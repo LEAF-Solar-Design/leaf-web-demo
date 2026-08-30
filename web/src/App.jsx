@@ -1,5 +1,6 @@
 import './structural.css'
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, Suspense } from 'react'
+import { track, setTourStep } from './telemetry.js'
 // The 3D viewer drags in `three`; loading it lazily (mirroring the auth.js
 // dynamic-import pattern) keeps first paint off the critical path.
 const Viewer = React.lazy(() => import('./components/Viewer.jsx'))
@@ -12,13 +13,19 @@ import PromptBox from './components/PromptBox.jsx'
 import RoutePanel from './components/RoutePanel.jsx'
 import JobRail from './components/JobRail.jsx'
 import DegradedBanner from './components/DegradedBanner.jsx'
+import OperatorEntry from './components/operator/OperatorEntry.jsx'
 import EntitlementGate, { EntitlementNotice } from './components/EntitlementGate.jsx'
 import QuotaCard from './components/QuotaCard.jsx'
+import OverlayDecisionCard from './components/OverlayDecisionCard.jsx'
+import { useOverlay } from './useOverlay.js'
+import AnnotationDecisionCard from './components/AnnotationDecisionCard.jsx'
+import { useAnnotations } from './useAnnotations.js'
 import VersionHistory from './components/VersionHistory.jsx'
 import * as mockVersions from './mock/mockVersions.js'
 import ProjectSwitcher from './components/ProjectSwitcher.jsx'
 import WorkspaceSummary from './components/WorkspaceSummary.jsx'
 import OpsDrawer from './components/OpsDrawer.jsx'
+import CustomizePanel from './components/CustomizePanel.jsx'
 import CheckoutControls from './components/CheckoutControls.jsx'
 import ClaudeAccountPanel from './components/ClaudeAccountPanel.jsx'
 import DemoBanner from './components/DemoBanner.jsx'
@@ -32,32 +39,49 @@ import {
   searchForProductSurface,
 } from './site/productSurfaces.js'
 import { fetchIosSurfaceStatus } from './ios/iosSurfaceStatus.js'
-import { authConfigured, login, logout, isSignedIn, handleRedirectCallback } from './auth.js'
+import { authConfigured, login, logout, isSignedIn, handleRedirectCallback, isAuthRedirectCallback } from './auth.js'
 import { shouldAutoDemo } from './demoState.js'
 import { humanizeError } from './errorHumanize.js'
+import { cadTimingRows } from './cadTimingPresentation.js'
+import {
+  getSessionHolderId, claimHolderId, lockState,
+  stageCheckoutReloadHandoff, bootstrapCheckoutReloadHandoff,
+  holdCheckoutReloadAuthority, remintSessionHolderId,
+} from './checkoutIdentity.js'
 import {
   confirmRunIntent, createCatalogRunContext, createCatalogToolSnapshot, createRunIntentState,
-  dismissRunIntent, stageRunIntent,
+  dismissRunIntent, drawingVersionForRun, prepareCatalogRunParams, stageRunIntent,
 } from './runIntent.js'
 import useExit from './useExit.js'
 import Toast from './components/Toast.jsx'
 import DetailsDrawer from './components/DetailsDrawer.jsx'
 import {
-  config, getSession, getTools, getCapabilities, getUsage, getHealth, runTool, runToolAsync,
-  attachToJob, getJob, listJobs, recordToEnvelope, stageAuthorTool, publishStagedAuthor, getDrawingIntake,
-  getDrawingVersions, undoDrawing, redoDrawing, takeCheckout, releaseCheckout, nlPrompt, closeJobBeacon,
-  getStoredOrgId, setStoredOrgId, createOrg, listProjects, createProject, openProject,
-  getClaudeGrant, linkClaudeGrant, unlinkClaudeGrant, getEntitlements,
+  config, getSession, getTools, getCapabilities, runTool, runToolAsync,
+  getJob, recordToEnvelope, publishStagedAuthor, getDrawingIntake,
+  getDrawingVersions, undoDrawing, redoDrawing, takeCheckout, releaseCheckout, nlPrompt,
+  createOrg, listProjects, createProject, openProject, subscribeUnauthorized,
 } from './api.js'
 import { matchPrompt } from './mock/mockNlPrompt.js'
 import { shouldStartTour } from './demo/tourEntry.js'
 import DemoTour from './demo/DemoTour.jsx'
+import { TOUR_STEPS } from './demo/tourScript.js'
 import { editFixture, pendingEditDemo, editFixtureV2 } from './mock/editFixture.js'
 import ConversePanel from './components/ConversePanel.jsx'
 import {
-  THRESHOLDS, ensureSession, resetSession, classifyAgentError,
-  postMessage as sendConverseMessage,
+  THRESHOLDS, classifyAgentError, fetchRegistry, fetchSkills, listPendingApprovals,
 } from './converse.js'
+import { useWorkspaceControllers } from './controllers/WorkspaceControllerProvider.jsx'
+import { entitlementAllowed } from './controllers/platform/index.js'
+import useJobController from './controllers/useJobController.js'
+import useAuthorStageController from './controllers/useAuthorStageController.js'
+import useDrawingVersionController from './controllers/useDrawingVersionController.js'
+import usePlatformTrustController from './controllers/platform/usePlatformTrustController.js'
+import useWorkspaceController from './controllers/workspace/useWorkspaceController.js'
+import useCatalogController from './controllers/catalog/useCatalogController.js'
+import {
+  resolveCheckoutDrawingId,
+  storeDrawingIdForSource,
+} from './controllers/checkout/createCheckoutController.js'
 
 // Calm layer palette, re-derived at higher lightness for the DARK CADViewport
 // canvas (--cv-bg #0f0f11) — same hue spacing as the retired light-paper set so
@@ -78,17 +102,6 @@ function ViewerSkeleton() {
 
 // Durable pointer to the one in-flight live job, so a closed/reloaded tab can
 // re-attach instead of orphaning the UI (CONTRACT-ADDENDUM §7, MATRIX gap #1).
-const INFLIGHT_KEY = 'leaf.inflightJob'
-const saveInflight = (job_id, tool) => {
-  try { localStorage.setItem(INFLIGHT_KEY, JSON.stringify({ job_id, tool, ts: Date.now() })) } catch { /* noop */ }
-}
-const clearInflight = () => {
-  try { localStorage.removeItem(INFLIGHT_KEY) } catch { /* noop */ }
-}
-const readInflight = () => {
-  try { return JSON.parse(localStorage.getItem(INFLIGHT_KEY) || 'null') } catch { return null }
-}
-
 // Elapsed wall-clock for the running strip: "4.2s" under a minute, "2:41" after.
 const fmtElapsed = (ms) => {
   if (ms == null) return null
@@ -112,6 +125,13 @@ const demoDegraded = new URLSearchParams(window.location.search).get('demo') ===
 // by default — the tenant-facing app never shows it.
 const opsFlag = new URLSearchParams(window.location.search).get('ops') === '1'
 
+// `?customize=1` reveals the R7 admin self-edit drawer. Like ?ops=1 it is
+// absent by default and never reachable from a public demo build; unlike ops
+// the mount ALSO requires the policy read to carry platform_customize: true
+// (strict — see platformCustomizeEntitled), so non-admins never see it even
+// with the flag.
+const customizeFlag = new URLSearchParams(window.location.search).get('customize') === '1'
+
 // `?demo=locked` is a DEV-only hook that injects a synthetic single-writer
 // checkout (held by another session) so the checkout chip + write-Run
 // suppression can be exercised without touching the demo drawing's real
@@ -134,6 +154,10 @@ const devControls = (() => {
 // The run's dwg (intake source name) — unchanged from the original demo.
 const DEFAULT_DRAWING_ID = 'rooftop_demo'
 
+// A self-minted author-authority turn is reusable for this long — a wide
+// margin under the server's TURN_MAX_S default of 300s (server/turn_runner.py).
+const AUTHOR_AUTHORITY_TTL_MS = 120_000
+
 // Calm degraded copy for the agent tier (two-tier dispatch, wire §11). The
 // deterministic path is never blocked by any of these — the banner just says
 // so honestly. Keyed off classifyAgentError, never message text.
@@ -147,12 +171,12 @@ const agentBannerFor = (e) => {
   return { kind: 'unreachable', message: 'AI assistant unavailable — routed deterministically.' }
 }
 
-// The versioned-store drawing id the /versions + checkout reads key on. The
-// write loop bootstraps the well-known `demo` drawing (write runs target it),
-// so checkout/version reads default to `demo`. `?drawing=<id>` overrides it to
-// drive a scratch drawing's checkout state through the real fetch path.
-const CHECKOUT_DRAWING_ID =
-  new URLSearchParams(window.location.search).get('drawing') || 'demo'
+// The bundled rooftop is an intake source named `rooftop_demo`, while default
+// writes and checkout state use the server's well-known `demo` store drawing.
+// Uploaded drawings retain their own id across both surfaces.
+const DRAWING_SOURCE =
+  new URLSearchParams(window.location.search).get('drawing') || DEFAULT_DRAWING_ID
+const REQUESTED_DRAWING_ID = storeDrawingIdForSource(DRAWING_SOURCE)
 
 // Collapsible left-rail section (keeps the classic catalog reachable but
 // secondary to the prompt box — the primary path).
@@ -196,106 +220,59 @@ function SignedOutGate({ onDemo, onSignIn }) {
 
 export default function App() {
   const [mock, setMock] = useState(config.mockDefault)
-  const [intake, setIntake] = useState(null)
-  const [versionIntake, setVersionIntake] = useState(null) // applied next-version
   const [loadErr, setLoadErr] = useState(null)
   const [intakeRetryKey, setIntakeRetryKey] = useState(0) // X3 Retry — bumping re-runs the intake load effect
-  const [refreshFail, setRefreshFail] = useState(null) // {drawing_id, version} — post-write viewer refresh failed (X1)
-  const [tools, setTools] = useState([])
-  const [toolsErr, setToolsErr] = useState(null)
-  const [toolsRetryKey, setToolsRetryKey] = useState(0) // R ladder / Retry chip — bumping re-runs the tools load effect
-  const [visibleLayers, setVisibleLayers] = useState({})
   const [selectedTool, setSelectedTool] = useState(null)
-  const [running, setRunning] = useState(false)
-  const [runStatus, setRunStatus] = useState(null)   // live job phase: 'submitted' | 'running'
-  const [runProgress, setRunProgress] = useState(null) // richer progress string (e.g. 'storing version')
-  const [runElapsedMs, setRunElapsedMs] = useState(null) // ticking wall-clock while running
-  const [result, setResult] = useState(null)
-  const [runErr, setRunErr] = useState(null)
   const [selectedHandle, setSelectedHandle] = useState(null)
   const [pendingEdit, setPendingEdit] = useState(null)
   // Write-loop (§11, live mode): the current drawing/version chain from the last
   // drawing response and an undo/redo-in-flight guard. Version-completed events
   // surface as NT2 toasts (showToast), never as a persistent amber note.
-  const [drawingState, setDrawingState] = useState(null) // {drawing_id, version, head, latest}
-  const [versionBusy, setVersionBusy] = useState(false)  // undo/redo request in flight
-  const [overlayStale, setOverlayStale] = useState(false) // last result overlay no longer matches shown version
-  const [openTool, setOpenTool] = useState(null)         // the tool card expanded in ToolsPanel (for the write ghost)
 
   // --- platform session state ---
   const [tenant, setTenant] = useState(null)             // /api/session tenant echo (else "demo")
   const [tier, setTier] = useState(null)                 // real tier from the session echo (auth-live)
   const [org, setOrg] = useState(null)                   // org_id from the session echo (auth-live)
-  const [catalog, setCatalog] = useState({ families: [], source: null }) // grouped families catalog
-  const [catalogErr, setCatalogErr] = useState(null)     // families load failure (falls back to flat tools)
-  const [openFamilies, setOpenFamilies] = useState({})   // per-family collapse state (family_id -> bool)
-  const [usage, setUsage] = useState(null)               // GET /api/usage aggregate (live; null hides chip)
-  const [usageAt, setUsageAt] = useState(0)              // ts of the last successful usage poll (freshness gate for quota self-clear)
-  const [health, setHealth] = useState(null)             // GET /api/health (live; null -> static footer)
-  // Product-surface navigation (Browser / CAD / Solar CAD / iOS). 'cad' is the
-  // module default, so the drawing workspace renders exactly as before unless
-  // the user picks another tab (or arrives with ?surface=). The tabs and frame
-  // existed fully built and tested but were never mounted (2026-08-30 finding);
-  // this is the mount, not new surface behavior.
-  const [activeSurface, setActiveSurface] = useState(() => {
-    try { return productSurfaceFromSearch(window.location.search) } catch { return 'cad' }
-  })
-  const onSelectSurface = useCallback((id) => {
-    setActiveSurface(id)
-    try {
-      const next = searchForProductSurface(window.location.search, id)
-      window.history.replaceState(null, '', `${window.location.pathname}${next}${window.location.hash}`)
-    } catch { /* URL sync is a convenience; state alone still switches the tab */ }
-  }, [])
-  // iOS ship-lane readiness contract (leaf.ios-ship-surface.v1). Fetched only
-  // with the surface flag baked on and a concrete project + revision; every
-  // other case stays null, which IosSurface renders truthfully as
-  // "Not yet configured" and the tab label shows as "Setup required".
-  const [iosContract, setIosContract] = useState(null)
   // Real entitlements (GET /api/entitlements): drives the write-tool + build gates.
   // null in mock, or when the endpoint isn't deployed -> treated as full access.
-  const [entitlements, setEntitlements] = useState(null) // {tier, entitlements:{run_read,run_write,build}, source}
-  const [entLoading, setEntLoading] = useState(false)
   // Version-history browser (§ version chain) + read-only preview state.
-  const [historyOpen, setHistoryOpen] = useState(false)
-  const [history, setHistory] = useState(null)           // {drawing_id, head, latest, versions[]}
-  const [historyErr, setHistoryErr] = useState(null)
-  const [historyLoading, setHistoryLoading] = useState(false)
-  const [previewing, setPreviewing] = useState(null)     // {version} while previewing a non-head version
-  const [previewIntake, setPreviewIntake] = useState(null) // that version's intake, seated read-only
-  const [prompt, setPrompt] = useState('')               // dispatch box text
-  const [route, setRoute] = useState(null)               // §12 nl-prompt routing decision
-  const [routing, setRouting] = useState(false)          // awaiting the router
-  const [routeErr, setRouteErr] = useState(null)         // routing call failed -> failed strip
-  const [jobs, setJobs] = useState([])                   // live rail: recent GET /api/jobs
   const [authRequired, setAuthRequired] = useState(false) // live mode with no session: 401s observed -> polls stop, footer says so
+  const [signedIn, setSignedIn] = useState(() => isSignedIn())
   const is401 = (e) => e?.status === 401 || / -> 401$/.test(String(e?.message || ''))
-  const [currentJobId, setCurrentJobId] = useState(null) // this session's live job id (dedupe)
-  const [inflightPtr, setInflightPtr] = useState(null)   // localStorage re-attach pointer
-  const [reattaching, setReattaching] = useState(false)  // auto re-attach in progress
   const [toolsOpen, setToolsOpen] = useState(false)      // left catalog collapsed by default
   const [authorOpen, setAuthorOpen] = useState(false)    // author flow (opens on build lane)
   const [authorSeed, setAuthorSeed] = useState('')       // build-lane prefill text
   const [authorSignal, setAuthorSignal] = useState(0)    // bump to re-seed the author flow
+  const [authorTargetTool, setAuthorTargetTool] = useState(null)
 
   // --- projects / orgs workspace (UI wave 2, item 1) ---
-  const [orgId, setOrgId] = useState(getStoredOrgId())   // stored workspace org (localStorage leaf.org_id)
-  const [projects, setProjects] = useState([])           // GET /api/projects
-  const [projectsErr, setProjectsErr] = useState(null)   // platform unavailable (no DB) -> graceful note
-  const [projectsLoading, setProjectsLoading] = useState(false)
-  const [openProjectId, setOpenProjectId] = useState(null)
-  const [workspace, setWorkspace] = useState(null)       // hydration payload {project, drawing_versions[], jobs[], built_tools[]}
-  const [canonicalVersionId, setCanonicalVersionId] = useState(null)
-  const [wsLoading, setWsLoading] = useState(false)      // re-hydration in flight
-  const [orgBusy, setOrgBusy] = useState(false)
-  const [projectBusy, setProjectBusy] = useState(false)
 
   // --- single-writer checkout lock (item 3) ---
   const [checkout, setCheckout] = useState(null)         // {holder, acquired, expires} | null (from /versions)
   const [checkoutBusy, setCheckoutBusy] = useState(false) // take/release request in flight (3B)
+  const [checkoutUnknown, setCheckoutUnknown] = useState(true)
+  const [checkoutReadFailed, setCheckoutReadFailed] = useState(false)
+  const initialHolderRef = useRef(null)
+  if (!initialHolderRef.current) initialHolderRef.current = getSessionHolderId()
+  const reloadHandoffRef = useRef(undefined)
+  if (reloadHandoffRef.current === undefined) {
+    reloadHandoffRef.current = bootstrapCheckoutReloadHandoff({
+      holder: initialHolderRef.current,
+      drawingId: REQUESTED_DRAWING_ID,
+      deferForAuthCallback: isAuthRedirectCallback(),
+    })
+  }
+  // The server returns this bearer proof once when the session takes the lock.
+  // Keep it outside rendered state. The only storage edge is the one-use,
+  // short-lived beforeunload handoff consumed above.
+  const capabilityRef = useRef(null)
+  const holderClaimRef = useRef(null)
+  const reloadAuthorityRef = useRef(null)
+  const [, bumpCheckoutAuthority] = useState(0)
 
   // --- ops drawer (item 2) ---
   const [opsDismissed, setOpsDismissed] = useState(false)
+  const [customizeOpen, setCustomizeOpen] = useState(customizeFlag)
 
   // --- NT2 toast (one slot — newest replaces) + DT2 details drawer ---
   const [toast, setToast] = useState(null)   // {id, text, action?}
@@ -304,10 +281,6 @@ export default function App() {
   // --- Claude account grant (Concern 2 — the user's Claude login) ---
   // Kept strictly apart from the platform identity above (AUTH.md §0). The token
   // is write-only: we hold linkage status only, never the token itself.
-  const [grant, setGrant] = useState(null)        // {linked, linked_at} | null (null = unknown/undeployed)
-  const [grantLoading, setGrantLoading] = useState(false)
-  const [grantBusy, setGrantBusy] = useState(false) // link/unlink request in flight
-  const [grantErr, setGrantErr] = useState(null)
   const [claudeOpen, setClaudeOpen] = useState(false) // header Claude-account popover open
   // M5 guided tour: opened ONLY by the ?demo=tour (or ?demo=1) deep-link, and
   // only while mock is active. Exiting clears the tour and leaves you in mock.
@@ -319,24 +292,92 @@ export default function App() {
   // still leaves a way back in (the tour re-enters at beat 1).
   const tourAvailable = useRef(false)
   if (tourOn) tourAvailable.current = true
+  // P2 wave C-2: the tour funnel. tourStepRef mirrors DemoTour's (uncontrolled)
+  // index so exit can say where; setTourStep stamps `tour_step` onto every
+  // organic event while the tour is active (design: tour beats ride the REAL
+  // handlers, so organic events carry the step instead of tour.* duplicates).
+  // The started emit requires the tour to actually RENDER (mock && tourOn:
+  // a ?demo=tour deep link in live mode shows no tour and counts nothing,
+  // review #428 round-1 blocker 3); step 0 is emitted as reached so per-step
+  // dropout starts at the first step.
+  const tourStepRef = useRef(0)
+  const tourStartedRef = useRef(false)
+  useEffect(() => {
+    if (tourOn && mock && !tourStartedRef.current) {
+      tourStartedRef.current = true
+      tourStepRef.current = 0
+      setTourStep(TOUR_STEPS[0]?.id)
+      track('tour.started', { entry: 'deeplink' })
+      track('tour.step_reached', { step_id: TOUR_STEPS[0]?.id })
+    }
+  }, [tourOn, mock])
 
   // --- agent tier (two-tier dispatch, wire §11; LIVE only — mock has no harness) ---
-  const [agentSessionId, setAgentSessionId] = useState(null) // this drawing's converse session
-  const [agentMode, setAgentMode] = useState(null)  // null | 'race' (chip primary) | 'primary' (panel primary)
-  const [agentTurns, setAgentTurns] = useState([])  // [{turnId, text}] turns dispatched from the bar
-  const [agentBanner, setAgentBanner] = useState(null) // {kind, message} calm degraded note
-  const agentSessionRef = useRef(null)              // sessionId without a render dependency
+  const { converse } = useWorkspaceControllers()
+  const {
+    sessionId: agentSessionId,
+    turns: agentTurns,
+    startTurn: startAgentTurn,
+    clear: clearAgentSession,
+  } = converse
+  // T1 runtime overlay. Reads on load and applies the tenant's colour/copy
+  // tokens as CSS custom properties, so an approved change is on screen
+  // without a build or a deploy. LIVE only, like the agent tier: mock mode has
+  // no tenant to read for, and applying a theme there would be theatre.
+  const themeOverlay = useOverlay(agentSessionId, { enabled: !mock })
+  const [pendingApprovalCount, setPendingApprovalCount] = useState(0)
+  const [pendingApprovalsUnavailable, setPendingApprovalsUnavailable] = useState(false)
+  useEffect(() => {
+    if (mock || !agentSessionId) {
+      setPendingApprovalCount(0)
+      setPendingApprovalsUnavailable(false)
+      return undefined
+    }
+    let closed = false
+    const refresh = async () => {
+      try {
+        const approvals = await listPendingApprovals(agentSessionId)
+        if (!closed) {
+          setPendingApprovalCount(approvals.length)
+          setPendingApprovalsUnavailable(false)
+        }
+      } catch {
+        if (!closed) setPendingApprovalsUnavailable(true)
+      }
+    }
+    void refresh()
+    const timer = window.setInterval(refresh, 5000)
+    return () => {
+      closed = true
+      window.clearInterval(timer)
+    }
+  }, [agentSessionId, mock])
 
   const viewerRef = useRef(null)
+  const drawingErrorRef = useRef(null)
+  const catalogUiRef = useRef({})
   const authorSectionRef = useRef(null)
-  const runningSinceRef = useRef(null)  // ms epoch the job entered 'running'
+  const authorPendingRef = useRef(false)
   const lastRunRef = useRef(null)       // {tool, params} for the retry affordance
   const barInputRef = useRef(null)      // ⌘K focuses the command bar input
+
+  // Slash-menu registry: commands + skills + tools in one tenant-scoped
+  // catalog. Fetched once; resolves to [] on any failure, in which case the
+  // picker falls back to the catalog lane's runnable tools — today's
+  // behaviour exactly, so a registry outage costs the menu nothing.
+  const [registryEntries, setRegistryEntries] = useState([])
+  const [catalogSkills, setCatalogSkills] = useState([])
+  useEffect(() => {
+    let live = true
+    fetchRegistry().then((r) => { if (live) setRegistryEntries(r.entries || []) })
+    fetchSkills().then((r) => { if (live) setCatalogSkills(r.skills || []) })
+    return () => { live = false }
+  }, [])
+
   const resultBlockRef = useRef(null)   // toast "View" scroll target (result)
   const workspaceCardRef = useRef(null) // toast "View" scroll target (viewer)
   const toastSeqRef = useRef(0)         // monotonic toast ids
   const cannedSeq = useRef(0)           // supersedes an in-flight tour beat (typing + dispatch)
-  const runSeqRef = useRef(0)           // Esc-interrupt bumps this to detach a run
   const runIntentSessionRef = useRef(null)
   if (!runIntentSessionRef.current) {
     const randomId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`
@@ -349,9 +390,124 @@ export default function App() {
   const runIntentSeqRef = useRef(0)
 
   const isEditFixture = mock && fixtureParam === 'edit'
+  const applyDrawingIntake = useCallback((nextIntake) => {
+    viewerRef.current?.applyVersion(nextIntake)
+  }, [])
+  const resetDrawingSelection = useCallback(() => {
+    setSelectedHandle(null)
+    setPendingEdit(null)
+  }, [])
+  const reportDrawingError = useCallback((error, { operation } = {}) => {
+    if (operation === 'undo' || operation === 'redo') drawingErrorRef.current?.(error)
+  }, [])
+  const drawingAdapters = useMemo(() => ({
+    loadHead: (drawingId) => getDrawingIntake(mock, drawingId, 'head'),
+    loadVersion: (drawingId, version) => getDrawingIntake(mock, drawingId, version),
+    loadVersions: (drawingId, options) => getDrawingVersions(mock, drawingId, options),
+    undoVersion: (drawingId) => undoDrawing(mock, drawingId, capabilityRef.current),
+    redoVersion: (drawingId) => redoDrawing(mock, drawingId, capabilityRef.current),
+  }), [mock])
+  const drawing = useDrawingVersionController({
+    ...drawingAdapters,
+    formatError: humanizeError,
+    onApplyIntake: applyDrawingIntake,
+    onResetSelection: resetDrawingSelection,
+    onError: reportDrawingError,
+  })
+  const {
+    intake,
+    versionIntake,
+    shown,
+    visibleLayers,
+    drawingState,
+    canUndo,
+    canRedo,
+    versionBusy,
+    overlayStale,
+    historyOpen,
+    history,
+    historyError: historyErr,
+    historyLoading,
+    previewing,
+    refreshFailure: refreshFail,
+    unreadableHead,
+    mutationsBlocked: drawingMutationsBlocked,
+    actions: drawingActions,
+  } = drawing
+  const {
+    reset: resetDrawing,
+    seatIntake,
+    seatVersion: seatDrawingVersion,
+    setVisibleLayers,
+    setOverlayStale,
+    undo: undoDrawingVersion,
+    redo: redoDrawingVersion,
+    loadHistory,
+    toggleHistory: onToggleHistory,
+    closeHistory,
+    previewVersion: onPreviewVersion,
+    backToHead: onBackToHead,
+    markRefreshFailure,
+    retryRefresh: onRetryViewerRefresh,
+    recordRestore: onRestoreCommitted,
+    recordCommittedUnreadableHead,
+    retryUnreadableHead,
+  } = drawingActions
+  const platform = usePlatformTrustController({ mock })
+  const {
+    usage,
+    usageAt,
+    health,
+    entitlements,
+    entLoading,
+    grant,
+    grantLoading,
+    grantBusy,
+    grantErr,
+    actions: platformActions,
+  } = platform
+  const {
+    loadUsage,
+    loadHealth,
+    linkClaude: onLinkClaude,
+    unlinkClaude: onUnlinkClaude,
+  } = platformActions
+  const workspaceServices = useMemo(() => ({
+    createOrg,
+    listProjects,
+    createProject,
+    openProject,
+  }), [])
+  const workspaceController = useWorkspaceController({
+    mock,
+    services: workspaceServices,
+    formatError: humanizeError,
+  })
+  const {
+    orgId,
+    projects,
+    projectsError: projectsErr,
+    projectsLoading,
+    openProjectId,
+    workspace,
+    canonicalVersionId,
+    workspaceLoading: wsLoading,
+    orgBusy,
+    projectBusy,
+    adoptOrgId,
+    openProject: onOpenProject,
+    createOrg: createWorkspaceOrg,
+    createProject: createWorkspaceProject,
+    rehydrate,
+    closeProject: onCloseProject,
+    selectCanonicalVersion,
+  } = workspaceController
+  const annotationEnabled = Boolean(
+    !mock && signedIn && openProjectId && drawingState?.drawing_id && agentSessionId,
+  )
+  const annotations = useAnnotations(agentSessionId, { enabled: annotationEnabled })
   // What the panels/legend/selection reflect: a read-only version PREVIEW wins,
   // else the applied write-loop version, else the base intake.
-  const shown = previewIntake || versionIntake || intake
   const projectName = shown?.dwg ? shown.dwg.split(/[\\/]/).pop().replace(/\.dwg$/i, '') : 'your project'
   // Honest identity: tenant id and tier are DISTINCT. tenant defaults to "demo"
   // off-auth; tier is only known when the session echo carries it (auth live).
@@ -371,12 +527,86 @@ export default function App() {
     return e[key] !== false
   }, [entitlements])
   const canRunWrite = entOf('run_write')
-  const canBuild = entOf('build')
+  // Platform self-edit is the ONE capability that never falls back permissive:
+  // entOf treats unknown as allowed (demo parity), but an admin-only lane must
+  // read as absent unless the policy read explicitly grants it. Strict `=== true`
+  // keeps the drawer unreachable in mock and on tiers below admin even with
+  // ?customize=1 in the URL (the server enforces the same gate regardless).
+  const platformCustomizeEntitled = entitlements?.entitlements?.platform_customize === true
+  const canOpenCustomize = !mock && signedIn && platformCustomizeEntitled
+  // Build routes through the SHARED helper (platformTrustModel) so every
+  // surface — this legacy /app shell and ToolCast's /try — applies the same
+  // entitlement-AND-availability rule: a tier may hold `build` while the R5
+  // authoring stage is off, and Generate must not render enabled then.
+  const canBuild = entitlementAllowed(entitlements, 'build')
   // Agent tier gate: LIVE only (mock has no harness — behavior stays exactly
   // today's), and only when the plan doesn't explicitly exclude `converse`
   // (unknown/undeployed policy resolves permissive, like every other gate).
   const canConverse = entOf('converse')
   const agentDisabled = mock || !canConverse
+  const catalogServices = useMemo(() => ({
+    getTools,
+    getCapabilities,
+    routePrompt: nlPrompt,
+  }), [])
+  const catalogAdapters = useMemo(() => ({
+    humanizeError,
+    isUnauthorized: (error) => error?.status === 401 || / -> 401$/.test(String(error?.message || '')),
+    thresholds: THRESHOLDS,
+    previewRoute: matchPrompt,
+    commitDecision: (decision) => catalogUiRef.current.armDecision?.(decision),
+    dismissDecision: () => {
+      runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
+    },
+    openAuthor: (text) => {
+      if (!authorPendingRef.current) setAuthorTargetTool(null)
+      setAuthorSeed(text)
+      setAuthorSignal((value) => value + 1)
+      setAuthorOpen(true)
+      setTimeout(() => authorSectionRef.current?.scrollIntoView({ block: 'nearest' }), 0)
+    },
+    startAgentTurn: (...args) => catalogUiRef.current.startAgentTurn?.(...args),
+    agentBannerFor,
+    onAuthRequired: () => setAuthRequired(true),
+  }), [])
+  const { state: catalogState, actions: catalogActions } = useCatalogController({
+    services: catalogServices,
+    adapters: catalogAdapters,
+    context: { mock, entitlements, running: false, agentDisabled },
+  })
+  const {
+    tools,
+    toolsError: toolsErr,
+    catalog,
+    catalogError: catalogErr,
+    openFamilies,
+    openTool,
+    prompt,
+    route,
+    routing,
+    routeError: routeErr,
+    agentMode,
+    agentBanner,
+    hintLane,
+    runnableTools: slashTools,
+    capabilityCount: capCount,
+  } = catalogState
+  const {
+    retryTools,
+    loadCatalog,
+    upsertTool,
+    toggleFamily,
+    openTool: setOpenTool,
+    resetTransient: resetCatalogTransient,
+    openAgentMode,
+    clearAgentMode,
+    clearAgentBanner,
+    setPrompt: onPromptChange,
+    dismissRoute,
+    commitDecision: commitCatalogDecision,
+    pickAlternative: onPickAlternative,
+    clearRouteError,
+  } = catalogActions
 
   // Claude account (Concern 2) authoring gate. Only fires when we DEFINITELY know
   // the tenant has no linked Claude grant (live + grant read + linked === false).
@@ -384,20 +614,77 @@ export default function App() {
   // gates — authoring stays byte-identical to today (template path unaffected).
   const claudeNotLinked = !mock && !!grant && grant.linked === false
 
+  // Handlers for registry entries of kind "command". This map IS the gate:
+  // composer.js filterRunnable drops any command whose action is missing here,
+  // so the picker cannot list something that would do nothing. A command
+  // becomes visible the moment its handler lands — `/stop` stays hidden until
+  // the composer can reach the converse panel's interrupt, which is the next
+  // chip rather than a promise made in a menu.
+  //
+  // Placed after the catalog-controller destructuring that binds
+  // `onPromptChange` (the canonical way to set the well's text — it also
+  // invalidates a stale route) and before the JSX that reads this map.
+  const slashCommandActions = useMemo(() => ({
+    help: () => {
+      // The menu IS the help: reopen it on a bare slash and put the caret back
+      // in the well so the next keystroke filters.
+      onPromptChange('/')
+      barInputRef.current?.focus()
+    },
+  }), [onPromptChange])
+
   // --- single-writer checkout (item 3) ---
-  // Our own holder id (best-effort): the echoed tenant, else the configured stub.
-  // A checkout held by US is not a lock; only a checkout held by ANOTHER session
-  // suppresses write-Run. `?demo=locked` injects a synthetic other-session lock.
-  const ownHolder = tenant || config.tenant || 'demo-tenant'
+  // The holder is a per-session display identity, never the tenant. A copied tab
+  // initially inherits sessionStorage, so the claim channel remints the duplicate.
+  const [ownHolder, setOwnHolder] = useState(initialHolderRef.current)
+  useEffect(() => {
+    // A reload handoff is only provisional authority. The Web Lock below
+    // arbitrates any cloned copies before this runtime joins the holder channel.
+    if (reloadHandoffRef.current) return undefined
+    const claim = claimHolderId({ id: ownHolder, onRemint: setOwnHolder })
+    holderClaimRef.current = claim
+    return () => claim.stop()
+    // Claim once per runtime. A remint must not restart the claim loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   const rawCheckout = demoLocked
     ? { holder: 'another-session', acquired: new Date().toISOString(), expires: new Date(Date.now() + 3600e3).toISOString() }
     : checkout
-  const otherHeldCheckout =
-    (rawCheckout && rawCheckout.holder && rawCheckout.holder !== ownHolder) ? rawCheckout : null
-  const writeLocked = !mock && !!otherHeldCheckout
-  // We hold the single-writer lock (3B): our own holder id owns the checkout.
-  // Not a lock on us (write-Run stays enabled) — it just offers a Release.
-  const heldByUs = !mock && !!(rawCheckout && rawCheckout.holder && rawCheckout.holder === ownHolder)
+  const baseLock = lockState({ mock, checkout: rawCheckout, unknown: checkoutUnknown, ownHolder })
+  const unprovenOwnLock = baseLock.heldByUs && !capabilityRef.current ? rawCheckout : null
+  const lock = {
+    ...baseLock,
+    heldByUs: baseLock.heldByUs && !!capabilityRef.current,
+    otherHeld: baseLock.otherHeld || unprovenOwnLock,
+    writeLocked: baseLock.writeLocked || !!unprovenOwnLock,
+    canTake: baseLock.canTake || !!unprovenOwnLock,
+  }
+  const otherHeldCheckout = lock.otherHeld || unprovenOwnLock
+  const writeLocked = lock.writeLocked || drawingMutationsBlocked
+  const heldByUs = lock.heldByUs
+  const staleHeldCheckout = lock.stale ? lock.otherHeld : null
+  const legacyHeldCheckout = lock.legacy ? lock.otherHeld : null
+
+  useEffect(() => {
+    const stageReloadHandoff = () => {
+      const provisional = reloadHandoffRef.current
+      const capability = capabilityRef.current || provisional?.capability
+      const drawingId = resolveCheckoutDrawingId({
+        drawingState,
+        requestedDrawingId: REQUESTED_DRAWING_ID,
+      })
+      if (capability && drawingId) {
+        holderClaimRef.current?.stop()
+        stageCheckoutReloadHandoff({
+          capability,
+          holder: provisional?.holder || ownHolder,
+          drawingId: provisional?.drawingId || drawingId,
+        })
+      }
+    }
+    window.addEventListener('beforeunload', stageReloadHandoff)
+    return () => window.removeEventListener('beforeunload', stageReloadHandoff)
+  }, [drawingState, ownHolder])
 
   // Current open project's display name (from the hydration payload, else the list).
   const currentProjectName = openProjectId
@@ -417,39 +704,45 @@ export default function App() {
   // load session (intake + tenant echo) + reset transient state on mode/fixture change
   useEffect(() => {
     let alive = true
-    setIntake(null); setVersionIntake(null); setLoadErr(null); setRefreshFail(null)
-    setResult(null); setSelectedHandle(null); setPendingEdit(null)
-    setRunning(false); setRunStatus(null); setRunProgress(null); setRunElapsedMs(null); setRunErr(null)
-    setDrawingState(null); setVersionBusy(false)
-    setOverlayStale(false); setOpenTool(null)
-    setToast(null); setDrawer(null); setRouteErr(null)
-    runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
-    setRoute(null); setRouting(false); setCurrentJobId(null); setTenant(null)
+    resetDrawing(); setLoadErr(null)
+    resetCatalogTransient()
+    setToast(null); setDrawer(null); setTenant(null)
     setTier(null); setOrg(null)
-    setHistoryOpen(false); setHistory(null); setHistoryErr(null)
-    setPreviewing(null); setPreviewIntake(null)
-    setAgentMode(null); setAgentBanner(null); setAgentTurns([]); setAgentSessionId(null)
-    agentSessionRef.current = null
-    runningSinceRef.current = null
+    clearAgentSession()
     mockVersions.reset()
-    const seat = (d) => {
+    const seat = (d, options = {}) => {
       if (!alive) return
-      setIntake(d)
+      seatIntake(d, options)
       // MOCK write loop (M3): v1 of the 'demo' chain is the intake just seated,
       // so re-running the demo always starts from a clean v1.
       if (mock && !isEditFixture) mockVersions.seedBase(d)
-      const vis = {}
-      for (const l of d.layers || []) vis[l] = true
-      setVisibleLayers(vis)
     }
     if (isEditFixture) {
       seat(editFixture) // synchronous local fixture — no backend
       return () => { alive = false }
     }
-    getSession(mock)
-      .then(({ intake: d, tenant: t, tier: ti, org: o }) => {
+    getSession(mock, DRAWING_SOURCE)
+      .then(async ({ intake: d, tenant: t, tier: ti, org: o }) => {
         if (!alive) return
-        seat(d); setTenant(t); setTier(ti); setOrg(o)
+        let drawingSummary = null
+        if (!mock) {
+          try {
+            drawingSummary = await getDrawingVersions(false, REQUESTED_DRAWING_ID)
+          } catch {
+            // Keep the intake readable, but leave its version unknown. The
+            // run-intent gate below refuses live legacy writes in this state.
+          }
+        }
+        if (!alive) return
+        seat(d, {
+          drawingId: REQUESTED_DRAWING_ID,
+          ...(drawingSummary ? { drawingState: drawingSummary } : {}),
+        })
+        setTenant(t); setTier(ti); setOrg(o)
+        // Live auth resolves workspace identity from the verified subject.
+        // Persist that server-owned org id so an already-bound account never
+        // sees the create-org affordance or attempts a duplicate bootstrap.
+        if (!mock && o) adoptOrgId(o)
       })
       .catch((e) => {
         if (!alive) return
@@ -464,43 +757,7 @@ export default function App() {
         }
       })
     return () => { alive = false }
-  }, [mock, isEditFixture, intakeRetryKey])
-
-  useEffect(() => {
-    let alive = true
-    setToolsErr(null)
-    getTools(mock)
-      .then((t) => alive && setTools(t))
-      .catch((e) => alive && setToolsErr(humanizeError(e)))
-    return () => { alive = false }
-  }, [mock, toolsRetryKey])
-
-  // Retry the tools load (ToolsPanel's Retry chip + the R ladder below).
-  const retryTools = useCallback(() => setToolsRetryKey((k) => k + 1), [])
-
-  // Families catalog (left rail): GET /api/capabilities grouped, or the mock
-  // registry grouped client-side. Refetched on mode change and after authoring a
-  // tool (so it lands in "Custom authored tools"). Falls back to the flat list
-  // inside getCapabilities; a total failure surfaces catalogErr (flat ToolsPanel).
-  const loadCatalog = useCallback(async () => {
-    setCatalogErr(null)
-    try {
-      const cat = await getCapabilities(mock)
-      setCatalog(cat)
-      // default every family collapsed (keeps the left catalog secondary to the prompt)
-      setOpenFamilies((prev) => {
-        const next = { ...prev }
-        for (const f of cat.families) if (!(f.family_id in next)) next[f.family_id] = false
-        return next
-      })
-    } catch (e) {
-      setCatalog({ families: [], source: null })
-      setCatalogErr(humanizeError(e))
-      if (!mock && is401(e)) setAuthRequired(true)
-    }
-  }, [mock])
-
-  useEffect(() => { loadCatalog() }, [loadCatalog])
+  }, [mock, isEditFixture, intakeRetryKey, resetCatalogTransient, resetDrawing, seatIntake])
 
   // Auth0 return leg: if we came back from Universal Login (?code=&state=),
   // finish the exchange + store leaf.jwt, then reload so the fresh loads send
@@ -510,108 +767,102 @@ export default function App() {
     handleRedirectCallback().then((stored) => { if (stored) window.location.reload() })
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // A 401 clears leaf.jwt in api.js. Mirror that transport event into render
+  // state so privileged browser surfaces disappear in the same turn, including
+  // when the rejected request originated inside the customization drawer.
+  useEffect(() => subscribeUnauthorized(() => {
+    setSignedIn(false)
+    setCustomizeOpen(false)
+  }), [])
+
   // Per-tenant spend chip: poll GET /api/usage on load (live only). null hides
   // the chip (mock, or the sibling endpoint not deployed yet) — no fake numbers.
-  const loadUsage = useCallback(async () => {
-    if (mock) { setUsage(null); return }
-    try { setUsage(await getUsage()); setUsageAt(Date.now()) } catch { setUsage(null) }
-  }, [mock])
-
-  useEffect(() => { loadUsage() }, [loadUsage])
-
   // Real entitlements (live only): fetch on load so the write-tool + build gates
   // reflect the tenant's actual plan. null in mock (full access, all true) or when
   // the sibling endpoint isn't deployed yet (degrades to ungated — honest demo).
-  const loadEntitlements = useCallback(async () => {
-    if (mock) { setEntitlements(null); return }
-    setEntLoading(true)
-    try { setEntitlements(await getEntitlements()) } catch { setEntitlements(null) } finally { setEntLoading(false) }
-  }, [mock])
-
-  useEffect(() => { loadEntitlements() }, [loadEntitlements])
-
   // Real backend diagnostics for the footer chips (live only). Mock keeps the
   // static footer (setHealth(null)); any error -> null -> calm static fallback.
-  const loadHealth = useCallback(async () => {
-    if (mock) { setHealth(null); return }
-    try { setHealth(await getHealth()) } catch { setHealth(null) }
-  }, [mock])
-
-  useEffect(() => { loadHealth() }, [loadHealth])
-
   // Claude account grant (Concern 2): read linkage status on load (live only).
   // null in mock (panel hidden) or when the sibling endpoint isn't deployed yet
   // (the affordance then degrades to today's ungated authoring — no gate, no
   // fabricated "linked" claim). Never fetches or holds the token itself.
-  const loadGrant = useCallback(async () => {
-    if (mock) { setGrant(null); return }
-    setGrantLoading(true); setGrantErr(null)
-    try { setGrant(await getClaudeGrant()) } catch { setGrant(null) } finally { setGrantLoading(false) }
-  }, [mock])
-
-  useEffect(() => { loadGrant() }, [loadGrant])
-
-  const onLinkClaude = useCallback(async (token, kind) => {
-    // token is passed straight to the API and never stored/logged here. `kind`
-    // ("oauth" | "api_key") is the user's explicit choice; the server may echo the
-    // authoritative kind back (it auto-detects), so prefer the response kind.
-    setGrantBusy(true); setGrantErr(null)
-    try {
-      const res = await linkClaudeGrant(token, kind)
-      setGrant({ linked: true, linked_at: res?.linked_at || new Date().toISOString(), kind: res?.kind || kind || null })
-    } catch (e) {
-      setGrantErr(humanizeError(e))
-    } finally {
-      setGrantBusy(false)
-    }
-  }, [])
-
-  const onUnlinkClaude = useCallback(async () => {
-    setGrantBusy(true); setGrantErr(null)
-    try {
-      await unlinkClaudeGrant()
-      setGrant({ linked: false, linked_at: null })
-    } catch (e) {
-      setGrantErr(humanizeError(e))
-    } finally {
-      setGrantBusy(false)
-    }
-  }, [])
-
   // Projects workspace (item 1): fetch the org's projects (live only). No org
   // stored -> empty list + no error (the switcher offers "create workspace org").
   // Platform down (no DATABASE_URL / 500) -> projectsErr drives the graceful
   // "projects unavailable" note. Mock -> zero /api calls (no surface).
-  const loadProjects = useCallback(async () => {
-    if (mock || !orgId) { setProjects([]); setProjectsErr(null); return }
-    setProjectsLoading(true); setProjectsErr(null)
-    try {
-      setProjects(await listProjects(orgId))
-    } catch (e) {
-      setProjects([]); setProjectsErr(humanizeError(e))
-    } finally {
-      setProjectsLoading(false)
-    }
-  }, [mock, orgId])
-
-  useEffect(() => { loadProjects() }, [loadProjects])
-
   // Checkout lock (item 3): read the current drawing's version manifest and pick
-  // up its `checkout` (sibling contract adds it to /versions). Live only; any
-  // error -> null (no chip, no write-Run suppression). Refetched when the drawing
-  // version changes and after runs (a write may acquire/release the lock).
+  // up its `checkout` (sibling contract adds it to /versions). Unknown and failed
+  // reads stay fail-closed, and sequence fencing prevents a stale response from
+  // re-enabling writes after the drawing changes.
+  const checkoutSeqRef = useRef(0)
   const loadCheckout = useCallback(async () => {
-    if (mock) { setCheckout(null); return }
-    const did = drawingState?.drawing_id || CHECKOUT_DRAWING_ID
+    if (mock) {
+      setCheckout(null)
+      setCheckoutUnknown(false)
+      setCheckoutReadFailed(false)
+      return
+    }
+    const did = resolveCheckoutDrawingId({
+      drawingState,
+      requestedDrawingId: REQUESTED_DRAWING_ID,
+    })
+    const seq = ++checkoutSeqRef.current
+    setCheckoutUnknown(true)
     try {
       const v = await getDrawingVersions(mock, did)
+      if (seq !== checkoutSeqRef.current) return
       setCheckout(v?.checkout || null)
+      setCheckoutUnknown(false)
+      setCheckoutReadFailed(false)
     } catch {
+      if (seq !== checkoutSeqRef.current) return
       setCheckout(null)
+      setCheckoutUnknown(true)
+      setCheckoutReadFailed(true)
     }
   }, [mock, drawingState])
 
   useEffect(() => { loadCheckout() }, [loadCheckout])
+
+  // Install a reload handoff only while this runtime owns the origin-wide,
+  // exclusive authority lock. Reload releases the old runtime's lock and wakes
+  // this one. Duplicated tabs queue, so they cannot write concurrently.
+  useEffect(() => {
+    const handoff = reloadHandoffRef.current
+    if (mock || !handoff) return undefined
+    const authority = holdCheckoutReloadAuthority({
+      handoff,
+      onAcquired: (owned) => {
+        capabilityRef.current = owned.capability
+        reloadHandoffRef.current = null
+        holderClaimRef.current = claimHolderId({
+          id: owned.holder,
+          onRemint: setOwnHolder,
+          now: () => 0,
+        })
+        bumpCheckoutAuthority((version) => version + 1)
+        loadCheckout()
+      },
+      onError: () => {
+        capabilityRef.current = null
+        reloadHandoffRef.current = null
+        setOwnHolder(remintSessionHolderId())
+        bumpCheckoutAuthority((version) => version + 1)
+        loadCheckout()
+      },
+    })
+    reloadAuthorityRef.current = authority
+    if (!authority.active) {
+      capabilityRef.current = null
+      reloadHandoffRef.current = null
+      setOwnHolder(remintSessionHolderId())
+      bumpCheckoutAuthority((version) => version + 1)
+    }
+    // The module runtime owns the lock. React StrictMode cleanup must not release
+    // checkout authority between its setup probes; explicit Release calls stop it.
+    return undefined
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // Take / Release the single-writer checkout (3B). Both refetch /versions after
   // the call so the chip reflects the real lock (source of truth), and both stay
@@ -619,11 +870,43 @@ export default function App() {
   // means the refetched manifest shows the truth. Live only.
   const onTakeCheckout = useCallback(async () => {
     if (mock) return
-    const did = drawingState?.drawing_id || CHECKOUT_DRAWING_ID
+    const did = resolveCheckoutDrawingId({
+      drawingState,
+      requestedDrawingId: REQUESTED_DRAWING_ID,
+    })
     setCheckoutBusy(true)
     try {
-      await takeCheckout(did, ownHolder)
-    } catch { /* calm — the refetch below shows the real state */ }
+      const result = await takeCheckout(did, ownHolder, undefined, capabilityRef.current)
+      if (result?.acquired && result.checkout_capability) {
+        reloadAuthorityRef.current?.stop()
+        const authority = holdCheckoutReloadAuthority({
+          handoff: {
+            capability: result.checkout_capability,
+            holder: ownHolder,
+            drawingId: did,
+          },
+          onAcquired: (owned) => {
+            capabilityRef.current = owned.capability
+            bumpCheckoutAuthority((version) => version + 1)
+          },
+        })
+        reloadAuthorityRef.current = authority
+        if (!authority.active || !(await authority.acquired)) {
+          capabilityRef.current = null
+          try { await releaseCheckout(did, result.checkout_capability) } catch { /* fail closed */ }
+        }
+      } else if (!result?.acquired) {
+        capabilityRef.current = null
+        reloadAuthorityRef.current?.stop()
+        reloadAuthorityRef.current = null
+      }
+    } catch (error) {
+      if (error?.status === 403 || error?.status === 409) {
+        capabilityRef.current = null
+        reloadAuthorityRef.current?.stop()
+        reloadAuthorityRef.current = null
+      }
+    }
     finally {
       await loadCheckout()
       setCheckoutBusy(false)
@@ -632,16 +915,50 @@ export default function App() {
 
   const onReleaseCheckout = useCallback(async () => {
     if (mock) return
-    const did = drawingState?.drawing_id || CHECKOUT_DRAWING_ID
+    const did = resolveCheckoutDrawingId({
+      drawingState,
+      requestedDrawingId: REQUESTED_DRAWING_ID,
+    })
     setCheckoutBusy(true)
     try {
-      await releaseCheckout(did, ownHolder)
-    } catch { /* calm — the refetch below shows the real state */ }
+      await releaseCheckout(did, capabilityRef.current)
+      capabilityRef.current = null
+      reloadAuthorityRef.current?.stop()
+      reloadAuthorityRef.current = null
+    } catch (error) {
+      if (error?.status === 403 || error?.status === 409) capabilityRef.current = null
+    }
     finally {
       await loadCheckout()
       setCheckoutBusy(false)
     }
-  }, [mock, drawingState, ownHolder, loadCheckout])
+  }, [mock, drawingState, loadCheckout])
+
+  // Prefer ending checkout authority before leaving this origin for Auth0. If
+  // the release cannot complete, login still proceeds and the marked, one-use
+  // auth-return handoff above preserves the capability behind the Web Lock.
+  const onLogin = useCallback(async () => {
+    if (!mock && capabilityRef.current) {
+      const did = resolveCheckoutDrawingId({
+        drawingState,
+        requestedDrawingId: REQUESTED_DRAWING_ID,
+      })
+      try {
+        await releaseCheckout(did, capabilityRef.current)
+        capabilityRef.current = null
+        reloadAuthorityRef.current?.stop()
+        reloadAuthorityRef.current = null
+        // The server lease is already gone. Converge the rendered lock state
+        // before Auth0 navigation so a rejected redirect cannot leave a stale
+        // "You hold the edit lock" control with no bearer capability.
+        setCheckout(null)
+        setCheckoutUnknown(false)
+        setCheckoutReadFailed(false)
+        bumpCheckoutAuthority((version) => version + 1)
+      } catch { /* the auth-return handoff remains the fail-closed fallback */ }
+    }
+    await login()
+  }, [mock, drawingState])
 
   // Tab-close reap beacon: on pagehide / tab-hidden, if a durable in-flight job
   // pointer exists, sendBeacon POST /api/jobs/{id}/close so the backend flags the
@@ -650,73 +967,16 @@ export default function App() {
   // server-side; the localStorage re-attach path is untouched — if the user
   // returns quickly the re-attach still re-fetches the record (which may have
   // completed before the reaper swept). Absolute URL respects VITE_API_BASE.
-  useEffect(() => {
-    if (mock) return
-    const fire = () => {
-      const saved = readInflight()
-      if (saved && saved.job_id) closeJobBeacon(saved.job_id)
-    }
-    const onHide = () => fire()
-    const onVis = () => { if (document.visibilityState === 'hidden') fire() }
-    window.addEventListener('pagehide', onHide)
-    document.addEventListener('visibilitychange', onVis)
-    return () => {
-      window.removeEventListener('pagehide', onHide)
-      document.removeEventListener('visibilitychange', onVis)
-    }
-  }, [mock])
-
   // Refresh the live job rail on demand (after a run completes, so the job shows
   // immediately rather than waiting for the next poll). No-op in mock.
-  const refreshJobs = useCallback(async () => {
-    if (mock) return
-    try { setJobs(await listJobs()) } catch { /* transient */ }
-  }, [mock])
-
   // Poll the recent-jobs list (live only; zero /api calls in mock). A 401 means
   // there is NO session — polling forever would just hammer the API with error
   // traffic, so the poll STOPS on the first 401 and resumes only when the mode
   // flips (the effect re-runs). Transient non-auth errors keep polling.
-  useEffect(() => {
-    if (mock) { setJobs([]); setAuthRequired(false); return }
-    let alive = true
-    let id = null
-    const tick = async () => {
-      try {
-        const js = await listJobs()
-        if (alive) { setJobs(js); setAuthRequired(false) }
-      } catch (e) {
-        if (e?.status === 401) {
-          if (alive) setAuthRequired(true)
-          if (id) { clearInterval(id); id = null }
-        } /* other errors: transient, keep polling */
-      }
-    }
-    tick()
-    id = setInterval(tick, 2500)
-    return () => { alive = false; if (id) clearInterval(id) }
-  }, [mock])
-
   // A live job entered 'running' — begin (or resume) the wall-clock, using the
   // server's started_at when known (localhost clocks match) so a re-attach
   // continues the real elapsed time instead of restarting at zero.
-  const markRunning = useCallback((startedAtSec) => {
-    if (runningSinceRef.current == null) {
-      runningSinceRef.current = startedAtSec ? startedAtSec * 1000 : Date.now()
-    }
-    setRunStatus('running')
-    setRunElapsedMs(Math.max(0, Date.now() - runningSinceRef.current))
-  }, [])
-
   // Tick the calm "running · N.Ns" clock while a live job runs (no animated loader).
-  useEffect(() => {
-    if (runStatus !== 'running') return
-    const id = setInterval(() => {
-      if (runningSinceRef.current != null) setRunElapsedMs(Date.now() - runningSinceRef.current)
-    }, 200)
-    return () => clearInterval(id)
-  }, [runStatus])
-
   // --- NT2 toast plumbing (one slot — newest replaces; Toast auto-fades ~5s) --
   const showToast = useCallback((t) => {
     toastSeqRef.current += 1
@@ -732,10 +992,89 @@ export default function App() {
     workspaceCardRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' })
   }, [])
 
+  const completedVersionRef = useRef(null)
+  const {
+    jobs,
+    currentJobId,
+    currentJob,
+    inflight: inflightPtr,
+    reattaching,
+    running,
+    status: runStatus,
+    progress: runProgress,
+    elapsedMs: runElapsedMs,
+    result,
+    error: runErr,
+    runJob,
+    attachJob: attachSharedJob,
+    detachJob: interruptRun,
+    reportError: setRunErr,
+    clearError: clearRunErr,
+    adoptEnvelope,
+    refreshJobs,
+  } = useJobController({
+    mock,
+    resetKey: `${isEditFixture}:${intakeRetryKey}`,
+    formatError: humanizeError,
+    onAuthRequired: setAuthRequired,
+    onNotice: ({ text }) => showToast({ text, action: { label: 'View', onClick: viewResult } }),
+    onCompleteVersion: (...args) => completedVersionRef.current?.(...args),
+  })
+  drawingErrorRef.current = setRunErr
+
+  // Turn-authority provider for the author panel's stage POST (server fail-
+  // closes without it: X-Authority-Session-Id/-Turn-Id naming an ACTIVE turn
+  // whose subject matches the caller). Reuses a self-minted turn within TTL
+  // (a wide margin under the server's TURN_MAX_S default of 300s) rather than
+  // reusing an arbitrary composer turn: useConverseSessionController exposes
+  // no live "still active" signal for turns already in flight (its `turns`
+  // entries are a one-time snapshot from turn start, never updated to
+  // terminal), so trusting one here could hand the server a turn id that has
+  // already ended. Minting is the safe default; the server 409s harmlessly if
+  // this races and loses.
+  const agentSessionIdRef = useRef(agentSessionId)
+  useEffect(() => { agentSessionIdRef.current = agentSessionId }, [agentSessionId])
+  const authorAuthorityRef = useRef(null) // { sessionId, turnId, mintedAt }
+  const authorAuthorityProvider = useCallback(async (description) => {
+    // No entitlement pre-check here: entitlements load async, and a stage
+    // click can beat them (proven by the e2e). A mint against a tenant that
+    // truly cannot converse just fails and falls through to null, which the
+    // server answers with its own fail-closed refusal.
+    const cached = authorAuthorityRef.current
+    if (cached && cached.sessionId === agentSessionIdRef.current
+        && Date.now() - cached.mintedAt < AUTHOR_AUTHORITY_TTL_MS) {
+      return { sessionId: cached.sessionId, turnId: cached.turnId }
+    }
+    try {
+      const response = await startAgentTurn(description, { source: 'author_panel', purpose: 'stage_authority' })
+      // The response's own session id, never the state-fed ref alone: the
+      // first mint resolves before React has re-rendered the fresh sessionId.
+      const sessionId = response?.session_id || agentSessionIdRef.current
+      if (!sessionId || !response?.turn_id) return null
+      authorAuthorityRef.current = { sessionId, turnId: response.turn_id, mintedAt: Date.now() }
+      return { sessionId, turnId: response.turn_id }
+    } catch {
+      return null
+    }
+  }, [startAgentTurn])
+
+  const authorStage = useAuthorStageController({ mock, authorityProvider: authorAuthorityProvider })
+  authorPendingRef.current = !!authorStage.pointer
+
+  useEffect(() => {
+    const pending = authorStage.pointer
+    if (!pending) return
+    setAuthorTargetTool(pending.target_tool_name || null)
+    setAuthorSeed(pending.description || '')
+    setAuthorSignal((value) => value + 1)
+    setAuthorOpen(true)
+  }, [authorStage.pointer?.idempotency_key])
+
   // Tab-close survivability: on load in live mode, if a durable in-flight job
   // pointer exists, re-attach. Terminal already -> render its envelope; still
   // running -> resume calm progress + final render. The rail shows a re-attach
   // chip while this runs. Clear the pointer either way.
+  /* Legacy reattach is disabled; useJobController owns this lifecycle.
   useEffect(() => {
     if (mock) { setInflightPtr(null); setReattaching(false); return }
     const saved = readInflight()
@@ -801,6 +1140,7 @@ export default function App() {
     })()
     return () => { alive = false }
   }, [mock, markRunning, refreshJobs, showToast, viewResult])
+  */
 
   // Count ALL entity kinds per layer (polylines + inserts + 3DFACEs) so
   // insert/face-only layers (e.g. the ?fixture=edit Blocks/Surfaces layers)
@@ -829,122 +1169,70 @@ export default function App() {
   // Swap the viewer + panels to a drawing version (§11). The completed event
   // ("Version 2 created" / "Reverted to version 1") fires the NT2 toast.
   const seatVersion = useCallback((view, drawingId, note) => {
-    viewerRef.current?.applyVersion(view.intake)
-    setVersionIntake(view.intake)
-    setPendingEdit(null)
-    setSelectedHandle(null)
-    setDrawingState({ drawing_id: drawingId, version: view.head, head: view.head, latest: view.latest })
+    seatDrawingVersion(view, { drawingId, source: 'version' })
     if (note) showToast({ text: `${note} · ${drawingId}`, action: { label: 'View', onClick: viewViewer } })
-    // the version chain changed — drop any open history popover / active preview.
-    setHistoryOpen(false); setHistory(null); setPreviewing(null); setPreviewIntake(null)
-  }, [showToast, viewViewer])
+  }, [seatDrawingVersion, showToast, viewViewer])
 
-  const onUndo = useCallback(async () => {
-    if (!drawingState || versionBusy) return
-    setVersionBusy(true); setOverlayStale(true)
-    try {
-      const view = await undoDrawing(mock, drawingState.drawing_id)
-      seatVersion(view, drawingState.drawing_id, `Reverted to version ${view.head}`)
-    } catch (e) {
-      setRunErr(humanizeError(e))
-    } finally {
-      setVersionBusy(false)
+  const seatCompletedVersion = useCallback(async (newVersion, envelope) => {
+    let version = newVersion?.version
+    if (mock) {
+      try {
+        if (!mockVersions.isSeeded() && intake) mockVersions.seedBase(intake)
+        const commit = mockVersions.applyDelete(envelope?.result?.removed)
+        version = commit.version
+      } catch {
+        showToast({ text: `Version ${version} created` })
+        markRefreshFailure({ drawing_id: newVersion.drawing_id, version })
+        return
+      }
     }
-  }, [mock, drawingState, versionBusy, seatVersion])
+    if (envelope?.result?.new_version_readable === false) {
+      recordCommittedUnreadableHead(newVersion)
+      showToast({ text: `Version ${version} created` })
+      return
+    }
+    try {
+      const view = await getDrawingIntake(mock, newVersion.drawing_id, 'head')
+      seatVersion(view, newVersion.drawing_id, `Version ${version} created`)
+    } catch {
+      showToast({ text: `Version ${version} created` })
+      markRefreshFailure({ drawing_id: newVersion.drawing_id, version })
+    }
+  }, [intake, markRefreshFailure, mock, recordCommittedUnreadableHead, seatVersion, showToast])
+  completedVersionRef.current = seatCompletedVersion
+
+  // P2 wave C-2: engagement depth (real CAD work). ONE event for the four
+  // version-navigation gestures; action is the closed vocabulary
+  // undo/redo/history/preview, counted only when the navigation happened.
+  const onUndo = useCallback(async () => {
+    const view = await undoDrawingVersion()
+    if (view) {
+      track('drawing.version_navigated', { action: 'undo' })
+      showToast({ text: `Reverted to version ${view.head} · ${drawingState?.drawing_id}`, action: { label: 'View', onClick: viewViewer } })
+    }
+  }, [drawingState, showToast, undoDrawingVersion, viewViewer])
 
   const onRedo = useCallback(async () => {
-    if (!drawingState || versionBusy) return
-    setVersionBusy(true); setOverlayStale(true)
-    try {
-      const view = await redoDrawing(mock, drawingState.drawing_id)
-      seatVersion(view, drawingState.drawing_id, `Advanced to version ${view.head}`)
-    } catch (e) {
-      setRunErr(humanizeError(e))
-    } finally {
-      setVersionBusy(false)
+    const view = await redoDrawingVersion()
+    if (view) {
+      track('drawing.version_navigated', { action: 'redo' })
+      showToast({ text: `Advanced to version ${view.head} · ${drawingState?.drawing_id}`, action: { label: 'View', onClick: viewViewer } })
     }
-  }, [mock, drawingState, versionBusy, seatVersion])
+  }, [drawingState, redoDrawingVersion, showToast, viewViewer])
+
+  const onToggleHistoryTracked = useCallback(() => {
+    if (!historyOpen) track('drawing.version_navigated', { action: 'history' })
+    onToggleHistory()
+  }, [historyOpen, onToggleHistory])
+
+  const onPreviewVersionTracked = useCallback((...args) => {
+    track('drawing.version_navigated', { action: 'preview' })
+    return onPreviewVersion(...args)
+  }, [onPreviewVersion])
 
   // --- version-history browser + read-only preview -------------------------
-  const toggleFamily = useCallback((id) => {
-    setOpenFamilies((o) => ({ ...o, [id]: !o[id] }))
-  }, [])
-
-  // Shared by the History toggle and the X3 takeover's Retry chip.
-  const loadHistory = useCallback(async () => {
-    if (!drawingState) return
-    setHistoryLoading(true); setHistoryErr(null)
-    try {
-      setHistory(await getDrawingVersions(mock, drawingState.drawing_id))
-    } catch (e) {
-      setHistoryErr(humanizeError(e)); setHistory(null)
-    } finally {
-      setHistoryLoading(false)
-    }
-  }, [mock, drawingState])
-
-  const onToggleHistory = useCallback(async () => {
-    if (historyOpen) { setHistoryOpen(false); return }
-    setHistoryOpen(true)
-    loadHistory()
-  }, [historyOpen, loadHistory])
-
-  // Read-only preview of a version. Head -> restore head + clear preview; any
-  // other version -> seat that intake in the viewer WITHOUT touching head/latest
-  // (undo/redo remain the only mutations; confirm via /intake?version=head).
-  const onPreviewVersion = useCallback(async (v) => {
-    if (!drawingState) return
-    const isHead = v === drawingState.head
-    try {
-      const view = await getDrawingIntake(mock, drawingState.drawing_id, isHead ? 'head' : v)
-      viewerRef.current?.applyVersion(view.intake)
-      setSelectedHandle(null)
-      if (isHead) {
-        setVersionIntake(view.intake)   // re-sync the seated head
-        setPreviewIntake(null); setPreviewing(null)
-      } else {
-        setPreviewIntake(view.intake)
-        setPreviewing({ version: v })
-        setOverlayStale(true)           // last run's overlay describes a different version
-      }
-    } catch (e) {
-      setHistoryErr(humanizeError(e))
-    }
-  }, [mock, drawingState])
-
-  const onBackToHead = useCallback(() => {
-    if (drawingState) onPreviewVersion(drawingState.head)
-  }, [drawingState, onPreviewVersion])
-
   // --- projects / orgs workspace handlers (item 1) -------------------------
-  const onOpenProject = useCallback(async (pid) => {
-    if (!pid) return
-    setOpenProjectId(pid); setWorkspace(null); setCanonicalVersionId(null)
-    setWsLoading(true); setProjectsErr(null)
-    try {
-      setWorkspace(await openProject(pid, orgId))
-    } catch (e) {
-      setWorkspace(null); setProjectsErr(humanizeError(e))
-    } finally {
-      setWsLoading(false)
-    }
-  }, [orgId])
-
   // Re-hydrate the open project (after a terminal run so jobs[] visibly grows).
-  const rehydrate = useCallback(async () => {
-    if (!openProjectId) return
-    setWsLoading(true)
-    try {
-      setWorkspace(await openProject(openProjectId, orgId))
-    } catch { /* transient — keep the last good hydration */ } finally {
-      setWsLoading(false)
-    }
-  }, [openProjectId, orgId])
-
-  const onCloseProject = useCallback(() => {
-    setOpenProjectId(null); setWorkspace(null); setCanonicalVersionId(null)
-  }, [])
-
   // Both creators accept the name from an inline F1 field (ProjectSwitcher);
   // the window.prompt fallback only fires when no name is passed (legacy path —
   // native dialogs are off-standard and slated for removal with the switcher).
@@ -953,46 +1241,16 @@ export default function App() {
       ? givenName
       : window.prompt('Name your workspace org', 'My workspace')
     if (name == null) return
-    setOrgBusy(true); setProjectsErr(null)
-    try {
-      const org = await createOrg(name.trim() || 'My workspace')
-      const id = org.org_id || org.id
-      setStoredOrgId(id); setOrgId(id); setProjects([])
-    } catch (e) {
-      setProjectsErr(humanizeError(e))
-    } finally {
-      setOrgBusy(false)
-    }
-  }, [])
+    return createWorkspaceOrg(name)
+  }, [createWorkspaceOrg])
 
   const onCreateProject = useCallback(async (givenName) => {
     const name = typeof givenName === 'string'
       ? givenName
       : window.prompt('New project name', 'rooftop demo')
     if (name == null || !name.trim()) return
-    setProjectBusy(true); setProjectsErr(null)
-    try {
-      const p = await createProject(name.trim(), orgId)
-      setProjects((prev) => [...prev, p])
-      await onOpenProject(p.project_id || p.id)
-    } catch (e) {
-      setProjectsErr(humanizeError(e))
-    } finally {
-      setProjectBusy(false)
-    }
-  }, [orgId, onOpenProject])
-
-  const dismissRoute = useCallback(() => {
-    runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
-    setRoute(null)
-  }, [])
-
-  const prepareRunParams = useCallback((tool, params) => {
-    const isWrite = (tool.capabilities || []).includes('drawing.write')
-    return selectedHandle
-      ? { ...(params || {}), target_handle: selectedHandle, ...(isWrite ? { handle: selectedHandle } : {}) }
-      : (params || {})
-  }, [selectedHandle])
+    return createWorkspaceProject(name)
+  }, [createWorkspaceProject])
 
   const catalogRunContext = useMemo(() => createCatalogRunContext({
     tenantId: tenant || config.tenant,
@@ -1001,15 +1259,32 @@ export default function App() {
     workspace,
     selectedVersionId: canonicalVersionId,
     drawingState,
-    fallbackDrawingId: DEFAULT_DRAWING_ID,
+    fallbackDrawingId: REQUESTED_DRAWING_ID,
   }), [tenant, orgId, openProjectId, workspace, canonicalVersionId, drawingState])
   const catalogRunContextRef = useRef(catalogRunContext)
   catalogRunContextRef.current = catalogRunContext
 
+  const prepareRunParams = useCallback((tool, params) => {
+    const isWrite = (tool.capabilities || []).includes('drawing.write')
+    const overlays = selectedHandle
+      ? { target_handle: selectedHandle, ...(isWrite ? { handle: selectedHandle } : {}) }
+      : {}
+    return prepareCatalogRunParams(tool, params, catalogRunContextRef.current, overlays)
+  }, [selectedHandle])
+
+  const confirmEmitRef = useRef(null) // P2: run.confirm_shown de-dupe (tour double-arm)
+  const tourDispatchRef = useRef(false) // P2: true only while a tour beat's dispatch is in flight
+  // P2: committed snapshot for the Esc-interrupt emit. Assigned in an effect
+  // (post-commit), not during render, so an abandoned concurrent render can
+  // never tear a wrong tool/elapsed pair into the handler; kept out of the
+  // Esc listener's deps because elapsed ticks every 200ms.
+  const interruptSnapshotRef = useRef({ tool: null, elapsedMs: null })
+  useEffect(() => {
+    interruptSnapshotRef.current = { tool: selectedTool?.name || null, elapsedMs: runElapsedMs }
+  })
   const armDecision = useCallback((decision) => {
     if (decision?.lane !== 'run') {
       runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
-      setRoute(decision)
       return decision
     }
     // Family catalog entries are presentation-normalized. Resolve the canonical
@@ -1018,7 +1293,6 @@ export default function App() {
     const catalogTool = tools.find((candidate) => candidate.name === decision.tool)
     if (!catalogTool) {
       runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
-      setRoute(decision)
       return decision
     }
     if (!mock && !tenant) return
@@ -1027,6 +1301,15 @@ export default function App() {
       return
     }
     const isWrite = (catalogTool.capabilities || []).includes('drawing.write')
+    if (
+      !mock
+      && isWrite
+      && catalogRunContextRef.current.projectId == null
+      && catalogRunContextRef.current.drawingVersion == null
+    ) {
+      setRunErr('The current drawing version is not ready. Refresh the drawing before running a write tool.')
+      return
+    }
     if (running || previewing || (isWrite && (writeLocked || !canRunWrite))) return
     const prepared = prepareRunParams(catalogTool, decision.params)
     const staged = stageRunIntent(runIntentStateRef.current, {
@@ -1037,26 +1320,48 @@ export default function App() {
       toolSnapshot: createCatalogToolSnapshot(catalogTool),
     })
     runIntentStateRef.current = staged.state
-    setRouteErr(null)
     const armed = {
       ...decision,
       tool: catalogTool.name,
       params: staged.intent.params,
       runIntent: staged.intent,
     }
-    setRoute(armed)
+    // P2: confirm-to-run conversion top. `source` comes from the decision's
+    // own construction site (catalog/tour stamp source; slash decisions
+    // carry slash:true; the NL route is 'prompt'). A tour beat's FIRST arm
+    // comes through the dispatch route, which knows nothing of the tour, so
+    // the in-flight flag reattributes it; the tour's catalog re-arm is then
+    // the de-duped duplicate (review #427 round-2 warn 5 + round-3 warn 1).
+    const emitKey = `${catalogTool.name}`
+    const nowTs = Date.now()
+    const last = confirmEmitRef.current
+    if (!(last && last.key === emitKey && nowTs - last.ts < 2000)) {
+      const source = decision.source
+        || (tourDispatchRef.current ? 'tour' : decision.slash ? 'slash' : 'prompt')
+      // `source` rides the ref so run.confirmed can report the SAME
+      // provenance and ms_since_shown without re-deriving either.
+      confirmEmitRef.current = { key: emitKey, ts: nowTs, source }
+      track('run.confirm_shown', {
+        tool: catalogTool.name,
+        is_write: isWrite,
+        source,
+      })
+    }
     return armed
   }, [tools, mock, tenant, prepareRunParams, running, previewing, writeLocked, canRunWrite, catalogRunContext])
+  catalogUiRef.current = { armDecision, startAgentTurn, running }
 
-  const onRequestCatalogRun = useCallback((tool, params, rationale = null) => {
+  const onRequestCatalogRun = useCallback((tool, params, rationale = null, source = 'catalog') => {
     if (!tool) return
-    return armDecision({
+    return commitCatalogDecision({
       lane: 'run', tool: tool.name, params, confidence: 1,
       rationale: rationale || 'Catalog selection. Confirm the exact tool and parameters before it runs.',
       alternatives: [],
+      source, // P2: run.confirm_shown attribution (catalog by default, tour from the tour beat)
     })
-  }, [armDecision])
+  }, [commitCatalogDecision])
 
+  /* Legacy inline run lifecycle is disabled; useJobController owns it.
   const onRun = useCallback(async (tool, params, {
     intentConfirmed = false, runContext = null, idempotencyKey = null,
   } = {}) => {
@@ -1163,6 +1468,49 @@ export default function App() {
     }
   }, [mock, shown, intake, selectedHandle, markRunning, seatVersion, refreshJobs, previewing, loadUsage,
       loadCheckout, writeLocked, openProjectId, rehydrate, showToast, viewResult, prepareRunParams, catalogRunContext])
+  */
+
+  const onRun = useCallback(async (tool, params, {
+    intentConfirmed = false, runContext = null, idempotencyKey = null,
+  } = {}) => {
+    if (previewing) return null
+    if (writeLocked && (tool.capabilities || []).includes('drawing.write')) return null
+    runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
+    // ranTool lets the controller resolve a shown route honestly: this run IS
+    // the routed tool -> accepted; a different tool -> invalidated.
+    dismissRoute({ ranTool: tool.name })
+    if (agentMode === 'race') clearAgentMode()
+    setSelectedTool(tool)
+    setOverlayStale(false); markRefreshFailure(null)
+    const merged = intentConfirmed ? params : prepareRunParams(tool, params)
+    const executionContext = runContext || catalogRunContext
+    lastRunRef.current = { tool, params: merged }
+
+    const envelope = await runJob({
+      toolName: tool.name,
+      execute: ({ onSubmit, onStatus }) => (mock
+        ? runTool(mock, tool, merged, shown)
+        : runToolAsync(tool, merged, executionContext.drawingId, {
+          orgId: executionContext.orgId || undefined,
+          projectId: executionContext.projectId || undefined,
+          dwgVersion: drawingVersionForRun(tool, executionContext, health?.aps_live),
+          idempotencyKey: idempotencyKey || undefined,
+          catalogDigest: (runContext?.toolSnapshot?.catalogDigest
+            || createCatalogToolSnapshot(tool).catalogDigest || undefined),
+          checkoutCapability: capabilityRef.current || undefined,
+          onSubmit,
+          onStatus,
+        })),
+    })
+
+    if (!mock) {
+      loadUsage(); loadCheckout()
+      if (openProjectId) rehydrate()
+    }
+    return envelope
+  }, [agentMode, catalogRunContext, clearAgentMode, dismissRoute, loadCheckout, loadUsage, mock,
+    health?.aps_live, openProjectId, prepareRunParams, markRefreshFailure, previewing, rehydrate, runJob,
+    shown, writeLocked])
 
   const onConfirmCatalogRun = useCallback(async (intent, tool, params) => {
     let currentTool = tool
@@ -1175,7 +1523,7 @@ export default function App() {
       toolSnapshot = createCatalogToolSnapshot(currentTool)
     } catch {
       runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current, intent?.intentId)
-      setRoute(null)
+      dismissRoute({ outcome: 'invalidated' })
       setRunErr('That catalog tool changed or is no longer available. Choose Run again to create a new intent.')
       return
     }
@@ -1189,16 +1537,30 @@ export default function App() {
     })
     runIntentStateRef.current = confirmed.state
     if (!confirmed.ok) {
-      setRoute(null)
+      dismissRoute({ outcome: 'invalidated' })
       setRunErr('That run confirmation is no longer valid. Choose Run again to create a new intent.')
       return
+    }
+    // P2 wave C-2: trust-gate friction. This is THE confirm click (the only
+    // path from an armed intent to onRun with intentConfirmed). source and
+    // ms_since_shown come from the confirm_shown emit's own record; when the
+    // ref names a different tool (2s window expired edge), both are omitted
+    // rather than guessed.
+    {
+      const shownRec = confirmEmitRef.current
+      const matches = shownRec && shownRec.key === currentTool?.name
+      track('run.confirmed', {
+        tool: currentTool?.name,
+        ...(matches && shownRec.source ? { source: shownRec.source } : {}),
+        ...(matches ? { ms_since_shown: Date.now() - shownRec.ts } : {}),
+      })
     }
     onRun(currentTool, confirmed.execution.params, {
       intentConfirmed: true,
       runContext: { ...confirmed.execution.context, toolSnapshot: confirmed.execution.toolSnapshot },
       idempotencyKey: confirmed.execution.intentId,
     })
-  }, [mock, onRun])
+  }, [dismissRoute, mock, onRun])
 
   // Retry the last run (plain affordance for retryable failures / transport hiccups).
   const onRetry = useCallback(() => {
@@ -1209,6 +1571,7 @@ export default function App() {
   // An agent-dispatched job (job_linked event) -> the SAME §7 attach
   // affordance the tab-close re-attach uses: subscribe to the job, stream
   // progress into the result pane, toast on completion. Never re-submits.
+  /* Legacy inline attach lifecycle is disabled; useJobController owns it.
   const onAttachAgentJob = useCallback(async (jobId, toolName) => {
     if (!jobId || mock) return
     const seq = ++runSeqRef.current // Esc-interrupt detaches, like any run
@@ -1230,6 +1593,19 @@ export default function App() {
         if (env?.ok) {
           showToast({ text: `${toolName || env.tool || 'job'} complete`, action: { label: 'View', onClick: viewResult } })
         }
+        // Agent-dispatched writes use the same immutable version contract as
+        // catalog runs. Attaching must seat the new head, otherwise the receipt
+        // says the write completed while the viewer still shows its parent.
+        if (env?.ok && env.result?.new_version) {
+          const nv = env.result.new_version
+          try {
+            const view = await getDrawingIntake(false, nv.drawing_id, 'head')
+            seatVersion(view, nv.drawing_id, `Version ${nv.version} created`)
+          } catch {
+            showToast({ text: `Version ${nv.version} created` })
+            setRefreshFail({ drawing_id: nv.drawing_id, version: nv.version })
+          }
+        }
       }
     } catch (e) {
       if (runSeqRef.current === seq) setRunErr(String(e.message || e))
@@ -1240,51 +1616,68 @@ export default function App() {
       }
       refreshJobs()
     }
-  }, [mock, markRunning, refreshJobs, showToast, viewResult])
+  }, [mock, markRunning, refreshJobs, seatVersion, showToast, viewResult])
+  */
+
+  const onAttachAgentJob = useCallback(async (jobId, toolName) => {
+    if (!jobId || mock) return null
+    // P2 wave C-2: agent-to-deterministic-run conversion, at the one seam
+    // where a chat-dispatched job enters the run pane.
+    track('agent.job_linked', { tool: toolName || 'job' })
+    setSelectedTool({ name: toolName || 'job' })
+    return attachSharedJob(jobId, { toolName: toolName || 'job', persist: true })
+  }, [attachSharedJob, mock])
 
   // X1 Retry for a failed post-write viewer refresh — re-fetch head and seat it.
-  const onRetryViewerRefresh = useCallback(async () => {
-    if (!refreshFail) return
-    try {
-      const view = await getDrawingIntake(mock, refreshFail.drawing_id, 'head')
-      seatVersion(view, refreshFail.drawing_id, null)
-      setRefreshFail(null)
-    } catch { /* still failing — the X1 row stays */ }
-  }, [mock, refreshFail, seatVersion])
-
-  const onAuthor = useCallback(async (description) => {
+  const onAuthor = useCallback(async (description, targetToolName = null) => {
     // R5 only stages bytes. It must not place a tool in the runnable catalog.
-    return stageAuthorTool(mock, description)
-  }, [mock])
+    return authorStage.stage(description, targetToolName)
+  }, [authorStage.stage])
+
+  const onReviseAuthoredTool = useCallback((tool) => {
+    if (!tool?.name || authorPendingRef.current) return
+    setAuthorTargetTool(tool.name)
+    setAuthorSeed('')
+    setAuthorSignal((value) => value + 1)
+    setAuthorOpen(true)
+    setTimeout(() => authorSectionRef.current?.scrollIntoView({ block: 'nearest' }), 0)
+  }, [])
+
+  const onCancelAuthorRevision = useCallback(() => {
+    if (authorPendingRef.current) return
+    setAuthorTargetTool(null)
+    setAuthorSeed('')
+    setAuthorSignal((value) => value + 1)
+  }, [])
 
   const onPublishAuthor = useCallback(async (staged) => {
     try {
       const res = await publishStagedAuthor(mock, staged)
       const tool = res.tool || staged.tool
-      setTools((prev) => {
-        const rest = prev.filter((t) => t.name !== tool.name)
-        return [...rest, tool]
-      })
-      // Re-group the catalog so the new tool lands in "Custom authored tools"
-      // (visible re-fetch of the grouped capabilities).
-      loadCatalog()
-      // Authoring is a ~1-2 min agent run — surface completion as an NT2 toast so
-      // it is visible even when the author section is collapsed / scrolled away.
-      showToast({
-        text: `Tool published — ${tool.name}`,
-        action: {
-          label: 'View',
-          onClick: () => {
-            setAuthorOpen(true)
-            setTimeout(() => authorSectionRef.current?.scrollIntoView({ block: 'nearest' }), 0)
+      if (res.published) {
+        upsertTool(tool)
+        // Re-group the catalog so the new tool lands in "Custom authored tools"
+        // (visible re-fetch of the grouped capabilities).
+        loadCatalog()
+        // Authoring is a ~1-2 min agent run — surface completion as an NT2 toast so
+        // it is visible even when the author section is collapsed / scrolled away.
+        showToast({
+          text: `Tool published — ${tool.name}`,
+          action: {
+            label: 'View',
+            onClick: () => {
+              setAuthorOpen(true)
+              setTimeout(() => authorSectionRef.current?.scrollIntoView({ block: 'nearest' }), 0)
+            },
           },
-        },
-      })
+        })
+        authorStage.completePublication()
+      }
       return { ...res, tool }
     } finally {
       setTourLanded(true)
     }
-  }, [mock, loadCatalog, showToast])
+  }, [authorStage.completePublication, mock, loadCatalog, showToast, upsertTool])
 
   // "Run it now" from the author card — prefill the RUN lane (RoutePanel) with
   // the just-authored tool so the user confirms before it runs (paid actions
@@ -1292,60 +1685,24 @@ export default function App() {
   // RoutePanel resolves it and shows a single Run.
   const onUseAuthored = useCallback((tool) => {
     if (!tool) return
-    armDecision({
+    commitCatalogDecision({
       lane: 'run', tool: tool.name, params: {}, confidence: 0.99,
       rationale: `Authored just now — confirm to run “${tool.name}”.`,
       alternatives: [],
     })
     setTimeout(() => document.querySelector('main')?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 0)
-  }, [armDecision])
+  }, [commitCatalogDecision])
 
   // --- prompt-first dispatch (§12) -----------------------------------------
   // Live preview of which lane the text will route to (lights the hero's dots).
-  const hintLane = useMemo(() => {
-    const s = prompt.trim()
-    if (!s) return null
-    if (s.startsWith('/')) return 'run' // slash = explicit tool invocation
-    try { return matchPrompt(s, tools).lane } catch { return null }
-  }, [prompt, tools])
-
   // The slash-completable catalog: every runnable tool the CURRENT plan allows
   // (write tools drop out when the plan lacks run_write — the menu only offers
   // what the end user can actually complete and run).
-  const slashTools = useMemo(
-    () => tools.filter((t) => canRunWrite || !(t.capabilities || []).includes('drawing.write')),
-    [tools, canRunWrite],
-  )
-
-  // Start (or continue) the drawing's converse session and post one turn.
-  // The session create is idempotent per (tenant, drawing); a stale cached
-  // session (harness restarted -> session_not_found) re-attaches once.
-  const startAgentTurn = useCallback(async (text, hint) => {
-    const drawingId = DEFAULT_DRAWING_ID
-    const attach = async () => {
-      const sid = (await ensureSession(drawingId)).session_id
-      agentSessionRef.current = sid
-      setAgentSessionId(sid)
-      return sid
-    }
-    const sid = agentSessionRef.current || (await attach())
-    try {
-      const res = await sendConverseMessage(sid, { text, classifier_hint: hint })
-      setAgentTurns((prev) => [...prev, { turnId: res.turn_id, text }])
-    } catch (e) {
-      if (classifyAgentError(e) !== 'not_found') throw e
-      resetSession(drawingId)
-      agentSessionRef.current = null
-      const fresh = await attach()
-      const res = await sendConverseMessage(fresh, { text, classifier_hint: hint })
-      setAgentTurns((prev) => [...prev, { turnId: res.turn_id, text }])
-    }
-  }, [])
-
   // `override` is an optional explicit string — the guided tour's canned prompt,
   // or the menu-picked "/tool" (state hasn't flushed yet). Click handlers pass
   // an event object, which is NOT a string, so the normal "dispatch what's in
   // the bar" path is untouched.
+  /* Legacy inline catalog dispatch is disabled; useCatalogController owns it.
   const onDispatch = useCallback(async (override) => {
     const text = (typeof override === 'string' ? override : prompt).trim()
     if (!text || routing || running) return // no new decision while a run is in flight (Esc interrupts first)
@@ -1464,8 +1821,15 @@ export default function App() {
       stub: prev?.stub, stubReason: prev?.stubReason,
     })
   }, [armDecision, route])
+  */
+
+  const onDispatch = useCallback((override) => {
+    if (running) return undefined
+    return catalogActions.dispatch(override)
+  }, [catalogActions, running])
 
   const onOpenAuthor = useCallback(() => {
+    if (!authorPendingRef.current) setAuthorTargetTool(null)
     setAuthorOpen(true)
     setTimeout(() => authorSectionRef.current?.scrollIntoView({ block: 'nearest' }), 0)
   }, [])
@@ -1485,23 +1849,33 @@ export default function App() {
     setTourLanded(false)
     // self-type into the real bar so the audience sees the sentence being written
     runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
-    setRoute(null); setRouteErr(null)
+    // A leftover route at a tour beat's start was superseded, not user-dismissed.
+    dismissRoute({ outcome: 'invalidated' })
     for (let i = 1; i <= text.length; i += 1) {
       if (cannedSeq.current !== seq) return
-      setPrompt(text.slice(0, i))
+      onPromptChange(text.slice(0, i))
       // eslint-disable-next-line no-await-in-loop
       await new Promise((res) => setTimeout(res, 22))
     }
     if (cannedSeq.current !== seq) return
     let r = null
     try {
-      r = await onDispatch(text)
+      // The dispatch route arms the decision itself; the flag makes that arm
+      // (the one that actually emits) say 'tour' instead of 'prompt'.
+      tourDispatchRef.current = true
+      try {
+        r = await onDispatch(text)
+      } finally {
+        tourDispatchRef.current = false
+      }
       if (cannedSeq.current !== seq) return
       if (r && r.lane === 'run' && step?.action === 'run') {
         const toolObj = tools.find((t) => t.name === r.tool)
         const isWrite = (toolObj?.capabilities || []).includes('drawing.write')
         if (toolObj && !isWrite) {
-          onRequestCatalogRun(toolObj, r.params || {}, 'Guided tour selection. Confirm before it runs.')
+          // Kept on ONE line: scripts/check_run_intent.mjs pins this exact
+          // call shape as the PR107 intent-contract witness.
+          onRequestCatalogRun(toolObj, r.params || {}, 'Guided tour selection. Confirm before it runs.', 'tour')
         }
       }
     } finally {
@@ -1510,11 +1884,23 @@ export default function App() {
       // tool is actually authored, which is the whole differentiator beat.
       if (cannedSeq.current === seq && !(r && r.lane === 'build')) setTourLanded(true)
     }
-  }, [onDispatch, onRequestCatalogRun, tools])
+  }, [dismissRoute, onDispatch, onPromptChange, onRequestCatalogRun, tools])
+
+  const onTourStepChange = useCallback((index) => {
+    tourStepRef.current = index
+    const stepId = TOUR_STEPS[index]?.id
+    setTourStep(stepId)
+    track('tour.step_reached', { step_id: stepId })
+  }, [])
 
   const onTourExit = useCallback(() => {
     // Leaving the tour keeps you exactly where you are — in mock, on the same
     // drawing, with your last real result on screen.
+    track('tour.exited', {
+      at_step: TOUR_STEPS[tourStepRef.current]?.id,
+      completed: tourStepRef.current >= TOUR_STEPS.length - 1,
+    })
+    setTourStep(null)
     cannedSeq.current += 1   // kills any in-flight typing / dispatch
     setTourOn(false)
     setTourLanded(true)
@@ -1545,6 +1931,7 @@ export default function App() {
       if (env?.error) rows.push(typeof env.error === 'string'
         ? `error ${env.error}`
         : `error ${env.error.error_code || ''} · ${env.error.message || ''}`)
+      rows.push(...cadTimingRows(env))
       setDrawer({
         title: `${rec.tool || job.tool || 'job'} · provenance`,
         rows,
@@ -1552,9 +1939,8 @@ export default function App() {
           label: 'Show in result pane',
           onClick: () => {
             setSelectedTool({ name: rec.tool || job.tool })
-            setResult(env)
-            setRunErr(null); setRunning(false); setOverlayStale(false)
-            setCurrentJobId(job.job_id)
+            adoptEnvelope(env, { jobId: job.job_id, toolName: rec.tool || job.tool })
+            setOverlayStale(false)
             setDrawer(null)
             setTimeout(() => resultBlockRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 0)
           },
@@ -1564,7 +1950,7 @@ export default function App() {
     } catch (e) {
       setRunErr(humanizeError(e))
     }
-  }, [])
+  }, [adoptEnvelope, setRunErr])
 
   // "Details" in the result receipt area -> the run's DT2 provenance drawer.
   const openRunDetails = useCallback(() => {
@@ -1585,6 +1971,7 @@ export default function App() {
     if (env.error) rows.push(typeof env.error === 'string'
       ? `error ${env.error}`
       : `error ${env.error.error_code || ''} · ${env.error.message || ''}`)
+    rows.push(...cadTimingRows(env))
     setDrawer({
       title: 'Run · provenance',
       rows,
@@ -1623,6 +2010,7 @@ export default function App() {
 
   // Esc while a live run is in flight: detach this session from the job (the
   // rail keeps tracking it; the close beacon flags it reap-able server-side).
+  /* Legacy interrupt is disabled; useJobController owns it.
   const interruptRun = useCallback(() => {
     runSeqRef.current += 1
     if (!mock && currentJobId) closeJobBeacon(currentJobId)
@@ -1631,6 +2019,7 @@ export default function App() {
     runningSinceRef.current = null
     refreshJobs()
   }, [mock, currentJobId, refreshJobs])
+  */
 
   // R ladder (item D): every displayed R keycap must be live, and only the
   // HIGHEST-PRIORITY visible error responds — one keypress, one retry, never
@@ -1674,10 +2063,22 @@ export default function App() {
       }
       if (e.key === 'Escape') {
         if (drawer) { setDrawer(null); return }
-        if (historyOpen) { setHistoryOpen(false); return }
+        if (historyOpen) { closeHistory(); return }
         if (route) { dismissRoute(); return }
-        if (routeErr || runErr) { setRouteErr(null); setRunErr(null); return }
-        if (running) { interruptRun(); return }
+        if (routeErr || runErr) { clearRouteError(); clearRunErr(); return }
+        if (running) {
+          // P2 wave C-2: latency tolerance in the wild. Esc-on-running is the
+          // ONE interrupt gesture (the rail keeps the job; nothing cancels
+          // server-side). Refs, not deps: elapsed ticks every 200ms and must
+          // not re-subscribe this listener.
+          track('run.interrupted', {
+            ...(interruptSnapshotRef.current.tool ? { tool: interruptSnapshotRef.current.tool } : {}),
+            ...(interruptSnapshotRef.current.elapsedMs != null
+              ? { elapsed_ms: interruptSnapshotRef.current.elapsedMs } : {}),
+          })
+          interruptRun()
+          return
+        }
         if (selectedHandle) { setSelectedHandle(null); return }
         // Bottom rung: the WorkspaceSummary Esc cap — close the open project
         // only once every higher surface has already yielded.
@@ -1718,7 +2119,7 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [drawer, historyOpen, route, routeErr, runErr, running, selectedHandle,
       interruptRun, onDispatch, openProjectId, onCloseProject, rTarget,
-      loadHistory, retryTools, loadCatalog, onRetryViewerRefresh, dismissRoute])
+      closeHistory, loadHistory, retryTools, loadCatalog, onRetryViewerRefresh, dismissRoute, clearRouteError])
 
   // Click-to-fall-through (operator rule): a click anywhere on the surface that
   // doesn't otherwise take an action activates the prompt bar. Real
@@ -1745,11 +2146,8 @@ export default function App() {
   }, [])
 
   const applyVersion = useCallback(() => {
-    viewerRef.current?.applyVersion(editFixtureV2)
-    setVersionIntake(editFixtureV2)
-    setPendingEdit(null)
-    setSelectedHandle(null)
-  }, [])
+    seatDrawingVersion({ intake: editFixtureV2 }, { source: 'fixture' })
+  }, [seatDrawingVersion])
 
   // The last run's overlay only describes the version it produced; once the user
   // undoes/redoes to a different version, suppress it so the viewer never shows a
@@ -1765,38 +2163,7 @@ export default function App() {
     return caps.includes('drawing.write') ? { removed: [selectedHandle] } : null
   }, [mock, selectedHandle, openTool])
 
-  // The current in-session run, shown as a rail card until it appears in the
-  // polled live list (deduped by job_id in JobRail).
-  const currentJob = useMemo(() => {
-    const toolName = selectedTool?.name
-    if (!toolName) return null
-    let status
-    if (running) status = runStatus || 'running'
-    else if (result) status = result.ok ? 'complete' : 'failed'
-    else return null
-    return {
-      job_id: currentJobId,
-      tool: toolName,
-      status,
-      // Prefer the richer progress string ('storing version' etc.) when present.
-      progress: runProgress || runStatus || 'running',
-      elapsed_ms: runElapsedMs != null ? runElapsedMs : (result?.timing_ms ?? null),
-      degraded_mode: !!result?.degraded_mode,
-      error: result?.error || null,
-      // Per-run cost (live APS) for the rail card; null for mock runs.
-      cost: result?.cost || null,
-      // Plan-boundary rejection -> calm amber rail card (not red failed).
-      entitlement_required: !!result?.entitlement_required,
-    }
-  }, [selectedTool, running, runStatus, runProgress, result, runElapsedMs, currentJobId])
-
   const degraded = !!result?.degraded_mode || demoDegraded
-
-  // Total capabilities across families (footer + fam-title, honest count).
-  const capCount = useMemo(
-    () => catalog.families.reduce((n, f) => n + f.capabilities.length, 0),
-    [catalog],
-  )
 
   // A run rejected by the hard SPEND cap (§ broker 402) -> calm amber quota card,
   // not a red failure. The backend's message is authoritative. The coarse DAILY
@@ -1849,7 +2216,26 @@ export default function App() {
   // (round-2 review F1: that state was an unrecoverable blank).
   const signedOut = !mock && authRequired && (authConfigured || !isSignedIn())
 
-  // iOS readiness fetch: flag-gated, project+revision-scoped, fail-to-null.
+  // Product-surface navigation (Browser / CAD / Solar CAD / iOS). 'cad' is the
+  // module default, so the drawing workspace renders exactly as before unless
+  // the user picks another tab (or arrives with ?surface=). The tabs, frame,
+  // IosSurface, and EditSurface existed fully built and tested but were never
+  // mounted (2026-08-30 finding); this is the mount, not new surface behavior.
+  const [activeSurface, setActiveSurface] = useState(() => {
+    try { return productSurfaceFromSearch(window.location.search) } catch { return 'cad' }
+  })
+  const onSelectSurface = useCallback((id) => {
+    setActiveSurface(id)
+    try {
+      const next = searchForProductSurface(window.location.search, id)
+      window.history.replaceState(null, '', `${window.location.pathname}${next}${window.location.hash}`)
+    } catch { /* URL sync is a convenience; state alone still switches the tab */ }
+  }, [])
+  // iOS ship-lane readiness contract (leaf.ios-ship-surface.v1). Fetched only
+  // with the surface flag baked on and a concrete project + revision; every
+  // other case stays null, which IosSurface renders truthfully as
+  // "Not yet configured" and the tab label shows as "Setup required".
+  const [iosContract, setIosContract] = useState(null)
   useEffect(() => {
     if (!ENV_IOS_SURFACE || mock || !openProjectId || !canonicalVersionId) {
       setIosContract(null)
@@ -1861,7 +2247,6 @@ export default function App() {
       .catch(() => { if (live) setIosContract(null) })
     return () => { live = false }
   }, [mock, openProjectId, canonicalVersionId])
-
   const surfaceStates = useMemo(() => productSurfaceStates({
     sessionActive: mock || !signedOut,
     hasDrawing: !!shown,
@@ -1902,6 +2287,7 @@ export default function App() {
   // The internal ops / tenant kill-switch drawer must never be reachable from a
   // public demo build — `?ops=1` is a no-op in mock.
   const opsExit = useExit(opsFlag && !mock && !opsDismissed)
+  const customizeExit = useExit(customizeOpen && canOpenCustomize)
 
   return (
     <div className="app">
@@ -1932,6 +2318,24 @@ export default function App() {
         <div className="who">
           {/* Header metadata (org · tenant · tier · spend · API base) is demoted
               behind Details -> the DT2 session drawer, per the standard. */}
+          {canOpenCustomize && (
+            <button type="button" className="chip-act" onClick={() => setCustomizeOpen(true)}>Customize</button>
+          )}
+          {!mock && agentSessionId && (
+            <button
+              type="button"
+              className="chip-act"
+              onClick={openAgentMode}
+              aria-label={`Pending approvals ${pendingApprovalCount}`}
+              title={pendingApprovalsUnavailable
+                ? 'Pending approvals could not be refreshed. Open the inbox to retry.'
+                : 'Open pending approvals'}
+            >
+              Approvals
+              {pendingApprovalCount > 0 && <span className="key">{pendingApprovalCount}</span>}
+              {pendingApprovalsUnavailable && <span className="dot red" aria-hidden="true" />}
+            </button>
+          )}
           <button type="button" className="chip-act" onClick={openSessionDetails}>Details</button>
           {devControls && (
             <label className="switch">
@@ -2020,6 +2424,9 @@ export default function App() {
               selectedTool={selectedTool}
               onRequestRun={onRequestCatalogRun}
               onOpenTool={setOpenTool}
+              onReviseTool={fam.family_id === 'custom-authored' || fam.family_id === 'custom'
+                ? onReviseAuthoredTool
+                : undefined}
             />
           </Section>
         ))}
@@ -2037,6 +2444,10 @@ export default function App() {
             seed={authorSeed}
             seedSignal={authorSignal}
             seedAutoSubmit={tourOn}
+            targetToolName={authorTargetTool}
+            onCancelRevision={onCancelAuthorRevision}
+            stageActivity={authorStage}
+            onResumeAuthor={authorStage.resume}
             notLinked={claudeNotLinked}
             onLinkClaude={() => setClaudeOpen(true)}
             buildEntitled={canBuild}
@@ -2051,11 +2462,35 @@ export default function App() {
         {/* There is a way back IN: leaving the tour (Skip / Exit) used to be
             one-way, with a hard reload the only re-entry — forbidden on stage. */}
         {mock && !tourOn && tourAvailable.current && (
-          <button type="button" className="chip-neutral" onClick={() => { setTourLanded(true); setTourOn(true) }}>
+          <button
+            type="button"
+            className="chip-neutral"
+            onClick={() => {
+              tourStartedRef.current = true
+              tourStepRef.current = 0
+              setTourStep(TOUR_STEPS[0]?.id)
+              track('tour.started', { entry: 'button' })
+              track('tour.step_reached', { step_id: TOUR_STEPS[0]?.id })
+              setTourLanded(true); setTourOn(true)
+            }}
+          >
             Restart guided tour
           </button>
         )}
-        {signedOut && authConfigured && <SignedOutGate onDemo={() => setMock(true)} onSignIn={login} />}
+        {signedOut && authConfigured && (
+          <SignedOutGate
+            onDemo={() => {
+              // P2 (pre-auth allowlisted): the stranger split at the front door.
+              track('gate.choice', { choice: 'demo' })
+              setMock(true)
+            }}
+            onSignIn={() => {
+              // The redirect to Auth0 follows; the pagehide beacon carries this.
+              track('gate.choice', { choice: 'sign_in' })
+              onLogin()
+            }}
+          />
+        )}
         <div className="kicker">Home · one prompt, two lanes</div>
         <h1 className="home-q">What should Leaf do to <em>{projectName}</em>?</h1>
         <div className="hint">
@@ -2068,7 +2503,7 @@ export default function App() {
             workspace={workspace}
             loading={wsLoading}
             selectedVersionId={canonicalVersionId}
-            onSelectVersion={setCanonicalVersionId}
+            onSelectVersion={selectCanonicalVersion}
             onClose={onCloseProject}
           />
         )}
@@ -2091,6 +2526,36 @@ export default function App() {
         {/* The CAD workspace hides (not unmounts) on other tabs so live
             drawing, lock, and job state survive tab switches untouched. */}
         <div className="workspace-card enter" style={{ '--rank': 1, display: activeSurface === 'cad' ? undefined : 'none' }} ref={workspaceCardRef}>
+          {unreadableHead && unreadableHead.pending && (
+            // The routine post-restore load: calm progress, not a failure —
+            // no alert role, no retry (the load is already in flight).
+            <div
+              className="strip-running"
+              role="status"
+              data-testid="unreadable-head-lock"
+              data-head={unreadableHead.head}
+              data-latest={unreadableHead.latest}
+              data-pending="true"
+            >
+              <span className="dot square" aria-hidden="true" />
+              <span className="strip-sentence">{unreadableHead.message}</span>
+            </div>
+          )}
+          {unreadableHead && !unreadableHead.pending && (
+            <div
+              className="strip-failed"
+              role="alert"
+              data-testid="unreadable-head-lock"
+              data-head={unreadableHead.head}
+              data-latest={unreadableHead.latest}
+            >
+              <span className="dot red" aria-hidden="true" />
+              <span className="strip-sentence">{unreadableHead.message}</span>
+              <button type="button" className="chip-act" onClick={retryUnreadableHead} disabled={drawing.refreshing}>
+                Retry loading
+              </button>
+            </div>
+          )}
           <div className="viewer-toolbar">
             <div className="viewer-title">
               {/* One loading voice per pane — the pulse-dot line in the viewer
@@ -2114,10 +2579,16 @@ export default function App() {
               {!mock && (
                 <CheckoutControls
                   lockedByOther={otherHeldCheckout}
+                  staleByOther={!!staleHeldCheckout}
+                  legacyByOther={!!legacyHeldCheckout}
+                  canTake={lock.canTake}
                   heldByUs={heldByUs}
+                  unknown={checkoutUnknown}
+                  readFailed={checkoutReadFailed}
                   busy={checkoutBusy}
                   onTake={onTakeCheckout}
                   onRelease={onReleaseCheckout}
+                  onRetry={loadCheckout}
                 />
               )}
               {drawingState && (
@@ -2125,21 +2596,21 @@ export default function App() {
                   <button
                     className="btn ghost"
                     onClick={onUndo}
-                    disabled={versionBusy || running || !!previewing || drawingState.head <= 1}
+                    disabled={versionBusy || running || !!previewing || drawingMutationsBlocked || !canUndo}
                   >
                     Undo
                   </button>
                   <button
                     className="btn ghost"
                     onClick={onRedo}
-                    disabled={versionBusy || running || !!previewing || drawingState.head >= drawingState.latest}
+                    disabled={versionBusy || running || !!previewing || drawingMutationsBlocked || !canRedo}
                   >
                     Redo
                   </button>
                   <div className="vh-anchor">
                     <button
                       className="btn ghost"
-                      onClick={onToggleHistory}
+                      onClick={onToggleHistoryTracked}
                       aria-expanded={historyOpen}
                       disabled={versionBusy}
                     >
@@ -2151,12 +2622,17 @@ export default function App() {
                         error={historyErr}
                         loading={historyLoading}
                         previewingVersion={previewing?.version ?? null}
-                        onPreview={onPreviewVersion}
+                        onPreview={onPreviewVersionTracked}
                         onBackToHead={onBackToHead}
-                        onClose={() => setHistoryOpen(false)}
+                        onClose={closeHistory}
                         onRetry={loadHistory}
                         retryKey={rTarget === 'history'}
                         exiting={historyExit.exiting}
+                        mock={mock}
+                        capability={capabilityRef.current}
+                        onRestored={onRestoreCommitted}
+                        headWarning={unreadableHead}
+                        mutationBlocked={drawingMutationsBlocked}
                       />
                     )}
                   </div>
@@ -2301,11 +2777,38 @@ export default function App() {
             session. LIVE only — never rendered in mock. 'race' keeps the chip
             primary; taking the chip unmounts this (onRun) without cancelling
             the server-side turn. */}
+        {/* T1 operator decision card. Rendered whenever this session has a
+            pending overlay, independent of agentMode: a proposal outlives the
+            panel that produced it, and an operator who dismissed the panel
+            must still be able to decide. */}
+        {!mock && themeOverlay.pendingProposalId && (
+          <OverlayDecisionCard
+            proposal={{ proposal_id: themeOverlay.pendingProposalId,
+                        tokens: themeOverlay.tokens }}
+            documentVersion={themeOverlay.documentVersion}
+            onDecide={(proposalId, opts) => themeOverlay.decide(proposalId, opts)}
+          />
+        )}
+
+        {annotationEnabled && annotations.annotation && (
+          <AnnotationDecisionCard
+            annotation={annotations.annotation}
+            busy={annotations.busy}
+            error={annotations.error}
+            confirmation={annotations.confirmation}
+            onPreview={annotations.preview}
+            onAccept={annotations.accept}
+            onReject={annotations.reject}
+            onRetry={annotations.retry}
+            onUndo={annotations.undo}
+          />
+        )}
+
         {!mock && agentMode && agentSessionId && (
           <ConversePanel
             sessionId={agentSessionId}
             userTurns={agentTurns}
-            onDismiss={() => setAgentMode(null)}
+            onDismiss={clearAgentMode}
             onLinkClaude={() => setClaudeOpen(true)}
             onAttachJob={onAttachAgentJob}
             onJobLinked={refreshJobs}
@@ -2366,7 +2869,7 @@ export default function App() {
                   Link account
                 </button>
               )}
-              <button type="button" className="chip-neutral" onClick={() => setAgentBanner(null)}>
+              <button type="button" className="chip-neutral" onClick={clearAgentBanner}>
                 Dismiss
               </button>
             </div>
@@ -2392,7 +2895,14 @@ export default function App() {
             inputRef={barInputRef}
             routeActive={!!route}
             onOpenAuthor={onOpenAuthor}
-            tools={slashTools}
+            // The registry supersedes the tools-only list when it loaded (its
+            // entries carry `kind`, which is what groups the picker); a failed
+            // fetch falls back to exactly today's list.
+            tools={registryEntries.length ? registryEntries : slashTools}
+            skills={catalogSkills}
+            commandActions={slashCommandActions}
+            sessionId={agentSessionId}
+            imageAttachmentsEnabled={false}
           />
         </div>
 
@@ -2473,6 +2983,8 @@ export default function App() {
 
       {opsExit.shown && <OpsDrawer onDismiss={() => setOpsDismissed(true)} exiting={opsExit.exiting} />}
 
+      {signedIn && customizeExit.shown && <CustomizePanel tenant={tenant} onDismiss={() => setCustomizeOpen(false)} exiting={customizeExit.exiting} />}
+
       {/* DT2 drawer: fixed over the events rail (row 2, col 3) — the rail
           behind never re-flows. Esc (global ladder) or the header cap closes. */}
       <DetailsDrawer data={drawer} onClose={() => setDrawer(null)} />
@@ -2482,11 +2994,17 @@ export default function App() {
       {mock && tourOn && (
         <DemoTour
           onCannedPrompt={onCannedPrompt}
+          onIndexChange={onTourStepChange}
           onExit={onTourExit}
           landed={tourLanded && !running && !routing}
           busy={running || routing}
         />
       )}
+      {/* Lane E operator console entry: renders nothing unless a single
+          probe of GET /api/operator/sessions says the operator surface is
+          mounted (LEAF_OPERATOR_ENABLED=1) AND this caller holds a grant.
+          Tenant deployments never see it and never re-probe. */}
+      <OperatorEntry />
     </div>
   )
 }
