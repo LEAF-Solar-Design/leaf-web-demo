@@ -716,18 +716,19 @@ def save_edited_version(drawing_id: str,
         return blocked
     import store  # da/store.py; importable via write_loop's sys.path setup
     import dxf_intake
-    import tenant_id_validator
 
     # Taint barrier at the boundary: the drawing id is a URL path parameter
-    # and flows into store keys, so it is validated HERE against the ONE
-    # shared canonical-id rule (the same reject-don't-collapse validator
-    # store.sanitize_id applies at every key builder) before any store call.
-    # Belt and braces with the store's own guard, and the explicit fullmatch
-    # is the barrier static analysis can see.
-    if not re.fullmatch(tenant_id_validator.TENANT_ID_PATTERN, drawing_id or ""):
+    # and flows into store keys, so it is validated HERE before any store
+    # call. The regex is a LITERAL, deliberately: static analysis can prove
+    # a literal admits no separator or traversal characters, while the same
+    # pattern behind a variable earns no barrier credit (measured on this
+    # PR's CodeQL run). test_save_edited_version.py pins this literal equal
+    # to the ONE shared canonical-id rule so the two can never drift.
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", drawing_id or ""):
         return error_response(ErrorCode.BAD_PARAMS,
                               "malformed drawing id",
                               retryable=False, status_code=400)
+    drawing_id = str(re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", drawing_id).group(0))
 
     cap = guest_uploads.max_upload_bytes()
     data = file.file.read(cap + 1)
@@ -794,9 +795,13 @@ def save_edited_version(drawing_id: str,
         # message names the stale parent (da/store.py put_drawing); every
         # other ValueError from the put is a bad-request shape.
         if str(exc).startswith("stale parent"):
+            # Fixed text: the store's message carries version numbers, which
+            # are fine, but a fixed sentence keeps exception internals out of
+            # the wire entirely (stack-trace-exposure class).
             return error_response(
                 ErrorCode.BAD_PARAMS,
-                f"{exc}; refresh the drawing and re-apply the edit",
+                "stale parent: the named parent_version is no longer the "
+                "head; refresh the drawing and re-apply the edit",
                 retryable=True, status_code=409)
         return error_response(ErrorCode.BAD_PARAMS,
                               "version write rejected by the store",

@@ -145,6 +145,34 @@ def test_stale_parent_is_a_409_compare_and_set_refusal(client):
     assert "stale parent" in stale.json()["error"]["message"]
 
 
+def test_route_barrier_literal_equals_the_shared_id_rule():
+    """The route's inline literal (a CodeQL-provable taint barrier) must be
+    the SAME rule as the store's shared validator, forever."""
+    import re as _re
+
+    import tenant_id_validator  # noqa: PLC0415
+    from routers import drawings as drawings_router  # noqa: PLC0415
+
+    source = Path(drawings_router.__file__).read_text(encoding="utf-8")
+    literal = _re.search(r'r"(\[a-z0-9\]\[a-z0-9_-\]\{0,62\})"', source)
+    assert literal, "the route's literal id barrier vanished"
+    assert f"^{literal.group(1)}$" == tenant_id_validator.TENANT_ID_PATTERN, (
+        "the route's inline barrier drifted from the shared canonical-id rule"
+    )
+
+
+def test_malformed_drawing_id_is_refused_at_the_boundary(client):
+    resp = client.post(
+        "/api/drawings/..%2Fevil/versions/edited",
+        headers={"X-Tenant-Id": TENANT},
+        files={"file": ("edited.dxf", io.BytesIO(EDITED_DXF), "application/dxf")},
+        data={"parent_version": "1",
+              "source_digest": hashlib.sha256(EDITED_DXF).hexdigest()},
+    )
+    assert resp.status_code == 400
+    assert "malformed drawing id" in resp.json()["error"]["message"]
+
+
 def test_non_dxf_name_is_refused(client):
     resp = _post(client, name="edited.dwg")
     assert resp.status_code == 400
