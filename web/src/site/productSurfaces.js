@@ -11,6 +11,12 @@ export const SHARED_WORKSPACE_CAPABILITIES = Object.freeze([
   'one-shot execution',
 ])
 
+// Per-surface projection of the ONE tenant capability catalog (F-7).
+// `familyIds` filters the live folded families each surface features in its
+// frame; null means the surface presents the whole catalog (iOS ships the
+// full tenant tool set). This is presentation-level focus, never a second
+// scoping model: the server catalog is tenant-scoped only, and every surface
+// reads the same fold (GET /api/capabilities; CONTRACT-ADDENDUM §25).
 export const PRODUCT_SURFACES = Object.freeze([
   Object.freeze({
     id: 'browser',
@@ -18,7 +24,7 @@ export const PRODUCT_SURFACES = Object.freeze([
     eyebrow: 'Blank slate',
     title: 'Build from an open project workspace',
     description: 'Shape files, conversations, annotations, tools, and automations without leaving the project.',
-    additions: Object.freeze(['Files', 'General authoring', 'Browser artifacts']),
+    familyIds: Object.freeze(['custom', 'measurement', 'selection']),
   }),
   Object.freeze({
     id: 'cad',
@@ -26,7 +32,7 @@ export const PRODUCT_SURFACES = Object.freeze([
     eyebrow: 'Drawing workspace',
     title: 'Work directly with a project drawing',
     description: 'Use the live drawing, layers, tools, approvals, jobs, versions, and receipts in one scene.',
-    additions: Object.freeze(['Drawing view', 'CAD tools', 'APS jobs']),
+    familyIds: null,
   }),
   Object.freeze({
     id: 'solar',
@@ -34,7 +40,7 @@ export const PRODUCT_SURFACES = Object.freeze([
     eyebrow: 'LEAF template',
     title: 'Apply the LEAF solar tool set',
     description: 'Start from a versioned solar template with standards, catalog tools, and project-owned versions.',
-    additions: Object.freeze(['Solar template', 'Standards', 'Solar automations']),
+    familyIds: Object.freeze(['stringing', 'placement']),
   }),
   Object.freeze({
     id: 'ios',
@@ -42,7 +48,7 @@ export const PRODUCT_SURFACES = Object.freeze([
     eyebrow: 'One-shot ship lane',
     title: 'Turn an approved project revision into a TestFlight build',
     description: 'Use mounted Apple readiness and resumable ship receipts. Credentials never enter this browser.',
-    additions: Object.freeze(['App identity', 'Build stages', 'TestFlight receipt']),
+    familyIds: null,
   }),
 ])
 

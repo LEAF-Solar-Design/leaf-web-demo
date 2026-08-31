@@ -1,5 +1,6 @@
 {
   "contract": "leaf.vendor-pin.v1",
+  "disposition": "wired-core: deps.load_tenant_repo_tools delegates the call-time registry read to the vendored mushy_fold core (deps.py imports _vendor.mushy_fold.registry.load_repo_registry_tools; PR #474). Tenant resolution and the malformed-registry stderr diagnostic stay in-repo. The 08-31 capability audit misreported this as never-imported; refuted against deps.py:180. Changing what deps.py imports from this package re-records this disposition (test_mushy_fold_vendor_disposition.py is the tripwire). Recorded 2026-08-31, card F-7.",
   "files": {
     "__init__.py": "71321bd64198ffa084693370c0a1235bf8bd89c2649c53d6a049e90c7d2a109e",
     "entry.py": "b4f8948286cd5e52ee9e0be9c65974ec62d04cd03ee0c6676e8a0265b9bfbfdf",

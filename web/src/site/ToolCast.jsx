@@ -2079,6 +2079,8 @@ export default function ToolCast({
         <ProductSurfaceFrame
           activeSurface={activeSurface}
           states={productStates}
+          catalog={capabilityCatalog}
+          catalogError={catalogError}
           projectSlot={projectSlot}
           onOpenCad={() => selectProductSurface('cad')}
         />
