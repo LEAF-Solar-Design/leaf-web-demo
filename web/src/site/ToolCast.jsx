@@ -1403,7 +1403,7 @@ export default function ToolCast({
 
   return (
     <>
-      <ProductSurfaceTabs activeSurface={activeSurface} states={productStates} onSelect={selectProductSurface} />
+      <ProductSurfaceTabs activeSurface={activeSurface} states={productStates} onSelect={selectProductSurface} catalog={capabilityCatalog} />
       {activeSurface === 'cad' ? (
       <>
       <div className="tc-topcluster tc-topcluster-product" data-cast="tool" style={{ '--rank': 3 }}>
