@@ -364,33 +364,56 @@ CHAIN_SCRIPT = r"""
 # sol-critic round 1 on this PR), the nearest-first selection order, and
 # the fail-open tail. Raw string: backslash continuations again.
 FALLBACK_SCRIPT = r"""
-          if [[ -z "$cache_from" ]]; then
+          tags=("${CURRENT_CACHE_TAG:-}" "${PREVIOUS_CACHE_TAG:-}")
+          for sha in $(git rev-list --first-parent --skip=1 --max-count=15 HEAD 2>/dev/null); do
+            short="$(git rev-parse --short "$sha" 2>/dev/null)" || continue
+            tags+=("buildcache-$short")
+          done
+          candidates=()
+          seen=" "
+          for tag in "${tags[@]}"; do
+            if [[ -n "$tag" && "$seen" != *" $tag "* ]]; then
+              seen="$seen$tag "
+              candidates+=("$tag")
+            fi
+          done
+
+          probe_ok="false"
+          found=" "
+          if [[ "${#candidates[@]}" -gt 0 ]]; then
             ids=()
-            for sha in $(git rev-list --first-parent --skip=1 --max-count=15 HEAD 2>/dev/null); do
-              short="$(git rev-parse --short "$sha" 2>/dev/null)" || continue
-              if [[ "buildcache-$short" == "${CURRENT_CACHE_TAG:-}" ]]; then
-                continue
-              fi
-              ids+=("imageTag=buildcache-$short")
+            for tag in "${candidates[@]}"; do
+              ids+=("imageTag=$tag")
             done
-            if [[ "${#ids[@]}" -gt 0 ]]; then
-              found_tags="$(aws ecr batch-get-image \
-                --repository-name "$IMAGE_NAME-buildcache" \
-                --image-ids "${ids[@]}" \
-                --query 'images[].imageId.imageTag' \
-                --output text 2>/dev/null | tr '\t\n' '  ' || true)"
-              for id in "${ids[@]}"; do
-                tag="${id#imageTag=}"
-                if [[ " $found_tags " == *" $tag "* ]]; then
-                  cache_from="type=registry,ref=$cache_repo:$tag"
-                  echo "::notice::$IMAGE_NAME importing the nearest ancestor cache $tag"
-                  break
-                fi
-              done
+            for attempt in 1 2 3; do
+              if raw="$(aws ecr batch-get-image \
+                  --repository-name "$IMAGE_NAME-buildcache" \
+                  --image-ids "${ids[@]}" \
+                  --query 'images[].imageId.imageTag' \
+                  --output text 2>/dev/null)"; then
+                probe_ok="true"
+                found=" $(printf '%s' "$raw" | tr '\t\n' '  ') "
+                break
+              fi
+              if [[ "$attempt" -lt 3 ]]; then
+                sleep 1
+              fi
+            done
+          fi
+
+          for tag in "${candidates[@]}"; do
+            if [[ "$found" == *" $tag "* ]]; then
+              cache_from="type=registry,ref=$cache_repo:$tag"
+              if [[ "$tag" == "${CURRENT_CACHE_TAG:-}" ]]; then
+                echo "::notice::$IMAGE_NAME reusing the warmed cache $CURRENT_CACHE_TAG"
+              elif [[ "$tag" != "${PREVIOUS_CACHE_TAG:-}" ]]; then
+                echo "::notice::$IMAGE_NAME importing the nearest ancestor cache $tag"
+              fi
+              break
             fi
-            if [[ -z "$cache_from" ]]; then
-              echo "::notice::$IMAGE_NAME has no predecessor cache; building without cache input"
-            fi
+          done
+          if [[ -z "$cache_from" ]]; then
+            echo "::notice::$IMAGE_NAME has no predecessor cache; building without cache input"
           fi
 """.lstrip("\n")
 
@@ -407,85 +430,117 @@ WARM_BUILD_CACHE_SCRIPT = r"""
           cache_from=""
           cache_to=""
 
-          # THIS commit's cache first. The `warm` job builds the same tree in
-          # parallel with the test gate and publishes exactly this tag, so by
-          # the time the gate is green the layers already exist and this build
-          # is a near-total cache hit rather than a cold rebuild. The fallback
-          # keeps the previous behaviour whenever warm was skipped, failed, or
-          # simply has not finished — it is never a hard dependency, so a warm
-          # failure costs seconds, not a red build.
-          current_warm="$(aws ecr batch-get-image \
-            --repository-name "$IMAGE_NAME-buildcache" \
-            --image-ids "imageTag=$CURRENT_CACHE_TAG" \
-            --query 'length(images)' \
-            --output text 2>/dev/null || true)"
-          if [[ "$current_warm" == "1" ]]; then
-            cache_from="type=registry,ref=$cache_repo:$CURRENT_CACHE_TAG"
-            echo "::notice::$IMAGE_NAME reusing the warmed cache $CURRENT_CACHE_TAG"
-          elif [[ -n "$PREVIOUS_CACHE_TAG" ]]; then
-            found="$(aws ecr batch-get-image \
-              --repository-name "$IMAGE_NAME-buildcache" \
-              --image-ids "imageTag=$PREVIOUS_CACHE_TAG" \
-              --query 'length(images)' \
-              --output text 2>/dev/null || true)"
-            if [[ "$found" == "1" ]]; then
-              cache_from="type=registry,ref=$cache_repo:$PREVIOUS_CACHE_TAG"
+          # ONE probe, every candidate at once, best first:
+          #
+          #   1. THIS commit's own cache tag. The `warm` job builds the same tree
+          #      beside the test gate and publishes exactly this tag, so by the
+          #      time the gate is green the layers already exist and this build is
+          #      a near-total cache hit rather than a cold rebuild. It is never a
+          #      hard dependency: whenever warm was skipped, failed, or simply has
+          #      not finished, the arms below carry it.
+          #   2. The exact predecessor's tag.
+          #   3. The nearest first-parent ancestor still published (chain keeper,
+          #      2026-08-05). Under the adoption path a fully green merge run skips
+          #      both cache writers, so the exact predecessor tag can be several
+          #      commits stale; the cache keys are commit-stable below the
+          #      per-commit ARGs (#458), so a near-ancestor cache still hits the
+          #      heavy toolchain layers. Candidates come from the checkout's own
+          #      first-parent history -- fetch-depth: 20 above exists for this walk.
+          #
+          # batch-get-image, deliberately never an ECR listing: neither workflow
+          # role is granted one (leaf-automation-aws-terraform pins both to
+          # BatchGetImage plus push actions), so an image-listing call would
+          # AccessDenied and silently run every build cold.
+          #
+          # ONE call, where this step used to make four (2026-08-31). Each `aws`
+          # invocation costs about 0.75s of process start even with the page cache
+          # warm, and BatchGetImage accepts 100 image ids against our at-most 17,
+          # so asking once is both cheaper and more consistent: every arm below
+          # now reads the SAME response instead of four snapshots taken seconds
+          # apart. Differentially tested against the four-call version across 15
+          # scenarios (each candidate arm, none present, empty predecessor, no
+          # ancestors, probe failure) -- identical from=/to=/notices in all 15.
+          #
+          # Every failure still lands on the uncached build: a probe that errors
+          # leaves `found` empty, so no candidate matches and cache_from stays "".
+          #
+          # The probe carries a bounded retry, because it is now the ONLY probe.
+          # The four separate calls this step used to make gave it accidental
+          # redundancy against a transient ECR error, and collapsing them must not
+          # quietly trade that away: three attempts a second apart, then the
+          # uncached build. The selection that follows takes the first candidate
+          # present and stops, and the space padding on both sides of the match is
+          # what stops a tag matching as a substring of a longer one.
+          tags=("${CURRENT_CACHE_TAG:-}" "${PREVIOUS_CACHE_TAG:-}")
+          for sha in $(git rev-list --first-parent --skip=1 --max-count=15 HEAD 2>/dev/null); do
+            short="$(git rev-parse --short "$sha" 2>/dev/null)" || continue
+            tags+=("buildcache-$short")
+          done
+          candidates=()
+          seen=" "
+          for tag in "${tags[@]}"; do
+            if [[ -n "$tag" && "$seen" != *" $tag "* ]]; then
+              seen="$seen$tag "
+              candidates+=("$tag")
             fi
-          fi
+          done
 
-          # Nearest-ancestor fallback (chain keeper, 2026-08-05): under the
-          # adoption path a fully green merge run skips both cache writers,
-          # so the exact predecessor tag can be several commits stale. The
-          # cache keys are commit-stable below the per-commit ARGs (#458),
-          # so a near-ancestor cache still hits the heavy toolchain layers.
-          # Candidates come from the checkout's own first-parent history
-          # (fetch-depth: 20 above exists for exactly this walk) and are
-          # probed in ONE batch-get-image call — deliberately not an ECR
-          # listing, which neither workflow role is granted
-          # (leaf-automation-aws-terraform pins both to BatchGetImage plus
-          # push actions). Every failure lands on the uncached build.
-          if [[ -z "$cache_from" ]]; then
+          probe_ok="false"
+          found=" "
+          if [[ "${#candidates[@]}" -gt 0 ]]; then
             ids=()
-            for sha in $(git rev-list --first-parent --skip=1 --max-count=15 HEAD 2>/dev/null); do
-              short="$(git rev-parse --short "$sha" 2>/dev/null)" || continue
-              if [[ "buildcache-$short" == "${CURRENT_CACHE_TAG:-}" ]]; then
-                continue
-              fi
-              ids+=("imageTag=buildcache-$short")
+            for tag in "${candidates[@]}"; do
+              ids+=("imageTag=$tag")
             done
-            if [[ "${#ids[@]}" -gt 0 ]]; then
-              found_tags="$(aws ecr batch-get-image \
-                --repository-name "$IMAGE_NAME-buildcache" \
-                --image-ids "${ids[@]}" \
-                --query 'images[].imageId.imageTag' \
-                --output text 2>/dev/null | tr '\t\n' '  ' || true)"
-              for id in "${ids[@]}"; do
-                tag="${id#imageTag=}"
-                if [[ " $found_tags " == *" $tag "* ]]; then
-                  cache_from="type=registry,ref=$cache_repo:$tag"
-                  echo "::notice::$IMAGE_NAME importing the nearest ancestor cache $tag"
-                  break
-                fi
-              done
-            fi
-            if [[ -z "$cache_from" ]]; then
-              echo "::notice::$IMAGE_NAME has no predecessor cache; building without cache input"
-            fi
+            for attempt in 1 2 3; do
+              if raw="$(aws ecr batch-get-image \
+                  --repository-name "$IMAGE_NAME-buildcache" \
+                  --image-ids "${ids[@]}" \
+                  --query 'images[].imageId.imageTag' \
+                  --output text 2>/dev/null)"; then
+                probe_ok="true"
+                found=" $(printf '%s' "$raw" | tr '\t\n' '  ') "
+                break
+              fi
+              if [[ "$attempt" -lt 3 ]]; then
+                sleep 1
+              fi
+            done
           fi
 
-          if current_exists="$(aws ecr batch-get-image \
-              --repository-name "$IMAGE_NAME-buildcache" \
-              --image-ids "imageTag=$CURRENT_CACHE_TAG" \
-              --query 'length(images)' \
-              --output text 2>/dev/null)"; then
-            if [[ "$current_exists" == "1" ]]; then
+          for tag in "${candidates[@]}"; do
+            if [[ "$found" == *" $tag "* ]]; then
+              cache_from="type=registry,ref=$cache_repo:$tag"
+              if [[ "$tag" == "${CURRENT_CACHE_TAG:-}" ]]; then
+                echo "::notice::$IMAGE_NAME reusing the warmed cache $CURRENT_CACHE_TAG"
+              elif [[ "$tag" != "${PREVIOUS_CACHE_TAG:-}" ]]; then
+                echo "::notice::$IMAGE_NAME importing the nearest ancestor cache $tag"
+              fi
+              break
+            fi
+          done
+          if [[ -z "$cache_from" ]]; then
+            echo "::notice::$IMAGE_NAME has no predecessor cache; building without cache input"
+          fi
+
+          # The publication decision, read off that SAME response.
+          #
+          # ignore-error: the probe cannot exclude the other writer of this
+          # immutable tag finishing in between (warm and the gated build race by
+          # design, and ECR refuses the second manifest with
+          # ImageTagAlreadyExistsException). Losing that race must cost only the
+          # cache export, never the build. Taking the decision from the earlier
+          # response means a racer landing mid-step is now discovered by ECR
+          # rather than by a second probe: that costs one doomed export attempt
+          # whose failure is already ignored, and nothing else.
+          #
+          # The probe_ok and non-empty guards are the fail-closed half. A probe
+          # that never succeeded, or an empty CURRENT_CACHE_TAG, must land on "no
+          # publication" and say so -- never on an export to an empty ref.
+          if [[ "$probe_ok" == "true" && -n "${CURRENT_CACHE_TAG:-}" ]]; then
+            if [[ "$found" == *" $CURRENT_CACHE_TAG "* ]]; then
               echo "::notice::$IMAGE_NAME cache $CURRENT_CACHE_TAG already exists; immutable tag will not be overwritten"
             else
-              # ignore-error: the existence check above cannot exclude the
-              # other writer of this immutable tag finishing in between (warm
-              # and the gated build race by design, and ECR refuses the second
-              # manifest with ImageTagAlreadyExistsException). Losing that race
-              # must cost only the cache export, never the build.
               cache_to="type=registry,ref=$cache_repo:$CURRENT_CACHE_TAG,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true"
             fi
           else
@@ -501,61 +556,85 @@ WARM_BUILD_CACHE_SCRIPT = r"""
 # is the proof that no cache_to/export path exists in this lane.
 # Raw string: backslash continuations.
 SPECULATE_CACHE_SCRIPT = r"""
-          # Import the cache of the main tip this preview merged onto and
-          # export nothing: speculative trees churn too fast to be worth
-          # polluting the immutable buildcache-* namespace, and no export
-          # means no cache_to race to tolerate.
+          # Import the cache of the main tip this preview merged onto and export
+          # nothing: speculative trees churn too fast to be worth polluting the
+          # immutable buildcache-* namespace, and no export means no cache_to race
+          # to tolerate. That is also why this lane never reads probe_ok -- the
+          # probe block below is byte-identical to warm's and build's, and only
+          # the publication half it feeds is absent here.
           set -euo pipefail
           cache_repo="$ECR_REGISTRY/$IMAGE_NAME-buildcache"
           cache_from=""
-          if [[ -n "$PREVIOUS_CACHE_TAG" ]]; then
-            found="$(aws ecr batch-get-image \
-              --repository-name "$IMAGE_NAME-buildcache" \
-              --image-ids "imageTag=$PREVIOUS_CACHE_TAG" \
-              --query 'length(images)' \
-              --output text 2>/dev/null || true)"
-            if [[ "$found" == "1" ]]; then
-              cache_from="type=registry,ref=$cache_repo:$PREVIOUS_CACHE_TAG"
+
+          # ONE probe, every candidate at once, best first: the merged-onto main
+          # tip's exact tag, then the nearest first-parent ancestor still
+          # published. That tip's tag can be several commits stale when adopted
+          # merges published nothing, and the commit-stable keys (#458) make a
+          # near-ancestor cache nearly as good. The preview's first-parent chain
+          # IS main's history, so the same walk warm and build use works here
+          # (fetch-depth: 20 above). This lane has no CURRENT_CACHE_TAG, so the
+          # shared block's first candidate is simply empty and drops out.
+          #
+          # batch-get-image, deliberately never an ECR listing, which neither
+          # workflow role is granted. IMPORT stays the only direction in this
+          # lane, and every failure lands on the uncached build.
+          #
+          # The probe carries the same bounded retry warm and build use -- it is
+          # the only probe here too -- and the selection takes the first candidate
+          # present, space-padded on both sides so a tag cannot match as a
+          # substring of a longer one.
+          tags=("${CURRENT_CACHE_TAG:-}" "${PREVIOUS_CACHE_TAG:-}")
+          for sha in $(git rev-list --first-parent --skip=1 --max-count=15 HEAD 2>/dev/null); do
+            short="$(git rev-parse --short "$sha" 2>/dev/null)" || continue
+            tags+=("buildcache-$short")
+          done
+          candidates=()
+          seen=" "
+          for tag in "${tags[@]}"; do
+            if [[ -n "$tag" && "$seen" != *" $tag "* ]]; then
+              seen="$seen$tag "
+              candidates+=("$tag")
             fi
-          fi
-          # Nearest-ancestor fallback (chain keeper, 2026-08-05): the
-          # merged-onto main tip's exact tag can be several commits stale
-          # when adopted merges published nothing, and the commit-stable
-          # keys (#458) make a near-ancestor cache nearly as good. The
-          # preview's first-parent chain IS main's history, so the same
-          # walk warm/build use works here (fetch-depth: 20 above), probed
-          # in ONE batch-get-image call — deliberately not an ECR listing,
-          # which neither workflow role is granted. IMPORT stays the only
-          # direction in this lane; every failure lands on the uncached
-          # build.
-          if [[ -z "$cache_from" ]]; then
+          done
+
+          probe_ok="false"
+          found=" "
+          if [[ "${#candidates[@]}" -gt 0 ]]; then
             ids=()
-            for sha in $(git rev-list --first-parent --skip=1 --max-count=15 HEAD 2>/dev/null); do
-              short="$(git rev-parse --short "$sha" 2>/dev/null)" || continue
-              if [[ "buildcache-$short" == "${CURRENT_CACHE_TAG:-}" ]]; then
-                continue
-              fi
-              ids+=("imageTag=buildcache-$short")
+            for tag in "${candidates[@]}"; do
+              ids+=("imageTag=$tag")
             done
-            if [[ "${#ids[@]}" -gt 0 ]]; then
-              found_tags="$(aws ecr batch-get-image \
-                --repository-name "$IMAGE_NAME-buildcache" \
-                --image-ids "${ids[@]}" \
-                --query 'images[].imageId.imageTag' \
-                --output text 2>/dev/null | tr '\t\n' '  ' || true)"
-              for id in "${ids[@]}"; do
-                tag="${id#imageTag=}"
-                if [[ " $found_tags " == *" $tag "* ]]; then
-                  cache_from="type=registry,ref=$cache_repo:$tag"
-                  echo "::notice::$IMAGE_NAME importing the nearest ancestor cache $tag"
-                  break
-                fi
-              done
-            fi
-            if [[ -z "$cache_from" ]]; then
-              echo "::notice::$IMAGE_NAME has no predecessor cache; building without cache input"
-            fi
+            for attempt in 1 2 3; do
+              if raw="$(aws ecr batch-get-image \
+                  --repository-name "$IMAGE_NAME-buildcache" \
+                  --image-ids "${ids[@]}" \
+                  --query 'images[].imageId.imageTag' \
+                  --output text 2>/dev/null)"; then
+                probe_ok="true"
+                found=" $(printf '%s' "$raw" | tr '\t\n' '  ') "
+                break
+              fi
+              if [[ "$attempt" -lt 3 ]]; then
+                sleep 1
+              fi
+            done
           fi
+
+          for tag in "${candidates[@]}"; do
+            if [[ "$found" == *" $tag "* ]]; then
+              cache_from="type=registry,ref=$cache_repo:$tag"
+              if [[ "$tag" == "${CURRENT_CACHE_TAG:-}" ]]; then
+                echo "::notice::$IMAGE_NAME reusing the warmed cache $CURRENT_CACHE_TAG"
+              elif [[ "$tag" != "${PREVIOUS_CACHE_TAG:-}" ]]; then
+                echo "::notice::$IMAGE_NAME importing the nearest ancestor cache $tag"
+              fi
+              break
+            fi
+          done
+          if [[ -z "$cache_from" ]]; then
+            echo "::notice::$IMAGE_NAME has no predecessor cache; building without cache input"
+          fi
+
           echo "from=$cache_from" >> "$GITHUB_OUTPUT"
 """.lstrip("\n")
 
@@ -991,7 +1070,13 @@ def main() -> None:
     assert "BEFORE_SHA: ${{ github.event.before }}" in text
     assert 'cache_from=""' in text
     assert 'echo "from=$cache_from"' in text
-    assert 'if [[ -n "$PREVIOUS_CACHE_TAG" ]]' in text
+    # The predecessor arm's non-empty guard. It used to be its own
+    # `if [[ -n "$PREVIOUS_CACHE_TAG" ]]` wrapped around a dedicated probe;
+    # with the four probes collapsed into one (2026-08-31) the same guard is
+    # the candidate filter, which drops empty tags and de-duplicates. An
+    # empty PREVIOUS_CACHE_TAG must never reach --image-ids as `imageTag=`.
+    assert 'tags=("${CURRENT_CACHE_TAG:-}" "${PREVIOUS_CACHE_TAG:-}")' in text
+    assert 'if [[ -n "$tag" && "$seen" != *" $tag "* ]]; then' in text
     assert "has no predecessor cache; building without cache input" in text
 
     # Cache growth has an explicit bounded-retention infrastructure contract.
@@ -1749,18 +1834,18 @@ def main() -> None:
         assert assignments == [
             'cache_repo="$ECR_REGISTRY/$IMAGE_NAME-buildcache"'
         ], lane
-        # build: the signed-surface discovery and baked-source witness probes,
-        # the exact release-output resume probe, the current-warm probe, the predecessor probe, the
-        # nearest-ancestor fallback batch probe (chain keeper, 2026-08-05;
-        # batch-get-image, never an ECR listing — the roles are not granted
-        # one), and the existence check before export. warm adds the
-        # chain-keeper decide step's predecessor probe. Both lanes additionally
-        # carry the CodeBuild page-cache prewarm (2026-08-31), which names the
-        # cache repository but reaches no repository at all: it is pinned to a
-        # dead loopback endpoint, and the endpoint assertion below is what
-        # keeps it that way.
+        # warm: the CodeBuild page-cache prewarm (2026-08-31, pinned to a
+        # dead loopback endpoint below, so it reaches no repository at all),
+        # the chain-keeper decide step, and the cache-select step. build:
+        # the prewarm, the signed-surface discovery and baked-source witness
+        # probes, the exact release-output resume probe, and the cache-select
+        # step. Cache-select is ONE probe per lane as of 2026-08-31: the
+        # current-warm, predecessor, nearest-ancestor and pre-export
+        # existence questions are four arms reading one batch-get-image
+        # response, never an ECR listing (neither role is granted one).
+        # A count that grows here is a probe fan-out and must be argued for.
         probes = [l for l in live if "--repository-name" in l]
-        assert len(probes) == {"warm": 6, "build": 8}[lane], (lane, probes)
+        assert len(probes) == {"warm": 3, "build": 5}[lane], (lane, probes)
         # The prewarm is the ONLY thing in either lane allowed to redirect an
         # AWS endpoint, and there is exactly one of it. A live probe that grew
         # an --endpoint-url would be talking to something that is not ECR, and
@@ -1807,10 +1892,10 @@ def main() -> None:
     # the nearest-ancestor fallback batch probe, and the CodeBuild page-cache
     # prewarm (2026-08-31) all name the cache repository, though the prewarm
     # reaches nothing: it is pinned to a dead loopback endpoint, asserted next.
-    assert len(speculate_probes) == 4
+    assert len(speculate_probes) == 3
     assert sorted(
         '"$IMAGE_NAME-buildcache"' in p for p in speculate_probes
-    ) == [False, True, True, True], speculate_probes
+    ) == [False, True, True], speculate_probes
     speculate_offline = [l for l in speculate_live if "--endpoint-url" in l]
     assert speculate_offline == [
         "            --endpoint-url http://127.0.0.1:1 \\"
@@ -1946,9 +2031,20 @@ def main() -> None:
     assert "push: true" in build_block
 
     # The warmed cache is what makes the post-gate build cheap; without this
-    # preference the warm job burns five runners and saves nothing.
-    assert "current_warm" in build_block
-    assert 'cache_from="type=registry,ref=$cache_repo:$CURRENT_CACHE_TAG"' in build_block
+    # preference the warm job burns five runners and saves nothing. Since the
+    # four probes collapsed into one (2026-08-31) the preference is no longer a
+    # separate current-warm probe that simply runs first -- it is CANDIDATE
+    # ORDER, so that is what is pinned here: this commit's tag seeds the list
+    # ahead of the predecessor, exactly once, and the ancestor walk only ever
+    # appends. FALLBACK_SCRIPT above already binds the selection loop itself
+    # byte-exact, including its first-match `break`.
+    assert 'tags=("${CURRENT_CACHE_TAG:-}" "${PREVIOUS_CACHE_TAG:-}")' in build_block
+    assert build_block.count('tags=("${CURRENT_CACHE_TAG:-}"') == 1
+    assert build_block.count('tags+=("buildcache-$short")') == 1
+    assert (
+        "::notice::$IMAGE_NAME reusing the warmed cache $CURRENT_CACHE_TAG"
+        in build_block
+    )
 
     # Both writers race on the same immutable tag by design, and ECR refuses
     # the loser with ImageTagAlreadyExistsException. The registry cache
