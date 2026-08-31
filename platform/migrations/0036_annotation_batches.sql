@@ -8,8 +8,10 @@ CREATE TABLE IF NOT EXISTS annotation_targets (
   project_id  UUID        NOT NULL,
   drawing_id  UUID        NOT NULL,
   version     BIGINT      NOT NULL DEFAULT 0 CHECK (version >= 0),
+  repository_id TEXT      NOT NULL,
   commit_sha  TEXT        NOT NULL CHECK (commit_sha ~ '^[0-9a-f]{40}$'),
   tree_sha    TEXT        NOT NULL CHECK (tree_sha ~ '^[0-9a-f]{40}$'),
+  source_receipt_digest TEXT NOT NULL CHECK (source_receipt_digest ~ '^[0-9a-f]{64}$'),
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_by_binding_id UUID REFERENCES identity_bindings(binding_id),
   CONSTRAINT annotation_targets_pkey
@@ -37,26 +39,33 @@ CREATE TABLE IF NOT EXISTS annotation_batches (
   base_tree      TEXT        NOT NULL CHECK (base_tree ~ '^[0-9a-f]{40}$'),
   preview_commit TEXT        NOT NULL CHECK (preview_commit ~ '^[0-9a-f]{40}$'),
   preview_tree   TEXT        NOT NULL CHECK (preview_tree ~ '^[0-9a-f]{40}$'),
+  reverses_commit TEXT CHECK (reverses_commit IS NULL OR reverses_commit ~ '^[0-9a-f]{40}$'),
+  reverses_tree  TEXT CHECK (reverses_tree IS NULL OR reverses_tree ~ '^[0-9a-f]{40}$'),
+  repository_id TEXT         NOT NULL,
+  source_receipt_digest TEXT NOT NULL CHECK (source_receipt_digest ~ '^[0-9a-f]{64}$'),
   payload_digest TEXT        NOT NULL CHECK (payload_digest ~ '^[0-9a-f]{64}$'),
   payload_count  INTEGER     NOT NULL CHECK (payload_count > 0),
-  request_key    TEXT        NOT NULL,
+  request_key_digest TEXT    NOT NULL CHECK (request_key_digest ~ '^[0-9a-f]{64}$'),
   request_fingerprint TEXT   NOT NULL CHECK (request_fingerprint ~ '^[0-9a-f]{64}$'),
   state          TEXT        NOT NULL DEFAULT 'pending'
-                              CHECK (state IN ('pending','accepted','rejected','expired')),
+                              CHECK (state IN ('pending','accepted','rejected','expired','stale')),
   created_by_binding_id UUID NOT NULL REFERENCES identity_bindings(binding_id),
   created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   lease_expires_at TIMESTAMPTZ NOT NULL,
   decided_at     TIMESTAMPTZ,
   decided_by_binding_id UUID REFERENCES identity_bindings(binding_id),
-  decision_key   TEXT,
+  decision_key_digest TEXT CHECK (
+    decision_key_digest IS NULL OR decision_key_digest ~ '^[0-9a-f]{64}$'),
   applied_version BIGINT,
   reason         TEXT,
   superseded_at  TIMESTAMPTZ,
   CONSTRAINT annotation_batches_pkey PRIMARY KEY (batch_id, revision),
   CONSTRAINT annotation_batches_tenant_org_match CHECK (tenant_id = org_id),
   CONSTRAINT annotation_batches_kind_link_check CHECK (
-    (kind = 'apply' AND reverses_batch_id IS NULL) OR
-    (kind = 'undo' AND reverses_batch_id IS NOT NULL)
+    (kind = 'apply' AND reverses_batch_id IS NULL
+      AND reverses_commit IS NULL AND reverses_tree IS NULL) OR
+    (kind = 'undo' AND reverses_batch_id IS NOT NULL
+      AND reverses_commit IS NOT NULL AND reverses_tree IS NOT NULL)
   ),
   CONSTRAINT annotation_batches_target_fk
     FOREIGN KEY (tenant_id, org_id, project_id, drawing_id)
@@ -65,7 +74,7 @@ CREATE TABLE IF NOT EXISTS annotation_batches (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS annotation_batches_request_key_uq
-  ON annotation_batches (tenant_id, request_key) WHERE revision = 0;
+  ON annotation_batches (tenant_id, request_key_digest) WHERE revision = 0;
 
 CREATE UNIQUE INDEX IF NOT EXISTS annotation_batches_one_pending_per_session_target
   ON annotation_batches (tenant_id, session_id, project_id, drawing_id)
@@ -81,6 +90,7 @@ CREATE INDEX IF NOT EXISTS annotation_batches_target_created_idx
 CREATE TABLE IF NOT EXISTS annotation_audit (
   audit_id       BIGSERIAL   PRIMARY KEY,
   batch_id      UUID        NOT NULL,
+  batch_revision INTEGER     NOT NULL,
   tenant_id     UUID        NOT NULL,
   org_id        UUID        NOT NULL,
   project_id    UUID        NOT NULL,
@@ -88,7 +98,9 @@ CREATE TABLE IF NOT EXISTS annotation_audit (
   from_state    TEXT        NOT NULL,
   to_state      TEXT        NOT NULL,
   actor_binding_id UUID REFERENCES identity_bindings(binding_id),
-  decision_key  TEXT,
+  decision_key_digest TEXT CHECK (
+    decision_key_digest IS NULL OR decision_key_digest ~ '^[0-9a-f]{64}$'),
+  source_receipt_digest TEXT NOT NULL CHECK (source_receipt_digest ~ '^[0-9a-f]{64}$'),
   payload_digest TEXT       NOT NULL CHECK (payload_digest ~ '^[0-9a-f]{64}$'),
   payload_count INTEGER     NOT NULL CHECK (payload_count > 0),
   before_version BIGINT     NOT NULL,
@@ -99,6 +111,9 @@ CREATE TABLE IF NOT EXISTS annotation_audit (
   after_tree     TEXT       NOT NULL CHECK (after_tree ~ '^[0-9a-f]{40}$'),
   at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT annotation_audit_tenant_org_match CHECK (tenant_id = org_id),
+  CONSTRAINT annotation_audit_batch_revision_fk
+    FOREIGN KEY (batch_id, batch_revision)
+    REFERENCES annotation_batches(batch_id, revision) ON DELETE CASCADE,
   CONSTRAINT annotation_audit_project_fk FOREIGN KEY (org_id, project_id)
     REFERENCES projects(org_id, project_id) ON DELETE CASCADE,
   CONSTRAINT annotation_audit_drawing_fk FOREIGN KEY (drawing_id, project_id, org_id)

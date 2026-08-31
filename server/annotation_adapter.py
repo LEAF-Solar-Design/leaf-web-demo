@@ -11,6 +11,18 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
+try:
+    import platform_link
+except ModuleNotFoundError:  # Package-style tests import ``server.annotation_adapter``.
+    from server import platform_link
+
+platform_link._ensure_platform_package()
+from leaf_platform.annotation_source import (  # noqa: E402
+    SourceAuthority,
+    SourceVerificationRequest,
+    VerifiedSourceReceipt,
+)
+
 
 class AnnotationAdapterError(ValueError):
     def __init__(self, code: str, status_code: int = 400, detail: str = "") -> None:
@@ -132,3 +144,40 @@ def store_args(request: AnnotationBatchRequest) -> dict[str, Any]:
         "retry_of_batch_id": request.retry_of_batch_id,
         "reverses_batch_id": request.reverses_batch_id,
     }
+
+
+def source_request(request: AnnotationBatchRequest, *, repository_id: str,
+                   reverses_commit: Optional[str] = None,
+                   reverses_tree: Optional[str] = None) -> SourceVerificationRequest:
+    repository = str(repository_id or "").strip()
+    if not repository or len(repository) > 300:
+        raise AnnotationAdapterError("source_repository_invalid", 400)
+    relation = "inverse" if request.kind == "undo" else "preview"
+    if relation == "inverse" and (not reverses_commit or not reverses_tree):
+        raise AnnotationAdapterError("inverse_source_required", 400)
+    return SourceVerificationRequest(
+        tenant_id=request.tenant_id, org_id=request.org_id,
+        project_id=request.project_id, drawing_id=request.drawing_id,
+        repository_id=repository, relation=relation,
+        commit_sha=request.preview_commit, tree_sha=request.preview_tree,
+        base_commit=request.base_commit, base_tree=request.base_tree,
+        reverses_commit=(_git(reverses_commit, "reverses_commit")
+                         if reverses_commit else None),
+        reverses_tree=(_git(reverses_tree, "reverses_tree")
+                       if reverses_tree else None),
+    )
+
+
+def verify_source(authority: SourceAuthority,
+                  request: SourceVerificationRequest) -> VerifiedSourceReceipt:
+    """Require an injected authority and return only its exact validated receipt."""
+    if not isinstance(authority, SourceAuthority):
+        raise AnnotationAdapterError("source_authority_required", 503)
+    receipt = authority.verify(request)
+    if not isinstance(receipt, VerifiedSourceReceipt):
+        raise AnnotationAdapterError("source_receipt_invalid", 409)
+    if receipt.request != request or not _DIGEST.fullmatch(receipt.receipt_digest):
+        raise AnnotationAdapterError("source_receipt_mismatch", 409)
+    if authority.validate(receipt, request) is not True:
+        raise AnnotationAdapterError("source_receipt_unverified", 409)
+    return receipt

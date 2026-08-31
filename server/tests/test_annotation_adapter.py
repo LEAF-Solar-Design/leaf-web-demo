@@ -7,16 +7,34 @@ from pathlib import Path
 import pytest
 
 SERVER = Path(__file__).resolve().parent.parent
+REPO_ROOT = SERVER.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 if str(SERVER) not in sys.path:
     sys.path.insert(0, str(SERVER))
 
 import annotation_adapter as adapter  # noqa: E402
+from server import annotation_adapter as package_adapter  # noqa: E402
+
+import platform_link  # noqa: E402
+
+platform_link._ensure_platform_package()
+from leaf_platform import annotation_source  # noqa: E402
 
 TENANT = str(uuid.uuid4())
 PROJECT = str(uuid.uuid4())
 DRAWING = str(uuid.uuid4())
 SESSION = {"session_id": "session-a", "tenant_id": TENANT,
            "drawing_id": DRAWING, "status": "active"}
+
+
+def test_source_types_have_one_runtime_identity_across_import_paths():
+    assert adapter.SourceVerificationRequest is package_adapter.SourceVerificationRequest
+    assert adapter.VerifiedSourceReceipt is package_adapter.VerifiedSourceReceipt
+    assert adapter.SourceAuthority is package_adapter.SourceAuthority
+    assert adapter.SourceVerificationRequest is annotation_source.SourceVerificationRequest
+    assert adapter.VerifiedSourceReceipt is annotation_source.VerifiedSourceReceipt
+    assert adapter.SourceAuthority is annotation_source.SourceAuthority
 
 
 def _request(**changes):
