@@ -1737,6 +1737,8 @@ def main() -> None:
         "node:22-bookworm",
         "node:22-slim",
         "python:3.12-slim",
+        # Card F-3: Dockerfile.web's engine stage compiles the CAD wasm.
+        "rust:1-slim",
     }, sorted(declared_bases)
 
     # One surface-resolve step per job that resolves base digests at all.
