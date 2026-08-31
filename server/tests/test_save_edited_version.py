@@ -162,8 +162,11 @@ def test_route_barrier_literal_equals_the_shared_id_rule():
 
 
 def test_malformed_drawing_id_is_refused_at_the_boundary(client):
+    # A traversal-shaped id (..%2F) never even ROUTES (404 at the router —
+    # defense in depth above this barrier). The barrier's own case: an id
+    # that routes fine but violates the canonical rule (uppercase).
     resp = client.post(
-        "/api/drawings/..%2Fevil/versions/edited",
+        "/api/drawings/Evil_Upper/versions/edited",
         headers={"X-Tenant-Id": TENANT},
         files={"file": ("edited.dxf", io.BytesIO(EDITED_DXF), "application/dxf")},
         data={"parent_version": "1",
