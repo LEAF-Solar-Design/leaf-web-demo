@@ -103,10 +103,41 @@ in `engine/corpus_harness.py`, and locked by
 ```
 
 **Fidelity table**: byte-level (`byte_identical`) plus three entity-level
-comparisons computed via `server/dxf_intake.py` -- entity count, layer list
-(order-sensitive, first-seen order), and total vertex count across all
-polylines. `score` is the fraction of the four checks that passed
-(`0.0`-`1.0`); `ok` additionally requires `score == 1.0`.
+comparisons computed via `server/dxf_intake.py` -- entity count, layers, and
+total vertex count across all polylines. `score` is the fraction of the four
+checks that passed (`0.0`-`1.0`) and is informational.
+
+**Acceptance bar (amended by card F-1, EXECUTION-PLAN v3.2 §4)**: `ok`
+requires the three ENTITY-LEVEL checks; `byte_identical` is recorded, never
+required -- a real engine's writer emits full default document sections, so
+byte identity is unachievable by construction, and byte preservation is the
+versioned-control store's guarantee (originals are immutable versions), not
+the engine's. `layers_match` is correspondingly the no-loss form, measured
+against the real engine: (a) no source layer dropped (`before ⊆ after`) and
+(b) no entity reassigned (the per-entity layer multiset is unchanged); a
+conforming writer materializing the spec-mandatory default layer `0` in the
+LAYER table is normalization, not loss.
+
+## ENG2: the real adapter (card F-1)
+
+`engine/acadrust_adapter.py::AcadrustAdapter` round-trips through the
+compiled acadrust wasm build by spawning
+`vendor/acadrust-worker/roundtrip-cli.mjs` (bytes in/bytes out, inside the
+license fence's allowed prefix, importing the wasm-pack `pkg-node` output
+documented in `worker-entry.mjs`). Select it as harness tooling with:
+
+```
+python engine/corpus_harness.py --adapter=acadrust
+```
+
+Measured 2026-08-31 on the full corpus: ALL FIXTURES OK -- entity and vertex
+counts identical on every fixture (including the classic
+POLYLINE/VERTEX/SEQEND form), per-entity layers preserved, sources untouched,
+`byte_identical` false on all four exactly as the day-3 spike predicted.
+The compiled build stays machine-local (never committed); the real-engine
+tests skip cleanly where it is absent
+(`server/tests/test_acadrust_adapter.py`). The production selector remains
+card F-4's, not this switch.
 
 **Rollback assertion**: the adapter only ever receives bytes, never the
 fixture's path, so the harness re-hashes the on-disk file after every round
