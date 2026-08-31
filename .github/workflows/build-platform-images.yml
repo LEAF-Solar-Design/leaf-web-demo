@@ -709,6 +709,50 @@ jobs:
       PREVIOUS_CACHE_TAG: ${{ needs.prepare.outputs.previous_cache_tag }}
 
     steps:
+      # CodeBuild first-`aws`-call prewarm (2026-08-31). The in-AWS runner
+      # image lazily faults in its 266 MB AWS CLI v2 install, so whichever step
+      # below makes this job's FIRST `aws` call pays that cold read once:
+      # measured 12-19s alone and 14-39s across a five-leg fan-out, which is
+      # the whole warm-lane wall regression the CodeBuild flip introduced.
+      # Nothing else about ECR is slower in-AWS -- DNS 5ms, TLS 50ms and a
+      # signed BatchGetImage round trip 0.70s all BEAT ubuntu-latest
+      # (68ms / 325ms / 0.66s), and a warm `aws` starts in 0.52s on both. Only
+      # the first read is slow, and only once per job.
+      #
+      # So start that read here, detached, and let it overlap checkout, the
+      # OIDC step and the ECR login instead of blocking the cache probes. Two
+      # readers on purpose: the offline client build faults the pages that
+      # exact call shape needs in the order it needs them, and the bulk read
+      # covers the rest. Measured on the CodeBuild runner against the ~4s
+      # overlap the chain-keeper gets, a 14.6-14.9s first probe becomes
+      # 1.9-2.6s; the cache step's ~14s window takes it to 2.9s.
+      #
+      # This step can only cost wall clock. It reads files, writes nothing,
+      # takes no lock, and holds no credential: the probe is pointed at a dead
+      # loopback port so it never reaches AWS, which is required rather than
+      # incidental -- it runs before the OIDC step, and a prewarm must never
+      # become a call whose result anything depends on. Both readers are
+      # bounded by `timeout`, both are fully detached, and the step exits 0
+      # whatever they do. Deleting it changes no output of this workflow, only
+      # its speed.
+      - name: Prewarm the AWS CLI page cache
+        run: |
+          set +e
+          dist="$(dirname "$(readlink -f "$(command -v aws)")")"
+          if [ -d "$dist" ]; then
+            setsid timeout 180 bash -c \
+              "find '$dist' -type f -print0 | xargs -0 -P 16 -n 8 cat" \
+              </dev/null >/dev/null 2>&1 &
+          fi
+          setsid timeout 180 aws ecr batch-get-image \
+            --repository-name "$IMAGE_NAME-buildcache" \
+            --image-ids imageTag=prewarm-never-published \
+            --region "$AWS_REGION" \
+            --endpoint-url http://127.0.0.1:1 \
+            </dev/null >/dev/null 2>&1 &
+          disown -a 2>/dev/null
+          exit 0
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.prepare.outputs.source_sha }}
@@ -968,6 +1012,50 @@ jobs:
       PREVIOUS_CACHE_TAG: ${{ needs.prepare.outputs.previous_cache_tag }}
 
     steps:
+      # CodeBuild first-`aws`-call prewarm (2026-08-31). The in-AWS runner
+      # image lazily faults in its 266 MB AWS CLI v2 install, so whichever step
+      # below makes this job's FIRST `aws` call pays that cold read once:
+      # measured 12-19s alone and 14-39s across a five-leg fan-out, which is
+      # the whole warm-lane wall regression the CodeBuild flip introduced.
+      # Nothing else about ECR is slower in-AWS -- DNS 5ms, TLS 50ms and a
+      # signed BatchGetImage round trip 0.70s all BEAT ubuntu-latest
+      # (68ms / 325ms / 0.66s), and a warm `aws` starts in 0.52s on both. Only
+      # the first read is slow, and only once per job.
+      #
+      # So start that read here, detached, and let it overlap checkout, the
+      # OIDC step and the ECR login instead of blocking the cache probes. Two
+      # readers on purpose: the offline client build faults the pages that
+      # exact call shape needs in the order it needs them, and the bulk read
+      # covers the rest. Measured on the CodeBuild runner against the ~4s
+      # overlap the chain-keeper gets, a 14.6-14.9s first probe becomes
+      # 1.9-2.6s; the cache step's ~14s window takes it to 2.9s.
+      #
+      # This step can only cost wall clock. It reads files, writes nothing,
+      # takes no lock, and holds no credential: the probe is pointed at a dead
+      # loopback port so it never reaches AWS, which is required rather than
+      # incidental -- it runs before the OIDC step, and a prewarm must never
+      # become a call whose result anything depends on. Both readers are
+      # bounded by `timeout`, both are fully detached, and the step exits 0
+      # whatever they do. Deleting it changes no output of this workflow, only
+      # its speed.
+      - name: Prewarm the AWS CLI page cache
+        run: |
+          set +e
+          dist="$(dirname "$(readlink -f "$(command -v aws)")")"
+          if [ -d "$dist" ]; then
+            setsid timeout 180 bash -c \
+              "find '$dist' -type f -print0 | xargs -0 -P 16 -n 8 cat" \
+              </dev/null >/dev/null 2>&1 &
+          fi
+          setsid timeout 180 aws ecr batch-get-image \
+            --repository-name "$IMAGE_NAME-buildcache" \
+            --image-ids imageTag=prewarm-never-published \
+            --region "$AWS_REGION" \
+            --endpoint-url http://127.0.0.1:1 \
+            </dev/null >/dev/null 2>&1 &
+          disown -a 2>/dev/null
+          exit 0
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.prepare.outputs.source_sha }}
@@ -1791,6 +1879,50 @@ jobs:
       PREVIOUS_CACHE_TAG: ${{ needs.prepare.outputs.previous_cache_tag }}
 
     steps:
+      # CodeBuild first-`aws`-call prewarm (2026-08-31). The in-AWS runner
+      # image lazily faults in its 266 MB AWS CLI v2 install, so whichever step
+      # below makes this job's FIRST `aws` call pays that cold read once:
+      # measured 12-19s alone and 14-39s across a five-leg fan-out, which is
+      # the whole warm-lane wall regression the CodeBuild flip introduced.
+      # Nothing else about ECR is slower in-AWS -- DNS 5ms, TLS 50ms and a
+      # signed BatchGetImage round trip 0.70s all BEAT ubuntu-latest
+      # (68ms / 325ms / 0.66s), and a warm `aws` starts in 0.52s on both. Only
+      # the first read is slow, and only once per job.
+      #
+      # So start that read here, detached, and let it overlap checkout, the
+      # OIDC step and the ECR login instead of blocking the cache probes. Two
+      # readers on purpose: the offline client build faults the pages that
+      # exact call shape needs in the order it needs them, and the bulk read
+      # covers the rest. Measured on the CodeBuild runner against the ~4s
+      # overlap the chain-keeper gets, a 14.6-14.9s first probe becomes
+      # 1.9-2.6s; the cache step's ~14s window takes it to 2.9s.
+      #
+      # This step can only cost wall clock. It reads files, writes nothing,
+      # takes no lock, and holds no credential: the probe is pointed at a dead
+      # loopback port so it never reaches AWS, which is required rather than
+      # incidental -- it runs before the OIDC step, and a prewarm must never
+      # become a call whose result anything depends on. Both readers are
+      # bounded by `timeout`, both are fully detached, and the step exits 0
+      # whatever they do. Deleting it changes no output of this workflow, only
+      # its speed.
+      - name: Prewarm the AWS CLI page cache
+        run: |
+          set +e
+          dist="$(dirname "$(readlink -f "$(command -v aws)")")"
+          if [ -d "$dist" ]; then
+            setsid timeout 180 bash -c \
+              "find '$dist' -type f -print0 | xargs -0 -P 16 -n 8 cat" \
+              </dev/null >/dev/null 2>&1 &
+          fi
+          setsid timeout 180 aws ecr batch-get-image \
+            --repository-name "$IMAGE_NAME-buildcache" \
+            --image-ids imageTag=prewarm-never-published \
+            --region "$AWS_REGION" \
+            --endpoint-url http://127.0.0.1:1 \
+            </dev/null >/dev/null 2>&1 &
+          disown -a 2>/dev/null
+          exit 0
+
       - uses: actions/checkout@v4
         with:
           ref: refs/pull/${{ inputs.speculative_pr_number }}/merge
