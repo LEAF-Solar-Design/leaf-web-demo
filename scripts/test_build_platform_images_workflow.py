@@ -1754,9 +1754,21 @@ def main() -> None:
         # nearest-ancestor fallback batch probe (chain keeper, 2026-08-05;
         # batch-get-image, never an ECR listing — the roles are not granted
         # one), and the existence check before export. warm adds the
-        # chain-keeper decide step's predecessor probe.
+        # chain-keeper decide step's predecessor probe. Both lanes additionally
+        # carry the CodeBuild page-cache prewarm (2026-08-31), which names the
+        # cache repository but reaches no repository at all: it is pinned to a
+        # dead loopback endpoint, and the endpoint assertion below is what
+        # keeps it that way.
         probes = [l for l in live if "--repository-name" in l]
-        assert len(probes) == {"warm": 5, "build": 7}[lane], (lane, probes)
+        assert len(probes) == {"warm": 6, "build": 8}[lane], (lane, probes)
+        # The prewarm is the ONLY thing in either lane allowed to redirect an
+        # AWS endpoint, and there is exactly one of it. A live probe that grew
+        # an --endpoint-url would be talking to something that is not ECR, and
+        # a prewarm that lost one would be making a real call whose result
+        # nothing checks.
+        offline = [l for l in live if "--endpoint-url" in l]
+        assert offline == ["            --endpoint-url http://127.0.0.1:1 \\"], (
+            lane, offline)
         release_probes = [
             p for p in probes
             if re.search(r'--repository-name "\$IMAGE_NAME"(?!-)', p)
@@ -1791,13 +1803,18 @@ def main() -> None:
         'cache_repo="$ECR_REGISTRY/$IMAGE_NAME-buildcache"'
     ]
     speculate_probes = [l for l in speculate_live if "--repository-name" in l]
-    # One release-repository existence probe; the predecessor import probe
-    # and the nearest-ancestor fallback batch probe both read the cache
-    # repository.
-    assert len(speculate_probes) == 3
+    # One release-repository existence probe; the predecessor import probe,
+    # the nearest-ancestor fallback batch probe, and the CodeBuild page-cache
+    # prewarm (2026-08-31) all name the cache repository, though the prewarm
+    # reaches nothing: it is pinned to a dead loopback endpoint, asserted next.
+    assert len(speculate_probes) == 4
     assert sorted(
         '"$IMAGE_NAME-buildcache"' in p for p in speculate_probes
-    ) == [False, True, True], speculate_probes
+    ) == [False, True, True, True], speculate_probes
+    speculate_offline = [l for l in speculate_live if "--endpoint-url" in l]
+    assert speculate_offline == [
+        "            --endpoint-url http://127.0.0.1:1 \\"
+    ], speculate_offline
     # Same canonical fallback bytes as warm/build (their comments differ,
     # their code must not), and no lane anywhere may reach for an ECR
     # listing: neither workflow role is granted one, so a describe-images
@@ -2489,7 +2506,16 @@ def main() -> None:
     # would make every walk silently empty while the fallback pins stayed
     # green (sol-critic round 1 on this PR). Parsed, not text-matched.
     for job_name in ("warm", "build", "speculate"):
-        first_step = wf_jobs[job_name]["steps"][0]
+        steps = wf_jobs[job_name]["steps"]
+        # Exactly one step may precede the checkout: the CodeBuild page-cache
+        # prewarm (2026-08-31). It must stay a plain `run:` -- anything that
+        # reads the repository cannot run before the tree exists, and an
+        # `uses:` here would put a third-party action ahead of the source it
+        # is meant to be building.
+        if str(steps[0].get("name", "")) == "Prewarm the AWS CLI page cache":
+            assert "uses" not in steps[0], job_name
+            steps = steps[1:]
+        first_step = steps[0]
         assert str(first_step.get("uses", "")).startswith(
             "actions/checkout@"), job_name
         assert first_step["with"].get("fetch-depth") == 20, (
