@@ -1218,6 +1218,24 @@ def build_suites() -> List[Suite]:
         Suite("unit-economics-owner-report",
               "scripts test_render_unit_economics_issue.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_render_unit_economics_issue.py"), 3),
+        # Actions cache bucket prune (2026-08-31). The bucket was at 92.7% of
+        # its 10 GiB ceiling with 87% of the bytes in unreachable CodeQL
+        # overlay-base databases, and the merge gate's 279 MB Playwright entry
+        # was only surviving on read traffic. 35 = the whole decision surface
+        # EXECUTED against the pure planner: the whitelist boundary (a real key
+        # from the live bucket parses; the playwright and node-cache keys the
+        # gate depends on do not, so they are never candidates), the
+        # keep-newest-N-per-restore-key-group rule, four negative controls that
+        # drive each fail-closed guard to refuse with a sabotaged plan plus a
+        # positive control proving the refusals are attributable to the
+        # sabotage, and the already-gone path (a 404 mid-run is idempotent
+        # success, a 403 is not -- 2 of 153 deletes 404'd on the live
+        # 2026-08-31 run, and failing on that would make this job red for
+        # racing GitHub's own LRU). No network, no clock, no skipIf, so this
+        # count is exact on every runner rather than a min across environments.
+        Suite("prune-codeql-caches",
+              "scripts test_prune_codeql_caches.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_prune_codeql_caches.py"), 35),
         # Prewarm staging relay (tf design W2). 20 = 13 EXECUTED cases (the
         # eligibility matrix run against the real step body with a fake gh,
         # plus the migration-surface refusal and its fail-closed preview case
