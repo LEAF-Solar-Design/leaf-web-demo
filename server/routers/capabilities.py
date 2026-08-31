@@ -5,8 +5,9 @@ requests the projection, but the existing X-Ops-Secret credential authorizes it.
 """
 from __future__ import annotations
 
+import os
 import sys
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, Header
 from fastapi.responses import JSONResponse
@@ -102,7 +103,55 @@ def capabilities(x_internal_role: Optional[str] = Header(default=None),
         tools,
         include_internal=include_internal,
     )
-    return with_envelope_fields({"families": families})
+    return with_envelope_fields({
+        "families": families,
+        "cad_engine": cad_engine_selector(),
+    })
+
+
+# ---------------------------------------------------------------------------
+# Card F-4: the TRUTHFUL CAD-engine selector. The program shipped for months
+# with the terminal receipt "no CAD engine is enabled and the contract
+# exposes no selector" — this block is that receipt's supersession point.
+# Truthful BOTH ways: flag off => enabled:false and NO engine named; flag on
+# => the engine, its exact rev pin, and its license posture, plus the NOTICE
+# line the license review's binding condition 1 requires on the product's
+# attributions surface (the web renders this text from here AT RUNTIME —
+# the client tree may not name the engine, per the license fence).
+# ---------------------------------------------------------------------------
+
+FLAG_CAD_EDIT = "LEAF_CAD_EDIT_ENABLED"
+
+# The exact consumed revision. MUST match vendor/acadrust-worker/Cargo.toml's
+# rev pin; test_engine_selector.py locks the two together so a re-pin cannot
+# leave this selector lying.
+CAD_ENGINE_REVISION = "18500466e7e4392ef830fdc59cede75fa3794f2b"
+
+CAD_ENGINE_NOTICE = (
+    "This product includes acadrust (https://github.com/hakanaktt/acadrust), "
+    "licensed under the Mozilla Public License 2.0. Source for the exact "
+    "revision used is available at the upstream repository."
+)
+
+
+def cad_edit_enabled() -> bool:
+    """Server-side cad_edit config rail, same truthy set as cad_upload's."""
+    return os.environ.get(FLAG_CAD_EDIT, "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def cad_engine_selector() -> Dict[str, Any]:
+    if not cad_edit_enabled():
+        return {"enabled": False, "engine": None}
+    return {
+        "enabled": True,
+        "engine": "acadrust",
+        "revision": CAD_ENGINE_REVISION,
+        "license": "MPL-2.0",
+        "isolation": "wasm worker behind the license-fenced boundary",
+        "notice": CAD_ENGINE_NOTICE,
+    }
 
 
 @router.get("/api/converse/registry")
