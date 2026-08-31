@@ -2790,7 +2790,10 @@ jobs:
   # base-image guess would redden main on its first run: measured 2026-08-26,
   # the bases alone carry 39 fixed HIGH/CRITICAL (python:3.12-slim),
   # 9 (node:22-slim, incl. CRITICAL CVE-2026-59873) and 2 (nginx:alpine),
-  # and no Dockerfile under deploy/ runs `apt-get upgrade` or `apk upgrade`.
+  # and none of the five platform Dockerfiles scanned here runs `apt-get
+  # upgrade` or `apk upgrade`. (deploy/Dockerfile.instant-execution does, but
+  # it belongs to the isolated instant-execution lane with its own pre-push
+  # Trivy gate and is never part of this workflow's supply set.)
   #
   # PHASE 2 is live: this job blocks on fixed HIGH/CRITICAL findings. Its
   # expiring Trivy ignore list was seeded from the pre-D1 harvest artifact;
