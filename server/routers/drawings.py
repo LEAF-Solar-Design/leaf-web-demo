@@ -731,7 +731,12 @@ def save_edited_version(drawing_id: str,
     drawing_id = str(re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", drawing_id).group(0))
 
     cap = guest_uploads.max_upload_bytes()
-    data = file.file.read(cap + 1)
+    try:
+        data = file.file.read(cap + 1)
+    except Exception:  # noqa: BLE001 — transport read faults answer typed, never a plain 500
+        return error_response(ErrorCode.BAD_PARAMS,
+                              "could not read the uploaded body",
+                              retryable=True, status_code=400)
     if len(data) > cap:
         return error_response(ErrorCode.BAD_PARAMS,
                               f"file exceeds the {cap} byte cap",
@@ -791,10 +796,13 @@ def save_edited_version(drawing_id: str,
     except store.CheckoutDenied as exc:
         return _denied(checkout_capability.CapabilityRejected(str(exc)))
     except ValueError as exc:
-        # The store's compare-and-set refusal is a plain ValueError whose
-        # message names the stale parent (da/store.py put_drawing); every
-        # other ValueError from the put is a bad-request shape.
-        if str(exc).startswith("stale parent"):
+        # The store's compare-and-set refusal is a plain ValueError. BOTH
+        # authorities' shapes are matched (review 20260831-185316 finding 1):
+        # the legacy manifest raises "stale parent ..." (da/store.py
+        # put_drawing) and the postgres authority raises "stale drawing
+        # head: expected ..." (_pg_put) — under LEAF_DRAWING_STORE=postgres
+        # a moved head must still answer the documented 409, not a 400.
+        if str(exc).startswith(("stale parent", "stale drawing head")):
             # Fixed text: the store's message carries version numbers, which
             # are fine, but a fixed sentence keeps exception internals out of
             # the wire entirely (stack-trace-exposure class).

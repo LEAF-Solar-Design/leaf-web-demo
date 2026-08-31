@@ -143,6 +143,24 @@ def test_stale_parent_is_a_409_compare_and_set_refusal(client):
     stale = _post(client, parent=head)
     assert stale.status_code == 409
     assert "stale parent" in stale.json()["error"]["message"]
+    after = client.get(f"/api/drawings/{DRAWING}/versions",
+                       headers={"X-Tenant-Id": TENANT}).json()["head"]
+    assert after == head + 1  # the refused replay wrote nothing
+
+
+def test_postgres_authority_stale_head_shape_is_also_a_409(client, monkeypatch):
+    """Review 20260831-185316 finding 1: the postgres authority's CAS raises
+    'stale drawing head: expected ...' — a moved head under
+    LEAF_DRAWING_STORE=postgres must answer the same documented 409."""
+    import write_loop  # noqa: PLC0415
+
+    def _pg_shape(*args, **kwargs):
+        raise ValueError("stale drawing head: expected 4, found 6")
+
+    monkeypatch.setattr(write_loop, "_put_bytes_version", _pg_shape)
+    resp = _post(client, parent=1)
+    assert resp.status_code == 409
+    assert "stale parent" in resp.json()["error"]["message"]
 
 
 def test_route_barrier_literal_equals_the_shared_id_rule():
@@ -184,5 +202,10 @@ def test_non_dxf_name_is_refused(client):
 def test_over_cap_body_is_refused_before_parse(client, monkeypatch):
     import guest_uploads  # noqa: PLC0415
     monkeypatch.setattr(guest_uploads, "max_upload_bytes", lambda: 64)
+    before = client.get(f"/api/drawings/{DRAWING}/versions",
+                        headers={"X-Tenant-Id": TENANT}).json()["head"]
     resp = _post(client, data=b"0" * 200)
     assert resp.status_code == 413
+    after = client.get(f"/api/drawings/{DRAWING}/versions",
+                       headers={"X-Tenant-Id": TENANT}).json()["head"]
+    assert after == before

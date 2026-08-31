@@ -236,7 +236,7 @@ export default function CadEditSurface({
   // digest; the server recomputes, parses, and compare-and-sets against the
   // head. A 409 (head moved) reads back as a plain instruction to refresh.
   const saveToProject = useCallback(async () => {
-    if (!savedBytes || !saveTarget) return
+    if (!savedBytes || !saveTarget || busy) return
     setBusy(true)
     setStatus('Saving to the project as a new version...')
     try {
@@ -255,7 +255,7 @@ export default function CadEditSurface({
         ? `Save refused: ${error.message}`
         : `Save failed: ${error?.message || error}`)
     }
-  }, [onSaved, saveTarget, savedBytes])
+  }, [busy, onSaved, saveTarget, savedBytes])
 
   if (!enabled) return null
 
