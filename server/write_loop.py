@@ -321,6 +321,19 @@ def intake_cache_key(tenant_id: str, drawing_id: str, version: int) -> str:
             f"{store.sanitize_id(drawing_id)}/v/{v:08d}.intake.json")
 
 
+def edited_source_key(tenant_id: str, drawing_id: str, version: int) -> str:
+    """Sibling key holding the RAW edited DXF a browser edit saved as this
+    version (card F-3). The version's own payload stays intake JSON (the
+    chain's mock-writer idiom, viewer-readable with no cache machinery); this
+    sidecar preserves the full-fidelity document — every entity the intake
+    subset cannot represent — for re-edit, digest-bound via the version's
+    meta (source_sha256)."""
+    import store
+    v = int(version)
+    return (f"tenants/{store.sanitize_id(tenant_id)}/drawings/"
+            f"{store.sanitize_id(drawing_id)}/v/{v:08d}.edited.dxf")
+
+
 def intake_cache_proof_key(tenant_id: str, drawing_id: str, version: int) -> str:
     """Binding proof for a derived intake cache beside a raw DWG version."""
     return intake_cache_key(tenant_id, drawing_id, version) + ".proof.json"

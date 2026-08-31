@@ -53,7 +53,24 @@ function parseDelta(raw) {
   return Number.isFinite(n) ? n : null
 }
 
-export default function CadEditSurface({ enabled = ENV_CAD_EDIT, createWorker = defaultCreateWorker }) {
+async function sha256Hex(bytes) {
+  const digest = await crypto.subtle.digest('SHA-256', bytes)
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+export default function CadEditSurface({
+  enabled = ENV_CAD_EDIT,
+  createWorker = defaultCreateWorker,
+  // Card F-3 persistence leg: when the studio supplies a live drawing
+  // target, edited bytes can be saved as a NEW VERSION through the same
+  // versioned-control chain every write uses. Absent target = download-only
+  // (the demo/site shell), stated honestly in the hint below.
+  saveTarget = null, // { drawingId, headVersion, capability?, save(bytes, parent, digest) }
+  onSaved = null,
+  // The engine attribution NOTICE, served by the capability contract at
+  // runtime (the client tree may not name the engine — license fence).
+  notice = '',
+}) {
   const boundaryRef = useRef(null)
   const [documentId, setDocumentId] = useState('')
   const [entities, setEntities] = useState([])
@@ -215,6 +232,31 @@ export default function CadEditSurface({ enabled = ENV_CAD_EDIT, createWorker = 
     }
   }, [dx, dy, layerName, selectedId, vertexIndex])
 
+  // The persistence leg: post the EXACT edited bytes with a client-computed
+  // digest; the server recomputes, parses, and compare-and-sets against the
+  // head. A 409 (head moved) reads back as a plain instruction to refresh.
+  const saveToProject = useCallback(async () => {
+    if (!savedBytes || !saveTarget) return
+    setBusy(true)
+    setStatus('Saving to the project as a new version...')
+    try {
+      const digest = await sha256Hex(savedBytes)
+      const receipt = await saveTarget.save(savedBytes, saveTarget.headVersion, digest)
+      setBusy(false)
+      const nv = receipt?.new_version?.version ?? receipt?.head
+      setStatus(
+        `Saved as version ${nv} (parent ${receipt?.new_version?.parent}), `
+        + `digest ${String(receipt?.source_sha256 || digest).slice(0, 12)}…, `
+        + `engine cost $${receipt?.cost?.engine_usd ?? 0}.`)
+      onSaved?.(receipt)
+    } catch (error) {
+      setBusy(false)
+      setStatus(error?.status === 409
+        ? `Save refused: ${error.message}`
+        : `Save failed: ${error?.message || error}`)
+    }
+  }, [onSaved, saveTarget, savedBytes])
+
   if (!enabled) return null
 
   const selected = entities.find((entity) => entity.id === selectedId) || null
@@ -320,6 +362,18 @@ export default function CadEditSurface({ enabled = ENV_CAD_EDIT, createWorker = 
         </div>
       )}
 
+      {savedBytes && saveTarget && (
+        <button
+          type="button"
+          className="cad-edit-workbench-save"
+          data-testid="cad-edit-save-version"
+          onClick={saveToProject}
+          disabled={busy}
+        >
+          Save to project as new version
+        </button>
+      )}
+
       {downloadUrl && (
         <a className="cad-edit-workbench-download" href={downloadUrl} download={documentId || 'edited.dxf'}>
           Download edited DXF
@@ -327,6 +381,12 @@ export default function CadEditSurface({ enabled = ENV_CAD_EDIT, createWorker = 
       )}
 
       <p role="status" aria-live="polite">{status}</p>
+
+      {notice && (
+        <p className="cad-edit-workbench-notice" data-testid="cad-edit-engine-notice">
+          {notice}
+        </p>
+      )}
     </section>
   )
 }
