@@ -1,29 +1,29 @@
 /**
- * CadEditSurface — the first REAL slice of the browser editing surface,
- * behind cad_edit.
+ * CadEditSurface — the browser editing surface, behind cad_edit (card F-3).
  *
- * What it does end to end, today, in a browser:
- *   open a .dxf from disk -> parse it inside an isolated engine worker ->
- *   list the parsed entities -> select one -> delete it or move it by a
- *   delta -> the worker re-serializes the edited document to DXF bytes,
- *   re-parses those bytes, and reports the entity count and entity list
- *   FROM THE RE-PARSE -> download the resulting .dxf.
- *
- * What it deliberately does NOT do: no server round trip, no project
- * persistence, no byte-identical round trip, and no edit at all on a
- * document carrying constructs this build can read but not rewrite (it
- * refuses BY NAME rather than silently dropping them). See
- * docs/CAD-EDIT-SURFACE-DESIGN.md.
+ * What it does end to end, in a browser, against the REAL compiled CAD
+ * engine (the rev-pinned MPL-2.0 wasm behind the license fence's worker
+ * boundary):
+ *   open a .dxf from disk -> parse the WHOLE document inside the isolated
+ *   engine worker -> list every entity truthfully (editable kinds — LINE,
+ *   LWPOLYLINE, classic POLYLINE — plus an honest OTHER bucket that
+ *   round-trips untouched) -> select one -> delete it, translate it, move /
+ *   add / delete a single vertex, or reassign its layer -> the worker
+ *   re-serializes, RE-PARSES the written bytes, and reports the state a
+ *   reader of those bytes would actually see -> download the resulting .dxf.
  *
  * Isolation: the only engine contact is web/src/cad/engineWorker.js's
- * EngineBoundary, unmodified — every message in both directions is
- * schema-validated there, and a malformed one is dropped with a counted
- * receipt instead of reaching this component as an exception. The worker is
- * spawned lazily on the first open, never at mount.
+ * EngineBoundary, unmodified — every message both directions is
+ * schema-validated there. The worker is spawned lazily on the first open,
+ * never at mount, and the ONLY place this module names the worker path is
+ * the one spawn shape the license fence allows (deny rule 3).
  *
- * Flag: ENV_CAD_EDIT must be the FIRST operand of the `&&` at the ToolCast
- * call site so a flag-off build folds this whole module away (the `enabled`
- * default below is belt-and-braces for a direct caller, not the fence).
+ * Persistence deliberately stays out of this slice (the save-as-new-version
+ * leg is the card's second PR): nothing is uploaded, nothing touches the
+ * project, the download is the only output.
+ *
+ * Flag: ENV_CAD_EDIT must be the FIRST operand of the `&&` at the call site
+ * so a flag-off build folds this whole module away.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
@@ -31,18 +31,21 @@ import { EngineBoundary } from '../cad/engineWorker.js'
 
 import { ENV_CAD_EDIT } from './flag.js'
 
-// Mirrors dxfLineDocument.js's own cap. Checked against File.size BEFORE any
-// read, so an oversized file costs a comparison and never a 4 MB+ decode.
-const MAX_DOCUMENT_BYTES = 4 * 1024 * 1024
+// Mirrors the worker's own bound. Checked against File.size BEFORE any read,
+// so an oversized file costs a comparison, never a decode.
+const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
 
 function defaultCreateWorker() {
   // The one legal spawn shape, and the only place this module names the
-  // worker module path.
-  return new Worker(new URL('./documentWorker.js', import.meta.url), { type: 'module' })
+  // engine worker's path (license fence deny rule 3).
+  return new Worker(
+    new URL('../../../vendor/acadrust-worker/worker-browser.mjs', import.meta.url),
+    { type: 'module' },
+  )
 }
 
-function formatPoint(point) {
-  return `${point[0]}, ${point[1]}, ${point[2]}`
+function fmt(n) {
+  return Number.isInteger(n) ? String(n) : n.toFixed(2)
 }
 
 function parseDelta(raw) {
@@ -55,17 +58,15 @@ export default function CadEditSurface({ enabled = ENV_CAD_EDIT, createWorker = 
   const [documentId, setDocumentId] = useState('')
   const [entities, setEntities] = useState([])
   const [entityCount, setEntityCount] = useState(0)
-  const [writable, setWritable] = useState(false)
-  const [refusal, setRefusal] = useState('')
   const [selectedId, setSelectedId] = useState('')
+  const [vertexIndex, setVertexIndex] = useState('0')
   const [dx, setDx] = useState('10')
   const [dy, setDy] = useState('0')
+  const [layerName, setLayerName] = useState('')
   const [status, setStatus] = useState('')
   const [savedBytes, setSavedBytes] = useState(null)
   const [busy, setBusy] = useState(false)
 
-  // Object URL for the edited bytes, revoked on replace/unmount so a long
-  // editing session cannot leak one blob per edit.
   const downloadUrl = useMemo(() => {
     if (!savedBytes) return ''
     return URL.createObjectURL(new Blob([savedBytes], { type: 'application/dxf' }))
@@ -82,21 +83,19 @@ export default function CadEditSurface({ enabled = ENV_CAD_EDIT, createWorker = 
 
   const ensureBoundary = useCallback(() => {
     if (boundaryRef.current) return boundaryRef.current
-    // The resolved flag is passed EXPLICITLY rather than left to
-    // EngineBoundary's env fallback. Both now read VITE_CAD_EDIT as the
-    // string '1', so this is belt-and-braces rather than a spelling dodge.
     const boundary = new EngineBoundary({ flags: { cad_edit: true }, createWorker })
     boundary.onMessage((message) => {
       if (message.type === 'ready') return
       if (message.type === 'documentLoaded') {
         setEntities(message.entities ?? [])
         setEntityCount(message.entityCount ?? 0)
-        setWritable(message.writable === true)
-        setRefusal(message.writable === true ? '' : (message.refusal ?? 'unknown'))
         setSelectedId('')
         setSavedBytes(null)
         setBusy(false)
-        setStatus(`Loaded ${message.documentId}: ${message.entityCount} editable entities.`)
+        const others = (message.unsupported ?? []).length
+        setStatus(
+          `Loaded ${message.documentId}: ${message.entityCount} entities`
+          + (others ? ` (${others} preserved as read-only kinds).` : '.'))
         return
       }
       if (message.type === 'editApplied') {
@@ -119,7 +118,6 @@ export default function CadEditSurface({ enabled = ENV_CAD_EDIT, createWorker = 
         setBusy(false)
         setEntities([])
         setEntityCount(0)
-        setWritable(false)
         setSavedBytes(null)
         setStatus(`Engine refused: ${message.message}`)
       }
@@ -169,6 +167,42 @@ export default function CadEditSurface({ enabled = ENV_CAD_EDIT, createWorker = 
       payload.dx = deltaX
       payload.dy = deltaY
     }
+    if (op === 'moveVertex' || op === 'addVertex' || op === 'deleteVertex') {
+      const vi = Number.parseInt(vertexIndex, 10)
+      if (!Number.isInteger(vi) || vi < 0) {
+        setStatus(`${op} refused: vertex must be a non-negative integer.`)
+        return
+      }
+      payload.vertexIndex = vi
+      if (op === 'moveVertex') {
+        const deltaX = parseDelta(dx)
+        const deltaY = parseDelta(dy)
+        if (deltaX === null || deltaY === null) {
+          setStatus('Move vertex refused: dx and dy must both be numbers.')
+          return
+        }
+        payload.dx = deltaX
+        payload.dy = deltaY
+      }
+      if (op === 'addVertex') {
+        const x = parseDelta(dx)
+        const y = parseDelta(dy)
+        if (x === null || y === null) {
+          setStatus('Add vertex refused: x and y must both be numbers.')
+          return
+        }
+        payload.x = x
+        payload.y = y
+      }
+    }
+    if (op === 'setLayer') {
+      const trimmed = layerName.trim()
+      if (!trimmed) {
+        setStatus('Set layer refused: enter a layer name.')
+        return
+      }
+      payload.layer = trimmed
+    }
     const boundary = boundaryRef.current
     if (!boundary) {
       setStatus('Edit refused: no document is open.')
@@ -179,17 +213,18 @@ export default function CadEditSurface({ enabled = ENV_CAD_EDIT, createWorker = 
       setBusy(false)
       setStatus(`Edit refused (${op}): the boundary rejected the message.`)
     }
-  }, [dx, dy, selectedId])
+  }, [dx, dy, layerName, selectedId, vertexIndex])
 
   if (!enabled) return null
 
-  const canEdit = writable && selectedId !== '' && !busy
+  const selected = entities.find((entity) => entity.id === selectedId) || null
+  const canEdit = selected !== null && selected.editable !== false && !busy
 
   return (
     <section className="cad-edit-workbench" data-testid="cad-edit-workbench" aria-label="CAD editing surface">
       <h3 className="cad-edit-workbench-title">Edit a DXF drawing</h3>
       <p className="cad-edit-workbench-hint">
-        Runs entirely in your browser, inside an isolated engine worker. Nothing is uploaded and
+        Runs entirely in your browser, inside the isolated engine worker. Nothing is uploaded and
         nothing is saved to the project — download the result to keep it.
       </p>
 
@@ -207,12 +242,6 @@ export default function CadEditSurface({ enabled = ENV_CAD_EDIT, createWorker = 
         </p>
       )}
 
-      {documentId && !writable && refusal && (
-        <p className="cad-edit-workbench-refusal" role="alert">
-          Read-only: {refusal}. Editing is disabled so nothing is silently dropped.
-        </p>
-      )}
-
       {entities.length > 0 && (
         <ul className="cad-edit-entity-list" data-testid="cad-edit-entity-list">
           {entities.map((entity) => (
@@ -224,9 +253,17 @@ export default function CadEditSurface({ enabled = ENV_CAD_EDIT, createWorker = 
                   value={entity.id}
                   checked={selectedId === entity.id}
                   onChange={() => setSelectedId(entity.id)}
-                  disabled={!writable}
+                  disabled={entity.editable === false}
                 />
-                {entity.type} on layer {entity.layer}: ({formatPoint(entity.start)}) to ({formatPoint(entity.end)})
+                {entity.type} on layer {entity.layer}
+                {' '}· {entity.vertices?.length ?? 0} vertices{entity.closed ? ' · closed' : ''}
+                {entity.editable === false ? ' · read-only' : ''}
+                {entity.vertices?.length > 0 && (
+                  <span className="cad-edit-entity-verts">
+                    {' '}({entity.vertices.slice(0, 2).map((v) => `${fmt(v[0])},${fmt(v[1])}`).join(' → ')}
+                    {entity.vertices.length > 2 ? ' …' : ''})
+                  </span>
+                )}
               </label>
             </li>
           ))}
@@ -248,6 +285,37 @@ export default function CadEditSurface({ enabled = ENV_CAD_EDIT, createWorker = 
           </label>
           <button type="button" onClick={() => runEdit('move')} disabled={!canEdit}>
             Move selected
+          </button>
+          <label>
+            vertex
+            <input
+              type="text"
+              inputMode="numeric"
+              value={vertexIndex}
+              onChange={(e) => setVertexIndex(e.target.value)}
+              aria-label="vertex index"
+            />
+          </label>
+          <button type="button" onClick={() => runEdit('moveVertex')} disabled={!canEdit}>
+            Move vertex by dx,dy
+          </button>
+          <button type="button" onClick={() => runEdit('addVertex')} disabled={!canEdit}>
+            Add vertex after (at dx,dy)
+          </button>
+          <button type="button" onClick={() => runEdit('deleteVertex')} disabled={!canEdit}>
+            Delete vertex
+          </button>
+          <label>
+            layer
+            <input
+              type="text"
+              value={layerName}
+              onChange={(e) => setLayerName(e.target.value)}
+              aria-label="layer name"
+            />
+          </label>
+          <button type="button" onClick={() => runEdit('setLayer')} disabled={!canEdit}>
+            Set layer
           </button>
         </div>
       )}

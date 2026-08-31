@@ -67,9 +67,80 @@
 //! docs/ACADRUST-SPIKE-DAY3.md for the round-trip evidence.
 
 use acadrust::entities::{Entity, EntityType};
+use acadrust::types::{Vector2, Vector3};
 use acadrust::{CadDocument, DxfReader, DxfWriter};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
+
+// ---------------------------------------------------------------------------
+// Card F-3 (editing surface engine leg). Everything below is LEAF wrapper
+// code: the crate stays unmodified and rev-pinned (the license review's
+// tripwire), and every mutation goes through the crate's own public surface
+// (entities_mut(), common_mut(), the public vertex Vecs). Contract shared by
+// every exported mutation: bounds-checked, Result<_, JsValue> — never a
+// panic across the wasm boundary; an out-of-range index or an unsupported
+// entity kind is a typed JS error the worker folds into an editApplied
+// refusal, and the document is NEVER half-mutated on a refused edit (each op
+// validates before it writes).
+//
+// Index contract: `editableEntities` and every mutation address entities by
+// their CURRENT position in document order. Any successful mutation may
+// invalidate previously fetched indexes, so the UI must refresh its list
+// from the edit response before issuing another edit — which is exactly what
+// the existing editApplied message already carries.
+// ---------------------------------------------------------------------------
+
+/// True when this entity kind is one the editor can mutate (vertex-level
+/// geometry through the crate's public fields). Everything else still
+/// round-trips through the writer untouched — the whole-document model means
+/// "unsupported" costs nothing and loses nothing.
+fn editable(entity: &EntityType) -> bool {
+    matches!(
+        entity,
+        EntityType::Line(_) | EntityType::LwPolyline(_) | EntityType::Polyline2D(_)
+    )
+}
+
+fn kind_name(entity: &EntityType) -> &'static str {
+    match entity {
+        EntityType::Line(_) => "LINE",
+        EntityType::LwPolyline(_) => "LWPOLYLINE",
+        EntityType::Polyline2D(_) => "POLYLINE",
+        _ => "OTHER",
+    }
+}
+
+fn vertices_of(entity: &EntityType) -> Vec<[f64; 3]> {
+    match entity {
+        EntityType::Line(line) => vec![
+            [line.start.x, line.start.y, line.start.z],
+            [line.end.x, line.end.y, line.end.z],
+        ],
+        EntityType::LwPolyline(poly) => poly
+            .vertices
+            .iter()
+            .map(|v| [v.location.x, v.location.y, poly.elevation])
+            .collect(),
+        EntityType::Polyline2D(poly) => poly
+            .vertices
+            .iter()
+            .map(|v| [v.location.x, v.location.y, v.location.z])
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn closed_of(entity: &EntityType) -> bool {
+    match entity {
+        EntityType::LwPolyline(poly) => poly.is_closed,
+        EntityType::Polyline2D(poly) => poly.flags.is_closed(),
+        _ => false,
+    }
+}
+
+fn err(message: &str) -> JsValue {
+    JsValue::from_str(message)
+}
 
 /// Opaque parsed-document handle: the Rust twin of the plain object
 /// bindings.mjs's `parseDxf` returns. Crosses the boundary by reference;
@@ -103,6 +174,244 @@ impl ParsedDxf {
         // day-2 test's .toEqual({...}) assertions both require.
         list.serialize(&serde_wasm_bindgen::Serializer::json_compatible())
             .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// F-3 editor projection: EVERY entity in document order, each as
+    /// `{index, type, layer, closed, editable, vertices}`. Non-editable kinds
+    /// appear with `editable: false` and empty vertices — they are listed so
+    /// the count the UI shows is the truth about the document, and they
+    /// round-trip through the writer untouched (whole-document model: nothing
+    /// is dropped by being uneditable).
+    #[wasm_bindgen(js_name = editableEntities)]
+    pub fn editable_entities(&self) -> Result<JsValue, JsValue> {
+        let list: Vec<serde_json::Value> = self
+            .inner
+            .entities()
+            .enumerate()
+            .map(|(index, e)| {
+                serde_json::json!({
+                    "index": index,
+                    "type": kind_name(e),
+                    "layer": e.common().layer.clone(),
+                    "closed": closed_of(e),
+                    "editable": editable(e),
+                    "vertices": vertices_of(e),
+                })
+            })
+            .collect();
+        list.serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Deletes the entity at `index` (current document order) via the
+    /// crate's own remove_entity(handle). Refuses out-of-range and
+    /// non-editable kinds BEFORE touching the document.
+    #[wasm_bindgen(js_name = deleteEntity)]
+    pub fn delete_entity(&mut self, index: usize) -> Result<(), JsValue> {
+        let (handle, is_editable) = {
+            let entity = self
+                .inner
+                .entities()
+                .nth(index)
+                .ok_or_else(|| err("entity_index_out_of_range"))?;
+            (entity.common().handle, editable(entity))
+        };
+        if !is_editable {
+            return Err(err("entity_kind_not_editable"));
+        }
+        self.inner
+            .remove_entity(handle)
+            .map(|_| ())
+            .ok_or_else(|| err("entity_handle_not_found"))
+    }
+
+    /// Translates every vertex of the entity at `index` by (dx, dy).
+    #[wasm_bindgen(js_name = translateEntity)]
+    pub fn translate_entity(&mut self, index: usize, dx: f64, dy: f64) -> Result<(), JsValue> {
+        if !dx.is_finite() || !dy.is_finite() {
+            return Err(err("delta_not_finite"));
+        }
+        let entity = self
+            .inner
+            .entities_mut()
+            .nth(index)
+            .ok_or_else(|| err("entity_index_out_of_range"))?;
+        match entity {
+            EntityType::Line(line) => {
+                line.start = Vector3::new(line.start.x + dx, line.start.y + dy, line.start.z);
+                line.end = Vector3::new(line.end.x + dx, line.end.y + dy, line.end.z);
+                Ok(())
+            }
+            EntityType::LwPolyline(poly) => {
+                for v in poly.vertices.iter_mut() {
+                    v.location = Vector2::new(v.location.x + dx, v.location.y + dy);
+                }
+                Ok(())
+            }
+            EntityType::Polyline2D(poly) => {
+                for v in poly.vertices.iter_mut() {
+                    v.location =
+                        Vector3::new(v.location.x + dx, v.location.y + dy, v.location.z);
+                }
+                Ok(())
+            }
+            _ => Err(err("entity_kind_not_editable")),
+        }
+    }
+
+    /// Moves ONE vertex of the entity at `index` by (dx, dy). For a LINE,
+    /// vertex 0 is the start and vertex 1 the end.
+    #[wasm_bindgen(js_name = moveVertex)]
+    pub fn move_vertex(
+        &mut self,
+        index: usize,
+        vertex_index: usize,
+        dx: f64,
+        dy: f64,
+    ) -> Result<(), JsValue> {
+        if !dx.is_finite() || !dy.is_finite() {
+            return Err(err("delta_not_finite"));
+        }
+        let entity = self
+            .inner
+            .entities_mut()
+            .nth(index)
+            .ok_or_else(|| err("entity_index_out_of_range"))?;
+        match entity {
+            EntityType::Line(line) => match vertex_index {
+                0 => {
+                    line.start =
+                        Vector3::new(line.start.x + dx, line.start.y + dy, line.start.z);
+                    Ok(())
+                }
+                1 => {
+                    line.end = Vector3::new(line.end.x + dx, line.end.y + dy, line.end.z);
+                    Ok(())
+                }
+                _ => Err(err("vertex_index_out_of_range")),
+            },
+            EntityType::LwPolyline(poly) => {
+                let v = poly
+                    .vertices
+                    .get_mut(vertex_index)
+                    .ok_or_else(|| err("vertex_index_out_of_range"))?;
+                v.location = Vector2::new(v.location.x + dx, v.location.y + dy);
+                Ok(())
+            }
+            EntityType::Polyline2D(poly) => {
+                let v = poly
+                    .vertices
+                    .get_mut(vertex_index)
+                    .ok_or_else(|| err("vertex_index_out_of_range"))?;
+                v.location = Vector3::new(v.location.x + dx, v.location.y + dy, v.location.z);
+                Ok(())
+            }
+            _ => Err(err("entity_kind_not_editable")),
+        }
+    }
+
+    /// Inserts a vertex AFTER `vertex_index` on a polyline at (x, y).
+    /// Refused for LINE (a line has exactly two endpoints by definition).
+    #[wasm_bindgen(js_name = addVertexAfter)]
+    pub fn add_vertex_after(
+        &mut self,
+        index: usize,
+        vertex_index: usize,
+        x: f64,
+        y: f64,
+    ) -> Result<(), JsValue> {
+        if !x.is_finite() || !y.is_finite() {
+            return Err(err("coordinate_not_finite"));
+        }
+        let entity = self
+            .inner
+            .entities_mut()
+            .nth(index)
+            .ok_or_else(|| err("entity_index_out_of_range"))?;
+        match entity {
+            EntityType::LwPolyline(poly) => {
+                if vertex_index >= poly.vertices.len() {
+                    return Err(err("vertex_index_out_of_range"));
+                }
+                poly.vertices.insert(
+                    vertex_index + 1,
+                    acadrust::entities::LwVertex::from_coords(x, y),
+                );
+                Ok(())
+            }
+            EntityType::Polyline2D(poly) => {
+                if vertex_index >= poly.vertices.len() {
+                    return Err(err("vertex_index_out_of_range"));
+                }
+                poly.vertices.insert(
+                    vertex_index + 1,
+                    acadrust::entities::Vertex2D::new(Vector3::new(x, y, poly.elevation)),
+                );
+                Ok(())
+            }
+            EntityType::Line(_) => Err(err("line_has_fixed_endpoints")),
+            _ => Err(err("entity_kind_not_editable")),
+        }
+    }
+
+    /// Deletes one vertex of a polyline. Refused when it would leave fewer
+    /// than two vertices (that is entity deletion, an explicit separate op),
+    /// and refused for LINE for the same fixed-endpoints reason as add.
+    #[wasm_bindgen(js_name = deleteVertex)]
+    pub fn delete_vertex(&mut self, index: usize, vertex_index: usize) -> Result<(), JsValue> {
+        let entity = self
+            .inner
+            .entities_mut()
+            .nth(index)
+            .ok_or_else(|| err("entity_index_out_of_range"))?;
+        match entity {
+            EntityType::LwPolyline(poly) => {
+                if vertex_index >= poly.vertices.len() {
+                    return Err(err("vertex_index_out_of_range"));
+                }
+                if poly.vertices.len() <= 2 {
+                    return Err(err("polyline_needs_two_vertices"));
+                }
+                poly.vertices.remove(vertex_index);
+                Ok(())
+            }
+            EntityType::Polyline2D(poly) => {
+                if vertex_index >= poly.vertices.len() {
+                    return Err(err("vertex_index_out_of_range"));
+                }
+                if poly.vertices.len() <= 2 {
+                    return Err(err("polyline_needs_two_vertices"));
+                }
+                poly.vertices.remove(vertex_index);
+                Ok(())
+            }
+            EntityType::Line(_) => Err(err("line_has_fixed_endpoints")),
+            _ => Err(err("entity_kind_not_editable")),
+        }
+    }
+
+    /// Reassigns the entity at `index` to `layer` via the crate's own
+    /// EntityCommon. Bounded name; the empty string is refused (DXF layer
+    /// names cannot be empty, and an empty write would be silent data rot).
+    #[wasm_bindgen(js_name = setEntityLayer)]
+    pub fn set_entity_layer(&mut self, index: usize, layer: &str) -> Result<(), JsValue> {
+        let trimmed = layer.trim();
+        if trimmed.is_empty() {
+            return Err(err("layer_name_empty"));
+        }
+        if trimmed.len() > 255 {
+            return Err(err("layer_name_too_long"));
+        }
+        let entity = self
+            .inner
+            .entities_mut()
+            .nth(index)
+            .ok_or_else(|| err("entity_index_out_of_range"))?;
+        if !editable(&*entity) {
+            return Err(err("entity_kind_not_editable"));
+        }
+        entity.common_mut().layer = trimmed.to_string();
+        Ok(())
     }
 }
 

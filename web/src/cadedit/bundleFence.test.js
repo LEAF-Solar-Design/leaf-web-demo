@@ -25,7 +25,11 @@ import { beforeAll, describe, expect, it } from 'vitest'
 // marker is a string only the worker-side document model contains, so it
 // also proves the DXF engine itself does not ride along on a flag-off build.
 const SURFACE_MARKERS = ['cad-edit-workbench', 'cad-edit-entity-list']
-const ENGINE_MARKERS = ['this build can read but not rewrite', 'too_many_group_pairs']
+// Card F-3: the engine chunk is now the vendored browser worker driving the
+// real compiled engine — its own typed refusal strings are the markers.
+// (Strings must live in the WORKER's JS: engine-side refusals like
+// polyline_needs_two_vertices are inside the wasm, invisible to this grep.)
+const ENGINE_MARKERS = ['engine_unavailable', 'bad_document_bytes']
 
 const WEB_ROOT = process.cwd()
 const FENCE_ROOT = join(WEB_ROOT, 'node_modules', '.cache', 'cad-edit-fence')
