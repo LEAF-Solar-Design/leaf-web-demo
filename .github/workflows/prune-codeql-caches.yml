@@ -1,0 +1,116 @@
+# Keeps the Actions cache bucket off its 10 GiB ceiling.
+#
+# The bucket is a single shared LRU. On 2026-08-31 it sat at 92.7% of the limit
+# with 87% of the bytes held by CodeQL overlay-base databases that nothing ever
+# pruned -- CodeQL default setup writes four fresh ones per analysed commit
+# (~1.4 GB/day measured) and they leave only by GitHub's 7-day idle TTL or by
+# evicting something else.
+#
+# The something else is the point. test-gate.yml -- the merge gate -- restores a
+# 279 MB `playwright-chromium-Linux-*` entry on all 8 shards every run, and that
+# read traffic is the only thing holding it at the top of the LRU. Evict it and
+# shard 7 (the critical path, ~58s of slack) pays a ~33s cold save plus ~9s of
+# Chromium download on every shard. So this workflow protects gate headroom, not
+# tidiness.
+#
+# Every 6 hours, not daily: at the measured production rate that bounds
+# accumulation between runs to roughly 350 MB, which keeps steady state near
+# 2.2 GiB (22%) instead of drifting back toward the ceiling. The job is ~30s on
+# a standard runner, so the schedule costs a few minutes of Actions time a month.
+#
+# What it deletes and why that is safe is argued in full, against the
+# github/codeql-action source rather than assumed, in the module docstring of
+# scripts/prune_codeql_caches.py. The short version: the restore key prefix
+# excludes the commit SHA, so only the NEWEST entry per group is reachable at
+# all, and a missing overlay-base database makes the next analysis cold
+# (init-action.ts reverts to OverlayDatabaseMode.None) rather than failing or
+# narrowing coverage.
+name: Prune CodeQL caches
+
+on:
+  schedule:
+    # 20 past, every 6 hours -- off the top of the hour to miss the cron rush.
+    - cron: "20 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print the plan without deleting anything"
+        type: boolean
+        default: false
+      keep:
+        description: "Overlay-base databases to keep per restore-key group"
+        type: string
+        default: "2"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prune-codeql-caches
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      # The only job in this repo that needs it, and it needs nothing else.
+      # Deleting a cache entry is an Actions write; reading the bucket is not.
+      contents: read
+      actions: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Prune stale CodeQL overlay-base databases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # A scheduled run always prunes for real; only a hand-dispatched run
+          # can ask for a plan-only pass.
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+          KEEP: ${{ github.event_name == 'workflow_dispatch' && inputs.keep || '2' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--repo "$GITHUB_REPOSITORY" --keep "$KEEP")
+          if [[ "$DRY_RUN" == "true" ]]; then
+            args+=(--dry-run)
+          fi
+          python scripts/prune_codeql_caches.py "${args[@]}"
+
+      # The prune whitelists what it deletes, so it cannot reach this entry by
+      # construction -- but the gate's headroom is the whole reason this
+      # workflow exists, so prove the entry is still there rather than trusting
+      # that argument. Fails the job loudly if the key is gone, whoever removed
+      # it.
+      - name: Confirm the gate's Playwright entry survived
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          keys=$(gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" \
+            --jq '.actions_caches[].key')
+          if ! grep -q '^playwright-chromium-Linux-' <<<"$keys"; then
+            echo "::error::playwright-chromium-Linux-* is missing from the cache" \
+                 "bucket after the prune. test-gate.yml will run cold." >&2
+            exit 1
+          fi
+          echo "playwright-chromium entry present:"
+          grep '^playwright-chromium-Linux-' <<<"$keys"
+
+      - name: Report bucket usage
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/cache/usage" \
+            --jq '"usage: \(.active_caches_size_in_bytes) bytes across \(.active_caches_count) entries"'
