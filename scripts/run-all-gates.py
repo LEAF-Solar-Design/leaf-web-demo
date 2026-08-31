@@ -1367,6 +1367,11 @@ def build_suites() -> List[Suite]:
                   # only on a machine that ran the build and never on a runner.
                   # Opt in with CAD_ENGINE_REAL_WASM=1. One test.
                   ("src/cad/engineWasmHarness.realwasm.test.js", 1),
+                  # Card F-3: the editing-surface acceptance cases drive the
+                  # REAL compiled engine through a persistent-child double,
+                  # gated on the same machine-local wasm artifact (never on a
+                  # runner). Ten tests.
+                  ("src/cadedit/cadEditSurface.test.jsx", 10),
               )),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
@@ -1640,7 +1645,10 @@ def parse_vitest(text: str) -> dict:
         # ts-only pattern made a skip in ANY web test unnameable, and an
         # unnameable skip trips the "reported N but named 0" rule below on a
         # correctly-declared skip. The rule is right; the pattern was partial.
-        match = re.search(r"(\S+\.test\.(?:ts|tsx|js|jsx|mjs|cjs)).*?(\d+) skipped",
+        # Alternation LONGEST-FIRST: with js before jsx, a .test.jsx path was
+        # captured truncated to .test.js and could never match its allowlist
+        # entry (found live on the F-3 cadedit suite).
+        match = re.search(r"(\S+\.test\.(?:tsx|ts|jsx|js|mjs|cjs)).*?(\d+) skipped",
                           output_line)
         if match:
             skipped_files.append((match.group(1).replace("\\", "/"), int(match.group(2))))

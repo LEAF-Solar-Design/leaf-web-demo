@@ -102,6 +102,12 @@ SURFACE_INPUTS: dict[str, tuple[str, ...]] = {
         "deploy/Dockerfile.web",
         "deploy/nginx.conf",
         "web",
+        # Card F-3: the web image now compiles the CAD engine in its own
+        # build stage — the vendored wrapper crate and the stage script are
+        # therefore release-relevant inputs whose content must move the
+        # fingerprint (a wrapper edit ships different wasm bytes).
+        "vendor/acadrust-worker",
+        "scripts/stage_cad_engine.mjs",
     ),
 }
 

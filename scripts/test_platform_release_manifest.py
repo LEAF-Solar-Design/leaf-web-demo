@@ -159,6 +159,15 @@ def _surface_repository(tmp_path: Path) -> tuple[Path, str]:
     )
     (repo / "deploy" / "nginx.conf").write_text("server {}\n", encoding="utf-8")
     (repo / "web" / "index.html").write_text("leaf\n", encoding="utf-8")
+    # Card F-3: the web surface roster gained the vendored engine wrapper and
+    # the stage script (both compiled into the image), so the synthetic repo
+    # must carry them for its fingerprint to build.
+    (repo / "vendor" / "acadrust-worker").mkdir(parents=True)
+    (repo / "vendor" / "acadrust-worker" / "Cargo.toml").write_text(
+        '[package]\nname = "stub"\n', encoding="utf-8")
+    (repo / "scripts").mkdir()
+    (repo / "scripts" / "stage_cad_engine.mjs").write_text(
+        "// stub\n", encoding="utf-8")
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", "surface")
     return repo, _git(repo, "rev-parse", "HEAD")
@@ -1253,7 +1262,7 @@ def test_every_current_dockerfile_surface_is_fully_classified():
         "broker": {"node:20-slim": digest, "python:3.12-slim": digest},
         "canonical-worker": {"python:3.12-slim": digest},
         "harness": {"node:22-bookworm": digest, "node:22-slim": digest},
-        "web": {"nginx:alpine": digest, "node:22-slim": digest},
+        "web": {"nginx:alpine": digest, "node:22-slim": digest, "rust:1-slim": digest},
     }
 
     fingerprints = {}

@@ -993,6 +993,7 @@ jobs:
           # which is a base-image pull that no FROM-only survey catches.
           build-contexts: |
             nginx:alpine=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/nginx:alpine
+            rust:1-slim=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/rust:1-slim
             node:20-slim=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/node:20-slim
             node:22-bookworm=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/node:22-bookworm
             node:22-slim=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/node:22-slim
@@ -1157,7 +1158,7 @@ jobs:
             broker) bases=(node:20-slim python:3.12-slim) ;;
             canonical-worker) bases=(python:3.12-slim) ;;
             harness) bases=(node:22-bookworm node:22-slim) ;;
-            web) bases=(nginx:alpine node:22-slim) ;;
+            web) bases=(nginx:alpine node:22-slim rust:1-slim) ;;
             *) echo "::error::Unknown platform surface."; exit 1 ;;
           esac
           base_args=()
@@ -1613,6 +1614,7 @@ jobs:
           # which is a base-image pull that no FROM-only survey catches.
           build-contexts: |
             nginx:alpine=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/nginx:alpine
+            rust:1-slim=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/rust:1-slim
             node:20-slim=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/node:20-slim
             node:22-bookworm=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/node:22-bookworm
             node:22-slim=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/node:22-slim
@@ -2048,7 +2050,7 @@ jobs:
             broker) bases=(node:20-slim python:3.12-slim) ;;
             canonical-worker) bases=(python:3.12-slim) ;;
             harness) bases=(node:22-bookworm node:22-slim) ;;
-            web) bases=(nginx:alpine node:22-slim) ;;
+            web) bases=(nginx:alpine node:22-slim rust:1-slim) ;;
             *) echo "::error::Unknown platform surface."; exit 1 ;;
           esac
           base_args=()
@@ -2240,6 +2242,7 @@ jobs:
           # which is a base-image pull that no FROM-only survey catches.
           build-contexts: |
             nginx:alpine=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/nginx:alpine
+            rust:1-slim=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/rust:1-slim
             node:20-slim=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/node:20-slim
             node:22-bookworm=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/node:22-bookworm
             node:22-slim=docker-image://${{ env.ECR_REGISTRY }}/public-ecr/docker/library/node:22-slim
