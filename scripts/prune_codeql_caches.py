@@ -357,11 +357,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
 
-    before_bytes, before_count = usage_bytes(args.repo)
-    print(f"before: {_gib(before_bytes)} across {before_count} entries")
-
+    # Both before and after come from a LISTING, never from the usage endpoint.
+    # The first version of this reported `usage_bytes()` as "before" and printed
+    # `before: 8.89 GiB across 187 entries` directly above `listed: 35 entries`
+    # on a healthy steady-state run -- a stale figure at the top of every
+    # scheduled log, reading exactly like the prune had stopped working. The
+    # usage endpoint is still reported once at the end, labelled as lagging.
     entries = list_caches(args.repo)
-    print(f"listed: {len(entries)} entries")
+    before_bytes = sum(e.size_in_bytes for e in entries)
+    print(f"before (listing): {_gib(before_bytes)} across {len(entries)} entries")
 
     try:
         plan = plan_prune(entries, args.keep, args.max_deletes)
@@ -391,19 +395,20 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"deleted {deleted}, already gone {already_gone}, failed {failures}")
 
-    # NOTE: repos/{repo}/actions/cache/usage lags the actual bucket by minutes
-    # -- immediately after the 2026-08-31 run it still reported the pre-prune
-    # 9,543,187,664 B / 187 entries while a fresh listing showed 33 entries and
-    # 1.85 GiB. So report the listing, which is authoritative now, and the usage
-    # endpoint alongside it flagged as possibly stale. Do not gate anything on
-    # the usage number in the seconds after a prune.
+    # repos/{repo}/actions/cache/usage lags the actual bucket badly -- over 40
+    # minutes after the 2026-08-31 run it still reported the pre-prune
+    # 9,543,187,664 B / 187 entries while fresh listings read 33 -> 31 entries
+    # and ~1.8 GiB. The listing is authoritative; the usage figure is printed
+    # only so a reader can see the lag rather than be surprised by it. Never
+    # gate anything on the usage number after a mutation.
     remaining = list_caches(args.repo)
     remaining_bytes = sum(e.size_in_bytes for e in remaining)
     print(f"after (listing): {_gib(remaining_bytes)} across {len(remaining)} entries")
+    print(f"freed: {_gib(before_bytes - remaining_bytes)}")
     lagging_bytes, lagging_count = usage_bytes(args.repo)
     print(
-        f"after (usage api, may lag): {_gib(lagging_bytes)} "
-        f"across {lagging_count} entries"
+        f"after (usage api, lags by many minutes, do not gate on this): "
+        f"{_gib(lagging_bytes)} across {lagging_count} entries"
     )
 
     if failures:
