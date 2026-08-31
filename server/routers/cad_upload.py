@@ -85,8 +85,27 @@ def max_upload_bytes() -> int:
 
 
 def cad_upload_dir() -> Path:
-    return Path(os.environ.get(
-        "LEAF_CAD_UPLOAD_DIR", str(PROJECT_ROOT / "data" / "cad_uploads")))
+    """Receipt/staging directory, resolved WRITABLE-FIRST (card F-2).
+
+    Deployed containers run with a read-only root filesystem and exactly one
+    writable volume, whose location the deployment already names via
+    ``LEAF_UPLOADS_DIR`` (staging: /data/drawings/uploads). The old default
+    (PROJECT_ROOT/data/cad_uploads) sits INSIDE the read-only root there, so
+    every accepted upload 500'd on the first mkdir — measured live on
+    staging 2026-08-31 (error_id 1d0930ab8e96381c). Resolution order:
+
+      1. LEAF_CAD_UPLOAD_DIR — explicit override, wins outright;
+      2. sibling of LEAF_UPLOADS_DIR when that is set (…/cad_uploads on the
+         same writable volume the drawing-upload path already proves out);
+      3. the local-dev default under PROJECT_ROOT/data.
+    """
+    explicit = os.environ.get("LEAF_CAD_UPLOAD_DIR")
+    if explicit:
+        return Path(explicit)
+    uploads_dir = os.environ.get("LEAF_UPLOADS_DIR")
+    if uploads_dir:
+        return Path(uploads_dir).parent / "cad_uploads"
+    return Path(PROJECT_ROOT / "data" / "cad_uploads")
 
 
 def _read_bounded(stream: Any, cap: int, chunk_size: int = 65536) -> bytes:
@@ -207,28 +226,50 @@ def _emit_cad_event(
         pass
 
 
+class CadUploadStoreUnavailable(Exception):
+    """The receipt store refused a write (unwritable volume, full disk).
+    Raised only AFTER any partially staged bytes are removed, so the
+    zero-orphan invariant holds on the failure path too."""
+
+
 def _write_accepted_upload(filename: str, ext: str, data: bytes) -> Dict[str, Any]:
     """Every effect here happens only for bytes that already cleared every
     gate above — nothing malformed or oversized ever reaches this function,
-    so it is the ONLY place this router touches disk."""
+    so it is the ONLY place this router touches disk.
+
+    Fail-closed (card F-2): any filesystem refusal becomes
+    CadUploadStoreUnavailable — a typed 503 at the route, never an unhandled
+    500 (the live staging failure mode this replaces). If the staged bytes
+    landed but the receipt append then failed, the staged file is unlinked
+    first: an upload without its receipt row must not exist."""
     digest = hashlib.sha256(data).hexdigest()
     directory = cad_upload_dir()
     with _RECEIPT_LOCK:
-        directory.mkdir(parents=True, exist_ok=True)
-        version = _next_version_for_digest(directory, digest)
-        upload_id = f"{digest[:16]}-v{version}"
-        staged = directory / f"{upload_id}{ext}"
-        staged.write_bytes(data)
-        receipt = {
-            "upload_id": upload_id,
-            "filename": filename,
-            "ext": ext,
-            "size": len(data),
-            "digest": digest,
-            "version": version,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        _append_receipt(directory, receipt)
+        staged: Optional[Path] = None
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            version = _next_version_for_digest(directory, digest)
+            upload_id = f"{digest[:16]}-v{version}"
+            staged = directory / f"{upload_id}{ext}"
+            staged.write_bytes(data)
+            receipt = {
+                "upload_id": upload_id,
+                "filename": filename,
+                "ext": ext,
+                "size": len(data),
+                "digest": digest,
+                "version": version,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            _append_receipt(directory, receipt)
+        except OSError as exc:
+            if staged is not None:
+                try:
+                    staged.unlink(missing_ok=True)
+                except OSError:
+                    pass  # the store is already refusing writes; nothing better to do
+            raise CadUploadStoreUnavailable(
+                f"cad upload store unavailable at {directory}: {exc}") from exc
     return receipt
 
 
@@ -281,6 +322,16 @@ def upload_cad_file(request: Request, file: UploadFile = File(...)) -> Any:
         return error_response(
             ErrorCode.BAD_PARAMS, bomb_reason, retryable=False, status_code=422)
 
-    receipt = _write_accepted_upload(file.filename or f"upload{ext}", ext, data)
+    try:
+        receipt = _write_accepted_upload(file.filename or f"upload{ext}", ext, data)
+    except CadUploadStoreUnavailable:
+        # Typed, retryable degrade — never an unhandled 500. The message names
+        # the condition, not the path (no filesystem layout on the wire).
+        _emit_cad_event(False, "store_unavailable", ext, len(data))
+        return error_response(
+            ErrorCode.INTERNAL,
+            "the CAD upload receipt store is unavailable on this deployment; "
+            "retry shortly or contact the operator",
+            retryable=True, status_code=503)
     _emit_cad_event(True, None, ext, len(data))
     return JSONResponse(status_code=201, content=with_envelope_fields(receipt))
