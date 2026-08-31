@@ -7,16 +7,15 @@ existing python DXF path server/dxf_intake.py -- never a reimplemented
 parser) and a rollback assertion (proof the on-disk fixture is never mutated,
 identity or not).
 
-NO ENGINE IS ENABLED TODAY. `IdentityAdapter` is the only adapter wired here:
-it returns its input bytes unchanged, which proves the corpus + comparison
-machinery end-to-end (every check in a receipt's "fidelity" table reads as a
-match) without a real transforming engine. `EngineAdapter` is the exact shape
-a later enabled engine (behind the `cad_edit` flag, wired elsewhere -- this
-harness has no flag, no production wiring, no selector) plugs into: subclass
-it, implement round_trip, and every receipt field below is what it must
-produce.
+Adapters: `IdentityAdapter` (default) proves the corpus + comparison
+machinery; `--adapter=acadrust` (card F-1, ENG2) runs the REAL compiled
+acadrust wasm through `engine/acadrust_adapter.py`. This switch is harness
+TOOLING only -- the harness still has no flag, no production wiring, and no
+selector; the production engine selector is the tenant capability contract
+(card F-4). Acceptance bar per receipt: entity-level parity required,
+byte_identical recorded-not-required (amended by F-1, see run_fixture).
 
-Run:  python engine/corpus_harness.py
+Run:  python engine/corpus_harness.py [--adapter=identity|acadrust]
 Exits 0 only if every corpus fixture's receipt is ok (bounded runtime, full
 fidelity, source untouched); nonzero and a stderr line per failing fixture
 otherwise.
@@ -103,6 +102,10 @@ def _entity_snapshot(dxf_bytes: bytes, *, source_name: str) -> Dict[str, Any]:
         "layers": list(intake["layers"]),
         "entity_count": len(polylines),
         "vertex_count": sum(len(p["pts"]) for p in polylines),
+        # Per-entity layer assignments (sorted multiset): the check that a
+        # round trip reassigned no entity to another layer, independent of
+        # LAYER-table normalization (see layers_match below).
+        "entity_layers": sorted(p["layer"] for p in polylines),
     }
 
 
@@ -114,10 +117,20 @@ def compute_fidelity(before: bytes, after: bytes, *, source_name: str) -> Dict[s
     snap_before = _entity_snapshot(before, source_name=source_name)
     snap_after = _entity_snapshot(after, source_name=source_name)
 
+    # layers_match, amended by card F-1 (measured against the real engine):
+    # a conforming writer MATERIALIZES the spec-mandatory default layer "0"
+    # in the LAYER table even when a hand-minimal fixture omits it — that is
+    # normalization, not loss. The honest no-loss bar is therefore
+    # (a) no source layer DROPPED (before ⊆ after) and (b) no entity
+    # REASSIGNED (the per-entity layer multiset is unchanged). A real layer
+    # named "0" carrying entities is still fully protected by (a) + (b).
     checks = {
         "byte_identical": before == after,
         "entity_count_match": snap_before["entity_count"] == snap_after["entity_count"],
-        "layers_match": snap_before["layers"] == snap_after["layers"],
+        "layers_match": (
+            set(snap_before["layers"]) <= set(snap_after["layers"])
+            and snap_before["entity_layers"] == snap_after["entity_layers"]
+        ),
         "vertex_count_match": snap_before["vertex_count"] == snap_after["vertex_count"],
     }
     score = sum(1 for ok in checks.values() if ok) / len(checks)
@@ -171,12 +184,25 @@ def run_fixture(adapter: EngineAdapter, path: Path) -> Dict[str, Any]:
     }
     assert tuple(rollback.keys()) == ROLLBACK_KEYS
 
+    # ACCEPTANCE BAR (amended by card F-1, EXECUTION-PLAN v3.2 §4, resolving
+    # the day-3 spike's open fidelity decision): entity-level parity is what
+    # `ok` requires — entity count, layer list, vertex count. byte_identical
+    # stays RECORDED (and still contributes to the informational `score`) but
+    # is NOT required: a real engine's writer emits full default document
+    # sections, so byte identity is unachievable by construction, and the
+    # versioned-control storage model owns byte preservation (originals are
+    # immutable versions), not the engine.
+    entity_parity = (
+        fidelity is not None
+        and fidelity["entity_count_match"]
+        and fidelity["layers_match"]
+        and fidelity["vertex_count_match"]
+    )
     ok = (
         error is None
         and rollback["source_untouched"]
         and timing_ms <= FIXTURE_TIMEOUT_MS
-        and fidelity is not None
-        and fidelity["score"] == 1.0
+        and entity_parity
     )
 
     receipt = {
@@ -197,8 +223,26 @@ def run_corpus(adapter: EngineAdapter, corpus_dir: Optional[Path] = None) -> Lis
     return [run_fixture(adapter, path) for path in discover_corpus(corpus_dir)]
 
 
-def main() -> int:
-    receipts = run_corpus(IdentityAdapter())
+def _select_adapter(argv: List[str]) -> EngineAdapter:
+    """Harness-tooling adapter selection (card F-1): `--adapter=acadrust`
+    runs the real compiled engine; the default stays the identity baseline.
+    This is TEST TOOLING selection only — the production engine selector is
+    the tenant capability contract (card F-4), never this argv switch."""
+    choice = "identity"
+    for arg in argv:
+        if arg.startswith("--adapter="):
+            choice = arg.split("=", 1)[1].strip().lower()
+    if choice == "identity":
+        return IdentityAdapter()
+    if choice == "acadrust":
+        from acadrust_adapter import AcadrustAdapter  # noqa: PLC0415 — lazy: needs Node + the compiled build
+        return AcadrustAdapter()
+    raise SystemExit(f"unknown adapter {choice!r} (identity|acadrust)")
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    adapter = _select_adapter(argv if argv is not None else sys.argv[1:])
+    receipts = run_corpus(adapter)
     print(json.dumps(receipts, indent=2))
     all_ok = all(r["ok"] for r in receipts)
     if not all_ok:
@@ -206,7 +250,7 @@ def main() -> int:
             if not r["ok"]:
                 print(f"  FAIL: {r['fixture']}: {r['error'] or r['fidelity']}", file=sys.stderr)
     print(f"\n# RESULT: {'ALL FIXTURES OK' if all_ok else 'FAILURES ABOVE'} "
-          f"({len(receipts)} fixtures, adapter={IdentityAdapter.name!r})")
+          f"({len(receipts)} fixtures, adapter={adapter.name!r})")
     return 0 if all_ok else 1
 
 
