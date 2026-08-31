@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import threading
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -715,6 +716,18 @@ def save_edited_version(drawing_id: str,
         return blocked
     import store  # da/store.py; importable via write_loop's sys.path setup
     import dxf_intake
+    import tenant_id_validator
+
+    # Taint barrier at the boundary: the drawing id is a URL path parameter
+    # and flows into store keys, so it is validated HERE against the ONE
+    # shared canonical-id rule (the same reject-don't-collapse validator
+    # store.sanitize_id applies at every key builder) before any store call.
+    # Belt and braces with the store's own guard, and the explicit fullmatch
+    # is the barrier static analysis can see.
+    if not re.fullmatch(tenant_id_validator.TENANT_ID_PATTERN, drawing_id or ""):
+        return error_response(ErrorCode.BAD_PARAMS,
+                              "malformed drawing id",
+                              retryable=False, status_code=400)
 
     cap = guest_uploads.max_upload_bytes()
     data = file.file.read(cap + 1)
@@ -748,9 +761,13 @@ def save_edited_version(drawing_id: str,
     except (checkout_capability.CapabilityRejected,
             checkout_capability.CapabilityUnavailable) as exc:
         return _denied(exc)
-    except (KeyError, ValueError) as exc:
-        return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
-                              status_code=400)
+    except (KeyError, ValueError):
+        # Fixed message, deliberately: exception text from the store layer is
+        # an internal detail (CodeQL stack-trace-exposure class), and the
+        # caller needs only the category.
+        return error_response(ErrorCode.BAD_PARAMS,
+                              "drawing unavailable or malformed request",
+                              retryable=False, status_code=400)
 
     intake_payload = json.dumps(intake, separators=(",", ":")).encode("utf-8")
     intake_digest = hashlib.sha256(intake_payload).hexdigest()
@@ -781,8 +798,9 @@ def save_edited_version(drawing_id: str,
                 ErrorCode.BAD_PARAMS,
                 f"{exc}; refresh the drawing and re-apply the edit",
                 retryable=True, status_code=409)
-        return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
-                              status_code=400)
+        return error_response(ErrorCode.BAD_PARAMS,
+                              "version write rejected by the store",
+                              retryable=False, status_code=400)
     except Exception as exc:  # noqa: BLE001 — persist faults answer typed, never a raw 500
         return error_response(ErrorCode.INTERNAL,
                               f"version persist failed: {type(exc).__name__}",
