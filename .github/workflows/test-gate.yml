@@ -270,7 +270,7 @@ jobs:
           persist-credentials: false
 
       # ---------------------------------------------------------------- #
-      # DEPENDENCY CACHING ON THIS RUNNER (2026-08-17)
+      # DEPENDENCY CACHING ON THIS RUNNER (2026-08-17, closed 2026-08-31)
       #
       # This job caches ONE thing: the Playwright browser download. It does
       # not cache pip or npm, and `cache: pip` / `cache: npm` are deliberately
@@ -302,6 +302,50 @@ jobs:
       # into its key, `24.04-Ubuntu` hosted against `22.04-Ubuntu` on
       # aws/codebuild/standard:7.0.)
       #
+      # THAT COST IS GONE, AND NOT BY INSTALLING ZSTD (2026-08-31). Every
+      # number in the table above is now stale. Run 33361852063, mean seconds
+      # per shard, all 8 shards `Cache restored from key:
+      # playwright-chromium-Linux-125d47d2...`:
+      #
+      #   step                              CodeBuild   was      now
+      #   Post Restore Playwright cache            —      32.0    (gone)
+      #   Post Run actions/setup-node@v4          0.1     25.8     -25.7
+      #   Post Run actions/setup-python@v5        0.0      4.8      -4.8
+      #   Install Chromium for browser proofs     0.9      9.4      -8.5
+      #   Restore Playwright browser cache        6.2      6.4      -0.2
+      #
+      # 0.9s of Chromium install now BEATS the 1.5s hosted control, because a
+      # hit leaves nothing to download. Two changes did it, neither of them
+      # zstd: #649 split the combined `actions/cache@v4` into restore + a
+      # single sole-writer save, which deleted the 32s post-step from all 8
+      # shards; and the entry written on 2026-08-17 lives on refs/heads/main,
+      # so every PR run reads it through base-branch fallback. Shard wall is
+      # now 131-155s.
+      #
+      # SO DO NOT INSTALL ZSTD HERE. It is not a pending action, it is a
+      # measured regression, on three counts:
+      #   1. Nothing to share with. `~/.cache/ms-playwright` and the
+      #      `playwright-chromium-*` key appear in exactly ONE workflow —
+      #      this one, in this CodeBuild-only job. No ubuntu-latest job in
+      #      this repo writes or reads that key, so the "hosted namespace"
+      #      an earlier note here promised to rejoin is empty. Before the
+      #      #647 flip these shards WERE the hosted writers; flipping them
+      #      moved the whole population, it did not split it.
+      #   2. It abandons the entry that is currently hitting. Adding zstd
+      #      changes the internal cache `version`, so the live 279 MB gzip
+      #      entry misses on the next run and shard 7 — already the critical
+      #      path at 155s with ~58s of slack — pays the ~33s cold save while
+      #      all 8 shards re-download Chromium.
+      #   3. The cache bucket has no room for the changeover. This repo sits
+      #      at 10,492,367,236 B across 202 entries against GitHub's 10 GB
+      #      per-repo limit, i.e. full, with LRU evicting continuously. A
+      #      compression flip means holding two 279 MB copies of the same
+      #      browser at once and evicting other entries to fit them.
+      # The apt call it would take is also the exact shape of this
+      # workflow's worst historical pathology (see the install-deps note
+      # below). The question is closed; reopen it only if a hosted job in
+      # this repo ever starts writing this same key.
+      #
       # What was NOT the cause: the save race. A save DOES win the
       # reservation every run — gate-shard-7 logged `Cache saved with key:
       # playwright-chromium-Linux-125d47d2...` at 12:36:16Z in 32030441705
@@ -330,8 +374,17 @@ jobs:
       # Playwright survives because its build step is a browser download,
       # which the restore genuinely beats (9.8s -> 0.9s for a 6.4s restore).
       #
-      # Re-measure this whole block if zstd lands on the runner image or the
-      # shards move back to hosted runners; both change every number above.
+      # Re-measure this whole block if the shards move back to hosted
+      # runners. Zstd is NOT such a trigger — see the closed question above.
+      #
+      # The one live exposure is a COLD KEY, and it is independent of
+      # compression: the key follows hashFiles('web/package-lock.json'), so
+      # bumping that lockfile mints a new key, and the 10 GB bucket can LRU
+      # out the old entry at any time. Either way the next run misses and
+      # shard 7 pays ~33s of save on the critical path. That is the designed
+      # cost of a lockfile bump, not a defect — but it is why the entry's
+      # survival matters, and why 8 readers per run (the strongest LRU
+      # refresh in this repo) is a feature of this layout rather than waste.
       # ---------------------------------------------------------------- #
       - uses: actions/setup-python@v5
         with:
@@ -371,9 +424,14 @@ jobs:
       # gets downloaded.
       #
       # The key is unchanged from the `actions/cache@v4` form this replaced,
-      # deliberately: if zstd ever lands on the runner image the CodeBuild
-      # shards rejoin the hosted namespace and start hitting entries the
-      # ubuntu-latest jobs already wrote, with no further change here.
+      # and must stay that way: the entry it resolves to was written on
+      # 2026-08-17, sits on refs/heads/main, and is what all 8 shards hit
+      # today through base-branch fallback. Editing this key discards a live
+      # 279 MB entry and makes the next run cold. (An earlier note here gave
+      # a different reason — that an unchanged key would let these shards
+      # rejoin a hosted namespace once zstd landed. That reason was wrong:
+      # no ubuntu-latest job in this repo writes this key, so there is no
+      # such namespace to rejoin. The key is right; the rationale was not.)
       - name: Restore Playwright browser cache
         id: playwright-cache
         uses: actions/cache/restore@v4
