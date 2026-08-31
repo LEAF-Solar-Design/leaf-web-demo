@@ -187,6 +187,7 @@ jobs:
       previous_cache_tag: ${{ steps.tag.outputs.previous_cache_value }}
       source_sha: ${{ steps.source.outputs.sha }}
       source_mode: ${{ steps.source.outputs.mode }}
+      superseded: ${{ steps.source.outputs.superseded }}
       workflow_blob: ${{ steps.source.outputs.workflow_blob }}
       source_tree: ${{ steps.tag.outputs.tree }}
       solver_revision: ${{ steps.solver.outputs.revision }}
@@ -352,6 +353,30 @@ jobs:
               and .head.repo.fork == false
               and (.head.sha | ascii_downcase) == $sha
             ' <<<"$PULL" >/dev/null; then
+              # A PR merged within seconds of its triggering event closes
+              # before this dispatched guard reads it (runs 33334277156 and
+              # 33359992686: the merge landed ~4s ahead of the dispatch),
+              # and that race used to paint a red X on main's run list for
+              # a build that was correctly refusing to run. The merged case
+              # is benign — the push-to-main run now owns these exact bytes
+              # — so it ends this run GREEN with nothing built:
+              # superseded=true gates every later prepare step and both
+              # speculative jobs off. It is distinguished on the SAME API
+              # response by the merged flag plus every identity condition
+              # the open arm demands (same repo, non-fork, main base, EXACT
+              # dispatched head); a stale or foreign head, or a PR closed
+              # without merging, still fails exactly as before.
+              if jq -e --arg sha "$CURRENT_SHA" --arg repo "$GITHUB_REPOSITORY" '
+                .merged == true
+                and .base.ref == "main"
+                and .head.repo.full_name == $repo
+                and .head.repo.fork == false
+                and (.head.sha | ascii_downcase) == $sha
+              ' <<<"$PULL" >/dev/null; then
+                echo "::notice::Speculation superseded by merge: PR #$SPECULATIVE_PR_NUMBER already merged this exact head, so the push-to-main run owns the build and every later job skips."
+                echo "superseded=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
               echo "::error::Speculative source must be the exact current head of the open same-repository PR."
               exit 1
             fi
@@ -435,9 +460,13 @@ jobs:
           echo "sha=$CURRENT_SHA" >> "$GITHUB_OUTPUT"
           echo "mode=$SOURCE_MODE" >> "$GITHUB_OUTPUT"
 
+      # Every remaining prepare step also gates on the merged-race arm's
+      # superseded output: past it there is nothing to tag, validate, or
+      # hint for, and the tag step in particular must not mint a prod-*
+      # value from the PR-head checkout the preview never replaced.
       - name: Resolve canonical solver provenance
         id: solver
-        if: steps.decide.outputs.build == 'true'
+        if: steps.decide.outputs.build == 'true' && steps.source.outputs.superseded != 'true'
         run: |
           set -euo pipefail
           SOURCES=deploy/autofill-solver-sources.json
@@ -452,7 +481,7 @@ jobs:
           echo "source_sha256=$source_sha256" >> "$GITHUB_OUTPUT"
 
       - name: Validate image workflow invariants
-        if: steps.decide.outputs.build == 'true'
+        if: steps.decide.outputs.build == 'true' && steps.source.outputs.superseded != 'true'
         # The harness parses this workflow's YAML; the runner's system
         # python does not ship PyYAML, so install the harness deps first.
         run: |
@@ -461,7 +490,7 @@ jobs:
 
       - name: Derive immutable image tag
         id: tag
-        if: steps.decide.outputs.build == 'true'
+        if: steps.decide.outputs.build == 'true' && steps.source.outputs.superseded != 'true'
         env:
           BEFORE_SHA: ${{ github.event.before }}
           SOURCE_MODE: ${{ steps.source.outputs.mode }}
@@ -529,7 +558,7 @@ jobs:
       # and the contract test pins exactly that.
       - name: Probe for an expected gate reuse (warm-skip hint)
         id: reuse-hint
-        if: steps.decide.outputs.build == 'true'
+        if: steps.decide.outputs.build == 'true' && steps.source.outputs.superseded != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -1735,7 +1764,11 @@ jobs:
   # build: the tag is immutable and the content is the same by construction.
   speculate:
     needs: prepare
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.speculative }}
+    # superseded: prepare's merged-race arm found the PR already merged
+    # with this exact head (the dispatch lost the race to a fast merge),
+    # so the push-to-main run owns the build and this run ends green with
+    # nothing built.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.speculative && needs.prepare.outputs.superseded != 'true' }}
     # Re-flipped 2026-08-17 behind the ECR pull-through cache; see the `warm`
     # job's comment for why the first flip failed and what changed.
     runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
@@ -2124,7 +2157,8 @@ jobs:
     needs: [prepare, speculate]
     if: >-
       ${{ !cancelled() && github.event_name == 'workflow_dispatch' &&
-          inputs.speculative && needs.prepare.result == 'success' }}
+          inputs.speculative && needs.prepare.result == 'success' &&
+          needs.prepare.outputs.superseded != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: ecr-release
