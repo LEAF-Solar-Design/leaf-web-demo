@@ -60,7 +60,14 @@ export default defineConfig({
   define: {
     __BUILD_HASH__: JSON.stringify(buildHash()),
   },
-  server: { port: 5175, strictPort: false },
+  server: {
+    port: 5175,
+    strictPort: false,
+    // The editing surface's engine worker lives under the repo's vendor/
+    // (spawned via the one fence-legal URL shape); vite's dev-server fs
+    // sandbox must therefore admit that tree or the worker 403s in dev.
+    fs: { allow: [HERE, path.resolve(HERE, '..', 'vendor')] },
+  },
   build: {
     rollupOptions: {
       output: {
