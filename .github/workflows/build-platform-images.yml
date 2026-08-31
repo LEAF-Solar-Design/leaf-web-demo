@@ -725,7 +725,13 @@ jobs:
       # exact call shape needs in the order it needs them, and the bulk read
       # covers the rest. Measured on the CodeBuild runner against the ~4s
       # overlap the chain-keeper gets, a 14.6-14.9s first probe becomes
-      # 1.9-2.6s; the cache step's ~14s window takes it to 2.9s.
+      # 1.9-2.6s; the cache step's ~14s window takes it to 2.9s. Confirmed on
+      # two real runs. warm, run 33414479974 (the first merge carrying this
+      # step): the chain-keeper cost 4-5s on 5 of 5 legs, against 12-25s on run
+      # 33322101251 before it. speculate, on legs that actually built and
+      # pushed: its own first `aws` call ("Skip when this tree is already
+      # speculatively pushed") cost 12/12/14/14/16s on run 33413901750 before
+      # this step and 0/1/1/1/1s on run 33415016399 after it.
       #
       # This step can only cost wall clock. It reads files, writes nothing,
       # takes no lock, and holds no credential: the probe is pointed at a dead
@@ -1028,7 +1034,13 @@ jobs:
       # exact call shape needs in the order it needs them, and the bulk read
       # covers the rest. Measured on the CodeBuild runner against the ~4s
       # overlap the chain-keeper gets, a 14.6-14.9s first probe becomes
-      # 1.9-2.6s; the cache step's ~14s window takes it to 2.9s.
+      # 1.9-2.6s; the cache step's ~14s window takes it to 2.9s. Confirmed on
+      # two real runs. warm, run 33414479974 (the first merge carrying this
+      # step): the chain-keeper cost 4-5s on 5 of 5 legs, against 12-25s on run
+      # 33322101251 before it. speculate, on legs that actually built and
+      # pushed: its own first `aws` call ("Skip when this tree is already
+      # speculatively pushed") cost 12/12/14/14/16s on run 33413901750 before
+      # this step and 0/1/1/1/1s on run 33415016399 after it.
       #
       # This step can only cost wall clock. It reads files, writes nothing,
       # takes no lock, and holds no credential: the probe is pointed at a dead
@@ -1895,7 +1907,13 @@ jobs:
       # exact call shape needs in the order it needs them, and the bulk read
       # covers the rest. Measured on the CodeBuild runner against the ~4s
       # overlap the chain-keeper gets, a 14.6-14.9s first probe becomes
-      # 1.9-2.6s; the cache step's ~14s window takes it to 2.9s.
+      # 1.9-2.6s; the cache step's ~14s window takes it to 2.9s. Confirmed on
+      # two real runs. warm, run 33414479974 (the first merge carrying this
+      # step): the chain-keeper cost 4-5s on 5 of 5 legs, against 12-25s on run
+      # 33322101251 before it. speculate, on legs that actually built and
+      # pushed: its own first `aws` call ("Skip when this tree is already
+      # speculatively pushed") cost 12/12/14/14/16s on run 33413901750 before
+      # this step and 0/1/1/1/1s on run 33415016399 after it.
       #
       # This step can only cost wall clock. It reads files, writes nothing,
       # takes no lock, and holds no credential: the probe is pointed at a dead
