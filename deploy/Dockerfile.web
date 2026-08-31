@@ -7,6 +7,19 @@
 # docker-compose passes the app's published host port as a build arg.
 # The header Mock toggle still lets a viewer flip to client-side data at runtime.
 
+# ---- engine stage: compile the CAD engine wasm (card F-3) -------------------
+# Builds the rev-pinned, unmodified MPL-2.0 engine crate (vendor pin +
+# license posture: docs/CAD-ENGINE-LICENSE-REVIEW.md) to a browser wasm the
+# editing surface's worker loads at /engine/*. Reproducible in-image: no
+# machine-local artifact is ever committed. Cargo fetch is network-bound and
+# rev-pinned, so the layer caches on the vendor dir's content.
+FROM rust:1-slim AS engine
+RUN cargo install wasm-pack --locked
+WORKDIR /engine-src
+COPY vendor/acadrust-worker/ /engine-src/
+RUN RUSTFLAGS='--cfg getrandom_backend="wasm_js"' \
+    wasm-pack build --release --target web . --out-dir pkg-web
+
 # ---- build stage: vite build (env baked at BUILD time) ----------------------
 FROM node:22-slim AS build
 WORKDIR /web
@@ -53,7 +66,16 @@ ARG LEAF_SOURCE_SHA=unknown
 ENV LEAF_SOURCE_SHA=${LEAF_SOURCE_SHA}
 
 COPY web/ /web/
+# The engine stage's wasm-pack output + the stage script land the runtime
+# engine at dist/engine/{engine.js,engine_bg.wasm} with a PROVENANCE.json
+# (crate rev + sha256s). Staged AFTER the vite build so the fence-relevant
+# source tree never carries the binary.
+COPY vendor/acadrust-worker/Cargo.toml /vendor/acadrust-worker/Cargo.toml
+COPY --from=engine /engine-src/pkg-web /vendor/acadrust-worker/pkg-web
+COPY scripts/stage_cad_engine.mjs /scripts/stage_cad_engine.mjs
 RUN npm run build && \
+    node /scripts/stage_cad_engine.mjs && \
+    test -f /web/dist/engine/engine_bg.wasm && \
     printf '{"ok":true,"service":"leaf-platform-web","component":"frontend","source_sha":"%s"}\n' \
       "$LEAF_SOURCE_SHA" > /web/dist/health.json
 
