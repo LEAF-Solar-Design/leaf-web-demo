@@ -68,6 +68,16 @@ describe('F-7: surface frames render the live tenant catalog', () => {
     expect(live.textContent).toContain('String autofill')
   })
 
+  it('an empty featured set says so honestly and still reports the live catalog', () => {
+    const noSolar = { families: [
+      { family_id: 'measurement', label: 'Measurement', capabilities: [{ name: 'count-by-layer', label: 'Count by layer' }] },
+    ] }
+    render(frame('solar', noSolar))
+    const live = screen.getByTestId('surface-capabilities-live')
+    expect(live.textContent).toContain('No stringing or placement tools are registered')
+    expect(live.textContent).toContain('1 family · 1 capabilities live')
+  })
+
   it('a catalog error degrades to an honest note, never a fake list', () => {
     render(frame('browser', null, 'families unavailable'))
     expect(screen.getByTestId('surface-capabilities-error').textContent).toContain('families unavailable')

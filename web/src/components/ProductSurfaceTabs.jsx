@@ -77,6 +77,23 @@ export function SurfaceCapabilities({ surface, catalog, catalogError }) {
       </div>
     )
   }
+  // The catalog is live but none of this surface's featured families are in
+  // this tenant's fold yet: say so, and still show the live whole-catalog
+  // count — never a bare zero that reads as a broken load.
+  if (!featured.length) {
+    const totalCount = families.reduce(
+      (count, family) => count + (family.capabilities?.length || 0),
+      0,
+    )
+    return (
+      <div data-testid="surface-capabilities-live">
+        <p className="tc-product-catalog-count">
+          No {surface.familyIds.join(' or ')} tools are registered in this tenant’s catalog yet
+          · {families.length} {families.length === 1 ? 'family' : 'families'} · {totalCount} capabilities live
+        </p>
+      </div>
+    )
+  }
   return (
     <div data-testid="surface-capabilities-live">
       <p className="tc-product-catalog-count">
