@@ -2513,6 +2513,8 @@ export default function App() {
           activeSurface={activeSurface}
           states={surfaceStates}
           onSelect={onSelectSurface}
+          project={openProjectId ? (currentProjectName || projectName) : null}
+          catalog={catalog}
         />
         {activeSurface !== 'cad' && (
           <ProductSurfaceFrame

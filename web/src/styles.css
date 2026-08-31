@@ -1773,6 +1773,12 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 .app .tc-product-tabs [role="tab"] small[data-state="available"] { color: var(--status-success); }
 .app .tc-product-tabs [role="tab"] small[data-state="unavailable"] { color: var(--status-danger); }
 .app .tc-product-shared { display: block; margin-left: 0; white-space: normal; color: var(--muted-2); font-size: 12px; }
+/* F-8 continuity rail, app theme: same structure as landing.css, colors from
+   the app's own tokens. Keyframes are defined once in landing.css. */
+.app .tc-continuity { margin-left: auto; color: var(--muted-2); font-size: 12px; }
+.app .tc-continuity-label { color: var(--muted-2); }
+.app .tc-continuity-item strong { color: var(--muted); font-weight: 600; }
+.app .tc-product-tabs [role="tab"][aria-selected="true"] { box-shadow: inset 0 -2px 0 var(--status-success); }
 .app .tc-product-frame {
   position: static; inset: auto; z-index: auto; overflow: visible;
   border: 1px solid var(--border); border-radius: 10px; background: var(--card-grad);

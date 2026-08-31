@@ -8,7 +8,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { cleanup, render, screen } from '@testing-library/react'
-import { ProductSurfaceFrame } from './ProductSurfaceTabs.jsx'
+import ProductSurfaceTabs, { ProductSurfaceFrame } from './ProductSurfaceTabs.jsx'
 import { productSurfaceStates } from '../site/productSurfaces.js'
 
 afterEach(cleanup)
@@ -88,6 +88,48 @@ describe('F-7: surface frames render the live tenant catalog', () => {
     render(frame('browser', null))
     expect(screen.getByTestId('surface-capabilities-loading')).toBeTruthy()
     expect(screen.queryByTestId('surface-capabilities-live')).toBeNull()
+  })
+
+  it('F-8: the continuity rail is the SAME node across profile switches, and pulses instead of remounting', () => {
+    const nav = (surface) => (
+      <ProductSurfaceTabs
+        activeSurface={surface}
+        states={states}
+        onSelect={() => {}}
+        project="rooftop_demo"
+        catalog={catalogA}
+      />
+    )
+    const { rerender } = render(nav('browser'))
+    const rail = screen.getByTestId('continuity-rail')
+    expect(rail.dataset.pulse).toBe('false')
+    expect(rail.textContent).toContain('rooftop_demo')
+    expect(rail.textContent).toContain('3 families / 3 tools')
+    rerender(nav('solar'))
+    expect(screen.getByTestId('continuity-rail')).toBe(rail)
+    expect(rail.dataset.pulse).toBe('true')
+  })
+
+  it('F-8: the rail renders only live data — no catalog, no counts', () => {
+    render(
+      <ProductSurfaceTabs activeSurface="browser" states={states} onSelect={() => {}} />,
+    )
+    const rail = screen.getByTestId('continuity-rail')
+    expect(rail.textContent).toContain('no project open')
+    expect(rail.textContent).not.toContain('families')
+  })
+
+  it('F-8: every new motion rule is disabled under prefers-reduced-motion', () => {
+    const css = readFileSync(`${process.cwd()}/src/site/landing.css`, 'utf8')
+    const reduced = css.split('@media (prefers-reduced-motion: reduce)')[1] || ''
+    expect(reduced).toContain('.tc-product-morph { animation: none; }')
+    expect(reduced).toContain('.tc-continuity[data-pulse="true"] .tc-continuity-item { animation: none; }')
+    expect(reduced).toContain('.tc-product-tabs button { transition: none; }')
+  })
+
+  it('F-8: the frame morph wrapper keys on the surface so switches animate', () => {
+    const src = readFileSync(`${process.cwd()}/src/components/ProductSurfaceTabs.jsx`, 'utf8')
+    expect(src).toContain('key={surface.id} className="tc-product-morph"')
   })
 
   it('no hardcoded per-surface capability strings survive in the sources', () => {

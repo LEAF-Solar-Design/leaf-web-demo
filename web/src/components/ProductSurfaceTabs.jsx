@@ -1,4 +1,39 @@
+import { useEffect, useRef, useState } from 'react'
 import { PRODUCT_SURFACES, SHARED_WORKSPACE_CAPABILITIES, productSurface } from '../site/productSurfaces.js'
+
+// F-8: the continuity layer, made visible. Lives in the always-mounted nav so
+// it NEVER remounts on a profile switch (that persistence is the point, and
+// the test asserts node identity across switches). Renders ONLY live data:
+// the open project and the same catalog fold every surface consumes (F-7).
+// A surface change pulses it (class toggle, never a remount); the pulse and
+// every other F-8 motion is disabled under prefers-reduced-motion in CSS.
+export function ContinuityRail({ activeSurface, project, catalog }) {
+  const [pulse, setPulse] = useState(false)
+  const first = useRef(true)
+  useEffect(() => {
+    if (first.current) { first.current = false; return }
+    setPulse(true)
+    const t = setTimeout(() => setPulse(false), 600)
+    return () => clearTimeout(t)
+  }, [activeSurface])
+  const families = catalog?.families || []
+  const capabilityCount = families.reduce(
+    (count, family) => count + (family.capabilities?.length || 0),
+    0,
+  )
+  return (
+    <div className="tc-continuity" data-testid="continuity-rail" data-pulse={pulse ? 'true' : 'false'}>
+      <span className="tc-continuity-label">Carried across every profile</span>
+      <span className="tc-continuity-item">{project ? <>project · <strong>{project}</strong></> : 'no project open'}</span>
+      {families.length > 0 && (
+        <span className="tc-continuity-item">
+          catalog · <strong>{families.length} {families.length === 1 ? 'family' : 'families'} / {capabilityCount} tools</strong>
+        </span>
+      )}
+      <span className="tc-continuity-item tc-continuity-static">conversation · approvals · runs · receipts</span>
+    </div>
+  )
+}
 
 function moveProductTab(event) {
   if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
@@ -15,7 +50,7 @@ function moveProductTab(event) {
   tabs[next].click()
 }
 
-export default function ProductSurfaceTabs({ activeSurface, states, onSelect }) {
+export default function ProductSurfaceTabs({ activeSurface, states, onSelect, project = null, catalog = null }) {
   return (
     <nav className="tc-product-nav" data-cast="tool" aria-label="Product workspace">
       <div className="tc-product-tabs" role="tablist" aria-label="Workspace profile" onKeyDown={moveProductTab}>
@@ -41,9 +76,11 @@ export default function ProductSurfaceTabs({ activeSurface, states, onSelect }) 
           )
         })}
       </div>
-      <span className="tc-product-shared" title={SHARED_WORKSPACE_CAPABILITIES.join(', ')}>
-        One project, shared Claude, tools, approvals, runs, and receipts
-      </span>
+      <ContinuityRail
+        activeSurface={activeSurface}
+        project={project}
+        catalog={catalog}
+      />
     </nav>
   )
 }
@@ -125,6 +162,11 @@ export function ProductSurfaceFrame({ activeSurface, states, projectSlot, onOpen
       data-cast="tool"
       data-surface={surface.id}
     >
+      {/* F-8 morph: the key remounts this wrapper per surface, so the CSS
+          enter animation runs on every profile switch. The section above
+          stays put (stable tabpanel identity); prefers-reduced-motion
+          disables the animation in CSS, never in JS. */}
+      <div key={surface.id} className="tc-product-morph">
       <div className="tc-product-frame-head">
         <span>{surface.eyebrow}</span>
         <strong>{status.label}</strong>
@@ -150,6 +192,7 @@ export function ProductSurfaceFrame({ activeSurface, states, projectSlot, onOpen
       <button type="button" className="tc-product-cad-link" onClick={onOpenCad}>
         {surface.id === 'solar' ? 'Open the solar template in the CAD workspace' : 'Open the live CAD workspace'}
       </button>
+      </div>
     </section>
   )
 }
