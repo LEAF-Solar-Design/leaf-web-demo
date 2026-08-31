@@ -2518,6 +2518,8 @@ export default function App() {
           <ProductSurfaceFrame
             activeSurface={activeSurface}
             states={surfaceStates}
+            catalog={catalog}
+            catalogError={catalogErr}
             projectSlot={activeSurface === 'ios'
               ? <IosSurface enabled={ENV_IOS_SURFACE} contract={iosContract} />
               : <span className="dim">{openProjectId ? currentProjectName || projectName : 'No project open'}</span>}

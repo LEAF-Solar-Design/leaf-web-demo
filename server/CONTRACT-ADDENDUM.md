@@ -1704,3 +1704,36 @@ compare-and-set revision control, preserve unrelated tenant policy fields, and
 audit the verified account owner subject. The browser never receives an approval
 secret or confirmation material. When strict mode is on, the existing independent
 approval, denial, expiry, receipt verification, and recovery rules remain in force.
+
+## §25 The capability/catalog contract map (card F-7)
+
+Five capability-shaped endpoints exist. They are NOT five contracts by
+design drift; each has a distinct scoping model, and this section is the one
+place that names which endpoint each product surface consumes and why. No
+endpoint scopes by client surface: the catalog's only tenant-data scoping
+axis is the resolved caller tenant, and every product surface projects the
+SAME tenant fold (`deps.all_tools`).
+
+| Endpoint | Scoping | Consumer |
+|---|---|---|
+| `GET /api/capabilities` | tenant-scoped families over `deps.all_tools` (globals + the caller tenant's own repo tools; `internal_qa` filtered unless the ops-verified QA header) | the app shell's catalog rail on every product tab, and (F-7) each surface frame's live capability projection |
+| `GET /api/tools` | the same tenant fold, flat list | catalog fallback when families fail; slash-tools |
+| `GET /api/site/capabilities` | public, builtin-only projection with HTTP validators — no tenant data | the unauthenticated site/demo shell |
+| `GET /api/platform/capabilities` | authenticated org/project submission context + live worker health + entitlements; "capability truth, never promoted from configuration alone" | run/build gating; the F-4 engine selector lands here |
+| `GET /api/capabilities/promotion/stringing` | UNMOUNTED — `capabilities_promotion.router` is not included in `app.py`; dead by record | nothing (documented standalone) |
+
+Surface projection (web, card F-7): each product tab's frame renders the
+live `/api/capabilities` families through `SurfaceCapabilities`, filtered by
+the surface's `familyIds` (browser: custom/measurement/selection; solar:
+stringing/placement; ios: the whole catalog). This filter is presentation
+focus in `web/src/site/productSurfaces.js`, not a server scoping model, and
+must never become one silently.
+
+Vendor note: `server/_vendor/mushy_fold` (pinned to
+`LEAF-Solar-Design/mushy-code`) is the WIRED core of the tenant fold:
+`deps.load_tenant_repo_tools` delegates the call-time registry read to the
+vendored `mushy_fold.registry.load_repo_registry_tools` (PR #474), with
+tenant resolution and the malformed-registry diagnostic staying in-repo. The
+disposition and its exact import surface are recorded in
+`_vendor/VENDOR-PIN.json` and tripwired by
+`tests/test_mushy_fold_vendor_disposition.py`.
