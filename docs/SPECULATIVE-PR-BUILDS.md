@@ -31,7 +31,14 @@ not minutes.
 2. **Build the preview.** `prepare` validates the dispatched head against
    the open PR via the pulls API (same-repo, non-fork, exact head), fetches
    `refs/pull/<n>/merge`, proves the preview still merges that head, and
-   checks it out. The five-image matrix (`speculate`) builds that tree with
+   checks it out. One validation outcome is benign: a PR merged within
+   seconds of its triggering event closes before the dispatched guard reads
+   it, and since the push-to-main run then owns those exact bytes, a PR the
+   API reports MERGED with the exact dispatched head (all other identity
+   conditions unchanged) ends the run green with nothing built —
+   speculation superseded by merge. Any other mismatch (stale or foreign
+   head, closed without merging) fails the run as before. The five-image
+   matrix (`speculate`) builds that tree with
    inputs byte-identical to the gated build's and pushes each image as
    `spec-<tree>-<preview12>` — a namespace no deploy workflow accepts (the
    staging deploy validates tags against `sha-*`/`prod-*` only), so

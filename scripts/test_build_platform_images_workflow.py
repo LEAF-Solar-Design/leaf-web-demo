@@ -600,20 +600,42 @@ def main() -> None:
     solver_start = text.index("      - name: Resolve canonical solver provenance")
     source_body = text[source_start:solver_start]
     assert '--arg repo "$GITHUB_REPOSITORY"' in source_body
-    # TWO PR-validating arms live in this step now: the draft-PR dispatch
-    # mode and the speculative mode (which validates the exact open PR by
-    # number). Both must pin the same-repository, non-fork, exact-head jq
-    # conditions; only the draft arm requires .draft.
-    for required_check in (
-        '.state == "open"',
-        '.base.ref == "main"',
-        ".head.repo.full_name == $repo",
-        ".head.repo.fork == false",
-        "(.head.sha | ascii_downcase) == $sha",
+    # THREE PR-validating jq blocks live in this step now: the draft-PR
+    # dispatch mode, the speculative mode (which validates the exact open
+    # PR by number), and the speculative mode's merged-race arm — a PR
+    # merged seconds before the dispatched guard read it ends the run
+    # green instead of red (runs 33334277156, 33359992686). All must pin
+    # the same-repository, non-fork, exact-head jq conditions; only the
+    # draft arm requires .draft, only the two live arms require
+    # .state == "open", and only the merged arm accepts .merged — the
+    # sha comparison itself is never relaxed.
+    for required_check, occurrences in (
+        ('.state == "open"', 2),
+        ('.base.ref == "main"', 3),
+        (".head.repo.full_name == $repo", 3),
+        (".head.repo.fork == false", 3),
+        ("(.head.sha | ascii_downcase) == $sha", 3),
+        (".merged == true", 1),
     ):
-        assert source_body.count(required_check) == 2, required_check
+        assert source_body.count(required_check) == occurrences, required_check
     assert source_body.count(".draft == true") == 1
     assert "exact head of an open same-repository draft PR" in source_body
+    # The merged-race arm is benign-exit only: it sets superseded (which
+    # gates the later prepare steps and both speculative jobs off) and
+    # stops; it never reaches the preview fetch. The wrong-head error
+    # stays word-for-word, and the merged jq sits between the open check
+    # and that error, so it can only fire once the open arm has refused.
+    assert source_body.count('echo "superseded=true" >> "$GITHUB_OUTPUT"') == 1
+    assert "Speculation superseded by merge" in source_body
+    assert (
+        "Speculative source must be the exact current head of the open "
+        "same-repository PR." in source_body
+    )
+    merged_at = source_body.index(".merged == true")
+    assert source_body.index('.state == "open"') < merged_at
+    assert merged_at < source_body.index(
+        "Speculative source must be the exact current head"
+    )
     # The speculative arm builds the merge preview only after proving it
     # still merges the dispatched head, and can never promote.
     assert "A speculative run can never promote." in source_body
@@ -1208,9 +1230,17 @@ def main() -> None:
         )
     docs_gate = "steps.decide.outputs.build == 'true'"
     docs_skip = "steps.decide.outputs.build == 'false'"
+    # Steps after the source step additionally gate on its merged-race
+    # superseded output: past that arm there is nothing to tag, validate,
+    # or hint for, and the tag step must not mint a prod-* value from the
+    # PR-head checkout the preview never replaced.
+    live_gate = (
+        "steps.decide.outputs.build == 'true' && "
+        "steps.source.outputs.superseded != 'true'"
+    )
     assert step_ifs == [
         [], [], [docs_skip], [docs_skip],
-        [docs_gate], [docs_gate], [docs_gate], [docs_gate], [docs_gate],
+        [docs_gate], [live_gate], [live_gate], [live_gate], [live_gate],
     ], step_ifs
     hint_ranges = []
     for n, start in enumerate(step_starts):
@@ -1251,14 +1281,17 @@ def main() -> None:
     # if: on the step (or an emptied GH_TOKEN) silently restores permanent
     # expected=false - warm runs on every reuse path again with nothing
     # red anywhere (round 3, finding 2). Since the 2026-08-05 fold the
-    # step carries exactly ONE permitted condition — the docs-noop gate,
-    # already pinned per step above — and no other: when build == 'false'
-    # the warm job itself is gated off, so this condition can never starve
-    # a live warm; any OTHER condition could. Pinned by exact value.
+    # step carries exactly the TWO permitted conditions — the docs-noop
+    # gate and the merged-race superseded gate, already pinned per step
+    # above — and no other. Neither can starve a live warm: when
+    # build == 'false' the warm job itself is gated off, and superseded
+    # only ever sets on a speculative dispatch, where warm's
+    # !inputs.speculative guard gates it off too; any OTHER condition
+    # could. Pinned by exact value.
     hint_conditions = [
         _value_of(l) for l in hint_structural if _key_of(l) == "if"
     ]
-    assert hint_conditions == [docs_gate], hint_conditions
+    assert hint_conditions == [live_gate], hint_conditions
     hint_tokens = [
         _value_of(l) for l in hint_structural if _key_of(l) == "GH_TOKEN"
     ]
@@ -2043,7 +2076,8 @@ def main() -> None:
         if _key_of(l) == "if" and l.startswith("    if")
     ]
     assert speculate_guards == [
-        "${{ github.event_name == 'workflow_dispatch' && inputs.speculative }}"
+        "${{ github.event_name == 'workflow_dispatch' && inputs.speculative && "
+        "needs.prepare.outputs.superseded != 'true' }}"
     ], speculate_guards
     assert "fail-fast: false" in speculate_block
     speculate_matrices = [
@@ -2159,7 +2193,8 @@ def main() -> None:
     manifest_guard = (
         "    if: >-\n"
         "      ${{ !cancelled() && github.event_name == 'workflow_dispatch' &&\n"
-        "          inputs.speculative && needs.prepare.result == 'success' }}\n"
+        "          inputs.speculative && needs.prepare.result == 'success' &&\n"
+        "          needs.prepare.outputs.superseded != 'true' }}\n"
     )
     assert text.count(manifest_guard) == 1
     assert manifest_guard in manifest_block
@@ -2294,7 +2329,8 @@ def main() -> None:
     wf_jobs = wf_doc["jobs"]
 
     assert wf_jobs["speculate"]["if"] == (
-        "${{ github.event_name == 'workflow_dispatch' && inputs.speculative }}"
+        "${{ github.event_name == 'workflow_dispatch' && inputs.speculative && "
+        "needs.prepare.outputs.superseded != 'true' }}"
     )
     assert wf_jobs["adopt"]["if"] == (
         "${{ !inputs.promote && github.event_name == 'push' && "
@@ -2302,7 +2338,8 @@ def main() -> None:
     )
     assert _folded(wf_jobs["speculate-manifest"]["if"]) == (
         "${{ !cancelled() && github.event_name == 'workflow_dispatch' && "
-        "inputs.speculative && needs.prepare.result == 'success' }}"
+        "inputs.speculative && needs.prepare.result == 'success' && "
+        "needs.prepare.outputs.superseded != 'true' }}"
     )
     assert _folded(wf_jobs["build"]["if"]) == (
         "${{ !cancelled() && !inputs.promote && !inputs.speculative && "
@@ -2812,6 +2849,12 @@ def check_docs_noop_filter(text: str) -> None:
     assert "needs" not in prepare_job, "prepare is the graph's root job"
     assert "if" not in prepare_job
     assert prepare_job["outputs"]["build"] == "${{ steps.decide.outputs.build }}"
+    # The merged-race arm's benign exit travels as a first-class prepare
+    # output; the speculate / speculate-manifest guards and the late
+    # prepare step gates all read exactly this.
+    assert prepare_job["outputs"]["superseded"] == (
+        "${{ steps.source.outputs.superseded }}"
+    )
     # prepare SUCCEEDS on a docs-only push (it must: it publishes the
     # marker artifact), so the docs gate is enforced by the three guards
     # below plus build/verify's needs-result checks — a docs-only push
