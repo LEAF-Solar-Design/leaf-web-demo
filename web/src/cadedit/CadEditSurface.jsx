@@ -12,32 +12,40 @@
  *   re-serializes, RE-PARSES the written bytes, and reports the state a
  *   reader of those bytes would actually see -> download the resulting .dxf.
  *
+ * W1 (convergence): the session itself — EngineBoundary construction, worker
+ * lifetime, document bytes, the entity list, selection identity, edit
+ * dispatch, the save-as-version flow and every busy/error/refusal state —
+ * moved to ./engineSession.js, the ONE engine-session store
+ * (docs/convergence/ACCEPTANCE.md "Engine-session ownership"). This file is
+ * now purely its consumer: it renders the store and owns nothing but form
+ * inputs and the download URL. No visual or behavioural change came with
+ * that move.
+ *
  * Isolation: the only engine contact is web/src/cad/engineWorker.js's
  * EngineBoundary, unmodified — every message both directions is
  * schema-validated there. The worker is spawned lazily on the first open,
- * never at mount, and the ONLY place this module names the worker path is
- * the one spawn shape the license fence allows (deny rule 3).
- *
- * Persistence deliberately stays out of this slice (the save-as-new-version
- * leg is the card's second PR): nothing is uploaded, nothing touches the
- * project, the download is the only output.
+ * never at mount, and the ONLY place this repo's web tree names the engine
+ * worker path is the one spawn shape the license fence allows (deny rule 3),
+ * which stays HERE. The store never names it: it takes the factory as a
+ * required injected dependency precisely so the extraction adds no second
+ * legal site (docs/CAD-ENGINE-LICENSE-FENCE.md).
  *
  * Flag: ENV_CAD_EDIT must be the FIRST operand of the `&&` at the call site
- * so a flag-off build folds this whole module away.
+ * so a flag-off build folds this whole module away — and, transitively,
+ * engineSession.js, which nothing else imports.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 
-import { EngineBoundary } from '../cad/engineWorker.js'
+import { useDrawingIdentityOptional } from '../drawing/DrawingIdentityProvider.jsx'
 
 import { ENV_CAD_EDIT } from './flag.js'
-
-// Mirrors the worker's own bound. Checked against File.size BEFORE any read,
-// so an oversized file costs a comparison, never a decode.
-const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
+import useEngineSession from './engineSession.js'
 
 function defaultCreateWorker() {
-  // The one legal spawn shape, and the only place this module names the
-  // engine worker's path (license fence deny rule 3).
+  // The one legal spawn shape, and the only place this repo's web tree names
+  // the engine worker's path (license fence deny rule 3). It stays at the
+  // call site: the engine-session store takes this factory as an argument so
+  // there is exactly one such site to bless, not two.
   return new Worker(
     new URL('../../../vendor/acadrust-worker/worker-browser.mjs', import.meta.url),
     { type: 'module' },
@@ -46,16 +54,6 @@ function defaultCreateWorker() {
 
 function fmt(n) {
   return Number.isInteger(n) ? String(n) : n.toFixed(2)
-}
-
-function parseDelta(raw) {
-  const n = Number.parseFloat(raw)
-  return Number.isFinite(n) ? n : null
-}
-
-async function sha256Hex(bytes) {
-  const digest = await crypto.subtle.digest('SHA-256', bytes)
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
 }
 
 export default function CadEditSurface({
@@ -71,18 +69,26 @@ export default function CadEditSurface({
   // runtime (the client tree may not name the engine — license fence).
   notice = '',
 }) {
-  const boundaryRef = useRef(null)
-  const [documentId, setDocumentId] = useState('')
-  const [entities, setEntities] = useState([])
-  const [entityCount, setEntityCount] = useState(0)
-  const [selectedId, setSelectedId] = useState('')
+  // The surface stays mountable on its own (its own specs, a future embed):
+  // no provider means no drawing identity, which is a real state. When there
+  // IS one, a drawing switch resets the session — no cross-document bleed.
+  const identity = useDrawingIdentityOptional()
+  const session = useEngineSession({
+    createWorker,
+    saveTarget,
+    onSaved,
+    drawingId: identity?.drawingId ?? null,
+  })
+  const {
+    documentId, entities, entityCount, selectedId, selected, status, savedBytes, busy,
+  } = session
+
+  // Form inputs stay here: they are what the operator is typing, not session
+  // state the store owes anyone.
   const [vertexIndex, setVertexIndex] = useState('0')
   const [dx, setDx] = useState('10')
   const [dy, setDy] = useState('0')
   const [layerName, setLayerName] = useState('')
-  const [status, setStatus] = useState('')
-  const [savedBytes, setSavedBytes] = useState(null)
-  const [busy, setBusy] = useState(false)
 
   const downloadUrl = useMemo(() => {
     if (!savedBytes) return ''
@@ -93,173 +99,20 @@ export default function CadEditSurface({
     if (downloadUrl) URL.revokeObjectURL(downloadUrl)
   }, [downloadUrl])
 
-  useEffect(() => () => {
-    boundaryRef.current?.terminate()
-    boundaryRef.current = null
-  }, [])
-
-  const ensureBoundary = useCallback(() => {
-    if (boundaryRef.current) return boundaryRef.current
-    const boundary = new EngineBoundary({ flags: { cad_edit: true }, createWorker })
-    boundary.onMessage((message) => {
-      if (message.type === 'ready') return
-      if (message.type === 'documentLoaded') {
-        setEntities(message.entities ?? [])
-        setEntityCount(message.entityCount ?? 0)
-        setSelectedId('')
-        setSavedBytes(null)
-        setBusy(false)
-        const others = (message.unsupported ?? []).length
-        setStatus(
-          `Loaded ${message.documentId}: ${message.entityCount} entities`
-          + (others ? ` (${others} preserved as read-only kinds).` : '.'))
-        return
-      }
-      if (message.type === 'editApplied') {
-        setBusy(false)
-        if (!message.ok) {
-          setStatus(`Edit refused (${message.op}): ${message.reason ?? 'unknown reason'}`)
-          return
-        }
-        setEntities(message.entities ?? [])
-        setEntityCount(message.entityCount ?? 0)
-        setSavedBytes(message.bytes ?? null)
-        setSelectedId((previous) =>
-          (message.entities ?? []).some((entity) => entity.id === previous) ? previous : '')
-        setStatus(
-          `${message.op} applied. Re-parsed from the written bytes: `
-          + `${message.entityCount} entities, ${message.byteLength} bytes.`)
-        return
-      }
-      if (message.type === 'error') {
-        setBusy(false)
-        setEntities([])
-        setEntityCount(0)
-        setSavedBytes(null)
-        setStatus(`Engine refused: ${message.message}`)
-      }
-    })
-    boundary.start()
-    boundary.post({ type: 'init' })
-    boundaryRef.current = boundary
-    return boundary
-  }, [createWorker])
-
-  const openFile = useCallback(async (event) => {
+  const { open, applyEdit } = session.actions
+  const openFile = useCallback((event) => {
     const file = event.target.files?.[0]
+    // Cleared BEFORE the async read so re-choosing the same file still fires.
     event.target.value = ''
-    if (!file) return
-    if (file.size > MAX_DOCUMENT_BYTES) {
-      setStatus(`Refused ${file.name}: ${file.size} bytes exceeds the ${MAX_DOCUMENT_BYTES}-byte limit.`)
-      return
-    }
-    setBusy(true)
-    setDocumentId(file.name)
-    setStatus(`Reading ${file.name}...`)
-    let bytes
-    try {
-      bytes = new Uint8Array(await file.arrayBuffer())
-    } catch {
-      setBusy(false)
-      setStatus(`Could not read ${file.name}.`)
-      return
-    }
-    const boundary = ensureBoundary()
-    if (!boundary.post({ type: 'loadDocument', documentId: file.name, bytes })) {
-      setBusy(false)
-      setStatus(`Could not send ${file.name} to the engine.`)
-    }
-  }, [ensureBoundary])
+    open(file)
+  }, [open])
 
   const runEdit = useCallback((op) => {
-    if (!selectedId) return
-    const payload = { entityId: selectedId }
-    if (op === 'move') {
-      const deltaX = parseDelta(dx)
-      const deltaY = parseDelta(dy)
-      if (deltaX === null || deltaY === null) {
-        setStatus('Move refused: dx and dy must both be numbers.')
-        return
-      }
-      payload.dx = deltaX
-      payload.dy = deltaY
-    }
-    if (op === 'moveVertex' || op === 'addVertex' || op === 'deleteVertex') {
-      const vi = Number.parseInt(vertexIndex, 10)
-      if (!Number.isInteger(vi) || vi < 0) {
-        setStatus(`${op} refused: vertex must be a non-negative integer.`)
-        return
-      }
-      payload.vertexIndex = vi
-      if (op === 'moveVertex') {
-        const deltaX = parseDelta(dx)
-        const deltaY = parseDelta(dy)
-        if (deltaX === null || deltaY === null) {
-          setStatus('Move vertex refused: dx and dy must both be numbers.')
-          return
-        }
-        payload.dx = deltaX
-        payload.dy = deltaY
-      }
-      if (op === 'addVertex') {
-        const x = parseDelta(dx)
-        const y = parseDelta(dy)
-        if (x === null || y === null) {
-          setStatus('Add vertex refused: x and y must both be numbers.')
-          return
-        }
-        payload.x = x
-        payload.y = y
-      }
-    }
-    if (op === 'setLayer') {
-      const trimmed = layerName.trim()
-      if (!trimmed) {
-        setStatus('Set layer refused: enter a layer name.')
-        return
-      }
-      payload.layer = trimmed
-    }
-    const boundary = boundaryRef.current
-    if (!boundary) {
-      setStatus('Edit refused: no document is open.')
-      return
-    }
-    setBusy(true)
-    if (!boundary.post({ type: 'applyEdit', op, payload })) {
-      setBusy(false)
-      setStatus(`Edit refused (${op}): the boundary rejected the message.`)
-    }
-  }, [dx, dy, layerName, selectedId, vertexIndex])
-
-  // The persistence leg: post the EXACT edited bytes with a client-computed
-  // digest; the server recomputes, parses, and compare-and-sets against the
-  // head. A 409 (head moved) reads back as a plain instruction to refresh.
-  const saveToProject = useCallback(async () => {
-    if (!savedBytes || !saveTarget || busy) return
-    setBusy(true)
-    setStatus('Saving to the project as a new version...')
-    try {
-      const digest = await sha256Hex(savedBytes)
-      const receipt = await saveTarget.save(savedBytes, saveTarget.headVersion, digest)
-      setBusy(false)
-      const nv = receipt?.new_version?.version ?? receipt?.head
-      setStatus(
-        `Saved as version ${nv} (parent ${receipt?.new_version?.parent}), `
-        + `digest ${String(receipt?.source_sha256 || digest).slice(0, 12)}…, `
-        + `engine cost $${receipt?.cost?.engine_usd ?? 0}.`)
-      onSaved?.(receipt)
-    } catch (error) {
-      setBusy(false)
-      setStatus(error?.status === 409
-        ? `Save refused: ${error.message}`
-        : `Save failed: ${error?.message || error}`)
-    }
-  }, [busy, onSaved, saveTarget, savedBytes])
+    applyEdit(op, { dx, dy, vertexIndex, layer: layerName })
+  }, [applyEdit, dx, dy, layerName, vertexIndex])
 
   if (!enabled) return null
 
-  const selected = entities.find((entity) => entity.id === selectedId) || null
   const canEdit = selected !== null && selected.editable !== false && !busy
 
   return (
@@ -295,7 +148,7 @@ export default function CadEditSurface({
                   name="cad-edit-entity"
                   value={entity.id}
                   checked={selectedId === entity.id}
-                  onChange={() => setSelectedId(entity.id)}
+                  onChange={() => session.actions.select(entity.id)}
                   disabled={entity.editable === false}
                 />
                 {entity.type} on layer {entity.layer}
@@ -368,7 +221,7 @@ export default function CadEditSurface({
           type="button"
           className="cad-edit-workbench-save"
           data-testid="cad-edit-save-version"
-          onClick={saveToProject}
+          onClick={session.actions.save}
           disabled={busy}
         >
           Save to project as new version

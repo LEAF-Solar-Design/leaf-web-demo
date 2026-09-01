@@ -59,6 +59,7 @@ import useCheckoutController from '../controllers/checkout/useCheckoutController
 import useDrawingUploadController from '../controllers/upload/useDrawingUploadController.js'
 import useSessionController from '../controllers/session/useSessionController.js'
 import { selectCurrentProjectName } from '../controllers/workspace/createWorkspaceController.js'
+import { useDrawingScopeReset } from '../drawing/DrawingIdentityProvider.jsx'
 import { matchPrompt } from '../mock/mockNlPrompt.js'
 import {
   confirmRunIntent,
@@ -716,6 +717,12 @@ export default function ToolCast({
     await login()
   }, [checkout.actions])
   const workspace = useWorkspaceController({ mock: transportMock, services: workspaceServices })
+  // Scope-reset contract (docs/convergence/ACCEPTANCE.md, binding): document
+  // identity persists across interactions, so it must NOT survive a project
+  // switch or close — no drawing from the previous project's scope may still
+  // be addressed under the next one. Opening the FIRST project of a session
+  // is not a switch and keeps the boot seed.
+  useDrawingScopeReset(workspace.openProjectId)
   // Live sessions echo the verified subject's org — persist it (leaf.org_id)
   // so a fresh browser lists its projects instead of the create-org bootstrap.
   useSessionOrgAdoption(sessionOrg, workspace.adoptOrgId)

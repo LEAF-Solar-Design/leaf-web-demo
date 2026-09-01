@@ -6,24 +6,27 @@
 // or an Auth0 callback (?code= AND ?state=) boots straight into scene 'app'
 // regardless of path — every pre-existing deep link keeps working byte-for-
 // byte. Checked ONCE at boot; navigate() preserves the search string.
+//
+// W1 (convergence): each scene now mounts DrawingIdentityProvider in its MODE
+// — console for the /app console, operator for the stage — and the stage's
+// casts moved into StageScene.jsx so they can READ that provider. Routing,
+// the auth-callback deferral, the marketing redirect and the keyboard/inert
+// passes are untouched.
 
-import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { Suspense, useEffect, useRef, useState } from 'react'
 import { markInstant } from '../lib/instant.js'
 import { useRoute, navigate } from './router.js'
 import { sceneForPath } from './routeScene.js'
-import StageLayer from './StageLayer.jsx'
-import LandingCast from './LandingCast.jsx'
-import ToolCast from './ToolCast.jsx'
+import StageScene from './StageScene.jsx'
 import { WorkspaceControllerProvider } from '../controllers/WorkspaceControllerProvider.jsx'
 import { handleRedirectCallback, isSignedIn } from '../auth.js'
 import { bootWantsApp, shouldDeferForAuthCallback } from './authBoot.js'
-import { liveDrawingId, rememberLiveDrawingId } from './workbenchId.js'
 import {
-  getDrawingIntake,
-  getDrawingVersions,
-  redoDrawing,
-  undoDrawing,
-} from '../api.js'
+  DRAWING_MODE_CONSOLE,
+  DRAWING_MODE_OPERATOR,
+  DrawingIdentityProvider,
+} from '../drawing/DrawingIdentityProvider.jsx'
+import { classifyDemo } from '../drawing/drawingIdentity.js'
 import './landing.css'
 
 const App = React.lazy(() => import('../App.jsx'))
@@ -48,30 +51,18 @@ const APP_ONLY_HOSTS = new Set([
 ])
 const MARKETING_ORIGIN = 'https://www.leafautomation.ai'
 
-const DEMO_VALUE = new URLSearchParams(window.location.search).get('demo')
-const PUBLIC_DEMO = DEMO_VALUE === '1' && !isSignedIn()
-const LIVE_DEMO = DEMO_VALUE === 'tour' || (DEMO_VALUE === '1' && isSignedIn())
-const PROOF_MODE =
-  import.meta.env.VITE_CAT_PROOF === '1' ||
-  new URLSearchParams(window.location.search).get('proof') === '1'
-const INITIAL_OPERATOR_DRAWING_ID = PROOF_MODE
-  ? 'cat-panels'
-  : PUBLIC_DEMO
-    ? 'demo'
-    : LIVE_DEMO
-      ? 'rooftop_demo'
-    : liveDrawingId()
-const loadHead = (drawingId) => getDrawingIntake(PUBLIC_DEMO, drawingId, 'head')
-const loadVersion = (drawingId, version) => getDrawingIntake(PUBLIC_DEMO, drawingId, version)
-// /try does not render delta chips. Its recovery-only restore controls need
-// the stable version list but not the larger delta response used by /app.
-const loadVersions = (drawingId) => getDrawingVersions(PUBLIC_DEMO, drawingId)
-const undoVersion = (drawingId, capability) => undoDrawing(PUBLIC_DEMO, drawingId, capability)
-const redoVersion = (drawingId, capability) => redoDrawing(PUBLIC_DEMO, drawingId, capability)
+// THE reading of the boot query, made once (ACCEPTANCE route matrix: "one
+// reading must serve both consumers"). The same string drives the BOOT
+// decision (bootWantsApp) and the drawing SELECTION (classifyDemo, handed to
+// the provider rather than re-read there), so the two cannot drift.
+// navigate() preserves the search, and nothing else rewrites it.
+const BOOT_SEARCH = window.location.search
+const DEMO = classifyDemo(BOOT_SEARCH, isSignedIn())
+const PUBLIC_DEMO = DEMO.publicDemo
 
 export default function SiteRoot() {
   // Evaluated once at boot — deep links into the console never see the site.
-  const [bootApp] = useState(() => bootWantsApp(window.location.search, window.location.pathname))
+  const [bootApp] = useState(() => bootWantsApp(BOOT_SEARCH, window.location.pathname))
   // Armed by the callback QUERY on ANY path, not just /try: the redirect_uri is
   // the bare origin, so /try is the one landing this never sees. See authBoot.js.
   const [authCallbackPending, setAuthCallbackPending] = useState(shouldDeferForAuthCallback)
@@ -88,28 +79,6 @@ export default function SiteRoot() {
     window.location.replace(MARKETING_ORIGIN + target)
   }, [scene])
   const stageRef = useRef(null)
-  const stageLayerRef = useRef(null)
-  const [operatorIntake, setOperatorIntake] = useState(null)
-  const [operatorViewMode, setOperatorViewMode] = useState('flat')
-  const [operatorVisibleLayers, setOperatorVisibleLayers] = useState(null)
-  const [operatorSelectedHandle, setOperatorSelectedHandle] = useState(null)
-  const [operatorOverlay, setOperatorOverlay] = useState(null)
-  const [operatorDrawingId, setOperatorDrawingId] = useState(INITIAL_OPERATOR_DRAWING_ID)
-  const drawingOptions = useMemo(() => ({
-    loadHead,
-    loadVersion,
-    loadVersions,
-    undoVersion,
-    redoVersion,
-    onApplyIntake: setOperatorIntake,
-    onResetSelection: () => setOperatorSelectedHandle(null),
-  }), [])
-  const promoteOperatorDrawing = useCallback((receipt) => {
-    const drawingId = receipt?.drawing_id || null
-    if (!drawingId) return
-    setOperatorDrawingId(drawingId)
-    if (receipt.tenant_kind === 'account') rememberLiveDrawingId(drawingId)
-  }, [])
 
   useEffect(() => {
     if (!authCallbackPending) return
@@ -193,11 +162,13 @@ export default function SiteRoot() {
   if (scene === 'app') {
     // The console ALONE — no stage mounted; App owns its own Viewer.
     return (
-      <WorkspaceControllerProvider drawingId="rooftop_demo" retryNotFound>
-        <Suspense fallback={null}>
-          <App />
-        </Suspense>
-      </WorkspaceControllerProvider>
+      <DrawingIdentityProvider mode={DRAWING_MODE_CONSOLE} search={BOOT_SEARCH}>
+        <WorkspaceControllerProvider drawingId="rooftop_demo" retryNotFound>
+          <Suspense fallback={null}>
+            <App />
+          </Suspense>
+        </WorkspaceControllerProvider>
+      </DrawingIdentityProvider>
     )
   }
 
@@ -210,33 +181,13 @@ export default function SiteRoot() {
   }
 
   return (
-    <WorkspaceControllerProvider
-      drawingId={scene === 'tool' ? operatorDrawingId : 'rooftop_demo'}
-      drawingOptions={drawingOptions}
+    <DrawingIdentityProvider
+      mode={DRAWING_MODE_OPERATOR}
+      search={BOOT_SEARCH}
+      publicDemo={DEMO.publicDemo}
+      liveDemo={DEMO.liveDemo}
     >
-      <main className="stage-root" data-scene={scene} ref={stageRef} aria-label={scene === 'tool' ? 'Leaf operator workspace' : 'Leaf product overview'}>
-        <StageLayer
-          ref={stageLayerRef}
-          intakeOverride={scene === 'tool' ? operatorIntake : null}
-          viewMode={scene === 'tool' ? operatorViewMode : 'flat'}
-          visibleLayers={scene === 'tool' ? operatorVisibleLayers : null}
-          selectedHandle={scene === 'tool' ? operatorSelectedHandle : null}
-          onSelectEntity={scene === 'tool' ? setOperatorSelectedHandle : undefined}
-          overlay={scene === 'tool' ? operatorOverlay : null}
-        />
-        <LandingCast onTryTool={() => navigate('/try')} />
-        <ToolCast
-          active={scene === 'tool'}
-          drawingId={operatorDrawingId}
-          onDrawingReady={promoteOperatorDrawing}
-          onFitDrawing={() => stageLayerRef.current?.fit()}
-          onViewModeChange={setOperatorViewMode}
-          onVisibleLayersChange={setOperatorVisibleLayers}
-          selectedHandle={operatorSelectedHandle}
-          onSelectedHandleChange={setOperatorSelectedHandle}
-          onResultOverlayChange={setOperatorOverlay}
-        />
-      </main>
-    </WorkspaceControllerProvider>
+      <StageScene scene={scene} stageRef={stageRef} publicDemo={PUBLIC_DEMO} />
+    </DrawingIdentityProvider>
   )
 }

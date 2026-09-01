@@ -98,6 +98,42 @@ wrapper module that re-exports a legal spawn from elsewhere in the tree, is
 still covered without this doc or the script needing to enumerate entry
 points by name.
 
+### Where the one legal spawn lives, after the W1 engine-session extraction
+
+Convergence W1 (docs/convergence/ACCEPTANCE.md, "Engine-session ownership")
+moved the engine SESSION — `EngineBoundary` construction, worker lifetime,
+document bytes, entity state, selection, edit dispatch, the save flow — out of
+`web/src/cadedit/CadEditSurface.jsx` and into
+`web/src/cadedit/engineSession.js`. The worker PATH deliberately did **not**
+move with it.
+
+`engineSession.js` takes its worker factory as a REQUIRED injected argument
+and never names the path, so the fence-legal spawn shape stays at exactly one
+site — `CadEditSurface.jsx` — and this extraction creates no second legal site
+to bless. That is why **`scripts/check_license_fence.py` is unchanged by W1**:
+its rules are shape-based and enumerate no entry points (deny rule 3 above),
+so there is nothing in them that the extraction could invalidate. This
+paragraph is the record of that deliberate no-op, so a reviewer diffing doc
+against script sees the decision rather than an omission.
+
+Two boundaries, kept distinct on purpose:
+
+- **Engine MESSAGES** cross `EngineBoundary` only. It is unmodified, and it
+  remains the sole schema-validating channel in both directions.
+- **Worker LIFETIME** is the session store's, by the ownership contract, and
+  lifetime includes death: the store attaches an `error` / `messageerror`
+  death watch to the worker handle it constructs, so a crashed worker becomes
+  a recoverable state instead of a silent hang. No engine payload is read
+  there — a Worker-API lifecycle event carries none.
+
+Companion control, NOT part of this script: `web/src/cadedit/engineOwnership.test.js`
+asserts that exactly one non-test module under `web/src` carries the legal
+spawn, which is what makes "ONE engine session owner" enforceable rather than
+merely documented. It detects by SHAPE (a legal spawn whose URL literal leaves
+`web/` for the repo's vendored sources) and names neither the engine nor the
+owning file — so it needs no exclusion here, cannot become the standing
+evasion hole the "exactly 3 paths" rule guards, and does not rot on a rename.
+
 ## Self-tests (negative + positive controls)
 
 `python scripts/check_license_fence.py --self-test` runs an embedded
