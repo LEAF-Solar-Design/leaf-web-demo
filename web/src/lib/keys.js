@@ -7,3 +7,9 @@ const isMac =
   typeof navigator !== 'undefined' && /Mac|iPhone|iPod|iPad/i.test(navigator.platform || '')
 
 export const MOD_KEY = isMac ? '⌘' : 'Ctrl'
+
+// Platform chord label: Mac convention omits the plus (⌘K), everything
+// else joins with one (Ctrl+K).
+export function modChord(key) {
+  return MOD_KEY === '⌘' ? `${MOD_KEY}${key}` : `${MOD_KEY}+${key}`
+}
