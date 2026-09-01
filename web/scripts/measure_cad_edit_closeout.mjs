@@ -2,7 +2,15 @@
 
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+} from 'node:fs'
 import { createServer as createNetServer } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
@@ -14,7 +22,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 const WEB_ROOT = path.resolve(HERE, '..')
 const REPO_ROOT = path.resolve(WEB_ROOT, '..')
 const FIXTURE = path.join(REPO_ROOT, 'vendor', 'acadrust-worker', 'fixtures', 'one_line.dxf')
-const PERF_PAGE = '/e2e/fixtures/cad-edit-perf.html'
+const PERF_HTML = path.join(WEB_ROOT, 'e2e', 'fixtures', 'cad-edit-perf.html')
 const SAMPLES = 10
 const P95_BUDGET_MS = 2_000
 const DELTA_BUDGET_BYTES = 5_120
@@ -84,6 +92,19 @@ function requirePath(candidate, message) {
   return candidate
 }
 
+function filesWithExtension(root, extension) {
+  const found = []
+  const visit = (directory) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const candidate = path.join(directory, entry.name)
+      if (entry.isDirectory()) visit(candidate)
+      else if (entry.isFile() && entry.name.endsWith(extension)) found.push(candidate)
+    }
+  }
+  visit(root)
+  return found
+}
+
 function viteBin() {
   return requirePath(
     path.join(WEB_ROOT, 'node_modules', 'vite', 'bin', 'vite.js'),
@@ -149,7 +170,7 @@ function build(flag, outDir) {
   }
 }
 
-function engineWasm() {
+function enginePackage() {
   const pkgDir = path.join(REPO_ROOT, 'vendor', 'acadrust-worker', 'pkg-web')
   if (!existsSync(pkgDir)) {
     throw new Error(`prerequisite missing: ${WASM_PREREQUISITE}`)
@@ -158,13 +179,57 @@ function engineWasm() {
   if (names.length !== 1) {
     throw new Error(`prerequisite missing: expected one *_bg.wasm in ${pkgDir}; run: ${WASM_PREREQUISITE}`)
   }
-  const bytes = readFileSync(path.join(pkgDir, names[0]))
+  const wasmName = names[0]
+  const bytes = readFileSync(path.join(pkgDir, wasmName))
   return {
-    file: `vendor/acadrust-worker/pkg-web/${names[0]}`,
-    bytes: bytes.length,
-    gzip_bytes: gzipSync(bytes, { mtime: 0 }).length,
-    sha256: sha256(bytes),
+    pkgDir,
+    wasmName,
+    receipt: {
+      file: `vendor/acadrust-worker/pkg-web/${wasmName}`,
+      bytes: bytes.length,
+      gzip_bytes: gzipSync(bytes, { mtime: 0 }).length,
+      sha256: sha256(bytes),
+    },
   }
+}
+
+async function buildPerformanceFixture(outDir, engine) {
+  const priorFlag = process.env.VITE_CAD_EDIT
+  process.env.VITE_CAD_EDIT = '1'
+  try {
+    const { build: viteBuild } = await import('vite')
+    await viteBuild({
+      configFile: path.join(WEB_ROOT, 'vite.config.js'),
+      root: WEB_ROOT,
+      logLevel: 'error',
+      build: {
+        outDir,
+        emptyOutDir: true,
+        rollupOptions: {
+          input: { 'cad-edit-perf': PERF_HTML },
+        },
+      },
+    })
+  } finally {
+    if (priorFlag === undefined) delete process.env.VITE_CAD_EDIT
+    else process.env.VITE_CAD_EDIT = priorFlag
+  }
+
+  const engineOut = path.join(outDir, 'engine')
+  mkdirSync(engineOut, { recursive: true })
+  for (const name of ['engine.js', engine.wasmName]) {
+    const source = requirePath(
+      path.join(engine.pkgDir, name),
+      `prerequisite missing: expected ${name} in ${engine.pkgDir}; run: ${WASM_PREREQUISITE}`,
+    )
+    copyFileSync(source, path.join(engineOut, name))
+  }
+
+  const pages = filesWithExtension(outDir, '.html')
+  if (pages.length !== 1) {
+    throw new Error(`expected exactly one performance HTML artifact, found ${pages.length}`)
+  }
+  return `/${path.relative(outDir, pages[0]).split(path.sep).join('/')}`
 }
 
 function gitSha() {
@@ -241,29 +306,38 @@ async function measure(chromium, pageUrl) {
 
 export async function main() {
   requirePath(FIXTURE, `named fixture missing: ${FIXTURE}`)
-  const wasm = engineWasm()
+  requirePath(PERF_HTML, `performance fixture missing: ${PERF_HTML}`)
+  const engine = enginePackage()
   const tempRoot = mkdtempSync(path.join(os.tmpdir(), 'leaf-cad-edit-f3-'))
   let vite = null
   try {
     const on = build('1', path.join(tempRoot, 'on'))
     const off = build('0', path.join(tempRoot, 'off'))
     const delta = on.initial.gzip_bytes - off.initial.gzip_bytes
+    const perfOut = path.join(tempRoot, 'perf')
+    const perfPage = await buildPerformanceFixture(perfOut, engine)
 
     const port = await freePort()
     const origin = `http://127.0.0.1:${port}`
     vite = spawn(
       process.execPath,
-      [viteBin(), '--host', '127.0.0.1', '--port', String(port), '--strictPort'],
+      [
+        viteBin(),
+        'preview',
+        '--host', '127.0.0.1',
+        '--port', String(port),
+        '--strictPort',
+        '--outDir', perfOut,
+      ],
       {
         cwd: WEB_ROOT,
-        env: { ...process.env, VITE_CAD_EDIT: '1' },
         stdio: 'ignore',
         windowsHide: true,
       },
     )
-    await waitForVite(`${origin}${PERF_PAGE}`, vite)
+    await waitForVite(`${origin}${perfPage}`, vite)
     const { chromium } = await import('@playwright/test')
-    const measured = await measure(chromium, `${origin}${PERF_PAGE}`)
+    const measured = await measure(chromium, `${origin}${perfPage}`)
     const p50 = percentile(measured.raw, 50)
     const p95 = percentile(measured.raw, 95)
     const performancePass = p95 <= P95_BUDGET_MS
@@ -286,8 +360,10 @@ export async function main() {
         budget: { comparison: '<', gzip_bytes: DELTA_BUDGET_BYTES },
         pass: bundlePass,
       },
-      engine_wasm: wasm,
+      engine_wasm: engine.receipt,
       timing: {
+        harness: 'production-built fixture served by Vite preview',
+        page: perfPage,
         definition: 'setInputFiles start until nonempty data-testid cad-edit-entity-list',
         fresh_chromium_contexts: SAMPLES,
         samples_ms: measured.raw,

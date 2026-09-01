@@ -33,7 +33,7 @@ The measurement command writes one JSON record to stdout. Its schema is `leaf.ca
 
 ## Frozen budgets
 
-The load budget uses 10 fresh Chromium contexts. Each sample starts immediately before Playwright calls `setInputFiles` with `vendor/acadrust-worker/fixtures/one_line.dxf`. It stops when the real `CadEditSurface`, backed by the real browser worker and compiled engine, displays a nonempty `data-testid="cad-edit-entity-list"`. The nearest-rank p95 must be at most 2,000 ms.
+The load budget uses a production-built fixture served by `vite preview` and 10 fresh Chromium contexts. Each sample starts immediately before Playwright calls `setInputFiles` with `vendor/acadrust-worker/fixtures/one_line.dxf`. It stops when the real `CadEditSurface`, backed by the real browser worker and compiled engine, displays a nonempty `data-testid="cad-edit-entity-list"`. The nearest-rank p95 must be at most 2,000 ms.
 
 The bundle budget builds the exact checkout twice with `vite build --manifest`. The only intended environment difference is `VITE_CAD_EDIT=1` versus `VITE_CAD_EDIT=0`. Starting at the manifest ENTRY, the replay follows only static imports and counts each reachable JavaScript and CSS artifact once at its gzip size. It excludes dynamic imports, worker output, and wasm from this base graph. The on-minus-off delta must be less than 5,120 gzip bytes.
 
