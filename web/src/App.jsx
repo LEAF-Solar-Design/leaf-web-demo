@@ -29,7 +29,8 @@ import CustomizePanel from './components/CustomizePanel.jsx'
 import CheckoutControls from './components/CheckoutControls.jsx'
 import ClaudeAccountPanel from './components/ClaudeAccountPanel.jsx'
 import DemoBanner from './components/DemoBanner.jsx'
-import ProductSurfaceTabs, { ProductSurfaceFrame } from './components/ProductSurfaceTabs.jsx'
+import ProductSurfaceTabs, { ProductSurfaceFrame, WorkspaceProjectSlot } from './components/ProductSurfaceTabs.jsx'
+import { deriveWorkspaceProjectState } from './site/workspaceProjectState.js'
 import IosSurface from './ios/IosSurface.jsx'
 import { ENV_IOS_SURFACE } from './ios/flag.js'
 import CadEditSurface from './cadedit/CadEditSurface.jsx'
@@ -528,7 +529,12 @@ export default function App() {
   const annotations = useAnnotations(agentSessionId, { enabled: annotationEnabled })
   // What the panels/legend/selection reflect: a read-only version PREVIEW wins,
   // else the applied write-loop version, else the base intake.
-  const projectName = shown?.dwg ? shown.dwg.split(/[\\/]/).pop().replace(/\.dwg$/i, '') : 'your project'
+  // The MOUNTED DRAWING's own name — deliberately NOT called a project. It is
+  // null when nothing is mounted, so the workspace-project derivation can tell
+  // "a drawing is open, no project" apart from "nothing is open at all".
+  const drawingName = shown?.dwg ? shown.dwg.split(/[\\/]/).pop().replace(/\.dwg$/i, '') : null
+  // Prose fallback for the "What should Leaf do to <em>…</em>?" headline only.
+  const projectName = drawingName || 'your project'
   // Honest identity: tenant id and tier are DISTINCT. tenant defaults to "demo"
   // off-auth; tier is only known when the session echo carries it (auth live).
   const tenantLabel = tenant || 'demo'
@@ -715,6 +721,18 @@ export default function App() {
         || projects.find((p) => (p.project_id || p.id) === openProjectId)?.name
         || null)
     : null
+
+  // The ONE workspace-project derivation this shell renders (F-9). Header chip,
+  // continuity rail, and the Browser / Solar CAD cards all read THIS — before,
+  // each derived its own answer and they contradicted each other in production.
+  const workspaceProjectState = useMemo(() => deriveWorkspaceProjectState({
+    openProjectId,
+    projectName: currentProjectName,
+    drawingName,
+    orgId,
+    projectsUnavailable: projectsErr,
+    mock,
+  }), [openProjectId, currentProjectName, drawingName, orgId, projectsErr, mock])
 
   // color-by-layer, stable across renders (keyed to base intake identity)
   const colorForLayer = useMemo(() => {
@@ -2355,6 +2373,7 @@ export default function App() {
             projects={projects}
             openProjectId={openProjectId}
             currentName={currentProjectName}
+            workspaceProject={workspaceProjectState}
             unavailable={projectsErr}
             loading={projectsLoading}
             orgBusy={orgBusy}
@@ -2566,7 +2585,7 @@ export default function App() {
           activeSurface={activeSurface}
           states={surfaceStates}
           onSelect={onSelectSurface}
-          project={openProjectId ? (currentProjectName || projectName) : null}
+          workspaceProject={workspaceProjectState}
           catalog={catalog}
         />
         {activeSurface !== 'cad' && (
@@ -2577,7 +2596,7 @@ export default function App() {
             catalogError={catalogErr}
             projectSlot={activeSurface === 'ios'
               ? <IosSurface enabled={ENV_IOS_SURFACE} contract={iosContract} />
-              : <span className="dim">{openProjectId ? currentProjectName || projectName : 'No project open'}</span>}
+              : <WorkspaceProjectSlot state={workspaceProjectState} onCreateProject={onCreateProject} />}
           />
         )}
         {/* The CAD workspace hides (not unmounts) on other tabs so live

@@ -2027,6 +2027,18 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 .app .tc-product-columns ul { display: block; margin: 0; padding: 0 0 0 18px; list-style: disc; color: var(--muted); }
 .app .tc-product-columns li { padding: 0; border-radius: 0; background: transparent; color: var(--muted); font-size: 13px; }
 .app .tc-product-note { padding-left: 0; border-left: 0; font-size: 12px; color: var(--muted-2); }
+/* F-9 project-state block, re-pinned to the drafting-studio token vocabulary
+   (landing.css owns the /try dark literals). No light literal appears here:
+   every colour is a token, so the dark subtrees keep working through a re-pin. */
+.app .tc-product-project-state { gap: 6px; }
+.app .tc-product-project-state > strong {
+  color: var(--muted-2); font-family: var(--font-mono); font-size: 10px;
+  font-weight: 600; text-transform: uppercase; letter-spacing: .08em;
+}
+.app .tc-product-project-state > p { max-width: 560px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.app .tc-product-project-act { margin-top: 2px; }
+.app .tc-product-project-act:disabled { color: var(--muted-2); cursor: not-allowed; opacity: .7; }
+.app .tc-product-project-reason { max-width: 560px; color: var(--muted-2); font-size: 12px; line-height: 1.5; }
 /* (.tc-product-cad-link rules removed: the frame no longer renders an
    "Open ..." button — the tabs are the navigation.) */
 

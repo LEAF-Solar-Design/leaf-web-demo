@@ -7,9 +7,10 @@
  */
 import { afterEach, describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { cleanup, render, screen } from '@testing-library/react'
-import ProductSurfaceTabs, { ProductSurfaceFrame } from './ProductSurfaceTabs.jsx'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import ProductSurfaceTabs, { ProductSurfaceFrame, WorkspaceProjectSlot } from './ProductSurfaceTabs.jsx'
 import { productSurfaceStates } from '../site/productSurfaces.js'
+import { deriveWorkspaceProjectState } from '../site/workspaceProjectState.js'
 
 afterEach(cleanup)
 
@@ -117,6 +118,99 @@ describe('F-7: surface frames render the live tenant catalog', () => {
     const rail = screen.getByTestId('continuity-rail')
     expect(rail.textContent).toContain('no project open')
     expect(rail.textContent).not.toContain('families')
+  })
+
+  // --- F-9: the mounted drawing vs the workspace project ------------------
+  // Regression guard for the 2026-09-01 production contradiction: the header
+  // read "Project rooftop_demo · 2345 polylines · 4 layers" while the rail and
+  // the Browser / Solar CAD cards said "No project open". Every one of them now
+  // reads the SAME derivation, so the three cannot disagree again.
+  const drawingOnly = deriveWorkspaceProjectState({
+    openProjectId: null, projectName: null, drawingName: 'rooftop_demo', orgId: 'org-1',
+  })
+
+  it('F-9: the rail names the mounted drawing instead of claiming nothing is open', () => {
+    render(
+      <ProductSurfaceTabs
+        activeSurface="browser" states={states} onSelect={() => {}}
+        workspaceProject={drawingOnly} catalog={catalogA}
+      />,
+    )
+    const rail = screen.getByTestId('continuity-rail')
+    expect(rail.dataset.projectState).toBe('drawing-only')
+    expect(rail.textContent).toContain('rooftop_demo')
+    expect(rail.textContent).toContain('no workspace project')
+    // The exact string a pilot user read as a contradiction, gone.
+    expect(rail.textContent).not.toContain('no project open')
+  })
+
+  it.each(['browser', 'solar'])('F-9: the %s card explains the split and offers the create action', (surface) => {
+    const created = []
+    render(
+      <ProductSurfaceFrame
+        activeSurface={surface}
+        states={states}
+        catalog={catalogA}
+        catalogError={null}
+        projectSlot={<WorkspaceProjectSlot state={drawingOnly} onCreateProject={(n) => created.push(n)} />}
+      />,
+    )
+    const slot = screen.getByTestId('surface-project-state')
+    expect(slot.dataset.projectState).toBe('drawing-only')
+    expect(slot.textContent).toContain('No workspace project')
+    expect(slot.textContent).toContain('open and editable in CAD')
+    expect(screen.queryByTestId('surface-project-reason')).toBeNull()
+    const action = screen.getByTestId('surface-project-action')
+    expect(action.disabled).toBe(false)
+    fireEvent.click(action)
+    // The action creates a project NAMED FOR the drawing, so the two stay
+    // visibly connected rather than the user having to invent a name.
+    expect(created).toEqual(['rooftop_demo'])
+  })
+
+  it('F-9: a blocked create says why, instead of a silent dead-end button', () => {
+    const noOrg = deriveWorkspaceProjectState({ drawingName: 'rooftop_demo', orgId: null })
+    render(
+      <ProductSurfaceFrame
+        activeSurface="browser" states={states} catalog={catalogA} catalogError={null}
+        projectSlot={<WorkspaceProjectSlot state={noOrg} onCreateProject={() => {}} />}
+      />,
+    )
+    expect(screen.getByTestId('surface-project-action').disabled).toBe(true)
+    expect(screen.getByTestId('surface-project-reason').textContent).toContain('Create a workspace first')
+  })
+
+  it('F-9: an open workspace project renders as the plain project name, no action', () => {
+    const open = deriveWorkspaceProjectState({
+      openProjectId: 'p-1', projectName: 'Maple St retrofit', drawingName: 'rooftop_demo', orgId: 'org-1',
+    })
+    render(
+      <ProductSurfaceFrame
+        activeSurface="browser" states={states} catalog={catalogA} catalogError={null}
+        projectSlot={<WorkspaceProjectSlot state={open} onCreateProject={() => {}} />}
+      />,
+    )
+    const slot = screen.getByTestId('surface-project-state')
+    expect(slot.dataset.projectState).toBe('project')
+    expect(slot.textContent).toBe('Maple St retrofit')
+    expect(screen.queryByTestId('surface-project-action')).toBeNull()
+  })
+
+  it('F-9: rail and card agree — one derivation, never two answers on one screen', () => {
+    render(
+      <>
+        <ProductSurfaceTabs
+          activeSurface="browser" states={states} onSelect={() => {}}
+          workspaceProject={drawingOnly} catalog={catalogA}
+        />
+        <ProductSurfaceFrame
+          activeSurface="browser" states={states} catalog={catalogA} catalogError={null}
+          projectSlot={<WorkspaceProjectSlot state={drawingOnly} onCreateProject={() => {}} />}
+        />
+      </>,
+    )
+    expect(screen.getByTestId('continuity-rail').dataset.projectState)
+      .toBe(screen.getByTestId('surface-project-state').dataset.projectState)
   })
 
   it('F-8: every new motion rule is disabled under prefers-reduced-motion', () => {

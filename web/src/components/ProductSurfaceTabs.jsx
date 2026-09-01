@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { PRODUCT_SURFACES, SHARED_WORKSPACE_CAPABILITIES, productSurface } from '../site/productSurfaces.js'
+import { deriveWorkspaceProjectState } from '../site/workspaceProjectState.js'
 import { moveRovingTab } from '../lib/roving.js'
 
 // F-8: the continuity layer, made visible. Lives in the always-mounted nav so
@@ -8,7 +9,7 @@ import { moveRovingTab } from '../lib/roving.js'
 // the open project and the same catalog fold every surface consumes (F-7).
 // A surface change pulses it (class toggle, never a remount); the pulse and
 // every other F-8 motion is disabled under prefers-reduced-motion in CSS.
-export function ContinuityRail({ activeSurface, project, catalog }) {
+export function ContinuityRail({ activeSurface, project, workspaceProject = null, catalog }) {
   const [pulse, setPulse] = useState(false)
   const first = useRef(true)
   useEffect(() => {
@@ -22,10 +23,20 @@ export function ContinuityRail({ activeSurface, project, catalog }) {
     (count, family) => count + (family.capabilities?.length || 0),
     0,
   )
+  // The rail names BOTH concepts, so a mounted drawing can never read as
+  // "nothing is open" (the 2026-09-01 pilot contradiction). `project` stays
+  // accepted as the legacy shorthand for a plain open workspace project.
+  const state = workspaceProject
+    || deriveWorkspaceProjectState({ openProjectId: project ? 'legacy' : null, projectName: project })
   return (
-    <div className="tc-continuity" data-testid="continuity-rail" data-pulse={pulse ? 'true' : 'false'}>
+    <div className="tc-continuity" data-testid="continuity-rail" data-pulse={pulse ? 'true' : 'false'} data-project-state={state.kind}>
       <span className="tc-continuity-label">Carried across every profile</span>
-      <span className="tc-continuity-item">{project ? <>project · <strong>{project}</strong></> : 'no project open'}</span>
+      {state.kind === 'drawing-only' && (
+        <span className="tc-continuity-item">drawing · <strong>{state.drawingName}</strong></span>
+      )}
+      <span className="tc-continuity-item">
+        {state.kind === 'project' ? <>project · <strong>{state.label}</strong></> : state.railLabel}
+      </span>
       {families.length > 0 && (
         <span className="tc-continuity-item">
           catalog · <strong>{families.length} {families.length === 1 ? 'family' : 'families'} / {capabilityCount} tools</strong>
@@ -36,7 +47,9 @@ export function ContinuityRail({ activeSurface, project, catalog }) {
   )
 }
 
-export default function ProductSurfaceTabs({ activeSurface, states, onSelect, project = null, catalog = null }) {
+export default function ProductSurfaceTabs({
+  activeSurface, states, onSelect, project = null, workspaceProject = null, catalog = null,
+}) {
   return (
     <nav className="tc-product-nav" data-cast="tool" aria-label="Product workspace">
       <div className="tc-product-tabs" role="tablist" aria-label="Workspace profile" onKeyDown={moveRovingTab}>
@@ -65,6 +78,7 @@ export default function ProductSurfaceTabs({ activeSurface, states, onSelect, pr
       <ContinuityRail
         activeSurface={activeSurface}
         project={project}
+        workspaceProject={workspaceProject}
         catalog={catalog}
       />
     </nav>
@@ -132,6 +146,45 @@ export function SurfaceCapabilities({ surface, catalog, catalogError }) {
           </li>
         ))}
       </ul>
+    </div>
+  )
+}
+
+// The Browser / Solar CAD project line, made legible (the F-9 fix). Renders the
+// SAME derivation the header chip and the rail render, so the three can no
+// longer disagree. When a drawing is mounted but no workspace project is open
+// it says which of the two is missing, why that matters, and offers the one
+// action that closes the gap — never a bare "No project open" next to a header
+// that is plainly showing an open, editable drawing.
+export function WorkspaceProjectSlot({ state, onCreateProject }) {
+  if (!state) return null
+  if (state.kind === 'project') {
+    return <span className="dim" data-testid="surface-project-state" data-project-state="project">{state.label}</span>
+  }
+  const action = state.action
+  return (
+    <div className="tc-product-project-state" data-testid="surface-project-state" data-project-state={state.kind}>
+      <strong>{state.headline}</strong>
+      {state.explainer && <p>{state.explainer}</p>}
+      {action && (
+        <>
+          <button
+            type="button"
+            className="chip-act tc-product-project-act"
+            data-testid="surface-project-action"
+            disabled={action.disabled || !onCreateProject}
+            title={action.reason || undefined}
+            onClick={() => onCreateProject?.(action.projectName)}
+          >
+            {action.label}
+          </button>
+          {/* An unexplained disabled button is the same dead end as the bare
+              state line it replaced, so the blocker is always spelled out. */}
+          {action.disabled && action.reason && (
+            <span className="tc-product-project-reason" data-testid="surface-project-reason">{action.reason}</span>
+          )}
+        </>
+      )}
     </div>
   )
 }

@@ -6,6 +6,15 @@ import useExit from '../useExit.js'
 // org-scoped Project entity (platform/api.py). LIVE only — in mock mode it is a
 // static label with zero /api calls (matching today's demo header exactly).
 //
+// HONEST TAG (fixed 2026-09-01). This chip used to render the literal tag
+// "Project" over `currentName || projectName`, and `projectName` is the MOUNTED
+// DRAWING's name, not a project's. With no workspace project open it therefore
+// printed "Project rooftop_demo" — the header half of the contradiction a pilot
+// user hit, with three surface cards correctly saying "No project open" below
+// it. The tag now comes from workspaceProjectState.js, the one derivation every
+// surface shares, so it reads "Drawing rooftop_demo" until a workspace project
+// is genuinely open. The menu below is unchanged.
+//
 // States (live):
 //   - platform unavailable (no DATABASE_URL / 500): show today's static drawing
 //     name + a calm "Projects unavailable (no database configured)" note. Never
@@ -16,7 +25,7 @@ import useExit from '../useExit.js'
 //     active row, arrow-key + Enter selection.
 export default function ProjectSwitcher({
   mock, projectName, orgId, projects, openProjectId, currentName,
-  unavailable, loading, orgBusy, projectBusy,
+  unavailable, loading, orgBusy, projectBusy, workspaceProject = null,
   onCreateOrg, onCreateProject, onOpenProject,
 }) {
   const [open, setOpen] = useState(false)
@@ -53,17 +62,27 @@ export default function ProjectSwitcher({
     return () => { document.removeEventListener('mousedown', onDoc); document.removeEventListener('keydown', onKey) }
   }, [open, projects, hi, orgId, unavailable, openProjectId, onOpenProject])
 
+  // The chip's tag and name come from the shared derivation whenever the caller
+  // supplies it; the pre-F-9 fallback keeps every untouched call site rendering
+  // byte-identically rather than silently going blank.
+  const tag = workspaceProject?.tag || 'Project'
+  // 'None open' rather than a blank chip: the switcher is the affordance for
+  // opening one, so the resting state has to read as a state, not as a
+  // half-rendered label.
+  const label = workspaceProject
+    ? (workspaceProject.label || 'None open')
+    : (currentName || projectName)
+
   // Mock: no platform, no switcher — the classic static chip.
   if (mock) {
     return (
       <span className="proj-chip static">
-        <span className="tag">Project</span>
-        <span className="name">{projectName}</span>
+        <span className="tag">{tag}</span>
+        <span className="name">{label}</span>
       </span>
     )
   }
 
-  const label = currentName || projectName
   const pick = (pid) => { onOpenProject(pid); setOpen(false) }
   const count = (projects || []).length
 
@@ -75,7 +94,7 @@ export default function ProjectSwitcher({
         aria-expanded={open}
         aria-haspopup="menu"
       >
-        <span className="tag">Project</span>
+        <span className="tag">{tag}</span>
         <span className="name">{label}</span>
         <span className="proj-caret" aria-hidden="true">▾</span>
       </button>

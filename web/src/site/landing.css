@@ -231,6 +231,16 @@
 .tc-product-columns ul { margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 7px; list-style: none; }
 .tc-product-columns li { padding: 5px 8px; border-radius: 999px; color: #a1a1aa; background: #1c1c20; font-size: 11px; }
 .tc-product-note { padding-left: 12px; border-left: 2px solid #52525b; }
+/* F-9: the Browser / Solar CAD project line, made legible. Same dark literals
+   as the rest of this /try stylesheet; the .app shell re-pins these to tokens
+   in styles.css. */
+.tc-product-project-state { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.tc-product-project-state > strong { color: #d4d4d8; font: 600 13px 'Inter Tight', sans-serif; }
+.tc-product-project-state > p { max-width: 560px; margin: 0; color: #a1a1aa; font-size: 12.5px; line-height: 1.55; }
+.tc-product-project-act { border: 1px solid #3f3f46; border-radius: 7px; padding: 7px 12px; color: #fff; background: #27272a; cursor: pointer; font-size: 12px; }
+.tc-product-project-act:hover:not(:disabled) { background: #3f3f46; }
+.tc-product-project-act:disabled { color: #71717a; background: #1c1c20; cursor: not-allowed; }
+.tc-product-project-reason { max-width: 560px; color: #71717a; font-size: 11.5px; line-height: 1.5; }
 .tc-product-cad-link { margin-top: 18px; border: 1px solid #3f3f46; border-radius: 7px; padding: 8px 12px; color: #fff; background: #27272a; cursor: pointer; }
 .tc-product-cad-link:hover { background: #3f3f46; }
 .tc-solve { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: #22c55e; }
