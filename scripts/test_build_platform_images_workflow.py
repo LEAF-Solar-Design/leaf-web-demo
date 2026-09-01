@@ -2221,6 +2221,101 @@ def main() -> None:
         assert _with_input(speculate_with, key) == _with_input(build_with, key), (
             "speculate and build must carry a byte-identical %s input" % key
         )
+
+    # The harness apt cache key comes from the exact signed Debian channel
+    # documents. Each real producer resolves both HTTPS resources itself,
+    # validates one lowercase SHA256 for each, and passes the same values to
+    # Docker. Build and speculate also bind them into the signed surface
+    # fingerprint, so a channel update cannot reuse the prior signed image.
+    resolver_name = "name: Resolve harness Debian InRelease digests"
+    producer_blocks = (
+        ("warm", warm_block),
+        ("build", build_block),
+        ("speculate", speculate_block),
+    )
+    expected_conditions = {
+        "warm": "matrix.image == 'harness' && steps.chain.outputs.skip != 'true'",
+        "build": "matrix.image == 'harness'",
+        "speculate": "matrix.image == 'harness'",
+    }
+    security_url = (
+        "https://deb.debian.org/debian-security/dists/"
+        "bookworm-security/InRelease"
+    )
+    updates_url = (
+        "https://deb.debian.org/debian/dists/bookworm-updates/InRelease"
+    )
+    for lane, block in producer_blocks:
+        resolvers = [
+            step
+            for step in re.split(r"\n      - ", block)
+            if step.startswith(resolver_name)
+        ]
+        assert len(resolvers) == 1, (lane, len(resolvers))
+        resolver = _executable_bash(resolvers[0])
+        assert resolver.count(security_url) == 1, lane
+        assert resolver.count(updates_url) == 1, lane
+        assert "curl --fail --silent --show-error --location" in resolver, lane
+        assert "--proto '=https' --tlsv1.2" in resolver, lane
+        assert "sha256sum \"$artifact\"" in resolver, lane
+        assert '[[ "$digest" =~ ^[0-9a-f]{64}$ ]]' in resolver, lane
+        assert 'echo "$output_name=$digest" >> "$GITHUB_OUTPUT"' in resolver, lane
+        conditions = [
+            _value_of(line)
+            for line in resolvers[0].splitlines()
+            if _key_of(line) == "if"
+        ]
+        assert conditions == [expected_conditions[lane]], (lane, conditions)
+
+    harness_arg_outputs = {
+        "HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256": "security_sha256",
+        "HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256": "updates_sha256",
+    }
+    build_arg_input = _with_input(build_with, "build-args:")
+    for argument, output in harness_arg_outputs.items():
+        expression = (
+            "${{ matrix.image == 'harness' && format('"
+            f"{argument}={{0}}', steps.harness_debian.outputs.{output}) || '' }}}}"
+        )
+        assert expression in build_arg_input, argument
+        assert text.count(expression) == 3, argument
+
+    for lane, block, surface_name in (
+        ("build", build_block, "name: Resolve one signed reusable surface"),
+        ("speculate", speculate_block, "name: Describe the exact speculative surface"),
+    ):
+        surfaces = [
+            step
+            for step in re.split(r"\n      - ", block)
+            if step.startswith(surface_name)
+        ]
+        assert len(surfaces) == 1, (lane, len(surfaces))
+        surface = _executable_bash(surfaces[0])
+        for argument, output in harness_arg_outputs.items():
+            assert (
+                f"{argument}: ${{{{ steps.harness_debian.outputs.{output} }}}}"
+                in surface
+            ), (lane, argument)
+            assert f'[[ "${argument}" =~ ^[0-9a-f]{{64}}$ ]]' in surface, (
+                lane,
+                argument,
+            )
+            assert (
+                f'build_args+=(--build-arg "{argument}=${argument}")' in surface
+            ), (lane, argument)
+
+    harness_dockerfile = (ROOT / "deploy" / "Dockerfile.harness").read_text(
+        encoding="utf-8"
+    )
+    assert not re.search(r"^ADD\s+https://", harness_dockerfile, re.M)
+    for argument in harness_arg_outputs:
+        assert harness_dockerfile.count(f"ARG {argument}") == 1, argument
+        assert (
+            f'printf \'%s\\n\' "${argument}"' in harness_dockerfile
+        ), argument
+        assert (
+            f'printf \'%s  %s\\n\' "${argument}"' in harness_dockerfile
+        ), argument
     # The speculative app leg must mint the same zstd compression as the
     # gated build leg: adoption aliases the speculative digest onto the
     # immutable sha-* tags, so a gzip spec image would keep every merge on
