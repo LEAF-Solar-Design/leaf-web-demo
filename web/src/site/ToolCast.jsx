@@ -86,6 +86,7 @@ import { authConfigured, isSignedIn, login } from '../auth.js'
 import { agentBannerFor as agentBannerForKind, OPERATOR_AGENT_BANNER_COPY } from '../lib/agentBanner.js'
 import { moveRovingTab } from '../lib/roving.js'
 import { selectEntity } from '../lib/selectEntity.js'
+import { countEntitiesByLayer } from '../lib/layerCounts.js'
 import { claimHolderId, getSessionHolderId } from '../checkoutIdentity.js'
 import DemoTour from '../demo/DemoTour.jsx'
 import DemoConversationPanel, { demoReplyFor } from '../demo/DemoConversationPanel.jsx'
@@ -366,14 +367,7 @@ export default function ToolCast({
   const panelCount = drawing.shown?.polylines?.length || null
   const selection = useMemo(() => selectEntity(drawing.shown, selectedHandle), [drawing.shown, selectedHandle])
   const sculpture = Number(drawing.previewing?.version ?? version) > 1 && phase !== 'undone'
-  const layerCounts = useMemo(() => {
-    const counts = {}
-    for (const layer of drawing.shown?.layers || []) counts[layer] = 0
-    for (const entity of [...(drawing.shown?.polylines || []), ...(drawing.shown?.inserts || []), ...(drawing.shown?.faces3d || [])]) {
-      counts[entity.layer] = (counts[entity.layer] || 0) + 1
-    }
-    return counts
-  }, [drawing.shown])
+  const layerCounts = useMemo(() => countEntitiesByLayer(drawing.shown), [drawing.shown])
 
   useEffect(() => {
     onVisibleLayersChange?.(drawing.visibleLayers)

@@ -36,6 +36,7 @@ import CadEditSurface from './cadedit/CadEditSurface.jsx'
 import { markInstant } from './lib/instant.js'
 import { agentBannerFor } from './lib/agentBanner.js'
 import { selectEntity } from './lib/selectEntity.js'
+import { countEntitiesByLayer } from './lib/layerCounts.js'
 import { ENV_CAD_EDIT } from './cadedit/flag.js'
 import {
   productSurfaceStates,
@@ -1137,14 +1138,7 @@ export default function App() {
   // Count ALL entity kinds per layer (polylines + inserts + 3DFACEs) so
   // insert/face-only layers (e.g. the ?fixture=edit Blocks/Surfaces layers)
   // stop reading 0 in the legend.
-  const layerCounts = useMemo(() => {
-    const c = {}
-    for (const l of shown?.layers || []) c[l] = 0
-    for (const pl of shown?.polylines || []) c[pl.layer] = (c[pl.layer] || 0) + 1
-    for (const ins of shown?.inserts || []) c[ins.layer] = (c[ins.layer] || 0) + 1
-    for (const f of shown?.faces3d || []) c[f.layer] = (c[f.layer] || 0) + 1
-    return c
-  }, [shown])
+  const layerCounts = useMemo(() => countEntitiesByLayer(shown), [shown])
 
   // resolve the picked handle to an entity descriptor for the readout
   const selection = useMemo(() => selectEntity(shown, selectedHandle, {
