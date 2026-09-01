@@ -1436,6 +1436,34 @@ def build_suites() -> List[Suite]:
         Suite("web-workbench-id-contract",
               "web live workbench drawing id rule", "script", WEB,
               [_npm(), "run", "check:workbench-id"], None),
+        # web/src/**/*.test.mjs is invisible to vitest (its include is
+        # src/**/*.test.{js,jsx}) and each file needs its own npm script to
+        # run at all, so these eight node:test files passed by hand and gated
+        # nothing. Found landing #880, whose App.jsx pins had to go in a
+        # .test.js file to be seen. error-classify.test.mjs is deliberately
+        # absent: its ConversePanel pin is stale (it greps for an `if` branch
+        # the panel replaced with a copy map) and fails on main.
+        Suite("web-app-wiring", "App.jsx structural wiring pins", "script", WEB,
+              [_npm(), "run", "check:app-wiring"], None),
+        Suite("web-composer-contract",
+              "web composer prompt history + queued turn state", "script", WEB,
+              [_npm(), "run", "check:composer"], None),
+        Suite("web-project-session-binding",
+              "web project session binding controller", "script", WEB,
+              [_npm(), "run", "check:project-session-binding"], None),
+        Suite("web-markdown-contract", "web markdown inline parser", "script", WEB,
+              [_npm(), "run", "check:markdown"], None),
+        Suite("web-panel-fold-contract",
+              "web transcript fold skips queue bookkeeping events", "script", WEB,
+              [_npm(), "run", "check:panel-fold"], None),
+        Suite("web-pending-approvals-contract",
+              "web pending approvals inbox + resolve contract", "script", WEB,
+              [_npm(), "run", "check:pending-approvals"], None),
+        Suite("web-route-scene-contract",
+              "web site route scene mapping (/ty renders as /app)", "script", WEB,
+              [_npm(), "run", "check:route-scene"], None),
+        Suite("web-usage-contract", "web usage formatting helpers", "script", WEB,
+              [_npm(), "run", "check:usage"], None),
         Suite("web-version-restore-proof",
               "web /app version restore browser proof", "script", WEB,
               [_npm(), "run", "proof:version-restore"], None),
@@ -2014,6 +2042,13 @@ _MEASURED_EST_S = {
     "server-wave5": 6.9,
     "server-wave3": 5.9,
     "server-hardening-3b": 5.8,
+    # Measured LOCALLY (Windows, 2026-09-01, two runs at 7.25s/7.28s). The
+    # tests themselves take 22ms; the rest is node:test waiting on a handle
+    # converse.js leaves open (--test-force-exit brings it to 0.27s), so the
+    # figure is a runtime cost, not a host cost, and should hold on CI. The
+    # other seven .test.mjs suites registered with it all measured under
+    # 0.5s and take the default.
+    "web-pending-approvals-contract": 7.3,
     "web-vitest": 5.4,
     "server-mcp-gateway-authority": 5.1,
     "server-platform-customize": 4.9,
