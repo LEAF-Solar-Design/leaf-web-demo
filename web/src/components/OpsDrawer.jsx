@@ -4,12 +4,13 @@ import './popovers.css'
 
 // Internal ops drawer — visible only with ?ops=1 in the URL. A DT2 right drawer
 // (title + Esc cap header, endpoint provenance in the foot) listing tenants from
-// GET /api/ops/tenants (X-Internal-Role: qa): tenant / runs / spend / state.
+// GET /api/operator/tenants: tenant / runs / spend / state. The browser sends
+// only its bearer; the server-owned operator grant is the authority.
 // Disable is destructive, so it follows D1: quiet danger chip -> the row's
 // actions swap inline to "Disable <tenant>? [filled danger chip] [Keep]" — red
 // only on the destroying act. A kill-switched tenant is a deliberate hold, not
-// a failure: amber square-dot "Disabled", never red. A 403 (role not granted)
-// renders a calm "ops role required" note; a load failure gets the centered
+// a failure: amber square-dot "Disabled", never red. A 401/403/404 operator
+// denial renders a calm grant-required note; a load failure gets the centered
 // X3 takeover with a Retry chip. Clearly labelled Internal, distinct from the
 // tenant-facing app. Esc (key or cap) hides the drawer.
 // `exiting`: App holds the mount through the 180 ms M1 exit fade (useExit).
@@ -37,7 +38,7 @@ export default function OpsDrawer({ onDismiss, exiting }) {
     try {
       setTenants(await getOpsTenants())
     } catch (e) {
-      if (e && e.status === 403) { setForbidden(true); setTenants(null) }
+      if (e && [401, 403, 404].includes(e.status)) { setForbidden(true); setTenants(null) }
       else { setErr(String(e.message || e)); setTenants(null) }
     } finally {
       setLoading(false)
@@ -118,7 +119,7 @@ export default function OpsDrawer({ onDismiss, exiting }) {
       // (and the next open) reconcile the full list.
       setTenants((prev) => (prev || []).map((t) => (t.tenant_id === tid ? { ...t, disabled } : t)))
     } catch (e) {
-      if (e && e.status === 403) setForbidden(true)
+      if (e && [401, 403, 404].includes(e.status)) setForbidden(true)
       else setErr(String(e.message || e))
     } finally {
       setActing(null)
@@ -221,7 +222,7 @@ export default function OpsDrawer({ onDismiss, exiting }) {
         </section>
 
         {forbidden && (
-          <div className="ops-note">ops role required — this surface needs the QA/internal role.</div>
+          <div className="ops-note">An active operator grant is required for tenant controls.</div>
         )}
         {err && !forbidden && (
           <div className="pane-fail" role="alert">
@@ -303,7 +304,7 @@ export default function OpsDrawer({ onDismiss, exiting }) {
         </button>
       </div>
 
-      <div className="drawer-foot">Account controls use signed-in admin access · tenant operations use server-authorized internal access</div>
+      <div className="drawer-foot">Account controls use signed-in admin access · tenant operations use a server-owned operator grant</div>
     </aside>
   )
 }

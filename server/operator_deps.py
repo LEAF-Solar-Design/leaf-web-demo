@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from typing import Iterator
+from typing import AsyncIterator
 
 from fastapi import Depends, Header, HTTPException
 
@@ -42,11 +42,11 @@ def _resolve_subject(tenant, x_operator_subject: Optional[str]) -> Optional[str]
     return None
 
 
-def require_operator(
+async def require_operator(
     tenant=Depends(tenant_deps.require_tenant),
     x_operator_subject: Optional[str] = Header(default=None),
     x_operator_profile: Optional[str] = Header(default=None),
-) -> Iterator[OperatorContext]:
+) -> AsyncIterator[OperatorContext]:
     """Resolve the operator principal AND arm the egress boundary for the whole
     handler. This is a yield-dependency: FastAPI runs the path operation inside
     the `with operator_execution()` block, so EVERY operator handler executes

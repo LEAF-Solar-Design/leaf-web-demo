@@ -329,6 +329,10 @@ def _mount_operator_router() -> None:
     from routers import operator_worker as operator_worker_router
 
     app.include_router(operator_sessions_router.router)
+    # Browser tenant controls share the operator feature gate. Their bearer
+    # authority lives in the app, while the always-mounted /api/ops service
+    # surface keeps its separate server-side credential contract.
+    app.include_router(ops.operator_router)
     # Lane F reversible runbooks. Write actions are always-confirm and gated by
     # a one-use authority; they ship dark (enabled:false in operator_policy.json)
     # so mounting the routes grants nothing until an operator enables an action.
