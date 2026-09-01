@@ -876,7 +876,7 @@ export default function ConversePanel({
         </section>
       )}
 
-      <div className="converse-log" ref={logRef} onScroll={onLogScroll} aria-live="polite" aria-atomic="false">
+      <div className="converse-log" ref={logRef} onScroll={onLogScroll} role="log" aria-live="polite" aria-atomic="false" aria-label="Assistant conversation">
         {model.turns.length === 0 && pendingUserTurns.length === 0 && (
           <div className="converse-note">
             <span className="dot hollow" aria-hidden="true" />

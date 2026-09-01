@@ -11,7 +11,7 @@
 import { useCallback, useState } from 'react'
 
 import * as operatorClient from '../../operatorClient.js'
-import { isRedactedField, renderFieldValue } from '../../projects/ReceiptPanel.jsx'
+import { isRedactedField, renderFieldValue, deepRedact } from '../../projects/ReceiptPanel.jsx'
 import ApprovalCard from './ApprovalCard.jsx'
 import { fieldLabel, normalizeApproval } from './approvalDigest.js'
 
@@ -58,7 +58,11 @@ function DestinationRow({ destination: d, index }) {
   const rowKey = primaryKey ? fieldText(primaryKey, d[primaryKey]) : `destination-${index}`
   return (
     <li>
-      <span>{primaryKey ? fieldText(primaryKey, d[primaryKey]) : renderFieldValue(d)}</span>
+      {/* the no-string-field fallback renders the WHOLE object, so it must
+          pass through deepRedact - today's server contract always yields a
+          primary key, but a relaxed contract must not become a leak (panel
+          round 2) */}
+      <span>{primaryKey ? fieldText(primaryKey, d[primaryKey]) : renderFieldValue(deepRedact(d))}</span>
       {rest.length > 0 && (
         <>
           {' '}

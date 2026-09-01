@@ -33,7 +33,10 @@ function eventWhen(ev) {
 // one-line summary, never the full object.
 function eventSummary(data) {
   if (data == null) return null
-  if (isScalar(data)) return String(data)
+  // a scalar payload is still a VALUE and must clear the denylist - the
+  // server writes dicts today, but a relaxed contract must not leak (panel
+  // round 2)
+  if (isScalar(data)) return String(deepRedact(data, 'data'))
   const scalarEntries = Object.entries(data).filter(([, v]) => isScalar(v)).slice(0, 3)
   if (scalarEntries.length === 0) return null
   return scalarEntries
