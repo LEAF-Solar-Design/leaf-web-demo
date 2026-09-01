@@ -28,6 +28,13 @@ test('the unified drawing controller survives a site recast without reloading ve
   const surface = page.getByTestId('operator-surface')
   await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
   const instanceBefore = await surface.getAttribute('data-controller-instance')
+  // W2c: ONE single-writer controller per page, asserted at RUNTIME rather than
+  // only as a source pin. A second instance is a second bearer capability and a
+  // second holder id over ONE server-side lock, and a REMOUNT across the recast
+  // would silently drop the capability the current lease depends on.
+  const checkoutBefore = await surface.getAttribute('data-checkout-instance')
+  expect(checkoutBefore).toBeTruthy()
+  expect(await page.locator('[data-checkout-instance]').count()).toBe(1)
   await expect(page.getByLabel('Command bar')).toHaveValue(REQUEST)
   await page.getByRole('button', { name: 'Run', exact: true }).click()
   await expect(surface.getByRole('button', { name: 'Approve' })).toBeVisible({ timeout: 15_000 })
@@ -44,6 +51,8 @@ test('the unified drawing controller survives a site recast without reloading ve
   await expect(page.getByTestId('version-head')).toContainText('Version 2')
   await expect(page.getByTestId('operator-phase')).toContainText('Cat version ready')
   expect(await surface.getAttribute('data-controller-instance')).toBe(instanceBefore)
+  expect(await surface.getAttribute('data-checkout-instance')).toBe(checkoutBefore)
+  expect(await page.locator('[data-checkout-instance]').count()).toBe(1)
   expect(sessionReads).toBe(readsBeforeRecast)
   expect(catSubmissions).toBe(1)
   await page.getByRole('tab', { name: 'View' }).click()

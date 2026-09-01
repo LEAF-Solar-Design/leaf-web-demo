@@ -50,11 +50,7 @@ import { authConfigured, login, isSignedIn, handleRedirectCallback, isAuthRedire
 import { shouldAutoDemo } from './demoState.js'
 import { humanizeError } from './errorHumanize.js'
 import { cadTimingRows } from './cadTimingPresentation.js'
-import {
-  getSessionHolderId, claimHolderId, lockState,
-  stageCheckoutReloadHandoff, bootstrapCheckoutReloadHandoff,
-  holdCheckoutReloadAuthority, remintSessionHolderId,
-} from './checkoutIdentity.js'
+import { getSessionHolderId } from './checkoutIdentity.js'
 import {
   confirmRunIntent, createCatalogRunContext, createCatalogToolSnapshot, createRunIntentState,
   dismissRunIntent, drawingVersionForRun, mintCorrelationId, prepareCatalogRunParams, stageRunIntent,
@@ -88,7 +84,8 @@ import useWorkspaceController from './controllers/workspace/useWorkspaceControll
 import useCatalogController from './controllers/catalog/useCatalogController.js'
 import useSessionController from './controllers/session/useSessionController.js'
 import { consoleAuthRequired, consoleSignedOut } from './controllers/session/consoleGate.js'
-import { resolveCheckoutDrawingId } from './controllers/checkout/createCheckoutController.js'
+import useCheckoutController from './controllers/checkout/useCheckoutController.js'
+import { checkoutScopeDrawingId, deriveCheckout } from './controllers/checkout/createCheckoutController.js'
 import { useDrawingIdentity } from './drawing/DrawingIdentityProvider.jsx'
 
 // Calm layer palette, re-derived at higher lightness for the DARK CADViewport
@@ -269,27 +266,17 @@ export default function App() {
   // --- projects / orgs workspace (UI wave 2, item 1) ---
 
   // --- single-writer checkout lock (item 3) ---
-  const [checkout, setCheckout] = useState(null)         // {holder, acquired, expires} | null (from /versions)
-  const [checkoutBusy, setCheckoutBusy] = useState(false) // take/release request in flight (3B)
-  const [checkoutUnknown, setCheckoutUnknown] = useState(true)
-  const [checkoutReadFailed, setCheckoutReadFailed] = useState(false)
-  const initialHolderRef = useRef(null)
-  if (!initialHolderRef.current) initialHolderRef.current = getSessionHolderId()
-  const reloadHandoffRef = useRef(undefined)
-  if (reloadHandoffRef.current === undefined) {
-    reloadHandoffRef.current = bootstrapCheckoutReloadHandoff({
-      holder: initialHolderRef.current,
-      drawingId: REQUESTED_DRAWING_ID,
-      deferForAuthCallback: isAuthRedirectCallback(),
-    })
-  }
-  // The server returns this bearer proof once when the session takes the lock.
-  // Keep it outside rendered state. The only storage edge is the one-use,
-  // short-lived beforeunload handoff consumed above.
-  const capabilityRef = useRef(null)
-  const holderClaimRef = useRef(null)
-  const reloadAuthorityRef = useRef(null)
-  const [, bumpCheckoutAuthority] = useState(0)
+  // W2c (convergence): the lock, the bearer capability, the reload handoff, the
+  // Web-Lock authority and the duplicate-tab claim are ALL the shared
+  // controller's now (controllers/checkout/). The holder id stays here, in the
+  // shell, exactly as it does on /try — it is this surface's session identity,
+  // and the controller consumes it.
+  const [ownHolder, setOwnHolder] = useState(() => getSessionHolderId())
+  // Read at render so a write-path call site can reach the capability without
+  // waiting for the controller mount below (drawingAdapters is built first, and
+  // the controller needs `drawingState` from the version controller it feeds).
+  // Same render-phase ref assignment `catalogUiRef` already uses in this file.
+  const checkoutCapabilityRef = useRef(() => null)
 
   // --- ops drawer (item 2) ---
   const [opsDismissed, setOpsDismissed] = useState(false)
@@ -424,8 +411,8 @@ export default function App() {
     loadHead: (drawingId) => getDrawingIntake(mock, drawingId, 'head'),
     loadVersion: (drawingId, version) => getDrawingIntake(mock, drawingId, version),
     loadVersions: (drawingId, options) => getDrawingVersions(mock, drawingId, options),
-    undoVersion: (drawingId) => undoDrawing(mock, drawingId, capabilityRef.current),
-    redoVersion: (drawingId) => redoDrawing(mock, drawingId, capabilityRef.current),
+    undoVersion: (drawingId) => undoDrawing(mock, drawingId, checkoutCapabilityRef.current()),
+    redoVersion: (drawingId) => redoDrawing(mock, drawingId, checkoutCapabilityRef.current()),
   }), [mock])
   const drawing = useDrawingVersionController({
     ...drawingAdapters,
@@ -657,57 +644,64 @@ export default function App() {
   }), [onPromptChange])
 
   // --- single-writer checkout (item 3) ---
-  // The holder is a per-session display identity, never the tenant. A copied tab
-  // initially inherits sessionStorage, so the claim channel remints the duplicate.
-  const [ownHolder, setOwnHolder] = useState(initialHolderRef.current)
-  useEffect(() => {
-    // A reload handoff is only provisional authority. The Web Lock below
-    // arbitrates any cloned copies before this runtime joins the holder channel.
-    if (reloadHandoffRef.current) return undefined
-    const claim = claimHolderId({ id: ownHolder, onRemint: setOwnHolder })
-    holderClaimRef.current = claim
-    return () => claim.stop()
-    // Claim once per runtime. A remint must not restart the claim loop.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-  const rawCheckout = demoLocked
-    ? { holder: 'another-session', acquired: new Date().toISOString(), expires: new Date(Date.now() + 3600e3).toISOString() }
+  // W2c: the SHARED controller. It owns the /versions read and its sequence
+  // fence, the fail-closed `unknown` state, the derived lock (including the
+  // unproven-own-lock correction this shell used to compute inline), the bearer
+  // capability, take/release, the beforeunload reload handoff, the Web-Lock
+  // authority and the duplicate-tab holder claim.
+  //
+  // ONE INSTANCE PER PAGE, the same argument W2b made for the session
+  // controller: SiteRoot renders scene 'app' (this component) and scenes
+  // site|tool (StageScene -> ToolCast, which mounts the other instance) in
+  // mutually exclusive arms of ONE ternary, and SiteRoot itself mounts none. So
+  // the console mounting its own is exactly one live instance per page load,
+  // and appCheckoutWiring.test.js pins that this file contains exactly one
+  // mount. Hoisting a shared instance into SiteRoot was rejected for the same
+  // reason: it would hand the console and the stage one lock — one capability,
+  // one holder id, one authority — that neither owns.
+  const checkout = useCheckoutController({
+    mock,
+    // Scope-reset contract (ACCEPTANCE, binding). While the identity stands,
+    // this is byte-identical to the retired `resolveCheckoutDrawingId` call:
+    // the version chain wins, the booted identity is the fallback. A tenant
+    // switch voids the identity and the scope goes with it — see
+    // checkoutScopeDrawingId for why abandoning beats releasing.
+    drawingId: checkoutScopeDrawingId({
+      identityDrawingId: REQUESTED_DRAWING_ID,
+      drawingState,
+      requestedDrawingId: REQUESTED_DRAWING_ID,
+    }),
+    holder: ownHolder,
+    // The console knows its boot drawing (DrawingIdentityProvider seeds console
+    // mode unconditionally), so the handoff is bootstrapped in the render phase
+    // and the claim deferral is decided before the first effect runs — the
+    // ordering the retired block got from its own render-phase bootstrap.
+    bootDrawingId: REQUESTED_DRAWING_ID,
+    deferForAuthCallback: isAuthRedirectCallback(),
+    onHolderRemint: setOwnHolder,
+  })
+  checkoutCapabilityRef.current = checkout.actions.getCapability
+  // `?demo=locked` (DEV-only) fabricates ANOTHER session's lock so the chip and
+  // the write suppression can be exercised without touching the demo drawing's
+  // real manifest. It replaces the DERIVED state only — the controller's scope,
+  // capability and server reads are untouched — which is exactly where the
+  // retired block applied it (on top of lockState, never on the fetched record).
+  const lock = demoLocked
+    ? deriveCheckout(
+      { holder: 'another-session', acquired: new Date().toISOString(), expires: new Date(Date.now() + 3600e3).toISOString() },
+      ownHolder,
+      Date.now(),
+      // The REAL unknown, never a synthetic one: `?demo=locked` fabricates a
+      // holder, never an answer. A read still in flight or failed keeps
+      // suppressing writes exactly as it does without the hook.
+      checkout.unknown,
+      mock,
+      !!checkout.actions.getCapability(),
+    )
     : checkout
-  const baseLock = lockState({ mock, checkout: rawCheckout, unknown: checkoutUnknown, ownHolder })
-  const unprovenOwnLock = baseLock.heldByUs && !capabilityRef.current ? rawCheckout : null
-  const lock = {
-    ...baseLock,
-    heldByUs: baseLock.heldByUs && !!capabilityRef.current,
-    otherHeld: baseLock.otherHeld || unprovenOwnLock,
-    writeLocked: baseLock.writeLocked || !!unprovenOwnLock,
-    canTake: baseLock.canTake || !!unprovenOwnLock,
-  }
-  const otherHeldCheckout = lock.otherHeld || unprovenOwnLock
+  const otherHeldCheckout = lock.lockedByOther
   const writeLocked = lock.writeLocked || drawingMutationsBlocked
   const heldByUs = lock.heldByUs
-  const staleHeldCheckout = lock.stale ? lock.otherHeld : null
-  const legacyHeldCheckout = lock.legacy ? lock.otherHeld : null
-
-  useEffect(() => {
-    const stageReloadHandoff = () => {
-      const provisional = reloadHandoffRef.current
-      const capability = capabilityRef.current || provisional?.capability
-      const drawingId = resolveCheckoutDrawingId({
-        drawingState,
-        requestedDrawingId: REQUESTED_DRAWING_ID,
-      })
-      if (capability && drawingId) {
-        holderClaimRef.current?.stop()
-        stageCheckoutReloadHandoff({
-          capability,
-          holder: provisional?.holder || ownHolder,
-          drawingId: provisional?.drawingId || drawingId,
-        })
-      }
-    }
-    window.addEventListener('beforeunload', stageReloadHandoff)
-    return () => window.removeEventListener('beforeunload', stageReloadHandoff)
-  }, [drawingState, ownHolder])
 
   // Current open project's display name (from the hydration payload, else the list).
   const currentProjectName = openProjectId
@@ -834,175 +828,28 @@ export default function App() {
   // stored -> empty list + no error (the switcher offers "create workspace org").
   // Platform down (no DATABASE_URL / 500) -> projectsErr drives the graceful
   // "projects unavailable" note. Mock -> zero /api calls (no surface).
-  // Checkout lock (item 3): read the current drawing's version manifest and pick
-  // up its `checkout` (sibling contract adds it to /versions). Unknown and failed
-  // reads stay fail-closed, and sequence fencing prevents a stale response from
-  // re-enabling writes after the drawing changes.
-  const checkoutSeqRef = useRef(0)
-  const loadCheckout = useCallback(async () => {
-    if (mock) {
-      setCheckout(null)
-      setCheckoutUnknown(false)
-      setCheckoutReadFailed(false)
-      return
-    }
-    const did = resolveCheckoutDrawingId({
-      drawingState,
-      requestedDrawingId: REQUESTED_DRAWING_ID,
-    })
-    const seq = ++checkoutSeqRef.current
-    setCheckoutUnknown(true)
-    try {
-      const v = await getDrawingVersions(mock, did)
-      if (seq !== checkoutSeqRef.current) return
-      setCheckout(v?.checkout || null)
-      setCheckoutUnknown(false)
-      setCheckoutReadFailed(false)
-    } catch {
-      if (seq !== checkoutSeqRef.current) return
-      setCheckout(null)
-      setCheckoutUnknown(true)
-      setCheckoutReadFailed(true)
-    }
-  }, [mock, drawingState])
-
-  useEffect(() => { loadCheckout() }, [loadCheckout])
-
-  // Install a reload handoff only while this runtime owns the origin-wide,
-  // exclusive authority lock. Reload releases the old runtime's lock and wakes
-  // this one. Duplicated tabs queue, so they cannot write concurrently.
-  useEffect(() => {
-    const handoff = reloadHandoffRef.current
-    if (mock || !handoff) return undefined
-    const authority = holdCheckoutReloadAuthority({
-      handoff,
-      onAcquired: (owned) => {
-        capabilityRef.current = owned.capability
-        reloadHandoffRef.current = null
-        holderClaimRef.current = claimHolderId({
-          id: owned.holder,
-          onRemint: setOwnHolder,
-          now: () => 0,
-        })
-        bumpCheckoutAuthority((version) => version + 1)
-        loadCheckout()
-      },
-      onError: () => {
-        capabilityRef.current = null
-        reloadHandoffRef.current = null
-        setOwnHolder(remintSessionHolderId())
-        bumpCheckoutAuthority((version) => version + 1)
-        loadCheckout()
-      },
-    })
-    reloadAuthorityRef.current = authority
-    if (!authority.active) {
-      capabilityRef.current = null
-      reloadHandoffRef.current = null
-      setOwnHolder(remintSessionHolderId())
-      bumpCheckoutAuthority((version) => version + 1)
-    }
-    // The module runtime owns the lock. React StrictMode cleanup must not release
-    // checkout authority between its setup probes; explicit Release calls stop it.
-    return undefined
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  // Take / Release the single-writer checkout (3B). Both refetch /versions after
-  // the call so the chip reflects the real lock (source of truth), and both stay
-  // calm on failure — a 409 (someone else took it) / 403 (not the holder) just
-  // means the refetched manifest shows the truth. Live only.
-  const onTakeCheckout = useCallback(async () => {
-    if (mock) return
-    const did = resolveCheckoutDrawingId({
-      drawingState,
-      requestedDrawingId: REQUESTED_DRAWING_ID,
-    })
-    setCheckoutBusy(true)
-    try {
-      const result = await takeCheckout(did, ownHolder, undefined, capabilityRef.current)
-      if (result?.acquired && result.checkout_capability) {
-        reloadAuthorityRef.current?.stop()
-        const authority = holdCheckoutReloadAuthority({
-          handoff: {
-            capability: result.checkout_capability,
-            holder: ownHolder,
-            drawingId: did,
-          },
-          onAcquired: (owned) => {
-            capabilityRef.current = owned.capability
-            bumpCheckoutAuthority((version) => version + 1)
-          },
-        })
-        reloadAuthorityRef.current = authority
-        if (!authority.active || !(await authority.acquired)) {
-          capabilityRef.current = null
-          try { await releaseCheckout(did, result.checkout_capability) } catch { /* fail closed */ }
-        }
-      } else if (!result?.acquired) {
-        capabilityRef.current = null
-        reloadAuthorityRef.current?.stop()
-        reloadAuthorityRef.current = null
-      }
-    } catch (error) {
-      if (error?.status === 403 || error?.status === 409) {
-        capabilityRef.current = null
-        reloadAuthorityRef.current?.stop()
-        reloadAuthorityRef.current = null
-      }
-    }
-    finally {
-      await loadCheckout()
-      setCheckoutBusy(false)
-    }
-  }, [mock, drawingState, ownHolder, loadCheckout])
-
-  const onReleaseCheckout = useCallback(async () => {
-    if (mock) return
-    const did = resolveCheckoutDrawingId({
-      drawingState,
-      requestedDrawingId: REQUESTED_DRAWING_ID,
-    })
-    setCheckoutBusy(true)
-    try {
-      await releaseCheckout(did, capabilityRef.current)
-      capabilityRef.current = null
-      reloadAuthorityRef.current?.stop()
-      reloadAuthorityRef.current = null
-    } catch (error) {
-      if (error?.status === 403 || error?.status === 409) capabilityRef.current = null
-    }
-    finally {
-      await loadCheckout()
-      setCheckoutBusy(false)
-    }
-  }, [mock, drawingState, loadCheckout])
+  // Checkout lock (item 3): the controller reads the current drawing's version
+  // manifest and picks up its `checkout` (the sibling contract adds it to
+  // /versions). Unknown and failed reads stay fail-closed, and its sequence
+  // fence stops a stale response re-enabling writes after the drawing changes.
+  // All of that is createCheckoutController.js now, proven by its own suites
+  // rather than re-derived here.
 
   // Prefer ending checkout authority before leaving this origin for Auth0. If
   // the release cannot complete, login still proceeds and the marked, one-use
-  // auth-return handoff above preserves the capability behind the Web Lock.
+  // auth-return handoff preserves the capability behind the Web Lock.
+  //
+  // The retired copy also converged the rendered lock state by hand
+  // (setCheckout(null) + setCheckoutUnknown(false)) so a REJECTED redirect
+  // could not leave a stale "You hold the edit lock" control behind a dead
+  // capability. The controller's release does better than that: it re-reads
+  // /versions, so the control shows the SERVER's answer, and a read that 401s
+  // on the way to sign-in lands unknown + read-failed, which is fail-closed.
+  // Byte-identical to /try's signInWithCheckoutRelease.
   const onLogin = useCallback(async () => {
-    if (!mock && capabilityRef.current) {
-      const did = resolveCheckoutDrawingId({
-        drawingState,
-        requestedDrawingId: REQUESTED_DRAWING_ID,
-      })
-      try {
-        await releaseCheckout(did, capabilityRef.current)
-        capabilityRef.current = null
-        reloadAuthorityRef.current?.stop()
-        reloadAuthorityRef.current = null
-        // The server lease is already gone. Converge the rendered lock state
-        // before Auth0 navigation so a rejected redirect cannot leave a stale
-        // "You hold the edit lock" control with no bearer capability.
-        setCheckout(null)
-        setCheckoutUnknown(false)
-        setCheckoutReadFailed(false)
-        bumpCheckoutAuthority((version) => version + 1)
-      } catch { /* the auth-return handoff remains the fail-closed fallback */ }
-    }
+    if (checkout.actions.getCapability()) await checkout.actions.release()
     await login()
-  }, [mock, drawingState])
+  }, [checkout.actions])
 
   // Tab-close reap beacon: on pagehide / tab-hidden, if a durable in-flight job
   // pointer exists, sendBeacon POST /api/jobs/{id}/close so the backend flags the
@@ -1534,18 +1381,18 @@ export default function App() {
           idempotencyKey: idempotencyKey || undefined,
           catalogDigest: (runContext?.toolSnapshot?.catalogDigest
             || createCatalogToolSnapshot(tool).catalogDigest || undefined),
-          checkoutCapability: capabilityRef.current || undefined,
+          checkoutCapability: checkout.actions.getCapability() || undefined,
           onSubmit,
           onStatus,
         })),
     })
 
     if (!mock) {
-      loadUsage(); loadCheckout()
+      loadUsage(); checkout.actions.refresh()
       if (openProjectId) rehydrate()
     }
     return envelope
-  }, [agentMode, catalogRunContext, clearAgentMode, dismissRoute, loadCheckout, loadUsage, mock,
+  }, [agentMode, catalogRunContext, checkout.actions, clearAgentMode, dismissRoute, loadUsage, mock,
     health?.aps_live, openProjectId, prepareRunParams, markRefreshFailure, previewing, rehydrate, runJob,
     shown, writeLocked])
 
@@ -2639,16 +2486,16 @@ export default function App() {
               {!mock && (
                 <CheckoutControls
                   lockedByOther={otherHeldCheckout}
-                  staleByOther={!!staleHeldCheckout}
-                  legacyByOther={!!legacyHeldCheckout}
+                  staleByOther={lock.staleByOther}
+                  legacyByOther={lock.legacyByOther}
                   canTake={lock.canTake}
                   heldByUs={heldByUs}
-                  unknown={checkoutUnknown}
-                  readFailed={checkoutReadFailed}
-                  busy={checkoutBusy}
-                  onTake={onTakeCheckout}
-                  onRelease={onReleaseCheckout}
-                  onRetry={loadCheckout}
+                  unknown={lock.unknown}
+                  readFailed={checkout.readFailed}
+                  busy={checkout.busy}
+                  onTake={checkout.actions.take}
+                  onRelease={checkout.actions.release}
+                  onRetry={checkout.actions.refresh}
                 />
               )}
               {drawingState && (
@@ -2689,7 +2536,7 @@ export default function App() {
                         retryKey={rTarget === 'history'}
                         exiting={historyExit.exiting}
                         mock={mock}
-                        capability={capabilityRef.current}
+                        capability={checkout.actions.getCapability()}
                         onRestored={onRestoreCommitted}
                         headWarning={unreadableHead}
                         mutationBlocked={drawingMutationsBlocked}
@@ -2753,7 +2600,7 @@ export default function App() {
                   // after, the same acquire→save→release discipline the
                   // acceptance prover runs. A refused acquire surfaces the
                   // real holder instead of the store's opaque 400.
-                  const held = capabilityRef.current
+                  const held = checkout.actions.getCapability()
                   let acquired = null
                   if (!held) {
                     acquired = await takeCheckout(REQUESTED_DRAWING_ID, 'cad-edit-save')
@@ -3052,7 +2899,7 @@ export default function App() {
         onSelectJob={onSelectJob}
       />
 
-      <footer className="foot-bar">
+      <footer className="foot-bar" data-checkout-instance={checkout.instanceId}>
         {/* Traversal left: a named "← Parent" link while a project is open. */}
         {!mock && openProjectId && (
           <button type="button" className="chip-act" onClick={onCloseProject}>← All projects</button>
