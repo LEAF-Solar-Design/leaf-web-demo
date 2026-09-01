@@ -1279,7 +1279,7 @@ export default function App() {
   // P2: committed snapshot for the Esc-interrupt emit. Assigned in an effect
   // (post-commit), not during render, so an abandoned concurrent render can
   // never tear a wrong tool/elapsed pair into the handler; kept out of the
-  // Esc listener's deps because elapsed ticks every 200ms.
+  // Esc listener's deps because elapsed ticks every 1s (useJobController).
   const interruptSnapshotRef = useRef({ tool: null, elapsedMs: null })
   useEffect(() => {
     interruptSnapshotRef.current = { tool: selectedTool?.name || null, elapsedMs: runElapsedMs }
@@ -2076,7 +2076,7 @@ export default function App() {
           markInstant()
           // P2 wave C-2: latency tolerance in the wild. Esc-on-running is the
           // ONE interrupt gesture (the rail keeps the job; nothing cancels
-          // server-side). Refs, not deps: elapsed ticks every 200ms and must
+          // server-side). Refs, not deps: elapsed ticks every 1s and must
           // not re-subscribe this listener.
           track('run.interrupted', {
             ...(interruptSnapshotRef.current.tool ? { tool: interruptSnapshotRef.current.tool } : {}),

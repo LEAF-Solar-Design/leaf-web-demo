@@ -167,7 +167,7 @@ export default function VersionHistory({
         )}
 
         {loading && (
-          <div className="skeleton-stack" aria-label="Loading history">
+          <div className="skeleton-stack vh-skeleton" aria-label="Loading history">
             <div className="skeleton-row" />
             <div className="skeleton-row" />
             <div className="skeleton-row" />

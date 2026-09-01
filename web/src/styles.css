@@ -544,7 +544,7 @@ h1.home-q em {
   background: var(--status-warning); flex: 0 0 auto;
 }
 .viewer-wrap { position: relative; height: 460px; min-height: 320px; background: var(--cv-bg); }
-.viewer-canvas { position: absolute; inset: 0; }
+.viewer-canvas { position: absolute; inset: 0; cursor: crosshair; }
 .viewer-canvas canvas { display: block; }
 /* canvas-anchored copy reads with the CANVAS palette, never the paper tokens */
 .overlay-msg { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); color: var(--cv-dim); font-size: 14px; }
@@ -1067,6 +1067,9 @@ footer .warn-txt { color: var(--status-warning); }
 .vh-row-sub { display: flex; align-items: baseline; gap: 8px; margin-top: 3px; }
 .vh-note-txt { font-size: 11.5px; color: var(--muted); line-height: 1.4; }
 .vh-when { margin-left: auto; font-size: 10.5px; color: var(--muted-2); white-space: nowrap; font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
+/* Real .vh-row rows run ~44px (7px pad + two text lines + 3px gap + 7px pad);
+   the loading skeleton matches so history doesn't jump height on load. */
+.vh-skeleton { --skeleton-h: 44px; }
 
 /* ==================== UI wave 2: projects · ops · checkout · quota ==================== */
 
@@ -1646,9 +1649,14 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 .ledger-ref { font: 400 11px var(--font-mono); color: var(--muted-2); text-align: right; }
 .ledger-row.selected { background: var(--accent-tint); box-shadow: inset 2px 0 0 var(--primary); }
 
-/* ---------------- L1 skeleton loading (static - no shimmer, no spinners) ---------------- */
+/* ---------------- L1 skeleton loading (static - no shimmer, no spinners) ----------------
+   Height is a per-list custom property, not a flat 34px: a skeleton whose
+   rows don't match the real row height makes the list visibly jump the
+   instant data replaces it. Callers whose real rows differ from the 34px
+   default set --skeleton-h on their own container (e.g. .vh-skeleton,
+   .rail-ske); everyone else keeps the fallback untouched. */
 .skeleton-row {
-  height: 34px; border: 1px solid var(--border); border-radius: 4px;
+  height: var(--skeleton-h, 34px); border: 1px solid var(--border); border-radius: 4px;
   background: var(--card); opacity: .55;
 }
 .skeleton-row:last-child { width: 70%; }
@@ -1658,6 +1666,12 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   content: ''; width: 6px; height: 6px; border-radius: 50%; flex: none;
   background: var(--primary); animation: leaf-pulse 1.6s ease-in-out infinite;
 }
+/* .refreshing: the shared "content is updating in place" atom — a thin
+   accent hairline above a panel that's silently re-fetching (not a cold
+   load, not an error), so panels stop inventing their own one-off variant
+   of the same signal. Token-derived (color-mix on --primary), so it
+   re-pins correctly inside dark subtrees same as .strip-decision/.strip-failed. */
+.refreshing { border-top: 1px solid color-mix(in srgb, var(--primary) 40%, transparent); }
 
 /* ---------------- E2 empty pane (top-left, content-shaped - never centered) ---------------- */
 .empty-pane {
