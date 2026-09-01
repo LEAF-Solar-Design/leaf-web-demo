@@ -252,3 +252,32 @@ describe('transport and controller together', () => {
     expect(controller.getSnapshot()).toMatchObject({ status: 'required', reason: 'expired' })
   })
 })
+
+// The activate guard (adversarial verify of PR #880, attack A1): a session
+// proof that answers AFTER a token-invalidating refusal latched the gate is
+// stale by construction and must not clear it.
+describe('activate guard', () => {
+  it('a 200 landing after a 401 latch does not clear the gate', () => {
+    const { controller: c } = harness()
+    c.actions.checking()
+    c.actions.requireAuth('/api/session', { tokenInvalidated: true })
+    expect(c.getSnapshot().status).toBe('required')
+    c.actions.activate({ tenant: 't1', tier: 'demo', org: null })
+    expect(c.getSnapshot().status).toBe('required')
+  })
+
+  it('activate cannot reopen a signed-out-final latch', async () => {
+    const { controller: c } = harness()
+    c.actions.checking()
+    c.actions.requireAuth('sign-out')
+    c.actions.activate({ tenant: 't1' })
+    expect(c.getSnapshot().status).toBe('required')
+  })
+
+  it('the normal checking -> activate path still activates', () => {
+    const { controller: c } = harness()
+    c.actions.checking()
+    c.actions.activate({ tenant: 't1', tier: 'demo', org: null })
+    expect(c.getSnapshot().status).toBe('active')
+  })
+})

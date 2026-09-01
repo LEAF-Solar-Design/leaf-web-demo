@@ -64,8 +64,10 @@ export function createSessionController({
   // per reason; a refusal that indicts nothing deletes nothing.
   const requireAuth = (source = 'unknown', { tokenInvalidated = false } = {}) => {
     if (tokenInvalidated) {
-      // Read BEFORE clearing: this is the token the refusal indicted, and
-      // recovery must never spend an attempt retrying it.
+      // Read before clearing. In the transport channel api.js has already
+      // wiped the store before notifying, so this reads null there (correct:
+      // that token is dead); in a surface-owned requireAuth the token is
+      // still present and this pins it so recovery never retries it.
       latchedToken = readToken()
       clearToken()
     }
@@ -115,6 +117,14 @@ export function createSessionController({
   }
 
   const activate = (session) => {
+    // A refusal that landed AFTER this session proof went out OUTRANKS it: the
+    // 200 shows the session was live when the server answered, not now, and
+    // the console awaits a second round trip between the two (App.jsx load
+    // effect), so a token-invalidating 401 can latch inside that window. Only
+    // `checking` (pre-answer) or an already-active session may activate; a
+    // latched gate stays until a re-VERIFIED proof arrives through recovery.
+    // (Adversarial verify of PR #880, attack A1/A2: confirmed + fixed.)
+    if (state.status === 'required') return state
     publish({
       status: 'active',
       reason: null,
