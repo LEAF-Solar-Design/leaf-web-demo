@@ -32,7 +32,7 @@ test('ordinary language routes to a confident catalog proposal before any execut
 
   await page.goto('/try')
   await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
-  await page.getByRole('textbox', { name: 'Command bar' }).fill('Count every panel in this drawing')
+  await page.getByLabel('Command bar').fill('Count every panel in this drawing')
   await page.getByRole('button', { name: 'Run', exact: true }).click()
 
   await expect(page.getByRole('button', { name: 'Run count-panels' })).toBeVisible()
@@ -45,7 +45,7 @@ test('the cat request is classified before Claude receives the same request and 
   const evidence = await install(page)
   await page.goto('/try')
   await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
-  await page.getByRole('textbox', { name: 'Command bar' }).fill(REQUEST)
+  await page.getByLabel('Command bar').fill(REQUEST)
   await page.getByRole('button', { name: 'Run', exact: true }).click()
 
   await expect(page.getByTestId('operator-surface').getByRole('button', { name: 'Approve' })).toBeVisible({ timeout: 12_000 })
@@ -78,7 +78,7 @@ test('router transport loss falls back visibly to local catalog matching', async
   await page.goto('/try')
   await entitlementLoaded
   await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
-  await page.getByRole('textbox', { name: 'Command bar' }).fill('Inspect this drawing for unusual geometry')
+  await page.getByLabel('Command bar').fill('Inspect this drawing for unusual geometry')
   await page.getByRole('button', { name: 'Run', exact: true }).click()
 
   const resolver = page.getByRole('listbox', { name: 'Route resolver' })
@@ -116,7 +116,7 @@ test('no match survives Claude quota failure as an honest resolver', async ({ pa
 
   await page.goto('/try')
   await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
-  await page.getByRole('textbox', { name: 'Command bar' }).fill('Do the unusual thing')
+  await page.getByLabel('Command bar').fill('Do the unusual thing')
   await page.getByRole('button', { name: 'Run', exact: true }).click()
 
   await expect(page.getByText('AI paused. Your built tools keep working.')).toBeVisible()

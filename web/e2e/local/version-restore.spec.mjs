@@ -108,7 +108,7 @@ async function mountVersionSurface(page, {
   await expect(page.locator('.viewer-title')).toContainText('cat.dwg', { timeout: 15_000 })
   // Seat a real versioned drawing through App's production controller path.
   // The initial session intake alone is intentionally unversioned.
-  await page.getByRole('combobox', { name: 'Command bar' }).fill(REQUEST)
+  await page.getByLabel('Command bar').fill(REQUEST)
   await page.getByRole('button', { name: 'Run' }).click()
   const approval = page.locator('.converse-confirm').filter({ hasText: 'arrange-panels-as-cat' })
   await approval.getByRole('button', { name: 'Approve' }).click()
