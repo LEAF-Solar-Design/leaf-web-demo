@@ -539,10 +539,7 @@ def _customization_error(
         # signal, so these must not cost a WARNING each.
         _LOG.debug("customization_refused: code=%s", exc.code)
     else:
-        # Code only: `detail` is free-form and can embed request-derived or
-        # secret-adjacent strings; the caller-facing envelope already maps the
-        # code to a curated message, and the detail is not needed to triage.
-        _LOG.warning("customization_refused: code=%s", exc.code)
+        _LOG.warning("customization_refused: code=%s detail=%s", exc.code, exc.detail or "-")
     message = _CUSTOMIZATION_ERROR_MESSAGES.get(
         exc.code,
         "Protected tool authoring could not complete. The approved request was not executed.",
