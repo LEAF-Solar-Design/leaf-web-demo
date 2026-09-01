@@ -2316,6 +2316,85 @@ def main() -> None:
         assert (
             f'printf \'%s  %s\\n\' "${argument}"' in harness_dockerfile
         ), argument
+
+    # The web libexpat refresh follows the same producer-bound cache contract,
+    # but against the exact Alpine main APKINDEX exposed by nginx:alpine. Each
+    # producer reads the versioned repository from that base, validates the
+    # official HTTPS endpoint, hashes the current index bytes, and passes that
+    # value to both Docker and the signed surface fingerprint.
+    web_resolver_name = "name: Resolve web Alpine main APKINDEX digest"
+    web_expected_conditions = {
+        "warm": "matrix.image == 'web' && steps.chain.outputs.skip != 'true'",
+        "build": "matrix.image == 'web'",
+        "speculate": "matrix.image == 'web'",
+    }
+    for lane, block in producer_blocks:
+        resolvers = [
+            step
+            for step in re.split(r"\n      - ", block)
+            if step.startswith(web_resolver_name)
+        ]
+        assert len(resolvers) == 1, (lane, len(resolvers))
+        resolver = _executable_bash(resolvers[0])
+        assert (
+            '--entrypoint cat "$NGINX_ALPINE_BASE" /etc/apk/repositories'
+            in resolver
+        ), lane
+        assert (
+            r"^https://dl-cdn\.alpinelinux\.org/alpine/"
+            r"v[0-9]+\.[0-9]+/main/?$" in resolver
+        ), lane
+        assert '"${main_repo%/}/x86_64/APKINDEX.tar.gz"' in resolver, lane
+        assert "curl --fail --silent --show-error --location" in resolver, lane
+        assert "--proto '=https' --tlsv1.2" in resolver, lane
+        assert 'sha256sum "$artifact"' in resolver, lane
+        assert '[[ "$digest" =~ ^[0-9a-f]{64}$ ]]' in resolver, lane
+        assert 'echo "main_sha256=$digest" >> "$GITHUB_OUTPUT"' in resolver, lane
+        conditions = [
+            _value_of(line)
+            for line in resolvers[0].splitlines()
+            if _key_of(line) == "if"
+        ]
+        assert conditions == [web_expected_conditions[lane]], (lane, conditions)
+
+    web_argument = "WEB_ALPINE_MAIN_APKINDEX_SHA256"
+    web_expression = (
+        "${{ matrix.image == 'web' && format('"
+        f"{web_argument}={{0}}', steps.web_alpine.outputs.main_sha256) || '' }}}}"
+    )
+    assert web_expression in build_arg_input
+    assert text.count(web_expression) == 3
+    for lane, block, surface_name in (
+        ("build", build_block, "name: Resolve one signed reusable surface"),
+        ("speculate", speculate_block, "name: Describe the exact speculative surface"),
+    ):
+        surface = _executable_bash(next(
+            step
+            for step in re.split(r"\n      - ", block)
+            if step.startswith(surface_name)
+        ))
+        assert (
+            f"{web_argument}: ${{{{ steps.web_alpine.outputs.main_sha256 }}}}"
+            in surface
+        ), lane
+        assert f'[[ "${web_argument}" =~ ^[0-9a-f]{{64}}$ ]]' in surface, lane
+        assert (
+            f'build_args+=(--build-arg "{web_argument}=${web_argument}")'
+            in surface
+        ), lane
+
+    web_dockerfile = (ROOT / "deploy" / "Dockerfile.web").read_text(
+        encoding="utf-8"
+    )
+    assert web_dockerfile.count(f"ARG {web_argument}") == 1
+    assert 'apk --repositories-file "$repositories_file" update' in web_dockerfile
+    assert f'printf \'%s  %s\\n\' "${web_argument}" "$1"' in web_dockerfile
+    assert 'apk --repositories-file "$repositories_file" upgrade libexpat' in (
+        web_dockerfile
+    )
+    assert 'apk version -t "$installed_version" 2.8.4-r0' in web_dockerfile
+    assert not re.search(r"^ADD\s+https://", web_dockerfile, re.M)
+
     # The speculative app leg must mint the same zstd compression as the
     # gated build leg: adoption aliases the speculative digest onto the
     # immutable sha-* tags, so a gzip spec image would keep every merge on
