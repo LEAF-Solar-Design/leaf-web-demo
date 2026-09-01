@@ -2691,9 +2691,35 @@ export default function App() {
                 headVersion: null,
                 save: async (bytes, _parent, digest) => {
                   const chain = await getDrawingVersions(false, REQUESTED_DRAWING_ID)
-                  return saveEditedDrawingVersion(
-                    REQUESTED_DRAWING_ID, bytes, chain.head, digest,
-                    capabilityRef.current)
+                  // The store publishes ONLY under a live single-writer
+                  // checkout (the postgres authority fails closed without
+                  // one — staging's exact first-save refusal). Use the
+                  // session's held capability when there is one; otherwise
+                  // take a checkout for exactly this save and release it
+                  // after, the same acquire→save→release discipline the
+                  // acceptance prover runs. A refused acquire surfaces the
+                  // real holder instead of the store's opaque 400.
+                  const held = capabilityRef.current
+                  let acquired = null
+                  if (!held) {
+                    acquired = await takeCheckout(REQUESTED_DRAWING_ID, 'cad-edit-save')
+                    if (!acquired.acquired) {
+                      const e = new Error('drawing is checked out by '
+                        + (acquired.locked_by || 'another session')
+                        + ' — try again when the lock clears')
+                      e.status = 409
+                      throw e
+                    }
+                  }
+                  const cap = held || acquired.checkout_capability
+                  try {
+                    return await saveEditedDrawingVersion(
+                      REQUESTED_DRAWING_ID, bytes, chain.head, digest, cap)
+                  } finally {
+                    if (acquired) {
+                      releaseCheckout(REQUESTED_DRAWING_ID, cap).catch(() => {})
+                    }
+                  }
                 },
               } : null}
               onSaved={(receipt) => {
