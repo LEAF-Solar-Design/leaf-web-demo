@@ -69,7 +69,7 @@ test('an uploaded DXF remains the authorized target of a catalog run', async ({ 
   await expect(result).toContainText('count-by-layer')
   expect(observed.filter((entry) => entry === 'POST /api/run 202')).toHaveLength(1)
   expect(invalidRequests).toEqual([])
-  await page.getByRole('textbox', { name: 'Command bar' }).fill('stale request for the first drawing')
+  await page.getByLabel('Command bar').fill('stale request for the first drawing')
 
   let releaseOldRefresh
   let markOldRefreshReached
@@ -111,7 +111,7 @@ test('an uploaded DXF remains the authorized target of a catalog run', async ({ 
   await expect(page.getByTestId('catalog-run-result')).not.toContainText('count-by-layer')
   await expect(page.getByTestId('catalog-run-result')).not.toContainText('delete-marked-panel')
   await expect(page.getByTestId('version-head')).toContainText('Version 1')
-  await expect(page.getByRole('textbox', { name: 'Command bar' })).toHaveValue('')
+  await expect(page.getByLabel('Command bar')).toHaveValue('')
   const oldRefreshResponse = page.waitForResponse((response) => {
     const url = new URL(response.url())
     return response.request().method() === 'GET' &&

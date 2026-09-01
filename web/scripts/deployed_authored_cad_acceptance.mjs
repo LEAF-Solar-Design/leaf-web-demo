@@ -959,7 +959,7 @@ async function runBrowserTenant(config, tenant, browser, execute) {
     } catch {
       throw new AcceptanceError('browser_preflight', `tenant ${tenant.label} is not backend-ready`)
     }
-    const command = page.getByRole('textbox', { name: 'Command bar' })
+    const command = page.getByLabel('Command bar')
     if (await command.inputValue() !== '') {
       throw new AcceptanceError('preloaded_request', 'the command bar was not empty')
     }

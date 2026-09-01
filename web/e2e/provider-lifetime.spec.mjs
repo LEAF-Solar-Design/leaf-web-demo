@@ -28,7 +28,7 @@ test('the unified drawing controller survives a site recast without reloading ve
   const surface = page.getByTestId('operator-surface')
   await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
   const instanceBefore = await surface.getAttribute('data-controller-instance')
-  await expect(page.getByRole('textbox', { name: 'Command bar' })).toHaveValue(REQUEST)
+  await expect(page.getByLabel('Command bar')).toHaveValue(REQUEST)
   await page.getByRole('button', { name: 'Run', exact: true }).click()
   await expect(surface.getByRole('button', { name: 'Approve' })).toBeVisible({ timeout: 15_000 })
   await surface.getByRole('button', { name: 'Approve' }).click()

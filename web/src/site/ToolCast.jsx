@@ -1945,6 +1945,7 @@ export default function ToolCast({
               onChange={(event) => changePrompt(event.target.value)}
               onKeyDown={runOnEnter}
               aria-label="Command bar"
+              data-testid="command-bar"
               placeholder={PUBLIC_DEMO
                 ? 'Message the demo or describe a CAD task.'
                 : PROOF_MODE
