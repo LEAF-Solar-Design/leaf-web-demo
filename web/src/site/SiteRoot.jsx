@@ -51,16 +51,18 @@ const APP_ONLY_HOSTS = new Set([
 ])
 const MARKETING_ORIGIN = 'https://www.leafautomation.ai'
 
-// The ONE `?demo` reading on this surface (ACCEPTANCE route matrix: "one
-// reading must serve both consumers"). bootWantsApp takes the same search
-// string for the BOOT decision; this classification is what the drawing
-// SELECTION is seeded from, handed to the provider rather than re-read there.
-const DEMO = classifyDemo(window.location.search, isSignedIn())
+// THE reading of the boot query, made once (ACCEPTANCE route matrix: "one
+// reading must serve both consumers"). The same string drives the BOOT
+// decision (bootWantsApp) and the drawing SELECTION (classifyDemo, handed to
+// the provider rather than re-read there), so the two cannot drift.
+// navigate() preserves the search, and nothing else rewrites it.
+const BOOT_SEARCH = window.location.search
+const DEMO = classifyDemo(BOOT_SEARCH, isSignedIn())
 const PUBLIC_DEMO = DEMO.publicDemo
 
 export default function SiteRoot() {
   // Evaluated once at boot — deep links into the console never see the site.
-  const [bootApp] = useState(() => bootWantsApp(window.location.search, window.location.pathname))
+  const [bootApp] = useState(() => bootWantsApp(BOOT_SEARCH, window.location.pathname))
   // Armed by the callback QUERY on ANY path, not just /try: the redirect_uri is
   // the bare origin, so /try is the one landing this never sees. See authBoot.js.
   const [authCallbackPending, setAuthCallbackPending] = useState(shouldDeferForAuthCallback)
@@ -138,7 +140,7 @@ export default function SiteRoot() {
   if (scene === 'app') {
     // The console ALONE — no stage mounted; App owns its own Viewer.
     return (
-      <DrawingIdentityProvider mode={DRAWING_MODE_CONSOLE}>
+      <DrawingIdentityProvider mode={DRAWING_MODE_CONSOLE} search={BOOT_SEARCH}>
         <WorkspaceControllerProvider drawingId="rooftop_demo" retryNotFound>
           <Suspense fallback={null}>
             <App />
@@ -159,6 +161,7 @@ export default function SiteRoot() {
   return (
     <DrawingIdentityProvider
       mode={DRAWING_MODE_OPERATOR}
+      search={BOOT_SEARCH}
       publicDemo={DEMO.publicDemo}
       liveDemo={DEMO.liveDemo}
     >
