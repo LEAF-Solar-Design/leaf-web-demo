@@ -8,7 +8,7 @@
  * a project. Both halves have to hold: dropping either one recreates the bug.
  */
 import { describe, expect, it } from 'vitest'
-import { deriveWorkspaceProjectState, WORKSPACE_PROJECT_COPY } from './workspaceProjectState.js'
+import { deriveWorkspaceProjectState, EMPTY_WORKSPACE_PROJECT, WORKSPACE_PROJECT_COPY } from './workspaceProjectState.js'
 
 describe('deriveWorkspaceProjectState', () => {
   it('the observed production state: a mounted drawing, no workspace project', () => {
@@ -85,6 +85,42 @@ describe('deriveWorkspaceProjectState', () => {
   it('blank and whitespace-only names fall through to the honest empty state', () => {
     expect(deriveWorkspaceProjectState({ drawingName: '   ' }).kind).toBe('empty')
     expect(deriveWorkspaceProjectState({ openProjectId: 'p-1', projectName: '  ' }).kind).toBe('empty')
+  })
+
+  it.each([
+    ['spaces', '   '],
+    ['tab', String.fromCharCode(9)],
+    ['newline', String.fromCharCode(10)],
+  ])(
+    'a whitespace-only openProjectId (%s) never invents an open project',
+    (_label, blank) => {
+      // sol-critic finding 1: a whitespace id is TRUTHY in JS, so trimming
+      // names but not ids would have opened a project from a blank identifier.
+      const state = deriveWorkspaceProjectState({
+        openProjectId: blank, projectName: 'Maple St retrofit', drawingName: 'rooftop_demo',
+      })
+      expect(state.kind).toBe('drawing-only')
+    },
+  )
+
+  it('a whitespace-only orgId does not enable a create the server must reject', () => {
+    const state = deriveWorkspaceProjectState({ drawingName: 'rooftop_demo', orgId: '   ' })
+    expect(state.action.disabled).toBe(true)
+    expect(state.action.reason).toBe(WORKSPACE_PROJECT_COPY.reasonNoOrg)
+  })
+
+  it('an over-long id is never truncated — a truncated id is a WRONG id', () => {
+    const id = 'p-'.padEnd(500, '9')
+    const state = deriveWorkspaceProjectState({ openProjectId: id, projectName: 'Maple St' })
+    expect(state.kind).toBe('project')
+    expect(state.label).toBe('Maple St')
+  })
+
+  it('EMPTY_WORKSPACE_PROJECT is the shared frozen resting state', () => {
+    expect(EMPTY_WORKSPACE_PROJECT.kind).toBe('empty')
+    expect(Object.isFrozen(EMPTY_WORKSPACE_PROJECT)).toBe(true)
+    // Same object every read: consumers must not allocate one per render.
+    expect(EMPTY_WORKSPACE_PROJECT).toBe(EMPTY_WORKSPACE_PROJECT)
   })
 
   it('a project NAME with no open id never reaches the header chip label', () => {

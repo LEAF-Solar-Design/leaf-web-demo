@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { PRODUCT_SURFACES, SHARED_WORKSPACE_CAPABILITIES, productSurface } from '../site/productSurfaces.js'
-import { deriveWorkspaceProjectState } from '../site/workspaceProjectState.js'
+import { EMPTY_WORKSPACE_PROJECT } from '../site/workspaceProjectState.js'
 import { moveRovingTab } from '../lib/roving.js'
 
 // F-8: the continuity layer, made visible. Lives in the always-mounted nav so
@@ -9,7 +9,7 @@ import { moveRovingTab } from '../lib/roving.js'
 // the open project and the same catalog fold every surface consumes (F-7).
 // A surface change pulses it (class toggle, never a remount); the pulse and
 // every other F-8 motion is disabled under prefers-reduced-motion in CSS.
-export function ContinuityRail({ activeSurface, project, workspaceProject = null, catalog }) {
+export function ContinuityRail({ activeSurface, workspaceProject = null, catalog }) {
   const [pulse, setPulse] = useState(false)
   const first = useRef(true)
   useEffect(() => {
@@ -24,10 +24,12 @@ export function ContinuityRail({ activeSurface, project, workspaceProject = null
     0,
   )
   // The rail names BOTH concepts, so a mounted drawing can never read as
-  // "nothing is open" (the 2026-09-01 pilot contradiction). `project` stays
-  // accepted as the legacy shorthand for a plain open workspace project.
-  const state = workspaceProject
-    || deriveWorkspaceProjectState({ openProjectId: project ? 'legacy' : null, projectName: project })
+  // "nothing is open" (the 2026-09-01 pilot contradiction). It CONSUMES the
+  // derivation and never performs one: the previous revision accepted a legacy
+  // `project` string and synthesized a placeholder openProjectId from it,
+  // which fabricated an identifier inside the fix for fabricated state. That
+  // prop is gone; callers pass the derived state or nothing.
+  const state = workspaceProject || EMPTY_WORKSPACE_PROJECT
   return (
     <div className="tc-continuity" data-testid="continuity-rail" data-pulse={pulse ? 'true' : 'false'} data-project-state={state.kind}>
       <span className="tc-continuity-label">Carried across every profile</span>
@@ -48,7 +50,7 @@ export function ContinuityRail({ activeSurface, project, workspaceProject = null
 }
 
 export default function ProductSurfaceTabs({
-  activeSurface, states, onSelect, project = null, workspaceProject = null, catalog = null,
+  activeSurface, states, onSelect, workspaceProject = null, catalog = null,
 }) {
   return (
     <nav className="tc-product-nav" data-cast="tool" aria-label="Product workspace">
@@ -77,7 +79,6 @@ export default function ProductSurfaceTabs({
       </div>
       <ContinuityRail
         activeSurface={activeSurface}
-        project={project}
         workspaceProject={workspaceProject}
         catalog={catalog}
       />

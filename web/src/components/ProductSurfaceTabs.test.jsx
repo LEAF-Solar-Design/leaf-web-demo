@@ -92,12 +92,15 @@ describe('F-7: surface frames render the live tenant catalog', () => {
   })
 
   it('F-8: the continuity rail is the SAME node across profile switches, and pulses instead of remounting', () => {
+    const openProject = deriveWorkspaceProjectState({
+      openProjectId: 'p-1', projectName: 'rooftop_demo', orgId: 'org-1',
+    })
     const nav = (surface) => (
       <ProductSurfaceTabs
         activeSurface={surface}
         states={states}
         onSelect={() => {}}
-        project="rooftop_demo"
+        workspaceProject={openProject}
         catalog={catalogA}
       />
     )
@@ -243,6 +246,17 @@ describe('F-7: surface frames render the live tenant catalog', () => {
       expect(frame).toContain('workspaceProject={workspaceProjectState}')
       expect(frame).toContain('onCreateProject=')
     }
+  })
+
+  it('F-9: the rail CONSUMES the derivation and never performs one', () => {
+    // sol-critic finding 2: the rail used to synthesize a literal 'legacy'
+    // openProjectId from a legacy prop — fabricating an identifier inside the
+    // fix for fabricated state. It reads the shared frozen resting state now.
+    const src = readFileSync(`${process.cwd()}/src/components/ProductSurfaceTabs.jsx`, 'utf8')
+    expect(src).not.toContain('deriveWorkspaceProjectState')
+    expect(src).not.toContain("'legacy'")
+    render(<ProductSurfaceTabs activeSurface="browser" states={states} onSelect={() => {}} />)
+    expect(screen.getByTestId('continuity-rail').dataset.projectState).toBe('empty')
   })
 
   it('F-9: rail and card agree — one derivation, never two answers on one screen', () => {

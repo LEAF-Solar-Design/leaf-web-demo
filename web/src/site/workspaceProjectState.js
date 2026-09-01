@@ -53,6 +53,19 @@ function trimmedLabel(value) {
   return text.length > MAX_LABEL ? `${text.slice(0, MAX_LABEL - 1)}…` : text
 }
 
+// Identifiers get the SAME normalization as names. Trimming names but not ids
+// was an inconsistency this module could not survive: a whitespace-only
+// openProjectId is truthy in JS, so '   ' plus a valid name would have invented
+// an open project out of a blank identifier, and a whitespace-only orgId would
+// have enabled a create action the server must then reject. Both are exactly
+// the "invented state" this module exists to prevent. Ids are not truncated —
+// a truncated id is a WRONG id, so an over-long one is passed through intact
+// and only the label it produces is bounded.
+function presentId(value) {
+  const text = String(value ?? '').trim()
+  return text || null
+}
+
 /**
  * Derive the single legible workspace-project state.
  *
@@ -76,11 +89,13 @@ export function deriveWorkspaceProjectState({
 } = {}) {
   const drawing = trimmedLabel(drawingName)
   const project = trimmedLabel(projectName)
+  const projectId = presentId(openProjectId)
+  const org = presentId(orgId)
 
   // A workspace project is open only when BOTH the id and a name resolve; an id
   // with no name yet is still hydrating, and labelling that "Project —" is how
   // the old chip started lying in the first place.
-  if (openProjectId && project) {
+  if (projectId && project) {
     return Object.freeze({
       kind: 'project',
       tag: 'Project',
@@ -106,12 +121,12 @@ export function deriveWorkspaceProjectState({
         label: WORKSPACE_PROJECT_COPY.actionLabel,
         // The suggested name; the caller owns the actual create call.
         projectName: drawing,
-        disabled: Boolean(mock || projectsUnavailable || !orgId),
+        disabled: Boolean(mock || projectsUnavailable || !org),
         reason: mock
           ? WORKSPACE_PROJECT_COPY.reasonDemo
           : projectsUnavailable
             ? WORKSPACE_PROJECT_COPY.reasonNoPlatform
-            : !orgId
+            : !org
               ? WORKSPACE_PROJECT_COPY.reasonNoOrg
               : null,
       }),
@@ -133,3 +148,10 @@ export function deriveWorkspaceProjectState({
     action: null,
   })
 }
+
+// The one shared resting state. Consumers with nothing to show read THIS rather
+// than calling the derivation with synthesized input: the previous revision had
+// the continuity rail pass a literal 'legacy' as an openProjectId, fabricating
+// an identifier inside the very module that exists to stop invented state.
+// Frozen and module-level, so it also costs no per-render allocation.
+export const EMPTY_WORKSPACE_PROJECT = deriveWorkspaceProjectState({})
