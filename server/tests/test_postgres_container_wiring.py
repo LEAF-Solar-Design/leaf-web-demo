@@ -2076,6 +2076,25 @@ def test_upload_import_boundary_has_a_real_postgres_pr_gate():
     assert "../platform/tests/test_drawing_import.py" in workflow
 
 
+def test_review_signatures_have_a_real_postgres_pr_gate():
+    workflow = _read(".github/workflows/project-lifecycle-postgres.yml")
+
+    for protected_path in ("platform/signing.py", "platform/tests/test_signing.py"):
+        assert f"- '{protected_path}'" in workflow
+
+    step_name = "- name: Run review signature PostgreSQL tests"
+    signing_step = workflow[workflow.index(step_name):]
+    next_step = signing_step.find("\n      - name:", len(step_name))
+    if next_step != -1:
+        signing_step = signing_step[:next_step]
+
+    assert "python -m pytest -q -rs platform/tests/test_signing.py" in signing_step
+    assert "--import-mode=importlib" not in signing_step
+    assert 'if [[ "${out,,}" == *skipped* ]]; then' in signing_step
+    assert "FAIL: review signature tests skipped" in signing_step
+    assert "exit 1" in signing_step
+
+
 def test_live_dwg_version_restore_has_a_real_postgres_pr_gate():
     workflow = _read(".github/workflows/upload-authority-postgres.yml")
 

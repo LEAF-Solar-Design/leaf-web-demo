@@ -7,6 +7,8 @@ from decimal import Decimal, InvalidOperation, localcontext
 from typing import Any, Dict, List, Mapping
 
 SUPPORTED_RULE_TYPES = ("max_cold_string_voltage", "min_source_circuit_ampacity")
+MAX_SIGNIFICANT_DIGITS = 64
+MAX_ADJUSTED_EXPONENT = 100
 
 
 def _decimal(value: Any, field: str) -> Decimal:
@@ -18,6 +20,9 @@ def _decimal(value: Any, field: str) -> Decimal:
         raise ValueError(f"{field} must be numeric") from exc
     if not result.is_finite():
         raise ValueError(f"{field} must be finite")
+    if (len(result.as_tuple().digits) > MAX_SIGNIFICANT_DIGITS
+            or abs(result.adjusted()) > MAX_ADJUSTED_EXPONENT):
+        raise ValueError(f"{field} is outside the supported numeric range")
     return result
 
 
