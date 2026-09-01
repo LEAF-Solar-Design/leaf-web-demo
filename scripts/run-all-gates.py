@@ -576,6 +576,19 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_g1a_canonical_e2e.py"), 1, db_gated=True),
         Suite("server-engine-registry-scripts", "server tests/test_engine_registry_scripts.py",
               "pytest", SERVER, _py_pytest("tests/test_engine_registry_scripts.py"), 7),
+        # timber-cutlist (2026-09-01): the first kind:appbundle tool, three suites. The
+        # activity-spec suite exercises the REAL da/client.py appbundle branch dependency-
+        # free (no creds, no network; APS_NICKNAME is set inside the tests). The intake
+        # suite pins LINE -> 2-point polyline and TEXT/MTEXT -> additive `texts` in the
+        # local DXF parser and in da/intake_parse (LN/TX families). The preflight suite
+        # cross-checks the local_only preview builtin against the engine's own read of
+        # the client's spec drawing (tests/fixtures/six_views.dxf).
+        Suite("server-appbundle-activity-spec", "server tests/test_appbundle_activity_spec.py",
+              "pytest", SERVER, _py_pytest("tests/test_appbundle_activity_spec.py"), 8),
+        Suite("server-dxf-intake-lines-text", "server tests/test_dxf_intake_lines_text.py",
+              "pytest", SERVER, _py_pytest("tests/test_dxf_intake_lines_text.py"), 4),
+        Suite("server-timber-cutlist-preflight", "server tests/test_timber_cutlist_preflight.py",
+              "pytest", SERVER, _py_pytest("tests/test_timber_cutlist_preflight.py"), 4),
         # issue #29 red-suite registry (https://github.com/Evan-Haug/leaf-web-demo/issues/29):
         # all six now fixed-then-registered. test_sessions_e2e's measured "7 errors"
         # were purely its module `harness` fixture failing `npm run build` in a

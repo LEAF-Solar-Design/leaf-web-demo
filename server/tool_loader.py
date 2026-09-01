@@ -1218,7 +1218,10 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
                                 retryable=True, tool=name, version=version, timing_ms=_ms())
 
     # 3) LOCAL "the FILE is the tool" path (APS_LIVE=0, or degraded live fallback)
-    degraded = bool(aps_live)  # requested live but running locally => degraded
+    # requested live but running locally => degraded, EXCEPT a tool that declares
+    # local_only: its implementation IS the local file by design (a preflight that
+    # must cost nothing), so running it here is the contract, not a fallback.
+    degraded = bool(aps_live) and not bool(tool.get("local_only"))
     if local is None and test_source is None:
         return err_envelope(
             ErrorCode.BAD_PARAMS,

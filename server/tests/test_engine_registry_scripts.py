@@ -50,19 +50,29 @@ def _live_activity_tools():
     public demo tool that is contractually submitted with APS_LIVE=0 and runs
     its tracked Python builtin. Neither can use a live Activity.
     """
+    # ``local_only`` (2026-09-01) identifies a tool whose implementation IS its local
+    # Python entry by design (timber-cutlist-preflight): it never takes the Activity
+    # path and the loader does not mark its runs degraded (tool_loader.run_tool_dynamic).
     return [
         tool for tool in _registry_tools()
-        if not tool.get("canonical_only") and not tool.get("offline_only")
+        if not tool.get("canonical_only") and not tool.get("offline_only") and not tool.get("local_only")
     ]
 
 
-def test_count_by_layer_is_the_only_explicit_live_aps_catalog_tool():
-    live_eligible = [
-        tool for tool in _registry_tools() if tool.get("aps_live") is True
-    ]
-    assert [tool.get("name") for tool in live_eligible] == ["count-by-layer"]
-    assert live_eligible[0]["capabilities"] == ["drawing.read"]
-    assert live_eligible[0]["script"] == "engine/tools/count_by_layer.lsp"
+def test_explicit_live_aps_catalog_tools_are_exactly_the_pinned_set():
+    """The live APS lane is an explicit allowlist, pinned here so a registry edit cannot
+    widen it silently. Members: count-by-layer (LISP, the original), timber-cutlist
+    (compiled AppBundle, 2026-09-01: the first kind:appbundle tool; it has no local
+    implementation, so APS is its only execution path)."""
+    live_eligible = {
+        tool["name"]: tool for tool in _registry_tools() if tool.get("aps_live") is True
+    }
+    assert sorted(live_eligible) == ["count-by-layer", "timber-cutlist"]
+    assert live_eligible["count-by-layer"]["capabilities"] == ["drawing.read"]
+    assert live_eligible["count-by-layer"]["script"] == "engine/tools/count_by_layer.lsp"
+    assert live_eligible["timber-cutlist"]["capabilities"] == ["drawing.read"]
+    assert live_eligible["timber-cutlist"]["kind"] == "appbundle"
+    assert live_eligible["timber-cutlist"]["appbundle"] == "LeafCutListTools"
 
 
 def test_live_aps_catalog_authority_requires_an_exact_boolean():

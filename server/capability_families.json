@@ -29,6 +29,11 @@
       "family_id": "placement",
       "label": "Equipment placement",
       "description": "Provisional family for inverter/combiner placement tools. No member is registered in the catalog yet; entries below are reservations for the R2 registry-promotion lane."
+    },
+    {
+      "family_id": "quantities",
+      "label": "Quantities & cut lists",
+      "description": "Material take-offs from layer-coded drawings: member lengths, counts, connections, running metres."
     }
   ],
   "tool_families": {
@@ -43,7 +48,11 @@
     "autofill-string-targets": "stringing",
     "string-autofill-opt": "stringing",
     "inverter-placement": "placement",
-    "combiner-placement": "placement"
+    "combiner-placement": "placement",
+    "timber-cutlist": "quantities",
+    "leaf_cutlist": "quantities",
+    "timber-cutlist-preflight": "quantities",
+    "timber_cutlist_preflight": "quantities"
   },
   "filter_rules": {
     "internal_flag": "internal",

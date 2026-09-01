@@ -179,6 +179,21 @@ def provision_tenant(tenant_id, per_bucket=False):
     print(f"[tenant] DONE. Client can submit WorkItems as tenant {tid!r} (APS_LIVE=1).")
 
 
+def _bundle_id_from_zip(zip_path):
+    """Bundle id = PackageContents.xml's ApplicationPackage/@Name inside the zip (never the file name)."""
+    import zipfile
+    import xml.etree.ElementTree as ET
+    with zipfile.ZipFile(zip_path) as zf:
+        pc = [n for n in zf.namelist() if n.endswith("PackageContents.xml")]
+        if not pc:
+            raise SystemExit(f"{zip_path}: no PackageContents.xml in the bundle")
+        root = ET.fromstring(zf.read(pc[0]))
+    name = root.attrib.get("Name", "")
+    if not client._APPBUNDLE_ID_RE.match(name):
+        raise SystemExit(f"{zip_path}: PackageContents Name {name!r} is not a valid bundle id")
+    return name
+
+
 def main():
     argv = sys.argv[1:]
     dry = "--dry-run" in argv
@@ -194,9 +209,22 @@ def main():
     tools_path = None
     if "--tools" in argv:
         tools_path = argv[argv.index("--tools") + 1]
+    appbundle_zip = None
+    if "--appbundle" in argv:
+        i = argv.index("--appbundle")
+        if i + 1 < len(argv):
+            appbundle_zip = argv[i + 1]
+        else:
+            print("--appbundle requires a zip path", file=sys.stderr)
+            sys.exit(2)
 
     if dry:
         dry_run_report(tenant_id=tenant_id, per_bucket=per_bucket, tools_path=tools_path)
+        if appbundle_zip:
+            bid = _bundle_id_from_zip(appbundle_zip)
+            print(f"[appbundle]   would ensure {bid} from {appbundle_zip} "
+                  f"({os.path.getsize(appbundle_zip)} bytes) engine={client.ENGINE} alias={client.ALIAS}")
+            print(json.dumps(client.ensure_appbundle(bid, appbundle_zip, dry_run=True), indent=2))
         return
 
     dxf_only = "--dxf-activity-only" in argv
@@ -213,6 +241,15 @@ def main():
         print("DONE (dxf-activity-only). LeafExtractDxf+prod is live; nothing else changed.")
         return
 
+    if appbundle_zip:
+        # Narrow lane: (re)publish ONE compiled bundle + its prod alias, nothing else.
+        bid = _bundle_id_from_zip(appbundle_zip)
+        res = client.ensure_appbundle(bid, appbundle_zip)
+        print(f"[appbundle] {bid} -> {res}")
+        if not tools_path:
+            print("DONE (appbundle). Provision its Activity with --tools <registry.json>.")
+            return
+
     ensure_bucket()
     ensure_activity(client.extract_activity_spec())
     if with_dxf:
@@ -222,6 +259,9 @@ def main():
         for t in reg.get("tools", []):
             if t.get("kind") == "script" and t.get("engine_script"):
                 ensure_activity(tool_activity_spec(t))
+            elif t.get("kind") == "appbundle":
+                # Activity for a compiled bundle: /al loads it, script runs its command.
+                ensure_activity(client.tool_activity_spec(t))
             else:
                 print(f"[skip] {t.get('name')} (kind={t.get('kind')}, no inline engine_script)")
     if tenant_id is not None:
