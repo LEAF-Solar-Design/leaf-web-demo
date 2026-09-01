@@ -705,6 +705,21 @@ def build_suites() -> List[Suite]:
         Suite("server-unit-economics-ops",
               "server tests/test_unit_economics_ops.py", "pytest", SERVER,
               _py_pytest("tests/test_unit_economics_ops.py"), 4),
+        # Ops usage scoreboard (M6). Registered WITH the file, per the #29
+        # fix-then-register rule. Both files are hermetic -- every authority is
+        # monkeypatched, no DB, no subprocess, no skipif -- so these floors are
+        # the exact count on every runner, not a cross-environment minimum.
+        # Measured on this tree 2026-09-01: 4 and 3.
+        # test_ops_operator_boundary.py had NEVER been registered, so the
+        # browser-credential boundary it guards ran nowhere in PR CI; it is
+        # registered here because the scoreboard join changed the row shape it
+        # pins, and an unpinned shape is how the drift began.
+        Suite("server-ops-usage-scoreboard",
+              "server tests/test_ops_usage_scoreboard.py", "pytest", SERVER,
+              _py_pytest("tests/test_ops_usage_scoreboard.py"), 4),
+        Suite("server-ops-operator-boundary",
+              "server tests/test_ops_operator_boundary.py", "pytest", SERVER,
+              _py_pytest("tests/test_ops_operator_boundary.py"), 3),
         # P2 telemetry (waves A + B). Floors are the measured local executed
         # counts on 2026-08-04; neither file was registered when it landed,
         # which made the whole telemetry suite invisible to PR CI (review

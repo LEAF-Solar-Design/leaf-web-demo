@@ -1,11 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { getAccountControls, getOpsTenants, setTenantDisabled, updateAccountControls } from '../api.js'
+import { getAccountControls, getOpsUsage, setTenantDisabled, updateAccountControls } from '../api.js'
+import { formatUsageCount, formatUsageUsd, normalizeOpsUsage } from './opsUsage.js'
 import './popovers.css'
 
 // Internal ops drawer — visible only with ?ops=1 in the URL. A DT2 right drawer
 // (title + Esc cap header, endpoint provenance in the foot) listing tenants from
 // GET /api/operator/tenants: tenant / runs / spend / state. The browser sends
 // only its bearer; the server-owned operator grant is the authority.
+// Above the table sits the usage scoreboard: the SAME metric grammar at two
+// scopes, the picked profile and the platform, so an operator can see whether
+// one profile is the platform's flow or a rounding error in it without leaving
+// the drawer. An unknown reading is an em dash, never a confident zero.
 // Disable is destructive, so it follows D1: quiet danger chip -> the row's
 // actions swap inline to "Disable <tenant>? [filled danger chip] [Keep]" — red
 // only on the destroying act. A kill-switched tenant is a deliberate hold, not
@@ -19,6 +24,8 @@ export default function OpsDrawer({ onDismiss, exiting }) {
   const closeRef = useRef(null)
   const restoreRef = useRef(null)
   const [tenants, setTenants] = useState(null)
+  const [platform, setPlatform] = useState(null)
+  const [selectedTenantId, setSelectedTenantId] = useState(null)
   const [err, setErr] = useState(null)
   const [forbidden, setForbidden] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -36,8 +43,18 @@ export default function OpsDrawer({ onDismiss, exiting }) {
   const load = useCallback(async () => {
     setLoading(true); setErr(null); setForbidden(false)
     try {
-      setTenants(await getOpsTenants())
+      const snapshot = normalizeOpsUsage(await getOpsUsage())
+      setTenants(snapshot.tenants)
+      setPlatform(snapshot.platform)
+      // Keep the operator's pick across a refresh; fall back to the first row
+      // only when the tenant they were looking at is no longer listed.
+      setSelectedTenantId((current) => (
+        snapshot.tenants.some((tenant) => tenant.tenant_id === current)
+          ? current
+          : snapshot.tenants[0]?.tenant_id || null
+      ))
     } catch (e) {
+      setPlatform(null)
       if (e && [401, 403, 404].includes(e.status)) { setForbidden(true); setTenants(null) }
       else { setErr(String(e.message || e)); setTenants(null) }
     } finally {
@@ -146,6 +163,12 @@ export default function OpsDrawer({ onDismiss, exiting }) {
     }
   }, [accountControls])
 
+  const selectedTenant = tenants?.find((tenant) => tenant.tenant_id === selectedTenantId) || null
+  const profiles = platform?.profiles
+  const platformName = profiles === null || profiles === undefined
+    ? 'all profiles'
+    : `${profiles} profile${profiles === 1 ? '' : 's'}`
+
   return (
     <aside ref={drawerRef} className={`drawer${exiting ? ' exit' : ''}`} role="dialog" aria-modal="true" aria-label="Internal ops" onKeyDown={ownKeyboard}>
       <div className="drawer-head">
@@ -221,6 +244,27 @@ export default function OpsDrawer({ onDismiss, exiting }) {
           )}
         </section>
 
+        {!forbidden && !err && platform && selectedTenant && (
+          <section className="ops-scoreboard" aria-label="Usage scoreboard">
+            <UsageScope
+              label="Profile · lifetime"
+              name={selectedTenant.tenant_id}
+              runs={selectedTenant.runs}
+              cadUsd={selectedTenant.usd_est}
+              tokens={selectedTenant.llm_cost_tokens}
+              llmUsd={selectedTenant.llm_usd_est}
+            />
+            <UsageScope
+              label="Platform · lifetime"
+              name={platformName}
+              runs={platform.autocad_backend.runs}
+              cadUsd={platform.autocad_backend.usd_est}
+              tokens={platform.llm.cost_tokens}
+              llmUsd={platform.llm.usd_est}
+            />
+          </section>
+        )}
+
         {forbidden && (
           <div className="ops-note">An active operator grant is required for tenant controls.</div>
         )}
@@ -255,8 +299,22 @@ export default function OpsDrawer({ onDismiss, exiting }) {
                 const isConfirming = confirming === t.tenant_id
                 const isActing = acting === t.tenant_id
                 return (
-                  <tr key={t.tenant_id} className={disabled ? 'ops-row-off' : ''}>
-                    <td className="ops-tid">{t.tenant_id}</td>
+                  <tr
+                    key={t.tenant_id}
+                    className={`${disabled ? 'ops-row-off ' : ''}${selectedTenantId === t.tenant_id ? 'ops-row-selected' : ''}`.trim()}
+                  >
+                    <td className="ops-tid">
+                      {/* Picking the scoreboard's profile is a READ, so it is a
+                          plain button in the identity cell rather than another
+                          action chip competing with Disable. */}
+                      <button
+                        className="ops-profile-pick"
+                        onClick={() => setSelectedTenantId(t.tenant_id)}
+                        aria-pressed={selectedTenantId === t.tenant_id}
+                      >
+                        {t.tenant_id}
+                      </button>
+                    </td>
                     <td className="num">{Number(t.runs || 0).toLocaleString()}</td>
                     <td className="num">${Number(t.usd_est || 0).toFixed(3)}</td>
                     <td>
@@ -306,5 +364,30 @@ export default function OpsDrawer({ onDismiss, exiting }) {
 
       <div className="drawer-foot">Account controls use signed-in admin access · tenant operations use a server-owned operator grant</div>
     </aside>
+  )
+}
+
+// One scope of the scoreboard. Both scopes render through this, so profile and
+// platform cannot drift into different units or different rounding.
+function UsageScope({ label, name, runs, cadUsd, tokens, llmUsd }) {
+  return (
+    <div className="ops-score-scope">
+      <div className="ops-score-head">
+        <span>{label}</span>
+        <strong title={name}>{name}</strong>
+      </div>
+      <div className="ops-score-metrics">
+        <div className="ops-score-metric">
+          <span>AutoCAD backend</span>
+          <strong>{formatUsageCount(runs)}</strong>
+          <small>runs · {formatUsageUsd(cadUsd)} est.</small>
+        </div>
+        <div className="ops-score-metric">
+          <span>LLM tokens</span>
+          <strong>{formatUsageCount(tokens)}</strong>
+          <small>metered · {formatUsageUsd(llmUsd)} est.</small>
+        </div>
+      </div>
+    </div>
   )
 }

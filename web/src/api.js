@@ -377,13 +377,16 @@ function throwOperatorDenied(response) {
   throw error
 }
 
-export async function getOpsTenants() {
+// The whole usage body, not just the rows: it also carries the `platform`
+// block the drawer's scoreboard reads. Callers get the raw wire object and
+// hand it to normalizeOpsUsage, so the absent-vs-zero decision lives in one
+// place instead of being re-made at each call site.
+export async function getOpsUsage() {
   const path = '/api/operator/tenants'
   const res = await apiFetch(`${API_BASE}${path}`, { headers: authHeaders() }, path)
   throwOperatorDenied(res)
   if (!res.ok) throw new Error(`GET ${path} -> ${res.status}`)
-  const body = await res.json()
-  return body.tenants || []
+  return res.json()
 }
 
 export async function setTenantDisabled(tenantId, disabled) {

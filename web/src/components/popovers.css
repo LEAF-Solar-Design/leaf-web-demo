@@ -107,3 +107,45 @@ button.key:disabled { opacity: .6; cursor: default; }
 .cst-meta { display: flex; align-items: center; gap: 11px; flex-wrap: wrap; margin: 7px 0; }
 .cst-mono { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
 .cst-recent { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+
+/* Ops usage scoreboard — two scopes (picked profile, whole platform) sharing
+   one metric grammar, so the two are comparable at a glance. The original this
+   was derived from widened the drawer to 480px and set the scopes side by side;
+   this drawer is 300px (.drawer in styles.css), so the SCOPES stack and only
+   the two metrics inside a scope sit side by side. Nothing here is nowrap: a
+   long tenant id ellipsises, everything else is allowed to wrap rather than
+   overflow a narrow drawer. */
+.ops-scoreboard { display: grid; grid-template-columns: 1fr; gap: 6px; margin-bottom: 4px; }
+.ops-score-scope {
+  min-width: 0; padding: 9px; border: 1px solid var(--border);
+  border-radius: 7px; background: var(--accent-tint);
+}
+.ops-score-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  padding-bottom: 7px; border-bottom: 1px solid var(--hairline);
+}
+.ops-score-head > span { font-size: 10.5px; color: var(--muted-2); }
+.ops-score-head > strong {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: 500 10.5px var(--font-mono); color: var(--foreground);
+}
+.ops-score-metrics {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px; padding-top: 8px;
+}
+.ops-score-metric { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ops-score-metric > span { font-size: 10px; color: var(--muted-2); line-height: 1.3; }
+.ops-score-metric > strong {
+  font: 500 17px var(--font-mono); color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+}
+.ops-score-metric > small { font-size: 9.5px; color: var(--muted-2); line-height: 1.3; }
+
+/* The identity cell doubles as the scoreboard's profile picker. It is a READ,
+   so it carries no chip styling that would read as an action next to Disable. */
+.ops-profile-pick {
+  width: 100%; padding: 0; border: 0; background: none; color: inherit;
+  font: inherit; text-align: left; cursor: pointer;
+}
+.ops-profile-pick:hover { color: var(--primary); }
+.ops-table tbody tr.ops-row-selected { background: var(--accent-tint); box-shadow: inset 2px 0 var(--primary); }

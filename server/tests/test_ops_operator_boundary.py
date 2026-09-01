@@ -74,9 +74,14 @@ def test_active_operator_can_list_disable_and_enable(monkeypatch) -> None:
 
     listed = client.get("/api/operator/tenants", headers=headers)
     assert listed.status_code == 200
+    # The row shape carries the scoreboard's LLM columns beside the broker's
+    # AutoCAD columns; both authorities are resolved server-side so the browser
+    # still presents nothing but its bearer.
     assert listed.json()["tenants"] == [
-        {"tenant_id": "tenant-a", "runs": 0, "usd_est": 0.0, "disabled": False},
-        {"tenant_id": "tenant-b", "runs": 0, "usd_est": 0.0, "disabled": True},
+        {"tenant_id": "tenant-a", "runs": 0, "usd_est": 0.0, "disabled": False,
+         "llm_turns": 0, "llm_cost_tokens": 0, "llm_usd_est": 0.0},
+        {"tenant_id": "tenant-b", "runs": 0, "usd_est": 0.0, "disabled": True,
+         "llm_turns": 0, "llm_cost_tokens": 0, "llm_usd_est": 0.0},
     ]
     assert client.post("/api/operator/tenants/tenant-a/disable", headers=headers).json() == {
         "tenant_id": "tenant-a", "action": "disable"}
