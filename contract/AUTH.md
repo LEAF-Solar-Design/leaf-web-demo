@@ -288,9 +288,12 @@ the `credentials-exchange` trigger for approved machine clients.
 The action does nothing unless the client has exact Auth0 metadata values for
 `leaf_tenant_id` and `leaf_tenant_audience`. It also requires the requested
 resource-server identifier to equal `leaf_tenant_audience`. Optional metadata
-keys are `leaf_org_id` and `leaf_tier`. An absent or invalid tier becomes
-`restricted`, which keeps the client read-only. Tenant and org IDs must match
-the canonical `^[a-z0-9][a-z0-9_-]{0,62}$` rule.
+keys include `leaf_org_id`, `leaf_tier`, and comma-separated `leaf_roles`. The
+optional `leaf_tenant_class` emits the namespaced `tenant_class` claim only
+when its exact value is `non_customer_acceptance`; absent or other values emit
+no class claim. An absent or invalid tier becomes `restricted`, which keeps the
+client read-only. Tenant and org IDs must match the canonical
+`^[a-z0-9][a-z0-9_-]{0,62}$` rule.
 
 Verify locally with:
 
