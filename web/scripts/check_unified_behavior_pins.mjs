@@ -72,10 +72,15 @@ assert(
   !styles.includes('animation: none !important') && !landing.includes('animation: none !important'),
   'reduced motion must complete filled animations instead of canceling them',
 )
+// The scale tier may be the literal or the motion token (P0c): a tokenized
+// sheet must still DEFINE the token as .985 for the pin to hold.
+const scaleTier = (sheet) =>
+  sheet.includes('transform: scale(.985)') ||
+  (sheet.includes('--mo-scale-in: .985') && sheet.includes('transform: scale(var(--mo-scale-in'))
 assert(
   !styles.includes('translateY(12px)') && !demo.includes('translateY(12px)') &&
-    styles.includes('transform: scale(.985)') && demo.includes('transform: scale(.985)'),
-  'micro entrances must use the scale tier and never translated motion',
+    scaleTier(styles) && scaleTier(demo),
+  'micro entrances must use the .985 scale tier (literal or tokenized) and never translated motion',
 )
 
 console.log('unified behavior pins passed')

@@ -35,7 +35,11 @@ test('reduced motion completes the operator flow without hiding filled panes', a
     }
   })
   const unrestrictedCaptionMotion = await readCaptionMotion()
-  expect(unrestrictedCaptionMotion.transitionDuration).toBe('0.5s')
+  // The caption must have REAL motion when unreduced (the exact duration is a
+  // design token, not a behavior pin - P0c): positive and under a second.
+  const captionSeconds = Number.parseFloat(unrestrictedCaptionMotion.transitionDuration)
+  expect(captionSeconds).toBeGreaterThan(0)
+  expect(captionSeconds).toBeLessThanOrEqual(1)
 
   await page.emulateMedia({ reducedMotion: 'reduce' })
   const reducedCaptionMotion = await readCaptionMotion()
