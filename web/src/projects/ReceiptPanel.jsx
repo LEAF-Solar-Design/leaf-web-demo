@@ -24,6 +24,12 @@
  * receipt carries) is rendered byte-for-byte: no truncation, no ellipsis,
  * no locale reformatting. Getting a version pin one character wrong is
  * worse than not showing it at all.
+ *
+ * `isRedactedField`, `renderFieldValue`, and `deepRedact` are exported so
+ * other panels that render arbitrary server JSON (operator/WorkerJobsPanel,
+ * operator/SessionPanel, operator/RunbooksPanel) apply this exact same
+ * credential denylist instead of forking a second copy that can drift out
+ * of sync with `_RECEIPT_SECRET_KEYS`.
  */
 
 // Mirrors platform/project_lifecycle.py _RECEIPT_SECRET_KEYS — a receipt
@@ -47,14 +53,37 @@ function looksLikeCredential(value) {
   return stripped.toLowerCase().startsWith('bearer ') || JWT_SHAPE.test(stripped)
 }
 
+// The one predicate every panel rendering server JSON must run a field
+// through before it reaches the DOM: true when the key itself is
+// credential-shaped (mirrors _RECEIPT_SECRET_KEYS) OR the value's own shape
+// looks like a bearer token / JWT, independent of what its key was called.
+export function isRedactedField(fieldKey, value) {
+  return SECRET_KEYS.has(normalizedKey(fieldKey)) || looksLikeCredential(value)
+}
+
 // Renders a field value exactly as given: primitives as their literal
 // string form (no rounding, no locale formatting), objects/arrays as exact
 // JSON — never a summarized or truncated stand-in.
-function renderFieldValue(value) {
+export function renderFieldValue(value) {
   if (value == null) return String(value)
   if (typeof value === 'string') return value
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
   return JSON.stringify(value)
+}
+
+// Recursively redacts credential-shaped keys/values at ANY depth, not just
+// the top level `isRedactedField` alone would catch. Every raw-JSON /
+// "show everything" fallback a panel offers MUST pass its data through this
+// first — a flat one-level redaction pass is not enough once a caller falls
+// back to dumping a whole nested object, and that fallback is exactly where
+// a token buried two levels deep would otherwise leak in plain text.
+export function deepRedact(value, key = null) {
+  if (isRedactedField(key, value)) return '[redacted]'
+  if (Array.isArray(value)) return value.map((v) => deepRedact(v, key))
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, deepRedact(v, k)]))
+  }
+  return value
 }
 
 function formatTime(time) {
@@ -64,7 +93,7 @@ function formatTime(time) {
 }
 
 function ReceiptField({ fieldKey, value }) {
-  const redacted = SECRET_KEYS.has(normalizedKey(fieldKey)) || looksLikeCredential(value)
+  const redacted = isRedactedField(fieldKey, value)
   const isVersionPin = normalizedKey(fieldKey).includes('version_pin')
   return (
     <div className="receipt-field">

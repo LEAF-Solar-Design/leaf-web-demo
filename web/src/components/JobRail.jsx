@@ -89,8 +89,11 @@ export function fmtWhen(ts) {
   return { rel, abs, clock, day: d.toDateString(), date: d }
 }
 
-// 26px day-boundary label ("Today · Jul 16") for the ledger.
-function dayLabel(d) {
+// 26px day-boundary label ("Today · Jul 16") for the ledger. Exported so
+// other panels rendering the same TM1 day-grouped ledger convention (e.g.
+// operator/SessionPanel's transcript) don't reimplement the "Today"/
+// "Yesterday" boundary text.
+export function dayLabel(d) {
   const md = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
   if (d.toDateString() === new Date().toDateString()) return `Today · ${md}`
   if (d.toDateString() === new Date(Date.now() - 86_400_000).toDateString()) return `Yesterday · ${md}`

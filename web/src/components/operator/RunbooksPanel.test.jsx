@@ -33,6 +33,27 @@ describe('acceptance: fleet and tenant inspection, read-only', () => {
     expect(operatorClient.tenantOverlayState).toHaveBeenCalledWith('acme-solar')
     expect(await screen.findByText('false')).toBeTruthy() // agent_disabled
   })
+
+  it('renders the server destination mapping as structured rows', async () => {
+    operatorClient.externalDestinations.mockResolvedValue({
+      staging_status_webhook: {
+        destination: 'staging_status_webhook',
+        environment: 'staging',
+        adapter: 'generic_webhook',
+      },
+    })
+    const { container } = render(<RunbooksPanel sessionEnvironment="staging" />)
+
+    fireEvent.click(screen.getByRole('button', { name: /load external destinations/i }))
+
+    expect(await screen.findByText('staging_status_webhook')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /show details for staging_status_webhook/i }))
+    expect(screen.getByText('environment')).toBeTruthy()
+    expect(screen.getByText('staging')).toBeTruthy()
+    expect(screen.getByText('adapter')).toBeTruthy()
+    expect(screen.getByText('generic_webhook')).toBeTruthy()
+    expect(container.querySelector('pre')).toBeNull()
+  })
 })
 
 describe('acceptance: approval cards built from server truth', () => {
