@@ -13,6 +13,7 @@
 //   404 "refused" (flag off) / any network error -> null
 // It NEVER throws and NEVER returns a stale contract: every call is live.
 import { authHeaders, config, noteUnauthorized } from '../api.js'
+import { fetchWithBudget } from '../fetchBudget.js'
 
 export const IOS_SURFACE_CONTRACT_SCHEMA = 'leaf.ios-ship-surface.v1'
 
@@ -23,7 +24,7 @@ async function surfaceFetch(path, init, fetchImpl) {
     ...authHeaders(),
   }
   return noteUnauthorized(
-    await fetchImpl(`${config.apiBase}${path}`, { ...(init || {}), headers }),
+    await fetchWithBudget(fetchImpl, `${config.apiBase}${path}`, { ...(init || {}), headers }),
     path,
     headers.Authorization,
   )

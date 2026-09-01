@@ -43,10 +43,17 @@ button.rail-row { cursor: pointer; }
   font-family: var(--font-mono); font-size: 11px; color: var(--muted-2);
   font-variant-numeric: tabular-nums; white-space: nowrap;
 }
+/* Fixed slot: content ranges from "now"/"5 m" up to a clock ("12:45 PM") or
+   a date fallback ("Jul 16"). Without a floor, each re-render at a new
+   width nudges .rail-ev's ellipsis point, so the row visibly jitters on
+   every tick. */
+.rail-when { min-width: 8ch; text-align: right; }
 
 /* --- E2 empty state (content-shaped, top-left) + L1 skeleton spacing --- */
 .rail-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
-.rail-ske { display: flex; flex-direction: column; gap: 8px; }
+/* --skeleton-h matches the real 32px .rail-row so the rail doesn't jump
+   height once jobs replace the loading placeholder. */
+.rail-ske { display: flex; flex-direction: column; gap: 8px; --skeleton-h: 32px; }
 
 /* --- workspace summary: ONE big number, demoted sibling stats --- */
 .ws-stats {

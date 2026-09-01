@@ -87,11 +87,21 @@ export default function ApprovalCard({
     <div className="operator-approval-card" role="group" aria-label={`Approval for ${action}`}>
       <div className="operator-approval-head">
         <span className="operator-approval-action">{action}</span>
+        {/* Blast radius, at a glance, before reading a single field: which
+            environment this authority reaches. */}
+        {digest.environment !== undefined && <span className="tag">{digest.environment}</span>}
       </div>
 
       <dl className="operator-approval-fields">
         {['target', 'environment', 'cost', 'scope', 'expiry', 'reversal', 'argsDigest'].map((field) => (
-          <div className="operator-approval-field" key={field}>
+          <div
+            className={
+              field === 'cost' || field === 'scope'
+                ? 'operator-approval-field operator-approval-field-strong'
+                : 'operator-approval-field'
+            }
+            key={field}
+          >
             <dt>{fieldLabel(field)}</dt>
             <dd>
               {digest[field] !== undefined
