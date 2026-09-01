@@ -129,6 +129,14 @@ async function post(events) {
   if (!res.ok) throw new Error(`telemetry ${res.status}`)
 }
 
+// Background bookkeeping only — this buffer must never be the reason a
+// process (a Node test runner, a script host embedding this module) stays
+// alive. Browsers have no ref/unref concept and setTimeout there returns a
+// number, so `unref` is Node-only and guarded accordingly.
+function unrefTimer(timer) {
+  try { timer?.unref?.() } catch { /* no-op */ }
+}
+
 function flush() {
   try {
     if (state.timer) { clearTimeout(state.timer); state.timer = null }
@@ -136,7 +144,7 @@ function flush() {
     const events = state.buffer.splice(0, FLUSH_AT)
     post(events).catch(() => {
       // ONE retry PER BATCH, then drop — loss-tolerant by contract.
-      setTimeout(() => { post(events).catch(() => {}) }, 2000)
+      unrefTimer(setTimeout(() => { post(events).catch(() => {}) }, 2000))
     })
     if (state.buffer.length) schedule()
   } catch { /* telemetry never breaks the product */ }
@@ -146,6 +154,7 @@ function schedule() {
   try {
     if (state.timer) return
     state.timer = setTimeout(flush, FLUSH_MS)
+    unrefTimer(state.timer)
   } catch { /* no-op */ }
 }
 
