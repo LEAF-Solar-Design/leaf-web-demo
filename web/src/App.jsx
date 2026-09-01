@@ -81,9 +81,7 @@ import useDrawingVersionController from './controllers/useDrawingVersionControll
 import usePlatformTrustController from './controllers/platform/usePlatformTrustController.js'
 import useWorkspaceController from './controllers/workspace/useWorkspaceController.js'
 import useCatalogController from './controllers/catalog/useCatalogController.js'
-import {
-  resolveCheckoutDrawingId,
-} from './controllers/checkout/createCheckoutController.js'
+import { resolveCheckoutDrawingId } from './controllers/checkout/createCheckoutController.js'
 import { useDrawingIdentity } from './drawing/DrawingIdentityProvider.jsx'
 
 // Calm layer palette, re-derived at higher lightness for the DARK CADViewport
