@@ -17,8 +17,14 @@ FROM rust:1-slim AS engine
 RUN cargo install wasm-pack --locked
 WORKDIR /engine-src
 COPY vendor/acadrust-worker/ /engine-src/
+# --out-name engine: the artifacts are BORN crate-name-free, and — load-
+# bearing — the wasm binary's import module key is baked at build time as
+# ./<out-name>_bg.js. A post-hoc file rename cannot change that key, which is
+# how the first staged engine died in the browser: glue rewritten to import
+# './engine_bg.js', binary still demanding './acadrust_worker_bg.js'
+# (WebAssembly.instantiate: "Import #0 ... module is not an object").
 RUN RUSTFLAGS='--cfg getrandom_backend="wasm_js"' \
-    wasm-pack build --release --target web . --out-dir pkg-web
+    wasm-pack build --release --target web . --out-dir pkg-web --out-name engine
 
 # ---- build stage: vite build (env baked at BUILD time) ----------------------
 FROM node:22-slim AS build
