@@ -55,28 +55,42 @@ SERVICES = ("app", "broker", "canonical-worker", "harness", "web")
 _SOURCE_SHA = re.compile(r"^[0-9a-f]{40}$")
 _IMAGE_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 
-# app and web run a blue/green color pair; the other three are single-family.
-# The routed color is the one actually serving, which is what "running" means
-# for this endpoint. Resolving it from ECS is the reason this cannot be a
-# static map.
-_COLOR_FAMILIES: dict[str, tuple[str, ...]] = {
+# Staging runs app and web as blue/green pairs. Production uses three ECS
+# services, with app, broker, and harness sharing one task. Keep both
+# topologies explicit so a production receipt cannot be interpreted through
+# staging names, or vice versa.
+_STAGING_SERVICE_FAMILIES: dict[str, tuple[str, ...]] = {
     "app": ("leaf-platform-app", "leaf-platform-app-alt"),
     "web": ("leaf-platform-web", "leaf-platform-web-alt"),
     "broker": ("leaf-platform-broker",),
     "canonical-worker": ("leaf-platform-canonical-worker",),
     "harness": ("leaf-platform-harness",),
 }
+_PRODUCTION_SERVICE_FAMILIES: dict[str, tuple[str, ...]] = {
+    "app": ("leaf-platform",),
+    "broker": ("leaf-platform",),
+    "harness": ("leaf-platform",),
+    "web": ("leaf-platform-web",),
+    "canonical-worker": ("leaf-platform-canonical-worker",),
+}
 
 # The container inside each task definition whose image IS the service. A task
 # definition may carry init/sidecar containers (the live app carries
 # init-drawing-mutations-fence and init-ios-provider-files), and picking the
 # wrong one would compare an unrelated digest.
-_SERVICE_CONTAINER = {
+_STAGING_SERVICE_CONTAINER = {
     "app": "leaf-platform-app",
     "broker": "leaf-platform-broker",
     "canonical-worker": "leaf-platform-canonical-worker",
     "harness": "leaf-platform-harness",
     "web": "leaf-platform-web",
+}
+_PRODUCTION_SERVICE_CONTAINER = {
+    "app": "app",
+    "broker": "broker",
+    "harness": "harness",
+    "web": "leaf-platform-web",
+    "canonical-worker": "leaf-platform-canonical-worker",
 }
 
 DEFAULT_CLUSTER = "leaf-automation-staging"
@@ -124,14 +138,18 @@ def _region(env: Mapping[str, str]) -> str:
     )
 
 
-def _routed_family(descriptions: dict[str, dict[str, Any]], service: str) -> str:
+def _routed_family(
+    descriptions: dict[str, dict[str, Any]],
+    service: str,
+    families_by_service: Mapping[str, tuple[str, ...]],
+) -> str:
     """Return the one family that is actually serving this service.
 
     Ambiguity is an error, not a coin flip. Two active colors means a flip is
     in progress and no single answer is true; zero active colors means nothing
     is serving. Both fail closed rather than pick one.
     """
-    families = _COLOR_FAMILIES[service]
+    families = families_by_service[service]
     active = [
         family
         for family in families
@@ -147,7 +165,9 @@ def _routed_family(descriptions: dict[str, dict[str, Any]], service: str) -> str
     )
 
 
-def _service_container_digest(task: dict[str, Any], service: str) -> str:
+def _service_container_digest(
+    task: dict[str, Any], service: str, container_by_service: Mapping[str, str]
+) -> str:
     """Pull the RUNNING container's resolved image digest out of one task.
 
     ``containers[].imageDigest`` is what the container actually resolved and
@@ -157,7 +177,7 @@ def _service_container_digest(task: dict[str, Any], service: str) -> str:
     sha256:87e6dd97 minutes after its service still described revision 252
     pinning sha256:a12a9d7c, because the service rolled to 253 underneath.
     """
-    name = _SERVICE_CONTAINER[service]
+    name = container_by_service[service]
     containers = task.get("containers")
     if not isinstance(containers, list):
         raise LiveIdentityUnavailable(f"{service} task reports no containers")
@@ -261,9 +281,16 @@ def _read_live_digests_with_meta(
     if not isinstance(tasks_by_family, dict):
         raise LiveIdentityUnavailable("identity collector document lacks task descriptions")
 
+    if _expected_environment(env) == "production":
+        families_by_service = _PRODUCTION_SERVICE_FAMILIES
+        container_by_service = _PRODUCTION_SERVICE_CONTAINER
+    else:
+        families_by_service = _STAGING_SERVICE_FAMILIES
+        container_by_service = _STAGING_SERVICE_CONTAINER
+
     digests: dict[str, str] = {}
     for service in SERVICES:
-        family = _routed_family(described, service)
+        family = _routed_family(described, service, families_by_service)
         family_payload = tasks_by_family.get(family)
         if not isinstance(family_payload, dict):
             raise LiveIdentityUnavailable(f"{family} has no running tasks")
@@ -274,7 +301,10 @@ def _read_live_digests_with_meta(
             raise LiveIdentityUnavailable(
                 f"{family} runs {len(tasks)} tasks, more than this endpoint reads"
             )
-        observed = {_service_container_digest(task, service) for task in tasks}
+        observed = {
+            _service_container_digest(task, service, container_by_service)
+            for task in tasks
+        }
         if len(observed) != 1:
             raise LiveIdentityUnavailable(
                 f"{service} is running {len(observed)} different image digests; "

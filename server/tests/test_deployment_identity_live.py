@@ -314,6 +314,36 @@ def _staging_fixture(app_active="leaf-platform-app", web_active="leaf-platform-w
     return _FakeClient(services, tasks_by_service, task_detail)
 
 
+def _production_fixture():
+    """Mirror production: three ECS services expose five logical services."""
+    services = {
+        family: _service(family)
+        for family in (
+            "leaf-platform",
+            "leaf-platform-web",
+            "leaf-platform-canonical-worker",
+        )
+    }
+    tasks_by_service = {
+        family: ["task/" + family + "/1"] for family in services
+    }
+    task_detail = {
+        "task/leaf-platform/1": {
+            "containers": [
+                {"name": "app", "imageDigest": LIVE["app"]},
+                {"name": "broker", "imageDigest": LIVE["broker"]},
+                {"name": "harness", "imageDigest": LIVE["harness"]},
+                {"name": "live-identity-collector", "imageDigest": digest("7")},
+            ]
+        },
+        "task/leaf-platform-web/1": _task("leaf-platform-web", LIVE["web"]),
+        "task/leaf-platform-canonical-worker/1": _task(
+            "leaf-platform-canonical-worker", LIVE["canonical-worker"]
+        ),
+    }
+    return _FakeClient(services, tasks_by_service, task_detail)
+
+
 _SIDECAR_FAMILIES = (
     "leaf-platform-app",
     "leaf-platform-app-alt",
@@ -323,9 +353,21 @@ _SIDECAR_FAMILIES = (
     "leaf-platform-harness",
     "leaf-platform-canonical-worker",
 )
+_PRODUCTION_SIDECAR_FAMILIES = (
+    "leaf-platform",
+    "leaf-platform-web",
+    "leaf-platform-canonical-worker",
+)
 
 
-def _sidecar_env(tmp_path, client, observed_at=None, state="ok", reason=None):
+def _sidecar_env(
+    tmp_path,
+    client,
+    observed_at=None,
+    state="ok",
+    reason=None,
+    families=_SIDECAR_FAMILIES,
+):
     """Materialize a fake client's world into the sidecar document.
 
     The reader consumes the collector's file now; the fixtures still describe
@@ -342,12 +384,12 @@ def _sidecar_env(tmp_path, client, observed_at=None, state="ok", reason=None):
         "observed_at": observed_at
         or _dt.datetime.now(_dt.timezone.utc).isoformat(),
         "state": state,
-        "describe_services": client.describe_services("c", list(_SIDECAR_FAMILIES)),
+        "describe_services": client.describe_services("c", list(families)),
         "tasks": {},
     }
     if reason is not None:
         document["reason"] = reason
-    for family in _SIDECAR_FAMILIES:
+    for family in families:
         arns = client.list_tasks("c", serviceName=family, desiredStatus="RUNNING")[
             "taskArns"
         ]
@@ -356,6 +398,61 @@ def _sidecar_env(tmp_path, client, observed_at=None, state="ok", reason=None):
     path = tmp_path / "current.json"
     path.write_text(_json.dumps(document), encoding="utf-8")
     return {"LEAF_IDENTITY_SIDECAR_FILE": str(path)}
+
+
+def _production_sidecar_env(tmp_path, client=None):
+    env = _sidecar_env(
+        tmp_path,
+        client or _production_fixture(),
+        families=_PRODUCTION_SIDECAR_FAMILIES,
+    )
+    env.update(
+        {
+            "LEAF_RUNTIME_ENV": "production",
+            "LEAF_DEPLOYMENT_ENVIRONMENT": "production",
+        }
+    )
+    return env
+
+
+def test_production_three_service_sidecar_yields_five_logical_digests(tmp_path):
+    result = live_deployment_identity(_production_sidecar_env(tmp_path))
+
+    assert result["environment"] == "production"
+    assert result["derived_from"] == "live-ecs-sidecar"
+    assert {
+        service: details["image_digest"]
+        for service, details in result["services"].items()
+    } == LIVE
+
+
+def test_production_combined_task_missing_container_fails_closed(tmp_path):
+    client = _production_fixture()
+    containers = client._task_detail["task/leaf-platform/1"]["containers"]
+    client._task_detail["task/leaf-platform/1"]["containers"] = [
+        item for item in containers if item["name"] != "broker"
+    ]
+
+    with pytest.raises(LiveIdentityUnavailable, match="exactly one broker"):
+        live.live_digests(_production_sidecar_env(tmp_path, client))
+
+
+def test_production_combined_task_duplicate_container_fails_closed(tmp_path):
+    client = _production_fixture()
+    client._task_detail["task/leaf-platform/1"]["containers"].append(
+        {"name": "app", "imageDigest": LIVE["app"]}
+    )
+
+    with pytest.raises(LiveIdentityUnavailable, match="exactly one app"):
+        live.live_digests(_production_sidecar_env(tmp_path, client))
+
+
+def test_production_sidecar_requires_explicit_environment_binding(tmp_path):
+    env = _production_sidecar_env(tmp_path)
+    env.pop("LEAF_DEPLOYMENT_ENVIRONMENT")
+
+    with pytest.raises(LiveIdentityUnavailable, match="not explicit"):
+        live.live_digests(env)
 
 
 def test_the_routed_color_is_the_one_that_is_read(tmp_path):
