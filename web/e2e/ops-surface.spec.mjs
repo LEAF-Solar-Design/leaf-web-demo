@@ -7,11 +7,11 @@ import { catProofResponse, makeCatProofState } from './catProofFixture.mjs'
 // owner (_require_account_owner). The drawer opens on ?ops=1 regardless of
 // sign-in, so 401 is the status a real operator hits first.
 async function install(page, {
-  secret = 'fixture-secret', conflictOnAccountPut = false, deniedAccountStatus = 403,
+  conflictOnAccountPut = false, deniedAccountStatus = 403,
 } = {}) {
   const state = makeCatProofState()
   const evidence = {
-    list: 0, mutations: [], opsHeaders: [], nonOpsSecrets: [],
+    list: 0, mutations: [], operatorAuth: [], operatorOpsSecrets: [], nonOpsSecrets: [],
     accountReads: 0, accountWrites: [], accountAuth: [], accountOpsSecrets: [],
   }
   let disabled = false
@@ -51,26 +51,28 @@ async function install(page, {
       })
       return
     }
-    if (url.pathname === '/api/ops/tenants') {
+    if (url.pathname === '/api/operator/tenants') {
       evidence.list += 1
-      evidence.opsHeaders.push(requestSecret)
-      const forbidden = requestSecret !== secret
+      evidence.operatorAuth.push(request.headers().authorization || null)
+      if (requestSecret) evidence.operatorOpsSecrets.push(requestSecret)
+      const forbidden = request.headers().authorization !== 'Bearer fixture-jwt'
       await route.fulfill({
-        status: forbidden ? 403 : 200,
+        status: forbidden ? 401 : 200,
         contentType: 'application/json',
-        body: JSON.stringify(forbidden ? { error: { message: 'ops role required' } } : {
+        body: JSON.stringify(forbidden ? { detail: 'operator_not_found' } : {
           tenants: [{ tenant_id: 'tenant-alpha', runs: 7, usd_est: 0.125, disabled }],
         }),
       })
       return
     }
-    const match = url.pathname.match(/^\/api\/ops\/tenants\/([^/]+)\/(disable|enable)$/)
+    const match = url.pathname.match(/^\/api\/operator\/tenants\/([^/]+)\/(disable|enable)$/)
     if (match) {
-      evidence.opsHeaders.push(requestSecret)
-      const forbidden = requestSecret !== secret
+      evidence.operatorAuth.push(request.headers().authorization || null)
+      if (requestSecret) evidence.operatorOpsSecrets.push(requestSecret)
+      const forbidden = request.headers().authorization !== 'Bearer fixture-jwt'
       disabled = match[2] === 'disable'
       if (!forbidden) evidence.mutations.push({ tenant: match[1], action: match[2] })
-      await route.fulfill({ status: forbidden ? 403 : 200, contentType: 'application/json', body: JSON.stringify({ disabled }) })
+      await route.fulfill({ status: forbidden ? 401 : 200, contentType: 'application/json', body: JSON.stringify({ disabled }) })
       return
     }
     if (requestSecret) evidence.nonOpsSecrets.push({ path: url.pathname, secret: requestSecret })
@@ -83,7 +85,6 @@ async function install(page, {
 test('gated unified ops lists and disables a tenant with two-step confirmation', async ({ page }) => {
   const evidence = await install(page)
   await page.addInitScript(() => {
-    localStorage.setItem('leaf.ops_secret', 'fixture-secret')
     localStorage.setItem('leaf.jwt', 'fixture-jwt')
   })
   await page.goto('/try?ops=1')
@@ -122,13 +123,12 @@ test('gated unified ops lists and disables a tenant with two-step confirmation',
   await ops.getByRole('button', { name: 'Disable' }).click()
   await expect(ops).toContainText('Disabled')
   expect(evidence.mutations).toEqual([{ tenant: 'tenant-alpha', action: 'disable' }])
-  expect(evidence.opsHeaders.length).toBeGreaterThanOrEqual(2)
-  expect(evidence.opsHeaders.every((value) => value === 'fixture-secret')).toBe(true)
+  expect(evidence.operatorAuth.length).toBeGreaterThanOrEqual(2)
+  expect(evidence.operatorAuth.every((value) => value === 'Bearer fixture-jwt')).toBe(true)
+  expect(evidence.operatorOpsSecrets).toEqual([])
   expect(evidence.accountAuth.every((value) => value === 'Bearer fixture-jwt')).toBe(true)
   expect(evidence.accountOpsSecrets).toEqual([])
   expect(evidence.nonOpsSecrets).toEqual([])
-  await expect(page.locator('body')).not.toContainText('fixture-secret')
-  await expect(page).not.toHaveURL(/fixture-secret/)
   await page.keyboard.press('Escape')
   await expect(ops).toHaveCount(0)
   await expect(page).toHaveURL(/\/try\?ops=1$/)
@@ -137,7 +137,7 @@ test('gated unified ops lists and disables a tenant with two-step confirmation',
 test('ops role denial is calm and the flag is the only entry', async ({ page }) => {
   const denied = await install(page)
   await page.goto('/try?ops=1')
-  await expect(page.getByText(/ops role required/)).toBeVisible()
+  await expect(page.getByText(/operator grant is required/)).toBeVisible()
   await expect(page.getByText(/Account owner required/)).toBeVisible()
   await expect(page.getByText('tenant-alpha')).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Disable' })).toHaveCount(0)
@@ -145,7 +145,7 @@ test('ops role denial is calm and the flag is the only entry', async ({ page }) 
 
   const unflagged = await page.context().newPage()
   const evidence = await install(unflagged)
-  await unflagged.addInitScript(() => localStorage.setItem('leaf.ops_secret', 'fixture-secret'))
+  await unflagged.addInitScript(() => localStorage.setItem('leaf.jwt', 'fixture-jwt'))
   await unflagged.goto('/try')
   await expect(unflagged.getByRole('dialog', { name: 'Internal ops' })).toHaveCount(0)
   expect(evidence.list).toBe(0)
@@ -169,7 +169,6 @@ test('a signed-out account-controls denial (401) is calm, not a red error', asyn
 test('account-control revision conflict asks for a refresh and preserves the displayed state', async ({ page }) => {
   const evidence = await install(page, { conflictOnAccountPut: true })
   await page.addInitScript(() => {
-    localStorage.setItem('leaf.ops_secret', 'fixture-secret')
     localStorage.setItem('leaf.jwt', 'fixture-jwt')
   })
   await page.goto('/try?ops=1')

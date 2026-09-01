@@ -1,24 +1,26 @@
-"""Ops surface (CONTRACT-ADDENDUM §14) — the broker's metering + kill-switch,
-exposed app-side behind an internal role gate.
+"""Ops surface (CONTRACT-ADDENDUM §14) — the broker's metering + kill-switch.
 
 The broker (server/broker.py) is the attribution + kill-switch chokepoint, but it
 has no operator UI. These routes give the ops/QA operator a read of per-tenant
 spend/runs joined with kill-switch state, plus a proxied disable/enable — WITHOUT
 the tenant-facing UI ever seeing them.
 
-CREDENTIAL GATE (F7): every route requires a real internal shared secret — the
-value of the ``LEAF_OPS_SECRET`` env, presented in the ``X-Ops-Secret`` header and
-compared CONSTANT-TIME (``hmac.compare_digest``). The old plain ``X-Internal-Role:
-qa`` header let anyone read every tenant's spend and flip kill-switches; it is gone.
-Fail-closed: in live-auth mode (``LEAF_AUTH_LIVE=1``) a server with no
-``LEAF_OPS_SECRET`` configured refuses the surface entirely (503). A wrong/absent
-presented secret is always 403. With auth OFF and no secret configured the surface
-stays open (byte-identical to the local single-operator demo, mirroring
-``deps.require_tenant``). This is an internal surface, NOT part of the tenant surface.
+BROWSER OPERATOR GATE: the drawer uses ``/api/operator/tenants``. Those routes
+resolve the bearer subject through the server-owned ``operator_principals`` grant
+with ``require_operator``. The browser never receives or sends an ops secret.
+
+SERVICE CREDENTIAL GATE (F7): the older ``/api/ops/*`` integration surface keeps
+its internal ``LEAF_OPS_SECRET`` credential for trusted service callers. It is not
+the browser authority path. The value is presented in ``X-Ops-Secret`` and compared
+constant-time. The old plain ``X-Internal-Role: qa`` header grants nothing.
 
     GET  /api/ops/tenants                  -> {tenants:[{tenant_id, runs, usd_est, disabled}]}
     POST /api/ops/tenants/{tid}/disable     -> proxy broker disable; broker's §-enveloped ack
     POST /api/ops/tenants/{tid}/enable      -> proxy broker enable;  broker's §-enveloped ack
+
+    GET  /api/operator/tenants              -> same list, server-granted operator only
+    POST /api/operator/tenants/{tid}/disable -> same mutation, server-granted operator only
+    POST /api/operator/tenants/{tid}/enable  -> same mutation, server-granted operator only
 
 Spend/runs come from the selected broker authority, matching GET /api/usage.
 PostgreSQL mode never falls back to JSONL. Kill-switch state comes from the
@@ -48,6 +50,8 @@ import agent_ledger
 import agent_policy
 import broker_client
 import deps
+import operator_deps
+from operator_deps import OperatorContext
 from customization_service import CustomizationService, CustomizationServiceError
 from envelopes import ErrorCode, error_response, with_envelope_fields
 
@@ -268,11 +272,7 @@ def _proxy(tid: str, action: str) -> JSONResponse:
 # --------------------------------------------------------------------------- #
 # routes
 # --------------------------------------------------------------------------- #
-@router.get("/api/ops/tenants")
-def ops_tenants(x_ops_secret: Optional[str] = Header(default=None)) -> Any:
-    gate = _require_ops(x_ops_secret)
-    if gate is not None:
-        return gate
+def _tenant_listing() -> Any:
     um = _usage_mod()
     disabled = _disabled_set()
     postgres_mode = _broker_store_mode() == "postgres"
@@ -297,6 +297,21 @@ def ops_tenants(x_ops_secret: Optional[str] = Header(default=None)) -> Any:
         rows.append({"tenant_id": tid, "runs": runs, "usd_est": usd_est,
                      "disabled": tid in disabled})
     return with_envelope_fields({"tenants": rows})
+
+
+@router.get("/api/ops/tenants")
+def ops_tenants(x_ops_secret: Optional[str] = Header(default=None)) -> Any:
+    gate = _require_ops(x_ops_secret)
+    if gate is not None:
+        return gate
+    return _tenant_listing()
+
+
+@router.get("/api/operator/tenants")
+def operator_tenants(
+    _operator: OperatorContext = Depends(operator_deps.require_operator),
+) -> Any:
+    return _tenant_listing()
 
 
 @router.get("/api/ops/unit-economics")
@@ -366,6 +381,22 @@ def ops_enable(tid: str, x_ops_secret: Optional[str] = Header(default=None)) -> 
     gate = _require_ops(x_ops_secret)
     if gate is not None:
         return gate
+    return _proxy(tid, "enable")
+
+
+@router.post("/api/operator/tenants/{tid}/disable")
+def operator_disable(
+    tid: str,
+    _operator: OperatorContext = Depends(operator_deps.require_operator),
+) -> Any:
+    return _proxy(tid, "disable")
+
+
+@router.post("/api/operator/tenants/{tid}/enable")
+def operator_enable(
+    tid: str,
+    _operator: OperatorContext = Depends(operator_deps.require_operator),
+) -> Any:
     return _proxy(tid, "enable")
 
 

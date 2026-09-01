@@ -364,53 +364,38 @@ export async function openProject(projectId, orgId) {
   return http(`/api/projects/${encodeURIComponent(projectId)}`, { headers: { ...orgHeaders(orgId) } })
 }
 
-// --- Ops surface (INTERNAL; ?ops=1 only) ---------------------------------
-// GET /api/ops/tenants -> {tenants:[{tenant_id,runs,usd_est,disabled}]}.
-// POST /api/ops/tenants/{tid}/disable|enable -> enveloped ack. A 403 (not
-// authorized) throws an Error tagged .status=403 so the drawer renders a calm
-// "ops role required" instead of a red failure. Sibling contract.
-//
-// AUTH (1C-followup): the backend now gates ops on a real internal credential,
-// `X-Ops-Secret`, NOT the legacy `X-Internal-Role: qa` dev seam. When the
-// operator has provisioned the browser-local `leaf.ops_secret` value, we
-// attach it. We still send the legacy
-// role header so an ungated LOCAL dev backend keeps working (the demo path is
-// byte-unchanged off-secret). The secret is read at call time and never logged.
-const OPS_SECRET_KEY = 'leaf.ops_secret'
-const OPS_HEADERS = { 'X-Internal-Role': 'qa' }
+// --- Operator tenant controls (?ops=1 only) -------------------------------
+// The browser presents only its normal bearer. The server resolves that subject
+// through the server-owned operator_principals grant. No shared ops credential
+// is stored in or sent by the browser.
+const OPERATOR_DENIED = new Set([401, 403, 404])
 
-function opsSecret() {
-  try {
-    const ls = localStorage.getItem(OPS_SECRET_KEY)
-    if (ls) return ls
-  } catch { /* localStorage unavailable */ }
-  return null
-}
-
-// Ops request headers: the legacy role seam + the real secret (when present) +
-// any bearer. Never logs the secret.
-function opsHeaders() {
-  const s = opsSecret()
-  return { ...OPS_HEADERS, ...(s ? { 'X-Ops-Secret': s } : {}), ...authHeaders() }
+function throwOperatorDenied(response) {
+  if (!OPERATOR_DENIED.has(response.status)) return
+  const error = new Error('operator grant required')
+  error.status = response.status
+  throw error
 }
 
 export async function getOpsTenants() {
-  const res = await apiFetch(`${API_BASE}/api/ops/tenants`, { headers: opsHeaders() }, '/api/ops/tenants')
-  if (res.status === 403) { const e = new Error('ops role required'); e.status = 403; throw e }
-  if (!res.ok) throw new Error(`GET /api/ops/tenants -> ${res.status}`)
+  const path = '/api/operator/tenants'
+  const res = await apiFetch(`${API_BASE}${path}`, { headers: authHeaders() }, path)
+  throwOperatorDenied(res)
+  if (!res.ok) throw new Error(`GET ${path} -> ${res.status}`)
   const body = await res.json()
   return body.tenants || []
 }
 
 export async function setTenantDisabled(tenantId, disabled) {
   const action = disabled ? 'disable' : 'enable'
+  const path = `/api/operator/tenants/${encodeURIComponent(tenantId)}/${action}`
   const res = await apiFetch(
-    `${API_BASE}/api/ops/tenants/${encodeURIComponent(tenantId)}/${action}`,
-    { method: 'POST', headers: opsHeaders() },
-    `/api/ops/tenants/${tenantId}/${action}`,
+    `${API_BASE}${path}`,
+    { method: 'POST', headers: authHeaders() },
+    path,
   )
-  if (res.status === 403) { const e = new Error('ops role required'); e.status = 403; throw e }
-  if (!res.ok) throw new Error(`POST /api/ops/tenants/${tenantId}/${action} -> ${res.status}`)
+  throwOperatorDenied(res)
+  if (!res.ok) throw new Error(`POST ${path} -> ${res.status}`)
   return res.json()
 }
 

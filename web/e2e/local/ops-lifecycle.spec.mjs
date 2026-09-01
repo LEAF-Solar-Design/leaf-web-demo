@@ -4,40 +4,37 @@ import { writeProofReceipt } from '../proofReceipt.mjs'
 import { requireLocalReady } from './requireReady.mjs'
 
 const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
-const OPS_SECRET = process.env.LEAF_E2E_OPS_SECRET
+const OPERATOR_JWT = process.env.LEAF_E2E_OPERATOR_JWT
 const PROOF_DIR = join(process.cwd(), '..', 'artifacts', 'unified-surface-proof', 'local')
 
-test('internal Operations uses real local authority without leaking its credential', async ({ page, request }, testInfo) => {
-  test.skip(!OPS_SECRET, 'managed local stack did not supply a disposable ops credential')
+test('internal Operations uses a real operator principal without exposing a shared credential', async ({ page, request }, testInfo) => {
+  test.skip(!OPERATOR_JWT, 'local stack did not supply a granted operator bearer')
   await requireLocalReady(request, test, API_BASE)
 
   const observed = []
   let opsRequests = 0
   let opsMutations = 0
-  let nonOpsCredentialLeaks = 0
-  let opsCredentialExpected = true
+  let sharedCredentialLeaks = 0
   page.on('request', (browserRequest) => {
     if (!browserRequest.url().startsWith(API_BASE)) return
     const url = new URL(browserRequest.url())
-    const header = browserRequest.headers()['x-ops-secret']
-    if (url.pathname.startsWith('/api/ops/')) {
+    const sharedSecret = browserRequest.headers()['x-ops-secret']
+    if (sharedSecret) sharedCredentialLeaks += 1
+    if (url.pathname.startsWith('/api/operator/')) {
       opsRequests += 1
-      if (opsCredentialExpected) expect(header).toBe(OPS_SECRET)
-      else expect(header).toBeFalsy()
+      expect(browserRequest.headers().authorization).toBe(`Bearer ${OPERATOR_JWT}`)
       if (browserRequest.method() === 'POST') opsMutations += 1
-    } else if (header) {
-      nonOpsCredentialLeaks += 1
     }
   })
   page.on('response', (response) => {
     if (!response.url().startsWith(API_BASE)) return
     const url = new URL(response.url())
-    if (url.pathname.startsWith('/api/ops/')) {
+    if (url.pathname.startsWith('/api/operator/')) {
       observed.push(`${response.request().method()} ${url.pathname} ${response.status()}`)
     }
   })
 
-  await page.addInitScript((secret) => localStorage.setItem('leaf.ops_secret', secret), OPS_SECRET)
+  await page.addInitScript((jwt) => localStorage.setItem('leaf.jwt', jwt), OPERATOR_JWT)
   await page.goto('/try?ops=1')
   const drawer = page.getByRole('dialog', { name: 'Internal ops' })
   await expect(drawer.getByRole('button', { name: 'Hide drawer' })).toBeFocused()
@@ -45,8 +42,8 @@ test('internal Operations uses real local authority without leaking its credenti
   await expect(firstRow).toBeVisible({ timeout: 15_000 })
   const tenantId = (await firstRow.locator('.ops-tid').textContent()).trim()
   await expect(firstRow).toContainText('Active')
-  await expect(page.locator('body')).not.toContainText(OPS_SECRET)
-  await expect(page).not.toHaveURL(new RegExp(OPS_SECRET))
+  await expect(page.locator('body')).not.toContainText(OPERATOR_JWT)
+  await expect(page).not.toHaveURL(new RegExp(OPERATOR_JWT))
 
   await firstRow.getByRole('button', { name: 'Disable', exact: true }).click()
   await expect(firstRow).toContainText(`Disable ${tenantId}?`)
@@ -58,7 +55,7 @@ test('internal Operations uses real local authority without leaking its credenti
   const disableResponse = page.waitForResponse((response) => {
     const url = new URL(response.url())
     return response.request().method() === 'POST'
-      && url.pathname === `/api/ops/tenants/${encodeURIComponent(tenantId)}/disable`
+      && url.pathname === `/api/operator/tenants/${encodeURIComponent(tenantId)}/disable`
   })
   await firstRow.locator('.chip-danger-confirm').click()
   expect((await disableResponse).status()).toBe(200)
@@ -68,36 +65,35 @@ test('internal Operations uses real local authority without leaking its credenti
   const enableResponse = page.waitForResponse((response) => {
     const url = new URL(response.url())
     return response.request().method() === 'POST'
-      && url.pathname === `/api/ops/tenants/${encodeURIComponent(tenantId)}/enable`
+      && url.pathname === `/api/operator/tenants/${encodeURIComponent(tenantId)}/enable`
   })
   await firstRow.getByRole('button', { name: 'Enable', exact: true }).click()
   expect((await enableResponse).status()).toBe(200)
   await expect(firstRow).toContainText('Active')
   expect(opsMutations).toBe(2)
-  expect(nonOpsCredentialLeaks).toBe(0)
+  expect(sharedCredentialLeaks).toBe(0)
 
-  await page.evaluate(() => localStorage.removeItem('leaf.ops_secret'))
-  opsCredentialExpected = false
+  await page.evaluate(() => localStorage.removeItem('leaf.jwt'))
   const deniedRefresh = page.waitForResponse((response) => {
     const url = new URL(response.url())
     return response.request().method() === 'GET'
-      && url.pathname === '/api/ops/tenants'
-      && response.status() === 403
+      && url.pathname === '/api/operator/tenants'
+      && [401, 403, 404].includes(response.status())
   })
   await drawer.getByRole('button', { name: 'Refresh', exact: true }).click()
   await deniedRefresh
-  await expect(page.getByText(/ops role required/)).toBeVisible()
+  await expect(page.getByText(/operator grant is required/)).toBeVisible()
   await expect(drawer.locator('tbody tr')).toHaveCount(0)
-  expect(nonOpsCredentialLeaks).toBe(0)
+  expect(sharedCredentialLeaks).toBe(0)
 
-  const denied = await request.get(`${API_BASE}/api/ops/tenants`)
-  expect(denied.status()).toBe(403)
+  const denied = await request.get(`${API_BASE}/api/operator/tenants`)
+  expect([401, 403, 404]).toContain(denied.status())
 
   writeProofReceipt(join(PROOF_DIR, 'ops-lifecycle-receipt.json'), {
     capability_ids: ['OP-01'],
     evidence_tier: 'local-e2e',
     route: '/try?ops=1',
-    runtime: 'real local Vite, FastAPI ops router, broker kill switch, isolated ledger, and disposable credential',
+    runtime: 'real local Vite, FastAPI operator router, broker kill switch, isolated ledger, and granted operator bearer',
     api_endpoints: observed,
     artifacts: [
       relative(join(process.cwd(), '..'), testInfo.outputPath('video.webm')).replaceAll('\\', '/'),
@@ -107,8 +103,8 @@ test('internal Operations uses real local authority without leaking its credenti
       'the destructive first click could be canceled without mutation',
       'explicit confirmation disabled the selected tenant through the real broker authority',
       'explicit confirmation restored the tenant to active before the proof ended',
-      'the disposable ops credential appeared only on ops requests and never in page text or URL',
-      'removing the credential produced a calm 403 gate with no tenant rows or actions',
+      'the browser sent its bearer and no shared ops credential',
+      'removing the bearer produced a calm operator gate with no tenant rows or actions',
     ],
     result: {
       verdict: 'pass',
@@ -116,13 +112,13 @@ test('internal Operations uses real local authority without leaking its credenti
       ops_requests: opsRequests,
       ops_mutations: opsMutations,
       final_state: 'active',
-      denied_without_credential: true,
-      non_ops_credential_leaks: nonOpsCredentialLeaks,
+      denied_without_bearer: true,
+      shared_credential_leaks: sharedCredentialLeaks,
     },
     limitations: [
-      'The proof uses a random disposable local ops credential, not a production operator secret.',
+      'The proof uses a configured test operator grant, not a production operator principal.',
       'The tenant ledger and broker kill-switch state are isolated under the managed run directory.',
-      'LEAF_AUTH_LIVE=0 does not prove a production internal-role identity.',
+      'The test bearer and principal are isolated from production.',
     ],
   })
 })

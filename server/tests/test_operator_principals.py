@@ -7,6 +7,7 @@ without it — the repo's database-free test-environment idiom.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import uuid
@@ -92,11 +93,13 @@ def test_store_unavailable_maps_to_503(monkeypatch):
 
     from fastapi import HTTPException
     with pytest.raises(HTTPException) as err:
-        # require_operator is a yield-dependency (it arms the egress boundary);
-        # driving it with next() runs the body, which raises before the yield.
-        next(operator_deps.require_operator(
-            tenant="demo-tenant", x_operator_subject="auth0|nobody",
-            x_operator_profile=None))
+        async def resolve():
+            dependency = operator_deps.require_operator(
+                tenant="demo-tenant", x_operator_subject="auth0|nobody",
+                x_operator_profile=None)
+            return await anext(dependency)
+
+        asyncio.run(resolve())
     assert err.value.status_code == 503
 
 
@@ -113,10 +116,14 @@ def test_dev_header_names_lookup_only(monkeypatch):
 
     from fastapi import HTTPException
     with pytest.raises(HTTPException) as err:
-        next(operator_deps.require_operator(
-            tenant="demo-tenant",
-            x_operator_subject=f"auth0|ungrant-{uuid.uuid4().hex[:8]}",
-            x_operator_profile=None))
+        async def resolve():
+            dependency = operator_deps.require_operator(
+                tenant="demo-tenant",
+                x_operator_subject=f"auth0|ungrant-{uuid.uuid4().hex[:8]}",
+                x_operator_profile=None)
+            return await anext(dependency)
+
+        asyncio.run(resolve())
     assert err.value.status_code == 404
 
 

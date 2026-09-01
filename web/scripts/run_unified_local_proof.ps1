@@ -68,7 +68,6 @@ $env:BROKER_TENANTS = Join-Path $runRoot 'broker-tenants.json'
 $env:LEAF_GRANTS_DIR = Join-Path $runRoot 'grants'
 $env:LEAF_GRANT_FILE = Join-Path $runRoot 'no-legacy-grant.token'
 $env:LEAF_OPS_SECRET = [Guid]::NewGuid().ToString('N')
-$env:LEAF_E2E_OPS_SECRET = $env:LEAF_OPS_SECRET
 $env:CLAUDE_CODE_OAUTH_TOKEN = ''
 $env:ANTHROPIC_API_KEY = ''
 $env:LEAF_TENANTS_DIR = Join-Path $runRoot 'tenants'

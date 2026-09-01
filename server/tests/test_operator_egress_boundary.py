@@ -11,6 +11,7 @@ Two layers (operator_egress_guard):
 """
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import contextvars
 import socket
@@ -220,15 +221,18 @@ def test_require_operator_arms_the_egress_boundary(monkeypatch):
     monkeypatch.setattr(operator_principals, "resolve_principal",
                         lambda subject: principal)
 
-    gen = operator_deps.require_operator(
-        tenant=_Tenant(), x_operator_subject=None, x_operator_profile=None)
-    ctx = next(gen)
-    try:
-        assert guard.is_armed(), "handler must run with egress armed"
-        assert ctx.subject == "auth0|op-egress-test"
-        with pytest.raises(OperatorEgressDenied):
-            socket.getaddrinfo("api.vercel.com", 443)
-    finally:
-        with pytest.raises(StopIteration):
-            next(gen)
+    async def exercise_dependency():
+        dependency = operator_deps.require_operator(
+            tenant=_Tenant(), x_operator_subject=None, x_operator_profile=None)
+        ctx = await anext(dependency)
+        try:
+            assert guard.is_armed(), "handler must run with egress armed"
+            assert ctx.subject == "auth0|op-egress-test"
+            with pytest.raises(OperatorEgressDenied):
+                socket.getaddrinfo("api.vercel.com", 443)
+        finally:
+            with pytest.raises(StopAsyncIteration):
+                await anext(dependency)
+
+    asyncio.run(exercise_dependency())
     assert not guard.is_armed()
