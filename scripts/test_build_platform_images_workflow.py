@@ -2317,6 +2317,110 @@ def main() -> None:
             f'printf \'%s  %s\\n\' "${argument}"' in harness_dockerfile
         ), argument
 
+    # The three python:3.12-slim images (app, broker, canonical-worker) carry
+    # the harness contract against the TRIXIE channels: one producer-resolved
+    # digest pair, shared across the three, passed to Docker and bound into
+    # the signed surface fingerprint — so a Debian channel update both
+    # invalidates their apt layers and refuses signed reuse of the pre-update
+    # image (the libexpat1 CVE-2026-56408 defect class, applied preventively).
+    trixie_resolver_name = "name: Resolve trixie Debian InRelease digests"
+    trixie_members = (
+        "matrix.image == 'app' || matrix.image == 'broker' || "
+        "matrix.image == 'canonical-worker'"
+    )
+    trixie_expected_conditions = {
+        "warm": f"({trixie_members}) && steps.chain.outputs.skip != 'true'",
+        "build": trixie_members,
+        "speculate": trixie_members,
+    }
+    trixie_security_url = (
+        "https://deb.debian.org/debian-security/dists/"
+        "trixie-security/InRelease"
+    )
+    trixie_updates_url = (
+        "https://deb.debian.org/debian/dists/trixie-updates/InRelease"
+    )
+    for lane, block in producer_blocks:
+        resolvers = [
+            step
+            for step in re.split(r"\n      - ", block)
+            if step.startswith(trixie_resolver_name)
+        ]
+        assert len(resolvers) == 1, (lane, len(resolvers))
+        resolver = _executable_bash(resolvers[0])
+        assert resolver.count(trixie_security_url) == 1, lane
+        assert resolver.count(trixie_updates_url) == 1, lane
+        assert "curl --fail --silent --show-error --location" in resolver, lane
+        assert "--proto '=https' --tlsv1.2" in resolver, lane
+        assert "sha256sum \"$artifact\"" in resolver, lane
+        assert '[[ "$digest" =~ ^[0-9a-f]{64}$ ]]' in resolver, lane
+        assert 'echo "$output_name=$digest" >> "$GITHUB_OUTPUT"' in resolver, lane
+        conditions = [
+            _value_of(line)
+            for line in resolvers[0].splitlines()
+            if _key_of(line) == "if"
+        ]
+        assert conditions == [trixie_expected_conditions[lane]], (lane, conditions)
+
+    trixie_arg_outputs = {
+        "TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256": "security_sha256",
+        "TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256": "updates_sha256",
+    }
+    for argument, output in trixie_arg_outputs.items():
+        expression = (
+            f"${{{{ ({trixie_members}) && format('"
+            f"{argument}={{0}}', steps.trixie_debian.outputs.{output}) || '' }}}}"
+        )
+        assert expression in build_arg_input, argument
+        assert text.count(expression) == 3, argument
+
+    for lane, block, surface_name in (
+        ("build", build_block, "name: Resolve one signed reusable surface"),
+        ("speculate", speculate_block, "name: Describe the exact speculative surface"),
+    ):
+        surface = _executable_bash(next(
+            step
+            for step in re.split(r"\n      - ", block)
+            if step.startswith(surface_name)
+        ))
+        for argument, output in trixie_arg_outputs.items():
+            assert (
+                f"{argument}: ${{{{ steps.trixie_debian.outputs.{output} }}}}"
+                in surface
+            ), (lane, argument)
+            assert f'[[ "${argument}" =~ ^[0-9a-f]{{64}}$ ]]' in surface, (
+                lane,
+                argument,
+            )
+            assert (
+                f'build_args+=(--build-arg "{argument}=${argument}")' in surface
+            ), (lane, argument)
+
+    for trixie_image in ("app", "broker", "canonical-worker"):
+        trixie_dockerfile = (
+            ROOT / "deploy" / f"Dockerfile.{trixie_image}"
+        ).read_text(encoding="utf-8")
+        assert not re.search(
+            r"^ADD\s+https://", trixie_dockerfile, re.M
+        ), trixie_image
+        for argument in trixie_arg_outputs:
+            assert trixie_dockerfile.count(f"ARG {argument}") == 1, (
+                trixie_image, argument)
+            assert (
+                f'printf \'%s\\n\' "${argument}"' in trixie_dockerfile
+            ), (trixie_image, argument)
+            assert (
+                f'printf \'%s  %s\\n\' "${argument}"' in trixie_dockerfile
+            ), (trixie_image, argument)
+        # The upgrade itself, on executable lines only: a mention in prose
+        # can neither satisfy nor break it.
+        trixie_executable = "\n".join(
+            line
+            for line in trixie_dockerfile.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        )
+        assert "apt-get upgrade -y" in trixie_executable, trixie_image
+
     # The web libexpat refresh follows the same producer-bound cache contract,
     # but against the exact Alpine main APKINDEX exposed by nginx:alpine. Each
     # producer reads the versioned repository from that base, validates the

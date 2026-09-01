@@ -54,11 +54,41 @@ RUN pip install --no-cache-dir \
 # e2b-tool-exec.mjs, keys its cache on that file's content alone), and below
 # them the apt + node layers re-ran on every merge (run 31006198764: apt 6.1s
 # + node 0.7s rebuilt after cache-busting source COPYs).
-RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
+#
+# Security posture: apply Debian security updates at build time so the image
+# never ships base-layer CVEs the distro has already fixed (the Trivy
+# cve-harvest gate blocks HIGH/CRITICAL with a released fix; libexpat1
+# CVE-2026-56408 turned staging auto-deploys off for every merge until the
+# harness picked up this exact contract, run 33465506870).
+#
+# The producer resolves both signed trixie channel documents and passes their
+# exact SHA256 values as build arguments. They are cache-key inputs to this
+# RUN and members of the signed surface fingerprint, so a Debian channel
+# update both invalidates this apt layer and refuses signed reuse of the
+# pre-update image. The files apt downloaded must match before any package is
+# upgraded; a missing, malformed, stale, or substituted value fails the build
+# closed. Same contract, same spelling as deploy/Dockerfile.harness (bookworm
+# there, trixie here — python:3.12-slim is Debian 13).
+ARG TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256
+ARG TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256
+
+RUN printf '%s\n' "$TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256" \
+      | grep -Eq '^[0-9a-f]{64}$' \
+ && printf '%s\n' "$TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256" \
+      | grep -Eq '^[0-9a-f]{64}$' \
+ && find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
     -exec sed -i \
       -e 's|http://deb.debian.org|https://deb.debian.org|g' \
       -e 's|http://security.debian.org|https://security.debian.org|g' {} + \
- && apt-get update && apt-get install -y --no-install-recommends libstdc++6 git \
+ && apt-get update \
+ && printf '%s  %s\n' "$TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256" \
+      /var/lib/apt/lists/deb.debian.org_debian-security_dists_trixie-security_InRelease \
+      | sha256sum -c - \
+ && printf '%s  %s\n' "$TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256" \
+      /var/lib/apt/lists/deb.debian.org_debian_dists_trixie-updates_InRelease \
+      | sha256sum -c - \
+ && apt-get upgrade -y \
+ && apt-get install -y --no-install-recommends libstdc++6 git \
       && rm -rf /var/lib/apt/lists/*
 COPY --from=node:20-slim /usr/local/bin/node /usr/local/bin/node
 COPY --from=e2bdeps /helper/node_modules /app/harness/node_modules

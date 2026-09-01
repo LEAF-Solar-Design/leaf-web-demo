@@ -836,6 +836,30 @@ jobs:
           resolve_inrelease updates_sha256 \
             https://deb.debian.org/debian/dists/bookworm-updates/InRelease
 
+      - name: Resolve trixie Debian InRelease digests
+        id: trixie_debian
+        if: (matrix.image == 'app' || matrix.image == 'broker' || matrix.image == 'canonical-worker') && steps.chain.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          resolve_inrelease() {
+            local output_name="$1"
+            local url="$2"
+            local artifact="$RUNNER_TEMP/$output_name.inrelease"
+            local digest
+            curl --fail --silent --show-error --location \
+              --proto '=https' --tlsv1.2 "$url" --output "$artifact"
+            digest="$(sha256sum "$artifact" | awk '{print $1}')"
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || {
+              echo "::error::Debian $output_name InRelease did not resolve to one SHA256 value."
+              exit 1
+            }
+            echo "$output_name=$digest" >> "$GITHUB_OUTPUT"
+          }
+          resolve_inrelease security_sha256 \
+            https://deb.debian.org/debian-security/dists/trixie-security/InRelease
+          resolve_inrelease updates_sha256 \
+            https://deb.debian.org/debian/dists/trixie-updates/InRelease
+
       - name: Resolve web Alpine main APKINDEX digest
         id: web_alpine
         if: matrix.image == 'web' && steps.chain.outputs.skip != 'true'
@@ -1029,6 +1053,8 @@ jobs:
             ${{ matrix.image == 'canonical-worker' && format('AUTOFILL_SOLVER_REVISION={0}', needs.prepare.outputs.solver_revision) || '' }}
             ${{ matrix.image == 'harness' && format('HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256={0}', steps.harness_debian.outputs.security_sha256) || '' }}
             ${{ matrix.image == 'harness' && format('HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256={0}', steps.harness_debian.outputs.updates_sha256) || '' }}
+            ${{ (matrix.image == 'app' || matrix.image == 'broker' || matrix.image == 'canonical-worker') && format('TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256={0}', steps.trixie_debian.outputs.security_sha256) || '' }}
+            ${{ (matrix.image == 'app' || matrix.image == 'broker' || matrix.image == 'canonical-worker') && format('TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256={0}', steps.trixie_debian.outputs.updates_sha256) || '' }}
             ${{ matrix.image == 'web' && format('WEB_ALPINE_MAIN_APKINDEX_SHA256={0}', steps.web_alpine.outputs.main_sha256) || '' }}
           # Every upstream base resolves through this account's ECR pull-through
           # cache instead of Docker Hub. buildx named contexts override an image
@@ -1222,6 +1248,30 @@ jobs:
           resolve_inrelease updates_sha256 \
             https://deb.debian.org/debian/dists/bookworm-updates/InRelease
 
+      - name: Resolve trixie Debian InRelease digests
+        id: trixie_debian
+        if: matrix.image == 'app' || matrix.image == 'broker' || matrix.image == 'canonical-worker'
+        run: |
+          set -euo pipefail
+          resolve_inrelease() {
+            local output_name="$1"
+            local url="$2"
+            local artifact="$RUNNER_TEMP/$output_name.inrelease"
+            local digest
+            curl --fail --silent --show-error --location \
+              --proto '=https' --tlsv1.2 "$url" --output "$artifact"
+            digest="$(sha256sum "$artifact" | awk '{print $1}')"
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || {
+              echo "::error::Debian $output_name InRelease did not resolve to one SHA256 value."
+              exit 1
+            }
+            echo "$output_name=$digest" >> "$GITHUB_OUTPUT"
+          }
+          resolve_inrelease security_sha256 \
+            https://deb.debian.org/debian-security/dists/trixie-security/InRelease
+          resolve_inrelease updates_sha256 \
+            https://deb.debian.org/debian/dists/trixie-updates/InRelease
+
       - name: Resolve web Alpine main APKINDEX digest
         id: web_alpine
         if: matrix.image == 'web'
@@ -1260,6 +1310,8 @@ jobs:
           SOLVER_SOURCE_SHA256: ${{ needs.prepare.outputs.solver_source_sha256 }}
           HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256: ${{ steps.harness_debian.outputs.security_sha256 }}
           HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256: ${{ steps.harness_debian.outputs.updates_sha256 }}
+          TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256: ${{ steps.trixie_debian.outputs.security_sha256 }}
+          TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256: ${{ steps.trixie_debian.outputs.updates_sha256 }}
           WEB_ALPINE_MAIN_APKINDEX_SHA256: ${{ steps.web_alpine.outputs.main_sha256 }}
           FORCE_REBUILD_ALL: ${{ inputs.force_rebuild_all }}
         run: |
@@ -1310,6 +1362,18 @@ jobs:
             }
             build_args+=(--build-arg "HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256=$HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256")
             build_args+=(--build-arg "HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256=$HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256")
+          fi
+          if [ "${{ matrix.image }}" = "app" ] || [ "${{ matrix.image }}" = "broker" ] || [ "${{ matrix.image }}" = "canonical-worker" ]; then
+            [[ "$TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+              echo "::error::The trixie security InRelease SHA256 is missing or malformed."
+              exit 1
+            }
+            [[ "$TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+              echo "::error::The trixie updates InRelease SHA256 is missing or malformed."
+              exit 1
+            }
+            build_args+=(--build-arg "TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256=$TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256")
+            build_args+=(--build-arg "TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256=$TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256")
           fi
           if [ "${{ matrix.image }}" = "web" ]; then
             [[ "$WEB_ALPINE_MAIN_APKINDEX_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
@@ -1728,6 +1792,8 @@ jobs:
             ${{ matrix.image == 'canonical-worker' && format('AUTOFILL_SOLVER_REVISION={0}', needs.prepare.outputs.solver_revision) || '' }}
             ${{ matrix.image == 'harness' && format('HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256={0}', steps.harness_debian.outputs.security_sha256) || '' }}
             ${{ matrix.image == 'harness' && format('HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256={0}', steps.harness_debian.outputs.updates_sha256) || '' }}
+            ${{ (matrix.image == 'app' || matrix.image == 'broker' || matrix.image == 'canonical-worker') && format('TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256={0}', steps.trixie_debian.outputs.security_sha256) || '' }}
+            ${{ (matrix.image == 'app' || matrix.image == 'broker' || matrix.image == 'canonical-worker') && format('TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256={0}', steps.trixie_debian.outputs.updates_sha256) || '' }}
             ${{ matrix.image == 'web' && format('WEB_ALPINE_MAIN_APKINDEX_SHA256={0}', steps.web_alpine.outputs.main_sha256) || '' }}
           # Every upstream base resolves through this account's ECR pull-through
           # cache instead of Docker Hub. buildx named contexts override an image
@@ -2195,6 +2261,30 @@ jobs:
           resolve_inrelease updates_sha256 \
             https://deb.debian.org/debian/dists/bookworm-updates/InRelease
 
+      - name: Resolve trixie Debian InRelease digests
+        id: trixie_debian
+        if: matrix.image == 'app' || matrix.image == 'broker' || matrix.image == 'canonical-worker'
+        run: |
+          set -euo pipefail
+          resolve_inrelease() {
+            local output_name="$1"
+            local url="$2"
+            local artifact="$RUNNER_TEMP/$output_name.inrelease"
+            local digest
+            curl --fail --silent --show-error --location \
+              --proto '=https' --tlsv1.2 "$url" --output "$artifact"
+            digest="$(sha256sum "$artifact" | awk '{print $1}')"
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || {
+              echo "::error::Debian $output_name InRelease did not resolve to one SHA256 value."
+              exit 1
+            }
+            echo "$output_name=$digest" >> "$GITHUB_OUTPUT"
+          }
+          resolve_inrelease security_sha256 \
+            https://deb.debian.org/debian-security/dists/trixie-security/InRelease
+          resolve_inrelease updates_sha256 \
+            https://deb.debian.org/debian/dists/trixie-updates/InRelease
+
       - name: Resolve web Alpine main APKINDEX digest
         id: web_alpine
         if: matrix.image == 'web'
@@ -2232,6 +2322,8 @@ jobs:
           SOLVER_SOURCE_SHA256: ${{ needs.prepare.outputs.solver_source_sha256 }}
           HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256: ${{ steps.harness_debian.outputs.security_sha256 }}
           HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256: ${{ steps.harness_debian.outputs.updates_sha256 }}
+          TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256: ${{ steps.trixie_debian.outputs.security_sha256 }}
+          TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256: ${{ steps.trixie_debian.outputs.updates_sha256 }}
           WEB_ALPINE_MAIN_APKINDEX_SHA256: ${{ steps.web_alpine.outputs.main_sha256 }}
         run: |
           set -euo pipefail
@@ -2280,6 +2372,18 @@ jobs:
             }
             build_args+=(--build-arg "HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256=$HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256")
             build_args+=(--build-arg "HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256=$HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256")
+          fi
+          if [ "${{ matrix.image }}" = "app" ] || [ "${{ matrix.image }}" = "broker" ] || [ "${{ matrix.image }}" = "canonical-worker" ]; then
+            [[ "$TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+              echo "::error::The trixie security InRelease SHA256 is missing or malformed."
+              exit 1
+            }
+            [[ "$TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+              echo "::error::The trixie updates InRelease SHA256 is missing or malformed."
+              exit 1
+            }
+            build_args+=(--build-arg "TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256=$TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256")
+            build_args+=(--build-arg "TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256=$TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256")
           fi
           if [ "${{ matrix.image }}" = "web" ]; then
             [[ "$WEB_ALPINE_MAIN_APKINDEX_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
@@ -2434,6 +2538,8 @@ jobs:
             ${{ matrix.image == 'canonical-worker' && format('AUTOFILL_SOLVER_REVISION={0}', needs.prepare.outputs.solver_revision) || '' }}
             ${{ matrix.image == 'harness' && format('HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256={0}', steps.harness_debian.outputs.security_sha256) || '' }}
             ${{ matrix.image == 'harness' && format('HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256={0}', steps.harness_debian.outputs.updates_sha256) || '' }}
+            ${{ (matrix.image == 'app' || matrix.image == 'broker' || matrix.image == 'canonical-worker') && format('TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256={0}', steps.trixie_debian.outputs.security_sha256) || '' }}
+            ${{ (matrix.image == 'app' || matrix.image == 'broker' || matrix.image == 'canonical-worker') && format('TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256={0}', steps.trixie_debian.outputs.updates_sha256) || '' }}
             ${{ matrix.image == 'web' && format('WEB_ALPINE_MAIN_APKINDEX_SHA256={0}', steps.web_alpine.outputs.main_sha256) || '' }}
           # Every upstream base resolves through this account's ECR pull-through
           # cache instead of Docker Hub. buildx named contexts override an image
