@@ -77,13 +77,41 @@ COPY deploy/gen_seccomp_filter.c /tmp/gen_seccomp_filter.c
 # dependency on libseccomp (setpriv reads it as raw bytes itself). See the
 # generator's own header comment for what is denied and why execve is not.
 #
+# --- Debian security refresh (the Dockerfile.harness contract, on trixie). ----
+# Apply Debian security updates at build time so the image never ships
+# base-layer CVEs the distro has already fixed (the Trivy cve-harvest gate
+# blocks HIGH/CRITICAL with a released fix; libexpat1 CVE-2026-56408 turned
+# staging auto-deploys off for every merge until the harness picked up this
+# exact contract, run 33465506870).
+#
+# The producer resolves both signed trixie channel documents and passes their
+# exact SHA256 values as build arguments. They are cache-key inputs to the RUN
+# below and members of the signed surface fingerprint, so a Debian channel
+# update both invalidates the apt layer and refuses signed reuse of the
+# pre-update image. The files apt downloaded must match before any package is
+# upgraded; a missing, malformed, stale, or substituted value fails the build
+# closed.
+ARG TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256
+ARG TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256
+
 # NOTE: the `apt-get install ... git` prefix below is pinned verbatim by
 # server/tests/test_postgres_container_wiring.py (_PINNED_GIT_INSTALL).
-RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
+RUN printf '%s\n' "$TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256" \
+      | grep -Eq '^[0-9a-f]{64}$' \
+ && printf '%s\n' "$TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256" \
+      | grep -Eq '^[0-9a-f]{64}$' \
+ && find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
     -exec sed -i \
       -e 's|http://deb.debian.org|https://deb.debian.org|g' \
       -e 's|http://security.debian.org|https://security.debian.org|g' {} + \
  && apt-get update \
+ && printf '%s  %s\n' "$TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256" \
+      /var/lib/apt/lists/deb.debian.org_debian-security_dists_trixie-security_InRelease \
+      | sha256sum -c - \
+ && printf '%s  %s\n' "$TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256" \
+      /var/lib/apt/lists/deb.debian.org_debian_dists_trixie-updates_InRelease \
+      | sha256sum -c - \
+ && apt-get upgrade -y \
  && apt-get install -y --no-install-recommends git curl ca-certificates \
       xz-utils gcc make libc6-dev libseccomp-dev \
  && curl -fsSL https://github.com/LibreDWG/libredwg/releases/download/0.14.8584/libredwg-0.14.8584.tar.xz \

@@ -8,6 +8,42 @@ FROM python:3.12-slim AS canonical-worker
 
 WORKDIR /app
 
+# --- Debian security refresh (the Dockerfile.harness contract, on trixie). ----
+# This image installs no apt packages of its own, but it still ships the
+# python:3.12-slim base layers, so without this layer a base CVE fixed by
+# Debian stays aboard until the base tag itself moves — the exact defect class
+# that turned staging auto-deploys off via the harness (libexpat1
+# CVE-2026-56408, run 33465506870), applied here preventively.
+#
+# The producer resolves both signed trixie channel documents and passes their
+# exact SHA256 values as build arguments. They are cache-key inputs to this
+# RUN and members of the signed surface fingerprint, so a Debian channel
+# update both invalidates this apt layer and refuses signed reuse of the
+# pre-update image. The files apt downloaded must match before any package is
+# upgraded; a missing, malformed, stale, or substituted value fails the build
+# closed. HTTPS mirrors, the app/broker idiom: the self-hosted build runner's
+# VPC has no port-80 egress.
+ARG TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256
+ARG TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256
+
+RUN printf '%s\n' "$TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256" \
+      | grep -Eq '^[0-9a-f]{64}$' \
+ && printf '%s\n' "$TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256" \
+      | grep -Eq '^[0-9a-f]{64}$' \
+ && find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
+    -exec sed -i \
+      -e 's|http://deb.debian.org|https://deb.debian.org|g' \
+      -e 's|http://security.debian.org|https://security.debian.org|g' {} + \
+ && apt-get update \
+ && printf '%s  %s\n' "$TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256" \
+      /var/lib/apt/lists/deb.debian.org_debian-security_dists_trixie-security_InRelease \
+      | sha256sum -c - \
+ && printf '%s  %s\n' "$TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256" \
+      /var/lib/apt/lists/deb.debian.org_debian_dists_trixie-updates_InRelease \
+      | sha256sum -c - \
+ && apt-get upgrade -y \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY platform/requirements.txt /app/platform/requirements.txt
 RUN pip install --no-cache-dir -r /app/platform/requirements.txt
 

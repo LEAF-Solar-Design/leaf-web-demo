@@ -1280,6 +1280,11 @@ def test_every_current_dockerfile_surface_is_fully_classified():
                 HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256="2" * 64,
                 HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256="3" * 64,
             )
+        if service in ("app", "broker", "canonical-worker"):
+            build_args.update(
+                TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256="4" * 64,
+                TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256="5" * 64,
+            )
         fingerprints[service] = build_surface_fingerprint(
             repo,
             revision,
@@ -1296,6 +1301,15 @@ def test_every_current_dockerfile_surface_is_fully_classified():
         "HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256": "2" * 64,
         "HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256": "3" * 64,
     }
+    # The trixie channel digests are surface build arguments on all three
+    # python:3.12-slim images, so a Debian channel update moves each recipe
+    # fingerprint and refuses signed reuse of the pre-update image.
+    for service in ("app", "broker", "canonical-worker"):
+        recipe_args = fingerprints[service]["recipe"]["build_args"]
+        assert recipe_args[
+            "TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256"] == "4" * 64, service
+        assert recipe_args[
+            "TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256"] == "5" * 64, service
     assert fingerprints["web"]["recipe"]["build_args"]["VITE_API_BASE"] == ""
     assert fingerprints["app"]["migration_fingerprint"] != "not_app"
 
