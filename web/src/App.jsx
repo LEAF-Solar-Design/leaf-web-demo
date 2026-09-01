@@ -2525,12 +2525,14 @@ export default function App() {
             projectSlot={activeSurface === 'ios'
               ? <IosSurface enabled={ENV_IOS_SURFACE} contract={iosContract} />
               : <span className="dim">{openProjectId ? currentProjectName || projectName : 'No project open'}</span>}
-            onOpenCad={() => onSelectSurface('cad')}
           />
         )}
         {/* The CAD workspace hides (not unmounts) on other tabs so live
-            drawing, lock, and job state survive tab switches untouched. */}
-        <div className="workspace-card enter" style={{ '--rank': 1, display: activeSurface === 'cad' ? undefined : 'none' }} ref={workspaceCardRef}>
+            drawing, lock, and job state survive tab switches untouched.
+            Solar shows it too: that tab IS the CAD workspace on the solar
+            tool set, opened inline by the tab itself (no "Open ..." button;
+            operator directive 2026-09-01). */}
+        <div className="workspace-card enter" style={{ '--rank': 1, display: activeSurface === 'cad' || activeSurface === 'solar' ? undefined : 'none' }} ref={workspaceCardRef}>
           {unreadableHead && unreadableHead.pending && (
             // The routine post-restore load: calm progress, not a failure —
             // no alert role, no retry (the load is already in flight).

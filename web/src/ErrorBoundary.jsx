@@ -1,5 +1,7 @@
 // Crash barrier — a React render error must never turn the stage into a white
-// screen. Renders a calm dark-emerald card with a Reload button instead.
+// screen. Renders a calm paper card (the drafting-studio identity) with a
+// Reload button instead; it takes over the full viewport, so it owns its own
+// ground regardless of which surface broke beneath it.
 //
 // Deliberately dependency-light: React only, no JSON imports, no api.js — the
 // boundary has to survive whatever broke below it.
@@ -11,19 +13,19 @@ const WRAP = {
   alignItems: 'center',
   justifyContent: 'center',
   padding: '24px',
-  background: '#0a0f0d',
-  color: '#e6f2ec',
-  fontFamily: "'Inter Tight', 'Inter', system-ui, -apple-system, sans-serif",
+  background: '#e9e7e0',
+  color: '#191d1a',
+  fontFamily: "'Barlow', system-ui, -apple-system, sans-serif",
 }
 
 const CARD = {
   maxWidth: '420px',
   width: '100%',
   padding: '28px',
-  borderRadius: '14px',
-  background: '#0f1714',
-  border: '1px solid #1d2b25',
-  boxShadow: '0 18px 48px rgba(0,0,0,0.45)',
+  borderRadius: '6px',
+  background: '#ffffff',
+  border: '1px solid #d6d4cb',
+  boxShadow: '0 12px 32px rgba(25,29,26,0.16)',
   textAlign: 'center',
 }
 
@@ -31,23 +33,23 @@ const DIAMOND = {
   width: '18px',
   height: '18px',
   margin: '0 auto 18px',
-  background: '#22c55e',
+  background: '#1e6b45',
   transform: 'rotate(45deg)',
   borderRadius: '4px',
 }
 
 const TITLE = { margin: '0 0 8px', fontSize: '18px', fontWeight: 600, letterSpacing: '-0.01em' }
-const BODY = { margin: '0 0 20px', fontSize: '14px', lineHeight: 1.55, color: '#9db3a8' }
+const BODY = { margin: '0 0 20px', fontSize: '14px', lineHeight: 1.55, color: '#4f5851' }
 
 const BUTTON = {
   appearance: 'none',
-  border: '1px solid #22c55e',
-  background: '#22c55e',
-  color: '#06120c',
+  border: '1px solid #1e6b45',
+  background: '#1e6b45',
+  color: '#f5faf6',
   fontSize: '14px',
   fontWeight: 600,
   padding: '10px 22px',
-  borderRadius: '9px',
+  borderRadius: '4px',
   cursor: 'pointer',
 }
 
