@@ -64,7 +64,7 @@ function parseJwt(token) {
   if (!subject.startsWith('auth0|')) fail('interactive principal is not an Auth0 database account')
   if (claims.iss !== ISSUER) fail('JWT issuer is not exact')
   const audiences = Array.isArray(claims.aud) ? claims.aud : [claims.aud]
-  if (!audiences.includes(AUDIENCE)) fail('JWT audience is not exact')
+  if (!audiences.some((aud) => aud === AUDIENCE)) fail('JWT audience is not exact')
   if (claims.azp !== CLIENT_ID) fail('JWT authorized party is not the staging SPA')
   return {
     subject_sha256: sha256(subject),

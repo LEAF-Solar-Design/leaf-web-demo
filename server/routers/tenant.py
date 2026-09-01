@@ -212,7 +212,7 @@ def grant_diagnostic(tenant=Depends(_require_grant_owner)):
             timeout=30,
         )
     except Exception as exc:  # noqa: BLE001
-        return _unreachable(str(exc))
+        return _unreachable(f"harness request failed: {type(exc).__name__}")
     if r.status_code >= 500:
         return _unreachable(f"harness returned HTTP {r.status_code}")
     try:
@@ -245,7 +245,7 @@ def link_grant(req: GrantLinkRequest, tenant=Depends(_require_grant_owner)):
         import broker_client
         r = requests.put(url, json=payload, headers=broker_client.harness_headers(), timeout=30)
     except Exception as exc:  # noqa: BLE001  (connection/timeout/etc.)
-        return _unreachable(str(exc))
+        return _unreachable(f"harness request failed: {type(exc).__name__}")
     if r.status_code >= 500:
         return _unreachable(f"harness returned HTTP {r.status_code}")
     if r.status_code >= 400:
@@ -309,7 +309,7 @@ def activate_grant(req: GrantActivateRequest, tenant=Depends(_require_grant_owne
             timeout=30,
         )
     except Exception as exc:  # noqa: BLE001
-        return _unreachable(str(exc))
+        return _unreachable(f"harness request failed: {type(exc).__name__}")
     if r.status_code >= 500:
         return _unreachable(f"harness returned HTTP {r.status_code}")
     if r.status_code >= 400:
@@ -332,7 +332,7 @@ def grant_status(tenant=Depends(_require_grant_owner)):
         import broker_client
         r = requests.get(url, headers=broker_client.harness_headers(), timeout=30)
     except Exception as exc:  # noqa: BLE001
-        return _unreachable(str(exc))
+        return _unreachable(f"harness request failed: {type(exc).__name__}")
     if r.status_code >= 500:
         return _unreachable(f"harness returned HTTP {r.status_code}")
     try:
@@ -354,7 +354,7 @@ def unlink_grant(account_id: Optional[str] = None, tenant=Depends(_require_grant
         params = {"account_id": account_id} if account_id else None
         r = requests.delete(url, params=params, headers=broker_client.harness_headers(), timeout=30)
     except Exception as exc:  # noqa: BLE001
-        return _unreachable(str(exc))
+        return _unreachable(f"harness request failed: {type(exc).__name__}")
     if r.status_code >= 500:
         return _unreachable(f"harness returned HTTP {r.status_code}")
     if r.status_code >= 400:

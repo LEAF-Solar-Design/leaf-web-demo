@@ -1150,7 +1150,11 @@ export function createHarness(ports: HarnessPorts, opts?: {
           error: { message: err.message, diagnostics: err.diagnostics ?? [] },
         });
       }
-      return send(res, 500, { error: { message: (err as Error).message } });
+      // Class name only for the unclassified catch-all: an arbitrary error's
+      // message can carry paths or internal state. The full stack already
+      // went to stderr (redacted) above; typed errors returned their own
+      // curated messages before reaching here.
+      return send(res, 500, { error: { message: `internal error: ${(err as Error)?.constructor?.name ?? "Error"}` } });
     }
   };
 

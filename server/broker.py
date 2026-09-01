@@ -1444,8 +1444,13 @@ def _resolve_live_dwg(dwg: str) -> Path:
     absolute paths, symlinks, or a double/misleading suffix to make APS upload
     an arbitrary local file.
     """
-    if not isinstance(dwg, str) or not _DWG_NAME_RE.fullmatch(dwg):
+    if not isinstance(dwg, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", dwg):
         raise ValueError("dwg must be a bare drawing name (letters, digits, '_' or '-')")
+    # Inline LITERAL rebind of the _DWG_NAME_RE rule (pinned equal by
+    # test_codeql_barrier_literals.py): a literal fullmatch is a taint barrier
+    # static analysis proves; the same pattern behind the compiled constant
+    # earns no credit.
+    dwg = str(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", dwg).group(0))
 
     root = DATA_DIR.resolve(strict=True)
     registry_dwg = drawing_identity.source_id(dwg)
@@ -1481,10 +1486,15 @@ def _resolve_upload_dwg(name: str, tenant_id: str) -> Path:
     knowing another tenant's drawing id resolves nothing (review round 1,
     MAJOR: the flat namespace had no tenant binding). Tries `.dwg` then
     `.dxf` — the upload endpoint stages exactly one of the two."""
-    if not isinstance(name, str) or not _DWG_NAME_RE.fullmatch(name):
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", name):
         raise ValueError("dwg must be a bare drawing name (letters, digits, '_' or '-')")
-    if not isinstance(tenant_id, str) or not _DWG_NAME_RE.fullmatch(tenant_id):
+    if not isinstance(tenant_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", tenant_id):
         raise ValueError("tenant_id must be a bare id (letters, digits, '_' or '-')")
+    # Inline LITERAL rebinds of the _DWG_NAME_RE rule (pinned equal by
+    # test_codeql_barrier_literals.py): provable taint barriers for both parts
+    # of the staged name — the compiled constant earns no barrier credit.
+    name = str(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", name).group(0))
+    tenant_id = str(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", tenant_id).group(0))
     try:
         root = _uploads_root().resolve(strict=True)
     except FileNotFoundError as exc:
@@ -2250,17 +2260,26 @@ def _broker_extract(req: BrokerExtractRequest) -> JSONResponse:
                 content=err_envelope(ErrorCode.INTERNAL, str(exc), retryable=False),
             )
         except FileNotFoundError as exc:
+            # The message of a FileNotFoundError names broker-local filesystem
+            # paths (e.g. the APS credential file); log it, never return it.
+            print(f"[leaf-broker] extraction unavailable: {exc}", file=sys.stderr)
             return JSONResponse(
                 status_code=DEFAULT_HTTP_STATUS[ErrorCode.APS_UNAVAILABLE],
                 content=err_envelope(
-                    ErrorCode.APS_UNAVAILABLE, str(exc), retryable=False),
+                    ErrorCode.APS_UNAVAILABLE,
+                    "APS extraction prerequisites are missing in the broker",
+                    retryable=False),
             )
         except Exception as exc:  # noqa: BLE001
+            # Class name only: an arbitrary exception's message can carry
+            # internal paths or state. Full detail goes to the broker log.
+            print(f"[leaf-broker] extraction failed: {type(exc).__name__}: {exc}",
+                  file=sys.stderr)
             return JSONResponse(
                 status_code=DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED],
                 content=err_envelope(
                     ErrorCode.WORKITEM_FAILED,
-                    f"{type(exc).__name__}: {exc}",
+                    f"extraction failed: {type(exc).__name__}",
                     retryable=True,
                 ),
             )
@@ -2645,8 +2664,12 @@ def _broker_run(req: BrokerRunRequest) -> JSONResponse:
         return response
     except Exception as exc:  # noqa: BLE001
         entry["status"] = "INTERNAL"
+        # Class name only in the envelope; the message can carry internal
+        # paths or state, so it goes to the broker log instead.
+        print(f"[leaf-broker] run failed: {type(exc).__name__}: {exc}",
+              file=sys.stderr)
         terminal_env = err_envelope(
-            ErrorCode.INTERNAL, f"{type(exc).__name__}: {exc}", retryable=False,
+            ErrorCode.INTERNAL, f"run failed: {type(exc).__name__}", retryable=False,
             tool=tool.get("name"))
         terminal_status = DEFAULT_HTTP_STATUS[ErrorCode.INTERNAL]
         return JSONResponse(status_code=terminal_status, content=terminal_env)
@@ -3043,11 +3066,20 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                 return (err_envelope(ErrorCode.INTERNAL, str(exc), retryable=False,
                                      tool=tool.get("name")), 500)
             except FileNotFoundError as exc:  # creds missing
-                return (err_envelope(ErrorCode.APS_UNAVAILABLE, str(exc), retryable=False,
-                                     tool=tool.get("name")),
+                # The message names broker-local paths (the credential file);
+                # log it, never return it.
+                print(f"[leaf-broker] live run unavailable: {exc}", file=sys.stderr)
+                return (err_envelope(ErrorCode.APS_UNAVAILABLE,
+                                     "APS credentials are unavailable in the broker",
+                                     retryable=False, tool=tool.get("name")),
                         DEFAULT_HTTP_STATUS[ErrorCode.APS_UNAVAILABLE])
             except Exception as exc:  # noqa: BLE001
-                return (err_envelope(ErrorCode.WORKITEM_FAILED, f"{type(exc).__name__}: {exc}",
+                # Class name only; full detail to the broker log (internal
+                # paths and state must not reach the envelope).
+                print(f"[leaf-broker] live run failed: {type(exc).__name__}: {exc}",
+                      file=sys.stderr)
+                return (err_envelope(ErrorCode.WORKITEM_FAILED,
+                                     f"live run failed: {type(exc).__name__}",
                                      retryable=True, tool=tool.get("name")),
                         DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED])
             finally:

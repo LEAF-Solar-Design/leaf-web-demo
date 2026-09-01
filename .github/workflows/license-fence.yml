@@ -33,6 +33,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+# The fence only reads the tree and reports a verdict; the GITHUB_TOKEN
+# needs nothing beyond checkout.
+permissions:
+  contents: read
+
 jobs:
   license-fence:
     name: license-fence

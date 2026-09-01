@@ -138,7 +138,12 @@ def test_ts_safebase_mirrors_the_canonical_pattern():
     Tying the Python pattern to the TS source string means a change to
     TENANT_ID_PATTERN that is not mirrored in the TS file fails this test.
     """
-    ts_path = os.path.join(_PROJECT_ROOT, "harness", "src", "ports", "impl",
+    # The module became a strangler shim on 2026-08-06 (mushy-code
+    # extraction); the ACTIVE regex lives in the vendored implementation the
+    # shim re-exports. Pin the vendored source — pinning the shim pinned
+    # nothing, and this test sat red from the move until 2026-08-31.
+    ts_path = os.path.join(_PROJECT_ROOT, "harness", "src", "vendor",
+                           "mushy-author", "ports", "impl",
                            "oauthGrantProvider.ts")
     src = open(ts_path, encoding="utf-8").read()
     expected_literal = "/" + tid.TENANT_ID_PATTERN + "/"  # /^[a-z0-9][a-z0-9_-]{0,62}$/

@@ -30,6 +30,11 @@ on:
       - 'platform/signing.py'
   workflow_dispatch: {}
 
+# The gate only reads the tree and runs tests against its own throwaway
+# Postgres service; the GITHUB_TOKEN needs nothing beyond checkout.
+permissions:
+  contents: read
+
 jobs:
   project-lifecycle:
     runs-on: ubuntu-latest

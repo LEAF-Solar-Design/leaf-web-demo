@@ -252,7 +252,11 @@ def _detect_op(desc: str) -> Tuple[str, str]:
 def _detect_layer(desc: str) -> str:
     d = desc
     # "layer Panels", "layer 'Panel Groups'", "on the Panels layer"
-    m = re.search(r"layer\s+['\"]?([A-Za-z0-9 _\-]+?)['\"]?(?:\s+(?:and|to|,|\.)|$)", d, re.IGNORECASE)
+    # Bounded capture ({1,64}), not `+?`: the space inside the class overlaps
+    # the `\s+` that follows, which is polynomial backtracking territory on a
+    # crafted description. 64 chars covers any real layer name; a longer one
+    # falls through to the later heuristics instead of blowing the matcher up.
+    m = re.search(r"layer\s+['\"]?([A-Za-z0-9 _\-]{1,64}?)['\"]?(?:\s+(?:and|to|,|\.)|$)", d, re.IGNORECASE)
     if m:
         return m.group(1).strip()
     m = re.search(r"on\s+(?:the\s+)?['\"]?([A-Za-z0-9_\-]+)['\"]?\s+layer", d, re.IGNORECASE)
@@ -268,6 +272,9 @@ def _detect_layer(desc: str) -> str:
 
 def _slugify(s: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
+    # Bounded: the slug becomes a filename and a registry key; an unbounded
+    # description must not mint an unbounded (or >255-byte) name.
+    s = s[:64].rstrip("-")
     return s or "authored-tool"
 
 

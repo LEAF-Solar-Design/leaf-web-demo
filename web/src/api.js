@@ -1082,8 +1082,13 @@ function customizationError(method, path, status, body) {
 }
 
 function requestId() {
-  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID()
-  return `leaf-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  // CSPRNG only: these ids key run-intent consumption, so they must not be
+  // guessable. Every supported runtime (browsers, node >= 19, jsdom) has
+  // webcrypto; there is deliberately no Math.random fallback.
+  const c = globalThis.crypto
+  if (c?.randomUUID) return c.randomUUID()
+  const bytes = c.getRandomValues(new Uint8Array(16))
+  return `leaf-${Date.now()}-${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`
 }
 
 const AUTHOR_PENDING = new Set(['accepted', 'submitted', 'queued', 'pending', 'running', 'authoring'])

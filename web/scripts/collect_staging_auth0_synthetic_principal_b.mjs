@@ -137,7 +137,7 @@ function parseSessionToken(token, principal) {
   const audiences = Array.isArray(claims.aud) ? claims.aud : [claims.aud]
   const subject = claims.sub
   const tenant = claims['https://leafdesign.ai/tenant_id']
-  if (header.alg !== 'RS256' || claims.iss !== `${AUTH0_ORIGIN}/` || !audiences.includes(AUDIENCE) || claims.azp !== CLIENT_ID || typeof subject !== 'string' || typeof tenant !== 'string' || sha256(subject) !== principal.user_sha256 || sha256(tenant) !== principal.tenant_sha256) fail('authenticated session is not exact principal B')
+  if (header.alg !== 'RS256' || claims.iss !== `${AUTH0_ORIGIN}/` || !audiences.some((aud) => aud === AUDIENCE) || claims.azp !== CLIENT_ID || typeof subject !== 'string' || typeof tenant !== 'string' || sha256(subject) !== principal.user_sha256 || sha256(tenant) !== principal.tenant_sha256) fail('authenticated session is not exact principal B')
   return { subjectSha256: sha256(subject), tenantSha256: sha256(tenant), tokenSha256: sha256(token) }
 }
 
@@ -287,7 +287,7 @@ export function validateSignedEnvelope(envelope, activation, config, signer, obs
   if (payload.schema !== PAYLOAD_SCHEMA || payload.plan_version !== PLAN_VERSION || payload.source_sha !== activation.receipt.source_sha || payload.key_id !== config.signingKeyId || payload.activation_receipt_sha256 !== activation.digest || payload.challenge_sha256 !== sha256(`leaf-staging-auth0-interactive:${activation.digest}`)) fail('interactive activation or challenge binding differs')
   for (const key of ['principal_b_email_sha256', 'principal_b_user_sha256', 'principal_b_tenant_sha256']) {
     requireHash(payload[key], key)
-    if (payload[key] !== activation.receipt.principals.B[key.replace('principal_b_', '').replace('tenant_', 'tenant_')]) fail('interactive principal B binding differs')
+    if (payload[key] !== activation.receipt.principals.B[key.replace('principal_b_', '')]) fail('interactive principal B binding differs')
   }
   requireHash(payload.nonce_sha256, 'interactive nonce')
   const activationAt = timestamp(activation.receipt.verified_at, 'activation time')
