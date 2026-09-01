@@ -877,7 +877,7 @@ footer .warn-txt { color: var(--status-warning); }
 
 /* scrollbars */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-thumb { background: #c8c6bc; border-radius: 5px; border: 2px solid var(--background); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; border: 2px solid var(--background); } /* tokenized: dark subtrees re-pin --border */
 
 /* responsive: collapse the rail, then the nav */
 @media (max-width: 1200px) {
