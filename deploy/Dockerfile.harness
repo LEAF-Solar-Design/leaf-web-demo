@@ -26,7 +26,7 @@ RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
       -e 's|http://deb.debian.org|https://deb.debian.org|g' \
       -e 's|http://security.debian.org|https://security.debian.org|g' {} + \
   && apt-get update \
-  && apt-get install -y --no-install-recommends git ca-certificates \
+  && apt-get install -y --no-install-recommends git ca-certificates libexpat1 \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
