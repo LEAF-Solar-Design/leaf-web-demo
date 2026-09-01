@@ -92,6 +92,11 @@ RUN npm run build && \
 
 # ---- serve stage: nginx on :8080 --------------------------------------------
 FROM nginx:alpine AS web
+# The moving nginx:alpine base can lag Alpine security packages. Refresh the
+# final image's package index and fail closed until both fixed libexpat CVEs
+# (CVE-2026-66046 and CVE-2026-76641) resolve to at least 2.8.4-r0.
+RUN apk add --no-cache 'libexpat>=2.8.4-r0' \
+  && test "$(apk version -t "$(apk info -e -v libexpat | sed 's/^libexpat-//')" '2.8.4-r0')" != '<'
 COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /web/dist /usr/share/nginx/html
 EXPOSE 8080
