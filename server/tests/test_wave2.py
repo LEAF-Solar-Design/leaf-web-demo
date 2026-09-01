@@ -304,10 +304,23 @@ def test_C_ops_tenants_shape_and_disabled_from_file(monkeypatch, tmp_path):
     _validate_envelope(body)
     rows = {t["tenant_id"]: t for t in body["tenants"]}
     assert set(rows) == {"A", "B"}
+    # The row carries the broker's AutoCAD columns AND the agent ledger's LLM
+    # columns: the scoreboard needs both, and only the server can reach both.
+    # No agent ledger exists in this fixture, so the LLM columns are a real,
+    # readable zero -- distinct from the null an UNREADABLE store produces
+    # (tests/test_ops_usage_scoreboard.py pins that difference).
     for t in body["tenants"]:
-        assert set(t.keys()) == {"tenant_id", "runs", "usd_est", "disabled"}
-    assert rows["A"] == {"tenant_id": "A", "runs": 2, "usd_est": 0.03, "disabled": False}
-    assert rows["B"] == {"tenant_id": "B", "runs": 1, "usd_est": 0.05, "disabled": True}
+        assert set(t.keys()) == {"tenant_id", "runs", "usd_est", "disabled",
+                                 "llm_turns", "llm_cost_tokens", "llm_usd_est"}
+    assert rows["A"] == {"tenant_id": "A", "runs": 2, "usd_est": 0.03, "disabled": False,
+                         "llm_turns": 0, "llm_cost_tokens": 0, "llm_usd_est": 0.0}
+    assert rows["B"] == {"tenant_id": "B", "runs": 1, "usd_est": 0.05, "disabled": True,
+                         "llm_turns": 0, "llm_cost_tokens": 0, "llm_usd_est": 0.0}
+    assert body["platform"] == {
+        "profiles": 2,
+        "autocad_backend": {"runs": 3, "usd_est": 0.08},
+        "llm": {"turns": 0, "cost_tokens": 0, "usd_est": 0.0},
+    }
 
 
 # =========================================================================== #

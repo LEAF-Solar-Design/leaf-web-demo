@@ -14,7 +14,10 @@ its internal ``LEAF_OPS_SECRET`` credential for trusted service callers. It is n
 the browser authority path. The value is presented in ``X-Ops-Secret`` and compared
 constant-time. The old plain ``X-Internal-Role: qa`` header grants nothing.
 
-    GET  /api/ops/tenants                  -> {tenants:[{tenant_id, runs, usd_est, disabled}]}
+    GET  /api/ops/tenants                  -> {tenants:[{tenant_id, runs, usd_est,
+                                              llm_turns, llm_cost_tokens, llm_usd_est,
+                                              disabled}],
+                                             platform:{profiles, autocad_backend, llm}}
     POST /api/ops/tenants/{tid}/disable     -> proxy broker disable; broker's §-enveloped ack
     POST /api/ops/tenants/{tid}/enable      -> proxy broker enable;  broker's §-enveloped ack
 
@@ -273,9 +276,79 @@ def _proxy(tid: str, action: str) -> JSONResponse:
 # --------------------------------------------------------------------------- #
 # routes
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# usage scoreboard join (M6) — LLM usage beside the broker's AutoCAD usage
+# --------------------------------------------------------------------------- #
+# ABSENT usage and ZERO usage are different facts. A tenant with no turns has
+# spent 0; a tenant whose ledger we could not read has spent an UNKNOWN amount.
+# The scoreboard renders those differently ("0" vs an em dash), so nothing in
+# this layer is allowed to collapse one into the other -- a confident zero over
+# a failed read is the one reading that inverts an operator's judgement.
+_LLM_ABSENT: Dict[str, Any] = {
+    "llm_turns": None, "llm_cost_tokens": None, "llm_usd_est": None}
+
+
+def _agent_usage_snapshot() -> Optional[Dict[str, Dict[str, Any]]]:
+    """Lifetime agent usage for EVERY tenant, read exactly once per listing.
+
+    ``agent_ledger.tenants_seen()`` makes its own full pass over the ledger, so
+    calling it inside the row loop would be an N+1 over the whole file. The one
+    call stays out here and every row indexes into the result: cost is one pass,
+    not one pass per tenant. Returns None (unknown) on any fault, never {}.
+    """
+    try:
+        seen = agent_ledger.tenants_seen()
+    except Exception:  # ledger unreadable / agent store down -> unknown
+        return None
+    return seen if isinstance(seen, dict) else None
+
+
+def _llm_row(snapshot: Optional[Dict[str, Dict[str, Any]]], tid: str) -> Dict[str, Any]:
+    """This tenant's lifetime LLM columns, or the absent triple."""
+    if snapshot is None:
+        return dict(_LLM_ABSENT)
+    agg = snapshot.get(tid) or {}
+    return {
+        "llm_turns": int(agg.get("turns") or 0),
+        "llm_cost_tokens": int(agg.get("cost_tokens") or 0),
+        "llm_usd_est": round(float(agg.get("usd_est") or 0.0), 6),
+    }
+
+
+def _platform_totals(rows: list, snapshot: Optional[Dict[str, Dict[str, Any]]]) -> Dict[str, Any]:
+    """Platform-scope lifetime totals -- NOT merely the sum of the rows above.
+
+    The AutoCAD total does sum the listing, because the listing IS the broker
+    authority's whole tenant set. The LLM total sums the WHOLE agent ledger: a
+    tenant can spend LLM turns without ever reaching the broker, so clipping to
+    the listed rows would silently under-report the platform. ``profiles`` is
+    the union of both authorities and may therefore exceed the row count, which
+    is why the drawer labels this scope "platform" and never "these rows".
+    """
+    cad_runs = sum(int(r.get("runs") or 0) for r in rows)
+    cad_usd = round(sum(float(r.get("usd_est") or 0.0) for r in rows), 6)
+    if snapshot is None:
+        return {
+            "profiles": len(rows),
+            "autocad_backend": {"runs": cad_runs, "usd_est": cad_usd},
+            "llm": {"turns": None, "cost_tokens": None, "usd_est": None},
+        }
+    aggs = list(snapshot.values())
+    return {
+        "profiles": len({str(r.get("tenant_id")) for r in rows} | set(snapshot)),
+        "autocad_backend": {"runs": cad_runs, "usd_est": cad_usd},
+        "llm": {
+            "turns": sum(int(a.get("turns") or 0) for a in aggs),
+            "cost_tokens": sum(int(a.get("cost_tokens") or 0) for a in aggs),
+            "usd_est": round(sum(float(a.get("usd_est") or 0.0) for a in aggs), 6),
+        },
+    }
+
+
 def _tenant_listing() -> Any:
     um = _usage_mod()
     disabled = _disabled_set()
+    agent_snapshot = _agent_usage_snapshot()
     postgres_mode = _broker_store_mode() == "postgres"
     if postgres_mode:
         store = _postgres_store()
@@ -296,8 +369,12 @@ def _tenant_listing() -> Any:
         else:  # da/usage.py somehow unavailable -> honest zeros, never a 500
             runs, usd_est = 0, 0.0
         rows.append({"tenant_id": tid, "runs": runs, "usd_est": usd_est,
-                     "disabled": tid in disabled})
-    return with_envelope_fields({"tenants": rows})
+                     "disabled": tid in disabled,
+                     **_llm_row(agent_snapshot, tid)})
+    return with_envelope_fields({
+        "tenants": rows,
+        "platform": _platform_totals(rows, agent_snapshot),
+    })
 
 
 @router.get("/api/ops/tenants")
