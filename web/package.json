@@ -36,7 +36,9 @@
     "check:proof-receipt": "node --test e2e/proofReceipt.test.mjs",
     "check:workbench-id": "node --test src/site/workbenchId.test.mjs",
     "test:unit": "vitest run",
-    "test:unit:watch": "vitest"
+    "test:unit:watch": "vitest",
+    "measure:cad-edit-closeout": "node scripts/measure_cad_edit_closeout.mjs",
+    "test:cad-edit-closeout-measurement": "node --test scripts/test_measure_cad_edit_closeout.mjs"
   },
   "dependencies": {
     "@auth0/auth0-spa-js": "^2.23.0",
