@@ -28,13 +28,15 @@ function cadEngineDevServer() {
         : undefined
       server.middlewares.use('/engine', (req, res, next) => {
         if (!pkgDir) { next(); return }
+        // The pkg is built with --out-name engine (see the Dockerfile's
+        // engine stage), so the served names ARE the on-disk names — no
+        // rename mapping, because the wasm's import module key is baked to
+        // the build-time name and a mapped alias cannot change it.
         const wanted = (req.url || '').split('?')[0].replace(/^\//, '')
-        const glue = readdirSync(pkgDir).find((f) => f.endsWith('_worker.js'))
-        const wasm = readdirSync(pkgDir).find((f) => f.endsWith('_bg.wasm'))
-        const file = wanted === 'engine.js' ? glue : wanted === 'engine_bg.wasm' ? wasm : null
-        if (!file) { next(); return }
+        if (wanted !== 'engine.js' && wanted !== 'engine_bg.wasm') { next(); return }
+        if (!existsSync(path.join(pkgDir, wanted))) { next(); return }
         res.setHeader('Content-Type', wanted.endsWith('.wasm') ? 'application/wasm' : 'text/javascript')
-        createReadStream(path.join(pkgDir, file)).pipe(res)
+        createReadStream(path.join(pkgDir, wanted)).pipe(res)
       })
     },
   }
