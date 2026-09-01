@@ -11,6 +11,43 @@ export function resolveCheckoutDrawingId({
   return drawingState?.drawing_id || requestedDrawingId || null
 }
 
+/**
+ * The checkout SCOPE for a surface, under the scope-reset contract
+ * (docs/convergence/ACCEPTANCE.md, binding: "checkout state MUST reset on
+ * tenant switch").
+ *
+ * A tenant switch is an auth-principal switch, and DrawingIdentityProvider
+ * answers it by voiding every mode's drawing identity (`resetAll`), so
+ * `identityDrawingId` goes null. The version chain does NOT reset with it:
+ * `drawingState` still names the PREVIOUS tenant's drawing, so a scope that
+ * read it alone would keep addressing that drawing — with the bearer
+ * capability the previous principal was issued. That is exactly "a lock held
+ * under tenant A gating and authorizing writes under tenant B".
+ *
+ * So a voided identity has NO checkout scope. Handing null to
+ * `controller.setScope` is what drops the capability, clears the checkout
+ * record and re-arms `unknown` — the ABANDON half of the answer.
+ *
+ * ABANDON, NOT RELEASE, deliberately. The capability was issued to the
+ * previous principal and this client no longer holds that principal's token,
+ * so a DELETE would either be refused (403) or be attributed to the NEW
+ * principal. The server caps every lease at MAX_CHECKOUT_TTL_S and treats an
+ * expired lock as free (see `isLegacyHolder` in checkoutIdentity.js), so the
+ * abandoned lease drains on its own and any editor may Take it meanwhile.
+ *
+ * This GATES a scope, it never widens one: while the identity is present the
+ * answer is `resolveCheckoutDrawingId`'s, unchanged, so each shell keeps the
+ * exact drawing it addressed before.
+ */
+export function checkoutScopeDrawingId({
+  identityDrawingId = null,
+  drawingState = null,
+  requestedDrawingId = null,
+} = {}) {
+  if (!identityDrawingId) return null
+  return resolveCheckoutDrawingId({ drawingState, requestedDrawingId })
+}
+
 export function deriveCheckout(
   checkout,
   holder,
@@ -20,8 +57,18 @@ export function deriveCheckout(
   hasCapability = false,
 ) {
   const lock = lockState({ mock, checkout, unknown, ownHolder: holder, nowMs: now })
-  // A matching public holder label is not proof. After a reload or copied
-  // sessionStorage, only the server-issued capability distinguishes the owner.
+  // THE UNPROVEN-OWN-LOCK CORRECTION. `holder` is a PUBLIC label the manifest
+  // hands to every reader, so a matching label is not proof of ownership: a
+  // reload, a duplicated tab (browsers copy sessionStorage) or a redemption
+  // this runtime lost all leave a client whose stored holder id equals the
+  // lock's holder while it holds no capability at all. Only the server-issued
+  // bearer capability distinguishes the owner.
+  //
+  // So a lock that LOOKS like ours but has no capability behind it is treated
+  // as somebody else's: writes stay suppressed, no Release is offered for a
+  // lease we cannot prove, and a Take is offered so the server can re-issue a
+  // capability we can actually use. Both shells derive this here — the console
+  // kept a hand-rolled twin of it until W2c and must never fork it again.
   const unprovenOwnLock = lock.heldByUs && !hasCapability ? checkout : null
   return {
     checkout,
