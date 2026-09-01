@@ -34,6 +34,7 @@ import IosSurface from './ios/IosSurface.jsx'
 import { ENV_IOS_SURFACE } from './ios/flag.js'
 import CadEditSurface from './cadedit/CadEditSurface.jsx'
 import { markInstant } from './lib/instant.js'
+import { agentBannerFor } from './lib/agentBanner.js'
 import { ENV_CAD_EDIT } from './cadedit/flag.js'
 import {
   productSurfaceStates,
@@ -71,7 +72,7 @@ import { TOUR_STEPS } from './demo/tourScript.js'
 import { editFixture, pendingEditDemo, editFixtureV2 } from './mock/editFixture.js'
 import ConversePanel from './components/ConversePanel.jsx'
 import {
-  THRESHOLDS, classifyAgentError, fetchRegistry, fetchSkills, listPendingApprovals,
+  THRESHOLDS, fetchRegistry, fetchSkills, listPendingApprovals,
 } from './converse.js'
 import { useWorkspaceControllers } from './controllers/WorkspaceControllerProvider.jsx'
 import { entitlementAllowed } from './controllers/platform/index.js'
@@ -155,19 +156,6 @@ const devControls = (() => {
 // A self-minted author-authority turn is reusable for this long — a wide
 // margin under the server's TURN_MAX_S default of 300s (server/turn_runner.py).
 const AUTHOR_AUTHORITY_TTL_MS = 120_000
-
-// Calm degraded copy for the agent tier (two-tier dispatch, wire §11). The
-// deterministic path is never blocked by any of these — the banner just says
-// so honestly. Keyed off classifyAgentError, never message text.
-const agentBannerFor = (e) => {
-  const kind = classifyAgentError(e)
-  if (kind === 'quota') return { kind, message: 'AI paused — your built tools keep working.' }
-  if (kind === 'grant') return { kind, message: 'Chat needs a linked Claude account.' }
-  if (kind === 'entitlement') return { kind, message: 'Chat isn’t included in your plan — your built tools keep working.' }
-  if (kind === 'busy') return { kind, message: 'The assistant is mid-turn — routed deterministically instead.' }
-  if (kind === 'rate_limited') return { kind, message: 'AI rate-limited — routed deterministically; retry shortly.' }
-  return { kind: 'unreachable', message: 'AI assistant unavailable — routed deterministically.' }
-}
 
 // Collapsible left-rail section (keeps the classic catalog reachable but
 // secondary to the prompt box — the primary path).

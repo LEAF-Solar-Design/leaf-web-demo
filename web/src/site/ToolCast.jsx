@@ -83,7 +83,7 @@ import {
   requestIosShipLaunch,
 } from './iosShipReadiness.js'
 import { authConfigured, isSignedIn, login } from '../auth.js'
-import { classifyAgentError } from '../converse.js'
+import { agentBannerFor as agentBannerForKind, OPERATOR_AGENT_BANNER_COPY } from '../lib/agentBanner.js'
 import { claimHolderId, getSessionHolderId } from '../checkoutIdentity.js'
 import DemoTour from '../demo/DemoTour.jsx'
 import DemoConversationPanel, { demoReplyFor } from '../demo/DemoConversationPanel.jsx'
@@ -169,16 +169,6 @@ const UNIFIED_TOUR_STEPS = [
     action: 'exit',
   },
 ]
-
-function agentBannerFor(error) {
-  const kind = classifyAgentError(error)
-  if (kind === 'quota') return { kind, message: 'AI paused. Your built tools keep working.' }
-  if (kind === 'grant') return { kind, message: 'Chat needs a linked Claude account.' }
-  if (kind === 'entitlement') return { kind, message: 'Chat is not included in your plan. Your built tools keep working.' }
-  if (kind === 'busy') return { kind, message: 'The assistant is mid-turn. The catalog route is still available.' }
-  if (kind === 'rate_limited') return { kind, message: 'AI is rate-limited. The catalog route is still available; retry shortly.' }
-  return { kind: 'unreachable', message: 'AI assistant unavailable. The catalog route is still available.' }
-}
 
 function phaseLabel(phase) {
   if (phase === 'empty') return 'No drawing yet'
@@ -355,7 +345,7 @@ export default function ToolCast({
       setPhase('proposal')
       return response
     },
-    agentBannerFor,
+    agentBannerFor: (error) => agentBannerForKind(error, { copy: OPERATOR_AGENT_BANNER_COPY }),
   }), [requireAuth])
 
   useEffect(() => {
