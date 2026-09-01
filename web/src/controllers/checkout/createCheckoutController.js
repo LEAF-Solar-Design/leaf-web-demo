@@ -1,4 +1,4 @@
-import { lockState } from '../../checkoutIdentity.js'
+import { lockState, normalizeCheckout } from '../../checkoutIdentity.js'
 
 export function storeDrawingIdForSource(drawingSource) {
   return drawingSource === 'rooftop_demo' ? 'demo' : drawingSource
@@ -143,13 +143,16 @@ export function createCheckoutController({ mock = false, drawingId = null, holde
     try {
       const manifest = await services.loadVersions(drawing)
       if (disposed || seq !== refreshSeq || drawing !== state.drawingId) return null
+      // Normalized, because `checkout: {}` is a truthy way of saying "nobody
+      // holds it" and this is the one place the server's answer enters state.
+      const live = normalizeCheckout(manifest?.checkout)
       publish({
-        checkout: manifest?.checkout || null,
+        checkout: live,
         error: null,
         unknown: false,
         readFailed: false,
       })
-      return manifest?.checkout || null
+      return live
     } catch (error) {
       if (disposed || seq !== refreshSeq || drawing !== state.drawingId) return null
       publish({
