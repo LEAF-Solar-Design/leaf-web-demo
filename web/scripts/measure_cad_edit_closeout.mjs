@@ -21,12 +21,32 @@ import { gzipSync } from 'node:zlib'
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const WEB_ROOT = path.resolve(HERE, '..')
 const REPO_ROOT = path.resolve(WEB_ROOT, '..')
-const FIXTURE = path.join(REPO_ROOT, 'vendor', 'acadrust-worker', 'fixtures', 'one_line.dxf')
+const ENGINE_ROOT = discoverEngineRoot()
+const FIXTURE = path.join(ENGINE_ROOT, 'fixtures', 'one_line.dxf')
 const PERF_HTML = path.join(WEB_ROOT, 'e2e', 'fixtures', 'cad-edit-perf.html')
 const SAMPLES = 10
 const P95_BUDGET_MS = 2_000
 const DELTA_BUDGET_BYTES = 5_120
-const WASM_PREREQUISITE = '$env:RUSTFLAGS=\'--cfg getrandom_backend="wasm_js"\'; Push-Location vendor/acadrust-worker; wasm-pack build --release --target web . --out-dir pkg-web --out-name engine; Pop-Location'
+const WASM_PREREQUISITE = 'run wasm-pack build --release --target web . --out-dir pkg-web --out-name engine from the vendored browser-worker package directory'
+
+function discoverEngineRoot() {
+  const vendorRoot = path.join(REPO_ROOT, 'vendor')
+  const candidates = readdirSync(vendorRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(vendorRoot, entry.name))
+    .filter((candidate) => (
+      existsSync(path.join(candidate, 'worker-browser.mjs'))
+      && existsSync(path.join(candidate, 'fixtures', 'one_line.dxf'))
+    ))
+  if (candidates.length !== 1) {
+    throw new Error(`expected exactly one vendored browser-worker engine, found ${candidates.length}`)
+  }
+  return candidates[0]
+}
+
+function repoPath(candidate) {
+  return path.relative(REPO_ROOT, candidate).split(path.sep).join('/')
+}
 
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex')
@@ -171,7 +191,7 @@ function build(flag, outDir) {
 }
 
 function enginePackage() {
-  const pkgDir = path.join(REPO_ROOT, 'vendor', 'acadrust-worker', 'pkg-web')
+  const pkgDir = path.join(ENGINE_ROOT, 'pkg-web')
   if (!existsSync(pkgDir)) {
     throw new Error(`prerequisite missing: ${WASM_PREREQUISITE}`)
   }
@@ -185,7 +205,7 @@ function enginePackage() {
     pkgDir,
     wasmName,
     receipt: {
-      file: `vendor/acadrust-worker/pkg-web/${wasmName}`,
+      file: repoPath(path.join(pkgDir, wasmName)),
       bytes: bytes.length,
       gzip_bytes: gzipSync(bytes, { mtime: 0 }).length,
       sha256: sha256(bytes),
@@ -347,7 +367,7 @@ export async function main() {
       schema: 'leaf.cad-edit-f3-performance.v1',
       source_sha: gitSha(),
       fixture: {
-        path: 'vendor/acadrust-worker/fixtures/one_line.dxf',
+        path: repoPath(FIXTURE),
         bytes: fixtureBytes.length,
         sha256: sha256(fixtureBytes),
       },
