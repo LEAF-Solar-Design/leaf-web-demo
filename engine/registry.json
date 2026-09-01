@@ -149,6 +149,28 @@
       "provenance": { "author": "site-demo-lane", "created": "2026-07-20T00:00:00Z" }
     },
     {
+      "name": "timber-cutlist-preflight",
+      "version": "1.0.0",
+      "description": "Preview what timber-cutlist will read before the paid run: which layers follow Material_W x H (counted) and which do not, the view frames and labels it detects, segment counts per layer and view. Local, no cloud engine.",
+      "kind": "script",
+      "engine_op": "timber_cutlist_preflight",
+      "entry": "builtins/timber_cutlist_preflight.py",
+      "local_only": true,
+      "params": { "type": "object", "properties": {}, "required": [] },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "table": { "type": "object" },
+          "views": { "type": "array" },
+          "counted_segments": { "type": "integer" },
+          "view_count": { "type": "integer" },
+          "warnings": { "type": "array" }
+        }
+      },
+      "capabilities": ["drawing.read"],
+      "provenance": { "author": "cutlists-lane", "created": "2026-09-01T00:00:00Z", "source": "mirror of CutLists.Core LayerSpec/ViewDetector; cross-checked in server/tests/test_timber_cutlist_preflight.py" }
+    },
+    {
       "name": "timber-cutlist",
       "version": "1.0.0",
       "description": "Timber cut list from layer-coded plans and elevations (Material_W x H layers): member lengths and counts per view, connections, running metres, CSV and PDF.",

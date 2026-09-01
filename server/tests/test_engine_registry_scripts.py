@@ -50,9 +50,12 @@ def _live_activity_tools():
     public demo tool that is contractually submitted with APS_LIVE=0 and runs
     its tracked Python builtin. Neither can use a live Activity.
     """
+    # ``local_only`` (2026-09-01) identifies a tool whose implementation IS its local
+    # Python entry by design (timber-cutlist-preflight): it never takes the Activity
+    # path and the loader does not mark its runs degraded (tool_loader.run_tool_dynamic).
     return [
         tool for tool in _registry_tools()
-        if not tool.get("canonical_only") and not tool.get("offline_only")
+        if not tool.get("canonical_only") and not tool.get("offline_only") and not tool.get("local_only")
     ]
 
 

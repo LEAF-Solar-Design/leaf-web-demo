@@ -50,7 +50,9 @@
     "inverter-placement": "placement",
     "combiner-placement": "placement",
     "timber-cutlist": "quantities",
-    "leaf_cutlist": "quantities"
+    "leaf_cutlist": "quantities",
+    "timber-cutlist-preflight": "quantities",
+    "timber_cutlist_preflight": "quantities"
   },
   "filter_rules": {
     "internal_flag": "internal",

@@ -585,6 +585,8 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_appbundle_activity_spec.py"), 8),
         Suite("server-dxf-intake-lines-text", "server tests/test_dxf_intake_lines_text.py",
               "pytest", SERVER, _py_pytest("tests/test_dxf_intake_lines_text.py"), 4),
+        Suite("server-timber-cutlist-preflight", "server tests/test_timber_cutlist_preflight.py",
+              "pytest", SERVER, _py_pytest("tests/test_timber_cutlist_preflight.py"), 4),
         # issue #29 red-suite registry (https://github.com/Evan-Haug/leaf-web-demo/issues/29):
         # all six now fixed-then-registered. test_sessions_e2e's measured "7 errors"
         # were purely its module `harness` fixture failing `npm run build` in a
