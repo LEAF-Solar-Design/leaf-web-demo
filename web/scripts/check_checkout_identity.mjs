@@ -553,10 +553,20 @@ async function runTabs(ages, seedId) {
   } else pass('(g) heldByUs is false for another session (the original defect stays closed)')
 }
 
-// --- the App must delegate to lockState and start the claim -------------------
+// --- ONE controller, and no shell may re-derive the decision (W2c) -----------
+//
+// Until W2c the console owned a hand-rolled twin of the whole single-writer
+// block, and the pins below were source greps for the twin's identifiers in
+// App.jsx. The twin is gone: BOTH shells consume
+// controllers/checkout/useCheckoutController.js, so the pins now say
+// "delegates" (the shells) and "behaves" (the controller, exercised for real).
 {
   const fs = await import('node:fs/promises')
   const app = await fs.readFile(new URL('../src/App.jsx', import.meta.url), 'utf8')
+  const toolCast = await fs.readFile(new URL('../src/site/ToolCast.jsx', import.meta.url), 'utf8')
+  const checkoutHook = await fs.readFile(new URL('../src/controllers/checkout/useCheckoutController.js', import.meta.url), 'utf8')
+  const checkoutStore = await fs.readFile(new URL('../src/controllers/checkout/createCheckoutController.js', import.meta.url), 'utf8')
+  const shells = [['App.jsx', app], ['ToolCast.jsx', toolCast]]
 
   if (/const\s+ownHolder\s*=\s*tenant\s*\|\|/.test(app)) {
     fail('App.jsx still derives ownHolder from the tenant')
@@ -564,30 +574,69 @@ async function runTabs(ages, seedId) {
     fail('App.jsx does not compute ownHolder from getSessionHolderId()')
   } else pass('App.jsx computes ownHolder from getSessionHolderId(), not the tenant')
 
-  // Wiring assertions only. The BEHAVIOUR is covered by (d)-(g) above; these just
-  // confirm App.jsx routes through the tested code instead of re-deriving it.
-  if (!/lockState\(/.test(app)) fail('App.jsx does not use lockState, so the tested decision is bypassed')
-  else pass('App.jsx delegates the write-lock decision to lockState')
+  // EXACTLY ONE mount per shell. SiteRoot renders scene 'app' (App) and scenes
+  // site|tool (StageScene -> ToolCast) in mutually exclusive arms of one
+  // ternary and mounts none itself, so one mount per shell is one live
+  // instance per page load. Two would be two capabilities, two holder ids and
+  // two authorities over one lock.
+  for (const [name, source] of shells) {
+    const mounts = (source.match(/useCheckoutController\(/g) || []).length
+    if (mounts !== 1) fail(`${name} mounts ${mounts} checkout controllers, not exactly 1`)
+    else pass(`${name} mounts exactly one checkout controller`)
+  }
 
-  if (!/claimHolderId\(/.test(app)) fail('App.jsx never calls claimHolderId, so duplicate tabs go undetected')
-  else pass('App.jsx starts the holder claim')
+  // The DECISION and the PROTOCOL live in one place. A shell that still names
+  // any of these is re-deriving what the controller already owns — which is
+  // precisely the drift W2c retired.
+  const controllerOwned = [
+    'lockState(',
+    'claimHolderId(',
+    'holdCheckoutReloadAuthority(',
+    'bootstrapCheckoutReloadHandoff(',
+    'stageCheckoutReloadHandoff(',
+    'remintSessionHolderId(',
+  ]
+  for (const [name, source] of shells) {
+    const stripped = source.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '')
+    const forked = controllerOwned.filter((token) => stripped.includes(token))
+    if (forked.length) fail(`${name} re-derives controller-owned checkout protocol: ${forked.join(', ')}`)
+    else pass(`${name} delegates the whole write-lock decision and protocol to the controller`)
+  }
+  if (!/lockState\(/.test(checkoutStore)) {
+    fail('createCheckoutController does not use lockState, so the tested decision is bypassed')
+  } else pass('createCheckoutController delegates the write-lock decision to lockState')
 
-  if (!/bootstrapCheckoutReloadHandoff\(/.test(app) || !/stageCheckoutReloadHandoff\(/.test(app)) {
-    fail('App.jsx does not wire the one-use checkout reload handoff')
-  } else if (!/addEventListener\(['"]beforeunload['"]/.test(app)) {
-    fail('App.jsx does not stage checkout authority only at the reload lifecycle edge')
-  } else pass('App.jsx wires a one-use checkout capability handoff at beforeunload')
+  for (const required of [
+    'bootstrapCheckoutReloadHandoff(',
+    'holdCheckoutReloadAuthority(',
+    'stageCheckoutReloadHandoff(',
+    'claimHolderId(',
+    'remintSessionHolderId(',
+    'controller.restoreCapability(',
+    'secureTakenCheckoutAuthority(',
+  ]) {
+    if (!checkoutHook.includes(required)) fail(`the shared checkout hook is missing ${required}`)
+  }
+  if (!/addEventListener\(['"]beforeunload['"]/.test(checkoutHook)) {
+    fail('the shared checkout hook does not stage authority only at the reload lifecycle edge')
+  } else pass('the shared checkout hook wires a one-use checkout capability handoff at beforeunload')
+  if (/useRef\([^)]*\?\.capability/.test(checkoutHook)) {
+    fail('the shared checkout hook installs the provisional handoff capability before lock ownership')
+  } else pass('the shared checkout hook installs reload authority only inside an exclusive Web Lock')
+
+  // The claim must not answer `held` while this runtime is unloading: the
+  // reloading runtime would then remint away from the holder its staged
+  // handoff names, and the redemption is lost.
+  const stageBody = (checkoutHook.match(/const stage = \(\) => \{[\s\S]*?\n    \}/) || [''])[0]
+  if (stageBody.indexOf('claimRef.current?.stop()') < 0 ||
+      stageBody.indexOf('claimRef.current?.stop()') > stageBody.indexOf('stageCheckoutReloadHandoff(')) {
+    fail('the reload handoff is staged while the claim is still answering `held`')
+  } else pass('the claim stops before the reload handoff is staged')
 
   const identitySource = await fs.readFile(new URL('../src/checkoutIdentity.js', import.meta.url), 'utf8')
   if (!/runtimeReloadHandoff[\s\S]*bootstrapCheckoutReloadHandoff/.test(identitySource)) {
     fail('reload handoff consumption is not cached across speculative React renders')
   } else pass('reload handoff consumption is cached for the whole JavaScript runtime')
-
-  if (!/holdCheckoutReloadAuthority\(/.test(app)) {
-    fail('App.jsx installs a reload handoff without an exclusive Web Lock')
-  } else if (/useRef\(reloadHandoffRef\.current\?\.capability/.test(app)) {
-    fail('App.jsx installs the provisional handoff capability before lock ownership')
-  } else pass('App.jsx installs reload authority only inside an exclusive Web Lock')
 
   const authSource = await fs.readFile(new URL('../src/auth.js', import.meta.url), 'utf8')
   const loginBody = (authSource.match(/export async function login\(\)[\s\S]*?\n}/) || [null])[0]
@@ -607,122 +656,210 @@ async function runTabs(ages, seedId) {
     fail('Auth0 error callback cannot preserve its checkout fallback for a clean reload')
   } else pass('Auth0 login marks only its intentional redirect and clears a failed launch')
 
-  const authLoginBody = (app.match(/const onLogin = useCallback\(async[\s\S]*?\n  }, \[[^\]]*\]\)/) || [null])[0]
-  if (!authLoginBody) {
-    fail('App.jsx does not define the checkout-aware Auth0 login path')
-  } else if (authLoginBody.indexOf('releaseCheckout(') < 0 ||
-             authLoginBody.indexOf('releaseCheckout(') > authLoginBody.indexOf('await login()')) {
-    fail('App.jsx leaves checkout authority live before Auth0 login')
-  } else if (authLoginBody.indexOf('setCheckout(null)') < authLoginBody.indexOf('releaseCheckout(') ||
-             authLoginBody.indexOf('setCheckout(null)') > authLoginBody.indexOf('await login()') ||
-             authLoginBody.indexOf('setCheckoutUnknown(false)') < authLoginBody.indexOf('releaseCheckout(') ||
-             authLoginBody.indexOf('setCheckoutUnknown(false)') > authLoginBody.indexOf('await login()') ||
-             authLoginBody.indexOf('setCheckoutReadFailed(false)') < authLoginBody.indexOf('releaseCheckout(') ||
-             authLoginBody.indexOf('setCheckoutReadFailed(false)') > authLoginBody.indexOf('await login()')) {
-    fail('App.jsx does not converge released checkout state before Auth0 login can reject')
-  } else pass('App.jsx releases checkout authority before Auth0 and keeps the return handoff as fallback')
-
-  const checkoutHook = await fs.readFile(new URL('../src/controllers/checkout/useCheckoutController.js', import.meta.url), 'utf8')
-  for (const required of [
-    'bootstrapCheckoutReloadHandoff(',
-    'holdCheckoutReloadAuthority(',
-    'stageCheckoutReloadHandoff(',
-    'controller.restoreCapability(',
-    'secureTakenCheckoutAuthority(',
-  ]) {
-    if (!checkoutHook.includes(required)) fail(`ToolCast checkout hook is missing ${required}`)
-  }
-  const toolCast = await fs.readFile(new URL('../src/site/ToolCast.jsx', import.meta.url), 'utf8')
-  const toolLoginBody = (toolCast.match(/const signInWithCheckoutRelease = useCallback\(async[\s\S]*?\n  }, \[[^\]]*\]\)/) || [null])[0]
-  if (!toolLoginBody || toolLoginBody.indexOf('checkout.actions.release()') < 0 ||
-      toolLoginBody.indexOf('checkout.actions.release()') > toolLoginBody.indexOf('await login()')) {
-    fail('/try does not release checkout authority before Auth0 login')
-  } else pass('/try releases checkout authority first and wires the guarded callback-reload fallback')
-
-  // CAPTURE the initial value instead of testing whether `useState(true)` appears
-  // anywhere. The loose form matched an unrelated `tourLanded` hook, so flipping
-  // checkoutUnknown back to false still passed the check.
-  const initDecl = app.match(/\[checkoutUnknown,\s*setCheckoutUnknown\]\s*=\s*useState\(([^)]*)\)/)
-  if (!initDecl) {
-    fail('could not find the checkoutUnknown useState declaration')
-  } else if (initDecl[1].trim() !== 'true') {
-    fail(`checkoutUnknown starts ${initDecl[1].trim()}, not true: writes are enabled while the first read is in flight`)
-  } else pass('checkoutUnknown starts true (unknown until answered)')
-
-  // Everything below is scoped to the loadCheckout BODY, not the whole file. A
-  // global count would be satisfied by guards living anywhere in App.jsx, which
-  // is the kind of drift that makes an oracle stop meaning what it says.
-  const loadBody = (app.match(/const loadCheckout = useCallback\(async[\s\S]*?\n  \}, \[/) || [null])[0]
-  if (!loadBody) {
-    fail('could not locate the loadCheckout body; the assertions below cannot be scoped')
-  } else {
-    // Both response comparisons must survive, not merely the increment. The loose
-    // form matched `++checkoutSeqRef.current` on its own, so deleting every guard
-    // still passed.
-    const seqGuards = (loadBody.match(/seq\s*!==\s*checkoutSeqRef\.current/g) || []).length
-    if (seqGuards < 2) {
-      fail(`only ${seqGuards} sequence comparison(s) INSIDE loadCheckout; the success and failure paths each need one`)
-    } else pass(`loadCheckout compares a sequence guard on both paths (${seqGuards} found)`)
-
-    // Unknown must be CLEARED on the SUCCESS path, or a healthy read leaves
-    // writes paused forever and the fail-closed design becomes a permanent lock.
-    // Scoped to AFTER the await on purpose: a body-wide search matched the mock
-    // early-return branch, which also clears it, so deleting the success-path
-    // call still passed. Verified by mutation.
-    const iAwaitClear = loadBody.indexOf('await getDrawingVersions')
-    const afterAwait = iAwaitClear === -1 ? '' : loadBody.slice(iAwaitClear)
-    if (!/setCheckoutUnknown\(false\)/.test(afterAwait)) {
-      fail('loadCheckout never clears checkoutUnknown after a successful read: writes would stay paused forever')
-    } else pass('loadCheckout clears checkoutUnknown on the success path (after the await)')
-
-    // And SET on failure, which is the fail-closed half.
-    if (!/catch[\s\S]*setCheckoutUnknown\(true\)/.test(loadBody)) {
-      fail('loadCheckout does not mark unknown in its catch: a failed read would read as "no lock"')
-    } else pass('loadCheckout marks unknown when the read fails')
+  // ONE sign-in path across both shells: end the lease first, then leave the
+  // origin. The console used to converge its rendered lock state by hand here;
+  // the controller's release re-reads /versions instead, so the control shows
+  // the server's answer and a read that 401s on the way out fails CLOSED.
+  const signInBodies = [
+    ['App.jsx', (app.match(/const onLogin = useCallback\(async[\s\S]*?\n  \}, \[[^\]]*\]\)/) || [null])[0]],
+    ['ToolCast.jsx', (toolCast.match(/const signInWithCheckoutRelease = useCallback\(async[\s\S]*?\n  \}, \[[^\]]*\]\)/) || [null])[0]],
+  ]
+  for (const [name, body] of signInBodies) {
+    if (!body) fail(`${name} does not define the checkout-aware Auth0 login path`)
+    else if (body.indexOf('checkout.actions.release()') < 0 ||
+             body.indexOf('checkout.actions.release()') > body.indexOf('await login()')) {
+      fail(`${name} leaves checkout authority live before Auth0 login`)
+    } else pass(`${name} releases checkout authority through the controller before Auth0`)
   }
 
-  // The decision must actually reach the control, or lockState is computed and
-  // thrown away. Removing the prop previously passed silently.
-  for (const prop of ['canTake={lock.canTake}', 'unknown={checkoutUnknown}']) {
-    if (!app.includes(prop)) {
-      fail(`CheckoutControls is not given ${prop}: the tested decision never reaches the UI`)
-    } else pass(`CheckoutControls receives ${prop}`)
-  }
-
-  // ORDER matters: the read must go unknown BEFORE awaiting, or the previous
-  // drawing's answer stays authoritative for the whole new request and a write
-  // can be submitted before any lock answer exists for the current drawing.
-  const bodyMatch = app.match(/const loadCheckout = useCallback\(async[\s\S]*?\n  \}, \[/)
-  if (!bodyMatch) {
-    fail('could not locate the loadCheckout body')
-  } else {
-    const b = bodyMatch[0]
-    const iUnknown = b.indexOf('setCheckoutUnknown(true)')
-    const iAwait = b.indexOf('await getDrawingVersions')
-    if (iUnknown === -1) {
-      fail('loadCheckout never marks the lock unknown, so a drawing change keeps the previous answer authoritative')
-    } else if (iAwait === -1) {
-      fail('could not find the awaited read inside loadCheckout')
-    } else if (iUnknown > iAwait) {
-      fail('loadCheckout marks unknown only AFTER awaiting: writes stay enabled during the first read for a new drawing')
-    } else {
-      pass('loadCheckout marks the lock unknown BEFORE awaiting (no write-enabled window on drawing change)')
+  // The decision must actually reach the control on BOTH surfaces, or it is
+  // computed and thrown away. Removing a prop previously passed silently.
+  const controlProps = [
+    ['App.jsx', app, ['canTake={lock.canTake}', 'unknown={lock.unknown}', 'lockedByOther={otherHeldCheckout}']],
+    ['ToolCast.jsx', toolCast, ['canTake={checkout.canTake}', 'unknown={checkout.unknown}', 'lockedByOther={checkout.lockedByOther}']],
+  ]
+  for (const [name, source, props] of controlProps) {
+    for (const prop of props) {
+      if (!source.includes(prop)) fail(`${name}: CheckoutControls is not given ${prop}`)
+      else pass(`${name}: CheckoutControls receives ${prop}`)
     }
   }
 
-  // The Take offer must not depend on the clock. Gating it on `stale` meant a
-  // clock running slow judged an elapsed lease live, hid the button, and left the
-  // user unable to either write or take.
-  if (/canTake:\s*!!otherHeld\s*&&/.test(await fs.readFile(new URL('../src/checkoutIdentity.js', import.meta.url), 'utf8'))) {
-    fail('canTake is conditioned on more than holder presence: a skewed clock can hide the Take and wedge the UI')
-  } else pass('canTake depends only on another session holding the lock, not on our clock')
+  // The scope-reset contract reaches the shells as DATA, not as a comment.
+  for (const [name, source] of shells) {
+    if (!/checkoutScopeDrawingId\(\{[\s\S]{0,200}identityDrawingId:/.test(source)) {
+      fail(`${name} scopes its checkout without the drawing identity: a tenant switch would keep the previous tenant's lock`)
+    } else pass(`${name} scopes its checkout on the drawing identity (tenant switch voids it)`)
+  }
+}
 
-  // Purity: node imported it, but be explicit so a future edit cannot sneak a
-  // bundler-only dependency into the module (mirrors check_errors.mjs).
-  const src = await fs.readFile(new URL('../src/checkoutIdentity.js', import.meta.url), 'utf8')
-  if (/import\.meta/.test(src)) fail('checkoutIdentity.js references import.meta')
-  if (/from ['"]react/.test(src)) fail('checkoutIdentity.js imports React')
-  if (/\.json['"]/.test(src)) fail('checkoutIdentity.js imports JSON')
+// --- the controller BEHAVES, exercised against the real store ----------------
+// These replace the source greps that used to scope themselves to App.jsx's
+// `loadCheckout` body. A grep for a guard is satisfied by an unreachable one;
+// each case below drives createCheckoutController for real.
+{
+  const { createCheckoutController, deriveCheckout, checkoutScopeDrawingId } =
+    await import('../src/controllers/checkout/createCheckoutController.js')
+  const idleServices = {
+    loadVersions: async () => ({ checkout: null }),
+    take: async () => null,
+    release: async () => null,
+  }
+
+  // Unknown until answered. The old pin captured `useState(true)` out of
+  // App.jsx; this asserts the STATE a first render actually sees.
+  {
+    const controller = createCheckoutController({ drawingId: 'demo', holder: 'sess-me', services: idleServices })
+    const first = controller.getSnapshot()
+    if (first.unknown !== true || first.writeLocked !== true) {
+      fail(`the first snapshot is not fail-closed -> ${JSON.stringify({ unknown: first.unknown, writeLocked: first.writeLocked })}`)
+    } else pass('the checkout starts unknown, so writes are suppressed while the first read is in flight')
+    const mocked = createCheckoutController({ mock: true, drawingId: 'demo', holder: 'sess-me', services: idleServices })
+    if (mocked.getSnapshot().unknown !== false || mocked.getSnapshot().writeLocked !== false) {
+      fail('mock mode starts locked; the demo holds no locks at all')
+    } else pass('mock mode starts with no lock and no unknown')
+  }
+
+  // A read goes unknown BEFORE awaiting, or the previous drawing's answer stays
+  // authoritative for the whole new request and a write can be submitted before
+  // any answer exists for the current drawing.
+  {
+    let releaseRead = null
+    const gate = new Promise((resolve) => { releaseRead = resolve })
+    const controller = createCheckoutController({
+      drawingId: 'demo',
+      holder: 'sess-me',
+      services: { ...idleServices, loadVersions: async () => { await gate; return { checkout: null } } },
+    })
+    // Seed an answered state first, so "unknown" below can only come from the
+    // read itself and not from the initial value.
+    releaseRead({ checkout: null })
+    await controller.refresh()
+    if (controller.getSnapshot().unknown !== false) fail('an answered read did not clear unknown')
+    let inFlight = null
+    const slow = new Promise((resolve) => { inFlight = resolve })
+    const controller2 = createCheckoutController({
+      drawingId: 'demo',
+      holder: 'sess-me',
+      services: { ...idleServices, loadVersions: () => slow },
+    })
+    // Not awaited: the read is still IN FLIGHT, which is the whole point.
+    controller2.refresh()
+    await Promise.resolve()
+    if (controller2.getSnapshot().unknown !== true || controller2.getSnapshot().writeLocked !== true) {
+      fail('a read in flight left writes enabled')
+    } else pass('a read marks the lock unknown BEFORE awaiting (no write-enabled window on drawing change)')
+    inFlight({ checkout: null })
+  }
+
+  // The success path clears unknown, or the fail-closed design becomes a
+  // permanent lock; the failure path re-arms it AND says the read failed.
+  {
+    const ok = createCheckoutController({ drawingId: 'demo', holder: 'sess-me', services: idleServices })
+    await ok.refresh()
+    if (ok.getSnapshot().unknown !== false || ok.getSnapshot().writeLocked !== false) {
+      fail('a successful read left writes paused forever')
+    } else pass('a successful read clears unknown')
+    const bad = createCheckoutController({
+      drawingId: 'demo',
+      holder: 'sess-me',
+      services: { ...idleServices, loadVersions: async () => { throw new Error('unavailable') } },
+    })
+    await bad.refresh()
+    const snapshot = bad.getSnapshot()
+    if (snapshot.unknown !== true || snapshot.readFailed !== true || snapshot.writeLocked !== true) {
+      fail(`a failed read did not fail closed -> ${JSON.stringify(snapshot)}`)
+    } else pass('a failed read marks unknown + readFailed and suppresses writes')
+  }
+
+  // The sequence fence: a stale response for the PREVIOUS drawing must never
+  // replace the current drawing's answer. Both the success and the failure
+  // path need one, so both are driven.
+  {
+    for (const stalePathFails of [false, true]) {
+      let releaseOld = null
+      let rejectOld = null
+      const oldRead = new Promise((resolve, reject) => { releaseOld = resolve; rejectOld = reject })
+      const controller = createCheckoutController({
+        drawingId: 'old',
+        holder: 'sess-me',
+        services: {
+          ...idleServices,
+          loadVersions: (id) => (id === 'old' ? oldRead : Promise.resolve({ checkout: { holder: 'sess-current' } })),
+        },
+      })
+      const stale = controller.refresh()
+      controller.setScope({ drawingId: 'new', holder: 'sess-me', mock: false })
+      await controller.refresh()
+      if (stalePathFails) rejectOld(new Error('the old drawing read failed late'))
+      else releaseOld({ checkout: { holder: 'sess-stale' } })
+      await stale
+      const snapshot = controller.getSnapshot()
+      if (snapshot.drawingId !== 'new' || snapshot.checkout?.holder !== 'sess-current') {
+        fail(`a stale ${stalePathFails ? 'failed' : 'successful'} read replaced the current drawing's checkout -> ${JSON.stringify(snapshot.checkout)}`)
+      }
+    }
+    pass('a stale response for the previous drawing cannot replace the current answer (success and failure paths)')
+  }
+
+  // THE UNPROVEN-OWN-LOCK CORRECTION. `holder` is a PUBLIC label, so a matching
+  // label is not proof: after a reload, a duplicated tab, or a redemption this
+  // runtime lost, the stored holder can equal the lock's holder with no
+  // capability behind it. That must read as somebody else's lock.
+  {
+    const record = { holder: 'sess-me' }
+    const unproven = deriveCheckout(record, 'sess-me', Date.now(), false, false, false)
+    const proven = deriveCheckout(record, 'sess-me', Date.now(), false, false, true)
+    if (unproven.heldByUs) fail('a matching holder label with NO capability read as ours -> a Release for a lease we cannot prove')
+    else if (!unproven.writeLocked) fail('a matching holder label with NO capability enabled writes')
+    else if (unproven.lockedByOther !== record) fail('an unproven own lock is not surfaced as another holder')
+    else if (!unproven.canTake) fail('an unproven own lock offers no Take, so the UI wedges with no action available')
+    else if (!proven.heldByUs || proven.writeLocked) fail('a capability-backed own lock did not enable writes')
+    else pass('an own-looking lock with no capability suppresses writes, offers a Take, and is never "ours"')
+  }
+
+  // THE TENANT SCOPE (ACCEPTANCE "Scope-reset contract", binding). A tenant
+  // switch voids the drawing identity; the version chain does NOT reset with
+  // it, so a scope read off drawingState alone keeps addressing the previous
+  // tenant's drawing with the previous principal's capability.
+  {
+    if (checkoutScopeDrawingId({
+      identityDrawingId: null,
+      drawingState: { drawing_id: 'tenant-a-drawing' },
+      requestedDrawingId: 'tenant-a-drawing',
+    }) !== null) {
+      fail('a voided drawing identity still produced a checkout scope')
+    } else if (checkoutScopeDrawingId({
+      identityDrawingId: 'demo',
+      drawingState: { drawing_id: 'demo' },
+      requestedDrawingId: 'demo',
+    }) !== 'demo') {
+      fail('the scope gate narrowed a LIVE identity; each shell must keep the drawing it addressed')
+    } else pass('a voided drawing identity has no checkout scope, and a live one is unchanged')
+
+    let releases = 0
+    const controller = createCheckoutController({
+      drawingId: 'tenant-a-drawing',
+      holder: 'sess-tenant-a',
+      services: {
+        loadVersions: async () => ({ checkout: { holder: 'sess-tenant-a' } }),
+        take: async () => ({ acquired: true, checkout_capability: 'tenant-a-proof' }),
+        release: async () => { releases += 1; return { released: true } },
+      },
+    })
+    await controller.take()
+    if (controller.getCapability() !== 'tenant-a-proof') fail('the tenant-A take did not install its capability')
+    controller.setScope({ drawingId: null, holder: 'sess-tenant-a', mock: false })
+    await controller.refresh()
+    const snapshot = controller.getSnapshot()
+    if (controller.getCapability() !== null) {
+      fail('a tenant switch kept the previous principal\'s bearer capability -> it can still AUTHORIZE a write')
+    } else if (snapshot.checkout !== null || snapshot.lockedByOther) {
+      fail('a tenant switch kept the previous tenant\'s lock record -> it can still GATE a write')
+    } else if (releases !== 0) {
+      fail('a tenant switch spent the NEW principal\'s credentials releasing the OLD principal\'s lease')
+    } else pass('a tenant switch abandons the lease: no capability, no lock record, and no cross-principal release')
+  }
 }
 
 if (failures) {
