@@ -1,25 +1,37 @@
-/* Leaf — Unified Surface, restyled to the LEAF SURFACE STANDARD (committed Jul 2026).
-   Source of truth: the operator's design-system package ("Website design system
-   collaboration"): docs/leaf-tokens.css + its CLAUDE.md calm rules. The prior
-   session-minted design (20ab544c9f6b, light cream paper) is retired.
+/* Leaf — Unified Surface, THE DRAFTING STUDIO identity (committed Sep 2026).
+   Replaces the LEAF SURFACE STANDARD dark shell (rejected by the operator,
+   2026-08-31: "the boring old cad ui"). This is a designed identity, not a
+   re-tint: the workspace is a white drawing SHEET on a bond-paper desk, and
+   the two instruments stay dark — the CAD viewport (model space) and the
+   command bar (the command line). Chrome is drafting furniture: the footer is
+   a segmented TITLE BLOCK, the product profiles are connected drawing-set
+   tabs, the catalog is a tool schedule, the job rail is a plot-queue ledger.
 
-   Standard, applied here:
-   - dark everywhere (TS2): #0a0a0a void · cards linear-gradient(180deg,#17171a,#111113)
-     · border #27272a · text #fff/#a1a1aa/#71717a · accent #22c55e (hover #4ade80,
-     on-accent #04140a) · warn #e7b643 · danger #e24947
-   - one accent: green = you can act here; amber/red only for real states
-   - sentence case everywhere; NO mono-caps labels; ui-monospace ONLY for
-     logs, hashes, ids, slugs, and keycaps
-   - status = 6px dot + sentence-case word (never a pill): solid = active ·
-     hollow = not in play · 1.5px-radius square = degraded/advisory · pulse = live
-   - action chips are quiet FILLED chips (accent text on rgba(accent,.08)) — never outlined
-   - pops (max four): surface lift gradient · soft green halo ONLY on the single
-     primary + focused composer · one big number per pane · glow on live geometry
-   - no spinners: static skeletons, 3px determinate bars, pulse dot + verb
-   - keycaps: filled quiet chips (#1c1c20, #71717a text, radius 5, ui-monospace)
+   The identity, applied here:
+   - grounds: desk bond #e9e7e0 · sheet #fdfdfb with a 24px engineering grid ·
+     paper cards #fff on hairlines #d6d4cb · strong ink rules #30362f frame the
+     chrome (header bottom, title-block top)
+   - inks: graphite #191d1a text · plotter-pen green #1e6b45 = you can act here
+     · ochre pencil #8f5f06 advisory · red pen #b42318 failure · drafting blue
+     #1f6390 info. Green is INK on paper, never neon on black.
+   - instruments (the only dark surfaces): ink well #171b18 for the command
+     bar; the viewer canvas keeps its own --cv-* dark palette so DXF layer
+     colors stay legible. Everything that floats ON those surfaces uses the
+     well/canvas palettes, never the paper tokens.
+   - type: 'Barlow Semi Condensed' display (spec-sheet lettering) · 'Barlow'
+     UI · 'IBM Plex Mono' for ids, hashes, timestamps, keycaps, title-block
+     fields, and the command-bar input. Micro-labels (eyebrows, schedule and
+     ledger heads) are mono 10px caps with .08em tracking — the title-block
+     grammar.
+   - status grammar KEPT from the prior standard (it was the good part):
+     6px dot + sentence-case word, never a pill: solid = active · hollow = not
+     in play · 1.5px-radius square = degraded/advisory · pulse = live. No
+     spinners: static skeletons, 3px determinate bars, pulse dot + verb.
+   - shadows are paper shadows (soft ink, no glow halos); radii are drafting-
+     sharp: cards 4 · chips 4 · popovers 6 · the bar 9.
 
-   Tokens stay a flat contract (hex + real font names) so a WinForms port and the
-   three.js viewer (reads --cv-*) can consume them 1:1.
+   Tokens stay a flat contract (hex + real font names) so a WinForms port and
+   the three.js viewer (reads --cv-*) can consume them 1:1.
 
    T1 OVERLAY: an approved tenant overlay sets these SAME tokens as inline
    custom properties on :root (web/src/overlayTheme.js CSS_VAR_BY_TOKEN), which
@@ -29,39 +41,94 @@
    committed constants and do NOT follow an overlaid --primary; acceptable for
    the v1 vocabulary, revisit when the registry grows derived tokens. */
 
+/* --- faces: self-hosted latin woff2 (web/public/fonts) — no external font
+   host in the critical path, CSP-proof, offline-safe --- */
+@font-face {
+  font-family: 'Barlow'; font-style: normal; font-weight: 400; font-display: swap;
+  src: url('/fonts/barlow-400-latin.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Barlow'; font-style: normal; font-weight: 500; font-display: swap;
+  src: url('/fonts/barlow-500-latin.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Barlow'; font-style: normal; font-weight: 600; font-display: swap;
+  src: url('/fonts/barlow-600-latin.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Barlow Semi Condensed'; font-style: normal; font-weight: 500; font-display: swap;
+  src: url('/fonts/barlow-semi-condensed-500-latin.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Barlow Semi Condensed'; font-style: normal; font-weight: 600; font-display: swap;
+  src: url('/fonts/barlow-semi-condensed-600-latin.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Mono'; font-style: normal; font-weight: 400; font-display: swap;
+  src: url('/fonts/ibm-plex-mono-400-latin.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Mono'; font-style: normal; font-weight: 500; font-display: swap;
+  src: url('/fonts/ibm-plex-mono-500-latin.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Mono'; font-style: normal; font-weight: 600; font-display: swap;
+  src: url('/fonts/ibm-plex-mono-600-latin.woff2') format('woff2');
+}
+
 :root {
-  /* --- leaf-tokens.css contract (dark, verbatim) --- */
-  --background: #0a0a0a;
-  --foreground: #ffffff;
-  --card: #18181b;
-  --card-grad: linear-gradient(180deg, #17171a, #111113);
-  --border: #27272a;
-  --primary: #22c55e;          /* hover #4ade80 · on-accent #04140a */
-  --primary-hover: #4ade80;
-  --on-accent: #04140a;
-  --muted: #a1a1aa;            /* secondary text; tertiary #71717a */
-  --muted-2: #71717a;
+  /* --- token contract (drafting studio, verbatim) --- */
+  --background: #e9e7e0;       /* desk bond */
+  --foreground: #191d1a;       /* graphite ink */
+  --card: #ffffff;             /* paper */
+  --card-grad: linear-gradient(180deg, #ffffff, #fbfaf6);
+  --border: #d6d4cb;           /* paper hairline */
+  --primary: #1e6b45;          /* plotter-pen green · hover #175437 · on-accent #f5faf6 */
+  --primary-hover: #175437;
+  --on-accent: #f5faf6;
+  --muted: #4f5851;            /* secondary ink; tertiary #6b726b */
+  --muted-2: #6b726b;
 
-  --status-success: #22c55e;
-  --status-warning: #e7b643;   /* faithful hex of oklch(0.8 0.14 85) — viewer-safe */
-  --status-danger: #e24947;    /* faithful hex of oklch(0.62 0.19 25) */
-  --status-info: #43b2e1;      /* faithful hex of oklch(0.72 0.12 230) */
+  --status-success: #1e6b45;
+  --status-warning: #8f5f06;   /* ochre pencil */
+  --status-danger: #b42318;    /* red pen */
+  --status-info: #1f6390;      /* drafting blue */
 
-  --bar-well: #141416;
-  --bar-chip: #1f1f23;
-  --bar-focus-ring: rgba(34, 197, 94, .07);
-  --keycap: #1c1c20;
-  --hairline: #1c1c20;         /* ledger row separators (22g) */
-  --rail: #0c0c0e;             /* console-shell side rails */
+  --bar-well: #efede6;         /* light inset wells (legacy composer) */
+  --bar-chip: #e5e3da;         /* quiet chip ground on paper/bond */
+  --bar-focus-ring: rgba(30, 107, 69, .14);
+  --keycap: #e5e3da;
+  --hairline: #dedcd3;         /* ledger row separators (22g) */
+  --rail: #e4e2da;             /* console-shell side rails (the desk) */
+  --input: #ffffff;            /* field ground (was referenced, never defined) */
 
-  --accent-tint: rgba(34, 197, 94, .08);
-  --accent-tint-hover: rgba(34, 197, 94, .14);
-  --warn-tint: rgba(231, 182, 67, .10);
-  --danger-tint: rgba(226, 73, 71, .10);
+  --accent-tint: rgba(30, 107, 69, .09);
+  --accent-tint-hover: rgba(30, 107, 69, .16);
+  --warn-tint: rgba(143, 95, 6, .10);
+  --danger-tint: rgba(180, 35, 24, .08);
 
-  --font-label: 'Inter', system-ui, sans-serif;
-  --font-sans: 'Inter Tight', 'Inter', system-ui, sans-serif;
-  --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  /* --- drafting-studio additions (new names; the overlay map is unchanged) --- */
+  --sheet: #fdfdfb;            /* the drawing sheet (center scroll ground) */
+  --grid-line: rgba(25, 29, 26, .05);  /* engineering grid on the sheet */
+  --rule-strong: #30362f;      /* the ink rules that frame the chrome */
+  --hover-tint: rgba(25, 29, 26, .04);
+  --hover-tint-strong: rgba(25, 29, 26, .07);
+  --shadow-pop: 0 12px 32px rgba(25, 29, 26, .16), 0 2px 8px rgba(25, 29, 26, .08);
+
+  /* the ink well: the command bar's own dark palette (instrument, not theme) */
+  --well: #171b18;
+  --well-border: #2b302a;
+  --well-chip: #232823;
+  --well-text: #eef1ec;
+  --well-dim: #8f978d;
+  --well-faint: #7f877e;
+  --well-accent: #38c274;
+  --well-accent-tint: rgba(56, 194, 116, .13);
+
+  --font-label: 'Barlow', system-ui, sans-serif;
+  --font-sans: 'Barlow', system-ui, sans-serif;
+  --font-display: 'Barlow Semi Condensed', 'Barlow', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
 
   /* --- compatibility aliases (legacy names used across component rules) --- */
   --paper: var(--background);
@@ -83,18 +150,20 @@
   --danger: var(--status-danger);
 
   /* --- CADViewport tokens (read by Viewer.jsx at scene build; hex only) ---
-     Dark canvas sits just above the void; selection aligns to the warn amber;
-     live geometry may glow (pop #4). */
-  --cv-bg: #0f0f11;
-  --cv-panel: #18181b;
-  --cv-panel-glass: rgba(24, 24, 27, .86);
-  --cv-border: #27272a;
-  --cv-text: #ffffff;
-  --cv-dim: #a1a1aa;
+     Model space stays DARK on purpose: DXF layer colors are authored against a
+     dark ground, and the dark viewport framed by the white sheet is the
+     plotted-drawing read this identity is built on. Neutrals retuned to the
+     ink family; entity colors unchanged (legibility-tested against layers). */
+  --cv-bg: #131614;
+  --cv-panel: #1b1f1c;
+  --cv-panel-glass: rgba(27, 31, 28, .9);
+  --cv-border: #313731;
+  --cv-text: #f0f2ee;
+  --cv-dim: #a3aca3;
   --cv-insert: #4f83c2;
   --cv-face: #4b8f68;
-  --cv-select: #e7b643;   /* = --status-warning (true oklch(0.8 0.14 85) hex) */
-  --cv-danger: #e24947;   /* = --status-danger  (true oklch(0.62 0.19 25) hex) */
+  --cv-select: #e7b643;   /* selection amber on dark canvas (unchanged) */
+  --cv-danger: #e24947;   /* canvas danger (unchanged) */
   --cv-ghost: #6b7280;
   --cv-ghost-remove: #a05555;
   --cv-overlay: #43b2e1;      /* result-overlay geometry default (info family) */
@@ -116,6 +185,19 @@ a { color: var(--primary); }
 /* live-dot pulse (the ONLY animated affordance; frozen under reduced motion) */
 @keyframes leaf-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 
+/* the title-block micro-label grammar: mono caps, wide tracking. Composed by
+   eyebrows, schedule heads, ledger heads, and the title block itself. */
+@media all { /* grouping only: keeps the grammar next to its consumers */
+  .kicker, .fam-title, .rail h2, .card > h3, .ws-k, .ws-jobs-head,
+  .vh-head, .ca-head, .proj-menu-head, .resolver-header, .legend-title {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+  }
+}
+
 /* --- app shell: header / left nav / main / right rail / footer --- */
 .app {
   display: grid;
@@ -125,14 +207,14 @@ a { color: var(--primary); }
   min-height: 0;
 }
 
-/* ---------------- header ---------------- */
+/* ---------------- header: the sheet head ---------------- */
 header.top {
   grid-column: 1 / -1;
   display: flex;
   align-items: center;
   gap: 18px;
-  padding: 10px 18px;
-  border-bottom: 1px solid var(--border);
+  padding: 9px 18px;
+  border-bottom: 1px solid var(--rule-strong);
   background: var(--background);
   flex-wrap: wrap;
 }
@@ -141,11 +223,11 @@ header.top {
   align-items: center;
   gap: 8px;
   font-weight: 600;
-  letter-spacing: -.01em;
+  letter-spacing: .005em;
   color: var(--foreground);
-  font-size: 14px;
+  font-size: 13.5px;
 }
-/* the leaf mark: a small accent diamond (typographic, no icon-in-button) */
+/* the leaf mark: a plot-stamp diamond in green ink */
 .mark .diamond {
   width: 9px; height: 9px;
   background: var(--primary);
@@ -155,7 +237,7 @@ header.top {
 }
 .proj { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .proj .name { font-weight: 600; }
-.proj .meta { font-family: var(--sans); font-size: 11px; color: var(--muted-2); font-variant-numeric: tabular-nums; }
+.proj .meta { font-family: var(--font-mono); font-size: 10.5px; color: var(--muted-2); font-variant-numeric: tabular-nums; }
 .top .spacer { flex: 1; }
 
 /* label chip: quiet filled chip for pure LABELS ('Project', 'Workspace') only.
@@ -166,7 +248,7 @@ header.top {
   gap: 6px;
   padding: 2px 9px;
   border: 0;
-  border-radius: 6px;
+  border-radius: 4px;
   font-size: 11.5px;
   color: var(--muted);
   background: var(--bar-chip);
@@ -185,7 +267,7 @@ header.top {
 .switch { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; }
 .switch input { accent-color: var(--primary); }
 
-/* ---------------- left nav ---------------- */
+/* ---------------- left nav: the tool schedule ---------------- */
 aside.nav {
   border-right: 1px solid var(--border);
   background: var(--rail);
@@ -197,14 +279,13 @@ aside.nav {
   min-height: 0;
 }
 .fam-title {
-  font-size: 11px;
   color: var(--muted-2);
   margin: 6px 4px 4px;
 }
 .section {
   border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--card-grad);
+  border-radius: 4px;
+  background: var(--card);
   overflow: hidden;
   flex: 0 0 auto; /* never compress in the nav's flex column — the NAV scrolls instead */
 }
@@ -221,16 +302,17 @@ aside.nav {
   color: var(--foreground);
   font-family: var(--sans);
   font-size: 12px;
+  font-weight: 500;
   padding: 8px 10px;
   cursor: pointer;
   text-align: left;
 }
 .section.collapsed > .section-head { border-bottom: 0; }
-.section-head .n { color: var(--muted-2); }
+.section-head .n { color: var(--muted-2); font-family: var(--font-mono); font-size: 11px; font-variant-numeric: tabular-nums; }
 .section-head .chev { color: var(--muted-2); font-size: 10px; }
 .section-body { padding: 10px; }
 
-/* ---------------- main ---------------- */
+/* ---------------- main: the drawing sheet ---------------- */
 main {
   overflow-y: auto;
   min-width: 0;
@@ -238,18 +320,26 @@ main {
   padding: 20px 26px 28px;
 }
 .kicker {
-  font-size: 11px;
   color: var(--muted-2);
-  margin-bottom: 6px;
+  margin-bottom: 8px;
 }
 h1.home-q {
-  font-size: 22px;
+  font-family: var(--font-display);
+  font-size: 30px;
+  line-height: 1.12;
   margin: 0 0 14px;
   font-weight: 600;
-  letter-spacing: -.01em;
+  letter-spacing: 0;
   color: var(--foreground);
 }
-h1.home-q em { font-style: normal; color: var(--foreground); } /* emphasis by weight — green stays earned */
+/* the project name is a slug: mono, green ink — the one accent in the title */
+h1.home-q em {
+  font-style: normal;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: .8em;
+  color: var(--primary);
+}
 
 /* --- prompt: the composer (SB3 construction, docked in place) ---
    Borderless inset well; focus is the standing exception to the halo rule:
@@ -257,11 +347,11 @@ h1.home-q em { font-style: normal; color: var(--foreground); } /* emphasis by we
 .prompt {
   border: 1px solid transparent;
   background: var(--bar-well);
-  border-radius: 11px;
+  border-radius: 8px;
   box-shadow: none;
 }
 .prompt:focus-within {
-  border-color: rgba(34, 197, 94, .75);
+  border-color: rgba(30, 107, 69, .6);
   box-shadow: 0 0 0 3px var(--bar-focus-ring);
 }
 .prompt.disabled { opacity: .7; }
@@ -290,7 +380,7 @@ h1.home-q em { font-style: normal; color: var(--foreground); } /* emphasis by we
 }
 .lane {
   padding: 3px 9px;
-  border-radius: 6px;
+  border-radius: 4px;
   background: var(--bar-chip);
   color: var(--muted);
   display: flex;
@@ -308,7 +398,7 @@ h1.home-q em { font-style: normal; color: var(--foreground); } /* emphasis by we
   font-size: 10.5px;
   border: 0;
   padding: 1px 6px;
-  border-radius: 5px;
+  border-radius: 4px;
   background: var(--keycap);
   color: var(--muted-2);
 }
@@ -322,14 +412,14 @@ h1.home-q em { font-style: normal; color: var(--foreground); } /* emphasis by we
   color: var(--on-accent);
   border: 0;
   padding: 6px 14px;
-  border-radius: 6px;
+  border-radius: 4px;
   cursor: pointer;
   margin-left: 10px;
 }
 .dispatch-btn:hover:not(:disabled) { background: var(--primary-hover); }
 .dispatch-btn:disabled { opacity: .5; cursor: not-allowed; }
-/* inline hint (H3): recedes to 15% until hovered (max one per pane) */
-.hint { margin-top: 8px; font-size: 11.5px; color: var(--muted-2); opacity: .15; transition: opacity 180ms ease; }
+/* inline hint (H3): recedes to 25% until hovered (max one per pane) */
+.hint { margin-top: 8px; font-size: 11.5px; color: var(--muted-2); opacity: .25; transition: opacity 180ms ease; }
 .hint:hover, .hint:focus-within { opacity: 1; }
 .hint b { color: var(--foreground); font-weight: 500; }
 
@@ -337,8 +427,9 @@ h1.home-q em { font-style: normal; color: var(--foreground); } /* emphasis by we
 .route {
   margin-top: 16px;
   border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--card-grad);
+  border-radius: 4px;
+  background: var(--card);
+  box-shadow: 0 1px 3px rgba(25, 29, 26, .06);
 }
 .route.solve, .route.lowconf { border-left: 2px solid var(--status-warning); }
 .route.build { border-left: 2px solid var(--primary); }
@@ -370,7 +461,7 @@ h1.home-q em { font-style: normal; color: var(--foreground); } /* emphasis by we
 .route-param {
   display: flex; justify-content: space-between; gap: 12px;
   font-size: 12px;
-  padding: 4px 0; border-bottom: 1px solid var(--bar-chip);
+  padding: 4px 0; border-bottom: 1px solid var(--hairline);
 }
 .route-param span:first-child { color: var(--muted); }
 .route-param span:last-child { font-family: var(--font-mono); font-size: 11.5px; }
@@ -380,10 +471,10 @@ h1.home-q em { font-style: normal; color: var(--foreground); } /* emphasis by we
 .route-alt {
   display: flex; align-items: baseline; gap: 8px;
   text-align: left; width: 100%;
-  background: var(--bar-chip); border: 0; border-radius: 6px;
+  background: var(--bar-well); border: 0; border-radius: 4px;
   padding: 7px 10px; cursor: pointer; color: var(--foreground);
 }
-.route-alt:hover { background: rgba(255, 255, 255, .03); }
+.route-alt:hover { background: var(--bar-chip); }
 .route-alt .an { font-family: var(--font-mono); font-size: 12px; font-weight: 600; }
 .route-alt .ad { font-size: 11.5px; color: var(--muted); }
 
@@ -395,7 +486,7 @@ h1.home-q em { font-style: normal; color: var(--foreground); } /* emphasis by we
   border: 0;
   border-bottom: 1px solid var(--border);
   border-radius: 0;
-  background: color-mix(in oklab, var(--status-warning) 5%, var(--background));
+  background: color-mix(in oklab, var(--status-warning) 7%, var(--sheet));
   padding: 8px 16px;
   display: flex;
   align-items: center;
@@ -409,15 +500,16 @@ h1.home-q em { font-style: normal; color: var(--foreground); } /* emphasis by we
 }
 .banner b { color: var(--status-warning); font-weight: 500; }
 
-/* --- workspace / viewer card --- */
+/* --- workspace / viewer card: the plotted drawing, framed on the sheet --- */
 .workspace-card {
   margin-top: 16px;
   border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--card-grad);
+  border-radius: 4px;
+  background: var(--card);
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  box-shadow: 0 1px 3px rgba(25, 29, 26, .06);
 }
 .viewer-toolbar {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
@@ -440,63 +532,63 @@ h1.home-q em { font-style: normal; color: var(--foreground); } /* emphasis by we
 .viewer-wrap { position: relative; height: 460px; min-height: 320px; background: var(--cv-bg); }
 .viewer-canvas { position: absolute; inset: 0; }
 .viewer-canvas canvas { display: block; }
-.overlay-msg { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); color: var(--muted); font-size: 14px; }
-.overlay-msg.error { color: var(--status-danger); }
-.viewer-fallback { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); color: var(--muted); font-size: 13px; text-align: center; max-width: 320px; padding: 0 16px; }
+/* canvas-anchored copy reads with the CANVAS palette, never the paper tokens */
+.overlay-msg { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); color: var(--cv-dim); font-size: 14px; }
+.overlay-msg.error { color: var(--cv-danger); }
+.viewer-fallback { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); color: var(--cv-dim); font-size: 13px; text-align: center; max-width: 320px; padding: 0 16px; }
 
-/* --- legend (dark glass on the canvas) --- */
+/* --- legend (dark glass ON the canvas — canvas palette, not paper) --- */
 .legend {
   position: absolute; top: 14px; right: 14px;
   background: var(--cv-panel-glass); backdrop-filter: blur(6px);
-  border: 1px solid var(--border); border-radius: 10px; padding: 10px; min-width: 152px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
+  border: 1px solid var(--cv-border); border-radius: 6px; padding: 10px; min-width: 152px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .4);
 }
-.legend-title { font-size: 11px; color: var(--muted-2); margin-bottom: 8px; }
-.legend-row { display: flex; align-items: center; gap: 8px; width: 100%; background: none; border: none; color: var(--foreground); padding: 4px 2px; cursor: pointer; font-size: 12px; border-radius: 5px; }
-.legend-row:hover:not(:disabled) { background: rgba(255, 255, 255, .04); }
-.legend-row.off .legend-name { color: var(--muted-2); text-decoration: line-through; }
+.legend-title { color: var(--cv-dim); margin-bottom: 8px; }
+.legend-row { display: flex; align-items: center; gap: 8px; width: 100%; background: none; border: none; color: var(--cv-text); padding: 4px 2px; cursor: pointer; font-size: 12px; border-radius: 4px; }
+.legend-row:hover:not(:disabled) { background: rgba(255, 255, 255, .06); }
+.legend-row.off .legend-name { color: var(--cv-dim); text-decoration: line-through; }
 .legend-row.empty { opacity: .5; cursor: default; }
 .swatch { width: 12px; height: 12px; border-radius: 3px; flex: 0 0 auto; }
 .legend-name { flex: 1 1 auto; text-align: left; }
-.legend-count { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 11px; }
+.legend-count { color: var(--cv-dim); font-variant-numeric: tabular-nums; font-size: 11px; font-family: var(--font-mono); }
 
-/* --- selection readout --- */
+/* --- selection readout (dark glass ON the canvas) --- */
 .selection-readout {
   position: absolute; left: 14px; bottom: 14px; min-width: 190px; max-width: 260px;
   background: var(--cv-panel-glass); backdrop-filter: blur(6px);
-  border: 1px solid var(--border); border-radius: 10px; padding: 11px 12px;
-  color: var(--foreground); box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
+  border: 1px solid var(--cv-border); border-radius: 6px; padding: 11px 12px;
+  color: var(--cv-text); box-shadow: 0 8px 24px rgba(0, 0, 0, .4);
 }
-.selection-readout.empty { color: var(--muted); }
-.sel-hint { font-size: 12px; color: var(--muted); opacity: .15; transition: opacity 180ms ease; }
+.selection-readout.empty { color: var(--cv-dim); }
+.sel-hint { font-size: 12px; color: var(--cv-dim); opacity: .3; transition: opacity 180ms ease; }
 .sel-hint:hover, .selection-readout:hover .sel-hint, .selection-readout:focus-within .sel-hint { opacity: 1; }
 .sel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
-.sel-kind { font-size: 12px; font-weight: 600; letter-spacing: .2px; color: var(--foreground); }
-/* plain action = quiet accent chip (amber is reserved for real advisories) */
+.sel-kind { font-size: 12px; font-weight: 600; letter-spacing: .2px; color: var(--cv-text); }
+/* plain action on the dark glass = quiet well-accent chip */
 .sel-clear {
-  background: var(--accent-tint); border: none; border-radius: 6px;
-  padding: 2px 8px; font: inherit; font-size: 11.5px; color: var(--primary); cursor: pointer;
+  background: var(--well-accent-tint); border: none; border-radius: 4px;
+  padding: 2px 8px; font: inherit; font-size: 11.5px; color: var(--well-accent); cursor: pointer;
 }
-.sel-clear:hover { background: var(--accent-tint-hover); }
+.sel-clear:hover { background: rgba(56, 194, 116, .22); }
 .sel-fields { margin: 0; display: flex; flex-direction: column; gap: 5px; }
 .sel-field { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-.sel-field dt { font-size: 11px; color: var(--muted-2); margin: 0; }
-.sel-field dd { margin: 0; font-size: 13px; color: var(--foreground); }
+.sel-field dt { font-size: 11px; color: var(--cv-dim); margin: 0; }
+.sel-field dd { margin: 0; font-size: 13px; color: var(--cv-text); }
 .sel-handle { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 
 /* --- result card (renders the real §3 envelope) --- */
 .result-block { margin-top: 16px; }
 .card {
   border: 1px solid var(--border);
-  background: var(--card-grad);
-  border-radius: 10px;
+  background: var(--card);
+  border-radius: 4px;
   padding: 14px 16px;
+  box-shadow: 0 1px 3px rgba(25, 29, 26, .06);
 }
 .card > h3 {
   margin: 0 0 10px;
-  font-size: 11px;
   color: var(--muted-2);
-  font-weight: 500;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -523,21 +615,21 @@ h1.home-q em { font-style: normal; color: var(--foreground); } /* emphasis by we
 .ok.no::before { background: var(--status-danger); }
 .result-tool { font-family: var(--font-mono); font-size: 12.5px; font-weight: 600; color: var(--foreground); }
 table.counts, table.kv { width: 100%; border-collapse: collapse; font-size: 13px; }
-table.counts th { text-align: left; color: var(--muted-2); font-size: 11px; font-weight: 500; padding: 4px 6px; border-bottom: 1px solid var(--border); }
-table.counts td, table.kv td { padding: 6px; border-bottom: 1px solid var(--bar-chip); }
-.num { text-align: right; font-variant-numeric: tabular-nums; }
+table.counts th { text-align: left; color: var(--muted-2); font-family: var(--font-mono); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; padding: 4px 6px; border-bottom: 1px solid var(--rule-strong); }
+table.counts td, table.kv td { padding: 6px; border-bottom: 1px solid var(--hairline); }
+.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: 12px; }
 .kv .k { color: var(--muted); }
 .kv .k::first-letter { text-transform: uppercase; } /* sentence case, not Title Case */
 .total { font-size: 13px; color: var(--muted); }
-.overlay-summary { display: flex; flex-direction: column; gap: 6px; padding: 10px; background: var(--bar-well); border: 1px solid var(--border); border-radius: 8px; font-size: 12px; }
+.overlay-summary { display: flex; flex-direction: column; gap: 6px; padding: 10px; background: var(--bar-well); border: 1px solid var(--border); border-radius: 4px; font-size: 12px; }
 .ov-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .ov-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
 .ov-dot.hl { background: var(--status-warning); }
 .ov-dot.mk { background: var(--status-danger); }
 .ov-dot.ov { background: var(--primary); }
-.marker-label { font-size: 11px; background: var(--danger-tint); color: var(--status-danger); padding: 2px 8px; border-radius: 6px; }
-/* run receipt: copy with numbers — sans + tabular-nums (mono only if a sha/id joins) */
-.receipt { display: flex; gap: 8px; align-items: center; font-family: var(--sans); font-size: 11px; color: var(--muted); border-top: 1px solid var(--border); padding-top: 10px; font-variant-numeric: tabular-nums; }
+.marker-label { font-size: 11px; background: var(--danger-tint); color: var(--status-danger); padding: 2px 8px; border-radius: 4px; }
+/* run receipt: the sheet's issue line — mono, on a strong rule */
+.receipt { display: flex; gap: 8px; align-items: center; font-family: var(--font-mono); font-size: 10.5px; color: var(--muted); border-top: 1px solid var(--rule-strong); padding-top: 10px; font-variant-numeric: tabular-nums; }
 .degraded {
   display: inline-flex; align-items: center; gap: 6px;
   font-size: 11px; color: var(--status-warning); border: 0; padding: 0;
@@ -548,28 +640,29 @@ table.counts td, table.kv td { padding: 6px; border-bottom: 1px solid var(--bar-
 .lower { margin-top: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .gate {
   border: 1px solid var(--border);
-  background: var(--card-grad);
-  padding: 14px 16px; border-radius: 10px;
+  background: var(--card);
+  padding: 14px 16px; border-radius: 4px;
+  box-shadow: 0 1px 3px rgba(25, 29, 26, .06);
 }
 .gate .lock { font-size: 11px; color: var(--muted-2); }
 .gate h4 { margin: 6px 0 4px; font-size: 14px; color: var(--foreground); }
 .gate p { margin: 0 0 10px; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
-.gate .up { font-size: 11.5px; color: var(--muted); border: 0; padding: 5px 11px; border-radius: 6px; background: var(--bar-chip); cursor: not-allowed; }
-/* sandboxed build: hollow-state posture (not in play until reviewed);
-   legacy pill/amber-category rules (.quarantine, .tiers span.on) deleted — dead grammar */
+.gate .up { font-size: 11.5px; color: var(--muted); border: 0; padding: 5px 11px; border-radius: 4px; background: var(--bar-chip); cursor: not-allowed; }
+/* sandboxed build: hollow-state posture (not in play until reviewed) */
 .build {
   border: 1px solid var(--border);
-  background: var(--card-grad);
-  border-radius: 10px; padding: 16px 16px 14px; position: relative;
+  background: var(--card);
+  border-radius: 4px; padding: 16px 16px 14px; position: relative;
+  box-shadow: 0 1px 3px rgba(25, 29, 26, .06);
 }
 .build .id { font-family: var(--font-mono); font-size: 11px; color: var(--muted-2); }
 .build h4 { margin: 4px 0 4px; font-size: 14px; color: var(--foreground); }
 .build p { margin: 6px 0 8px; font-size: 12.5px; color: var(--foreground); line-height: 1.5; }
 .tiers { display: flex; gap: 4px; font-size: 11px; margin-top: 8px; }
-.tiers span { padding: 3px 9px; border: 0; border-radius: 6px; background: var(--bar-chip); color: var(--muted); }
+.tiers span { padding: 3px 9px; border: 0; border-radius: 4px; background: var(--bar-chip); color: var(--muted); }
 .build .placeholder { font-size: 11px; color: var(--status-warning); margin-top: 8px; }
 
-/* ---------------- right rail: job monitor ---------------- */
+/* ---------------- right rail: the plot queue ---------------- */
 aside.rail {
   border-left: 1px solid var(--border);
   background: var(--rail);
@@ -577,9 +670,16 @@ aside.rail {
   padding: 16px 16px;
   min-height: 0;
 }
+/* Pin the rail to its grid cell on desktop. The DT2 .drawer-layer claims
+   row 2 / col 3 explicitly (structural.css), and an auto-placed rail then
+   falls to an implicit row UNDER the nav whenever the drawer mounts —
+   breaking "the rail behind never re-flows" (reproduced on staging,
+   2026-09-01). Desktop-only: the stacked <=980px layout must keep flowing. */
+@media (min-width: 981px) {
+  aside.rail { grid-row: 2; grid-column: 3; }
+}
 .rail h2 {
-  font-size: 11px;
-  color: var(--muted-2); margin: 0 0 10px; font-weight: 500;
+  color: var(--muted-2); margin: 0 0 10px;
   display: flex; justify-content: space-between; align-items: baseline;
 }
 .rail h2 .n { color: var(--muted); } /* a count is metadata, not a pass state */
@@ -598,7 +698,7 @@ aside.rail {
 .reattach button {
   font-family: var(--sans); font-size: 11px; font-weight: 600;
   background: var(--primary); color: var(--on-accent); border: 0;
-  padding: 3px 10px; border-radius: 6px; cursor: pointer;
+  padding: 3px 10px; border-radius: 4px; cursor: pointer;
   margin-left: auto;
 }
 .reattach button:hover { background: var(--primary-hover); }
@@ -610,7 +710,7 @@ aside.rail {
   width: 100%; text-align: left; color: inherit; cursor: default; display: block;
 }
 button.job { cursor: pointer; font: inherit; }
-button.job:hover { background: rgba(255, 255, 255, .03); }
+button.job:hover { background: var(--hover-tint); }
 .job.current { box-shadow: inset 2px 0 0 var(--primary); background: var(--accent-tint); }
 .job .h { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 4px; }
 .job .h b { font-weight: 600; color: var(--foreground); font-family: var(--font-mono); font-size: 12px; }
@@ -636,19 +736,32 @@ button.job:hover { background: rgba(255, 255, 255, .03); }
 .job .bar i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--primary); display: block; }
 .job .foot { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--muted-2); flex-wrap: wrap; }
 
-/* ---------------- footer status bar ---------------- */
+/* ---------------- footer: the TITLE BLOCK (the identity's signature) ----------------
+   A real drafting title block: strong ink rule on top, fields separated by
+   vertical hairlines, everything set in mono caps. Zero markup change — the
+   segments are the footer's existing children. */
 footer.foot-bar {
   grid-column: 1 / -1;
-  border-top: 1px solid var(--border);
-  padding: 6px 18px;
-  font-size: 11px;
+  border-top: 1px solid var(--rule-strong);
+  padding: 0 18px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: .07em;
   color: var(--muted-2);
   display: flex;
-  gap: 18px;
+  gap: 0;
   background: var(--background);
   flex-wrap: wrap;
   font-variant-numeric: tabular-nums;
+  min-height: 30px;
 }
+/* inline-flex drops whitespace-only text nodes between inline children, so a
+   4px gap stands in for the word space (the dot rows override it to 6px) */
+footer.foot-bar > * { display: inline-flex; align-items: center; gap: 4px; padding: 6px 14px 6px 0; }
+footer.foot-bar > * + * { border-left: 1px solid var(--border); padding-left: 14px; }
+.foot-stat { gap: 6px; white-space: nowrap; }
 footer .ok-txt { color: var(--primary); }
 footer .warn-txt { color: var(--status-warning); }
 
@@ -657,34 +770,34 @@ footer .warn-txt { color: var(--status-warning); }
 .dim { color: var(--muted); font-weight: 400; }
 
 .tool-list { display: flex; flex-direction: column; gap: 8px; }
-.tool-card { border: 1px solid var(--border); border-radius: 10px; background: var(--card-grad); overflow: hidden; }
+.tool-card { border: 1px solid var(--border); border-radius: 4px; background: var(--card); overflow: hidden; }
 .tool-card.open { box-shadow: inset 2px 0 0 var(--primary); } /* open = SL1 2px accent left bar, never a full accent border */
 .tool-head { width: 100%; text-align: left; background: none; border: none; color: inherit; padding: 10px 12px; cursor: pointer; display: flex; flex-direction: column; gap: 5px; }
-.tool-head:hover { background: rgba(255, 255, 255, .03); }
+.tool-head:hover { background: var(--hover-tint); }
 .tool-head-main { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
-.tool-name { font-family: var(--font-mono); font-weight: 600; font-size: 12.5px; color: var(--foreground); } /* slug = mono */
+.tool-name { font-family: var(--font-mono); font-weight: 600; font-size: 12px; color: var(--foreground); } /* slug = mono */
 .tool-desc { font-size: 12px; color: var(--muted); line-height: 1.35; }
 .tool-tags { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 2px; }
-.cap { font-size: 10.5px; padding: 1px 8px; border-radius: 6px; border: 0; background: var(--bar-chip); color: var(--muted); }
+.cap { font-size: 10.5px; padding: 1px 8px; border-radius: 4px; border: 0; background: var(--bar-chip); color: var(--muted); }
 .cap.read, .cap.write { color: var(--muted); background: var(--bar-chip); } /* static capability descriptors — neutral, not states */
 .cap.kind { color: var(--muted); }
 /* provenance badge: quiet chip, sentence case */
-.badge { font-size: 10.5px; padding: 1px 8px; border-radius: 6px; border: 0; color: var(--muted); background: var(--bar-chip); }
+.badge { font-size: 10.5px; padding: 1px 8px; border-radius: 4px; border: 0; color: var(--muted); background: var(--bar-chip); }
 .tool-body { padding: 0 12px 12px; display: flex; flex-direction: column; gap: 10px; }
 .params { display: flex; flex-direction: column; gap: 8px; }
 .params-none { font-size: 12px; color: var(--muted); margin: 4px 0; }
 .param { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); }
-/* fields (F1): card fill, hairline, radius 7, 34px tall; focus = accent border
-   + ring + soft halo (the pane's one halo). Scoped to real fields only — the
-   composer keeps its SB3 well ring, never this one. */
+/* fields (F1): paper fill, hairline, radius 4, 34px tall; focus = accent
+   border + flat ring (no glow halos on paper). Scoped to real fields only —
+   the composer keeps its SB3 well ring, never this one. */
 .param input, .param textarea, .author-panel textarea, .ca-field input {
-  background: var(--card-grad); border: 1px solid var(--border); border-radius: 7px;
+  background: var(--input); border: 1px solid var(--border); border-radius: 4px;
   color: var(--foreground); padding: 7px 9px; font-size: 13px; font-family: var(--sans);
 }
 .param input, .ca-field input { height: 34px; }
 .param input:focus, .param textarea:focus, .author-panel textarea:focus, .ca-field input:focus {
   outline: none; border-color: var(--primary);
-  box-shadow: 0 0 0 3px rgba(34, 197, 94, .12), 0 6px 18px rgba(34, 197, 94, .2);
+  box-shadow: 0 0 0 3px var(--bar-focus-ring);
 }
 /* V1 validation: field border turns danger; message renders below via .v1-msg */
 .param input.invalid, .param textarea.invalid, .author-panel textarea.invalid,
@@ -698,38 +811,37 @@ footer .warn-txt { color: var(--status-warning); }
    .neutral is the secondary of a pair (Keep / Cancel per D1) */
 .btn {
   font-family: var(--sans); background: var(--accent-tint); color: var(--primary);
-  border: 0; border-radius: 6px; padding: 3px 9px; font-size: 12px; font-weight: 500; cursor: pointer;
+  border: 0; border-radius: 4px; padding: 3px 9px; font-size: 12px; font-weight: 500; cursor: pointer;
 }
 .btn:hover:not(:disabled) { color: var(--primary-hover); background: var(--accent-tint-hover); }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
 .btn.primary {
   background: var(--primary); color: var(--on-accent); font-weight: 600;
   padding: 6px 12px;
-  box-shadow: 0 6px 18px rgba(34, 197, 94, .3);
+  box-shadow: 0 1px 2px rgba(25, 29, 26, .2);
 }
 .btn.primary:hover:not(:disabled) { background: var(--primary-hover); color: var(--on-accent); }
-/* F1: the focused field's halo is the only halo in the pane — the primary
-   yields its drop halo while a sibling field has focus (cf. .bar .primary) */
+/* F1: while a sibling field has focus the primary stays quiet */
 .author-panel:focus-within .btn.primary, .claude-pop:focus-within .btn.primary { box-shadow: none; }
 /* ghost repointed at the filled accent construction (unfilled text buttons retired) */
 .btn.ghost { background: var(--accent-tint); color: var(--primary); }
 .btn.ghost:hover:not(:disabled) { background: var(--accent-tint-hover); color: var(--primary-hover); }
 .btn.neutral { background: var(--bar-chip); color: var(--muted); }
-.btn.neutral:hover:not(:disabled) { background: #26262b; color: var(--foreground); }
+.btn.neutral:hover:not(:disabled) { background: #d9d7ce; color: var(--foreground); }
 
 .author-panel textarea { width: 100%; resize: vertical; }
 .examples { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 10px; }
 /* example prompts: quiet accent chips */
 .chip {
   font-size: 11.5px; background: var(--accent-tint); border: 0; color: var(--primary);
-  border-radius: 6px; padding: 3px 9px; cursor: pointer;
+  border-radius: 4px; padding: 3px 9px; cursor: pointer;
 }
 .chip:hover { background: var(--accent-tint-hover); }
 .authored { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px; }
 .authored-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .authored-desc { font-size: 12px; color: var(--muted); margin: 0 0 8px; }
-/* code: real mono territory */
-.code { background: #101013; border: 1px solid var(--border); border-radius: 8px; padding: 10px; font-size: 11px; line-height: 1.45; color: var(--foreground); overflow-x: auto; max-height: 220px; font-family: var(--font-mono); }
+/* code: real mono territory — a paper code block, ink on vellum */
+.code { background: #f4f3ec; border: 1px solid var(--border); border-radius: 4px; padding: 10px; font-size: 11px; line-height: 1.45; color: var(--foreground); overflow-x: auto; max-height: 220px; font-family: var(--font-mono); }
 
 /* calm long-running authoring line — pulse dot + verb + elapsed, no spinner */
 .authoring { margin-top: 8px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; line-height: 1.4; display: flex; align-items: center; gap: 8px; }
@@ -757,7 +869,7 @@ footer .warn-txt { color: var(--status-warning); }
 
 /* scrollbars */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; border: 2px solid var(--background); }
+::-webkit-scrollbar-thumb { background: #c8c6bc; border-radius: 5px; border: 2px solid var(--background); }
 
 /* responsive: collapse the rail, then the nav */
 @media (max-width: 1200px) {
@@ -792,7 +904,7 @@ footer .warn-txt { color: var(--status-warning); }
      structural.css). This override must live in THIS file, not structural.css:
      main.jsx evaluates `import App` (which imports structural.css) before
      `import './styles.css'`, so styles.css is emitted last and its
-     unconditional `.bar-dock { position: absolute }` (:1203) wins any
+     unconditional `.bar-dock { position: absolute }` wins any
      equal-specificity tie — media queries add no specificity. */
   .bar-dock {
     position: fixed;
@@ -826,7 +938,7 @@ footer .warn-txt { color: var(--status-warning); }
   /* header / footer already wrap (flex-wrap set elsewhere) — tighten the gap
      and edge padding so a wrapped row can't itself force horizontal scroll. */
   header.top { gap: 8px; padding: 8px 10px; }
-  footer.foot-bar { gap: 10px; padding: 6px 10px; }
+  footer.foot-bar { gap: 0; padding: 0 10px; }
 
   /* tables / code blocks: table auto-layout can force column widths past a
      100% box (a well-known CSS quirk — width:100% doesn't cap min-content
@@ -864,11 +976,12 @@ footer .warn-txt { color: var(--status-warning); }
   font-size: 11px;
   color: var(--muted);
   border: 0;
-  border-radius: 6px;
+  border-radius: 4px;
   padding: 2px 9px;
   background: var(--bar-chip);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
 }
 
 /* quota card: reuses .banner; a calm second line under the headline */
@@ -884,24 +997,23 @@ footer .warn-txt { color: var(--status-warning); }
   width: 300px;
   max-height: 340px;
   overflow-y: auto;
-  background: var(--card-grad);
+  background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, .55);
+  border-radius: 6px;
+  box-shadow: var(--shadow-pop);
   padding: 8px;
   text-align: left;
 }
 .vh-head {
   display: flex; align-items: center; justify-content: space-between;
-  font-size: 11px;
   color: var(--muted-2);
   padding: 2px 2px 8px; border-bottom: 1px solid var(--border);
 }
-.vh-x { font-size: 11px; color: var(--muted); background: var(--bar-chip); border: 0; border-radius: 5px; cursor: pointer; padding: 1px 7px; }
+.vh-x { font-size: 11px; color: var(--muted); background: var(--bar-chip); border: 0; border-radius: 4px; cursor: pointer; padding: 1px 7px; }
 .vh-x:hover { color: var(--foreground); }
 .vh-previewing {
   display: flex; align-items: center; gap: 8px; justify-content: space-between;
-  margin: 8px 0; padding: 6px 8px; border-radius: 6px;
+  margin: 8px 0; padding: 6px 8px; border-radius: 4px;
   background: var(--warn-tint);
   font-size: 11.5px; color: var(--status-warning);
 }
@@ -909,13 +1021,13 @@ footer .warn-txt { color: var(--status-warning); }
 .vh-note { font-size: 11.5px; color: var(--muted-2); padding: 10px 4px; line-height: 1.5; }
 .vh-note.vh-err { color: var(--status-danger); } /* a failed load is a red state */
 .vh-list { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 0; }
-/* resolver-anatomy rows: transparent on the gradient card; active = accent tint + 2px left bar */
+/* resolver-anatomy rows: transparent on the paper card; active = accent tint + 2px left bar */
 .vh-row {
   width: 100%; text-align: left; cursor: pointer;
   background: none; border: 0;
-  border-radius: 6px; padding: 7px 9px;
+  border-radius: 4px; padding: 7px 9px;
 }
-.vh-row:hover { background: rgba(255, 255, 255, .03); }
+.vh-row:hover { background: var(--hover-tint); }
 .vh-row.active { background: var(--accent-tint); box-shadow: inset 2px 0 0 var(--primary); }
 .vh-row-top { display: flex; align-items: center; gap: 8px; }
 .vh-v { font-family: var(--font-mono); font-weight: 600; color: var(--foreground); font-size: 12px; }
@@ -928,7 +1040,7 @@ footer .warn-txt { color: var(--status-warning); }
 .vh-mark::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--primary); flex: 0 0 auto; }
 .vh-row-sub { display: flex; align-items: baseline; gap: 8px; margin-top: 3px; }
 .vh-note-txt { font-size: 11.5px; color: var(--muted); line-height: 1.4; }
-.vh-when { margin-left: auto; font-size: 10.5px; color: var(--muted-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.vh-when { margin-left: auto; font-size: 10.5px; color: var(--muted-2); white-space: nowrap; font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
 
 /* ==================== UI wave 2: projects · ops · checkout · quota ==================== */
 
@@ -942,26 +1054,25 @@ footer .warn-txt { color: var(--status-warning); }
 .proj-chip .name { font-weight: 600; color: var(--foreground); }
 .proj-caret {
   font-size: 10.5px;
-  color: var(--muted-2); background: var(--bar-chip); border: 0; border-radius: 5px; padding: 0 6px;
+  color: var(--muted-2); background: var(--bar-chip); border: 0; border-radius: 4px; padding: 0 6px;
 }
 .proj-chip:hover .proj-caret { color: var(--muted); }
 .proj-menu {
   position: absolute; top: calc(100% + 8px); left: 0; z-index: 50;
-  width: 280px; background: var(--card-grad); border: 1px solid var(--border); border-radius: 10px;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, .55); padding: 10px; text-align: left;
+  width: 280px; background: var(--card); border: 1px solid var(--border); border-radius: 6px;
+  box-shadow: var(--shadow-pop); padding: 10px; text-align: left;
 }
 .proj-menu-head {
-  font-size: 11px;
   color: var(--muted-2); padding-bottom: 6px; border-bottom: 1px solid var(--border);
 }
 .proj-list { list-style: none; margin: 6px 0; padding: 0; display: flex; flex-direction: column; gap: 0; max-height: 240px; overflow-y: auto; }
 /* top-level nav rows: 46px, resolver-anatomy active state (accent tint + 2px left bar) */
 .proj-row {
   width: 100%; min-height: 46px; text-align: left; cursor: pointer; display: flex; align-items: center; gap: 8px;
-  background: none; border: 0; border-radius: 8px; padding: 7px 9px;
+  background: none; border: 0; border-radius: 4px; padding: 7px 9px;
   font-size: 12.5px; color: var(--foreground);
 }
-.proj-row:hover { background: rgba(255, 255, 255, .03); }
+.proj-row:hover { background: var(--hover-tint); }
 .proj-row.active { background: var(--accent-tint); box-shadow: inset 2px 0 0 var(--primary); }
 .proj-row-name { font-weight: 500; }
 /* 'open' marker: green dot + word — never a pill */
@@ -978,7 +1089,7 @@ footer .warn-txt { color: var(--status-warning); }
 .proj-create { display: flex; flex-direction: column; gap: 7px; padding-top: 8px; border-top: 1px solid var(--border); }
 .proj-create label { display: flex; flex-direction: column; gap: 5px; font-size: 10.5px; color: var(--muted-2); }
 .proj-create input {
-  width: 100%; border: 1px solid var(--border); border-radius: 6px; background: var(--input);
+  width: 100%; border: 1px solid var(--border); border-radius: 4px; background: var(--input);
   color: var(--foreground); font: inherit; font-size: 12px; padding: 7px 8px; outline: none;
 }
 .proj-create input:focus { border-color: var(--primary); box-shadow: 0 0 0 2px var(--accent-tint); }
@@ -991,17 +1102,17 @@ footer .warn-txt { color: var(--status-warning); }
 .ws-close { padding: 4px 10px; }
 .ws-metrics { display: flex; gap: 22px; margin-bottom: 14px; flex-wrap: wrap; }
 .ws-metric { display: flex; flex-direction: column; gap: 2px; }
-/* one big number per pane (30px, Inter Tight) */
-.ws-n { font-size: 30px; font-weight: 600; color: var(--foreground); font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
-.ws-k { font-size: 11px; color: var(--muted-2); }
-.ws-jobs-head { font-size: 11px; color: var(--muted-2); margin-bottom: 6px; }
+/* one big number per pane (32px, spec-sheet display face) */
+.ws-n { font-family: var(--font-display); font-size: 32px; font-weight: 600; color: var(--foreground); font-variant-numeric: tabular-nums; letter-spacing: 0; }
+.ws-k { color: var(--muted-2); font-size: 9.5px; }
+.ws-jobs-head { color: var(--muted-2); margin-bottom: 6px; font-size: 10px; }
 .ws-note { font-size: 11.5px; color: var(--muted-2); line-height: 1.5; }
 .ws-job-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.ws-job { display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; background: var(--card-grad); flex-wrap: wrap; }
+.ws-job { display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--border); border-radius: 4px; padding: 7px 10px; background: var(--card); flex-wrap: wrap; }
 .ws-job-main { display: flex; align-items: baseline; gap: 8px; }
 .ws-job-main b { font-family: var(--font-mono); font-size: 12px; color: var(--foreground); }
 .ws-job-kind { font-size: 10.5px; color: var(--muted-2); }
-.ws-job-meta { display: flex; align-items: center; gap: 10px; font-size: 10.5px; color: var(--muted-2); font-variant-numeric: tabular-nums; }
+.ws-job-meta { display: flex; align-items: center; gap: 10px; font-size: 10.5px; color: var(--muted-2); font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
 .ws-job-cost { font-variant-numeric: tabular-nums; }
 
 /* --- item 2: ops drawer (INTERNAL surface, ?ops=1) --- */
@@ -1009,26 +1120,26 @@ footer .warn-txt { color: var(--status-warning); }
   position: fixed; right: 16px; bottom: 16px; z-index: 60;
   width: min(560px, calc(100vw - 32px)); max-height: 60vh; overflow: auto;
   background: var(--card); border: 1px solid var(--border);
-  border-radius: 10px; box-shadow: 0 16px 40px rgba(0, 0, 0, .6); padding: 12px 14px;
+  border-radius: 6px; box-shadow: var(--shadow-pop); padding: 12px 14px;
 }
 .ops-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 .ops-badge {
   font-size: 10.5px; font-weight: 600;
-  color: var(--foreground); background: var(--bar-chip); border-radius: 6px; padding: 2px 8px;
+  color: var(--foreground); background: var(--bar-chip); border-radius: 4px; padding: 2px 8px;
 }
 .ops-title { font-size: 12px; color: var(--foreground); }
-.ops-x { font-size: 11px; color: var(--muted); background: var(--bar-chip); border: 0; border-radius: 5px; cursor: pointer; padding: 1px 7px; }
+.ops-x { font-size: 11px; color: var(--muted); background: var(--bar-chip); border: 0; border-radius: 4px; cursor: pointer; padding: 1px 7px; }
 .ops-x:hover { color: var(--foreground); }
 .ops-head .ops-x:first-of-type { margin-left: auto; }
 .ops-head .ops-x + .ops-x { margin-left: 8px; }
 .ops-note { font-size: 11.5px; color: var(--muted-2); padding: 8px 2px; line-height: 1.5; }
 .ops-note.ops-err { color: var(--status-danger); }
-/* ledger/table spec (22g): 11px micro-header, 32px rows on #1c1c20 hairlines, hover white .03 */
+/* ledger/table spec (22g): mono micro-header, 32px rows on hairlines */
 .ops-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-.ops-table th { text-align: left; font-size: 11px; font-weight: 500; color: var(--muted-2); border-bottom: 1px solid var(--border); padding: 4px 8px; }
+.ops-table th { text-align: left; font-family: var(--font-mono); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; color: var(--muted-2); border-bottom: 1px solid var(--rule-strong); padding: 4px 8px; }
 .ops-table th.num, .ops-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .ops-table td { height: 32px; padding: 0 8px; border-bottom: 1px solid var(--hairline); vertical-align: middle; }
-.ops-table tbody tr:hover { background: rgba(255, 255, 255, .03); }
+.ops-table tbody tr:hover { background: var(--hover-tint); }
 .ops-tid { font-family: var(--font-mono); font-size: 11px; color: var(--foreground); word-break: break-all; }
 .ops-row-off .ops-tid { color: var(--muted-2); }
 .ops-act-cell { text-align: right; white-space: nowrap; }
@@ -1067,8 +1178,9 @@ footer .warn-txt { color: var(--status-warning); }
 .telemetry-chip {
   font-size: 10.5px;
   color: var(--muted); border: 0; background: var(--bar-chip);
-  border-radius: 6px; padding: 1px 8px; white-space: nowrap;
+  border-radius: 4px; padding: 1px 8px; white-space: nowrap;
   font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
 }
 
 /* --- item 4: quota softening (amber advisory posture, never red) --- */
@@ -1077,7 +1189,7 @@ footer .warn-txt { color: var(--status-warning); }
 .state.quota { color: var(--status-warning); }
 .state.quota::before { background: var(--status-warning); border-radius: 1.5px; }
 /* .job.quota carries state via its dot — no colored left border (bar = selection only) */
-.inline-error.quota { color: var(--foreground); background: var(--warn-tint); border-radius: 8px; padding: 8px 10px; }
+.inline-error.quota { color: var(--foreground); background: var(--warn-tint); border-radius: 4px; padding: 8px 10px; }
 .inline-error.quota::before { background: var(--status-warning); border-radius: 1.5px; }
 .inline-error.quota span { color: var(--foreground); }
 
@@ -1103,25 +1215,24 @@ footer .warn-txt { color: var(--status-warning); }
 .ca-state.on::before { border: 0; background: var(--primary); }
 .claude-trigger:hover .ca-state { filter: brightness(1.15); }
 
-/* popover — card, right-anchored (trigger sits at header right) */
+/* popover — paper card, right-anchored (trigger sits at header right) */
 .claude-pop {
   position: absolute; top: calc(100% + 8px); right: 0; z-index: 55;
   width: 320px; max-width: calc(100vw - 32px);
-  background: var(--card); border: 1px solid var(--border); border-radius: 10px;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, .55); padding: 12px; text-align: left;
+  background: var(--card); border: 1px solid var(--border); border-radius: 6px;
+  box-shadow: var(--shadow-pop); padding: 12px; text-align: left;
 }
 .ca-head {
   display: flex; align-items: center; justify-content: space-between;
-  font-size: 11px;
   color: var(--muted-2); padding-bottom: 8px; border-bottom: 1px solid var(--border);
 }
-.ca-x { font-size: 11px; color: var(--muted); background: var(--bar-chip); border: 0; border-radius: 5px; cursor: pointer; padding: 1px 7px; }
+.ca-x { font-size: 11px; color: var(--muted); background: var(--bar-chip); border: 0; border-radius: 4px; cursor: pointer; padding: 1px 7px; }
 .ca-x:hover { color: var(--foreground); }
 .ca-setup, .ca-linked { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
 .ca-copy { font-size: 12.5px; color: var(--muted); line-height: 1.5; margin: 0; }
 .ca-copy b { color: var(--foreground); }
 .ca-steps { margin: 0; padding-left: 18px; font-size: 12px; color: var(--muted); line-height: 1.6; display: flex; flex-direction: column; gap: 2px; }
-.ca-steps code, .ca-copy code { font-family: var(--font-mono); font-size: 11.5px; background: #101013; border: 1px solid var(--border); border-radius: 5px; padding: 0 4px; color: var(--foreground); }
+.ca-steps code, .ca-copy code { font-family: var(--font-mono); font-size: 11.5px; background: #f4f3ec; border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; color: var(--foreground); }
 .ca-field { display: flex; flex-direction: column; gap: 4px; }
 .ca-field-k { font-size: 12px; color: var(--muted); } /* F1: 12px muted label above */
 .ca-field input { width: 100%; }
@@ -1131,7 +1242,7 @@ footer .warn-txt { color: var(--status-warning); }
 .ca-err {
   display: flex; align-items: center; gap: 8px;
   font-size: 11.5px; color: var(--status-warning); background: var(--warn-tint);
-  border: 0; border-radius: 8px; padding: 6px 9px; line-height: 1.4;
+  border: 0; border-radius: 4px; padding: 6px 9px; line-height: 1.4;
 }
 .ca-err::before { content: ''; width: 6px; height: 6px; border-radius: 1.5px; background: var(--status-warning); flex: 0 0 auto; }
 .ca-confirm { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -1143,7 +1254,7 @@ footer .warn-txt { color: var(--status-warning); }
 /* authoring gate — calm nudge in AuthorPanel; never red, template path stays live */
 .author-gate {
   display: flex; align-items: flex-start; gap: 10px;
-  background: var(--warn-tint); border: 0; border-radius: 8px;
+  background: var(--warn-tint); border: 0; border-radius: 4px;
   padding: 10px 12px; margin: 0 0 12px; font-size: 12.5px; color: var(--foreground);
 }
 .author-gate::before { content: ''; width: 6px; height: 6px; border-radius: 1.5px; background: var(--status-warning); flex: 0 0 auto; margin-top: 5px; }
@@ -1157,7 +1268,7 @@ footer .warn-txt { color: var(--status-warning); }
 .ca-choice { display: flex; gap: 4px; margin-top: 10px; }
 .ca-opt {
   flex: 1 1 0; font-size: 11px;
-  padding: 6px 8px; border: 0; border-radius: 6px; background: var(--bar-chip); color: var(--muted);
+  padding: 6px 8px; border: 0; border-radius: 4px; background: var(--bar-chip); color: var(--muted);
   cursor: pointer; text-align: center; white-space: nowrap;
 }
 .ca-opt.on { background: var(--accent-tint); color: var(--primary); }
@@ -1172,8 +1283,9 @@ footer .warn-txt { color: var(--status-warning); }
 
 /* --- real entitlements panel (replaces the placeholder gate) --- */
 .ent-panel {
-  margin-top: 16px; border: 1px solid var(--border); background: var(--card-grad);
-  border-radius: 10px; padding: 14px 16px;
+  margin-top: 16px; border: 1px solid var(--border); background: var(--card);
+  border-radius: 4px; padding: 14px 16px;
+  box-shadow: 0 1px 3px rgba(25, 29, 26, .06);
 }
 .ent-head {
   display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
@@ -1182,14 +1294,14 @@ footer .warn-txt { color: var(--status-warning); }
 .ent-k { font-size: 12px; color: var(--foreground); font-weight: 500; }
 .ent-tier {
   font-size: 11px;
-  color: var(--muted); border: 0; border-radius: 6px; padding: 1px 8px; background: var(--bar-chip);
+  color: var(--muted); border: 0; border-radius: 4px; padding: 1px 8px; background: var(--bar-chip);
 }
 .ent-src { font-size: 11px; color: var(--muted); margin-left: auto; }
 .ent-src.dim { color: var(--muted-2); }
 .ent-rows { display: flex; flex-direction: column; gap: 0; margin: 10px 0 2px; }
 .ent-row {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  padding: 7px 0; border-bottom: 1px solid var(--bar-chip);
+  padding: 7px 0; border-bottom: 1px solid var(--hairline);
 }
 .ent-row:last-child { border-bottom: 0; }
 .ent-label { font-size: 12.5px; color: var(--foreground); }
@@ -1216,10 +1328,10 @@ footer .warn-txt { color: var(--status-warning); }
 .job-meta { font-variant-numeric: tabular-nums; }
 
 /* ==================================================================== */
-/* ============ LEAF STANDARD VOCABULARY (crib-sheet, verbatim) ======= */
+/* ============ LEAF STANDARD VOCABULARY (crib-sheet, restyled) ======= */
 /* Shared class contract: JSX lanes USE these names; this file DEFINES  */
-/* them. Values follow the implementation crib sheet exactly; token     */
-/* vars substitute only where the value is identical.                   */
+/* them. The construction recipes are unchanged; only the identity's    */
+/* values differ (paper grounds, ink rules, the ink-well command bar).  */
 /* ==================================================================== */
 
 /* ---------------- console shell: center column + docked bar ---------------- */
@@ -1233,12 +1345,19 @@ footer .warn-txt { color: var(--status-warning); }
   min-height: 0;
   position: relative; /* anchors .toast and the floating .resolver */
 }
+/* the drawing sheet: paper-white with a 24px engineering grid — the ground
+   every card sits on, and the surface the dark instruments contrast against */
 .center-scroll {
   flex: 1 1 auto;
   overflow-y: auto;
   min-width: 0;
   min-height: 0;
   padding: 20px 26px 140px; /* bottom clearance: content scrolls clear of the floating bar */
+  background-color: var(--sheet);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 24px 24px;
 }
 .bar-dock {
   /* floating island (operator amendment): hovers over the scroll area with a
@@ -1274,111 +1393,124 @@ footer .warn-txt { color: var(--status-warning); }
   font: 500 10.5px var(--font-mono);
   color: var(--muted-2);
   background: var(--keycap);
-  border-radius: 5px;
+  border-radius: 4px;
   padding: 3px 7px;
 }
-.key.hot { color: var(--foreground); background: var(--border); }
-.bar .key { background: var(--bar-chip); } /* inside the SB3 well the chip ground is #1f1f23 */
+.key.hot { color: var(--foreground); background: #d9d7ce; }
 
 /* ---------------- action chips (the ONLY clickable chip forms) ---------------- */
 .chip-act {
   font: 500 12px var(--sans); color: var(--primary);
-  background: var(--accent-tint); border: 0; border-radius: 6px;
+  background: var(--accent-tint); border: 0; border-radius: 4px;
   padding: 3px 9px; cursor: pointer;
 }
 .chip-act:hover { background: var(--accent-tint-hover); }
 .chip-neutral {
   font: 500 12px var(--sans); color: var(--muted);
-  background: rgba(255, 255, 255, .05); border: 0; border-radius: 6px;
+  background: var(--hover-tint); border: 0; border-radius: 4px;
   padding: 3px 9px; cursor: pointer;
 }
-.chip-neutral:hover { background: rgba(255, 255, 255, .09); }
+.chip-neutral:hover { background: var(--hover-tint-strong); }
 .chip-danger {
   font: 500 12px var(--sans); color: var(--status-danger);
-  background: var(--danger-tint); border: 0; border-radius: 6px;
+  background: var(--danger-tint); border: 0; border-radius: 4px;
   padding: 3px 9px; cursor: pointer;
 }
 .chip-danger-confirm {
   font: 500 12px var(--sans); color: #fff;
-  background: var(--status-danger); border: 0; border-radius: 6px;
+  background: var(--status-danger); border: 0; border-radius: 4px;
   padding: 3px 10px; cursor: pointer;
 }
 
-/* the one haloed primary per pane */
+/* the one primary per pane — flat ink shadow, never a glow */
 .primary {
-  border-radius: 7px; background: var(--primary); color: var(--on-accent);
+  border-radius: 4px; background: var(--primary); color: var(--on-accent);
   border: 0; cursor: pointer;
-  box-shadow: 0 6px 18px rgba(34, 197, 94, .3);
+  box-shadow: 0 1px 2px rgba(25, 29, 26, .2);
   font: 500 12.5px var(--sans); padding: 7px 14px;
 }
 .primary:hover { background: var(--primary-hover); }
 
-/* ---------------- SB3 command bar ---------------- */
+/* ---------------- SB3 command bar: the INK WELL ----------------
+   The one deliberately dark chrome surface: the command line, floating over
+   the sheet like an instrument. Everything inside the well (input, caret,
+   chips, keycaps) uses the well palette; the resolver/slash menu that opens
+   ABOVE it stays a paper card. */
 .bar {
-  border: 1px solid var(--border); border-radius: 11px; /* hairline lifts the island off the void */
-  background: var(--bar-well);
+  border: 1px solid var(--well-border); border-radius: 9px;
+  background: var(--well);
   display: flex; flex-direction: column;
-  box-shadow: 0 18px 44px rgba(0, 0, 0, .5); /* floating elevation */
+  box-shadow: 0 18px 40px rgba(23, 27, 24, .32), 0 3px 9px rgba(23, 27, 24, .22);
   position: relative; /* anchors the G2 drop hint overlay */
 }
 /* G2 ingest — the bar is the ONE drop catcher: mid-drag the well border goes
    dashed accent and the hint overlays the well (display-only; drops land on
    the bar itself). */
-.bar.drag { border-style: dashed; border-color: var(--primary); }
+.bar.drag { border-style: dashed; border-color: var(--well-accent); }
 .bar-drop-hint {
   position: absolute; inset: 0; z-index: 2;
   display: flex; align-items: center; justify-content: center;
-  border-radius: 11px; background: var(--bar-well);
-  font-size: 12.5px; color: var(--primary);
+  border-radius: 9px; background: var(--well);
+  font-size: 12.5px; color: var(--well-accent);
   pointer-events: none;
 }
 .bar-input { display: flex; align-items: center; gap: 10px; padding: 13px 16px 9px; }
-.bar-caret { font: 600 13px var(--font-mono); color: var(--primary); } /* the accent prompt caret */
+.bar-caret { font: 600 13px var(--font-mono); color: var(--well-accent); } /* the green prompt caret */
+/* the command line reads in mono — typed intent looks like a command */
 .bar-input input, .bar-input .bar-field {
   flex: 1; border: 0; outline: 0; background: transparent;
-  font-family: var(--sans); font-size: 13px; color: var(--foreground);
+  font-family: var(--font-mono); font-size: 12.5px; color: var(--well-text);
 }
-.bar-placeholder { flex: 1; font-size: 13px; color: #52525b; } /* "Find, act, or build..." */
-.bar-input input::placeholder, .bar-input .bar-field::placeholder { color: #52525b; }
+.bar-placeholder { flex: 1; font-size: 12.5px; font-family: var(--font-mono); color: var(--well-faint); } /* "Find, act, or build..." */
+.bar-input input::placeholder, .bar-input .bar-field::placeholder { color: var(--well-faint); }
 .bar-controls { display: flex; align-items: center; gap: 9px; padding: 0 13px 12px; }
 .bar-add {
   width: 20px; height: 20px; display: inline-flex; align-items: center;
-  justify-content: center; font-size: 13px; color: var(--muted-2);
-  background: var(--bar-chip); border: 0; border-radius: 6px; cursor: pointer;
+  justify-content: center; font-size: 13px; color: var(--well-dim);
+  background: var(--well-chip); border: 0; border-radius: 4px; cursor: pointer;
 }
-.bar-add:hover { color: var(--muted); }
+.bar-add:hover { color: var(--well-text); }
 .bar-scope {
-  font-family: var(--sans); font-size: 11px; color: var(--muted-2); background: var(--bar-chip);
-  border: 0; border-radius: 6px; padding: 3px 10px; cursor: pointer;
+  font-family: var(--font-mono); font-size: 10.5px; color: var(--well-dim); background: var(--well-chip);
+  border: 0; border-radius: 4px; padding: 3px 10px; cursor: pointer;
 }
 /* rendered as <button>s now — strip the UA chrome (font comes from the rules above) */
 button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 /* passive context label — no cursor:pointer: the chip advertises nothing it
    can't do (the project switcher lives in the header) */
-.bar-proj { margin-left: auto; font-size: 11.5px; color: var(--muted-2); background: none; border: 0; }
-.bar-lanes { font-size: 11px; color: #3f3f46; } /* "find - act - build" lane hint */
+.bar-proj { margin-left: auto; font-size: 11px; font-family: var(--font-mono); color: var(--well-faint); background: none; border: 0; }
+.bar-lanes { font-size: 11px; color: var(--well-faint); } /* "find - act - build" lane hint */
+/* well-scoped keycaps + the Run chip (the resolver above keeps paper values) */
+.bar .bar-input .key, .bar .bar-controls .key { background: var(--well-chip); color: var(--well-dim); }
+.bar .bar-input .key.hot, .bar .bar-controls .key.hot { background: var(--well-accent-tint); color: var(--well-accent); }
+.bar .bar-controls .chip-act { background: var(--well-accent); color: #08140d; font-weight: 600; }
+.bar .bar-controls .chip-act:hover { background: #46d182; }
+.bar .converse-note { color: var(--well-dim); }
+.bar .converse-note .dim { color: var(--well-dim); }
 /* focus - the bar's standing exception to the halo rule: no drop halo */
 .bar:focus-within {
-  border-color: rgba(34, 197, 94, .75);
-  box-shadow: 0 0 0 3px var(--bar-focus-ring);
+  border-color: rgba(56, 194, 116, .7);
+  box-shadow: 0 0 0 3px rgba(56, 194, 116, .13), 0 18px 40px rgba(23, 27, 24, .32);
 }
 
-/* ---------------- SB3 state strips (ride above the well) ---------------- */
+/* ---------------- SB3 state strips (ride above the well, on the sheet) ---------------- */
 .strip-running { display: flex; align-items: center; gap: 9px; }
 .strip-running .verb { flex: 1; font-size: 12.5px; font-weight: 500; color: var(--foreground); }
 .strip-bar { height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; }
 .strip-bar > i { display: block; height: 100%; background: var(--primary); } /* width = real % only */
 .strip-decision {
   display: flex; align-items: center; gap: 10px; padding: 10px 13px;
-  border: 1px solid oklch(0.8 0.14 85 / .4); border-radius: 9px;
-  background: color-mix(in oklab, oklch(0.8 0.14 85) 8%, #0f0f10);
+  border: 1px solid rgba(143, 95, 6, .38); border-radius: 6px;
+  background: color-mix(in oklab, var(--status-warning) 9%, #ffffff);
   font-size: 12.5px; color: var(--foreground);
+  box-shadow: 0 4px 14px rgba(25, 29, 26, .1);
 }
 .strip-failed {
   display: flex; align-items: center; gap: 10px; padding: 10px 13px;
-  border: 1px solid oklch(0.62 0.19 25 / .4); border-radius: 9px;
-  background: color-mix(in oklab, oklch(0.62 0.19 25) 8%, #0f0f10);
+  border: 1px solid rgba(180, 35, 24, .38); border-radius: 6px;
+  background: color-mix(in oklab, var(--status-danger) 8%, #ffffff);
   font-size: 12.5px; color: var(--foreground);
+  box-shadow: 0 4px 14px rgba(25, 29, 26, .1);
 }
 
 /* ---------------- O2 resolver (menus/completions anatomy) ---------------- */
@@ -1391,24 +1523,24 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   max-height: 320px; overflow-y: auto;
 }
 .resolver {
-  border: 1px solid var(--border); border-radius: 9px;
-  background: var(--card-grad); overflow: hidden;
-  box-shadow: 0 18px 44px rgba(0, 0, 0, .45);
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--card); overflow: hidden;
+  box-shadow: var(--shadow-pop);
 }
-.resolver-header { font-size: 11px; color: var(--muted-2); padding: 9px 13px 4px; }
+.resolver-header { color: var(--muted-2); padding: 9px 13px 4px; }
 .resolver-row {
   display: flex; align-items: center; gap: 10px; padding: 8px 13px;
-  border-top: 1px solid var(--border); cursor: pointer;
+  border-top: 1px solid var(--hairline); cursor: pointer;
   width: 100%; text-align: left; background: none; color: inherit;
   border-left: 0; border-right: 0; border-bottom: 0;
 }
-.resolver-row:hover { background: rgba(255, 255, 255, .03); }
-.resolver-row.active { background: rgba(34, 197, 94, .09); }
+.resolver-row:hover { background: var(--hover-tint); }
+.resolver-row.active { background: var(--accent-tint); }
 .resolver-row .lbar { width: 2px; align-self: stretch; background: transparent; flex: none; }
 .resolver-row.active .lbar { background: var(--primary); border-radius: 1px; }
 .resolver-row .label { flex: 1; font-size: 12.5px; color: var(--muted); }
 .resolver-row.active .label { color: var(--foreground); }
-.resolver-row .count { font-size: 11px; color: #52525b; }
+.resolver-row .count { font-size: 11px; color: var(--muted-2); font-family: var(--font-mono); }
 
 /* ---------------- NT2 toast (completed event) ---------------- */
 .toast {
@@ -1418,8 +1550,8 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   bottom: 132px; z-index: 80; /* clears the floating bar island */
   display: flex; align-items: center; gap: 9px;
   font: 500 12px var(--sans); color: var(--muted);
-  background: var(--keycap); border-radius: 7px; padding: 7px 13px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
+  background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 7px 13px;
+  box-shadow: var(--shadow-pop);
   /* lifecycle animation comes from .enter/.exit (Toast.jsx owns the timing) */
 }
 .toast::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--primary); flex: none; }
@@ -1431,8 +1563,8 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
    .drawer-fixed is the backup helper (fixed right panel over aside.rail). */
 .drawer {
   width: 300px;
-  background: #111113; border-left: 1px solid var(--border);
-  box-shadow: -18px 0 44px rgba(0, 0, 0, .5);
+  background: var(--card); border-left: 1px solid var(--border);
+  box-shadow: -18px 0 44px rgba(25, 29, 26, .14);
   display: flex; flex-direction: column;
   z-index: 70;
 }
@@ -1458,12 +1590,13 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 /* ---------------- status rows (rail events) ---------------- */
 .status-row { display: flex; align-items: center; gap: 8px; padding: 7px 8px; }
 .status-row .text { flex: 1; font-size: 12px; color: var(--muted); }
-.status-row .when { font-size: 11px; color: var(--muted-2); font-variant-numeric: tabular-nums; }
+.status-row .when { font-size: 11px; color: var(--muted-2); font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
 
 /* ---------------- ledger / fleet table (22g) ---------------- */
 .ledger-header {
   display: grid; grid-template-columns: 80px 1fr 130px 160px; gap: 14px;
-  padding: 2px 12px 8px; font-size: 11px; color: var(--muted-2);
+  padding: 2px 12px 8px; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .07em; color: var(--muted-2);
 }
 .ledger-day {
   display: flex; align-items: center; height: 26px; padding: 0 12px;
@@ -1473,16 +1606,16 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   display: grid; grid-template-columns: 80px 1fr 130px 160px; gap: 14px;
   align-items: center; height: 32px; padding: 0 12px; border-top: 1px solid var(--hairline);
 }
-.ledger-row:hover { background: rgba(255, 255, 255, .03); }
+.ledger-row:hover { background: var(--hover-tint); }
 .ledger-time { font: 400 11px var(--font-mono); color: var(--muted-2); font-variant-numeric: tabular-nums; }
 .ledger-event { display: flex; align-items: center; gap: 9px; font-size: 12.5px; color: var(--muted); min-width: 0; }
 .ledger-ref { font: 400 11px var(--font-mono); color: var(--muted-2); text-align: right; }
-.ledger-row.selected { background: rgba(34, 197, 94, .07); box-shadow: inset 2px 0 0 var(--primary); }
+.ledger-row.selected { background: var(--accent-tint); box-shadow: inset 2px 0 0 var(--primary); }
 
 /* ---------------- L1 skeleton loading (static - no shimmer, no spinners) ---------------- */
 .skeleton-row {
-  height: 34px; border: 1px solid var(--border); border-radius: 7px;
-  background: var(--card-grad); opacity: .4;
+  height: 34px; border: 1px solid var(--border); border-radius: 4px;
+  background: var(--card); opacity: .55;
 }
 .skeleton-row:last-child { width: 70%; }
 /* indeterminate loading line: pulse dot + verb */
@@ -1510,19 +1643,19 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 .toggle, .switch input {
   appearance: none; -webkit-appearance: none;
   width: 32px; height: 18px; border-radius: 9px;
-  background: var(--bar-chip); border: 0; outline: none;
+  background: #d3d1c7; border: 0; outline: none;
   position: relative; cursor: pointer; flex: none; margin: 0;
   transition: background 180ms ease;
 }
 .toggle::before, .switch input::before {
   content: ''; position: absolute; top: 2px; left: 2px;
   width: 14px; height: 14px; border-radius: 50%;
-  background: var(--muted-2);
+  background: var(--card);
   transition: transform 180ms ease, background 180ms ease;
 }
 .toggle:checked, .switch input:checked { background: var(--primary); }
 .toggle:checked::before, .switch input:checked::before { transform: translateX(14px); background: var(--on-accent); }
-.toggle:focus-visible, .switch input:focus-visible { box-shadow: 0 0 0 3px rgba(34, 197, 94, .12); }
+.toggle:focus-visible, .switch input:focus-visible { box-shadow: 0 0 0 3px var(--bar-focus-ring); }
 
 /* ---------------- M1 motion (glide) ---------------- */
 :root { --m-enter: 520ms; --m-exit: 180ms; --m-curve: cubic-bezier(.22, 1, .36, 1); --m-stagger: 20ms; }
@@ -1548,12 +1681,13 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
      here also removed the Run button and the Enter keycap (both live in this
      row), and an iPhone 12 in PORTRAIT is ~664px CSS tall, so the most common
      demo phone showed a bare input with no primary action. Hide only the
-     decorative children; keep Run + the Enter hint, right-aligned by :1287. */
+     decorative children; keep Run + the Enter hint, right-aligned by the key
+     rule below. */
   .bar-controls { padding: 0 13px 8px; gap: 8px; }
   .bar-controls .bar-add,
   .bar-controls .bar-scope,
   .bar-controls .bar-proj { display: none; }
-  /* .bar-proj (:1302) carries the margin-left:auto that pushes the keycap + Run
+  /* .bar-proj carries the margin-left:auto that pushes the keycap + Run
      right; hiding it would left-bunch them, so hand the auto margin to the
      keycap, which is the next surviving child. */
   .bar-controls .key { margin-left: auto; }
@@ -1564,16 +1698,17 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 .bar .primary, .bar-dock .primary { box-shadow: none; }
 
 /* ---------------- Converse panel (agent tier — ADDITIVE ONLY) ----------------
-   The tier-2 conversational surface, styled inside the standard: card gradient
-   + hairline border like every pane; assistant text is plain foreground prose;
-   tool activity is quiet mono chips on the bar-chip ground; confirm cards
-   reuse .strip-decision / .cap / .chip-act verbatim (RoutePanel's language). */
+   The tier-2 conversational surface, styled inside the identity: paper card
+   + hairline border like every pane; assistant text is plain ink prose;
+   tool activity is quiet mono chips; confirm cards reuse .strip-decision /
+   .cap / .chip-act verbatim (RoutePanel's language). */
 .converse-card {
-  background: var(--card-grad);
+  background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 11px;
+  border-radius: 4px;
   margin-top: 14px;
   overflow: hidden;
+  box-shadow: 0 1px 3px rgba(25, 29, 26, .06);
 }
 .converse-head {
   display: flex; align-items: center; gap: 9px;
@@ -1597,7 +1732,7 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   max-width: 85%;
   color: var(--foreground);
   background: var(--accent-tint);
-  border-radius: 9px;
+  border-radius: 6px;
   padding: 7px 11px;
 }
 .converse-msg.assistant { color: var(--foreground); }
@@ -1607,7 +1742,7 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   font: 500 11.5px var(--font-mono);
   color: var(--muted);
   background: var(--bar-chip);
-  border-radius: 6px;
+  border-radius: 4px;
   padding: 3px 9px;
   max-width: 100%;
 }
@@ -1637,7 +1772,7 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
    chip cannot be judged, so it reads as a refusal, not an overflow count. */
 .customize-incomplete {
   display: block; margin-top: 4px; font-size: 11px; font-weight: 600;
-  color: var(--danger, #b3261e);
+  color: var(--danger, #b42318);
 }
 .converse-pending {
   display: grid;
@@ -1666,7 +1801,7 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   flex: 1; border: 0; outline: 0; background: transparent;
   font-family: var(--sans); font-size: 13px; color: var(--foreground);
 }
-.converse-input input::placeholder { color: #52525b; }
+.converse-input input::placeholder { color: var(--muted-2); }
 .converse-input input:disabled { color: var(--muted-2); }
 /* ============================================================
    M2 — demo-default chrome, focus ring, route-title, banner
@@ -1679,7 +1814,7 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 
 /* Shared keyboard :focus-visible accent ring (M-g / a11y). Keyboard focus was
    invisible across the interactive chips/buttons/rows; one consistent
-   dark-emerald ring makes it perceivable. Pointer focus stays quiet (only
+   green-ink ring makes it perceivable. Pointer focus stays quiet (only
    :focus-visible, never :focus). */
 .chip-act:focus-visible,
 .btn:focus-visible,
@@ -1687,8 +1822,8 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 .rail-row:focus-visible,
 .legend-row:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px var(--background, #0f0f11), 0 0 0 4px var(--primary);
-  border-radius: 6px;
+  box-shadow: 0 0 0 2px var(--card), 0 0 0 4px var(--primary);
+  border-radius: 4px;
 }
 
 /* Persistent guided-demo banner (M2 item 3 / M-c). NR ongoing-condition
@@ -1702,7 +1837,7 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   border: 0;
   border-bottom: 1px solid var(--border);
   border-radius: 0;
-  background: color-mix(in oklab, var(--status-warning) 5%, var(--background));
+  background: color-mix(in oklab, var(--status-warning) 7%, var(--sheet));
 }
 .demo-banner::before {
   content: ''; width: 6px; height: 6px; border-radius: 1.5px;
@@ -1714,12 +1849,12 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 
 /* ---- phone command-bar pin (must be LAST) ----
    The @media (max-width: 980px) `.bar-dock { position: fixed }` override above
-   loses to the unconditional `.bar-dock { position: absolute }` at :1221 —
-   same file, same specificity, and the unconditional rule is emitted LATER, so
-   source order decides. Re-declare the pin here, after every competing rule,
-   so the collapsed single-column layout actually keeps the command bar (the
-   product's only input surface) on the viewport instead of anchoring it to the
-   bottom of a tall, content-sized .center-col. */
+   loses to the unconditional `.bar-dock { position: absolute }` in the crib
+   section — same file, same specificity, and the unconditional rule is emitted
+   LATER, so source order decides. Re-declare the pin here, after every
+   competing rule, so the collapsed single-column layout actually keeps the
+   command bar (the product's only input surface) on the viewport instead of
+   anchoring it to the bottom of a tall, content-sized .center-col. */
 @media (max-width: 980px) {
   .bar-dock {
     position: fixed;
@@ -1751,61 +1886,88 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
        both stylesheets are global in the bundle. Every rule here is scoped
        under .app and explicitly resets the landing.css properties that would
        otherwise leak in; unscoped tc-product rules broke /try by growing its
-       nav over the workspace tab strip (PR #824 round 2). ----------------- */
+       nav over the workspace tab strip (PR #824 round 2).
+
+       Identity: DRAWING-SET TABS. The profiles read as the tabs of a drawing
+       set — the selected tab is paper, connects flush to the frame below it
+       (its -1px bottom margin covers the frame's top border), and carries a
+       2px green ink strip on its top edge. The continuity rail rides ABOVE
+       the tabs as a mono title-block strip (visual order only; DOM and the
+       F-8 node-identity contract are untouched). ----------------- */
 .app .tc-product-nav {
   position: static; inset: auto; z-index: auto; min-height: 0;
   background: transparent; border-bottom: 0;
-  display: flex; flex-direction: column; align-items: stretch; gap: 6px;
-  margin: 10px 0 4px; padding: 0;
+  display: flex; flex-direction: column; align-items: stretch; gap: 0;
+  margin: 14px 0 0; padding: 0;
 }
-.app .tc-product-tabs { display: flex; min-width: 0; gap: 6px; flex-wrap: wrap; }
+.app .tc-product-tabs { display: flex; min-width: 0; gap: 4px; flex-wrap: wrap; position: relative; z-index: 1; }
 .app .tc-product-tabs [role="tab"] {
   min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
-  padding: 6px 12px; border: 1px solid var(--border); border-radius: 8px;
-  background: var(--card-grad); color: var(--foreground); cursor: pointer;
+  padding: 7px 14px 8px; border: 1px solid transparent; border-bottom: 0;
+  border-radius: 5px 5px 0 0;
+  background: transparent; color: var(--muted); cursor: pointer;
   font: inherit; text-align: left;
 }
-.app .tc-product-tabs [role="tab"]:hover { color: var(--foreground); background: var(--card-grad); }
-.app .tc-product-tabs [role="tab"][aria-selected="true"] { border-color: var(--primary); color: var(--foreground); background: var(--card-grad); }
+.app .tc-product-tabs [role="tab"]:hover { color: var(--foreground); background: var(--hover-tint); }
+.app .tc-product-tabs [role="tab"][aria-selected="true"] {
+  border-color: var(--border); color: var(--foreground); background: var(--card);
+  margin-bottom: -1px; padding-bottom: 9px;
+  box-shadow: inset 0 2px 0 var(--primary); /* the set-tab's green ink strip */
+}
 .app .tc-product-tabs [role="tab"]:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-.app .tc-product-tabs [role="tab"] > span { font: inherit; }
-.app .tc-product-tabs [role="tab"] small { color: var(--muted); font-size: 11px; }
+.app .tc-product-tabs [role="tab"] > span { font: 600 12.5px var(--font-sans); }
+.app .tc-product-tabs [role="tab"] small {
+  color: var(--muted-2); font-family: var(--font-mono); font-size: 9px;
+  text-transform: uppercase; letter-spacing: .06em;
+}
 .app .tc-product-tabs [role="tab"] small[data-state="available"] { color: var(--status-success); }
 .app .tc-product-tabs [role="tab"] small[data-state="unavailable"] { color: var(--status-danger); }
 .app .tc-product-shared { display: block; margin-left: 0; white-space: normal; color: var(--muted-2); font-size: 12px; }
-/* F-8 continuity rail, app theme: same structure as landing.css, colors from
-   the app's own tokens. Keyframes are defined once in landing.css. */
-.app .tc-continuity { margin-left: auto; color: var(--muted-2); font-size: 12px; }
-.app .tc-continuity-label { color: var(--muted-2); }
-.app .tc-continuity-item strong { color: var(--muted); font-weight: 600; }
-.app .tc-product-tabs [role="tab"][aria-selected="true"] { box-shadow: inset 0 -2px 0 var(--status-success); }
+/* F-8 continuity rail as a title-block strip above the tabs: mono caps label,
+   ink values. Same DOM, same node identity, same pulse contract — the pulse
+   just flashes green INK here (app-scoped keyframes; landing.css keeps its
+   own color for /try). Keyframe base rules live in landing.css. */
+.app .tc-continuity {
+  order: -1; margin: 0 0 10px auto;
+  color: var(--muted-2); font-family: var(--font-mono); font-size: 10px;
+}
+.app .tc-continuity-label { color: var(--muted-2); letter-spacing: .1em; }
+.app .tc-continuity-item strong { color: var(--foreground); font-weight: 500; }
+.app .tc-continuity[data-pulse="true"] .tc-continuity-item { animation: appContinuityPulse .6s ease; }
+@keyframes appContinuityPulse {
+  0% { color: #1e6b45; }
+  100% { color: inherit; }
+}
 .app .tc-product-frame {
   position: static; inset: auto; z-index: auto; overflow: visible;
-  border: 1px solid var(--border); border-radius: 10px; background: var(--card-grad);
-  padding: 16px 18px; margin-bottom: 10px; display: flex; flex-direction: column; gap: 10px;
+  border: 1px solid var(--border); border-radius: 0 4px 4px 4px; background: var(--card);
+  padding: 18px 20px; margin-bottom: 12px; display: flex; flex-direction: column; gap: 10px;
+  box-shadow: 0 1px 3px rgba(25, 29, 26, .06);
 }
 .app .tc-product-frame-head {
   display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
-  color: var(--muted); font-size: 12px; text-transform: none; letter-spacing: normal;
+  color: var(--muted-2); font-family: var(--font-mono); font-size: 10px;
+  text-transform: uppercase; letter-spacing: .07em;
 }
-.app .tc-product-frame-head strong { color: inherit; font-weight: 600; }
+.app .tc-product-frame-head strong { color: var(--muted); font-weight: 600; }
 .app .tc-product-frame h1 {
   max-width: none; margin: 0; color: var(--foreground);
-  font-family: inherit; font-size: 20px; font-weight: 600; line-height: 1.3; letter-spacing: normal;
+  font-family: var(--font-display); font-size: 24px; font-weight: 600; line-height: 1.15; letter-spacing: 0;
 }
 .app .tc-product-frame p { max-width: none; margin: 0; color: var(--muted); font-size: 14px; line-height: 1.5; }
 .app .tc-product-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 0; }
 .app .tc-product-columns > div { padding: 0; border: 0; border-radius: 0; background: transparent; }
 .app .tc-product-columns h2 {
-  margin: 0 0 4px; color: var(--muted-2); font-family: inherit;
-  font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em;
+  margin: 0 0 4px; color: var(--muted-2); font-family: var(--font-mono);
+  font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em;
 }
 .app .tc-product-columns ul { display: block; margin: 0; padding: 0 0 0 18px; list-style: disc; color: var(--muted); }
 .app .tc-product-columns li { padding: 0; border-radius: 0; background: transparent; color: var(--muted); font-size: 13px; }
 .app .tc-product-note { padding-left: 0; border-left: 0; font-size: 12px; color: var(--muted-2); }
 .app .tc-product-cad-link {
-  align-self: flex-start; margin-top: 0; padding: 6px 12px; border-radius: 8px;
-  border: 1px solid var(--primary); background: transparent; color: var(--primary);
-  cursor: pointer; font: inherit;
+  align-self: flex-start; margin-top: 0; padding: 7px 14px; border-radius: 4px;
+  border: 0; background: var(--primary); color: var(--on-accent);
+  cursor: pointer; font: 600 12px var(--font-sans);
+  box-shadow: 0 1px 2px rgba(25, 29, 26, .2);
 }
-.app .tc-product-cad-link:hover { background: transparent; color: var(--primary-hover); border-color: var(--primary-hover); }
+.app .tc-product-cad-link:hover { background: var(--primary-hover); color: var(--on-accent); }

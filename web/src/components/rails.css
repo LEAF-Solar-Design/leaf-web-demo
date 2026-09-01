@@ -11,20 +11,20 @@
 .rail-ledger { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
 .rail-day {
   display: flex; align-items: center; height: 26px;
-  border-top: 1px solid var(--keycap);
+  border-top: 1px solid var(--border);
   font-size: 11px; color: var(--muted-2);
 }
 .rail-row {
   display: flex; align-items: center; gap: 8px;
   height: 32px; padding: 0 2px; width: 100%;
-  border: 0; border-top: 1px solid var(--keycap);
+  border: 0; border-top: 1px solid var(--border);
   background: none; text-align: left; color: inherit; font: inherit;
 }
 button.rail-row { cursor: pointer; }
-.rail-row:hover { background: rgba(255, 255, 255, .03); }
+.rail-row:hover { background: var(--hover-tint, rgba(25, 29, 26, .04)); }
 /* SL1 selected/current row: 2px accent left bar + accent tint */
 .rail-row.current {
-  background: rgba(34, 197, 94, .07);
+  background: var(--accent-tint);
   box-shadow: inset 2px 0 0 var(--primary);
 }
 .rail-ev {
@@ -58,7 +58,7 @@ button.rail-row { cursor: pointer; }
    lead word is styles.css `.banner b`) --- */
 .banner-rest { color: var(--muted); min-width: 0; }
 .banner-tail { margin-left: auto; display: flex; align-items: center; gap: 10px; white-space: nowrap; }
-.banner-since { font-size: 11px; color: #52525b; }
+.banner-since { font-size: 11px; color: var(--muted-2); }
 .banner-reason {
   font-family: var(--font-mono); font-size: 11px; color: var(--muted-2);
   max-width: 340px; overflow: hidden; text-overflow: ellipsis;

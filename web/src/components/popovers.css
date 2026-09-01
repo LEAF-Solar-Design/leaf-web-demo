@@ -79,8 +79,8 @@ button.key:disabled { opacity: .6; cursor: default; }
   font: inherit; background: none; border: 0; border-top: 1px solid var(--border);
   border-radius: 0; padding: 8px 8px 8px 0; cursor: pointer;
 }
-.vh-list .vh-row:hover { background: rgba(255, 255, 255, .03); }
-.vh-list .vh-row.active { background: rgba(34, 197, 94, .09); }
+.vh-list .vh-row:hover { background: var(--hover-tint, rgba(25, 29, 26, .04)); }
+.vh-list .vh-row.active { background: var(--accent-tint); }
 .vh-list .vh-row .lbar { width: 2px; align-self: stretch; flex: 0 0 auto; }
 .vh-list .vh-row.active .lbar { background: var(--primary); border-radius: 1px; }
 .vh-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
