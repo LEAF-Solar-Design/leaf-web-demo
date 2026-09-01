@@ -125,6 +125,14 @@ describe.skipIf(!REAL_BUILD_REQUESTED)('CAD engine real-build worker (day-3 spik
     expect(loaded.type).toBe('documentLoaded')
     expect(loaded.documentId).toBe('one_line.dxf')
 
+    // Engine receipt first: the worker names the build it actually ran.
+    // This is the positive proof the run exercised the real compiled
+    // engine — if the worker's env switch ever regressed, this suite would
+    // otherwise go green against the stand-in while claiming real-build
+    // coverage (the same silent-mode failure class the day-2 file's
+    // stand-in pin closes in the other direction).
+    expect(loaded.roundTrip.engine).toBe('real-wasm')
+
     // Entity comparison against the real compiled engine's parser/writer —
     // the load-bearing proof the real build round-trips the day-1 fixture's
     // single LINE entity correctly (see the day-3 spike doc's "First
