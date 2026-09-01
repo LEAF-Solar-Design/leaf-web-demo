@@ -22,7 +22,13 @@ import './panels.css'
 function fmtUntil(iso) {
   if (!iso) return null
   const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return { rel: String(iso), abs: null }
+  // An `expires` we cannot parse is not a horizon either, and echoing it raw
+  // put the string itself where a duration goes ("until banana"). It is a real
+  // record shape, not a hypothetical: `looksStale` already treats an
+  // unparseable expiry as elapsed for exactly this reason, so the rail said
+  // "until banana … this lease looks expired" in one breath. Same answer as the
+  // elapsed case — no horizon, and let the sibling note carry the meaning.
+  if (Number.isNaN(d.getTime())) return { rel: null, abs: null }
   const abs = d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
   const remainingMs = d.getTime() - Date.now()
   // At or past expiry there is no horizon left to name: a null `rel` is what

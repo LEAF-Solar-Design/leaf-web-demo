@@ -58,6 +58,23 @@ describe('CheckoutChip expiry horizon', () => {
     expect(chip.querySelector('.t-rel')).toBe(null)
   })
 
+  it('names no horizon for an expires it cannot parse', () => {
+    // Not hypothetical: `looksStale` treats an unparseable expiry as elapsed
+    // precisely because such records exist, so echoing the raw string made the
+    // rail say "until banana" and "this lease looks expired" at once.
+    render(<CheckoutChip checkout={{ holder: HOLDER, expires: 'banana' }} />)
+    const chip = screen.getByRole('status')
+    expect(chip.textContent).toContain(`Editing locked by ${HOLDER}`)
+    expect(chip.textContent).not.toContain('until')
+    expect(chip.textContent).not.toContain('banana')
+    expect(chip.querySelector('.t-rel')).toBe(null)
+  })
+
+  it('names no horizon when the record carries no expires at all', () => {
+    render(<CheckoutChip checkout={{ holder: HOLDER }} />)
+    expect(screen.getByRole('status').textContent).not.toContain('until')
+  })
+
   it('rounds a lease with seconds left UP to a live horizon, not down to elapsed', () => {
     // Boundary between the two states above: 20s left is live, and rounding
     // minutes before testing the sign would call it expired.
