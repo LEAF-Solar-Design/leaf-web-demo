@@ -83,8 +83,8 @@ import useWorkspaceController from './controllers/workspace/useWorkspaceControll
 import useCatalogController from './controllers/catalog/useCatalogController.js'
 import {
   resolveCheckoutDrawingId,
-  storeDrawingIdForSource,
 } from './controllers/checkout/createCheckoutController.js'
+import { useDrawingIdentity } from './drawing/DrawingIdentityProvider.jsx'
 
 // Calm layer palette, re-derived at higher lightness for the DARK CADViewport
 // canvas (--cv-bg #0f0f11) — same hue spacing as the retired light-paper set so
@@ -154,9 +154,6 @@ const devControls = (() => {
   return new URLSearchParams(window.location.search).get('dev') === '1'
 })()
 
-// The run's dwg (intake source name) — unchanged from the original demo.
-const DEFAULT_DRAWING_ID = 'rooftop_demo'
-
 // A self-minted author-authority turn is reusable for this long — a wide
 // margin under the server's TURN_MAX_S default of 300s (server/turn_runner.py).
 const AUTHOR_AUTHORITY_TTL_MS = 120_000
@@ -173,13 +170,6 @@ const agentBannerFor = (e) => {
   if (kind === 'rate_limited') return { kind, message: 'AI rate-limited — routed deterministically; retry shortly.' }
   return { kind: 'unreachable', message: 'AI assistant unavailable — routed deterministically.' }
 }
-
-// The bundled rooftop is an intake source named `rooftop_demo`, while default
-// writes and checkout state use the server's well-known `demo` store drawing.
-// Uploaded drawings retain their own id across both surfaces.
-const DRAWING_SOURCE =
-  new URLSearchParams(window.location.search).get('drawing') || DEFAULT_DRAWING_ID
-const REQUESTED_DRAWING_ID = storeDrawingIdForSource(DRAWING_SOURCE)
 
 // Collapsible left-rail section (keeps the classic catalog reachable but
 // secondary to the prompt box — the primary path).
@@ -222,6 +212,19 @@ function SignedOutGate({ onDemo, onSignIn }) {
 
 
 export default function App() {
+  // W1 (convergence): the console's drawing identity is now owned by
+  // DrawingIdentityProvider, seeded from the SAME rule these two module
+  // constants encoded — the bundled rooftop is an intake source named
+  // `rooftop_demo`, while default writes and checkout state use the server's
+  // well-known `demo` store drawing, and `?drawing=` names its own. Uploaded
+  // drawings retain their own id across both surfaces.
+  //
+  // The local names are preserved DELIBERATELY: every call site below (and
+  // web/src/app-wiring.test.mjs's pins) reads exactly as it did before, so
+  // this change moves ownership and nothing else. The console keeps its
+  // module-const behavior — the seed is frozen at mount and nothing in this
+  // shell promotes a new identity yet.
+  const { drawingId: REQUESTED_DRAWING_ID, source: DRAWING_SOURCE } = useDrawingIdentity()
   const [mock, setMock] = useState(config.mockDefault)
   const [loadErr, setLoadErr] = useState(null)
   const [intakeRetryKey, setIntakeRetryKey] = useState(0) // X3 Retry — bumping re-runs the intake load effect
