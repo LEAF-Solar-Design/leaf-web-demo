@@ -16,7 +16,11 @@
 import type { ToolPackage } from "../ports/index.js";
 
 const KEBAB = /^[a-z0-9]+(-[a-z0-9]+)*$/;
-const SEMVER = /^\d+\.\d+\.\d+([-+][0-9A-Za-z-.]+)*$/;
+// One optional prerelease then one optional build-metadata segment (the real
+// semver shape). The previous `([-+]...)*` repetition was exponential-backtrack
+// bait on inputs like "0.0.0+" followed by many "--" pairs, and never matched
+// anything valid that this does not.
+const SEMVER = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
 // Pragmatic ISO-8601 (date, or date-time with optional fractional seconds + tz).
 const ISO8601 = /^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})?)?$/;
 

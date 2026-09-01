@@ -51,7 +51,6 @@ from customization_models import ChangeSet, ChangeSetNotFoundError, ChangeState
 from customization_postgres_store import PostgresCustomizationStore
 from customization_store import CustomizationRepository, SQLiteCustomizationStore
 from platform_release_policy import PlatformReleasePolicyError, classify_path, load_policy
-from tenant_id_validator import is_valid_tenant_id
 
 
 CONTRACT = "leaf.customization.v1"
@@ -136,11 +135,17 @@ def _secret(name: str) -> bytes:
 
 
 def _tenant_id(value: Any) -> str:
-    """Return the one canonical tenant identity used by flags, stores and paths."""
-    tenant_id = str(value).strip()
-    if not is_valid_tenant_id(tenant_id):
+    """Return the one canonical tenant identity used by flags, stores and paths.
+
+    Inline LITERAL restatement of tenant_id_validator.TENANT_ID_PATTERN — a
+    literal fullmatch is a taint barrier static analysis proves, and every
+    tenant-derived path in this module flows through here. Pinned equal to the
+    canonical rule by server/tests/test_codeql_barrier_literals.py.
+    """
+    m = re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", str(value).strip())
+    if m is None:
         raise CustomizationServiceError("tenant_identity_invalid", 403)
-    return tenant_id
+    return str(m.group(0))
 
 
 def _harness_config() -> tuple[str, str]:

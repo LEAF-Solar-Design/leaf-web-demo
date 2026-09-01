@@ -13,6 +13,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import traceback
 from pathlib import Path
 from typing import Any, Dict, Literal
@@ -333,7 +334,13 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
         tenant_dir_name = hashlib.sha256(tenant_id.encode("utf-8")).hexdigest()[:32]
         tenant_dir = AUTHORED_DIR / tenant_dir_name
         tenant_dir.mkdir(parents=True, exist_ok=True)
-        fname = f"{tool['name']}.py"
+        # Provable barrier on the one path component derived from request
+        # content: tools_fallback._slugify guarantees `[a-z0-9-]`, and this
+        # literal fullmatch fails closed if that guarantee ever breaks.
+        name_match = re.fullmatch(r"[a-z0-9][a-z0-9-]{0,127}", str(tool["name"]))
+        if name_match is None:
+            raise ValueError(f"authored tool name is not a safe slug: {tool['name']!r}")
+        fname = f"{name_match.group(0)}.py"
         (tenant_dir / fname).write_text(code, encoding="utf-8")
         tool["entry"] = f"authored/{tenant_dir_name}/{fname}"
         # deps.all_tools() folds this global store last and only surfaces entries
@@ -532,7 +539,10 @@ def _customization_error(
         # signal, so these must not cost a WARNING each.
         _LOG.debug("customization_refused: code=%s", exc.code)
     else:
-        _LOG.warning("customization_refused: code=%s detail=%s", exc.code, exc.detail or "-")
+        # Code only: `detail` is free-form and can embed request-derived or
+        # secret-adjacent strings; the caller-facing envelope already maps the
+        # code to a curated message, and the detail is not needed to triage.
+        _LOG.warning("customization_refused: code=%s", exc.code)
     message = _CUSTOMIZATION_ERROR_MESSAGES.get(
         exc.code,
         "Protected tool authoring could not complete. The approved request was not executed.",

@@ -34,6 +34,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import secrets
 import threading
 import time
@@ -152,9 +153,15 @@ def _parse_iso(raw: Any) -> Optional[datetime]:
 # --------------------------------------------------------------------------- #
 def _approval_path(confirmation_id: str) -> Path:
     # confirmation ids are server-minted hex; re-sanitize anyway so a caller-
-    # supplied id can never traverse out of the approvals dir.
+    # supplied id can never traverse out of the approvals dir. The literal
+    # fullmatch restates what the collapse just guaranteed — stated as a
+    # literal because that is the shape static analysis proves as a barrier
+    # for the path built from it.
     safe = "".join(c for c in str(confirmation_id) if c.isalnum())[:64]
-    return approvals_dir() / f"{safe}.json"
+    m = re.fullmatch(r"[A-Za-z0-9]{0,64}", safe)
+    if m is None:  # unreachable after the collapse; fail closed anyway
+        raise ValueError("malformed confirmation id")
+    return approvals_dir() / f"{m.group(0)}.json"
 
 
 def _new_pending_record(*, tenant_id: str, session_id: str, turn_id: str,
@@ -763,7 +770,10 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
         tenant_state = agent_policy.load_tenant_state(
             tenant_id, pg_store=_pg_store() if _using_postgres() else None)
     except PolicyError as exc:
-        return _deny(f"tenant_state_load_failed: {exc}", extra={"gate": "tenant_disabled"})
+        # Class name only: a load failure's message can carry config paths,
+        # and deny reasons travel back to the caller.
+        return _deny(f"tenant_state_load_failed: {type(exc).__name__}",
+                     extra={"gate": "tenant_disabled"})
     # `is not False`: load_tenant_state resolves the flag through security_bool
     # (an unparseable kill flag already fails closed there), so the only value
     # that may keep the agent running is an explicit False — a missing or
@@ -778,7 +788,8 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
         act = agent_policy.effective_action(pol, action, tier=tier,
                                             tenant_overlay=tenant_state.get("overlay"))
     except PolicyError as exc:
-        return _deny(f"policy_load_failed: {exc}", extra={"gate": "catalog"})
+        return _deny(f"policy_load_failed: {type(exc).__name__}",
+                     extra={"gate": "catalog"})
     if act is None:
         return _deny("unknown_action", extra={"gate": "catalog"})
     if not act.enabled:
@@ -805,7 +816,8 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
         act = agent_policy.effective_action(pol, action, tier=tier,
                                             tenant_overlay=tenant_state.get("overlay"))
     except PolicyError as exc:
-        return _deny(f"policy_load_failed: {exc}", extra={"gate": "revalidate"})
+        return _deny(f"policy_load_failed: {type(exc).__name__}",
+                     extra={"gate": "revalidate"})
     if act is None or not act.enabled:
         return _deny("action_disabled", act=act, extra={"gate": "revalidate"})
     schema_error = _validate_args(act, args)

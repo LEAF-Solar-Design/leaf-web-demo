@@ -174,8 +174,19 @@ def sanitize_id(raw: str) -> str:
     folded to `acme-corp`. Now anything not already canonical is REJECTED, so no two
     distinct tenants/drawings can ever share a key. A UUIDv7 drawing id is already
     canonical and passes through unchanged.
+
+    The regex below is an inline LITERAL restatement of
+    tenant_id_validator.TENANT_ID_PATTERN, deliberately: a literal fullmatch is a
+    taint barrier static analysis can prove (a pattern behind a variable or a
+    helper call earns no barrier credit — measured on PR #843's CodeQL run).
+    server/tests/test_codeql_barrier_literals.py pins this literal equal to the
+    ONE shared canonical-id rule so the two can never drift.
     """
-    return _tid.validate_tenant_id(raw, kind="id")
+    m = re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", raw) if isinstance(raw, str) else None
+    if m is None:
+        _tid.validate_tenant_id(raw, kind="id")  # raises the canonical ValueError
+        raise ValueError(f"invalid id {raw!r}")  # unreachable belt: fail closed
+    return str(m.group(0))
 
 
 def new_drawing_id() -> str:
@@ -736,9 +747,15 @@ class FilesystemBackend(StorageBackend):
                     held._release_reclaim()
 
     def _path(self, key: str) -> str:
-        p = os.path.normpath(os.path.join(self.root, key))
+        # The containment barrier every filesystem sink in this backend goes
+        # through. Written in the ONE shape static analysis proves (normalize,
+        # then a bare prefix check that raises): a compound condition here
+        # earns no barrier credit. Also strictly tighter than before: a key
+        # that normalizes to the root itself (empty, ".") is now rejected —
+        # no caller builds one, and a bare root is never a valid object.
         root = self.root if self.root.endswith(os.sep) else self.root + os.sep
-        if p != self.root and not p.startswith(root):
+        p = os.path.normpath(os.path.join(root, key))
+        if not p.startswith(root):
             raise ValueError(f"object key {key!r} escapes store root")
         return p
 

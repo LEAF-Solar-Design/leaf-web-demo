@@ -46,6 +46,7 @@ import hmac
 import importlib.util
 import json
 import os
+import re
 import secrets
 import shutil
 import sys
@@ -977,9 +978,26 @@ def drawing_lock(tenant_id: str, drawing_id: str):
 
 def guest_drawing_dir(tenant_id: str, drawing_id: str) -> Path:
     """The guest store's on-disk directory for one drawing (guest tenants are
-    ALWAYS filesystem-backed — write_loop.backend_for_tenant)."""
+    ALWAYS filesystem-backed — write_loop.backend_for_tenant).
+
+    The inline LITERAL fullmatches are provable taint barriers (same rule as
+    the broker's bare-name check; pinned equal by
+    tests/test_codeql_barrier_literals.py); every id this builds a path from
+    is already canonical, so a mismatch is a caller bug and fails closed."""
+    tenant_id = _safe_path_id(tenant_id, "tenant_id")
+    drawing_id = _safe_path_id(drawing_id, "drawing_id")
     return (Path(write_loop.guest_store_dir()) / "tenants" / tenant_id
             / "drawings" / drawing_id)
+
+
+def _safe_path_id(value: str, kind: str) -> str:
+    """Reject-don't-collapse barrier for one path component: a bare id
+    (letters, digits, '_' or '-'), returned via the literal match so the
+    guarantee is provable at every filesystem sink built from it."""
+    m = re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", value) if isinstance(value, str) else None
+    if m is None:
+        raise ValueError(f"{kind} must be a bare id (letters, digits, '_' or '-')")
+    return str(m.group(0))
 
 
 def wipe_failed_attempt_residue(
@@ -1221,7 +1239,15 @@ def staged_path(tenant_id: str, drawing_id: str, ext: str) -> Path:
     upload resolver rebuilds this exact name from the request's tenant_id, so
     a broker-authorized caller can only ever extract its OWN tenant's staged
     bytes — knowing another tenant's drawing id is not enough (review round 1,
-    MAJOR: flat namespace had no tenant binding)."""
+    MAJOR: flat namespace had no tenant binding).
+
+    Every component is barrier-checked here (provable literal fullmatch for
+    the ids, a literal allowlist for the ext — validate_upload is the only
+    minter of both, so a mismatch is a caller bug and fails closed)."""
+    tenant_id = _safe_path_id(tenant_id, "tenant_id")
+    drawing_id = _safe_path_id(drawing_id, "drawing_id")
+    if ext not in (".dwg", ".dxf"):
+        raise ValueError("staged uploads are .dwg or .dxf only")
     return uploads_dir() / f"{tenant_id}--{drawing_id}{ext}"
 
 

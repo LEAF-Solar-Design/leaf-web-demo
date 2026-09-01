@@ -21,6 +21,7 @@ crafted tenant_id can never escape ``$LEAF_TENANTS_DIR``.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -49,7 +50,16 @@ def _safe_component(tenant_id: str) -> Optional[str]:
     single store key. Now both accept exactly the same charset (``[a-z0-9_-]``).
     """
     tid = "" if tenant_id is None else str(tenant_id)
-    return _generic_safe_component(tid, validator=is_valid_tenant_id)
+    if _generic_safe_component(tid, validator=is_valid_tenant_id) is None:
+        return None
+    # Inline LITERAL restatement of tenant_id_validator.TENANT_ID_PATTERN
+    # (pinned equal by server/tests/test_codeql_barrier_literals.py): the
+    # generic check above already decided, but only a literal fullmatch is a
+    # taint barrier static analysis can prove for the path built from this.
+    m = re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", tid)
+    if m is None:
+        return None
+    return str(m.group(0))
 
 
 def resolve_tenant_repo_dir(tenant_id: Optional[str]) -> Optional[Path]:

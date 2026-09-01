@@ -46,6 +46,9 @@ class RuntimeTlsConfig:
 
     def server_context(self) -> ssl.SSLContext:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        # TLS 1.2 floor: PROTOCOL_TLS_SERVER alone still admits 1.0/1.1 on
+        # older OpenSSL defaults, and every peer here is our own mTLS client.
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.load_cert_chain(certfile=self.cert_file, keyfile=self.key_file)
         context.load_verify_locations(cafile=self.client_ca_file)
         context.verify_mode = ssl.CERT_REQUIRED
