@@ -30,6 +30,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,7 +38,6 @@ REPO = Path(__file__).resolve().parent.parent
 SERVER = REPO / "server"
 sys.path.insert(0, str(SERVER))
 
-DEFAULT_KEY_FILE = Path("C:/tmp/leaf-grants/e2b-api-key.txt")
 RECEIPT_PATH = REPO / "docs" / "e2b-tool-exec-microvm-receipt.json"
 INTAKE_PATH = REPO / "data" / "rooftop_demo.intake.json"
 
@@ -102,10 +102,45 @@ STEAL_SRC = (
 )
 
 
+def _default_key_file(
+    *,
+    environ: Mapping[str, str] | None = None,
+    os_name: str | None = None,
+    home: str | None = None,
+) -> Path:
+    """Return the current user's default E2B grant file."""
+    current_environ = os.environ if environ is None else environ
+    current_os_name = os.name if os_name is None else os_name
+    current_home = os.path.expanduser("~") if home is None else home
+    if current_os_name == "nt":
+        grant_root = Path(current_environ.get("LOCALAPPDATA") or current_home) / "leaf-grants"
+    else:
+        grant_root = Path(current_home) / ".leaf-grants"
+    return grant_root / "e2b-api-key.txt"
+
+
+def _key_file(
+    *,
+    environ: Mapping[str, str] | None = None,
+    os_name: str | None = None,
+    home: str | None = None,
+) -> Path:
+    """Resolve the E2B grant, honoring the explicit full-path override."""
+    current_environ = os.environ if environ is None else environ
+    override = current_environ.get("E2B_API_KEY_FILE")
+    if override is not None:
+        return Path(override)
+    return _default_key_file(
+        environ=current_environ,
+        os_name=os_name,
+        home=home,
+    )
+
+
 def key_available() -> bool:
     if os.environ.get("E2B_API_KEY", "").strip():
         return True
-    f = Path(os.environ.get("E2B_API_KEY_FILE", str(DEFAULT_KEY_FILE)))
+    f = _key_file()
     try:
         return bool(f.read_text(encoding="utf-8").strip())
     except OSError:
@@ -121,7 +156,7 @@ def main() -> int:
     # value itself never enters this process's prints.
     os.environ["LEAF_SANDBOX"] = "e2b-microvm"
     os.environ["LEAF_TOOL_SANDBOX_PROVIDER"] = "e2b"
-    os.environ.setdefault("E2B_API_KEY_FILE", str(DEFAULT_KEY_FILE))
+    os.environ.setdefault("E2B_API_KEY_FILE", str(_default_key_file()))
 
     import tool_loader  # noqa: E402  (server/ on sys.path)
 
