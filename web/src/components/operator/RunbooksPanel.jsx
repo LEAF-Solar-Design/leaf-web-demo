@@ -11,11 +11,67 @@
 import { useCallback, useState } from 'react'
 
 import * as operatorClient from '../../operatorClient.js'
+import { isRedactedField, renderFieldValue } from '../../projects/ReceiptPanel.jsx'
 import ApprovalCard from './ApprovalCard.jsx'
 import { fieldLabel, normalizeApproval } from './approvalDigest.js'
 
 const TENANT_ID_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/
 const HANDLE_RE = /^[a-z0-9_.:-]{1,64}$/
+
+const KEY_STYLE = { fontFamily: 'var(--font-mono)' }
+
+// The destination's headline field: `destination` when present (the common
+// case — every real payload from /api/operator/external/destinations names
+// one), else the first string-valued key so an unfamiliar shape still shows
+// something readable instead of silently falling through to raw JSON.
+function primaryField(d) {
+  if (typeof d?.destination === 'string' && d.destination) return 'destination'
+  const entry = Object.entries(d || {}).find(([, v]) => typeof v === 'string')
+  return entry ? entry[0] : null
+}
+
+function fieldText(fieldKey, value) {
+  return isRedactedField(fieldKey, value) ? '[redacted]' : renderFieldValue(value)
+}
+
+// A destination row: its headline field inline, and every remaining field
+// behind a `▸`/`▾` disclosure toggle (the house pattern ConversePanel's
+// expandable tool chip uses) — never a raw JSON.stringify(d) dump.
+function DestinationRow({ destination: d, index }) {
+  const [open, setOpen] = useState(false)
+  const primaryKey = primaryField(d)
+  const rest = Object.entries(d || {}).filter(([k]) => k !== primaryKey)
+  const rowKey = primaryKey ? fieldText(primaryKey, d[primaryKey]) : `destination-${index}`
+  return (
+    <li>
+      <span>{primaryKey ? fieldText(primaryKey, d[primaryKey]) : renderFieldValue(d)}</span>
+      {rest.length > 0 && (
+        <>
+          {' '}
+          <button
+            type="button"
+            className="chip-act"
+            aria-expanded={open}
+            aria-label={open ? `Hide details for ${rowKey}` : `Show details for ${rowKey}`}
+            onClick={() => setOpen((v) => !v)}
+          >
+            {open ? '▾ details' : '▸ details'}
+          </button>
+          {open && (
+            <dl className="operator-readout">
+              {rest.map(([k, v]) => (
+                <div key={k} className="operator-field-row">
+                  <dt style={KEY_STYLE}>{k}</dt>
+                  <dd>{fieldText(k, v)}</dd>
+                </div>
+              ))}
+            </dl>
+          )}
+        </>
+      )}
+    </li>
+  )
+}
 
 export default function RunbooksPanel({ sessionEnvironment, onSignedOut }) {
   const [tenantId, setTenantId] = useState('')
@@ -134,7 +190,9 @@ export default function RunbooksPanel({ sessionEnvironment, onSignedOut }) {
       </div>
       {destinations && (
         <ul className="operator-readout-list">
-          {destinations.map((d) => <li key={d.destination || JSON.stringify(d)}>{JSON.stringify(d)}</li>)}
+          {destinations.map((d, i) => (
+            <DestinationRow key={(typeof d?.destination === 'string' && d.destination) || i} destination={d} index={i} />
+          ))}
           {destinations.length === 0 && <li className="dim">No destinations configured.</li>}
         </ul>
       )}

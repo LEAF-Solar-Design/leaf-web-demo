@@ -18,7 +18,10 @@ describe('acceptance: worker job status and cancellation', () => {
     fireEvent.change(screen.getByLabelText(/commands/i), { target: { value: 'echo hi\necho bye' } })
     fireEvent.click(screen.getByRole('button', { name: /dispatch job/i }))
     await waitFor(() => expect(operatorClient.dispatchWorker).toHaveBeenCalledWith(['echo hi', 'echo bye']))
-    expect(await screen.findByText(/"jobId": "op-1"/)).toBeTruthy()
+    // W0#10: the receipt renders as labeled field rows, not a JSON dump —
+    // assert on the row value, not the old `"jobId": "op-1"` JSON text.
+    expect(await screen.findByText('jobId')).toBeTruthy()
+    expect(screen.getByText('op-1')).toBeTruthy()
   })
 
   it('cancels only the exact active worker/run pair returned by the server', async () => {
@@ -29,7 +32,9 @@ describe('acceptance: worker job status and cancellation', () => {
     expect(cancel.disabled).toBe(false)
     fireEvent.click(cancel)
     await waitFor(() => expect(operatorClient.cancelWorker).toHaveBeenCalledWith('worker-1', 'run-1'))
-    expect(await screen.findByText(/"status": "cancelled"/)).toBeTruthy()
+    // W0#10: labeled rows, not a JSON dump.
+    expect(await screen.findByText('status')).toBeTruthy()
+    expect(screen.getByText('cancelled')).toBeTruthy()
   })
 
   it('keeps Cancel disabled when a receipt lacks an exact active worker/run pair', async () => {
