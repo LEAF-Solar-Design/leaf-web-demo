@@ -20,6 +20,16 @@ usage:
   python scripts/sync-mushy-code.py --verify                       # CI check
 
 Exit 0 on success / verified; 1 on drift or damage (with a per-file report).
+
+PIN CONVENTION:
+
+  A pin can declare ``downstream_overlays``. Each entry names a vendored file
+  whose pinned bytes differ from ``upstream_commit`` because leaf-web-demo
+  carries a reviewed downstream patch. ``--from`` checks every declared
+  overlay before it changes any vendored file. If the incoming checkout would
+  replace an overlay, the sync stops with no writes. Remove an overlay entry
+  only when the incoming upstream tree reproduces the intended bytes or the
+  downstream patch is deliberately retired.
 """
 from __future__ import annotations
 
@@ -60,6 +70,57 @@ def tree_manifest(root: Path) -> dict[str, str]:
     }
 
 
+def downstream_overlays(manifest: dict) -> dict[str, str]:
+    """Return the declared downstream overlay hashes from one pin manifest."""
+    overlays = {}
+    for rel, declaration in manifest.get("downstream_overlays", {}).items():
+        if isinstance(declaration, str):
+            overlays[rel] = declaration
+        elif isinstance(declaration, dict) and isinstance(declaration.get("sha256"), str):
+            overlays[rel] = declaration["sha256"]
+    return overlays
+
+
+def check_sync_preflight(upstream: Path) -> list[str]:
+    """Find overlay loss before ``do_sync`` changes any vendored path."""
+    problems = []
+    for upstream_rel, vendored, pin in SURFACES:
+        src = upstream / upstream_rel
+        if not src.is_dir():
+            problems.append(f"upstream surface missing: {src}")
+            continue
+        if not pin.is_file():
+            continue
+
+        manifest = json.loads(pin.read_text(encoding="utf-8"))
+        pinned_files = manifest.get("files", {})
+        for rel, declared_hash in downstream_overlays(manifest).items():
+            current = vendored / rel
+            incoming = src / rel
+            pinned_hash = pinned_files.get(rel)
+
+            if pinned_hash != declared_hash:
+                problems.append(
+                    f"{pin.relative_to(REPO)}: overlay {rel} does not match its pinned file hash"
+                )
+                continue
+            if not current.is_file() or sha256(current) != declared_hash:
+                problems.append(
+                    f"{current.relative_to(REPO)}: declared overlay bytes are missing or changed"
+                )
+                continue
+            if not incoming.is_file():
+                problems.append(
+                    f"{upstream_rel}/{rel}: incoming checkout omits a declared overlay"
+                )
+                continue
+            if sha256(incoming) != declared_hash:
+                problems.append(
+                    f"{vendored.relative_to(REPO)}/{rel}: incoming checkout would replace a downstream overlay"
+                )
+    return problems
+
+
 def do_sync(upstream: Path) -> int:
     head = subprocess.run(
         ["git", "-C", str(upstream), "rev-parse", "HEAD"],
@@ -73,6 +134,15 @@ def do_sync(upstream: Path) -> int:
         print("refusing to vendor from a DIRTY upstream checkout (pin would lie):")
         print(dirty)
         return 1
+
+    preflight = check_sync_preflight(upstream)
+    if preflight:
+        print("REFUSING to sync because it would lose or misstate downstream overlays:")
+        for problem in preflight:
+            print(f"  {problem}")
+        print("No vendored files or pin manifests were changed.")
+        return 1
+
     for upstream_rel, vendored, pin in SURFACES:
         src = upstream / upstream_rel
         if not src.is_dir():
@@ -83,6 +153,9 @@ def do_sync(upstream: Path) -> int:
         # pyc-free discipline (spec non-negotiable #3): never vendor bytecode.
         shutil.copytree(src, vendored,
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        old_manifest = (
+            json.loads(pin.read_text(encoding="utf-8")) if pin.exists() else {}
+        )
         manifest = {
             "contract": "leaf.vendor-pin.v1",
             "upstream": "LEAF-Solar-Design/mushy-code",
@@ -90,6 +163,8 @@ def do_sync(upstream: Path) -> int:
             "surface": upstream_rel,
             "files": tree_manifest(vendored),
         }
+        if old_manifest.get("downstream_overlays"):
+            manifest["downstream_overlays"] = old_manifest["downstream_overlays"]
         extras = {}
         if pin == SURFACES[0][2]:
             for single_rel, single_dst in SINGLE_FILES:
@@ -113,6 +188,10 @@ def do_verify() -> int:
             continue
         manifest = json.loads(pin.read_text(encoding="utf-8"))
         actual = tree_manifest(vendored) if vendored.is_dir() else {}
+        for rel, declared_hash in downstream_overlays(manifest).items():
+            if manifest.get("files", {}).get(rel) != declared_hash:
+                print(f"INVALID downstream overlay declaration: {pin.relative_to(REPO)}/{rel}")
+                bad += 1
         for rel, want in manifest["files"].items():
             got = actual.pop(rel, None)
             if got != want:

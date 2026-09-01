@@ -1,5 +1,27 @@
 {
   "contract": "leaf.vendor-pin.v1",
+  "downstream_overlays": {
+    "ports/fakes/fakeConverseRunner.ts": {
+      "reason": "leaf-web-demo downstream patch not present at the pinned upstream commit",
+      "sha256": "8a7b076759ad4f7fea0c6ec4de078c32f3cc556252a9328668c41881b7f75f41"
+    },
+    "ports/impl/agentSdkRunner.ts": {
+      "reason": "leaf-web-demo downstream patch not present at the pinned upstream commit",
+      "sha256": "1e36deb407e2dcc1958682b911480aae3ef6e802277a38cc4b72d6680c99d0c6"
+    },
+    "ports/impl/converseSdkRunner.ts": {
+      "reason": "leaf-web-demo downstream patch not present at the pinned upstream commit",
+      "sha256": "df09818381e51ba935dd367c8267b4c05df251e90948d31c8740e463d95ae88a"
+    },
+    "ports/impl/tenantChangeRepo.ts": {
+      "reason": "leaf-web-demo downstream patch not present at the pinned upstream commit",
+      "sha256": "58b125b5c4c4b7aecab3351031c951cbde849a38f5b263c674e9c41ef6b1d87f"
+    },
+    "ports/index.ts": {
+      "reason": "leaf-web-demo downstream patch not present at the pinned upstream commit",
+      "sha256": "4d123b38f771718872eef955a4bad1002700c5a7c3901058010184eb99433b43"
+    }
+  },
   "files": {
     "agent/authorLoop.ts": "926febe83eb4b61b5052de22982f297face605721a4d56168b34fe5e291ec033",
     "agent/captureGuards.ts": "ae3e2e735196115235678411a942a5a99eeec0d6f8769b920e034b9d1a73e911",
