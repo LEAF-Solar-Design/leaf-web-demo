@@ -8,7 +8,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import ProductSurfaceTabs, { ProductSurfaceFrame, WorkspaceProjectSlot } from './ProductSurfaceTabs.jsx'
+import ProductSurfaceTabs, { ProductSurfaceFrame } from './ProductSurfaceTabs.jsx'
 import { productSurfaceStates } from '../site/productSurfaces.js'
 import { deriveWorkspaceProjectState } from '../site/workspaceProjectState.js'
 
@@ -152,7 +152,8 @@ describe('F-7: surface frames render the live tenant catalog', () => {
         states={states}
         catalog={catalogA}
         catalogError={null}
-        projectSlot={<WorkspaceProjectSlot state={drawingOnly} onCreateProject={(n) => created.push(n)} />}
+        workspaceProject={drawingOnly}
+        onCreateProject={(n) => created.push(n)}
       />,
     )
     const slot = screen.getByTestId('surface-project-state')
@@ -173,7 +174,7 @@ describe('F-7: surface frames render the live tenant catalog', () => {
     render(
       <ProductSurfaceFrame
         activeSurface="browser" states={states} catalog={catalogA} catalogError={null}
-        projectSlot={<WorkspaceProjectSlot state={noOrg} onCreateProject={() => {}} />}
+        workspaceProject={noOrg} onCreateProject={() => {}}
       />,
     )
     const action = screen.getByTestId('surface-project-action')
@@ -193,13 +194,55 @@ describe('F-7: surface frames render the live tenant catalog', () => {
     render(
       <ProductSurfaceFrame
         activeSurface="browser" states={states} catalog={catalogA} catalogError={null}
-        projectSlot={<WorkspaceProjectSlot state={open} onCreateProject={() => {}} />}
+        workspaceProject={open} onCreateProject={() => {}}
       />,
     )
     const slot = screen.getByTestId('surface-project-state')
     expect(slot.dataset.projectState).toBe('project')
     expect(slot.textContent).toBe('Maple St retrofit')
     expect(screen.queryByTestId('surface-project-action')).toBeNull()
+  })
+
+  it.each(['browser', 'solar'])(
+    'F-9: the %s frame renders the state ITSELF, alongside any caller slot',
+    (surface) => {
+      // sol-critic RED on #888: /try passed its header switcher as projectSlot,
+      // so its cards lost the explainer and the action entirely. The frame owns
+      // the state now, so a caller slot composes WITH it and cannot displace it.
+      render(
+        <ProductSurfaceFrame
+          activeSurface={surface} states={states} catalog={catalogA} catalogError={null}
+          workspaceProject={drawingOnly} onCreateProject={() => {}}
+          projectSlot={<span data-testid="caller-slot">switcher</span>}
+        />,
+      )
+      expect(screen.getByTestId('caller-slot')).toBeTruthy()
+      expect(screen.getByTestId('surface-project-state').textContent).toContain('No workspace project')
+      expect(screen.getByTestId('surface-project-action')).toBeTruthy()
+    },
+  )
+
+  it('F-9: iOS keeps its own project line — the ship lane owns that slot', () => {
+    render(
+      <ProductSurfaceFrame
+        activeSurface="ios" states={states} catalog={catalogA} catalogError={null}
+        workspaceProject={drawingOnly} onCreateProject={() => {}}
+        projectSlot={<span data-testid="ios-lane">ship lane</span>}
+      />,
+    )
+    expect(screen.getByTestId('ios-lane')).toBeTruthy()
+    expect(screen.queryByTestId('surface-project-state')).toBeNull()
+  })
+
+  it('F-9: BOTH shells hand the frame the derivation — no call-site can opt out', () => {
+    // The finding was a composition defect invisible to a component test, so
+    // this binds the two real call sites: /app (App.jsx) and /try (ToolCast).
+    for (const file of ['../App.jsx', '../site/ToolCast.jsx']) {
+      const src = readFileSync(`${process.cwd()}/src/components/${file}`.replace('/components/../', '/'), 'utf8')
+      const frame = src.slice(src.indexOf('<ProductSurfaceFrame'))
+      expect(frame).toContain('workspaceProject={workspaceProjectState}')
+      expect(frame).toContain('onCreateProject=')
+    }
   })
 
   it('F-9: rail and card agree — one derivation, never two answers on one screen', () => {
@@ -211,7 +254,7 @@ describe('F-7: surface frames render the live tenant catalog', () => {
         />
         <ProductSurfaceFrame
           activeSurface="browser" states={states} catalog={catalogA} catalogError={null}
-          projectSlot={<WorkspaceProjectSlot state={drawingOnly} onCreateProject={() => {}} />}
+          workspaceProject={drawingOnly} onCreateProject={() => {}}
         />
       </>,
     )

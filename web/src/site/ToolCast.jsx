@@ -2098,6 +2098,8 @@ export default function ToolCast({
           states={productStates}
           catalog={capabilityCatalog}
           catalogError={catalogError}
+          workspaceProject={workspaceProjectState}
+          onCreateProject={createWorkspaceProject}
           projectSlot={projectSlot}
         />
       )}

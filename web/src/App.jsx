@@ -29,7 +29,7 @@ import CustomizePanel from './components/CustomizePanel.jsx'
 import CheckoutControls from './components/CheckoutControls.jsx'
 import ClaudeAccountPanel from './components/ClaudeAccountPanel.jsx'
 import DemoBanner from './components/DemoBanner.jsx'
-import ProductSurfaceTabs, { ProductSurfaceFrame, WorkspaceProjectSlot } from './components/ProductSurfaceTabs.jsx'
+import ProductSurfaceTabs, { ProductSurfaceFrame } from './components/ProductSurfaceTabs.jsx'
 import { deriveWorkspaceProjectState } from './site/workspaceProjectState.js'
 import IosSurface from './ios/IosSurface.jsx'
 import { ENV_IOS_SURFACE } from './ios/flag.js'
@@ -2594,9 +2594,11 @@ export default function App() {
             states={surfaceStates}
             catalog={catalog}
             catalogError={catalogErr}
+            workspaceProject={workspaceProjectState}
+            onCreateProject={onCreateProject}
             projectSlot={activeSurface === 'ios'
               ? <IosSurface enabled={ENV_IOS_SURFACE} contract={iosContract} />
-              : <WorkspaceProjectSlot state={workspaceProjectState} onCreateProject={onCreateProject} />}
+              : null}
           />
         )}
         {/* The CAD workspace hides (not unmounts) on other tabs so live

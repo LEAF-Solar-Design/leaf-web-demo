@@ -194,9 +194,22 @@ export function WorkspaceProjectSlot({ state, onCreateProject }) {
   )
 }
 
-export function ProductSurfaceFrame({ activeSurface, states, projectSlot, catalog, catalogError }) {
+// `workspaceProject` is rendered by the FRAME, not handed in as a slot by each
+// caller. sol-critic RED on PR #888 caught why: /app passed WorkspaceProjectSlot
+// into projectSlot while /try passed its header switcher, so the /try Browser
+// and Solar cards silently lost the explainer and the create action. A slot the
+// caller must remember to fill correctly is a contract no test of this
+// component can enforce; owning it here means every surface gets it by
+// construction. projectSlot stays for what genuinely IS caller-specific -- the
+// iOS ship lane, /try's switcher chip -- and renders above it.
+export function ProductSurfaceFrame({
+  activeSurface, states, projectSlot, catalog, catalogError,
+  workspaceProject = null, onCreateProject = null,
+}) {
   const surface = productSurface(activeSurface)
   const status = states[surface.id]
+  // iOS owns its whole project line (the ship lane mounts there instead).
+  const showProjectState = Boolean(workspaceProject) && surface.id !== 'ios'
   return (
     <section
       id="product-surface-panel"
@@ -217,7 +230,12 @@ export function ProductSurfaceFrame({ activeSurface, states, projectSlot, catalo
       </div>
       <h1>{surface.title}</h1>
       <p>{surface.description}</p>
-      <div className="tc-product-project">{projectSlot}</div>
+      <div className="tc-product-project">
+        {projectSlot}
+        {showProjectState && (
+          <WorkspaceProjectSlot state={workspaceProject} onCreateProject={onCreateProject} />
+        )}
+      </div>
       <div className="tc-product-columns">
         <div>
           <h2>Shared everywhere</h2>
