@@ -89,10 +89,14 @@ def test_ops_usage_postgres_never_reads_stale_jsonl(monkeypatch):
     body = ops_router.ops_tenants()
     assert body["tenants"] == [
         {"tenant_id": "tenant-a", "runs": 3, "usd_est": 0.234568,
-         "disabled": False},
+         "disabled": False,
+         "llm_turns": 0, "llm_cost_tokens": 0, "llm_usd_est": 0.0},
         {"tenant_id": "tenant-b", "runs": 1, "usd_est": 1.0,
-         "disabled": True},
+         "disabled": True,
+         "llm_turns": 0, "llm_cost_tokens": 0, "llm_usd_est": 0.0},
     ]
+    # The postgres authority still owns the AutoCAD half of the platform block.
+    assert body["platform"]["autocad_backend"] == {"runs": 4, "usd_est": 1.234568}
     assert ("tenants",) in store.calls
     assert ("disabled",) in store.calls
 
@@ -153,4 +157,5 @@ def test_legacy_ops_usage_still_reads_jsonl(monkeypatch, tmp_path):
     assert body["tenants"] == [{
         "tenant_id": "tenant-a", "runs": 1, "usd_est": 0.25,
         "disabled": False,
+        "llm_turns": 0, "llm_cost_tokens": 0, "llm_usd_est": 0.0,
     }]

@@ -569,7 +569,7 @@ has no update path. Ownership: new `server/platform_link.py`, call sites in
 
 | Method | Path | Behaviour |
 |---|---|---|
-| GET | `/api/ops/tenants` | `X-Internal-Role: qa` (else 403) → `{tenants:[{tenant_id, runs, usd_est, disabled}]}` — per-tenant runs/spend from the broker ledger (`da/usage.aggregate_usage`) joined with kill-switch state (broker `/broker/health`, `broker_tenants.json` fallback) |
+| GET | `/api/ops/tenants` | `X-Internal-Role: qa` (else 403) → `{tenants:[{tenant_id, runs, usd_est, llm_turns, llm_cost_tokens, llm_usd_est, disabled}], platform:{profiles, autocad_backend:{runs, usd_est}, llm:{turns, cost_tokens, usd_est}}}` — per-tenant runs/spend from the broker ledger (`da/usage.aggregate_usage`) joined with kill-switch state (broker `/broker/health`, `broker_tenants.json` fallback) and with lifetime LLM usage from the agent ledger (`agent_ledger.tenants_seen`, read ONCE per listing). The `llm_*` fields are `null`, never `0`, when the agent store cannot be read: an unknown spend must not render as an idle profile. `platform` is platform scope, not a row sum — its LLM totals cover tenants that never reached the broker, so `profiles` can exceed the row count |
 | POST | `/api/ops/tenants/{tid}/disable` / `.../enable` | same role gate → **proxy** the broker's `/broker/tenants/{tid}/disable\|enable` over `BROKER_URL`; return the broker's §-enveloped ack. Broker unreachable → `BROKER_UNREACHABLE` envelope, HTTP 502 |
 
 Internal-only surface (NOT the tenant surface), gated exactly like the QA catalog
