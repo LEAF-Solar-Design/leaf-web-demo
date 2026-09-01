@@ -372,6 +372,19 @@ describe('save completion', () => {
     expect(session.current.savedVersion).toBeNull()
   })
 
+  it('two clicks in one tick write ONE version — `busy` alone cannot gate that', async () => {
+    // Both calls are issued before any render can flip `busy`, which is
+    // exactly the double-click window. The in-flight latch is what makes the
+    // second one a no-op; without it the server takes two version writes.
+    const save = vi.fn(async () => receipt)
+    const session = await editedSession({ headVersion: 4, save })
+    await act(async () => {
+      await Promise.all([session.current.actions.save(), session.current.actions.save()])
+    })
+    expect(save).toHaveBeenCalledTimes(1)
+    expect(session.current.savedVersion).toBe(5)
+  })
+
   it('will not save with no target, and will not save unedited bytes', async () => {
     const save = vi.fn()
     const session = mountSession({ saveTarget: { headVersion: 1, save } })

@@ -195,6 +195,8 @@ export default function useEngineSession({
   saveTargetRef.current = saveTarget
   const onSavedRef = useRef(onSaved)
   onSavedRef.current = onSaved
+  // In-flight latch for the version write. See save().
+  const savingRef = useRef(false)
 
   const patch = useCallback((next) => {
     setSession((current) => Object.freeze({ ...current, ...next }))
@@ -371,7 +373,11 @@ export default function useEngineSession({
   const save = useCallback(async () => {
     const target = saveTargetRef.current
     const bytes = sessionRef.current.savedBytes
-    if (!bytes || !target || sessionRef.current.busy) return null
+    // `busy` alone cannot gate this: two clicks in one tick both read the
+    // pre-render value. A version write is not an operation to do twice, so
+    // the in-flight latch is a ref, set before the first await.
+    if (!bytes || !target || sessionRef.current.busy || savingRef.current) return null
+    savingRef.current = true
     patch({ busy: true, errorKind: null, status: 'Saving to the project as a new version...' })
     const generation = generationRef.current
     try {
@@ -402,6 +408,8 @@ export default function useEngineSession({
           : `Save failed: ${error?.message || error}`,
       })
       return null
+    } finally {
+      savingRef.current = false
     }
   }, [patch])
 
