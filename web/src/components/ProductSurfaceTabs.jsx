@@ -162,6 +162,11 @@ export function WorkspaceProjectSlot({ state, onCreateProject }) {
     return <span className="dim" data-testid="surface-project-state" data-project-state="project">{state.label}</span>
   }
   const action = state.action
+  const showReason = Boolean(action?.disabled && action.reason)
+  // A disabled button's `title` is not reliably announced, so the blocker is
+  // rendered as real text and ASSOCIATED with the control — a screen-reader
+  // user must not be the only one who cannot find out why it is dead.
+  const reasonId = showReason ? 'surface-project-reason' : undefined
   return (
     <div className="tc-product-project-state" data-testid="surface-project-state" data-project-state={state.kind}>
       <strong>{state.headline}</strong>
@@ -173,15 +178,15 @@ export function WorkspaceProjectSlot({ state, onCreateProject }) {
             className="chip-act tc-product-project-act"
             data-testid="surface-project-action"
             disabled={action.disabled || !onCreateProject}
-            title={action.reason || undefined}
+            aria-describedby={reasonId}
             onClick={() => onCreateProject?.(action.projectName)}
           >
             {action.label}
           </button>
           {/* An unexplained disabled button is the same dead end as the bare
               state line it replaced, so the blocker is always spelled out. */}
-          {action.disabled && action.reason && (
-            <span className="tc-product-project-reason" data-testid="surface-project-reason">{action.reason}</span>
+          {showReason && (
+            <span id={reasonId} className="tc-product-project-reason" data-testid="surface-project-reason">{action.reason}</span>
           )}
         </>
       )}

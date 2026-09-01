@@ -176,8 +176,14 @@ describe('F-7: surface frames render the live tenant catalog', () => {
         projectSlot={<WorkspaceProjectSlot state={noOrg} onCreateProject={() => {}} />}
       />,
     )
-    expect(screen.getByTestId('surface-project-action').disabled).toBe(true)
-    expect(screen.getByTestId('surface-project-reason').textContent).toContain('Create a workspace first')
+    const action = screen.getByTestId('surface-project-action')
+    const reason = screen.getByTestId('surface-project-reason')
+    expect(action.disabled).toBe(true)
+    expect(reason.textContent).toContain('Create a workspace first')
+    // The reason must be ASSOCIATED with the control, not merely adjacent: a
+    // disabled button's title is not reliably announced.
+    expect(action.getAttribute('aria-describedby')).toBe(reason.id)
+    expect(reason.id).toBeTruthy()
   })
 
   it('F-9: an open workspace project renders as the plain project name, no action', () => {
