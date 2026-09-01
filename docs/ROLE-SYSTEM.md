@@ -46,6 +46,12 @@ mode + always-confirm approval still apply per docs/ADMIN-SELF-EDIT-LANE.md).
 With either alone: no elevated capability. Machine (M2M) clients can never
 hold `platform_admin` (Action-forbidden).
 
+An approved M2M client's optional metadata `leaf_tenant_class` is orthogonal
+to roles. The credentials-exchange Action emits
+`https://leafdesign.ai/tenant_class=non_customer_acceptance` only for that
+exact metadata value. Missing and other values emit no class claim and do not
+change the client's roles or capabilities.
+
 ## Toggle what a role grants
 
 Edit `server/roles.json` — each role has:
