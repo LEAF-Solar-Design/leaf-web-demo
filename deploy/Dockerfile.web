@@ -71,11 +71,16 @@ COPY web/ /web/
 # (crate rev + sha256s). Staged AFTER the vite build so the fence-relevant
 # source tree never carries the binary.
 COPY vendor/acadrust-worker/Cargo.toml /vendor/acadrust-worker/Cargo.toml
+# The worker entry itself must exist at the resolved spawn path or the vite
+# build cannot bundle the worker chunk (it fails closed, as run 33455169029
+# proved) — the shim carries no crate-name strings, so the fence stays clean.
+COPY vendor/acadrust-worker/worker-browser.mjs /vendor/acadrust-worker/worker-browser.mjs
 COPY --from=engine /engine-src/pkg-web /vendor/acadrust-worker/pkg-web
 COPY scripts/stage_cad_engine.mjs /scripts/stage_cad_engine.mjs
 RUN npm run build && \
     node /scripts/stage_cad_engine.mjs && \
     test -f /web/dist/engine/engine_bg.wasm && \
+    test -n "$(find /web/dist/assets -name 'worker-browser*.js' -print -quit)" && \
     printf '{"ok":true,"service":"leaf-platform-web","component":"frontend","source_sha":"%s"}\n' \
       "$LEAF_SOURCE_SHA" > /web/dist/health.json
 

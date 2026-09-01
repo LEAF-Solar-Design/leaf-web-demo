@@ -266,8 +266,9 @@ export default function CadEditSurface({
     <section className="cad-edit-workbench" data-testid="cad-edit-workbench" aria-label="CAD editing surface">
       <h3 className="cad-edit-workbench-title">Edit a DXF drawing</h3>
       <p className="cad-edit-workbench-hint">
-        Runs entirely in your browser, inside the isolated engine worker. Nothing is uploaded and
-        nothing is saved to the project — download the result to keep it.
+        {saveTarget
+          ? 'Edits run entirely in your browser, inside the isolated engine worker. Nothing leaves it until you explicitly save a new version to the project or download the result.'
+          : 'Runs entirely in your browser, inside the isolated engine worker. Nothing is uploaded and nothing is saved to the project — download the result to keep it.'}
       </p>
 
       <input
