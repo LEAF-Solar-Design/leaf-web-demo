@@ -131,6 +131,28 @@ export default function SiteRoot() {
     })
   }, [scene])
 
+  // will-change hygiene: the [data-cast] panes only need a GPU layer during
+  // the actual recast (landing.css .stage-root.recasting), never at rest.
+  // The window covers exit(870ms) + gap(900ms) + the longer enter transition,
+  // the 2250ms filter/focus pull, with slack: 870+900+2250 = 4020ms.
+  // Skipped entirely under reduced motion (transitions already collapse to
+  // 0s there — see landing.css:733 — so there is nothing to hint about).
+  const prevSceneRef = useRef(scene)
+  useEffect(() => {
+    const root = stageRef.current
+    if (!root) return undefined
+    if (prevSceneRef.current === scene) return undefined
+    prevSceneRef.current = scene
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return undefined
+    const RECAST_WINDOW_MS = 4100 // exit(870) + gap(900) + enter-filter(2250) + slack
+    root.classList.add('recasting')
+    const timer = setTimeout(() => root.classList.remove('recasting'), RECAST_WINDOW_MS)
+    return () => {
+      clearTimeout(timer)
+      root.classList.remove('recasting')
+    }
+  }, [scene])
+
   // BEFORE every scene, including 'app'. Mounting anything that talks to /api
   // while the code exchange is still in flight is the whole defect: the burst
   // 401s, the session controller latches `required`, and the token that lands

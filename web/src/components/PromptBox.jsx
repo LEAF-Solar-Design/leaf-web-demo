@@ -26,6 +26,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import useExit from '../useExit.js'
 import { authHeaders, config, noteUnauthorized } from '../api.js'
+import { modChord } from '../lib/keys.js'
 import {
   appendPromptHistory,
   autoGrowHeight,
@@ -506,7 +507,7 @@ export default function PromptBox({
             scope ▾
           </button>
           <span className="bar-proj">{projectName}</span>
-          {focused ? <span className="key hot">Enter</span> : <span className="key">⌘K</span>}
+          {focused ? <span className="key hot">Enter</span> : <span className="key">{modChord('K')}</span>}
           <button
             type="button"
             className="chip-act"

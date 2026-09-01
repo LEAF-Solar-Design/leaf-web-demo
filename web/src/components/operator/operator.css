@@ -54,9 +54,16 @@
   border: 1px solid var(--accent-tint); border-radius: 6px; padding: 10px 12px;
   display: flex; flex-direction: column; gap: 8px;
 }
-.operator-approval-head { font-size: 13px; font-weight: 600; }
+.operator-approval-head { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.operator-approval-head .tag { font-weight: 400; }
 .operator-approval-fields { display: flex; flex-direction: column; gap: 4px; margin: 0; }
 .operator-approval-field { display: flex; gap: 8px; font-size: 12px; }
+/* Cost and scope carry the actual blast radius (what this authority spends,
+   what it can touch) — the strongest ink on the card, so they read before
+   the quieter target/expiry/reversal bookkeeping fields. */
+.operator-approval-field-strong dd, .operator-approval-field-strong code {
+  color: var(--foreground); font-weight: 600;
+}
 .operator-approval-missing, .operator-approval-blocked { color: var(--status-warning); font-size: 12px; }
 .operator-approval-error { color: var(--status-warning); font-size: 12px; font-family: var(--font-mono); }
 .operator-approval-confirm { display: flex; flex-direction: column; gap: 6px; }

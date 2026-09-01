@@ -310,9 +310,12 @@ export default function useJobController({
 
   useEffect(() => {
     if (status !== 'running') return undefined
+    // 1s cadence: fmtElapsed shows one decimal of seconds, so a 200ms tick
+    // was five renders for every user-visible digit change. 1s still reads
+    // as live without the redundant re-renders.
     const timer = setInterval(() => {
       if (runningSinceRef.current != null) setElapsedMs(Date.now() - runningSinceRef.current)
-    }, 200)
+    }, 1000)
     return () => clearInterval(timer)
   }, [status])
 

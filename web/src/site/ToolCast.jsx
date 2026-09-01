@@ -1682,7 +1682,7 @@ export default function ToolCast({
             {drawing.unreadableHead.message}
             {!drawing.unreadableHead.pending ? (
               <button type="button" className="chip-act" onClick={drawing.actions.retryUnreadableHead} disabled={drawing.refreshing}>
-                {drawing.refreshing ? 'Loading…' : 'Retry loading'}
+                {drawing.refreshing ? 'Reading the version chain…' : 'Retry loading'}
               </button>
             ) : null}
           </div>

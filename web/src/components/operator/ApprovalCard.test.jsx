@@ -45,7 +45,11 @@ describe('acceptance #3: renders server truth, refuses on any missing field', ()
   it('renders target, environment, cost, scope, expiry, reversal, and argument digest', () => {
     setup(COMPLETE_RESPONSE)
     expect(screen.getByText('credential:staging-broker-token')).toBeTruthy()
-    expect(screen.getByText('staging')).toBeTruthy()
+    // 'staging' now also renders as the header's environment .tag chip
+    // (round-2 panel: blast radius at a glance), so this is no longer the
+    // string's only occurrence — pin it to the field digest's <code>, same
+    // disambiguation the action/reversal assertion below already needed.
+    expect(screen.getByText('staging', { selector: 'code' })).toBeTruthy()
     expect(screen.getByText('none')).toBeTruthy()
     expect(screen.getByText('staging:broker')).toBeTruthy()
     expect(screen.getByText('2026-08-17T12:05:00Z')).toBeTruthy()
