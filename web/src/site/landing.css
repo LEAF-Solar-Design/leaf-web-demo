@@ -795,3 +795,7 @@
   --font-display: 'Inter Tight', 'Inter', system-ui, sans-serif;
   --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
 }
+
+/* usage ledger (showcase #2): the cap bar rides inside the trust row */
+.tc-usage-bar { display: inline-block; width: 72px; margin-left: 8px; vertical-align: middle; }
+.tc-trust-row b { font-variant-numeric: tabular-nums; }
