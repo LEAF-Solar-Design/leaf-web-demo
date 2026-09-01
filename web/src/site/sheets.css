@@ -486,3 +486,49 @@
   .sheets-root .tb-sheet { margin-left: 0; border-left: 0; }
   .sheets-root .tb-rev { border-left: 0; }
 }
+
+/* ---------------- sheets token re-pin (drafting-studio isolation) ----------------
+   Same mechanism as landing.css's .stage-root block: this dark marketing
+   mock consumes the shared token vocabulary that styles.css (Sep 2026)
+   recast to the /app paper identity. SheetsPage mounts OUTSIDE .stage-root
+   (SiteRoot renders it bare), so it needs its own re-pin of the old dark
+   values. Preview-only surface (deployed hosts redirect /sheets to www),
+   but every localhost / Vercel preview reviewer sees it. Additive only. */
+.sheets-root {
+  --background: #0a0a0a;
+  --foreground: #ffffff;
+  --card: #18181b;
+  --card-grad: linear-gradient(180deg, #17171a, #111113);
+  --border: #27272a;
+  --primary: #22c55e;
+  --primary-hover: #4ade80;
+  --on-accent: #04140a;
+  --muted: #a1a1aa;
+  --muted-2: #71717a;
+  --status-success: #22c55e;
+  --status-warning: #e7b643;
+  --status-danger: #e24947;
+  --status-info: #43b2e1;
+  --bar-well: #141416;
+  --bar-chip: #1f1f23;
+  --bar-focus-ring: rgba(34, 197, 94, .07);
+  --keycap: #1c1c20;
+  --hairline: #1c1c20;
+  --rail: #0c0c0e;
+  --input: #141416;
+  --accent-tint: rgba(34, 197, 94, .08);
+  --accent-tint-hover: rgba(34, 197, 94, .14);
+  --warn-tint: rgba(231, 182, 67, .10);
+  --danger-tint: rgba(226, 73, 71, .10);
+  --sheet: #0a0a0a;
+  --code-bg: #101013;
+  --grid-line: rgba(255, 255, 255, .02);
+  --rule-strong: #27272a;
+  --hover-tint: rgba(255, 255, 255, .04);
+  --hover-tint-strong: rgba(255, 255, 255, .08);
+  --shadow-pop: 0 12px 32px rgba(0, 0, 0, .55);
+  --font-label: 'Inter', system-ui, sans-serif;
+  --font-sans: 'Inter Tight', 'Inter', system-ui, sans-serif;
+  --font-display: 'Inter Tight', 'Inter', system-ui, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}

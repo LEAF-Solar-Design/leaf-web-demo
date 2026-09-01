@@ -86,11 +86,11 @@
   --primary: #1e6b45;          /* plotter-pen green · hover #175437 · on-accent #f5faf6 */
   --primary-hover: #175437;
   --on-accent: #f5faf6;
-  --muted: #4f5851;            /* secondary ink; tertiary #6b726b */
-  --muted-2: #6b726b;
+  --muted: #4f5851;            /* secondary ink; tertiary #5d645d */
+  --muted-2: #5d645d;          /* >=4.5:1 on every ground incl. the rail (#e4e2da: 4.70) */
 
   --status-success: #1e6b45;
-  --status-warning: #8f5f06;   /* ochre pencil */
+  --status-warning: #855805;   /* ochre pencil (>=4.5:1 on bond AND rail) */
   --status-danger: #b42318;    /* red pen */
   --status-info: #1f6390;      /* drafting blue */
 
@@ -104,11 +104,13 @@
 
   --accent-tint: rgba(30, 107, 69, .09);
   --accent-tint-hover: rgba(30, 107, 69, .16);
-  --warn-tint: rgba(143, 95, 6, .10);
+  --warn-tint: rgba(133, 88, 5, .10);
   --danger-tint: rgba(180, 35, 24, .08);
 
   /* --- drafting-studio additions (new names; the overlay map is unchanged) --- */
   --sheet: #fdfdfb;            /* the drawing sheet (center scroll ground) */
+  --code-bg: #f4f3ec;          /* code-block ground — a TOKEN so the /try and
+                                  /sheets re-pins can flip it back to dark */
   --grid-line: rgba(25, 29, 26, .05);  /* engineering grid on the sheet */
   --rule-strong: #30362f;      /* the ink rules that frame the chrome */
   --hover-tint: rgba(25, 29, 26, .04);
@@ -418,8 +420,8 @@ h1.home-q em {
 }
 .dispatch-btn:hover:not(:disabled) { background: var(--primary-hover); }
 .dispatch-btn:disabled { opacity: .5; cursor: not-allowed; }
-/* inline hint (H3): recedes to 25% until hovered (max one per pane) */
-.hint { margin-top: 8px; font-size: 11.5px; color: var(--muted-2); opacity: .25; transition: opacity 180ms ease; }
+/* inline hint (H3): recedes to 45% until hovered (max one per pane) */
+.hint { margin-top: 8px; font-size: 11.5px; color: var(--muted-2); opacity: .45; transition: opacity 180ms ease; }
 .hint:hover, .hint:focus-within { opacity: 1; }
 .hint b { color: var(--foreground); font-weight: 500; }
 
@@ -561,7 +563,7 @@ h1.home-q em {
   color: var(--cv-text); box-shadow: 0 8px 24px rgba(0, 0, 0, .4);
 }
 .selection-readout.empty { color: var(--cv-dim); }
-.sel-hint { font-size: 12px; color: var(--cv-dim); opacity: .3; transition: opacity 180ms ease; }
+.sel-hint { font-size: 12px; color: var(--cv-dim); opacity: .5; transition: opacity 180ms ease; }
 .sel-hint:hover, .selection-readout:hover .sel-hint, .selection-readout:focus-within .sel-hint { opacity: 1; }
 .sel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
 .sel-kind { font-size: 12px; font-weight: 600; letter-spacing: .2px; color: var(--cv-text); }
@@ -758,10 +760,16 @@ footer.foot-bar {
   min-height: 30px;
 }
 /* inline-flex drops whitespace-only text nodes between inline children, so a
-   4px gap stands in for the word space (the dot rows override it to 6px) */
-footer.foot-bar > * { display: inline-flex; align-items: center; gap: 4px; padding: 6px 14px 6px 0; }
+   6px gap stands in for the word space (and doubles as the dot gap) */
+footer.foot-bar > * { display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px 6px 0; }
 footer.foot-bar > * + * { border-left: 1px solid var(--border); padding-left: 14px; }
-.foot-stat { gap: 6px; white-space: nowrap; }
+.foot-stat { white-space: nowrap; }
+/* the traversal chip ("← All projects") keeps its chip anatomy — the segment
+   rule above (0,1,1) would strip its padding and caps-transform it */
+footer.foot-bar .chip-act {
+  padding: 3px 9px; text-transform: none; letter-spacing: normal;
+  font-family: var(--sans); align-self: center;
+}
 footer .ok-txt { color: var(--primary); }
 footer .warn-txt { color: var(--status-warning); }
 
@@ -827,7 +835,7 @@ footer .warn-txt { color: var(--status-warning); }
 .btn.ghost { background: var(--accent-tint); color: var(--primary); }
 .btn.ghost:hover:not(:disabled) { background: var(--accent-tint-hover); color: var(--primary-hover); }
 .btn.neutral { background: var(--bar-chip); color: var(--muted); }
-.btn.neutral:hover:not(:disabled) { background: #d9d7ce; color: var(--foreground); }
+.btn.neutral:hover:not(:disabled) { background: var(--border); color: var(--foreground); }
 
 .author-panel textarea { width: 100%; resize: vertical; }
 .examples { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 10px; }
@@ -840,8 +848,8 @@ footer .warn-txt { color: var(--status-warning); }
 .authored { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px; }
 .authored-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .authored-desc { font-size: 12px; color: var(--muted); margin: 0 0 8px; }
-/* code: real mono territory — a paper code block, ink on vellum */
-.code { background: #f4f3ec; border: 1px solid var(--border); border-radius: 4px; padding: 10px; font-size: 11px; line-height: 1.45; color: var(--foreground); overflow-x: auto; max-height: 220px; font-family: var(--font-mono); }
+/* code: real mono territory — tokenized ground so dark subtrees re-pin it */
+.code { background: var(--code-bg); border: 1px solid var(--border); border-radius: 4px; padding: 10px; font-size: 11px; line-height: 1.45; color: var(--foreground); overflow-x: auto; max-height: 220px; font-family: var(--font-mono); }
 
 /* calm long-running authoring line — pulse dot + verb + elapsed, no spinner */
 .authoring { margin-top: 8px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; line-height: 1.4; display: flex; align-items: center; gap: 8px; }
@@ -1232,7 +1240,7 @@ footer .warn-txt { color: var(--status-warning); }
 .ca-copy { font-size: 12.5px; color: var(--muted); line-height: 1.5; margin: 0; }
 .ca-copy b { color: var(--foreground); }
 .ca-steps { margin: 0; padding-left: 18px; font-size: 12px; color: var(--muted); line-height: 1.6; display: flex; flex-direction: column; gap: 2px; }
-.ca-steps code, .ca-copy code { font-family: var(--font-mono); font-size: 11.5px; background: #f4f3ec; border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; color: var(--foreground); }
+.ca-steps code, .ca-copy code { font-family: var(--font-mono); font-size: 11.5px; background: var(--code-bg); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; color: var(--foreground); }
 .ca-field { display: flex; flex-direction: column; gap: 4px; }
 .ca-field-k { font-size: 12px; color: var(--muted); } /* F1: 12px muted label above */
 .ca-field input { width: 100%; }
@@ -1396,7 +1404,7 @@ footer .warn-txt { color: var(--status-warning); }
   border-radius: 4px;
   padding: 3px 7px;
 }
-.key.hot { color: var(--foreground); background: #d9d7ce; }
+.key.hot { color: var(--foreground); background: var(--border); } /* tokenized: dark subtrees re-pin --border */
 
 /* ---------------- action chips (the ONLY clickable chip forms) ---------------- */
 .chip-act {
@@ -1484,9 +1492,12 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 .bar .bar-input .key, .bar .bar-controls .key { background: var(--well-chip); color: var(--well-dim); }
 .bar .bar-input .key.hot, .bar .bar-controls .key.hot { background: var(--well-accent-tint); color: var(--well-accent); }
 .bar .bar-controls .chip-act { background: var(--well-accent); color: #08140d; font-weight: 600; }
-.bar .bar-controls .chip-act:hover { background: #46d182; }
+.bar .bar-controls .chip-act:hover:not(:disabled) { background: #46d182; }
+.bar .bar-controls .chip-act:disabled { background: var(--well-chip); color: var(--well-dim); }
 .bar .converse-note { color: var(--well-dim); }
 .bar .converse-note .dim { color: var(--well-dim); }
+.bar .converse-note .chip-neutral { background: var(--well-chip); color: var(--well-dim); }
+.bar .converse-note .chip-neutral:hover { color: var(--well-text); background: var(--well-chip); }
 /* focus - the bar's standing exception to the halo rule: no drop halo */
 .bar:focus-within {
   border-color: rgba(56, 194, 116, .7);
@@ -1498,17 +1509,22 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 .strip-running .verb { flex: 1; font-size: 12.5px; font-weight: 500; color: var(--foreground); }
 .strip-bar { height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; }
 .strip-bar > i { display: block; height: 100%; background: var(--primary); } /* width = real % only */
+/* mix bases and borders are TOKEN-derived: on paper these read as tinted
+   paper strips; inside a dark re-pinned subtree (/try, /sheets) --card and
+   --status-* flip and the strips render dark again, matching the old shell */
 .strip-decision {
   display: flex; align-items: center; gap: 10px; padding: 10px 13px;
-  border: 1px solid rgba(143, 95, 6, .38); border-radius: 6px;
-  background: color-mix(in oklab, var(--status-warning) 9%, #ffffff);
+  border: 1px solid color-mix(in srgb, var(--status-warning) 40%, transparent);
+  border-radius: 6px;
+  background: color-mix(in oklab, var(--status-warning) 9%, var(--card));
   font-size: 12.5px; color: var(--foreground);
   box-shadow: 0 4px 14px rgba(25, 29, 26, .1);
 }
 .strip-failed {
   display: flex; align-items: center; gap: 10px; padding: 10px 13px;
-  border: 1px solid rgba(180, 35, 24, .38); border-radius: 6px;
-  background: color-mix(in oklab, var(--status-danger) 8%, #ffffff);
+  border: 1px solid color-mix(in srgb, var(--status-danger) 40%, transparent);
+  border-radius: 6px;
+  background: color-mix(in oklab, var(--status-danger) 8%, var(--card));
   font-size: 12.5px; color: var(--foreground);
   box-shadow: 0 4px 14px rgba(25, 29, 26, .1);
 }
@@ -1643,7 +1659,8 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 .toggle, .switch input {
   appearance: none; -webkit-appearance: none;
   width: 32px; height: 18px; border-radius: 9px;
-  background: #d3d1c7; border: 0; outline: none;
+  background: #c6c4b9; border: 0; outline: none;
+  box-shadow: inset 0 0 0 1px #aeac9f; /* track boundary stays legible on bond */
   position: relative; cursor: pointer; flex: none; margin: 0;
   transition: background 180ms ease;
 }
@@ -1653,9 +1670,10 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   background: var(--card);
   transition: transform 180ms ease, background 180ms ease;
 }
-.toggle:checked, .switch input:checked { background: var(--primary); }
+.toggle:checked, .switch input:checked { background: var(--primary); box-shadow: none; }
 .toggle:checked::before, .switch input:checked::before { transform: translateX(14px); background: var(--on-accent); }
-.toggle:focus-visible, .switch input:focus-visible { box-shadow: 0 0 0 3px var(--bar-focus-ring); }
+/* keyboard focus gets the same visible two-layer ring as every other control */
+.toggle:focus-visible, .switch input:focus-visible { box-shadow: 0 0 0 2px var(--card), 0 0 0 4px var(--primary); }
 
 /* ---------------- M1 motion (glide) ---------------- */
 :root { --m-enter: 520ms; --m-exit: 180ms; --m-curve: cubic-bezier(.22, 1, .36, 1); --m-stagger: 20ms; }
@@ -1971,3 +1989,24 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   box-shadow: 0 1px 2px rgba(25, 29, 26, .2);
 }
 .app .tc-product-cad-link:hover { background: var(--primary-hover); color: var(--on-accent); }
+
+/* --- Operator console (Lane E) token re-pin ------------------------------
+   operator.css is a deliberately DARK probe-gated panel (its --panel-bg
+   fallback #101418 always fires; nothing defines --panel-bg) that consumes
+   the shared token vocabulary and inherits body color. Under the paper
+   identity that composed graphite text on a near-black panel. Re-pin the
+   consumed tokens to the dark vocabulary and set the text color explicitly;
+   emitted after operator.css (main.jsx imports styles.css last), so the
+   equal-specificity color declaration wins by source order. */
+.operator-console {
+  --muted: #a1a1aa;
+  --muted-2: #71717a;
+  --primary: #22c55e;
+  --accent-tint: rgba(34, 197, 94, .14);
+  --status-warning: #e7b643;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+/* doubled class = (0,2,0): beats operator.css's `color: inherit` (0,1,0) by
+   SPECIFICITY, not stylesheet order — dev and build inject CSS in different
+   orders, so an order-dependent tie is not a fix */
+.operator-console.operator-console { color: #f4f4f5; }

@@ -777,11 +777,19 @@
   --warn-tint: rgba(231, 182, 67, .10);
   --danger-tint: rgba(226, 73, 71, .10);
   --sheet: #0a0a0a;
+  --code-bg: #101013;
   --grid-line: rgba(255, 255, 255, .02);
   --rule-strong: #27272a;
   --hover-tint: rgba(255, 255, 255, .04);
   --hover-tint-strong: rgba(255, 255, 255, .08);
   --shadow-pop: 0 12px 32px rgba(0, 0, 0, .55);
+  /* the stage's viewer glass panels keep the OLD canvas neutrals too */
+  --cv-bg: #0f0f11;
+  --cv-panel: #18181b;
+  --cv-panel-glass: rgba(24, 24, 27, .86);
+  --cv-border: #27272a;
+  --cv-text: #ffffff;
+  --cv-dim: #a1a1aa;
   --font-label: 'Inter', system-ui, sans-serif;
   --font-sans: 'Inter Tight', 'Inter', system-ui, sans-serif;
   --font-display: 'Inter Tight', 'Inter', system-ui, sans-serif;
