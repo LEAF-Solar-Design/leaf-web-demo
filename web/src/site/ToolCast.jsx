@@ -406,6 +406,9 @@ export default function ToolCast({
       // 403s with no path forward (found by the 2026-08-17 staging walk). The
       // probe is authority-only: it seats no intake and leaves phase 'empty'.
       let probeLive = true
+      // checking() first: the activate guard (createSessionController) only
+      // admits a proof from `checking` or `active`, never over a latched gate.
+      platformSession.actions.checking()
       getSession(false, 'rooftop_demo')
         .then((data) => {
           if (!probeLive) return
@@ -531,6 +534,9 @@ export default function ToolCast({
     } : null)
     setPhase('ready')
     setError(null)
+    // An upload receipt is not an /api/session proof: under the activate
+    // guard it can refresh an already-live session's fields but can never
+    // clear a latched gate - that takes a re-verified session 200.
     if (receipt.tenant_kind === 'account') platformSession.actions.activate(receipt)
     showToast({ text: `Drawing ready, ${view?.intake?.dwg || receipt.drawing_id}`, action: { label: 'View', onClick: () => setRightView('view') } })
   }, [clearConverse, onDrawingReady, platformSession.actions, resetCached, seatVersion, showToast, tenantId])

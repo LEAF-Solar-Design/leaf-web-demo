@@ -44,7 +44,9 @@ import {
   searchForProductSurface,
 } from './site/productSurfaces.js'
 import { fetchIosSurfaceStatus } from './ios/iosSurfaceStatus.js'
-import { authConfigured, login, logout, isSignedIn, handleRedirectCallback, isAuthRedirectCallback } from './auth.js'
+// `logout` is no longer imported here: the session controller owns ending a
+// session (useSessionController defaults endSession to auth.js logout).
+import { authConfigured, login, isSignedIn, handleRedirectCallback, isAuthRedirectCallback } from './auth.js'
 import { shouldAutoDemo } from './demoState.js'
 import { humanizeError } from './errorHumanize.js'
 import { cadTimingRows } from './cadTimingPresentation.js'
@@ -84,6 +86,8 @@ import useDrawingVersionController from './controllers/useDrawingVersionControll
 import usePlatformTrustController from './controllers/platform/usePlatformTrustController.js'
 import useWorkspaceController from './controllers/workspace/useWorkspaceController.js'
 import useCatalogController from './controllers/catalog/useCatalogController.js'
+import useSessionController from './controllers/session/useSessionController.js'
+import { consoleAuthRequired, consoleSignedOut } from './controllers/session/consoleGate.js'
 import { resolveCheckoutDrawingId } from './controllers/checkout/createCheckoutController.js'
 import { useDrawingIdentity } from './drawing/DrawingIdentityProvider.jsx'
 
@@ -230,7 +234,30 @@ export default function App() {
   // Real entitlements (GET /api/entitlements): drives the write-tool + build gates.
   // null in mock, or when the endpoint isn't deployed -> treated as full access.
   // Version-history browser (§ version chain) + read-only preview state.
-  const [authRequired, setAuthRequired] = useState(false) // live mode with no session: 401s observed -> polls stop, footer says so
+  // W2b (convergence): the console's session gate is the SHARED controller, not
+  // a hand-rolled twin. `authRequired` used to be a local latch that only ever
+  // went true; it is now the controller's `required` status, so /app and /try
+  // read ONE state machine and the console inherits the bounded post-callback
+  // recovery the twin never had (D1a defect #6, createSessionController.js).
+  //
+  // ONE INSTANCE PER PAGE: SiteRoot renders scene 'app' (this component) and
+  // scene site|tool (StageScene -> ToolCast, which mounts the other instance)
+  // in mutually exclusive arms of one ternary, so the console mounting its own
+  // controller keeps exactly one live instance per page load. SiteRoot itself
+  // mounts none, and hoisting one there would hand the console and the stage a
+  // shared latch neither owns — the opposite of the per-mode isolation
+  // DrawingIdentityProvider had to grow (see its header).
+  const session = useSessionController()
+  const sessionActions = session.actions
+  // Byte-identical to the retired boolean: "live mode with no session: 401s
+  // observed -> polls stop, footer says so".
+  const authRequired = consoleAuthRequired(session.status)
+  // NOT the session gate: this mirrors TOKEN PRESENCE (auth.js localStorage),
+  // which is a different truth from "the platform session resolved". It is true
+  // at boot before /api/session has answered, and the three surfaces below
+  // (converse mount, Customize entry, CustomizePanel) all want the token, not
+  // the session. The controller publishes no token-presence signal, so folding
+  // these into `status` would change three truth tables; they stay here.
   const [signedIn, setSignedIn] = useState(() => isSignedIn())
   const is401 = (e) => e?.status === 401 || / -> 401$/.test(String(e?.message || ''))
   const [toolsOpen, setToolsOpen] = useState(false)      // left catalog collapsed by default
@@ -560,8 +587,11 @@ export default function App() {
     },
     startAgentTurn: (...args) => catalogUiRef.current.startAgentTurn?.(...args),
     agentBannerFor,
-    onAuthRequired: () => setAuthRequired(true),
-  }), [])
+    // W2b: same edge, same source name /try already uses. The controller
+    // records WHICH surface refused (`sources`) instead of collapsing every
+    // observer onto one shared boolean.
+    onAuthRequired: () => sessionActions.requireAuth('catalog'),
+  }), [sessionActions])
   const { state: catalogState, actions: catalogActions } = useCatalogController({
     services: catalogServices,
     adapters: catalogAdapters,
@@ -714,6 +744,10 @@ export default function App() {
       seat(editFixture) // synchronous local fixture — no backend
       return () => { alive = false }
     }
+    // The controller is told about the LIVE session only. Mock has no platform
+    // session to check, activate or refuse, and touching the state machine from
+    // the demo would let a mock round trip clear a live latch.
+    if (!mock) sessionActions.checking()
     getSession(mock, DRAWING_SOURCE)
       .then(async ({ intake: d, tenant: t, tier: ti, org: o }) => {
         if (!alive) return
@@ -732,6 +766,9 @@ export default function App() {
           ...(drawingSummary ? { drawingState: drawingSummary } : {}),
         })
         setTenant(t); setTier(ti); setOrg(o)
+        // A 200 from /api/session IS the platform session — the same proof
+        // ToolCast activates on. Live only: a mock 200 proves nothing.
+        if (!mock) sessionActions.activate({ tenant: t, tier: ti, org: o })
         // Live auth resolves workspace identity from the verified subject.
         // Persist that server-owned org id so an already-bound account never
         // sees the create-org affordance or attempts a duplicate bootstrap.
@@ -741,7 +778,13 @@ export default function App() {
         if (!alive) return
         setLoadErr(humanizeError(e))
         if (!mock && is401(e)) {
-          setAuthRequired(true)
+          // `tokenInvalidated` stays FALSE on purpose: this is render state
+          // reporting a refusal, never a verdict on the token. api.js already
+          // wiped (and published) any token its own 401 proved bad, and the
+          // controller's subscription latched on that. A refusal that indicts
+          // nothing deletes nothing — see createSessionController.js's
+          // "WHO MAY DELETE THE TOKEN".
+          sessionActions.requireAuth('/api/session')
           // Auto-fallback (B1): a VITE_MOCK=0 build that hits a 401 with Auth0
           // unconfigured can't sign in — flip to the demo instead of parking on
           // the gate, so the deployed link lands zero-click. SignedOutGate is
@@ -750,7 +793,15 @@ export default function App() {
         }
       })
     return () => { alive = false }
-  }, [mock, isEditFixture, intakeRetryKey, resetCatalogTransient, resetDrawing, seatIntake])
+    // `session.recoveries` is the bounded re-entry, and the ONLY dep that
+    // changes when localStorage gains a token. The controller re-opens
+    // `checking` at most MAX_TOKEN_RECOVERIES times, and only for a token that
+    // is present and DIFFERENT from the one the refusal latched on; that bump
+    // is what re-runs getSession after a post-callback 401 instead of stranding
+    // this page holding a valid token behind a signed-out surface. Identical
+    // wiring to ToolCast's session effect.
+  }, [mock, isEditFixture, intakeRetryKey, resetCatalogTransient, resetDrawing, seatIntake,
+      sessionActions, session.recoveries])
 
   // Auth0 return leg: if we came back from Universal Login (?code=&state=),
   // finish the exchange + store leaf.jwt, then reload so the fresh loads send
@@ -1009,7 +1060,14 @@ export default function App() {
     mock,
     resetKey: `${isEditFixture}:${intakeRetryKey}`,
     formatError: humanizeError,
-    onAuthRequired: setAuthRequired,
+    // W2b: the RISING edge only, exactly as /try wires it. useJobController
+    // publishes a two-way boolean (`setAuth(false)` on every successful jobs
+    // read), and feeding that `false` back in was the console's last-writer-
+    // wins hazard: a jobs 200 racing a /api/session 401 silently dismissed the
+    // gate over a session that never loaded. Leaving `required` is now the
+    // controller's alone — a /api/session 200 (activate) or the bounded token
+    // recovery, both of which RE-VERIFY instead of guessing.
+    onAuthRequired: (required) => { if (required) sessionActions.requireAuth('jobs') },
     onNotice: ({ text }) => showToast({ text, action: { label: 'View', onClick: viewResult } }),
     onCompleteVersion: (...args) => completedVersionRef.current?.(...args),
   })
@@ -1980,12 +2038,17 @@ export default function App() {
     setDrawer({
       title: 'Session · provenance',
       rows,
+      // W2b: the controller owns sign-out, exactly as /try does. Its signOut
+      // still calls auth.js logout(), and additionally tells the state machine
+      // the refusal reason is `signed_out` — the ONE reason the bounded token
+      // recovery refuses to re-open. Ending a session through raw logout() left
+      // a deliberate sign-out indistinguishable from an expiry.
       action: isSignedIn()
-        ? { label: 'Sign out', onClick: logout }
+        ? { label: 'Sign out', onClick: sessionActions.signOut }
         : { label: 'Refresh', onClick: () => { loadUsage(); loadHealth() } },
       foot: 'Your account and usage.',
     })
-  }, [org, tenantLabel, tierDisplay, mock, usage, gateTier, loadUsage, loadHealth])
+  }, [org, tenantLabel, tierDisplay, mock, usage, gateTier, loadUsage, loadHealth, sessionActions])
 
   // Esc while a live run is in flight: detach this session from the job (the
   // rail keeps tracking it; the close beacon flags it reap-able server-side).
@@ -2199,7 +2262,13 @@ export default function App() {
   // and there is no way to re-auth, so it is a real failure — fall through to
   // the pane-fail surface (Retry + Back to the demo), never the inert overlay
   // (round-2 review F1: that state was an unrecoverable blank).
-  const signedOut = !mock && authRequired && (authConfigured || !isSignedIn())
+  // W2b: the same expression, now a named contract over the shared
+  // controller's `required` status (consoleGate.js proves its truth table).
+  // Every console surface below (the gate, the hushed 401 red, the viewer
+  // overlay, the product-surface enablement) reads THIS, so there is one
+  // derivation and one state machine behind it. `isSignedIn` is handed in as a
+  // function so the storage read keeps its short circuit.
+  const signedOut = consoleSignedOut({ mock, authRequired, authConfigured, isSignedIn })
 
   // Product-surface navigation (Browser / CAD / Solar CAD / iOS). 'cad' is the
   // module default, so the drawing workspace renders exactly as before unless

@@ -167,7 +167,10 @@ export async function getSession(mock, dwg = 'rooftop_demo') {
     track('session.started', { mock: true, catalog_source: catalogSource })
     return { intake, tenant: null, tier: null, org: null }
   }
-  const data = await http(`/api/session?dwg=${encodeURIComponent(dwg)}`, undefined, STARTUP_FETCH_TIMEOUT_MS)
+  // no-store: this 200 is the sole proof that clears the auth gate, so it
+  // must never be a replay. The server sends no validators today (nothing to
+  // revalidate against), making this insurance rather than a fix.
+  const data = await http(`/api/session?dwg=${encodeURIComponent(dwg)}`, { cache: 'no-store' }, STARTUP_FETCH_TIMEOUT_MS)
   // P2 funnel top: how many people open the product, and as who.
   track('session.started', {
     mock: false,
