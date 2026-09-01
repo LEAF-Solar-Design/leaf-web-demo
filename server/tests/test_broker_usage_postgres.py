@@ -73,7 +73,11 @@ def test_tenant_usage_postgres_never_reads_stale_jsonl(monkeypatch):
     assert store.calls == [("aggregate", "tenant-a")]
 
 
-def test_ops_usage_postgres_never_reads_stale_jsonl(monkeypatch):
+def test_ops_usage_postgres_never_reads_stale_jsonl(monkeypatch, tmp_path):
+    # The scoreboard's platform block sums the WHOLE agent ledger by design, so
+    # isolate it: unset, it reads gitignored machine-local dev data and this
+    # test's result depends on whose box it runs on. Absent-and-readable = 0.
+    monkeypatch.setenv("LEAF_AGENT_LEDGER", str(tmp_path / "agent_ledger.jsonl"))
     store = _Store()
     monkeypatch.setenv("LEAF_BROKER_STORE", "postgres")
     monkeypatch.delenv("LEAF_OPS_SECRET", raising=False)
@@ -131,6 +135,10 @@ def test_legacy_tenant_usage_shape_is_unchanged(monkeypatch, tmp_path):
 
 
 def test_legacy_ops_usage_still_reads_jsonl(monkeypatch, tmp_path):
+    # The scoreboard's platform block sums the WHOLE agent ledger by design, so
+    # isolate it: unset, it reads gitignored machine-local dev data and this
+    # test's result depends on whose box it runs on. Absent-and-readable = 0.
+    monkeypatch.setenv("LEAF_AGENT_LEDGER", str(tmp_path / "agent_ledger.jsonl"))
     ledger = tmp_path / "legacy-ops.jsonl"
     ledger.write_text(json.dumps({
         "ts": 1, "tenant_id": "tenant-a", "tool": "x",

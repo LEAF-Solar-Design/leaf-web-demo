@@ -53,7 +53,11 @@ def test_ungranted_browser_cannot_list_or_mutate_tenants(monkeypatch) -> None:
     assert client.post("/api/operator/tenants/tenant-a/enable", headers=forged).status_code == 404
 
 
-def test_active_operator_can_list_disable_and_enable(monkeypatch) -> None:
+def test_active_operator_can_list_disable_and_enable(monkeypatch, tmp_path) -> None:
+    # The scoreboard's platform block sums the WHOLE agent ledger by design, so
+    # isolate it: unset, it reads gitignored machine-local dev data and this
+    # test's result depends on whose box it runs on. Absent-and-readable = 0.
+    monkeypatch.setenv("LEAF_AGENT_LEDGER", str(tmp_path / "agent_ledger.jsonl"))
     monkeypatch.setattr(operator_deps.tenant_deps, "auth_live", lambda: False)
     monkeypatch.setattr(
         operator_principals,

@@ -297,6 +297,14 @@ def test_C_ops_tenants_shape_and_disabled_from_file(monkeypatch, tmp_path):
     monkeypatch.setenv("LEAF_USAGE_LEDGER", str(ledger))
     monkeypatch.setenv("BROKER_TENANTS", str(tenants_file))
     monkeypatch.setenv("BROKER_URL", _dead_broker_url())  # force file fallback
+    # Isolate the AGENT ledger too. The scoreboard's platform block sums the
+    # whole agent ledger by design (a tenant can spend LLM turns without ever
+    # reaching the broker), so without this the assertion below reads
+    # data/agent_ledger.jsonl -- gitignored, machine-local, and different on
+    # every developer box. It passes on a clean runner and fails on any machine
+    # that has actually run the agent. Point it at a path inside tmp_path that
+    # does not exist: absent-and-readable is a real zero.
+    monkeypatch.setenv("LEAF_AGENT_LEDGER", str(tmp_path / "agent_ledger.jsonl"))
 
     r = _ops_client().get("/api/ops/tenants", headers={"X-Internal-Role": "qa"})
     assert r.status_code == 200, r.text
@@ -306,8 +314,9 @@ def test_C_ops_tenants_shape_and_disabled_from_file(monkeypatch, tmp_path):
     assert set(rows) == {"A", "B"}
     # The row carries the broker's AutoCAD columns AND the agent ledger's LLM
     # columns: the scoreboard needs both, and only the server can reach both.
-    # No agent ledger exists in this fixture, so the LLM columns are a real,
-    # readable zero -- distinct from the null an UNREADABLE store produces
+    # The agent ledger is isolated to a path that does not exist, so the LLM
+    # columns are a real, readable zero -- distinct from the null an
+    # UNREADABLE store produces
     # (tests/test_ops_usage_scoreboard.py pins that difference).
     for t in body["tenants"]:
         assert set(t.keys()) == {"tenant_id", "runs", "usd_est", "disabled",
