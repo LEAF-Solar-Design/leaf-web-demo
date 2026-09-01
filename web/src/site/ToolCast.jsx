@@ -1829,8 +1829,38 @@ export default function ToolCast({
             )}
             <div className="tc-trust-row"><span>Backend</span><b>{platform.healthStatus.status}</b></div>
             <div className="tc-trust-row"><span>Claude account</span><b>{platform.grant?.linked ? `linked${platform.grant.kind ? ` · ${platform.grant.kind}` : ''}` : 'not linked'}</b></div>
-            <div className="tc-trust-row"><span>Runs today</span><b>{platform.usage?.today?.runs ?? 'unknown'}</b></div>
-            <div className="tc-trust-row"><span>Spend remaining</span><b>{typeof platform.usage?.cap?.remaining === 'number' ? `$${platform.usage.cap.remaining.toFixed(2)}` : 'unknown'}</b></div>
+            {/* The usage LEDGER (showcase #2): /api/usage has always returned
+                today/total/cap - the UI rendered one number and dropped the
+                rest. Every row below is a field the endpoint already ships;
+                absent fields render 'unknown', never a fabricated zero. The
+                cap bar is a REAL percentage (house rule: width = real % only).
+                The agent-turn sub-ledger lands with the W3 agent-trace work. */}
+            {platform.usage ? (
+              <div data-testid="usage-ledger">
+                <div className="tc-trust-row"><span>Runs today</span><b>{platform.usage.today?.runs ?? 'unknown'}</b></div>
+                <div className="tc-trust-row"><span>Spend today</span><b>{typeof platform.usage.today?.usd_est === 'number' ? `$${platform.usage.today.usd_est.toFixed(3)}` : 'unknown'}</b></div>
+                <div className="tc-trust-row"><span>Runs total</span><b>{typeof platform.usage.total?.runs === 'number' ? platform.usage.total.runs.toLocaleString() : 'unknown'}</b></div>
+                <div className="tc-trust-row"><span>Spend total</span><b>{typeof platform.usage.total?.usd_est === 'number' ? `$${platform.usage.total.usd_est.toFixed(2)}` : 'unknown'}</b></div>
+                {platform.usage.cap?.enabled && typeof platform.usage.cap.remaining === 'number' && typeof platform.usage.cap.usd_cap === 'number' && platform.usage.cap.usd_cap > 0 ? (
+                  <div className="tc-trust-row tc-usage-cap">
+                    <span>Cap ${platform.usage.cap.usd_cap.toFixed(2)}</span>
+                    <b>
+                      ${platform.usage.cap.remaining.toFixed(2)} left
+                      <span className="strip-bar tc-usage-bar" aria-hidden="true">
+                        <i style={{ width: `${Math.min(100, Math.max(0, (1 - platform.usage.cap.remaining / platform.usage.cap.usd_cap) * 100))}%` }} />
+                      </span>
+                    </b>
+                  </div>
+                ) : (
+                  <div className="tc-trust-row"><span>Cap</span><b>{platform.usage.cap?.enabled === false ? 'no cap configured' : (typeof platform.usage.cap?.remaining === 'number' ? `$${platform.usage.cap.remaining.toFixed(2)} left` : 'unknown')}</b></div>
+                )}
+              </div>
+            ) : (
+              <>
+                <div className="tc-trust-row"><span>Runs today</span><b>unknown</b></div>
+                <div className="tc-trust-row"><span>Spend remaining</span><b>unknown</b></div>
+              </>
+            )}
             <EntitlementGate
               tier={platform.entitlements?.tier}
               entitlements={platform.entitlements}
