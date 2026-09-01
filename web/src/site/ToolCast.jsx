@@ -1421,7 +1421,7 @@ export default function ToolCast({
         <span className="key">Esc</span>
       </div>
 
-      <aside className={`tc-rail tc-rail-l tc-operator-rail${focusView ? ' tc-focus-hidden' : ''}`} aria-label="Workspace controls" data-cast="tool" data-controller-instance={instanceId} style={{ '--rank': 0 }} data-testid="operator-surface">
+      <aside className={`tc-rail tc-rail-l tc-operator-rail${focusView ? ' tc-focus-hidden' : ''}`} aria-label="Workspace controls" data-cast="tool" data-controller-instance={instanceId} data-checkout-instance={checkout.instanceId} style={{ '--rank': 0 }} data-testid="operator-surface">
         <div className="tc-rail-head">
           <span className="tc-rail-title">Workspace</span>
           <span className="tc-rail-sub">request and tools</span>

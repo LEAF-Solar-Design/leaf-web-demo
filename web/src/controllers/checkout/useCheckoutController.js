@@ -86,6 +86,15 @@ export default function useCheckoutController({
   const controllerRef = useRef(null)
   if (!controllerRef.current) controllerRef.current = createCheckoutController({ mock, drawingId, holder, services })
   const controller = controllerRef.current
+  // Minted with the store, so it names THIS instance for its whole life. A
+  // surface can stamp it and an e2e walk can then prove, at runtime, that one
+  // page holds one controller: a second instance is a second capability and a
+  // second holder id over ONE server-side lock, and a REMOUNT silently drops
+  // the capability the current lease depends on.
+  const instanceIdRef = useRef(null)
+  if (!instanceIdRef.current) {
+    instanceIdRef.current = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`
+  }
   const authorityRef = useRef(null)
   const authorityScopeRef = useRef(null)
   const claimRef = useRef(null)
@@ -269,5 +278,5 @@ export default function useCheckoutController({
     }
   }, [controller, drawingId, holder])
 
-  return { ...state, actions }
+  return { ...state, instanceId: instanceIdRef.current, actions }
 }
