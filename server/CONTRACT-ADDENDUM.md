@@ -606,9 +606,11 @@ header — never a body field or query parameter — on:
 Unchanged in every case where no lease is live: an absent or EXPIRED lock is free,
 needs no capability, and is re-acquirable by anyone — so a forgotten lock still
 cannot wedge a drawing. Operators running more than one app process must set
-`LEAF_CHECKOUT_CAP_SECRET` (required outright, with at least 32 bytes, when
-`LEAF_RUNTIME_ENV=production`); unset off production means a per-process secret
-that does not survive a restart. When `LEAF_AUTH_LIVE=1`, mint and verification
+`LEAF_CHECKOUT_CAP_SECRET` (required outright, with at least 32 bytes and about
+128 bits of estimated entropy, when `LEAF_RUNTIME_ENV=production`). Generate it
+with `openssl rand -hex 32`; repeated characters, words, or short pasted blocks
+are refused. Unset off production means a per-process secret that does not
+survive a restart. When `LEAF_AUTH_LIVE=1`, mint and verification
 also require the verified token's nonempty `sub`; a subjectless authenticated
 caller receives a fail-closed operator error rather than sharing an anonymous
 capability identity with every other tenant member.

@@ -13,6 +13,8 @@ Run:  cd server && python -m pytest tests/test_checkout_capability.py -q
 """
 from __future__ import annotations
 
+import re
+import secrets
 import sys
 from pathlib import Path
 
@@ -169,8 +171,64 @@ def test_production_rejects_a_short_configured_secret(monkeypatch):
 
 
 def test_production_accepts_a_32_byte_configured_secret(monkeypatch):
-    monkeypatch.setenv("LEAF_CHECKOUT_CAP_SECRET", "x" * 32)
+    monkeypatch.setenv("LEAF_CHECKOUT_CAP_SECRET",
+                       "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6")
     monkeypatch.setenv("LEAF_RUNTIME_ENV", "production")
+    token = cc.mint(TENANT, DRAWING, 1)
+    assert cc.verify(token, TENANT, DRAWING, lock(fence=1)) == ("sess-a", 1)
+
+
+@pytest.mark.parametrize("weak", [
+    "x" * 32,
+    "0" * 40,
+    "abcd" * 8,
+    "password" * 5,
+    "password password password password",
+    "password-password-password-password",
+    "abcd-abcd-abcd-abcd-abcd-abcd-abcd",
+    "word_word_word_word_word_word_word_word",
+    "Password password PASSWORD password",
+    "1234567890" * 4,
+])
+def test_production_rejects_a_long_but_predictable_secret(monkeypatch, weak):
+    assert len(weak.encode("utf-8")) >= cc._MIN_PRODUCTION_SECRET_BYTES
+    monkeypatch.setenv("LEAF_CHECKOUT_CAP_SECRET", weak)
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "production")
+    with pytest.raises(cc.CapabilityUnavailable, match="too predictable"):
+        cc.mint(TENANT, DRAWING, 1)
+
+
+def test_entropy_error_never_echoes_the_secret_or_measured_score(monkeypatch):
+    weak = "sekrit" * 6
+    monkeypatch.setenv("LEAF_CHECKOUT_CAP_SECRET", weak)
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "production")
+    with pytest.raises(cc.CapabilityUnavailable) as caught:
+        cc.mint(TENANT, DRAWING, 1)
+
+    rendered = str(caught.value)
+    assert weak not in rendered
+    assert "sekrit" not in rendered
+    assert set(re.findall(r"\d+", rendered)) == {
+        str(cc._MIN_PRODUCTION_SECRET_ENTROPY_BITS),
+        str(cc._MIN_PRODUCTION_SECRET_BYTES),
+    }
+
+
+@pytest.mark.parametrize("generator", [
+    lambda: secrets.token_hex(16),
+    lambda: secrets.token_hex(32),
+    lambda: secrets.token_urlsafe(32),
+])
+def test_machine_generated_secrets_are_not_rejected(monkeypatch, generator):
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "production")
+    for _ in range(50):
+        monkeypatch.setenv("LEAF_CHECKOUT_CAP_SECRET", generator())
+        cc.mint(TENANT, DRAWING, 1)
+
+
+def test_a_predictable_secret_remains_valid_off_production(monkeypatch):
+    monkeypatch.delenv("LEAF_RUNTIME_ENV", raising=False)
+    monkeypatch.setenv("LEAF_CHECKOUT_CAP_SECRET", "x" * 32)
     token = cc.mint(TENANT, DRAWING, 1)
     assert cc.verify(token, TENANT, DRAWING, lock(fence=1)) == ("sess-a", 1)
 
