@@ -68,6 +68,13 @@ test('the console holds the same single-writer lock the stage does', async ({ pa
   // seeds DrawingIdentityProvider with the drawing the stage twin uses.
   await page.goto(`/app?drawing=${DRAWING_ID}`)
   await expect(page.getByText(`Editing locked by`)).toBeVisible({ timeout: 20_000 })
+
+  // Runtime single-instance proof for the console (panel W2c): exactly one
+  // single-writer controller stamps the page. Two instances would be two
+  // bearer capabilities and two holder ids over ONE server-side lock.
+  expect(await page.locator('[data-checkout-instance]').count()).toBe(1)
+  const checkoutInstance = await page.locator('[data-checkout-instance]').getAttribute('data-checkout-instance')
+  expect(checkoutInstance).toBeTruthy()
   await expect(page.getByText(OTHER_HOLDER)).toBeVisible()
 
   // The write tool is genuinely DISABLED, and no run leaves the browser.
@@ -87,6 +94,9 @@ test('the console holds the same single-writer lock the stage does', async ({ pa
 
   await page.waitForTimeout(600)
   await page.reload()
+  // Still exactly one controller after the reload (a fresh instance id is
+  // legitimate; a second stamp is not).
+  expect(await page.locator('[data-checkout-instance]').count()).toBe(1)
   const take = page.getByRole('button', { name: 'Take edit lock' })
   await expect(take).toBeVisible({ timeout: 20_000 })
 

@@ -29,13 +29,26 @@ export async function secureTakenCheckoutAuthority({
   // The take response arrives before the origin-wide lock. Remove the bearer
   // proof during that gap so no render can issue a write without both proofs.
   controller.clearCapability()
-  const authority = holdAuthority({
+  // restoreCapability refuses once the scope has voided (tenant switch racing
+  // this acquisition). A refused capability is a lock this runtime must not
+  // keep: stop the authority and release the server lease, or the origin-wide
+  // Web Lock leaks for the runtime's lifetime and a queued duplicate waits
+  // forever (panel W2c, lock-safety BLOCKER - reproduced).
+  let refused = false
+  let authority = null
+  authority = holdAuthority({
     handoff: { capability, holder, drawingId, createdAtMs: Date.now() },
-    onAcquired: (owned) => controller.restoreCapability(owned.capability),
+    onAcquired: (owned) => {
+      if (!controller.restoreCapability(owned.capability)) {
+        refused = true
+        authority?.stop()
+        Promise.resolve(services.release(drawingId, owned.capability)).catch(() => { /* fail closed */ })
+      }
+    },
     onError: () => controller.clearCapability(),
   })
   const acquired = authority.active && await authority.acquired
-  if (acquired) return authority
+  if (acquired && !refused) return authority
 
   authority.stop()
   controller.clearCapability()
@@ -192,7 +205,13 @@ export default function useCheckoutController({
       handoff,
       onAcquired: (owned) => {
         provisionalRef.current = null
-        controller.restoreCapability(owned.capability)
+        if (!controller.restoreCapability(owned.capability)) {
+          // Scope voided while the handoff redeemed: do not keep the lock or
+          // the lease (same refusal rule as secureTakenCheckoutAuthority).
+          authority.stop()
+          Promise.resolve(services.release(owned.drawingId || drawingId, owned.capability)).catch(() => { /* fail closed */ })
+          return
+        }
         startClaim(owned.holder, { incumbent: true })
         controller.refresh()
       },
@@ -244,14 +263,34 @@ export default function useCheckoutController({
 
   const actions = useMemo(() => {
     const take = async () => {
+      // Fenced on the scope generation: this closure's drawingId/holder are
+      // the render's, and a tenant switch mid-flight voids them. A lease
+      // granted for a scope this runtime no longer serves is released, never
+      // secured (panel W2c, lock-safety BLOCKER).
+      const scopeGenAtStart = controller.getScopeGeneration()
       const result = await controller.takeDeferred()
       let acquiredAuthority = null
+      if (result?.acquired && result.checkout_capability
+          && controller.getScopeGeneration() !== scopeGenAtStart) {
+        Promise.resolve(services.release(drawingId, result.checkout_capability)).catch(() => { /* fail closed */ })
+        const safeStale = { ...result, acquired: false }
+        delete safeStale.checkout_capability
+        return safeStale
+      }
       if (result?.acquired && result.checkout_capability && drawingId && holder) {
         const scope = `${holder}\u0000${drawingId}`
         authorityRef.current?.stop()
         acquiredAuthority = await secureTakenCheckoutAuthority({
           controller, result, drawingId, holder, services,
         })
+        if (acquiredAuthority && controller.getScopeGeneration() !== scopeGenAtStart) {
+          // Voided while the authority was being secured: never install a
+          // stale scope's authority into the live refs.
+          acquiredAuthority.stop()
+          controller.clearCapability()
+          Promise.resolve(services.release(drawingId, result.checkout_capability)).catch(() => { /* fail closed */ })
+          acquiredAuthority = null
+        }
         authorityRef.current = acquiredAuthority
         authorityScopeRef.current = authorityRef.current ? scope : null
       }

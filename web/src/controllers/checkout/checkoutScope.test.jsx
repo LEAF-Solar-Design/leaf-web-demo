@@ -240,3 +240,70 @@ describe('the holder claim', () => {
     })
   })
 })
+
+// --- the mid-take tenant switch (panel W2c, lock-safety BLOCKER) ------------
+
+describe('a tenant switch racing an in-flight take', () => {
+  it('releases the stale lease, keeps no authority, and leaves the hook usable', async () => {
+    restoreLocks = installLocks()
+    // A deferred take: the server grant resolves only after the scope voids.
+    let grantTake
+    const services = makeServices()
+    services.take = vi.fn((_drawingId, holder) => new Promise((resolve) => {
+      grantTake = () => {
+        services.state.checkout = { holder }
+        resolve({ acquired: true, checkout_capability: 'opaque-proof' })
+      }
+    }))
+
+    const { result, rerender } = renderHook(
+      ({ drawingId }) => useCheckoutController({
+        drawingId, holder: 'sess-tenant-a', services,
+      }),
+      { initialProps: { drawingId: 'tenant-a-drawing' } },
+    )
+
+    let takePromise
+    act(() => { takePromise = result.current.actions.take() })
+    // The tenant switch lands while the server is still deciding.
+    await act(async () => { rerender({ drawingId: null }) })
+    let takeResult
+    await act(async () => { grantTake(); takeResult = await takePromise })
+
+    // The grant is refused client-side: not acquired, no capability installed.
+    expect(takeResult?.acquired).toBe(false)
+    expect(result.current.actions.getCapability()).toBeNull()
+    // The stale lease is handed back with ITS OWN capability (this is the one
+    // legitimate cross-scope release: same principal, same proof).
+    await waitFor(() => {
+      expect(services.release.mock.calls.some(
+        (call) => call[0] === 'tenant-a-drawing' && call[1] === 'opaque-proof',
+      )).toBe(true)
+    })
+    // And the hook is not wedged: the new scope reports un-busy.
+    expect(result.current.busy).toBe(false)
+  })
+
+  it('a scope change mid-mutation never strands busy=true', async () => {
+    restoreLocks = installLocks()
+    let grantTake
+    const services = makeServices()
+    services.take = vi.fn(() => new Promise((resolve) => {
+      grantTake = () => resolve({ acquired: false })
+    }))
+    const { result, rerender } = renderHook(
+      ({ drawingId }) => useCheckoutController({
+        drawingId, holder: 'sess-tenant-a', services,
+      }),
+      { initialProps: { drawingId: 'tenant-a-drawing' } },
+    )
+    let takePromise
+    act(() => { takePromise = result.current.actions.take() })
+    expect(result.current.busy).toBe(true)
+    await act(async () => { rerender({ drawingId: 'tenant-b-drawing' }) })
+    // The new scope starts un-busy even though the old mutation is in flight.
+    expect(result.current.busy).toBe(false)
+    await act(async () => { grantTake(); await takePromise })
+    expect(result.current.busy).toBe(false)
+  })
+})

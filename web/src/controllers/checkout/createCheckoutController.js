@@ -99,6 +99,9 @@ export function createCheckoutController({ mock = false, drawingId = null, holde
   let capability = null
   let disposed = false
   let refreshSeq = 0
+  // Monotonic per setScope CHANGE: async work fences itself on this so a
+  // result that raced a tenant/drawing switch can prove its scope is stale.
+  let scopeGeneration = 0
   let mutationBusy = false
   const listeners = new Set()
   let snapshotState = {
@@ -201,6 +204,7 @@ export function createCheckoutController({ mock = false, drawingId = null, holde
         !!next.mock !== state.mock
       if (changed) refreshSeq += 1
       if (changed) capability = null
+      if (changed) scopeGeneration += 1
       publish({
         mock: !!next.mock,
         drawingId: next.drawingId || null,
@@ -209,6 +213,10 @@ export function createCheckoutController({ mock = false, drawingId = null, holde
         unknown: next.mock ? false : (changed ? true : state.unknown),
         readFailed: false,
         error: null,
+        // mutate()'s finally guards its busy:false on the OLD drawingId, so a
+        // scope change mid-mutation would strand busy forever (panel W2c,
+        // lock-safety WARN): the new scope starts un-busy by definition.
+        busy: changed ? false : state.busy,
       })
     },
     refresh,
@@ -216,6 +224,7 @@ export function createCheckoutController({ mock = false, drawingId = null, holde
     takeDeferred: () => mutate('take', { installCapability: false }),
     release: () => mutate('release'),
     getCapability: () => capability,
+    getScopeGeneration: () => scopeGeneration,
     restoreCapability(nextCapability) {
       if (state.mock || !state.drawingId || !state.holder ||
           typeof nextCapability !== 'string' || !nextCapability) return false

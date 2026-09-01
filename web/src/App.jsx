@@ -2899,7 +2899,7 @@ export default function App() {
         onSelectJob={onSelectJob}
       />
 
-      <footer className="foot-bar">
+      <footer className="foot-bar" data-checkout-instance={checkout.instanceId}>
         {/* Traversal left: a named "← Parent" link while a project is open. */}
         {!mock && openProjectId && (
           <button type="button" className="chip-act" onClick={onCloseProject}>← All projects</button>

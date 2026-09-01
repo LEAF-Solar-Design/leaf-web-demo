@@ -568,11 +568,19 @@ async function runTabs(ages, seedId) {
   const checkoutStore = await fs.readFile(new URL('../src/controllers/checkout/createCheckoutController.js', import.meta.url), 'utf8')
   const shells = [['App.jsx', app], ['ToolCast.jsx', toolCast]]
 
-  if (/const\s+ownHolder\s*=\s*tenant\s*\|\|/.test(app)) {
-    fail('App.jsx still derives ownHolder from the tenant')
-  } else if (!/getSessionHolderId\(\)/.test(app)) {
-    fail('App.jsx does not compute ownHolder from getSessionHolderId()')
-  } else pass('App.jsx computes ownHolder from getSessionHolderId(), not the tenant')
+  // Scoped to the DECLARATION LINE, destructured or not (panel W2c: the old
+  // negative regex required `const ownHolder =` verbatim, which the shipped
+  // `const [ownHolder, setOwnHolder] = useState(...)` structurally never
+  // matches - a permanently vacuous guard - and the positive check accepted
+  // the bare token anywhere in the file).
+  const ownHolderDecl = app.split('\n').find((line) => /\bownHolder\b/.test(line) && /\bconst\b/.test(line))
+  if (!ownHolderDecl) {
+    fail('App.jsx no longer declares ownHolder - the guard below needs repointing')
+  } else if (/\btenant\b/i.test(ownHolderDecl) || /\borg\b/i.test(ownHolderDecl)) {
+    fail(`App.jsx derives ownHolder from a tenant/org value -> ${JSON.stringify(ownHolderDecl.trim())}`)
+  } else if (!/getSessionHolderId\(\)/.test(ownHolderDecl)) {
+    fail(`App.jsx's ownHolder declaration does not call getSessionHolderId() -> ${JSON.stringify(ownHolderDecl.trim())}`)
+  } else pass('App.jsx computes ownHolder from getSessionHolderId() on its declaration line, tenant-free')
 
   // EXACTLY ONE mount per shell. SiteRoot renders scene 'app' (App) and scenes
   // site|tool (StageScene -> ToolCast) in mutually exclusive arms of one
