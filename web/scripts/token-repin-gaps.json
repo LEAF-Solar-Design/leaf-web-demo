@@ -1,0 +1,43 @@
+{
+ "_comment": "Committed re-pin DEBT for check_token_repin.mjs. Only shrink this file (W1 tokens.css restructure burns it to zero); growing it means a new light-literal-on-dark hole.",
+ "stage": [
+  "--cv-danger",
+  "--cv-face",
+  "--cv-ghost",
+  "--cv-ghost-remove",
+  "--cv-insert",
+  "--cv-overlay",
+  "--cv-select",
+  "--well",
+  "--well-accent",
+  "--well-accent-tint",
+  "--well-border",
+  "--well-chip",
+  "--well-dim",
+  "--well-faint",
+  "--well-text"
+ ],
+ "sheets": [
+  "--cv-bg",
+  "--cv-border",
+  "--cv-danger",
+  "--cv-dim",
+  "--cv-face",
+  "--cv-ghost",
+  "--cv-ghost-remove",
+  "--cv-insert",
+  "--cv-overlay",
+  "--cv-panel",
+  "--cv-panel-glass",
+  "--cv-select",
+  "--cv-text",
+  "--well",
+  "--well-accent",
+  "--well-accent-tint",
+  "--well-border",
+  "--well-chip",
+  "--well-dim",
+  "--well-faint",
+  "--well-text"
+ ]
+}
