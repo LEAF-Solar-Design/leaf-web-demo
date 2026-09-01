@@ -56,6 +56,7 @@ from customization_service import CustomizationService, CustomizationServiceErro
 from envelopes import ErrorCode, error_response, with_envelope_fields
 
 router = APIRouter()
+operator_router = APIRouter()
 
 
 class DeploymentVerifyRequest(BaseModel):
@@ -307,7 +308,7 @@ def ops_tenants(x_ops_secret: Optional[str] = Header(default=None)) -> Any:
     return _tenant_listing()
 
 
-@router.get("/api/operator/tenants")
+@operator_router.get("/api/operator/tenants")
 def operator_tenants(
     _operator: OperatorContext = Depends(operator_deps.require_operator),
 ) -> Any:
@@ -384,7 +385,7 @@ def ops_enable(tid: str, x_ops_secret: Optional[str] = Header(default=None)) -> 
     return _proxy(tid, "enable")
 
 
-@router.post("/api/operator/tenants/{tid}/disable")
+@operator_router.post("/api/operator/tenants/{tid}/disable")
 def operator_disable(
     tid: str,
     _operator: OperatorContext = Depends(operator_deps.require_operator),
@@ -392,7 +393,7 @@ def operator_disable(
     return _proxy(tid, "disable")
 
 
-@router.post("/api/operator/tenants/{tid}/enable")
+@operator_router.post("/api/operator/tenants/{tid}/enable")
 def operator_enable(
     tid: str,
     _operator: OperatorContext = Depends(operator_deps.require_operator),

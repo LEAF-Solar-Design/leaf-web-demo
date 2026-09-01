@@ -22,7 +22,7 @@ from routers import ops  # noqa: E402
 
 def _client(*, raise_server_exceptions: bool = False) -> TestClient:
     app = FastAPI()
-    app.include_router(ops.router)
+    app.include_router(ops.operator_router)
     app.dependency_overrides[deps.require_tenant] = lambda: "demo-tenant"
     return TestClient(app, raise_server_exceptions=raise_server_exceptions)
 

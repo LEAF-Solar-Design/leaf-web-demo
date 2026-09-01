@@ -245,7 +245,12 @@ _installed = False
 def _allowlist() -> tuple[frozenset[str], tuple[str, ...]]:
     hosts = set(_LOOPBACK)
     suffixes: list[str] = []
-    for var in ("DATABASE_URL", "LEAF_PLATFORM_DATABASE_URL", "PLATFORM_DATABASE_URL"):
+    for var in (
+        "DATABASE_URL",
+        "LEAF_PLATFORM_DATABASE_URL",
+        "PLATFORM_DATABASE_URL",
+        "BROKER_URL",
+    ):
         url = os.environ.get(var, "")
         if url:
             host = urllib.parse.urlsplit(url).hostname

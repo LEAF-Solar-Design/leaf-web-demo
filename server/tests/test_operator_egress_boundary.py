@@ -164,6 +164,22 @@ def test_deployment_declared_db_host_is_allowed(monkeypatch):
             socket.getaddrinfo("api.vercel.com", 443)   # still denied (Layer 1)
 
 
+def test_configured_broker_host_is_allowed_but_production_stays_denied(monkeypatch):
+    monkeypatch.setenv("BROKER_URL", "http://broker:8140")
+    with operator_execution():
+        try:
+            socket.getaddrinfo("broker", 8140)
+        except OperatorEgressDenied:
+            pytest.fail("the configured broker host must be allowed")
+        except OSError:
+            pass
+
+    monkeypatch.setenv("BROKER_URL", "https://api.leafdesign.ai")
+    with operator_execution():
+        with pytest.raises(OperatorEgressDenied):
+            socket.getaddrinfo("api.leafdesign.ai", 443)
+
+
 def test_tenant_s3_host_not_denied_by_layer1():
     # S3 (s3.amazonaws.com) is legitimate tenant egress and must NOT match the
     # ECS deploy pattern, so Layer 1 does not deny it outside operator context.

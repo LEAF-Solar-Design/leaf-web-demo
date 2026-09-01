@@ -143,6 +143,7 @@ _EXPECTED_ENDPOINTS = frozenset({
     ("GET", "/api/operator/sessions"),
     ("GET", "/api/operator/sessions/{session_id}"),
     ("GET", "/api/operator/sessions/{session_id}/events"),
+    ("GET", "/api/operator/tenants"),
     ("POST", "/api/operator/external/execute"),
     ("POST", "/api/operator/external/propose"),
     ("POST", "/api/operator/release/execute"),
@@ -155,6 +156,8 @@ _EXPECTED_ENDPOINTS = frozenset({
     ("POST", "/api/operator/runbooks/tenant-overlay/propose"),
     ("POST", "/api/operator/sessions"),
     ("POST", "/api/operator/sessions/{session_id}/messages"),
+    ("POST", "/api/operator/tenants/{tid}/disable"),
+    ("POST", "/api/operator/tenants/{tid}/enable"),
     # Capability-only Lane D dispatch: validates the operator principal and
     # enqueues a bounded job to the isolated egress-locked disposable worker; it
     # executes no command in the app process and reaches no production route
