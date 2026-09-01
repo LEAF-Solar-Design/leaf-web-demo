@@ -35,6 +35,7 @@ import conversations as conversation_crud
 import ios_ship_provider as ios_ship_provider_client
 import ios_ship_callback_listener
 import ios_surface_bridge
+import glug_routes
 import jobs as job_store
 import write_loop
 from customization_flags import RolloutMode, mode as customization_mode
@@ -239,6 +240,7 @@ app.include_router(overlay.router)  # T1 runtime overlay: propose a preview, dec
 app.include_router(ios_ship.router)  # Wave D one-shot iOS: readiness, one reviewed idempotent launch, status, receipt
 app.include_router(ios_ship_provider_router.router)  # internal provider callbacks, bearer-file auth only
 app.include_router(ios_surface.router)  # Wave D consume-only iOS readiness surface, fail-closed behind LEAF_IOS_SURFACE_ENABLED (GET /api/ios-surface/status refuses 404 while off)
+app.include_router(glug_routes.router)
 # SOURCE SEAM (ios_surface): fn({tenant_id, project_id, revision}) -> a sanitized
 # leaf.ios-ship-surface.v1 dict. Wired to the INTERIM in-repo projection of the
 # live ship-lane store (ios_surface_bridge), which reads readiness, the newest
