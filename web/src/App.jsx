@@ -33,6 +33,7 @@ import ProductSurfaceTabs, { ProductSurfaceFrame } from './components/ProductSur
 import IosSurface from './ios/IosSurface.jsx'
 import { ENV_IOS_SURFACE } from './ios/flag.js'
 import CadEditSurface from './cadedit/CadEditSurface.jsx'
+import { markInstant } from './lib/instant.js'
 import { ENV_CAD_EDIT } from './cadedit/flag.js'
 import {
   productSurfaceStates,
@@ -2057,6 +2058,10 @@ export default function App() {
     const onKey = (e) => {
       const tag = ((e.target && e.target.tagName) || '').toLowerCase()
       const typing = tag === 'input' || tag === 'textarea'
+      // Hotkey-driven changes land frame-of-keypress (data-instant, W0#7).
+      // Marked for every ladder key, not per branch: the rAF clear makes an
+      // unmatched key a no-op, and a missed branch here is a motion bug.
+      if (e.key === 'Escape' || e.key === 'r' || e.key === 'R' || ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K'))) markInstant()
       if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
         e.preventDefault()
         barInputRef.current?.focus()

@@ -76,6 +76,18 @@
   src: url('/fonts/ibm-plex-mono-600-latin.woff2') format('woff2');
 }
 
+/* Metric-matched swap fallbacks (W0 craft #3): sized so the reflow when the
+   real face lands is near-zero. Overrides derived from the faces' published
+   metrics against Arial / Courier New; they only govern the swap window. */
+@font-face {
+  font-family: 'Barlow Fallback'; src: local('Arial');
+  size-adjust: 111.7%; ascent-override: 88.4%; descent-override: 21%;
+}
+@font-face {
+  font-family: 'Plex Mono Fallback'; src: local('Courier New');
+  size-adjust: 100%; ascent-override: 102.5%; descent-override: 27.5%;
+}
+
 :root {
   /* --- token contract (drafting studio, verbatim) --- */
   --background: #e9e7e0;       /* desk bond */
@@ -127,10 +139,10 @@
   --well-accent: #38c274;
   --well-accent-tint: rgba(56, 194, 116, .13);
 
-  --font-label: 'Barlow', system-ui, sans-serif;
-  --font-sans: 'Barlow', system-ui, sans-serif;
-  --font-display: 'Barlow Semi Condensed', 'Barlow', system-ui, sans-serif;
-  --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --font-label: 'Barlow', 'Barlow Fallback', system-ui, sans-serif;
+  --font-sans: 'Barlow', 'Barlow Fallback', system-ui, sans-serif;
+  --font-display: 'Barlow Semi Condensed', 'Barlow', 'Barlow Fallback', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'Plex Mono Fallback', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
 
   /* --- compatibility aliases (legacy names used across component rules) --- */
   --paper: var(--background);
@@ -974,6 +986,12 @@ footer .warn-txt { color: var(--status-warning); }
     transition-duration: 0s !important;
     transition-delay: 0s !important;
   }
+  /* W0 craft #8: with the pulse frozen, a LIVE dot was byte-identical to a
+     COMPLETE dot - same information, static form: a ring marks "running" */
+  .dot.live, .state.prog::before, .running::before, .reattach::before,
+  .authoring::before, .loading::before {
+    box-shadow: 0 0 0 1.5px color-mix(in oklab, var(--primary) 45%, transparent);
+  }
 }
 
 /* ---------------- UI wave 1: identity chip · spend chip · quota · history ---------------- */
@@ -1676,12 +1694,16 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 .toggle:focus-visible, .switch input:focus-visible { box-shadow: 0 0 0 2px var(--card), 0 0 0 4px var(--primary); }
 
 /* ---------------- M1 motion (glide) ---------------- */
-:root { --m-enter: 520ms; --m-exit: 180ms; --m-curve: cubic-bezier(.22, 1, .36, 1); --m-stagger: 20ms; }
+:root { --m-enter: 260ms; --m-exit: 180ms; --m-curve: cubic-bezier(.22, 1, .36, 1); --m-stagger: 20ms; }
+/* Register II ceiling (W0 craft #6): 520ms sat in no register - too slow for
+   a mounting card, too fast for a scene. 260ms is the surface-arrival tier. */
 @keyframes m1-in { from { opacity: 0; transform: scale(.985); } to { opacity: 1; transform: none; } }
 @keyframes m1-out { to { opacity: 0; } }
 .enter {
   animation: m1-in var(--m-enter) var(--m-curve) both;
-  animation-delay: calc(var(--rank, 0) * var(--m-stagger));
+  /* stagger capped at rank 6 (W0 craft #5): a 20-row ledger must not make
+     its last row wait 400ms after its first */
+  animation-delay: calc(min(var(--rank, 0), 6) * var(--m-stagger));
 }
 /* the one enter curve, applied to every mounting pane/card/popover */
 .route, .banner, .vh-pop, .proj-menu, .claude-pop, .result-card,
@@ -1689,6 +1711,15 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 .strip-decision, .strip-failed {
   animation: m1-in var(--m-enter) var(--m-curve) both;
 }
+/* data-instant (W0 craft #7): a hotkey-driven surface change lands on the
+   frame the key was pressed - the handler stamps documentElement.dataset
+   .instant and clears it next rAF. Pointer-driven versions of the same
+   change keep their register motion. */
+[data-instant] *, [data-instant] *::before, [data-instant] *::after {
+  transition-duration: 0s !important;
+  animation-duration: 0s !important;
+}
+
 /* exits: 180 ms fades (M1). AFTER the auto-enter list so .exit wins on any
    surface that list also names; a fading surface is display-only. */
 .exit { animation: m1-out var(--m-exit) ease both; pointer-events: none; }
