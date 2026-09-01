@@ -34,6 +34,9 @@ import IosSurface from './ios/IosSurface.jsx'
 import { ENV_IOS_SURFACE } from './ios/flag.js'
 import CadEditSurface from './cadedit/CadEditSurface.jsx'
 import { markInstant } from './lib/instant.js'
+import { agentBannerFor } from './lib/agentBanner.js'
+import { selectEntity } from './lib/selectEntity.js'
+import { countEntitiesByLayer } from './lib/layerCounts.js'
 import { ENV_CAD_EDIT } from './cadedit/flag.js'
 import {
   productSurfaceStates,
@@ -71,7 +74,7 @@ import { TOUR_STEPS } from './demo/tourScript.js'
 import { editFixture, pendingEditDemo, editFixtureV2 } from './mock/editFixture.js'
 import ConversePanel from './components/ConversePanel.jsx'
 import {
-  THRESHOLDS, classifyAgentError, fetchRegistry, fetchSkills, listPendingApprovals,
+  THRESHOLDS, fetchRegistry, fetchSkills, listPendingApprovals,
 } from './converse.js'
 import { useWorkspaceControllers } from './controllers/WorkspaceControllerProvider.jsx'
 import { entitlementAllowed } from './controllers/platform/index.js'
@@ -155,19 +158,6 @@ const devControls = (() => {
 // A self-minted author-authority turn is reusable for this long — a wide
 // margin under the server's TURN_MAX_S default of 300s (server/turn_runner.py).
 const AUTHOR_AUTHORITY_TTL_MS = 120_000
-
-// Calm degraded copy for the agent tier (two-tier dispatch, wire §11). The
-// deterministic path is never blocked by any of these — the banner just says
-// so honestly. Keyed off classifyAgentError, never message text.
-const agentBannerFor = (e) => {
-  const kind = classifyAgentError(e)
-  if (kind === 'quota') return { kind, message: 'AI paused — your built tools keep working.' }
-  if (kind === 'grant') return { kind, message: 'Chat needs a linked Claude account.' }
-  if (kind === 'entitlement') return { kind, message: 'Chat isn’t included in your plan — your built tools keep working.' }
-  if (kind === 'busy') return { kind, message: 'The assistant is mid-turn — routed deterministically instead.' }
-  if (kind === 'rate_limited') return { kind, message: 'AI rate-limited — routed deterministically; retry shortly.' }
-  return { kind: 'unreachable', message: 'AI assistant unavailable — routed deterministically.' }
-}
 
 // Collapsible left-rail section (keeps the classic catalog reachable but
 // secondary to the prompt box — the primary path).
@@ -1148,26 +1138,12 @@ export default function App() {
   // Count ALL entity kinds per layer (polylines + inserts + 3DFACEs) so
   // insert/face-only layers (e.g. the ?fixture=edit Blocks/Surfaces layers)
   // stop reading 0 in the legend.
-  const layerCounts = useMemo(() => {
-    const c = {}
-    for (const l of shown?.layers || []) c[l] = 0
-    for (const pl of shown?.polylines || []) c[pl.layer] = (c[pl.layer] || 0) + 1
-    for (const ins of shown?.inserts || []) c[ins.layer] = (c[ins.layer] || 0) + 1
-    for (const f of shown?.faces3d || []) c[f.layer] = (c[f.layer] || 0) + 1
-    return c
-  }, [shown])
+  const layerCounts = useMemo(() => countEntitiesByLayer(shown), [shown])
 
   // resolve the picked handle to an entity descriptor for the readout
-  const selection = useMemo(() => {
-    if (!selectedHandle || !shown) return null
-    const pl = shown.polylines?.find((p) => p.handle === selectedHandle)
-    if (pl) return { handle: pl.handle, kind: 'polyline', layer: pl.layer }
-    const ins = shown.inserts?.find((i) => i.handle === selectedHandle)
-    if (ins) return { handle: ins.handle, kind: 'insert', layer: ins.layer, name: ins.name }
-    const f = shown.faces3d?.find((x) => x.handle === selectedHandle)
-    if (f) return { handle: f.handle, kind: '3dface', layer: f.layer }
-    return { handle: selectedHandle, kind: 'entity', layer: null }
-  }, [selectedHandle, shown])
+  const selection = useMemo(() => selectEntity(shown, selectedHandle, {
+    onUnresolved: (handle) => ({ handle, kind: 'entity', layer: null }),
+  }), [selectedHandle, shown])
 
   // Swap the viewer + panels to a drawing version (§11). The completed event
   // ("Version 2 created" / "Reverted to version 1") fires the NT2 toast.

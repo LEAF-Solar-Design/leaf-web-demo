@@ -83,7 +83,10 @@ import {
   requestIosShipLaunch,
 } from './iosShipReadiness.js'
 import { authConfigured, isSignedIn, login } from '../auth.js'
-import { classifyAgentError } from '../converse.js'
+import { agentBannerFor as agentBannerForKind, OPERATOR_AGENT_BANNER_COPY } from '../lib/agentBanner.js'
+import { moveRovingTab } from '../lib/roving.js'
+import { selectEntity } from '../lib/selectEntity.js'
+import { countEntitiesByLayer } from '../lib/layerCounts.js'
 import { claimHolderId, getSessionHolderId } from '../checkoutIdentity.js'
 import DemoTour from '../demo/DemoTour.jsx'
 import DemoConversationPanel, { demoReplyFor } from '../demo/DemoConversationPanel.jsx'
@@ -170,16 +173,6 @@ const UNIFIED_TOUR_STEPS = [
   },
 ]
 
-function agentBannerFor(error) {
-  const kind = classifyAgentError(error)
-  if (kind === 'quota') return { kind, message: 'AI paused. Your built tools keep working.' }
-  if (kind === 'grant') return { kind, message: 'Chat needs a linked Claude account.' }
-  if (kind === 'entitlement') return { kind, message: 'Chat is not included in your plan. Your built tools keep working.' }
-  if (kind === 'busy') return { kind, message: 'The assistant is mid-turn. The catalog route is still available.' }
-  if (kind === 'rate_limited') return { kind, message: 'AI is rate-limited. The catalog route is still available; retry shortly.' }
-  return { kind: 'unreachable', message: 'AI assistant unavailable. The catalog route is still available.' }
-}
-
 function phaseLabel(phase) {
   if (phase === 'empty') return 'No drawing yet'
   if (phase === 'loading') return PROOF_MODE ? 'Loading drawing' : 'Connecting backend'
@@ -192,32 +185,6 @@ function phaseLabel(phase) {
   if (phase === 'undone') return 'Original restored'
   if (phase === 'failed') return 'Request failed'
   return 'Workspace state unavailable'
-}
-
-function selectedEntity(intake, handle) {
-  if (!handle) return null
-  const polyline = intake?.polylines?.find((entity) => entity.handle === handle)
-  if (polyline) return { handle, kind: 'polyline', layer: polyline.layer }
-  const insert = intake?.inserts?.find((entity) => entity.handle === handle)
-  if (insert) return { handle, kind: 'insert', layer: insert.layer, name: insert.name }
-  const face = intake?.faces3d?.find((entity) => entity.handle === handle)
-  if (face) return { handle, kind: '3dface', layer: face.layer }
-  return null
-}
-
-function moveTab(event) {
-  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight' && event.key !== 'Home' && event.key !== 'End') return
-  const tabs = [...event.currentTarget.querySelectorAll('[role="tab"]')]
-  if (!tabs.length) return
-  const current = tabs.indexOf(document.activeElement)
-  let next = current < 0 ? 0 : current
-  if (event.key === 'ArrowRight') next = (next + 1) % tabs.length
-  if (event.key === 'ArrowLeft') next = (next - 1 + tabs.length) % tabs.length
-  if (event.key === 'Home') next = 0
-  if (event.key === 'End') next = tabs.length - 1
-  event.preventDefault()
-  tabs[next].focus()
-  tabs[next].click()
 }
 
 // Whether this SPA page load ever saw an ACTIVE platform session. Lives at
@@ -355,7 +322,7 @@ export default function ToolCast({
       setPhase('proposal')
       return response
     },
-    agentBannerFor,
+    agentBannerFor: (error) => agentBannerForKind(error, { copy: OPERATOR_AGENT_BANNER_COPY }),
   }), [requireAuth])
 
   useEffect(() => {
@@ -398,16 +365,9 @@ export default function ToolCast({
   const canOperate = sessionReady && hasDrawing
   const { canUndo, canRedo } = drawing
   const panelCount = drawing.shown?.polylines?.length || null
-  const selection = useMemo(() => selectedEntity(drawing.shown, selectedHandle), [drawing.shown, selectedHandle])
+  const selection = useMemo(() => selectEntity(drawing.shown, selectedHandle), [drawing.shown, selectedHandle])
   const sculpture = Number(drawing.previewing?.version ?? version) > 1 && phase !== 'undone'
-  const layerCounts = useMemo(() => {
-    const counts = {}
-    for (const layer of drawing.shown?.layers || []) counts[layer] = 0
-    for (const entity of [...(drawing.shown?.polylines || []), ...(drawing.shown?.inserts || []), ...(drawing.shown?.faces3d || [])]) {
-      counts[entity.layer] = (counts[entity.layer] || 0) + 1
-    }
-    return counts
-  }, [drawing.shown])
+  const layerCounts = useMemo(() => countEntitiesByLayer(drawing.shown), [drawing.shown])
 
   useEffect(() => {
     onVisibleLayersChange?.(drawing.visibleLayers)
@@ -1451,7 +1411,7 @@ export default function ToolCast({
           <span className="tc-rail-title">Workspace</span>
           <span className="tc-rail-sub">request and tools</span>
         </div>
-        <div className="tc-rail-tabs" role="tablist" aria-label="Workspace panels" onKeyDown={moveTab}>
+        <div className="tc-rail-tabs" role="tablist" aria-label="Workspace panels" onKeyDown={moveRovingTab}>
           <button id="workspace-tab-operator" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'operator' ? 0 : -1} aria-selected={leftView === 'operator'} onClick={() => setLeftView('operator')}>Operator</button>
           <button id="workspace-tab-catalog" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'catalog' ? 0 : -1} aria-selected={leftView === 'catalog'} disabled={!canOperate} onClick={() => setLeftView('catalog')}>Catalog <span>{tools.length}</span></button>
           <button id="workspace-tab-author" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'author' ? 0 : -1} aria-selected={leftView === 'author'} disabled={!canOperate} onClick={() => setLeftView('author')}>Author</button>
@@ -1623,7 +1583,7 @@ export default function ToolCast({
           <span className="tc-rail-title">Operations</span>
           <span className="tc-rail-sub">controller state</span>
         </div>
-        <div className="tc-rail-tabs" role="tablist" aria-label="Operation panels" onKeyDown={moveTab}>
+        <div className="tc-rail-tabs" role="tablist" aria-label="Operation panels" onKeyDown={moveRovingTab}>
           <button id="operations-tab-execution" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'execution' ? 0 : -1} aria-selected={rightView === 'execution'} onClick={() => setRightView('execution')}>Execution</button>
           <button id="operations-tab-jobs" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'jobs' ? 0 : -1} aria-selected={rightView === 'jobs'} disabled={!sessionReady} onClick={() => setRightView('jobs')}>Jobs <span>{visibleJobCount}</span></button>
           <button id="operations-tab-versions" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'versions' ? 0 : -1} aria-selected={rightView === 'versions'} disabled={!canOperate} onClick={() => { setRightView('versions'); drawing.actions.loadHistory() }}>Versions <span>{drawing.latest ?? 0}</span></button>

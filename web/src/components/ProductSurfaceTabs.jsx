@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { PRODUCT_SURFACES, SHARED_WORKSPACE_CAPABILITIES, productSurface } from '../site/productSurfaces.js'
+import { moveRovingTab } from '../lib/roving.js'
 
 // F-8: the continuity layer, made visible. Lives in the always-mounted nav so
 // it NEVER remounts on a profile switch (that persistence is the point, and
@@ -35,25 +36,10 @@ export function ContinuityRail({ activeSurface, project, catalog }) {
   )
 }
 
-function moveProductTab(event) {
-  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
-  const tabs = [...event.currentTarget.querySelectorAll('[role="tab"]')]
-  if (!tabs.length) return
-  const current = Math.max(0, tabs.indexOf(document.activeElement))
-  let next = current
-  if (event.key === 'ArrowRight') next = (current + 1) % tabs.length
-  if (event.key === 'ArrowLeft') next = (current - 1 + tabs.length) % tabs.length
-  if (event.key === 'Home') next = 0
-  if (event.key === 'End') next = tabs.length - 1
-  event.preventDefault()
-  tabs[next].focus()
-  tabs[next].click()
-}
-
 export default function ProductSurfaceTabs({ activeSurface, states, onSelect, project = null, catalog = null }) {
   return (
     <nav className="tc-product-nav" data-cast="tool" aria-label="Product workspace">
-      <div className="tc-product-tabs" role="tablist" aria-label="Workspace profile" onKeyDown={moveProductTab}>
+      <div className="tc-product-tabs" role="tablist" aria-label="Workspace profile" onKeyDown={moveRovingTab}>
         {PRODUCT_SURFACES.map((surface) => {
           const selected = surface.id === activeSurface
           const status = states[surface.id]
