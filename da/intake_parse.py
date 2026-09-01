@@ -70,6 +70,41 @@ def parse_text(families_text, dwg):
     return _parse_lines(families_text.splitlines(), out, close_pl, cur_bd, cur_pl)
 
 
+_MTEXT_FORMAT_CODES = ("\\P", "\\p", "\\f", "\\F", "\\H", "\\W", "\\C", "\\c", "\\Q", "\\T", "\\A", "\\L", "\\l", "\\O", "\\o", "\\K", "\\k", "\\S")
+
+
+def _strip_mtext(s):
+    """Drop MTEXT inline formatting ({\\fArial|b0;...} groups keep their text; \\P is a break).
+    Mirrors server/dxf_intake._strip_mtext so both extractors emit the same label text."""
+    out = []
+    j = 0
+    L = len(s)
+    while j < L:
+        c = s[j]
+        if c == "\\" and j + 1 < L:
+            code = s[j:j + 2]
+            if code == "\\P":
+                out.append(" ")
+                j += 2
+                continue
+            if code in ("\\\\", "\\{", "\\}"):
+                out.append(s[j + 1])
+                j += 2
+                continue
+            if code in _MTEXT_FORMAT_CODES:
+                k = s.find(";", j)
+                j = (k + 1) if k >= 0 else L
+                continue
+            j += 2
+            continue
+        if c in "{}":
+            j += 1
+            continue
+        out.append(c)
+        j += 1
+    return "".join(out)
+
+
 def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
     # cur_bd / cur_pl are closed over via the enclosing scope trick; re-bind locally
     state = {"bd": cur_bd, "pl": cur_pl}
@@ -103,6 +138,23 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                 state["pl"]["xdata"].append({"app": rest, "strings": []})
             elif tag == "PXS" and state["pl"] is not None and state["pl"]["xdata"]:
                 state["pl"]["xdata"][-1]["strings"].append(rest)
+            elif tag == "LN":
+                # LINE as a 2-point open polyline: the frozen §1 shape, no new field.
+                layn, p1, p2, hnd = rest.split("|")
+                a = [round(float(v), 3) for v in p1.split(",")]
+                b = [round(float(v), 3) for v in p2.split(",")]
+                out["polylines"].append({"layer": layn, "closed": False, "pts": [a, b],
+                                         "xdata": None, "handle": hnd})
+            elif tag == "TX":
+                # TEXT/MTEXT label (ADDITIVE §1 field `texts`; the value had "|" replaced
+                # by a space in the LISP and is capped at 512 chars there).
+                et, layn, ip, hnd, tx = rest.split("|", 4)
+                x, y = (float(v) for v in ip.split(","))
+                tx = " ".join(_strip_mtext(tx).split()) if et == "MTEXT" else " ".join(tx.split())
+                if tx:
+                    out.setdefault("texts", []).append({"kind": et, "layer": layn,
+                                                        "pt": [round(x, 3), round(y, 3)],
+                                                        "text": tx, "handle": hnd})
             elif tag == "IN":
                 nm, layn, ip, rot, nrm, scl, hnd = rest.split("|")
                 n = tuple(float(v) for v in nrm.split(","))
