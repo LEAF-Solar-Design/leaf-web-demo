@@ -2030,8 +2030,15 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   --primary: #22c55e;
   --accent-tint: rgba(34, 197, 94, .14);
   --status-warning: #e7b643;
+  /* ledger atoms borrowed by the de-JSON panels consume these two (panel
+     round 2): the :root paper values were an invisible hover and a light
+     hairline on the #101418 panel */
+  --hairline: #262b31;
+  --hover-tint: rgba(255, 255, 255, .05);
   --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
 }
+/* the session transcript rows carry two columns, not JobRail's four */
+.operator-console .ledger-row { grid-template-columns: 80px 1fr; }
 /* doubled class = (0,2,0): beats operator.css's `color: inherit` (0,1,0) by
    SPECIFICITY, not stylesheet order — dev and build inject CSS in different
    orders, so an order-dependent tie is not a fix */
