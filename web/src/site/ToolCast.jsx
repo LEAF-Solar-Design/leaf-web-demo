@@ -66,6 +66,7 @@ import {
   createCatalogToolSnapshot,
   createRunIntentState,
   dismissRunIntent,
+  mintCorrelationId,
   prepareCatalogRunParams,
   stageRunIntent,
 } from '../runIntent.js'
@@ -320,8 +321,7 @@ export default function ToolCast({
   const resetJobRef = useRef(() => {})
   const runIntentSessionRef = useRef(null)
   if (!runIntentSessionRef.current) {
-    const id = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`
-    runIntentSessionRef.current = `try-${id}`
+    runIntentSessionRef.current = `try-${mintCorrelationId()}`
   }
   const runIntentStateRef = useRef(null)
   const lastConfirmedRunRef = useRef(null)
@@ -818,7 +818,7 @@ export default function ToolCast({
       setError('This project needs a canonical drawing version before a tool can run.')
       return undefined
     }
-    const id = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`
+    const id = mintCorrelationId()
     const effectiveParams = prepareCatalogRunParams(tool, decision.params, context)
     const staged = stageRunIntent(runIntentStateRef.current, {
       intentId: `try-intent-${id}`,

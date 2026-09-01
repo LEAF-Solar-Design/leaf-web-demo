@@ -51,7 +51,7 @@ import {
 } from './checkoutIdentity.js'
 import {
   confirmRunIntent, createCatalogRunContext, createCatalogToolSnapshot, createRunIntentState,
-  dismissRunIntent, drawingVersionForRun, prepareCatalogRunParams, stageRunIntent,
+  dismissRunIntent, drawingVersionForRun, mintCorrelationId, prepareCatalogRunParams, stageRunIntent,
 } from './runIntent.js'
 import useExit from './useExit.js'
 import Toast from './components/Toast.jsx'
@@ -382,8 +382,7 @@ export default function App() {
   const cannedSeq = useRef(0)           // supersedes an in-flight tour beat (typing + dispatch)
   const runIntentSessionRef = useRef(null)
   if (!runIntentSessionRef.current) {
-    const randomId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`
-    runIntentSessionRef.current = `catalog-${randomId}`
+    runIntentSessionRef.current = `catalog-${mintCorrelationId()}`
   }
   const runIntentStateRef = useRef(null)
   if (!runIntentStateRef.current) {
