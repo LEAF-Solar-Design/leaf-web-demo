@@ -85,6 +85,7 @@ import {
 import { authConfigured, isSignedIn, login } from '../auth.js'
 import { agentBannerFor as agentBannerForKind, OPERATOR_AGENT_BANNER_COPY } from '../lib/agentBanner.js'
 import { moveRovingTab } from '../lib/roving.js'
+import { selectEntity } from '../lib/selectEntity.js'
 import { claimHolderId, getSessionHolderId } from '../checkoutIdentity.js'
 import DemoTour from '../demo/DemoTour.jsx'
 import DemoConversationPanel, { demoReplyFor } from '../demo/DemoConversationPanel.jsx'
@@ -183,17 +184,6 @@ function phaseLabel(phase) {
   if (phase === 'undone') return 'Original restored'
   if (phase === 'failed') return 'Request failed'
   return 'Workspace state unavailable'
-}
-
-function selectedEntity(intake, handle) {
-  if (!handle) return null
-  const polyline = intake?.polylines?.find((entity) => entity.handle === handle)
-  if (polyline) return { handle, kind: 'polyline', layer: polyline.layer }
-  const insert = intake?.inserts?.find((entity) => entity.handle === handle)
-  if (insert) return { handle, kind: 'insert', layer: insert.layer, name: insert.name }
-  const face = intake?.faces3d?.find((entity) => entity.handle === handle)
-  if (face) return { handle, kind: '3dface', layer: face.layer }
-  return null
 }
 
 // Whether this SPA page load ever saw an ACTIVE platform session. Lives at
@@ -374,7 +364,7 @@ export default function ToolCast({
   const canOperate = sessionReady && hasDrawing
   const { canUndo, canRedo } = drawing
   const panelCount = drawing.shown?.polylines?.length || null
-  const selection = useMemo(() => selectedEntity(drawing.shown, selectedHandle), [drawing.shown, selectedHandle])
+  const selection = useMemo(() => selectEntity(drawing.shown, selectedHandle), [drawing.shown, selectedHandle])
   const sculpture = Number(drawing.previewing?.version ?? version) > 1 && phase !== 'undone'
   const layerCounts = useMemo(() => {
     const counts = {}

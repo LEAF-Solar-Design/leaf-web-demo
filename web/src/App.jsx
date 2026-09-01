@@ -35,6 +35,7 @@ import { ENV_IOS_SURFACE } from './ios/flag.js'
 import CadEditSurface from './cadedit/CadEditSurface.jsx'
 import { markInstant } from './lib/instant.js'
 import { agentBannerFor } from './lib/agentBanner.js'
+import { selectEntity } from './lib/selectEntity.js'
 import { ENV_CAD_EDIT } from './cadedit/flag.js'
 import {
   productSurfaceStates,
@@ -1146,16 +1147,9 @@ export default function App() {
   }, [shown])
 
   // resolve the picked handle to an entity descriptor for the readout
-  const selection = useMemo(() => {
-    if (!selectedHandle || !shown) return null
-    const pl = shown.polylines?.find((p) => p.handle === selectedHandle)
-    if (pl) return { handle: pl.handle, kind: 'polyline', layer: pl.layer }
-    const ins = shown.inserts?.find((i) => i.handle === selectedHandle)
-    if (ins) return { handle: ins.handle, kind: 'insert', layer: ins.layer, name: ins.name }
-    const f = shown.faces3d?.find((x) => x.handle === selectedHandle)
-    if (f) return { handle: f.handle, kind: '3dface', layer: f.layer }
-    return { handle: selectedHandle, kind: 'entity', layer: null }
-  }, [selectedHandle, shown])
+  const selection = useMemo(() => selectEntity(shown, selectedHandle, {
+    onUnresolved: (handle) => ({ handle, kind: 'entity', layer: null }),
+  }), [selectedHandle, shown])
 
   // Swap the viewer + panels to a drawing version (§11). The completed event
   // ("Version 2 created" / "Reverted to version 1") fires the NT2 toast.
