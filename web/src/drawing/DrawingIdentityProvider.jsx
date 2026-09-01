@@ -8,15 +8,24 @@
  * (drawingIdentity.js) and both READ through this provider, so the converged
  * studio has one identity to move rather than two to reconcile.
  *
- * This PR changes WIRING, not behavior: each mode's seed reproduces exactly
- * what its shell computed before. The one addition is the binding scope-reset
- * contract — a persistent identity must not survive a tenant/project switch.
+ * PER-MODE IDENTITY MAP (panel W1 finding 1). SiteRoot mounts ONE provider
+ * above its scene branch, so a /try -> / -> /sheets -> /try round trip no
+ * longer unmounts it and destroys an in-progress upload identity — the state
+ * the pre-#876 SiteRoot held survived that detour and this must too. But a
+ * single-slot provider whose `mode` prop moves would then serve the FIRST
+ * mode's identity under the second (measured: operator -> console yielded
+ * `console|null|null|empty` instead of the console's own seed). So the
+ * provider holds ONE ENTRY PER MODE: each mode seeds from the boot inputs on
+ * its own first activation, keeps its identity across mode switches and scene
+ * detours, and `setFromUpload` / `setFromQuery` / `reset` act on the ACTIVE
+ * mode's entry only.
  *
- * SEED IS FROZEN AT MOUNT, on purpose. `seedInputs` (search string, demo
- * classification, remembered live id) are captured once, so `setFromQuery()`
- * restores the identity this page load BOOTED with rather than resurrecting
- * an id a later upload happened to remember — which would quietly undo a
- * scope reset. The matrix rows are boot decisions; this keeps them that way.
+ * SEED INPUTS ARE FROZEN AT MOUNT, on purpose. The search string, the demo
+ * classification and the remembered live id are captured once, so a mode that
+ * activates late still seeds from what this page load BOOTED with, and
+ * `setFromQuery()` restores that rather than resurrecting an id a later upload
+ * happened to remember — which would quietly undo a scope reset. The matrix
+ * rows are boot decisions; this keeps them that way.
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 
@@ -48,6 +57,19 @@ function readEnvProof() {
   return undefined
 }
 
+function seedForMode(inputs, targetMode) {
+  return seedDrawingIdentity({
+    mode: targetMode,
+    search: inputs.search,
+    proofMode: inputs.proofMode,
+    publicDemo: inputs.publicDemo,
+    liveDemo: inputs.liveDemo,
+    // Step 3 of the ladder is the OPERATOR stage's alone (the console's own
+    // seed never consults it), so the console entry is not handed one.
+    liveId: targetMode === DRAWING_MODE_OPERATOR ? inputs.liveId : null,
+  })
+}
+
 export function DrawingIdentityProvider({
   mode = DRAWING_MODE_OPERATOR,
   // Every seam below is injectable so the provider is testable without a
@@ -62,14 +84,15 @@ export function DrawingIdentityProvider({
   rememberDrawingId = rememberLiveDrawingId,
   children,
 }) {
-  const seedRef = useRef(null)
-  if (!seedRef.current) {
+  // Mode-FREE boot inputs, captured once. The per-mode seed is derived from
+  // them on that mode's first activation — see the header.
+  const seedInputsRef = useRef(null)
+  if (!seedInputsRef.current) {
     const resolvedSearch = search ?? (typeof window === 'undefined' ? '' : window.location.search)
     const demo = publicDemo === undefined || liveDemo === undefined
       ? classifyDemo(resolvedSearch, isSignedIn())
       : { publicDemo, liveDemo }
-    seedRef.current = {
-      mode,
+    seedInputsRef.current = {
       search: resolvedSearch,
       proofMode: proofMode === undefined
         ? classifyProof(resolvedSearch, readEnvProof())
@@ -79,11 +102,42 @@ export function DrawingIdentityProvider({
       // The operator stage's step 3: a drawing a previous upload remembered
       // for this browser session. Read ONCE, at boot, for the reason in the
       // header comment.
-      liveId: mode === DRAWING_MODE_OPERATOR ? readLiveDrawingId() : null,
+      liveId: readLiveDrawingId() || null,
     }
   }
 
-  const [identity, setIdentity] = useState(() => seedDrawingIdentity(seedRef.current))
+  // Boot seeds, memoised per mode so a mode's seed is the SAME frozen record
+  // every render — the lazy fill below must not hand the tree a new object
+  // each pass, and StrictMode's double render must converge on one value.
+  const seedCacheRef = useRef(null)
+  if (!seedCacheRef.current) seedCacheRef.current = new Map()
+  const seedFor = (targetMode) => {
+    const cache = seedCacheRef.current
+    if (!cache.has(targetMode)) cache.set(targetMode, seedForMode(seedInputsRef.current, targetMode))
+    return cache.get(targetMode)
+  }
+
+  const [identities, setIdentities] = useState(() => Object.freeze({ [mode]: seedFor(mode) }))
+
+  const bootSeed = seedFor(mode)
+
+  // A mode this provider has not served yet seeds NOW, from the boot inputs —
+  // never from whichever mode happened to mount first. Render-phase set on
+  // THIS component (React re-renders it immediately); `identity` below already
+  // carries the new mode's value, so no render ever serves the wrong one.
+  let identity = identities[mode]
+  if (!identity) {
+    identity = bootSeed
+    setIdentities((current) => (current[mode]
+      ? current
+      : Object.freeze({ ...current, [mode]: bootSeed })))
+  }
+
+  const setActiveIdentity = useCallback((next) => {
+    setIdentities((current) => (current[mode] === next
+      ? current
+      : Object.freeze({ ...current, [mode]: next })))
+  }, [mode])
 
   // The upload promotion, unchanged from SiteRoot's promoteOperatorDrawing:
   // a receipt with no drawing id promotes nothing, and only an ACCOUNT tenant
@@ -91,20 +145,19 @@ export function DrawingIdentityProvider({
   const setFromUpload = useCallback((receipt) => {
     const next = identityFromUploadReceipt(receipt)
     if (!next) return null
-    setIdentity(next)
+    setActiveIdentity(next)
     if (receipt?.tenant_kind === 'account') rememberDrawingId(next.drawingId)
     return next
-  }, [rememberDrawingId])
+  }, [rememberDrawingId, setActiveIdentity])
 
   const setFromQuery = useCallback(() => {
-    const next = seedDrawingIdentity(seedRef.current)
-    setIdentity(next)
-    return next
-  }, [])
+    setActiveIdentity(bootSeed)
+    return bootSeed
+  }, [bootSeed, setActiveIdentity])
 
   const reset = useCallback(() => {
-    setIdentity(RESET_DRAWING_IDENTITY)
-  }, [])
+    setActiveIdentity(RESET_DRAWING_IDENTITY)
+  }, [setActiveIdentity])
 
   const value = useMemo(() => ({
     mode,
@@ -147,6 +200,9 @@ export function useDrawingIdentityOptional() {
  * identity is a surface that persists across interactions, so it MUST NOT
  * survive a project switch or close. Mounted by the surface that owns the
  * project selection; a no-op outside a provider.
+ *
+ * Resets the ACTIVE mode's identity: a project switch happens inside one
+ * tenant, so the other mode's identity is still that tenant's.
  *
  * The first observation is never a switch — it is the session learning which
  * project is open, and clearing there would discard the boot seed.

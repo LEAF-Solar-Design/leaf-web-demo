@@ -18,6 +18,10 @@
  *  3. The SCOPE-RESET contract: no stale drawing id survives a project
  *     switch or close. Driven through the SHIPPED hook (useDrawingScopeReset)
  *     and the SHIPPED provider, not a restatement of them.
+ *
+ *  4. (panel W1) The provider SURVIVES the scene detours SiteRoot can take,
+ *     and serves each MODE its own identity while doing so — driven through a
+ *     model of SiteRoot's real three-branch shape around the real provider.
  */
 import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -44,9 +48,7 @@ afterEach(cleanup)
 // A probe that renders the identity and exposes its mutators, so the tests
 // drive the real provider rather than its internals.
 const controls = {}
-function Probe({ projectId = undefined }) {
-  const identity = useDrawingIdentity()
-  useDrawingScopeReset(projectId)
+function readout(identity) {
   controls.setFromUpload = identity.setFromUpload
   controls.setFromQuery = identity.setFromQuery
   controls.reset = identity.reset
@@ -58,6 +60,21 @@ function Probe({ projectId = undefined }) {
       <span data-testid="drawing-mode">{identity.mode}</span>
     </>
   )
+}
+
+function Probe({ projectId = undefined }) {
+  const identity = useDrawingIdentity()
+  useDrawingScopeReset(projectId)
+  return readout(identity)
+}
+
+// The console arm's consumer. App.jsx READS the identity and mounts no
+// project-scope hook (ToolCast owns the project selection), so the model must
+// not mount one either — and it is a different component type, which is what
+// makes React unmount the stage's consumer on a scene change exactly as
+// SiteRoot does.
+function ConsoleProbe() {
+  return readout(useDrawingIdentity())
 }
 
 const shown = (testId) => screen.getByTestId(testId).textContent
@@ -351,5 +368,100 @@ describe('scope reset: no stale drawing id survives a project switch', () => {
     expect(isScopeSwitch('p1', 'p2')).toBe(true)
     expect(isScopeSwitch('p1', null)).toBe(true)
     expect(isScopeSwitch('p1', '')).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Panel W1 finding 1: the provider survives SiteRoot's scene detours, and a
+// mode change serves that mode's OWN seed.
+//
+// SiteRootModel is the shipped shape, not a paraphrase of it: one provider at
+// the root of all three arms, `mode` following the scene, the sheets arm
+// rendering a sibling that does NOT read the identity (SheetsPage does not).
+// Everything asserted comes from the REAL provider mounted underneath.
+// ---------------------------------------------------------------------------
+function SiteRootModel({ scene, projectId = undefined, search = '' }) {
+  return (
+    <DrawingIdentityProvider
+      mode={scene === 'app' ? DRAWING_MODE_CONSOLE : DRAWING_MODE_OPERATOR}
+      search={search}
+      publicDemo={false}
+      liveDemo={false}
+      readLiveDrawingId={() => null}
+      rememberDrawingId={() => true}
+    >
+      {scene === 'app' ? (
+        <ConsoleProbe />
+      ) : scene === 'sheets' ? (
+        <span data-testid="sheets">sheets</span>
+      ) : (
+        <Probe projectId={projectId} />
+      )}
+    </DrawingIdentityProvider>
+  )
+}
+
+describe('scene detours: an in-progress upload identity survives the round trip', () => {
+  it('/try -> / -> /sheets -> /try keeps the guest upload the stage was holding', () => {
+    const view = render(<SiteRootModel scene="tool" />)
+    act(() => { controls.setFromUpload({ drawing_id: 'u-guest-in-progress', tenant_kind: 'guest' }) })
+    expect(shown('drawing-id')).toBe('u-guest-in-progress')
+
+    // The cover, then the sheets sibling — the arm that used to unmount the
+    // provider outright and take the upload identity with it.
+    view.rerender(<SiteRootModel scene="site" />)
+    expect(shown('drawing-id')).toBe('u-guest-in-progress')
+    view.rerender(<SiteRootModel scene="sheets" />)
+    expect(screen.getByTestId('sheets')).toBeTruthy()
+
+    view.rerender(<SiteRootModel scene="tool" />)
+    expect(shown('drawing-id')).toBe('u-guest-in-progress')
+    expect(shown('drawing-origin')).toBe('upload')
+  })
+
+  it('a mode switch serves the NEW mode its own fresh seed, never the previous mode\'s identity', () => {
+    // The panel measured `console|null|null|empty` here: the seed was frozen
+    // to whichever mode mounted first, so the console read the stage's empty
+    // identity instead of its own default.
+    const view = render(<SiteRootModel scene="tool" />)
+    expect(shown('drawing-mode')).toBe('operator')
+    expect(shown('drawing-id')).toBe('null')
+
+    view.rerender(<SiteRootModel scene="app" />)
+    expect(shown('drawing-mode')).toBe('console')
+    expect(shown('drawing-id')).toBe('demo')            // App's REQUESTED_DRAWING_ID
+    expect(shown('drawing-source')).toBe('rooftop_demo') // App's DRAWING_SOURCE
+    expect(shown('drawing-origin')).toBe('mode')
+  })
+
+  it('each mode keeps its OWN identity across a switch and back', () => {
+    const view = render(<SiteRootModel scene="tool" />)
+    act(() => { controls.setFromUpload({ drawing_id: 'stage-upload', tenant_kind: 'guest' }) })
+    expect(shown('drawing-id')).toBe('stage-upload')
+
+    view.rerender(<SiteRootModel scene="app" />)
+    expect(shown('drawing-id')).toBe('demo')
+    act(() => { controls.setFromUpload({ drawing_id: 'console-upload', tenant_kind: 'guest' }) })
+    expect(shown('drawing-id')).toBe('console-upload')
+
+    // Back to the stage: its own upload, not the console's.
+    view.rerender(<SiteRootModel scene="tool" />)
+    expect(shown('drawing-id')).toBe('stage-upload')
+    view.rerender(<SiteRootModel scene="app" />)
+    expect(shown('drawing-id')).toBe('console-upload')
+  })
+
+  it('a project switch resets the ACTIVE mode only — a project lives inside one tenant', () => {
+    const view = render(<SiteRootModel scene="app" />)
+    act(() => { controls.setFromUpload({ drawing_id: 'console-upload', tenant_kind: 'guest' }) })
+    view.rerender(<SiteRootModel scene="tool" projectId="project-a" />)
+    act(() => { controls.setFromUpload({ drawing_id: 'stage-upload', tenant_kind: 'guest' }) })
+
+    view.rerender(<SiteRootModel scene="tool" projectId="project-b" />)
+    expect(shown('drawing-id')).toBe('null')
+    expect(shown('drawing-origin')).toBe('reset')
+
+    view.rerender(<SiteRootModel scene="app" />)
+    expect(shown('drawing-id')).toBe('console-upload')
   })
 })

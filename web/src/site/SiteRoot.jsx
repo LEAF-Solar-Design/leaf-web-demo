@@ -7,11 +7,20 @@
 // regardless of path — every pre-existing deep link keeps working byte-for-
 // byte. Checked ONCE at boot; navigate() preserves the search string.
 //
-// W1 (convergence): each scene now mounts DrawingIdentityProvider in its MODE
-// — console for the /app console, operator for the stage — and the stage's
-// casts moved into StageScene.jsx so they can READ that provider. Routing,
-// the auth-callback deferral, the marketing redirect and the keyboard/inert
-// passes are untouched.
+// W1 (convergence): DrawingIdentityProvider is mounted ONCE, ABOVE the scene
+// branch, in the MODE the current scene implies — console for the /app
+// console, operator for the stage — and the stage's casts moved into
+// StageScene.jsx so they can READ that provider. Routing, the auth-callback
+// deferral, the marketing redirect and the keyboard/inert passes are
+// untouched.
+//
+// WHY ABOVE THE BRANCH (panel W1 finding 1): mounted inside the branches, the
+// provider was a different element in the sheets arm, so a /try -> / ->
+// /sheets -> /try round trip unmounted it and destroyed an in-progress
+// (guest) upload identity — state SiteRoot's own `operatorDrawingId` used to
+// carry through that detour. One provider at the root of every arm survives
+// it; the provider keeps one identity PER MODE so the hoist cannot serve the
+// console's identity to the stage or the reverse.
 
 import React, { Suspense, useEffect, useRef, useState } from 'react'
 import { markInstant } from '../lib/instant.js'
@@ -159,35 +168,31 @@ export default function SiteRoot() {
   // 700ms later can no longer be used by this page load.
   if (authCallbackPending) return <div className="site-auth-callback" role="status">Completing sign in</div>
 
-  if (scene === 'app') {
-    // The console ALONE — no stage mounted; App owns its own Viewer.
-    return (
-      <DrawingIdentityProvider mode={DRAWING_MODE_CONSOLE} search={BOOT_SEARCH}>
+  // ONE provider, at the root of every arm, so React reconciles it across
+  // scene changes instead of unmounting it. `mode` follows the scene; the
+  // provider keeps an identity per mode, so the console and the stage never
+  // read each other's.
+  return (
+    <DrawingIdentityProvider
+      mode={scene === 'app' ? DRAWING_MODE_CONSOLE : DRAWING_MODE_OPERATOR}
+      search={BOOT_SEARCH}
+      publicDemo={DEMO.publicDemo}
+      liveDemo={DEMO.liveDemo}
+    >
+      {scene === 'app' ? (
+        // The console ALONE — no stage mounted; App owns its own Viewer.
         <WorkspaceControllerProvider drawingId="rooftop_demo" retryNotFound>
           <Suspense fallback={null}>
             <App />
           </Suspense>
         </WorkspaceControllerProvider>
-      </DrawingIdentityProvider>
-    )
-  }
-
-  if (scene === 'sheets') {
-    return (
-      <Suspense fallback={null}>
-        <SheetsPage />
-      </Suspense>
-    )
-  }
-
-  return (
-    <DrawingIdentityProvider
-      mode={DRAWING_MODE_OPERATOR}
-      search={BOOT_SEARCH}
-      publicDemo={DEMO.publicDemo}
-      liveDemo={DEMO.liveDemo}
-    >
-      <StageScene scene={scene} stageRef={stageRef} publicDemo={PUBLIC_DEMO} />
+      ) : scene === 'sheets' ? (
+        <Suspense fallback={null}>
+          <SheetsPage />
+        </Suspense>
+      ) : (
+        <StageScene scene={scene} stageRef={stageRef} publicDemo={PUBLIC_DEMO} />
+      )}
     </DrawingIdentityProvider>
   )
 }
