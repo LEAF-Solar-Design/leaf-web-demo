@@ -34,6 +34,20 @@ function fieldText(fieldKey, value) {
   return isRedactedField(fieldKey, value) ? '[redacted]' : renderFieldValue(value)
 }
 
+// The server owns destinations as a mapping keyed by logical destination
+// name. Keep the older array shape safe too, since tests and compatible
+// clients may still provide it.
+function normalizeDestinations(value) {
+  if (Array.isArray(value)) return value
+  if (!value || typeof value !== 'object') return []
+  return Object.entries(value).map(([destination, metadata]) => {
+    if (metadata && typeof metadata === 'object' && !Array.isArray(metadata)) {
+      return { ...metadata, destination }
+    }
+    return { destination, value: metadata }
+  })
+}
+
 // A destination row: its headline field inline, and every remaining field
 // behind a `▸`/`▾` disclosure toggle (the house pattern ConversePanel's
 // expandable tool chip uses) — never a raw JSON.stringify(d) dump.
@@ -128,7 +142,7 @@ export default function RunbooksPanel({ sessionEnvironment, onSignedOut }) {
   const loadDestinations = async () => {
     setError(null)
     try {
-      setDestinations(await operatorClient.externalDestinations())
+      setDestinations(normalizeDestinations(await operatorClient.externalDestinations()))
     } catch (e) { guard(e, 'Could not load external destinations.') }
   }
 
