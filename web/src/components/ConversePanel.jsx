@@ -272,10 +272,18 @@ export default function ConversePanel({
     return () => { closed = true; window.clearInterval(timer) }
   }, [sessionId])
 
-  // Keep the log pinned to the newest event while streaming.
+  // Keep the log pinned to the newest event while streaming - but ONLY when
+  // the reader is already at (or near) the bottom. Yanking a user who
+  // scrolled up to re-read mid-stream is the classic streaming-UI defect
+  // (W0 craft #21); the ref tracks proximity from their own scrolls.
+  const nearBottomRef = useRef(true)
+  const onLogScroll = () => {
+    const el = logRef.current
+    if (el) nearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48
+  }
   useEffect(() => {
     const el = logRef.current
-    if (el) el.scrollTop = el.scrollHeight
+    if (el && nearBottomRef.current) el.scrollTop = el.scrollHeight
   }, [events])
 
   // Fold the raw §3 envelopes into renderable turns. Feed items preserve the
@@ -669,7 +677,13 @@ export default function ConversePanel({
               onClick={() => setExpandedTools((prev) => ({ ...prev, [key]: !prev[key] }))}
             >
               <span className="route-tool">{c.tool}</span>
-              <span className="dim"> {open ? '▾' : '▸'}</span>
+              {/* the disclosure names what it opens (W0 craft #22): an
+                  unlabeled glyph is an affordance nobody finds */}
+              <span className="dim">
+                {' '}{open ? 'hide ▾'
+                  : c.args != null && c.fullResult != null ? 'args · result ▸'
+                  : c.args != null ? 'args ▸' : 'result ▸'}
+              </span>
             </button>
           ) : (
             <span className="route-tool">{c.tool}</span>
@@ -862,7 +876,7 @@ export default function ConversePanel({
         </section>
       )}
 
-      <div className="converse-log" ref={logRef}>
+      <div className="converse-log" ref={logRef} onScroll={onLogScroll} aria-live="polite" aria-atomic="false">
         {model.turns.length === 0 && pendingUserTurns.length === 0 && (
           <div className="converse-note">
             <span className="dot hollow" aria-hidden="true" />
