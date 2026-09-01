@@ -25,7 +25,7 @@
     "proof:cat:api": "node e2e/catProofApi.mjs",
     "check:customization": "node scripts/check_customization.mjs",
     "check:customize-panel": "node scripts/check_customize_panel.mjs",
-    "check:staging-fixes": "node scripts/check_run_intent.mjs && node scripts/check_author_staging.mjs && node scripts/check_mock_catalog.mjs && node scripts/check_fetch_budget.mjs && node scripts/check_checkout_identity.mjs && node scripts/check_web_container_config.mjs && npm run check:published-catalog-tool && node scripts/check_token_repin.mjs",
+    "check:staging-fixes": "node scripts/check_run_intent.mjs && node scripts/check_author_staging.mjs && node scripts/check_mock_catalog.mjs && node scripts/check_fetch_budget.mjs && node scripts/check_checkout_identity.mjs && node scripts/check_web_container_config.mjs && npm run check:published-catalog-tool && node scripts/check_token_repin.mjs && npm run check:bundle-budget",
     "check:checkout-identity": "node scripts/check_checkout_identity.mjs",
     "check:deployed-acceptance-contract": "node --test scripts/test_deployed_authored_cad_acceptance.mjs",
     "check:deployed-surface-synthetic-acceptance": "node --test scripts/test_deployed_surface_synthetic_acceptance.mjs",

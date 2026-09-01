@@ -73,10 +73,14 @@ assert(
   'reduced motion must complete filled animations instead of canceling them',
 )
 // The scale tier may be the literal or the motion token (P0c): a tokenized
-// sheet must still DEFINE the token as .985 for the pin to hold.
+// sheet must DEFINE the token as .985 AND apply it, and (panel W0 finding)
+// no rule may locally override the token to another value - substring
+// co-occurrence alone would pass a sheet whose applying rule redefines it.
 const scaleTier = (sheet) =>
   sheet.includes('transform: scale(.985)') ||
-  (sheet.includes('--mo-scale-in: .985') && sheet.includes('transform: scale(var(--mo-scale-in'))
+  (sheet.includes('--mo-scale-in: .985') &&
+    sheet.includes('transform: scale(var(--mo-scale-in') &&
+    !/--mo-scale-in:\s*(?!\.985)[\d.]/.test(sheet))
 assert(
   !styles.includes('translateY(12px)') && !demo.includes('translateY(12px)') &&
     scaleTier(styles) && scaleTier(demo),
