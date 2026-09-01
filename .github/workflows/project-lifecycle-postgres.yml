@@ -28,6 +28,9 @@ on:
       - 'platform/annotation_store.py'
       - 'platform/canonical_jobs.py'
       - 'platform/signing.py'
+      # Review signatures also need this live PostgreSQL lane. The hermetic
+      # gate cannot exercise their persisted payload and timezone behavior.
+      - 'platform/tests/test_signing.py'
   workflow_dispatch: {}
 
 # The gate only reads the tree and runs tests against its own throwaway
@@ -84,6 +87,23 @@ jobs:
           if printf '%s\n' "$out" | grep -qi 'skipped'; then
             printf '%s\n' "$out"
             echo 'FAIL: lifecycle tests skipped - DATABASE_URL is not reaching pytest.'
+            exit 1
+          fi
+
+      - name: Run review signature PostgreSQL tests
+        # Default pytest import mode is required. test_signing.py imports its
+        # sibling test_compliance_store module, which importlib mode does not
+        # place on sys.path.
+        run: |
+          set -o pipefail
+          if ! out=$(python -m pytest -q -rs platform/tests/test_signing.py 2>&1); then
+            printf '%s\n' "$out"
+            exit 1
+          fi
+          printf '%s\n' "$out" | tail -5
+          if [[ "${out,,}" == *skipped* ]]; then
+            printf '%s\n' "$out"
+            echo 'FAIL: review signature tests skipped - DATABASE_URL is not reaching pytest.'
             exit 1
           fi
 

@@ -69,3 +69,15 @@ def test_missing_or_nonfinite_inputs_fail_closed():
     with pytest.raises(ValueError, match="finite"):
         compliance.evaluate(PACK, {**INPUTS, "isc": "NaN"},
                             standards_snapshot_id="s", ahj_snapshot_id="a")
+
+
+@pytest.mark.parametrize("value", [
+    "9" * 65,
+    "1e101",
+    "1e-101",
+    "1e999999999",
+])
+def test_excessive_decimal_shapes_fail_closed_before_derivation(value):
+    with pytest.raises(ValueError, match="supported numeric range"):
+        compliance.evaluate(PACK, {**INPUTS, "voc": value},
+                            standards_snapshot_id="s", ahj_snapshot_id="a")
