@@ -192,3 +192,56 @@ export function isScopeSwitch(previousProjectId, nextProjectId) {
   const next = nextProjectId || null
   return previous != null && previous !== next
 }
+
+/**
+ * Base64url -> claims, TOTAL. Any malformed segment, any non-JSON payload and
+ * any absent global decoder all resolve to null rather than throwing into the
+ * boot path. Reads claims only; never verifies (verification is the server's,
+ * server/auth.py) and never needs to: this value is used ONLY to compare a
+ * scope against itself.
+ */
+function decodeJwtClaims(token) {
+  try {
+    const payload = String(token).split('.')[1]
+    if (!payload) return null
+    const b64 = payload.replace(/-/g, '+').replace(/_/g, '/')
+    const decode = globalThis.atob
+    if (typeof decode !== 'function') return null
+    const claims = JSON.parse(decode(b64.padEnd(b64.length + ((4 - (b64.length % 4)) % 4), '=')))
+    return claims && typeof claims === 'object' ? claims : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * THE TENANT SCOPE KEY (ACCEPTANCE "Scope-reset contract": reset on tenant
+ * switch AND project switch).
+ *
+ * Which tenant this client speaks for is decided by exactly two things, and
+ * only one of them can move inside a page load:
+ *   * `X-Tenant-Id`, api.js's `TENANT` — a BUILD-TIME constant
+ *     (`VITE_TENANT_ID`), so it is fixed for the life of the document;
+ *   * the bearer PRINCIPAL in `leaf.jwt`, which the server resolves to the
+ *     real tenant (the `tenant`/`org` echo /api/session returns is a pure
+ *     function of it, so the echo cannot change while the principal holds).
+ * So the principal IS the client-observable tenant scope, and a change of
+ * principal is the tenant switch the contract names.
+ *
+ * The key is the SUBJECT (plus org, when the token carries one), not the
+ * token: nothing in this app refreshes a token in place today, but a
+ * same-subject re-mint must never read as a tenant switch if one ever does.
+ * An undecodable token FAILS CLOSED to being its own scope — two opaque
+ * tokens then compare unequal, so a switch is over-detected rather than
+ * missed. The returned string is COMPARED ONLY: never rendered, logged, or
+ * sent anywhere.
+ */
+export function authTenantScope(token) {
+  if (typeof token !== 'string' || !token) return null
+  const claims = decodeJwtClaims(token)
+  if (!claims) return token
+  const sub = typeof claims.sub === 'string' ? claims.sub : ''
+  if (!sub) return token
+  const org = typeof claims.org_id === 'string' ? claims.org_id : ''
+  return `${sub}|${org}`
+}

@@ -22,14 +22,20 @@
  *  4. (panel W1) The provider SURVIVES the scene detours SiteRoot can take,
  *     and serves each MODE its own identity while doing so — driven through a
  *     model of SiteRoot's real three-branch shape around the real provider.
+ *
+ *  5. (panel W1) The TENANT half of the scope-reset contract: a principal
+ *     switch clears EVERY mode's identity, including the boot seed behind a
+ *     mode that has not activated yet.
  */
 import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { noteUnauthorized } from '../api.js'
 import { bootWantsApp } from '../site/authBoot.js'
 import {
   DRAWING_MODE_CONSOLE,
   DRAWING_MODE_OPERATOR,
+  authTenantScope,
   classifyDemo,
   identityFromUploadReceipt,
   isScopeSwitch,
@@ -52,6 +58,7 @@ function readout(identity) {
   controls.setFromUpload = identity.setFromUpload
   controls.setFromQuery = identity.setFromQuery
   controls.reset = identity.reset
+  controls.resetAll = identity.resetAll
   return (
     <>
       <span data-testid="drawing-id">{String(identity.drawingId)}</span>
@@ -380,6 +387,9 @@ describe('scope reset: no stale drawing id survives a project switch', () => {
 // rendering a sibling that does NOT read the identity (SheetsPage does not).
 // Everything asserted comes from the REAL provider mounted underneath.
 // ---------------------------------------------------------------------------
+const NO_TOKEN = () => null
+const NO_AUTH_EVENTS = () => () => {}
+
 function SiteRootModel({ scene, projectId = undefined, search = '' }) {
   return (
     <DrawingIdentityProvider
@@ -389,6 +399,8 @@ function SiteRootModel({ scene, projectId = undefined, search = '' }) {
       liveDemo={false}
       readLiveDrawingId={() => null}
       rememberDrawingId={() => true}
+      readAuthToken={NO_TOKEN}
+      subscribeAuthChange={NO_AUTH_EVENTS}
     >
       {scene === 'app' ? (
         <ConsoleProbe />
@@ -463,5 +475,175 @@ describe('scene detours: an in-progress upload identity survives the round trip'
 
     view.rerender(<SiteRootModel scene="app" />)
     expect(shown('drawing-id')).toBe('console-upload')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Panel W1 finding 2: the TENANT half of the scope-reset contract.
+//
+// SEAM (documented in DrawingIdentityProvider.jsx): the tenant this client
+// speaks for is `X-Tenant-Id` (api.js's TENANT, a build-time constant fixed
+// for the life of the document) plus the bearer PRINCIPAL, so the principal is
+// the only client-observable tenant scope and a principal change is the tenant
+// switch the contract names.
+// ---------------------------------------------------------------------------
+const jwtFor = (claims) => `h.${btoa(JSON.stringify(claims)).replace(/=+$/, '')}.sig`
+
+describe('scope reset: no drawing identity survives a TENANT switch', () => {
+  // A hand-driven principal: the test owns the token and the notification,
+  // so the assertions are about the provider, not about localStorage.
+  function principalHarness(initialToken) {
+    const listeners = new Set()
+    const state = { token: initialToken }
+    return {
+      state,
+      read: () => state.token,
+      subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener) },
+      change(token) {
+        state.token = token
+        act(() => { listeners.forEach((listener) => listener()) })
+      },
+    }
+  }
+
+  const tree = (harness, scene, search = '') => (
+    <DrawingIdentityProvider
+      mode={scene === 'app' ? DRAWING_MODE_CONSOLE : DRAWING_MODE_OPERATOR}
+      search={search}
+      publicDemo={false}
+      liveDemo={false}
+      readLiveDrawingId={() => null}
+      rememberDrawingId={() => true}
+      readAuthToken={harness.read}
+      subscribeAuthChange={harness.subscribe}
+    >
+      <Probe />
+    </DrawingIdentityProvider>
+  )
+
+  it('clears EVERY mode\'s identity when the principal switches', () => {
+    const harness = principalHarness(jwtFor({ sub: 'auth0|alice' }))
+    const view = render(tree(harness, 'app'))
+    act(() => { controls.setFromUpload({ drawing_id: 'alice-console', tenant_kind: 'account' }) })
+    view.rerender(tree(harness, 'tool'))
+    act(() => { controls.setFromUpload({ drawing_id: 'alice-stage', tenant_kind: 'account' }) })
+    expect(shown('drawing-id')).toBe('alice-stage')
+
+    harness.change(jwtFor({ sub: 'auth0|bob' }))
+
+    expect(shown('drawing-id')).toBe('null')
+    expect(shown('drawing-origin')).toBe('reset')
+    // The other mode too — not just whichever one happened to be active.
+    view.rerender(tree(harness, 'app'))
+    expect(shown('drawing-id')).toBe('null')
+    expect(shown('drawing-origin')).toBe('reset')
+  })
+
+  it('signing OUT is a scope exit: the account drawing does not outlive the principal', () => {
+    const harness = principalHarness(jwtFor({ sub: 'auth0|alice' }))
+    render(tree(harness, 'tool'))
+    act(() => { controls.setFromUpload({ drawing_id: 'alice-stage', tenant_kind: 'account' }) })
+    harness.change(null)
+    expect(shown('drawing-id')).toBe('null')
+    expect(shown('drawing-origin')).toBe('reset')
+  })
+
+  it('VOIDS the boot seed behind a mode that has not activated yet', () => {
+    // The hole a per-mode map opens if the reset only touched live entries:
+    // the console had never rendered, so its `?drawing=` seed would have been
+    // waiting to hand the NEXT principal the previous one's drawing.
+    const harness = principalHarness(jwtFor({ sub: 'auth0|alice' }))
+    const view = render(tree(harness, 'tool', '?drawing=alice-only'))
+    expect(shown('drawing-id')).toBe('alice-only')
+
+    harness.change(jwtFor({ sub: 'auth0|bob' }))
+    expect(shown('drawing-id')).toBe('null')
+
+    view.rerender(tree(harness, 'app', '?drawing=alice-only'))
+    expect(shown('drawing-id')).toBe('null')
+    expect(shown('drawing-origin')).toBe('reset')
+    // And setFromQuery cannot smuggle it back either.
+    act(() => { controls.setFromQuery() })
+    expect(shown('drawing-id')).toBe('null')
+  })
+
+  it('the FIRST principal observation is not a switch (signing in adopts what the guest built)', () => {
+    const harness = principalHarness(null)
+    render(tree(harness, 'tool'))
+    act(() => { controls.setFromUpload({ drawing_id: 'u-guest-1', tenant_kind: 'guest' }) })
+    harness.change(jwtFor({ sub: 'auth0|alice' }))
+    expect(shown('drawing-id')).toBe('u-guest-1')
+  })
+
+  it('the scope key is the SUBJECT, so a same-subject re-mint is not a switch', () => {
+    const harness = principalHarness(jwtFor({ sub: 'auth0|alice', exp: 1 }))
+    render(tree(harness, 'tool'))
+    act(() => { controls.setFromUpload({ drawing_id: 'alice-stage', tenant_kind: 'account' }) })
+    harness.change(jwtFor({ sub: 'auth0|alice', exp: 2 }))
+    expect(shown('drawing-id')).toBe('alice-stage')
+  })
+
+  // The three cases above drive INJECTED seams. These two drive the SHIPPED
+  // defaults, so the wiring itself is proven and not just the state machine.
+  const shippedTree = (search = '') => (
+    <DrawingIdentityProvider
+      mode={DRAWING_MODE_OPERATOR}
+      search={search}
+      publicDemo={false}
+      liveDemo={false}
+      readLiveDrawingId={() => null}
+      rememberDrawingId={() => true}
+    >
+      <Probe />
+    </DrawingIdentityProvider>
+  )
+
+  it('SHIPPED seam: a sign-out in another tab (storage event) resets the identity', () => {
+    const token = jwtFor({ sub: 'auth0|alice' })
+    try {
+      localStorage.setItem('leaf.jwt', token)
+      render(shippedTree())
+      act(() => { controls.setFromUpload({ drawing_id: 'alice-stage', tenant_kind: 'account' }) })
+      expect(shown('drawing-id')).toBe('alice-stage')
+
+      act(() => {
+        localStorage.removeItem('leaf.jwt')
+        window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt' }))
+      })
+      expect(shown('drawing-id')).toBe('null')
+      expect(shown('drawing-origin')).toBe('reset')
+    } finally {
+      localStorage.removeItem('leaf.jwt')
+    }
+  })
+
+  it('SHIPPED seam: the transport proving the token dead (api.js 401 wipe) resets the identity', () => {
+    const token = jwtFor({ sub: 'auth0|alice' })
+    try {
+      localStorage.setItem('leaf.jwt', token)
+      render(shippedTree())
+      act(() => { controls.setFromUpload({ drawing_id: 'alice-stage', tenant_kind: 'account' }) })
+      expect(shown('drawing-id')).toBe('alice-stage')
+
+      // The REAL api.js channel: a 401 whose request carried the stored token.
+      act(() => { noteUnauthorized({ status: 401 }, '/api/session', `Bearer ${token}`) })
+      expect(shown('drawing-id')).toBe('null')
+      expect(shown('drawing-origin')).toBe('reset')
+    } finally {
+      localStorage.removeItem('leaf.jwt')
+    }
+  })
+
+  it('the key derivation itself: subject+org, total, and fail-CLOSED on an opaque token', () => {
+    expect(authTenantScope(null)).toBeNull()
+    expect(authTenantScope('')).toBeNull()
+    expect(authTenantScope(jwtFor({ sub: 'auth0|alice' })))
+      .toBe(authTenantScope(jwtFor({ sub: 'auth0|alice', exp: 99 })))
+    expect(authTenantScope(jwtFor({ sub: 'auth0|alice', org_id: 'org_1' })))
+      .not.toBe(authTenantScope(jwtFor({ sub: 'auth0|alice', org_id: 'org_2' })))
+    // Undecodable: its own scope, so two different opaque tokens compare
+    // unequal and a switch is over-detected rather than missed.
+    expect(() => authTenantScope('not-a-jwt')).not.toThrow()
+    expect(authTenantScope('not-a-jwt')).not.toBe(authTenantScope('also-not-a-jwt'))
   })
 })
