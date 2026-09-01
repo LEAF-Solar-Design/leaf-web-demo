@@ -836,6 +836,35 @@ jobs:
           resolve_inrelease updates_sha256 \
             https://deb.debian.org/debian/dists/bookworm-updates/InRelease
 
+      - name: Resolve web Alpine main APKINDEX digest
+        id: web_alpine
+        if: matrix.image == 'web' && steps.chain.outputs.skip != 'true'
+        env:
+          NGINX_ALPINE_BASE: ${{ env.ECR_REGISTRY }}/public-ecr/docker/library/nginx:alpine
+        run: |
+          set -euo pipefail
+          repositories="$(docker run --rm --platform linux/amd64 \
+            --entrypoint cat "$NGINX_ALPINE_BASE" /etc/apk/repositories)"
+          main_repo="$(printf '%s\n' "$repositories" | awk '/\/main\/?$/ { print }')"
+          [ "$(printf '%s\n' "$main_repo" | sed '/^$/d' | wc -l)" -eq 1 ] || {
+            echo "::error::The nginx Alpine base did not expose exactly one main repository."
+            exit 1
+          }
+          [[ "$main_repo" =~ ^https://dl-cdn\.alpinelinux\.org/alpine/v[0-9]+\.[0-9]+/main/?$ ]] || {
+            echo "::error::The nginx Alpine main repository is not the expected versioned HTTPS endpoint."
+            exit 1
+          }
+          artifact="$RUNNER_TEMP/web-alpine-main.APKINDEX.tar.gz"
+          curl --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 \
+            "${main_repo%/}/x86_64/APKINDEX.tar.gz" --output "$artifact"
+          digest="$(sha256sum "$artifact" | awk '{print $1}')"
+          [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "::error::The Alpine main APKINDEX did not resolve to one SHA256 value."
+            exit 1
+          }
+          echo "main_sha256=$digest" >> "$GITHUB_OUTPUT"
+
       - name: Require the read-only canonical solver deploy key
         if: matrix.image == 'canonical-worker' && steps.chain.outputs.skip != 'true'
         env:
@@ -1000,6 +1029,7 @@ jobs:
             ${{ matrix.image == 'canonical-worker' && format('AUTOFILL_SOLVER_REVISION={0}', needs.prepare.outputs.solver_revision) || '' }}
             ${{ matrix.image == 'harness' && format('HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256={0}', steps.harness_debian.outputs.security_sha256) || '' }}
             ${{ matrix.image == 'harness' && format('HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256={0}', steps.harness_debian.outputs.updates_sha256) || '' }}
+            ${{ matrix.image == 'web' && format('WEB_ALPINE_MAIN_APKINDEX_SHA256={0}', steps.web_alpine.outputs.main_sha256) || '' }}
           # Every upstream base resolves through this account's ECR pull-through
           # cache instead of Docker Hub. buildx named contexts override an image
           # reference WITHOUT editing the Dockerfile, which matters here: the
@@ -1192,6 +1222,35 @@ jobs:
           resolve_inrelease updates_sha256 \
             https://deb.debian.org/debian/dists/bookworm-updates/InRelease
 
+      - name: Resolve web Alpine main APKINDEX digest
+        id: web_alpine
+        if: matrix.image == 'web'
+        env:
+          NGINX_ALPINE_BASE: ${{ env.ECR_REGISTRY }}/public-ecr/docker/library/nginx:alpine
+        run: |
+          set -euo pipefail
+          repositories="$(docker run --rm --platform linux/amd64 \
+            --entrypoint cat "$NGINX_ALPINE_BASE" /etc/apk/repositories)"
+          main_repo="$(printf '%s\n' "$repositories" | awk '/\/main\/?$/ { print }')"
+          [ "$(printf '%s\n' "$main_repo" | sed '/^$/d' | wc -l)" -eq 1 ] || {
+            echo "::error::The nginx Alpine base did not expose exactly one main repository."
+            exit 1
+          }
+          [[ "$main_repo" =~ ^https://dl-cdn\.alpinelinux\.org/alpine/v[0-9]+\.[0-9]+/main/?$ ]] || {
+            echo "::error::The nginx Alpine main repository is not the expected versioned HTTPS endpoint."
+            exit 1
+          }
+          artifact="$RUNNER_TEMP/web-alpine-main.APKINDEX.tar.gz"
+          curl --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 \
+            "${main_repo%/}/x86_64/APKINDEX.tar.gz" --output "$artifact"
+          digest="$(sha256sum "$artifact" | awk '{print $1}')"
+          [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "::error::The Alpine main APKINDEX did not resolve to one SHA256 value."
+            exit 1
+          }
+          echo "main_sha256=$digest" >> "$GITHUB_OUTPUT"
+
       - name: Resolve one signed reusable surface
         id: surface
         env:
@@ -1201,6 +1260,7 @@ jobs:
           SOLVER_SOURCE_SHA256: ${{ needs.prepare.outputs.solver_source_sha256 }}
           HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256: ${{ steps.harness_debian.outputs.security_sha256 }}
           HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256: ${{ steps.harness_debian.outputs.updates_sha256 }}
+          WEB_ALPINE_MAIN_APKINDEX_SHA256: ${{ steps.web_alpine.outputs.main_sha256 }}
           FORCE_REBUILD_ALL: ${{ inputs.force_rebuild_all }}
         run: |
           set -euo pipefail
@@ -1250,6 +1310,13 @@ jobs:
             }
             build_args+=(--build-arg "HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256=$HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256")
             build_args+=(--build-arg "HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256=$HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256")
+          fi
+          if [ "${{ matrix.image }}" = "web" ]; then
+            [[ "$WEB_ALPINE_MAIN_APKINDEX_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+              echo "::error::The web Alpine main APKINDEX SHA256 is missing or malformed."
+              exit 1
+            }
+            build_args+=(--build-arg "WEB_ALPINE_MAIN_APKINDEX_SHA256=$WEB_ALPINE_MAIN_APKINDEX_SHA256")
           fi
           buildkit_version="$(docker buildx version | head -n 1)"
           python scripts/platform_release_manifest.py surface-fingerprint \
@@ -1661,6 +1728,7 @@ jobs:
             ${{ matrix.image == 'canonical-worker' && format('AUTOFILL_SOLVER_REVISION={0}', needs.prepare.outputs.solver_revision) || '' }}
             ${{ matrix.image == 'harness' && format('HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256={0}', steps.harness_debian.outputs.security_sha256) || '' }}
             ${{ matrix.image == 'harness' && format('HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256={0}', steps.harness_debian.outputs.updates_sha256) || '' }}
+            ${{ matrix.image == 'web' && format('WEB_ALPINE_MAIN_APKINDEX_SHA256={0}', steps.web_alpine.outputs.main_sha256) || '' }}
           # Every upstream base resolves through this account's ECR pull-through
           # cache instead of Docker Hub. buildx named contexts override an image
           # reference WITHOUT editing the Dockerfile, which matters here: the
@@ -2127,6 +2195,35 @@ jobs:
           resolve_inrelease updates_sha256 \
             https://deb.debian.org/debian/dists/bookworm-updates/InRelease
 
+      - name: Resolve web Alpine main APKINDEX digest
+        id: web_alpine
+        if: matrix.image == 'web'
+        env:
+          NGINX_ALPINE_BASE: ${{ env.ECR_REGISTRY }}/public-ecr/docker/library/nginx:alpine
+        run: |
+          set -euo pipefail
+          repositories="$(docker run --rm --platform linux/amd64 \
+            --entrypoint cat "$NGINX_ALPINE_BASE" /etc/apk/repositories)"
+          main_repo="$(printf '%s\n' "$repositories" | awk '/\/main\/?$/ { print }')"
+          [ "$(printf '%s\n' "$main_repo" | sed '/^$/d' | wc -l)" -eq 1 ] || {
+            echo "::error::The nginx Alpine base did not expose exactly one main repository."
+            exit 1
+          }
+          [[ "$main_repo" =~ ^https://dl-cdn\.alpinelinux\.org/alpine/v[0-9]+\.[0-9]+/main/?$ ]] || {
+            echo "::error::The nginx Alpine main repository is not the expected versioned HTTPS endpoint."
+            exit 1
+          }
+          artifact="$RUNNER_TEMP/web-alpine-main.APKINDEX.tar.gz"
+          curl --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 \
+            "${main_repo%/}/x86_64/APKINDEX.tar.gz" --output "$artifact"
+          digest="$(sha256sum "$artifact" | awk '{print $1}')"
+          [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "::error::The Alpine main APKINDEX did not resolve to one SHA256 value."
+            exit 1
+          }
+          echo "main_sha256=$digest" >> "$GITHUB_OUTPUT"
+
       - name: Describe the exact speculative surface
         id: spec-surface
         env:
@@ -2135,6 +2232,7 @@ jobs:
           SOLVER_SOURCE_SHA256: ${{ needs.prepare.outputs.solver_source_sha256 }}
           HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256: ${{ steps.harness_debian.outputs.security_sha256 }}
           HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256: ${{ steps.harness_debian.outputs.updates_sha256 }}
+          WEB_ALPINE_MAIN_APKINDEX_SHA256: ${{ steps.web_alpine.outputs.main_sha256 }}
         run: |
           set -euo pipefail
           case "${{ matrix.image }}" in
@@ -2182,6 +2280,13 @@ jobs:
             }
             build_args+=(--build-arg "HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256=$HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256")
             build_args+=(--build-arg "HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256=$HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256")
+          fi
+          if [ "${{ matrix.image }}" = "web" ]; then
+            [[ "$WEB_ALPINE_MAIN_APKINDEX_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+              echo "::error::The web Alpine main APKINDEX SHA256 is missing or malformed."
+              exit 1
+            }
+            build_args+=(--build-arg "WEB_ALPINE_MAIN_APKINDEX_SHA256=$WEB_ALPINE_MAIN_APKINDEX_SHA256")
           fi
           python scripts/platform_release_manifest.py surface-fingerprint \
             --repo-root . \
@@ -2329,6 +2434,7 @@ jobs:
             ${{ matrix.image == 'canonical-worker' && format('AUTOFILL_SOLVER_REVISION={0}', needs.prepare.outputs.solver_revision) || '' }}
             ${{ matrix.image == 'harness' && format('HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256={0}', steps.harness_debian.outputs.security_sha256) || '' }}
             ${{ matrix.image == 'harness' && format('HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256={0}', steps.harness_debian.outputs.updates_sha256) || '' }}
+            ${{ matrix.image == 'web' && format('WEB_ALPINE_MAIN_APKINDEX_SHA256={0}', steps.web_alpine.outputs.main_sha256) || '' }}
           # Every upstream base resolves through this account's ECR pull-through
           # cache instead of Docker Hub. buildx named contexts override an image
           # reference WITHOUT editing the Dockerfile, which matters here: the
