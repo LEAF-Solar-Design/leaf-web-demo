@@ -29,12 +29,9 @@ import { describe, expect, it } from 'vitest'
 import esbuild from 'esbuild'
 
 // Normalized to LF: the index stores LF but a Windows working tree checks out
-// CRLF, and a literal 
- replacement against raw CRLF source silently no-ops
+// CRLF, and a literal \n replacement against raw CRLF source silently no-ops
 // (kimi-critic review of PR #885, observation 7).
-const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8').replace(/
-/g, '
-')
+const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
 
 // esbuild's transform drops the ~140-line commented-out legacy block (which
 // still mentions `loadCheckout`), but keeps line comments in some positions —
