@@ -466,6 +466,7 @@ export default function PromptBox({
             placeholder="Find, act, or build… ( / for tools)"
             spellCheck={false}
             aria-label="Command bar"
+            data-testid="command-bar"
             role="combobox"
             aria-autocomplete="list"
             aria-expanded={menuOpen}
