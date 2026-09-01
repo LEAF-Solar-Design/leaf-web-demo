@@ -33,6 +33,7 @@ import ProductSurfaceTabs, { ProductSurfaceFrame } from './components/ProductSur
 import IosSurface from './ios/IosSurface.jsx'
 import { ENV_IOS_SURFACE } from './ios/flag.js'
 import CadEditSurface from './cadedit/CadEditSurface.jsx'
+import { markInstant } from './lib/instant.js'
 import { ENV_CAD_EDIT } from './cadedit/flag.js'
 import {
   productSurfaceStates,
@@ -2057,17 +2058,22 @@ export default function App() {
     const onKey = (e) => {
       const tag = ((e.target && e.target.tagName) || '').toLowerCase()
       const typing = tag === 'input' || tag === 'textarea'
+      // Hotkey-driven changes land frame-of-keypress (data-instant, W0#7).
+      // Stamp only a branch that will handle the key. An ordinary r/R typed
+      // into a field, or an inactive retry rung, must keep normal motion.
       if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+        markInstant()
         e.preventDefault()
         barInputRef.current?.focus()
         return
       }
       if (e.key === 'Escape') {
-        if (drawer) { setDrawer(null); return }
-        if (historyOpen) { closeHistory(); return }
-        if (route) { dismissRoute(); return }
-        if (routeErr || runErr) { clearRouteError(); clearRunErr(); return }
+        if (drawer) { markInstant(); setDrawer(null); return }
+        if (historyOpen) { markInstant(); closeHistory(); return }
+        if (route) { markInstant(); dismissRoute(); return }
+        if (routeErr || runErr) { markInstant(); clearRouteError(); clearRunErr(); return }
         if (running) {
+          markInstant()
           // P2 wave C-2: latency tolerance in the wild. Esc-on-running is the
           // ONE interrupt gesture (the rail keeps the job; nothing cancels
           // server-side). Refs, not deps: elapsed ticks every 200ms and must
@@ -2080,10 +2086,10 @@ export default function App() {
           interruptRun()
           return
         }
-        if (selectedHandle) { setSelectedHandle(null); return }
+        if (selectedHandle) { markInstant(); setSelectedHandle(null); return }
         // Bottom rung: the WorkspaceSummary Esc cap — close the open project
         // only once every higher surface has already yielded.
-        if (openProjectId) { onCloseProject() }
+        if (openProjectId) { markInstant(); onCloseProject() }
         return
       }
       // R: fire the ladder's active rung. rTarget === 'result' means
@@ -2092,6 +2098,7 @@ export default function App() {
       if (!typing && (e.key === 'r' || e.key === 'R') &&
           !e.metaKey && !e.ctrlKey && !e.altKey &&
           rTarget && rTarget !== 'result') {
+        markInstant()
         e.preventDefault()
         if (rTarget === 'route') onDispatch()
         else if (rTarget === 'history') loadHistory()

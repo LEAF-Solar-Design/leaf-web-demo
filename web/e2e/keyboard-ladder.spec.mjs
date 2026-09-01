@@ -28,3 +28,30 @@ test('Escape dismisses a proposal before a second Escape leaves the unified scen
   await page.keyboard.press('Escape')
   await expect(page).toHaveURL(/\/$/)
 })
+
+test('data-instant is stamped only when the global ladder handles a hotkey', async ({ page }) => {
+  const state = makeCatProofState()
+  await page.route('http://leaf-proof.invalid/api/**', async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    const result = catProofResponse({ method: request.method(), path: url.pathname }, state)
+    await route.fulfill({ status: result.status, contentType: 'application/json', body: JSON.stringify(result.body || {}) })
+  })
+
+  await page.goto('/try')
+  await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
+
+  const unhandledRetryStamped = await page.evaluate(() => {
+    delete document.documentElement.dataset.instant
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'r' }))
+    return document.documentElement.dataset.instant === '1'
+  })
+  expect(unhandledRetryStamped).toBe(false)
+
+  const focusHotkeyStamped = await page.evaluate(() => {
+    delete document.documentElement.dataset.instant
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true }))
+    return document.documentElement.dataset.instant === '1'
+  })
+  expect(focusHotkeyStamped).toBe(true)
+})

@@ -8,6 +8,7 @@
 // byte. Checked ONCE at boot; navigate() preserves the search string.
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { markInstant } from '../lib/instant.js'
 import { useRoute, navigate } from './router.js'
 import { sceneForPath } from './routeScene.js'
 import StageLayer from './StageLayer.jsx'
@@ -128,6 +129,9 @@ export default function SiteRoot() {
     const onKey = (e) => {
       if (isEditable(e.target)) return
       if (scene === 'tool' && (e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'k') {
+        // data-instant (W0#7): the focus hotkey lands frame-of-keypress; the
+        // scene recasts (Esc/T -> navigate) stay Register III on purpose.
+        markInstant()
         e.preventDefault()
         stageRef.current?.querySelector('.tc-bar-input')?.focus()
         return
