@@ -131,9 +131,13 @@ def aggregate(tenant_id: str, *, path: Optional[Path] = None) -> Dict[str, Any]:
     return {"today": today, "cycle": cycle, "estimate_basis": "self_metered"}
 
 
-def tenants_seen(*, path: Optional[Path] = None) -> Dict[str, Dict[str, Any]]:
+def tenants_seen(
+    *, path: Optional[Path] = None, raise_on_read_error: bool = False,
+) -> Dict[str, Dict[str, Any]]:
     """Every tenant with at least one turn line -> lifetime {turns, cost_tokens,
-    usd_est}. Ops-surface aggregation; tolerant of malformed lines."""
+    usd_est}. Malformed lines and a missing ledger remain safe. Callers that
+    must distinguish an unreadable store from an empty one can request the
+    original OSError with ``raise_on_read_error``."""
     if path is None and _using_postgres():
         return _pg_store().usage_tenants()
     target = path or ledger_path()
@@ -143,6 +147,8 @@ def tenants_seen(*, path: Optional[Path] = None) -> Dict[str, Dict[str, Any]]:
     try:
         lines = target.read_text(encoding="utf-8").splitlines()
     except OSError:
+        if raise_on_read_error:
+            raise
         return out
     for line in lines:
         line = line.strip()

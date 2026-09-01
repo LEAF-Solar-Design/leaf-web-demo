@@ -297,7 +297,7 @@ def _agent_usage_snapshot() -> Optional[Dict[str, Dict[str, Any]]]:
     not one pass per tenant. Returns None (unknown) on any fault, never {}.
     """
     try:
-        seen = agent_ledger.tenants_seen()
+        seen = agent_ledger.tenants_seen(raise_on_read_error=True)
     except Exception:  # ledger unreadable / agent store down -> unknown
         return None
     return seen if isinstance(seen, dict) else None

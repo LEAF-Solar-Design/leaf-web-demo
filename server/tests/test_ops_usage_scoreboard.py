@@ -12,6 +12,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -52,10 +53,11 @@ def _listing(monkeypatch, *, brokers, agent):
     monkeypatch.setattr(ops, "_distinct_tenants", lambda _path: set(brokers))
     monkeypatch.setattr(ops, "_usage_mod", lambda: None)
 
-    calls = {"n": 0}
+    calls = {"n": 0, "raise_on_read_error": []}
 
-    def _seen():
+    def _seen(*, raise_on_read_error=False):
         calls["n"] += 1
+        calls["raise_on_read_error"].append(raise_on_read_error)
         if isinstance(agent, BaseException):
             raise agent
         return agent
@@ -134,6 +136,25 @@ def test_an_unreadable_agent_store_reports_unknown_not_zero(monkeypatch) -> None
     assert body["platform"]["autocad_backend"]["runs"] == 0
 
 
+def test_strict_agent_ledger_read_does_not_collapse_oserror_to_empty(
+    monkeypatch, tmp_path,
+) -> None:
+    ledger = tmp_path / "agent-ledger.jsonl"
+    ledger.write_text('{"kind":"turn","tenant_id":"tenant-a"}\n', encoding="utf-8")
+    original_read_text = Path.read_text
+
+    def _unreadable(path, *args, **kwargs):
+        if path == ledger:
+            raise OSError("ledger cannot be read")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _unreadable)
+
+    assert ops.agent_ledger.tenants_seen(path=ledger) == {}
+    with pytest.raises(OSError, match="ledger cannot be read"):
+        ops.agent_ledger.tenants_seen(path=ledger, raise_on_read_error=True)
+
+
 def test_the_agent_ledger_is_read_once_per_listing_not_once_per_tenant(monkeypatch) -> None:
     """Performance contract, not a style preference.
 
@@ -149,3 +170,4 @@ def test_the_agent_ledger_is_read_once_per_listing_not_once_per_tenant(monkeypat
     )
 
     assert calls["n"] == 1
+    assert calls["raise_on_read_error"] == [True]
