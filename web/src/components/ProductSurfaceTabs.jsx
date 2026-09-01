@@ -150,7 +150,7 @@ export function SurfaceCapabilities({ surface, catalog, catalogError }) {
   )
 }
 
-export function ProductSurfaceFrame({ activeSurface, states, projectSlot, onOpenCad, catalog, catalogError }) {
+export function ProductSurfaceFrame({ activeSurface, states, projectSlot, catalog, catalogError }) {
   const surface = productSurface(activeSurface)
   const status = states[surface.id]
   return (
@@ -189,9 +189,10 @@ export function ProductSurfaceFrame({ activeSurface, states, projectSlot, onOpen
       {surface.id === 'browser' && <p className="tc-product-note">Project-scoped files, conversation, and browser composition are live on the shared identity and project rail.</p>}
       {surface.id === 'solar' && <p className="tc-product-note">Solar work runs the shared tenant catalog’s stringing and placement families against the versioned LEAF solar template in the CAD workspace.</p>}
       {surface.id === 'ios' && <p className="tc-product-note">A mounted Apple grant and terminal ship-lane readiness receipt are required. This browser never asks for Apple credentials.</p>}
-      <button type="button" className="tc-product-cad-link" onClick={onOpenCad}>
-        {surface.id === 'solar' ? 'Open the solar template in the CAD workspace' : 'Open the live CAD workspace'}
-      </button>
+      {/* No "Open ..." buttons here (operator directive 2026-09-01): the TABS
+          are the navigation — each tab opens its surface inline, client-side.
+          Solar renders the live CAD workspace beneath this frame; iOS mounts
+          its ship lane in projectSlot above. */}
       </div>
     </section>
   )

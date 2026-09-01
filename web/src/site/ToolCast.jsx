@@ -2082,7 +2082,6 @@ export default function ToolCast({
           catalog={capabilityCatalog}
           catalogError={catalogError}
           projectSlot={projectSlot}
-          onOpenCad={() => selectProductSurface('cad')}
         />
       )}
     </>

@@ -1982,13 +1982,8 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 .app .tc-product-columns ul { display: block; margin: 0; padding: 0 0 0 18px; list-style: disc; color: var(--muted); }
 .app .tc-product-columns li { padding: 0; border-radius: 0; background: transparent; color: var(--muted); font-size: 13px; }
 .app .tc-product-note { padding-left: 0; border-left: 0; font-size: 12px; color: var(--muted-2); }
-.app .tc-product-cad-link {
-  align-self: flex-start; margin-top: 0; padding: 7px 14px; border-radius: 4px;
-  border: 0; background: var(--primary); color: var(--on-accent);
-  cursor: pointer; font: 600 12px var(--font-sans);
-  box-shadow: 0 1px 2px rgba(25, 29, 26, .2);
-}
-.app .tc-product-cad-link:hover { background: var(--primary-hover); color: var(--on-accent); }
+/* (.tc-product-cad-link rules removed: the frame no longer renders an
+   "Open ..." button — the tabs are the navigation.) */
 
 /* --- Operator console (Lane E) token re-pin ------------------------------
    operator.css is a deliberately DARK probe-gated panel (its --panel-bg
