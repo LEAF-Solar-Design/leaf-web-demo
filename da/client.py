@@ -206,9 +206,13 @@ def _auth_headers() -> dict:
 def nickname() -> str:
     """App nickname (owner id) used to qualify activity ids. Cached per process."""
     if not hasattr(nickname, "_v"):
-        r = requests.get(f"{DA}/forgeapps/me", headers=_auth_headers(), timeout=_HTTP_TIMEOUT)
-        r.raise_for_status()
-        nickname._v = r.text.strip().strip('"')
+        configured = os.environ.get("APS_NICKNAME", "").strip()
+        if configured:
+            nickname._v = configured
+        else:
+            r = requests.get(f"{DA}/forgeapps/me", headers=_auth_headers(), timeout=_HTTP_TIMEOUT)
+            r.raise_for_status()
+            nickname._v = r.text.strip().strip('"')
     return nickname._v
 
 
@@ -1081,7 +1085,7 @@ def extract_dxf_activity_spec() -> dict:
     }
 
 
-def tool_activity_spec(tool: dict) -> dict:
+def tool_activity_spec(tool: dict, *, dry_run: bool = False) -> dict:
     """POST /activities body for a tool's LeafTool_<engine_op> Activity.
 
     Built from the tool's LISP source: `engine_script` if present, else the
@@ -1097,7 +1101,11 @@ def tool_activity_spec(tool: dict) -> dict:
     """
     engine_op = tool.get("engine_op") or tool["name"].replace("-", "_")
     if tool.get("kind") == "appbundle":
-        return _appbundle_tool_activity_spec(tool, engine_op)
+        return _appbundle_tool_activity_spec(
+            tool,
+            engine_op,
+            dry_run=dry_run,
+        )
     script_src = tool.get("engine_script")
     if not script_src:
         sp = tool.get("script")
@@ -1162,8 +1170,19 @@ def appbundle_script(tool: dict) -> str:
     return "\r\n".join(['(setvar "CMDECHO" 0)', cmd, QUIT_SAVED]) + "\r\n"
 
 
-def _appbundle_tool_activity_spec(tool: dict, engine_op: str) -> dict:
+def _appbundle_tool_activity_spec(
+    tool: dict,
+    engine_op: str,
+    *,
+    dry_run: bool = False,
+) -> dict:
     bid = appbundle_id(tool)
+    use_placeholder = dry_run and not os.environ.get("APS_NICKNAME") and not _nickname_cached()
+    qualified_bundle = (
+        f"$(nickname).{bid}+{ALIAS}"
+        if use_placeholder
+        else appbundle_qualified(bid)
+    )
     return {
         "id": f"{TOOL_ACTIVITY_PREFIX}{engine_op}",
         "engine": ENGINE,
@@ -1172,7 +1191,7 @@ def _appbundle_tool_activity_spec(tool: dict, engine_op: str) -> dict:
             rf'/al "$(appbundles[{bid}].path)" '
             r'/s "$(settings[script].path)"'
         ],
-        "appbundles": [appbundle_qualified(bid)] if os.environ.get("APS_NICKNAME") or _nickname_cached() else [f"$(nickname).{bid}+{ALIAS}"],
+        "appbundles": [qualified_bundle],
         "parameters": {
             "HostDwg": {"verb": "get", "required": True, "localName": HOSTDWG_LOCALNAME},
             "Params": {"verb": "get", "required": False, "localName": "params.json"},
@@ -1184,7 +1203,7 @@ def _appbundle_tool_activity_spec(tool: dict, engine_op: str) -> dict:
 
 
 def _nickname_cached() -> bool:
-    """True when the nickname is already known without a network call (cached or env)."""
+    """True when this process has already resolved the APS nickname."""
     return hasattr(nickname, "_v")
 
 
@@ -1245,7 +1264,9 @@ def ensure_tool_activity(tool: dict, dry_run: bool = False) -> dict:
     """
     engine_op = tool.get("engine_op") or tool["name"].replace("-", "_")
     activity_id = f"{TOOL_ACTIVITY_PREFIX}{engine_op}"
-    spec = tool_activity_spec(tool)
+    # A live Activity body must carry the real APS owner nickname. The literal
+    # placeholder is useful only for the explicit, network-free dry-run report.
+    spec = tool_activity_spec(tool, dry_run=dry_run)
     if dry_run:
         return {"_dry_run": True, "endpoint": f"POST {DA}/activities",
                 "activity": activity_id, "alias": ALIAS, "body": spec}

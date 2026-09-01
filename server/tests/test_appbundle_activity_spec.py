@@ -1,8 +1,9 @@
 """kind:"appbundle" tools provision a real Activity (CONTRACT §2 declared the kind; this
-wires it). Calls the REAL da/client.py resolution, dependency-free (no creds, no network):
-the appbundle branch never needs the nickname when APS_NICKNAME is set, and the emitted
-script is the bundle's command plus the mark-saved QUIT, so the broker's live-script
-guard passes and the WorkItem cannot be submitted with an empty script.
+wires it). Calls the REAL da/client.py resolution. Live callers resolve and cache the
+actual APS owner nickname before they construct the Activity; only an explicit dry run
+may emit the literal nickname placeholder. The emitted script is the bundle's command
+plus the mark-saved QUIT, so the broker's live-script guard passes and the WorkItem
+cannot be submitted with an empty script.
 """
 from __future__ import annotations
 
@@ -29,6 +30,30 @@ def _load_real_da_client():
 def _cutlist_tool():
     tools = json.loads(ENGINE_REGISTRY.read_text(encoding="utf-8"))["tools"]
     return next(t for t in tools if t["name"] == "timber-cutlist")
+
+
+class _NicknameResponse:
+    text = '"real-owner"'
+
+    @staticmethod
+    def raise_for_status():
+        return None
+
+
+def _cold_nickname_client(monkeypatch):
+    da = _load_real_da_client()
+    monkeypatch.delenv("APS_NICKNAME", raising=False)
+    if hasattr(da.nickname, "_v"):
+        delattr(da.nickname, "_v")
+    calls = []
+    monkeypatch.setattr(da, "_auth_headers", lambda: {"Authorization": "Bearer test"})
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return _NicknameResponse()
+
+    monkeypatch.setattr(da.requests, "get", fake_get)
+    return da, calls
 
 
 def test_registry_declares_the_compiled_tool_completely():
@@ -62,11 +87,45 @@ def test_appbundle_activity_spec_loads_bundle_and_runs_command(monkeypatch):
 
 
 def test_live_script_guard_accepts_the_appbundle_tool(monkeypatch):
-    monkeypatch.setenv("APS_NICKNAME", "nick")
     import broker  # noqa: PLC0415
-    da = _load_real_da_client()
-    da.nickname._v = "nick"
+    da, calls = _cold_nickname_client(monkeypatch)
     assert broker._live_script_is_nonempty(_cutlist_tool(), da) is True
+    assert calls[0][0].endswith("/forgeapps/me")
+    assert da.nickname._v == "real-owner"
+    assert da.tool_activity_spec(_cutlist_tool())["appbundles"] == [
+        "real-owner.LeafCutListTools+prod"
+    ]
+
+
+def test_tool_loader_live_path_resolves_nickname_before_activity(monkeypatch):
+    import tool_loader  # noqa: PLC0415
+    da, calls = _cold_nickname_client(monkeypatch)
+
+    class LiveDa:
+        spec = None
+
+        def ensure_tool_activity(self, tool):
+            self.spec = da.tool_activity_spec(tool)
+
+        @staticmethod
+        def run_tool(_dwg_path, _tool, _params):
+            return {"ok": True, "result": {}}
+
+    live_da = LiveDa()
+    result = tool_loader.run_tool_dynamic(
+        _cutlist_tool(), {}, {}, aps_live=True, da=live_da, dwg_path="input.dwg"
+    )
+    assert result["ok"] is True
+    assert calls[0][0].endswith("/forgeapps/me")
+    assert live_da.spec["appbundles"] == ["real-owner.LeafCutListTools+prod"]
+    assert "$(nickname)" not in json.dumps(live_da.spec)
+
+
+def test_explicit_activity_dry_run_may_use_nickname_placeholder(monkeypatch):
+    da, calls = _cold_nickname_client(monkeypatch)
+    out = da.ensure_tool_activity(_cutlist_tool(), dry_run=True)
+    assert calls == []
+    assert out["body"]["appbundles"] == ["$(nickname).LeafCutListTools+prod"]
 
 
 @pytest.mark.parametrize("bad", [
