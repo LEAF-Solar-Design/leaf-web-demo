@@ -50,6 +50,7 @@ capability, that travels down the broker/write-loop chain.
 from __future__ import annotations
 
 import hmac
+import math
 import os
 import secrets
 import sys
@@ -67,6 +68,7 @@ _FIELD_SEP = "\x1f"  # ASCII unit separator: cannot occur in any bound component
 _SECRET_ENV = "LEAF_CHECKOUT_CAP_SECRET"
 _RUNTIME_ENV = "LEAF_RUNTIME_ENV"
 _MIN_PRODUCTION_SECRET_BYTES = 32
+_MIN_PRODUCTION_SECRET_ENTROPY_BITS = 128
 
 _EPHEMERAL_SECRET: Optional[str] = None
 
@@ -103,6 +105,71 @@ def _auth_live_posture() -> bool:
     return deps.auth_live()
 
 
+def _smallest_repeating_unit(value: str) -> str:
+    """Return the smallest unit that composes ``value`` by repetition."""
+    length = len(value)
+    if length < 2:
+        return value
+
+    # Prefix-function period detection keeps the startup check linear even if
+    # a deployment system supplies an unexpectedly large environment value.
+    prefixes = [0] * length
+    matched = 0
+    for index in range(1, length):
+        while matched and value[index] != value[matched]:
+            matched = prefixes[matched - 1]
+        if value[index] == value[matched]:
+            matched += 1
+            prefixes[index] = matched
+
+    size = length - prefixes[-1]
+    if size < length and length % size == 0:
+        return value[:size]
+    return value
+
+
+def _estimated_entropy_bits(value: str) -> float:
+    """Conservatively estimate entropy from the non-repeated character shape.
+
+    Entropy depends on how a value was generated, which cannot be recovered from
+    the finished string. This estimate catches the production mistakes that a
+    byte-length check misses: one repeated character, a pasted word, or a short
+    block copied until it looks long. It does not certify that a passing value
+    was generated randomly.
+    """
+    def shape_entropy(shape: str) -> float:
+        unit = _smallest_repeating_unit(shape)
+        if not unit:
+            return 0.0
+
+        pool = 0
+        if any(character.islower() for character in unit):
+            pool += 26
+        if any(character.isupper() for character in unit):
+            pool += 26
+        if any(character.isdigit() for character in unit):
+            pool += 10
+        pool += len({
+            character for character in unit
+            if not (character.islower() or character.isupper()
+                    or character.isdigit())
+        })
+        if pool <= 1:
+            return 0.0
+        return len(unit) * math.log2(pool)
+
+    estimates = [shape_entropy(value)]
+    # Operators often paste repeated words with spaces, hyphens, or
+    # underscores. Score an alphanumeric, case-folded view too, so those
+    # separators cannot disguise the same short repeated unit.
+    compact = "".join(
+        character.casefold() for character in value if character.isalnum()
+    )
+    if compact and compact != value:
+        estimates.append(shape_entropy(compact))
+    return min(estimates)
+
+
 def _secret() -> str:
     """The HMAC signing secret.
 
@@ -124,12 +191,23 @@ def _secret() -> str:
     global _EPHEMERAL_SECRET
     configured = os.environ.get(_SECRET_ENV, "").strip()
     if configured:
-        if (_production_posture()
-                and len(configured.encode("utf-8")) < _MIN_PRODUCTION_SECRET_BYTES):
-            raise CapabilityUnavailable(
-                f"{_SECRET_ENV} must contain at least "
-                f"{_MIN_PRODUCTION_SECRET_BYTES} bytes when "
-                f"{_RUNTIME_ENV}=production")
+        if _production_posture():
+            if len(configured.encode("utf-8")) < _MIN_PRODUCTION_SECRET_BYTES:
+                raise CapabilityUnavailable(
+                    f"{_SECRET_ENV} must contain at least "
+                    f"{_MIN_PRODUCTION_SECRET_BYTES} bytes when "
+                    f"{_RUNTIME_ENV}=production")
+            if (_estimated_entropy_bits(configured)
+                    < _MIN_PRODUCTION_SECRET_ENTROPY_BITS):
+                # Do not include the value or its measured score. This message
+                # reaches operator logs, where either would disclose useful
+                # information about the rejected credential.
+                raise CapabilityUnavailable(
+                    f"{_SECRET_ENV} is long enough but too predictable for an "
+                    f"HMAC key when {_RUNTIME_ENV}=production (needs about "
+                    f"{_MIN_PRODUCTION_SECRET_ENTROPY_BITS} bits of entropy; a "
+                    f"repeated character or pasted word does not reach it). "
+                    f"Generate one with `openssl rand -hex 32`")
         return configured
     if _production_posture():
         raise CapabilityUnavailable(
