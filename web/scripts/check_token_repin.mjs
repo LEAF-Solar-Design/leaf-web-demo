@@ -32,7 +32,12 @@ const decls = (text) => {
 // Merge EVERY occurrence of `selector { ... }` — layout blocks and re-pin
 // blocks share selectors, and reading only the first was exactly the bug
 // that made a stage gap of 15 look like 53 during P0b development.
-const merged = (css, selector) => {
+const stripComments = (css) => css.replace(/\/\*[\s\S]*?\*\//g, '')
+const merged = (rawCss, selector) => {
+  // Comments are stripped first and the selector match is anchored to a
+  // rule position (panel W0 finding: a prose mention of ':root' inside the
+  // file-header comment matched and scanned a decoy block).
+  const css = stripComments(rawCss)
   const out = {}
   let idx = 0
   for (;;) {
@@ -40,6 +45,11 @@ const merged = (css, selector) => {
     if (i === -1) break
     const j = css.indexOf('{', i)
     if (j === -1) break
+    // anchored: nothing but whitespace/selector-list characters may sit
+    // between the matched selector and its opening brace
+    if (!/^[\sA-Za-z0-9_.:,#>\[\]="'-]*$/.test(css.slice(i + selector.length, j))) { idx = i + 1; continue }
+    const before = css[i - 1]
+    if (before && !/[\s,}{;]/.test(before)) { idx = i + 1; continue }
     let depth = 1
     let k = j + 1
     while (depth && k < css.length) {
