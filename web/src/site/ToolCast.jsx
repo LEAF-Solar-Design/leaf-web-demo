@@ -84,6 +84,7 @@ import {
 } from './iosShipReadiness.js'
 import { authConfigured, isSignedIn, login } from '../auth.js'
 import { agentBannerFor as agentBannerForKind, OPERATOR_AGENT_BANNER_COPY } from '../lib/agentBanner.js'
+import { moveRovingTab } from '../lib/roving.js'
 import { claimHolderId, getSessionHolderId } from '../checkoutIdentity.js'
 import DemoTour from '../demo/DemoTour.jsx'
 import DemoConversationPanel, { demoReplyFor } from '../demo/DemoConversationPanel.jsx'
@@ -193,21 +194,6 @@ function selectedEntity(intake, handle) {
   const face = intake?.faces3d?.find((entity) => entity.handle === handle)
   if (face) return { handle, kind: '3dface', layer: face.layer }
   return null
-}
-
-function moveTab(event) {
-  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight' && event.key !== 'Home' && event.key !== 'End') return
-  const tabs = [...event.currentTarget.querySelectorAll('[role="tab"]')]
-  if (!tabs.length) return
-  const current = tabs.indexOf(document.activeElement)
-  let next = current < 0 ? 0 : current
-  if (event.key === 'ArrowRight') next = (next + 1) % tabs.length
-  if (event.key === 'ArrowLeft') next = (next - 1 + tabs.length) % tabs.length
-  if (event.key === 'Home') next = 0
-  if (event.key === 'End') next = tabs.length - 1
-  event.preventDefault()
-  tabs[next].focus()
-  tabs[next].click()
 }
 
 // Whether this SPA page load ever saw an ACTIVE platform session. Lives at
@@ -1441,7 +1427,7 @@ export default function ToolCast({
           <span className="tc-rail-title">Workspace</span>
           <span className="tc-rail-sub">request and tools</span>
         </div>
-        <div className="tc-rail-tabs" role="tablist" aria-label="Workspace panels" onKeyDown={moveTab}>
+        <div className="tc-rail-tabs" role="tablist" aria-label="Workspace panels" onKeyDown={moveRovingTab}>
           <button id="workspace-tab-operator" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'operator' ? 0 : -1} aria-selected={leftView === 'operator'} onClick={() => setLeftView('operator')}>Operator</button>
           <button id="workspace-tab-catalog" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'catalog' ? 0 : -1} aria-selected={leftView === 'catalog'} disabled={!canOperate} onClick={() => setLeftView('catalog')}>Catalog <span>{tools.length}</span></button>
           <button id="workspace-tab-author" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'author' ? 0 : -1} aria-selected={leftView === 'author'} disabled={!canOperate} onClick={() => setLeftView('author')}>Author</button>
@@ -1613,7 +1599,7 @@ export default function ToolCast({
           <span className="tc-rail-title">Operations</span>
           <span className="tc-rail-sub">controller state</span>
         </div>
-        <div className="tc-rail-tabs" role="tablist" aria-label="Operation panels" onKeyDown={moveTab}>
+        <div className="tc-rail-tabs" role="tablist" aria-label="Operation panels" onKeyDown={moveRovingTab}>
           <button id="operations-tab-execution" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'execution' ? 0 : -1} aria-selected={rightView === 'execution'} onClick={() => setRightView('execution')}>Execution</button>
           <button id="operations-tab-jobs" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'jobs' ? 0 : -1} aria-selected={rightView === 'jobs'} disabled={!sessionReady} onClick={() => setRightView('jobs')}>Jobs <span>{visibleJobCount}</span></button>
           <button id="operations-tab-versions" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'versions' ? 0 : -1} aria-selected={rightView === 'versions'} disabled={!canOperate} onClick={() => { setRightView('versions'); drawing.actions.loadHistory() }}>Versions <span>{drawing.latest ?? 0}</span></button>
