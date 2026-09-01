@@ -17,6 +17,20 @@ FROM node:22-slim AS harness
 # sources before the first apt metadata request.
 COPY --from=trust-store /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
+# Security posture: apply Debian security updates at build time so the image
+# never ships base-layer CVEs the distro has already fixed (the Trivy gate
+# blocks HIGH/CRITICAL with a released fix; libexpat1 CVE-2026-56408 turned
+# staging auto-deploys off for every merge from run 33465506870 onward).
+#
+# The two ADDs exist to keep that promise under the workflow's registry
+# buildcache: BuildKit re-fetches URL sources every build and keys the layer
+# chain on their content, so the apt layer is invalidated exactly when Debian
+# publishes new security or point updates, and stays cached otherwise. Same
+# pattern and reasoning as deploy/Dockerfile.instant-execution, on this
+# image's bookworm (node:22-slim) channels rather than trixie.
+ADD https://deb.debian.org/debian-security/dists/bookworm-security/InRelease /opt/leaf-build/debian-security.inrelease
+ADD https://deb.debian.org/debian/dists/bookworm-updates/InRelease /opt/leaf-build/debian-updates.inrelease
+
 # git: the tenant repos are REAL git repos (provision + one seed commit + commit
 # on each authoring). The git worker (scripts/git-worker.cjs) is spawned at boot;
 # on Linux the SDK-process-tree spawn hazard it guards against does not occur, so
@@ -26,6 +40,7 @@ RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
       -e 's|http://deb.debian.org|https://deb.debian.org|g' \
       -e 's|http://security.debian.org|https://security.debian.org|g' {} + \
   && apt-get update \
+  && apt-get upgrade -y \
   && apt-get install -y --no-install-recommends git ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
