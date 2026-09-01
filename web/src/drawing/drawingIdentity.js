@@ -135,7 +135,13 @@ export function modeDrawingId({ mode, proofMode = false, publicDemo = false, liv
  *
  * The console applies the store mapping (`rooftop_demo` -> `demo`) to both
  * (1) and (2), exactly as App's module constants did. The operator stage
- * applies no mapping, exactly as SiteRoot's state did.
+ * applies NO mapping to EITHER, exactly as SiteRoot's state did: on that
+ * stage `source` and `drawingId` have always been the same value, and this
+ * function keeps that unconditional (panel W1 NIT: the query arm used to
+ * apply the console's mapping in operator mode too, contradicting both this
+ * comment and the module header. `?drawing=` boots the console on every path
+ * — bootWantsApp — so the pair was unreachable in production; the code now
+ * says what the contract says rather than relying on that).
  */
 export function seedDrawingIdentity({
   mode = DRAWING_MODE_OPERATOR,
@@ -148,8 +154,11 @@ export function seedDrawingIdentity({
   const requested = readDrawingParam(search)
   if (requested) {
     // A named drawing is addressed by the store id the console's checkout,
-    // version chain and save path all use.
-    return frozenIdentity(storeDrawingIdForSource(requested), requested, IDENTITY_ORIGIN.QUERY)
+    // version chain and save path all use — on the CONSOLE. The stage
+    // addresses the source name it was handed.
+    return mode === DRAWING_MODE_CONSOLE
+      ? frozenIdentity(storeDrawingIdForSource(requested), requested, IDENTITY_ORIGIN.QUERY)
+      : frozenIdentity(requested, requested, IDENTITY_ORIGIN.QUERY)
   }
 
   const selected = modeDrawingId({ mode, proofMode, publicDemo, liveDemo })

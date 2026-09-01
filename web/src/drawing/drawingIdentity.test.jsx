@@ -118,6 +118,18 @@ describe('seeding: the stage reproduces SiteRoot\'s INITIAL_OPERATOR_DRAWING_ID'
     expect(stage({ liveDemo: true })).toMatchObject({ drawingId: 'rooftop_demo', source: 'rooftop_demo' })
     expect(modeDrawingId({ mode: DRAWING_MODE_OPERATOR, liveDemo: true })).toBe('rooftop_demo')
   })
+
+  it('applies no mapping on the QUERY arm either (panel W1 NIT: code now says what the comment says)', () => {
+    // `?drawing=` boots the CONSOLE on every path, so this pair is not
+    // reachable through SiteRoot — which is exactly why the mismatch could
+    // sit here unnoticed. The stage's invariant is unconditional: on the
+    // operator stage source and drawingId are the same value, always.
+    expect(stage({ search: '?drawing=rooftop_demo' }))
+      .toMatchObject({ drawingId: 'rooftop_demo', source: 'rooftop_demo', origin: 'query' })
+    // The console, unchanged: it still maps the named source to its store id.
+    expect(seedDrawingIdentity({ mode: DRAWING_MODE_CONSOLE, search: '?drawing=rooftop_demo' }))
+      .toMatchObject({ drawingId: 'demo', source: 'rooftop_demo', origin: 'query' })
+  })
 })
 
 // ---------------------------------------------------------------------------
