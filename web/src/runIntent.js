@@ -1,5 +1,18 @@
 const DEFAULT_MAX_AGE_MS = 5 * 60 * 1000
 
+// Monotonic fallback counter: crypto.randomUUID() is the mint on every
+// evergreen browser; this only ever executes on a runtime without it, and
+// uniqueness (not unpredictability) is all a client-side intent/session
+// correlation id needs, so no Math.random() belongs on this path.
+let _fallbackIdSeq = 0
+
+export function mintCorrelationId() {
+  const uuid = globalThis.crypto?.randomUUID?.()
+  if (uuid) return uuid
+  _fallbackIdSeq += 1
+  return `${Date.now()}-${_fallbackIdSeq}`
+}
+
 function freeze(value) {
   if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value
   Object.freeze(value)
