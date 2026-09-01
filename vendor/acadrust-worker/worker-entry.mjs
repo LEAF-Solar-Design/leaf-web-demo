@@ -73,6 +73,13 @@ export async function handleMessage(raw) {
       type: 'documentLoaded',
       documentId: raw.documentId,
       roundTrip: {
+        // Engine receipt: names which build actually ran, derived from the
+        // SAME switch getEngine() selects its import by (one line apart, so
+        // the receipt cannot drift from the selection). Tests assert this
+        // instead of inferring the engine from byte behavior — the two
+        // engines differ on byte-identity (see the day-3 spike doc), so a
+        // suite that never pins its engine silently changes what it tests.
+        engine: USE_REAL_WASM ? 'real-wasm' : 'stand-in',
         entityCount: parsed.entities.length,
         firstEntity: parsed.entities[0] ?? null,
         reparsedFirstEntity: reparsed.entities[0] ?? null,

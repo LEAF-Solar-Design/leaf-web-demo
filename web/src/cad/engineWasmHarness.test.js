@@ -16,6 +16,23 @@
 // day 2 closes the remaining half (see this repo's day-2 spike doc under
 // docs/ for the full spike lineage receipt).
 //
+// ENGINE MODE — PINNED TO THE JS STAND-IN, explicitly: the worker module
+// behind the boundary picks its engine off an env switch
+// (CAD_ENGINE_REAL_WASM=1 loads the real compiled wasm build where a
+// developer has produced it), so runInWorkerProcess() below force-clears
+// that switch in the child it spawns, and the round-trip test asserts the
+// worker's own engine receipt (roundTrip.engine === 'stand-in') before
+// anything else. Without the pin, this suite silently changed what it
+// tested based on ambient shell env. The pin matters for the byte
+// assertions: BYTE-IDENTICAL ROUND TRIP IS A STAND-IN-ONLY PROPERTY. The
+// real compiled engine writes a complete document (the 140-byte one-LINE
+// fixture comes back as ~46,750 bytes — see the day-3 spike doc under
+// docs/, "not identical, and not expected to be"), so byte identity is
+// FALSE there by design, not an engine defect. Do not re-add a
+// byte-identity claim against the real build; the real build's coverage
+// (entity-level semantic round trip, opt-in via CAD_ENGINE_REAL_WASM=1)
+// lives in engineWasmHarness.realwasm.test.js.
+//
 // No real Worker exists in jsdom (see engineBoundary.test.js's own
 // `delete globalThis.Worker` / `globalThis.Worker = vi.fn()` pattern) so
 // this mocks the global the same way. The mock runs the real worker module
@@ -64,6 +81,13 @@ function runInWorkerProcess(modulePath, message) {
   const stdout = execFileSync(process.execPath, ['--input-type=module', '-e', script], {
     input: JSON.stringify(message),
     encoding: 'utf8',
+    // Pin the child to the stand-in engine. execFileSync inherits
+    // process.env by default, and a shell that just ran the real-build
+    // suite the documented way has CAD_ENGINE_REAL_WASM=1 exported — which
+    // would silently flip this suite onto the real engine, where the byte
+    // assertions below are false by design. Any value but '1' selects the
+    // stand-in; '0' says so explicitly.
+    env: { ...process.env, CAD_ENGINE_REAL_WASM: '0' },
   })
   return JSON.parse(stdout)
 }
@@ -94,7 +118,7 @@ class RecordingBrowserWorker {
   terminate() {}
 }
 
-describe('CAD engine wasm worker (day-2 spike)', () => {
+describe('CAD engine wasm worker (day-2 spike, stand-in engine pinned)', () => {
   afterEach(() => {
     delete globalThis.Worker
   })
@@ -130,6 +154,11 @@ describe('CAD engine wasm worker (day-2 spike)', () => {
     expect(loaded.type).toBe('documentLoaded')
     expect(loaded.documentId).toBe('one_line.dxf')
 
+    // Engine receipt first: the worker names the build it actually ran. If
+    // this fails, the stand-in pin in runInWorkerProcess broke — nothing
+    // asserted below is a claim about the stand-in anymore.
+    expect(loaded.roundTrip.engine).toBe('stand-in')
+
     // Entity comparison: the same one-LINE fixture day 1 used, parsed twice
     // (once from the original bytes, once from the round-tripped bytes) and
     // required to agree on the entity data exactly.
@@ -139,6 +168,8 @@ describe('CAD engine wasm worker (day-2 spike)', () => {
     expect(loaded.roundTrip.reparsedFirstEntity).toEqual(expectedLine)
 
     // Byte comparison: parse -> write -> compare against the original bytes.
+    // A STAND-IN-ONLY property (see the engine-mode note in this file's
+    // header): the real compiled engine is NOT byte-identical, by design.
     expect(loaded.roundTrip.bytesIdentical).toBe(true)
     expect(loaded.roundTrip.writtenByteLength).toBe(loaded.roundTrip.originalByteLength)
 
