@@ -61,6 +61,7 @@ import {
   getJob, recordToEnvelope, publishStagedAuthor, getDrawingIntake,
   getDrawingVersions, undoDrawing, redoDrawing, takeCheckout, releaseCheckout, nlPrompt,
   createOrg, listProjects, createProject, openProject, subscribeUnauthorized,
+  saveEditedDrawingVersion,
 } from './api.js'
 import { matchPrompt } from './mock/mockNlPrompt.js'
 import { shouldStartTour } from './demo/tourEntry.js'
@@ -2674,7 +2675,34 @@ export default function App() {
               module's own documented call-site contract). The engine fence
               stands: the only /cad/ contact stays engineWorker, inside
               cadedit/, never from here. */}
-          {ENV_CAD_EDIT && <CadEditSurface />}
+          {ENV_CAD_EDIT && (
+            <CadEditSurface
+              // F-4: the engine attribution NOTICE arrives from the tenant
+              // capability contract at runtime (web source may not name the
+              // engine — license fence).
+              notice={catalog?.cad_engine?.notice || ''}
+              // F-3 persistence leg: live (non-mock) sessions can save
+              // edited bytes as a NEW VERSION of the open drawing. The
+              // parent is fetched FRESH at save time; the server's
+              // compare-and-set still guards the race. Mock/demo stays
+              // download-only, honestly.
+              saveTarget={!mock && intake ? {
+                drawingId: REQUESTED_DRAWING_ID,
+                headVersion: null,
+                save: async (bytes, _parent, digest) => {
+                  const chain = await getDrawingVersions(false, REQUESTED_DRAWING_ID)
+                  return saveEditedDrawingVersion(
+                    REQUESTED_DRAWING_ID, bytes, chain.head, digest,
+                    capabilityRef.current)
+                },
+              } : null}
+              onSaved={(receipt) => {
+                if (receipt?.new_version) {
+                  completedVersionRef.current?.(receipt.new_version, { result: {} })
+                }
+              }}
+            />
+          )}
           <div className="viewer-wrap">
             {/* X3 whole-pane takeover: red dot + what failed + quiet reason + Retry. */}
             {loadErr && !signedOut && (

@@ -1370,8 +1370,9 @@ def build_suites() -> List[Suite]:
                   # Card F-3: the editing-surface acceptance cases drive the
                   # REAL compiled engine through a persistent-child double,
                   # gated on the same machine-local wasm artifact (never on a
-                  # runner). Ten tests.
-                  ("src/cadedit/cadEditSurface.test.jsx", 10),
+                  # runner). Twelve tests (ten engine cases + the two
+                  # persistence-leg save cases in the same gated describe).
+                  ("src/cadedit/cadEditSurface.test.jsx", 12),
               )),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),

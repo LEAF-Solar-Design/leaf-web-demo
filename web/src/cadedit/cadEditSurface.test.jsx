@@ -245,6 +245,17 @@ describe('acceptance: the editing surface mounts only behind cad_edit', () => {
     await statusContains('exceeds')
     expect(createWorker).not.toHaveBeenCalled()
   })
+
+  it('F-4: renders the runtime engine notice when the contract supplies one', () => {
+    render(<CadEditSurface enabled notice="Includes a third-party engine under MPL-2.0." />)
+    expect(screen.getByTestId('cad-edit-engine-notice').textContent)
+      .toContain('MPL-2.0')
+  })
+
+  it('F-4: renders no notice element when the contract supplies none (flag-off truth)', () => {
+    render(<CadEditSurface enabled />)
+    expect(screen.queryByTestId('cad-edit-engine-notice')).toBeNull()
+  })
 })
 
 describe.skipIf(!HAS_ENGINE)('acceptance: real-engine editing through the boundary', () => {
@@ -332,6 +343,57 @@ describe.skipIf(!HAS_ENGINE)('acceptance: real-engine editing through the bounda
     fireEvent.click(screen.getByRole('button', { name: 'Move selected' }))
     await statusContains('move applied')
     expect(screen.getByText('Download edited DXF')).toBeInTheDocument()
+  })
+
+  it('F-3b: saves edited bytes to the project with a client-computed digest and shows the receipt', async () => {
+    const save = vi.fn(async (bytes, _parent, digest) => {
+      const expected = await (async () => {
+        const d = await crypto.subtle.digest('SHA-256', bytes)
+        return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, '0')).join('')
+      })()
+      expect(digest).toBe(expected)
+      return {
+        new_version: { drawing_id: 'rooftop', version: 5, parent: 4 },
+        head: 5,
+        source_sha256: digest,
+        cost: { engine_usd: 0, engine: 'client-wasm' },
+      }
+    })
+    const onSaved = vi.fn()
+    worker = new FakeEngineWorker()
+    render(<CadEditSurface
+      enabled
+      createWorker={() => worker}
+      saveTarget={{ drawingId: 'rooftop', headVersion: 4, save }}
+      onSaved={onSaved}
+    />)
+    await openDocument(ONE_LINE_DXF)
+    expect(screen.queryByTestId('cad-edit-save-version')).toBeNull()
+    selectEntity(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Move selected' }))
+    await statusContains('move applied')
+    fireEvent.click(screen.getByTestId('cad-edit-save-version'))
+    await statusContains('Saved as version 5')
+    await statusContains('engine cost $0')
+    expect(save).toHaveBeenCalledTimes(1)
+    expect(onSaved).toHaveBeenCalledTimes(1)
+  })
+
+  it('F-3b: a moved head (409) reads back as a refusal, not a success', async () => {
+    const conflict = Object.assign(new Error('stale parent 4: head is now 6; refresh'), { status: 409 })
+    const save = vi.fn(async () => { throw conflict })
+    worker = new FakeEngineWorker()
+    render(<CadEditSurface
+      enabled
+      createWorker={() => worker}
+      saveTarget={{ drawingId: 'rooftop', headVersion: 4, save }}
+    />)
+    await openDocument(ONE_LINE_DXF)
+    selectEntity(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Move selected' }))
+    await statusContains('move applied')
+    fireEvent.click(screen.getByTestId('cad-edit-save-version'))
+    await statusContains('Save refused: stale parent')
   })
 
   it('refuses a non-numeric delta before it reaches the engine', async () => {

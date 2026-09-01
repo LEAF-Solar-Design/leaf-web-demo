@@ -24,17 +24,20 @@ a documented follow-up (CONTRACT-ADDENDUM §11).
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import re
 import threading
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, File, Form, Header, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 import checkout_capability
 import deps
+import guest_uploads
 import write_loop
 from envelopes import ErrorCode, error_obj, error_response, with_envelope_fields
 
@@ -678,6 +681,166 @@ def restore_version(drawing_id: str, version: int,
         "restored_head_readable": restored.restored_head_readable,
     }, tenant_id)
     return with_envelope_fields(view)
+
+
+@router.post("/api/drawings/{drawing_id}/versions/edited")
+def save_edited_version(drawing_id: str,
+                        file: UploadFile = File(...),
+                        parent_version: int = Form(...),
+                        source_digest: str = Form(...),
+                        tenant_id: str = Depends(deps.require_active_tenant),
+                        x_checkout_capability: Optional[str] = Header(default=None)) -> Any:
+    """Card F-3 (persistence leg): save a browser-edited DXF as a NEW VERSION
+    of this drawing — the editing surface's write-back into the same
+    versioned-control chain every other write uses.
+
+    Contract, hardened end to end:
+      - the client sends the sha256 it computed over the exact bytes it
+        edited; the server recomputes and refuses a mismatch (400) — a
+        corrupted or tampered body can never become a version;
+      - the bytes must PARSE through the real intake path (422 otherwise):
+        the stored version payload IS that intake JSON (the chain's idiom,
+        viewer-readable with no cache machinery), while the raw full-fidelity
+        DXF is stored digest-bound at the version's `.edited.dxf` sidecar;
+      - parent_version is compare-and-set against the CURRENT head
+        (require_parent_is_head): a save over a moved head answers 409 and
+        writes nothing — refresh, re-open, re-edit;
+      - same single-writer gate as undo/redo/restore (_lock_authorization),
+        same drain fence (_mutation_gate + the store commit guard inside
+        _put_bytes_version), same 403/503 taxonomy;
+      - the receipt names both digests and a truthful cost: the edit ran in
+        the tenant's own browser, so engine cost is exactly 0.
+    """
+    blocked = _mutation_gate()
+    if blocked is not None:
+        return blocked
+    import store  # da/store.py; importable via write_loop's sys.path setup
+    import dxf_intake
+
+    # Taint barrier at the boundary: the drawing id is a URL path parameter
+    # and flows into store keys, so it is validated HERE before any store
+    # call. The regex is a LITERAL, deliberately: static analysis can prove
+    # a literal admits no separator or traversal characters, while the same
+    # pattern behind a variable earns no barrier credit (measured on this
+    # PR's CodeQL run). test_save_edited_version.py pins this literal equal
+    # to the ONE shared canonical-id rule so the two can never drift.
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", drawing_id or ""):
+        return error_response(ErrorCode.BAD_PARAMS,
+                              "malformed drawing id",
+                              retryable=False, status_code=400)
+    drawing_id = str(re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", drawing_id).group(0))
+
+    cap = guest_uploads.max_upload_bytes()
+    try:
+        data = file.file.read(cap + 1)
+    except Exception:  # noqa: BLE001 — transport read faults answer typed, never a plain 500
+        return error_response(ErrorCode.BAD_PARAMS,
+                              "could not read the uploaded body",
+                              retryable=True, status_code=400)
+    if len(data) > cap:
+        return error_response(ErrorCode.BAD_PARAMS,
+                              f"file exceeds the {cap} byte cap",
+                              retryable=False, status_code=413)
+    if not str(file.filename or "").lower().endswith(".dxf"):
+        return error_response(ErrorCode.BAD_PARAMS,
+                              "edited saves accept .dxf only",
+                              retryable=False, status_code=400)
+    actual_digest = hashlib.sha256(data).hexdigest()
+    if not hmac.compare_digest(actual_digest, str(source_digest or "").lower()):
+        return error_response(
+            ErrorCode.BAD_PARAMS,
+            "source_digest does not match the received bytes; refusing to "
+            "version a payload that differs from what was edited",
+            retryable=False, status_code=400)
+    try:
+        intake = dxf_intake.parse_dxf_bytes(data, source_name=file.filename or "edited.dxf")
+    except dxf_intake.DxfParseError as exc:
+        return error_response(ErrorCode.BAD_PARAMS,
+                              f"edited document does not parse: {exc}",
+                              retryable=False, status_code=422)
+
+    backend = _backend(str(tenant_id))
+    try:
+        write_loop.ensure_demo_drawing(backend, str(tenant_id), drawing_id)
+        holder, fence = _lock_authorization(drawing_id, tenant_id, backend,
+                                            x_checkout_capability)
+    except (checkout_capability.CapabilityRejected,
+            checkout_capability.CapabilityUnavailable) as exc:
+        return _denied(exc)
+    except (KeyError, ValueError):
+        # Fixed message, deliberately: exception text from the store layer is
+        # an internal detail (CodeQL stack-trace-exposure class), and the
+        # caller needs only the category.
+        return error_response(ErrorCode.BAD_PARAMS,
+                              "drawing unavailable or malformed request",
+                              retryable=False, status_code=400)
+
+    intake_payload = json.dumps(intake, separators=(",", ":")).encode("utf-8")
+    intake_digest = hashlib.sha256(intake_payload).hexdigest()
+    try:
+        with write_loop.drawing_mutation_commit_guard() as commit_enabled:
+            if not commit_enabled:
+                return error_response(
+                    ErrorCode.INTERNAL,
+                    "drawing mutations are temporarily disabled for a storage cutover",
+                    retryable=True, status_code=503)
+            new_v = write_loop._put_bytes_version(
+                backend, str(tenant_id), drawing_id, intake_payload,
+                parent_version=int(parent_version),
+                meta={"tool": "cad-edit-surface", "source": "cad_edit",
+                      "source_sha256": actual_digest,
+                      "intake_sha256": intake_digest,
+                      "note": "browser edit via the isolated engine worker"},
+                holder=holder, fence=fence,
+                require_parent_is_head=True)
+    except store.CheckoutDenied as exc:
+        return _denied(checkout_capability.CapabilityRejected(str(exc)))
+    except ValueError as exc:
+        # The store's compare-and-set refusal is a plain ValueError. BOTH
+        # authorities' shapes are matched (review 20260831-185316 finding 1):
+        # the legacy manifest raises "stale parent ..." (da/store.py
+        # put_drawing) and the postgres authority raises "stale drawing
+        # head: expected ..." (_pg_put) — under LEAF_DRAWING_STORE=postgres
+        # a moved head must still answer the documented 409, not a 400.
+        if str(exc).startswith(("stale parent", "stale drawing head")):
+            # Fixed text: the store's message carries version numbers, which
+            # are fine, but a fixed sentence keeps exception internals out of
+            # the wire entirely (stack-trace-exposure class).
+            return error_response(
+                ErrorCode.BAD_PARAMS,
+                "stale parent: the named parent_version is no longer the "
+                "head; refresh the drawing and re-apply the edit",
+                retryable=True, status_code=409)
+        return error_response(ErrorCode.BAD_PARAMS,
+                              "version write rejected by the store",
+                              retryable=False, status_code=400)
+    except Exception as exc:  # noqa: BLE001 — persist faults answer typed, never a raw 500
+        return error_response(ErrorCode.INTERNAL,
+                              f"version persist failed: {type(exc).__name__}",
+                              retryable=False, status_code=500)
+
+    # Raw full-fidelity sidecar, AFTER the version committed. A sidecar write
+    # failure degrades honestly: the version exists and is viewer-readable
+    # (its payload is the intake), only re-edit fidelity is reduced, and the
+    # response says so rather than pretending.
+    source_stored = True
+    try:
+        backend.put(write_loop.edited_source_key(str(tenant_id), drawing_id, new_v), data)
+    except Exception:  # noqa: BLE001
+        source_stored = False
+
+    view = deps.tenant_echo({
+        "drawing_id": drawing_id,
+        "new_version": {"drawing_id": drawing_id, "version": new_v,
+                        "parent": int(parent_version)},
+        "head": new_v,
+        "source_sha256": actual_digest,
+        "intake_sha256": intake_digest,
+        "source_stored": source_stored,
+        # Truthful cost receipt: the engine ran in the tenant's browser.
+        "cost": {"engine_usd": 0.0, "engine": "client-wasm"},
+    }, tenant_id)
+    return JSONResponse(status_code=201, content=with_envelope_fields(view))
 
 
 # --------------------------------------------------------------------------- #

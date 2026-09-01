@@ -863,6 +863,31 @@ export async function uploadDrawing(file, guestSession = null, engine = null) {
   return body
 }
 
+// Card F-3 (persistence leg): save a browser-edited DXF as a NEW VERSION of
+// the drawing. `digest` is the sha256 the CLIENT computed over the exact
+// bytes it edited — the server recomputes and refuses a mismatch, so a
+// corrupted body can never become a version. `parentVersion` rides the
+// server's compare-and-set (409 when the head moved). The single-writer
+// checkout capability travels the same header undo/redo use.
+export async function saveEditedDrawingVersion(drawingId, bytes, parentVersion, digest, capability = null) {
+  const form = new FormData()
+  form.append('file', new Blob([bytes], { type: 'application/dxf' }), 'edited.dxf')
+  form.append('parent_version', String(parentVersion))
+  form.append('source_digest', digest)
+  const headers = { 'X-Tenant-Id': TENANT, ...authHeaders() }
+  if (capability) headers['X-Checkout-Capability'] = capability
+  const path = `/api/drawings/${encodeURIComponent(drawingId)}/versions/edited`
+  const res = await apiFetch(`${API_BASE}${path}`, { method: 'POST', headers, body: form }, path)
+  const body = await res.json().catch(() => null)
+  if (!res.ok) {
+    const error = new Error(body?.error?.message || `POST ${path} -> ${res.status}`)
+    error.status = res.status
+    error.body = body
+    throw error
+  }
+  return body
+}
+
 export async function getDrawingUploadStatus(drawingId, guestSession = null, tenantId = null) {
   const headers = { 'X-Tenant-Id': tenantId || TENANT, ...authHeaders() }
   if (guestSession) headers['X-Guest-Session'] = guestSession
