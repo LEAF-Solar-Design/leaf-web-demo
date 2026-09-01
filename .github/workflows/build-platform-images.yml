@@ -812,6 +812,30 @@ jobs:
           fi
           exit 0
 
+      - name: Resolve harness Debian InRelease digests
+        id: harness_debian
+        if: matrix.image == 'harness' && steps.chain.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          resolve_inrelease() {
+            local output_name="$1"
+            local url="$2"
+            local artifact="$RUNNER_TEMP/$output_name.inrelease"
+            local digest
+            curl --fail --silent --show-error --location \
+              --proto '=https' --tlsv1.2 "$url" --output "$artifact"
+            digest="$(sha256sum "$artifact" | awk '{print $1}')"
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || {
+              echo "::error::Debian $output_name InRelease did not resolve to one SHA256 value."
+              exit 1
+            }
+            echo "$output_name=$digest" >> "$GITHUB_OUTPUT"
+          }
+          resolve_inrelease security_sha256 \
+            https://deb.debian.org/debian-security/dists/bookworm-security/InRelease
+          resolve_inrelease updates_sha256 \
+            https://deb.debian.org/debian/dists/bookworm-updates/InRelease
+
       - name: Require the read-only canonical solver deploy key
         if: matrix.image == 'canonical-worker' && steps.chain.outputs.skip != 'true'
         env:
@@ -974,6 +998,8 @@ jobs:
           build-args: |
             LEAF_SOURCE_SHA=${{ needs.prepare.outputs.source_sha }}
             ${{ matrix.image == 'canonical-worker' && format('AUTOFILL_SOLVER_REVISION={0}', needs.prepare.outputs.solver_revision) || '' }}
+            ${{ matrix.image == 'harness' && format('HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256={0}', steps.harness_debian.outputs.security_sha256) || '' }}
+            ${{ matrix.image == 'harness' && format('HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256={0}', steps.harness_debian.outputs.updates_sha256) || '' }}
           # Every upstream base resolves through this account's ECR pull-through
           # cache instead of Docker Hub. buildx named contexts override an image
           # reference WITHOUT editing the Dockerfile, which matters here: the
@@ -1142,6 +1168,30 @@ jobs:
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Resolve harness Debian InRelease digests
+        id: harness_debian
+        if: matrix.image == 'harness'
+        run: |
+          set -euo pipefail
+          resolve_inrelease() {
+            local output_name="$1"
+            local url="$2"
+            local artifact="$RUNNER_TEMP/$output_name.inrelease"
+            local digest
+            curl --fail --silent --show-error --location \
+              --proto '=https' --tlsv1.2 "$url" --output "$artifact"
+            digest="$(sha256sum "$artifact" | awk '{print $1}')"
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || {
+              echo "::error::Debian $output_name InRelease did not resolve to one SHA256 value."
+              exit 1
+            }
+            echo "$output_name=$digest" >> "$GITHUB_OUTPUT"
+          }
+          resolve_inrelease security_sha256 \
+            https://deb.debian.org/debian-security/dists/bookworm-security/InRelease
+          resolve_inrelease updates_sha256 \
+            https://deb.debian.org/debian/dists/bookworm-updates/InRelease
+
       - name: Resolve one signed reusable surface
         id: surface
         env:
@@ -1149,6 +1199,8 @@ jobs:
           SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
           SOLVER_REVISION: ${{ needs.prepare.outputs.solver_revision }}
           SOLVER_SOURCE_SHA256: ${{ needs.prepare.outputs.solver_source_sha256 }}
+          HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256: ${{ steps.harness_debian.outputs.security_sha256 }}
+          HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256: ${{ steps.harness_debian.outputs.updates_sha256 }}
           FORCE_REBUILD_ALL: ${{ inputs.force_rebuild_all }}
         run: |
           set -euo pipefail
@@ -1186,6 +1238,18 @@ jobs:
             build_args+=(--build-arg "AUTOFILL_SOLVER_REVISION=$SOLVER_REVISION")
             solver_args+=(--solver-revision "$SOLVER_REVISION")
             solver_args+=(--solver-source-sha256 "$SOLVER_SOURCE_SHA256")
+          fi
+          if [ "${{ matrix.image }}" = "harness" ]; then
+            [[ "$HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+              echo "::error::The harness security InRelease SHA256 is missing or malformed."
+              exit 1
+            }
+            [[ "$HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+              echo "::error::The harness updates InRelease SHA256 is missing or malformed."
+              exit 1
+            }
+            build_args+=(--build-arg "HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256=$HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256")
+            build_args+=(--build-arg "HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256=$HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256")
           fi
           buildkit_version="$(docker buildx version | head -n 1)"
           python scripts/platform_release_manifest.py surface-fingerprint \
@@ -1595,6 +1659,8 @@ jobs:
           build-args: |
             LEAF_SOURCE_SHA=${{ needs.prepare.outputs.source_sha }}
             ${{ matrix.image == 'canonical-worker' && format('AUTOFILL_SOLVER_REVISION={0}', needs.prepare.outputs.solver_revision) || '' }}
+            ${{ matrix.image == 'harness' && format('HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256={0}', steps.harness_debian.outputs.security_sha256) || '' }}
+            ${{ matrix.image == 'harness' && format('HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256={0}', steps.harness_debian.outputs.updates_sha256) || '' }}
           # Every upstream base resolves through this account's ECR pull-through
           # cache instead of Docker Hub. buildx named contexts override an image
           # reference WITHOUT editing the Dockerfile, which matters here: the
@@ -2037,12 +2103,38 @@ jobs:
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Resolve harness Debian InRelease digests
+        id: harness_debian
+        if: matrix.image == 'harness'
+        run: |
+          set -euo pipefail
+          resolve_inrelease() {
+            local output_name="$1"
+            local url="$2"
+            local artifact="$RUNNER_TEMP/$output_name.inrelease"
+            local digest
+            curl --fail --silent --show-error --location \
+              --proto '=https' --tlsv1.2 "$url" --output "$artifact"
+            digest="$(sha256sum "$artifact" | awk '{print $1}')"
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || {
+              echo "::error::Debian $output_name InRelease did not resolve to one SHA256 value."
+              exit 1
+            }
+            echo "$output_name=$digest" >> "$GITHUB_OUTPUT"
+          }
+          resolve_inrelease security_sha256 \
+            https://deb.debian.org/debian-security/dists/bookworm-security/InRelease
+          resolve_inrelease updates_sha256 \
+            https://deb.debian.org/debian/dists/bookworm-updates/InRelease
+
       - name: Describe the exact speculative surface
         id: spec-surface
         env:
           SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
           SOLVER_REVISION: ${{ needs.prepare.outputs.solver_revision }}
           SOLVER_SOURCE_SHA256: ${{ needs.prepare.outputs.solver_source_sha256 }}
+          HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256: ${{ steps.harness_debian.outputs.security_sha256 }}
+          HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256: ${{ steps.harness_debian.outputs.updates_sha256 }}
         run: |
           set -euo pipefail
           case "${{ matrix.image }}" in
@@ -2078,6 +2170,18 @@ jobs:
             build_args+=(--build-arg "AUTOFILL_SOLVER_REVISION=$SOLVER_REVISION")
             solver_args+=(--solver-revision "$SOLVER_REVISION")
             solver_args+=(--solver-source-sha256 "$SOLVER_SOURCE_SHA256")
+          fi
+          if [ "${{ matrix.image }}" = "harness" ]; then
+            [[ "$HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+              echo "::error::The harness security InRelease SHA256 is missing or malformed."
+              exit 1
+            }
+            [[ "$HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+              echo "::error::The harness updates InRelease SHA256 is missing or malformed."
+              exit 1
+            }
+            build_args+=(--build-arg "HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256=$HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256")
+            build_args+=(--build-arg "HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256=$HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256")
           fi
           python scripts/platform_release_manifest.py surface-fingerprint \
             --repo-root . \
@@ -2223,6 +2327,8 @@ jobs:
           build-args: |
             LEAF_SOURCE_SHA=${{ needs.prepare.outputs.source_sha }}
             ${{ matrix.image == 'canonical-worker' && format('AUTOFILL_SOLVER_REVISION={0}', needs.prepare.outputs.solver_revision) || '' }}
+            ${{ matrix.image == 'harness' && format('HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256={0}', steps.harness_debian.outputs.security_sha256) || '' }}
+            ${{ matrix.image == 'harness' && format('HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256={0}', steps.harness_debian.outputs.updates_sha256) || '' }}
           # Every upstream base resolves through this account's ECR pull-through
           # cache instead of Docker Hub. buildx named contexts override an image
           # reference WITHOUT editing the Dockerfile, which matters here: the

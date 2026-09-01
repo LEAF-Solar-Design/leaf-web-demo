@@ -1275,6 +1275,11 @@ def test_every_current_dockerfile_surface_is_fully_classified():
                 "solver_revision": SOLVER_REVISION,
                 "solver_source_sha256": SOLVER_HASH,
             }
+        elif service == "harness":
+            build_args.update(
+                HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256="2" * 64,
+                HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256="3" * 64,
+            )
         fingerprints[service] = build_surface_fingerprint(
             repo,
             revision,
@@ -1287,6 +1292,10 @@ def test_every_current_dockerfile_surface_is_fully_classified():
         )
 
     assert set(fingerprints) == set(SERVICES)
+    assert fingerprints["harness"]["recipe"]["build_args"] == {
+        "HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256": "2" * 64,
+        "HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256": "3" * 64,
+    }
     assert fingerprints["web"]["recipe"]["build_args"]["VITE_API_BASE"] == ""
     assert fingerprints["app"]["migration_fingerprint"] != "not_app"
 

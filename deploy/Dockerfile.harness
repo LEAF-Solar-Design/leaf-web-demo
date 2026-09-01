@@ -17,15 +17,38 @@ FROM node:22-slim AS harness
 # sources before the first apt metadata request.
 COPY --from=trust-store /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
+# Security posture: apply Debian security updates at build time so the image
+# never ships base-layer CVEs the distro has already fixed (the Trivy gate
+# blocks HIGH/CRITICAL with a released fix; libexpat1 CVE-2026-56408 turned
+# staging auto-deploys off for every merge from run 33465506870 onward).
+#
+# The producer resolves both signed Debian channel documents and passes their
+# exact SHA256 values as build arguments. They are cache-key inputs to this RUN,
+# and the files apt downloaded must match before any package is upgraded. A
+# missing, malformed, stale, or substituted value fails the build closed.
+ARG HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256
+ARG HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256
+
 # git: the tenant repos are REAL git repos (provision + one seed commit + commit
 # on each authoring). The git worker (scripts/git-worker.cjs) is spawned at boot;
 # on Linux the SDK-process-tree spawn hazard it guards against does not occur, so
 # it is harmless-but-present here (load-bearing on a Windows host).
-RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
+RUN printf '%s\n' "$HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256" \
+      | grep -Eq '^[0-9a-f]{64}$' \
+  && printf '%s\n' "$HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256" \
+      | grep -Eq '^[0-9a-f]{64}$' \
+  && find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
     -exec sed -i \
       -e 's|http://deb.debian.org|https://deb.debian.org|g' \
       -e 's|http://security.debian.org|https://security.debian.org|g' {} + \
   && apt-get update \
+  && printf '%s  %s\n' "$HARNESS_DEBIAN_SECURITY_INRELEASE_SHA256" \
+      /var/lib/apt/lists/deb.debian.org_debian-security_dists_bookworm-security_InRelease \
+      | sha256sum -c - \
+  && printf '%s  %s\n' "$HARNESS_DEBIAN_UPDATES_INRELEASE_SHA256" \
+      /var/lib/apt/lists/deb.debian.org_debian_dists_bookworm-updates_InRelease \
+      | sha256sum -c - \
+  && apt-get upgrade -y \
   && apt-get install -y --no-install-recommends git ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
