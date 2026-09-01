@@ -19,13 +19,13 @@ const DIST = join(ROOT, 'dist', 'assets')
 const BASELINE_PATH = join(ROOT, 'scripts', 'bundle-baseline.json')
 
 // Hash-stripped stem so content-hash churn never fails the gate:
-// "index-CEIWaqwN.js" -> "index.js".
+// "index-CEIWaqwN.js" -> "index.js". Neither first-dash (merged
+// "vendor-viewer" into "vendor"; panel W0) nor last-dash (Rollup hashes may
+// CONTAIN dashes, so the split lands mid-hash) is stable: strip the
+// fixed-width trailing "-<8 hash chars>" instead.
 const stem = (name) => {
   const dot = name.lastIndexOf('.')
-  const base = name.slice(0, dot)
-  const ext = name.slice(dot)
-  const dash = base.indexOf('-')
-  return (dash === -1 ? base : base.slice(0, dash)) + ext
+  return name.slice(0, dot).replace(/-[A-Za-z0-9_-]{8}$/, '') + name.slice(dot)
 }
 
 const chunks = {}
