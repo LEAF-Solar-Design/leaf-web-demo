@@ -61,7 +61,9 @@ def test_tenant_usage_postgres_never_reads_stale_jsonl(monkeypatch):
     monkeypatch.setattr(usage_router, "_ledger_path", _stale_file_guard)
     monkeypatch.setattr(
         usage_router.agent_ledger, "aggregate",
-        lambda _tenant: {"today": {}, "cycle": {}},
+        # **_ absorbs the strict-read kwarg: these cases pin the BROKER half of
+        # the body, so the agent block is stubbed out, not exercised here.
+        lambda _tenant, **_: {"today": {}, "cycle": {}},
     )
 
     body = usage_router.usage("tenant-a")
@@ -121,7 +123,9 @@ def test_legacy_tenant_usage_shape_is_unchanged(monkeypatch, tmp_path):
     monkeypatch.delenv("LEAF_TENANT_CAP_USD", raising=False)
     monkeypatch.setattr(
         usage_router.agent_ledger, "aggregate",
-        lambda _tenant: {"today": {}, "cycle": {}},
+        # **_ absorbs the strict-read kwarg: these cases pin the BROKER half of
+        # the body, so the agent block is stubbed out, not exercised here.
+        lambda _tenant, **_: {"today": {}, "cycle": {}},
     )
     body = usage_router.usage("tenant-a")
     assert body["total"] == {"runs": 1, "usd_est": 0.1}
