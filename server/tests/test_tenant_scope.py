@@ -104,11 +104,15 @@ def test_absent_file_scopes_nobody(monkeypatch, tmp_path):
     assert tenant_scope.filter_rows(SCOPED, rows) is rows
 
 
-@pytest.mark.parametrize("raw", ["{not json", "[]", '{"scopes": []}', '{"scopes": {"../evil": {"tools": []}}}'])
+@pytest.mark.parametrize("raw", ["{not json", "[]", "{}", '{"scopes": []}', '{"scopes": {"../evil": {"tools": []}}}'])
 def test_present_but_corrupt_file_fails_closed(monkeypatch, tmp_path, raw):
+    import deps
+
     _policy(monkeypatch, tmp_path, raw)
     with pytest.raises(tenant_scope.ScopePolicyError):
         tenant_scope.filter_rows(OTHER, [])
+    with pytest.raises(tenant_scope.ScopePolicyError):
+        deps.find_tool("count-by-layer", OTHER)
 
 
 def test_label_is_bounded_and_defaults_to_the_tenant_id(monkeypatch, tmp_path):
@@ -166,8 +170,9 @@ def test_tools_capabilities_and_entitlements_routes_are_scoped(monkeypatch, tmp_
     assert ent_other["scope"] is None
 
 
-def test_corrupt_scope_file_is_a_structured_503_on_the_list_routes(monkeypatch, tmp_path):
-    _policy(monkeypatch, tmp_path, "{not json")
+@pytest.mark.parametrize("raw", ["{not json", "{}"])
+def test_corrupt_scope_file_is_a_structured_503_on_the_list_routes(monkeypatch, tmp_path, raw):
+    _policy(monkeypatch, tmp_path, raw)
     c = _client()
     for path in ("/api/tools", "/api/capabilities", "/api/entitlements"):
         r = c.get(path, headers=_h(OTHER))

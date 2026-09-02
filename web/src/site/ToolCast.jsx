@@ -790,6 +790,13 @@ export default function ToolCast({
   // button per scoped tool. Unscoped tenants render byte-identically.
   const tenantScope = useMemo(() => scopeFromEntitlements(platform.entitlements), [platform.entitlements])
   const scopeLocked = tenantScope !== null
+  const visibleSurface = scopeLocked ? 'cad' : activeSurface
+  useEffect(() => {
+    if (!scopeLocked || activeSurface === 'cad') return
+    const search = searchForProductSurface(window.location.search, 'cad')
+    window.history.replaceState({}, '', `${window.location.pathname}${search}${window.location.hash}`)
+    setActiveSurface('cad')
+  }, [activeSurface, scopeLocked])
   useEffect(() => {
     if (capabilityCatalog.families.length === 0) return
     const catalogKey = `${capabilityCatalog.source || 'unknown'}:${capabilityCatalog.families.map((family) => family.family_id).join(',')}`
@@ -1291,7 +1298,7 @@ export default function ToolCast({
     setIosShip(emptyIosShipReadiness('loading', null, projectId || null))
     setIosShipExecution(null)
     setIosShipReceipt(null)
-    if (activeSurface !== 'ios' || !signedIn || !projectId || !revision) {
+    if (visibleSurface !== 'ios' || !signedIn || !projectId || !revision) {
       setIosShip(emptyIosShipReadiness('no_approved_project_revision', null, projectId || null))
       return undefined
     }
@@ -1303,7 +1310,7 @@ export default function ToolCast({
       if (!next.launchable) setIosShipError(next.setupAction || next.reason || null)
     })
     return () => { live = false }
-  }, [activeSurface, platformSession.status, workspace.canonicalVersionId, workspace.openProjectId])
+  }, [visibleSurface, platformSession.status, workspace.canonicalVersionId, workspace.openProjectId])
   // Consume-only iOS readiness (ios_surface, cards D-1..D-4): one point-in-time
   // read of GET /api/ios-surface/status per (project, revision), distinct from the
   // ios_ship LAUNCH lane above (this one only ever reads). `enabled` mirrors the
@@ -1317,7 +1324,7 @@ export default function ToolCast({
     workspace.openProjectId,
     workspace.canonicalVersionId,
     {
-      enabled: ENV_IOS_SURFACE && activeSurface === 'cad' && leftView === 'workspace'
+      enabled: ENV_IOS_SURFACE && visibleSurface === 'cad' && leftView === 'workspace'
         && !PUBLIC_DEMO && !transportMock && canOperate,
     },
   )
@@ -1350,7 +1357,7 @@ export default function ToolCast({
   useEffect(() => {
     const projectId = workspace.openProjectId
     const executionId = iosShipExecution?.execution_id
-    if (activeSurface !== 'ios' || !projectId || !executionId) return undefined
+    if (visibleSurface !== 'ios' || !projectId || !executionId) return undefined
     let live = true
     let timer = null
     const poll = async () => {
@@ -1375,7 +1382,7 @@ export default function ToolCast({
       timer = setTimeout(poll, 2000)
     }
     return () => { live = false; if (timer) clearTimeout(timer) }
-  }, [activeSurface, iosShipExecution?.execution_id, iosShipExecution?.receipt_id,
+  }, [visibleSurface, iosShipExecution?.execution_id, iosShipExecution?.receipt_id,
     iosShipExecution?.status, workspace.openProjectId])
 
   const statusClass = phase === 'failed' ? 'red' : (phase === 'proposal' || phase === 'empty' ? 'hollow' : 'live')
@@ -1411,9 +1418,9 @@ export default function ToolCast({
   return (
     <>
       {!scopeLocked && (
-        <ProductSurfaceTabs activeSurface={activeSurface} states={productStates} onSelect={selectProductSurface} workspaceProject={workspaceProjectState} catalog={capabilityCatalog} />
+        <ProductSurfaceTabs activeSurface={visibleSurface} states={productStates} onSelect={selectProductSurface} workspaceProject={workspaceProjectState} catalog={capabilityCatalog} />
       )}
-      {activeSurface === 'cad' ? (
+      {visibleSurface === 'cad' ? (
       <>
       <div className="tc-topcluster tc-topcluster-product" data-cast="tool" style={{ '--rank': 3 }}>
         {projectSlot}
@@ -2068,7 +2075,7 @@ export default function ToolCast({
         />
       )}
       </>
-      ) : activeSurface === 'ios' ? (
+      ) : visibleSurface === 'ios' ? (
       <>
       <div className="tc-topcluster tc-topcluster-product" data-cast="tool" style={{ '--rank': 3 }}>
         {projectSlot}
@@ -2133,7 +2140,7 @@ export default function ToolCast({
       </>
       ) : (
         <ProductSurfaceFrame
-          activeSurface={activeSurface}
+          activeSurface={visibleSurface}
           states={productStates}
           catalog={capabilityCatalog}
           catalogError={catalogError}
