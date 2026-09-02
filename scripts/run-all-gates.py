@@ -1474,8 +1474,9 @@ def build_suites() -> List[Suite]:
                   # REAL compiled engine through a persistent-child double,
                   # gated on the same machine-local wasm artifact (never on a
                   # runner). Twelve tests (ten engine cases + the two
-                  # persistence-leg save cases in the same gated describe).
-                  ("src/cadedit/cadEditSurface.test.jsx", 12),
+                  # persistence-leg save cases in the same gated describe), plus
+                  # the three W4d Slice B draw cases. Fifteen tests total.
+                  ("src/cadedit/cadEditSurface.test.jsx", 15),
               )),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
