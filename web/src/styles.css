@@ -432,9 +432,9 @@ h1.home-q em {
 }
 .dispatch-btn:hover:not(:disabled) { background: var(--primary-hover); }
 .dispatch-btn:disabled { opacity: .5; cursor: not-allowed; }
-/* inline hint (H3): recedes to 45% until hovered (max one per pane) */
-.hint { margin-top: 8px; font-size: 11.5px; color: var(--muted-2); opacity: .45; transition: opacity 180ms ease; }
-.hint:hover, .hint:focus-within { opacity: 1; }
+/* inline hint (H3): --muted-2 is only ~4.5:1 on its lightest ground, so any
+   opacity fade below 1 drops it under WCAG AA (axe color-contrast, PR #794) */
+.hint { margin-top: 8px; font-size: 11.5px; color: var(--muted-2); }
 .hint b { color: var(--foreground); font-weight: 500; }
 
 /* --- route panel (the nl-prompt match) --- */
