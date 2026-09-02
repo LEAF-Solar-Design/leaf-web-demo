@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { catalogClusters } from '../lib/ribbonClusters.js'
 
-import DraftingRibbon, { RibbonCluster, RibbonTool } from './DraftingRibbon.jsx'
+import DraftingRibbon, { RIBBON_HEIGHT_VAR, RibbonCluster, RibbonTool } from './DraftingRibbon.jsx'
 
 afterEach(cleanup)
 
@@ -107,6 +107,22 @@ describe('DraftingRibbon', () => {
     expect(screen.getByText('opens on an imported DXF').className).toBe('ribbon-note')
     const move = screen.getByRole('button', { name: 'move (unavailable: opens on an imported DXF)' })
     expect(move.title).toBe('opens on an imported DXF')
+  })
+
+  it('publishes its measured band height on the workspace card, with or without ResizeObserver', () => {
+    // jsdom has no ResizeObserver and no layout: the one-shot measurement
+    // still runs and the variable exists (0px here), so the import pane's
+    // offset never falls back to a stale constant in a real browser.
+    const { unmount } = render(
+      <div className="workspace-card">
+        <DraftingRibbon clusters={catalogClusters(FAMS, { onRequestRun: () => {} })} />
+      </div>,
+    )
+    const card = document.querySelector('.workspace-card')
+    expect(card.style.getPropertyValue(RIBBON_HEIGHT_VAR)).toBe('0px')
+    unmount()
+    // Unmount clears it: a card without a ribbon publishes nothing.
+    expect(document.querySelector('.workspace-card')).toBeNull()
   })
 
   it('a pressed toggle carries aria-pressed and an expander carries aria-expanded + aria-controls', () => {

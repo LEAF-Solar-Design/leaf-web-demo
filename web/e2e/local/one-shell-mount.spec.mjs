@@ -281,13 +281,16 @@ test.describe('route matrix, rail ON', () => {
     await expect(ribbon).toBeVisible()
     await expect(ribbon.locator('.ribbon-cluster[data-family]').first()).toBeVisible({ timeout: 20_000 })
     // No cluster paints over its neighbour: every pair of adjacent tool
-    // boxes must be disjoint horizontally (the flex-shrink overlap class).
+    // boxes on the SAME ROW must be disjoint horizontally (the flex-shrink
+    // overlap class). The band wraps (W4d), so a cluster that starts a new
+    // row is not a neighbour of the one before it.
     const overlaps = await page.evaluate(() => {
       const boxes = [...document.querySelectorAll('.drafting-ribbon .ribbon-cluster')]
         .map((el) => el.getBoundingClientRect())
       let bad = 0
       for (let i = 1; i < boxes.length; i += 1) {
-        if (boxes[i].left < boxes[i - 1].right - 1) bad += 1
+        const sameRow = Math.abs(boxes[i].top - boxes[i - 1].top) < 2
+        if (sameRow && boxes[i].left < boxes[i - 1].right - 1) bad += 1
       }
       return bad
     })
@@ -472,6 +475,25 @@ test.describe('route matrix, rail ON', () => {
     expect(groups[groups.length - 1]).toBe('author')
     test.info().annotations.push({ type: 'cad_edit', description: cadEditOn ? 'VITE_CAD_EDIT=1: engine groups proven' : 'VITE_CAD_EDIT off in this build: engine groups absent by construction' })
 
+    // Every group is VISIBLE at 1600 wide: the band wraps instead of hiding
+    // half the tools behind a horizontal scroll (a group off-screen is a
+    // group the operator cannot see, the opposite of surfacing it).
+    const fit = await ribbon.evaluate((el) => {
+      const band = el.getBoundingClientRect()
+      const clusters = [...el.querySelectorAll('.ribbon-cluster')].map((c) => c.getBoundingClientRect())
+      return {
+        overflow: el.scrollWidth - el.clientWidth,
+        outside: clusters.filter((c) => c.right > band.right + 1 || c.left < band.left - 1).length,
+        rows: new Set(clusters.map((c) => Math.round(c.top))).size,
+        bandHeight: Math.round(band.height),
+        published: getComputedStyle(el.closest('.workspace-card')).getPropertyValue('--cockpit-ribbon-h').trim(),
+      }
+    })
+    expect(fit.overflow).toBeLessThanOrEqual(1)
+    expect(fit.outside).toBe(0)
+    expect(fit.published).toBe(String(fit.bandHeight) + 'px')
+    test.info().annotations.push({ type: 'ribbon', description: 'rows=' + fit.rows + ' height=' + fit.bandHeight })
+
     // The non-engine groups are live in every build.
     await expect(ribbon.locator('[data-tool="fit"]')).toBeEnabled()
     const layerToggleAny = ribbon.locator('[data-group="layers"] .ribbon-tool').first()
@@ -528,6 +550,16 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.locator('#cockpit-import-pane[data-import-open="true"]')).toHaveCount(1)
     const fileInput = page.getByLabel('DXF file')
     await expect(fileInput).toBeVisible()
+    // The pane floats on the DRAWING, below the band it opened from and the
+    // drawing's own command band: never over the ribbon's second row.
+    const clearance = await page.evaluate(() => {
+      const band = document.querySelector('.drafting-ribbon').getBoundingClientRect()
+      const bar = document.querySelector('.viewer-toolbar').getBoundingClientRect()
+      const pane = document.querySelector('.cad-edit-workbench').getBoundingClientRect()
+      return { paneTop: pane.top, bandBottom: band.bottom, barBottom: bar.bottom }
+    })
+    expect(clearance.paneTop).toBeGreaterThanOrEqual(clearance.bandBottom - 1)
+    expect(clearance.paneTop).toBeGreaterThanOrEqual(clearance.barBottom - 1)
 
     // The engine half runs only where the compiled engine is served (dev
     // middleware from pkg-web, or a staged dist/engine). Without it the

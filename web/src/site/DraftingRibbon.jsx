@@ -21,7 +21,35 @@
 // run" uses (onRequestRun -> commitCatalogDecision, source 'ribbon'). NEVER
 // dispatchSlash here: that stamps slash provenance into the P2 funnel and
 // silently no-ops on gated writes.
+import { useLayoutEffect, useRef } from 'react'
+
 import { familyMonogram } from '../lib/surfaceRails.js'
+
+// The band's measured height, published on the workspace card as a CSS
+// variable so the floating import pane clears it (landing.css). The band
+// WRAPS at narrow widths (nine groups do not fit 1600px on one row), so its
+// height is a fact of layout, never a constant: a stale offset would float
+// the pane over the band's second row. jsdom has no ResizeObserver; the
+// one-shot measurement still runs there, so the variable always exists.
+export const RIBBON_HEIGHT_VAR = '--cockpit-ribbon-h'
+
+function useBandHeight(ref) {
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return undefined
+    const host = el.closest('.workspace-card') || el.parentElement
+    if (!host) return undefined
+    const publish = () => { host.style.setProperty(RIBBON_HEIGHT_VAR, `${Math.round(el.offsetHeight)}px`) }
+    publish()
+    if (typeof ResizeObserver === 'undefined') return () => host.style.removeProperty(RIBBON_HEIGHT_VAR)
+    const observer = new ResizeObserver(publish)
+    observer.observe(el)
+    return () => {
+      observer.disconnect()
+      host.style.removeProperty(RIBBON_HEIGHT_VAR)
+    }
+  }, [ref])
+}
 
 export function RibbonTool({ tool }) {
   const {
@@ -63,8 +91,10 @@ export function RibbonCluster({ id, label, kind = 'group', note = null, extra = 
 
 export default function DraftingRibbon({ clusters = [], children = null }) {
   const list = Array.isArray(clusters) ? clusters : []
+  const ref = useRef(null)
+  useBandHeight(ref)
   return (
-    <div className="drafting-ribbon" role="toolbar" aria-label="Drafting tools" data-testid="drafting-ribbon">
+    <div ref={ref} className="drafting-ribbon" role="toolbar" aria-label="Drafting tools" data-testid="drafting-ribbon">
       {children}
       {list.length === 0 && !children && (
         // Honest empty: a sentence, never a fabricated cluster.
