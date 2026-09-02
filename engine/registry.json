@@ -10,18 +10,48 @@
       "params": {
         "type": "object",
         "properties": {
-          "groups": { "type": "array", "items": { "type": "object" }, "minItems": 1 },
-          "panelsPerString": { "type": "integer", "minimum": 3 },
-          "options": { "type": "object" },
-          "panelAngle": { "type": "number", "default": 0 },
-          "panelWidth": { "type": "number", "default": 0 },
-          "panelHeight": { "type": "number", "default": 0 }
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "minItems": 1
+          },
+          "panelsPerString": {
+            "type": "integer",
+            "minimum": 3
+          },
+          "options": {
+            "type": "object"
+          },
+          "panelAngle": {
+            "type": "number",
+            "default": 0
+          },
+          "panelWidth": {
+            "type": "number",
+            "default": 0
+          },
+          "panelHeight": {
+            "type": "number",
+            "default": 0
+          }
         },
-        "required": ["groups", "panelsPerString"]
+        "required": [
+          "groups",
+          "panelsPerString"
+        ]
       },
-      "returns": { "type": "object" },
-      "capabilities": ["solve"],
-      "provenance": { "source": "autofill-solver/solver.py", "entry": "solve_targets" }
+      "returns": {
+        "type": "object"
+      },
+      "capabilities": [
+        "solve"
+      ],
+      "provenance": {
+        "source": "autofill-solver/solver.py",
+        "entry": "solve_targets"
+      }
     },
     {
       "name": "count-by-layer",
@@ -31,15 +61,29 @@
       "engine_op": "count_by_layer",
       "script": "engine/tools/count_by_layer.lsp",
       "aps_live": true,
-      "params": { "type": "object", "properties": {}, "required": [] },
+      "params": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
       "returns": {
         "type": "object",
         "properties": {
-          "counts": { "type": "object", "additionalProperties": { "type": "integer" } }
+          "counts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          }
         }
       },
-      "capabilities": ["drawing.read"],
-      "provenance": { "author": "agent", "created": "2026-07-17T00:00:00Z" }
+      "capabilities": [
+        "drawing.read"
+      ],
+      "provenance": {
+        "author": "agent",
+        "created": "2026-07-17T00:00:00Z"
+      }
     },
     {
       "name": "measure-panel-area",
@@ -48,17 +92,35 @@
       "kind": "script",
       "engine_op": "measure_panel_area",
       "script": "engine/tools/measure_panel_area.lsp",
-      "params": { "type": "object", "properties": {}, "required": [] },
+      "params": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
       "returns": {
         "type": "object",
         "properties": {
-          "area_sqft": { "type": "number" },
-          "by_layer_sqft": { "type": "object", "additionalProperties": { "type": "number" } },
-          "units_assumption": { "type": "string" }
+          "area_sqft": {
+            "type": "number"
+          },
+          "by_layer_sqft": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            }
+          },
+          "units_assumption": {
+            "type": "string"
+          }
         }
       },
-      "capabilities": ["drawing.read"],
-      "provenance": { "author": "agent", "created": "2026-07-17T00:00:00Z" }
+      "capabilities": [
+        "drawing.read"
+      ],
+      "provenance": {
+        "author": "agent",
+        "created": "2026-07-17T00:00:00Z"
+      }
     },
     {
       "name": "highlight-panels-near-edge",
@@ -70,22 +132,43 @@
       "params": {
         "type": "object",
         "properties": {
-          "layer": { "type": "string", "default": "Panels", "description": "Layer whose polylines are tested." },
-          "distance": { "type": "number", "default": 200, "description": "Max distance (drawing units / inches) from an extents edge." }
+          "layer": {
+            "type": "string",
+            "default": "Panels",
+            "description": "Layer whose polylines are tested."
+          },
+          "distance": {
+            "type": "number",
+            "default": 200,
+            "description": "Max distance (drawing units / inches) from an extents edge."
+          }
         },
         "required": []
       },
       "returns": {
         "type": "object",
         "properties": {
-          "layer": { "type": "string" },
-          "distance": { "type": "number" },
-          "matched": { "type": "integer" },
-          "extents": { "type": "object" }
+          "layer": {
+            "type": "string"
+          },
+          "distance": {
+            "type": "number"
+          },
+          "matched": {
+            "type": "integer"
+          },
+          "extents": {
+            "type": "object"
+          }
         }
       },
-      "capabilities": ["drawing.read"],
-      "provenance": { "author": "agent", "created": "2026-07-17T00:00:00Z" }
+      "capabilities": [
+        "drawing.read"
+      ],
+      "provenance": {
+        "author": "agent",
+        "created": "2026-07-17T00:00:00Z"
+      }
     },
     {
       "name": "string-panels",
@@ -139,71 +222,27 @@
       "returns": {
         "type": "object",
         "properties": {
-          "module": { "type": "object" },
-          "electrical": { "type": "object" },
-          "strings": { "type": "array" },
-          "stats": { "type": "object" }
+          "module": {
+            "type": "object"
+          },
+          "electrical": {
+            "type": "object"
+          },
+          "strings": {
+            "type": "array"
+          },
+          "stats": {
+            "type": "object"
+          }
         }
       },
-      "capabilities": ["drawing.read"],
-      "provenance": { "author": "site-demo-lane", "created": "2026-07-20T00:00:00Z" }
-    },
-    {
-      "name": "timber-cutlist-preflight",
-      "version": "1.0.0",
-      "description": "Preview what timber-cutlist will read before the paid run: which layers follow Material_W x H (counted) and which do not, the view frames and labels it detects, segment counts per layer and view. Local, no cloud engine.",
-      "kind": "script",
-      "engine_op": "timber_cutlist_preflight",
-      "entry": "builtins/timber_cutlist_preflight.py",
-      "local_only": true,
-      "params": { "type": "object", "properties": {}, "required": [] },
-      "returns": {
-        "type": "object",
-        "properties": {
-          "table": { "type": "object" },
-          "views": { "type": "array" },
-          "counted_segments": { "type": "integer" },
-          "view_count": { "type": "integer" },
-          "warnings": { "type": "array" }
-        }
-      },
-      "capabilities": ["drawing.read"],
-      "provenance": { "author": "cutlists-lane", "created": "2026-09-01T00:00:00Z", "source": "mirror of CutLists.Core LayerSpec/ViewDetector; cross-checked in server/tests/test_timber_cutlist_preflight.py" }
-    },
-    {
-      "name": "timber-cutlist",
-      "version": "1.0.0",
-      "description": "Timber cut list from layer-coded plans and elevations (Material_W x H layers): member lengths and counts per view, connections, running metres, CSV and PDF.",
-      "kind": "appbundle",
-      "engine_op": "leaf_cutlist",
-      "appbundle": "LeafCutListTools",
-      "command": "LEAFCUTLIST",
-      "aps_live": true,
-      "params": {
-        "type": "object",
-        "properties": {
-          "wall_mid_spacing_mm": { "type": "number", "default": 600, "minimum": 10, "maximum": 10000, "description": "Bolt spacing along wall frames, mm." },
-          "wall_end_spacing_mm": { "type": "number", "default": 300, "minimum": 10, "maximum": 10000, "description": "Bolt spacing near wall ends, mm." },
-          "joist_spacing_mm": { "type": "number", "default": 600, "minimum": 10, "maximum": 10000, "description": "Joist / hanger spacing, mm." },
-          "merge_tolerance_mm": { "type": "number", "default": 2, "minimum": 0, "maximum": 100, "description": "Split lines closer than this merge into one member." },
-          "reconcile_views": { "type": "boolean", "default": true, "description": "Count each member from one view family only (plan owns horizontals, elevations own verticals)." }
-        },
-        "required": []
-      },
-      "returns": {
-        "type": "object",
-        "properties": {
-          "table": { "type": "object" },
-          "running_metres": { "type": "object" },
-          "views": { "type": "array" },
-          "warnings": { "type": "array" },
-          "files": { "type": "array" },
-          "member_count": { "type": "integer" },
-          "view_count": { "type": "integer" }
-        }
-      },
-      "capabilities": ["drawing.read"],
-      "provenance": { "author": "cutlists-lane", "created": "2026-09-01T00:00:00Z", "source": "CutLists.AppBundle (CutLists.Core engine), engine/appbundle-cutlist/LeafCutListTools.zip" }
+      "capabilities": [
+        "drawing.read"
+      ],
+      "provenance": {
+        "author": "site-demo-lane",
+        "created": "2026-07-20T00:00:00Z"
+      }
     }
   ]
 }
