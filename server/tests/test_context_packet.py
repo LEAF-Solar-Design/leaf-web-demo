@@ -26,6 +26,7 @@ import platform as _stdlib_platform  # noqa: E402
 _stdlib_platform.python_implementation()
 
 import json  # noqa: E402
+from datetime import datetime, timedelta, timezone  # noqa: E402
 import os  # noqa: E402
 import sys  # noqa: E402
 import tempfile  # noqa: E402
@@ -222,6 +223,51 @@ def test_drawing_digest_versions_tail_and_checkout(monkeypatch, tmp_path):
     p2 = _build(monkeypatch, _tools(3))
     assert p2["checkout"]["held_by"] == "alice"
     assert p2["checkout"]["expires_at"]
+
+
+def test_checkout_nulls_an_elapsed_lease_but_names_a_live_holder(monkeypatch, tmp_path):
+    """`checkout` is "who is editing RIGHT NOW", so an ELAPSED lease nulls it.
+
+    Neither storage authority erases a lapsed record eagerly, so the manifest
+    keeps its `checkout` dict and a presence test names a holder for a lock the
+    store re-grants to anyone. GET /versions carried exactly this defect until
+    `_checkout_view` started asking `store.checkout_active` (a lease measured 827
+    minutes dead was still reported as held); this module read the same field the
+    same wrong way, and is parked awaiting spine unification, so the two are
+    fixed together rather than wired up disagreeing.
+
+    BOTH states, because asserting only the elapsed nulls is satisfied by a
+    packet that nulls every lease and would stop naming a live holder at all.
+    The frozen {held_by, expires_at} shape is asserted in both.
+    """
+    monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "store"))
+    import write_loop
+    import store
+    backend = write_loop.default_backend()
+    write_loop.ensure_demo_drawing(backend, TENANT, "demo")
+
+    # LIVE: named, with its expiry.
+    assert store.acquire_checkout(backend, TENANT, "demo", "alice", 600)
+    live = _build(monkeypatch, _tools(3))["checkout"]
+    assert set(live) == {"held_by", "expires_at"}          # frozen shape
+    assert live["held_by"] == "alice" and live["expires_at"]
+
+    # ELAPSED: backdate the SAME record rather than sleeping, so this test has no
+    # timing margin to lose on a loaded runner. The store's own rule is read
+    # through `checkout_active`, which is what the packet must now agree with.
+    m = store.load_manifest(backend, TENANT, "demo")
+    m["checkout"]["expires"] = (
+        datetime.now(timezone.utc) - timedelta(hours=13)).isoformat()
+    store.save_manifest(backend, TENANT, "demo", m)
+    assert store.checkout_active(m["checkout"]) is False
+
+    elapsed = _build(monkeypatch, _tools(3))["checkout"]
+    assert set(elapsed) == {"held_by", "expires_at"}       # shape, not dropped
+    assert elapsed == {"held_by": None, "expires_at": None}
+
+    # The record is still in the manifest: the packet withheld it, the pure-read
+    # contract held, and nothing mutated the store.
+    assert store.load_manifest(backend, TENANT, "demo")["checkout"]["holder"] == "alice"
 
 
 def test_drawing_layers_capped_top_n_by_count(monkeypatch, tmp_path):

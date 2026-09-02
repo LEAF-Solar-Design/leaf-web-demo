@@ -378,7 +378,10 @@ def build_suites() -> List[Suite]:
         Suite("server-sessions-router", "server tests/test_sessions_router.py", "pytest", SERVER,
               _py_pytest("tests/test_sessions_router.py"), 46),
         Suite("server-context-packet", "server tests/test_context_packet.py", "pytest", SERVER,
-              _py_pytest("tests/test_context_packet.py"), 16),
+              # 16 -> 17 on 2026-09-02: the packet's `checkout` now nulls an
+              # ELAPSED lease, pinned in both states. Nothing here skips, so the
+              # local count IS the CI count.
+              _py_pytest("tests/test_context_packet.py"), 17),
         Suite("server-contract-freeze", "server tests/test_contract_freeze.py", "pytest", SERVER,
               _py_pytest("tests/test_contract_freeze.py"), 14),
         Suite("server-auth-vocab-freeze", "server tests/test_auth_vocab_freeze.py", "pytest",

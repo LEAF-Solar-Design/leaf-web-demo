@@ -595,7 +595,10 @@ one surface that called a lock held while the rest of the system called it free
 — measured on platform-staging, a lease reported for 827 minutes after it ended,
 suppressing write tools for every viewer of a drawing nobody held. The 409
 not-acquired body is unchanged: an acquire is refused only for a LIVE lease, so
-its `checkout` and `locked_by` still name the holder.
+its `checkout` and `locked_by` still name the holder. The parked
+`server/context_packet.py` reads the same manifest field and was corrected in the
+same change, so the §4 packet's `checkout {held_by, expires_at}` nulls BOTH fields
+for an elapsed lease rather than naming a holder. Its frozen shape is unchanged.
 
 **Update (checkout capability, 2026-07-25).** `holder` on this read is a DISPLAY
 LABEL only. It is public to every member of the tenant, so it cannot also be the
