@@ -51,6 +51,7 @@ export function ContinuityRail({ activeSurface, workspaceProject = null, catalog
 
 export default function ProductSurfaceTabs({
   activeSurface, states, onSelect, workspaceProject = null, catalog = null,
+  signedIn = false, onSignOut = null,
 }) {
   return (
     <nav className="tc-product-nav" data-cast="tool" aria-label="Product workspace">
@@ -82,6 +83,18 @@ export default function ProductSurfaceTabs({
         workspaceProject={workspaceProject}
         catalog={catalog}
       />
+      {/* Persistent identity control: the ONE place in the always-mounted nav
+          (never remounts on a surface switch — same F-8 contract as the
+          continuity rail) that lets a signed-in operator leave. Before this,
+          sign-out lived only behind Trust panel -> Account details -> drawer,
+          so the console had no reachable exit for an end user (2026-09-02
+          reconciliation, row B11). Same signOut path the Trust panel drawer
+          already calls -- never raw logout(). */}
+      {signedIn && onSignOut && (
+        <button type="button" className="chip-danger tc-account-signout" onClick={onSignOut}>
+          Sign out
+        </button>
+      )}
     </nav>
   )
 }

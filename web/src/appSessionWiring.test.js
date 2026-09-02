@@ -103,6 +103,17 @@ describe('App.jsx session controller adoption', () => {
     expect(stripped).toMatch(/label:\s*"Sign out",\s*onClick:\s*sessionActions\.signOut/)
   })
 
+  // 2026-09-02 reconciliation (row B11): the deployed /app header had no
+  // reachable sign-out control, only the drawer action pinned above, behind
+  // Details. This pin is on the RAW (un-transformed) source: esbuild's JSX
+  // loader compiles the literal <button> below into a createElement call, so
+  // the comment-stripped `stripped` lens the other pins use cannot see it.
+  it('renders a persistent header sign-out control, gated on isSignedIn(), through the same controller path', () => {
+    expect(appSource).toMatch(
+      /\{isSignedIn\(\) && \(\s*<button type="button" className="chip-danger tc-account-signout" onClick=\{sessionActions\.signOut\}>Sign out<\/button>\s*\)\}/,
+    )
+  })
+
   // Falsification: the pins above must FAIL on the shapes they forbid, not
   // merely pass on the shape that ships.
   it('fails when the jobs falling edge is wired back in', () => {

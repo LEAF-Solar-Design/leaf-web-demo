@@ -2302,6 +2302,14 @@ export default function App() {
             </button>
           )}
           <button type="button" className="chip-act" onClick={openSessionDetails}>Details</button>
+          {/* Persistent identity control: before this, sign-out lived only
+              behind Details -> the session drawer, so the header carried no
+              reachable exit for a signed-in operator (2026-09-02
+              reconciliation, row B11). Same signOut path the drawer's action
+              already calls -- never raw logout(). */}
+          {isSignedIn() && (
+            <button type="button" className="chip-danger tc-account-signout" onClick={sessionActions.signOut}>Sign out</button>
+          )}
           {devControls && (
             <label className="switch">
               <input

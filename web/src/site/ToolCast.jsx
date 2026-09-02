@@ -1418,7 +1418,15 @@ export default function ToolCast({
   return (
     <>
       {!scopeLocked && (
-        <ProductSurfaceTabs activeSurface={visibleSurface} states={productStates} onSelect={selectProductSurface} workspaceProject={workspaceProjectState} catalog={capabilityCatalog} />
+        <ProductSurfaceTabs
+          activeSurface={visibleSurface}
+          states={productStates}
+          onSelect={selectProductSurface}
+          workspaceProject={workspaceProjectState}
+          catalog={capabilityCatalog}
+          signedIn={isSignedIn()}
+          onSignOut={platformSession.actions.signOut}
+        />
       )}
       {visibleSurface === 'cad' ? (
       <>
