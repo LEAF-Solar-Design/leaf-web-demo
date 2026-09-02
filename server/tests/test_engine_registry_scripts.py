@@ -21,7 +21,18 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
+
 SERVER_DIR = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def _no_network_owner(monkeypatch):
+    """kind:appbundle specs qualify their bundle with the APS owner. APS_NICKNAME is the
+    documented no-network source for it (da/client.appbundle_qualified); without it the
+    spec would fetch the live nickname and this dependency-free suite would need APS
+    credentials (it broke on CI on 2026-09-01 for exactly that reason)."""
+    monkeypatch.setenv("APS_NICKNAME", "registry-scripts-test")
 REPO_ROOT = SERVER_DIR.parent
 ENGINE_REGISTRY = REPO_ROOT / "engine" / "registry.json"
 

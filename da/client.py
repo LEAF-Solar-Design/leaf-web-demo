@@ -1149,8 +1149,17 @@ def appbundle_id(tool: dict) -> str:
 
 
 def appbundle_qualified(bundle_id: str) -> str:
-    """owner.Bundle+alias (e.g. iBZF....LeafCutListTools+prod)."""
-    return f"{nickname()}.{bundle_id}+{ALIAS}"
+    """owner.Bundle+alias (e.g. iBZF....LeafCutListTools+prod).
+
+    The owner comes from APS_NICKNAME when set, else from the cached live nickname
+    lookup. NEVER a placeholder: Design Automation rejects an Activity whose
+    `appbundles` entry is not a real qualified id (observed 2026-09-01 on staging:
+    the broker process had no cached nickname, the spec carried
+    "$(nickname).LeafCutListTools+prod", POST /activities answered 400 and every
+    live run of the tool failed before a WorkItem existed).
+    """
+    owner = os.environ.get("APS_NICKNAME", "").strip() or nickname()
+    return f"{owner}.{bundle_id}+{ALIAS}"
 
 
 def appbundle_script(tool: dict) -> str:
@@ -1172,7 +1181,7 @@ def _appbundle_tool_activity_spec(tool: dict, engine_op: str) -> dict:
             rf'/al "$(appbundles[{bid}].path)" '
             r'/s "$(settings[script].path)"'
         ],
-        "appbundles": [appbundle_qualified(bid)] if os.environ.get("APS_NICKNAME") or _nickname_cached() else [f"$(nickname).{bid}+{ALIAS}"],
+        "appbundles": [appbundle_qualified(bid)],
         "parameters": {
             "HostDwg": {"verb": "get", "required": True, "localName": HOSTDWG_LOCALNAME},
             "Params": {"verb": "get", "required": False, "localName": "params.json"},
@@ -1181,11 +1190,6 @@ def _appbundle_tool_activity_spec(tool: dict, engine_op: str) -> dict:
         "settings": {"script": {"value": appbundle_script(tool)}},
         "description": f"Leaf compiled tool {tool.get('name')} (engine_op={engine_op}, appbundle={bid}).",
     }
-
-
-def _nickname_cached() -> bool:
-    """True when the nickname is already known without a network call (cached or env)."""
-    return hasattr(nickname, "_v")
 
 
 def ensure_appbundle(bundle_id: str, zip_path: str, description: str = "", dry_run: bool = False) -> dict:
