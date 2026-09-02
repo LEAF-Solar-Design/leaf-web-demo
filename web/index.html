@@ -33,6 +33,11 @@
         </div>
       </div>
     </div>
+    <!-- Runtime flags BEFORE the bundle, synchronously: the container's
+         entrypoint writes this file from the task-definition env at boot
+         (deploy/write-runtime-flags.sh), so shell rollout flips per
+         environment on one shared image. Readers fail closed on absence. -->
+    <script src="/runtime-flags.js"></script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
