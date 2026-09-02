@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react'
+import { applyViewPose, cameraPose, unprojectClientToPlane } from './viewerMath.js'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
@@ -549,6 +550,22 @@ const Viewer = forwardRef(function Viewer(
             far: camera.far,
           }
         },
+        // W3 surface twins (same helpers the ref API uses), so automated
+        // checks can drive them without holding the React ref.
+        unproject(clientX, clientY) {
+          return unprojectClientToPlane(
+            camera, renderer.domElement.getBoundingClientRect(), clientX, clientY)
+        },
+        setView(pose) {
+          if (pose === 'home') { fitToBounds(); return true }
+          const changed = applyViewPose(camera, controls.target, pose)
+          if (changed) controls.update()
+          return changed
+        },
+        getPose() {
+          return cameraPose(
+            camera, controls.target, renderer.domElement.getBoundingClientRect())
+        },
       }
     }
 
@@ -591,6 +608,35 @@ const Viewer = forwardRef(function Viewer(
         x: rect.left + (v.x * 0.5 + 0.5) * rect.width,
         y: rect.top + (-v.y * 0.5 + 0.5) * rect.height,
       }
+    },
+    // --- W3 shared-shell surface (math in viewerMath.js, node-tested) -------
+    // Client pixel -> drawing-plane world point ({x,y} or null). The status
+    // bar's cursor readout calls this from a rAF DOM-write path: no React
+    // state, no allocation beyond the helper's own vectors.
+    unproject: (clientX, clientY) => {
+      const s = stateRef.current
+      if (!s) return null
+      return unprojectClientToPlane(
+        s.camera, s.renderer.domElement.getBoundingClientRect(), clientX, clientY)
+    },
+    // Snap the view: 'home' refits; {center?, zoom?} recenters preserving the
+    // camera tilt. Snaps are instant by design — reduced-motion parity needs
+    // no branch because there is no animation to suppress.
+    setView: (pose) => {
+      const s = stateRef.current
+      if (!s) return false
+      if (pose === 'home') { s.fitToBounds(); return true }
+      const changed = applyViewPose(s.camera, s.controls.target, pose)
+      if (changed) s.controls.update()
+      return changed
+    },
+    // Camera pose as plain data (position/target/zoom/near/far/worldPerPixel)
+    // or null before layout — the scale readout's input.
+    getPose: () => {
+      const s = stateRef.current
+      if (!s) return null
+      return cameraPose(
+        s.camera, s.controls.target, s.renderer.domElement.getBoundingClientRect())
     },
   }), [])
 
