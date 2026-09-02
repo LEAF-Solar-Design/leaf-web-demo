@@ -78,6 +78,33 @@ def test_flag_off_refuses_even_with_a_healthy_source(monkeypatch):
                                "project_id": PROJECT, "revision": REVISION}
 
 
+def test_absent_env_defaults_to_refused(monkeypatch):
+    # The DEPLOYED default: the env var is ABSENT (no task-def/terraform sets it).
+    # It must default OFF -> refused, so a missing config can never turn the
+    # surface on. Pins the default="" in os.environ.get(FLAG_IOS_SURFACE, "").
+    monkeypatch.delenv("LEAF_IOS_SURFACE_ENABLED", raising=False)
+    router.set_contract_source(lambda scope: _contract())
+    response = _get(_client())
+    assert response.status_code == 404
+    assert response.json()["reason"] == "ios_surface_disabled"
+
+
+@pytest.mark.parametrize("value,is_on", [
+    ("1", True), ("true", True), ("TRUE", True), ("yes", True), ("on", True),
+    ("  1  ", True), ("0", False), ("false", False), ("", False), ("nope", False),
+])
+def test_flag_vocabulary_is_pinned(monkeypatch, value, is_on):
+    # Lock the exact accepted vocabulary + whitespace/case handling so a future
+    # edit to ios_surface_enabled() cannot silently widen or narrow it.
+    monkeypatch.setenv("LEAF_IOS_SURFACE_ENABLED", value)
+    router.set_contract_source(lambda scope: _contract())
+    response = _get(_client())
+    if is_on:
+        assert response.status_code == 200 and response.json()["status"] == "available"
+    else:
+        assert response.status_code == 404 and response.json()["reason"] == "ios_surface_disabled"
+
+
 def test_reads_only_readiness_build_stage_and_receipt_id_and_drops_unknown_fields():
     router.set_contract_source(lambda scope: _contract(
         extra_debug_info="drop-me",
