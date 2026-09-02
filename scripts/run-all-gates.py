@@ -738,6 +738,14 @@ def build_suites() -> List[Suite]:
         Suite("server-ops-operator-boundary",
               "server tests/test_ops_operator_boundary.py", "pytest", SERVER,
               _py_pytest("tests/test_ops_operator_boundary.py"), 3),
+        # The other half of the scoreboard's honesty: the swallowed OSError in
+        # agent_ledger that the join above could not see through. Covers the two
+        # surfaces #865 did not own -- GET /api/usage's agent block and the ops
+        # per-tenant rollup -- in both directions (unreadable -> unknown,
+        # ABSENT -> a real zero). Measured on this tree 2026-09-01: 8.
+        Suite("server-agent-ledger-unreadable",
+              "server tests/test_agent_ledger_unreadable.py", "pytest", SERVER,
+              _py_pytest("tests/test_agent_ledger_unreadable.py"), 8),
         # P2 telemetry (waves A + B). Floors are the measured local executed
         # counts on 2026-08-04; neither file was registered when it landed,
         # which made the whole telemetry suite invisible to PR CI (review

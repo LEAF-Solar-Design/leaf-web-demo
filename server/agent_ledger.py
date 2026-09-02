@@ -26,7 +26,7 @@ import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 SERVER_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SERVER_DIR.parent
@@ -79,6 +79,27 @@ def append(record: Dict[str, Any], *, path: Optional[Path] = None) -> None:
         print(f"[leaf-agent] ledger append failed: {exc}", file=sys.stderr, flush=True)
 
 
+def _read_lines(target: Path, *, raise_on_read_error: bool) -> List[str]:
+    """Ledger lines, preserving the split every reader of this file depends on.
+
+    A MISSING ledger is a real zero: no turn was ever recorded. A ledger that
+    is PRESENT but unreadable (permissions, truncation, a store that is down)
+    is UNKNOWN. Collapsing the second into the first reports a confident zero
+    over a failed read, which is the one reading that makes the most expensive
+    profile look idle. Strict callers opt in and map the OSError onto their own
+    unknown; the default stays lenient because a metering read must never fail
+    a request the tenant already paid for.
+    """
+    if not target.exists():
+        return []
+    try:
+        return target.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        if raise_on_read_error:
+            raise
+        return []
+
+
 def _bucket() -> Dict[str, Any]:
     return {"turns": 0, "cost_tokens": 0, "usd_est": 0.0}
 
@@ -95,11 +116,19 @@ def _accumulate(bucket: Dict[str, Any], entry: Dict[str, Any]) -> None:
         pass
 
 
-def aggregate(tenant_id: str, *, path: Optional[Path] = None) -> Dict[str, Any]:
+def aggregate(
+    tenant_id: str, *, path: Optional[Path] = None,
+    raise_on_read_error: bool = False,
+) -> Dict[str, Any]:
     """The /api/usage `agent` block for a tenant: today (UTC date) + cycle
     (current UTC calendar month) turn counts, cost-tokens, and USD estimate.
     Missing/empty ledger -> zeros, never an error. `estimate_basis` is always
-    "self_metered" — there is no balance API to reconcile against."""
+    "self_metered" — there is no balance API to reconcile against.
+
+    A ledger that is present but UNREADABLE is not the same zero. Callers that
+    render the number to a human pass ``raise_on_read_error`` and map the
+    OSError to their own unknown, exactly as ``tenants_seen`` does; see
+    ``_read_lines`` for why the two must not collapse."""
     if path is None and _using_postgres():
         return _pg_store().aggregate_usage(str(tenant_id))
     target = path or ledger_path()
@@ -108,26 +137,21 @@ def aggregate(tenant_id: str, *, path: Optional[Path] = None) -> Dict[str, Any]:
     cycle_prefix = now.strftime("%Y-%m")
     today = _bucket()
     cycle = _bucket()
-    if target.exists():
+    for line in _read_lines(target, raise_on_read_error=raise_on_read_error):
+        line = line.strip()
+        if not line:
+            continue
         try:
-            lines = target.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            lines = []
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if entry.get("kind") != "turn" or entry.get("tenant_id") != str(tenant_id):
-                continue
-            ts = str(entry.get("ts") or "")
-            if ts.startswith(cycle_prefix):
-                _accumulate(cycle, entry)
-            if ts.startswith(today_prefix):
-                _accumulate(today, entry)
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("kind") != "turn" or entry.get("tenant_id") != str(tenant_id):
+            continue
+        ts = str(entry.get("ts") or "")
+        if ts.startswith(cycle_prefix):
+            _accumulate(cycle, entry)
+        if ts.startswith(today_prefix):
+            _accumulate(today, entry)
     return {"today": today, "cycle": cycle, "estimate_basis": "self_metered"}
 
 
@@ -142,15 +166,7 @@ def tenants_seen(
         return _pg_store().usage_tenants()
     target = path or ledger_path()
     out: Dict[str, Dict[str, Any]] = {}
-    if not target.exists():
-        return out
-    try:
-        lines = target.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        if raise_on_read_error:
-            raise
-        return out
-    for line in lines:
+    for line in _read_lines(target, raise_on_read_error=raise_on_read_error):
         line = line.strip()
         if not line:
             continue
