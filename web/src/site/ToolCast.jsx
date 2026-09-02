@@ -28,12 +28,10 @@ import DrawingUploadControl from '../components/DrawingUploadControl.jsx'
 import JobRail from '../components/JobRail.jsx'
 import Legend from '../components/Legend.jsx'
 import ProjectSwitcher from '../components/ProjectSwitcher.jsx'
-import ProductSurfaceTabs, { AccountSignOut, ProductSurfaceFrame } from '../components/ProductSurfaceTabs.jsx'
+import ProductSurfaceTabs, { ProductSurfaceFrame } from '../components/ProductSurfaceTabs.jsx'
 import SelectionReadout from '../components/SelectionReadout.jsx'
 import RoutePanel from '../components/RoutePanel.jsx'
 import ResultPanel from '../components/ResultPanel.jsx'
-import ScopedToolPanel from '../components/ScopedToolPanel.jsx'
-import { LOCKED_SCOPE_ATTR, scopeFromEntitlements } from './tenantScope.js'
 import QuotaCard from '../components/QuotaCard.jsx'
 import DegradedBanner from '../components/DegradedBanner.jsx'
 import Toast from '../components/Toast.jsx'
@@ -787,20 +785,6 @@ export default function ToolCast({
     routeError,
     agentBanner,
   } = catalog.state
-  // Tenant tool scope (server/tenant_scope.py): a scoped tenant is LOCKED to a
-  // single-purpose app. The server already narrowed the catalog; here the
-  // shell drops the catalog/author/project chrome, the product-surface tabs,
-  // the marketing exits, and swaps the conversational panel for one Run
-  // button per scoped tool. Unscoped tenants render byte-identically.
-  const tenantScope = useMemo(() => scopeFromEntitlements(platform.entitlements), [platform.entitlements])
-  const scopeLocked = tenantScope !== null
-  const visibleSurface = scopeLocked ? 'cad' : activeSurface
-  useEffect(() => {
-    if (!scopeLocked || activeSurface === 'cad') return
-    const search = searchForProductSurface(window.location.search, 'cad')
-    window.history.replaceState({}, '', `${window.location.pathname}${search}${window.location.hash}`)
-    setActiveSurface('cad')
-  }, [activeSurface, scopeLocked])
   useEffect(() => {
     if (capabilityCatalog.families.length === 0) return
     const catalogKey = `${capabilityCatalog.source || 'unknown'}:${capabilityCatalog.families.map((family) => family.family_id).join(',')}`
@@ -1302,7 +1286,7 @@ export default function ToolCast({
     setIosShip(emptyIosShipReadiness('loading', null, projectId || null))
     setIosShipExecution(null)
     setIosShipReceipt(null)
-    if (visibleSurface !== 'ios' || !signedIn || !projectId || !revision) {
+    if (activeSurface !== 'ios' || !signedIn || !projectId || !revision) {
       setIosShip(emptyIosShipReadiness('no_approved_project_revision', null, projectId || null))
       return undefined
     }
@@ -1314,7 +1298,7 @@ export default function ToolCast({
       if (!next.launchable) setIosShipError(next.setupAction || next.reason || null)
     })
     return () => { live = false }
-  }, [visibleSurface, platformSession.status, workspace.canonicalVersionId, workspace.openProjectId])
+  }, [activeSurface, platformSession.status, workspace.canonicalVersionId, workspace.openProjectId])
   // Consume-only iOS readiness (ios_surface, cards D-1..D-4): one point-in-time
   // read of GET /api/ios-surface/status per (project, revision), distinct from the
   // ios_ship LAUNCH lane above (this one only ever reads). `enabled` mirrors the
@@ -1328,7 +1312,7 @@ export default function ToolCast({
     workspace.openProjectId,
     workspace.canonicalVersionId,
     {
-      enabled: ENV_IOS_SURFACE && visibleSurface === 'cad' && leftView === 'workspace'
+      enabled: ENV_IOS_SURFACE && activeSurface === 'cad' && leftView === 'workspace'
         && !PUBLIC_DEMO && !transportMock && canOperate,
     },
   )
@@ -1361,7 +1345,7 @@ export default function ToolCast({
   useEffect(() => {
     const projectId = workspace.openProjectId
     const executionId = iosShipExecution?.execution_id
-    if (visibleSurface !== 'ios' || !projectId || !executionId) return undefined
+    if (activeSurface !== 'ios' || !projectId || !executionId) return undefined
     let live = true
     let timer = null
     const poll = async () => {
@@ -1386,7 +1370,7 @@ export default function ToolCast({
       timer = setTimeout(poll, 2000)
     }
     return () => { live = false; if (timer) clearTimeout(timer) }
-  }, [visibleSurface, iosShipExecution?.execution_id, iosShipExecution?.receipt_id,
+  }, [activeSurface, iosShipExecution?.execution_id, iosShipExecution?.receipt_id,
     iosShipExecution?.status, workspace.openProjectId])
 
   const statusClass = phase === 'failed' ? 'red' : (phase === 'proposal' || phase === 'empty' ? 'hollow' : 'live')
@@ -1421,18 +1405,16 @@ export default function ToolCast({
 
   return (
     <>
-      {!scopeLocked && (
-        <ProductSurfaceTabs
-          activeSurface={visibleSurface}
-          states={productStates}
-          onSelect={selectProductSurface}
-          workspaceProject={workspaceProjectState}
-          catalog={capabilityCatalog}
-          signedIn={isSignedIn()}
-          onSignOut={platformSession.actions.signOut}
-        />
-      )}
-      {visibleSurface === 'cad' ? (
+            <ProductSurfaceTabs
+        activeSurface={activeSurface}
+        states={productStates}
+        onSelect={selectProductSurface}
+        workspaceProject={workspaceProjectState}
+        catalog={capabilityCatalog}
+        signedIn={isSignedIn()}
+        onSignOut={platformSession.actions.signOut}
+      />
+      {activeSurface === 'cad' ? (
       <>
       <div className="tc-topcluster tc-topcluster-product" data-cast="tool" style={{ '--rank': 3 }}>
         {projectSlot}
@@ -1451,13 +1433,7 @@ export default function ToolCast({
             {focusView ? 'Show controls' : 'Focus 3D'}
           </button>
         )}
-        <AccountSignOut
-          signedIn={scopeLocked && isSignedIn()}
-          onSignOut={platformSession.actions.signOut}
-        />
-        {!scopeLocked && (
-          <button type="button" className="tc-back" onClick={() => navigate('/')}>Back to the site</button>
-        )}
+                <button type="button" className="tc-back" onClick={() => navigate('/')}>Back to the site</button>
         {LIVE_TOUR_REQUESTED && sessionReady && !tourOn && shouldStartTour(window.location.search) && (
           <button
             type="button"
@@ -1470,23 +1446,19 @@ export default function ToolCast({
             }}
           >Restart walk</button>
         )}
-        {!scopeLocked && <span className="key">Esc</span>}
+        <span className="key">Esc</span>
       </div>
 
       <aside className={`tc-rail tc-rail-l tc-operator-rail${focusView ? ' tc-focus-hidden' : ''}`} aria-label="Workspace controls" data-cast="tool" data-controller-instance={instanceId} data-checkout-instance={checkout.instanceId} style={{ '--rank': 0 }} data-testid="operator-surface">
         <div className="tc-rail-head">
-          <span className="tc-rail-title" {...(scopeLocked ? { [LOCKED_SCOPE_ATTR]: '1' } : {})}>{scopeLocked ? tenantScope.label : 'Workspace'}</span>
-          <span className="tc-rail-sub">{scopeLocked ? 'your tools' : 'request and tools'}</span>
+          <span className="tc-rail-title">Workspace</span>
+          <span className="tc-rail-sub">request and tools</span>
         </div>
         <div className="tc-rail-tabs" role="tablist" aria-label="Workspace panels" onKeyDown={moveRovingTab}>
           <button id="workspace-tab-operator" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'operator' ? 0 : -1} aria-selected={leftView === 'operator'} onClick={() => setLeftView('operator')}>Operator</button>
-          {!scopeLocked && (
-            <>
-              <button id="workspace-tab-catalog" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'catalog' ? 0 : -1} aria-selected={leftView === 'catalog'} disabled={!sessionReady} onClick={() => setLeftView('catalog')}>Catalog <span>{tools.length}</span></button>
-              <button id="workspace-tab-author" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'author' ? 0 : -1} aria-selected={leftView === 'author'} disabled={!canOperate} onClick={() => setLeftView('author')}>Author</button>
-              <button id="workspace-tab-workspace" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'workspace' ? 0 : -1} aria-selected={leftView === 'workspace'} disabled={!canOperate} onClick={() => setLeftView('workspace')}>Project</button>
-            </>
-          )}
+                    <button id="workspace-tab-catalog" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'catalog' ? 0 : -1} aria-selected={leftView === 'catalog'} disabled={!sessionReady} onClick={() => setLeftView('catalog')}>Catalog <span>{tools.length}</span></button>
+          <button id="workspace-tab-author" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'author' ? 0 : -1} aria-selected={leftView === 'author'} disabled={!canOperate} onClick={() => setLeftView('author')}>Author</button>
+          <button id="workspace-tab-workspace" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'workspace' ? 0 : -1} aria-selected={leftView === 'workspace'} disabled={!canOperate} onClick={() => setLeftView('workspace')}>Project</button>
         </div>
         <div id="workspace-tabpanel" className="tc-rail-body" role="tabpanel" aria-labelledby={`workspace-tab-${leftView}`} tabIndex={0}>
           {leftView === 'operator' && (PUBLIC_DEMO ? (
@@ -1510,14 +1482,6 @@ export default function ToolCast({
                 onDemo={() => { window.location.href = '/try?demo=1' }}
               />
             </>
-          ) : sessionId && scopeLocked ? (
-            <ScopedToolPanel
-              scope={tenantScope}
-              tools={tools}
-              hasDrawing={hasDrawing}
-              busy={busy || jobRunning || routing}
-              onRun={(tool) => dispatchRequest(`/${tool.name}`)}
-            />
           ) : sessionId ? (
             <ConversePanel
               sessionId={sessionId}
@@ -2093,7 +2057,7 @@ export default function ToolCast({
         />
       )}
       </>
-      ) : visibleSurface === 'ios' ? (
+      ) : activeSurface === 'ios' ? (
       <>
       <div className="tc-topcluster tc-topcluster-product" data-cast="tool" style={{ '--rank': 3 }}>
         {projectSlot}
@@ -2101,9 +2065,7 @@ export default function ToolCast({
           <span className={`dot ${iosShip.launchable ? 'live' : 'hollow'}`} />
           {iosShip.launchable ? 'Ship lane ready' : 'Ship lane setup required'}
         </span>
-        {!scopeLocked && (
-          <button type="button" className="tc-back" onClick={() => navigate('/')}>Back to the site</button>
-        )}
+                <button type="button" className="tc-back" onClick={() => navigate('/')}>Back to the site</button>
         <span className="key">Esc</span>
       </div>
       <aside className="tc-rail tc-rail-l tc-operator-rail" aria-label="iOS ship lane" data-cast="tool" data-testid="ios-ship-lane" style={{ '--rank': 0 }}>
@@ -2158,7 +2120,7 @@ export default function ToolCast({
       </>
       ) : (
         <ProductSurfaceFrame
-          activeSurface={visibleSurface}
+          activeSurface={activeSurface}
           states={productStates}
           catalog={capabilityCatalog}
           catalogError={catalogError}

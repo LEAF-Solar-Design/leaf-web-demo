@@ -88,12 +88,66 @@ def test_appbundles_entry_is_never_a_placeholder(monkeypatch):
     assert "$(nickname)" not in json.dumps(spec)
 
 
-def test_live_script_guard_accepts_an_appbundle_tool(monkeypatch):
-    monkeypatch.setenv("APS_NICKNAME", "nick")
-    import broker  # noqa: PLC0415
+class _NicknameResponse:
+    text = '"real-owner"'
+
+    @staticmethod
+    def raise_for_status():
+        return None
+
+
+def _cold_nickname_client(monkeypatch):
+    """Load the real client with no configured or cached nickname (#894: the live callers
+    must resolve the owner through the one lookup before any Activity is built)."""
     da = _load_real_da_client()
-    da.nickname._v = "nick"
+    monkeypatch.delenv("APS_NICKNAME", raising=False)
+    if hasattr(da.nickname, "_v"):
+        delattr(da.nickname, "_v")
+    calls = []
+    monkeypatch.setattr(da, "_auth_headers", lambda: {"Authorization": "Bearer test"})
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return _NicknameResponse()
+
+    monkeypatch.setattr(da.requests, "get", fake_get)
+    return da, calls
+
+
+def test_live_script_guard_accepts_an_appbundle_tool(monkeypatch):
+    import broker  # noqa: PLC0415
+    da, calls = _cold_nickname_client(monkeypatch)
     assert broker._live_script_is_nonempty(_tool(), da) is True
+    assert calls[0][0].endswith("/forgeapps/me")
+    assert da.nickname._v == "real-owner"
+    spec = da.tool_activity_spec(_tool())
+    assert spec["appbundles"] == ["real-owner.LeafSampleTools+prod"]
+    assert "$(nickname)" not in json.dumps(spec)
+
+
+def test_tool_loader_live_path_resolves_nickname_before_activity(monkeypatch):
+    import tool_loader  # noqa: PLC0415
+    da, calls = _cold_nickname_client(monkeypatch)
+    monkeypatch.setattr(tool_loader, "validate_params", lambda _tool, _params: [])
+
+    class LiveDa:
+        spec = None
+
+        def ensure_tool_activity(self, tool):
+            self.spec = da.tool_activity_spec(tool)
+
+        @staticmethod
+        def run_tool(_dwg_path, _tool, _params):
+            return {"ok": True, "result": {}}
+
+    live_da = LiveDa()
+    result = tool_loader.run_tool_dynamic(
+        _tool(), {}, {}, aps_live=True, da=live_da, dwg_path="input.dwg"
+    )
+    assert result["ok"] is True
+    assert calls[0][0].endswith("/forgeapps/me")
+    assert live_da.spec["appbundles"] == ["real-owner.LeafSampleTools+prod"]
+    assert "$(nickname)" not in json.dumps(live_da.spec)
 
 
 @pytest.mark.parametrize("bad", [
