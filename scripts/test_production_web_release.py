@@ -428,6 +428,7 @@ def test_workflow_is_protected_prebuilt_two_phase_and_receipted():
     ).read_text(encoding="utf-8")
     for expected in (
         "refs/heads/main",
+        "timeout-minutes: 60",
         "actions: read",
         "issues: read",
         "collaborators/$OPERATOR/permission",
