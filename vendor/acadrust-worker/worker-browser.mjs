@@ -60,12 +60,17 @@ function isByteArray(value) {
 }
 
 function projectEntities(doc) {
-  // The wrapper's editableEntities() already returns plain JSON-compatible
-  // objects; re-key `index` as the string id the surface's list keys on.
+  // The wrapper's editableEntities() returns plain JSON-compatible objects.
+  // The id the surface keys on is the engine HANDLE: the one identity that
+  // survives a write/re-parse. It used to be the document-order index, and
+  // a delete renumbers: after deleting index 0 the survivor became id 0 and
+  // the selection "survived" onto a different entity (found by the W4d e2e
+  // row on the real stack). Edits still address the wrapper by index, which
+  // the worker resolves from the handle at dispatch time (entityIndex).
   return doc.editableEntities().map((entity) => ({
-    id: String(entity.index),
-    // The identity that survives a write/re-parse (an index does not).
+    id: String(entity.handle),
     handle: entity.handle,
+    index: entity.index,
     type: entity.type,
     layer: entity.layer,
     closed: entity.closed,
@@ -94,10 +99,16 @@ function refused(op, reason) {
   return { type: 'editApplied', op, ok: false, reason }
 }
 
-function entityIndex(payload) {
+// The wrapper addresses entities by CURRENT document-order index; the
+// surface addresses them by handle. Resolve at dispatch time against the
+// held document, so a renumbering edit can never redirect the next edit onto
+// a neighbour. Bounded by the entity count; null for anything unknown.
+function entityIndex(doc, payload) {
   const raw = payload?.entityId
-  const index = Number.parseInt(String(raw), 10)
-  return Number.isInteger(index) && index >= 0 ? index : null
+  if (raw === undefined || raw === null || raw === '') return null
+  const wanted = String(raw)
+  const hit = doc.editableEntities().find((entity) => String(entity.handle) === wanted)
+  return hit && Number.isInteger(hit.index) && hit.index >= 0 ? hit.index : null
 }
 
 // W4d Draw group: a create op takes no entityId; each maps to ONE wrapper
@@ -131,7 +142,7 @@ async function applyEdit(engine, message) {
     }
     if (!Number.isFinite(createdHandle)) return refused(op, 'create_returned_no_handle')
   } else {
-    const index = entityIndex(payload)
+    const index = entityIndex(doc, payload)
     if (index === null) return refused(op, 'bad_entity_id')
     try {
       if (op === 'delete') doc.deleteEntity(index)

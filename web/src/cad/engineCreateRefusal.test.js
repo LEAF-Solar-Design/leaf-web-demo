@@ -49,15 +49,23 @@ const WORKER_PATH = captureWorkerPath()
 const SCRIPT = [
   'import { pathToFileURL } from "node:url"',
   'const { handleMessage } = await import(pathToFileURL(process.argv[1]).href)',
-  'const doc = { editableEntities: () => [{ index: 0, handle: 7, type: "LINE", layer: "0", closed: false, editable: true, vertices: [[0,0],[1,1]] }] }',
+  'const calls = []',
+  'const doc = {',
+  '  editableEntities: () => [',
+  '    { index: 0, handle: 7, type: "LINE", layer: "0", closed: false, editable: true, vertices: [[0,0],[1,1]] },',
+  '    { index: 1, handle: 9, type: "LINE", layer: "0", closed: false, editable: true, vertices: [[2,2],[3,3]] },',
+  '  ],',
+  '  deleteEntity: (index) => { calls.push(["deleteEntity", index]) },',
+  '}',
   'const engine = { parseDxf: () => doc, writeDxf: () => new Uint8Array([48, 10]) }',
   'const loaded = await handleMessage({ type: "loadDocument", documentId: "x.dxf", bytes: new Uint8Array([48]) }, engine)',
   'const out = {}',
   'for (const op of ["createLine", "createCircle", "createArc", "createPolyline"]) {',
   '  out[op] = await handleMessage({ type: "applyEdit", op, payload: { x1: 0, y1: 0, x2: 1, y2: 1 } }, engine)',
   '}',
-  'out.edit = await handleMessage({ type: "applyEdit", op: "delete", payload: { entityId: "0" } }, { ...engine, parseDxf: () => ({ ...doc, deleteEntity: () => {} }) })',
-  'process.stdout.write(JSON.stringify({ loaded: loaded.type, out }))',
+  'out.edit = await handleMessage({ type: "applyEdit", op: "delete", payload: { entityId: "9" } }, engine)',
+  'out.unknown = await handleMessage({ type: "applyEdit", op: "delete", payload: { entityId: "1" } }, engine)',
+  'process.stdout.write(JSON.stringify({ loaded: loaded, out, calls }))',
 ].join('\n')
 
 describe('the browser worker refuses create ops an engine cannot perform', () => {
@@ -69,8 +77,10 @@ describe('the browser worker refuses create ops an engine cannot perform', () =>
       encoding: 'utf8',
       timeout: 60_000,
     })
-    const { loaded, out } = JSON.parse(raw)
-    expect(loaded).toBe('documentLoaded')
+    const { loaded, out, calls } = JSON.parse(raw)
+    expect(loaded.type).toBe('documentLoaded')
+    // The surface's ids are HANDLES, not indexes.
+    expect(loaded.entities.map((e) => e.id)).toEqual(['7', '9'])
     for (const op of ['createLine', 'createCircle', 'createArc', 'createPolyline']) {
       expect(out[op]).toEqual({ type: 'editApplied', op, ok: false, reason: `engine_lacks_create:${op}` })
     }
@@ -78,6 +88,11 @@ describe('the browser worker refuses create ops an engine cannot perform', () =>
     // here (a scripted parse), but the EDIT path reached the wrapper method
     // rather than a create refusal: the two dispatch arms are distinct.
     expect(out.edit.op).toBe('delete')
-    expect(out.edit.reason ?? '').not.toMatch(/engine_lacks_create/)
+    expect(out.edit.ok).toBe(true)
+    // Handle 9 resolved to index 1 at dispatch time: a renumbering edit can
+    // never redirect the next edit onto a neighbour.
+    expect(calls).toEqual([['deleteEntity', 1]])
+    // "1" is a stale INDEX, not a handle: refused, never a guess.
+    expect(out.unknown).toEqual({ type: 'editApplied', op: 'delete', ok: false, reason: 'bad_entity_id' })
   })
 })
