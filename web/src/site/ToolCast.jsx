@@ -99,6 +99,10 @@ import { shouldStartTour } from '../demo/tourEntry.js'
 import * as mockVersions from '../mock/mockVersions.js'
 
 const CAT_REQUEST = 'Rearrange the existing panels in this drawing into the shape of a sitting cat. Preserve every panel, create a new version, and show me the proposed change before anything runs.'
+// Catalog is browsable with no drawing open (rail row B2: the rail advertises
+// "44 tools" before a drawing exists, so the tab must let a signed-in user look);
+// only running a tool still needs one.
+const CATALOG_NEEDS_DRAWING_NOTE = 'Upload a DWG or DXF to run this tool.'
 const PROOF_MODE =
   import.meta.env.VITE_CAT_PROOF === '1' ||
   new URLSearchParams(window.location.search).get('proof') === '1'
@@ -1466,7 +1470,7 @@ export default function ToolCast({
           <button id="workspace-tab-operator" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'operator' ? 0 : -1} aria-selected={leftView === 'operator'} onClick={() => setLeftView('operator')}>Operator</button>
           {!scopeLocked && (
             <>
-              <button id="workspace-tab-catalog" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'catalog' ? 0 : -1} aria-selected={leftView === 'catalog'} disabled={!canOperate} onClick={() => setLeftView('catalog')}>Catalog <span>{tools.length}</span></button>
+              <button id="workspace-tab-catalog" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'catalog' ? 0 : -1} aria-selected={leftView === 'catalog'} disabled={!sessionReady} onClick={() => setLeftView('catalog')}>Catalog <span>{tools.length}</span></button>
               <button id="workspace-tab-author" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'author' ? 0 : -1} aria-selected={leftView === 'author'} disabled={!canOperate} onClick={() => setLeftView('author')}>Author</button>
               <button id="workspace-tab-workspace" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'workspace' ? 0 : -1} aria-selected={leftView === 'workspace'} disabled={!canOperate} onClick={() => setLeftView('workspace')}>Project</button>
             </>
@@ -1540,6 +1544,8 @@ export default function ToolCast({
               writeEntitled={writeEntitled}
               writeLocked={writeLocked}
               writeLockNote={writeLockNote}
+              runDisabled={!hasDrawing}
+              runDisabledNote={CATALOG_NEEDS_DRAWING_NOTE}
             />
           )}
           {leftView === 'workspace' && (

@@ -17,6 +17,8 @@ export default function CapabilityCatalog({
   writeLocked,
   writeLockNote = null,
   writeEntitled,
+  runDisabled = false,
+  runDisabledNote = null,
 }) {
   const families = catalog?.families || []
   const capabilityCount = families.reduce(
@@ -48,6 +50,8 @@ export default function CapabilityCatalog({
             writeLocked={writeLocked}
             writeLockNote={writeLockNote}
             writeEntitled={writeEntitled}
+            runDisabled={runDisabled}
+            runDisabledNote={runDisabledNote}
           />
         </div>
       )}
@@ -94,6 +98,8 @@ export default function CapabilityCatalog({
                   writeLocked={writeLocked}
                   writeLockNote={writeLockNote}
                   writeEntitled={writeEntitled}
+                  runDisabled={runDisabled}
+                  runDisabledNote={runDisabledNote}
                 />
               </div>
             )}
