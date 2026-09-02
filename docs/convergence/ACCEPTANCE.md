@@ -191,8 +191,10 @@ resolving inside the ground); the small-screen scroll surface (<=980px: the
 shell scrolls, the ground stays pinned). Rollback: baseline storage keys are
 captured on a rail-OFF boot BEFORE the studio session, the studio session is
 interacted with (canvas click + Esc), then on → off must introduce no key at
-all (the only named exclusion is the old shell's per-event telemetry caps,
-`leaf.telemetry.cap.*`, which both shells write identically).
+all (the only named exclusions are telemetry.js's own lazily written keys,
+`leaf.telemetry.session` and the per-event `leaf.telemetry.cap.*` counters,
+which both shells write identically on the first tracked event; the spec's
+predicate names exactly those two shapes, never an open prefix).
 
 Deliberately deferred, with owners:
 

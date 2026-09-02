@@ -927,7 +927,14 @@
 .studio-shell .app .tc-product-tabs [role="tab"]:hover { color: rgba(240, 242, 240, .98); background: rgba(240, 242, 240, .08); }
 .studio-shell .app .tc-product-tabs [role="tab"][aria-selected="true"] { color: var(--foreground); background: var(--card); }
 .studio-shell .app .tc-product-tabs [role="tab"] small { color: rgba(240, 242, 240, .62); }
+/* The state labels' paper-ramp status colors (styles.css, same (0,4,1)
+   specificity, later in sheet order) would win the tie: pin them one
+   attribute higher with dark-ground-safe ink. */
+.studio-shell .app .tc-product-tabs [role="tab"] small[data-state="available"] { color: #7fd6a6; }
+.studio-shell .app .tc-product-tabs [role="tab"] small[data-state="unavailable"] { color: #f0997b; }
 .studio-shell .app .tc-product-tabs [role="tab"][aria-selected="true"] small { color: var(--muted-2); }
+.studio-shell .app .tc-product-tabs [role="tab"][aria-selected="true"] small[data-state="available"] { color: var(--status-success); }
+.studio-shell .app .tc-product-tabs [role="tab"][aria-selected="true"] small[data-state="unavailable"] { color: var(--status-danger); }
 .studio-shell .app .tc-product-shared { color: rgba(240, 242, 240, .7); }
 .studio-shell .app .tc-continuity,
 .studio-shell .app .tc-continuity-label { color: rgba(240, 242, 240, .7); }
@@ -937,3 +944,9 @@
 /* Pre-intake and skeleton feedback render on the bare ground. */
 .studio-shell .viewer-wrap .loading-line,
 .studio-ground .loading-line { color: rgba(240, 242, 240, .8); }
+/* Error copy that used to ride the card's paper: the viewer-refresh
+   inline error and the pane-failure title/reason inside the transparent
+   card and wrap. */
+.studio-shell .workspace-card .inline-error { color: rgba(240, 242, 240, .92); }
+.studio-shell .viewer-wrap .pane-fail-title { color: rgba(240, 242, 240, .96); }
+.studio-shell .viewer-wrap .pane-fail-reason { color: rgba(240, 242, 240, .72); }

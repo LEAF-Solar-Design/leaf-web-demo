@@ -42,8 +42,9 @@ async function expectOneCanvasIn(page, containerSelector) {
 // below performs the SAME interaction as the studio walk anyway, so the diff
 // is symmetric even without the exclusion. Anything else that grows during
 // or after a studio session is stale storage the rollback contract forbids.
+const TELEMETRY_OWNED = (k) => k === 'leaf.telemetry.session' || k.startsWith('leaf.telemetry.cap.')
 function residue(baseline, keys) {
-  return keys.filter((k) => !baseline.includes(k) && !k.startsWith('leaf.telemetry.'))
+  return keys.filter((k) => !baseline.includes(k) && !TELEMETRY_OWNED(k))
 }
 
 const storageKeys = (page) => page.evaluate(() => Object.keys({ ...localStorage, ...sessionStorage }))
