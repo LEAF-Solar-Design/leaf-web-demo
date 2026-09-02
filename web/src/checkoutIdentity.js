@@ -525,6 +525,22 @@ export function hasHolder(checkout) {
 }
 
 /**
+ * normalizeCheckout(checkout) -> the lock record, or null when it names nobody.
+ *
+ * GET /versions answers `checkout: {}` for a drawing whose manifest carries an
+ * empty lock record, and `{}` is TRUTHY. Every reader that stored
+ * `response.checkout || null` therefore kept an object that `hasHolder` then
+ * has to reject again, one reader at a time, and any reader that forgets reads
+ * "a lock exists". Normalize once, at the boundary where the answer arrives, so
+ * "no holder in the live answer" and "no lock" are the same value: a refresh
+ * that comes back holderless REPLACES a cached holder with null rather than
+ * layering an empty object over it.
+ */
+export function normalizeCheckout(checkout) {
+  return hasHolder(checkout) ? checkout : null
+}
+
+/**
  * looksStale(checkout, nowMs?) -> should we OFFER to take this lock?
  *
  * The browser clock is not an authority on whether a lease has elapsed, and an
