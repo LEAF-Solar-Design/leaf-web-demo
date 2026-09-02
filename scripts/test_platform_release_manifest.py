@@ -158,6 +158,11 @@ def _surface_repository(tmp_path: Path) -> tuple[Path, str]:
         encoding="utf-8",
     )
     (repo / "deploy" / "nginx.conf").write_text("server {}\n", encoding="utf-8")
+    # W3 one-shell rail: the entrypoint drop-in joined the web surface roster
+    # (it rewrites runtime-flags.js at container boot), so the synthetic repo
+    # must carry it for its fingerprint to build.
+    (repo / "deploy" / "write-runtime-flags.sh").write_text(
+        "#!/bin/sh\n# stub\n", encoding="utf-8")
     (repo / "web" / "index.html").write_text("leaf\n", encoding="utf-8")
     # Card F-3: the web surface roster gained the vendored engine wrapper and
     # the stage script (both compiled into the image), so the synthetic repo

@@ -56,6 +56,7 @@ import usePlatformTrustController from '../controllers/platform/usePlatformTrust
 import useWorkspaceController from '../controllers/workspace/useWorkspaceController.js'
 import useSessionOrgAdoption from '../controllers/workspace/useSessionOrgAdoption.js'
 import useCheckoutController from '../controllers/checkout/useCheckoutController.js'
+import { checkoutScopeDrawingId } from '../controllers/checkout/createCheckoutController.js'
 import useDrawingUploadController from '../controllers/upload/useDrawingUploadController.js'
 import useSessionController from '../controllers/session/useSessionController.js'
 import { selectCurrentProjectName } from '../controllers/workspace/createWorkspaceController.js'
@@ -83,12 +84,12 @@ import {
   makeIosShipLaunchKey,
   requestIosShipLaunch,
 } from './iosShipReadiness.js'
-import { authConfigured, isSignedIn, login } from '../auth.js'
+import { authConfigured, isAuthRedirectCallback, isSignedIn, login } from '../auth.js'
 import { agentBannerFor as agentBannerForKind, OPERATOR_AGENT_BANNER_COPY } from '../lib/agentBanner.js'
 import { moveRovingTab } from '../lib/roving.js'
 import { selectEntity } from '../lib/selectEntity.js'
 import { countEntitiesByLayer } from '../lib/layerCounts.js'
-import { claimHolderId, getSessionHolderId } from '../checkoutIdentity.js'
+import { getSessionHolderId } from '../checkoutIdentity.js'
 import DemoTour from '../demo/DemoTour.jsx'
 import DemoConversationPanel, { demoReplyFor } from '../demo/DemoConversationPanel.jsx'
 import FirstRunCoach from '../demo/FirstRunCoach.jsx'
@@ -297,12 +298,11 @@ export default function ToolCast({
   if (!runIntentStateRef.current) {
     runIntentStateRef.current = createRunIntentState(runIntentSessionRef.current)
   }
-  useEffect(() => {
-    const claim = claimHolderId({ id: checkoutHolder, onRemint: setCheckoutHolder })
-    return () => claim.stop()
-    // Claim once per runtime. A remint must not restart the claim loop.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  // W2c: the duplicate-tab claim loop moved INTO useCheckoutController, so both
+  // shells run one implementation of the holder protocol. This surface's timing
+  // is unchanged — it passes no `bootDrawingId` (the operator stage boots with
+  // no drawing until one loads or uploads), so the claim still starts at mount
+  // and the reload handoff is still bootstrapped in the authority effect.
   const catalogAdapters = useMemo(() => ({
     previewRoute: matchPrompt,
     commitDecision: (decision) => catalogDecisionRef.current?.(decision),
@@ -644,8 +644,17 @@ export default function ToolCast({
   const writeEntitled = platform.isEntitled('run_write')
   const checkout = useCheckoutController({
     mock: transportMock,
-    drawingId: drawing.drawingState?.drawing_id || null,
+    // Scope-reset contract (ACCEPTANCE, binding): a tenant switch voids the
+    // drawing identity, and the checkout scope goes with it — the version
+    // chain does NOT reset, so reading `drawingState` alone would keep
+    // addressing the previous tenant's drawing with its capability.
+    drawingId: checkoutScopeDrawingId({
+      identityDrawingId: MODE_DRAWING_ID || drawingId,
+      drawingState: drawing.drawingState,
+    }),
     holder: checkoutHolder,
+    deferForAuthCallback: isAuthRedirectCallback(),
+    onHolderRemint: setCheckoutHolder,
   })
   // Previewing an older version is a READ-ONLY view: the stage and the version
   // panel show v{n} while the head sits elsewhere, so a write tool would commit
@@ -1424,7 +1433,7 @@ export default function ToolCast({
         <span className="key">Esc</span>
       </div>
 
-      <aside className={`tc-rail tc-rail-l tc-operator-rail${focusView ? ' tc-focus-hidden' : ''}`} aria-label="Workspace controls" data-cast="tool" data-controller-instance={instanceId} style={{ '--rank': 0 }} data-testid="operator-surface">
+      <aside className={`tc-rail tc-rail-l tc-operator-rail${focusView ? ' tc-focus-hidden' : ''}`} aria-label="Workspace controls" data-cast="tool" data-controller-instance={instanceId} data-checkout-instance={checkout.instanceId} style={{ '--rank': 0 }} data-testid="operator-surface">
         <div className="tc-rail-head">
           <span className="tc-rail-title">Workspace</span>
           <span className="tc-rail-sub">request and tools</span>

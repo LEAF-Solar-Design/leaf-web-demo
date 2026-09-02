@@ -60,6 +60,7 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
     # DXF here (see guest_uploads.run_extraction).
     seen_layers: set[str] = set()
     polylines: List[Dict[str, Any]] = []
+    texts: List[Dict[str, Any]] = []
     handle_seq = 0
 
     i = 0
@@ -95,9 +96,32 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             handle_seq += 1
             _finish_entity(entity, handle_seq, layers, seen_layers, polylines)
             continue
+        if section == "ENTITIES" and code == 0 and value == "LINE":
+            # A LINE is a 2-point open polyline to the viewer and to every tool: no new
+            # intake field, the frozen §1 shape renders it as-is.
+            entity, i = _parse_line(pairs, i + 1)
+            handle_seq += 1
+            _finish_entity(entity, handle_seq, layers, seen_layers, polylines)
+            continue
+        if section == "ENTITIES" and code == 0 and value in ("TEXT", "MTEXT"):
+            entity, i = _parse_text(pairs, i + 1, value)
+            handle_seq += 1
+            if entity["text"]:
+                if not entity["handle"]:
+                    entity["handle"] = f"L{handle_seq:X}"
+                if entity["layer"] not in seen_layers:
+                    seen_layers.add(entity["layer"])
+                    layers.append(entity["layer"])
+                texts.append(entity)
+            continue
         i += 1
 
-    return {"dwg": source_name, "layers": layers, "polylines": polylines}
+    out: Dict[str, Any] = {"dwg": source_name, "layers": layers, "polylines": polylines}
+    if texts:
+        # ADDITIVE §1 field (frontend ignores unknown keys): drawing labels for tools
+        # that classify views by the text inside a frame (timber-cutlist).
+        out["texts"] = texts
+    return out
 
 
 def _finish_entity(entity: Dict[str, Any], seq: int, layers: List[str],
@@ -203,6 +227,102 @@ def _parse_polyline(pairs: List[Tuple[int, str]], i: int):
         break  # any other entity start ends this POLYLINE (missing SEQEND)
     return {"layer": layer, "closed": closed, "pts": pts,
             "xdata": None, "handle": handle}, i
+
+
+def _parse_line(pairs: List[Tuple[int, str]], i: int):
+    """LINE: layer=8, handle=5, start (10, 20, 30), end (11, 21, 31). Emitted in the
+    polyline shape (closed=False, two pts) so nothing downstream learns a new type."""
+    layer = "0"
+    handle = ""
+    a = [0.0, 0.0, 0.0]
+    b = [0.0, 0.0, 0.0]
+    n = len(pairs)
+    while i < n and pairs[i][0] != 0:
+        code, value = pairs[i]
+        if code == 8:
+            layer = value or "0"
+        elif code == 5:
+            handle = value
+        elif code == 10:
+            a[0] = _float(value)
+        elif code == 20:
+            a[1] = _float(value)
+        elif code == 30:
+            a[2] = _float(value)
+        elif code == 11:
+            b[0] = _float(value)
+        elif code == 21:
+            b[1] = _float(value)
+        elif code == 31:
+            b[2] = _float(value)
+        i += 1
+    return {"layer": layer, "closed": False, "pts": [a, b], "xdata": None, "handle": handle}, i
+
+
+_MTEXT_FORMAT_CODES = ("\\P", "\\p", "\\f", "\\F", "\\H", "\\W", "\\C", "\\c", "\\Q", "\\T", "\\A", "\\L", "\\l", "\\O", "\\o", "\\K", "\\k", "\\S")
+_TEXT_MAX_CHARS = 512
+
+
+def _parse_text(pairs: List[Tuple[int, str]], i: int, kind: str):
+    """TEXT / MTEXT: layer=8, handle=5, insertion (10, 20), value=1 (MTEXT may continue
+    in 3-codes). MTEXT inline formatting codes are stripped to plain words; the value is
+    capped so a hostile file cannot inflate the intake."""
+    layer = "0"
+    handle = ""
+    x = y = 0.0
+    parts: List[str] = []
+    n = len(pairs)
+    while i < n and pairs[i][0] != 0:
+        code, value = pairs[i]
+        if code == 8:
+            layer = value or "0"
+        elif code == 5:
+            handle = value
+        elif code == 10:
+            x = _float(value)
+        elif code == 20:
+            y = _float(value)
+        elif code == 3:
+            parts.append(value)
+        elif code == 1:
+            parts.append(value)
+        i += 1
+    text = "".join(parts)
+    if kind == "MTEXT":
+        text = _strip_mtext(text)
+    text = " ".join(text.split())[:_TEXT_MAX_CHARS]
+    return {"kind": kind, "layer": layer, "pt": [x, y], "text": text, "handle": handle}, i
+
+
+def _strip_mtext(s: str) -> str:
+    """Drop MTEXT formatting: {\\fArial|b0;...} groups keep their text, \\P is a line break."""
+    out: List[str] = []
+    j = 0
+    L = len(s)
+    while j < L:
+        c = s[j]
+        if c == "\\" and j + 1 < L:
+            code = s[j:j + 2]
+            if code == "\\P":
+                out.append(" ")
+                j += 2
+                continue
+            if code in ("\\\\", "\\{", "\\}"):
+                out.append(s[j + 1])
+                j += 2
+                continue
+            if code in _MTEXT_FORMAT_CODES:
+                k = s.find(";", j)
+                j = (k + 1) if k >= 0 else L
+                continue
+            j += 2
+            continue
+        if c in "{}":
+            j += 1
+            continue
+        out.append(c)
+        j += 1
+    return "".join(out)
 
 
 def _int(value: str) -> int:

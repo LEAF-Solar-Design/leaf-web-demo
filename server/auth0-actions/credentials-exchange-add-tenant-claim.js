@@ -13,6 +13,7 @@
 const CLAIM_NS = 'https://leafdesign.ai/';
 const VALID_TIERS = new Set(['restricted', 'self_hosted', 'hosted_starter', 'hosted_pro']);
 const DEFAULT_TIER = 'restricted';
+const ACCEPTANCE_TENANT_CLASS = 'non_customer_acceptance';
 const TENANT_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 
 // Roles (contract/AUTH.md §11.5): optional client metadata `leaf_roles`, a
@@ -62,8 +63,17 @@ function deriveClaims(event) {
   const orgId = configuredOrgId || tenantId;
   const requestedTier = stringValue(metadata.leaf_tier);
   const tier = VALID_TIERS.has(requestedTier) ? requestedTier : DEFAULT_TIER;
+  const tenantClass = stringValue(metadata.leaf_tenant_class) === ACCEPTANCE_TENANT_CLASS
+    ? ACCEPTANCE_TENANT_CLASS
+    : null;
 
-  return { tenant_id: tenantId, org_id: orgId, tier, roles: deriveRoles(metadata) };
+  return {
+    tenant_id: tenantId,
+    org_id: orgId,
+    tier,
+    roles: deriveRoles(metadata),
+    ...(tenantClass ? { tenant_class: tenantClass } : {}),
+  };
 }
 
 exports.onExecuteCredentialsExchange = async (event, api) => {
@@ -76,6 +86,9 @@ exports.onExecuteCredentialsExchange = async (event, api) => {
   api.accessToken.setCustomClaim(CLAIM_NS + 'org_id', claims.org_id);
   api.accessToken.setCustomClaim(CLAIM_NS + 'tier', claims.tier);
   api.accessToken.setCustomClaim(CLAIM_NS + 'roles', claims.roles);
+  if (claims.tenant_class) {
+    api.accessToken.setCustomClaim(CLAIM_NS + 'tenant_class', claims.tenant_class);
+  }
 };
 
 exports.deriveClaims = deriveClaims;

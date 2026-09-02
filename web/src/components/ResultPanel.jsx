@@ -50,9 +50,77 @@ function KeyValue({ data }) {
   )
 }
 
+// Generic table: result.table = { columns: string[], rows: any[][] }. Used by tools whose
+// output is a list (the timber cut list), rendered before the scalar key/values.
+function GridTable({ table }) {
+  const cols = Array.isArray(table.columns) ? table.columns : []
+  const rows = Array.isArray(table.rows) ? table.rows : []
+  return (
+    <table className="counts grid">
+      <thead><tr>{cols.map((c, i) => <th key={i}>{String(c)}</th>)}</tr></thead>
+      <tbody>
+        {rows.map((r, i) => (
+          <tr key={i}>
+            {(Array.isArray(r) ? r : [r]).map((v, j) => (
+              <td key={j} className={typeof v === 'number' ? 'num' : ''}>
+                {typeof v === 'number' ? v.toLocaleString() : String(v ?? '')}
+              </td>
+            ))}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
+// result.files = [{ name, mime, base64 }]: the tool hands back files (CSV, PDF). The bytes
+// are already in the envelope, so the link is a blob URL built in the browser; nothing is
+// fetched. URLs are revoked when the result changes.
+function FileLinks({ files }) {
+  const list = (Array.isArray(files) ? files : []).filter((f) => f && typeof f.base64 === 'string' && f.name)
+  if (list.length === 0) return null
+  return (
+    <div className="files">
+      {list.map((f) => {
+        let href = ''
+        try {
+          const bin = atob(f.base64)
+          const bytes = new Uint8Array(bin.length)
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+          href = URL.createObjectURL(new Blob([bytes], { type: f.mime || 'application/octet-stream' }))
+        } catch {
+          return <span key={f.name} className="dim">{f.name} (unreadable)</span>
+        }
+        return (
+          <a key={f.name} className="btn ghost" href={href} download={String(f.name).replace(/[^\w.-]/g, '_')}>
+            Download {f.name}
+          </a>
+        )
+      })}
+    </div>
+  )
+}
+
 function ResultBody({ result }) {
   const data = result?.result
   if (!data) return null
+  if (data.table && typeof data.table === 'object') {
+    const scalars = {}
+    for (const [k, v] of Object.entries(data)) {
+      if (v !== null && typeof v === 'object') continue
+      scalars[k] = v
+    }
+    return (
+      <>
+        <GridTable table={data.table} />
+        {Array.isArray(data.warnings) && data.warnings.length > 0 && (
+          <ul className="warnings">{data.warnings.map((w, i) => <li key={i}>{String(w)}</li>)}</ul>
+        )}
+        <FileLinks files={data.files} />
+        {Object.keys(scalars).length > 0 && <KeyValue data={scalars} />}
+      </>
+    )
+  }
   if (data.counts && typeof data.counts === 'object') {
     return (
       <>

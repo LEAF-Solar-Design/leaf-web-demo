@@ -122,6 +122,11 @@ RUN printf '%s\n' "$WEB_ALPINE_MAIN_APKINDEX_SHA256" \
 
 COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /web/dist /usr/share/nginx/html
+# Runtime flags: rewritten at container boot from the task-definition env
+# (LEAF_ONE_SHELL_ENABLED; fail-closed to '0'). nginx:alpine's entrypoint
+# runs every /docker-entrypoint.d/*.sh before nginx starts.
+COPY deploy/write-runtime-flags.sh /docker-entrypoint.d/40-runtime-flags.sh
+RUN chmod +x /docker-entrypoint.d/40-runtime-flags.sh
 EXPOSE 8080
 
 # GET / -> 200 (busybox wget; nginx:alpine has no curl). Use the IPv4 literal:

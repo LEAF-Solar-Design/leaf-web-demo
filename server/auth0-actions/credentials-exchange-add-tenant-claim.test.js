@@ -29,6 +29,8 @@ assert.equal(
   action.deriveClaims(event({
     leaf_tenant_id: 'org_leaf_demo',
     leaf_tenant_audience: audience,
+    leaf_tenant_class: 'non_customer_acceptance',
+    leaf_roles: 'org_admin',
   }, 'https://unrelated.example')),
   null
 );
@@ -44,6 +46,37 @@ assert.deepEqual(
     org_id: 'org_leaf_demo',
     tier: 'restricted',
     roles: [],
+  }
+);
+
+assert.deepEqual(
+  action.deriveClaims(event({
+    leaf_tenant_id: 'production_acceptance_a',
+    leaf_tenant_audience: audience,
+    leaf_tenant_class: 'non_customer_acceptance',
+    leaf_roles: 'owner',
+  })),
+  {
+    tenant_id: 'production_acceptance_a',
+    org_id: 'production_acceptance_a',
+    tier: 'restricted',
+    roles: ['owner'],
+    tenant_class: 'non_customer_acceptance',
+  }
+);
+
+assert.deepEqual(
+  action.deriveClaims(event({
+    leaf_tenant_id: 'org_leaf_demo',
+    leaf_tenant_audience: audience,
+    leaf_tenant_class: 'customer',
+    leaf_roles: 'org_admin',
+  })),
+  {
+    tenant_id: 'org_leaf_demo',
+    org_id: 'org_leaf_demo',
+    tier: 'restricted',
+    roles: ['org_admin'],
   }
 );
 
@@ -101,7 +134,8 @@ action.onExecuteCredentialsExchange(
   event({
     leaf_tenant_id: 'org_leaf_demo',
     leaf_tenant_audience: audience,
-    leaf_roles: 'org_admin',
+    leaf_tenant_class: 'non_customer_acceptance',
+    leaf_roles: 'owner',
   }),
   { accessToken: { setCustomClaim: (key, value) => { stamped[key] = value; } } }
 ).then(() => {
@@ -109,7 +143,8 @@ action.onExecuteCredentialsExchange(
     'https://leafdesign.ai/tenant_id': 'org_leaf_demo',
     'https://leafdesign.ai/org_id': 'org_leaf_demo',
     'https://leafdesign.ai/tier': 'restricted',
-    'https://leafdesign.ai/roles': ['org_admin'],
+    'https://leafdesign.ai/roles': ['owner'],
+    'https://leafdesign.ai/tenant_class': 'non_customer_acceptance',
   });
   console.log('credentials-exchange tenant claim tests passed');
 });

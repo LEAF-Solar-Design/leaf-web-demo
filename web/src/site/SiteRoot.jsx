@@ -25,9 +25,10 @@
 import React, { Suspense, useEffect, useRef, useState } from 'react'
 import { markInstant } from '../lib/instant.js'
 import { useRoute, navigate } from './router.js'
-import { sceneForPath } from './routeScene.js'
+import { activeCastForScene, sceneAllowsMarketingEject, sceneForPath } from './routeScene.js'
 import StageScene from './StageScene.jsx'
 import { WorkspaceControllerProvider } from '../controllers/WorkspaceControllerProvider.jsx'
+import { consoleWorkspaceMount } from '../controllers/workspaceMount.js'
 import { handleRedirectCallback, isSignedIn } from '../auth.js'
 import { bootWantsApp, shouldDeferForAuthCallback } from './authBoot.js'
 import {
@@ -115,7 +116,10 @@ export default function SiteRoot() {
         return
       }
       if (e.metaKey || e.ctrlKey || e.altKey) return
-      if (e.key === 'Escape' && scene === 'tool') {
+      // The eject predicate, not a scene literal: console mode must never
+      // reach navigate('/') here (ACCEPTANCE; APP_ONLY_HOSTS redirect would
+      // discard live console work). See routeScene.js.
+      if (e.key === 'Escape' && sceneAllowsMarketingEject(scene)) {
         const ownedSurface = document.querySelector('.proj-menu, .route, .strip-decision, .resolver, .drawer-layer .drawer, .claude-pop')
         if (!ownedSurface) navigate('/')
       }
@@ -130,7 +134,11 @@ export default function SiteRoot() {
   useEffect(() => {
     const root = stageRef.current
     if (!root) return
-    const activeCast = scene === 'tool' ? 'tool' : 'site'
+    // Mode-aware (named convergence bug a): null means this scene owns no
+    // cast, so DO NOT SWEEP — the old 'site' default would inert the whole
+    // W3 console the moment the stage stays mounted under it.
+    const activeCast = activeCastForScene(scene)
+    if (activeCast === null) return
     root.querySelectorAll('[data-cast]').forEach((el) => {
       const cast = el.getAttribute('data-cast')
       const hidden = cast !== 'both' && cast !== activeCast
@@ -181,7 +189,10 @@ export default function SiteRoot() {
     >
       {scene === 'app' ? (
         // The console ALONE — no stage mounted; App owns its own Viewer.
-        <WorkspaceControllerProvider drawingId="rooftop_demo" retryNotFound>
+        // Mount shape from workspaceMount.js (convergence bug c): the
+        // console/operator divergences are named decisions there, not two
+        // drifting literals.
+        <WorkspaceControllerProvider {...consoleWorkspaceMount()}>
           <Suspense fallback={null}>
             <App />
           </Suspense>

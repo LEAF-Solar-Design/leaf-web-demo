@@ -1096,6 +1096,8 @@ def tool_activity_spec(tool: dict) -> dict:
     live-path guards can fail closed on it.
     """
     engine_op = tool.get("engine_op") or tool["name"].replace("-", "_")
+    if tool.get("kind") == "appbundle":
+        return _appbundle_tool_activity_spec(tool, engine_op)
     script_src = tool.get("engine_script")
     if not script_src:
         sp = tool.get("script")
@@ -1122,6 +1124,116 @@ def tool_activity_spec(tool: dict) -> dict:
         "settings": {"script": {"value": script_src or ""}},
         "description": f"Leaf authored tool {tool.get('name')} (engine_op={engine_op}).",
     }
+
+
+# --------------------------------------------------------------------------- #
+# kind:"appbundle" tools — compiled C# loaded into the engine (CONTRACT §2).
+#
+# The tool package names the bundle (`appbundle`, the DA AppBundle id) and the
+# command the bundle registers (`command`). The Activity loads the bundle with
+# /al and runs a three-line script: the command, then the mark-saved QUIT form
+# (a read-only command leaves the drawing unmodified, but QUIT_SAVED is the form
+# proven not to block on DXF input; see lisp.py). Bundle ids are validated
+# against a strict pattern because they land verbatim in DA ids and paths.
+# --------------------------------------------------------------------------- #
+_APPBUNDLE_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{1,63}$")
+_COMMAND_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,31}$")
+
+
+def appbundle_id(tool: dict) -> str:
+    """The un-aliased AppBundle id a kind:appbundle tool declares. Fails closed on a bad id."""
+    bid = str(tool.get("appbundle") or "")
+    if not _APPBUNDLE_ID_RE.match(bid):
+        raise ValueError(f"tool {tool.get('name')!r}: 'appbundle' must match {_APPBUNDLE_ID_RE.pattern}, got {bid!r}")
+    return bid
+
+
+def appbundle_qualified(bundle_id: str) -> str:
+    """owner.Bundle+alias (e.g. iBZF....LeafCutListTools+prod)."""
+    return f"{nickname()}.{bundle_id}+{ALIAS}"
+
+
+def appbundle_script(tool: dict) -> str:
+    """The CRLF .scr an appbundle Activity runs: the registered command, then QUIT_SAVED."""
+    from lisp import QUIT_SAVED
+    cmd = str(tool.get("command") or "")
+    if not _COMMAND_RE.match(cmd):
+        raise ValueError(f"tool {tool.get('name')!r}: 'command' must match {_COMMAND_RE.pattern}, got {cmd!r}")
+    return "\r\n".join(['(setvar "CMDECHO" 0)', cmd, QUIT_SAVED]) + "\r\n"
+
+
+def _appbundle_tool_activity_spec(tool: dict, engine_op: str) -> dict:
+    bid = appbundle_id(tool)
+    return {
+        "id": f"{TOOL_ACTIVITY_PREFIX}{engine_op}",
+        "engine": ENGINE,
+        "commandLine": [
+            r'$(engine.path)\accoreconsole.exe /i "$(args[HostDwg].path)" '
+            rf'/al "$(appbundles[{bid}].path)" '
+            r'/s "$(settings[script].path)"'
+        ],
+        "appbundles": [appbundle_qualified(bid)] if os.environ.get("APS_NICKNAME") or _nickname_cached() else [f"$(nickname).{bid}+{ALIAS}"],
+        "parameters": {
+            "HostDwg": {"verb": "get", "required": True, "localName": HOSTDWG_LOCALNAME},
+            "Params": {"verb": "get", "required": False, "localName": "params.json"},
+            "Result": {"verb": "put", "required": True, "localName": TOOL_RESULT_LOCALNAME},
+        },
+        "settings": {"script": {"value": appbundle_script(tool)}},
+        "description": f"Leaf compiled tool {tool.get('name')} (engine_op={engine_op}, appbundle={bid}).",
+    }
+
+
+def _nickname_cached() -> bool:
+    """True when the nickname is already known without a network call (cached or env)."""
+    return hasattr(nickname, "_v")
+
+
+def ensure_appbundle(bundle_id: str, zip_path: str, description: str = "", dry_run: bool = False) -> dict:
+    """Idempotently provision a DA AppBundle from a zip + the `prod` alias. LIVE call.
+
+    POST /appbundles (409 => exists, then POST /appbundles/{id}/versions), upload the zip
+    to the returned signed form, then alias `prod` -> that version (PATCH on 409). The zip
+    is validated for size and for carrying PackageContents.xml before any network call.
+    """
+    if not _APPBUNDLE_ID_RE.match(bundle_id):
+        raise ValueError(f"bad appbundle id {bundle_id!r}")
+    import zipfile
+    size = os.path.getsize(zip_path)
+    if size <= 0 or size > 100 * 1024 * 1024:
+        raise ValueError(f"{zip_path}: size {size} outside (0, 100 MB]")
+    with zipfile.ZipFile(zip_path) as zf:
+        names = zf.namelist()
+        if not any(n.endswith("PackageContents.xml") for n in names):
+            raise ValueError(f"{zip_path}: no PackageContents.xml inside the bundle")
+    body = {"id": bundle_id, "engine": ENGINE, "description": description or f"Leaf AppBundle {bundle_id}"}
+    if dry_run:
+        return {"_dry_run": True, "endpoint": f"POST {DA}/appbundles", "body": body,
+                "zip": zip_path, "zip_bytes": size, "alias": ALIAS}
+    headers = {**_auth_headers(), "Content-Type": "application/json"}
+    r = requests.post(f"{DA}/appbundles", headers=headers, data=json.dumps(body), timeout=_HTTP_TIMEOUT)
+    if r.status_code == 409:
+        r = requests.post(f"{DA}/appbundles/{bundle_id}/versions", headers=headers,
+                          data=json.dumps({"engine": ENGINE, "description": body["description"]}),
+                          timeout=_HTTP_TIMEOUT)
+    r.raise_for_status()
+    info = r.json()
+    version = int(info.get("version", 1))
+    up = info.get("uploadParameters") or {}
+    if not up.get("endpointURL"):
+        raise RuntimeError("appbundle create/version response carried no uploadParameters")
+    with open(zip_path, "rb") as fh:
+        u = requests.post(up["endpointURL"], data=up.get("formData") or {},
+                          files={"file": (os.path.basename(zip_path), fh, "application/zip")},
+                          timeout=max(_HTTP_TIMEOUT, 300))
+    if u.status_code not in (200, 201, 204):
+        raise RuntimeError(f"appbundle upload failed {u.status_code}: {u.text[:300]}")
+    a = requests.post(f"{DA}/appbundles/{bundle_id}/aliases", headers=headers,
+                      data=json.dumps({"id": ALIAS, "version": version}), timeout=_HTTP_TIMEOUT)
+    if a.status_code == 409:
+        a = requests.patch(f"{DA}/appbundles/{bundle_id}/aliases/{ALIAS}", headers=headers,
+                           data=json.dumps({"version": version}), timeout=_HTTP_TIMEOUT)
+    a.raise_for_status()
+    return {"appbundle": bundle_id, "version": version, "alias": ALIAS, "zip_bytes": size}
 
 
 def ensure_tool_activity(tool: dict, dry_run: bool = False) -> dict:
