@@ -1115,19 +1115,21 @@
    stacks the grid into one column (styles.css) and App neutralizes the
    posture there anyway. Radius and the 12px inset stay (W4b chrome row). */
 @media (min-width: 981px) {
-  .studio-shell .app:has(aside.nav[data-spine]) { grid-template-columns: 44px 1fr 300px; }
+  /* 56px column - 12px inset = a true 44px rail, so the 32px monogram
+     buttons fit with breathing room instead of overflowing a 32px strip. */
+  .studio-shell .app:has(aside.nav[data-spine]) { grid-template-columns: 56px 1fr 300px; }
 }
-.studio-shell aside.nav[data-spine] { padding: 8px 4px; overflow-y: auto; overflow-x: hidden; }
+.studio-shell aside.nav[data-spine] { padding: 8px 4px; overflow-y: auto; overflow-x: hidden; background: rgba(10, 10, 10, .88); }
 .nav-spine { display: flex; flex-direction: column; align-items: center; gap: 6px; }
 /* Explicit ink on the dark rail — inherited color never beats a declared
    one (kimi, twice): 240,242,240 at .88 on the rail material clears 4.5:1. */
 .spine-btn {
-  width: 32px; height: 32px; padding: 0;
+  width: 34px; height: 34px; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
-  font: 600 11px var(--font-mono); letter-spacing: .04em;
-  color: rgba(240, 242, 240, .88);
-  background: rgba(240, 242, 240, .06);
-  border: 1px solid rgba(240, 242, 240, .16); border-radius: 6px;
+  font: 600 12px var(--font-mono); letter-spacing: .02em;
+  color: rgba(240, 242, 240, .96);
+  background: rgba(240, 242, 240, .1);
+  border: 1px solid rgba(240, 242, 240, .26); border-radius: 6px;
   cursor: pointer;
 }
 .spine-btn:hover { background: rgba(240, 242, 240, .12); }
@@ -1180,6 +1182,97 @@
 .ribbon-tool:disabled { color: rgba(240, 242, 240, .45); cursor: not-allowed; background: transparent; }
 .ribbon-empty { font: 400 11.5px var(--sans); color: rgba(240, 242, 240, .6); padding: 4px 2px; }
 
+/* --- W4c-C: the page dissolves into the viewport (CAD/Solar only) -------
+   Operator, twice: the drawing IS the workspace. Before this the console's
+   page blocks (import surface 1192x140, result 1194x83, tabs, toolbar) held
+   ~26% of the viewport while the cockpit chrome held 4.5% - a page with a
+   toolbar, not a cockpit. Here the ribbon and the drawing's own command bar
+   fuse into ONE dark ribbon assembly at the top, and every page-shaped block
+   becomes a floating instrument over the drawing. Scoped to the studio's
+   drafting surfaces; the old shell and Browser/iOS are untouched. */
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) {
+  /* The ribbon assembly is the only thing that owns page flow up top. */
+  --cockpit-band: 4px;
+}
+/* One assembly: clusters band, then the drawing's own commands band. */
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drafting-ribbon {
+  margin-bottom: 0;
+  border-radius: 4px 4px 0 0;
+  border-bottom: 0;
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar {
+  border-radius: 0 0 4px 4px;
+  border-top: 1px solid rgba(240, 242, 240, .08);
+  margin-bottom: var(--cockpit-band);
+}
+/* The card stops being a page: no flow height, so the drawing shows through
+   edge to edge and only the floating instruments sit on it. */
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .workspace-card > .viewer-wrap {
+  min-height: 0;
+}
+/* The import surface: a floating pane the ribbon opens, never a band across
+   the drawing. Closed by default (the card carries the open state). */
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cad-edit-workbench {
+  /* Clears the ribbon assembly above it (clusters band 52 + drawing band 40
+     + the band gap), so the pane floats on the DRAWING, never over its own
+     opener. */
+  position: absolute; top: calc(52px + 40px + 14px); left: 14px; z-index: 4;
+  width: min(420px, calc(100% - 260px));
+  max-height: calc(100% - 28px); overflow-y: auto;
+  margin: 0;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, .55);
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .workspace-card:not([data-import-open]) .cad-edit-workbench {
+  display: none;
+}
+/* The result: a floating instrument at the bottom-left of the drawing,
+   clear of the command bar, instead of a full-width page block. */
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .result-block {
+  position: absolute; left: 14px; bottom: 92px; z-index: 3;
+  width: min(420px, calc(100% - 260px));
+  max-height: 40%; overflow-y: auto;
+  margin: 0; padding: 0;
+  border: 1px solid var(--cv-border); border-radius: 6px;
+  background: var(--cv-panel-glass);
+  color: rgba(240, 242, 240, .92);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, .5);
+}
+/* The result pane's own card carries the ink; the block only frames it, so
+   the card is re-pinned too (a paper card inside a dark pane is the exact
+   inherited-vs-declared trap that has cost this repo two review rounds). */
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .result-block .card {
+  background: transparent; border: 0; box-shadow: none; margin: 0;
+  color: rgba(240, 242, 240, .92);
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .result-block :is(h3, h4, .result-title, strong) {
+  color: rgba(240, 242, 240, .94);
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .result-block :is(.dim, .muted, small, p) {
+  color: rgba(240, 242, 240, .68);
+}
+/* The demo coach is real onboarding, so it stays - but as an instrument on
+   the drawing, not a paper band across the top of it. */
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-banner {
+  background: rgba(10, 10, 10, .86);
+  border: 1px solid rgba(240, 242, 240, .14); border-radius: 4px;
+  color: rgba(240, 242, 240, .92);
+  backdrop-filter: blur(6px);
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-banner :is(.dim, .muted, small, p, span) {
+  color: rgba(240, 242, 240, .7);
+}
+/* Product tabs read as document-tab chrome on the dark ground: opaque, so
+   the drawing never bleeds through the labels. */
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-nav {
+  position: relative;
+  background: rgba(10, 10, 10, .88);
+  border: 1px solid rgba(240, 242, 240, .12);
+  border-radius: 4px 4px 0 0;
+  padding: 2px 4px 0;
+  margin-bottom: var(--cockpit-band);
+}
+/* ----------------------------------------------------------------------- */
+
 /* --- W4c-V2: the right palette (properties dock) ----------------------- */
 /* Hosts the SAME Legend + SelectionReadout elements the old shell renders
    inline, plus the client-derived Geometry rows. Right edge of the drawing
@@ -1212,10 +1305,18 @@
 /* The hosted Legend/readout drop their own floating placement inside the
    dock: they become flow content of their section. */
 .properties-dock .legend,
-.properties-dock .selection-readout {
+.properties-dock .selection-readout,
+.properties-dock .ent-panel {
   position: static; margin: 0; min-width: 0; max-width: none; box-shadow: none;
   border: 0; background: transparent; backdrop-filter: none; padding: 0;
 }
+/* The hosted plan rows take the dock's dark ink (the panel paints paper ink
+   on its own surface; inherited colour never beats a declared one). */
+.properties-dock .ent-panel,
+.properties-dock .ent-panel :is(h3, h4, li, p, span, strong, dt, dd) {
+  color: rgba(240, 242, 240, .88); font-size: 11px;
+}
+.properties-dock .ent-panel :is(.dim, .muted, small) { color: rgba(240, 242, 240, .6); }
 .dock-geometry {
   display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; margin: 8px 0 0;
   font: 400 11px var(--font-mono);

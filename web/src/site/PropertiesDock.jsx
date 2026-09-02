@@ -69,7 +69,7 @@ export function GeometryRows({ geometry }) {
   )
 }
 
-export default function PropertiesDock({ layers, selection, geometry }) {
+export default function PropertiesDock({ layers, selection, geometry, plan = null }) {
   return (
     <aside className="properties-dock" aria-label="Properties" data-testid="properties-dock">
       <DockSection title="Layers">{layers}</DockSection>
@@ -77,6 +77,11 @@ export default function PropertiesDock({ layers, selection, geometry }) {
         {selection}
         <GeometryRows geometry={geometry} />
       </DockSection>
+      {/* What this plan includes: reference information, folded away by
+          default. It was a full-width slab across the drawing before the
+          cockpit (the single largest object on the page); hosted here it
+          stays reachable without owning the viewport. */}
+      {plan && <DockSection title="Plan" defaultOpen={false}>{plan}</DockSection>}
     </aside>
   )
 }
