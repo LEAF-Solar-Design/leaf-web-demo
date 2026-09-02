@@ -44,30 +44,31 @@ name: Dispatch staging deploys
 # queueing loss rather than a deploy failure and is the one conclusion this
 # relay retries. Every other non-success fails the relay red.
 #
-# Superseded mid-release: being overtaken by a newer merge after one service
-# is already live leaves staging split, so the relay asks whether the newer
-# commit will converge it, using that commit's OWN build receipt rather than
-# a re-derived diff. Since PR #519 BOTH kinds of superseder converge staging,
-# so this relay STANDS DOWN on proof rather than finishing its own older tag
-# on a moved tip. A superseder whose build SUCCEEDED without a marker produced
-# a supply set, so its own relay deploys those images (`yes`). A DOCS-ONLY
-# superseder publishes a docs-noop marker and no supply set (`no`); it builds
-# no images of its own, but its relay now RECONCILES both services onto the
-# last tag built from main (the manifest step's reconcile arm below). Both
-# publish the SAME staging-converged receipt, so in either case this relay
-# waits for that receipt and stands down only once it lands. Anything else
-# (its build failed, never appeared, or outlived the watch budget), or a
-# receipt that never arrives within budget, leaves staging split with no known
-# converger and fails this relay RED. The older behaviour -- finishing the
-# remaining services on a `no` verdict -- was itself a reopened backwards-
-# deploy race, because once docs-only commits reconcile they can deploy, so a
-# stood-down relay finishing its older tag could land it on top of the
-# superseder's newer deploy (sol-critic RED round 2 on PR #519). Observed
-# 2026-08-07 under the ORIGINAL stand-down-and-finish behaviour: relay
-# 31144164225 stood down after deploying web, the superseding commit was
-# docs-only, nothing converged, and the run still concluded success, so
+# Superseded mid-release (rewritten 2026-09-02; see COALESCE ACROSS COMMITS
+# below): the relay's own concurrency group no longer cancels a running relay,
+# so a relay that has dispatched its legs watches EVERY one of them to a
+# terminal state whatever main does meanwhile, and the newer commit's relay
+# is queued behind it and deploys once it exits. The one place a moved tip
+# still matters after dispatch is an eviction re-dispatch (a leg cancelled
+# with zero jobs, which `queue: max` on the infra lock should make
+# unreachable). That arm must not re-dispatch its older tag onto a moved tip
+# (finishing an older tag on a moved tip is the backwards-deploy race PRs
+# #508 and #519 closed), and it CANNOT wait for the newer commit's relay to
+# converge staging, because that relay is serialized behind this run and
+# cannot start, let alone publish a receipt, until this run exits. So it
+# fails RED at once, names the split and names the queued converger. The
+# superseder classifier and the convergence-receipt wait that used to sit in
+# that arm (PRs #508, #519) are gone: under a no-cancel group a wait on a run
+# queued behind you can only expire, and it held the one converger back for
+# the whole 95-minute deadline before going RED anyway. The receipt itself is
+# still published by every relay that lands every leg; its consumer is now
+# scripts/platform_staging_convergence.py, not a waiting sibling relay.
+# Observed 2026-08-07 under the ORIGINAL stand-down-and-finish behaviour:
+# relay 31144164225 stood down after deploying web, the superseding commit
+# was docs-only, nothing converged, and the run still concluded success, so
 # leaf-platform-web-alt ran prod-d9306c3 while leaf-platform-app-alt ran
-# prod-87294a9 with a ::warning:: on a green run as the only trace.
+# prod-87294a9 with a ::warning:: on a green run as the only trace. A split
+# that is left behind is still announced RED, never as a warning on green.
 # NEED-FIRST ORDERING (2026-08-07). The service loop used to be a hardcoded
 # `for SERVICE in web app`, so web won every race and app lost every race. A
 # relay superseded mid-release always dies before its SECOND service, so under
@@ -216,31 +217,52 @@ name: Dispatch staging deploys
 # relays then queued behind it and sat in_progress on the deploy step in a
 # row, with no relay converging staging between 13:02:46Z and this fix.
 #
-# The group is now FIXED (not per-sha) with cancel-in-progress: true, so
-# GitHub itself keeps at most one relay alive across ALL commits: a newer
-# commit's relay cancels whichever older-commit relay is still running,
-# instead of letting both run and race for the infra lock. This is safe
-# because every step through the actual AWS mutation is idempotent and
-# always targets the CURRENT release's own tag: a relay cancelled after
-# deploying only web leaves staging split exactly as a stood-down relay
-# already could, and whichever relay survives to run uncancelled deploys
-# BOTH services fresh onto its own tag, converging staging regardless of
-# what a cancelled predecessor left mid-flight. Cancellation cannot roll a
-# service backwards -- it only stops THIS relay from proceeding, it never
-# touches an already-dispatched infra deploy (fire-and-forget
-# workflow_dispatch), and every dispatch is still gated by the tip re-check
-# and the supply-set manifest exactly as before.
+# The group is FIXED (not per-sha). From 2026-08-24 to 2026-09-02 it also
+# carried cancel-in-progress: true, so a newer commit's relay CANCELLED the
+# running one. That reintroduced the split this file exists to prevent, one
+# level up. Every relay between 00:50Z and 03:07Z on 2026-09-02 (runs
+# 33576940731, 33578177149, 33580565170, 33581652351) was killed inside the
+# deploy step by "a higher priority waiting request", after dispatching both
+# legs but before watching either to terminal. The legs themselves still
+# landed (workflow_dispatch is fire-and-forget; run 33581652351's app deploy
+# concluded success ten minutes after the relay was cancelled), which is why
+# the cancel looked harmless from ECS. What it lost was every PROOF: no relay
+# published a convergence receipt, no relay could retry an evicted leg, and a
+# deploy that failed would have failed with nobody watching.
 #
-# WHAT THIS DOES NOT DO: it does not guarantee any relay ever completes
-# under a merge rate that never lets one finish before the next supersedes
-# it -- that ceiling is inherent (see "NOT PINNED BY A TEST" and the
-# need-first section above) and this change does not touch it. It also does
-# not replace the superseder-wait / convergence-receipt logic below, which
-# stays as the correctness backstop for the window between a newer run
-# STARTING and this job's cancellation actually taking effect (GitHub
-# cancels a running job at its next cancellable checkpoint, not
-# instantaneously), and for the case where the newer commit's own build
-# fails outright, so no relay ever exists to cancel this one.
+# NOW: cancel-in-progress: false. A running relay is never cancelled by a
+# newer build; it watches every leg it dispatched to a terminal state and
+# publishes its receipt. GitHub keeps at most ONE PENDING run per group and
+# a newly queued run replaces the previously pending one (that is the same
+# "higher priority waiting request" cancellation, now applied only to runs
+# that have not started), so the queue collapses to the NEWEST successful
+# build. When the running relay exits, the relay that starts is that newest
+# one: it deploys its own tag or, for a docs-only build, reconciles both
+# relay services onto the newest ancestor tag through the manifest step's
+# reconcile arm. Builds replaced while pending are never deployed, which is
+# latest-main-only staging by construction. Nothing races the infra lock:
+# one relay runs at a time, and the infra workflow's in-lock forward guard
+# still orders relays against every other dispatcher of that workflow.
+#
+# THE GROUP IS PREDICATED ON THE JOB'S OWN GATE. workflow_run fires for EVERY
+# completion of "Build platform images", including workflow_dispatch builds
+# (speculate-platform-images.yml dispatches them against draft PR heads) and
+# failed main builds. Those runs skip the job, but group membership is
+# decided when a run is queued and the job's `if` only when it starts, so
+# under a fixed group a no-op completion could replace a PENDING main relay
+# (and under cancel-in-progress: true, cancel a RUNNING one). The group
+# expression below therefore keys any run the job would skip to its own run
+# id, so only successful push-to-main build completions ever share the lane.
+# Its predicate is the job `if` verbatim; the shape tests pin both so they
+# cannot drift apart.
+#
+# WHAT THIS DOES NOT DO: it does not bound how far staging trails main. A
+# relay runs for as long as its legs sit behind the shared infra lock (60 to
+# 75 minutes per relay on 2026-09-02), every merge that lands meanwhile waits
+# for the next relay, and that relay deploys only the newest of them. It does
+# not guarantee the queued relay converges either: its own tip check stands
+# it down if main has moved again by the time it starts, and its build can
+# fail. The receipt is still the only proof that a relay landed every leg.
 # ---------------------------------------------------------------------------
 
 on:
@@ -252,9 +274,17 @@ permissions:
   actions: read
   contents: read
 
+# Never cancels a running relay (see COALESCE ACROSS COMMITS above). The
+# predicate is the dispatch job's `if`, verbatim: a completion the job would
+# skip gets a group of its own and cannot displace a real relay.
 concurrency:
-  group: dispatch-staging-deploys
-  cancel-in-progress: true
+  group: >-
+    ${{ (github.event.workflow_run.conclusion == 'success' &&
+    github.event.workflow_run.event == 'push' &&
+    github.event.workflow_run.head_branch == 'main')
+    && 'dispatch-staging-deploys'
+    || format('dispatch-staging-deploys-noop-{0}', github.run_id) }}
+  cancel-in-progress: false
 
 jobs:
   dispatch:
@@ -1455,132 +1485,6 @@ jobs:
                    | sort_by(-.databaseId) | first | .databaseId // empty'
           }
 
-          # Will the commit that superseded this release deploy anything of
-          # its own? Answered from that commit's OWN build receipt, never a
-          # re-derived diff: the build gate decides docs-only from the real
-          # push diff with local git and rename detection disabled, which no
-          # compare-API window can reproduce. Re-deriving it here would be a
-          # second, drifting copy of that rule.
-          #
-          # Echoes exactly one word:
-          #   no      docs-noop marker present, so the superseder builds no
-          #           images and its relay dispatches nothing
-          #   yes     its build concluded success with no marker, so it
-          #           produced a supply set and its own relay converges
-          #   unknown its build failed, never appeared, or outlived the
-          #           budget; nothing is KNOWN to converge staging
-          # Every read here FAILS CLOSED. A read that cannot be proven
-          # complete retries until the deadline and then answers `unknown`;
-          # it never falls through to a decision. Suppressing a failed read
-          # with `|| true` used to empty the artifact list, skip the marker
-          # check, and classify a DOCS-ONLY superseder as `yes` on the
-          # strength of its build concluding success -- which is exactly the
-          # green-on-a-split outcome this guard exists to stop.
-          BUILD_WORKFLOW_PATH=".github/workflows/build-platform-images.yml"
-          # ONE poll of the superseder's build. Echoes no/yes/unknown only
-          # when the reads PROVE that answer, echoes nothing while the build
-          # has not decided yet, and returns 1 when any read could not be
-          # proven complete. An unproven read is therefore always a retry and
-          # never a decision, and the caller alone owns the retry.
-          classify_superseder_once() {
-            SUP_SHA="$1"
-            SUP_RUNS=$(GH_TOKEN="$HOME_TOKEN" gh api \
-              "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$SUP_SHA&event=push&per_page=100") \
-              || return 1
-            # Select the build by workflow PATH, not display name. A name is
-            # not an identity: another workflow could also be called "Build
-            # platform images" and supply a colliding marker or conclusion,
-            # and adding one would not change this file or its frozen hash.
-            SUP_RUN=$(printf '%s' "$SUP_RUNS" \
-              | jq -r --arg path "$BUILD_WORKFLOW_PATH" \
-                  '[.workflow_runs[] | select(.path == $path)]
-                   | sort_by(-.id) | first | .id // empty') \
-              || return 1
-            [ -n "$SUP_RUN" ] || return 0
-            # One read carries status, conclusion AND the current attempt.
-            SUP_RECORD=$(GH_TOKEN="$HOME_TOKEN" gh api \
-              "repos/$GITHUB_REPOSITORY/actions/runs/$SUP_RUN") || return 1
-            SUP_ATTEMPT=$(printf '%s' "$SUP_RECORD" | jq -r '.run_attempt // empty') \
-              || return 1
-            SUP_STATE=$(printf '%s' "$SUP_RECORD" \
-              | jq -r '"\(.status) \(.conclusion // "")"') || return 1
-            [ -n "$SUP_ATTEMPT" ] || return 1
-            # Hand the attempt back to the CALLER. superseder_deploys runs this
-            # function in a command substitution, so every variable set here
-            # dies with that subshell, and a `yes` verdict alone does not carry
-            # the one number the receipt wait below needs to name the receipt.
-            # The file is written by the SAME read that produced the verdict, so
-            # the receipt we wait for is bound to the exact attempt whose supply
-            # set earned `yes`, never to a re-read a rerun could move.
-            printf '%s' "$SUP_ATTEMPT" > superseder-attempt
-            SUP_ARTIFACTS=$(GH_TOKEN="$HOME_TOKEN" gh api \
-              "repos/$GITHUB_REPOSITORY/actions/runs/$SUP_RUN/artifacts?per_page=100") \
-              || return 1
-            # Artifact ABSENCE only counts against a listing proven WHOLE, and
-            # a response is only whole if it actually carries the two fields
-            # that say so. A truncated page, or a body missing `total_count`,
-            # says nothing about the entries it did not return.
-            printf '%s' "$SUP_ARTIFACTS" \
-              | jq -e '(.artifacts | type == "array")
-                       and (.total_count | type == "number")
-                       and (.total_count <= (.artifacts | length))' >/dev/null \
-              || return 1
-            # The marker is written in `prepare`, so it lands minutes before
-            # any supply set and decides this early. Bind it to the run's
-            # CURRENT attempt, the same way this workflow names its own marker
-            # above. Artifacts are keyed by run id and NOT by attempt, so an
-            # attempt-1 docs marker outlives a rerun whose attempt 2 built real
-            # images; matching any attempt would call that rerun `no` and
-            # finish this release on the older tag, landing it on top of the
-            # images that rerun is about to deploy.
-            if printf '%s' "$SUP_ARTIFACTS" \
-              | jq -e --arg n "docs-noop-$SUP_SHA-attempt-$SUP_ATTEMPT" \
-                  'any(.artifacts[]; .name == $n)' >/dev/null; then
-              echo no
-              return 0
-            fi
-            # `yes` asserts that the superseder's OWN relay will converge
-            # staging, so it has to be earned by the artifact that relay
-            # actually needs, not by a green conclusion. A build can conclude
-            # success and still publish no supply set (a partial run, a failed
-            # upload). The manifest step above then fails LOUD on exactly that
-            # -- "Supply-set artifact ... not found and no ... marker present"
-            # -- so that relay deploys NOTHING and this split never converges,
-            # while we would have exited green on its success. Require the
-            # exact attempt-bound supply set; anything else falls to `unknown`,
-            # which is the RED path.
-            # An EXPIRED artifact is a name with nothing behind it: the
-            # superseder's own manifest step downloads this artifact, and that
-            # download is only valid until expiry. A name match that ignores
-            # `.expired` would answer `yes` for a supply set that relay can no
-            # longer fetch.
-            if printf '%s' "$SUP_ARTIFACTS" \
-              | jq -e --arg n "staging-supply-set-$SUP_SHA-attempt-$SUP_ATTEMPT" \
-                  'any(.artifacts[]; (.name == $n) and (.expired == false))' \
-                  >/dev/null; then
-              case "$SUP_STATE" in
-                "completed success") echo yes; return 0 ;;
-              esac
-            fi
-            case "$SUP_STATE" in
-              completed*) echo unknown ;;
-            esac
-            return 0
-          }
-
-          superseder_deploys() {
-            while before_deadline; do
-              if VERDICT=$(classify_superseder_once "$1"); then
-                if [ -n "$VERDICT" ]; then
-                  echo "$VERDICT"
-                  return 0
-                fi
-              fi
-              sleep "$POLL_SECONDS"
-            done
-            echo unknown
-          }
-
           # Newest SUCCESSFUL deploy run for one service, as its full run name.
           # Every dispatch of the infra workflow names itself
           # "Deploy leaf-platform staging <service> (<release identity>)".
@@ -1646,50 +1550,6 @@ jobs:
               echo "::notice::app ($APP_SOURCE) trails web ($WEB_SOURCE); queueing the app leg first so the service that lost the last race reaches the staging lock first."
             fi
           fi
-
-          # THE CONVERGENCE RECEIPT, waited for. Returns 0 only once the
-          # superseding release has PUBLISHED proof that both of its services
-          # landed, and 1 when this relay's own deadline runs out first.
-          #
-          # A supply set proves the superseder COULD deploy. Only the receipt
-          # proves its relay DID. Nothing read before this relay exits can
-          # substitute, because the superseder's relay can still stand down
-          # after any read we take -- that is the whole race.
-          #
-          # Read from the REPOSITORY artifact endpoint, filtered by exact
-          # name, because the receipt is published by the superseder's RELAY
-          # run and we cannot name that run: a workflow_run run carries the tip
-          # at trigger time as its own head_sha, not the commit that triggered
-          # it. The name is the identity, and it is bound to the BUILD's sha
-          # and attempt precisely so this relay can compute it from what the
-          # classifier already read.
-          #
-          # NO COMPLETENESS CHECK, deliberately, and this is not the
-          # classifier's rule relaxed. That check exists because the classifier
-          # reasons from artifact ABSENCE, and a truncated page says nothing
-          # about what it did not return. This function reasons only from
-          # PRESENCE: a match on any page is a real match, and no match keeps
-          # polling until the deadline and then fails RED. It already fails
-          # closed, so proving the page whole would add nothing.
-          wait_for_receipt() {
-            WANT_RECEIPT="staging-converged-$1-attempt-$2"
-            echo "Waiting for the superseder's convergence receipt $WANT_RECEIPT."
-            while before_deadline; do
-              if RECEIPTS=$(GH_TOKEN="$HOME_TOKEN" gh api \
-                "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100&name=$WANT_RECEIPT"); then
-                # Re-match the name locally. The server-side filter is a
-                # narrowing convenience, never the proof.
-                if printf '%s' "$RECEIPTS" \
-                  | jq -e --arg n "$WANT_RECEIPT" \
-                      'any(.artifacts[]; (.name == $n) and (.expired == false))' \
-                      >/dev/null; then
-                  return 0
-                fi
-              fi
-              sleep "$POLL_SECONDS"
-            done
-            return 1
-          }
 
           DEPLOYED_ANY=false
           DISPATCHED_ANY=false
@@ -1776,20 +1636,33 @@ jobs:
           }
 
           # The tip gate, unchanged in substance and never gated: dispatching a
-          # tag that is no longer current rolls staging BACKWARDS. It now runs
-          # ONCE before the dispatch phase instead of once per service, so both
-          # legs provably carry the same tag from the same tip observation, and
-          # again before any eviction re-dispatch, which happens minutes later
-          # and therefore still needs its own read.
+          # tag that is no longer current rolls staging BACKWARDS. It runs ONCE
+          # before the dispatch phase, so both legs provably carry the same tag
+          # from the same tip observation, and again before any eviction
+          # re-dispatch, which happens minutes later and therefore still needs
+          # its own read.
           #
-          # The clean stand-down now keys on DISPATCHED_ANY, not DEPLOYED_ANY.
-          # Once anything has been dispatched, a deploy may still land after
-          # this relay exits, so "nothing of this release is live" stops being
-          # provable and this relay must not claim it. That is strictly more
-          # conservative than the previous condition.
+          # The clean stand-down keys on DISPATCHED_ANY, not DEPLOYED_ANY. Once
+          # anything has been dispatched, a deploy may still land after this
+          # relay exits, so "nothing of this release is live" stops being
+          # provable and this relay must not claim it.
+          #
+          # NO WAIT ON A MOVED TIP AFTER DISPATCH (2026-09-02). This arm used to
+          # classify the superseding commit from its build receipt and then
+          # wait, up to this step's deadline, for that commit's relay to publish
+          # its convergence receipt. Under the header's no-cancel concurrency
+          # group that relay is QUEUED BEHIND THIS RUN and cannot start, let
+          # alone publish, until this run exits, so the wait could only ever
+          # expire: a 95-minute stall that held the one converger back for
+          # exactly that long and then went RED anyway. The arm now fails RED
+          # at once and names who converges. It still dispatches nothing:
+          # finishing an older tag on a moved tip is the backwards-deploy race
+          # PRs #508 and #519 closed, and one relay at a time is not a licence
+          # to reopen it, because operators and sibling lanes dispatch the same
+          # infra workflow outside this group.
           require_tip_current() {
             local pending=$1
-            local MAIN_SHA TIP_NOW CONVERGER SUP_ATTEMPT_SEEN
+            local MAIN_SHA
             MAIN_SHA=$(GH_TOKEN="$HOME_TOKEN" gh api \
               "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
             [ "$MAIN_SHA" = "$BUILD_HEAD_SHA" ] && return 0
@@ -1798,55 +1671,7 @@ jobs:
               echo "::notice::main moved to $MAIN_SHA past built $BUILD_HEAD_SHA before this release dispatched anything; standing down (latest-main-only staging: the newer commit's relay owns the deploy)."
               exit 0
             fi
-            # Something of this release is already in flight or live, so
-            # standing down leaves staging on a mixed identity. Whether that is
-            # benign turns entirely on whether the superseder converges it.
-            CONVERGER=$(superseder_deploys "$MAIN_SHA")
-            if [ "$CONVERGER" != "no" ] && [ "$CONVERGER" != "yes" ]; then
-              # `unknown`: the superseder's build failed, never appeared, or
-              # outlived this watch, so nothing is KNOWN to converge staging.
-              # Stand down RED rather than finish this older tag on top of
-              # whatever it may deploy.
-              echo "::error::STAGING IS SPLIT AND UNCONVERGED: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already dispatched a service, so $pending stays on its previous image, and $MAIN_SHA is not known to deploy anything that would converge it (its build failed, never appeared, or outlived this watch). Standing down rather than risk landing $IMAGE_TAG on top of a newer deploy. Staging is NOT converged on $BUILD_HEAD_SHA; converge it with a successful main build."
-              exit 1
-            fi
-            # CONVERGE-AND-WAIT. Both a deployable superseder (`yes`) and a
-            # DOCS-ONLY superseder (`no`) converge staging: the deployable one
-            # deploys its own images, the docs-only one RECONCILES both
-            # services onto the last built tag, and BOTH publish the same
-            # staging-converged receipt. So this relay does not finish its own
-            # remaining service on a moved tip -- that would race the
-            # superseder's deploy and could land this older tag last, the
-            # sol-critic RED #497/#508 race reopened by making docs-only
-            # commits dispatch (sol-critic RED round 2 on PR #519). It stands
-            # down on PROOF the superseder converged. #508's fail-red-on-split
-            # principle is unchanged: no receipt within budget is still RED.
-            #
-            # The classification POLLED, so $MAIN_SHA is a snapshot. Re-read
-            # the tip and fail CLOSED if it moved: the superseder we are about
-            # to trust may no longer be the tip, and its own relay may then
-            # stand down and converge nothing.
-            TIP_NOW=$(GH_TOKEN="$HOME_TOKEN" gh api \
-              "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
-            if [ "$TIP_NOW" != "$MAIN_SHA" ]; then
-              echo "::error::STAGING IS SPLIT AND UNCONVERGED: main moved again to $TIP_NOW while this relay was classifying $MAIN_SHA, so the finding that $MAIN_SHA converges staging is stale. That commit's relay may itself stand down on the newer tip and deploy nothing, leaving this split with no converger. Staging is NOT converged on $BUILD_HEAD_SHA; converge it with a successful main build."
-              exit 1
-            fi
-            # A fresh tip read proves $MAIN_SHA is the tip at that instant and
-            # nothing more, so the proof of convergence has to come from the
-            # superseder ACTUALLY LANDING both services: its receipt. Wait for
-            # it, bounded by this relay's own deadline. A superseder that was
-            # itself superseded publishes none and this relay then fails RED.
-            SUP_ATTEMPT_SEEN=$(cat superseder-attempt 2>/dev/null || true)
-            if [ -z "$SUP_ATTEMPT_SEEN" ]; then
-              echo "::error::STAGING IS SPLIT AND UNCONVERGED: $MAIN_SHA classified as a converger but its build attempt was not recorded, so the convergence receipt to wait for cannot be named. Refusing to stand down on an unprovable claim. Staging is NOT converged on $BUILD_HEAD_SHA; converge it with a successful main build."
-              exit 1
-            fi
-            if wait_for_receipt "$MAIN_SHA" "$SUP_ATTEMPT_SEEN"; then
-              echo "::notice::STAGING WAS SPLIT AND IS NOW CONVERGED: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already dispatched a service, and $MAIN_SHA's relay has published its convergence receipt, so both staging services are live on that newer release. Standing down on PROOF that the split closed, not on the expectation that it would."
-              exit 0
-            fi
-            echo "::error::STAGING IS SPLIT AND UNCONVERGED: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already dispatched a service, so $pending stays on its previous image, and $MAIN_SHA never published a convergence receipt within this relay's budget. Its relay did not prove both services landed -- it may itself have been superseded and stood down. Staging is NOT converged on $BUILD_HEAD_SHA; converge it with a successful main build."
+            echo "::error::STAGING IS SPLIT AND UNCONVERGED: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already dispatched a service, so $pending stays on its previous image. This relay will not land $IMAGE_TAG on a moved tip, and it cannot wait for $MAIN_SHA's relay to converge staging: that relay is queued behind this run in the dispatch-staging-deploys concurrency group and cannot start until this run exits. Exiting RED now so it can. Staging is NOT converged on $BUILD_HEAD_SHA; $MAIN_SHA's relay (if its build succeeded) or the next successful main build converges it."
             exit 1
           }
 
@@ -2042,17 +1867,18 @@ jobs:
           done
 
           # EVERY service landed, so this release converged staging. Record
-          # that as an artifact the NEXT superseded relay can wait on, which is
-          # the only evidence that distinguishes a relay that COULD have
-          # deployed from one that DID.
+          # that as an artifact, which is the only evidence that distinguishes
+          # a relay that COULD have deployed from one that DID. Its consumer is
+          # scripts/platform_staging_convergence.py (the finalize workflow);
+          # no sibling relay waits on it any more (see require_tip_current).
           #
           # Reached only by falling out of the loop. Every stand-down and every
           # failure above exits first, so the receipt cannot be written by a
           # relay that skipped, stood down, or left a service behind. Keyed by
           # the BUILD's sha and attempt, exactly like the supply set and the
-          # docs-noop marker, so a superseded relay can compute this name from
-          # the build record it already reads. The services array records the
-          # ACTUAL order this relay deployed, not a hardcoded pair.
+          # docs-noop marker, so any consumer can compute this name from the
+          # build record alone. The services array records the ACTUAL order
+          # this relay deployed, not a hardcoded pair.
           if [ "$SUPPLY_SCHEMA" = "leaf.staging-supply-set.v3" ]; then
             FINAL_MAIN=$(GH_TOKEN="$HOME_TOKEN" gh api \
               "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
