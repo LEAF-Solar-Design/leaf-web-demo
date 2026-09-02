@@ -1,10 +1,20 @@
 import { useEffect, useRef, useState } from 'react'
 import './panels.css'
 import useExit from '../useExit.js'
+import { EMPTY_WORKSPACE_PROJECT } from '../site/workspaceProjectState.js'
 
 // The header PROJECT chip, made real: a calm switcher over the canonical
 // org-scoped Project entity (platform/api.py). LIVE only — in mock mode it is a
 // static label with zero /api calls (matching today's demo header exactly).
+//
+// HONEST TAG (fixed 2026-09-01). This chip used to render the literal tag
+// "Project" over a name that fell back to `projectName`, which is the MOUNTED
+// DRAWING's name, not a project's. With no workspace project open it therefore
+// printed "Project rooftop_demo" — the header half of the contradiction a pilot
+// user hit, with three surface cards correctly saying "No project open" below
+// it. The tag now comes from workspaceProjectState.js, the one derivation every
+// surface shares, so it reads "Drawing rooftop_demo" until a workspace project
+// is genuinely open. The menu below is unchanged.
 //
 // States (live):
 //   - platform unavailable (no DATABASE_URL / 500): show today's static drawing
@@ -15,8 +25,8 @@ import useExit from '../useExit.js'
 //     right in muted, rows with a 2px accent left bar + tint + Enter cap on the
 //     active row, arrow-key + Enter selection.
 export default function ProjectSwitcher({
-  mock, projectName, orgId, projects, openProjectId, currentName,
-  unavailable, loading, orgBusy, projectBusy,
+  mock, projectName, orgId, projects, openProjectId,
+  unavailable, loading, orgBusy, projectBusy, workspaceProject = null,
   onCreateOrg, onCreateProject, onOpenProject,
 }) {
   const [open, setOpen] = useState(false)
@@ -53,17 +63,31 @@ export default function ProjectSwitcher({
     return () => { document.removeEventListener('mousedown', onDoc); document.removeEventListener('keydown', onKey) }
   }, [open, projects, hi, orgId, unavailable, openProjectId, onOpenProject])
 
+  // The chip reads the shared derivation and NOTHING else. sol-critic finding
+  // 1: that pre-F-9 name fallback survived here as a
+  // compatibility path, and `projectName` is the mounted DRAWING's name -- so
+  // that fallback could still print "Project rooftop_demo" over a drawing,
+  // reproducing the exact bug this change exists to fix. Omitting the prop now
+  // degrades to the honest resting state instead. (`projectName` is still used
+  // below, in the platform-unavailable note, where naming the drawing IS the
+  // honest thing to say.)
+  const state = workspaceProject || EMPTY_WORKSPACE_PROJECT
+  const tag = state.tag
+  // 'None open' rather than a blank chip: the switcher is the affordance for
+  // opening one, so the resting state has to read as a state, not as a
+  // half-rendered label.
+  const label = state.label || 'None open'
+
   // Mock: no platform, no switcher — the classic static chip.
   if (mock) {
     return (
       <span className="proj-chip static">
-        <span className="tag">Project</span>
-        <span className="name">{projectName}</span>
+        <span className="tag">{tag}</span>
+        <span className="name">{label}</span>
       </span>
     )
   }
 
-  const label = currentName || projectName
   const pick = (pid) => { onOpenProject(pid); setOpen(false) }
   const count = (projects || []).length
 
@@ -75,7 +99,7 @@ export default function ProjectSwitcher({
         aria-expanded={open}
         aria-haspopup="menu"
       >
-        <span className="tag">Project</span>
+        <span className="tag">{tag}</span>
         <span className="name">{label}</span>
         <span className="proj-caret" aria-hidden="true">▾</span>
       </button>

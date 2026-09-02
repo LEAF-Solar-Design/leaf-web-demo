@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { PRODUCT_SURFACES, SHARED_WORKSPACE_CAPABILITIES, productSurface } from '../site/productSurfaces.js'
+import { EMPTY_WORKSPACE_PROJECT, WORKSPACE_PROJECT_COPY } from '../site/workspaceProjectState.js'
 import { moveRovingTab } from '../lib/roving.js'
 
 // F-8: the continuity layer, made visible. Lives in the always-mounted nav so
@@ -8,7 +9,7 @@ import { moveRovingTab } from '../lib/roving.js'
 // the open project and the same catalog fold every surface consumes (F-7).
 // A surface change pulses it (class toggle, never a remount); the pulse and
 // every other F-8 motion is disabled under prefers-reduced-motion in CSS.
-export function ContinuityRail({ activeSurface, project, catalog }) {
+export function ContinuityRail({ activeSurface, workspaceProject = null, catalog }) {
   const [pulse, setPulse] = useState(false)
   const first = useRef(true)
   useEffect(() => {
@@ -22,10 +23,22 @@ export function ContinuityRail({ activeSurface, project, catalog }) {
     (count, family) => count + (family.capabilities?.length || 0),
     0,
   )
+  // The rail names BOTH concepts, so a mounted drawing can never read as
+  // "nothing is open" (the 2026-09-01 pilot contradiction). It CONSUMES the
+  // derivation and never performs one: the previous revision accepted a legacy
+  // `project` string and synthesized a placeholder openProjectId from it,
+  // which fabricated an identifier inside the fix for fabricated state. That
+  // prop is gone; callers pass the derived state or nothing.
+  const state = workspaceProject || EMPTY_WORKSPACE_PROJECT
   return (
-    <div className="tc-continuity" data-testid="continuity-rail" data-pulse={pulse ? 'true' : 'false'}>
+    <div className="tc-continuity" data-testid="continuity-rail" data-pulse={pulse ? 'true' : 'false'} data-project-state={state.kind}>
       <span className="tc-continuity-label">Carried across every profile</span>
-      <span className="tc-continuity-item">{project ? <>project · <strong>{project}</strong></> : 'no project open'}</span>
+      {state.kind === 'drawing-only' && (
+        <span className="tc-continuity-item">drawing · <strong>{state.drawingName}</strong></span>
+      )}
+      <span className="tc-continuity-item">
+        {state.kind === 'project' ? <>project · <strong>{state.label}</strong></> : state.railLabel}
+      </span>
       {families.length > 0 && (
         <span className="tc-continuity-item">
           catalog · <strong>{families.length} {families.length === 1 ? 'family' : 'families'} / {capabilityCount} tools</strong>
@@ -36,7 +49,9 @@ export function ContinuityRail({ activeSurface, project, catalog }) {
   )
 }
 
-export default function ProductSurfaceTabs({ activeSurface, states, onSelect, project = null, catalog = null }) {
+export default function ProductSurfaceTabs({
+  activeSurface, states, onSelect, workspaceProject = null, catalog = null,
+}) {
   return (
     <nav className="tc-product-nav" data-cast="tool" aria-label="Product workspace">
       <div className="tc-product-tabs" role="tablist" aria-label="Workspace profile" onKeyDown={moveRovingTab}>
@@ -64,7 +79,7 @@ export default function ProductSurfaceTabs({ activeSurface, states, onSelect, pr
       </div>
       <ContinuityRail
         activeSurface={activeSurface}
-        project={project}
+        workspaceProject={workspaceProject}
         catalog={catalog}
       />
     </nav>
@@ -136,9 +151,81 @@ export function SurfaceCapabilities({ surface, catalog, catalogError }) {
   )
 }
 
-export function ProductSurfaceFrame({ activeSurface, states, projectSlot, catalog, catalogError }) {
+// The Browser / Solar CAD project line, made legible (the F-9 fix). Renders the
+// SAME derivation the header chip and the rail render, so the three can no
+// longer disagree. When a drawing is mounted but no workspace project is open
+// it says which of the two is missing, why that matters, and offers the one
+// action that closes the gap — never a bare "No project open" next to a header
+// that is plainly showing an open, editable drawing.
+export function WorkspaceProjectSlot({ state, onCreateProject }) {
+  if (!state) return null
+  if (state.kind === 'project') {
+    return <span className="dim" data-testid="surface-project-state" data-project-state="project">{state.label}</span>
+  }
+  const action = state.action
+  // ONE disabled decision, and the reason is derived from the SAME value.
+  // sol-critic finding 3: these were computed separately, so a state that
+  // allowed the create while the caller supplied no handler rendered a
+  // disabled button with NO stated blocker -- exactly the dead end this slot
+  // replaced. A missing handler is now a stated blocker like any other.
+  const missingHandler = Boolean(action) && !onCreateProject
+  const disabled = Boolean(action?.disabled) || missingHandler
+  const reason = action?.disabled
+    ? action.reason
+    : missingHandler
+      ? WORKSPACE_PROJECT_COPY.reasonNoHandler
+      : null
+  const showReason = Boolean(disabled && reason)
+  // A disabled button's `title` is not reliably announced, so the blocker is
+  // rendered as real text and ASSOCIATED with the control — a screen-reader
+  // user must not be the only one who cannot find out why it is dead.
+  const reasonId = showReason ? 'surface-project-reason' : undefined
+  return (
+    <div className="tc-product-project-state" data-testid="surface-project-state" data-project-state={state.kind}>
+      <strong>{state.headline}</strong>
+      {state.explainer && <p>{state.explainer}</p>}
+      {action && (
+        <>
+          <button
+            type="button"
+            className="chip-act tc-product-project-act"
+            data-testid="surface-project-action"
+            disabled={disabled}
+            aria-describedby={reasonId}
+            onClick={() => onCreateProject?.(action.projectName)}
+          >
+            {action.label}
+          </button>
+          {/* An unexplained disabled button is the same dead end as the bare
+              state line it replaced, so the blocker is always spelled out. */}
+          {showReason && (
+            <span id={reasonId} className="tc-product-project-reason" data-testid="surface-project-reason">{reason}</span>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
+// `workspaceProject` is rendered by the FRAME, not handed in as a slot by each
+// caller. sol-critic RED on PR #888 caught why: /app passed WorkspaceProjectSlot
+// into projectSlot while /try passed its header switcher, so the /try Browser
+// and Solar cards silently lost the explainer and the create action. A slot the
+// caller must remember to fill correctly is a contract no test of this
+// component can enforce; owning it here means every surface gets it by
+// construction. projectSlot stays for what genuinely IS caller-specific -- the
+// iOS ship lane, /try's switcher chip -- and renders above it.
+export function ProductSurfaceFrame({
+  activeSurface, states, projectSlot, catalog, catalogError,
+  workspaceProject = EMPTY_WORKSPACE_PROJECT, onCreateProject = null,
+}) {
   const surface = productSurface(activeSurface)
   const status = states[surface.id]
+  // iOS owns its whole project line (the ship lane mounts there instead).
+  // Every other surface ALWAYS renders a state: sol-critic finding 2 was that
+  // a null default let a call site drop the Browser/Solar state silently.
+  // Omitting the prop now degrades to the honest empty state, never to nothing.
+  const showProjectState = surface.id !== 'ios'
   return (
     <section
       id="product-surface-panel"
@@ -159,7 +246,12 @@ export function ProductSurfaceFrame({ activeSurface, states, projectSlot, catalo
       </div>
       <h1>{surface.title}</h1>
       <p>{surface.description}</p>
-      <div className="tc-product-project">{projectSlot}</div>
+      <div className="tc-product-project">
+        {projectSlot}
+        {showProjectState && (
+          <WorkspaceProjectSlot state={workspaceProject} onCreateProject={onCreateProject} />
+        )}
+      </div>
       <div className="tc-product-columns">
         <div>
           <h2>Shared everywhere</h2>

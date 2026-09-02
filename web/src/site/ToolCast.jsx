@@ -74,6 +74,7 @@ import {
 } from '../runIntent.js'
 import { navigate } from './router.js'
 import { productSurfaceFromSearch, productSurfaceStates, searchForProductSurface } from './productSurfaces.js'
+import { deriveWorkspaceProjectState } from './workspaceProjectState.js'
 import {
   emptyIosShipReadiness,
   fetchIosShipReadiness,
@@ -706,6 +707,17 @@ export default function ToolCast({
   }, [bindConverseProject, workspace.openProjectId])
   const currentProjectName = selectCurrentProjectName(workspace)
   const activeDrawingId = drawing.drawingState?.drawing_id || null
+  // The ONE workspace-project derivation this cast renders (F-9), shared with
+  // /app: the header chip, the continuity rail, the surface cards, and the left
+  // rail's foot all read THIS instead of each phrasing the state themselves.
+  const workspaceProjectState = useMemo(() => deriveWorkspaceProjectState({
+    openProjectId: workspace.openProjectId,
+    projectName: currentProjectName,
+    drawingName: activeDrawingId,
+    orgId: workspace.orgId,
+    projectsUnavailable: workspace.projectsError,
+    mock: transportMock,
+  }), [workspace.openProjectId, workspace.orgId, workspace.projectsError, currentProjectName, activeDrawingId, transportMock])
   const catalogRunContext = useMemo(() => createCatalogRunContext({
     tenantId,
     orgId: workspace.orgId,
@@ -1369,10 +1381,10 @@ export default function ToolCast({
     <ProjectSwitcher
       mock={transportMock}
       projectName={activeDrawingId}
+      workspaceProject={workspaceProjectState}
       orgId={workspace.orgId}
       projects={workspace.projects}
       openProjectId={workspace.openProjectId}
-      currentName={currentProjectName}
       unavailable={workspace.projectsError}
       loading={workspace.projectsLoading}
       orgBusy={workspace.orgBusy}
@@ -1385,7 +1397,7 @@ export default function ToolCast({
 
   return (
     <>
-      <ProductSurfaceTabs activeSurface={activeSurface} states={productStates} onSelect={selectProductSurface} catalog={capabilityCatalog} />
+      <ProductSurfaceTabs activeSurface={activeSurface} states={productStates} onSelect={selectProductSurface} workspaceProject={workspaceProjectState} catalog={capabilityCatalog} />
       {activeSurface === 'cad' ? (
       <>
       <div className="tc-topcluster tc-topcluster-product" data-cast="tool" style={{ '--rank': 3 }}>
@@ -1589,7 +1601,7 @@ export default function ToolCast({
         </div>
         <div className="tc-rail-foot">
           <span className="tc-link">{leftView === 'operator' ? 'Drawing operator' : leftView === 'catalog' ? 'Registered catalog' : leftView === 'author' ? 'Tool authoring' : 'Project workspace'}</span>
-          <span className="tc-link muted">{leftView === 'operator' ? (PUBLIC_DEMO ? 'Interactive demo' : PROOF_MODE ? 'Deterministic proof' : 'Live services') : leftView === 'catalog' ? `${tools.length} tools` : leftView === 'author' ? 'Stage, review, publish' : currentProjectName || 'No project open'}</span>
+          <span className="tc-link muted">{leftView === 'operator' ? (PUBLIC_DEMO ? 'Interactive demo' : PROOF_MODE ? 'Deterministic proof' : 'Live services') : leftView === 'catalog' ? `${tools.length} tools` : leftView === 'author' ? 'Stage, review, publish' : workspaceProjectState.kind === 'project' ? workspaceProjectState.label : workspaceProjectState.headline}</span>
         </div>
       </aside>
 
@@ -2094,6 +2106,8 @@ export default function ToolCast({
           states={productStates}
           catalog={capabilityCatalog}
           catalogError={catalogError}
+          workspaceProject={workspaceProjectState}
+          onCreateProject={createWorkspaceProject}
           projectSlot={projectSlot}
         />
       )}

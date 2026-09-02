@@ -7,9 +7,10 @@
  */
 import { afterEach, describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import ProductSurfaceTabs, { ProductSurfaceFrame } from './ProductSurfaceTabs.jsx'
 import { productSurfaceStates } from '../site/productSurfaces.js'
+import { deriveWorkspaceProjectState } from '../site/workspaceProjectState.js'
 
 afterEach(cleanup)
 
@@ -91,12 +92,15 @@ describe('F-7: surface frames render the live tenant catalog', () => {
   })
 
   it('F-8: the continuity rail is the SAME node across profile switches, and pulses instead of remounting', () => {
+    const openProject = deriveWorkspaceProjectState({
+      openProjectId: 'p-1', projectName: 'rooftop_demo', orgId: 'org-1',
+    })
     const nav = (surface) => (
       <ProductSurfaceTabs
         activeSurface={surface}
         states={states}
         onSelect={() => {}}
-        project="rooftop_demo"
+        workspaceProject={openProject}
         catalog={catalogA}
       />
     )
@@ -117,6 +121,190 @@ describe('F-7: surface frames render the live tenant catalog', () => {
     const rail = screen.getByTestId('continuity-rail')
     expect(rail.textContent).toContain('no project open')
     expect(rail.textContent).not.toContain('families')
+  })
+
+  // --- F-9: the mounted drawing vs the workspace project ------------------
+  // Regression guard for the 2026-09-01 production contradiction: the header
+  // read "Project rooftop_demo · 2345 polylines · 4 layers" while the rail and
+  // the Browser / Solar CAD cards said "No project open". Every one of them now
+  // reads the SAME derivation, so the three cannot disagree again.
+  const drawingOnly = deriveWorkspaceProjectState({
+    openProjectId: null, projectName: null, drawingName: 'rooftop_demo', orgId: 'org-1',
+  })
+
+  it('F-9: the rail names the mounted drawing instead of claiming nothing is open', () => {
+    render(
+      <ProductSurfaceTabs
+        activeSurface="browser" states={states} onSelect={() => {}}
+        workspaceProject={drawingOnly} catalog={catalogA}
+      />,
+    )
+    const rail = screen.getByTestId('continuity-rail')
+    expect(rail.dataset.projectState).toBe('drawing-only')
+    expect(rail.textContent).toContain('rooftop_demo')
+    expect(rail.textContent).toContain('no workspace project')
+    // The exact string a pilot user read as a contradiction, gone.
+    expect(rail.textContent).not.toContain('no project open')
+  })
+
+  it.each(['browser', 'solar'])('F-9: the %s card explains the split and offers the create action', (surface) => {
+    const created = []
+    render(
+      <ProductSurfaceFrame
+        activeSurface={surface}
+        states={states}
+        catalog={catalogA}
+        catalogError={null}
+        workspaceProject={drawingOnly}
+        onCreateProject={(n) => created.push(n)}
+      />,
+    )
+    const slot = screen.getByTestId('surface-project-state')
+    expect(slot.dataset.projectState).toBe('drawing-only')
+    expect(slot.textContent).toContain('No workspace project')
+    expect(slot.textContent).toContain('open and editable in CAD')
+    expect(screen.queryByTestId('surface-project-reason')).toBeNull()
+    const action = screen.getByTestId('surface-project-action')
+    expect(action.disabled).toBe(false)
+    fireEvent.click(action)
+    // The action creates a project NAMED FOR the drawing, so the two stay
+    // visibly connected rather than the user having to invent a name.
+    expect(created).toEqual(['rooftop_demo'])
+  })
+
+  it('F-9: a blocked create says why, instead of a silent dead-end button', () => {
+    const noOrg = deriveWorkspaceProjectState({ drawingName: 'rooftop_demo', orgId: null })
+    render(
+      <ProductSurfaceFrame
+        activeSurface="browser" states={states} catalog={catalogA} catalogError={null}
+        workspaceProject={noOrg} onCreateProject={() => {}}
+      />,
+    )
+    const action = screen.getByTestId('surface-project-action')
+    const reason = screen.getByTestId('surface-project-reason')
+    expect(action.disabled).toBe(true)
+    expect(reason.textContent).toContain('Create a workspace first')
+    // The reason must be ASSOCIATED with the control, not merely adjacent: a
+    // disabled button's title is not reliably announced.
+    expect(action.getAttribute('aria-describedby')).toBe(reason.id)
+    expect(reason.id).toBeTruthy()
+  })
+
+  it('F-9: an open workspace project renders as the plain project name, no action', () => {
+    const open = deriveWorkspaceProjectState({
+      openProjectId: 'p-1', projectName: 'Maple St retrofit', drawingName: 'rooftop_demo', orgId: 'org-1',
+    })
+    render(
+      <ProductSurfaceFrame
+        activeSurface="browser" states={states} catalog={catalogA} catalogError={null}
+        workspaceProject={open} onCreateProject={() => {}}
+      />,
+    )
+    const slot = screen.getByTestId('surface-project-state')
+    expect(slot.dataset.projectState).toBe('project')
+    expect(slot.textContent).toBe('Maple St retrofit')
+    expect(screen.queryByTestId('surface-project-action')).toBeNull()
+  })
+
+  it.each(['browser', 'solar'])(
+    'F-9: the %s frame renders the state ITSELF, alongside any caller slot',
+    (surface) => {
+      // sol-critic RED on #888: /try passed its header switcher as projectSlot,
+      // so its cards lost the explainer and the action entirely. The frame owns
+      // the state now, so a caller slot composes WITH it and cannot displace it.
+      render(
+        <ProductSurfaceFrame
+          activeSurface={surface} states={states} catalog={catalogA} catalogError={null}
+          workspaceProject={drawingOnly} onCreateProject={() => {}}
+          projectSlot={<span data-testid="caller-slot">switcher</span>}
+        />,
+      )
+      expect(screen.getByTestId('caller-slot')).toBeTruthy()
+      expect(screen.getByTestId('surface-project-state').textContent).toContain('No workspace project')
+      expect(screen.getByTestId('surface-project-action')).toBeTruthy()
+    },
+  )
+
+  it('F-9: iOS keeps its own project line — the ship lane owns that slot', () => {
+    render(
+      <ProductSurfaceFrame
+        activeSurface="ios" states={states} catalog={catalogA} catalogError={null}
+        workspaceProject={drawingOnly} onCreateProject={() => {}}
+        projectSlot={<span data-testid="ios-lane">ship lane</span>}
+      />,
+    )
+    expect(screen.getByTestId('ios-lane')).toBeTruthy()
+    expect(screen.queryByTestId('surface-project-state')).toBeNull()
+  })
+
+  it('F-9: BOTH shells hand the frame the derivation — no call-site can opt out', () => {
+    // The finding was a composition defect invisible to a component test, so
+    // this binds the two real call sites: /app (App.jsx) and /try (ToolCast).
+    for (const file of ['../App.jsx', '../site/ToolCast.jsx']) {
+      const src = readFileSync(`${process.cwd()}/src/components/${file}`.replace('/components/../', '/'), 'utf8')
+      const frame = src.slice(src.indexOf('<ProductSurfaceFrame'))
+      expect(frame).toContain('workspaceProject={workspaceProjectState}')
+      expect(frame).toContain('onCreateProject=')
+    }
+  })
+
+  it('F-9: the rail CONSUMES the derivation and never performs one', () => {
+    // sol-critic finding 2: the rail used to synthesize a literal 'legacy'
+    // openProjectId from a legacy prop — fabricating an identifier inside the
+    // fix for fabricated state. It reads the shared frozen resting state now.
+    const src = readFileSync(`${process.cwd()}/src/components/ProductSurfaceTabs.jsx`, 'utf8')
+    expect(src).not.toContain('deriveWorkspaceProjectState')
+    expect(src).not.toContain("'legacy'")
+    render(<ProductSurfaceTabs activeSurface="browser" states={states} onSelect={() => {}} />)
+    expect(screen.getByTestId('continuity-rail').dataset.projectState).toBe('empty')
+  })
+
+  it('F-9: an omitted workspaceProject degrades to the honest empty state, not to nothing', () => {
+    // sol-critic finding 2: the prop defaulted to null and the frame then
+    // rendered NO state, so a call site could silently drop it. Omission is a
+    // stated empty state now; it can never be silence.
+    render(
+      <ProductSurfaceFrame
+        activeSurface="browser" states={states} catalog={catalogA} catalogError={null}
+      />,
+    )
+    const slot = screen.getByTestId('surface-project-state')
+    expect(slot.dataset.projectState).toBe('empty')
+    expect(slot.textContent).toContain('No project open')
+  })
+
+  it('F-9: a create with no handler is disabled WITH a stated blocker', () => {
+    // sol-critic finding 3: `disabled` counted the missing handler but the
+    // reason did not, so this rendered a dead button with no explanation —
+    // the exact dead end this slot replaced.
+    render(
+      <ProductSurfaceFrame
+        activeSurface="browser" states={states} catalog={catalogA} catalogError={null}
+        workspaceProject={drawingOnly}
+      />,
+    )
+    const action = screen.getByTestId('surface-project-action')
+    expect(action.disabled).toBe(true)
+    const reason = screen.getByTestId('surface-project-reason')
+    expect(reason.textContent).toContain('not wired to create projects')
+    expect(action.getAttribute('aria-describedby')).toBe(reason.id)
+  })
+
+  it('F-9: rail and card agree — one derivation, never two answers on one screen', () => {
+    render(
+      <>
+        <ProductSurfaceTabs
+          activeSurface="browser" states={states} onSelect={() => {}}
+          workspaceProject={drawingOnly} catalog={catalogA}
+        />
+        <ProductSurfaceFrame
+          activeSurface="browser" states={states} catalog={catalogA} catalogError={null}
+          workspaceProject={drawingOnly} onCreateProject={() => {}}
+        />
+      </>,
+    )
+    expect(screen.getByTestId('continuity-rail').dataset.projectState)
+      .toBe(screen.getByTestId('surface-project-state').dataset.projectState)
   })
 
   it('F-8: every new motion rule is disabled under prefers-reduced-motion', () => {
