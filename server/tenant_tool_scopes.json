@@ -1,9 +1,0 @@
-{
-  "_note": "Per-tenant tool allowlists (server/tenant_scope.py). A tenant listed here sees and can run ONLY the named tools; every other tenant is unscoped and unaffected. Keys are platform tenant ids (orgs.org_id). Pair a scoped tenant with org tier `restricted` plus the `client_tool` role (server/roles.json: adds upload only) for a locked single-purpose app. Operator-tunable; override the path with LEAF_TENANT_TOOL_SCOPES_FILE. A malformed entry scopes its tenant to NOTHING, never to everything.",
-  "scopes": {
-    "841f64db-71eb-4987-90e0-5f5bf52fa3e7": {
-      "label": "Cut lists",
-      "tools": ["timber-cutlist-preflight", "timber-cutlist"]
-    }
-  }
-}

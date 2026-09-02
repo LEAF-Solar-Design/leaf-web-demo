@@ -1,5 +1,5 @@
 {
-  "_note": "Role -> capability overlay policy (contract/AUTH.md \u00a711.5). Operator-tunable: edit these booleans (or point LEAF_ROLES_FILE at another file) to change what each role ADDS on top of the tenant's tier entitlements (entitlements.json). Read at request time by server/roles.py. ADDITIVE-ONLY: a role can only turn a capability ON, never off \u2014 denial stays the tier policy's job. Roles arrive on the verified `https://leafdesign.ai/roles` claim, minted by the Post-Login Action from Auth0-native role assignments (event.authorization.roles), the root-level app_metadata.leaf_roles array, and the leaf_admin flag (which implies platform_admin). `elevated_grants` apply ONLY when the verified subject is ALSO on the server-owned LEAF_PLATFORM_ADMIN_SUBJECTS allowlist (the W14 two-factor rule) \u2014 platform_customize must never appear under plain grants (freeze-gated). Role NAMES are operator-extensible: add an entry here and mint the matching claim; unknown names in a token are ignored. org_admin / org_member are RESERVED preset slots for the org-configuration phase and deliberately grant nothing yet. client_tool (2026-09-02): the locked single-purpose client seat. Pair with org tier `restricted` (read-only floor) and a server/tenant_scope.py allowlist: the role adds ONLY `upload`, so the client can upload a drawing and run the scoped read tools, nothing else.",
+  "_note": "Role -> capability overlay policy (contract/AUTH.md §11.5). Operator-tunable: edit these booleans (or point LEAF_ROLES_FILE at another file) to change what each role ADDS on top of the tenant's tier entitlements (entitlements.json). Read at request time by server/roles.py. ADDITIVE-ONLY: a role can only turn a capability ON, never off — denial stays the tier policy's job. Roles arrive on the verified `https://leafdesign.ai/roles` claim, minted by the Post-Login Action from Auth0-native role assignments (event.authorization.roles), the root-level app_metadata.leaf_roles array, and the leaf_admin flag (which implies platform_admin). `elevated_grants` apply ONLY when the verified subject is ALSO on the server-owned LEAF_PLATFORM_ADMIN_SUBJECTS allowlist (the W14 two-factor rule) — platform_customize must never appear under plain grants (freeze-gated). Role NAMES are operator-extensible: add an entry here and mint the matching claim; unknown names in a token are ignored. org_admin / org_member are RESERVED preset slots for the org-configuration phase and deliberately grant nothing yet.",
   "platform_admin": {
     "grants": {
       "run_read": true,
@@ -22,12 +22,6 @@
   },
   "org_member": {
     "grants": {},
-    "elevated_grants": {}
-  },
-  "client_tool": {
-    "grants": {
-      "upload": true
-    },
     "elevated_grants": {}
   }
 }

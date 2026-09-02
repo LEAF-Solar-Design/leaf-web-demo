@@ -16,8 +16,6 @@ import catalog
 import converse_registry
 import customization_service
 import deps
-import entitlements
-import tenant_scope
 from envelopes import ErrorCode, error_obj, with_envelope_fields
 from routers import ops as ops_router
 
@@ -84,12 +82,6 @@ def capabilities(x_internal_role: Optional[str] = Header(default=None),
         )
     except customization_service.CustomizationServiceError as exc:
         return _catalog_error(exc)
-    except tenant_scope.ScopePolicyError:
-        # A corrupt tenant scope file (server/tenant_scope.py) must never
-        # unlock a scoped tenant's catalog: fail closed with the entitlement
-        # policy's structured 503, same as /api/tools and /api/entitlements.
-        return entitlements.policy_unavailable_response(
-            "run_read", entitlements.resolve_tier(tenant))
     tools = []
     for tool in raw_tools:
         view = deps.catalog_tool_view(tool)
