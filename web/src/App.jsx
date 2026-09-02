@@ -9,6 +9,7 @@ import DraftingRibbon from './site/DraftingRibbon.jsx'
 import PropertiesDock from './site/PropertiesDock.jsx'
 import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
 import { entityGeometry } from './lib/entityMetrics.js'
+import { loadDemoSolve } from './site/intakeCache.js'
 // The 3D viewer drags in `three`; loading it lazily (mirroring the auth.js
 // dynamic-import pattern) keeps first paint off the critical path.
 const Viewer = React.lazy(() => import('./components/Viewer.jsx'))
@@ -2211,6 +2212,43 @@ export default function App() {
     () => (studioGround ? familiesForSurface(catalog.families, activeSurface) : catalog.families),
     [studioGround, catalog.families, activeSurface],
   )
+
+  // W4c-V3: the Solar tab's ground material. Under the studio on the solar
+  // surface, the Panels layer takes the solar accent and every other layer
+  // keeps its palette - rail OFF (and every other surface) returns the SAME
+  // colorForLayer reference, so the old shell's canvas bytes are untouched
+  // (viewer-interaction screenshots compare layer colors rail-OFF).
+  const surfaceColorForLayer = useMemo(() => {
+    if (!(studioGround && activeSurface === 'solar')) return colorForLayer
+    return (layer) => (layer === 'Panels' ? '#7fd6a6' : colorForLayer(layer))
+  }, [studioGround, activeSurface, colorForLayer])
+
+  // W4c-V3: the 135 REAL solved string routes over the bundled rooftop
+  // sample, on the Solar tab only. Honesty gates, all structural:
+  //  - mock only: the live demo drawing is mutable and the bundled solve
+  //    was computed against these exact bytes, nothing else;
+  //  - the demo sample only (a fixture boot never shows another drawing's
+  //    strings);
+  //  - never over a version preview or a mutated head (StageLayer:107
+  //    precedent) - a delete-panel run makes v2 and the routes go stale.
+  const [demoSolveRoutes, setDemoSolveRoutes] = useState(null)
+  const solarStringsEligible = !!studioGround && activeSurface === 'solar' && mock
+    && DRAWING_SOURCE === 'rooftop_demo'
+  useEffect(() => {
+    if (!solarStringsEligible || demoSolveRoutes) return undefined
+    let live = true
+    loadDemoSolve().then((solve) => {
+      if (!live || !Array.isArray(solve?.strings)) return
+      setDemoSolveRoutes(solve.strings
+        .filter((route) => Array.isArray(route.pts) && route.pts.length >= 2)
+        .map((route) => ({ id: route.id, pts: route.pts })))
+    }).catch(() => { /* no solve, no overlay - never a fabricated route */ })
+    return () => { live = false }
+  }, [solarStringsEligible, demoSolveRoutes])
+  const solarStringRoutes = useMemo(() => {
+    if (!solarStringsEligible || previewing || (drawingState?.head ?? 1) > 1) return undefined
+    return demoSolveRoutes || undefined
+  }, [solarStringsEligible, previewing, drawingState, demoSolveRoutes])
   // iOS ship-lane readiness contract (leaf.ios-ship-surface.v1). Fetched only
   // with the surface flag baked on and a concrete project + revision; every
   // other case stays null, which IosSurface renders truthfully as
@@ -2833,7 +2871,8 @@ export default function App() {
                 <Viewer
                   ref={viewerRef}
                   intake={intake}
-                  colorForLayer={colorForLayer}
+                  colorForLayer={surfaceColorForLayer}
+                  stringRoutes={solarStringRoutes}
                   visibleLayers={visibleLayers}
                   highlightHandles={overlay?.highlight_handles}
                   markers={overlay?.markers}
@@ -2861,7 +2900,7 @@ export default function App() {
                 <Legend
                   layers={shown.layers}
                   counts={layerCounts}
-                  colorForLayer={colorForLayer}
+                  colorForLayer={surfaceColorForLayer}
                   visibleLayers={visibleLayers}
                   onToggle={toggleLayer}
                 />

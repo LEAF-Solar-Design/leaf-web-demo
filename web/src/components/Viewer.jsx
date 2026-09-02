@@ -659,6 +659,15 @@ const Viewer = forwardRef(function Viewer(
     const g = s.stringGroup
     s.stringAnim = null
     g.clear()
+    // Observable receipt for automation (W4c-V3): the mount says how many
+    // routes are actually drawn, and says NOTHING when none are - e2e
+    // asserts the honesty gates through this attribute.
+    const routeCount = stringRoutes ? stringRoutes.filter((rt) => (rt.pts || []).length >= 2).length : 0
+    const mountEl = mountRef.current
+    if (mountEl) {
+      if (routeCount > 0) mountEl.dataset.stringRoutes = String(routeCount)
+      else delete mountEl.dataset.stringRoutes
+    }
     if (!stringRoutes || stringRoutes.length === 0) return undefined
 
     const disposables = []
