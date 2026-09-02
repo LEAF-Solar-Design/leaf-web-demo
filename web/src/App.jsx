@@ -3,6 +3,7 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallba
 import { createPortal } from 'react-dom'
 import { track, setTourStep } from './telemetry.js'
 import { useStudioGround } from './site/studioGround.js'
+import SurfaceGrounds, { groundShowsDrawing } from './site/SurfaceGrounds.jsx'
 // The 3D viewer drags in `three`; loading it lazily (mirroring the auth.js
 // dynamic-import pattern) keeps first paint off the critical path.
 const Viewer = React.lazy(() => import('./components/Viewer.jsx'))
@@ -2440,6 +2441,25 @@ export default function App() {
           workspaceProject={workspaceProjectState}
           catalog={catalog}
         />
+        {/* W4a surface grounds (site/SurfaceGrounds.jsx): under the studio
+            shell the ground IS each tab's workspace — the project board for
+            Browser, the device stage for iOS; CAD and Solar CAD keep the
+            drawing (portaled above). ONLY through the ground portal: the
+            old shell has no ground, so rail OFF renders none of this. */}
+        {studioGround && createPortal(
+          <SurfaceGrounds
+            surface={activeSurface}
+            workspaceProject={workspaceProjectState}
+            workspace={!mock && openProjectId ? workspace : null}
+            drawing={shown ? { name: projectName, polylines: shown.polylines.length, layers: shown.layers.length } : null}
+            catalog={catalog}
+            mock={mock}
+            iosEnabled={ENV_IOS_SURFACE}
+            iosContract={iosContract}
+            revision={canonicalVersionId}
+          />,
+          studioGround,
+        )}
         {activeSurface !== 'cad' && (
           <ProductSurfaceFrame
             activeSurface={activeSurface}
@@ -2704,8 +2724,11 @@ export default function App() {
                 />
                 </Suspense>
               )
+              // W4a: the drawing is the ground for CAD and Solar CAD only;
+              // on Browser/iOS it stays mounted (WebGL, lock, job state
+              // survive) but hidden while that surface's own ground shows.
               return studioGround
-                ? createPortal(<div className="studio-ground-viewer">{viewerEl}</div>, studioGround)
+                ? createPortal(<div className="studio-ground-viewer" hidden={!groundShowsDrawing(activeSurface)}>{viewerEl}</div>, studioGround)
                 : viewerEl
             })()}
             {shown && (
