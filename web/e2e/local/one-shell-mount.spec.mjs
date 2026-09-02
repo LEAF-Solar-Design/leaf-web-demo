@@ -128,6 +128,52 @@ test.describe('route matrix, rail ON', () => {
     }
   })
 
+  test('each tab has its own ground: drawing for CAD and Solar CAD, the project board for Browser, the device stage for iOS', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    await page.goto('/app')
+    await expectOneCanvasIn(page, '.studio-ground')
+    const viewer = page.locator('.studio-ground .studio-ground-viewer')
+    const board = page.locator('.studio-ground [data-ground="browser"]')
+    const device = page.locator('.studio-ground [data-ground="ios"]')
+    // Both non-drawing grounds are MOUNTED from the start (one mount, toggled
+    // by `hidden`), and hidden while the drawing shows.
+    await expect(board).toHaveCount(1)
+    await expect(device).toHaveCount(1)
+    await expect(viewer).toBeVisible()
+    await expect(board).toBeHidden()
+    await expect(device).toBeHidden()
+
+    await page.getByRole('tab', { name: 'Browser' }).click()
+    await expect(board).toBeVisible()
+    await expect(viewer).toBeHidden()
+    await expect(device).toBeHidden()
+    // The canvas is still there (hidden), never torn down by a tab switch.
+    await expect(page.locator('.studio-ground .viewer-canvas canvas')).toHaveCount(1)
+    await expect(board.locator('[data-tile="drawing"]')).toContainText(/polylines/)
+    await expect(board.locator('[data-tile="catalog"]')).toContainText(/famil/)
+
+    await page.getByRole('tab', { name: 'iOS' }).click()
+    await expect(device).toBeVisible()
+    await expect(board).toBeHidden()
+    await expect(viewer).toBeHidden()
+    await expect(device.locator('.device-frame')).toHaveCount(1)
+    await expect(device.locator('[data-testid="device-state"]')).not.toBeEmpty()
+
+    await page.getByRole('tab', { name: 'Solar CAD' }).click()
+    await expect(viewer).toBeVisible()
+    await expect(board).toBeHidden()
+    await expect(device).toBeHidden()
+    await expectOneCanvasIn(page, '.studio-ground')
+
+    // Deep link straight into a non-drawing surface boots that ground.
+    await page.goto('/app?surface=browser')
+    await expect(page.locator(STUDIO)).toHaveCount(1)
+    await expect(page.locator('.studio-ground [data-ground="browser"]')).toBeVisible()
+    await expect(page.locator('.studio-ground .studio-ground-viewer')).toBeHidden()
+  })
+
   test('/try stays the operator stage; /sheets and unknown paths never mount the studio', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
@@ -196,6 +242,11 @@ test.describe('route matrix, rail OFF + rollback', () => {
     await expect(page.locator('.studio-ground')).toHaveCount(0)
     await expectOneCanvasIn(page, '.viewer-wrap')
     expect(await page.locator('[data-checkout-instance]').count()).toBe(1)
+    // No surface ground exists without the shell — on any tab.
+    await expect(page.locator('[data-ground]')).toHaveCount(0)
+    await page.getByRole('tab', { name: 'Browser' }).click()
+    await expect(page.locator('[data-ground]')).toHaveCount(0)
+    await expect(page.locator('#product-surface-panel')).toHaveCount(1)
   })
 
   test('ROLLBACK: on -> off restores the old shell with no stale storage, URL state, or provider duplication', async ({ page, request }) => {

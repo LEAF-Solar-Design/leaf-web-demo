@@ -81,7 +81,17 @@ describe('App portal wiring', () => {
 
   it('renders the Viewer through the ground portal ONLY when a ground exists', () => {
     expect(src).toMatch(/const studioGround = useStudioGround\(\)/)
-    expect(src).toMatch(/studioGround\s*\n?\s*\? createPortal\(<div className="studio-ground-viewer">\{viewerEl\}<\/div>, studioGround\)\s*\n?\s*: viewerEl/)
+    expect(src).toMatch(/studioGround\s*\n?\s*\? createPortal\(<div className="studio-ground-viewer" hidden=\{!groundShowsDrawing\(activeSurface\)\}>\{viewerEl\}<\/div>, studioGround\)\s*\n?\s*: viewerEl/)
+  })
+
+  it('mounts the surface grounds ONLY through the ground portal (rail OFF has no ground, so none of it)', () => {
+    // W4a: the project board and device stage are studio-only by
+    // construction. One JSX occurrence, and it sits inside the
+    // `studioGround && createPortal(` guard — never rendered inline.
+    const occurrences = src.match(/<SurfaceGrounds/g) || []
+    expect(occurrences).toHaveLength(1)
+    expect(src).toMatch(/\{studioGround && createPortal\(\s*\n?\s*<SurfaceGrounds/)
+    expect(src).toMatch(/import SurfaceGrounds, \{ groundShowsDrawing \} from '\.\/site\/SurfaceGrounds\.jsx'/)
   })
 
   it('the grounded viewer goes transparent; the inline viewer keeps its default', () => {
@@ -141,7 +151,12 @@ describe('falsification', () => {
 
   it('a portal without the null-ground inline fallback fails the portal pin', () => {
     const mutated = read('../App.jsx').replace(': viewerEl', ': null')
-    expect(mutated).not.toMatch(/\? createPortal\(<div className="studio-ground-viewer">\{viewerEl\}<\/div>, studioGround\)\s*\n?\s*: viewerEl/)
+    expect(mutated).not.toMatch(/\? createPortal\(<div className="studio-ground-viewer" hidden=\{!groundShowsDrawing\(activeSurface\)\}>\{viewerEl\}<\/div>, studioGround\)\s*\n?\s*: viewerEl/)
+  })
+
+  it('an inline (unguarded) SurfaceGrounds fails the portal-only pin', () => {
+    const mutated = read('../App.jsx').replace(/\{studioGround && createPortal\(\s*\n\s*<SurfaceGrounds/, '{createPortal(\n          <SurfaceGrounds')
+    expect(mutated).not.toMatch(/\{studioGround && createPortal\(\s*\n?\s*<SurfaceGrounds/)
   })
 
   it('a commented-out deferral no longer satisfies the deferral pin', () => {

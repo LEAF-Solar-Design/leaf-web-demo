@@ -99,3 +99,7 @@ export default function IosSurface({ enabled, contract }) {
     </section>
   )
 }
+
+// Shared with the studio shell's device ground (site/SurfaceGrounds.jsx):
+// ONE derivation of the ship-lane state from the contract, never two.
+export { deriveState as deriveIosState, humanizeStage, STATE_LABEL as IOS_STATE_LABEL }

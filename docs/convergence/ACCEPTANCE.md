@@ -215,3 +215,37 @@ Deliberately deferred, with owners:
 - Cosmetic: `ViewerSkeleton` paints `#0f0f11` inline at z0 under the studio;
   the loading verb re-pins light. Skeleton material moves with W4's ground
   tokens.
+
+### Surface grounds (W4a, panel-free slice; operator direction 2026-09-02: "the cad surface on each tab should be a similar workspace, appropriate to the application")
+
+Under the rail the ground is each tab's workspace, never the drawing behind
+every tab: CAD and Solar CAD keep the portaled Viewer; Browser gets the
+project BOARD (`site/SurfaceGrounds.jsx` `ProjectBoardGround`: the mounted
+drawing, versions, jobs, built tools, the live catalog, the shared
+capabilities, all from the same state the console already holds, honest
+empties otherwise); iOS gets the DEVICE stage (`DeviceGround`: state derived
+by `IosSurface`'s own `deriveIosState`, the three lane rungs lit only from
+booleans, dormant reveals nothing). Contract:
+
+- Rail OFF renders none of it: the grounds mount ONLY through App's
+  studio-ground portal (`siteRootOneShell.test.js` pins one `<SurfaceGrounds`
+  occurrence inside the `studioGround && createPortal(` guard, with a
+  falsification); the e2e OFF row asserts zero `[data-ground]` on every tab.
+- One mount, toggled by `hidden`: a tab switch never remounts a ground (unit
+  test pins node identity) and the drawing's canvas survives hidden (e2e
+  counts it on the Browser tab).
+- THE WINDOW: on Browser and iOS the product frame is transparent chrome
+  (head, title, project line as light ink; columns and notes hidden because
+  the ground carries them as tiles) over a 460px window; the ground measures
+  `#product-surface-panel` and lays its content below the frame's chrome
+  (`measureGroundWindow`, ResizeObserver + scroll + resize), falling back to
+  the CSS-variable geometry in landing.css when there is no layout. The
+  pointer chain extends through the frame with the same `:where()` rule.
+- Receipts: `surfaceGrounds.test.jsx` (states, honesty, hidden-not-unmounted,
+  dormant leaks nothing); `one-shell-mount.spec.mjs` row "each tab has its
+  own ground" (rail ON: visibility per tab, canvas survives, deep link to
+  `?surface=browser`; rail OFF: no ground on any tab).
+- Deferred: the Solar CAD ground is the drawing today (its identity is the
+  solar tool set in the console); a solar-specific ground material lands
+  with W4's token re-pin. Board tiles are read-only in W4a; version select,
+  job reattach, and built-tool open move onto the board with W5 showcases.
