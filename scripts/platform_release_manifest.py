@@ -101,6 +101,10 @@ SURFACE_INPUTS: dict[str, tuple[str, ...]] = {
         ".dockerignore",
         "deploy/Dockerfile.web",
         "deploy/nginx.conf",
+        # W3 one-shell rail: the entrypoint drop-in rewrites runtime-flags.js
+        # at container boot from the task-definition env - an edit changes
+        # what every environment serves, so it must move the fingerprint.
+        "deploy/write-runtime-flags.sh",
         "web",
         # Card F-3: the web image now compiles the CAD engine in its own
         # build stage — the vendored wrapper crate and the stage script are
