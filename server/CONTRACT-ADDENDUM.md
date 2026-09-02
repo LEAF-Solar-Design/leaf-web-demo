@@ -580,9 +580,22 @@ line in `server/app.py`.
 ### D. `GET /api/drawings/{id}/versions` gains `checkout`
 
 The versions response now carries `"checkout": {holder, acquired, expires} | null`
-straight from the store manifest's single-writer lock — read-only (no
-acquire/release endpoints this wave), for a calm "someone else is editing" chip.
+from the store manifest's single-writer lock — read-only (no acquire/release
+endpoints this wave), for a calm "someone else is editing" chip.
 Ownership: extends `server/routers/drawings.py` (`da/store.py` unchanged).
+
+**Update (elapsed leases are null, 2026-09-02).** The field answers "who is
+editing RIGHT NOW", so it is populated only while `store.checkout_active` says
+the lease is LIVE. An elapsed lock reads `null`, exactly as an absent one does,
+because every other path already treats the two alike: `acquire_checkout_fence`
+re-grants an expired lock to anyone, `release_checkout` lets anyone clear one,
+and a write over one is admitted unauthenticated. Neither storage authority
+erases the lapsed record eagerly, so publishing it verbatim made this read the
+one surface that called a lock held while the rest of the system called it free
+— measured on platform-staging, a lease reported for 827 minutes after it ended,
+suppressing write tools for every viewer of a drawing nobody held. The 409
+not-acquired body is unchanged: an acquire is refused only for a LIVE lease, so
+its `checkout` and `locked_by` still name the holder.
 
 **Update (checkout capability, 2026-07-25).** `holder` on this read is a DISPLAY
 LABEL only. It is public to every member of the tenant, so it cannot also be the

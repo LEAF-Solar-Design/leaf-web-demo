@@ -553,7 +553,10 @@ def build_suites() -> List[Suite]:
         # (test_hardening_2c_microvm.py is registered above as "server-microvm";
         # it was listed twice, running the same 14 tests for no added coverage.)
         Suite("server-hardening-3b", "server tests/test_hardening_3b.py", "pytest", SERVER,
-              _py_pytest("tests/test_hardening_3b.py"), 14),
+              # 14 -> 15 on 2026-09-02: matrix item 7 gained its read-side twin
+              # (GET /versions withholds an elapsed lease). Nothing in this suite
+              # skips, so the local count IS the CI count.
+              _py_pytest("tests/test_hardening_3b.py"), 15),
         # The opaque checkout capability's own unit acceptance. Separate from the
         # HTTP suites because the SUBJECT binding only exists with auth live, and
         # those suites run against the LEAF_AUTH_LIVE=0 header stub.

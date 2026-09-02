@@ -295,6 +295,32 @@ def _checkout_view(co: Any) -> Any:
     or null. GET /versions renders this read-only ("someone else is editing" chip);
     the POST/DELETE .../checkout routes below let the holder TAKE and RELEASE it.
 
+    AN ELAPSED LEASE IS NULL, and the judgment comes from `store.checkout_active`
+    rather than from a timestamp compared here. The question this field answers is
+    "who is editing RIGHT NOW", and the store's answer for a lapsed lease is
+    "nobody": `acquire_checkout_fence` re-grants an expired lock to anyone,
+    `release_checkout` lets anyone clear one, and `_lock_authorization` below
+    admits a write over one unauthenticated. Neither authority erases the lapsed
+    record eagerly (the postgres `load_manifest` rebuilds `checkout` from
+    `checkout_holder` whatever `checkout_expires_at` says; the legacy manifest just
+    keeps the dict), so returning it verbatim made this read the ONE surface in the
+    system that called a lock held while every other path called it free.
+
+    Measured on platform-staging 2026-09-02: a lease that ended 01:56:42Z was still
+    published at 15:46Z, so the rail read "Editing locked by sess-72d58f4d…" for 827
+    minutes and suppressed write tools that whole time, on a drawing nobody held.
+
+    The client cannot decide this for itself and must not try. The browser clock is
+    not an authority on expiry (web/src/checkoutIdentity.js `looksStale`: a clock
+    two hours slow wedged the UI, one two hours fast falsely enabled writes), so it
+    fails closed on ANY reported holder. Withdrawing the dead record is the server
+    saying the one thing only the server can say, and it needs no client change —
+    an already-loaded tab stops seeing the phantom on its next refresh.
+
+    A holderless-but-present record (`{}`, which is truthy over the wire) is null
+    here for the same reason: `checkout_active` rejects it, so the client no longer
+    has to re-reject an empty object one reader at a time.
+
     `holder` is a DISPLAY LABEL and nothing more. It is public on this read by
     design — the UI's "locked by X" chip needs a name — so it can never be the
     thing that proves ownership; the opaque capability minted at acquire is
@@ -306,7 +332,11 @@ def _checkout_view(co: Any) -> Any:
     either (it holds a capability instead), and an ownership generation is not
     something to publish to everyone who can read the drawing.
     """
-    if not co:
+    import store  # da/store.py; importable via write_loop's sys.path setup
+
+    # `checkout_active` is the store's OWN rule, called rather than copied, so
+    # this read and the write paths cannot drift on what "held" means.
+    if not store.checkout_active(co):
         return None
     return {"holder": co.get("holder"), "acquired": co.get("acquired"),
             "expires": co.get("expires")}

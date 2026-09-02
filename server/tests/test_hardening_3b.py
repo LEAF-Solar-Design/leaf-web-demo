@@ -19,7 +19,8 @@ Covers the acceptance matrix:
   4. release by the holder -> 200 + cleared state; GET /versions shows it cleared;
   5. release by a NON-holder -> 403 and the lock is left intact;
   6. a read tool run (count-by-layer) is UNAFFECTED by a held lock;
-  7. an EXPIRED lock is re-acquirable by a different holder;
+  7. an EXPIRED lock is re-acquirable by a different holder, and GET /versions
+     stops publishing it the moment it elapses (its read-side twin);
   8. the default holder is the tenant id (bodyless POST / no-holder DELETE);
   9. releasing when nothing is held is an idempotent 200.
 
@@ -317,6 +318,48 @@ def test_expired_lock_is_reacquirable(stack):
     assert body["acquired"] is True
     assert body["checkout"]["holder"] == "bob"
     assert versions(stack, t).json()["checkout"]["holder"] == "bob"
+
+
+# --------------------------------------------------------------------------- #
+# 7b. GET /versions publishes a LIVE lease and WITHHOLDS an elapsed one
+#
+# The read-side twin of 7. That test proves the store treats an elapsed lock as
+# free; this one proves the read agrees. It did not: `_checkout_view` returned
+# None only for an ABSENT record, so a lapsed lease stayed on this surface until
+# somebody took or released the lock. Measured on platform-staging 2026-09-02, a
+# lease that ended at 01:56:42Z was still reported at 15:46Z — 827 minutes — and
+# the CAD rail read "Editing locked by sess-72d58f4d…" the whole time, on a
+# drawing nobody held, with write tools suppressed for every viewer.
+#
+# BOTH states, one clock apart on the SAME drawing. Asserting only the elapsed
+# null is satisfied by a route that answers null for every lock, which would take
+# the chip away from a live lease too; asserting only the live record is what the
+# suite already did when the defect shipped.
+# --------------------------------------------------------------------------- #
+def test_versions_withholds_an_elapsed_lease_but_publishes_a_live_one(stack):
+    t = "co-elapsed-read"
+    assert acquire(stack, t, holder="alice", ttl_s=1).status_code == 200
+
+    # LIVE: the record is published, which is what renders "locked by alice".
+    live = versions(stack, t).json()["checkout"]
+    assert live is not None, "a live lease must still be published"
+    assert live["holder"] == "alice"
+    assert live["acquired"] and live["expires"]
+
+    time.sleep(1.3)                                                  # the lease elapses
+
+    # ELAPSED: the store re-grants this lock to anyone, so the read must say free.
+    assert versions(stack, t).json()["checkout"] is None
+
+    # … and the record is still IN the manifest: the view withheld it, nothing
+    # cleared it. A GET that mutated the store would be a worse fix than the bug.
+    # `release_checkout` reports False for an absent lock and True when it clears
+    # one, and an elapsed lock is releasable with no capability at all, so this
+    # distinguishes "withheld" from "erased" over HTTP alone.
+    rel = release(stack, t)
+    assert rel.status_code == 200, rel.text
+    assert rel.json()["released"] is True, (
+        "the elapsed record vanished from the manifest: the read cleared it")
 
 
 # --------------------------------------------------------------------------- #
