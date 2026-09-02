@@ -124,7 +124,10 @@ describe('rollback contract', () => {
       expect(rule.slice(0, rule.indexOf('}')), link).toMatch(/pointer-events: none/)
     }
     for (const restore of ['.app > *', '.center-col > *', 'main.center-scroll > *', '.workspace-card > *', '.viewer-wrap > *']) {
-      expect(block, restore).toMatch(new RegExp(`:where\\(\\.studio-shell ${restore.replace(/[.*]/g, '\\$&')}\\) \\{ pointer-events: auto; \\}`))
+      // Literal rule text, not a regex built from the selector (CodeQL
+      // js/incomplete-sanitization on the escape helper, and a literal is
+      // the stronger pin anyway).
+      expect(block, restore).toContain(`:where(.studio-shell ${restore}) { pointer-events: auto; }`)
     }
   })
 })
