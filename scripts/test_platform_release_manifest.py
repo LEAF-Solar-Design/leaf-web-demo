@@ -679,6 +679,42 @@ def test_v2_manifest_feeds_production_handoff_unchanged(tmp_path: Path):
     assert handoff["proof"]["staging_digests_equal_release"] is True
 
 
+def test_v3_manifest_projects_to_the_stable_production_handoff(tmp_path: Path):
+    repo, source = _repository(tmp_path)
+    manifest = build_v3_manifest(
+        source,
+        "e" * 40,
+        RUN_ID,
+        RUN_ATTEMPT,
+        {name: _v3_entry(name) for name in SERVICES},
+    )
+
+    handoff = verify_staging_receipt(
+        manifest,
+        _receipt(source),
+        repo,
+        "main",
+        _release_proof(source),
+        _acceptance_proof(source),
+        "release-proof-1",
+    )
+
+    assert handoff["source_revision"] == source
+    assert handoff["staging_supply_set_manifest_sha256"] == hashlib.sha256(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    services = handoff["staging_supply_set_services"]
+    assert all(service["source_revision"] == source for service in services.values())
+    assert set(services["app"]) == {"repository", "image_digest", "source_revision"}
+    assert services["web"]["artifact_sha256"] == WEB_HASH
+    assert services["canonical-worker"]["provenance"] == {
+        "application_source_revision": source,
+        "solver_source_revision": SOLVER_REVISION,
+        "solver_source_sha256": SOLVER_HASH,
+    }
+    assert "producer_source_revision" not in services["canonical-worker"]
+
+
 @pytest.mark.parametrize(
     "mutate",
     [

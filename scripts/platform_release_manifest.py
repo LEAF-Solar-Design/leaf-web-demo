@@ -1085,6 +1085,40 @@ def _validate_run_proof(proof: dict[str, Any], label: str) -> None:
         raise ContractError(f"{label} workflow run proof is invalid")
 
 
+def _production_handoff_projection(
+    manifest: dict[str, Any],
+) -> tuple[str, dict[str, dict[str, Any]]]:
+    """Project every accepted supply schema into the stable handoff contract.
+
+    V3 keeps producer identity and release identity separate. Production
+    consumers still read the compact handoff v1 service shape, so bind each
+    projected row to the release source while the full producer evidence stays
+    authenticated by the supply-set manifest hash.
+    """
+
+    if manifest["schema"] != SCHEMA_V3:
+        return manifest["source_revision"], copy.deepcopy(manifest["services"])
+
+    source = manifest["release_source_revision"]
+    services: dict[str, dict[str, Any]] = {}
+    for name in SERVICES:
+        entry = manifest["services"][name]
+        projected = {
+            "repository": entry["repository"],
+            "image_digest": entry["image_digest"],
+            "source_revision": source,
+        }
+        if name == "web":
+            projected["artifact_sha256"] = entry["artifact_sha256"]
+        if name == "canonical-worker":
+            projected["provenance"] = {
+                "application_source_revision": source,
+                **entry["solver_provenance"],
+            }
+        services[name] = projected
+    return source, services
+
+
 def verify_staging_receipt(
     manifest: dict[str, Any],
     receipt: dict[str, Any],
@@ -1101,7 +1135,7 @@ def verify_staging_receipt(
         raise ContractError("production handoff requires executed staging acceptance")
     if receipt.get("ok") is not True or receipt.get("secrets_recorded") is not False:
         raise ContractError("staging acceptance did not finish safely")
-    source = manifest["source_revision"]
+    source, handoff_services = _production_handoff_projection(manifest)
     if receipt.get("source_revision") != source:
         raise ContractError("staging and release source revisions differ")
     images = receipt.get("images")
@@ -1165,7 +1199,7 @@ def verify_staging_receipt(
             "source_revision": source,
             "images": images,
         },
-        "staging_supply_set_services": manifest["services"],
+        "staging_supply_set_services": handoff_services,
         "proof": {
             "source_is_ancestor_of_main": True,
             "staging_digests_equal_release": True,
