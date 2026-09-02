@@ -11,6 +11,10 @@
 # permissions: write-all anywhere. tests/test_contract_workflow_shape.py also
 # binds this file's own shape: pull_request trigger, job id `contract`, and
 # no concurrency block.
+# tests/test_dispatch_staging_deploys_shape.py pins the staging relay's
+# concurrency block by key name (never cancel a running relay; the group is
+# predicated on the dispatch job's own gate), proven RED by mutation. Test
+# files are listed here BY NAME: a new one that is not listed never runs.
 #
 # Deliberately carries NO concurrency block (the tf immune pattern) -- do NOT
 # copy test-gate.yml's cancel-in-progress: true + per-PR group here.
@@ -46,4 +50,7 @@ jobs:
         # platform and crashes pytest at import (uuid -> platform.system).
         env:
           PYTHONSAFEPATH: "1"
-        run: python -m pytest -q tests/test_contract_workflow_shape.py
+        run: >-
+          python -m pytest -q
+          tests/test_contract_workflow_shape.py
+          tests/test_dispatch_staging_deploys_shape.py
