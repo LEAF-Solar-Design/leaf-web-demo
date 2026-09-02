@@ -1143,12 +1143,24 @@ def main() -> None:
     assert "/compare/$ACCEPTANCE_HEAD_SHA...main" in handoff_body
     assert "staging-authored-execute-" in text
     assert "platform_release_manifest.py verify-staging" in handoff_body
+    # Same-repository Actions reads use github.token. The narrowly scoped PAT
+    # is selected only by the helper that reads the Terraform repository. A
+    # job-wide PAT caused the first release-run read to fail with HTTP 403 in
+    # production-handoff run 33612473907.
+    assert "    permissions:\n      actions: read\n      contents: read\n" in handoff_body
+    assert "GH_TOKEN: ${{ github.token }}" in handoff_body
+    assert "ACCEPTANCE_TOKEN: ${{ secrets.TERRAFORM_REPO_TOKEN }}" in handoff_body
+    assert 'GH_TOKEN="$ACCEPTANCE_TOKEN" gh api "$@"' in handoff_body
+    assert handoff_body.count(
+        'acceptance_api "repos/$ACCEPTANCE_REPOSITORY/'
+    ) == 5
+    assert 'gh api "repos/$ACCEPTANCE_REPOSITORY/' not in handoff_body
     # The handoff checkout persists no credentials and the repository is
     # private, so the pre-verify-staging main fetch must carry the scoped
     # auth-header idiom on the workflow's own token. A bare
     # `git fetch --no-tags origin main` fails on auth the first time a
     # promote is dispatched (it has never fired: no promote has run), and
-    # the job-level cross-repo PAT stays out of the git header.
+    # the cross-repo PAT stays out of the git header.
     assert "git fetch --no-tags origin main" not in handoff_body
     assert "http.https://github.com/.extraheader" in handoff_body
     assert "fetch --no-tags origin main" in handoff_body

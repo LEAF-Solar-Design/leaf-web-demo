@@ -68,8 +68,9 @@ name: Build platform images
 # (speculate pushes real spec-* images by
 # design, so it genuinely needs the release role; that namespace is fenced
 # from deploys as described above.)
-# TERRAFORM_REPO_TOKEN (PAT with Actions read access to both repositories) is
-# only needed for the optional promote step.
+# TERRAFORM_REPO_TOKEN (PAT with Actions and contents read access to the
+# Terraform repository) is only needed for the optional promote step. The
+# job-scoped GitHub token reads this repository.
 # ---------------------------------------------------------------------------
 
 on:
@@ -3572,8 +3573,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
+    permissions:
+      actions: read
+      contents: read
+
     env:
-      GH_TOKEN: ${{ secrets.TERRAFORM_REPO_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+      ACCEPTANCE_TOKEN: ${{ secrets.TERRAFORM_REPO_TOKEN }}
       RELEASE_RUN_ID: ${{ inputs.release_workflow_run_id }}
       RELEASE_RUN_ATTEMPT: ${{ inputs.release_run_attempt }}
       ACCEPTANCE_RUN_ID: ${{ inputs.staging_acceptance_workflow_run_id }}
@@ -3601,6 +3607,13 @@ jobs:
           ACCEPTANCE_REPOSITORY=LEAF-Solar-Design/leaf-automation-aws-terraform
           ACCEPTANCE_WORKFLOW_PATH=.github/workflows/accept-leaf-platform-staging-authored-cad.yml
           RELEASE_ARTIFACT="staging-supply-set-$SOURCE_SHA-attempt-$RELEASE_RUN_ATTEMPT"
+          [ -n "$ACCEPTANCE_TOKEN" ] || {
+            echo "::error::TERRAFORM_REPO_TOKEN is required for the cross-repository acceptance reads."
+            exit 1
+          }
+          acceptance_api() {
+            GH_TOKEN="$ACCEPTANCE_TOKEN" gh api "$@"
+          }
           [[ "$ACCEPTANCE_ARTIFACT" =~ ^staging-authored-execute-([a-z0-9][a-z0-9-]{5,49})-run-${ACCEPTANCE_RUN_ID}-attempt-${ACCEPTANCE_RUN_ATTEMPT}$ ]]
           ACCEPTANCE_RECEIPT_RUN_ID=${BASH_REMATCH[1]}
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RELEASE_RUN_ID" \
@@ -3627,9 +3640,9 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$RELEASE_ARTIFACT_ID/zip" \
             > "$RUNNER_TEMP/release.zip"
           unzip -q "$RUNNER_TEMP/release.zip" -d "$RUNNER_TEMP/release"
-          gh api "repos/$ACCEPTANCE_REPOSITORY/actions/runs/$ACCEPTANCE_RUN_ID" \
+          acceptance_api "repos/$ACCEPTANCE_REPOSITORY/actions/runs/$ACCEPTANCE_RUN_ID" \
             > "$RUNNER_TEMP/staging-acceptance-run.json"
-          gh api "repos/$ACCEPTANCE_REPOSITORY/actions/workflows/accept-leaf-platform-staging-authored-cad.yml" \
+          acceptance_api "repos/$ACCEPTANCE_REPOSITORY/actions/workflows/accept-leaf-platform-staging-authored-cad.yml" \
             > "$RUNNER_TEMP/staging-acceptance-workflow.json"
           ACCEPTANCE_HEAD_SHA=$(jq -er '.head_sha' "$RUNNER_TEMP/staging-acceptance-run.json")
           python scripts/platform_release_manifest.py verify-workflow-run \
@@ -3640,13 +3653,13 @@ jobs:
             --workflow-path "$ACCEPTANCE_WORKFLOW_PATH" \
             --event workflow_dispatch --branch main --head-sha "$ACCEPTANCE_HEAD_SHA" \
             --output "$RUNNER_TEMP/staging-acceptance-run-proof.json"
-          gh api "repos/$ACCEPTANCE_REPOSITORY/compare/$ACCEPTANCE_HEAD_SHA...main" \
+          acceptance_api "repos/$ACCEPTANCE_REPOSITORY/compare/$ACCEPTANCE_HEAD_SHA...main" \
             > "$RUNNER_TEMP/staging-acceptance-main-ancestry.json"
           jq -e --arg head "$ACCEPTANCE_HEAD_SHA" '
             (.merge_base_commit.sha | ascii_downcase) == $head
             and (.status == "ahead" or .status == "identical")
           ' "$RUNNER_TEMP/staging-acceptance-main-ancestry.json" >/dev/null
-          gh api "repos/$ACCEPTANCE_REPOSITORY/actions/runs/$ACCEPTANCE_RUN_ID/artifacts?per_page=100" \
+          acceptance_api "repos/$ACCEPTANCE_REPOSITORY/actions/runs/$ACCEPTANCE_RUN_ID/artifacts?per_page=100" \
             > "$RUNNER_TEMP/staging-acceptance-artifacts.json"
           python scripts/platform_release_manifest.py verify-artifact \
             --listing "$RUNNER_TEMP/staging-acceptance-artifacts.json" \
@@ -3655,7 +3668,7 @@ jobs:
             --output "$RUNNER_TEMP/staging-acceptance-artifact.json"
           ACCEPTANCE_ARTIFACT_ID=$(jq -er '.id' "$RUNNER_TEMP/staging-acceptance-artifact.json")
           mkdir -p "$RUNNER_TEMP/staging-acceptance"
-          gh api "repos/$ACCEPTANCE_REPOSITORY/actions/artifacts/$ACCEPTANCE_ARTIFACT_ID/zip" \
+          acceptance_api "repos/$ACCEPTANCE_REPOSITORY/actions/artifacts/$ACCEPTANCE_ARTIFACT_ID/zip" \
             > "$RUNNER_TEMP/staging-acceptance.zip"
           unzip -q "$RUNNER_TEMP/staging-acceptance.zip" \
             -d "$RUNNER_TEMP/staging-acceptance"
