@@ -320,6 +320,58 @@ describe('F-7: surface frames render the live tenant catalog', () => {
     expect(src).toContain('key={surface.id} className="tc-product-morph"')
   })
 
+  // --- persistent sign-out affordance ---------------------------------
+  // 2026-09-02 reconciliation (row B11): the deployed /try console had no
+  // reachable sign-out control, only a toast buried behind Trust panel ->
+  // Account details. The nav is the ONE always-mounted element that never
+  // remounts across a surface switch (same F-8 node-identity contract as
+  // the continuity rail), so it is the persistent home for the control.
+  it('renders no sign-out control when signed out', () => {
+    render(
+      <ProductSurfaceTabs
+        activeSurface="browser" states={states} onSelect={() => {}}
+        signedIn={false} onSignOut={() => {}}
+      />,
+    )
+    expect(screen.queryByRole('button', { name: /sign out/i })).toBeNull()
+  })
+
+  it('renders no sign-out control when signed in but no handler is wired', () => {
+    render(
+      <ProductSurfaceTabs
+        activeSurface="browser" states={states} onSelect={() => {}}
+        signedIn
+      />,
+    )
+    expect(screen.queryByRole('button', { name: /sign out/i })).toBeNull()
+  })
+
+  it('renders a persistent sign-out control when signed in, and invokes signOut on click', () => {
+    const signOut = []
+    render(
+      <ProductSurfaceTabs
+        activeSurface="browser" states={states} onSelect={() => {}}
+        signedIn onSignOut={() => signOut.push(true)}
+      />,
+    )
+    const btn = screen.getByRole('button', { name: /sign out/i })
+    fireEvent.click(btn)
+    expect(signOut).toEqual([true])
+  })
+
+  it('the sign-out control survives a surface switch on the same always-mounted nav', () => {
+    const nav = (surface) => (
+      <ProductSurfaceTabs
+        activeSurface={surface} states={states} onSelect={() => {}}
+        signedIn onSignOut={() => {}}
+      />
+    )
+    const { rerender } = render(nav('browser'))
+    const before = screen.getByRole('button', { name: /sign out/i })
+    rerender(nav('solar'))
+    expect(screen.getByRole('button', { name: /sign out/i })).toBe(before)
+  })
+
   it('no hardcoded per-surface capability strings survive in the sources', () => {
     const tabs = readFileSync(`${process.cwd()}/src/components/ProductSurfaceTabs.jsx`, 'utf8')
     const surfaces = readFileSync(`${process.cwd()}/src/site/productSurfaces.js`, 'utf8')

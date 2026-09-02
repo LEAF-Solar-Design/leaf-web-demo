@@ -40,4 +40,26 @@ describe('scope-locked shell wiring', () => {
     expect(siteRoot).toMatch(/if \(!ownedSurface && !scopeLockActive\(\)\) navigate\('\/'\)/)
     expect(siteRoot).toMatch(/import \{ scopeLockActive \} from '\.\/tenantScope\.js'/)
   })
+
+  // 2026-09-02 reconciliation (row B11): the deployed /try console had no
+  // reachable sign-out control, only a toast buried behind Trust panel ->
+  // Account details. ProductSurfaceTabs' own render is covered by
+  // ProductSurfaceTabs.test.jsx; this pins that ToolCast actually WIRES the
+  // real controller into it (the same platformSession.actions.signOut path
+  // the Trust panel drawer already calls — never raw logout()).
+  it('wires the real session controller into the persistent nav sign-out control', () => {
+    expect(toolCast).toMatch(
+      /<ProductSurfaceTabs\s[\s\S]{0,400}signedIn=\{isSignedIn\(\)\}\s*\n\s*onSignOut=\{platformSession\.actions\.signOut\}/,
+    )
+  })
+
+  it('keeps a sign-out control in the top cluster when a tenant scope hides the product nav', () => {
+    const topCluster = toolCast.indexOf('<div className="tc-topcluster tc-topcluster-product"')
+    const scopedControl = toolCast.indexOf('signedIn={scopeLocked && isSignedIn()}')
+    expect(topCluster).toBeGreaterThan(-1)
+    expect(scopedControl).toBeGreaterThan(topCluster)
+    expect(toolCast).toMatch(
+      /<AccountSignOut\s+signedIn=\{scopeLocked && isSignedIn\(\)\}\s+onSignOut=\{platformSession\.actions\.signOut\}\s*\/>/,
+    )
+  })
 })

@@ -28,7 +28,7 @@ import DrawingUploadControl from '../components/DrawingUploadControl.jsx'
 import JobRail from '../components/JobRail.jsx'
 import Legend from '../components/Legend.jsx'
 import ProjectSwitcher from '../components/ProjectSwitcher.jsx'
-import ProductSurfaceTabs, { ProductSurfaceFrame } from '../components/ProductSurfaceTabs.jsx'
+import ProductSurfaceTabs, { AccountSignOut, ProductSurfaceFrame } from '../components/ProductSurfaceTabs.jsx'
 import SelectionReadout from '../components/SelectionReadout.jsx'
 import RoutePanel from '../components/RoutePanel.jsx'
 import ResultPanel from '../components/ResultPanel.jsx'
@@ -1418,7 +1418,15 @@ export default function ToolCast({
   return (
     <>
       {!scopeLocked && (
-        <ProductSurfaceTabs activeSurface={visibleSurface} states={productStates} onSelect={selectProductSurface} workspaceProject={workspaceProjectState} catalog={capabilityCatalog} />
+        <ProductSurfaceTabs
+          activeSurface={visibleSurface}
+          states={productStates}
+          onSelect={selectProductSurface}
+          workspaceProject={workspaceProjectState}
+          catalog={capabilityCatalog}
+          signedIn={isSignedIn()}
+          onSignOut={platformSession.actions.signOut}
+        />
       )}
       {visibleSurface === 'cad' ? (
       <>
@@ -1439,6 +1447,10 @@ export default function ToolCast({
             {focusView ? 'Show controls' : 'Focus 3D'}
           </button>
         )}
+        <AccountSignOut
+          signedIn={scopeLocked && isSignedIn()}
+          onSignOut={platformSession.actions.signOut}
+        />
         {!scopeLocked && (
           <button type="button" className="tc-back" onClick={() => navigate('/')}>Back to the site</button>
         )}

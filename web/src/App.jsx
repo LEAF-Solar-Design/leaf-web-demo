@@ -35,7 +35,7 @@ import CustomizePanel from './components/CustomizePanel.jsx'
 import CheckoutControls from './components/CheckoutControls.jsx'
 import ClaudeAccountPanel from './components/ClaudeAccountPanel.jsx'
 import DemoBanner from './components/DemoBanner.jsx'
-import ProductSurfaceTabs, { ProductSurfaceFrame } from './components/ProductSurfaceTabs.jsx'
+import ProductSurfaceTabs, { AccountSignOut, ProductSurfaceFrame } from './components/ProductSurfaceTabs.jsx'
 import { deriveWorkspaceProjectState } from './site/workspaceProjectState.js'
 import IosSurface from './ios/IosSurface.jsx'
 import { ENV_IOS_SURFACE } from './ios/flag.js'
@@ -2302,6 +2302,12 @@ export default function App() {
             </button>
           )}
           <button type="button" className="chip-act" onClick={openSessionDetails}>Details</button>
+          {/* Persistent identity control: before this, sign-out lived only
+              behind Details -> the session drawer, so the header carried no
+              reachable exit for a signed-in operator (2026-09-02
+              reconciliation, row B11). Same signOut path the drawer's action
+              already calls -- never raw logout(). */}
+          <AccountSignOut signedIn={isSignedIn()} onSignOut={sessionActions.signOut} />
           {devControls && (
             <label className="switch">
               <input
