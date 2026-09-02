@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test'
 import { join, relative } from 'node:path'
 import { writeProofReceipt } from '../proofReceipt.mjs'
 import { requireLocalReady } from './requireReady.mjs'
+import { setRail } from './railFlag.mjs'
 
 // The /app TWIN of checkout-ownership.spec.mjs (W2c).
 //
@@ -32,9 +33,16 @@ async function openEveryCatalogFamily(page) {
   }
 }
 
-test('the console holds the same single-writer lock the stage does', async ({ page, request }, testInfo) => {
+// Both rail values (W4c-0 debt): the OFF walk is the W2c preservation proof;
+// the ON walk proves the STUDIO console holds the identical single-writer
+// behaviour - same lock, same fail-closed gates, one controller - under the
+// portaled ground. ACCEPTANCE: "run console-checkout-ownership.spec.mjs with
+// setRail('1')", due since the pre-existing-failures chip merged (#896).
+for (const rail of ['0', '1']) {
+test(`the console holds the same single-writer lock the stage does [rail ${rail}]`, async ({ page, request }, testInfo) => {
   test.setTimeout(120_000)
   await requireLocalReady(request, test, API_BASE)
+  await setRail(page, rail)
 
   // Start from a clean lock: a previous spec in this run may have left one.
   await request.delete(`${API_BASE}/api/drawings/${DRAWING_ID}/checkout`, {
@@ -67,6 +75,9 @@ test('the console holds the same single-writer lock the stage does', async ({ pa
   // `?drawing=` boots the console on every path (the frozen route matrix) and
   // seeds DrawingIdentityProvider with the drawing the stage twin uses.
   await page.goto(`/app?drawing=${DRAWING_ID}`)
+  // The walk must run under the arm the rail names, or the ON row proves
+  // nothing: assert the studio shell's presence exactly matches the rail.
+  await expect(page.locator('.studio-shell[data-mode="console"]')).toHaveCount(rail === '1' ? 1 : 0)
   await expect(page.getByText(`Editing locked by`)).toBeVisible({ timeout: 20_000 })
 
   // Runtime single-instance proof for the console (panel W2c): exactly one
@@ -137,11 +148,11 @@ test('the console holds the same single-writer lock the stage does', async ({ pa
   await expect(versions.json()).resolves.toMatchObject({ drawing_id: DRAWING_ID, checkout: null })
   expect(observed.filter((entry) => entry.startsWith('POST /api/run '))).toHaveLength(0)
 
-  writeProofReceipt(join(PROOF_DIR, 'console-checkout-ownership-receipt.json'), {
+  writeProofReceipt(join(PROOF_DIR, `console-checkout-ownership-receipt${rail === '1' ? '-studio' : ''}.json`), {
     capability_ids: ['VR-02'],
     evidence_tier: 'local-e2e',
     route: '/app',
-    runtime: 'real local Vite, FastAPI, drawing manifest, and the SHARED checkout controller',
+    runtime: `real local Vite, FastAPI, drawing manifest, and the SHARED checkout controller (one-shell rail ${rail === '1' ? 'ON: studio console' : 'OFF: old shell'})`,
     api_endpoints: observed,
     artifacts: [
       relative(join(process.cwd(), '..'), testInfo.outputPath('video.webm')).replaceAll('\\', '/'),
@@ -170,3 +181,4 @@ test('the console holds the same single-writer lock the stage does', async ({ pa
     ],
   })
 })
+}
