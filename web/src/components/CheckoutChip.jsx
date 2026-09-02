@@ -11,14 +11,20 @@ import './panels.css'
 // TM1: the expiry renders as a relative horizon under a day ("until ~40 m"),
 // a date after; the absolute clock lives in the hover title.
 //
-// A LAPSED lease renders no horizon at all. The server publishes the checkout
-// record verbatim, expired or not (routers/drawings.py `_checkout_view`), so a
-// holder who closed the tab without releasing stays on this read until someone
-// takes the lock. Subtracting `now` from a past `expires` used to produce
-// "until ~-4 h" — an interval running backwards, which reads as a broken clock
-// rather than as the elapsed lease it is. The elapsed case is worded once, by
-// the sibling note in CheckoutControls ("this lease looks expired"), next to
-// the Take that clears it; duplicating it here would say it twice.
+// A LAPSED lease renders no horizon at all. Subtracting `now` from a past
+// `expires` used to produce "until ~-4 h" — an interval running backwards, which
+// reads as a broken clock rather than as the elapsed lease it is. The elapsed
+// case is worded once, by the sibling note in CheckoutControls ("this lease
+// looks expired"), next to the Take that clears it; duplicating it here would
+// say it twice.
+//
+// The routine source of that state is GONE: `_checkout_view` now answers null
+// for a lease the SERVER considers elapsed, so a holder who closed the tab
+// without releasing no longer sits on this read for hours. What remains is the
+// case this branch was always for — the server calls the lease live and OUR
+// clock disagrees (skew), or the record carries an `expires` we cannot read. The
+// browser clock never decides the lock is free (checkoutIdentity.js
+// `looksStale`), so the chip must keep rendering sanely when the two disagree.
 function fmtUntil(iso) {
   if (!iso) return null
   const d = new Date(iso)

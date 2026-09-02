@@ -527,8 +527,10 @@ export function hasHolder(checkout) {
 /**
  * normalizeCheckout(checkout) -> the lock record, or null when it names nobody.
  *
- * GET /versions answers `checkout: {}` for a drawing whose manifest carries an
- * empty lock record, and `{}` is TRUTHY. Every reader that stored
+ * A holderless-but-present `checkout: {}` is TRUTHY, and readers have received
+ * one: mock mode, and — until `_checkout_view` started asking the store whether
+ * the lease is live — GET /versions, for a manifest carrying an empty lock
+ * record. Every reader that stored
  * `response.checkout || null` therefore kept an object that `hasHolder` then
  * has to reject again, one reader at a time, and any reader that forgets reads
  * "a lock exists". Normalize once, at the boundary where the answer arrives, so

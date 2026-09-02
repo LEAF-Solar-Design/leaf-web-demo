@@ -129,8 +129,22 @@ def _drawing_sections(tenant_id: str, drawing_id: str) -> Dict[str, Any]:
         "tool": e.get("tool"),
     } for e in (m.get("versions") or [])[-VERSIONS_TAIL:]]
 
-    co = m.get("checkout") or {}
-    out["checkout"] = {"held_by": co.get("holder"), "expires_at": co.get("expires")}
+    # NULLS WHEN FREE, and "free" is `store.checkout_active`'s answer, not the
+    # presence of a record. Neither storage authority erases a lapsed lease
+    # eagerly, so a manifest keeps its `checkout` dict long after the lease ended
+    # and `co.get("holder")` stays truthy the whole time. Publishing that named a
+    # holder for a lock the store re-grants to anyone — the same defect
+    # GET /versions carried (`routers/drawings.py` `_checkout_view`), where a
+    # lease measured 827 minutes dead was still reported as held. This module is
+    # parked (no live caller yet, schema frozen), so no packet ever shipped one,
+    # and the fix lands WITH the read's so the two cannot be wired up disagreeing.
+    # The shape stays frozen at {held_by, expires_at}: an elapsed lease nulls
+    # both fields, it never drops or renames them.
+    co = m.get("checkout")
+    if not store.checkout_active(co):
+        co = None
+    out["checkout"] = {"held_by": (co or {}).get("holder"),
+                       "expires_at": (co or {}).get("expires")}
 
     layers: Dict[str, int] = {}
     total = 0

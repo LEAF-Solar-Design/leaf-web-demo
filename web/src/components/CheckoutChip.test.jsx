@@ -9,10 +9,14 @@
  * an interval running BACKWARDS. `fmtUntil` subtracted `now` from a past
  * `expires` and formatted the negative result, because every branch tested
  * `Math.abs(mins)` — so a lapsed lease got the same "until …" clause a live one
- * gets, with a minus sign in it. The server publishes the checkout record
- * verbatim whether or not it has elapsed (routers/drawings.py `_checkout_view`),
- * so this is reachable for the whole time between a forgotten lease expiring and
- * anyone taking the lock: hours, on any drawing.
+ * gets, with a minus sign in it.
+ *
+ * The path that made it COMMON has since been closed: `_checkout_view` answers
+ * null for a lease the server considers elapsed, so a forgotten lease no longer
+ * sits on the read for hours. These cases stay pinned because the component must
+ * still be correct when the server and this clock DISAGREE — skew, which the
+ * browser is deliberately not allowed to resolve (checkoutIdentity.js
+ * `looksStale`), and an `expires` this client cannot parse.
  *
  * Both states are pinned, in the bundleFence spirit: asserting only that the
  * expired case says something is satisfied by a component that says it in every
@@ -117,8 +121,9 @@ describe('CheckoutControls over an elapsed lease', () => {
 })
 
 describe('a holderless checkout is not a lock', () => {
-  // GET /versions answers `checkout: {}` for a drawing nobody holds, and `{}` is
-  // truthy: stored as-is it is an object that every reader must re-reject.
+  // A holderless `checkout: {}` is truthy: stored as-is it is an object that
+  // every reader must re-reject. The server no longer emits one on /versions,
+  // but mock mode and any other producer still can, so the boundary normalizes.
   // Normalized at the boundary, "no holder in the live answer" IS null, so a
   // refresh that comes back holderless replaces a cached holder instead of
   // layering an empty record over it.

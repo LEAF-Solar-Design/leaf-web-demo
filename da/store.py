@@ -2028,10 +2028,15 @@ def _is_active(co: dict | None, now: datetime) -> bool:
 def checkout_active(co: dict | None) -> bool:
     """Is this manifest `checkout` a LIVE lease right now?
 
-    The one place outside this module that asks — the mutating drawing routes,
-    which need proof of ownership for an active lock and nothing for an absent or
-    expired one — so the "expired means free" rule is read from here rather than
-    re-implemented against a timestamp string.
+    Every caller outside this module asks THROUGH here, so the "expired means
+    free" rule is read from one place rather than re-implemented against a
+    timestamp string. Two of them:
+
+      * the mutating drawing routes, which need proof of ownership for an active
+        lock and nothing for an absent or expired one;
+      * `_checkout_view` on GET /versions, which publishes the lock record only
+        while it is live. That read used to test presence instead, which is how a
+        lease that had ended 13 hours earlier was still reported as held.
     """
     return _is_active(co, datetime.now(timezone.utc))
 

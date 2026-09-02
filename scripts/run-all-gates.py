@@ -378,7 +378,10 @@ def build_suites() -> List[Suite]:
         Suite("server-sessions-router", "server tests/test_sessions_router.py", "pytest", SERVER,
               _py_pytest("tests/test_sessions_router.py"), 46),
         Suite("server-context-packet", "server tests/test_context_packet.py", "pytest", SERVER,
-              _py_pytest("tests/test_context_packet.py"), 16),
+              # 16 -> 17 on 2026-09-02: the packet's `checkout` now nulls an
+              # ELAPSED lease, pinned in both states. Nothing here skips, so the
+              # local count IS the CI count.
+              _py_pytest("tests/test_context_packet.py"), 17),
         Suite("server-contract-freeze", "server tests/test_contract_freeze.py", "pytest", SERVER,
               _py_pytest("tests/test_contract_freeze.py"), 14),
         Suite("server-auth-vocab-freeze", "server tests/test_auth_vocab_freeze.py", "pytest",
@@ -553,7 +556,10 @@ def build_suites() -> List[Suite]:
         # (test_hardening_2c_microvm.py is registered above as "server-microvm";
         # it was listed twice, running the same 14 tests for no added coverage.)
         Suite("server-hardening-3b", "server tests/test_hardening_3b.py", "pytest", SERVER,
-              _py_pytest("tests/test_hardening_3b.py"), 14),
+              # 14 -> 15 on 2026-09-02: matrix item 7 gained its read-side twin
+              # (GET /versions withholds an elapsed lease). Nothing in this suite
+              # skips, so the local count IS the CI count.
+              _py_pytest("tests/test_hardening_3b.py"), 15),
         # The opaque checkout capability's own unit acceptance. Separate from the
         # HTTP suites because the SUBJECT binding only exists with auth live, and
         # those suites run against the LEAF_AUTH_LIVE=0 header stub.
