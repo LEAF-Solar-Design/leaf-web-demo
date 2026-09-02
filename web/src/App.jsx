@@ -2228,12 +2228,14 @@ export default function App() {
   //  - mock only: the live demo drawing is mutable and the bundled solve
   //    was computed against these exact bytes, nothing else;
   //  - the demo sample only, with the edit fixture excluded before its
-  //    synthetic geometry can inherit the demo source identity;
+  //    synthetic geometry can inherit the demo source identity, and the
+  //    seated intake itself bound to the bundled sample drawing;
   //  - never over a version preview or a mutated head (StageLayer:107
   //    precedent) - a delete-panel run makes v2 and the routes go stale.
   const [demoSolveRoutes, setDemoSolveRoutes] = useState(null)
+  const intakeIsRooftopSample = String(intake?.dwg || '').replace(/\\/g, '/').endsWith('/rooftop_demo.dwg')
   const solarStringsEligible = !!studioGround && activeSurface === 'solar' && mock
-    && !isEditFixture && DRAWING_SOURCE === 'rooftop_demo'
+    && !isEditFixture && DRAWING_SOURCE === 'rooftop_demo' && intakeIsRooftopSample
   useEffect(() => {
     if (!solarStringsEligible || demoSolveRoutes) return undefined
     let live = true
