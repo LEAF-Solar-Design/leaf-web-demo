@@ -1,5 +1,25 @@
 name: Finalize platform staging convergence
 
+# WHAT THIS RECEIPT PROVES
+#   The named build run produced the five-service supply set, one relay landed
+#   web and app onto staging from exactly those image digests, every child
+#   deploy is accounted for, and the built sha is an ancestor of current main on
+#   an unbroken, non-diverged commit chain. It also records, per service,
+#   whether that service's declared release surface on main today is still byte
+#   for byte the surface the deployed image was built from.
+#
+# WHAT IT NO LONGER PROVES
+#   That staging is running current main. It used to refuse to emit unless main
+#   had not moved past the built sha except across three verifier-owned files.
+#   The relay costs ~28 minutes (its two legs serialize behind one staging
+#   mutation lock) and main takes a merge roughly every eight minutes, so that
+#   condition was effectively never true once any receipt existed: the finalizer
+#   had 3 successes and 16 failures lifetime and had not been dispatched since
+#   2026-08-16. Drift is now MEASURED into the receipt's `arrival_source` block
+#   instead of gating its existence, so a reader sees exactly how stale the
+#   receipt is rather than getting no receipt at all. Pass
+#   require_surface_parity to get the old strictness back on a quiet window.
+
 on:
   workflow_dispatch:
     inputs:
@@ -11,6 +31,11 @@ on:
         description: "Optional exact final app identity-restamp run"
         type: string
         required: false
+      require_surface_parity:
+        description: "Refuse to emit unless every service surface on main still matches the built one (quiet-window strictness)"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   actions: read
@@ -56,6 +81,7 @@ jobs:
           TERRAFORM_GITHUB_TOKEN: ${{ secrets.TERRAFORM_REPO_TOKEN }}
           PRODUCER_BUILD_RUN_ID: ${{ inputs.producer_build_run_id }}
           CURRENT_FRONTIER_RUN_ID: ${{ inputs.current_frontier_run_id }}
+          REQUIRE_SURFACE_PARITY: ${{ inputs.require_surface_parity }}
         run: |
           set -euo pipefail
           args=(
@@ -64,6 +90,9 @@ jobs:
           )
           if [ -n "$CURRENT_FRONTIER_RUN_ID" ]; then
             args+=(--current-frontier-run-id "$CURRENT_FRONTIER_RUN_ID")
+          fi
+          if [ "$REQUIRE_SURFACE_PARITY" = "true" ]; then
+            args+=(--require-surface-parity)
           fi
           python -m scripts.platform_staging_convergence "${args[@]}"
           test -s platform-staging-convergence.json

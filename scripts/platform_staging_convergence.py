@@ -28,6 +28,7 @@ import zipfile
 from scripts.platform_release_manifest import (
     SCHEMA_V3,
     SERVICES,
+    SURFACE_INPUTS,
     validate_manifest,
 )
 
@@ -134,13 +135,10 @@ MAX_PROVIDER_LOG_BYTES = 16 * 1024 * 1024
 MAX_PROVIDER_READ_ATTEMPTS = 3
 MAX_PROVIDER_RETRY_DELAY_SECONDS = 30
 MAX_PROVIDER_RUN_SNAPSHOT_SCANS = 3
-VERIFIER_ONLY_MAIN_DRIFT_PATHS = frozenset(
-    {
-        "contract/platform-staging-convergence.v1.schema.json",
-        "scripts/platform_staging_convergence.py",
-        "scripts/test_platform_staging_convergence.py",
-    }
-)
+# Bound on one recursive tree listing, so a hostile or corrupt provider answer
+# cannot make the arrival comparison allocate without limit. Well above this
+# repo's real tree; the truncation flag is the load-bearing check, not this.
+MAX_ARRIVAL_TREE_ROWS = 200000
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 SHA64 = re.compile(r"^[0-9a-f]{64}$")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -403,17 +401,108 @@ def _workflow_blob(provider: Provider, repository: str, sha: str, path: str) -> 
     return tree_sha, _sha40(matches[0].get("sha"), "PROVIDER_WORKFLOW_BLOB_INVALID")
 
 
-def _verify_arrival_source(provider: Provider, build_sha: str) -> None:
+def _tree_blob_map(provider: Provider, repository: str, commit_sha: str) -> dict[str, str]:
+    """Every blob path -> blob sha at one commit. Fails closed on a partial tree."""
+
+    commit = provider.json(repository, f"/git/commits/{commit_sha}")
+    if not isinstance(commit, dict) or not isinstance(commit.get("tree"), dict):
+        raise ContractError("ARRIVAL_TREE_INVALID")
+    tree_sha = _sha40(commit["tree"].get("sha"), "ARRIVAL_TREE_INVALID")
+    tree = provider.json(repository, f"/git/trees/{tree_sha}?recursive=1")
+    if not isinstance(tree, dict) or not isinstance(tree.get("tree"), list):
+        raise ContractError("ARRIVAL_TREE_INVALID")
+    # A truncated listing would silently UNDERSTATE the drift: absent rows read
+    # as unchanged surfaces. Never classify from a partial tree.
+    if tree.get("truncated") is not False:
+        raise ContractError("ARRIVAL_TREE_INVALID")
+    rows = tree["tree"]
+    if len(rows) > MAX_ARRIVAL_TREE_ROWS:
+        raise ContractError("ARRIVAL_TREE_INVALID")
+    blobs: dict[str, str] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ContractError("ARRIVAL_TREE_INVALID")
+        if row.get("type") != "blob":
+            # A gitlink carries no blob sha, so a submodule bump would be
+            # invisible to a blob-only comparison. Refuse rather than miss it.
+            if row.get("mode") == "160000":
+                raise ContractError("ARRIVAL_TREE_INVALID")
+            continue
+        path = row.get("path")
+        if not isinstance(path, str) or not path or path in blobs:
+            raise ContractError("ARRIVAL_TREE_INVALID")
+        blobs[path] = _sha40(row.get("sha"), "ARRIVAL_TREE_INVALID")
+    if not blobs:
+        raise ContractError("ARRIVAL_TREE_INVALID")
+    return blobs
+
+
+def _surface_blob_map(blobs: dict[str, str], service: str) -> dict[str, str]:
+    """The declared release inputs of one service, exactly as the producer fingerprints them."""
+
+    if service not in SURFACE_INPUTS:
+        raise ContractError("ARRIVAL_SURFACE_INPUT_ABSENT")
+    selected: dict[str, str] = {}
+    for source in SURFACE_INPUTS[service]:
+        prefix = source + "/"
+        matched = {
+            path: sha
+            for path, sha in blobs.items()
+            if path == source or path.startswith(prefix)
+        }
+        # SURFACE_INPUTS is the producer's frozen declaration of what bakes into
+        # each image. A declared input that is absent means the declaration and
+        # the tree disagree, so no honest classification is available.
+        if not matched:
+            raise ContractError("ARRIVAL_SURFACE_INPUT_ABSENT")
+        selected.update(matched)
+    return selected
+
+
+def _arrival_source(
+    provider: Provider,
+    build_sha: str,
+    *,
+    require_surface_parity: bool,
+) -> dict[str, Any]:
+    """Measure how far main has moved past the built sha, and record it.
+
+    The relay costs ~28 minutes end to end (its two legs serialize behind the
+    single leaf-platform-staging-ecs-mutation group) and main takes a merge
+    roughly every eight minutes on a working day, so by the time any receipt
+    exists main is ALREADY ahead by real product commits. Demanding "the built
+    sha is still main's tip" is therefore unsatisfiable at cadence, and a path
+    allowlist does not rescue it: only 13 of the 40 merges before 2026-09-02
+    touched no declared surface input at all, which is ~2% across a 28-minute
+    window.
+
+    GATED (still fails closed): the built sha must be current main, or an exact
+    ancestor of it on an unbroken, non-diverged commit chain. That is what rules
+    out finalizing a sha that never landed, or one whose history was rewritten.
+
+    RECORDED (never gated, unless the caller opts in): whether each service's
+    declared release surface still matches byte for byte. Drift is normal at
+    merge cadence, so the receipt reports its own staleness instead of refusing
+    to exist.
+    """
+
     branch = provider.json(APP_REPOSITORY, "/branches/main")
     if not isinstance(branch, dict) or not isinstance(branch.get("commit"), dict):
         raise ContractError("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
     current_sha = _sha40(branch["commit"].get("sha"), "ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
     if current_sha == build_sha:
-        return
+        # Same commit is the same tree, so every surface is identical by
+        # construction: no tree read can refute it and none is worth paying for.
+        return {
+            "current_main_sha": current_sha,
+            "relationship": "exact",
+            "ahead_by": 0,
+            "surfaces": {service: "identical" for service in SERVICE_ORDER},
+            "drifted_surfaces": [],
+        }
     comparison = provider.json(APP_REPOSITORY, f"/compare/{build_sha}...{current_sha}")
     if (
         not isinstance(comparison, dict)
-        or not isinstance(comparison.get("files"), list)
         or not isinstance(comparison.get("commits"), list)
     ):
         raise ContractError("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
@@ -449,21 +538,29 @@ def _verify_arrival_source(provider: Provider, build_sha: str) -> None:
         commit_shas.append(commit_sha)
     if commit_shas[-1] != current_sha:
         raise ContractError("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
-    changed_paths: set[str] = set()
-    for row in comparison["files"]:
-        if not isinstance(row, dict):
-            raise ContractError("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
-        path = row.get("filename")
-        if (
-            not isinstance(path, str)
-            or path not in VERIFIER_ONLY_MAIN_DRIFT_PATHS
-            or path in changed_paths
-            or row.get("status") != "modified"
-        ):
-            raise ContractError("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
-        changed_paths.add(path)
-    if not changed_paths:
-        raise ContractError("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN")
+
+    # Compare the surfaces themselves, not the changed FILENAMES. A name-based
+    # rule cannot see a rename into a release input, and /compare caps its file
+    # list at 300 entries, so a large drift would read as a small one.
+    built = _tree_blob_map(provider, APP_REPOSITORY, build_sha)
+    current = _tree_blob_map(provider, APP_REPOSITORY, current_sha)
+    surfaces: dict[str, str] = {}
+    drifted: list[str] = []
+    for service in SERVICE_ORDER:
+        if _surface_blob_map(built, service) == _surface_blob_map(current, service):
+            surfaces[service] = "identical"
+        else:
+            surfaces[service] = "changed"
+            drifted.append(service)
+    if require_surface_parity and drifted:
+        raise ContractError("ARRIVAL_SURFACE_PARITY_REQUIRED")
+    return {
+        "current_main_sha": current_sha,
+        "relationship": "ancestor",
+        "ahead_by": ahead_by,
+        "surfaces": surfaces,
+        "drifted_surfaces": drifted,
+    }
 
 
 def _artifact_rows(provider: Provider, repository: str, run_id: int) -> list[dict[str, Any]]:
@@ -1624,13 +1721,21 @@ def _identity(child: dict[str, Any], supply: dict[str, Any]) -> dict[str, Any]:
     return {"body": body, "body_sha256": value["sha256"], "producer_run_id": child["provider"]["run_id"]}
 
 
-def _build_receipt(provider: Provider, producer_build_run_id: int, current_frontier_run_id: int | None) -> dict[str, Any]:
+def _build_receipt(
+    provider: Provider,
+    producer_build_run_id: int,
+    current_frontier_run_id: int | None,
+    *,
+    require_surface_parity: bool = False,
+) -> dict[str, Any]:
     raw_build = provider.json(APP_REPOSITORY, f"/actions/runs/{producer_build_run_id}")
     build = _provider_run(raw_build, APP_REPOSITORY, BUILD_WORKFLOW, "push")
     if build["run_id"] != producer_build_run_id or build["head_branch"] != "main" or build["conclusion"] != "success":
         raise ContractError("BUILD_RUN_MISMATCH")
     build_tree, build_blob = _workflow_blob(provider, APP_REPOSITORY, build["head_sha"], BUILD_WORKFLOW)
-    _verify_arrival_source(provider, build["head_sha"])
+    arrival = _arrival_source(
+        provider, build["head_sha"], require_surface_parity=require_surface_parity
+    )
     supply_name = f"staging-supply-set-{build['head_sha']}-attempt-{build['run_attempt']}"
     supply_artifact, manifest = _one_artifact(
         provider, APP_REPOSITORY, build["run_id"], supply_name, "staging-supply-set.json"
@@ -1963,6 +2068,7 @@ def _build_receipt(provider: Provider, producer_build_run_id: int, current_front
             "workflow_blob": build_blob,
             "source_tree": build_tree,
         },
+        "arrival_source": arrival,
         "supply": {**supply_artifact, **supply},
         "relay": {
             **{key: relay[key] for key in ("repository", "workflow_path", "run_id", "run_attempt", "event", "head_sha", "conclusion")},
@@ -2011,6 +2117,15 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--producer-build-run-id", required=True)
     parser.add_argument("--current-frontier-run-id")
+    parser.add_argument(
+        "--require-surface-parity",
+        action="store_true",
+        help=(
+            "refuse to emit unless every declared service surface on main still "
+            "matches the built one byte for byte (a quiet-window strictness "
+            "opt-in; the default records drift instead of refusing)"
+        ),
+    )
     parser.add_argument("--output", type=Path, required=True)
     return parser
 
@@ -2025,7 +2140,12 @@ def main(argv: list[str] | None = None) -> int:
             os.environ.get("TERRAFORM_GITHUB_TOKEN", ""),
         )
         assert build_run_id is not None
-        receipt = _build_receipt(provider, build_run_id, frontier_run_id)
+        receipt = _build_receipt(
+            provider,
+            build_run_id,
+            frontier_run_id,
+            require_surface_parity=bool(args.require_surface_parity),
+        )
         args.output.write_bytes(_receipt_bytes(receipt))
         print(f"Prepared {OUTPUT_SCHEMA}; provider evidence body withheld.")
         return 0

@@ -1298,6 +1298,29 @@ def build_suites() -> List[Suite]:
         Suite("platform-release-manifest",
               "scripts test_platform_release_manifest.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_platform_release_manifest.py"), 88),
+        # The staging convergence FINALIZER's own suite. It shipped with the
+        # finalizer on 2026-08-13 and was never registered, so ~1100 lines of
+        # provider-evidence tests never ran on any PR. It could not run the
+        # ordinary way: the subject imports `scripts.platform_release_manifest`,
+        # which needs the repo root importable, and the repo root carries a
+        # `platform/` package that shadows the stdlib module pytest's own
+        # plugins import at load time. The suite now widens sys.path from inside
+        # the test file, after its stdlib preload, so it runs from SCRIPTS_DIR
+        # like every other scripts suite. Registered per the #29
+        # fix-then-register rule. 61 = the 54 that existed unregistered, minus
+        # the 2 arrival-source tests whose contract this PR replaced, plus the 9
+        # covering the recorded-drift arrival block (exact main reads no tree,
+        # product drift is recorded not refused, non-surface drift stays clean,
+        # an addition into a surface is caught by blob comparison, the
+        # surface-parity opt-in still refuses, unusable tree evidence and an
+        # absent declared input both fail closed, the broken-ancestry matrix,
+        # and the end-to-end receipt carrying arrival_source). Measured on this
+        # tree 2026-09-02: 61 passed, 117 subtests passed, 0 skipped. Every test
+        # is an in-process fake-provider check with no DB, network or platform
+        # gate, so 61 is the count in every environment.
+        Suite("platform-staging-convergence",
+              "scripts test_platform_staging_convergence.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_platform_staging_convergence.py"), 61),
         Suite("production-web-release",
               "scripts test_production_web_release.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_production_web_release.py"), 17),

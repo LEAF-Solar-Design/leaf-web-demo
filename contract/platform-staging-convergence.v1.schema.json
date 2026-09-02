@@ -9,6 +9,7 @@
     "environment",
     "finalizer",
     "producer",
+    "arrival_source",
     "supply",
     "relay",
     "frontier_run_id",
@@ -31,6 +32,7 @@
       }
     },
     "producer": {"$ref": "#/$defs/producer"},
+    "arrival_source": {"$ref": "#/$defs/arrivalSource"},
     "supply": {"$ref": "#/$defs/supply"},
     "relay": {"$ref": "#/$defs/relay"},
     "frontier_run_id": {"$ref": "#/$defs/runId"},
@@ -75,6 +77,33 @@
         "artifact_name": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$"},
         "provider_zip_sha256": {"$ref": "#/$defs/sha256"},
         "file_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "arrivalSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["current_main_sha", "relationship", "ahead_by", "surfaces", "drifted_surfaces"],
+      "properties": {
+        "current_main_sha": {"$ref": "#/$defs/sha40"},
+        "relationship": {"enum": ["exact", "ancestor"]},
+        "ahead_by": {"type": "integer", "minimum": 0},
+        "surfaces": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["app", "broker", "canonical-worker", "harness", "web"],
+          "properties": {
+            "app": {"enum": ["identical", "changed"]},
+            "broker": {"enum": ["identical", "changed"]},
+            "canonical-worker": {"enum": ["identical", "changed"]},
+            "harness": {"enum": ["identical", "changed"]},
+            "web": {"enum": ["identical", "changed"]}
+          }
+        },
+        "drifted_surfaces": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"enum": ["app", "broker", "canonical-worker", "harness", "web"]}
+        }
       }
     },
     "producer": {
