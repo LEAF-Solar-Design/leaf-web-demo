@@ -257,6 +257,84 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.locator(STUDIO)).toHaveCount(1)
   })
 
+  test('the drafting cockpit on the REAL stack: spine by default, per-surface ribbon, rail adaptation (W4c-V1)', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    await page.goto('/app')
+    await expect(page.locator(STUDIO)).toHaveCount(1)
+
+    // CAD boots in the spine posture: the ribbon carries the tool set, so an
+    // expanded catalog beside it would be the duplication ACCEPTANCE named.
+    const nav = page.locator('aside.nav[data-spine]')
+    await expect(nav).toHaveCount(1)
+    expect((await nav.boundingBox()).width).toBeLessThanOrEqual(48)
+    // W4b chrome row invariants survive the spine: radius + the 12px inset.
+    expect(await nav.evaluate((el) => getComputedStyle(el).borderRadius)).toBe('8px')
+    expect((await nav.boundingBox()).x).toBeGreaterThanOrEqual(12)
+
+    // The ribbon renders the ACTIVE SURFACE'S fold from the REAL catalog,
+    // one cluster per family (async load: wait for the first cluster).
+    const ribbon = page.getByTestId('drafting-ribbon')
+    await expect(ribbon).toBeVisible()
+    await expect(ribbon.locator('.ribbon-cluster').first()).toBeVisible({ timeout: 20_000 })
+    // No cluster paints over its neighbour: every pair of adjacent tool
+    // boxes must be disjoint horizontally (the flex-shrink overlap class).
+    const overlaps = await page.evaluate(() => {
+      const boxes = [...document.querySelectorAll('.drafting-ribbon .ribbon-cluster')]
+        .map((el) => el.getBoundingClientRect())
+      let bad = 0
+      for (let i = 1; i < boxes.length; i += 1) {
+        if (boxes[i].left < boxes[i - 1].right - 1) bad += 1
+      }
+      return bad
+    })
+    expect(overlaps).toBe(0)
+
+    // Browser is not a drafting surface: expanded rail, folded families, no
+    // ribbon, no spine - the rail populates per application.
+    await page.getByRole('tab', { name: 'Browser' }).click()
+    await expect(page.getByTestId('drafting-ribbon')).toHaveCount(0)
+    await expect(page.locator('aside.nav[data-spine]')).toHaveCount(0)
+    await expect(page.locator('.fam-title')).toBeVisible()
+  })
+
+  test('a ribbon click arms the SAME confirm ladder as the rail (mock walk, W4c-V1)', async ({ page, request }) => {
+    // Mock mode exercises the identical CLIENT path (commitCatalogDecision ->
+    // armDecision -> the decision strip) without the real stack's canonical-
+    // version context, which plain /app does not stage for direct catalog
+    // runs (armDecision fails closed there by design - same as the rail).
+    test.setTimeout(120_000)
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    await page.goto('/app?dev=1')
+    await expect(page.locator(STUDIO)).toHaveCount(1)
+    // Deterministic mock: the signed-in local stack classifies ?demo=1 as
+    // liveDemo, so flip the dev Mock switch instead of trusting the query.
+    await page.getByLabel('Use mock data (off = live backend)').check()
+    const ribbon = page.getByTestId('drafting-ribbon')
+    await expect(ribbon.locator('.ribbon-tool').first()).toBeVisible({ timeout: 20_000 })
+    await ribbon.locator('.ribbon-tool').first().click()
+    // The strip appears; nothing auto-runs; Esc dismisses and never ejects.
+    await expect(page.locator('.strip-decision')).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(page.locator('.strip-decision')).toHaveCount(0)
+    await expect(page).toHaveURL(/\/app\?dev=1$/)
+
+    // A spine monogram expands the rail AND opens that family.
+    const monogram = page.locator('.nav-spine .spine-btn').nth(1)
+    const famLabel = await monogram.getAttribute('title')
+    await monogram.click()
+    await expect(page.locator('aside.nav[data-spine]')).toHaveCount(0)
+    await expect(
+      page.locator('.section-head[aria-expanded="true"]').filter({ hasText: famLabel }),
+    ).toHaveCount(1)
+
+    // The collapse control restores the spine.
+    await page.getByRole('button', { name: 'Collapse the tool rail to a spine' }).click()
+    await expect(page.locator('aside.nav[data-spine]')).toHaveCount(1)
+  })
+
   test('Esc ladder, history rung under the rail: an open drawer owns Esc, the route never moves', async ({ page, request }) => {
     // W4c-0 debt (ACCEPTANCE "Esc LADDER rungs"): the terminal row above
     // proves Esc never LEAVES /app; this rung proves an owned surface
@@ -324,6 +402,11 @@ test.describe('route matrix, rail OFF + rollback', () => {
     await expect(page.locator('.app[data-surface]')).toHaveCount(0)
     await expect(page.getByTestId('cockpit-view')).toHaveCount(0)
     await expect(page.getByTestId('cockpit-status')).toHaveCount(0)
+    // W4c-V1 furniture is studio-only: none of it may exist rail-OFF.
+    await expect(page.getByTestId('drafting-ribbon')).toHaveCount(0)
+    await expect(page.locator('aside.nav[data-spine]')).toHaveCount(0)
+    await expect(page.locator('.nav-spine')).toHaveCount(0)
+    await expect(page.locator('.spine-collapse')).toHaveCount(0)
     await page.getByRole('tab', { name: 'Browser' }).click()
     await expect(page.locator('[data-ground]')).toHaveCount(0)
     await expect(page.locator('#product-surface-panel')).toHaveCount(1)
