@@ -585,7 +585,7 @@ def build_suites() -> List[Suite]:
         # kind:appbundle activity spec + LINE/TEXT intake (2026-09-01): generic platform
         # capabilities, dependency-free.
         Suite("server-appbundle-activity-spec", "server tests/test_appbundle_activity_spec.py",
-              "pytest", SERVER, _py_pytest("tests/test_appbundle_activity_spec.py"), 8),
+              "pytest", SERVER, _py_pytest("tests/test_appbundle_activity_spec.py"), 7),
         Suite("server-dxf-intake-lines-text", "server tests/test_dxf_intake_lines_text.py",
               "pytest", SERVER, _py_pytest("tests/test_dxf_intake_lines_text.py"), 4),
         # issue #29 red-suite registry (https://github.com/Evan-Haug/leaf-web-demo/issues/29):
@@ -1438,7 +1438,7 @@ def build_suites() -> List[Suite]:
         # "non-allowlisted vitest skip" note, which is this runner asserting
         # that per-file match, so the allowlist below needs no change.
         Suite("web-vitest", "web npm run test:unit (vitest)", "vitest", WEB,
-              [_npm(), "run", "test:unit"], 672,
+              [_npm(), "run", "test:unit"], 657,
               allowed_vitest_skips=(
                   # Day-3 CAD engine real-build round trip: needs a compiled
                   # wasm artifact, which needs a Rust toolchain, so it exists
