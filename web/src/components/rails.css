@@ -51,6 +51,13 @@ button.rail-row { cursor: pointer; }
 
 /* --- E2 empty state (content-shaped, top-left) + L1 skeleton spacing --- */
 .rail-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+/* .chip-act's default text (--primary on --accent-tint) is tuned against
+   --card/--background; composited over the rail's own --rail ground (#e4e2da)
+   the tint reads as #d2d7cd and the pairing drops to 4.42:1, under WCAG AA's
+   4.5:1 (axe color-contrast, /app job rail empty state). --primary-hover is
+   already the darker shade of the same green — reuse it here (6.08:1 on the
+   rail's tint) instead of inventing a new color. */
+.rail .chip-act { color: var(--primary-hover); }
 /* --skeleton-h matches the real 32px .rail-row so the rail doesn't jump
    height once jobs replace the loading placeholder. */
 .rail-ske { display: flex; flex-direction: column; gap: 8px; --skeleton-h: 32px; }
