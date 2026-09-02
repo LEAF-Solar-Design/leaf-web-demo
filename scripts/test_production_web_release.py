@@ -65,8 +65,9 @@ def _dist(root: Path) -> tuple[Path, str]:
 
 def _approval(digest: str) -> dict:
     return {
-        "schema": "leaf.production-web-approval.v1",
+        "schema": "leaf.production-web-approval.v2",
         "project_id": PROJECT_ID,
+        "deployment_id": "dpl_" + "B" * 24,
         "source_revision": SOURCE,
         "release_workflow_run_id": 123456,
         "release_workflow_run_attempt": 2,
@@ -310,6 +311,7 @@ def test_receipt_rejects_replayed_or_unbound_approval(tmp_path: Path):
     deployed = _inspect("dpl_" + "B" * 24, "leaf-new.vercel.app")
     for field, value in (
         ("deployment_workflow_run_id", 765433),
+        ("deployment_id", "dpl_" + "C" * 24),
         ("timely_at_promotion", False),
         ("permission", "read"),
     ):
@@ -431,7 +433,9 @@ def test_workflow_is_protected_prebuilt_two_phase_and_receipted():
         "collaborators/$OPERATOR/permission",
         "collaborators/$APPROVER/permission",
         "approve-vercel-production:",
+        "approve-vercel-production-promotion:",
         "Production approval required (independent approver, or a repository administrator self-authorizing)",
+        "Exact deployment approval required before public alias promotion",
         # The two-person rule is now two named modes. These pins keep the
         # administrator requirement and the anti-laundering check in the
         # workflow: dropping either would silently let a non-admin, or a rerun
@@ -440,7 +444,8 @@ def test_workflow_is_protected_prebuilt_two_phase_and_receipted():
         "Self-authorization requires live repository admin permission.",
         "Self-authorization requires the dispatcher and rerun actor to be the same administrator.",
         "Self-authorization requires live repository admin permission at promotion.",
-        "Approval mode changed between admission",
+        "PROMOTION_APPROVAL_COMMENT_ID",
+        'DEPLOYMENT_ID=$(jq -er \'.id\' "$RUN_DIR/deployment.json")',
         "age > 86400",
         "VERCEL_AUTOMATION_BYPASS_SECRET",
         "x-vercel-protection-bypass:",

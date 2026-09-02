@@ -358,7 +358,7 @@ jobs:
           [ "$API_STATUS" = 404 ]
           ! grep -Eiq '<!doctype html|<html' "$RUN_DIR/candidate-api.txt"
 
-      - name: Revalidate exact independent approval before promotion
+      - name: Require exact deployment approval before promotion
         env:
           GH_TOKEN: ${{ github.token }}
           APPROVAL_ISSUE_NUMBER: ${{ inputs.approval_issue_number }}
@@ -366,24 +366,45 @@ jobs:
           TRIGGERING_ACTOR: ${{ github.triggering_actor }}
         run: |
           set -euo pipefail
-          EXPECTED_APPROVAL="approve-vercel-production:$VERCEL_PROJECT_ID:$SOURCE_SHA:$RELEASE_RUN_ID:$RELEASE_RUN_ATTEMPT:$HANDOFF_RUN_ID:$HANDOFF_RUN_ATTEMPT:$EXPECTED_WEB_SHA256:$GITHUB_SHA:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT"
+          DEPLOYMENT_ID=$(jq -er '.id' "$RUN_DIR/deployment.json")
+          EXPECTED_APPROVAL="approve-vercel-production-promotion:$VERCEL_PROJECT_ID:$DEPLOYMENT_ID:$SOURCE_SHA:$RELEASE_RUN_ID:$RELEASE_RUN_ATTEMPT:$HANDOFF_RUN_ID:$HANDOFF_RUN_ATTEMPT:$EXPECTED_WEB_SHA256:$GITHUB_SHA:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT"
+          echo "::notice title=Exact deployment approval required before public alias promotion::$EXPECTED_APPROVAL"
           gh api "repos/$GITHUB_REPOSITORY/issues/$APPROVAL_ISSUE_NUMBER" \
             > "$RUN_DIR/approval-issue-final.json"
           jq -e '.state == "open" and .pull_request == null' \
             "$RUN_DIR/approval-issue-final.json" >/dev/null
-          gh api "repos/$GITHUB_REPOSITORY/issues/comments/$APPROVAL_COMMENT_ID" \
+          PROMOTION_APPROVAL_COMMENT_ID=
+          for attempt in $(seq 1 180); do
+            gh api "repos/$GITHUB_REPOSITORY/issues/$APPROVAL_ISSUE_NUMBER/comments?per_page=100" \
+              > "$RUN_DIR/promotion-approval-comments.json"
+            jq -c --arg body "$EXPECTED_APPROVAL" \
+              '[.[] | select(.body == $body and .created_at == .updated_at)]' \
+              "$RUN_DIR/promotion-approval-comments.json" > "$RUN_DIR/promotion-approval-matches.json"
+            MATCH_COUNT=$(jq -r 'length' "$RUN_DIR/promotion-approval-matches.json")
+            [ "$MATCH_COUNT" -le 1 ] || { echo "::error::Multiple exact deployment approvals found."; exit 1; }
+            if [ "$MATCH_COUNT" = 1 ]; then
+              PROMOTION_APPROVAL_COMMENT_ID=$(jq -er '.[0].id | tostring' "$RUN_DIR/promotion-approval-matches.json")
+              break
+            fi
+            [ "$attempt" -lt 180 ] && sleep 10
+          done
+          [[ "$PROMOTION_APPROVAL_COMMENT_ID" =~ ^[1-9][0-9]{5,19}$ ]] || {
+            echo "::error::Add this exact deployment approval to issue #$APPROVAL_ISSUE_NUMBER: $EXPECTED_APPROVAL"
+            exit 1
+          }
+          gh api "repos/$GITHUB_REPOSITORY/issues/comments/$PROMOTION_APPROVAL_COMMENT_ID" \
             > "$RUN_DIR/approval-comment-final.json"
-          jq -e --arg body "$EXPECTED_APPROVAL" --arg issue "/issues/$APPROVAL_ISSUE_NUMBER" \
-            --arg approver "$APPROVER" '
+          jq -e --arg body "$EXPECTED_APPROVAL" --arg issue "/issues/$APPROVAL_ISSUE_NUMBER" '
             .body == $body and (.issue_url | endswith($issue))
-            and .created_at == .updated_at and .user.login == $approver
+            and .created_at == .updated_at
+            and (.user.login | type == "string" and test("^[A-Za-z0-9-]{1,39}$"))
           ' "$RUN_DIR/approval-comment-final.json" >/dev/null
+          APPROVER=$(jq -er '.user.login' "$RUN_DIR/approval-comment-final.json")
           gh api "repos/$GITHUB_REPOSITORY/collaborators/$APPROVER/permission" \
             > "$RUN_DIR/approver-permission-final.json"
-          # Re-assert the SAME two modes at promotion time, against freshly fetched
-          # permission: an approver demoted between admission and promotion must not
-          # promote. APPROVAL_MODE is re-derived here rather than trusted from the
-          # environment, and the two derivations must agree.
+          # Apply the same two authorization modes to the exact immutable deployment.
+          # The promotion approval is independent evidence and may be authored by a
+          # different qualified collaborator than the release-admission approval.
           PERMISSION=$(jq -er '.permission | select(. == "admin" or . == "maintain" or . == "write")' \
             "$RUN_DIR/approver-permission-final.json")
           if [ "${APPROVER,,}" = "${ACTOR,,}" ] || [ "${APPROVER,,}" = "${TRIGGERING_ACTOR,,}" ]; then
@@ -399,10 +420,6 @@ jobs:
           else
             FINAL_APPROVAL_MODE="independent"
           fi
-          [ "$FINAL_APPROVAL_MODE" = "$APPROVAL_MODE" ] || {
-            echo "::error::Approval mode changed between admission ($APPROVAL_MODE) and promotion ($FINAL_APPROVAL_MODE)."
-            exit 1
-          }
           python - "$RUN_DIR/approval-comment-final.json" <<'PY'
           import datetime as dt
           import json
@@ -417,18 +434,20 @@ jobs:
           PY
           APPROVAL_PAYLOAD_SHA256=$(printf '%s' "$EXPECTED_APPROVAL" | sha256sum | cut -d' ' -f1)
           VALIDATED_AT=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-          jq -cnS --arg project_id "$VERCEL_PROJECT_ID" --arg source "$SOURCE_SHA" \
+          jq -cnS --arg project_id "$VERCEL_PROJECT_ID" --arg deployment_id "$DEPLOYMENT_ID" \
+            --arg source "$SOURCE_SHA" \
             --arg release_run "$RELEASE_RUN_ID" --arg release_attempt "$RELEASE_RUN_ATTEMPT" \
             --arg handoff_run "$HANDOFF_RUN_ID" --arg handoff_attempt "$HANDOFF_RUN_ATTEMPT" \
             --arg web_sha "$EXPECTED_WEB_SHA256" --arg workflow_sha "$GITHUB_SHA" \
             --arg workflow_run "$GITHUB_RUN_ID" --arg workflow_attempt "$GITHUB_RUN_ATTEMPT" \
-            --arg issue "$APPROVAL_ISSUE_NUMBER" --arg comment "$APPROVAL_COMMENT_ID" \
+            --arg issue "$APPROVAL_ISSUE_NUMBER" --arg comment "$PROMOTION_APPROVAL_COMMENT_ID" \
             --arg approver "$APPROVER" --arg permission "$PERMISSION" \
             --arg approval_mode "$FINAL_APPROVAL_MODE" \
             --arg created_at "$(jq -er .created_at "$RUN_DIR/approval-comment-final.json")" \
             --arg validated_at "$VALIDATED_AT" --arg payload_sha "$APPROVAL_PAYLOAD_SHA256" \
             --arg approver_id "$(jq -er '.user.id | tostring' "$RUN_DIR/approval-comment-final.json")" '
-            {schema:"leaf.production-web-approval.v1",project_id:$project_id,
+            {schema:"leaf.production-web-approval.v2",project_id:$project_id,
+             deployment_id:$deployment_id,
              source_revision:$source,release_workflow_run_id:($release_run|tonumber),
              release_workflow_run_attempt:($release_attempt|tonumber),
              handoff_workflow_run_id:($handoff_run|tonumber),

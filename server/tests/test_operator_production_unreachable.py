@@ -747,7 +747,9 @@ def test_o5_canonical_production_deploy_requires_a_separate_owner_off_the_plane(
     assert "workflow_dispatch:" in wf                       # manual, not operator-triggered
     assert '[ "$GITHUB_REF" = "refs/heads/main" ]' in wf    # canonical source
     assert "Validate protected production request and operator" in wf
-    assert 'EXPECTED_APPROVAL="approve-vercel-production:' in wf  # exact approval payload
+    assert 'EXPECTED_APPROVAL="approve-vercel-production:' in wf  # exact admission payload
+    assert 'EXPECTED_APPROVAL="approve-vercel-production-promotion:' in wf
+    assert ':$DEPLOYMENT_ID:$SOURCE_SHA:' in wf
     assert ("Production approval required (independent approver, or a "
             "repository administrator self-authorizing)") in wf
     # The administrator requirement and the anti-laundering check, enforced not
@@ -760,7 +762,8 @@ def test_o5_canonical_production_deploy_requires_a_separate_owner_off_the_plane(
             "the same administrator.") in wf
     assert ("Self-authorization requires live repository admin permission at "
             "promotion.") in wf
-    assert "Approval mode changed between admission" in wf
+    assert "PROMOTION_APPROVAL_COMMENT_ID" in wf
+    assert 'DEPLOYMENT_ID=$(jq -er \'.id\' "$RUN_DIR/deployment.json")' in wf
     # A mutation that defeats a check with `|| true` / `|| :` is caught here,
     # and a missing exit is caught by requiring the fail-closed `exit 1`.
     assert "|| true" not in wf and "|| :" not in wf   # no tautology defeat
