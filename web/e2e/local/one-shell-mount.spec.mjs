@@ -396,6 +396,16 @@ test.describe('route matrix, rail ON', () => {
 
     const dock = page.getByTestId('properties-dock')
     await expect(dock).toBeVisible()
+    // The dock's Plan section folds by default (W4c-C: reference information
+    // stays reachable without owning the viewport), and a folded section
+    // renders no body — so "reachable" is proven as ONE click, not as a
+    // panel already in the DOM. This row failed under the managed proof as
+    // first written (count 0) because it asserted the latter.
+    const planHead = dock.locator('.dock-section-head', { hasText: 'Plan' })
+    await expect(planHead).toHaveAttribute('aria-expanded', 'false')
+    await expect(page.locator('.ent-panel')).toHaveCount(0)
+    await planHead.click()
+    await expect(planHead).toHaveAttribute('aria-expanded', 'true')
     await expect(page.locator('.ent-panel')).toHaveCount(1)
     expect(await page.locator('.ent-panel').evaluate((el) => !!el.closest('.properties-dock'))).toBe(true)
   })
