@@ -1,5 +1,5 @@
 {
-  "_note": "Tier -> capability policy (CONTRACT-ADDENDUM §17 + agent spine §18 + guest uploads §19). Operator-tunable: edit these booleans (or point LEAF_ENTITLEMENTS_FILE at another file) to change what each Auth0 tier may do. Read at request time by server/entitlements.py. Off-auth (and unknown) tenants resolve tier 'demo' (full access, friction-free). run_read gates POST /api/run of drawing.read tools; run_write gates drawing.write tools; build gates POST /api/author; converse gates the conversational agent surface; agent_write_autopilot lets the agent auto-dispatch write tools; deploy gates registering an authored tool (R6); platform_customize gates R7 (true ONLY on the operator-granted 'admin' tier — W14 admin self-edit lane, docs/ADMIN-SELF-EDIT-LANE.md); upload gates POST /api/drawings/upload (§19 — the 'guest' tier is the ephemeral signed-out identity: upload only, everything else denied).",
+  "_note": "Tier -> capability policy (CONTRACT-ADDENDUM \u00a717 + agent spine \u00a718 + guest uploads \u00a719). Operator-tunable: edit these booleans (or point LEAF_ENTITLEMENTS_FILE at another file) to change what each Auth0 tier may do. Read at request time by server/entitlements.py. Off-auth (and unknown) tenants resolve tier 'demo' (full access, friction-free). run_read gates POST /api/run of drawing.read tools; run_write gates drawing.write tools; build gates POST /api/author; converse gates the conversational agent surface; agent_write_autopilot lets the agent auto-dispatch write tools; deploy gates registering an authored tool (R6); platform_customize gates R7 (true ONLY on the operator-granted 'admin' tier \u2014 W14 admin self-edit lane, docs/ADMIN-SELF-EDIT-LANE.md); upload gates POST /api/drawings/upload (\u00a719 \u2014 the 'guest' tier is the ephemeral signed-out identity: upload only, everything else denied). client_tool (2026-09-02) is the LOCKED single-purpose tier for a client handed one tool as a standalone app (server/tenant_scope.py narrows that tenant's catalog): upload + run_read only, no build/converse/write/solve/deploy.",
   "demo": {
     "run_read": true,
     "run_write": true,
@@ -65,6 +65,17 @@
     "deploy": false,
     "platform_customize": false,
     "upload": false
+  },
+  "client_tool": {
+    "run_read": true,
+    "run_write": false,
+    "solve": false,
+    "build": false,
+    "converse": false,
+    "agent_write_autopilot": false,
+    "deploy": false,
+    "platform_customize": false,
+    "upload": true
   },
   "guest": {
     "run_read": false,

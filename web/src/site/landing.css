@@ -1183,3 +1183,14 @@
   .studio-shell aside.nav, .studio-shell aside.rail { margin: 8px 8px 0; }
   .cockpit-status { display: none; }
 }
+
+/* Scope-locked shell (tenant tool scope): one Run button per scoped tool in
+   place of the conversational panel. Same palette as the operator rail. */
+.tc-scoped { display: flex; flex-direction: column; }
+.tc-scoped-tool { padding: 10px 14px; border-top: 1px solid #1f1f23; }
+.tc-scoped-tool-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.tc-scoped-tool-name { font-size: 12px; color: #e4e4e7; }
+.tc-scoped-tool-desc { margin: 6px 0 0; color: #71717a; font-size: 11px; line-height: 1.45; }
+.tc-bar-chip.accent { color: #0a0a0a; background: #22c55e; font-weight: 600; }
+.tc-bar-chip.accent:hover { color: #0a0a0a; background: #4ade80; }
+.tc-bar-chip.accent:disabled { color: #52525b; background: #1f1f23; cursor: not-allowed; }

@@ -32,6 +32,8 @@ import ProductSurfaceTabs, { ProductSurfaceFrame } from '../components/ProductSu
 import SelectionReadout from '../components/SelectionReadout.jsx'
 import RoutePanel from '../components/RoutePanel.jsx'
 import ResultPanel from '../components/ResultPanel.jsx'
+import ScopedToolPanel from '../components/ScopedToolPanel.jsx'
+import { LOCKED_SCOPE_ATTR, scopeFromEntitlements } from './tenantScope.js'
 import QuotaCard from '../components/QuotaCard.jsx'
 import DegradedBanner from '../components/DegradedBanner.jsx'
 import Toast from '../components/Toast.jsx'
@@ -781,6 +783,13 @@ export default function ToolCast({
     routeError,
     agentBanner,
   } = catalog.state
+  // Tenant tool scope (server/tenant_scope.py): a scoped tenant is LOCKED to a
+  // single-purpose app. The server already narrowed the catalog; here the
+  // shell drops the catalog/author/project chrome, the product-surface tabs,
+  // the marketing exits, and swaps the conversational panel for one Run
+  // button per scoped tool. Unscoped tenants render byte-identically.
+  const tenantScope = useMemo(() => scopeFromEntitlements(platform.entitlements), [platform.entitlements])
+  const scopeLocked = tenantScope !== null
   useEffect(() => {
     if (capabilityCatalog.families.length === 0) return
     const catalogKey = `${capabilityCatalog.source || 'unknown'}:${capabilityCatalog.families.map((family) => family.family_id).join(',')}`
@@ -1401,7 +1410,9 @@ export default function ToolCast({
 
   return (
     <>
-      <ProductSurfaceTabs activeSurface={activeSurface} states={productStates} onSelect={selectProductSurface} workspaceProject={workspaceProjectState} catalog={capabilityCatalog} />
+      {!scopeLocked && (
+        <ProductSurfaceTabs activeSurface={activeSurface} states={productStates} onSelect={selectProductSurface} workspaceProject={workspaceProjectState} catalog={capabilityCatalog} />
+      )}
       {activeSurface === 'cad' ? (
       <>
       <div className="tc-topcluster tc-topcluster-product" data-cast="tool" style={{ '--rank': 3 }}>
@@ -1421,7 +1432,9 @@ export default function ToolCast({
             {focusView ? 'Show controls' : 'Focus 3D'}
           </button>
         )}
-        <button type="button" className="tc-back" onClick={() => navigate('/')}>Back to the site</button>
+        {!scopeLocked && (
+          <button type="button" className="tc-back" onClick={() => navigate('/')}>Back to the site</button>
+        )}
         {LIVE_TOUR_REQUESTED && sessionReady && !tourOn && shouldStartTour(window.location.search) && (
           <button
             type="button"
@@ -1434,19 +1447,23 @@ export default function ToolCast({
             }}
           >Restart walk</button>
         )}
-        <span className="key">Esc</span>
+        {!scopeLocked && <span className="key">Esc</span>}
       </div>
 
       <aside className={`tc-rail tc-rail-l tc-operator-rail${focusView ? ' tc-focus-hidden' : ''}`} aria-label="Workspace controls" data-cast="tool" data-controller-instance={instanceId} data-checkout-instance={checkout.instanceId} style={{ '--rank': 0 }} data-testid="operator-surface">
         <div className="tc-rail-head">
-          <span className="tc-rail-title">Workspace</span>
-          <span className="tc-rail-sub">request and tools</span>
+          <span className="tc-rail-title" {...(scopeLocked ? { [LOCKED_SCOPE_ATTR]: '1' } : {})}>{scopeLocked ? tenantScope.label : 'Workspace'}</span>
+          <span className="tc-rail-sub">{scopeLocked ? 'your tools' : 'request and tools'}</span>
         </div>
         <div className="tc-rail-tabs" role="tablist" aria-label="Workspace panels" onKeyDown={moveRovingTab}>
           <button id="workspace-tab-operator" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'operator' ? 0 : -1} aria-selected={leftView === 'operator'} onClick={() => setLeftView('operator')}>Operator</button>
-          <button id="workspace-tab-catalog" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'catalog' ? 0 : -1} aria-selected={leftView === 'catalog'} disabled={!canOperate} onClick={() => setLeftView('catalog')}>Catalog <span>{tools.length}</span></button>
-          <button id="workspace-tab-author" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'author' ? 0 : -1} aria-selected={leftView === 'author'} disabled={!canOperate} onClick={() => setLeftView('author')}>Author</button>
-          <button id="workspace-tab-workspace" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'workspace' ? 0 : -1} aria-selected={leftView === 'workspace'} disabled={!canOperate} onClick={() => setLeftView('workspace')}>Project</button>
+          {!scopeLocked && (
+            <>
+              <button id="workspace-tab-catalog" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'catalog' ? 0 : -1} aria-selected={leftView === 'catalog'} disabled={!canOperate} onClick={() => setLeftView('catalog')}>Catalog <span>{tools.length}</span></button>
+              <button id="workspace-tab-author" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'author' ? 0 : -1} aria-selected={leftView === 'author'} disabled={!canOperate} onClick={() => setLeftView('author')}>Author</button>
+              <button id="workspace-tab-workspace" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'workspace' ? 0 : -1} aria-selected={leftView === 'workspace'} disabled={!canOperate} onClick={() => setLeftView('workspace')}>Project</button>
+            </>
+          )}
         </div>
         <div id="workspace-tabpanel" className="tc-rail-body" role="tabpanel" aria-labelledby={`workspace-tab-${leftView}`} tabIndex={0}>
           {leftView === 'operator' && (PUBLIC_DEMO ? (
@@ -1470,6 +1487,14 @@ export default function ToolCast({
                 onDemo={() => { window.location.href = '/try?demo=1' }}
               />
             </>
+          ) : sessionId && scopeLocked ? (
+            <ScopedToolPanel
+              scope={tenantScope}
+              tools={tools}
+              hasDrawing={hasDrawing}
+              busy={busy || jobRunning || routing}
+              onRun={(tool) => dispatchRequest(`/${tool.name}`)}
+            />
           ) : sessionId ? (
             <ConversePanel
               sessionId={sessionId}
@@ -2051,7 +2076,9 @@ export default function ToolCast({
           <span className={`dot ${iosShip.launchable ? 'live' : 'hollow'}`} />
           {iosShip.launchable ? 'Ship lane ready' : 'Ship lane setup required'}
         </span>
-        <button type="button" className="tc-back" onClick={() => navigate('/')}>Back to the site</button>
+        {!scopeLocked && (
+          <button type="button" className="tc-back" onClick={() => navigate('/')}>Back to the site</button>
+        )}
         <span className="key">Esc</span>
       </div>
       <aside className="tc-rail tc-rail-l tc-operator-rail" aria-label="iOS ship lane" data-cast="tool" data-testid="ios-ship-lane" style={{ '--rank': 0 }}>

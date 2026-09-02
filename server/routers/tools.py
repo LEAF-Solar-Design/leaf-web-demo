@@ -39,10 +39,16 @@ def tools(tenant=Depends(deps.require_tenant)) -> Any:
     requesting tenant's OWN repo tools are folded in (tenant A's authored tools are
     invisible to tenant B). Auth OFF -> tenant is the X-Tenant-Id stub (default
     demo-tenant); with no tenant repo configured this is byte-identical to before."""
+    import tenant_scope  # noqa: PLC0415
     try:
         catalog_tools = deps.all_tools(str(tenant))
     except customization_service.CustomizationServiceError as exc:
         return _catalog_error(exc)
+    except tenant_scope.ScopePolicyError:
+        # A corrupt tenant scope file must not unlock a scoped tenant: the
+        # whole list fails closed with the entitlement policy's structured 503.
+        return entitlements.policy_unavailable_response(
+            "run_read", entitlements.resolve_tier(tenant))
     return with_envelope_fields({
         "tools": [deps.catalog_tool_view(tool) for tool in catalog_tools]
     })
@@ -69,4 +75,14 @@ def get_entitlements(tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
     view["availability"] = {
         "author_stage": bool(customization_enabled(5, str(tenant).strip())),
     }
+    # Tenant tool scope (server/tenant_scope.py): `{label, tools}` when this
+    # tenant is locked to a single-purpose app, else null. Names only; the
+    # catalog itself is narrowed server-side, this is the shell's cue to drop
+    # the catalog/author/project chrome. A corrupt scope file is the same
+    # structured 503 as a corrupt entitlement policy, never an unlocked shell.
+    import tenant_scope  # noqa: PLC0415
+    try:
+        view["scope"] = tenant_scope.public_view(str(tenant))
+    except tenant_scope.ScopePolicyError:
+        return entitlements.policy_unavailable_response("run_read", tier)
     return deps.tenant_echo(with_envelope_fields(view), tenant)

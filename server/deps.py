@@ -310,7 +310,12 @@ def _fold_effective_tool_tiers(
                 if owner != tenant_id:
                     continue
             by_name[tool["name"]] = (tool, source)
-    return list(by_name.values())
+    # Tenant tool scope (server/tenant_scope.py): the ONE choke point every
+    # catalog read shares (all_tools, find_tool, effective_tools_with_provenance),
+    # so a scoped tenant cannot list, resolve, or run an unlisted tool. Unscoped
+    # tenants get the same list back untouched.
+    import tenant_scope  # noqa: PLC0415 - lazy, keeps deps import-light
+    return tenant_scope.filter_rows(tenant_id, list(by_name.values()))
 
 
 def _compatibility_effective_tool_tiers(
