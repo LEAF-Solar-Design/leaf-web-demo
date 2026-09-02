@@ -368,6 +368,7 @@ def service_receipt(
         "convergence_id": "not_produced",
         "deploy_mode": "normal",
         "consumer_contract": contract_slot,
+        "deploy_mode": "normal",
         "deploy_strategy": "direct",
         "digest_aware_evidence": missing(),
         "digest_aware_reconcile": False,
@@ -2014,6 +2015,44 @@ class ConvergenceFinalizerTests(unittest.TestCase):
         )
         receipt = subject._build_receipt(provider, BUILD_RUN, FRONTIER_RUN)
         self.assertEqual(receipt["relay"]["children"], {"web": 301, "app": 302})
+
+    def test_prewarm_receipt_is_never_convergence_evidence(self) -> None:
+        """A prewarm leg ends BEFORE the flip, so it is not a landed deploy.
+
+        deploy_mode=prewarm warms the idle colour at listener weight 0 and never
+        read-modifies a listener weight. Admitting the key without constraining
+        its value would let a receipt for traffic that never moved mint a
+        convergence receipt.
+        """
+
+        provider = fixture()
+        replace_receipt(
+            provider, 303, lambda value: value["requested"].__setitem__("deploy_mode", "prewarm")
+        )
+        self.assert_reason("SERVICE_RECEIPT_IS_A_PREWARM_NOT_A_CONVERGENCE", provider)
+
+    def test_an_unrelated_prewarm_receipt_does_not_abort_the_finalizer(self) -> None:
+        """The reason the shape-validation placement was wrong.
+
+        A prewarm receipt for some OTHER release sits in the same provider
+        window. It must simply fail to match this supply and be skipped. Refusing
+        prewarm inside `_service_receipt` ran over every candidate in the window,
+        so this receipt would have aborted the whole finalizer; refusing it at
+        selection, after `_receipt_matches_supply`, cannot.
+        """
+
+        def foreign_prewarm(value: dict) -> None:
+            value["requested"]["deploy_mode"] = "prewarm"
+            value["facts"]["source"]["revision"] = {"status": "produced", "value": "9" * 40}
+
+        provider = fixture()
+        replace_receipt(provider, 303, foreign_prewarm)
+        # 303 no longer carries this supply, so it is skipped and the run stops
+        # later for an ordinary missing-evidence reason. The whole point is
+        # WHICH reason: anything but SERVICE_RECEIPT_IS_A_PREWARM_NOT_A_
+        # CONVERGENCE proves the foreign prewarm was filtered, not adopted and
+        # not fatal. Under the old placement this raised the prewarm code.
+        self.assert_reason("SERVICE_TERMINAL_CARDINALITY", provider)
 
     def test_service_receipt_extra_field_and_bad_checksum_fail(self) -> None:
         provider = fixture()

@@ -1325,9 +1325,16 @@ def build_suites() -> List[Suite]:
         # membership test a provider value reaches, so an unhashable list or
         # dict fails closed with a reason code instead of raising a bare
         # TypeError: 66 passed, 222 subtests passed, 0 skipped.
+        # 66 -> 68 on 2026-09-03: a prewarm receipt is admitted as well-formed
+        # (that is #945's closed set) but refused at SELECTION, once it has
+        # matched THIS supply, because a prewarm leg ends before the flip. Two
+        # tests: a matching prewarm refused, and an UNRELATED prewarm in the
+        # same window filtered rather than fatal - the second is the regression
+        # test for refusing it at shape-validation time instead, which aborted
+        # the finalizer on a receipt belonging to some other release.
         Suite("platform-staging-convergence",
               "scripts test_platform_staging_convergence.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_platform_staging_convergence.py"), 66),
+              SCRIPTS_DIR, _py_pytest("test_platform_staging_convergence.py"), 68),
         Suite("production-web-release",
               "scripts test_production_web_release.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_production_web_release.py"), 17),
