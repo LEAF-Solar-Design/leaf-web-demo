@@ -52,4 +52,14 @@ describe('scope-locked shell wiring', () => {
       /<ProductSurfaceTabs\s[\s\S]{0,400}signedIn=\{isSignedIn\(\)\}\s*\n\s*onSignOut=\{platformSession\.actions\.signOut\}/,
     )
   })
+
+  it('keeps a sign-out control in the top cluster when a tenant scope hides the product nav', () => {
+    const topCluster = toolCast.indexOf('<div className="tc-topcluster tc-topcluster-product"')
+    const scopedControl = toolCast.indexOf('signedIn={scopeLocked && isSignedIn()}')
+    expect(topCluster).toBeGreaterThan(-1)
+    expect(scopedControl).toBeGreaterThan(topCluster)
+    expect(toolCast).toMatch(
+      /<AccountSignOut\s+signedIn=\{scopeLocked && isSignedIn\(\)\}\s+onSignOut=\{platformSession\.actions\.signOut\}\s*\/>/,
+    )
+  })
 })

@@ -49,6 +49,15 @@ export function ContinuityRail({ activeSurface, workspaceProject = null, catalog
   )
 }
 
+export function AccountSignOut({ signedIn = false, onSignOut = null }) {
+  if (!signedIn || typeof onSignOut !== 'function') return null
+  return (
+    <button type="button" className="chip-danger tc-account-signout" onClick={onSignOut}>
+      Sign out
+    </button>
+  )
+}
+
 export default function ProductSurfaceTabs({
   activeSurface, states, onSelect, workspaceProject = null, catalog = null,
   signedIn = false, onSignOut = null,
@@ -90,11 +99,7 @@ export default function ProductSurfaceTabs({
           so the console had no reachable exit for an end user (2026-09-02
           reconciliation, row B11). Same signOut path the Trust panel drawer
           already calls -- never raw logout(). */}
-      {signedIn && onSignOut && (
-        <button type="button" className="chip-danger tc-account-signout" onClick={onSignOut}>
-          Sign out
-        </button>
-      )}
+      <AccountSignOut signedIn={signedIn} onSignOut={onSignOut} />
     </nav>
   )
 }

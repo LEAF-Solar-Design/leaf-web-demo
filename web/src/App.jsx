@@ -35,7 +35,7 @@ import CustomizePanel from './components/CustomizePanel.jsx'
 import CheckoutControls from './components/CheckoutControls.jsx'
 import ClaudeAccountPanel from './components/ClaudeAccountPanel.jsx'
 import DemoBanner from './components/DemoBanner.jsx'
-import ProductSurfaceTabs, { ProductSurfaceFrame } from './components/ProductSurfaceTabs.jsx'
+import ProductSurfaceTabs, { AccountSignOut, ProductSurfaceFrame } from './components/ProductSurfaceTabs.jsx'
 import { deriveWorkspaceProjectState } from './site/workspaceProjectState.js'
 import IosSurface from './ios/IosSurface.jsx'
 import { ENV_IOS_SURFACE } from './ios/flag.js'
@@ -2307,9 +2307,7 @@ export default function App() {
               reachable exit for a signed-in operator (2026-09-02
               reconciliation, row B11). Same signOut path the drawer's action
               already calls -- never raw logout(). */}
-          {isSignedIn() && (
-            <button type="button" className="chip-danger tc-account-signout" onClick={sessionActions.signOut}>Sign out</button>
-          )}
+          <AccountSignOut signedIn={isSignedIn()} onSignOut={sessionActions.signOut} />
           {devControls && (
             <label className="switch">
               <input

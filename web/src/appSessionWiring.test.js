@@ -25,6 +25,7 @@ import { describe, expect, it } from 'vitest'
 import esbuild from 'esbuild'
 
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
+const landingCss = readFileSync(new URL('./site/landing.css', import.meta.url), 'utf8')
 const stripped = esbuild.transformSync(appSource, { loader: 'jsx' }).code
 
 describe('App.jsx session controller adoption', () => {
@@ -110,8 +111,28 @@ describe('App.jsx session controller adoption', () => {
   // the comment-stripped `stripped` lens the other pins use cannot see it.
   it('renders a persistent header sign-out control, gated on isSignedIn(), through the same controller path', () => {
     expect(appSource).toMatch(
-      /\{isSignedIn\(\) && \(\s*<button type="button" className="chip-danger tc-account-signout" onClick=\{sessionActions\.signOut\}>Sign out<\/button>\s*\)\}/,
+      /<AccountSignOut signedIn=\{isSignedIn\(\)\} onSignOut=\{sessionActions\.signOut\} \/>/,
     )
+  })
+
+  it('keeps the sign-out text above AA contrast on the dark studio header', () => {
+    expect(landingCss).toMatch(
+      /\.studio-shell header\.top \.tc-account-signout \{\s*color: #f0997b; background: rgba\(240, 153, 123, \.12\);/,
+    )
+
+    const foreground = [240, 153, 123]
+    const background = foreground.map((channel, index) => (
+      channel * 0.12 + [10, 10, 10][index] * 0.88
+    ))
+    const luminance = (rgb) => rgb
+      .map((channel) => channel / 255)
+      .map((channel) => (channel <= 0.04045
+        ? channel / 12.92
+        : ((channel + 0.055) / 1.055) ** 2.4))
+      .reduce((sum, channel, index) => sum + channel * [0.2126, 0.7152, 0.0722][index], 0)
+    const lighter = luminance(foreground)
+    const darker = luminance(background)
+    expect((lighter + 0.05) / (darker + 0.05)).toBeGreaterThanOrEqual(4.5)
   })
 
   // Falsification: the pins above must FAIL on the shapes they forbid, not
