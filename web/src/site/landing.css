@@ -1135,6 +1135,19 @@
 .cockpit-status b { font-weight: 500; color: rgba(240, 242, 240, .96); min-width: 5.5ch; display: inline-block; text-align: right; }
 .cockpit-scale b { min-width: 0; text-align: left; }
 .cockpit-sel[data-selected="true"] { color: #7fd6a6; }
+/* kimi-critic on #899: text with its OWN declared paper color inside the
+   dark chrome (an inherited re-pin never beats a declaration). */
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .btn,
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .btn.ghost {
+  background: rgba(240, 242, 240, .08); color: rgba(240, 242, 240, .92); border-color: rgba(240, 242, 240, .22);
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .btn.ghost:hover:not(:disabled) {
+  background: rgba(240, 242, 240, .16); color: rgba(240, 242, 240, .98);
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar :is(.checkout-mine, .checkout-mine b) { color: #7fd6a6; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar :is(.checkout-chip, .checkout-chip b, .checkout-stale, .checkout-legacy) { color: #f0c97b; }
+.studio-shell header.top .tag.amber { color: #f0c97b; }
+.studio-shell header.top :is(.claude-trigger .ca-k, .claude-trigger .ca-state) { color: rgba(240, 242, 240, .78); }
 @media (max-width: 980px) {
   .studio-shell aside.nav, .studio-shell aside.rail { margin: 8px 8px 0; }
   .cockpit-status { display: none; }
