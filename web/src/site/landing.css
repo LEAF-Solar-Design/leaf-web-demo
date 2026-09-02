@@ -1181,6 +1181,31 @@
    reason rides the title/aria-label from the component. */
 .ribbon-tool:disabled { color: rgba(240, 242, 240, .45); cursor: not-allowed; background: transparent; }
 .ribbon-empty { font: 400 11.5px var(--sans); color: rgba(240, 242, 240, .6); padding: 4px 2px; }
+/* W4d: honest gating reads as a sentence, not as grey. The cluster note is
+   visible text (never aria-hidden) and each tool's reason rides its title
+   and accessible name from the component. Pressed = a layer toggle's
+   visible state; false = the layer is hidden, struck through so the state
+   is readable without colour. */
+.ribbon-note { font: 400 10.5px var(--sans); color: rgba(240, 242, 240, .72); white-space: nowrap; }
+.ribbon-tool[aria-pressed="true"] { background: rgba(127, 214, 166, .16); border-color: rgba(127, 214, 166, .5); }
+.ribbon-tool[aria-pressed="false"] { text-decoration: line-through; color: rgba(240, 242, 240, .62); }
+/* The Modify group's operands (dx, dy, vertex, layer): the SAME record the
+   import pane's fields bind to, rendered as a compact row under the ops. */
+.ribbon-cluster-inputs { display: flex; gap: 6px; align-items: center; }
+.ribbon-cluster-inputs label {
+  display: inline-flex; gap: 4px; align-items: center;
+  font: 500 9.5px var(--font-mono); letter-spacing: .06em; text-transform: uppercase;
+  color: rgba(240, 242, 240, .72); white-space: nowrap;
+}
+.ribbon-input {
+  width: 46px; padding: 2px 5px;
+  font: 500 11px var(--font-mono);
+  color: rgba(240, 242, 240, .92);
+  background: rgba(240, 242, 240, .06);
+  border: 1px solid rgba(240, 242, 240, .22); border-radius: 3px;
+}
+.ribbon-input:focus-visible { outline: 2px solid #7fd6a6; outline-offset: 1px; }
+.ribbon-input:disabled { color: rgba(240, 242, 240, .45); background: transparent; }
 
 /* --- W4c-C: the page dissolves into the viewport (CAD/Solar only) -------
    Operator, twice: the drawing IS the workspace. Before this the console's
