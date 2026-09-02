@@ -2227,13 +2227,13 @@ export default function App() {
   // sample, on the Solar tab only. Honesty gates, all structural:
   //  - mock only: the live demo drawing is mutable and the bundled solve
   //    was computed against these exact bytes, nothing else;
-  //  - the demo sample only (a fixture boot never shows another drawing's
-  //    strings);
+  //  - the demo sample only, with the edit fixture excluded before its
+  //    synthetic geometry can inherit the demo source identity;
   //  - never over a version preview or a mutated head (StageLayer:107
   //    precedent) - a delete-panel run makes v2 and the routes go stale.
   const [demoSolveRoutes, setDemoSolveRoutes] = useState(null)
   const solarStringsEligible = !!studioGround && activeSurface === 'solar' && mock
-    && DRAWING_SOURCE === 'rooftop_demo'
+    && !isEditFixture && DRAWING_SOURCE === 'rooftop_demo'
   useEffect(() => {
     if (!solarStringsEligible || demoSolveRoutes) return undefined
     let live = true

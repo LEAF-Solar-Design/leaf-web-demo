@@ -411,6 +411,24 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.locator('.viewer-canvas[data-string-routes]')).toHaveCount(0)
   })
 
+  test('solar depth never projects rooftop strings over the edit fixture (W4c-V3)', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    await page.goto('/?fixture=edit&dev=1')
+    await expect(page.locator(STUDIO)).toHaveCount(1)
+    await page.getByLabel('Use mock data (off = live backend)').check()
+    await expect(page.getByRole('button', { name: 'Preview pending edit' })).toBeVisible()
+    await expect(page.locator('.viewer-canvas canvas')).toHaveCount(1, { timeout: 30_000 })
+
+    await page.getByRole('tab', { name: 'Solar CAD' }).click()
+    await expect(page.getByRole('tab', { name: 'Solar CAD' })).toHaveAttribute('aria-selected', 'true')
+    // Give the bundled solve enough time to load on the pre-fix path. The
+    // fixture must remain route-free after that same async boundary.
+    await page.waitForTimeout(500)
+    await expect(page.locator('.viewer-canvas[data-string-routes]')).toHaveCount(0)
+  })
+
   test('Esc ladder, history rung under the rail: an open drawer owns Esc, the route never moves', async ({ page, request }) => {
     // W4c-0 debt (ACCEPTANCE "Esc LADDER rungs"): the terminal row above
     // proves Esc never LEAVES /app; this rung proves an owned surface
