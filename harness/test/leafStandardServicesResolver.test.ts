@@ -153,10 +153,29 @@ describe("LeafStandardServicesResolver", () => {
     await expect(resolver(redirect).resolve(context, "spine"))
       .rejects.toThrow("standard_services_exchange_unavailable");
 
-    expect(() => standardServicesResolverFromEnv({
+    // Intent is LEAF_TENANT_MCP_BROKER_URL, matching serve.ts's approval-store
+    // predicate. LEAF_APP_URL (+ dispatch secret) alone is the converse
+    // back-edge pair scripts/start-leaf.py has always exported — reading it as
+    // standard-services intent broke every local managed proof, so locally it
+    // resolves to "not configured", never a throw.
+    expect(standardServicesResolverFromEnv({
       LEAF_APP_URL: "https://app.example",
+    })).toBeUndefined();
+    expect(standardServicesResolverFromEnv({
+      LEAF_APP_URL: "http://127.0.0.1:8230",
+      LEAF_APP_DISPATCH_SECRET: "converse-back-edge-secret",
+    })).toBeUndefined();
+    // The broker URL set with the rest missing IS a partial config: hard error.
+    expect(() => standardServicesResolverFromEnv({
+      LEAF_TENANT_MCP_BROKER_URL: "https://staging-api.leafdesign.ai",
     })).toThrow("standard services require");
     expect(() => standardServicesResolverFromEnv({
+      LEAF_RUNTIME_ENV: "production",
+    })).toThrow("required in staging and production");
+    // Deployed environments stay fail-closed no matter which pair is present.
+    expect(() => standardServicesResolverFromEnv({
+      LEAF_APP_URL: "https://app.example",
+      LEAF_APP_DISPATCH_SECRET: "converse-back-edge-secret",
       LEAF_RUNTIME_ENV: "production",
     })).toThrow("required in staging and production");
     expect(() => new LeafStandardServicesResolver({
