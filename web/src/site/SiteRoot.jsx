@@ -208,7 +208,7 @@ export default function SiteRoot() {
           // session/checkout controller, command bar, or operator provider —
           // the exact duplicate-instance defects the ownership specs pin.
           <div className="studio-shell" data-scene="app" data-mode="console">
-            <div className="studio-ground" ref={setStudioGround} aria-hidden={studioGround ? undefined : true} />
+            <div className="studio-ground" ref={setStudioGround} role="region" aria-label="Drawing" aria-hidden={studioGround ? undefined : true} />
             <StudioGroundContext.Provider value={studioGround}>
               <WorkspaceControllerProvider {...consoleWorkspaceMount()}>
                 <Suspense fallback={null}>

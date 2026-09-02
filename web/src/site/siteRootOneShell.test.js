@@ -5,11 +5,34 @@
 // arm drifting from the shipped shell, the auth-callback deferral slipping
 // below the shell branch, the portal losing its null-ground inline path, or
 // the studio shell adopting the dark-token .stage-root class before W4's
-// re-pin work. Normalized to LF (Windows checkout is CRLF).
+// re-pin work. Normalized to LF (Windows checkout is CRLF) and pinned on
+// COMMENT-STRIPPED source, so a commented-out copy of the required code can
+// never satisfy a pin after the live code is deleted (panel finding).
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
-const read = (rel) => readFileSync(new URL(rel, import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+const raw = (rel) => readFileSync(new URL(rel, import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+
+// Strip block comments, JSX comment braces, and full-line // comments. Not a
+// parser: it leaves `//` inside string literals (URLs) alone by only removing
+// lines whose first non-space characters are `//`.
+export function stripComments(src) {
+  return src
+    .replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}/g, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^[ \t]*\/\/.*$/gm, '')
+}
+
+const read = (rel) => stripComments(raw(rel))
+
+// The studio-shell JSX block: from the host div to the rollback arm.
+function studioArm(src) {
+  const start = src.indexOf('<div className="studio-shell"')
+  const end = src.indexOf(') : (', start)
+  expect(start).toBeGreaterThan(-1)
+  expect(end).toBeGreaterThan(start)
+  return src.slice(start, end)
+}
 
 describe('SiteRoot one-shell branch', () => {
   const src = read('./SiteRoot.jsx')
@@ -28,11 +51,15 @@ describe('SiteRoot one-shell branch', () => {
     expect(src).toMatch(/className="studio-shell" data-scene="app" data-mode="console"/)
   })
 
-  it('is NOT .stage-root — the dark token re-pin would flip the console identity', () => {
-    // The studio shell must not adopt the stage class until W4 lands the
-    // console-mode token re-pin; landing.css re-pins the full dark set on
-    // .stage-root. Pin the className expression, not prose.
-    expect(src).not.toMatch(/className="stage-root[^"]*" data-scene="app"/)
+  it('is NOT .stage-root in ANY spelling — the dark token re-pin would flip the console identity', () => {
+    // Scoped to the studio arm's JSX (not one literal attribute order): no
+    // class expression, clsx call, or reordered attribute may carry the
+    // stage class until W4 lands the console-mode token re-pin.
+    expect(studioArm(src)).not.toMatch(/stage-root/)
+  })
+
+  it('the ground node is a named landmark, hidden only while empty', () => {
+    expect(studioArm(src)).toMatch(/className="studio-ground" ref=\{setStudioGround\} role="region" aria-label="Drawing" aria-hidden=\{studioGround \? undefined : true\}/)
   })
 
   it('keeps the auth-callback deferral ABOVE the shell branch (never regress the deferral)', () => {
@@ -60,6 +87,16 @@ describe('App portal wiring', () => {
   it('the grounded viewer goes transparent; the inline viewer keeps its default', () => {
     expect(src).toMatch(/background=\{studioGround \? 'transparent' : undefined\}/)
   })
+
+  it('never seeds intake synchronously — the single-mount invariant of the portal', () => {
+    // The ground attaches in a pre-paint state flush, before any async intake
+    // resolves, so the Viewer's first committed render is already the portal
+    // render. An `initialIntake` passed to the version controller would make
+    // intake truthy at App's FIRST render, mount the Viewer inline, then
+    // remount it into the ground one commit later (WebGL context rebuild,
+    // camera pose lost). Pinned here because nothing at runtime would fail.
+    expect(src).not.toMatch(/initialIntake/)
+  })
 })
 
 describe('rollback contract', () => {
@@ -69,12 +106,30 @@ describe('rollback contract', () => {
   })
 
   it('the studio shell styles live in landing.css (dark file), never styles.css', () => {
-    expect(read('./landing.css')).toMatch(/\.studio-shell \{/)
-    expect(read('../styles.css')).not.toMatch(/studio-shell/)
+    expect(raw('./landing.css')).toMatch(/\.studio-shell \{/)
+    expect(raw('../styles.css')).not.toMatch(/studio-shell/)
+  })
+
+  it('every pointer RESTORE in the studio chain is zero-specificity (:where), every link plain', () => {
+    // A restore rule with specificity beats an element's own declared
+    // `pointer-events: none` (tour root, drawer layer, .exit) into a click
+    // shield, and a `> *` restore out-specifies the next `none` link; both
+    // were live defects. Pin the shape: no bare `... > * { pointer-events:
+    // auto }` in the block, and each chain link declares `none`.
+    const css = stripComments(raw('./landing.css'))
+    const block = css.slice(css.indexOf('.studio-shell {'))
+    expect(block).not.toMatch(/^[^:\n][^\n]*> \* \{[^}]*pointer-events: auto/m)
+    for (const link of ['.studio-shell .app', '.studio-shell .center-col', '.studio-shell main.center-scroll', '.studio-shell .workspace-card', '.studio-shell .viewer-wrap']) {
+      const rule = block.slice(block.indexOf(`${link} {`))
+      expect(rule.slice(0, rule.indexOf('}')), link).toMatch(/pointer-events: none/)
+    }
+    for (const restore of ['.app > *', '.center-col > *', 'main.center-scroll > *', '.workspace-card > *', '.viewer-wrap > *']) {
+      expect(block, restore).toMatch(new RegExp(`:where\\(\\.studio-shell ${restore.replace(/[.*]/g, '\\$&')}\\) \\{ pointer-events: auto; \\}`))
+    }
   })
 })
 
-// Falsification: the branch pin must FAIL on the shape it forbids.
+// Falsification: the pins must FAIL on the shapes they forbid.
 describe('falsification', () => {
   it('an unconditional studio shell (no rail branch) fails the branch pin', () => {
     const mutated = read('./SiteRoot.jsx').replace('ONE_SHELL_ENABLED ? (', 'true ? (')
@@ -84,5 +139,26 @@ describe('falsification', () => {
   it('a portal without the null-ground inline fallback fails the portal pin', () => {
     const mutated = read('../App.jsx').replace(': viewerEl', ': null')
     expect(mutated).not.toMatch(/\? createPortal\(<div className="studio-ground-viewer">\{viewerEl\}<\/div>, studioGround\)\s*\n?\s*: viewerEl/)
+  })
+
+  it('a commented-out deferral no longer satisfies the deferral pin', () => {
+    const mutated = stripComments(raw('./SiteRoot.jsx').replace('if (authCallbackPending) return', '// if (authCallbackPending) return'))
+    expect(mutated.indexOf('if (authCallbackPending) return')).toBe(-1)
+  })
+
+  it('a clsx-spelled stage-root on the studio host fails the scoped pin', () => {
+    const mutated = read('./SiteRoot.jsx').replace('className="studio-shell"', "className={cx('stage-root', 'studio-shell')}")
+    expect(mutated).toMatch(/stage-root/)
+    // The scoped pin reads the arm from the host div; a renamed host is the
+    // pin's own boundary moving, which the mode/scene pin above catches.
+    const start = mutated.indexOf("className={cx('stage-root', 'studio-shell')}")
+    const end = mutated.indexOf(') : (', start)
+    expect(mutated.slice(start, end)).toMatch(/stage-root/)
+  })
+
+  it('a specific restore rule fails the zero-specificity pin', () => {
+    const css = stripComments(raw('./landing.css'))
+    const block = css.slice(css.indexOf('.studio-shell {')).replace(':where(.studio-shell .app > *) { pointer-events: auto; }', '.studio-shell .app > * { pointer-events: auto; }')
+    expect(block).toMatch(/^[^:\n][^\n]*> \* \{[^}]*pointer-events: auto/m)
   })
 })

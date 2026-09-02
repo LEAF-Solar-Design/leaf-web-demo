@@ -169,5 +169,47 @@ below the W0 baseline; the rail and its flag module removed in the same PR.
    re-pin, gated by check_token_repin key parity.
 
 The `?demo` dual-read row's "add a test the first time this wiring is
-touched" clause is satisfied by the mount spec's rail-ON rows (`?demo=1`
-boots console mode off `/try`, stays operator on `/try`).
+touched" clause is NOT triggered by the mount PR: the mount does not touch
+the `?demo` wiring (SiteRoot's single `BOOT_SEARCH` reading is unchanged),
+and the mount spec's rail-ON rows prove only the BOOT consumer (`?demo=1`
+boots console mode off `/try`, stays operator on `/try`), never the
+drawing-SELECTION consumer. The clause stays owed by the first slice that
+touches that wiring; it must assert the seeded drawing id on
+`/try?demo=<named-drawing>` alongside the shell it boots.
+
+### W3 mount receipts (panel-corrected)
+
+Rail-ON rows proven by `web/e2e/local/one-shell-mount.spec.mjs` (managed
+runner only; `requireLocalReady` hard-fails under `LEAF_E2E_MANAGED=1` and
+the receipt must quote executed/skipped counts): `/app`, `/app/*`, `/ty`,
+`/ty/*`, `?drawing=`, `?ops=`, `?demo=`, `?dev=`, `?fixture=` off `/try`;
+`/try` and `/try?demo=1` stay operator; `/sheets` and an unknown path never
+mount the studio; Esc at top level stays on `/app`; the pointer chain
+(computed `pointer-events` down `.center-col` → `main.center-scroll` →
+`.workspace-card` → `.viewer-wrap`, and `elementFromPoint` at the card window
+resolving inside the ground); the small-screen scroll surface (<=980px: the
+shell scrolls, the ground stays pinned). Rollback: baseline storage keys are
+captured on a rail-OFF boot BEFORE the studio session, the studio session is
+interacted with (canvas click + Esc), then on → off must introduce no key at
+all (the only named exclusion is the old shell's per-event telemetry caps,
+`leaf.telemetry.cap.*`, which both shells write identically).
+
+Deliberately deferred, with owners:
+
+- Reload-during-checkout-handoff under rail ON (row above): the console
+  checkout-ownership walk fails on plain `main` today (pre-existing, chipped
+  as "Fix 4 pre-existing local-proof failures"), so a rail-ON copy would be
+  red for reasons unrelated to the mount. Owed by the first slice after that
+  chip lands: run `console-checkout-ownership.spec.mjs` with `setRail('1')`.
+- Esc LADDER rungs (drawer / history / route) under the rail: the spec pins
+  the terminal "never navigates" behavior only. Owed by W4's overlay-rail
+  slice, which adds the first studio-mode drawer.
+- A jsdom render test mounting SiteRoot under both `__LEAF_FLAGS` values (the
+  arm-swap dodge the source pins cannot see) is owed by W4 alongside the
+  `.stage-root` adoption; until then the managed e2e ON/OFF rows are the
+  arm receipt.
+- A DOM stamp of `WorkspaceControllerProvider`'s instanceId in console mode
+  (today only the operator rail stamps it): W4 overlay rails.
+- Cosmetic: `ViewerSkeleton` paints `#0f0f11` inline at z0 under the studio;
+  the loading verb re-pins light. Skeleton material moves with W4's ground
+  tokens.
