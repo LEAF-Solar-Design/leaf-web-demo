@@ -114,6 +114,72 @@ export function surviveSelection(previousId, entities) {
   return (entities || []).some((entity) => entity.id === previousId) ? previousId : ''
 }
 
+/** The W4d Draw group's operations: creation needs no selection. */
+export const CREATE_OPS = Object.freeze(['createLine', 'createCircle', 'createArc', 'createPolyline'])
+
+// Client-side bound on a typed point list. The engine bounds harder
+// (100,000); past this a "polyline" is a paste, not a drawing gesture.
+export const MAX_CREATE_POINTS = 1000
+
+/**
+ * "x,y x,y ..." (pairs split on whitespace or ';') -> a flat finite
+ * [x0, y0, x1, y1, ...], or null for anything malformed or oversized.
+ */
+export function parsePointList(raw) {
+  const text = String(raw ?? '').trim()
+  if (!text) return null
+  const points = []
+  for (const pair of text.split(/[;\s]+/)) {
+    if (!pair) continue
+    const parts = pair.split(',')
+    if (parts.length !== 2) return null
+    const x = Number.parseFloat(parts[0])
+    const y = Number.parseFloat(parts[1])
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null
+    points.push(x, y)
+    if (points.length > MAX_CREATE_POINTS * 2) return null
+  }
+  return points.length >= 4 ? points : null
+}
+
+/**
+ * Create-input validation (W4d Draw group), refused here rather than at the
+ * engine: `{ payload }` or `{ refusal }` with the operator-facing sentence.
+ * The engine re-validates (finite, radius > 0, sweep, bounds) and refuses
+ * with a typed reason; this layer exists so a typo costs a sentence, not a
+ * round trip.
+ */
+export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, layer } = {}) {
+  const layerName = String(layer ?? '').trim()
+  if (op === 'createLine') {
+    const [x1, y1, xx2, yy2] = [x, y, x2, y2].map(fmtDelta)
+    if ([x1, y1, xx2, yy2].some((v) => v === null)) return { refusal: 'Line refused: x, y, x2 and y2 must all be numbers.' }
+    if (x1 === xx2 && y1 === yy2) return { refusal: 'Line refused: the two points must differ.' }
+    return { payload: { x1, y1, x2: xx2, y2: yy2, layer: layerName } }
+  }
+  if (op === 'createCircle') {
+    const [cx, cy, radius] = [x, y, r].map(fmtDelta)
+    if ([cx, cy, radius].some((v) => v === null)) return { refusal: 'Circle refused: x, y and r must all be numbers.' }
+    if (radius <= 0) return { refusal: 'Circle refused: r must be greater than 0.' }
+    return { payload: { cx, cy, radius, layer: layerName } }
+  }
+  if (op === 'createArc') {
+    const [cx, cy, radius, startDeg, endDeg] = [x, y, r, a0, a1].map(fmtDelta)
+    if ([cx, cy, radius, startDeg, endDeg].some((v) => v === null)) {
+      return { refusal: 'Arc refused: x, y, r, start and end must all be numbers.' }
+    }
+    if (radius <= 0) return { refusal: 'Arc refused: r must be greater than 0.' }
+    if ((endDeg - startDeg) % 360 === 0) return { refusal: 'Arc refused: start and end must differ (degrees).' }
+    return { payload: { cx, cy, radius, startDeg, endDeg, layer: layerName } }
+  }
+  if (op === 'createPolyline') {
+    const points = parsePointList(pts)
+    if (!points) return { refusal: `Polyline refused: enter at least two points as x,y pairs (at most ${MAX_CREATE_POINTS}).` }
+    return { payload: { points, closed: closed === true || closed === 'true', layer: layerName } }
+  }
+  return { refusal: `Draw refused: unknown operation ${op}.` }
+}
+
 /**
  * Edit-input validation, refused here rather than at the engine. Returns
  * either `{ payload }` or `{ refusal }` with the exact operator-facing
@@ -267,20 +333,32 @@ export default function useEngineSession({
           return
         }
         const entities = message.entities ?? NO_ENTITIES
+        // A create reports what it drew BY ID (the worker found it again by
+        // handle in the re-parse); the selection lands on it. A create whose
+        // entity the writer dropped is a defect and reads as one.
+        const isCreate = CREATE_OPS.includes(message.op)
+        const createdId = isCreate && message.createdId !== null && message.createdId !== undefined
+          ? String(message.createdId)
+          : ''
+        const createLost = isCreate && !createdId
+        const reparsed = `Re-parsed from the written bytes: ${message.entityCount} entities, ${message.byteLength} bytes.`
         setSession((current) => Object.freeze({
           ...current,
           busy: false,
           entities,
           entityCount: message.entityCount ?? 0,
           savedBytes: message.bytes ?? null,
-          selectedId: surviveSelection(current.selectedId, entities),
+          selectedId: createdId || surviveSelection(current.selectedId, entities),
           engineParsed: true,
           // The written bytes, read back: what a reader of the saved file
           // would actually see, never an optimistic prediction.
           geometrySource: GEOMETRY_SOURCE.ENGINE_REPARSE,
-          errorKind: null,
-          status: `${message.op} applied. Re-parsed from the written bytes: `
-            + `${message.entityCount} entities, ${message.byteLength} bytes.`,
+          errorKind: createLost ? SESSION_ERROR.REFUSED : null,
+          status: createLost
+            ? `${message.op} applied, but the new entity was not found after re-parse. ${reparsed}`
+            : createdId
+              ? `${message.op} applied: entity ${createdId} drawn. ${reparsed}`
+              : `${message.op} applied. ${reparsed}`,
         }))
         return
       }
@@ -367,6 +445,34 @@ export default function useEngineSession({
     }
   }, [patch])
 
+  // W4d Draw group: creation needs an open, engine-parsed document and no
+  // selection. Refused here for malformed input (a sentence, no round trip),
+  // refused as TRANSPORT when nothing is open.
+  const create = useCallback((op, inputs) => {
+    if (!CREATE_OPS.includes(op)) {
+      patch({ errorKind: SESSION_ERROR.REFUSED, status: `Draw refused: unknown operation ${op}.` })
+      return
+    }
+    const { payload, refusal } = buildCreatePayload(op, inputs)
+    if (refusal) {
+      patch({ errorKind: SESSION_ERROR.REFUSED, status: refusal })
+      return
+    }
+    const boundary = boundaryRef.current
+    if (!boundary || !sessionRef.current.engineParsed) {
+      patch({ errorKind: SESSION_ERROR.TRANSPORT, status: 'Draw refused: no document is open.' })
+      return
+    }
+    patch({ busy: true, errorKind: null })
+    if (!boundary.post({ type: 'applyEdit', op, payload })) {
+      patch({
+        busy: false,
+        errorKind: SESSION_ERROR.TRANSPORT,
+        status: `Draw refused (${op}): the boundary rejected the message.`,
+      })
+    }
+  }, [patch])
+
   // The persistence leg: post the EXACT edited bytes with a client-computed
   // digest; the server recomputes, parses, and compare-and-sets against the
   // head. A 409 (head moved) reads back as a plain instruction to refresh.
@@ -433,8 +539,8 @@ export default function useEngineSession({
   useEffect(() => () => { teardown() }, [teardown])
 
   const actions = useMemo(() => ({
-    open, select, applyEdit, save, reset,
-  }), [applyEdit, open, reset, save, select])
+    open, select, applyEdit, create, save, reset,
+  }), [applyEdit, create, open, reset, save, select])
 
   const selected = useMemo(
     () => session.entities.find((entity) => entity.id === session.selectedId) || null,
