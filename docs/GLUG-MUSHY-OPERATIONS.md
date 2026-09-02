@@ -4,11 +4,11 @@ Glug is one organization-owned specialization inside the shared Malleable worksp
 
 ## Required production configuration
 
-Set `GLUG_MUSHY_ENABLED=true` only after every value below is present in the service secret store.
-The deployment profile is recorded in `deploy/required-config.glug-mushy.json` and extends the ordinary app requirements.
+Set `GLUG_MUSHY_ENABLED=true` only after the control-plane values below are present. The profile is recorded in `deploy/required-config.glug-mushy.json` and extends the ordinary app requirements.
 
 | Variable | Purpose |
 | --- | --- |
+| `GLUG_MUSHY_AUTHOR_URL` | Exact authenticated harness endpoint. Its path must be `/internal/glug/mushy/author`. |
 | `GLUG_MUSHY_CANONICAL_GIT_SOURCE` | Clean standalone Glug clone used as the source for fresh job workspaces. |
 | `GLUG_MUSHY_WORKSPACE_ROOT` | Dedicated directory for isolated, short-lived job clones. It must not overlap the canonical source. |
 | `LEAF_GLUG_MUSHY_ARTIFACT_ROOT` | Immutable built artifact for Mushy source pin `c3fdc0869692c804ae69fe00b5b6f0722c80943a`. |
@@ -21,7 +21,23 @@ The deployment profile is recorded in `deploy/required-config.glug-mushy.json` a
 | `GLUG_MUSHY_PROXY_SUBJECT` | The one service subject allowed to forward a signed Glug board actor. |
 | `GLUG_MUSHY_PROXY_SIGNING_SECRET` | Shared HMAC key for the Next.js board proxy. Use at least 32 random bytes. |
 
-The app startup hook validates the artifact, its manifest-declared JavaScript entrypoint, canonical clone, isolated workspace root, durable database, approval store, and review provider. The author process is always the fixed Node.js runtime plus that exact digest-checked artifact file. No environment value may replace the author executable. An enabled rail that cannot mount all of them stops startup.
+`LEAF_HARNESS_SECRET` is inherited from the app profile and authenticates this one internal hop. The app startup hook validates the pinned artifact, its manifest-declared entrypoint, canonical clone, isolated workspace root, durable database, approval store, and review provider. It rechecks the entrypoint digest before every author request.
+
+Enable the author in the harness only after `deploy/required-config.glug-mushy-harness.json` is satisfied:
+
+| Variable | Purpose |
+| --- | --- |
+| `GLUG_MUSHY_AUTHOR_ENABLED` | Opt-in switch for the Glug-only author route. |
+| `GLUG_MUSHY_AUTHOR_TENANT_ID` | Fixed harness grant identity used for Glug maintenance. |
+| `GLUG_MUSHY_WORKSPACE_ROOT` | The same disposable-workspace volume mounted in the control plane. |
+| `LEAF_GLUG_MUSHY_ARTIFACT_ROOT` | Read-only exact built artifact from the pinned Mushy source. |
+| `LEAF_GLUG_ADOPTION_MANIFEST_FILE` | Optional manifest path override. The image default is `/app/glug/glug_adoption_manifest.json`. |
+
+The harness inherits `LEAF_HARNESS_SECRET` and its grant-store controls from the ordinary harness profile. Install the fixed Glug grant under `GLUG_MUSHY_AUTHOR_TENANT_ID`. Do not place that grant in the control plane. Seed the same immutable artifact volume at `/data/glug/mushy-artifact` in the app and `/app/glug-mushy-artifact` in the harness before enabling either side.
+
+The control plane sends only the closed author request, source pin, timeout, and harness secret. The harness verifies the full manifest-declared artifact tree before every run and imports only `src/ports/impl/repoEditRunner.js` from it. No environment value can replace the editor module. The harness has the model grant but no GitHub, Stripe, deployment, or App Store credential. The control plane has the narrow GitHub review credential but no model grant.
+
+The author has one 240-second cancellation budget that starts before artifact verification, workspace checks, grant lookup, and editor loading. The harness gives the pinned editor only the remaining budget and passes the same outer abort signal into its Agent SDK query. At the limit, the SDK closes the child input, gives it about two seconds to exit cleanly, then forwards the abort signal to the transport process. The harness restores an aborted workspace before responding. The control-plane HTTP wrapper stops at 280 seconds, and a stale workspace becomes reclaimable at 300 seconds. These three limits leave cleanup time without letting a late author publish or complete an old claim.
 
 ## Authority boundary
 

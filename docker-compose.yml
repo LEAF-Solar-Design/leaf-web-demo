@@ -101,6 +101,12 @@ services:
       LEAF_HARNESS_SESSION_STORE: ${LEAF_HARNESS_SESSION_STORE:-file}
       LEAF_HARNESS_AUTHORING_MODE: ${LEAF_HARNESS_AUTHORING_MODE:-disabled}
       LEAF_HARNESS_DATABASE_URL: ${LEAF_HARNESS_DATABASE_URL:-}
+      # Glug maintenance is opt-in. The harness owns the model grant while the
+      # app retains claims, Git receipts, and review-provider credentials.
+      GLUG_MUSHY_AUTHOR_ENABLED: ${GLUG_MUSHY_AUTHOR_ENABLED:-false}
+      GLUG_MUSHY_AUTHOR_TENANT_ID: ${GLUG_MUSHY_AUTHOR_TENANT_ID:-glug-maintainer}
+      GLUG_MUSHY_WORKSPACE_ROOT: /data/glug/workspaces
+      LEAF_GLUG_MUSHY_ARTIFACT_ROOT: /app/glug-mushy-artifact
       # --- operator opt-ins (NEVER baked): ------------------------------------
       # LEAF_TENANT_REPO: /data/tenants/demo-tenant  # demo single-repo back-compat override
       # LEAF_GRANT_FILE: /run/secrets/claude-grant   # a demo-tenant grant token file
@@ -108,6 +114,8 @@ services:
       - leaf-tenants:/data/tenants        # shared with the app (§16.H)
       - leaf-grants:/data/grants
       - leaf-sessions:/data/sessions      # harness-only converse store
+      - leaf-glug-workspaces:/data/glug/workspaces
+      - leaf-glug-mushy-artifact:/app/glug-mushy-artifact:ro
       # - ./.secrets/claude-grant:/run/secrets/claude-grant:ro
     depends_on:
       broker:
@@ -178,6 +186,12 @@ services:
       LEAF_GUEST_CAP_STORE: ${LEAF_GUEST_CAP_STORE:-memory}
       LEAF_DRAWING_STORE: ${LEAF_DRAWING_STORE:-legacy}
       LEAF_UPLOAD_STORE: ${LEAF_UPLOAD_STORE:-legacy}
+      GLUG_MUSHY_ENABLED: ${GLUG_MUSHY_ENABLED:-false}
+      GLUG_MUSHY_AUTHOR_URL: http://harness:8150/internal/glug/mushy/author
+      GLUG_MUSHY_CANONICAL_GIT_SOURCE: /data/glug/canonical
+      GLUG_MUSHY_WORKSPACE_ROOT: /data/glug/workspaces
+      LEAF_GLUG_MUSHY_ARTIFACT_ROOT: /data/glug/mushy-artifact
+      GLUG_MUSHY_JOB_DATABASE: /data/glug/control/jobs.db
       LEAF_GUEST_CAP_HMAC_SECRET: ${LEAF_GUEST_CAP_HMAC_SECRET:-}
       # --- operator opt-in: platform Project/Job persistence (Neon/Postgres) ---
       DATABASE_URL: ${DATABASE_URL:-}                  # empty => platform DB endpoints stay dark (demo-safe)
@@ -186,6 +200,10 @@ services:
       - leaf-drawings:/data/drawings
       - leaf-state:/data/state
       - leaf-uploads:/data/uploads
+      - leaf-glug-canonical:/data/glug/canonical:ro
+      - leaf-glug-control:/data/glug/control
+      - leaf-glug-workspaces:/data/glug/workspaces
+      - leaf-glug-mushy-artifact:/data/glug/mushy-artifact:ro
     depends_on:
       broker:
         condition: service_healthy
@@ -240,3 +258,7 @@ volumes:
   leaf-drawings:
   leaf-state:
   leaf-uploads:
+  leaf-glug-canonical:
+  leaf-glug-control:
+  leaf-glug-workspaces:
+  leaf-glug-mushy-artifact:

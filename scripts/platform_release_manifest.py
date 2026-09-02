@@ -96,6 +96,7 @@ SURFACE_INPUTS: dict[str, tuple[str, ...]] = {
         ".dockerignore",
         "deploy/Dockerfile.harness",
         "harness",
+        "server/glug_adoption_manifest.json",
     ),
     "web": (
         ".dockerignore",

@@ -5,6 +5,7 @@
   "required": {
     "environment": [
       "GLUG_MUSHY_ENABLED",
+      "GLUG_MUSHY_AUTHOR_URL",
       "GLUG_MUSHY_CANONICAL_GIT_SOURCE",
       "GLUG_MUSHY_WORKSPACE_ROOT",
       "LEAF_GLUG_MUSHY_ARTIFACT_ROOT",
