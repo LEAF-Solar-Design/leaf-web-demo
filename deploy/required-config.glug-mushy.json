@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "profile": "glug-mushy-control",
+  "extends": "required-config.app.json",
+  "required": {
+    "environment": [
+      "GLUG_MUSHY_ENABLED",
+      "GLUG_MUSHY_CANONICAL_GIT_SOURCE",
+      "GLUG_MUSHY_WORKSPACE_ROOT",
+      "LEAF_GLUG_MUSHY_ARTIFACT_ROOT",
+      "GLUG_MUSHY_JOB_DATABASE",
+      "GLUG_REPOSITORY_SLUG",
+      "GLUG_MUSHY_CONTROL_TENANT_ID",
+      "GLUG_MUSHY_CONTROL_SUBJECTS",
+      "GLUG_MUSHY_PROXY_SUBJECT"
+    ],
+    "mountPaths": [
+      "/data/glug/canonical",
+      "/data/glug/control",
+      "/data/glug/mushy-artifact",
+      "/data/glug/workspaces"
+    ],
+    "secrets": [
+      "GLUG_MUSHY_CLAIM_SIGNING_SECRET",
+      "GLUG_GITHUB_REVIEW_TOKEN",
+      "GLUG_MUSHY_PROXY_SIGNING_SECRET"
+    ]
+  }
+}
