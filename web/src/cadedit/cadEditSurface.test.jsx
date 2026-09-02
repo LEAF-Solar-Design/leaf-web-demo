@@ -125,6 +125,18 @@ const TWO_POLY_DXF = [
   '0', 'ENDSEC', '0', 'EOF',
 ].join('\n') + '\n'
 
+// Adjacent valid u64 handles above Number.MAX_SAFE_INTEGER. They round to the
+// same JavaScript number, so this fixture catches any numeric wasm projection
+// that can redirect an edit onto a neighbouring entity.
+const HIGH_HANDLE_DXF = [
+  '0', 'SECTION', '2', 'ENTITIES',
+  '0', 'LINE', '5', '20000000000000', '8', '0',
+  '10', '0', '20', '0', '30', '0', '11', '1', '21', '0', '31', '0',
+  '0', 'LINE', '5', '20000000000001', '8', '0',
+  '10', '100', '20', '0', '30', '0', '11', '101', '21', '0', '31', '0',
+  '0', 'ENDSEC', '0', 'EOF',
+].join('\n') + '\n'
+
 // Transport double: the REAL async worker handler in a persistent child
 // process (real wasm engine loaded there), behind a Worker-shaped surface.
 class FakeEngineWorker {
@@ -308,6 +320,21 @@ describe.skipIf(!HAS_ENGINE)('acceptance: real-engine editing through the bounda
     fireEvent.click(screen.getByRole('button', { name: 'Delete selected' }))
     await statusContains('delete applied')
     expect(screen.getByTestId('cad-edit-entity-count').textContent).toBe('1')
+  })
+
+  it('keeps adjacent u64 handles above 2^53 distinct and deletes only the selected entity', async () => {
+    renderSurface()
+    await openDocument(HIGH_HANDLE_DXF, 'high-handles.dxf')
+    const radios = screen.getAllByRole('radio')
+    expect(radios.map((radio) => radio.value)).toEqual(['9007199254740992', '9007199254740993'])
+    selectEntity(1)
+    expect(radios[1].checked).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Delete selected' }))
+    await statusContains('delete applied')
+    expect(screen.getByTestId('cad-edit-entity-count').textContent).toBe('1')
+    const remaining = screen.getByTestId('cad-edit-entity-list').textContent
+    expect(remaining).toContain('(0,0 → 1,0)')
+    expect(remaining).not.toContain('(100,0 → 101,0)')
   })
 
   it('moves the selected entity by the entered delta and re-lists the translated geometry', async () => {

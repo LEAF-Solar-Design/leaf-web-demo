@@ -2342,7 +2342,8 @@ export default function App() {
       layersCluster({ layers: shown?.layers, counts: layerCounts, visibleLayers, onToggle: toggleLayer }),
       ...catalogClusters(railFamilies, {
         onRequestRun: onRequestCatalogRun,
-        running: running || !!previewing,
+        running: !!running,
+        previewing: !!previewing,
         writeLocked,
         writeEntitled: canRunWrite,
       }),

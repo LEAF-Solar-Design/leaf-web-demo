@@ -59,6 +59,27 @@ function isByteArray(value) {
     || (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView(value))
 }
 
+const MAX_U64 = 18446744073709551615n
+
+// DXF handles are u64 values. wasm exports them as decimal strings because a
+// JavaScript number loses identity above 2^53. Safe integers remain accepted
+// for the old JS stand-in; an unsafe numeric handle is refused, never rounded.
+function handleId(value, invalidReason = 'bad_entity_handle') {
+  if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value)) throw new Error('handle_precision_lost')
+    if (value <= 0) throw new Error(invalidReason)
+    return String(value)
+  }
+  if (typeof value !== 'string') throw new Error(invalidReason)
+  const raw = value.trim()
+  if (!/^\d+$/.test(raw)) throw new Error(invalidReason)
+  const canonical = raw.replace(/^0+/, '') || '0'
+  if (canonical.length > 20) throw new Error(invalidReason)
+  const parsed = BigInt(canonical)
+  if (parsed <= 0n || parsed > MAX_U64) throw new Error(invalidReason)
+  return parsed.toString()
+}
+
 function projectEntities(doc) {
   // The wrapper's editableEntities() returns plain JSON-compatible objects.
   // The id the surface keys on is the engine HANDLE: the one identity that
@@ -67,16 +88,19 @@ function projectEntities(doc) {
   // the selection "survived" onto a different entity (found by the W4d e2e
   // row on the real stack). Edits still address the wrapper by index, which
   // the worker resolves from the handle at dispatch time (entityIndex).
-  return doc.editableEntities().map((entity) => ({
-    id: String(entity.handle),
-    handle: entity.handle,
-    index: entity.index,
-    type: entity.type,
-    layer: entity.layer,
-    closed: entity.closed,
-    editable: entity.editable,
-    vertices: entity.vertices,
-  }))
+  return doc.editableEntities().map((entity) => {
+    const handle = handleId(entity.handle)
+    return {
+      id: handle,
+      handle,
+      index: entity.index,
+      type: entity.type,
+      layer: entity.layer,
+      closed: entity.closed,
+      editable: entity.editable,
+      vertices: entity.vertices,
+    }
+  })
 }
 
 function loadedResponse(documentId, doc) {
@@ -106,8 +130,8 @@ function refused(op, reason) {
 function entityIndex(doc, payload) {
   const raw = payload?.entityId
   if (raw === undefined || raw === null || raw === '') return null
-  const wanted = String(raw)
-  const hit = doc.editableEntities().find((entity) => String(entity.handle) === wanted)
+  const wanted = handleId(raw, 'bad_entity_id')
+  const hit = doc.editableEntities().find((entity) => handleId(entity.handle) === wanted)
   return hit && Number.isInteger(hit.index) && hit.index >= 0 ? hit.index : null
 }
 
@@ -134,15 +158,23 @@ async function applyEdit(engine, message) {
   if (create) {
     if (typeof doc[op] !== 'function') return refused(op, `engine_lacks_create:${op}`)
     try {
-      createdHandle = Number(create(doc, payload && typeof payload === 'object' ? payload : {}))
+      createdHandle = handleId(
+        create(doc, payload && typeof payload === 'object' ? payload : {}),
+        'create_returned_no_handle',
+      )
     } catch (error) {
       // The wrapper validates before it writes: a refusal here means the
       // document was NOT mutated. Surface the typed reason string as-is.
+      current = null
       return refused(op, error instanceof Error ? error.message : String(error))
     }
-    if (!Number.isFinite(createdHandle)) return refused(op, 'create_returned_no_handle')
   } else {
-    const index = entityIndex(doc, payload)
+    let index
+    try {
+      index = entityIndex(doc, payload)
+    } catch (error) {
+      return refused(op, error instanceof Error ? error.message : String(error))
+    }
     if (index === null) return refused(op, 'bad_entity_id')
     try {
       if (op === 'delete') doc.deleteEntity(index)
@@ -163,7 +195,13 @@ async function applyEdit(engine, message) {
   // renders what the written bytes actually say.
   const written = engine.writeDxf(doc)
   const reparsed = engine.parseDxf(written)
-  const entities = projectEntities(reparsed)
+  let entities
+  try {
+    entities = projectEntities(reparsed)
+  } catch (error) {
+    current = null
+    return refused(op, error instanceof Error ? error.message : String(error))
+  }
   current = { documentId: current.documentId, doc: reparsed }
   const reply = {
     type: 'editApplied',
@@ -230,7 +268,12 @@ export async function handleMessage(raw, engineOverride = null) {
       return { type: 'error', message: `parse_failed:${error instanceof Error ? error.message : String(error)}` }
     }
     current = { documentId, doc }
-    return loadedResponse(documentId, doc)
+    try {
+      return loadedResponse(documentId, doc)
+    } catch (error) {
+      current = null
+      return { type: 'error', message: error instanceof Error ? error.message : String(error) }
+    }
   }
 
   if (raw.type === 'applyEdit') {

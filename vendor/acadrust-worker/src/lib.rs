@@ -111,6 +111,13 @@ fn js_err(refusal: Refusal) -> JsValue {
     JsValue::from_str(&refusal)
 }
 
+/// JavaScript numbers cannot represent every DXF u64 handle. Keep the
+/// engine identity lossless at the wasm boundary as a canonical decimal
+/// string, including for handles above Number.MAX_SAFE_INTEGER.
+fn handle_id(value: u64) -> String {
+    value.to_string()
+}
+
 /// True when this entity kind is one the editor can mutate through the
 /// crate's public fields: vertex-level geometry for LINE / LWPOLYLINE /
 /// POLYLINE, centre-level geometry for CIRCLE / ARC (W4d Draw group: what
@@ -403,17 +410,17 @@ impl ParsedDxf {
 
     /// Adds a validated entity through the crate's own add_entity and returns
     /// its handle value (the identity that survives the write/re-parse).
-    fn add_created(&mut self, mut entity: EntityType, layer: &str) -> Result<f64, Refusal> {
+    fn add_created(&mut self, mut entity: EntityType, layer: &str) -> Result<String, Refusal> {
         let layer = created_layer(layer)?;
         entity.common_mut().layer = layer;
         let handle = self
             .inner
             .add_entity(entity)
             .map_err(|e| format!("create_failed:{e}"))?;
-        Ok(handle.value() as f64)
+        Ok(handle_id(handle.value()))
     }
 
-    fn create_line_core(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, layer: &str) -> Result<f64, Refusal> {
+    fn create_line_core(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, layer: &str) -> Result<String, Refusal> {
         if !all_finite(&[x1, y1, x2, y2]) {
             return refuse("coordinate_not_finite");
         }
@@ -426,7 +433,7 @@ impl ParsedDxf {
         )
     }
 
-    fn create_circle_core(&mut self, cx: f64, cy: f64, radius: f64, layer: &str) -> Result<f64, Refusal> {
+    fn create_circle_core(&mut self, cx: f64, cy: f64, radius: f64, layer: &str) -> Result<String, Refusal> {
         if !all_finite(&[cx, cy, radius]) {
             return refuse("coordinate_not_finite");
         }
@@ -447,7 +454,7 @@ impl ParsedDxf {
         start_deg: f64,
         end_deg: f64,
         layer: &str,
-    ) -> Result<f64, Refusal> {
+    ) -> Result<String, Refusal> {
         if !all_finite(&[cx, cy, radius, start_deg, end_deg]) {
             return refuse("coordinate_not_finite");
         }
@@ -468,7 +475,7 @@ impl ParsedDxf {
         )
     }
 
-    fn create_polyline_core(&mut self, points: &[f64], closed: bool, layer: &str) -> Result<f64, Refusal> {
+    fn create_polyline_core(&mut self, points: &[f64], closed: bool, layer: &str) -> Result<String, Refusal> {
         if points.len() % 2 != 0 {
             return refuse("points_not_pairs");
         }
@@ -537,7 +544,7 @@ impl ParsedDxf {
                     // The handle is the identity that survives a write/re-parse
                     // (the index does not: a delete renumbers). A create returns
                     // it; the worker finds the new entity by it afterwards.
-                    "handle": e.common().handle.value() as f64,
+                    "handle": handle_id(e.common().handle.value()),
                     "type": kind_name(e),
                     "layer": e.common().layer.clone(),
                     "closed": closed_of(e),
@@ -612,14 +619,14 @@ impl ParsedDxf {
     /// Refuses non-finite coordinates and a zero-length line. Returns the
     /// new entity's handle.
     #[wasm_bindgen(js_name = createLine)]
-    pub fn create_line(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, layer: &str) -> Result<f64, JsValue> {
+    pub fn create_line(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, layer: &str) -> Result<String, JsValue> {
         self.create_line_core(x1, y1, x2, y2, layer).map_err(js_err)
     }
 
     /// Creates a CIRCLE at (cx, cy) with `radius` on `layer`. Refuses a
     /// non-finite centre or a radius that is not strictly positive.
     #[wasm_bindgen(js_name = createCircle)]
-    pub fn create_circle(&mut self, cx: f64, cy: f64, radius: f64, layer: &str) -> Result<f64, JsValue> {
+    pub fn create_circle(&mut self, cx: f64, cy: f64, radius: f64, layer: &str) -> Result<String, JsValue> {
         self.create_circle_core(cx, cy, radius, layer).map_err(js_err)
     }
 
@@ -635,7 +642,7 @@ impl ParsedDxf {
         start_deg: f64,
         end_deg: f64,
         layer: &str,
-    ) -> Result<f64, JsValue> {
+    ) -> Result<String, JsValue> {
         self.create_arc_core(cx, cy, radius, start_deg, end_deg, layer).map_err(js_err)
     }
 
@@ -644,7 +651,7 @@ impl ParsedDxf {
     /// MAX_CREATED_VERTICES points (bounded allocation), or any non-finite
     /// coordinate — all before the document is touched.
     #[wasm_bindgen(js_name = createPolyline)]
-    pub fn create_polyline(&mut self, points: &[f64], closed: bool, layer: &str) -> Result<f64, JsValue> {
+    pub fn create_polyline(&mut self, points: &[f64], closed: bool, layer: &str) -> Result<String, JsValue> {
         self.create_polyline_core(points, closed, layer).map_err(js_err)
     }
 }
@@ -753,12 +760,20 @@ mod created_entity_roundtrip {
         assert_eq!(kinds(&back), vec!["LINE", "CIRCLE", "ARC", "LWPOLYLINE"]);
         let back_handles = handles(&back);
         for h in [line, circle, arc, poly] {
-            assert!(back_handles.contains(&(h as u64)), "handle {h} survives the rewrite");
+            let value = h.parse::<u64>().expect("wrapper returns a decimal handle");
+            assert!(back_handles.contains(&value), "handle {h} survives the rewrite");
         }
         let layers: Vec<String> = back.inner.entities().map(|e| e.common().layer.clone()).collect();
         assert_eq!(layers, vec!["0", "Panels", "0", "Outline"]);
         assert!(editable(back.inner.entities().nth(1).unwrap()), "a created circle is editable");
         assert!(closed_of(back.inner.entities().nth(3).unwrap()), "the closed flag survives");
+    }
+
+    #[test]
+    fn handle_ids_stay_distinct_above_javascript_safe_integer() {
+        assert_eq!(handle_id(0x20_0000_0000_0000), "9007199254740992");
+        assert_eq!(handle_id(0x20_0000_0000_0001), "9007199254740993");
+        assert_ne!(handle_id(0x20_0000_0000_0000), handle_id(0x20_0000_0000_0001));
     }
 
     #[test]

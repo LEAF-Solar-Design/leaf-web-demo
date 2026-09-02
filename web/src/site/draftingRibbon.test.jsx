@@ -66,9 +66,18 @@ describe('DraftingRibbon', () => {
     expect(write.title).toMatch(/plan/)
   })
 
-  it('disables everything while a run is in flight', () => {
+  it('disables everything while a run is in flight and exposes that reason', () => {
     render(<DraftingRibbon clusters={catalogClusters(FAMS, { onRequestRun: () => {}, running: true })} />)
-    expect(screen.getByRole('button', { name: 'count-by-layer' }).disabled).toBe(true)
+    const read = screen.getByRole('button', { name: `count-by-layer (unavailable: a run is in flight)` })
+    expect(read.disabled).toBe(true)
+    expect(read.title).toBe('a run is in flight')
+  })
+
+  it('disables everything during version preview and exposes the read-only reason', () => {
+    render(<DraftingRibbon clusters={catalogClusters(FAMS, { onRequestRun: () => {}, previewing: true })} />)
+    const read = screen.getByRole('button', { name: `count-by-layer (unavailable: viewing a version, read-only)` })
+    expect(read.disabled).toBe(true)
+    expect(read.title).toBe('viewing a version, read-only')
   })
 
   it('renders the honest empty sentence with no clusters, and the empty fold as one note-only cluster', () => {
