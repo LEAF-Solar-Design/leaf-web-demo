@@ -24,11 +24,25 @@ export default function DraftingRibbon({
   writeLocked = false,
   writeEntitled = true,
   writeLockNote = '',
+  leading = null,
+  leadingLabel = 'Drawing',
 }) {
   const list = Array.isArray(families) ? families : []
   return (
     <div className="drafting-ribbon" role="toolbar" aria-label="Drafting tools" data-testid="drafting-ribbon">
-      {list.length === 0 && (
+      {/* A caller-supplied first cluster (the drawing's own commands), in the
+          same grammar as the catalog clusters so the band reads as one
+          ribbon rather than two strips. */}
+      {leading && (
+        <div className="ribbon-cluster" data-family="drawing">
+          <span className="ribbon-cluster-label" aria-hidden="true">
+            <span className="ribbon-monogram">{familyMonogram(leadingLabel)}</span>
+            {leadingLabel}
+          </span>
+          <div className="ribbon-cluster-tools">{leading}</div>
+        </div>
+      )}
+      {list.length === 0 && !leading && (
         // Honest empty (the mock catalog has no solar families): a sentence,
         // never a fabricated cluster.
         <span className="ribbon-empty">No tools for this surface yet.</span>

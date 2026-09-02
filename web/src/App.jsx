@@ -2191,6 +2191,10 @@ export default function App() {
   // ribbon carries the tool set there and an expanded catalog beside it is
   // exactly the duplication ACCEPTANCE deferred the ribbon to avoid.
   const [navExpanded, setNavExpanded] = useState(false)
+  // W4c-C: the DXF import surface is a floating cockpit pane on drafting
+  // surfaces (it was a full-width page block across the drawing); the ribbon
+  // opens it. Rail OFF it renders inline exactly as before.
+  const [importOpen, setImportOpen] = useState(false)
   // <=980px the shell stacks into one column (styles.css) — a 44px spine
   // there is a full-width sliver, so the posture neutralizes to expanded.
   const [wideViewport, setWideViewport] = useState(() => {
@@ -2626,7 +2630,13 @@ export default function App() {
             Solar shows it too: that tab IS the CAD workspace on the solar
             tool set, opened inline by the tab itself (no "Open ..." button;
             operator directive 2026-09-01). */}
-        <div className="workspace-card enter" style={{ '--rank': 1, display: activeSurface === 'cad' || activeSurface === 'solar' ? undefined : 'none' }} ref={workspaceCardRef}>
+        <div
+          className="workspace-card enter"
+          style={{ '--rank': 1, display: activeSurface === 'cad' || activeSurface === 'solar' ? undefined : 'none' }}
+          ref={workspaceCardRef}
+          id={studioGround && drafting ? 'cockpit-import-pane' : undefined}
+          data-import-open={studioGround && drafting && importOpen ? 'true' : undefined}
+        >
           {unreadableHead && unreadableHead.pending && (
             // The routine post-restore load: calm progress, not a failure —
             // no alert role, no retry (the load is already in flight).
@@ -2668,6 +2678,18 @@ export default function App() {
               running={running || !!previewing}
               writeLocked={writeLocked}
               writeEntitled={canRunWrite}
+              leading={ENV_CAD_EDIT ? (
+                <button
+                  type="button"
+                  className="ribbon-tool"
+                  aria-expanded={importOpen}
+                  aria-controls="cockpit-import-pane"
+                  title="Open a DXF in the browser engine"
+                  onClick={() => setImportOpen((o) => !o)}
+                >
+                  import-dxf
+                </button>
+              ) : null}
             />
           )}
           <div className="viewer-toolbar">
@@ -2913,12 +2935,23 @@ export default function App() {
               // wideViewport: <=980px stacks the console; the dock's
               // floating placement has no home there, so the inline arm
               // (today's placement) renders instead of hiding the tools.
-              if (studioGround && drafting && wideViewport && (legendEl || readoutEl)) {
+              // The Plan section is useful before a drawing or intake exists.
+              // Keep the dock mounted on every wide drafting surface so the
+              // entitlement controls never disappear in that honest-empty state.
+              if (studioGround && drafting && wideViewport) {
                 return (
                   <PropertiesDock
                     layers={legendEl}
                     selection={readoutEl}
                     geometry={selectedEntityGeometry}
+                    plan={(
+                      <EntitlementGate
+                        tier={entTier}
+                        entitlements={entitlements}
+                        loading={entLoading}
+                        mock={mock}
+                      />
+                    )}
                   />
                 )
               }
@@ -3024,12 +3057,19 @@ export default function App() {
           />
         )}
 
-        <EntitlementGate
-          tier={entTier}
-          entitlements={entitlements}
-          loading={entLoading}
-          mock={mock}
-        />
+        {(() => {
+          const gate = (
+            <EntitlementGate
+              tier={entTier}
+              entitlements={entitlements}
+              loading={entLoading}
+              mock={mock}
+            />
+          )
+          // Studio drafting surfaces host it in the dock (see the dock's
+          // Plan section); everywhere else it renders here, unchanged.
+          return studioGround && drafting && wideViewport ? null : gate
+        })()}
         </main>
 
         <div className="bar-dock">

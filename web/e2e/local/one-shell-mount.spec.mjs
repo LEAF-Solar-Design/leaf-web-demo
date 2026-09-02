@@ -382,6 +382,24 @@ test.describe('route matrix, rail ON', () => {
     await expect(dock.getByTestId('dock-geometry')).toHaveCount(0)
   })
 
+  test('the right palette keeps the plan reachable before drawing intake exists', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    await page.route('**/api/session?**', (route) => route.fulfill({
+      status: 503,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: 'fixture_no_intake' }),
+    }))
+    await page.goto('/app')
+    await expect(page.locator(STUDIO)).toHaveCount(1)
+
+    const dock = page.getByTestId('properties-dock')
+    await expect(dock).toBeVisible()
+    await expect(page.locator('.ent-panel')).toHaveCount(1)
+    expect(await page.locator('.ent-panel').evaluate((el) => !!el.closest('.properties-dock'))).toBe(true)
+  })
+
   test('solar depth: real solved strings on the Solar tab only, honesty-gated (W4c-V3)', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
@@ -427,6 +445,70 @@ test.describe('route matrix, rail ON', () => {
     // fixture must remain route-free after that same async boundary.
     await page.waitForTimeout(500)
     await expect(page.locator('.viewer-canvas[data-string-routes]')).toHaveCount(0)
+  })
+
+  test('the page dissolves into the viewport: no page-shaped block sits on the drawing (W4c-C)', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    await page.goto('/app')
+    await expect(page.locator(STUDIO)).toHaveCount(1)
+    await expect(page.locator('.studio-ground .viewer-canvas canvas')).toHaveCount(1, { timeout: 30_000 })
+    await expect(page.getByTestId('properties-dock')).toBeVisible()
+
+    // THE regression this slice fixes: the operator's read of the first
+    // cockpit was "that doesn't contain the cad cockpit" because page-shaped
+    // blocks (a 1192x140 import slab, a 1194x228 white entitlements panel)
+    // owned the drawing. Nothing large and light-backed may sit inside the
+    // shell again - this is a computed-style check, not a class allowlist.
+    const lightSlabs = await page.evaluate(() => [...document.querySelectorAll('.studio-shell *')]
+      .filter((el) => {
+        const m = getComputedStyle(el).backgroundColor.match(/rgba?\((\d+), (\d+), (\d+)(?:, ([\d.]+))?/)
+        if (!m) return false
+        if (m[4] !== undefined && Number(m[4]) < 0.2) return false
+        const r = el.getBoundingClientRect()
+        return Number(m[1]) > 200 && Number(m[2]) > 200 && Number(m[3]) > 200 && r.width * r.height > 30_000
+      })
+      .map((el) => `${el.tagName}.${el.className}`.slice(0, 60)))
+    expect(lightSlabs, 'a light page-shaped block is sitting on the drawing').toEqual([])
+
+    // The entitlements panel is hosted in the dock, not stacked in the column.
+    const ent = page.locator('.ent-panel')
+    if (await ent.count()) {
+      expect(await ent.first().evaluate((el) => !!el.closest('.properties-dock'))).toBe(true)
+    }
+    // The result is a floating instrument, not a full-width band.
+    const result = page.locator('.result-block')
+    if (await result.count()) {
+      expect(await result.evaluate((el) => getComputedStyle(el).position)).toBe('absolute')
+      expect((await result.boundingBox()).width).toBeLessThan(600)
+    }
+    // The spine's monogram buttons fit their rail (a 44px rail, not a sliver).
+    const rail = await page.locator('aside.nav[data-spine]').boundingBox()
+    const btn = await page.locator('.nav-spine .spine-btn').first().boundingBox()
+    expect(rail.width).toBeGreaterThanOrEqual(40)
+    expect(btn.width + 8).toBeLessThanOrEqual(rail.width)
+  })
+
+  test('rail OFF keeps every block in flow: the cockpit changes nothing without the rail (W4c-C)', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '0')
+    await page.goto('/app')
+    await expect(page.locator('.studio-shell')).toHaveCount(0)
+    await expect(page.locator('.viewer-wrap .viewer-canvas canvas')).toHaveCount(1, { timeout: 30_000 })
+    // The card grows no cockpit hooks, and the blocks keep their page flow.
+    await expect(page.locator('.workspace-card[data-import-open]')).toHaveCount(0)
+    await expect(page.locator('.workspace-card#cockpit-import-pane')).toHaveCount(0)
+    await expect(page.getByTestId('properties-dock')).toHaveCount(0)
+    const result = page.locator('.result-block')
+    if (await result.count()) {
+      expect(await result.evaluate((el) => getComputedStyle(el).position)).toBe('static')
+    }
+    const ent = page.locator('.ent-panel')
+    if (await ent.count()) {
+      expect(await ent.first().evaluate((el) => !!el.closest('main.center-scroll'))).toBe(true)
+    }
   })
 
   test('Esc ladder, history rung under the rail: an open drawer owns Esc, the route never moves', async ({ page, request }) => {
