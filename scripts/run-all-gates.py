@@ -1408,14 +1408,43 @@ def build_suites() -> List[Suite]:
         # (squash 09112cdd, the post-callback token race fix) added 20 more
         # cases -- 7 in the new authBoot.test.js, 13 in the new
         # createSessionController.test.js -- and its own commit message
-        # states "Web unit suite 180/180". This suite remains the easy case:
-        # every case is literal and unconditional, no skips, no parametrize,
-        # no platform branch, and a collection/import failure makes vitest
-        # FAIL rather than report a lower count, so this floor IS the exact
-        # measured count, not a cross-environment minimum. Measured on this
-        # tree 2026-08-17: 24 files, 180 tests, `npm run test:unit` in web/.
+        # states "Web unit suite 180/180". Measured on THAT tree 2026-08-17:
+        # 24 files, 180 tests, `npm run test:unit` in web/.
+        # 180 -> 672: sixteen days of unmeasured drift, found while landing
+        # PR #865. 180 held while the tree grew from 24 to 77 test files, so
+        # ~490 executed cases -- 73% of the suite -- could have vanished and
+        # this gate would still have printed PASS behind an "(executed-count
+        # drift: expected 180)" note. The entries above call this the easy
+        # case with "no skips anywhere"; that is no longer true, two
+        # machine-gated files now skip (see allowed_vitest_skips below). Every
+        # OTHER case is still literal and unconditional, no parametrize, no
+        # platform branch, and a collection/import failure makes vitest FAIL
+        # rather than report a lower count. So 672 is the exact executed count
+        # on any machine WITHOUT the local wasm artifact -- CI and a plain dev
+        # box alike -- and a machine that opted in with CAD_ENGINE_REAL_WASM=1
+        # executes all 685, above the floor, where the drift note is harmless.
+        # Evidence, 2026-09-02, all from gate-shard-2, which is where the
+        # packer puts this suite. Five CI runs track the growth monotonically
+        # across five merges, and the two trees measured locally match their
+        # CI counterparts exactly, so this number is CI's and not this box's:
+        #   run 33645303496  #912 merge tree                645 executed
+        #   run 33646288071  #911 merge tree                659
+        #   run 33649092752  #913 merge tree                660
+        #   run 33650443868  #915 merge tree                660
+        #   run 33651020047  #914 merge tree == main 6ab65b5f  672
+        # #913 and #915 are independent runs of the SAME web tree (#915
+        # touched no file under web/src), and both printed
+        # `web npm run test:unit (vitest)  >=180  660  PASS  13 skipped`; the
+        # local run there agreed exactly at 673 collected / 13 skipped / 660
+        # executed. #914 then added 12 cases (surfaceRails, draftingRibbon)
+        # and merged, so main is 685 collected / 13 skipped / 672 executed,
+        # 77 files -- CI run 33651020047 and a local `npm run test:unit` in
+        # web/ both. The 13 skips are the same two allow-listed files in both
+        # places: CI's PASS carries no "skip details incomplete" and no
+        # "non-allowlisted vitest skip" note, which is this runner asserting
+        # that per-file match, so the allowlist below needs no change.
         Suite("web-vitest", "web npm run test:unit (vitest)", "vitest", WEB,
-              [_npm(), "run", "test:unit"], 180,
+              [_npm(), "run", "test:unit"], 672,
               allowed_vitest_skips=(
                   # Day-3 CAD engine real-build round trip: needs a compiled
                   # wasm artifact, which needs a Rust toolchain, so it exists

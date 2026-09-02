@@ -94,7 +94,12 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
         # floor (94-test drift: 89e0de06's bulk sweep set 86, never
         # re-measured through #661 + the annotation projection feature +
         # PR #670's post-callback token race fix, +20 cases).
-        "web-vitest": 180,
+        # 180 -> 672 on 2026-09-02, alongside the re-measured run-all-gates.py
+        # floor: 492-test drift over sixteen days and 24 -> 77 test files.
+        # Five CI gate-shard-2 logs track the growth 645 -> 659 -> 660 -> 660
+        # -> 672, the last (run 33651020047) being main's web tree at
+        # 6ab65b5f. See the rationale block in run-all-gates.py.
+        "web-vitest": 672,
     }
     assert {
         suite_id: suites[suite_id].expected
