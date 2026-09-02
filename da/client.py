@@ -1149,13 +1149,13 @@ def appbundle_id(tool: dict) -> str:
 
 
 def appbundle_qualified(bundle_id: str) -> str:
-    """owner.Bundle+alias (e.g. iBZF....LeafCutListTools+prod).
+    """owner.Bundle+alias (e.g. iBZF....ExampleBundle+prod).
 
     The owner comes from APS_NICKNAME when set, else from the cached live nickname
     lookup. NEVER a placeholder: Design Automation rejects an Activity whose
     `appbundles` entry is not a real qualified id (observed 2026-09-01 on staging:
     the broker process had no cached nickname, the spec carried
-    "$(nickname).LeafCutListTools+prod", POST /activities answered 400 and every
+    "$(nickname).ExampleBundle+prod", POST /activities answered 400 and every
     live run of the tool failed before a WorkItem existed).
     """
     owner = os.environ.get("APS_NICKNAME", "").strip() or nickname()

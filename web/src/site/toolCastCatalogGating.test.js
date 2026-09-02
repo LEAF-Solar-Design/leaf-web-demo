@@ -10,6 +10,12 @@ const read = (name) => readFileSync(new URL(name, import.meta.url), 'utf8').repl
 const toolCast = read('./ToolCast.jsx')
 
 describe('no-drawing Catalog browse wiring', () => {
+  it('wires the session controller into the persistent product-nav sign-out control', () => {
+    expect(toolCast).toMatch(
+      /<ProductSurfaceTabs[\s\S]{0,500}signedIn=\{isSignedIn\(\)\}[\s\S]{0,100}onSignOut=\{platformSession\.actions\.signOut\}/,
+    )
+  })
+
   it('gates the Catalog tab on session readiness alone, not on having a drawing open', () => {
     expect(toolCast).toMatch(/<button id="workspace-tab-catalog"[^>]*disabled=\{!sessionReady\}/)
   })

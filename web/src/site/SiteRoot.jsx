@@ -26,7 +26,6 @@ import React, { Suspense, useEffect, useRef, useState } from 'react'
 import { markInstant } from '../lib/instant.js'
 import { useRoute, navigate } from './router.js'
 import { activeCastForScene, sceneAllowsMarketingEject, sceneForPath } from './routeScene.js'
-import { scopeLockActive } from './tenantScope.js'
 import { ONE_SHELL_ENABLED } from '../lib/runtimeFlags.js'
 import { StudioGroundContext } from './studioGround.js'
 import StageScene from './StageScene.jsx'
@@ -129,9 +128,7 @@ export default function SiteRoot() {
       // discard live console work). See routeScene.js.
       if (e.key === 'Escape' && sceneAllowsMarketingEject(scene)) {
         const ownedSurface = document.querySelector('.proj-menu, .route, .strip-decision, .resolver, .drawer-layer .drawer, .claude-pop')
-        // A scope-locked tenant (tenant tool scope) has no marketing exit:
-        // the locked shell renders the DOM marker this predicate reads.
-        if (!ownedSurface && !scopeLockActive()) navigate('/')
+        if (!ownedSurface) navigate('/')
       }
       else if ((e.key === 't' || e.key === 'T') && scene === 'site') navigate('/try')
     }
