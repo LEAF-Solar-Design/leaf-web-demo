@@ -142,6 +142,28 @@ def test_rejects_undeclared_artifact_entrypoint(tmp_path):
         glug_adoption.load_adoption(_write_manifest(tmp_path, raw))
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "src\\index.js",
+        "src/index js",
+        "src:index.js",
+        "src/index!.js",
+        "src/indéx.js",
+    ],
+)
+def test_rejects_artifact_paths_outside_the_canonical_character_contract(value):
+    assert glug_adoption._is_safe_artifact_path(value) is False
+
+
+def test_artifact_path_validation_is_linear_for_adversarial_long_input():
+    adversarial = "a/" * 100_000 + "!"
+
+    assert glug_adoption._is_safe_artifact_path(adversarial) is False
+    assert glug_adoption._is_safe_artifact_path("src/@scope/author-v1.2+prod/index.js") is True
+
+
 def test_rejects_unknown_workspace_and_extra_input_keys(tmp_path):
     target = _write_manifest(tmp_path)
     with pytest.raises(glug_adoption.GlugAdoptionError, match="unknown workspace"):

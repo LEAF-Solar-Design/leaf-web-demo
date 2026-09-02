@@ -23,7 +23,9 @@ SHA40 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 REPO_SLUG = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 SAFE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,199}$")
-SAFE_ARTIFACT_PATH = re.compile(r"^[A-Za-z0-9._/@+-]+(?:/[A-Za-z0-9._/@+-]+)*$")
+SAFE_ARTIFACT_PATH_CHARACTERS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/@+-"
+)
 SECRET_KEY = re.compile(r"(secret|token|password|credential|private.?key|grant)", re.I)
 SECRET_VALUE = re.compile(
     r"(?:gh[opsu]_[A-Za-z0-9]{20,}|sk_(?:live|test)_[A-Za-z0-9]{12,}|"
@@ -135,8 +137,7 @@ def load_adoption(path: Path | str | None = None) -> GlugAdoption:
     component = _safe_id(artifact["component"], "artifact component")
     entrypoint = artifact["entrypoint"]
     if (
-        not isinstance(entrypoint, str)
-        or not SAFE_ARTIFACT_PATH.fullmatch(entrypoint)
+        not _is_safe_artifact_path(entrypoint)
         or not entrypoint.endswith(".js")
     ):
         raise GlugAdoptionError("artifact entrypoint is invalid")
@@ -148,7 +149,7 @@ def load_adoption(path: Path | str | None = None) -> GlugAdoption:
         mapped = _mapping(item, "artifact file")
         _exact(mapped, ARTIFACT_FILE_FIELDS, "artifact file")
         path_value = mapped["path"]
-        if not isinstance(path_value, str) or not SAFE_ARTIFACT_PATH.fullmatch(path_value):
+        if not _is_safe_artifact_path(path_value):
             raise GlugAdoptionError("artifact path is invalid")
         byte_count = mapped["bytes"]
         if isinstance(byte_count, bool) or not isinstance(byte_count, int) or byte_count < 0:
@@ -378,6 +379,15 @@ def _safe_id(value: Any, label: str) -> str:
     if not isinstance(value, str) or not SAFE_ID.fullmatch(value):
         raise GlugAdoptionError(label + " must be a canonical identifier")
     return value
+
+
+def _is_safe_artifact_path(value: Any) -> bool:
+    """Match the manifest artifact-path contract in one linear scan."""
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and all(character in SAFE_ARTIFACT_PATH_CHARACTERS for character in value)
+    )
 
 
 def _string_set(value: Any, label: str) -> frozenset[str]:

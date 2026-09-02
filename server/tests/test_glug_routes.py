@@ -54,6 +54,15 @@ class FakeService:
         return {"contract": "glug.mushy-publication-approval.v1", "id": "approval-1"}
 
 
+class FailingService(FakeService):
+    def __init__(self, error):
+        super().__init__()
+        self.error = error
+
+    def create(self, **kwargs):
+        raise self.error
+
+
 def _client(service=None, tenant=None):
     app = FastAPI()
     app.include_router(glug_routes.router)
@@ -158,6 +167,49 @@ def test_mutation_route_fails_closed_when_live_mounts_are_absent(monkeypatch):
     })
     assert result.status_code == 503
     assert result.json()["error"]["code"] == "executor_unavailable"
+
+
+@pytest.mark.parametrize(("error", "expected_status", "expected_code", "expected_message"), [
+    (
+        glug_routes.GlugExecutorError(
+            "stage_refused",
+            "Traceback: database failed with sk_live_do_not_expose_this_secret",
+            409,
+        ),
+        409,
+        "stage_refused",
+        "Glug request could not be completed",
+    ),
+    (
+        glug_routes.glug_adoption.GlugAdoptionError(
+            "C:\\internal\\workspace contains ghp_do_not_expose_this_token"
+        ),
+        409,
+        "adoption_refused",
+        "Glug adoption request was refused",
+    ),
+])
+def test_failure_responses_never_expose_exception_text(
+    error, expected_status, expected_code, expected_message
+):
+    response = _client(FailingService(error)).post("/api/glug/mushy/jobs", json={
+        "workspace_id": "glug",
+        "requested_power": "code_question",
+        "instruction": "What is Glug?",
+        "idempotency_key": "failure-redaction-1",
+    })
+
+    assert response.status_code == expected_status
+    assert response.json() == {
+        "ok": False,
+        "error": {"code": expected_code, "message": expected_message},
+    }
+    serialized = response.text
+    assert "Traceback" not in serialized
+    assert "database failed" not in serialized
+    assert "sk_live_" not in serialized
+    assert "C:\\\\internal" not in serialized
+    assert "ghp_" not in serialized
 
 
 def test_signed_server_proxy_can_forward_only_an_actor_identity(monkeypatch):

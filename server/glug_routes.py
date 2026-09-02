@@ -162,11 +162,11 @@ async def require_control_actor(
 def _failure(error: Exception) -> JSONResponse:
     if isinstance(error, GlugExecutorError):
         return JSONResponse(status_code=error.status, content={"ok": False, "error": {
-            "code": error.code, "message": str(error),
+            "code": error.code, "message": "Glug request could not be completed",
         }})
     if isinstance(error, glug_adoption.GlugAdoptionError):
         return JSONResponse(status_code=409, content={"ok": False, "error": {
-            "code": "adoption_refused", "message": str(error),
+            "code": "adoption_refused", "message": "Glug adoption request was refused",
         }})
     return JSONResponse(status_code=503, content={"ok": False, "error": {
         "code": "executor_unavailable", "message": "Glug executor is unavailable",
