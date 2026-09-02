@@ -1144,11 +1144,15 @@
    trap that collapsed the Version-history drawer in the toolbar below). */
 .studio-shell .drafting-ribbon {
   position: relative; z-index: 2;
-  display: flex; align-items: stretch; gap: 14px;
+  display: flex; align-items: stretch; gap: 8px 14px;
+  /* W4d: nine groups do not fit 1600px on one row. The band WRAPS rather
+     than scrolling: every group stays visible (the whole point of surfacing
+     the tools), and the import pane clears the measured height through
+     --cockpit-ribbon-h (DraftingRibbon publishes it on the workspace card). */
+  flex-wrap: wrap;
   padding: 6px 10px; margin-bottom: 6px;
   border: 1px solid rgba(240, 242, 240, .14); border-radius: 4px;
   color: rgba(240, 242, 240, .92);
-  overflow-x: auto;
 }
 .studio-shell .drafting-ribbon::before {
   content: ''; position: absolute; inset: 0; z-index: -1;
@@ -1243,7 +1247,7 @@
   /* Clears the ribbon assembly above it (clusters band 52 + drawing band 40
      + the band gap), so the pane floats on the DRAWING, never over its own
      opener. */
-  position: absolute; top: calc(52px + 40px + 14px); left: 14px; z-index: 4;
+  position: absolute; top: calc(var(--cockpit-ribbon-h, 52px) + 6px + 40px + 14px); left: 14px; z-index: 4;
   width: min(420px, calc(100% - 260px));
   max-height: calc(100% - 28px); overflow-y: auto;
   margin: 0;
