@@ -1015,6 +1015,18 @@
   height: var(--ground-window);
 }
 .ground-desk { display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 6px; }
+/* --ground-top/left/right/window above are a fixed approximation, tuned for
+   the common project states only — the frame's chrome grows by an explainer,
+   an action, and a reason on some states (SurfaceGrounds.jsx), and the CSS
+   values have no idea the page has scrolled. When measureGroundWindow()
+   cannot place the window (data-measured stays "false": no real layout yet,
+   the chrome left less than MIN_WINDOW_HEIGHT, or jsdom), painting tiles at
+   the guessed position risks landing them over the frame's own head text —
+   the exact collision this pair exists to prevent. Hiding the desk until a
+   real measurement lands is strictly safer than a guess that might overlap
+   real content; a live browser always resolves this in the same layout pass
+   (useLayoutEffect), so nothing here is visibly missing in practice. */
+.ground-desk[data-measured="false"], .ground-device-stage[data-measured="false"] { visibility: hidden; }
 .ground-eyebrow, .device-k, .ground-tile h3 {
   font: 600 10px var(--font-mono); letter-spacing: .12em; text-transform: uppercase;
   color: rgba(240, 242, 240, .55); margin: 0;

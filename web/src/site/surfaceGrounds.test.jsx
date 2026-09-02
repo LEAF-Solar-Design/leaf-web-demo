@@ -6,6 +6,7 @@
  */
 import { afterEach, describe, expect, it } from 'vitest'
 import { cleanup, render, screen, within } from '@testing-library/react'
+import { readFileSync } from 'node:fs'
 
 import SurfaceGrounds, { DeviceGround, ProjectBoardGround, groundShowsDrawing } from './SurfaceGrounds.jsx'
 import { deriveWorkspaceProjectState } from './workspaceProjectState.js'
@@ -90,7 +91,12 @@ describe('ProjectBoardGround', () => {
     const board = screen.getByRole('region', { name: 'Project workspace' })
     expect(board.dataset.projectState).toBe('drawing-only')
     expect(within(board).getByText(/Offline demo build/)).toBeTruthy()
-    // jsdom has no layout: the window falls back to the CSS geometry.
+    // jsdom has no layout: measureGroundWindow() can't place the window, so
+    // this exercises the exact unmeasured state landing.css must hide (see
+    // 'hides the ground desk when the window can't be measured' below) —
+    // real browsers only reach this state transiently, jsdom reaches it
+    // always, and either way a rule keyed on this attribute is what keeps it
+    // from painting over the frame's own head text.
     expect(board.querySelector('.ground-desk').dataset.measured).toBe('false')
   })
 
@@ -168,5 +174,24 @@ describe('SurfaceGrounds', () => {
     const boardNode = board()
     rerender(<SurfaceGrounds surface="browser" catalog={catalog} />)
     expect(board()).toBe(boardNode)
+  })
+})
+
+describe('ground window fallback geometry', () => {
+  // measureGroundWindow() (this file) places the window from the real DOM;
+  // --ground-top/left/right/window (landing.css) is only a fixed stand-in
+  // for when that measurement can't run yet or came back too small. That
+  // stand-in has no idea which project state is showing (the chrome grows
+  // taller on some — an explainer, an action, a reason) or whether the page
+  // has scrolled, so it is a guess, not a placement: painting ground tiles
+  // at a guessed position risks landing them over the frame's own head
+  // text, which is the collision this whole desk/window split exists to
+  // avoid. The desk marks the guess with data-measured="false"
+  // (ProjectBoardGround/DeviceGround above); this asserts landing.css
+  // actually keeps that guess invisible rather than painting it.
+  it('hides the ground desk and device stage when the window could not be measured', () => {
+    const css = readFileSync(`${process.cwd()}/src/site/landing.css`, 'utf8')
+    expect(css).toMatch(/\.ground-desk\[data-measured="false"\][^{]*\{[^}]*visibility:\s*hidden;/s)
+    expect(css).toMatch(/\.ground-device-stage\[data-measured="false"\][^{]*\{[^}]*visibility:\s*hidden;/s)
   })
 })
