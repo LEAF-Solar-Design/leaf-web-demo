@@ -460,9 +460,23 @@ test.describe('route matrix, rail ON', () => {
 
     // Every fixed group is present, in the reference order, ahead of the
     // catalog fold; every one is a real command wired to App's own handler.
+    // The engine groups exist only in a build with VITE_CAD_EDIT=1 (every
+    // deployed artifact; the managed proof only when its environment sets
+    // it). A flag-off build is a truthful state too: the groups are ABSENT,
+    // not present-and-dead, and this row says which build it proved.
     const groups = await ribbon.locator('.ribbon-cluster').evaluateAll((els) => els.map((el) => el.dataset.group || `family:${el.dataset.family}`))
-    expect(groups.slice(0, 5)).toEqual(['drawing', 'modify', 'view', 'version', 'layers'])
+    const engineGroups = ['drawing', 'modify']
+    const cadEditOn = groups.includes('modify')
+    const fixedFirst = cadEditOn ? [...engineGroups, 'view', 'version', 'layers'] : ['view', 'version', 'layers']
+    expect(groups.slice(0, fixedFirst.length)).toEqual(fixedFirst)
     expect(groups[groups.length - 1]).toBe('author')
+    test.info().annotations.push({ type: 'cad_edit', description: cadEditOn ? 'VITE_CAD_EDIT=1: engine groups proven' : 'VITE_CAD_EDIT off in this build: engine groups absent by construction' })
+
+    // The non-engine groups are live in every build.
+    await expect(ribbon.locator('[data-tool="fit"]')).toBeEnabled()
+    const layerToggleAny = ribbon.locator('[data-group="layers"] .ribbon-tool').first()
+    await expect(layerToggleAny).toHaveAttribute('aria-pressed', 'true')
+    if (!cadEditOn) return
 
     // Modify is unavailable on the console's own drawing (the engine edits
     // an imported DXF only) and SAYS SO: a visible note, and each tool's
