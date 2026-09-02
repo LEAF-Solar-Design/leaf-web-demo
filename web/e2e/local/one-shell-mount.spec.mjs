@@ -400,6 +400,41 @@ test.describe('route matrix, rail ON', () => {
     expect(await page.locator('.ent-panel').evaluate((el) => !!el.closest('.properties-dock'))).toBe(true)
   })
 
+  test('<=980px: the entitlement gate renders inline in the console, with and without a drawing (narrow arm)', async ({ page, request }) => {
+    // The dock arm is unreachable below 981px (wideViewport is false), so
+    // the main-column arm MUST carry the gate there — with a drawing loaded
+    // and in the honest-empty state alike. This is the responsive twin of
+    // the wide-arm row above: the two arms use one condition, and this row
+    // proves the narrow side of it never lets the panel vanish.
+    test.setTimeout(120_000)
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    await page.setViewportSize({ width: 900, height: 640 })
+
+    const expectInlineGate = async () => {
+      await expect(page.locator(STUDIO)).toHaveCount(1)
+      await expect(page.getByTestId('properties-dock')).toHaveCount(0)
+      const ent = page.locator('.ent-panel')
+      await expect(ent).toHaveCount(1)
+      expect(await ent.evaluate((el) => !!el.closest('main.center-scroll'))).toBe(true)
+      await ent.scrollIntoViewIfNeeded()
+      await expect(ent).toBeVisible()
+    }
+
+    await page.goto('/app')
+    await expectOneCanvasIn(page, '.studio-ground')
+    await expectInlineGate()
+
+    // Honest-empty: no intake at all (boot before intake, a failed load).
+    await page.route('**/api/session?**', (route) => route.fulfill({
+      status: 503,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: 'fixture_no_intake' }),
+    }))
+    await page.goto('/app')
+    await expectInlineGate()
+  })
+
   test('solar depth: real solved strings on the Solar tab only, honesty-gated (W4c-V3)', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
