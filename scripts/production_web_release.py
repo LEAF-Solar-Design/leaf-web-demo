@@ -20,7 +20,7 @@ STABLE_URL = "https://leaf-platform-web.vercel.app"
 HANDOFF_SCHEMA = "leaf.production-handoff-candidate.v1"
 PREPARED_SCHEMA = "leaf.production-web-prepared.v1"
 RECEIPT_SCHEMA = "leaf.production-web-deployment.v1"
-APPROVAL_SCHEMA = "leaf.production-web-approval.v1"
+APPROVAL_SCHEMA = "leaf.production-web-approval.v2"
 # The two approval modes the production deploy workflow can record. Closed set:
 # an unrecognized mode is refused rather than treated as independent.
 _APPROVAL_MODES = frozenset({"independent", "administrator-self-authorization"})
@@ -345,6 +345,7 @@ def deployment_receipt(
     approval_keys = {
         "schema",
         "project_id",
+        "deployment_id",
         "source_revision",
         "release_workflow_run_id",
         "release_workflow_run_attempt",
@@ -371,6 +372,7 @@ def deployment_receipt(
     if (
         approval["schema"] != APPROVAL_SCHEMA
         or approval["project_id"] != PROJECT_ID
+        or approval["deployment_id"] != deployment.get("id")
         or approval["source_revision"] != prepared["source_revision"]
         or approval["release_workflow_run_id"] != prepared["release_workflow_run_id"]
         or approval["release_workflow_run_attempt"]
