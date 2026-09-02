@@ -25,6 +25,15 @@ sys.modules["platform"] = _stdlib_platform
 _platform_spec.loader.exec_module(_stdlib_platform)
 jsonschema = importlib.import_module("jsonschema")
 
+# The subject imports `scripts.platform_release_manifest`, so the repo root has
+# to be importable. Adding it HERE rather than through the cwd or PYTHONPATH is
+# deliberate: the repo root carries a `platform/` package that shadows the
+# stdlib module, and pytest loads its plugins (pytest-cov imports `platform`)
+# before this file runs. Widening the path only now, after the stdlib preload
+# above has pinned the real module, lets this suite run under pytest from the
+# scripts directory the way every other scripts suite does.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from scripts import platform_staging_convergence as subject  # noqa: E402
 
 
@@ -814,42 +823,211 @@ class ConvergenceFinalizerTests(unittest.TestCase):
             "files": files,
         }
 
-    def test_frozen_build_accepts_exact_verifier_only_descendant_main(self) -> None:
+    @staticmethod
+    def tree_sha(commit_sha: str) -> str:
+        return hashlib.sha1(("tree:" + commit_sha).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def surface_tree(
+        *,
+        changed: dict[str, str] | None = None,
+        added: dict[str, str] | None = None,
+        removed: tuple[str, ...] = (),
+    ) -> dict[str, object]:
+        """A tree carrying one blob per declared release input, plus mutations.
+
+        Blob shas are derived from the path, so two unmutated trees compare
+        equal and any mutation is the only thing that can move a surface.
+        """
+
+        paths: list[str] = [subject.BUILD_WORKFLOW, subject.RELAY_WORKFLOW, "docs/readme.md"]
+        for sources in subject.SURFACE_INPUTS.values():
+            paths.extend(sources)
+        # exercise the prefix branch of _surface_blob_map, not only exact hits
+        paths.extend(["web/app.jsx", "server/app.py", "harness/tool.mjs"])
+        rows: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for path in paths:
+            if path in seen or path in removed:
+                continue
+            seen.add(path)
+            sha = hashlib.sha1(path.encode("utf-8")).hexdigest()
+            rows.append({"path": path, "type": "blob", "mode": "100644", "sha": sha})
+        for path, sha in (added or {}).items():
+            rows.append({"path": path, "type": "blob", "mode": "100644", "sha": sha})
+        for row in rows:
+            if row["path"] in (changed or {}):
+                row["sha"] = changed[row["path"]]
+        return {"truncated": False, "tree": rows}
+
+    def drift_provider(
+        self,
+        source: str,
+        current: str,
+        *,
+        changed: dict[str, str] | None = None,
+        added: dict[str, str] | None = None,
+        removed: tuple[str, ...] = (),
+    ) -> FakeProvider:
+        app = subject.APP_REPOSITORY
+        tree_of = self.tree_sha
+        provider = FakeProvider()
+        provider.json_values[(app, "/branches/main")] = {"commit": {"sha": current}}
+        provider.json_values[(app, f"/compare/{source}...{current}")] = self.comparison(
+            source, [], current=current
+        )
+        provider.json_values[(app, f"/git/commits/{source}")] = {"tree": {"sha": tree_of(source)}}
+        provider.json_values[(app, f"/git/commits/{current}")] = {"tree": {"sha": tree_of(current)}}
+        provider.json_values[(app, f"/git/trees/{tree_of(source)}?recursive=1")] = self.surface_tree()
+        provider.json_values[(app, f"/git/trees/{tree_of(current)}?recursive=1")] = self.surface_tree(
+            changed=changed, added=added, removed=removed
+        )
+        return provider
+
+    def test_exact_main_records_no_drift_without_reading_a_tree(self) -> None:
         provider = FakeProvider()
         source = "7368ac85ef809957fa65fe237f3c72829580b4ee"
+        provider.json_values[(subject.APP_REPOSITORY, "/branches/main")] = {"commit": {"sha": source}}
+
+        arrival = subject._arrival_source(provider, source, require_surface_parity=False)
+
+        self.assertEqual(arrival["relationship"], "exact")
+        self.assertEqual(arrival["ahead_by"], 0)
+        self.assertEqual(arrival["drifted_surfaces"], [])
+        self.assertEqual(set(arrival["surfaces"].values()), {"identical"})
+        # Same commit is the same tree: paying for two recursive tree reads to
+        # rediscover that would be pure waste on the common path.
+        self.assertEqual([call for call in provider.calls if "/git/trees/" in call[2]], [])
+
+    def test_product_drift_on_main_is_recorded_not_refused(self) -> None:
+        """The case that made finalize unrunnable: main moved by real product code."""
+
+        source = "7368ac85ef809957fa65fe237f3c72829580b4ee"
         current = "0f9c47fe89f12b94a4d9d16c61d6c6df119356bc"
-        commits = [
-            "baf4b255753354c52005be65799731df27087fe2",
-            "20d86fe5d308c849485346712754d449d3b7e8d5",
-            "39c17213f2573542c2b58743ace12ed5b682f2dc",
-            "2f36f335241264ecbca6a873796cf8ddc4972a6a",
-            "68e28c330fc80cdac32f178f8c657673769f04d1",
-            "0f9c47fe89f12b94a4d9d16c61d6c6df119356bc",
-        ]
-        provider.json_values[(subject.APP_REPOSITORY, "/branches/main")] = {"commit": {"sha": current}}
-        provider.json_values[(subject.APP_REPOSITORY, f"/compare/{source}...{current}")] = self.comparison(
-            source,
-            [
-                {"filename": "contract/platform-staging-convergence.v1.schema.json", "status": "modified"},
-                {"filename": "scripts/platform_staging_convergence.py", "status": "modified"},
-                {"filename": "scripts/test_platform_staging_convergence.py", "status": "modified"},
-            ],
-            current=current,
-            commits=commits,
+        provider = self.drift_provider(
+            source, current, changed={"web/app.jsx": "9" * 40, "server/app.py": "9" * 40}
         )
 
-        subject._verify_arrival_source(provider, source)
+        arrival = subject._arrival_source(provider, source, require_surface_parity=False)
 
-    def test_arrival_source_rejects_harmful_or_unproved_main_drift(self) -> None:
+        self.assertEqual(arrival["relationship"], "ancestor")
+        self.assertEqual(arrival["current_main_sha"], current)
+        self.assertEqual(arrival["ahead_by"], 2)
+        # web owns web/, and server/ is a declared input of app, broker and
+        # canonical-worker; harness declares neither, so it must stay clean.
+        self.assertEqual(
+            arrival["drifted_surfaces"], ["app", "broker", "canonical-worker", "web"]
+        )
+        self.assertEqual(arrival["surfaces"]["harness"], "identical")
+
+    def test_non_surface_drift_on_main_records_every_surface_identical(self) -> None:
+        source = "7368ac85ef809957fa65fe237f3c72829580b4ee"
+        current = "0f9c47fe89f12b94a4d9d16c61d6c6df119356bc"
+        provider = self.drift_provider(source, current, changed={"docs/readme.md": "9" * 40})
+
+        arrival = subject._arrival_source(provider, source, require_surface_parity=False)
+
+        self.assertEqual(arrival["ahead_by"], 2)
+        self.assertEqual(arrival["drifted_surfaces"], [])
+        self.assertEqual(set(arrival["surfaces"].values()), {"identical"})
+
+    def test_an_addition_into_a_release_surface_is_caught_by_blob_comparison(self) -> None:
+        """A changed-filename allowlist can miss this; comparing surfaces cannot."""
+
+        source = "7368ac85ef809957fa65fe237f3c72829580b4ee"
+        current = "0f9c47fe89f12b94a4d9d16c61d6c6df119356bc"
+        provider = self.drift_provider(source, current, added={"harness/late-addition.mjs": "9" * 40})
+
+        arrival = subject._arrival_source(provider, source, require_surface_parity=False)
+
+        self.assertEqual(arrival["surfaces"]["harness"], "changed")
+        self.assertIn("harness", arrival["drifted_surfaces"])
+
+    def test_surface_parity_opt_in_still_refuses_any_drifted_surface(self) -> None:
+        source = "7368ac85ef809957fa65fe237f3c72829580b4ee"
+        current = "0f9c47fe89f12b94a4d9d16c61d6c6df119356bc"
+        provider = self.drift_provider(source, current, changed={"web/app.jsx": "9" * 40})
+
+        with self.assertRaisesRegex(subject.ContractError, "^ARRIVAL_SURFACE_PARITY_REQUIRED$"):
+            subject._arrival_source(provider, source, require_surface_parity=True)
+
+        # ...and the same evidence is accepted when the caller did not ask for it.
+        provider = self.drift_provider(source, current, changed={"web/app.jsx": "9" * 40})
+        self.assertEqual(
+            subject._arrival_source(provider, source, require_surface_parity=False)[
+                "drifted_surfaces"
+            ],
+            ["web"],
+        )
+
+    def test_unusable_tree_evidence_fails_closed(self) -> None:
+        source = "7368ac85ef809957fa65fe237f3c72829580b4ee"
+        current = "0f9c47fe89f12b94a4d9d16c61d6c6df119356bc"
+
+        def truncated(tree: dict[str, object]) -> None:
+            tree["truncated"] = True
+
+        def missing_truncated_flag(tree: dict[str, object]) -> None:
+            tree.pop("truncated")
+
+        def submodule(tree: dict[str, object]) -> None:
+            tree["tree"].append(
+                {"path": "vendor/pinned", "type": "commit", "mode": "160000", "sha": "9" * 40}
+            )
+
+        def duplicate_path(tree: dict[str, object]) -> None:
+            tree["tree"].append(dict(tree["tree"][0]))
+
+        def malformed_blob_sha(tree: dict[str, object]) -> None:
+            tree["tree"][0] = {**tree["tree"][0], "sha": "not-a-sha"}
+
+        def empty_tree(tree: dict[str, object]) -> None:
+            tree["tree"] = []
+
+        def missing_tree_rows(tree: dict[str, object]) -> None:
+            tree.pop("tree")
+
+        for mutate in (
+            truncated,
+            missing_truncated_flag,
+            submodule,
+            duplicate_path,
+            malformed_blob_sha,
+            empty_tree,
+            missing_tree_rows,
+        ):
+            with self.subTest(mutate=mutate.__name__):
+                provider = self.drift_provider(source, current)
+                tree = provider.json_values[
+                    (subject.APP_REPOSITORY, f"/git/trees/{self.tree_sha(current)}?recursive=1")
+                ]
+                mutate(tree)
+                with self.assertRaisesRegex(subject.ContractError, "^ARRIVAL_TREE_INVALID$"):
+                    subject._arrival_source(provider, source, require_surface_parity=False)
+
+    def test_a_declared_surface_input_absent_from_main_fails_closed(self) -> None:
+        source = "7368ac85ef809957fa65fe237f3c72829580b4ee"
+        current = "0f9c47fe89f12b94a4d9d16c61d6c6df119356bc"
+        provider = self.drift_provider(source, current, removed=("deploy/nginx.conf",))
+
+        with self.assertRaisesRegex(subject.ContractError, "^ARRIVAL_SURFACE_INPUT_ABSENT$"):
+            subject._arrival_source(provider, source, require_surface_parity=False)
+
+    def test_arrival_source_rejects_broken_or_diverged_main_ancestry(self) -> None:
         source = "7368ac85ef809957fa65fe237f3c72829580b4ee"
         current = "39c17213f2573542c2b58743ace12ed5b682f2dc"
-        valid_files = [{"filename": "scripts/platform_staging_convergence.py", "status": "modified"}]
 
         def diverged(value: dict[str, object]) -> None:
             value["status"] = "diverged"
 
         def wrong_merge_base(value: dict[str, object]) -> None:
             value["merge_base_commit"] = {"sha": "0" * 40}
+
+        def wrong_base(value: dict[str, object]) -> None:
+            value["base_commit"] = {"sha": "0" * 40}
+
+        def behind_main(value: dict[str, object]) -> None:
+            value["behind_by"] = 1
 
         def missing_commits(value: dict[str, object]) -> None:
             value.pop("commits")
@@ -875,21 +1053,11 @@ class ConvergenceFinalizerTests(unittest.TestCase):
         def malformed_count(value: dict[str, object]) -> None:
             value["behind_by"] = False
 
-        def product_path(value: dict[str, object]) -> None:
-            value["files"] = [{"filename": "server/app.py", "status": "modified"}]
-
-        def removed_verifier(value: dict[str, object]) -> None:
-            value["files"] = [{"filename": valid_files[0]["filename"], "status": "removed"}]
-
-        def duplicate_path(value: dict[str, object]) -> None:
-            value["files"] = [*valid_files, *valid_files]
-
-        def empty_drift(value: dict[str, object]) -> None:
-            value["files"] = []
-
         for mutate in (
             diverged,
             wrong_merge_base,
+            wrong_base,
+            behind_main,
             missing_commits,
             empty_commits,
             truncated_commits,
@@ -898,20 +1066,20 @@ class ConvergenceFinalizerTests(unittest.TestCase):
             malformed_commit,
             wrong_terminal,
             malformed_count,
-            product_path,
-            removed_verifier,
-            duplicate_path,
-            empty_drift,
         ):
             with self.subTest(mutate=mutate.__name__), self.assertRaisesRegex(
                 subject.ContractError, "^ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN$"
             ):
                 provider = FakeProvider()
-                provider.json_values[(subject.APP_REPOSITORY, "/branches/main")] = {"commit": {"sha": current}}
-                comparison = self.comparison(source, copy.deepcopy(valid_files))
+                provider.json_values[(subject.APP_REPOSITORY, "/branches/main")] = {
+                    "commit": {"sha": current}
+                }
+                comparison = self.comparison(source, [])
                 mutate(comparison)
-                provider.json_values[(subject.APP_REPOSITORY, f"/compare/{source}...{current}")] = comparison
-                subject._verify_arrival_source(provider, source)
+                provider.json_values[
+                    (subject.APP_REPOSITORY, f"/compare/{source}...{current}")
+                ] = comparison
+                subject._arrival_source(provider, source, require_surface_parity=False)
 
     def test_run_list_growth_between_pages_restarts_to_one_stable_snapshot(self) -> None:
         provider = FakeProvider()
@@ -1750,13 +1918,17 @@ class ConvergenceFinalizerTests(unittest.TestCase):
                 provider.json_values[(subject.APP_REPOSITORY, f"/actions/runs/{BUILD_RUN}")][key_name] = value
                 self.assert_reason(reason, provider)
 
-    def test_newer_main_or_active_child_blocks_current_frontier(self) -> None:
+    def test_main_that_is_not_a_descendant_or_an_active_child_blocks_the_frontier(self) -> None:
+        # Main moving on is normal and is recorded, not refused. Main that does
+        # NOT descend from the built sha is a different thing entirely: the
+        # commit chain does not terminate at main's tip, so the built sha was
+        # never on this history and no receipt may be minted for it.
         provider = fixture()
         current = "0" * 40
         provider.json_values[(subject.APP_REPOSITORY, "/branches/main")]["commit"]["sha"] = current
         provider.json_values[(subject.APP_REPOSITORY, f"/compare/{SOURCE}...{current}")] = self.comparison(
             SOURCE,
-            [{"filename": "server/app.py", "status": "modified"}],
+            [],
         )
         self.assert_reason("ARRIVAL_SOURCE_IS_NOT_CURRENT_MAIN", provider)
 
@@ -1778,6 +1950,43 @@ class ConvergenceFinalizerTests(unittest.TestCase):
         provider.json_values[list_key]["workflow_runs"].append(active)
         provider.json_values[list_key]["total_count"] += 1
         self.assert_reason("ACTIVE_CHILD_RUN", provider)
+
+    def test_receipt_records_product_drift_and_still_validates(self) -> None:
+        """Finalize at real merge cadence: main has moved, and the receipt says so."""
+
+        app = subject.APP_REPOSITORY
+        current = "0f9c47fe89f12b94a4d9d16c61d6c6df119356bc"
+        provider = fixture()
+        provider.json_values[(app, "/branches/main")]["commit"]["sha"] = current
+        provider.json_values[(app, f"/compare/{SOURCE}...{current}")] = self.comparison(
+            SOURCE, [], current=current
+        )
+        provider.json_values[(app, f"/git/commits/{current}")] = {
+            "tree": {"sha": self.tree_sha(current)}
+        }
+        # The build tree stays APP_TREE (the supply manifest pins it, and
+        # _workflow_blob resolves both workflows out of it), so the arrival
+        # comparison reads that same tree and only main's tree is new.
+        provider.json_values[(app, f"/git/trees/{APP_TREE}?recursive=1")] = self.surface_tree()
+        provider.json_values[(app, f"/git/trees/{self.tree_sha(current)}?recursive=1")] = (
+            self.surface_tree(changed={"web/app.jsx": "9" * 40})
+        )
+
+        receipt = subject._build_receipt(provider, BUILD_RUN, None)
+
+        self.assertEqual(receipt["arrival_source"]["relationship"], "ancestor")
+        self.assertEqual(receipt["arrival_source"]["current_main_sha"], current)
+        self.assertEqual(receipt["arrival_source"]["ahead_by"], 2)
+        self.assertEqual(receipt["arrival_source"]["drifted_surfaces"], ["web"])
+        self.assertEqual(receipt["arrival_source"]["surfaces"]["app"], "identical")
+        jsonschema.Draft202012Validator(self.schema).validate(receipt)
+
+        # The same evidence is refused when the operator asks for the strict
+        # property instead of the recorded one.
+        with self.assertRaisesRegex(
+            subject.ContractError, "^ARRIVAL_SURFACE_PARITY_REQUIRED$"
+        ):
+            subject._build_receipt(provider, BUILD_RUN, None, require_surface_parity=True)
 
     def test_relay_log_duplicate_missing_or_foreign_child_fails(self) -> None:
         for log in (
@@ -2034,10 +2243,19 @@ class WorkflowAndSchemaTests(unittest.TestCase):
     def test_workflow_is_manual_read_only_and_accepts_only_run_ids(self) -> None:
         trigger = self.doc.get("on", self.doc.get(True))
         self.assertEqual(set(trigger), {"workflow_dispatch"})
+        inputs = trigger["workflow_dispatch"]["inputs"]
         self.assertEqual(
-            set(trigger["workflow_dispatch"]["inputs"]),
-            {"producer_build_run_id", "current_frontier_run_id"},
+            set(inputs),
+            {"producer_build_run_id", "current_frontier_run_id", "require_surface_parity"},
         )
+        # Every free-text input is still a run identifier and nothing else. The
+        # third input carries no caller text at all: it is a typed boolean whose
+        # only effect is to make the verifier STRICTER, and it defaults off, so
+        # the permissive reading is never something a caller has to ask for.
+        for identifier in ("producer_build_run_id", "current_frontier_run_id"):
+            self.assertEqual(inputs[identifier]["type"], "string")
+        self.assertEqual(inputs["require_surface_parity"]["type"], "boolean")
+        self.assertIs(inputs["require_surface_parity"]["default"], False)
         self.assertEqual(self.doc["permissions"], {"actions": "read", "contents": "read"})
         self.assertNotIn("environment", self.doc["jobs"]["finalize"])
         self.assertNotIn("id-token", self.text)
