@@ -1451,11 +1451,12 @@ def build_suites() -> List[Suite]:
               [_npm(), "run", "check:workbench-id"], None),
         # web/src/**/*.test.mjs is invisible to vitest (its include is
         # src/**/*.test.{js,jsx}) and each file needs its own npm script to
-        # run at all, so these eight node:test files passed by hand and gated
+        # run at all, so these nine node:test files passed by hand and gated
         # nothing. Found landing #880, whose App.jsx pins had to go in a
-        # .test.js file to be seen. error-classify.test.mjs is deliberately
-        # absent: its ConversePanel pin is stale (it greps for an `if` branch
-        # the panel replaced with a copy map) and fails on main.
+        # .test.js file to be seen. error-classify.test.mjs came last: its
+        # ConversePanel pin grepped for an `if` branch the panel had already
+        # replaced with a copy map, so the pin had to be repaired before it
+        # could gate anything.
         Suite("web-app-wiring", "App.jsx structural wiring pins", "script", WEB,
               [_npm(), "run", "check:app-wiring"], None),
         Suite("web-composer-contract",
@@ -1477,6 +1478,9 @@ def build_suites() -> List[Suite]:
               [_npm(), "run", "check:route-scene"], None),
         Suite("web-usage-contract", "web usage formatting helpers", "script", WEB,
               [_npm(), "run", "check:usage"], None),
+        Suite("web-error-classify-contract",
+              "web 413 classifies as too_large with its own panel copy", "script", WEB,
+              [_npm(), "run", "check:error-classify"], None),
         Suite("web-version-restore-proof",
               "web /app version restore browser proof", "script", WEB,
               [_npm(), "run", "proof:version-restore"], None),

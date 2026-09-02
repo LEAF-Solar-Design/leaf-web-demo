@@ -43,6 +43,7 @@
     "check:pending-approvals": "node --test src/pending-approvals.test.mjs",
     "check:route-scene": "node --test src/site/routeScene.test.mjs",
     "check:usage": "node --test src/usage.test.mjs",
+    "check:error-classify": "node --test src/error-classify.test.mjs",
     "test:unit": "vitest run",
     "test:unit:watch": "vitest",
     "measure:cad-edit-closeout": "node scripts/measure_cad_edit_closeout.mjs",
