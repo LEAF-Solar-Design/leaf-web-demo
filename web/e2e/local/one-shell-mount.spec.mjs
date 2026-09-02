@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test'
 import { requireLocalReady } from './requireReady.mjs'
+import { setRail } from './railFlag.mjs'
 
 // The W3 one-shell mount proof (docs/convergence/ACCEPTANCE.md): every
 // route-matrix row the local stack can exercise, with the rail ON and OFF,
@@ -18,12 +19,8 @@ import { requireLocalReady } from './requireReady.mjs'
 // executed/skipped counts (the unmanaged `proof:local` skips silently).
 const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
 
-async function setRail(page, value) {
-  await page.route('**/runtime-flags.js', (route) => route.fulfill({
-    contentType: 'text/javascript',
-    body: `window.__LEAF_FLAGS = { oneShell: '${value}' }`,
-  }))
-}
+// setRail moved to railFlag.mjs (W4c-0): the checkout-ownership twin and
+// every future rail-ON row arm the flag through the same interception.
 
 const STUDIO = '.studio-shell[data-scene="app"][data-mode="console"]'
 
@@ -67,9 +64,12 @@ test.describe('route matrix, rail ON', () => {
     await page.goto('/app')
     await expect(page.locator(STUDIO)).toHaveCount(1)
     await expectOneCanvasIn(page, '.studio-ground')
-    // No duplicate-instance regressions: one checkout stamp, one session
-    // surface, one Command bar, one main landmark (the console's own).
+    // No duplicate-instance regressions: one checkout stamp, one WORKSPACE
+    // controller stamp (W4c-0 debt: a duplicated WorkspaceControllerProvider
+    // would be a second converse session, invisible to the checkout stamp),
+    // one Command bar, one main landmark (the console's own).
     expect(await page.locator('[data-checkout-instance]').count()).toBe(1)
+    expect(await page.locator('[data-controller-instance]').count()).toBe(1)
     await expect(page.getByLabel('Command bar')).toHaveCount(1)
     await expect(page.locator('main')).toHaveCount(1)
     // No stage furniture leaked into console mode.
@@ -257,6 +257,32 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.locator(STUDIO)).toHaveCount(1)
   })
 
+  test('Esc ladder, history rung under the rail: an open drawer owns Esc, the route never moves', async ({ page, request }) => {
+    // W4c-0 debt (ACCEPTANCE "Esc LADDER rungs"): the terminal row above
+    // proves Esc never LEAVES /app; this rung proves an owned surface
+    // (the Version history drawer, role=dialog) consumes Esc FIRST, closes,
+    // and leaves the studio standing. The route rung (a live routing panel)
+    // is owed with the first rail-ON run walk.
+    test.setTimeout(120_000)
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    await page.goto('/app?drawing=cat-panels')
+    await expect(page.locator(STUDIO)).toHaveCount(1)
+    const history = page.getByRole('button', { name: 'History' })
+    await expect(history).toBeVisible({ timeout: 20_000 })
+    await history.click()
+    const drawer = page.getByRole('dialog', { name: 'Version history' })
+    await expect(drawer).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(drawer).toHaveCount(0)
+    await expect(page).toHaveURL(/\/app\?drawing=cat-panels$/)
+    await expect(page.locator(STUDIO)).toHaveCount(1)
+    // And the now-unowned Esc still refuses to eject the console.
+    await page.keyboard.press('Escape')
+    await expect(page).toHaveURL(/\/app\?drawing=cat-panels$/)
+    await expect(page.locator(STUDIO)).toHaveCount(1)
+  })
+
   test('<=980px: the shell is the scroll surface and the ground stays pinned', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
@@ -292,6 +318,7 @@ test.describe('route matrix, rail OFF + rollback', () => {
     await expect(page.locator('.studio-ground')).toHaveCount(0)
     await expectOneCanvasIn(page, '.viewer-wrap')
     expect(await page.locator('[data-checkout-instance]').count()).toBe(1)
+    expect(await page.locator('[data-controller-instance]').count()).toBe(1)
     // No surface ground, no surface hook, no cockpit without the shell.
     await expect(page.locator('[data-ground]')).toHaveCount(0)
     await expect(page.locator('.app[data-surface]')).toHaveCount(0)
@@ -336,6 +363,7 @@ test.describe('route matrix, rail OFF + rollback', () => {
     await expect(page.locator('.studio-ground')).toHaveCount(0)
     await expectOneCanvasIn(page, '.viewer-wrap')
     expect(await page.locator('[data-checkout-instance]').count()).toBe(1)
+    expect(await page.locator('[data-controller-instance]').count()).toBe(1)
     await expect(page.getByLabel('Command bar')).toHaveCount(1)
     await expect(page.locator('main')).toHaveCount(1)
     await expect(page).toHaveURL(/\/app$/)

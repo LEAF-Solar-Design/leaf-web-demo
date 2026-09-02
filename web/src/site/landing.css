@@ -944,6 +944,10 @@
 /* Pre-intake and skeleton feedback render on the bare ground. */
 .studio-shell .viewer-wrap .loading-line,
 .studio-ground .loading-line { color: rgba(240, 242, 240, .8); }
+/* The lazy-viewer fallback sheet takes the GROUND material here, not the
+   card canvas colour it uses in the old shell (W4c-0: the #0f0f11 sheet at
+   z0 read as a mis-toned flash over the #0a0a0a ground). */
+.studio-ground .viewer-skeleton { --viewer-skeleton-bg: #0a0a0a; }
 /* Error copy that used to ride the card's paper: the viewer-refresh
    inline error and the pane-failure title/reason inside the transparent
    card and wrap. */
@@ -1103,8 +1107,20 @@
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"][aria-selected="true"] small[data-state="unavailable"] { color: #f0997b; }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .workspace-card { margin-top: 8px; }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar {
-  background: rgba(10, 10, 10, .78); border: 1px solid rgba(240, 242, 240, .14); border-radius: 4px;
-  color: rgba(240, 242, 240, .92); backdrop-filter: blur(6px);
+  position: relative;
+  background: transparent; border: 1px solid rgba(240, 242, 240, .14); border-radius: 4px;
+  color: rgba(240, 242, 240, .92);
+  /* NO backdrop-filter on the element itself: a filter makes this toolbar
+     the CONTAINING BLOCK for position:fixed descendants, and the Version
+     history drawer (.drawer-fixed, mounted in .vh-anchor inside this
+     toolbar) then resolves its top/bottom against a ~36px box - negative
+     height, invisible (caught by the W4c-0 Esc history rung). The glass
+     paints on the ::before, whose filter contains only itself. */
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar::before {
+  content: ''; position: absolute; inset: 0; z-index: -1;
+  border-radius: inherit;
+  background: rgba(10, 10, 10, .78); backdrop-filter: blur(6px);
 }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar :is(.viewer-title, .version-note) { color: rgba(240, 242, 240, .92); }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .viewer-title .dim { color: rgba(240, 242, 240, .6); }

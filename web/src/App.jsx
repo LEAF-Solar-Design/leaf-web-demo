@@ -101,8 +101,12 @@ const PALETTE = ['#6b9fd4', '#8fbf9c', '#b49bd1', '#d4af6e', '#cf8fa6', '#79bcc7
 // Suspense fallback while the lazy viewer chunk arrives — L1 indeterminate:
 // pulse dot + verb, top-left (the centered position is reserved for X3 failures).
 function ViewerSkeleton() {
+  // Material follows the host: --viewer-skeleton-bg is re-pinned by the
+  // studio ground (landing.css) so the fallback sheet matches whichever
+  // surface it paints over; the inline fallback keeps the old shell's
+  // card material byte-identical (W4c-0 debt, ACCEPTANCE deferred list).
   return (
-    <div aria-hidden="true" style={{ position: 'absolute', inset: 0, background: '#0f0f11' }}>
+    <div className="viewer-skeleton" aria-hidden="true" style={{ position: 'absolute', inset: 0, background: 'var(--viewer-skeleton-bg, #0f0f11)' }}>
       <div className="loading-line dim" style={{ position: 'absolute', top: 14, left: 14 }}>
         <span className="dot live pulse" aria-hidden="true" /> Preparing the viewer
       </div>
@@ -330,7 +334,10 @@ export default function App() {
   }, [tourOn, mock])
 
   // --- agent tier (two-tier dispatch, wire §11; LIVE only — mock has no harness) ---
-  const { converse } = useWorkspaceControllers()
+  // instanceId: the provider mints one per mount for exactly this proof —
+  // the footer stamps it (W4c-0 debt) so e2e can assert ONE workspace
+  // controller (= one converse session) the same way it proves one checkout.
+  const { converse, instanceId: workspaceInstanceId } = useWorkspaceControllers()
   const {
     sessionId: agentSessionId,
     turns: agentTurns,
@@ -2966,7 +2973,7 @@ export default function App() {
         onSelectJob={onSelectJob}
       />
 
-      <footer className="foot-bar" data-checkout-instance={checkout.instanceId}>
+      <footer className="foot-bar" data-checkout-instance={checkout.instanceId} data-controller-instance={workspaceInstanceId}>
         {/* Traversal left: a named "← Parent" link while a project is open. */}
         {!mock && openProjectId && (
           <button type="button" className="chip-act" onClick={onCloseProject}>← All projects</button>

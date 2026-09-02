@@ -198,23 +198,28 @@ predicate names exactly those two shapes, never an open prefix).
 
 Deliberately deferred, with owners:
 
-- Reload-during-checkout-handoff under rail ON (row above): the console
-  checkout-ownership walk fails on plain `main` today (pre-existing, chipped
-  as "Fix 4 pre-existing local-proof failures"), so a rail-ON copy would be
-  red for reasons unrelated to the mount. Owed by the first slice after that
-  chip lands: run `console-checkout-ownership.spec.mjs` with `setRail('1')`.
-- Esc LADDER rungs (drawer / history / route) under the rail: the spec pins
-  the terminal "never navigates" behavior only. Owed by W4's overlay-rail
-  slice, which adds the first studio-mode drawer.
-- A jsdom render test mounting SiteRoot under both `__LEAF_FLAGS` values (the
-  arm-swap dodge the source pins cannot see) is owed by W4 alongside the
-  `.stage-root` adoption; until then the managed e2e ON/OFF rows are the
-  arm receipt.
-- A DOM stamp of `WorkspaceControllerProvider`'s instanceId in console mode
-  (today only the operator rail stamps it): W4 overlay rails.
-- Cosmetic: `ViewerSkeleton` paints `#0f0f11` inline at z0 under the studio;
-  the loading verb re-pins light. Skeleton material moves with W4's ground
-  tokens.
+- Route rung of the Esc LADDER under the rail (a live routing panel owning
+  Esc): owed with the first rail-ON run walk. The terminal row and the
+  history/drawer rung landed in W4c-0 (`one-shell-mount.spec.mjs`, "Esc
+  ladder, history rung": the Version history dialog consumes Esc, closes,
+  the route never moves).
+
+Paid by W4c-0 (receipts named so the ledger stays auditable):
+
+- Rail-ON checkout ownership: `console-checkout-ownership.spec.mjs` now runs
+  its whole walk under BOTH rail values (`for (const rail of ['0','1'])`,
+  asserting the studio arm matches the rail), receipt
+  `console-checkout-ownership-receipt-studio.json`.
+- Arm-swap render receipt: `src/site/siteRootRender.test.jsx` mounts SiteRoot
+  under jsdom with `__LEAF_FLAGS` '1' / '0' / absent (heavy subtrees stubbed
+  at module seams; runtimeFlags re-imported per case because the read is
+  module-eval). Falsified: inverting the arm fails all three.
+- `WorkspaceControllerProvider` instanceId stamp in console mode: the footer
+  carries `data-controller-instance` (App.jsx), count===1 asserted in the
+  rail-ON, rail-OFF, and rollback rows.
+- `ViewerSkeleton` material: `--viewer-skeleton-bg` re-pinned to the ground
+  colour under `.studio-ground` (landing.css); the old shell keeps `#0f0f11`
+  via the inline fallback.
 
 ### Surface grounds (W4a, panel-free slice; operator direction 2026-09-02: "the cad surface on each tab should be a similar workspace, appropriate to the application")
 
