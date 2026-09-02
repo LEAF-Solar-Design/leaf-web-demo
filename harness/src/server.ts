@@ -69,6 +69,10 @@ import {
   type OperatorWorkerDispatchRequest,
 } from "./operatorWorker/operatorWorkerDispatch.js";
 import type { OperatorWorkerManager } from "./operatorWorker/workerManager.js";
+import {
+  GlugMushyAuthorError,
+  type GlugMushyAuthor,
+} from "./glugMushyAuthor.js";
 
 export { DEFAULT_TENANT };
 
@@ -716,6 +720,9 @@ export function createHarness(ports: HarnessPorts, opts?: {
    * ships dark (501). The manager itself still fails closed on a non-isolating
    * substrate, so wiring this grants no broad-execution capability by itself. */
   operatorWorker?: { manager: OperatorWorkerManager };
+  /** Glug maintenance runs in this grant-owning sidecar. Git publication and
+   * provider credentials remain in the calling control plane. */
+  glugMushyAuthor?: GlugMushyAuthor;
 }): Harness {
   const loop = new AuthorLoop(ports);
   const explicitAuth = opts?.auth ?? null;
@@ -802,6 +809,45 @@ export function createHarness(ports: HarnessPorts, opts?: {
       const auth = explicitAuth ?? resolveHarnessAuth();
       const denial = harnessAuthDenial(req, auth);
       if (denial) return send(res, 401, denial);
+
+      if (method === "POST" && path === "/internal/glug/mushy/author") {
+        if (!opts?.glugMushyAuthor) {
+          return send(res, 501, {
+            error: { code: "glug_mushy_author_unavailable", message: "Glug Mushy author is unavailable" },
+          });
+        }
+        res.setHeader("cache-control", "no-store");
+        res.setHeader("pragma", "no-cache");
+        const sourceCommit = authorityHeader(req, "x-glug-mushy-source-commit") ?? "";
+        const timeoutValue = authorityHeader(req, "x-glug-mushy-author-timeout-seconds") ?? "";
+        const authorTimeoutSeconds = Number(timeoutValue);
+        if (!SHA40.test(sourceCommit) || !Number.isSafeInteger(authorTimeoutSeconds)) {
+          return send(res, 422, {
+            error: { code: "glug_mushy_request_invalid", message: "Glug Mushy author request is invalid" },
+          });
+        }
+        try {
+          const authorBody = await readJsonBody(req, 24 * 1024);
+          if (!isRecord(authorBody)) {
+            return send(res, 422, {
+              error: { code: "glug_mushy_request_invalid", message: "Glug Mushy author request is invalid" },
+            });
+          }
+          const result = await opts.glugMushyAuthor.run(
+            authorBody,
+            sourceCommit,
+            authorTimeoutSeconds,
+          );
+          return send(res, 200, result);
+        } catch (error) {
+          if (error instanceof GlugMushyAuthorError) {
+            return send(res, error.status, {
+              error: { code: error.code, message: "Glug Mushy author refused the request" },
+            });
+          }
+          throw error;
+        }
+      }
 
 
       // Operator worker dispatch (contract/OPERATOR.md Lane D, O2/O3 wiring): the

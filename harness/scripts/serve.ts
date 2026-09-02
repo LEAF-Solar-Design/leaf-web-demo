@@ -89,6 +89,10 @@ import type { StandardServicesResolver } from "../src/vendor/mushy-author/index.
 import { CustomizationCoordinationClient } from "../src/ports/impl/customizationCoordinationClient.js";
 import { FakeAgentRunner } from "../src/ports/fakes/fakeAgentRunner.js";
 import { FakeTurnRunner } from "../src/ports/fakes/fakeTurnRunner.js";
+import {
+  GLUG_MUSHY_SOURCE_COMMIT,
+  PinnedGlugMushyAuthor,
+} from "../src/glugMushyAuthor.js";
 
 const HARNESS_PORT = Number(process.env.HARNESS_PORT || 8150);
 validateProductionHarnessEnv();
@@ -125,6 +129,18 @@ function safeComponent(tenantId: string): string {
     throw new Error(`invalid tenant id: ${JSON.stringify(tenantId)}`);
   }
   return base;
+}
+
+function requiredEnvironment(name: string): string {
+  const value = (process.env[name] ?? "").trim();
+  if (!value) throw new Error(`${name} is required`);
+  return value;
+}
+
+function glugMushyAuthorEnabled(): boolean {
+  return ["1", "true", "yes", "on"].includes(
+    (process.env.GLUG_MUSHY_AUTHOR_ENABLED ?? "").trim().toLowerCase(),
+  );
 }
 
 /** Resolve a tenant to its mushy-repo dir. demo-tenant honours $LEAF_TENANT_REPO. */
@@ -373,9 +389,27 @@ async function main(): Promise<void> {
         }),
       }
     : undefined;
+  const ports = buildPorts(standardServicesResolver);
+  const glugMushyAuthor = glugMushyAuthorEnabled()
+    ? new PinnedGlugMushyAuthor({
+        artifactRoot: requiredEnvironment("LEAF_GLUG_MUSHY_ARTIFACT_ROOT"),
+        manifestPath: (
+          process.env.LEAF_GLUG_ADOPTION_MANIFEST_FILE
+          ?? "/app/glug/glug_adoption_manifest.json"
+        ).trim(),
+        workspaceRoot: requiredEnvironment("GLUG_MUSHY_WORKSPACE_ROOT"),
+        sourceCommit: GLUG_MUSHY_SOURCE_COMMIT,
+        grantTenantId: requiredEnvironment("GLUG_MUSHY_AUTHOR_TENANT_ID"),
+        grantProvider: ports.oauth,
+      })
+    : undefined;
+  const serverOptions = {
+    ...(standardServicesApproval ? { standardServicesApproval } : {}),
+    ...(glugMushyAuthor ? { glugMushyAuthor } : {}),
+  };
   const server: Server = createHarness(
-    buildPorts(standardServicesResolver),
-    standardServicesApproval ? { standardServicesApproval } : undefined,
+    ports,
+    Object.keys(serverOptions).length ? serverOptions : undefined,
   ).listen(HARNESS_PORT);
   server.on("listening", () => {
     log(

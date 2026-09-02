@@ -66,6 +66,7 @@ COPY harness/tsconfig.json harness/tsconfig.build.json /app/
 COPY harness/src/     /app/src/
 COPY harness/scripts/ /app/scripts/
 COPY harness/test/    /app/test/
+COPY server/glug_adoption_manifest.json /app/glug/glug_adoption_manifest.json
 
 # Compile TS -> /app/dist (dist/scripts/serve.js + dist/src/**), then drop the
 # dev toolchain (typescript/vitest/@types) — the runtime keeps only the SDK dep.

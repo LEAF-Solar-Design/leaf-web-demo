@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "profile": "glug-mushy-author",
+  "extends": "required-config.harness.json",
+  "required": {
+    "environment": [
+      "GLUG_MUSHY_AUTHOR_ENABLED",
+      "GLUG_MUSHY_AUTHOR_TENANT_ID",
+      "GLUG_MUSHY_WORKSPACE_ROOT",
+      "LEAF_GLUG_MUSHY_ARTIFACT_ROOT"
+    ],
+    "mountPaths": [
+      "/app/glug-mushy-artifact",
+      "/data/glug/workspaces"
+    ],
+    "secrets": []
+  }
+}

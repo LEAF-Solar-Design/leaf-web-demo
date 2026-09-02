@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Mapping
@@ -22,8 +23,7 @@ from glug_executor import GlugExecutorError
 
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,199}$")
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
-SAFE_AUTHOR_ENV = frozenset({"PATH", "SYSTEMROOT", "TMP", "TEMP", "LANG", "LC_ALL",
-                             "GLUG_MUSHY_SOURCE_COMMIT"})
+AUTHOR_ENDPOINT_PATH = "/internal/glug/mushy/author"
 
 
 def _required(env: Mapping[str, str], key: str) -> str:
@@ -33,23 +33,47 @@ def _required(env: Mapping[str, str], key: str) -> str:
     return value
 
 
-class SubprocessAuthorAdapter:
-    """Runs the pinned author with the request on stdin and a scrubbed env."""
+class HarnessAuthorAdapter:
+    """Calls the isolated harness that owns the model grant and pinned runtime."""
 
-    RUNTIME = "node"
+    MAX_RESULT_BYTES = 64 * 1024
 
-    def __init__(self, *, artifact_root: Path | str, entrypoint: glug_adoption.ArtifactFile):
+    def __init__(
+        self,
+        *,
+        artifact_root: Path | str,
+        entrypoint: glug_adoption.ArtifactFile,
+        endpoint: str,
+        harness_secret: str,
+        workspace_root: Path | str,
+        opener=None,
+    ):
         root = Path(artifact_root)
         if root.is_symlink() or not root.is_dir():
             raise GlugExecutorError("executor_unavailable", "Glug author artifact is unavailable", 503)
         self.artifact_root = root.resolve()
         self.entrypoint = entrypoint
+        self.endpoint = self._validated_endpoint(endpoint)
+        if not isinstance(harness_secret, str) or not harness_secret:
+            raise GlugExecutorError(
+                "executor_unavailable", "Glug author harness authentication is unavailable", 503)
+        self.harness_secret = harness_secret
+        workspace = Path(workspace_root)
+        if workspace.is_symlink() or not workspace.is_dir():
+            raise GlugExecutorError(
+                "executor_unavailable", "Glug author workspace root is unavailable", 503)
+        self.workspace_root = workspace.resolve()
+        self._opener = opener or urllib.request.urlopen
         self._verified_entrypoint(root)
 
     @classmethod
     def configured(
-        cls, adoption: glug_adoption.GlugAdoption, artifact_root: Path | str,
-    ) -> "SubprocessAuthorAdapter":
+        cls,
+        adoption: glug_adoption.GlugAdoption,
+        artifact_root: Path | str,
+        *,
+        env: Mapping[str, str],
+    ) -> "HarnessAuthorAdapter":
         entrypoint = next(
             (entry for entry in adoption.artifact_files
              if entry.path == adoption.artifact_entrypoint),
@@ -58,7 +82,13 @@ class SubprocessAuthorAdapter:
         if entrypoint is None:
             raise GlugExecutorError(
                 "executor_unavailable", "Glug author entrypoint is not pinned", 503)
-        return cls(artifact_root=artifact_root, entrypoint=entrypoint)
+        return cls(
+            artifact_root=artifact_root,
+            entrypoint=entrypoint,
+            endpoint=_required(env, "GLUG_MUSHY_AUTHOR_URL"),
+            harness_secret=_required(env, "LEAF_HARNESS_SECRET"),
+            workspace_root=_required(env, "GLUG_MUSHY_WORKSPACE_ROOT"),
+        )
 
     def run(
         self,
@@ -70,28 +100,102 @@ class SubprocessAuthorAdapter:
         wrapper_timeout_seconds: int,
         env: Mapping[str, str],
     ) -> Mapping[str, Any]:
-        entrypoint = self._verified_entrypoint(Path(artifact_root))
-        child_env = {key: value for key, value in env.items() if key in SAFE_AUTHOR_ENV}
-        child_env["GLUG_MUSHY_ARTIFACT_ROOT"] = str(artifact_root)
-        child_env["GLUG_MUSHY_AUTHOR_TIMEOUT_SECONDS"] = str(author_timeout_seconds)
-        request = json.dumps(dict(payload), separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+        self._verified_entrypoint(Path(artifact_root))
+        self._verify_workspace_binding(payload, repository)
+        source_commit = env.get("GLUG_MUSHY_SOURCE_COMMIT", "")
+        if not SHA40.fullmatch(source_commit):
+            raise GlugExecutorError(
+                "author_unavailable", "Glug Mushy source identity is unavailable", 503)
+        body = json.dumps(
+            dict(payload), separators=(",", ":"), ensure_ascii=True,
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            self.endpoint,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-Harness-Secret": self.harness_secret,
+                "X-Glug-Mushy-Source-Commit": source_commit,
+                "X-Glug-Mushy-Author-Timeout-Seconds": str(author_timeout_seconds),
+            },
+        )
+        response = None
         try:
-            completed = subprocess.run(
-                [self.RUNTIME, str(entrypoint)], cwd=str(repository), input=request,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-                timeout=wrapper_timeout_seconds, env=child_env, shell=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise GlugExecutorError("author_unavailable", "Glug author process failed", 503) from exc
-        if completed.returncode != 0:
-            raise GlugExecutorError("author_failed", "Glug author refused the request", 502)
+            response = self._opener(request, timeout=wrapper_timeout_seconds)
+            raw_status = getattr(response, "status", None)
+            status = int(raw_status if raw_status is not None else response.getcode())
+            encoded = response.read(self.MAX_RESULT_BYTES + 1)
+        except urllib.error.HTTPError as exc:
+            code = "author_failed" if 400 <= exc.code < 500 else "author_unavailable"
+            status = 502 if code == "author_failed" else 503
+            exc.close()
+            raise GlugExecutorError(code, "Glug author harness refused the request", status) from exc
+        except (OSError, TimeoutError, urllib.error.URLError) as exc:
+            raise GlugExecutorError(
+                "author_unavailable", "Glug author harness is unavailable", 503,
+            ) from exc
+        finally:
+            if response is not None:
+                response.close()
+        if status < 200 or status >= 300:
+            raise GlugExecutorError(
+                "author_unavailable", "Glug author harness returned an invalid status", 503)
+        if len(encoded) > self.MAX_RESULT_BYTES:
+            raise GlugExecutorError(
+                "author_result_invalid", "Glug author result is too large", 502)
         try:
-            result = json.loads(completed.stdout.decode("utf-8", errors="strict"))
+            result = json.loads(encoded.decode("utf-8", errors="strict"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise GlugExecutorError("author_result_invalid", "Glug author result is invalid", 502) from exc
         if not isinstance(result, dict):
             raise GlugExecutorError("author_result_invalid", "Glug author result is invalid", 502)
         return result
+
+    @staticmethod
+    def _validated_endpoint(value: str) -> str:
+        try:
+            parsed = urllib.parse.urlsplit(value)
+        except ValueError as exc:
+            raise GlugExecutorError(
+                "executor_unavailable", "Glug author harness URL is invalid", 503,
+            ) from exc
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed.path != AUTHOR_ENDPOINT_PATH
+        ):
+            raise GlugExecutorError(
+                "executor_unavailable", "Glug author harness URL is invalid", 503)
+        return value
+
+    def _verify_workspace_binding(
+        self, payload: Mapping[str, Any], repository: Path,
+    ) -> None:
+        claim_id = payload.get("claim_id")
+        if not isinstance(claim_id, str) or not re.fullmatch(
+            r"[a-z0-9][a-z0-9._-]{0,199}", claim_id,
+        ):
+            raise GlugExecutorError("author_failed", "Glug author claim is invalid", 502)
+        expected = (
+            self.workspace_root
+            / hashlib.sha256(claim_id.encode("utf-8")).hexdigest()
+            / "repository"
+        )
+        try:
+            actual = Path(repository).resolve(strict=True)
+            expected_resolved = expected.resolve(strict=True)
+        except OSError as exc:
+            raise GlugExecutorError(
+                "author_unavailable", "Glug author workspace is unavailable", 503,
+            ) from exc
+        if actual != expected_resolved:
+            raise GlugExecutorError(
+                "author_failed", "Glug author workspace binding is invalid", 502)
 
     def _verified_entrypoint(self, artifact_root: Path) -> Path:
         if artifact_root.is_symlink() or not artifact_root.is_dir():
@@ -306,7 +410,7 @@ def configured_live_components(
 ):
     database = Path(_required(env, "GLUG_MUSHY_JOB_DATABASE"))
     return (
-        SubprocessAuthorAdapter.configured(adoption, artifact_root),
+        HarnessAuthorAdapter.configured(adoption, artifact_root, env=env),
         SQLiteApprovalStore(database),
         GitHubReviewProvider.configured(env),
     )
