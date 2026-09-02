@@ -411,6 +411,22 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.locator('.viewer-canvas[data-string-routes]')).toHaveCount(0)
   })
 
+  test('solar strings REFUSE the edit fixture: routes never draw over bytes they were not solved against (W4c-V3, kimi finding 1)', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    // The fixture boot keeps the console-default source name while seating
+    // a DIFFERENT drawing - the exact bypass the intake-identity gate closes.
+    await page.goto('/?fixture=edit')
+    await expect(page.locator(STUDIO)).toHaveCount(1)
+    await expect(page.locator('.viewer-canvas canvas')).toHaveCount(1, { timeout: 30_000 })
+    await page.getByRole('tab', { name: 'Solar CAD' }).click()
+    // Give the (wrongly-)eligible path every chance to load and draw, then
+    // assert nothing did: the stamp only exists when routes actually draw.
+    await page.waitForTimeout(4_000)
+    await expect(page.locator('.viewer-canvas[data-string-routes]')).toHaveCount(0)
+  })
+
   test('Esc ladder, history rung under the rail: an open drawer owns Esc, the route never moves', async ({ page, request }) => {
     // W4c-0 debt (ACCEPTANCE "Esc LADDER rungs"): the terminal row above
     // proves Esc never LEAVES /app; this rung proves an owned surface

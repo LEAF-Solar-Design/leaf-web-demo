@@ -2232,8 +2232,14 @@ export default function App() {
   //  - never over a version preview or a mutated head (StageLayer:107
   //    precedent) - a delete-panel run makes v2 and the routes go stale.
   const [demoSolveRoutes, setDemoSolveRoutes] = useState(null)
+  // The SEATED INTAKE's own identity, not just the requested source: a
+  // fixture boot (?fixture=edit) keeps the console-default source name
+  // while seating a different drawing entirely, and routes over bytes they
+  // were never solved against are a fabricated visual (kimi RED on #928,
+  // finding 1). The sample capture's dwg field is the byte-level identity.
+  const intakeIsRooftopSample = String(intake?.dwg || '').replace(/\\/g, '/').endsWith('/rooftop_demo.dwg')
   const solarStringsEligible = !!studioGround && activeSurface === 'solar' && mock
-    && DRAWING_SOURCE === 'rooftop_demo'
+    && DRAWING_SOURCE === 'rooftop_demo' && intakeIsRooftopSample
   useEffect(() => {
     if (!solarStringsEligible || demoSolveRoutes) return undefined
     let live = true
