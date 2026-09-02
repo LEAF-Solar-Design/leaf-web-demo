@@ -1047,3 +1047,108 @@
   .ground-device-stage { flex-direction: column; gap: 18px; }
   .device-frame { width: 120px; height: 250px; }
 }
+
+/* ================= W4b: floating rails, dark chrome, the drawing cockpit ====
+   Operator direction 2026-09-02: "all rails should be floating in front of
+   entire-screen workspace" and "where is the opencad UI for the cad bit".
+   The grid keeps its columns (layout, scroll, keyboard, and a11y contracts
+   untouched); the rails become floating paper panels inset from the edges
+   with the ground visible around them, and the header, footer, product
+   tabs (as the document-tab strip), and viewer toolbar become DARK chrome
+   (two-material rule: chrome touching the drawing is dark, paper carries
+   content). CAD and Solar CAD drop the page furniture (kicker, prompt
+   headline, hint, continuity strip): the command bar is the prompt and the
+   status bar carries the continuity facts. All of it scoped under
+   .studio-shell and the studio-only `data-surface` attribute. */
+.studio-shell header.top {
+  background: rgba(10, 10, 10, .84); backdrop-filter: blur(8px);
+  border-bottom: 1px solid rgba(240, 242, 240, .12); color: rgba(240, 242, 240, .92);
+}
+.studio-shell header.top :is(.mark, .who, .who b, .proj .name, .switch) { color: rgba(240, 242, 240, .92); }
+.studio-shell header.top .meta { color: rgba(240, 242, 240, .6); }
+.studio-shell header.top .chip-act,
+.studio-shell footer.foot-bar .chip-act,
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .chip-act {
+  background: rgba(240, 242, 240, .08); border-color: rgba(240, 242, 240, .22); color: rgba(240, 242, 240, .92);
+}
+.studio-shell header.top .chip-act:hover,
+.studio-shell footer.foot-bar .chip-act:hover,
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .chip-act:hover { background: rgba(240, 242, 240, .16); }
+.studio-shell aside.nav, .studio-shell aside.rail {
+  position: relative; z-index: 2;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: color-mix(in srgb, var(--rail) 94%, transparent);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, .5); backdrop-filter: blur(8px);
+}
+.studio-shell aside.nav { margin: 12px 0 12px 12px; }
+.studio-shell aside.rail { margin: 12px 12px 12px 0; }
+.studio-shell footer.foot-bar {
+  background: rgba(10, 10, 10, .86); backdrop-filter: blur(8px);
+  border-top: 1px solid rgba(240, 242, 240, .12); color: rgba(240, 242, 240, .7);
+}
+.studio-shell footer.foot-bar > * + * { border-left-color: rgba(240, 242, 240, .15); }
+.studio-shell footer.foot-bar :is(.dim, .foot-stat) { color: rgba(240, 242, 240, .7); }
+.studio-shell footer.foot-bar .ok-txt { color: #7fd6a6; }
+.studio-shell footer.foot-bar .warn-txt { color: #f0c97b; }
+
+/* CAD / Solar CAD: the document-tab strip and the instrument strip. */
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) :is(.kicker, .home-q, .hint, .tc-continuity) { display: none; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-nav { margin-top: 4px; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"][aria-selected="true"] {
+  background: rgba(240, 242, 240, .1); color: rgba(240, 242, 240, .96);
+  border-color: rgba(240, 242, 240, .2); box-shadow: inset 0 2px 0 #7fd6a6;
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"][aria-selected="true"] small { color: rgba(240, 242, 240, .62); }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"][aria-selected="true"] small[data-state="available"] { color: #7fd6a6; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"][aria-selected="true"] small[data-state="unavailable"] { color: #f0997b; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .workspace-card { margin-top: 8px; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar {
+  background: rgba(10, 10, 10, .78); border: 1px solid rgba(240, 242, 240, .14); border-radius: 4px;
+  color: rgba(240, 242, 240, .92); backdrop-filter: blur(6px);
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar :is(.viewer-title, .version-note) { color: rgba(240, 242, 240, .92); }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .viewer-title .dim { color: rgba(240, 242, 240, .6); }
+
+/* The cockpit: view cluster in the drawing window (legend material), status
+   cluster in the status bar. */
+.cockpit-view {
+  position: absolute; top: 14px; left: 14px; z-index: 2;
+  display: flex; align-items: center; gap: 4px; padding: 5px 6px;
+  background: var(--cv-panel-glass); backdrop-filter: blur(6px);
+  border: 1px solid var(--cv-border); border-radius: 6px; box-shadow: 0 8px 24px rgba(0, 0, 0, .4);
+  color: var(--cv-text); pointer-events: auto;
+}
+.cockpit-cube {
+  width: 28px; height: 28px; border: 1px solid rgba(240, 242, 240, .35); border-radius: 3px;
+  display: grid; place-items: center; font: 600 8px var(--font-mono); letter-spacing: .08em;
+  color: rgba(240, 242, 240, .8); background: linear-gradient(135deg, rgba(240, 242, 240, .14), rgba(240, 242, 240, .02));
+  margin-right: 4px;
+}
+.cockpit-view button {
+  min-width: 26px; height: 26px; padding: 0 8px; border-radius: 4px;
+  border: 1px solid rgba(240, 242, 240, .18); background: rgba(240, 242, 240, .06);
+  color: rgba(240, 242, 240, .92); font: 500 12px var(--font-sans); cursor: pointer;
+}
+.cockpit-view button:hover { background: rgba(240, 242, 240, .16); }
+.cockpit-view button:focus-visible { outline: 2px solid #7fd6a6; outline-offset: 1px; }
+.cockpit-status { display: inline-flex; gap: 14px; align-items: center; font-variant-numeric: tabular-nums; }
+.cockpit-status b { font-weight: 500; color: rgba(240, 242, 240, .96); min-width: 5.5ch; display: inline-block; text-align: right; }
+.cockpit-scale b { min-width: 0; text-align: left; }
+.cockpit-sel[data-selected="true"] { color: #7fd6a6; }
+/* kimi-critic on #899: text with its OWN declared paper color inside the
+   dark chrome (an inherited re-pin never beats a declaration). */
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .btn,
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .btn.ghost {
+  background: rgba(240, 242, 240, .08); color: rgba(240, 242, 240, .92); border-color: rgba(240, 242, 240, .22);
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .btn.ghost:hover:not(:disabled) {
+  background: rgba(240, 242, 240, .16); color: rgba(240, 242, 240, .98);
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar :is(.checkout-mine, .checkout-mine b) { color: #7fd6a6; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar :is(.checkout-chip, .checkout-chip b, .checkout-stale, .checkout-legacy) { color: #f0c97b; }
+.studio-shell header.top .tag.amber { color: #f0c97b; }
+.studio-shell header.top :is(.claude-trigger .ca-k, .claude-trigger .ca-state) { color: rgba(240, 242, 240, .78); }
+@media (max-width: 980px) {
+  .studio-shell aside.nav, .studio-shell aside.rail { margin: 8px 8px 0; }
+  .cockpit-status { display: none; }
+}

@@ -174,6 +174,56 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.locator('.studio-ground .studio-ground-viewer')).toBeHidden()
   })
 
+  test('floating rails, dark chrome, and the drawing cockpit (W4b)', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    await page.goto('/app')
+    await expectOneCanvasIn(page, '.studio-ground')
+    // The surface hook exists only under the rail, and CAD drops the page
+    // furniture (the command bar is the prompt).
+    await expect(page.locator('.app[data-surface="cad"]')).toHaveCount(1)
+    await expect(page.locator('.home-q')).toBeHidden()
+    await expect(page.locator('.tc-continuity')).toBeHidden()
+    // Rails float: inset with rounded corners; header and footer are dark.
+    const chrome = await page.evaluate(() => {
+      const cs = (sel) => getComputedStyle(document.querySelector(sel))
+      const rgb = (v) => v.match(/\d+/g).slice(0, 3).map(Number)
+      return {
+        navRadius: cs('aside.nav').borderRadius,
+        navLeft: document.querySelector('aside.nav').getBoundingClientRect().left,
+        railRight: window.innerWidth - document.querySelector('aside.rail').getBoundingClientRect().right,
+        headerBg: rgb(cs('header.top').backgroundColor),
+        footerBg: rgb(cs('footer.foot-bar').backgroundColor),
+      }
+    })
+    expect(chrome.navRadius).toBe('8px')
+    expect(chrome.navLeft).toBeGreaterThanOrEqual(12)
+    expect(chrome.railRight).toBeGreaterThanOrEqual(12)
+    expect(Math.max(...chrome.headerBg)).toBeLessThan(40)
+    expect(Math.max(...chrome.footerBg)).toBeLessThan(40)
+    // The cockpit: view cluster in the window, status cluster in the footer.
+    const view = page.getByTestId('cockpit-view')
+    await expect(view).toBeVisible()
+    await view.getByRole('button', { name: 'Zoom in' }).click()
+    await view.getByRole('button', { name: 'Fit drawing to view' }).click()
+    await expectOneCanvasIn(page, '.studio-ground')
+    const status = page.getByTestId('cockpit-status')
+    await expect(status).toBeVisible()
+    await expect(status).toContainText(/entities/)
+    const box = await page.locator('.studio-shell .viewer-wrap').boundingBox()
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await page.mouse.move(box.x + box.width / 2 + 5, box.y + box.height / 2 + 5)
+    await expect(status.locator('.cockpit-coord b').first()).not.toHaveText('—')
+    await expect(status.locator('.cockpit-scale b')).toContainText(/1px = /)
+    // Browser keeps its page furniture (the frame is the page there).
+    await page.getByRole('tab', { name: 'Browser' }).click()
+    await expect(page.locator('.app[data-surface="browser"]')).toHaveCount(1)
+    await expect(page.locator('.home-q')).toBeVisible()
+    await expect(page.getByTestId('cockpit-view')).toHaveCount(0)
+    await expect(page.getByTestId('cockpit-status')).toHaveCount(0)
+  })
+
   test('/try stays the operator stage; /sheets and unknown paths never mount the studio', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
@@ -242,8 +292,11 @@ test.describe('route matrix, rail OFF + rollback', () => {
     await expect(page.locator('.studio-ground')).toHaveCount(0)
     await expectOneCanvasIn(page, '.viewer-wrap')
     expect(await page.locator('[data-checkout-instance]').count()).toBe(1)
-    // No surface ground exists without the shell — on any tab.
+    // No surface ground, no surface hook, no cockpit without the shell.
     await expect(page.locator('[data-ground]')).toHaveCount(0)
+    await expect(page.locator('.app[data-surface]')).toHaveCount(0)
+    await expect(page.getByTestId('cockpit-view')).toHaveCount(0)
+    await expect(page.getByTestId('cockpit-status')).toHaveCount(0)
     await page.getByRole('tab', { name: 'Browser' }).click()
     await expect(page.locator('[data-ground]')).toHaveCount(0)
     await expect(page.locator('#product-surface-panel')).toHaveCount(1)

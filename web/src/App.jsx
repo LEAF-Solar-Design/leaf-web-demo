@@ -4,6 +4,7 @@ import { createPortal } from 'react-dom'
 import { track, setTourStep } from './telemetry.js'
 import { useStudioGround } from './site/studioGround.js'
 import SurfaceGrounds, { groundShowsDrawing } from './site/SurfaceGrounds.jsx'
+import { CockpitStatus, ViewCluster } from './site/DrawingCockpit.jsx'
 // The 3D viewer drags in `three`; loading it lazily (mirroring the auth.js
 // dynamic-import pattern) keeps first paint off the critical path.
 const Viewer = React.lazy(() => import('./components/Viewer.jsx'))
@@ -2216,7 +2217,7 @@ export default function App() {
   const customizeExit = useExit(customizeOpen && canOpenCustomize)
 
   return (
-    <div className="app">
+    <div className="app" data-surface={studioGround ? activeSurface : undefined}>
       <header className="top">
         <div className="mark"><span className="diamond" aria-hidden="true" /> Leaf — build CAD tools with AI</div>
         <div className="proj">
@@ -2743,6 +2744,10 @@ export default function App() {
             {intake && (
               <SelectionReadout selection={selection} onDeselect={() => setSelectedHandle(null)} />
             )}
+            {/* W4b cockpit: view snaps on the drawing (studio only). */}
+            {studioGround && intake && groundShowsDrawing(activeSurface) && (
+              <ViewCluster viewerRef={viewerRef} />
+            )}
           </div>
         </div>
 
@@ -3001,6 +3006,11 @@ export default function App() {
         <span className="dim">{plural(capCount, 'cap')} · {catalog.families.length} famil{catalog.families.length === 1 ? 'y' : 'ies'} · tier {gateTier}</span>
         {!mock && usage && (
           <span className="dim">${Number(usage.today?.usd_est || 0).toFixed(3)} today</span>
+        )}
+        {/* W4b cockpit: live cursor coordinates, scale, counts, selection
+            (studio only; DOM-written at rAF rate, never React state). */}
+        {studioGround && groundShowsDrawing(activeSurface) && (
+          <CockpitStatus ground={studioGround} viewerRef={viewerRef} shown={shown} selectedHandle={selectedHandle} />
         )}
         <span style={{ marginLeft: 'auto' }}>build <span style={{ fontFamily: 'var(--font-mono)' }}>{__BUILD_HASH__}</span> · {mock ? 'sample data' : 'live'}</span>
       </footer>

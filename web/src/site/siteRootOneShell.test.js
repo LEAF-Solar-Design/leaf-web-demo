@@ -98,6 +98,17 @@ describe('App portal wiring', () => {
     expect(src).toMatch(/background=\{studioGround \? 'transparent' : undefined\}/)
   })
 
+  it('mounts the cockpit ONLY under the studio ground, and the surface attribute only there', () => {
+    // W4b: view cluster and status cluster are studio chrome; the
+    // data-surface hook the studio CSS scopes on exists only under the rail,
+    // so the old shell's DOM stays byte-for-byte.
+    expect((src.match(/<ViewCluster/g) || [])).toHaveLength(1)
+    expect((src.match(/<CockpitStatus/g) || [])).toHaveLength(1)
+    expect(src).toMatch(/\{studioGround && intake && groundShowsDrawing\(activeSurface\) && \(\s*\n?\s*<ViewCluster/)
+    expect(src).toMatch(/\{studioGround && groundShowsDrawing\(activeSurface\) && \(\s*\n?\s*<CockpitStatus/)
+    expect(src).toMatch(/<div className="app" data-surface=\{studioGround \? activeSurface : undefined\}>/)
+  })
+
   it('never seeds intake synchronously — the single-mount invariant of the portal', () => {
     // The ground attaches in a pre-paint state flush, before any async intake
     // resolves, so the Viewer's first committed render is already the portal
