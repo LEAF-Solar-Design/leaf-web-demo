@@ -484,27 +484,46 @@ def operator_enable(
 # agent kill flag is APP-SIDE state (agent_tenants.json beside the policy
 # file, via agent_policy) — independent of the broker run kill-switch above.
 # --------------------------------------------------------------------------- #
+# Same rule the scoreboard join above is built on, one route over: a ledger we
+# could not read has spent an UNKNOWN amount, not zero. This route's numbers ARE
+# the agent ledger, so an unreadable one costs the row set too -- only the
+# tenants the state store already named survive, each with null usage. The
+# envelope's degraded_mode carries that so an operator reading the list knows
+# it is partial. A MISSING ledger stays a truthful empty listing.
+_AGENT_USAGE_UNKNOWN: Dict[str, Any] = {
+    "turns": None, "cost_tokens": None, "usd_est": None}
+_AGENT_USAGE_ZERO: Dict[str, Any] = {"turns": 0, "cost_tokens": 0, "usd_est": 0.0}
+
+
 @router.get("/api/ops/agent/tenants")
 def ops_agent_tenants(x_ops_secret: Optional[str] = Header(default=None)) -> Any:
     gate = _require_ops(x_ops_secret)
     if gate is not None:
         return gate
-    usage_by_tenant = agent_ledger.tenants_seen()
+    # A postgres-store fault is left to surface as a 500: that is already an
+    # honest failure, and only the swallowed OSError produced a confident zero.
+    try:
+        usage_by_tenant = agent_ledger.tenants_seen(raise_on_read_error=True)
+        ledger_unreadable = False
+    except OSError:
+        usage_by_tenant = {}
+        ledger_unreadable = True
     states = (
         _agent_pg_store().tenant_states()
         if _agent_store_mode() == "postgres" else {}
     )
+    absent = _AGENT_USAGE_UNKNOWN if ledger_unreadable else _AGENT_USAGE_ZERO
     rows = []
     for tid in sorted(set(usage_by_tenant) | set(states)):
-        agg = usage_by_tenant.get(
-            tid, {"turns": 0, "cost_tokens": 0, "usd_est": 0.0})
+        agg = usage_by_tenant.get(tid, absent)
         state = states.get(tid) or agent_policy.load_tenant_state(tid)
         rows.append({"tenant_id": tid, "turns": agg["turns"],
                      "cost_tokens": agg["cost_tokens"], "usd_est": agg["usd_est"],
                      "agent_disabled": bool(state.get("agent_disabled")),
                      **({"revision": int(state["revision"])}
                         if "revision" in state else {})})
-    return with_envelope_fields({"tenants": rows})
+    return with_envelope_fields({"tenants": rows},
+                                degraded_mode=ledger_unreadable)
 
 
 @router.get("/api/ops/agent/sessions/{session_id}")

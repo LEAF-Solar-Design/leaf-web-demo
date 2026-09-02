@@ -75,6 +75,27 @@ def _aggregate_usage(tenant_id: str, um: Any) -> Dict[str, Any]:
     return um.aggregate_usage(tenant_id, _ledger_path())
 
 
+# The agent block when the agent ledger is present but UNREADABLE. Every number
+# is null rather than 0: a confident "$0.000 spent" over a failed read tells the
+# tenant they are idle at exactly the moment their spend is unknown, and the
+# frontend already renders null as an em dash (web/src/usage.js `finiteOrNull` /
+# `orDash`). `estimate_basis` carries the reason on the field the design doc
+# reserves for exactly this -- an additive VALUE, not a schema change
+# (docs/AGENT-SPINE-DESIGN.md §6.7). A MISSING ledger stays a real zero.
+_AGENT_UNKNOWN_BUCKET: Dict[str, Any] = {
+    "turns": None, "cost_tokens": None, "usd_est": None}
+
+
+def _agent_block(tenant_id: str) -> tuple[Dict[str, Any], bool]:
+    """This tenant's agent-spine usage, and whether the reading is degraded."""
+    try:
+        return agent_ledger.aggregate(tenant_id, raise_on_read_error=True), False
+    except OSError:
+        return ({"today": dict(_AGENT_UNKNOWN_BUCKET),
+                 "cycle": dict(_AGENT_UNKNOWN_BUCKET),
+                 "estimate_basis": "unavailable"}, True)
+
+
 @router.get("/api/usage")
 def usage(tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
     tenant_id = str(tenant)
@@ -85,6 +106,7 @@ def usage(tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
     enabled = cap is not None
     remaining = round(max(0.0, float(cap) - agg["total"]["usd_est"]), 6) if enabled else None
 
+    agent, agent_degraded = _agent_block(tenant_id)
     body = {
         "tenant_id": tenant_id,
         "today": agg["today"],
@@ -95,7 +117,8 @@ def usage(tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
         # from the agent's OWN ledger (data/agent_ledger.jsonl) — never the
         # broker attribution ledger, whose one-line-per-run invariant is
         # sacred. Self-metered estimates only (no balance API exists).
-        "agent": agent_ledger.aggregate(tenant_id),
+        "agent": agent,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-    return with_envelope_fields(deps.tenant_echo(body, tenant))
+    return with_envelope_fields(deps.tenant_echo(body, tenant),
+                                degraded_mode=agent_degraded)
