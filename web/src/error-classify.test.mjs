@@ -30,10 +30,14 @@ describe('classifyAgentError', () => {
 
   it('gives the too_large kind its own panel message', () => {
     // The kind is only useful if the panel says something different for it.
+    // Accept either shape: a `kind === 'too_large'` branch, or a `too_large:`
+    // entry in a { [kind]: message } lookup map — don't pin the panel's
+    // internal structure, only the guaranteed behavior.
     const source = readFileSync(
       new URL('./components/ConversePanel.jsx', import.meta.url), 'utf8')
-    const line = source.split('\n').find((l) => l.includes("kind === 'too_large'"))
-    assert.ok(line, 'ConversePanel has no branch for too_large')
+    const line = source.split('\n').find((l) =>
+      l.includes("kind === 'too_large'") || /\btoo_large\s*:/.test(l))
+    assert.ok(line, 'ConversePanel has no branch or map entry for too_large')
     assert.ok(!/Couldn.t reach the assistant/.test(line),
       'too_large must not reuse the outage copy')
   })
