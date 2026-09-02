@@ -8,7 +8,7 @@ from solver_adapters import autofill
 
 
 STAGING_SOLVER_REVISION = "760d3888018f762e0ab8dbe289dae8a2871216ea"
-STAGING_SOLVER_SHA256 = "a70f1e323da0f7a972c530d1101fc1eca82f2c58dc5b0141d5d98fba0f188cd2"
+STAGING_SOLVER_SHA256 = "c4cc323472b711415207d76db74a625ba3ef8a83a7b6e689d55d7854dddbb628"
 
 
 def test_trusted_manifest_is_limited_to_the_deployed_solver() -> None:
