@@ -1317,10 +1317,13 @@ def build_suites() -> List[Suite]:
         # and the end-to-end receipt carrying arrival_source). Measured on this
         # tree 2026-09-02: 61 passed, 117 subtests passed, 0 skipped. Every test
         # is an in-process fake-provider check with no DB, network or platform
-        # gate, so 61 is the count in every environment.
+        # gate, so the count is identical in every environment. Re-measured on
+        # this tree 2026-09-02 after admitting the provider's deploy_mode into
+        # the frozen requested-key set and closing it to {normal, prewarm}:
+        # 63 passed, 132 subtests passed, 0 skipped.
         Suite("platform-staging-convergence",
               "scripts test_platform_staging_convergence.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_platform_staging_convergence.py"), 61),
+              SCRIPTS_DIR, _py_pytest("test_platform_staging_convergence.py"), 63),
         Suite("production-web-release",
               "scripts test_production_web_release.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_production_web_release.py"), 17),
