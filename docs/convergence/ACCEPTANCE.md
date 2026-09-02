@@ -137,3 +137,37 @@ ON in production; every source-string pin that referenced App.jsx or old
 selectors has been rewritten as a behavior-based check (a deleted file must
 not leave a permanently-named implementation contract); bundle receipt at or
 below the W0 baseline; the rail and its flag module removed in the same PR.
+
+---
+
+## Version 2 — 2026-09-01 (W3 mount PR): two contract resolutions, appended
+
+1. **The rail's "build-twice bundle-shape test" (flag matrix, one-shell row)
+   resolves to a single-build shape receipt.** That sentence predates the
+   R-1 rail decision: the ratified rail is RUNTIME, so both shells ship in
+   ONE bundle and no build input varies. The receipt carrying the same
+   intent is `web/src/site/oneShellBundleShape.test.js`: one real vite
+   build, then proof on the emitted JS that the studio shell ships, the old
+   shell ships beside it, the `__LEAF_FLAGS`/`oneShell` runtime read
+   survives un-folded, and no `VITE_ONE_SHELL` ever appears. The rollback
+   test the same row requires is `web/e2e/local/one-shell-mount.spec.mjs`
+   (on → off restores the old shell; storage/URL/provider assertions).
+
+2. **W3's "mount the SHARED Viewer" lands as the portal-ground.** The
+   shared component (`web/src/components/Viewer.jsx`) is already the only
+   canvas both shells use; what W3 moves is WHERE the console's instance
+   renders: under the rail, SiteRoot's studio shell provides the z0 ground
+   node and App portals its own element into it (`site/studioGround.js`).
+   The console keeps full ownership of the drawing dataflow — props, ref,
+   version seat/undo/redo, pendingEdit — in both rail states, so the route
+   matrix and rollback are provable without a dataflow migration.
+   "Remove App's Viewer" (the W3 tail) remains: it means retiring the
+   console's INLINE render path and migrating drawing state onto the shared
+   controller, only after these receipts hold. The studio shell is
+   deliberately NOT `.stage-root` yet: landing.css re-pins the full dark
+   token set on that class; adoption happens with W4's console-mode token
+   re-pin, gated by check_token_repin key parity.
+
+The `?demo` dual-read row's "add a test the first time this wiring is
+touched" clause is satisfied by the mount spec's rail-ON rows (`?demo=1`
+boots console mode off `/try`, stays operator on `/try`).

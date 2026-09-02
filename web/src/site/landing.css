@@ -840,3 +840,51 @@
 /* usage ledger (showcase #2): the cap bar rides inside the trust row */
 .tc-usage-bar { display: inline-block; width: 72px; margin-left: 8px; vertical-align: middle; }
 .tc-trust-row b { font-variant-numeric: tabular-nums; }
+
+/* ================= W3 one-shell: the studio shell (console mode) =========
+   Host for scene 'app' under LEAF_ONE_SHELL_ENABLED (SiteRoot). Deliberately
+   NOT .stage-root: that class re-pins the full dark token set above and would
+   flip the console's ratified paper identity; the studio shell is a bare
+   fixed host whose subtree keeps :root tokens. Class adoption + the real
+   two-material re-pin is W4's token work.
+
+   The GROUND (z0) carries the console's own Viewer via portal (App.jsx).
+   Everything console floats above it; the pointer chain below punches a
+   hole down the ancestor stack so clicks in uncovered space reach the
+   drawing (pan/zoom/select), while every painted pane keeps its own
+   events. Known W3 trades, resolved in W4: the center scrollbar is not
+   draggable in this mode (wheel over cards still scrolls), and fit centers
+   on the viewport, not the old card window. */
+.studio-shell {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  background: #0a0a0a;
+}
+.studio-shell .studio-ground { position: absolute; inset: 0; z-index: 0; }
+.studio-ground .studio-ground-viewer { position: absolute; inset: 0; }
+/* The console floats over the ground. Transparent field: panes that paint
+   themselves stay opaque; the sheet + card chrome around the drawing window
+   go clear so the ground reads through. */
+.studio-shell .app { position: relative; z-index: 1; background: transparent; pointer-events: none; }
+.studio-shell .app > * { pointer-events: auto; }
+.studio-shell .center-col { pointer-events: none; }
+.studio-shell .center-col > * { pointer-events: auto; }
+.studio-shell main.center-scroll { background: none; pointer-events: none; }
+.studio-shell main.center-scroll > * { pointer-events: auto; }
+.studio-shell .workspace-card {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  pointer-events: none;
+}
+.studio-shell .workspace-card > * { pointer-events: auto; }
+/* The card's own chrome stays legible over the drawing. */
+.studio-shell .viewer-toolbar { background: var(--card); border: 1px solid var(--border); border-radius: 4px; }
+.studio-shell .viewer-wrap { background: transparent; pointer-events: none; }
+.studio-shell .viewer-wrap > * { pointer-events: auto; }
+/* Home text sits directly on the dark ground in this mode; landing.css is
+   the dark-surface file, so light literals are the local convention (the
+   token re-pin contract bans them from styles.css, not here). */
+.studio-shell :is(.kicker, .home-q, .hint) { color: rgba(240, 242, 240, .92); }
+.studio-shell .home-q em { color: rgba(240, 242, 240, .98); }

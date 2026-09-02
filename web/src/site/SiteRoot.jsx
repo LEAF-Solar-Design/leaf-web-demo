@@ -26,6 +26,8 @@ import React, { Suspense, useEffect, useRef, useState } from 'react'
 import { markInstant } from '../lib/instant.js'
 import { useRoute, navigate } from './router.js'
 import { activeCastForScene, sceneAllowsMarketingEject, sceneForPath } from './routeScene.js'
+import { ONE_SHELL_ENABLED } from '../lib/runtimeFlags.js'
+import { StudioGroundContext } from './studioGround.js'
 import StageScene from './StageScene.jsx'
 import { WorkspaceControllerProvider } from '../controllers/WorkspaceControllerProvider.jsx'
 import { consoleWorkspaceMount } from '../controllers/workspaceMount.js'
@@ -89,6 +91,11 @@ export default function SiteRoot() {
     window.location.replace(MARKETING_ORIGIN + target)
   }, [scene])
   const stageRef = useRef(null)
+  // The studio ground node (W3 one-shell). State, not a ref: App's portal
+  // must re-render when the node ATTACHES, and a ref mutation is invisible
+  // to React. null until the shell mounts — and null forever with the rail
+  // off, which IS the rollback contract (consumers render inline on null).
+  const [studioGround, setStudioGround] = useState(null)
 
   useEffect(() => {
     if (!authCallbackPending) return
@@ -188,15 +195,39 @@ export default function SiteRoot() {
       liveDemo={DEMO.liveDemo}
     >
       {scene === 'app' ? (
-        // The console ALONE — no stage mounted; App owns its own Viewer.
-        // Mount shape from workspaceMount.js (convergence bug c): the
-        // console/operator divergences are named decisions there, not two
-        // drifting literals.
-        <WorkspaceControllerProvider {...consoleWorkspaceMount()}>
-          <Suspense fallback={null}>
-            <App />
-          </Suspense>
-        </WorkspaceControllerProvider>
+        ONE_SHELL_ENABLED ? (
+          // W3 one-shell mount (docs/convergence/ACCEPTANCE.md): scene 'app'
+          // becomes STUDIO MODE CONSOLE. The .studio-shell host carries the
+          // ground layer at z0 — the node App portals its own shared <Viewer>
+          // into (see studioGround.js: the console keeps FULL ownership of
+          // the drawing dataflow in W3; only where the element renders moves).
+          // Deliberately NOT .stage-root: landing.css re-pins the full dark
+          // token set on that class, which would flip the console's ratified
+          // paper identity; class adoption is W4's token work.
+          // NOT StageScene/StageLayer/ToolCast: each would co-mount a second
+          // session/checkout controller, command bar, or operator provider —
+          // the exact duplicate-instance defects the ownership specs pin.
+          <div className="studio-shell" data-scene="app" data-mode="console">
+            <div className="studio-ground" ref={setStudioGround} aria-hidden={studioGround ? undefined : true} />
+            <StudioGroundContext.Provider value={studioGround}>
+              <WorkspaceControllerProvider {...consoleWorkspaceMount()}>
+                <Suspense fallback={null}>
+                  <App />
+                </Suspense>
+              </WorkspaceControllerProvider>
+            </StudioGroundContext.Provider>
+          </div>
+        ) : (
+          // ROLLBACK PATH, byte-for-byte today's shell: the console ALONE —
+          // no stage mounted; App owns its own Viewer inline. Mount shape
+          // from workspaceMount.js (convergence bug c): the console/operator
+          // divergences are named decisions there, not two drifting literals.
+          <WorkspaceControllerProvider {...consoleWorkspaceMount()}>
+            <Suspense fallback={null}>
+              <App />
+            </Suspense>
+          </WorkspaceControllerProvider>
+        )
       ) : scene === 'sheets' ? (
         <Suspense fallback={null}>
           <SheetsPage />
