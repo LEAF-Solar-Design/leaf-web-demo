@@ -135,7 +135,7 @@ function provenanceLine(t) {
 
 // `retryKey` (App's R ladder): the R keycap renders only while this row is the
 // ladder's active rung — a shown cap is never inert, never double-firing.
-export default function ToolsPanel({ tools, error, running, selectedTool, onRequestRun, onOpenTool, onReviseTool, onRetry, retryKey, subtitle, writeLocked, writeLockNote = null, writeEntitled = true }) {
+export default function ToolsPanel({ tools, error, running, selectedTool, onRequestRun, onOpenTool, onReviseTool, onRetry, retryKey, subtitle, writeLocked, writeLockNote = null, writeEntitled = true, runDisabled = false, runDisabledNote = null }) {
   const [openName, setOpenName] = useState(null)
   const [paramsByTool, setParamsByTool] = useState({})
 
@@ -199,7 +199,8 @@ export default function ToolsPanel({ tools, error, running, selectedTool, onRequ
                       never a second haloed primary in the pane */}
                   <button
                     className="chip-act tool-run"
-                    disabled={running || locked || entBlocked}
+                    disabled={running || locked || entBlocked || runDisabled}
+                    title={runDisabled ? runDisabledNote || undefined : undefined}
                     onClick={() => onRequestRun(t, params)}
                   >
                     {isRunningThis ? 'Running on Leaf…' : 'Review & run'}
@@ -214,16 +215,26 @@ export default function ToolsPanel({ tools, error, running, selectedTool, onRequ
                       Revise
                     </button>
                   )}
-                  {entBlocked && !locked && (
-                    <p className="lock-note">Your plan doesn’t include editing tools — upgrade to run write tools. Read tools still run.</p>
-                  )}
-                  {/* A disabled run chip with no reason is the gap this closes.
-                      The note is written mid-sentence for RoutePanel, so lift
-                      the first letter for this standalone line. */}
-                  {locked && writeLockNote && (
-                    <p className="lock-note">
-                      {writeLockNote.charAt(0).toUpperCase() + writeLockNote.slice(1)}
-                    </p>
+                  {/* runDisabled (no drawing open yet) is the more fundamental
+                      gate, so it wins over the write-entitlement notes below —
+                      those describe why a *tool* can't run, this describes why
+                      *nothing* can run yet. */}
+                  {runDisabled && runDisabledNote ? (
+                    <p className="lock-note">{runDisabledNote}</p>
+                  ) : (
+                    <>
+                      {entBlocked && !locked && (
+                        <p className="lock-note">Your plan doesn’t include editing tools — upgrade to run write tools. Read tools still run.</p>
+                      )}
+                      {/* A disabled run chip with no reason is the gap this closes.
+                          The note is written mid-sentence for RoutePanel, so lift
+                          the first letter for this standalone line. */}
+                      {locked && writeLockNote && (
+                        <p className="lock-note">
+                          {writeLockNote.charAt(0).toUpperCase() + writeLockNote.slice(1)}
+                        </p>
+                      )}
+                    </>
                   )}
                 </div>
               )}
