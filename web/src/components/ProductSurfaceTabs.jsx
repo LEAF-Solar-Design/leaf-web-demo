@@ -282,7 +282,18 @@ export function ProductSurfaceFrame({
           <SurfaceCapabilities surface={surface} catalog={catalog} catalogError={catalogError} />
         </div>
       </div>
-      {surface.id === 'browser' && <p className="tc-product-note">Project-scoped files, conversation, and browser composition are live on the shared identity and project rail.</p>}
+      {/* Present tense only when a workspace project is genuinely open (kind
+          === 'project'). PR #888 fixed the same contradiction one card up
+          (WorkspaceProjectSlot's drawing-only explainer) but left this note
+          unconditional, so a drawing-only screen claimed these were already
+          live one paragraph below saying they were not. */}
+      {surface.id === 'browser' && (
+        <p className="tc-product-note" data-testid="browser-composition-note">
+          {workspaceProject.kind === 'project'
+            ? 'Project-scoped files, conversation, and browser composition are live on the shared identity and project rail.'
+            : 'A workspace project adds project-scoped files, conversation, and browser composition on the shared identity and project rail.'}
+        </p>
+      )}
       {surface.id === 'solar' && <p className="tc-product-note">Solar work runs the shared tenant catalog’s stringing and placement families against the versioned LEAF solar template in the CAD workspace.</p>}
       {surface.id === 'ios' && <p className="tc-product-note">A mounted Apple grant and terminal ship-lane readiness receipt are required. This browser never asks for Apple credentials.</p>}
       {/* No "Open ..." buttons here (operator directive 2026-09-01): the TABS

@@ -290,6 +290,41 @@ describe('F-7: surface frames render the live tenant catalog', () => {
     expect(action.getAttribute('aria-describedby')).toBe(reason.id)
   })
 
+  // Regression guard: PR #888 fixed the header/rail/card contradiction over
+  // "is a project open" but left this note (just below the WorkspaceProjectSlot
+  // explainer) asserting project-scoped capabilities were already live no
+  // matter what the slot above it said. It must never claim "are live" while
+  // state.kind is 'drawing-only' or 'empty' — only while a project is open.
+  it.each([
+    ['empty', deriveWorkspaceProjectState({})],
+    ['drawing-only', drawingOnly],
+  ])('F-9: the browser note never claims project-scoped capabilities are live while state is %s', (_kind, state) => {
+    render(
+      <ProductSurfaceFrame
+        activeSurface="browser" states={states} catalog={catalogA} catalogError={null}
+        workspaceProject={state} onCreateProject={() => {}}
+      />,
+    )
+    const note = screen.getByTestId('browser-composition-note')
+    expect(note.textContent).not.toContain('are live')
+    expect(note.textContent).toContain('adds')
+  })
+
+  it('F-9: the browser note reads present-tense once a workspace project is open', () => {
+    const open = deriveWorkspaceProjectState({
+      openProjectId: 'p-1', projectName: 'Maple St retrofit', drawingName: 'rooftop_demo', orgId: 'org-1',
+    })
+    render(
+      <ProductSurfaceFrame
+        activeSurface="browser" states={states} catalog={catalogA} catalogError={null}
+        workspaceProject={open} onCreateProject={() => {}}
+      />,
+    )
+    const note = screen.getByTestId('browser-composition-note')
+    expect(note.textContent).toContain('are live')
+    expect(note.textContent).not.toContain('adds')
+  })
+
   it('F-9: rail and card agree — one derivation, never two answers on one screen', () => {
     render(
       <>
