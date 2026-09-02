@@ -5,6 +5,8 @@ import { track, setTourStep } from './telemetry.js'
 import { useStudioGround } from './site/studioGround.js'
 import SurfaceGrounds, { groundShowsDrawing } from './site/SurfaceGrounds.jsx'
 import { CockpitStatus, ViewCluster } from './site/DrawingCockpit.jsx'
+import DraftingRibbon from './site/DraftingRibbon.jsx'
+import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
 // The 3D viewer drags in `three`; loading it lazily (mirroring the auth.js
 // dynamic-import pattern) keeps first paint off the critical path.
 const Viewer = React.lazy(() => import('./components/Viewer.jsx'))
@@ -627,6 +629,7 @@ export default function App() {
     loadCatalog,
     upsertTool,
     toggleFamily,
+    setFamilyOpen,
     openTool: setOpenTool,
     resetTransient: resetCatalogTransient,
     openAgentMode,
@@ -2165,6 +2168,34 @@ export default function App() {
       window.history.replaceState(null, '', `${window.location.pathname}${next}${window.location.hash}`)
     } catch { /* URL sync is a convenience; state alone still switches the tab */ }
   }, [])
+  // W4c-V1: the nav rail's spine posture on drafting surfaces under the
+  // studio. IN-MEMORY on purpose: the rollback contract forbids new storage
+  // keys under the studio and stale ?params, so the posture resets per page
+  // load (accepted V1 cost). Default COLLAPSED on CAD/Solar — the drafting
+  // ribbon carries the tool set there and an expanded catalog beside it is
+  // exactly the duplication ACCEPTANCE deferred the ribbon to avoid.
+  const [navExpanded, setNavExpanded] = useState(false)
+  // <=980px the shell stacks into one column (styles.css) — a 44px spine
+  // there is a full-width sliver, so the posture neutralizes to expanded.
+  const [wideViewport, setWideViewport] = useState(() => {
+    try { return window.matchMedia('(min-width: 981px)').matches } catch { return true }
+  })
+  useEffect(() => {
+    let mq
+    try { mq = window.matchMedia('(min-width: 981px)') } catch { return undefined }
+    const sync = () => setWideViewport(mq.matches)
+    mq.addEventListener?.('change', sync)
+    return () => mq.removeEventListener?.('change', sync)
+  }, [])
+  const drafting = groundShowsDrawing(activeSurface)
+  const navSpine = !!studioGround && drafting && !navExpanded && wideViewport
+  // The per-application fold (operator directive): under the studio each
+  // tab's rail carries the families its application calls for; the old shell
+  // keeps the whole catalog byte-for-byte.
+  const railFamilies = useMemo(
+    () => (studioGround ? familiesForSurface(catalog.families, activeSurface) : catalog.families),
+    [studioGround, catalog.families, activeSurface],
+  )
   // iOS ship-lane readiness contract (leaf.ios-ship-surface.v1). Fetched only
   // with the surface flag baked on and a concrete project + revision; every
   // other case stays null, which IosSurface renders truthfully as
@@ -2301,10 +2332,56 @@ export default function App() {
         </div>
       </header>
 
-      <aside className="nav">
+      <aside className="nav" data-spine={navSpine ? 'true' : undefined}>
+        {/* W4c-V1 spine: on drafting surfaces under the studio the rail
+            boots as a 44px monogram strip — the ribbon carries the tool set
+            there, and an expanded catalog beside it is the duplication
+            ACCEPTANCE deferred the ribbon to avoid. A monogram click expands
+            the rail AND opens that family. Rail OFF: navSpine is false by
+            construction and this branch never renders. */}
+        {navSpine ? (
+          <div className="nav-spine" role="toolbar" aria-label="Tool rail" aria-orientation="vertical">
+            <button
+              type="button"
+              className="spine-btn spine-expand"
+              aria-label="Expand the tool rail"
+              title="Expand the tool rail"
+              onClick={() => setNavExpanded(true)}
+            >
+              »
+            </button>
+            {railFamilies.map((fam) => (
+              <button
+                key={fam.family_id}
+                type="button"
+                className="spine-btn"
+                aria-label={`Open ${fam.label} (${fam.capabilities.length} tools)`}
+                title={fam.label}
+                onClick={() => {
+                  setNavExpanded(true)
+                  setFamilyOpen(fam.family_id, true)
+                }}
+              >
+                {familyMonogram(fam.label)}
+              </button>
+            ))}
+          </div>
+        ) : (
+        <>
         <div className="fam-title">
-          Catalog · {catalog.families.length} famil{catalog.families.length === 1 ? 'y' : 'ies'} · {capCount} caps
+          Catalog · {railFamilies.length} famil{railFamilies.length === 1 ? 'y' : 'ies'} · {studioGround ? railFamilies.reduce((n, f) => n + f.capabilities.length, 0) : capCount} caps
           {catalog.source === 'flat-fallback' ? ' · flat' : ''}
+          {studioGround && drafting && (
+            <button
+              type="button"
+              className="spine-btn spine-collapse"
+              aria-label="Collapse the tool rail to a spine"
+              title="Collapse to spine"
+              onClick={() => setNavExpanded(false)}
+            >
+              «
+            </button>
+          )}
         </div>
         {catalogErr && !signedOut && (
           <>
@@ -2338,7 +2415,7 @@ export default function App() {
             <div className="skeleton-row" />
           </div>
         )}
-        {catalog.families.map((fam) => (
+        {railFamilies.map((fam) => (
           <Section
             key={fam.family_id}
             title={fam.label}
@@ -2387,6 +2464,8 @@ export default function App() {
             buildEntitled={canBuild}
           />
         </Section>
+        </>
+        )}
       </aside>
 
       <div className="center-col">
@@ -2516,6 +2595,19 @@ export default function App() {
                 Retry loading
               </button>
             </div>
+          )}
+          {/* W4c-V1: the drafting ribbon — the drawing window's command
+              strip, in the cockpit grammar. Studio-only (rail OFF renders
+              nothing); tools are the ACTIVE SURFACE's fold, wired through
+              the same run-decision path as the rail (source 'ribbon'). */}
+          {studioGround && drafting && (
+            <DraftingRibbon
+              families={railFamilies}
+              onRequestRun={onRequestCatalogRun}
+              running={running || !!previewing}
+              writeLocked={writeLocked}
+              writeEntitled={canRunWrite}
+            />
           )}
           <div className="viewer-toolbar">
             <div className="viewer-title">

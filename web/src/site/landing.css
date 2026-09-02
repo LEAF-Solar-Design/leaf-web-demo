@@ -1085,6 +1085,78 @@
   box-shadow: 0 16px 44px rgba(0, 0, 0, .5); backdrop-filter: blur(8px);
 }
 .studio-shell aside.nav { margin: 12px 0 12px 12px; }
+/* --- W4c-V1: the nav-rail spine + the drafting ribbon ------------------- */
+/* Spine posture: the rail column narrows to 44px while aside.nav carries
+   data-spine (drafting surfaces, studio only). :has() keeps the hook off
+   the pinned .app opening tag; scoped to the wide layout because <=980px
+   stacks the grid into one column (styles.css) and App neutralizes the
+   posture there anyway. Radius and the 12px inset stay (W4b chrome row). */
+@media (min-width: 981px) {
+  .studio-shell .app:has(aside.nav[data-spine]) { grid-template-columns: 44px 1fr 300px; }
+}
+.studio-shell aside.nav[data-spine] { padding: 8px 4px; overflow-y: auto; overflow-x: hidden; }
+.nav-spine { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+/* Explicit ink on the dark rail — inherited color never beats a declared
+   one (kimi, twice): 240,242,240 at .88 on the rail material clears 4.5:1. */
+.spine-btn {
+  width: 32px; height: 32px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  font: 600 11px var(--font-mono); letter-spacing: .04em;
+  color: rgba(240, 242, 240, .88);
+  background: rgba(240, 242, 240, .06);
+  border: 1px solid rgba(240, 242, 240, .16); border-radius: 6px;
+  cursor: pointer;
+}
+.spine-btn:hover { background: rgba(240, 242, 240, .12); }
+.spine-btn:focus-visible { outline: 2px solid #7fd6a6; outline-offset: 1px; }
+.spine-expand { font-size: 13px; }
+/* The collapse control inside the expanded rail head: same button, inline. */
+.fam-title .spine-collapse { float: right; width: 24px; height: 24px; font-size: 12px; }
+
+/* The ribbon: the drawing window's command strip. Glass paints on the
+   ::before — NEVER a backdrop-filter on the element itself: a filter makes
+   this strip the containing block for position:fixed descendants (the exact
+   trap that collapsed the Version-history drawer in the toolbar below). */
+.studio-shell .drafting-ribbon {
+  position: relative; z-index: 2;
+  display: flex; align-items: stretch; gap: 14px;
+  padding: 6px 10px; margin-bottom: 6px;
+  border: 1px solid rgba(240, 242, 240, .14); border-radius: 4px;
+  color: rgba(240, 242, 240, .92);
+  overflow-x: auto;
+}
+.studio-shell .drafting-ribbon::before {
+  content: ''; position: absolute; inset: 0; z-index: -1;
+  border-radius: inherit;
+  background: rgba(10, 10, 10, .78); backdrop-filter: blur(6px);
+}
+/* flex: none — a shrinking cluster lets its nowrap tools paint over the
+   neighbour (seen on the real 5-family catalog); the strip SCROLLS instead. */
+.ribbon-cluster { display: flex; flex-direction: column; gap: 4px; flex: 0 0 auto; }
+.ribbon-cluster + .ribbon-cluster { border-left: 1px solid rgba(240, 242, 240, .12); padding-left: 14px; }
+.ribbon-cluster-label {
+  font: 500 9.5px var(--font-mono); letter-spacing: .08em; text-transform: uppercase;
+  color: rgba(240, 242, 240, .55);
+  display: inline-flex; gap: 6px; align-items: baseline; white-space: nowrap;
+}
+.ribbon-monogram { color: rgba(127, 214, 166, .9); }
+.ribbon-cluster-tools { display: flex; gap: 4px; flex-wrap: nowrap; }
+.ribbon-tool {
+  padding: 3px 8px;
+  font: 500 11px var(--font-mono); white-space: nowrap;
+  color: rgba(240, 242, 240, .88);
+  background: rgba(240, 242, 240, .06);
+  border: 1px solid rgba(240, 242, 240, .16); border-radius: 4px;
+  cursor: pointer;
+}
+.ribbon-tool:hover:not(:disabled) { background: rgba(240, 242, 240, .12); }
+.ribbon-tool:focus-visible { outline: 2px solid #7fd6a6; outline-offset: 1px; }
+.ribbon-tool.write { border-color: rgba(212, 175, 110, .38); }
+/* Disabled keeps legible ink (3:1 floor for disabled affordances), and the
+   reason rides the title/aria-label from the component. */
+.ribbon-tool:disabled { color: rgba(240, 242, 240, .45); cursor: not-allowed; background: transparent; }
+.ribbon-empty { font: 400 11.5px var(--sans); color: rgba(240, 242, 240, .6); padding: 4px 2px; }
+/* ----------------------------------------------------------------------- */
 .studio-shell aside.rail { margin: 12px 12px 12px 0; }
 .studio-shell footer.foot-bar {
   background: rgba(10, 10, 10, .86); backdrop-filter: blur(8px);
