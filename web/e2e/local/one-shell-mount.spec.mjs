@@ -335,6 +335,53 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.locator('aside.nav[data-spine]')).toHaveCount(1)
   })
 
+  test('the right palette: dock hosts Layers + Selection, geometry from a real pick (W4c-V2)', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await requireLocalReady(request, test, API_BASE)
+    // A real closed polyline from the live session intake, picked via the
+    // viewer's DEV projection hook - the same gesture viewer-interaction
+    // proves rail-OFF; this row proves it lands in the DOCK under the rail.
+    const sessionResponse = await request.get(`${API_BASE}/api/session?dwg=rooftop_demo`, {
+      headers: { 'X-Tenant-Id': 'demo-tenant' },
+    })
+    expect(sessionResponse.status()).toBe(200)
+    const intake = (await sessionResponse.json()).intake
+    const target = intake.polylines.find((entity) => (
+      entity.handle && entity.closed === true && Array.isArray(entity.pts) && entity.pts.length >= 3
+    ))
+    expect(target, 'the sample drawing must carry a closed polyline').toBeTruthy()
+
+    await setRail(page, '1')
+    await page.goto('/app')
+    await expect(page.locator('.studio-ground .viewer-canvas canvas')).toHaveCount(1, { timeout: 30_000 })
+
+    const dock = page.getByTestId('properties-dock')
+    await expect(dock).toBeVisible()
+    await expect(dock.getByRole('button', { name: /Layers/ })).toBeVisible()
+    // Empty selection: the readout's own hint renders INSIDE the dock (the
+    // dock hosts the same element, never a re-implementation).
+    await expect(dock.getByText('Click an entity to select it')).toBeVisible({ timeout: 20_000 })
+
+    const centroid = target.pts.reduce((acc, pt) => [acc[0] + pt[0] / target.pts.length, acc[1] + pt[1] / target.pts.length], [0, 0])
+    const clientPoint = await page.evaluate(([wx, wy]) => (
+      document.querySelector('.studio-ground .viewer-canvas').__cadviewer.project(wx, wy)
+    ), centroid)
+    await page.mouse.click(clientPoint.x, clientPoint.y)
+
+    await expect(dock.locator('.selection-readout')).toContainText('Polyline', { timeout: 10_000 })
+    await expect(dock.locator('.selection-readout')).toContainText(target.handle)
+    const geometry = dock.getByTestId('dock-geometry')
+    await expect(geometry).toContainText('Vertices')
+    await expect(geometry).toContainText('Perimeter')
+    await expect(geometry).toContainText('Area')
+    // Fail-closed formatting: the rows never render NaN or -0.00.
+    const text = await geometry.textContent()
+    expect(text).not.toMatch(/NaN|-0\.00/)
+    // Deselect clears the geometry with the selection (scope-reset shape).
+    await dock.getByRole('button', { name: 'Deselect' }).click()
+    await expect(dock.getByTestId('dock-geometry')).toHaveCount(0)
+  })
+
   test('Esc ladder, history rung under the rail: an open drawer owns Esc, the route never moves', async ({ page, request }) => {
     // W4c-0 debt (ACCEPTANCE "Esc LADDER rungs"): the terminal row above
     // proves Esc never LEAVES /app; this rung proves an owned surface
@@ -407,6 +454,7 @@ test.describe('route matrix, rail OFF + rollback', () => {
     await expect(page.locator('aside.nav[data-spine]')).toHaveCount(0)
     await expect(page.locator('.nav-spine')).toHaveCount(0)
     await expect(page.locator('.spine-collapse')).toHaveCount(0)
+    await expect(page.getByTestId('properties-dock')).toHaveCount(0)
     await page.getByRole('tab', { name: 'Browser' }).click()
     await expect(page.locator('[data-ground]')).toHaveCount(0)
     await expect(page.locator('#product-surface-panel')).toHaveCount(1)

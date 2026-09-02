@@ -6,7 +6,9 @@ import { useStudioGround } from './site/studioGround.js'
 import SurfaceGrounds, { groundShowsDrawing } from './site/SurfaceGrounds.jsx'
 import { CockpitStatus, ViewCluster } from './site/DrawingCockpit.jsx'
 import DraftingRibbon from './site/DraftingRibbon.jsx'
+import PropertiesDock from './site/PropertiesDock.jsx'
 import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
+import { entityGeometry } from './lib/entityMetrics.js'
 // The 3D viewer drags in `three`; loading it lazily (mirroring the auth.js
 // dynamic-import pattern) keeps first paint off the critical path.
 const Viewer = React.lazy(() => import('./components/Viewer.jsx'))
@@ -1085,6 +1087,19 @@ export default function App() {
   const selection = useMemo(() => selectEntity(shown, selectedHandle, {
     onUnresolved: (handle) => ({ handle, kind: 'entity', layer: null }),
   }), [selectedHandle, shown])
+  // W4c-V2: the raw intake entity behind the selection, resolved in place -
+  // selectEntity deliberately drops geometry and its descriptor shape is
+  // pinned by exact-shape tests, so the dock derives from the intake here.
+  // Scope-reset for free: a drawing/tenant switch clears selectedHandle and
+  // replaces `shown`, so no stale geometry can survive the switch.
+  const selectedEntityGeometry = useMemo(() => {
+    if (!selectedHandle || !shown) return null
+    const entity = (shown.polylines || []).find((e) => e.handle === selectedHandle)
+      || (shown.inserts || []).find((e) => e.handle === selectedHandle)
+      || (shown.faces3d || []).find((e) => e.handle === selectedHandle)
+    if (!entity) return null
+    return entityGeometry(entity, selection?.kind)
+  }, [shown, selectedHandle, selection])
 
   // Swap the viewer + panels to a drawing version (§11). The completed event
   // ("Version 2 created" / "Reverted to version 1") fires the NT2 toast.
@@ -2831,18 +2846,37 @@ export default function App() {
                 ? createPortal(<div className="studio-ground-viewer" hidden={!groundShowsDrawing(activeSurface)}>{viewerEl}</div>, studioGround)
                 : viewerEl
             })()}
-            {shown && (
-              <Legend
-                layers={shown.layers}
-                counts={layerCounts}
-                colorForLayer={colorForLayer}
-                visibleLayers={visibleLayers}
-                onToggle={toggleLayer}
-              />
-            )}
-            {intake && (
-              <SelectionReadout selection={selection} onDeselect={() => setSelectedHandle(null)} />
-            )}
+            {/* W4c-V2: under the studio the Legend and the readout live in
+                the right palette (the SAME elements - one source of truth
+                for every field); rail OFF renders them inline byte-for-byte.
+                Geometry is client-derived from the intake entity in place. */}
+            {(() => {
+              const legendEl = shown ? (
+                <Legend
+                  layers={shown.layers}
+                  counts={layerCounts}
+                  colorForLayer={colorForLayer}
+                  visibleLayers={visibleLayers}
+                  onToggle={toggleLayer}
+                />
+              ) : null
+              const readoutEl = intake ? (
+                <SelectionReadout selection={selection} onDeselect={() => setSelectedHandle(null)} />
+              ) : null
+              // wideViewport: <=980px stacks the console; the dock's
+              // floating placement has no home there, so the inline arm
+              // (today's placement) renders instead of hiding the tools.
+              if (studioGround && drafting && wideViewport && (legendEl || readoutEl)) {
+                return (
+                  <PropertiesDock
+                    layers={legendEl}
+                    selection={readoutEl}
+                    geometry={selectedEntityGeometry}
+                  />
+                )
+              }
+              return <>{legendEl}{readoutEl}</>
+            })()}
             {/* W4b cockpit: view snaps on the drawing (studio only). */}
             {studioGround && intake && groundShowsDrawing(activeSurface) && (
               <ViewCluster viewerRef={viewerRef} />

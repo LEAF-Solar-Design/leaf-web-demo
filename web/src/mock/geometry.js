@@ -1,21 +1,15 @@
 // Small geometry helpers shared by the mock engine. All operate on the
 // intake §1 polyline shape ({ layer, closed, pts:[[x,y,z]...], handle }).
+//
+// polyArea moved to lib/entityMetrics.js (W4c-V2: the properties dock
+// renders the same shoelace the mock engine trusts) and is re-exported so
+// every existing mock import keeps working.
+export { polyArea } from '../lib/entityMetrics.js'
 
 export function centroid(pts) {
   let sx = 0, sy = 0
   for (const p of pts) { sx += p[0]; sy += p[1] }
   return [sx / pts.length, sy / pts.length]
-}
-
-// Shoelace area (absolute), in drawing-unit^2.
-export function polyArea(pts) {
-  let a = 0
-  for (let i = 0; i < pts.length; i++) {
-    const [x1, y1] = pts[i]
-    const [x2, y2] = pts[(i + 1) % pts.length]
-    a += x1 * y2 - x2 * y1
-  }
-  return Math.abs(a) / 2
 }
 
 export function bounds(polylines) {
