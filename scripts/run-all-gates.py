@@ -1413,10 +1413,9 @@ def build_suites() -> List[Suite]:
         # machine-gated files now skip (see allowed_vitest_skips below). Every
         # OTHER case is still literal and unconditional, no parametrize, no
         # platform branch, and a collection/import failure makes vitest FAIL
-        # rather than report a lower count. So 672 is the exact executed count
-        # on any machine WITHOUT the local wasm artifact -- CI and a plain dev
-        # box alike -- and a machine that opted in with CAD_ENGINE_REAL_WASM=1
-        # executes all 685, above the floor, where the drift note is harmless.
+        # rather than report a lower count. At the 6ab65b5f snapshot, 672 was
+        # the exact executed count without the local wasm artifact. A machine
+        # that opted in with CAD_ENGINE_REAL_WASM=1 executed 685 there.
         # Evidence, 2026-09-02, all from gate-shard-2, which is where the
         # packer puts this suite. Five CI runs track the growth monotonically
         # across five merges, and the two trees measured locally match their
@@ -1431,9 +1430,11 @@ def build_suites() -> List[Suite]:
         # `web npm run test:unit (vitest)  >=180  660  PASS  13 skipped`; the
         # local run there agreed exactly at 673 collected / 13 skipped / 660
         # executed. After the right-palette tests landed and the retired
-        # single-purpose client-shell tests left, the integrated tree is 698
-        # collected / 13 skipped / 685 executed across 78 files, measured by
-        # `npm run test:unit` on 2026-09-02. The 13 skips are the same two
+        # single-purpose client-shell tests left, the floor advances again:
+        # the integrated tree is 698 collected / 13 skipped / 685 executed
+        # across 78 files without the local wasm artifact, measured by
+        # `npm run test:unit` on 2026-09-02. An opted-in machine executes all
+        # 698, above the floor. The 13 skips are the same two
         # allow-listed files in both
         # places: CI's PASS carries no "skip details incomplete" and no
         # "non-allowlisted vitest skip" note, which is this runner asserting
