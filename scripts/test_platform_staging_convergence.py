@@ -366,6 +366,7 @@ def service_receipt(
         "configuration_delta": missing(),
         "configuration_task_definition": predecessor if with_identity else "not_produced",
         "convergence_id": "not_produced",
+        "deploy_mode": "normal",
         "consumer_contract": contract_slot,
         "deploy_strategy": "direct",
         "digest_aware_evidence": missing(),
@@ -632,6 +633,9 @@ def fixture() -> FakeProvider:
     provider.json_values[(tf, CHILD_WINDOW_EXACT_ENDPOINT)] = child_list
     provider.json_values[(tf, CHILD_WINDOW_OPEN_ENDPOINT)] = copy.deepcopy(child_list)
     return provider
+
+
+_ABSENT = object()
 
 
 def replace_receipt(provider: FakeProvider, run_id: int, mutate) -> None:
@@ -2059,6 +2063,69 @@ class ConvergenceFinalizerTests(unittest.TestCase):
                 invalid["receipt_sha256"] = hashlib.sha256(canonical(invalid)).hexdigest()
                 with self.assertRaisesRegex(subject.ContractError, "SERVICE_RECEIPT_REQUEST_INVALID"):
                     subject._service_receipt(invalid)
+
+    def test_service_receipt_requires_and_closes_deploy_mode(self) -> None:
+        # Regression: the frozen requested_keys set omitted deploy_mode while
+        # the tf producer had been emitting it, so _exact fail-closed on EVERY
+        # live receipt and no service deploy could be validated (finalize run
+        # 33691444128, ERROR:SERVICE_RECEIPT_REQUEST_INVALID). Admitting the
+        # key is only half the fix: the tf workflow declares deploy_mode
+        # `type: choice` over exactly {normal, prewarm} and re-gates it with
+        # `case "$DEPLOY_MODE" in normal|prewarm)`, so the verifier mirrors
+        # that closed set rather than accepting free text into a deliberately
+        # exact-match contract.
+        def sealed(**overrides: object) -> dict:
+            receipt = service_receipt(
+                "app",
+                306,
+                predecessor="leaf-platform-app:2",
+                terminal_td="leaf-platform-app:3",
+                with_identity=True,
+            )
+            for key, value in overrides.items():
+                if value is _ABSENT:
+                    del receipt["requested"][key]
+                else:
+                    receipt["requested"][key] = value
+            receipt["receipt_sha256"] = ""
+            receipt["receipt_sha256"] = hashlib.sha256(canonical(receipt)).hexdigest()
+            return receipt
+
+        # Both real provider options parse. prewarm must not fail closed here:
+        # a by-design prewarm run sharing the scan window would otherwise turn
+        # into a hard convergence outage at parse time.
+        for mode in ("normal", "prewarm"):
+            with self.subTest(mode=mode):
+                receipt = sealed(deploy_mode=mode)
+                self.assertEqual(subject._service_receipt(receipt), receipt)
+
+        # A receipt that omits the key is rejected, so the verifier can never
+        # silently drift back to a producer that stopped emitting it.
+        with self.assertRaisesRegex(subject.ContractError, "SERVICE_RECEIPT_REQUEST_INVALID"):
+            subject._service_receipt(sealed(deploy_mode=_ABSENT))
+
+        # Well-formed strings outside the provider's option list are rejected
+        # by this gate specifically, so admitting the key did not turn a frozen
+        # contract into a free-text field.
+        for value in ("NORMAL", "normal ", " normal", "canary", "prewarm,normal", "deploy"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(subject.ContractError, "SERVICE_RECEIPT_REQUEST_INVALID"):
+                    subject._service_receipt(sealed(deploy_mode=value))
+
+        # Wrong-typed and empty values fail CLOSED with a contract reason. The
+        # unhashable cases would raise a bare TypeError out of a `not in <set>`
+        # membership test, crashing the finalizer instead of naming a reason.
+        for value in ("", True, None, 1, 1.5, ["normal"], {"normal": True}):
+            with self.subTest(value=value):
+                with self.assertRaises(subject.ContractError):
+                    subject._service_receipt(sealed(deploy_mode=value))
+
+    def test_service_receipt_deploy_mode_matches_provider_declared_set(self) -> None:
+        # The verifier's closed set is a MIRROR of the provider's, not an
+        # independent opinion. If tf adds a third mode, this is the line that
+        # should be updated deliberately alongside the convergence semantics
+        # for that mode, rather than the set quietly widening.
+        self.assertEqual(subject.SERVICE_DEPLOY_MODES, {"normal", "prewarm"})
 
     def test_failed_step_must_match_jobs_api(self) -> None:
         provider = fixture()

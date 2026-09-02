@@ -70,6 +70,14 @@ TERMINAL_CONCLUSIONS = {
     "startup_failure",
 }
 SERVICE_RESULT_LABELS = {"success", "failure", "cancelled", "skipped"}
+# The provider's deploy_mode is a CLOSED set, not free text: the tf workflow
+# declares it `type: choice` with exactly these options (blob
+# 1f71f7fa53915754253549400021203cefc221c0, `deploy_mode:` input) and its
+# resolve step re-gates them with `case "$DEPLOY_MODE" in normal|prewarm)`.
+# `prewarm` warms the IDLE colour and STOPS before the flip, so a prewarm
+# receipt is admitted as a well-formed receipt but is not, on its own,
+# evidence that a release converged.
+SERVICE_DEPLOY_MODES = {"normal", "prewarm"}
 SUPPORTED_CHILD_CONCLUSIONS = {"success", "failure"}
 PREFLIGHT_STATES = {"not_required", "passed", "failed"}
 MUTATION_STATES = {"not_started", "candidate_active", "predecessor_restored"}
@@ -1107,7 +1115,7 @@ def _service_receipt(value: Any) -> dict[str, Any]:
     _positive(provider["run_attempt"], "SERVICE_RECEIPT_PROVIDER_INVALID")
     requested_keys = {
         "allow_non_forward_image", "app_deploy_intent", "configuration_delta",
-        "configuration_task_definition", "convergence_id", "deploy_strategy",
+        "configuration_task_definition", "convergence_id", "deploy_mode", "deploy_strategy",
         "consumer_contract", "digest_aware_evidence", "digest_aware_reconcile",
         "expected_task_definition",
         "hold_seconds", "image_tag", "p4a_session_identity_cutover",
@@ -1117,6 +1125,11 @@ def _service_receipt(value: Any) -> dict[str, Any]:
     }
     requested = _exact(receipt["requested"], requested_keys, "SERVICE_RECEIPT_REQUEST_INVALID")
     if requested["service"] not in SERVICE_ORDER:
+        raise ContractError("SERVICE_RECEIPT_REQUEST_INVALID")
+    # isinstance first: `x not in <set>` raises TypeError on an unhashable
+    # provider value, and this gate must fail CLOSED with a reason code
+    # rather than crash the finalizer with a traceback.
+    if not isinstance(requested["deploy_mode"], str) or requested["deploy_mode"] not in SERVICE_DEPLOY_MODES:
         raise ContractError("SERVICE_RECEIPT_REQUEST_INVALID")
     if requested["app_deploy_intent"] not in {"forward", "configuration", "authority-bootstrap", "rollback"}:
         raise ContractError("SERVICE_RECEIPT_REQUEST_INVALID")
