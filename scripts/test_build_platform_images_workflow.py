@@ -3922,7 +3922,12 @@ def check_docs_noop_filter(text: str) -> None:
         # are REMOVED (the superseder's run list, run record and artifacts,
         # the repository artifact lookup, and the second tip read). The
         # dispatch input set is byte-identical.
-        "45e98c83793c91bbb7b6bcdbd92186f33ca20a0a97dee731594bc141b2df2ce1"
+        # Hash updated 2026-09-02 after two exact child deployments landed
+        # but the aggregate v3 receipt failed on a later mutable-main read.
+        # That post-settlement read is removed. The pre-dispatch and
+        # eviction re-dispatch tip guards remain. No dispatch site, input,
+        # token, credential, endpoint class, or live mutation was added.
+        "7f87bcd986fda9406c7ea946c6adf7656c70d31d5b7d5abc787bddc22a385575"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -4835,11 +4840,11 @@ def check_staging_relay_convergence(text: str) -> None:
     assert gate_call_at < dispatch_loop_at < watch_loop_at, (
         "every leg must be dispatched before any leg is watched; interleaving "
         "them is the abandoned-leg defect")
-    assert code.count("branches/main") == 2, (
-        "exactly two tip reads: require_tip_current's own read and the freeze "
-        "check before the v3 convergence receipt. A THIRD, per-leg read would "
-        "mean the two legs no longer share one observation; the re-read that "
-        "used to guard a superseder classification went with the classifier")
+    assert code.count("branches/main") == 1, (
+        "exactly one tip read: require_tip_current freezes the source before "
+        "both dispatches. A later read must not veto a receipt after both "
+        "exact child deployments settled; per-leg reads would also mean the "
+        "two legs no longer share one observation")
 
     # The tip read is the FIRST statement of the gate and is NEVER gated.
     # sol-critic RED round 2 on PR #497 broke the tempting alternative: gating
@@ -5349,10 +5354,11 @@ set -uo pipefail
 
 args=("$@")
 joined="$*"
+url="${args[1]:-}"
 
 case "${args[0]}" in
   api)
-    case "${args[1]}" in
+    case "$url" in
       *"/branches/main"*)
         # Serve the built sha for the first $FAKE_TIP_OK_READS tip checks,
         # then a newer one, so a scenario can move main BETWEEN services.
@@ -5364,6 +5370,22 @@ case "${args[0]}" in
           printf '%s\n' "moved01"
         fi
         ;;
+      *"/actions/workflows/"*"/runs?branch=main"*)
+        [ "${FAKE_V3:-0}" = "1" ] || { echo "fake gh: unexpected contract read" >&2; exit 9; }
+        printf '{"id":99,"head_sha":"%s"}\n' "$FAKE_TF_HEAD"
+        ;;
+      *"/actions/runs/99")
+        [ "${FAKE_V3:-0}" = "1" ] || { echo "fake gh: unexpected contract run" >&2; exit 9; }
+        printf '%s\n' '{"status":"completed","conclusion":"success"}'
+        ;;
+      *"/actions/runs/2000/artifacts?per_page=100")
+        printf '{"total_count":1,"artifacts":[{"id":3000,"name":"staging-surface-result-%s-1-web","expired":false}]}\n' "$FAKE_RELEASE_SOURCE"
+        ;;
+      *"/actions/runs/2001/artifacts?per_page=100")
+        printf '{"total_count":1,"artifacts":[{"id":3001,"name":"staging-surface-result-%s-1-app","expired":false}]}\n' "$FAKE_RELEASE_SOURCE"
+        ;;
+      *"/actions/artifacts/3000/zip") cat "$FAKE_WEB_RESULT_ZIP" ;;
+      *"/actions/artifacts/3001/zip") cat "$FAKE_APP_RESULT_ZIP" ;;
       *"/compare/"*)      printf '%s\n' "$FAKE_RELATION" ;;
       *"/jobs"*)          printf '%s\n' "1" ;;
       # No receipt or classifier endpoints (2026-09-02): the moved-tip arm
@@ -5398,10 +5420,11 @@ esac
 
 def _rehearse_relay_dispatch(*, image_tag="prod-9999999", web_title, app_title,
                              relation="ahead", main_sha="deadbee",
-                             history_fails=False, tip_ok_reads=99):
+                             history_fails=False, tip_ok_reads=99, v3=False):
     """Execute the relay's ACTUAL dispatch script (extracted from the parsed
-    YAML, never re-typed here) against a fake `gh`, and return
-    (returncode, stdout, [(service, image_tag)] in dispatch order).
+    YAML, never re-typed here) against a fake `gh`. Legacy rehearsals return
+    (returncode, stdout, [(service, image_tag)] in dispatch order). A v3
+    rehearsal also returns its parsed convergence receipt.
 
     The static pins prove the script SAYS the right thing. This proves it DOES
     it: which services it deploys, in which order, onto which tag.
@@ -5419,9 +5442,16 @@ def _rehearse_relay_dispatch(*, image_tag="prod-9999999", web_title, app_title,
         for rid, title in ((10, web_title), (11, app_title))
         if title
     ]
+    build_sha = "d" * 40 if v3 else "deadbee"
+    if v3 and main_sha == "deadbee":
+        main_sha = build_sha
     pending = [
         {"databaseId": 2000 + i,
-         "displayTitle": f"Deploy leaf-platform staging {svc} ({image_tag})"}
+         "displayTitle": (
+             f"Deploy leaf-platform staging {svc} ({build_sha}-1-{svc})"
+             if v3
+             else f"Deploy leaf-platform staging {svc} ({image_tag})"
+         )}
         for i, svc in enumerate(("web", "app"))
     ]
 
@@ -5439,6 +5469,48 @@ def _rehearse_relay_dispatch(*, image_tag="prod-9999999", web_title, app_title,
         log.write_text("", encoding="utf-8")
         tip_file = tmp / "tip"
         tip_file.write_text(str(tip_ok_reads), encoding="utf-8")
+        receipt = None
+        web_result_zip = tmp / "web-result.zip"
+        app_result_zip = tmp / "app-result.zip"
+        if v3:
+            digests = {
+                "web": "sha256:" + "1" * 64,
+                "app": "sha256:" + "2" * 64,
+            }
+            supply = {
+                "schema": "leaf.staging-supply-set.v3",
+                "source_revision": build_sha,
+                "services": {
+                    service: {
+                        "immutable_lookup_tag": (
+                            "surface-v1-" + digest.removeprefix("sha256:")
+                        ),
+                        "image_digest": digest,
+                    }
+                    for service, digest in digests.items()
+                },
+            }
+            (tmp / "staging-supply-set.json").write_text(
+                json.dumps(supply), encoding="utf-8")
+            for service, artifact, digest in (
+                ("web", web_result_zip, digests["web"]),
+                ("app", app_result_zip, digests["app"]),
+            ):
+                surface_result = {
+                    "aws_mutation_count": 1,
+                    "candidate_image_digest": digest,
+                    "convergence_id": f"{build_sha}-1-{service}",
+                    "outcome": "deployed",
+                    "release_source_revision": build_sha,
+                    "schema": "leaf.staging-surface-result.v1",
+                    "service": service,
+                    "surface_receipt_sha256": "c" * 64,
+                    "terminal_image_digest": digest,
+                    "terraform_workflow_blob": "b" * 40,
+                }
+                with zipfile.ZipFile(artifact, "w") as archive:
+                    archive.writestr(
+                        "surface-result.json", json.dumps(surface_result))
         script = tmp / "dispatch.sh"
         script.write_text(
             _relay_deploy_step(relay["jobs"]["dispatch"])["run"],
@@ -5450,7 +5522,7 @@ def _rehearse_relay_dispatch(*, image_tag="prod-9999999", web_title, app_title,
             INFRA_REPO="LEAF-Solar-Design/leaf-automation-aws-terraform",
             DEPLOY_WORKFLOW="deploy-leaf-platform-staging.yml",
             GITHUB_REPOSITORY="LEAF-Solar-Design/leaf-web-demo",
-            BUILD_HEAD_SHA="deadbee",
+            BUILD_HEAD_SHA=build_sha,
             # Job-level env in the real workflow; the receipt payload and the
             # publish step name are both keyed on the build attempt, and the
             # `converged=true` line writes to GITHUB_OUTPUT. Unset, `set -u`
@@ -5469,6 +5541,32 @@ def _rehearse_relay_dispatch(*, image_tag="prod-9999999", web_title, app_title,
             FAKE_PENDING=json.dumps(pending),
             DISPATCH_LOG=str(log),
         )
+        if v3:
+            env.update(
+                FAKE_V3="1",
+                FAKE_TF_HEAD="a" * 40,
+                FAKE_RELEASE_SOURCE=build_sha,
+                FAKE_WEB_RESULT_ZIP=str(web_result_zip),
+                FAKE_APP_RESULT_ZIP=str(app_result_zip),
+                SUPPLY_SCHEMA="leaf.staging-supply-set.v3",
+                SUPPLY_SHA256="f" * 64,
+                SUPPLY_ARTIFACT_ID="7",
+                SUPPLY_ARTIFACT_NAME=(
+                    f"staging-supply-set-{build_sha}-attempt-1"),
+                SUPPLY_EVIDENCE_B64="ZXZpZGVuY2U",
+                RELEASE_SOURCE=build_sha,
+                RELEASE_ATTEMPT="1",
+                DIGEST_AWARE_CONVERGENCE_ENABLED="true",
+                CONSUMER_CONTRACT_B64="Y29udHJhY3Q",
+                TF_CONTRACT_HEAD="a" * 40,
+                TF_CONSUMER_BLOB="b" * 40,
+                TF_CONTRACT_RUN_ID="99",
+                CONSUMER_CONTRACT_WORKFLOW=(
+                    "publish-leaf-platform-staging-consumer-contract.yml"),
+                CONSUMER_CONTRACT_WORKFLOW_PATH=(
+                    ".github/workflows/"
+                    "publish-leaf-platform-staging-consumer-contract.yml"),
+            )
         # cwd=tmp so the relay's own file writes (the staging-converged.json
         # receipt payload, surface-results/) land in the throwaway dir
         # rather than leaking into wherever pytest was invoked.
@@ -5484,6 +5582,11 @@ def _rehearse_relay_dispatch(*, image_tag="prod-9999999", web_title, app_title,
             svc = next(p for p in parts if p.startswith("service="))
             tag = next(p for p in parts if p.startswith("image_tag="))
             deployed.append((svc.split("=", 1)[1], tag.split("=", 1)[1]))
+        receipt_path = tmp / "staging-converged.json"
+        if receipt_path.exists():
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        if v3:
+            return proc.returncode, proc.stdout + proc.stderr, deployed, receipt
         return proc.returncode, proc.stdout, deployed
 
 
@@ -5635,6 +5738,37 @@ def test_staging_relay_orders_the_starved_service_first() -> None:
     assert "standing down" in out
 
     print("staging relay need-first ordering rehearsal: PASS")
+
+
+def test_v3_relay_publishes_frozen_receipt_after_main_advances() -> None:
+    """A settled immutable relay is not invalidated by later main movement.
+
+    The fake main endpoint returns the frozen build on its first read and a
+    different tip on every later read. Both v3 child runs then return exact
+    terminal surface artifacts. Any post-settlement tip gate therefore turns
+    this rehearsal red before the receipt can exist.
+    """
+    rc, out, deployed, receipt = _rehearse_relay_dispatch(
+        web_title="",
+        app_title="",
+        tip_ok_reads=1,
+        v3=True,
+    )
+    assert rc == 0, out
+    assert deployed == [
+        ("web", "surface-v1-" + "1" * 64),
+        ("app", "surface-v1-" + "2" * 64),
+    ], (out, deployed)
+    assert receipt is not None, out
+    assert receipt["schema"] == "leaf.staging-converged.v2"
+    assert receipt["release_source_revision"] == "d" * 40
+    assert receipt["automatic_surfaces"] == ["web", "app"]
+    assert set(receipt["surface_results"]) == {"web", "app"}
+    assert all(
+        result["outcome"] == "deployed"
+        for result in receipt["surface_results"].values()
+    )
+    assert out.count("Dispatched ") == 2, out
 
 
 

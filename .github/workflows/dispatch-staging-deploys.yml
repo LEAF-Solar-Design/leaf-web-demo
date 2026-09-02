@@ -1880,12 +1880,10 @@ jobs:
           # build record alone. The services array records the ACTUAL order
           # this relay deployed, not a hardcoded pair.
           if [ "$SUPPLY_SCHEMA" = "leaf.staging-supply-set.v3" ]; then
-            FINAL_MAIN=$(GH_TOKEN="$HOME_TOKEN" gh api \
-              "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
-            [ "$FINAL_MAIN" = "$BUILD_HEAD_SHA" ] || {
-              echo "::error::main moved to $FINAL_MAIN before the v3 convergence receipt was frozen."
-              exit 1
-            }
+            # The source was frozen before dispatch, and both exact surface
+            # results below are terminal evidence for that source. A later
+            # main commit cannot invalidate those settled child deployments;
+            # the next relay owns that newer source independently.
             require_contract_still_latest
             jq -s \
               --slurpfile supply staging-supply-set.json \
