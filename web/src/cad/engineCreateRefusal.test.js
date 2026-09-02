@@ -65,6 +65,9 @@ const SCRIPT = [
   '}',
   'out.edit = await handleMessage({ type: "applyEdit", op: "delete", payload: { entityId: "9" } }, engine)',
   'out.unknown = await handleMessage({ type: "applyEdit", op: "delete", payload: { entityId: "1" } }, engine)',
+  'const unsafeDoc = { editableEntities: () => [{ index: 0, handle: 9007199254740992, type: "LINE", layer: "0", closed: false, editable: true, vertices: [[0,0],[1,1]] }]}',
+  'const unsafeEngine = { parseDxf: () => unsafeDoc, writeDxf: () => new Uint8Array([48, 10]) }',
+  'out.unsafe = await handleMessage({ type: "loadDocument", documentId: "unsafe.dxf", bytes: new Uint8Array([48]) }, unsafeEngine)',
   'process.stdout.write(JSON.stringify({ loaded: loaded, out, calls }))',
 ].join('\n')
 
@@ -94,5 +97,6 @@ describe('the browser worker refuses create ops an engine cannot perform', () =>
     expect(calls).toEqual([['deleteEntity', 1]])
     // "1" is a stale INDEX, not a handle: refused, never a guess.
     expect(out.unknown).toEqual({ type: 'editApplied', op: 'delete', ok: false, reason: 'bad_entity_id' })
+    expect(out.unsafe).toEqual({ type: 'error', message: 'handle_precision_lost' })
   })
 })

@@ -98,13 +98,20 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
         # floor: 505-test drift over sixteen days and 24 -> 78 test files.
         # Five CI gate-shard-2 logs track the growth 645 -> 659 -> 660 -> 660
         # -> 672, then the integrated tree measured locally at 698 collected /
-        # 13 skipped / 685 executed. See the rationale in run-all-gates.py.
-        "web-vitest": 685,
+        # 13 skipped / 685 executed. W4d Slice B then re-measured exact-head
+        # Linux CI at 748 collected / 17 skipped / 731 executed after the
+        # lossless-handle correction added one gated and one portable case.
+        "web-vitest": 731,
     }
     assert {
         suite_id: suites[suite_id].expected
         for suite_id in measured_residual_floors
     } == measured_residual_floors
+
+    assert suites["web-vitest"].allowed_vitest_skips == (
+        ("src/cad/engineWasmHarness.realwasm.test.js", 1),
+        ("src/cadedit/cadEditSurface.test.jsx", 16),
+    )
 
     restore = suites["server-version-restore"]
     assert restore.expected == 26

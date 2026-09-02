@@ -46,6 +46,7 @@ export const REASONS = Object.freeze({
 export function catalogClusters(families, {
   onRequestRun,
   running = false,
+  previewing = false,
   writeLocked = false,
   writeEntitled = true,
   writeLockNote = '',
@@ -62,17 +63,21 @@ export function catalogClusters(families, {
       const isWrite = (tool.capabilities || []).includes('drawing.write')
       const locked = !!writeLocked && isWrite
       const entBlocked = isWrite && !writeEntitled
-      const reason = locked
-        ? (writeLockNote || REASONS.writeLocked)
-        : entBlocked
-          ? REASONS.writeUnentitled
-          : ''
+      const reason = running
+        ? REASONS.running
+        : previewing
+          ? REASONS.previewing
+          : locked
+            ? (writeLockNote || REASONS.writeLocked)
+            : entBlocked
+              ? REASONS.writeUnentitled
+              : ''
       return {
         id: tool.name,
         label: tool.name,
         title: tool.description || tool.name,
         write: isWrite,
-        disabled: !!running || locked || entBlocked,
+        disabled: !!running || !!previewing || locked || entBlocked,
         reason,
         onClick: () => onRequestRun(tool, null, RIBBON_RATIONALE, 'ribbon'),
       }

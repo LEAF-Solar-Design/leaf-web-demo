@@ -1454,16 +1454,14 @@ def build_suites() -> List[Suite]:
         # local run there agreed exactly at 673 collected / 13 skipped / 660
         # executed. After the right-palette tests landed and the retired
         # single-purpose client-shell tests left, the floor advances again:
-        # the integrated tree is 698 collected / 13 skipped / 685 executed
-        # across 78 files without the local wasm artifact, measured by
-        # `npm run test:unit` on 2026-09-02. An opted-in machine executes all
-        # 698, above the floor. The 13 skips are the same two
-        # allow-listed files in both
-        # places: CI's PASS carries no "skip details incomplete" and no
-        # "non-allowlisted vitest skip" note, which is this runner asserting
-        # that per-file match, so the allowlist below needs no change.
+        # the integrated tree was 698 collected / 13 skipped / 685 executed.
+        # W4d Slice B plus the lossless-handle correction measures 748
+        # collected / 17 skipped / 731 executed without the local wasm build.
+        # An opted-in machine executes 747. The 17 skips
+        # are exactly the two allow-listed files below: one real-wasm harness
+        # case and sixteen editing-surface cases.
         Suite("web-vitest", "web npm run test:unit (vitest)", "vitest", WEB,
-              [_npm(), "run", "test:unit"], 685,
+              [_npm(), "run", "test:unit"], 731,
               allowed_vitest_skips=(
                   # Day-3 CAD engine real-build round trip: needs a compiled
                   # wasm artifact, which needs a Rust toolchain, so it exists
@@ -1473,10 +1471,10 @@ def build_suites() -> List[Suite]:
                   # Card F-3: the editing-surface acceptance cases drive the
                   # REAL compiled engine through a persistent-child double,
                   # gated on the same machine-local wasm artifact (never on a
-                  # runner). Twelve tests (ten engine cases + the two
-                  # persistence-leg save cases in the same gated describe), plus
-                  # the three W4d Slice B draw cases. Fifteen tests total.
-                  ("src/cadedit/cadEditSurface.test.jsx", 15),
+                  # runner). Sixteen tests: twelve editing and persistence
+                  # cases, the three W4d Draw-group cases, and the lossless
+                  # u64-handle collision regression.
+                  ("src/cadedit/cadEditSurface.test.jsx", 16),
               )),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),

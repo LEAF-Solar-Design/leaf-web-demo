@@ -64,9 +64,11 @@ describe('catalogClusters', () => {
     expect(toolsOf(unentitled[1])['delete-marked-panel'].reason).toBe(REASONS.writeUnentitled)
   })
 
-  it('disables everything while a run is in flight', () => {
-    const clusters = catalogClusters(FAMS, { onRequestRun: () => {}, running: true })
-    expect(clusters.flatMap((c) => c.tools).every((t) => t.disabled)).toBe(true)
+  it('disables everything during a run or preview and names the distinct reason', () => {
+    const running = catalogClusters(FAMS, { onRequestRun: () => {}, running: true })
+    expect(running.flatMap((c) => c.tools).every((t) => t.disabled && t.reason === REASONS.running)).toBe(true)
+    const previewing = catalogClusters(FAMS, { onRequestRun: () => {}, previewing: true })
+    expect(previewing.flatMap((c) => c.tools).every((t) => t.disabled && t.reason === REASONS.previewing)).toBe(true)
   })
 
   it('an empty fold is ONE honest cluster with the sentence and zero tools', () => {
