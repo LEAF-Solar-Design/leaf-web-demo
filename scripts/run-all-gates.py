@@ -1438,7 +1438,7 @@ def build_suites() -> List[Suite]:
         # "non-allowlisted vitest skip" note, which is this runner asserting
         # that per-file match, so the allowlist below needs no change.
         Suite("web-vitest", "web npm run test:unit (vitest)", "vitest", WEB,
-              [_npm(), "run", "test:unit"], 657,
+              [_npm(), "run", "test:unit"], 672,
               allowed_vitest_skips=(
                   # Day-3 CAD engine real-build round trip: needs a compiled
                   # wasm artifact, which needs a Rust toolchain, so it exists
