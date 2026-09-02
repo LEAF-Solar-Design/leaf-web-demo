@@ -94,11 +94,14 @@ test('the console holds the same single-writer lock the stage does', async ({ pa
 
   await page.waitForTimeout(600)
   await page.reload()
-  // Still exactly one controller after the reload (a fresh instance id is
-  // legitimate; a second stamp is not).
-  expect(await page.locator('[data-checkout-instance]').count()).toBe(1)
   const take = page.getByRole('button', { name: 'Take edit lock' })
   await expect(take).toBeVisible({ timeout: 20_000 })
+  // Still exactly one controller after the reload (a fresh instance id is
+  // legitimate; a second stamp is not). Checked once the reloaded page has
+  // reached the same stable, rendered state the pre-reload check waited for
+  // (line 70) — `.count()` has no retry of its own, so it must never run
+  // against a still-hydrating DOM right after `reload()` returns.
+  expect(await page.locator('[data-checkout-instance]').count()).toBe(1)
 
   const takeResponse = page.waitForResponse((response) => {
     const url = new URL(response.url())
