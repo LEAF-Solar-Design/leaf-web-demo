@@ -51,7 +51,7 @@ function KeyValue({ data }) {
 }
 
 // Generic table: result.table = { columns: string[], rows: any[][] }. Used by tools whose
-// output is a list (the timber cut list), rendered before the scalar key/values.
+// output is a list of inspection rows, rendered before the scalar key/values.
 function GridTable({ table }) {
   const cols = Array.isArray(table.columns) ? table.columns : []
   const rows = Array.isArray(table.rows) ? table.rows : []

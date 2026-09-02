@@ -9,40 +9,39 @@ afterEach(cleanup)
 
 const envelope = {
   ok: true,
-  tool: 'timber-cutlist',
+  tool: 'table-export-demo',
   version: '1.0.0',
   timing_ms: 212,
   cost: null,
   error: null,
   result: {
-    member_count: 19,
-    view_count: 6,
+    row_count: 2,
     table: {
       columns: ['Material/Dim', 'Length (mm)', 'Quantity', 'Notes'],
       rows: [
-        ['CLADDING_22X2120', '3000', 8, ''],
-        ['BOLT_8', '250', 20, '8mm diameter, spaced at 600mm centres'],
+        ['PANEL_A', '3000', 8, ''],
+        ['FASTENER_B', '250', 20, '8mm diameter'],
       ],
     },
-    warnings: ['layer \'WINDOW\' does not follow Material_W x H: 48 run(s) not counted'],
+    warnings: ['One source row was omitted.'],
     files: [
-      { name: 'cutlist.csv', mime: 'text/csv', bytes: 5, base64: btoa('a,b,c') },
+      { name: 'result.csv', mime: 'text/csv', bytes: 5, base64: btoa('a,b,c') },
     ],
   },
 }
 
 describe('ResultPanel generic table results', () => {
   it('renders result.table rows, warnings, scalars and file downloads', () => {
-    const createObjectURL = vi.fn(() => 'blob:cutlist')
+    const createObjectURL = vi.fn(() => 'blob:result')
     vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL: vi.fn() })
-    render(<ResultPanel running={false} tool={{ name: 'timber-cutlist' }} result={envelope} />)
+    render(<ResultPanel running={false} tool={{ name: 'table-export-demo' }} result={envelope} />)
     expect(screen.getByText('Material/Dim')).toBeInTheDocument()
-    expect(screen.getByText('CLADDING_22X2120')).toBeInTheDocument()
-    expect(screen.getByText('8mm diameter, spaced at 600mm centres')).toBeInTheDocument()
-    expect(screen.getByText(/WINDOW/)).toBeInTheDocument()
-    const link = screen.getByText('Download cutlist.csv')
-    expect(link.getAttribute('href')).toBe('blob:cutlist')
-    expect(link.getAttribute('download')).toBe('cutlist.csv')
+    expect(screen.getByText('PANEL_A')).toBeInTheDocument()
+    expect(screen.getByText('8mm diameter')).toBeInTheDocument()
+    expect(screen.getByText('One source row was omitted.')).toBeInTheDocument()
+    const link = screen.getByText('Download result.csv')
+    expect(link.getAttribute('href')).toBe('blob:result')
+    expect(link.getAttribute('download')).toBe('result.csv')
     expect(createObjectURL).toHaveBeenCalledTimes(1)
     vi.unstubAllGlobals()
   })

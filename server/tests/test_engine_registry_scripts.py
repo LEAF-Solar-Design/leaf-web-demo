@@ -62,7 +62,7 @@ def _live_activity_tools():
     its tracked Python builtin. Neither can use a live Activity.
     """
     # ``local_only`` (2026-09-01) identifies a tool whose implementation IS its local
-    # Python entry by design (timber-cutlist-preflight): it never takes the Activity
+    # Python entry by design: it never takes the Activity
     # path and the loader does not mark its runs degraded (tool_loader.run_tool_dynamic).
     return [
         tool for tool in _registry_tools()
@@ -72,18 +72,13 @@ def _live_activity_tools():
 
 def test_explicit_live_aps_catalog_tools_are_exactly_the_pinned_set():
     """The live APS lane is an explicit allowlist, pinned here so a registry edit cannot
-    widen it silently. Members: count-by-layer (LISP, the original), timber-cutlist
-    (compiled AppBundle, 2026-09-01: the first kind:appbundle tool; it has no local
-    implementation, so APS is its only execution path)."""
+    widen it silently. Member: count-by-layer (LISP, the original)."""
     live_eligible = {
         tool["name"]: tool for tool in _registry_tools() if tool.get("aps_live") is True
     }
-    assert sorted(live_eligible) == ["count-by-layer", "timber-cutlist"]
+    assert sorted(live_eligible) == ["count-by-layer"]
     assert live_eligible["count-by-layer"]["capabilities"] == ["drawing.read"]
     assert live_eligible["count-by-layer"]["script"] == "engine/tools/count_by_layer.lsp"
-    assert live_eligible["timber-cutlist"]["capabilities"] == ["drawing.read"]
-    assert live_eligible["timber-cutlist"]["kind"] == "appbundle"
-    assert live_eligible["timber-cutlist"]["appbundle"] == "LeafCutListTools"
 
 
 def test_live_aps_catalog_authority_requires_an_exact_boolean():

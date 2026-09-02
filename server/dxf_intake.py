@@ -119,7 +119,7 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
     out: Dict[str, Any] = {"dwg": source_name, "layers": layers, "polylines": polylines}
     if texts:
         # ADDITIVE §1 field (frontend ignores unknown keys): drawing labels for tools
-        # that classify views by the text inside a frame (timber-cutlist).
+        # that classify views by the text inside a frame.
         out["texts"] = texts
     return out
 

@@ -534,11 +534,6 @@ def build_suites() -> List[Suite]:
                   r"PostgreSQL race test requires explicit DATABASE_URL",)),
         Suite("server-entitlements", "server tests/test_entitlements.py", "pytest", SERVER,
               _py_pytest("tests/test_entitlements.py"), 26),
-        # Tenant tool scope (server/tenant_scope.py): the locked single-purpose
-        # client app. Pure policy, the catalog choke point, the routes, and the
-        # shipped scope file.
-        Suite("server-tenant-scope", "server tests/test_tenant_scope.py", "pytest", SERVER,
-              _py_pytest("tests/test_tenant_scope.py"), 19),
         Suite("server-policy-unavailable-paths", "server tests/test_policy_unavailable_paths.py",
               "pytest", SERVER, _py_pytest("tests/test_policy_unavailable_paths.py"), 2),
         Suite("server-entitlements-converse", "server tests/test_entitlements_converse.py",
@@ -587,19 +582,12 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_g1a_canonical_e2e.py"), 1, db_gated=True),
         Suite("server-engine-registry-scripts", "server tests/test_engine_registry_scripts.py",
               "pytest", SERVER, _py_pytest("tests/test_engine_registry_scripts.py"), 7),
-        # timber-cutlist (2026-09-01): the first kind:appbundle tool, three suites. The
-        # activity-spec suite exercises the REAL da/client.py appbundle branch dependency-
-        # free (no creds, no network; APS_NICKNAME is set inside the tests). The intake
-        # suite pins LINE -> 2-point polyline and TEXT/MTEXT -> additive `texts` in the
-        # local DXF parser and in da/intake_parse (LN/TX families). The preflight suite
-        # cross-checks the local_only preview builtin against the engine's own read of
-        # the client's spec drawing (tests/fixtures/six_views.dxf).
+        # kind:appbundle activity spec + LINE/TEXT intake (2026-09-01): generic platform
+        # capabilities, dependency-free.
         Suite("server-appbundle-activity-spec", "server tests/test_appbundle_activity_spec.py",
-              "pytest", SERVER, _py_pytest("tests/test_appbundle_activity_spec.py"), 8),
+              "pytest", SERVER, _py_pytest("tests/test_appbundle_activity_spec.py"), 7),
         Suite("server-dxf-intake-lines-text", "server tests/test_dxf_intake_lines_text.py",
               "pytest", SERVER, _py_pytest("tests/test_dxf_intake_lines_text.py"), 4),
-        Suite("server-timber-cutlist-preflight", "server tests/test_timber_cutlist_preflight.py",
-              "pytest", SERVER, _py_pytest("tests/test_timber_cutlist_preflight.py"), 4),
         # issue #29 red-suite registry (https://github.com/Evan-Haug/leaf-web-demo/issues/29):
         # all six now fixed-then-registered. test_sessions_e2e's measured "7 errors"
         # were purely its module `harness` fixture failing `npm run build` in a
@@ -1442,15 +1430,16 @@ def build_suites() -> List[Suite]:
         # touched no file under web/src), and both printed
         # `web npm run test:unit (vitest)  >=180  660  PASS  13 skipped`; the
         # local run there agreed exactly at 673 collected / 13 skipped / 660
-        # executed. #914 then added 12 cases (surfaceRails, draftingRibbon)
-        # and merged, so main is 685 collected / 13 skipped / 672 executed,
-        # 77 files -- CI run 33651020047 and a local `npm run test:unit` in
-        # web/ both. The 13 skips are the same two allow-listed files in both
+        # executed. After the right-palette tests landed and the retired
+        # single-purpose client-shell tests left, the integrated tree is 698
+        # collected / 13 skipped / 685 executed across 78 files, measured by
+        # `npm run test:unit` on 2026-09-02. The 13 skips are the same two
+        # allow-listed files in both
         # places: CI's PASS carries no "skip details incomplete" and no
         # "non-allowlisted vitest skip" note, which is this runner asserting
         # that per-file match, so the allowlist below needs no change.
         Suite("web-vitest", "web npm run test:unit (vitest)", "vitest", WEB,
-              [_npm(), "run", "test:unit"], 672,
+              [_npm(), "run", "test:unit"], 685,
               allowed_vitest_skips=(
                   # Day-3 CAD engine real-build round trip: needs a compiled
                   # wasm artifact, which needs a Rust toolchain, so it exists
