@@ -251,3 +251,23 @@ def test_shipped_platform_customize_is_elevated_only():
         assert grants.get("platform_customize") is not True, (
             f"role {name} must never carry platform_customize in plain grants")
     assert raw["platform_admin"]["elevated_grants"] == {"platform_customize": True}
+
+
+# --------------------------------------------------------------------------- #
+# client_tool: the locked single-purpose client seat (2026-09-02, tenant scope)
+# --------------------------------------------------------------------------- #
+def test_client_tool_role_adds_only_upload_on_the_restricted_floor(monkeypatch):
+    """A client handed one tool as a standalone app runs on org tier `restricted`
+    (run_read only) plus the shipped `client_tool` role, which adds `upload` and
+    nothing else; the tenant tool scope narrows WHICH read tools. No build,
+    converse, write, solve, deploy, and never platform_customize."""
+    monkeypatch.delenv("LEAF_ROLES_FILE", raising=False)
+    monkeypatch.delenv("LEAF_ENTITLEMENTS_FILE", raising=False)
+    import entitlements
+    shipped = roles.load_role_policy()["client_tool"]
+    assert shipped["grants"] == {"upload": True} and shipped["elevated_grants"] == {}
+    ent = entitlements.entitlements_for("restricted", ("client_tool",))
+    assert ent["run_read"] is True and ent["upload"] is True
+    assert not any(v for k, v in ent.items() if k not in ("run_read", "upload"))
+    # Elevation (the W14 second factor) changes nothing for this role.
+    assert entitlements.entitlements_for("restricted", ("client_tool",), elevated=True) == ent

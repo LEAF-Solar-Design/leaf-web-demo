@@ -531,6 +531,11 @@ def build_suites() -> List[Suite]:
                   r"PostgreSQL race test requires explicit DATABASE_URL",)),
         Suite("server-entitlements", "server tests/test_entitlements.py", "pytest", SERVER,
               _py_pytest("tests/test_entitlements.py"), 26),
+        # Tenant tool scope (server/tenant_scope.py): the locked single-purpose
+        # client app. Pure policy, the catalog choke point, the routes, and the
+        # shipped scope file.
+        Suite("server-tenant-scope", "server tests/test_tenant_scope.py", "pytest", SERVER,
+              _py_pytest("tests/test_tenant_scope.py"), 19),
         Suite("server-policy-unavailable-paths", "server tests/test_policy_unavailable_paths.py",
               "pytest", SERVER, _py_pytest("tests/test_policy_unavailable_paths.py"), 2),
         Suite("server-entitlements-converse", "server tests/test_entitlements_converse.py",

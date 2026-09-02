@@ -86,6 +86,10 @@ _HARDCODED_ROLE_DEFAULTS: Dict[str, Dict[str, Dict[str, bool]]] = {
     # workspace past what its plan bought before the org semantics are decided.
     "org_admin": {"grants": {}, "elevated_grants": {}},
     "org_member": {"grants": {}, "elevated_grants": {}},
+    # The locked single-purpose client seat (2026-09-02, tenant tool scope):
+    # org tier `restricted` (read-only floor) + this role = upload + run_read,
+    # with server/tenant_scope.py narrowing WHICH read tools. Adds nothing else.
+    "client_tool": {"grants": {"upload": True}, "elevated_grants": {}},
 }
 
 
