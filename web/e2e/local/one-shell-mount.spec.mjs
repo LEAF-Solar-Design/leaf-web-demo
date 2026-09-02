@@ -382,6 +382,35 @@ test.describe('route matrix, rail ON', () => {
     await expect(dock.getByTestId('dock-geometry')).toHaveCount(0)
   })
 
+  test('solar depth: real solved strings on the Solar tab only, honesty-gated (W4c-V3)', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    await page.goto('/app?dev=1')
+    await expect(page.locator(STUDIO)).toHaveCount(1)
+    // Mock: the bundled solve was computed against these exact drawing
+    // bytes; the live demo drawing is mutable and gets NO overlay.
+    await page.getByLabel('Use mock data (off = live backend)').check()
+    await expect(page.locator('.viewer-canvas canvas')).toHaveCount(1, { timeout: 30_000 })
+
+    // CAD first: no routes on a non-solar surface, ever.
+    await expect(page.locator('.viewer-canvas[data-string-routes]')).toHaveCount(0)
+
+    // The expected count comes from the BUNDLE itself (one of the 135
+    // solved strings is a degenerate <2-point path the viewer honestly
+    // refuses to draw), so the row cannot drift from the artifact.
+    const payload = await (await page.request.get('/demo-solve.json')).json()
+    const expected = payload.solve.strings.filter((route) => Array.isArray(route.pts) && route.pts.length >= 2).length
+    expect(expected).toBeGreaterThan(100)
+
+    await page.getByRole('tab', { name: 'Solar CAD' }).click()
+    await expect(page.locator(`.viewer-canvas[data-string-routes="${expected}"]`)).toHaveCount(1, { timeout: 20_000 })
+
+    // Back to CAD: the overlay leaves with the surface.
+    await page.getByRole('tab', { name: 'CAD', exact: true }).click()
+    await expect(page.locator('.viewer-canvas[data-string-routes]')).toHaveCount(0)
+  })
+
   test('Esc ladder, history rung under the rail: an open drawer owns Esc, the route never moves', async ({ page, request }) => {
     // W4c-0 debt (ACCEPTANCE "Esc LADDER rungs"): the terminal row above
     // proves Esc never LEAVES /app; this rung proves an owned surface
