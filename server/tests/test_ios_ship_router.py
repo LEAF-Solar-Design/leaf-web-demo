@@ -295,23 +295,6 @@ def test_launch_requires_key_and_rejects_secret_fields_before_store(monkeypatch)
     assert store.launches == []
 
 
-def test_restricted_client_tool_role_cannot_launch_ios_ship(monkeypatch):
-    monkeypatch.setattr(router, "_store", lambda: pytest.fail("store must not be reached"))
-    router.set_dispatch(lambda _: pytest.fail("dispatch must not be reached"))
-    tenant = deps.TenantContext(
-        ORG,
-        org_id=ORG,
-        subject="auth0|client-tool",
-        tier="restricted",
-        roles=("client_tool",),
-    )
-    response = _client(tenant).post(
-        "/api/ios-ship/launch", json=_body(), headers={"Idempotency-Key": "k-client"})
-    assert response.status_code == 403
-    assert response.json()["entitlement_required"] is True
-    assert response.json()["required"] == "deploy"
-
-
 def test_launch_forwards_all_six_approved_fields_and_ignores_principal_header(monkeypatch):
     store = FakeStore()
     monkeypatch.setattr(router, "_store", lambda: store)

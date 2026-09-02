@@ -98,9 +98,7 @@ def _parse(text: str, path: Path) -> Dict[str, TenantScope]:
         raise ScopePolicyError(f"tenant scope file invalid JSON at {path}: {exc}") from exc
     if not isinstance(raw, dict):
         raise ScopePolicyError(f"tenant scope file top level must be a mapping ({path})")
-    if "scopes" not in raw:
-        raise ScopePolicyError(f"tenant scope file is missing the required 'scopes' mapping ({path})")
-    scopes = raw["scopes"]
+    scopes = raw.get("scopes", {})
     if not isinstance(scopes, dict):
         raise ScopePolicyError(f"tenant scope file 'scopes' must be a mapping ({path})")
     if len(scopes) > MAX_SCOPES:

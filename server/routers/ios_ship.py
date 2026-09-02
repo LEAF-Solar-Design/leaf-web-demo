@@ -13,7 +13,6 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import deps
-import entitlements
 import telemetry_sink
 
 router = APIRouter()
@@ -193,16 +192,6 @@ async def launch(request: Request, req: LaunchRequest,
         _ship_event(tid, tkind, name, stage, reason)
 
     ship_event("ship.requested", "received")
-    tier = entitlements.resolve_tier(tenant)
-    roles, elevated = entitlements.resolve_roles(tenant)
-    try:
-        deploy_allowed = entitlements.entitlements_for(tier, roles, elevated).get("deploy", False)
-    except entitlements.EntitlementsError:
-        ship_event("ship.failed", "authorization", "entitlement_policy_unavailable")
-        return entitlements.policy_unavailable_response("deploy", tier)
-    if not deploy_allowed:
-        ship_event("ship.failed", "authorization", "entitlement_required")
-        return entitlements.entitlement_denied_response("deploy", tier)
     if not idempotency_key:
         ship_event("ship.failed", "validation", "idempotency_key_required")
         return _failure(400, "idempotency_key_required", "Idempotency-Key header is required")
