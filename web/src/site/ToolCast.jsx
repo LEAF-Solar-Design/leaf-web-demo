@@ -1376,7 +1376,6 @@ export default function ToolCast({
       orgId={workspace.orgId}
       projects={workspace.projects}
       openProjectId={workspace.openProjectId}
-      currentName={currentProjectName}
       unavailable={workspace.projectsError}
       loading={workspace.projectsLoading}
       orgBusy={workspace.orgBusy}

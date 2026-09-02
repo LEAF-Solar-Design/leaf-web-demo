@@ -45,6 +45,7 @@ export const WORKSPACE_PROJECT_COPY = Object.freeze({
   reasonNoPlatform: 'Workspace projects need the platform database, which this deployment is running without.',
   reasonNoOrg: 'Create a workspace first — the Project menu in the header offers it.',
   reasonDemo: 'This is the offline demo build; it talks to no workspace service.',
+  reasonNoHandler: 'This surface is not wired to create projects yet.',
 })
 
 function trimmedLabel(value) {

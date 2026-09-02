@@ -259,6 +259,37 @@ describe('F-7: surface frames render the live tenant catalog', () => {
     expect(screen.getByTestId('continuity-rail').dataset.projectState).toBe('empty')
   })
 
+  it('F-9: an omitted workspaceProject degrades to the honest empty state, not to nothing', () => {
+    // sol-critic finding 2: the prop defaulted to null and the frame then
+    // rendered NO state, so a call site could silently drop it. Omission is a
+    // stated empty state now; it can never be silence.
+    render(
+      <ProductSurfaceFrame
+        activeSurface="browser" states={states} catalog={catalogA} catalogError={null}
+      />,
+    )
+    const slot = screen.getByTestId('surface-project-state')
+    expect(slot.dataset.projectState).toBe('empty')
+    expect(slot.textContent).toContain('No project open')
+  })
+
+  it('F-9: a create with no handler is disabled WITH a stated blocker', () => {
+    // sol-critic finding 3: `disabled` counted the missing handler but the
+    // reason did not, so this rendered a dead button with no explanation —
+    // the exact dead end this slot replaced.
+    render(
+      <ProductSurfaceFrame
+        activeSurface="browser" states={states} catalog={catalogA} catalogError={null}
+        workspaceProject={drawingOnly}
+      />,
+    )
+    const action = screen.getByTestId('surface-project-action')
+    expect(action.disabled).toBe(true)
+    const reason = screen.getByTestId('surface-project-reason')
+    expect(reason.textContent).toContain('not wired to create projects')
+    expect(action.getAttribute('aria-describedby')).toBe(reason.id)
+  })
+
   it('F-9: rail and card agree — one derivation, never two answers on one screen', () => {
     render(
       <>

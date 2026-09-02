@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { PRODUCT_SURFACES, SHARED_WORKSPACE_CAPABILITIES, productSurface } from '../site/productSurfaces.js'
-import { EMPTY_WORKSPACE_PROJECT } from '../site/workspaceProjectState.js'
+import { EMPTY_WORKSPACE_PROJECT, WORKSPACE_PROJECT_COPY } from '../site/workspaceProjectState.js'
 import { moveRovingTab } from '../lib/roving.js'
 
 // F-8: the continuity layer, made visible. Lives in the always-mounted nav so
@@ -163,7 +163,19 @@ export function WorkspaceProjectSlot({ state, onCreateProject }) {
     return <span className="dim" data-testid="surface-project-state" data-project-state="project">{state.label}</span>
   }
   const action = state.action
-  const showReason = Boolean(action?.disabled && action.reason)
+  // ONE disabled decision, and the reason is derived from the SAME value.
+  // sol-critic finding 3: these were computed separately, so a state that
+  // allowed the create while the caller supplied no handler rendered a
+  // disabled button with NO stated blocker -- exactly the dead end this slot
+  // replaced. A missing handler is now a stated blocker like any other.
+  const missingHandler = Boolean(action) && !onCreateProject
+  const disabled = Boolean(action?.disabled) || missingHandler
+  const reason = action?.disabled
+    ? action.reason
+    : missingHandler
+      ? WORKSPACE_PROJECT_COPY.reasonNoHandler
+      : null
+  const showReason = Boolean(disabled && reason)
   // A disabled button's `title` is not reliably announced, so the blocker is
   // rendered as real text and ASSOCIATED with the control — a screen-reader
   // user must not be the only one who cannot find out why it is dead.
@@ -178,7 +190,7 @@ export function WorkspaceProjectSlot({ state, onCreateProject }) {
             type="button"
             className="chip-act tc-product-project-act"
             data-testid="surface-project-action"
-            disabled={action.disabled || !onCreateProject}
+            disabled={disabled}
             aria-describedby={reasonId}
             onClick={() => onCreateProject?.(action.projectName)}
           >
@@ -187,7 +199,7 @@ export function WorkspaceProjectSlot({ state, onCreateProject }) {
           {/* An unexplained disabled button is the same dead end as the bare
               state line it replaced, so the blocker is always spelled out. */}
           {showReason && (
-            <span id={reasonId} className="tc-product-project-reason" data-testid="surface-project-reason">{action.reason}</span>
+            <span id={reasonId} className="tc-product-project-reason" data-testid="surface-project-reason">{reason}</span>
           )}
         </>
       )}
@@ -205,12 +217,15 @@ export function WorkspaceProjectSlot({ state, onCreateProject }) {
 // iOS ship lane, /try's switcher chip -- and renders above it.
 export function ProductSurfaceFrame({
   activeSurface, states, projectSlot, catalog, catalogError,
-  workspaceProject = null, onCreateProject = null,
+  workspaceProject = EMPTY_WORKSPACE_PROJECT, onCreateProject = null,
 }) {
   const surface = productSurface(activeSurface)
   const status = states[surface.id]
   // iOS owns its whole project line (the ship lane mounts there instead).
-  const showProjectState = Boolean(workspaceProject) && surface.id !== 'ios'
+  // Every other surface ALWAYS renders a state: sol-critic finding 2 was that
+  // a null default let a call site drop the Browser/Solar state silently.
+  // Omitting the prop now degrades to the honest empty state, never to nothing.
+  const showProjectState = surface.id !== 'ios'
   return (
     <section
       id="product-surface-panel"

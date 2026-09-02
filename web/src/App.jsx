@@ -2372,7 +2372,6 @@ export default function App() {
             orgId={orgId}
             projects={projects}
             openProjectId={openProjectId}
-            currentName={currentProjectName}
             workspaceProject={workspaceProjectState}
             unavailable={projectsErr}
             loading={projectsLoading}
