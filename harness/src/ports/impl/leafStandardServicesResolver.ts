@@ -358,9 +358,18 @@ export function standardServicesResolverFromEnv(
   const appOrigin = (env.LEAF_APP_URL ?? "").trim();
   const brokerEndpoint = (env.LEAF_TENANT_MCP_BROKER_URL ?? "").trim();
   const dispatchSecret = (env.LEAF_APP_DISPATCH_SECRET ?? "").trim();
-  const configured = [appOrigin, brokerEndpoint, dispatchSecret].filter(Boolean).length;
   const runtime = (env.LEAF_RUNTIME_ENV ?? "").trim().toLowerCase();
-  if (configured === 0) {
+  // Intent is the SERVICE-SPECIFIC variable, exactly as serve.ts keys the
+  // approval store: LEAF_TENANT_MCP_BROKER_URL set means standard services
+  // are intended (and then EVERYTHING must be present — partial config stays
+  // a hard error below). LEAF_APP_URL + LEAF_APP_DISPATCH_SECRET alone are
+  // NOT intent: scripts/start-leaf.py has always set that pair for the
+  // converse back-edge, and reading it as intent broke every local managed
+  // proof ("standard services require ..." with no broker to point at —
+  // the tenant MCP broker exists only in deployed environments, see
+  // deploy/required-config.{app,harness}.json). Staging/production keep the
+  // unconditional hard-require regardless of which variables are set.
+  if (!brokerEndpoint) {
     if (env.LEAF_STANDARD_SERVICES_ENV !== undefined) {
       const environment = standardServicesEnvironmentFromEnv(env);
       if (environment === "staging" || environment === "production") {
@@ -368,12 +377,19 @@ export function standardServicesResolverFromEnv(
       }
       return undefined;
     }
-    if (runtime === "staging" || runtime === "production") {
-      throw new Error("standard services are required in staging and production");
+    if (runtime) {
+      // Non-empty LEAF_RUNTIME_ENV must parse cleanly even with no broker
+      // configured — a garbage value (a typo'd "prod") must fail closed,
+      // not silently read as "not staging/production" and fall through.
+      const environment = parseStandardServicesEnvironment(env.LEAF_RUNTIME_ENV);
+      if (environment === "staging" || environment === "production") {
+        throw new Error("standard services are required in staging and production");
+      }
+      return undefined;
     }
     return undefined;
   }
-  if (configured !== 3) throw new Error("standard services require LEAF_APP_URL, LEAF_TENANT_MCP_BROKER_URL, and LEAF_APP_DISPATCH_SECRET");
+  if (!appOrigin || !dispatchSecret) throw new Error("standard services require LEAF_APP_URL, LEAF_TENANT_MCP_BROKER_URL, and LEAF_APP_DISPATCH_SECRET");
   if (!approvalStore) throw new Error("standard services require a durable tenant broker approval store");
   return new LeafStandardServicesResolver({
     appOrigin,

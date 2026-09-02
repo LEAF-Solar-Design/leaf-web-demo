@@ -51,9 +51,30 @@ test('trust rail reflects real health, plan, usage, and Claude grant state', asy
   const expectedHealth = health.degraded_mode === true || health.ok === false ? 'degraded' : 'healthy'
   await expect(panel.getByText('Backend', { exact: true }).locator('..')).toContainText(expectedHealth)
   await expect(panel.getByText('Claude account', { exact: true }).first().locator('..')).toContainText('not linked')
+  // #869 (W0) rewrote the single 'Spend remaining' field into the full
+  // usage ledger /api/usage always shipped: today/total runs+spend and a
+  // cap row with a real percentage bar. Assert every field the ledger
+  // renders, mirroring ToolCast.jsx's own formatting exactly.
   await expect(panel.getByText('Runs today').locator('..')).toContainText(String(surfacedUsage.today?.runs ?? 'unknown'))
-  const spend = typeof surfacedUsage.cap?.remaining === 'number' ? `$${surfacedUsage.cap.remaining.toFixed(2)}` : 'unknown'
-  await expect(panel.getByText('Spend remaining').locator('..')).toContainText(spend)
+  const spendToday = typeof surfacedUsage.today?.usd_est === 'number' ? `$${surfacedUsage.today.usd_est.toFixed(3)}` : 'unknown'
+  await expect(panel.getByText('Spend today').locator('..')).toContainText(spendToday)
+  const runsTotal = typeof surfacedUsage.total?.runs === 'number' ? surfacedUsage.total.runs.toLocaleString() : 'unknown'
+  await expect(panel.getByText('Runs total').locator('..')).toContainText(runsTotal)
+  const spendTotal = typeof surfacedUsage.total?.usd_est === 'number' ? `$${surfacedUsage.total.usd_est.toFixed(2)}` : 'unknown'
+  await expect(panel.getByText('Spend total').locator('..')).toContainText(spendTotal)
+  const capHasBar = surfacedUsage.cap?.enabled
+    && typeof surfacedUsage.cap.remaining === 'number'
+    && typeof surfacedUsage.cap.usd_cap === 'number'
+    && surfacedUsage.cap.usd_cap > 0
+  if (capHasBar) {
+    await expect(panel.getByText(`Cap $${surfacedUsage.cap.usd_cap.toFixed(2)}`).locator('..'))
+      .toContainText(`$${surfacedUsage.cap.remaining.toFixed(2)} left`)
+  } else {
+    const capText = surfacedUsage.cap?.enabled === false
+      ? 'no cap configured'
+      : (typeof surfacedUsage.cap?.remaining === 'number' ? `$${surfacedUsage.cap.remaining.toFixed(2)} left` : 'unknown')
+    await expect(panel.getByText('Cap', { exact: true }).locator('..')).toContainText(capText)
+  }
 
   const entitlementPanel = panel.getByRole('region', { name: 'Entitlements' })
   await expect(entitlementPanel).toContainText(`tier ${entitlements.tier}`)

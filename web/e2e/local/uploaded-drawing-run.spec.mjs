@@ -22,6 +22,17 @@ test('an uploaded DXF remains the authorized target of a catalog run', async ({ 
     if (outgoing.url().includes('leaf-proof.invalid')) invalidRequests.push(outgoing.url())
   })
 
+  // A truly empty boot (no seeded drawing identity) hits the signed-out
+  // bootstrap branch, which latches the session controller to 'required'
+  // under this local proof's no-live-auth environment — an upload's later
+  // activate() call is then a permanent no-op (createSessionController.js),
+  // so Catalog never un-disables. version-depth.spec.mjs hits the same
+  // plain /try route and carries the same fix: seed a placeholder workbench
+  // id so the boot takes the normal getSession/activate path instead. The
+  // real upload below fully replaces this placeholder identity.
+  await page.addInitScript(() => {
+    sessionStorage.setItem('leaf.cat.workbench.id.v1', 'demo')
+  })
   await page.goto('/try')
   await expect(page.getByRole('button', { name: 'Upload DWG or DXF' })).toBeEnabled({ timeout: 15_000 })
 
