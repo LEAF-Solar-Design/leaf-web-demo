@@ -1294,6 +1294,20 @@ def build_suites() -> List[Suite]:
         Suite("production-web-release",
               "scripts test_production_web_release.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_production_web_release.py"), 17),
+        # These entrypoint checks shipped with the instant-execution container
+        # contract but were never registered in the aggregate gate. The mode
+        # checks are hermetic file reads, so their measured counts are exact.
+        Suite("instant-app-entrypoint",
+              "scripts test_instant_app_entrypoint.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_instant_app_entrypoint.py"), 2),
+        Suite("instant-harness-entrypoint",
+              "scripts test_instant_harness_entrypoint.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_instant_harness_entrypoint.py"), 2),
+        # This is a main() assert script, not a pytest collection target.
+        Suite("instant-execution-container-contract",
+              "scripts test_instant_execution_container_contract.py", "script",
+              SCRIPTS_DIR,
+              [sys.executable, "test_instant_execution_container_contract.py"], None),
         # --- the gate runner's own spawn-failure/retry behavior (this file) --- #
         # Floor 57: the 29 measured 2026-07-28, plus the 18 sharding tests
         # (partition determinism, catalog fingerprint incl. toolchain-path
