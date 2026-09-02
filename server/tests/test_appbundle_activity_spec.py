@@ -61,6 +61,32 @@ def test_appbundle_activity_spec_loads_bundle_and_runs_command(monkeypatch):
     assert spec["parameters"]["Params"]["localName"] == "params.json"
 
 
+def test_appbundles_entry_is_never_a_placeholder(monkeypatch):
+    """Staging 2026-09-01: the broker had no cached nickname and no APS_NICKNAME, the spec
+    emitted "$(nickname).LeafCutListTools+prod", and DA answered 400 on POST /activities.
+    The owner must come from APS_NICKNAME or the (cached) live lookup, never a literal."""
+    da = _load_real_da_client()
+    # 1) env wins without any network
+    monkeypatch.setenv("APS_NICKNAME", "envnick")
+    if hasattr(da.nickname, "_v"):
+        delattr(da.nickname, "_v")
+    spec = da.tool_activity_spec(_cutlist_tool())
+    assert spec["appbundles"] == ["envnick.LeafCutListTools+prod"]
+    # 2) no env: the live lookup is used (cached on the function), never a placeholder
+    monkeypatch.delenv("APS_NICKNAME", raising=False)
+    calls = []
+
+    def fake_nickname():
+        calls.append(1)
+        return "livenick"
+
+    monkeypatch.setattr(da, "nickname", fake_nickname)
+    spec = da.tool_activity_spec(_cutlist_tool())
+    assert spec["appbundles"] == ["livenick.LeafCutListTools+prod"]
+    assert calls == [1]
+    assert "$(nickname)" not in json.dumps(spec)
+
+
 def test_live_script_guard_accepts_the_appbundle_tool(monkeypatch):
     monkeypatch.setenv("APS_NICKNAME", "nick")
     import broker  # noqa: PLC0415
