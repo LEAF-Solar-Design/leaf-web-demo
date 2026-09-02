@@ -209,7 +209,8 @@ export default function ToolsPanel({ tools, error, running, selectedTool, onRequ
                     <button
                       type="button"
                       className="chip-act"
-                      disabled={running}
+                      disabled={running || runDisabled}
+                      title={runDisabled ? runDisabledNote || undefined : undefined}
                       onClick={() => onReviseTool(t)}
                     >
                       Revise

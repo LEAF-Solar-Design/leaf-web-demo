@@ -41,6 +41,26 @@ describe('ToolsPanel read-only browse (no drawing open)', () => {
     expect(screen.queryByText(/edit lock/)).toBeNull()
   })
 
+  it('keeps a custom-authored tool browse-only until a drawing is open', () => {
+    const onReviseTool = vi.fn()
+    render(
+      <ToolsPanel
+        tools={TOOLS}
+        running={false}
+        onRequestRun={() => {}}
+        onReviseTool={onReviseTool}
+        runDisabled
+        runDisabledNote="Upload a DWG or DXF to run this tool."
+      />,
+    )
+    fireEvent.click(screen.getByText('count-by-layer'))
+    const reviseButton = screen.getByRole('button', { name: 'Revise' })
+    expect(reviseButton.disabled).toBe(true)
+    expect(reviseButton.title).toBe('Upload a DWG or DXF to run this tool.')
+    fireEvent.click(reviseButton)
+    expect(onReviseTool).not.toHaveBeenCalled()
+  })
+
   it('runs normally once a drawing makes the tool operable', () => {
     const onRequestRun = vi.fn()
     render(<ToolsPanel tools={TOOLS} running={false} onRequestRun={onRequestRun} runDisabled={false} />)

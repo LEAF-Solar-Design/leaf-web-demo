@@ -16,6 +16,7 @@ describe('no-drawing Catalog browse wiring', () => {
   it('keeps Author and Project gated on canOperate (session + drawing)', () => {
     expect(toolCast).toMatch(/<button id="workspace-tab-author"[^>]*disabled=\{!canOperate\}/)
     expect(toolCast).toMatch(/<button id="workspace-tab-workspace"[^>]*disabled=\{!canOperate\}/)
+    expect(toolCast).toMatch(/const reviseAuthoredTool = useCallback\(\(tool\) => \{\n    if \(!canOperate \|\| !tool\?\.name \|\| authorStage\.pointer\) return/)
   })
   it('threads the no-drawing run reason from ToolCast into CapabilityCatalog', () => {
     expect(toolCast).toMatch(/<CapabilityCatalog[\s\S]{0,1000}runDisabled=\{!hasDrawing\}[\s\S]{0,100}runDisabledNote=\{CATALOG_NEEDS_DRAWING_NOTE\}/)

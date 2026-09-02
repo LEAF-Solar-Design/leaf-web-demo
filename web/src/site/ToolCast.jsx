@@ -1020,12 +1020,12 @@ export default function ToolCast({
   }, [authorStage.stage, sessionReady])
 
   const reviseAuthoredTool = useCallback((tool) => {
-    if (!tool?.name || authorStage.pointer) return
+    if (!canOperate || !tool?.name || authorStage.pointer) return
     setAuthorTargetTool(tool.name)
     setAuthorSeed('')
     setAuthorSeedSignal((current) => current + 1)
     setLeftView('author')
-  }, [authorStage.pointer])
+  }, [authorStage.pointer, canOperate])
 
   const cancelAuthorRevision = useCallback(() => {
     if (authorStage.pointer) return
