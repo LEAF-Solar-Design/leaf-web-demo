@@ -16,6 +16,7 @@
   },
   "artifact": {
     "component": "mushy-author",
+    "entrypoint": "src/index.js",
     "files": [
       {
         "bytes": 423,

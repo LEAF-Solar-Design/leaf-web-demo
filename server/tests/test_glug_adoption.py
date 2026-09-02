@@ -48,6 +48,7 @@ def _raw_manifest():
         },
         "artifact": {
             "component": "mushy-author",
+            "entrypoint": "index.js",
             "files": files,
             "byte_count": len(payload),
             "aggregate_sha256": aggregate,
@@ -126,11 +127,19 @@ def _validate(adoption, request):
 
 def test_loads_policy_and_builds_client_safe_receipt(tmp_path):
     adoption = glug_adoption.load_adoption(_write_manifest(tmp_path))
+    assert adoption.artifact_entrypoint == "index.js"
     receipt = glug_adoption.client_pin_receipt(adoption)
     assert receipt["source_commit"] == MUSHY_SOURCE
     assert "repository" not in receipt
     assert "package_lock" not in receipt
     glug_adoption.validate_client_pin_receipt(receipt)
+
+
+def test_rejects_undeclared_artifact_entrypoint(tmp_path):
+    raw = _raw_manifest()
+    raw["artifact"]["entrypoint"] = "stale-author.js"
+    with pytest.raises(glug_adoption.GlugAdoptionError, match="declared file"):
+        glug_adoption.load_adoption(_write_manifest(tmp_path, raw))
 
 
 def test_rejects_unknown_workspace_and_extra_input_keys(tmp_path):

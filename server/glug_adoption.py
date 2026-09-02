@@ -41,7 +41,7 @@ REPOSITORY_FIELDS = frozenset({
 })
 SOURCES_FIELDS = frozenset({"mushy_source_commit", "package_lock_sha256"})
 ARTIFACT_FIELDS = frozenset({
-    "component", "files", "byte_count", "aggregate_sha256",
+    "component", "entrypoint", "files", "byte_count", "aggregate_sha256",
 })
 ARTIFACT_FILE_FIELDS = frozenset({"path", "bytes", "sha256"})
 LIMIT_FIELDS = frozenset({
@@ -85,6 +85,7 @@ class GlugAdoption:
     mushy_source_commit: str
     package_lock_sha256: str
     artifact_component: str
+    artifact_entrypoint: str
     artifact_files: tuple[ArtifactFile, ...]
     artifact_byte_count: int
     artifact_aggregate_sha256: str
@@ -132,6 +133,13 @@ def load_adoption(path: Path | str | None = None) -> GlugAdoption:
     artifact = _mapping(raw["artifact"], "artifact")
     _exact(artifact, ARTIFACT_FIELDS, "artifact")
     component = _safe_id(artifact["component"], "artifact component")
+    entrypoint = artifact["entrypoint"]
+    if (
+        not isinstance(entrypoint, str)
+        or not SAFE_ARTIFACT_PATH.fullmatch(entrypoint)
+        or not entrypoint.endswith(".js")
+    ):
+        raise GlugAdoptionError("artifact entrypoint is invalid")
     files_raw = artifact["files"]
     if not isinstance(files_raw, list) or not files_raw:
         raise GlugAdoptionError("artifact files must be a non-empty list")
@@ -150,6 +158,8 @@ def load_adoption(path: Path | str | None = None) -> GlugAdoption:
         raise GlugAdoptionError("artifact files must be sorted")
     if len({entry.path for entry in files}) != len(files):
         raise GlugAdoptionError("artifact file paths must be unique")
+    if entrypoint not in {entry.path for entry in files}:
+        raise GlugAdoptionError("artifact entrypoint must be a declared file")
     declared_bytes = artifact["byte_count"]
     if isinstance(declared_bytes, bool) or declared_bytes != sum(entry.bytes for entry in files):
         raise GlugAdoptionError("artifact aggregate byte count does not match files")
@@ -207,6 +217,7 @@ def load_adoption(path: Path | str | None = None) -> GlugAdoption:
         mushy_source_commit=mushy_commit,
         package_lock_sha256=package_lock,
         artifact_component=component,
+        artifact_entrypoint=entrypoint,
         artifact_files=tuple(files),
         artifact_byte_count=declared_bytes,
         artifact_aggregate_sha256=declared_aggregate,

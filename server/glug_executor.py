@@ -882,12 +882,16 @@ class GlugExecutor:
 
     @classmethod
     def configured(cls) -> "GlugExecutor":
+        from glug_live_adapters import configured_live_components
+
         canonical_source = os.environ.get("GLUG_MUSHY_CANONICAL_GIT_SOURCE", "").strip()
         workspace_root = os.environ.get("GLUG_MUSHY_WORKSPACE_ROOT", "").strip()
         artifact_root = os.environ.get("LEAF_GLUG_MUSHY_ARTIFACT_ROOT", "").strip()
         if not canonical_source or not workspace_root or not artifact_root:
             raise GlugExecutorError(
                 "executor_unavailable", "Glug trusted executor is not configured", 503)
+        adoption = glug_adoption.load_adoption()
+        glug_adoption.verify_artifact_tree(adoption, artifact_root)
         commands = SubprocessCommandRunner()
         manager = LocalClaimWorkspaceManager(
             canonical_source=canonical_source,
@@ -896,9 +900,12 @@ class GlugExecutor:
             commands=commands,
             env=os.environ,
         )
+        author, approvals, provider = configured_live_components(
+            os.environ, adoption=adoption, artifact_root=artifact_root)
         return cls(
             repository=None, artifact_root=artifact_root, env=os.environ,
-            commands=commands, workspace_manager=manager)
+            commands=commands, workspace_manager=manager, author=author,
+            approvals=approvals, provider=provider)
 
     def pin_receipt(self) -> Mapping[str, Any]:
         adoption = glug_adoption.load_adoption(self.adoption_path)

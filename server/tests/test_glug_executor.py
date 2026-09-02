@@ -60,7 +60,7 @@ def _manifest(tmp_path, *, base=BASE):
             "package_lock_sha256": "1" * 64,
         },
         "artifact": {
-            "component": "mushy-author", "files": files,
+            "component": "mushy-author", "entrypoint": "index.js", "files": files,
             "byte_count": len(payload), "aggregate_sha256": aggregate,
         },
         "limits": {

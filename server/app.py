@@ -104,6 +104,18 @@ _ios_callback_tls_server: ios_ship_callback_listener.CallbackTlsServer | None = 
 
 
 @app.on_event("startup")
+def initialize_glug_mushy_control() -> None:
+    """Fail startup closed when the durable Glug control rail is enabled."""
+    if os.environ.get("GLUG_MUSHY_ENABLED", "").strip().lower() == "true":
+        glug_routes.initialize_services()
+
+
+@app.on_event("shutdown")
+def stop_glug_mushy_control() -> None:
+    glug_routes.shutdown_services()
+
+
+@app.on_event("startup")
 def initialize_ios_ship_provider() -> None:
     """Mount one HTTP dispatch and its callback verifier, or fail closed."""
     config = ios_ship_provider_client.ProviderConfig.from_environment()
