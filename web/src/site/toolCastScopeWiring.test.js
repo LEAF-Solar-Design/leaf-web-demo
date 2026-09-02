@@ -21,6 +21,12 @@ describe('scope-locked shell wiring', () => {
     expect(total.length).toBe(guarded.length)
     expect(toolCast).toMatch(/\{!scopeLocked && <span className="key">Esc<\/span>\}/)
   })
+  it('normalizes a scoped deep link to CAD before choosing a product surface', () => {
+    expect(toolCast).toMatch(/const visibleSurface = scopeLocked \? 'cad' : activeSurface/)
+    expect(toolCast).toMatch(/if \(!scopeLocked \|\| activeSurface === 'cad'\) return[\s\S]{0,300}setActiveSurface\('cad'\)/)
+    expect(toolCast).toMatch(/\{visibleSurface === 'cad' \? \(/)
+    expect(toolCast).toMatch(/\) : visibleSurface === 'ios' \? \(/)
+  })
   it('keeps only the Operator tab and renders the DOM lock marker on the rail title', () => {
     expect(toolCast).toMatch(/\{!scopeLocked && \(\s*<>\s*<button id="workspace-tab-catalog"/)
     expect(toolCast).toMatch(/<button id="workspace-tab-author"[\s\S]{0,600}<button id="workspace-tab-workspace"[\s\S]{0,400}<\/>\s*\)\}/)
