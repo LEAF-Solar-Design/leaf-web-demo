@@ -382,6 +382,24 @@ test.describe('route matrix, rail ON', () => {
     await expect(dock.getByTestId('dock-geometry')).toHaveCount(0)
   })
 
+  test('the right palette keeps the plan reachable before drawing intake exists', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    await page.route('**/api/session?**', (route) => route.fulfill({
+      status: 503,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: 'fixture_no_intake' }),
+    }))
+    await page.goto('/app')
+    await expect(page.locator(STUDIO)).toHaveCount(1)
+
+    const dock = page.getByTestId('properties-dock')
+    await expect(dock).toBeVisible()
+    await expect(page.locator('.ent-panel')).toHaveCount(1)
+    expect(await page.locator('.ent-panel').evaluate((el) => !!el.closest('.properties-dock'))).toBe(true)
+  })
+
   test('solar depth: real solved strings on the Solar tab only, honesty-gated (W4c-V3)', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)

@@ -100,4 +100,15 @@ describe('App.jsx wiring', () => {
       /dwgVersion:\s*drawingVersionForRun\(tool,\s*executionContext,\s*health\?\.aps_live\)/,
     )
   })
+
+  it('keeps the wide drafting properties dock mounted before drawing data exists', () => {
+    assert.match(
+      stripped,
+      /if \(studioGround && drafting && wideViewport\) \{\s*return[^;]*React\.createElement\(\s*PropertiesDock/,
+    )
+    assert.doesNotMatch(
+      stripped,
+      /studioGround && drafting && wideViewport && \(legendEl \|\| readoutEl\)/,
+    )
+  })
 })

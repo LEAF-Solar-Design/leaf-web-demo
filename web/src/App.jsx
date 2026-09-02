@@ -2935,7 +2935,10 @@ export default function App() {
               // wideViewport: <=980px stacks the console; the dock's
               // floating placement has no home there, so the inline arm
               // (today's placement) renders instead of hiding the tools.
-              if (studioGround && drafting && wideViewport && (legendEl || readoutEl)) {
+              // The Plan section is useful before a drawing or intake exists.
+              // Keep the dock mounted on every wide drafting surface so the
+              // entitlement controls never disappear in that honest-empty state.
+              if (studioGround && drafting && wideViewport) {
                 return (
                   <PropertiesDock
                     layers={legendEl}
