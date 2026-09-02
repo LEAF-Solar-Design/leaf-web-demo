@@ -150,5 +150,11 @@ describe('authorCluster', () => {
     const off = authorCluster({ onOpen, entitled: false })
     expect(off.tools[0].disabled).toBe(true)
     expect(off.tools[0].reason).toBe(REASONS.buildUnentitled)
+    // Entitled but the authoring stage is off: a different fix, a different sentence.
+    const dark = authorCluster({ onOpen, entitled: true, available: false })
+    expect(dark.tools[0].disabled).toBe(true)
+    expect(dark.tools[0].reason).toBe(REASONS.buildUnavailable)
+    // The plan's answer outranks availability when both are false.
+    expect(authorCluster({ onOpen, entitled: false, available: false }).tools[0].reason).toBe(REASONS.buildUnentitled)
   })
 })

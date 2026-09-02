@@ -502,10 +502,18 @@ test.describe('route matrix, rail ON', () => {
     await expect(layerToggle).toHaveAttribute('aria-pressed', 'false')
     await layerToggle.click()
     await expect(layerToggle).toHaveAttribute('aria-pressed', 'true')
-    // Author expands the rail and opens "Author a tool".
-    await ribbon.locator('[data-tool="author-tool"]').click()
-    await expect(page.locator('aside.nav[data-spine]')).toHaveCount(0)
-    await expect(page.locator('.author-section .section-head[aria-expanded="true"]')).toHaveCount(1)
+    // Author expands the rail and opens "Author a tool" where authoring is
+    // live; where the stage is off (the local proof stack: R5 off) or the
+    // plan lacks build, it is disabled WITH the reason, never grey and mute.
+    const authorBtn = ribbon.locator('[data-tool="author-tool"]')
+    if (await authorBtn.isEnabled()) {
+      await authorBtn.click()
+      await expect(page.locator('aside.nav[data-spine]')).toHaveCount(0)
+      await expect(page.locator('.author-section .section-head[aria-expanded="true"]')).toHaveCount(1)
+    } else {
+      expect(await authorBtn.getAttribute('aria-label')).toMatch(/\(unavailable: /)
+      test.info().annotations.push({ type: 'author', description: `disabled: ${await authorBtn.getAttribute('title')}` })
+    }
 
     // Drawing: import-dxf opens the SAME import pane (aria-controls -> a
     // live element), the one place a document enters the engine.

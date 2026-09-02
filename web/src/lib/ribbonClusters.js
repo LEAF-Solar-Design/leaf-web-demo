@@ -25,6 +25,7 @@ export const REASONS = Object.freeze({
   writeLocked: 'another session holds the edit lock',
   writeUnentitled: 'your plan does not include editing tools',
   buildUnentitled: 'your plan does not include authoring tools',
+  buildUnavailable: 'the authoring stage is off on this deployment',
   noDrawing: 'no drawing loaded',
   noVersions: 'no versioned drawing',
   versionBusy: 'a version change is in flight',
@@ -177,9 +178,16 @@ export function layersCluster({ layers, counts = {}, visibleLayers = {}, onToggl
   }
 }
 
-/** Author: one real command — expand the rail and open "Author a tool". */
-export function authorCluster({ onOpen, entitled = true } = {}) {
-  const reason = entitled ? '' : REASONS.buildUnentitled
+/**
+ * Author: one real command — expand the rail and open "Author a tool".
+ * Two distinct reasons, because they have two distinct fixes: a plan that
+ * lacks `build` (entitlement) and a deployment whose authoring stage is off
+ * (availability, the R5 rail). `entitled` is the plan's own answer;
+ * `available` is the folded entitlement-AND-availability rule the rest of
+ * the shell gates Generate on.
+ */
+export function authorCluster({ onOpen, entitled = true, available = entitled } = {}) {
+  const reason = !entitled ? REASONS.buildUnentitled : !available ? REASONS.buildUnavailable : ''
   return {
     id: 'author',
     label: 'Author',
@@ -188,7 +196,7 @@ export function authorCluster({ onOpen, entitled = true } = {}) {
       id: 'author-tool',
       label: 'author-tool',
       title: 'Build a new tool from plain English',
-      disabled: !entitled,
+      disabled: !!reason,
       reason,
       onClick: () => onOpen?.(),
     }],

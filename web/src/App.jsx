@@ -2347,7 +2347,10 @@ export default function App() {
         writeEntitled: canRunWrite,
       }),
       authorCluster({
-        entitled: canBuild,
+        // The plan's own answer, then the folded entitlement-AND-availability
+        // rule (R5 stage off): two reasons, two fixes.
+        entitled: entOf('build'),
+        available: canBuild,
         onOpen: () => {
           setNavExpanded(true)
           setAuthorOpen(true)
@@ -2357,7 +2360,7 @@ export default function App() {
     ]
   }, [studioGround, drafting, shown, drawingState, canUndo, canRedo, versionBusy, running, previewing,
     drawingMutationsBlocked, historyOpen, onUndo, onRedo, onToggleHistoryTracked, layerCounts, visibleLayers,
-    toggleLayer, railFamilies, onRequestCatalogRun, writeLocked, canRunWrite, canBuild])
+    toggleLayer, railFamilies, onRequestCatalogRun, writeLocked, canRunWrite, canBuild, entOf])
 
   // W4d Slice A: the ONE engine-session mount wraps the drawing workspace,
   // so the ribbon's engine clusters and the import pane consume the same
