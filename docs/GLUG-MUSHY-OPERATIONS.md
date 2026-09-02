@@ -35,6 +35,30 @@ Enable the author in the harness only after `deploy/required-config.glug-mushy-h
 
 The harness inherits `LEAF_HARNESS_SECRET` and its grant-store controls from the ordinary harness profile. Install the fixed Glug grant under `GLUG_MUSHY_AUTHOR_TENANT_ID`. Do not place that grant in the control plane. Seed the same immutable artifact volume at `/data/glug/mushy-artifact` in the app and `/app/glug-mushy-artifact` in the harness before enabling either side.
 
+Build the `packages/author-ts` artifact in a clean standalone checkout at the manifest's exact Mushy commit with `npm ci` and `npm run build`. Package only the resulting `dist` directory. Verify the out-of-band archive before any runtime change:
+
+```bash
+python scripts/prepare_glug_mushy_artifact.py verify-archive \
+  --archive "$GLUG_MUSHY_ARTIFACT_ARCHIVE" \
+  --archive-sha256 "$GLUG_MUSHY_ARTIFACT_ARCHIVE_SHA256"
+```
+
+To seed the compose volume, use an exact digest-qualified utility image. The command creates and labels an absent volume, refuses a mismatched existing volume, reads the volume back, and removes a newly created volume if seeding or verification fails:
+
+```bash
+GLUG_MUSHY_ARTIFACT_VOLUME_NAME="$(
+  docker compose config --format json \
+    | jq -er '.volumes["leaf-glug-mushy-artifact"].name'
+)"
+python scripts/prepare_glug_mushy_artifact.py seed-volume \
+  --archive "$GLUG_MUSHY_ARTIFACT_ARCHIVE" \
+  --archive-sha256 "$GLUG_MUSHY_ARTIFACT_ARCHIVE_SHA256" \
+  --volume "$GLUG_MUSHY_ARTIFACT_VOLUME_NAME" \
+  --seed-image "$GLUG_MUSHY_SEED_IMAGE"
+```
+
+Keep the emitted JSON receipt with the deployment record. Set `GLUG_MUSHY_AUTHOR_ENABLED=true` and `GLUG_MUSHY_ENABLED=true` only after this command reports `verified: true`. The receipt and runtime volume contain built files and digests, not credentials or Mushy source paths.
+
 The control plane sends only the closed author request, source pin, timeout, and harness secret. The harness verifies the full manifest-declared artifact tree before every run and imports only `src/ports/impl/repoEditRunner.js` from it. No environment value can replace the editor module. The harness has the model grant but no GitHub, Stripe, deployment, or App Store credential. The control plane has the narrow GitHub review credential but no model grant.
 
 The author has one 240-second cancellation budget that starts before artifact verification, workspace checks, grant lookup, and editor loading. The harness gives the pinned editor only the remaining budget and passes the same outer abort signal into its Agent SDK query. At the limit, the SDK closes the child input, gives it about two seconds to exit cleanly, then forwards the abort signal to the transport process. The harness restores an aborted workspace before responding. The control-plane HTTP wrapper stops at 280 seconds, and a stale workspace becomes reclaimable at 300 seconds. These three limits leave cleanup time without letting a late author publish or complete an old claim.
