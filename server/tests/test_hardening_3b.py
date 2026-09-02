@@ -358,8 +358,13 @@ def test_versions_withholds_an_elapsed_lease_but_publishes_a_live_one(stack):
     # distinguishes "withheld" from "erased" over HTTP alone.
     rel = release(stack, t)
     assert rel.status_code == 200, rel.text
+    # Reads as the FAILURE branch, which is the only branch a message is printed
+    # on: released=False means release_checkout found nothing to clear, so the
+    # record was already gone before this call and the GET above is what removed
+    # it. released=True (the pass) means the record survived the read.
     assert rel.json()["released"] is True, (
-        "the elapsed record vanished from the manifest: the read cleared it")
+        "released=False: the elapsed record was already gone from the manifest "
+        "before this release, so the GET above cleared it")
 
 
 # --------------------------------------------------------------------------- #
