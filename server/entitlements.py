@@ -56,12 +56,6 @@ _HARDCODED_DEFAULTS: Dict[str, Dict[str, bool]] = {
     "restricted": {"run_read": True, "run_write": False, "solve": False, "build": False,
                    "converse": False, "agent_write_autopilot": False, "deploy": False,
                    "platform_customize": False, "upload": False},
-    # Locked single-purpose client tier (2026-09-02): a client handed ONE tool
-    # as a standalone app. Upload + run_read only; server/tenant_scope.py
-    # narrows that tenant's catalog to the tools the operator listed.
-    "client_tool": {"run_read": True, "run_write": False, "solve": False, "build": False,
-                    "converse": False, "agent_write_autopilot": False, "deploy": False,
-                    "platform_customize": False, "upload": True},
     "self_hosted": {"run_read": True, "run_write": True, "solve": True, "build": True,
                     "converse": True, "agent_write_autopilot": True, "deploy": True,
                     "platform_customize": False, "upload": True},

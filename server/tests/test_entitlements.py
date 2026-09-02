@@ -250,17 +250,3 @@ def test_entitlements_view_shape(monkeypatch):
     assert view["tier"] == "hosted_starter" and view["source"] == "policy"
     assert set(view["entitlements"]) == set(CAPABILITIES)
     assert view["entitlements"]["build"] is True
-
-
-# --------------------------------------------------------------------------- #
-# client_tool: the locked single-purpose tier (2026-09-02, tenant tool scope)
-# --------------------------------------------------------------------------- #
-def test_client_tool_tier_is_upload_plus_read_only(monkeypatch):
-    """A client handed one tool as a standalone app may upload and run read
-    tools, nothing else: no build, no converse, no write, no solve, no deploy."""
-    monkeypatch.delenv("LEAF_ENTITLEMENTS_FILE", raising=False)
-    ent = entitlements.entitlements_for("client_tool")
-    assert ent["run_read"] is True and ent["upload"] is True
-    assert not any(ent[c] for c in CAPABILITIES if c not in ("run_read", "upload"))
-    shipped = json.loads(SHIPPED.read_text(encoding="utf-8"))["client_tool"]
-    assert shipped == entitlements._HARDCODED_DEFAULTS["client_tool"]

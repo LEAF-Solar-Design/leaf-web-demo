@@ -169,7 +169,7 @@ def test_tools_capabilities_and_entitlements_routes_are_scoped(monkeypatch, tmp_
 def test_corrupt_scope_file_is_a_structured_503_on_the_list_routes(monkeypatch, tmp_path):
     _policy(monkeypatch, tmp_path, "{not json")
     c = _client()
-    for path in ("/api/tools", "/api/entitlements"):
+    for path in ("/api/tools", "/api/capabilities", "/api/entitlements"):
         r = c.get(path, headers=_h(OTHER))
         assert r.status_code == 503, path
         assert r.json()["error"]["retryable"] is True

@@ -2,10 +2,12 @@
 catalog into a locked, single-purpose app.
 
 Why (2026-09-02): a client handed a bespoke tool (timber-cutlist) as a
-"standalone application" must see and run ONLY that tool. Their tier
-(`client_tool`, server/entitlements.json) already withholds build / converse /
-write; this module withholds the rest of the CATALOG, so the tenant cannot
-list, resolve, or run anything the operator did not scope to them.
+"standalone application" must see and run ONLY that tool. Their seat (org tier
+`restricted`, the read-only floor, plus the `client_tool` role in
+server/roles.json that adds upload) already withholds build / converse / write;
+this module withholds the rest of the CATALOG, so the tenant cannot list,
+resolve, or run anything the operator did not scope to them. The tier
+vocabulary stays frozen (contract/AUTH.md §11); roles are operator-extensible.
 
 Policy file: server/tenant_tool_scopes.json (override with
 LEAF_TENANT_TOOL_SCOPES_FILE). Shape::
