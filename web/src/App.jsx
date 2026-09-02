@@ -8,6 +8,7 @@ import { CockpitStatus, ViewCluster } from './site/DrawingCockpit.jsx'
 import DraftingRibbon from './site/DraftingRibbon.jsx'
 import PropertiesDock from './site/PropertiesDock.jsx'
 import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
+import { authorCluster, catalogClusters, layersCluster, versionCluster, viewCluster } from './lib/ribbonClusters.js'
 import { entityGeometry } from './lib/entityMetrics.js'
 import { loadDemoSolve } from './site/intakeCache.js'
 // The 3D viewer drags in `three`; loading it lazily (mirroring the auth.js
@@ -43,6 +44,8 @@ import { deriveWorkspaceProjectState } from './site/workspaceProjectState.js'
 import IosSurface from './ios/IosSurface.jsx'
 import { ENV_IOS_SURFACE } from './ios/flag.js'
 import CadEditSurface from './cadedit/CadEditSurface.jsx'
+import EngineSessionProvider from './cadedit/EngineSessionProvider.jsx'
+import EngineRibbonClusters from './cadedit/EngineRibbonClusters.jsx'
 import { markInstant } from './lib/instant.js'
 import { agentBannerFor } from './lib/agentBanner.js'
 import { selectEntity } from './lib/selectEntity.js'
@@ -2313,6 +2316,104 @@ export default function App() {
   const opsExit = useExit(opsFlag && !mock && !opsDismissed)
   const customizeExit = useExit(customizeOpen && canOpenCustomize)
 
+  // W4d Slice A: the ribbon's clusters as DATA (View, Version, Layers, the
+  // active surface's catalog fold, Author) — each a REAL command this
+  // component already owns, each disabled control carrying its reason. The
+  // engine's own clusters (Drawing, Modify) render as the ribbon's children
+  // so they can read the ONE engine session through context. Studio-only:
+  // rail OFF the ribbon never mounts and this list is never read.
+  const ribbonClusters = useMemo(() => {
+    if (!(studioGround && drafting)) return []
+    return [
+      viewCluster({ viewerRef, hasDrawing: !!shown }),
+      versionCluster({
+        hasVersions: !!drawingState,
+        canUndo,
+        canRedo,
+        versionBusy: !!versionBusy,
+        running: !!running,
+        previewing: !!previewing,
+        mutationsBlocked: !!drawingMutationsBlocked,
+        historyOpen,
+        onUndo,
+        onRedo,
+        onToggleHistory: onToggleHistoryTracked,
+      }),
+      layersCluster({ layers: shown?.layers, counts: layerCounts, visibleLayers, onToggle: toggleLayer }),
+      ...catalogClusters(railFamilies, {
+        onRequestRun: onRequestCatalogRun,
+        running: running || !!previewing,
+        writeLocked,
+        writeEntitled: canRunWrite,
+      }),
+      authorCluster({
+        entitled: canBuild,
+        onOpen: () => {
+          setNavExpanded(true)
+          setAuthorOpen(true)
+          authorSectionRef.current?.scrollIntoView?.({ block: 'nearest' })
+        },
+      }),
+    ]
+  }, [studioGround, drafting, shown, drawingState, canUndo, canRedo, versionBusy, running, previewing,
+    drawingMutationsBlocked, historyOpen, onUndo, onRedo, onToggleHistoryTracked, layerCounts, visibleLayers,
+    toggleLayer, railFamilies, onRequestCatalogRun, writeLocked, canRunWrite, canBuild])
+
+  // W4d Slice A: the ONE engine-session mount wraps the drawing workspace,
+  // so the ribbon's engine clusters and the import pane consume the same
+  // session (a second useEngineSession call is a second worker, forbidden by
+  // the store's contract). ENV_CAD_EDIT is deliberately the FIRST operand so
+  // a flag-off build folds the provider, the store and the worker chunk away
+  // exactly as the surface's own call site does (bundleFence.test.js).
+  //
+  // F-3 persistence leg: live (non-mock) sessions can save edited bytes as a
+  // NEW VERSION of the open drawing. The parent is fetched FRESH at save
+  // time; the server's compare-and-set still guards the race. Mock/demo
+  // stays download-only, honestly.
+  const engineSaveTarget = !mock && intake ? {
+    drawingId: REQUESTED_DRAWING_ID,
+    headVersion: null,
+    save: async (bytes, _parent, digest) => {
+      const chain = await getDrawingVersions(false, REQUESTED_DRAWING_ID)
+      // The store publishes ONLY under a live single-writer checkout (the
+      // postgres authority fails closed without one — staging's exact
+      // first-save refusal). Use the session's held capability when there
+      // is one; otherwise take a checkout for exactly this save and release
+      // it after, the same acquire→save→release discipline the acceptance
+      // prover runs. A refused acquire surfaces the real holder instead of
+      // the store's opaque 400.
+      const held = checkout.actions.getCapability()
+      let acquired = null
+      if (!held) {
+        acquired = await takeCheckout(REQUESTED_DRAWING_ID, 'cad-edit-save')
+        if (!acquired.acquired) {
+          const e = new Error('drawing is checked out by '
+            + (acquired.locked_by || 'another session')
+            + ' — try again when the lock clears')
+          e.status = 409
+          throw e
+        }
+      }
+      const cap = held || acquired.checkout_capability
+      try {
+        return await saveEditedDrawingVersion(
+          REQUESTED_DRAWING_ID, bytes, chain.head, digest, cap)
+      } finally {
+        if (acquired) {
+          releaseCheckout(REQUESTED_DRAWING_ID, cap).catch(() => {})
+        }
+      }
+    },
+  } : null
+  const onEngineSaved = (receipt) => {
+    if (receipt?.new_version) {
+      completedVersionRef.current?.(receipt.new_version, { result: {} })
+    }
+  }
+  const engineScope = (node) => (ENV_CAD_EDIT ? (
+    <EngineSessionProvider saveTarget={engineSaveTarget} onSaved={onEngineSaved}>{node}</EngineSessionProvider>
+  ) : node)
+
   return (
     <div className="app" data-surface={studioGround ? activeSurface : undefined}>
       <header className="top">
@@ -2630,6 +2731,7 @@ export default function App() {
             Solar shows it too: that tab IS the CAD workspace on the solar
             tool set, opened inline by the tab itself (no "Open ..." button;
             operator directive 2026-09-01). */}
+        {engineScope(
         <div
           className="workspace-card enter"
           style={{ '--rank': 1, display: activeSurface === 'cad' || activeSurface === 'solar' ? undefined : 'none' }}
@@ -2672,25 +2774,17 @@ export default function App() {
               nothing); tools are the ACTIVE SURFACE's fold, wired through
               the same run-decision path as the rail (source 'ribbon'). */}
           {studioGround && drafting && (
-            <DraftingRibbon
-              families={railFamilies}
-              onRequestRun={onRequestCatalogRun}
-              running={running || !!previewing}
-              writeLocked={writeLocked}
-              writeEntitled={canRunWrite}
-              leading={ENV_CAD_EDIT ? (
-                <button
-                  type="button"
-                  className="ribbon-tool"
-                  aria-expanded={importOpen}
-                  aria-controls="cockpit-import-pane"
-                  title="Open a DXF in the browser engine"
-                  onClick={() => setImportOpen((o) => !o)}
-                >
-                  import-dxf
-                </button>
-              ) : null}
-            />
+            <DraftingRibbon clusters={ribbonClusters}>
+              {/* The engine's own clusters (Drawing, Modify) read the ONE
+                  session through context; ENV_CAD_EDIT first so a flag-off
+                  build folds them away with the provider. */}
+              {ENV_CAD_EDIT && (
+                <EngineRibbonClusters
+                  importOpen={importOpen}
+                  onToggleImport={() => setImportOpen((o) => !o)}
+                />
+              )}
+            </DraftingRibbon>
           )}
           <div className="viewer-toolbar">
             <div className="viewer-title">
@@ -2809,54 +2903,10 @@ export default function App() {
             <CadEditSurface
               // F-4: the engine attribution NOTICE arrives from the tenant
               // capability contract at runtime (web source may not name the
-              // engine — license fence).
+              // engine — license fence). The session itself (and the save
+              // target) come from the EngineSessionProvider wrapping this
+              // workspace (W4d Slice A).
               notice={catalog?.cad_engine?.notice || ''}
-              // F-3 persistence leg: live (non-mock) sessions can save
-              // edited bytes as a NEW VERSION of the open drawing. The
-              // parent is fetched FRESH at save time; the server's
-              // compare-and-set still guards the race. Mock/demo stays
-              // download-only, honestly.
-              saveTarget={!mock && intake ? {
-                drawingId: REQUESTED_DRAWING_ID,
-                headVersion: null,
-                save: async (bytes, _parent, digest) => {
-                  const chain = await getDrawingVersions(false, REQUESTED_DRAWING_ID)
-                  // The store publishes ONLY under a live single-writer
-                  // checkout (the postgres authority fails closed without
-                  // one — staging's exact first-save refusal). Use the
-                  // session's held capability when there is one; otherwise
-                  // take a checkout for exactly this save and release it
-                  // after, the same acquire→save→release discipline the
-                  // acceptance prover runs. A refused acquire surfaces the
-                  // real holder instead of the store's opaque 400.
-                  const held = checkout.actions.getCapability()
-                  let acquired = null
-                  if (!held) {
-                    acquired = await takeCheckout(REQUESTED_DRAWING_ID, 'cad-edit-save')
-                    if (!acquired.acquired) {
-                      const e = new Error('drawing is checked out by '
-                        + (acquired.locked_by || 'another session')
-                        + ' — try again when the lock clears')
-                      e.status = 409
-                      throw e
-                    }
-                  }
-                  const cap = held || acquired.checkout_capability
-                  try {
-                    return await saveEditedDrawingVersion(
-                      REQUESTED_DRAWING_ID, bytes, chain.head, digest, cap)
-                  } finally {
-                    if (acquired) {
-                      releaseCheckout(REQUESTED_DRAWING_ID, cap).catch(() => {})
-                    }
-                  }
-                },
-              } : null}
-              onSaved={(receipt) => {
-                if (receipt?.new_version) {
-                  completedVersionRef.current?.(receipt.new_version, { result: {} })
-                }
-              }}
             />
           )}
           <div className="viewer-wrap">
@@ -2962,7 +3012,8 @@ export default function App() {
               <ViewCluster viewerRef={viewerRef} />
             )}
           </div>
-        </div>
+        </div>,
+        )}
 
         <div className="result-block enter" style={{ '--rank': 2 }} ref={resultBlockRef}>
           <ResultPanel

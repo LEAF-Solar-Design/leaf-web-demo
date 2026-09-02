@@ -16,79 +16,52 @@
  * lifetime, document bytes, the entity list, selection identity, edit
  * dispatch, the save-as-version flow and every busy/error/refusal state —
  * moved to ./engineSession.js, the ONE engine-session store
- * (docs/convergence/ACCEPTANCE.md "Engine-session ownership"). This file is
- * now purely its consumer: it renders the store and owns nothing but form
- * inputs and the download URL. No visual or behavioural change came with
- * that move.
+ * (docs/convergence/ACCEPTANCE.md "Engine-session ownership").
+ *
+ * W4d (Slice A): the ONE call of that store moved out of here into
+ * ./EngineSessionProvider.jsx, together with the one legal worker spawn, so
+ * the ribbon's Modify group can consume the same session. This file is now
+ * purely a CONSUMER: it renders the store through context and owns nothing
+ * but the download URL. It names no worker path and constructs no boundary
+ * (license fence deny rule 3; engineOwnership.test.js counts both shapes).
+ * The operator's inputs (dx, dy, vertex, layer) are the provider's ONE
+ * record, shared with the ribbon.
  *
  * Isolation: the only engine contact is web/src/cad/engineWorker.js's
  * EngineBoundary, unmodified — every message both directions is
  * schema-validated there. The worker is spawned lazily on the first open,
- * never at mount, and the ONLY place this repo's web tree names the engine
- * worker path is the one spawn shape the license fence allows (deny rule 3),
- * which stays HERE. The store never names it: it takes the factory as a
- * required injected dependency precisely so the extraction adds no second
- * legal site (docs/CAD-ENGINE-LICENSE-FENCE.md).
+ * never at mount.
  *
  * Flag: ENV_CAD_EDIT must be the FIRST operand of the `&&` at the call site
- * so a flag-off build folds this whole module away — and, transitively,
- * engineSession.js, which nothing else imports.
+ * so a flag-off build folds this whole module away — and, transitively, the
+ * provider and engineSession.js, which nothing else imports.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react'
-
-import { useDrawingIdentityOptional } from '../drawing/DrawingIdentityProvider.jsx'
+import { useCallback, useEffect, useMemo } from 'react'
 
 import { ENV_CAD_EDIT } from './flag.js'
-import useEngineSession from './engineSession.js'
-
-function defaultCreateWorker() {
-  // The one legal spawn shape, and the only place this repo's web tree names
-  // the engine worker's path (license fence deny rule 3). It stays at the
-  // call site: the engine-session store takes this factory as an argument so
-  // there is exactly one such site to bless, not two.
-  return new Worker(
-    new URL('../../../vendor/acadrust-worker/worker-browser.mjs', import.meta.url),
-    { type: 'module' },
-  )
-}
+import { DEFAULT_EDIT_INPUTS, useEngineSessionOptional } from './EngineSessionProvider.jsx'
 
 function fmt(n) {
   return Number.isInteger(n) ? String(n) : n.toFixed(2)
 }
 
+const noop = () => {}
+
 export default function CadEditSurface({
   enabled = ENV_CAD_EDIT,
-  createWorker = defaultCreateWorker,
-  // Card F-3 persistence leg: when the studio supplies a live drawing
-  // target, edited bytes can be saved as a NEW VERSION through the same
-  // versioned-control chain every write uses. Absent target = download-only
-  // (the demo/site shell), stated honestly in the hint below.
-  saveTarget = null, // { drawingId, headVersion, capability?, save(bytes, parent, digest) }
-  onSaved = null,
   // The engine attribution NOTICE, served by the capability contract at
   // runtime (the client tree may not name the engine — license fence).
   notice = '',
 }) {
-  // The surface stays mountable on its own (its own specs, a future embed):
-  // no provider means no drawing identity, which is a real state. When there
-  // IS one, a drawing switch resets the session — no cross-document bleed.
-  const identity = useDrawingIdentityOptional()
-  const session = useEngineSession({
-    createWorker,
-    saveTarget,
-    onSaved,
-    drawingId: identity?.drawingId ?? null,
-  })
+  const engine = useEngineSessionOptional()
+  const session = engine?.session ?? null
+  const inputs = engine?.inputs ?? DEFAULT_EDIT_INPUTS
+  const setInput = engine?.setInput ?? noop
+  const canSave = !!engine?.canSave
   const {
-    documentId, entities, entityCount, selectedId, selected, status, savedBytes, busy,
-  } = session
-
-  // Form inputs stay here: they are what the operator is typing, not session
-  // state the store owes anyone.
-  const [vertexIndex, setVertexIndex] = useState('0')
-  const [dx, setDx] = useState('10')
-  const [dy, setDy] = useState('0')
-  const [layerName, setLayerName] = useState('')
+    documentId = '', entities = [], entityCount = 0, selectedId = '', selected = null,
+    status = '', savedBytes = null, busy = false,
+  } = session ?? {}
 
   const downloadUrl = useMemo(() => {
     if (!savedBytes) return ''
@@ -99,19 +72,25 @@ export default function CadEditSurface({
     if (downloadUrl) URL.revokeObjectURL(downloadUrl)
   }, [downloadUrl])
 
-  const { open, applyEdit } = session.actions
+  const open = session?.actions.open
+  const applyEdit = session?.actions.applyEdit
   const openFile = useCallback((event) => {
     const file = event.target.files?.[0]
     // Cleared BEFORE the async read so re-choosing the same file still fires.
     event.target.value = ''
-    open(file)
+    open?.(file)
   }, [open])
 
   const runEdit = useCallback((op) => {
-    applyEdit(op, { dx, dy, vertexIndex, layer: layerName })
-  }, [applyEdit, dx, dy, layerName, vertexIndex])
+    applyEdit?.(op, inputs)
+  }, [applyEdit, inputs])
 
   if (!enabled) return null
+  if (!session) {
+    // A consumer outside the ONE mount is a wiring bug, never a silent
+    // second session.
+    throw new Error('CadEditSurface renders only inside EngineSessionProvider (the ONE engine-session mount)')
+  }
 
   const canEdit = selected !== null && selected.editable !== false && !busy
 
@@ -119,7 +98,7 @@ export default function CadEditSurface({
     <section className="cad-edit-workbench" data-testid="cad-edit-workbench" aria-label="CAD editing surface">
       <h3 className="cad-edit-workbench-title">Edit a DXF drawing</h3>
       <p className="cad-edit-workbench-hint">
-        {saveTarget
+        {canSave
           ? 'Edits run entirely in your browser, inside the isolated engine worker. Nothing leaves it until you explicitly save a new version to the project or download the result.'
           : 'Runs entirely in your browser, inside the isolated engine worker. Nothing is uploaded and nothing is saved to the project — download the result to keep it.'}
       </p>
@@ -173,11 +152,11 @@ export default function CadEditSurface({
           </button>
           <label>
             dx
-            <input type="text" inputMode="decimal" value={dx} onChange={(e) => setDx(e.target.value)} aria-label="dx" />
+            <input type="text" inputMode="decimal" value={inputs.dx} onChange={(e) => setInput('dx', e.target.value)} aria-label="dx" />
           </label>
           <label>
             dy
-            <input type="text" inputMode="decimal" value={dy} onChange={(e) => setDy(e.target.value)} aria-label="dy" />
+            <input type="text" inputMode="decimal" value={inputs.dy} onChange={(e) => setInput('dy', e.target.value)} aria-label="dy" />
           </label>
           <button type="button" onClick={() => runEdit('move')} disabled={!canEdit}>
             Move selected
@@ -187,8 +166,8 @@ export default function CadEditSurface({
             <input
               type="text"
               inputMode="numeric"
-              value={vertexIndex}
-              onChange={(e) => setVertexIndex(e.target.value)}
+              value={inputs.vertexIndex}
+              onChange={(e) => setInput('vertexIndex', e.target.value)}
               aria-label="vertex index"
             />
           </label>
@@ -205,8 +184,8 @@ export default function CadEditSurface({
             layer
             <input
               type="text"
-              value={layerName}
-              onChange={(e) => setLayerName(e.target.value)}
+              value={inputs.layer}
+              onChange={(e) => setInput('layer', e.target.value)}
               aria-label="layer name"
             />
           </label>
@@ -216,7 +195,7 @@ export default function CadEditSurface({
         </div>
       )}
 
-      {savedBytes && saveTarget && (
+      {savedBytes && canSave && (
         <button
           type="button"
           className="cad-edit-workbench-save"

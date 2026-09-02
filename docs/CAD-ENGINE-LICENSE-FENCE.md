@@ -109,12 +109,31 @@ move with it.
 
 `engineSession.js` takes its worker factory as a REQUIRED injected argument
 and never names the path, so the fence-legal spawn shape stays at exactly one
-site — `CadEditSurface.jsx` — and this extraction creates no second legal site
-to bless. That is why **`scripts/check_license_fence.py` is unchanged by W1**:
+site — `CadEditSurface.jsx` at W1, `EngineSessionProvider.jsx` since W4d (next
+section) — and this extraction creates no second legal site to bless. That is why **`scripts/check_license_fence.py` is unchanged by W1**:
 its rules are shape-based and enumerate no entry points (deny rule 3 above),
 so there is nothing in them that the extraction could invalidate. This
 paragraph is the record of that deliberate no-op, so a reviewer diffing doc
 against script sees the decision rather than an omission.
+
+### Where the one legal spawn lives, after the W4d provider (Slice A)
+
+W4d moved the ONE `useEngineSession` call out of `CadEditSurface.jsx` into
+`web/src/cadedit/EngineSessionProvider.jsx`, because the ribbon's Modify
+group needs the same session and a second call of the store is a second
+worker. The one legal spawn shape moved WITH that call: the provider is now
+the only non-test module under `web/src` that names the worker path, and
+`CadEditSurface.jsx` (like the ribbon's `EngineRibbonClusters.jsx`) is a
+pure consumer that names no path and constructs no boundary.
+
+`scripts/check_license_fence.py` is again unchanged: its rules are
+shape-based and enumerate no entry points, so a spawn that moves from one
+module to another is still exactly one legal spawn to it. The count itself
+is held by `web/src/cadedit/engineOwnership.test.js`, which detects the
+spawn shape and the boundary construction BY SHAPE (it spells no engine
+identifier, so the move cannot make it stale). This paragraph records the
+move so a reviewer diffing doc against script sees the decision rather than
+a stale site name.
 
 Two boundaries, kept distinct on purpose:
 

@@ -25,6 +25,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
 import CadEditSurface from './CadEditSurface.jsx'
+import EngineSessionProvider from './EngineSessionProvider.jsx'
 
 // FENCE NOTE (same discipline as engineWasmHarness.realwasm.test.js): this
 // file never spells the engine's vendor path outside the ONE literal
@@ -75,6 +76,8 @@ const GLUE = existsSync(PKG_DIR)
   ? readdirSync(PKG_DIR).find((name) => name.endsWith('_worker.js'))
   : null
 const HAS_ENGINE = Boolean(GLUE)
+// Bound for a reply from the real engine child (see openDocument).
+const ENGINE_WAIT_MS = 20_000
 
 // One PERSISTENT node child per fake worker (vitest's module runner refuses
 // out-of-root imports, and a child-per-message would lose the worker's held
@@ -189,16 +192,33 @@ function oversizedFile() {
 
 let worker
 
-function renderSurface(props = {}) {
+// W4d: the session comes from the ONE provider; the surface is a consumer.
+function renderSurface(providerProps = {}) {
   worker = new FakeEngineWorker()
-  return render(<CadEditSurface enabled createWorker={() => worker} {...props} />)
+  return render(
+    <EngineSessionProvider createWorker={() => worker} {...providerProps}>
+      <CadEditSurface enabled />
+    </EngineSessionProvider>,
+  )
+}
+
+// A provider that must never spawn: flag/notice cases that open nothing.
+function withInertProvider(node) {
+  return (
+    <EngineSessionProvider createWorker={() => { throw new Error('unexpected engine spawn') }}>
+      {node}
+    </EngineSessionProvider>
+  )
 }
 
 async function openDocument(text, name) {
   fireEvent.change(screen.getByLabelText('DXF file'), { target: { files: [fileOf(text, name)] } })
   // The engine runs in a real async child here: wait for the LOAD REPORT,
   // not merely for the count element (which renders while still busy).
-  await waitFor(() => expect(screen.getByRole('status').textContent).toContain('Loaded'))
+  // A real engine in a real child process: under host load the default
+  // 1 s waitFor is a flake generator, not an oracle. The bound is generous
+  // because a MISSING reply still fails, only later.
+  await waitFor(() => expect(screen.getByRole('status').textContent).toContain('Loaded'), { timeout: ENGINE_WAIT_MS })
 }
 
 function selectEntity(index = 0) {
@@ -206,7 +226,7 @@ function selectEntity(index = 0) {
 }
 
 async function statusContains(fragment) {
-  await waitFor(() => expect(screen.getByRole('status').textContent).toContain(fragment))
+  await waitFor(() => expect(screen.getByRole('status').textContent).toContain(fragment), { timeout: ENGINE_WAIT_MS })
 }
 
 beforeEach(() => {
@@ -233,27 +253,27 @@ describe('acceptance: the editing surface mounts only behind cad_edit', () => {
 
   it('never spawns the engine worker at mount — only on the first open', () => {
     const createWorker = vi.fn(() => new FakeEngineWorker())
-    render(<CadEditSurface enabled createWorker={createWorker} />)
+    render(<EngineSessionProvider createWorker={createWorker}><CadEditSurface enabled /></EngineSessionProvider>)
     expect(screen.getByTestId('cad-edit-workbench')).toBeInTheDocument()
     expect(createWorker).not.toHaveBeenCalled()
   })
 
   it('refuses a file over the byte cap without reading or spawning anything', async () => {
     const createWorker = vi.fn(() => new FakeEngineWorker())
-    render(<CadEditSurface enabled createWorker={createWorker} />)
+    render(<EngineSessionProvider createWorker={createWorker}><CadEditSurface enabled /></EngineSessionProvider>)
     fireEvent.change(screen.getByLabelText('DXF file'), { target: { files: [oversizedFile()] } })
     await statusContains('exceeds')
     expect(createWorker).not.toHaveBeenCalled()
   })
 
   it('F-4: renders the runtime engine notice when the contract supplies one', () => {
-    render(<CadEditSurface enabled notice="Includes a third-party engine under MPL-2.0." />)
+    render(withInertProvider(<CadEditSurface enabled notice="Includes a third-party engine under MPL-2.0." />))
     expect(screen.getByTestId('cad-edit-engine-notice').textContent)
       .toContain('MPL-2.0')
   })
 
   it('F-4: renders no notice element when the contract supplies none (flag-off truth)', () => {
-    render(<CadEditSurface enabled />)
+    render(withInertProvider(<CadEditSurface enabled />))
     expect(screen.queryByTestId('cad-edit-engine-notice')).toBeNull()
   })
 })
@@ -360,13 +380,7 @@ describe.skipIf(!HAS_ENGINE)('acceptance: real-engine editing through the bounda
       }
     })
     const onSaved = vi.fn()
-    worker = new FakeEngineWorker()
-    render(<CadEditSurface
-      enabled
-      createWorker={() => worker}
-      saveTarget={{ drawingId: 'rooftop', headVersion: 4, save }}
-      onSaved={onSaved}
-    />)
+    renderSurface({ saveTarget: { drawingId: 'rooftop', headVersion: 4, save }, onSaved })
     await openDocument(ONE_LINE_DXF)
     expect(screen.queryByTestId('cad-edit-save-version')).toBeNull()
     selectEntity(0)
@@ -382,12 +396,7 @@ describe.skipIf(!HAS_ENGINE)('acceptance: real-engine editing through the bounda
   it('F-3b: a moved head (409) reads back as a refusal, not a success', async () => {
     const conflict = Object.assign(new Error('stale parent 4: head is now 6; refresh'), { status: 409 })
     const save = vi.fn(async () => { throw conflict })
-    worker = new FakeEngineWorker()
-    render(<CadEditSurface
-      enabled
-      createWorker={() => worker}
-      saveTarget={{ drawingId: 'rooftop', headVersion: 4, save }}
-    />)
+    renderSurface({ saveTarget: { drawingId: 'rooftop', headVersion: 4, save } })
     await openDocument(ONE_LINE_DXF)
     selectEntity(0)
     fireEvent.click(screen.getByRole('button', { name: 'Move selected' }))

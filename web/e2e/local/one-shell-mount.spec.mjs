@@ -274,10 +274,12 @@ test.describe('route matrix, rail ON', () => {
     expect((await nav.boundingBox()).x).toBeGreaterThanOrEqual(12)
 
     // The ribbon renders the ACTIVE SURFACE'S fold from the REAL catalog,
-    // one cluster per family (async load: wait for the first cluster).
+    // one cluster per family (async load: wait for the first CATALOG cluster;
+    // the fixed groups — Drawing, Modify, View, Version, Layers, Author —
+    // are synchronous and would satisfy a bare .ribbon-cluster wait).
     const ribbon = page.getByTestId('drafting-ribbon')
     await expect(ribbon).toBeVisible()
-    await expect(ribbon.locator('.ribbon-cluster').first()).toBeVisible({ timeout: 20_000 })
+    await expect(ribbon.locator('.ribbon-cluster[data-family]').first()).toBeVisible({ timeout: 20_000 })
     // No cluster paints over its neighbour: every pair of adjacent tool
     // boxes must be disjoint horizontally (the flex-shrink overlap class).
     const overlaps = await page.evaluate(() => {
@@ -313,8 +315,9 @@ test.describe('route matrix, rail ON', () => {
     // liveDemo, so flip the dev Mock switch instead of trusting the query.
     await page.getByLabel('Use mock data (off = live backend)').check()
     const ribbon = page.getByTestId('drafting-ribbon')
-    await expect(ribbon.locator('.ribbon-tool').first()).toBeVisible({ timeout: 20_000 })
-    await ribbon.locator('.ribbon-tool').first().click()
+    const catalogTool = ribbon.locator('[data-family] .ribbon-tool').first()
+    await expect(catalogTool).toBeVisible({ timeout: 20_000 })
+    await catalogTool.click()
     // The strip appears; nothing auto-runs; Esc dismisses and never ejects.
     await expect(page.locator('.strip-decision')).toBeVisible()
     await page.keyboard.press('Escape')
@@ -443,6 +446,93 @@ test.describe('route matrix, rail ON', () => {
     }))
     await page.goto('/app')
     await expectInlineGate()
+  })
+
+  test("the cockpit's actual tools (W4d Slice A): real groups, honest gating, one engine session", async ({ page, request }) => {
+    test.setTimeout(180_000)
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    await page.goto('/app')
+    await expect(page.locator(STUDIO)).toHaveCount(1)
+    await expectOneCanvasIn(page, '.studio-ground')
+    const ribbon = page.getByTestId('drafting-ribbon')
+    await expect(ribbon).toBeVisible()
+
+    // Every fixed group is present, in the reference order, ahead of the
+    // catalog fold; every one is a real command wired to App's own handler.
+    const groups = await ribbon.locator('.ribbon-cluster').evaluateAll((els) => els.map((el) => el.dataset.group || `family:${el.dataset.family}`))
+    expect(groups.slice(0, 5)).toEqual(['drawing', 'modify', 'view', 'version', 'layers'])
+    expect(groups[groups.length - 1]).toBe('author')
+
+    // Modify is unavailable on the console's own drawing (the engine edits
+    // an imported DXF only) and SAYS SO: a visible note, and each tool's
+    // reason in its accessible name — never a silently greyed group.
+    const modify = ribbon.locator('[data-group="modify"]')
+    await expect(modify.locator('.ribbon-note')).toHaveText('opens on an imported DXF')
+    const modifyTools = modify.locator('.ribbon-tool')
+    await expect(modifyTools).toHaveCount(6)
+    for (const btn of await modifyTools.all()) {
+      await expect(btn).toBeDisabled()
+      expect(await btn.getAttribute('aria-label')).toContain('(unavailable: opens on an imported DXF)')
+    }
+
+    // View drives the viewer: fit is live with a drawing loaded.
+    await expect(ribbon.locator('[data-tool="fit"]')).toBeEnabled()
+    // Version: the toolbar's exact gates, each disabled control naming why.
+    const undo = ribbon.locator('[data-tool="undo"]')
+    if (await undo.isDisabled()) expect(await undo.getAttribute('aria-label')).toMatch(/\(unavailable: /)
+    // Layers: pressed toggles that drive the SAME visibility the dock's Legend shows.
+    const layerToggle = ribbon.locator('[data-group="layers"] .ribbon-tool').first()
+    await expect(layerToggle).toHaveAttribute('aria-pressed', 'true')
+    await layerToggle.click()
+    await expect(layerToggle).toHaveAttribute('aria-pressed', 'false')
+    await layerToggle.click()
+    await expect(layerToggle).toHaveAttribute('aria-pressed', 'true')
+    // Author expands the rail and opens "Author a tool".
+    await ribbon.locator('[data-tool="author-tool"]').click()
+    await expect(page.locator('aside.nav[data-spine]')).toHaveCount(0)
+    await expect(page.locator('.author-section .section-head[aria-expanded="true"]')).toHaveCount(1)
+
+    // Drawing: import-dxf opens the SAME import pane (aria-controls -> a
+    // live element), the one place a document enters the engine.
+    const importBtn = ribbon.locator('[data-tool="import-dxf"]')
+    await expect(importBtn).toHaveAttribute('aria-expanded', 'false')
+    await importBtn.click()
+    await expect(importBtn).toHaveAttribute('aria-expanded', 'true')
+    await expect(page.locator('#cockpit-import-pane[data-import-open="true"]')).toHaveCount(1)
+    const fileInput = page.getByLabel('DXF file')
+    await expect(fileInput).toBeVisible()
+
+    // The engine half runs only where the compiled engine is served (dev
+    // middleware from pkg-web, or a staged dist/engine). Without it the
+    // import reports engine_unavailable by contract, which is not what this
+    // row is about — so it stops here, honestly, rather than skipping the
+    // whole receipt.
+    const engine = await request.get('/engine/engine.js').catch(() => null)
+    if (!engine || engine.status() !== 200) {
+      test.info().annotations.push({ type: 'engine', description: 'compiled engine not served; import half not exercised' })
+      return
+    }
+    const dxf = [
+      '0', 'SECTION', '2', 'ENTITIES',
+      '0', 'LINE', '8', 'Panels', '10', '0.0', '20', '0.0', '30', '0.0', '11', '100.0', '21', '50.0', '31', '0.0',
+      '0', 'LWPOLYLINE', '8', 'Outline', '90', '3', '70', '0', '10', '0.0', '20', '0.0', '10', '50.0', '20', '5.0', '10', '80.0', '20', '40.0',
+      '0', 'ENDSEC', '0', 'EOF',
+    ].join('\n') + '\n'
+    await fileInput.setInputFiles({ name: 'ribbon.dxf', mimeType: 'application/dxf', buffer: Buffer.from(dxf) })
+    await expect(page.getByRole('status').filter({ hasText: /Loaded ribbon\.dxf/ })).toHaveCount(1, { timeout: 60_000 })
+    // Loaded, nothing selected: the ribbon names the next missing thing.
+    await expect(modify.locator('.ribbon-note')).toHaveText('select an entity in the imported DXF')
+    await page.getByRole('radio').first().check()
+    await expect(modify.locator('.ribbon-note')).toHaveCount(0)
+    const del = ribbon.locator('[data-tool="modify:delete"]')
+    await expect(del).toBeEnabled()
+    await del.click()
+    // The engine re-parsed its own written bytes and the pane shows the result.
+    await expect(page.getByRole('status').filter({ hasText: /delete applied/ })).toHaveCount(1, { timeout: 60_000 })
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('1')
+    // The deleted entity's selection cleared with it (selection identity).
+    await expect(modify.locator('.ribbon-note')).toHaveText('select an entity in the imported DXF')
   })
 
   test('solar depth: real solved strings on the Solar tab only, honesty-gated (W4c-V3)', async ({ page, request }) => {
