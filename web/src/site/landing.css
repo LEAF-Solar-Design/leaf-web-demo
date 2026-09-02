@@ -1148,6 +1148,21 @@
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar :is(.checkout-chip, .checkout-chip b, .checkout-stale, .checkout-legacy) { color: #f0c97b; }
 .studio-shell header.top .tag.amber { color: #f0c97b; }
 .studio-shell header.top :is(.claude-trigger .ca-k, .claude-trigger .ca-state) { color: rgba(240, 242, 240, .78); }
+/* Seen on staging 2026-09-02 (?dev=1, VITE_CAD_EDIT builds): the DXF edit
+   workbench sits inside the transparent workspace card and painted paper
+   ink over the dark ground. It is chrome touching the drawing, so it takes
+   the legend's dark-glass material with light ink. */
+.studio-shell .workspace-card .cad-edit-workbench {
+  margin: 8px 0 0; padding: 10px 12px; border-radius: 6px;
+  background: var(--cv-panel-glass); backdrop-filter: blur(6px);
+  border: 1px solid var(--cv-border); color: rgba(240, 242, 240, .9);
+}
+.studio-shell .workspace-card .cad-edit-workbench :is(h3, .cad-edit-workbench-title) { color: rgba(240, 242, 240, .96); }
+.studio-shell .workspace-card .cad-edit-workbench :is(p, label, .dim, .cad-edit-workbench-hint, .cad-edit-workbench-doc, .cad-edit-workbench-notice) { color: rgba(240, 242, 240, .72); }
+.studio-shell .workspace-card .cad-edit-workbench :is(.chip-act, .btn, .btn.ghost) {
+  background: rgba(240, 242, 240, .08); border-color: rgba(240, 242, 240, .22); color: rgba(240, 242, 240, .92);
+}
+.studio-shell .workspace-card .cad-edit-workbench a { color: #7fd6a6; }
 @media (max-width: 980px) {
   .studio-shell aside.nav, .studio-shell aside.rail { margin: 8px 8px 0; }
   .cockpit-status { display: none; }
