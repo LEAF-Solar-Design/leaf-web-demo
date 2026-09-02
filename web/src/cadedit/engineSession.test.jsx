@@ -23,10 +23,14 @@ import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import useEngineSession, {
+  CREATE_OPS,
   GEOMETRY_SOURCE,
+  MAX_CREATE_POINTS,
   MAX_DOCUMENT_BYTES,
   SESSION_ERROR,
+  buildCreatePayload,
   buildEditPayload,
+  parsePointList,
   surviveSelection,
 } from './engineSession.js'
 
@@ -500,5 +504,91 @@ describe('drawing switch mid-edit', () => {
     expect(session.current.entities).toEqual([])
     expect(session.current.engineParsed).toBe(false)
     expect(session.workers[0].terminated).toBe(true)
+  })
+})
+
+describe('draw dispatch (W4d Draw group): creation needs no selection, and the selection lands on what was drawn', () => {
+  const DRAWN = { id: 'e3', type: 'LINE', layer: '0', vertices: [[0, 0], [100, 0]] }
+
+  it('every create op is refused as a sentence before the engine sees a malformed operand', () => {
+    expect(buildCreatePayload('createLine', { x: '0', y: '0', x2: 'nope', y2: '0' }).refusal).toMatch(/must all be numbers/)
+    expect(buildCreatePayload('createLine', { x: '1', y: '1', x2: '1', y2: '1' }).refusal).toMatch(/must differ/)
+    expect(buildCreatePayload('createCircle', { x: '0', y: '0', r: '0' }).refusal).toMatch(/greater than 0/)
+    expect(buildCreatePayload('createArc', { x: '0', y: '0', r: '1', a0: '45', a1: '405' }).refusal).toMatch(/start and end must differ/)
+    expect(buildCreatePayload('createPolyline', { pts: '0,0' }).refusal).toMatch(/at least two points/)
+    expect(buildCreatePayload('createPolyline', { pts: '0,0 1,x' }).refusal).toMatch(/at least two points/)
+    expect(buildCreatePayload('teleport', {}).refusal).toMatch(/unknown operation/)
+  })
+
+  it('a valid operand set becomes the exact payload the worker dispatches on, layer trimmed', () => {
+    expect(buildCreatePayload('createLine', { x: '0', y: '0', x2: '100', y2: '0', layer: ' Panels ' }).payload)
+      .toEqual({ x1: 0, y1: 0, x2: 100, y2: 0, layer: 'Panels' })
+    expect(buildCreatePayload('createCircle', { x: '5', y: '-3', r: '2.5' }).payload)
+      .toEqual({ cx: 5, cy: -3, radius: 2.5, layer: '' })
+    expect(buildCreatePayload('createArc', { x: '0', y: '0', r: '4', a0: '0', a1: '90' }).payload)
+      .toEqual({ cx: 0, cy: 0, radius: 4, startDeg: 0, endDeg: 90, layer: '' })
+    expect(buildCreatePayload('createPolyline', { pts: '0,0 10,0; 10,4', closed: 'true' }).payload)
+      .toEqual({ points: [0, 0, 10, 0, 10, 4], closed: true, layer: '' })
+  })
+
+  it('the point list is bounded and total: malformed or oversized reads as null, never a throw', () => {
+    expect(parsePointList('')).toBeNull()
+    expect(parsePointList('1,2')).toBeNull()
+    expect(parsePointList('1,2,3 4,5')).toBeNull()
+    expect(parsePointList('1,2 3,4')).toEqual([1, 2, 3, 4])
+    const many = Array.from({ length: MAX_CREATE_POINTS + 1 }, (_, i) => `${i},0`).join(' ')
+    expect(parsePointList(many)).toBeNull()
+    expect(parsePointList(null)).toBeNull()
+  })
+
+  it('create is refused as TRANSPORT when no document is open, and posts applyEdit with the payload when one is', async () => {
+    const session = mountSession()
+    act(() => session.current.actions.create('createLine', { x: '0', y: '0', x2: '100', y2: '0' }))
+    expect(session.current.errorKind).toBe(SESSION_ERROR.TRANSPORT)
+    expect(session.current.status).toMatch(/no document is open/)
+    await openDocument(session)
+    session.workers[0].emit(loadedMessage([LINE]))
+    act(() => session.current.actions.create('createLine', { x: '0', y: '0', x2: '100', y2: '0', layer: '' }))
+    expect(session.current.busy).toBe(true)
+    const posted = session.workers[0].posted
+    expect(posted[posted.length - 1]).toEqual({
+      type: 'applyEdit', op: 'createLine', payload: { x1: 0, y1: 0, x2: 100, y2: 0, layer: '' },
+    })
+    // A sentence-level refusal never reaches the wire.
+    const before = posted.length
+    act(() => session.current.actions.create('createCircle', { x: '0', y: '0', r: '-1' }))
+    expect(posted.length).toBe(before)
+    expect(session.current.errorKind).toBe(SESSION_ERROR.REFUSED)
+  })
+
+  it('the selection LANDS on the created entity by the id the worker found again by handle', async () => {
+    const session = mountSession()
+    await openDocument(session)
+    session.workers[0].emit(loadedMessage([LINE, POLY]))
+    act(() => session.current.actions.select('e1'))
+    act(() => session.current.actions.create('createLine', { x: '0', y: '0', x2: '100', y2: '0' }))
+    session.workers[0].emit({ ...editedMessage('createLine', [LINE, POLY, DRAWN]), createdId: 'e3' })
+    expect(session.current.selectedId).toBe('e3')
+    expect(session.current.selected).toEqual(DRAWN)
+    expect(session.current.geometrySource).toBe(GEOMETRY_SOURCE.ENGINE_REPARSE)
+    expect(session.current.errorKind).toBeNull()
+    expect(session.current.status).toMatch(/createLine applied: entity e3 drawn/)
+  })
+
+  it('a create whose entity the writer dropped reads as a REFUSAL, not a success', async () => {
+    const session = mountSession()
+    await openDocument(session)
+    session.workers[0].emit(loadedMessage([LINE]))
+    act(() => session.current.actions.select('e1'))
+    act(() => session.current.actions.create('createCircle', { x: '0', y: '0', r: '1' }))
+    session.workers[0].emit({ ...editedMessage('createCircle', [LINE]), createdId: null })
+    expect(session.current.errorKind).toBe(SESSION_ERROR.REFUSED)
+    expect(session.current.status).toMatch(/not found after re-parse/)
+    // The prior selection survives (e1 is still there); nothing pretends.
+    expect(session.current.selectedId).toBe('e1')
+  })
+
+  it('the create op list is the closed set the worker dispatches on', () => {
+    expect([...CREATE_OPS]).toEqual(['createLine', 'createCircle', 'createArc', 'createPolyline'])
   })
 })

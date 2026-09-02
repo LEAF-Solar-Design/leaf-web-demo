@@ -49,12 +49,22 @@ function defaultCreateWorker() {
   )
 }
 
-export const DEFAULT_EDIT_INPUTS = Object.freeze({ dx: '10', dy: '0', vertexIndex: '0', layer: '' })
+export const DEFAULT_EDIT_INPUTS = Object.freeze({
+  // Modify operands.
+  dx: '10', dy: '0', vertexIndex: '0', layer: '',
+  // Draw operands (W4d Slice B): a point, a second point, a radius, an
+  // angle span in degrees, a point list, and the closed flag as a string
+  // (every input is a string; the store parses and refuses).
+  x: '0', y: '0', x2: '100', y2: '0', r: '10', a0: '0', a1: '90', pts: '0,0 100,0 100,50', closed: 'false',
+})
 
 const INPUT_KEYS = new Set(Object.keys(DEFAULT_EDIT_INPUTS))
 // A typed delta or a layer name never needs more; a paste of a whole file
-// into the dx field costs a slice, not a render of 16 MB of text.
+// into the dx field costs a slice, not a render of 16 MB of text. The point
+// list is the one field that legitimately runs long.
 export const MAX_INPUT_CHARS = 64
+export const MAX_POINT_LIST_CHARS = 4096
+const INPUT_LIMITS = Object.freeze({ pts: MAX_POINT_LIST_CHARS })
 
 export default function EngineSessionProvider({
   createWorker = defaultCreateWorker,
@@ -75,7 +85,8 @@ export default function EngineSessionProvider({
   const [inputs, setInputs] = useState(DEFAULT_EDIT_INPUTS)
   const setInput = useCallback((key, value) => {
     if (!INPUT_KEYS.has(key) || typeof value !== 'string') return
-    const bounded = value.length > MAX_INPUT_CHARS ? value.slice(0, MAX_INPUT_CHARS) : value
+    const limit = INPUT_LIMITS[key] ?? MAX_INPUT_CHARS
+    const bounded = value.length > limit ? value.slice(0, limit) : value
     setInputs((current) => (
       current[key] === bounded ? current : Object.freeze({ ...current, [key]: bounded })
     ))

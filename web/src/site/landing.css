@@ -1206,6 +1206,8 @@
 }
 .ribbon-input:focus-visible { outline: 2px solid #7fd6a6; outline-offset: 1px; }
 .ribbon-input:disabled { color: rgba(240, 242, 240, .45); background: transparent; }
+.ribbon-input.wide { width: 132px; }
+.ribbon-cluster-inputs input[type="checkbox"] { margin: 0; accent-color: #7fd6a6; }
 
 /* --- W4c-C: the page dissolves into the viewport (CAD/Solar only) -------
    Operator, twice: the drawing IS the workspace. Before this the console's

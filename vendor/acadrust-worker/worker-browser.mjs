@@ -64,6 +64,8 @@ function projectEntities(doc) {
   // objects; re-key `index` as the string id the surface's list keys on.
   return doc.editableEntities().map((entity) => ({
     id: String(entity.index),
+    // The identity that survives a write/re-parse (an index does not).
+    handle: entity.handle,
     type: entity.type,
     layer: entity.layer,
     closed: entity.closed,
@@ -98,24 +100,52 @@ function entityIndex(payload) {
   return Number.isInteger(index) && index >= 0 ? index : null
 }
 
+// W4d Draw group: a create op takes no entityId; each maps to ONE wrapper
+// method that validates before it writes and returns the new entity's
+// handle. An engine that lacks the method (the JS stand-in) is refused
+// EXPLICITLY, as a typed reason — never a TypeError read as a crash, never a
+// pretend success.
+const CREATE_OPS = Object.freeze({
+  createLine: (doc, p) => doc.createLine(Number(p.x1), Number(p.y1), Number(p.x2), Number(p.y2), String(p.layer ?? '')),
+  createCircle: (doc, p) => doc.createCircle(Number(p.cx), Number(p.cy), Number(p.radius), String(p.layer ?? '')),
+  createArc: (doc, p) => doc.createArc(
+    Number(p.cx), Number(p.cy), Number(p.radius), Number(p.startDeg), Number(p.endDeg), String(p.layer ?? '')),
+  createPolyline: (doc, p) => doc.createPolyline(
+    Float64Array.from(Array.isArray(p.points) ? p.points : []), Boolean(p.closed), String(p.layer ?? '')),
+})
+
 async function applyEdit(engine, message) {
   const { op, payload } = message
   if (!current) return refused(op, 'no_document_loaded')
-  const index = entityIndex(payload)
-  if (index === null) return refused(op, 'bad_entity_id')
   const doc = current.doc
-  try {
-    if (op === 'delete') doc.deleteEntity(index)
-    else if (op === 'move') doc.translateEntity(index, Number(payload.dx), Number(payload.dy))
-    else if (op === 'moveVertex') doc.moveVertex(index, Number(payload.vertexIndex), Number(payload.dx), Number(payload.dy))
-    else if (op === 'addVertex') doc.addVertexAfter(index, Number(payload.vertexIndex), Number(payload.x), Number(payload.y))
-    else if (op === 'deleteVertex') doc.deleteVertex(index, Number(payload.vertexIndex))
-    else if (op === 'setLayer') doc.setEntityLayer(index, String(payload.layer ?? ''))
-    else return refused(op, `unknown_op:${op}`)
-  } catch (error) {
-    // The wrapper validates before it writes, so a refusal here means the
-    // document was NOT mutated. Surface the typed reason string as-is.
-    return refused(op, error instanceof Error ? error.message : String(error))
+  let createdHandle = null
+  const create = CREATE_OPS[op]
+  if (create) {
+    if (typeof doc[op] !== 'function') return refused(op, `engine_lacks_create:${op}`)
+    try {
+      createdHandle = Number(create(doc, payload && typeof payload === 'object' ? payload : {}))
+    } catch (error) {
+      // The wrapper validates before it writes: a refusal here means the
+      // document was NOT mutated. Surface the typed reason string as-is.
+      return refused(op, error instanceof Error ? error.message : String(error))
+    }
+    if (!Number.isFinite(createdHandle)) return refused(op, 'create_returned_no_handle')
+  } else {
+    const index = entityIndex(payload)
+    if (index === null) return refused(op, 'bad_entity_id')
+    try {
+      if (op === 'delete') doc.deleteEntity(index)
+      else if (op === 'move') doc.translateEntity(index, Number(payload.dx), Number(payload.dy))
+      else if (op === 'moveVertex') doc.moveVertex(index, Number(payload.vertexIndex), Number(payload.dx), Number(payload.dy))
+      else if (op === 'addVertex') doc.addVertexAfter(index, Number(payload.vertexIndex), Number(payload.x), Number(payload.y))
+      else if (op === 'deleteVertex') doc.deleteVertex(index, Number(payload.vertexIndex))
+      else if (op === 'setLayer') doc.setEntityLayer(index, String(payload.layer ?? ''))
+      else return refused(op, `unknown_op:${op}`)
+    } catch (error) {
+      // The wrapper validates before it writes, so a refusal here means the
+      // document was NOT mutated. Surface the typed reason string as-is.
+      return refused(op, error instanceof Error ? error.message : String(error))
+    }
   }
 
   // Write-back leg: serialize, reparse, report from the REPARSE — the UI
@@ -124,7 +154,7 @@ async function applyEdit(engine, message) {
   const reparsed = engine.parseDxf(written)
   const entities = projectEntities(reparsed)
   current = { documentId: current.documentId, doc: reparsed }
-  return {
+  const reply = {
     type: 'editApplied',
     op,
     ok: true,
@@ -133,6 +163,14 @@ async function applyEdit(engine, message) {
     bytes: written,
     byteLength: written.length,
   }
+  if (createdHandle !== null) {
+    // What was just drawn, found again BY HANDLE in the re-parse (an index
+    // is not an identity). null means the writer dropped it: the caller
+    // must treat that as a defect, never as success.
+    const created = entities.find((e) => e.handle === createdHandle)
+    reply.createdId = created ? created.id : null
+  }
+  return reply
 }
 
 /** Handles one boundary message; returns the reply or null. Never throws. */

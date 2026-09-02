@@ -26,6 +26,8 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 
 import CadEditSurface from './CadEditSurface.jsx'
 import EngineSessionProvider from './EngineSessionProvider.jsx'
+import EngineRibbonClusters from './EngineRibbonClusters.jsx'
+import DraftingRibbon from '../site/DraftingRibbon.jsx'
 
 // FENCE NOTE (same discipline as engineWasmHarness.realwasm.test.js): this
 // file never spells the engine's vendor path outside the ONE literal
@@ -422,5 +424,93 @@ describe.skipIf(!HAS_ENGINE)('acceptance: real-engine editing through the bounda
     for (const name of ['Delete selected', 'Move selected', 'Set layer']) {
       expect(screen.getByRole('button', { name })).toBeDisabled()
     }
+  })
+})
+
+describe.skipIf(!HAS_ENGINE)('acceptance: the Draw group creates real entities through the boundary (W4d Slice B)', () => {
+  // The cockpit's exact shape: the ribbon's engine clusters and the import
+  // pane under the ONE provider, the real compiled engine behind the worker.
+  function renderCockpit() {
+    worker = new FakeEngineWorker()
+    return render(
+      <EngineSessionProvider createWorker={() => worker}>
+        <DraftingRibbon clusters={[]}>
+          <EngineRibbonClusters importOpen={false} onToggleImport={() => {}} />
+        </DraftingRibbon>
+        <CadEditSurface enabled />
+      </EngineSessionProvider>,
+    )
+  }
+  const drawTool = (op) => document.querySelector(`.drafting-ribbon [data-tool="draw:${op}"]`)
+  const modifyTool = (op) => document.querySelector(`.drafting-ribbon [data-tool="modify:${op}"]`)
+
+  it('draws a line, a circle, an arc and a polyline; each lands selected, re-parsed from the written bytes', async () => {
+    renderCockpit()
+    await openDocument(ONE_LINE_DXF)
+    expect(screen.getByTestId('cad-edit-entity-count').textContent).toBe('1')
+
+    fireEvent.change(screen.getByLabelText('ribbon x2'), { target: { value: '40' } })
+    fireEvent.change(screen.getByLabelText('ribbon y2'), { target: { value: '30' } })
+    fireEvent.click(drawTool('createLine'))
+    await statusContains('createLine applied: entity 1 drawn')
+    expect(screen.getByTestId('cad-edit-entity-count').textContent).toBe('2')
+    expect(screen.getByTestId('cad-edit-entity-list').textContent).toContain('40,30')
+    expect(screen.getAllByRole('radio')[1].checked).toBe(true)
+
+    fireEvent.change(screen.getByLabelText('ribbon r'), { target: { value: '2.5' } })
+    fireEvent.click(drawTool('createCircle'))
+    await statusContains('createCircle applied: entity 2 drawn')
+    expect(screen.getByTestId('cad-edit-entity-list').textContent).toContain('CIRCLE on layer 0')
+
+    fireEvent.change(screen.getByLabelText('ribbon end'), { target: { value: '180' } })
+    fireEvent.click(drawTool('createArc'))
+    await statusContains('createArc applied: entity 3 drawn')
+    expect(screen.getByTestId('cad-edit-entity-list').textContent).toContain('ARC on layer 0')
+
+    fireEvent.change(screen.getByLabelText('ribbon points'), { target: { value: '0,0 10,0 10,4' } })
+    fireEvent.click(screen.getByLabelText('ribbon closed'))
+    fireEvent.click(drawTool('createPolyline'))
+    await statusContains('createPolyline applied: entity 4 drawn')
+    expect(screen.getByTestId('cad-edit-entity-count').textContent).toBe('5')
+    expect(screen.getByTestId('cad-edit-entity-list').textContent).toContain('3 vertices · closed')
+
+    // What the ribbon drew, the ribbon can modify: the selection is on the
+    // polyline; delete it and the count re-parses back down.
+    expect(modifyTool('delete').disabled).toBe(false)
+    fireEvent.click(modifyTool('delete'))
+    await statusContains('delete applied')
+    expect(screen.getByTestId('cad-edit-entity-count').textContent).toBe('4')
+  })
+
+  it('the engine refuses a degenerate create with its typed reason and mutates nothing', async () => {
+    renderCockpit()
+    await openDocument(ONE_LINE_DXF)
+    // The client sentence catches r=0; force the engine-side refusal with a
+    // sweep the client cannot see through: 0 -> 360 is a full turn = zero.
+    fireEvent.change(screen.getByLabelText('ribbon end'), { target: { value: '360' } })
+    fireEvent.click(drawTool('createArc'))
+    await statusContains('Arc refused')
+    fireEvent.change(screen.getByLabelText('ribbon end'), { target: { value: '720' } })
+    fireEvent.click(drawTool('createArc'))
+    await statusContains('Arc refused')
+    expect(screen.getByTestId('cad-edit-entity-count').textContent).toBe('1')
+  })
+
+  it('a created circle takes a centre move and re-layer, and refuses vertex-list edits by kind', async () => {
+    renderCockpit()
+    await openDocument(ONE_LINE_DXF)
+    fireEvent.click(drawTool('createCircle'))
+    await statusContains('createCircle applied: entity 1 drawn')
+    fireEvent.change(screen.getByLabelText('ribbon dx'), { target: { value: '7' } })
+    fireEvent.change(screen.getByLabelText('ribbon dy'), { target: { value: '3' } })
+    fireEvent.click(modifyTool('move'))
+    await statusContains('move applied')
+    expect(screen.getByTestId('cad-edit-entity-list').textContent).toContain('7,3')
+    fireEvent.click(modifyTool('addVertex'))
+    await statusContains('entity_kind_has_no_vertex_list')
+    fireEvent.change(screen.getByLabelText('ribbon set layer'), { target: { value: 'Moved' } })
+    fireEvent.click(modifyTool('setLayer'))
+    await statusContains('setLayer applied')
+    expect(screen.getByTestId('cad-edit-entity-list').textContent).toContain('CIRCLE on layer Moved')
   })
 })

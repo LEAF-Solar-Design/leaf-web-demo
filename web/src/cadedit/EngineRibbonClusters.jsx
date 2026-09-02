@@ -37,6 +37,32 @@ export const SAVE_REASONS = Object.freeze({
   busy: 'engine busy',
 })
 
+export const DRAW_REASONS = Object.freeze({
+  noDocument: 'opens on an imported DXF',
+  crashed: 'engine stopped: open a drawing again',
+  busy: 'engine busy',
+})
+
+// W4d Slice B: the Draw group. Each button creates ONE primitive from the
+// numeric operands in the row below (no canvas rubber-banding in this slice;
+// that is a later interaction wave). The engine validates again and refuses
+// with a typed reason; the selection lands on what was just drawn.
+const DRAW_OPS = Object.freeze([
+  { op: 'createLine', label: 'line', title: 'Draw a line from x,y to x2,y2' },
+  { op: 'createPolyline', label: 'polyline', title: 'Draw a polyline through the points listed (x,y pairs)' },
+  { op: 'createCircle', label: 'circle', title: 'Draw a circle at x,y with radius r' },
+  { op: 'createArc', label: 'arc', title: 'Draw an arc at x,y with radius r from start to end (degrees)' },
+])
+
+/** Why the Draw group is unavailable right now, or '' when it is live. Creation needs no selection. */
+export function drawReason(session) {
+  if (!session) return DRAW_REASONS.noDocument
+  if (session.errorKind === SESSION_ERROR.CRASHED) return DRAW_REASONS.crashed
+  if (!session.engineParsed) return DRAW_REASONS.noDocument
+  if (session.busy) return DRAW_REASONS.busy
+  return ''
+}
+
 const OPS = Object.freeze([
   { op: 'delete', label: 'delete', title: 'Delete the selected entity' },
   { op: 'move', label: 'move', title: 'Move the selected entity by dx, dy' },
@@ -73,8 +99,9 @@ export function saveReason(session, canSave) {
 export default function EngineRibbonClusters({ importOpen = false, onToggleImport }) {
   const { session, inputs, setInput, canSave } = useEngineSessionContext()
   const modify = modifyReason(session)
+  const draw = drawReason(session)
   const save = saveReason(session, canSave)
-  const { applyEdit } = session.actions
+  const { applyEdit, create } = session.actions
 
   const drawingTools = [
     {
@@ -95,20 +122,22 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     },
   ]
 
-  const inputField = (key, label, mode) => (
+  const inputField = (key, label, mode, disabled, wide = false) => (
     <label key={key}>
       {label}
       <input
-        className="ribbon-input"
+        className={`ribbon-input${wide ? ' wide' : ''}`}
         type="text"
         inputMode={mode}
         value={inputs[key]}
         onChange={(event) => setInput(key, event.target.value)}
         aria-label={`ribbon ${label}`}
-        disabled={!!modify && modify !== MODIFY_REASONS.noSelection}
+        disabled={disabled}
       />
     </label>
   )
+  const modifyInputsOff = !!modify && modify !== MODIFY_REASONS.noSelection
+  const drawInputsOff = !!draw
 
   return (
     <>
@@ -116,15 +145,58 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
         {drawingTools.map((tool) => <RibbonTool key={tool.id} tool={tool} />)}
       </RibbonCluster>
       <RibbonCluster
+        id="draw"
+        label="Draw"
+        note={draw || null}
+        extra={(
+          <div className="ribbon-cluster-inputs" data-testid="ribbon-draw-inputs">
+            {inputField('x', 'x', 'decimal', drawInputsOff)}
+            {inputField('y', 'y', 'decimal', drawInputsOff)}
+            {inputField('x2', 'x2', 'decimal', drawInputsOff)}
+            {inputField('y2', 'y2', 'decimal', drawInputsOff)}
+            {inputField('r', 'r', 'decimal', drawInputsOff)}
+            {inputField('a0', 'start', 'decimal', drawInputsOff)}
+            {inputField('a1', 'end', 'decimal', drawInputsOff)}
+            {inputField('pts', 'points', 'text', drawInputsOff, true)}
+            <label>
+              closed
+              <input
+                type="checkbox"
+                checked={inputs.closed === 'true'}
+                onChange={(event) => setInput('closed', event.target.checked ? 'true' : 'false')}
+                aria-label="ribbon closed"
+                disabled={drawInputsOff}
+              />
+            </label>
+            {inputField('layer', 'layer', 'text', drawInputsOff)}
+          </div>
+        )}
+      >
+        {DRAW_OPS.map(({ op, label, title }) => (
+          <RibbonTool
+            key={op}
+            tool={{
+              id: `draw:${op}`,
+              label,
+              title,
+              write: true,
+              disabled: !!draw,
+              reason: draw,
+              onClick: () => create(op, inputs),
+            }}
+          />
+        ))}
+      </RibbonCluster>
+      <RibbonCluster
         id="modify"
         label="Modify"
         note={modify || null}
         extra={(
           <div className="ribbon-cluster-inputs" data-testid="ribbon-modify-inputs">
-            {inputField('dx', 'dx', 'decimal')}
-            {inputField('dy', 'dy', 'decimal')}
-            {inputField('vertexIndex', 'vertex', 'numeric')}
-            {inputField('layer', 'layer', 'text')}
+            {inputField('dx', 'dx', 'decimal', modifyInputsOff)}
+            {inputField('dy', 'dy', 'decimal', modifyInputsOff)}
+            {inputField('vertexIndex', 'vertex', 'numeric', modifyInputsOff)}
+            {inputField('layer', 'set layer', 'text', modifyInputsOff)}
           </div>
         )}
       >

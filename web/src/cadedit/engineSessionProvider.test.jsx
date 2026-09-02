@@ -26,7 +26,9 @@ import {
 } from '../drawing/DrawingIdentityProvider.jsx'
 
 import CadEditSurface from './CadEditSurface.jsx'
-import EngineRibbonClusters, { MODIFY_REASONS, SAVE_REASONS, modifyReason, saveReason } from './EngineRibbonClusters.jsx'
+import EngineRibbonClusters, {
+  DRAW_REASONS, MODIFY_REASONS, SAVE_REASONS, drawReason, modifyReason, saveReason,
+} from './EngineRibbonClusters.jsx'
 import EngineSessionProvider, { MAX_INPUT_CHARS, useEngineSessionContext } from './EngineSessionProvider.jsx'
 import { SESSION_ERROR } from './engineSession.js'
 
@@ -314,6 +316,80 @@ describe('worker-crash recovery', () => {
   })
 })
 
+describe('the Draw group (W4d Slice B): creation from the ribbon, selection lands on what was drawn', () => {
+  const drawTool = (op) => document.querySelector(`.drafting-ribbon [data-tool="draw:${op}"]`)
+  const drawNote = () => document.querySelector('.drafting-ribbon [data-group="draw"] .ribbon-note')
+
+  it('is unavailable with the reason until a DXF is imported, then live without any selection', async () => {
+    const studio = mount()
+    expect(drawNote().textContent).toBe(DRAW_REASONS.noDocument)
+    for (const op of ['createLine', 'createPolyline', 'createCircle', 'createArc']) {
+      expect(drawTool(op).disabled).toBe(true)
+      expect(drawTool(op).title).toBe(DRAW_REASONS.noDocument)
+    }
+    expect(screen.getByLabelText('ribbon x').disabled).toBe(true)
+    await openAndLoad(studio, [LINE])
+    expect(drawNote()).toBeNull()
+    expect(drawTool('createLine').disabled).toBe(false)
+    expect(screen.getByLabelText('ribbon x').disabled).toBe(false)
+    // Modify still wants a selection; Draw does not — different ladders.
+    expect(modifyNote().textContent).toBe(MODIFY_REASONS.noSelection)
+  })
+
+  it('posts the create with the typed operands, and the reply seats the selection on the new entity', async () => {
+    const studio = mount()
+    await openAndLoad(studio, [LINE])
+    fireEvent.change(screen.getByLabelText('ribbon x2'), { target: { value: '40' } })
+    fireEvent.change(screen.getByLabelText('ribbon y2'), { target: { value: '30' } })
+    fireEvent.change(screen.getByLabelText('ribbon layer'), { target: { value: 'Sketch' } })
+    fireEvent.click(drawTool('createLine'))
+    const posted = studio.workers[0].posted
+    expect(posted[posted.length - 1]).toEqual({
+      type: 'applyEdit', op: 'createLine', payload: { x1: 0, y1: 0, x2: 40, y2: 30, layer: 'Sketch' },
+    })
+    expect(drawNote().textContent).toBe(DRAW_REASONS.busy)
+    const drawn = { id: 'e9', type: 'LINE', layer: 'Sketch', vertices: [[0, 0], [40, 30]] }
+    studio.workers[0].emit({ ...editApplied('createLine', [LINE, drawn]), createdId: 'e9' })
+    expect(studio.context.session.selectedId).toBe('e9')
+    expect(screen.getAllByRole('radio')[1].checked).toBe(true)
+    // Drawn, selected: Modify is live on it immediately.
+    expect(modifyNote()).toBeNull()
+    expect(ribbonTool('delete').disabled).toBe(false)
+    expect(screen.getByRole('status').textContent).toMatch(/entity e9 drawn/)
+  })
+
+  it('the closed flag and the point list ride the polyline create; the circle and arc take the radius and angles', async () => {
+    const studio = mount()
+    await openAndLoad(studio, [LINE])
+    fireEvent.change(screen.getByLabelText('ribbon points'), { target: { value: '0,0 10,0 10,4' } })
+    fireEvent.click(screen.getByLabelText('ribbon closed'))
+    fireEvent.click(drawTool('createPolyline'))
+    let posted = studio.workers[0].posted
+    expect(posted[posted.length - 1].payload).toEqual({ points: [0, 0, 10, 0, 10, 4], closed: true, layer: '' })
+    studio.workers[0].emit({ ...editApplied('createPolyline', [LINE, POLY]), createdId: 'e2' })
+    fireEvent.change(screen.getByLabelText('ribbon r'), { target: { value: '2.5' } })
+    fireEvent.click(drawTool('createCircle'))
+    posted = studio.workers[0].posted
+    expect(posted[posted.length - 1].payload).toEqual({ cx: 0, cy: 0, radius: 2.5, layer: '' })
+    studio.workers[0].emit({ ...editApplied('createCircle', [LINE, POLY]), createdId: 'e1' })
+    fireEvent.change(screen.getByLabelText('ribbon end'), { target: { value: '180' } })
+    fireEvent.click(drawTool('createArc'))
+    posted = studio.workers[0].posted
+    expect(posted[posted.length - 1].payload).toEqual({ cx: 0, cy: 0, radius: 2.5, startDeg: 0, endDeg: 180, layer: '' })
+  })
+
+  it('a malformed operand is a sentence in the status, never a message on the wire', async () => {
+    const studio = mount()
+    await openAndLoad(studio, [LINE])
+    const before = studio.workers[0].posted.length
+    fireEvent.change(screen.getByLabelText('ribbon r'), { target: { value: '0' } })
+    fireEvent.click(drawTool('createCircle'))
+    expect(studio.workers[0].posted.length).toBe(before)
+    expect(screen.getByRole('status').textContent).toMatch(/Circle refused: r must be greater than 0/)
+    expect(drawTool('createCircle').disabled).toBe(false)
+  })
+})
+
 describe('the reason ladders are pure and total', () => {
   it('modifyReason resolves in the order a user clears them', () => {
     expect(modifyReason(null)).toBe(MODIFY_REASONS.noDocument)
@@ -323,6 +399,14 @@ describe('the reason ladders are pure and total', () => {
     expect(modifyReason({ engineParsed: true, selected: null })).toBe(MODIFY_REASONS.noSelection)
     expect(modifyReason({ engineParsed: true, selected: { editable: false } })).toBe(MODIFY_REASONS.readOnlyKind)
     expect(modifyReason({ engineParsed: true, selected: { id: 'e1' } })).toBe('')
+  })
+
+  it('drawReason needs a parsed document and a live engine, never a selection', () => {
+    expect(drawReason(null)).toBe(DRAW_REASONS.noDocument)
+    expect(drawReason({ errorKind: SESSION_ERROR.CRASHED, engineParsed: true })).toBe(DRAW_REASONS.crashed)
+    expect(drawReason({ engineParsed: false })).toBe(DRAW_REASONS.noDocument)
+    expect(drawReason({ engineParsed: true, busy: true })).toBe(DRAW_REASONS.busy)
+    expect(drawReason({ engineParsed: true, selected: null })).toBe('')
   })
 
   it('saveReason names the missing precondition', () => {

@@ -465,7 +465,7 @@ test.describe('route matrix, rail ON', () => {
     // it). A flag-off build is a truthful state too: the groups are ABSENT,
     // not present-and-dead, and this row says which build it proved.
     const groups = await ribbon.locator('.ribbon-cluster').evaluateAll((els) => els.map((el) => el.dataset.group || `family:${el.dataset.family}`))
-    const engineGroups = ['drawing', 'modify']
+    const engineGroups = ['drawing', 'draw', 'modify']
     const cadEditOn = groups.includes('modify')
     const fixedFirst = cadEditOn ? [...engineGroups, 'view', 'version', 'layers'] : ['view', 'version', 'layers']
     expect(groups.slice(0, fixedFirst.length)).toEqual(fixedFirst)
@@ -483,6 +483,10 @@ test.describe('route matrix, rail ON', () => {
     // reason in its accessible name — never a silently greyed group.
     const modify = ribbon.locator('[data-group="modify"]')
     await expect(modify.locator('.ribbon-note')).toHaveText('opens on an imported DXF')
+    const draw = ribbon.locator('[data-group="draw"]')
+    await expect(draw.locator('.ribbon-note')).toHaveText('opens on an imported DXF')
+    await expect(draw.locator('.ribbon-tool')).toHaveCount(4)
+    for (const btn of await draw.locator('.ribbon-tool').all()) await expect(btn).toBeDisabled()
     const modifyTools = modify.locator('.ribbon-tool')
     await expect(modifyTools).toHaveCount(6)
     for (const btn of await modifyTools.all()) {
@@ -553,11 +557,30 @@ test.describe('route matrix, rail ON', () => {
     // The engine re-parsed its own written bytes and the pane shows the result.
     await expect(page.getByRole('status').filter({ hasText: /delete applied/ })).toHaveCount(1, { timeout: 60_000 })
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('1')
-    // NOT asserted here, on purpose: whether the deleted entity's selection
-    // clears. Entity ids are document-order INDEXES today, so after deleting
-    // index 0 the survivor becomes id 0 and the selection "survives" onto a
-    // different entity. Found by this row on the real stack; fixed in the
-    // Draw slice, which makes ids the engine handles, and asserted there.
+    // The deleted entity's selection cleared with it (selection identity).
+    await expect(modify.locator('.ribbon-note')).toHaveText('select an entity in the imported DXF')
+
+    // W4d Slice B: the Draw group creates real entities in the imported
+    // document. The selection lands on what was drawn, so Modify is live on
+    // it at once; the count is the engine's re-parse of its own bytes.
+    await expect(draw.locator('.ribbon-note')).toHaveCount(0)
+    await page.getByLabel('ribbon x2').fill('40')
+    await page.getByLabel('ribbon y2').fill('30')
+    await ribbon.locator('[data-tool="draw:createLine"]').click()
+    await expect(page.getByRole('status').filter({ hasText: /createLine applied: entity \d+ drawn/ })).toHaveCount(1, { timeout: 60_000 })
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('2')
+    await expect(modify.locator('.ribbon-note')).toHaveCount(0)
+    await expect(del).toBeEnabled()
+    await page.getByLabel('ribbon r').fill('2.5')
+    await ribbon.locator('[data-tool="draw:createCircle"]').click()
+    await expect(page.getByRole('status').filter({ hasText: /createCircle applied: entity \d+ drawn/ })).toHaveCount(1, { timeout: 60_000 })
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('3')
+    await expect(page.getByTestId('cad-edit-entity-list')).toContainText('CIRCLE on layer 0')
+    // A degenerate create is refused as a sentence, and nothing changes.
+    await page.getByLabel('ribbon r').fill('0')
+    await ribbon.locator('[data-tool="draw:createCircle"]').click()
+    await expect(page.getByRole('status').filter({ hasText: /Circle refused: r must be greater than 0/ })).toHaveCount(1)
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('3')
   })
 
   test('solar depth: real solved strings on the Solar tab only, honesty-gated (W4c-V3)', async ({ page, request }) => {
