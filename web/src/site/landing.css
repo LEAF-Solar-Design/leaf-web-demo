@@ -840,3 +840,113 @@
 /* usage ledger (showcase #2): the cap bar rides inside the trust row */
 .tc-usage-bar { display: inline-block; width: 72px; margin-left: 8px; vertical-align: middle; }
 .tc-trust-row b { font-variant-numeric: tabular-nums; }
+
+/* ================= W3 one-shell: the studio shell (console mode) =========
+   Host for scene 'app' under LEAF_ONE_SHELL_ENABLED (SiteRoot). Deliberately
+   NOT .stage-root: that class re-pins the full dark token set above and would
+   flip the console's ratified paper identity; the studio shell is a bare
+   fixed host whose subtree keeps :root tokens. Class adoption + the real
+   two-material re-pin is W4's token work.
+
+   The GROUND (z0) carries the console's own Viewer via portal (App.jsx).
+   Everything console floats above it; the pointer chain below punches a
+   hole down the ancestor stack so clicks in uncovered space reach the
+   drawing (pan/zoom/select), while every painted pane keeps its own
+   events. Known W3 trades, resolved in W4: the center scrollbar is not
+   draggable in this mode (wheel over cards still scrolls), and fit centers
+   on the viewport, not the old card window.
+
+   POINTER CHAIN CONTRACT (panel finding, W3 mount): every link that goes
+   `none` is a plain two-class selector (0,2,0); every RESTORE is wrapped in
+   :where() so it carries ZERO specificity. A declared value still beats the
+   inherited `none`, so painted panes get their events back, but any element
+   that declares its own pointer-events (the tour root, .exit fades, the
+   drawer layer, the next `none` link in this chain) keeps it. The old
+   blanket `.app > * { auto }` (0,2,0) out-specified `.tour-root { none }`
+   (0,1,0) into a full-viewport click shield, and `main.center-scroll > *`
+   (0,2,1) beat `.workspace-card { none }` (0,2,0) so the card window never
+   punched through. e2e receipt: one-shell-mount.spec.mjs asserts computed
+   pointer-events down the chain and elementFromPoint at the card window. */
+.studio-shell {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  background: #0a0a0a;
+}
+.studio-shell .studio-ground { position: absolute; inset: 0; z-index: 0; }
+.studio-ground .studio-ground-viewer { position: absolute; inset: 0; }
+/* The console floats over the ground. Transparent field: panes that paint
+   themselves stay opaque; the sheet + card chrome around the drawing window
+   go clear so the ground reads through. */
+.studio-shell .app { position: relative; z-index: 1; background: transparent; pointer-events: none; }
+:where(.studio-shell .app > *) { pointer-events: auto; }
+.studio-shell .center-col { pointer-events: none; }
+:where(.studio-shell .center-col > *) { pointer-events: auto; }
+.studio-shell main.center-scroll { background: none; pointer-events: none; }
+:where(.studio-shell main.center-scroll > *) { pointer-events: auto; }
+.studio-shell .workspace-card {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  pointer-events: none;
+}
+:where(.studio-shell .workspace-card > *) { pointer-events: auto; }
+/* The card's own chrome stays legible over the drawing. */
+.studio-shell .viewer-toolbar { background: var(--card); border: 1px solid var(--border); border-radius: 4px; }
+.studio-shell .viewer-wrap { background: transparent; pointer-events: none; }
+:where(.studio-shell .viewer-wrap > *) { pointer-events: auto; }
+
+/* SMALL SCREENS (<=980px): styles.css releases .app's 100vh trap so the
+   DOCUMENT scrolls and structural.css retires the inner scrollport. Inside a
+   fixed overflow:hidden host the document has no flow height, so the shell
+   itself becomes the scrollport here and the ground pins to the viewport
+   (fixed) so the drawing stays put while the console scrolls over it. The
+   command bar is already viewport-fixed at this breakpoint (styles.css). */
+@media (max-width: 980px) {
+  .studio-shell { overflow-x: hidden; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  .studio-shell .studio-ground { position: fixed; inset: 0; }
+}
+
+/* CONTRAST RE-PINS: text that used to ride the paper sheet now sits on the
+   dark ground (or the drawing). landing.css is the dark-surface file, so
+   light literals are the local convention here (the token re-pin contract
+   bans them from styles.css, not from this file). Direct declarations on
+   descendants (`.hint b`, tab labels, continuity values) need their own
+   re-pin: an inherited color never beats a declared one. */
+.studio-shell :is(.kicker, .home-q, .hint) { color: rgba(240, 242, 240, .92); }
+.studio-shell .home-q em { color: rgba(240, 242, 240, .98); }
+.studio-shell .hint b { color: rgba(240, 242, 240, .98); }
+/* The running strip has no background by design (it rode the sheet); over
+   the ground it takes the same card material as its decision/failed siblings. */
+.studio-shell .strip-running {
+  padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--card); color: var(--foreground);
+}
+/* Unselected surface tabs and their state labels sit on the transparent nav. */
+.studio-shell .app .tc-product-tabs [role="tab"] { color: rgba(240, 242, 240, .74); }
+.studio-shell .app .tc-product-tabs [role="tab"]:hover { color: rgba(240, 242, 240, .98); background: rgba(240, 242, 240, .08); }
+.studio-shell .app .tc-product-tabs [role="tab"][aria-selected="true"] { color: var(--foreground); background: var(--card); }
+.studio-shell .app .tc-product-tabs [role="tab"] small { color: rgba(240, 242, 240, .62); }
+/* The state labels' paper-ramp status colors (styles.css, same (0,4,1)
+   specificity, later in sheet order) would win the tie: pin them one
+   attribute higher with dark-ground-safe ink. */
+.studio-shell .app .tc-product-tabs [role="tab"] small[data-state="available"] { color: #7fd6a6; }
+.studio-shell .app .tc-product-tabs [role="tab"] small[data-state="unavailable"] { color: #f0997b; }
+.studio-shell .app .tc-product-tabs [role="tab"][aria-selected="true"] small { color: var(--muted-2); }
+.studio-shell .app .tc-product-tabs [role="tab"][aria-selected="true"] small[data-state="available"] { color: var(--status-success); }
+.studio-shell .app .tc-product-tabs [role="tab"][aria-selected="true"] small[data-state="unavailable"] { color: var(--status-danger); }
+.studio-shell .app .tc-product-shared { color: rgba(240, 242, 240, .7); }
+.studio-shell .app .tc-continuity,
+.studio-shell .app .tc-continuity-label { color: rgba(240, 242, 240, .7); }
+.studio-shell .app .tc-continuity-item strong { color: rgba(240, 242, 240, .98); }
+.studio-shell .chip-neutral { color: rgba(240, 242, 240, .88); background: rgba(240, 242, 240, .1); }
+.studio-shell .chip-neutral:hover { background: rgba(240, 242, 240, .18); }
+/* Pre-intake and skeleton feedback render on the bare ground. */
+.studio-shell .viewer-wrap .loading-line,
+.studio-ground .loading-line { color: rgba(240, 242, 240, .8); }
+/* Error copy that used to ride the card's paper: the viewer-refresh
+   inline error and the pane-failure title/reason inside the transparent
+   card and wrap. */
+.studio-shell .workspace-card .inline-error { color: rgba(240, 242, 240, .92); }
+.studio-shell .viewer-wrap .pane-fail-title { color: rgba(240, 242, 240, .96); }
+.studio-shell .viewer-wrap .pane-fail-reason { color: rgba(240, 242, 240, .72); }

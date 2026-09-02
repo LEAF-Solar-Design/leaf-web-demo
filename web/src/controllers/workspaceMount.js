@@ -16,9 +16,13 @@
 //     even under a `?drawing=` boot. PARITY, on purpose: App attached its
 //     module-const DEFAULT_DRAWING_ID from the day converse existed, and the
 //     provider mount ported that literal. Whether the console's agent session
-//     should follow the drawing identity instead is a REAL coherence question
-//     — recorded for the W3 mount, where the shared shell decides it once,
-//     with its own test. Do not change it as a side effect of a refactor.
+//     should follow the drawing identity instead is a REAL coherence question.
+//     The W3 MOUNT PR (studio ground portal) kept this parity ON PURPOSE: it
+//     moves only where the Viewer renders, never the drawing dataflow. The
+//     decision belongs to the W3 TAIL (retiring the console's inline render
+//     path and migrating drawing state onto the shared controller), where the
+//     drawing identity and the converse session are wired in one place with
+//     their own test. Do not change it as a side effect of a refactor.
 //
 //   * drawingOptions are the OPERATOR's alone. The stage binds its loaders to
 //     the public-demo flag (the one reading SiteRoot made of `?demo`) and

@@ -1,6 +1,8 @@
 import './structural.css'
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, Suspense } from 'react'
+import { createPortal } from 'react-dom'
 import { track, setTourStep } from './telemetry.js'
+import { useStudioGround } from './site/studioGround.js'
 // The 3D viewer drags in `three`; loading it lazily (mirroring the auth.js
 // dynamic-import pattern) keeps first paint off the critical path.
 const Viewer = React.lazy(() => import('./components/Viewer.jsx'))
@@ -215,6 +217,10 @@ export default function App() {
   // module-const behavior — the seed is frozen at mount and nothing in this
   // shell promotes a new identity yet.
   const { drawingId: REQUESTED_DRAWING_ID, source: DRAWING_SOURCE } = useDrawingIdentity()
+  // W3 one-shell: non-null ONLY under the studio shell (rail on). The sole
+  // consumer is the Viewer render site, which portals into it; null renders
+  // the old shell byte-for-byte (the rollback contract, studioGround.js).
+  const studioGround = useStudioGround()
   const [mock, setMock] = useState(config.mockDefault)
   const [loadErr, setLoadErr] = useState(null)
   const [intakeRetryKey, setIntakeRetryKey] = useState(0) // X3 Retry — bumping re-runs the intake load effect
@@ -2673,22 +2679,35 @@ export default function App() {
                 <span className="dot live pulse" aria-hidden="true" /> Loading drawing
               </div>
             )}
-            {intake && (
-              <Suspense fallback={<ViewerSkeleton />}>
-              <Viewer
-                ref={viewerRef}
-                intake={intake}
-                colorForLayer={colorForLayer}
-                visibleLayers={visibleLayers}
-                highlightHandles={overlay?.highlight_handles}
-                markers={overlay?.markers}
-                overlayPolylines={overlay?.polylines}
-                selectedHandle={selectedHandle}
-                onSelectEntity={setSelectedHandle}
-                pendingEdit={pendingEdit || writeGhost}
-              />
-              </Suspense>
-            )}
+            {intake && (() => {
+              // W3 one-shell: the console OWNS this element — every prop, the
+              // ref, the version/undo/redo imperative path — in BOTH shells.
+              // Under the studio shell the element PORTALS into the ground
+              // layer (z0, under the floating console) instead of rendering
+              // inline; a null ground (rail off, old shell) renders inline
+              // exactly as before, which is the rollback contract. The ground
+              // viewer goes transparent so the studio void reads through.
+              const viewerEl = (
+                <Suspense fallback={<ViewerSkeleton />}>
+                <Viewer
+                  ref={viewerRef}
+                  intake={intake}
+                  colorForLayer={colorForLayer}
+                  visibleLayers={visibleLayers}
+                  highlightHandles={overlay?.highlight_handles}
+                  markers={overlay?.markers}
+                  overlayPolylines={overlay?.polylines}
+                  selectedHandle={selectedHandle}
+                  onSelectEntity={setSelectedHandle}
+                  pendingEdit={pendingEdit || writeGhost}
+                  background={studioGround ? 'transparent' : undefined}
+                />
+                </Suspense>
+              )
+              return studioGround
+                ? createPortal(<div className="studio-ground-viewer">{viewerEl}</div>, studioGround)
+                : viewerEl
+            })()}
             {shown && (
               <Legend
                 layers={shown.layers}
