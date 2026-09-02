@@ -1336,7 +1336,30 @@ def build_suites() -> List[Suite]:
               # 59 -> 60 on 2026-08-17: the catalog fingerprint now normalizes
               # each cwd against REPO, so a runner that hands every job its own
               # checkout root is its own named test.
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 60),
+              # 60 -> 66 on 2026-09-02: three PRs added tests here and none
+              # moved the floor, so the runner that exists to catch exactly
+              # this drift was carrying six tests of its own untracked.
+              # Recovered per-commit rather than absorbed as a lump, because
+              # this file's convention is to record WHY a floor moved:
+              #   #732 (3d96352f) +3  the two "real refusal is the primary
+              #                       note" cases, pytest and vitest, plus the
+              #                       scoreboard rendering the floor column as
+              #                       a minimum and not an equality
+              #   #769 (29051a82) +2  the .js-family vitest skip being
+              #                       nameable/allowlistable, and a .jsx skip
+              #                       that is NOT allowlisted still failing
+              #   #820 (bc7cb183) +1  the operator suites pinned to their
+              #                       measured floors
+              # The header above still holds: no DB, network or platform gate
+              # anywhere in this file, so 66 is the count in every environment
+              # rather than a lowest-common-denominator across them, and that
+              # is measured on both sides rather than asserted. CI
+              # gate-shard-0 of runs 33663393817 (PR #929, whose merge tree is
+              # main at 237b90c0) and 33662970009 (an independent branch) each
+              # printed `scripts test_gate_runner.py  >=60  66  PASS` with no
+              # skip note; a local run on 237b90c0 agrees at 66 executed, 0
+              # skipped.
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 66),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
