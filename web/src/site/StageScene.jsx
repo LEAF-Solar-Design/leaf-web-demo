@@ -19,13 +19,8 @@ import LandingCast from './LandingCast.jsx'
 import ToolCast from './ToolCast.jsx'
 import { navigate } from './router.js'
 import { WorkspaceControllerProvider } from '../controllers/WorkspaceControllerProvider.jsx'
+import { operatorWorkspaceMount } from '../controllers/workspaceMount.js'
 import { useDrawingIdentity } from '../drawing/DrawingIdentityProvider.jsx'
-import {
-  getDrawingIntake,
-  getDrawingVersions,
-  redoDrawing,
-  undoDrawing,
-} from '../api.js'
 
 export default function StageScene({ scene, stageRef, publicDemo = false }) {
   const stageLayerRef = useRef(null)
@@ -36,16 +31,12 @@ export default function StageScene({ scene, stageRef, publicDemo = false }) {
   const [operatorOverlay, setOperatorOverlay] = useState(null)
   const { drawingId: operatorDrawingId, setFromUpload } = useDrawingIdentity()
 
-  // Adapters, unchanged: the public demo flag is the ONE reading SiteRoot
-  // made of `?demo`, handed down rather than re-read here.
-  const drawingOptions = useMemo(() => ({
-    loadHead: (drawingId) => getDrawingIntake(publicDemo, drawingId, 'head'),
-    loadVersion: (drawingId, version) => getDrawingIntake(publicDemo, drawingId, version),
-    // /try does not render delta chips. Its recovery-only restore controls
-    // need the stable version list but not the larger delta response /app uses.
-    loadVersions: (drawingId) => getDrawingVersions(publicDemo, drawingId),
-    undoVersion: (drawingId, capability) => undoDrawing(publicDemo, drawingId, capability),
-    redoVersion: (drawingId, capability) => redoDrawing(publicDemo, drawingId, capability),
+  // The mount shapes live in workspaceMount.js (convergence bug c): the
+  // public-demo flag is the ONE reading SiteRoot made of `?demo`, handed down
+  // rather than re-read here. Memoized on it exactly as before — the setters
+  // are referentially stable.
+  const mount = useMemo(() => operatorWorkspaceMount({
+    publicDemo,
     onApplyIntake: setOperatorIntake,
     onResetSelection: () => setOperatorSelectedHandle(null),
   }), [publicDemo])
@@ -59,7 +50,8 @@ export default function StageScene({ scene, stageRef, publicDemo = false }) {
   return (
     <WorkspaceControllerProvider
       drawingId={scene === 'tool' ? operatorDrawingId : 'rooftop_demo'}
-      drawingOptions={drawingOptions}
+      drawingOptions={mount.drawingOptions}
+      retryNotFound={mount.retryNotFound}
     >
       <main className="stage-root" data-scene={scene} ref={stageRef} aria-label={scene === 'tool' ? 'Leaf operator workspace' : 'Leaf product overview'}>
         <StageLayer

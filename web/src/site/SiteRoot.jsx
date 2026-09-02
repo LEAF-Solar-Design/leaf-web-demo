@@ -28,6 +28,7 @@ import { useRoute, navigate } from './router.js'
 import { activeCastForScene, sceneAllowsMarketingEject, sceneForPath } from './routeScene.js'
 import StageScene from './StageScene.jsx'
 import { WorkspaceControllerProvider } from '../controllers/WorkspaceControllerProvider.jsx'
+import { consoleWorkspaceMount } from '../controllers/workspaceMount.js'
 import { handleRedirectCallback, isSignedIn } from '../auth.js'
 import { bootWantsApp, shouldDeferForAuthCallback } from './authBoot.js'
 import {
@@ -188,7 +189,10 @@ export default function SiteRoot() {
     >
       {scene === 'app' ? (
         // The console ALONE — no stage mounted; App owns its own Viewer.
-        <WorkspaceControllerProvider drawingId="rooftop_demo" retryNotFound>
+        // Mount shape from workspaceMount.js (convergence bug c): the
+        // console/operator divergences are named decisions there, not two
+        // drifting literals.
+        <WorkspaceControllerProvider {...consoleWorkspaceMount()}>
           <Suspense fallback={null}>
             <App />
           </Suspense>
