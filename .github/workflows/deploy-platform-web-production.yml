@@ -48,7 +48,7 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       VERCEL_ORG_ID: team_LWjg4ghzDbsZrkNPaOnRwAx5
       VERCEL_PROJECT_ID: prj_tBxvYtXa47THZ8aF59gvRx8W0bBc
