@@ -377,8 +377,15 @@ export function standardServicesResolverFromEnv(
       }
       return undefined;
     }
-    if (runtime === "staging" || runtime === "production") {
-      throw new Error("standard services are required in staging and production");
+    if (runtime) {
+      // Non-empty LEAF_RUNTIME_ENV must parse cleanly even with no broker
+      // configured — a garbage value (a typo'd "prod") must fail closed,
+      // not silently read as "not staging/production" and fall through.
+      const environment = parseStandardServicesEnvironment(env.LEAF_RUNTIME_ENV);
+      if (environment === "staging" || environment === "production") {
+        throw new Error("standard services are required in staging and production");
+      }
+      return undefined;
     }
     return undefined;
   }

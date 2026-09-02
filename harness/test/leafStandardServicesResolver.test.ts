@@ -178,6 +178,14 @@ describe("LeafStandardServicesResolver", () => {
       LEAF_APP_DISPATCH_SECRET: "converse-back-edge-secret",
       LEAF_RUNTIME_ENV: "production",
     })).toThrow("required in staging and production");
+    // A garbage LEAF_RUNTIME_ENV must fail closed too, even with no broker
+    // configured and the converse pair present — it must never be read as
+    // "not staging/production" and silently fall through to undefined.
+    expect(() => standardServicesResolverFromEnv({
+      LEAF_APP_URL: "https://app.example",
+      LEAF_APP_DISPATCH_SECRET: "converse-back-edge-secret",
+      LEAF_RUNTIME_ENV: "prod",
+    })).toThrow("LEAF_RUNTIME_ENV must be local, staging, or production");
     expect(() => new LeafStandardServicesResolver({
       appOrigin: "https://app.example/path",
       brokerEndpoint: "https://api.leafdesign.ai",
