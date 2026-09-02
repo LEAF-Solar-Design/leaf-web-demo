@@ -249,3 +249,45 @@ booleans, dormant reveals nothing). Contract:
   solar tool set in the console); a solar-specific ground material lands
   with W4's token re-pin. Board tiles are read-only in W4a; version select,
   job reattach, and built-tool open move onto the board with W5 showcases.
+
+### Floating rails, dark chrome, the drawing cockpit (W4b; operator direction 2026-09-02: "all rails should be floating in front of entire-screen workspace", "where is the opencad UI for the cad bit")
+
+Under the rail the console's grid keeps its columns (layout, scroll,
+keyboard, and a11y contracts untouched) but reads as instruments over a
+full-screen workspace: the catalog and job rails are floating paper panels
+inset 12px from the edges with the ground visible around them; the header,
+footer, product tabs on CAD/Solar CAD (the document-tab strip), and the
+viewer toolbar are DARK chrome (two-material rule: chrome touching the
+drawing is dark, paper carries content). CAD and Solar CAD drop the page
+furniture (kicker, prompt headline, hint, continuity strip): the command bar
+is the prompt and the status bar carries the continuity facts; Browser and
+iOS keep theirs (the frame is the page there).
+
+The cockpit (`site/DrawingCockpit.jsx`), built on the Viewer ref surface
+from #890, in the reference CAD grammar: a viewcube-lite + view snaps
+cluster (Fit = `setView('home')`, zoom in/out = `setView({ zoom })` around
+`getPose().zoom`) in the drawing window as legend-material glass; a status
+cluster in the footer with live cursor X/Y (`unproject` of the ground's
+pointer traffic, rAF-throttled DOM writes, never React state), scale
+(`worldPerPixel`), entity and layer counts, and the selected handle.
+
+Contract:
+- Studio-only by construction: `<ViewCluster` and `<CockpitStatus` each
+  occur once in App, behind `studioGround && ... groundShowsDrawing(...)`;
+  the `data-surface` attribute on `.app` exists only under the rail
+  (`studioGround ? activeSurface : undefined`), so the old shell's DOM is
+  byte-for-byte; pinned in `siteRootOneShell.test.js`, asserted by the
+  e2e OFF row (no `[data-surface]`, no cockpit test ids).
+- Unit receipts (`drawingCockpit.test.jsx`): Fit/zoom drive the ref and
+  no-op without a viewer or pose; the readout coalesces to one write per
+  frame on the last position, clears on leave, tears down on unmount;
+  formatting is fixed-precision and never "-0.00".
+- e2e row "floating rails, dark chrome, and the drawing cockpit": computed
+  rail radius and insets, dark header/footer, page furniture hidden on CAD
+  and visible on Browser, view cluster clicks keep one canvas, the status
+  readout leaves "—" after a mouse move over the drawing window.
+- Deferred to W4c/W5: a ribbon of tool clusters (the catalog rail already
+  carries the tool set; a ribbon would duplicate it until the rail
+  collapses to a spine), the properties dock as a grown SelectionReadout,
+  document tabs per drawing (one drawing per console today), split
+  viewports (P6 spike).
