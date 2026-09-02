@@ -7,8 +7,8 @@ import pytest
 from solver_adapters import autofill
 
 
-STAGING_SOLVER_REVISION = "3ae53e274a5c6be3edeab30054234d09fdd74b41"
-STAGING_SOLVER_SHA256 = "c50ab70db1802f36af2af1ac24f8177d347a1083b9caf4bc85009310addcd721"
+STAGING_SOLVER_REVISION = "760d3888018f762e0ab8dbe289dae8a2871216ea"
+STAGING_SOLVER_SHA256 = "a70f1e323da0f7a972c530d1101fc1eca82f2c58dc5b0141d5d98fba0f188cd2"
 
 
 def test_trusted_manifest_is_limited_to_the_deployed_solver() -> None:
