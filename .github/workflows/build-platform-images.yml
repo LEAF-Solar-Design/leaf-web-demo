@@ -166,7 +166,9 @@ concurrency:
   # group ahead of real merge builds. Within one PR, newest-wins: a stale
   # preview's images can never be adopted (the tree moved), so cancelling the
   # older run only saves runners.
-  group: build-platform-images-${{ inputs.speculative && format('speculative-pr-{0}', inputs.speculative_pr_number) || github.ref }}
+  # A handoff only reads immutable release evidence and writes its own artifact.
+  # Isolate it from main builds so a later push cannot cancel an accepted release.
+  group: build-platform-images-${{ inputs.promote && format('handoff-run-{0}', github.run_id) || inputs.speculative && format('speculative-pr-{0}', inputs.speculative_pr_number) || github.ref }}
   cancel-in-progress: ${{ inputs.speculative || github.event_name == 'push' }}
 
 jobs:
