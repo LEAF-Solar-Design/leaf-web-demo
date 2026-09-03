@@ -125,22 +125,34 @@ export function railCluster({ onExpand } = {}) {
   }
 }
 
-/** View: fit / zoom in / zoom out on the Viewer's ref surface (setView/getPose). */
-export function viewCluster({ viewerRef, hasDrawing = false } = {}) {
+/**
+ * View: fit / zoom in / zoom out on the Viewer's ref surface (setView/getPose),
+ * and (W4e round 3) the Properties pane toggle when the caller owns one: a
+ * pressed-state tool, the way back after the pane's own close control.
+ */
+export function viewCluster({ viewerRef, hasDrawing = false, paneOpen = null, onTogglePane = null } = {}) {
   const reason = hasDrawing ? '' : REASONS.noDrawing
   const tool = (id, label, text, icon, title, onClick) => ({
     id, label, text, icon, size: 'large', title, disabled: !hasDrawing, reason, onClick,
   })
-  return {
-    id: 'view',
-    label: 'View',
-    kind: 'group',
-    tools: [
-      tool('fit', 'fit', 'Fit', 'fit', 'Fit the drawing to the view', () => { viewerRef?.current?.setView?.('home') }),
-      tool('zoom-in', 'zoom-in', 'Zoom in', 'zoom-in', 'Zoom in', () => { zoomViewer(viewerRef?.current, ZOOM_IN) }),
-      tool('zoom-out', 'zoom-out', 'Zoom out', 'zoom-out', 'Zoom out', () => { zoomViewer(viewerRef?.current, ZOOM_OUT) }),
-    ],
+  const tools = [
+    tool('fit', 'fit', 'Fit', 'fit', 'Fit the drawing to the view', () => { viewerRef?.current?.setView?.('home') }),
+    tool('zoom-in', 'zoom-in', 'Zoom in', 'zoom-in', 'Zoom in', () => { zoomViewer(viewerRef?.current, ZOOM_IN) }),
+    tool('zoom-out', 'zoom-out', 'Zoom out', 'zoom-out', 'Zoom out', () => { zoomViewer(viewerRef?.current, ZOOM_OUT) }),
+  ]
+  if (typeof onTogglePane === 'function') {
+    tools.push({
+      id: 'properties-pane',
+      label: 'properties',
+      text: 'Properties',
+      icon: 'sidebar',
+      size: 'large',
+      title: paneOpen ? 'Close the properties pane' : 'Open the properties pane',
+      pressed: !!paneOpen,
+      onClick: () => onTogglePane(),
+    })
   }
+  return { id: 'view', label: 'View', kind: 'group', tools }
 }
 
 /** Version: undo / redo / history, under EXACTLY the toolbar's gates, each with its reason. */

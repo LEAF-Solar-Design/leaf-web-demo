@@ -2,7 +2,7 @@
 // and never an invented number; extents are one pass over the intake's
 // vertices, tolerant of the two point shapes the intake has carried.
 import { cleanup, render, screen, within } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 afterEach(cleanup)
 
@@ -43,6 +43,15 @@ describe('DrawingRows', () => {
     const rows = screen.getByTestId('dock-drawing')
     expect(within(rows).getByText('Width').nextSibling).toHaveTextContent('100')
     expect(within(rows).getByText('Height').nextSibling).toHaveTextContent('50')
+  })
+
+  it('the title row carries a close control only when the caller owns the pane state', () => {
+    const onClose = vi.fn()
+    const { rerender } = render(<PropertiesDock layers={<div>L</div>} selection={<div>S</div>} geometry={null} />)
+    expect(screen.queryByRole('button', { name: 'Close the properties pane' })).toBeNull()
+    rerender(<PropertiesDock layers={<div>L</div>} selection={<div>S</div>} geometry={null} onClose={onClose} />)
+    screen.getByRole('button', { name: 'Close the properties pane' }).click()
+    expect(onClose).toHaveBeenCalledTimes(1)
   })
 
   it('is absent from the dock when no drawing summary is given, and present when one is', () => {

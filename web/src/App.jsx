@@ -2205,6 +2205,10 @@ export default function App() {
   // W4e: the ribbon shows ONE tab's panels at a time (the reference's
   // Draw / Insert / Annotate / View / Manage); the top band switches it.
   const [ribbonTab, setRibbonTab] = useState('draw')
+  // W4e round 3: the properties pane closes from its own title row and the
+  // View tab's Properties tool reopens it; while closed the canvas takes the
+  // column (cockpit.css keys off the pane's absence, never a root attribute).
+  const [paneOpen, setPaneOpen] = useState(true)
   // <=980px the shell stacks into one column (styles.css) — a 44px spine
   // there is a full-width sliver, so the posture neutralizes to expanded.
   const [wideViewport, setWideViewport] = useState(() => {
@@ -2331,7 +2335,7 @@ export default function App() {
   // rail OFF the ribbon never mounts and this list is never read.
   const ribbon = useMemo(() => {
     if (!(studioGround && drafting)) return { clusters: [], quickBefore: [], quickAfter: [] }
-    const view = viewCluster({ viewerRef, hasDrawing: !!shown })
+    const view = viewCluster({ viewerRef, hasDrawing: !!shown, paneOpen, onTogglePane: () => setPaneOpen((o) => !o) })
     const version = versionCluster({
       hasVersions: !!drawingState,
       canUndo,
@@ -2407,7 +2411,7 @@ export default function App() {
     }
   }, [studioGround, drafting, shown, drawingState, canUndo, canRedo, versionBusy, running, previewing,
     drawingMutationsBlocked, historyOpen, onUndo, onRedo, onToggleHistoryTracked, layerCounts, visibleLayers,
-    toggleLayer, railFamilies, onRequestCatalogRun, writeLocked, canRunWrite, canBuild, entOf, ribbonTab, colorForLayer])
+    toggleLayer, railFamilies, onRequestCatalogRun, writeLocked, canRunWrite, canBuild, entOf, ribbonTab, colorForLayer, paneOpen])
   const ribbonClusters = ribbon.clusters
   // W4e round 2: the pane's Drawing section, the document's own facts from
   // the intake (counts) and one pass over its vertices (extents). Studio
@@ -3080,12 +3084,16 @@ export default function App() {
               // Keep the dock mounted on every wide drafting surface so the
               // entitlement controls never disappear in that honest-empty state.
               if (studioGround && drafting && wideViewport) {
-                return (
+                // Closed by its own control: nothing renders here until the View
+                // tab's Properties tool reopens it (the condition above stays
+                // literal for the App wiring pin).
+                return paneOpen ? (
                   <PropertiesDock
                     layers={legendEl}
                     selection={readoutEl}
                     geometry={selectedEntityGeometry}
                     drawing={paneDrawingFacts}
+                    onClose={() => setPaneOpen(false)}
                     plan={(
                       <EntitlementGate
                         tier={entTier}
@@ -3095,7 +3103,7 @@ export default function App() {
                       />
                     )}
                   />
-                )
+                ) : null
               }
               return <>{legendEl}{readoutEl}</>
             })()}

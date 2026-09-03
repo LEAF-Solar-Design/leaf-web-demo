@@ -116,9 +116,19 @@ export function drawingExtents(polylines) {
   return Number.isFinite(minX) && Number.isFinite(minY) ? { minX, minY, maxX, maxY } : null
 }
 
-export default function PropertiesDock({ layers, selection, geometry, plan = null, drawing = null }) {
+// The pane's title row (W4e round 3): the reference's pane carries a close
+// control at its right; ours is real (App unmounts the pane and the canvas
+// takes the column) and the View tab's Properties tool brings it back. No
+// pin: there is no auto-hide behaviour to pin, so a pin would be a dead control.
+export default function PropertiesDock({ layers, selection, geometry, plan = null, drawing = null, onClose = null }) {
   return (
     <aside className="properties-dock" aria-label="Properties" data-testid="properties-dock">
+      <div className="dock-title">
+        <span>Properties</span>
+        {onClose && (
+          <button type="button" className="dock-close" aria-label="Close the properties pane" title="Close (View tab: Properties brings it back)" onClick={onClose}>×</button>
+        )}
+      </div>
       <DockSection title="Layers">{layers}</DockSection>
       {drawing && <DockSection title="Drawing"><DrawingRows drawing={drawing} /></DockSection>}
       <DockSection title="Selection">
