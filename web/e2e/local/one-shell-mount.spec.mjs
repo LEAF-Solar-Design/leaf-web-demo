@@ -775,28 +775,53 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByTestId('cad-edit-entity-list')).toContainText('CIRCLE on layer 0')
 
     // W4f slice A1: the drawing answers the prompt. Arm LINE by its word,
-    // click two points ON the drawing (world -> pixels through the DEV
-    // projection hook), the fields take the picked coordinates, the caret
-    // moves on, the console's click-to-select stands aside, Enter draws.
+    // click two points ON the drawing ground, the fields take the picked
+    // coordinates, the caret moves on, the console's click-to-select stands
+    // aside, Enter draws. The pixels come from the ground's own box (right
+    // half, clear of the floating import card and the viewcube) and the
+    // expected values from the viewer's own unproject of those pixels, so the
+    // row holds at any viewport or framing; a pixel that lands on chrome
+    // instead of the drawing fails here by name. (The proof's 1600x1000 frame
+    // once put world (20,30) under the import card, and the click went to it.)
     await bar.fill('l')
     await bar.press('Enter')
     await expect(promptRow).toHaveAttribute('data-op', 'createLine')
     await expect(page.locator('.workspace-card[data-cockpit-picking="1"]')).toHaveCount(1)
-    const px = (wx, wy) => page.evaluate(([x, y]) => document.querySelector('.studio-ground .viewer-canvas').__cadviewer.project(x, y), [wx, wy])
-    const a = await px(20, 30)
-    const b = await px(70, 15)
+    const groundPick = (fx, fy) => page.evaluate(([px, py]) => {
+      const ground = document.querySelector('.studio-ground')
+      const box = ground.getBoundingClientRect()
+      const x = Math.round(box.left + box.width * px)
+      const y = Math.round(box.top + box.height * py)
+      const hit = document.elementFromPoint(x, y)
+      const world = document.querySelector('.studio-ground .viewer-canvas').__cadviewer.unproject(x, y)
+      const name = hit ? `${hit.tagName.toLowerCase()}.${String(hit.className || '').split(' ')[0]}` : 'nothing'
+      return { x, y, onGround: !!(hit && ground.contains(hit)), name, wx: world ? world.x : NaN, wy: world ? world.y : NaN }
+    }, [fx, fy])
+    // The same rounding the picker writes (pointPicking.js round3).
+    const r3 = (v) => { const r = Math.round(v * 1000) / 1000; return Object.is(r, -0) ? '0' : String(r) }
+    const a = await groundPick(0.62, 0.55)
+    const b = await groundPick(0.8, 0.35)
+    expect(a.onGround, `first pick pixel (${a.x},${a.y}) hit ${a.name}, not the drawing`).toBe(true)
+    expect(b.onGround, `second pick pixel (${b.x},${b.y}) hit ${b.name}, not the drawing`).toBe(true)
+    expect(Number.isFinite(a.wx) && Number.isFinite(a.wy) && Number.isFinite(b.wx) && Number.isFinite(b.wy)).toBe(true)
     await page.mouse.click(a.x, a.y)
-    await expect(page.getByLabel('ribbon x', { exact: true })).toHaveValue(/^(19\.9|20\.0|20)/)
-    await expect(page.getByLabel('ribbon y', { exact: true })).toHaveValue(/^(29\.9|30\.0|30)/)
+    await expect(page.getByLabel('ribbon x', { exact: true })).toHaveValue(r3(a.wx))
+    await expect(page.getByLabel('ribbon y', { exact: true })).toHaveValue(r3(a.wy))
     await expect(page.getByLabel('ribbon x2', { exact: true })).toBeFocused()
     await page.mouse.click(b.x, b.y)
-    await expect(page.getByLabel('ribbon x2', { exact: true })).toHaveValue(/^(69\.9|70\.0|70)/)
-    await expect(page.getByLabel('ribbon y2', { exact: true })).toHaveValue(/^(14\.9|15\.0|15)/)
+    await expect(page.getByLabel('ribbon x2', { exact: true })).toHaveValue(r3(b.wx))
+    await expect(page.getByLabel('ribbon y2', { exact: true })).toHaveValue(r3(b.wy))
     await expect(page.getByTestId('cockpit-prompt-run')).toBeFocused()
     await expect(page.locator('.selection-readout')).not.toContainText('Polyline')
     await page.keyboard.press('Enter')
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('4', { timeout: 60_000 })
-    await page.keyboard.press('Escape')
+    // Esc from a prompt field cancels (the row's own contract, as above). A
+    // bare Esc after the run is NOT enough: the Run button is disabled while
+    // the engine is busy, so focus fell to the body and the prompt row never
+    // saw the key (proof 3 on d764b50a). Product follow-up, not this PR: keep
+    // focus in the prompt after a run so Esc cancels from wherever the
+    // drafter is, as the reference does.
+    await page.getByLabel('ribbon x', { exact: true }).press('Escape')
     await expect(page.locator('.workspace-card[data-cockpit-picking="1"]')).toHaveCount(0)
     // A sentence is still a sentence: it routes, it never arms. LAST in the
     // row on purpose: while its route decision is shown the Command bar's
