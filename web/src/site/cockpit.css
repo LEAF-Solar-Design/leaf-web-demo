@@ -142,15 +142,18 @@
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .workspace-card {
   margin: 0; border: 0; border-radius: 0; overflow: visible; animation: none; transform: none;
 }
-/* W4f-2: while a point command is picking (App stamps the card), the card's
-   floating children (the import workbench, the result block, the strips) let
-   pointer traffic through to the drawing under them and step back visually,
-   so a point under the workbench can be picked; Esc, a run that disarms, or a
-   new arming restores them. The card itself is already a pass-through layer
-   (landing.css: pointer-events none, `:where(> *)` auto), so the children are
-   the ones to switch, and this selector outranks that :where(). */
-.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .workspace-card[data-cockpit-picking="1"] { opacity: 0.42; }
-.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .workspace-card[data-cockpit-picking="1"] > * { pointer-events: none; }
+/* W4f-2: while a point command is picking (App stamps the card), the two
+   instruments that float OVER the drawing (the import workbench, the result
+   block) let pointer traffic through to the drawing under them and step back
+   visually, so a point under them can be picked; Esc, a run that disarms, or
+   a new arming restores them. Only those two: the card also holds the ribbon
+   and the strips, which must stay clickable while a command is armed (the
+   proof caught a `> *` cut that locked the ribbon). The card itself is already
+   a pass-through layer (landing.css: pointer-events none, `:where(> *)` auto),
+   so the instruments are the switch, and this selector outranks that :where(). */
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .workspace-card[data-cockpit-picking="1"] :is(.cad-edit-workbench, .result-block) {
+  pointer-events: none; opacity: 0.42;
+}
 /* The job monitor: no right column on drafting surfaces (the reference gives
    the whole width to the ribbon and the canvas). Its spine is a chip in the
    status bar; expanded, it is a panel over the canvas's right edge. */
