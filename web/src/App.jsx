@@ -4,7 +4,7 @@ import { createPortal } from 'react-dom'
 import { track, setTourStep } from './telemetry.js'
 import { useStudioGround } from './site/studioGround.js'
 import SurfaceGrounds, { groundShowsDrawing } from './site/SurfaceGrounds.jsx'
-import { CockpitStatus, ViewCluster } from './site/DrawingCockpit.jsx'
+import { CockpitStatus, StatusTabs, StatusToggles, ViewCluster } from './site/DrawingCockpit.jsx'
 import CockpitTopBand from './site/CockpitTopBand.jsx'
 import DraftingRibbon from './site/DraftingRibbon.jsx'
 import PropertiesDock from './site/PropertiesDock.jsx'
@@ -3310,6 +3310,12 @@ export default function App() {
       />
 
       <footer className="foot-bar" data-checkout-instance={checkout.instanceId} data-controller-instance={workspaceInstanceId}>
+        {/* W4e: on the studio's drafting surfaces the status bar opens with
+            the reference's Model tab, the drawing's name, and + (the project
+            board). Rail OFF and every other surface: nothing here. */}
+        {studioGround && drafting && (
+          <StatusTabs name={shown ? `${projectName}.dwg` : ''} onStart={() => onSelectSurface('browser')} />
+        )}
         {/* Traversal left: a named "← Parent" link while a project is open. */}
         {!mock && openProjectId && (
           <button type="button" className="chip-act" onClick={onCloseProject}>← All projects</button>
@@ -3355,6 +3361,8 @@ export default function App() {
         {studioGround && groundShowsDrawing(activeSurface) && (
           <CockpitStatus ground={studioGround} viewerRef={viewerRef} shown={shown} selectedHandle={selectedHandle} />
         )}
+        {/* W4e: the reference's drafting toggles (honestly off) and fullscreen. */}
+        {studioGround && drafting && <StatusToggles />}
         {mock && !tourOn && tourAvailable.current && studioGround && drafting && (
           <button
             type="button"

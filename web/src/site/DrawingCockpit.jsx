@@ -114,6 +114,64 @@ export function useCursorReadout(ground, viewerRef, refs) {
   }, [ground, viewerRef, refs])
 }
 
+// The status bar's left end (W4e slice I): the reference's Model tab, the
+// drawing's name tab, and +. Model is the only space this viewer has, so the
+// tab is a readout; the name tab is the same drawing the document band
+// shows; + opens the project board (a real surface switch).
+export function StatusTabs({ name = '', onStart = null }) {
+  return (
+    <span className="cockpit-status-tabs" data-testid="cockpit-status-tabs">
+      <span className="foot-model-tab" aria-label="Model space">Model</span>
+      {name ? <span className="foot-doc-tab">{name}</span> : null}
+      {onStart ? (
+        <button type="button" className="foot-doc-add" aria-label="Open the project board" title="Project board" onClick={onStart}>+</button>
+      ) : null}
+    </span>
+  )
+}
+
+const STATUS_TOGGLES = Object.freeze([
+  { id: 'snap', label: 'Snap mode', icon: 'snap' },
+  { id: 'grid', label: 'Grid display', icon: 'grid' },
+  { id: 'ortho', label: 'Ortho mode', icon: 'ortho' },
+  { id: 'polar', label: 'Polar tracking', icon: 'polar' },
+  { id: 'osnap', label: 'Object snap', icon: 'osnap' },
+])
+const TOGGLE_REASON = 'not in the browser viewer yet'
+
+function requestFullscreen() {
+  if (typeof document === 'undefined') return false
+  const root = document.documentElement
+  if (document.fullscreenElement) { document.exitFullscreen?.(); return true }
+  if (typeof root.requestFullscreen === 'function') { root.requestFullscreen().catch(() => {}); return true }
+  return false
+}
+
+// The status bar's right end: the reference's drafting toggles. This viewer
+// has no snap, grid, ortho, polar or object-snap state, so each is present,
+// disabled, and says so; fullscreen is the one that is real.
+export function StatusToggles() {
+  return (
+    <span className="cockpit-status-toggles" role="toolbar" aria-label="Drafting settings" data-testid="cockpit-status-toggles">
+      {STATUS_TOGGLES.map((t) => (
+        <button
+          key={t.id}
+          type="button"
+          data-toggle={t.id}
+          disabled
+          title={`${t.label}: ${TOGGLE_REASON}`}
+          aria-label={`${t.label} (unavailable: ${TOGGLE_REASON})`}
+        >
+          <CockpitIcon id={t.icon} fallback={t.label} size="strip" />
+        </button>
+      ))}
+      <button type="button" data-toggle="fullscreen" title="Fullscreen" aria-label="Toggle fullscreen" onClick={requestFullscreen}>
+        <CockpitIcon id="fullscreen" fallback="Full" size="strip" />
+      </button>
+    </span>
+  )
+}
+
 export function CockpitStatus({ ground, viewerRef, shown = null, selectedHandle = null }) {
   const refs = useRef({ x: { current: null }, y: { current: null }, scale: { current: null } }).current
   useCursorReadout(ground, viewerRef, refs)
