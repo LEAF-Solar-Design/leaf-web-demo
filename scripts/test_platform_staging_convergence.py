@@ -277,8 +277,11 @@ def produced(value: object) -> dict:
     return {"status": "produced", "value": value}
 
 
-def consumer_contract_evidence() -> tuple[dict, bytes, dict]:
-    name = f"leaf-platform-staging-consumer-contract-run-{CONTRACT_RUN}-attempt-1"
+def consumer_contract_evidence(
+    *, head_sha: str = TF_HEAD, tree_sha: str = TF_TREE,
+    run_id: int = CONTRACT_RUN, artifact_id: int = CONTRACT_ARTIFACT,
+) -> tuple[dict, bytes, dict]:
+    name = f"leaf-platform-staging-consumer-contract-run-{run_id}-attempt-1"
     unsigned = {
         "artifact": {"file": "consumer-contract.json", "name": name},
         "consumer": {
@@ -297,12 +300,12 @@ def consumer_contract_evidence() -> tuple[dict, bytes, dict]:
             "repository": subject.TF_REPOSITORY,
             "workflow_path": subject.CONSUMER_CONTRACT_WORKFLOW,
             "workflow_blob": CONTRACT_WORKFLOW_BLOB,
-            "run_id": CONTRACT_RUN,
+            "run_id": run_id,
             "run_attempt": 1,
             "event": "push",
             "branch": "main",
-            "head_sha": TF_HEAD,
-            "head_tree": TF_TREE,
+            "head_sha": head_sha,
+            "head_tree": tree_sha,
         },
         "schema": subject.CONSUMER_CONTRACT_SCHEMA,
         "version": 1,
@@ -314,9 +317,9 @@ def consumer_contract_evidence() -> tuple[dict, bytes, dict]:
     archive_sha = hashlib.sha256(zip_raw).hexdigest()
     dispatch = {
         "artifact": {
-            "id": CONTRACT_ARTIFACT,
+            "id": artifact_id,
             "name": name,
-            "producer_run_id": CONTRACT_RUN,
+            "producer_run_id": run_id,
             "producer_run_attempt": 1,
             "provider_sha256": archive_sha,
             "archive_sha256": archive_sha,
@@ -668,6 +671,62 @@ def replace_consumer_contract(provider: FakeProvider, mutate) -> None:
         )
     ]["artifacts"]
     rows[0]["digest"] = "sha256:" + hashlib.sha256(zip_raw).hexdigest()
+
+
+def retained_consumer_fixture() -> FakeProvider:
+    """Live 5daa topology: four later children retain the earlier contract."""
+    provider = fixture()
+    tf = subject.TF_REPOSITORY
+    head, tree = "9" * 40, "2" * 40
+    contract, zip_raw, _ = consumer_contract_evidence(
+        head_sha=head, tree_sha=tree,
+        run_id=CONTRACT_RUN + 1, artifact_id=CONTRACT_ARTIFACT + 1,
+    )
+    current_run = run(
+        CONTRACT_RUN + 1, repository=tf,
+        workflow=subject.CONSUMER_CONTRACT_WORKFLOW, event="push",
+        head_sha=head, created="2026-08-13T01:15:00Z",
+    )
+    query = (
+        "/actions/workflows/publish-leaf-platform-staging-consumer-contract.yml/"
+        "runs?branch=main&event=push&status=success&per_page=100"
+    )
+    listing = provider.json_values[(tf, query)]
+    listing["workflow_runs"].insert(0, current_run)
+    listing["total_count"] += 1
+    row = artifact(CONTRACT_ARTIFACT + 1, contract["artifact"]["name"], CONTRACT_RUN + 1, head)
+    row["digest"] = "sha256:" + hashlib.sha256(zip_raw).hexdigest()
+    row["workflow_run"]["head_branch"] = "main"
+    provider.json_values[(tf, f"/actions/runs/{CONTRACT_RUN + 1}/artifacts?per_page=100")] = {
+        "total_count": 1, "artifacts": [row],
+    }
+    provider.byte_values[(tf, f"/actions/artifacts/{CONTRACT_ARTIFACT + 1}/zip")] = zip_raw
+    for run_id in (303, 304, 305, 306):
+        provider.json_values[(tf, f"/actions/runs/{run_id}")]["head_sha"] = head
+        rows = provider.json_values[(tf, f"/actions/runs/{run_id}/artifacts?per_page=100")]["artifacts"]
+        rows[0]["workflow_run"]["head_sha"] = head
+        replace_receipt(provider, run_id, lambda value: value["provider"].__setitem__("head_sha", head))
+    for endpoint in (CHILD_WINDOW_EXACT_ENDPOINT, CHILD_WINDOW_OPEN_ENDPOINT):
+        for child in provider.json_values[(tf, endpoint)]["workflow_runs"]:
+            if child["id"] in (303, 304, 305, 306):
+                child["head_sha"] = head
+    provider.json_values[(tf, f"/compare/{TF_HEAD}...{head}")] = {
+        "status": "ahead", "ahead_by": 6, "behind_by": 0,
+        "base_commit": {"sha": TF_HEAD}, "merge_base_commit": {"sha": TF_HEAD},
+    }
+    provider.json_values[(tf, f"/git/commits/{head}")] = {"tree": {"sha": tree}}
+    provider.json_values[(tf, f"/git/trees/{tree}?recursive=1")] = {
+        "truncated": False,
+        "tree": [
+            {"path": path, "type": "blob", "sha": blob}
+            for path, blob in (
+                (subject.DEPLOY_WORKFLOW, TF_BLOB),
+                (subject.CONSUMER_CONTRACT_WORKFLOW, CONTRACT_WORKFLOW_BLOB),
+                (subject.CONSUMER_CONTRACT_SCHEMA_PATH, CONTRACT_SCHEMA_BLOB),
+            )
+        ],
+    }
+    return provider
 
 
 def failed_relay_fixture() -> FakeProvider:
@@ -1367,6 +1426,58 @@ class ConvergenceFinalizerTests(unittest.TestCase):
                 "sha256", "0" * 64
             ),
         )
+        self.assert_reason("SERVICE_RECEIPT_CONSUMER_CONTRACT_MISMATCH", provider)
+
+    def test_retained_consumer_matches_exact_receipt_slot(self) -> None:
+        provider = retained_consumer_fixture()
+        receipt = subject._build_receipt(provider, BUILD_RUN, FRONTIER_RUN)
+        jsonschema.Draft202012Validator(self.schema).validate(receipt)
+        self.assertTrue(receipt["terminal_complete"])
+        self.assertEqual(receipt["deployment_identity"]["body_sha256"], identity()["sha256"])
+        broker = receipt["services"]["broker"]["attempts"][0]
+        self.assertEqual(broker["provider"]["head_sha"], "9" * 40)
+        self.assertEqual(broker["provider"]["source_tree"], "2" * 40)
+
+    def test_retained_consumer_requires_exact_slot_hash_and_size(self) -> None:
+        for field, value in (("sha256", "0" * 64), ("utf8_bytes", 1)):
+            with self.subTest(field=field):
+                provider = retained_consumer_fixture()
+                replace_receipt(
+                    provider, FRONTIER_RUN,
+                    lambda receipt: receipt["requested"]["consumer_contract"].__setitem__(field, value),
+                )
+                self.assert_reason("SERVICE_RECEIPT_CONSUMER_CONTRACT_MISMATCH", provider)
+
+    def test_retained_consumer_requires_contained_producer_source(self) -> None:
+        changes = (
+            {"status": "diverged", "behind_by": 1},
+            {"status": "behind", "ahead_by": 0, "behind_by": 1},
+            {"merge_base_commit": {"sha": "0" * 40}},
+            {"base_commit": {"sha": "0" * 40}},
+            {"ahead_by": True},
+        )
+        for change in changes:
+            with self.subTest(change=change):
+                provider = retained_consumer_fixture()
+                provider.json_values[(subject.TF_REPOSITORY, f"/compare/{TF_HEAD}...{'9' * 40}")].update(change)
+                self.assert_reason("CONSUMER_CONTRACT_SOURCE_NOT_CONTAINED", provider)
+
+    def test_retained_consumer_requires_all_three_protected_blobs(self) -> None:
+        for path in (
+            subject.DEPLOY_WORKFLOW,
+            subject.CONSUMER_CONTRACT_WORKFLOW,
+            subject.CONSUMER_CONTRACT_SCHEMA_PATH,
+        ):
+            with self.subTest(path=path):
+                provider = retained_consumer_fixture()
+                rows = provider.json_values[(subject.TF_REPOSITORY, f"/git/trees/{'2' * 40}?recursive=1")]["tree"]
+                next(row for row in rows if row["path"] == path)["sha"] = "0" * 40
+                self.assert_reason("CONSUMER_CONTRACT_BLOB_MISMATCH", provider)
+
+    def test_retained_consumer_cannot_use_unverified_artifact(self) -> None:
+        provider = retained_consumer_fixture()
+        key = (subject.TF_REPOSITORY, f"/actions/runs/{CONTRACT_RUN}/artifacts?per_page=100")
+        provider.json_values[key]["artifacts"][0]["digest"] = "sha256:" + "0" * 64
         self.assert_reason("SERVICE_RECEIPT_CONSUMER_CONTRACT_MISMATCH", provider)
 
     def test_failed_relay_and_provider_bound_resumes_produce_one_complete_receipt(self) -> None:
