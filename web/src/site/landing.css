@@ -1544,3 +1544,29 @@
   width: 0; min-width: 0; margin: 0; padding: 0; border: 0; box-shadow: none;
   visibility: hidden; overflow: hidden;
 }
+
+/* --- W4d Slice E: the command line (reference: one slim line docked at the
+   bottom of the viewport, "Command:" then the field). The well's DOM is
+   unchanged; PromptBox adds .bar-command-line under the studio's drafting
+   surfaces and the caret reads "Command:". One row: field left, controls
+   right; the attachment note wraps under; the scope menu keeps its own
+   absolute placement. Rail OFF none of this matches. --------------------- */
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-dock {
+  bottom: 10px; max-width: 860px;
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar.bar-command-line {
+  flex-direction: row; flex-wrap: wrap; align-items: center;
+  border-radius: 4px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .45);
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-command-line .bar-input {
+  flex: 1 1 320px; min-width: 0; padding: 5px 10px; gap: 8px;
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-command-line .bar-caret {
+  font: 600 10.5px var(--font-mono); letter-spacing: .08em; text-transform: uppercase; white-space: nowrap;
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-command-line .bar-field { font-size: 12px; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-command-line .bar-controls {
+  flex: 0 0 auto; padding: 0 8px 0 0; gap: 6px;
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-command-line .converse-note { flex-basis: 100%; order: 3; }

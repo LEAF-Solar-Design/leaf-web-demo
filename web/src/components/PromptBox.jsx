@@ -78,6 +78,11 @@ export default function PromptBox({
   // client would silently ignore.
   commandActions = {},
   imageAttachmentsEnabled = false,
+  // W4d Slice E: the reference's one-line docked "Command:" prompt. The DOM
+  // is the same well; this only adds a class the studio's drafting-surface
+  // CSS lays out as one row, and swaps the caret glyph for the prompt word.
+  // False (the default, and rail OFF) renders byte-for-byte as before.
+  commandLine = false,
 }) {
   const [focused, setFocused] = useState(false)
   const [scopeOpen, setScopeOpen] = useState(false)
@@ -373,7 +378,7 @@ export default function PromptBox({
         </div>
       )}
       <div
-        className={`bar${dragging ? ' drag' : ''}`}
+        className={`bar${dragging ? ' drag' : ''}${commandLine ? ' bar-command-line' : ''}`}
         ref={rootRef}
         onDragEnter={onDragEnter}
         onDragOver={onDragOver}
@@ -440,7 +445,7 @@ export default function PromptBox({
           </div>
         )}
         <div className="bar-input">
-          <span className="bar-caret" aria-hidden="true">›</span>
+          <span className="bar-caret" aria-hidden="true">{commandLine ? 'Command:' : '›'}</span>
           {/* A textarea, not an input: Shift+Enter (and Ctrl+J) must be able to
               put a real newline in the buffer — an <input> silently cannot hold
               one, so the existing `!e.shiftKey` dispatch guard was only ever
