@@ -157,7 +157,11 @@ function JobRow({ job, current, onSelect }) {
   return <div className={cls}>{inner}</div>
 }
 
-export default function JobRail({ mock, jobs, currentJob, inflight, reattaching, onSelectJob }) {
+// W4d Slice D seating: `spine` renders the rail as a 44px strip (the live
+// count and one expand button); `onCollapse` adds the collapse control to the
+// expanded rail's header. Both undefined = the rail exactly as before (rail
+// OFF is byte-identical by construction).
+export default function JobRail({ mock, jobs, currentJob, inflight, reattaching, onSelectJob, spine = false, onExpand, onCollapse }) {
   const list = jobs || []
   const knownIds = new Set(list.map((j) => j.job_id))
   const showCurrent = currentJob && (!currentJob.job_id || !knownIds.has(currentJob.job_id))
@@ -195,11 +199,40 @@ export default function JobRail({ mock, jobs, currentJob, inflight, reattaching,
     )
   }
 
+  if (spine) {
+    return (
+      <aside className="rail" data-spine="true">
+        <div className="rail-spine" role="toolbar" aria-label="Job monitor" aria-orientation="vertical">
+          <button
+            type="button"
+            className="spine-btn spine-expand"
+            aria-label={`Expand the job monitor (${liveCount} live)`}
+            title="Expand the job monitor"
+            onClick={() => onExpand?.()}
+          >
+            «
+          </button>
+          <span className="rail-spine-count" title={`${liveCount} live jobs`} aria-hidden="true">{liveCount}</span>
+        </div>
+      </aside>
+    )
+  }
   return (
     <aside className="rail">
       <h2>
         Job monitor
         <span className="n">{mock ? 'session' : `${liveCount} live`}</span>
+        {onCollapse && (
+          <button
+            type="button"
+            className="spine-btn spine-collapse"
+            aria-label="Collapse the job monitor to a spine"
+            title="Collapse to spine"
+            onClick={onCollapse}
+          >
+            »
+          </button>
+        )}
       </h2>
 
       {mock && (

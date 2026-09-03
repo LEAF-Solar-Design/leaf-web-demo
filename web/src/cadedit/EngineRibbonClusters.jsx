@@ -144,34 +144,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
       <RibbonCluster id="drawing" label="Drawing">
         {drawingTools.map((tool) => <RibbonTool key={tool.id} tool={tool} />)}
       </RibbonCluster>
-      <RibbonCluster
-        id="draw"
-        label="Draw"
-        note={draw || null}
-        extra={(
-          <div className="ribbon-cluster-inputs" data-testid="ribbon-draw-inputs">
-            {inputField('x', 'x', 'decimal', drawInputsOff)}
-            {inputField('y', 'y', 'decimal', drawInputsOff)}
-            {inputField('x2', 'x2', 'decimal', drawInputsOff)}
-            {inputField('y2', 'y2', 'decimal', drawInputsOff)}
-            {inputField('r', 'r', 'decimal', drawInputsOff)}
-            {inputField('a0', 'start', 'decimal', drawInputsOff)}
-            {inputField('a1', 'end', 'decimal', drawInputsOff)}
-            {inputField('pts', 'points', 'text', drawInputsOff, true)}
-            <label>
-              closed
-              <input
-                type="checkbox"
-                checked={inputs.closed === 'true'}
-                onChange={(event) => setInput('closed', event.target.checked ? 'true' : 'false')}
-                aria-label="ribbon closed"
-                disabled={drawInputsOff}
-              />
-            </label>
-            {inputField('layer', 'layer', 'text', drawInputsOff)}
-          </div>
-        )}
-      >
+      <RibbonCluster id="draw" label="Draw" note={draw || null}>
         {DRAW_OPS.map(({ op, label, title }) => (
           <RibbonTool
             key={op}
@@ -187,19 +160,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
           />
         ))}
       </RibbonCluster>
-      <RibbonCluster
-        id="modify"
-        label="Modify"
-        note={modify || null}
-        extra={(
-          <div className="ribbon-cluster-inputs" data-testid="ribbon-modify-inputs">
-            {inputField('dx', 'dx', 'decimal', modifyInputsOff)}
-            {inputField('dy', 'dy', 'decimal', modifyInputsOff)}
-            {inputField('vertexIndex', 'vertex', 'numeric', modifyInputsOff)}
-            {inputField('layer', 'set layer', 'text', modifyInputsOff)}
-          </div>
-        )}
-      >
+      <RibbonCluster id="modify" label="Modify" note={modify || null}>
         {OPS.map(({ op, label, title }) => (
           <RibbonTool
             key={op}
@@ -215,6 +176,37 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
           />
         ))}
       </RibbonCluster>
+      {/* ONE operand line under the band (seating: the reference's ribbon
+          is a dense row of clusters; operands never live inside a group).
+          Both groups read the same record; each half disables with its
+          group's own gate. */}
+      <div className="ribbon-operands" data-testid="ribbon-operands">
+        <span className="ribbon-operands-tag" aria-hidden="true">draw</span>
+        {inputField('x', 'x', 'decimal', drawInputsOff)}
+        {inputField('y', 'y', 'decimal', drawInputsOff)}
+        {inputField('x2', 'x2', 'decimal', drawInputsOff)}
+        {inputField('y2', 'y2', 'decimal', drawInputsOff)}
+        {inputField('r', 'r', 'decimal', drawInputsOff)}
+        {inputField('a0', 'start', 'decimal', drawInputsOff)}
+        {inputField('a1', 'end', 'decimal', drawInputsOff)}
+        {inputField('pts', 'points', 'text', drawInputsOff, true)}
+        <label>
+          closed
+          <input
+            type="checkbox"
+            checked={inputs.closed === 'true'}
+            onChange={(event) => setInput('closed', event.target.checked ? 'true' : 'false')}
+            aria-label="ribbon closed"
+            disabled={drawInputsOff}
+          />
+        </label>
+        {inputField('layer', 'layer', 'text', drawInputsOff)}
+        <span className="ribbon-operands-tag" aria-hidden="true">modify</span>
+        {inputField('dx', 'dx', 'decimal', modifyInputsOff)}
+        {inputField('dy', 'dy', 'decimal', modifyInputsOff)}
+        {inputField('vertexIndex', 'vertex', 'numeric', modifyInputsOff)}
+        {inputField('layer', 'set layer', 'text', modifyInputsOff)}
+      </div>
     </>
   )
 }

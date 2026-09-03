@@ -109,6 +109,27 @@ describe('DraftingRibbon', () => {
     expect(move.title).toBe('opens on an imported DXF')
   })
 
+  it('a family label is a real command that opens the family in the rail; a fixed group label is decoration', () => {
+    const onOpenFamily = vi.fn()
+    render(
+      <DraftingRibbon clusters={[
+        ...catalogClusters(FAMS, { onRequestRun: () => {}, onOpenFamily }),
+        { id: 'view', label: 'View', tools: [{ id: 'fit', label: 'fit', onClick: () => {} }] },
+      ]}
+      />,
+    )
+    const label = screen.getByRole('button', { name: 'Open Measurement in the tool rail (1 tools)' })
+    fireEvent.click(label)
+    expect(onOpenFamily).toHaveBeenCalledWith(FAMS[0])
+    // The label sits LAST in its cluster (bottom, the reference grammar).
+    const cluster = label.closest('.ribbon-cluster')
+    expect(cluster.lastElementChild).toBe(label)
+    // A fixed group's label is not a button and is hidden from assistive tech.
+    const view = document.querySelector('[data-group="view"] .ribbon-cluster-label')
+    expect(view.tagName).toBe('SPAN')
+    expect(view.getAttribute('aria-hidden')).toBe('true')
+  })
+
   it('publishes its measured band height on the workspace card, with or without ResizeObserver', () => {
     // jsdom has no ResizeObserver and no layout: the one-shot measurement
     // still runs and the variable exists (0px here), so the import pane's

@@ -12,6 +12,7 @@ import {
   authorCluster,
   catalogClusters,
   layersCluster,
+  railCluster,
   versionCluster,
   viewCluster,
 } from './ribbonClusters.js'
@@ -78,6 +79,26 @@ describe('catalogClusters', () => {
       expect(clusters[0].tools).toEqual([])
       expect(clusters[0].note).toBe('No tools for this surface yet.')
     }
+  })
+})
+
+describe('the rail affordances the band carries while the rail is hidden', () => {
+  it('a family cluster label opens that family when a handler is given, and is decoration otherwise', () => {
+    const onOpenFamily = vi.fn()
+    const [cluster] = catalogClusters(FAMS, { onRequestRun: () => {}, onOpenFamily })
+    expect(cluster.labelTitle).toBe('Open Measurement in the tool rail (1 tools)')
+    cluster.onLabelClick()
+    expect(onOpenFamily).toHaveBeenCalledWith(FAMS[0])
+    const [plain] = catalogClusters(FAMS, { onRequestRun: () => {} })
+    expect(plain.onLabelClick).toBeNull()
+  })
+
+  it('railCluster is one real command: expand the hidden rail', () => {
+    const onExpand = vi.fn()
+    const cluster = railCluster({ onExpand })
+    expect(cluster.tools.map((t) => t.id)).toEqual(['rail-expand'])
+    cluster.tools[0].onClick()
+    expect(onExpand).toHaveBeenCalledTimes(1)
   })
 })
 
