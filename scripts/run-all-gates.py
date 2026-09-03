@@ -1320,10 +1320,14 @@ def build_suites() -> List[Suite]:
         # gate, so the count is identical in every environment. Re-measured on
         # this tree 2026-09-02 after admitting the provider's deploy_mode into
         # the frozen requested-key set and closing it to {normal, prewarm}:
-        # 63 passed, 132 subtests passed, 0 skipped.
+        # 63 passed, 132 subtests passed, 0 skipped. Re-measured on this tree
+        # 2026-09-02 after putting isinstance first on every closed-vocabulary
+        # membership test a provider value reaches, so an unhashable list or
+        # dict fails closed with a reason code instead of raising a bare
+        # TypeError: 66 passed, 222 subtests passed, 0 skipped.
         Suite("platform-staging-convergence",
               "scripts test_platform_staging_convergence.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_platform_staging_convergence.py"), 63),
+              SCRIPTS_DIR, _py_pytest("test_platform_staging_convergence.py"), 66),
         Suite("production-web-release",
               "scripts test_production_web_release.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_production_web_release.py"), 17),
