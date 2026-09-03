@@ -815,7 +815,13 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.locator('.selection-readout')).not.toContainText('Polyline')
     await page.keyboard.press('Enter')
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('4', { timeout: 60_000 })
-    await page.keyboard.press('Escape')
+    // Esc from a prompt field cancels (the row's own contract, as above). A
+    // bare Esc after the run is NOT enough: the Run button is disabled while
+    // the engine is busy, so focus fell to the body and the prompt row never
+    // saw the key (proof 3 on d764b50a). Product follow-up, not this PR: keep
+    // focus in the prompt after a run so Esc cancels from wherever the
+    // drafter is, as the reference does.
+    await page.getByLabel('ribbon x', { exact: true }).press('Escape')
     await expect(page.locator('.workspace-card[data-cockpit-picking="1"]')).toHaveCount(0)
     // A sentence is still a sentence: it routes, it never arms. LAST in the
     // row on purpose: while its route decision is shown the Command bar's
