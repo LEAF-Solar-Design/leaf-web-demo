@@ -3195,6 +3195,11 @@ export default function App() {
             commandActions={slashCommandActions}
             sessionId={agentSessionId}
             imageAttachmentsEnabled={false}
+            // W4d Slice E seating: on drafting surfaces under the studio the
+            // well is the reference's one-line docked "Command:" prompt.
+            // Rail OFF (and every non-drafting surface) the prop is false and
+            // the well renders exactly as before.
+            commandLine={!!studioGround && drafting}
           />
         </div>
 

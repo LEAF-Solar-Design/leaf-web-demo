@@ -527,6 +527,19 @@ test.describe('route matrix, rail ON', () => {
     if (seating.viewLeftOfCenter !== null) expect(seating.viewLeftOfCenter).toBe(false)
     expect(seating.glass).toMatch(/rgba\(12, 12, 13, 0\.96\)|rgb\(12, 12, 13\)/)
     test.info().annotations.push({ type: 'seating', description: JSON.stringify(seating) })
+
+    // Slice E: the command well is the reference's one-line docked prompt on
+    // drafting surfaces: "Command:" then the field, controls on the same row,
+    // under 44px tall, and still the ONE Command bar the route matrix pins.
+    const well = page.locator('.bar.bar-command-line')
+    await expect(well).toHaveCount(1)
+    await expect(well.locator('.bar-caret')).toHaveText('Command:')
+    const wellBox = await well.boundingBox()
+    expect(wellBox.height).toBeLessThanOrEqual(44)
+    const inputBox = await well.locator('.bar-input').boundingBox()
+    const controlsBox = await well.locator('.bar-controls').boundingBox()
+    expect(Math.abs(inputBox.y - controlsBox.y)).toBeLessThan(12)
+    await expect(page.getByLabel('Command bar')).toHaveCount(1)
     test.info().annotations.push({ type: 'cad_edit', description: cadEditOn ? 'VITE_CAD_EDIT=1: engine groups proven' : 'VITE_CAD_EDIT off in this build: engine groups absent by construction' })
 
     // Every group is VISIBLE at 1600 wide: the band wraps instead of hiding
@@ -780,6 +793,9 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.locator('.workspace-card[data-import-open]')).toHaveCount(0)
     await expect(page.locator('.workspace-card#cockpit-import-pane')).toHaveCount(0)
     await expect(page.getByTestId('properties-dock')).toHaveCount(0)
+    // Slice E: the command well keeps its caret glyph and two-row well rail OFF.
+    await expect(page.locator('.bar.bar-command-line')).toHaveCount(0)
+    await expect(page.locator('.bar .bar-caret')).toHaveText('›')
     const result = page.locator('.result-block')
     if (await result.count()) {
       expect(await result.evaluate((el) => getComputedStyle(el).position)).toBe('static')
