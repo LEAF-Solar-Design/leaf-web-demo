@@ -777,6 +777,31 @@ test.describe('route matrix, rail ON', () => {
     await bar.press('Enter')
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('3', { timeout: 60_000 })
     await expect(page.getByTestId('cad-edit-entity-list')).toContainText('CIRCLE on layer 0')
+
+    // W4f slice A1: the drawing answers the prompt. Arm LINE by its word,
+    // click two points ON the drawing (world -> pixels through the DEV
+    // projection hook), the fields take the picked coordinates, the caret
+    // moves on, the console's click-to-select stands aside, Enter draws.
+    await bar.fill('l')
+    await bar.press('Enter')
+    await expect(promptRow).toHaveAttribute('data-op', 'createLine')
+    await expect(page.locator('.workspace-card[data-cockpit-picking="1"]')).toHaveCount(1)
+    const px = (wx, wy) => page.evaluate(([x, y]) => document.querySelector('.studio-ground .viewer-canvas').__cadviewer.project(x, y), [wx, wy])
+    const a = await px(20, 30)
+    const b = await px(70, 15)
+    await page.mouse.click(a.x, a.y)
+    await expect(page.getByLabel('ribbon x', { exact: true })).toHaveValue(/^(19\.9|20\.0|20)/)
+    await expect(page.getByLabel('ribbon y', { exact: true })).toHaveValue(/^(29\.9|30\.0|30)/)
+    await expect(page.getByLabel('ribbon x2', { exact: true })).toBeFocused()
+    await page.mouse.click(b.x, b.y)
+    await expect(page.getByLabel('ribbon x2', { exact: true })).toHaveValue(/^(69\.9|70\.0|70)/)
+    await expect(page.getByLabel('ribbon y2', { exact: true })).toHaveValue(/^(14\.9|15\.0|15)/)
+    await expect(page.getByTestId('cockpit-prompt-run')).toBeFocused()
+    await expect(page.locator('.selection-readout')).not.toContainText('Polyline')
+    await page.keyboard.press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('4', { timeout: 60_000 })
+    await page.keyboard.press('Escape')
+    await expect(page.locator('.workspace-card[data-cockpit-picking="1"]')).toHaveCount(0)
   })
 
   test('solar depth: real solved strings on the Solar tab only, honesty-gated (W4c-V3)', async ({ page, request }) => {
