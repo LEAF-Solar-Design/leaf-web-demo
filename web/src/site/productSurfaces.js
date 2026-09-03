@@ -18,10 +18,13 @@ export const SHARED_WORKSPACE_CAPABILITIES = Object.freeze([
 // every value below is read off the code site cited beside it, so the
 // manifest and the running shell agree byte for byte.
 //
-// Slice 2 made this manifest LOAD-BEARING: App.jsx, ToolCast.jsx and
-// SurfaceGrounds.jsx now read these slots instead of comparing activeSurface
-// to a string literal, so a value below is what the shell renders, not a
-// description of it. Behaviour is unchanged, because surfaceGates.test.js pins every
+// Slice 2 made this manifest LOAD-BEARING: App.jsx, ToolCast.jsx,
+// SurfaceGrounds.jsx and ProductSurfaceTabs.jsx now read these slots instead of
+// comparing a surface id to a string literal, so a value below is what the
+// shell renders, not a description of it. What still compares an id is three
+// lines of per-surface COPY in the frame, allowlisted exactly by the same test
+// and owned by slice 9.
+// Behaviour is unchanged, because surfaceGates.test.js pins every
 // derived gate equal to the literal predicate it replaced, for all four ids,
 // and the three console/stage divergences (D1 ios chrome, D2 ios builds,
 // D3 authoring) plus the solar productFrame quirk are PRESERVED as documented,
@@ -93,7 +96,10 @@ export const PRODUCT_SURFACES = Object.freeze([
         // stageBranch: ToolCast.jsx:1434 / 2077 ternary falls through to the
         //   frame branch (ToolCast.jsx:2139).
         stageBranch: 'frame',
-        // projectSlot: App.jsx:2846 fills the slot for 'ios' only.
+        // projectSlot: App.jsx:2846 fills the slot for 'ios' only, and
+        //   ProductSurfaceTabs.jsx:252 reads the same slot from the other side
+        //   to decide whether the frame stacks its own project state under it.
+        //   TWO readers, one value: that is the point of the slot.
         projectSlot: null,
       },
       toolbar: {
@@ -319,7 +325,9 @@ export const PRODUCT_SURFACES = Object.freeze([
         cockpit: false,
         // stageBranch: ToolCast.jsx:2077 `activeSurface === 'ios'`.
         stageBranch: 'ios',
-        // projectSlot: App.jsx:2846-2847 mounts <IosSurface> into the frame.
+        // projectSlot: App.jsx:2846-2847 mounts <IosSurface> into the frame,
+        //   and ProductSurfaceTabs.jsx:252 reads the same slot to suppress the
+        //   frame's own project state, because the ship lane owns that line.
         projectSlot: 'ios-surface',
       },
       toolbar: {
