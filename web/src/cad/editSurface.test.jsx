@@ -1,7 +1,7 @@
 /**
  * EditSurface. Card C1-6 acceptance oracle, one describe block per assertion:
  *   - Dormant editing surface mounts only with cad_edit on; renders the
- *     ribbon/command skeleton (OpenCADStudio interaction model, Leaf Automation's own
+ *     ribbon/command skeleton (OpenCADStudio interaction model, the Leaf Automation
  *     implementation); every command stub reports 'not yet enabled' truthfully.
  */
 import { afterEach, describe, expect, it } from 'vitest'
@@ -29,7 +29,7 @@ describe('acceptance: dormant editing surface mounts only with cad_edit on', () 
   })
 })
 
-describe('acceptance: renders the ribbon/command skeleton (OpenCADStudio interaction model, Leaf Automation's own implementation)', () => {
+describe("acceptance: renders the ribbon/command skeleton (OpenCADStudio interaction model, the Leaf Automation implementation)", () => {
   it('renders a ribbon tablist with multiple tabs, one selected', () => {
     render(<EditSurface enabled />)
     const tablist = screen.getByRole('tablist', { name: /editing ribbon tabs/i })
