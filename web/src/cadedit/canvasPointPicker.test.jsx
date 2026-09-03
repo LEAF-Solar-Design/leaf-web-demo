@@ -135,6 +135,31 @@ describe('CanvasPointPicker (W4f slice A1)', () => {
     expect(screen.getByLabelText('ribbon x').value).not.toBe('12')
   })
 
+  it('F8 toggles ORTHO; with it on the second point and the band snap to the axis of the larger move (W4f-4)', async () => {
+    mount()
+    await openAndLoad()
+    expect(context.ortho).toBe(false)
+    act(() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'F8', bubbles: true, cancelable: true })) })
+    expect(context.ortho).toBe(true)
+    fireEvent.click(document.querySelector('.drafting-ribbon [data-tool="draw:createLine"]'))
+    // The first point is free.
+    click(120, 30)
+    expect(screen.getByLabelText('ribbon x').value).toBe('12')
+    expect(screen.getByLabelText('ribbon y').value).toBe('3')
+    // The band and the pick hold y (the larger move is horizontal).
+    act(() => { ground.dispatchEvent(new MouseEvent('pointermove', { clientX: 200, clientY: 50, bubbles: true })) })
+    expect(viewer.setRubberBand).toHaveBeenLastCalledWith([[12, 3], [20, 3]], false)
+    click(200, 50)
+    expect(screen.getByLabelText('ribbon x2').value).toBe('20')
+    expect(screen.getByLabelText('ribbon y2').value).toBe('3')
+    // Off again: a free pick.
+    act(() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'F8', bubbles: true, cancelable: true })) })
+    expect(context.ortho).toBe(false)
+    act(() => { context.setArmed({ group: 'draw', op: 'createLine', from: [12, 3] }) })
+    click(200, 50)
+    expect(screen.getByLabelText('ribbon y2').value).toBe('5')
+  })
+
   it('a circle takes its centre and a radius point; a drag (pointer travel) is never a pick', async () => {
     mount()
     await openAndLoad()
