@@ -25,6 +25,10 @@ export default function EngineDocumentView({ viewerRef = null, onShown = null })
   const entities = showing ? session.entities : null
   const documentId = showing ? session.documentId : ''
   const lastRef = useRef(null)
+  // The latest onShown, so the unmount cleanup (a closure from the first
+  // render) tells the host the stamp is gone (kimi, #969).
+  const onShownRef = useRef(onShown)
+  onShownRef.current = onShown
   useEffect(() => {
     const viewer = viewerRef?.current
     if (!viewer || typeof viewer.applyVersion !== 'function') return undefined
@@ -45,8 +49,11 @@ export default function EngineDocumentView({ viewerRef = null, onShown = null })
   }, [viewerRef, entities, documentId, onShown])
   // Unmount (the surface leaves): the console drawing comes back.
   useEffect(() => () => {
+    if (lastRef.current === null) return
+    lastRef.current = null
     const viewer = viewerRef?.current
-    if (lastRef.current !== null && viewer && typeof viewer.applyVersion === 'function') viewer.applyVersion(null)
+    if (viewer && typeof viewer.applyVersion === 'function') viewer.applyVersion(null)
+    onShownRef.current?.(null)
   }, [viewerRef])
   return null
 }

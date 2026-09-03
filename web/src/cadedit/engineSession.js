@@ -90,9 +90,30 @@ const INITIAL_SESSION = Object.freeze({
   errorKind: null,
   receipt: null,
   savedVersion: null,
+  // W4f slice F: how many engine edits can be undone / redone right now.
+  // The snapshots themselves (whole-document bytes) live in refs, never in
+  // React state; these counts are what the affordances read.
+  undoDepth: 0,
+  redoDepth: 0,
 })
 
 const CRASH_STATUS = 'Engine stopped unexpectedly. Open a drawing again to restart it.'
+
+// W4f slice F: undo is a bytes-snapshot stack. Every applied edit re-parses
+// the WHOLE written document and hands the bytes back, so the state before an
+// edit is exactly the bytes that were current then, and undoing is re-loading
+// them through the same loadDocument path the open uses. Bounded by total
+// bytes, not count: a 16 MB document would make fifty snapshots 800 MB.
+export const MAX_UNDO_BYTES = 64 * 1024 * 1024
+
+function trimSnapshots(stack, limit = MAX_UNDO_BYTES) {
+  let total = 0
+  for (const snap of stack) total += snap.bytes.length
+  while (stack.length > 1 && total > limit) {
+    total -= stack.shift().bytes.length
+  }
+  return stack
+}
 
 function fmtDelta(raw) {
   const n = Number.parseFloat(raw)
@@ -263,6 +284,15 @@ export default function useEngineSession({
   onSavedRef.current = onSaved
   // In-flight latch for the version write. See save().
   const savingRef = useRef(false)
+  // W4f slice F: the undo machinery. `current` is the bytes the engine holds
+  // right now (the opened file, then each applied edit's written bytes);
+  // `undo`/`redo` hold {bytes, op}; `reload` names an undo/redo re-load in
+  // flight so the documentLoaded that answers it is read as a step back or
+  // forward, not as a fresh open.
+  const historyRef = useRef({ original: null, current: null, undo: [], redo: [], reload: null })
+  const clearHistory = () => {
+    historyRef.current = { original: null, current: null, undo: [], redo: [], reload: null }
+  }
 
   const patch = useCallback((next) => {
     setSession((current) => Object.freeze({ ...current, ...next }))
@@ -272,6 +302,7 @@ export default function useEngineSession({
     generationRef.current += 1
     boundaryRef.current?.terminate()
     boundaryRef.current = null
+    clearHistory()
   }, [])
 
   // Worker death. Not an engine message — the boundary never sees this — so
@@ -309,6 +340,36 @@ export default function useEngineSession({
       if (message.type === 'documentLoaded') {
         const entities = message.entities ?? NO_ENTITIES
         const others = (message.unsupported ?? []).length
+        const history = historyRef.current
+        const reload = history.reload
+        if (reload) {
+          // W4f slice F: this load answers an undo/redo. The engine now holds
+          // the snapshot; the selection survives by id where it can; the
+          // bytes count as edited unless they ARE the opened file.
+          history.reload = null
+          history.current = reload.bytes
+          const edited = reload.bytes !== history.original
+          setSession((current) => Object.freeze({
+            ...current,
+            entities,
+            entityCount: message.entityCount ?? 0,
+            selectedId: surviveSelection(current.selectedId, entities),
+            savedBytes: edited ? reload.bytes : null,
+            busy: false,
+            engineParsed: true,
+            geometrySource: GEOMETRY_SOURCE.ENGINE_REPARSE,
+            errorKind: null,
+            undoDepth: history.undo.length,
+            redoDepth: history.redo.length,
+            status: `${reload.kind === 'undo' ? 'Undid' : 'Redid'} ${reload.op}: `
+              + `${message.entityCount} entities, ${reload.bytes.length} bytes.`,
+          }))
+          return
+        }
+        // A fresh open: the history starts here.
+        history.undo = []
+        history.redo = []
+        history.current = history.original
         patch({
           entities,
           entityCount: message.entityCount ?? 0,
@@ -318,6 +379,8 @@ export default function useEngineSession({
           engineParsed: true,
           geometrySource: GEOMETRY_SOURCE.ENGINE_PARSE,
           errorKind: null,
+          undoDepth: 0,
+          redoDepth: 0,
           status: `Loaded ${message.documentId}: ${message.entityCount} entities`
             + (others ? ` (${others} preserved as read-only kinds).` : '.'),
         })
@@ -342,6 +405,16 @@ export default function useEngineSession({
           : ''
         const createLost = isCreate && !createdId
         const reparsed = `Re-parsed from the written bytes: ${message.entityCount} entities, ${message.byteLength} bytes.`
+        // W4f slice F: the state BEFORE this edit is a snapshot; a new edit
+        // ends any redo branch. Done once here (outside the updater, which
+        // StrictMode runs twice).
+        const history = historyRef.current
+        if (message.bytes && history.current) {
+          history.undo.push({ bytes: history.current, op: message.op })
+          trimSnapshots(history.undo)
+          history.redo = []
+        }
+        if (message.bytes) history.current = message.bytes
         setSession((current) => Object.freeze({
           ...current,
           busy: false,
@@ -349,6 +422,8 @@ export default function useEngineSession({
           entityCount: message.entityCount ?? 0,
           savedBytes: message.bytes ?? null,
           selectedId: createdId || surviveSelection(current.selectedId, entities),
+          undoDepth: history.undo.length,
+          redoDepth: history.redo.length,
           engineParsed: true,
           // The written bytes, read back: what a reader of the saved file
           // would actually see, never an optimistic prediction.
@@ -406,6 +481,9 @@ export default function useEngineSession({
     // the bytes rather than post a document nobody asked for any more.
     if (generation !== generationRef.current) return
     const boundary = ensureBoundary()
+    // W4f slice F: the opened bytes are the floor of the undo history.
+    clearHistory()
+    historyRef.current.original = bytes
     if (!boundary.post({ type: 'loadDocument', documentId: file.name, bytes })) {
       patch({
         busy: false,
@@ -519,6 +597,39 @@ export default function useEngineSession({
     }
   }, [patch])
 
+  // W4f slice F: step back (or forward) by re-loading the neighbouring
+  // snapshot through the open path. A no-op while busy or with nothing to
+  // step to; the documentLoaded reply is read by the `reload` marker.
+  const step = useCallback((kind) => {
+    const history = historyRef.current
+    const from = kind === 'undo' ? history.undo : history.redo
+    const to = kind === 'undo' ? history.redo : history.undo
+    const boundary = boundaryRef.current
+    if (sessionRef.current.busy || history.reload || !boundary || !from.length || !history.current) return false
+    const snap = from.pop()
+    to.push({ bytes: history.current, op: snap.op })
+    trimSnapshots(to)
+    history.reload = { kind, op: snap.op, bytes: snap.bytes }
+    patch({ busy: true, errorKind: null, undoDepth: history.undo.length, redoDepth: history.redo.length })
+    if (!boundary.post({ type: 'loadDocument', documentId: sessionRef.current.documentId, bytes: snap.bytes })) {
+      // Put the snapshot back: nothing moved.
+      history.reload = null
+      to.pop()
+      from.push(snap)
+      patch({
+        busy: false,
+        errorKind: SESSION_ERROR.TRANSPORT,
+        undoDepth: history.undo.length,
+        redoDepth: history.redo.length,
+        status: `${kind === 'undo' ? 'Undo' : 'Redo'} refused: the boundary rejected the message.`,
+      })
+      return false
+    }
+    return true
+  }, [patch])
+  const undo = useCallback(() => step('undo'), [step])
+  const redo = useCallback(() => step('redo'), [step])
+
   const reset = useCallback(() => {
     teardown()
     setSession(INITIAL_SESSION)
@@ -539,8 +650,8 @@ export default function useEngineSession({
   useEffect(() => () => { teardown() }, [teardown])
 
   const actions = useMemo(() => ({
-    open, select, applyEdit, create, save, reset,
-  }), [applyEdit, create, open, reset, save, select])
+    open, select, applyEdit, create, save, reset, undo, redo,
+  }), [applyEdit, create, open, redo, reset, save, select, undo])
 
   const selected = useMemo(
     () => session.entities.find((entity) => entity.id === session.selectedId) || null,

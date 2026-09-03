@@ -100,6 +100,8 @@ describe('CommandLineArmer (W4f slice B)', () => {
     expect(acceptsCommand({ group: 'modify', op: 'delete' })).toBe(true)
     expect(acceptsCommand({ group: 'modify', op: 'hasOwnProperty' })).toBe(false)
     expect(acceptsCommand({ group: 'draw', op: 'delete' })).toBe(true)
+    expect(acceptsCommand({ group: 'modify', op: 'undo' })).toBe(true)
+    expect(acceptsCommand({ group: 'modify', op: 'redo' })).toBe(true)
     expect(acceptsCommand({ group: 'view', op: 'fit' })).toBe(false)
     expect(acceptsCommand(undefined)).toBe(false)
   })

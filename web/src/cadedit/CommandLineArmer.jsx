@@ -22,7 +22,9 @@ import { PROMPTS, modifyReason } from './EngineRibbonClusters.jsx'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
 
 const GROUPS = new Set(['draw', 'modify'])
-const RUN_ON_ARRIVAL = new Set(['delete'])
+// Ops with no operands run the moment the word arrives: delete on a live
+// selection, undo/redo on the engine's own history (W4f slice F).
+const RUN_ON_ARRIVAL = new Set(['delete', 'undo', 'redo'])
 
 /** The event detail is a command the engine can take: { group, op } and nothing surprising. */
 export function acceptsCommand(detail) {
@@ -34,12 +36,14 @@ export function acceptsCommand(detail) {
 
 export default function CommandLineArmer() {
   const { session, inputs, setArmed } = useEngineSessionContext()
-  const { applyEdit } = session.actions
+  const { applyEdit, undo, redo } = session.actions
   useEffect(() => {
     if (typeof window === 'undefined') return undefined
     const onCommand = (event) => {
       const detail = event?.detail
       if (!acceptsCommand(detail)) return
+      if (detail.op === 'undo') { undo(); return }
+      if (detail.op === 'redo') { redo(); return }
       if (RUN_ON_ARRIVAL.has(detail.op)) {
         // ERASE with a live selection runs, as the ribbon's Delete does; with
         // nothing to act on it arms nothing (the ribbon's note names why).
@@ -50,6 +54,6 @@ export default function CommandLineArmer() {
     }
     window.addEventListener(COCKPIT_COMMAND_EVENT, onCommand)
     return () => window.removeEventListener(COCKPIT_COMMAND_EVENT, onCommand)
-  }, [session, inputs, setArmed, applyEdit])
+  }, [session, inputs, setArmed, applyEdit, undo, redo])
   return null
 }

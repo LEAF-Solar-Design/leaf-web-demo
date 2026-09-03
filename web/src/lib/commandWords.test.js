@@ -13,6 +13,9 @@ describe('commandWords (W4f slice B): typed CAD words on the command line', () =
     expect(parseDrawingCommand('m')).toMatchObject({ group: 'modify', op: 'move', verb: 'MOVE' })
     expect(parseDrawingCommand('erase')).toMatchObject({ group: 'modify', op: 'delete', verb: 'ERASE' })
     expect(parseDrawingCommand('DEL')).toMatchObject({ op: 'delete' })
+    expect(parseDrawingCommand('u')).toMatchObject({ group: 'modify', op: 'undo', verb: 'UNDO' })
+    expect(parseDrawingCommand('UNDO')).toMatchObject({ op: 'undo' })
+    expect(parseDrawingCommand('redo')).toMatchObject({ group: 'modify', op: 'redo', verb: 'REDO' })
     expect(Object.isFrozen(parseDrawingCommand('line'))).toBe(true)
   })
 

@@ -560,6 +560,37 @@ describe('the command prompt (W4e slice H): a tool arms, the command line asks i
   })
 })
 
+describe('the band\'s Undo edit / Redo edit (W4f slice F)', () => {
+  // No band slot in this mount, so the tools render inline in the File panel
+  // (the band gets the same records as quick-access buttons).
+  const quick = (id) => document.querySelector(`.drafting-ribbon [data-tool="${id.replace(/^quick-/, '')}"]`)
+
+  it('are disabled with the reason until an edit exists, then Undo re-loads the bytes before it and Redo steps forward', async () => {
+    const studio = mount()
+    expect(quick('quick-undo-edit').disabled).toBe(true)
+    expect(quick('quick-undo-edit').title).toBe('opens on an imported DXF')
+    await openAndLoad(studio, [LINE])
+    expect(quick('quick-undo-edit').title).toBe('nothing to undo')
+    expect(quick('quick-redo-edit').title).toBe('nothing to redo')
+    fireEvent.click(screen.getByRole('radio'))
+    armAndRun('move')
+    const bytes = new Uint8Array([9, 9])
+    studio.workers[0].emit(editApplied('move', [LINE], bytes))
+    expect(quick('quick-undo-edit').disabled).toBe(false)
+    expect(quick('quick-undo-edit').title).toContain('1 to undo')
+    fireEvent.click(quick('quick-undo-edit'))
+    const posted = studio.workers[0].posted
+    expect(posted[posted.length - 1].type).toBe('loadDocument')
+    expect(posted[posted.length - 1].documentId).toBe('one.dxf')
+    studio.workers[0].emit(loadedMessage([LINE]))
+    expect(studio.context.session.status).toMatch(/^Undid move:/)
+    expect(quick('quick-undo-edit').title).toBe('nothing to undo')
+    expect(quick('quick-redo-edit').disabled).toBe(false)
+    fireEvent.click(quick('quick-redo-edit'))
+    expect(studio.workers[0].posted[studio.workers[0].posted.length - 1].bytes).toBe(bytes)
+  })
+})
+
 describe('the reason ladders are pure and total', () => {
   it('modifyReason resolves in the order a user clears them', () => {
     expect(modifyReason(null)).toBe(MODIFY_REASONS.noDocument)

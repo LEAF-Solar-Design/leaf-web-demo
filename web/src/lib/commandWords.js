@@ -29,6 +29,11 @@ const WORDS = Object.freeze({
   e: { group: 'modify', op: 'delete', verb: 'ERASE' },
   delete: { group: 'modify', op: 'delete', verb: 'ERASE' },
   del: { group: 'modify', op: 'delete', verb: 'ERASE' },
+  // W4f slice F: the engine's own history (a bytes-snapshot stack), never
+  // the console's version undo.
+  undo: { group: 'modify', op: 'undo', verb: 'UNDO' },
+  u: { group: 'modify', op: 'undo', verb: 'UNDO' },
+  redo: { group: 'modify', op: 'redo', verb: 'REDO' },
 })
 
 export const COMMAND_WORDS = Object.freeze(Object.keys(WORDS))

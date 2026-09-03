@@ -292,8 +292,30 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
       onClick: () => { session.actions.save() },
     },
   ]
-  // The same two commands as quick-access buttons in the top band.
-  const quick = fileTools.map((tool) => ({ ...tool, id: `quick-${tool.id}`, label: tool.text }))
+  // W4f slice F: the engine's own Undo / Redo (a bytes-snapshot stack,
+  // distinct from the console's version undo on the View tab), each disabled
+  // with its reason when there is nothing to step to. They ride the File
+  // panel inline and the top band as quick-access buttons, like Open/Save.
+  const historyReason = !session.engineParsed
+    ? 'opens on an imported DXF'
+    : session.busy ? 'engine busy' : ''
+  const undoReason = historyReason || (session.undoDepth ? '' : 'nothing to undo')
+  const redoReason = historyReason || (session.redoDepth ? '' : 'nothing to redo')
+  fileTools.push(
+    {
+      id: 'undo-edit', label: 'Undo edit', text: 'Undo edit', icon: 'undo', size: 'small',
+      title: `Undo the last engine edit${session.undoDepth ? ` (${session.undoDepth} to undo)` : ''}`,
+      disabled: !!undoReason, reason: undoReason, onClick: () => { session.actions.undo() },
+    },
+    {
+      id: 'redo-edit', label: 'Redo edit', text: 'Redo edit', icon: 'redo', size: 'small',
+      title: `Redo the undone engine edit${session.redoDepth ? ` (${session.redoDepth} to redo)` : ''}`,
+      disabled: !!redoReason, reason: redoReason, onClick: () => { session.actions.redo() },
+    },
+  )
+  // The same commands as quick-access buttons in the top band (data-tool
+  // "quick-<id>", the band's locator contract).
+  const quick = fileTools.map((tool) => ({ ...tool, id: `quick-${tool.id}`, dataTool: `quick-${tool.id}`, label: tool.text }))
 
   // One field of the prompt: the SAME operator record the pane's fields bind
   // to (provider `inputs`), named `ribbon <label>` for the locator contract.
