@@ -1,0 +1,545 @@
+"""Resolve the staging fleet reconcile-and-restamp plan. READ ONLY.
+
+WHY THIS EXISTS. The staging relay converges exactly two surfaces, web and
+app, and says so in its own receipt: automatic_surfaces ["web","app"],
+non_relay_services all "not_automatically_reconciled",
+full_fleet_identity_stamped false. The convergence receipt that
+scripts/platform_staging_convergence.py emits needs more than that. Its
+deployment identity is a FIVE-service stamp built from LIVE ECS digests (the
+provider samples running tasks and checks their health before writing the
+body), so it exists only once broker, harness and canonical-worker are also
+live on the release, and only after an app run with
+app_deploy_intent=configuration stamps it. Nothing dispatches any of that:
+the relay only ever sends app_deploy_intent=forward. Measured 2026-09-03 on
+the dad27a10 wave, every one of those four runs (broker 33698179237, harness
+33698719439, canonical-worker 33699214170, restamp 33699604872) was
+triggering_actor=Evan-Haug, event=workflow_dispatch. This module computes, on
+evidence alone, what those four dispatches should be.
+
+WHY IT PLANS INSTEAD OF DEPLOYING, and why the plan is not per-release.
+Every staging mutation funnels through one shared concurrency group
+(leaf-platform-staging-ecs-mutation, shared by 39 workflows) which holds a
+single slot. Measured over the 60 most recent staging deploys to 2026-09-03,
+median wall clock per service: web 11.2, app 26.9, broker 5.4, harness 6.0,
+canonical-worker 7.8 minutes, so all five serialized is ~57 minutes, ~63 with
+the restamp, against a 19.4-minute median merge cadence on main and a lock
+already busy 70.3% of a 25.2h sample. Converging EVERY release is therefore
+3.2x oversubscribed: a per-release reconciler would queue forever and starve
+the web and app deploys that carry the product. So the plan always targets the
+NEWEST converged release and is expected to skip releases, and the lane that
+runs it yields to the relay rather than competing with it.
+
+This module NEVER dispatches and never mutates. It reads provider evidence and
+returns a closed plan for a human to read, which is the milestone that comes
+before arming anything.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from typing import Any
+
+from scripts.platform_staging_convergence import (
+    APP_REPOSITORY,
+    ARTIFACT_FILE,
+    DEPLOY_WORKFLOW,
+    SERVICE_ORDER,
+    TF_REPOSITORY,
+    ContractError,
+    GitHubProvider,
+    Provider,
+    _one_artifact,
+    _positive,
+    _sha40,
+)
+
+PLAN_SCHEMA = "leaf.staging-fleet-reconcile-plan.v1"
+ENVIRONMENT = "staging"
+RELAY_ARTIFACT_FILE = "staging-converged.json"
+
+# The relay owns these two and reconciles them itself; this lane must never
+# name them in a dispatch step or it would race the relay for the lock.
+RELAY_SERVICES = ("web", "app")
+# Dispatched in this order, cheapest first (medians above), so a lane that
+# loses the lock partway has still advanced the most services it could.
+NON_RELAY_SERVICES = ("broker", "harness", "canonical-worker")
+
+# Bounded scan. The reconciler reads recent deploy runs to find each service's
+# most recent settled state; it never walks the whole history.
+MAX_DEPLOY_RUN_SCAN = 60
+MAX_RELAY_RUN_SCAN = 20
+# Hard ceiling on rows accepted from one listing, so a provider that ignores
+# per_page cannot make this lane allocate without bound.
+MAX_RUN_PAGE = 100
+
+DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+TASK_DEFINITION_ARN = re.compile(
+    r"^arn:aws:ecs:[a-z0-9-]{1,32}:[0-9]{12}:task-definition/[A-Za-z0-9_-]{1,255}:[1-9][0-9]{0,9}$"
+)
+
+# Live-run statuses that mean the shared staging mutation lock is, or is about
+# to be, held by somebody else.
+BUSY_STATUSES = frozenset({"queued", "in_progress", "waiting", "requested", "pending"})
+
+# The provider sets run-name to "Deploy leaf-platform staging <service>
+# (<image_tag>)". The relay already depends on that contract to identify its
+# own dispatched runs, so this reuses it as a CHEAP PREFILTER: it narrows
+# which runs are worth an artifact download, and the receipt inside is still
+# the authority. A title that lies costs a discarded candidate, never a wrong
+# reading, because the receipt's own requested.service has to agree.
+RUN_TITLE = re.compile(r"^Deploy leaf-platform staging (?P<service>[a-z-]{1,32}) \(")
+
+
+def _digest(value: Any, reason: str) -> str:
+    if not isinstance(value, str) or not DIGEST.fullmatch(value):
+        raise ContractError(reason)
+    return value
+
+
+def _task_definition(value: Any, reason: str) -> str:
+    if not isinstance(value, str) or not TASK_DEFINITION_ARN.fullmatch(value):
+        raise ContractError(reason)
+    return value
+
+
+def _run_page(
+    provider: Provider, repository: str, workflow: str, query: str
+) -> list[dict[str, Any]]:
+    """ONE bounded snapshot of a workflow's run list.
+
+    Deliberately not the convergence finalizer's _workflow_run_rows. That helper
+    re-reads until two scans agree, which is right for a receipt bound to a
+    CLOSED window, and impossible here: this lane reads an open-ended listing of
+    a workflow that has a run live 70.3% of the time, so on a full page any new
+    run pushes one off the end and the scans can never agree. Measured against
+    the live provider on 2026-09-03, that is exactly what happened:
+    ERROR:PROVIDER_RUN_LIST_DRIFT, every time.
+
+    A single snapshot is the honest primitive for a REPORT. It is also what the
+    provider's own prewarm self-yield uses for the same decision. Staleness is
+    bounded by the read itself and costs at worst one skipped cycle, and the
+    schedule brings the lane straight back.
+    """
+    raw = provider.json(repository, f"/actions/workflows/{workflow}/runs?{query}")
+    if not isinstance(raw, dict) or not isinstance(raw.get("workflow_runs"), list):
+        raise ContractError("PROVIDER_RUN_LIST_INVALID")
+    rows = raw["workflow_runs"]
+    if len(rows) > MAX_RUN_PAGE:
+        raise ContractError("PROVIDER_RUN_LIST_INVALID")
+    return rows
+
+
+def _live_runs(provider: Provider, repository: str, workflow: str) -> list[int]:
+    """Run ids of anything not settled. Fails CLOSED: a read that cannot be
+    parsed is reported as busy, never as quiet, because standing down costs one
+    idle cycle while proceeding could race the relay for the staging lock."""
+    rows = _run_page(provider, repository, workflow, "per_page=50")
+    live: list[int] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ContractError("PROVIDER_RUN_LIST_INVALID")
+        status = row.get("status")
+        if not isinstance(status, str):
+            raise ContractError("PROVIDER_RUN_LIST_INVALID")
+        if status in BUSY_STATUSES:
+            live.append(_positive(row.get("id"), "PROVIDER_RUN_LIST_INVALID"))
+    return live
+
+
+def yield_check(provider: Provider) -> dict[str, Any]:
+    """Stand down whenever the relay, or any staging deploy, is live.
+
+    This lane is strictly lower priority than the relay: the relay carries the
+    product surfaces and already abandons its SECOND service whenever main
+    moves inside its window, so a reconciler that took the lock from it would
+    make the thing it is trying to fix worse. Same shape as the provider's own
+    prewarm self-yield, including its fail-closed posture.
+    """
+    relay_live = _live_runs(provider, APP_REPOSITORY, "dispatch-staging-deploys.yml")
+    deploy_live = _live_runs(provider, TF_REPOSITORY, "deploy-leaf-platform-staging.yml")
+    if relay_live:
+        return {
+            "status": "yielded",
+            "reason": "RELAY_LIVE",
+            "detail": f"relay run(s) {sorted(relay_live)} not settled",
+        }
+    if deploy_live:
+        return {
+            "status": "yielded",
+            "reason": "STAGING_DEPLOY_LIVE",
+            "detail": f"staging deploy run(s) {sorted(deploy_live)} not settled",
+        }
+    return {"status": "clear", "reason": None, "detail": None}
+
+
+def _newest_relay_release(provider: Provider) -> dict[str, Any]:
+    """The newest successful relay run that actually published a receipt.
+
+    A relay that stood down or went red published nothing, so it names no
+    converged release and is skipped rather than treated as a failure.
+    """
+    rows = _run_page(
+        provider,
+        APP_REPOSITORY,
+        "dispatch-staging-deploys.yml",
+        f"status=success&per_page={MAX_RELAY_RUN_SCAN}",
+    )
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ContractError("PROVIDER_RUN_LIST_INVALID")
+        run_id = _positive(row.get("id"), "PROVIDER_RUN_LIST_INVALID")
+        head_sha = row.get("head_sha")
+        if not isinstance(head_sha, str):
+            continue
+        name = f"staging-converged-{head_sha}-attempt-{row.get('run_attempt')}"
+        try:
+            _artifact, raw = _one_artifact(
+                provider, APP_REPOSITORY, run_id, name, RELAY_ARTIFACT_FILE
+            )
+        except ContractError:
+            continue
+        receipt = raw if isinstance(raw, dict) else None
+        if receipt is None or receipt.get("schema") != "leaf.staging-converged.v2":
+            continue
+        supply = receipt.get("candidate_supply_set")
+        if not isinstance(supply, dict):
+            raise ContractError("RELAY_RECEIPT_INVALID")
+        services = supply.get("services")
+        if not isinstance(services, dict) or set(services) != set(SERVICE_ORDER):
+            raise ContractError("RELAY_RECEIPT_INVALID")
+        digests = {
+            service: _digest(
+                (services[service] or {}).get("image_digest"), "RELAY_RECEIPT_INVALID"
+            )
+            for service in SERVICE_ORDER
+        }
+        return {
+            "relay_run_id": run_id,
+            "build_run_id": _positive(supply.get("build_run_id"), "RELAY_RECEIPT_INVALID"),
+            "release_source_revision": _sha40(
+                receipt.get("release_source_revision"), "RELAY_RECEIPT_INVALID"
+            ),
+            "supply_set_sha256": receipt.get("supply_set_sha256"),
+            "service_digests": digests,
+        }
+    raise ContractError("NO_CONVERGED_RELEASE")
+
+
+def _settled_service_state(provider: Provider) -> dict[str, dict[str, Any]]:
+    """Each service's most recent settled deploy, read from its own receipt.
+
+    Deliberately evidence-based rather than an AWS read: this repository holds
+    no AWS credentials, and the receipt already records the terminal digest and
+    task definition the deploy landed on. It is a BEST-EFFORT view of live
+    state, because a later deploy dispatched by anyone else could have moved a
+    service since. That is safe here for two reasons: the plan is only read by
+    a human, and every deploy step it names carries digest_aware_reconcile,
+    which makes the provider skip a service that is already exact.
+    """
+    rows = _run_page(
+        provider,
+        TF_REPOSITORY,
+        "deploy-leaf-platform-staging.yml",
+        f"event=workflow_dispatch&status=success&per_page={MAX_DEPLOY_RUN_SCAN}",
+    )
+    # Pick the newest candidate per service from run metadata FIRST, then read
+    # at most one artifact each. Downloading a receipt per scanned run instead
+    # would be a per-item network round trip over a 60-run window to recover 5
+    # facts, and broker appears about twice in such a window, so the naive shape
+    # pays ~50 archive downloads on every tick of a 30-minute schedule.
+    candidates: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ContractError("PROVIDER_RUN_LIST_INVALID")
+        title = row.get("display_title")
+        if not isinstance(title, str):
+            continue
+        match = RUN_TITLE.match(title)
+        if match is None:
+            continue
+        service = match.group("service")
+        if service not in SERVICE_ORDER or service in candidates:
+            continue
+        candidates[service] = row
+        if len(candidates) == len(SERVICE_ORDER):
+            break
+
+    state: dict[str, dict[str, Any]] = {}
+    for expected_service, row in candidates.items():
+        run_id = _positive(row.get("id"), "PROVIDER_RUN_LIST_INVALID")
+        name = (
+            f"leaf-platform-staging-service-run-{run_id}"
+            f"-attempt-{row.get('run_attempt')}"
+        )
+        try:
+            _artifact, raw = _one_artifact(
+                provider, TF_REPOSITORY, run_id, name, ARTIFACT_FILE
+            )
+        except ContractError:
+            continue
+        if not isinstance(raw, dict):
+            continue
+        requested = raw.get("requested")
+        facts = raw.get("facts")
+        if not isinstance(requested, dict) or not isinstance(facts, dict):
+            continue
+        service = requested.get("service")
+        # The receipt, not the run title, decides. A mismatch means the title
+        # contract drifted, so drop the candidate rather than record it under a
+        # service it may not belong to.
+        if service != expected_service or service in state:
+            continue
+        terminal = facts.get("terminal")
+        if not isinstance(terminal, dict) or terminal.get("status") != "produced":
+            continue
+        value = terminal.get("value")
+        if not isinstance(value, dict):
+            continue
+        image = value.get("image_digest")
+        if not isinstance(image, dict) or image.get("status") != "produced":
+            continue
+        state[service] = {
+            "run_id": run_id,
+            "image_digest": _digest(image.get("value"), "SERVICE_RECEIPT_INVALID"),
+            "task_definition": _task_definition(
+                value.get("task_definition"), "SERVICE_RECEIPT_INVALID"
+            ),
+            "app_deploy_intent": requested.get("app_deploy_intent"),
+        }
+    return state
+
+
+def _dispatch_step(service: str, image_tag: str, *, position: int) -> dict[str, Any]:
+    """One forward reconcile of a non-relay service.
+
+    digest_aware_reconcile is what makes this safe to name even when the
+    best-effort read above is stale: the provider re-reads live state under the
+    lock and skips a service that is already exact, so a redundant step costs a
+    no-op run rather than a redeploy.
+    """
+    return {
+        "position": position,
+        "kind": "reconcile",
+        "service": service,
+        "workflow": DEPLOY_WORKFLOW,
+        "repository": TF_REPOSITORY,
+        "inputs": {
+            "service": service,
+            "expected_task_definition": "auto-live",
+            "image_tag": image_tag,
+            "app_deploy_intent": "forward",
+            "digest_aware_reconcile": "true",
+        },
+        "requires_relay_supply_evidence": True,
+    }
+
+
+def _restamp_step(baseline: str, image_tag: str, *, position: int) -> dict[str, Any]:
+    """The five-service identity stamp, which is the whole point of the lane.
+
+    expected_task_definition must be an EXACT arn: the provider refuses
+    auto-live unless app_deploy_intent is forward, and this is a configuration
+    deploy. The arn is not guessed and needs no AWS read: it is the task
+    definition the app's own most recent deploy receipt says it landed on.
+    Verified on the dad27a10 wave, where the relay's app deploy 33696191244
+    recorded terminal task_definition leaf-platform-app:762 and the restamp
+    33699604872 was dispatched against exactly that, producing :763.
+
+    The arn carries a blue/green COLOUR (a live read on 2026-09-03 resolved
+    leaf-platform-app-alt:216, the alt family), and this is evidence of where
+    the app last landed rather than a live read of where it sits now. That is
+    safe to name but must not be trusted blindly: the provider resolves its
+    configuration baseline from the LIVE colour and gates the family against it,
+    so a colour that flipped after the app's last deploy fails closed there
+    instead of stamping an identity against the wrong family.
+    """
+    return {
+        "position": position,
+        "kind": "identity_restamp",
+        "service": "app",
+        "workflow": DEPLOY_WORKFLOW,
+        "repository": TF_REPOSITORY,
+        "inputs": {
+            "service": "app",
+            "app_deploy_intent": "configuration",
+            "expected_task_definition": baseline,
+            "configuration_task_definition": baseline,
+            "image_tag": image_tag,
+            "deploy_strategy": "direct",
+        },
+        "requires_relay_supply_evidence": True,
+    }
+
+
+def build_plan(provider: Provider, *, image_tag: str | None = None) -> dict[str, Any]:
+    yielded = yield_check(provider)
+    release = _newest_relay_release(provider)
+    settled = _settled_service_state(provider)
+
+    services: dict[str, Any] = {}
+    for service in SERVICE_ORDER:
+        target = release["service_digests"][service]
+        current = settled.get(service)
+        if current is None:
+            status = "unknown"
+        elif current["image_digest"] == target:
+            status = "converged"
+        else:
+            status = "lagging"
+        services[service] = {
+            "target_image_digest": target,
+            "observed_image_digest": None if current is None else current["image_digest"],
+            "observed_from_run_id": None if current is None else current["run_id"],
+            "status": status,
+            "owner": "relay" if service in RELAY_SERVICES else "reconciler",
+        }
+
+    # Reported in DISPATCH order, not SERVICE_ORDER, so the list and the steps
+    # below cannot disagree about what happens first.
+    lagging = [
+        service
+        for service in NON_RELAY_SERVICES
+        if services[service]["status"] != "converged"
+    ]
+
+    blockers: list[str] = []
+    steps: list[dict[str, Any]] = []
+    position = 0
+    tag = image_tag or ""
+    for service in NON_RELAY_SERVICES:
+        if service in lagging:
+            position += 1
+            steps.append(_dispatch_step(service, tag, position=position))
+
+    # The identity stamp reads LIVE digests for all five services, so naming it
+    # while any service still lags would plan a stamp the finalizer must then
+    # reject with DEPLOYMENT_IDENTITY_MISMATCH. Report the blocker instead.
+    app_state = settled.get("app")
+    relay_lagging = [s for s in RELAY_SERVICES if services[s]["status"] != "converged"]
+    restamp: dict[str, Any] | None = None
+    if relay_lagging:
+        blockers.append(
+            "RELAY_SURFACES_NOT_CONVERGED: "
+            f"{relay_lagging} are the relay's to land, not this lane's; "
+            "the next relay converges them."
+        )
+    elif app_state is None:
+        blockers.append(
+            "APP_BASELINE_UNKNOWN: no settled app deploy receipt in the scanned "
+            "window, so the restamp baseline task definition cannot be read."
+        )
+    else:
+        restamp = _restamp_step(
+            app_state["task_definition"], tag, position=position + 1
+        )
+        if lagging:
+            blockers.append(
+                "FLEET_NOT_CONVERGED: the identity stamp samples LIVE digests for "
+                f"all five services, so it is only valid once {lagging} land. The "
+                "step is listed last and must not be dispatched before them."
+            )
+        steps.append(restamp)
+
+    if not steps:
+        blockers.append(
+            "NOTHING_TO_DO: every non-relay service already matches the release "
+            "and the identity baseline is unchanged."
+        )
+
+    return {
+        "schema": PLAN_SCHEMA,
+        "environment": ENVIRONMENT,
+        "mode": "report_only",
+        "yield": yielded,
+        "release": {
+            "source_revision": release["release_source_revision"],
+            "relay_run_id": release["relay_run_id"],
+            "build_run_id": release["build_run_id"],
+            "supply_set_sha256": release["supply_set_sha256"],
+        },
+        "services": services,
+        "lagging": lagging,
+        "steps": steps,
+        "blockers": blockers,
+        # Stated, not silently assumed: every step above still needs the
+        # relay's own supply evidence envelope, and the provider hard-requires
+        # relay.workflow_path == .github/workflows/dispatch-staging-deploys.yml,
+        # so this lane cannot mint one. Arming it means the relay publishing
+        # the envelope it already builds, then this lane reusing it verbatim.
+        "arming_prerequisite": {
+            "reason": "SUPPLY_EVIDENCE_IS_RELAY_MINTED",
+            "detail": (
+                "deploy-leaf-platform-staging.yml refuses a supply evidence "
+                "envelope whose relay.workflow_path is not the relay's own, so "
+                "every step here must carry the envelope the relay minted for "
+                "this release. The relay does not publish it yet."
+            ),
+        },
+    }
+
+
+def _render_summary(plan: dict[str, Any]) -> str:
+    lines = [f"# Staging fleet reconcile plan ({plan['mode']})", ""]
+    y = plan["yield"]
+    if y["status"] != "clear":
+        lines += [f"**Stood down: {y['reason']}** {y['detail']}", ""]
+    rel = plan["release"]
+    lines += [
+        f"Release `{rel['source_revision'][:12]}` "
+        f"(relay run {rel['relay_run_id']}, build {rel['build_run_id']})",
+        "",
+        "| service | owner | status | observed |",
+        "| --- | --- | --- | --- |",
+    ]
+    for service in SERVICE_ORDER:
+        row = plan["services"][service]
+        observed = row["observed_image_digest"]
+        lines.append(
+            f"| {service} | {row['owner']} | {row['status']} | "
+            f"{'unknown' if observed is None else observed[:19]} |"
+        )
+    lines += ["", f"Planned steps: {len(plan['steps'])}"]
+    for step in plan["steps"]:
+        lines.append(f"- {step['position']}. {step['kind']} `{step['service']}`")
+    if plan["blockers"]:
+        lines += ["", "Blockers:"]
+        lines += [f"- {b}" for b in plan["blockers"]]
+    return "\n".join(lines) + "\n"
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Resolve the staging fleet reconcile-and-restamp plan (read only)."
+    )
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--summary", required=False)
+    parser.add_argument("--image-tag", required=False, default="")
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    args = _parser().parse_args(argv)
+    provider = GitHubProvider(
+        os.environ.get("APP_GITHUB_TOKEN", ""),
+        os.environ.get("TERRAFORM_GITHUB_TOKEN", ""),
+    )
+    try:
+        plan = build_plan(provider, image_tag=args.image_tag or None)
+    except ContractError as exc:
+        print(f"ERROR:{exc}", file=sys.stderr)
+        return 2
+    raw = json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n"
+    with open(args.output, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(raw)
+    if args.summary:
+        with open(args.summary, "a", encoding="utf-8", newline="\n") as handle:
+            handle.write(_render_summary(plan))
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main(sys.argv[1:]))

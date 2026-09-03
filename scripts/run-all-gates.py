@@ -1346,6 +1346,14 @@ def build_suites() -> List[Suite]:
         Suite("production-web-release",
               "scripts test_production_web_release.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_production_web_release.py"), 17),
+        # Registered with its suite the day it shipped, no fix-then-register
+        # debt. The reconcile planner is pure evidence resolution driving a fake
+        # provider, with no DB, network or platform gate, so the count is
+        # identical in every environment. Measured on this tree 2026-09-03:
+        # 14 passed, 17 subtests passed, 0 skipped.
+        Suite("reconcile-staging-fleet",
+              "scripts test_reconcile_staging_fleet.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_reconcile_staging_fleet.py"), 14),
         # These entrypoint checks shipped with the instant-execution container
         # contract but were never registered in the aggregate gate. The mode
         # checks are hermetic file reads, so their measured counts are exact.
