@@ -246,7 +246,7 @@ const SURFACE_NOTES = Object.freeze({
         : 'A workspace project adds project-scoped files, conversation, and browser composition on the shared identity and project rail.'}
     </p>
   ),
-  solar: () => <p className="tc-product-note">Solar work runs the shared tenant catalog’s stringing and placement families against the versioned LEAF solar template in the CAD workspace.</p>,
+  solar: () => <p className="tc-product-note">Solar work runs the shared tenant catalog’s stringing and placement families against the versioned Leaf Automation solar template in the CAD workspace.</p>,
   ios: () => <p className="tc-product-note">A mounted Apple grant and terminal ship-lane readiness receipt are required. This browser never asks for Apple credentials.</p>,
 })
 
