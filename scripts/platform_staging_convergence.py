@@ -1917,6 +1917,19 @@ def _build_receipt(
             raise
         receipt = _service_receipt(raw_receipt)
         if _receipt_matches_supply(receipt, supply):
+            # Only NOW is deploy_mode load-bearing. A prewarm receipt is a
+            # well-formed receipt (_service_receipt admits it, closed to the
+            # producer's {normal, prewarm}), and an unrelated one for some other
+            # release must simply not match this supply rather than abort the
+            # finalizer. But a prewarm leg that DOES carry this supply is still
+            # not convergence: it warms the idle colour at listener weight 0 and
+            # deliberately ENDS before the flip, never read-modifying a listener
+            # weight, so adopting one would mint a receipt for traffic that
+            # never moved. The relay never sets the input, so its own children
+            # always default to "normal"; only prewarm-staging-cutover.yml sends
+            # "prewarm", and that is not the relay.
+            if receipt["requested"]["deploy_mode"] != "normal":
+                raise ContractError("SERVICE_RECEIPT_IS_A_PREWARM_NOT_A_CONVERGENCE")
             outcome = _normalized_outcome(provider, run, receipt)
             matching.append((run, artifact, receipt, outcome))
 
