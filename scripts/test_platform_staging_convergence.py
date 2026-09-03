@@ -673,6 +673,41 @@ def replace_consumer_contract(provider: FakeProvider, mutate) -> None:
     rows[0]["digest"] = "sha256:" + hashlib.sha256(zip_raw).hexdigest()
 
 
+def intermediate_app_identity_fixture() -> FakeProvider:
+    """Real readiness-config topology: relay app, identity, then new frontier."""
+    provider = fixture()
+    tf = subject.TF_REPOSITORY
+    frontier_id = FRONTIER_RUN + 1
+    frontier = run(
+        frontier_id, repository=tf, workflow=subject.DEPLOY_WORKFLOW,
+        event="workflow_dispatch", head_sha=TF_HEAD,
+        created="2026-08-13T01:26:00Z",
+    )
+    provider.json_values[(tf, f"/actions/runs/{frontier_id}")] = frontier
+    name = f"leaf-platform-staging-service-run-{frontier_id}-attempt-1"
+    provider.json_values[(tf, f"/actions/runs/{frontier_id}/artifacts?per_page=100")] = {
+        "total_count": 1,
+        "artifacts": [artifact(frontier_id + 1000, name, frontier_id, TF_HEAD)],
+    }
+    receipt = service_receipt(
+        "app", frontier_id, predecessor="leaf-platform-app:3",
+        terminal_td="leaf-platform-app:4", with_identity=True,
+    )
+    provider.byte_values[(tf, f"/actions/artifacts/{frontier_id + 1000}/zip")] = archive(
+        subject.ARTIFACT_FILE, canonical(receipt),
+    )
+    provider.json_values[(tf, f"/actions/runs/{frontier_id}/attempts/1/jobs?per_page=100")] = copy.deepcopy(
+        provider.json_values[(tf, f"/actions/runs/{FRONTIER_RUN}/attempts/1/jobs?per_page=100")]
+    )
+    children = copy.deepcopy(provider.json_values[(tf, CHILD_WINDOW_EXACT_ENDPOINT)])
+    children["workflow_runs"].append(frontier)
+    children["total_count"] += 1
+    endpoint = CHILD_WINDOW_EXACT_ENDPOINT.replace("01%3A25%3A00Z", "01%3A26%3A00Z")
+    provider.json_values[(tf, endpoint)] = children
+    provider.json_values[(tf, CHILD_WINDOW_OPEN_ENDPOINT)] = copy.deepcopy(children)
+    return provider
+
+
 def retained_consumer_fixture() -> FakeProvider:
     """Live 5daa topology: four later children retain the earlier contract."""
     provider = fixture()
@@ -1427,6 +1462,102 @@ class ConvergenceFinalizerTests(unittest.TestCase):
             ),
         )
         self.assert_reason("SERVICE_RECEIPT_CONSUMER_CONTRACT_MISMATCH", provider)
+
+    def test_intermediate_app_identity_before_explicit_frontier_is_preserved(self) -> None:
+        provider = intermediate_app_identity_fixture()
+        receipt = subject._build_receipt(provider, BUILD_RUN, FRONTIER_RUN + 1)
+        jsonschema.Draft202012Validator(self.schema).validate(receipt)
+        self.assertTrue(receipt["terminal_complete"])
+        app = receipt["services"]["app"]
+        self.assertEqual(app["selected_run_id"], FRONTIER_RUN + 1)
+        self.assertEqual(
+            [(row["provider"]["run_id"], row["role"]) for row in app["attempts"]],
+            [(302, "relay_app"), (FRONTIER_RUN, "intermediate_app_identity"),
+             (FRONTIER_RUN + 1, "frontier_app_identity")],
+        )
+        self.assertEqual(receipt["deployment_identity"]["body_sha256"], identity()["sha256"])
+
+    def test_intermediate_app_identity_keeps_predecessor_chain_strict(self) -> None:
+        provider = intermediate_app_identity_fixture()
+        replace_receipt(
+            provider, FRONTIER_RUN + 1,
+            lambda value: value["facts"]["predecessor_task_definition"].__setitem__(
+                "value", "leaf-platform-app:2"
+            ),
+        )
+        with self.assertRaisesRegex(subject.ContractError, "^SERVICE_PREDECESSOR_CHAIN_MISMATCH$"):
+            subject._build_receipt(provider, BUILD_RUN, FRONTIER_RUN + 1)
+
+    def test_intermediate_app_identity_rejects_other_intents(self) -> None:
+        for intent in ("forward", "rollback", "authority-bootstrap"):
+            with self.subTest(intent=intent):
+                provider = intermediate_app_identity_fixture()
+                replace_receipt(
+                    provider, FRONTIER_RUN,
+                    lambda value: value["requested"].__setitem__("app_deploy_intent", intent),
+                )
+                with self.assertRaisesRegex(subject.ContractError, "^UNCLASSIFIED_MATCHING_CHILD$"):
+                    subject._build_receipt(provider, BUILD_RUN, FRONTIER_RUN + 1)
+
+    def test_intermediate_app_identity_requires_coherent_full_identity(self) -> None:
+        cases = (
+            (lambda value: value["facts"].__setitem__("deployment_identity", missing()),
+             "UNCLASSIFIED_MATCHING_CHILD"),
+            (lambda value: value["facts"]["deployment_identity"]["value"]["body"].__setitem__("source_revision", "0" * 40),
+             "DEPLOYMENT_IDENTITY_INVALID"),
+            (lambda value: value["facts"]["deployment_identity"]["value"]["body"]["services"]["broker"].__setitem__("image_digest", "sha256:" + "0" * 64),
+             "DEPLOYMENT_IDENTITY_MISMATCH"),
+            (lambda value: value["facts"]["deployment_identity"]["value"].__setitem__("sha256", "0" * 64),
+             "DEPLOYMENT_IDENTITY_CHECKSUM_INVALID"),
+        )
+        for mutate, reason in cases:
+            with self.subTest(reason=reason):
+                provider = intermediate_app_identity_fixture()
+                replace_receipt(provider, FRONTIER_RUN, mutate)
+                with self.assertRaisesRegex(subject.ContractError, f"^{reason}$"):
+                    subject._build_receipt(provider, BUILD_RUN, FRONTIER_RUN + 1)
+
+    def test_intermediate_app_identity_requires_selected_candidate_and_terminal_image(self) -> None:
+        for slot, reason in (
+            ("candidate", "SERVICE_DIGEST_MISMATCH"),
+            ("terminal", "SERVICE_DIGEST_MISMATCH"),
+            ("both", "SERVICE_CANDIDATE_DIGEST_MISMATCH"),
+        ):
+            with self.subTest(slot=slot):
+                provider = intermediate_app_identity_fixture()
+
+                def mutate(value):
+                    if slot == "both":
+                        value["facts"]["candidate"]["image_digest"]["value"] = "sha256:" + "0" * 64
+                        value["facts"]["terminal"]["value"]["image_digest"]["value"] = "sha256:" + "0" * 64
+                        return
+                    evidence = value["facts"][slot]
+                    if slot == "terminal":
+                        evidence = evidence["value"]
+                    evidence["image_digest"]["value"] = "sha256:" + "0" * 64
+
+                replace_receipt(provider, FRONTIER_RUN, mutate)
+                with self.assertRaisesRegex(subject.ContractError, f"^{reason}$"):
+                    subject._build_receipt(provider, BUILD_RUN, FRONTIER_RUN + 1)
+
+    def test_intermediate_app_identity_must_be_between_relay_and_frontier(self) -> None:
+        for created in ("2026-08-13T01:20:30Z", "2026-08-13T01:26:00Z"):
+            with self.subTest(created=created):
+                provider = intermediate_app_identity_fixture()
+                for (repository, _), value in provider.json_values.items():
+                    if repository != subject.TF_REPOSITORY or not isinstance(value, dict):
+                        continue
+                    for row in value.get("workflow_runs", []):
+                        if row["id"] == FRONTIER_RUN:
+                            row["created_at"] = created
+                            row["updated_at"] = created
+                with self.assertRaisesRegex(subject.ContractError, "^UNCLASSIFIED_MATCHING_CHILD$"):
+                    subject._build_receipt(provider, BUILD_RUN, FRONTIER_RUN + 1)
+
+    def test_intermediate_app_identity_does_not_change_automatic_frontier_policy(self) -> None:
+        provider = intermediate_app_identity_fixture()
+        with self.assertRaisesRegex(subject.ContractError, "^FRONTIER_RUN_CARDINALITY$"):
+            subject._build_receipt(provider, BUILD_RUN, None)
 
     def test_retained_consumer_matches_exact_receipt_slot(self) -> None:
         provider = retained_consumer_fixture()
