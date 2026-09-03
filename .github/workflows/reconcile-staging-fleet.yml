@@ -163,6 +163,18 @@ jobs:
             exit 1
           }
 
+          # The consumer-contract half. Both are required: a digest-aware
+          # dispatch carrying only the supply envelope is refused at the
+          # provider's gate before any credential is used.
+          CONTRACT_RUN=$(jq -r '.consumer_contract.relay_run_id' "$PLAN")
+          CONTRACT_NAME=$(jq -r '.consumer_contract.artifact_name' "$PLAN")
+          GH_TOKEN="$HOME_TOKEN" gh run download "$CONTRACT_RUN"             --repo "$GITHUB_REPOSITORY" -n "$CONTRACT_NAME" -D contract
+          CONTRACT=$(cat contract/staging-consumer-contract.b64)
+          [ -n "$CONTRACT" ] || {
+            echo "::error::The published consumer contract envelope is empty."
+            exit 1
+          }
+
           DEADLINE=$(( $(date +%s) + 80 * 60 ))
           before_deadline() { [ "$(date +%s)" -lt "$DEADLINE" ]; }
 
@@ -196,7 +208,7 @@ jobs:
               --limit 1 --json databaseId --jq '.[0].databaseId // 0')
             mapfile -t ARGS < <(jq -r ".steps[$i].inputs | to_entries[] | \"-f\", (.key + \"=\" + .value)" "$PLAN")
             gh workflow run "$INFRA_WORKFLOW" --repo "$INFRA_REPO" --ref main \
-              "${ARGS[@]}" -f "supply_evidence_b64=$EVIDENCE"
+              "${ARGS[@]}"               -f "supply_evidence_b64=$EVIDENCE"               -f "consumer_contract_b64=$CONTRACT"
             echo "Dispatched $KIND for $SERVICE."
 
             # Identified by the provider's run-name contract, never by "the

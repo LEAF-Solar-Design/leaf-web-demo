@@ -1368,7 +1368,11 @@ def build_suites() -> List[Suite]:
               # come from a CLI flag the workflow never passed, so every
               # constructed dispatch read `image_tag=`, and the provider deploys
               # whatever tag it is handed.
-              SCRIPTS_DIR, _py_pytest("test_reconcile_staging_fleet.py"), 22),
+              # 22 -> 23 on 2026-09-03: BOTH relay envelopes gate armability.
+              # The three v3 dispatch inputs travel together, so a lane holding
+              # only the supply envelope is refused at the provider's
+              # digest-aware consumer-contract gate before any credential.
+              SCRIPTS_DIR, _py_pytest("test_reconcile_staging_fleet.py"), 23),
         # These entrypoint checks shipped with the instant-execution container
         # contract but were never registered in the aggregate gate. The mode
         # checks are hermetic file reads, so their measured counts are exact.

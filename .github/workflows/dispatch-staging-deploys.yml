@@ -1247,6 +1247,16 @@ jobs:
               stream.write(f"terraform_head_sha={head}\n")
               stream.write(f"deploy_workflow_blob={consumer['deploy_workflow_blob']}\n")
               stream.write(f"producer_run_id={run_id}\n")
+          # Published alongside the supply evidence envelope, from the same
+          # value and for the same reason. A digest-aware dispatch is refused
+          # without it ("staging consumer contract refused: digest-aware
+          # consumer contract", measured on run 33719323168), and the three v3
+          # inputs travel together, so a lane reusing only the supply envelope
+          # cannot dispatch at all. Written from `encoded`, the same string the
+          # dispatch input is written from, so it cannot drift from what this
+          # relay sends.
+          with open("staging-consumer-contract.b64", "w", encoding="ascii", newline="") as handle:
+              handle.write(encoded)
           print("Validated one provider-associated Terraform consumer contract; body withheld.")
           PY
 
@@ -1970,6 +1980,20 @@ jobs:
       # neither. Named on the same head_sha/attempt convention as the receipt so
       # one lookup shape finds both. Like the step above this runs NO script and
       # holds NO token: a pure upload of a file the guarded step already wrote.
+      # The consumer-contract half of the same pair. Both are required for a
+      # digest-aware dispatch, so they are published together or a consumer can
+      # only get halfway. Same gate, same naming, and like the two above this
+      # runs NO script and holds NO token.
+      - name: Publish the consumer contract envelope for downstream reuse
+        if: >-
+          steps.deploy.outputs.converged == 'true'
+          && steps.consumer_contract.outputs.consumer_contract_b64 != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-consumer-contract-${{ github.event.workflow_run.head_sha }}-attempt-${{ github.event.workflow_run.run_attempt }}
+          path: staging-consumer-contract.b64
+          if-no-files-found: error
+
       - name: Publish the supply evidence envelope for downstream reuse
         if: >-
           steps.deploy.outputs.converged == 'true'

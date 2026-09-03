@@ -3528,16 +3528,28 @@ def check_docs_noop_filter(text: str) -> None:
     # the secret-reference wall further down still finds its two references on
     # steps[2] and steps[3] and this step cannot hold a token or smuggle a
     # dispatch.
+    # 6 -> 7 on 2026-09-03, co-review again. The seventh publishes the CONSUMER
+    # CONTRACT envelope, the other half of the pair the sixth publishes. The
+    # three v3 dispatch inputs travel together, so a lane reusing only the
+    # supply envelope is refused at the provider's "digest-aware consumer
+    # contract" gate before any credential (measured on run 33719323168: deploy
+    # job skipped, nothing mutated). Publishing one without the other lets a
+    # consumer get exactly halfway. Same pure-upload shape, no run: and no env:.
     assert [s.get("id") for s in relay_steps] == [
-        "tip", "manifest", "consumer_contract", "deploy", None, None]
+        "tip", "manifest", "consumer_contract", "deploy", None, None, None]
     (
         tip_step,
         manifest_step,
         contract_step,
         dispatch_step,
         receipt_step,
+        contract_envelope_step,
         evidence_step,
     ) = relay_steps
+    assert set(contract_envelope_step) == {"name", "if", "uses", "with"}
+    assert (
+        contract_envelope_step["with"]["path"] == "staging-consumer-contract.b64"
+    )
     # Step KEY SETS are exact: no shell:, no working-directory:,
     # no continue-on-error: may appear on any step without breaking this.
     assert set(tip_step) == {"name", "id", "env", "run"}
@@ -3976,7 +3988,21 @@ def check_docs_noop_filter(text: str) -> None:
         # already prints the envelope in this job's log as the deploy step's
         # SUPPLY_EVIDENCE_B64 env line (verified on relay run 33706627085,
         # 11982 base64 chars in the clear).
-        "7c2eeb3570d6c3cbdc08e0e33d28fefce59741fda1b93d80e8fab2287c3abc7d"
+        # Hash updated 2026-09-03 (b): the consumer_contract step now also
+        # WRITES the dispatch envelope it already computed to
+        # staging-consumer-contract.b64, so the seventh step can publish it.
+        # Both halves are needed: a digest-aware dispatch carrying only the
+        # supply envelope is refused at the provider gate before any
+        # credential (run 33719323168, deploy job skipped, nothing mutated).
+        # REVIEWED FOR DISPATCH CAPABILITY: the added lines are one local file
+        # write of an EXISTING variable, `encoded`, the same string the
+        # consumer_contract_b64 output is written from on the line above, so
+        # the artifact cannot drift from what this relay sends. No new
+        # `gh workflow run` site (still exactly one), no new secret reference
+        # (still two, on steps[2] and steps[3]), no new token, no new endpoint
+        # class, no live mutation. Not a secret: Actions already prints this
+        # envelope in the relay log the same way it prints the supply one.
+        "6085947af98d186777348c526b1fe38b460f80a1631fcd8f68100a1d5063ceb1"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -6896,13 +6922,17 @@ def test_relay_receipt_archive_stays_single_member() -> None:
         if str(step.get("uses", "")).startswith("actions/upload-artifact")
     ]
     paths = [step["with"]["path"] for step in uploads]
-    assert paths == ["staging-converged.json", "staging-supply-evidence.b64"]
+    assert paths == [
+        "staging-converged.json",
+        "staging-consumer-contract.b64",
+        "staging-supply-evidence.b64",
+    ]
     for step in uploads:
         # One path each, no globs, no directories: each archive holds one file.
         assert chr(10) not in str(step["with"]["path"])
         assert "*" not in str(step["with"]["path"])
     names = [step["with"]["name"] for step in uploads]
-    assert len(set(names)) == 2, "the two artifacts must not collide"
+    assert len(set(names)) == 3, "the three artifacts must not collide"
 
 
 def test_digest_aware_producer_is_source_controlled_and_dormant() -> None:

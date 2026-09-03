@@ -254,7 +254,9 @@ def _newest_relay_release(provider: Provider) -> dict[str, Any]:
     raise ContractError("NO_CONVERGED_RELEASE")
 
 
-def _supply_evidence(provider: Provider, release: dict[str, Any]) -> dict[str, Any]:
+def _relay_envelope(
+    provider: Provider, release: dict[str, Any], *, prefix: str, file: str
+) -> dict[str, Any]:
     """Locate the relay's published supply evidence envelope.
 
     Nothing else can mint one: deploy-leaf-platform-staging.yml refuses an
@@ -271,7 +273,7 @@ def _supply_evidence(provider: Provider, release: dict[str, Any]) -> dict[str, A
     re-encoding can corrupt a value the provider validates byte for byte.
     """
     name = (
-        f"staging-supply-evidence-{release['relay_head_sha']}"
+        f"{prefix}-{release['relay_head_sha']}"
         f"-attempt-{release['relay_run_attempt']}"
     )
     try:
@@ -300,7 +302,7 @@ def _supply_evidence(provider: Provider, release: dict[str, Any]) -> dict[str, A
         "artifact_name": name,
         "artifact_id": _positive(matches[0].get("id"), "PROVIDER_ARTIFACT_INVALID"),
         "relay_run_id": release["relay_run_id"],
-        "file": "staging-supply-evidence.b64",
+        "file": file,
     }
 
 
@@ -454,7 +456,22 @@ def build_plan(provider: Provider) -> dict[str, Any]:
     yielded = yield_check(provider)
     release = _newest_relay_release(provider)
     settled = _settled_service_state(provider)
-    envelope = _supply_evidence(provider, release)
+    # BOTH halves. The three v3 dispatch inputs travel together, so a lane
+    # holding only the supply envelope is refused at the provider's
+    # "digest-aware consumer contract" gate before it reaches any credential
+    # (measured on run 33719323168, deploy job skipped, nothing mutated).
+    envelope = _relay_envelope(
+        provider,
+        release,
+        prefix="staging-supply-evidence",
+        file="staging-supply-evidence.b64",
+    )
+    contract = _relay_envelope(
+        provider,
+        release,
+        prefix="staging-consumer-contract",
+        file="staging-consumer-contract.b64",
+    )
 
     services: dict[str, Any] = {}
     for service in SERVICE_ORDER:
@@ -545,6 +562,11 @@ def build_plan(provider: Provider) -> dict[str, Any]:
             "a receipt the finalizer refuses (SERVICE_SUPPLY_EVIDENCE_MISMATCH), "
             "so it would mutate staging and prove nothing."
         )
+    if not contract["present"]:
+        not_armable.append(
+            "NO_CONSUMER_CONTRACT: a digest-aware dispatch is refused without it, "
+            "at the provider's gate before any credential."
+        )
     if relay_lagging:
         not_armable.append("RELAY_SURFACES_NOT_CONVERGED")
     if not steps:
@@ -566,6 +588,7 @@ def build_plan(provider: Provider) -> dict[str, Any]:
         "steps": steps,
         "blockers": blockers,
         "supply_evidence": envelope,
+        "consumer_contract": contract,
         "armable": not not_armable,
         "not_armable_because": not_armable,
         # The provider hard-requires relay.workflow_path ==
