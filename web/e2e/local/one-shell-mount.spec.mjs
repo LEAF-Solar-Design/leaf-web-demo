@@ -683,6 +683,9 @@ test.describe('route matrix, rail ON', () => {
     ].join('\n') + '\n'
     await fileInput.setInputFiles({ name: 'ribbon.dxf', mimeType: 'application/dxf', buffer: Buffer.from(dxf) })
     await expect(page.getByRole('status').filter({ hasText: /Loaded ribbon\.dxf/ })).toHaveCount(1, { timeout: 60_000 })
+    // W4f slice A0: the canvas now shows the ENGINE document (the card is
+    // stamped with its id through the viewer's applyVersion seam).
+    await expect(page.locator('.workspace-card[data-engine-document="ribbon.dxf"]')).toHaveCount(1)
     await page.getByRole('tab', { name: 'Draw' }).click()
     // Loaded, nothing selected: the ribbon names the next missing thing.
     await expect(modify.locator('.ribbon-note')).toHaveText('select an entity in the imported DXF')

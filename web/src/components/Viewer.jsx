@@ -177,6 +177,11 @@ const Viewer = forwardRef(function Viewer(
     const polylines = activeIntake.polylines || []
     const inserts = activeIntake.inserts || []
     const faces3d = activeIntake.faces3d || []
+    // W4f slice A0: an ENGINE document (the browser engine's imported DXF,
+    // shown through applyVersion) draws its open polylines, lines and arcs
+    // as strokes only; the console drawing keeps its panel fills exactly as
+    // before (this flag is false for every intake the server seats).
+    const strokeOnlyOpen = activeIntake.source === 'engine'
 
     // bounds — include polylines, insert points, and face corners so the
     // whole drawing (not just polylines) is framed.
@@ -259,8 +264,10 @@ const Viewer = forwardRef(function Viewer(
         minDisplayZ = Math.min(minDisplayZ, bottomZ)
         maxDisplayZ = Math.max(maxDisplayZ, topZ)
         pickIndex.set(pl.handle, { kind: 'poly', layer: pl.layer, pts })
-        // fan-triangulate (panels are convex quads) for a subtle fill
-        for (let i = 1; i < pts.length - 1; i++) {
+        // fan-triangulate (panels are convex quads) for a subtle fill; an
+        // engine document's OPEN polyline (a line, an arc) is a stroke only.
+        const fillThis = !(strokeOnlyOpen && !pl.closed)
+        for (let i = 1; fillThis && i < pts.length - 1; i++) {
           fillPos.push(pts[0][0], pts[0][1], topZ)
           fillPos.push(pts[i][0], pts[i][1], topZ)
           fillPos.push(pts[i + 1][0], pts[i + 1][1], topZ)
