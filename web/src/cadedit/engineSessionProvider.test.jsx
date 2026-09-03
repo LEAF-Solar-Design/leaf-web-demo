@@ -464,6 +464,58 @@ describe('the command prompt (W4e slice H): a tool arms, the command line asks i
     expect(studio.workers[0].posted.filter((message) => message.type === 'applyEdit')).toHaveLength(0)
   })
 
+  it('Esc cancels the armed command from anywhere but a foreign text field, and the caret returns to the prompt after a run (W4f-2)', async () => {
+    const studio = mount()
+    await openAndLoad(studio, [LINE])
+    fireEvent.click(drawTool('createLine'))
+    expect(document.activeElement).toBe(screen.getByLabelText('ribbon x'))
+    // Focus wandered to the body (a click on the drawing, a button that went
+    // disabled): Esc still cancels, and App's window-level rung never sees it.
+    screen.getByLabelText('ribbon x').blur()
+    expect(document.activeElement).toBe(document.body)
+    const windowEsc = vi.fn()
+    window.addEventListener('keydown', windowEsc)
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    window.removeEventListener('keydown', windowEsc)
+    expect(windowEsc).not.toHaveBeenCalled()
+    expect(promptEl()).toBeNull()
+    // With nothing armed the rung is gone: a stray Esc reaches the window.
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    // A text field outside the prompt keeps its own Esc (the Command bar
+    // clearing itself): the armed command stays.
+    fireEvent.click(drawTool('createLine'))
+    const foreign = document.createElement('input')
+    document.body.appendChild(foreign)
+    foreign.focus()
+    fireEvent.keyDown(foreign, { key: 'Escape' })
+    expect(promptEl()).not.toBeNull()
+    foreign.remove()
+    // A run: Enter in a field posts the edit; the engine is busy (fields and
+    // Run disabled) and the browser drops focus; the reply brings the caret
+    // back to the first field.
+    fireEvent.change(screen.getByLabelText('ribbon x2'), { target: { value: '5' } })
+    fireEvent.keyDown(screen.getByLabelText('ribbon x2'), { key: 'Enter' })
+    expect(studio.context.session.busy).toBe(true)
+    expect(screen.getByLabelText('ribbon x').disabled).toBe(true)
+    expect(screen.getByTestId('cockpit-prompt-run').disabled).toBe(true)
+    screen.getByLabelText('ribbon x2').blur()
+    expect(document.activeElement).toBe(document.body)
+    studio.workers[0].emit(editApplied('createLine', [LINE, { ...LINE, id: 'e9' }]))
+    expect(studio.context.session.busy).toBe(false)
+    expect(promptEl().getAttribute('data-op')).toBe('createLine')
+    expect(document.activeElement).toBe(screen.getByLabelText('ribbon x'))
+    // The Command bar (any field outside the prompt) holding the focus when
+    // the engine answers keeps it.
+    fireEvent.keyDown(screen.getByLabelText('ribbon x'), { key: 'Enter' })
+    expect(studio.context.session.busy).toBe(true)
+    const bar = document.createElement('input')
+    document.body.appendChild(bar)
+    bar.focus()
+    studio.workers[0].emit(editApplied('createLine', [LINE, { ...LINE, id: 'e9' }, { ...LINE, id: 'e10' }]))
+    expect(document.activeElement).toBe(bar)
+    bar.remove()
+  })
+
   it('a Modify tool armed with nothing selected keeps its fields live and gates only Run; a pick releases Run', async () => {
     const studio = mount()
     await openAndLoad(studio, [LINE])

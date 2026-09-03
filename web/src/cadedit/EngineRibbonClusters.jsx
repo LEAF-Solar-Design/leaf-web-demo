@@ -244,6 +244,41 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     promptRef.current?.querySelector('input:not([disabled])')?.focus()
     return undefined
   }, [armedOp])
+  useEffect(() => {
+    // W4f-2: a run makes the engine busy, which disables Run and the fields,
+    // and the browser drops focus to the body. When the engine answers, the
+    // caret comes back to the prompt's first field so the next command (or
+    // Esc) is one keystroke away. Only when nothing else took the focus in
+    // between (the Command bar, a ribbon tool): those keep it.
+    if (!armedOp || session.busy || typeof document === 'undefined') return undefined
+    const active = document.activeElement
+    if (active && active !== document.body && !promptRef.current?.contains(active)) return undefined
+    promptRef.current?.querySelector('input:not([disabled])')?.focus()
+    return undefined
+  }, [armedOp, session.busy])
+  const cancelRef = useRef(cancel)
+  cancelRef.current = cancel
+  useEffect(() => {
+    // W4f-2: Esc cancels the armed command from ANYWHERE, as the reference's
+    // command line drops a command on Esc wherever the pointer is (the
+    // drawing, a ribbon tool, the body after a run). Capture phase on the
+    // window, so App's window-level Esc rung never also fires for the same
+    // key. Esc inside a text field OUTSIDE the prompt keeps that field's own
+    // meaning (the Command bar clears itself); the prompt's own fields are
+    // handled by the row below.
+    if (!armedOp || typeof window === 'undefined') return undefined
+    const onWindowKeyDown = (event) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return
+      const target = event.target
+      if (promptRef.current?.contains(target)) return
+      if (target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return
+      event.preventDefault()
+      event.stopPropagation()
+      cancelRef.current()
+    }
+    window.addEventListener('keydown', onWindowKeyDown, true)
+    return () => window.removeEventListener('keydown', onWindowKeyDown, true)
+  }, [armedOp])
   const onPromptKeyDown = (event) => {
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent?.isComposing) {
       // Enter on Run or Cancel keeps the button's own activation (one

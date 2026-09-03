@@ -815,14 +815,28 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.locator('.selection-readout')).not.toContainText('Polyline')
     await page.keyboard.press('Enter')
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('4', { timeout: 60_000 })
-    // Esc from a prompt field cancels (the row's own contract, as above). A
-    // bare Esc after the run is NOT enough: the Run button is disabled while
-    // the engine is busy, so focus fell to the body and the prompt row never
-    // saw the key (proof 3 on d764b50a). Product follow-up, not this PR: keep
-    // focus in the prompt after a run so Esc cancels from wherever the
-    // drafter is, as the reference does.
-    await page.getByLabel('ribbon x', { exact: true }).press('Escape')
+    // W4f-2: after the run the caret is back in the prompt's first field (the
+    // Run button was disabled while the engine was busy and the browser had
+    // dropped focus to the body), and while a point command is picking the
+    // floating import card lets clicks through to the drawing under it.
+    await expect(page.getByLabel('ribbon x', { exact: true })).toBeFocused()
+    const underCard = () => page.evaluate(() => {
+      // The card is a full-width pass-through layer; the floating "Edit a
+      // DXF drawing" workbench is the child that sits over the drawing.
+      const bench = document.querySelector('#cockpit-import-pane .cad-edit-workbench')
+      const box = bench.getBoundingClientRect()
+      const hit = document.elementFromPoint(Math.round(box.left + box.width / 2), Math.round(box.top + box.height / 2))
+      return { ground: !!hit?.closest('.studio-ground'), card: !!(hit && bench.contains(hit)) }
+    })
+    expect(await underCard()).toEqual({ ground: true, card: false })
+    // A bare Esc with the focus on the body (the proof-3 situation), cancels
+    // the armed command (W4f-2: the prompt's window rung), and the card takes
+    // its clicks back.
+    await page.evaluate(() => document.activeElement?.blur())
+    await expect(page.getByLabel('ribbon x', { exact: true })).not.toBeFocused()
+    await page.keyboard.press('Escape')
     await expect(page.locator('.workspace-card[data-cockpit-picking="1"]')).toHaveCount(0)
+    expect(await underCard()).toEqual({ ground: false, card: true })
     // A sentence is still a sentence: it routes, it never arms. LAST in the
     // row on purpose: while its route decision is shown the Command bar's
     // Enter belongs to the decision strip, so a word typed after it would be
