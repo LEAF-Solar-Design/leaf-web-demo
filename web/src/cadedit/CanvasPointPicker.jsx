@@ -93,7 +93,11 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
       const m = machine.current
       if (!v || !m || !m.sequence || !last || typeof v.unproject !== 'function') return
       const p = v.unproject(last.x, last.y)
-      const [gx, gy] = p ? (orthoRef.current ? orthoPoint(m, p.x, p.y) : [p.x, p.y]) : [NaN, NaN]
+      // No allocation on this per-frame path with ORTHO off; on, the one
+      // constrained pair is the price of the mode (kimi note on #982).
+      let gx = p ? p.x : NaN
+      let gy = p ? p.y : NaN
+      if (p && orthoRef.current) { const q = orthoPoint(m, gx, gy); gx = q[0]; gy = q[1] }
       const ghost = p ? ghostFor(m, gx, gy) : null
       v.setRubberBand?.(ghost ? ghost.pts : null, !!ghost?.closed)
     }
