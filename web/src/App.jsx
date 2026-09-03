@@ -3224,9 +3224,10 @@ export default function App() {
         </main>
 
         <div className="bar-dock">
-          {/* W4e: the engine's operand line portals here, above the command
-              line, on the studio's drafting surfaces (empty otherwise). */}
-          {studioGround && drafting && <div id="cockpit-operands" className="cockpit-operands-slot" />}
+          {/* W4e slice H: the engine's command prompt ("LINE  Specify first
+              point:") portals here, the line above the command input, on the
+              studio's drafting surfaces (empty otherwise). */}
+          {studioGround && drafting && <div id="cockpit-prompt-slot" className="cockpit-prompt-slot" />}
           {/* SB3 state strips ride above the well: running / failed. Decisions
               (the route) attach as resolver rows / decision strips below. */}
           {running && (

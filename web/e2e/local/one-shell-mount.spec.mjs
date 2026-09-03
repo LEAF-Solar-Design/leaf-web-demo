@@ -697,27 +697,54 @@ test.describe('route matrix, rail ON', () => {
     // The deleted entity's selection cleared with it (selection identity).
     await expect(modify.locator('.ribbon-note')).toHaveText('select an entity in the imported DXF')
 
-    // W4d Slice B: the Draw group creates real entities in the imported
-    // document. The selection lands on what was drawn, so Modify is live on
-    // it at once; the count is the engine's re-parse of its own bytes.
+    // W4d Slice B / W4e slice H: the Draw group creates real entities in
+    // the imported document. A tool ARMS and the command line prompts for
+    // its operands in the reference grammar ("LINE  Specify first point:"),
+    // Enter runs; the selection lands on what was drawn, so Modify is live
+    // on it at once; the count is the engine's re-parse of its own bytes.
     await expect(draw.locator('.ribbon-note')).toHaveCount(0)
+    await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
+    const lineTool = ribbon.locator('[data-tool="draw:createLine"]')
+    await lineTool.click()
+    const promptRow = page.getByTestId('cockpit-prompt')
+    await expect(promptRow).toHaveAttribute('data-op', 'createLine')
+    await expect(promptRow).toContainText('LINE')
+    await expect(promptRow).toContainText('Specify first point:')
+    await expect(lineTool).toHaveAttribute('aria-expanded', 'true')
+    // The prompt is the command line's upper line: the command input's own
+    // left edge and width, seated directly on top of it.
+    const seat = await page.evaluate(() => {
+      const p = document.getElementById('cockpit-prompt').getBoundingClientRect()
+      const b = document.querySelector('.bar.bar-command-line').getBoundingClientRect()
+      return { dl: Math.abs(p.left - b.left), dw: Math.abs(p.width - b.width), gap: b.top - p.bottom }
+    })
+    expect(seat.dl).toBeLessThanOrEqual(1)
+    expect(seat.dw).toBeLessThanOrEqual(1)
+    expect(seat.gap).toBeGreaterThanOrEqual(-1)
+    expect(seat.gap).toBeLessThanOrEqual(2)
     await page.getByLabel('ribbon x2').fill('40')
     await page.getByLabel('ribbon y2').fill('30')
-    await ribbon.locator('[data-tool="draw:createLine"]').click()
+    await page.getByLabel('ribbon y2').press('Enter')
     await expect(page.getByRole('status').filter({ hasText: /createLine applied: entity \d+ drawn/ })).toHaveCount(1, { timeout: 60_000 })
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('2')
     await expect(modify.locator('.ribbon-note')).toHaveCount(0)
     await expect(del).toBeEnabled()
-    await page.getByLabel('ribbon r').fill('2.5')
     await ribbon.locator('[data-tool="draw:createCircle"]').click()
+    await expect(promptRow).toHaveAttribute('data-op', 'createCircle')
+    await expect(lineTool).toHaveAttribute('aria-expanded', 'false')
+    await page.getByLabel('ribbon r').fill('2.5')
+    await page.getByTestId('cockpit-prompt-run').click()
     await expect(page.getByRole('status').filter({ hasText: /createCircle applied: entity \d+ drawn/ })).toHaveCount(1, { timeout: 60_000 })
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('3')
     await expect(page.getByTestId('cad-edit-entity-list')).toContainText('CIRCLE on layer 0')
     // A degenerate create is refused as a sentence, and nothing changes.
     await page.getByLabel('ribbon r').fill('0')
-    await ribbon.locator('[data-tool="draw:createCircle"]').click()
+    await page.getByLabel('ribbon r').press('Enter')
     await expect(page.getByRole('status').filter({ hasText: /Circle refused: r must be greater than 0/ })).toHaveCount(1)
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('3')
+    // Esc cancels the command; the prompt leaves with it.
+    await page.getByLabel('ribbon r').press('Escape')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
   })
 
   test('solar depth: real solved strings on the Solar tab only, honesty-gated (W4c-V3)', async ({ page, request }) => {

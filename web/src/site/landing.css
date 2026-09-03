@@ -1198,21 +1198,28 @@
 .ribbon-cluster-label.as-button:focus-visible { outline: 2px solid #7fd6a6; outline-offset: 1px; }
 .ribbon-monogram { color: rgba(127, 214, 166, .9); }
 .ribbon-cluster-tools { display: grid; grid-auto-flow: column; grid-template-rows: repeat(2, auto); gap: 3px 4px; align-content: start; }
-/* The one operand line under every cluster (draw and modify read the same
-   record): spans the band, ordered last. */
-.ribbon-operands {
+/* W4e slice H: the command prompt (an armed tool's operands, asked for in
+   the reference's grammar) renders inline in the band only where the
+   cockpit's slot does not exist (no studio); cockpit.css seats it above the
+   command line. Spans the band, ordered last. */
+.cockpit-prompt {
   flex: 1 0 100%; order: 99;
   display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center;
   padding-top: 4px; border-top: 1px solid rgba(240, 242, 240, .1);
+  font: 500 10px var(--font-mono); color: rgba(240, 242, 240, .72);
 }
-.ribbon-operands label {
-  display: inline-flex; gap: 4px; align-items: center;
-  font: 500 9.5px var(--font-mono); letter-spacing: .06em; text-transform: uppercase;
-  color: rgba(240, 242, 240, .72); white-space: nowrap;
+.cockpit-prompt .cp-verb { color: rgba(127, 214, 166, .9); letter-spacing: .08em; }
+.cockpit-prompt :is(.cp-step, .cp-field, .cp-actions) { display: inline-flex; gap: 4px; align-items: center; white-space: nowrap; }
+.cockpit-prompt .cp-input {
+  width: 42px; padding: 1px 4px;
+  font: 500 11px var(--font-mono); color: rgba(240, 242, 240, .92);
+  background: rgba(240, 242, 240, .06); border: 1px solid rgba(240, 242, 240, .22); border-radius: 3px;
 }
-.ribbon-operands-tag { font: 600 9.5px var(--font-mono); letter-spacing: .08em; text-transform: uppercase; color: rgba(127, 214, 166, .9); }
-.ribbon-operands-tag + label { margin-left: 2px; }
-.ribbon-operands input[type="checkbox"] { margin: 0; accent-color: #7fd6a6; }
+.cockpit-prompt .cp-input.wide { width: 120px; }
+.cockpit-prompt .cp-input:focus-visible { outline: 2px solid #7fd6a6; outline-offset: 1px; }
+.cockpit-prompt .cp-input:disabled { color: rgba(240, 242, 240, .45); background: transparent; }
+.cockpit-prompt input[type="checkbox"] { margin: 0; accent-color: #7fd6a6; }
+.cockpit-prompt .cp-note { color: rgba(240, 200, 120, .9); }
 .ribbon-tool {
   padding: 3px 8px;
   font: 500 11px var(--font-mono); white-space: nowrap;
@@ -1236,26 +1243,6 @@
 .ribbon-note { font: 400 10.5px var(--sans); color: rgba(240, 242, 240, .72); white-space: nowrap; }
 .ribbon-tool[aria-pressed="true"] { background: rgba(127, 214, 166, .16); border-color: rgba(127, 214, 166, .5); }
 .ribbon-tool[aria-pressed="false"] { text-decoration: line-through; color: rgba(240, 242, 240, .62); }
-/* The Modify group's operands (dx, dy, vertex, layer): the SAME record the
-   import pane's fields bind to, rendered as a compact row under the ops. */
-.ribbon-cluster-inputs { display: flex; gap: 6px; align-items: center; }
-.ribbon-cluster-inputs label {
-  display: inline-flex; gap: 4px; align-items: center;
-  font: 500 9.5px var(--font-mono); letter-spacing: .06em; text-transform: uppercase;
-  color: rgba(240, 242, 240, .72); white-space: nowrap;
-}
-.ribbon-input {
-  width: 42px; padding: 1px 4px;
-  font: 500 11px var(--font-mono);
-  color: rgba(240, 242, 240, .92);
-  background: rgba(240, 242, 240, .06);
-  border: 1px solid rgba(240, 242, 240, .22); border-radius: 3px;
-}
-.ribbon-input:focus-visible { outline: 2px solid #7fd6a6; outline-offset: 1px; }
-.ribbon-input:disabled { color: rgba(240, 242, 240, .45); background: transparent; }
-.ribbon-input.wide { width: 120px; }
-.ribbon-cluster-inputs input[type="checkbox"] { margin: 0; accent-color: #7fd6a6; }
-
 /* --- W4c-C: the page dissolves into the viewport (CAD/Solar only) -------
    Operator, twice: the drawing IS the workspace. Before this the console's
    page blocks (import surface 1192x140, result 1194x83, tabs, toolbar) held

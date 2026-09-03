@@ -164,9 +164,6 @@
     background: var(--ck-chrome);
   }
 }
-/* The operand line is hidden while neither group can take input; the UA's
-   [hidden] loses to landing.css's display:flex, so the hook is explicit. */
-.studio-shell .ribbon-operands[hidden] { display: none !important; }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drafting-ribbon {
   height: var(--ck-ribbon); box-sizing: border-box;
   display: flex; flex-wrap: nowrap; align-items: stretch; gap: 0;
@@ -409,7 +406,9 @@
     position: fixed; left: 50%; right: auto; bottom: 35px; width: 720px; max-width: none; margin: 0 0 0 -360px; z-index: 30;
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar.bar-command-line {
-    min-height: 0; height: 25px; box-sizing: border-box;
+    /* margin 0: the old shell's 8px top margin would seat the prompt line
+       8px above the input instead of on it (the dock's gap spaces siblings). */
+    min-height: 0; height: 25px; box-sizing: border-box; margin: 0;
     flex-direction: row; flex-wrap: nowrap; align-items: center;
     background: var(--ck-recess); border: 1px solid #3a3a3a; border-radius: 0; box-shadow: none;
     font-family: var(--ck-font);
@@ -443,23 +442,45 @@
     position: absolute; left: 0; right: 0; bottom: 100%; margin-bottom: 4px; padding: 2px 8px;
     font: 400 11px var(--ck-font); background: var(--ck-recess); border: 1px solid #3a3a3a;
   }
-  /* The engine's operands ride ABOVE the line (the reference prompts for
-     them on the command line itself; W4e slice H moves them into it). */
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-operands-slot {
-    position: absolute; left: 0; right: 0; bottom: 100%; margin: 0 0 4px; z-index: 31;
+  /* W4e slice H: the command prompt is the command line's line ABOVE the
+     input (the reference's own prompt line): same width, same material, the
+     verb in the Command: green, then "Specify …:" steps with their fields.
+     It exists only while a tool is armed, and wraps upward when a long
+     command (ARC) needs a second line. */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt-slot {
+    position: absolute; left: 0; right: 0; bottom: 100%; margin: 0; z-index: 31;
   }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-operands-slot:empty { display: none; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-operands-slot .ribbon-operands {
-    flex: none; order: 0; padding: 3px 8px; border: 1px solid #3a3a3a; background: var(--ck-recess);
-    font-family: var(--ck-font);
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt-slot:empty { display: none; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 0 8px; min-height: 25px; box-sizing: border-box;
+    padding: 1px 8px; background: var(--ck-recess); border: 1px solid #3a3a3a; border-bottom: 0;
+    font: 400 11px var(--ck-font); color: #cfcfcf;
   }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-operands-slot .ribbon-operands label,
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-operands-slot .ribbon-operands-tag {
-    font: 400 10.5px var(--ck-font); letter-spacing: 0; text-transform: none;
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-verb { color: var(--ck-cmd); font-size: 12px; letter-spacing: .02em; white-space: nowrap; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-step { display: inline-flex; align-items: center; gap: 3px; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-ask { white-space: nowrap; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-input {
+    width: 48px; height: 21px; box-sizing: border-box; padding: 0 4px; margin: 0;
+    font: 400 12px/19px var(--ck-font); color: #e6e6e6; background: #2a2a2a; border: 1px solid #3f3f3f; border-radius: 0;
   }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-operands-slot .ribbon-input {
-    font: 400 11px var(--ck-font); background: #2a2a2a; border-color: #3f3f3f; border-radius: 0; color: #e6e6e6;
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-input.wide { width: 170px; }
+  /* The key hints ride the buttons' titles on the cockpit; the row must fit
+     LINE on one 25px line at the reference's 720px. */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .key { display: none; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-input::placeholder { color: #7a7a7a; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-input:focus-visible { outline: 1px solid var(--ck-active); outline-offset: 0; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-input:disabled { color: #7a7a7a; background: transparent; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-field { display: inline-flex; align-items: center; gap: 4px; font: inherit; color: inherit; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-field input { margin: 0; accent-color: var(--ck-active); }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-note { color: #d9a441; font-size: 11px; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-actions { display: inline-flex; align-items: center; gap: 3px; margin-left: auto; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt :is(.cp-run, .cp-cancel) {
+    display: inline-flex; align-items: center; gap: 4px; height: 19px; padding: 0 6px;
+    font: 400 11px/19px var(--ck-font); color: #cfcfcf; background: transparent; border: 1px solid transparent; border-radius: 2px; cursor: pointer;
   }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-run { color: var(--ck-cmd); }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt :is(.cp-run, .cp-cancel):hover:not(:disabled) { background: var(--ck-title); color: var(--ck-ink); }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-run:disabled { color: #6a6a6a; cursor: not-allowed; }
 
   /* ---- y 911-940: the status bar ---- */
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar {

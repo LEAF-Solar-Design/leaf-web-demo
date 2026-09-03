@@ -108,8 +108,14 @@ def main(argv):
     whole = mean_abs_diff(ref, ours)
     chrome = mean_abs_diff(ref, ours, mask)
 
-    ref_y = sorted(set(edges_along_column(ref, 700) + edges_along_column(ref, 100)))
-    our_y = sorted(set(edges_along_column(ours, 700) + edges_along_column(ours, 100)))
+    # Three probe columns: x=100 (the pane), x=700 (the bands over the
+    # canvas), and x=300 for the viewport strip's bottom edge (y=181): the
+    # strip is content-wide on BOTH images (reference ~x 250-440), so at
+    # x=700 that edge can only come from drawing content, which passed the
+    # staging shots by luck and failed a dev shot of the same chrome.
+    probes = (700, 100, 300)
+    ref_y = sorted(set(y for x in probes for y in edges_along_column(ref, x)))
+    our_y = sorted(set(y for x in probes for y in edges_along_column(ours, x)))
     ref_x = [x for x in edges_along_row(ref, 500) if x < 400]
     our_x = [x for x in edges_along_row(ours, 500) if x < 400]
 

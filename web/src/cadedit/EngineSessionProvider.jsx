@@ -29,12 +29,18 @@
  * on what was typed. They are UI state, not session state, so they sit
  * beside the store rather than inside it, and every write is type- and
  * length-checked (fails closed: an unknown key or a non-string is dropped).
+ *
+ * THE ARMED COMMAND (W4e slice H) sits beside them for the same reason: the
+ * ribbon tool the command line is prompting for is part of what the
+ * operator is doing, not of the document, and it must outlive the ribbon's
+ * tab remounts. Bounded the same way (a group from the fixed pair and a
+ * short op token, or null), and it disarms itself when the document goes.
  */
-import { createContext, useCallback, useContext, useMemo, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 
 import { useDrawingIdentityOptional } from '../drawing/DrawingIdentityProvider.jsx'
 
-import useEngineSession from './engineSession.js'
+import useEngineSession, { SESSION_ERROR } from './engineSession.js'
 
 const EngineSessionContext = createContext(null)
 
@@ -66,6 +72,12 @@ export const MAX_INPUT_CHARS = 64
 export const MAX_POINT_LIST_CHARS = 4096
 const INPUT_LIMITS = Object.freeze({ pts: MAX_POINT_LIST_CHARS })
 
+// The two ribbon groups whose tools prompt for operands, and the op token's
+// shape (a JS identifier the clusters own; the engine validates the op
+// again when it runs).
+const ARMED_GROUPS = new Set(['draw', 'modify'])
+const ARMED_OP = /^[a-zA-Z]{1,32}$/
+
 export default function EngineSessionProvider({
   createWorker = defaultCreateWorker,
   saveTarget = null,
@@ -92,10 +104,31 @@ export default function EngineSessionProvider({
     ))
   }, [])
 
+  // The armed command: null, or { group, op }. Fails closed on any other
+  // shape (a consumer bug never leaves the prompt pointing at a non-command).
+  const [armed, setArmedState] = useState(null)
+  const setArmed = useCallback((next) => {
+    if (next === null) { setArmedState(null); return }
+    if (!next || typeof next !== 'object') return
+    const { group, op } = next
+    if (!ARMED_GROUPS.has(group) || typeof op !== 'string' || !ARMED_OP.test(op)) return
+    setArmedState((current) => (
+      current && current.group === group && current.op === op ? current : Object.freeze({ group, op })
+    ))
+  }, [])
+  // No parsed document (closed, or the worker died): nothing to prompt for,
+  // so a stale prompt never outlives its drawing. A NEW document disarms
+  // too (openDocument keeps engineParsed while it loads, so the identity is
+  // the signal): opening a file cancels the running command, as in the
+  // reference.
+  const documentGone = !session.engineParsed || session.errorKind === SESSION_ERROR.CRASHED
+  useEffect(() => { if (documentGone) setArmedState(null) }, [documentGone])
+  useEffect(() => { setArmedState(null) }, [session.documentId])
+
   const canSave = saveTarget !== null && saveTarget !== undefined
   const value = useMemo(
-    () => ({ session, inputs, setInput, canSave }),
-    [session, inputs, setInput, canSave],
+    () => ({ session, inputs, setInput, canSave, armed, setArmed }),
+    [session, inputs, setInput, canSave, armed, setArmed],
   )
   return <EngineSessionContext.Provider value={value}>{children}</EngineSessionContext.Provider>
 }
