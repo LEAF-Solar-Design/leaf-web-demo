@@ -1,0 +1,304 @@
+name: Converge staging fleet
+
+run-name: Converge staging fleet (build ${{ inputs.producer_build_run_id }}${{ inputs.dry_run == false && '' || ', dry run' }})
+
+# WHY THIS EXISTS
+#   dispatch-staging-deploys.yml (the relay) lands only web and app. It says so
+#   in its own receipt: automatic_surfaces ["web","app"], the other three
+#   "not_automatically_reconciled", full_fleet_identity_stamped false. Broker,
+#   harness, canonical-worker and the app identity restamp were dispatched BY
+#   HAND, every release. Until they run, the convergence finalizer cannot emit
+#   a receipt at all: it selects a terminal run for all five services and reads
+#   deployment_identity off the app frontier, and only an
+#   app_deploy_intent=configuration run produces that identity.
+#
+# WHAT IT DOES NOT DO
+#   It does not fire on its own. The relay's per-merge cost is already the
+#   binding constraint on staging (its two legs serialize behind the single
+#   leaf-platform-staging-ecs-mutation group), and this adds four more
+#   mutations. Measured on the dad27a10 sequence: web 10.5 min, app 25.3,
+#   broker 5.7, canonical-worker 4.1, restamp 5.6. Auto-firing this on every
+#   relay is a separate decision with a real backlog risk, deliberately not
+#   taken here.
+#
+# SAFETY
+#   dry_run defaults TRUE. A dry run resolves every input against live provider
+#   evidence and PRINTS the dispatch it would make, touching nothing. Turn it
+#   off only once a dry run reads correctly for the release in hand.
+#
+#   The task definitions are read from each service's newest successful deploy
+#   receipt rather than from AWS (this repo holds no AWS credentials). That is
+#   an inference about live state, so it is passed as expected_task_definition
+#   and the deploy itself adjudicates: it refuses with "Live task definition
+#   changed after review" if the guess is stale. A wrong guess therefore fails
+#   closed instead of deploying against an unreviewed baseline.
+
+on:
+  workflow_dispatch:
+    inputs:
+      producer_build_run_id:
+        description: "Exact canonical build run whose supply set defines the release"
+        type: string
+        required: true
+      dry_run:
+        description: "Resolve and print the dispatches without making them"
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  # Self-serializing. Two fleet convergences at once would interleave their
+  # deploys behind the shared staging mutation lock and each would adopt the
+  # other's task definitions as its reviewed baseline.
+  group: leaf-platform-staging-fleet-convergence
+  cancel-in-progress: false
+
+jobs:
+  converge:
+    name: Reconcile the non-relay services and stamp fleet identity
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      INFRA_REPO: LEAF-Solar-Design/leaf-automation-aws-terraform
+      DEPLOY_WORKFLOW: deploy-leaf-platform-staging.yml
+      TAIL_SERVICES: "broker harness canonical-worker"
+    steps:
+      - name: Check out the dispatcher
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate identifier-only input
+        shell: bash
+        env:
+          PRODUCER_BUILD_RUN_ID: ${{ inputs.producer_build_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$PRODUCER_BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::producer_build_run_id must be one positive decimal identifier."
+            exit 1
+          }
+
+      - name: Resolve the release from its supply set
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCER_BUILD_RUN_ID: ${{ inputs.producer_build_run_id }}
+        run: |
+          set -euo pipefail
+          BUILD_JSON=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_BUILD_RUN_ID")
+          HEAD_SHA=$(jq -r '.head_sha' <<<"$BUILD_JSON")
+          ATTEMPT=$(jq -r '.run_attempt' <<<"$BUILD_JSON")
+          CONCLUSION=$(jq -r '.conclusion' <<<"$BUILD_JSON")
+          WORKFLOW_PATH=$(jq -r '.path' <<<"$BUILD_JSON")
+          [ "$CONCLUSION" = "success" ] || {
+            echo "::error::Build run $PRODUCER_BUILD_RUN_ID did not succeed ($CONCLUSION)."; exit 1; }
+          [ "$WORKFLOW_PATH" = ".github/workflows/build-platform-images.yml" ] || {
+            echo "::error::Run $PRODUCER_BUILD_RUN_ID is not a platform build ($WORKFLOW_PATH)."; exit 1; }
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Malformed build head sha."; exit 1; }
+
+          SUPPLY_NAME="staging-supply-set-$HEAD_SHA-attempt-$ATTEMPT"
+          ART=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_BUILD_RUN_ID/artifacts?per_page=100")
+          ART_ID=$(jq -r --arg n "$SUPPLY_NAME" \
+            '[.artifacts[] | select(.name == $n and .expired == false)] | if length == 1 then .[0].id else empty end' <<<"$ART")
+          [ -n "$ART_ID" ] || { echo "::error::Expected exactly one live artifact named $SUPPLY_NAME."; exit 1; }
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ART_ID/zip" > supply.zip
+          unzip -p supply.zip staging-supply-set.json > staging-supply-set.json
+
+          SCHEMA=$(jq -r '.schema' staging-supply-set.json)
+          [ "$SCHEMA" = "leaf.staging-supply-set.v3" ] || {
+            echo "::error::Fleet convergence needs a strict-v3 supply set; found $SCHEMA. The identity stamp is built by the deploy FROM this manifest, and only v3 carries the five-service graph it validates."
+            exit 1
+          }
+          jq -e --arg sha "$HEAD_SHA" '.release_source_revision == $sha' staging-supply-set.json >/dev/null || {
+            echo "::error::Supply set lineage does not match the build head sha."; exit 1; }
+          jq -e '(.services | keys | sort) == ["app","broker","canonical-worker","harness","web"]' \
+            staging-supply-set.json >/dev/null || {
+            echo "::error::Supply set is not a five-service graph."; exit 1; }
+
+          # The relay must already have landed web and app. Stamping fleet
+          # identity before the forward legs land would assert digests that are
+          # not live, and a configuration deploy cannot move the app image, so
+          # the restamp would either refuse or freeze the wrong identity.
+          RELAY_NAME="staging-converged-$HEAD_SHA-attempt-$ATTEMPT"
+          RELAY_RUNS=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?event=workflow_run&head_sha=$HEAD_SHA&per_page=100" \
+            --jq '[.workflow_runs[] | select(.path == ".github/workflows/dispatch-staging-deploys.yml" and .conclusion == "success") | .id]')
+          FOUND=""
+          for RID in $(jq -r '.[]' <<<"$RELAY_RUNS"); do
+            COUNT=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RID/artifacts?per_page=100" \
+              | jq -r --arg n "$RELAY_NAME" \
+                  '[.artifacts[] | select(.name == $n and .expired == false)] | length')
+            if [ "$COUNT" != "0" ]; then FOUND="$RID"; break; fi
+          done
+          [ -n "$FOUND" ] || {
+            echo "::error::No successful relay published $RELAY_NAME. Web and app must land before the fleet is reconciled."
+            exit 1
+          }
+
+          SUPPLY_EVIDENCE_B64=$(base64 -w0 staging-supply-set.json)
+          {
+            echo "head_sha=$HEAD_SHA"
+            echo "attempt=$ATTEMPT"
+            echo "relay_run_id=$FOUND"
+            echo "supply_evidence_b64=$SUPPLY_EVIDENCE_B64"
+          } >> "$GITHUB_OUTPUT"
+          echo "Release $HEAD_SHA attempt $ATTEMPT; relay $FOUND already converged web and app."
+
+      - name: Reconcile the non-relay services, then stamp fleet identity
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.TERRAFORM_REPO_TOKEN }}
+          HEAD_SHA: ${{ steps.release.outputs.head_sha }}
+          SUPPLY_EVIDENCE_B64: ${{ steps.release.outputs.supply_evidence_b64 }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          POLL_SECONDS: "20"
+        run: |
+          set -euo pipefail
+
+          # Newest successful deploy receipt for a service, for its live task
+          # definition and current digest. Provider evidence, never a guess at
+          # what "live" should be; the deploy re-adjudicates it anyway.
+          latest_terminal_of() {
+            local SERVICE=$1 RID TMP F TD DIGEST
+            # The run-name carries the service, so narrow BEFORE downloading:
+            # one list call and at most a few artifact fetches, never a scan of
+            # every recent deploy for each of four services.
+            for RID in $(gh run list --repo "$INFRA_REPO" --workflow "$DEPLOY_WORKFLOW" \
+                  --limit 100 --json databaseId,displayTitle,conclusion \
+                  | jq -r --arg p "Deploy leaf-platform staging $SERVICE (" \
+                      '[.[] | select(.conclusion == "success" and (.displayTitle | startswith($p))) | .databaseId]
+                       | sort | reverse | .[0:5] | .[]'); do
+              TMP=$(mktemp -d)
+              if gh run download "$RID" --repo "$INFRA_REPO" --dir "$TMP" >/dev/null 2>&1; then
+                F=$(find "$TMP" -name leaf-platform-staging-service-run.json | head -1)
+                if [ -n "$F" ] && [ "$(jq -r '.requested.service' "$F")" = "$SERVICE" ]; then
+                  TD=$(jq -r '.facts.terminal.value.task_definition // empty' "$F")
+                  DIGEST=$(jq -r '.facts.terminal.value.image_digest // empty' "$F")
+                  if [ -n "$TD" ]; then
+                    rm -rf "$TMP"
+                    printf '%s\t%s\n' "$TD" "$DIGEST"
+                    return 0
+                  fi
+                fi
+              fi
+              rm -rf "$TMP"
+            done
+            return 1
+          }
+
+          # Bind the dispatched run by its EXACT run-name, never "the newest run
+          # that appeared". Sibling lanes dispatch this same infra workflow, and
+          # GitHub lists dispatched runs asynchronously, so a sibling's run can
+          # surface before ours. Watching theirs would report their result as
+          # ours. This mirrors the relay's find_run_named for the same reason.
+          find_run_named() {
+            local MARK=$1 WANT=$2
+            gh run list --repo "$INFRA_REPO" --workflow "$DEPLOY_WORKFLOW" \
+              --limit 100 --json databaseId,displayTitle \
+              | jq -r --argjson mark "$MARK" --arg want "$WANT" \
+                  '[.[] | select(.databaseId > $mark and .displayTitle == $want) | .databaseId] | max // empty'
+          }
+
+          latest_any_run_id() {
+            gh run list --repo "$INFRA_REPO" --workflow "$DEPLOY_WORKFLOW" \
+              --limit 100 --json databaseId | jq -r '[.[].databaseId] | max // 0'
+          }
+
+          dispatch_and_watch() {
+            local SERVICE=$1 INTENT=$2 IMAGE_TAG=$3 EXPECTED_TD=$4 CONFIG_TD=$5
+            local WANT="Deploy leaf-platform staging $SERVICE ($IMAGE_TAG)"
+            local MARK RUN_ID DEADLINE STATE STATUS CONCLUSION
+            local ARGS=(
+              --repo "$INFRA_REPO" --ref main
+              -f "service=$SERVICE"
+              -f "image_tag=$IMAGE_TAG"
+              -f "app_deploy_intent=$INTENT"
+              -f "expected_task_definition=$EXPECTED_TD"
+              -f "supply_evidence_b64=$SUPPLY_EVIDENCE_B64"
+            )
+            [ -n "$CONFIG_TD" ] && ARGS+=(-f "configuration_task_definition=$CONFIG_TD")
+
+            if [ "$DRY_RUN" != "false" ]; then
+              echo "DRY RUN would dispatch: $SERVICE intent=$INTENT tag=$IMAGE_TAG"
+              echo "    expected_task_definition=$EXPECTED_TD"
+              [ -n "$CONFIG_TD" ] && echo "    configuration_task_definition=$CONFIG_TD"
+              echo "    run-name it would bind: $WANT"
+              return 0
+            fi
+
+            MARK=$(latest_any_run_id)
+            gh workflow run "$DEPLOY_WORKFLOW" "${ARGS[@]}"
+            echo "Dispatched $SERVICE ($INTENT) on $IMAGE_TAG."
+
+            RUN_ID=""
+            DEADLINE=$(( $(date +%s) + 300 ))
+            while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+              sleep 5
+              RUN_ID=$(find_run_named "$MARK" "$WANT" || true)
+              [ -n "$RUN_ID" ] && break
+            done
+            [ -n "$RUN_ID" ] || {
+              echo "::error::Dispatched $SERVICE but no run named '$WANT' appeared. Refusing to watch a run that may not be ours. Staging is NOT fleet-converged on $HEAD_SHA."
+              exit 1
+            }
+            echo "Watching $SERVICE run $RUN_ID."
+
+            STATUS=""
+            DEADLINE=$(( $(date +%s) + 45 * 60 ))
+            while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+              STATE=$(gh run view "$RUN_ID" --repo "$INFRA_REPO" --json status,conclusion \
+                --jq '"\(.status) \(.conclusion // "")"' || true)
+              STATUS=${STATE%% *}
+              CONCLUSION=${STATE#* }
+              [ "$STATUS" = "completed" ] && break
+              sleep "$POLL_SECONDS"
+            done
+            [ "$STATUS" = "completed" ] || {
+              echo "::error::$SERVICE run $RUN_ID did not finish within the watch budget. Staging may be partially reconciled on $HEAD_SHA."
+              exit 1
+            }
+            [ "$CONCLUSION" = "success" ] || {
+              echo "::error::$SERVICE run $RUN_ID concluded $CONCLUSION. Staging is NOT fleet-converged on $HEAD_SHA; nothing after this point was dispatched."
+              exit 1
+            }
+            echo "$SERVICE reconciled by run $RUN_ID."
+          }
+
+          for SERVICE in $TAIL_SERVICES; do
+            TAG=$(jq -er --arg s "$SERVICE" '.services[$s].immutable_lookup_tag' staging-supply-set.json)
+            WANT_DIGEST=$(jq -er --arg s "$SERVICE" '.services[$s].image_digest' staging-supply-set.json)
+            if ! ROW=$(latest_terminal_of "$SERVICE"); then
+              echo "::error::No successful $SERVICE deploy receipt carries a terminal task definition, so there is no reviewed baseline to pass. Dispatch $SERVICE once by hand, then re-run."
+              exit 1
+            fi
+            LIVE_TD=${ROW%%$'\t'*}
+            LIVE_DIGEST=${ROW#*$'\t'}
+            if [ "$LIVE_DIGEST" = "$WANT_DIGEST" ]; then
+              echo "$SERVICE already live on $WANT_DIGEST; no deploy needed."
+              continue
+            fi
+            dispatch_and_watch "$SERVICE" "forward" "$TAG" "$LIVE_TD" ""
+          done
+
+          # The identity stamp. Only app_deploy_intent=configuration produces
+          # deployment_identity, and the deploy builds the five-service body
+          # itself from the supply manifest, so nothing here computes identity.
+          # It must run LAST: the body it freezes names every service's digest.
+          APP_TAG=$(jq -er '.services.app.immutable_lookup_tag' staging-supply-set.json)
+          if ! ROW=$(latest_terminal_of "app"); then
+            echo "::error::No successful app deploy receipt carries a terminal task definition."
+            exit 1
+          fi
+          APP_TD=${ROW%%$'\t'*}
+          dispatch_and_watch "app" "configuration" "$APP_TAG" "$APP_TD" "$APP_TD"
+
+          if [ "$DRY_RUN" != "false" ]; then
+            echo "Dry run complete. Nothing was dispatched."
+          else
+            echo "Fleet converged on $HEAD_SHA and identity stamped."
+          fi

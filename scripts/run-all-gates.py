@@ -1332,6 +1332,21 @@ def build_suites() -> List[Suite]:
         # same window filtered rather than fatal - the second is the regression
         # test for refusing it at shape-validation time instead, which aborted
         # the finalizer on a receipt belonging to some other release.
+        # converge-staging-fleet.yml dispatches REAL staging deploys into the
+        # infra repo, so its safety properties are gated, not reviewed by
+        # memory: dry_run defaults true and every dispatch site is guarded in
+        # the fail-safe direction, permissions stay read-only with no cloud
+        # credentials and no locally-computed identity body, it never touches
+        # the two surfaces the relay owns, the identity stamp is a
+        # configuration deploy that runs last, runs are bound by exact name
+        # rather than "newest", and it passes a reviewed task definition
+        # because auto-live is unavailable for these dispatches. Registered
+        # with the workflow, no fix-then-register debt. Measured on this tree
+        # 2026-09-03: 10 passed, 0 skipped; a pure file-shape suite with no DB,
+        # network or platform gate, so 10 is the count in every environment.
+        Suite("converge-staging-fleet-workflow",
+              "scripts test_converge_staging_fleet_workflow.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_converge_staging_fleet_workflow.py"), 10),
         Suite("platform-staging-convergence",
               "scripts test_platform_staging_convergence.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_platform_staging_convergence.py"), 68),
