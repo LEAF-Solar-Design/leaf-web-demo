@@ -1,0 +1,50 @@
+// W4f slice B: the command line's typed COMMAND WORDS. The reference (and
+// every CAD a drafter has used) takes LINE, L, CIRCLE, C, MOVE, M ... typed on
+// the command line, Enter, and the prompt starts. Our Command bar is the
+// natural-language input first, so a typed word is a command ONLY when the
+// whole text is exactly one known word (optionally prefixed with ">", the
+// explicit command marker); a sentence, a slash tool, or anything else falls
+// through to the normal dispatch untouched. Pure, bounded, allocation-free on
+// the miss path; the consumer (CommandLineArmer) turns the record into an
+// armed prompt or a direct edit.
+export const COCKPIT_COMMAND_EVENT = 'cockpit:command'
+export const MAX_COMMAND_CHARS = 32
+
+// word -> { group, op, verb }. `op` is the engine session op the ribbon's
+// PROMPTS table (draw/modify) or OPS (delete) knows; `verb` is the reference's
+// command name, shown back to the user.
+const WORDS = Object.freeze({
+  line: { group: 'draw', op: 'createLine', verb: 'LINE' },
+  l: { group: 'draw', op: 'createLine', verb: 'LINE' },
+  pline: { group: 'draw', op: 'createPolyline', verb: 'PLINE' },
+  pl: { group: 'draw', op: 'createPolyline', verb: 'PLINE' },
+  polyline: { group: 'draw', op: 'createPolyline', verb: 'PLINE' },
+  circle: { group: 'draw', op: 'createCircle', verb: 'CIRCLE' },
+  c: { group: 'draw', op: 'createCircle', verb: 'CIRCLE' },
+  arc: { group: 'draw', op: 'createArc', verb: 'ARC' },
+  a: { group: 'draw', op: 'createArc', verb: 'ARC' },
+  move: { group: 'modify', op: 'move', verb: 'MOVE' },
+  m: { group: 'modify', op: 'move', verb: 'MOVE' },
+  erase: { group: 'modify', op: 'delete', verb: 'ERASE' },
+  e: { group: 'modify', op: 'delete', verb: 'ERASE' },
+  delete: { group: 'modify', op: 'delete', verb: 'ERASE' },
+  del: { group: 'modify', op: 'delete', verb: 'ERASE' },
+})
+
+export const COMMAND_WORDS = Object.freeze(Object.keys(WORDS))
+
+/**
+ * Parse the Command bar text as a drawing command. Returns a frozen
+ * { group, op, verb, word } or null. Exact single-token match only (case-
+ * insensitive), with an optional leading ">" and surrounding whitespace;
+ * text longer than MAX_COMMAND_CHARS is never a command (a pasted paragraph
+ * costs one length check, not a regex over 16 MB).
+ */
+export function parseDrawingCommand(text) {
+  if (typeof text !== 'string' || text.length === 0 || text.length > MAX_COMMAND_CHARS) return null
+  let s = text.trim()
+  if (s.startsWith('>')) s = s.slice(1).trim()
+  if (!s || /\s/.test(s)) return null
+  const hit = WORDS[s.toLowerCase()]
+  return hit ? Object.freeze({ ...hit, word: s }) : null
+}

@@ -745,6 +745,21 @@ test.describe('route matrix, rail ON', () => {
     // Esc cancels the command; the prompt leaves with it.
     await page.getByLabel('ribbon r').press('Escape')
     await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
+
+    // W4f slice B: a typed command word on the Command bar arms the same
+    // prompt and clears the bar; the natural-language router never sees it.
+    const bar = page.getByLabel('Command bar')
+    await bar.fill('circle')
+    await bar.press('Enter')
+    await expect(promptRow).toHaveAttribute('data-op', 'createCircle')
+    await expect(promptRow).toContainText('CIRCLE')
+    await expect(bar).toHaveValue('')
+    await page.getByLabel('ribbon r').press('Escape')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
+    // A sentence is still a sentence: it routes, it never arms.
+    await bar.fill('draw a line across the roof')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
   })
 
   test('solar depth: real solved strings on the Solar tab only, honesty-gated (W4c-V3)', async ({ page, request }) => {

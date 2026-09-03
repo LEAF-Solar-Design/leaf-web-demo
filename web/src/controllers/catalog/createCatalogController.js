@@ -170,6 +170,17 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   const dispatch = async (override) => {
     const text = (typeof override === 'string' ? override : state.prompt).trim()
     if (!text || state.routing || current.running) return undefined
+    // W4f slice B: a typed CAD command word (LINE, C, MOVE ...) on a drafting
+    // surface is the cockpit's business, not the router's. The adapter
+    // returns true only when the whole text is exactly one known word and
+    // the surface can take it; then the bar clears and nothing routes.
+    if (adapters.drawingCommand?.(text)) {
+      track('prompt.submitted', { input_kind: 'command', text_len: text.length })
+      if (state.route) noteRouteResolved('invalidated', state.route)
+      adapters.dismissDecision?.()
+      publish({ prompt: '', route: null, routeError: null })
+      return undefined
+    }
     // P2 funnel top: THE active dispatch path (the legacy App.jsx inline
     // handler is disabled). text_len only, never text. slash vs typed only:
     // a string override is NOT a reliable canned signal (ToolCast passes
