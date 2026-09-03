@@ -48,6 +48,13 @@ const OLD = {
   workspaceCard: (id) => id === 'cad' || id === 'solar',
   // App.jsx:2846  projectSlot={activeSurface === 'ios' ? <IosSurface/> : null}
   iosProjectSlot: (id) => id === 'ios',
+  // ProductSurfaceTabs.jsx:248  const showProjectState = surface.id !== 'ios'
+  // The FRAME's own mount gate for <WorkspaceProjectSlot>. Pinned separately
+  // from iosProjectSlot even though the two are complements today: they are
+  // two call sites reading one slot, and a later slice may give the frame a
+  // reason to diverge. It decides whether an element mounts, so it is chrome,
+  // not copy -- the fix round that repointed it added this row.
+  frameProjectState: (id) => id !== 'ios',
   // App.jsx:2269  const drafting = groundShowsDrawing(activeSurface)
   // Spelled out rather than calling groundShowsDrawing, which slice 2 also
   // repointed: an oracle that shares an implementation with its subject
@@ -79,6 +86,12 @@ describe('Surface Contract — every repointed gate equals its old literal', () 
 
     it(`${id}: chrome.projectSlot === 'ios-surface' iff the surface is ios`, () => {
       expect(c.chrome.projectSlot === 'ios-surface').toBe(OLD.iosProjectSlot(id))
+    })
+
+    it(`${id}: the frame's project-state mount gate === its old literal`, () => {
+      // ProductSurfaceFrame reads the SAME slot from the other side. Written
+      // as the frame writes it, so a slot rename that only half-lands fails.
+      expect(c.chrome.projectSlot !== 'ios-surface').toBe(OLD.frameProjectState(id))
     })
 
     it(`${id}: chrome.cockpit === the old drafting predicate`, () => {
@@ -176,8 +189,8 @@ describe('Surface Contract — every repointed gate equals its old literal', () 
 
 // ---------------------------------------------------------------------------
 // The slice's headline claim, checked against the shipped source rather than
-// against a summary of it: no shell component decides chrome by comparing
-// activeSurface to a string literal any more.
+// against a summary of it: no shell component decides whether chrome MOUNTS by
+// comparing a surface id to a string literal any more.
 //
 // Deliberately scanned WITH comments, which makes this stricter than a
 // compiled-output grep and needs no transform step (esbuild cannot run under
@@ -186,7 +199,7 @@ describe('Surface Contract — every repointed gate equals its old literal', () 
 // predicate WITHOUT re-spelling the comparison, so prose can never satisfy or
 // defeat this pin.
 // ---------------------------------------------------------------------------
-const SHELLS = ['../App.jsx', './ToolCast.jsx']
+const SHELLS = ['../App.jsx', './ToolCast.jsx', '../components/ProductSurfaceTabs.jsx']
 const SURFACE_LITERAL = /activeSurface\s*[!=]==\s*['"]/
 
 describe('Surface Contract — no surface-literal chrome gate survives', () => {
@@ -206,5 +219,69 @@ describe('Surface Contract — no surface-literal chrome gate survives', () => {
     const reintroduced = `const x = activeSurface ${'==='} 'cad' ? 1 : 2`
     expect(reintroduced).toMatch(SURFACE_LITERAL)
     expect(`if (activeSurface ${'!=='} 'ios') return`).toMatch(SURFACE_LITERAL)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The second half of the same claim. A shell can reach a surface id without
+// ever writing the word `activeSurface`: ProductSurfaceFrame binds
+// `productSurface(activeSurface)` once and then reads `.id` off the record.
+// The scan above cannot see that shape, which is how the frame's
+// project-state MOUNT gate survived the first cut of this slice.
+//
+// The three per-surface notes legitimately remain, so they are pinned as an
+// EXACT allowlist rather than waved through by a loose exemption: a fourth
+// comparison, or a mount gate wearing a note's clothes, fails here. Each
+// surviving match must also guard a `tc-product-note` paragraph inside a
+// short window, which is what makes "copy, not chrome" a checked property of
+// the source instead of a claim in a PR body.
+// ---------------------------------------------------------------------------
+const FRAME = '../components/ProductSurfaceTabs.jsx'
+const SURFACE_ID_LITERAL = /surface\.id\s*[!=]==\s*['"][a-z-]+['"]/
+const COPY_WINDOW = 96
+const surfaceIdLiterals = (text) => text.match(new RegExp(SURFACE_ID_LITERAL.source, 'g')) ?? []
+
+describe('Surface Contract — the frame keeps no surface-id chrome gate', () => {
+  const frameSource = readFileSync(new URL(FRAME, import.meta.url), 'utf8')
+
+  it('is scanning the file that actually renders the frame', () => {
+    // Non-vacuity: the pins below mean nothing against an unrelated module.
+    expect(frameSource).toMatch(/export function ProductSurfaceFrame\(/)
+    expect(frameSource).toMatch(/<WorkspaceProjectSlot/)
+  })
+
+  it('every surviving surface-id comparison is one of the three copy gates', () => {
+    expect(surfaceIdLiterals(frameSource)).toEqual([
+      "surface.id === 'browser'",
+      "surface.id === 'solar'",
+      "surface.id === 'ios'",
+    ])
+  })
+
+  it('each surviving comparison guards prose, never an element mount', () => {
+    const scan = new RegExp(SURFACE_ID_LITERAL.source, 'g')
+    const guardsANote = []
+    let hit
+    while ((hit = scan.exec(frameSource)) !== null) {
+      guardsANote.push(
+        frameSource.slice(hit.index, hit.index + COPY_WINDOW).includes('tc-product-note'),
+      )
+    }
+    expect(guardsANote).toEqual([true, true, true])
+  })
+
+  it("the frame's project-state gate reads the contract slot, not an id", () => {
+    expect(frameSource).toMatch(
+      /showProjectState = surfaceContract\(surface\.id\)\.chrome\.projectSlot/,
+    )
+  })
+
+  it('the frame probe would catch a reintroduced mount gate (positive control)', () => {
+    // Built from fragments so the control cannot trip the exact-allowlist pin.
+    const reintroduced = `const showProjectState = surface.id ${'!=='} 'ios'`
+    expect(surfaceIdLiterals(reintroduced)).toEqual([`surface.id ${'!=='} 'ios'`])
+    // ...and the note window is what separates copy from chrome, so a mount
+    // gate fails the second pin even if someone re-adds it to the allowlist.
+    expect(reintroduced.slice(0, COPY_WINDOW)).not.toContain('tc-product-note')
   })
 })

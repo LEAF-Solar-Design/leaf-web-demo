@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { PRODUCT_SURFACES, SHARED_WORKSPACE_CAPABILITIES, productSurface } from '../site/productSurfaces.js'
+import {
+  PRODUCT_SURFACES, SHARED_WORKSPACE_CAPABILITIES, productSurface, surfaceContract,
+} from '../site/productSurfaces.js'
 import { EMPTY_WORKSPACE_PROJECT, WORKSPACE_PROJECT_COPY } from '../site/workspaceProjectState.js'
 import { moveRovingTab } from '../lib/roving.js'
 
@@ -239,11 +241,15 @@ export function ProductSurfaceFrame({
 }) {
   const surface = productSurface(activeSurface)
   const status = states[surface.id]
-  // iOS owns its whole project line (the ship lane mounts there instead).
-  // Every other surface ALWAYS renders a state: sol-critic finding 2 was that
-  // a null default let a call site drop the Browser/Solar state silently.
-  // Omitting the prop now degrades to the honest empty state, never to nothing.
-  const showProjectState = surface.id !== 'ios'
+  // A chrome MOUNT gate, so it reads the contract slot rather than a surface
+  // id: the same `chrome.projectSlot` App.jsx:2846 reads when it decides which
+  // surface gets the iOS ship lane. That surface owns its whole project line,
+  // so the frame does not stack a second one under it. Every other surface
+  // ALWAYS renders a state -- sol-critic finding 2 was that a null default let
+  // a call site drop the Browser/Solar state silently, so omitting the prop now
+  // degrades to the honest empty state, never to nothing. surfaceGates.test.js
+  // pins this equal to the predicate it replaced, for all four ids.
+  const showProjectState = surfaceContract(surface.id).chrome.projectSlot !== 'ios-surface'
   return (
     <section
       id="product-surface-panel"

@@ -7,13 +7,15 @@ section "The Surface Contract", element table row 1.
 default EQUAL TO TODAY, read off the code site cited beside it. No component read the
 `contract` object, so slice 1 could not change a pixel.
 
-**Slice 2** made the manifest LOAD-BEARING. `App.jsx`, `ToolCast.jsx` and
-`SurfaceGrounds.jsx` now read the declared slots, so no shell component decides chrome by
-comparing `activeSurface` to a string literal any more. Behaviour is unchanged, and that is
-a test rather than a claim: `web/src/site/surfaceGates.test.js` pins every derived gate
-equal to the literal predicate it replaced, for all four surface ids, with the old
-predicates written out as literals so a later edit to a default fails loudly instead of
-agreeing with itself. The three console/stage divergences (D1, D2, D3) and the solar
+**Slice 2** made the manifest LOAD-BEARING. `App.jsx`, `ToolCast.jsx`, `SurfaceGrounds.jsx`
+and `ProductSurfaceTabs.jsx` now read the declared slots, so no shell component decides
+whether chrome MOUNTS by comparing a surface id to a string literal any more. What still
+compares an id is three lines of per-surface COPY, listed under "Left alone, on purpose"
+and pinned there as an exact allowlist rather than exempted by a loose rule. Behaviour is
+unchanged, and that is a test rather than a claim: `web/src/site/surfaceGates.test.js` pins
+every derived gate equal to the literal predicate it replaced, for all four surface ids,
+with the old predicates written out as literals so a later edit to a default fails loudly
+instead of agreeing with itself. The three console/stage divergences (D1, D2, D3) and the solar
 `productFrame` quirk are PRESERVED, each still a later-slice item. From here on, editing a
 value in the manifest changes the product.
 
@@ -223,6 +225,14 @@ inline. Nothing renders that did not render before, and nothing stopped renderin
 | 19 | `SurfaceGrounds.jsx:106` | `new Set(['cad','solar'])` | derived from `contract.ground === 'drawing'` |
 | 20 | `SurfaceGrounds.jsx:298` | `surface === 'browser'` | `surfaceGround(surface) === 'board'` |
 | 21 | `SurfaceGrounds.jsx:306` | `surface === 'ios'` | `surfaceGround(surface) === 'device-stage'` |
+| 22 | `ProductSurfaceTabs.jsx:248` | `surface.id !== 'ios'` (`showProjectState`) | `surfaceContract(surface.id).chrome.projectSlot !== 'ios-surface'` — the same slot row 9 reads, from the other side |
+
+Row 22 landed in the fix round, not the first cut. The first cut swept the three files that
+name `activeSurface` and missed this one, because the frame binds
+`productSurface(activeSurface)` once and then reads `.id` off the record — a shape the
+source pin could not see. Two things changed so the miss cannot recur: the pin's `SHELLS`
+list now includes `ProductSurfaceTabs.jsx`, and a second scan matches surface-id
+comparisons directly, with an exact allowlist for the three copy gates below.
 
 New in the manifest, because the gate could not be repointed until the slot existed:
 `groundMaterial: { layerAccent, solarStrings }`, values read off `App.jsx:2296` and `:2313`.
@@ -245,10 +255,16 @@ Also in this slice:
 
 ### Left alone, on purpose
 
-- `ProductSurfaceTabs.jsx:290-298` keys three notes on `surface.id`. Those are COPY (the
-  browser composition note, the solar template sentence, the iOS credential warning), not
-  chrome gates: they choose prose, never whether an element mounts. Slice 9's copy work
-  owns them.
+- `ProductSurfaceTabs.jsx:296`, `:303` and `:304` key three notes on `surface.id`. Those
+  are COPY (the browser composition note, the solar template sentence, the iOS credential
+  warning), not chrome gates: each one chooses which sentence a `tc-product-note`
+  paragraph carries. Slice 9's copy work owns them. This entry is now ENFORCED, not
+  asserted: `surfaceGates.test.js` matches every surface-id comparison in the file against
+  an exact three-item allowlist, and separately requires each surviving match to be
+  guarding a `tc-product-note` within 96 characters. A fourth comparison fails, and so
+  does a mount gate that someone adds to the allowlist, because it guards no note. The
+  fix round added both pins after `showProjectState` (row 22) was found here as a real
+  un-repointed mount gate that this bullet had wrongly covered.
 - `App.jsx:3162`, `:3216` and `:3514` still call `groundShowsDrawing(activeSurface)`
   directly. They are already contract-driven (`groundShowsDrawing` is derived from
   `contract.ground` as of this slice), and `siteRootOneShell.test.js` pins their exact
