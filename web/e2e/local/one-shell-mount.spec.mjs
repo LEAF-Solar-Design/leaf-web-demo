@@ -789,7 +789,10 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.locator('.workspace-card[data-cockpit-picking="1"]')).toHaveCount(1)
     // A visible higher Esc rung owns the first key even when its opener keeps
     // focus outside the dialog. History closes and the armed command survives.
-    const historyWhileArmed = page.getByRole('button', { name: 'History' })
+    // (exact: once the drawer is open its "Close version history" button
+    // also matches the substring, and the focus assertion hit two elements
+    // in the flagged proof on main a0820937)
+    const historyWhileArmed = page.getByRole('button', { name: 'History', exact: true })
     await historyWhileArmed.click()
     await expect(historyWhileArmed).toBeFocused()
     const historyDialog = page.getByRole('dialog', { name: 'Version history' })
