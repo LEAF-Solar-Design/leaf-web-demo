@@ -245,8 +245,8 @@ export const PRODUCT_SURFACES = Object.freeze([
   Object.freeze({
     id: 'solar',
     label: 'Solar CAD',
-    eyebrow: 'LEAF template',
-    title: 'Apply the LEAF solar tool set',
+    eyebrow: 'Leaf Automation template',
+    title: 'Apply the Leaf Automation solar tool set',
     description: 'Start from a versioned solar template with standards, catalog tools, and project-owned versions.',
     familyIds: Object.freeze(['stringing', 'placement']),
     contract: deepFreeze({

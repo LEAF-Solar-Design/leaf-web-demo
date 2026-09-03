@@ -7,7 +7,7 @@
  *   - Renders the ribbon/command skeleton: the OpenCADStudio interaction
  *     model (grouped ribbon tabs of commands) reimplemented natively for
  *     Leaf. No OpenCADStudio source, assets, or dependency is used here —
- *     this is a from-scratch LEAF component that mirrors the interaction
+ *     this is a from-scratch Leaf Automation component that mirrors the interaction
  *     shape only (see card C1-1's license fence).
  *   - Every command stub reports "not yet enabled" truthfully when invoked:
  *     nothing here performs an edit, and nothing claims to.

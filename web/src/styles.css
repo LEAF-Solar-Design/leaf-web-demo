@@ -1,5 +1,5 @@
 /* Leaf — Unified Surface, THE DRAFTING STUDIO identity (committed Sep 2026).
-   Replaces the LEAF SURFACE STANDARD dark shell (rejected by the operator,
+   Replaces the Leaf Automation surface standard dark shell (rejected by the operator,
    2026-08-31: "the boring old cad ui"). This is a designed identity, not a
    re-tint: the workspace is a white drawing SHEET on a bond-paper desk, and
    the two instruments stay dark — the CAD viewport (model space) and the
@@ -1357,7 +1357,7 @@ footer .warn-txt { color: var(--status-warning); }
 .job-meta { font-variant-numeric: tabular-nums; }
 
 /* ==================================================================== */
-/* ============ LEAF STANDARD VOCABULARY (crib-sheet, restyled) ======= */
+/* ============ Leaf Automation standard vocabulary (crib-sheet, restyled) ======= */
 /* Shared class contract: JSX lanes USE these names; this file DEFINES  */
 /* them. The construction recipes are unchanged; only the identity's    */
 /* values differ (paper grounds, ink rules, the ink-well command bar).  */

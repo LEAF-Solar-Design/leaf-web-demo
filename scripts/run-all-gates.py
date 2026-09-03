@@ -2766,7 +2766,7 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
     line = "-" * (sum(widths) + 2 * (len(headers) - 1))
     print()
     print("=" * len(line))
-    print("  LEAF WEB DEMO -- GATE SCOREBOARD")
+    print("  leaf-web-demo -- GATE SCOREBOARD")
     print("=" * len(line))
     print(fmt(headers))
     print(line)
