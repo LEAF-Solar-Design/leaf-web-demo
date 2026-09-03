@@ -212,7 +212,7 @@ const offTool = ({ id, label, icon }, size = 'small') => ({
 })
 
 export default function EngineRibbonClusters({ importOpen = false, onToggleImport, panels = ['draw', 'modify'] }) {
-  const { session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho } = useEngineSessionContext()
+  const { session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap } = useEngineSessionContext()
   const modify = modifyReason(session)
   const draw = drawReason(session)
   const save = saveReason(session, canSave)
@@ -456,6 +456,18 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
           title={`Ortho ${ortho ? 'on' : 'off'}: picks snap to the axis of the larger move from the last point (F8)`}
         >
           ORTHO
+        </button>
+        {/* W4f-5: object snap, the reference's F3: picks land on the
+            document's endpoints, midpoints and centres within reach. */}
+        <button
+          type="button"
+          className="cp-mode"
+          data-testid="cockpit-osnap"
+          aria-pressed={osnap}
+          onClick={() => setOsnap(!osnap)}
+          title={`Object snap ${osnap ? 'on' : 'off'}: picks land on endpoints, midpoints and centres within reach (F3)`}
+        >
+          OSNAP
         </button>
         <button
           type="button"

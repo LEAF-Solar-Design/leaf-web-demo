@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
-import { PICK_SEQUENCES, applyPick, currentStep, ghostFor, orthoAnchor, orthoPoint, startPicking, wantsPick } from './pointPicking.js'
+import {
+  MAX_SNAP_POINTS, PICK_SEQUENCES, applyPick, buildSnapIndex, currentStep, ghostFor, orthoAnchor, orthoPoint, snapPoint, startPicking, wantsPick,
+} from './pointPicking.js'
 
 describe('pointPicking (W4f slice A1): clicks on the drawing answer the prompts', () => {
   it('a line takes two points, then wants nothing more; the ghost runs from the first point to the cursor', () => {
@@ -111,5 +113,39 @@ describe('pointPicking (W4f slice A1): clicks on the drawing answer the prompts'
     // Non-finite cursors pass through untouched (applyPick refuses them itself).
     expect(orthoPoint(s, NaN, 1)).toEqual([NaN, 1])
     expect(orthoPoint({ op: 'deleteVertex', sequence: null, step: 0, picked: [], base: null }, 1, 2)).toEqual([1, 2])
+  })
+
+  it('OSNAP packs endpoints, midpoints and centres once, bounded, and finds the nearest within reach, endpoints first (W4f-5)', () => {
+    const entities = [
+      { id: 'l', type: 'LINE', layer: '0', vertices: [[0, 0], [10, 0]] },
+      { id: 'p', type: 'LWPOLYLINE', layer: '0', closed: true, vertices: [[20, 0], [30, 0], [30, 10]] },
+      { id: 'c', type: 'CIRCLE', layer: '0', vertices: [[50, 50]], radius: 5 },
+      { id: 'o', type: 'OTHER', layer: '0', vertices: [[99, 99]] },
+      { id: 'bad', type: 'LINE', layer: '0', vertices: [[NaN, 1], [2, Infinity]] },
+    ]
+    const index = buildSnapIndex(entities)
+    // LINE: 2 ends + 1 mid; closed triangle: 3 ends + 3 mids; circle: 1 centre; OTHER and non-finite: nothing.
+    expect(index.n).toBe(10)
+    expect(index.truncated).toBe(false)
+    expect(snapPoint(index, 9.6, 0.3, 1)).toEqual({ x: 10, y: 0, kind: 'endpoint' })
+    expect(snapPoint(index, 5.2, -0.4, 1)).toEqual({ x: 5, y: 0, kind: 'midpoint' })
+    expect(snapPoint(index, 25.1, 4.9, 1)).toEqual({ x: 25, y: 5, kind: 'midpoint' })
+    expect(snapPoint(index, 49, 51, 2)).toEqual({ x: 50, y: 50, kind: 'centre' })
+    // Out of reach, or nothing to search, or a bad tolerance: nothing.
+    expect(snapPoint(index, 9.6, 0.3, 0.3)).toBeNull()
+    expect(snapPoint(index, 70, 70, 1)).toBeNull()
+    expect(snapPoint(buildSnapIndex([]), 0, 0, 1)).toBeNull()
+    expect(snapPoint(index, 0, 0, 0)).toBeNull()
+    expect(snapPoint(index, NaN, 0, 1)).toBeNull()
+    expect(snapPoint(null, 0, 0, 1)).toBeNull()
+    // An endpoint beats a midpoint at equal distance: the point (5, 0) is a
+    // midpoint; a candidate LINE ending there too makes it an endpoint too.
+    const tie = buildSnapIndex([...entities, { id: 't', type: 'LINE', layer: '0', vertices: [[5, 0], [5, 9]] }])
+    expect(snapPoint(tie, 5, 0.1, 1)).toEqual({ x: 5, y: 0, kind: 'endpoint' })
+    // Bounded: a document past the cap keeps the first MAX_SNAP_POINTS candidates and says so.
+    const many = Array.from({ length: MAX_SNAP_POINTS }, (_, i) => ({ id: `m${i}`, type: 'LINE', layer: '0', vertices: [[i, 0], [i, 1]] }))
+    const capped = buildSnapIndex(many)
+    expect(capped.n).toBe(MAX_SNAP_POINTS)
+    expect(capped.truncated).toBe(true)
   })
 })

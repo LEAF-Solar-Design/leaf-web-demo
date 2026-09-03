@@ -107,6 +107,67 @@ export function orthoPoint(state, x, y) {
   return Math.abs(x - anchor[0]) >= Math.abs(y - anchor[1]) ? [x, anchor[1]] : [anchor[0], y]
 }
 
+/**
+ * W4f-5: OSNAP. The snap candidates of the engine document, packed once per
+ * document change into typed arrays (no per-frame allocation): every
+ * segment endpoint and midpoint of LINE / LWPOLYLINE entities and the
+ * centre of CIRCLE / ARC. Bounded by MAX_SNAP_POINTS (the rest of a huge
+ * document simply has no snaps: never a refusal, never an unbounded scan).
+ * Kinds: 0 endpoint, 1 midpoint, 2 centre.
+ */
+export const MAX_SNAP_POINTS = 20000
+export const SNAP_KIND = Object.freeze({ END: 0, MID: 1, CENTRE: 2 })
+const SNAP_KIND_NAME = Object.freeze(['endpoint', 'midpoint', 'centre'])
+
+export function buildSnapIndex(entities) {
+  const xs = []
+  const ys = []
+  const kinds = []
+  const push = (x, y, kind) => {
+    if (xs.length >= MAX_SNAP_POINTS || !finite(x) || !finite(y)) return
+    xs.push(x); ys.push(y); kinds.push(kind)
+  }
+  for (const e of Array.isArray(entities) ? entities : []) {
+    const v = Array.isArray(e?.vertices) ? e.vertices : []
+    if (e?.type === 'CIRCLE' || e?.type === 'ARC') {
+      if (v[0]) push(v[0][0], v[0][1], SNAP_KIND.CENTRE)
+      continue
+    }
+    if (e?.type !== 'LINE' && e?.type !== 'LWPOLYLINE') continue
+    for (let i = 0; i < v.length; i += 1) push(v[i][0], v[i][1], SNAP_KIND.END)
+    const segments = e.type === 'LWPOLYLINE' && e.closed && v.length > 2 ? v.length : v.length - 1
+    for (let i = 0; i < segments; i += 1) {
+      const a = v[i]
+      const b = v[(i + 1) % v.length]
+      if (a && b) push((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, SNAP_KIND.MID)
+    }
+  }
+  return Object.freeze({ n: xs.length, xs: Float64Array.from(xs), ys: Float64Array.from(ys), kinds: Uint8Array.from(kinds), truncated: xs.length >= MAX_SNAP_POINTS })
+}
+
+/**
+ * The nearest candidate within `tol` (world units) of (x, y), or null. One
+ * linear pass over at most MAX_SNAP_POINTS (about 0.1 ms at the cap), no
+ * allocation on a miss; an endpoint beats a midpoint or a centre at equal
+ * distance. Non-finite input or tolerance finds nothing.
+ */
+export function snapPoint(index, x, y, tol) {
+  if (!index || !index.n || !finite(x) || !finite(y) || !finite(tol) || tol <= 0) return null
+  const { n, xs, ys, kinds } = index
+  const tol2 = tol * tol
+  let best = -1
+  let bestD = Infinity
+  for (let i = 0; i < n; i += 1) {
+    const dx = xs[i] - x
+    const dy = ys[i] - y
+    const d = dx * dx + dy * dy
+    if (d > tol2) continue
+    if (d < bestD || (d === bestD && best >= 0 && kinds[i] < kinds[best])) { best = i; bestD = d }
+  }
+  if (best < 0) return null
+  return { x: xs[best], y: ys[best], kind: SNAP_KIND_NAME[kinds[best]] }
+}
+
 /** The rubber band for the cursor at world (x, y): [[x,y],...] plus closed, or null. */
 export function ghostFor(state, x, y) {
   if (!state?.sequence || !finite(x) || !finite(y)) return null
