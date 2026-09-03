@@ -3511,12 +3511,31 @@ def check_docs_noop_filter(text: str) -> None:
         "github.event.workflow_run.head_branch == 'main'"
     )
     relay_steps = dispatch_job["steps"]
-    # Five steps: tip check, manifest read, provider contract read, guarded
-    # dispatch, and receipt publish. The fifth is the only step with `uses:`.
-    # reordering must break this harness and force a co-review.
+    # Six steps: tip check, manifest read, provider contract read, guarded
+    # dispatch, receipt publish, and supply-evidence publish. The last two are
+    # the only steps with `uses:`. Reordering must break this harness and force
+    # a co-review.
+    #
+    # 5 -> 6 on 2026-09-03, and this is the co-review the comment asks for. The
+    # sixth step publishes the supply evidence envelope the relay already minted
+    # and dispatched. Only the relay can mint a usable one, because
+    # deploy-leaf-platform-staging.yml refuses an envelope whose
+    # relay.workflow_path is not this file, so a downstream lane can dispatch a
+    # finalizable deploy only by reusing this one verbatim. It is a PURE UPLOAD
+    # with no `run:` and no `env:`, exactly like the receipt step beside it, so
+    # the secret-reference wall further down still finds its two references on
+    # steps[2] and steps[3] and this step cannot hold a token or smuggle a
+    # dispatch.
     assert [s.get("id") for s in relay_steps] == [
-        "tip", "manifest", "consumer_contract", "deploy", None]
-    tip_step, manifest_step, contract_step, dispatch_step, receipt_step = relay_steps
+        "tip", "manifest", "consumer_contract", "deploy", None, None]
+    (
+        tip_step,
+        manifest_step,
+        contract_step,
+        dispatch_step,
+        receipt_step,
+        evidence_step,
+    ) = relay_steps
     # Step KEY SETS are exact: no shell:, no working-directory:,
     # no continue-on-error: may appear on any step without breaking this.
     assert set(tip_step) == {"name", "id", "env", "run"}
@@ -3531,6 +3550,14 @@ def check_docs_noop_filter(text: str) -> None:
     # a lie every future waiter believes, so it belongs to the convergence
     # contract.
     assert set(receipt_step) == {"name", "if", "uses", "with"}
+    # THE ENVELOPE STEP IS THE SAME SHAPE, for the same reason: no script and no
+    # token. It is additionally gated on an envelope existing at all, because a
+    # v1 supply set never mints one.
+    assert set(evidence_step) == {"name", "if", "uses", "with"}
+    assert evidence_step["with"]["path"] == "staging-supply-evidence.b64"
+    assert "steps.manifest.outputs.supply_evidence_b64 != ''" in " ".join(
+        evidence_step["if"].split()
+    )
     # Step ENV dicts are exact: the unguarded steps hold only the
     # read-scoped workflow token, never the infra-repo PAT.
     assert tip_step["env"] == {"GH_TOKEN": "${{ github.token }}"}
@@ -3927,7 +3954,27 @@ def check_docs_noop_filter(text: str) -> None:
         # That post-settlement read is removed. The pre-dispatch and
         # eviction re-dispatch tip guards remain. No dispatch site, input,
         # token, credential, endpoint class, or live mutation was added.
-        "7f87bcd986fda9406c7ea946c6adf7656c70d31d5b7d5abc787bddc22a385575"
+        # Hash updated 2026-09-03: the manifest step now also WRITES the
+        # supply evidence envelope it already computed to
+        # staging-supply-evidence.b64, so the sixth step can publish it and a
+        # downstream lane can reuse it verbatim. Only the relay can mint a
+        # usable envelope (the provider refuses one whose relay.workflow_path
+        # is not this file), so reuse is the only route to a finalizable
+        # deploy from anywhere else.
+        # REVIEWED FOR DISPATCH CAPABILITY: the added lines are a single
+        # `printf` of an EXISTING shell variable to a local file, guarded on
+        # that variable being non-empty because a v1 supply set mints none.
+        # No new `gh workflow run` site (still exactly one, in the dispatch
+        # step, asserted above), no new secret reference (the count assertion
+        # still finds two, on steps[2] and steps[3]), no new token, no new
+        # endpoint or network call of any class, and no live mutation. The
+        # published bytes are the SAME $evidence the dispatch output is
+        # written from, on the adjacent line, so the artifact cannot drift
+        # from what was dispatched. This publishes nothing secret: Actions
+        # already prints the envelope in this job's log as the deploy step's
+        # SUPPLY_EVIDENCE_B64 env line (verified on relay run 33706627085,
+        # 11982 base64 chars in the clear).
+        "7c2eeb3570d6c3cbdc08e0e33d28fefce59741fda1b93d80e8fab2287c3abc7d"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -4955,10 +5002,26 @@ def check_staging_relay_convergence(text: str) -> None:
     # THE PUBLISH STEP ITSELF. Pinned here, inside the convergence contract, so
     # the decoy battery exercises it: a receipt published by a relay that stood
     # down is a lie every future waiter believes.
-    receipt_steps = [s for s in job["steps"] if s.get("id") is None]
+    # Identified by what it PUBLISHES, not by lacking an id: since 2026-09-03
+    # a sixth step publishes the supply evidence envelope, and it is id-less
+    # too. Matching on the payload keeps this guard aimed at the receipt.
+    publish_steps = [s for s in job["steps"] if s.get("id") is None]
+    receipt_steps = [
+        s
+        for s in publish_steps
+        if s.get("with", {}).get("path") == "staging-converged.json"
+    ]
     assert len(receipt_steps) == 1, (
         f"exactly one relay step publishes the receipt; found "
         f"{len(receipt_steps)}")
+    # And NOTHING this relay publishes may outlive a stand-down. Every publisher
+    # carries the same convergence gate, so a relay that abandoned a service
+    # leaves behind neither a receipt nor an envelope that a later lane could
+    # reuse to dispatch against a release this relay never landed.
+    for step in publish_steps:
+        assert "steps.deploy.outputs.converged == 'true'" in " ".join(
+            step["if"].split()
+        ), f"publisher {step['name']!r} is not gated on convergence"
     receipt_step = receipt_steps[0]
     assert receipt_step["uses"] == "actions/upload-artifact@v4", (
         "the receipt publisher is pinned to the first-party action version the "
@@ -6751,6 +6814,93 @@ def test_relay_binds_provider_archive_and_dispatches_one_unchanged_envelope() ->
     assert '-f "supply_set_artifact_id=' not in dispatch_code
     assert 'if [ "$SUPPLY_SCHEMA" != "leaf.staging-supply-set.v1" ]' in dispatch_code
     assert 'V2/v3 dispatch is missing its closed supply evidence envelope' in dispatch_code
+
+
+def test_relay_publishes_the_one_envelope_it_dispatched() -> None:
+    """The relay is the ONLY thing that can mint a usable supply evidence
+    envelope: deploy-leaf-platform-staging.yml refuses one whose
+    relay.workflow_path is not this file. So a downstream lane (the staging
+    fleet reconciler and its identity restamp) can only dispatch a finalizable
+    deploy by reusing the relay's envelope verbatim, which means the relay has
+    to publish it.
+
+    The invariant that matters is that the PUBLISHED value cannot drift from
+    the DISPATCHED value. Both come from the same `$evidence` shell variable in
+    the manifest step, so this pins that they are written on adjacent lines
+    from that one source rather than recomputed.
+
+    Not a secret and not a widening: Actions already prints the envelope in the
+    relay's own log as the deploy step's SUPPLY_EVIDENCE_B64 env line.
+    """
+    relay = _strict_yaml(
+        (WORKFLOW.parent / "dispatch-staging-deploys.yml").read_text(encoding="utf-8")
+    )
+    job = relay["jobs"]["dispatch"]
+    steps = job["steps"]
+    manifest_code = _executable_bash(
+        next(step for step in steps if step.get("id") == "manifest")["run"]
+    )
+
+    # One source, two consumers: the dispatch output and the published file.
+    assert 'echo "supply_evidence_b64=$evidence" >> "$GITHUB_OUTPUT"' in manifest_code
+    assert "printf '%s' \"$evidence\" > staging-supply-evidence.b64" in manifest_code
+    # v1 supply sets carry no envelope, so the write is conditional.
+    assert 'if [ -n "$evidence" ]; then' in manifest_code
+
+    publish = [
+        step
+        for step in steps
+        if str(step.get("uses", "")).startswith("actions/upload-artifact")
+        and step["with"]["path"] == "staging-supply-evidence.b64"
+    ]
+    assert len(publish) == 1, "exactly one envelope publisher"
+    step = publish[0]
+
+    # Same naming convention as the convergence receipt, so one lookup shape
+    # finds both.
+    assert step["with"]["name"] == (
+        "staging-supply-evidence-${{ github.event.workflow_run.head_sha }}"
+        "-attempt-${{ github.event.workflow_run.run_attempt }}"
+    )
+    assert step["with"]["if-no-files-found"] == "error"
+
+    # Published only alongside a convergence receipt, and only when an envelope
+    # exists at all.
+    condition = " ".join(step["if"].split())
+    assert "steps.deploy.outputs.converged == 'true'" in condition
+    assert "steps.manifest.outputs.supply_evidence_b64 != ''" in condition
+
+    # A pure upload: no script, so it can never be where a dispatch is smuggled
+    # in. Same property the receipt publisher's own comment claims for itself.
+    assert "run" not in step
+    assert "env" not in step
+
+
+def test_relay_receipt_archive_stays_single_member() -> None:
+    """The envelope goes in its OWN artifact, never alongside the receipt.
+
+    scripts/platform_staging_convergence.py reads the receipt with _zip_member,
+    which refuses any archive whose member list is not exactly [filename]
+    (PROVIDER_ARCHIVE_SHAPE_INVALID). Adding a second file to the
+    staging-converged artifact would break the finalizer outright, so this pins
+    that the two artifacts stay separate.
+    """
+    relay = _strict_yaml(
+        (WORKFLOW.parent / "dispatch-staging-deploys.yml").read_text(encoding="utf-8")
+    )
+    uploads = [
+        step
+        for step in relay["jobs"]["dispatch"]["steps"]
+        if str(step.get("uses", "")).startswith("actions/upload-artifact")
+    ]
+    paths = [step["with"]["path"] for step in uploads]
+    assert paths == ["staging-converged.json", "staging-supply-evidence.b64"]
+    for step in uploads:
+        # One path each, no globs, no directories: each archive holds one file.
+        assert chr(10) not in str(step["with"]["path"])
+        assert "*" not in str(step["with"]["path"])
+    names = [step["with"]["name"] for step in uploads]
+    assert len(set(names)) == 2, "the two artifacts must not collide"
 
 
 def test_digest_aware_producer_is_source_controlled_and_dormant() -> None:

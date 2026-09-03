@@ -83,7 +83,15 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
 
     measured_residual_floors = {
         "da-mutation-apply": 24,
-        "build-platform-images-workflow": 17,
+        # 17 -> 19 on 2026-09-03: the relay publishes the supply evidence
+        # envelope it already dispatches, so a downstream lane can reuse it
+        # (the provider refuses an envelope minted by any other workflow).
+        # +1 that the published bytes come from the same $evidence the
+        # dispatch output does and the publisher holds no script or token,
+        # +1 that the envelope gets its OWN artifact, because the finalizer
+        # reads the receipt with _zip_member and that refuses any archive
+        # holding more than one file.
+        "build-platform-images-workflow": 19,
         "platform-release-manifest": 88,
         # 10 -> 17 on 2026-08-18 with the production deploy's second approval
         # mode (administrator self-authorization): 1 acceptance case plus 6

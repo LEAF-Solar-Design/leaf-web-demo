@@ -1243,7 +1243,15 @@ def build_suites() -> List[Suite]:
               # executes the extracted manifest script against a fake gh and
               # asserts the tag a docs-only merge resolves, then feeds it to the
               # real dispatch script and asserts BOTH services deploy onto it.
-              _py_pytest("test_build_platform_images_workflow.py"), 17),
+              # 17 -> 19 on 2026-09-03: the relay now publishes the supply
+              # evidence envelope it already dispatches, so a downstream lane
+              # can reuse it (the provider refuses an envelope minted by any
+              # other workflow). +1 that the published bytes come from the same
+              # $evidence the dispatch output does and the publisher holds no
+              # script or token, +1 that the envelope gets its OWN artifact,
+              # because the finalizer reads the receipt with _zip_member and
+              # that refuses any archive holding more than one file.
+              _py_pytest("test_build_platform_images_workflow.py"), 19),
         # Vendored mushy-code integrity (PR #474 review, P2): the pin verifier
         # must be a CI fact, not a manual command. Registered with its suite the
         # day it shipped — no fix-then-register debt. 2 = verify READY + the
