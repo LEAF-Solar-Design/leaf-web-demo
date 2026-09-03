@@ -25,11 +25,14 @@ const PROOF_DIR = join(process.cwd(), '..', 'artifacts', 'unified-surface-proof'
 // rather than naming a family label, so the walk does not break when the server
 // regroups its capabilities.
 async function openEveryCatalogFamily(page) {
-  // W4c-V1: on drafting surfaces under the studio the rail boots as a spine
-  // - the catalog sections exist only once it expands. The walk expands
-  // first (a no-op rail-OFF, where the button does not render).
-  const expand = page.locator('.spine-expand')
+  // W4c-V1 / W4d Slice D: on drafting surfaces under the studio the tool
+  // rail hides behind the band - the catalog sections exist only once it
+  // expands. The walk expands it first through the band's own affordance
+  // (a no-op rail-OFF, where the band does not render). Never `.spine-expand`
+  // alone: the job monitor's spine carries that class too.
+  const expand = page.locator('[data-tool="rail-expand"], aside.nav .spine-expand').first()
   if (await expand.count()) await expand.click()
+  await page.locator('aside.nav[data-spine]').waitFor({ state: 'detached', timeout: 10_000 }).catch(() => {})
   const heads = page.locator('.section-head')
   const count = await heads.count()
   for (let i = 0; i < count; i += 1) {

@@ -191,6 +191,10 @@ test.describe('route matrix, rail ON', () => {
       const rgb = (v) => v.match(/\d+/g).slice(0, 3).map(Number)
       return {
         navRadius: cs('aside.nav').borderRadius,
+        // Slice D: on drafting surfaces the tool rail hides behind the band
+        // (zero width); its inset is asserted only while it is visible.
+        navHidden: !!document.querySelector('aside.nav[data-spine="hidden"]'),
+        navWidth: document.querySelector('aside.nav').getBoundingClientRect().width,
         navLeft: document.querySelector('aside.nav').getBoundingClientRect().left,
         railRight: window.innerWidth - document.querySelector('aside.rail').getBoundingClientRect().right,
         headerBg: rgb(cs('header.top').backgroundColor),
@@ -198,7 +202,8 @@ test.describe('route matrix, rail ON', () => {
       }
     })
     expect(chrome.navRadius).toBe('8px')
-    expect(chrome.navLeft).toBeGreaterThanOrEqual(12)
+    if (chrome.navHidden) expect(chrome.navWidth).toBeLessThanOrEqual(1)
+    else expect(chrome.navLeft).toBeGreaterThanOrEqual(12)
     expect(chrome.railRight).toBeGreaterThanOrEqual(12)
     expect(Math.max(...chrome.headerBg)).toBeLessThan(40)
     expect(Math.max(...chrome.footerBg)).toBeLessThan(40)
@@ -264,14 +269,15 @@ test.describe('route matrix, rail ON', () => {
     await page.goto('/app')
     await expect(page.locator(STUDIO)).toHaveCount(1)
 
-    // CAD boots in the spine posture: the ribbon carries the tool set, so an
-    // expanded catalog beside it would be the duplication ACCEPTANCE named.
-    const nav = page.locator('aside.nav[data-spine]')
+    // CAD boots with the tool rail HIDDEN behind the band (Slice D seating:
+    // the reference has no left rail; the ribbon carries the tool set, so an
+    // expanded catalog beside it would be the duplication ACCEPTANCE named).
+    // The aside stays in the DOM at zero width so the grid keeps its cells.
+    const nav = page.locator('aside.nav[data-spine="hidden"]')
     await expect(nav).toHaveCount(1)
-    expect((await nav.boundingBox()).width).toBeLessThanOrEqual(48)
-    // W4b chrome row invariants survive the spine: radius + the 12px inset.
-    expect(await nav.evaluate((el) => getComputedStyle(el).borderRadius)).toBe('8px')
-    expect((await nav.boundingBox()).x).toBeGreaterThanOrEqual(12)
+    expect(await nav.evaluate((el) => el.getBoundingClientRect().width)).toBeLessThanOrEqual(1)
+    // The band carries the rail's expand affordance while it is hidden.
+    await expect(page.getByTestId('drafting-ribbon').locator('[data-tool="rail-expand"]')).toHaveCount(1)
 
     // The ribbon renders the ACTIVE SURFACE'S fold from the REAL catalog,
     // one cluster per family (async load: wait for the first CATALOG cluster;
@@ -327,18 +333,22 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.locator('.strip-decision')).toHaveCount(0)
     await expect(page).toHaveURL(/\/app\?dev=1$/)
 
-    // A spine monogram expands the rail AND opens that family.
-    const monogram = page.locator('.nav-spine .spine-btn').nth(1)
-    const famLabel = await monogram.getAttribute('title')
-    await monogram.click()
+    // A family label in the band expands the rail AND opens that family
+    // (the affordance the spine's monogram carried before Slice D).
+    const familyLabel = ribbon.locator('[data-family] .ribbon-cluster-label.as-button').first()
+    const famLabel = (await familyLabel.textContent()).replace(/^\S+\s*/, '').trim()
+    await familyLabel.click()
     await expect(page.locator('aside.nav[data-spine]')).toHaveCount(0)
     await expect(
       page.locator('.section-head[aria-expanded="true"]').filter({ hasText: famLabel }),
     ).toHaveCount(1)
 
-    // The collapse control restores the spine.
+    // The collapse control hides the rail again; the band's expand tool
+    // brings it back.
     await page.getByRole('button', { name: 'Collapse the tool rail to a spine' }).click()
-    await expect(page.locator('aside.nav[data-spine]')).toHaveCount(1)
+    await expect(page.locator('aside.nav[data-spine="hidden"]')).toHaveCount(1)
+    await ribbon.locator('[data-tool="rail-expand"]').click()
+    await expect(page.locator('aside.nav[data-spine]')).toHaveCount(0)
   })
 
   test('the right palette: dock hosts Layers + Selection, geometry from a real pick (W4c-V2)', async ({ page, request }) => {
@@ -352,10 +362,10 @@ test.describe('route matrix, rail ON', () => {
     })
     expect(sessionResponse.status()).toBe(200)
     const intake = (await sessionResponse.json()).intake
-    const target = intake.polylines.find((entity) => (
+    const candidates = intake.polylines.filter((entity) => (
       entity.handle && entity.closed === true && Array.isArray(entity.pts) && entity.pts.length >= 3
     ))
-    expect(target, 'the sample drawing must carry a closed polyline').toBeTruthy()
+    expect(candidates.length, 'the sample drawing must carry a closed polyline').toBeGreaterThan(0)
 
     await setRail(page, '1')
     await page.goto('/app')
@@ -368,11 +378,27 @@ test.describe('route matrix, rail ON', () => {
     // dock hosts the same element, never a re-implementation).
     await expect(dock.getByText('Click an entity to select it')).toBeVisible({ timeout: 20_000 })
 
-    const centroid = target.pts.reduce((acc, pt) => [acc[0] + pt[0] / target.pts.length, acc[1] + pt[1] / target.pts.length], [0, 0])
-    const clientPoint = await page.evaluate(([wx, wy]) => (
-      document.querySelector('.studio-ground .viewer-canvas').__cadviewer.project(wx, wy)
-    ), centroid)
-    await page.mouse.click(clientPoint.x, clientPoint.y)
+    // Floating instruments (the dock, the result block, the view cluster)
+    // sit ON the drawing, so pick the first closed polyline whose centroid
+    // projects to a point the pointer chain delivers to the ground, not to
+    // an instrument: the same rule a user's click follows.
+    const pick = await page.evaluate((cands) => {
+      const canvas = document.querySelector('.studio-ground .viewer-canvas')
+      const ground = document.querySelector('.studio-ground')
+      for (let i = 0; i < cands.length; i += 1) {
+        const pts = cands[i].pts
+        const cx = pts.reduce((a, p) => a + p[0] / pts.length, 0)
+        const cy = pts.reduce((a, p) => a + p[1] / pts.length, 0)
+        const pt = canvas.__cadviewer.project(cx, cy)
+        if (!pt || pt.x < 0 || pt.y < 0 || pt.x > window.innerWidth || pt.y > window.innerHeight) continue
+        const el = document.elementFromPoint(pt.x, pt.y)
+        if (el && ground.contains(el)) return { index: i, x: pt.x, y: pt.y }
+      }
+      return null
+    }, candidates.slice(0, 500))
+    expect(pick, 'a closed polyline must be clickable on the drawing, clear of the instruments').toBeTruthy()
+    const target = candidates[pick.index]
+    await page.mouse.click(pick.x, pick.y)
 
     await expect(dock.locator('.selection-readout')).toContainText('Polyline', { timeout: 10_000 })
     await expect(dock.locator('.selection-readout')).toContainText(target.handle)
@@ -473,6 +499,34 @@ test.describe('route matrix, rail ON', () => {
     const fixedFirst = cadEditOn ? [...engineGroups, 'view', 'version', 'layers'] : ['view', 'version', 'layers']
     expect(groups.slice(0, fixedFirst.length)).toEqual(fixedFirst)
     expect(groups[groups.length - 1]).toBe('author')
+    expect(groups).toContain('rail')
+
+    // SEATING (Slice D), the reference overlay's numbers: the assembly is
+    // opaque; the band is at most two cluster rows plus the operand line;
+    // the dock sits in the LEFT column and the viewcube top-RIGHT; the
+    // drawing keeps at least 70% of the console's height below the chrome.
+    const seating = await page.evaluate(() => {
+      const shell = document.querySelector('.studio-shell').getBoundingClientRect()
+      const band = document.querySelector('.drafting-ribbon').getBoundingClientRect()
+      const bar = document.querySelector('.viewer-toolbar').getBoundingClientRect()
+      const dock = document.querySelector('[data-testid="properties-dock"]')?.getBoundingClientRect()
+      const view = document.querySelector('[data-testid="cockpit-view"]')?.getBoundingClientRect()
+      const rows = new Set([...document.querySelectorAll('.drafting-ribbon .ribbon-cluster')].map((c) => Math.round(c.getBoundingClientRect().top))).size
+      const glass = getComputedStyle(document.querySelector('.drafting-ribbon'), '::before').backgroundColor
+      return {
+        rows, bandHeight: Math.round(band.height), chromeBottom: Math.round(bar.bottom),
+        drawingShare: (shell.bottom - bar.bottom) / shell.height,
+        dockLeft: dock ? dock.left - shell.left : null, viewRight: view ? shell.right - view.right : null,
+        viewLeftOfCenter: view ? view.left < shell.left + shell.width / 2 : null,
+        glass,
+      }
+    })
+    expect(seating.rows).toBeLessThanOrEqual(2)
+    expect(seating.drawingShare).toBeGreaterThanOrEqual(0.7)
+    if (seating.dockLeft !== null) expect(seating.dockLeft).toBeLessThan(120)
+    if (seating.viewLeftOfCenter !== null) expect(seating.viewLeftOfCenter).toBe(false)
+    expect(seating.glass).toMatch(/rgba\(12, 12, 13, 0\.96\)|rgb\(12, 12, 13\)/)
+    test.info().annotations.push({ type: 'seating', description: JSON.stringify(seating) })
     test.info().annotations.push({ type: 'cad_edit', description: cadEditOn ? 'VITE_CAD_EDIT=1: engine groups proven' : 'VITE_CAD_EDIT off in this build: engine groups absent by construction' })
 
     // Every group is VISIBLE at 1600 wide: the band wraps instead of hiding
@@ -698,11 +752,21 @@ test.describe('route matrix, rail ON', () => {
       expect(await result.evaluate((el) => getComputedStyle(el).position)).toBe('absolute')
       expect((await result.boundingBox()).width).toBeLessThan(600)
     }
-    // The spine's monogram buttons fit their rail (a 44px rail, not a sliver).
-    const rail = await page.locator('aside.nav[data-spine]').boundingBox()
-    const btn = await page.locator('.nav-spine .spine-btn').first().boundingBox()
+    // Slice D seating: the tool rail is hidden behind the band and the job
+    // monitor is a right-hand spine whose button fits its rail (44px, not
+    // a sliver). One click expands it; its header collapses it again.
+    await expect(page.locator('aside.nav[data-spine="hidden"]')).toHaveCount(1)
+    const jobRail = page.locator('aside.rail[data-spine]')
+    await expect(jobRail).toHaveCount(1)
+    const rail = await jobRail.boundingBox()
+    const btn = await jobRail.locator('.spine-btn').first().boundingBox()
     expect(rail.width).toBeGreaterThanOrEqual(40)
     expect(btn.width + 8).toBeLessThanOrEqual(rail.width)
+    await jobRail.locator('.spine-btn').first().click()
+    await expect(page.locator('aside.rail[data-spine]')).toHaveCount(0)
+    await expect(page.getByRole('heading', { name: /Job monitor/ })).toBeVisible()
+    await page.getByRole('button', { name: 'Collapse the job monitor to a spine' }).click()
+    await expect(page.locator('aside.rail[data-spine]')).toHaveCount(1)
   })
 
   test('rail OFF keeps every block in flow: the cockpit changes nothing without the rail (W4c-C)', async ({ page, request }) => {

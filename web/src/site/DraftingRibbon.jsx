@@ -12,6 +12,13 @@
 // command wired to a handler App already owns — nothing auto-runs, nothing
 // is a stub.
 //
+// SEATING (W4d Slice D, overlaid pixel for pixel on the reference): the
+// reference ribbon is one dense row of clusters with the tools in a compact
+// grid and the GROUP LABEL AT THE BOTTOM of each cluster. So: tools in a
+// two-row column-flow grid, label last, operands never inside a cluster (the
+// engine consumer renders ONE operand line under the band instead). A family
+// label is a real button that opens that family in the tool rail.
+//
 // Honesty: a disabled tool carries its reason on the title AND in the
 // accessible name ("(unavailable: …)"); a group that is unavailable as a
 // whole says why in a visible note. A greyed control with no reason is the
@@ -27,10 +34,10 @@ import { familyMonogram } from '../lib/surfaceRails.js'
 
 // The band's measured height, published on the workspace card as a CSS
 // variable so the floating import pane clears it (landing.css). The band
-// WRAPS at narrow widths (nine groups do not fit 1600px on one row), so its
-// height is a fact of layout, never a constant: a stale offset would float
-// the pane over the band's second row. jsdom has no ResizeObserver; the
-// one-shot measurement still runs there, so the variable always exists.
+// WRAPS at narrow widths, so its height is a fact of layout, never a
+// constant: a stale offset would float the pane over the band's second row.
+// jsdom has no ResizeObserver; the one-shot measurement still runs there, so
+// the variable always exists.
 export const RIBBON_HEIGHT_VAR = '--cockpit-ribbon-h'
 
 function useBandHeight(ref) {
@@ -74,17 +81,36 @@ export function RibbonTool({ tool }) {
   )
 }
 
-export function RibbonCluster({ id, label, kind = 'group', note = null, extra = null, children }) {
+export function RibbonCluster({ id, label, kind = 'group', note = null, extra = null, onLabelClick = null, labelTitle = '', children }) {
   const attrs = kind === 'family' ? { 'data-family': id } : { 'data-group': id }
+  const labelBody = (
+    <>
+      <span className="ribbon-monogram">{familyMonogram(label)}</span>
+      {label}
+    </>
+  )
   return (
     <div className="ribbon-cluster" role="group" aria-label={label} {...attrs}>
-      <span className="ribbon-cluster-label" aria-hidden="true">
-        <span className="ribbon-monogram">{familyMonogram(label)}</span>
-        {label}
-      </span>
       <div className="ribbon-cluster-tools">{children}</div>
       {extra}
       {note && <span className="ribbon-note">{note}</span>}
+      {/* The group label sits at the BOTTOM, the reference grammar. A family
+          label is a real command (open that family in the rail); a fixed
+          group's label is decoration, hidden from assistive tech because the
+          group already carries the name. */}
+      {onLabelClick ? (
+        <button
+          type="button"
+          className="ribbon-cluster-label as-button"
+          title={labelTitle || `Open ${label} in the tool rail`}
+          aria-label={labelTitle || `Open ${label} in the tool rail`}
+          onClick={onLabelClick}
+        >
+          {labelBody}
+        </button>
+      ) : (
+        <span className="ribbon-cluster-label" aria-hidden="true">{labelBody}</span>
+      )}
     </div>
   )
 }
@@ -107,6 +133,8 @@ export default function DraftingRibbon({ clusters = [], children = null }) {
           label={cluster.label}
           kind={cluster.kind}
           note={cluster.note}
+          onLabelClick={cluster.onLabelClick || null}
+          labelTitle={cluster.labelTitle || ''}
         >
           {(cluster.tools || []).map((tool) => <RibbonTool key={tool.id} tool={tool} />)}
         </RibbonCluster>

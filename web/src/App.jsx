@@ -8,7 +8,7 @@ import { CockpitStatus, ViewCluster } from './site/DrawingCockpit.jsx'
 import DraftingRibbon from './site/DraftingRibbon.jsx'
 import PropertiesDock from './site/PropertiesDock.jsx'
 import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
-import { authorCluster, catalogClusters, layersCluster, versionCluster, viewCluster } from './lib/ribbonClusters.js'
+import { authorCluster, catalogClusters, layersCluster, railCluster, versionCluster, viewCluster } from './lib/ribbonClusters.js'
 import { entityGeometry } from './lib/entityMetrics.js'
 import { loadDemoSolve } from './site/intakeCache.js'
 // The 3D viewer drags in `three`; loading it lazily (mirroring the auth.js
@@ -2198,6 +2198,9 @@ export default function App() {
   // surfaces (it was a full-width page block across the drawing); the ribbon
   // opens it. Rail OFF it renders inline exactly as before.
   const [importOpen, setImportOpen] = useState(false)
+  // W4d Slice D: the job monitor's posture on drafting surfaces (spine by
+  // default; in-memory only, like the nav posture).
+  const [jobRailExpanded, setJobRailExpanded] = useState(false)
   // <=980px the shell stacks into one column (styles.css) — a 44px spine
   // there is a full-width sliver, so the posture neutralizes to expanded.
   const [wideViewport, setWideViewport] = useState(() => {
@@ -2340,8 +2343,17 @@ export default function App() {
         onToggleHistory: onToggleHistoryTracked,
       }),
       layersCluster({ layers: shown?.layers, counts: layerCounts, visibleLayers, onToggle: toggleLayer }),
+      // Seating (Slice D): the tool rail hides behind the band on drafting
+      // surfaces, so the band carries the rail's two affordances: `expand`
+      // (only while the rail is hidden) and every family label opening
+      // that family in the rail.
+      ...(navSpine ? [railCluster({ onExpand: () => setNavExpanded(true) })] : []),
       ...catalogClusters(railFamilies, {
         onRequestRun: onRequestCatalogRun,
+        onOpenFamily: (fam) => {
+          setNavExpanded(true)
+          setFamilyOpen(fam.family_id, true)
+        },
         running: !!running,
         previewing: !!previewing,
         writeLocked,
@@ -2502,41 +2514,15 @@ export default function App() {
         </div>
       </header>
 
-      <aside className="nav" data-spine={navSpine ? 'true' : undefined}>
-        {/* W4c-V1 spine: on drafting surfaces under the studio the rail
-            boots as a 44px monogram strip — the ribbon carries the tool set
-            there, and an expanded catalog beside it is the duplication
-            ACCEPTANCE deferred the ribbon to avoid. A monogram click expands
-            the rail AND opens that family. Rail OFF: navSpine is false by
-            construction and this branch never renders. */}
-        {navSpine ? (
-          <div className="nav-spine" role="toolbar" aria-label="Tool rail" aria-orientation="vertical">
-            <button
-              type="button"
-              className="spine-btn spine-expand"
-              aria-label="Expand the tool rail"
-              title="Expand the tool rail"
-              onClick={() => setNavExpanded(true)}
-            >
-              »
-            </button>
-            {railFamilies.map((fam) => (
-              <button
-                key={fam.family_id}
-                type="button"
-                className="spine-btn"
-                aria-label={`Open ${fam.label} (${fam.capabilities.length} tools)`}
-                title={fam.label}
-                onClick={() => {
-                  setNavExpanded(true)
-                  setFamilyOpen(fam.family_id, true)
-                }}
-              >
-                {familyMonogram(fam.label)}
-              </button>
-            ))}
-          </div>
-        ) : (
+      <aside className="nav" data-spine={navSpine ? 'hidden' : undefined} aria-hidden={navSpine || undefined}>
+        {/* W4c-V1 spine, re-seated in W4d Slice D: on drafting surfaces under
+            the studio the rail HIDES behind the band (the reference cockpit
+            has no left rail; the band carries the whole catalog and the
+            affordances the spine used to carry: `expand` in its Rail group,
+            and every family label opens that family). The aside stays in
+            the DOM at zero width so the grid keeps its cells. Rail OFF:
+            navSpine is false by construction and this branch never renders. */}
+        {navSpine ? null : (
         <>
         <div className="fam-title">
           Catalog · {railFamilies.length} famil{railFamilies.length === 1 ? 'y' : 'ies'} · {studioGround ? railFamilies.reduce((n, f) => n + f.capabilities.length, 0) : capCount} caps
@@ -2829,6 +2815,7 @@ export default function App() {
                 <>
                   <button
                     className="btn ghost"
+                    data-cockpit="ribbon"
                     onClick={onUndo}
                     disabled={versionBusy || running || !!previewing || drawingMutationsBlocked || !canUndo}
                   >
@@ -2836,6 +2823,7 @@ export default function App() {
                   </button>
                   <button
                     className="btn ghost"
+                    data-cockpit="ribbon"
                     onClick={onRedo}
                     disabled={versionBusy || running || !!previewing || drawingMutationsBlocked || !canRedo}
                   >
@@ -2886,7 +2874,7 @@ export default function App() {
                   </button>
                 </>
               )}
-              <button className="btn ghost" onClick={() => viewerRef.current?.fit()}>Fit to bounds</button>
+              <button className="btn ghost" data-cockpit="ribbon" onClick={() => viewerRef.current?.fit()}>Fit to bounds</button>
             </div>
           </div>
           {/* X1: a failed post-write viewer refresh — red row + Retry + honest
@@ -3239,6 +3227,14 @@ export default function App() {
         inflight={inflightPtr}
         reattaching={reattaching}
         onSelectJob={onSelectJob}
+        // W4d Slice D seating: on drafting surfaces under the studio the job
+        // monitor boots as a 44px spine on the right (the reference gives
+        // that edge to the viewport and the viewcube); its live count stays
+        // visible and one click expands it. Rail OFF: both props undefined,
+        // the rail renders exactly as before.
+        spine={!!studioGround && drafting && wideViewport && !jobRailExpanded}
+        onExpand={studioGround && drafting ? () => setJobRailExpanded(true) : undefined}
+        onCollapse={studioGround && drafting && jobRailExpanded ? () => setJobRailExpanded(false) : undefined}
       />
 
       <footer className="foot-bar" data-checkout-instance={checkout.instanceId} data-controller-instance={workspaceInstanceId}>

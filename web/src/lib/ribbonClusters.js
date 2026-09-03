@@ -45,6 +45,7 @@ export const REASONS = Object.freeze({
  */
 export function catalogClusters(families, {
   onRequestRun,
+  onOpenFamily = null,
   running = false,
   previewing = false,
   writeLocked = false,
@@ -59,6 +60,11 @@ export function catalogClusters(families, {
     id: fam.family_id,
     label: fam.label,
     kind: 'family',
+    // The family label is a real command: open that family in the tool
+    // rail (the spine's monogram used to do this; on drafting surfaces the
+    // rail is hidden under the band, so the band carries the affordance).
+    onLabelClick: onOpenFamily ? () => onOpenFamily(fam) : null,
+    labelTitle: onOpenFamily ? `Open ${fam.label} in the tool rail (${(fam.capabilities || []).length} tools)` : '',
     tools: (fam.capabilities || []).map((tool) => {
       const isWrite = (tool.capabilities || []).includes('drawing.write')
       const locked = !!writeLocked && isWrite
@@ -83,6 +89,26 @@ export function catalogClusters(families, {
       }
     }),
   }))
+}
+
+/**
+ * Rail: the one command the hidden tool rail still needs from the band —
+ * expand it. On drafting surfaces under the studio the rail sits behind
+ * the band (the reference has no left rail at all), so this is the
+ * affordance that brings it back; the rail's own header collapses it again.
+ */
+export function railCluster({ onExpand } = {}) {
+  return {
+    id: 'rail',
+    label: 'Rail',
+    kind: 'group',
+    tools: [{
+      id: 'rail-expand',
+      label: 'expand',
+      title: 'Expand the tool rail',
+      onClick: () => onExpand?.(),
+    }],
+  }
 }
 
 /** View: fit / zoom in / zoom out on the Viewer's ref surface (setView/getPose). */
