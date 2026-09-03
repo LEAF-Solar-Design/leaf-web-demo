@@ -115,7 +115,9 @@
    as a compact surface switch. */
 @media (min-width: 981px) {
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-nav {
-    position: fixed; top: 0; right: 224px; z-index: 6;
+    /* Past the ribbon tabs (they end near x=570) and clear of the header's
+       own chips at the right, at any wide width. */
+    position: fixed; top: 0; left: max(600px, 45%); right: auto; z-index: 6;
     height: var(--ck-top); margin: 0; padding: 0 4px; display: flex; align-items: center;
     background: transparent; border: 0; border-radius: 0; box-shadow: none;
   }
@@ -368,7 +370,7 @@
      band between the ribbon tabs and the surface switch instead of adding a
      row under the status bar. */
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .operator-entry-button {
-    position: fixed; left: 620px; top: 4px; z-index: 42; height: 20px; padding: 0 8px;
+    position: fixed; left: 578px; top: 4px; z-index: 42; height: 20px; padding: 0 8px;
     font: 400 11px/20px var(--ck-font); background: var(--ck-title); border: 1px solid #4a4a4a; border-radius: 3px; color: var(--ck-ink);
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cad-edit-workbench {
@@ -540,7 +542,7 @@
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-status-toggles button:focus-visible { outline: 2px solid var(--ck-sel); outline-offset: -2px; }
   /* The reference's menu glyph at the far left. */
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar::before {
-    content: '\2261'; position: absolute; left: 0; bottom: 0; width: 30px; height: 29px;
+    content: '\2261' / ''; position: absolute; left: 0; bottom: 0; width: 30px; height: 29px;
     display: flex; align-items: center; justify-content: center; font-size: 16px; color: #cfcfcf;
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar { position: relative; }
