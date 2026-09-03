@@ -144,7 +144,7 @@ export default function VersionHistory({
   // column into the toolbar. `.drawer-fixed` (styles.css) anchors it as a
   // floating right panel below the header / above the footer instead.
   return (
-    <div className={`drawer drawer-fixed${exiting ? ' exit' : ''}`} role="dialog" aria-label="Version history">
+    <div className={`drawer drawer-fixed${exiting ? ' exit' : ''}`} role="dialog" aria-label="Version history" data-escape-owner>
       <div className="drawer-head">
         <span className="drawer-title">Version history{effective ? ` · ${rows.length}` : ''}</span>
         <button className="key hot" onClick={onClose} aria-label="Close version history">Esc</button>

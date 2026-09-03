@@ -537,6 +537,46 @@ describe('the command prompt (W4e slice H): a tool arms, the command line asks i
     bar.remove()
   })
 
+  it('an open dialog owns Esc even when its opener kept focus outside the layer', async () => {
+    const studio = mount()
+    await openAndLoad(studio, [LINE])
+    fireEvent.click(drawTool('createLine'))
+    expect(promptEl()?.getAttribute('data-op')).toBe('createLine')
+
+    // Version history opens without moving focus into its dialog. Model that
+    // exact integration shape: the opener remains the key target while App's
+    // bubble listener owns closing the visible layer.
+    const opener = document.createElement('button')
+    document.body.appendChild(opener)
+    opener.focus()
+    const dialog = document.createElement('aside')
+    dialog.setAttribute('role', 'dialog')
+    dialog.setAttribute('aria-label', 'Version history')
+    dialog.setAttribute('data-escape-owner', '')
+    document.body.appendChild(dialog)
+    const appEsc = vi.fn(() => dialog.remove())
+    window.addEventListener('keydown', appEsc)
+
+    fireEvent.keyDown(opener, { key: 'Escape' })
+
+    window.removeEventListener('keydown', appEsc)
+    expect(appEsc).toHaveBeenCalledTimes(1)
+    expect(dialog.isConnected).toBe(false)
+    expect(promptEl()?.getAttribute('data-op')).toBe('createLine')
+
+    // A nonmodal dialog such as the guided tour does not claim the ladder.
+    // Its role alone must not make an armed command impossible to cancel.
+    const tour = document.createElement('aside')
+    tour.setAttribute('role', 'dialog')
+    tour.setAttribute('aria-modal', 'false')
+    document.body.appendChild(tour)
+    opener.focus()
+    fireEvent.keyDown(opener, { key: 'Escape' })
+    expect(promptEl()).toBeNull()
+    tour.remove()
+    opener.remove()
+  })
+
   it('a Modify tool armed with nothing selected keeps its fields live and gates only Run; a pick releases Run', async () => {
     const studio = mount()
     await openAndLoad(studio, [LINE])

@@ -42,6 +42,20 @@ import { useEngineSessionContext } from './EngineSessionProvider.jsx'
 export const PROMPT_SLOT_ID = 'cockpit-prompt-slot'
 export const PROMPT_ID = 'cockpit-prompt'
 
+const ESC_OWNER_SELECTOR = '[data-escape-owner]'
+
+// Some layers leave focus on the button that opened them. An explicit marker
+// lets those layers claim Esc without treating every nonmodal dialog as an
+// owner (the guided tour is a dialog but deliberately does not claim Esc).
+function hasVisibleEscOwner() {
+  return [...document.querySelectorAll(ESC_OWNER_SELECTOR)].some((layer) => {
+    if (layer.hidden || layer.hasAttribute('inert') || layer.getAttribute('aria-hidden') === 'true') return false
+    if (layer instanceof HTMLDialogElement && !layer.open) return false
+    const style = window.getComputedStyle(layer)
+    return style.display !== 'none' && style.visibility !== 'hidden'
+  })
+}
+
 export const MODIFY_REASONS = Object.freeze({
   noDocument: 'opens on an imported DXF',
   crashed: 'engine stopped: open a drawing again',
@@ -272,10 +286,9 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
       const target = event.target
       if (promptRef.current?.contains(target)) return
       if (target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return
-      // An open dialog or drawer owns its Esc (the DetailsDrawer's "Esc
-      // closes" contract, focus parked on its close BUTTON): the rung defers
-      // to any modal layer instead of cancelling under it (kimi, #976).
-      if (target instanceof Element && target.closest('[role="dialog"], [aria-modal="true"], dialog, .drawer-layer')) return
+      // An open dialog or drawer owns its Esc. Check the whole visible layer
+      // stack too because a layer may leave focus on its outside opener.
+      if ((target instanceof Element && target.closest('[role="dialog"], [aria-modal="true"], dialog, .drawer-layer')) || hasVisibleEscOwner()) return
       event.preventDefault()
       event.stopPropagation()
       cancelRef.current()
