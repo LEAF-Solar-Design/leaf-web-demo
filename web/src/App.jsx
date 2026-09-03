@@ -48,6 +48,7 @@ import CadEditSurface from './cadedit/CadEditSurface.jsx'
 import EngineSessionProvider from './cadedit/EngineSessionProvider.jsx'
 import EngineRibbonClusters from './cadedit/EngineRibbonClusters.jsx'
 import CommandLineArmer from './cadedit/CommandLineArmer.jsx'
+import EngineDocumentView from './cadedit/EngineDocumentView.jsx'
 import { COCKPIT_COMMAND_EVENT, parseDrawingCommand } from './lib/commandWords.js'
 import { markInstant } from './lib/instant.js'
 import { agentBannerFor } from './lib/agentBanner.js'
@@ -2870,6 +2871,21 @@ export default function App() {
               {/* W4f slice B: the command line's typed words (LINE, C, MOVE ...)
                   reach the engine through this consumer; renders nothing. */}
               {ENV_CAD_EDIT && <CommandLineArmer />}
+              {/* W4f slice A0: while a DXF is open in the engine, the canvas
+                  shows the ENGINE document through the viewer's own
+                  applyVersion seam (the console drawing returns on close);
+                  the card carries data-engine-document for the pins. */}
+              {ENV_CAD_EDIT && (
+                <EngineDocumentView
+                  viewerRef={viewerRef}
+                  onShown={(intake) => {
+                    const el = workspaceCardRef.current
+                    if (!el) return
+                    if (intake) el.dataset.engineDocument = intake.documentId
+                    else delete el.dataset.engineDocument
+                  }}
+                />
+              )}
             </DraftingRibbon>
           )}
           <div className="viewer-toolbar">

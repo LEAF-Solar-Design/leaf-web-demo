@@ -179,6 +179,25 @@ fn closed_of(entity: &EntityType) -> bool {
     }
 }
 
+/// W4f: a circle or arc is drawn from its centre, radius and sweep; the
+/// projection carried only the centre before, so the viewer could not show
+/// the engine document. `None` for every other kind (JSON null), and the
+/// angles come out in DEGREES, the same unit the create operands take.
+fn radius_of(entity: &EntityType) -> Option<f64> {
+    match entity {
+        EntityType::Circle(c) => Some(c.radius),
+        EntityType::Arc(a) => Some(a.radius),
+        _ => None,
+    }
+}
+
+fn sweep_deg_of(entity: &EntityType) -> Option<(f64, f64)> {
+    match entity {
+        EntityType::Arc(a) => Some((a.start_angle.to_degrees(), a.end_angle.to_degrees())),
+        _ => None,
+    }
+}
+
 // W4d Draw group. Creation goes through the crate's own `add_entity`, which
 // allocates the handle and routes the entity into model space; the wrapper
 // only validates and builds the entity. Every create refuses BEFORE it
@@ -550,6 +569,12 @@ impl ParsedDxf {
                     "closed": closed_of(e),
                     "editable": editable(e),
                     "vertices": vertices_of(e),
+                    // W4f: circles and arcs are drawable from these; null
+                    // for every other kind, so a consumer that ignores them
+                    // sees the exact shape it saw before.
+                    "radius": radius_of(e),
+                    "startDeg": sweep_deg_of(e).map(|(start, _)| start),
+                    "endDeg": sweep_deg_of(e).map(|(_, end)| end),
                 })
             })
             .collect();
@@ -895,6 +920,29 @@ mod created_entity_roundtrip {
         // quarter turn must come back as a quarter turn.
         assert!((a.end_angle - a.start_angle - std::f64::consts::FRAC_PI_2).abs() < 1e-6,
             "sweep survives: {} -> {}", a.start_angle, a.end_angle);
+    }
+
+    // W4f: the projection's drawable fields for circles and arcs, in the
+    // create operands' own units (degrees), null for every other kind.
+    #[test]
+    fn projection_carries_radius_and_sweep_for_circles_and_arcs_only() {
+        let mut doc = empty_doc();
+        doc.create_line_core(0.0, 0.0, 10.0, 5.0, "").expect("line");
+        doc.create_circle_core(3.0, 3.0, 1.5, "Panels").expect("circle");
+        doc.create_arc_core(0.0, 0.0, 2.0, 30.0, 120.0, "").expect("arc");
+        doc.create_polyline_core(&[0.0, 0.0, 4.0, 0.0, 4.0, 3.0], true, "Outline").expect("polyline");
+        let back = rewrite(&doc);
+        let entities: Vec<&EntityType> = back.inner.entities().collect();
+        assert_eq!(entities.len(), 4);
+        assert_eq!(radius_of(entities[0]), None);
+        assert_eq!(sweep_deg_of(entities[0]), None);
+        assert!(near(radius_of(entities[1]).expect("circle radius"), 1.5));
+        assert_eq!(sweep_deg_of(entities[1]), None);
+        assert!(near(radius_of(entities[2]).expect("arc radius"), 2.0));
+        let (start, end) = sweep_deg_of(entities[2]).expect("arc sweep");
+        assert!((start - 30.0).abs() < 1e-6 && (end - 120.0).abs() < 1e-6, "sweep in degrees: {} -> {}", start, end);
+        assert_eq!(radius_of(entities[3]), None);
+        assert_eq!(sweep_deg_of(entities[3]), None);
     }
 
     #[test]

@@ -99,6 +99,12 @@ function projectEntities(doc) {
       closed: entity.closed,
       editable: entity.editable,
       vertices: entity.vertices,
+      // W4f: drawable fields for CIRCLE/ARC (null for every other kind), so
+      // the viewer can show the engine document; older wrappers without
+      // them read as null too.
+      radius: entity.radius ?? null,
+      startDeg: entity.startDeg ?? null,
+      endDeg: entity.endDeg ?? null,
     }
   })
 }
