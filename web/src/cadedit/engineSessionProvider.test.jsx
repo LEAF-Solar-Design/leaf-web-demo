@@ -480,6 +480,23 @@ describe('the command prompt (W4e slice H): a tool arms, the command line asks i
     studio.workers[0].emit({ ...editApplied('createCircle', [LINE, POLY]), createdId: 'e2' })
     expect(screen.getByLabelText('ribbon r').disabled).toBe(false)
     expect(promptEl().getAttribute('data-op')).toBe('createCircle')
+    // Enter ON A BUTTON is the button's own activation, never the row's
+    // run: keydown alone posts nothing (jsdom synthesizes no click), the
+    // click that a browser then fires is the one action. Cancel cancels.
+    const posted = () => studio.workers[0].posted.length
+    const afterCircle = posted()
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Cancel' }), { key: 'Enter' })
+    expect(posted()).toBe(afterCircle)
+    expect(promptEl().getAttribute('data-op')).toBe('createCircle')
+    fireEvent.keyDown(screen.getByTestId('cockpit-prompt-run'), { key: 'Enter' })
+    expect(posted()).toBe(afterCircle)
+    fireEvent.click(screen.getByTestId('cockpit-prompt-run'))
+    expect(posted()).toBe(afterCircle + 1)
+    studio.workers[0].emit({ ...editApplied('createCircle', [LINE, POLY]), createdId: 'e2' })
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(promptEl()).toBeNull()
+    expect(posted()).toBe(afterCircle + 1)
+    fireEvent.click(drawTool('createCircle'))
     // Bounded writes: a malformed record is ignored (the prompt stays on
     // the circle), null disarms.
     act(() => { studio.context.setArmed({ group: 'nope', op: 'createLine' }) })

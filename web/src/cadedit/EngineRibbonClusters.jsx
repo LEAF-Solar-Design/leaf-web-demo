@@ -242,6 +242,11 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   }, [armedOp])
   const onPromptKeyDown = (event) => {
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent?.isComposing) {
+      // Enter on Run or Cancel keeps the button's own activation (one
+      // click, one action); the row's Enter is for the fields only. Without
+      // this the row swallowed the keydown and ran the command the operator
+      // was cancelling (kimi, #965).
+      if (event.target instanceof HTMLButtonElement) return
       event.preventDefault()
       run()
     } else if (event.key === 'Escape') {
