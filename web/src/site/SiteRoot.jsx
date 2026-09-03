@@ -40,6 +40,9 @@ import {
 } from '../drawing/DrawingIdentityProvider.jsx'
 import { classifyDemo } from '../drawing/drawingIdentity.js'
 import './landing.css'
+// W4e: the reference cockpit's bands, loaded AFTER landing.css so its
+// studio-scoped rules supersede the W4c/W4d seating for the same elements.
+import './cockpit.css'
 
 const App = React.lazy(() => import('../App.jsx'))
 // Built by a sibling agent (src/site/sheets/** is theirs) — referenced only.

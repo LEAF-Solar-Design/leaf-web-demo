@@ -1,0 +1,498 @@
+/* ================= W4e: the reference cockpit, band for band ===============
+   Operator, 2026-09-03: "no pixel parity, no organization, no icons, dont
+   stop until its all literally perfect." The reference (OpenCADStudio at
+   1920x940, measured in the W4e plan) is:
+
+     y   0- 28  quick access + ribbon tabs            (#2a2a2a)
+     y  28-123  the ribbon, 3 rows of 26px + labels   (#2a2a2a)  95px
+     y 123-155  document tabs (2px seam + 30px)       (#232323)
+     y 155-181  viewport strip, top-left of canvas    (#3c3c3c)  26px
+     x   0-250  properties pane, canvas top to status (#2a2a2a)
+     y 880-905  command line, x 600-1320, 25px        (#232323)
+     y 911-940  status bar                            (#232323)  28px
+     canvas #212830 from (250,155) to the status bar
+
+   Ribbon grammar (the reference's own constants, ROW_H = 26): a large tool
+   is a 39px icon over a 10px two-line label, 57px wide, spanning the three
+   rows; a small tool is an 18px icon in a 26px square, 2px apart, column
+   flow; the panel label is 10px grey on the row under the tools.
+
+   SCOPE: everything here is .studio-shell-scoped and, except the icon atoms,
+   limited to the studio's drafting surfaces (data-surface cad | solar) at the
+   wide layout. Rail OFF renders none of these hooks, so the old shell is
+   byte-identical (ACCEPTANCE one-shell rows). This sheet loads AFTER
+   landing.css (SiteRoot) and supersedes the W4c/W4d seating rules there for
+   the same elements; the positioning is FIXED because the shell is a fixed
+   full-viewport host, which keeps the chrome bands off the card's flow
+   (and clear of the backdrop-filter containing-block trap: no ancestor
+   between these elements and the shell carries a filter or transform).
+   ========================================================================= */
+
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) {
+  --ck-font: system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --ck-chrome: #2a2a2a;
+  --ck-recess: #232323;
+  --ck-title: #3c3c3c;
+  --ck-field: #232323;
+  --ck-canvas: #212830;
+  --ck-active: #1390cc;
+  --ck-model: #0f74a6;
+  --ck-sel: #00b4ff;
+  --ck-cmd: #04b255;
+  --ck-label: #696969;
+  --ck-ink: #e2e2e2;
+  --ck-ink-dim: #b8b8b8;
+  --ck-ink-off: #5f5f5f;
+  --ck-edge: #424242;
+  --ck-divider: #3a3a3a;
+  --ck-hover: #3c3c3c;
+  --ck-bulb: #f2c94c;
+  --ck-warn: #f0c97b;
+  --ck-top: 28px;
+  --ck-ribbon: 95px;
+  --ck-doctabs: 32px;
+  --ck-canvas-top: 155px;
+  --ck-status: 31px; /* 2px seam + the reference's 29px bar (y 909-940) */
+  --ck-pane: 250px;
+  --ck-spine: 56px;
+  font-family: var(--ck-font);
+}
+
+/* ---- the ground: the drawing occupies exactly the reference's canvas ---- */
+@media (min-width: 981px) {
+  .studio-shell:has(.app:is([data-surface="cad"], [data-surface="solar"])) .studio-ground {
+    inset: 155px 0 31px 250px;
+    --cv-bg: #212830;
+    background: #212830;
+  }
+  .studio-shell:has(.app:is([data-surface="cad"], [data-surface="solar"])) .studio-ground .viewer-skeleton { --viewer-skeleton-bg: #212830; }
+  /* The reference draws a 1px light seam along the canvas's top edge. */
+  .studio-shell:has(.app:is([data-surface="cad"], [data-surface="solar"])) .studio-ground::after {
+    content: ''; position: absolute; left: 0; right: 0; top: 0; height: 1px; background: #424242; z-index: 2; pointer-events: none;
+  }
+}
+
+/* ---- y 0-28: quick access + ribbon tabs (header.top becomes the band) ---- */
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) header.top {
+  height: var(--ck-top); min-height: 0; box-sizing: border-box;
+  padding: 0 4px 0 6px; gap: 4px; flex-wrap: nowrap; overflow: hidden;
+  background: var(--ck-chrome); backdrop-filter: none;
+  border-bottom: 0; color: var(--ck-ink);
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) header.top .mark { font-size: 0; gap: 0; margin-right: 2px; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) header.top .mark .diamond { width: 9px; height: 9px; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) header.top .proj { display: none; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) header.top .spacer { flex: 1; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) header.top .who { gap: 4px; flex: 0 0 auto; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) header.top :is(.chip-act, .tc-account-signout, .switch) {
+  height: 20px; padding: 0 8px; font: 500 11px var(--ck-font); line-height: 20px;
+  background: var(--ck-title); border: 1px solid #4a4a4a; border-radius: 3px; color: var(--ck-ink);
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) header.top .chip-act .key { font-size: 9px; padding: 0 4px; }
+.cockpit-quick { display: inline-flex; align-items: center; gap: 1px; height: var(--ck-top); }
+.cockpit-quick-slot { display: contents; }
+.cockpit-quick button, .cockpit-strip button, .doc-tab-add, .cockpit-pane-tools button {
+  width: 24px; height: 24px; padding: 0; border: 0; border-radius: 3px;
+  background: transparent; color: var(--ck-ink); cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.cockpit-quick button:hover:not(:disabled), .cockpit-strip button:hover:not(:disabled), .doc-tab-add:hover { background: var(--ck-hover); }
+.cockpit-quick button:disabled, .cockpit-strip button:disabled { color: var(--ck-ink-off); cursor: not-allowed; }
+.cockpit-quick button[aria-expanded="true"] { background: var(--ck-hover); }
+.cockpit-quick button:focus-visible, .cockpit-strip button:focus-visible, .cockpit-ribbon-tabs [role="tab"]:focus-visible, .doc-tab-start:focus-visible, .doc-tab-add:focus-visible { outline: 2px solid var(--ck-sel); outline-offset: -2px; }
+.cockpit-quick-sep { width: 1px; height: 16px; background: var(--ck-divider); margin: 0 3px; }
+.cockpit-ribbon-tabs { display: inline-flex; align-items: stretch; height: var(--ck-top); margin-left: 6px; }
+.cockpit-ribbon-tabs [role="tab"] {
+  height: var(--ck-top); padding: 0 14px; border: 0; background: transparent;
+  font: 400 12.5px var(--ck-font); color: #d4d4d4; cursor: pointer; white-space: nowrap;
+}
+.cockpit-ribbon-tabs [role="tab"]:hover:not(:disabled) { color: #fff; background: #323232; }
+.cockpit-ribbon-tabs [role="tab"][aria-selected="true"] { color: #fff; background: #323232; box-shadow: inset 0 -2px 0 var(--ck-active); }
+.cockpit-ribbon-tabs [role="tab"]:disabled { color: var(--ck-ink-off); cursor: not-allowed; }
+
+/* The product-surface tabs stay ALWAYS-MOUNTED in the centre column (the
+   continuity contract: never a remount) and ride the band at its right,
+   as a compact surface switch. */
+@media (min-width: 981px) {
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-nav {
+    position: fixed; top: 0; right: 224px; z-index: 6;
+    height: var(--ck-top); margin: 0; padding: 0 4px; display: flex; align-items: center;
+    background: transparent; border: 0; border-radius: 0; box-shadow: none;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs { gap: 2px; margin: 0; padding: 0; border: 0; background: transparent; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"] {
+    height: 22px; padding: 0 8px; gap: 5px; border-radius: 3px; border: 1px solid transparent;
+    font: 400 11px var(--ck-font); color: #c8c8c8; background: transparent; box-shadow: none; align-items: center;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"]:hover { background: var(--ck-hover); color: #fff; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"][aria-selected="true"] {
+    background: var(--ck-title); border-color: #4a4a4a; color: #fff; box-shadow: none;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"] small { font: 400 9px var(--ck-font); letter-spacing: 0; text-transform: none; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-nav .tc-account-signout { display: none; }
+}
+
+/* ---- y 28-123: the ribbon ---------------------------------------------- */
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) main.center-scroll { padding: 0; }
+/* The card is a flow-less host for the band and the doc tabs: no enter
+   transform (a transform would make it the containing block of the fixed
+   instruments below and its overflow would clip them), no clipping. */
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .workspace-card {
+  margin: 0; border: 0; border-radius: 0; overflow: visible; animation: none; transform: none;
+}
+/* The job monitor: no right column on drafting surfaces (the reference gives
+   the whole width to the ribbon and the canvas). Its spine is a chip in the
+   status bar; expanded, it is a panel over the canvas's right edge. */
+@media (min-width: 981px) {
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]):has(aside.rail[data-spine]) { grid-template-columns: 0 1fr 0; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]):has(aside.nav[data-spine="hidden"]):has(aside.rail[data-spine]) { grid-template-columns: 0 1fr 0; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) aside.rail[data-spine] {
+    position: fixed; right: 8px; bottom: 0; top: auto; z-index: 41;
+    width: auto; height: 29px; padding: 0 6px; margin: 0;
+    display: flex; align-items: center; border: 0; box-shadow: none; background: transparent; overflow: visible;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) aside.rail[data-spine] .rail-spine { flex-direction: row; gap: 6px; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) aside.rail[data-spine] .spine-btn {
+    width: 22px; height: 20px; font-size: 11px; border-radius: 3px; background: var(--ck-title); border-color: #4a4a4a;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) aside.rail[data-spine] .rail-spine-count { font: 400 11px var(--ck-font); color: #cfcfcf; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) aside.rail:not([data-spine]) {
+    position: fixed; right: 0; top: var(--ck-canvas-top); bottom: var(--ck-status); z-index: 5;
+    width: 300px; margin: 0; border: 0; border-left: 1px solid var(--ck-edge); border-radius: 0; box-shadow: -8px 0 24px rgba(0, 0, 0, .4);
+    background: var(--ck-chrome);
+  }
+}
+/* The operand line is hidden while neither group can take input; the UA's
+   [hidden] loses to landing.css's display:flex, so the hook is explicit. */
+.studio-shell .ribbon-operands[hidden] { display: none !important; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drafting-ribbon {
+  height: var(--ck-ribbon); box-sizing: border-box;
+  display: flex; flex-wrap: nowrap; align-items: stretch; gap: 0;
+  padding: 0 2px; margin: 0;
+  border: 0; border-top: 1px solid #424242; border-radius: 0;
+  background: var(--ck-chrome); color: var(--ck-ink);
+  overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drafting-ribbon::-webkit-scrollbar { display: none; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drafting-ribbon::before {
+  content: ''; position: absolute; inset: 0; z-index: -1; border-radius: 0;
+  background: #2a2a2a; backdrop-filter: none;
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-cluster {
+  display: grid; grid-template-rows: 78px 15px; gap: 0; align-content: start;
+  flex: 0 0 auto; padding: 1px 5px 0; margin: 0; justify-content: start;
+  border: 0; border-right: 1px solid var(--ck-divider);
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-cluster:last-child { border-right: 0; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-cluster-tools {
+  display: grid; grid-auto-flow: column; grid-template-rows: repeat(3, 26px);
+  gap: 0 2px; align-content: start; align-items: start;
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-cluster-label {
+  grid-row: 2; align-self: end; justify-content: center; margin: 0; padding: 0 2px; gap: 0;
+  font: 400 10px/15px var(--ck-font); letter-spacing: 0; text-transform: none;
+  color: var(--ck-label); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-cluster-label.as-button { color: #9a9a9a; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-cluster-label.as-button:hover { color: #fff; background: var(--ck-hover); }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-cluster[data-note] .ribbon-cluster-label { color: var(--ck-warn); text-decoration: underline dotted; text-underline-offset: 2px; cursor: help; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-monogram { display: none; }
+/* The honest note stays in the DOM as text (tests and assistive tech read
+   it); on the reference's band it is the amber dotted label + its title. */
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-note {
+  position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool {
+  position: relative;
+  width: 26px; height: 26px; padding: 0; margin: 0;
+  display: inline-flex; align-items: center; justify-content: center; gap: 0;
+  border: 0; border-radius: 3px; background: transparent;
+  font: 400 10px/11px var(--ck-font); color: var(--ck-ink); white-space: nowrap;
+  text-decoration: none; cursor: pointer;
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool.write { border: 0; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool:hover:not(:disabled) { background: var(--ck-hover); }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool:focus-visible { outline: 2px solid var(--ck-sel); outline-offset: -2px; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool:disabled { color: var(--ck-ink-off); background: transparent; cursor: not-allowed; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[aria-expanded="true"] { background: var(--ck-hover); }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool .ribbon-tool-label { display: none; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[data-size="large"] {
+  grid-row: 1 / span 3; width: 57px; height: 78px;
+  flex-direction: column; justify-content: flex-start; padding: 5px 2px 0; gap: 3px;
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[data-size="large"] .ribbon-tool-label {
+  display: block; width: 100%; font: 400 10px/11px var(--ck-font); color: #d0d0d0;
+  white-space: normal; text-align: center; max-height: 22px; overflow: hidden;
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[data-size="large"]:disabled .ribbon-tool-label { color: var(--ck-ink-off); }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[data-size="row"] {
+  width: 150px; height: 26px; justify-content: flex-start; padding: 0 6px; gap: 6px;
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[data-size="row"] .ribbon-tool-label {
+  display: inline; font: 400 11px var(--ck-font); overflow: hidden; text-overflow: ellipsis; min-width: 0;
+}
+/* Layer rows: the bulb is lit (amber) when the layer shows, dark when hidden;
+   no strike-through, the reference reads state from the bulb. */
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[aria-pressed="true"] { background: transparent; border: 0; color: var(--ck-ink); }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[aria-pressed="true"] .ci { color: var(--ck-bulb); }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[aria-pressed="false"] { text-decoration: none; color: var(--ck-ink-dim); }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[aria-pressed="false"] .ci { color: var(--ck-ink-off); }
+.ribbon-swatch { width: 12px; height: 12px; border: 1px solid rgba(255, 255, 255, .25); border-radius: 1px; flex: 0 0 auto; }
+/* Panel widgets (the Properties panel's ByLayer combos, 130px like the reference). */
+.ribbon-widget { display: inline-flex; align-items: center; height: 26px; }
+.ribbon-widget select {
+  width: 130px; height: 22px; padding: 0 6px;
+  font: 400 11px var(--ck-font); color: var(--ck-ink);
+  background: var(--ck-field); border: 1px solid #3f3f3f; border-radius: 2px;
+}
+.ribbon-widget select:disabled { color: #8a8a8a; }
+
+/* ---- y 123-155: the document tabs (the viewer toolbar becomes the band) ---- */
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar {
+  position: relative; height: var(--ck-doctabs); box-sizing: border-box;
+  display: flex; align-items: stretch; justify-content: flex-start; gap: 0; flex-wrap: nowrap;
+  padding: 0; margin: 0;
+  background: var(--ck-recess); border: 0; border-top: 2px solid #424242; border-radius: 0;
+  color: var(--ck-ink); overflow: hidden;
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar::before { content: none; }
+.doc-tab-start, .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .viewer-title {
+  display: inline-flex; align-items: center; height: 30px; padding: 0 14px;
+  font: 400 12.5px var(--ck-font); color: #d4d4d4; white-space: nowrap;
+}
+.doc-tab-start { order: 1; border: 0; background: transparent; cursor: pointer; }
+.doc-tab-start:hover { background: #2e2e2e; color: #fff; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .viewer-title {
+  order: 2; max-width: 260px; overflow: hidden; text-overflow: ellipsis;
+  background: var(--ck-active); color: #fff; font-weight: 400;
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .viewer-title::before {
+  content: ''; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px; flex: 0 0 auto;
+  background: rgba(255, 255, 255, .55);
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .viewer-title .dim { display: none; }
+.doc-tab-add { order: 3; width: 30px; height: 30px; margin-left: 2px; font: 400 16px/1 var(--ck-font); color: #d4d4d4; align-self: center; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .viewer-actions {
+  order: 4; margin-left: auto; gap: 4px; flex-wrap: nowrap; padding-right: 6px; align-items: center;
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .btn,
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .btn.ghost,
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .chip-act {
+  height: 20px; padding: 0 8px; font: 400 11px var(--ck-font); line-height: 20px;
+  background: var(--ck-title); border: 1px solid #4a4a4a; border-radius: 3px; color: var(--ck-ink);
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar :is(.version-note, .checkout-chip, .checkout-mine) { font: 400 11px var(--ck-font); }
+/* The card window under the band has no flow height of its own now. */
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .workspace-card > .viewer-wrap { height: 0; min-height: 0; }
+
+/* ---- the canvas instruments ---------------------------------------------- */
+@media (min-width: 981px) {
+  /* Viewport strip, top-left of the canvas: fit / zoom / history as icons. */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-view {
+    position: fixed; top: var(--ck-canvas-top); left: var(--ck-pane); right: auto; z-index: 3;
+    height: 26px; padding: 0 3px; gap: 1px; border: 0; border-radius: 0 0 3px 0;
+    background: var(--ck-title); box-shadow: none; backdrop-filter: none; color: var(--ck-ink);
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-view button {
+    min-width: 24px; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 3px;
+    background: transparent; color: var(--ck-ink); font: 400 12px var(--ck-font);
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-view button:hover { background: #4a4a4a; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-view .cockpit-view-mode {
+    display: inline-flex; align-items: center; gap: 4px; padding: 0 8px; font: 400 11.5px var(--ck-font); color: #d8d8d8;
+  }
+  /* The view cube: top-right of the canvas, left of the job spine. */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-cube-wrap {
+    position: fixed; top: calc(var(--ck-canvas-top) + 14px); right: 14px; z-index: 3;
+    display: grid; grid-template-columns: 16px 64px 16px; grid-template-rows: 16px 64px 16px; place-items: center;
+    font: 600 9px var(--ck-font); color: #cfd8e3; pointer-events: none;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-cube {
+    grid-column: 2; grid-row: 2; width: 64px; height: 64px; margin: 0;
+    border: 1px solid #6a7a8a; border-radius: 50%; background: radial-gradient(circle, #3a4656 0%, #2a3340 70%, #222b36 100%);
+    display: grid; place-items: center; font: 600 10px var(--ck-font); letter-spacing: 0; color: #e8eef5;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-cube span {
+    width: 34px; height: 34px; border: 1px solid #8fa0b2; background: #4a5666; display: grid; place-items: center;
+  }
+  .cockpit-cube-n { grid-column: 2; grid-row: 1; }
+  .cockpit-cube-s { grid-column: 2; grid-row: 3; }
+  .cockpit-cube-w { grid-column: 1; grid-row: 2; }
+  .cockpit-cube-e { grid-column: 3; grid-row: 2; }
+  .cockpit-cube-wcs {
+    position: fixed; top: calc(var(--ck-canvas-top) + 122px); right: 14px; z-index: 3;
+    width: 94px; height: 18px; box-sizing: border-box; padding: 0 6px;
+    display: flex; align-items: center; justify-content: space-between;
+    font: 400 11px var(--ck-font); color: #d8d8d8; background: var(--ck-title); border: 1px solid #4a4a4a;
+  }
+
+  /* ---- x 0-250: the properties pane ---- */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .properties-dock {
+    position: fixed; top: var(--ck-canvas-top); left: 0; right: auto; bottom: var(--ck-status); z-index: 3;
+    width: var(--ck-pane); max-height: none; box-sizing: border-box;
+    display: flex; flex-direction: column; gap: 0; padding: 0;
+    background: var(--ck-chrome); border-right: 1px solid var(--ck-edge);
+    color: var(--ck-ink); font-family: var(--ck-font);
+    overflow-y: auto; overflow-x: hidden;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .properties-dock::before {
+    content: 'Properties'; display: flex; align-items: center; flex: 0 0 26px; height: 26px;
+    padding: 0 8px; font: 400 12.5px var(--ck-font); color: #e6e6e6; background: var(--ck-title);
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-section { border: 0; border-radius: 0; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-section::before { content: none; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-section-head {
+    height: 22px; padding: 0 8px; margin-top: 2px; background: var(--ck-title);
+    font: 400 11px var(--ck-font); letter-spacing: 0; text-transform: none; color: #e6e6e6;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-section-body { padding: 3px 4px 4px; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .properties-dock :is(.legend, .selection-readout, .ent-panel, .dock-geometry),
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .properties-dock :is(.legend, .selection-readout, .ent-panel, .dock-geometry) :is(b, span, dt, dd, li, p, h3, h4, label, button) {
+    font-family: var(--ck-font); font-size: 11px;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-geometry { gap: 2px 8px; margin-top: 4px; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-geometry dd {
+    background: var(--ck-field); border: 1px solid #3a3a3a; padding: 1px 6px; text-align: left; border-radius: 2px;
+  }
+
+  /* ---- floating instruments over the canvas ---- */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .result-block {
+    position: fixed; left: calc(var(--ck-pane) + 12px); bottom: 66px; z-index: 3;
+    width: 420px; max-height: 40vh;
+  }
+  /* Idle (no run, no result, no error) the result panel is only its own
+     invitation sentence; the command line already says that, so the block
+     stays off the canvas until there is a result to show. */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .result-block:has(.result-panel > p.panel-sub) { display: none; }
+  /* The operator console entry (operator deployments only) rides the top
+     band between the ribbon tabs and the surface switch instead of adding a
+     row under the status bar. */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .operator-entry-button {
+    position: fixed; left: 620px; top: 4px; z-index: 42; height: 20px; padding: 0 8px;
+    font: 400 11px/20px var(--ck-font); background: var(--ck-title); border: 1px solid #4a4a4a; border-radius: 3px; color: var(--ck-ink);
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cad-edit-workbench {
+    position: fixed; top: calc(var(--ck-canvas-top) + 36px); left: calc(var(--ck-pane) + 12px); z-index: 4;
+    width: 420px; max-height: calc(100vh - var(--ck-canvas-top) - 36px - 90px);
+  }
+
+  /* ---- y 880-905: the command line, x 600-1320 ---- */
+  /* Centred, 720 wide: x 600-1320 at the reference's 1920. */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-dock {
+    position: fixed; left: 50%; right: auto; bottom: 35px; width: 720px; max-width: none; margin: 0 0 0 -360px; z-index: 30;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar.bar-command-line {
+    min-height: 0; height: 25px; box-sizing: border-box;
+    flex-direction: row; flex-wrap: nowrap; align-items: center;
+    background: var(--ck-recess); border: 1px solid #3a3a3a; border-radius: 0; box-shadow: none;
+    font-family: var(--ck-font);
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-command-line .bar-input {
+    flex: 1 1 auto; min-width: 0; height: 23px; padding: 0 0 0 8px; gap: 6px; align-items: center;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-command-line .bar-caret {
+    font: 400 12px var(--ck-font); letter-spacing: 0; text-transform: none; color: var(--ck-cmd); white-space: nowrap;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-command-line .bar-caret::after {
+    content: '>'; display: inline-flex; align-items: center; justify-content: center;
+    width: 14px; height: 17px; margin-left: 6px; font-size: 11px; color: #bdbdbd;
+    background: #2e2e2e; border: 1px solid #444;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-command-line :is(.bar-field, .bar-input input) {
+    font: 400 12px/21px var(--ck-font); height: 21px; min-height: 0; max-height: 21px; padding: 0 6px; margin: 0;
+    background: #2a2a2a; border: 1px solid #3f3f3f; border-radius: 0; color: #e6e6e6; resize: none; overflow: hidden;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-command-line .bar-controls {
+    flex: 0 0 auto; height: 23px; padding: 0 3px 0 0; gap: 3px; align-items: center;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-command-line .bar-controls :is(.bar-add, .bar-scope, .bar-proj, .key, .chip-act, .bar-lanes) {
+    height: 18px; padding: 0 6px; font: 400 10px/18px var(--ck-font); border-radius: 2px;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-command-line .bar-controls .bar-proj { display: none; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-command-line .converse-note {
+    position: absolute; left: 0; right: 0; bottom: 100%; margin-bottom: 4px; padding: 2px 8px;
+    font: 400 11px var(--ck-font); background: var(--ck-recess); border: 1px solid #3a3a3a;
+  }
+  /* The engine's operands ride ABOVE the line (the reference prompts for
+     them on the command line itself; W4e slice H moves them into it). */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-operands-slot {
+    position: absolute; left: 0; right: 0; bottom: 100%; margin: 0 0 4px; z-index: 31;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-operands-slot:empty { display: none; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-operands-slot .ribbon-operands {
+    flex: none; order: 0; padding: 3px 8px; border: 1px solid #3a3a3a; background: var(--ck-recess);
+    font-family: var(--ck-font);
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-operands-slot .ribbon-operands label,
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-operands-slot .ribbon-operands-tag {
+    font: 400 10.5px var(--ck-font); letter-spacing: 0; text-transform: none;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-operands-slot .ribbon-input {
+    font: 400 11px var(--ck-font); background: #2a2a2a; border-color: #3f3f3f; border-radius: 0; color: #e6e6e6;
+  }
+
+  /* ---- y 911-940: the status bar ---- */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar {
+    height: var(--ck-status); min-height: 0; box-sizing: border-box;
+    padding: 0 8px 0 0; gap: 0; flex-wrap: nowrap; overflow: hidden;
+    background: var(--ck-recess); backdrop-filter: none; border-top: 2px solid #424242;
+    font: 400 11px var(--ck-font); letter-spacing: 0; text-transform: none; color: #cfcfcf;
+    font-variant-numeric: tabular-nums;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar > * { height: 29px; padding: 0 8px; gap: 5px; white-space: nowrap; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar > * + * { border-left: 1px solid #383838; padding-left: 8px; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar :is(.dim, .foot-stat, .ok-txt, .warn-txt) { color: #cfcfcf; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar .chip-act,
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar .chip-neutral {
+    height: 20px; padding: 0 8px; font: 400 11px var(--ck-font); line-height: 20px; margin: 0 4px;
+    background: var(--ck-title); border: 1px solid #4a4a4a; border-radius: 3px; color: var(--ck-ink);
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .foot-model-tab {
+    background: var(--ck-model); color: #fff; padding: 0 12px; border-left: 0;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-status { gap: 10px; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-status b { font-weight: 400; color: #e6e6e6; min-width: 0; }
+
+  /* ---- the job spine and the demo furniture ---- */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) aside.rail[data-spine] {
+    margin: 0; border: 0; border-left: 1px solid var(--ck-edge); border-radius: 0; box-shadow: none; backdrop-filter: none;
+    background: var(--ck-chrome);
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .demo-banner { display: none; }
+  /* The tour is real onboarding: it keeps its banner and coach as a chip and
+     a card at the bottom right of the canvas, never over the pane, the
+     ribbon, or the command line. The card's inline position (JS-placed next
+     to the spotlit element) yields here, so the important flags are the
+     contract, not a shortcut. */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-banner {
+    top: auto; bottom: 36px; left: auto; right: 14px; width: auto; max-width: 520px;
+    display: flex; flex-wrap: nowrap; align-items: center; gap: 10px;
+    padding: 4px 8px; border-radius: 3px;
+    background: var(--ck-recess); border: 1px solid #3a3a3a; backdrop-filter: none; font-family: var(--ck-font);
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-banner .tour-banner-title { font: 400 11px var(--ck-font); white-space: nowrap; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-banner .tour-banner-sub { display: none; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-banner .tour-banner-exit {
+    white-space: nowrap; height: 20px; padding: 0 8px; font: 400 11px/20px var(--ck-font); border-radius: 3px;
+    background: var(--ck-title); border: 1px solid #4a4a4a; color: var(--ck-ink);
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card {
+    left: auto !important; right: 14px !important;
+    top: auto !important; bottom: 70px !important; width: 300px; max-width: 300px;
+    border-radius: 3px; font-family: var(--ck-font);
+  }
+}
+
+/* ---- the icon atoms (studio-wide: any cockpit chrome may use them) ---- */
+.ci { display: inline-block; width: 18px; height: 18px; flex: 0 0 auto; fill: currentColor; color: inherit; vertical-align: middle; }
+.ci[data-size="large"] { width: 39px; height: 39px; }
+.ci[data-size="row"], .ci[data-size="quick"] { width: 16px; height: 16px; }
+.ci[data-size="strip"] { width: 16px; height: 16px; }
+/* No sprite entry yet (the fetch has not run for this key): a two-letter
+   glyph in the same box, never a blank square. */
+.ci-glyph {
+  display: inline-flex; align-items: center; justify-content: center;
+  font: 600 9px/1 system-ui, sans-serif; letter-spacing: .02em; color: inherit;
+  border: 1px solid currentColor; border-radius: 2px; opacity: .85; box-sizing: border-box;
+}
+.ci-glyph[data-size="large"] { font-size: 13px; }

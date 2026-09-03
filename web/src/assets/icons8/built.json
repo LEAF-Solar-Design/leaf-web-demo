@@ -1,0 +1,7 @@
+{
+  "_comment": "Written by web/scripts/fetch_icons8.mjs: the keys actually present in public/icons8-sprite.svg, the sprite's content hash (cache key), and the platform. Empty until the fetch has run with the operator's icons8 key; CockpitIcon renders a two-letter glyph for any key not listed here.",
+  "platform": "fluency-systems-regular",
+  "hash": "",
+  "fetchedAt": "",
+  "ids": []
+}

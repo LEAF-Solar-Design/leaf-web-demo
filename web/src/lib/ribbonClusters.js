@@ -1,24 +1,31 @@
-// The drafting ribbon's clusters as DATA (W4d Slice A): pure builders over
-// App state, so every group the ribbon shows is one tested decision and the
-// ribbon component itself stays a renderer of an ordered cluster list.
+// The drafting ribbon's clusters as DATA (W4d Slice A, W4e panels): pure
+// builders over App state, so every panel the ribbon shows is one tested
+// decision and the ribbon component itself stays a renderer of an ordered
+// cluster list.
 //
-// Cluster shape: { id, label, kind: 'group' | 'family', note?, tools: [] }.
-// Tool shape:    { id, label, title?, reason?, disabled?, pressed?, write?,
+// Cluster shape: { id, label, kind: 'group' | 'family', note?, tools: [],
+//                  widgets?: [] }.
+// Tool shape:    { id, label, text?, icon?, size?: 'large'|'small'|'row',
+//                  swatch?, title?, reason?, disabled?, pressed?, write?,
 //                  expanded?, controls?, onClick }.
+//   `label` is the accessible name (stable, tests key on it); `text` is the
+//   ribbon's display label for large/row tools; `icon` is a CockpitIcon key.
 //
 // HONESTY CONTRACT (the reason a group exists here at all): every disabled
 // tool carries the sentence that says WHY (`reason`), and a group that is
 // unavailable as a whole carries it as `note`. A greyed control with no
 // reason is the gap ToolsPanel's lock-note closed, and the ribbon must never
 // reopen it. Nothing here is a stub: every onClick is a real handler App
-// already owns.
+// already owns, and the reference panels this engine cannot back yet are
+// present, disabled, and say so (operator decision, W4e plan: mirror the
+// reference's eight Draw-tab panels).
 import { zoomViewer } from '../site/DrawingCockpit.jsx'
 
 export const RIBBON_RATIONALE = 'Ribbon selection. Confirm the exact tool and parameters before it runs.'
 export const ZOOM_IN = 1.25
 export const ZOOM_OUT = 0.8
 // A drawing can carry hundreds of layers; the ribbon is a strip, not a
-// palette. Past this the cluster says how many more live in the dock.
+// palette. Past this the cluster says how many more live in the pane.
 export const MAX_LAYER_TOOLS = 10
 
 export const REASONS = Object.freeze({
@@ -34,6 +41,7 @@ export const REASONS = Object.freeze({
   mutationsBlocked: 'edits are blocked on this drawing',
   nothingToUndo: 'nothing to undo',
   nothingToRedo: 'nothing to redo',
+  notInEngine: 'not in the browser engine yet',
 })
 
 /**
@@ -81,6 +89,9 @@ export function catalogClusters(families, {
       return {
         id: tool.name,
         label: tool.name,
+        text: tool.label || tool.name,
+        icon: 'toolbox',
+        size: 'large',
         title: tool.description || tool.name,
         write: isWrite,
         disabled: !!running || !!previewing || locked || entBlocked,
@@ -105,6 +116,9 @@ export function railCluster({ onExpand } = {}) {
     tools: [{
       id: 'rail-expand',
       label: 'expand',
+      text: 'Tool rail',
+      icon: 'sidebar',
+      size: 'large',
       title: 'Expand the tool rail',
       onClick: () => onExpand?.(),
     }],
@@ -114,17 +128,17 @@ export function railCluster({ onExpand } = {}) {
 /** View: fit / zoom in / zoom out on the Viewer's ref surface (setView/getPose). */
 export function viewCluster({ viewerRef, hasDrawing = false } = {}) {
   const reason = hasDrawing ? '' : REASONS.noDrawing
-  const tool = (id, label, title, onClick) => ({
-    id, label, title, disabled: !hasDrawing, reason, onClick,
+  const tool = (id, label, text, icon, title, onClick) => ({
+    id, label, text, icon, size: 'large', title, disabled: !hasDrawing, reason, onClick,
   })
   return {
     id: 'view',
     label: 'View',
     kind: 'group',
     tools: [
-      tool('fit', 'fit', 'Fit the drawing to the view', () => { viewerRef?.current?.setView?.('home') }),
-      tool('zoom-in', 'zoom-in', 'Zoom in', () => { zoomViewer(viewerRef?.current, ZOOM_IN) }),
-      tool('zoom-out', 'zoom-out', 'Zoom out', () => { zoomViewer(viewerRef?.current, ZOOM_OUT) }),
+      tool('fit', 'fit', 'Fit', 'fit', 'Fit the drawing to the view', () => { viewerRef?.current?.setView?.('home') }),
+      tool('zoom-in', 'zoom-in', 'Zoom in', 'zoom-in', 'Zoom in', () => { zoomViewer(viewerRef?.current, ZOOM_IN) }),
+      tool('zoom-out', 'zoom-out', 'Zoom out', 'zoom-out', 'Zoom out', () => { zoomViewer(viewerRef?.current, ZOOM_OUT) }),
     ],
   }
 }
@@ -162,11 +176,14 @@ export function versionCluster({
     label: 'Version',
     kind: 'group',
     tools: [
-      { id: 'undo', label: 'undo', title: 'Undo the last version', disabled: !!undoReason, reason: undoReason, onClick: () => onUndo?.() },
-      { id: 'redo', label: 'redo', title: 'Redo the undone version', disabled: !!redoReason, reason: redoReason, onClick: () => onRedo?.() },
+      { id: 'undo', label: 'undo', text: 'Undo', icon: 'undo', size: 'large', title: 'Undo the last version', disabled: !!undoReason, reason: undoReason, onClick: () => onUndo?.() },
+      { id: 'redo', label: 'redo', text: 'Redo', icon: 'redo', size: 'large', title: 'Redo the undone version', disabled: !!redoReason, reason: redoReason, onClick: () => onRedo?.() },
       {
         id: 'history',
         label: 'history',
+        text: 'History',
+        icon: 'history',
+        size: 'large',
         title: 'Open the version history',
         disabled: !!historyReason,
         reason: historyReason,
@@ -180,9 +197,10 @@ export function versionCluster({
 /**
  * Layers: one pressed-state toggle per layer (the Legend's exact rule:
  * visible unless the map says false), bounded at MAX_LAYER_TOOLS with the
- * remainder named honestly.
+ * remainder named honestly. Each row is the reference's layer line: a bulb
+ * (lit = shown), the layer's swatch, the name.
  */
-export function layersCluster({ layers, counts = {}, visibleLayers = {}, onToggle, max = MAX_LAYER_TOOLS } = {}) {
+export function layersCluster({ layers, counts = {}, visibleLayers = {}, onToggle, colorFor = null, max = MAX_LAYER_TOOLS } = {}) {
   const list = Array.isArray(layers) ? layers : []
   if (list.length === 0) {
     return { id: 'layers', label: 'Layers', kind: 'group', note: REASONS.noDrawing, tools: [] }
@@ -198,9 +216,14 @@ export function layersCluster({ layers, counts = {}, visibleLayers = {}, onToggl
     tools: shown.map((layer) => {
       const on = visibleLayers[layer] !== false
       const n = counts[layer] || 0
+      const swatch = typeof colorFor === 'function' ? (colorFor(layer) || '') : ''
       return {
         id: `layer:${layer}`,
         label: layer,
+        text: layer,
+        icon: 'bulb',
+        size: 'row',
+        swatch,
         title: `${on ? 'Hide' : 'Show'} ${layer} (${n})`,
         pressed: on,
         onClick: () => onToggle?.(layer),
@@ -226,10 +249,71 @@ export function authorCluster({ onOpen, entitled = true, available = entitled } 
     tools: [{
       id: 'author-tool',
       label: 'author-tool',
+      text: 'Author tool',
+      icon: 'wand',
+      size: 'large',
       title: 'Build a new tool from plain English',
       disabled: !!reason,
       reason,
       onClick: () => onOpen?.(),
     }],
   }
+}
+
+// A reference panel this engine cannot back yet: present at the reference's
+// place and width, every tool disabled with the same honest sentence, the
+// panel's note carrying it too. Never a click handler that pretends.
+function offTool(id, label, icon, size = 'small') {
+  return { id, label, text: label, icon, size, title: label, disabled: true, reason: REASONS.notInEngine, onClick: () => {} }
+}
+
+/**
+ * The reference's Draw-tab panels beyond Draw and Modify (which the engine
+ * consumer renders): Annotation, Layers widget (built by layersCluster),
+ * Block, Properties, Groups, Clipboard — in the reference's order, at the
+ * reference's shapes, all honestly unavailable.
+ */
+export function referencePanels() {
+  const note = REASONS.notInEngine
+  return [
+    {
+      id: 'annotation', label: 'Annotation', kind: 'group', note,
+      tools: [
+        offTool('annotation:text', 'Text', 'text', 'large'),
+        offTool('annotation:dimensions', 'Dimensions', 'dimension', 'large'),
+        offTool('annotation:leader', 'Leader', 'leader', 'large'),
+      ],
+    },
+    {
+      id: 'block', label: 'Block', kind: 'group', note,
+      tools: [
+        offTool('block:create', 'Create Block', 'block-create', 'large'),
+        offTool('block:insert', 'Insert Block', 'block-insert', 'large'),
+      ],
+    },
+    {
+      id: 'properties', label: 'Properties', kind: 'group', note,
+      tools: [offTool('properties:match', 'Match', 'match', 'large')],
+      widgets: [
+        { id: 'prop-color', label: 'Color', value: 'ByLayer', disabled: true, reason: note },
+        { id: 'prop-linetype', label: 'Linetype', value: 'ByLayer', disabled: true, reason: note },
+        { id: 'prop-lineweight', label: 'Lineweight', value: 'ByLayer', disabled: true, reason: note },
+      ],
+    },
+    {
+      id: 'groups', label: 'Groups', kind: 'group', note,
+      tools: [
+        offTool('groups:group', 'Group', 'group', 'large'),
+        offTool('groups:ungroup', 'Ungroup', 'ungroup', 'large'),
+      ],
+    },
+    {
+      id: 'clipboard', label: 'Clipboard', kind: 'group', note,
+      tools: [
+        offTool('clipboard:paste', 'Paste', 'paste', 'large'),
+        offTool('clipboard:cut', 'Cut', 'cut'),
+        offTool('clipboard:copy', 'Copy', 'copy'),
+      ],
+    },
+  ]
 }
