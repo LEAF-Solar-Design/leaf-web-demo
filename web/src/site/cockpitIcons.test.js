@@ -32,7 +32,7 @@ describe('cockpit icons (W4e)', () => {
   const declared = new Set(Object.keys(manifest.icons || {}))
 
   it('names one platform and at least one icon', () => {
-    expect(manifest.platform).toBe('fluency-systems-regular')
+    expect(manifest.platform).toBe('fluent-systems-regular')
     expect(declared.size).toBeGreaterThan(0)
     // The sprite is either the manifest's icons8 platform or the INTERIM
     // line set (scripts/build_interim_sprite.mjs) that holds the keys until
