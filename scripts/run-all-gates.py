@@ -1353,7 +1353,16 @@ def build_suites() -> List[Suite]:
         # 14 passed, 17 subtests passed, 0 skipped.
         Suite("reconcile-staging-fleet",
               "scripts test_reconcile_staging_fleet.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_reconcile_staging_fleet.py"), 14),
+              # 14 -> 22 on 2026-09-03 with arming: the plan now resolves the
+              # relay's published envelope and says whether it may be
+              # dispatched, and the lane's own shape is pinned here (it ships
+              # DORMANT, exactly one step can mutate, and that step is gated on
+              # the arm decision). +1 regression that every step carries the
+              # release's real per-service immutable_lookup_tag: the tag used to
+              # come from a CLI flag the workflow never passed, so every
+              # constructed dispatch read `image_tag=`, and the provider deploys
+              # whatever tag it is handed.
+              SCRIPTS_DIR, _py_pytest("test_reconcile_staging_fleet.py"), 22),
         # These entrypoint checks shipped with the instant-execution container
         # contract but were never registered in the aggregate gate. The mode
         # checks are hermetic file reads, so their measured counts are exact.

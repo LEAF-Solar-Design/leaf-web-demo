@@ -52,6 +52,7 @@ from scripts.platform_staging_convergence import (
     ContractError,
     GitHubProvider,
     Provider,
+    _artifact_rows,
     _one_artifact,
     _positive,
     _sha40,
@@ -77,6 +78,8 @@ MAX_RELAY_RUN_SCAN = 20
 MAX_RUN_PAGE = 100
 
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+# The producer's immutable lookup tag, e.g. surface-v1-<64 hex>.
+IMAGE_TAG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,126}$")
 TASK_DEFINITION_ARN = re.compile(
     r"^arn:aws:ecs:[a-z0-9-]{1,32}:[0-9]{12}:task-definition/[A-Za-z0-9_-]{1,255}:[1-9][0-9]{0,9}$"
 )
@@ -96,6 +99,12 @@ RUN_TITLE = re.compile(r"^Deploy leaf-platform staging (?P<service>[a-z-]{1,32})
 
 def _digest(value: Any, reason: str) -> str:
     if not isinstance(value, str) or not DIGEST.fullmatch(value):
+        raise ContractError(reason)
+    return value
+
+
+def _image_tag(value: Any, reason: str) -> str:
+    if not isinstance(value, str) or not IMAGE_TAG.fullmatch(value):
         raise ContractError(reason)
     return value
 
@@ -217,16 +226,82 @@ def _newest_relay_release(provider: Provider) -> dict[str, Any]:
             )
             for service in SERVICE_ORDER
         }
+        # The image tag is the supply set's own immutable_lookup_tag per
+        # service, exactly what the relay dispatches. Never re-derived and never
+        # read from a run name: the provider deploys whatever tag it is handed,
+        # so a guessed one is a wrong deploy rather than a failed dispatch.
+        tags = {
+            service: _image_tag(
+                (services[service] or {}).get("immutable_lookup_tag"),
+                "RELAY_RECEIPT_INVALID",
+            )
+            for service in SERVICE_ORDER
+        }
         return {
             "relay_run_id": run_id,
+            "relay_head_sha": head_sha,
+            "relay_run_attempt": _positive(
+                row.get("run_attempt"), "PROVIDER_RUN_LIST_INVALID"
+            ),
             "build_run_id": _positive(supply.get("build_run_id"), "RELAY_RECEIPT_INVALID"),
             "release_source_revision": _sha40(
                 receipt.get("release_source_revision"), "RELAY_RECEIPT_INVALID"
             ),
             "supply_set_sha256": receipt.get("supply_set_sha256"),
             "service_digests": digests,
+            "service_tags": tags,
         }
     raise ContractError("NO_CONVERGED_RELEASE")
+
+
+def _supply_evidence(provider: Provider, release: dict[str, Any]) -> dict[str, Any]:
+    """Locate the relay's published supply evidence envelope.
+
+    Nothing else can mint one: deploy-leaf-platform-staging.yml refuses an
+    envelope whose relay.workflow_path is not the relay's own file, and the
+    convergence finalizer refuses any matched child whose supply evidence does
+    not match the build's supply artifact. So this artifact is the ONLY route
+    to a dispatch whose receipt can later be finalized, and its absence is the
+    single fact that decides whether this plan can be armed.
+
+    Absent is the ordinary answer for any release the relay converged before it
+    started publishing the envelope, so it is reported, never raised. The
+    content is deliberately NOT read here: the plan stays small and the armed
+    lane downloads the artifact and passes it straight through, so no
+    re-encoding can corrupt a value the provider validates byte for byte.
+    """
+    name = (
+        f"staging-supply-evidence-{release['relay_head_sha']}"
+        f"-attempt-{release['relay_run_attempt']}"
+    )
+    try:
+        rows = _artifact_rows(provider, APP_REPOSITORY, release["relay_run_id"])
+    except ContractError as exc:
+        return {"present": False, "artifact_name": name, "reason": exc.reason}
+    matches = [
+        row
+        for row in rows
+        if isinstance(row, dict) and row.get("name") == name and row.get("expired") is False
+    ]
+    if len(matches) != 1:
+        return {
+            "present": False,
+            "artifact_name": name,
+            "reason": "ENVELOPE_ARTIFACT_ABSENT",
+            "detail": (
+                "relay run "
+                f"{release['relay_run_id']} published no usable envelope. "
+                "Releases converged before the relay began publishing it cannot "
+                "be armed; the next relay's release can."
+            ),
+        }
+    return {
+        "present": True,
+        "artifact_name": name,
+        "artifact_id": _positive(matches[0].get("id"), "PROVIDER_ARTIFACT_INVALID"),
+        "relay_run_id": release["relay_run_id"],
+        "file": "staging-supply-evidence.b64",
+    }
 
 
 def _settled_service_state(provider: Provider) -> dict[str, dict[str, Any]]:
@@ -375,10 +450,11 @@ def _restamp_step(baseline: str, image_tag: str, *, position: int) -> dict[str, 
     }
 
 
-def build_plan(provider: Provider, *, image_tag: str | None = None) -> dict[str, Any]:
+def build_plan(provider: Provider) -> dict[str, Any]:
     yielded = yield_check(provider)
     release = _newest_relay_release(provider)
     settled = _settled_service_state(provider)
+    envelope = _supply_evidence(provider, release)
 
     services: dict[str, Any] = {}
     for service in SERVICE_ORDER:
@@ -409,11 +485,14 @@ def build_plan(provider: Provider, *, image_tag: str | None = None) -> dict[str,
     blockers: list[str] = []
     steps: list[dict[str, Any]] = []
     position = 0
-    tag = image_tag or ""
     for service in NON_RELAY_SERVICES:
         if service in lagging:
             position += 1
-            steps.append(_dispatch_step(service, tag, position=position))
+            steps.append(
+                _dispatch_step(
+                    service, release["service_tags"][service], position=position
+                )
+            )
 
     # The identity stamp reads LIVE digests for all five services, so naming it
     # while any service still lags would plan a stamp the finalizer must then
@@ -433,8 +512,12 @@ def build_plan(provider: Provider, *, image_tag: str | None = None) -> dict[str,
             "window, so the restamp baseline task definition cannot be read."
         )
     else:
+        # The restamp is an app deploy, so it carries the APP tag: it deploys
+        # the existing immutable image and re-stamps its identity.
         restamp = _restamp_step(
-            app_state["task_definition"], tag, position=position + 1
+            app_state["task_definition"],
+            release["service_tags"]["app"],
+            position=position + 1,
         )
         if lagging:
             blockers.append(
@@ -449,6 +532,23 @@ def build_plan(provider: Provider, *, image_tag: str | None = None) -> dict[str,
             "NOTHING_TO_DO: every non-relay service already matches the release "
             "and the identity baseline is unchanged."
         )
+
+    # ARMABILITY is a separate question from correctness. A plan can be a
+    # perfectly good report and still be undispatchable, and every reason it is
+    # undispatchable is already a fact stated above rather than a new judgement.
+    not_armable: list[str] = []
+    if yielded["status"] != "clear":
+        not_armable.append(f"YIELDED: {yielded['reason']}")
+    if not envelope["present"]:
+        not_armable.append(
+            "NO_SUPPLY_EVIDENCE: without the relay's envelope a dispatch produces "
+            "a receipt the finalizer refuses (SERVICE_SUPPLY_EVIDENCE_MISMATCH), "
+            "so it would mutate staging and prove nothing."
+        )
+    if relay_lagging:
+        not_armable.append("RELAY_SURFACES_NOT_CONVERGED")
+    if not steps:
+        not_armable.append("NOTHING_TO_DO")
 
     return {
         "schema": PLAN_SCHEMA,
@@ -465,19 +565,19 @@ def build_plan(provider: Provider, *, image_tag: str | None = None) -> dict[str,
         "lagging": lagging,
         "steps": steps,
         "blockers": blockers,
-        # Stated, not silently assumed: every step above still needs the
-        # relay's own supply evidence envelope, and the provider hard-requires
-        # relay.workflow_path == .github/workflows/dispatch-staging-deploys.yml,
-        # so this lane cannot mint one. Arming it means the relay publishing
-        # the envelope it already builds, then this lane reusing it verbatim.
+        "supply_evidence": envelope,
+        "armable": not not_armable,
+        "not_armable_because": not_armable,
+        # The provider hard-requires relay.workflow_path ==
+        # .github/workflows/dispatch-staging-deploys.yml, so this lane can never
+        # mint its own envelope and every step must carry the one the relay
+        # minted for THIS release. The relay publishes it as of 2026-09-03, so
+        # this is now a resolved reference rather than a standing blocker: see
+        # supply_evidence above, and armable, which is false whenever it is
+        # missing.
         "arming_prerequisite": {
             "reason": "SUPPLY_EVIDENCE_IS_RELAY_MINTED",
-            "detail": (
-                "deploy-leaf-platform-staging.yml refuses a supply evidence "
-                "envelope whose relay.workflow_path is not the relay's own, so "
-                "every step here must carry the envelope the relay minted for "
-                "this release. The relay does not publish it yet."
-            ),
+            "resolved_by": envelope,
         },
     }
 
@@ -508,6 +608,8 @@ def _render_summary(plan: dict[str, Any]) -> str:
     if plan["blockers"]:
         lines += ["", "Blockers:"]
         lines += [f"- {b}" for b in plan["blockers"]]
+    lines += ["", f"Armable: {'yes' if plan['armable'] else 'no'}"]
+    lines += [f"- blocked by: {r}" for r in plan["not_armable_because"]]
     return "\n".join(lines) + "\n"
 
 
@@ -517,7 +619,6 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--output", required=True)
     parser.add_argument("--summary", required=False)
-    parser.add_argument("--image-tag", required=False, default="")
     return parser
 
 
@@ -528,7 +629,7 @@ def main(argv: list[str]) -> int:
         os.environ.get("TERRAFORM_GITHUB_TOKEN", ""),
     )
     try:
-        plan = build_plan(provider, image_tag=args.image_tag or None)
+        plan = build_plan(provider)
     except ContractError as exc:
         print(f"ERROR:{exc}", file=sys.stderr)
         return 2
