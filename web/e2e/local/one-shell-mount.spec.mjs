@@ -191,6 +191,10 @@ test.describe('route matrix, rail ON', () => {
       const rgb = (v) => v.match(/\d+/g).slice(0, 3).map(Number)
       return {
         navRadius: cs('aside.nav').borderRadius,
+        // Slice D: on drafting surfaces the tool rail hides behind the band
+        // (zero width); its inset is asserted only while it is visible.
+        navHidden: !!document.querySelector('aside.nav[data-spine="hidden"]'),
+        navWidth: document.querySelector('aside.nav').getBoundingClientRect().width,
         navLeft: document.querySelector('aside.nav').getBoundingClientRect().left,
         railRight: window.innerWidth - document.querySelector('aside.rail').getBoundingClientRect().right,
         headerBg: rgb(cs('header.top').backgroundColor),
@@ -198,7 +202,8 @@ test.describe('route matrix, rail ON', () => {
       }
     })
     expect(chrome.navRadius).toBe('8px')
-    expect(chrome.navLeft).toBeGreaterThanOrEqual(12)
+    if (chrome.navHidden) expect(chrome.navWidth).toBeLessThanOrEqual(1)
+    else expect(chrome.navLeft).toBeGreaterThanOrEqual(12)
     expect(chrome.railRight).toBeGreaterThanOrEqual(12)
     expect(Math.max(...chrome.headerBg)).toBeLessThan(40)
     expect(Math.max(...chrome.footerBg)).toBeLessThan(40)
@@ -357,10 +362,10 @@ test.describe('route matrix, rail ON', () => {
     })
     expect(sessionResponse.status()).toBe(200)
     const intake = (await sessionResponse.json()).intake
-    const target = intake.polylines.find((entity) => (
+    const candidates = intake.polylines.filter((entity) => (
       entity.handle && entity.closed === true && Array.isArray(entity.pts) && entity.pts.length >= 3
     ))
-    expect(target, 'the sample drawing must carry a closed polyline').toBeTruthy()
+    expect(candidates.length, 'the sample drawing must carry a closed polyline').toBeGreaterThan(0)
 
     await setRail(page, '1')
     await page.goto('/app')
@@ -373,11 +378,27 @@ test.describe('route matrix, rail ON', () => {
     // dock hosts the same element, never a re-implementation).
     await expect(dock.getByText('Click an entity to select it')).toBeVisible({ timeout: 20_000 })
 
-    const centroid = target.pts.reduce((acc, pt) => [acc[0] + pt[0] / target.pts.length, acc[1] + pt[1] / target.pts.length], [0, 0])
-    const clientPoint = await page.evaluate(([wx, wy]) => (
-      document.querySelector('.studio-ground .viewer-canvas').__cadviewer.project(wx, wy)
-    ), centroid)
-    await page.mouse.click(clientPoint.x, clientPoint.y)
+    // Floating instruments (the dock, the result block, the view cluster)
+    // sit ON the drawing, so pick the first closed polyline whose centroid
+    // projects to a point the pointer chain delivers to the ground, not to
+    // an instrument: the same rule a user's click follows.
+    const pick = await page.evaluate((cands) => {
+      const canvas = document.querySelector('.studio-ground .viewer-canvas')
+      const ground = document.querySelector('.studio-ground')
+      for (let i = 0; i < cands.length; i += 1) {
+        const pts = cands[i].pts
+        const cx = pts.reduce((a, p) => a + p[0] / pts.length, 0)
+        const cy = pts.reduce((a, p) => a + p[1] / pts.length, 0)
+        const pt = canvas.__cadviewer.project(cx, cy)
+        if (!pt || pt.x < 0 || pt.y < 0 || pt.x > window.innerWidth || pt.y > window.innerHeight) continue
+        const el = document.elementFromPoint(pt.x, pt.y)
+        if (el && ground.contains(el)) return { index: i, x: pt.x, y: pt.y }
+      }
+      return null
+    }, candidates.slice(0, 500))
+    expect(pick, 'a closed polyline must be clickable on the drawing, clear of the instruments').toBeTruthy()
+    const target = candidates[pick.index]
+    await page.mouse.click(pick.x, pick.y)
 
     await expect(dock.locator('.selection-readout')).toContainText('Polyline', { timeout: 10_000 })
     await expect(dock.locator('.selection-readout')).toContainText(target.handle)

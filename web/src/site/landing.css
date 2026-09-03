@@ -1530,3 +1530,17 @@
   .studio-shell aside.nav, .studio-shell aside.rail { margin: 8px 8px 0; }
   .cockpit-status { display: none; }
 }
+
+/* W4d Slice D, placed LAST on purpose: the drafting toolbar's glass is
+   re-declared at .78 + blur by the older W4c rule above (same specificity),
+   which made the opaque-assembly override earlier in this file dead code
+   (kimi on #946). The assembly is one material, tab strip to toolbar. */
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar::before {
+  background: rgba(12, 12, 13, .96); backdrop-filter: none;
+}
+/* The hidden nav posture must beat the spine rule above it (same
+   specificity, earlier): the .app ancestor lifts this one, and it sits last. */
+.studio-shell .app aside.nav[data-spine="hidden"] {
+  width: 0; min-width: 0; margin: 0; padding: 0; border: 0; box-shadow: none;
+  visibility: hidden; overflow: hidden;
+}
