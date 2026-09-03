@@ -245,10 +245,13 @@ Also in this slice:
 
 ### Left alone, on purpose
 
-- `ProductSurfaceTabs.jsx:290-298` keys three notes on `surface.id`. Those are COPY (the
-  browser composition note, the solar template sentence, the iOS credential warning), not
-  chrome gates: they choose prose, never whether an element mounts. Slice 9's copy work
-  owns them.
+- `ProductSurfaceTabs.jsx` no longer compares `surface.id` to anything (slice 2
+  fix-forward). Its project-slot gate, the one mount gate #978 missed
+  (`showProjectState = surface.id !== 'ios'`), reads `chrome.projectSlot` like App.jsx does;
+  the three per-surface notes (browser composition, the solar template sentence, the iOS
+  credential warning) are COPY and moved to a `SURFACE_NOTES` lookup keyed by id, text
+  byte-identical. `surfaceGates.test.js` now scans this file and `SurfaceGrounds.jsx` too,
+  with a second probe for `surface` / `surface.id` comparisons.
 - `App.jsx:3162`, `:3216` and `:3514` still call `groundShowsDrawing(activeSurface)`
   directly. They are already contract-driven (`groundShowsDrawing` is derived from
   `contract.ground` as of this slice), and `siteRootOneShell.test.js` pins their exact

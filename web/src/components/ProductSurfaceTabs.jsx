@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { PRODUCT_SURFACES, SHARED_WORKSPACE_CAPABILITIES, productSurface } from '../site/productSurfaces.js'
+import { PRODUCT_SURFACES, SHARED_WORKSPACE_CAPABILITIES, productSurface, surfaceContract } from '../site/productSurfaces.js'
 import { EMPTY_WORKSPACE_PROJECT, WORKSPACE_PROJECT_COPY } from '../site/workspaceProjectState.js'
 import { moveRovingTab } from '../lib/roving.js'
 
@@ -233,17 +233,41 @@ export function WorkspaceProjectSlot({ state, onCreateProject }) {
 // component can enforce; owning it here means every surface gets it by
 // construction. projectSlot stays for what genuinely IS caller-specific -- the
 // iOS ship lane, /try's switcher chip -- and renders above it.
+// Per-surface COPY under the capability columns. Copy, not chrome: it chooses
+// prose, never whether an element mounts, so it lives in a lookup keyed by id
+// rather than behind a surface-id comparison (the surfaceGates scan forbids
+// those in every shell file, this one included). Text is byte-identical to
+// the three inline notes it replaced.
+const SURFACE_NOTES = Object.freeze({
+  browser: (workspaceProject) => (
+    <p className="tc-product-note" data-testid="browser-composition-note">
+      {workspaceProject.kind === 'project'
+        ? 'Project-scoped files, conversation, and browser composition are live on the shared identity and project rail.'
+        : 'A workspace project adds project-scoped files, conversation, and browser composition on the shared identity and project rail.'}
+    </p>
+  ),
+  solar: () => <p className="tc-product-note">Solar work runs the shared tenant catalog’s stringing and placement families against the versioned LEAF solar template in the CAD workspace.</p>,
+  ios: () => <p className="tc-product-note">A mounted Apple grant and terminal ship-lane readiness receipt are required. This browser never asks for Apple credentials.</p>,
+})
+
+function surfaceNote(surfaceId, workspaceProject) {
+  const render = Object.prototype.hasOwnProperty.call(SURFACE_NOTES, surfaceId) ? SURFACE_NOTES[surfaceId] : null
+  return render ? render(workspaceProject) : null
+}
+
 export function ProductSurfaceFrame({
   activeSurface, states, projectSlot, catalog, catalogError,
   workspaceProject = EMPTY_WORKSPACE_PROJECT, onCreateProject = null,
 }) {
   const surface = productSurface(activeSurface)
   const status = states[surface.id]
-  // iOS owns its whole project line (the ship lane mounts there instead).
-  // Every other surface ALWAYS renders a state: sol-critic finding 2 was that
-  // a null default let a call site drop the Browser/Solar state silently.
-  // Omitting the prop now degrades to the honest empty state, never to nothing.
-  const showProjectState = surface.id !== 'ios'
+  // The surface whose contract mounts the ios ship lane in projectSlot owns its
+  // whole project line; every other surface ALWAYS renders a state: sol-critic
+  // finding 2 was that a null default let a call site drop the Browser/Solar
+  // state silently. Omitting the prop now degrades to the honest empty state,
+  // never to nothing. Read from the contract (slice 2 fix-forward): this was
+  // the one mount gate still keyed on a surface id after #978.
+  const showProjectState = surfaceContract(surface.id).chrome.projectSlot !== 'ios-surface'
   return (
     <section
       id="product-surface-panel"
@@ -287,15 +311,7 @@ export function ProductSurfaceFrame({
           (WorkspaceProjectSlot's drawing-only explainer) but left this note
           unconditional, so a drawing-only screen claimed these were already
           live one paragraph below saying they were not. */}
-      {surface.id === 'browser' && (
-        <p className="tc-product-note" data-testid="browser-composition-note">
-          {workspaceProject.kind === 'project'
-            ? 'Project-scoped files, conversation, and browser composition are live on the shared identity and project rail.'
-            : 'A workspace project adds project-scoped files, conversation, and browser composition on the shared identity and project rail.'}
-        </p>
-      )}
-      {surface.id === 'solar' && <p className="tc-product-note">Solar work runs the shared tenant catalog’s stringing and placement families against the versioned LEAF solar template in the CAD workspace.</p>}
-      {surface.id === 'ios' && <p className="tc-product-note">A mounted Apple grant and terminal ship-lane readiness receipt are required. This browser never asks for Apple credentials.</p>}
+      {surfaceNote(surface.id, workspaceProject)}
       {/* No "Open ..." buttons here (operator directive 2026-09-01): the TABS
           are the navigation — each tab opens its surface inline, client-side.
           Solar renders the live CAD workspace beneath this frame; iOS mounts
