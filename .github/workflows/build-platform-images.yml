@@ -3596,8 +3596,8 @@ jobs:
 
       - name: Consume the release manifest and accepted staging execution receipt
         env:
-          # The job-level GH_TOKEN is the cross-repo PAT for the
-          # acceptance-repo API reads. The same-repo main fetch needs only
+          # ACCEPTANCE_TOKEN is the cross-repo PAT for acceptance reads.
+          # The same-repo main fetch needs only
           # a same-repo read, so it gets the workflow's own token under a
           # separate name and the PAT never enters the git header.
           MAIN_FETCH_TOKEN: ${{ github.token }}
@@ -3612,6 +3612,7 @@ jobs:
             exit 1
           }
           acceptance_api() {
+            printf 'Acceptance provider GET %s\n' "$1" >&2
             GH_TOKEN="$ACCEPTANCE_TOKEN" gh api "$@"
           }
           [[ "$ACCEPTANCE_ARTIFACT" =~ ^staging-authored-execute-([a-z0-9][a-z0-9-]{5,49})-run-${ACCEPTANCE_RUN_ID}-attempt-${ACCEPTANCE_RUN_ATTEMPT}$ ]]
