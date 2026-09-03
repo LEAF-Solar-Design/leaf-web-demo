@@ -49,6 +49,7 @@ import EngineSessionProvider from './cadedit/EngineSessionProvider.jsx'
 import EngineRibbonClusters from './cadedit/EngineRibbonClusters.jsx'
 import CommandLineArmer from './cadedit/CommandLineArmer.jsx'
 import EngineDocumentView from './cadedit/EngineDocumentView.jsx'
+import CanvasPointPicker from './cadedit/CanvasPointPicker.jsx'
 import { COCKPIT_COMMAND_EVENT, parseDrawingCommand } from './lib/commandWords.js'
 import { markInstant } from './lib/instant.js'
 import { agentBannerFor } from './lib/agentBanner.js'
@@ -2886,6 +2887,22 @@ export default function App() {
                   }}
                 />
               )}
+              {/* W4f slice A1: a click on the drawing answers the armed
+                  prompt's point steps; while a point command is live the
+                  card carries data-cockpit-picking and the console's
+                  click-to-select stands aside (the Viewer callback below). */}
+              {ENV_CAD_EDIT && (
+                <CanvasPointPicker
+                  viewerRef={viewerRef}
+                  ground={studioGround}
+                  onPicking={(live) => {
+                    const el = workspaceCardRef.current
+                    if (!el) return
+                    if (live) el.dataset.cockpitPicking = '1'
+                    else delete el.dataset.cockpitPicking
+                  }}
+                />
+              )}
             </DraftingRibbon>
           )}
           <div className="viewer-toolbar">
@@ -3086,7 +3103,13 @@ export default function App() {
                   markers={overlay?.markers}
                   overlayPolylines={overlay?.polylines}
                   selectedHandle={selectedHandle}
-                  onSelectEntity={setSelectedHandle}
+                  // W4f slice A1: a click that answers an armed point prompt
+                  // is not a selection (the picker stamps the card while a
+                  // point command is live).
+                  onSelectEntity={(handle) => {
+                    if (workspaceCardRef.current?.dataset.cockpitPicking === '1') return
+                    setSelectedHandle(handle)
+                  }}
                   pendingEdit={pendingEdit || writeGhost}
                   background={studioGround ? 'transparent' : undefined}
                 />

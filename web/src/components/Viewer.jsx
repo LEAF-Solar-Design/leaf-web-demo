@@ -404,6 +404,10 @@ const Viewer = forwardRef(function Viewer(
     const selectionGroup = new THREE.Group(); scene.add(selectionGroup)
     const pendingGroup = new THREE.Group(); scene.add(pendingGroup)
     const stringGroup = new THREE.Group(); scene.add(stringGroup)
+    // W4f slice A1: the command line's rubber band (the shape being drawn,
+    // from the picked points to the cursor); set imperatively per pointer
+    // move, never through React state, never rebuilding the scene.
+    const rubberGroup = new THREE.Group(); scene.add(rubberGroup)
 
     // rendered-count assertion (acceptance: rendered == intake lengths)
     // eslint-disable-next-line no-console
@@ -526,7 +530,7 @@ const Viewer = forwardRef(function Viewer(
     stateRef.current = {
       scene, camera, renderer, controls, layerGroups, pickIndex,
       highlightGroup, markerGroup, overlayGroup, selectionGroup, pendingGroup,
-      stringGroup, stringAnim: null,
+      stringGroup, rubberGroup, stringAnim: null,
       fitToBounds, dataSpan, tokens,
     }
 
@@ -644,6 +648,30 @@ const Viewer = forwardRef(function Viewer(
       if (!s) return null
       return cameraPose(
         s.camera, s.controls.target, s.renderer.domElement.getBoundingClientRect())
+    },
+    // W4f slice A1: the rubber band. `pts` is [[x,y],...] in world units
+    // (closed joins the last point back to the first); null clears it. One
+    // LineSegments in the selection colour, depth-tested off so it reads
+    // over the drawing; called per pointer move, so it disposes what it
+    // replaces and allocates nothing when clearing an empty band.
+    setRubberBand: (pts, closed = false) => {
+      const s = stateRef.current
+      if (!s) return false
+      const g = s.rubberGroup
+      for (const child of g.children) { child.geometry?.dispose?.(); child.material?.dispose?.() }
+      g.clear()
+      if (!Array.isArray(pts) || pts.length < 2) return true
+      const pos = []
+      const n = pts.length
+      for (let i = 0; i < n - 1; i++) pos.push(pts[i][0], pts[i][1], 2, pts[i + 1][0], pts[i + 1][1], 2)
+      if (closed) pos.push(pts[n - 1][0], pts[n - 1][1], 2, pts[0][0], pts[0][1], 2)
+      const geo = new THREE.BufferGeometry()
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
+      const mat = new THREE.LineBasicMaterial({ color: s.tokens.select, depthTest: false })
+      const mesh = new THREE.LineSegments(geo, mat)
+      mesh.renderOrder = 10
+      g.add(mesh)
+      return true
     },
   }), [])
 

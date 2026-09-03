@@ -458,7 +458,11 @@
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-verb { color: var(--ck-cmd); font-size: 12px; letter-spacing: .02em; white-space: nowrap; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-step { display: inline-flex; align-items: center; gap: 3px; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-ask { white-space: nowrap; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-ask { white-space: nowrap; color: #9a9a9a; }
+  /* W4f slice A1: the CURRENT step is the one holding the caret (a click on
+     the drawing moves it on), lit like the reference's active prompt; the
+     others stay dim. Pure CSS, no state. */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-step:focus-within .cp-ask { color: var(--ck-ink); }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-input {
     width: 48px; height: 21px; box-sizing: border-box; padding: 0 4px; margin: 0;
     font: 400 12px/19px var(--ck-font); color: #e6e6e6; background: #2a2a2a; border: 1px solid #3f3f3f; border-radius: 0;
