@@ -2127,6 +2127,151 @@ class ConvergenceFinalizerTests(unittest.TestCase):
         # for that mode, rather than the set quietly widening.
         self.assertEqual(subject.SERVICE_DEPLOY_MODES, {"normal", "prewarm"})
 
+    # `x not in <set>` HASHES x, so a list- or dict-valued provider field raised
+    # a bare `TypeError: unhashable type` straight out of the finalizer instead
+    # of naming a reason code, the exact opposite of a gate whose whole contract
+    # is to fail CLOSED. PR #945 fixed this for the deploy_mode check it
+    # introduced; the three tests below cover every other closed-vocabulary
+    # membership test in this file that a provider value can reach. Measured on
+    # this tree 2026-09-02: all fourteen sites raised TypeError before the
+    # isinstance guards, and no hashable value changed the reason code it
+    # already produced (the second half of each table pins that).
+    UNHASHABLE = (["x"], {"a": 1})
+
+    def test_receipt_closed_labels_fail_closed_on_unhashable_values(self) -> None:
+        def sealed(mutate, value) -> dict:
+            receipt = service_receipt(
+                "app",
+                306,
+                predecessor="leaf-platform-app:2",
+                terminal_td="leaf-platform-app:3",
+                with_identity=True,
+            )
+            mutate(receipt, value)
+            # Re-seal, or the checksum gate fires before the check under test.
+            receipt["receipt_sha256"] = ""
+            receipt["receipt_sha256"] = hashlib.sha256(canonical(receipt)).hexdigest()
+            return receipt
+
+        # (field, reason, mutation). The two `status` rows reach the shared
+        # _strict_slot helper, which every receipt slot runs through.
+        fields = (
+            ("requested.app_deploy_intent", "SERVICE_RECEIPT_REQUEST_INVALID",
+             lambda receipt, value: receipt["requested"].__setitem__("app_deploy_intent", value)),
+            ("preflight_result", "SERVICE_OUTCOME_LABEL_INVALID",
+             lambda receipt, value: receipt.__setitem__("preflight_result", value)),
+            ("deploy_result", "SERVICE_OUTCOME_LABEL_INVALID",
+             lambda receipt, value: receipt.__setitem__("deploy_result", value)),
+            ("terminal_result", "SERVICE_OUTCOME_LABEL_INVALID",
+             lambda receipt, value: receipt.__setitem__("terminal_result", value)),
+            ("path", "SERVICE_RECEIPT_INVALID",
+             lambda receipt, value: receipt.__setitem__("path", value)),
+            ("facts.prior_job_status.value", "SERVICE_OUTCOME_LABEL_INVALID",
+             lambda receipt, value: receipt["facts"]["prior_job_status"].__setitem__("value", value)),
+            ("facts.service.status", "SERVICE_RECEIPT_FACTS_INVALID",
+             lambda receipt, value: receipt["facts"]["service"].__setitem__("status", value)),
+            ("failed_stage.status", "SERVICE_RECEIPT_FAILED_STAGE_INVALID",
+             lambda receipt, value: receipt["failed_stage"].__setitem__("status", value)),
+        )
+        for field, reason, mutate in fields:
+            for value in self.UNHASHABLE:
+                with self.subTest(field=field, value=value):
+                    with self.assertRaisesRegex(subject.ContractError, reason):
+                        subject._service_receipt(sealed(mutate, value))
+            # The isinstance guard must not shift which gate claims an
+            # already-handled value: a wrong-but-hashable type keeps the reason
+            # code it produced before, so the fix widened nothing.
+            for value in (None, 1, True, "bogus"):
+                with self.subTest(field=field, value=value):
+                    with self.assertRaisesRegex(subject.ContractError, reason):
+                        subject._service_receipt(sealed(mutate, value))
+
+    def test_rollback_evidence_closed_labels_fail_closed_on_unhashable_values(self) -> None:
+        baseline = service_receipt(
+            "app", 306, predecessor="leaf-platform-app:2", terminal_td="leaf-platform-app:3"
+        )["facts"]["rollback"]
+        kwargs = dict(
+            mutation_count=1,
+            provider_conclusion="success",
+            terminal_healthy=True,
+            terminal_td="leaf-platform-app:3",
+            predecessor_td="leaf-platform-app:2",
+        )
+        self.assertEqual(subject._rollback_outcome(baseline, **kwargs), "not_required")
+
+        for field in (
+            "bluegreen_step", "direct_failure_step", "direct_cancel_step",
+            "bluegreen_detail", "authority_result",
+        ):
+            for value in (*self.UNHASHABLE, None, 1, True, "bogus"):
+                with self.subTest(field=field, value=value):
+                    evidence = copy.deepcopy(baseline)
+                    evidence["value"][field] = value
+                    with self.assertRaisesRegex(
+                        subject.ContractError, "SERVICE_ROLLBACK_EVIDENCE_INVALID"
+                    ):
+                        subject._rollback_outcome(evidence, **kwargs)
+
+    def test_provider_run_and_relay_step_labels_fail_closed_on_unhashable_values(self) -> None:
+        def provider_run(conclusion: object) -> dict:
+            return {
+                "path": subject.DEPLOY_WORKFLOW,
+                "id": 303,
+                "run_attempt": 1,
+                "event": "workflow_dispatch",
+                "head_sha": TF_HEAD,
+                "head_branch": "main",
+                "status": "completed",
+                "conclusion": conclusion,
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:01Z",
+            }
+
+        parsed = subject._provider_run(
+            provider_run("success"), subject.TF_REPOSITORY, subject.DEPLOY_WORKFLOW, "workflow_dispatch"
+        )
+        self.assertEqual(parsed["conclusion"], "success")
+        # None is what the API sends for a run still in flight, so it has to
+        # keep landing on the same reason code the unhashable cases now use.
+        for value in (*self.UNHASHABLE, None, 1, True, "bogus"):
+            with self.subTest(conclusion=value):
+                with self.assertRaisesRegex(subject.ContractError, "PROVIDER_RUN_MISMATCH"):
+                    subject._provider_run(
+                        provider_run(value), subject.TF_REPOSITORY, subject.DEPLOY_WORKFLOW, "workflow_dispatch"
+                    )
+
+        # The relay step-name test is `not in <mapping>`, which hashes too. Its
+        # miss path is `continue`, so an unhashable name has to fall through to
+        # the cardinality check rather than crash the scan.
+        endpoint = f"/actions/runs/{RELAY_RUN}/attempts/1/jobs?per_page=100"
+        steps = [
+            {"name": "Deploy each staging service in turn and prove each one landed",
+             "number": 1, "conclusion": "failure"},
+            {"name": "Publish the convergence receipt", "number": 2, "conclusion": "skipped"},
+        ]
+
+        def relay_provider(step_name: object) -> FakeProvider:
+            provider = FakeProvider()
+            jobs = copy.deepcopy(steps)
+            jobs[0]["name"] = step_name
+            provider.json_values[(subject.APP_REPOSITORY, endpoint)] = {
+                "total_count": 1,
+                "jobs": [{"name": "dispatch", "steps": jobs}],
+            }
+            return provider
+
+        relay = {"run_id": RELAY_RUN, "run_attempt": 1}
+        self.assertEqual(
+            subject._relay_failure_evidence(relay_provider(steps[0]["name"]), relay)["status"],
+            "produced",
+        )
+        for value in (*self.UNHASHABLE, None, 1, True, "bogus"):
+            with self.subTest(step_name=value):
+                with self.assertRaisesRegex(
+                    subject.ContractError, "RELAY_FAILURE_EVIDENCE_INVALID"
+                ):
+                    subject._relay_failure_evidence(relay_provider(value), relay)
+
     def test_failed_step_must_match_jobs_api(self) -> None:
         provider = fixture()
         provider.json_values[(subject.TF_REPOSITORY, "/actions/runs/303/attempts/1/jobs?per_page=100")]["jobs"][0]["steps"][0]["conclusion"] = "failure"

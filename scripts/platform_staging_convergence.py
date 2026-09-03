@@ -381,6 +381,10 @@ def _provider_run(raw: Any, repository: str, workflow: str, event: str) -> dict[
         run["workflow_path"] != workflow
         or run["event"] != event
         or run["status"] != "completed"
+        # isinstance first: `x not in <set>` raises a bare TypeError on an
+        # unhashable provider value, and this gate owes its caller a closed
+        # reason code rather than a traceback out of the finalizer.
+        or not isinstance(run["conclusion"], str)
         or run["conclusion"] not in TERMINAL_CONCLUSIONS
         or not all(isinstance(run[key], str) for key in ("created_at", "updated_at"))
     ):
@@ -1033,7 +1037,9 @@ def _relay_failure_evidence(provider: Provider, relay: dict[str, Any]) -> dict[s
         "Publish the convergence receipt": "skipped",
     }
     for step in job["steps"]:
-        if not isinstance(step, dict) or step.get("name") not in expected:
+        # isinstance first: `x not in <mapping>` hashes, so an unhashable
+        # provider step name would raise TypeError instead of being skipped.
+        if not isinstance(step, dict) or not isinstance(step.get("name"), str) or step["name"] not in expected:
             continue
         name = step["name"]
         if name in selected or step.get("conclusion") != expected[name]:
@@ -1055,7 +1061,13 @@ def _relay_failure_evidence(provider: Provider, relay: dict[str, Any]) -> dict[s
 
 
 def _strict_slot(value: Any, reason: str) -> dict[str, Any]:
-    if not isinstance(value, dict) or value.get("status") not in {"produced", "not_produced"}:
+    # isinstance first: `x not in <set>` raises a bare TypeError on an
+    # unhashable provider status, and every slot in a receipt runs through here.
+    if (
+        not isinstance(value, dict)
+        or not isinstance(value.get("status"), str)
+        or value["status"] not in {"produced", "not_produced"}
+    ):
         raise ContractError(reason)
     expected = {"status", "value"} if value["status"] == "produced" else {"status"}
     return _exact(value, expected, reason)
@@ -1096,7 +1108,14 @@ def _service_receipt(value: Any) -> dict[str, Any]:
     _bounded_tree(receipt, "SERVICE_RECEIPT_TEXT_INVALID", maximum=MAX_PROVIDER_JSON_BYTES)
     if receipt["schema"] != SERVICE_RECEIPT_SCHEMA or receipt["environment"] != ENVIRONMENT:
         raise ContractError("SERVICE_RECEIPT_INVALID")
-    if any(receipt[key] not in SERVICE_RESULT_LABELS for key in ("preflight_result", "deploy_result", "terminal_result")):
+    # Every closed-vocabulary check below puts isinstance first: `x not in
+    # <set>` raises a bare TypeError on an unhashable provider value, and this
+    # gate must fail CLOSED with a reason code rather than crash the finalizer
+    # with a traceback.
+    if any(
+        not isinstance(receipt[key], str) or receipt[key] not in SERVICE_RESULT_LABELS
+        for key in ("preflight_result", "deploy_result", "terminal_result")
+    ):
         raise ContractError("SERVICE_OUTCOME_LABEL_INVALID")
     provider = _exact(
         receipt["provider"],
@@ -1126,12 +1145,11 @@ def _service_receipt(value: Any) -> dict[str, Any]:
     requested = _exact(receipt["requested"], requested_keys, "SERVICE_RECEIPT_REQUEST_INVALID")
     if requested["service"] not in SERVICE_ORDER:
         raise ContractError("SERVICE_RECEIPT_REQUEST_INVALID")
-    # isinstance first: `x not in <set>` raises TypeError on an unhashable
-    # provider value, and this gate must fail CLOSED with a reason code
-    # rather than crash the finalizer with a traceback.
     if not isinstance(requested["deploy_mode"], str) or requested["deploy_mode"] not in SERVICE_DEPLOY_MODES:
         raise ContractError("SERVICE_RECEIPT_REQUEST_INVALID")
-    if requested["app_deploy_intent"] not in {"forward", "configuration", "authority-bootstrap", "rollback"}:
+    if not isinstance(requested["app_deploy_intent"], str) or requested["app_deploy_intent"] not in {
+        "forward", "configuration", "authority-bootstrap", "rollback",
+    }:
         raise ContractError("SERVICE_RECEIPT_REQUEST_INVALID")
     _requested_evidence_slot(requested["consumer_contract"])
     _requested_evidence_slot(requested["supply_evidence"])
@@ -1237,7 +1255,10 @@ def _service_receipt(value: Any) -> dict[str, Any]:
     ):
         raise ContractError("SERVICE_RECEIPT_FACTS_INVALID")
     prior_status = facts["prior_job_status"]
-    if prior_status["status"] == "produced" and prior_status["value"] not in {"success", "failure", "cancelled"}:
+    if prior_status["status"] == "produced" and (
+        not isinstance(prior_status["value"], str)
+        or prior_status["value"] not in {"success", "failure", "cancelled"}
+    ):
         raise ContractError("SERVICE_OUTCOME_LABEL_INVALID")
     identity_slot = facts["deployment_identity"]
     if identity_slot["status"] == "produced":
@@ -1245,7 +1266,9 @@ def _service_receipt(value: Any) -> dict[str, Any]:
         if not isinstance(identity_value["body"], dict):
             raise ContractError("SERVICE_RECEIPT_FACTS_INVALID")
         _sha64(identity_value["sha256"], "SERVICE_RECEIPT_FACTS_INVALID")
-    if receipt["path"] not in {"deploy", "digest_aware_skip", "digest_aware_preflight"}:
+    if not isinstance(receipt["path"], str) or receipt["path"] not in {
+        "deploy", "digest_aware_skip", "digest_aware_preflight",
+    }:
         raise ContractError("SERVICE_RECEIPT_INVALID")
     checksum = receipt["receipt_sha256"]
     _sha64(checksum, "SERVICE_RECEIPT_CHECKSUM_INVALID")
@@ -1330,10 +1353,19 @@ def _rollback_outcome(
         {"bluegreen_step", "bluegreen_detail", "direct_failure_step", "direct_cancel_step", "authority_result"},
         "SERVICE_ROLLBACK_EVIDENCE_INVALID",
     )
+    # isinstance first: `x not in <set>` raises a bare TypeError on an
+    # unhashable provider value, and this gate owes its caller a closed reason
+    # code rather than a traceback out of the finalizer. Every later read of
+    # these five fields is safe because this check proved them strings.
     for key in ("bluegreen_step", "direct_failure_step", "direct_cancel_step"):
-        if raw[key] not in ROLLBACK_STEP_RESULTS:
+        if not isinstance(raw[key], str) or raw[key] not in ROLLBACK_STEP_RESULTS:
             raise ContractError("SERVICE_ROLLBACK_EVIDENCE_INVALID")
-    if raw["bluegreen_detail"] not in ROLLBACK_DETAIL_CODES or raw["authority_result"] not in ROLLBACK_AUTHORITY_CODES:
+    if (
+        not isinstance(raw["bluegreen_detail"], str)
+        or raw["bluegreen_detail"] not in ROLLBACK_DETAIL_CODES
+        or not isinstance(raw["authority_result"], str)
+        or raw["authority_result"] not in ROLLBACK_AUTHORITY_CODES
+    ):
         raise ContractError("SERVICE_ROLLBACK_EVIDENCE_INVALID")
     rollback_steps = ("bluegreen_step", "direct_failure_step", "direct_cancel_step")
     handler_succeeded = any(raw[key] == "success" for key in rollback_steps)
