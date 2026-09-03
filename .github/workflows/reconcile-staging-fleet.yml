@@ -1,12 +1,14 @@
-name: Reconcile staging fleet (report only)
+name: Reconcile staging fleet
 
 # ---------------------------------------------------------------------------
-# REPORT ONLY. This lane has no write permission to anything and dispatches
-# nothing. It publishes the plan that WOULD bring the non-relay services onto
-# the newest converged release and then stamp the five-service deployment
-# identity the convergence receipt needs. Arming it is a later, deliberate
-# change, and it is blocked on a prerequisite the plan itself names (see
-# ARMING below).
+# DORMANT BY DEFAULT. The dispatch path below ships complete and tested, but
+# RECONCILE_ARMED is "false", so a scheduled run only publishes the plan that
+# WOULD bring the non-relay services onto the newest converged release and then
+# stamp the five-service deployment identity the convergence receipt needs.
+# Arming the schedule is a one-line change to that flag, reviewed on its own;
+# a single run can be armed deliberately with the workflow_dispatch input,
+# which is how this gets exercised for real before any schedule mutates
+# anything. Same idiom as the build workflow's DIGEST_AWARE_CONVERGENCE_ENABLED.
 #
 # WHY THIS LANE EXISTS. The staging relay converges web and app only, and says
 # so: automatic_surfaces ["web","app"], every other service
@@ -29,30 +31,46 @@ name: Reconcile staging fleet (report only)
 # therefore targets the NEWEST converged release, is EXPECTED to skip releases,
 # and yields to the relay rather than competing with it.
 #
-# YIELDS, FAIL CLOSED. The planner stands down whenever a relay run or any
-# staging deploy is unsettled, and treats an unreadable run list as busy. The
-# relay already abandons its SECOND service when main moves inside its window,
-# so taking the lock from it would worsen the split this is meant to close.
-# Standing down costs one idle cycle; the schedule brings it straight back.
+# YIELDS, FAIL CLOSED, TWICE. The planner stands down whenever a relay run or
+# any staging deploy is unsettled, and treats an unreadable run list as busy.
+# The armed path re-checks that before EVERY leg, because the plan's yield is
+# minutes old by the time a leg dispatches and the relay may have started
+# since. The relay owns the product surfaces and already abandons its SECOND
+# service when main moves inside its window, so it wins every race here and
+# this lane exits cleanly rather than queueing ahead of it. Standing down costs
+# one tick; the schedule brings it straight back, and the next plan resumes
+# from wherever the fleet was left.
 #
-# ARMING. Every step the plan names still needs the relay's own supply evidence
-# envelope. The provider hard-requires that envelope's relay.workflow_path to be
-# ".github/workflows/dispatch-staging-deploys.yml", so this lane cannot mint
-# one, and the relay does not publish the one it builds. Arming therefore means
-# the relay publishing that envelope and this lane reusing it verbatim, which is
-# a separate change against a file with its own pinned shape tests. The plan
-# reports this as arming_prerequisite rather than leaving it to be discovered.
+# THE ENVELOPE. Every dispatched leg carries the relay's own supply evidence
+# envelope, downloaded from the relay run that minted it and passed through
+# byte for byte. This lane can never mint one: the provider requires
+# relay.workflow_path to be ".github/workflows/dispatch-staging-deploys.yml".
+# Without it a deploy would mutate staging and produce a receipt the finalizer
+# refuses (SERVICE_SUPPLY_EVIDENCE_MISMATCH), so armable is false whenever the
+# envelope is missing, which is the ordinary answer for any release converged
+# before the relay began publishing it.
 # ---------------------------------------------------------------------------
 
 on:
   schedule:
-    # Every 30 minutes. The lane is cheap (a bounded set of GET reads) and
-    # coalescing means a missed tick costs nothing: the next one targets the
-    # newest converged release anyway.
+    # Every 30 minutes. The lane is cheap when it only reports (a bounded set
+    # of GET reads) and coalescing means a missed tick costs nothing: the next
+    # one targets the newest converged release anyway.
     - cron: "7,37 * * * *"
   workflow_dispatch:
+    inputs:
+      arm:
+        description: "Dispatch THIS run's plan instead of only reporting it"
+        type: boolean
+        required: false
+        default: false
 
-# Read only, deliberately. This lane cannot dispatch even if its code tried.
+# SOURCE-CONTROLLED AND DORMANT. Flipping this to "true" is what arms the
+# SCHEDULE, and it is pinned "false" by a gate test so the flip cannot ride
+# along inside an unrelated change.
+env:
+  RECONCILE_ARMED: "false"
+
 permissions:
   actions: read
   contents: read
@@ -65,7 +83,9 @@ jobs:
   plan:
     name: Resolve the staging fleet reconcile plan
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Long enough for a full armed sequence behind the shared staging lock
+    # (~63 minutes of legs at the medians above) plus its own polling.
+    timeout-minutes: 90
     steps:
       - name: Check out the planner
         uses: actions/checkout@v4
@@ -90,3 +110,126 @@ jobs:
           path: staging-fleet-reconcile-plan.json
           if-no-files-found: error
           retention-days: 14
+
+      # The arming decision is its own step, holding NO token, so the reason a
+      # run did or did not mutate staging is a readable line rather than an
+      # expression buried on the step that acts.
+      - name: Decide whether this run may act on the plan
+        id: arm
+        env:
+          ARMED_BY_DEFAULT: ${{ env.RECONCILE_ARMED }}
+          ARMED_BY_INPUT: ${{ inputs.arm }}
+        run: |
+          set -euo pipefail
+          ARMABLE=$(jq -r '.armable' staging-fleet-reconcile-plan.json)
+          WANTED=false
+          if [ "$ARMED_BY_DEFAULT" = "true" ] || [ "$ARMED_BY_INPUT" = "true" ]; then
+            WANTED=true
+          fi
+          # Fails CLOSED: anything that is not the exact string "true" on both
+          # sides leaves this reporting only.
+          if [ "$WANTED" = "true" ] && [ "$ARMABLE" = "true" ]; then
+            echo "act=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Armed and armable; acting on the plan."
+          else
+            echo "act=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Report only (armed=$WANTED, armable=$ARMABLE)."
+            jq -r '.not_armable_because[]?' staging-fleet-reconcile-plan.json \
+              | sed 's/^/::notice::blocked by: /'
+          fi
+
+      # THE ONE MUTATING STEP, and the only one holding the infra token.
+      - name: Act on the plan, one leg at a time, each proven to land
+        if: steps.arm.outputs.act == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.TERRAFORM_REPO_TOKEN }}
+          HOME_TOKEN: ${{ github.token }}
+          INFRA_REPO: LEAF-Solar-Design/leaf-automation-aws-terraform
+          INFRA_WORKFLOW: deploy-leaf-platform-staging.yml
+        run: |
+          set -euo pipefail
+          PLAN=staging-fleet-reconcile-plan.json
+
+          # The relay's envelope, from the run that minted it, passed through
+          # byte for byte and never re-encoded: the provider validates it
+          # exactly and this lane cannot mint a replacement.
+          RELAY_RUN=$(jq -r '.supply_evidence.relay_run_id' "$PLAN")
+          ENVELOPE_NAME=$(jq -r '.supply_evidence.artifact_name' "$PLAN")
+          GH_TOKEN="$HOME_TOKEN" gh run download "$RELAY_RUN" \
+            --repo "$GITHUB_REPOSITORY" -n "$ENVELOPE_NAME" -D envelope
+          EVIDENCE=$(cat envelope/staging-supply-evidence.b64)
+          [ -n "$EVIDENCE" ] || {
+            echo "::error::The published supply evidence envelope is empty."
+            exit 1
+          }
+
+          DEADLINE=$(( $(date +%s) + 80 * 60 ))
+          before_deadline() { [ "$(date +%s)" -lt "$DEADLINE" ]; }
+
+          staging_is_busy() {
+            local legs relays
+            legs=$(gh run list --repo "$INFRA_REPO" --workflow "$INFRA_WORKFLOW" \
+              --limit 20 --json status \
+              --jq '[.[] | select(.status != "completed")] | length')
+            relays=$(GH_TOKEN="$HOME_TOKEN" gh run list --repo "$GITHUB_REPOSITORY" \
+              --workflow dispatch-staging-deploys.yml --limit 10 --json status \
+              --jq '[.[] | select(.status != "completed")] | length')
+            [ "$legs" != "0" ] || [ "$relays" != "0" ]
+          }
+
+          COUNT=$(jq -r '.steps | length' "$PLAN")
+          for i in $(seq 0 $(( COUNT - 1 ))); do
+            KIND=$(jq -r ".steps[$i].kind" "$PLAN")
+            SERVICE=$(jq -r ".steps[$i].service" "$PLAN")
+            WANT="Deploy leaf-platform staging $SERVICE ("
+
+            # RE-CHECK THE LOCK BEFORE EVERY LEG. The plan's yield is minutes
+            # old by now. The relay owns the product surfaces, so it wins and
+            # this lane stops cleanly; the next tick resumes from wherever the
+            # fleet was left, which is safe because each leg is idempotent.
+            if staging_is_busy; then
+              echo "::notice::Standing down before $KIND $SERVICE: staging is busy. The next tick resumes from here."
+              exit 0
+            fi
+
+            BEFORE=$(gh run list --repo "$INFRA_REPO" --workflow "$INFRA_WORKFLOW" \
+              --limit 1 --json databaseId --jq '.[0].databaseId // 0')
+            mapfile -t ARGS < <(jq -r ".steps[$i].inputs | to_entries[] | \"-f\", (.key + \"=\" + .value)" "$PLAN")
+            gh workflow run "$INFRA_WORKFLOW" --repo "$INFRA_REPO" --ref main \
+              "${ARGS[@]}" -f "supply_evidence_b64=$EVIDENCE"
+            echo "Dispatched $KIND for $SERVICE."
+
+            # Identified by the provider's run-name contract, never by "the
+            # newest run": operators and sibling lanes dispatch this same
+            # workflow, and watching someone else's run would prove nothing.
+            RUN_ID=""
+            RESOLVE_BY=$(( $(date +%s) + 5 * 60 ))
+            while [ "$(date +%s)" -lt "$RESOLVE_BY" ] && before_deadline; do
+              sleep 5
+              RUN_ID=$(gh run list --repo "$INFRA_REPO" --workflow "$INFRA_WORKFLOW" \
+                --limit 20 --json databaseId,displayTitle \
+                --jq "[.[] | select(.databaseId > $BEFORE) | select(.displayTitle | startswith(\"$WANT\"))] | .[0].databaseId // empty" || true)
+              [ -n "$RUN_ID" ] && break
+            done
+            if [ -z "$RUN_ID" ]; then
+              echo "::error::Dispatched $KIND for $SERVICE but no run named '$WANT...' appeared. This lane never guesses which run is its own, so it stops rather than watch one that may not be."
+              exit 1
+            fi
+            echo "Watching $SERVICE run $RUN_ID."
+
+            CONCLUSION=""
+            while before_deadline; do
+              sleep 20
+              STATUS=$(gh run view "$RUN_ID" --repo "$INFRA_REPO" --json status --jq '.status' || true)
+              if [ "$STATUS" = "completed" ]; then
+                CONCLUSION=$(gh run view "$RUN_ID" --repo "$INFRA_REPO" --json conclusion --jq '.conclusion')
+                break
+              fi
+            done
+            if [ "$CONCLUSION" != "success" ]; then
+              echo "::error::$KIND for $SERVICE run $RUN_ID ended '$CONCLUSION'. Stopping before every later leg, and before the identity restamp, which is only valid once EVERY service is live on this release."
+              exit 1
+            fi
+            echo "::notice::$KIND for $SERVICE landed ($RUN_ID)."
+          done
+          echo "::notice::Acted on the whole plan."

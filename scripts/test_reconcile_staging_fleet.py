@@ -12,6 +12,8 @@ import sysconfig
 import unittest
 import zipfile
 
+import yaml
+
 
 # Same stdlib preload the convergence suite uses, and for the same reason: the
 # repo root carries a `platform/` package that shadows the stdlib module, and
@@ -52,6 +54,10 @@ SETTLED = {
 
 def digest(seed: str) -> str:
     return "sha256:" + hashlib.sha256(seed.encode()).hexdigest()
+
+
+def image_tag(service: str) -> str:
+    return f"surface-v1-{hashlib.sha256(service.encode()).hexdigest()}"
 
 
 def release_digests() -> dict[str, str]:
@@ -126,7 +132,13 @@ def relay_receipt(digests: dict[str, str]) -> dict:
         "supply_set_sha256": "c" * 64,
         "candidate_supply_set": {
             "build_run_id": BUILD_RUN,
-            "services": {s: {"image_digest": d} for s, d in digests.items()},
+            # immutable_lookup_tag is the tag the relay itself dispatches, and
+            # it is per service; the planner must never re-derive or guess one,
+            # because the provider deploys whatever tag it is handed.
+            "services": {
+                s: {"image_digest": d, "immutable_lookup_tag": image_tag(s)}
+                for s, d in digests.items()
+            },
         },
     }
 
@@ -161,6 +173,7 @@ def fixture(
     deploy_status: str = "completed",
     lagging: tuple[str, ...] = (),
     missing_receipt: tuple[str, ...] = (),
+    envelope: bool = True,
 ) -> FakeProvider:
     """A quiet single-release world with every service settled on the release.
 
@@ -187,9 +200,18 @@ def fixture(
         (APP, runs_endpoint(RELAY_WF, f"status=success&per_page={subject.MAX_RELAY_RUN_SCAN}"))
     ] = {"total_count": 1, "workflow_runs": [run_row(RELAY_RUN)]}
     relay_name = f"staging-converged-{SOURCE}-attempt-1"
+    relay_artifacts = [artifact_row(2000, relay_name, RELAY_RUN)]
+    if envelope:
+        relay_artifacts.append(
+            artifact_row(
+                2001,
+                f"staging-supply-evidence-{SOURCE}-attempt-1",
+                RELAY_RUN,
+            )
+        )
     provider.json_values[(APP, f"/actions/runs/{RELAY_RUN}/artifacts?per_page=100")] = {
-        "total_count": 1,
-        "artifacts": [artifact_row(2000, relay_name, RELAY_RUN)],
+        "total_count": len(relay_artifacts),
+        "artifacts": relay_artifacts,
     }
     provider.byte_values[(APP, "/actions/artifacts/2000/zip")] = archive(
         subject.RELAY_ARTIFACT_FILE, canonical(relay_receipt(digests))
@@ -350,6 +372,144 @@ class PlanTests(unittest.TestCase):
                 reconciles = [s for s in plan["steps"] if s["kind"] == "reconcile"]
                 for step in reconciles:
                     self.assertIn(step["service"], subject.NON_RELAY_SERVICES)
+
+
+class ArmingTests(unittest.TestCase):
+    def test_every_step_carries_the_releases_own_per_service_tag(self) -> None:
+        """Regression: steps used to carry an EMPTY image_tag.
+
+        The tag came from a CLI flag the workflow never passed, so every
+        constructed dispatch read `image_tag=`. The provider deploys whatever
+        tag it is handed, so that is a wrong deploy rather than a failed
+        dispatch. The tag is now the supply set's own immutable_lookup_tag, per
+        service, which is exactly what the relay dispatches.
+        """
+        plan = subject.build_plan(fixture(lagging=("broker", "harness")))
+        for step in plan["steps"]:
+            with self.subTest(step=step["service"]):
+                self.assertEqual(
+                    step["inputs"]["image_tag"], image_tag(step["service"])
+                )
+                self.assertTrue(step["inputs"]["image_tag"])
+        # The restamp is an app deploy, so it takes the APP tag even though the
+        # legs before it were other services.
+        restamp = next(s for s in plan["steps"] if s["kind"] == "identity_restamp")
+        self.assertEqual(restamp["inputs"]["image_tag"], image_tag("app"))
+
+    def test_a_missing_envelope_makes_the_plan_unarmable(self) -> None:
+        """The single fact that decides whether a plan may be dispatched.
+
+        Without the relay's envelope a deploy would mutate staging and produce a
+        receipt the finalizer refuses (SERVICE_SUPPLY_EVIDENCE_MISMATCH): all
+        cost, no proof. Absent is the ordinary answer for any release converged
+        before the relay began publishing it, so it is reported, never raised.
+        """
+        absent = subject.build_plan(fixture(envelope=False, lagging=("broker",)))
+        self.assertFalse(absent["armable"])
+        self.assertFalse(absent["supply_evidence"]["present"])
+        self.assertTrue(
+            any(r.startswith("NO_SUPPLY_EVIDENCE") for r in absent["not_armable_because"]),
+            absent["not_armable_because"],
+        )
+        # Still a perfectly good REPORT: the steps are unchanged.
+        self.assertEqual([s["service"] for s in absent["steps"]], ["broker", "app"])
+
+        present = subject.build_plan(fixture(lagging=("broker",)))
+        self.assertTrue(present["armable"], present["not_armable_because"])
+        self.assertTrue(present["supply_evidence"]["present"])
+        self.assertEqual(
+            present["supply_evidence"]["artifact_name"],
+            f"staging-supply-evidence-{SOURCE}-attempt-1",
+        )
+        self.assertEqual(present["supply_evidence"]["file"], "staging-supply-evidence.b64")
+
+    def test_a_yielded_or_empty_plan_is_never_armable(self) -> None:
+        yielded = subject.build_plan(fixture(relay_status="in_progress", lagging=("broker",)))
+        self.assertFalse(yielded["armable"])
+        self.assertTrue(any(r.startswith("YIELDED") for r in yielded["not_armable_because"]))
+
+        relay_behind = subject.build_plan(fixture(lagging=("web",)))
+        self.assertFalse(relay_behind["armable"])
+        self.assertIn(
+            "RELAY_SURFACES_NOT_CONVERGED", relay_behind["not_armable_because"]
+        )
+
+    def test_the_plan_never_carries_the_envelope_body_itself(self) -> None:
+        """The armed lane downloads the artifact and passes it through byte for
+        byte. Copying 12KB of envelope into the plan would add a re-encoding
+        step between the relay and a provider that validates it exactly."""
+        plan = subject.build_plan(fixture())
+        blob = json.dumps(plan)
+        self.assertNotIn("supply_evidence_b64", blob)
+        self.assertLess(len(blob), 20000)
+
+
+class LaneShapeTests(unittest.TestCase):
+    """The workflow's own shape. Pinned here because the difference between
+    this lane reporting and this lane mutating staging is one string."""
+
+    @staticmethod
+    def lane() -> dict:
+        path = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "reconcile-staging-fleet.yml"
+        )
+        return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    def test_the_lane_ships_dormant(self) -> None:
+        """Source-controlled and off, the same idiom as the build workflow's
+        DIGEST_AWARE_CONVERGENCE_ENABLED. Arming the SCHEDULE must be its own
+        one-line change, not something that rides along inside another edit."""
+        self.assertEqual(self.lane()["env"]["RECONCILE_ARMED"], "false")
+
+    def test_only_one_step_can_mutate_and_it_is_gated(self) -> None:
+        steps = self.lane()["jobs"]["plan"]["steps"]
+        infra_token = "${{ secrets.TERRAFORM_REPO_TOKEN }}"
+        # The infra token is what makes a step able to dispatch a deploy. The
+        # planner holds it to READ the provider; only one step may act with it.
+        acting = [
+            s
+            for s in steps
+            if "gh workflow run" in str(s.get("run", ""))
+        ]
+        self.assertEqual(len(acting), 1, "exactly one step may dispatch")
+        step = acting[0]
+        self.assertEqual(step["if"], "steps.arm.outputs.act == 'true'")
+        self.assertEqual(step["env"]["GH_TOKEN"], infra_token)
+        # And the decision it is gated on holds NO token of its own.
+        decider = next(s for s in steps if s.get("id") == "arm")
+        self.assertNotIn(infra_token, str(decider.get("env", {})))
+        self.assertNotIn("gh ", str(decider.get("run", "")))
+
+    def test_the_acting_step_rechecks_the_lock_and_watches_each_leg(self) -> None:
+        """The plan's yield is minutes old by the time a leg dispatches, so the
+        relay may have started since. It owns the product surfaces and wins."""
+        steps = self.lane()["jobs"]["plan"]["steps"]
+        code = next(s["run"] for s in steps if "gh workflow run" in str(s.get("run", "")))
+        self.assertIn("staging_is_busy", code)
+        # Re-checked INSIDE the per-leg loop, not once before it.
+        self.assertLess(code.index("for i in $(seq"), code.index("if staging_is_busy"))
+        # Each leg is watched to a terminal state and anything but success stops
+        # the sequence before the restamp.
+        self.assertIn('if [ "$CONCLUSION" != "success" ]', code)
+        # The envelope is passed through, never rebuilt.
+        self.assertIn("staging-supply-evidence.b64", code)
+        self.assertIn('-f "supply_evidence_b64=$EVIDENCE"', code)
+
+    def test_the_schedule_cannot_act_while_the_flag_is_false(self) -> None:
+        """The scheduled trigger has no way to set the manual arm input, so a
+        dormant flag means every scheduled run reports and nothing else."""
+        lane = self.lane()
+        triggers = lane[True] if True in lane else lane["on"]
+        self.assertIn("schedule", triggers)
+        self.assertEqual(lane["env"]["RECONCILE_ARMED"], "false")
+        decider = next(
+            s for s in lane["jobs"]["plan"]["steps"] if s.get("id") == "arm"
+        )
+        self.assertEqual(decider["env"]["ARMED_BY_DEFAULT"], "${{ env.RECONCILE_ARMED }}")
+        self.assertEqual(decider["env"]["ARMED_BY_INPUT"], "${{ inputs.arm }}")
 
 
 class ValidationTests(unittest.TestCase):
