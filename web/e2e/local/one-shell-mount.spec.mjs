@@ -852,6 +852,27 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByLabel('ribbon y2', { exact: true })).toHaveValue(r3(b.wy))
     await page.keyboard.press('F8')
     await expect(page.getByTestId('cockpit-ortho')).toHaveAttribute('aria-pressed', 'false')
+    // W4f-5: Enter draws that segment (the chain moves on), then F3 turns
+    // OSNAP on and a click a few pixels off the imported polyline's corner
+    // (50, 5) lands exactly on it. F3 again turns it off.
+    await page.keyboard.press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('5', { timeout: 60_000 })
+    await page.keyboard.press('F3')
+    await expect(page.getByTestId('cockpit-osnap')).toHaveAttribute('aria-pressed', 'true')
+    const corner = await page.evaluate(() => {
+      const canvas = document.querySelector('.studio-ground .viewer-canvas')
+      const px = canvas.__cadviewer.project(50, 5)
+      const x = Math.round(px.x) + 5
+      const y = Math.round(px.y) - 4
+      const hit = document.elementFromPoint(x, y)
+      return { x, y, onGround: !!hit?.closest('.studio-ground') }
+    })
+    expect(corner.onGround, `snap pixel (${corner.x},${corner.y}) is not on the drawing`).toBe(true)
+    await page.mouse.click(corner.x, corner.y)
+    await expect(page.getByLabel('ribbon x2', { exact: true })).toHaveValue('50')
+    await expect(page.getByLabel('ribbon y2', { exact: true })).toHaveValue('5')
+    await page.keyboard.press('F3')
+    await expect(page.getByTestId('cockpit-osnap')).toHaveAttribute('aria-pressed', 'false')
     const underCard = () => page.evaluate(() => {
       // The card is a full-width pass-through layer; the floating "Edit a
       // DXF drawing" workbench is the child that sits over the drawing.

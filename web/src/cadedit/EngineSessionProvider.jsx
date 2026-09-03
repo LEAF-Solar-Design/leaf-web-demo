@@ -140,11 +140,16 @@ export default function EngineSessionProvider({
   // point, as the reference's F8 does. A boolean, nothing else is stored.
   const [ortho, setOrthoState] = useState(false)
   const setOrtho = useCallback((next) => { setOrthoState(next === true) }, [])
+  // W4f-5: OSNAP (F3) snaps a pick to the document's endpoints, midpoints
+  // and centres within a pixel tolerance. Off until gate 4 settles the
+  // default (the reference ships it on).
+  const [osnap, setOsnapState] = useState(false)
+  const setOsnap = useCallback((next) => { setOsnapState(next === true) }, [])
 
   const canSave = saveTarget !== null && saveTarget !== undefined
   const value = useMemo(
-    () => ({ session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho }),
-    [session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho],
+    () => ({ session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap }),
+    [session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap],
   )
   return <EngineSessionContext.Provider value={value}>{children}</EngineSessionContext.Provider>
 }

@@ -39,7 +39,7 @@ function Probe() { context = useEngineSessionContext(); return null }
 function mount() {
   workers = []
   // World = client / 10, so a click at (120, 30) is world (12, 3).
-  viewer = { unproject: vi.fn((cx, cy) => ({ x: cx / 10, y: cy / 10 })), setRubberBand: vi.fn() }
+  viewer = { unproject: vi.fn((cx, cy) => ({ x: cx / 10, y: cy / 10 })), setRubberBand: vi.fn(), setSnapMarker: vi.fn() }
   ground = document.createElement('div')
   document.body.appendChild(ground)
   onPicking = vi.fn()
@@ -76,7 +76,10 @@ function click(x, y) {
 beforeEach(() => {
   globalThis.URL.createObjectURL = vi.fn(() => 'blob:cad-edit-test')
   globalThis.URL.revokeObjectURL = vi.fn()
-  vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => { cb(); return 1 })
+  // Synchronous frames: the callback runs at once and no handle stays
+  // pending (a real browser sets the handle before the callback runs, so
+  // the picker's "one frame in flight" latch clears on every draw).
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => { cb(); return 0 })
 })
 afterEach(() => { cleanup(); ground?.remove(); vi.restoreAllMocks() })
 
@@ -158,6 +161,46 @@ describe('CanvasPointPicker (W4f slice A1)', () => {
     act(() => { context.setArmed({ group: 'draw', op: 'createLine', from: [12, 3] }) })
     click(200, 50)
     expect(screen.getByLabelText('ribbon y2').value).toBe('5')
+  })
+
+  it('F3 toggles OSNAP; on, a pick within reach of an endpoint lands on it, the marker follows, and the snap beats ORTHO (W4f-5)', async () => {
+    mount()
+    await openAndLoad()
+    // The reach: SNAP_PX 10 px = 1 world unit under the mock projection. The
+    // document's LINE ends at (100, 50); a click at world (100.3, 49.7) is
+    // within reach with OSNAP on and a raw pick with it off.
+    fireEvent.click(document.querySelector('.drafting-ribbon [data-tool="draw:createLine"]'))
+    click(1003, 497)
+    expect(screen.getByLabelText('ribbon x').value).toBe('100.3')
+    expect(screen.getByLabelText('ribbon y').value).toBe('49.7')
+    expect(viewer.setSnapMarker).not.toHaveBeenCalled()
+    act(() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'F3', bubbles: true, cancelable: true })) })
+    expect(context.osnap).toBe(true)
+    act(() => { context.setArmed({ group: 'draw', op: 'createLine', from: [0, 0] }) })
+    // Hovering near the endpoint shows the marker at it (once per change)
+    // and the band runs to the snapped point; hovering away clears it.
+    act(() => { ground.dispatchEvent(new MouseEvent('pointermove', { clientX: 1003, clientY: 497, bubbles: true })) })
+    expect(viewer.setSnapMarker).toHaveBeenLastCalledWith({ x: 100, y: 50 }, 1)
+    expect(viewer.setRubberBand).toHaveBeenLastCalledWith([[0, 0], [100, 50]], false)
+    act(() => { ground.dispatchEvent(new MouseEvent('pointermove', { clientX: 1004, clientY: 496, bubbles: true })) })
+    expect(viewer.setSnapMarker).toHaveBeenCalledTimes(1)
+    act(() => { ground.dispatchEvent(new MouseEvent('pointermove', { clientX: 700, clientY: 700, bubbles: true })) })
+    expect(viewer.setSnapMarker).toHaveBeenLastCalledWith(null)
+    // With ORTHO on as well, the snap wins.
+    act(() => { context.setOrtho(true) })
+    click(1003, 497)
+    expect(screen.getByLabelText('ribbon x2').value).toBe('100')
+    expect(screen.getByLabelText('ribbon y2').value).toBe('50')
+    // Off again (F3): the same click is a raw (here ORTHO-held) pick.
+    act(() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'F3', bubbles: true, cancelable: true })) })
+    expect(context.osnap).toBe(false)
+    act(() => { context.setOrtho(false) })
+    // (the same chain point keeps the same armed object, so disarm first to
+    // start a fresh sequence)
+    act(() => { context.setArmed(null) })
+    act(() => { context.setArmed({ group: 'draw', op: 'createLine', from: [0, 0] }) })
+    click(1003, 497)
+    expect(screen.getByLabelText('ribbon x2').value).toBe('100.3')
   })
 
   it('a circle takes its centre and a radius point; a drag (pointer travel) is never a pick', async () => {

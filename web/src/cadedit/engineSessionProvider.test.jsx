@@ -601,6 +601,25 @@ describe('the command prompt (W4e slice H): a tool arms, the command line asks i
     expect(studio.workers[0].posted.filter((message) => message.type === 'applyEdit')).toHaveLength(0)
   })
 
+  it('the prompt carries the OSNAP toggle too: pressed state from the provider, a click flips it, the setter takes only true (W4f-5)', async () => {
+    const studio = mount()
+    await openAndLoad(studio, [LINE])
+    fireEvent.click(drawTool('createLine'))
+    const chip = screen.getByTestId('cockpit-osnap')
+    expect(chip.getAttribute('aria-pressed')).toBe('false')
+    expect(studio.context.osnap).toBe(false)
+    fireEvent.click(chip)
+    expect(studio.context.osnap).toBe(true)
+    expect(screen.getByTestId('cockpit-osnap').getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByTestId('cockpit-osnap').title).toContain('Object snap on')
+    act(() => { studio.context.setOsnap('yes') })
+    expect(studio.context.osnap).toBe(false)
+    // Independent of ORTHO.
+    act(() => { studio.context.setOsnap(true) })
+    expect(studio.context.ortho).toBe(false)
+    expect(promptEl().getAttribute('data-op')).toBe('createLine')
+  })
+
   it('an open dialog owns Esc even when its opener kept focus outside the layer', async () => {
     const studio = mount()
     await openAndLoad(studio, [LINE])

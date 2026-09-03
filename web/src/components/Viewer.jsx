@@ -408,6 +408,9 @@ const Viewer = forwardRef(function Viewer(
     // from the picked points to the cursor); set imperatively per pointer
     // move, never through React state, never rebuilding the scene.
     const rubberGroup = new THREE.Group(); scene.add(rubberGroup)
+    // W4f-5: the object-snap marker (a small square at the snapped point),
+    // its own group so the rubber band and the marker clear independently.
+    const snapGroup = new THREE.Group(); scene.add(snapGroup)
 
     // rendered-count assertion (acceptance: rendered == intake lengths)
     // eslint-disable-next-line no-console
@@ -530,7 +533,7 @@ const Viewer = forwardRef(function Viewer(
     stateRef.current = {
       scene, camera, renderer, controls, layerGroups, pickIndex,
       highlightGroup, markerGroup, overlayGroup, selectionGroup, pendingGroup,
-      stringGroup, rubberGroup, stringAnim: null,
+      stringGroup, rubberGroup, snapGroup, stringAnim: null,
       fitToBounds, dataSpan, tokens,
     }
 
@@ -670,6 +673,33 @@ const Viewer = forwardRef(function Viewer(
       const mat = new THREE.LineBasicMaterial({ color: s.tokens.select, depthTest: false })
       const mesh = new THREE.LineSegments(geo, mat)
       mesh.renderOrder = 10
+      g.add(mesh)
+      return true
+    },
+    // W4f-5: the object-snap marker, a square of `size` world units centred
+    // on the snapped point, or nothing. Called when the snap CHANGES (the
+    // picker remembers the last one), so it disposes what it replaces and
+    // allocates nothing when clearing an empty group.
+    setSnapMarker: (pt, size = 1) => {
+      const s = stateRef.current
+      if (!s) return false
+      const g = s.snapGroup
+      for (const child of g.children) { child.geometry?.dispose?.(); child.material?.dispose?.() }
+      g.clear()
+      if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y) || !Number.isFinite(size) || size <= 0) return true
+      const h = size / 2
+      const [x, y] = [pt.x, pt.y]
+      const pos = [
+        x - h, y - h, 2, x + h, y - h, 2,
+        x + h, y - h, 2, x + h, y + h, 2,
+        x + h, y + h, 2, x - h, y + h, 2,
+        x - h, y + h, 2, x - h, y - h, 2,
+      ]
+      const geo = new THREE.BufferGeometry()
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
+      const mat = new THREE.LineBasicMaterial({ color: s.tokens.select, depthTest: false })
+      const mesh = new THREE.LineSegments(geo, mat)
+      mesh.renderOrder = 11
       g.add(mesh)
       return true
     },

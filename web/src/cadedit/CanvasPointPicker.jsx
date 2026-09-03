@@ -19,10 +19,12 @@
 import { useEffect, useRef } from 'react'
 
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
-import { applyPick, ghostFor, orthoPoint, startPicking, wantsPick } from './pointPicking.js'
+import { applyPick, buildSnapIndex, ghostFor, orthoPoint, snapPoint, startPicking, wantsPick } from './pointPicking.js'
 
 const CLICK_MOVE_PX = 5
 const CLICK_MAX_MS = 500
+// W4f-5: the object-snap reach, in screen pixels (the reference's aperture).
+const SNAP_PX = 10
 // Operand key -> the prompt field's accessible name suffix ("ribbon <label>").
 const FIELD_LABEL = Object.freeze({ x: 'x', y: 'y', x2: 'x2', y2: 'y2', r: 'r', pts: 'points', dx: 'dx', dy: 'dy' })
 
@@ -39,24 +41,33 @@ function focusRun() {
 }
 
 export default function CanvasPointPicker({ viewerRef = null, ground = null, onPicking = null }) {
-  const { session, inputs, setInput, armed, ortho, setOrtho } = useEngineSessionContext()
+  const { session, inputs, setInput, armed, ortho, setOrtho, osnap, setOsnap } = useEngineSessionContext()
   // W4f-4: ORTHO (F8) constrains the cursor to the axis of the larger delta
-  // from the last point, for the pick and the rubber band alike. Read
+  // from the last point, for the pick and the rubber band alike. W4f-5:
+  // OSNAP (F3) lands the cursor on the document's endpoints, midpoints and
+  // centres within SNAP_PX, and wins over ORTHO when it finds one. Both read
   // through refs so the pointer path allocates nothing and re-binds nothing.
   const orthoRef = useRef(ortho)
   orthoRef.current = ortho
   const setOrthoRef = useRef(setOrtho)
   setOrthoRef.current = setOrtho
+  const osnapRef = useRef(osnap)
+  osnapRef.current = osnap
+  const setOsnapRef = useRef(setOsnap)
+  setOsnapRef.current = setOsnap
   useEffect(() => {
     if (typeof window === 'undefined') return undefined
     const onKey = (event) => {
-      if (event.key !== 'F8' || event.defaultPrevented) return
-      event.preventDefault()
-      setOrthoRef.current(!orthoRef.current)
+      if (event.defaultPrevented) return
+      if (event.key === 'F8') { event.preventDefault(); setOrthoRef.current(!orthoRef.current); return }
+      if (event.key === 'F3') { event.preventDefault(); setOsnapRef.current(!osnapRef.current) }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [])
+  // The snap candidates, packed once per document change (never per frame).
+  const snapIndex = useRef(null)
+  useEffect(() => { snapIndex.current = buildSnapIndex(session.entities) }, [session.entities])
   const armedOp = armed ? armed.op : ''
   // W4f-3: the chain point a continued command starts from (LINE's next
   // segment), keyed as a string so the sequence restarts only when it moves.
@@ -87,17 +98,47 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
     let frame = 0
     let last = null
     const viewer = () => viewerRef?.current
+    // The snap under the cursor, if any: the aperture in world units is one
+    // extra unproject SNAP_PX to the right (zoom-aware), the search is one
+    // linear pass over the packed candidates. The marker is redrawn only
+    // when the snapped point changes.
+    let snapX = NaN
+    let snapY = NaN
+    let markerShown = false
+    const snapAt = (v, m, cx, cy, p) => {
+      if (!osnapRef.current || !p || !snapIndex.current?.n) return null
+      const q = v.unproject(cx + SNAP_PX, cy)
+      const tol = q ? Math.abs(q.x - p.x) : 0
+      const hit = snapPoint(snapIndex.current, p.x, p.y, tol)
+      if (!hit) return null
+      hit.tol = tol
+      return hit
+    }
+    const showMarker = (v, hit) => {
+      if (hit) {
+        if (!markerShown || hit.x !== snapX || hit.y !== snapY) {
+          v.setSnapMarker?.({ x: hit.x, y: hit.y }, hit.tol)
+          snapX = hit.x; snapY = hit.y; markerShown = true
+        }
+      } else if (markerShown) {
+        v.setSnapMarker?.(null)
+        markerShown = false; snapX = NaN; snapY = NaN
+      }
+    }
     const draw = () => {
       frame = 0
       const v = viewer()
       const m = machine.current
       if (!v || !m || !m.sequence || !last || typeof v.unproject !== 'function') return
       const p = v.unproject(last.x, last.y)
-      // No allocation on this per-frame path with ORTHO off; on, the one
-      // constrained pair is the price of the mode (kimi note on #982).
+      // No allocation on this per-frame path with both modes off; on, the
+      // constrained pair or the snap hit is the price of the mode (kimi
+      // note on #982).
       let gx = p ? p.x : NaN
       let gy = p ? p.y : NaN
-      if (p && orthoRef.current) { const q = orthoPoint(m, gx, gy); gx = q[0]; gy = q[1] }
+      const hit = snapAt(v, m, last.x, last.y, p)
+      showMarker(v, hit)
+      if (hit) { gx = hit.x; gy = hit.y } else if (p && orthoRef.current) { const q = orthoPoint(m, gx, gy); gx = q[0]; gy = q[1] }
       const ghost = p ? ghostFor(m, gx, gy) : null
       v.setRubberBand?.(ghost ? ghost.pts : null, !!ghost?.closed)
     }
@@ -121,7 +162,8 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
       if (!v || !m || !wantsPick(m) || typeof v.unproject !== 'function') return
       const p = v.unproject(event.clientX, event.clientY)
       if (!p) return
-      const [px, py] = orthoRef.current ? orthoPoint(m, p.x, p.y) : [p.x, p.y]
+      const hit = snapAt(v, m, event.clientX, event.clientY, p)
+      const [px, py] = hit ? [hit.x, hit.y] : (orthoRef.current ? orthoPoint(m, p.x, p.y) : [p.x, p.y])
       const { state, writes } = applyPick(m, px, py, inputsRef.current)
       if (!writes.length && state === m) return
       machine.current = state
@@ -131,7 +173,7 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
       else focusRun()
       draw()
     }
-    const onLeave = () => { last = null; viewer()?.setRubberBand?.(null) }
+    const onLeave = () => { last = null; const v = viewer(); v?.setRubberBand?.(null); if (v) showMarker(v, null) }
     ground.addEventListener('pointermove', onMove, { passive: true })
     ground.addEventListener('pointerdown', onDown)
     ground.addEventListener('pointerup', onUp)
@@ -143,6 +185,7 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
       ground.removeEventListener('pointerup', onUp)
       ground.removeEventListener('pointerleave', onLeave)
       viewer()?.setRubberBand?.(null)
+      viewer()?.setSnapMarker?.(null)
     }
   }, [ground, viewerRef, setInput])
   return null
