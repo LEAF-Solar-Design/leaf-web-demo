@@ -1578,6 +1578,12 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 .resolver-row .label { flex: 1; font-size: 12.5px; color: var(--muted); }
 .resolver-row.active .label { color: var(--foreground); }
 .resolver-row .count { font-size: 11px; color: var(--muted-2); font-family: var(--font-mono); }
+/* The slash row's tool glyph: the SAME CockpitIcon the ribbon shows, at the
+   ribbon's `small` size (18px). Sized here rather than inherited so the picker
+   never depends on cockpit.css being in the bundle, and `flex: none` keeps the
+   row's 40px input-row rhythm and the label's flex:1 exactly as they were. */
+.resolver-row .ci { width: 18px; height: 18px; flex: none; fill: currentColor; color: var(--muted-2); }
+.resolver-row.active .ci { color: var(--foreground); }
 
 /* ---------------- NT2 toast (completed event) ---------------- */
 .toast {

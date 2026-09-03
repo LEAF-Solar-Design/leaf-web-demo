@@ -20,6 +20,7 @@
 // present, disabled, and say so (operator decision, W4e plan: mirror the
 // reference's eight Draw-tab panels).
 import { zoomViewer } from '../site/DrawingCockpit.jsx'
+import { isWriteTool, toolIcon, toolPlacementSize, toolPlacementTab } from './toolRecord.js'
 
 export const RIBBON_RATIONALE = 'Ribbon selection. Confirm the exact tool and parameters before it runs.'
 export const ZOOM_IN = 1.25
@@ -42,7 +43,16 @@ export const REASONS = Object.freeze({
   nothingToUndo: 'nothing to undo',
   nothingToRedo: 'nothing to redo',
   notInEngine: 'not in the browser engine yet',
+  // The publish settled in the author card but the catalog has not issued the
+  // tool a digest yet, so there is nothing runnable to arm. Same sentence the
+  // one honest resolver (site/publishedCatalogTool.js) fails with.
+  publishing: 'publishing: not in the runnable catalog yet',
 })
+
+// Every catalog tool used to be one hardcoded icon and one hardcoded size. The
+// record now answers both, and a record that answers neither renders exactly as
+// it did — that equality is pinned in ribbonClusters.test.js.
+export const CATALOG_TOOL_NOTE_ALL_PLACED = 'Every catalog tool sits on its own ribbon tab.'
 
 /**
  * The catalog families of the active surface as `family` clusters — the
@@ -64,7 +74,68 @@ export function catalogClusters(families, {
   if (list.length === 0) {
     return [{ id: 'tools', label: 'Tools', kind: 'group', note: 'No tools for this surface yet.', tools: [] }]
   }
-  return list.map((fam) => ({
+  const gate = { onRequestRun, running, previewing, writeLocked, writeEntitled, writeLockNote }
+  // Tools that name their own tab leave this cluster (they are built by
+  // catalogTabClusters instead); a family whose tools ALL moved leaves no
+  // empty panel behind.
+  const clusters = []
+  for (const fam of list) {
+    const tools = (fam.capabilities || []).filter((tool) => !toolPlacementTab(tool))
+    if (tools.length === 0 && (fam.capabilities || []).length > 0) continue
+    clusters.push(familyCluster(fam, tools, gate, onOpenFamily))
+  }
+  if (clusters.length === 0) {
+    return [{ id: 'tools', label: 'Tools', kind: 'group', note: CATALOG_TOOL_NOTE_ALL_PLACED, tools: [] }]
+  }
+  return clusters
+}
+
+/**
+ * The same catalog families as PER-TAB clusters, for the tools whose record
+ * names a `placement.tab`. Cluster id is `<family_id>@<tab>` so a family can
+ * seat tools on more than one tab and the two clusters stay distinct; the
+ * label is the family's, unchanged.
+ *
+ * Returns an object keyed by tab id, holding only the tabs that actually got
+ * tools — so a catalog where nothing declares a placement returns `{}` and the
+ * ribbon is byte-identical to today.
+ */
+export function catalogTabClusters(families, {
+  onRequestRun,
+  onOpenFamily = null,
+  running = false,
+  previewing = false,
+  writeLocked = false,
+  writeEntitled = true,
+  writeLockNote = '',
+} = {}) {
+  const list = Array.isArray(families) ? families : []
+  const gate = { onRequestRun, running, previewing, writeLocked, writeEntitled, writeLockNote }
+  const byTab = {}
+  for (const fam of list) {
+    // One pass per family, bucketed by tab: no per-tab rescan of the catalog.
+    const buckets = new Map()
+    for (const tool of fam.capabilities || []) {
+      const tab = toolPlacementTab(tool)
+      if (!tab) continue
+      const bucket = buckets.get(tab)
+      if (bucket) bucket.push(tool)
+      else buckets.set(tab, [tool])
+    }
+    for (const [tab, tools] of buckets) {
+      const cluster = familyCluster(fam, tools, gate, onOpenFamily)
+      cluster.id = `${fam.family_id}@${tab}`
+      if (byTab[tab]) byTab[tab].push(cluster)
+      else byTab[tab] = [cluster]
+    }
+  }
+  return byTab
+}
+
+/** One family cluster over an explicit tool list. The single tool projection. */
+function familyCluster(fam, tools, gate, onOpenFamily) {
+  const { onRequestRun, running, previewing, writeLocked, writeEntitled, writeLockNote } = gate
+  return {
     id: fam.family_id,
     label: fam.label,
     kind: 'family',
@@ -73,8 +144,8 @@ export function catalogClusters(families, {
     // rail is hidden under the band, so the band carries the affordance).
     onLabelClick: onOpenFamily ? () => onOpenFamily(fam) : null,
     labelTitle: onOpenFamily ? `Open ${fam.label} in the tool rail (${(fam.capabilities || []).length} tools)` : '',
-    tools: (fam.capabilities || []).map((tool) => {
-      const isWrite = (tool.capabilities || []).includes('drawing.write')
+    tools: tools.map((tool) => {
+      const isWrite = isWriteTool(tool)
       const locked = !!writeLocked && isWrite
       const entBlocked = isWrite && !writeEntitled
       const reason = running
@@ -90,8 +161,9 @@ export function catalogClusters(families, {
         id: tool.name,
         label: tool.name,
         text: tool.label || tool.name,
-        icon: 'toolbox',
-        size: 'large',
+        // The record's own answer, with today's literals as the default.
+        icon: toolIcon(tool),
+        size: toolPlacementSize(tool),
         title: tool.description || tool.name,
         write: isWrite,
         disabled: !!running || !!previewing || locked || entBlocked,
@@ -99,7 +171,7 @@ export function catalogClusters(families, {
         onClick: () => onRequestRun(tool, null, RIBBON_RATIONALE, 'ribbon'),
       }
     }),
-  }))
+  }
 }
 
 /**
@@ -252,24 +324,48 @@ export function layersCluster({ layers, counts = {}, visibleLayers = {}, onToggl
  * `available` is the folded entitlement-AND-availability rule the rest of
  * the shell gates Generate on.
  */
-export function authorCluster({ onOpen, entitled = true, available = entitled } = {}) {
+export function authorCluster({
+  onOpen, entitled = true, available = entitled,
+  // The tool the author card just published, if any. It joins the cluster so
+  // "run the one I just made" is a ribbon command too, and it says honestly
+  // when the catalog has not caught up: no digest, no runnable tool.
+  authored = null, onUseAuthored = null, running = false, previewing = false,
+} = {}) {
   const reason = !entitled ? REASONS.buildUnentitled : !available ? REASONS.buildUnavailable : ''
-  return {
-    id: 'author',
-    label: 'Author',
-    kind: 'group',
-    tools: [{
-      id: 'author-tool',
-      label: 'author-tool',
-      text: 'Author tool',
-      icon: 'wand',
-      size: 'large',
-      title: 'Build a new tool from plain English',
-      disabled: !!reason,
-      reason,
-      onClick: () => onOpen?.(),
-    }],
+  const tools = [{
+    id: 'author-tool',
+    label: 'author-tool',
+    text: 'Author tool',
+    icon: 'wand',
+    size: 'large',
+    title: 'Build a new tool from plain English',
+    disabled: !!reason,
+    reason,
+    onClick: () => onOpen?.(),
+  }]
+  if (authored && authored.name) {
+    const settled = typeof authored.catalog_digest === 'string' && !!authored.catalog_digest
+    const authoredReason = !settled
+      ? REASONS.publishing
+      : running
+        ? REASONS.running
+        : previewing
+          ? REASONS.previewing
+          : ''
+    tools.push({
+      id: `authored:${authored.name}`,
+      label: authored.name,
+      text: authored.name,
+      icon: toolIcon(authored),
+      size: toolPlacementSize(authored),
+      title: authored.description || `Run ${authored.name}`,
+      write: isWriteTool(authored),
+      disabled: !!authoredReason,
+      reason: authoredReason,
+      onClick: () => onUseAuthored?.(authored),
+    })
   }
+  return { id: 'author', label: 'Author', kind: 'group', tools }
 }
 
 // A reference panel this engine cannot back yet: present at the reference's

@@ -27,6 +27,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import useExit from '../useExit.js'
 import { authHeaders, config, noteUnauthorized } from '../api.js'
 import { modChord } from '../lib/keys.js'
+import { isWriteTool } from '../lib/toolRecord.js'
+import CockpitIcon from '../site/CockpitIcon.jsx'
 import {
   appendPromptHistory,
   autoGrowHeight,
@@ -396,7 +398,7 @@ export default function PromptBox({
                 : <>{trigger.kind === 'resource' ? 'No MCP servers mounted.' : <>No tool matches “/{afterSlash}” — keep typing, or Esc to close</>}</>}
             </div>
             {matches.map((t, i) => {
-              const isWrite = (t.capabilities || []).includes('drawing.write')
+              const isWrite = isWriteTool(t)
               return (
                 <div
                   key={t.name}
@@ -409,6 +411,15 @@ export default function PromptBox({
                   onClick={() => pick(t)}
                 >
                   <span className="lbar" aria-hidden="true" />
+                  {/* The SAME glyph the ribbon shows for this tool (one record,
+                      one icon) — decorative, aria-hidden inside CockpitIcon, so
+                      the row's accessible name is still the `.label` text
+                      below. Resource rows (@mounts) are servers, not tools, and
+                      carry no icon. The read/write dot stays exactly where it
+                      is: it is the money-relevant signal, not decoration. */}
+                  {t.kind !== 'resource' && (
+                    <CockpitIcon id={t.icon || ''} fallback={t.name} size="small" />
+                  )}
                   <span className={isWrite ? 'dot square' : 'dot'} aria-hidden="true" />
                   <span className="label">
                     <span className="route-tool">{t.kind === 'resource' ? `@${t.name}:` : `/${t.name}`}</span>

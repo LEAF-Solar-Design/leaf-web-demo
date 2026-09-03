@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { isWriteTool } from '../lib/toolRecord.js'
 import './panels.css'
 
 function schemaTypes(param) {
@@ -154,7 +155,7 @@ export default function ToolsPanel({ tools, error, running, selectedTool, onRequ
           const open = openName === t.name
           const params = paramsByTool[t.name] ?? defaultsOf(t.params)
           const isRunningThis = running && selectedTool?.name === t.name
-          const isWrite = (t.capabilities || []).includes('drawing.write')
+          const isWrite = isWriteTool(t)
           const locked = !!writeLocked && isWrite
           // Real plan gate: a write tool the tenant's plan doesn't include.
           const entBlocked = isWrite && !writeEntitled

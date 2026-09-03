@@ -2,6 +2,7 @@
   "tools": [
     {
       "name": "count-by-layer",
+      "icon": "layers",
       "version": "1.0.0",
       "description": "Counts entities per layer. The safest read-only tool — a good first run.",
       "kind": "script",
@@ -13,6 +14,7 @@
     },
     {
       "name": "highlight-panels-near-edge",
+      "icon": "bulb",
       "version": "1.0.0",
       "description": "Highlights panels whose centroid is within a given distance of the roof edge.",
       "kind": "script",
@@ -30,6 +32,7 @@
     },
     {
       "name": "measure-panel-area",
+      "icon": "dimension",
       "version": "1.0.0",
       "description": "Measures the area of every panel and reports totals; highlights the largest.",
       "kind": "script",
@@ -41,6 +44,7 @@
     },
     {
       "name": "delete-marked-panel",
+      "icon": "delete",
       "version": "1.0.0",
       "description": "Deletes the marked panel and stores the result as a new, undoable drawing version.",
       "kind": "script",
@@ -58,6 +62,7 @@
     },
     {
       "name": "select-by-layer",
+      "icon": "set-layer",
       "version": "1.0.0",
       "description": "Selects and highlights every entity on a chosen layer.",
       "kind": "script",

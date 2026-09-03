@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 import author_quota
+import catalog
 import deps
 import entitlements
 from customization_authority import AuthorityError, PublishRequest
@@ -32,6 +33,8 @@ from customization_flags import enabled as customization_enabled
 from deps import fb
 from envelopes import ErrorCode, error_obj, with_envelope_fields
 from tenant_id_validator import is_valid_tenant_id
+import tool_record_fields
+from tool_record_fields import ToolRecordFieldError
 from tool_validate import static_scan
 
 router = APIRouter()
@@ -65,6 +68,11 @@ class AuthorRequest(BaseModel):
     description: str = Field(..., max_length=MAX_AUTHOR_DESCRIPTION)
     mode: Literal["build", "one_off"] = "build"
     target_tool_name: str | None = Field(default=None, min_length=1, max_length=64)
+    # Optional presentation the author chooses for the tool record itself (see
+    # server/tool_record_fields.py). Length-bounded here as well as validated
+    # there, so an over-long body is rejected before any validator runs.
+    icon: str | None = Field(default=None, max_length=tool_record_fields.MAX_ICON_LEN)
+    placement: Dict[str, Any] | None = None
 
 
 class StageRequest(AuthorRequest):
@@ -151,6 +159,30 @@ class ConfirmationLookupRequest(BaseModel):
 
     class Config:
         extra = "forbid"
+
+
+def _record_fields_error(exc: ToolRecordFieldError) -> JSONResponse:
+    """422 for a malformed optional tool-record field, naming the field.
+
+    The authoring API has a caller to tell, so it REJECTS rather than dropping;
+    the fold-tier read path drops-with-a-warning instead (one bad tool must not
+    break the catalog). Two paths, one validator.
+    """
+    return JSONResponse(status_code=422, content=with_envelope_fields({
+        "tool": None,
+        "code": None,
+        "preview": exc.message,
+        "source": "invalid_tool_record_field",
+        "static_scan": [],
+        "invalid_field": exc.field,
+        "error": error_obj(ErrorCode.BAD_PARAMS, exc.message, retryable=False),
+    }))
+
+
+def _validated_record_fields(req: AuthorRequest) -> Dict[str, Any]:
+    """The request's valid optional record fields, or raise ToolRecordFieldError."""
+    return tool_record_fields.validate_optional_fields(
+        {"icon": req.icon, "placement": req.placement})
 
 
 def _grant_required_response(tenant_id: str, harness_message: str | None) -> JSONResponse:
@@ -305,6 +337,18 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
     tool.setdefault("provenance", {})["static_scan"] = findings
     if findings:
         preview = f"{preview}  [static-scan flags: {', '.join(findings)}]"
+
+    # The record's own presentation + family, stamped BEFORE persistence so a
+    # later rename keeps the family instead of silently falling to the default
+    # ("custom") through capability_families.json's name map. Validated at the
+    # route boundary; re-read here because that is where the record is written.
+    record_fields = _validated_record_fields(req)
+    if record_fields:
+        tool.update(record_fields)
+    stamped_family = tool_record_fields.family_id_for_persist(
+        tool, catalog.family_for_persist(tool))
+    if stamped_family:
+        tool["family_id"] = stamped_family
 
     if source == "harness":
         # The harness already registered this tool into the TENANT repo (its build
@@ -684,6 +728,10 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
         return _customization_error(
             CustomizationServiceError("invalid_stage_authority", 422)
         )
+    try:
+        _validated_record_fields(req)
+    except ToolRecordFieldError as exc:
+        return _record_fields_error(exc)
     _emit_author_event("author.requested", tenant, {
         "mode": req.mode, "desc_len": len(req.description or "")})
     if not deps.auth_live() and not customization_enabled(5, str(tenant).strip()):
@@ -774,6 +822,10 @@ def stage(
         return _customization_error(
             CustomizationServiceError("invalid_stage_authority", 422)
         )
+    try:
+        _validated_record_fields(req)
+    except ToolRecordFieldError as exc:
+        return _record_fields_error(exc)
     denied = _customization_gate(5, tenant)
     if denied is not None:
         return denied

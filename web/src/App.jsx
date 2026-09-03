@@ -9,7 +9,8 @@ import CockpitTopBand from './site/CockpitTopBand.jsx'
 import DraftingRibbon from './site/DraftingRibbon.jsx'
 import PropertiesDock, { drawingExtents } from './site/PropertiesDock.jsx'
 import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
-import { authorCluster, catalogClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
+import { authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
+import { resolvePublishedCatalogTool } from './site/publishedCatalogTool.js'
 import { entityGeometry } from './lib/entityMetrics.js'
 import { loadDemoSolve } from './site/intakeCache.js'
 // The 3D viewer drags in `three`; loading it lazily (mirroring the auth.js
@@ -290,6 +291,10 @@ export default function App() {
   const [authorSeed, setAuthorSeed] = useState('')       // build-lane prefill text
   const [authorSignal, setAuthorSignal] = useState(0)    // bump to re-seed the author flow
   const [authorTargetTool, setAuthorTargetTool] = useState(null)
+  // The tool the author card published most recently. The ribbon's Author
+  // cluster carries it so "run the one I just made" is a ribbon command too,
+  // and says honestly while it has no catalog digest yet.
+  const [lastAuthoredTool, setLastAuthoredTool] = useState(null)
 
   // --- projects / orgs workspace (UI wave 2, item 1) ---
 
@@ -651,6 +656,9 @@ export default function App() {
   } = catalogState
   const {
     retryTools,
+    // The awaitable catalog refetch. `loadCatalog` regroups families; this is
+    // the flat runnable list the published-tool resolver needs.
+    loadTools: loadCatalogTools,
     loadCatalog,
     upsertTool,
     toggleFamily,
@@ -1250,7 +1258,14 @@ export default function App() {
     // Family catalog entries are presentation-normalized. Resolve the canonical
     // flat-catalog record before snapshotting so confirmation compares the same
     // server-sourced definition that RoutePanel will execute.
-    const catalogTool = tools.find((candidate) => candidate.name === decision.tool)
+    // A caller that already refetched (the authored "Run it now" path) hands
+    // its resolved record over: `tools` in this closure is the PRE-refetch
+    // list, so trusting it would snapshot the provisional record the resolver
+    // just rejected. Same preference ToolCast's armCatalogDecision applies.
+    const refreshedTool = decision.refreshedTool?.name === decision.tool
+      ? decision.refreshedTool
+      : null
+    const catalogTool = refreshedTool || tools.find((candidate) => candidate.name === decision.tool)
     if (!catalogTool) {
       runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
       return decision
@@ -1280,8 +1295,9 @@ export default function App() {
       toolSnapshot: createCatalogToolSnapshot(catalogTool),
     })
     runIntentStateRef.current = staged.state
+    const { refreshedTool: _refreshedTool, ...publicDecision } = decision
     const armed = {
-      ...decision,
+      ...publicDecision,
       tool: catalogTool.name,
       params: staged.intent.params,
       runIntent: staged.intent,
@@ -1616,6 +1632,9 @@ export default function App() {
       const tool = res.tool || staged.tool
       if (res.published) {
         upsertTool(tool)
+        // The ribbon's Author cluster shows this tool from here on, and says
+        // honestly that it is not runnable until the catalog issues its digest.
+        setLastAuthoredTool(tool)
         // Re-group the catalog so the new tool lands in "Custom authored tools"
         // (visible re-fetch of the grouped capabilities).
         loadCatalog()
@@ -1643,15 +1662,36 @@ export default function App() {
   // the just-authored tool so the user confirms before it runs (paid actions
   // never auto-execute). The tool is already in `tools` (onAuthor added it), so
   // RoutePanel resolves it and shows a single Run.
-  const onUseAuthored = useCallback((tool) => {
+  // ONE honest path, the same one ToolCast.useAuthoredTool walks: refetch the
+  // runnable catalog, resolve the published tool through the single oracle
+  // (site/publishedCatalogTool.js, pinned by publishedCatalogTool.test.mjs),
+  // and surface its sentence instead of arming a run against a record the
+  // catalog has not issued a digest for. This shell used to trust the
+  // provisional publish response and arm regardless.
+  const onUseAuthored = useCallback(async (tool) => {
     if (!tool) return
+    const refreshedTools = await loadCatalogTools()
+    let runnableTool
+    try {
+      runnableTool = resolvePublishedCatalogTool(tool, refreshedTools)
+    } catch (cause) {
+      showToast({ text: cause?.message || 'The published tool is not ready to run yet.' })
+      return
+    }
+    setLastAuthoredTool(runnableTool)
     commitCatalogDecision({
-      lane: 'run', tool: tool.name, params: {}, confidence: 0.99,
-      rationale: `Authored just now — confirm to run “${tool.name}”.`,
+      lane: 'run', tool: runnableTool.name, params: {}, confidence: 0.99,
+      rationale: `Authored just now — confirm to run “${runnableTool.name}”.`,
       alternatives: [],
+      // The refetched record, so armDecision snapshots what the catalog just
+      // issued rather than this render's stale `tools`.
+      refreshedTool: runnableTool,
+      // P2 parity with ToolCast: 'authored' is already in the
+      // run.confirm_shown source vocabulary.
+      source: 'authored',
     })
     setTimeout(() => document.querySelector('main')?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 0)
-  }, [commitCatalogDecision])
+  }, [commitCatalogDecision, loadCatalogTools, showToast])
 
   // --- prompt-first dispatch (§12) -----------------------------------------
   // Live preview of which lane the text will route to (lights the hero's dots).
@@ -2436,16 +2476,35 @@ export default function App() {
         setAuthorOpen(true)
         authorSectionRef.current?.scrollIntoView?.({ block: 'nearest' })
       },
+      authored: lastAuthoredTool,
+      onUseAuthored,
+      running: !!running,
+      previewing: !!previewing,
+    })
+    // Per-tool placement: a tool whose record names a ribbon tab is grouped
+    // into a cluster for THAT tab instead of the Manage families panel. A
+    // catalog where nothing declares a placement returns {} and every tab below
+    // is byte-identical to before.
+    const tabFamilies = catalogTabClusters(railFamilies, {
+      onRequestRun: onRequestCatalogRun,
+      onOpenFamily: (fam) => {
+        setNavExpanded(true)
+        setFamilyOpen(fam.family_id, true)
+      },
+      running: !!running,
+      previewing: !!previewing,
+      writeLocked,
+      writeEntitled: canRunWrite,
     })
     const [annotation, block, properties, groups, clipboard] = referencePanels()
     // The reference's Draw tab: Draw, Modify (engine children, rendered
     // first), Annotation, Layers, Block, Properties, Groups, Clipboard.
     const byTab = {
-      draw: [annotation, layers, block, properties, groups, clipboard],
-      insert: [block],
-      annotate: [annotation],
-      view: [view, version, layers],
-      manage: [...rail, ...families, author],
+      draw: [annotation, layers, block, properties, groups, clipboard, ...(tabFamilies.draw || [])],
+      insert: [block, ...(tabFamilies.insert || [])],
+      annotate: [annotation, ...(tabFamilies.annotate || [])],
+      view: [view, version, layers, ...(tabFamilies.view || [])],
+      manage: [...rail, ...families, ...(tabFamilies.manage || []), author],
     }
     const [undo, redo] = version.tools
     return {
@@ -2469,7 +2528,8 @@ export default function App() {
     }
   }, [studioGround, drafting, shown, drawingState, canUndo, canRedo, versionBusy, running, previewing,
     drawingMutationsBlocked, historyOpen, onUndo, onRedo, onToggleHistoryTracked, layerCounts, visibleLayers,
-    toggleLayer, railFamilies, onRequestCatalogRun, writeLocked, canRunWrite, canBuild, entOf, ribbonTab, colorForLayer, paneOpen])
+    toggleLayer, railFamilies, onRequestCatalogRun, writeLocked, canRunWrite, canBuild, entOf, ribbonTab, colorForLayer, paneOpen,
+    lastAuthoredTool, onUseAuthored, setFamilyOpen])
   const ribbonClusters = ribbon.clusters
   // W4e round 2: the pane's Drawing section, the document's own facts from
   // the intake (counts) and one pass over its vertices (extents). Studio
