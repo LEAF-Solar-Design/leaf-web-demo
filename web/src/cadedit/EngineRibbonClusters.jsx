@@ -236,8 +236,12 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const promptOff = !!promptReason
   const fieldsOff = promptOff && promptReason !== MODIFY_REASONS.noSelection
   const toggleArmed = (group, op) => setArmed(armedOp === op ? null : { group, op })
+  // W4f-3: LINE chains. A run remembers where the segment ends; once the
+  // engine has drawn it, that end becomes the next segment's first point.
+  const chainRef = useRef(null)
   const run = () => {
     if (!prompt || promptOff) return
+    chainRef.current = armedOp === 'createLine' ? { x: inputs.x2, y: inputs.y2 } : null
     if (armedGroup === 'draw') create(armedOp, inputs)
     else applyEdit(armedOp, inputs)
   }
@@ -254,6 +258,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   useEffect(() => {
     // Arming puts the caret in the first field the way the reference's
     // command line takes typing the moment a command starts.
+    chainRef.current = null
     if (!armedOp) return undefined
     promptRef.current?.querySelector('input:not([disabled])')?.focus()
     return undefined
@@ -261,13 +266,31 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   useEffect(() => {
     // W4f-2: a run makes the engine busy, which disables Run and the fields,
     // and the browser drops focus to the body. When the engine answers, the
-    // caret comes back to the prompt's first field so the next command (or
-    // Esc) is one keystroke away. Only when nothing else took the focus in
-    // between (the Command bar, a ribbon tool): those keep it.
+    // caret comes back to the prompt so the next command (or Esc) is one
+    // keystroke away. Only when nothing else took the focus in between (the
+    // Command bar, a ribbon tool): those keep it.
     if (!armedOp || session.busy || typeof document === 'undefined') return undefined
+    // W4f-3: LINE chains, as the reference's LINE keeps asking "Specify next
+    // point:" until Esc. After a segment is drawn its end becomes the next
+    // segment's first point (the fields and the picker's rubber band alike,
+    // through the armed command's chain point) and the caret waits in the
+    // next-point field. A refused edit chains nothing.
+    const chain = chainRef.current
+    chainRef.current = null
+    let nextField = 'input:not([disabled])'
+    if (chain && armedOp === 'createLine' && session.errorKind === null) {
+      const x = Number.parseFloat(chain.x)
+      const y = Number.parseFloat(chain.y)
+      if (Number.isFinite(x) && Number.isFinite(y)) {
+        setInput('x', chain.x)
+        setInput('y', chain.y)
+        setArmed({ group: 'draw', op: 'createLine', from: [x, y] })
+        nextField = '[aria-label="ribbon x2"]:not([disabled])'
+      }
+    }
     const active = document.activeElement
     if (active && active !== document.body && !promptRef.current?.contains(active)) return undefined
-    promptRef.current?.querySelector('input:not([disabled])')?.focus()
+    promptRef.current?.querySelector(nextField)?.focus()
     return undefined
   }, [armedOp, session.busy])
   const cancelRef = useRef(cancel)

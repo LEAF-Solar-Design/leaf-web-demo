@@ -41,21 +41,28 @@ function focusRun() {
 export default function CanvasPointPicker({ viewerRef = null, ground = null, onPicking = null }) {
   const { session, inputs, setInput, armed } = useEngineSessionContext()
   const armedOp = armed ? armed.op : ''
+  // W4f-3: the chain point a continued command starts from (LINE's next
+  // segment), keyed as a string so the sequence restarts only when it moves.
+  const armedFrom = armed && armed.from ? armed.from : null
+  const fromKey = armedFrom ? `${armedFrom[0]},${armedFrom[1]}` : ''
+  const fromRef = useRef(armedFrom)
+  fromRef.current = armedFrom
   const inputsRef = useRef(inputs)
   inputsRef.current = inputs
   const onPickingRef = useRef(onPicking)
   onPickingRef.current = onPicking
   const machine = useRef(null)
   // A fresh sequence on every arming and after every applied edit (the next
-  // segment starts clean); cleared when nothing is armed.
+  // segment starts clean, or from the chain point); cleared when nothing is
+  // armed.
   const entities = session.entities
   useEffect(() => {
-    machine.current = armedOp ? startPicking(armedOp) : null
+    machine.current = armedOp ? startPicking(armedOp, fromRef.current) : null
     const live = !!(machine.current && machine.current.sequence)
     onPickingRef.current?.(live)
     viewerRef?.current?.setRubberBand?.(null)
     return () => { onPickingRef.current?.(false) }
-  }, [armedOp, entities, viewerRef])
+  }, [armedOp, fromKey, entities, viewerRef])
 
   useEffect(() => {
     if (!ground || typeof window === 'undefined') return undefined

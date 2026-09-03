@@ -119,6 +119,22 @@ describe('CanvasPointPicker (W4f slice A1)', () => {
     expect(viewer.setRubberBand).toHaveBeenLastCalledWith(null)
   })
 
+  it('a chained LINE (armed with a chain point) starts at the next-point step: the band runs from it and one click finishes (W4f-3)', async () => {
+    mount()
+    await openAndLoad()
+    act(() => { context.setArmed({ group: 'draw', op: 'createLine', from: [12, 3] }) })
+    expect(onPicking).toHaveBeenLastCalledWith(true)
+    act(() => { ground.dispatchEvent(new MouseEvent('pointermove', { clientX: 200, clientY: 80, bubbles: true })) })
+    expect(viewer.setRubberBand).toHaveBeenLastCalledWith([[12, 3], [20, 8]], false)
+    click(200, 80)
+    expect(screen.getByLabelText('ribbon x2').value).toBe('20')
+    expect(screen.getByLabelText('ribbon y2').value).toBe('8')
+    expect(document.activeElement).toBe(screen.getByTestId('cockpit-prompt-run'))
+    // The chain point itself was never written: the fields' first point is
+    // the ribbon's business (it set them when it chained).
+    expect(screen.getByLabelText('ribbon x').value).not.toBe('12')
+  })
+
   it('a circle takes its centre and a radius point; a drag (pointer travel) is never a pick', async () => {
     mount()
     await openAndLoad()

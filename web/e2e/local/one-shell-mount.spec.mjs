@@ -830,7 +830,11 @@ test.describe('route matrix, rail ON', () => {
     // Run button was disabled while the engine was busy and the browser had
     // dropped focus to the body), and while a point command is picking the
     // floating import card lets clicks through to the drawing under it.
-    await expect(page.getByLabel('ribbon x', { exact: true })).toBeFocused()
+    // W4f-3: LINE chains: the segment's end is the next segment's first
+    // point and the caret waits in the next-point field.
+    await expect(page.getByLabel('ribbon x', { exact: true })).toHaveValue(r3(b.wx))
+    await expect(page.getByLabel('ribbon y', { exact: true })).toHaveValue(r3(b.wy))
+    await expect(page.getByLabel('ribbon x2', { exact: true })).toBeFocused()
     const underCard = () => page.evaluate(() => {
       // The card is a full-width pass-through layer; the floating "Edit a
       // DXF drawing" workbench is the child that sits over the drawing.
