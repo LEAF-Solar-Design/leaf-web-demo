@@ -39,5 +39,9 @@ export const INTERIM_ICONS = Object.freeze({
   split: '<rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M12 4v16"/>',
   wireframe: '<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12L4 7.5M12 12v9"/>',
   hatch: '<rect x="4" y="4" width="16" height="16"/><path d="M4 12l8-8M4 20L20 4M12 20l8-8"/>',
+  trim: '<path d="M4 6l12 12"/><path d="M4 18L16 6"/><circle cx="6" cy="18" r="2"/><circle cx="6" cy="6" r="2"/><path d="M20 12h-6"/>',
+  text: '<path d="M5 5h14"/><path d="M12 5v14"/><path d="M8 19h8"/>',
+  dimension: '<path d="M4 15V9M20 15V9"/><path d="M4 12h16"/><path d="M7 10l-3 2 3 2M17 10l3 2-3 2"/><path d="M9 6h6"/>',
+  match: '<path d="M14 4l6 6-9 9H5v-6z"/><path d="M11 7l6 6"/><path d="M4 20h4"/>',
   bulb: '<path d="M9 18h6"/><path d="M10 21h4"/><path d="M8.5 14a5.5 5.5 0 1 1 7 0c-.8.7-1.5 1.6-1.5 2.5h-4c0-.9-.7-1.8-1.5-2.5z"/>',
 })
