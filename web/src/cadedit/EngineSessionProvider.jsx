@@ -77,6 +77,7 @@ const INPUT_LIMITS = Object.freeze({ pts: MAX_POINT_LIST_CHARS })
 // again when it runs).
 const ARMED_GROUPS = new Set(['draw', 'modify'])
 const ARMED_OP = /^[a-zA-Z]{1,32}$/
+const sameFrom = (a, b) => (!a && !b) || (!!a && !!b && a[0] === b[0] && a[1] === b[1])
 
 export default function EngineSessionProvider({
   createWorker = defaultCreateWorker,
@@ -112,8 +113,17 @@ export default function EngineSessionProvider({
     if (!next || typeof next !== 'object') return
     const { group, op } = next
     if (!ARMED_GROUPS.has(group) || typeof op !== 'string' || !ARMED_OP.test(op)) return
+    // W4f-3: an optional chain point `from` ([x, y], two finite numbers): the
+    // command continues from there (LINE's next segment starts where the
+    // last one ended). Any other shape is dropped, never stored.
+    const from = Array.isArray(next.from) && next.from.length === 2
+      && next.from.every((v) => typeof v === 'number' && Number.isFinite(v))
+      ? Object.freeze([next.from[0], next.from[1]])
+      : null
     setArmedState((current) => (
-      current && current.group === group && current.op === op ? current : Object.freeze({ group, op })
+      current && current.group === group && current.op === op && sameFrom(current.from, from)
+        ? current
+        : Object.freeze(from ? { group, op, from } : { group, op })
     ))
   }, [])
   // No parsed document (closed, or the worker died): nothing to prompt for,

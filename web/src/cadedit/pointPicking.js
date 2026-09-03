@@ -25,10 +25,20 @@ export const PICK_SEQUENCES = Object.freeze({
   addVertex: [{ kind: 'base' }, { kind: 'delta', keys: ['dx', 'dy'] }],
 })
 
-/** Fresh pick state for an armed op: which step is next, plus the points picked so far. */
-export function startPicking(op) {
+/**
+ * Fresh pick state for an armed op: which step is next, plus the points
+ * picked so far. W4f-3: a chain point `from` ([x, y]) answers the first
+ * point step up front (LINE's next segment starts where the last one ended),
+ * so the sequence opens at step 1 with that point picked and the rubber band
+ * runs from it; a non-finite point, or an op whose first step is not a
+ * point, opens normally.
+ */
+export function startPicking(op, from = null) {
   const sequence = PICK_SEQUENCES[op] || null
-  return { op, sequence, step: 0, picked: [], base: null }
+  const chained = !!(sequence && sequence[0].kind === 'point' && Array.isArray(from) && finite(from[0]) && finite(from[1]))
+  return chained
+    ? { op, sequence, step: 1, picked: [[from[0], from[1]]], base: null }
+    : { op, sequence, step: 0, picked: [], base: null }
 }
 
 /** The step the next click answers, or null when the sequence is done (an append repeats forever). */

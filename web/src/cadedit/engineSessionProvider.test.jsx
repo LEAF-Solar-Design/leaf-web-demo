@@ -513,28 +513,67 @@ describe('the command prompt (W4e slice H): a tool arms, the command line asks i
     layer.remove()
     // A run: Enter in a field posts the edit; the engine is busy (fields and
     // Run disabled) and the browser drops focus; the reply brings the caret
-    // back to the first field.
+    // back to the prompt. W4f-3: LINE chains, so the segment's end becomes
+    // the next first point, the armed command carries it as the chain point
+    // (the picker's rubber band starts there), and the caret waits in x2.
     fireEvent.change(screen.getByLabelText('ribbon x2'), { target: { value: '5' } })
+    fireEvent.change(screen.getByLabelText('ribbon y2'), { target: { value: '7' } })
     fireEvent.keyDown(screen.getByLabelText('ribbon x2'), { key: 'Enter' })
     expect(studio.context.session.busy).toBe(true)
     expect(screen.getByLabelText('ribbon x').disabled).toBe(true)
     expect(screen.getByTestId('cockpit-prompt-run').disabled).toBe(true)
     screen.getByLabelText('ribbon x2').blur()
     expect(document.activeElement).toBe(document.body)
-    studio.workers[0].emit(editApplied('createLine', [LINE, { ...LINE, id: 'e9' }]))
+    // (a create reports what it drew by id; without it the store reads the
+    // create as lost and, rightly, nothing chains)
+    studio.workers[0].emit({ ...editApplied('createLine', [LINE, { ...LINE, id: 'e9' }]), createdId: 'e9' })
     expect(studio.context.session.busy).toBe(false)
     expect(promptEl().getAttribute('data-op')).toBe('createLine')
-    expect(document.activeElement).toBe(screen.getByLabelText('ribbon x'))
+    expect(screen.getByLabelText('ribbon x').value).toBe('5')
+    expect(screen.getByLabelText('ribbon y').value).toBe('7')
+    expect(studio.context.armed).toEqual({ group: 'draw', op: 'createLine', from: [5, 7] })
+    expect(document.activeElement).toBe(screen.getByLabelText('ribbon x2'))
     // The Command bar (any field outside the prompt) holding the focus when
-    // the engine answers keeps it.
-    fireEvent.keyDown(screen.getByLabelText('ribbon x'), { key: 'Enter' })
+    // the engine answers keeps it; the chain still applies.
+    fireEvent.change(screen.getByLabelText('ribbon x2'), { target: { value: '9' } })
+    fireEvent.keyDown(screen.getByLabelText('ribbon x2'), { key: 'Enter' })
     expect(studio.context.session.busy).toBe(true)
     const bar = document.createElement('input')
     document.body.appendChild(bar)
     bar.focus()
-    studio.workers[0].emit(editApplied('createLine', [LINE, { ...LINE, id: 'e9' }, { ...LINE, id: 'e10' }]))
+    studio.workers[0].emit({ ...editApplied('createLine', [LINE, { ...LINE, id: 'e9' }, { ...LINE, id: 'e10' }]), createdId: 'e10' })
     expect(document.activeElement).toBe(bar)
+    expect(screen.getByLabelText('ribbon x').value).toBe('9')
+    expect(studio.context.armed.from).toEqual([9, 7])
     bar.remove()
+  })
+
+  it('a refused LINE chains nothing, a CIRCLE never chains, and a malformed chain point is dropped (W4f-3)', async () => {
+    const studio = mount()
+    await openAndLoad(studio, [LINE])
+    fireEvent.click(drawTool('createLine'))
+    fireEvent.change(screen.getByLabelText('ribbon x2'), { target: { value: '5' } })
+    fireEvent.keyDown(screen.getByLabelText('ribbon x2'), { key: 'Enter' })
+    studio.workers[0].emit({ type: 'editApplied', op: 'createLine', ok: false, reason: 'degenerate' })
+    expect(studio.context.session.busy).toBe(false)
+    expect(screen.getByLabelText('ribbon x').value).toBe('0')
+    expect(studio.context.armed).toEqual({ group: 'draw', op: 'createLine' })
+    expect(document.activeElement).toBe(screen.getByLabelText('ribbon x'))
+    // A circle run leaves its centre alone.
+    fireEvent.click(drawTool('createCircle'))
+    fireEvent.change(screen.getByLabelText('ribbon r'), { target: { value: '4' } })
+    fireEvent.keyDown(screen.getByLabelText('ribbon r'), { key: 'Enter' })
+    studio.workers[0].emit({ ...editApplied('createCircle', [LINE, { id: 'c1', type: 'CIRCLE', layer: '0', vertices: [[0, 0]] }]), createdId: 'c1' })
+    expect(studio.context.session.errorKind).toBeNull()
+    expect(studio.context.armed).toEqual({ group: 'draw', op: 'createCircle' })
+    expect(document.activeElement).toBe(screen.getByLabelText('ribbon x'))
+    // The provider stores only a well-formed chain point.
+    act(() => { studio.context.setArmed({ group: 'draw', op: 'createLine', from: ['1', 2] }) })
+    expect(studio.context.armed).toEqual({ group: 'draw', op: 'createLine' })
+    act(() => { studio.context.setArmed({ group: 'draw', op: 'createLine', from: [1, Infinity] }) })
+    expect(studio.context.armed).toEqual({ group: 'draw', op: 'createLine' })
+    act(() => { studio.context.setArmed({ group: 'draw', op: 'createLine', from: [1.5, -2] }) })
+    expect(studio.context.armed).toEqual({ group: 'draw', op: 'createLine', from: [1.5, -2] })
   })
 
   it('an open dialog owns Esc even when its opener kept focus outside the layer', async () => {

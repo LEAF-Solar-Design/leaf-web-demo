@@ -71,4 +71,21 @@ describe('pointPicking (W4f slice A1): clicks on the drawing answer the prompts'
     expect(ghostFor(line, NaN, 1)).toBeNull()
     expect(applyPick(startPicking('createLine'), -0.00001, 2, {}).writes).toEqual([['x', '0'], ['y', '2']])
   })
+
+  it('a chain point opens LINE at its next-point step, the ghost runs from it, one click finishes (W4f-3)', () => {
+    const s = startPicking('createLine', [10, 20])
+    expect(s.step).toBe(1)
+    expect(currentStep(s)).toEqual({ kind: 'point', keys: ['x2', 'y2'] })
+    expect(ghostFor(s, 30, 40)).toEqual({ pts: [[10, 20], [30, 40]], closed: false })
+    const { state, writes } = applyPick(s, 30, 40, {})
+    expect(writes).toEqual([['x2', '30'], ['y2', '40']])
+    expect(wantsPick(state)).toBe(false)
+    // A chain point that is not finite, or not a pair, or an op whose first
+    // step is not a point, opens normally.
+    expect(startPicking('createLine', [NaN, 1]).step).toBe(0)
+    expect(startPicking('createLine', [1]).step).toBe(0)
+    expect(startPicking('createLine', null).step).toBe(0)
+    expect(startPicking('move', [1, 2]).step).toBe(0)
+    expect(startPicking('createPolyline', [1, 2]).step).toBe(0)
+  })
 })

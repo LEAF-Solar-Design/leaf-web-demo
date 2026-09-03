@@ -789,7 +789,10 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.locator('.workspace-card[data-cockpit-picking="1"]')).toHaveCount(1)
     // A visible higher Esc rung owns the first key even when its opener keeps
     // focus outside the dialog. History closes and the armed command survives.
-    const historyWhileArmed = page.getByRole('button', { name: 'History' })
+    // (exact: once the drawer is open its "Close version history" button
+    // also matches the substring, and the focus assertion hit two elements
+    // in the flagged proof on main a0820937)
+    const historyWhileArmed = page.getByRole('button', { name: 'History', exact: true })
     await historyWhileArmed.click()
     await expect(historyWhileArmed).toBeFocused()
     const historyDialog = page.getByRole('dialog', { name: 'Version history' })
@@ -830,7 +833,11 @@ test.describe('route matrix, rail ON', () => {
     // Run button was disabled while the engine was busy and the browser had
     // dropped focus to the body), and while a point command is picking the
     // floating import card lets clicks through to the drawing under it.
-    await expect(page.getByLabel('ribbon x', { exact: true })).toBeFocused()
+    // W4f-3: LINE chains: the segment's end is the next segment's first
+    // point and the caret waits in the next-point field.
+    await expect(page.getByLabel('ribbon x', { exact: true })).toHaveValue(r3(b.wx))
+    await expect(page.getByLabel('ribbon y', { exact: true })).toHaveValue(r3(b.wy))
+    await expect(page.getByLabel('ribbon x2', { exact: true })).toBeFocused()
     const underCard = () => page.evaluate(() => {
       // The card is a full-width pass-through layer; the floating "Edit a
       // DXF drawing" workbench is the child that sits over the drawing.
