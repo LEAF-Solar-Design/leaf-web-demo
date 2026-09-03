@@ -2412,7 +2412,10 @@ export default function App() {
   // W4e round 2: the pane's Drawing section, the document's own facts from
   // the intake (counts) and one pass over its vertices (extents). Studio
   // drafting surfaces only; null everywhere else so the dock renders as before.
-  const drawingSummary = useMemo(() => {
+  // Named apart from the version bootstrap's `drawingSummary`: a shadowing
+  // name makes the build transform rename one of them and the App wiring
+  // pins (src/app-wiring.test.mjs) then miss the bootstrap's pattern.
+  const paneDrawingFacts = useMemo(() => {
     if (!(studioGround && drafting && shown)) return null
     const layers = Array.isArray(shown.layers) ? shown.layers : []
     const polylines = Array.isArray(shown.polylines) ? shown.polylines.length : 0
@@ -3082,7 +3085,7 @@ export default function App() {
                     layers={legendEl}
                     selection={readoutEl}
                     geometry={selectedEntityGeometry}
-                    drawing={drawingSummary}
+                    drawing={paneDrawingFacts}
                     plan={(
                       <EntitlementGate
                         tier={entTier}
