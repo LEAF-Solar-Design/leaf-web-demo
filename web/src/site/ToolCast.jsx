@@ -73,7 +73,9 @@ import {
   stageRunIntent,
 } from '../runIntent.js'
 import { navigate } from './router.js'
-import { productSurfaceFromSearch, productSurfaceStates, searchForProductSurface } from './productSurfaces.js'
+import {
+  productSurfaceFromSearch, productSurfaceStates, searchForProductSurface, surfaceContract,
+} from './productSurfaces.js'
 import { deriveWorkspaceProjectState } from './workspaceProjectState.js'
 import {
   emptyIosShipReadiness,
@@ -211,6 +213,14 @@ export default function ToolCast({
 }) {
   const [prompt, setPrompt] = useState(PROOF_MODE ? CAT_REQUEST : '')
   const [activeSurface, setActiveSurface] = useState(() => productSurfaceFromSearch(window.location.search))
+  // THE SURFACE CONTRACT (standardization slice 2, docs/convergence/
+  // SURFACE-CONTRACT.md). The stage picks its arm from the DECLARED branch
+  // instead of comparing activeSurface to a string literal. Truth table is
+  // unchanged: 'cad' for cad, 'ios' for ios, 'frame' for browser AND solar
+  // (the stage gives Solar CAD no drafting cockpit; that divergence from the
+  // console is documented, and preserved here on purpose, not fixed).
+  // src/site/surfaceGates.test.js pins this equal to the old ternary.
+  const stageBranch = surfaceContract(activeSurface).chrome.stageBranch
   const {
     converse,
     bindConverseProject,
@@ -1286,7 +1296,10 @@ export default function ToolCast({
     setIosShip(emptyIosShipReadiness('loading', null, projectId || null))
     setIosShipExecution(null)
     setIosShipReceipt(null)
-    if (activeSurface !== 'ios' || !signedIn || !projectId || !revision) {
+    // Slice 2: the ship-lane readiness read follows the DECLARED ios branch,
+    // the same one that renders it below. It replaces the inline
+    // not-equal-ios surface literal.
+    if (stageBranch !== 'ios' || !signedIn || !projectId || !revision) {
       setIosShip(emptyIosShipReadiness('no_approved_project_revision', null, projectId || null))
       return undefined
     }
@@ -1302,7 +1315,7 @@ export default function ToolCast({
   // Consume-only iOS readiness (ios_surface, cards D-1..D-4): one point-in-time
   // read of GET /api/ios-surface/status per (project, revision), distinct from the
   // ios_ship LAUNCH lane above (this one only ever reads). `enabled` mirrors the
-  // render gate below EXACTLY (incl. activeSurface === 'cad') so the hook is inert
+  // render gate below EXACTLY (incl. stageBranch === 'cad') so the hook is inert
   // whenever the panel is not mounted -- otherwise a project switch on the iOS
   // product surface, where this panel does not render, would fetch for nothing.
   // Not a live poll: a build's stage advancing (BUILT -> RECEIPT) is picked up on
@@ -1312,7 +1325,7 @@ export default function ToolCast({
     workspace.openProjectId,
     workspace.canonicalVersionId,
     {
-      enabled: ENV_IOS_SURFACE && activeSurface === 'cad' && leftView === 'workspace'
+      enabled: ENV_IOS_SURFACE && stageBranch === 'cad' && leftView === 'workspace'
         && !PUBLIC_DEMO && !transportMock && canOperate,
     },
   )
@@ -1345,7 +1358,8 @@ export default function ToolCast({
   useEffect(() => {
     const projectId = workspace.openProjectId
     const executionId = iosShipExecution?.execution_id
-    if (activeSurface !== 'ios' || !projectId || !executionId) return undefined
+    // Slice 2: same declared ios branch as the readiness read above.
+    if (stageBranch !== 'ios' || !projectId || !executionId) return undefined
     let live = true
     let timer = null
     const poll = async () => {
@@ -1414,7 +1428,10 @@ export default function ToolCast({
         signedIn={isSignedIn()}
         onSignOut={platformSession.actions.signOut}
       />
-      {activeSurface === 'cad' ? (
+      {/* Slice 2: the stage's arm is the contract's declared stageBranch. It
+          replaces the inline cad-then-ios-then-frame surface-literal ternary
+          that spanned this block. */}
+      {stageBranch === 'cad' ? (
       <>
       <div className="tc-topcluster tc-topcluster-product" data-cast="tool" style={{ '--rank': 3 }}>
         {projectSlot}
@@ -2057,7 +2074,7 @@ export default function ToolCast({
         />
       )}
       </>
-      ) : activeSurface === 'ios' ? (
+      ) : stageBranch === 'ios' ? (
       <>
       <div className="tc-topcluster tc-topcluster-product" data-cast="tool" style={{ '--rank': 3 }}>
         {projectSlot}

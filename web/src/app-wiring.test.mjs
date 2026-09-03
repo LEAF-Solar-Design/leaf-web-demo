@@ -102,13 +102,20 @@ describe('App.jsx wiring', () => {
   })
 
   it('keeps the wide drafting properties dock mounted before drawing data exists', () => {
+    // Standardization slice 2 renamed the surface term only: the mount gate is
+    // now `dockSections` (the contract's rails.dock, truthy exactly where
+    // `drafting` was) instead of `drafting`. What this pin guards is unchanged:
+    // the dock must mount on a wide drafting surface BEFORE any drawing data
+    // exists, so the entitlement controls cannot vanish into an honest-empty
+    // state. The negative below is the regression it was written for: gating
+    // the mount on data (legendEl || readoutEl) is the white-screen shape.
     assert.match(
       stripped,
-      /if \(studioGround && drafting && wideViewport\) \{\s*return[^;]*React\.createElement\(\s*PropertiesDock/,
+      /if \(studioGround && dockSections && wideViewport\) \{\s*return[^;]*React\.createElement\(\s*PropertiesDock/,
     )
     assert.doesNotMatch(
       stripped,
-      /studioGround && drafting && wideViewport && \(legendEl \|\| readoutEl\)/,
+      /studioGround && (?:dockSections|drafting) && wideViewport && \(legendEl \|\| readoutEl\)/,
     )
   })
 })

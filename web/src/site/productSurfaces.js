@@ -12,12 +12,20 @@ export const SHARED_WORKSPACE_CAPABILITIES = Object.freeze([
 ])
 
 // ---------------------------------------------------------------------------
-// THE SURFACE CONTRACT (standardization slice 1, docs/convergence/
+// THE SURFACE CONTRACT (standardization slices 1-2, docs/convergence/
 // SURFACE-CONTRACT.md). Every slot a surface can own, declared as DATA on the
-// surface record instead of hidden in an inline gate. This slice FREEZES
-// TODAY: every value below is read off the code site cited beside it, so the
-// manifest and the running shell agree byte for byte. NO CONSUMER READS THIS
-// YET — slice 2 repoints the gates — so this slice cannot change a pixel.
+// surface record instead of hidden in an inline gate. Slice 1 FROZE TODAY:
+// every value below is read off the code site cited beside it, so the
+// manifest and the running shell agree byte for byte.
+//
+// Slice 2 made this manifest LOAD-BEARING: App.jsx, ToolCast.jsx and
+// SurfaceGrounds.jsx now read these slots instead of comparing activeSurface
+// to a string literal, so a value below is what the shell renders, not a
+// description of it. Behaviour is unchanged, because surfaceGates.test.js pins every
+// derived gate equal to the literal predicate it replaced, for all four ids,
+// and the three console/stage divergences (D1 ios chrome, D2 ios builds,
+// D3 authoring) plus the solar productFrame quirk are PRESERVED as documented,
+// not fixed here. Editing a value below now changes the product.
 //
 // Operator rule this exists to serve:
 //   "nothing HAS to be there, but everything needs to be ABLE to be there,
@@ -34,10 +42,21 @@ export const SHARED_WORKSPACE_CAPABILITIES = Object.freeze([
 // Freezes the whole tree, not just the top object, so a consumer cannot
 // mutate a nested slot at runtime. Arrays are frozen too; null/primitives
 // pass through untouched. Fails closed on nothing: it never throws.
-function deepFreeze(value) {
-  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value
+//
+// Slice 2 correction: it RECURSES INTO ALREADY-FROZEN NODES. The slice-1
+// version short-circuited on `Object.isFrozen(value)`, which is wrong the
+// moment a caller nests an `Object.freeze`d literal (a shallow freeze) inside
+// the tree, so the frozen parent was skipped and every child under it stayed
+// writable, so "deep" quietly meant "down to the first frozen node".
+// PRODUCT_SURFACES does exactly that nesting one level up, so the trap was
+// one edit away. The cycle guard is now a WeakSet of visited nodes rather
+// than the frozen bit, so a self-referential tree still terminates.
+// Exported for its own test; it is a pure utility, never a contract value.
+export function deepFreeze(value, seen = new WeakSet()) {
+  if (value === null || typeof value !== 'object' || seen.has(value)) return value
+  seen.add(value)
   Object.freeze(value)
-  for (const key of Object.keys(value)) deepFreeze(value[key])
+  for (const key of Object.keys(value)) deepFreeze(value[key], seen)
   return value
 }
 
@@ -56,71 +75,84 @@ export const PRODUCT_SURFACES = Object.freeze([
     description: 'Shape files, conversations, annotations, tools, and automations without leaving the project.',
     familyIds: Object.freeze(['custom', 'measurement', 'selection']),
     contract: deepFreeze({
-      // ground: SurfaceGrounds.jsx:99 DRAWING_SURFACES = new Set(['cad','solar'])
+      // ground: SurfaceGrounds.jsx:106 DRAWING_SURFACES = new Set(['cad','solar'])
       //   excludes browser; e2e/local/one-shell-mount.spec.mjs:131 names it
       //   "the project board for Browser".
       ground: 'board',
       chrome: {
-        // productFrame: App.jsx:2798 `activeSurface !== 'cad'` -> true.
-        //   (The stage agrees: ToolCast.jsx:2122 renders the frame here too.)
+        // productFrame: App.jsx:2838 `activeSurface !== 'cad'` -> true.
+        //   (The stage agrees: ToolCast.jsx:2139 renders the frame here too.)
         productFrame: true,
-        // workspaceCard: App.jsx:2819 display gate `cad || solar` -> hidden.
+        // workspaceCard: App.jsx:2859 display gate `cad || solar` -> hidden.
         workspaceCard: false,
-        // cockpit: App.jsx:2242 drafting = groundShowsDrawing(activeSurface);
+        // cockpit: App.jsx:2269 drafting = groundShowsDrawing(activeSurface);
         //   the cockpit bands mount under `studioGround && drafting`
-        //   (App.jsx:2526, 2858) -> false. Declared separately from `ground`
+        //   (App.jsx:2562, 2898) -> false. Declared separately from `ground`
         //   on purpose: every slot is declarable per surface.
         cockpit: false,
-        // stageBranch: ToolCast.jsx:1417 / 2060 ternary falls through to the
-        //   frame branch (ToolCast.jsx:2122).
+        // stageBranch: ToolCast.jsx:1434 / 2077 ternary falls through to the
+        //   frame branch (ToolCast.jsx:2139).
         stageBranch: 'frame',
-        // projectSlot: App.jsx:2806 fills the slot for 'ios' only.
+        // projectSlot: App.jsx:2846 fills the slot for 'ios' only.
         projectSlot: null,
       },
       toolbar: {
-        // ribbon: App.jsx:2858 `studioGround && drafting` -> no DraftingRibbon.
+        // ribbon: App.jsx:2898 `studioGround && drafting` -> no DraftingRibbon.
         ribbon: false,
-        // home: no ribbon here, so no home tab is declared. (App.jsx:2225
+        // home: no ribbon here, so no home tab is declared. (App.jsx:2234
         //   useState('draw') is console-global state, not a per-surface value;
         //   CockpitTopBand.jsx:17 RIBBON_TABS[0] is 'draw'.)
         home: null,
         // quick: CockpitTopBand.jsx takes `before`/`after` as PROPS built in
-        //   App.jsx:2417-2432 — code, not data — so there is no data source
+        //   App.jsx:2453-2468 — code, not data — so there is no data source
         //   to read ids from. Slice 3 promotes them to a registry.
         quick: null,
       },
       rails: {
-        // left: App.jsx:2247 navSpine = studioGround && drafting && !navExpanded
+        // left: App.jsx:2281 navSpine = studioGround && drafting && !navExpanded
         //   && wideViewport -> false here, so the full nav rail renders
-        //   (App.jsx:2609). Wide-viewport default; see the doc.
+        //   (App.jsx:2645). Wide-viewport default; see the doc.
         left: 'nav',
-        // right: App.jsx:3414 JobRail spine prop -> false, so the expanded
-        //   job rail renders (App.jsx:3402). Wide-viewport default.
+        // right: App.jsx:3460 JobRail spine prop -> false, so the expanded
+        //   job rail renders (App.jsx:3445). Wide-viewport default.
         right: 'job-rail',
         // dock: PropertiesDock mounts only under `studioGround && drafting
-        //   && wideViewport` (App.jsx:3148) — nothing declares a board dock.
+        //   && wideViewport` (App.jsx:3191) — nothing declares a board dock.
+        //   `paneOpen` (App.jsx:2241, default true) is the dock's SECOND gate
+        //   inside that branch: the user closes the pane from its own title
+        //   row and the View tab reopens it, so a null dock and a closed pane
+        //   render the same nothing for different reasons.
         dock: null,
       },
-      // commandLine: App.jsx:3376 PromptBox commandLine={!!studioGround && drafting}.
+      // groundMaterial: the ground's per-surface material overrides. Both
+      // fields are the SURFACE term of their gate only; the mock / fixture /
+      // sample terms beside them are honesty gates, not surface data.
+      //   layerAccent: App.jsx:2296 `studioGround && activeSurface === 'solar'`
+      //     recolours the Panels layer. Every other surface returns the SAME
+      //     colorForLayer reference, which is what keeps the old shell's
+      //     canvas bytes untouched.
+      //   solarStrings: App.jsx:2313 solarStringsEligible.
+      groundMaterial: { layerAccent: null, solarStrings: false },
+      // commandLine: App.jsx:3419 PromptBox commandLine={!!studioGround && drafting}.
       commandLine: false,
-      // authoring: App.jsx:2699 AuthorPanel sits in the nav rail, which is not
-      //   surface-gated (App.jsx:2609, 2617). (Stage divergence: the build lane
-      //   is cad-only, ToolCast.jsx:1417/1506.)
+      // authoring: App.jsx:2735 AuthorPanel sits in the nav rail, which is not
+      //   surface-gated (App.jsx:2645, 2653). (Stage divergence: the build lane
+      //   is cad-only, ToolCast.jsx:1434/1523.)
       authoring: true,
-      // versions: App.jsx:3001 VersionHistory lives inside the workspace card,
-      //   whose display gate (App.jsx:2819) hides it off cad/solar.
+      // versions: App.jsx:3041 VersionHistory lives inside the workspace card,
+      //   whose display gate (App.jsx:2859) hides it off cad/solar.
       versions: 'none',
       conversations: {
         // scope: converse.js:129-134 caches ONE session per project+drawing pair
-        //   ('default' when there is no drawing); ConversePanel (App.jsx:3263)
+        //   ('default' when there is no drawing); ConversePanel (App.jsx:3306)
         //   is not surface-gated, so the scope is the same on every surface.
         scope: 'drawing',
       },
       // integrations: the only link surface today is the header's Claude
-      //   account panel (App.jsx:2596), which is global, not per-surface.
+      //   account panel (App.jsx:2630), which is global, not per-surface.
       integrations: null,
       builds: {
-        // routes: the nav rail's ToolsPanel run path (App.jsx:2674 ->
+        // routes: the nav rail's ToolsPanel run path (App.jsx:2710 ->
         //   onRequestCatalogRun) is mounted on every surface; no marathon
         //   route exists in this client at all.
         routes: ['one-shot'],
@@ -137,7 +169,8 @@ export const PRODUCT_SURFACES = Object.freeze([
       resetOn: null,
       // a11y: no per-surface a11y declaration exists.
       a11y: null,
-      // tourAnchors: the tour is mock-gated (App.jsx:2722), not surface data.
+      // tourAnchors: the tour is mock-gated (App.jsx:2761 and :3519), not
+      //   surface data.
       tourAnchors: null,
     }),
   }),
@@ -149,49 +182,58 @@ export const PRODUCT_SURFACES = Object.freeze([
     description: 'Use the live drawing, layers, tools, approvals, jobs, versions, and receipts in one scene.',
     familyIds: null,
     contract: deepFreeze({
-      // ground: SurfaceGrounds.jsx:99 DRAWING_SURFACES includes 'cad'.
+      // ground: SurfaceGrounds.jsx:106 DRAWING_SURFACES includes 'cad'.
       ground: 'drawing',
       chrome: {
-        // productFrame: App.jsx:2798 `activeSurface !== 'cad'` -> false.
+        // productFrame: App.jsx:2838 `activeSurface !== 'cad'` -> false.
         productFrame: false,
-        // workspaceCard: App.jsx:2819 `cad || solar` -> shown.
+        // workspaceCard: App.jsx:2859 `cad || solar` -> shown.
         workspaceCard: true,
-        // cockpit: App.jsx:2242 drafting -> true (App.jsx:2526, 2858 mount).
+        // cockpit: App.jsx:2269 drafting -> true (App.jsx:2562, 2898 mount).
         cockpit: true,
-        // stageBranch: ToolCast.jsx:1417 `activeSurface === 'cad'`.
+        // stageBranch: ToolCast.jsx:1434 `activeSurface === 'cad'`.
         stageBranch: 'cad',
         projectSlot: null,
       },
       toolbar: {
-        // ribbon: App.jsx:2858 `studioGround && drafting` -> DraftingRibbon mounts.
+        // ribbon: App.jsx:2898 `studioGround && drafting` -> DraftingRibbon mounts.
         ribbon: true,
-        // home: App.jsx:2225 useState('draw'); CockpitTopBand.jsx:18 tab id 'draw'.
+        // home: App.jsx:2234 useState('draw'); CockpitTopBand.jsx:18 tab id 'draw'.
         home: 'draw',
-        // quick: props, not data (App.jsx:2417-2432). See browser's note.
+        // quick: props, not data (App.jsx:2453-2468). See browser's note.
         quick: null,
       },
       rails: {
-        // left: App.jsx:2247 navSpine true at the wide-viewport default
-        //   (navExpanded starts false, App.jsx:2216).
+        // left: App.jsx:2281 navSpine true at the wide-viewport default
+        //   (navExpanded starts false, App.jsx:2217).
         left: 'spine',
-        // right: App.jsx:3414 spine true at the wide-viewport default
-        //   (jobRailExpanded starts false, App.jsx:2222).
+        // right: App.jsx:3460 spine true at the wide-viewport default
+        //   (jobRailExpanded starts false, App.jsx:2224).
         right: 'job-spine',
-        // dock: App.jsx:3148 mounts PropertiesDock; sections in the order
+        // dock: App.jsx:3191 mounts PropertiesDock; sections in the order
         //   PropertiesDock.jsx:132-142 renders them (drawing and plan are
-        //   conditional on their props, both supplied here at App.jsx:3153).
+        //   conditional on their props, both supplied here at App.jsx:3196).
+        //   FOUR sections is the WITH-DRAWING case: `drawing` renders only
+        //   when paneDrawingFacts is non-null (App.jsx:2481 returns null until
+        //   `shown` exists), so an honest-empty drafting surface shows three.
+        //   `paneOpen` (App.jsx:2241, default true) is the dock's SECOND gate
+        //   inside the mount branch, closed by the dock's own title row,
+        //   reopened by the View tab's Properties tool.
         dock: ['layers', 'drawing', 'selection', 'plan'],
       },
-      // commandLine: App.jsx:3376 -> true.
+      // groundMaterial: no solar accent and no string overlay off the solar
+      //   surface (App.jsx:2296, :2313 both test for 'solar').
+      groundMaterial: { layerAccent: null, solarStrings: false },
+      // commandLine: App.jsx:3419 -> true.
       commandLine: true,
-      // authoring: App.jsx:2699 AuthorPanel (reachable from the ribbon's
-      //   author cluster, App.jsx:2396, while the rail is a spine).
+      // authoring: App.jsx:2735 AuthorPanel (reachable from the ribbon's
+      //   author cluster, App.jsx:2429, while the rail is a spine).
       authoring: true,
-      // versions: App.jsx:3001 VersionHistory inside the shown workspace card.
+      // versions: App.jsx:3041 VersionHistory inside the shown workspace card.
       versions: 'drawing',
       conversations: { scope: 'drawing' }, // converse.js:129-134
       integrations: null,
-      builds: { routes: ['one-shot'] }, // App.jsx:2674 catalog run path
+      builds: { routes: ['one-shot'] }, // App.jsx:2710 catalog run path
       contextMenu: [],
       shortcuts: null,
       entitlements: null,
@@ -208,38 +250,46 @@ export const PRODUCT_SURFACES = Object.freeze([
     description: 'Start from a versioned solar template with standards, catalog tools, and project-owned versions.',
     familyIds: Object.freeze(['stringing', 'placement']),
     contract: deepFreeze({
-      // ground: SurfaceGrounds.jsx:99 DRAWING_SURFACES includes 'solar'.
+      // ground: SurfaceGrounds.jsx:106 DRAWING_SURFACES includes 'solar'.
       ground: 'drawing',
       chrome: {
-        // productFrame: App.jsx:2798 `activeSurface !== 'cad'` -> TRUE on solar.
+        // productFrame: App.jsx:2838 `activeSurface !== 'cad'` -> TRUE on solar.
         //   The frame renders over the shown workspace card; this is today's
         //   behaviour, not a defect this slice may fix.
         productFrame: true,
-        // workspaceCard: App.jsx:2819 `cad || solar` -> shown.
+        // workspaceCard: App.jsx:2859 `cad || solar` -> shown.
         workspaceCard: true,
-        // cockpit: App.jsx:2242 drafting -> true.
+        // cockpit: App.jsx:2269 drafting -> true.
         cockpit: true,
-        // stageBranch: ToolCast.jsx:1417/2060 fall through to the frame branch
-        //   (ToolCast.jsx:2122) — the stage has NO drafting cockpit for solar.
+        // stageBranch: ToolCast.jsx:1434/2077 fall through to the frame branch
+        //   (ToolCast.jsx:2139) — the stage has NO drafting cockpit for solar.
         stageBranch: 'frame',
         projectSlot: null,
       },
       toolbar: {
-        ribbon: true, // App.jsx:2858
-        home: 'draw', // App.jsx:2225
+        ribbon: true, // App.jsx:2898
+        home: 'draw', // App.jsx:2234
         quick: null,
       },
       rails: {
-        left: 'spine', // App.jsx:2247
-        right: 'job-spine', // App.jsx:3414
-        dock: ['layers', 'drawing', 'selection', 'plan'], // App.jsx:3148, PropertiesDock.jsx:132-142
+        left: 'spine', // App.jsx:2281
+        right: 'job-spine', // App.jsx:3460
+        // Four sections is the with-drawing case; paneOpen (App.jsx:2241) is
+        // the dock's second gate. See the cad record for the full note.
+        dock: ['layers', 'drawing', 'selection', 'plan'], // App.jsx:3191, PropertiesDock.jsx:132-142
       },
-      commandLine: true, // App.jsx:3376
-      authoring: true, // App.jsx:2699
-      versions: 'drawing', // App.jsx:3001 inside the shown card (App.jsx:2819)
+      // groundMaterial: the ONE surface that carries both. The Panels layer
+      //   takes the solar accent (App.jsx:2296) and the 135 bundled solved
+      //   string routes are eligible here (App.jsx:2313), eligible and not
+      //   shown: the mock / demo-sample / head-v1 honesty gates beside the
+      //   surface term still decide, and none of them is surface data.
+      groundMaterial: { layerAccent: 'solar', solarStrings: true },
+      commandLine: true, // App.jsx:3419
+      authoring: true, // App.jsx:2735
+      versions: 'drawing', // App.jsx:3041 inside the shown card (App.jsx:2859)
       conversations: { scope: 'drawing' }, // converse.js:129-134
       integrations: null,
-      builds: { routes: ['one-shot'] }, // App.jsx:2674
+      builds: { routes: ['one-shot'] }, // App.jsx:2710
       contextMenu: [],
       shortcuts: null,
       entitlements: null,
@@ -256,42 +306,44 @@ export const PRODUCT_SURFACES = Object.freeze([
     description: 'Use mounted Apple readiness and resumable ship receipts. Credentials never enter this browser.',
     familyIds: null,
     contract: deepFreeze({
-      // ground: SurfaceGrounds.jsx:99 excludes ios; one-shell-mount.spec.mjs:131
-      //   names it "the device stage for iOS" (DeviceGround, SurfaceGrounds.jsx:213).
+      // ground: SurfaceGrounds.jsx:106 excludes ios; one-shell-mount.spec.mjs:131
+      //   names it "the device stage for iOS" (DeviceGround, SurfaceGrounds.jsx:222).
       ground: 'device-stage',
       chrome: {
-        // productFrame: App.jsx:2798 -> true (with the iOS project slot).
-        //   Stage divergence: ToolCast.jsx:2060 gives ios its own rail instead.
+        // productFrame: App.jsx:2838 -> true (with the iOS project slot).
+        //   Stage divergence: ToolCast.jsx:2077 gives ios its own rail instead.
         productFrame: true,
-        // workspaceCard: App.jsx:2819 -> hidden.
+        // workspaceCard: App.jsx:2859 -> hidden.
         workspaceCard: false,
-        // cockpit: App.jsx:2242 drafting -> false.
+        // cockpit: App.jsx:2269 drafting -> false.
         cockpit: false,
-        // stageBranch: ToolCast.jsx:2060 `activeSurface === 'ios'`.
+        // stageBranch: ToolCast.jsx:2077 `activeSurface === 'ios'`.
         stageBranch: 'ios',
-        // projectSlot: App.jsx:2806-2807 mounts <IosSurface> into the frame.
+        // projectSlot: App.jsx:2846-2847 mounts <IosSurface> into the frame.
         projectSlot: 'ios-surface',
       },
       toolbar: {
-        ribbon: false, // App.jsx:2858
+        ribbon: false, // App.jsx:2898
         home: null,
         quick: null,
       },
       rails: {
-        left: 'nav', // App.jsx:2247 navSpine false
-        right: 'job-rail', // App.jsx:3414 spine false
-        dock: null, // App.jsx:3148 drafting-only
+        left: 'nav', // App.jsx:2281 navSpine false
+        right: 'job-rail', // App.jsx:3460 spine false
+        dock: null, // App.jsx:3191 drafting-only (paneOpen is its second gate)
       },
-      commandLine: false, // App.jsx:3376
-      authoring: true, // App.jsx:2699 (the nav rail is not surface-gated)
-      versions: 'none', // App.jsx:3001 inside the hidden card (App.jsx:2819)
+      // groundMaterial: the device stage carries neither (App.jsx:2296, :2313).
+      groundMaterial: { layerAccent: null, solarStrings: false },
+      commandLine: false, // App.jsx:3419
+      authoring: true, // App.jsx:2735 (the nav rail is not surface-gated)
+      versions: 'none', // App.jsx:3041 inside the hidden card (App.jsx:2859)
       conversations: { scope: 'drawing' }, // converse.js:129-134
       integrations: null,
       builds: {
         // routes: the console mounts IosSurface, which is props-only and
         //   carries NO launch control (IosSurface.jsx:3-4 "no fetch, no
         //   polling, no client-side state math"); the only ship-lane launch
-        //   in the repo is the STAGE's (ToolCast.jsx:2097
+        //   in the repo is the STAGE's (ToolCast.jsx:2114
         //   data-testid="ios-ship-launch"). Recorded as a divergence in the
         //   doc, never invented into the console contract.
         routes: ['one-shot'],

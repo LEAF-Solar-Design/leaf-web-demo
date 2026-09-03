@@ -1527,11 +1527,27 @@ def build_suites() -> List[Suite]:
         # executed. After the right-palette tests landed and the retired
         # single-purpose client-shell tests left, the floor advances again:
         # the integrated tree was 698 collected / 13 skipped / 685 executed.
-        # W4d Slice B plus the lossless-handle correction measures 748
-        # collected / 17 skipped / 731 executed without the local wasm build.
-        # An opted-in machine executes 747. The 17 skips
-        # are exactly the two allow-listed files below: one real-wasm harness
-        # case and sixteen editing-surface cases.
+        # W4d Slice B plus the lossless-handle correction measured 748
+        # collected / 17 skipped / 731 executed without the local wasm build,
+        # which is the number `expected` below still carries.
+        #
+        # That comment then went stale while the floor stayed correct: the
+        # floor is a MINIMUM (coverage_verdict rule 2), so a growing suite
+        # passes with an "(executed-count drift: expected 731)" note and
+        # nothing ever forced the prose to keep up. Re-measured on the
+        # standardization slice-2 tree (2026-09-03, Windows, no local wasm
+        # build): 883 collected / 17 skipped / 866 executed, 90 files passed
+        # and 1 skipped. The immediately preceding tree (origin/main
+        # 1a49766) measured 820 collected / 17 skipped / 803 executed, so
+        # slice 2's +63 is entirely its own new tests.
+        #
+        # `expected` is deliberately NOT raised here. Raising a floor is a
+        # separate decision from correcting a description of the tree, and
+        # doing both in a refactor PR would hide one behind the other.
+        #
+        # The 17 skips are exactly the two allow-listed files below: one
+        # real-wasm harness case and sixteen editing-surface cases. An
+        # opted-in machine (local wasm build present) executes one more.
         Suite("web-vitest", "web npm run test:unit (vitest)", "vitest", WEB,
               [_npm(), "run", "test:unit"], 731,
               allowed_vitest_skips=(
