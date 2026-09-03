@@ -47,6 +47,8 @@ import { ENV_IOS_SURFACE } from './ios/flag.js'
 import CadEditSurface from './cadedit/CadEditSurface.jsx'
 import EngineSessionProvider from './cadedit/EngineSessionProvider.jsx'
 import EngineRibbonClusters from './cadedit/EngineRibbonClusters.jsx'
+import CommandLineArmer from './cadedit/CommandLineArmer.jsx'
+import { COCKPIT_COMMAND_EVENT, parseDrawingCommand } from './lib/commandWords.js'
 import { markInstant } from './lib/instant.js'
 import { agentBannerFor } from './lib/agentBanner.js'
 import { selectEntity } from './lib/selectEntity.js'
@@ -608,7 +610,19 @@ export default function App() {
     // records WHICH surface refused (`sources`) instead of collapsing every
     // observer onto one shared boolean.
     onAuthRequired: () => sessionActions.requireAuth('catalog'),
+    // W4f slice B: a bare CAD command word on a drafting surface (LINE, C,
+    // MOVE ...) is handed to the engine's CommandLineArmer through ONE window
+    // event instead of the router. The surface gate rides a ref written each
+    // render (drawingCommandOnRef) so this memo stays stable.
+    drawingCommand: (text) => {
+      if (!drawingCommandOnRef.current) return false
+      const command = parseDrawingCommand(text)
+      if (!command) return false
+      window.dispatchEvent(new CustomEvent(COCKPIT_COMMAND_EVENT, { detail: { group: command.group, op: command.op } }))
+      return true
+    },
   }), [sessionActions])
+  const drawingCommandOnRef = useRef(false)
   const { state: catalogState, actions: catalogActions } = useCatalogController({
     services: catalogServices,
     adapters: catalogAdapters,
@@ -2224,6 +2238,10 @@ export default function App() {
     return () => mq.removeEventListener?.('change', sync)
   }, [])
   const drafting = groundShowsDrawing(activeSurface)
+  // Typed command words arm the engine only where the cockpit is: the studio's
+  // drafting surfaces with the engine built in (ENV_CAD_EDIT first, so a
+  // flag-off build folds the whole feature to false).
+  drawingCommandOnRef.current = ENV_CAD_EDIT && !!studioGround && !!drafting
   const navSpine = !!studioGround && drafting && !navExpanded && wideViewport
   // The per-application fold (operator directive): under the studio each
   // tab's rail carries the families its application calls for; the old shell
@@ -2849,6 +2867,9 @@ export default function App() {
                   panels={ribbonTab === 'insert' ? ['file'] : ribbonTab === 'draw' ? ['draw', 'modify'] : []}
                 />
               )}
+              {/* W4f slice B: the command line's typed words (LINE, C, MOVE ...)
+                  reach the engine through this consumer; renders nothing. */}
+              {ENV_CAD_EDIT && <CommandLineArmer />}
             </DraftingRibbon>
           )}
           <div className="viewer-toolbar">
