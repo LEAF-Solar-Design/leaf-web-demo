@@ -186,25 +186,36 @@ describe('Surface Contract — every repointed gate equals its old literal', () 
 // predicate WITHOUT re-spelling the comparison, so prose can never satisfy or
 // defeat this pin.
 // ---------------------------------------------------------------------------
-const SHELLS = ['../App.jsx', './ToolCast.jsx']
+// Every file that renders shell chrome from a surface: the two scenes, the
+// product frame (its project-slot gate was the one comparison #978 missed) and
+// the grounds. A new shell file joins this list the day it reads a surface.
+const SHELLS = ['../App.jsx', './ToolCast.jsx', '../components/ProductSurfaceTabs.jsx', './SurfaceGrounds.jsx']
 const SURFACE_LITERAL = /activeSurface\s*[!=]==\s*['"]/
+// The frame and the grounds hold the surface as `surface` / `surface.id`, so a
+// literal comparison there hides from the activeSurface probe. Second probe.
+const SURFACE_ID_LITERAL = /\bsurface(?:\.id)?\s*[!=]==\s*['"]/
 
 describe('Surface Contract — no surface-literal chrome gate survives', () => {
   for (const relative of SHELLS) {
-    it(`${relative} compares activeSurface to no string literal`, () => {
+    it(`${relative} compares no surface id to a string literal`, () => {
       const source = readFileSync(new URL(relative, import.meta.url), 'utf8')
       expect(source).not.toMatch(SURFACE_LITERAL)
-      // The file must still be the one that renders the surface, or the pin
-      // above passes vacuously against an unrelated module.
-      expect(source).toMatch(/activeSurface/)
+      expect(source).not.toMatch(SURFACE_ID_LITERAL)
+      // The file must still be the one that renders the surface, or the pins
+      // above pass vacuously against an unrelated module.
+      expect(source).toMatch(/activeSurface|\bsurface\b/)
     })
   }
 
-  it('the probe would catch a reintroduced literal (positive control)', () => {
+  it('the probes would catch a reintroduced literal (positive control)', () => {
     // Without this, a broken regex would report GREEN forever. Built from
-    // fragments so the control itself cannot trip the scan above.
+    // fragments so the control itself cannot trip the scans above.
     const reintroduced = `const x = activeSurface ${'==='} 'cad' ? 1 : 2`
     expect(reintroduced).toMatch(SURFACE_LITERAL)
     expect(`if (activeSurface ${'!=='} 'ios') return`).toMatch(SURFACE_LITERAL)
+    expect(`const showProjectState = surface.id ${'!=='} 'ios'`).toMatch(SURFACE_ID_LITERAL)
+    expect(`active={surface ${'==='} 'browser'}`).toMatch(SURFACE_ID_LITERAL)
+    // A key/tab id comparison is not a chrome gate and must stay out of reach.
+    expect(`const selected = surface.id ${'==='} activeSurface`).not.toMatch(SURFACE_ID_LITERAL)
   })
 })

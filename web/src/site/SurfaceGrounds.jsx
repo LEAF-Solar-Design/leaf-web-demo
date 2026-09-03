@@ -103,8 +103,12 @@ const windowStyle = (rect) => (rect
 // The truth table is unchanged from the old `new Set(['cad','solar'])`, and
 // surfaceGates.test.js pins it. That includes the unknown/undefined case, which
 // still answers false, because a Set lookup misses rather than normalizing.
+// `contract?.` so a record that ever ships without a contract reads as "no
+// drawing ground" instead of throwing during module load (a white screen
+// before any error boundary exists). productSurfaces.test.js pins contract
+// presence for every id, so today this guard never fires.
 const DRAWING_SURFACES = new Set(
-  PRODUCT_SURFACES.filter(({ contract }) => contract.ground === 'drawing').map(({ id }) => id),
+  PRODUCT_SURFACES.filter(({ contract }) => contract?.ground === 'drawing').map(({ id }) => id),
 )
 
 // The drawing ground shows for the surfaces whose declared ground is 'drawing'.
@@ -291,9 +295,10 @@ export default function SurfaceGrounds({
   return (
     <>
       {/* Slice 2: each ground is active for its DECLARED ground kind, not for
-          a surface id. Was `surface === 'browser'` / `surface === 'ios'`. An
-          unknown surface still activates neither: surfaceGround falls closed
-          to the CAD contract, whose ground is 'drawing'. */}
+          a surface id (it used to compare the surface id to the browser and
+          ios literals). An unknown surface still activates neither:
+          surfaceGround falls closed to the CAD contract, whose ground is
+          'drawing'. */}
       <ProjectBoardGround
         active={surfaceGround(surface) === 'board'}
         workspaceProject={workspaceProject}
