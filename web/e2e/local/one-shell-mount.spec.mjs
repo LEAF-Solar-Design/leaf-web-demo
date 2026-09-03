@@ -787,6 +787,17 @@ test.describe('route matrix, rail ON', () => {
     await bar.press('Enter')
     await expect(promptRow).toHaveAttribute('data-op', 'createLine')
     await expect(page.locator('.workspace-card[data-cockpit-picking="1"]')).toHaveCount(1)
+    // A visible higher Esc rung owns the first key even when its opener keeps
+    // focus outside the dialog. History closes and the armed command survives.
+    const historyWhileArmed = page.getByRole('button', { name: 'History' })
+    await historyWhileArmed.click()
+    await expect(historyWhileArmed).toBeFocused()
+    const historyDialog = page.getByRole('dialog', { name: 'Version history' })
+    await expect(historyDialog).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(historyDialog).toHaveCount(0)
+    await expect(promptRow).toHaveAttribute('data-op', 'createLine')
+    await expect(lineTool).toHaveAttribute('aria-expanded', 'true')
     const groundPick = (fx, fy) => page.evaluate(([px, py]) => {
       const ground = document.querySelector('.studio-ground')
       const box = ground.getBoundingClientRect()
