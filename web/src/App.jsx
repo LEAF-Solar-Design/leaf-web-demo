@@ -7,7 +7,7 @@ import SurfaceGrounds, { groundShowsDrawing } from './site/SurfaceGrounds.jsx'
 import { CockpitStatus, StatusTabs, StatusToggles, ViewCluster } from './site/DrawingCockpit.jsx'
 import CockpitTopBand from './site/CockpitTopBand.jsx'
 import DraftingRibbon from './site/DraftingRibbon.jsx'
-import PropertiesDock from './site/PropertiesDock.jsx'
+import PropertiesDock, { drawingExtents } from './site/PropertiesDock.jsx'
 import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
 import { authorCluster, catalogClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
 import { entityGeometry } from './lib/entityMetrics.js'
@@ -2409,6 +2409,27 @@ export default function App() {
     drawingMutationsBlocked, historyOpen, onUndo, onRedo, onToggleHistoryTracked, layerCounts, visibleLayers,
     toggleLayer, railFamilies, onRequestCatalogRun, writeLocked, canRunWrite, canBuild, entOf, ribbonTab, colorForLayer])
   const ribbonClusters = ribbon.clusters
+  // W4e round 2: the pane's Drawing section, the document's own facts from
+  // the intake (counts) and one pass over its vertices (extents). Studio
+  // drafting surfaces only; null everywhere else so the dock renders as before.
+  const drawingSummary = useMemo(() => {
+    if (!(studioGround && drafting && shown)) return null
+    const layers = Array.isArray(shown.layers) ? shown.layers : []
+    const polylines = Array.isArray(shown.polylines) ? shown.polylines.length : 0
+    const inserts = Array.isArray(shown.inserts) ? shown.inserts.length : 0
+    const faces = Array.isArray(shown.faces3d) ? shown.faces3d.length : 0
+    return {
+      name: `${projectName}.dwg`,
+      entities: polylines + inserts + faces,
+      polylines,
+      inserts,
+      faces,
+      layers: layers.length,
+      layersShown: layers.filter((l) => visibleLayers[l] !== false).length,
+      extents: drawingExtents(shown.polylines),
+      source: mock ? 'sample data' : 'project drawing',
+    }
+  }, [studioGround, drafting, shown, projectName, visibleLayers, mock])
 
   // W4d Slice A: the ONE engine-session mount wraps the drawing workspace,
   // so the ribbon's engine clusters and the import pane consume the same
@@ -3061,6 +3082,7 @@ export default function App() {
                     layers={legendEl}
                     selection={readoutEl}
                     geometry={selectedEntityGeometry}
+                    drawing={drawingSummary}
                     plan={(
                       <EntitlementGate
                         tier={entTier}
