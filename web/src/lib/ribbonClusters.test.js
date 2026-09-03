@@ -115,6 +115,19 @@ describe('viewCluster', () => {
     // A missing viewer is a no-op, never a throw.
     expect(() => toolsOf(off).fit.onClick()).not.toThrow()
   })
+
+  it('carries the Properties pane toggle only when the caller owns the pane, as a pressed-state tool', () => {
+    expect(toolsOf(viewCluster({ viewerRef: { current: null }, hasDrawing: true }))['properties-pane']).toBeUndefined()
+    const onTogglePane = vi.fn()
+    const open = toolsOf(viewCluster({ viewerRef: { current: null }, hasDrawing: false, paneOpen: true, onTogglePane }))['properties-pane']
+    expect(open.pressed).toBe(true)
+    expect(open.disabled).toBeUndefined()
+    open.onClick()
+    expect(onTogglePane).toHaveBeenCalledTimes(1)
+    const closed = toolsOf(viewCluster({ viewerRef: { current: null }, hasDrawing: true, paneOpen: false, onTogglePane }))['properties-pane']
+    expect(closed.pressed).toBe(false)
+    expect(closed.title).toMatch(/Open/)
+  })
 })
 
 describe('versionCluster', () => {

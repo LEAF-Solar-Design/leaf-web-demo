@@ -351,10 +351,21 @@
     color: var(--ck-ink); font-family: var(--ck-font);
     overflow-y: auto; overflow-x: hidden;
   }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .properties-dock::before {
-    content: 'Properties'; display: flex; align-items: center; flex: 0 0 26px; height: 26px;
-    padding: 0 8px; font: 400 12.5px var(--ck-font); color: #e6e6e6; background: var(--ck-title);
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-title {
+    display: flex; align-items: center; justify-content: space-between; flex: 0 0 26px; height: 26px;
+    padding: 0 4px 0 8px; font: 400 12.5px var(--ck-font); color: #e6e6e6; background: var(--ck-title);
   }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-close {
+    width: 20px; height: 20px; padding: 0; border: 0; border-radius: 3px; background: transparent;
+    color: #cfcfcf; font: 400 15px/1 var(--ck-font); cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-close:hover { background: #4a4a4a; color: #fff; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-close:focus-visible { outline: 2px solid var(--ck-sel); outline-offset: -2px; }
+  /* Pane closed (App unmounts it): the canvas takes the column. The hook is
+     the pane's absence, because the root .app opening tag is pinned. */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]):not(:has(.properties-dock)) { --ck-pane: 0px; }
+  /* :has() may not nest, so the absence test sits on the shell itself. */
+  .studio-shell:has(.app:is([data-surface="cad"], [data-surface="solar"])):not(:has(.properties-dock)) .studio-ground { inset: 155px 0 31px 0; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-section { border: 0; border-radius: 0; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-section::before { content: none; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-section-head {
