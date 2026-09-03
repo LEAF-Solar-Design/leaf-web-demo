@@ -464,6 +464,37 @@ describe('the command prompt (W4e slice H): a tool arms, the command line asks i
     expect(studio.workers[0].posted.filter((message) => message.type === 'applyEdit')).toHaveLength(0)
   })
 
+  it('a Modify tool armed with nothing selected keeps its fields live and gates only Run; a pick releases Run', async () => {
+    const studio = mount()
+    await openAndLoad(studio, [LINE])
+    // Nothing selected: the tool itself is disabled (its own ladder), so
+    // arm through the provider the way a keyboard command would.
+    expect(ribbonTool('move').disabled).toBe(true)
+    act(() => { studio.context.setArmed({ group: 'modify', op: 'move' }) })
+    const row = screen.getByTestId('cockpit-prompt')
+    expect(row.getAttribute('data-op')).toBe('move')
+    expect(row.textContent).toContain(MODIFY_REASONS.noSelection)
+    // The operands can be typed before the pick (the documented ladder).
+    expect(screen.getByLabelText('ribbon dx').disabled).toBe(false)
+    expect(screen.getByLabelText('ribbon dy').disabled).toBe(false)
+    fireEvent.change(screen.getByLabelText('ribbon dx'), { target: { value: '7' } })
+    expect(screen.getByLabelText('ribbon dx').value).toBe('7')
+    // Run is what waits for the entity, and Enter posts nothing meanwhile.
+    expect(screen.getByTestId('cockpit-prompt-run').disabled).toBe(true)
+    const before = studio.workers[0].posted.length
+    fireEvent.keyDown(screen.getByLabelText('ribbon dx'), { key: 'Enter' })
+    expect(studio.workers[0].posted.length).toBe(before)
+    // Pick: Run releases, the sentence leaves, Enter runs with the typed dx.
+    fireEvent.click(screen.getByRole('radio'))
+    expect(screen.getByTestId('cockpit-prompt-run').disabled).toBe(false)
+    expect(row.textContent).not.toContain(MODIFY_REASONS.noSelection)
+    fireEvent.keyDown(screen.getByLabelText('ribbon dx'), { key: 'Enter' })
+    const posted = studio.workers[0].posted
+    expect(posted[posted.length - 1]).toEqual({ type: 'applyEdit', op: 'move', payload: { entityId: 'e1', dx: 7, dy: 0 } })
+    // Busy still disables the fields themselves (not a selection matter).
+    expect(screen.getByLabelText('ribbon dx').disabled).toBe(true)
+  })
+
   it('Enter runs the armed command once, a dead engine disarms it, and setArmed drops anything malformed', async () => {
     const studio = mount()
     await openAndLoad(studio, [LINE])
