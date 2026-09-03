@@ -19,6 +19,42 @@ const SOURCES = [
   join(HERE, '..', 'App.jsx'),
 ]
 
+// Slice 3: the tool RECORD carries its own icon key, so the data files that
+// declare tools are icon sources too, not just the modules that render them.
+const DATA_SOURCES = [
+  join(HERE, '..', 'mock', 'registry.json'),
+  join(HERE, '..', '..', '..', 'server', 'capability_families.json'),
+]
+
+// A key that is deliberately NOT in the sprite. CockpitIcon degrades a miss to
+// an honest two-letter monogram, which is fine when it is a decision; this list
+// is what makes it a decision instead of a typo. Each entry carries its reason.
+const ALLOWED_MONOGRAM = Object.freeze({
+  // (empty) every key the cockpit and the seeded records name is in the sprite
+  // today. Add a row here only with the reason the sprite cannot carry it.
+})
+
+function jsonIconKeys(source) {
+  // Every `"icon": "x"` in a tool-shaped JSON file, at any nesting depth
+  // (registry tools, capability_families seed_tools).
+  const keys = new Set()
+  for (const m of source.matchAll(/"icon"\s*:\s*"([^"]*)"/g)) keys.add(m[1])
+  return keys
+}
+
+function declaredIconKeys() {
+  const used = new Set()
+  for (const file of SOURCES) for (const key of iconKeysIn(readFileSync(file, 'utf8'))) used.add(key)
+  for (const file of DATA_SOURCES) for (const key of jsonIconKeys(readFileSync(file, 'utf8'))) used.add(key)
+  return used
+}
+
+/** Keys that neither the sprite nor the allow-list accounts for. */
+function unresolvedIconKeys(keys, spriteIds) {
+  const have = new Set(spriteIds)
+  return [...keys].filter((k) => !have.has(k) && !(k in ALLOWED_MONOGRAM)).sort()
+}
+
 function iconKeysIn(source) {
   const keys = new Set()
   // icon: 'x'   |   icon="x"   |   <CockpitIcon id="x"
@@ -46,6 +82,29 @@ describe('cockpit icons (W4e)', () => {
     expect(used.size).toBeGreaterThan(20)
     const missing = [...used].filter((k) => !declared.has(k)).sort()
     expect(missing).toEqual([])
+  })
+
+  it('every icon key any tool source names is in the built sprite, or allow-listed', () => {
+    // Stronger than the manifest check above: the manifest says what the fetch
+    // WOULD resolve; built.json says what the shipped sprite actually carries.
+    // A key that is in neither renders as a monogram on staging, silently.
+    const unresolved = unresolvedIconKeys(declaredIconKeys(), built.ids || [])
+    expect(unresolved).toEqual([])
+  })
+
+  it('fails on an unknown key rather than passing vacuously', () => {
+    // The gate above is only worth having if it can go red. Falsify it.
+    expect(unresolvedIconKeys(['definitely-not-an-icon'], built.ids || []))
+      .toEqual(['definitely-not-an-icon'])
+    expect(declaredIconKeys().size).toBeGreaterThan(20)
+  })
+
+  it('every allow-listed monogram key carries a reason and is really absent', () => {
+    const have = new Set(built.ids || [])
+    for (const [key, reason] of Object.entries(ALLOWED_MONOGRAM)) {
+      expect(typeof reason === 'string' && reason.length > 0).toBe(true)
+      expect(have.has(key)).toBe(false)
+    }
   })
 
   it('the sprite inventory lists only manifest keys, sorted, with a hash when non-empty', () => {

@@ -12,6 +12,8 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
+import tool_record_fields
+
 SERVER_DIR = Path(__file__).resolve().parent
 FAMILIES_FILE = SERVER_DIR / "capability_families.json"
 DEFAULT_FAMILY = "custom"
@@ -74,7 +76,16 @@ def filter_internal(tools: List[Dict[str, Any]],
     return [t for t in tools if isinstance(t, dict) and not is_internal(t, rules)]
 
 
-def _family_for(tool: Dict[str, Any], cfg: Dict[str, Any], rules: Dict[str, Any]) -> str:
+def _family_for(tool: Dict[str, Any], cfg: Dict[str, Any], rules: Dict[str, Any],
+                *, warn_on_fallback: bool = True) -> str:
+    """Resolve one tool's family. A persisted ``family_id`` always wins.
+
+    The name-lookup fallback is the rename trap: a tool renamed without an
+    update to ``tool_families`` used to land in DEFAULT_FAMILY with nothing
+    said. Authoring now STAMPS ``family_id`` at write time, so an authored row
+    never reaches the fallback; any other row that does gets one bounded
+    warning per tool per process instead of a silent drop.
+    """
     if tool.get("family_id"):
         return str(tool["family_id"])
     if is_internal(tool, rules):
@@ -86,7 +97,22 @@ def _family_for(tool: Dict[str, Any], cfg: Dict[str, Any], rules: Dict[str, Any]
     op = str(tool.get("engine_op", ""))
     if op in mapping:
         return mapping[op]
+    # `tenant_id` is the authored-store marker (routers/author.py stamps it);
+    # legacy authored rows written before family stamping are not the drop this
+    # warning is for.
+    if warn_on_fallback and not tool.get("tenant_id"):
+        tool_record_fields.warn_family_fallback(name, DEFAULT_FAMILY)
     return DEFAULT_FAMILY
+
+
+def family_for_persist(tool: Dict[str, Any]) -> str:
+    """The family to STAMP on a record being written (one config read, no warning).
+
+    The write path is the fix for the fallback, not an instance of it, so it
+    never emits the rename warning.
+    """
+    cfg = _load_config()
+    return _family_for(tool, cfg, cfg.get("filter_rules", {}), warn_on_fallback=False)
 
 
 def apply_live_aps_runtime_authority(
@@ -151,6 +177,12 @@ def _capability_entry(tool: Dict[str, Any]) -> Dict[str, Any]:
         # Only the route's combined static and runtime authority marker may
         # advertise live APS. Raw registry metadata alone always fails closed.
         "aps_live": tool.get("_aps_live_runtime_authorized") is _APS_LIVE_AUTHORIZED,
+        # Optional presentation the RECORD carries (icon key, ribbon placement).
+        # This projection is the single point that decides what /api/capabilities
+        # exposes per tool, so the pass-through lives here and nowhere else. A
+        # malformed value is dropped with a warning rather than breaking the
+        # whole catalog on one bad tool.
+        **tool_record_fields.sanitize_optional_fields(tool),
     }
 
 

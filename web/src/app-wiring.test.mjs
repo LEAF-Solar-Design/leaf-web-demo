@@ -51,6 +51,63 @@ describe('App.jsx wiring', () => {
     })
   }
 
+  // Slice 3: "run the tool I just authored" is ONE honest path on both shells.
+  // App used to arm the run straight off the provisional publish response, so a
+  // publish that had not settled in the runnable catalog armed anyway. These
+  // pins are source-level for the same reason the ones above are: nothing here
+  // is reachable without rendering App, and publishedCatalogTool.test.mjs
+  // remains the single oracle for the resolver's own behaviour.
+  describe('authored-tool run path', () => {
+    const useAuthoredBody = () => {
+      const start = stripped.indexOf('onUseAuthored = useCallback')
+      assert.notEqual(start, -1, 'onUseAuthored is not declared in executable code')
+      return stripped.slice(start, start + 1400)
+    }
+
+    it('refetches the runnable catalog before it resolves anything', () => {
+      assert.match(useAuthoredBody(), /await\s+loadCatalogTools\(\)/)
+    })
+
+    it('resolves through publishedCatalogTool, the one oracle', () => {
+      assert.ok(stripped.includes('resolvePublishedCatalogTool'),
+        'App does not import/call the shared published-tool resolver')
+      assert.match(useAuthoredBody(), /resolvePublishedCatalogTool\(/)
+    })
+
+    it('surfaces the resolver message instead of arming the run', () => {
+      const body = useAuthoredBody()
+      assert.match(body, /catch/)
+      assert.match(body, /showToast\(/)
+      // The bail is BEFORE the commit, or the honesty is decorative.
+      assert.ok(body.indexOf('showToast(') < body.indexOf('commitCatalogDecision('),
+        'the error toast must precede the commit, not follow it')
+    })
+
+    it('stamps the authored provenance ToolCast already stamps', () => {
+      assert.match(useAuthoredBody(), /source:\s*"authored"/)
+    })
+
+    it('hands the refetched record to armDecision instead of the stale list', () => {
+      assert.match(useAuthoredBody(), /refreshedTool:\s*runnableTool/)
+      const armStart = stripped.indexOf('armDecision = useCallback')
+      assert.notEqual(armStart, -1)
+      const armBody = stripped.slice(armStart, armStart + 1200)
+      assert.match(armBody, /decision\.refreshedTool\?\.name === decision\.tool/)
+    })
+
+    it('fails when the resolver call is removed', () => {
+      const mutated = appSource.replace(
+        /runnableTool = resolvePublishedCatalogTool\(tool, refreshedTools\)/,
+        'runnableTool = tool',
+      )
+      assert.notEqual(mutated, appSource, 'the falsification mutation must apply')
+      const mutatedStripped = esbuild.transformSync(mutated, { loader: 'jsx' }).code
+      const start = mutatedStripped.indexOf('onUseAuthored = useCallback')
+      assert.doesNotMatch(mutatedStripped.slice(start, start + 1400),
+        /resolvePublishedCatalogTool\(/)
+    })
+  })
+
   it('passes sessionId into the PromptBox element itself', () => {
     // Limit the match to the PromptBox props object, not another component
     // receiving the same session binding.

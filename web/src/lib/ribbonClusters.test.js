@@ -6,11 +6,13 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import {
+  CATALOG_TOOL_NOTE_ALL_PLACED,
   MAX_LAYER_TOOLS,
   REASONS,
   RIBBON_RATIONALE,
   authorCluster,
   catalogClusters,
+  catalogTabClusters,
   layersCluster,
   railCluster,
   versionCluster,
@@ -177,6 +179,140 @@ describe('layersCluster', () => {
   })
 })
 
+describe('the tool record carries icon, size and tab (slice 3)', () => {
+  // The regression this whole slice must not cause: a catalog whose tools
+  // declare NOTHING renders byte-identically to before the record grew fields.
+  it('is byte-identical for tools that declare no icon and no placement', () => {
+    const onRequestRun = () => {}
+    const clusters = catalogClusters(FAMS, { onRequestRun })
+    expect(clusters.map((c) => ({
+      id: c.id,
+      label: c.label,
+      kind: c.kind,
+      tools: c.tools.map(({ onClick, ...rest }) => rest),
+    }))).toEqual([
+      {
+        id: 'measurement',
+        label: 'Measurement',
+        kind: 'family',
+        tools: [{
+          id: 'count-by-layer',
+          label: 'count-by-layer',
+          text: 'count-by-layer',
+          icon: 'toolbox',
+          size: 'large',
+          title: 'Counts entities per layer.',
+          write: false,
+          disabled: false,
+          reason: '',
+        }],
+      },
+      {
+        id: 'custom',
+        label: 'Custom authored tools',
+        kind: 'family',
+        tools: [{
+          id: 'delete-marked-panel',
+          label: 'delete-marked-panel',
+          text: 'delete-marked-panel',
+          icon: 'toolbox',
+          size: 'large',
+          title: 'Deletes the marked panel.',
+          write: true,
+          disabled: false,
+          reason: '',
+        }],
+      },
+    ])
+    expect(catalogTabClusters(FAMS, { onRequestRun })).toEqual({})
+  })
+
+  it('reads the icon and the size off the record when it declares them', () => {
+    const fams = [{
+      family_id: 'measurement',
+      label: 'Measurement',
+      capabilities: [
+        { name: 'count-by-layer', icon: 'layers', placement: { size: 'small' }, capabilities: [] },
+        { name: 'measure-panel-area', capabilities: [] },
+      ],
+    }]
+    const tools = toolsOf(catalogClusters(fams, { onRequestRun: () => {} })[0])
+    expect([tools['count-by-layer'].icon, tools['count-by-layer'].size]).toEqual(['layers', 'small'])
+    expect([tools['measure-panel-area'].icon, tools['measure-panel-area'].size]).toEqual(['toolbox', 'large'])
+  })
+
+  it('ignores an unknown size rather than rendering an unknown ribbon shape', () => {
+    const fams = [{
+      family_id: 'measurement', label: 'Measurement',
+      capabilities: [{ name: 'count-by-layer', placement: { size: 'huge' }, capabilities: [] }],
+    }]
+    expect(toolsOf(catalogClusters(fams, { onRequestRun: () => {} })[0])['count-by-layer'].size).toBe('large')
+  })
+
+  it('moves a tool that names a tab OUT of the families panel and into that tab', () => {
+    const onRequestRun = vi.fn()
+    const fams = [{
+      family_id: 'measurement',
+      label: 'Measurement',
+      capabilities: [
+        { name: 'count-by-layer', placement: { tab: 'annotate' }, capabilities: [] },
+        { name: 'measure-panel-area', capabilities: [] },
+      ],
+    }]
+    const stay = catalogClusters(fams, { onRequestRun })
+    expect(stay.map((c) => c.id)).toEqual(['measurement'])
+    expect(Object.keys(toolsOf(stay[0]))).toEqual(['measure-panel-area'])
+
+    const byTab = catalogTabClusters(fams, { onRequestRun })
+    expect(Object.keys(byTab)).toEqual(['annotate'])
+    expect(byTab.annotate.map((c) => [c.id, c.label])).toEqual([['measurement@annotate', 'Measurement']])
+    const placed = toolsOf(byTab.annotate[0])['count-by-layer']
+    placed.onClick()
+    expect(onRequestRun).toHaveBeenCalledWith(
+      fams[0].capabilities[0], null, RIBBON_RATIONALE, 'ribbon')
+  })
+
+  it('seats one family on two tabs as two distinct clusters', () => {
+    const fams = [{
+      family_id: 'measurement',
+      label: 'Measurement',
+      capabilities: [
+        { name: 'a', placement: { tab: 'draw' }, capabilities: [] },
+        { name: 'b', placement: { tab: 'view' }, capabilities: [] },
+      ],
+    }]
+    const byTab = catalogTabClusters(fams, { onRequestRun: () => {} })
+    expect(byTab.draw[0].id).toBe('measurement@draw')
+    expect(byTab.view[0].id).toBe('measurement@view')
+    // Every tool moved, so the families panel keeps no empty shell.
+    expect(catalogClusters(fams, { onRequestRun: () => {} })).toEqual([
+      { id: 'tools', label: 'Tools', kind: 'group', note: CATALOG_TOOL_NOTE_ALL_PLACED, tools: [] },
+    ])
+  })
+
+  it('an unknown tab leaves the tool exactly where it renders today', () => {
+    const fams = [{
+      family_id: 'measurement', label: 'Measurement',
+      capabilities: [{ name: 'count-by-layer', placement: { tab: 'model' }, capabilities: [] }],
+    }]
+    expect(Object.keys(toolsOf(catalogClusters(fams, { onRequestRun: () => {} })[0])))
+      .toEqual(['count-by-layer'])
+    expect(catalogTabClusters(fams, { onRequestRun: () => {} })).toEqual({})
+  })
+
+  it('carries the write gating onto a placed tool too', () => {
+    const fams = [{
+      family_id: 'custom', label: 'Custom authored tools',
+      capabilities: [{
+        name: 'delete-marked-panel', placement: { tab: 'draw' }, capabilities: ['drawing.write'],
+      }],
+    }]
+    const byTab = catalogTabClusters(fams, { onRequestRun: () => {}, writeLocked: true })
+    const tool = toolsOf(byTab.draw[0])['delete-marked-panel']
+    expect([tool.write, tool.disabled, tool.reason]).toEqual([true, true, REASONS.writeLocked])
+  })
+})
+
 describe('authorCluster', () => {
   it('one real command, disabled with the plan reason when authoring is not entitled', () => {
     const onOpen = vi.fn()
@@ -192,5 +328,51 @@ describe('authorCluster', () => {
     expect(dark.tools[0].reason).toBe(REASONS.buildUnavailable)
     // The plan's answer outranks availability when both are false.
     expect(authorCluster({ onOpen, entitled: false, available: false }).tools[0].reason).toBe(REASONS.buildUnentitled)
+  })
+
+  it('carries no second tool until something has been published', () => {
+    expect(authorCluster({ onOpen: () => {} }).tools.map((t) => t.id)).toEqual(['author-tool'])
+    expect(authorCluster({ onOpen: () => {}, authored: null }).tools).toHaveLength(1)
+  })
+
+  it('shows a just-published tool with the record icon and runs it through onUseAuthored', () => {
+    const onUseAuthored = vi.fn()
+    const authored = { name: 'panel-audit', icon: 'layers', catalog_digest: 'sha256:abc' }
+    const cluster = authorCluster({ onOpen: () => {}, authored, onUseAuthored })
+    const tool = cluster.tools[1]
+    expect([tool.id, tool.label, tool.icon, tool.size, tool.disabled, tool.reason])
+      .toEqual(['authored:panel-audit', 'panel-audit', 'layers', 'large', false, ''])
+    tool.onClick()
+    expect(onUseAuthored).toHaveBeenCalledWith(authored)
+  })
+
+  it('falls back to the shared toolbox glyph when the published record names no icon', () => {
+    const cluster = authorCluster({
+      onOpen: () => {}, authored: { name: 'panel-audit', catalog_digest: 'sha256:abc' },
+    })
+    expect(cluster.tools[1].icon).toBe('toolbox')
+  })
+
+  it('says honestly that a digest-less publish is not runnable yet', () => {
+    // Exact string, pinned: this is the sentence a user reads, and it is the
+    // ribbon's half of publishedCatalogTool.js's fail-closed rule.
+    expect(REASONS.publishing).toBe('publishing: not in the runnable catalog yet')
+    for (const authored of [
+      { name: 'panel-audit' },
+      { name: 'panel-audit', catalog_digest: '' },
+      { name: 'panel-audit', catalog_digest: 7 },
+    ]) {
+      const tool = authorCluster({ onOpen: () => {}, authored }).tools[1]
+      expect(tool.disabled).toBe(true)
+      expect(tool.reason).toBe(REASONS.publishing)
+    }
+  })
+
+  it('a settled authored tool still yields to a run in flight or a version preview', () => {
+    const authored = { name: 'panel-audit', catalog_digest: 'sha256:abc' }
+    expect(authorCluster({ onOpen: () => {}, authored, running: true }).tools[1].reason)
+      .toBe(REASONS.running)
+    expect(authorCluster({ onOpen: () => {}, authored, previewing: true }).tools[1].reason)
+      .toBe(REASONS.previewing)
   })
 })
