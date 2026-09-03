@@ -58,7 +58,7 @@ export function ViewCluster({ viewerRef }) {
           <CockpitIcon id="zoom-out" fallback="−" size="strip" />
         </button>
         <span className="cockpit-view-mode" aria-label="View mode">
-          <CockpitIcon id="wireframe" fallback="2D" size="strip" />
+          <CockpitIcon id="wireframe" fallback="WF" size="strip" />
           Wireframe 2D
         </span>
       </div>

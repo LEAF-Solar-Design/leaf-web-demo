@@ -120,7 +120,11 @@ export function RibbonCluster({ id, label, kind = 'group', note = null, extra = 
     <div className="ribbon-cluster" role="group" aria-label={label} {...attrs}>
       <div className="ribbon-cluster-tools">
         {children}
-        {widgets.map((widget) => <RibbonWidget key={widget.id} widget={widget} />)}
+        {widgets.length > 0 && (
+          <div className="ribbon-widgets">
+            {widgets.map((widget) => <RibbonWidget key={widget.id} widget={widget} />)}
+          </div>
+        )}
       </div>
       {extra}
       {/* The panel label sits on the row under the tools, the reference

@@ -69,10 +69,58 @@ export function GeometryRows({ geometry }) {
   )
 }
 
-export default function PropertiesDock({ layers, selection, geometry, plan = null }) {
+// The document's own facts (W4e round 2): the reference's pane is dense
+// label | field rows from top to bottom, and ours read as an unfinished panel
+// while nothing was selected. Client-derived truth only: the counts the
+// intake carries and the extents computed from its vertices; '—' for
+// anything absent, never an invented number.
+export function DrawingRows({ drawing }) {
+  if (!drawing) return null
+  const n = (v) => (Number.isFinite(v) ? v.toLocaleString() : '—')
+  const u = (v) => (Number.isFinite(v) ? `${formatUnits(v)} u` : '—')
+  return (
+    <dl className="dock-drawing" data-testid="dock-drawing">
+      <dt>Name</dt><dd title={drawing.name || ''}>{drawing.name || '—'}</dd>
+      <dt>Entities</dt><dd>{n(drawing.entities)}</dd>
+      <dt>Polylines</dt><dd>{n(drawing.polylines)}</dd>
+      <dt>Block inserts</dt><dd>{n(drawing.inserts)}</dd>
+      <dt>3D faces</dt><dd>{n(drawing.faces)}</dd>
+      <dt>Layers</dt><dd>{n(drawing.layers)}</dd>
+      <dt>Layers shown</dt><dd>{n(drawing.layersShown)}</dd>
+      <dt>Extents X</dt><dd>{drawing.extents ? `${formatUnits(drawing.extents.minX)} … ${formatUnits(drawing.extents.maxX)}` : '—'}</dd>
+      <dt>Extents Y</dt><dd>{drawing.extents ? `${formatUnits(drawing.extents.minY)} … ${formatUnits(drawing.extents.maxY)}` : '—'}</dd>
+      <dt>Width</dt><dd>{u(drawing.extents ? drawing.extents.maxX - drawing.extents.minX : NaN)}</dd>
+      <dt>Height</dt><dd>{u(drawing.extents ? drawing.extents.maxY - drawing.extents.minY : NaN)}</dd>
+      <dt>Source</dt><dd>{drawing.source || '—'}</dd>
+    </dl>
+  )
+}
+
+// Extents over the intake's vertices: one pass, tolerant of [x, y] pairs and
+// {x, y} points, null when nothing finite was seen. Bounded by the intake.
+export function drawingExtents(polylines) {
+  const list = Array.isArray(polylines) ? polylines : []
+  let minX = Infinity; let minY = Infinity; let maxX = -Infinity; let maxY = -Infinity
+  for (const entity of list) {
+    const pts = Array.isArray(entity?.pts) ? entity.pts : []
+    for (const pt of pts) {
+      const x = Array.isArray(pt) ? pt[0] : pt?.x
+      const y = Array.isArray(pt) ? pt[1] : pt?.y
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue
+      if (x < minX) minX = x
+      if (x > maxX) maxX = x
+      if (y < minY) minY = y
+      if (y > maxY) maxY = y
+    }
+  }
+  return Number.isFinite(minX) && Number.isFinite(minY) ? { minX, minY, maxX, maxY } : null
+}
+
+export default function PropertiesDock({ layers, selection, geometry, plan = null, drawing = null }) {
   return (
     <aside className="properties-dock" aria-label="Properties" data-testid="properties-dock">
       <DockSection title="Layers">{layers}</DockSection>
+      {drawing && <DockSection title="Drawing"><DrawingRows drawing={drawing} /></DockSection>}
       <DockSection title="Selection">
         {selection}
         <GeometryRows geometry={geometry} />

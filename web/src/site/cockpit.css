@@ -39,10 +39,10 @@
   --ck-model: #0f74a6;
   --ck-sel: #00b4ff;
   --ck-cmd: #04b255;
-  --ck-label: #696969;
+  --ck-label: #949494; /* the reference's #696969 is 2.6:1; this is 4.7:1 on #2a2a2a */
   --ck-ink: #e2e2e2;
   --ck-ink-dim: #b8b8b8;
-  --ck-ink-off: #5f5f5f;
+  --ck-ink-off: #767676;
   --ck-edge: #424242;
   --ck-divider: #3a3a3a;
   --ck-hover: #3c3c3c;
@@ -77,7 +77,7 @@
   height: var(--ck-top); min-height: 0; box-sizing: border-box;
   padding: 0 4px 0 6px; gap: 4px; flex-wrap: nowrap; overflow: hidden;
   background: var(--ck-chrome); backdrop-filter: none;
-  border-bottom: 0; color: var(--ck-ink);
+  border-bottom: 0; color: var(--ck-ink); box-shadow: inset 0 1px 0 var(--ck-recess);
 }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) header.top .mark { font-size: 0; gap: 0; margin-right: 2px; }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) header.top .mark .diamond { width: 9px; height: 9px; }
@@ -101,13 +101,13 @@
 .cockpit-quick button[aria-expanded="true"] { background: var(--ck-hover); }
 .cockpit-quick button:focus-visible, .cockpit-strip button:focus-visible, .cockpit-ribbon-tabs [role="tab"]:focus-visible, .doc-tab-start:focus-visible, .doc-tab-add:focus-visible { outline: 2px solid var(--ck-sel); outline-offset: -2px; }
 .cockpit-quick-sep { width: 1px; height: 16px; background: var(--ck-divider); margin: 0 3px; }
-.cockpit-ribbon-tabs { display: inline-flex; align-items: stretch; height: var(--ck-top); margin-left: 6px; }
+.cockpit-ribbon-tabs { display: inline-flex; align-items: stretch; height: var(--ck-top); margin-left: 40px; }
 .cockpit-ribbon-tabs [role="tab"] {
-  height: var(--ck-top); padding: 0 14px; border: 0; background: transparent;
+  height: var(--ck-top); padding: 0 17px; border: 0; background: transparent;
   font: 400 12.5px var(--ck-font); color: #d4d4d4; cursor: pointer; white-space: nowrap;
 }
 .cockpit-ribbon-tabs [role="tab"]:hover:not(:disabled) { color: #fff; background: #323232; }
-.cockpit-ribbon-tabs [role="tab"][aria-selected="true"] { color: #fff; background: #323232; box-shadow: inset 0 -2px 0 var(--ck-active); }
+.cockpit-ribbon-tabs [role="tab"][aria-selected="true"] { color: #fff; background: transparent; box-shadow: inset 0 2px 0 var(--ck-sel), inset 0 -2px 0 var(--ck-sel); }
 .cockpit-ribbon-tabs [role="tab"]:disabled { color: var(--ck-ink-off); cursor: not-allowed; }
 
 /* The product-surface tabs stay ALWAYS-MOUNTED in the centre column (the
@@ -124,13 +124,13 @@
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs { gap: 2px; margin: 0; padding: 0; border: 0; background: transparent; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"] {
     height: 22px; padding: 0 8px; gap: 5px; border-radius: 3px; border: 1px solid transparent;
-    font: 400 11px var(--ck-font); color: #c8c8c8; background: transparent; box-shadow: none; align-items: center;
+    font: 400 11px var(--ck-font); color: #9a9a9a; background: transparent; box-shadow: none; align-items: center;
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"]:hover { background: var(--ck-hover); color: #fff; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"][aria-selected="true"] {
     background: var(--ck-title); border-color: #4a4a4a; color: #fff; box-shadow: none;
   }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"] small { font: 400 9px var(--ck-font); letter-spacing: 0; text-transform: none; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"] small { font: 400 10px var(--ck-font); letter-spacing: 0; text-transform: none; color: var(--ck-label); }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-nav .tc-account-signout { display: none; }
 }
 
@@ -219,8 +219,8 @@
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[aria-expanded="true"] { background: var(--ck-hover); }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool .ribbon-tool-label { display: none; }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[data-size="large"] {
-  grid-row: 1 / span 3; width: 57px; height: 78px;
-  flex-direction: column; justify-content: flex-start; padding: 5px 2px 0; gap: 3px;
+  grid-row: 1 / span 3; width: 57px; height: 78px; box-sizing: border-box;
+  flex-direction: column; justify-content: space-between; padding: 5px 2px 4px; gap: 3px;
 }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[data-size="large"] .ribbon-tool-label {
   display: block; width: 100%; font: 400 10px/11px var(--ck-font); color: #d0d0d0;
@@ -228,22 +228,25 @@
 }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[data-size="large"]:disabled .ribbon-tool-label { color: var(--ck-ink-off); }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[data-size="row"] {
-  width: 150px; height: 26px; justify-content: flex-start; padding: 0 6px; gap: 6px;
+  width: 104px; height: 26px; justify-content: flex-start; padding: 0 4px; gap: 5px;
 }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[data-size="row"] .ribbon-tool-label {
   display: inline; font: 400 11px var(--ck-font); overflow: hidden; text-overflow: ellipsis; min-width: 0;
 }
 /* Layer rows: the bulb is lit (amber) when the layer shows, dark when hidden;
    no strike-through, the reference reads state from the bulb. */
-.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[aria-pressed="true"] { background: transparent; border: 0; color: var(--ck-ink); }
-.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[aria-pressed="true"] .ci { color: var(--ck-bulb); }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[aria-pressed="true"] { background: #1f4a63; border: 0; box-shadow: inset 0 0 0 1px var(--ck-active); color: var(--ck-ink); }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[aria-pressed="false"] { text-decoration: none; color: var(--ck-ink-dim); }
-.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[aria-pressed="false"] .ci { color: var(--ck-ink-off); }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[data-size="row"][aria-pressed="true"] { background: transparent; box-shadow: none; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[data-size="row"][aria-pressed="true"] .ci { color: var(--ck-bulb); }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[data-size="row"][aria-pressed="false"] .ci { color: var(--ck-ink-off); }
 .ribbon-swatch { width: 12px; height: 12px; border: 1px solid rgba(255, 255, 255, .25); border-radius: 1px; flex: 0 0 auto; }
-/* Panel widgets (the Properties panel's ByLayer combos, 130px like the reference). */
-.ribbon-widget { display: inline-flex; align-items: center; height: 26px; }
+/* Panel widgets (the Properties panel's ByLayer combos): one column spanning
+   the three rows on the reference's 21px pitch (y 47 / 68 / 89). */
+.ribbon-widgets { grid-row: 1 / span 3; display: flex; flex-direction: column; gap: 2px; padding-top: 2px; }
+.ribbon-widget { display: inline-flex; align-items: center; height: 19px; }
 .ribbon-widget select {
-  width: 130px; height: 22px; padding: 0 6px;
+  width: 125px; height: 19px; padding: 0 6px;
   font: 400 11px var(--ck-font); color: var(--ck-ink);
   background: var(--ck-field); border: 1px solid #3f3f3f; border-radius: 2px;
 }
@@ -267,7 +270,16 @@
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .viewer-title {
   order: 2; max-width: 260px; overflow: hidden; text-overflow: ellipsis;
   background: var(--ck-active); color: #fff; font-weight: 400;
+  box-shadow: inset 0 1px 0 var(--ck-sel); padding-right: 6px;
 }
+/* The reference's tab carries a close glyph at its right edge. */
+.doc-tab-close {
+  order: 2; align-self: center; width: 18px; height: 18px; margin: 0 4px 0 -2px; padding: 0;
+  border: 0; border-radius: 2px; background: var(--ck-active); color: rgba(255, 255, 255, .85);
+  font: 400 13px/1 var(--ck-font); cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
+}
+.doc-tab-close:hover { background: #2aa3de; color: #fff; }
+.doc-tab-close:focus-visible { outline: 2px solid #fff; outline-offset: -2px; }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .viewer-title::before {
   content: ''; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px; flex: 0 0 auto;
   background: rgba(255, 255, 255, .55);
@@ -305,25 +317,27 @@
   }
   /* The view cube: top-right of the canvas, left of the job spine. */
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-cube-wrap {
-    position: fixed; top: calc(var(--ck-canvas-top) + 14px); right: 14px; z-index: 3;
-    display: grid; grid-template-columns: 16px 64px 16px; grid-template-rows: 16px 64px 16px; place-items: center;
-    font: 600 9px var(--ck-font); color: #cfd8e3; pointer-events: none;
+    position: fixed; top: calc(var(--ck-canvas-top) + 20px); right: 18px; z-index: 3;
+    width: 96px; height: 96px; box-sizing: border-box;
+    display: grid; grid-template-columns: 20px 56px 20px; grid-template-rows: 20px 56px 20px; place-items: center;
+    border: 2px solid #707478; border-radius: 50%;
+    font: 600 10px var(--ck-font); color: #d0d0d0; pointer-events: none;
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-cube {
-    grid-column: 2; grid-row: 2; width: 64px; height: 64px; margin: 0;
-    border: 1px solid #6a7a8a; border-radius: 50%; background: radial-gradient(circle, #3a4656 0%, #2a3340 70%, #222b36 100%);
-    display: grid; place-items: center; font: 600 10px var(--ck-font); letter-spacing: 0; color: #e8eef5;
+    grid-column: 2; grid-row: 2; width: 56px; height: 56px; margin: 0;
+    border: 0; border-radius: 50%; background: #9ec2d6;
+    display: grid; place-items: center; font: 600 10px var(--ck-font); letter-spacing: 0; color: #111;
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-cube span {
-    width: 34px; height: 34px; border: 1px solid #8fa0b2; background: #4a5666; display: grid; place-items: center;
+    width: 34px; height: 34px; border: 1px solid #5f7d90; background: #c4dbe8; display: grid; place-items: center; color: #111;
   }
   .cockpit-cube-n { grid-column: 2; grid-row: 1; }
   .cockpit-cube-s { grid-column: 2; grid-row: 3; }
   .cockpit-cube-w { grid-column: 1; grid-row: 2; }
   .cockpit-cube-e { grid-column: 3; grid-row: 2; }
   .cockpit-cube-wcs {
-    position: fixed; top: calc(var(--ck-canvas-top) + 122px); right: 14px; z-index: 3;
-    width: 94px; height: 18px; box-sizing: border-box; padding: 0 6px;
+    position: fixed; top: calc(var(--ck-canvas-top) + 128px); right: 18px; z-index: 3;
+    width: 96px; height: 18px; box-sizing: border-box; padding: 0 6px;
     display: flex; align-items: center; justify-content: space-between;
     font: 400 11px var(--ck-font); color: #d8d8d8; background: var(--ck-title); border: 1px solid #4a4a4a;
   }
@@ -344,7 +358,7 @@
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-section { border: 0; border-radius: 0; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-section::before { content: none; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-section-head {
-    height: 22px; padding: 0 8px; margin-top: 2px; background: var(--ck-title);
+    height: 26px; padding: 0 8px; margin-top: 0; background: var(--ck-title);
     font: 400 11px var(--ck-font); letter-spacing: 0; text-transform: none; color: #e6e6e6;
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-section-body { padding: 3px 4px 4px; }
@@ -370,7 +384,7 @@
      band between the ribbon tabs and the surface switch instead of adding a
      row under the status bar. */
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .operator-entry-button {
-    position: fixed; left: 578px; top: 4px; z-index: 42; height: 20px; padding: 0 8px;
+    position: fixed; left: calc(max(600px, 45%) + 380px); top: 4px; z-index: 42; height: 20px; padding: 0 8px;
     font: 400 11px/20px var(--ck-font); background: var(--ck-title); border: 1px solid #4a4a4a; border-radius: 3px; color: var(--ck-ink);
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cad-edit-workbench {
@@ -409,7 +423,10 @@
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-command-line .bar-controls :is(.bar-add, .bar-scope, .bar-proj, .key, .chip-act, .bar-lanes) {
     height: 18px; padding: 0 6px; font: 400 10px/18px var(--ck-font); border-radius: 2px;
+    background: transparent; color: #9a9a9a; border: 1px solid transparent;
   }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-command-line .bar-controls :is(.bar-add, .bar-scope, .chip-act):hover:not(:disabled) { background: var(--ck-title); color: var(--ck-ink); }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-command-line .bar-controls .chip-act:disabled { background: transparent; color: #6a6a6a; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-command-line .bar-controls .bar-proj { display: none; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-command-line .converse-note {
     position: absolute; left: 0; right: 0; bottom: 100%; margin-bottom: 4px; padding: 2px 8px;
@@ -480,16 +497,20 @@
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card {
     left: auto !important; right: 14px !important;
-    top: auto !important; bottom: 70px !important; width: 300px; max-width: 300px;
+    top: auto !important; bottom: 70px !important; width: 260px; max-width: 260px; padding: 10px 12px;
     border-radius: 3px; font-family: var(--ck-font);
     /* Chrome on the drawing is dark (two-material rule); the coach is no
        exception once it sits on the canvas. */
     background: var(--ck-chrome); color: var(--ck-ink); border: 1px solid var(--ck-edge); box-shadow: 0 12px 32px rgba(0, 0, 0, .5);
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card :is(.tour-card-step, .tour-card-wait) { color: #9a9a9a; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card :is(.tour-card-title) { color: #fff; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card :is(.tour-card-body, .tour-card-prompt) { color: #d0d0d0; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card :is(.tour-card-title) { color: #fff; font: 600 12.5px/16px var(--ck-font); margin: 2px 0 4px; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card :is(.tour-card-step, .tour-card-wait) { font: 400 10px/14px var(--ck-font); }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card :is(.tour-card-body, .tour-card-prompt) { color: #d0d0d0; font: 400 11px/16px var(--ck-font); margin: 0 0 6px; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card :is(.chip-neutral, .primary) { height: 20px; padding: 0 8px; font: 400 11px/20px var(--ck-font); border-radius: 3px; box-shadow: none; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card .chip-neutral { background: var(--ck-title); color: var(--ck-ink); border: 1px solid #4a4a4a; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card .primary { background: var(--ck-model); color: #fff; border: 1px solid #1390cc; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card .tour-card-actions { gap: 6px; margin-top: 6px; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card .tour-dot { background: #5a5a5a; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card .tour-dot.on { background: var(--ck-cmd); }
 }
@@ -519,9 +540,11 @@
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar > .cockpit-status-tabs { order: 1; padding: 0; gap: 0; border-left: 0; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar > .cockpit-status { order: 3; margin-left: auto; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar > .cockpit-status-toggles { order: 4; padding: 0 4px; gap: 2px; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar > :is(.foot-stat, .dim) { order: 6; color: #8f8f8f; font-size: 10.5px; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar > :is(.foot-stat, .dim) { order: 6; color: #9a9a9a; font-size: 10.5px; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar .ok-txt { color: #8fbf9f; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar .warn-txt { color: #c9a86a; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar > .chip-neutral { order: 2; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar > span[style] { order: 7; color: #8f8f8f; font-size: 10.5px; margin-left: 0 !important; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar > span[style] { order: 7; color: #9a9a9a; font-size: 10.5px; margin-left: 0 !important; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar .foot-model-tab,
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar .foot-doc-tab,
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar .foot-doc-add {
@@ -539,6 +562,7 @@
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-status-toggles button:hover:not(:disabled) { background: var(--ck-hover); }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-status-toggles button:disabled { color: var(--ck-ink-off); cursor: not-allowed; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-status-toggles button[aria-pressed="true"] { background: #1f4a63; box-shadow: inset 0 0 0 1px var(--ck-active); }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-status-toggles button:focus-visible { outline: 2px solid var(--ck-sel); outline-offset: -2px; }
   /* The reference's menu glyph at the far left. */
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar::before {
@@ -556,7 +580,7 @@
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .properties-dock .legend { display: flex; flex-direction: column; gap: 0; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .properties-dock .legend-row {
     display: grid; grid-template-columns: 14px 1fr auto; align-items: center; gap: 8px;
-    height: 24px; padding: 0 6px; margin: 0; border: 0; border-radius: 2px; background: transparent;
+    height: 26px; padding: 0 6px; margin: 0; border: 0; border-radius: 2px; background: transparent;
     font: 400 11px var(--ck-font); color: var(--ck-ink); text-align: left; cursor: pointer;
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .properties-dock .legend-row:hover:not(:disabled) { background: #333; }
@@ -565,7 +589,7 @@
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .properties-dock .legend-count { color: #9a9a9a; font-variant-numeric: tabular-nums; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .properties-dock .sel-hint { display: block; padding: 4px 4px 2px; font: 400 11px var(--ck-font); color: #9a9a9a; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .properties-dock .sel-head {
-    display: flex; align-items: center; justify-content: space-between; height: 24px; padding: 0 4px;
+    display: flex; align-items: center; justify-content: space-between; height: 26px; padding: 0 4px;
     font: 400 12px var(--ck-font); color: var(--ck-ink);
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .properties-dock .sel-clear {
@@ -573,7 +597,7 @@
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .properties-dock .sel-fields { display: grid; gap: 2px; margin: 2px 0 0; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .properties-dock .sel-field {
-    display: grid; grid-template-columns: 104px 1fr; align-items: center; gap: 6px; height: 24px; padding: 0 4px;
+    display: grid; grid-template-columns: 104px 1fr; align-items: center; gap: 6px; height: 26px; padding: 0 4px;
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .properties-dock .sel-field dt { font: 400 11px var(--ck-font); color: #cfcfcf; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .properties-dock .sel-field dd {
@@ -596,5 +620,16 @@
     width: 300px; margin: 0; border: 0; border-right: 1px solid var(--ck-edge); border-radius: 0;
     box-shadow: 8px 0 24px rgba(0, 0, 0, .4); backdrop-filter: none; background: var(--ck-chrome);
     overflow-y: auto;
+  }
+}
+
+/* ---- W4e round 2: the pane's Drawing section (label | field rows) ---- */
+@media (min-width: 981px) {
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-drawing { display: grid; grid-template-columns: 104px 1fr; gap: 2px 6px; padding: 0 4px; margin: 0; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-drawing dt { height: 20px; line-height: 20px; font: 400 11px var(--ck-font); color: #cfcfcf; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-drawing dd {
+    margin: 0; height: 20px; line-height: 20px; padding: 0 6px; font: 400 11px var(--ck-font); color: var(--ck-ink);
+    background: var(--ck-field); border: 1px solid #3a3a3a; border-radius: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-variant-numeric: tabular-nums;
   }
 }
