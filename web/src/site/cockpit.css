@@ -149,7 +149,7 @@
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]):has(aside.rail[data-spine]) { grid-template-columns: 0 1fr 0; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]):has(aside.nav[data-spine="hidden"]):has(aside.rail[data-spine]) { grid-template-columns: 0 1fr 0; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) aside.rail[data-spine] {
-    position: fixed; right: 8px; bottom: 0; top: auto; z-index: 41;
+    position: fixed; right: 12px; bottom: 0; top: auto; z-index: 41;
     width: auto; height: 29px; padding: 0 6px; margin: 0;
     display: flex; align-items: center; border: 0; box-shadow: none; background: transparent; overflow: visible;
   }
@@ -583,4 +583,18 @@
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-geometry { display: grid; grid-template-columns: 104px 1fr; gap: 2px 6px; padding: 0 4px; margin-top: 2px; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-geometry dt { height: 20px; line-height: 20px; font: 400 11px var(--ck-font); color: #cfcfcf; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-geometry dd { height: 20px; line-height: 20px; padding: 0 6px; font: 400 11px var(--ck-font); }
+}
+
+/* ---- the tool rail, expanded, on drafting surfaces ---------------------
+   The rail's column is 0 here (the reference has no left rail), so an
+   EXPANDED rail is a panel over the canvas's left edge, above the properties
+   pane (z 3), never under it: proof row "a ribbon click arms the SAME
+   confirm ladder" clicked its collapse control through the pane. */
+@media (min-width: 981px) {
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) aside.nav:not([data-spine]) {
+    position: fixed; left: 0; top: var(--ck-canvas-top); bottom: var(--ck-status); z-index: 5;
+    width: 300px; margin: 0; border: 0; border-right: 1px solid var(--ck-edge); border-radius: 0;
+    box-shadow: 8px 0 24px rgba(0, 0, 0, .4); backdrop-filter: none; background: var(--ck-chrome);
+    overflow-y: auto;
+  }
 }

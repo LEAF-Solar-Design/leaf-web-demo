@@ -205,8 +205,10 @@ test.describe('route matrix, rail ON', () => {
     if (chrome.navHidden) expect(chrome.navWidth).toBeLessThanOrEqual(1)
     else expect(chrome.navLeft).toBeGreaterThanOrEqual(12)
     expect(chrome.railRight).toBeGreaterThanOrEqual(12)
-    expect(Math.max(...chrome.headerBg)).toBeLessThan(40)
-    expect(Math.max(...chrome.footerBg)).toBeLessThan(40)
+    // Dark chrome: the reference cockpit's own chrome is #2a2a2a (42) and
+    // its recessed bands #232323 (35); anything lighter than 48 is paper.
+    expect(Math.max(...chrome.headerBg)).toBeLessThan(48)
+    expect(Math.max(...chrome.footerBg)).toBeLessThan(48)
     // The cockpit: view cluster in the window, status cluster in the footer.
     const view = page.getByTestId('cockpit-view')
     await expect(view).toBeVisible()
@@ -216,7 +218,9 @@ test.describe('route matrix, rail ON', () => {
     const status = page.getByTestId('cockpit-status')
     await expect(status).toBeVisible()
     await expect(status).toContainText(/entities/)
-    const box = await page.locator('.studio-shell .viewer-wrap').boundingBox()
+    // The canvas is the ground's box (W4e: the card window has no flow
+    // height of its own any more; the ground is inset to the canvas).
+    const box = await page.locator('.studio-shell .studio-ground').boundingBox()
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
     await page.mouse.move(box.x + box.width / 2 + 5, box.y + box.height / 2 + 5)
     await expect(status.locator('.cockpit-coord b').first()).not.toHaveText('—')
@@ -796,7 +800,8 @@ test.describe('route matrix, rail ON', () => {
     // The result is a floating instrument, not a full-width band.
     const result = page.locator('.result-block')
     if (await result.count()) {
-      expect(await result.evaluate((el) => getComputedStyle(el).position)).toBe('absolute')
+      // W4e: the instruments are viewport-fixed (the shell is a fixed host).
+      expect(['absolute', 'fixed']).toContain(await result.evaluate((el) => getComputedStyle(el).position))
       expect((await result.boundingBox()).width).toBeLessThan(600)
     }
     // Slice D seating: the tool rail is hidden behind the band and the job

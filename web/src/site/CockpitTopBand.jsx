@@ -16,7 +16,9 @@ export const QUICK_FILE_SLOT_ID = 'cockpit-quick-file'
 
 export const RIBBON_TABS = Object.freeze([
   { id: 'draw', label: 'Draw' },
-  { id: 'model', label: 'Model', reason: '3D modelling is not in the browser engine' },
+  // The reason never says "browser": the product tabs include one named
+  // Browser and accessible-name matching is a substring test.
+  { id: 'model', label: 'Model', reason: '3D modelling is not in this engine yet' },
   { id: 'insert', label: 'Insert' },
   { id: 'annotate', label: 'Annotate' },
   { id: 'view', label: 'View' },
