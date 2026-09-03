@@ -2841,6 +2841,17 @@ export default function App() {
                 </span>
               )}
             </div>
+            {studioGround && drafting && shown && (
+              <button
+                type="button"
+                className="doc-tab-close"
+                aria-label="Close the drawing view and return to Start"
+                title="Close (back to Start)"
+                onClick={() => onSelectSurface('browser')}
+              >
+                ×
+              </button>
+            )}
             {ENV_CAD_EDIT && studioGround && drafting && (
               <button
                 type="button"
