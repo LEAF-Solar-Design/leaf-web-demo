@@ -759,10 +759,6 @@ test.describe('route matrix, rail ON', () => {
     await expect(bar).toHaveValue('')
     await page.getByLabel('ribbon r').press('Escape')
     await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
-    // A sentence is still a sentence: it routes, it never arms.
-    await bar.fill('draw a line across the roof')
-    await bar.press('Enter')
-    await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
 
     // W4f slice F: `u` undoes the last engine edit (the circle), `redo`
     // brings it back; the band's Undo edit / Redo edit carry the depths.
@@ -802,6 +798,13 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('4', { timeout: 60_000 })
     await page.keyboard.press('Escape')
     await expect(page.locator('.workspace-card[data-cockpit-picking="1"]')).toHaveCount(0)
+    // A sentence is still a sentence: it routes, it never arms. LAST in the
+    // row on purpose: while its route decision is shown the Command bar's
+    // Enter belongs to the decision strip, so a word typed after it would be
+    // swallowed (the race that failed this row once).
+    await bar.fill('draw a line across the roof')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
   })
 
   test('solar depth: real solved strings on the Solar tab only, honesty-gated (W4c-V3)', async ({ page, request }) => {
