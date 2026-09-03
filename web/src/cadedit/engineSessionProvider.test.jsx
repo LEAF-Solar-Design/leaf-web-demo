@@ -490,6 +490,27 @@ describe('the command prompt (W4e slice H): a tool arms, the command line asks i
     fireEvent.keyDown(foreign, { key: 'Escape' })
     expect(promptEl()).not.toBeNull()
     foreign.remove()
+    // An open dialog owns its Esc too (the DetailsDrawer parks focus on its
+    // close BUTTON and closes on Esc): the key reaches the dialog's own
+    // handler and the armed command stays (kimi blocker on #976).
+    const layer = document.createElement('div')
+    layer.className = 'drawer-layer'
+    const dialog = document.createElement('aside')
+    dialog.setAttribute('role', 'dialog')
+    dialog.setAttribute('aria-modal', 'true')
+    const close = document.createElement('button')
+    close.type = 'button'
+    dialog.appendChild(close)
+    layer.appendChild(dialog)
+    document.body.appendChild(layer)
+    const dialogEsc = vi.fn()
+    dialog.addEventListener('keydown', dialogEsc)
+    close.focus()
+    fireEvent.keyDown(close, { key: 'Escape' })
+    expect(dialogEsc).toHaveBeenCalledTimes(1)
+    expect(dialogEsc.mock.calls[0][0].defaultPrevented).toBe(false)
+    expect(promptEl()).not.toBeNull()
+    layer.remove()
     // A run: Enter in a field posts the edit; the engine is busy (fields and
     // Run disabled) and the browser drops focus; the reply brings the caret
     // back to the first field.
