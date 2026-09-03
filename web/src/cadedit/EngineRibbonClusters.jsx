@@ -272,6 +272,10 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
       const target = event.target
       if (promptRef.current?.contains(target)) return
       if (target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return
+      // An open dialog or drawer owns its Esc (the DetailsDrawer's "Esc
+      // closes" contract, focus parked on its close BUTTON): the rung defers
+      // to any modal layer instead of cancelling under it (kimi, #976).
+      if (target instanceof Element && target.closest('[role="dialog"], [aria-modal="true"], dialog, .drawer-layer')) return
       event.preventDefault()
       event.stopPropagation()
       cancelRef.current()
