@@ -82,6 +82,13 @@ describe('App.jsx session controller adoption', () => {
     )
   })
 
+  it('publishes the session 200 before a secondary versions request can refuse auth', () => {
+    const activation = stripped.indexOf('sessionActions.activate({ tenant: t, tier: ti, org: o })')
+    const versionsRead = stripped.indexOf('await getDrawingVersions(false, REQUESTED_DRAWING_ID)')
+    expect(activation).toBeGreaterThan(-1)
+    expect(versionsRead).toBeGreaterThan(activation)
+  })
+
   it('keeps the auto-demo escape hatch on the same 401 branch', () => {
     // A VITE_MOCK=0 build with Auth0 unconfigured must still land zero-click on
     // the demo. Same call, same four inputs, same branch as before W2b.
