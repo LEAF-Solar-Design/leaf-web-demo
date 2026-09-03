@@ -1,65 +1,301 @@
 {
-  "_comment": "W4e icons8 manifest: every cockpit icon key -> the icons8 search term that resolves it in ONE style. web/scripts/fetch_icons8.mjs resolves each key through the icons8 API with the operator's key (credential store, never argv), pins the resolved icon id here on --pin, and writes public/icons8-sprite.svg + assets/icons8/built.json. Licence: icons8 paid account of the LEAF operator, attribution-free per the icons8 Pro terms; the sprite carries the platform name and the pinned ids as its receipt.",
-  "platform": "fluency-systems-regular",
+  "_comment": "W4e icons8 manifest: every cockpit icon key -> the icons8 search term that resolves it in ONE style. web/scripts/fetch_icons8.mjs resolves each key through the icons8 API through the icons8 MCP (mcp.icons8.com, Bearer key; the REST publicApi refuses Basic-plan keys) with the operator's key (credential store, never argv), pins the resolved icon id here on --pin, and writes public/icons8-sprite.svg + assets/icons8/built.json. Licence: icons8 paid account of the LEAF operator, attribution-free per the icons8 Pro terms; the sprite carries the platform name and the pinned ids as its receipt.",
+  "platform": "fluent-systems-regular",
   "icons": {
-    "new-file": { "term": "add file" },
-    "open": { "term": "opened folder" },
-    "save": { "term": "save" },
-    "print": { "term": "print" },
-    "undo": { "term": "undo" },
-    "redo": { "term": "redo" },
-    "history": { "term": "activity history" },
-    "line": { "term": "line" },
-    "polyline": { "term": "polyline" },
-    "circle": { "term": "circle" },
-    "arc": { "term": "arc" },
-    "rectangle": { "term": "rectangle" },
-    "ellipse": { "term": "ellipse" },
-    "point": { "term": "point" },
-    "hatch": { "term": "hatching" },
-    "delete": { "term": "delete" },
-    "move": { "term": "move" },
-    "move-vertex": { "term": "drag" },
-    "add-vertex": { "term": "add node" },
-    "delete-vertex": { "term": "remove node" },
-    "set-layer": { "term": "layers" },
-    "copy": { "term": "copy" },
-    "mirror": { "term": "flip horizontal" },
-    "rotate": { "term": "rotate" },
-    "scale": { "term": "resize" },
-    "trim": { "term": "cut" },
-    "extend": { "term": "extend" },
-    "text": { "term": "text" },
-    "dimension": { "term": "ruler" },
-    "leader": { "term": "callout" },
-    "layers": { "term": "layers" },
-    "bulb": { "term": "light bulb" },
-    "freeze": { "term": "snowflake" },
-    "lock": { "term": "lock" },
-    "block-create": { "term": "cube" },
-    "block-insert": { "term": "insert" },
-    "match": { "term": "format painter" },
-    "group": { "term": "group objects" },
-    "ungroup": { "term": "ungroup objects" },
-    "paste": { "term": "paste" },
-    "cut": { "term": "cut" },
-    "import": { "term": "import" },
-    "fit": { "term": "zoom to fit" },
-    "zoom-in": { "term": "zoom in" },
-    "zoom-out": { "term": "zoom out" },
-    "wand": { "term": "magic wand" },
-    "sidebar": { "term": "sidebar" },
-    "toolbox": { "term": "toolbox" },
-    "grid": { "term": "grid" },
-    "snap": { "term": "magnet" },
-    "ortho": { "term": "right angle" },
-    "polar": { "term": "compass" },
-    "osnap": { "term": "target" },
-    "fullscreen": { "term": "fullscreen" },
-    "close": { "term": "close" },
-    "pin": { "term": "pin" },
-    "menu": { "term": "menu" },
-    "split": { "term": "split" },
-    "wireframe": { "term": "wireframe" }
+    "new-file": {
+      "term": "add file",
+      "id": "aCryS1FvTZwy",
+      "name": "add-file"
+    },
+    "open": {
+      "term": "opened folder",
+      "id": "ccl15GfjlIdj",
+      "name": "opened-folder"
+    },
+    "save": {
+      "term": "save",
+      "id": "78FI1reyhXx7",
+      "name": "save"
+    },
+    "print": {
+      "term": "print",
+      "id": "sInQvCXvQM2I",
+      "name": "print"
+    },
+    "undo": {
+      "term": "undo",
+      "id": "NW43CciCALcq",
+      "name": "undo"
+    },
+    "redo": {
+      "term": "redo",
+      "id": "G2FNRGdbYCBF",
+      "name": "redo"
+    },
+    "history": {
+      "term": "activity history",
+      "id": "QCWNw21jG46E",
+      "name": "activity-history"
+    },
+    "line": {
+      "term": "line",
+      "id": "WLAUdBqgqI7w",
+      "name": "line--v2"
+    },
+    "polyline": {
+      "term": "polyline",
+      "id": "oI7SnAJREJAW",
+      "name": "polyline"
+    },
+    "circle": {
+      "term": "circled",
+      "id": "EOKbkORI8fPz",
+      "name": "circle"
+    },
+    "arc": {
+      "term": "semicircle",
+      "id": "DgDRJRRLH70u",
+      "name": "half-turn"
+    },
+    "rectangle": {
+      "term": "rectangle",
+      "id": "ldNOrF5ESq70",
+      "name": "rectangle"
+    },
+    "ellipse": {
+      "term": "ellipse",
+      "id": "5HR1pp8nVqsU",
+      "name": "ellipse"
+    },
+    "point": {
+      "term": "centre point",
+      "id": "Rr7LgXAggK3h",
+      "name": "centre-point"
+    },
+    "hatch": {
+      "term": "diagonal lines",
+      "id": "LANrkaowpRUz",
+      "name": "diagonal-lines"
+    },
+    "delete": {
+      "term": "delete",
+      "id": "KPhFC2OwpbWV",
+      "name": "filled-trash"
+    },
+    "move": {
+      "term": "move",
+      "id": "XVTqgRVGGEoY",
+      "name": "move"
+    },
+    "move-vertex": {
+      "term": "drag",
+      "id": "BGuoJHQjQ6Qa",
+      "name": "resize-four-directions"
+    },
+    "add-vertex": {
+      "term": "add node",
+      "id": "FDqahY4cluXK",
+      "name": "add-node"
+    },
+    "delete-vertex": {
+      "term": "remove node",
+      "id": "3TQRZB1JbGDa",
+      "name": "delete-node"
+    },
+    "set-layer": {
+      "term": "layers",
+      "id": "8kvDToFaCkmL",
+      "name": "layers"
+    },
+    "copy": {
+      "term": "copy",
+      "id": "XvHX5jSzuUPP",
+      "name": "copy--v2"
+    },
+    "mirror": {
+      "term": "flip horizontal",
+      "id": "2LTFxrU3DvWo",
+      "name": "flip-horizontal"
+    },
+    "rotate": {
+      "term": "rotate",
+      "id": "Kmk3GTV6m6E3",
+      "name": "rotate"
+    },
+    "scale": {
+      "term": "resize",
+      "id": "vnalRqfv3W9d",
+      "name": "resize"
+    },
+    "trim": {
+      "term": "scissors",
+      "id": "GBQXGYWVb36R",
+      "name": "scissors"
+    },
+    "extend": {
+      "term": "expand",
+      "id": "EFHuM075H0SN",
+      "name": "expand"
+    },
+    "text": {
+      "term": "text",
+      "id": "bf5YdRko8Kwt",
+      "name": "text"
+    },
+    "dimension": {
+      "term": "ruler",
+      "id": "ZRRfNqXp4ozV",
+      "name": "ruler"
+    },
+    "leader": {
+      "term": "speech bubble",
+      "id": "ga8Uy7FrWYne",
+      "name": "speech-bubble-with-dots"
+    },
+    "layers": {
+      "term": "layers",
+      "id": "8kvDToFaCkmL",
+      "name": "layers"
+    },
+    "bulb": {
+      "term": "light on",
+      "id": "57lj558zKJJC",
+      "name": "light-on"
+    },
+    "freeze": {
+      "term": "snowflake",
+      "id": "QvyUEoUfyEFN",
+      "name": "snowflake"
+    },
+    "lock": {
+      "term": "lock",
+      "id": "A8vjI43762Rl",
+      "name": "lock-2"
+    },
+    "block-create": {
+      "term": "box",
+      "id": "FnCSMZbfR6RU",
+      "name": "box"
+    },
+    "block-insert": {
+      "term": "block",
+      "id": "d4dTW8wmvLvj",
+      "name": "block"
+    },
+    "match": {
+      "term": "paint brush",
+      "id": "vsKVuffwB0Uc",
+      "name": "paint-brush"
+    },
+    "group": {
+      "term": "group objects",
+      "id": "aJ4U0XdtaTwQ",
+      "name": "group-objects"
+    },
+    "ungroup": {
+      "term": "ungroup objects",
+      "id": "8RXeKbVkKm9x",
+      "name": "ungroup-objects"
+    },
+    "paste": {
+      "term": "paste",
+      "id": "rUCpLPrTzIyY",
+      "name": "paste"
+    },
+    "cut": {
+      "term": "cut",
+      "id": "AtCItlaShkec",
+      "name": "cut"
+    },
+    "import": {
+      "term": "import",
+      "id": "st0dqOVQN8E6",
+      "name": "import"
+    },
+    "fit": {
+      "term": "zoom to fit",
+      "id": "51kQ7dX5L94a",
+      "name": "zoom-to-fit"
+    },
+    "zoom-in": {
+      "term": "zoom in",
+      "id": "2vADHy9Z7ATx",
+      "name": "zoom-in"
+    },
+    "zoom-out": {
+      "term": "zoom out",
+      "id": "B3rtongZbJz8",
+      "name": "zoom-out"
+    },
+    "wand": {
+      "term": "magic wand",
+      "id": "RCs1z9htSWge",
+      "name": "fantasy"
+    },
+    "sidebar": {
+      "term": "sidebar",
+      "id": "2hsQKroRJUX8",
+      "name": "sidebar-menu"
+    },
+    "toolbox": {
+      "term": "toolbox",
+      "id": "JDfW9bMaRZ5A",
+      "name": "toolbox"
+    },
+    "grid": {
+      "term": "grid",
+      "id": "jLGlCGQS1SFr",
+      "name": "grid"
+    },
+    "snap": {
+      "term": "magnet",
+      "id": "d2DSi8q0DtSS",
+      "name": "magnet"
+    },
+    "ortho": {
+      "term": "around corner",
+      "id": "wXWG0RYhmZJI",
+      "name": "around-corner"
+    },
+    "polar": {
+      "term": "compass",
+      "id": "aBDIThwGtLKb",
+      "name": "compass"
+    },
+    "osnap": {
+      "term": "target",
+      "id": "AYFSAzltJPA5",
+      "name": "define-location"
+    },
+    "fullscreen": {
+      "term": "fullscreen",
+      "id": "crWnyUeyHtYy",
+      "name": "fullscreen"
+    },
+    "close": {
+      "term": "close",
+      "id": "1NVn5K29mOSz",
+      "name": "delete-sign"
+    },
+    "pin": {
+      "term": "pin",
+      "id": "JpQmx08a0y8Z",
+      "name": "pin"
+    },
+    "menu": {
+      "term": "menu",
+      "id": "quuyJoZCkYni",
+      "name": "menu"
+    },
+    "split": {
+      "term": "split",
+      "id": "1LvB0gJpcgHV",
+      "name": "split"
+    },
+    "wireframe": {
+      "term": "orthogonal view",
+      "id": "QF5IzJ0wwINJ",
+      "name": "orthogonal-view"
+    }
   }
 }
