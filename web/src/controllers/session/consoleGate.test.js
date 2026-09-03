@@ -109,6 +109,11 @@ function consoleHarness({ authConfigured = false } = {}) {
       if (!state.mock) controller.actions.checking()
       if (result.ok) {
         if (!state.mock) controller.actions.activate(result.session || {})
+        if (result.versions401) {
+          // App performs this secondary read only after the session 200 has
+          // activated. Its newer transport verdict must therefore win.
+          noteUnauthorized({ status: 401 }, '/api/versions', result.sentAuth)
+        }
         return
       }
       // The transport sees the 401 first and decides whether the token is
@@ -171,6 +176,22 @@ describe('console session adoption', () => {
 
     expect(console_.view()).toMatchObject({ status: 'active', authRequired: false, signedOut: false })
     expect(console_.controller.getSnapshot().session).toMatchObject({ tenant: 'cat-litmus-tenant' })
+    console_.controller.destroy()
+  })
+
+  it('keeps a versions 401 authoritative after the session 200 activates', () => {
+    localStorage.setItem('leaf.jwt', 'live-token')
+    const console_ = consoleHarness({ authConfigured: true })
+    console_.load({
+      ok: true,
+      session: { tenant: 'cat-litmus-tenant' },
+      versions401: true,
+      sentAuth: 'Bearer live-token',
+    })
+
+    expect(localStorage.getItem('leaf.jwt')).toBeNull()
+    expect(console_.controller.getSnapshot()).toMatchObject({ status: 'required', reason: 'expired' })
+    expect(console_.view().signedOut).toBe(true)
     console_.controller.destroy()
   })
 

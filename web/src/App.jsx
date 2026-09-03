@@ -788,6 +788,11 @@ export default function App() {
     getSession(mock, DRAWING_SOURCE)
       .then(async ({ intake: d, tenant: t, tier: ti, org: o }) => {
         if (!alive) return
+        // A 200 from /api/session IS the platform session, so publish it before
+        // any secondary request can report a newer auth failure. In particular,
+        // a /versions 401 must remain `required` instead of being overwritten by
+        // a late activation after the await. Live only: a mock 200 proves nothing.
+        if (!mock) sessionActions.activate({ tenant: t, tier: ti, org: o })
         let drawingSummary = null
         if (!mock) {
           try {
@@ -803,9 +808,6 @@ export default function App() {
           ...(drawingSummary ? { drawingState: drawingSummary } : {}),
         })
         setTenant(t); setTier(ti); setOrg(o)
-        // A 200 from /api/session IS the platform session — the same proof
-        // ToolCast activates on. Live only: a mock 200 proves nothing.
-        if (!mock) sessionActions.activate({ tenant: t, tier: ti, org: o })
         // Live auth resolves workspace identity from the verified subject.
         // Persist that server-owned org id so an already-bound account never
         // sees the create-org affordance or attempts a duplicate bootstrap.
