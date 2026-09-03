@@ -174,6 +174,7 @@ def fixture(
     lagging: tuple[str, ...] = (),
     missing_receipt: tuple[str, ...] = (),
     envelope: bool = True,
+    contract: bool = True,
 ) -> FakeProvider:
     """A quiet single-release world with every service settled on the release.
 
@@ -206,6 +207,14 @@ def fixture(
             artifact_row(
                 2001,
                 f"staging-supply-evidence-{SOURCE}-attempt-1",
+                RELAY_RUN,
+            )
+        )
+    if contract:
+        relay_artifacts.append(
+            artifact_row(
+                2002,
+                f"staging-consumer-contract-{SOURCE}-attempt-1",
                 RELAY_RUN,
             )
         )
@@ -423,6 +432,38 @@ class ArmingTests(unittest.TestCase):
         )
         self.assertEqual(present["supply_evidence"]["file"], "staging-supply-evidence.b64")
 
+    def test_both_relay_envelopes_are_required_to_arm(self) -> None:
+        """The three v3 dispatch inputs travel together.
+
+        A lane holding only the supply envelope sends digest_aware_reconcile
+        with an empty consumer_contract_b64, and the provider refuses it with
+        "staging consumer contract refused: digest-aware consumer contract"
+        BEFORE any credential is used. Measured on run 33719323168: the deploy
+        job was skipped and nothing was mutated, but the leg failed and the
+        whole sequence stopped. So both halves gate armability.
+        """
+        missing_contract = subject.build_plan(fixture(contract=False))
+        self.assertFalse(missing_contract["armable"])
+        self.assertTrue(
+            any(
+                r.startswith("NO_CONSUMER_CONTRACT")
+                for r in missing_contract["not_armable_because"]
+            ),
+            missing_contract["not_armable_because"],
+        )
+        self.assertTrue(missing_contract["supply_evidence"]["present"])
+        self.assertFalse(missing_contract["consumer_contract"]["present"])
+
+        both = subject.build_plan(fixture())
+        self.assertTrue(both["armable"], both["not_armable_because"])
+        self.assertEqual(
+            both["consumer_contract"]["artifact_name"],
+            f"staging-consumer-contract-{SOURCE}-attempt-1",
+        )
+        self.assertEqual(
+            both["consumer_contract"]["file"], "staging-consumer-contract.b64"
+        )
+
     def test_a_yielded_or_empty_plan_is_never_armable(self) -> None:
         yielded = subject.build_plan(fixture(relay_status="in_progress", lagging=("broker",)))
         self.assertFalse(yielded["armable"])
@@ -497,6 +538,8 @@ class LaneShapeTests(unittest.TestCase):
         # The envelope is passed through, never rebuilt.
         self.assertIn("staging-supply-evidence.b64", code)
         self.assertIn('-f "supply_evidence_b64=$EVIDENCE"', code)
+        self.assertIn('-f "consumer_contract_b64=$CONTRACT"', code)
+        self.assertIn("staging-consumer-contract.b64", code)
 
     def test_the_schedule_cannot_act_while_the_flag_is_false(self) -> None:
         """The scheduled trigger has no way to set the manual arm input, so a
