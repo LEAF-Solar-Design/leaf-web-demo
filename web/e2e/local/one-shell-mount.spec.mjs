@@ -873,6 +873,16 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByLabel('ribbon y2', { exact: true })).toHaveValue('5')
     await page.keyboard.press('F3')
     await expect(page.getByTestId('cockpit-osnap')).toHaveAttribute('aria-pressed', 'false')
+    // W4f-6: the prompt validates as you type with the store's own sentence:
+    // a word in x2 outlines the field, names the refusal and holds Run; the
+    // number back releases it.
+    await page.getByLabel('ribbon x2', { exact: true }).fill('abc')
+    await expect(page.getByLabel('ribbon x2', { exact: true })).toHaveAttribute('aria-invalid', 'true')
+    await expect(page.getByTestId('cockpit-prompt-note')).toHaveText('Line refused: x, y, x2 and y2 must all be numbers.')
+    await expect(page.getByTestId('cockpit-prompt-run')).toBeDisabled()
+    await page.getByLabel('ribbon x2', { exact: true }).fill('50')
+    await expect(page.getByTestId('cockpit-prompt-note')).toHaveCount(0)
+    await expect(page.getByTestId('cockpit-prompt-run')).toBeEnabled()
     const underCard = () => page.evaluate(() => {
       // The card is a full-width pass-through layer; the floating "Edit a
       // DXF drawing" workbench is the child that sits over the drawing.

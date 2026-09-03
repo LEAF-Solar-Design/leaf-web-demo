@@ -34,8 +34,12 @@ import { createPortal } from 'react-dom'
 import { RibbonCluster, RibbonTool } from '../site/DraftingRibbon.jsx'
 import { QuickButton, QUICK_FILE_SLOT_ID } from '../site/CockpitTopBand.jsx'
 
-import { SESSION_ERROR } from './engineSession.js'
+import { SESSION_ERROR, buildCreatePayload, buildEditPayload } from './engineSession.js'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
+
+// W4f-6: the store's own number reading (a field that parses to a finite
+// number is what a run would take), so the outline and the sentence agree.
+const readsAsNumber = (raw) => Number.isFinite(Number.parseFloat(raw))
 
 // The bar-dock's slot the prompt portals into, and the prompt's own id (the
 // armed tool's aria-controls target).
@@ -235,12 +239,25 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const promptReason = armedGroup === 'draw' ? draw : armedGroup === 'modify' ? modify : ''
   const promptOff = !!promptReason
   const fieldsOff = promptOff && promptReason !== MODIFY_REASONS.noSelection
+  // W4f-6: live validation. The store's own payload builders judge the
+  // operands as they are typed, with the same sentence a run would refuse
+  // with, so Run lights only when the command would go through and the
+  // drafter never learns of a bad operand from a refused run. Only while
+  // the group itself is live (its reason ladder comes first); the store
+  // judges again when the command runs.
+  const liveRefusal = prompt && !promptReason
+    ? ((armedGroup === 'draw'
+      ? buildCreatePayload(armedOp, inputs)
+      : buildEditPayload(armedOp, session.selectedId, inputs)).refusal || '')
+    : ''
+  const runOff = promptOff || !!liveRefusal
+  const runReason = promptReason || liveRefusal
   const toggleArmed = (group, op) => setArmed(armedOp === op ? null : { group, op })
   // W4f-3: LINE chains. A run remembers where the segment ends; once the
   // engine has drawn it, that end becomes the next segment's first point.
   const chainRef = useRef(null)
   const run = () => {
-    if (!prompt || promptOff) return
+    if (!prompt || runOff) return
     chainRef.current = armedOp === 'createLine' ? { x: inputs.x2, y: inputs.y2 } : null
     if (armedGroup === 'draw') create(armedOp, inputs)
     else applyEdit(armedOp, inputs)
@@ -409,6 +426,9 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
         </label>
       )
     }
+    // A numeric field that does not read as a number while the command is
+    // refused is the one to fix: outlined, and named by the note.
+    const invalid = mode === 'decimal' && !!liveRefusal && !readsAsNumber(inputs[key])
     return (
       <input
         key={`${key}:${label}`}
@@ -418,6 +438,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
         value={inputs[key]}
         onChange={(event) => setInput(key, event.target.value)}
         aria-label={`ribbon ${label}`}
+        aria-invalid={invalid ? 'true' : undefined}
         placeholder={label}
         title={label}
         disabled={fieldsOff}
@@ -443,7 +464,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
           {step.fields.map(field)}
         </span>
       ))}
-      {promptReason ? <span className="cp-note">{promptReason}</span> : null}
+      {runReason ? <span className="cp-note" data-testid="cockpit-prompt-note">{runReason}</span> : null}
       <span className="cp-actions">
         {/* W4f-4: the drafting mode the picks obey, the reference's F8. A
             pressed toggle on the prompt (the picker owns the key). */}
@@ -474,9 +495,9 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
           className="cp-run"
           data-testid="cockpit-prompt-run"
           onClick={run}
-          disabled={promptOff}
-          title={promptOff ? promptReason : `Run ${prompt.verb.toLowerCase()} (Enter)`}
-          aria-label={promptOff ? `Run (unavailable: ${promptReason})` : 'Run'}
+          disabled={runOff}
+          title={runOff ? runReason : `Run ${prompt.verb.toLowerCase()} (Enter)`}
+          aria-label={runOff ? `Run (unavailable: ${runReason})` : 'Run'}
         >
           Run <kbd className="key">Enter</kbd>
         </button>

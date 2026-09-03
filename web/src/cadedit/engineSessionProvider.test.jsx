@@ -402,15 +402,19 @@ describe('the Draw group (W4d Slice B): creation from the ribbon, selection land
     expect(posted[posted.length - 1].payload).toEqual({ cx: 0, cy: 0, radius: 2.5, startDeg: 0, endDeg: 180, layer: '' })
   })
 
-  it('a malformed operand is a sentence in the status, never a message on the wire', async () => {
+  it('a malformed operand is a sentence on the prompt, never a message on the wire', async () => {
     const studio = mount()
     await openAndLoad(studio, [LINE])
     const before = studio.workers[0].posted.length
     fireEvent.click(drawTool('createCircle'))
     fireEvent.change(screen.getByLabelText('ribbon r'), { target: { value: '0' } })
+    // W4f-6: the store's sentence shows as the operand is typed and Run
+    // waits; a click on Run (or Enter) posts nothing.
+    expect(screen.getByTestId('cockpit-prompt-note').textContent).toMatch(/Circle refused: r must be greater than 0/)
+    expect(screen.getByTestId('cockpit-prompt-run').disabled).toBe(true)
     runPrompt()
+    fireEvent.keyDown(screen.getByLabelText('ribbon r'), { key: 'Enter' })
     expect(studio.workers[0].posted.length).toBe(before)
-    expect(screen.getByRole('status').textContent).toMatch(/Circle refused: r must be greater than 0/)
     expect(drawTool('createCircle').disabled).toBe(false)
   })
 })
@@ -618,6 +622,58 @@ describe('the command prompt (W4e slice H): a tool arms, the command line asks i
     act(() => { studio.context.setOsnap(true) })
     expect(studio.context.ortho).toBe(false)
     expect(promptEl().getAttribute('data-op')).toBe('createLine')
+  })
+
+  it('the prompt validates as you type with the store\'s own sentence: the bad field is outlined, Run waits, Enter does nothing, a fix releases it (W4f-6)', async () => {
+    const studio = mount()
+    await openAndLoad(studio, [LINE, POLY])
+    fireEvent.click(drawTool('createLine'))
+    const note = () => screen.queryByTestId('cockpit-prompt-note')
+    const run = () => screen.getByTestId('cockpit-prompt-run')
+    // Defaults read as a line: nothing to say, Run live.
+    fireEvent.change(screen.getByLabelText('ribbon x2'), { target: { value: '40' } })
+    expect(note()).toBeNull()
+    expect(run().disabled).toBe(false)
+    // A word where a number belongs: the store's refusal, live, on the
+    // field and on Run; Enter posts nothing.
+    fireEvent.change(screen.getByLabelText('ribbon x'), { target: { value: 'abc' } })
+    expect(note().textContent).toBe('Line refused: x, y, x2 and y2 must all be numbers.')
+    expect(screen.getByLabelText('ribbon x').getAttribute('aria-invalid')).toBe('true')
+    expect(screen.getByLabelText('ribbon y').getAttribute('aria-invalid')).toBeNull()
+    expect(run().disabled).toBe(true)
+    expect(run().getAttribute('aria-label')).toBe('Run (unavailable: Line refused: x, y, x2 and y2 must all be numbers.)')
+    fireEvent.keyDown(screen.getByLabelText('ribbon x'), { key: 'Enter' })
+    expect(studio.workers[0].posted.filter((message) => message.type === 'applyEdit')).toHaveLength(0)
+    // Numbers that make a degenerate line: the sentence names it, no field
+    // is outlined (they all read as numbers).
+    fireEvent.change(screen.getByLabelText('ribbon x'), { target: { value: '40' } })
+    fireEvent.change(screen.getByLabelText('ribbon y'), { target: { value: '30' } })
+    fireEvent.change(screen.getByLabelText('ribbon y2'), { target: { value: '30' } })
+    expect(note().textContent).toBe('Line refused: the two points must differ.')
+    expect(screen.getByLabelText('ribbon x').getAttribute('aria-invalid')).toBeNull()
+    expect(run().disabled).toBe(true)
+    // The fix releases Run and Enter runs.
+    fireEvent.change(screen.getByLabelText('ribbon x2'), { target: { value: '50' } })
+    expect(note()).toBeNull()
+    expect(run().disabled).toBe(false)
+    fireEvent.keyDown(screen.getByLabelText('ribbon x2'), { key: 'Enter' })
+    const posted = studio.workers[0].posted
+    expect(posted[posted.length - 1].type).toBe('applyEdit')
+    expect(posted[posted.length - 1].op).toBe('createLine')
+    studio.workers[0].emit({ ...editApplied('createLine', [LINE, POLY, { ...LINE, id: 'e9' }]), createdId: 'e9' })
+    // A modify command judged the same way (the create selected what it
+    // drew, so the group is live): the operand sentence, live.
+    fireEvent.keyDown(screen.getByLabelText('ribbon x2'), { key: 'Escape' })
+    act(() => { studio.context.setArmed({ group: 'modify', op: 'move' }) })
+    expect(studio.context.session.selectedId).toBe('e9')
+    expect(note()).toBeNull()
+    fireEvent.change(screen.getByLabelText('ribbon dx'), { target: { value: 'zz' } })
+    expect(note().textContent).toBe('Move refused: dx and dy must both be numbers.')
+    expect(screen.getByLabelText('ribbon dx').getAttribute('aria-invalid')).toBe('true')
+    expect(run().disabled).toBe(true)
+    fireEvent.change(screen.getByLabelText('ribbon dx'), { target: { value: '2' } })
+    expect(note()).toBeNull()
+    expect(run().disabled).toBe(false)
   })
 
   it('an open dialog owns Esc even when its opener kept focus outside the layer', async () => {

@@ -486,6 +486,8 @@
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-input::placeholder { color: #7a7a7a; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-input:focus-visible { outline: 1px solid var(--ck-active); outline-offset: 0; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-input:disabled { color: #7a7a7a; background: transparent; }
+  /* W4f-6: a field the store would refuse, outlined in the note's amber. */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-input[aria-invalid="true"] { border-color: #d9a441; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-field { display: inline-flex; align-items: center; gap: 4px; font: inherit; color: inherit; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-field input { margin: 0; accent-color: var(--ck-active); }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-note { color: #d9a441; font-size: 11px; }
