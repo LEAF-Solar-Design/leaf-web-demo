@@ -816,6 +816,27 @@ jobs:
             echo "artifact_id=$SUPPLY_ARTIFACT_ID" >> "$GITHUB_OUTPUT"
             echo "artifact_name=$SUPPLY_ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
             echo "supply_evidence_b64=$evidence" >> "$GITHUB_OUTPUT"
+            # Write the SAME envelope this relay dispatches, so a downstream
+            # lane can reuse it verbatim instead of minting one the provider
+            # would refuse: deploy-leaf-platform-staging.yml requires
+            # relay.workflow_path to be exactly this file, so nothing else can
+            # produce a usable one. Written HERE, on the line after the single
+            # value every leg is dispatched with, so the artifact cannot drift
+            # from what was actually sent.
+            #
+            # This publishes no secret and widens nothing. Actions already
+            # prints the envelope in this job's own log, as the deploy step's
+            # SUPPLY_EVIDENCE_B64 env line (verified 2026-09-03 on relay run
+            # 33706627085: 11982 base64 chars in the clear, matching the
+            # supply_evidence utf8_bytes the provider receipts record). Anyone
+            # who can read this run already has it. An artifact is a stable
+            # contract; a log line is not one, and scraping it would be.
+            #
+            # v1 supply sets carry no envelope, so the file is written only
+            # when one exists and the upload below is gated on the same fact.
+            if [ -n "$evidence" ]; then
+              printf '%s' "$evidence" > staging-supply-evidence.b64
+            fi
             # THE RELEASE IDENTITY IS THE ENVELOPE'S, NOT THE TIP'S. These two
             # name the commit and attempt whose IMAGES this relay is about to
             # deploy, which is the build head on the ordinary path and the
@@ -1941,4 +1962,20 @@ jobs:
         with:
           name: staging-converged-${{ github.event.workflow_run.head_sha }}-attempt-${{ github.event.workflow_run.run_attempt }}
           path: staging-converged.json
+          if-no-files-found: error
+
+      # Gated on the receipt's own condition, deliberately. A consumer only ever
+      # targets a release that HAS a convergence receipt, so the envelope and the
+      # receipt appear together or not at all, and an unconverged relay publishes
+      # neither. Named on the same head_sha/attempt convention as the receipt so
+      # one lookup shape finds both. Like the step above this runs NO script and
+      # holds NO token: a pure upload of a file the guarded step already wrote.
+      - name: Publish the supply evidence envelope for downstream reuse
+        if: >-
+          steps.deploy.outputs.converged == 'true'
+          && steps.manifest.outputs.supply_evidence_b64 != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-supply-evidence-${{ github.event.workflow_run.head_sha }}-attempt-${{ github.event.workflow_run.run_attempt }}
+          path: staging-supply-evidence.b64
           if-no-files-found: error
