@@ -449,9 +449,15 @@ describe('the command prompt (W4e slice H): a tool arms, the command line asks i
     fireEvent.click(drawTool('createCircle'))
     expect(promptEl()).toBeNull()
     expect(drawTool('createCircle').getAttribute('aria-expanded')).toBe('false')
-    // Esc cancels and hands focus back to the tool that armed the command.
+    // Esc cancels and hands focus back to the tool that armed the command,
+    // and the prompt OWNS that Esc: App's window-level Esc rung (drawers,
+    // routes) never sees the same keypress.
     fireEvent.click(drawTool('createArc'))
+    const windowEsc = vi.fn()
+    window.addEventListener('keydown', windowEsc)
     fireEvent.keyDown(screen.getByLabelText('ribbon r'), { key: 'Escape' })
+    window.removeEventListener('keydown', windowEsc)
+    expect(windowEsc).not.toHaveBeenCalled()
     expect(promptEl()).toBeNull()
     expect(document.activeElement).toBe(drawTool('createArc'))
     // Arming and cancelling never touched the engine.
@@ -484,7 +490,18 @@ describe('the command prompt (W4e slice H): a tool arms, the command line asks i
     act(() => { studio.context.setArmed({ group: 'modify', op: 'move' }) })
     expect(promptEl().getAttribute('data-op')).toBe('move')
     expect(promptEl().textContent).toContain('Specify displacement:')
+    // A regex-valid op the table does not know renders no prompt and
+    // leaves no tool claiming one (no dangling aria-controls).
+    act(() => { studio.context.setArmed({ group: 'modify', op: 'delete' }) })
+    expect(promptEl()).toBeNull()
+    expect(document.querySelectorAll('.drafting-ribbon [aria-controls="cockpit-prompt"]')).toHaveLength(0)
     act(() => { studio.context.setArmed(null) })
+    expect(promptEl()).toBeNull()
+    // Opening ANOTHER document cancels the running command.
+    fireEvent.click(drawTool('createLine'))
+    expect(promptEl().getAttribute('data-op')).toBe('createLine')
+    await openAndLoad(studio, [LINE, POLY], 'two.dxf')
+    expect(studio.context.session.documentId).toBe('two.dxf')
     expect(promptEl()).toBeNull()
     // The worker dies: no document to prompt for, so the prompt goes too.
     act(() => { studio.context.setArmed({ group: 'draw', op: 'createArc' }) })

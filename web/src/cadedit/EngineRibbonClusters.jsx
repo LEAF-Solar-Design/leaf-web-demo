@@ -245,10 +245,19 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
       event.preventDefault()
       run()
     } else if (event.key === 'Escape') {
+      // The prompt owns this Esc: it must not ALSO climb to App's
+      // window-level Esc rung (a drawer or route reacting to the same key).
       event.preventDefault()
+      event.stopPropagation()
       cancel()
     }
   }
+  // The armed tool exposes the prompt it opened; only a tool this table
+  // knows can be expanded, so an out-of-contract op never leaves a dangling
+  // aria-controls on a button.
+  const armedAttrs = (op) => (PROMPTS[op]
+    ? { expanded: prompt !== null && armedOp === op, controls: prompt !== null && armedOp === op ? PROMPT_ID : undefined }
+    : {})
 
   const fileTools = [
     {
@@ -373,8 +382,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
                 write: true,
                 disabled: !!draw,
                 reason: draw,
-                expanded: armedOp === op,
-                controls: armedOp === op ? PROMPT_ID : undefined,
+                ...armedAttrs(op),
                 onClick: () => (PROMPTS[op] ? toggleArmed('draw', op) : create(op, inputs)),
               }}
             />
@@ -397,8 +405,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
                 write: true,
                 disabled: !!modify,
                 reason: modify,
-                expanded: PROMPTS[op] ? armedOp === op : undefined,
-                controls: armedOp === op ? PROMPT_ID : undefined,
+                ...armedAttrs(op),
                 onClick: () => (PROMPTS[op] ? toggleArmed('modify', op) : applyEdit(op, inputs)),
               }}
             />

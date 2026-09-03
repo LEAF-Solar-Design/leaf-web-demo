@@ -116,10 +116,14 @@ export default function EngineSessionProvider({
       current && current.group === group && current.op === op ? current : Object.freeze({ group, op })
     ))
   }, [])
-  // No parsed document (closed, switched, or the worker died): nothing to
-  // prompt for, so a stale prompt never outlives its drawing.
+  // No parsed document (closed, or the worker died): nothing to prompt for,
+  // so a stale prompt never outlives its drawing. A NEW document disarms
+  // too (openDocument keeps engineParsed while it loads, so the identity is
+  // the signal): opening a file cancels the running command, as in the
+  // reference.
   const documentGone = !session.engineParsed || session.errorKind === SESSION_ERROR.CRASHED
   useEffect(() => { if (documentGone) setArmedState(null) }, [documentGone])
+  useEffect(() => { setArmedState(null) }, [session.documentId])
 
   const canSave = saveTarget !== null && saveTarget !== undefined
   const value = useMemo(
