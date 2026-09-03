@@ -642,6 +642,78 @@ def fixture() -> FakeProvider:
 _ABSENT = object()
 
 
+def add_child_row(provider: FakeProvider, row: dict, *, open_window_only: bool) -> None:
+    """Append one run row to the child listing(s).
+
+    A caller-supplied frontier bounds the API window server side, so a run
+    created after it only ever appears in the OPEN listing. open_window_only
+    reproduces that asymmetry, which is what production looks like and what the
+    single-release fixture otherwise cannot show.
+    """
+    endpoints = [CHILD_WINDOW_OPEN_ENDPOINT]
+    if not open_window_only:
+        endpoints.append(CHILD_WINDOW_EXACT_ENDPOINT)
+    for endpoint in endpoints:
+        listing = provider.json_values[(subject.TF_REPOSITORY, endpoint)]
+        listing["workflow_runs"].append(copy.deepcopy(row))
+        listing["total_count"] += 1
+
+
+def active_child_row(created: str, run_id: int = 399) -> dict:
+    row = run(
+        run_id,
+        repository=subject.TF_REPOSITORY,
+        workflow=subject.DEPLOY_WORKFLOW,
+        event="workflow_dispatch",
+        head_sha=TF_HEAD,
+        created=created,
+    )
+    row["status"] = "in_progress"
+    row["conclusion"] = None
+    return row
+
+
+def add_identity_child(provider: FakeProvider, run_id: int, created: str) -> None:
+    """A second completed app run carrying a produced deployment identity."""
+    tf = subject.TF_REPOSITORY
+    row = run(
+        run_id,
+        repository=tf,
+        workflow=subject.DEPLOY_WORKFLOW,
+        event="workflow_dispatch",
+        head_sha=TF_HEAD,
+        created=created,
+    )
+    provider.json_values[(tf, f"/actions/runs/{run_id}")] = copy.deepcopy(row)
+    name = f"leaf-platform-staging-service-run-{run_id}-attempt-1"
+    provider.json_values[(tf, f"/actions/runs/{run_id}/artifacts?per_page=100")] = {
+        "total_count": 1,
+        "artifacts": [artifact(run_id + 1000, name, run_id, TF_HEAD)],
+    }
+    provider.byte_values[(tf, f"/actions/artifacts/{run_id + 1000}/zip")] = archive(
+        subject.ARTIFACT_FILE,
+        canonical(
+            service_receipt(
+                "app",
+                run_id,
+                predecessor="leaf-platform-app:2",
+                terminal_td="leaf-platform-app:3",
+                with_identity=True,
+            )
+        ),
+    )
+    provider.json_values[(tf, f"/actions/runs/{run_id}/attempts/1/jobs?per_page=100")] = {
+        "total_count": 1,
+        "jobs": [
+            {
+                "name": "Deploy",
+                "steps": [{"name": "Done", "number": 1, "conclusion": "success"}],
+            }
+        ],
+    }
+    add_child_row(provider, row, open_window_only=True)
+
+
 def replace_receipt(provider: FakeProvider, run_id: int, mutate) -> None:
     key = (subject.TF_REPOSITORY, f"/actions/artifacts/{run_id + 1000}/zip")
     with zipfile.ZipFile(io.BytesIO(provider.byte_values[key])) as value:
@@ -2124,6 +2196,71 @@ class ConvergenceFinalizerTests(unittest.TestCase):
         for bad in ("", "0", "01", "-1", "1.0", "run-1", "../1"):
             with self.subTest(bad=bad), self.assertRaises(subject.ContractError):
                 subject._parse_run_id(bad, True)
+
+    def test_auto_detected_frontier_ignores_a_later_release_still_deploying(self) -> None:
+        """The blocker: an unbounded read aborted on unrelated later activity.
+
+        Handing the finalizer a frontier bounds its API window at
+        frontier.updated_at, so a later release's deploy is filtered out server
+        side. Auto-detect must query an unbounded window to FIND the frontier,
+        and used to abort the moment anything was in flight anywhere after the
+        relay. Measured over 25.2h to 2026-09-03, the tf deploy workflow has a
+        run live 70.3% of the time, so that read failed roughly seven times in
+        ten for reasons with no bearing on this release. Every finalize that
+        ever succeeded (4 of 28 lifetime runs) was handed the id by hand.
+        """
+        provider = fixture()
+        # FRONTIER_RUN is created and updated 2026-08-13T01:25:00Z.
+        add_child_row(
+            provider, active_child_row("2026-08-13T01:40:00Z"), open_window_only=True
+        )
+        receipt = subject._build_receipt(provider, BUILD_RUN, None)
+        self.assertEqual(receipt["frontier_run_id"], FRONTIER_RUN)
+        # Parity is the point: discovering the frontier and being handed it must
+        # produce the same receipt, byte for byte.
+        self.assertEqual(receipt, subject._build_receipt(fixture(), BUILD_RUN, FRONTIER_RUN))
+
+    def test_auto_detected_frontier_still_refuses_activity_inside_its_window(self) -> None:
+        """The guard is deferred, not dropped."""
+        for created in ("2026-08-13T01:24:00Z", "2026-08-13T01:25:00Z"):
+            with self.subTest(created=created):
+                provider = fixture()
+                add_child_row(
+                    provider, active_child_row(created), open_window_only=True
+                )
+                with self.assertRaisesRegex(subject.ContractError, "^ACTIVE_CHILD_RUN$"):
+                    subject._build_receipt(provider, BUILD_RUN, None)
+
+    def test_frontier_absent_and_ambiguous_are_different_reasons(self) -> None:
+        """Zero and many need different operator actions, so they say so.
+
+        Zero was the live blocker on finalize run 33698105096: the release's
+        convergence sequence had not stamped a full-fleet identity yet. Both
+        used to surface as FRONTIER_RUN_CARDINALITY, whose name points at the
+        wrong one of the two.
+        """
+        absent = fixture()
+        replace_receipt(
+            absent,
+            FRONTIER_RUN,
+            lambda value: value["facts"].__setitem__(
+                "deployment_identity", {"status": "not_produced"}
+            ),
+        )
+        with self.assertRaisesRegex(subject.ContractError, "^FRONTIER_IDENTITY_ABSENT$"):
+            subject._build_receipt(absent, BUILD_RUN, None)
+
+        ambiguous = fixture()
+        add_identity_child(ambiguous, 307, "2026-08-13T01:26:00Z")
+        with self.assertRaisesRegex(subject.ContractError, "^FRONTIER_RUN_CARDINALITY$"):
+            subject._build_receipt(ambiguous, BUILD_RUN, None)
+        # Naming one resolves it, and the second stamp falls outside the bound.
+        named = fixture()
+        add_identity_child(named, 307, "2026-08-13T01:26:00Z")
+        self.assertEqual(
+            subject._build_receipt(named, BUILD_RUN, FRONTIER_RUN)["frontier_run_id"],
+            FRONTIER_RUN,
+        )
 
     def test_cli_rejects_caller_supplied_authority_fields(self) -> None:
         parser = subject._parser()
