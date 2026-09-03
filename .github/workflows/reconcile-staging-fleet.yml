@@ -1,0 +1,92 @@
+name: Reconcile staging fleet (report only)
+
+# ---------------------------------------------------------------------------
+# REPORT ONLY. This lane has no write permission to anything and dispatches
+# nothing. It publishes the plan that WOULD bring the non-relay services onto
+# the newest converged release and then stamp the five-service deployment
+# identity the convergence receipt needs. Arming it is a later, deliberate
+# change, and it is blocked on a prerequisite the plan itself names (see
+# ARMING below).
+#
+# WHY THIS LANE EXISTS. The staging relay converges web and app only, and says
+# so: automatic_surfaces ["web","app"], every other service
+# "not_automatically_reconciled", full_fleet_identity_stamped false. The
+# convergence receipt needs more, because its deployment identity is a
+# FIVE-service stamp the provider builds from LIVE ECS digests. Nothing
+# dispatches the rest: measured 2026-09-03 on the dad27a10 wave, broker
+# 33698179237, harness 33698719439, canonical-worker 33699214170 and restamp
+# 33699604872 were all hand-dispatched.
+#
+# WHY IT IS SCHEDULED AND NOT PER RELEASE. Every staging mutation funnels
+# through one shared single-slot concurrency group
+# (leaf-platform-staging-ecs-mutation, shared by 39 workflows). Measured over
+# the 60 most recent staging deploys to 2026-09-03, medians are web 11.2, app
+# 26.9, broker 5.4, harness 6.0, canonical-worker 7.8 minutes: ~57 minutes for
+# all five serialized, ~63 with the restamp, against a 19.4-minute median merge
+# cadence and a lock already busy 70.3% of a 25.2h sample. Converging EVERY
+# release is 3.2x oversubscribed, so a per-release reconciler would queue
+# forever and starve the web and app deploys that carry the product. This lane
+# therefore targets the NEWEST converged release, is EXPECTED to skip releases,
+# and yields to the relay rather than competing with it.
+#
+# YIELDS, FAIL CLOSED. The planner stands down whenever a relay run or any
+# staging deploy is unsettled, and treats an unreadable run list as busy. The
+# relay already abandons its SECOND service when main moves inside its window,
+# so taking the lock from it would worsen the split this is meant to close.
+# Standing down costs one idle cycle; the schedule brings it straight back.
+#
+# ARMING. Every step the plan names still needs the relay's own supply evidence
+# envelope. The provider hard-requires that envelope's relay.workflow_path to be
+# ".github/workflows/dispatch-staging-deploys.yml", so this lane cannot mint
+# one, and the relay does not publish the one it builds. Arming therefore means
+# the relay publishing that envelope and this lane reusing it verbatim, which is
+# a separate change against a file with its own pinned shape tests. The plan
+# reports this as arming_prerequisite rather than leaving it to be discovered.
+# ---------------------------------------------------------------------------
+
+on:
+  schedule:
+    # Every 30 minutes. The lane is cheap (a bounded set of GET reads) and
+    # coalescing means a missed tick costs nothing: the next one targets the
+    # newest converged release anyway.
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+
+# Read only, deliberately. This lane cannot dispatch even if its code tried.
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: reconcile-staging-fleet
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Resolve the staging fleet reconcile plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the planner
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Resolve the plan
+        env:
+          APP_GITHUB_TOKEN: ${{ github.token }}
+          TERRAFORM_GITHUB_TOKEN: ${{ secrets.TERRAFORM_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          python -m scripts.reconcile_staging_fleet \
+            --output staging-fleet-reconcile-plan.json \
+            --summary "$GITHUB_STEP_SUMMARY"
+          test -s staging-fleet-reconcile-plan.json
+
+      - name: Upload the plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-fleet-reconcile-plan-${{ github.run_id }}
+          path: staging-fleet-reconcile-plan.json
+          if-no-files-found: error
+          retention-days: 14
