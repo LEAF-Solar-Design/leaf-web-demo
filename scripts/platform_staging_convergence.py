@@ -704,8 +704,10 @@ def _one_artifact(
         raise ContractError("PROVIDER_ARTIFACT_JSON_INVALID") from exc
 
 
-def _consumer_contract_for_head(provider: Provider, head_sha: str) -> dict[str, Any]:
-    """Resolve one provider-owned Terraform consumer contract using Actions only."""
+def _consumer_contract_for_head(
+    provider: Provider, head_sha: str, request_slot: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve the provider envelope actually bound by this receipt, not main."""
     rows = _workflow_run_rows(
         provider,
         TF_REPOSITORY,
@@ -725,9 +727,69 @@ def _consumer_contract_for_head(provider: Provider, head_sha: str) -> dict[str, 
         if run["head_branch"] != "main" or run["conclusion"] != "success":
             raise ContractError("CONSUMER_CONTRACT_RUN_INVALID")
         matches.append(run)
-    if len(matches) != 1:
+    if len(matches) > 1:
         raise ContractError("CONSUMER_CONTRACT_RUN_CARDINALITY")
-    run = matches[0]
+    same_head = _consumer_contract_for_run(provider, matches[0]) if matches else None
+    if same_head is not None and same_head["request_slot"] == request_slot:
+        return same_head
+
+    # A canonical deploy may retain a contained producer across unrelated main
+    # advances. Discover its immutable envelope by the recorded hash AND size;
+    # never replace that slot with an envelope minted at the later control head.
+    for raw in rows:
+        if not isinstance(raw, dict) or raw.get("head_sha") == head_sha:
+            continue
+        try:
+            run = _provider_run(raw, TF_REPOSITORY, CONSUMER_CONTRACT_WORKFLOW, "push")
+            if run["head_branch"] != "main" or run["conclusion"] != "success":
+                continue
+            contract = _consumer_contract_for_run(provider, run)
+        except ContractError:
+            # Invalid unrelated artifacts cannot supply authority. If this was
+            # the requested envelope, no verified match exists and we refuse.
+            continue
+        if contract["request_slot"] != request_slot:
+            continue
+        return _retained_consumer_contract(provider, head_sha, contract)
+
+    if same_head is not None:
+        # Keep the existing exact-head validation/error ordering in the caller.
+        return same_head
+    raise ContractError("SERVICE_RECEIPT_CONSUMER_CONTRACT_MISMATCH")
+
+
+def _retained_consumer_contract(
+    provider: Provider, head_sha: str, contract: dict[str, Any],
+) -> dict[str, Any]:
+    source = contract["producer_source"]
+    comparison = provider.json(TF_REPOSITORY, f"/compare/{source}...{head_sha}")
+    if (
+        not isinstance(comparison, dict)
+        or comparison.get("status") != "ahead"
+        or type(comparison.get("ahead_by")) is not int
+        or comparison["ahead_by"] < 1
+        or type(comparison.get("behind_by")) is not int
+        or comparison["behind_by"] != 0
+        or not isinstance(comparison.get("base_commit"), dict)
+        or comparison["base_commit"].get("sha") != source
+        or not isinstance(comparison.get("merge_base_commit"), dict)
+        or comparison["merge_base_commit"].get("sha") != source
+    ):
+        raise ContractError("CONSUMER_CONTRACT_SOURCE_NOT_CONTAINED")
+    control_tree = None
+    for path, expected_blob in contract["protected_blobs"].items():
+        tree, blob = _workflow_blob(provider, TF_REPOSITORY, head_sha, path)
+        if blob != expected_blob or (control_tree is not None and tree != control_tree):
+            raise ContractError("CONSUMER_CONTRACT_BLOB_MISMATCH")
+        control_tree = tree
+    # The normalized child describes the deployment control commit, not the
+    # earlier contract producer's tree. The receipt's recorded slot is intact.
+    return {**contract, "source_tree": control_tree}
+
+
+def _consumer_contract_for_run(provider: Provider, run: dict[str, Any]) -> dict[str, Any]:
+    """Verify one successful publisher and reconstruct its exact dispatch bytes."""
+    head_sha = run["head_sha"]
     name = (
         f"{CONSUMER_CONTRACT_ARTIFACT_PREFIX}{run['run_id']}"
         f"-attempt-{run['run_attempt']}"
@@ -861,6 +923,12 @@ def _consumer_contract_for_head(provider: Provider, head_sha: str) -> dict[str, 
     dispatch["envelope_sha256"] = _sha(_canonical(dispatch))
     encoded = base64.urlsafe_b64encode(_canonical(dispatch)).rstrip(b"=")
     return {
+        "producer_source": head_sha,
+        "protected_blobs": {
+            DEPLOY_WORKFLOW: workflow_blob,
+            CONSUMER_CONTRACT_WORKFLOW: producer["workflow_blob"],
+            CONSUMER_CONTRACT_SCHEMA_PATH: consumer["contract_schema_blob"],
+        },
         "source_tree": tree,
         "workflow_blob": workflow_blob,
         "request_slot": {
@@ -2005,13 +2073,15 @@ def _build_receipt(
         raise ContractError("UNCLASSIFIED_MATCHING_CHILD")
 
     normalized_by_id: dict[int, dict[str, Any]] = {}
-    consumer_contracts: dict[str, dict[str, Any]] = {}
+    consumer_contracts: dict[tuple[str, bytes], dict[str, Any]] = {}
     per_service: dict[str, list[dict[str, Any]]] = {service: [] for service in SERVICE_ORDER}
     for run_id, role in roles.items():
         run, artifact, raw_receipt, outcome = by_id[run_id]
-        if run["head_sha"] not in consumer_contracts:
-            consumer_contracts[run["head_sha"]] = _consumer_contract_for_head(
-                provider, run["head_sha"]
+        request_slot = raw_receipt["requested"]["consumer_contract"]
+        consumer_key = (run["head_sha"], _canonical(request_slot))
+        if consumer_key not in consumer_contracts:
+            consumer_contracts[consumer_key] = _consumer_contract_for_head(
+                provider, run["head_sha"], request_slot
             )
         child = _normalize_child(
             run,
@@ -2019,7 +2089,7 @@ def _build_receipt(
             raw_receipt,
             role,
             outcome,
-            consumer_contracts[run["head_sha"]],
+            consumer_contracts[consumer_key],
         )
         normalized_by_id[run_id] = child
         per_service[child["service"]].append(child)

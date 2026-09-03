@@ -1334,7 +1334,7 @@ def build_suites() -> List[Suite]:
         # the finalizer on a receipt belonging to some other release.
         Suite("platform-staging-convergence",
               "scripts test_platform_staging_convergence.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_platform_staging_convergence.py"), 68),
+              SCRIPTS_DIR, _py_pytest("test_platform_staging_convergence.py"), 73),
         Suite("production-web-release",
               "scripts test_production_web_release.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_production_web_release.py"), 17),
