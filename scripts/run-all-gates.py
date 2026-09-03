@@ -1340,9 +1340,15 @@ def build_suites() -> List[Suite]:
         # same window filtered rather than fatal - the second is the regression
         # test for refusing it at shape-validation time instead, which aborted
         # the finalizer on a receipt belonging to some other release.
+        # 68 -> 71 on 2026-09-03: the auto-detected frontier. A later
+        # release still deploying no longer aborts it (the explicit path was
+        # already immune, its API window being bounded), activity inside its own
+        # window still does, and an absent frontier is now a different reason
+        # from an ambiguous one. Measured on the rebased tree, not derived:
+        # 71 passed, 224 subtests passed, 0 skipped.
         Suite("platform-staging-convergence",
               "scripts test_platform_staging_convergence.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_platform_staging_convergence.py"), 80),
+              SCRIPTS_DIR, _py_pytest("test_platform_staging_convergence.py"), 83),
         Suite("production-web-release",
               "scripts test_production_web_release.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_production_web_release.py"), 17),

@@ -1948,6 +1948,17 @@ def _build_receipt(
         },
     )
     runs: dict[int, dict[str, Any]] = {}
+    # Deploys still in flight while the frontier is unknown. A caller-supplied
+    # frontier bounds the API window at frontier.updated_at, so a LATER
+    # release's deploy is filtered out server side and never reaches this loop.
+    # Auto-detect has to query an unbounded window to FIND the frontier, so
+    # without deferral it aborts on activity that belongs to a different
+    # release and is excluded from this receipt anyway. Measured over 25.2h to
+    # 2026-09-03: the tf deploy workflow has a run live 70.3% of the time, so
+    # that unbounded read failed roughly seven times in ten for reasons with no
+    # bearing on this release's evidence. The judgement is not dropped, only
+    # deferred to the point where the same bound the explicit path uses exists.
+    deferred_active: list[str] = []
     for raw in child_rows:
         if (
             isinstance(raw, dict)
@@ -1955,7 +1966,10 @@ def _build_receipt(
             and isinstance(raw.get("created_at"), str)
             and relay["created_at"] <= raw["created_at"]
         ):
-            raise ContractError("ACTIVE_CHILD_RUN")
+            if frontier is not None:
+                raise ContractError("ACTIVE_CHILD_RUN")
+            deferred_active.append(raw["created_at"])
+            continue
         if not isinstance(raw, dict) or raw.get("status") != "completed":
             continue
         run = _provider_run(raw, TF_REPOSITORY, DEPLOY_WORKFLOW, "workflow_dispatch")
@@ -2014,10 +2028,30 @@ def _build_receipt(
             and receipt["facts"].get("schema") == "leaf.platform-staging-service-facts.v1"
             and receipt["facts"]["deployment_identity"].get("status") == "produced"
         ]
-        if len(identity_candidates) != 1:
+        # Zero and many are different operator actions, so they get different
+        # reasons. Absent: this release's convergence sequence has not stamped a
+        # full-fleet identity yet, so finish it (or name the run). Many: the
+        # choice is genuinely ambiguous, so the caller must name one.
+        if not identity_candidates:
+            raise ContractError("FRONTIER_IDENTITY_ABSENT")
+        if len(identity_candidates) > 1:
             raise ContractError("FRONTIER_RUN_CARDINALITY")
         current_frontier_run_id = identity_candidates[0]
         frontier = runs[current_frontier_run_id]
+        # Parity: discovering the frontier and being handed it must yield the
+        # same receipt. The explicit path bounds its evidence window at
+        # frontier.updated_at, so apply exactly that bound now it is known,
+        # both to the deferred active runs and to the child set.
+        bound = frontier["updated_at"]
+        if any(created <= bound for created in deferred_active):
+            raise ContractError("ACTIVE_CHILD_RUN")
+        runs = {
+            run_id: run for run_id, run in runs.items() if run["created_at"] <= bound
+        }
+        matching = [row for row in matching if row[0]["created_at"] <= bound]
+        by_id = {row[0]["run_id"]: row for row in matching}
+        if not required_ids.issubset(by_id):
+            raise ContractError("CHILD_RUN_WINDOW_MISMATCH")
     if (
         current_frontier_run_id not in by_id
         or frontier is None
