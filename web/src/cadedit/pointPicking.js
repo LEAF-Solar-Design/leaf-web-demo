@@ -82,6 +82,31 @@ export function applyPick(state, x, y, inputs = {}) {
   return { state, writes: [] }
 }
 
+/**
+ * W4f-4: ORTHO. The anchor a pick is measured from (the last picked point,
+ * or the base of a displacement), or null when the next click has nothing to
+ * be orthogonal to (a first point, a polyline's first vertex).
+ */
+export function orthoAnchor(state) {
+  if (!state?.sequence) return null
+  const last = state.picked[state.picked.length - 1]
+  if (last) return last
+  return state.base || null
+}
+
+/**
+ * The cursor at world (x, y) constrained to the axis of the larger delta from
+ * the anchor: [x, anchor.y] or [anchor.x, y]. Without an anchor, or with a
+ * non-finite cursor, the point is returned as it is (a pick never turns into
+ * a refusal because ORTHO is on). Ties go to the horizontal, as the
+ * reference does.
+ */
+export function orthoPoint(state, x, y) {
+  const anchor = orthoAnchor(state)
+  if (!anchor || !finite(x) || !finite(y)) return [x, y]
+  return Math.abs(x - anchor[0]) >= Math.abs(y - anchor[1]) ? [x, anchor[1]] : [anchor[0], y]
+}
+
 /** The rubber band for the cursor at world (x, y): [[x,y],...] plus closed, or null. */
 export function ghostFor(state, x, y) {
   if (!state?.sequence || !finite(x) || !finite(y)) return null

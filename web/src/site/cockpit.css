@@ -497,6 +497,15 @@
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-run { color: var(--ck-cmd); }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt :is(.cp-run, .cp-cancel):hover:not(:disabled) { background: var(--ck-title); color: var(--ck-ink); }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-run:disabled { color: #6a6a6a; cursor: not-allowed; }
+  /* W4f-4: the ORTHO toggle on the prompt (F8), pressed = the reference's lit
+     status toggle (#00b4ff on the recess). */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-mode {
+    height: 19px; padding: 0 6px; margin-right: 4px;
+    font: 600 10px/17px var(--ck-font); letter-spacing: .04em; color: #8a8a8a;
+    background: transparent; border: 1px solid #3f3f3f; border-radius: 2px; cursor: pointer;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-mode:hover { color: var(--ck-ink); }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-mode[aria-pressed="true"] { color: #0b1a22; background: var(--ck-active); border-color: var(--ck-active); }
 
   /* ---- y 911-940: the status bar ---- */
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { PICK_SEQUENCES, applyPick, currentStep, ghostFor, startPicking, wantsPick } from './pointPicking.js'
+import { PICK_SEQUENCES, applyPick, currentStep, ghostFor, orthoAnchor, orthoPoint, startPicking, wantsPick } from './pointPicking.js'
 
 describe('pointPicking (W4f slice A1): clicks on the drawing answer the prompts', () => {
   it('a line takes two points, then wants nothing more; the ghost runs from the first point to the cursor', () => {
@@ -87,5 +87,29 @@ describe('pointPicking (W4f slice A1): clicks on the drawing answer the prompts'
     expect(startPicking('createLine', null).step).toBe(0)
     expect(startPicking('move', [1, 2]).step).toBe(0)
     expect(startPicking('createPolyline', [1, 2]).step).toBe(0)
+  })
+
+  it('ORTHO snaps the cursor to the axis of the larger delta from the last point or the base; a first point is free (W4f-4)', () => {
+    // A first point has nothing to be orthogonal to.
+    let s = startPicking('createLine')
+    expect(orthoAnchor(s)).toBeNull()
+    expect(orthoPoint(s, 3.5, -2)).toEqual([3.5, -2])
+    s = applyPick(s, 10, 10, {}).state
+    expect(orthoAnchor(s)).toEqual([10, 10])
+    // Larger horizontal move: keep x, hold y; larger vertical: hold x, keep y; a tie is horizontal.
+    expect(orthoPoint(s, 25, 13)).toEqual([25, 10])
+    expect(orthoPoint(s, 12, 30)).toEqual([10, 30])
+    expect(orthoPoint(s, 15, 5)).toEqual([15, 10])
+    // A chained LINE is anchored at its chain point.
+    expect(orthoPoint(startPicking('createLine', [4, 4]), 4.5, 9)).toEqual([4, 9])
+    // A displacement is anchored at its base.
+    let m = startPicking('move')
+    expect(orthoAnchor(m)).toBeNull()
+    m = applyPick(m, 2, 2, {}).state
+    expect(orthoAnchor(m)).toEqual([2, 2])
+    expect(orthoPoint(m, 9, 3)).toEqual([9, 2])
+    // Non-finite cursors pass through untouched (applyPick refuses them itself).
+    expect(orthoPoint(s, NaN, 1)).toEqual([NaN, 1])
+    expect(orthoPoint({ op: 'deleteVertex', sequence: null, step: 0, picked: [], base: null }, 1, 2)).toEqual([1, 2])
   })
 })

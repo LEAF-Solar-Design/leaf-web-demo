@@ -838,6 +838,20 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByLabel('ribbon x', { exact: true })).toHaveValue(r3(b.wx))
     await expect(page.getByLabel('ribbon y', { exact: true })).toHaveValue(r3(b.wy))
     await expect(page.getByLabel('ribbon x2', { exact: true })).toBeFocused()
+    // W4f-4: F8 turns ORTHO on (the prompt's chip is pressed); the next
+    // pick, measured from the chain point, snaps to the axis of the larger
+    // move: the pixel below is far to the right of b and a little down, so
+    // x2 takes the pick's x and y2 holds b's y. F8 again turns it off.
+    await page.keyboard.press('F8')
+    await expect(page.getByTestId('cockpit-ortho')).toHaveAttribute('aria-pressed', 'true')
+    const o = await groundPick(0.95, 0.42)
+    expect(o.onGround, `ortho pick pixel (${o.x},${o.y}) hit ${o.name}, not the drawing`).toBe(true)
+    expect(Math.abs(o.wx - b.wx)).toBeGreaterThan(Math.abs(o.wy - b.wy))
+    await page.mouse.click(o.x, o.y)
+    await expect(page.getByLabel('ribbon x2', { exact: true })).toHaveValue(r3(o.wx))
+    await expect(page.getByLabel('ribbon y2', { exact: true })).toHaveValue(r3(b.wy))
+    await page.keyboard.press('F8')
+    await expect(page.getByTestId('cockpit-ortho')).toHaveAttribute('aria-pressed', 'false')
     const underCard = () => page.evaluate(() => {
       // The card is a full-width pass-through layer; the floating "Edit a
       // DXF drawing" workbench is the child that sits over the drawing.

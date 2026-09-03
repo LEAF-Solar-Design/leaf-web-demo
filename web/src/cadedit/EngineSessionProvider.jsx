@@ -135,10 +135,16 @@ export default function EngineSessionProvider({
   useEffect(() => { if (documentGone) setArmedState(null) }, [documentGone])
   useEffect(() => { setArmedState(null) }, [session.documentId])
 
+  // W4f-4: the drafting mode a pick obeys. ORTHO constrains a picked point
+  // (and the rubber band) to the axis of the larger delta from the last
+  // point, as the reference's F8 does. A boolean, nothing else is stored.
+  const [ortho, setOrthoState] = useState(false)
+  const setOrtho = useCallback((next) => { setOrthoState(next === true) }, [])
+
   const canSave = saveTarget !== null && saveTarget !== undefined
   const value = useMemo(
-    () => ({ session, inputs, setInput, canSave, armed, setArmed }),
-    [session, inputs, setInput, canSave, armed, setArmed],
+    () => ({ session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho }),
+    [session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho],
   )
   return <EngineSessionContext.Provider value={value}>{children}</EngineSessionContext.Provider>
 }

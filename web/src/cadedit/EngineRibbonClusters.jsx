@@ -212,7 +212,7 @@ const offTool = ({ id, label, icon }, size = 'small') => ({
 })
 
 export default function EngineRibbonClusters({ importOpen = false, onToggleImport, panels = ['draw', 'modify'] }) {
-  const { session, inputs, setInput, canSave, armed, setArmed } = useEngineSessionContext()
+  const { session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho } = useEngineSessionContext()
   const modify = modifyReason(session)
   const draw = drawReason(session)
   const save = saveReason(session, canSave)
@@ -445,6 +445,18 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
       ))}
       {promptReason ? <span className="cp-note">{promptReason}</span> : null}
       <span className="cp-actions">
+        {/* W4f-4: the drafting mode the picks obey, the reference's F8. A
+            pressed toggle on the prompt (the picker owns the key). */}
+        <button
+          type="button"
+          className="cp-mode"
+          data-testid="cockpit-ortho"
+          aria-pressed={ortho}
+          onClick={() => setOrtho(!ortho)}
+          title={`Ortho ${ortho ? 'on' : 'off'}: picks snap to the axis of the larger move from the last point (F8)`}
+        >
+          ORTHO
+        </button>
         <button
           type="button"
           className="cp-run"

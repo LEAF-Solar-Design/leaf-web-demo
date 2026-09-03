@@ -19,7 +19,7 @@
 import { useEffect, useRef } from 'react'
 
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
-import { applyPick, ghostFor, startPicking, wantsPick } from './pointPicking.js'
+import { applyPick, ghostFor, orthoPoint, startPicking, wantsPick } from './pointPicking.js'
 
 const CLICK_MOVE_PX = 5
 const CLICK_MAX_MS = 500
@@ -39,7 +39,24 @@ function focusRun() {
 }
 
 export default function CanvasPointPicker({ viewerRef = null, ground = null, onPicking = null }) {
-  const { session, inputs, setInput, armed } = useEngineSessionContext()
+  const { session, inputs, setInput, armed, ortho, setOrtho } = useEngineSessionContext()
+  // W4f-4: ORTHO (F8) constrains the cursor to the axis of the larger delta
+  // from the last point, for the pick and the rubber band alike. Read
+  // through refs so the pointer path allocates nothing and re-binds nothing.
+  const orthoRef = useRef(ortho)
+  orthoRef.current = ortho
+  const setOrthoRef = useRef(setOrtho)
+  setOrthoRef.current = setOrtho
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined
+    const onKey = (event) => {
+      if (event.key !== 'F8' || event.defaultPrevented) return
+      event.preventDefault()
+      setOrthoRef.current(!orthoRef.current)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
   const armedOp = armed ? armed.op : ''
   // W4f-3: the chain point a continued command starts from (LINE's next
   // segment), keyed as a string so the sequence restarts only when it moves.
@@ -76,7 +93,12 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
       const m = machine.current
       if (!v || !m || !m.sequence || !last || typeof v.unproject !== 'function') return
       const p = v.unproject(last.x, last.y)
-      const ghost = p ? ghostFor(m, p.x, p.y) : null
+      // No allocation on this per-frame path with ORTHO off; on, the one
+      // constrained pair is the price of the mode (kimi note on #982).
+      let gx = p ? p.x : NaN
+      let gy = p ? p.y : NaN
+      if (p && orthoRef.current) { const q = orthoPoint(m, gx, gy); gx = q[0]; gy = q[1] }
+      const ghost = p ? ghostFor(m, gx, gy) : null
       v.setRubberBand?.(ghost ? ghost.pts : null, !!ghost?.closed)
     }
     const onMove = (event) => {
@@ -99,7 +121,8 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
       if (!v || !m || !wantsPick(m) || typeof v.unproject !== 'function') return
       const p = v.unproject(event.clientX, event.clientY)
       if (!p) return
-      const { state, writes } = applyPick(m, p.x, p.y, inputsRef.current)
+      const [px, py] = orthoRef.current ? orthoPoint(m, p.x, p.y) : [p.x, p.y]
+      const { state, writes } = applyPick(m, px, py, inputsRef.current)
       if (!writes.length && state === m) return
       machine.current = state
       for (const [key, value] of writes) setInput(key, value)

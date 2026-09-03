@@ -576,6 +576,31 @@ describe('the command prompt (W4e slice H): a tool arms, the command line asks i
     expect(studio.context.armed).toEqual({ group: 'draw', op: 'createLine', from: [1.5, -2] })
   })
 
+  it('the prompt carries the ORTHO toggle: pressed state from the provider, a click flips it, the setter takes only true (W4f-4)', async () => {
+    const studio = mount()
+    await openAndLoad(studio, [LINE])
+    fireEvent.click(drawTool('createLine'))
+    const chip = screen.getByTestId('cockpit-ortho')
+    expect(chip.getAttribute('aria-pressed')).toBe('false')
+    expect(studio.context.ortho).toBe(false)
+    fireEvent.click(chip)
+    expect(studio.context.ortho).toBe(true)
+    expect(screen.getByTestId('cockpit-ortho').getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByTestId('cockpit-ortho').title).toContain('Ortho on')
+    // The mode outlives the command: cancel, re-arm, still on.
+    fireEvent.keyDown(screen.getByLabelText('ribbon x'), { key: 'Escape' })
+    fireEvent.click(drawTool('createCircle'))
+    expect(screen.getByTestId('cockpit-ortho').getAttribute('aria-pressed')).toBe('true')
+    act(() => { studio.context.setOrtho('yes') })
+    expect(studio.context.ortho).toBe(false)
+    act(() => { studio.context.setOrtho(true) })
+    expect(studio.context.ortho).toBe(true)
+    // Clicking the chip never runs or cancels the command.
+    fireEvent.click(screen.getByTestId('cockpit-ortho'))
+    expect(promptEl().getAttribute('data-op')).toBe('createCircle')
+    expect(studio.workers[0].posted.filter((message) => message.type === 'applyEdit')).toHaveLength(0)
+  })
+
   it('an open dialog owns Esc even when its opener kept focus outside the layer', async () => {
     const studio = mount()
     await openAndLoad(studio, [LINE])
