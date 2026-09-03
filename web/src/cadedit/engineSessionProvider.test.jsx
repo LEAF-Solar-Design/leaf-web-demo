@@ -145,6 +145,11 @@ async function openAndLoad(studio, entities = [LINE], name = 'one.dxf') {
 const ribbonTool = (op) => document.querySelector(`.drafting-ribbon [data-tool="modify:${op}"]`)
 const modifyNote = () => document.querySelector('.drafting-ribbon [data-group="modify"] .ribbon-note')
 const saveTool = () => document.querySelector('.drafting-ribbon [data-tool="save-version"]')
+// W4e slice H: a tool with operands ARMS on click and the command line
+// prompts for them; Run (or Enter in a field) fires the edit. `delete` has
+// no operands and still runs on click.
+const runPrompt = () => fireEvent.click(screen.getByTestId('cockpit-prompt-run'))
+const armAndRun = (op) => { fireEvent.click(ribbonTool(op)); runPrompt() }
 
 beforeEach(() => {
   globalThis.URL.createObjectURL = vi.fn(() => 'blob:cad-edit-test')
@@ -186,14 +191,16 @@ describe('provider construction: one session, one worker, every consumer', () =>
     const studio = mount()
     await openAndLoad(studio, [LINE])
     fireEvent.click(screen.getByRole('radio'))
-    // The pane's fields by their own aria-labels (the ribbon's carry a
-    // "ribbon " prefix, and both sets are live at once by design).
+    // The pane's fields by their own aria-labels (the prompt's carry a
+    // "ribbon " prefix, and both sets are live at once by design once the
+    // move is armed).
     const paneInput = (name) => document.querySelector(`.cad-edit-workbench-ops input[aria-label="${name}"]`)
+    fireEvent.click(ribbonTool('move'))
     fireEvent.change(screen.getByLabelText('ribbon dx'), { target: { value: '7' } })
     fireEvent.change(paneInput('dy'), { target: { value: '3' } })
     expect(paneInput('dx').value).toBe('7')
     expect(screen.getByLabelText('ribbon dy').value).toBe('3')
-    fireEvent.click(ribbonTool('move'))
+    runPrompt()
     const posted = studio.workers[0].posted
     expect(posted[posted.length - 1]).toEqual({ type: 'applyEdit', op: 'move', payload: { entityId: 'e1', dx: 7, dy: 3 } })
     // Bounded: a paste of a whole file into dx costs a slice, never a 16 MB render.
@@ -222,10 +229,14 @@ describe('worker lifetime', () => {
     const studio = mount()
     await openAndLoad(studio)
     fireEvent.click(screen.getByRole('radio'))
-    fireEvent.click(ribbonTool('move'))
+    armAndRun('move')
     expect(modifyNote().textContent).toBe(MODIFY_REASONS.busy)
+    // The prompt says so too, and refuses a second run while in flight.
+    expect(screen.getByTestId('cockpit-prompt').textContent).toContain(MODIFY_REASONS.busy)
+    expect(screen.getByTestId('cockpit-prompt-run').disabled).toBe(true)
     studio.workers[0].emit(editApplied('move', [LINE]))
     expect(modifyNote()).toBeNull()
+    expect(screen.getByTestId('cockpit-prompt-run').disabled).toBe(false)
   })
 })
 
@@ -239,7 +250,7 @@ describe('save truth', () => {
     await openAndLoad(studio)
     expect(saveTool().title).toBe(SAVE_REASONS.nothingEdited)
     fireEvent.click(screen.getByRole('radio'))
-    fireEvent.click(ribbonTool('move'))
+    armAndRun('move')
     const bytes = new Uint8Array([49, 10, 50, 10])
     studio.workers[0].emit(editApplied('move', [LINE], bytes))
     expect(saveTool().disabled).toBe(false)
@@ -257,7 +268,7 @@ describe('save truth', () => {
     const studio = mount()
     await openAndLoad(studio)
     fireEvent.click(screen.getByRole('radio'))
-    fireEvent.click(ribbonTool('move'))
+    armAndRun('move')
     studio.workers[0].emit(editApplied('move', [LINE]))
     expect(saveTool().disabled).toBe(true)
     expect(saveTool().title).toBe(SAVE_REASONS.noTarget)
@@ -270,7 +281,7 @@ describe('selection identity across an edit', () => {
     const studio = mount()
     await openAndLoad(studio, [LINE, POLY])
     fireEvent.click(screen.getAllByRole('radio')[0])
-    fireEvent.click(ribbonTool('move'))
+    armAndRun('move')
     studio.workers[0].emit(editApplied('move', [{ ...LINE, vertices: [[7, 3], [8, 4]] }, POLY]))
     expect(studio.context.session.selectedId).toBe('e1')
     expect(ribbonTool('delete').disabled).toBe(false)
@@ -327,10 +338,13 @@ describe('the Draw group (W4d Slice B): creation from the ribbon, selection land
       expect(drawTool(op).disabled).toBe(true)
       expect(drawTool(op).title).toBe(DRAW_REASONS.noDocument)
     }
-    expect(screen.getByLabelText('ribbon x').disabled).toBe(true)
+    // Nothing armed, nothing asked for: the command line carries no prompt.
+    expect(screen.queryByTestId('cockpit-prompt')).toBeNull()
+    expect(screen.queryByLabelText('ribbon x')).toBeNull()
     await openAndLoad(studio, [LINE])
     expect(drawNote()).toBeNull()
     expect(drawTool('createLine').disabled).toBe(false)
+    fireEvent.click(drawTool('createLine'))
     expect(screen.getByLabelText('ribbon x').disabled).toBe(false)
     // Modify still wants a selection; Draw does not — different ladders.
     expect(modifyNote().textContent).toBe(MODIFY_REASONS.noSelection)
@@ -339,41 +353,51 @@ describe('the Draw group (W4d Slice B): creation from the ribbon, selection land
   it('posts the create with the typed operands, and the reply seats the selection on the new entity', async () => {
     const studio = mount()
     await openAndLoad(studio, [LINE])
+    fireEvent.click(drawTool('createLine'))
     fireEvent.change(screen.getByLabelText('ribbon x2'), { target: { value: '40' } })
     fireEvent.change(screen.getByLabelText('ribbon y2'), { target: { value: '30' } })
     fireEvent.change(screen.getByLabelText('ribbon layer'), { target: { value: 'Sketch' } })
-    fireEvent.click(drawTool('createLine'))
+    fireEvent.keyDown(screen.getByLabelText('ribbon layer'), { key: 'Enter' })
     const posted = studio.workers[0].posted
     expect(posted[posted.length - 1]).toEqual({
       type: 'applyEdit', op: 'createLine', payload: { x1: 0, y1: 0, x2: 40, y2: 30, layer: 'Sketch' },
     })
     expect(drawNote().textContent).toBe(DRAW_REASONS.busy)
+    // In flight: the prompt's fields and Run are off with the same sentence.
+    expect(screen.getByLabelText('ribbon x2').disabled).toBe(true)
+    expect(screen.getByTestId('cockpit-prompt').textContent).toContain(DRAW_REASONS.busy)
     const drawn = { id: 'e9', type: 'LINE', layer: 'Sketch', vertices: [[0, 0], [40, 30]] }
     studio.workers[0].emit({ ...editApplied('createLine', [LINE, drawn]), createdId: 'e9' })
     expect(studio.context.session.selectedId).toBe('e9')
     expect(screen.getAllByRole('radio')[1].checked).toBe(true)
-    // Drawn, selected: Modify is live on it immediately.
+    // Drawn, selected: Modify is live on it immediately; the command stays
+    // armed for the next segment, fields live again.
     expect(modifyNote()).toBeNull()
     expect(ribbonTool('delete').disabled).toBe(false)
     expect(screen.getByRole('status').textContent).toMatch(/entity e9 drawn/)
+    expect(screen.getByTestId('cockpit-prompt').getAttribute('data-op')).toBe('createLine')
+    expect(screen.getByLabelText('ribbon x2').disabled).toBe(false)
   })
 
   it('the closed flag and the point list ride the polyline create; the circle and arc take the radius and angles', async () => {
     const studio = mount()
     await openAndLoad(studio, [LINE])
+    fireEvent.click(drawTool('createPolyline'))
     fireEvent.change(screen.getByLabelText('ribbon points'), { target: { value: '0,0 10,0 10,4' } })
     fireEvent.click(screen.getByLabelText('ribbon closed'))
-    fireEvent.click(drawTool('createPolyline'))
+    runPrompt()
     let posted = studio.workers[0].posted
     expect(posted[posted.length - 1].payload).toEqual({ points: [0, 0, 10, 0, 10, 4], closed: true, layer: '' })
     studio.workers[0].emit({ ...editApplied('createPolyline', [LINE, POLY]), createdId: 'e2' })
-    fireEvent.change(screen.getByLabelText('ribbon r'), { target: { value: '2.5' } })
     fireEvent.click(drawTool('createCircle'))
+    fireEvent.change(screen.getByLabelText('ribbon r'), { target: { value: '2.5' } })
+    runPrompt()
     posted = studio.workers[0].posted
     expect(posted[posted.length - 1].payload).toEqual({ cx: 0, cy: 0, radius: 2.5, layer: '' })
     studio.workers[0].emit({ ...editApplied('createCircle', [LINE, POLY]), createdId: 'e1' })
-    fireEvent.change(screen.getByLabelText('ribbon end'), { target: { value: '180' } })
     fireEvent.click(drawTool('createArc'))
+    fireEvent.change(screen.getByLabelText('ribbon end'), { target: { value: '180' } })
+    runPrompt()
     posted = studio.workers[0].posted
     expect(posted[posted.length - 1].payload).toEqual({ cx: 0, cy: 0, radius: 2.5, startDeg: 0, endDeg: 180, layer: '' })
   })
@@ -382,11 +406,92 @@ describe('the Draw group (W4d Slice B): creation from the ribbon, selection land
     const studio = mount()
     await openAndLoad(studio, [LINE])
     const before = studio.workers[0].posted.length
-    fireEvent.change(screen.getByLabelText('ribbon r'), { target: { value: '0' } })
     fireEvent.click(drawTool('createCircle'))
+    fireEvent.change(screen.getByLabelText('ribbon r'), { target: { value: '0' } })
+    runPrompt()
     expect(studio.workers[0].posted.length).toBe(before)
     expect(screen.getByRole('status').textContent).toMatch(/Circle refused: r must be greater than 0/)
     expect(drawTool('createCircle').disabled).toBe(false)
+  })
+})
+
+describe('the command prompt (W4e slice H): a tool arms, the command line asks in the reference grammar, Enter runs, Esc cancels', () => {
+  const drawTool = (op) => document.querySelector(`.drafting-ribbon [data-tool="draw:${op}"]`)
+  const promptEl = () => screen.queryByTestId('cockpit-prompt')
+
+  it('arms on click with the verb and its "Specify" steps, toggles off on a second click, Esc cancels back to the tool', async () => {
+    const studio = mount()
+    await openAndLoad(studio, [LINE])
+    expect(promptEl()).toBeNull()
+    fireEvent.click(drawTool('createLine'))
+    const row = promptEl()
+    expect(row).not.toBeNull()
+    expect(row.getAttribute('data-op')).toBe('createLine')
+    expect(row.textContent).toContain('LINE')
+    expect(row.textContent).toContain('Specify first point:')
+    expect(row.textContent).toContain('Specify next point:')
+    // The armed tool owns the prompt (aria-expanded + aria-controls); the
+    // others are plain collapsed commands.
+    expect(drawTool('createLine').getAttribute('aria-expanded')).toBe('true')
+    expect(drawTool('createLine').getAttribute('aria-controls')).toBe('cockpit-prompt')
+    expect(drawTool('createCircle').getAttribute('aria-expanded')).toBe('false')
+    expect(drawTool('createCircle').getAttribute('aria-controls')).toBeNull()
+    // Only the armed command's operands are asked for, and the caret is in
+    // the first one the way a command line takes typing at once.
+    expect(screen.queryByLabelText('ribbon r')).toBeNull()
+    expect(document.activeElement).toBe(screen.getByLabelText('ribbon x'))
+    // Another tool re-arms; the same tool toggles off.
+    fireEvent.click(drawTool('createCircle'))
+    expect(promptEl().getAttribute('data-op')).toBe('createCircle')
+    expect(promptEl().textContent).toContain('CIRCLE')
+    expect(promptEl().textContent).toContain('Specify radius:')
+    expect(screen.getByLabelText('ribbon r')).toBeTruthy()
+    fireEvent.click(drawTool('createCircle'))
+    expect(promptEl()).toBeNull()
+    expect(drawTool('createCircle').getAttribute('aria-expanded')).toBe('false')
+    // Esc cancels and hands focus back to the tool that armed the command.
+    fireEvent.click(drawTool('createArc'))
+    fireEvent.keyDown(screen.getByLabelText('ribbon r'), { key: 'Escape' })
+    expect(promptEl()).toBeNull()
+    expect(document.activeElement).toBe(drawTool('createArc'))
+    // Arming and cancelling never touched the engine.
+    expect(studio.workers[0].posted.filter((message) => message.type === 'applyEdit')).toHaveLength(0)
+  })
+
+  it('Enter runs the armed command once, a dead engine disarms it, and setArmed drops anything malformed', async () => {
+    const studio = mount()
+    await openAndLoad(studio, [LINE])
+    fireEvent.click(drawTool('createCircle'))
+    const before = studio.workers[0].posted.length
+    fireEvent.keyDown(screen.getByLabelText('ribbon r'), { key: 'Enter' })
+    expect(studio.workers[0].posted.length).toBe(before + 1)
+    expect(studio.workers[0].posted[before].op).toBe('createCircle')
+    // In flight: Enter again queues nothing (the fields and Run are off).
+    expect(screen.getByLabelText('ribbon r').disabled).toBe(true)
+    expect(screen.getByTestId('cockpit-prompt-run').disabled).toBe(true)
+    fireEvent.keyDown(screen.getByTestId('cockpit-prompt'), { key: 'Enter' })
+    expect(studio.workers[0].posted.length).toBe(before + 1)
+    studio.workers[0].emit({ ...editApplied('createCircle', [LINE, POLY]), createdId: 'e2' })
+    expect(screen.getByLabelText('ribbon r').disabled).toBe(false)
+    expect(promptEl().getAttribute('data-op')).toBe('createCircle')
+    // Bounded writes: a malformed record is ignored (the prompt stays on
+    // the circle), null disarms.
+    act(() => { studio.context.setArmed({ group: 'nope', op: 'createLine' }) })
+    act(() => { studio.context.setArmed({ group: 'draw', op: 'create Line' }) })
+    act(() => { studio.context.setArmed('createLine') })
+    act(() => { studio.context.setArmed({ group: 'draw' }) })
+    expect(promptEl().getAttribute('data-op')).toBe('createCircle')
+    act(() => { studio.context.setArmed({ group: 'modify', op: 'move' }) })
+    expect(promptEl().getAttribute('data-op')).toBe('move')
+    expect(promptEl().textContent).toContain('Specify displacement:')
+    act(() => { studio.context.setArmed(null) })
+    expect(promptEl()).toBeNull()
+    // The worker dies: no document to prompt for, so the prompt goes too.
+    act(() => { studio.context.setArmed({ group: 'draw', op: 'createArc' }) })
+    expect(promptEl().getAttribute('data-op')).toBe('createArc')
+    act(() => { studio.workers[0].die() })
+    expect(studio.context.session.errorKind).toBe(SESSION_ERROR.CRASHED)
+    expect(promptEl()).toBeNull()
   })
 })
 

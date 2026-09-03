@@ -12,10 +12,12 @@
  * W4e SEATING: the ribbon shows one tab's panels at a time (`panels`), the
  * quick-access Open/Save buttons live in the top band (a portal into
  * CockpitTopBand's slot, because only this consumer may read the session),
- * and the operand line rides above the command line (a portal into the
- * bar-dock's slot) and is hidden while neither group can take input. Where
- * a slot does not exist (unit tests, no cockpit) both render inline, as
- * before.
+ * and a tool's operands are PROMPTED FOR on the command line (slice H): a
+ * click on Line ARMS the command, the line above the command input reads
+ * "LINE  Specify first point:" with the fields, Enter runs it, Esc cancels,
+ * a second click on the tool cancels too. A tool with no operands (delete)
+ * runs on click, as ERASE does on a picked selection. Where a slot does not
+ * exist (unit tests, no cockpit) the prompt renders inline in the band.
  *
  * HONEST GATING, stated so nobody "fixes" it into a lie: the engine edits an
  * IMPORTED DXF only — the console's server-loaded drawing never enters it
@@ -26,7 +28,7 @@
  * reference's tools this engine has no operation for (rectangle, copy,
  * mirror, ...) are present, disabled, with "not in the browser engine yet".
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 
 import { RibbonCluster, RibbonTool } from '../site/DraftingRibbon.jsx'
@@ -35,7 +37,10 @@ import { QuickButton, QUICK_FILE_SLOT_ID } from '../site/CockpitTopBand.jsx'
 import { SESSION_ERROR } from './engineSession.js'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
 
-export const OPERANDS_SLOT_ID = 'cockpit-operands'
+// The bar-dock's slot the prompt portals into, and the prompt's own id (the
+// armed tool's aria-controls target).
+export const PROMPT_SLOT_ID = 'cockpit-prompt-slot'
+export const PROMPT_ID = 'cockpit-prompt'
 
 export const MODIFY_REASONS = Object.freeze({
   noDocument: 'opens on an imported DXF',
@@ -106,6 +111,52 @@ const MODIFY_OFF = Object.freeze([
 ])
 
 /**
+ * W4e slice H: the command line's prompt grammar, in the reference's own
+ * vocabulary (a VERB, then "Specify …:" steps; words only, nothing copied).
+ * A tool listed here ARMS on click and the command line prompts for its
+ * operands; Enter (or Run) fires the same create/applyEdit the button used
+ * to fire directly. A tool absent here (delete) has no operands and runs on
+ * click. Field: [inputKey, label, inputMode, wide]; the accessible name is
+ * `ribbon <label>`, the locator contract since W4d, so every existing row
+ * still finds its field once the command is armed.
+ */
+export const PROMPTS = Object.freeze({
+  createLine: { verb: 'LINE', steps: [
+    { ask: 'Specify first point:', fields: [['x', 'x'], ['y', 'y']] },
+    { ask: 'Specify next point:', fields: [['x2', 'x2'], ['y2', 'y2']] },
+    { ask: 'Layer:', fields: [['layer', 'layer', 'text']] },
+  ] },
+  createPolyline: { verb: 'PLINE', steps: [
+    { ask: 'Specify points (x,y pairs):', fields: [['pts', 'points', 'text', true]] },
+    { ask: 'Close:', fields: [['closed', 'closed', 'checkbox']] },
+    { ask: 'Layer:', fields: [['layer', 'layer', 'text']] },
+  ] },
+  createCircle: { verb: 'CIRCLE', steps: [
+    { ask: 'Specify center point:', fields: [['x', 'x'], ['y', 'y']] },
+    { ask: 'Specify radius:', fields: [['r', 'r']] },
+    { ask: 'Layer:', fields: [['layer', 'layer', 'text']] },
+  ] },
+  createArc: { verb: 'ARC', steps: [
+    { ask: 'Specify center:', fields: [['x', 'x'], ['y', 'y']] },
+    { ask: 'Specify radius:', fields: [['r', 'r']] },
+    { ask: 'Specify start angle:', fields: [['a0', 'start']] },
+    { ask: 'Specify end angle:', fields: [['a1', 'end']] },
+    { ask: 'Layer:', fields: [['layer', 'layer', 'text']] },
+  ] },
+  move: { verb: 'MOVE', steps: [{ ask: 'Specify displacement:', fields: [['dx', 'dx'], ['dy', 'dy']] }] },
+  moveVertex: { verb: 'MOVE VERTEX', steps: [
+    { ask: 'Specify vertex:', fields: [['vertexIndex', 'vertex', 'numeric']] },
+    { ask: 'Specify displacement:', fields: [['dx', 'dx'], ['dy', 'dy']] },
+  ] },
+  addVertex: { verb: 'ADD VERTEX', steps: [
+    { ask: 'Insert after vertex:', fields: [['vertexIndex', 'vertex', 'numeric']] },
+    { ask: 'Specify offset:', fields: [['dx', 'dx'], ['dy', 'dy']] },
+  ] },
+  deleteVertex: { verb: 'DELETE VERTEX', steps: [{ ask: 'Specify vertex:', fields: [['vertexIndex', 'vertex', 'numeric']] }] },
+  setLayer: { verb: 'SET LAYER', steps: [{ ask: 'Specify layer:', fields: [['layer', 'set layer', 'text']] }] },
+})
+
+/**
  * Why the Modify group is unavailable right now, or '' when it is live.
  * Pure over the session record so the ladder is checkable on its own; the
  * order is the order a user resolves them in.
@@ -147,14 +198,57 @@ const offTool = ({ id, label, icon }, size = 'small') => ({
 })
 
 export default function EngineRibbonClusters({ importOpen = false, onToggleImport, panels = ['draw', 'modify'] }) {
-  const { session, inputs, setInput, canSave } = useEngineSessionContext()
+  const { session, inputs, setInput, canSave, armed, setArmed } = useEngineSessionContext()
   const modify = modifyReason(session)
   const draw = drawReason(session)
   const save = saveReason(session, canSave)
   const { applyEdit, create } = session.actions
   const quickSlot = useSlot(QUICK_FILE_SLOT_ID)
-  const operandsSlot = useSlot(OPERANDS_SLOT_ID)
+  const promptSlot = useSlot(PROMPT_SLOT_ID)
   const show = new Set(Array.isArray(panels) ? panels : [])
+
+  // The armed command (provider state, so it outlives the ribbon's tab
+  // remounts). A second click on the armed tool cancels it: a toggle, like
+  // the import pane's button. The prompt takes the group's own reason
+  // ladder: "select an entity" keeps the fields visible (pick one, run);
+  // busy / no document / crashed disable them with the sentence.
+  const armedOp = armed ? armed.op : ''
+  const armedGroup = armed ? armed.group : ''
+  const prompt = armedOp ? PROMPTS[armedOp] : null
+  const promptReason = armedGroup === 'draw' ? draw : armedGroup === 'modify' ? modify : ''
+  const promptOff = !!promptReason
+  const toggleArmed = (group, op) => setArmed(armedOp === op ? null : { group, op })
+  const run = () => {
+    if (!prompt || promptOff) return
+    if (armedGroup === 'draw') create(armedOp, inputs)
+    else applyEdit(armedOp, inputs)
+  }
+  const cancel = () => {
+    const toolId = armed ? `${armed.group}:${armed.op}` : ''
+    setArmed(null)
+    // Focus returns to the tool that armed the command, where the pointer
+    // or Tab was before the prompt took it.
+    if (toolId && typeof document !== 'undefined') {
+      document.querySelector(`.drafting-ribbon [data-tool="${toolId}"]`)?.focus()
+    }
+  }
+  const promptRef = useRef(null)
+  useEffect(() => {
+    // Arming puts the caret in the first field the way the reference's
+    // command line takes typing the moment a command starts.
+    if (!armedOp) return undefined
+    promptRef.current?.querySelector('input:not([disabled])')?.focus()
+    return undefined
+  }, [armedOp])
+  const onPromptKeyDown = (event) => {
+    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent?.isComposing) {
+      event.preventDefault()
+      run()
+    } else if (event.key === 'Escape') {
+      event.preventDefault()
+      cancel()
+    }
+  }
 
   const fileTools = [
     {
@@ -183,55 +277,76 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // The same two commands as quick-access buttons in the top band.
   const quick = fileTools.map((tool) => ({ ...tool, id: `quick-${tool.id}`, label: tool.text }))
 
-  const inputField = (key, label, mode, disabled, wide = false) => (
-    <label key={`${key}:${label}`}>
-      {label}
+  // One field of the prompt: the SAME operator record the pane's fields bind
+  // to (provider `inputs`), named `ribbon <label>` for the locator contract.
+  const field = ([key, label, mode = 'decimal', wide = false]) => {
+    if (mode === 'checkbox') {
+      return (
+        <label key={`${key}:${label}`} className="cp-field">
+          <input
+            type="checkbox"
+            checked={inputs[key] === 'true'}
+            onChange={(event) => setInput(key, event.target.checked ? 'true' : 'false')}
+            aria-label={`ribbon ${label}`}
+            disabled={promptOff}
+          />
+          {label}
+        </label>
+      )
+    }
+    return (
       <input
-        className={`ribbon-input${wide ? ' wide' : ''}`}
+        key={`${key}:${label}`}
+        className={`cp-input${wide ? ' wide' : ''}`}
         type="text"
         inputMode={mode}
         value={inputs[key]}
         onChange={(event) => setInput(key, event.target.value)}
         aria-label={`ribbon ${label}`}
-        disabled={disabled}
+        placeholder={label}
+        title={label}
+        disabled={promptOff}
       />
-    </label>
-  )
-  const modifyInputsOff = !!modify && modify !== MODIFY_REASONS.noSelection
-  const drawInputsOff = !!draw
+    )
+  }
 
-  const operands = (
-    // ONE operand line for both groups (the reference prompts on the command
-    // line; W4e slice H moves these into it). Hidden while neither group can
-    // take input, so the band never carries a dead row.
-    <div className="ribbon-operands" data-testid="ribbon-operands" hidden={drawInputsOff && modifyInputsOff}>
-      <span className="ribbon-operands-tag" aria-hidden="true">draw</span>
-      {inputField('x', 'x', 'decimal', drawInputsOff)}
-      {inputField('y', 'y', 'decimal', drawInputsOff)}
-      {inputField('x2', 'x2', 'decimal', drawInputsOff)}
-      {inputField('y2', 'y2', 'decimal', drawInputsOff)}
-      {inputField('r', 'r', 'decimal', drawInputsOff)}
-      {inputField('a0', 'start', 'decimal', drawInputsOff)}
-      {inputField('a1', 'end', 'decimal', drawInputsOff)}
-      {inputField('pts', 'points', 'text', drawInputsOff, true)}
-      <label>
-        closed
-        <input
-          type="checkbox"
-          checked={inputs.closed === 'true'}
-          onChange={(event) => setInput('closed', event.target.checked ? 'true' : 'false')}
-          aria-label="ribbon closed"
-          disabled={drawInputsOff}
-        />
-      </label>
-      {inputField('layer', 'layer', 'text', drawInputsOff)}
-      <span className="ribbon-operands-tag" aria-hidden="true">modify</span>
-      {inputField('dx', 'dx', 'decimal', modifyInputsOff)}
-      {inputField('dy', 'dy', 'decimal', modifyInputsOff)}
-      {inputField('vertexIndex', 'vertex', 'numeric', modifyInputsOff)}
-      {inputField('layer', 'set layer', 'text', modifyInputsOff)}
+  const promptRow = prompt ? (
+    <div
+      id={PROMPT_ID}
+      ref={promptRef}
+      className="cockpit-prompt"
+      data-testid="cockpit-prompt"
+      data-op={armedOp}
+      role="group"
+      aria-label={`${prompt.verb} command`}
+      onKeyDown={onPromptKeyDown}
+    >
+      <span className="cp-verb">{prompt.verb}</span>
+      {prompt.steps.map((step) => (
+        <span key={step.ask} className="cp-step">
+          <span className="cp-ask">{step.ask}</span>
+          {step.fields.map(field)}
+        </span>
+      ))}
+      {promptReason ? <span className="cp-note">{promptReason}</span> : null}
+      <span className="cp-actions">
+        <button
+          type="button"
+          className="cp-run"
+          data-testid="cockpit-prompt-run"
+          onClick={run}
+          disabled={promptOff}
+          title={promptOff ? promptReason : `Run ${prompt.verb.toLowerCase()} (Enter)`}
+          aria-label={promptOff ? `Run (unavailable: ${promptReason})` : 'Run'}
+        >
+          Run <kbd className="key">Enter</kbd>
+        </button>
+        <button type="button" className="cp-cancel" onClick={cancel} title="Cancel the command (Esc)" aria-label="Cancel">
+          Cancel <kbd className="key">Esc</kbd>
+        </button>
+      </span>
     </div>
-  )
+  ) : null
 
   return (
     <>
@@ -258,7 +373,9 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
                 write: true,
                 disabled: !!draw,
                 reason: draw,
-                onClick: () => create(op, inputs),
+                expanded: armedOp === op,
+                controls: armedOp === op ? PROMPT_ID : undefined,
+                onClick: () => (PROMPTS[op] ? toggleArmed('draw', op) : create(op, inputs)),
               }}
             />
           ))}
@@ -280,14 +397,16 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
                 write: true,
                 disabled: !!modify,
                 reason: modify,
-                onClick: () => applyEdit(op, inputs),
+                expanded: PROMPTS[op] ? armedOp === op : undefined,
+                controls: armedOp === op ? PROMPT_ID : undefined,
+                onClick: () => (PROMPTS[op] ? toggleArmed('modify', op) : applyEdit(op, inputs)),
               }}
             />
           ))}
           {MODIFY_OFF.map((tool) => <RibbonTool key={tool.id} tool={offTool(tool)} />)}
         </RibbonCluster>
       )}
-      {operandsSlot ? createPortal(operands, operandsSlot) : operands}
+      {promptRow && (promptSlot ? createPortal(promptRow, promptSlot) : promptRow)}
     </>
   )
 }
