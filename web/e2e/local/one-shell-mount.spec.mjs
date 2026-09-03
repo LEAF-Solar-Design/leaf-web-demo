@@ -802,7 +802,10 @@ test.describe('route matrix, rail ON', () => {
     if (await result.count()) {
       // W4e: the instruments are viewport-fixed (the shell is a fixed host).
       expect(['absolute', 'fixed']).toContain(await result.evaluate((el) => getComputedStyle(el).position))
-      expect((await result.boundingBox()).width).toBeLessThan(600)
+      // Idle (no result yet) the block is off the canvas entirely (W4e), which
+      // is the strongest form of "no page-shaped block"; measured only when shown.
+      const resultBox = await result.boundingBox()
+      if (resultBox) expect(resultBox.width).toBeLessThan(600)
     }
     // Slice D seating: the tool rail is hidden behind the band and the job
     // monitor is a right-hand spine whose button fits its rail (44px, not
