@@ -62,7 +62,7 @@ export const PRODUCT_SURFACES = Object.freeze([
       ground: 'board',
       chrome: {
         // productFrame: App.jsx:2798 `activeSurface !== 'cad'` -> true.
-        //   (Stage divergence: ToolCast.jsx:2122 also renders the frame here.)
+        //   (The stage agrees: ToolCast.jsx:2122 renders the frame here too.)
         productFrame: true,
         // workspaceCard: App.jsx:2819 display gate `cad || solar` -> hidden.
         workspaceCard: false,
