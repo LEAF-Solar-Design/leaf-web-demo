@@ -1,16 +1,19 @@
-// The drawing cockpit (W4b): the instrument chrome that touches the drawing
-// under the studio shell, in the reference CAD grammar (viewcube-lite +
-// view snaps top-left of the drawing window; live cursor coordinates,
-// scale, counts, and selection in the status bar). Both pieces are built on
-// the Viewer's existing ref surface (setView / getPose / unproject, W3
-// pre-work #890) and render ONLY under the rail (App guards each with
-// `studioGround &&`), so the old shell never carries them.
+// The drawing cockpit (W4b, re-seated in W4e): the instrument chrome that
+// touches the drawing under the studio shell, in the reference CAD grammar
+// (the viewport strip at the canvas's top-left, the view cube at its
+// top-right; live cursor coordinates, scale, counts, and selection in the
+// status bar). Both pieces are built on the Viewer's existing ref surface
+// (setView / getPose / unproject, W3 pre-work #890) and render ONLY under the
+// rail (App guards each with `studioGround &&`), so the old shell never
+// carries them.
 //
 // Two-material rule: this is chrome ON the drawing, so it is dark glass, the
 // legend's material, never paper. The cursor readout is a rAF-throttled DOM
 // write, never React state: pointer-rate re-renders were risk R11 in the
 // convergence plan.
 import { useEffect, useRef } from 'react'
+
+import CockpitIcon from './CockpitIcon.jsx'
 
 const ZOOM_IN = 1.25
 const ZOOM_OUT = 0.8
@@ -40,12 +43,36 @@ export function zoomViewer(viewer, factor) {
 
 export function ViewCluster({ viewerRef }) {
   return (
-    <div className="cockpit-view" role="toolbar" aria-label="View" data-testid="cockpit-view">
-      <span className="cockpit-cube" aria-hidden="true"><span>TOP</span></span>
-      <button type="button" onClick={() => viewerRef.current?.setView?.('home')} aria-label="Fit drawing to view" title="Fit to view">Fit</button>
-      <button type="button" onClick={() => zoomViewer(viewerRef.current, ZOOM_IN)} aria-label="Zoom in" title="Zoom in">+</button>
-      <button type="button" onClick={() => zoomViewer(viewerRef.current, ZOOM_OUT)} aria-label="Zoom out" title="Zoom out">−</button>
-    </div>
+    <>
+      {/* The viewport strip: fit / zoom as icons, then the view mode the
+          Viewer actually renders (2D wireframe; there is no other mode, so
+          it is a readout, never a fake dropdown). */}
+      <div className="cockpit-view" role="toolbar" aria-label="View" data-testid="cockpit-view">
+        <button type="button" onClick={() => viewerRef.current?.setView?.('home')} aria-label="Fit drawing to view" title="Fit to view">
+          <CockpitIcon id="fit" fallback="Fit" size="strip" />
+        </button>
+        <button type="button" onClick={() => zoomViewer(viewerRef.current, ZOOM_IN)} aria-label="Zoom in" title="Zoom in">
+          <CockpitIcon id="zoom-in" fallback="+" size="strip" />
+        </button>
+        <button type="button" onClick={() => zoomViewer(viewerRef.current, ZOOM_OUT)} aria-label="Zoom out" title="Zoom out">
+          <CockpitIcon id="zoom-out" fallback="−" size="strip" />
+        </button>
+        <span className="cockpit-view-mode" aria-label="View mode">
+          <CockpitIcon id="wireframe" fallback="2D" size="strip" />
+          Wireframe 2D
+        </span>
+      </div>
+      {/* The view cube: TOP is the only view this 2D viewer has, so the cube
+          is a readout of that fact with the compass around it. */}
+      <div className="cockpit-cube-wrap" aria-hidden="true">
+        <span className="cockpit-cube-n">N</span>
+        <span className="cockpit-cube-w">W</span>
+        <span className="cockpit-cube"><span>TOP</span></span>
+        <span className="cockpit-cube-e">E</span>
+        <span className="cockpit-cube-s">S</span>
+      </div>
+      <div className="cockpit-cube-wcs" aria-hidden="true"><span>WCS</span><span>▾</span></div>
+    </>
   )
 }
 
@@ -85,6 +112,64 @@ export function useCursorReadout(ground, viewerRef, refs) {
       ground.removeEventListener('pointerleave', onLeave)
     }
   }, [ground, viewerRef, refs])
+}
+
+// The status bar's left end (W4e slice I): the reference's Model tab, the
+// drawing's name tab, and +. Model is the only space this viewer has, so the
+// tab is a readout; the name tab is the same drawing the document band
+// shows; + opens the project board (a real surface switch).
+export function StatusTabs({ name = '', onStart = null }) {
+  return (
+    <span className="cockpit-status-tabs" data-testid="cockpit-status-tabs">
+      <span className="foot-model-tab" aria-label="Model space">Model</span>
+      {name ? <span className="foot-doc-tab">{name}</span> : null}
+      {onStart ? (
+        <button type="button" className="foot-doc-add" aria-label="Open the project board" title="Project board" onClick={onStart}>+</button>
+      ) : null}
+    </span>
+  )
+}
+
+const STATUS_TOGGLES = Object.freeze([
+  { id: 'snap', label: 'Snap mode', icon: 'snap' },
+  { id: 'grid', label: 'Grid display', icon: 'grid' },
+  { id: 'ortho', label: 'Ortho mode', icon: 'ortho' },
+  { id: 'polar', label: 'Polar tracking', icon: 'polar' },
+  { id: 'osnap', label: 'Object snap', icon: 'osnap' },
+])
+const TOGGLE_REASON = 'not in the browser viewer yet'
+
+function requestFullscreen() {
+  if (typeof document === 'undefined') return false
+  const root = document.documentElement
+  if (document.fullscreenElement) { document.exitFullscreen?.(); return true }
+  if (typeof root.requestFullscreen === 'function') { root.requestFullscreen().catch(() => {}); return true }
+  return false
+}
+
+// The status bar's right end: the reference's drafting toggles. This viewer
+// has no snap, grid, ortho, polar or object-snap state, so each is present,
+// disabled, and says so; fullscreen is the one that is real.
+export function StatusToggles() {
+  return (
+    <span className="cockpit-status-toggles" role="toolbar" aria-label="Drafting settings" data-testid="cockpit-status-toggles">
+      {STATUS_TOGGLES.map((t) => (
+        <button
+          key={t.id}
+          type="button"
+          data-toggle={t.id}
+          disabled
+          title={`${t.label}: ${TOGGLE_REASON}`}
+          aria-label={`${t.label} (unavailable: ${TOGGLE_REASON})`}
+        >
+          <CockpitIcon id={t.icon} fallback={t.label} size="strip" />
+        </button>
+      ))}
+      <button type="button" data-toggle="fullscreen" title="Fullscreen" aria-label="Toggle fullscreen" onClick={requestFullscreen}>
+        <CockpitIcon id="fullscreen" fallback="Full" size="strip" />
+      </button>
+    </span>
+  )
 }
 
 export function CockpitStatus({ ground, viewerRef, shown = null, selectedHandle = null }) {

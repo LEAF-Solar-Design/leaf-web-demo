@@ -4,11 +4,12 @@ import { createPortal } from 'react-dom'
 import { track, setTourStep } from './telemetry.js'
 import { useStudioGround } from './site/studioGround.js'
 import SurfaceGrounds, { groundShowsDrawing } from './site/SurfaceGrounds.jsx'
-import { CockpitStatus, ViewCluster } from './site/DrawingCockpit.jsx'
+import { CockpitStatus, StatusTabs, StatusToggles, ViewCluster } from './site/DrawingCockpit.jsx'
+import CockpitTopBand from './site/CockpitTopBand.jsx'
 import DraftingRibbon from './site/DraftingRibbon.jsx'
 import PropertiesDock from './site/PropertiesDock.jsx'
 import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
-import { authorCluster, catalogClusters, layersCluster, railCluster, versionCluster, viewCluster } from './lib/ribbonClusters.js'
+import { authorCluster, catalogClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
 import { entityGeometry } from './lib/entityMetrics.js'
 import { loadDemoSolve } from './site/intakeCache.js'
 // The 3D viewer drags in `three`; loading it lazily (mirroring the auth.js
@@ -2201,6 +2202,9 @@ export default function App() {
   // W4d Slice D: the job monitor's posture on drafting surfaces (spine by
   // default; in-memory only, like the nav posture).
   const [jobRailExpanded, setJobRailExpanded] = useState(false)
+  // W4e: the ribbon shows ONE tab's panels at a time (the reference's
+  // Draw / Insert / Annotate / View / Manage); the top band switches it.
+  const [ribbonTab, setRibbonTab] = useState('draw')
   // <=980px the shell stacks into one column (styles.css) — a 44px spine
   // there is a full-width sliver, so the posture neutralizes to expanded.
   const [wideViewport, setWideViewport] = useState(() => {
@@ -2325,55 +2329,86 @@ export default function App() {
   // engine's own clusters (Drawing, Modify) render as the ribbon's children
   // so they can read the ONE engine session through context. Studio-only:
   // rail OFF the ribbon never mounts and this list is never read.
-  const ribbonClusters = useMemo(() => {
-    if (!(studioGround && drafting)) return []
-    return [
-      viewCluster({ viewerRef, hasDrawing: !!shown }),
-      versionCluster({
-        hasVersions: !!drawingState,
-        canUndo,
-        canRedo,
-        versionBusy: !!versionBusy,
-        running: !!running,
-        previewing: !!previewing,
-        mutationsBlocked: !!drawingMutationsBlocked,
-        historyOpen,
-        onUndo,
-        onRedo,
-        onToggleHistory: onToggleHistoryTracked,
-      }),
-      layersCluster({ layers: shown?.layers, counts: layerCounts, visibleLayers, onToggle: toggleLayer }),
-      // Seating (Slice D): the tool rail hides behind the band on drafting
-      // surfaces, so the band carries the rail's two affordances: `expand`
-      // (only while the rail is hidden) and every family label opening
-      // that family in the rail.
-      ...(navSpine ? [railCluster({ onExpand: () => setNavExpanded(true) })] : []),
-      ...catalogClusters(railFamilies, {
-        onRequestRun: onRequestCatalogRun,
-        onOpenFamily: (fam) => {
-          setNavExpanded(true)
-          setFamilyOpen(fam.family_id, true)
-        },
-        running: !!running,
-        previewing: !!previewing,
-        writeLocked,
-        writeEntitled: canRunWrite,
-      }),
-      authorCluster({
-        // The plan's own answer, then the folded entitlement-AND-availability
-        // rule (R5 stage off): two reasons, two fixes.
-        entitled: entOf('build'),
-        available: canBuild,
-        onOpen: () => {
-          setNavExpanded(true)
-          setAuthorOpen(true)
-          authorSectionRef.current?.scrollIntoView?.({ block: 'nearest' })
-        },
-      }),
-    ]
+  const ribbon = useMemo(() => {
+    if (!(studioGround && drafting)) return { clusters: [], quickBefore: [], quickAfter: [] }
+    const view = viewCluster({ viewerRef, hasDrawing: !!shown })
+    const version = versionCluster({
+      hasVersions: !!drawingState,
+      canUndo,
+      canRedo,
+      versionBusy: !!versionBusy,
+      running: !!running,
+      previewing: !!previewing,
+      mutationsBlocked: !!drawingMutationsBlocked,
+      historyOpen,
+      onUndo,
+      onRedo,
+      onToggleHistory: onToggleHistoryTracked,
+    })
+    const layers = layersCluster({
+      layers: shown?.layers, counts: layerCounts, visibleLayers, onToggle: toggleLayer, colorFor: colorForLayer,
+    })
+    // Seating (Slice D): the tool rail hides behind the band on drafting
+    // surfaces, so the band carries the rail's two affordances: `expand`
+    // (only while the rail is hidden) and every family label opening
+    // that family in the rail.
+    const rail = navSpine ? [railCluster({ onExpand: () => setNavExpanded(true) })] : []
+    const families = catalogClusters(railFamilies, {
+      onRequestRun: onRequestCatalogRun,
+      onOpenFamily: (fam) => {
+        setNavExpanded(true)
+        setFamilyOpen(fam.family_id, true)
+      },
+      running: !!running,
+      previewing: !!previewing,
+      writeLocked,
+      writeEntitled: canRunWrite,
+    })
+    const author = authorCluster({
+      // The plan's own answer, then the folded entitlement-AND-availability
+      // rule (R5 stage off): two reasons, two fixes.
+      entitled: entOf('build'),
+      available: canBuild,
+      onOpen: () => {
+        setNavExpanded(true)
+        setAuthorOpen(true)
+        authorSectionRef.current?.scrollIntoView?.({ block: 'nearest' })
+      },
+    })
+    const [annotation, block, properties, groups, clipboard] = referencePanels()
+    // The reference's Draw tab: Draw, Modify (engine children, rendered
+    // first), Annotation, Layers, Block, Properties, Groups, Clipboard.
+    const byTab = {
+      draw: [annotation, layers, block, properties, groups, clipboard],
+      insert: [block],
+      annotate: [annotation],
+      view: [view, version, layers],
+      manage: [...rail, ...families, author],
+    }
+    const [undo, redo] = version.tools
+    return {
+      clusters: byTab[ribbonTab] || byTab.draw,
+      quickBefore: [
+        { id: 'new', label: 'New drawing', icon: 'new-file', disabled: true, reason: 'new drawings start on the project board (Start tab)' },
+      ],
+      quickAfter: [
+        { id: 'print', label: 'Print', icon: 'print', disabled: true, reason: 'printing is not in the browser engine' },
+        { id: 'sep-1', kind: 'sep' },
+        { ...undo, id: 'quick-undo', label: 'Undo' },
+        { ...redo, id: 'quick-redo', label: 'Redo' },
+        // The tool rail's expand affordance rides the band on every tab
+        // (the Manage tab carries it as a panel too), so the catalog is
+        // always one click away while the rail hides behind the cockpit.
+        ...(navSpine ? [
+          { id: 'sep-2', kind: 'sep' },
+          { id: 'quick-rail', dataTool: 'rail-expand', label: 'Tool rail', icon: 'sidebar', title: 'Expand the tool rail', onClick: () => setNavExpanded(true) },
+        ] : []),
+      ],
+    }
   }, [studioGround, drafting, shown, drawingState, canUndo, canRedo, versionBusy, running, previewing,
     drawingMutationsBlocked, historyOpen, onUndo, onRedo, onToggleHistoryTracked, layerCounts, visibleLayers,
-    toggleLayer, railFamilies, onRequestCatalogRun, writeLocked, canRunWrite, canBuild, entOf])
+    toggleLayer, railFamilies, onRequestCatalogRun, writeLocked, canRunWrite, canBuild, entOf, ribbonTab, colorForLayer])
+  const ribbonClusters = ribbon.clusters
 
   // W4d Slice A: the ONE engine-session mount wraps the drawing workspace,
   // so the ribbon's engine clusters and the import pane consume the same
@@ -2434,6 +2469,13 @@ export default function App() {
     <div className="app" data-surface={studioGround ? activeSurface : undefined}>
       <header className="top">
         <div className="mark"><span className="diamond" aria-hidden="true" /> Leaf — build CAD tools with AI</div>
+        {/* W4e: on the studio's drafting surfaces the header IS the
+            reference's top band: quick access, then the ribbon tabs. The
+            engine's Open/Save portal into the band's slot. Rail OFF and
+            every other surface: nothing here. */}
+        {studioGround && drafting && (
+          <CockpitTopBand tab={ribbonTab} onTab={setRibbonTab} before={ribbon.quickBefore} after={ribbon.quickAfter} />
+        )}
         <div className="proj">
           <ProjectSwitcher
             mock={mock}
@@ -2630,7 +2672,7 @@ export default function App() {
         {mock && !tourOn && <DemoBanner />}
         {/* There is a way back IN: leaving the tour (Skip / Exit) used to be
             one-way, with a hard reload the only re-entry — forbidden on stage. */}
-        {mock && !tourOn && tourAvailable.current && (
+        {mock && !tourOn && tourAvailable.current && !(studioGround && drafting) && (
           <button
             type="button"
             className="chip-neutral"
@@ -2764,19 +2806,28 @@ export default function App() {
               nothing); tools are the ACTIVE SURFACE's fold, wired through
               the same run-decision path as the rail (source 'ribbon'). */}
           {studioGround && drafting && (
-            <DraftingRibbon clusters={ribbonClusters}>
-              {/* The engine's own clusters (Drawing, Modify) read the ONE
+            <DraftingRibbon clusters={ribbonClusters} tab={ribbonTab}>
+              {/* The engine's own panels (File, Draw, Modify) read the ONE
                   session through context; ENV_CAD_EDIT first so a flag-off
-                  build folds them away with the provider. */}
+                  build folds them away with the provider. Always mounted so
+                  the quick-access Open/Save and the operand line exist on
+                  every tab; the tab picks which panels the band shows. */}
               {ENV_CAD_EDIT && (
                 <EngineRibbonClusters
                   importOpen={importOpen}
                   onToggleImport={() => setImportOpen((o) => !o)}
+                  panels={ribbonTab === 'insert' ? ['file'] : ribbonTab === 'draw' ? ['draw', 'modify'] : []}
                 />
               )}
             </DraftingRibbon>
           )}
           <div className="viewer-toolbar">
+            {/* W4e: the toolbar is the reference's document-tab band. Start
+                is the project board (the Browser tab, a real surface switch);
+                the drawing is the active tab; + opens a DXF in the engine. */}
+            {studioGround && drafting && (
+              <button type="button" className="doc-tab-start" onClick={() => onSelectSurface('browser')}>Start</button>
+            )}
             <div className="viewer-title">
               {/* One loading voice per pane — the pulse-dot line in the viewer
                   announces loading; the title placeholder stays a muted dash. */}
@@ -2790,6 +2841,19 @@ export default function App() {
                 </span>
               )}
             </div>
+            {ENV_CAD_EDIT && studioGround && drafting && (
+              <button
+                type="button"
+                className="doc-tab-add"
+                aria-label="Open a DXF in the browser engine"
+                title="Open a DXF"
+                aria-expanded={importOpen}
+                aria-controls="cockpit-import-pane"
+                onClick={() => setImportOpen((o) => !o)}
+              >
+                +
+              </button>
+            )}
             <div className="viewer-actions">
               {/* Version-completed events surface as NT2 toasts; only the genuine
                   read-only-preview advisory keeps an amber note here. */}
@@ -3116,6 +3180,9 @@ export default function App() {
         </main>
 
         <div className="bar-dock">
+          {/* W4e: the engine's operand line portals here, above the command
+              line, on the studio's drafting surfaces (empty otherwise). */}
+          {studioGround && drafting && <div id="cockpit-operands" className="cockpit-operands-slot" />}
           {/* SB3 state strips ride above the well: running / failed. Decisions
               (the route) attach as resolver rows / decision strips below. */}
           {running && (
@@ -3243,6 +3310,12 @@ export default function App() {
       />
 
       <footer className="foot-bar" data-checkout-instance={checkout.instanceId} data-controller-instance={workspaceInstanceId}>
+        {/* W4e: on the studio's drafting surfaces the status bar opens with
+            the reference's Model tab, the drawing's name, and + (the project
+            board). Rail OFF and every other surface: nothing here. */}
+        {studioGround && drafting && (
+          <StatusTabs name={shown ? `${projectName}.dwg` : ''} onStart={() => onSelectSurface('browser')} />
+        )}
         {/* Traversal left: a named "← Parent" link while a project is open. */}
         {!mock && openProjectId && (
           <button type="button" className="chip-act" onClick={onCloseProject}>← All projects</button>
@@ -3287,6 +3360,24 @@ export default function App() {
             (studio only; DOM-written at rAF rate, never React state). */}
         {studioGround && groundShowsDrawing(activeSurface) && (
           <CockpitStatus ground={studioGround} viewerRef={viewerRef} shown={shown} selectedHandle={selectedHandle} />
+        )}
+        {/* W4e: the reference's drafting toggles (honestly off) and fullscreen. */}
+        {studioGround && drafting && <StatusToggles />}
+        {mock && !tourOn && tourAvailable.current && studioGround && drafting && (
+          <button
+            type="button"
+            className="chip-neutral"
+            onClick={() => {
+              tourStartedRef.current = true
+              tourStepRef.current = 0
+              setTourStep(TOUR_STEPS[0]?.id)
+              track('tour.started', { entry: 'button' })
+              track('tour.step_reached', { step_id: TOUR_STEPS[0]?.id })
+              setTourLanded(true); setTourOn(true)
+            }}
+          >
+            Restart guided tour
+          </button>
         )}
         <span style={{ marginLeft: 'auto' }}>build <span style={{ fontFamily: 'var(--font-mono)' }}>{__BUILD_HASH__}</span> · {mock ? 'sample data' : 'live'}</span>
       </footer>

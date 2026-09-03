@@ -205,8 +205,10 @@ test.describe('route matrix, rail ON', () => {
     if (chrome.navHidden) expect(chrome.navWidth).toBeLessThanOrEqual(1)
     else expect(chrome.navLeft).toBeGreaterThanOrEqual(12)
     expect(chrome.railRight).toBeGreaterThanOrEqual(12)
-    expect(Math.max(...chrome.headerBg)).toBeLessThan(40)
-    expect(Math.max(...chrome.footerBg)).toBeLessThan(40)
+    // Dark chrome: the reference cockpit's own chrome is #2a2a2a (42) and
+    // its recessed bands #232323 (35); anything lighter than 48 is paper.
+    expect(Math.max(...chrome.headerBg)).toBeLessThan(48)
+    expect(Math.max(...chrome.footerBg)).toBeLessThan(48)
     // The cockpit: view cluster in the window, status cluster in the footer.
     const view = page.getByTestId('cockpit-view')
     await expect(view).toBeVisible()
@@ -216,7 +218,9 @@ test.describe('route matrix, rail ON', () => {
     const status = page.getByTestId('cockpit-status')
     await expect(status).toBeVisible()
     await expect(status).toContainText(/entities/)
-    const box = await page.locator('.studio-shell .viewer-wrap').boundingBox()
+    // The canvas is the ground's box (W4e: the card window has no flow
+    // height of its own any more; the ground is inset to the canvas).
+    const box = await page.locator('.studio-shell .studio-ground').boundingBox()
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
     await page.mouse.move(box.x + box.width / 2 + 5, box.y + box.height / 2 + 5)
     await expect(status.locator('.cockpit-coord b').first()).not.toHaveText('—')
@@ -276,8 +280,9 @@ test.describe('route matrix, rail ON', () => {
     const nav = page.locator('aside.nav[data-spine="hidden"]')
     await expect(nav).toHaveCount(1)
     expect(await nav.evaluate((el) => el.getBoundingClientRect().width)).toBeLessThanOrEqual(1)
-    // The band carries the rail's expand affordance while it is hidden.
-    await expect(page.getByTestId('drafting-ribbon').locator('[data-tool="rail-expand"]')).toHaveCount(1)
+    // The top band carries the rail's expand affordance while it is hidden
+    // (W4e: a quick-access button on every tab; the Manage tab's panel too).
+    await expect(page.getByTestId('cockpit-band').locator('[data-tool="rail-expand"]')).toHaveCount(1)
 
     // The ribbon renders the ACTIVE SURFACE'S fold from the REAL catalog,
     // one cluster per family (async load: wait for the first CATALOG cluster;
@@ -285,6 +290,8 @@ test.describe('route matrix, rail ON', () => {
     // are synchronous and would satisfy a bare .ribbon-cluster wait).
     const ribbon = page.getByTestId('drafting-ribbon')
     await expect(ribbon).toBeVisible()
+    // W4e: the catalog's families are the Manage tab's panels.
+    await page.getByRole('tab', { name: 'Manage' }).click()
     await expect(ribbon.locator('.ribbon-cluster[data-family]').first()).toBeVisible({ timeout: 20_000 })
     // No cluster paints over its neighbour: every pair of adjacent tool
     // boxes on the SAME ROW must be disjoint horizontally (the flex-shrink
@@ -324,6 +331,7 @@ test.describe('route matrix, rail ON', () => {
     // liveDemo, so flip the dev Mock switch instead of trusting the query.
     await page.getByLabel('Use mock data (off = live backend)').check()
     const ribbon = page.getByTestId('drafting-ribbon')
+    await page.getByRole('tab', { name: 'Manage' }).click()
     const catalogTool = ribbon.locator('[data-family] .ribbon-tool').first()
     await expect(catalogTool).toBeVisible({ timeout: 20_000 })
     await catalogTool.click()
@@ -487,45 +495,58 @@ test.describe('route matrix, rail ON', () => {
     const ribbon = page.getByTestId('drafting-ribbon')
     await expect(ribbon).toBeVisible()
 
-    // Every fixed group is present, in the reference order, ahead of the
-    // catalog fold; every one is a real command wired to App's own handler.
-    // The engine groups exist only in a build with VITE_CAD_EDIT=1 (every
-    // deployed artifact; the managed proof only when its environment sets
-    // it). A flag-off build is a truthful state too: the groups are ABSENT,
-    // not present-and-dead, and this row says which build it proved.
-    const groups = await ribbon.locator('.ribbon-cluster').evaluateAll((els) => els.map((el) => el.dataset.group || `family:${el.dataset.family}`))
-    const engineGroups = ['drawing', 'draw', 'modify']
+    // W4e: the ribbon shows ONE tab's panels at a time. Draw is the
+    // reference's eight-panel tab: the engine's Draw and Modify first (only
+    // in a build with VITE_CAD_EDIT=1, every deployed artifact; a flag-off
+    // build is a truthful state too, the panels ABSENT, not present-and-
+    // dead, and this row says which build it proved), then Annotation,
+    // Layers, Block, Properties, Groups, Clipboard. View carries the
+    // viewer's and the version chain's commands; Manage the tool rail, the
+    // catalog's families, and Author, in that order.
+    const groupsOf = () => ribbon.locator('.ribbon-cluster').evaluateAll((els) => els.map((el) => el.dataset.group || `family:${el.dataset.family}`))
+    let groups = await groupsOf()
     const cadEditOn = groups.includes('modify')
-    const fixedFirst = cadEditOn ? [...engineGroups, 'view', 'version', 'layers'] : ['view', 'version', 'layers']
-    expect(groups.slice(0, fixedFirst.length)).toEqual(fixedFirst)
+    const referenceTail = ['annotation', 'layers', 'block', 'properties', 'groups', 'clipboard']
+    expect(groups).toEqual(cadEditOn ? ['draw', 'modify', ...referenceTail] : referenceTail)
+    await page.getByRole('tab', { name: 'View' }).click()
+    expect(await groupsOf()).toEqual(['view', 'version', 'layers'])
+    await page.getByRole('tab', { name: 'Manage' }).click()
+    groups = await groupsOf()
+    expect(groups[0]).toBe('rail')
     expect(groups[groups.length - 1]).toBe('author')
-    expect(groups).toContain('rail')
+    await page.getByRole('tab', { name: 'Draw' }).click()
 
-    // SEATING (Slice D), the reference overlay's numbers: the assembly is
-    // opaque; the band is at most two cluster rows plus the operand line;
-    // the dock sits in the LEFT column and the viewcube top-RIGHT; the
-    // drawing keeps at least 70% of the console's height below the chrome.
+    // SEATING (W4e), the reference's bands to the pixel at the 1600x1000
+    // viewport: a 28px top band, the 95px ribbon, the 32px document tabs,
+    // the canvas from (250, 155), the 250px properties pane, the viewport
+    // strip at the canvas's top-left and the view cube at its top-right,
+    // the 25px command line 35px off the bottom, the 31px status bar, and
+    // the ribbon's opaque #2a2a2a.
     const seating = await page.evaluate(() => {
+      const r = (sel) => {
+        const el = document.querySelector(sel)
+        if (!el) return null
+        const b = el.getBoundingClientRect()
+        return { x: Math.round(b.left), y: Math.round(b.top), w: Math.round(b.width), h: Math.round(b.height), bottom: Math.round(b.bottom) }
+      }
       const shell = document.querySelector('.studio-shell').getBoundingClientRect()
-      const band = document.querySelector('.drafting-ribbon').getBoundingClientRect()
-      const bar = document.querySelector('.viewer-toolbar').getBoundingClientRect()
-      const dock = document.querySelector('[data-testid="properties-dock"]')?.getBoundingClientRect()
-      const view = document.querySelector('[data-testid="cockpit-view"]')?.getBoundingClientRect()
-      const rows = new Set([...document.querySelectorAll('.drafting-ribbon .ribbon-cluster')].map((c) => Math.round(c.getBoundingClientRect().top))).size
-      const glass = getComputedStyle(document.querySelector('.drafting-ribbon'), '::before').backgroundColor
       return {
-        rows, bandHeight: Math.round(band.height), chromeBottom: Math.round(bar.bottom),
-        drawingShare: (shell.bottom - bar.bottom) / shell.height,
-        dockLeft: dock ? dock.left - shell.left : null, viewRight: view ? shell.right - view.right : null,
-        viewLeftOfCenter: view ? view.left < shell.left + shell.width / 2 : null,
-        glass,
+        header: r('header.top'), band: r('.drafting-ribbon'), tabs: r('.viewer-toolbar'), pane: r('[data-testid="properties-dock"]'),
+        strip: r('.cockpit-view'), cube: r('.cockpit-cube-wrap'), well: r('.bar.bar-command-line'), status: r('footer.foot-bar'),
+        ground: r('.studio-ground'), shellW: Math.round(shell.width), shellH: Math.round(shell.height),
+        glass: getComputedStyle(document.querySelector('.drafting-ribbon'), '::before').backgroundColor,
       }
     })
-    expect(seating.rows).toBeLessThanOrEqual(2)
-    expect(seating.drawingShare).toBeGreaterThanOrEqual(0.7)
-    if (seating.dockLeft !== null) expect(seating.dockLeft).toBeLessThan(120)
-    if (seating.viewLeftOfCenter !== null) expect(seating.viewLeftOfCenter).toBe(false)
-    expect(seating.glass).toMatch(/rgba\(12, 12, 13, 0\.96\)|rgb\(12, 12, 13\)/)
+    expect(seating.header.h).toBe(28)
+    expect([seating.band.y, seating.band.h]).toEqual([28, 95])
+    expect([seating.tabs.y, seating.tabs.h]).toEqual([123, 32])
+    expect([seating.ground.x, seating.ground.y]).toEqual([250, 155])
+    expect([seating.pane.x, seating.pane.y, seating.pane.w]).toEqual([0, 155, 250])
+    expect([seating.strip.x, seating.strip.y, seating.strip.h]).toEqual([250, 155, 26])
+    expect(seating.cube.x).toBeGreaterThan(seating.shellW / 2)
+    expect([seating.status.h, seating.status.bottom]).toEqual([31, seating.shellH])
+    expect([seating.well.h, seating.shellH - seating.well.bottom]).toEqual([25, 35])
+    expect(seating.glass).toBe('rgb(42, 42, 42)')
     test.info().annotations.push({ type: 'seating', description: JSON.stringify(seating) })
 
     // Slice E: the command well is the reference's one-line docked prompt on
@@ -561,8 +582,10 @@ test.describe('route matrix, rail ON', () => {
     expect(fit.published).toBe(String(fit.bandHeight) + 'px')
     test.info().annotations.push({ type: 'ribbon', description: 'rows=' + fit.rows + ' height=' + fit.bandHeight })
 
-    // The non-engine groups are live in every build.
+    // The non-engine groups are live in every build (View tab: fit; Draw tab: layers).
+    await page.getByRole('tab', { name: 'View' }).click()
     await expect(ribbon.locator('[data-tool="fit"]')).toBeEnabled()
+    await page.getByRole('tab', { name: 'Draw' }).click()
     const layerToggleAny = ribbon.locator('[data-group="layers"] .ribbon-tool').first()
     await expect(layerToggleAny).toHaveAttribute('aria-pressed', 'true')
     if (!cadEditOn) return
@@ -574,16 +597,26 @@ test.describe('route matrix, rail ON', () => {
     await expect(modify.locator('.ribbon-note')).toHaveText('opens on an imported DXF')
     const draw = ribbon.locator('[data-group="draw"]')
     await expect(draw.locator('.ribbon-note')).toHaveText('opens on an imported DXF')
-    await expect(draw.locator('.ribbon-tool')).toHaveCount(4)
+    // W4e: the reference's Draw column (rectangle, ellipse, point) and its
+    // other six Modify tools are present and honestly off ("not in the
+    // browser engine yet"); the engine's own four and six carry the
+    // document reason. 4 + 3 and 6 + 6: the reference's grid.
+    await expect(draw.locator('.ribbon-tool')).toHaveCount(7)
+    await expect(draw.locator('[data-tool^="draw:create"]')).toHaveCount(4)
     for (const btn of await draw.locator('.ribbon-tool').all()) await expect(btn).toBeDisabled()
     const modifyTools = modify.locator('.ribbon-tool')
-    await expect(modifyTools).toHaveCount(6)
+    await expect(modifyTools).toHaveCount(12)
+    let modifyReal = 0
     for (const btn of await modifyTools.all()) {
       await expect(btn).toBeDisabled()
-      expect(await btn.getAttribute('aria-label')).toContain('(unavailable: opens on an imported DXF)')
+      const name = await btn.getAttribute('aria-label')
+      if (name.includes('(unavailable: opens on an imported DXF)')) modifyReal += 1
+      else expect(name).toContain('(unavailable: not in the browser engine yet)')
     }
+    expect(modifyReal).toBe(6)
 
-    // View drives the viewer: fit is live with a drawing loaded.
+    // View drives the viewer: fit is live with a drawing loaded (View tab).
+    await page.getByRole('tab', { name: 'View' }).click()
     await expect(ribbon.locator('[data-tool="fit"]')).toBeEnabled()
     // Version: the toolbar's exact gates, each disabled control naming why.
     const undo = ribbon.locator('[data-tool="undo"]')
@@ -598,6 +631,7 @@ test.describe('route matrix, rail ON', () => {
     // Author expands the rail and opens "Author a tool" where authoring is
     // live; where the stage is off (the local proof stack: R5 off) or the
     // plan lacks build, it is disabled WITH the reason, never grey and mute.
+    await page.getByRole('tab', { name: 'Manage' }).click()
     const authorBtn = ribbon.locator('[data-tool="author-tool"]')
     if (await authorBtn.isEnabled()) {
       await authorBtn.click()
@@ -610,6 +644,9 @@ test.describe('route matrix, rail ON', () => {
 
     // Drawing: import-dxf opens the SAME import pane (aria-controls -> a
     // live element), the one place a document enters the engine.
+    // (W4e: the File panel is the Insert tab; the same command is the
+    // band's quick-access Open.)
+    await page.getByRole('tab', { name: 'Insert' }).click()
     const importBtn = ribbon.locator('[data-tool="import-dxf"]')
     await expect(importBtn).toHaveAttribute('aria-expanded', 'false')
     await importBtn.click()
@@ -646,6 +683,7 @@ test.describe('route matrix, rail ON', () => {
     ].join('\n') + '\n'
     await fileInput.setInputFiles({ name: 'ribbon.dxf', mimeType: 'application/dxf', buffer: Buffer.from(dxf) })
     await expect(page.getByRole('status').filter({ hasText: /Loaded ribbon\.dxf/ })).toHaveCount(1, { timeout: 60_000 })
+    await page.getByRole('tab', { name: 'Draw' }).click()
     // Loaded, nothing selected: the ribbon names the next missing thing.
     await expect(modify.locator('.ribbon-note')).toHaveText('select an entity in the imported DXF')
     await page.getByRole('radio').first().check()
@@ -762,8 +800,12 @@ test.describe('route matrix, rail ON', () => {
     // The result is a floating instrument, not a full-width band.
     const result = page.locator('.result-block')
     if (await result.count()) {
-      expect(await result.evaluate((el) => getComputedStyle(el).position)).toBe('absolute')
-      expect((await result.boundingBox()).width).toBeLessThan(600)
+      // W4e: the instruments are viewport-fixed (the shell is a fixed host).
+      expect(['absolute', 'fixed']).toContain(await result.evaluate((el) => getComputedStyle(el).position))
+      // Idle (no result yet) the block is off the canvas entirely (W4e), which
+      // is the strongest form of "no page-shaped block"; measured only when shown.
+      const resultBox = await result.boundingBox()
+      if (resultBox) expect(resultBox.width).toBeLessThan(600)
     }
     // Slice D seating: the tool rail is hidden behind the band and the job
     // monitor is a right-hand spine whose button fits its rail (44px, not
