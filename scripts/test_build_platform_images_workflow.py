@@ -2177,10 +2177,12 @@ def main() -> None:
     # newest-wins for speculative runs AND for main push runs (merge-burst
     # coalescing: the latest-main-only relay discards a superseded build's
     # images anyway, so completing them only burns runners and queues the
-    # winning run behind them). Non-push dispatches (promote, draft-PR
-    # builds) still cancel nothing.
+    # winning run behind them). A receipt-only handoff gets a run-specific
+    # group so a later push cannot evict it before or during its evidence reads.
+    # Non-push dispatches (promote, draft-PR builds) still cancel nothing.
     assert (
-        "group: build-platform-images-${{ inputs.speculative && "
+        "group: build-platform-images-${{ inputs.promote && "
+        "format('handoff-run-{0}', github.run_id) || inputs.speculative && "
         "format('speculative-pr-{0}', inputs.speculative_pr_number) || github.ref }}"
     ) in text
     assert (
