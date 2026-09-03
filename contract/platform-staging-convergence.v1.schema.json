@@ -361,7 +361,7 @@
       "additionalProperties": false,
       "required": ["role", "provider", "artifact", "service", "source_revision", "source_revision_evidence", "source_tree", "image_tag", "app_deploy_intent", "path", "outcome", "supply_evidence", "predecessor_task_definition", "candidate", "terminal", "posture", "deployment_identity"],
       "properties": {
-        "role": {"enum": ["relay_web", "relay_app", "frontier_app_identity", "terminal_web", "terminal_broker", "terminal_harness", "terminal_canonical_worker", "prior_failed_app", "prior_failed_broker", "prior_failed_canonical_worker", "prior_failed_harness", "prior_failed_web", "prior_relay_app", "prior_relay_web"]},
+        "role": {"enum": ["relay_web", "relay_app", "frontier_app_identity", "intermediate_app_identity", "terminal_web", "terminal_broker", "terminal_harness", "terminal_canonical_worker", "prior_failed_app", "prior_failed_broker", "prior_failed_canonical_worker", "prior_failed_harness", "prior_failed_web", "prior_relay_app", "prior_relay_web"]},
         "provider": {"$ref": "#/$defs/providerChild"},
         "artifact": {"$ref": "#/$defs/artifact"},
         "service": {"enum": ["app", "broker", "canonical-worker", "harness", "web"]},

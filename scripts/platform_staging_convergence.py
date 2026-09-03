@@ -2056,6 +2056,17 @@ def _build_receipt(
             selected_run, _, selected_receipt, _ = by_id[selected_id]
             for run_id in successes:
                 run, _, receipt, _ = by_id[run_id]
+                if (
+                    service == "app"
+                    and receipt["requested"]["app_deploy_intent"] == "configuration"
+                    and receipt["facts"]["deployment_identity"].get("status") == "produced"
+                    and selected_run["created_at"] < run["created_at"] < frontier["created_at"]
+                ):
+                    # A later configuration can supersede a successful identity
+                    # restamp without replacing any image. Keep that transaction
+                    # in the chain and verify its full identity below.
+                    roles[run_id] = "intermediate_app_identity"
+                    continue
                 role = _prior_relay_role(
                     service=service,
                     relay_attempt=relay["run_attempt"],
@@ -2159,7 +2170,11 @@ def _build_receipt(
         ),
     }
     selected = {service: normalized_by_id[run_id] for service, run_id in selected_ids.items()}
-    for service, child in selected.items():
+    intermediate_apps = [
+        child for child in normalized_by_id.values()
+        if child["role"] == "intermediate_app_identity"
+    ]
+    for service, child in [*selected.items(), *(("app", child) for child in intermediate_apps)]:
         if (
             child["outcome"]["deployment_outcome"] not in {"succeeded", "skipped_exact"}
             or child["outcome"]["failed_stage"] != "none"
@@ -2174,6 +2189,8 @@ def _build_receipt(
             raise ContractError("SERVICE_CANDIDATE_DIGEST_MISMATCH")
         if _terminal_digest(child) != supply["service_digests"][service]:
             raise ContractError("SERVICE_DIGEST_MISMATCH")
+    for child in intermediate_apps:
+        _identity(child, supply)
     identity = _identity(selected["app"], supply)
 
     service_output: dict[str, Any] = {}
