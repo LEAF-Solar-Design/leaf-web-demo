@@ -210,13 +210,17 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // The armed command (provider state, so it outlives the ribbon's tab
   // remounts). A second click on the armed tool cancels it: a toggle, like
   // the import pane's button. The prompt takes the group's own reason
-  // ladder: "select an entity" keeps the fields visible (pick one, run);
-  // busy / no document / crashed disable them with the sentence.
+  // ladder: "select an entity" keeps the FIELDS live (type the operands,
+  // pick an entity, run) and gates only Run; busy / no document / crashed
+  // disable fields and Run alike, with the sentence. (kimi, #965 review:
+  // the first cut disabled the fields for every reason, against this
+  // comment; engineSessionProvider.test pins the split.)
   const armedOp = armed ? armed.op : ''
   const armedGroup = armed ? armed.group : ''
   const prompt = armedOp ? PROMPTS[armedOp] : null
   const promptReason = armedGroup === 'draw' ? draw : armedGroup === 'modify' ? modify : ''
   const promptOff = !!promptReason
+  const fieldsOff = promptOff && promptReason !== MODIFY_REASONS.noSelection
   const toggleArmed = (group, op) => setArmed(armedOp === op ? null : { group, op })
   const run = () => {
     if (!prompt || promptOff) return
@@ -302,7 +306,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
             checked={inputs[key] === 'true'}
             onChange={(event) => setInput(key, event.target.checked ? 'true' : 'false')}
             aria-label={`ribbon ${label}`}
-            disabled={promptOff}
+            disabled={fieldsOff}
           />
           {label}
         </label>
@@ -319,7 +323,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
         aria-label={`ribbon ${label}`}
         placeholder={label}
         title={label}
-        disabled={promptOff}
+        disabled={fieldsOff}
       />
     )
   }
