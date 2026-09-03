@@ -100,6 +100,8 @@ describe('EngineDocumentView (W4f slice A0)', () => {
     utils.unmount()
     expect(viewer.applyVersion).toHaveBeenCalledTimes(2)
     expect(viewer.applyVersion.mock.calls[1][0]).toBeNull()
+    // The host hears the stamp is gone too (no lingering data-engine-document).
+    expect(onShown).toHaveBeenLastCalledWith(null)
     // A ref with no viewer yet: nothing thrown, nothing shown.
     workers = []
     viewer = {}

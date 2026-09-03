@@ -763,6 +763,20 @@ test.describe('route matrix, rail ON', () => {
     await bar.fill('draw a line across the roof')
     await bar.press('Enter')
     await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
+
+    // W4f slice F: `u` undoes the last engine edit (the circle), `redo`
+    // brings it back; the band's Undo edit / Redo edit carry the depths.
+    const undoQuick = page.locator('.cockpit-band [data-tool="quick-undo-edit"]')
+    await expect(undoQuick).toBeEnabled()
+    await bar.fill('u')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('2', { timeout: 60_000 })
+    await expect(page.getByRole('status').filter({ hasText: /Undid createCircle/ })).toHaveCount(1)
+    await expect(page.locator('.cockpit-band [data-tool="quick-redo-edit"]')).toBeEnabled()
+    await bar.fill('redo')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('3', { timeout: 60_000 })
+    await expect(page.getByTestId('cad-edit-entity-list')).toContainText('CIRCLE on layer 0')
   })
 
   test('solar depth: real solved strings on the Solar tab only, honesty-gated (W4c-V3)', async ({ page, request }) => {
