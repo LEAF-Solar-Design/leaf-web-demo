@@ -4,6 +4,7 @@ import {
   DEFAULT_PRODUCT_SURFACE,
   PRODUCT_SURFACES,
   SHARED_WORKSPACE_CAPABILITIES,
+  deepFreeze,
   normalizeProductSurface,
   productSurface,
   productSurfaceFromSearch,
@@ -68,25 +69,29 @@ describe('product surface contract', () => {
 // copied out of productSurfaces.js, so any later edit to a default fails
 // loudly instead of silently redefining the shell.
 //
-//   ground          SurfaceGrounds.jsx:99 DRAWING_SURFACES = new Set(['cad','solar'])
+//   ground          SurfaceGrounds.jsx:106 DRAWING_SURFACES = new Set(['cad','solar'])
 //                   e2e/local/one-shell-mount.spec.mjs:131 (board / device stage)
-//   productFrame    App.jsx:2798  activeSurface !== 'cad'
-//   workspaceCard   App.jsx:2819  activeSurface === 'cad' || activeSurface === 'solar'
-//   cockpit         App.jsx:2242  drafting = groundShowsDrawing(activeSurface),
-//                   mounted at App.jsx:2526 (band) and App.jsx:2858 (ribbon)
-//   stageBranch     ToolCast.jsx:1417 (cad) / 2060 (ios) / 2122 (frame)
-//   projectSlot     App.jsx:2806-2807 IosSurface for 'ios'
-//   toolbar.ribbon  App.jsx:2858
-//   toolbar.home    App.jsx:2225 useState('draw'); CockpitTopBand.jsx:17-18
-//   toolbar.quick   App.jsx:2417-2432 — props, not data, so null everywhere
-//   rails.left      App.jsx:2247 navSpine (wide-viewport default)
-//   rails.right     App.jsx:3414 JobRail spine (wide-viewport default)
-//   rails.dock      App.jsx:3148; section order PropertiesDock.jsx:132-142
-//   commandLine     App.jsx:3376 PromptBox commandLine
-//   authoring       App.jsx:2699 AuthorPanel in the un-gated nav rail
-//   versions        App.jsx:3001 VersionHistory inside the card gated at 2819
+//   productFrame    App.jsx:2838  activeSurface !== 'cad'
+//   workspaceCard   App.jsx:2859  activeSurface === 'cad' || activeSurface === 'solar'
+//   cockpit         App.jsx:2269  drafting = groundShowsDrawing(activeSurface),
+//                   mounted at App.jsx:2562 (band) and App.jsx:2898 (ribbon)
+//   stageBranch     ToolCast.jsx:1434 (cad) / 2077 (ios) / 2139 (frame)
+//   projectSlot     App.jsx:2846-2847 IosSurface for 'ios'
+//   toolbar.ribbon  App.jsx:2898
+//   toolbar.home    App.jsx:2234 useState('draw'); CockpitTopBand.jsx:17-18
+//   toolbar.quick   App.jsx:2453-2468 — props, not data, so null everywhere
+//   rails.left      App.jsx:2281 navSpine (wide-viewport default)
+//   rails.right     App.jsx:3460 JobRail spine (wide-viewport default)
+//   rails.dock      App.jsx:3191 (paneOpen is the second gate, App.jsx:2241);
+//                   section order PropertiesDock.jsx:132-142, four sections
+//                   being the WITH-DRAWING case
+//   groundMaterial  App.jsx:2296 layer accent / App.jsx:2313 solar strings:
+//                   the SURFACE term of each gate only (slice 2 added the slot)
+//   commandLine     App.jsx:3419 PromptBox commandLine
+//   authoring       App.jsx:2735 AuthorPanel in the un-gated nav rail
+//   versions        App.jsx:3041 VersionHistory inside the card gated at 2859
 //   conversations   converse.js:129-134 sessionCacheKey(project, drawing)
-//   builds.routes   App.jsx:2674 catalog run path; no marathon route exists
+//   builds.routes   App.jsx:2710 catalog run path; no marathon route exists
 //   contextMenu     zero contextmenu handlers under web/src
 //   everything else undeclared today (null)
 // ---------------------------------------------------------------------------
@@ -96,6 +101,7 @@ const CONTRACT_FIXTURE = {
     chrome: { productFrame: true, workspaceCard: false, cockpit: false, stageBranch: 'frame', projectSlot: null },
     toolbar: { ribbon: false, home: null, quick: null },
     rails: { left: 'nav', right: 'job-rail', dock: null },
+    groundMaterial: { layerAccent: null, solarStrings: false },
     commandLine: false,
     authoring: true,
     versions: 'none',
@@ -114,6 +120,7 @@ const CONTRACT_FIXTURE = {
     chrome: { productFrame: false, workspaceCard: true, cockpit: true, stageBranch: 'cad', projectSlot: null },
     toolbar: { ribbon: true, home: 'draw', quick: null },
     rails: { left: 'spine', right: 'job-spine', dock: ['layers', 'drawing', 'selection', 'plan'] },
+    groundMaterial: { layerAccent: null, solarStrings: false },
     commandLine: true,
     authoring: true,
     versions: 'drawing',
@@ -129,11 +136,12 @@ const CONTRACT_FIXTURE = {
   },
   solar: {
     ground: 'drawing',
-    // productFrame is TRUE on solar: App.jsx:2798 tests `!== 'cad'`, so the
+    // productFrame is TRUE on solar: App.jsx:2838 tests `!== 'cad'`, so the
     // frame renders over the shown workspace card. Today's behaviour, pinned.
     chrome: { productFrame: true, workspaceCard: true, cockpit: true, stageBranch: 'frame', projectSlot: null },
     toolbar: { ribbon: true, home: 'draw', quick: null },
     rails: { left: 'spine', right: 'job-spine', dock: ['layers', 'drawing', 'selection', 'plan'] },
+    groundMaterial: { layerAccent: 'solar', solarStrings: true },
     commandLine: true,
     authoring: true,
     versions: 'drawing',
@@ -152,13 +160,14 @@ const CONTRACT_FIXTURE = {
     chrome: { productFrame: true, workspaceCard: false, cockpit: false, stageBranch: 'ios', projectSlot: 'ios-surface' },
     toolbar: { ribbon: false, home: null, quick: null },
     rails: { left: 'nav', right: 'job-rail', dock: null },
+    groundMaterial: { layerAccent: null, solarStrings: false },
     commandLine: false,
     authoring: true,
     versions: 'none',
     conversations: { scope: 'drawing' },
     integrations: null,
     // The console carries NO ship-lane launch control (IosSurface.jsx:3-4 is
-    // props-only); the repo's only one is the stage's ToolCast.jsx:2097.
+    // props-only); the repo's only one is the stage's ToolCast.jsx:2114.
     builds: { routes: ['one-shot'] },
     contextMenu: [],
     shortcuts: null,
@@ -172,7 +181,7 @@ const CONTRACT_FIXTURE = {
 const SURFACE_IDS = ['browser', 'cad', 'solar', 'ios']
 
 const CONTRACT_KEYS = [
-  'ground', 'chrome', 'toolbar', 'rails', 'commandLine', 'authoring', 'versions',
+  'ground', 'chrome', 'toolbar', 'rails', 'groundMaterial', 'commandLine', 'authoring', 'versions',
   'conversations', 'integrations', 'builds', 'contextMenu', 'shortcuts',
   'entitlements', 'resetOn', 'a11y', 'tourAnchors',
 ]
@@ -185,6 +194,7 @@ const ENUMS = {
   right: ['job-spine', 'job-rail', 'none'],
   versions: ['drawing', 'none', null],
   scope: ['project', 'drawing', null],
+  layerAccent: ['solar', null],
 }
 
 // Every object and array in the tree, so "frozen" is proven at EVERY level
@@ -205,6 +215,7 @@ describe('Surface Contract — schema', () => {
         .toEqual(['cockpit', 'productFrame', 'projectSlot', 'stageBranch', 'workspaceCard'])
       expect(Object.keys(contract.toolbar).sort()).toEqual(['home', 'quick', 'ribbon'])
       expect(Object.keys(contract.rails).sort()).toEqual(['dock', 'left', 'right'])
+      expect(Object.keys(contract.groundMaterial).sort()).toEqual(['layerAccent', 'solarStrings'])
       expect(Object.keys(contract.conversations)).toEqual(['scope'])
       expect(Object.keys(contract.builds)).toEqual(['routes'])
     })
@@ -218,6 +229,8 @@ describe('Surface Contract — schema', () => {
       expect(ENUMS.right).toContain(c.rails.right)
       expect(ENUMS.versions).toContain(c.versions)
       expect(ENUMS.scope).toContain(c.conversations.scope)
+      expect(ENUMS.layerAccent).toContain(c.groundMaterial.layerAccent)
+      expect(typeof c.groundMaterial.solarStrings).toBe('boolean')
       for (const flag of [c.chrome.productFrame, c.chrome.workspaceCard, c.chrome.cockpit,
         c.toolbar.ribbon, c.commandLine]) {
         expect(typeof flag).toBe('boolean')
@@ -249,6 +262,54 @@ describe('Surface Contract — schema', () => {
       .toEqual(['contract', 'description', 'eyebrow', 'familyIds', 'id', 'label', 'title'])
     expect(productSurface('solar').familyIds).toEqual(['stringing', 'placement'])
     expect(productSurface('cad').familyIds).toBe(null)
+  })
+
+  // Slice 2 nit: deepFreeze used to short-circuit on Object.isFrozen(value),
+  // which made "deep" mean "down to the first frozen node". PRODUCT_SURFACES
+  // nests Object.freeze'd (SHALLOW-frozen) literals, so the trap was one edit
+  // away from leaving a live contract slot writable.
+  describe('deepFreeze', () => {
+    it('recurses THROUGH an already-frozen node into its mutable children', () => {
+      // The exact shape the old short-circuit skipped: a shallow-frozen parent
+      // whose child object is still writable.
+      const child = { slot: 'live' }
+      const parent = Object.freeze({ child })
+      expect(Object.isFrozen(parent)).toBe(true)
+      expect(Object.isFrozen(child)).toBe(false) // shallow freeze, as shipped
+
+      deepFreeze(parent)
+
+      expect(Object.isFrozen(child)).toBe(true)
+      // ESM is strict mode, so a write to a frozen slot THROWS rather than
+      // silently no-opping. Either way the value must survive.
+      expect(() => { child.slot = 'mutated' }).toThrow(TypeError)
+      expect(child.slot).toBe('live')
+    })
+
+    it('freezes arrays and nested arrays, not just plain objects', () => {
+      const tree = { rails: { dock: ['layers', 'plan'] } }
+      deepFreeze(tree)
+      expect(Object.isFrozen(tree.rails)).toBe(true)
+      expect(Object.isFrozen(tree.rails.dock)).toBe(true)
+    })
+
+    it('terminates on a cyclic tree (the WeakSet, not the frozen bit, guards)', () => {
+      // Dropping the isFrozen short-circuit also dropped the accidental cycle
+      // guard it provided. Without the WeakSet this recurses forever.
+      const a = { name: 'a' }
+      const b = { name: 'b', a }
+      a.b = b
+      expect(() => deepFreeze(a)).not.toThrow()
+      expect(Object.isFrozen(a)).toBe(true)
+      expect(Object.isFrozen(b)).toBe(true)
+    })
+
+    it('passes null and primitives through untouched and never throws', () => {
+      expect(deepFreeze(null)).toBe(null)
+      expect(deepFreeze(7)).toBe(7)
+      expect(deepFreeze('draw')).toBe('draw')
+      expect(deepFreeze(undefined)).toBe(undefined)
+    })
   })
 
   it('an unknown id normalizes to the CAD contract rather than undefined', () => {

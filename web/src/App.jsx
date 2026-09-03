@@ -57,9 +57,11 @@ import { selectEntity } from './lib/selectEntity.js'
 import { countEntitiesByLayer } from './lib/layerCounts.js'
 import { ENV_CAD_EDIT } from './cadedit/flag.js'
 import {
+  DEFAULT_PRODUCT_SURFACE,
   productSurfaceStates,
   productSurfaceFromSearch,
   searchForProductSurface,
+  surfaceContract,
 } from './site/productSurfaces.js'
 import { fetchIosSurfaceStatus } from './ios/iosSurfaceStatus.js'
 // `logout` is no longer imported here: the session controller owns ending a
@@ -2222,7 +2224,17 @@ export default function App() {
   const [jobRailExpanded, setJobRailExpanded] = useState(false)
   // W4e: the ribbon shows ONE tab's panels at a time (the reference's
   // Draw / Insert / Annotate / View / Manage); the top band switches it.
-  const [ribbonTab, setRibbonTab] = useState('draw')
+  // Slice 2: the opening tab is the contract's declared home tab, not a
+  // literal. This is console-GLOBAL state (one ribbon, switched by the top
+  // band), so a surface that declares no home tab because its ribbon never
+  // mounts (toolbar.home null on browser/ios) falls back to the default
+  // surface's home. That fallback is what makes this equal to today's
+  // useState('draw') on all four ids, and it is what keeps the ribbon from
+  // mounting with no tab selected after a browser -> cad switch.
+  const [ribbonTab, setRibbonTab] = useState(() => (
+    surfaceContract(activeSurface).toolbar.home
+    ?? surfaceContract(DEFAULT_PRODUCT_SURFACE).toolbar.home
+  ))
   // W4e round 3: the properties pane closes from its own title row and the
   // View tab's Properties tool reopens it; while closed the canvas takes the
   // column (cockpit.css keys off the pane's absence, never a root attribute).
@@ -2239,12 +2251,34 @@ export default function App() {
     mq.addEventListener?.('change', sync)
     return () => mq.removeEventListener?.('change', sync)
   }, [])
-  const drafting = groundShowsDrawing(activeSurface)
+  // THE SURFACE CONTRACT (standardization slice 2, docs/convergence/
+  // SURFACE-CONTRACT.md). Every chrome gate below this line reads a declared
+  // slot instead of comparing activeSurface to a string literal, so what the
+  // shell renders is the manifest, not a set of inline opinions that can drift
+  // apart. `activeSurface` is ALWAYS one of the four declared ids
+  // (productSurfaceFromSearch normalizes at :2201, and the tabs only ever emit
+  // a declared id), so surfaceContract's fail-closed normalization is a
+  // backstop here, never the live path. Identity-stable per id: the record is
+  // a frozen literal, so `surfaceSlots` is a safe useMemo dependency.
+  // Behaviour is IDENTICAL: src/site/surfaceGates.test.js pins each derived
+  // value equal to the literal predicate it replaced, on all four ids.
+  const surfaceSlots = surfaceContract(activeSurface)
+  // Keeps its name: ~20 sites read `studioGround && drafting`, and the App
+  // wiring pin (src/app-wiring.test.mjs) guards that exact shape against the
+  // white screen it was written for. Was groundShowsDrawing(activeSurface).
+  const drafting = surfaceSlots.chrome.cockpit
+  // The properties dock's declared sections; null off a drafting surface. Its
+  // TRUTHINESS is the mount gate (paneOpen is the second gate, below).
+  const dockSections = surfaceSlots.rails.dock
+  // The job monitor's declared posture. Was `drafting` inline at the JobRail.
+  const jobSpine = surfaceSlots.rails.right === 'job-spine'
   // Typed command words arm the engine only where the cockpit is: the studio's
   // drafting surfaces with the engine built in (ENV_CAD_EDIT first, so a
-  // flag-off build folds the whole feature to false).
+  // flag-off build folds the whole feature to false). Slice 2 keeps this and
+  // the three ENV_CAD_EDIT mounts on the SAME predicate as the cockpit gate
+  // (W4f cockpit owner's request), so the armer and its surfaces cannot split.
   drawingCommandOnRef.current = ENV_CAD_EDIT && !!studioGround && !!drafting
-  const navSpine = !!studioGround && drafting && !navExpanded && wideViewport
+  const navSpine = !!studioGround && surfaceSlots.rails.left === 'spine' && !navExpanded && wideViewport
   // The per-application fold (operator directive): under the studio each
   // tab's rail carries the families its application calls for; the old shell
   // keeps the whole catalog byte-for-byte.
@@ -2259,9 +2293,11 @@ export default function App() {
   // colorForLayer reference, so the old shell's canvas bytes are untouched
   // (viewer-interaction screenshots compare layer colors rail-OFF).
   const surfaceColorForLayer = useMemo(() => {
-    if (!(studioGround && activeSurface === 'solar')) return colorForLayer
+    if (!(studioGround && surfaceSlots.groundMaterial.layerAccent === 'solar')) return colorForLayer
     return (layer) => (layer === 'Panels' ? '#7fd6a6' : colorForLayer(layer))
-  }, [studioGround, activeSurface, colorForLayer])
+    // surfaceSlots is a frozen per-id literal, so its identity changes exactly
+    // when activeSurface does: same memo invalidation as before.
+  }, [studioGround, surfaceSlots, colorForLayer])
 
   // W4c-V3: the 135 REAL solved string routes over the bundled rooftop
   // sample, on the Solar tab only. Honesty gates, all structural:
@@ -2274,7 +2310,7 @@ export default function App() {
   //    precedent) - a delete-panel run makes v2 and the routes go stale.
   const [demoSolveRoutes, setDemoSolveRoutes] = useState(null)
   const intakeIsRooftopSample = String(intake?.dwg || '').replace(/\\/g, '/').endsWith('/rooftop_demo.dwg')
-  const solarStringsEligible = !!studioGround && activeSurface === 'solar' && mock
+  const solarStringsEligible = !!studioGround && surfaceSlots.groundMaterial.solarStrings && mock
     && !isEditFixture && DRAWING_SOURCE === 'rooftop_demo' && intakeIsRooftopSample
   useEffect(() => {
     if (!solarStringsEligible || demoSolveRoutes) return undefined
@@ -2795,7 +2831,11 @@ export default function App() {
           />,
           studioGround,
         )}
-        {activeSurface !== 'cad' && (
+        {/* Slice 2: contract.chrome.productFrame replaces the inline
+            not-equal-cad literal. It is TRUE on solar, so the frame still
+            renders over the shown workspace card there, today's quirk,
+            preserved deliberately, not fixed. */}
+        {surfaceSlots.chrome.productFrame && (
           <ProductSurfaceFrame
             activeSurface={activeSurface}
             states={surfaceStates}
@@ -2803,7 +2843,7 @@ export default function App() {
             catalogError={catalogErr}
             workspaceProject={workspaceProjectState}
             onCreateProject={onCreateProject}
-            projectSlot={activeSurface === 'ios'
+            projectSlot={surfaceSlots.chrome.projectSlot === 'ios-surface'
               ? <IosSurface enabled={ENV_IOS_SURFACE} contract={iosContract} />
               : null}
           />
@@ -2816,7 +2856,7 @@ export default function App() {
         {engineScope(
         <div
           className="workspace-card enter"
-          style={{ '--rank': 1, display: activeSurface === 'cad' || activeSurface === 'solar' ? undefined : 'none' }}
+          style={{ '--rank': 1, display: surfaceSlots.chrome.workspaceCard ? undefined : 'none' }}
           ref={workspaceCardRef}
           id={studioGround && drafting ? 'cockpit-import-pane' : undefined}
           data-import-open={studioGround && drafting && importOpen ? 'true' : undefined}
@@ -3145,7 +3185,10 @@ export default function App() {
               // The Plan section is useful before a drawing or intake exists.
               // Keep the dock mounted on every wide drafting surface so the
               // entitlement controls never disappear in that honest-empty state.
-              if (studioGround && drafting && wideViewport) {
+              // Slice 2: `dockSections` (contract.rails.dock) replaces
+              // `drafting` here: a surface declares its dock, or declares
+              // none. paneOpen below is the SECOND gate, unchanged.
+              if (studioGround && dockSections && wideViewport) {
                 // Closed by its own control: nothing renders here until the View
                 // tab's Properties tool reopens it (the condition above stays
                 // literal for the App wiring pin).
@@ -3373,7 +3416,7 @@ export default function App() {
             // well is the reference's one-line docked "Command:" prompt.
             // Rail OFF (and every non-drafting surface) the prop is false and
             // the well renders exactly as before.
-            commandLine={!!studioGround && drafting}
+            commandLine={!!studioGround && surfaceSlots.commandLine}
           />
         </div>
 
@@ -3411,9 +3454,12 @@ export default function App() {
         // that edge to the viewport and the viewcube); its live count stays
         // visible and one click expands it. Rail OFF: both props undefined,
         // the rail renders exactly as before.
-        spine={!!studioGround && drafting && wideViewport && !jobRailExpanded}
-        onExpand={studioGround && drafting ? () => setJobRailExpanded(true) : undefined}
-        onCollapse={studioGround && drafting && jobRailExpanded ? () => setJobRailExpanded(false) : undefined}
+        // Slice 2: `jobSpine` (contract.rails.right === 'job-spine') replaces
+        // `drafting` on all three props, ANDed with the same studioGround and
+        // wideViewport terms as before.
+        spine={!!studioGround && jobSpine && wideViewport && !jobRailExpanded}
+        onExpand={studioGround && jobSpine ? () => setJobRailExpanded(true) : undefined}
+        onCollapse={studioGround && jobSpine && jobRailExpanded ? () => setJobRailExpanded(false) : undefined}
       />
 
       <footer className="foot-bar" data-checkout-instance={checkout.instanceId} data-controller-instance={workspaceInstanceId}>

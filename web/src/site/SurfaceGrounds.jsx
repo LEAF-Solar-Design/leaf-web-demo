@@ -17,7 +17,7 @@
 //     context, lock, and job state, exactly as the workspace card always
 //     did (`display: none`, not unmount).
 import { useLayoutEffect, useState } from 'react'
-import { SHARED_WORKSPACE_CAPABILITIES } from './productSurfaces.js'
+import { PRODUCT_SURFACES, SHARED_WORKSPACE_CAPABILITIES, surfaceGround } from './productSurfaces.js'
 import { EMPTY_WORKSPACE_PROJECT } from './workspaceProjectState.js'
 import { deriveIosState, humanizeStage, IOS_STATE_LABEL } from '../ios/IosSurface.jsx'
 
@@ -96,9 +96,18 @@ const windowStyle = (rect) => (rect
   ? { top: rect.top, left: rect.left, width: rect.width, height: rect.height, right: 'auto' }
   : undefined)
 
-const DRAWING_SURFACES = new Set(['cad', 'solar'])
+// Standardization slice 2: DERIVED from the Surface Contract instead of a
+// hand-kept literal Set, so a surface's ground is declared in exactly one
+// place (productSurfaces.js) and this file cannot drift from it. Computed once
+// at module load, never per call: `has` stays O(1) on the hot render path.
+// The truth table is unchanged from the old `new Set(['cad','solar'])`, and
+// surfaceGates.test.js pins it. That includes the unknown/undefined case, which
+// still answers false, because a Set lookup misses rather than normalizing.
+const DRAWING_SURFACES = new Set(
+  PRODUCT_SURFACES.filter(({ contract }) => contract.ground === 'drawing').map(({ id }) => id),
+)
 
-// The drawing ground shows for the two CAD-shaped surfaces only.
+// The drawing ground shows for the surfaces whose declared ground is 'drawing'.
 export function groundShowsDrawing(surface) {
   return DRAWING_SURFACES.has(surface)
 }
@@ -281,8 +290,12 @@ export default function SurfaceGrounds({
     : workspaceProject?.drawingName || null
   return (
     <>
+      {/* Slice 2: each ground is active for its DECLARED ground kind, not for
+          a surface id. Was `surface === 'browser'` / `surface === 'ios'`. An
+          unknown surface still activates neither: surfaceGround falls closed
+          to the CAD contract, whose ground is 'drawing'. */}
       <ProjectBoardGround
-        active={surface === 'browser'}
+        active={surfaceGround(surface) === 'board'}
         workspaceProject={workspaceProject}
         workspace={workspace}
         drawing={drawing}
@@ -290,7 +303,7 @@ export default function SurfaceGrounds({
         mock={mock}
       />
       <DeviceGround
-        active={surface === 'ios'}
+        active={surfaceGround(surface) === 'device-stage'}
         enabled={iosEnabled}
         contract={iosContract}
         projectLabel={projectLabel}
