@@ -438,6 +438,13 @@ export default function useEngineSession({
         return
       }
       if (message.type === 'error') {
+        // W4f slice F: a refused undo/redo re-load (the engine could not
+        // parse the snapshot) leaves the engine holding NO document (the
+        // worker drops it on a failed load), so the history is moot: clear
+        // it, count zero, and say which step failed. Leaving `reload` set
+        // would silently kill every later step (kimi, #970).
+        const failedStep = historyRef.current.reload
+        clearHistory()
         patch({
           busy: false,
           entities: NO_ENTITIES,
@@ -448,7 +455,11 @@ export default function useEngineSession({
           engineParsed: false,
           geometrySource: null,
           errorKind: SESSION_ERROR.ENGINE,
-          status: `Engine refused: ${message.message}`,
+          undoDepth: 0,
+          redoDepth: 0,
+          status: failedStep
+            ? `${failedStep.kind === 'undo' ? 'Undo' : 'Redo'} of ${failedStep.op} failed: the engine refused the snapshot (${message.message}). Open the drawing again.`
+            : `Engine refused: ${message.message}`,
         })
       }
     })

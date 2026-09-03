@@ -147,6 +147,30 @@ describe('engine undo (W4f slice F)', () => {
     expect(stepped(() => session.current.actions.undo())).toBe(false)
   })
 
+  it('an engine refusal of the re-loaded snapshot clears the history, names the failed step, and never leaves undo dead', async () => {
+    const session = mountSession()
+    await openAndLoad(session, [LINE])
+    editOnce(session, 'move', [LINE], new Uint8Array([1]))
+    editOnce(session, 'setLayer', [LINE], new Uint8Array([2]))
+    expect(stepped(() => session.current.actions.undo())).toBe(true)
+    session.workers[0].emit({ type: 'error', message: 'parse_failed:handle_precision_lost' })
+    expect(session.current.busy).toBe(false)
+    expect(session.current.engineParsed).toBe(false)
+    expect(session.current.errorKind).toBe(SESSION_ERROR.ENGINE)
+    expect(session.current.status).toBe('Undo of setLayer failed: the engine refused the snapshot (parse_failed:handle_precision_lost). Open the drawing again.')
+    expect(session.current.undoDepth).toBe(0)
+    expect(session.current.redoDepth).toBe(0)
+    // Nothing latched: a further step is refused cleanly, and a fresh open starts a clean history.
+    expect(stepped(() => session.current.actions.undo())).toBe(false)
+    expect(stepped(() => session.current.actions.redo())).toBe(false)
+    await act(async () => { await session.current.actions.open(fileOf('again.dxf')) })
+    session.workers[session.workers.length - 1].emit(loaded([LINE], 'again.dxf'))
+    expect(session.current.engineParsed).toBe(true)
+    editOnce(session, 'move', [LINE], new Uint8Array([7]))
+    expect(session.current.undoDepth).toBe(1)
+    expect(stepped(() => session.current.actions.undo())).toBe(true)
+  })
+
   it('is bounded by total bytes, dropping the oldest snapshots first', async () => {
     const session = mountSession()
     await openAndLoad(session, [LINE])
