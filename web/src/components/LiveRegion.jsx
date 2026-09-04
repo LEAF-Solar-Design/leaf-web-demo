@@ -41,19 +41,26 @@
 // No state, no effects, no allocation on a render beyond the props object React
 // builds anyway.
 // ---------------------------------------------------------------------------
-import { forwardRef } from 'react'
+import { forwardRef } from "react";
 
 //: The console's inline sr-only clip rect, moved from App.jsx verbatim.
 //: Frozen so a consumer cannot mutate the shared object.
 export const SR_ONLY_STYLE = Object.freeze({
-  position: 'absolute', width: 1, height: 1, padding: 0, margin: -1,
-  overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap', border: 0,
-})
+  position: "absolute",
+  width: 1,
+  height: 1,
+  padding: 0,
+  margin: -1,
+  overflow: "hidden",
+  clip: "rect(0 0 0 0)",
+  whiteSpace: "nowrap",
+  border: 0,
+});
 
 //: `visuallyHidden` values. `false` is a VISIBLE region (the converse log and
 //: the decision card are the region AND the visible text).
-export const HIDE_WITH_CLASS = 'class'
-export const HIDE_WITH_STYLE = 'style'
+export const HIDE_WITH_CLASS = "class";
+export const HIDE_WITH_STYLE = "style";
 
 /**
  * LiveRegion.
@@ -73,30 +80,38 @@ export const HIDE_WITH_STYLE = 'style'
  * Any other prop (a ref, the converse log's onScroll) passes through to the
  * element, because the log region is also the scroll container.
  */
-const LiveRegion = forwardRef(function LiveRegion({
-  as: Tag = 'div',
-  role = null,
-  live = 'polite',
-  atomic = undefined,
-  visuallyHidden = false,
-  label = null,
-  className = null,
-  children = null,
-  ...rest
-}, ref) {
-  const hideClass = visuallyHidden === HIDE_WITH_CLASS ? 'sr-only' : null
-  const classes = [hideClass, className].filter(Boolean).join(' ') || undefined
-  const props = {
-    ref,
-    className: classes,
-    'aria-live': live,
-    ...rest,
-  }
-  if (role) props.role = role
-  if (atomic !== undefined) props['aria-atomic'] = atomic ? 'true' : 'false'
-  if (label) props['aria-label'] = label
-  if (visuallyHidden === HIDE_WITH_STYLE) props.style = SR_ONLY_STYLE
-  return <Tag {...props}>{children}</Tag>
-})
+const LiveRegion = forwardRef(function LiveRegion(
+  {
+    as: Tag = "div",
+    role,
+    live = "polite",
+    atomic,
+    visuallyHidden,
+    label,
+    className,
+    children,
+    ...rest
+  },
+  ref,
+) {
+  const classes =
+    visuallyHidden === HIDE_WITH_CLASS
+      ? `sr-only${className ? ` ${className}` : ""}`
+      : className;
+  return (
+    <Tag
+      ref={ref}
+      className={classes}
+      aria-live={live}
+      {...rest}
+      role={role}
+      aria-atomic={atomic}
+      aria-label={label}
+      style={visuallyHidden === HIDE_WITH_STYLE ? SR_ONLY_STYLE : undefined}
+    >
+      {children}
+    </Tag>
+  );
+});
 
-export default LiveRegion
+export default LiveRegion;

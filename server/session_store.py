@@ -1353,7 +1353,7 @@ def _pg_list_sessions(
         )
         org_args = (tenant_id, *filter_args, *cursor_args, bounded + 1)
         query = (
-            f"SELECT * FROM ({tenant_branch} UNION ALL {org_branch}) merged"
+            f"SELECT * FROM (({tenant_branch}) UNION ALL ({org_branch})) merged"
             " ORDER BY updated_at DESC, session_id DESC LIMIT %s"
         )
         args = (*tenant_args, *org_args, bounded + 1)

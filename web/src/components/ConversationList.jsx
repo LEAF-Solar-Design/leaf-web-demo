@@ -32,30 +32,30 @@
 //   * every fetch is generation-guarded: a scope switch or an unmount drops a
 //     late response instead of seating another scope's rows.
 // ---------------------------------------------------------------------------
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from "react";
 
-import { ensureSession, listSessions, normalizeScope } from '../converse.js'
+import { ensureSession, listSessions, normalizeScope } from "../converse.js";
 
-import { fmtWhen } from './JobRail.jsx'
+import { fmtWhen } from "./JobRail.jsx";
 
 //: How many pages one mount will fetch before it stops offering "Older".
 //: 5 x 20 rows is far past what a rail can show; the cap exists so a server
 //: that keeps handing back a cursor cannot grow this list without end.
-const MAX_PAGES = 5
+const MAX_PAGES = 5;
 //: Rows per page. Bounded again inside converse.listSessions.
-const PAGE_LIMIT = 20
+const PAGE_LIMIT = 20;
 
 //: The row label for a conversation with no title yet (no `turn_started` has
 //: carried user text). Never a fabricated summary of the transcript.
-const UNTITLED = 'New conversation'
+const UNTITLED = "Untitled";
 
 /** `{kind, handle}` -> the short scope label a row shows. Pure. */
 export function scopeLabel(scope) {
-  const normalized = normalizeScope(scope)
-  if (!normalized) return 'Conversation'
-  if (normalized.kind === 'project') return 'Project'
-  if (normalized.kind === 'entity') return `Element ${normalized.handle}`
-  return `Drawing ${normalized.handle}`
+  const normalized = normalizeScope(scope);
+  if (!normalized) return "Conversation";
+  if (normalized.kind === "project") return "Project";
+  if (normalized.kind === "entity") return `Element ${normalized.handle}`;
+  return `Drawing ${normalized.handle}`;
 }
 
 /**
@@ -74,15 +74,19 @@ export function scopeLabel(scope) {
  * throwing into a click handler. Exported for its own unit test.
  */
 export function resumeHref(scope, currentDrawingId, href) {
-  const normalized = normalizeScope(scope)
-  if (!normalized || normalized.kind !== 'drawing') return null
-  if (!normalized.handle || normalized.handle === currentDrawingId) return null
+  const normalized = normalizeScope(scope);
+  if (
+    !normalized ||
+    normalized.kind !== "drawing" ||
+    normalized.handle === currentDrawingId
+  )
+    return null;
   try {
-    const url = new URL(href)
-    url.searchParams.set('drawing', normalized.handle)
-    return url.toString()
+    const url = new URL(href);
+    url.searchParams.set("drawing", normalized.handle);
+    return url.toString();
   } catch {
-    return null
+    return null;
   }
 }
 
@@ -103,91 +107,102 @@ export default function ConversationList({
   scope = null,
   activeSessionId = null,
   onResume = null,
-  label = 'Conversations',
 }) {
-  const [rows, setRows] = useState([])
-  const [cursor, setCursor] = useState(null)
-  const [pages, setPages] = useState(0)
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState(null)
-  const [resuming, setResuming] = useState(null)
-  const generationRef = useRef(0)
+  const [rows, setRows] = useState([]);
+  const [cursor, setCursor] = useState(null);
+  const [pages, setPages] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [resuming, setResuming] = useState(null);
+  const generationRef = useRef(0);
 
   // The primitive scope identity. A scope OBJECT is a new reference every
   // render, so the effect below keys on this string instead — otherwise every
   // parent render refetches the page.
-  const normalized = normalizeScope(scope)
-  const scopeKey = normalized ? `${normalized.kind}:${normalized.handle}` : ''
-  const scopeDeclared = scope != null
+  const normalized = normalizeScope(scope);
+  const scopeKey = normalized ? `${normalized.kind}:${normalized.handle}` : "";
+  const scopeDeclared = scope != null;
 
-  const load = useCallback(async (nextCursor, generation) => {
-    setLoading(true)
-    try {
-      const page = await listSessions({
-        scope: normalized, limit: PAGE_LIMIT, cursor: nextCursor,
-      })
-      if (generation !== generationRef.current) return
-      setRows((current) => (nextCursor ? [...current, ...page.sessions] : page.sessions))
-      setCursor(page.nextCursor)
-      setPages((current) => current + 1)
-      setError(null)
-    } catch {
-      if (generation !== generationRef.current) return
-      // Honest and non-destructive: the rows already on screen stay, and the
-      // failure says so. An empty list would read as "you have none".
-      setError('Conversations are unavailable right now.')
-    } finally {
-      if (generation === generationRef.current) setLoading(false)
-    }
-    // `normalized` is rebuilt each render; `scopeKey` is its identity.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scopeKey, scopeDeclared])
+  const load = useCallback(
+    async (nextCursor, generation) => {
+      setLoading(true);
+      try {
+        const page = await listSessions({
+          scope: normalized,
+          limit: PAGE_LIMIT,
+          cursor: nextCursor,
+        });
+        if (generation !== generationRef.current) return;
+        setRows((current) =>
+          nextCursor ? [...current, ...page.sessions] : page.sessions,
+        );
+        setCursor(page.nextCursor);
+        setPages((current) => current + 1);
+        setError(null);
+      } catch {
+        if (generation !== generationRef.current) return;
+        // Honest and non-destructive: the rows already on screen stay, and the
+        // failure says so. An empty list would read as "you have none".
+        setError("Unavailable.");
+      } finally {
+        if (generation === generationRef.current) setLoading(false);
+      }
+      // `normalized` is rebuilt each render; `scopeKey` is its identity.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    },
+    [scopeKey, scopeDeclared],
+  );
 
   useEffect(() => {
-    const generation = ++generationRef.current
-    setRows([])
-    setCursor(null)
-    setPages(0)
-    setError(null)
-    setResuming(null)
+    const generation = ++generationRef.current;
+    setRows([]);
+    setCursor(null);
+    setPages(0);
+    setError(null);
+    setResuming(null);
     // A declared-but-unnormalizable scope lists nothing (fails closed).
-    if (scopeDeclared && !scopeKey) return
-    void load(null, generation)
-  }, [load, scopeDeclared, scopeKey])
+    if (scopeDeclared && !scopeKey) return;
+    void load(null, generation);
+  }, [load, scopeDeclared, scopeKey]);
 
-  const resume = useCallback(async (row) => {
-    if (!row || !row.id || resuming) return
-    setResuming(row.id)
-    const generation = generationRef.current
-    try {
-      const attached = await ensureSession(row.scope)
-      if (generation !== generationRef.current) return
-      // The row's own id is the authority for WHICH conversation this is; the
-      // attach only proves it is reachable and warms the cache the composer
-      // reads. They agree by construction (the scope names one session), and
-      // if a server ever disagreed the row the user clicked still wins.
-      const sessionId = (attached && attached.session_id) || row.id
-      setError(null)
-      onResume?.(sessionId, { scope: row.scope, afterSeq: Number(row.last_seq) || 0 })
-    } catch {
-      if (generation !== generationRef.current) return
-      setError('That conversation could not be resumed. Nothing changed.')
-    } finally {
-      if (generation === generationRef.current) setResuming(null)
-    }
-  }, [onResume, resuming])
+  const resume = useCallback(
+    async (row) => {
+      if (!row || !row.id || resuming) return;
+      setResuming(row.id);
+      const generation = generationRef.current;
+      try {
+        const attached = await ensureSession(row.scope);
+        if (generation !== generationRef.current) return;
+        // The row's own id is the authority for WHICH conversation this is; the
+        // attach only proves it is reachable and warms the cache the composer
+        // reads. They agree by construction (the scope names one session), and
+        // if a server ever disagreed the row the user clicked still wins.
+        const sessionId = attached?.session_id || row.id;
+        setError(null);
+        onResume?.(sessionId, {
+          scope: row.scope,
+          afterSeq: Number(row.last_seq) || 0,
+        });
+      } catch {
+        if (generation !== generationRef.current) return;
+        setError("Resume failed.");
+      } finally {
+        if (generation === generationRef.current) setResuming(null);
+      }
+    },
+    [onResume, resuming],
+  );
 
   return (
-    <section className="conversation-list" aria-label={label} data-testid="conversation-list">
+    <section className="conversation-list" aria-label="Conversations">
       <div className="conversation-list-head">
-        <span className="converse-title">{label}</span>
+        <span className="converse-title">Conversations</span>
         {loading && <span className="dim">Loading…</span>}
       </div>
 
       <ul className="conversation-list-rows">
         {rows.map((row) => {
-          const when = fmtWhen(row.updated_at)
-          const turns = Number(row.turn_count) || 0
+          const when = fmtWhen(row.updated_at);
           return (
             <li key={row.id}>
               <button
@@ -195,21 +210,25 @@ export default function ConversationList({
                 className="conversation-list-item"
                 aria-pressed={row.id === activeSessionId}
                 disabled={resuming === row.id}
-                data-testid={`conversation-row-${row.id}`}
-                onClick={() => { void resume(row) }}
+                onClick={() => {
+                  void resume(row);
+                }}
               >
-                <span className="conversation-row-scope">{scopeLabel(row.scope)}</span>
-                <span className="conversation-row-title">{row.title || UNTITLED}</span>
+                <span className="conversation-row-scope">
+                  {scopeLabel(row.scope)}
+                </span>
+                <span className="conversation-row-title">
+                  {row.title || UNTITLED}
+                </span>
                 <span className="dim conversation-row-when">
-                  {when ? when.rel : '—'}
-                  {turns > 0 ? ` · ${turns} turn${turns === 1 ? '' : 's'}` : ''}
+                  {resuming === row.id ? "Opening" : when ? when.rel : "—"}
                 </span>
               </button>
             </li>
-          )
+          );
         })}
         {rows.length === 0 && !loading && !error && (
-          <li className="dim" data-testid="conversation-list-empty">No conversations yet.</li>
+          <li className="dim">No conversations.</li>
         )}
       </ul>
 
@@ -218,14 +237,19 @@ export default function ConversationList({
           type="button"
           className="chip-act"
           disabled={loading}
-          data-testid="conversation-list-more"
-          onClick={() => { void load(cursor, generationRef.current) }}
+          onClick={() => {
+            void load(cursor, generationRef.current);
+          }}
         >
           Older
         </button>
       )}
 
-      {error && <p className="conversation-list-error" role="alert">{error}</p>}
+      {error && (
+        <p className="conversation-list-error" role="alert">
+          {error}
+        </p>
+      )}
     </section>
-  )
+  );
 }

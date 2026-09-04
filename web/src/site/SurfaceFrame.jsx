@@ -438,7 +438,6 @@ function Conversations() {
     <ConversationListComponent
       activeSessionId={wiring.activeSessionId || null}
       onResume={wiring.onResume || null}
-      label={wiring.label || 'Conversations'}
     />
   )
 }

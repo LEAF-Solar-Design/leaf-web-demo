@@ -765,8 +765,13 @@ def test_trap7_a_target_behind_its_migration_names_the_migration(
 ):
     """TRAP 7: fail with the migration to apply, not a driver error."""
     source.session()
+    scope_column = migration == SCOPE_MIGRATION_NAME
     with target.transaction() as conn:
-        conn.execute(f"ALTER TABLE app_sessions DROP COLUMN {column}")
+        # 0053 puts CHECK constraints on its columns. CASCADE removes only
+        # those dependent constraints so this test can reproduce a database
+        # behind the migration instead of failing in its own setup.
+        suffix = " CASCADE" if scope_column else ""
+        conn.execute(f"ALTER TABLE app_sessions DROP COLUMN {column}{suffix}")
     try:
         with pytest.raises(RuntimeError) as excinfo:
             RECONCILE.reconcile(sqlite_path=source.path, mode="parity")
@@ -774,7 +779,15 @@ def test_trap7_a_target_behind_its_migration_names_the_migration(
         assert column in str(excinfo.value)
     finally:
         with target.transaction() as conn:
-            conn.execute(f"ALTER TABLE app_sessions ADD COLUMN {column} TEXT")
+            if scope_column:
+                # Restore the exact shipped type, default, and every CHECK the
+                # dropped column owned. Re-adding all of 0053 is intentional:
+                # it is idempotent and exercises the same recovery the error
+                # tells an operator to use.
+                for statement in target._split_sql_statements(SCOPE_MIGRATION):
+                    conn.execute(statement)
+            else:
+                conn.execute(f"ALTER TABLE app_sessions ADD COLUMN {column} TEXT")
     # The restore must leave the reconciler working again, which proves the
     # failure came from the missing column rather than a poisoned connection.
     assert RECONCILE.reconcile(sqlite_path=source.path, mode="parity")["tables"]

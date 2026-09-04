@@ -13,6 +13,7 @@ Run:  cd server && python -m pytest tests/test_sessions_list.py -q
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import os
 import sys
 import tempfile
@@ -188,3 +189,38 @@ def test_list_malformed_scope_is_422(client):
 def test_list_malformed_cursor_is_422(client):
     r = client.get("/api/sessions?cursor=not-base64!!", headers=_h("tenant-list-a"))
     assert r.status_code == 422, r.text
+
+
+def test_postgres_org_query_keeps_each_ordered_branch_parenthesized(monkeypatch):
+    """The two index walks are legal PostgreSQL set-operation operands.
+
+    ORDER BY/LIMIT before UNION ALL requires each SELECT to be parenthesized.
+    Without these inner parentheses the real PostgreSQL route fails at UNION,
+    even though the SQLite route and every pure mapping test stay green.
+    """
+    statements = []
+
+    class Result:
+        @staticmethod
+        def fetchall():
+            return []
+
+    class Connection:
+        @staticmethod
+        def execute(statement, args=None):
+            statements.append((statement, args))
+            return Result()
+
+    class Database:
+        @staticmethod
+        @contextmanager
+        def transaction(**_kwargs):
+            yield Connection()
+
+    monkeypatch.setattr(session_store, "_platform_db", lambda: Database())
+    session_store._pg_list_sessions("11111111-1111-4111-8111-111111111111")
+
+    query = statements[-1][0]
+    assert "SELECT * FROM ((SELECT" in query
+    assert ") UNION ALL (SELECT" in query
+    assert ")) merged ORDER BY" in query

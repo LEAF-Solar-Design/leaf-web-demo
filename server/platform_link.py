@@ -204,7 +204,10 @@ def require_project_session_access(
         return session
     if org_id is None or project_id is None or str(org_id) != str(tenant):
         return None
-    require_project_access(tenant, project_id, write=write, binding=binding)
+    if binding is None:
+        require_project_access(tenant, project_id, write=write)
+    else:
+        require_project_access(tenant, project_id, write=write, binding=binding)
     return session
 
 
