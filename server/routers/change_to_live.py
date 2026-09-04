@@ -21,13 +21,18 @@ about different things:
                         credential. Serving those on tenant authentication
                         alone would hand any signed-in account of any tier an
                         existence oracle over a repository it has no access to,
-                        so ``_platform_scope_gate`` runs the SAME admission
-                        chain ``platform_customize._gate`` runs for that other
-                        reader of this data class: live auth (a dark platform
-                        is dark here too, not just there), the
+                        so ``_platform_scope_gate`` IS ``platform_customize``'s
+                        own ``_gate`` -- imported and called directly, not a
+                        hand-mirrored copy -- so it runs every rung of that
+                        SAME admission chain, in the SAME order, with the SAME
+                        refusal bodies: live auth (a dark platform is dark here
+                        too, not just there), tenant identity validity, the
                         ``platform_customize`` entitlement, and the R7
-                        internal-rollout allowlist -- reused rather than
-                        re-derived, so the two gates cannot drift apart.
+                        internal-rollout allowlist. Calling the sibling's own
+                        function rather than re-deriving it is what makes
+                        drift between the two impossible, by construction,
+                        instead of merely a claim (round-3 fix: a hand-mirrored
+                        copy here had silently dropped the tenant-identity rung).
 
 Both are BOUNDED and FAIL CLOSED: a malformed request is a 422 naming the rule
 it broke, never a best-effort answer. Neither endpoint accepts a caller-supplied
@@ -48,20 +53,10 @@ from fastapi.responses import JSONResponse
 
 import change_classifier
 import deps
-import entitlements
 import receipts_read
-from customization_flags import enabled as customization_enabled
 from envelopes import ErrorCode, error_response, with_envelope_fields
 
 router = APIRouter()
-
-# The capability the platform-scoped receipt reads require. Deliberately the
-# EXISTING platform_customize capability rather than a new one: it is already
-# operator-granted on the admin tier alone (entitlements.py), already the gate
-# on /api/platform/source for this same data class, and a new capability name
-# would default to False on every tier until an operator edited the policy file,
-# which is a silent 403 nobody asked for rather than a decision.
-RECEIPTS_PLATFORM_CAPABILITY = "platform_customize"
 
 # A query string wider than this is not a change set anybody reads a class for.
 # Checked BEFORE the list is expanded, so a hostile caller cannot make the
@@ -96,47 +91,38 @@ def _expand_paths(raw: List[str]) -> List[str]:
 def _platform_scope_gate(tenant: Any) -> Optional[JSONResponse]:
     """``None`` when this caller may read PLATFORM CI state, else the refusal.
 
-    Runs the same chain ``platform_customize._gate`` runs for the other reader
-    of this data class, reusing its own refusal builder for the two checks
-    that live there and not here (round-2 finding 5), so the two gates cannot
-    quietly drift apart:
+    Round-3 fix (finding 5 regressed): this used to re-derive the chain by
+    hand, and the hand-copy silently dropped a rung
+    (``is_valid_tenant_id``) that ``platform_customize._gate`` runs and this
+    route's own docstring claimed was "reused". A hand-mirrored chain is a
+    chain that CAN drift, and did. So this now calls that sibling's ``_gate``
+    directly and uses its verdict verbatim -- the two admission chains cannot
+    drift apart because there is, by construction, only one implementation:
 
       1. Live auth. ``deps.auth_live()`` false means the whole platform-CI
          surface is dark, not just the W14 self-edit lane -- the same 503
          either gate gives.
-      2. The ``platform_customize`` entitlement (below): an unreadable policy
-         is a 503, a missing capability a 403, and the auth-off ``demo`` tier
-         does not carry it, so an unauthenticated deployment is dark here too.
-      3. The R7 internal-rollout allowlist. This capability is granted only to
+      2. Tenant identity validity (``tenant_id_validator.is_valid_tenant_id``).
+         A malformed id must never reach an allowlist membership check on
+         either side of this boundary, in this repository's canonical
+         reject-don't-collapse rule.
+      3. The ``platform_customize`` entitlement: an unreadable policy is a
+         503, a missing capability a 403, and the auth-off ``demo`` tier does
+         not carry it, so an unauthenticated deployment is dark here too.
+      4. The R7 internal-rollout allowlist. This capability is granted only to
          the operator-provisioned ``admin`` tier, but the allowlist is the
          second factor that keeps an admin-tier account from defaulting into
          this read the moment a deployment ships that tier, on a rollout an
          operator has not yet turned on for it.
 
-    Fails closed at every step, in that order.
+    Fails closed at every step, in that order -- ``platform_customize._gate``'s
+    order, not a copy of it.
     """
     from routers import platform_customize as platform_customize_router  # noqa: PLC0415 - lazy, avoids an import cycle
 
-    if not deps.auth_live():
-        return platform_customize_router._error(
-            platform_customize_router.lane.PlatformCustomizeError(
-                "platform_customize_auth_required", 503))
-
-    tier = entitlements.resolve_tier(tenant)
-    roles, elevated = entitlements.resolve_roles(tenant)
-    try:
-        caps = entitlements.entitlements_for(tier, roles, elevated)
-    except entitlements.EntitlementsError:
-        return entitlements.policy_unavailable_response(
-            RECEIPTS_PLATFORM_CAPABILITY, tier)
-    if caps.get(RECEIPTS_PLATFORM_CAPABILITY) is not True:
-        return entitlements.entitlement_denied_response(
-            RECEIPTS_PLATFORM_CAPABILITY, tier)
-
-    if not customization_enabled(7, str(tenant).strip()):
-        return platform_customize_router._error(
-            platform_customize_router.lane.PlatformCustomizeError(
-                "platform_customize_disabled", 404))
+    admitted = platform_customize_router._gate(tenant)
+    if isinstance(admitted, JSONResponse):
+        return admitted
     return None
 
 
@@ -192,10 +178,10 @@ def receipts(
     ``GET /api/jobs/{id}`` follows. A well-formed ``pr:``, ``tree:`` or
     ``train`` scope reads the PLATFORM's private repository with the
     platform's own credential, so once parsing has told us it is not a
-    ``job:`` scope it must clear ``_platform_scope_gate`` (live auth, the
-    ``platform_customize`` entitlement, the R7 rollout) before any outbound
-    call is made, so the endpoint is not an existence oracle for a repository
-    the caller cannot see.
+    ``job:`` scope it must clear ``_platform_scope_gate`` (live auth, tenant
+    identity validity, the ``platform_customize`` entitlement, the R7 rollout)
+    before any outbound call is made, so the endpoint is not an existence
+    oracle for a repository the caller cannot see.
     """
     try:
         kind, value = receipts_read.parse_scope(scope)

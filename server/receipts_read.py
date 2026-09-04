@@ -100,20 +100,30 @@ credential whose 5000/hr also carries ``platform_customize``'s PR opening and
 review observation:
 
   * EVERY lookup is cached. Artifact listings are cached per ``(slug, name)``
-    for ``ARTIFACT_CACHE_SECONDS`` (failures included, so a 403 loop costs one
-    call per minute, not one per request), the reconciler read the same way for
-    ``RECONCILER_CACHE_SECONDS``; the repository id and a run's workflow path
-    are immutable, so both are cached for the process lifetime in bounded,
-    FIFO-evicted maps (keyed by slug too, so a future second repository can
-    never alias another repository's cached rows or run path onto its own).
-  * Run-provenance lookups are capped at ``MAX_PROVENANCE_LOOKUPS`` per artifact
-    name, spent on DISTINCT run ids only (a repeated run id is already free via
-    the workflow-path memo). The cap bounds WORK, never correctness: every
+    for ``ARTIFACT_CACHE_SECONDS`` (failures included, so a 403 loop costs, from
+    a single serial caller, one call per window -- under concurrency the
+    read-then-fetch happens outside the lock, so the true bound is at most
+    ``MAX_INFLIGHT_GITHUB`` calls racing into one empty window, never more),
+    the reconciler read the same way for ``RECONCILER_CACHE_SECONDS``; the
+    repository id and a run's workflow path are immutable, so both are cached
+    for the process lifetime in bounded, FIFO-evicted maps (keyed by slug too,
+    so a future second repository can never alias another repository's cached
+    rows or run path onto its own).
+  * Run-provenance lookups are capped at ``MAX_PROVENANCE_LOOKUPS`` DISTINCT run
+    ids per artifact name. A slot is spent the moment a lookup is actually
+    ATTEMPTED -- success or failure alike -- and its outcome is memoized for the
+    lifetime of THIS CALL, so a repeated run id, or a run id whose own record
+    keeps failing to read, is never re-attempted and never spends a second
+    slot. (``_run_workflow_path``'s own process-lifetime memo does NOT cache a
+    failed lookup -- a transient outage must not be cached across requests --
+    so that memo alone cannot bound repeats of a FAILING run id; the call-local
+    memo here is what does.) The cap bounds WORK, never correctness: every
     candidate that clears the two free checks is walked, newest first, so the
     budget is never spent on the wrong slice before verification is even
     attempted. When the budget runs out before every candidate has been
-    walked, the answer says so (``source_busy``) alongside whatever verified,
-    so an incomplete check is never rendered as a confirmed empty answer.
+    walked -- or when a run's own record could not be read at all -- the
+    answer says so (``source_busy``) alongside whatever verified, so an
+    incomplete check is never rendered as a confirmed empty answer.
   * ``MAX_INFLIGHT_GITHUB`` bounds how many requests may be inside an outbound
     read this module makes -- a GitHub call or the reconciler's -- at once. The
     cap is acquired NON-BLOCKING: over it, a caller gets an honest
@@ -147,10 +157,11 @@ MAX_RECONCILER_BYTES = 512 * 1024
 RECONCILER_CACHE_SECONDS = 60.0
 ARTIFACT_CACHE_SECONDS = 60.0
 
-# At most this many run-provenance reads per artifact name, spent on the NEWEST
-# candidates that already passed the two free checks. Bounds the fan-out of one
-# request on a shared credential; an older candidate beyond the cap is dropped,
-# never rendered unverified.
+# At most this many DISTINCT run ids may have their run record ACTUALLY READ
+# per artifact name in one call (module docstring above has the full account).
+# Bounds WORK on a shared credential, never correctness: every candidate is
+# still walked (see the loop in `_fetch_artifacts_verified`), so hitting this
+# cap means "not fully checked" (`source_busy`), never "checked and absent".
 MAX_PROVENANCE_LOOKUPS = 5
 # How many requests may be inside a GitHub call at once. Acquired NON-BLOCKING,
 # so this caps threadpool occupancy instead of queueing behind it.
@@ -527,29 +538,50 @@ def _fetch_artifacts_verified(
     # newer artifacts from a workflow that cannot mint this receipt spend the
     # whole budget and a genuinely older, valid receipt is never even examined
     # -- collapsing a present receipt into a confident-looking empty answer
-    # (round-2 finding 3). So every candidate is walked; only a run id NOT
-    # already attempted this call spends a budget slot (a repeat is already
-    # free via `_run_workflow_path`'s own memo). If the cap is exhausted before
-    # every candidate has been walked, the answer says so -- `source_busy`,
-    # never a silent empty -- so a reader can tell "not fully checked" apart
-    # from "checked and absent".
+    # (round-2 finding 3). So every candidate is walked. ``resolved`` memoizes
+    # each run id's outcome -- success OR failure -- for the LIFETIME OF THIS
+    # CALL ONLY (a fresh dict, never the process-lifetime `_run_path_memo`,
+    # which does not cache a failure): a slot is spent, and counted against the
+    # cap, the moment a lookup is actually ATTEMPTED (a call-local cache miss),
+    # never only on success -- a run id whose OWN record read keeps failing
+    # must not be re-attempted once per artifact that shares it, or the cap
+    # bounds nothing on that path (round-3 regression fix: this is the bug the
+    # prior "distinct run ids attempted" bookkeeping let through, because it
+    # counted a slot as spent without actually caching the call's result, so a
+    # repeated failing run id kept re-issuing the real HTTP call every time).
+    # If the cap is exhausted before every candidate has been walked -- or a
+    # run's own record could not be read at all, which is inconclusive and
+    # never a confident non-match -- the answer says so (`source_busy`), never
+    # a silent empty, so a reader can tell "not fully checked" apart from
+    # "checked and absent".
     verified: list[tuple[dict, str]] = []
-    attempted_run_ids: set[int] = set()
+    resolved: dict[int, Optional[str]] = {}
+    lookups_spent = 0
     incomplete = False
     for item in candidates:
         run = item.get("workflow_run")
         run_id = run.get("id") if isinstance(run, Mapping) else None
         if not isinstance(run_id, int) or isinstance(run_id, bool) or run_id <= 0:
             continue
-        if run_id not in attempted_run_ids:
-            if len(attempted_run_ids) >= MAX_PROVENANCE_LOOKUPS:
+        if run_id not in resolved:
+            if lookups_spent >= MAX_PROVENANCE_LOOKUPS:
                 incomplete = True
                 continue
-            attempted_run_ids.add(run_id)
-        path = _run_workflow_path(run_id)
-        if path is None or path not in allowed:
-            # Minted by something that may not mint this receipt (or by a run
-            # we cannot identify). Absent, never rendered unverified.
+            lookups_spent += 1
+            resolved[run_id] = _run_workflow_path(run_id)
+        path = resolved[run_id]
+        if path is None:
+            # The run record itself could not be read (network failure, or an
+            # unusable body). Inconclusive -- never rendered as a confirmed
+            # non-match -- so it folds into the same incomplete/busy answer
+            # the cap-exhaustion branch above uses, reached through a
+            # different door.
+            incomplete = True
+            continue
+        if path not in allowed:
+            # VERIFIED: this run really did mint the artifact, and it really
+            # is not one of the workflows allowed to mint this receipt kind.
+            # A genuine, confirmed absence -- dropped silently, never noted.
             continue
         verified.append((dict(item), path))
 
@@ -626,8 +658,10 @@ def _fetch_reconciler() -> tuple[list[dict[str, str]], Optional[dict[str, str]]]
     receipt inbox. The outbound read itself shares ``_inflight`` with the
     GitHub calls (one shared cap over every outbound read this module makes)
     and its failure is cached for ``RECONCILER_CACHE_SECONDS`` exactly like a
-    success, so an unreachable inbox costs one read per window, not one per
-    request.
+    success, so a single serial caller costs one read per window, not one per
+    request; the read-then-fetch happens outside the lock, so under
+    concurrency the true bound is at most ``MAX_INFLIGHT_GITHUB`` reads racing
+    into one empty window, never more.
     """
     url = os.environ.get(ENV_RECONCILER_URL, "").strip()
     if not url:

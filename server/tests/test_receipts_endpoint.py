@@ -389,6 +389,98 @@ def test_a_repeated_run_id_does_not_spend_a_second_lookup_slot(monkeypatch):
     assert body["unavailable"] == []
 
 
+def test_a_repeated_FAILING_run_id_does_not_retry_past_the_cap(monkeypatch):
+    """Round-3 regression: the round-2 fix spent a budget slot only on a run id
+    `not in attempted_run_ids`, on the premise that a repeat is free via
+    `_run_workflow_path`'s own memo -- but that memo does NOT cache a failed
+    lookup (a transient outage must not be cached across requests), so every
+    repeat of a run id whose OWN record cannot be read cost a fresh HTTP call.
+    Thirty artifacts sharing one failing run id must cost at most
+    MAX_PROVENANCE_LOOKUPS run-record calls, not thirty."""
+    _configure_github(monkeypatch)
+    name = "prewarm-relay-receipt-pr-9"
+    calls = []
+    same_failing_run = [
+        _artifact(name, run_id=42, created=f"2026-09-01T10:{i:02d}:00Z")
+        for i in range(30)
+    ]
+    # No entry for run 42 in run_paths: _stub_github's fake() raises OSError
+    # for any run id it has no fixture for, exactly like a real lookup failure.
+    _stub_github(monkeypatch, {name: same_failing_run}, run_paths={}, calls=calls)
+    body = rr.read_receipts("pr:9")
+    assert body["rows"] == [], "a run whose own record cannot be read verifies nothing"
+    run_calls = [c for c in calls if "/actions/runs/" in c[0]]
+    assert len(run_calls) <= rr.MAX_PROVENANCE_LOOKUPS, (
+        f"{len(run_calls)} run lookups for one artifact name sharing one "
+        f"failing run id, cap is {rr.MAX_PROVENANCE_LOOKUPS}"
+    )
+    assert len(run_calls) == 1, "the failing lookup must be memoized for this call, not re-issued"
+
+
+def test_an_unreadable_run_record_is_incomplete_not_a_confident_empty(monkeypatch):
+    """A run record that cannot be read at all (a transient runs-endpoint
+    failure) is inconclusive, never a confirmed absence -- the exact honesty
+    defect the cap-exhaustion path exists to prevent, reached through a
+    different door. It must render `source_busy`, never a silent empty."""
+    _configure_github(monkeypatch)
+    name = "prewarm-relay-receipt-pr-9"
+    _stub_github(monkeypatch, {name: [_artifact(name, run_id=42)]}, run_paths={})
+    body = rr.read_receipts("pr:9")
+    assert body["rows"] == []
+    assert body["unavailable"], "an unreadable run record must not read as a confirmed absence"
+    assert body["unavailable"][0]["reason"] == rr.REASON_BUSY
+
+
+def test_a_second_repository_cannot_be_served_this_ones_cached_rows(monkeypatch):
+    """`_artifact_cache` is keyed by ``(slug, name)``, not name alone (round-2
+    finding 4, previously unpinned): a bare `name` key would let a second
+    repository's identical artifact name inherit the FIRST repository's
+    cached rows."""
+    name = "prewarm-relay-receipt-pr-9"
+    _configure_github(monkeypatch)
+    _stub_github(monkeypatch, {name: [_artifact(name)]}, run_paths={4242: PREWARM_WORKFLOW})
+    first = rr.read_receipts("pr:9")
+    assert len(first["rows"]) == 1, "repo A's row is now cached under (REPO_SLUG, name)"
+
+    other_slug = "some-other-org/some-other-repo"
+    monkeypatch.setenv(rr.ENV_REPO, other_slug)
+    # repo B's listing for the SAME artifact name is genuinely empty.
+    _stub_github(monkeypatch, {name: []}, repo_id=555555)
+    second = rr.read_receipts("pr:9")
+    assert second["rows"] == [], (
+        "a bare name-only cache key would have served repo A's cached row "
+        "to repo B's identical artifact name"
+    )
+
+
+def test_a_second_repositorys_run_id_cannot_alias_a_workflow_path(monkeypatch):
+    """`_run_path_memo` is keyed by ``(slug, run_id)``, not the bare run id
+    (round-2 finding 4, previously unpinned): a bare-int key would let repo
+    B's run 42 -- minted by a workflow that may NOT mint this receipt --
+    inherit repo A's cached path for the SAME run id."""
+    name = "prewarm-relay-receipt-pr-9"
+    _configure_github(monkeypatch)
+    _stub_github(monkeypatch, {name: [_artifact(name, run_id=42)]},
+                 run_paths={42: PREWARM_WORKFLOW})
+    first = rr.read_receipts("pr:9")
+    assert len(first["rows"]) == 1, "run 42's path is now memoized under (REPO_SLUG, 42)"
+
+    other_slug = "some-other-org/some-other-repo"
+    monkeypatch.setenv(rr.ENV_REPO, other_slug)
+    # repo B's OWN run 42 was minted by a different, unallowlisted workflow.
+    _stub_github(
+        monkeypatch,
+        {name: [_artifact(name, run_id=42, head_repository_id=555555, repository_id=555555)]},
+        run_paths={42: ".github/workflows/some-other-lane.yml"},
+        repo_id=555555,
+    )
+    second = rr.read_receipts("pr:9")
+    assert second["rows"] == [], (
+        "a bare-int run-path key would have reused repo A's cached path for "
+        "run 42, verifying an artifact repo B's own run cannot mint"
+    )
+
+
 def test_the_minting_allowlist_names_a_real_uploader_per_kind():
     """Read from the workflow files, not from memory: a receipt kind's
     allowlist can legitimately include a workflow that only REUSES an
@@ -629,6 +721,79 @@ def test_a_truncated_response_is_the_honest_state_at_the_route_never_a_500(monke
                         lambda request, timeout=None: _TruncatedResponse())
 
     resp = _client(tenant).get("/api/receipts", params={"scope": "train"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["rows"] == []
+    assert body["unavailable"][0]["reason"] == rr.REASON_UNREACHABLE
+
+
+class _OversizeResponse:
+    """A real response-shaped object serving exactly ``cap + 1`` bytes, so the
+    cap is exercised through the actual bounded ``read(n)`` in ``_get_json``,
+    never asserted against ``_get_json`` in isolation (round-2 finding 1's
+    literal pin, previously missing at the route)."""
+
+    def __init__(self, cap):
+        self._payload = b"[" + b"0" * (cap + 1) + b"]"
+
+    def read(self, n):
+        return self._payload[:n]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _SmallJSONResponse:
+    """A real response-shaped object serving one small, well-formed body."""
+
+    def __init__(self, obj):
+        self._payload = json.dumps(obj).encode("utf-8")
+
+    def read(self, n):
+        return self._payload[:n]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_an_oversize_reconciler_body_is_200_source_unreachable_at_the_route(monkeypatch):
+    """Round-2 finding 1's literal pin: cap+1 bytes served through a REAL
+    urlopen must make the ROUTE answer 200 with `source_unreachable`, never a
+    truncated parse and never a 500."""
+    tenant = _admit_platform(monkeypatch)
+    monkeypatch.setenv(rr.ENV_RECONCILER_URL, "https://raw.example.com/latest.json")
+    monkeypatch.setattr(
+        rr.urllib.request, "urlopen",
+        lambda request, timeout=None: _OversizeResponse(rr.MAX_RECONCILER_BYTES),
+    )
+    resp = _client(tenant).get("/api/receipts", params={"scope": "train"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["rows"] == []
+    assert body["unavailable"][0]["reason"] == rr.REASON_UNREACHABLE
+
+
+def test_an_oversize_artifact_listing_is_200_source_unreachable_at_the_route(monkeypatch):
+    """The same literal pin, the artifacts path: the GitHub artifacts API
+    response itself is oversize, through a real urlopen, at the actual route.
+    The repo-id call is left small so this pins the ARTIFACTS read's boundary
+    specifically, not the repo-identity read's."""
+    tenant = _admit_platform(monkeypatch)
+    _configure_github(monkeypatch)
+
+    def fake_urlopen(request, timeout=None):
+        if "/actions/artifacts" in request.full_url:
+            return _OversizeResponse(rr.MAX_ARTIFACT_BYTES)
+        return _SmallJSONResponse({"id": REPO_ID})
+
+    monkeypatch.setattr(rr.urllib.request, "urlopen", fake_urlopen)
+    resp = _client(tenant).get("/api/receipts", params={"scope": "pr:988"})
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["rows"] == []
@@ -916,6 +1081,22 @@ def test_a_platform_scope_is_refused_when_the_r7_rollout_is_off(monkeypatch):
     resp = _client(tenant).get("/api/receipts", params={"scope": "train"})
     assert resp.status_code == 404, resp.text
     assert resp.json()["reason_code"] == "platform_customize_disabled"
+
+
+def test_a_malformed_tenant_identity_is_refused_the_same_way_the_sibling_gate_is(monkeypatch):
+    """Round-3 regression pin (finding 5): `_platform_scope_gate` had
+    re-derived `platform_customize._gate`'s chain by hand and silently
+    dropped `is_valid_tenant_id`. A tenant id placed on the R7 internal
+    allowlist that is NOT a canonical tenant id (uppercase + a space) must be
+    refused here exactly like `platform_customize._gate` refuses it for its
+    own callers -- 403 `tenant_identity_invalid` -- never served, and never
+    reaching an outbound call."""
+    tenant = _admit_platform(monkeypatch, tenant="Acme Corp")
+    monkeypatch.setattr(rr, "_get_json", lambda *a, **k: pytest.fail(
+        "the gate must refuse BEFORE any outbound call"))
+    resp = _client(tenant).get("/api/receipts", params={"scope": "train"})
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["reason_code"] == "tenant_identity_invalid"
 
 
 def test_a_job_scope_needs_no_platform_entitlement(monkeypatch, tmp_path):

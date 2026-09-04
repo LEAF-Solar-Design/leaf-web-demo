@@ -51,7 +51,13 @@ const REASON_SENTENCES = {
   source_unavailable: 'is not configured on this deployment, so it was not read',
   source_unreachable: 'did not answer, so its receipts are not shown',
   receipt_unreadable: 'answered with something this reader could not parse',
-  source_busy: 'was not read this time because too many reads were already in flight',
+  // Deliberately cause-neutral: the server uses this ONE reason for three
+  // distinct inconclusive states (too many reads already in flight, a
+  // per-name provenance budget exhausted, a run record that could not be
+  // read), and the server's own `detail` sentence -- appended below -- always
+  // names which one. A specific clause here would contradict `detail` on the
+  // cases it was not written for.
+  source_busy: 'was not fully read this time',
 }
 
 /** A short commit for display. Never pads, never invents, never truncates a

@@ -119,8 +119,31 @@ describe('ReceiptsTimeline honest states', () => {
       />,
     )
     expect(screen.getByTestId('receipts-unavailable').textContent)
-      .toContain('already in flight')
+      .toContain('was not fully read')
     expect(screen.queryByTestId('receipts-empty')).toBeNull()
+  })
+
+  it('lets the server detail name the cause instead of assuming inflight load', () => {
+    // source_busy covers THREE distinct server-side causes (the inflight cap,
+    // a per-name provenance budget exhausted, an unreadable run record). The
+    // component's own clause must stay cause-neutral so it never contradicts
+    // whichever cause the server's `detail` names for THIS entry.
+    render(
+      <ReceiptsTimeline
+        rows={[]}
+        unavailable={[{
+          source: 'github-artifacts',
+          reason: 'source_busy',
+          detail: 'more runs uploaded an artifact named \'gate-proof-abc\' than the '
+            + 'per-name provenance budget could check; the ones verified are shown, '
+            + 'never rendered as a confirmed absence',
+        }]}
+      />,
+    )
+    const text = screen.getByTestId('receipts-unavailable').textContent
+    expect(text).toContain('was not fully read')
+    expect(text).toContain('provenance budget could check')
+    expect(text).not.toContain('already in flight')
   })
 
   it('does not claim emptiness while a read is still in flight', () => {
