@@ -1,4 +1,4 @@
-# LEAF Platform product-event telemetry (contract of record)
+# Leaf Automation Studio product-event telemetry (contract of record)
 
 Design of record: the P2 events layer (audit package
 `C:/tmp/leaf-platform-telemetry/events_design.md`, 2026-07-30). This doc is

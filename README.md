@@ -10,7 +10,7 @@ deterministically with **no LLM in the request hot path**.
 > **Role in the mission:** this repo is the **hosted web lane (Lane 2)** of the
 > fleet mission — the natural-language CAD tool-building platform. Identity, the
 > canonical hierarchy, and the honest spiked-vs-bet ledger live in
-> `~/.claude/MISSION.md`. Solar/LEAF is a specialization of this mission, not the
+> `~/.claude/MISSION.md`. Solar/Leaf Automation is a specialization of this mission, not the
 > identity. Nothing here states the web lane as finished fact — see the ledger
 > below.
 

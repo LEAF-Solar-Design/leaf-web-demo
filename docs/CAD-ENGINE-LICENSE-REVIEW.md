@@ -5,7 +5,7 @@ Review performed 2026-08-24 by the root completion session under explicit operat
 ## Component under review
 
 - **acadrust**, upstream https://github.com/hakanaktt/acadrust, license **MPL-2.0**.
-- Consumed rev-pinned at `18500466e7e4392ef830fdc59cede75fa3794f2b`, **unmodified**: zero local patches to crate source. Every adaptation lives in this repo's own wrapper (`vendor/acadrust-worker/src/lib.rs` and the JS worker files), which is LEAF code.
+- Consumed rev-pinned at `18500466e7e4392ef830fdc59cede75fa3794f2b`, **unmodified**: zero local patches to crate source. Every adaptation lives in this repo's own wrapper (`vendor/acadrust-worker/src/lib.rs` and the JS worker files), which is Leaf Automation code.
 - Distribution form: compiled to a WebAssembly artifact, loaded exclusively as an isolated Web Worker through the fence's one allowed spawn shape; never imported into the proprietary web bundle.
 
 ## MPL-2.0 obligations as they apply here
@@ -13,7 +13,7 @@ Review performed 2026-08-24 by the root completion session under explicit operat
 1. **File-level copyleft.** MPL-2.0 (sec. 1.7, 3.3) permits combining Covered Software with proprietary code in a Larger Work provided the Covered Software's own files stay under MPL. We neither relicense nor modify any covered file.
 2. **Source availability (sec. 3.2).** Distributing Executable Form (the `.wasm`) obliges us to inform recipients how to obtain the Covered Software's source. Satisfied by the public upstream repository plus the exact pinned rev; the NOTICE below must ship with, or be reachable from, the product.
 3. **Notices (sec. 3.4).** Upstream license notices must not be removed. No crate source is vendored into the bundle: cargo fetches the pinned rev at build time with notices intact.
-4. **Modification duty (sec. 3.2 / 1.10).** If LEAF ever patches crate files locally, those files' source must be published under MPL-2.0. **Tripwire:** any change of `vendor/acadrust-worker/Cargo.toml` from the bare `rev =` git pin to a `path`/vendored dependency re-opens this review.
+4. **Modification duty (sec. 3.2 / 1.10).** If Leaf Automation ever patches crate files locally, those files' source must be published under MPL-2.0. **Tripwire:** any change of `vendor/acadrust-worker/Cargo.toml` from the bare `rev =` git pin to a `path`/vendored dependency re-opens this review.
 
 ## Technical controls in force
 
@@ -23,7 +23,7 @@ Review performed 2026-08-24 by the root completion session under explicit operat
 
 ## Verdict
 
-**ACCEPTABLE.** MPL-2.0, unmodified and rev-pinned, isolated behind the worker boundary with source availability satisfied upstream, is compatible with LEAF's proprietary distribution model.
+**ACCEPTABLE.** MPL-2.0, unmodified and rev-pinned, isolated behind the worker boundary with source availability satisfied upstream, is compatible with Leaf Automation's proprietary distribution model.
 
 Conditions binding on future work:
 
@@ -33,7 +33,7 @@ Conditions binding on future work:
 
 ## Scope limit of this review
 
-This is a review of **license compatibility for the current consumption shape**, performed by an engineering agent under operator delegation. It is not a legal opinion and does not bind any third party. It deliberately does not opine on trademark, patent-grant interactions with any future LEAF patent position, or the terms under which LEAF's own product is licensed to tenants.
+This is a review of **license compatibility for the current consumption shape**, performed by an engineering agent under operator delegation. It is not a legal opinion and does not bind any third party. It deliberately does not opine on trademark, patent-grant interactions with any future Leaf Automation patent position, or the terms under which Leaf Automation's own product is licensed to tenants.
 
 ## NOTICE line (for the attributions surface)
 
