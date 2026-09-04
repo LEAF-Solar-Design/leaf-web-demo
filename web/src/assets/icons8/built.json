@@ -1,8 +1,8 @@
 {
   "_comment": "Written by web/scripts/fetch_icons8.mjs: the keys actually present in public/icons8-sprite.svg, the sprite content hash (cache key), and the platform.",
   "platform": "fluent-systems-regular",
-  "hash": "4ec5db0cd2c1",
-  "fetchedAt": "2026-09-04T10:03:23.895Z",
+  "hash": "49a0717f2ef2",
+  "fetchedAt": "2026-09-04T18:25:52.136Z",
   "ids": [
     "add-vertex",
     "arc",
@@ -37,6 +37,7 @@
     "move",
     "move-vertex",
     "new-file",
+    "offset",
     "open",
     "ortho",
     "osnap",
@@ -66,6 +67,7 @@
     "zoom-out"
   ],
   "interim": [
-    "explode"
+    "explode",
+    "offset"
   ]
 }

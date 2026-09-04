@@ -31,6 +31,8 @@ export const PICK_SEQUENCES = Object.freeze({
   rotate: [{ kind: 'point', keys: ['cx', 'cy'] }],
   scale: [{ kind: 'point', keys: ['cx', 'cy'] }],
   createRectangle: [{ kind: 'point', keys: ['x', 'y'] }, { kind: 'point', keys: ['x2', 'y2'] }],
+  // W4g-5 OFFSET: one pick, the side the parallel copy goes on.
+  offset: [{ kind: 'point', keys: ['x', 'y'] }],
 })
 
 /**

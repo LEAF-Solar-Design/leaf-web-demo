@@ -65,6 +65,9 @@ export const DEFAULT_EDIT_INPUTS = Object.freeze({
   // W4g-4 Modify verbs: the mirror line's two points and the keep flag, the
   // base point, the rotation angle (degrees) and the scale factor.
   x1: '0', y1: '0', keep: 'true', cx: '0', cy: '0', deg: '90', factor: '2',
+  // W4g-5 OFFSET: how far the parallel copy sits from its source; the SIDE
+  // is the point clicked (x, y), so the verb needs no side operand of its own.
+  dist: '5',
 })
 
 const INPUT_KEYS = new Set(Object.keys(DEFAULT_EDIT_INPUTS))
