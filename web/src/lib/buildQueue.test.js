@@ -75,9 +75,9 @@ describe('the shared mapping cases (contract/build-queue.v1.cases.json)', () => 
 })
 
 describe('the two-stage terminal, never inferred', () => {
-  it('a complete broker job is verified by its own completion and never promoted on its own', () => {
+  it('a complete broker job is not verified without its own terminal receipt', () => {
     const r = fromBrokerJob({ job_id: 'j', tool: 't', status: 'complete', elapsed_ms: 1 })
-    expect(r.terminal).toEqual({ verified: true, promoted: false })
+    expect(r.terminal).toEqual({ verified: false, promoted: false })
   })
 
   it('a failed broker job is neither', () => {
@@ -285,7 +285,7 @@ describe('parseBuildRecord fails closed on malformed input', () => {
 describe('the mappers bound what they carry', () => {
   it('clips a long title, detail and requester with an ellipsis instead of dropping the row', () => {
     const long = 'x'.repeat(BUILD_LIMITS.text + 50)
-    const r = fromFleetTask({ task_id: 't', title: long, state: 'active', detail: long, owner: long })
+    const r = fromFleetTask({ task_id: 't', title: long, state: 'active', detail: long, requested_by: long })
     expect(r.title).toHaveLength(BUILD_LIMITS.text)
     expect(r.title.endsWith('…')).toBe(true)
     expect(r.status.detail).toHaveLength(BUILD_LIMITS.text)

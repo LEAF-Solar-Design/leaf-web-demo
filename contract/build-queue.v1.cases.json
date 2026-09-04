@@ -30,19 +30,19 @@
       "name": "broker: complete with a cost over a cent formats to two decimals",
       "source": "broker",
       "input": { "job_id": "j-done2", "tool": "solve-strings", "status": "complete", "elapsed_ms": 9000, "created_at": 1725400000, "result": { "ok": true, "cost": { "usd_est": 1.5 } } },
-      "expected": { "id": "j-done2", "lane": "broker", "state": "done", "title": "solve-strings", "requested_by": null, "started": 1725400000000, "elapsed_ms": 9000, "estimate_ms": null, "cost_usd": 1.5, "receipts": [], "terminal": { "verified": true, "promoted": false }, "actions": [], "status": { "word": "complete", "tint": "ok", "detail": "$1.50" } }
+      "expected": { "id": "j-done2", "lane": "broker", "state": "done", "title": "solve-strings", "requested_by": null, "started": 1725400000000, "elapsed_ms": 9000, "estimate_ms": null, "cost_usd": 1.5, "receipts": [], "terminal": { "verified": false, "promoted": false }, "actions": [], "status": { "word": "complete", "tint": "ok", "detail": "$1.50" } }
     },
     {
       "name": "broker: complete with a zero cost shows no cost text",
       "source": "broker",
       "input": { "job_id": "j-free", "tool": "list-layers", "status": "complete", "elapsed_ms": 100, "created_at": 1725400000, "cost": { "usd_est": 0 } },
-      "expected": { "id": "j-free", "lane": "broker", "state": "done", "title": "list-layers", "requested_by": null, "started": 1725400000000, "elapsed_ms": 100, "estimate_ms": null, "cost_usd": null, "receipts": [], "terminal": { "verified": true, "promoted": false }, "actions": [], "status": { "word": "complete", "tint": "ok", "detail": null } }
+      "expected": { "id": "j-free", "lane": "broker", "state": "done", "title": "list-layers", "requested_by": null, "started": 1725400000000, "elapsed_ms": 100, "estimate_ms": null, "cost_usd": null, "receipts": [], "terminal": { "verified": false, "promoted": false }, "actions": [], "status": { "word": "complete", "tint": "ok", "detail": null } }
     },
     {
       "name": "broker: degraded completion is an amber advisory with the local fallback detail",
       "source": "broker",
       "input": { "job_id": "j-deg", "tool": "count-by-layer", "status": "complete", "elapsed_ms": 800, "created_at": 1725400000, "degraded_mode": true, "cost": { "usd_est": 0.5 } },
-      "expected": { "id": "j-deg", "lane": "broker", "state": "done", "title": "count-by-layer", "requested_by": null, "started": 1725400000000, "elapsed_ms": 800, "estimate_ms": null, "cost_usd": 0.5, "receipts": [], "terminal": { "verified": true, "promoted": false }, "actions": [], "status": { "word": "degraded", "tint": "warn", "detail": "local fallback" } }
+      "expected": { "id": "j-deg", "lane": "broker", "state": "done", "title": "count-by-layer", "requested_by": null, "started": 1725400000000, "elapsed_ms": 800, "estimate_ms": null, "cost_usd": 0.5, "receipts": [], "terminal": { "verified": false, "promoted": false }, "actions": [], "status": { "word": "degraded", "tint": "warn", "detail": "local fallback" } }
     },
     {
       "name": "broker: a quota rejection is the calm spend cap word",
@@ -66,13 +66,13 @@
       "name": "broker: a prewarm relay receipt promotes a complete job",
       "source": "broker",
       "input": { "job_id": "j-promo", "tool": "build-platform-images", "status": "complete", "elapsed_ms": 60000, "created_at": 1725400000, "prewarm_relay": { "schema": "leaf.staging-prewarm-relay.v1", "relay_run_id": "17520001", "dispatched": [{ "tree": "abc" }], "at": 1725400100 } },
-      "expected": { "id": "j-promo", "lane": "broker", "state": "done", "title": "build-platform-images", "requested_by": null, "started": 1725400000000, "elapsed_ms": 60000, "estimate_ms": null, "cost_usd": null, "receipts": [{ "kind": "promotion", "ref": "leaf.staging-prewarm-relay.v1#17520001", "at": 1725400100000 }], "terminal": { "verified": true, "promoted": true }, "actions": [], "status": { "word": "complete", "tint": "ok", "detail": null } }
+      "expected": { "id": "j-promo", "lane": "broker", "state": "done", "title": "build-platform-images", "requested_by": null, "started": 1725400000000, "elapsed_ms": 60000, "estimate_ms": null, "cost_usd": null, "receipts": [{ "kind": "promotion", "ref": "leaf.staging-prewarm-relay.v1#17520001", "at": 1725400100000 }], "terminal": { "verified": false, "promoted": true }, "actions": [], "status": { "word": "complete", "tint": "ok", "detail": null } }
     },
     {
       "name": "broker: a prewarm relay with nothing dispatched is not a promotion",
       "source": "broker",
       "input": { "job_id": "j-nopromo", "tool": "build-platform-images", "status": "complete", "elapsed_ms": 60000, "created_at": 1725400000, "prewarm_relay": { "schema": "leaf.staging-prewarm-relay.v1", "relay_run_id": "17520002", "dispatched": [] } },
-      "expected": { "id": "j-nopromo", "lane": "broker", "state": "done", "title": "build-platform-images", "requested_by": null, "started": 1725400000000, "elapsed_ms": 60000, "estimate_ms": null, "cost_usd": null, "receipts": [], "terminal": { "verified": true, "promoted": false }, "actions": [], "status": { "word": "complete", "tint": "ok", "detail": null } }
+      "expected": { "id": "j-nopromo", "lane": "broker", "state": "done", "title": "build-platform-images", "requested_by": null, "started": 1725400000000, "elapsed_ms": 60000, "estimate_ms": null, "cost_usd": null, "receipts": [], "terminal": { "verified": false, "promoted": false }, "actions": [], "status": { "word": "complete", "tint": "ok", "detail": null } }
     },
     {
       "name": "broker: a current-session row without a job id takes the session id",
@@ -153,13 +153,13 @@
       "expected": null
     },
     {
-      "name": "fleet: an active task falls back to the owner as requested_by",
+      "name": "fleet: an active task never mistakes its executor for its requester",
       "source": "fleet",
       "input": { "task_id": "t-1", "title": "Ship the sheets page", "owner": "session:claude-7", "state": "active", "state_since": 1725400000, "last_evidence_at": 1725400600, "created_at": 1725400000, "detail": "editing SheetsPage.jsx" },
-      "expected": { "id": "t-1", "lane": "fleet", "state": "running", "title": "Ship the sheets page", "requested_by": "session:claude-7", "started": 1725400000000, "elapsed_ms": 600000, "estimate_ms": null, "cost_usd": null, "receipts": [], "terminal": { "verified": false, "promoted": false }, "actions": ["cancel"], "status": { "word": "active", "tint": "ok", "detail": "editing SheetsPage.jsx" } }
+      "expected": { "id": "t-1", "lane": "fleet", "state": "running", "title": "Ship the sheets page", "requested_by": null, "started": 1725400000000, "elapsed_ms": 600000, "estimate_ms": null, "cost_usd": null, "receipts": [], "terminal": { "verified": false, "promoted": false }, "actions": ["cancel"], "status": { "word": "active", "tint": "ok", "detail": "editing SheetsPage.jsx" } }
     },
     {
-      "name": "fleet: a stamped requester wins over the owner fallback",
+      "name": "fleet: a stamped requester is carried independently of the executor",
       "source": "fleet",
       "input": { "task_id": "t-2", "title": "Rotate the token", "owner": "session:codex-3", "requested_by": "evan", "state": "waiting_human", "created_at": 1725400000, "last_evidence_at": 1725400000 },
       "expected": { "id": "t-2", "lane": "fleet", "state": "running", "title": "Rotate the token", "requested_by": "evan", "started": 1725400000000, "elapsed_ms": 0, "estimate_ms": null, "cost_usd": null, "receipts": [], "terminal": { "verified": false, "promoted": false }, "actions": ["cancel"], "status": { "word": "waiting on a person", "tint": "warn", "detail": null } }
@@ -168,25 +168,25 @@
       "name": "fleet: a complete task with a gate-proof receipt is verified and promotable",
       "source": "fleet",
       "input": { "task_id": "t-3", "title": "Gate the tree", "owner": "session:claude-2", "state": "complete", "terminal_state": "complete", "created_at": 1725400000, "last_evidence_at": 1725403600, "receipts": [{ "kind": "gate-proof", "ref": "gate-proof-abc123", "at": 1725403600 }], "estimate_ms": 3600000, "cost_usd": 12.25 },
-      "expected": { "id": "t-3", "lane": "fleet", "state": "done", "title": "Gate the tree", "requested_by": "session:claude-2", "started": 1725400000000, "elapsed_ms": 3600000, "estimate_ms": 3600000, "cost_usd": 12.25, "receipts": [{ "kind": "gate-proof", "ref": "gate-proof-abc123", "at": 1725403600000 }], "terminal": { "verified": true, "promoted": false }, "actions": ["promote"], "status": { "word": "complete", "tint": "ok", "detail": null } }
+      "expected": { "id": "t-3", "lane": "fleet", "state": "done", "title": "Gate the tree", "requested_by": null, "started": 1725400000000, "elapsed_ms": 3600000, "estimate_ms": 3600000, "cost_usd": 12.25, "receipts": [{ "kind": "gate-proof", "ref": "gate-proof-abc123", "at": 1725403600000 }], "terminal": { "verified": true, "promoted": false }, "actions": ["promote"], "status": { "word": "complete", "tint": "ok", "detail": null } }
     },
     {
       "name": "fleet: a complete task without a verification receipt is done but NOT verified",
       "source": "fleet",
       "input": { "task_id": "t-4", "title": "Write the memo", "owner": "session:claude-9", "state": "complete", "created_at": 1725400000 },
-      "expected": { "id": "t-4", "lane": "fleet", "state": "done", "title": "Write the memo", "requested_by": "session:claude-9", "started": 1725400000000, "elapsed_ms": null, "estimate_ms": null, "cost_usd": null, "receipts": [], "terminal": { "verified": false, "promoted": false }, "actions": [], "status": { "word": "complete", "tint": "ok", "detail": null } }
+      "expected": { "id": "t-4", "lane": "fleet", "state": "done", "title": "Write the memo", "requested_by": null, "started": 1725400000000, "elapsed_ms": null, "estimate_ms": null, "cost_usd": null, "receipts": [], "terminal": { "verified": false, "promoted": false }, "actions": [], "status": { "word": "complete", "tint": "ok", "detail": null } }
     },
     {
       "name": "fleet: an App Store Connect result with a build id promotes a verified task",
       "source": "fleet",
       "input": { "task_id": "t-5", "title": "TestFlight 42", "owner": "ios-lane", "state": "complete", "created_at": 1725400000, "receipts": [{ "kind": "verification", "ref": "xcodebuild-log-42" }], "app_store_connect_result": { "status": "SUCCEEDED", "build_id": "42", "at": 1725404000 } },
-      "expected": { "id": "t-5", "lane": "fleet", "state": "done", "title": "TestFlight 42", "requested_by": "ios-lane", "started": 1725400000000, "elapsed_ms": null, "estimate_ms": null, "cost_usd": null, "receipts": [{ "kind": "verification", "ref": "xcodebuild-log-42", "at": null }, { "kind": "promotion", "ref": "app_store_connect#42", "at": 1725404000000 }], "terminal": { "verified": true, "promoted": true }, "actions": [], "status": { "word": "complete", "tint": "ok", "detail": null } }
+      "expected": { "id": "t-5", "lane": "fleet", "state": "done", "title": "TestFlight 42", "requested_by": null, "started": 1725400000000, "elapsed_ms": null, "estimate_ms": null, "cost_usd": null, "receipts": [{ "kind": "verification", "ref": "xcodebuild-log-42", "at": null }, { "kind": "promotion", "ref": "app_store_connect#42", "at": 1725404000000 }], "terminal": { "verified": true, "promoted": true }, "actions": [], "status": { "word": "complete", "tint": "ok", "detail": null } }
     },
     {
       "name": "fleet: a failed task offers retry",
       "source": "fleet",
       "input": { "task_id": "t-6", "title": "", "owner": "session:x", "state": "failed", "created_at": 1725400000, "detail": "exit 76" },
-      "expected": { "id": "t-6", "lane": "fleet", "state": "failed", "title": "t-6", "requested_by": "session:x", "started": 1725400000000, "elapsed_ms": null, "estimate_ms": null, "cost_usd": null, "receipts": [], "terminal": { "verified": false, "promoted": false }, "actions": ["retry"], "status": { "word": "failed", "tint": "err", "detail": "exit 76" } }
+      "expected": { "id": "t-6", "lane": "fleet", "state": "failed", "title": "t-6", "requested_by": null, "started": 1725400000000, "elapsed_ms": null, "estimate_ms": null, "cost_usd": null, "receipts": [], "terminal": { "verified": false, "promoted": false }, "actions": ["retry"], "status": { "word": "failed", "tint": "err", "detail": "exit 76" } }
     },
     {
       "name": "fleet: an abandoned task is failed with its own word",

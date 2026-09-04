@@ -8,7 +8,7 @@ mirror of web/src/lib/buildQueue.js):
           (server/build_receipts.py) as a receipt of kind ``terminal``
   fleet   the fleet gateway, read with the PLATFORM's credential
           (server/fleet_gateway_client.py), never the browser's; degraded to
-          [] with one warning when unreachable or unconfigured
+          [] with one warning when unreachable; [] when unconfigured
   fold    the multi-round runs under the tenant's own directory
           (server/marathon_runs.py); [] when unconfigured
 

@@ -54,9 +54,9 @@ def test_shared_case(case):
 # --------------------------------------------------------------------------- #
 # two-stage terminal, never inferred
 # --------------------------------------------------------------------------- #
-def test_complete_job_is_verified_but_never_promoted_on_its_own():
+def test_complete_job_is_not_verified_without_its_own_terminal_receipt():
     rec = bq.from_broker_job({"job_id": "j", "tool": "t", "status": "complete"})
-    assert rec["terminal"] == {"verified": True, "promoted": False}
+    assert rec["terminal"] == {"verified": False, "promoted": False}
 
 
 def test_failed_job_is_neither():
@@ -175,7 +175,8 @@ def test_validate_record_normalises_timestamps_and_keeps_good_receipts():
 # --------------------------------------------------------------------------- #
 def test_mappers_clip_prose_and_refuse_over_bound_ids():
     long = "x" * 250
-    rec = bq.from_fleet_task({"task_id": "t", "title": long, "state": "active", "detail": long, "owner": long})
+    rec = bq.from_fleet_task({"task_id": "t", "title": long, "state": "active", "detail": long,
+                              "requested_by": long})
     assert len(rec["title"]) == 200 and rec["title"].endswith("…")
     assert len(rec["status"]["detail"]) == 200
     assert len(rec["requested_by"]) == 200

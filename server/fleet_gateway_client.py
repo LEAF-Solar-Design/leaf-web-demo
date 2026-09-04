@@ -9,7 +9,7 @@ put on one header; it is never logged, never returned, never placed in a URL.
 
 Configuration (both env names, no values, ever, in a log or a body):
   LEAF_FLEET_GATEWAY_URL     the gateway's base URL; unset = the lane is
-                             unconfigured and reads as [] with a warning
+                             unconfigured and reads as []
   LEAF_FLEET_GATEWAY_TOKEN   the bearer the gateway issued to this platform
 
 Wire shape this client expects from ``GET {url}/tasks?tenant=<id>&limit=<n>``:
@@ -71,6 +71,45 @@ def _token() -> Optional[str]:
     token = os.environ.get(TOKEN_ENV, "")
     token = token.strip()
     return token or None
+
+
+def _set_remaining_socket_timeout(stream: Any, remaining: float) -> None:
+    """Tighten urllib's socket timeout to the call's remaining budget.
+
+    Test streams and some alternate handlers do not expose a socket. The
+    deadline checks in ``_read_bounded`` still apply to those streams.
+    """
+    fp = getattr(stream, "fp", None)
+    raw = getattr(fp, "raw", None)
+    sock = getattr(raw, "_sock", None)
+    if sock is None or not hasattr(sock, "settimeout"):
+        return
+    try:
+        sock.settimeout(max(0.001, remaining))
+    except (OSError, ValueError):
+        # A closed or handler-owned socket will fail on read and the caller
+        # converts that failure into FleetGatewayUnavailable.
+        pass
+
+
+def _read_bounded(stream: Any, cap: int, deadline: float) -> bytes:
+    """Read no more than ``cap`` bytes inside one monotonic deadline."""
+    chunks: List[bytes] = []
+    remaining_bytes = cap
+    while remaining_bytes > 0:
+        remaining_time = deadline - time.monotonic()
+        if remaining_time <= 0:
+            raise TimeoutError("gateway read deadline exceeded")
+        _set_remaining_socket_timeout(stream, remaining_time)
+        chunk = stream.read(min(_READ_CHUNK_BYTES, remaining_bytes))
+        if not chunk:
+            break
+        if not isinstance(chunk, (bytes, bytearray)):
+            raise ValueError("gateway body is not bytes")
+        payload = bytes(chunk)
+        chunks.append(payload)
+        remaining_bytes -= len(payload)
+    return b"".join(chunks)
 
 
 def list_tasks(tenant_id: str, limit: int, *,

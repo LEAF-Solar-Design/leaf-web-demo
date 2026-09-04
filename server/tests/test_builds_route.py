@@ -100,7 +100,7 @@ def test_broker_lane_is_tenant_scoped_and_carries_the_terminal_receipt(client):
     assert running["state"] == "running" and running["terminal"] == {"verified": False, "promoted": False}
     assert running["receipts"] == [] and running["actions"] == ["cancel"]
     assert body["sources"] == {"broker": "jobs-store", "fleet": "unconfigured", "fold": "unconfigured"}
-    assert body["warnings"] == ["fleet: gateway not configured"]
+    assert body["warnings"] == []
     assert body["dropped"] == {"broker": 0, "fleet": 0, "fold": 0}
     for record in body["builds"]:
         build_queue.validate_record(record)
@@ -154,7 +154,7 @@ def test_fleet_lane_reads_with_the_platform_credential_and_degrades_to_empty(cli
     assert seen["timeout"] == fleet_gateway_client.FLEET_TIMEOUT_S
     fleet = [b for b in body["builds"] if b["lane"] == "fleet"]
     assert [b["id"] for b in fleet] == ["t-1", "t-2"]
-    assert fleet[0]["requested_by"] == "session:claude-7"
+    assert fleet[0]["requested_by"] is None
     assert fleet[1]["terminal"] == {"verified": True, "promoted": False}
     assert body["sources"]["fleet"] == "gateway"
     assert body["dropped"]["fleet"] == 1
@@ -210,6 +210,39 @@ def test_fleet_client_bounds_the_body_and_refuses_bad_shapes(monkeypatch):
         fleet_gateway_client.list_tasks("t", 5)
 
 
+def test_fleet_client_enforces_one_total_read_deadline(monkeypatch):
+    monkeypatch.setenv(fleet_gateway_client.URL_ENV, "https://fleet.example.test")
+
+    class Trickle:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self, size=-1):
+            return b"{"
+
+    ticks = iter((0.0, 0.0, fleet_gateway_client.FLEET_TIMEOUT_S + 0.1))
+    monkeypatch.setattr(fleet_gateway_client.time, "monotonic", lambda: next(ticks))
+
+    with pytest.raises(fleet_gateway_client.FleetGatewayUnavailable, match="TimeoutError"):
+        fleet_gateway_client.list_tasks("t", 5, opener=lambda request, timeout: Trickle())
+
+
+def test_fleet_client_degrades_a_malformed_http_response(monkeypatch):
+    monkeypatch.setenv(fleet_gateway_client.URL_ENV, "https://fleet.example.test")
+
+    class Broken(_FakeResponse):
+        def read(self, size=-1):
+            raise fleet_gateway_client.http.client.IncompleteRead(b"{", 4)
+
+    with pytest.raises(fleet_gateway_client.FleetGatewayUnavailable, match="IncompleteRead"):
+        fleet_gateway_client.list_tasks("t", 5, opener=lambda request, timeout: Broken(b""))
+
+
 def _write_run(root, tenant, run_id, state, manifest=None, promotion=None):
     run_dir = root / tenant / run_id
     run_dir.mkdir(parents=True)
@@ -259,6 +292,45 @@ def test_fold_lane_reads_only_the_tenants_runs_and_skips_malformed_state(client,
     assert "run-theirs" not in json.dumps(body)
     for record in body["builds"]:
         build_queue.validate_record(record)
+
+
+def test_fleet_and_fold_lanes_use_the_same_bound_tenant_id_the_broker_lane_reads(client, monkeypatch, tmp_path):
+    """B4 falsification: the fleet gateway query and the fold directory must
+    both use `_bound_tenant_id`'s answer, never the raw X-Tenant-Id claim.
+    A stale JWT claim can outlive an account move (routers/jobs.py's own
+    doctrine); if either lane reads `str(tenant)` instead, this test goes RED
+    because it would see the CLAIM tenant's fleet query and the CLAIM
+    tenant's fold runs, not the BOUND tenant's."""
+    from routers import builds as builds_router
+
+    monkeypatch.setattr(builds_router, "_bound_tenant_id", lambda tenant: "bound-tenant-after-move")
+
+    monkeypatch.setenv(fleet_gateway_client.URL_ENV, "https://fleet.example.test")
+    seen = {}
+
+    def opener(request, timeout):
+        seen["url"] = request.full_url
+        return _FakeResponse(json.dumps({"tasks": []}).encode("utf-8"))
+
+    monkeypatch.setattr(fleet_gateway_client.urllib.request, "urlopen", opener)
+
+    root = tmp_path / "runs"
+    monkeypatch.setenv("LEAF_MARATHON_RUNS_DIR", str(root))
+    _write_run(root, "bound-tenant-after-move", "run-bound",
+               {"run_id": "run-bound", "rounds": 1, "spent_usd": 0.1, "mission_complete": False,
+                "round_in_progress": {"milestone": "a", "round": 1, "attempt": 1},
+                "milestones": {"a": {"status": "running"}}})
+    _write_run(root, TENANT, "run-stale-claim",
+               {"run_id": "run-stale-claim", "rounds": 1, "spent_usd": 0.1, "mission_complete": False,
+                "round_in_progress": {"milestone": "a", "round": 1, "attempt": 1},
+                "milestones": {"a": {"status": "running"}}})
+
+    body = _get(client, tenant=TENANT).json()
+    # The fleet query carried the BOUND tenant, not the raw X-Tenant-Id claim.
+    assert seen["url"] == "https://fleet.example.test/tasks?tenant=bound-tenant-after-move&limit=20"
+    # The fold lane read the BOUND tenant's run directory, not the claim's.
+    fold_ids = {b["id"] for b in body["builds"] if b["lane"] == "fold"}
+    assert fold_ids == {"run-bound"}, "fold lane must read the bound tenant's subtree, never the raw claim's"
 
 
 def test_fold_lane_refuses_a_tenant_id_that_is_not_a_plain_token(monkeypatch, tmp_path):
