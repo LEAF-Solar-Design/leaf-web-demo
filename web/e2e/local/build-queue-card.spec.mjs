@@ -49,10 +49,21 @@ async function buildRecord(request, jobId) {
 }
 
 test('one real job rides the BuildQueueCard from running to a verified, unpromoted terminal with a SHA-stamped receipt', async ({ page, request }) => {
-  test.setTimeout(120_000)
+  test.setTimeout(240_000)
   const ready = await requireLocalReady(request, test, API_BASE)
   const health = await (await request.get(`${API_BASE}/api/health`)).json()
-  const jobId = await submitSlowJob(request, 12)
+
+  // Boot the console FIRST: it polls GET /api/jobs every 2.5 s once it is up,
+  // and a job submitted before the shell finished booting (15-30 s on the
+  // local stack) would be complete before the first poll, which the badge
+  // would honestly report as nothing running.
+  await setRail(page, '1')
+  await page.goto('/app?surface=cad')
+  await expect(page.locator('.app[data-surface="cad"]')).toHaveCount(1, { timeout: 30_000 })
+  await expect(page.locator('aside.rail[data-spine]')).toHaveCount(1, { timeout: 30_000 })
+  await expect(page.getByTestId('builds-badge')).toHaveCount(0)
+
+  const jobId = await submitSlowJob(request, 45)
 
   // 1. the record while it runs
   const running = await buildRecord(request, jobId)
@@ -66,12 +77,10 @@ test('one real job rides the BuildQueueCard from running to a verified, unpromot
   expect(Array.isArray(running.body.warnings)).toBe(true)
 
   // 2. the console under the studio: CAD is a job-spine surface, so the
-  //    badge is a button that expands the spine.
-  await setRail(page, '1')
-  await page.goto('/app?surface=cad')
-  await expect(page.locator('.app[data-surface="cad"]')).toHaveCount(1, { timeout: 30_000 })
+  //    badge is a button that expands the spine. The next poll tick lands
+  //    within 2.5 s; the wait covers a slow tick under host load.
   const badge = page.getByTestId('builds-badge')
-  await expect(badge).toBeVisible({ timeout: 15_000 })
+  await expect(badge).toBeVisible({ timeout: 20_000 })
   await expect(badge).toContainText('running')
   await expect(page.locator('aside.rail[data-spine]')).toHaveCount(1)
   await badge.click()
@@ -88,7 +97,7 @@ test('one real job rides the BuildQueueCard from running to a verified, unpromot
   await expect(card.locator('.bq-stages')).toHaveCount(0)
 
   // 4. to done: verified by its own completion, not promoted, receipt attached
-  await expect(card).toHaveAttribute('data-state', 'done', { timeout: 45_000 })
+  await expect(card).toHaveAttribute('data-state', 'done', { timeout: 90_000 })
   await expect(row.locator('.rail-word')).toHaveText('complete')
   await expect(card).toHaveAttribute('data-verified', '1')
   await expect(card).toHaveAttribute('data-promoted', '0')
@@ -96,7 +105,7 @@ test('one real job rides the BuildQueueCard from running to a verified, unpromot
   await expect(card.locator('.bq-mark.promoted.on')).toHaveCount(0)
   await expect(page.getByTestId('builds-badge')).toHaveCount(0)
 
-  await expect.poll(async () => (await buildRecord(request, jobId)).record?.state, { timeout: 30_000 }).toBe('done')
+  await expect.poll(async () => (await buildRecord(request, jobId)).record?.state, { timeout: 60_000 }).toBe('done')
   const done = await buildRecord(request, jobId)
   expect(done.record.terminal).toEqual({ verified: true, promoted: false })
   expect(done.record.actions).toEqual([])
