@@ -322,6 +322,16 @@ impl ParsedDxf {
                 a.center = Vector3::new(a.center.x + dx, a.center.y + dy, a.center.z);
                 Ok(())
             }
+            EntityType::Text(t) => {
+                // W4g-5d, kimi on #1028: MOVE is the one verb hand-rolled as a
+                // match, and a TEXT was editable everywhere but here, so a placed
+                // text armed MOVE and the engine then refused it with a false
+                // sentence. The insertion point moves; value, height and rotation
+                // stay exactly what the drafter set.
+                t.insertion_point.x += dx;
+                t.insertion_point.y += dy;
+                Ok(())
+            }
             _ => refuse("entity_kind_not_editable"),
         }
     }
@@ -1680,5 +1690,19 @@ line two", "")), "text_control_character");
         // Exactly the bound is accepted.
         let max = "b".repeat(MAX_TEXT_CHARS);
         assert!(doc.create_text_core(0.0, 0.0, 1.0, 0.0, &max, "").is_ok());
+    }
+
+    #[test]
+    fn w4g5d_text_moves_and_keeps_its_own_fields() {
+        let mut doc = empty_doc();
+        doc.create_text_core(10.0, 20.0, 2.5, 30.0, "Panel A", "Notes").unwrap();
+        doc.translate_entity_core(0, 5.0, -7.0).expect("MOVE takes a TEXT");
+        let e = doc.inner.entities().next().unwrap();
+        assert_eq!(vertices_of(e), vec![[15.0, 13.0, 0.0]]);
+        assert_eq!(text_of(e).as_deref(), Some("Panel A"));
+        assert_eq!(height_of(e), Some(2.5));
+        assert!((rotation_deg_of(e).unwrap() - 30.0).abs() < 1e-9);
+        let back = rewrite(&doc);
+        assert_eq!(vertices_of(back.inner.entities().next().unwrap()), vec![[15.0, 13.0, 0.0]]);
     }
 }

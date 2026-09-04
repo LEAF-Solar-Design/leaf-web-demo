@@ -46,6 +46,9 @@ describe('W4g-5d store: TEXT operand reading', () => {
       .toBe('Text refused: one line only, with no control characters.')
     expect(buildCreatePayload('createText', { ...ok, text: 'tab\there' }).refusal)
       .toBe('Text refused: one line only, with no control characters.')
+    // A C1 control (NEL, U+0085) is refused here as the crate refuses it.
+    expect(buildCreatePayload('createText', { ...ok, text: 'line\u0085next' }).refusal)
+      .toBe('Text refused: one line only, with no control characters.')
   })
 })
 

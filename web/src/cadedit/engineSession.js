@@ -251,7 +251,10 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
     if (!value.trim()) return { refusal: 'Text refused: enter the text to place.' }
     if ([...value].length > MAX_TEXT_CHARS) return { refusal: `Text refused: at most ${MAX_TEXT_CHARS} characters.` }
     // eslint-disable-next-line no-control-regex
-    if (/[\u0000-\u001f\u007f]/.test(value)) return { refusal: 'Text refused: one line only, with no control characters.' }
+    // C1 controls too (U+0080..U+009F, a NEL from a paste): the crate's
+    // char::is_control covers the whole Cc category, and the prompt must
+    // refuse everything the engine would, never the reverse (kimi on #1028).
+    if (/[\u0000-\u001f\u007f-\u009f]/.test(value)) return { refusal: 'Text refused: one line only, with no control characters.' }
     return { payload: { x: px, y: py, height: h, rotationDeg: angle, text: value, layer: layerName } }
   }
   if (op === 'createPolyline') {
