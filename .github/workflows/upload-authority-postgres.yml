@@ -222,7 +222,16 @@ jobs:
         run: |
           # A skipped concurrency suite reports green and proves nothing.
           # This is the check the review's finding actually needs.
-          out=$(python -m pytest -q tests/test_overlay_store_postgres.py -rs)
+          # Guarded for the same reason as the sessions reconciler step below:
+          # a bare `out=$(...)` aborts under `bash -e` before anything is
+          # printed. Less severe here, because the unguarded run of this same
+          # suite in the step above would fail first, but a failure that only
+          # reproduces on this second run would have been invisible.
+          if ! out=$(python -m pytest -q tests/test_overlay_store_postgres.py -rs 2>&1); then
+            printf '%s\n' "$out"
+            echo 'FAIL: overlay store PostgreSQL tests failed (full output above)'
+            exit 1
+          fi
           printf '%s\n' "$out" | tail -5
           # A bash string match rather than `echo "$out" | grep -qi`. This is
           # DEFENSIVE, not a bug fix: the pipeline form is correct as this
@@ -419,7 +428,20 @@ jobs:
       - name: Run sessions authority reconciler tests
         working-directory: server
         run: |
-          out=$(python -m pytest -q tests/test_reconcile_sessions_authority.py -rs)
+          # `if ! out=$(...)` and NOT a bare `out=$(...)`: the bare form aborts
+          # this step at that line under `bash -e`, so the printf below never
+          # runs and a real pytest failure reaches the log as nothing but
+          # "Process completed with exit code 1". Measured on PR #1017, job
+          # 33917147537: this step failed with zero diagnostic output while the
+          # same suite locally was 47 passed / 45 skipped, so the failing row was
+          # one of the live PostgreSQL tests and this was the only place it could
+          # have been seen. The eight sibling steps in this file already use the
+          # guarded form; these two had drifted from it.
+          if ! out=$(python -m pytest -q tests/test_reconcile_sessions_authority.py -rs 2>&1); then
+            printf '%s\n' "$out"
+            echo 'FAIL: sessions authority reconciler tests failed (full output above)'
+            exit 1
+          fi
           printf '%s\n' "$out" | tail -5
           # A bash string match rather than `... | grep -q`, for the reason
           # written out at the overlay skip-check above: `grep -q` can SIGPIPE a
