@@ -2727,7 +2727,13 @@ export default function App() {
         onResume: (sessionId, { scope } = {}) => {
           const href = resumeHref(scope, REQUESTED_DRAWING_ID, window.location.href)
           if (href) { window.location.assign(href); return }
-          setAgentMode('primary')
+          // The catalog controller owns agent mode; `openAgentMode` is the
+          // action that publishes agentMode 'primary' (the agent-mode button
+          // below calls the same one). There is no setAgentMode binding in
+          // this module: the three that grep finds are inside a commented-out
+          // legacy block, so calling one would have thrown on the first
+          // same-drawing resume.
+          openAgentMode()
         },
       }}
       commandBar={() => (

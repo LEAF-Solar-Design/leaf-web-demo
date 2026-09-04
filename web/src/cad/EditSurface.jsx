@@ -16,6 +16,7 @@
  * baked in) so a host page can also drive it directly, e.g. for a test fence.
  */
 import { useState } from 'react'
+import LiveRegion from '../components/LiveRegion.jsx'
 
 const ENV_CAD_EDIT = import.meta.env?.VITE_CAD_EDIT === '1'
 
