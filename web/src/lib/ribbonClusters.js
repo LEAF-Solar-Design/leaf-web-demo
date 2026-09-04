@@ -359,7 +359,7 @@ function offTool(id, label, icon, size = 'small') {
 /**
  * The reference's Draw-tab panels beyond Draw and Modify (which the engine
  * consumer renders): Annotation, Layers widget (built by layersCluster),
- * Block, Properties, Groups — in the reference's order, at the
+ * Block, Properties, Groups, Clipboard — in the reference's order, at the
  * reference's shapes, all honestly unavailable.
  */
 export function referencePanels() {
@@ -394,6 +394,17 @@ export function referencePanels() {
       tools: [
         offTool('groups:group', 'Group', 'group', 'large'),
         offTool('groups:ungroup', 'Ungroup', 'ungroup', 'large'),
+      ],
+    },
+    // W4g-5c: the engine renders a REAL Clipboard panel when the cad_edit
+    // flag is on, and App drops this one then. It stays here for the flag-off
+    // build, where the reference's row would otherwise lose a panel.
+    {
+      id: 'clipboard', label: 'Clipboard', kind: 'group', note,
+      tools: [
+        offTool('clipboard:paste', 'Paste', 'paste', 'large'),
+        offTool('clipboard:cut', 'Cut', 'cut'),
+        offTool('clipboard:copy', 'Copy', 'copy'),
       ],
     },
   ]

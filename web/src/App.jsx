@@ -2557,11 +2557,18 @@ export default function App() {
     })
     // W4g-5c: the Clipboard panel is REAL now and the engine consumer
     // renders it, so referencePanels no longer supplies a placeholder.
-    const [annotation, block, properties, groups] = referencePanels()
-    // The reference's Draw tab: Draw, Modify (engine children, rendered
-    // first), Annotation, Layers, Block, Properties, Groups, Clipboard.
+    const [annotation, block, properties, groups, clipboardOff] = referencePanels()
+    // The reference's Draw tab: Draw, Modify, Clipboard (engine children,
+    // rendered first), then Annotation, Layers, Block, Properties, Groups.
+    // NOTE: the reference puts Clipboard LAST. The ribbon renders engine
+    // children before this list, so a real Clipboard panel cannot sit at
+    // the end without a portal; the deviation is deliberate and named in
+    // the W4g-5c PR, with the parity re-measure owed.
     const byTab = {
-      draw: [annotation, layers, block, properties, groups, clipboard, ...(tabFamilies.draw || [])],
+      draw: [annotation, layers, block, properties, groups,
+        // The engine's own Clipboard panel replaces this placeholder when
+        // the flag is on; with the flag off the reference's row keeps it.
+        ...(ENV_CAD_EDIT ? [] : [clipboardOff]), ...(tabFamilies.draw || [])],
       insert: [block, ...(tabFamilies.insert || [])],
       annotate: [annotation, ...(tabFamilies.annotate || [])],
       view: [view, version, layers, ...(tabFamilies.view || [])],

@@ -536,8 +536,14 @@ test.describe('route matrix, rail ON', () => {
     const groupsOf = () => ribbon.locator('.ribbon-cluster').evaluateAll((els) => els.map((el) => el.dataset.group || `family:${el.dataset.family}`))
     let groups = await groupsOf()
     const cadEditOn = groups.includes('modify')
-    const referenceTail = ['annotation', 'layers', 'block', 'properties', 'groups', 'clipboard']
-    expect(groups).toEqual(cadEditOn ? ['draw', 'modify', ...referenceTail] : referenceTail)
+    // W4g-5c: Clipboard is a REAL engine group now, so with the engine on
+    // it renders with Draw and Modify (children come before this list) and
+    // leaves the reference tail; with the engine off it is still the
+    // honest placeholder at the end, where the reference puts it.
+    const referenceTail = ['annotation', 'layers', 'block', 'properties', 'groups']
+    expect(groups).toEqual(cadEditOn
+      ? ['draw', 'modify', 'clipboard', ...referenceTail]
+      : [...referenceTail, 'clipboard'])
     await page.getByRole('tab', { name: 'View' }).click()
     expect(await groupsOf()).toEqual(['view', 'version', 'layers'])
     await page.getByRole('tab', { name: 'Manage' }).click()
@@ -1146,6 +1152,26 @@ test.describe('route matrix, rail ON', () => {
     await bar.press('Enter')
     await expect(page.getByTestId('cad-edit-entity-count'))
       .toHaveText(String(countBeforeArray), { timeout: 60_000 })
+
+    // W4g-5c CUT / COPY / PASTE. A copy takes a RECORD of the selection,
+    // so a paste draws the same geometry at the point given (+1) and can
+    // be repeated; the clipboard itself never touches the document. A
+    // paste with nothing copied is refused by the panel, not the engine.
+    const countBeforeClip = Number(await page.getByTestId('cad-edit-entity-count').textContent())
+    await page.getByRole('radio').last().check()
+    await ribbon.locator('[data-tool="clipboard:copyClip"]').click()
+    await expect(page.getByRole('status').filter({ hasText: /is on the clipboard/ }))
+      .toHaveCount(1, { timeout: 30_000 })
+    // The copy drew nothing: the clipboard is not the document.
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeClip))
+    await ribbon.locator('[data-tool="clipboard:pasteClip"]').click()
+    await page.getByLabel('ribbon x', { exact: true }).fill('120')
+    await page.getByLabel('ribbon y', { exact: true }).fill('60')
+    await page.getByLabel('ribbon y', { exact: true }).press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count'))
+      .toHaveText(String(countBeforeClip + 1), { timeout: 60_000 })
+    test.info().annotations.push({ type: 'clipboard', description: `paste drew one entity (${countBeforeClip} -> ${countBeforeClip + 1})` })
+    await page.keyboard.press('Escape')
 
     // A sentence is still a sentence: it routes, it never arms. LAST in the
     // row on purpose: while its route decision is shown the Command bar's
