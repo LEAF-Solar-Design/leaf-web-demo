@@ -4,7 +4,11 @@ import { createPortal } from 'react-dom'
 import { track, setTourStep } from './telemetry.js'
 import { useStudioGround } from './site/studioGround.js'
 import SurfaceGrounds, { groundShowsDrawing } from './site/SurfaceGrounds.jsx'
-import { CockpitStatus, StatusTabs, StatusToggles, ViewCluster } from './site/DrawingCockpit.jsx'
+import { CockpitStatus, StatusTabs, ViewCluster } from './site/DrawingCockpit.jsx'
+// Slice 4a: the ONE shell wrapper both scenes mount, and the console nav
+// rail it used to spell inline. Every shared chrome gate lives there now.
+import SurfaceFrame from './site/SurfaceFrame.jsx'
+import NavRail from './site/NavRail.jsx'
 import CockpitTopBand from './site/CockpitTopBand.jsx'
 import DraftingRibbon from './site/DraftingRibbon.jsx'
 import PropertiesDock, { drawingExtents } from './site/PropertiesDock.jsx'
@@ -17,16 +21,13 @@ import { loadDemoSolve } from './site/intakeCache.js'
 // dynamic-import pattern) keeps first paint off the critical path.
 const Viewer = React.lazy(() => import('./components/Viewer.jsx'))
 import Legend from './components/Legend.jsx'
-import ToolsPanel from './components/ToolsPanel.jsx'
 import ResultPanel from './components/ResultPanel.jsx'
-import AuthorPanel from './components/AuthorPanel.jsx'
 import SelectionReadout from './components/SelectionReadout.jsx'
 import PromptBox from './components/PromptBox.jsx'
 import RoutePanel from './components/RoutePanel.jsx'
-import JobRail from './components/JobRail.jsx'
 import DegradedBanner from './components/DegradedBanner.jsx'
 import OperatorEntry from './components/operator/OperatorEntry.jsx'
-import EntitlementGate, { EntitlementNotice } from './components/EntitlementGate.jsx'
+import { EntitlementNotice } from './components/EntitlementGate.jsx'
 import QuotaCard from './components/QuotaCard.jsx'
 import OverlayDecisionCard from './components/OverlayDecisionCard.jsx'
 import { useOverlay } from './useOverlay.js'
@@ -41,7 +42,7 @@ import CustomizePanel from './components/CustomizePanel.jsx'
 import CheckoutControls from './components/CheckoutControls.jsx'
 import ClaudeAccountPanel from './components/ClaudeAccountPanel.jsx'
 import DemoBanner from './components/DemoBanner.jsx'
-import ProductSurfaceTabs, { AccountSignOut, ProductSurfaceFrame } from './components/ProductSurfaceTabs.jsx'
+import { AccountSignOut } from './components/ProductSurfaceTabs.jsx'
 import { deriveWorkspaceProjectState } from './site/workspaceProjectState.js'
 import IosSurface from './ios/IosSurface.jsx'
 import { ENV_IOS_SURFACE } from './ios/flag.js'
@@ -77,7 +78,6 @@ import {
   dismissRunIntent, drawingVersionForRun, mintCorrelationId, prepareCatalogRunParams, stageRunIntent,
 } from './runIntent.js'
 import useExit from './useExit.js'
-import Toast from './components/Toast.jsx'
 import DetailsDrawer from './components/DetailsDrawer.jsx'
 import {
   config, getSession, getTools, getCapabilities, runTool, runToolAsync,
@@ -184,20 +184,6 @@ const devControls = (() => {
 // A self-minted author-authority turn is reusable for this long — a wide
 // margin under the server's TURN_MAX_S default of 300s (server/turn_runner.py).
 const AUTHOR_AUTHORITY_TTL_MS = 120_000
-
-// Collapsible left-rail section (keeps the classic catalog reachable but
-// secondary to the prompt box — the primary path).
-function Section({ title, count, open, onToggle, children, innerRef, className = '' }) {
-  return (
-    <div className={`section ${className} ${open ? '' : 'collapsed'}`.replace(/\s+/g, ' ').trim()} ref={innerRef}>
-      <button className="section-head" onClick={onToggle} aria-expanded={open}>
-        <span>{title}{count != null ? <span className="n"> · {count}</span> : null}</span>
-        <span className="chev">{open ? 'hide' : 'show'}</span>
-      </button>
-      {open && <div className="section-body">{children}</div>}
-    </div>
-  )
-}
 
 // Live-mode landing when there is no session: instead of a wall of red 401s with
 // no way forward, a calm gate — sign-in for the live surface is coming; the demo
@@ -2612,6 +2598,80 @@ export default function App() {
   ) : node)
 
   return (
+    // Slice 4a: THE SURFACE FRAME (site/SurfaceFrame.jsx). One wrapper both
+    // scenes mount, carrying the normalized shell contract; its slots below
+    // render each shared element exactly where it already stood, so this adds
+    // no DOM. Local names are aliased HERE, at the call boundary, so the frame
+    // never learns App's private vocabulary.
+    <SurfaceFrame
+      scene="console"
+      activeSurface={activeSurface}
+      states={surfaceStates}
+      catalog={catalog}
+      catalogError={catalogErr}
+      workspaceProject={workspaceProjectState}
+      onSelect={onSelectSurface}
+      onCreateProject={onCreateProject}
+      projectSlot={surfaceSlots.chrome.projectSlot === 'ios-surface'
+        ? <IosSurface enabled={ENV_IOS_SURFACE} contract={iosContract} />
+        : null}
+      session={session}
+      posture={{
+        studio: !!studioGround,
+        navExpanded,
+        onNavExpand: () => setNavExpanded(true),
+        wideViewport,
+        jobRailExpanded,
+        onJobRailExpand: () => setJobRailExpanded(true),
+        onJobRailCollapse: () => setJobRailExpanded(false),
+      }}
+      entitlement={{
+        tier: entTier,
+        entitlements,
+        loading: entLoading,
+        mock,
+        // The ONE declaration of where the gate renders. Both mounts used to
+        // spell `studioGround && drafting && wideViewport` themselves: the
+        // dock hosts it on a wide drafting surface, main hosts it everywhere
+        // else. Unchanged, stated once.
+        placement: studioGround && drafting && wideViewport ? 'docked' : 'inline',
+      }}
+      commandBar={() => (
+        <PromptBox
+          value={prompt}
+          onChange={onPromptChange}
+          onDispatch={onDispatch}
+          routing={routing}
+          hintLane={hintLane}
+          projectName={currentProjectName || projectName}
+          inputRef={barInputRef}
+          routeActive={!!route}
+          onOpenAuthor={onOpenAuthor}
+          // The registry supersedes the tools-only list when it loaded (its
+          // entries carry `kind`, which is what groups the picker); a failed
+          // fetch falls back to exactly today's list.
+          tools={registryEntries.length ? registryEntries : slashTools}
+          skills={catalogSkills}
+          commandActions={slashCommandActions}
+          sessionId={agentSessionId}
+          imageAttachmentsEnabled={false}
+          // W4d Slice E seating: on drafting surfaces under the studio the
+          // well is the reference's one-line docked "Command:" prompt.
+          // Rail OFF (and every non-drafting surface) the prop is false and
+          // the well renders exactly as before.
+          commandLine={!!studioGround && surfaceSlots.commandLine}
+        />
+      )}
+      jobRail={{
+        mock,
+        jobs,
+        currentJob,
+        inflight: inflightPtr,
+        reattaching,
+        onSelectJob,
+      }}
+      toast={{ toast, onDone: onToastDone }}
+    >
     <div className="app" data-surface={studioGround ? activeSurface : undefined}>
       <header className="top">
         <div className="mark"><span className="diamond" aria-hidden="true" /> Leaf — build CAD tools with AI</div>
@@ -2702,115 +2762,56 @@ export default function App() {
         </div>
       </header>
 
-      <aside className="nav" data-spine={navSpine ? 'hidden' : undefined} aria-hidden={navSpine || undefined}>
-        {/* W4c-V1 spine, re-seated in W4d Slice D: on drafting surfaces under
-            the studio the rail HIDES behind the band (the reference cockpit
-            has no left rail; the band carries the whole catalog and the
-            affordances the spine used to carry: `expand` in its Rail group,
-            and every family label opens that family). The aside stays in
-            the DOM at zero width so the grid keeps its cells. Rail OFF:
-            navSpine is false by construction and this branch never renders. */}
-        {navSpine ? null : (
-        <>
-        <div className="fam-title">
-          Catalog · {railFamilies.length} famil{railFamilies.length === 1 ? 'y' : 'ies'} · {studioGround ? railFamilies.reduce((n, f) => n + f.capabilities.length, 0) : capCount} caps
-          {catalog.source === 'flat-fallback' ? ' · flat' : ''}
-          {studioGround && drafting && (
-            <button
-              type="button"
-              className="spine-btn spine-collapse"
-              aria-label="Collapse the tool rail to a spine"
-              title="Collapse to spine"
-              onClick={() => setNavExpanded(false)}
-            >
-              «
-            </button>
-          )}
-        </div>
-        {catalogErr && !signedOut && (
-          <>
-            <div className="inline-error" style={{ margin: '0 4px 4px' }}>
-              Couldn’t load families: {catalogErr}
-              <button type="button" className="chip-act" onClick={loadCatalog}>Retry</button>
-              {rTarget === 'catalog' && <span className="key" aria-hidden="true">R</span>}
-            </div>
-            <div className="dim" style={{ margin: '0 4px 8px', fontSize: 11.5 }}>Showing the flat tool list instead.</div>
-            <Section title="Tools" count={tools.length} open={toolsOpen} onToggle={() => setToolsOpen((o) => !o)}>
-              <ToolsPanel
-                tools={tools}
-                writeLocked={writeLocked}
-                writeEntitled={canRunWrite}
-                error={toolsErr}
-                onRetry={retryTools}
-                retryKey={rTarget === 'tools'}
-                running={running || !!previewing}
-                selectedTool={selectedTool}
-                onRequestRun={onRequestCatalogRun}
-                onOpenTool={setOpenTool}
-              />
-            </Section>
-          </>
-        )}
-        {!catalogErr && catalog.families.length === 0 && (
-          // Loading = static content-shaped skeleton rows (no spinner, no text note).
-          <div className="skeleton-stack" aria-hidden="true">
-            <div className="skeleton-row" />
-            <div className="skeleton-row" />
-            <div className="skeleton-row" />
-          </div>
-        )}
-        {railFamilies.map((fam) => (
-          <Section
-            key={fam.family_id}
-            title={fam.label}
-            count={fam.capabilities.length}
-            open={!!openFamilies[fam.family_id]}
-            onToggle={() => toggleFamily(fam.family_id)}
-          >
-            <ToolsPanel
-              tools={fam.capabilities}
-              writeLocked={writeLocked}
-              writeEntitled={canRunWrite}
-              subtitle={fam.description}
-              error={toolsErr}
-              onRetry={retryTools}
-              retryKey={rTarget === 'tools'}
-              running={running || !!previewing}
-              selectedTool={selectedTool}
-              onRequestRun={onRequestCatalogRun}
-              onOpenTool={setOpenTool}
-              onReviseTool={fam.family_id === 'custom-authored' || fam.family_id === 'custom'
-                ? onReviseAuthoredTool
-                : undefined}
-            />
-          </Section>
-        ))}
-        <Section
-          title="Author a tool"
-          className="author-section"
-          open={authorOpen}
-          onToggle={() => setAuthorOpen((o) => !o)}
-          innerRef={authorSectionRef}
-        >
-          <AuthorPanel
-            onAuthor={onAuthor}
-            onPublish={onPublishAuthor}
-            onUseAuthored={onUseAuthored}
-            seed={authorSeed}
-            seedSignal={authorSignal}
-            seedAutoSubmit={tourOn}
-            targetToolName={authorTargetTool}
-            onCancelRevision={onCancelAuthorRevision}
-            stageActivity={authorStage}
-            onResumeAuthor={authorStage.resume}
-            notLinked={claudeNotLinked}
-            onLinkClaude={() => setClaudeOpen(true)}
-            buildEntitled={canBuild}
-          />
-        </Section>
-        </>
-        )}
-      </aside>
+      {/* Slice 4a: the rail's DOM moved to site/NavRail.jsx byte-identically.
+          Its three folds stay CONTROLLED from here, because App drives all
+          three from outside the rail: seven build-lane paths call
+          setAuthorOpen(true), and rTarget / anyFamilyOpen read toolsOpen and
+          openFamilies to pick the R-key retry rung. A rail that owned them
+          would have silently cut those wires. */}
+      <NavRail
+        activeSurface={activeSurface}
+        studio={studioGround}
+        navSpine={navSpine}
+        railFamilies={railFamilies}
+        catalogFamilyCount={catalog.families.length}
+        capCount={capCount}
+        catalogSource={catalog.source}
+        catalogErr={catalogErr}
+        signedOut={signedOut}
+        onRetryCatalog={loadCatalog}
+        retryTarget={rTarget}
+        tools={tools}
+        toolsErr={toolsErr}
+        onRetryTools={retryTools}
+        writeLocked={writeLocked}
+        writeEntitled={canRunWrite}
+        running={running || !!previewing}
+        selectedTool={selectedTool}
+        onRequestRun={onRequestCatalogRun}
+        onOpenTool={setOpenTool}
+        onReviseTool={onReviseAuthoredTool}
+        toolsOpen={toolsOpen}
+        onToggleTools={() => setToolsOpen((o) => !o)}
+        openFamilies={openFamilies}
+        onToggleFamily={toggleFamily}
+        authorOpen={authorOpen}
+        onToggleAuthor={() => setAuthorOpen((o) => !o)}
+        onCollapse={() => setNavExpanded(false)}
+        authorSectionRef={authorSectionRef}
+        onAuthor={onAuthor}
+        onPublish={onPublishAuthor}
+        onUseAuthored={onUseAuthored}
+        authorSeed={authorSeed}
+        authorSignal={authorSignal}
+        authorAutoSubmit={tourOn}
+        authorTargetTool={authorTargetTool}
+        onCancelAuthorRevision={onCancelAuthorRevision}
+        authorStage={authorStage}
+        onResumeAuthor={authorStage.resume}
+        claudeNotLinked={claudeNotLinked}
+        onLinkClaude={() => setClaudeOpen(true)}
+        buildEntitled={canBuild}
+      />
 
       <div className="center-col">
         <main className="center-scroll">
@@ -2865,13 +2866,7 @@ export default function App() {
           />
         )}
 
-        <ProductSurfaceTabs
-          activeSurface={activeSurface}
-          states={surfaceStates}
-          onSelect={onSelectSurface}
-          workspaceProject={workspaceProjectState}
-          catalog={catalog}
-        />
+        <SurfaceFrame.Tabs />
         {/* W4a surface grounds (site/SurfaceGrounds.jsx): under the studio
             shell the ground IS each tab's workspace — the project board for
             Browser, the device stage for iOS; CAD and Solar CAD keep the
@@ -2891,23 +2886,11 @@ export default function App() {
           />,
           studioGround,
         )}
-        {/* Slice 2: contract.chrome.productFrame replaces the inline
-            not-equal-cad literal. It is TRUE on solar, so the frame still
-            renders over the shown workspace card there, today's quirk,
-            preserved deliberately, not fixed. */}
-        {surfaceSlots.chrome.productFrame && (
-          <ProductSurfaceFrame
-            activeSurface={activeSurface}
-            states={surfaceStates}
-            catalog={catalog}
-            catalogError={catalogErr}
-            workspaceProject={workspaceProjectState}
-            onCreateProject={onCreateProject}
-            projectSlot={surfaceSlots.chrome.projectSlot === 'ios-surface'
-              ? <IosSurface enabled={ENV_IOS_SURFACE} contract={iosContract} />
-              : null}
-          />
-        )}
+        {/* Slice 2 read contract.chrome.productFrame here; slice 4a moved that
+            read into the frame, which owns it for BOTH scenes now. Solar still
+            renders it over the shown workspace card, today's quirk, preserved
+            deliberately, not fixed. */}
+        <SurfaceFrame.Frame />
         {/* The CAD workspace hides (not unmounts) on other tabs so live
             drawing, lock, and job state survive tab switches untouched.
             Solar shows it too: that tab IS the CAD workspace on the solar
@@ -3259,14 +3242,7 @@ export default function App() {
                     geometry={selectedEntityGeometry}
                     drawing={paneDrawingFacts}
                     onClose={() => setPaneOpen(false)}
-                    plan={(
-                      <EntitlementGate
-                        tier={entTier}
-                        entitlements={entitlements}
-                        loading={entLoading}
-                        mock={mock}
-                      />
-                    )}
+                    plan={<SurfaceFrame.Entitlement at="docked" />}
                   />
                 ) : null
               }
@@ -3373,19 +3349,10 @@ export default function App() {
           />
         )}
 
-        {(() => {
-          const gate = (
-            <EntitlementGate
-              tier={entTier}
-              entitlements={entitlements}
-              loading={entLoading}
-              mock={mock}
-            />
-          )
-          // Studio drafting surfaces host it in the dock (see the dock's
-          // Plan section); everywhere else it renders here, unchanged.
-          return studioGround && drafting && wideViewport ? null : gate
-        })()}
+        {/* Studio drafting surfaces host it in the dock (see the dock's Plan
+            section); everywhere else it renders here, unchanged. Slice 4a: the
+            choice is the frame's `entitlement.placement`, declared once. */}
+        <SurfaceFrame.Entitlement at="inline" />
         </main>
 
         <div className="bar-dock">
@@ -3454,30 +3421,10 @@ export default function App() {
             onOpenAuthor={onOpenAuthor}
             onDismiss={dismissRoute}
           />
-          <PromptBox
-            value={prompt}
-            onChange={onPromptChange}
-            onDispatch={onDispatch}
-            routing={routing}
-            hintLane={hintLane}
-            projectName={currentProjectName || projectName}
-            inputRef={barInputRef}
-            routeActive={!!route}
-            onOpenAuthor={onOpenAuthor}
-            // The registry supersedes the tools-only list when it loaded (its
-            // entries carry `kind`, which is what groups the picker); a failed
-            // fetch falls back to exactly today's list.
-            tools={registryEntries.length ? registryEntries : slashTools}
-            skills={catalogSkills}
-            commandActions={slashCommandActions}
-            sessionId={agentSessionId}
-            imageAttachmentsEnabled={false}
-            // W4d Slice E seating: on drafting surfaces under the studio the
-            // well is the reference's one-line docked "Command:" prompt.
-            // Rail OFF (and every non-drafting surface) the prop is false and
-            // the well renders exactly as before.
-            commandLine={!!studioGround && surfaceSlots.commandLine}
-          />
+          {/* Slice 4a: the command well is the frame's `commandBar` render
+              prop (declared at the SurfaceFrame call above), so slice 5 has one
+              seat to unify. The element and its props are unchanged. */}
+          <SurfaceFrame.CommandBar />
         </div>
 
         {/* The golden path's payoff (result numbers) and the running strip are
@@ -3499,28 +3446,17 @@ export default function App() {
               : ''}
         </div>
 
-        <Toast toast={toast} onDone={onToastDone} />
+        <SurfaceFrame.Toast />
       </div>
 
-      <JobRail
-        mock={mock}
-        jobs={jobs}
-        currentJob={currentJob}
-        inflight={inflightPtr}
-        reattaching={reattaching}
-        onSelectJob={onSelectJob}
-        // W4d Slice D seating: on drafting surfaces under the studio the job
-        // monitor boots as a 44px spine on the right (the reference gives
-        // that edge to the viewport and the viewcube); its live count stays
-        // visible and one click expands it. Rail OFF: both props undefined,
-        // the rail renders exactly as before.
-        // Slice 2: `jobSpine` (contract.rails.right === 'job-spine') replaces
-        // `drafting` on all three props, ANDed with the same studioGround and
-        // wideViewport terms as before.
-        spine={!!studioGround && jobSpine && wideViewport && !jobRailExpanded}
-        onExpand={studioGround && jobSpine ? () => setJobRailExpanded(true) : undefined}
-        onCollapse={studioGround && jobSpine && jobRailExpanded ? () => setJobRailExpanded(false) : undefined}
-      />
+      {/* W4d Slice D seating: on drafting surfaces under the studio the job
+          monitor boots as a 44px spine on the right (the reference gives that
+          edge to the viewport and the viewcube); its live count stays visible
+          and one click expands it. Rail OFF: no spine, the rail renders
+          exactly as before. Slice 4a: that derivation (contract.rails.right
+          === 'job-spine', ANDed with the studio and viewport terms) is the
+          frame's, from the posture passed above. */}
+      <SurfaceFrame.JobRail />
 
       <footer className="foot-bar" data-checkout-instance={checkout.instanceId} data-controller-instance={workspaceInstanceId}>
         {/* W4e: on the studio's drafting surfaces the status bar opens with
@@ -3575,7 +3511,7 @@ export default function App() {
           <CockpitStatus ground={studioGround} viewerRef={viewerRef} shown={shown} selectedHandle={selectedHandle} />
         )}
         {/* W4e: the reference's drafting toggles (honestly off) and fullscreen. */}
-        {studioGround && drafting && <StatusToggles />}
+        <SurfaceFrame.Cockpit />
         {mock && !tourOn && tourAvailable.current && studioGround && drafting && (
           <button
             type="button"
@@ -3620,5 +3556,6 @@ export default function App() {
           Tenant deployments never see it and never re-probe. */}
       <OperatorEntry />
     </div>
+    </SurfaceFrame>
   )
 }

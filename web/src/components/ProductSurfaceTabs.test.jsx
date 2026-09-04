@@ -240,12 +240,45 @@ describe('F-7: surface frames render the live tenant catalog', () => {
   it('F-9: BOTH shells hand the frame the derivation — no call-site can opt out', () => {
     // The finding was a composition defect invisible to a component test, so
     // this binds the two real call sites: /app (App.jsx) and /try (ToolCast).
+    //
+    // Slice 4a moved the <ProductSurfaceFrame> element itself into
+    // site/SurfaceFrame.jsx, so the call site each scene owns is now its ONE
+    // <SurfaceFrame> mount. Same two assertions, same regex shape, pointed at
+    // where the props are actually passed — plus the third leg the move
+    // created: the frame must forward them, or both scenes could pass them
+    // into a black hole and this pin would still read green.
+    // Anchor on the MOUNT — the opening tag of the one <SurfaceFrame ...> a
+    // scene renders once, whether its attributes start on the same line
+    // (`<SurfaceFrame `) or wrap to the next (`<SurfaceFrame\n`) — never on a
+    // slot. `src.indexOf('<SurfaceFrame')` alone also matches
+    // `<SurfaceFrame.Tabs`, `<SurfaceFrame.Frame`, `<SurfaceFrame.JobRail`
+    // etc. Today the mount happens to be the FIRST match in both files
+    // (App.jsx mount at 2606, first slot at 2869; ToolCast.jsx mount at
+    // 1502, first slot at 1539), so a bare indexOf would land correctly by
+    // accident of ordering. The anchor makes mount-vs-slot an ASSERTION:
+    // if a slot ever moves above the mount, an unanchored scan would slice
+    // from the slot and read the mount's own props as absent; this one fails
+    // loudly instead.
+    // The next character after `SurfaceFrame` is what tells a mount
+    // (` ` or a line break, before its attributes) from a slot (`.`, before
+    // `Tabs`, `Frame`, `JobRail`...): the character class IS the assertion
+    // that this is the mount, not a `<SurfaceFrame.Tabs`-shaped false anchor.
+    // App.jsx is CRLF, ToolCast.jsx is LF, so match `\r` too.
+    const mountAnchor = (src) => {
+      const at = /<SurfaceFrame[ \r\n]/.exec(src)
+      expect(at, 'no <SurfaceFrame> mount found (only slots, or none at all)').toBeTruthy()
+      return at.index
+    }
     for (const file of ['../App.jsx', '../site/ToolCast.jsx']) {
       const src = readFileSync(`${process.cwd()}/src/components/${file}`.replace('/components/../', '/'), 'utf8')
-      const frame = src.slice(src.indexOf('<ProductSurfaceFrame'))
+      const frame = src.slice(mountAnchor(src))
       expect(frame).toContain('workspaceProject={workspaceProjectState}')
       expect(frame).toContain('onCreateProject=')
     }
+    const surfaceFrame = readFileSync(`${process.cwd()}/src/site/SurfaceFrame.jsx`, 'utf8')
+    const forwarded = surfaceFrame.slice(surfaceFrame.indexOf('<ProductSurfaceFrame'))
+    expect(forwarded).toContain('workspaceProject={frame.workspaceProject}')
+    expect(forwarded).toContain('onCreateProject={frame.onCreateProject}')
   })
 
   it('F-9: the rail CONSUMES the derivation and never performs one', () => {

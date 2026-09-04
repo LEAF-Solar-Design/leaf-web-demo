@@ -22,19 +22,19 @@ import AuthorPanel from '../components/AuthorPanel.jsx'
 import CapabilityCatalog from '../components/CapabilityCatalog.jsx'
 import ClaudeAccountPanel from '../components/ClaudeAccountPanel.jsx'
 import CheckoutControls from '../components/CheckoutControls.jsx'
-import EntitlementGate from '../components/EntitlementGate.jsx'
 import DetailsDrawer from '../components/DetailsDrawer.jsx'
 import DrawingUploadControl from '../components/DrawingUploadControl.jsx'
-import JobRail from '../components/JobRail.jsx'
 import Legend from '../components/Legend.jsx'
 import ProjectSwitcher from '../components/ProjectSwitcher.jsx'
-import ProductSurfaceTabs, { ProductSurfaceFrame } from '../components/ProductSurfaceTabs.jsx'
 import SelectionReadout from '../components/SelectionReadout.jsx'
 import RoutePanel from '../components/RoutePanel.jsx'
 import ResultPanel from '../components/ResultPanel.jsx'
 import QuotaCard from '../components/QuotaCard.jsx'
 import DegradedBanner from '../components/DegradedBanner.jsx'
-import Toast from '../components/Toast.jsx'
+// Slice 4a: the ONE shell wrapper both scenes mount. The tabs, the product
+// frame, the entitlement gate, the job rail and the toast all mount through
+// its slots now, so the stage and the console cannot drift apart again.
+import SurfaceFrame from './SurfaceFrame.jsx'
 import SessionGate from '../components/SessionGate.jsx'
 import OpsDrawer from '../components/OpsDrawer.jsx'
 import WorkspaceSummary from '../components/WorkspaceSummary.jsx'
@@ -1417,17 +1417,127 @@ export default function ToolCast({
     />
   )
 
+  // Slice 4a: the stage's command well, handed to the frame as its
+  // `commandBar` render prop. The JSX is untouched; slice 5 replaces it with
+  // the console's PromptBox from this one seat.
+  const commandBarBlock = (
+      <div className={`tc-bar-wrap${focusView ? ' tc-focus-hidden' : ''}`} data-cast="tool" style={{ '--rank': 2 }}>
+        <div
+          className={`tc-bar ${uploadDragActive ? 'upload-drag-active' : ''}`}
+          onDragEnter={(event) => { event.preventDefault(); setUploadDragActive(true) }}
+          onDragOver={(event) => { event.preventDefault(); setUploadDragActive(true) }}
+          onDragLeave={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget)) setUploadDragActive(false)
+          }}
+          onDrop={(event) => {
+            event.preventDefault()
+            setUploadDragActive(false)
+            const file = event.dataTransfer?.files?.[0]
+            if (file) drawingUpload.actions.upload(file)
+          }}
+        >
+          {uploadDragActive && <div className="tc-upload-drop" role="status">Drop a DWG or DXF to open it here</div>}
+          {routeError && (
+            <div className="strip-decision enter error" role="alert">
+              <span className="dot red" aria-hidden="true" />
+              <span className="strip-sentence">Could not route the request. {routeError}<span className="dim"> The drawing is unchanged.</span></span>
+              <button type="button" className="chip-act" onClick={runRequest}>Retry</button>
+              <span className="key">R</span>
+            </div>
+          )}
+          {agentBanner && (
+            <div className="strip-decision enter" role="status">
+              <span className="dot square" aria-hidden="true" />
+              <span className="strip-sentence">{agentBanner.message}</span>
+              {agentBanner.kind === 'grant' && <button type="button" className="chip-act" onClick={() => { setRightView('trust'); setClaudeOpen(true) }}>Link account</button>}
+              <button type="button" className="chip-neutral" onClick={catalog.actions.clearAgentBanner}>Dismiss</button>
+            </div>
+          )}
+          <RoutePanel
+            route={route}
+            tools={tools}
+            running={busy || jobRunning}
+            writeEntitled={writeEntitled}
+            writeLocked={writeLocked}
+            writeLockNote={writeLockNote}
+            onConfirmIntent={runCatalogTool}
+            onPickAlternative={catalog.actions.pickAlternative}
+            onOpenAuthor={() => setLeftView('author')}
+            onDismiss={catalog.actions.dismissRoute}
+          />
+          <div className="tc-bar-input-row">
+            <span className="tc-bar-caret">›</span>
+            <input
+              type="text"
+              className="tc-bar-input"
+              value={prompt}
+              onChange={(event) => changePrompt(event.target.value)}
+              onKeyDown={runOnEnter}
+              aria-label="Command bar"
+              data-testid="command-bar"
+              placeholder={PUBLIC_DEMO
+                ? 'Message the demo or describe a CAD task.'
+                : PROOF_MODE
+                ? `Try: ${CAT_REQUEST}`
+                : 'Describe a change to this drawing. Nothing runs until you submit it.'}
+            />
+            <button type="button" className="tc-run" onClick={runRequest} disabled={platformSession.status !== 'active' || !hasDrawing || busy || jobRunning || routing || phase === 'loading'}>{routing ? 'Routing' : PUBLIC_DEMO ? 'Send' : 'Run'}</button>
+          </div>
+          <div className="tc-bar-controls">
+            <span className="tc-bar-chip">Scope · this drawing</span>
+            <span className="tc-bar-scopes">{PUBLIC_DEMO ? 'message · review · run · version' : 'plan · approve · execute · version'}</span>
+            <span className="tc-bar-proj">{activeDrawingId || 'No drawing'}</span>
+            <span className="key tc-bar-key">⌘K</span>
+          </div>
+        </div>
+      </div>
+  )
+
   return (
+    // Slice 4a: THE SURFACE FRAME (site/SurfaceFrame.jsx). Local names are
+    // aliased HERE, at the call boundary (platformSession -> session,
+    // capabilityCatalog -> catalog) so the frame never learns the stage's
+    // private vocabulary. `scene="stage"` is what tells the frame which scene
+    // it is in; `posture` is null only because the stage has no studio rail,
+    // and the frame no longer infers anything from that null.
+    <SurfaceFrame
+      scene="stage"
+      activeSurface={activeSurface}
+      states={productStates}
+      catalog={capabilityCatalog}
+      catalogError={catalogError}
+      workspaceProject={workspaceProjectState}
+      onSelect={selectProductSurface}
+      onCreateProject={createWorkspaceProject}
+      projectSlot={projectSlot}
+      session={platformSession}
+      posture={null}
+      entitlement={{
+        tier: platform.entitlements?.tier,
+        entitlements: platform.entitlements,
+        loading: platform.entLoading,
+        mock: transportMock,
+        // The stage hosts it inline, in the trust panel, on every surface.
+        placement: 'inline',
+      }}
+      commandBar={commandBarBlock}
+      // `rightView === 'jobs'` stays OUTSIDE the frame: the stage owns that
+      // tab state, and the frame must never assume a rightView exists. Passing
+      // null here is how the stage says "no job rail on this view".
+      jobRail={rightView === 'jobs' ? {
+        mock: transportMock,
+        jobs,
+        currentJob,
+        inflight,
+        reattaching,
+        onSelectJob: inspectHistoricalJob,
+      } : null}
+      toast={{ toast, onDone: (id) => setToast((current) => current?.id === id ? null : current) }}
+      signedIn={isSignedIn()}
+      onSignOut={platformSession.actions.signOut}
+    >
     <>
-      <ProductSurfaceTabs
-        activeSurface={activeSurface}
-        states={productStates}
-        onSelect={selectProductSurface}
-        workspaceProject={workspaceProjectState}
-        catalog={capabilityCatalog}
-        signedIn={isSignedIn()}
-        onSignOut={platformSession.actions.signOut}
-      />
+      <SurfaceFrame.Tabs />
       {/* Slice 2: the stage's arm is the contract's declared stageBranch. It
           replaces the inline cad-then-ios-then-frame surface-literal ternary
           that spanned this block. */}
@@ -1755,16 +1865,9 @@ export default function ToolCast({
             </div>
           )}
         </div></>}
-        {rightView === 'jobs' && (
-          <JobRail
-            mock={transportMock}
-            jobs={jobs}
-            currentJob={currentJob}
-            inflight={inflight}
-            reattaching={reattaching}
-            onSelectJob={inspectHistoricalJob}
-          />
-        )}
+        {/* The rightView gate lives on the frame's `jobRail` prop above, so
+            this slot renders the rail exactly when this tab is showing. */}
+        <SurfaceFrame.JobRail />
         {rightView === 'versions' && (
           <div className="tc-version-panel" role="region" aria-label="Version history">
             <div className="tc-panel-heading">
@@ -1890,12 +1993,7 @@ export default function ToolCast({
                 <div className="tc-trust-row"><span>Spend remaining</span><b>unknown</b></div>
               </>
             )}
-            <EntitlementGate
-              tier={platform.entitlements?.tier}
-              entitlements={platform.entitlements}
-              loading={platform.entLoading}
-              mock={transportMock}
-            />
+            <SurfaceFrame.Entitlement at="inline" />
             <ClaudeAccountPanel
               mock={transportMock}
               grant={platform.grant}
@@ -1951,76 +2049,7 @@ export default function ToolCast({
         <div className="tc-rail-foot"><span className="tc-link muted">{PROOF_MODE ? (phase === 'complete' || phase === 'undone' ? 'Cat oracle, sitting-v1' : 'Contract proof, no APS claim') : 'Tool results appear here'}</span></div>
       </aside>
 
-      <div className={`tc-bar-wrap${focusView ? ' tc-focus-hidden' : ''}`} data-cast="tool" style={{ '--rank': 2 }}>
-        <div
-          className={`tc-bar ${uploadDragActive ? 'upload-drag-active' : ''}`}
-          onDragEnter={(event) => { event.preventDefault(); setUploadDragActive(true) }}
-          onDragOver={(event) => { event.preventDefault(); setUploadDragActive(true) }}
-          onDragLeave={(event) => {
-            if (!event.currentTarget.contains(event.relatedTarget)) setUploadDragActive(false)
-          }}
-          onDrop={(event) => {
-            event.preventDefault()
-            setUploadDragActive(false)
-            const file = event.dataTransfer?.files?.[0]
-            if (file) drawingUpload.actions.upload(file)
-          }}
-        >
-          {uploadDragActive && <div className="tc-upload-drop" role="status">Drop a DWG or DXF to open it here</div>}
-          {routeError && (
-            <div className="strip-decision enter error" role="alert">
-              <span className="dot red" aria-hidden="true" />
-              <span className="strip-sentence">Could not route the request. {routeError}<span className="dim"> The drawing is unchanged.</span></span>
-              <button type="button" className="chip-act" onClick={runRequest}>Retry</button>
-              <span className="key">R</span>
-            </div>
-          )}
-          {agentBanner && (
-            <div className="strip-decision enter" role="status">
-              <span className="dot square" aria-hidden="true" />
-              <span className="strip-sentence">{agentBanner.message}</span>
-              {agentBanner.kind === 'grant' && <button type="button" className="chip-act" onClick={() => { setRightView('trust'); setClaudeOpen(true) }}>Link account</button>}
-              <button type="button" className="chip-neutral" onClick={catalog.actions.clearAgentBanner}>Dismiss</button>
-            </div>
-          )}
-          <RoutePanel
-            route={route}
-            tools={tools}
-            running={busy || jobRunning}
-            writeEntitled={writeEntitled}
-            writeLocked={writeLocked}
-            writeLockNote={writeLockNote}
-            onConfirmIntent={runCatalogTool}
-            onPickAlternative={catalog.actions.pickAlternative}
-            onOpenAuthor={() => setLeftView('author')}
-            onDismiss={catalog.actions.dismissRoute}
-          />
-          <div className="tc-bar-input-row">
-            <span className="tc-bar-caret">›</span>
-            <input
-              type="text"
-              className="tc-bar-input"
-              value={prompt}
-              onChange={(event) => changePrompt(event.target.value)}
-              onKeyDown={runOnEnter}
-              aria-label="Command bar"
-              data-testid="command-bar"
-              placeholder={PUBLIC_DEMO
-                ? 'Message the demo or describe a CAD task.'
-                : PROOF_MODE
-                ? `Try: ${CAT_REQUEST}`
-                : 'Describe a change to this drawing. Nothing runs until you submit it.'}
-            />
-            <button type="button" className="tc-run" onClick={runRequest} disabled={platformSession.status !== 'active' || !hasDrawing || busy || jobRunning || routing || phase === 'loading'}>{routing ? 'Routing' : PUBLIC_DEMO ? 'Send' : 'Run'}</button>
-          </div>
-          <div className="tc-bar-controls">
-            <span className="tc-bar-chip">Scope · this drawing</span>
-            <span className="tc-bar-scopes">{PUBLIC_DEMO ? 'message · review · run · version' : 'plan · approve · execute · version'}</span>
-            <span className="tc-bar-proj">{activeDrawingId || 'No drawing'}</span>
-            <span className="key tc-bar-key">⌘K</span>
-          </div>
-        </div>
-      </div>
+      <SurfaceFrame.CommandBar />
 
       <div className={`tc-caption${focusView ? ' tc-focus-hidden' : ''}`} data-cast="tool">
         {PUBLIC_DEMO
@@ -2037,7 +2066,7 @@ export default function ToolCast({
             ? `${jobResult.tool || 'Tool'} complete`
             : jobResult?.error?.message || ''}
       </div>
-      <Toast toast={toast} onDone={(id) => setToast((current) => current?.id === id ? null : current)} />
+      <SurfaceFrame.Toast />
       <DetailsDrawer data={drawer} onClose={() => setDrawer(null)} />
       {opsOpen && (
         <div className="drawer-layer tc-ops-layer">
@@ -2136,16 +2165,9 @@ export default function ToolCast({
       </aside>
       </>
       ) : (
-        <ProductSurfaceFrame
-          activeSurface={activeSurface}
-          states={productStates}
-          catalog={capabilityCatalog}
-          catalogError={catalogError}
-          workspaceProject={workspaceProjectState}
-          onCreateProject={createWorkspaceProject}
-          projectSlot={projectSlot}
-        />
+        <SurfaceFrame.Frame />
       )}
     </>
+    </SurfaceFrame>
   )
 }
