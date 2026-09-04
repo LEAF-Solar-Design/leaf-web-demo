@@ -1035,6 +1035,14 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeVerbs + 1))
     await ribbon.locator('[data-tool="modify:explode"]').click()
     await expect(page.getByRole('status').filter({ hasText: /Edit refused \(explode\): entity_not_explodable/ })).toHaveCount(1, { timeout: 60_000 })
+    // Disarm before touching the import list. A refusal does NOT disarm, and
+    // while a command is armed the workbench is deliberately click-through
+    // (W4f-2, so a drafter can pick under it), which means a click aimed at
+    // this radio lands on the canvas instead: Playwright reports the drawing
+    // canvas intercepting the pointer event and retries until the row's whole
+    // budget is gone. The product is behaving; the step has to leave picking
+    // first.
+    await page.keyboard.press('Escape')
     await page.getByRole('radio').first().check()
     await ribbon.locator('[data-tool="modify:explode"]').click()
     await expect(page.getByRole('status').filter({ hasText: /explode applied: entity \d+ drawn/ })).toHaveCount(1, { timeout: 60_000 })
