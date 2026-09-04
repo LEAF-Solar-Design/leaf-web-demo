@@ -50,14 +50,17 @@ name: Build platform images
 # promote=true now requires an accepted staging execution receipt and emits a
 # digest-bound handoff artifact. This workflow never dispatches production.
 #
-# Auth, TWO OIDC roles: build, verify, and the speculative lane assume
+# Auth, THREE OIDC roles: build, verify, and the speculative lane assume
 # leaf-github-web-demo-ecr-push-role (AWS_ECR_PUSH_ROLE repo secret), limited
 # to the five leaf-platform release ECR repositories plus their *-buildcache
 # counterparts, no ECS, IAM, or secrets. The pre-gate warm job assumes ONLY
 # leaf-github-web-demo-buildcache-push-role (AWS_ECR_BUILDCACHE_PUSH_ROLE repo
 # secret), which can reach nothing but the five *-buildcache repositories --
 # IAM, not convention, is what keeps warm's configured credential away from
-# every tag the deploy rail consumes. Every release-role job additionally
+# every tag the deploy rail consumes. The cve-harvest gate assumes ONLY
+# leaf-github-web-demo-ecr-pull-role (AWS_ECR_PULL_ROLE repo secret), which
+# can read the five release repositories and write nothing anywhere.
+# Every release-role job additionally
 # declares environment: ecr-release (a GitHub environment with a main-only
 # deployment branch policy), so its OIDC sub presents the
 # repo:...:environment:ecr-release form. warm never declares it: once the
@@ -3396,12 +3399,17 @@ jobs:
   # dispatch-staging-deploys.yml fires only on a successful run and manual
   # promotion consumes the same run's supply set.
   #
-  # The one privilege delta for review: this job assumes AWS_ECR_PUSH_ROLE
-  # (the seventh assumption in the workflow) because that is the credential
-  # that can read leaf-platform-* in ECR. It uses it for `amazon-ecr-login`
-  # and image pulls only -- it builds nothing, tags nothing and pushes
-  # nothing. A pull-only role in leaf-automation-aws-terraform would be
-  # strictly better and is the follow-up.
+  # This job holds NO push privilege. It assumes
+  # leaf-github-web-demo-ecr-pull-role (AWS_ECR_PULL_ROLE repo secret), whose
+  # entire grant is ecr:GetAuthorizationToken plus read on the five
+  # leaf-platform release repositories: it can pull an image by digest and
+  # nothing else, so no scan step can reach a tag the deploy rail consumes.
+  # The role lives in leaf-automation-aws-terraform
+  # (module.leaf_web_demo_oidc_iam, PR #1325, production apply 2026-08-30) and
+  # trusts the same repo:...:environment:ecr-release subject the release role
+  # does, which is why this job keeps environment: ecr-release. It replaces
+  # the AWS_ECR_PUSH_ROLE assumption PR #808 shipped and named as its
+  # follow-up.
   cve-harvest:
     needs: [prepare, verify, adopt]
     if: >-
@@ -3466,7 +3474,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v6.1.0
         with:
-          role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE }}
+          role-to-assume: ${{ secrets.AWS_ECR_PULL_ROLE }}
           aws-region: us-east-1
           role-session-name: GHA-HarvestPlatformCVEs-${{ github.run_id }}
 
