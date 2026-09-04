@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { createNotificationBus, useNotices, useToastBus } from './notifications.js'
@@ -45,7 +45,7 @@ describe('useToastBus / useNotices lifecycle', () => {
     const bus = createNotificationBus(5)
     render(<Probe bus={bus} />)
     render(<InboxProbe bus={bus} />)
-    screen.getByRole('button', { name: 'no toast' }).click()
+    fireEvent.click(screen.getByRole('button', { name: 'no toast' }))
     expect(screen.getByRole('button')).toHaveTextContent('hello')
     expect(screen.getByTestId('count')).toHaveTextContent('1')
   })
