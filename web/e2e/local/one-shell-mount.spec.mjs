@@ -791,6 +791,13 @@ test.describe('route matrix, rail ON', () => {
     await bar.press('Enter')
     await expect(promptRow).toHaveAttribute('data-op', 'createLine')
     await expect(page.locator('.workspace-card[data-cockpit-picking="1"]')).toHaveCount(1)
+    // W4f-7: object snap is ON from the first session, visibly (the prompt's
+    // chip is pressed). The picks below are raw-ground picks measured against
+    // the viewer's own unproject, so F3 turns it off for them; the W4f-5 rows
+    // turn it back on and prove the snap.
+    await expect(page.getByTestId('cockpit-osnap')).toHaveAttribute('aria-pressed', 'true')
+    await page.keyboard.press('F3')
+    await expect(page.getByTestId('cockpit-osnap')).toHaveAttribute('aria-pressed', 'false')
     // A visible higher Esc rung owns the first key even when its opener keeps
     // focus outside the dialog. History closes and the armed command survives.
     // (exact: once the drawer is open its "Close version history" button

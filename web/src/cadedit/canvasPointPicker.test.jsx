@@ -163,12 +163,16 @@ describe('CanvasPointPicker (W4f slice A1)', () => {
     expect(screen.getByLabelText('ribbon y2').value).toBe('5')
   })
 
-  it('F3 toggles OSNAP; on, a pick within reach of an endpoint lands on it, the marker follows, and the snap beats ORTHO (W4f-5)', async () => {
+  it('OSNAP is on from the start (W4f-7); F3 toggles it; on, a pick within reach of an endpoint lands on it, the marker follows, and the snap beats ORTHO (W4f-5)', async () => {
     mount()
     await openAndLoad()
     // The reach: SNAP_PX 10 px = 1 world unit under the mock projection. The
     // document's LINE ends at (100, 50); a click at world (100.3, 49.7) is
-    // within reach with OSNAP on and a raw pick with it off.
+    // within reach with OSNAP on and a raw pick with it off. On is the
+    // default (W4f-7), so F3 first turns it off for the raw pick.
+    expect(context.osnap).toBe(true)
+    act(() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'F3', bubbles: true, cancelable: true })) })
+    expect(context.osnap).toBe(false)
     fireEvent.click(document.querySelector('.drafting-ribbon [data-tool="draw:createLine"]'))
     click(1003, 497)
     expect(screen.getByLabelText('ribbon x').value).toBe('100.3')
