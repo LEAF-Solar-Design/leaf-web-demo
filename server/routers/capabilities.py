@@ -151,6 +151,10 @@ def cad_engine_selector() -> Dict[str, Any]:
         "license": "MPL-2.0",
         "isolation": "wasm worker behind the license-fenced boundary",
         "notice": CAD_ENGINE_NOTICE,
+        # W4g-1: the route the browser engine opens the console's own head
+        # from. Named here so a client can say "engine reach is off on this
+        # deployment" honestly instead of probing for a 404.
+        "reach": {"route": "/api/drawings/{drawing_id}/dxf", "version_query": "version"},
     }
 
 

@@ -31,8 +31,8 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, File, Form, Header, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, File, Form, Header, Request, UploadFile
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 import checkout_capability
@@ -128,6 +128,57 @@ def get_intake(drawing_id: str, version: str = "head",
         return error_response(ErrorCode.BAD_PARAMS, f"drawing/version unavailable: {exc}",
                               retryable=False, status_code=404)
     return with_envelope_fields(deps.tenant_echo(view, tenant_id))
+
+
+@router.get("/api/drawings/{drawing_id}/dxf")
+def get_dxf(drawing_id: str, request: Request, version: str = "head",
+            tenant_id: str = Depends(deps.require_active_tenant)) -> Any:
+    """W4g-1 (engine reach): the version as ASCII DXF bytes, what the browser
+    engine opens so the cockpit's Draw/Modify tools work on the console's own
+    drawing instead of a hand-imported file.
+
+    Legs (write_loop.read_dxf, each fail-closed): a browser-edited version's
+    own sidecar when it is bound to the payload; the payload intake synthesized
+    to DXF (server/intake_dxf.py, the pinned inverse of the intake parser); a
+    raw DWG version converted by the caged dwg2dxf and cached digest-bound
+    beside it. The answer carries `ETag` (sha256 of the bytes; `If-None-Match`
+    answers 304), `X-Leaf-Version`, `X-Leaf-Head` and `X-Leaf-Dxf-Source`
+    (which leg). Bounded by the engine's own 16 MB ceiling (413 past it).
+    Same tenant gate, id literal and 404 pattern as the intake route."""
+    import store  # da/store.py; importable via write_loop's sys.path setup
+
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", drawing_id or ""):
+        return error_response(ErrorCode.BAD_PARAMS, "malformed drawing id",
+                              retryable=False, status_code=400)
+    ver: Any = version
+    if isinstance(version, str) and version not in ("head", "latest") and version.lstrip("-").isdigit():
+        ver = int(version)
+    backend = _backend(str(tenant_id))
+    try:
+        write_loop.ensure_demo_drawing(backend, str(tenant_id), drawing_id)
+        v, data, source = write_loop.read_dxf(backend, str(tenant_id), drawing_id, ver)
+        head = int(store.load_manifest(backend, str(tenant_id), drawing_id)["head"])
+    except write_loop.DxfUnavailable as exc:
+        return error_response(getattr(ErrorCode, exc.error_code, ErrorCode.INTERNAL),
+                              exc.message, retryable=exc.retryable,
+                              status_code=exc.status_code)
+    except (KeyError, ValueError) as exc:
+        return error_response(ErrorCode.BAD_PARAMS, f"drawing/version unavailable: {exc}",
+                              retryable=False, status_code=404)
+    etag = '"' + hashlib.sha256(data).hexdigest() + '"'
+    headers = {
+        "ETag": etag,
+        "X-Leaf-Version": str(v),
+        "X-Leaf-Head": str(head),
+        "X-Leaf-Dxf-Source": source,
+        # Private to the tenant's own browser; revalidate on every open (the
+        # ETag makes the unchanged case one header round trip).
+        "Cache-Control": "private, no-cache",
+    }
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    headers["Content-Disposition"] = f'inline; filename="{drawing_id}-v{v}.dxf"'
+    return Response(content=data, media_type="application/dxf", headers=headers)
 
 
 @router.get("/api/drawings/{drawing_id}/summary")

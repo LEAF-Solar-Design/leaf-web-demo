@@ -339,6 +339,22 @@ def intake_cache_proof_key(tenant_id: str, drawing_id: str, version: int) -> str
     return intake_cache_key(tenant_id, drawing_id, version) + ".proof.json"
 
 
+def dxf_cache_key(tenant_id: str, drawing_id: str, version: int) -> str:
+    """W4g-1 (engine reach): the ASCII DXF dwg2dxf derived from a raw DWG
+    version, cached beside it so the browser engine's second open of the
+    same head costs one blob read, not one caged conversion. Immutable like
+    every other version-scoped key; bound to its source by the proof below."""
+    import store
+    v = int(version)
+    return (f"tenants/{store.sanitize_id(tenant_id)}/drawings/"
+            f"{store.sanitize_id(drawing_id)}/v/{v:08d}.dxf")
+
+
+def dxf_cache_proof_key(tenant_id: str, drawing_id: str, version: int) -> str:
+    """Binding proof for the derived DXF cache (source digest + cache digest)."""
+    return dxf_cache_key(tenant_id, drawing_id, version) + ".proof.json"
+
+
 def publish_intake_cache(backend, tenant_id: str, drawing_id: str, version: int,
                          source_bytes: bytes, intake: Dict[str, Any]) -> str:
     """Publish derived intake plus a binding to its immutable DWG source.
@@ -373,6 +389,157 @@ def publish_intake_cache(backend, tenant_id: str, drawing_id: str, version: int,
         # source/cache pair or raises with PR #254's proof taxonomy.
         read_intake(backend, tenant_id, drawing_id, version)
     return cache_key
+
+
+# --------------------------------------------------------------------------- #
+# W4g-1: a version as DXF bytes (the browser engine's reach)
+# --------------------------------------------------------------------------- #
+
+# The served document is bounded by the SAME ceiling the browser engine
+# refuses at (web/src/cadedit/engineSession.js MAX_DOCUMENT_BYTES). A document
+# the engine would refuse is refused here with the sentence, never shipped
+# only to be refused after the transfer.
+MAX_DXF_BYTES = 16 * 1024 * 1024
+# Every DWG since R13 starts with its version string ("AC1015", "AC1032", ...).
+DWG_MAGIC = b"AC1"
+
+
+class DxfUnavailable(Exception):
+    """A version exists but cannot be served as DXF right now. Carries the
+    envelope error code, the HTTP status and the retryable flag so the router
+    answers typed, never a raw 500."""
+
+    def __init__(self, error_code: str, message: str, status_code: int, retryable: bool) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.message = message
+        self.status_code = int(status_code)
+        self.retryable = bool(retryable)
+
+
+def _json_object_or_none(raw: bytes) -> Optional[Dict[str, Any]]:
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _sidecar_bound(raw: bytes, payload: Dict[str, Any], payload_bytes: bytes) -> bool:
+    """The manifest keeps no digest for the sidecar, so the binding is the
+    one thing both artifacts share: the sidecar parsed through the SAME intake
+    path that produced the version payload must reproduce that payload byte
+    for byte (the payload is `json.dumps(intake, separators=(",", ":"))` of
+    the parse, the save route's idiom). A swapped or corrupted sidecar fails
+    this and the payload, the authority, is served instead."""
+    import dxf_intake
+    try:
+        intake = dxf_intake.parse_dxf_bytes(
+            raw, source_name=str(payload.get("dwg") or "edited.dxf"))
+    except dxf_intake.DxfParseError:
+        return False
+    canonical = json.dumps(intake, separators=(",", ":")).encode("utf-8")
+    return hmac.compare_digest(
+        hashlib.sha256(canonical).hexdigest(), hashlib.sha256(payload_bytes).hexdigest())
+
+
+def read_dxf(backend, tenant_id: str, drawing_id: str,
+             version="head") -> Tuple[int, bytes, str]:
+    """Resolve `version` and return (version_int, dxf_bytes, source), where
+    `source` names the leg taken: "edited-sidecar" (a browser-edited version's
+    own full-fidelity DXF, bound to the payload), "intake-synth" (the payload
+    intake synthesized to DXF), "dwg2dxf" (a raw DWG converted now, cached
+    digest-bound) or "dwg2dxf-cache" (that cache, proof verified). Each leg
+    fails closed on its own terms: an unbound sidecar falls to the payload,
+    an unbound cache is refused rather than served, a conversion failure
+    carries the converter's own code. Raises KeyError/ValueError for a
+    missing drawing or version (the router's 404) and DxfUnavailable for
+    every other refusal."""
+    import store
+    v, vkey = store.resolve_version(backend, tenant_id, drawing_id, version)
+    source = backend.get(vkey)
+    payload = _json_object_or_none(source)
+    if payload is not None:
+        skey = edited_source_key(tenant_id, drawing_id, v)
+        if backend.exists(skey):
+            raw = backend.get(skey)
+            if len(raw) <= MAX_DXF_BYTES and _sidecar_bound(raw, payload, source):
+                return v, raw, "edited-sidecar"
+        import intake_dxf
+        try:
+            data = intake_dxf.intake_to_dxf(payload)
+        except intake_dxf.IntakeDxfError as exc:
+            raise DxfUnavailable(
+                "BAD_PARAMS", f"this version's intake cannot be expressed as DXF: {exc}",
+                422, False) from exc
+        if len(data) > MAX_DXF_BYTES:
+            raise DxfUnavailable(
+                "BAD_PARAMS", f"the DXF for this version is {len(data)} bytes, over the "
+                f"{MAX_DXF_BYTES}-byte browser engine ceiling", 413, False)
+        return v, data, "intake-synth"
+
+    if not source.startswith(DWG_MAGIC):
+        raise DxfUnavailable(
+            "BAD_PARAMS", "this version's payload is neither intake JSON nor a DWG",
+            422, False)
+    ckey = dxf_cache_key(tenant_id, drawing_id, v)
+    pkey = dxf_cache_proof_key(tenant_id, drawing_id, v)
+    source_digest = hashlib.sha256(source).hexdigest()
+    if backend.exists(ckey):
+        cached = backend.get(ckey)
+        proof = _json_object_or_none(backend.get(pkey)) if backend.exists(pkey) else None
+        expected = {
+            "schema": 1,
+            "version": int(v),
+            "source_sha256": source_digest,
+            "dxf_ref": ckey,
+            "dxf_sha256": hashlib.sha256(cached).hexdigest(),
+        }
+        if proof == expected and len(cached) <= MAX_DXF_BYTES:
+            return v, cached, "dwg2dxf-cache"
+        # A cache that is not provably this source's output is never served:
+        # a swapped blob would put a different drawing in the drafter's hands.
+        raise DxfUnavailable(
+            "INTERNAL", "the converted DXF cached for this version is not bound to "
+            "its source; refusing to serve it", 503, False)
+    import dwg_convert
+    fd, tmp = tempfile.mkstemp(suffix=".dwg")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(source)
+        try:
+            with dwg_convert.converted_dxf(Path(tmp)) as dxf_path:
+                data = Path(dxf_path).read_bytes()
+        except dwg_convert.ConvertError as exc:
+            raise DxfUnavailable(
+                exc.error_code, exc.message,
+                503 if exc.error_code == "INTERNAL" else 422, exc.retryable) from exc
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    if len(data) > MAX_DXF_BYTES:
+        raise DxfUnavailable(
+            "BAD_PARAMS", f"the converted DXF is {len(data)} bytes, over the "
+            f"{MAX_DXF_BYTES}-byte browser engine ceiling", 413, False)
+    proof = {
+        "schema": 1,
+        "version": int(v),
+        "source_sha256": source_digest,
+        "dxf_ref": ckey,
+        "dxf_sha256": hashlib.sha256(data).hexdigest(),
+    }
+    # Best-effort publication, cache first then proof (the reader above only
+    # trusts the pair). dwg2dxf is deterministic, so a concurrent winner wrote
+    # the same bytes; any other failure just costs the next read a conversion.
+    try:
+        backend.put_if_absent_or_verify(ckey, data)
+        backend.put_if_absent_or_verify(
+            pkey, json.dumps(proof, separators=(",", ":")).encode("utf-8"))
+    except Exception:  # noqa: BLE001
+        pass
+    return v, data, "dwg2dxf"
 
 
 def upload_marker_key(tenant_id: str, drawing_id: str) -> str:
