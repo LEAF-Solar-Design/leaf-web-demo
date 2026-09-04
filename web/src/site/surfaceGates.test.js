@@ -198,7 +198,7 @@ const SHEETS = {
   // SheetsPage.jsx:54     <main className="sheets-root">, no drawing canvas,
   //                       no project board, no device stage.
   ground: 'sheet',
-  // ProductSurfaceTabs.jsx:68 renders a tab per record that declares one.
+  // ProductSurfaceTabs.jsx:72 renders a tab per record that declares one.
   tab: false,
 }
 

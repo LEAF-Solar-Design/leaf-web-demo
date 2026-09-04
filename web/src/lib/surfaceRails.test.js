@@ -29,6 +29,12 @@ describe('familiesForSurface', () => {
     expect(familiesForSurface(FAMS, 'not-a-surface')).toEqual(FAMS)
   })
 
+  it('sheets (a DECLARED empty fold, not an unknown id) is honestly empty, not fail-open', () => {
+    // familyIds: [] is a real manifest record, not a lookup miss, so this
+    // must NOT take the fail-open path above and must NOT equal FAMS.
+    expect(familiesForSurface(FAMS, 'sheets')).toEqual([])
+  })
+
   it('tolerates a missing catalog', () => {
     expect(familiesForSurface(null, 'cad')).toEqual([])
   })

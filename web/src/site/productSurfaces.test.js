@@ -231,9 +231,9 @@ const CONTRACT_FIXTURE = {
   //   chrome.*        SiteRoot.jsx:234-237 wraps it in NOTHING: no frame, no
   //                   card, no cockpit band; and it is not a stage cast, so
   //                   stageBranch is undeclared rather than one of the arms
-  //   chrome.tab      false, ProductSurfaceTabs.jsx:68 renders no sheets tab
+  //   chrome.tab      false, ProductSurfaceTabs.jsx:72 renders no sheets tab
   //   toolbar/rails   nothing in src/site/sheets/** mounts either
-  //   commandLine     App.jsx:3419's PromptBox is console-only
+  //   commandLine     App.jsx:3479's PromptBox is console-only
   //   authoring       no rail, so no AuthorPanel is reachable
   //   builds.routes   [], SheetsPage has no run or build control at all
   sheets: {
@@ -278,7 +278,10 @@ const ENUMS = {
   ground: ['drawing', 'board', 'device-stage', 'sheet'],
   scene: ['app', 'sheets'],
   // null joins the stage arms: a surface the stage never casts declares no arm
-  // rather than being forced into the frame fallthrough.
+  // rather than being forced into the frame fallthrough. Loosening this enum
+  // does not loosen the pin on the four studio surfaces: surfaceGates.test.js
+  // still asserts each one's stageBranch against its OLD three-arm ternary
+  // literal (OLD.stageBranch), so null is reachable only through sheets.
   stageBranch: ['cad', 'ios', 'frame', null],
   projectSlot: ['ios-surface', null],
   left: ['spine', 'nav', 'none'],
@@ -520,5 +523,18 @@ describe('Surface Contract, sheets is the fifth surface, and today it renders no
     // (The file's comment quotes the old literal to say what it replaced, so
     // the probe targets the assignment, not any mention of the old text.)
     expect(grounds).not.toMatch(/DRAWING_SURFACES\s*=\s*new Set\(\s*\[/)
+  })
+
+  it('scene has no other source of truth: SiteRoot.jsx and routeScene.js still name the ids the contract declares', () => {
+    // `scene` has no derivation to probe (unlike `ground`, it stays a literal
+    // switch in SiteRoot until a later slice repoints it), so the pin here is
+    // that the two literal ids ENUMS.scene declares are still the ones the
+    // arm and the router actually name, not that any structure derives them.
+    const siteRoot = readFileSync(`${process.cwd()}/src/site/SiteRoot.jsx`, 'utf8')
+    expect(siteRoot).toContain("scene === 'sheets'")
+    const routeScene = readFileSync(`${process.cwd()}/src/site/routeScene.js`, 'utf8')
+    for (const id of ENUMS.scene) {
+      expect(routeScene).toContain(`return '${id}'`)
+    }
   })
 })

@@ -99,7 +99,7 @@ export const PRODUCT_SURFACES = Object.freeze([
         stageBranch: 'frame',
         // projectSlot: App.jsx:2846 fills the slot for 'ios' only.
         projectSlot: null,
-        // tab: ProductSurfaceTabs.jsx:68 renders one tab per record whose
+        // tab: ProductSurfaceTabs.jsx:72 renders one tab per record whose
         //   contract declares `chrome.tab`. Slice 5b added the slot and the
         //   filter together; the four studio surfaces all declared `true`, so
         //   the band is byte-identical to the un-filtered map it replaced.
@@ -204,7 +204,7 @@ export const PRODUCT_SURFACES = Object.freeze([
         // stageBranch: ToolCast.jsx:1434 `activeSurface === 'cad'`.
         stageBranch: 'cad',
         projectSlot: null,
-        tab: true, // ProductSurfaceTabs.jsx:68
+        tab: true, // ProductSurfaceTabs.jsx:72
       },
       toolbar: {
         // ribbon: App.jsx:2898 `studioGround && drafting` -> DraftingRibbon mounts.
@@ -277,7 +277,7 @@ export const PRODUCT_SURFACES = Object.freeze([
         //   (ToolCast.jsx:2139) — the stage has NO drafting cockpit for solar.
         stageBranch: 'frame',
         projectSlot: null,
-        tab: true, // ProductSurfaceTabs.jsx:68
+        tab: true, // ProductSurfaceTabs.jsx:72
       },
       toolbar: {
         ribbon: true, // App.jsx:2898
@@ -335,7 +335,7 @@ export const PRODUCT_SURFACES = Object.freeze([
         stageBranch: 'ios',
         // projectSlot: App.jsx:2846-2847 mounts <IosSurface> into the frame.
         projectSlot: 'ios-surface',
-        tab: true, // ProductSurfaceTabs.jsx:68
+        tab: true, // ProductSurfaceTabs.jsx:72
       },
       toolbar: {
         ribbon: false, // App.jsx:2898
@@ -395,9 +395,11 @@ export const PRODUCT_SURFACES = Object.freeze([
     eyebrow: 'Website drawing set',
     title: 'Read the Website Sheets drawing set as one scrolling page',
     description: 'Seven sheets (l-000, g-000, a-101, a-102, e-401, c-201, s-501) on one public page, each deep-linkable at /sheets/<code>.',
-    // familyIds: the page renders no capability catalog at all (SheetsPage.jsx
-    //   mounts <SheetsSet> and nothing else, :54-55), so its fold is empty:
-    //   declared, not "the whole catalog" (which is what null means).
+    // familyIds folds the API tool-family catalog (the same `catalog.families`
+    //   fold every studio surface reads), which the page never reads: S501Sheet
+    //   renders its own static capabilities list (sheetsContent.jsx:554-556),
+    //   not a family from that catalog. So the fold here is empty: declared,
+    //   not "the whole catalog" (which is what null means).
     familyIds: Object.freeze([]),
     contract: deepFreeze({
       // ground: a new enum value. SheetsPage renders <main className="sheets-root">
@@ -424,19 +426,22 @@ export const PRODUCT_SURFACES = Object.freeze([
         //   surface is not a stage cast at all, so no arm of it is the answer.
         stageBranch: null,
         projectSlot: null,
-        // tab: ProductSurfaceTabs.jsx:68 filters on this slot. False today, so
+        // tab: ProductSurfaceTabs.jsx:72 filters on this slot. False today, so
         //   slice 5b renders the same four tabs it rendered before.
         tab: false,
       },
-      // No toolbar markup exists in src/site/sheets/** (SheetsPage.jsx renders
-      // SheetsSet only, :54-55).
+      // toolbar: false/null, not "no markup". SheetFrame.jsx:81-92 renders a
+      // per-sheet sheet-nav, sheetsContent.jsx:84-85 a print button, and
+      // sheetsContent.jsx:169 a /try CTA: real chrome exists on the page. None
+      // of it is DraftingRibbon / NavRail / JobRail / dock, the contract's own
+      // toolbar vocabulary, which is what this slot declares the absence of.
       toolbar: { ribbon: false, home: null, quick: null },
       // No rails: nothing in the sheets arm mounts a nav rail, job rail or dock.
       rails: { left: 'none', right: 'none', dock: null },
       // groundMaterial: the solar accent and the string overlay are drawing-
-      //   ground material (App.jsx:2296, :2313); this ground carries neither.
+      //   ground material (App.jsx:2336, :2353); this ground carries neither.
       groundMaterial: { layerAccent: null, solarStrings: false },
-      // commandLine: App.jsx:3419's PromptBox is inside the console; the sheets
+      // commandLine: App.jsx:3479's PromptBox is inside the console; the sheets
       //   arm mounts no prompt at all.
       commandLine: false,
       // authoring: no AuthorPanel is reachable from a page with no rail.
@@ -479,7 +484,11 @@ const SURFACE_IDS = new Set(PRODUCT_SURFACES.map(({ id }) => id))
 // addressable so `surfaceContract('sheets')` returns the sheets contract
 // rather than CAD's.
 const SELECTABLE_SURFACE_IDS = new Set(
-  PRODUCT_SURFACES.filter(({ contract }) => contract?.chrome?.tab).map(({ id }) => id),
+  // Unguarded, matching every other chrome.tab reader (ProductSurfaceTabs.jsx:72):
+  // the schema test (Surface Contract — schema) pins every id in this same
+  // module-scope array to declare `chrome.tab` exactly once, so a missing slot
+  // here would already be a failing test elsewhere, not a runtime possibility.
+  PRODUCT_SURFACES.filter(({ contract }) => contract.chrome.tab).map(({ id }) => id),
 )
 
 export function normalizeProductSurface(value) {
@@ -521,7 +530,7 @@ export function productSurfaceStates({ sessionActive, hasDrawing, apsLive, iosRe
       : { state: 'setup', label: 'Setup required' },
     // sheets: the one surface with NO precondition. SheetsPage.jsx renders its
     // content immediately with no auth gate, no drawing and no readiness
-    // check; loadDemoSolve (:30) is a soft enhancement with static fallbacks
+    // check; loadDemoSolve (SheetsPage.jsx:31) is a soft enhancement with static fallbacks
     // (:26-28), never a gate. So this row takes no argument and has no branch:
     // inventing a sign-in or setup state here would be a fabricated condition.
     sheets: { state: 'available', label: 'Ready' },

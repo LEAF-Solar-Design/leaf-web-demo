@@ -13,9 +13,13 @@ const BY_ID = new Map(PRODUCT_SURFACES.map((surface) => [surface.id, surface]))
 
 /**
  * The families a surface's rail and ribbon carry. `familyIds: null` means
- * the whole catalog (CAD); a listed fold filters AND orders by the list.
- * Unknown surface ids fail open to the whole catalog — a new tab must never
- * boot with an empty tool rail because this map lagged.
+ * the whole catalog (CAD); a non-empty fold filters AND orders by the list.
+ * A DECLARED empty fold (`familyIds: []`, sheets) is honest, not a lag: it
+ * returns no families on purpose, and the rail renders "No tools for this
+ * surface yet." rather than fabricating a catalog the page never reads.
+ * Unknown surface ids (no manifest record at all) fail open to the whole
+ * catalog instead — a new tab must never boot with an empty tool rail
+ * because this map lagged.
  */
 export function familiesForSurface(families, surfaceId) {
   const surface = BY_ID.get(surfaceId)
