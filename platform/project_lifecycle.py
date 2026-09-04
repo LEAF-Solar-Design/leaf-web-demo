@@ -198,6 +198,15 @@ def _require_project_role(
     )
 
 
+#: Bound for the one membership re-read below. It runs once per project per
+#: request (review finding 4: previously up to LIST_MAX_LIMIT times on the
+#: session list page before that route memoized the binding), and every
+#: caller of this seam -- conversation, approval, checkpoint, execution, and
+#: session routes -- gets the same fail-closed bound rather than each
+#: inventing its own.
+_PROJECT_ROLE_STATEMENT_TIMEOUT_MS = 3000
+
+
 def require_project_role(
     org_id: uuid.UUID, project_id: uuid.UUID, actor_binding_id: uuid.UUID, *,
     write: bool,
@@ -211,6 +220,9 @@ def require_project_role(
     """
     def operation(conn: Any) -> str:
         with conn.cursor() as cur:
+            cur.execute(
+                f"SET LOCAL statement_timeout = {int(_PROJECT_ROLE_STATEMENT_TIMEOUT_MS)}"
+            )
             _project_row(cur, org_id, project_id, lock=False)
             return _require_project_role(
                 cur, org_id, project_id, actor_binding_id,

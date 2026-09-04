@@ -136,7 +136,24 @@ def overlay_store():
     return store
 
 
-def require_project_access(tenant: Any, project_id: Any, *, write: bool) -> str:
+def resolve_caller_binding(tenant: Any) -> Any:
+    """Resolve the calling identity's binding ONCE, for callers that will
+    check several projects in the same request (review finding 4: the
+    binding does not depend on the project, so re-resolving it per project on
+    a list page is up to LIST_MAX_LIMIT redundant round trips). Raises
+    ``ProjectSessionForbidden`` on no verified identity, mirroring
+    ``require_project_access``'s own guard so a caller that skips memoizing
+    sees the identical failure mode."""
+    subject = getattr(tenant, "subject", None)
+    if not isinstance(subject, str) or not subject:
+        raise ProjectSessionForbidden("project access requires a verified identity")
+    _ensure_platform_package()
+    store, _db, _platform_deps = _load_platform()
+    return store.resolve_active_identity_binding("auth0", subject)
+
+
+def require_project_access(tenant: Any, project_id: Any, *, write: bool,
+                           binding: Any = None) -> str:
     """Return the canonical org id after a fresh project-membership check.
 
     ``tenant`` is the verified ``TenantContext`` supplied by server deps.  The
@@ -144,21 +161,23 @@ def require_project_access(tenant: Any, project_id: Any, *, write: bool) -> str:
     project returns ``LookupError`` so routes can preserve their identical 404
     shape.  A same-tenant actor with the wrong or revoked role raises the
     explicit forbidden type.
+
+    ``binding`` lets a caller checking several projects in one request (the
+    session list route) supply the identity binding ``resolve_caller_binding``
+    already resolved once, instead of this function re-resolving it per
+    project (review finding 4). ``None`` (every other caller) resolves it
+    here exactly as before.
     """
-    subject = getattr(tenant, "subject", None)
-    if not isinstance(subject, str) or not subject:
-        raise ProjectSessionForbidden("project access requires a verified identity")
     _ensure_platform_package()
     import leaf_platform.project_lifecycle as lifecycle  # noqa: PLC0415
     try:
         org_id = uuid.UUID(str(tenant))
         project_uuid = uuid.UUID(str(project_id))
-        store, _db, _platform_deps = _load_platform()
-        binding = store.resolve_active_identity_binding("auth0", subject)
-        if binding is None or binding.platform_tenant_id != org_id:
+        resolved = binding if binding is not None else resolve_caller_binding(tenant)
+        if resolved is None or resolved.platform_tenant_id != org_id:
             raise LookupError("project session is unavailable")
         lifecycle.require_project_role(
-            org_id, project_uuid, binding.binding_id, write=write,
+            org_id, project_uuid, resolved.binding_id, write=write,
         )
         return str(org_id)
     except lifecycle.LifecycleUnavailable as exc:
@@ -171,8 +190,12 @@ def require_project_access(tenant: Any, project_id: Any, *, write: bool) -> str:
 
 def require_project_session_access(
     session: Optional[Dict[str, Any]], tenant: Any, *, write: bool,
+    binding: Any = None,
 ) -> Optional[Dict[str, Any]]:
-    """Authorize one current session operation without changing legacy rows."""
+    """Authorize one current session operation without changing legacy rows.
+
+    ``binding``: see ``require_project_access``.
+    """
     if session is None or str(session.get("tenant_id")) != str(tenant):
         return None
     org_id = session.get("org_id")
@@ -181,7 +204,7 @@ def require_project_session_access(
         return session
     if org_id is None or project_id is None or str(org_id) != str(tenant):
         return None
-    require_project_access(tenant, project_id, write=write)
+    require_project_access(tenant, project_id, write=write, binding=binding)
     return session
 
 
