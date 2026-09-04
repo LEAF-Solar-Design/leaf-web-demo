@@ -141,9 +141,12 @@ export default function EngineSessionProvider({
   const [ortho, setOrthoState] = useState(false)
   const setOrtho = useCallback((next) => { setOrthoState(next === true) }, [])
   // W4f-5: OSNAP (F3) snaps a pick to the document's endpoints, midpoints
-  // and centres within a pixel tolerance. Off until gate 4 settles the
-  // default (the reference ships it on).
-  const [osnap, setOsnapState] = useState(false)
+  // and centres within a pixel tolerance. W4f-7: ON by default, the
+  // convention a drafter arrives with (AutoCAD's OSMODE initial value 4133
+  // and BricsCAD's 4135 both leave running object snap on); the reference
+  // itself starts suppressed, so this is a deliberate departure for flow,
+  // decided 2026-09-04 (askall w4fnext). F3 or the prompt's chip turns it off.
+  const [osnap, setOsnapState] = useState(true)
   const setOsnap = useCallback((next) => { setOsnapState(next === true) }, [])
 
   const canSave = saveTarget !== null && saveTarget !== undefined
