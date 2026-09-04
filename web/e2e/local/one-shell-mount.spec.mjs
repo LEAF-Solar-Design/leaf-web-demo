@@ -600,7 +600,10 @@ test.describe('route matrix, rail ON', () => {
     const draw = ribbon.locator('[data-group="draw"]')
     const engineServedEarly = await request.get('/engine/engine.js').catch(() => null)
     if (engineServedEarly && engineServedEarly.status() === 200) {
-      await expect(page.locator('.workspace-card[data-engine-document^="rooftop_demo-v"]')).toHaveCount(1, { timeout: 60_000 })
+      // The stamp is `<drawing id>-v<head>.dxf` (the stack's console drawing
+      // is `demo`; staging's is `rooftop_demo`), and no import has happened
+      // yet, so any head stamp is the opener's.
+      await expect(page.locator('.workspace-card[data-engine-document*="-v"]')).toHaveCount(1, { timeout: 60_000 })
       const headDoc = await page.locator('.workspace-card').getAttribute('data-engine-document')
       test.info().annotations.push({ type: 'engine-reach', description: `head opened as ${headDoc}` })
       await expect(draw.locator('.ribbon-note')).toHaveCount(0)
@@ -613,8 +616,8 @@ test.describe('route matrix, rail ON', () => {
       const countBefore = Number(await page.getByTestId('cad-edit-entity-count').textContent())
       expect(countBefore).toBeGreaterThan(0)
       await draw.locator('[data-tool="draw:createLine"]').click()
-      await page.getByLabel('ribbon x').fill('0')
-      await page.getByLabel('ribbon y').fill('0')
+      await page.getByLabel('ribbon x', { exact: true }).fill('0')
+      await page.getByLabel('ribbon y', { exact: true }).fill('0')
       await page.getByLabel('ribbon x2').fill('10')
       await page.getByLabel('ribbon y2').fill('10')
       await page.getByLabel('ribbon y2').press('Enter')

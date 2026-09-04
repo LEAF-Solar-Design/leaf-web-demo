@@ -174,6 +174,7 @@ def main(argv):
             mark = 'ok ' if r['ok'] else 'MISS'
             print(f"{mark} {r['axis']}={r['reference']:>4}  ours={r['ours']}  delta={r['delta']}")
         print(f"chrome diff {chrome:.2f}% (gate {CHROME_GATE}%)   whole frame {whole:.2f}%")
+        print(f"canvas diff {canvas_diff:.2f}% (gate {CANVAS_GATE}%, {'THE gate' if canvas_only else 'reported'})")
         print(f"our y edges: {our_y[:60]}")
         print(f"our x edges (y=500): {our_x[:20]}")
         print('GATE ' + ('PASS' if ok else 'FAIL'))

@@ -1,10 +1,22 @@
 import { describe, expect, it } from 'vitest'
 
-import { ARC_STEP_DEG, CIRCLE_SEGMENTS, MAX_POINTS, MIN_ARC_POINTS, engineIntake, entityToPolyline } from './engineIntake.js'
+import { ARC_STEP_DEG, CIRCLE_SEGMENTS, MAX_POINTS, MIN_ARC_POINTS, engineIntake, entityToPolyline, hexHandle } from './engineIntake.js'
 
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps
 
 describe('engineIntake (W4f slice A0): engine entities -> viewer intake', () => {
+  it('W4g-1b: the intake handle is the DXF hex form of the worker\'s decimal id, so a canvas pick names the drawing\'s own handle', () => {
+    expect(hexHandle('37986')).toBe('9462')
+    expect(hexHandle('7')).toBe('7')
+    expect(hexHandle('255')).toBe('FF')
+    expect(hexHandle('18446744073709551615')).toBe('FFFFFFFFFFFFFFFF')
+    expect(hexHandle('e1')).toBe('e1')
+    expect(hexHandle('')).toBe('')
+    expect(hexHandle(undefined)).toBe('')
+    const line = entityToPolyline({ id: '37986', type: 'LINE', layer: 'Panels', closed: false, vertices: [[0, 0, 0], [1, 1, 0]] })
+    expect(line.handle).toBe('9462')
+  })
+
   it('maps a line and a polyline as they are, keyed by the engine handle, layer and closed flag', () => {
     const line = entityToPolyline({ id: '7', type: 'LINE', layer: 'Panels', closed: false, vertices: [[0, 0, 0], [100, 50, 0]] })
     expect(line).toEqual({ handle: '7', layer: 'Panels', pts: [[0, 0, 0], [100, 50, 0]], closed: false })

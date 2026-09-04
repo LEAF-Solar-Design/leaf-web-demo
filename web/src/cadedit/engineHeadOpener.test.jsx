@@ -181,6 +181,34 @@ describe('EngineHeadOpener', () => {
     expect(fetchDxf).not.toHaveBeenCalled()
   })
 
+  it('a fetch that resolves while an edit is in flight stands down, then re-opens only if the engine is clean once busy clears', async () => {
+    const fetchDxf = vi.fn(async () => answer(1))
+    const studio = mount({ fetchDxf })
+    await settle()
+    await waitFor(() => expect(workers.length).toBe(1))
+    loaded(workers[0], headDocumentId('rooftop_demo', 1))
+    // The head moves; the fetch for v2 is in flight...
+    let resolve
+    fetchDxf.mockImplementation(() => new Promise((r) => { resolve = r }))
+    studio.rerender({ headKey: 2 })
+    await settle()
+    expect(fetchDxf).toHaveBeenCalledTimes(2)
+    // ...and the drafter applies an edit: busy is set now, its reply lands later.
+    act(() => { studio.context.session.actions.select('e1') })
+    act(() => { studio.context.session.actions.applyEdit('move', { dx: '1', dy: '0' }) })
+    expect(studio.context.session.busy).toBe(true)
+    await act(async () => { resolve(answer(2)); await Promise.resolve(); await Promise.resolve(); await Promise.resolve() })
+    // No load over the in-flight edit.
+    expect(workers[0].posted.filter((m) => m.type === 'loadDocument')).toHaveLength(1)
+    // The edit lands: dirty. Busy clears, the effect tries again and reports stale, never loading.
+    fetchDxf.mockImplementation(async () => answer(2))
+    workers[0].emit({ type: 'editApplied', op: 'move', ok: true, entities: [LINE], entityCount: 1, bytes: new Uint8Array([48, 10]), byteLength: 2 })
+    await settle()
+    expect(studio.context.session.dirty).toBe(true)
+    expect(studio.context.reach.state).toBe(REACH_STATE.STALE)
+    expect(workers[0].posted.filter((m) => m.type === 'loadDocument')).toHaveLength(1)
+  })
+
   it('hidden version headers (a cross-origin API) fall back to the head the host holds; no head at all is the sentence', async () => {
     const fetchDxf = vi.fn(async () => ({ bytes: BYTES, version: null, head: null, source: '', etag: null }))
     const studio = mount({ fetchDxf, headKey: 7 })

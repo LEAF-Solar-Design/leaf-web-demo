@@ -14,6 +14,23 @@ export const MIN_ARC_POINTS = 8
 const finite = (v) => typeof v === 'number' && Number.isFinite(v)
 const point = (v) => (Array.isArray(v) && finite(v[0]) && finite(v[1]) ? [v[0], v[1], finite(v[2]) ? v[2] : 0] : null)
 
+const DECIMAL_ID = /^\d{1,20}$/
+
+/**
+ * W4g-1b: the worker names an entity by its handle VALUE in decimal
+ * ("37986"), while every intake, the console's selection readout and the
+ * write contract name the same entity by the DXF handle in hex ("9462").
+ * Now that the console's own drawing is the engine document, the viewer
+ * intake carries the hex form so a pick on the canvas reads as the drawing's
+ * own handle; the engine's decimal id stays the engine's (the prompts and
+ * the picker never see this). BigInt: a handle can exceed 2^53.
+ */
+export function hexHandle(id) {
+  const raw = String(id ?? '')
+  if (!DECIMAL_ID.test(raw)) return raw
+  return BigInt(raw).toString(16).toUpperCase()
+}
+
 function circlePoints(cx, cy, z, r) {
   const pts = new Array(CIRCLE_SEGMENTS)
   for (let i = 0; i < CIRCLE_SEGMENTS; i += 1) {
@@ -41,7 +58,7 @@ function arcPoints(cx, cy, z, r, startDeg, endDeg) {
 /** One entity -> one intake polyline, or null when it has nothing drawable. */
 export function entityToPolyline(entity) {
   if (!entity || typeof entity !== 'object') return null
-  const handle = String(entity.id ?? entity.handle ?? '')
+  const handle = hexHandle(entity.id ?? entity.handle ?? '')
   const layer = typeof entity.layer === 'string' && entity.layer ? entity.layer : '0'
   const verts = Array.isArray(entity.vertices) ? entity.vertices : []
   const type = String(entity.type || '')

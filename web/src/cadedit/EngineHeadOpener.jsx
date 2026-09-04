@@ -57,9 +57,12 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
   const holdsHead = HEAD_DOC.test(documentId) && documentId.startsWith(`${drawingId}-v`)
   const dirty = session.dirty === true
 
+  // A drawing switch abandons any fetch in flight for the old drawing. The
+  // attempt key already carries the drawing id, so it is NOT cleared here:
+  // clearing it between StrictMode's two effect invocations issued a second
+  // fetch on every dev mount (kimi, #1006).
   useEffect(() => {
     generationRef.current += 1
-    attemptRef.current = ''
   }, [drawingId])
 
   useEffect(() => {
@@ -96,12 +99,19 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
     const generation = generationRef.current
     setReach({ state: REACH_STATE.OPENING, sentence: `opening ${drawingId} in the browser engine...` })
     let cancelled = false
+    // Settled = this attempt reached a terminal verdict (loaded, refused,
+    // stood down). A cancel BEFORE that (the session changed under the
+    // fetch: an edit went busy, an import landed) drops the bytes AND
+    // re-arms the attempt, so the next quiet moment re-evaluates instead of
+    // leaving the head unopened and the reach stuck at "opening".
+    let settled = false
     ;(async () => {
       let answer
       try {
         answer = await fetchRef.current(drawingId)
       } catch (error) {
         if (cancelled || generation !== generationRef.current) return
+        settled = true
         setReach({
           state: REACH_STATE.FAILED,
           sentence: `the drawing could not be opened in the browser engine: ${error?.message || 'fetch failed'}; import a DXF instead`,
@@ -109,6 +119,7 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
         return
       }
       if (cancelled || generation !== generationRef.current) return
+      settled = true
       const latest = sessionRef.current
       // A document appeared while the bytes were in flight (a hand import,
       // or this opener's own earlier open): it wins, the bytes are dropped.
@@ -118,6 +129,15 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
       }
       if (latest.dirty === true) {
         setReach({ state: REACH_STATE.STALE, sentence: 'the drawing moved on the server; save or discard the browser edits to open the new version' })
+        return
+      }
+      // An edit, undo or redo is in flight (busy set synchronously, its
+      // reply not yet landed, so `dirty` cannot say yet): loading now would
+      // clobber it (kimi, #1006). Stand down and let the effect try again
+      // when busy clears; by then dirty tells the truth.
+      if (latest.busy) {
+        attemptRef.current = ''
+        setReach({ state: REACH_STATE.IDLE, sentence: '' })
         return
       }
       const bytes = answer?.bytes
@@ -140,7 +160,10 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
       openBytes(bytes, headDocumentId(drawingId, version))
       setReach({ state: REACH_STATE.OPEN, sentence: '', version, head: Number(answer?.head) || version, source: String(answer?.source || '') })
     })()
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+      if (!settled) attemptRef.current = ''
+    }
     // present/holdsHead/dirty/busy are read from the same session object the
     // effect keys on; listing the derived booleans keeps the deps honest.
   }, [enabled, drawingId, headKey, present, holdsHead, dirty, session.busy, session.savedVersion, openBytes, setReach])
