@@ -1,9 +1,10 @@
 -- Authored-tool provenance on a drawing version (standardization slice 6a).
 --
--- `source_ref` is the sha256 the harness recorded in a `leaf.tool-source.v1`
--- receipt over an authored tool's source + manifest
--- (harness/contract/HARNESS-CONTRACT.md). It reaches the write path as
--- `execution_provenance.source_sha256` and is stored verbatim here; the read
+-- `source_ref` is the sha256 the SERVER measures over the published tool body it
+-- holds for the tool id (server/tool_loader.py published_tool_source_sha256),
+-- the same bytes every sandbox tier is fed and a genuine `leaf.tool-source.v1`
+-- receipt hashes. Nothing a sandbox returned ever reaches this column; a
+-- microvm receipt is only cross-checked against the server's digest. The read
 -- path (server/routers/drawings.py `_source_ref`) bounds and charset-validates
 -- it before it can reach a client, so free text in this column can never be
 -- rendered as provenance.

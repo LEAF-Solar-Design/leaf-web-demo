@@ -1128,14 +1128,58 @@ def published_tool_source_sha256(tool: Dict[str, Any],
     local = resolve_local_file(tool, tenant_id)
     if local is None:
         return None
+    # Containment, restated HERE so the read below is provably inside an allowed
+    # root: resolve_local_file already refused absolute / `..` / `~` references
+    # (_is_unsafe_ref) and containment-checked the join (_resolve_within, inside
+    # the vendored fold core), but that library boundary is opaque to a static
+    # taint scan, so the same rule is applied once more on the normalised real
+    # path against the SAME roots. A path outside every root is None, never read.
+    contained = _contained_published_path(local, tenant_id)
+    if contained is None:
+        return None
     try:
-        encoded = local.read_text(encoding="utf-8").encode("utf-8")
+        # Bounded read of the raw bytes, then the SAME text-mode view the sandbox
+        # tiers get from Path.read_text: UTF-8 decode with universal newlines
+        # (CRLF and lone CR become LF), re-encoded. A CRLF body on Windows must
+        # hash to what the sandbox and a genuine receipt hash, not to its raw bytes.
+        with open(contained, "rb") as handle:
+            raw = handle.read(_SANDBOX_LIMITS["source_bytes"] + 1)
+        text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        encoded = text.encode("utf-8")
     except (OSError, ValueError):  # UnicodeDecodeError is a ValueError
         return None
     if len(encoded) > _SANDBOX_LIMITS["source_bytes"]:
         return None
     return hashlib.sha256(encoded).hexdigest()
 
+
+def _published_source_roots(tenant_id: Optional[str] = None) -> List[Path]:
+    """Every root a published tool body may resolve under: the requesting tenant's
+    repo, the server dir, authored/ and builtins/. Mirrors resolve_local_file's
+    candidate roots exactly; there is no fifth place a body can live."""
+    roots: List[Path] = []
+    troot = _tenant_repo_root(tenant_id)
+    if troot is not None:
+        roots.append(troot)
+    roots.extend((SERVER_DIR, AUTHORED_DIR, BUILTIN_DIR))
+    return roots
+
+
+def _contained_published_path(local: Path, tenant_id: Optional[str] = None) -> Optional[str]:
+    """The normalised real path of ``local`` when it lies INSIDE one of the allowed
+    roots, else None. os.path.normpath over os.path.realpath, then a prefix check
+    against each normalised root plus a separator, so ``root2`` cannot pass as
+    ``root`` and a symlink out of the root is measured at its target. Fails to None
+    on any OS error."""
+    try:
+        real = os.path.normpath(os.path.realpath(str(local)))
+        for root in _published_source_roots(tenant_id):
+            base = os.path.normpath(os.path.realpath(str(root)))
+            if real.startswith(base + os.sep):
+                return real
+    except OSError:
+        return None
+    return None
 
 def _needs_aps(tool: Dict[str, Any], tenant_id: Optional[str] = None) -> bool:
     """True when the tool has no local .py and must run on APS DA."""

@@ -440,12 +440,12 @@ def _denied(exc: Exception) -> JSONResponse:
 
 
 # The authored-tool provenance a version row may carry. It is the sha256 the
-# harness put in a `leaf.tool-source.v1` receipt over the tool's source +
-# manifest (harness/contract/HARNESS-CONTRACT.md), reaching the write path as
-# `execution_provenance.source_sha256` and stored as the version's
-# `source_ref`. NOTHING else is ever minted here: a version written by a tool
-# with no receipt carries null, and null means "not established", never
-# "unauthored".
+# SERVER measured over the published tool body it holds for the tool id
+# (server/tool_loader.py published_tool_source_sha256, stamped in
+# server/write_loop.py), the same bytes a genuine `leaf.tool-source.v1`
+# receipt hashes; nothing a sandbox returned is ever stored. NOTHING else is
+# minted here: a version written by a tool whose body the server does not hold
+# carries null, and null means "not established", never "unauthored".
 _SOURCE_REF_MAX_LEN = 128          # bound before any regex touches the value
 _SOURCE_REF_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 

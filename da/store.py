@@ -1784,8 +1784,9 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
             "bytes": len(data), "sha256": _sha256(data),
             "workitem_id": meta.get("workitem_id"), "tool": meta.get("tool"),
             "note": meta.get("note"),
-            # Authored-tool provenance (`leaf.tool-source.v1` receipt digest)
-            # when the writer had one. Stored verbatim and validated on the
+            # Authored-tool provenance: the server's own sha256 over the
+            # published tool body (never a sandbox claim), when the server
+            # held one. Stored verbatim and validated on the
             # way OUT (server/routers/drawings.py `_source_ref`), so a drifted
             # value can never be dressed as provenance by a reader.
             "source_ref": meta.get("source_ref"),
