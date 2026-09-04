@@ -58,6 +58,12 @@ class RestoredDrawingVersion:
     version: int
     parent_version: int
     restored_head_readable: bool
+    # The restored source version's authored-tool receipt digest, carried
+    # forward because the new head's BYTES are that version's bytes verbatim
+    # (`source_bytes` is copied, not re-planned). Attributing them to the tool
+    # whose receipt produced them is a fact about the payload, not a guess
+    # about the restore. `None` whenever the source carried none.
+    source_ref: Optional[str] = None
 
 
 class RestoreSourceUnavailable(Exception):
@@ -433,9 +439,42 @@ def _denied(exc: Exception) -> JSONResponse:
                           status_code=403)
 
 
+# The authored-tool provenance a version row may carry. It is the sha256 the
+# harness put in a `leaf.tool-source.v1` receipt over the tool's source +
+# manifest (harness/contract/HARNESS-CONTRACT.md), reaching the write path as
+# `execution_provenance.source_sha256` and stored as the version's
+# `source_ref`. NOTHING else is ever minted here: a version written by a tool
+# with no receipt carries null, and null means "not established", never
+# "unauthored".
+_SOURCE_REF_MAX_LEN = 128          # bound before any regex touches the value
+_SOURCE_REF_RE = re.compile(r"\A[0-9a-f]{64}\Z")
+
+
+def _source_ref(value: Any) -> Optional[str]:
+    """Validate a stored `source_ref` on the way OUT. Fails closed to None.
+
+    The manifest is store-owned data, and the PostgreSQL authority's column is
+    free text, so a drifted, truncated or hostile value must never reach the
+    wire dressed as provenance. Bounded first (a pathological megabyte string
+    is rejected on length, never scanned), then charset-validated against the
+    exact shape a `leaf.tool-source.v1` receipt digest has: 64 lowercase hex
+    characters. Anything else reads as "no provenance", which is the honest
+    answer for a value we cannot vouch for. No allocation on the hot path
+    beyond the one `str` check; called once per version row."""
+    if not isinstance(value, str):
+        return None
+    if len(value) > _SOURCE_REF_MAX_LEN:
+        return None
+    return value if _SOURCE_REF_RE.match(value) else None
+
+
 def _version_row(e: Dict[str, Any]) -> Dict[str, Any]:
     """One manifest `versions[]` entry → the version-history row shape
-    (CONTRACT-ADDENDUM §11 manifest fields; missing optional fields → null)."""
+    (CONTRACT-ADDENDUM §11 manifest fields; missing optional fields → null).
+
+    `source_ref` (added standardization slice 6a) is a NULLABLE addition to a
+    frozen shape: every existing key keeps its meaning, and a client that does
+    not know the key is unaffected."""
     parent = e.get("parent")
     return {
         "v": int(e["v"]),
@@ -446,6 +485,7 @@ def _version_row(e: Dict[str, Any]) -> Dict[str, Any]:
         "tool": e.get("tool"),
         "workitem_id": e.get("workitem_id"),
         "note": e.get("note"),
+        "source_ref": _source_ref(e.get("source_ref")),
     }
 
 
@@ -625,6 +665,21 @@ def restore_drawing_version(tenant_id: str, drawing_id: str, target_version: int
     except (KeyError, ValueError) as exc:
         raise RestoreSourceUnavailable(str(exc)) from exc
 
+    # Read the source version's provenance BEFORE the write guard, from the
+    # same manifest `resolve_version` just proved the version is in. A
+    # manifest that cannot be read here is not a restore failure: provenance
+    # degrades to None and the restore proceeds, because losing a chip must
+    # never cost a tenant a recovery.
+    source_ref: Optional[str] = None
+    try:
+        for entry in store.load_manifest(
+                backend, tenant_id, drawing_id).get("versions", []):
+            if int(entry.get("v")) == int(source_v):
+                source_ref = _source_ref(entry.get("source_ref"))
+                break
+    except (KeyError, ValueError, TypeError):
+        source_ref = None
+
     try:
         _, source_intake = write_loop.read_intake(
             backend, tenant_id, drawing_id, source_v)
@@ -655,7 +710,9 @@ def restore_drawing_version(tenant_id: str, drawing_id: str, target_version: int
                     new_version = write_loop._put_bytes_version(
                         backend, tenant_id, drawing_id, source_bytes,
                         parent_version=parent_version,
-                        meta={"tool": actor, "note": f"{actor} of version {target_version}"},
+                        meta={"tool": actor,
+                              "note": f"{actor} of version {target_version}",
+                              "source_ref": source_ref},
                         holder=put_holder, fence=fence,
                         require_parent_is_head=True,
                     )
@@ -675,6 +732,7 @@ def restore_drawing_version(tenant_id: str, drawing_id: str, target_version: int
         version=int(new_version),
         parent_version=parent_version,
         restored_head_readable=restored_head_readable,
+        source_ref=source_ref,
     )
 
 
@@ -753,7 +811,11 @@ def restore_version(drawing_id: str, version: int,
         "drawing_id": drawing_id,
         "restored_from": int(version),
         "new_version": {"drawing_id": drawing_id, "version": restored.version,
-                        "parent": restored.parent_version},
+                        "parent": restored.parent_version,
+                        # Slice 6a: the row the client is about to render
+                        # already knows its provenance, so the drawer need not
+                        # re-read the chain to draw the chip.
+                        "source_ref": restored.source_ref},
         "head": restored.version,
         "latest": restored.version,
         # False only in the narrow committed-but-mirror-failed live case: the

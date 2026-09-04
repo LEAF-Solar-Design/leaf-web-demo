@@ -30,6 +30,10 @@ async function mountVersionSurface(page, {
   let restoreCount = 0
   let intakeReadsAfterRestore = 0
   let deltasRequested = false
+  // Every non-GET request the surface makes to the API. A read-only preview
+  // must add NOTHING to this list; asserting on disabled buttons alone would
+  // pass against a UI that greys a control and still fires the request.
+  const mutating = []
   let releaseHistoryRefresh
   const historyRefreshGate = new Promise((resolve) => { releaseHistoryRefresh = resolve })
 
@@ -39,6 +43,7 @@ async function mountVersionSurface(page, {
     const method = request.method()
     const path = url.pathname
     const body = request.postData() ? request.postDataJSON() : {}
+    if (method !== 'GET') mutating.push(`${method} ${path}`)
     let result
 
     if (path === '/api/drawings/cat-panels/versions' && method === 'GET') {
@@ -120,6 +125,7 @@ async function mountVersionSurface(page, {
   await expect(page.getByRole('dialog', { name: 'Version history' })).toBeVisible()
 
   return {
+    mutating: () => [...mutating],
     deltasRequested: () => deltasRequested,
     intakeReadsAfterRestore: () => intakeReadsAfterRestore,
     restoreCount: () => restoreCount,
@@ -299,13 +305,22 @@ test('an undo that landed after the restore releases the lock instead of wedging
   expect(observed.intakeReadsAfterRestore()).toBe(2)
 })
 
-test('/try skips deltas and hides recovery controls while its head is readable', async ({ page }) => {
+// STANDARDIZATION SLICE 6a re-pin. This row asserted the ABSENCE of
+// `include_deltas` on /try, which encoded the drift the slice removes: /app
+// rendered delta chips and /try did not, from the same controller and the same
+// endpoint. Both shells now render the ONE VersionList primitive, so /try asks
+// for deltas exactly as the drawer does. The assertion is INVERTED on purpose,
+// not deleted: the query is still pinned, and a regression that stopped
+// requesting deltas would fail here.
+test('/try requests deltas like /app and still hides recovery controls while its head is readable', async ({ page }) => {
   const state = makeCatProofState()
   const versionQueries = []
+  const mutating = []
   await page.route('**/api/**', async (route) => {
     const request = route.request()
     const url = new URL(request.url())
     if (url.pathname.includes('/versions')) versionQueries.push(url.search)
+    if (request.method() !== 'GET') mutating.push(`${request.method()} ${url.pathname}`)
     const body = request.postData() ? request.postDataJSON() : {}
     const result = catProofResponse({
       method: request.method(), path: url.pathname, body,
@@ -323,5 +338,59 @@ test('/try skips deltas and hides recovery controls while its head is readable',
   await expect(page.getByTestId('operator-phase')).toContainText(/ready/i, { timeout: 15_000 })
   await expect(page.getByRole('button', { name: /^Restore/ })).toHaveCount(0)
   expect(versionQueries.length).toBeGreaterThan(0)
-  expect(versionQueries.some((query) => query.includes('include_deltas'))).toBe(false)
+
+  // Opening the tab is what runs loadHistory, and THAT is the call the slice
+  // changed: the controller has always asked for deltas, /try's adapter used
+  // to drop the flag on the floor.
+  await page.getByRole('tab', { name: /^Versions/ }).click()
+  // v2, NOT v1: the proof fixture's head is v1, and previewing the head is the
+  // controller's "back to head" branch, which would clear the preview it is
+  // supposed to open.
+  const olderRow = page.getByTestId('try-version-v2')
+  await expect(olderRow).toBeVisible({ timeout: 15_000 })
+  expect(versionQueries.some((query) => query.includes('include_deltas=1'))).toBe(true)
+
+  // READ-ONLY WHILE PREVIEWING, on /try. PR #409 dropped this assertion and
+  // #410 only half-closed the gap: a tool RUN was refused while previewing,
+  // but Undo/Redo stayed live, where /app has disabled them since it shipped.
+  const beforePreview = mutating.length
+  await olderRow.getByRole('button').first().click()
+  await expect(page.getByTestId('try-preview-write-lock')).toBeVisible()
+  // The request log is the load-bearing assertion: a disabled button proves
+  // nothing about a surface that greys a control and still fires the write.
+  // (/try's Undo/Redo chips live in the Execution tab and are unmounted here;
+  // that they carry `previewLocked` is pinned at source in
+  // src/site/toolCastPreviewLock.test.js, with a positive control, because in
+  // this fixture head is v1 and `canUndo` is false anyway — an e2e assertion
+  // on them would pass vacuously.)
+  expect(mutating.slice(beforePreview)).toEqual([])
+
+  await page.getByRole('button', { name: 'Back to head' }).click()
+  await expect(page.getByTestId('try-preview-write-lock')).toHaveCount(0)
+})
+
+
+// READ-ONLY WHILE PREVIEWING, on /app. The drawer has disabled its write
+// controls during a preview since it shipped; nothing pinned it after PR #409
+// removed the assertion, so it could have regressed silently.
+test('the /app drawer is read-only while previewing an older version and fires no mutating request', async ({ page }) => {
+  test.setTimeout(60_000)
+  const observed = await mountVersionSurface(page)
+  const history = page.getByRole('dialog', { name: 'Version history' })
+
+  const undo = page.getByRole('button', { name: 'Undo', exact: true })
+  const redo = page.getByRole('button', { name: 'Redo', exact: true })
+  await expect(undo).toBeEnabled()
+
+  const beforePreview = observed.mutating().length
+  await history.getByTestId('vh-row-v1').getByRole('button', { name: /^v1/ }).click()
+  await expect(history.getByText(/read-only preview/)).toBeVisible()
+  await expect(undo).toBeDisabled()
+  await expect(redo).toBeDisabled()
+  expect(observed.mutating().slice(beforePreview)).toEqual([])
+
+  await history.getByRole('button', { name: 'Back to head' }).click()
+  await expect(history.getByText(/read-only preview/)).toHaveCount(0)
+  await expect(undo).toBeEnabled()
+  expect(observed.mutating().slice(beforePreview)).toEqual([])
 })

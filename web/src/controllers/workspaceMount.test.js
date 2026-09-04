@@ -52,8 +52,11 @@ describe('operator mount', () => {
     expect(getDrawingIntake).toHaveBeenCalledWith(true, 'd1', 'head')
     mount.drawingOptions.loadVersion('d1', 'v3')
     expect(getDrawingIntake).toHaveBeenCalledWith(true, 'd1', 'v3')
-    mount.drawingOptions.loadVersions('d1')
-    expect(getDrawingVersions).toHaveBeenCalledWith(true, 'd1')
+    // Slice 6a: the options object is FORWARDED, not dropped. /try renders the
+    // same VersionList primitive /app's drawer does, delta chips included, and
+    // the controller asks for them; this adapter used to swallow the flag.
+    mount.drawingOptions.loadVersions('d1', { includeDeltas: true })
+    expect(getDrawingVersions).toHaveBeenCalledWith(true, 'd1', { includeDeltas: true })
     mount.drawingOptions.undoVersion('d1', 'cap')
     expect(undoDrawing).toHaveBeenCalledWith(true, 'd1', 'cap')
     mount.drawingOptions.redoVersion('d1', 'cap')
@@ -64,8 +67,8 @@ describe('operator mount', () => {
     const onApplyIntake = vi.fn()
     const onResetSelection = vi.fn()
     const mount = operatorWorkspaceMount({ onApplyIntake, onResetSelection })
-    mount.drawingOptions.loadVersions('d2')
-    expect(getDrawingVersions).toHaveBeenCalledWith(false, 'd2')
+    mount.drawingOptions.loadVersions('d2', { includeDeltas: true })
+    expect(getDrawingVersions).toHaveBeenCalledWith(false, 'd2', { includeDeltas: true })
     expect(mount.drawingOptions.onApplyIntake).toBe(onApplyIntake)
     expect(mount.drawingOptions.onResetSelection).toBe(onResetSelection)
   })

@@ -7,6 +7,11 @@ const app = readFileSync(join(ROOT, 'src', 'App.jsx'), 'utf8')
 const registry = readFileSync(join(ROOT, 'src', 'lib', 'actionRegistry.js'), 'utf8')
 const jobs = readFileSync(join(ROOT, 'src', 'controllers', 'useJobController.js'), 'utf8')
 const toolCast = readFileSync(join(ROOT, 'src', 'site', 'ToolCast.jsx'), 'utf8')
+// Slice 6a: the version rows and the preview strip both shells render moved
+// into ONE primitive. The pins below follow the behaviour to where it lives
+// rather than being deleted with the file that used to hold it.
+const versionList = readFileSync(join(ROOT, 'src', 'components', 'VersionList.jsx'), 'utf8')
+const versionHistory = readFileSync(join(ROOT, 'src', 'components', 'VersionHistory.jsx'), 'utf8')
 const styles = readFileSync(join(ROOT, 'src', 'styles.css'), 'utf8')
 const landing = readFileSync(join(ROOT, 'src', 'site', 'landing.css'), 'utf8')
 const demo = readFileSync(join(ROOT, 'src', 'demo', 'demo.css'), 'utf8')
@@ -94,9 +99,20 @@ assert(
   'previewing an older version must lock drawing writes on /try',
 )
 assert(
-  toolCast.includes('data-testid="try-preview-write-lock"') &&
-    toolCast.includes('Back to head'),
+  versionList.includes('data-testid="try-preview-write-lock"') &&
+    versionList.includes('Back to head') &&
+    toolCast.includes('<VersionPreviewStrip') &&
+    toolCast.includes('variant="tab"'),
   'the preview write lock must say it is locked and name the way back to head',
+)
+assert(
+  versionList.includes('data-testid={`try-version-v${v}`}') &&
+    versionList.includes('data-testid={`vh-row-v${v}`}') &&
+    toolCast.includes('<VersionList') &&
+    // /app reaches the primitive through the drawer, which is now chrome only.
+    versionHistory.includes('<VersionList') &&
+    app.includes('<VersionHistory'),
+  'both shells must render the ONE version-list primitive, keeping their testids',
 )
 assert(
   !styles.includes('animation: none !important') && !landing.includes('animation: none !important'),

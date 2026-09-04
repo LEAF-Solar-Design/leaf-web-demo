@@ -394,6 +394,11 @@ _AUTHORITY_REQUIRED_COLUMNS = {
             "byte_count", "content_sha256", "workitem_id", "tool", "note", "state",
             "reservation_token", "reservation_expires_at", "created_at", "ready_at",
             "intake_ref", "intake_sha256",
+            # 0052: authored-tool receipt digest, read by da/store.py's manifest
+            # projection. Required, not optional: the SELECT names it, so a
+            # database without the migration must fail readiness LOUDLY rather
+            # than 500 every version read.
+            "source_ref",
         },
     },
     "upload": {
@@ -416,6 +421,11 @@ _AUTHORITY_REQUIRED_COLUMNS = {
             "byte_count", "content_sha256", "workitem_id", "tool", "note", "state",
             "reservation_token", "reservation_expires_at", "created_at", "ready_at",
             "intake_ref", "intake_sha256",
+            # 0052: authored-tool receipt digest, read by da/store.py's manifest
+            # projection. Required, not optional: the SELECT names it, so a
+            # database without the migration must fail readiness LOUDLY rather
+            # than 500 every version read.
+            "source_ref",
         },
         "drawing_upload_attempts": {
             "tenant_id", "drawing_id", "attempt", "marker", "status",

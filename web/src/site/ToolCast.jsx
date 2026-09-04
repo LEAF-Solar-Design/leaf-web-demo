@@ -72,6 +72,7 @@ import {
   prepareCatalogRunParams,
   stageRunIntent,
 } from '../runIntent.js'
+import VersionList, { VersionPreviewStrip } from '../components/VersionList.jsx'
 import { navigate } from './router.js'
 import {
   productSurfaceFromSearch, productSurfaceStates, searchForProductSurface, surfaceContract,
@@ -221,6 +222,10 @@ export default function ToolCast({
   // console is documented, and preserved here on purpose, not fixed).
   // src/site/surfaceGates.test.js pins this equal to the old ternary.
   const stageBranch = surfaceContract(activeSurface).chrome.stageBranch
+  // Slice 6a: the version tab mounts where the CONTRACT says versions exist
+  // (`drawing` today on cad and solar), never on a surface literal. A surface
+  // declaring `none` gets no Versions tab and no version panel at all.
+  const versionsMounted = surfaceContract(activeSurface).versions !== 'none'
   const {
     converse,
     bindConverseProject,
@@ -273,6 +278,13 @@ export default function ToolCast({
   const [busy, setBusy] = useState(false)
   const [leftView, setLeftView] = useState('operator')
   const [rightView, setRightView] = useState('execution')
+  // Fail closed on a surface switch: if the operator was on the Versions tab
+  // and moves to a surface whose contract declares `none`, the tab unmounts,
+  // and a tabpanel labelled by a button that no longer exists is a dangling
+  // aria reference. Fall back to the tab every surface has.
+  useEffect(() => {
+    if (!versionsMounted) setRightView((view) => (view === 'versions' ? 'execution' : view))
+  }, [versionsMounted])
   const [selectedCatalogTool, setSelectedCatalogTool] = useState(null)
   const [authorSeed, setAuthorSeed] = useState('')
   const [authorSeedSignal, setAuthorSeedSignal] = useState(0)
@@ -283,9 +295,6 @@ export default function ToolCast({
   const [toast, setToast] = useState(null)
   const [drawer, setDrawer] = useState(null)
   const [uploadDragActive, setUploadDragActive] = useState(false)
-  const [confirmingRecovery, setConfirmingRecovery] = useState(null)
-  const [recoveringVersion, setRecoveringVersion] = useState(null)
-  const [recoveryError, setRecoveryError] = useState(null)
   const [opsOpen, setOpsOpen] = useState(() => !PUBLIC_DEMO && new URLSearchParams(window.location.search).get('ops') === '1')
   const [quotaAt, setQuotaAt] = useState(0)
   const [tourOn, setTourOn] = useState(false)
@@ -938,17 +947,22 @@ export default function ToolCast({
     if (!PUBLIC_DEMO) checkout.actions.refresh()
   }, [busy, canOperate, catalog.actions, catalogRunContext, checkout.actions, checkout.lockedByOther, drawing.mutationsBlocked, drawing.previewing, drawing.shown, jobRunning, previewLocked, runTrackedJob, workspace, writeLocked])
 
+  // The recovery EFFECT only (slice 6a). The two-step confirm, the pending
+  // label, the single-flight guard and the error banner all live in
+  // components/VersionList.jsx now, so /app and /try cannot answer this
+  // differently. Preconditions stay here because they are /try's: recovery is
+  // offered only while the head is genuinely unreadable, and never onto head.
+  // A rejected restore THROWS so the primitive can render the failure on the
+  // row the operator pressed.
   const recoverHistoricalVersion = useCallback(async (versionToRecover) => {
     const drawingId = drawing.drawingState?.drawing_id
     const currentHead = Number(drawing.head)
     const target = Number(versionToRecover)
     if (
       !sessionReady || drawingId == null || !drawing.unreadableHead ||
-      drawing.unreadableHead.pending || recoveringVersion != null ||
+      drawing.unreadableHead.pending ||
       !Number.isFinite(target) || target === currentHead
     ) return
-    setRecoveringVersion(target)
-    setRecoveryError(null)
     try {
       const result = await restoreDrawingVersion(
         PUBLIC_DEMO,
@@ -956,15 +970,12 @@ export default function ToolCast({
         target,
         checkout.actions.getCapability() || undefined,
       )
-      setConfirmingRecovery(null)
       await drawing.actions.recordRestore(result)
       await drawing.actions.loadHistory()
     } catch (cause) {
-      setRecoveryError(cause?.message || `Could not recover from v${target}.`)
-    } finally {
-      setRecoveringVersion(null)
+      throw new Error(cause?.message || `Could not recover from v${target}.`)
     }
-  }, [checkout.actions, drawing.actions, drawing.drawingState?.drawing_id, drawing.head, drawing.unreadableHead, recoveringVersion, sessionReady])
+  }, [checkout.actions, drawing.actions, drawing.drawingState?.drawing_id, drawing.head, drawing.unreadableHead, sessionReady])
 
   const retryCatalogRun = useCallback(() => {
     const last = lastConfirmedRunRef.current
@@ -1758,7 +1769,7 @@ export default function ToolCast({
         <div className="tc-rail-tabs" role="tablist" aria-label="Operation panels" onKeyDown={moveRovingTab}>
           <button id="operations-tab-execution" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'execution' ? 0 : -1} aria-selected={rightView === 'execution'} onClick={() => setRightView('execution')}>Execution</button>
           <button id="operations-tab-jobs" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'jobs' ? 0 : -1} aria-selected={rightView === 'jobs'} disabled={!sessionReady} onClick={() => setRightView('jobs')}>Jobs <span>{visibleJobCount}</span></button>
-          <button id="operations-tab-versions" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'versions' ? 0 : -1} aria-selected={rightView === 'versions'} disabled={!canOperate} onClick={() => { setRightView('versions'); drawing.actions.loadHistory() }}>Versions <span>{drawing.latest ?? 0}</span></button>
+          {versionsMounted && <button id="operations-tab-versions" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'versions' ? 0 : -1} aria-selected={rightView === 'versions'} disabled={!canOperate} onClick={() => { setRightView('versions'); drawing.actions.loadHistory() }}>Versions <span>{drawing.latest ?? 0}</span></button>}
           <button id="operations-tab-trust" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'trust' ? 0 : -1} aria-selected={rightView === 'trust'} disabled={!sessionReady} onClick={() => { setRightView('trust'); platform.actions.refreshAll() }}>Trust</button>
           <button id="operations-tab-view" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'view' ? 0 : -1} aria-selected={rightView === 'view'} disabled={!hasDrawing} onClick={() => setRightView('view')}>View</button>
         </div>
@@ -1785,9 +1796,16 @@ export default function ToolCast({
             <span className="tc-event-time">v{version}</span>
           </div>
         </div>
+        {/* `previewLocked` closes the surface gap PR #409 filed and #410 only
+            half-closed: #410 folded preview into `writeLocked`, so a TOOL run
+            was refused while previewing, but these two affordances stayed
+            live, and /app has disabled them since it shipped. A read-only
+            preview must look read-only on both shells, not merely refuse the
+            write after the click. e2e/local/version-restore.spec.mjs pins it
+            on /app AND /try. */}
         <div className="tc-version-actions">
-          <button type="button" className="tc-bar-chip" onClick={undo} disabled={busy || jobRunning || drawing.versionBusy || !canUndo}>Undo</button>
-          <button type="button" className="tc-bar-chip" onClick={redo} disabled={busy || jobRunning || drawing.versionBusy || !canRedo}>Redo</button>
+          <button type="button" className="tc-bar-chip" onClick={undo} disabled={busy || jobRunning || drawing.versionBusy || previewLocked || !canUndo}>Undo</button>
+          <button type="button" className="tc-bar-chip" onClick={redo} disabled={busy || jobRunning || drawing.versionBusy || previewLocked || !canRedo}>Redo</button>
           <CheckoutControls
             lockedByOther={checkout.lockedByOther}
             staleByOther={checkout.staleByOther}
@@ -1868,77 +1886,39 @@ export default function ToolCast({
         {/* The rightView gate lives on the frame's `jobRail` prop above, so
             this slot renders the rail exactly when this tab is showing. */}
         <SurfaceFrame.JobRail />
-        {rightView === 'versions' && (
+        {versionsMounted && rightView === 'versions' && (
           <div className="tc-version-panel" role="region" aria-label="Version history">
             <div className="tc-panel-heading">
               <span>Version history</span>
               <button type="button" onClick={drawing.actions.loadHistory}>Refresh</button>
             </div>
-            {drawing.previewing && (
-              <>
-                <div className="tc-preview-note">
-                  Viewing v{drawing.previewing.version} read-only
-                  <button type="button" onClick={drawing.actions.backToHead}>Back to head</button>
-                </div>
-                {/* The lock is real (writeLocked, :532) — say so here, where the
-                    operator already is and where the control that lifts it sits.
-                    A SIBLING, not a child: .tc-preview-note is a two-item
-                    space-between flex row, and a third child would spread across
-                    it. Keeping the note's DOM intact also keeps the acceptance
-                    driver's `getByText(/Viewing v1 read-only/)` a single match. */}
-                <div className="tc-preview-lock" role="status" data-testid="try-preview-write-lock">
-                  Editing is paused until you return to head.
-                </div>
-              </>
-            )}
+            {/* Slice 6a: the preview strip and the rows come from the ONE
+                primitive /app's drawer renders (components/VersionList.jsx).
+                The `tab` skin is this surface's markup unchanged — same
+                testids, same classes — plus the delta and provenance chips
+                the drawer already had. */}
+            <VersionPreviewStrip
+              variant="tab"
+              version={drawing.previewing?.version ?? null}
+              onBackToHead={drawing.actions.backToHead}
+            />
             {drawing.historyLoading && <div className="tc-panel-note">Loading versions</div>}
             {drawing.historyError && <div className="tc-panel-error">{drawing.historyError}</div>}
-            {recoveryError && <div className="tc-panel-error" role="alert">{recoveryError}</div>}
-            <div className="tc-version-list">
-              {[...(drawing.history?.versions || [])].reverse().map((item) => {
-                const isCurrentHead = Number(item.v) === Number(drawing.head)
-                const recoveryMode = Boolean(drawing.unreadableHead && !isCurrentHead)
-                const recoveryDisabled = Boolean(drawing.unreadableHead?.pending || recoveringVersion != null)
-                const confirming = confirmingRecovery === item.v
-                return (
-                  <div className="tc-version-row" key={item.v} data-testid={`try-version-v${item.v}`}>
-                    <button
-                      type="button"
-                      className={drawing.previewing?.version === item.v ? 'active' : ''}
-                      onClick={() => drawing.actions.previewVersion(item.v)}
-                    >
-                      <span>v{item.v}</span>
-                      <span>{item.tool || 'drawing'}</span>
-                      {isCurrentHead ? <b>head</b> : null}
-                    </button>
-                    {recoveryMode ? (
-                      confirming ? (
-                        <span className="tc-version-recovery">
-                          <button
-                            type="button"
-                            className="chip-act"
-                            disabled={recoveryDisabled}
-                            onClick={() => recoverHistoricalVersion(item.v)}
-                          >
-                            {recoveringVersion === item.v ? 'Recovering…' : `Recover from v${item.v}`}
-                          </button>
-                          <button type="button" className="chip-neutral" disabled={recoveringVersion != null} onClick={() => setConfirmingRecovery(null)}>Cancel</button>
-                        </span>
-                      ) : (
-                        <button
-                          type="button"
-                          className="chip-act"
-                          disabled={recoveryDisabled}
-                          onClick={() => { setRecoveryError(null); setConfirmingRecovery(item.v) }}
-                        >
-                          Recover
-                        </button>
-                      )
-                    ) : null}
-                  </div>
-                )
-              })}
-            </div>
+            <VersionList
+              variant="tab"
+              versions={drawing.history?.versions}
+              head={drawing.head}
+              previewingVersion={drawing.previewing?.version ?? null}
+              onPreview={drawing.actions.previewVersion}
+              restore={{
+                run: recoverHistoricalVersion,
+                mode: 'recover',
+                // /try offers recovery ONLY while the head is unreadable, and
+                // never onto the head itself. Unchanged from before the slice.
+                eligible: (_row, isHead) => Boolean(drawing.unreadableHead) && !isHead,
+                disabled: Boolean(drawing.unreadableHead?.pending),
+              }}
+            />
           </div>
         )}
         {rightView === 'trust' && (

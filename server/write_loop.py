@@ -1923,6 +1923,13 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                 parent_version=head_v,
                 meta={"tool": name, "workitem_id": status.get("id"),
                       "plan_sha256": plan_digest,
+                      # The `leaf.tool-source.v1` receipt digest the sandboxed
+                      # planner reported for THIS tool's source + manifest,
+                      # already bound into `binding` above. It is the only
+                      # provenance the write path can vouch for; every other
+                      # write site leaves it unset, and an unset value reads
+                      # as null rather than as an unauthored version.
+                      "source_ref": binding["tool_source_sha256"],
                       "note": "live authored mutation plan"},
                 holder=holder, fence=fence, require_parent_is_head=True,
             )

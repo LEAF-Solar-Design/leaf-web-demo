@@ -66,10 +66,13 @@ export function operatorWorkspaceMount({
     drawingOptions: {
       loadHead: (id) => getDrawingIntake(publicDemo, id, 'head'),
       loadVersion: (id, version) => getDrawingIntake(publicDemo, id, version),
-      // /try does not render delta chips. Its recovery-only restore controls
-      // need the stable version list but not the larger delta response /app
-      // uses.
-      loadVersions: (id) => getDrawingVersions(publicDemo, id),
+      // Slice 6a: /try now renders the SAME VersionList primitive /app's
+      // drawer does, delta chips included, so it forwards the controller's
+      // options (`{ includeDeltas: true }`) instead of dropping them. This is
+      // the deliberate re-pin of
+      // e2e/local/version-restore.spec.mjs:326, which asserted the ABSENCE of
+      // include_deltas on this surface.
+      loadVersions: (id, options) => getDrawingVersions(publicDemo, id, options),
       undoVersion: (id, capability) => undoDrawing(publicDemo, id, capability),
       redoVersion: (id, capability) => redoDrawing(publicDemo, id, capability),
       onApplyIntake,

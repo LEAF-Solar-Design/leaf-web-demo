@@ -98,6 +98,10 @@ button.key:disabled { opacity: .6; cursor: default; }
 .vh-delta-mod { color: var(--status-warning); }
 .vh-delta-del { color: var(--status-danger); }
 .vh-delta-none { color: var(--muted); }
+/* Authored-tool provenance (slice 6a). Muted and mono: it is a receipt digest,
+   evidence a reader can check, not a headline. Shared by both shells, because
+   the chip ships from the one VersionList primitive. */
+.vh-source { display: inline-flex; align-items: center; font-size: 10px; color: var(--muted); font-family: var(--mono, ui-monospace, monospace); white-space: nowrap; }
 
 /* customize drawer (R7 admin self-edit): edit rows + mono fragments. Field
    visuals come from the shared .param rules in styles.css. */

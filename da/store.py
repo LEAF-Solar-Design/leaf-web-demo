@@ -900,7 +900,7 @@ def _pg_manifest(tenant_id: str, drawing_id: str) -> dict:
         cur.execute(
             """
             SELECT version, parent_version, created_at, byte_count,
-                   content_sha256, workitem_id, tool, note
+                   content_sha256, workitem_id, tool, note, source_ref
             FROM drawing_store_versions
             WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
               AND state = 'ready'
@@ -934,6 +934,7 @@ def _pg_manifest(tenant_id: str, drawing_id: str) -> dict:
             "workitem_id": row["workitem_id"],
             "tool": row["tool"],
             "note": row["note"],
+            "source_ref": row["source_ref"],
         } for row in rows],
         "checkout": checkout,
     }
@@ -1334,11 +1335,12 @@ def _pg_put(
             """
             INSERT INTO drawing_store_versions
               (tenant_id, drawing_id, version, parent_version, object_key,
-               byte_count, content_sha256, workitem_id, tool, note, state)
+               byte_count, content_sha256, workitem_id, tool, note,
+               source_ref, state)
             VALUES
               (%(tenant)s, %(drawing)s, %(version)s, %(parent)s, %(key)s,
                %(bytes)s, %(sha)s, %(workitem)s, %(tool)s, %(note)s,
-               'reserved')
+               %(source_ref)s, 'reserved')
             """,
             {
                 "tenant": tenant_id, "drawing": drawing_id,
@@ -1346,6 +1348,7 @@ def _pg_put(
                 "bytes": len(data), "sha": digest,
                 "workitem": meta.get("workitem_id"), "tool": meta.get("tool"),
                 "note": meta.get("note"),
+                "source_ref": meta.get("source_ref"),
             },
         )
         # Carried to finalize as the lock this version was reserved against. When
@@ -1781,6 +1784,11 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
             "bytes": len(data), "sha256": _sha256(data),
             "workitem_id": meta.get("workitem_id"), "tool": meta.get("tool"),
             "note": meta.get("note"),
+            # Authored-tool provenance (`leaf.tool-source.v1` receipt digest)
+            # when the writer had one. Stored verbatim and validated on the
+            # way OUT (server/routers/drawings.py `_source_ref`), so a drifted
+            # value can never be dressed as provenance by a reader.
+            "source_ref": meta.get("source_ref"),
         })
         m["head"] = new_v
         m["latest"] = new_v
