@@ -374,6 +374,12 @@ export function classifyReasonValue(raw) {
   if ((q === '"' || q === "'") && v.length >= 2 && v[v.length - 1] === q) {
     return { kind: 'string', value: v.slice(1, -1).replace(/\\(.)/g, '$1') }
   }
+  // A template literal with NO interpolation is a plain string in a different
+  // coat (an empty `` would render an empty reason), so it is judged as one.
+  // Only an interpolated template stays 'other' (its prose is not readable here).
+  if (q === '`' && v.length >= 2 && v[v.length - 1] === '`' && !v.includes('${')) {
+    return { kind: 'string', value: v.slice(1, -1).replace(/\\(.)/g, '$1') }
+  }
   const refMatch = /^([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)$/.exec(v)
   if (refMatch && refMatch[1].endsWith('REASONS')) {
     return { kind: 'ref', map: refMatch[1], key: refMatch[2] }
@@ -441,7 +447,8 @@ export function absentSlots(contract, prefix = '') {
     const path = prefix ? `${prefix}.${key}` : key
     const isEmptyArray = Array.isArray(value) && value.length === 0
     if (value && typeof value === 'object' && !Array.isArray(value)) out.push(...absentSlots(value, path))
-    else if (value === null || value === undefined || value === false || value === 'none' || isEmptyArray) out.push(path)
+    // Every spelling of "nothing here": null, undefined, false, 'none', '', 0, [].
+    else if (value === null || value === undefined || value === false || value === 'none' || value === '' || value === 0 || isEmptyArray) out.push(path)
   }
   return out
 }
@@ -560,7 +567,7 @@ for (const surface of PRODUCT_SURFACES) {
     seenSlots.add(slot)
     scannedCounts.slots += 1
     if (!doc.includes(`\`${slot}\``)) {
-      record(docFile, 1, `\`${slot}\` is declared absent (null / false / 'none') on surface "${surface.id}" but the doc never names it`)
+      record(docFile, 1, `\`${slot}\` is declared absent (null / undefined / false / 'none' / '' / 0 / []) on surface "${surface.id}" but the doc never names it`)
     } else if (!fieldTable.includes(`\`${slot}\``)) {
       record(docFile, 1, `\`${slot}\` is declared absent on surface "${surface.id}" but has no row in the field table, where the rationale lives`)
     }
