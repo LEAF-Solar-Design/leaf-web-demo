@@ -42,6 +42,26 @@ const GRANTED = 'granted'
 // leak (a component subscribing without unsubscribing), not a use case.
 const LISTENER_MAX = 32
 
+// The cap is a LEAK DETECTOR, so its refusal must be OBSERVABLE to whoever
+// caused it. A component that lands past it gets a switch frozen at its first
+// render, forever, with nothing anywhere to say why. Once per session, and
+// dev-only: in a production build the console belongs to the product, and the
+// refusal is still the correct behaviour there.
+let warnedListenerCap = false
+function warnListenerCap() {
+  if (warnedListenerCap) return
+  warnedListenerCap = true
+  try {
+    if (import.meta.env?.DEV) {
+      console.warn(
+        '[telemetryConsent] subscriber REFUSED: the listener set is at its cap of '
+        + LISTENER_MAX + '. Something is subscribing without unsubscribing, and the'
+        + ' refused component will never see a consent change.',
+      )
+    }
+  } catch { /* a warning never breaks the caller */ }
+}
+
 function defaultStore() {
   // Reading the property itself can throw, so the guard wraps the READ.
   try {
@@ -108,11 +128,16 @@ export function refreshUsageConsent(store = defaultStore()) {
 }
 
 /** Subscribe to changes. Returns an unsubscribe function — always call it;
- * the set is capped and a full set silently refuses new subscribers rather
- * than growing without bound. */
+ * the set is capped and a full set REFUSES new subscribers rather than growing
+ * without bound. The refusal is loud in dev (see warnListenerCap) and silent
+ * in production, because a frozen switch with no explanation is the one
+ * failure mode a bounded set can introduce. */
 export function subscribeUsageConsent(listener) {
   if (typeof listener !== 'function') return () => {}
-  if (listeners.size >= LISTENER_MAX && !listeners.has(listener)) return () => {}
+  if (listeners.size >= LISTENER_MAX && !listeners.has(listener)) {
+    warnListenerCap()
+    return () => {}
+  }
   listeners.add(listener)
   return () => { listeners.delete(listener) }
 }

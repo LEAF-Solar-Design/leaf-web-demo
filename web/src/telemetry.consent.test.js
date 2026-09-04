@@ -236,6 +236,63 @@ describe('a usage event ALREADY QUEUED when the viewer revokes', () => {
     }
   })
 
+  it('is DESTROYED inside the retry window too: revoke then re-grant posts no usage event', async () => {
+    // The retry batch lives OUT of state.buffer, in a closure the 2 s timer
+    // holds, so a purge of the buffer alone never reaches it. Without the
+    // pending-batch registry this spec is the counter-example to the whole
+    // "destructive revoke" claim: consent is TRUE again at the moment the
+    // retry fires, so the send-time fence waves it through and the viewer's
+    // revoked search query is posted anyway.
+    const { mod, fetchMock } = await loadTelemetry({ consented: true })
+    const consent = await import('./lib/telemetryConsent.js')
+    vi.useFakeTimers()
+
+    try {
+      fetchMock.mockImplementation(() => Promise.reject(new Error('offline')))
+      mod.trackUsage('search.submitted', { q_len: 4 })
+      mod.track('run.finished', { ok: true })
+      mod.flushNow()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+
+      consent.setUsageConsent(false)   // the revoke DESTROYS the usage half...
+      consent.setUsageConsent(true)    // ...and a re-grant inside the window finds nothing
+      fetchMock.mockImplementation(() => Promise.resolve({ ok: true, status: 202 }))
+      await vi.advanceTimersByTimeAsync(2100)
+
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      const retried = JSON.parse(fetchMock.mock.calls[1][1].body).events
+      expect(retried.map((e) => e.event_name)).toEqual(['run.finished'])
+      expect(consent.usageConsentGranted()).toBe(true)   // non-vacuous: consent IS back on
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('cannot grow the pending-retry set without bound', async () => {
+    // The registry that makes the purge reach in-flight batches is itself a
+    // queue, so it is capped (RETRY_BATCH_MAX = 8). A host rejecting every
+    // POST arms at most that many retries; the rest are dropped, which
+    // telemetry is allowed to do and an unbounded set is not.
+    const { mod, fetchMock } = await loadTelemetry({ consented: true })
+    vi.useFakeTimers()
+
+    try {
+      fetchMock.mockImplementation(() => Promise.reject(new Error('offline')))
+      for (let i = 0; i < 12; i += 1) {
+        mod.track(`run.finished.${i}`, { ok: true })
+        mod.flushNow()
+        await vi.advanceTimersByTimeAsync(0)
+      }
+      expect(fetchMock).toHaveBeenCalledTimes(12)   // 12 first attempts
+
+      await vi.advanceTimersByTimeAsync(2100)
+      expect(fetchMock).toHaveBeenCalledTimes(20)   // + 8 retries, not 12
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('is DESTROYED by the revoke, not merely fenced: a re-grant cannot resurrect it', async () => {
     // This is the spec that separates the two halves of the fix. The wire-time
     // fence alone would let these events sit in the buffer through the revoke

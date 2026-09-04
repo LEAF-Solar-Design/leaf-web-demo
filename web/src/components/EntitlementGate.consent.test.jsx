@@ -55,8 +55,31 @@ describe('the consent row', () => {
   it('carries the exact honest copy, both halves of it', () => {
     render(<EntitlementGate tier="team" entitlements={PAID} />)
     expect(screen.getByText(CONSENT_COPY).textContent).toBe(
-      'Share how you use the studio (menu picks, searches). Product events are unaffected.',
+      'Allow sharing how you use the studio (menu picks, searches) once those signals exist.'
+      + ' Product events are unaffected.',
     )
+  })
+
+  it('says "once those signals exist" while no usage emitter exists yet', () => {
+    // The honesty half of the copy, pinned as its own spec because it is the
+    // one clause that must change when slices 10-13 land an emitter: today a
+    // viewer who turns this on shares nothing, and "Share how you use the
+    // studio" would say otherwise.
+    render(<EntitlementGate tier="team" entitlements={PAID} />)
+    expect(screen.getByText(CONSENT_COPY).textContent).toMatch(/once those signals exist/)
+    expect(CONSENT_COPY.startsWith('Allow sharing')).toBe(true)
+  })
+
+  it('points aria-describedby at the copy, so the focused switch announces it', () => {
+    // The copy is a sibling <p>: reachable in browse mode either way, but a
+    // screen reader on the FOCUSED control announced only "Usage telemetry,
+    // switch, off" without this.
+    render(<EntitlementGate tier="team" entitlements={PAID} />)
+    const ids = switchEl().getAttribute('aria-describedby').split(' ')
+    expect(ids).toHaveLength(1)
+    // getElementById, not a selector: React useId values carry colons, which
+    // are legal in an id and an IDREF but not in a CSS id selector.
+    expect(document.getElementById(ids[0]).textContent).toBe(CONSENT_COPY)
   })
 
   it('toggles on click, and writes through to the store the emitter reads', () => {
@@ -112,8 +135,7 @@ describe('the consent row', () => {
 })
 
 describe('when the build-time kill switch is on', () => {
-  it('renders the row disabled, OFF, and names the reason in text', () => {
-    setUsageConsent(true)   // even a stored yes cannot collect in this build
+  it('renders the row disabled and OFF with nothing stored, and names the reason', () => {
     render(<EntitlementGate tier="team" entitlements={PAID} telemetryDisabled />)
 
     const toggle = switchEl()
@@ -121,11 +143,61 @@ describe('when the build-time kill switch is on', () => {
     expect(toggle).toHaveAttribute('aria-checked', 'false')
     expect(screen.getByText('Telemetry is off for this build.')).toBeInTheDocument()
     expect(CONSENT_REASONS.buildDisabled).toBe('Telemetry is off for this build.')
+    // No stored yes, so the second reason is not claimed.
+    expect(screen.queryByText(CONSENT_REASONS.storedGrantKept)).toBeNull()
+  })
+
+  it('never grants under the fence: the disabled switch cannot be turned on', () => {
+    render(<EntitlementGate tier="team" entitlements={PAID} telemetryDisabled />)
+    fireEvent.click(switchEl())
+    fireEvent.keyDown(switchEl(), { key: ' ' })
+    expect(usageConsentGranted()).toBe(false)
+    expect(switchEl()).toHaveAttribute('aria-checked', 'false')
+  })
+
+  it('keeps a STORED grant visible and says it survives this build', () => {
+    // The fence is a build flag; the grant is not. Showing the row off would
+    // tell the viewer their yes was gone, and the next build without the fence
+    // would resume collecting on it with no re-ask.
+    setUsageConsent(true)
+    render(<EntitlementGate tier="team" entitlements={PAID} telemetryDisabled />)
+
+    expect(switchEl()).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByText(CONSENT_REASONS.buildDisabled)).toBeInTheDocument()
+    expect(screen.getByText(CONSENT_REASONS.storedGrantKept)).toBeInTheDocument()
+    expect(CONSENT_REASONS.storedGrantKept).toBe(
+      'Your saved yes is kept and would resume in a build without this fence.'
+      + ' Turn the switch off to take it back now.',
+    )
+  })
+
+  it('stays operable for REVOKE, then refuses to grant again', () => {
+    // A viewer can ALWAYS take consent back. One-way, not dead.
+    setUsageConsent(true)
+    render(<EntitlementGate tier="team" entitlements={PAID} telemetryDisabled />)
+
+    expect(switchEl()).toBeEnabled()
+    fireEvent.click(switchEl())
+    expect(usageConsentGranted()).toBe(false)
+    expect(switchEl()).toHaveAttribute('aria-checked', 'false')
+    expect(switchEl()).toBeDisabled()          // and it cannot go back on here
+    expect(localStorage.getItem(USAGE_CONSENT_KEY)).toBeNull()
+  })
+
+  it('describes the switch with BOTH reasons when a grant is stored', () => {
+    setUsageConsent(true)
+    render(<EntitlementGate tier="team" entitlements={PAID} telemetryDisabled />)
+
+    const ids = switchEl().getAttribute('aria-describedby').split(' ')
+    expect(ids).toHaveLength(3)
+    const said = ids.map((id) => document.getElementById(id).textContent)
+    expect(said).toEqual([CONSENT_COPY, CONSENT_REASONS.buildDisabled, CONSENT_REASONS.storedGrantKept])
   })
 
   it('does not show that reason when the build allows telemetry', () => {
     render(<EntitlementGate tier="team" entitlements={PAID} />)
     expect(screen.queryByText(CONSENT_REASONS.buildDisabled)).toBeNull()
+    expect(screen.queryByText(CONSENT_REASONS.storedGrantKept)).toBeNull()
   })
 })
 

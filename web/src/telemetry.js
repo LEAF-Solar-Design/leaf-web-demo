@@ -65,8 +65,16 @@ const EXCEPTION_CAP = 10        // global-handler emissions per session
 const HASH_INPUT_MAX = 4096     // bound the work a digest does on the main thread
 const KEY_SAMPLE_MAX = 20       // keys sampled when describing an unserializable reason
 const DIGEST_WIDTH = 16         // 2^53-1 is 16 digits; a digest is ALWAYS this wide
+// Batches waiting on the 2 s post-failure retry. Bounded for the same reason
+// BUFFER_MAX exists: a host that rejects every POST must not be able to grow
+// an unbounded set of pending arrays. Past the cap a batch is DROPPED, which
+// telemetry is allowed to do (loss-tolerant by contract) and a leak is not.
+const RETRY_BATCH_MAX = 8
 const state = {
   buffer: [],
+  // The batches the retry timer is holding. They live OUT of `buffer`, so a
+  // revoke that only compacted `buffer` would miss them: see purgeUsageEvents.
+  retryBatches: new Set(),
   timer: null,
   sessionId: null,
   tourStep: null,
@@ -176,22 +184,40 @@ function unrefTimer(timer) {
  * no class marker is treated as usage-shaped. */
 function sendable(events) {
   if (usageConsentGranted()) return events
-  return events.filter((ev) => ev?.[EVENT_CLASS_KEY] === EVENT_CLASS.product)
+  return events.filter(isProduct)
 }
 
-/** Drop every usage-class event still waiting in the buffer. Runs ONLY on a
- * revoke, so the emit path stays allocation-free; the pass is
- * O(buffer <= BUFFER_MAX) and compacts IN PLACE, because `state.buffer` is the
- * shared queue and rebinding it would strand a splice already in flight. */
+function isProduct(ev) {
+  return ev?.[EVENT_CLASS_KEY] === EVENT_CLASS.product
+}
+
+/** Drop every usage-class event out of ONE queue, IN PLACE. The array
+ * identity is load-bearing (a caller may be a splice already in flight, or a
+ * retry closure that captured the array), so this never rebinds or copies.
+ * O(n) over a queue already bounded by BUFFER_MAX or FLUSH_AT. */
+function compactToProduct(events) {
+  let kept = 0
+  for (let i = 0; i < events.length; i += 1) {
+    const ev = events[i]
+    if (isProduct(ev)) { events[kept] = ev; kept += 1 }
+  }
+  events.length = kept
+}
+
+/** Drop every usage-class event still waiting ANYWHERE in this module. Runs
+ * ONLY on a revoke, so the emit path stays allocation-free.
+ *
+ * BOTH queues, and the second one is the whole point: `state.buffer` holds
+ * what has not been sent yet, and `state.retryBatches` holds the batches a
+ * failed POST handed to a 2 s timer. A purge of the buffer alone leaves the
+ * retry as the same leak on a longer fuse: revoke, re-grant inside that
+ * window, and the send-time fence sees consent again and posts what the viewer
+ * revoked. Destroying the events here is what makes a revoke DESTRUCTIVE
+ * rather than merely fenced. */
 function purgeUsageEvents() {
   try {
-    const buf = state.buffer
-    let kept = 0
-    for (let i = 0; i < buf.length; i += 1) {
-      const ev = buf[i]
-      if (ev?.[EVENT_CLASS_KEY] === EVENT_CLASS.product) { buf[kept] = ev; kept += 1 }
-    }
-    buf.length = kept
+    compactToProduct(state.buffer)
+    for (const batch of state.retryBatches) compactToProduct(batch)
   } catch { /* telemetry never breaks the product */ }
 }
 
@@ -210,10 +236,18 @@ function flush() {
     const events = sendable(state.buffer.splice(0, FLUSH_AT))
     if (!events.length) { if (state.buffer.length) schedule(); return }
     post(events).catch(() => {
-      // ONE retry PER BATCH, then drop — loss-tolerant by contract. The batch
-      // is re-fenced on the way out: a revoke inside the 2 s window drops its
-      // usage half instead of replaying it.
+      // ONE retry PER BATCH, then drop (loss-tolerant by contract).
+      //
+      // The batch is REGISTERED while it waits, because it is no longer in
+      // `state.buffer` and a revoke has to be able to destroy it there too.
+      // Registered, a revoke compacts this very array in place, so a re-grant
+      // inside the 2 s window finds nothing usage-shaped left to resurrect.
+      // sendable() below still re-fences, for a revoke that raced the
+      // subscription (a listener set at LISTENER_MAX refuses new subscribers).
+      if (state.retryBatches.size >= RETRY_BATCH_MAX) return
+      state.retryBatches.add(events)
       unrefTimer(setTimeout(() => {
+        state.retryBatches.delete(events)
         const retry = sendable(events)
         if (retry.length) post(retry).catch(() => {})
       }, 2000))

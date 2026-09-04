@@ -159,6 +159,25 @@ describe('subscribers', () => {
     expect(seen.length).toBe(32)
   })
 
+  it('says so, once, when it refuses a subscriber past the cap', async () => {
+    // Bounding the set is right; refusing in silence is not. The refused
+    // component gets a switch frozen at its first render forever, so the cap
+    // has to name itself to the developer who tripped it.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const mod = await loadConsent(fakeStore())
+      for (let i = 0; i < 32; i++) restore.push(mod.subscribeUsageConsent(() => {}))
+      expect(warn).not.toHaveBeenCalled()          // the cap itself is not a warning
+
+      restore.push(mod.subscribeUsageConsent(() => {}))
+      restore.push(mod.subscribeUsageConsent(() => {}))
+      expect(warn).toHaveBeenCalledTimes(1)        // once per session, not per refusal
+      expect(warn.mock.calls[0][0]).toContain('cap of 32')
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
   it('picks up a revoke made in another tab', async () => {
     const store = fakeStore({ [KEY]: 'granted' })
     const mod = await loadConsent(store)

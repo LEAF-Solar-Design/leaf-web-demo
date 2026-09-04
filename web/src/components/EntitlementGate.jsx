@@ -24,17 +24,30 @@ import {
 } from '../lib/telemetryConsent.js'
 import { TELEMETRY_BUILD_DISABLED } from '../telemetry.js'
 
-// The exact copy. Honest on both halves: it names what is collected AND says
-// what the switch does not touch, because a toggle that silently also governed
-// crash reporting would be the same lie in the other direction.
+// The exact copy. Honest on both halves: it names what would be collected AND
+// says what the switch does not touch, because a toggle that silently also
+// governed crash reporting would be the same lie in the other direction.
+//
+// PRESENT TENSE, deliberately: no usage emitter exists in the tree yet (grep
+// trackUsage across web/src and only telemetry.js and its own specs answer),
+// so copy reading "Share how you use the studio" would promise a viewer who
+// turns this on that something starts flowing today. It does not. The switch
+// is the permission, and the permission is real now; the signals arrive with
+// the emitters slices 10-13 add.
 export const CONSENT_LABEL = 'Usage telemetry'
-export const CONSENT_COPY = 'Share how you use the studio (menu picks, searches). Product events are unaffected.'
+export const CONSENT_COPY = 'Allow sharing how you use the studio (menu picks, searches) once those signals exist. Product events are unaffected.'
 
 // REASONS style: one sentence naming why the control cannot be used, never a
 // disabled control with no explanation. Exact-string tested — a reworded
 // reason is a product change and should fail the spec, not slip through.
 export const CONSENT_REASONS = Object.freeze({
   buildDisabled: 'Telemetry is off for this build.',
+  // The fence is a BUILD flag, and the grant outlives it. Saying only "off for
+  // this build" would let a viewer read the OFF-looking row as "my yes is
+  // gone", and the next build without the fence would then resume collecting
+  // with no re-ask. So the stored yes is stated, and taking it back is offered
+  // in the same sentence as the control that does it.
+  storedGrantKept: 'Your saved yes is kept and would resume in a build without this fence. Turn the switch off to take it back now.',
 })
 
 const ROWS = [
@@ -66,12 +79,19 @@ function entValue(ents, key) {
  * Touch: a tap on a <button> is a click; no extra pointer plumbing, and the
  * 32x18 pill sits inside a row-height hit target.
  *
- * Disabled by the build fence: a native `disabled` button fires neither click
- * nor keydown, so the refusal needs no handler-side guard — and the reason is
- * rendered as text below, never only as a title attribute a keyboard or screen
- * reader user would never reach. */
+ * Under the build fence the switch is ONE-WAY, not dead. A viewer must always
+ * be able to take consent back, so a stored grant keeps the control operable
+ * and clicking it revokes; only the granting direction is refused, and once
+ * nothing is stored the button is `disabled` (a native disabled button fires
+ * neither click nor keydown, so that refusal needs no handler-side guard).
+ * Both reasons render as text below, never only as a title attribute a
+ * keyboard or screen reader user would never reach, and both are named by
+ * aria-describedby so the focused control announces them. */
 function UsageConsentRow({ buildDisabled }) {
   const labelId = useId()
+  const copyId = `${labelId}-copy`
+  const reasonId = `${labelId}-reason`
+  const keptId = `${labelId}-kept`
   // The store is external (shared with the emitter and with any other mounted
   // panel), so this is exactly what useSyncExternalStore exists for: no
   // effect-based mirror to drift, and a revoke in one panel is instantly true
@@ -82,12 +102,19 @@ function UsageConsentRow({ buildDisabled }) {
     // Server snapshot: nothing is consented before a browser exists.
     () => false,
   )
-  // When the build fence is on, NOTHING usage-shaped can leave regardless of
-  // what is stored, so the switch shows off. Showing a stored yes here would
-  // claim collection that cannot happen.
-  const on = !buildDisabled && granted
+  // The switch shows the STORED state, under the fence too: the grant is what
+  // the control governs, and it survives the build flag. What the fence
+  // changes is what the grant DOES, and that is what the reason text below
+  // says. Hiding the stored yes here would tell a viewer their consent was
+  // gone while a build without the fence would silently resume on it.
+  const on = granted
+  // One-way under the fence: revoke yes, grant never.
+  const canToggle = !buildDisabled || granted
 
-  const toggle = () => { setUsageConsent(!granted) }
+  const toggle = () => {
+    if (buildDisabled && !granted) return   // belt and braces beside `disabled`
+    setUsageConsent(!granted)
+  }
   const onKeyDown = (ev) => {
     if (ev.key !== ' ' && ev.key !== 'Spacebar' && ev.key !== 'Enter') return
     ev.preventDefault()
@@ -105,17 +132,25 @@ function UsageConsentRow({ buildDisabled }) {
           role="switch"
           aria-checked={on}
           aria-labelledby={labelId}
+          aria-describedby={[
+            copyId,
+            buildDisabled ? reasonId : null,
+            buildDisabled && granted ? keptId : null,
+          ].filter(Boolean).join(' ')}
           className={`ent-switch${on ? ' on' : ''}`}
-          disabled={buildDisabled}
+          disabled={!canToggle}
           onClick={toggle}
           onKeyDown={onKeyDown}
         >
           <span className="ent-switch-knob" aria-hidden="true" />
         </button>
       </div>
-      <p className="ent-note ent-consent-copy">{CONSENT_COPY}</p>
+      <p className="ent-note ent-consent-copy" id={copyId}>{CONSENT_COPY}</p>
       {buildDisabled ? (
-        <p className="ent-note ent-consent-reason">{CONSENT_REASONS.buildDisabled}</p>
+        <p className="ent-note ent-consent-reason" id={reasonId}>{CONSENT_REASONS.buildDisabled}</p>
+      ) : null}
+      {buildDisabled && granted ? (
+        <p className="ent-note ent-consent-reason" id={keptId}>{CONSENT_REASONS.storedGrantKept}</p>
       ) : null}
     </div>
   )
