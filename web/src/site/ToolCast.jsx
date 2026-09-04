@@ -17,6 +17,8 @@ import {
   restoreDrawingVersion,
   runTool,
 } from '../api.js'
+import { resumeHref } from '../components/ConversationList.jsx'
+import LiveRegion, { HIDE_WITH_CLASS } from '../components/LiveRegion.jsx'
 import ConversePanel from '../components/ConversePanel.jsx'
 import AuthorPanel from '../components/AuthorPanel.jsx'
 import CapabilityCatalog from '../components/CapabilityCatalog.jsx'
@@ -1678,6 +1680,17 @@ export default function ToolCast({
         builds: buildQueue.builds,
       } : null}
       toast={{ toast, onDone: (id) => setToast((current) => current?.id === id ? null : current) }}
+      // Slice 6b. Same two facts the console supplies, spelled in the stage's
+      // own vocabulary: `sessionId` is the open conversation, and resuming a
+      // row for THIS drawing means showing the operator panel that renders it.
+      conversations={{
+        activeSessionId: sessionId,
+        onResume: (resumedId, { scope } = {}) => {
+          const href = resumeHref(scope, MODE_DRAWING_ID || drawingId, window.location.href)
+          if (href) { window.location.assign(href); return }
+          setLeftView('operator')
+        },
+      }}
       signedIn={isSignedIn()}
       onSignOut={platformSession.actions.signOut}
     >
@@ -1755,6 +1768,10 @@ export default function ToolCast({
               />
             </>
           ) : sessionId ? (
+            <>
+            {/* Slice 6b: the list stands beside the panel in the same
+                tabpanel, mounted by the frame from the declared scope. */}
+            <SurfaceFrame.Conversations />
             <ConversePanel
               sessionId={sessionId}
               userTurns={turns}
@@ -1764,6 +1781,7 @@ export default function ToolCast({
               onJobLinked={attachJob}
               writeLocked={writeLocked}
             />
+            </>
           ) : (
             <div className="tc-operator-empty">
               <span className={`dot ${phase === 'loading' ? 'live pulse' : 'hollow'}`} />
@@ -2177,13 +2195,18 @@ export default function ToolCast({
           : 'Live service chain: web → app → harness → broker. Requests are not preloaded or simulated.'}
       </div>
 
-      <div className="sr-only" role="status" aria-label="Run status announcements" aria-live="polite" aria-atomic="true">
+      <LiveRegion
+        role="status"
+        visuallyHidden={HIDE_WITH_CLASS}
+        atomic
+        label="Run status announcements"
+      >
         {jobRunning
           ? `Running ${selectedCatalogTool?.name || currentJob?.tool || 'tool'}`
           : jobResult?.ok
             ? `${jobResult.tool || 'Tool'} complete`
             : jobResult?.error?.message || ''}
-      </div>
+      </LiveRegion>
       <SurfaceFrame.Toast />
       <DetailsDrawer data={drawer} onClose={() => setDrawer(null)} />
       {opsOpen && (

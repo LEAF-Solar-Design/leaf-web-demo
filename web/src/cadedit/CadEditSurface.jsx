@@ -213,7 +213,7 @@ export default function CadEditSurface({
         </a>
       )}
 
-      <p role="status" aria-live="polite">{status}</p>
+      <LiveRegion as="p" role="status">{status}</LiveRegion>
 
       {notice && (
         <p className="cad-edit-workbench-notice" data-testid="cad-edit-engine-notice">

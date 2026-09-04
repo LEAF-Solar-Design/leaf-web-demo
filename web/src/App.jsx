@@ -98,6 +98,8 @@ import { shouldStartTour } from './demo/tourEntry.js'
 import DemoTour from './demo/DemoTour.jsx'
 import { TOUR_STEPS } from './demo/tourScript.js'
 import { editFixture, pendingEditDemo, editFixtureV2 } from './mock/editFixture.js'
+import { resumeHref } from './components/ConversationList.jsx'
+import LiveRegion, { HIDE_WITH_STYLE } from './components/LiveRegion.jsx'
 import ConversePanel from './components/ConversePanel.jsx'
 import {
   THRESHOLDS, fetchRegistry, fetchSkills, listPendingApprovals,
@@ -2715,6 +2717,19 @@ export default function App() {
         // else. Unchanged, stated once.
         placement: studioGround && drafting && wideViewport ? 'docked' : 'inline',
       }}
+      // Slice 6b. The scene supplies only what a scene can know: which
+      // conversation is open, and what resuming another one means HERE. A
+      // row for another drawing is addressed the way this shell has always
+      // addressed one, `?drawing=<id>` (resumeHref); a row for the drawing
+      // already on screen just opens the panel on the attached session.
+      conversations={{
+        activeSessionId: agentSessionId,
+        onResume: (sessionId, { scope } = {}) => {
+          const href = resumeHref(scope, REQUESTED_DRAWING_ID, window.location.href)
+          if (href) { window.location.assign(href); return }
+          setAgentMode('primary')
+        },
+      }}
       commandBar={() => (
         <PromptBox
           value={prompt}
@@ -3459,6 +3474,14 @@ export default function App() {
           />
         )}
 
+        {/* Slice 6b: the conversation list stands BESIDE the panel, mounted by
+            the frame on every surface whose contract declares a conversation
+            scope. The gate is the contract, not a surface literal, and not
+            `agentMode` — the list is how you get BACK to a conversation, so
+            hiding it until one is open would hide it exactly when it is
+            needed. */}
+        {!mock && <SurfaceFrame.Conversations />}
+
         {!mock && agentMode && agentSessionId && (
           <ConversePanel
             sessionId={agentSessionId}
@@ -3554,20 +3577,13 @@ export default function App() {
             both silent to a screen reader. One PERMANENTLY-mounted polite region
             announces the mutation; styles inline because no .sr-only utility
             exists in the sheet. */}
-        <div
-          role="status"
-          aria-live="polite"
-          style={{
-            position: 'absolute', width: 1, height: 1, padding: 0, margin: -1,
-            overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap', border: 0,
-          }}
-        >
+        <LiveRegion role="status" visuallyHidden={HIDE_WITH_STYLE}>
           {running
             ? `Running ${selectedTool?.name || 'tool'}`
             : result?.ok
               ? `${result.tool} complete${result.result?.total != null ? ` — total ${Number(result.result.total).toLocaleString()}` : ''}`
               : ''}
-        </div>
+        </LiveRegion>
 
         <SurfaceFrame.Toast />
       </div>

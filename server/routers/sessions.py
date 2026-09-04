@@ -101,7 +101,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 import deps
 import emf_metrics
@@ -237,8 +237,54 @@ _RETRYABLE_BY_CODE = {
 }
 
 
+# --------------------------------------------------------------------------- #
+# Conversation scope (standardization slice 6b)
+# --------------------------------------------------------------------------- #
+#: The closed kind set is session_store's; the wire, the store and
+#: web/src/converse.js SCOPE_KINDS are pinned equal by test_contract_freeze.
+SCOPE_KINDS = session_store.SCOPE_KINDS
+#: A handle is an opaque identifier (drawing id, project uuid, entity handle):
+#: bounded and charset-limited so it can be stored, listed and echoed without
+#: ever carrying free text. `:` is allowed inside a handle; the query form
+#: `scope=<kind>:<handle>` splits on the FIRST colon, and no kind contains one.
+SCOPE_HANDLE_MAX = 128
+SCOPE_HANDLE_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:@~+-]{0,127}$"
+_SCOPE_HANDLE_RE = re.compile(SCOPE_HANDLE_PATTERN)
+#: The drawing key a project-scoped attach carries when it names no drawing:
+#: the same sentinel web/src/converse.js uses for its cache key, so the two
+#: ends agree on which session a project conversation with no drawing is.
+DEFAULT_SCOPE_DRAWING_ID = "default"
+
+
+class SessionScope(BaseModel):
+    """`{kind, handle}`, closed-world and bounded AT THE WIRE: an unknown kind,
+    an extra key, an empty, over-long or off-charset handle is a 422 before
+    any store call (fail closed, never coerced)."""
+    model_config = ConfigDict(extra="forbid")
+    kind: str
+    handle: str = Field(min_length=1, max_length=SCOPE_HANDLE_MAX)
+
+    @field_validator("kind")
+    @classmethod
+    def _known_kind(cls, value: str) -> str:
+        if value not in SCOPE_KINDS:
+            raise ValueError(f"scope.kind must be one of: {', '.join(SCOPE_KINDS)}")
+        return value
+
+    @field_validator("handle")
+    @classmethod
+    def _bounded_handle(cls, value: str) -> str:
+        if not _SCOPE_HANDLE_RE.fullmatch(value):
+            raise ValueError("scope.handle carries an unsupported character")
+        return value
+
+
 class CreateSessionRequest(BaseModel):
-    drawing_id: str
+    # The legacy identity field STAYS. Optional only so `scope` can supply it
+    # (a drawing scope names the drawing; a project scope defaults it); the
+    # validator below refuses a body that names neither, so the old wire is
+    # unchanged: a bare `{}` is still a 422.
+    drawing_id: Optional[str] = None
     # Optional canonical browser-project binding. The server derives its org
     # and membership from the verified identity; no client org/binding hint is
     # accepted.
@@ -250,6 +296,117 @@ class CreateSessionRequest(BaseModel):
     # leaves the stored policy untouched — a repeat idempotent POST without the
     # field never resets an earlier choice. confirm_all is the implicit default.
     policy: Optional[str] = None
+    # Slice 6b: the conversation scope envelope. Absent -> derived from the
+    # legacy fields (project when bound, else drawing); present -> must AGREE
+    # with them where they overlap, or the body is refused rather than one
+    # field silently winning.
+    scope: Optional[SessionScope] = None
+
+    @model_validator(mode="after")
+    def _scope_agrees_with_identity(self) -> "CreateSessionRequest":
+        scope = self.scope
+        if scope is None:
+            if self.drawing_id is None:
+                raise ValueError("drawing_id is required when scope is absent")
+            return self
+        if scope.kind == "drawing":
+            if self.drawing_id is None:
+                self.drawing_id = scope.handle
+            elif self.drawing_id != scope.handle:
+                raise ValueError("scope.handle must equal drawing_id for a drawing scope")
+        elif scope.kind == "project":
+            if self.project_id is None:
+                self.project_id = scope.handle
+            elif self.project_id != scope.handle:
+                raise ValueError("scope.handle must equal project_id for a project scope")
+            if self.drawing_id is None:
+                self.drawing_id = DEFAULT_SCOPE_DRAWING_ID
+        else:  # entity: the handle names an entity INSIDE a drawing
+            if self.drawing_id is None:
+                raise ValueError("an entity scope requires drawing_id")
+        return self
+
+
+def _scope_of(sess: Dict[str, Any]) -> Dict[str, str]:
+    """The `{kind, handle}` a row answers with: the stored envelope when the
+    row has one, else derived from its identity (project when bound, else
+    drawing). Rows from before 0053 read NULL and land in the second branch;
+    nothing is invented and nothing is backfilled."""
+    kind, handle = sess.get("scope_kind"), sess.get("scope_handle")
+    if kind in SCOPE_KINDS and isinstance(handle, str) and handle:
+        return {"kind": kind, "handle": handle}
+    if sess.get("project_id") is not None:
+        return {"kind": "project", "handle": str(sess["project_id"])}
+    return {"kind": "drawing", "handle": str(sess.get("drawing_id") or "")}
+
+
+# GET /api/sessions paging. The page cap is the STORE's cap (one number, two
+# readers), the default is what ConversationList asks for.
+LIST_DEFAULT_LIMIT = 20
+LIST_MAX_LIMIT = session_store.LIST_MAX_LIMIT
+_CURSOR_MAX_LEN = 256
+
+
+def _parse_scope_query(raw: Optional[str]):
+    """`scope=<kind>:<handle>` -> (kind, handle), or (None, None) when absent.
+    Reuses SessionScope's validators so the query form can never accept a
+    scope the body form refuses. Raises ValueError on anything malformed."""
+    if raw is None or raw == "":
+        return None, None
+    if len(raw) > len(max(SCOPE_KINDS, key=len)) + 1 + SCOPE_HANDLE_MAX:
+        raise ValueError("scope is too long")
+    kind, sep, handle = raw.partition(":")
+    if not sep:
+        raise ValueError("scope must be <kind>:<handle>")
+    parsed = SessionScope(kind=kind, handle=handle)  # ValidationError is a ValueError
+    return parsed.kind, parsed.handle
+
+
+def _encode_cursor(cursor) -> Optional[str]:
+    if cursor is None:
+        return None
+    raw = json.dumps([float(cursor[0]), str(cursor[1])], separators=(",", ":"))
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _decode_cursor(raw: Optional[str]):
+    """Opaque keyset cursor -> (updated_at, session_id). Bounded, shape-checked,
+    fails closed: anything but our own encoding of a [number, string] pair is
+    a ValueError, never a partial page."""
+    if raw is None or raw == "":
+        return None
+    if len(raw) > _CURSOR_MAX_LEN:
+        raise ValueError("cursor is too long")
+    padded = raw + "=" * (-len(raw) % 4)
+    try:
+        decoded = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+    except (binascii.Error, ValueError, UnicodeDecodeError) as exc:
+        raise ValueError("cursor is not decodable") from exc
+    if (not isinstance(decoded, list) or len(decoded) != 2
+            or isinstance(decoded[0], bool) or not isinstance(decoded[0], (int, float))
+            or not isinstance(decoded[1], str) or not decoded[1]
+            or len(decoded[1]) > 128):
+        raise ValueError("cursor has the wrong shape")
+    return float(decoded[0]), decoded[1]
+
+
+def _session_row(sess: Dict[str, Any]) -> Dict[str, Any]:
+    """One list row. The five fields the slice froze plus the three a resume
+    needs: `last_seq` seeds openStream(after_seq), `drawing_id`/`project_id`
+    let the client re-attach by scope. Never the model, never the active turn,
+    never anything a transcript read would not also show the same tenant."""
+    return {
+        "id": sess["session_id"],
+        "scope": _scope_of(sess),
+        "title": sess.get("title"),
+        "updated_at": sess.get("updated_at"),
+        "turn_count": int(sess.get("turn_count") or 0),
+        "last_seq": int(sess.get("last_seq") or 0),
+        "drawing_id": sess.get("drawing_id"),
+        "project_id": (
+            str(sess["project_id"]) if sess.get("project_id") is not None else None
+        ),
+    }
 
 
 class MessageRequest(BaseModel):
@@ -690,15 +847,23 @@ def create_session(req: CreateSessionRequest, tenant=Depends(deps.require_active
             return _session_not_found("project")
         except platform_link.ProjectSessionForbidden:
             return _project_forbidden_response()
+    # Slice 6b: only an EXPLICIT scope is written (last explicit wins); an
+    # absent one is derived at read time by _scope_of, so a plain re-attach
+    # never overwrites an entity focus a client set on purpose. A project
+    # scope stores the CANONICAL uuid form, the same string the row binds.
+    scope_kw: Dict[str, Any] = {}
+    if req.scope is not None:
+        handle = project_id if req.scope.kind == "project" else req.scope.handle
+        scope_kw = {"scope_kind": req.scope.kind, "scope_handle": handle}
     if project_id is not None:
         sess = session_store.get_or_create_session(
             str(tenant), req.drawing_id, req.model,
-            org_id=org_id, project_id=project_id,
+            org_id=org_id, project_id=project_id, **scope_kw,
         )
     else:
         # Preserve the legacy call contract for existing adapters and tests.
         sess = session_store.get_or_create_session(
-            str(tenant), req.drawing_id, req.model,
+            str(tenant), req.drawing_id, req.model, **scope_kw,
         )
     if req.policy is not None:
         session_policy.set_policy(sess["session_id"], str(tenant), req.policy)
@@ -711,6 +876,10 @@ def create_session(req: CreateSessionRequest, tenant=Depends(deps.require_active
             "status": sess["status"],
             "created_at": sess["created_at"],
             "model": sess.get("model"),
+            # Additive (slice 6b): what this session is scoped to, stored or
+            # derived, so a client that attached by the legacy fields still
+            # learns the envelope the list will answer with.
+            "scope": _scope_of(sess),
             **(
                 {"project_id": sess["project_id"]}
                 if sess.get("project_id") is not None
@@ -735,6 +904,71 @@ def create_session(req: CreateSessionRequest, tenant=Depends(deps.require_active
             # on the authenticated app-to-harness back-edge.
             "instant_ready": bool(instant["ready"]),
             "instant_reason": instant["reason"],
+        }),
+        tenant,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# GET /api/sessions  (list + resume, standardization slice 6b)
+# --------------------------------------------------------------------------- #
+@router.get("/api/sessions")
+def list_sessions(scope: Optional[str] = None, limit: int = LIST_DEFAULT_LIMIT,
+                  cursor: Optional[str] = None,
+                  tenant=Depends(deps.require_active_tenant)):
+    """The caller's OWN sessions, newest-first, one bounded page.
+
+    `scope=<kind>:<handle>` narrows to one scope (absent: every session of the
+    tenant); `limit` is clamped to [1, LIST_MAX_LIMIT] like the transcript
+    route clamps its own; `cursor` is the opaque `next_cursor` of the previous
+    page. A malformed scope or cursor is 422 BAD_PARAMS, never an empty page
+    that reads as "no conversations". Tenant isolation is structural: the
+    store's WHERE names this tenant and nothing else, and a project-bound row
+    additionally re-reads membership (per listed project, memoized per page)
+    exactly as every per-session route does, so another tenant's session
+    never lists and a revoked member's project rows drop out.
+    """
+    try:
+        scope_kind, scope_handle = _parse_scope_query(scope)
+    except ValueError as exc:
+        return error_response(
+            ErrorCode.BAD_PARAMS, f"scope is malformed: {exc}",
+            retryable=False, status_code=422,
+        )
+    try:
+        after = _decode_cursor(cursor)
+    except ValueError as exc:
+        return error_response(
+            ErrorCode.BAD_PARAMS, f"cursor is malformed: {exc}",
+            retryable=False, status_code=422,
+        )
+    bounded = max(1, min(int(limit), LIST_MAX_LIMIT))
+    rows, next_cursor = session_store.list_sessions(
+        str(tenant), scope_kind=scope_kind, scope_handle=scope_handle,
+        limit=bounded, cursor=after,
+    )
+    out: List[Dict[str, Any]] = []
+    project_access: Dict[str, bool] = {}
+    for sess in rows:
+        if sess.get("project_id") is not None:
+            key = str(sess["project_id"])
+            if key not in project_access:
+                try:
+                    project_access[key] = platform_link.require_project_session_access(
+                        sess, tenant, write=False,
+                    ) is not None
+                except (platform_link.ProjectSessionForbidden, LookupError):
+                    # Fail closed: a row whose membership cannot be proven
+                    # right now is not listed. It is not deleted, not
+                    # reported, just absent from this page.
+                    project_access[key] = False
+            if not project_access[key]:
+                continue
+        out.append(_session_row(sess))
+    return deps.tenant_echo(
+        with_envelope_fields({
+            "sessions": out,
+            "next_cursor": _encode_cursor(next_cursor),
         }),
         tenant,
     )
