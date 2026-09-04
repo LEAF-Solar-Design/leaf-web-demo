@@ -16,7 +16,14 @@ vi.mock('../telemetry.js', () => ({ track: vi.fn() }))
 
 import { track } from '../telemetry.js'
 import PromptBox, { SECRET_REASONS } from './PromptBox.jsx'
-import { MASK_BULLETS, MASK_PREFIX, SECRET_PATTERNS } from '../lib/secretPatterns.js'
+import ClaudeAccountPanel from './ClaudeAccountPanel.jsx'
+import {
+  MASK_BULLETS,
+  MASK_PREFIX,
+  MOUNTABLE_NEXT_STEP,
+  SECRET_PATTERNS,
+  UNMOUNTABLE_NEXT_STEP,
+} from '../lib/secretPatterns.js'
 
 // Structurally valid, entirely fake.
 const FAKE_ANTHROPIC = `sk-ant-api03-${'A9_-'.repeat(12)}`
@@ -65,24 +72,48 @@ describe('the honesty ladder copy is frozen', () => {
   })
 
   it.each([
-    ['anthropic', 'That looks like an Anthropic API key. Credentials never go to the model. Mount it under Link a service instead.'],
-    ['openai', 'That looks like an OpenAI API key. Credentials never go to the model. Mount it under Link a service instead.'],
-    ['github', 'That looks like a GitHub token. Credentials never go to the model. Mount it under Link a service instead.'],
-    ['aws_access_key', 'That looks like an AWS access key ID. Credentials never go to the model. Mount it under Link a service instead.'],
-    ['aws_secret_key', 'That looks like an AWS secret access key. Credentials never go to the model. Mount it under Link a service instead.'],
-    ['slack', 'That looks like a Slack token. Credentials never go to the model. Mount it under Link a service instead.'],
-    ['jwt', 'That looks like a JSON Web Token. Credentials never go to the model. Mount it under Link a service instead.'],
-    ['private_key', 'That looks like a private key. Credentials never go to the model. Mount it under Link a service instead.'],
-    ['generic', 'That looks like a credential. Credentials never go to the model. Mount it under Link a service instead.'],
+    ['anthropic', 'That looks like an Anthropic API key. Credentials never go to the model. Mount it under Claude accounts in the header instead.'],
+    ['openai', 'That looks like an OpenAI API key. Credentials never go to the model. No surface here can hold one yet, so keep it out of the message.'],
+    ['github', 'That looks like a GitHub token. Credentials never go to the model. No surface here can hold one yet, so keep it out of the message.'],
+    ['aws_access_key', 'That looks like an AWS access key ID. Credentials never go to the model. No surface here can hold one yet, so keep it out of the message.'],
+    ['aws_secret_key', 'That looks like an AWS secret access key. Credentials never go to the model. No surface here can hold one yet, so keep it out of the message.'],
+    ['slack', 'That looks like a Slack token. Credentials never go to the model. No surface here can hold one yet, so keep it out of the message.'],
+    ['jwt', 'That looks like a JSON Web Token. Credentials never go to the model. No surface here can hold one yet, so keep it out of the message.'],
+    ['private_key', 'That looks like a private key. Credentials never go to the model. No surface here can hold one yet, so keep it out of the message.'],
+    ['generic', 'That looks like a credential. Credentials never go to the model. No surface here can hold one yet, so keep it out of the message.'],
   ])('%s reads exactly', (id, sentence) => {
     expect(SECRET_REASONS[id]).toBe(sentence)
   })
 
-  it('every sentence states the rule and names the surface that solves it', () => {
+  it('every sentence states the rule and ends in a next step, never a bare block', () => {
     for (const line of Object.values(SECRET_REASONS)) {
       expect(line).toContain('Credentials never go to the model.')
-      expect(line).toContain('Mount it under Link a service instead.')
+      expect([MOUNTABLE_NEXT_STEP, UNMOUNTABLE_NEXT_STEP].some((tail) => line.endsWith(tail))).toBe(true)
     }
+  })
+
+  // The honesty defect this replaced: every sentence pointed at "Link a
+  // service", a surface that exists nowhere in this product, and the pin froze
+  // that in place. A next step may only name a surface a user can actually
+  // reach TODAY — the header's Claude accounts panel, which mounts Anthropic
+  // credentials and nothing else (Surface Contract: `integrations: null`).
+  it('names a real surface only where one exists, and never invents one', () => {
+    const pointing = Object.entries(SECRET_REASONS)
+      .filter(([, line]) => line.endsWith(MOUNTABLE_NEXT_STEP))
+      .map(([id]) => id)
+    expect(pointing).toEqual(['anthropic'])
+    for (const line of Object.values(SECRET_REASONS)) {
+      expect(line).not.toContain('Link a service')
+    }
+  })
+
+  it('points at the header control by the name the header actually renders', () => {
+    // ClaudeAccountPanel's trigger reads "Claude accounts"; if that label is
+    // renamed, this refusal starts sending users to a control that is not
+    // there, so the copy and the control are pinned together.
+    render(<ClaudeAccountPanel mock={false} grant={null} loading={false} busy={false} error={null} open={false} onToggle={() => {}} onLink={() => {}} onUnlink={() => {}} />)
+    const trigger = screen.getByRole('button', { name: /claude accounts/i })
+    expect(MOUNTABLE_NEXT_STEP).toContain(trigger.querySelector('.ca-k').textContent)
   })
 })
 

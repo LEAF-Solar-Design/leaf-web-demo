@@ -221,3 +221,71 @@ export function maskForNotice(text, hit) {
   const take = Math.min(MASK_PREFIX, length)
   return `${text.slice(index, index + take)}${bullets}`
 }
+
+// ---------------------------------------------------------------------------
+// The refusal copy and the shared decision, so EVERY composer that can reach
+// model context refuses identically (slice 8a, fix round 1).
+//
+// HONESTY RULE, and why the closing sentence differs by shape: the notice names
+// what was recognised, states the rule plainly, and offers a next step this
+// product can actually deliver TODAY. The only credential surface that exists
+// is the header's "Claude accounts" panel (ClaudeAccountPanel.jsx, mounted at
+// App.jsx), and it mounts ANTHROPIC credentials only — the Surface Contract
+// says so itself with `integrations: null` (src/site/productSurfaces.js). So
+// exactly one sentence may point at it, and every other shape says plainly
+// that nothing here can hold it yet. The first revision of this copy sent all
+// nine shapes to a "Link a service" surface that exists nowhere in the
+// product; a notice that routes the user somewhere unreachable is a lie in a
+// friendly voice, and it was pinned by tests, which froze it in place.
+//
+// Pinned character-for-character by PromptBox.secretGuard.test.jsx, so a
+// reword is a deliberate act, not a drive-by.
+
+/** Next step for a shape this product CAN mount today. Anthropic only. */
+export const MOUNTABLE_NEXT_STEP = 'Mount it under Claude accounts in the header instead.'
+/** Next step for every shape no surface here can hold yet. Names no fiction. */
+export const UNMOUNTABLE_NEXT_STEP = 'No surface here can hold one yet, so keep it out of the message.'
+
+const RULE = 'Credentials never go to the model.'
+const reason = (what, next) => `That looks like ${what}. ${RULE} ${next}`
+
+export const SECRET_REASONS = Object.freeze({
+  anthropic: reason('an Anthropic API key', MOUNTABLE_NEXT_STEP),
+  openai: reason('an OpenAI API key', UNMOUNTABLE_NEXT_STEP),
+  github: reason('a GitHub token', UNMOUNTABLE_NEXT_STEP),
+  aws_access_key: reason('an AWS access key ID', UNMOUNTABLE_NEXT_STEP),
+  aws_secret_key: reason('an AWS secret access key', UNMOUNTABLE_NEXT_STEP),
+  slack: reason('a Slack token', UNMOUNTABLE_NEXT_STEP),
+  jwt: reason('a JSON Web Token', UNMOUNTABLE_NEXT_STEP),
+  private_key: reason('a private key', UNMOUNTABLE_NEXT_STEP),
+  generic: reason('a credential', UNMOUNTABLE_NEXT_STEP),
+})
+
+/**
+ * The shared refusal decision every send path runs BEFORE the text leaves the
+ * client. Returns null when the text may be sent, otherwise the notice a
+ * composer renders: `{id, reason, masked, overridable}`.
+ *
+ * FAILS CLOSED: any hit refuses. `overridable` is true only when EVERY hit is
+ * overridable (the fuzzy generic shape), so a paste carrying a named token
+ * beside a labelled assignment can never be talked past. The reported id is
+ * the strongest hit, so the sentence never understates what was found.
+ *
+ * The credential VALUE never leaves this module: `findSecrets` hands back
+ * positions only, and `maskForNotice` emits a four-character shape prefix
+ * behind a fixed bullet run.
+ *
+ * Linear time on the hot path (no allocation beyond the hit array); measured
+ * under 1.2 ms on 64 KB adversarial input against a 50 ms budget.
+ */
+export function evaluateSecretGuard(text) {
+  const hits = findSecrets(text)
+  if (hits.length === 0) return null
+  const worst = hits.find((hit) => !hit.overridable) || hits[0]
+  return {
+    id: worst.id,
+    reason: SECRET_REASONS[worst.id] || SECRET_REASONS.generic,
+    masked: maskForNotice(text, worst),
+    overridable: hits.every((hit) => hit.overridable),
+  }
+}

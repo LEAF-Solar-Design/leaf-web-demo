@@ -29,6 +29,7 @@ import {
   clipboardImagesToAttachments,
   thumbnailImages,
 } from '../composer.js'
+import { evaluateSecretGuard } from '../lib/secretPatterns.js'
 import Markdown from './Markdown.jsx'
 import { contextPct, fmtDetail, orDash, usageCost, usageModel } from '../usage.js'
 import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
@@ -204,6 +205,11 @@ export default function ConversePanel({
   const [expandedTools, setExpandedTools] = useState({}) // chip key -> expanded (full args/result)
   const [attachments, setAttachments] = useState([])
   const [attachmentError, setAttachmentError] = useState(null)
+  // The credential refusal for THIS composer (slice 8a fix round). The reply
+  // box posts to the same POST /api/sessions/{id}/messages the command bar
+  // guards, so it carries the same guard rather than trusting the bar's.
+  const [secretNotice, setSecretNotice] = useState(null) // {id, reason, masked, overridable}
+  const secretOverrideRef = useRef(false) // armed by "Send anyway", spent on the next send
   const attachmentUrlsRef = useRef(new Set())
   const logRef = useRef(null)
   const jobSeenRef = useRef(new Set())
@@ -473,6 +479,27 @@ export default function ConversePanel({
   const send = async (nextText = input) => {
     const text = String(nextText).trim()
     if ((!text && !attachments.length) || busy) return false
+    // --- credential guard (slice 8a fix round) ---------------------------
+    // This box is a second free-text path to POST /api/sessions/{id}/messages,
+    // the very endpoint the command bar's guard protects, so an unguarded
+    // send() here would let a pasted key reach model context two inches below
+    // a notice promising it never would. Same pure decision, same frozen copy
+    // (lib/secretPatterns.js), same fail-closed rule: any hit refuses, and only
+    // a wholly overridable hit set offers a way past. Read-and-disarm the
+    // override first so an early return cannot leave it armed.
+    const allowedOnce = secretOverrideRef.current
+    secretOverrideRef.current = false
+    if (!allowedOnce) {
+      const refusal = evaluateSecretGuard(text)
+      if (refusal) {
+        setSecretNotice(refusal)
+        // Pattern identity ONLY — the value reaches no log, no telemetry
+        // payload and no DOM node outside the masked span.
+        track('conversation.secret_refused', { pattern_id: refusal.id })
+        return false
+      }
+    }
+    setSecretNotice(null)
     let delivered = false
     setSending(true); setSendErr(null)
     const accept = (res, images) => {
@@ -925,10 +952,33 @@ export default function ConversePanel({
         ))}
       </div>
 
+      {secretNotice && (
+        <div className="converse-secret-notice" role="alert" data-testid="converse-secret-notice">
+          <span className="dot red" aria-hidden="true" />
+          <span className="strip-sentence" data-testid="converse-secret-notice-reason">{secretNotice.reason}</span>
+          {/* At most a four-character shape prefix behind a fixed bullet run
+              (maskForNotice). This is the ONLY place any character of the
+              pasted credential is rendered, and it is never the entropy. */}
+          <span className="dim" data-testid="converse-secret-notice-mask">{secretNotice.masked}</span>
+          {secretNotice.overridable && (
+            <button
+              type="button"
+              className="chip-neutral"
+              data-testid="converse-secret-send-anyway"
+              onClick={() => { secretOverrideRef.current = true; setSecretNotice(null); send() }}
+            >
+              Send anyway
+            </button>
+          )}
+        </div>
+      )}
+
       <div className="converse-input">
         <input
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          // Any edit retires the refusal, which was about the text that WAS
+          // there; a notice outliving its text reads as a stuck error.
+          onChange={(e) => { setInput(e.target.value); setSecretNotice(null) }}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send() }
           }}
@@ -963,7 +1013,13 @@ export default function ConversePanel({
             {stopping ? 'Stopping…' : 'Stop'}
           </button>
         ) : (
-          <button type="button" className="chip-act" onClick={send} disabled={busy || (!input.trim() && !attachments.length)}>
+          // onClick={send} handed the CLICK EVENT to send()'s text parameter,
+          // so the button posted the literal string "[object Object]" instead
+          // of the typed reply (probed on this branch before the fix:
+          // postMessage received {text: "[object Object]"}). Wrapping it is
+          // what makes the button send the input at all, and therefore what
+          // puts it behind the credential guard.
+          <button type="button" className="chip-act" onClick={() => send()} disabled={busy || (!input.trim() && !attachments.length)}>
             {sending ? 'Sending…' : 'Send'}
           </button>
         )}

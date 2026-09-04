@@ -154,7 +154,7 @@ test.describe('negative browser contracts', () => {
     const notice = page.getByTestId('secret-notice')
     await expect(notice).toBeVisible()
     await expect(page.getByTestId('secret-notice-reason')).toHaveText(
-      'That looks like an Anthropic API key. Credentials never go to the model. Mount it under Link a service instead.',
+      'That looks like an Anthropic API key. Credentials never go to the model. Mount it under Claude accounts in the header instead.',
     )
     // A named shape has no override.
     await expect(page.getByTestId('secret-send-anyway')).toHaveCount(0)

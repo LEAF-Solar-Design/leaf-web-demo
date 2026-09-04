@@ -27,7 +27,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import useExit from '../useExit.js'
 import { authHeaders, config, noteUnauthorized } from '../api.js'
 import { modChord } from '../lib/keys.js'
-import { findSecrets, maskForNotice } from '../lib/secretPatterns.js'
+import { SECRET_REASONS, evaluateSecretGuard } from '../lib/secretPatterns.js'
 import { isWriteTool } from '../lib/toolRecord.js'
 import { track } from '../telemetry.js'
 import CockpitIcon from '../site/CockpitIcon.jsx'
@@ -54,23 +54,12 @@ import {
 // both its row and its handler. Built once at module load, like the registry.
 const STATIC_COMMANDS = slashStaticEntries()
 
-// The credential-refusal copy, one frozen sentence per pattern id (slice 8a).
-// The honesty ladder's rule: the notice names WHAT was recognised, states the
-// rule plainly, and points at the surface that actually solves it — it never
-// says "blocked" without a next step, and it never echoes the credential.
-// Pinned character-for-character by PromptBox.secretGuard.test.jsx, so a
-// reword is a deliberate act, not a drive-by.
-export const SECRET_REASONS = Object.freeze({
-  anthropic: 'That looks like an Anthropic API key. Credentials never go to the model. Mount it under Link a service instead.',
-  openai: 'That looks like an OpenAI API key. Credentials never go to the model. Mount it under Link a service instead.',
-  github: 'That looks like a GitHub token. Credentials never go to the model. Mount it under Link a service instead.',
-  aws_access_key: 'That looks like an AWS access key ID. Credentials never go to the model. Mount it under Link a service instead.',
-  aws_secret_key: 'That looks like an AWS secret access key. Credentials never go to the model. Mount it under Link a service instead.',
-  slack: 'That looks like a Slack token. Credentials never go to the model. Mount it under Link a service instead.',
-  jwt: 'That looks like a JSON Web Token. Credentials never go to the model. Mount it under Link a service instead.',
-  private_key: 'That looks like a private key. Credentials never go to the model. Mount it under Link a service instead.',
-  generic: 'That looks like a credential. Credentials never go to the model. Mount it under Link a service instead.',
-})
+// The credential-refusal copy now lives in the pure module beside the patterns
+// (lib/secretPatterns.js), because the assistant reply box guards itself with
+// the SAME sentences and must not import a React component to get them. Kept
+// re-exported here: PromptBox.secretGuard.test.jsx and any consumer that
+// already reads it from the bar keep working unchanged.
+export { SECRET_REASONS }
 
 // The bar's scopes, mapped onto the app's lanes (find→run · act→solve ·
 // build→author). Selecting find/act returns you to the composer (the router
@@ -218,28 +207,24 @@ export default function PromptBox({
   const dispatchPrompt = (override) => {
     const sent = typeof override === 'string' ? override : value
     // --- credential guard (slice 8a) -------------------------------------
-    // The ONE choke point: Enter, the Run chip and a picked slash command all
-    // arrive here, so a token-shaped paste cannot reach model context through
-    // any of them. Fails CLOSED — any hit refuses, and only a wholly
-    // overridable hit set (the fuzzy generic pattern) offers a way past.
+    // The command bar's choke point: Enter, the Run chip and a picked slash
+    // command all arrive here, so a token-shaped paste cannot reach model
+    // context through any of THIS composer's paths. It is not the app's only
+    // composer — the assistant reply box (ConversePanel) posts to the same
+    // /messages endpoint and runs the identical guard at its own send(), which
+    // is why the decision itself lives in lib/secretPatterns.js rather than
+    // here. Fails CLOSED — any hit refuses, and only a wholly overridable hit
+    // set (the fuzzy generic pattern) offers a way past.
     // Read-and-disarm the override first so a throw below cannot leave it set.
     const allowedOnce = secretOverrideRef.current
     secretOverrideRef.current = false
     if (!allowedOnce) {
-      const hits = findSecrets(sent)
-      if (hits.length > 0) {
-        // Report the strongest hit: a named token shape outranks the generic
-        // one, so a paste containing both is never described as overridable.
-        const worst = hits.find((hit) => !hit.overridable) || hits[0]
-        setSecretNotice({
-          id: worst.id,
-          reason: SECRET_REASONS[worst.id] || SECRET_REASONS.generic,
-          masked: maskForNotice(sent, worst),
-          overridable: hits.every((hit) => hit.overridable),
-        })
+      const refusal = evaluateSecretGuard(sent)
+      if (refusal) {
+        setSecretNotice(refusal)
         // Pattern identity ONLY. The value reaches no log, no telemetry payload
         // and no DOM node outside the masked span.
-        track('prompt.secret_refused', { pattern_id: worst.id })
+        track('prompt.secret_refused', { pattern_id: refusal.id })
         return Promise.resolve(undefined)
       }
     }

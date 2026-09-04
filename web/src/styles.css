@@ -1934,6 +1934,18 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 }
 .converse-input input::placeholder { color: var(--muted-2); }
 .converse-input input:disabled { color: var(--muted-2); }
+/* The reply box's credential refusal (slice 8a): the same danger-strip grammar
+   the command bar uses, one row above the input it refuses for. */
+.converse-secret-notice {
+  display: flex; align-items: center; gap: 8px;
+  margin: 10px 14px 0; padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--status-danger) 45%, transparent);
+  border-radius: 6px;
+  background: color-mix(in oklab, var(--status-danger) 10%, var(--card));
+  font-size: 12px; color: var(--foreground);
+}
+.converse-secret-notice .strip-sentence { flex: 1; }
+.converse-secret-notice .dim { font-variant-numeric: tabular-nums; }
 /* ============================================================
    M2 — demo-default chrome, focus ring, route-title, banner
    ============================================================ */
