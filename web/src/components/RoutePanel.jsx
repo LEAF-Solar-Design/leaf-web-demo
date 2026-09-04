@@ -88,7 +88,7 @@ export default function RoutePanel({
   }, [activeIdx])
 
   // Enter / arrow keys while a decision surface is up (Esc lives in App's
-  // global ladder). Enter on a focused button/link is left to that control.
+  // global ladder). Editors and focused controls own their Enter key.
   // A fading (exiting) surface is display-only — no keys.
   useEffect(() => {
     if (!route || exiting) return undefined
@@ -101,7 +101,11 @@ export default function RoutePanel({
       }
       if (e.key !== 'Enter') return
       if (performance.now() < enterArmedAtRef.current) return // dispatch keypress cooling down
-      if (e.target && /^(button|a)$/i.test(e.target.tagName || '')) return
+      if (e.target instanceof Element && e.target.closest([
+        'input', 'textarea', 'select', 'button', 'a',
+        '[contenteditable]:not([contenteditable="false"])',
+        '[role="textbox"]', '[role="searchbox"]', '[role="combobox"]', '[role="spinbutton"]',
+      ].join(','))) return
       e.preventDefault()
       if (route.lane === 'build') { onOpenAuthor(); return }
       if (route.lane === 'solve') { if (onDismiss) onDismiss(); return }

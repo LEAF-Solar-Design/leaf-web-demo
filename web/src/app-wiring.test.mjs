@@ -415,6 +415,16 @@ describe('App.jsx wiring', () => {
       assert.match(onRunBody, /isWrite = isWriteTool\(tool\)/)
     })
 
+    it('arms after the platform session resolves even when the auth-only tenant echo is absent', () => {
+      const armStart = stripped.indexOf('armDecision = useCallback')
+      assert.notEqual(armStart, -1)
+      const armBody = stripped.slice(armStart, armStart + 5200)
+      assert.ok(armBody.includes('if (!mock && session.status !== "active") return'))
+      assert.equal(armBody.includes('if (!mock && !tenant) return'), false)
+      const dependencyStart = armBody.indexOf('[tools, mock, session.status')
+      assert.notEqual(dependencyStart, -1)
+    })
+
     it('the ribbon memo recomputes when the engine dirty state flips', () => {
       // The deps array that closes the ribbon useMemo names engineDirty
       // (kimi on #1008 finding 2: read inside, absent from the deps).

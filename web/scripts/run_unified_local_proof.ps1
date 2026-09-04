@@ -3,6 +3,7 @@ param(
   [int]$AppPort = 8230,
   [int]$BrokerPort = 8240,
   [int]$HarnessPort = 8250,
+  [string]$TestGrep = '',
   [ValidateSet('account', 'guest')]
   [string]$Mode = 'account'
 )
@@ -83,6 +84,40 @@ $stderr = Join-Path $runRoot 'stack.err.log'
 $proofExitCode = 1
 
 try {
+  if ($env:VITE_CAD_EDIT -eq '1') {
+    $engineCandidates = @(
+      Get-ChildItem -LiteralPath (Join-Path $repoRoot 'vendor') -Directory |
+        Where-Object {
+          (Test-Path -LiteralPath (Join-Path $_.FullName 'Cargo.toml')) -and
+          (Test-Path -LiteralPath (Join-Path $_.FullName 'worker-browser.mjs'))
+        }
+    )
+    if ($engineCandidates.Count -ne 1) {
+      throw "Expected exactly one browser CAD engine package, found $($engineCandidates.Count)"
+    }
+    $wasmPack = Get-Command wasm-pack -ErrorAction SilentlyContinue
+    if (-not $wasmPack) {
+      throw 'VITE_CAD_EDIT=1 local proof requires wasm-pack on PATH'
+    }
+    $enginePkgDir = Join-Path $runRoot 'cad-engine'
+    $previousRustFlags = $env:RUSTFLAGS
+    Push-Location $engineCandidates[0].FullName
+    try {
+      $env:RUSTFLAGS = '--cfg getrandom_backend="wasm_js"'
+      & $wasmPack.Source build --release --target web . --out-dir $enginePkgDir --out-name engine
+      if ($LASTEXITCODE -ne 0) { throw 'Could not build the browser CAD engine' }
+    } finally {
+      $env:RUSTFLAGS = $previousRustFlags
+      Pop-Location
+    }
+    foreach ($engineFile in @('engine.js', 'engine_bg.wasm')) {
+      if (-not (Test-Path -LiteralPath (Join-Path $enginePkgDir $engineFile))) {
+        throw "Browser CAD engine build did not produce $engineFile"
+      }
+    }
+    $env:LEAF_CAD_ENGINE_PKG_DIR = $enginePkgDir
+  }
+
   $managedVenv = Join-Path $runRoot 'python-runtime'
   uv venv $managedVenv --python 3.13 | Out-Null
   if ($LASTEXITCODE -ne 0) { throw 'Could not create the managed proof Python runtime' }
@@ -114,7 +149,13 @@ try {
 
   Push-Location (Join-Path $repoRoot 'web')
   try {
-    if ($Mode -eq 'guest') { npm run proof:guest } else { npm run proof:local }
+    if ($Mode -eq 'guest') {
+      npm run proof:guest
+    } elseif ($TestGrep) {
+      npx playwright test --config playwright.local.config.mjs --grep $TestGrep
+    } else {
+      npm run proof:local
+    }
     $proofExitCode = $LASTEXITCODE
   } finally { Pop-Location }
 } finally {
