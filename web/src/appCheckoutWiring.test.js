@@ -176,3 +176,37 @@ describe('App.jsx checkout controller adoption', () => {
     expect(strip(mutated).match(/useCheckoutController\(/g)).toHaveLength(2)
   })
 })
+
+describe('App.jsx hands the authored-tool cluster the same write gates as the catalog (3c)', () => {
+  // The defect this pins: writeLocked and canRunWrite were passed to the two
+  // catalog builders and NOT to authorCluster, so an authored WRITE tool under
+  // a write lock or without write entitlement rendered enabled or reasonless.
+  // No component test renders App.jsx, so the pin is over the source: the ONE
+  // authorCluster call must carry both gates. Anchored on the call so a slot
+  // in a neighbouring builder cannot satisfy it.
+  const AUTHOR_CALL = /authorCluster\(\{(?:(?!Clusters\()[\s\S]){0,1200}?\bwriteLocked,(?:(?!Clusters\()[\s\S]){0,200}?writeEntitled:\s*canRunWrite\s*\}\)/
+
+  it('passes writeLocked and writeEntitled into the one authorCluster call', () => {
+    expect(stripped.match(/authorCluster\(/g) || []).toHaveLength(1)
+    expect(stripped).toMatch(AUTHOR_CALL)
+  })
+
+  it('fails when either write gate is dropped from the authorCluster call', () => {
+    const call = appSource.indexOf('const author = authorCluster({')
+    expect(call).toBeGreaterThan(0)
+    // The call's own closing, not the onOpen closure's inner `})`: anchor on
+    // the last gate line and take the `})` after it.
+    const gate = appSource.indexOf('writeEntitled: canRunWrite', call)
+    expect(gate).toBeGreaterThan(call)
+    const end = appSource.indexOf('})', gate)
+    const head = appSource.slice(0, call)
+    const body = appSource.slice(call, end)
+    const tail = appSource.slice(end)
+    const withoutLock = head + body.replace(/\n\s*writeLocked,/, '') + tail
+    const withoutEnt = head + body.replace(/\n\s*writeEntitled: canRunWrite,/, '') + tail
+    expect(withoutLock).not.toEqual(appSource)
+    expect(withoutEnt).not.toEqual(appSource)
+    expect(strip(withoutLock)).not.toMatch(AUTHOR_CALL)
+    expect(strip(withoutEnt)).not.toMatch(AUTHOR_CALL)
+  })
+})
