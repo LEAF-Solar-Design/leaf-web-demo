@@ -106,6 +106,16 @@ TABLE_COLUMNS: dict[str, dict[str, str]] = {
         "active_turn_tier": TEXT,
         "active_turn_subject": TEXT,
         "model": TEXT,
+        # 0053 (review finding 8): the conversation scope envelope, the
+        # listed title, and the incrementally-maintained turn count. Omitting
+        # a column here means backfill silently writes rows without it (and,
+        # since the title write is `title IS NULL` guarded, a backfilled
+        # session would re-title itself from a later prompt) and parity mode
+        # cannot see it diverge -- the exact defect this entry closes.
+        "scope_kind": TEXT,
+        "scope_handle": TEXT,
+        "title": TEXT,
+        "turn_count": INT,
     },
     "app_session_events": {
         "session_id": TEXT,
@@ -153,6 +163,10 @@ _PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
 _MIGRATION_COLUMNS: dict[tuple[str, str], str] = {
     ("app_sessions", "model"): "0019_sessions_model.sql",
     ("app_sessions", "active_turn_subject"): "0022_sessions_active_turn_subject.sql",
+    ("app_sessions", "scope_kind"): "0053_session_scope.sql",
+    ("app_sessions", "scope_handle"): "0053_session_scope.sql",
+    ("app_sessions", "title"): "0053_session_scope.sql",
+    ("app_sessions", "turn_count"): "0053_session_scope.sql",
 }
 
 # NOT NULL on the PostgreSQL side only. Legacy SQLite declares none of these

@@ -148,6 +148,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   scope_kind      TEXT,
   scope_handle    TEXT,
   title           TEXT,
+  turn_count      INTEGER NOT NULL DEFAULT 0,
   UNIQUE(tenant_id, drawing_id)
 );
 
@@ -226,6 +227,13 @@ def _db() -> sqlite3.Connection:
         for column in ("scope_kind", "scope_handle", "title"):
             if column not in session_cols:
                 _conn.execute(f"ALTER TABLE sessions ADD COLUMN {column} TEXT")
+        # `turn_count` (review finding 3): maintained incrementally by
+        # append_event, never a correlated COUNT(*) at list time. Same
+        # additive, idempotent posture as the columns above.
+        if "turn_count" not in session_cols:
+            _conn.execute(
+                "ALTER TABLE sessions ADD COLUMN turn_count INTEGER NOT NULL DEFAULT 0"
+            )
         _conn.commit()
     return _conn
 
@@ -240,6 +248,20 @@ SCOPE_KINDS = ("project", "drawing", "entity")
 #: The listed title is the first user text of the conversation, bounded here
 #: and CHECK-bounded in PostgreSQL (0053) to the same figure.
 TITLE_MAX_CHARS = 120
+
+
+def _looks_like_uuid(value: Optional[str]) -> bool:
+    """True iff `value` parses as a UUID. Used to pick the index-friendly form
+    of a PostgreSQL equality (cast the parameter, not the indexed column) and
+    to decide whether the org_id branch of the tenant term can run at all
+    without risking a 22P02 on a non-UUID tenant id (review finding 2)."""
+    if not isinstance(value, str):
+        return False
+    try:
+        uuid.UUID(value)
+        return True
+    except ValueError:
+        return False
 
 
 def _validate_scope(scope_kind: Optional[str], scope_handle: Optional[str]) -> None:
@@ -318,6 +340,7 @@ def _row_to_session(row: sqlite3.Row) -> Dict[str, Any]:
         "scope_kind": row["scope_kind"],
         "scope_handle": row["scope_handle"],
         "title": row["title"],
+        "turn_count": row["turn_count"],
     }
 
 
@@ -452,6 +475,14 @@ def _list_filter_sql(
     if scope_kind == "drawing":
         return f" AND s.drawing_id = {placeholder}", (scope_handle,)
     if scope_kind == "project" and project_column:
+        # Review finding 2: casting the INDEXED column (`project_id::text`)
+        # defeats idx_app_sessions_one_project / any project_id index. A real
+        # project_id is always a UUID, so cast the PARAMETER instead when it
+        # parses as one; a malformed handle (never a real project's id) falls
+        # back to the always-correct but unindexed form rather than raising
+        # 22P02.
+        if _looks_like_uuid(scope_handle):
+            return f" AND s.{project_column} = {placeholder}::uuid", (scope_handle,)
         return f" AND s.{project_column}::text = {placeholder}", (scope_handle,)
     return (
         f" AND s.scope_kind = {placeholder} AND s.scope_handle = {placeholder}",
@@ -465,13 +496,13 @@ def list_sessions(
     cursor: Optional[tuple] = None,
 ) -> tuple:
     """One tenant's sessions, newest-first on (updated_at DESC, session_id DESC),
-    one bounded query: LIMIT clamped to [1, LIST_MAX_LIMIT], the `turn_count`
-    a correlated COUNT over the row's own `turn_started` events (a PK-prefix
-    scan per listed row, never a per-row round trip), and keyset paging on
-    `cursor = (updated_at, session_id)` from the previous page's last row.
-    Returns `(rows, next_cursor)`; `next_cursor` is None on the last page.
-    Tenant-scoped by construction: the WHERE names the caller's tenant_id and
-    nothing else can widen it."""
+    one bounded query: LIMIT clamped to [1, LIST_MAX_LIMIT], `turn_count` read
+    straight off the row (maintained incrementally by append_event, never a
+    per-row COUNT(*) over its event history — review finding 3), and keyset
+    paging on `cursor = (updated_at, session_id)` from the previous page's
+    last row. Returns `(rows, next_cursor)`; `next_cursor` is None on the last
+    page. Tenant-scoped by construction: the WHERE names the caller's
+    tenant_id and nothing else can widen it."""
     _validate_scope(scope_kind, scope_handle)
     bounded = max(1, min(int(limit), LIST_MAX_LIMIT))
     filter_sql, filter_args = _list_filter_sql(
@@ -485,21 +516,13 @@ def list_sessions(
         )
         cursor_args = (after_updated, after_updated, after_id)
     rows = _query(
-        "SELECT s.*,"
-        " (SELECT COUNT(*) FROM session_events e"
-        "  WHERE e.session_id = s.session_id AND e.type = 'turn_started')"
-        " AS turn_count"
-        " FROM sessions s WHERE s.tenant_id = ?"
+        "SELECT s.* FROM sessions s WHERE s.tenant_id = ?"
         f"{filter_sql}{cursor_sql}"
         " ORDER BY s.updated_at DESC, s.session_id DESC LIMIT ?",
         (tenant_id, *filter_args, *cursor_args, bounded + 1),
     )
     page = list(rows)[:bounded]
-    out = []
-    for row in page:
-        session = _row_to_session(row)
-        session["turn_count"] = int(row["turn_count"] or 0)
-        out.append(session)
+    out = [_row_to_session(row) for row in page]
     next_cursor = None
     if len(rows) > bounded and page:
         last = page[-1]
@@ -547,6 +570,13 @@ def append_event(session_id: str, turn_id: Optional[str], type: str,
                     "UPDATE sessions SET title = ? WHERE session_id = ? AND title IS NULL",
                     (title, session_id),
                 )
+            # Review finding 3: maintained here, in the same transaction as
+            # the event, so the list route never counts turn_started rows
+            # itself.
+            conn.execute(
+                "UPDATE sessions SET turn_count = turn_count + 1 WHERE session_id = ?",
+                (session_id,),
+            )
         if type in ("turn_complete", "error") and turn_id is not None:
             # Publish the terminal event and release its active-turn CAS in the
             # same transaction. A transcript reader that sees the terminal
@@ -1078,6 +1108,7 @@ def _pg_session(row: Dict[str, Any]) -> Dict[str, Any]:
         "scope_kind": row.get("scope_kind"),
         "scope_handle": row.get("scope_handle"),
         "title": row.get("title"),
+        "turn_count": row.get("turn_count") or 0,
     }
     # Keep legacy and unscoped PostgreSQL responses byte-compatible.  The
     # project keys appear only for a project-bound durable conversation.
@@ -1121,6 +1152,18 @@ def _pg_approval(row: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+#: Columns 0053 adds to app_sessions. Review finding 11: the READ side already
+#: tolerates a database behind this migration (`.get` on the row dict, see
+#: `_pg_session`), but the WRITE side does not -- `_pg_append_event`'s title
+#: UPDATE and `_pg_get_or_create_session`'s INSERT column list both hard-fail
+#: with undefined_column on an unmigrated database, and in dual-write mode the
+#: legacy write already committed by the time that failure surfaces, so every
+#: later shadow read of that session raises permanently. Checked here, before
+#: any dual-write/shadow call touches these columns, so an unmigrated target
+#: fails BEFORE the legacy write, not after.
+_SESSION_SCOPE_COLUMNS = ("scope_kind", "scope_handle", "title", "turn_count")
+
+
 def _pg_ensure_started() -> None:
     db = _platform_db()
     with db.cursor() as cur:
@@ -1130,9 +1173,22 @@ def _pg_ensure_started() -> None:
             " to_regclass('app_approvals') AS approvals"
         )
         row = cur.fetchone()
-    if not row or not all(row.values()):
+        if not row or not all(row.values()):
+            raise RuntimeError(
+                "PostgreSQL session schema is unavailable; apply 0012_sessions.sql"
+            )
+        cur.execute(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_schema = current_schema() AND table_name = 'app_sessions'"
+            " AND column_name = ANY(%s)",
+            (list(_SESSION_SCOPE_COLUMNS),),
+        )
+        present = {r["column_name"] for r in cur.fetchall()}
+    missing = [c for c in _SESSION_SCOPE_COLUMNS if c not in present]
+    if missing:
         raise RuntimeError(
-            "PostgreSQL session schema is unavailable; apply 0012_sessions.sql"
+            "PostgreSQL app_sessions is missing "
+            f"{', '.join(missing)}; apply 0053_session_scope.sql"
         )
 
 
@@ -1237,10 +1293,11 @@ def _pg_get_session(session_id: str) -> Optional[Dict[str, Any]]:
     return _pg_session(row) if row else None
 
 
-#: Statement timeout for the one list query: it is bounded by LIMIT and served
-#: from idx_app_sessions_{tenant,org}_recent, so a query that outlives this is
-#: a stuck backend, not a big page, and the caller fails closed instead of
-#: holding a pool connection.
+#: Statement timeout for the one list query: it is bounded by LIMIT and each
+#: branch walks its own index (idx_app_sessions_tenant_recent /
+#: idx_app_sessions_org_recent), so a query that outlives this is a stuck
+#: backend, not a big page, and the caller fails closed instead of holding a
+#: pool connection.
 _PG_LIST_STATEMENT_TIMEOUT_MS = 5000
 
 
@@ -1253,7 +1310,23 @@ def _pg_list_sessions(
     tenancies 0039 introduced: unscoped rows carry the tenant as tenant_id,
     project-bound rows carry it as org_id (their tenant_id is the reserved
     `project:<org>:<project>` marker). The router still re-reads project
-    membership per listed project before a project row reaches a client."""
+    membership per listed project before a project row reaches a client.
+
+    Review finding 2: `tenant_id` and `org_id` are two different columns, so
+    no single index can satisfy an `OR` across them together with the
+    ORDER BY/LIMIT. Each tenancy is instead its own query against its own
+    covering index (idx_app_sessions_tenant_recent /
+    idx_app_sessions_org_recent), each already LIMITed to the page size, and
+    the two already-sorted slices are merged and re-limited in SQL -- the
+    standard top-K-from-sorted-partitions merge: taking the top (bounded+1)
+    from every partition is sufficient to produce the true global top
+    (bounded+1), because any row excluded from a partition's slice is, by
+    definition, ranked behind at least (bounded+1) rows from that SAME
+    partition alone. The org branch only runs when `tenant_id` parses as a
+    UUID: `org_id = $::uuid` on a non-UUID guest/demo tenant id would raise
+    22P02 before the LIMIT ever bounds anything, and a non-UUID tenant can
+    never own a project row (org_id is a UUID column) so skipping the branch
+    changes no result."""
     _validate_scope(scope_kind, scope_handle)
     bounded = max(1, min(int(limit), LIST_MAX_LIMIT))
     filter_sql, filter_args = _list_filter_sql(
@@ -1266,26 +1339,33 @@ def _pg_list_sessions(
             " AND (s.updated_at < %s OR (s.updated_at = %s AND s.session_id < %s))"
         )
         cursor_args = (after_updated, after_updated, after_id)
+    tenant_branch = (
+        "SELECT s.* FROM app_sessions s WHERE s.tenant_id = %s"
+        f"{filter_sql}{cursor_sql}"
+        " ORDER BY s.updated_at DESC, s.session_id DESC LIMIT %s"
+    )
+    tenant_args = (tenant_id, *filter_args, *cursor_args, bounded + 1)
+    if _looks_like_uuid(tenant_id):
+        org_branch = (
+            "SELECT s.* FROM app_sessions s WHERE s.org_id = %s::uuid"
+            f"{filter_sql}{cursor_sql}"
+            " ORDER BY s.updated_at DESC, s.session_id DESC LIMIT %s"
+        )
+        org_args = (tenant_id, *filter_args, *cursor_args, bounded + 1)
+        query = (
+            f"SELECT * FROM ({tenant_branch} UNION ALL {org_branch}) merged"
+            " ORDER BY updated_at DESC, session_id DESC LIMIT %s"
+        )
+        args = (*tenant_args, *org_args, bounded + 1)
+    else:
+        query = tenant_branch
+        args = tenant_args
     db = _platform_db()
     with db.transaction(read_only=True) as conn:
         conn.execute(f"SET LOCAL statement_timeout = {int(_PG_LIST_STATEMENT_TIMEOUT_MS)}")
-        rows = conn.execute(
-            "SELECT s.*,"
-            " (SELECT COUNT(*) FROM app_session_events e"
-            "  WHERE e.session_id = s.session_id AND e.type = 'turn_started')"
-            " AS turn_count"
-            " FROM app_sessions s"
-            " WHERE (s.tenant_id = %s OR s.org_id::text = %s)"
-            f"{filter_sql}{cursor_sql}"
-            " ORDER BY s.updated_at DESC, s.session_id DESC LIMIT %s",
-            (tenant_id, tenant_id, *filter_args, *cursor_args, bounded + 1),
-        ).fetchall()
+        rows = conn.execute(query, args).fetchall()
     page = list(rows)[:bounded]
-    out = []
-    for row in page:
-        session = _pg_session(row)
-        session["turn_count"] = int(row.get("turn_count") or 0)
-        out.append(session)
+    out = [_pg_session(row) for row in page]
     next_cursor = None
     if len(rows) > bounded and page:
         last = page[-1]
@@ -1359,6 +1439,14 @@ def _pg_append_event(
                     " WHERE session_id = %s AND title IS NULL",
                     (title, session_id),
                 )
+            # Review finding 3: maintained here, in the same transaction as
+            # the event, so the list query reads a column instead of scanning
+            # app_session_events per row.
+            conn.execute(
+                "UPDATE app_sessions SET turn_count = turn_count + 1"
+                " WHERE session_id = %s",
+                (session_id,),
+            )
         if type in ("turn_complete", "error") and turn_id is not None:
             conn.execute(
                 "UPDATE app_sessions SET active_turn_id = NULL,"
@@ -1781,6 +1869,9 @@ def append_event(
     if mode == "postgres":
         return _pg_append_event(session_id, turn_id, type, data)
     if mode in _DUAL_WRITE_MODES:
+        # Review finding 11: verify the mirror can accept this write BEFORE
+        # the legacy write below commits -- see _pg_ensure_started.
+        _pg_ensure_started()
         postgres_before = _pg_get_session(session_id)
         if postgres_before is None:
             raise RuntimeError("PostgreSQL session mirror is missing")

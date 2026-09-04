@@ -30,6 +30,10 @@ RECONCILE_PATH = ROOT / "scripts" / "reconcile_sessions_authority.py"
 SESSIONS_MIGRATION = (
     ROOT / "platform" / "migrations" / "0012_sessions.sql"
 ).read_text(encoding="utf-8")
+SCOPE_MIGRATION_NAME = "0053_session_scope.sql"
+SCOPE_MIGRATION = (
+    ROOT / "platform" / "migrations" / SCOPE_MIGRATION_NAME
+).read_text(encoding="utf-8")
 INVENTORY = (ROOT / "platform" / "authority-inventory.json").read_text(encoding="utf-8")
 APP_DOCKERFILE = ROOT / "deploy" / "Dockerfile.app"
 MODEL_MIGRATION = "0019_sessions_model.sql"
@@ -358,12 +362,38 @@ def test_integer_flags_normalize_to_booleans_preserving_null():
 
 
 def test_migration_gated_columns_name_their_migration():
-    """TRAP 7: model arrives at 0019 and active_turn_subject at 0022."""
+    """TRAP 7: model arrives at 0019, active_turn_subject at 0022, the
+    conversation scope envelope/title/turn_count at 0053."""
     assert RECONCILE._MIGRATION_COLUMNS[("app_sessions", "model")] == MODEL_MIGRATION
     assert (
         RECONCILE._MIGRATION_COLUMNS[("app_sessions", "active_turn_subject")]
         == SUBJECT_MIGRATION
     )
+    for column in ("scope_kind", "scope_handle", "title", "turn_count"):
+        assert (
+            RECONCILE._MIGRATION_COLUMNS[("app_sessions", column)]
+            == SCOPE_MIGRATION_NAME
+        )
+
+
+def test_every_0053_column_is_registered_for_reconciliation():
+    """Review finding 8 regression guard, pure-logic (no DATABASE_URL needed).
+
+    scope_kind/scope_handle/title landed in 0053 with no TABLE_COLUMNS entry:
+    backfill silently wrote rows without them (and, since the title write is
+    `title IS NULL` guarded, a backfilled session would re-title itself from
+    a later prompt) and parity mode could not see them diverge. This reads
+    the columns the migration ACTUALLY adds straight from its SQL, so a
+    future column added to 0053 and forgotten here fails this test instead
+    of silently skipping reconciliation, closing the gap the old
+    order-only assertion (test_backfill_inserts_sessions_before_events)
+    could not catch.
+    """
+    added = set(re.findall(r"ADD COLUMN IF NOT EXISTS (\w+)", SCOPE_MIGRATION))
+    assert added == {"scope_kind", "scope_handle", "title", "turn_count"}
+    assert added <= set(RECONCILE.TABLE_COLUMNS["app_sessions"])
+    for column in added:
+        assert ("app_sessions", column) in RECONCILE._MIGRATION_COLUMNS
 
 
 def test_key_sample_is_bounded_and_hashed_never_raw():
@@ -721,7 +751,14 @@ def test_trap6_identity_already_held_by_another_session_is_reported(source, targ
 @requires_database
 @pytest.mark.parametrize(
     "column,migration",
-    [("model", MODEL_MIGRATION), ("active_turn_subject", SUBJECT_MIGRATION)],
+    [
+        ("model", MODEL_MIGRATION),
+        ("active_turn_subject", SUBJECT_MIGRATION),
+        ("scope_kind", SCOPE_MIGRATION_NAME),
+        ("scope_handle", SCOPE_MIGRATION_NAME),
+        ("title", SCOPE_MIGRATION_NAME),
+        ("turn_count", SCOPE_MIGRATION_NAME),
+    ],
 )
 def test_trap7_a_target_behind_its_migration_names_the_migration(
     source, target, column, migration

@@ -327,17 +327,23 @@ class CreateSessionRequest(BaseModel):
         return self
 
 
-def _scope_of(sess: Dict[str, Any]) -> Dict[str, str]:
-    """The `{kind, handle}` a row answers with: the stored envelope when the
-    row has one, else derived from its identity (project when bound, else
-    drawing). Rows from before 0053 read NULL and land in the second branch;
-    nothing is invented and nothing is backfilled."""
+def _scope_of(sess: Dict[str, Any]) -> Dict[str, Any]:
+    """The `{kind, handle, recorded}` a row answers with: the stored envelope
+    when the row has one, else derived from its identity (project when bound,
+    else drawing). Rows from before 0053 read NULL and land in the second
+    branch; nothing is invented and nothing is backfilled. `recorded` is
+    review finding 9: a derived scope is factually correct but was never
+    OBSERVED as an explicit attach, and this product's contract is that a
+    surface never states as fact what the machinery did not observe."""
     kind, handle = sess.get("scope_kind"), sess.get("scope_handle")
     if kind in SCOPE_KINDS and isinstance(handle, str) and handle:
-        return {"kind": kind, "handle": handle}
+        return {"kind": kind, "handle": handle, "recorded": True}
     if sess.get("project_id") is not None:
-        return {"kind": "project", "handle": str(sess["project_id"])}
-    return {"kind": "drawing", "handle": str(sess.get("drawing_id") or "")}
+        return {"kind": "project", "handle": str(sess["project_id"]), "recorded": False}
+    return {
+        "kind": "drawing", "handle": str(sess.get("drawing_id") or ""),
+        "recorded": False,
+    }
 
 
 # GET /api/sessions paging. The page cap is the STORE's cap (one number, two
@@ -350,7 +356,12 @@ _CURSOR_MAX_LEN = 256
 def _parse_scope_query(raw: Optional[str]):
     """`scope=<kind>:<handle>` -> (kind, handle), or (None, None) when absent.
     Reuses SessionScope's validators so the query form can never accept a
-    scope the body form refuses. Raises ValueError on anything malformed."""
+    scope the body form refuses. Raises ValueError on anything malformed.
+
+    Review finding 10: a project handle is canonicalized here exactly as
+    `create_session` canonicalizes it on write (`str(uuid.UUID(...))`), so
+    `?scope=project:<UPPERCASE-UUID>` matches the lowercase form every row
+    stores instead of silently listing zero rows."""
     if raw is None or raw == "":
         return None, None
     if len(raw) > len(max(SCOPE_KINDS, key=len)) + 1 + SCOPE_HANDLE_MAX:
@@ -359,7 +370,13 @@ def _parse_scope_query(raw: Optional[str]):
     if not sep:
         raise ValueError("scope must be <kind>:<handle>")
     parsed = SessionScope(kind=kind, handle=handle)  # ValidationError is a ValueError
-    return parsed.kind, parsed.handle
+    handle = parsed.handle
+    if parsed.kind == "project":
+        try:
+            handle = str(uuid.UUID(handle))
+        except ValueError as exc:
+            raise ValueError("scope.handle must be a project uuid") from exc
+    return parsed.kind, handle
 
 
 def _encode_cursor(cursor) -> Optional[str]:
@@ -916,17 +933,43 @@ def create_session(req: CreateSessionRequest, tenant=Depends(deps.require_active
 def list_sessions(scope: Optional[str] = None, limit: int = LIST_DEFAULT_LIMIT,
                   cursor: Optional[str] = None,
                   tenant=Depends(deps.require_active_tenant)):
-    """The caller's OWN sessions, newest-first, one bounded page.
+    """This tenant's sessions, newest-first, one bounded page.
+
+    Contract (review finding 1): tenant isolation is structural -- the
+    store's WHERE names this tenant and nothing else, so another tenant's
+    session never lists. WITHIN one tenant this is deliberately an ORG-LEVEL
+    view, not a per-caller one: a project-scoped row is visible to every
+    CURRENT member of that project (re-checked per listed project, memoized
+    per page -- exactly as every per-session route already gates project
+    access), and a non-project (drawing/entity) row is visible to every
+    member of the org, because that is already the access model every other
+    session route grants today (`platform_link.require_project_session_access`
+    returns a non-project row to any same-tenant caller who has its
+    session_id, and `get_or_create_session` hands back the SAME row to
+    whichever org member next attaches to that drawing_id -- session identity
+    there is per (tenant, drawing), not per person). This route only makes
+    that pre-existing, already-reachable set DISCOVERABLE without first
+    knowing a session_id; it grants no access this tenant's members did not
+    already have. `app_sessions` carries no owner/subject column, so a
+    per-caller-only list is not a smaller, safer version of this route: for a
+    shared non-project session it would hide a conversation from a member who
+    has actually been posting turns into it. A client surface listing this
+    should present it as shared team/org activity, not private history --
+    `title` is the first user prompt, and it is exposed at the same tenant
+    boundary as every other field of the row already was.
 
     `scope=<kind>:<handle>` narrows to one scope (absent: every session of the
     tenant); `limit` is clamped to [1, LIST_MAX_LIMIT] like the transcript
     route clamps its own; `cursor` is the opaque `next_cursor` of the previous
-    page. A malformed scope or cursor is 422 BAD_PARAMS, never an empty page
-    that reads as "no conversations". Tenant isolation is structural: the
-    store's WHERE names this tenant and nothing else, and a project-bound row
-    additionally re-reads membership (per listed project, memoized per page)
-    exactly as every per-session route does, so another tenant's session
-    never lists and a revoked member's project rows drop out.
+    page. A malformed scope or cursor is 422 BAD_PARAMS. A returned page CAN
+    be shorter than `limit`, including empty, while `next_cursor` is non-null
+    (review finding 5): a project row failing today's membership check is
+    dropped AFTER the store's LIMIT, so keep paging on a non-null cursor
+    rather than reading a short page as "no conversations". The cursor can
+    also skip a row exactly once (review finding 6): `updated_at` moves a
+    session already below the cursor's watermark back above it on its next
+    turn, so a conversation just talked to can vanish from a deeper page it
+    would otherwise have been on; it never appears twice.
     """
     try:
         scope_kind, scope_handle = _parse_scope_query(scope)
@@ -949,13 +992,21 @@ def list_sessions(scope: Optional[str] = None, limit: int = LIST_DEFAULT_LIMIT,
     )
     out: List[Dict[str, Any]] = []
     project_access: Dict[str, bool] = {}
+    # Review finding 4: the identity binding does not depend on the project,
+    # so it is resolved ONCE per request (only when a project row is actually
+    # on the page) instead of once per distinct project.
+    binding = None
+    binding_resolved = False
     for sess in rows:
         if sess.get("project_id") is not None:
             key = str(sess["project_id"])
             if key not in project_access:
                 try:
+                    if not binding_resolved:
+                        binding = platform_link.resolve_caller_binding(tenant)
+                        binding_resolved = True
                     project_access[key] = platform_link.require_project_session_access(
-                        sess, tenant, write=False,
+                        sess, tenant, write=False, binding=binding,
                     ) is not None
                 except (platform_link.ProjectSessionForbidden, LookupError):
                     # Fail closed: a row whose membership cannot be proven

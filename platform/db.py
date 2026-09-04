@@ -293,9 +293,10 @@ _AUTHORITY_REQUIRED_COLUMNS = {
             "updated_at", "last_seq", "active_turn_id", "turn_started_at",
             "active_turn_tier", "active_turn_subject", "model", "org_id",
             "project_id",
-            # 0053: the conversation scope envelope and the listed title
-            # (standardization slice 6b, server/session_store.py list_sessions).
-            "scope_kind", "scope_handle", "title",
+            # 0053: the conversation scope envelope, the listed title, and the
+            # incrementally-maintained turn count (standardization slice 6b,
+            # server/session_store.py list_sessions; review finding 3).
+            "scope_kind", "scope_handle", "title", "turn_count",
         },
         "app_session_events": {
             "session_id", "seq", "turn_id", "type", "data_json", "created_at",
@@ -735,8 +736,15 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
             "'project'", "'drawing'", "'entity'"),
         "app_sessions_scope_shape_check": _catalog_contract(
             "app_sessions", "CHECK ((scope_kind IS NULL) = (scope_handle IS NULL))"),
+        # 0053 (review finding 7): scope_handle carries its own length bound
+        # instead of leaning on the wire (routers/sessions.py SCOPE_HANDLE_MAX)
+        # alone, matching the title CHECK's posture.
+        "app_sessions_scope_handle_check": _catalog_contract(
+            "app_sessions", "CHECK", "scope_handle IS NULL", "char_length(scope_handle)"),
         "app_sessions_title_check": _catalog_contract(
             "app_sessions", "CHECK", "title IS NULL", "char_length(title)"),
+        "app_sessions_turn_count_check": _catalog_contract(
+            "app_sessions", "CHECK (turn_count >= 0)"),
         "app_session_events_pkey": _catalog_contract(
             "app_session_events", "PRIMARY KEY (session_id, seq)"),
         "app_session_events_session_id_fkey": _catalog_contract(
