@@ -27,9 +27,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import useExit from '../useExit.js'
 import { authHeaders, config, noteUnauthorized } from '../api.js'
 import { modChord } from '../lib/keys.js'
-import { SECRET_REASONS, SECRET_REASONS_NO_MOUNT, evaluateSecretGuard } from '../lib/secretPatterns.js'
+import { SECRET_REASONS, SECRET_REASONS_NO_MOUNT } from '../lib/secretPatterns.js'
 import { isWriteTool } from '../lib/toolRecord.js'
-import { track } from '../telemetry.js'
 import CockpitIcon from '../site/CockpitIcon.jsx'
 import {
   appendPromptHistory,
@@ -89,20 +88,14 @@ export default function PromptBox({
   // client would silently ignore.
   commandActions = {},
   imageAttachmentsEnabled = false,
-  // --- credential guard (slice 8a fix round 2) ---------------------------
-  // THE AUTHORITY IS THE CONTROLLER, not this component. Every bar path —
-  // this composer's Enter/Run/slash pick, the failed-strip Retry chip, the
-  // R-key re-dispatch, the tour — funnels through
-  // createCatalogController.dispatch, which evaluates the same guard and
-  // publishes its verdict here as `secretRefusal`. The local pre-check below
-  // only saves a round trip on the keystroke path; the funnel is what makes
-  // the promise true for paths this component never sees.
+  // --- credential refusal (slice 8a round 3) -----------------------------
+  // THIS COMPONENT HAS NO GUARD, and that is the fix. The guard is on the wire
+  // (lib/secretGuardTransport.js, called by api.nlPrompt); the controller
+  // catches its typed refusal and publishes it here. A local copy of the
+  // decision is what made rounds 1 and 2 wrong: it made this composer look
+  // like the authority while paths it never sees stayed open. Render the
+  // verdict that was actually enforced, and nothing else.
   secretRefusal = null,
-  onAllowSecretOnce = null,
-  // Is the header's Claude accounts panel actually mounted? Only a true answer
-  // lets the anthropic refusal point at it. Defaults false: name no surface
-  // rather than invent one.
-  credentialMountAvailable = false,
   // W4d Slice E: the reference's one-line docked "Command:" prompt. The DOM
   // is the same well; this only adds a class the studio's drafting-surface
   // CSS lays out as one row, and swaps the caret glyph for the prompt word.
@@ -125,12 +118,6 @@ export default function PromptBox({
   const [mcpServers, setMcpServers] = useState([])
   const [attachments, setAttachments] = useState([])
   const [attachmentError, setAttachmentError] = useState(null)
-  // The credential refusal (slice 8a): `{id, reason, masked, overridable}`, or
-  // null. It carries a MASK, never the value — see maskForNotice.
-  const [secretNotice, setSecretNotice] = useState(null)
-  // Armed by an explicit "Send anyway" click and disarmed by the very next
-  // dispatch, so an override is genuinely once and can never latch open.
-  const secretOverrideRef = useRef(false)
   const attachmentUrlsRef = useRef(new Set())
   const historyRef = useRef(createPromptHistoryState(sessionId))
 
@@ -205,17 +192,11 @@ export default function PromptBox({
   // once. scopeMenu.shown covers both the open and the fading state.
   const menuOpen = !!trigger && !menuDismissed && !routeActive && !scopeMenu.shown
 
-  // Any edit re-arms a dismissed menu and re-anchors the highlight — and
-  // retires the credential refusal, which is about the text that WAS there.
-  // A notice that outlived its text would read as a stuck error.
-  useEffect(() => { setMenuDismissed(false); setMenuIdx(0); setSecretNotice(null) }, [value])
+  // Any edit re-arms a dismissed menu and re-anchors the highlight. The
+  // credential refusal is retired by the controller's own setPrompt, which the
+  // same keystroke reaches, so a notice never outlives the text it was about.
+  useEffect(() => { setMenuDismissed(false); setMenuIdx(0) }, [value])
   const idx = Math.min(menuIdx, Math.max(0, matches.length - 1))
-
-  // The controller's verdict wins: it is the one the funnel actually enforced,
-  // and it is the only one that exists for a path this component never saw
-  // (the Retry chip, the R key). The local pre-check's notice is the fallback
-  // for the keystroke that never reached the controller at all.
-  const shownSecret = secretRefusal || secretNotice
 
   // Tab: complete the name into the input (trailing space closes the menu and
   // starts args mode). Enter: complete and hand off to dispatch in one act.
@@ -224,35 +205,15 @@ export default function PromptBox({
     setCaret(nextCaret)
     onChange(nextValue)
   }
-  const dispatchPrompt = (override) => {
+  // allowSecretOnce is the "Send anyway" click's authorisation, carried as a
+  // PARAMETER on this one dispatch. Nothing here remembers it, so a click the
+  // host short-circuits authorises exactly nothing.
+  const dispatchPrompt = (override, { allowSecretOnce = false } = {}) => {
     const sent = typeof override === 'string' ? override : value
-    // --- credential guard (slice 8a) -------------------------------------
-    // The command bar's choke point: Enter, the Run chip and a picked slash
-    // command all arrive here, so a token-shaped paste cannot reach model
-    // context through any of THIS composer's paths. It is not the app's only
-    // composer — the assistant reply box (ConversePanel) posts to the same
-    // /messages endpoint and runs the identical guard at its own send(), which
-    // is why the decision itself lives in lib/secretPatterns.js rather than
-    // here. Fails CLOSED — any hit refuses, and only a wholly overridable hit
-    // set (the fuzzy generic pattern) offers a way past.
-    // Read-and-disarm the override first so a throw below cannot leave it set.
-    const allowedOnce = secretOverrideRef.current
-    secretOverrideRef.current = false
-    if (!allowedOnce) {
-      const refusal = evaluateSecretGuard(sent, { credentialMountAvailable })
-      if (refusal) {
-        setSecretNotice(refusal)
-        // Pattern identity ONLY. The value reaches no log, no telemetry payload
-        // and no DOM node outside the masked span.
-        track('prompt.secret_refused', { pattern_id: refusal.id })
-        return Promise.resolve(undefined)
-      }
-    }
-    setSecretNotice(null)
     if (sent.trim() && !routing) {
       historyRef.current = appendPromptHistory(historyRef.current, sent, sessionId)
     }
-    const dispatched = onDispatch(override, { images: attachments })
+    const dispatched = onDispatch(override, { images: attachments, allowSecretOnce })
     return Promise.resolve(dispatched).then((result) => {
       if (result?.status === 202) clearAttachments()
       return result
@@ -553,30 +514,26 @@ export default function PromptBox({
             style={{ height: autoGrowHeight(value), resize: 'none', overflowY: 'auto' }}
           />
         </div>
-        {shownSecret && (
+        {secretRefusal && (
           <div className="bar-secret-notice" role="alert" data-testid="secret-notice">
             <span className="dot red" aria-hidden="true" />
-            <span className="strip-sentence" data-testid="secret-notice-reason">{shownSecret.reason}</span>
+            <span className="strip-sentence" data-testid="secret-notice-reason">{secretRefusal.reason}</span>
             {/* At most a four-character shape prefix behind a fixed bullet run
                 (maskForNotice). This is the ONLY place any character of the
                 pasted credential is rendered, and it is never the entropy. */}
-            <span className="dim" data-testid="secret-notice-mask">{shownSecret.masked}</span>
-            {shownSecret.overridable && (
+            <span className="dim" data-testid="secret-notice-mask">{secretRefusal.masked}</span>
+            {secretRefusal.overridable && (
               <button
                 type="button"
                 className="chip-neutral"
                 data-testid="secret-send-anyway"
-                // Arms BOTH latches, because either layer may be the one
-                // holding this refusal, and each spends its own on the very
-                // next dispatch. Disabled while routing so a click that cannot
-                // dispatch cannot arm anything either.
+                // Re-issues the SAME dispatch with the override as a call
+                // parameter. Nothing is armed, so a click the host
+                // short-circuits evaporates instead of latching open for the
+                // next unrelated Enter. That is the round-3 fix, and it is why
+                // this button needs no disabled set wider than the bar's own.
                 disabled={routing}
-                onClick={() => {
-                  secretOverrideRef.current = true
-                  setSecretNotice(null)
-                  onAllowSecretOnce?.()
-                  dispatchPrompt()
-                }}
+                onClick={() => dispatchPrompt(undefined, { allowSecretOnce: true })}
               >
                 Send anyway
               </button>

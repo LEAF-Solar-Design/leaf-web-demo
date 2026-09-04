@@ -22,6 +22,9 @@
  */
 
 import { config, authHeaders } from './api.js'
+// Staff console, same wire rule (slice 8a round 3): the operator message box
+// is free text into an agent session, so its transport carries the guard too.
+import { SecretRefusedError, guardedText } from './lib/secretGuardTransport.js'
 
 const API_BASE = config.apiBase
 
@@ -118,7 +121,16 @@ export function getEvents(sessionId, afterSeq = 0, limit = 200) {
   ).then((body) => body.events || [])
 }
 
-export function postMessage(sessionId, text) {
+// async so the guard's refusal arrives as a REJECTION, exactly like the other
+// four guarded transports; a sync throw here would need a different catch shape
+// at every call site, which is how one of them ends up missing it.
+export async function postMessage(sessionId, text, { allowSecretOnce = false } = {}) {
+  // GUARDED TRANSPORT. Staff-only, but a pasted key reaches a model here the
+  // same way it would from a tenant composer, and SessionPanel already renders
+  // `error.message` — which for this throw IS the frozen refusal sentence, so
+  // the panel says the honest thing with no new UI.
+  const guard = guardedText(text, { allowSecretOnce })
+  if (!guard.ok) throw new SecretRefusedError(guard.refusal)
   return postJson(`/api/operator/sessions/${encodeURIComponent(sessionId)}/messages`, { text })
 }
 

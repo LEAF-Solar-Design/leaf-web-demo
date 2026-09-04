@@ -29,7 +29,7 @@ import {
   clipboardImagesToAttachments,
   thumbnailImages,
 } from '../composer.js'
-import { evaluateSecretGuard } from '../lib/secretPatterns.js'
+import { isSecretRefused } from '../lib/secretGuardTransport.js'
 import Markdown from './Markdown.jsx'
 import { contextPct, fmtDetail, orDash, usageCost, usageModel } from '../usage.js'
 import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
@@ -182,10 +182,6 @@ function bannerFor(e) {
 }
 
 export default function ConversePanel({
-  // Is the header's Claude accounts panel actually mounted? Only a true answer
-  // lets the anthropic refusal point at it (App mounts both this panel and that
-  // one under `!mock`). Defaults false: name no surface rather than invent one.
-  credentialMountAvailable = false,
   sessionId,
   userTurns = [],            // [{turnId, text}] — turns App dispatched into this session
   onDismiss,                 // hide the panel (the server-side turn is never cancelled)
@@ -209,11 +205,10 @@ export default function ConversePanel({
   const [expandedTools, setExpandedTools] = useState({}) // chip key -> expanded (full args/result)
   const [attachments, setAttachments] = useState([])
   const [attachmentError, setAttachmentError] = useState(null)
-  // The credential refusal for THIS composer (slice 8a fix round). The reply
-  // box posts to the same POST /api/sessions/{id}/messages the command bar
-  // guards, so it carries the same guard rather than trusting the bar's.
-  const [secretNotice, setSecretNotice] = useState(null) // {id, reason, masked, overridable}
-  const secretOverrideRef = useRef(false) // armed by "Send anyway", spent on the next send
+  // The credential refusal the TRANSPORT raised, held only to render it:
+  // {id, reason, masked, overridable} or null. This composer evaluates nothing
+  // itself (round 3) — converse.postMessage refuses and throws, send() catches.
+  const [secretNotice, setSecretNotice] = useState(null)
   const attachmentUrlsRef = useRef(new Set())
   const logRef = useRef(null)
   const jobSeenRef = useRef(new Set())
@@ -480,37 +475,14 @@ export default function ConversePanel({
     reader.readAsDataURL(image.file)
   })))
 
-  const send = async (nextText = input) => {
-    // --- credential guard (slice 8a fix round 2) -------------------------
-    // This box is a second free-text path to POST /api/sessions/{id}/messages,
-    // the very endpoint the command bar's guard protects, so an unguarded
-    // send() here would let a pasted key reach model context two inches below
-    // a notice promising it never would. Same pure decision, same frozen copy
-    // (lib/secretPatterns.js), same fail-closed rule: any hit refuses, and only
-    // a wholly overridable hit set offers a way past.
-    //
-    // THE READ-AND-DISARM SITS ABOVE EVERY EARLY RETURN, and that ordering is
-    // the whole fix. Round 1 spent the override below the busy/empty guard, so
-    // a "Send anyway" click that landed while a turn was in flight armed the
-    // ref and then returned without spending it; onChange cleared the notice
-    // but not the ref, and the next Enter skipped the guard entirely and
-    // posted a hard-refusal shape. Spending an override on a no-op send is the
-    // fail-closed direction, so it happens FIRST, unconditionally.
-    const allowedOnce = secretOverrideRef.current
-    secretOverrideRef.current = false
+  // allowSecretOnce is the "Send anyway" click's authorisation, carried as a
+  // PARAMETER into the one postMessage it authorises. Nothing here remembers
+  // it: a click that lands while the box is busy returns early below and
+  // authorises exactly nothing, which is the fail-closed direction and the
+  // round-3 fix for the latch two earlier rounds shipped.
+  const send = async (nextText = input, { allowSecretOnce = false } = {}) => {
     const text = String(nextText).trim()
     if ((!text && !attachments.length) || busy) return false
-    if (!allowedOnce) {
-      const refusal = evaluateSecretGuard(text, { credentialMountAvailable })
-      if (refusal) {
-        setSecretNotice(refusal)
-        // Pattern identity ONLY — the value reaches no log, no telemetry
-        // payload and no DOM node outside the masked span.
-        track('conversation.secret_refused', { pattern_id: refusal.id })
-        return false
-      }
-    }
-    setSecretNotice(null)
     let delivered = false
     setSending(true); setSendErr(null)
     const accept = (res, images) => {
@@ -529,22 +501,32 @@ export default function ConversePanel({
       setInput('')
       clearAttachments()
       setAttachmentError(null)
+      // The send landed, so whatever refusal was on screen is spent.
+      setSecretNotice(null)
     }
     try {
       const images = await attachmentPayloads()
       try {
-        accept(await postMessage(sessionId, { ...(text ? { text } : {}), ...(images.length ? { images } : {}) }), images)
+        accept(await postMessage(sessionId, {
+          ...(text ? { text } : {}),
+          ...(images.length ? { images } : {}),
+          allowSecretOnce,
+        }), images)
         track('conversation.message_sent', { input_kind: text ? 'typed' : 'image_only', text_len: text.length })
       } catch (e) {
         if (!shouldRetryWithQueue(classifyAgentError(e), { text, images })) throw e
-        accept(await postMessage(sessionId, { text, queue: true }), images)
+        accept(await postMessage(sessionId, { text, queue: true, allowSecretOnce }), images)
         // P2: the direct post failed (turn busy) and the queued retry landed —
         // the panel recovered the send rather than surfacing an error.
         track('conversation.recovered', { reason: 'busy_retry_queued' })
       }
       delivered = true
     } catch (e) {
-      setSendErr(bannerFor(e))
+      // A credential refusal never left the browser, so it is NOT a send
+      // failure banner ("the assistant is unavailable" would be a lie about a
+      // client-side decision). It renders as this composer's own notice.
+      if (isSecretRefused(e)) setSecretNotice(e.refusal)
+      else setSendErr(bannerFor(e))
     } finally {
       setSending(false)
     }
@@ -976,17 +958,17 @@ export default function ConversePanel({
               (maskForNotice). This is the ONLY place any character of the
               pasted credential is rendered, and it is never the entropy. */}
           <span className="dim" data-testid="converse-secret-notice-mask">{secretNotice.masked}</span>
-          {secretNotice.overridable && (
+          {/* Rendered only when re-sending would actually send something: a
+              refusal raised by an app-supplied choice string has no text in the
+              box, and a button whose click does nothing is worse than no
+              button. Disabled while a turn is in flight for the same reason. */}
+          {secretNotice.overridable && !!input.trim() && (
             <button
               type="button"
               className="chip-neutral"
               data-testid="converse-secret-send-anyway"
-              // Disabled while a turn is in flight: send() returns early when
-              // busy, so a click here could only ever arm the override without
-              // spending it. The read-and-disarm above makes that safe anyway;
-              // this makes it unreachable, and honest on screen.
               disabled={busy}
-              onClick={() => { secretOverrideRef.current = true; setSecretNotice(null); send() }}
+              onClick={() => send(undefined, { allowSecretOnce: true })}
             >
               Send anyway
             </button>

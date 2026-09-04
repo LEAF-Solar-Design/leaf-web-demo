@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, it } from 'node:test'
 
 import esbuild from 'esbuild'
@@ -41,9 +43,56 @@ const strip = (relative) => esbuild.transformSync(
   readFileSync(new URL(relative, import.meta.url), 'utf8'),
   { loader: 'jsx' },
 ).code
-const conversePanelStripped = strip('./components/ConversePanel.jsx')
-const toolCastStripped = strip('./site/ToolCast.jsx')
-const catalogControllerStripped = strip('./controllers/catalog/createCatalogController.js')
+// Every source file under web/src, comments and string bodies intact but JSX
+// stripped, addressed by its path relative to src/. The census pins below walk
+// this list rather than a hand-kept file list, so a NEW file that sends free
+// text is caught the moment it appears.
+const SRC_ROOT = fileURLToPath(new URL('.', import.meta.url))
+const IS_TEST = /\.(test|spec)\.[cm]?[jt]sx?$/
+function listSrcFiles(dir = SRC_ROOT, prefix = '') {
+  const out = []
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name
+    if (entry.isDirectory()) {
+      if (entry.name === 'assets') continue
+      out.push(...listSrcFiles(join(dir, entry.name), rel))
+    } else if (/\.[cm]?[jt]sx?$/.test(entry.name) && !IS_TEST.test(entry.name)) {
+      out.push(rel)
+    }
+  }
+  return out.sort()
+}
+const SRC_FILES = listSrcFiles()
+const srcCache = new Map()
+const readSrc = (rel) => {
+  if (!srcCache.has(rel)) srcCache.set(rel, readFileSync(join(SRC_ROOT, rel), 'utf8'))
+  return srcCache.get(rel)
+}
+// Comment-stripped, for pins on identifiers: a comment that merely NAMES a
+// deleted latch must not red a gate, and a comment claiming a property must
+// not satisfy one. Falls back to the raw text if a file will not transform,
+// which fails in the strict direction (the pin still sees everything).
+// Whitespace-insensitive comparison, so a reformat cannot move a pin.
+const bare = (text) => String(text).replace(/\s+/g, '')
+const strippedCache = new Map()
+const readStripped = (rel) => {
+  if (!strippedCache.has(rel)) {
+    let out
+    try {
+      // minifyWhitespace is what actually removes comments; a plain
+      // transform keeps them, which would let a comment satisfy a pin.
+      out = esbuild.transformSync(readSrc(rel), { loader: 'jsx', minifyWhitespace: true }).code
+    } catch {
+      out = readSrc(rel)
+    }
+    strippedCache.set(rel, out)
+  }
+  return strippedCache.get(rel)
+}
+// Only a module that can issue a request can be a second sender. A mock or a
+// doc comment naming an endpoint is not one, and counting it would push this
+// census toward being switched off.
+const SENDERS = SRC_FILES.filter((file) => /\bfetch\(/.test(readSrc(file)))
 
 describe('autoGrowHeight', () => {
   it('leaves the single-line well to CSS', () => {
@@ -520,114 +569,180 @@ describe('queued-turn reconciliation: drop-before-202 (round 3)', () => {
 })
 
 
-// --- the credential guard's shape, read off the source (slice 8a round 2) ---
+// --- THE GUARD IS ON THE WIRE: source pins (slice 8a, round 3) -------------
 //
-// These are ORDERING and CENSUS pins, which is exactly what unit tests over
-// pure modules and jsdom tests over one component each could not give. Two
-// review rounds died on the same defect: the guard installed per composer while
-// the promise was per app. A behaviour test proves one path; these prove there
-// is only one path to prove.
+// These are CENSUS and ORDERING pins, and they are the rows that make the PR's
+// claim checkable at all. Three review rounds died on the same shape of
+// defect: the guard installed per composer while the promise was per app, and
+// the composer census short by one every time (the reply box, then the /try bar
+// and the retry paths, then the Author-a-tool textarea). A behaviour test
+// proves one path. These prove there is only one path to prove.
 //
-// esbuild strips comments, so a pin cannot be satisfied by a comment claiming
-// the property. Verified in both directions by neutering each property and
-// watching the matching row go red.
-describe('credential guard: the funnel is the authority', () => {
-  const orderIn = (source, opener, first, second, window = 2000) => {
-    const start = source.indexOf(opener)
-    assert.notEqual(start, -1, `could not find ${opener}`)
-    const body = source.slice(start, start + window)
-    const a = body.indexOf(first)
-    const b = body.indexOf(second)
-    assert.notEqual(a, -1, `could not find ${first}`)
-    assert.notEqual(b, -1, `could not find ${second}`)
-    return a < b
+// EVERY assertion below reads COMMENT-STRIPPED source (readStripped, which uses
+// esbuild's minifyWhitespace — a plain transform keeps comments, and a pin a
+// comment can satisfy is not a pin) and compares with whitespace removed, so
+// neither a claim in prose nor a reformat can move a row. Each was verified in
+// both directions by neutering the property and watching it go red.
+describe('the credential guard sits on the transport, not on the composers', () => {
+  const GUARDED = [
+    // [file, function opener, the first network call in its body]
+    ['api.js', 'async function nlPrompt(', 'apiFetch('],
+    ['api.js', 'async function authorTool(', 'apiFetch('],
+    ['api.js', 'async function stageAuthorTool(', 'apiFetch('],
+    ['converse.js', 'async function postMessage(', 'await post('],
+    ['operatorClient.js', 'async function postMessage(', 'postJson('],
+  ]
+
+  for (const [file, opener, network] of GUARDED) {
+    const label = opener.replace('async function ', '').replace('(', '')
+    it(`${file} ${label} guards before it touches the network`, () => {
+      const source = bare(readStripped(file))
+      const at = source.indexOf(bare(opener))
+      assert.notEqual(at, -1, `could not find ${opener} in ${file}`)
+      const body = source.slice(at, at + 3000)
+      const guardAt = body.indexOf('guardedText(')
+      const throwAt = body.indexOf('newSecretRefusedError(')
+      const networkAt = body.indexOf(bare(network))
+      assert.notEqual(guardAt, -1, `${file} ${label} must call the guard seam`)
+      assert.notEqual(throwAt, -1, `${file} ${label} must throw the typed refusal`)
+      assert.notEqual(networkAt, -1, `could not find ${network} in ${file} ${label}`)
+      assert.ok(guardAt < networkAt, `${file} ${label}: the guard must run before ${network}`)
+      assert.ok(throwAt < networkAt, `${file} ${label}: the refusal must throw before ${network}`)
+    })
   }
 
-  it('the controller evaluates the guard before the router ever sees the text', () => {
-    const dispatchAt = catalogControllerStripped.indexOf('const dispatch = async (override)')
-    assert.notEqual(dispatchAt, -1)
-    const body = catalogControllerStripped.slice(dispatchAt, dispatchAt + 4000)
-    const guardAt = body.indexOf('evaluateSecretGuard(')
-    const routeAt = body.indexOf('services.routePrompt(')
-    assert.notEqual(guardAt, -1, 'dispatch must evaluate the guard')
-    assert.notEqual(routeAt, -1, 'dispatch must be the one caller of routePrompt')
-    assert.ok(guardAt < routeAt, 'the guard must run before routePrompt')
+  // The endpoints that carry user-typed free text toward a model. Each may be
+  // named by exactly ONE module that can issue a request, so a second sender
+  // cannot appear beside the guarded one. (A mock or a doc comment naming an
+  // endpoint is not a sender, and counting it would push this census toward
+  // being switched off.)
+  const ENDPOINTS = [
+    ['/api/nl-prompt', 'api.js'],
+    ['/api/author/stage', 'api.js'],
+    ['/api/sessions/${encodeURIComponent(sessionId)}/messages', 'converse.js'],
+    ['/api/operator/sessions/${encodeURIComponent(sessionId)}/messages', 'operatorClient.js'],
+  ]
+
+  it('every free-text endpoint is spoken by exactly one module', () => {
+    for (const [endpoint, owner] of ENDPOINTS) {
+      const senders = SENDERS.filter((file) => readStripped(file).includes(endpoint))
+      assert.deepEqual(senders, [owner], `${endpoint} must be sent only by ${owner}`)
+    }
   })
 
-  it('the controller reads-and-disarms the override above every early return', () => {
-    // The round-1 fail-open, ported: an override read BELOW the busy/empty
-    // return latches armed when the dispatch is a no-op, and the next
-    // unrelated Enter spends it on a hard-refusal shape.
-    assert.ok(
-      orderIn(
-        catalogControllerStripped,
-        'const dispatch = async (override)',
-        'secretOverrideArmed = false',
-        'current.running) return',
-      ),
-      'the override must be spent before dispatch can return early',
-    )
+  // The composers, the controller and the shells must NOT evaluate the guard.
+  // A local copy of the decision is what made three rounds of review read a
+  // composer as the authority while some other path stayed open.
+  it('only the seam evaluates the guard', () => {
+    const evaluators = SRC_FILES.filter((file) => readStripped(file).includes('evaluateSecretGuard('))
+    assert.deepEqual(evaluators, ['lib/secretGuardTransport.js', 'lib/secretPatterns.js'])
   })
 
-  it('routePrompt has exactly one caller, so no bar can route around the guard', () => {
-    const callers = catalogControllerStripped.split('services.routePrompt(').length - 1
-    assert.equal(callers, 1)
+  // guardedText has exactly one caller outside the transports: the author
+  // pointer's STORAGE boundary, which writes the description to localStorage
+  // before any transport runs. Named here so it stays a deliberate exception.
+  it('the guard seam is called only by the transports and the storage boundary', () => {
+    const callers = SRC_FILES.filter((file) => readStripped(file).includes('guardedText('))
+    assert.deepEqual(callers, [
+      'api.js',
+      'controllers/useAuthorStageController.js',
+      'converse.js',
+      'lib/secretGuardTransport.js',
+      'operatorClient.js',
+    ])
   })
 
-  it('the reply box reads-and-disarms above its busy early return', () => {
-    assert.ok(
-      orderIn(
-        conversePanelStripped,
-        'const send = async (nextText = input)',
-        'secretOverrideRef.current = false',
-        '|| busy) return false',
-      ),
-      'ConversePanel.send must spend the override before it can return early',
-    )
+  // THE ROUND-3 FIX, pinned as an absence. Round 2's override was a latch: a
+  // module variable in the controller and a ref in two components. Both hosts
+  // short-circuit above the controller, so a "Send anyway" click whose
+  // follow-on call never arrived left it armed, and the NEXT dispatch of ANY
+  // text skipped the guard. The override is now a call parameter, so there is
+  // nothing to strand.
+  it('no override state is stored anywhere', () => {
+    for (const file of SRC_FILES) {
+      const source = readStripped(file)
+      for (const latch of ['secretOverrideArmed', 'secretOverrideRef', 'allowSecretOnce()']) {
+        assert.ok(!source.includes(latch), `${file} must not hold an override latch (${latch})`)
+      }
+    }
   })
 
-  it('the reply box guards before postMessage', () => {
-    assert.ok(
-      orderIn(
-        conversePanelStripped,
-        'const send = async (nextText = input)',
-        'evaluateSecretGuard(',
-        'postMessage(sessionId',
-        4000,
-      ),
-    )
+  it('the override reaches the wire as a parameter on the call it authorises', () => {
+    // The command bar and the /try bar hand it to dispatch; the controller
+    // hands it to the router and the agent turn; the reply box and the author
+    // panel hand it to their own transports.
+    const carries = [
+      ['components/PromptBox.jsx', 'dispatchPrompt(void 0, { allowSecretOnce: true })'],
+      ['components/PromptBox.jsx', 'onDispatch(override, { images: attachments, allowSecretOnce })'],
+      ['site/ToolCast.jsx', 'dispatchRequest(void 0, { allowSecretOnce: true })'],
+      ['site/ToolCast.jsx', 'catalog.actions.dispatch(text, { allowSecretOnce })'],
+      ['controllers/catalog/createCatalogController.js', 'services.routePrompt(current.mock, text, state.tools, { allowSecretOnce })'],
+      ['controllers/catalog/createCatalogController.js', 'adapters.startAgentTurn(text, hint, { allowSecretOnce })'],
+      ['components/ConversePanel.jsx', 'send(void 0, { allowSecretOnce: true })'],
+      ['components/AuthorPanel.jsx', 'submit(void 0, { allowSecretOnce: true })'],
+    ]
+    for (const [file, snippet] of carries) {
+      assert.ok(
+        bare(readStripped(file)).includes(bare(snippet)),
+        `${file} must carry the override as a call parameter: ${snippet}`,
+      )
+    }
   })
 
-  // /try's ToolCast bar carries the SAME data-testid and aria-label as the app
-  // bar, and it is the composer both earlier review rounds missed. It has no
-  // guard of its own BY DESIGN: everything it sends goes through the funnel,
-  // and it renders the funnel's verdict.
+  it('the authorisation never rides the wire itself', () => {
+    // converse.postMessage builds its payload field by field; allowSecretOnce
+    // must be destructured out of the options and never assigned into it.
+    const source = bare(readStripped('converse.js'))
+    const at = source.indexOf('asyncfunctionpostMessage(')
+    const body = source.slice(at, source.indexOf('await post(', at))
+    assert.ok(body.includes('allowSecretOnce'), 'postMessage must accept the flag')
+    assert.ok(!body.includes('payload.allowSecretOnce'), 'the flag must never enter the payload')
+  })
+
+  // The controller is the RENDER CHANNEL for the bar paths (App's Retry chip
+  // and its R key dispatch around every composer), so it must catch the typed
+  // refusal rather than let it read as a routing outage.
+  it('the controller catches the refusal and publishes it, not a route error', () => {
+    const source = bare(readStripped('controllers/catalog/createCatalogController.js'))
+    const at = source.indexOf(bare('const dispatch = async (override,'))
+    assert.notEqual(at, -1)
+    const body = source.slice(at, at + 5000)
+    assert.ok(body.includes('isSecretRefused(error)'), 'dispatch must recognise the refusal')
+    const refusalAt = body.indexOf(bare('publish({ secretRefusal: error.refusal'))
+    const routeErrAt = body.indexOf(bare('routeError: humanizeError(error)'))
+    assert.notEqual(refusalAt, -1)
+    assert.notEqual(routeErrAt, -1)
+    assert.ok(refusalAt < routeErrAt, 'a refusal must be handled before the generic route error')
+  })
+
+  it('routePrompt still has exactly one caller, so no bar routes around it', () => {
+    const source = readStripped('controllers/catalog/createCatalogController.js')
+    assert.equal(source.split('services.routePrompt(').length - 1, 1)
+  })
+
   it('the /try bar sends only through the controller, never straight to the router', () => {
-    assert.match(toolCastStripped, /catalog\.actions\.dispatch\(text\)/)
-    // nlPrompt is wired in as the controller's routePrompt service and is never
-    // called directly; a direct call would be a bar around the funnel.
-    const direct = toolCastStripped.split('nlPrompt').length - 1
-    assert.equal(direct, 2, 'nlPrompt may appear only as an import and as the routePrompt service')
-    assert.doesNotMatch(toolCastStripped, /nlPrompt\(/)
+    const source = readStripped('site/ToolCast.jsx')
+    // nlPrompt may appear only as an import and as the routePrompt service.
+    assert.equal(source.split('nlPrompt').length - 1, 2)
+    assert.ok(!/nlPrompt\(/.test(source))
   })
 
-  it('the /try bar renders the funnel refusal with its own testids', () => {
-    assert.match(toolCastStripped, /"tc-secret-notice"/)
-    assert.match(toolCastStripped, /"tc-secret-notice-reason"/)
-    assert.match(toolCastStripped, /"tc-secret-notice-mask"/)
-    assert.match(toolCastStripped, /secretRefusal\.reason/)
-    assert.match(toolCastStripped, /secretRefusal\.masked/)
-    // The override is a controller action, so it is spent by the controller.
-    assert.match(toolCastStripped, /catalog\.actions\.allowSecretOnce\(\)/)
+  it('all four composers render a refusal with their own testids', () => {
+    for (const [file, prefix] of [
+      ['components/PromptBox.jsx', 'secret-notice'],
+      ['components/ConversePanel.jsx', 'converse-secret-notice'],
+      ['site/ToolCast.jsx', 'tc-secret-notice'],
+      ['components/AuthorPanel.jsx', 'author-secret-notice'],
+    ]) {
+      const source = readStripped(file)
+      assert.ok(source.includes(`"${prefix}"`), `${prefix} must be rendered`)
+      assert.ok(source.includes(`"${prefix}-reason"`), `${prefix}-reason must be rendered`)
+      assert.ok(source.includes(`"${prefix}-mask"`), `${prefix}-mask must be rendered`)
+    }
   })
 
-  it('both bars answer the mount question, so the copy is honest per mode', () => {
-    assert.match(toolCastStripped, /credentialMountAvailable:\s*!transportMock/)
-    assert.match(promptBoxStripped, /evaluateSecretGuard\(sent,\s*\{\s*credentialMountAvailable\s*\}\)/)
-  })
-
-  it('the app bar renders the controller verdict, not only its own', () => {
-    assert.match(promptBoxStripped, /const shownSecret = secretRefusal \|\| secretNotice/)
-    assert.match(promptBoxStripped, /onAllowSecretOnce\?\.\(\)/)
+  it('both shells answer the mount question for the transports', () => {
+    assert.ok(bare(readStripped('App.jsx')).includes('setCredentialMountAvailable(!mock)'))
+    assert.ok(bare(readStripped('site/ToolCast.jsx')).includes('setCredentialMountAvailable(!transportMock)'))
   })
 })

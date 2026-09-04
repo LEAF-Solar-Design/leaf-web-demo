@@ -1,33 +1,44 @@
 /**
- * The assistant reply box's credential guard (slice 8a, fix round 1).
+ * The assistant reply box's credential REFUSAL (slice 8a, round 3).
  *
- * THE GAP THIS CLOSES: the command bar refused credential-shaped text, but this
- * panel's reply input posted straight to the SAME endpoint the bar's guard
- * protects (POST /api/sessions/{id}/messages, converse.js postMessage) with no
- * check at all. A user who read "Credentials never go to the model" in the bar
- * could paste the identical string two inches below and it reached model
- * context. So the load-bearing spec here is the NEGATIVE one: postMessage must
- * not be called.
+ * The panel no longer decides anything about credentials. converse.postMessage
+ * does, on the wire, and this box's job is to catch that typed refusal, render
+ * it as its own notice rather than as an outage banner, and offer a per-call
+ * "Send anyway" for the one overridable shape.
  *
- * `../telemetry.js` and `../converse.js` are mocked so these specs pin this
- * panel's own choke point, never the transport underneath.
+ * `../converse.js` is mocked, but its postMessage runs the REAL guard seam
+ * (vi.importActual), so these rows exercise the actual refusal contract — the
+ * override really has to arrive as a call parameter for the second send to go
+ * through. A hand-rolled fake refusal would prove only that the panel can
+ * render an object.
  */
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
 vi.mock('../telemetry.js', () => ({ track: vi.fn() }))
-vi.mock('../converse.js', () => ({
-  openStream: vi.fn(() => ({ close: vi.fn() })),
-  postMessage: vi.fn(() => Promise.resolve({ turn_id: 'turn-1', status: 'started' })),
-  resolveApproval: vi.fn(),
-  listPendingApprovals: vi.fn(() => Promise.resolve([])),
-  cancelTurn: vi.fn(),
-  classifyAgentError: vi.fn(() => 'unreachable'),
-}))
+vi.mock('../converse.js', async () => {
+  const guard = await vi.importActual('../lib/secretGuardTransport.js')
+  return {
+    openStream: vi.fn(() => ({ close: vi.fn() })),
+    // The real transport contract, standing in for the real transport.
+    postMessage: vi.fn(async (sessionId, { text, allowSecretOnce = false } = {}) => {
+      if (text != null) {
+        const verdict = guard.guardedText(text, { allowSecretOnce })
+        if (!verdict.ok) throw new guard.SecretRefusedError(verdict.refusal)
+      }
+      return { turn_id: 'turn-1', status: 'started' }
+    }),
+    resolveApproval: vi.fn(),
+    listPendingApprovals: vi.fn(() => Promise.resolve([])),
+    cancelTurn: vi.fn(),
+    classifyAgentError: vi.fn(() => 'unreachable'),
+  }
+})
 
 import { track } from '../telemetry.js'
 import * as converse from '../converse.js'
 import ConversePanel from './ConversePanel.jsx'
+import { setCredentialMountAvailable } from '../lib/secretGuardTransport.js'
 import {
   MASK_BULLETS,
   MASK_PREFIX,
@@ -39,13 +50,20 @@ import {
 const FAKE_ANTHROPIC = `sk-ant-api03-${'A9_-'.repeat(12)}`
 const FAKE_GENERIC = `api_key: ${'x'.repeat(24)}`
 
+beforeEach(() => {
+  // The live app: App mounts this panel and ClaudeAccountPanel under the same
+  // `!mock`, so where this can refuse, that control is on screen.
+  setCredentialMountAvailable(true)
+})
+
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
+  setCredentialMountAvailable(false)
 })
 
 const setup = (props = {}) => render(
-  <ConversePanel sessionId="session-1" onDismiss={vi.fn()} credentialMountAvailable {...props} />,
+  <ConversePanel sessionId="session-1" onDismiss={vi.fn()} {...props} />,
 )
 
 const replyBox = () => screen.getByRole('textbox', { name: /reply to the assistant/i })
@@ -59,39 +77,34 @@ const type = (text) => fireEvent.change(replyBox(), { target: { value: text } })
 // flaked once under a parallel full-suite run).
 const SETTLE = { timeout: 5000 }
 
-describe('a named token shape refuses on Enter', () => {
-  it('never posts the message, and says so honestly', async () => {
+describe('a named token shape is refused on the wire and shown here', () => {
+  it('renders the refusal as its own notice, not as a failure banner', async () => {
     setup()
     type(FAKE_ANTHROPIC)
     fireEvent.keyDown(replyBox(), { key: 'Enter' })
 
     await waitFor(() => expect(notice()).toBeInTheDocument(), SETTLE)
-    expect(converse.postMessage).not.toHaveBeenCalled()
     expect(notice()).toHaveAttribute('role', 'alert')
     expect(reason().textContent).toBe(SECRET_REASONS.anthropic)
+    // "The assistant is unavailable" would be a lie about a decision that never
+    // left the browser, so the send-error banner must stay absent.
+    expect(screen.queryByTestId('converse-send-error')).toBeNull()
+    expect(document.body.textContent).not.toContain('could not be delivered')
   })
 
   // The Send button used to be `onClick={send}`, which handed the click EVENT
   // to send()'s text parameter: it posted the literal string "[object Object]"
-  // and never looked at the input at all, so it was outside the guard by
-  // accident rather than by design. These two specs pin both halves — the
-  // button sends what was typed, and the guard refuses it.
-  it('refuses the Send button on the same terms', async () => {
-    setup()
-    type(FAKE_ANTHROPIC)
-    fireEvent.click(screen.getByRole('button', { name: /^send$/i }))
-
-    await waitFor(() => expect(notice()).toBeInTheDocument(), SETTLE)
-    expect(converse.postMessage).not.toHaveBeenCalled()
-  })
-
+  // and never looked at the input at all. This pins the fixed half.
   it('the Send button posts the typed reply, never the click event', async () => {
     setup()
     type('count the panels on the roofline layer')
     fireEvent.click(screen.getByRole('button', { name: /^send$/i }))
 
     await waitFor(() => expect(converse.postMessage).toHaveBeenCalledTimes(1), SETTLE)
-    expect(converse.postMessage.mock.calls[0][1]).toEqual({ text: 'count the panels on the roofline layer' })
+    expect(converse.postMessage.mock.calls[0][1]).toMatchObject({
+      text: 'count the panels on the roofline layer',
+      allowSecretOnce: false,
+    })
   })
 
   it('offers no override — a named shape is a hard refusal', async () => {
@@ -111,59 +124,45 @@ describe('a named token shape refuses on Enter', () => {
     await waitFor(() => expect(notice()).toBeInTheDocument(), SETTLE)
     const masked = screen.getByTestId('converse-secret-notice-mask').textContent
     expect(masked).toBe(`${FAKE_ANTHROPIC.slice(0, MASK_PREFIX)}${'•'.repeat(MASK_BULLETS)}`)
-    // Not one window of the credential's entropy may appear anywhere in the DOM.
-    const dom = document.body.textContent
+    // Not one window of the credential's entropy may appear in the NOTICE.
+    const shown = notice().textContent
     const entropy = FAKE_ANTHROPIC.slice(MASK_PREFIX)
     for (let i = 0; i + 8 <= entropy.length; i += 1) {
-      expect(dom).not.toContain(entropy.slice(i, i + 8))
+      expect(shown).not.toContain(entropy.slice(i, i + 8))
     }
   })
 
-  it('telemetries the pattern identity and nothing else', async () => {
+  it('never counts a refused reply as a sent message', async () => {
     setup()
     type(FAKE_ANTHROPIC)
     fireEvent.keyDown(replyBox(), { key: 'Enter' })
 
     await waitFor(() => expect(notice()).toBeInTheDocument(), SETTLE)
-    expect(track).toHaveBeenCalledWith('conversation.secret_refused', { pattern_id: 'anthropic' })
+    expect(track).not.toHaveBeenCalledWith('conversation.message_sent', expect.anything())
     for (const call of track.mock.calls) {
       expect(JSON.stringify(call)).not.toContain(FAKE_ANTHROPIC.slice(MASK_PREFIX))
     }
-    // The refused text never counts as a sent message.
-    expect(track).not.toHaveBeenCalledWith('conversation.message_sent', expect.anything())
   })
 })
 
 describe('the fuzzy generic shape is the only overridable one', () => {
-  it('offers Send anyway, and only then posts', async () => {
+  it('offers Send anyway, and the re-issued call carries the authorisation', async () => {
     setup()
     type(FAKE_GENERIC)
     fireEvent.keyDown(replyBox(), { key: 'Enter' })
 
     await waitFor(() => expect(notice()).toBeInTheDocument(), SETTLE)
     expect(reason().textContent).toBe(SECRET_REASONS.generic)
-    expect(converse.postMessage).not.toHaveBeenCalled()
-
-    fireEvent.click(screen.getByTestId('converse-secret-send-anyway'))
-    await waitFor(() => expect(converse.postMessage).toHaveBeenCalledTimes(1), SETTLE)
-    expect(converse.postMessage.mock.calls[0][1]).toEqual({ text: FAKE_GENERIC })
-  })
-
-  it('spends the override once — the next credential refuses again', async () => {
-    // The override send is made to FAIL so no turn goes pending and the box
-    // stays enabled; what is under test is the ref, not the transport.
-    converse.postMessage.mockRejectedValueOnce(new Error('network down'))
-    setup()
-    type(FAKE_GENERIC)
-    fireEvent.keyDown(replyBox(), { key: 'Enter' })
-    await waitFor(() => expect(notice()).toBeInTheDocument(), SETTLE)
-    fireEvent.click(screen.getByTestId('converse-secret-send-anyway'))
-    await waitFor(() => expect(converse.postMessage).toHaveBeenCalledTimes(1), SETTLE)
-
-    type(FAKE_ANTHROPIC)
-    fireEvent.keyDown(replyBox(), { key: 'Enter' })
-    await waitFor(() => expect(notice()).toBeInTheDocument(), SETTLE)
     expect(converse.postMessage).toHaveBeenCalledTimes(1)
+    expect(converse.postMessage.mock.calls[0][1]).toMatchObject({ allowSecretOnce: false })
+
+    fireEvent.click(screen.getByTestId('converse-secret-send-anyway'))
+    await waitFor(() => expect(converse.postMessage).toHaveBeenCalledTimes(2), SETTLE)
+    expect(converse.postMessage.mock.calls[1][1]).toMatchObject({
+      text: FAKE_GENERIC,
+      allowSecretOnce: true,
+    })
+    await waitFor(() => expect(notice()).toBeNull(), SETTLE)
   })
 
   it('a named shape beside a labelled assignment is never overridable', async () => {
@@ -174,11 +173,10 @@ describe('the fuzzy generic shape is the only overridable one', () => {
     await waitFor(() => expect(notice()).toBeInTheDocument(), SETTLE)
     expect(reason().textContent).toBe(SECRET_REASONS.anthropic)
     expect(screen.queryByTestId('converse-secret-send-anyway')).toBeNull()
-    expect(converse.postMessage).not.toHaveBeenCalled()
   })
 })
 
-describe('the guard stays out of the way of ordinary replies', () => {
+describe('the refusal stays out of the way of ordinary replies', () => {
   it('sends plain text untouched, with no notice', async () => {
     setup()
     type('count the panels on the roofline layer')
@@ -199,44 +197,36 @@ describe('the guard stays out of the way of ordinary replies', () => {
   })
 })
 
-describe('the override cannot latch open (fix round 2)', () => {
-  // THE DEFECT THIS PINS. Round 1 read-and-disarmed the override BELOW send()'s
-  // `if ((!text && !attachments.length) || busy) return false`. This panel is
-  // mounted beside the command bar and both drive the same session, so a bar
-  // dispatch (or a promoting queued turn, or a resumed in-flight turn) flips
-  // `busy` true while a refusal notice is still on screen. Clicking "Send
-  // anyway" in that window armed the ref and returned without spending it;
-  // onChange cleared the notice but NOT the ref, and the very next Enter
-  // skipped the guard entirely and posted a hard-refusal shape.
+describe('THE LATCH SCENARIO, rewritten: there is no arm step at all (round 3)', () => {
+  // ROUNDS 1 AND 2 BOTH DIED HERE. The override was a ref: clicking "Send
+  // anyway" armed it, and a click that landed while `busy` was true returned
+  // before spending it, so the ref stayed armed and the NEXT Enter posted a
+  // hard-refusal shape unguarded. Round 2 moved the read-and-disarm above the
+  // early return; round 3 deleted the ref.
   //
-  // The fix has two halves and both are pinned: the button is disabled while
-  // busy (here), and the read-and-disarm moved above every early return, so
-  // even a click that got through would spend the override on the no-op
-  // (pinned structurally in composer.test.mjs, which reads the send() source,
-  // because a disabled button cannot be clicked from jsdom at all).
+  // So the scenario cannot be written as "arm, then dispatch a hard shape".
+  // What it becomes is the sequence a user can actually perform, asserted at
+  // the wire: whatever a click does or fails to do, EVERY later send carries
+  // allowSecretOnce: false, and a named shape is refused every time.
   const IN_FLIGHT = [{ turnId: 'turn-in-flight', text: 'an earlier request' }]
 
   const renderWith = (userTurns) => (
-    <ConversePanel
-      sessionId="session-1"
-      onDismiss={vi.fn()}
-      credentialMountAvailable
-      userTurns={userTurns}
-    />
+    <ConversePanel sessionId="session-1" onDismiss={vi.fn()} userTurns={userTurns} />
   )
 
-  it('clicking Send anyway while busy arms nothing: the next named shape still refuses', async () => {
+  it('a click that cannot send authorises nothing for any later send', async () => {
     const { rerender } = render(renderWith([]))
     type(FAKE_GENERIC)
     fireEvent.keyDown(replyBox(), { key: 'Enter' })
     await waitFor(() => expect(notice()).toBeInTheDocument(), SETTLE)
+    expect(converse.postMessage).toHaveBeenCalledTimes(1)
 
     // A turn starts elsewhere in the app while the notice is still up.
     rerender(renderWith(IN_FLIGHT))
     const sendAnyway = screen.getByTestId('converse-secret-send-anyway')
-    expect(sendAnyway, 'a control that cannot spend an override must not arm one').toBeDisabled()
+    expect(sendAnyway, 'a control that cannot send must not look sendable').toBeDisabled()
     fireEvent.click(sendAnyway)
-    expect(converse.postMessage).not.toHaveBeenCalled()
+    expect(converse.postMessage).toHaveBeenCalledTimes(1)
 
     // The turn finishes; the user types a HARD-refusal shape and hits Enter.
     rerender(renderWith([]))
@@ -244,35 +234,41 @@ describe('the override cannot latch open (fix round 2)', () => {
     fireEvent.keyDown(replyBox(), { key: 'Enter' })
 
     await waitFor(() => expect(reason().textContent).toBe(SECRET_REASONS.anthropic), SETTLE)
-    expect(converse.postMessage, 'a latched override must never post a credential').not.toHaveBeenCalled()
+    // It reached the transport and the transport refused it. The load-bearing
+    // half is the flag: nothing carried an authorisation forward.
+    expect(converse.postMessage).toHaveBeenCalledTimes(2)
+    expect(converse.postMessage.mock.calls[1][1]).toMatchObject({ allowSecretOnce: false })
   })
 
-  it('an edit clears the notice but can never re-arm the spent override', async () => {
-    const { rerender } = render(renderWith([]))
+  it('a SPENT override does not carry to the next send either', async () => {
+    setup()
     type(FAKE_GENERIC)
     fireEvent.keyDown(replyBox(), { key: 'Enter' })
     await waitFor(() => expect(notice()).toBeInTheDocument(), SETTLE)
-
-    rerender(renderWith(IN_FLIGHT))
+    // The override send is made to FAIL, so no turn goes pending and the box
+    // stays enabled. What is under test is the authorisation, not the wire.
+    converse.postMessage.mockRejectedValueOnce(new Error('network down'))
     fireEvent.click(screen.getByTestId('converse-secret-send-anyway'))
-    rerender(renderWith([]))
+    await waitFor(() => expect(converse.postMessage).toHaveBeenCalledTimes(2), SETTLE)
+    expect(converse.postMessage.mock.calls[1][1]).toMatchObject({ allowSecretOnce: true })
 
-    type('never mind')
-    await waitFor(() => expect(notice()).toBeNull(), SETTLE)
     type(FAKE_ANTHROPIC)
     fireEvent.keyDown(replyBox(), { key: 'Enter' })
-
-    await waitFor(() => expect(notice()).toBeInTheDocument(), SETTLE)
-    expect(converse.postMessage).not.toHaveBeenCalled()
+    await waitFor(() => expect(converse.postMessage).toHaveBeenCalledTimes(3), SETTLE)
+    expect(converse.postMessage.mock.calls[2][1]).toMatchObject({ allowSecretOnce: false })
+    await waitFor(() => expect(reason().textContent).toBe(SECRET_REASONS.anthropic), SETTLE)
   })
 })
 
 describe('the copy is honest about the mode it is shown in', () => {
   // ClaudeAccountPanel returns null under mock, and App mounts it under
   // `{!mock && ...}`, so a notice that says "Mount it under Claude accounts"
-  // in a mode that renders no such control is a lie in a friendly voice.
+  // in a mode that renders no such control is a lie in a friendly voice. The
+  // shells answer the question once, for the transports (setCredentialMount-
+  // Available), so this pins the answer rather than a prop.
   it('names no surface where the Claude accounts panel is not mounted', async () => {
-    render(<ConversePanel sessionId="session-1" onDismiss={vi.fn()} />)
+    setCredentialMountAvailable(false)
+    setup()
     type(FAKE_ANTHROPIC)
     fireEvent.keyDown(replyBox(), { key: 'Enter' })
 

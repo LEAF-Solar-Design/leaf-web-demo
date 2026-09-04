@@ -11,6 +11,10 @@
 
 import { config, authHeaders, noteUnauthorized } from './api.js'
 import { trackErrorShown, trackStreamDown } from './telemetry.js'
+// The credential guard rides the WIRE (slice 8a round 3): postMessage is the
+// endpoint every conversational surface shares, so it carries the guard rather
+// than each of its four callers. See lib/secretGuardTransport.js.
+import { SecretRefusedError, guardedText } from './lib/secretGuardTransport.js'
 
 const API_BASE = config.apiBase
 const TENANT = config.tenant
@@ -167,7 +171,21 @@ export function resetSession(drawingId, projectId = null) {
 // llm_rate_limited · 404 session_not_found).
 export async function postMessage(sessionId, {
   text, confirm, images, classifier_hint, credential_grant, queue, request_id,
+  // Per-call authorisation for an OVERRIDABLE refusal only, passed in by the
+  // composer whose "Send anyway" the user just clicked. It is read here and
+  // never forwarded onto the wire, and nothing stores it: the next call starts
+  // from refused again. See lib/secretGuardTransport.js.
+  allowSecretOnce = false,
 } = {}) {
+  // GUARDED TRANSPORT. This endpoint is where user text becomes model context,
+  // and it has FOUR client callers: the assistant reply box, the catalog
+  // controller's agent turn, the Author-a-tool authority mint on both shells,
+  // and this module's own confirm/resume. Guarding it here is what makes the
+  // count irrelevant.
+  if (text != null) {
+    const guard = guardedText(text, { allowSecretOnce })
+    if (!guard.ok) throw new SecretRefusedError(guard.refusal)
+  }
   const payload = {}
   if (text != null) payload.text = text
   if (confirm != null) payload.confirm = confirm

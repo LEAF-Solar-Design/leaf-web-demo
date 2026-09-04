@@ -205,4 +205,42 @@ test.describe('negative browser contracts', () => {
     await expect(page).toHaveURL(/\/try$/)
     expectNoCreatedWork(expect, evidence, state)
   })
+
+  // THE THIRD COMPOSER, and the one round 3's review found open: the
+  // Author-a-tool description. It is not a bar, it shares no testid with one,
+  // and it reaches the authoring agent by a different route (POST
+  // /api/author/stage, plus an authority mint on POST
+  // /api/sessions/{id}/messages). Under a per-composer guard that made it a
+  // separate thing to remember. Under a guard on the wire it is the same
+  // thing, and this row is what proves that from outside the code.
+  test('the Author-a-tool description is refused before /api/author/stage fires', async ({ page }) => {
+    const { evidence, state } = await installNegativeApi(page)
+    await openApp(page)
+
+    await page.getByRole('button', { name: 'Author a tool' }).click()
+    const description = page.getByLabel('What should the tool do?')
+    await description.waitFor()
+    await description.fill(FAKE_TOKEN)
+    await page.getByRole('button', { name: /generate tool/i }).click()
+
+    const notice = page.getByTestId('author-secret-notice')
+    await expect(notice).toBeVisible()
+    await expect(page.getByTestId('author-secret-notice-reason')).toHaveText(ANTHROPIC_REFUSAL)
+    // A named shape has no override.
+    await expect(page.getByTestId('author-secret-send-anyway')).toHaveCount(0)
+    await expect(page.getByTestId('author-secret-notice-mask')).toHaveText('sk-a\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022')
+    await expect(notice).not.toContainText(FAKE_TOKEN.slice(4))
+
+    // The primary assertions: neither authoring route saw it, and neither did
+    // the conversation endpoint the authority mint would have used.
+    expect(
+      evidence.calls.filter((call) => /^POST \/api\/author/.test(call)),
+      'a credential must never reach the authoring agent',
+    ).toEqual([])
+    const messagePosts = evidence.calls.filter((call) => /^POST \/api\/sessions\/[^/]+\/messages$/.test(call))
+    expect(messagePosts, 'a credential must never reach the conversation endpoint').toEqual([])
+    expect(evidence.runSubmissions).toBe(0)
+    await expect(page).toHaveURL(/\/app$/)
+    expectNoCreatedWork(expect, evidence, state)
+  })
 })

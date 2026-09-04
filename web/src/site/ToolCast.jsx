@@ -48,6 +48,7 @@ import { ENV_IOS_SURFACE } from '../ios/flag.js'
 import useIosSurface from '../ios/useIosSurface.js'
 import { useWorkspaceControllers } from '../controllers/WorkspaceControllerProvider.jsx'
 import useCatalogController from '../controllers/catalog/useCatalogController.js'
+import { setCredentialMountAvailable } from '../lib/secretGuardTransport.js'
 import { resolvePublishedCatalogTool } from './publishedCatalogTool.js'
 import { track, setTourStep } from '../telemetry.js'
 import useJobController from '../controllers/useJobController.js'
@@ -251,6 +252,11 @@ export default function ToolCast({
   const transportMock = PUBLIC_DEMO || !sessionReady
   const sessionReadyRef = useRef(sessionReady)
   sessionReadyRef.current = sessionReady
+  // The refusal copy points at the Claude accounts panel only where this shell
+  // mounts one. The trust rail does, and the panel self-guards with
+  // `if (mock) return null`, so this is the same answer the control gives
+  // itself. The transports read it (plain functions, no props to thread).
+  useEffect(() => { setCredentialMountAvailable(!transportMock) }, [transportMock])
   // The first-run coach is only for visitors who were never signed in during
   // this page view. An active session that later expires flips status back
   // to 'required' (any subscribed 401 does it), and a first-run hint
@@ -339,9 +345,9 @@ export default function ToolCast({
       setAuthorSeedSignal((current) => current + 1)
       setLeftView('author')
     },
-    startAgentTurn: async (text, hint) => {
+    startAgentTurn: async (text, hint, opts) => {
       if (!sessionReadyRef.current) return undefined
-      const response = await startTurnRef.current(text, hint)
+      const response = await startTurnRef.current(text, hint, opts)
       setLeftView('operator')
       setPhase('proposal')
       return response
@@ -759,10 +765,6 @@ export default function ToolCast({
       entitlements: null,
       running: busy || jobRunning,
       agentDisabled: transportMock || !platform.isEntitled('converse'),
-      // The trust rail mounts ClaudeAccountPanel, which returns null under
-      // mock (`if (mock) return null`), so this is the same answer the control
-      // gives itself. False means the refusal names no surface at all.
-      credentialMountAvailable: !transportMock,
     },
   })
 
@@ -807,10 +809,11 @@ export default function ToolCast({
     routing,
     routeError,
     agentBanner,
-    // Slice 8a fix round 2: the credential refusal the FUNNEL raised
-    // (createCatalogController.dispatch). This bar has no guard of its own by
-    // design — a per-composer guard is what left this surface open through two
-    // review rounds — so what it renders is the decision that was enforced.
+    // Slice 8a round 3: the credential refusal the TRANSPORT raised (the
+    // nl-prompt client and the messages client), caught by the controller. This bar
+    // has no guard of its own by design — a per-composer guard is what left
+    // this surface open through two review rounds — so what it renders is the
+    // decision that was actually enforced on the wire.
     secretRefusal,
   } = catalog.state
   useEffect(() => {
@@ -1028,9 +1031,11 @@ export default function ToolCast({
     showToast({ text: receiptId ? `Project deleted. Receipt ${receiptId}` : 'Project deleted.' })
   }, [bindConverseProject, showToast, workspace])
 
-  const authorTool = useCallback((description, targetToolName = null) => {
+  const authorTool = useCallback((description, targetToolName = null, opts = {}) => {
     if (!sessionReady) return undefined
-    return authorStage.stage(description, targetToolName)
+    // `opts.allowSecretOnce` is the AuthorPanel "Send anyway" authorisation,
+    // forwarded as a parameter of this one staging call.
+    return authorStage.stage(description, targetToolName, opts)
   }, [authorStage.stage, sessionReady])
 
   const reviseAuthoredTool = useCallback((tool) => {
@@ -1218,13 +1223,17 @@ export default function ToolCast({
     catalog.actions.setPrompt(value)
   }, [catalog.actions])
 
-  const dispatchRequest = useCallback(async (override) => {
+  // `allowSecretOnce` is the "Send anyway" authorisation for THIS dispatch and
+  // nothing stores it, so the precondition short-circuit on the next line —
+  // the very short-circuit that stranded round 2's latch above the controller
+  // — now simply drops the authorisation with the call.
+  const dispatchRequest = useCallback(async (override, { allowSecretOnce = false } = {}) => {
     const text = (typeof override === 'string' ? override : prompt).trim()
     if (!text || platformSession.status !== 'active' || !hasDrawing || busy || jobRunning || routing) return
     setError(null)
     setPhase('starting')
     if (text.startsWith('/')) setLeftView('catalog')
-    const decision = await catalog.actions.dispatch(text)
+    const decision = await catalog.actions.dispatch(text, { allowSecretOnce })
     if (PUBLIC_DEMO) {
       const id = `demo-turn-${++demoTurnSeqRef.current}`
       setDemoTurns((current) => [...current, { id, text, reply: demoReplyFor(text, decision) }])
@@ -1499,12 +1508,12 @@ export default function ToolCast({
                   type="button"
                   className="chip-neutral"
                   data-testid="tc-secret-send-anyway"
-                  // Arms the controller's one-shot override, which the very
-                  // next dispatch reads and disarms above its own early
-                  // returns. Disabled whenever this bar cannot dispatch, so a
-                  // click can never arm a latch it has no chance to spend.
+                  // Re-issues the SAME dispatch with the override as a call
+                  // parameter. There is no latch to strand: this bar's own
+                  // preconditions (below) can short-circuit the re-dispatch and
+                  // the authorisation simply evaporates with it.
                   disabled={platformSession.status !== 'active' || !hasDrawing || busy || jobRunning || routing}
-                  onClick={() => { catalog.actions.allowSecretOnce(); runRequest() }}
+                  onClick={() => dispatchRequest(undefined, { allowSecretOnce: true })}
                 >
                   Send anyway
                 </button>
@@ -1659,7 +1668,6 @@ export default function ToolCast({
             <ConversePanel
               sessionId={sessionId}
               userTurns={turns}
-              credentialMountAvailable={!transportMock}
               onDismiss={() => {}}
               onLinkClaude={() => { setRightView('trust'); setClaudeOpen(true) }}
               onAttachJob={attachJob}
@@ -2067,8 +2075,8 @@ export default function ToolCast({
 
       {/* Slice 4a: the command well is the frame's `commandBar` render
           prop (commandBarBlock above), so slice 5 has one seat to unify.
-          Slice 8a wires the secretRefusal notice + Send-anyway override at
-          that same declaration, not here. */}
+          Slice 8a round 3 wires the secretRefusal notice + Send-anyway
+          override at that same declaration, not here. */}
       <SurfaceFrame.CommandBar />
 
       <div className={`tc-caption${focusView ? ' tc-focus-hidden' : ''}`} data-cast="tool">

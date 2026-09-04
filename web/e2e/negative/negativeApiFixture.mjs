@@ -138,6 +138,18 @@ export async function openTry(page) {
   await page.goto('/try')
   await page.getByTestId('operator-phase').waitFor()
   await page.getByLabel('Command bar').waitFor()
+  // AND wait until the bar can actually dispatch. ToolCast.dispatchRequest
+  // early-returns unless the platform session is active, a drawing is seated
+  // and nothing is in flight, and the Run button carries exactly that
+  // precondition set. Typing before it goes live makes the keypress a silent
+  // no-op, which is how a credential row went red on a loaded box while
+  // passing alone: the assertion was racing hydration, not the guard.
+  await page.getByRole('button', { name: /^(Run|Send)$/ }).and(page.locator('.tc-run')).first()
+    .waitFor({ state: 'visible' })
+  await page.waitForFunction(() => {
+    const run = document.querySelector('.tc-run')
+    return !!run && !run.disabled
+  }, null, { timeout: 30_000 })
 }
 
 export async function proposeCat(page) {

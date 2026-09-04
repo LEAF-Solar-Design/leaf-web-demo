@@ -270,21 +270,20 @@ export const MOUNTABLE_NEXT_STEP = 'Mount it under Claude accounts instead.'
 /** Next step for every shape no surface here can hold yet. Names no fiction. */
 export const UNMOUNTABLE_NEXT_STEP = 'No surface here can hold one yet, so keep it out of the message.'
 
-const RULE = 'Credentials never go to the model.'
-const reason = (what, next) => `That looks like ${what}. ${RULE} ${next}`
-
-/** What each shape is called. One noun phrase per id, mode-independent. */
-const WHAT = Object.freeze({
-  anthropic: 'an Anthropic API key',
-  openai: 'an OpenAI API key',
-  github: 'a GitHub token',
-  aws_access_key: 'an AWS access key ID',
-  aws_secret_key: 'an AWS secret access key',
-  slack: 'a Slack token',
-  jwt: 'a JSON Web Token',
-  private_key: 'a private key',
-  generic: 'a credential',
-})
+// EVERY SENTENCE BELOW IS WRITTEN OUT IN FULL, and that is a rule, not a
+// style. The honesty-ladder gate (web/scripts/check_honesty_ladder.mjs, check
+// 1) requires every value of a `*REASONS` map to be a plain quoted string
+// literal, because a reason a reviewer cannot read in the diff is a reason
+// nobody has actually read. An earlier revision of this file composed all
+// nine with a `reason(what, tail)` helper and failed that gate in CI.
+//
+// The shape each sentence follows, so a tenth stays consistent:
+//   "That looks like <what>. Credentials never go to the model. <next step>"
+// where <next step> is MOUNTABLE_NEXT_STEP for a credential this product can
+// actually hold today (anthropic, and only where the panel is on screen) and
+// UNMOUNTABLE_NEXT_STEP for every other. Those two constants stay exported and
+// the exact-string tests pin both tables character-for-character, so a reword
+// that drifts from this shape reds a test rather than shipping.
 
 /**
  * The copy as it reads WHERE THE CLAUDE ACCOUNTS PANEL IS MOUNTED. Exactly one
@@ -292,25 +291,33 @@ const WHAT = Object.freeze({
  * product can hold.
  */
 export const SECRET_REASONS = Object.freeze({
-  anthropic: reason(WHAT.anthropic, MOUNTABLE_NEXT_STEP),
-  openai: reason(WHAT.openai, UNMOUNTABLE_NEXT_STEP),
-  github: reason(WHAT.github, UNMOUNTABLE_NEXT_STEP),
-  aws_access_key: reason(WHAT.aws_access_key, UNMOUNTABLE_NEXT_STEP),
-  aws_secret_key: reason(WHAT.aws_secret_key, UNMOUNTABLE_NEXT_STEP),
-  slack: reason(WHAT.slack, UNMOUNTABLE_NEXT_STEP),
-  jwt: reason(WHAT.jwt, UNMOUNTABLE_NEXT_STEP),
-  private_key: reason(WHAT.private_key, UNMOUNTABLE_NEXT_STEP),
-  generic: reason(WHAT.generic, UNMOUNTABLE_NEXT_STEP),
+  anthropic: 'That looks like an Anthropic API key. Credentials never go to the model. Mount it under Claude accounts instead.',
+  openai: 'That looks like an OpenAI API key. Credentials never go to the model. No surface here can hold one yet, so keep it out of the message.',
+  github: 'That looks like a GitHub token. Credentials never go to the model. No surface here can hold one yet, so keep it out of the message.',
+  aws_access_key: 'That looks like an AWS access key ID. Credentials never go to the model. No surface here can hold one yet, so keep it out of the message.',
+  aws_secret_key: 'That looks like an AWS secret access key. Credentials never go to the model. No surface here can hold one yet, so keep it out of the message.',
+  slack: 'That looks like a Slack token. Credentials never go to the model. No surface here can hold one yet, so keep it out of the message.',
+  jwt: 'That looks like a JSON Web Token. Credentials never go to the model. No surface here can hold one yet, so keep it out of the message.',
+  private_key: 'That looks like a private key. Credentials never go to the model. No surface here can hold one yet, so keep it out of the message.',
+  generic: 'That looks like a credential. Credentials never go to the model. No surface here can hold one yet, so keep it out of the message.',
 })
 
 /**
  * The copy as it reads WHERE NO CREDENTIAL SURFACE IS MOUNTED — mock mode, the
  * signed-out demo, and any caller that has not answered the question. Every
- * shape, anthropic included, says plainly that nothing here can hold it.
+ * shape, anthropic included, says plainly that nothing here can hold it. Spelled
+ * out rather than spread over the table above for the same gate reason.
  */
 export const SECRET_REASONS_NO_MOUNT = Object.freeze({
-  ...SECRET_REASONS,
-  anthropic: reason(WHAT.anthropic, UNMOUNTABLE_NEXT_STEP),
+  anthropic: 'That looks like an Anthropic API key. Credentials never go to the model. No surface here can hold one yet, so keep it out of the message.',
+  openai: 'That looks like an OpenAI API key. Credentials never go to the model. No surface here can hold one yet, so keep it out of the message.',
+  github: 'That looks like a GitHub token. Credentials never go to the model. No surface here can hold one yet, so keep it out of the message.',
+  aws_access_key: 'That looks like an AWS access key ID. Credentials never go to the model. No surface here can hold one yet, so keep it out of the message.',
+  aws_secret_key: 'That looks like an AWS secret access key. Credentials never go to the model. No surface here can hold one yet, so keep it out of the message.',
+  slack: 'That looks like a Slack token. Credentials never go to the model. No surface here can hold one yet, so keep it out of the message.',
+  jwt: 'That looks like a JSON Web Token. Credentials never go to the model. No surface here can hold one yet, so keep it out of the message.',
+  private_key: 'That looks like a private key. Credentials never go to the model. No surface here can hold one yet, so keep it out of the message.',
+  generic: 'That looks like a credential. Credentials never go to the model. No surface here can hold one yet, so keep it out of the message.',
 })
 
 /**

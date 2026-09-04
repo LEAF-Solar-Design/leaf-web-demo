@@ -17,6 +17,7 @@ import { ladderListener, slashCommandHandlers } from './lib/actionRegistry.js'
 import { authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
 import { resolvePublishedCatalogTool } from './site/publishedCatalogTool.js'
 import { entityGeometry } from './lib/entityMetrics.js'
+import { setCredentialMountAvailable } from './lib/secretGuardTransport.js'
 import { loadDemoSolve } from './site/intakeCache.js'
 // The 3D viewer drags in `three`; loading it lazily (mirroring the auth.js
 // dynamic-import pattern) keeps first paint off the critical path.
@@ -621,14 +622,17 @@ export default function App() {
     },
   }), [sessionActions])
   const drawingCommandOnRef = useRef(false)
+  // The refusal copy's closing sentence points at the Claude accounts panel
+  // only where that panel exists. It is mounted under `{!mock && ...}` below
+  // and self-guards with `if (mock) return null`, so this is the same answer
+  // the control gives itself. The transports read it (they are plain functions
+  // with no props to thread), and it fails honest: false until answered.
+  useEffect(() => { setCredentialMountAvailable(!mock) }, [mock])
+
   const { state: catalogState, actions: catalogActions } = useCatalogController({
     services: catalogServices,
     adapters: catalogAdapters,
-    // `credentialMountAvailable` is the honest answer to "is the Claude
-    // accounts panel on screen": it is mounted under `{!mock && ...}` below, so
-    // in mock mode the anthropic refusal must NOT tell the user to go there.
-    // Same expression as the mount gate, deliberately, so the two cannot drift.
-    context: { mock, entitlements, running: false, agentDisabled, credentialMountAvailable: !mock },
+    context: { mock, entitlements, running: false, agentDisabled },
   })
   const {
     tools,
@@ -650,7 +654,6 @@ export default function App() {
   } = catalogState
   const {
     retryTools,
-    allowSecretOnce,
     // The awaitable catalog refetch. `loadCatalog` regroups families; this is
     // the flat runnable list the published-tool resolver needs.
     loadTools: loadCatalogTools,
@@ -1600,9 +1603,11 @@ export default function App() {
   }, [attachSharedJob, mock])
 
   // X1 Retry for a failed post-write viewer refresh — re-fetch head and seat it.
-  const onAuthor = useCallback(async (description, targetToolName = null) => {
+  const onAuthor = useCallback(async (description, targetToolName = null, opts = {}) => {
     // R5 only stages bytes. It must not place a tool in the runnable catalog.
-    return authorStage.stage(description, targetToolName)
+    // `opts.allowSecretOnce` is the AuthorPanel "Send anyway" authorisation,
+    // forwarded as a parameter of this one staging call.
+    return authorStage.stage(description, targetToolName, opts)
   }, [authorStage.stage])
 
   const onReviseAuthoredTool = useCallback((tool) => {
@@ -1818,9 +1823,15 @@ export default function App() {
   }, [armDecision, route])
   */
 
-  const onDispatch = useCallback((override) => {
+  // `options` carries the composer's per-call flags, including the
+  // "Send anyway" authorisation (`allowSecretOnce`). It MUST be forwarded: the
+  // override is a parameter on this one dispatch and nothing stores it, so a
+  // dropped option means the click silently does nothing rather than silently
+  // arming something. The `running` short-circuit above is exactly the
+  // short-circuit that stranded round 2's latch; with a parameter it is safe.
+  const onDispatch = useCallback((override, options) => {
     if (running) return undefined
-    return catalogActions.dispatch(override)
+    return catalogActions.dispatch(override, options)
   }, [catalogActions, running])
 
   const onOpenAuthor = useCallback(() => {
@@ -2656,14 +2667,11 @@ export default function App() {
           inputRef={barInputRef}
           routeActive={!!route}
           onOpenAuthor={onOpenAuthor}
-          // Slice 8a fix round 2: the AUTHORITY is the controller's dispatch,
-          // which every bar path (Enter, Run, Retry chip, R key, the tour)
-          // funnels through. The bar renders the controller's verdict and
-          // arms its one-shot override; its own pre-check only saves a round
-          // trip on the keystroke path.
+          // Slice 8a round 3: the bar has no guard of its own. This is the
+          // refusal the TRANSPORT raised (api.nlPrompt / converse.postMessage)
+          // and the controller caught, so what is on screen is the decision
+          // that was actually enforced.
           secretRefusal={secretRefusal}
-          onAllowSecretOnce={allowSecretOnce}
-          credentialMountAvailable={!mock}
           // The registry supersedes the tools-only list when it loaded (its
           // entries carry `kind`, which is what groups the picker); a failed
           // fetch falls back to exactly today's list.
@@ -3389,9 +3397,6 @@ export default function App() {
           <ConversePanel
             sessionId={agentSessionId}
             userTurns={agentTurns}
-            // This panel and ClaudeAccountPanel are both mounted under `!mock`,
-            // so where this can refuse, that control is on screen.
-            credentialMountAvailable={!mock}
             onDismiss={clearAgentMode}
             onLinkClaude={() => setClaudeOpen(true)}
             onAttachJob={onAttachAgentJob}
@@ -3474,8 +3479,8 @@ export default function App() {
           {/* Slice 4a: the command well is the frame's `commandBar` render
               prop (declared at the SurfaceFrame call above), so slice 5 has one
               seat to unify. The element and its props are unchanged. Slice 8a
-              wires secretRefusal/onAllowSecretOnce/credentialMountAvailable
-              at that same declaration, not here. */}
+              round 3 wires secretRefusal at that same declaration (the bar has
+              no guard of its own; the transport raises the refusal), not here. */}
           <SurfaceFrame.CommandBar />
         </div>
 
