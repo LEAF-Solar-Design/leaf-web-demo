@@ -1021,6 +1021,37 @@ test.describe('route matrix, rail ON', () => {
       .map((el) => `${el.tagName}.${el.className}`.slice(0, 60)))
     expect(lightSlabs, 'a light page-shaped block is sitting on the drawing').toEqual([])
 
+    // ...and the SAME oracle on Solar CAD (P1 studio-shell pass). This row is
+    // an APPEND, not a rewrite: the check above is unchanged and still guards
+    // CAD. It is added because solar was the surface the oracle never ran on,
+    // and so the surface a page-shaped block survived on - solar declared
+    // chrome.productFrame TRUE, which put a 450px opaque white marketing card
+    // (measured y=28..478 at 1512x950) over its own ribbon, document band and
+    // canvas, pushing the band from y~123 to y=585. The contract now says
+    // false; this row is what keeps it that way. An oracle only guards the
+    // rows you actually run it on.
+    await page.getByRole('tab', { name: 'Solar CAD' }).click()
+    await expect(page.locator('.app[data-surface="solar"]')).toHaveCount(1)
+    await expect(page.locator('#product-surface-panel')).toHaveCount(0)
+    await expect(page.locator('.studio-ground .viewer-canvas canvas')).toHaveCount(1, { timeout: 30_000 })
+    const solarSlabs = await page.evaluate(() => [...document.querySelectorAll('.studio-shell *')]
+      .filter((el) => {
+        const m = getComputedStyle(el).backgroundColor.match(/rgba?\((\d+), (\d+), (\d+)(?:, ([\d.]+))?/)
+        if (!m) return false
+        if (m[4] !== undefined && Number(m[4]) < 0.2) return false
+        const r = el.getBoundingClientRect()
+        return Number(m[1]) > 200 && Number(m[2]) > 200 && Number(m[3]) > 200 && r.width * r.height > 30_000
+      })
+      .map((el) => `${el.tagName}.${el.className}`.slice(0, 60)))
+    expect(solarSlabs, 'a light page-shaped block is sitting on the solar drawing').toEqual([])
+    // The document band belongs ON the drawing, above the ground - that is
+    // the geometry the frame broke, so it is measured, not assumed.
+    const solarBandTop = (await page.locator('.viewer-toolbar').boundingBox()).y
+    const solarGroundTop = (await page.locator('.studio-shell .studio-ground').boundingBox()).y
+    expect(solarBandTop).toBeLessThan(solarGroundTop)
+    await page.getByRole('tab', { name: 'CAD', exact: true }).click()
+    await expect(page.locator('.app[data-surface="cad"]')).toHaveCount(1)
+
     // The entitlements panel is hosted in the dock, not stacked in the column.
     const ent = page.locator('.ent-panel')
     if (await ent.count()) {

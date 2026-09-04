@@ -4,7 +4,7 @@ import { createPortal } from 'react-dom'
 import { track, setTourStep } from './telemetry.js'
 import { useStudioGround } from './site/studioGround.js'
 import SurfaceGrounds, { groundShowsDrawing } from './site/SurfaceGrounds.jsx'
-import { CockpitStatus, StatusTabs, ViewCluster } from './site/DrawingCockpit.jsx'
+import { CockpitStatus, FootRegion, StatusTabs, ViewCluster } from './site/DrawingCockpit.jsx'
 // Slice 4a: the ONE shell wrapper both scenes mount, and the console nav
 // rail it used to spell inline. Every shared chrome gate lives there now.
 import SurfaceFrame from './site/SurfaceFrame.jsx'
@@ -2278,6 +2278,16 @@ export default function App() {
   // wiring pin (src/app-wiring.test.mjs) guards that exact shape against the
   // white screen it was written for. Was groundShowsDrawing(activeSurface).
   const drafting = surfaceSlots.chrome.cockpit
+  // P1: the status bar is grouped into regions on exactly the surfaces that
+  // have instruments to group — the studio's drafting surfaces — and only at
+  // the width where the cockpit layout that styles those regions actually
+  // runs. `wideViewport` IS `(min-width: 981px)`, the same breakpoint
+  // cockpit.css uses, so the wrapper can never exist without its rules: below
+  // it the old shell's own `footer.foot-bar > *` rules (styles.css) style the
+  // segments as the bar's direct children, and a wrapper there would hide
+  // them from that selector. One gate for all three FootRegions, so they can
+  // never disagree; off, each is a fragment and the DOM is byte-identical.
+  const footRegions = Boolean(studioGround) && drafting && wideViewport
   // The properties dock's declared sections; null off a drafting surface. Its
   // TRUTHINESS is the mount gate (paneOpen is the second gate, below).
   const dockSections = surfaceSlots.rails.dock
@@ -2982,7 +2992,21 @@ export default function App() {
           <div className="viewer-toolbar">
             {/* W4e: the toolbar is the reference's document-tab band. Start
                 is the project board (the Browser tab, a real surface switch);
-                the drawing is the active tab; + opens a DXF in the engine. */}
+                the drawing is the active tab; + opens a DXF in the engine.
+
+                ONE DOCUMENT, and that is on purpose, stated so nobody has to
+                re-derive it: this shell has no multi-document state anywhere
+                — no open-drawings collection, no per-document tab list, and
+                DrawingIdentityProvider exposes a single `drawingId`. The band
+                is therefore a SINGLE-document band wearing the reference's
+                tab shape, not a tab strip with one tab in it. Real
+                multi-document is a lane of its own (per-drawing viewer,
+                checkout lease, job and converse scope, all of which are
+                singular today), explicitly OUT of the P1 studio-shell pass.
+                What P1 owed the reader was this sentence instead of a shape
+                that implies capability the app does not have; every control
+                below already names what it actually does, and none of them
+                claims role="tab" or aria-selected. */}
             {studioGround && drafting && (
               <button type="button" className="doc-tab-start" onClick={() => onSelectSurface('browser')}>Start</button>
             )}
@@ -3450,12 +3474,21 @@ export default function App() {
       <SurfaceFrame.JobRail />
 
       <footer className="foot-bar" data-checkout-instance={checkout.instanceId} data-controller-instance={workspaceInstanceId}>
+        {/* P1: on the studio's drafting surfaces the bar is three REGIONS —
+            documents, our honesty band, the drawing instruments — each a real
+            element, so the boundary between a coordinate readout and a build
+            hash is a region edge and not one more cell in a strip. `footRegions`
+            is the ONE gate; off, every FootRegion is a fragment and this
+            footer's DOM is byte-identical to what the old shell renders. */}
+        <FootRegion on={footRegions} name="docs">
         {/* W4e: on the studio's drafting surfaces the status bar opens with
             the reference's Model tab, the drawing's name, and + (the project
             board). Rail OFF and every other surface: nothing here. */}
         {studioGround && drafting && (
           <StatusTabs name={shown ? `${projectName}.dwg` : ''} onStart={() => onSelectSurface('browser')} />
         )}
+        </FootRegion>
+        <FootRegion on={footRegions} name="system">
         {/* Traversal left: a named "← Parent" link while a project is open. */}
         {!mock && openProjectId && (
           <button type="button" className="chip-act" onClick={onCloseProject}>← All projects</button>
@@ -3496,13 +3529,6 @@ export default function App() {
         {!mock && usage && (
           <span className="dim">${Number(usage.today?.usd_est || 0).toFixed(3)} today</span>
         )}
-        {/* W4b cockpit: live cursor coordinates, scale, counts, selection
-            (studio only; DOM-written at rAF rate, never React state). */}
-        {studioGround && groundShowsDrawing(activeSurface) && (
-          <CockpitStatus ground={studioGround} viewerRef={viewerRef} shown={shown} selectedHandle={selectedHandle} />
-        )}
-        {/* W4e: the reference's drafting toggles (honestly off) and fullscreen. */}
-        <SurfaceFrame.Cockpit />
         {mock && !tourOn && tourAvailable.current && studioGround && drafting && (
           <button
             type="button"
@@ -3520,6 +3546,22 @@ export default function App() {
           </button>
         )}
         <span style={{ marginLeft: 'auto' }}>build <span style={{ fontFamily: 'var(--font-mono)' }}>{__BUILD_HASH__}</span> · {mock ? 'sample data' : 'live'}</span>
+        </FootRegion>
+        {/* The drawing instruments, anchored at the right edge like the
+            reference's. They moved BELOW the build hash in the DOM so the
+            regions read left-to-right without a single `order:` — and that
+            move is a no-op off the studio, where both render null (the
+            CockpitStatus gate below, and SurfaceFrame.Cockpit's own
+            posture.studio gate). */}
+        <FootRegion on={footRegions} name="instruments">
+        {/* W4b cockpit: live cursor coordinates, scale, counts, selection
+            (studio only; DOM-written at rAF rate, never React state). */}
+        {studioGround && groundShowsDrawing(activeSurface) && (
+          <CockpitStatus ground={studioGround} viewerRef={viewerRef} shown={shown} selectedHandle={selectedHandle} />
+        )}
+        {/* W4e: the reference's drafting toggles (honestly off) and fullscreen. */}
+        <SurfaceFrame.Cockpit />
+        </FootRegion>
       </footer>
 
       {opsExit.shown && <OpsDrawer onDismiss={() => setOpsDismissed(true)} exiting={opsExit.exiting} />}

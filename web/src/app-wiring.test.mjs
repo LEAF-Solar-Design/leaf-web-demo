@@ -296,6 +296,31 @@ describe('App.jsx wiring', () => {
     )
   })
 
+  it('binds the status bar regions to the width whose CSS styles them', () => {
+    // P1 studio-shell pass. The three FootRegion wrappers are a WIDE-layout
+    // construct: cockpit.css styles `.foot-region` only inside
+    // `@media (min-width: 981px)`. Below that the old shell's own rules do
+    // the work, and they are CHILD selectors — `footer.foot-bar > *`
+    // (styles.css:776-777) — so a wrapper there would hide every segment
+    // from the only rules that style it, and the narrow status bar would
+    // lose its layout silently on a viewport no unit test renders at.
+    //
+    // The gate is therefore `wideViewport`, which is literally
+    // matchMedia('(min-width: 981px)') in this file: the same breakpoint,
+    // read once. Pinned in the transform (comments stripped) so the term
+    // cannot be dropped as "redundant" by a later reader.
+    assert.match(
+      stripped,
+      /footRegions\s*=\s*Boolean\(studioGround\)\s*&&\s*drafting\s*&&\s*wideViewport/,
+    )
+    // ...and that gate is the ONLY thing deciding it, on every FootRegion:
+    // three mounts, each reading the same binding, so they cannot disagree
+    // about whether the bar is regioned and leave a half-wrapped footer.
+    const gated = stripped.match(/React\.createElement\(\s*FootRegion,\s*\{\s*on:\s*footRegions\b/g) || []
+    assert.equal(gated.length, 3, `expected 3 FootRegion mounts on footRegions, saw ${gated.length}`)
+    assert.equal((stripped.match(/React\.createElement\(\s*FootRegion\b/g) || []).length, 3)
+  })
+
   it('keeps the wide drafting properties dock mounted before drawing data exists', () => {
     // Standardization slice 2 renamed the surface term only: the mount gate is
     // now `dockSections` (the contract's rails.dock, truthy exactly where

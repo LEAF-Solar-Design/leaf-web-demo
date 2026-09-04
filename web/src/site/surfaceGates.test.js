@@ -49,6 +49,22 @@ const STUDIO_SURFACE_IDS = ['browser', 'cad', 'solar', 'ios']
 // site it was lifted from at the commit slice 2 branched from (origin/main
 // 1a49766). These are the ORACLE; the contract is what is under test.
 // ---------------------------------------------------------------------------
+// The ONE row of the OLD table the product has since diverged from ON PURPOSE.
+// Slice 2 pinned solar's productFrame to the old `id !== 'cad'` literal and
+// wrote "if a later slice fixes it, this line is the tripwire". The P1
+// studio-shell pass is that slice: it fired, and this constant is how it is
+// recorded instead of erased. The old literal below is untouched, so the row
+// still proves every OTHER id is unchanged; only solar is excepted, by name,
+// with the reason, and DIVERGENCES.productFrame is asserted non-empty below
+// so a future edit cannot quietly widen the exception to nothing.
+const DIVERGENCES = {
+  // P1 studio-shell pass: the frame was a 450px opaque block over solar's own
+  // ribbon, document band and canvas (measured y=28..478 at 1512x950, ground
+  // top y=155, band pushed to y=585). Solar IS the CAD workspace on the solar
+  // tool set (operator directive 2026-09-01), so it declares no product frame.
+  productFrame: Object.freeze({ solar: false }),
+}
+
 const OLD = {
   // App.jsx:2838  {activeSurface !== 'cad' && (<ProductSurfaceFrame .../>)}
   productFrame: (id) => id !== 'cad',
@@ -77,8 +93,15 @@ describe('Surface Contract — every repointed gate equals its old literal', () 
   for (const id of STUDIO_SURFACE_IDS) {
     const c = surfaceContract(id)
 
-    it(`${id}: chrome.productFrame === (id !== 'cad')`, () => {
-      expect(c.chrome.productFrame).toBe(OLD.productFrame(id))
+    const expectedProductFrame = id in DIVERGENCES.productFrame
+      ? DIVERGENCES.productFrame[id]
+      : OLD.productFrame(id)
+    const productFrameRow = id in DIVERGENCES.productFrame
+      ? `chrome.productFrame === ${expectedProductFrame} — recorded divergence from (id !== 'cad')`
+      : `chrome.productFrame === (id !== 'cad')`
+
+    it(`${id}: ${productFrameRow}`, () => {
+      expect(c.chrome.productFrame).toBe(expectedProductFrame)
     })
 
     it(`${id}: chrome.workspaceCard === (id === 'cad' || id === 'solar')`, () => {
@@ -170,11 +193,41 @@ describe('Surface Contract — every repointed gate equals its old literal', () 
     expect(new Set(STUDIO_SURFACE_IDS.map((id) => surfaceContract(id).chrome.stageBranch)).size).toBe(3)
     expect(STUDIO_SURFACE_IDS.filter((id) => surfaceContract(id).chrome.cockpit)).toEqual(['cad', 'solar'])
     expect(STUDIO_SURFACE_IDS.filter((id) => surfaceContract(id).chrome.productFrame))
-      .toEqual(['browser', 'solar', 'ios'])
-    // The solar quirk this slice PRESERVES: the frame renders over a shown
-    // workspace card. If a later slice fixes it, this line is the tripwire.
-    expect(surfaceContract('solar').chrome.productFrame).toBe(true)
+      .toEqual(['browser', 'ios'])
+    // The solar quirk slice 2 preserved (the frame rendering over a shown
+    // workspace card) is FIXED by the P1 studio-shell pass. The tripwire is
+    // inverted, not deleted: solar declares the workspace card and no frame,
+    // which is the CAD shape, and this line fails if either half regresses.
+    expect(surfaceContract('solar').chrome.productFrame).toBe(false)
     expect(surfaceContract('solar').chrome.workspaceCard).toBe(true)
+    // A drafting surface may never declare BOTH a page frame and a cockpit:
+    // that pairing IS the defect, stated once as a rule over every surface so
+    // a new drafting surface cannot re-introduce it.
+    for (const id of STUDIO_SURFACE_IDS) {
+      const chrome = surfaceContract(id).chrome
+      expect(chrome.productFrame && chrome.cockpit).toBe(false)
+    }
+    // The divergence table is real: an empty one would make the row above a
+    // restatement of OLD and silently retire the exception it records.
+    expect(Object.keys(DIVERGENCES.productFrame)).toEqual(['solar'])
+  })
+
+  it('the status bar can be regioned wherever its instruments render', () => {
+    // The P1 pass moved CockpitStatus and SurfaceFrame.Cockpit BELOW the
+    // build hash in the footer's DOM so the three regions read left to right
+    // with no `order:`. That move is only safe if those two mounts render
+    // NOTHING on every surface where the regions are absent — otherwise a
+    // non-drafting surface would silently get its footer reshuffled.
+    //
+    // Their gates are groundShowsDrawing(surface) and chrome.cockpit; the
+    // regions' gate is chrome.cockpit. So the safety condition is exactly
+    // "groundShowsDrawing implies cockpit", pinned here per surface rather
+    // than argued in a PR body.
+    for (const id of [...STUDIO_SURFACE_IDS, 'sheets']) {
+      if (groundShowsDrawing(id)) expect(surfaceContract(id).chrome.cockpit).toBe(true)
+    }
+    // Not vacuous: at least one surface actually reaches the regioned branch.
+    expect(STUDIO_SURFACE_IDS.some((id) => groundShowsDrawing(id))).toBe(true)
     // The documented console/stage divergences, also preserved: the stage
     // gives solar the frame arm while the console gives it a cockpit.
     expect(surfaceContract('solar').chrome.stageBranch).toBe('frame')

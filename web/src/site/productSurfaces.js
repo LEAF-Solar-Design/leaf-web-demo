@@ -24,8 +24,12 @@ export const SHARED_WORKSPACE_CAPABILITIES = Object.freeze([
 // description of it. Behaviour is unchanged, because surfaceGates.test.js pins every
 // derived gate equal to the literal predicate it replaced, for all four ids,
 // and the three console/stage divergences (D1 ios chrome, D2 ios builds,
-// D3 authoring) plus the solar productFrame quirk are PRESERVED as documented,
-// not fixed here. Editing a value below now changes the product.
+// D3 authoring) are PRESERVED as documented. Editing a value below now
+// changes the product, which is exactly how the ONE value that has since
+// been changed on purpose was changed: solar's chrome.productFrame, flipped
+// true -> false by the P1 studio-shell pass (see its note on the solar
+// record). Slice 2 preserved that quirk and left the tripwire; the P1 pass
+// fired it deliberately and rewrote the tripwire to record the divergence.
 //
 // Operator rule this exists to serve:
 //   "nothing HAS to be there, but everything needs to be ABLE to be there,
@@ -265,10 +269,20 @@ export const PRODUCT_SURFACES = Object.freeze([
       ground: 'drawing',
       scene: 'app', // SiteRoot.jsx:228-232, a studio tab
       chrome: {
-        // productFrame: App.jsx:2838 `activeSurface !== 'cad'` -> TRUE on solar.
-        //   The frame renders over the shown workspace card; this is today's
-        //   behaviour, not a defect this slice may fix.
-        productFrame: true,
+        // productFrame: FALSE — a DELIBERATE divergence from the old literal
+        //   `activeSurface !== 'cad'` (App.jsx:2838), which is what the P1
+        //   pass fixes. Measured at 1512x950 before the fix: the frame was a
+        //   450px opaque white block at y=28..478 in the console's flow, over
+        //   a studio ground that starts at y=155 — it buried the ribbon,
+        //   pushed the document band from y~123 to y=585, and covered 323px
+        //   of canvas. Solar IS the CAD workspace on the solar tool set
+        //   (operator directive 2026-09-01, cited at App.jsx's workspace-card
+        //   mount), so a surface that declares a cockpit, a ribbon and a
+        //   drawing ground cannot also declare a page-sized frame over them.
+        //   The slice-2 parity tripwires (surfaceGates.test.js, and the
+        //   fixture in productSurfaces.test.js) are updated to RECORD this
+        //   divergence, never deleted to stop them firing.
+        productFrame: false,
         // workspaceCard: App.jsx:2859 `cad || solar` -> shown.
         workspaceCard: true,
         // cockpit: App.jsx:2269 drafting -> true.

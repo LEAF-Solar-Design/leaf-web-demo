@@ -72,6 +72,14 @@ export default function ProductSurfaceTabs({
         {PRODUCT_SURFACES.filter(({ contract }) => contract.chrome.tab).map((surface) => {
           const selected = surface.id === activeSurface
           const status = states[surface.id]
+          // aria-controls points at #product-surface-panel, which is the
+          // ProductSurfaceFrame — and a surface that declares no frame
+          // renders no such element. A tab whose aria-controls names a
+          // missing id is a broken reference to a screen reader, so the
+          // attribute is carried by the surfaces that HAVE the panel and
+          // omitted by the ones that do not (cad always; solar since the P1
+          // pass). Read from the contract, never from a surface id.
+          const controlsPanel = surface.contract.chrome.productFrame
           return (
             <button
               key={surface.id}
@@ -80,7 +88,7 @@ export default function ProductSurfaceTabs({
               role="tab"
               aria-label={surface.label}
               aria-selected={selected}
-              aria-controls="product-surface-panel"
+              aria-controls={controlsPanel ? 'product-surface-panel' : undefined}
               tabIndex={selected ? 0 : -1}
               data-surface={surface.id}
               onClick={() => onSelect(surface.id)}
