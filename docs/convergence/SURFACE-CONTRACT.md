@@ -80,7 +80,7 @@ the sheets arm rather than against the console predicates, which never ran for i
 | `shortcuts` | null | per-surface keyboard/touch triggers | undeclared: no per-surface shortcut registry exists |
 | `entitlements` | null | per-surface per-tool entitlement | undeclared: `web/src/components/EntitlementGate.jsx:15` `ROWS` are TIER capability keys (`run_read`, `run_write`, `build`, `converse`), never per-surface |
 | `resetOn` | null | scope reset on tenant/project switch | undeclared: no effect in `App.jsx` keys off `activeSurface` to reset scope |
-| `a11y` | null | per-surface accessibility declarations | undeclared |
+| `a11y` | null | per-surface accessibility declarations | undeclared: `web/src/site/productSurfaces.js:179` states no per-surface a11y declaration exists, so `null` on every surface |
 | `tourAnchors` | null | tour anchor ids | undeclared: the tour is mock-gated (`web/src/App.jsx:2761`), not surface data |
 
 ## The matrix (console values, equal to today)
