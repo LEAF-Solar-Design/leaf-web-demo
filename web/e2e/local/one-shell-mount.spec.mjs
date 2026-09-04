@@ -493,7 +493,9 @@ test.describe('route matrix, rail ON', () => {
   })
 
   test("the cockpit's actual tools (W4d Slice A): real groups, honest gating, one engine session", async ({ page, request }) => {
-    test.setTimeout(180_000)
+    // W4g-4: the verb rows (COPY, ROTATE, EXPLODE x2 on the real engine) grew this
+    // row past three minutes on a loaded host; five is its budget now.
+    test.setTimeout(300_000)
     await requireLocalReady(request, test, API_BASE)
     await setRail(page, '1')
     await page.goto('/app')
@@ -652,6 +654,13 @@ test.describe('route matrix, rail ON', () => {
       await expect(saveBtn).toBeDisabled()
       await page.getByRole('tab', { name: 'Manage' }).click()
       await expect(dirtyBlocked).toHaveCount(0)
+      // The confirm-time half of the one-head rule (a write tool armed while
+      // clean, the engine edited, the strip's Run clicked -> refused, no
+      // POST /api/run) is pinned by app-wiring.test.mjs, not here: on plain
+      // /app the live local stack fails a direct catalog arm closed by
+      // design (no canonical-version context; the W4d row above flips the
+      // dev Mock switch to see the strip), so the sequence cannot be staged
+      // against the real engine in this row.
       await page.getByRole('tab', { name: 'Draw' }).click()
     } else {
       await expect(modify.locator('.ribbon-note')).toHaveText(/no drawing in the browser engine yet|could not be opened in the browser engine/)
@@ -1026,6 +1035,14 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeVerbs + 1))
     await ribbon.locator('[data-tool="modify:explode"]').click()
     await expect(page.getByRole('status').filter({ hasText: /Edit refused \(explode\): entity_not_explodable/ })).toHaveCount(1, { timeout: 60_000 })
+    // Disarm before touching the import list. A refusal does NOT disarm, and
+    // while a command is armed the workbench is deliberately click-through
+    // (W4f-2, so a drafter can pick under it), which means a click aimed at
+    // this radio lands on the canvas instead: Playwright reports the drawing
+    // canvas intercepting the pointer event and retries until the row's whole
+    // budget is gone. The product is behaving; the step has to leave picking
+    // first.
+    await page.keyboard.press('Escape')
     await page.getByRole('radio').first().check()
     await ribbon.locator('[data-tool="modify:explode"]').click()
     await expect(page.getByRole('status').filter({ hasText: /explode applied: entity \d+ drawn/ })).toHaveCount(1, { timeout: 60_000 })

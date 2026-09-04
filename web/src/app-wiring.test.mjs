@@ -316,7 +316,13 @@ describe('App.jsx wiring', () => {
     // ...and that gate is the ONLY thing deciding it, on every FootRegion:
     // three mounts, each reading the same binding, so they cannot disagree
     // about whether the bar is regioned and leave a half-wrapped footer.
-    const gated = stripped.match(/React\.createElement\(\s*FootRegion,\s*\{\s*on:\s*footRegions\b/g) || []
+    // Built from a string, not a regex literal: the honesty gate masks
+    // comments and STRINGS and then balances braces per file, and it cannot
+    // see a regex literal, so an escaped `\{` with no partner in one reads to
+    // it as an unclosed block and the whole file is reported as untrustworthy
+    // ("braces do not balance after comment/string masking"). Same pattern,
+    // same match; the braces now sit inside a masked string.
+    const gated = stripped.match(new RegExp('React\\.createElement\\(\\s*FootRegion,\\s*\\{\\s*on:\\s*footRegions\\b', 'g')) || []
     assert.equal(gated.length, 3, `expected 3 FootRegion mounts on footRegions, saw ${gated.length}`)
     assert.equal((stripped.match(/React\.createElement\(\s*FootRegion\b/g) || []).length, 3)
   })
@@ -331,7 +337,8 @@ describe('App.jsx wiring', () => {
     // the mount on data (legendEl || readoutEl) is the white-screen shape.
     assert.match(
       stripped,
-      /if \(studioGround && dockSections && wideViewport\) \{\s*return[^;]*React\.createElement\(\s*PropertiesDock/,
+      // A string for the same reason as the FootRegion pin above.
+      new RegExp('if \\(studioGround && dockSections && wideViewport\\) \\{\\s*return[^;]*React\\.createElement\\(\\s*PropertiesDock'),
     )
     assert.doesNotMatch(
       stripped,
@@ -362,6 +369,64 @@ describe('App.jsx wiring', () => {
     it('the opener marks its load as the head, so the store keeps a diff base', () => {
       const opener = readFileSync(new URL('./cadedit/EngineHeadOpener.jsx', import.meta.url), 'utf8')
       assert.match(opener, /openBytes\(bytes, headDocumentId\(drawingId, version\), \{ committed: true \}\)/)
+    })
+  })
+
+  // W4g-2 (one head), kimi on #1008 finding 1: the dirty refusal must hold at
+  // EXECUTION time, not only when the run is armed. The confirm strip stays
+  // open while the drafter keeps drawing (engine tools never touch the run
+  // intent), so onRun, every path's last stop before runJob, reads the
+  // CURRENT fact from a ref and refuses before anything is submitted.
+  describe('W4g-2 one head: unsaved browser edits refuse a write tool at execution time', () => {
+    const onRunStart = stripped.indexOf('onRun = useCallback')
+    const onRunBody = stripped.slice(onRunStart, onRunStart + 2600)
+
+    it('onRun refuses a write tool while the engine is dirty, before runJob', () => {
+      assert.notEqual(onRunStart, -1)
+      const refusal = onRunBody.indexOf('engineDirtyRef.current')
+      const run = onRunBody.indexOf('runJob(')
+      assert.notEqual(refusal, -1, 'onRun must read engineDirtyRef.current')
+      assert.notEqual(run, -1)
+      assert.ok(refusal < run, 'the dirty refusal must precede runJob')
+      assert.match(onRunBody.slice(refusal, run), /REASONS\.unsavedEngineEdits[\s\S]*return null/)
+    })
+
+    it('the ref and the ribbon state are written by the one dirty-change callback the provider gets', () => {
+      // Read as text spans rather than one brace-carrying pattern: the
+      // honesty gate's scanner masks comments and strings and then balances
+      // braces per file, and an escaped `\{` inside a regex literal reads to
+      // it as an unclosed block (it reported this very file rather than
+      // silently trusting it).
+      const start = stripped.indexOf('onEngineDirtyChange = useCallback')
+      assert.notEqual(start, -1, 'App must declare onEngineDirtyChange')
+      const body = stripped.slice(start, start + 220)
+      assert.match(body, /engineDirtyRef\.current = !!dirty/)
+      assert.match(body, /setEngineDirty\(!!dirty\)/)
+      const provider = stripped.indexOf('React.createElement(EngineSessionProvider')
+      const providerLoose = provider === -1 ? stripped.indexOf('EngineSessionProvider,') : provider
+      assert.notEqual(providerLoose, -1, 'the provider must be mounted')
+      assert.match(stripped.slice(providerLoose, providerLoose + 400), /onDirtyChange:\s*onEngineDirtyChange/)
+    })
+
+    it('armDecision and onRun share the one write predicate', () => {
+      const armStart = stripped.indexOf('armDecision = useCallback')
+      assert.notEqual(armStart, -1)
+      assert.match(stripped.slice(armStart, armStart + 1600), /isWrite = isWriteTool\(catalogTool\)/)
+      assert.match(onRunBody, /isWrite = isWriteTool\(tool\)/)
+    })
+
+    it('the ribbon memo recomputes when the engine dirty state flips', () => {
+      // The deps array that closes the ribbon useMemo names engineDirty
+      // (kimi on #1008 finding 2: read inside, absent from the deps).
+      assert.match(stripped, /lastAuthoredTool,\s*onUseAuthored,\s*setFamilyOpen,\s*engineDirty\s*\]\)/)
+    })
+
+    it('fails when the execution-time refusal is removed', () => {
+      const mutated = appSource.replace(/if \(isWrite && engineDirtyRef\.current\) \{[\s\S]*?return null\r?\n\s*\}\r?\n/, '')
+      assert.notEqual(mutated, appSource, 'the falsification mutation must apply')
+      const mutatedStripped = esbuild.transformSync(mutated, { loader: 'jsx' }).code
+      const start = mutatedStripped.indexOf('onRun = useCallback')
+      assert.doesNotMatch(mutatedStripped.slice(start, start + 2600), /engineDirtyRef\.current/)
     })
   })
 })

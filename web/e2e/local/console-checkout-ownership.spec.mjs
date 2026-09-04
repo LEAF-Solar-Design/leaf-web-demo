@@ -59,7 +59,14 @@ test(`the console holds the same single-writer lock the stage does [rail ${rail}
 
   const seed = await request.post(`${API_BASE}/api/drawings/${DRAWING_ID}/checkout`, {
     headers: TENANT_HEADERS,
-    data: { holder: OTHER_HOLDER, ttl_s: 30 },
+    // Long enough to outlive a cold boot. At ttl_s 30 this row went red
+    // whenever the console took longer than the lease to reach the chip: the
+    // store then re-grants an expired lock to anyone (its documented rule),
+    // so the page correctly showed "Take edit lock" and the assertion for
+    // "Editing locked by" failed on a product that was behaving. The EXPIRY
+    // half of this walk is proven by the deliberate 0.5 s lease below, not by
+    // this one running out.
+    data: { holder: OTHER_HOLDER, ttl_s: 300 },
   })
   expect(seed.status()).toBe(200)
   const seedBody = await seed.json()
