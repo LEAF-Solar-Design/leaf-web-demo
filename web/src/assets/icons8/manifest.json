@@ -299,6 +299,9 @@
     },
     "explode": {
       "term": "explode"
+    },
+    "offset": {
+      "term": "offset"
     }
   }
 }

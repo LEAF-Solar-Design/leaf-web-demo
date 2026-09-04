@@ -37,6 +37,9 @@ const WORDS = Object.freeze({
   sc: { group: 'modify', op: 'scale', verb: 'SCALE' },
   explode: { group: 'modify', op: 'explode', verb: 'EXPLODE' },
   x: { group: 'modify', op: 'explode', verb: 'EXPLODE' },
+  // W4g-5: the reference's OFFSET, one letter like the rest of its Modify row.
+  offset: { group: 'modify', op: 'offset', verb: 'OFFSET' },
+  o: { group: 'modify', op: 'offset', verb: 'OFFSET' },
   rectang: { group: 'draw', op: 'createRectangle', verb: 'RECTANG' },
   rectangle: { group: 'draw', op: 'createRectangle', verb: 'RECTANG' },
   rec: { group: 'draw', op: 'createRectangle', verb: 'RECTANG' },

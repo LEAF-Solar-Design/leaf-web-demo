@@ -157,6 +157,12 @@ export const PROMPTS = Object.freeze({
     { ask: 'Specify base point:', fields: [['cx', 'cx'], ['cy', 'cy']] },
     { ask: 'Specify scale factor:', fields: [['factor', 'factor']] },
   ] },
+  // W4g-5: the reference asks for the distance, then a point on the side the
+  // copy goes; the click IS the side, so there is no third step.
+  offset: { verb: 'OFFSET', steps: [
+    { ask: 'Specify offset distance:', fields: [['dist', 'distance']] },
+    { ask: 'Specify point on side to offset:', fields: [['x', 'x'], ['y', 'y']] },
+  ] },
   moveVertex: { verb: 'MOVE VERTEX', steps: [
     { ask: 'Specify vertex:', fields: [['vertexIndex', 'vertex', 'numeric']] },
     { ask: 'Specify displacement:', fields: [['dx', 'dx'], ['dy', 'dy']] },

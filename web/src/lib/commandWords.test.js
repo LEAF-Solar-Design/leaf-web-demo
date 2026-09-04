@@ -19,6 +19,12 @@ describe('commandWords (W4f slice B): typed CAD words on the command line', () =
     expect(Object.isFrozen(parseDrawingCommand('line'))).toBe(true)
   })
 
+  it('W4g-5: offset and its one-letter form arm the OFFSET prompt', () => {
+    expect(parseDrawingCommand('offset')).toMatchObject({ group: 'modify', op: 'offset', verb: 'OFFSET', word: 'offset' })
+    expect(parseDrawingCommand('o')).toMatchObject({ group: 'modify', op: 'offset', verb: 'OFFSET', word: 'o' })
+    expect(parseDrawingCommand('  OFFSET  ')).toMatchObject({ group: 'modify', op: 'offset', verb: 'OFFSET', word: 'OFFSET' })
+  })
+
   it('never claims a sentence, a slash tool, an empty or oversized text, or an unknown word', () => {
     expect(parseDrawingCommand('draw a line from the inverter to the panel')).toBeNull()
     expect(parseDrawingCommand('line 0,0 100,0')).toBeNull()
@@ -28,6 +34,8 @@ describe('commandWords (W4f slice B): typed CAD words on the command line', () =
     expect(parseDrawingCommand('>')).toBeNull()
     // W4g-4 made `rectangle` a real word (RECTANG); `triangle` is the unknown one now.
     expect(parseDrawingCommand('triangle')).toBeNull()
+    // W4g-5 took `o` and `offset`; `offsets` is still nobody's word.
+    expect(parseDrawingCommand('offsets')).toBeNull()
     expect(parseDrawingCommand('lines')).toBeNull()
     expect(parseDrawingCommand(null)).toBeNull()
     expect(parseDrawingCommand(42)).toBeNull()

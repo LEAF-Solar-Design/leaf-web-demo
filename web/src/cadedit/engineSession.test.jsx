@@ -317,6 +317,44 @@ describe('edit dispatch refuses malformed input before it reaches the engine', (
     expect(session.current.status).toBe('Loaded one.dxf: 1 entities.')
   })
 
+  // W4g-5 OFFSET: the parallel copy is computed from the SELECTION and the
+  // clicked side (offset.js), then drawn by the engine's own create op, so
+  // one OFFSET is one round trip and every refusal is a sentence, not a post.
+  it('offset posts the computed create for the selected entity, on the clicked side', async () => {
+    const session = mountSession()
+    await openDocument(session)
+    session.workers[0].emit(loadedMessage([{ ...LINE, vertices: [[0, 0, 0], [10, 0, 0]] }]))
+    act(() => session.current.actions.select('e1'))
+    const before = session.workers[0].posted.length
+    act(() => session.current.actions.applyEdit('offset', { dist: '2', x: '5', y: '3' }))
+    expect(session.workers[0].posted.length).toBe(before + 1)
+    expect(session.workers[0].posted[before]).toEqual({
+      type: 'applyEdit',
+      op: 'createLine',
+      payload: { x1: 0, y1: 2, x2: 10, y2: 2, layer: 'Panels' },
+    })
+    expect(session.current.busy).toBe(true)
+  })
+
+  it('offset refuses with the geometry sentence and posts nothing', async () => {
+    const session = mountSession()
+    await openDocument(session)
+    session.workers[0].emit(loadedMessage([{ ...LINE, vertices: [[0, 0, 0], [10, 0, 0]] }]))
+    act(() => session.current.actions.select('e1'))
+    const before = session.workers[0].posted.length
+    // A click ON the line names no side.
+    act(() => session.current.actions.applyEdit('offset', { dist: '2', x: '5', y: '0' }))
+    expect(session.current.status).toMatch(/click to one side of the entity/)
+    // A distance that is not a positive number.
+    act(() => session.current.actions.applyEdit('offset', { dist: 'wide', x: '5', y: '3' }))
+    expect(session.current.status).toMatch(/the distance must be a number/)
+    // A side point that is not a number at all.
+    act(() => session.current.actions.applyEdit('offset', { dist: '2', x: '', y: '3' }))
+    expect(session.current.status).toMatch(/the side point x and y must both be numbers/)
+    expect(session.current.errorKind).toBe(SESSION_ERROR.REFUSED)
+    expect(session.workers[0].posted.length).toBe(before)
+  })
+
   it('builds the exact payload the boundary schema carries', () => {
     expect(buildEditPayload('move', 'e1', { dx: '2.5', dy: '-3' }))
       .toEqual({ payload: { entityId: 'e1', dx: 2.5, dy: -3 } })

@@ -1049,6 +1049,21 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeVerbs + 2))
     await page.keyboard.press('Escape')
 
+    // W4g-5 OFFSET: a parallel copy of the selection, the distance given and
+    // the side named by the point, drawn by the engine's own create (+1); a
+    // point ON the entity names no side and is refused with the sentence,
+    // drawing nothing.
+    const countBeforeOffset = Number(await page.getByTestId('cad-edit-entity-count').textContent())
+    await page.getByRole('radio').last().check()
+    await ribbon.locator('[data-tool="modify:offset"]').click()
+    await page.getByLabel('ribbon distance', { exact: true }).fill('3')
+    await page.getByLabel('ribbon x', { exact: true }).fill('40')
+    await page.getByLabel('ribbon y', { exact: true }).fill('40')
+    await page.getByLabel('ribbon y', { exact: true }).press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeOffset + 1), { timeout: 60_000 })
+    test.info().annotations.push({ type: 'offset', description: `offset drew one parallel entity (${countBeforeOffset} -> ${countBeforeOffset + 1})` })
+    await page.keyboard.press('Escape')
+
     // A sentence is still a sentence: it routes, it never arms. LAST in the
     // row on purpose: while its route decision is shown the Command bar's
     // Enter belongs to the decision strip, so a word typed after it would be

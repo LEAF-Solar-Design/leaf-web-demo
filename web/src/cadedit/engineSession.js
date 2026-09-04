@@ -39,6 +39,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { EngineBoundary } from '../cad/engineWorker.js'
 import { SESSION_ERROR } from './engineSessionErrors.js'
+import { offsetEntity } from './offset.js'
 import { diffPlan } from './mutationDiff.js'
 
 // Mirrors the worker's own bound. Checked against File.size BEFORE any read.
@@ -605,30 +606,6 @@ export default function useEngineSession({
       : Object.freeze({ ...current, selectedId: entityId })))
   }, [])
 
-  const applyEdit = useCallback((op, inputs) => {
-    // Nothing selected is not an error, it is a no-op: the affordances that
-    // dispatch an edit are disabled until something is.
-    if (!sessionRef.current.selectedId) return
-    const { payload, refusal } = buildEditPayload(op, sessionRef.current.selectedId, inputs)
-    if (refusal) {
-      patch({ errorKind: SESSION_ERROR.REFUSED, status: refusal })
-      return
-    }
-    const boundary = boundaryRef.current
-    if (!boundary) {
-      patch({ errorKind: SESSION_ERROR.TRANSPORT, status: 'Edit refused: no document is open.' })
-      return
-    }
-    patch({ busy: true, errorKind: null })
-    if (!boundary.post({ type: 'applyEdit', op, payload })) {
-      patch({
-        busy: false,
-        errorKind: SESSION_ERROR.TRANSPORT,
-        status: `Edit refused (${op}): the boundary rejected the message.`,
-      })
-    }
-  }, [patch])
-
   // W4d Draw group: creation needs an open, engine-parsed document and no
   // selection. Refused here for malformed input (a sentence, no round trip),
   // refused as TRANSPORT when nothing is open.
@@ -656,6 +633,55 @@ export default function useEngineSession({
       })
     }
   }, [patch])
+
+  const applyEdit = useCallback((op, inputs) => {
+    // Nothing selected is not an error, it is a no-op: the affordances that
+    // dispatch an edit are disabled until something is.
+    if (!sessionRef.current.selectedId) return
+    // W4g-5 OFFSET: a parallel copy is a CREATE whose geometry comes from the
+    // selection, the distance and the side clicked, computed here (offset.js)
+    // and drawn by the engine's own create op. One round trip, and every
+    // refusal is the geometry's own sentence.
+    if (op === 'offset') {
+      const { entities, selectedId } = sessionRef.current
+      const entity = entities.find((candidate) => candidate.id === selectedId)
+      if (!entity) {
+        patch({ errorKind: SESSION_ERROR.REFUSED, status: 'Offset refused: the selected entity is no longer in the document.' })
+        return
+      }
+      const px = readNumber(inputs?.x)
+      const py = readNumber(inputs?.y)
+      if (px === null || py === null) {
+        patch({ errorKind: SESSION_ERROR.REFUSED, status: 'Offset refused: the side point x and y must both be numbers.' })
+        return
+      }
+      const answer = offsetEntity(entity, readNumber(inputs?.dist), px, py)
+      if (answer.refusal) {
+        patch({ errorKind: SESSION_ERROR.REFUSED, status: answer.refusal })
+        return
+      }
+      create(answer.op, answer.inputs)
+      return
+    }
+    const { payload, refusal } = buildEditPayload(op, sessionRef.current.selectedId, inputs)
+    if (refusal) {
+      patch({ errorKind: SESSION_ERROR.REFUSED, status: refusal })
+      return
+    }
+    const boundary = boundaryRef.current
+    if (!boundary) {
+      patch({ errorKind: SESSION_ERROR.TRANSPORT, status: 'Edit refused: no document is open.' })
+      return
+    }
+    patch({ busy: true, errorKind: null })
+    if (!boundary.post({ type: 'applyEdit', op, payload })) {
+      patch({
+        busy: false,
+        errorKind: SESSION_ERROR.TRANSPORT,
+        status: `Edit refused (${op}): the boundary rejected the message.`,
+      })
+    }
+  }, [create, patch])
 
   // The persistence leg: post the EXACT edited bytes with a client-computed
   // digest; the server recomputes, parses, and compare-and-sets against the

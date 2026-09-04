@@ -191,7 +191,9 @@ describe('honest triggers', () => {
     expect(forGroup('modify').map((a) => a.id)).toEqual([
       'modify:delete', 'modify:move', 'modify:moveVertex',
       'modify:addVertex', 'modify:deleteVertex', 'modify:setLayer',
-      'modify:copy', 'modify:mirror', 'modify:rotate', 'modify:scale', 'modify:explode',
+      // W4g-5: OFFSET joined the row (a parallel copy, computed here and
+      // drawn by the engine's own create).
+      'modify:copy', 'modify:mirror', 'modify:rotate', 'modify:scale', 'modify:explode', 'modify:offset',
     ])
   })
 
