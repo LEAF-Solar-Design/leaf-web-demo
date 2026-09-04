@@ -49,7 +49,7 @@ from mutation_plan import (
     emit_plan,
     plan_sha256,
     validate_mutations,
-    world_to_ocs,
+    world_to_ocs_any,
 )
 from tenant_id_validator import validate_tenant_id
 
@@ -860,17 +860,60 @@ def apply_mutations(intake: Dict[str, Any], mutations: Dict[str, Any]) -> Dict[s
 
     removed = {str(h) for h in (mutations.get("removed") or [])}
     if removed:
-        new["polylines"] = [p for p in (new.get("polylines") or [])
-                            if str(p.get("handle")) not in removed]
+        for field in ("polylines", "circles", "arcs"):
+            if new.get(field):
+                new[field] = [p for p in new[field] if str(p.get("handle")) not in removed]
+    # W4g-3 (contract v2): replacements on existing entities, by handle. The
+    # validator has already bound each op to an entity of the right kind.
+    by_handle = {}
+    for field in ("polylines", "circles", "arcs"):
+        for entity in new.get(field) or []:
+            if isinstance(entity, dict) and entity.get("handle"):
+                by_handle[str(entity["handle"])] = entity
+    layers = new.setdefault("layers", [])
+
+    def note_layer(name):
+        if name and name not in layers:
+            layers.append(name)
+
+    for item in mutations.get("set_layer") or []:
+        by_handle[item["handle"]]["layer"] = item["layer"]
+        note_layer(item["layer"])
+    for item in mutations.get("set_points") or []:
+        entity = by_handle[item["handle"]]
+        entity["pts"] = [list(point) for point in item["pts"]]
+        entity["closed"] = bool(item["closed"])
+    for item in mutations.get("set_circle") or []:
+        entity = by_handle[item["handle"]]
+        entity["c"] = list(item["c"])
+        entity["r"] = item["r"]
+    for item in mutations.get("set_arc") or []:
+        entity = by_handle[item["handle"]]
+        entity["c"] = list(item["c"])
+        entity["r"] = item["r"]
+        entity["start_deg"] = item["start_deg"]
+        entity["end_deg"] = item["end_deg"]
     added = mutations.get("added") or []
     if added:
         polys = new.setdefault("polylines", [])
-        layers = new.setdefault("layers", [])
         for e in added:
-            polys.append(e)
-            lyr = e.get("layer")
-            if lyr and lyr not in layers:
-                layers.append(lyr)
+            kind = e.get("kind", "LWPOLYLINE")
+            if kind == "LWPOLYLINE":
+                polys.append(e)
+            elif kind == "LINE":
+                # The intake's idiom: a LINE is a 2-point open polyline.
+                polys.append({"handle": e["handle"], "layer": e["layer"], "closed": False,
+                              "pts": [list(p) for p in e["pts"]], "xdata": None})
+            elif kind == "CIRCLE":
+                new.setdefault("circles", []).append({
+                    "handle": e["handle"], "layer": e["layer"], "c": list(e["c"]),
+                    "r": e["r"], "nrm": [0.0, 0.0, 1.0]})
+            else:
+                new.setdefault("arcs", []).append({
+                    "handle": e["handle"], "layer": e["layer"], "c": list(e["c"]),
+                    "r": e["r"], "start_deg": e["start_deg"], "end_deg": e["end_deg"],
+                    "nrm": [0.0, 0.0, 1.0]})
+            note_layer(e.get("layer"))
     return new
 
 
@@ -1317,7 +1360,10 @@ def _expected_extracted_points(points: list[list[float]]) -> list[list[float]]:
     # its arbitrary-axis transform so verification cannot drift from extraction.
     from intake_parse import o2w
 
-    lowered = world_to_ocs(points)
+    # W4g-3: a LINE-shaped polyline (two points, collinear by construction)
+    # takes the +z plane at its elevation, which is exactly what the LN
+    # inspection record reports (world coordinates at three decimals).
+    lowered = world_to_ocs_any(points)
     normal = tuple(
         _extractor_round(_plan_number(value), 6)
         for value in lowered["normal"])
@@ -1358,14 +1404,16 @@ def verify_live_mutation_effects(
 ) -> None:
     """Refuse publication unless extraction proves exactly the proposed effects."""
     expected = apply_mutations(base, canonical)
+    # W4g-3 (contract v2): circles and arcs verify by the same rule as the
+    # polylines (LINE included, as a 2-point polyline): everything the plan
+    # names carries its expected geometry, everything else is untouched,
+    # every add is matched by kind and geometry, and no extra entity appears.
+    _verify_round_effects(base, actual, expected, canonical)
     base_polylines = base.get("polylines") or []
     actual_polylines = actual.get("polylines") or []
     if not isinstance(actual_polylines, list):
         raise ValueError("re-extracted output has no polyline list")
-    expected_count = (
-        len(base_polylines) - len(canonical.get("removed", []))
-        + len(canonical.get("added", []))
-    )
+    expected_count = len(expected.get("polylines") or [])
     if len(actual_polylines) != expected_count:
         raise ValueError("re-extracted output entity count does not match the plan")
     if any(
@@ -1394,6 +1442,10 @@ def verify_live_mutation_effects(
     transformed = {
         item["handle"] for item in canonical.get("transforms", [])
     }
+    # A v2 replacement (points or layer) reads like a transform: the
+    # expected geometry is the plan's, at the extractor's precision.
+    replaced = {item["handle"] for item in canonical.get("set_points", [])}
+    replaced |= {item["handle"] for item in canonical.get("set_layer", [])}
     expected_by_handle = {
         str(entity.get("handle")): entity
         for entity in expected.get("polylines") or []
@@ -1407,12 +1459,13 @@ def verify_live_mutation_effects(
             raise ValueError(f"unchanged handle {handle!r} is missing from output")
         if handle in removed:
             continue
-        expected_entity = (
-            expected_by_handle[handle] if handle in transformed else entity)
+        changed = handle in transformed or handle in replaced
+        expected_entity = expected_by_handle[handle] if changed else entity
         if not _polyline_effect_matches(
-                expected_entity, actual_by_handle[handle],
-                extracted=handle in transformed):
-            effect = "transformed" if handle in transformed else "unchanged"
+                expected_entity, actual_by_handle[handle], extracted=changed):
+            effect = (
+                "transformed" if handle in transformed
+                else "replaced" if handle in replaced else "unchanged")
             raise ValueError(
                 f"{effect} handle {handle!r} has unexpected output geometry")
     base_handles = {
@@ -1424,9 +1477,16 @@ def verify_live_mutation_effects(
         if isinstance(entity, dict)
         and str(entity.get("handle")) not in base_handles
     ]
-    if len(unmatched) != len(canonical.get("added", [])):
+    added_polylines = [
+        entity for entity in expected.get("polylines") or []
+        if str(entity.get("handle")) in {
+            item["handle"] for item in canonical.get("added", [])
+            if item.get("kind", "LWPOLYLINE") in ("LWPOLYLINE", "LINE")
+        }
+    ]
+    if len(unmatched) != len(added_polylines):
         raise ValueError("re-extracted output has unexpected new entities")
-    for entity in canonical.get("added", []):
+    for entity in added_polylines:
         match_index = next(
             (index for index, candidate in enumerate(unmatched)
              if isinstance(candidate, dict)
@@ -1442,6 +1502,88 @@ def verify_live_mutation_effects(
     # check and to keep mock/live validation on one implementation.
     if len(expected.get("polylines") or []) != expected_count:
         raise ValueError("canonical mutation application produced an invalid count")
+
+
+def _round_effect_matches(expected: Dict[str, Any], actual: Dict[str, Any], *, arc: bool) -> bool:
+    """One circle or arc against its re-extracted record: same layer, the
+    centre and radius within the extractor's 3-decimal quantum, and for an
+    arc its angles within a millidegree (modulo a turn)."""
+    if expected.get("layer") != actual.get("layer"):
+        return False
+    if not _point_close(list(expected.get("c") or []), list(actual.get("c") or []), 1.5e-3):
+        return False
+    try:
+        if abs(float(expected.get("r")) - float(actual.get("r"))) > 1.5e-3:
+            return False
+        if arc:
+            for key in ("start_deg", "end_deg"):
+                delta = (float(expected.get(key)) - float(actual.get(key))) % 360.0
+                if min(delta, 360.0 - delta) > 1e-3:
+                    return False
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _verify_round_effects(
+    base: Dict[str, Any], actual: Dict[str, Any], expected: Dict[str, Any],
+    canonical: Dict[str, Any],
+) -> None:
+    """The circle and arc half of verify_live_mutation_effects."""
+    removed = set(canonical.get("removed", []))
+    replaced = {item["handle"] for item in canonical.get("set_circle", [])}
+    replaced |= {item["handle"] for item in canonical.get("set_arc", [])}
+    replaced |= {item["handle"] for item in canonical.get("set_layer", [])}
+    added_by_kind = {
+        "CIRCLE": [e for e in canonical.get("added", []) if e.get("kind") == "CIRCLE"],
+        "ARC": [e for e in canonical.get("added", []) if e.get("kind") == "ARC"],
+    }
+    for field, kind in (("circles", "CIRCLE"), ("arcs", "ARC")):
+        base_rows = base.get(field) or []
+        actual_rows = actual.get(field) or []
+        if not isinstance(actual_rows, list):
+            raise ValueError(f"re-extracted output has no {field} list")
+        if any(not isinstance(e, dict) or not isinstance(e.get("handle"), str) or not e["handle"]
+               for e in actual_rows):
+            raise ValueError(f"every re-extracted output {kind} must have a nonempty handle")
+        actual_by_handle = {str(e["handle"]): e for e in actual_rows}
+        if len(actual_by_handle) != len(actual_rows):
+            raise ValueError("re-extracted output contains duplicate handles")
+        expected_by_handle = {
+            str(e.get("handle")): e for e in expected.get(field) or []
+            if isinstance(e, dict) and e.get("handle") is not None
+        }
+        base_handles = set()
+        for entity in base_rows:
+            if not isinstance(entity, dict) or entity.get("handle") is None:
+                continue
+            handle = str(entity["handle"])
+            base_handles.add(handle)
+            if handle in removed:
+                if handle in actual_by_handle:
+                    raise ValueError(f"removed handle {handle!r} remains in output")
+                continue
+            if handle not in actual_by_handle:
+                raise ValueError(f"unchanged handle {handle!r} is missing from output")
+            reference = expected_by_handle[handle] if handle in replaced else entity
+            if not _round_effect_matches(reference, actual_by_handle[handle], arc=(kind == "ARC")):
+                effect = "replaced" if handle in replaced else "unchanged"
+                raise ValueError(f"{effect} handle {handle!r} has unexpected output geometry")
+        unmatched = [e for h, e in actual_by_handle.items() if h not in base_handles]
+        adds = added_by_kind[kind]
+        if len(unmatched) > len(adds):
+            raise ValueError("re-extracted output has unexpected new entities")
+        for entity in adds:
+            match_index = next(
+                (index for index, candidate in enumerate(unmatched)
+                 if _round_effect_matches(entity, candidate, arc=(kind == "ARC"))),
+                None,
+            )
+            if match_index is None:
+                raise ValueError(f"added {kind} {entity['handle']!r} is missing from output")
+            unmatched.pop(match_index)
+        if unmatched:
+            raise ValueError("re-extracted output has unmatched new entities")
 
 
 def _run_write_live_legacy(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str, *,

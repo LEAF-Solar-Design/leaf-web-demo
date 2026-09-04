@@ -645,6 +645,11 @@ def build_suites() -> List[Suite]:
         Suite("server-live-mutation-plan",
               "server tests/test_live_mutation_plan.py", "pytest", SERVER,
               _py_pytest("tests/test_live_mutation_plan.py"), 34),
+        # W4g-3a: the contract v2 (the browser engine's saves through the same
+        # closed plan), 42 rows over literal parametrize lists, no skip gates.
+        Suite("server-mutation-contract-v2",
+              "server tests/test_mutation_contract_v2.py", "pytest", SERVER,
+              _py_pytest("tests/test_mutation_contract_v2.py"), 42),
         Suite("server-panel-transforms",
               "server tests/test_panel_transforms.py", "pytest", SERVER,
               _py_pytest("tests/test_panel_transforms.py"), 41),

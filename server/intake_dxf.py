@@ -97,11 +97,15 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
     layers_in = intake.get("layers", [])
     polylines = intake.get("polylines", [])
     texts = intake.get("texts", [])
+    circles = intake.get("circles", [])
+    arcs = intake.get("arcs", [])
     if not isinstance(layers_in, list) or len(layers_in) > MAX_LAYERS:
         _fail(f"layers must be a list of at most {MAX_LAYERS}")
     if not isinstance(polylines, list) or not isinstance(texts, list):
         _fail("polylines and texts must be lists")
-    if len(polylines) + len(texts) > MAX_ENTITIES:
+    if not isinstance(circles, list) or not isinstance(arcs, list):
+        _fail("circles and arcs must be lists")
+    if len(polylines) + len(texts) + len(circles) + len(arcs) > MAX_ENTITIES:
         _fail(f"more than {MAX_ENTITIES} entities")
 
     # Layer order is part of the intake shape (first seen). The table lists
@@ -181,6 +185,40 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
             highest = max(highest, int(h, 16))
         note_layer(layer)
         kinds.append(("text", layer, kind, (x, y), value, h))
+    # W4g-3: circles and arcs (ADDITIVE fields, the browser engine's kinds).
+    # The centre is WCS in the intake; a tilted normal (dxf_intake keeps it)
+    # puts the centre back into that OCS for the file.
+    for field, rows in (("circles", circles), ("arcs", arcs)):
+        for k, ent in enumerate(rows):
+            where = f"{field}[{k}]"
+            if not isinstance(ent, dict):
+                _fail(f"{where}: not an object")
+            layer = _layer_name(ent.get("layer"), where)
+            centre = ent.get("c")
+            if not isinstance(centre, (list, tuple)) or len(centre) not in (2, 3):
+                _fail(f"{where}: c must be [x, y] or [x, y, z]")
+            cx = _number(centre[0], f"{where}.c")
+            cy = _number(centre[1], f"{where}.c")
+            cz = _number(centre[2], f"{where}.c") if len(centre) == 3 else 0.0
+            radius = _number(ent.get("r"), f"{where}.r")
+            if not radius > 0.0:
+                _fail(f"{where}: r must be positive")
+            normal = ent.get("nrm", [0.0, 0.0, 1.0])
+            if not isinstance(normal, (list, tuple)) or len(normal) != 3:
+                _fail(f"{where}: nrm must be [nx, ny, nz]")
+            normal = [_number(v, f"{where}.nrm") for v in normal]
+            if not (normal[0] ** 2 + normal[1] ** 2 + normal[2] ** 2) > 0.0:
+                _fail(f"{where}: nrm must not be the zero vector")
+            angles = ()
+            if field == "arcs":
+                start = _number(ent.get("start_deg"), f"{where}.start_deg")
+                end = _number(ent.get("end_deg"), f"{where}.end_deg")
+                angles = (start, end)
+            h = _real_handle(ent.get("handle"), where, real)
+            if h is not None:
+                highest = max(highest, int(h, 16))
+            note_layer(layer)
+            kinds.append(("round", layer, field, (cx, cy, cz), radius, normal, angles, h))
 
     # Pass 2: emit. One flat list of lines, joined once.
     out: List[str] = [
@@ -218,6 +256,17 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
                             "100", "AcDbVertex", "100", "AcDb3dPolylineVertex",
                             "10", _num(x), "20", _num(y), "30", _num(z), "70", "32"]
                 out += ["0", "SEQEND", "100", "AcDbEntity", "8", layer]
+        elif row[0] == "round":
+            _, layer, field, (cx, cy, cz), radius, normal, angles, _ = row
+            tilted = normal != [0.0, 0.0, 1.0]
+            ox, oy, oz = _wcs_to_ocs((cx, cy, cz), normal) if tilted else (cx, cy, cz)
+            out += ["0", "CIRCLE" if field == "circles" else "ARC", "5", h,
+                    "100", "AcDbEntity", "8", layer, "100", "AcDbCircle",
+                    "10", _num(ox), "20", _num(oy), "30", _num(oz), "40", _num(radius)]
+            if tilted:
+                out += ["210", _num(normal[0]), "220", _num(normal[1]), "230", _num(normal[2])]
+            if field == "arcs":
+                out += ["100", "AcDbArc", "50", _num(angles[0]), "51", _num(angles[1])]
         else:
             _, layer, kind, (x, y), value, _ = row
             if kind == "TEXT":
@@ -230,6 +279,25 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
                         "40", TEXT_HEIGHT, "1", value]
     out += ["0", "ENDSEC", "0", "EOF"]
     return ("\n".join(out) + "\n").encode("utf-8")
+
+
+def _wcs_to_ocs(point, normal):
+    """The inverse of dxf_intake._ocs_to_wcs: project a WCS point onto the
+    arbitrary-axis frame of `normal` (unit-normalized here)."""
+    nx, ny, nz = normal
+    length = (nx * nx + ny * ny + nz * nz) ** 0.5
+    nx, ny, nz = nx / length, ny / length, nz / length
+    if abs(nx) < 1 / 64.0 and abs(ny) < 1 / 64.0:
+        ax = (nz, 0.0, -nx)  # (0,1,0) x n
+    else:
+        ax = (-ny, nx, 0.0)  # (0,0,1) x n
+    al = (ax[0] ** 2 + ax[1] ** 2 + ax[2] ** 2) ** 0.5 or 1.0
+    ax = (ax[0] / al, ax[1] / al, ax[2] / al)
+    ay = (ny * ax[2] - nz * ax[1], nz * ax[0] - nx * ax[2], nx * ax[1] - ny * ax[0])
+    x, y, z = point
+    return (x * ax[0] + y * ax[1] + z * ax[2],
+            x * ay[0] + y * ay[1] + z * ay[2],
+            x * nx + y * ny + z * nz)
 
 
 def _real_handle(handle: Any, where: str, real: set):

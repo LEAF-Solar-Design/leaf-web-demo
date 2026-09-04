@@ -83,13 +83,35 @@ QUIT_SAVED = ('(vl-load-com)'
               '(command "_.QUIT")')
 
 
-def build_scr(out_localname: str = OUT_LOCALNAME, *, quit_form: str = QUIT_DEFAULT) -> str:
+# W4g-3: the mutation Activity's same-WorkItem inspection also reports the
+# kinds the browser engine writes (LINE, CIRCLE, ARC), each with its handle,
+# so a plan's effects on them can be verified and the new version's intake
+# carries them (intake_parse reads LN / CI / AR). These blocks are appended
+# ONLY to the mutation Activity's inspect script (build_scr(...,
+# extra_blocks=MUTATION_INSPECT_BLOCKS)); the LeafExtract Activities keep the
+# byte-identical script above, so nothing there needs re-provisioning.
+# CIRCLE / ARC centres are reported in OCS with the normal (as PL does);
+# ARC angles come out of entget in radians and are written in degrees.
+MUTATION_INSPECT_BLOCKS = (
+    '(progn (setq f (open "{OUT}" "a")) (setq ss (ssget "_X" (list (cons 0 "LINE") (cons 410 "Model")))) (if ss (progn (setq nn (sslength ss) i 0) (while (< i nn) (setq ed (entget (ssname ss i)) layn (cdr (assoc 8 ed)) p1 (cdr (assoc 10 ed)) p2 (cdr (assoc 11 ed)) hnd (cdr (assoc 5 ed))) (write-line (strcat "LN|" layn "|" (rtos (car p1) 2 3) "," (rtos (cadr p1) 2 3) "," (rtos (caddr p1) 2 3) "|" (rtos (car p2) 2 3) "," (rtos (cadr p2) 2 3) "," (rtos (caddr p2) 2 3) "|" hnd) f) (setq i (1+ i))))) (princ "LN-DONE") (close f))',
+    '(progn (setq f (open "{OUT}" "a")) (setq ss (ssget "_X" (list (cons 0 "CIRCLE") (cons 410 "Model")))) (if ss (progn (setq nn (sslength ss) i 0) (while (< i nn) (setq ed (entget (ssname ss i)) layn (cdr (assoc 8 ed)) c (cdr (assoc 10 ed)) r (cdr (assoc 40 ed)) nrm (cdr (assoc 210 ed)) hnd (cdr (assoc 5 ed))) (if (null nrm) (setq nrm (list 0.0 0.0 1.0))) (write-line (strcat "CI|" layn "|" (rtos (car c) 2 3) "," (rtos (cadr c) 2 3) "," (rtos (caddr c) 2 3) "|" (rtos r 2 3) "|" (rtos (car nrm) 2 6) "," (rtos (cadr nrm) 2 6) "," (rtos (caddr nrm) 2 6) "|" hnd) f) (setq i (1+ i))))) (princ "CI-DONE") (close f))',
+    '(progn (setq f (open "{OUT}" "a")) (setq ss (ssget "_X" (list (cons 0 "ARC") (cons 410 "Model")))) (if ss (progn (setq nn (sslength ss) i 0) (while (< i nn) (setq ed (entget (ssname ss i)) layn (cdr (assoc 8 ed)) c (cdr (assoc 10 ed)) r (cdr (assoc 40 ed)) a1 (cdr (assoc 50 ed)) a2 (cdr (assoc 51 ed)) nrm (cdr (assoc 210 ed)) hnd (cdr (assoc 5 ed))) (if (null nrm) (setq nrm (list 0.0 0.0 1.0))) (write-line (strcat "AR|" layn "|" (rtos (car c) 2 3) "," (rtos (cadr c) 2 3) "," (rtos (caddr c) 2 3) "|" (rtos r 2 3) "|" (rtos (* 180.0 (/ a1 pi)) 2 6) "|" (rtos (* 180.0 (/ a2 pi)) 2 6) "|" (rtos (car nrm) 2 6) "," (rtos (cadr nrm) 2 6) "," (rtos (caddr nrm) 2 6) "|" hnd) f) (setq i (1+ i))))) (princ "AR-DONE") (close f))',
+)
+
+
+def build_scr(out_localname: str = OUT_LOCALNAME, *, quit_form: str = QUIT_DEFAULT,
+              extra_blocks: tuple = ()) -> str:
     """Return the .scr content (CRLF line endings) for the extract Activity.
 
     quit_form defaults to the DWG-proven ending so the existing Activity's
     script is byte-identical to what is live today. DXF input REQUIRES
     QUIT_SAVED (see the table above) or the WorkItem hangs to timeout.
+    extra_blocks (one progn per entry, `{OUT}` bound like the rest) are
+    inserted before the quit form; with none given the output is unchanged.
     """
-    body = _LISP.replace("{OUT}", out_localname).replace("{QUIT}", quit_form)
+    lisp = _LISP
+    if extra_blocks:
+        lisp = lisp.replace("{QUIT}", "\n".join(extra_blocks) + "\n{QUIT}")
+    body = lisp.replace("{OUT}", out_localname).replace("{QUIT}", quit_form)
     # accoreconsole scripts are CRLF; join every progn-line with \r\n and a trailing newline
     return body.replace("\n", "\r\n") + "\r\n"
