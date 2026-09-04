@@ -371,3 +371,24 @@ Not touched: `SurfaceGrounds.jsx` (the derivation already excludes a new ground 
 `App.jsx`, `ToolCast.jsx`, `SiteRoot.jsx`, `src/site/sheets/**` (a sibling agent's), and the
 `/sheets` row in `web/e2e/local/one-shell-mount.spec.mjs`, whose premise this slice
 deliberately preserves.
+
+## Daily-session set
+
+### Usage-telemetry consent (slice 13c)
+
+The studio collects two classes of telemetry event and they are gated differently. **Product
+events** are what the app did (a run finished, a version restored, an exception was caught):
+they are the operational record, they describe the system rather than the person, and their
+only gate is the build-time kill switch `VITE_TELEMETRY_DISABLED=1`, exactly as before this
+slice. **Usage-shaped events** are what a person typed and picked (search queries, menu
+actions, palette picks; the emitters slices 10-13 add): they describe the viewer, so **no
+usage-shaped data is collected before the Plan panel's "Usage telemetry" switch is on.** The
+grant is per browser, stored under a versioned key (`leaf.telemetry.usage_consent.v1`,
+`web/src/lib/telemetryConsent.js`) that is bumped rather than reinterpreted whenever the
+meaning of the yes changes; absent, malformed, or unreadable storage all read as NOT
+consented. The rule lives in exactly one place, `buildEvent` in `web/src/telemetry.js`, and it
+fails closed: an event whose class is anything but the literal `product` is treated as
+usage-shaped and needs consent. A refused event is never built and never queued, so granting
+consent later ships nothing that was refused while the switch was off. When the build-time
+kill switch is on, the switch renders disabled with its reason in text
+("Telemetry is off for this build.") rather than as a dead control.

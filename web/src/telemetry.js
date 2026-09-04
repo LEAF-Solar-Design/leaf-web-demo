@@ -23,7 +23,28 @@
 // here instead would drift the moment a route is added, and a hand-rolled one
 // is exactly how a customer name reaches BigQuery inside a pathname.
 import { sceneForPath } from './site/routeScene.js'
+// The consent rail (slice 13c). A second leaf module — pure, no imports of
+// its own beyond the platform — so it cannot form a cycle either. The rule it
+// carries is documented at buildEvent: usage-shaped events need the viewer's
+// yes, product events do not.
+import { usageConsentGranted } from './lib/telemetryConsent.js'
 const DISABLED = import.meta.env?.VITE_TELEMETRY_DISABLED === '1'
+
+/** The build-time kill switch, exported so the Plan panel can state the
+ * honest reason its consent row is disabled instead of re-reading the env
+ * (two readers of one fence is how they disagree). */
+export const TELEMETRY_BUILD_DISABLED = DISABLED
+
+/** The two classes of event this module carries. See buildEvent. */
+export const EVENT_CLASS = Object.freeze({
+  // What the app did: a run finished, a version restored, an exception was
+  // caught. The operational record. Gated only by the build-time kill switch,
+  // exactly as before slice 13c.
+  product: 'product',
+  // What a person typed or picked: search queries, menu actions, palette
+  // picks. Describes the viewer, so it needs the viewer's yes.
+  usage: 'usage',
+})
 const API_BASE = import.meta.env?.VITE_API_BASE ?? ''
 const FLUSH_AT = 20
 const FLUSH_MS = 5000
@@ -159,9 +180,24 @@ function schedule() {
 }
 
 /** Build one event WITHOUT queuing it. Kept split from `track` because the
- * DISABLED / no-fetch decision belongs in exactly one place. */
-function buildEvent(name, props, eventType) {
+ * DISABLED / no-fetch / CONSENT decision belongs in exactly one place.
+ *
+ * `eventClass` is REQUIRED and FAILS CLOSED: only the literal
+ * `EVENT_CLASS.product` is a product event. An omitted class, a typo, a class
+ * a future caller invents — every one of them is treated as usage-shaped and
+ * therefore needs consent. The safe default has to be the restrictive one,
+ * because the failure mode of the other default is collecting a person's
+ * search queries without asking, and that is not recoverable by a later fix.
+ *
+ * Exported for its own spec: the refusal is the product promise ("no
+ * usage-shaped data before the toggle is on"), so it is tested at the seam
+ * where it is decided, not inferred from a call site.
+ *
+ * A refused event is not built, so `track` cannot queue it: there is no
+ * buffered usage event waiting for a later consent to release it. */
+export function buildEvent(name, props, eventType, eventClass) {
   if (DISABLED || typeof fetch !== 'function') return undefined
+  if (eventClass !== EVENT_CLASS.product && !usageConsentGranted()) return undefined
   return {
     event_type: eventType,
     event_name: name,
@@ -186,7 +222,28 @@ function enqueue(event) {
  * threw. */
 export function track(name, props = {}, eventType = 'custom_event') {
   try {
-    const event = buildEvent(name, props, eventType)
+    const event = buildEvent(name, props, eventType, EVENT_CLASS.product)
+    if (!event) return undefined
+    enqueue(event)
+    return event
+  } catch { return undefined /* telemetry never breaks the product */ }
+}
+
+/** Queue one USAGE-SHAPED event — a search query, a menu action, a palette
+ * pick: anything that describes how a person uses the studio rather than what
+ * the app did.
+ *
+ * Returns undefined and queues NOTHING when the viewer has not turned the Plan
+ * panel's "Usage telemetry" switch on. There is no buffering-until-consent and
+ * no retroactive send: a refused event does not exist.
+ *
+ * Slices 10-13's emitters call THIS, never `track`. The separation is the
+ * whole guarantee — one function whose events are gated, one whose events are
+ * the operational record — and a caller that picks the wrong one is a review
+ * finding, not a runtime surprise, because the names say which is which. */
+export function trackUsage(name, props = {}, eventType = 'custom_event') {
+  try {
+    const event = buildEvent(name, props, eventType, EVENT_CLASS.usage)
     if (!event) return undefined
     enqueue(event)
     return event
