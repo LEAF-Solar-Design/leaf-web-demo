@@ -741,9 +741,13 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('3')
     await expect(page.getByTestId('cad-edit-entity-list')).toContainText('CIRCLE on layer 0')
     // A degenerate create is refused as a sentence, and nothing changes.
+    // W4f-6: the sentence shows on the prompt as the operand is typed and
+    // Run waits, so Enter posts nothing (before, it read from the status
+    // after a refused run).
     await page.getByLabel('ribbon r').fill('0')
+    await expect(page.getByTestId('cockpit-prompt-note')).toHaveText('Circle refused: r must be greater than 0.')
+    await expect(page.getByTestId('cockpit-prompt-run')).toBeDisabled()
     await page.getByLabel('ribbon r').press('Enter')
-    await expect(page.getByRole('status').filter({ hasText: /Circle refused: r must be greater than 0/ })).toHaveCount(1)
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('3')
     // Esc cancels the command; the prompt leaves with it.
     await page.getByLabel('ribbon r').press('Escape')
