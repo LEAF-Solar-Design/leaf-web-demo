@@ -1,3 +1,5 @@
+import LiveRegion from './LiveRegion.jsx'
+
 export default function AnnotationDecisionCard({
   annotation,
   busy = false,
@@ -56,7 +58,7 @@ export default function AnnotationDecisionCard({
           </button>
         )}
       </div>
-      {confirmed && <p className="dim" aria-live="polite">{confirmed}</p>}
+      <LiveRegion as="p" className="dim">{confirmed || ''}</LiveRegion>
       {error && <p className="overlay-card-error" role="alert">{error}</p>}
     </section>
   )

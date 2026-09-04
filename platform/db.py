@@ -293,6 +293,10 @@ _AUTHORITY_REQUIRED_COLUMNS = {
             "updated_at", "last_seq", "active_turn_id", "turn_started_at",
             "active_turn_tier", "active_turn_subject", "model", "org_id",
             "project_id",
+            # 0053: the conversation scope envelope, the listed title, and the
+            # incrementally-maintained turn count (standardization slice 6b,
+            # server/session_store.py list_sessions; review finding 3).
+            "scope_kind", "scope_handle", "title", "turn_count",
         },
         "app_session_events": {
             "session_id", "seq", "turn_id", "type", "data_json", "created_at",
@@ -725,6 +729,22 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
             "REFERENCES projects(org_id, project_id)", "ON DELETE CASCADE"),
         "app_sessions_project_scope_unique": _catalog_contract(
             "app_sessions", "UNIQUE (session_id, org_id, project_id)"),
+        # 0053: the scope envelope is closed-world and shape-checked at the
+        # store, so a malformed kind can never be listed back to a client.
+        "app_sessions_scope_kind_check": _catalog_contract(
+            "app_sessions", "CHECK", "scope_kind IS NULL",
+            "'project'", "'drawing'", "'entity'"),
+        "app_sessions_scope_shape_check": _catalog_contract(
+            "app_sessions", "CHECK ((scope_kind IS NULL) = (scope_handle IS NULL))"),
+        # 0053 (review finding 7): scope_handle carries its own length bound
+        # instead of leaning on the wire (routers/sessions.py SCOPE_HANDLE_MAX)
+        # alone, matching the title CHECK's posture.
+        "app_sessions_scope_handle_check": _catalog_contract(
+            "app_sessions", "CHECK", "scope_handle IS NULL", "char_length(scope_handle)"),
+        "app_sessions_title_check": _catalog_contract(
+            "app_sessions", "CHECK", "title IS NULL", "char_length(title)"),
+        "app_sessions_turn_count_check": _catalog_contract(
+            "app_sessions", "CHECK (turn_count >= 0)"),
         "app_session_events_pkey": _catalog_contract(
             "app_session_events", "PRIMARY KEY (session_id, seq)"),
         "app_session_events_session_id_fkey": _catalog_contract(
@@ -1115,6 +1135,13 @@ _AUTHORITY_REQUIRED_INDEXES = {
             "app_session_requests",
             "(org_id, project_id, session_id, created_at DESC)",
             "WHERE", "project_id IS NOT NULL"),
+        # 0053: GET /api/sessions orders newest-first per tenant and pages on
+        # (updated_at, session_id); one index per storage tenancy.
+        "idx_app_sessions_tenant_recent": _catalog_contract(
+            "app_sessions", "(tenant_id, updated_at DESC, session_id DESC)"),
+        "idx_app_sessions_org_recent": _catalog_contract(
+            "app_sessions", "(org_id, updated_at DESC, session_id DESC)",
+            "WHERE", "org_id IS NOT NULL"),
     },
     "session_annex": {
         "idx_app_session_checkpoints_scope": _catalog_contract(

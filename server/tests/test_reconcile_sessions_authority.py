@@ -30,6 +30,10 @@ RECONCILE_PATH = ROOT / "scripts" / "reconcile_sessions_authority.py"
 SESSIONS_MIGRATION = (
     ROOT / "platform" / "migrations" / "0012_sessions.sql"
 ).read_text(encoding="utf-8")
+SCOPE_MIGRATION_NAME = "0053_session_scope.sql"
+SCOPE_MIGRATION = (
+    ROOT / "platform" / "migrations" / SCOPE_MIGRATION_NAME
+).read_text(encoding="utf-8")
 INVENTORY = (ROOT / "platform" / "authority-inventory.json").read_text(encoding="utf-8")
 APP_DOCKERFILE = ROOT / "deploy" / "Dockerfile.app"
 MODEL_MIGRATION = "0019_sessions_model.sql"
@@ -156,6 +160,9 @@ class Source:
                     ("last_seq", "INTEGER DEFAULT 0"), ("active_turn_id", "TEXT"),
                     ("turn_started_at", "REAL"), ("active_turn_tier", "TEXT"),
                     ("active_turn_subject", "TEXT"), ("model", "TEXT"),
+                    ("scope_kind", "TEXT"), ("scope_handle", "TEXT"),
+                    ("title", "TEXT"),
+                    ("turn_count", "INTEGER NOT NULL DEFAULT 0"),
                 )
             )
             conn.execute("ALTER TABLE sessions RENAME TO sessions_indexed")
@@ -182,6 +189,27 @@ def _rows(database, table: str, **where) -> list[dict]:
     with database.cursor() as cur:
         cur.execute(f"SELECT * FROM {table} WHERE {clause}", tuple(where.values()))
         return [dict(row) for row in cur.fetchall()]
+
+
+def test_drop_identity_index_preserves_the_current_legacy_session_shape(source):
+    """The duplicate-identity fixture must not lag the live SQLite schema."""
+    first = source.session(
+        scope_kind="drawing",
+        scope_handle="drawing-scope",
+        title="Scoped conversation",
+        turn_count=1,
+    )
+    with RECONCILE._legacy_connection(source.path) as conn:
+        before = [tuple(row) for row in conn.execute("PRAGMA table_info(sessions)")]
+
+    source.drop_identity_index()
+
+    with RECONCILE._legacy_connection(source.path) as conn:
+        after = [tuple(row) for row in conn.execute("PRAGMA table_info(sessions)")]
+    assert after == before
+    # The one intended delta is that a second row can now use the same legacy
+    # tenant-and-drawing identity, which lets the trap-6 test reach the gate.
+    source.session(drawing_id=first["drawing_id"])
 
 
 # --------------------------------------------------------------------------- #
@@ -358,12 +386,38 @@ def test_integer_flags_normalize_to_booleans_preserving_null():
 
 
 def test_migration_gated_columns_name_their_migration():
-    """TRAP 7: model arrives at 0019 and active_turn_subject at 0022."""
+    """TRAP 7: model arrives at 0019, active_turn_subject at 0022, the
+    conversation scope envelope/title/turn_count at 0053."""
     assert RECONCILE._MIGRATION_COLUMNS[("app_sessions", "model")] == MODEL_MIGRATION
     assert (
         RECONCILE._MIGRATION_COLUMNS[("app_sessions", "active_turn_subject")]
         == SUBJECT_MIGRATION
     )
+    for column in ("scope_kind", "scope_handle", "title", "turn_count"):
+        assert (
+            RECONCILE._MIGRATION_COLUMNS[("app_sessions", column)]
+            == SCOPE_MIGRATION_NAME
+        )
+
+
+def test_every_0053_column_is_registered_for_reconciliation():
+    """Review finding 8 regression guard, pure-logic (no DATABASE_URL needed).
+
+    scope_kind/scope_handle/title landed in 0053 with no TABLE_COLUMNS entry:
+    backfill silently wrote rows without them (and, since the title write is
+    `title IS NULL` guarded, a backfilled session would re-title itself from
+    a later prompt) and parity mode could not see them diverge. This reads
+    the columns the migration ACTUALLY adds straight from its SQL, so a
+    future column added to 0053 and forgotten here fails this test instead
+    of silently skipping reconciliation, closing the gap the old
+    order-only assertion (test_backfill_inserts_sessions_before_events)
+    could not catch.
+    """
+    added = set(re.findall(r"ADD COLUMN IF NOT EXISTS (\w+)", SCOPE_MIGRATION))
+    assert added == {"scope_kind", "scope_handle", "title", "turn_count"}
+    assert added <= set(RECONCILE.TABLE_COLUMNS["app_sessions"])
+    for column in added:
+        assert ("app_sessions", column) in RECONCILE._MIGRATION_COLUMNS
 
 
 def test_key_sample_is_bounded_and_hashed_never_raw():
@@ -721,15 +775,27 @@ def test_trap6_identity_already_held_by_another_session_is_reported(source, targ
 @requires_database
 @pytest.mark.parametrize(
     "column,migration",
-    [("model", MODEL_MIGRATION), ("active_turn_subject", SUBJECT_MIGRATION)],
+    [
+        ("model", MODEL_MIGRATION),
+        ("active_turn_subject", SUBJECT_MIGRATION),
+        ("scope_kind", SCOPE_MIGRATION_NAME),
+        ("scope_handle", SCOPE_MIGRATION_NAME),
+        ("title", SCOPE_MIGRATION_NAME),
+        ("turn_count", SCOPE_MIGRATION_NAME),
+    ],
 )
 def test_trap7_a_target_behind_its_migration_names_the_migration(
     source, target, column, migration
 ):
     """TRAP 7: fail with the migration to apply, not a driver error."""
     source.session()
+    scope_column = migration == SCOPE_MIGRATION_NAME
     with target.transaction() as conn:
-        conn.execute(f"ALTER TABLE app_sessions DROP COLUMN {column}")
+        # 0053 puts CHECK constraints on its columns. CASCADE removes only
+        # those dependent constraints so this test can reproduce a database
+        # behind the migration instead of failing in its own setup.
+        suffix = " CASCADE" if scope_column else ""
+        conn.execute(f"ALTER TABLE app_sessions DROP COLUMN {column}{suffix}")
     try:
         with pytest.raises(RuntimeError) as excinfo:
             RECONCILE.reconcile(sqlite_path=source.path, mode="parity")
@@ -737,7 +803,15 @@ def test_trap7_a_target_behind_its_migration_names_the_migration(
         assert column in str(excinfo.value)
     finally:
         with target.transaction() as conn:
-            conn.execute(f"ALTER TABLE app_sessions ADD COLUMN {column} TEXT")
+            if scope_column:
+                # Restore the exact shipped type, default, and every CHECK the
+                # dropped column owned. Re-adding all of 0053 is intentional:
+                # it is idempotent and exercises the same recovery the error
+                # tells an operator to use.
+                for statement in target._split_sql_statements(SCOPE_MIGRATION):
+                    conn.execute(statement)
+            else:
+                conn.execute(f"ALTER TABLE app_sessions ADD COLUMN {column} TEXT")
     # The restore must leave the reconciler working again, which proves the
     # failure came from the missing column rather than a poisoned connection.
     assert RECONCILE.reconcile(sqlite_path=source.path, mode="parity")["tables"]

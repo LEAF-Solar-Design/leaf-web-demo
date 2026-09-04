@@ -126,20 +126,106 @@ export function classifyAgentError(err) {
   return 'unreachable'
 }
 
+// --- Conversation scope (standardization slice 6b) ------------------------
+// The CLOSED kind set. Pinned byte-equal to server/session_store.py SCOPE_KINDS
+// and routers/sessions.py by test_contract_freeze.py, exactly as
+// STREAM_EVENT_TYPES is: an addition here that never reaches the server is a
+// 422 the user reads as "the conversation would not start".
+export const SCOPE_KINDS = ['project', 'drawing', 'entity']
+// A handle is an opaque identifier (drawing id, project uuid, entity handle).
+// Bounded HERE too, not only at the wire: a client that would post an
+// over-long handle gets a local `null` scope and falls back to the legacy
+// identity instead of a round trip that can only 422.
+export const SCOPE_HANDLE_MAX = 128
+// The drawing key a project-scoped attach carries when it names no drawing.
+// The same sentinel the cache key has always used and the same one
+// routers/sessions.py DEFAULT_SCOPE_DRAWING_ID writes, so both ends agree on
+// which session a project conversation with no drawing is.
+const DEFAULT_DRAWING_KEY = 'default'
+
+/**
+ * `{kind, handle}` (plus an optional client-side `drawingId` for the kinds
+ * that live inside a drawing) -> the same shape, validated; anything else ->
+ * null. Pure, allocation-light, and FAILS CLOSED: an unknown kind, a missing,
+ * non-string, empty or over-long handle all return null rather than a
+ * half-formed scope that would reach the wire.
+ */
+export function normalizeScope(value) {
+  if (!value || typeof value !== 'object') return null
+  const { kind, handle } = value
+  if (!SCOPE_KINDS.includes(kind)) return null
+  if (typeof handle !== 'string') return null
+  const trimmed = handle.trim()
+  if (!trimmed || trimmed.length > SCOPE_HANDLE_MAX) return null
+  const scope = { kind, handle: trimmed }
+  // `drawingId` is CLIENT-SIDE ONLY: the wire scope is exactly {kind, handle}
+  // (the server model forbids extra keys), and the drawing rides the body's
+  // own `drawing_id` field. An entity scope names an entity INSIDE a drawing,
+  // so the server refuses one without a drawing_id — carrying it here is what
+  // lets a caller pass one object instead of two arguments.
+  if (typeof value.drawingId === 'string' && value.drawingId) {
+    scope.drawingId = value.drawingId
+  }
+  return scope
+}
+
+/** The (drawingId, projectId) a scope resolves to on today's wire. */
+function identityOfScope(scope) {
+  if (scope.kind === 'project') {
+    return { drawingId: scope.drawingId || DEFAULT_DRAWING_KEY, projectId: scope.handle }
+  }
+  if (scope.kind === 'drawing') return { drawingId: scope.handle, projectId: null }
+  return { drawingId: scope.drawingId || null, projectId: null } // entity
+}
+
 // --- Session create/attach (idempotent per tenant+drawing) ----------------
 // POST /api/sessions is idempotent server-side; the cache here only saves the
 // round-trip on repeat dispatches. A failed create never sticks, and callers
 // drop a stale entry via resetSession when a message 404s (harness restarted).
 const sessionCache = new Map() // project+drawing -> Promise<{session_id, status, created_at}>
 
-export function sessionCacheKey(drawingId, projectId = null) {
-  const drawingKey = drawingId || 'default'
+/**
+ * The cache key for one conversation. TWO accepted call shapes, ONE template
+ * family, so slice 6b widened the signature without moving a single existing
+ * key string:
+ *
+ *   sessionCacheKey(drawingId, projectId?)   the legacy positional form
+ *   sessionCacheKey({kind, handle, drawingId?})   the scope form
+ *
+ * A `drawing` scope keys exactly like the bare drawing it names, and a
+ * `project` scope keys exactly like today's project+drawing pair, so a client
+ * that switches from the positional form to the scope form ATTACHES TO THE
+ * SAME cached session rather than opening a second one. `entity` gets its own
+ * prefix because two entity conversations in one drawing are two
+ * conversations. An unnormalizable scope object falls back to the 'default'
+ * key rather than keying on `[object Object]`.
+ */
+export function sessionCacheKey(drawingIdOrScope, projectId = null) {
+  if (drawingIdOrScope && typeof drawingIdOrScope === 'object') {
+    const scope = normalizeScope(drawingIdOrScope)
+    if (!scope) return DEFAULT_DRAWING_KEY
+    const identity = identityOfScope(scope)
+    const drawingKey = identity.drawingId || DEFAULT_DRAWING_KEY
+    if (scope.kind === 'entity') return `entity:${scope.handle}:drawing:${drawingKey}`
+    return identity.projectId
+      ? `project:${identity.projectId}:drawing:${drawingKey}`
+      : drawingKey
+  }
+  const drawingKey = drawingIdOrScope || DEFAULT_DRAWING_KEY
   return projectId ? `project:${projectId}:drawing:${drawingKey}` : drawingKey
 }
 
-async function createSession(drawingId, projectId = null) {
-  const payload = { drawing_id: drawingId }
-  if (projectId) payload.project_id = projectId
+async function createSession(drawingIdOrScope, projectId = null) {
+  const scope = drawingIdOrScope && typeof drawingIdOrScope === 'object'
+    ? normalizeScope(drawingIdOrScope)
+    : null
+  // The LEGACY body is unchanged, byte for byte, when no scope was passed:
+  // `scope` is emitted ONLY for a caller that asked for one, so every deployed
+  // caller and every recorded wire fixture keeps its exact payload.
+  const identity = scope ? identityOfScope(scope) : { drawingId: drawingIdOrScope, projectId }
+  const payload = { drawing_id: identity.drawingId }
+  if (identity.projectId) payload.project_id = identity.projectId
+  if (scope) payload.scope = { kind: scope.kind, handle: scope.handle }
   const { res, body } = await post('/api/sessions', payload)
   if (!res.ok || !body || !body.session_id) {
     throw tagged(res, body, `POST /api/sessions -> ${res.status}`)
@@ -147,10 +233,10 @@ async function createSession(drawingId, projectId = null) {
   return body
 }
 
-export function ensureSession(drawingId, projectId = null) {
-  const key = sessionCacheKey(drawingId, projectId)
+export function ensureSession(drawingIdOrScope, projectId = null) {
+  const key = sessionCacheKey(drawingIdOrScope, projectId)
   if (!sessionCache.has(key)) {
-    const p = createSession(drawingId, projectId).catch((e) => {
+    const p = createSession(drawingIdOrScope, projectId).catch((e) => {
       sessionCache.delete(key)
       throw e
     })
@@ -159,8 +245,41 @@ export function ensureSession(drawingId, projectId = null) {
   return sessionCache.get(key)
 }
 
-export function resetSession(drawingId, projectId = null) {
-  sessionCache.delete(sessionCacheKey(drawingId, projectId))
+export function resetSession(drawingIdOrScope, projectId = null) {
+  sessionCache.delete(sessionCacheKey(drawingIdOrScope, projectId))
+}
+
+// --- The tenant's conversations (GET /api/sessions, slice 6b) -------------
+//: One page is at most this many rows. The server clamps to the same figure;
+//: asking for more is a slower query for a page the server will trim anyway.
+export const CONVERSATION_PAGE_MAX = 50
+
+/**
+ * One bounded page of the CALLER'S OWN conversations, newest first.
+ *
+ * `scope` narrows to one conversation scope (omit for every conversation of
+ * the tenant); `limit` is clamped to [1, CONVERSATION_PAGE_MAX] before it
+ * reaches the wire; `cursor` is the previous page's `next_cursor`. Throws
+ * tagged like every other call here, so ConversationList can classify the
+ * failure instead of string-matching it. Never returns a partial page as if it
+ * were the whole list: a non-2xx is an error, not an empty array.
+ */
+export async function listSessions({ scope = null, limit = 20, cursor = null } = {}) {
+  const params = new URLSearchParams()
+  const normalized = normalizeScope(scope)
+  if (normalized) params.set('scope', `${normalized.kind}:${normalized.handle}`)
+  const bounded = Math.max(1, Math.min(Number(limit) || 1, CONVERSATION_PAGE_MAX))
+  params.set('limit', String(bounded))
+  if (typeof cursor === 'string' && cursor) params.set('cursor', cursor)
+  const path = `/api/sessions?${params.toString()}`
+  const { res, body } = await get(path)
+  if (!res.ok || !body) throw tagged(res, body, `GET ${path} -> ${res.status}`)
+  return {
+    sessions: Array.isArray(body.sessions) ? body.sessions : [],
+    nextCursor: typeof body.next_cursor === 'string' && body.next_cursor
+      ? body.next_cursor
+      : null,
+  }
 }
 
 // --- Start a turn ---------------------------------------------------------
@@ -171,6 +290,10 @@ export function resetSession(drawingId, projectId = null) {
 // llm_rate_limited · 404 session_not_found).
 export async function postMessage(sessionId, {
   text, confirm, images, classifier_hint, credential_grant, queue, request_id,
+  // Slice 6b hand-off identity: WHO asked for this background start. Bounded
+  // and trimmed below before it can reach the wire; slice 11 is its consumer
+  // (the build queue card), and nothing in this slice reads it back.
+  requested_by,
   // Per-call authorisation for an OVERRIDABLE refusal only, passed in by the
   // composer whose "Send anyway" the user just clicked. It is read here and
   // never forwarded onto the wire, and nothing stores it: the next call starts
@@ -194,6 +317,13 @@ export async function postMessage(sessionId, {
   if (credential_grant != null) payload.credential_grant = credential_grant
   if (queue === true) payload.queue = true
   if (request_id != null) payload.request_id = request_id
+  // Only a QUEUED start is a background hand-off, and only a bounded non-empty
+  // string rides along: an over-long or blank value is dropped here rather
+  // than posted for the server to refuse. Never logged, never echoed.
+  if (queue === true && typeof requested_by === 'string') {
+    const who = requested_by.trim()
+    if (who && who.length <= SCOPE_HANDLE_MAX) payload.requested_by = who
+  }
   const { res, body } = await post(
     `/api/sessions/${encodeURIComponent(sessionId)}/messages`, payload,
   )

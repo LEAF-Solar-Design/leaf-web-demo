@@ -33,6 +33,7 @@
 // ---------------------------------------------------------------------------
 import { createContext, useContext } from 'react'
 
+import ConversationListComponent from '../components/ConversationList.jsx'
 import EntitlementGate from '../components/EntitlementGate.jsx'
 import JobRailComponent from '../components/JobRail.jsx'
 import ProductSurfaceTabs, { ProductSurfaceFrame } from '../components/ProductSurfaceTabs.jsx'
@@ -139,6 +140,14 @@ function useSlot() {
  *                      BuildQueueCard from it, and the Builds slot below
  *                      counts its open work into the toolbar badge.
  *   toast             { toast, onDone }
+ *   conversations     slice 6b. { activeSessionId, onResume, label } or null.
+ *                     The CONTRACT decides WHETHER the list mounts
+ *                     (contract.conversations.scope !== null); the scene
+ *                     supplies only what a scene can know — which conversation
+ *                     is open, and what to do when the user resumes another.
+ *                     Null means "this scene mounts no conversation list" and
+ *                     the slot renders nothing, the same fail-closed posture
+ *                     jobRail already has
  *   signedIn/onSignOut  the AccountSignOut beside the tabs (the stage passes
  *                     them; the console's sign-out lives in its own header
  *                     today). Slice 4b: published to the ContinuityStore
@@ -165,6 +174,7 @@ export default function SurfaceFrame({
   commandBar = null,
   jobRail = null,
   toast = null,
+  conversations = null,
   signedIn = false,
   onSignOut = null,
   children = null,
@@ -195,6 +205,7 @@ export default function SurfaceFrame({
     commandBar,
     jobRail,
     toast,
+    conversations,
     signedIn,
     onSignOut,
   }
@@ -394,6 +405,43 @@ function Cockpit() {
   return <StatusToggles />
 }
 
+/**
+ * ConversationList, beside the scene's ConversePanel (standardization slice
+ * 6b). THE gate is the declared slot and nothing else:
+ *
+ *   contract.conversations.scope !== null
+ *
+ * `null` in the Surface Contract means UNDECLARED — the surface has no
+ * conversation scope, which today is exactly the sheets arm (productSurfaces
+ * `conversations: { scope: null }`, "no ConversePanel is mounted in this arm").
+ * Every other surface declares 'drawing', so the list mounts on all of them,
+ * on BOTH scenes, from this one predicate. Nothing here compares a surface id
+ * to a string literal (the slice-2 house rule, pinned by surfaceGates.test.js).
+ *
+ * The list itself is UNSCOPED on purpose: the route lists the TENANT's
+ * conversations newest-first, and each row carries its own `{kind, handle}`,
+ * which is what the resume attaches by. Narrowing the mount to the surface's
+ * current handle would reduce a `drawing` scope to the one row the shell is
+ * already showing (session identity is UNIQUE per tenant+drawing), which is a
+ * list of one. The declared kind is the GATE, not a filter.
+ *
+ * Fails closed twice, in order: no frame, no `conversations` prop from the
+ * scene, no declared scope kind.
+ */
+function Conversations() {
+  const frame = useSlot()
+  const wiring = frame?.conversations
+  if (!wiring) return null
+  const declared = frame.contract.conversations
+  if (!declared || declared.scope === null || declared.scope === undefined) return null
+  return (
+    <ConversationListComponent
+      activeSessionId={wiring.activeSessionId || null}
+      onResume={wiring.onResume || null}
+    />
+  )
+}
+
 // The slots are statics on the frame, not separate named exports: one import
 // gives a scene the wrapper AND every slot, and `<SurfaceFrame.Tabs />` reads
 // at the mount site as what it is. Each reference is a stable module-level
@@ -403,6 +451,7 @@ function Cockpit() {
 // two are owned by SiteRoot's ContinuityStore and adopted by the tabs, so the
 // contract holds across the scene crossing as well).
 SurfaceFrame.Tabs = Tabs
+SurfaceFrame.Conversations = Conversations
 SurfaceFrame.Frame = Frame
 SurfaceFrame.Entitlement = Entitlement
 SurfaceFrame.CommandBar = CommandBar
