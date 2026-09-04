@@ -3,6 +3,16 @@
 This module is deliberately pure. It accepts only the product mutation data
 contract and emits a closed, line-oriented data plan. It never accepts or
 emits AutoLISP, command text, file paths, or other executable input.
+
+Contract v1 (catalog tools): ``added`` closed LWPOLYLINEs, ``removed`` and
+``transforms`` (dx/dy/rotation_deg) over LWPOLYLINE handles. Contract v2
+(W4g-3, the browser engine's saves): ``added`` may carry ``kind`` LINE, CIRCLE
+or ARC and an open LWPOLYLINE; ``removed`` covers every kind the intake names
+(polylines, circles, arcs); ``set_layer``, ``set_points``, ``set_circle`` and
+``set_arc`` replace one existing entity's layer or geometry. A v1 input yields
+byte-identical canonical data and plan text to before; the plan header reads
+``LEAF_MUTATION_PLAN|2`` only when a v2 capability is used, so a v1-only plan
+still runs on the previous Activity alias during a rollout.
 """
 from __future__ import annotations
 
@@ -19,17 +29,31 @@ MAX_ENTITIES = 200_000
 MAX_POINTS = 100_000
 MAX_POINTS_PER_ENTITY = 10_000
 MAX_COORDINATE = 1_000_000_000.0
+MAX_ANGLE_DEG = 3_600.0
 PLANAR_TOLERANCE = 1e-6
 _HANDLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _EXISTING_HANDLE_RE = re.compile(r"^[0-9A-Fa-f]{1,32}$")
 _LAYER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.$-]{0,254}$")
-_MUTATION_FIELDS = frozenset({"added", "removed", "transforms"})
-_ADDED_FIELDS = frozenset({"handle", "layer", "closed", "pts", "xdata"})
+_MUTATION_FIELDS = frozenset({
+    "added", "removed", "transforms",
+    "set_layer", "set_points", "set_circle", "set_arc",
+})
+_V2_FIELDS = frozenset({"set_layer", "set_points", "set_circle", "set_arc"})
+_ADDED_FIELDS = frozenset({
+    "handle", "kind", "layer", "closed", "pts", "xdata", "c", "r",
+    "start_deg", "end_deg",
+})
+_ADD_KINDS = ("LWPOLYLINE", "LINE", "CIRCLE", "ARC")
 _TRANSFORM_FIELDS = frozenset({"handle", "dx", "dy", "rotation_deg"})
+_SET_LAYER_FIELDS = frozenset({"handle", "layer"})
+_SET_POINTS_FIELDS = frozenset({"handle", "pts", "closed"})
+_SET_CIRCLE_FIELDS = frozenset({"handle", "c", "r"})
+_SET_ARC_FIELDS = frozenset({"handle", "c", "r", "start_deg", "end_deg"})
 _RAW_FIELDS = frozenset({
     "code", "command", "commands", "script", "lisp", "autolisp", "shell",
     "powershell", "python", "path", "url",
 })
+_UP_NORMAL = (0.0, 0.0, 1.0)
 
 
 def canonical_json_bytes(value: Any) -> bytes:
@@ -83,27 +107,76 @@ def _reject_raw_fields(value: Any, path: str = "mutations") -> None:
             _reject_raw_fields(child, f"{path}[{index}]")
 
 
-def _existing_by_handle(intake: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+def _point3(value: Any, field: str) -> List[float]:
+    """One [x, y] or [x, y, z] point as three finite floats."""
+    if not isinstance(value, list) or len(value) not in (2, 3):
+        raise ValueError(f"{field} is a malformed point")
+    xyz = [_number(item, field) for item in value]
+    if len(xyz) == 2:
+        xyz.append(0.0)
+    return xyz
+
+
+def _points(value: Any, field: str, *, minimum: int) -> List[List[float]]:
+    if not isinstance(value, list) or not minimum <= len(value) <= MAX_POINTS_PER_ENTITY:
+        raise ValueError(f"{field} has an invalid point count")
+    return [_point3(point, f"{field} point {index}") for index, point in enumerate(value)]
+
+
+def _normal_is_up(entity: Dict[str, Any]) -> bool:
+    normal = entity.get("nrm")
+    if normal is None:
+        return True
+    try:
+        return all(abs(float(a) - b) <= 1e-6 for a, b in zip(normal, _UP_NORMAL))
+    except (TypeError, ValueError):
+        return False
+
+
+def _index_intake(intake: Dict[str, Any]) -> Dict[str, Tuple[str, Dict[str, Any]]]:
+    """Every handle the intake names, with its kind. A handle that appears
+    twice anywhere is ambiguous and is dropped, so no op can name it."""
     if not isinstance(intake, dict):
         raise ValueError("intake must be an object")
-    polylines = intake.get("polylines") or []
-    if not isinstance(polylines, list) or len(polylines) > MAX_ENTITIES:
-        raise ValueError("intake polylines exceed the supported entity bound")
-    result: Dict[str, Dict[str, Any]] = {}
+    result: Dict[str, Tuple[str, Dict[str, Any]]] = {}
     ambiguous = set()
-    for entity in polylines:
-        if not isinstance(entity, dict):
-            continue
-        handle = entity.get("handle")
-        if not isinstance(handle, str) or not handle:
-            continue
-        if handle in result:
-            ambiguous.add(handle)
-        else:
-            result[handle] = entity
+    total = 0
+    for field, kind in (("polylines", "LWPOLYLINE"), ("circles", "CIRCLE"), ("arcs", "ARC")):
+        entities = intake.get(field) or []
+        if not isinstance(entities, list):
+            raise ValueError(f"intake {field} must be a list")
+        total += len(entities)
+        if total > MAX_ENTITIES:
+            raise ValueError("intake polylines exceed the supported entity bound")
+        for entity in entities:
+            if not isinstance(entity, dict):
+                continue
+            handle = entity.get("handle")
+            if not isinstance(handle, str) or not handle:
+                continue
+            if handle in result:
+                ambiguous.add(handle)
+            else:
+                result[handle] = (kind, entity)
     for handle in ambiguous:
         result.pop(handle, None)
     return result
+
+
+def _existing_by_handle(intake: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """The polyline entities by handle (the v1 view, used by the transform
+    lowering, which only ever names polylines)."""
+    return {
+        handle: entity for handle, (kind, entity) in _index_intake(intake).items()
+        if kind == "LWPOLYLINE"
+    }
+
+
+def _op_list(mutations: Dict[str, Any], field: str) -> List[Any]:
+    raw = mutations.get(field, [])
+    if not isinstance(raw, list):
+        raise ValueError(f"mutations.{field} must be a list")
+    return raw
 
 
 def validate_mutations(
@@ -113,19 +186,26 @@ def validate_mutations(
     """Strictly validate and canonicalize the frozen mutation data contract."""
     if not isinstance(mutations, dict):
         raise ValueError("result.mutations must be an object")
-    unknown = set(mutations) - _MUTATION_FIELDS
+    # `removed_kinds` is a canonical-only annotation this function writes (the
+    # kind of each non-polyline removal, for the plan header); on input it is
+    # never trusted, only recomputed, so a canonical set re-validates cleanly.
+    unknown = set(mutations) - _MUTATION_FIELDS - {"removed_kinds"}
     if unknown:
         raise ValueError(f"unknown mutation fields: {', '.join(sorted(map(str, unknown)))}")
     _reject_raw_fields(mutations)
-    existing = _existing_by_handle(intake)
-    removed_raw = mutations.get("removed", [])
-    added_raw = mutations.get("added", [])
-    transforms_raw = mutations.get("transforms", [])
-    if not isinstance(removed_raw, list) or not isinstance(added_raw, list):
-        raise ValueError("mutations.added and mutations.removed must be lists")
-    if not isinstance(transforms_raw, list):
-        raise ValueError("mutations.transforms must be a list")
-    op_count = len(removed_raw) + len(added_raw) + len(transforms_raw)
+    index = _index_intake(intake)
+    removed_raw = _op_list(mutations, "removed")
+    added_raw = _op_list(mutations, "added")
+    transforms_raw = _op_list(mutations, "transforms")
+    set_layer_raw = _op_list(mutations, "set_layer")
+    set_points_raw = _op_list(mutations, "set_points")
+    set_circle_raw = _op_list(mutations, "set_circle")
+    set_arc_raw = _op_list(mutations, "set_arc")
+    op_count = (
+        len(removed_raw) + len(added_raw) + len(transforms_raw)
+        + len(set_layer_raw) + len(set_points_raw) + len(set_circle_raw)
+        + len(set_arc_raw)
+    )
     if op_count == 0 and reject_noop:
         raise ValueError("mutations must contain at least one operation")
     if op_count > MAX_OPERATIONS:
@@ -133,26 +213,32 @@ def validate_mutations(
 
     removed: List[str] = []
     removed_seen = set()
-    for index, raw in enumerate(removed_raw):
-        handle = _existing_handle(raw, f"removed[{index}]")
+    removed_kinds: Dict[str, str] = {}
+    for position, raw in enumerate(removed_raw):
+        handle = _existing_handle(raw, f"removed[{position}]")
         if handle in removed_seen:
             raise ValueError(f"duplicate removed handle {handle!r}")
-        if handle not in existing:
+        if handle not in index:
             raise ValueError(f"unknown removed handle {handle!r}")
         removed_seen.add(handle)
         removed.append(handle)
+        kind = index[handle][0]
+        if kind != "LWPOLYLINE":
+            removed_kinds[handle] = kind
 
     transforms: List[Dict[str, Any]] = []
     transformed_seen = set()
     if transforms_raw and not allow_transforms:
         raise ValueError("live mutation plans do not yet support transforms")
-    for index, raw in enumerate(transforms_raw):
+    for position, raw in enumerate(transforms_raw):
         if not isinstance(raw, dict) or set(raw) - _TRANSFORM_FIELDS:
-            raise ValueError(f"transform at index {index} has unknown fields")
+            raise ValueError(f"transform at index {position} has unknown fields")
         handle = _existing_handle(
-            raw.get("handle"), f"transforms[{index}].handle")
-        if handle not in existing:
+            raw.get("handle"), f"transforms[{position}].handle")
+        if handle not in index:
             raise ValueError(f"unknown transform handle {handle!r}")
+        if index[handle][0] != "LWPOLYLINE":
+            raise ValueError(f"transform handle {handle!r} is not a polyline")
         if handle in transformed_seen:
             raise ValueError(f"duplicate transform handle {handle!r}")
         if handle in removed_seen:
@@ -173,47 +259,172 @@ def validate_mutations(
             "rotation_deg": rotation,
         })
 
-    added: List[Dict[str, Any]] = []
-    added_handles = set()
-    total_points = 0
-    for index, raw in enumerate(added_raw):
-        if not isinstance(raw, dict):
-            raise ValueError(f"added entity at index {index} must be an object")
-        extra = set(raw) - _ADDED_FIELDS
-        if extra:
-            raise ValueError(f"added entity at index {index} has unknown fields")
-        handle = _handle(raw.get("handle"), f"added[{index}].handle")
-        if handle in existing or handle in added_handles:
-            raise ValueError(f"duplicate or conflicting added handle {handle!r}")
-        if raw.get("closed") is not True:
-            raise ValueError(f"added entity {handle!r} must be a closed polyline")
+    # v2 replacements: one geometry op per handle, one layer op per handle,
+    # nothing on a removed handle. Each op names an entity of the kind it
+    # replaces, and a tilted circle or arc (a normal other than +z) is
+    # refused, since the plan writes its centre in world coordinates.
+    geometry_seen = set()
+    relayered_seen = set()
+
+    def _target(handle_raw: Any, field: str, kinds: Tuple[str, ...]) -> Tuple[str, str, Dict[str, Any]]:
+        handle = _existing_handle(handle_raw, field)
+        if handle not in index:
+            raise ValueError(f"unknown {field.split('[')[0]} handle {handle!r}")
+        if handle in removed_seen:
+            raise ValueError(f"handle {handle!r} cannot be removed and replaced")
+        kind, entity = index[handle]
+        if kind not in kinds:
+            raise ValueError(f"{field.split('[')[0]} handle {handle!r} is a {kind}")
+        return handle, kind, entity
+
+    set_layer: List[Dict[str, Any]] = []
+    for position, raw in enumerate(set_layer_raw):
+        if not isinstance(raw, dict) or set(raw) != _SET_LAYER_FIELDS:
+            raise ValueError(f"set_layer at index {position} has unknown or missing fields")
+        handle, _kind, entity = _target(raw.get("handle"), f"set_layer[{position}]", ("LWPOLYLINE", "CIRCLE", "ARC"))
+        if handle in relayered_seen:
+            raise ValueError(f"duplicate set_layer handle {handle!r}")
         layer = _layer(raw.get("layer"))
-        points_raw = raw.get("pts")
-        if not isinstance(points_raw, list) or not 3 <= len(points_raw) <= MAX_POINTS_PER_ENTITY:
-            raise ValueError(f"added entity {handle!r} has an invalid point count")
-        total_points += len(points_raw)
+        if layer == entity.get("layer") and reject_noop:
+            raise ValueError(f"set_layer {handle!r} is a no-op")
+        relayered_seen.add(handle)
+        set_layer.append({"handle": handle, "layer": layer})
+
+    total_points = 0
+    set_points: List[Dict[str, Any]] = []
+    for position, raw in enumerate(set_points_raw):
+        if not isinstance(raw, dict) or not {"handle", "pts"} <= set(raw) or set(raw) - _SET_POINTS_FIELDS:
+            raise ValueError(f"set_points at index {position} has unknown or missing fields")
+        handle, _kind, entity = _target(raw.get("handle"), f"set_points[{position}]", ("LWPOLYLINE",))
+        if handle in geometry_seen or handle in transformed_seen:
+            raise ValueError(f"handle {handle!r} has more than one geometry operation")
+        closed = raw.get("closed", bool(entity.get("closed")))
+        if not isinstance(closed, bool):
+            raise ValueError(f"set_points {handle!r} closed must be a boolean")
+        points = _points(raw.get("pts"), f"set_points {handle!r}", minimum=3 if closed else 2)
+        total_points += len(points)
         if total_points > MAX_POINTS:
             raise ValueError("mutation point bound exceeded")
-        points: List[List[float]] = []
-        for point_index, point in enumerate(points_raw):
-            if not isinstance(point, list) or len(point) not in (2, 3):
-                raise ValueError(f"added entity {handle!r} has malformed point {point_index}")
-            xyz = [
-                _number(value, f"added {handle!r} point {point_index}")
-                for value in point
-            ]
-            if len(xyz) == 2:
-                xyz.append(0.0)
-            points.append(xyz)
+        if (points == [list(map(float, p)) + [0.0] * (3 - len(p)) for p in (entity.get("pts") or [])]
+                and closed == bool(entity.get("closed")) and reject_noop):
+            raise ValueError(f"set_points {handle!r} is a no-op")
+        geometry_seen.add(handle)
+        set_points.append({"handle": handle, "closed": closed, "pts": points})
+
+    set_circle: List[Dict[str, Any]] = []
+    for position, raw in enumerate(set_circle_raw):
+        if not isinstance(raw, dict) or set(raw) != _SET_CIRCLE_FIELDS:
+            raise ValueError(f"set_circle at index {position} has unknown or missing fields")
+        handle, _kind, entity = _target(raw.get("handle"), f"set_circle[{position}]", ("CIRCLE",))
+        if handle in geometry_seen:
+            raise ValueError(f"handle {handle!r} has more than one geometry operation")
+        if not _normal_is_up(entity):
+            raise ValueError(f"set_circle {handle!r}: a tilted circle is not editable here")
+        centre = _point3(raw.get("c"), f"set_circle {handle!r} c")
+        radius = _number(raw.get("r"), f"set_circle {handle!r} r")
+        if radius <= 0:
+            raise ValueError(f"set_circle {handle!r} r must be positive")
+        geometry_seen.add(handle)
+        set_circle.append({"handle": handle, "c": centre, "r": radius})
+
+    set_arc: List[Dict[str, Any]] = []
+    for position, raw in enumerate(set_arc_raw):
+        if not isinstance(raw, dict) or set(raw) != _SET_ARC_FIELDS:
+            raise ValueError(f"set_arc at index {position} has unknown or missing fields")
+        handle, _kind, entity = _target(raw.get("handle"), f"set_arc[{position}]", ("ARC",))
+        if handle in geometry_seen:
+            raise ValueError(f"handle {handle!r} has more than one geometry operation")
+        if not _normal_is_up(entity):
+            raise ValueError(f"set_arc {handle!r}: a tilted arc is not editable here")
+        centre = _point3(raw.get("c"), f"set_arc {handle!r} c")
+        radius = _number(raw.get("r"), f"set_arc {handle!r} r")
+        if radius <= 0:
+            raise ValueError(f"set_arc {handle!r} r must be positive")
+        start = _number(raw.get("start_deg"), f"set_arc {handle!r} start_deg", limit=MAX_ANGLE_DEG)
+        end = _number(raw.get("end_deg"), f"set_arc {handle!r} end_deg", limit=MAX_ANGLE_DEG)
+        if abs(math.fmod(end - start, 360.0)) < 1e-9:
+            raise ValueError(f"set_arc {handle!r} has no sweep")
+        geometry_seen.add(handle)
+        set_arc.append({
+            "handle": handle, "c": centre, "r": radius,
+            "start_deg": start, "end_deg": end,
+        })
+
+    added: List[Dict[str, Any]] = []
+    added_handles = set()
+    for position, raw in enumerate(added_raw):
+        if not isinstance(raw, dict):
+            raise ValueError(f"added entity at index {position} must be an object")
+        extra = set(raw) - _ADDED_FIELDS
+        if extra:
+            raise ValueError(f"added entity at index {position} has unknown fields")
+        handle = _handle(raw.get("handle"), f"added[{position}].handle")
+        if handle in index or handle in added_handles:
+            raise ValueError(f"duplicate or conflicting added handle {handle!r}")
+        kind = raw.get("kind", "LWPOLYLINE")
+        if kind not in _ADD_KINDS:
+            raise ValueError(f"added entity {handle!r} has an unsupported kind")
+        layer = _layer(raw.get("layer"))
         xdata = raw.get("xdata")
         if xdata is not None and not allow_xdata:
             # The MVP Activity creates geometry only. Silently discarding xdata
             # would make the declared and persisted mutation differ.
             raise ValueError(f"added entity {handle!r} xdata is not supported")
+        if kind == "LWPOLYLINE":
+            for field in ("c", "r", "start_deg", "end_deg"):
+                if field in raw:
+                    raise ValueError(f"added entity {handle!r} has unknown fields")
+            closed = raw.get("closed")
+            if not isinstance(closed, bool):
+                raise ValueError(f"added entity {handle!r} must be a closed polyline")
+            points = _points(raw.get("pts"), f"added entity {handle!r}", minimum=3 if closed else 2)
+            total_points += len(points)
+            if total_points > MAX_POINTS:
+                raise ValueError("mutation point bound exceeded")
+            added_handles.add(handle)
+            added.append({
+                "handle": handle, "layer": layer, "closed": closed, "pts": points,
+                "xdata": xdata,
+            })
+            continue
+        if xdata is not None or "closed" in raw:
+            raise ValueError(f"added entity {handle!r} has unknown fields")
+        if kind == "LINE":
+            for field in ("c", "r", "start_deg", "end_deg"):
+                if field in raw:
+                    raise ValueError(f"added entity {handle!r} has unknown fields")
+            points = _points(raw.get("pts"), f"added entity {handle!r}", minimum=2)
+            if len(points) != 2:
+                raise ValueError(f"added entity {handle!r} has an invalid point count")
+            if points[0] == points[1]:
+                raise ValueError(f"added entity {handle!r} has zero length")
+            total_points += 2
+            if total_points > MAX_POINTS:
+                raise ValueError("mutation point bound exceeded")
+            added_handles.add(handle)
+            added.append({"handle": handle, "kind": "LINE", "layer": layer, "pts": points})
+            continue
+        if "pts" in raw:
+            raise ValueError(f"added entity {handle!r} has unknown fields")
+        centre = _point3(raw.get("c"), f"added entity {handle!r} c")
+        radius = _number(raw.get("r"), f"added entity {handle!r} r")
+        if radius <= 0:
+            raise ValueError(f"added entity {handle!r} r must be positive")
+        if kind == "CIRCLE":
+            for field in ("start_deg", "end_deg"):
+                if field in raw:
+                    raise ValueError(f"added entity {handle!r} has unknown fields")
+            added_handles.add(handle)
+            added.append({"handle": handle, "kind": "CIRCLE", "layer": layer, "c": centre, "r": radius})
+            continue
+        start = _number(raw.get("start_deg"), f"added entity {handle!r} start_deg", limit=MAX_ANGLE_DEG)
+        end = _number(raw.get("end_deg"), f"added entity {handle!r} end_deg", limit=MAX_ANGLE_DEG)
+        if abs(math.fmod(end - start, 360.0)) < 1e-9:
+            raise ValueError(f"added entity {handle!r} has no sweep")
         added_handles.add(handle)
         added.append({
-            "handle": handle, "layer": layer, "closed": True, "pts": points,
-            "xdata": xdata,
+            "handle": handle, "kind": "ARC", "layer": layer, "c": centre, "r": radius,
+            "start_deg": start, "end_deg": end,
         })
 
     canonical: Dict[str, Any] = {}
@@ -222,12 +433,36 @@ def validate_mutations(
             added, key=lambda item: canonical_json_bytes(item))
     if removed:
         canonical["removed"] = sorted(removed)
+    if removed_kinds:
+        canonical["removed_kinds"] = dict(sorted(removed_kinds.items()))
     if transforms:
         canonical["transforms"] = sorted(
             transforms, key=lambda item: item["handle"])
+    if set_layer:
+        canonical["set_layer"] = sorted(set_layer, key=lambda item: item["handle"])
+    if set_points:
+        canonical["set_points"] = sorted(set_points, key=lambda item: item["handle"])
+    if set_circle:
+        canonical["set_circle"] = sorted(set_circle, key=lambda item: item["handle"])
+    if set_arc:
+        canonical["set_arc"] = sorted(set_arc, key=lambda item: item["handle"])
     if len(canonical_json_bytes(canonical)) > MAX_PLAN_BYTES:
         raise ValueError("canonical mutation data exceeds the byte bound")
     return canonical
+
+
+def uses_v2(canonical: Dict[str, Any]) -> bool:
+    """True when the canonical data needs the v2 interpreter: any replacement
+    op, a non-polyline removal, or an added entity that is not a closed
+    LWPOLYLINE."""
+    if any(canonical.get(field) for field in _V2_FIELDS):
+        return True
+    if canonical.get("removed_kinds"):
+        return True
+    for entity in canonical.get("added", []):
+        if entity.get("kind", "LWPOLYLINE") != "LWPOLYLINE" or entity.get("closed") is not True:
+            return True
+    return False
 
 
 def _dot(left: Iterable[float], right: Iterable[float]) -> float:
@@ -280,9 +515,34 @@ def world_to_ocs(points: List[List[float]]) -> Dict[str, Any]:
     }
 
 
+def world_to_ocs_any(points: List[List[float]]) -> Dict[str, Any]:
+    """`world_to_ocs` for a point set that may be collinear (an open two-point
+    polyline, a LINE-shaped LWPOLYLINE): a collinear set lies in every plane
+    through it, so the +z plane at the set's elevation is chosen when every z
+    agrees; a collinear set with differing z has no planar LWPOLYLINE form."""
+    try:
+        return world_to_ocs(points)
+    except ValueError as exc:
+        if "collinear" not in str(exc):
+            raise
+    zs = {round(float(point[2]), 9) for point in points}
+    if len(zs) != 1:
+        raise ValueError("collinear points with differing z have no planar polyline form")
+    elevation = float(points[0][2])
+    return {
+        "normal": list(_UP_NORMAL), "elevation": elevation,
+        "points": [[float(point[0]), float(point[1])] for point in points],
+        "axis_x": [1.0, 0.0, 0.0], "axis_y": [0.0, 1.0, 0.0],
+    }
+
+
 def _fmt(value: float) -> str:
     value = 0.0 if abs(value) < 5e-13 else value
     return format(value, ".12g")
+
+
+def _fmt3(point: List[float]) -> str:
+    return ",".join(_fmt(float(value)) for value in point[:3])
 
 
 def transformed_points(
@@ -309,6 +569,15 @@ def transformed_points(
     return result
 
 
+def _ocs_line(tag: str, head: str, lowered: Dict[str, Any]) -> str:
+    normal = ",".join(_fmt(value) for value in lowered["normal"])
+    vertices = ";".join(
+        ",".join(_fmt(value) for value in point)
+        for point in lowered["points"]
+    )
+    return f"{tag}|{head}|{normal}|{_fmt(lowered['elevation'])}|{vertices}"
+
+
 def emit_plan(
     canonical: Dict[str, Any], *, base_sha256: str,
     base_intake: Optional[Dict[str, Any]] = None,
@@ -316,7 +585,8 @@ def emit_plan(
     """Emit the exact data-only Activity input for one canonical mutation set."""
     if not re.fullmatch(r"[0-9a-f]{64}", base_sha256):
         raise ValueError("base_sha256 must be lowercase hex")
-    lines = ["LEAF_MUTATION_PLAN|1", f"BASE_SHA256|{base_sha256}"]
+    version = 2 if uses_v2(canonical) else 1
+    lines = [f"LEAF_MUTATION_PLAN|{version}", f"BASE_SHA256|{base_sha256}"]
     for handle in canonical.get("removed", []):
         lines.append(f"REMOVE|{handle}")
     if canonical.get("transforms"):
@@ -333,25 +603,34 @@ def emit_plan(
                 raise ValueError(
                     f"transform handle {handle!r} has invalid source geometry")
             target = transformed_points(points, transform)
-            lowered = world_to_ocs(target)
-            normal = ",".join(_fmt(value) for value in lowered["normal"])
-            vertices = ";".join(
-                ",".join(_fmt(value) for value in point)
-                for point in lowered["points"]
-            )
-            lines.append(
-                f"TRANSFORM|{handle}|{normal}|"
-                f"{_fmt(lowered['elevation'])}|{vertices}")
-    for entity in canonical.get("added", []):
-        lowered = world_to_ocs(entity["pts"])
-        layer = entity["layer"]
-        normal = ",".join(_fmt(value) for value in lowered["normal"])
-        vertices = ";".join(
-            ",".join(_fmt(value) for value in point)
-            for point in lowered["points"]
-        )
+            lines.append(_ocs_line("TRANSFORM", handle, world_to_ocs(target)))
+    for item in canonical.get("set_layer", []):
+        lines.append(f"RELAYER|{item['handle']}|{item['layer']}")
+    for item in canonical.get("set_points", []):
+        lowered = world_to_ocs_any(item["pts"])
+        lines.append(_ocs_line("SETPOINTS", f"{item['handle']}|{1 if item['closed'] else 0}", lowered))
+    for item in canonical.get("set_circle", []):
+        lines.append(f"SETCIRCLE|{item['handle']}|{_fmt3(item['c'])}|{_fmt(item['r'])}")
+    for item in canonical.get("set_arc", []):
         lines.append(
-            f"ADD|{layer}|{normal}|{_fmt(lowered['elevation'])}|{vertices}")
+            f"SETARC|{item['handle']}|{_fmt3(item['c'])}|{_fmt(item['r'])}|"
+            f"{_fmt(item['start_deg'])}|{_fmt(item['end_deg'])}")
+    for entity in canonical.get("added", []):
+        layer = entity["layer"]
+        kind = entity.get("kind", "LWPOLYLINE")
+        if kind == "LWPOLYLINE":
+            if entity.get("closed") is True:
+                lines.append(_ocs_line("ADD", layer, world_to_ocs(entity["pts"])))
+            else:
+                lines.append(_ocs_line("ADDOPEN", layer, world_to_ocs_any(entity["pts"])))
+        elif kind == "LINE":
+            lines.append(f"ADDLINE|{layer}|{_fmt3(entity['pts'][0])}|{_fmt3(entity['pts'][1])}")
+        elif kind == "CIRCLE":
+            lines.append(f"ADDCIRCLE|{layer}|{_fmt3(entity['c'])}|{_fmt(entity['r'])}")
+        else:
+            lines.append(
+                f"ADDARC|{layer}|{_fmt3(entity['c'])}|{_fmt(entity['r'])}|"
+                f"{_fmt(entity['start_deg'])}|{_fmt(entity['end_deg'])}")
     plan = ("\n".join(lines) + "\n").encode("ascii")
     if len(plan) > MAX_PLAN_BYTES:
         raise ValueError("mutation plan exceeds the byte bound")

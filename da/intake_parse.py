@@ -145,6 +145,24 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                 b = [round(float(v), 3) for v in p2.split(",")]
                 out["polylines"].append({"layer": layn, "closed": False, "pts": [a, b],
                                          "xdata": None, "handle": hnd})
+            elif tag == "CI":
+                # W4g-3: CIRCLE with its handle (ADDITIVE §1 field `circles`);
+                # the centre comes in OCS with the normal, like PL vertices.
+                layn, cp, r, nrm, hnd = rest.split("|")
+                n = tuple(float(v) for v in nrm.split(","))
+                w = o2w(tuple(float(v) for v in cp.split(",")), n)
+                out.setdefault("circles", []).append({
+                    "layer": layn, "c": [round(v, 3) for v in w], "r": round(float(r), 3),
+                    "nrm": [round(v, 6) for v in n], "handle": hnd})
+            elif tag == "AR":
+                # W4g-3: ARC (ADDITIVE §1 field `arcs`); angles arrive in degrees.
+                layn, cp, r, a1, a2, nrm, hnd = rest.split("|")
+                n = tuple(float(v) for v in nrm.split(","))
+                w = o2w(tuple(float(v) for v in cp.split(",")), n)
+                out.setdefault("arcs", []).append({
+                    "layer": layn, "c": [round(v, 3) for v in w], "r": round(float(r), 3),
+                    "start_deg": round(float(a1), 6), "end_deg": round(float(a2), 6),
+                    "nrm": [round(v, 6) for v in n], "handle": hnd})
             elif tag == "TX":
                 # TEXT/MTEXT label (ADDITIVE §1 field `texts`; the value had "|" replaced
                 # by a space in the LISP and is capped at 512 chars there).

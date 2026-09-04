@@ -69,13 +69,51 @@ def test_fixed_script_is_crlf_closed_format_and_never_evaluates_plan():
     assert "vl-load-com" not in lowered
 
 
-def test_fixed_script_pins_add_layer_and_remove_mvp_constraints():
+def test_fixed_script_pins_add_layer_and_remove_constraints():
     script = apply_lisp.build_apply_scr()
     assert 'ok (>= (length raw) 3)' in script
     assert '0123456789_.-$ ")))' in script
-    assert '(= kind "LWPOLYLINE")' in script
-    assert '(member kind' not in script
+    # W4g-3 (contract v2): REMOVE, RELAYER and the SET* ops name the four
+    # kinds the browser engine writes, as one closed list, and nothing else.
+    assert script.count('(member kind (list "LWPOLYLINE" "LINE" "CIRCLE" "ARC"))') == 2
+    assert '(member kind (list "LWPOLYLINE" "LINE"))' in script
     assert '"POLYLINE"' not in script
+    assert '"INSERT"' not in script
+
+
+def test_v2_script_accepts_both_plan_headers_and_carries_every_v2_line():
+    script = apply_lisp.build_apply_scr()
+    assert '(member line (list "LEAF_MUTATION_PLAN|1" "LEAF_MUTATION_PLAN|2"))' in script
+    for tag in ("ADDOPEN", "ADDLINE", "ADDCIRCLE", "ADDARC", "RELAYER",
+                "SETPOINTS", "SETCIRCLE", "SETARC"):
+        assert f'((= (car v) "{tag}")' in script, tag
+        assert f'((= (car op) "{tag}")' in script, tag
+    # Angles on the plan are degrees; entmake takes radians.
+    assert "(defun leaf-deg2rad (d) (* pi (/ d 180.0)))" in script
+    assert "(cons 50 (leaf-deg2rad" in script and "(cons 51 (leaf-deg2rad" in script
+    # A LINE's endpoints come back to world coordinates through AutoCAD's
+    # own trans from the plan's normal; nothing is evaluated.
+    assert "(trans (list (car (car pts)) (cadr (car pts)) elev) normal 0)" in script
+    lowered = script.lower()
+    assert "(eval " not in lowered and "(read " not in lowered and "(load " not in lowered
+    assert "vl-load-com" not in lowered
+    for line in script.split("\r\n"):
+        assert line.count("(") == line.count(")"), line[:80]
+
+
+def test_mutation_inspect_script_is_the_extract_script_plus_the_three_kinds():
+    from lisp import MUTATION_INSPECT_BLOCKS, build_scr
+    plain = build_scr("output-intake.txt")
+    extended = build_scr("output-intake.txt", extra_blocks=MUTATION_INSPECT_BLOCKS)
+    assert build_scr() == build_scr(extra_blocks=())  # LeafExtract: byte-identical
+    assert extended != plain
+    head, tail = extended.split('(command "_.QUIT" "_Y")')
+    assert head.startswith(plain.split('(command "_.QUIT" "_Y")')[0])
+    for tag in ("LN|", "CI|", "AR|"):
+        assert tag in extended and tag not in plain
+    assert '"output-intake.txt"' in extended and "{OUT}" not in extended
+    spec = subject.activity_spec()
+    assert spec["settings"]["inspectScript"]["value"] == extended
 
 
 def test_activity_spec_pins_pure_script_contract():

@@ -17,7 +17,7 @@ import requests
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 import client  # noqa: E402
-from lisp import build_scr  # noqa: E402
+from lisp import MUTATION_INSPECT_BLOCKS, build_scr  # noqa: E402
 from apply_lisp import (  # noqa: E402
     INTAKE_LOCALNAME,
     OUT_LOCALNAME,
@@ -72,7 +72,11 @@ def activity_spec() -> dict[str, Any]:
         },
         "settings": {
             "script": {"value": build_apply_scr()},
-            "inspectScript": {"value": build_scr(INTAKE_LOCALNAME)},
+            # W4g-3: the inspection also reports LINE / CIRCLE / ARC with
+            # handles (the kinds the browser engine writes), so a v2 plan's
+            # effects verify; the LeafExtract script itself is untouched.
+            "inspectScript": {"value": build_scr(
+                INTAKE_LOCALNAME, extra_blocks=MUTATION_INSPECT_BLOCKS)},
         },
         "description": (
             "Leaf fixed closed-format drawing mutation interpreter with "

@@ -61,6 +61,8 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
     seen_layers: set[str] = set()
     polylines: List[Dict[str, Any]] = []
     texts: List[Dict[str, Any]] = []
+    circles: List[Dict[str, Any]] = []
+    arcs: List[Dict[str, Any]] = []
     handle_seq = 0
 
     i = 0
@@ -103,6 +105,21 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             handle_seq += 1
             _finish_entity(entity, handle_seq, layers, seen_layers, polylines)
             continue
+        if section == "ENTITIES" and code == 0 and value in ("CIRCLE", "ARC"):
+            # W4g-3: the kinds the browser engine draws besides lines and
+            # polylines, as ADDITIVE §1 fields `circles` / `arcs` (a viewer
+            # or tool that does not know them ignores them). Centre in WCS,
+            # radius, the normal, and for an arc its start/end in degrees.
+            entity, i = _parse_circle_or_arc(pairs, i + 1, value)
+            handle_seq += 1
+            if entity is not None:
+                if not entity["handle"]:
+                    entity["handle"] = f"L{handle_seq:X}"
+                if entity["layer"] not in seen_layers:
+                    seen_layers.add(entity["layer"])
+                    layers.append(entity["layer"])
+                (circles if value == "CIRCLE" else arcs).append(entity)
+            continue
         if section == "ENTITIES" and code == 0 and value in ("TEXT", "MTEXT"):
             entity, i = _parse_text(pairs, i + 1, value)
             handle_seq += 1
@@ -121,7 +138,81 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
         # ADDITIVE §1 field (frontend ignores unknown keys): drawing labels for tools
         # that classify views by the text inside a frame.
         out["texts"] = texts
+    if circles:
+        out["circles"] = circles
+    if arcs:
+        out["arcs"] = arcs
     return out
+
+
+def _ocs_to_wcs(point: List[float], normal: List[float]) -> List[float]:
+    """AutoCAD's arbitrary-axis algorithm (the same one da/intake_parse.o2w
+    applies to the extractor's OCS output), so a tilted circle's centre lands
+    where AutoCAD puts it. A +z normal is the identity."""
+    nx, ny, nz = normal
+    unit = (nx * nx + ny * ny + nz * nz) ** 0.5 or 1.0
+    nx, ny, nz = nx / unit, ny / unit, nz / unit
+    if abs(nx) < 1 / 64.0 and abs(ny) < 1 / 64.0:
+        ax = (nz, 0.0, -nx)  # (0,1,0) x n
+    else:
+        ax = (-ny, nx, 0.0)  # (0,0,1) x n
+    length = (ax[0] ** 2 + ax[1] ** 2 + ax[2] ** 2) ** 0.5 or 1.0
+    ax = (ax[0] / length, ax[1] / length, ax[2] / length)
+    ay = (ny * ax[2] - nz * ax[1], nz * ax[0] - nx * ax[2], nx * ax[1] - ny * ax[0])
+    x, y, z = point
+    return [x * ax[0] + y * ay[0] + z * nx,
+            x * ax[1] + y * ay[1] + z * ny,
+            x * ax[2] + y * ay[2] + z * nz]
+
+
+def _parse_circle_or_arc(pairs: List[Tuple[int, str]], i: int, kind: str):
+    """CIRCLE / ARC: layer=8, handle=5, centre (10, 20, 30) in OCS, radius=40,
+    normal (210, 220, 230, default +z), ARC start=50 / end=51 in DEGREES (the
+    DXF file convention; entget's radians never reach a file). A radius that
+    is not positive carries no geometry and is dropped, like a 1-point
+    polyline."""
+    layer = "0"
+    handle = ""
+    c = [0.0, 0.0, 0.0]
+    normal = [0.0, 0.0, 1.0]
+    radius = 0.0
+    start = 0.0
+    end = 360.0 if kind == "ARC" else 0.0
+    n = len(pairs)
+    while i < n and pairs[i][0] != 0:
+        code, value = pairs[i]
+        if code == 8:
+            layer = value or "0"
+        elif code == 5:
+            handle = value
+        elif code == 10:
+            c[0] = _float(value)
+        elif code == 20:
+            c[1] = _float(value)
+        elif code == 30:
+            c[2] = _float(value)
+        elif code == 40:
+            radius = _float(value)
+        elif code == 50:
+            start = _float(value)
+        elif code == 51:
+            end = _float(value)
+        elif code == 210:
+            normal[0] = _float(value)
+        elif code == 220:
+            normal[1] = _float(value)
+        elif code == 230:
+            normal[2] = _float(value)
+        i += 1
+    if not radius > 0.0:
+        return None, i
+    centre = _ocs_to_wcs(c, normal) if normal != [0.0, 0.0, 1.0] else c
+    entity: Dict[str, Any] = {"layer": layer, "c": centre, "r": radius,
+                              "nrm": normal, "handle": handle}
+    if kind == "ARC":
+        entity["start_deg"] = start
+        entity["end_deg"] = end
+    return entity, i
 
 
 def _finish_entity(entity: Dict[str, Any], seq: int, layers: List[str],
