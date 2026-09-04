@@ -62,6 +62,9 @@ export const DEFAULT_EDIT_INPUTS = Object.freeze({
   // angle span in degrees, a point list, and the closed flag as a string
   // (every input is a string; the store parses and refuses).
   x: '0', y: '0', x2: '100', y2: '0', r: '10', a0: '0', a1: '90', pts: '0,0 100,0 100,50', closed: 'false',
+  // W4g-4 Modify verbs: the mirror line's two points and the keep flag, the
+  // base point, the rotation angle (degrees) and the scale factor.
+  x1: '0', y1: '0', keep: 'true', cx: '0', cy: '0', deg: '90', factor: '2',
 })
 
 const INPUT_KEYS = new Set(Object.keys(DEFAULT_EDIT_INPUTS))

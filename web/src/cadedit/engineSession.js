@@ -149,7 +149,14 @@ export function surviveSelection(previousId, entities) {
 }
 
 /** The W4d Draw group's operations: creation needs no selection. */
-export const CREATE_OPS = Object.freeze(['createLine', 'createCircle', 'createArc', 'createPolyline'])
+export const CREATE_OPS = Object.freeze(['createLine', 'createCircle', 'createArc', 'createPolyline', 'createRectangle'])
+// W4g-4: edits that MAKE an entity (a displaced copy, a mirrored copy, the
+// segments of an explode) report what they made by id like the Draw group
+// does; the selection lands on it.
+export const CREATING_EDITS = Object.freeze(['copy', 'mirror', 'explode'])
+// RECTANG is a closed four-point polyline to the engine: the store lowers it
+// before the post, so the worker's op vocabulary is unchanged.
+const WORKER_OP = Object.freeze({ createRectangle: 'createPolyline' })
 
 // Client-side bound on a typed point list. The engine bounds harder
 // (100,000); past this a "polyline" is a paste, not a drawing gesture.
@@ -211,6 +218,15 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
     if (!points) return { refusal: `Polyline refused: enter at least two points as x,y pairs (at most ${MAX_CREATE_POINTS}).` }
     return { payload: { points, closed: closed === true || closed === 'true', layer: layerName } }
   }
+  if (op === 'createRectangle') {
+    // W4g-4 RECTANG: two opposite corners -> the closed polyline the engine
+    // draws (corner, corner, corner, corner). A zero-width or zero-height
+    // rectangle is a line, not a rectangle, and is refused.
+    const [x1, y1, xx2, yy2] = [x, y, x2, y2].map(fmtDelta)
+    if ([x1, y1, xx2, yy2].some((v) => v === null)) return { refusal: 'Rectangle refused: x, y, x2 and y2 must all be numbers.' }
+    if (x1 === xx2 || y1 === yy2) return { refusal: 'Rectangle refused: the corners must differ in both x and y.' }
+    return { payload: { points: [x1, y1, xx2, y1, xx2, yy2, x1, yy2], closed: true, layer: layerName } }
+  }
   return { refusal: `Draw refused: unknown operation ${op}.` }
 }
 
@@ -219,14 +235,42 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
  * either `{ payload }` or `{ refusal }` with the exact operator-facing
  * sentence — never both, never a throw.
  */
-export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer } = {}) {
+export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer, x1, y1, x2, y2, keep, cx, cy, deg, factor } = {}) {
   const payload = { entityId }
-  if (op === 'move') {
+  if (op === 'move' || op === 'copy') {
     const deltaX = fmtDelta(dx)
     const deltaY = fmtDelta(dy)
-    if (deltaX === null || deltaY === null) return { refusal: 'Move refused: dx and dy must both be numbers.' }
+    if (deltaX === null || deltaY === null) return { refusal: `${op === 'copy' ? 'Copy' : 'Move'} refused: dx and dy must both be numbers.` }
     payload.dx = deltaX
     payload.dy = deltaY
+  }
+  // W4g-4: the reference's Modify verbs the crate carries. Each refuses
+  // here with the operator-facing sentence; the engine validates again.
+  if (op === 'mirror') {
+    const [ax, ay, bx, by] = [x1, y1, x2, y2].map(fmtDelta)
+    if ([ax, ay, bx, by].some((v) => v === null)) return { refusal: 'Mirror refused: x1, y1, x2 and y2 must all be numbers.' }
+    if (ax === bx && ay === by) return { refusal: 'Mirror refused: the two points of the mirror line must differ.' }
+    payload.x1 = ax
+    payload.y1 = ay
+    payload.x2 = bx
+    payload.y2 = by
+    payload.keep = keep === true || keep === 'true'
+  }
+  if (op === 'rotate' || op === 'scale') {
+    const [bx, by] = [cx, cy].map(fmtDelta)
+    if (bx === null || by === null) return { refusal: `${op === 'rotate' ? 'Rotate' : 'Scale'} refused: the base point x and y must both be numbers.` }
+    payload.cx = bx
+    payload.cy = by
+    if (op === 'rotate') {
+      const angle = fmtDelta(deg)
+      if (angle === null) return { refusal: 'Rotate refused: the angle must be a number (degrees).' }
+      payload.deg = angle
+    } else {
+      const f = fmtDelta(factor)
+      if (f === null) return { refusal: 'Scale refused: the factor must be a number.' }
+      if (f <= 0) return { refusal: 'Scale refused: the factor must be greater than 0.' }
+      payload.factor = f
+    }
   }
   if (op === 'moveVertex' || op === 'addVertex' || op === 'deleteVertex') {
     // W4f-9: digits only; parseInt read "3abc" as 3.
@@ -415,6 +459,7 @@ export default function useEngineSession({
         // handle in the re-parse); the selection lands on it. A create whose
         // entity the writer dropped is a defect and reads as one.
         const isCreate = CREATE_OPS.includes(message.op)
+          || (CREATING_EDITS.includes(message.op) && Object.prototype.hasOwnProperty.call(message, 'createdId'))
         const createdId = isCreate && message.createdId !== null && message.createdId !== undefined
           ? String(message.createdId)
           : ''
@@ -588,7 +633,7 @@ export default function useEngineSession({
       return
     }
     patch({ busy: true, errorKind: null })
-    if (!boundary.post({ type: 'applyEdit', op, payload })) {
+    if (!boundary.post({ type: 'applyEdit', op: WORKER_OP[op] || op, payload })) {
       patch({
         busy: false,
         errorKind: SESSION_ERROR.TRANSPORT,

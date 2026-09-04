@@ -160,6 +160,7 @@ async function applyEdit(engine, message) {
   if (!current) return refused(op, 'no_document_loaded')
   const doc = current.doc
   let createdHandle = null
+  let explodedHandles = null
   const create = CREATE_OPS[op]
   if (create) {
     if (typeof doc[op] !== 'function') return refused(op, `engine_lacks_create:${op}`)
@@ -189,7 +190,31 @@ async function applyEdit(engine, message) {
       else if (op === 'addVertex') doc.addVertexAfter(index, Number(payload.vertexIndex), Number(payload.x), Number(payload.y))
       else if (op === 'deleteVertex') doc.deleteVertex(index, Number(payload.vertexIndex))
       else if (op === 'setLayer') doc.setEntityLayer(index, String(payload.layer ?? ''))
-      else return refused(op, `unknown_op:${op}`)
+      // W4g-4: the reference's Modify verbs the crate carries. COPY,
+      // MIRROR-with-source and EXPLODE create: their new handle(s) ride the
+      // same createdId leg as the Draw group so the selection lands on what
+      // was made. Each wrapper refuses before it writes.
+      else if (op === 'copy') {
+        if (typeof doc.copyEntity !== 'function') return refused(op, `engine_lacks_op:${op}`)
+        createdHandle = handleId(doc.copyEntity(index, Number(payload.dx), Number(payload.dy)), 'create_returned_no_handle')
+      } else if (op === 'mirror') {
+        if (typeof doc.mirrorEntity !== 'function') return refused(op, `engine_lacks_op:${op}`)
+        const keep = payload.keep === true
+        const made = doc.mirrorEntity(index, Number(payload.x1), Number(payload.y1), Number(payload.x2), Number(payload.y2), keep)
+        if (keep) createdHandle = handleId(made, 'create_returned_no_handle')
+      } else if (op === 'rotate') {
+        if (typeof doc.rotateEntity !== 'function') return refused(op, `engine_lacks_op:${op}`)
+        doc.rotateEntity(index, Number(payload.cx), Number(payload.cy), Number(payload.deg))
+      } else if (op === 'scale') {
+        if (typeof doc.scaleEntity !== 'function') return refused(op, `engine_lacks_op:${op}`)
+        doc.scaleEntity(index, Number(payload.cx), Number(payload.cy), Number(payload.factor))
+      } else if (op === 'explode') {
+        if (typeof doc.explodeEntity !== 'function') return refused(op, `engine_lacks_op:${op}`)
+        const parts = doc.explodeEntity(index)
+        if (!Array.isArray(parts) || parts.length === 0) return refused(op, 'explode_returned_no_parts')
+        createdHandle = handleId(parts[0], 'create_returned_no_handle')
+        explodedHandles = parts.map((h) => handleId(h, 'create_returned_no_handle'))
+      } else return refused(op, `unknown_op:${op}`)
     } catch (error) {
       // The wrapper validates before it writes, so a refusal here means the
       // document was NOT mutated. Surface the typed reason string as-is.
@@ -224,6 +249,14 @@ async function applyEdit(engine, message) {
     // must treat that as a defect, never as success.
     const created = entities.find((e) => e.handle === createdHandle)
     reply.createdId = created ? created.id : null
+  }
+  if (explodedHandles !== null) {
+    // Every segment the explode made, by id, in document order; a part the
+    // writer dropped reads as null in its slot rather than vanishing.
+    reply.createdIds = explodedHandles.map((h) => {
+      const hit = entities.find((e) => e.handle === h)
+      return hit ? hit.id : null
+    })
   }
   return reply
 }

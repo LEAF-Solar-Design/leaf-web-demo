@@ -184,12 +184,14 @@ describe('honest triggers', () => {
   it('projects the ribbon clusters and the engine groups the builders seat, in registry order', () => {
     expect(forCluster('view').map((a) => a.id)).toEqual(['fit', 'zoom-in', 'zoom-out', 'properties-pane'])
     expect(forCluster('version').map((a) => a.id)).toEqual(['undo', 'redo', 'history'])
+    // W4g-4: RECTANG joined Draw; COPY, MIRROR, ROTATE, SCALE, EXPLODE joined Modify.
     expect(forGroup('draw').map((a) => a.id)).toEqual([
-      'draw:createLine', 'draw:createPolyline', 'draw:createCircle', 'draw:createArc',
+      'draw:createLine', 'draw:createPolyline', 'draw:createCircle', 'draw:createArc', 'draw:createRectangle',
     ])
     expect(forGroup('modify').map((a) => a.id)).toEqual([
       'modify:delete', 'modify:move', 'modify:moveVertex',
       'modify:addVertex', 'modify:deleteVertex', 'modify:setLayer',
+      'modify:copy', 'modify:mirror', 'modify:rotate', 'modify:scale', 'modify:explode',
     ])
   })
 

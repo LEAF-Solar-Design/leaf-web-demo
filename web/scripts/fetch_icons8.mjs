@@ -251,6 +251,42 @@ async function main() {
   const entries = Object.entries(manifest.icons || {}).filter(([k]) => !only || only.has(k))
   if (!platform || entries.length === 0) throw new Error('manifest has no platform or no icons')
   if (entries.length > MAX_ICONS) throw new Error(`manifest lists ${entries.length} icons, cap is ${MAX_ICONS}`)
+  // `--merge-interim`: keep the served icons8 sprite as it is and ADD a
+  // hand-drawn symbol (scripts/interim-icons.mjs) for every manifest key the
+  // sprite lacks, through the same allowlist. For a new cockpit tool that
+  // arrives between icons8 fetches (W4g-4 EXPLODE): the icons8 set is never
+  // replaced, the receipt names the interim keys, and the next fetch with
+  // the key pinned swaps them out.
+  if (args.includes('--merge-interim')) {
+    const { INTERIM_ICONS } = await import('./interim-icons.mjs')
+    const sprite = readFileSync(SPRITE, 'utf8')
+    const present = new Set([...sprite.matchAll(/<symbol id="i8-([^"]+)"/g)].map((m) => m[1]))
+    const added = []
+    const rejected = []
+    let extra = ''
+    for (const [key] of entries) {
+      if (present.has(key)) continue
+      const inner = INTERIM_ICONS[key]
+      if (!inner) { rejected.push(key); continue }
+      const safe = serializeAllowlisted(inner)
+      if (!safe) { rejected.push(key); continue }
+      extra += `<symbol id="i8-${key}" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${safe}</g></symbol>`
+      added.push(key)
+    }
+    if (added.length === 0 && rejected.length === 0) { console.log('sprite already carries every manifest key; nothing merged'); return }
+    if (rejected.length) { console.error(`no interim symbol for: ${rejected.join(', ')}`); process.exit(1) }
+    const body = sprite.replace(/<\/svg>\s*$/, `${extra}</svg>\n`)
+    const hash = createHash('sha256').update(body).digest('hex').slice(0, 12)
+    writeFileSync(SPRITE, body)
+    const built = JSON.parse(readFileSync(BUILT, 'utf8'))
+    const ids = [...new Set([...(built.ids || []), ...added])].sort()
+    writeFileSync(BUILT, JSON.stringify({
+      ...built, hash, fetchedAt: new Date().toISOString(), ids,
+      interim: [...new Set([...(built.interim || []), ...added])].sort(),
+    }, null, 2) + '\n')
+    console.log(`merged ${added.length} interim symbol(s) (${added.join(', ')}) into the sprite: ${ids.length} icons, hash ${hash}, ${Buffer.byteLength(body)} bytes`)
+    return
+  }
   const dirIndex = args.indexOf('--dir')
   if (dirIndex >= 0) {
     const dir = args[dirIndex + 1]
