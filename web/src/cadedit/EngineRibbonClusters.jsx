@@ -34,13 +34,14 @@ import { createPortal } from 'react-dom'
 import { RibbonCluster, RibbonTool } from '../site/DraftingRibbon.jsx'
 import { QuickButton, QUICK_FILE_SLOT_ID } from '../site/CockpitTopBand.jsx'
 
-import { SESSION_ERROR, buildCreatePayload, buildEditPayload } from './engineSession.js'
+import { SESSION_ERROR, buildCreatePayload, buildEditPayload, readNumber } from './engineSession.js'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
 import { isPointExpression, pointExpressionRefusal, resolvePointExpression } from './pointExpression.js'
 
-// W4f-6: the store's own number reading (a field that parses to a finite
-// number is what a run would take), so the outline and the sentence agree.
-const readsAsNumber = (raw) => Number.isFinite(Number.parseFloat(raw))
+// W4f-6: the store's own number reading (a field the store would take as a
+// number), so the outline and the sentence agree; W4f-9 made that reading
+// strict ("10abc" is outlined, not read as 10).
+const readsAsNumber = (raw) => readNumber(raw) !== null
 
 // The bar-dock's slot the prompt portals into, and the prompt's own id (the
 // armed tool's aria-controls target).

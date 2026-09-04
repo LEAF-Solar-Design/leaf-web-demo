@@ -511,6 +511,14 @@ describe('draw dispatch (W4d Draw group): creation needs no selection, and the s
   const DRAWN = { id: 'e3', type: 'LINE', layer: '0', vertices: [[0, 0], [100, 0]] }
 
   it('every create op is refused as a sentence before the engine sees a malformed operand', () => {
+    // W4f-9: a decimal literal or nothing; a typo's numeric prefix is never read.
+    expect(buildCreatePayload('createLine', { x: '0', y: '0', x2: '10abc', y2: '0' }).refusal).toMatch(/must all be numbers/)
+    expect(buildCreatePayload('createLine', { x: '0', y: '0', x2: '1,5', y2: '0' }).refusal).toMatch(/must all be numbers/)
+    expect(buildCreatePayload('createLine', { x: ' 0 ', y: '-.5', x2: '1e2', y2: '+7' }).payload).toEqual({ x1: 0, y1: -0.5, x2: 100, y2: 7, layer: '' })
+    expect(buildEditPayload('moveVertex', 'e1', { vertexIndex: '3abc', dx: '1', dy: '1' }).refusal).toMatch(/non-negative integer/)
+    expect(buildEditPayload('moveVertex', 'e1', { vertexIndex: '-1', dx: '1', dy: '1' }).refusal).toMatch(/non-negative integer/)
+    expect(buildEditPayload('moveVertex', 'e1', { vertexIndex: ' 3 ', dx: '1', dy: '1' }).payload).toEqual({ entityId: 'e1', vertexIndex: 3, dx: 1, dy: 1 })
+    expect(buildEditPayload('move', 'e1', { dx: '10abc', dy: '0' }).refusal).toMatch(/must both be numbers/)
     expect(buildCreatePayload('createLine', { x: '0', y: '0', x2: 'nope', y2: '0' }).refusal).toMatch(/must all be numbers/)
     expect(buildCreatePayload('createLine', { x: '1', y: '1', x2: '1', y2: '1' }).refusal).toMatch(/must differ/)
     expect(buildCreatePayload('createCircle', { x: '0', y: '0', r: '0' }).refusal).toMatch(/greater than 0/)
@@ -536,6 +544,11 @@ describe('draw dispatch (W4d Draw group): creation needs no selection, and the s
     expect(parsePointList('1,2')).toBeNull()
     expect(parsePointList('1,2,3 4,5')).toBeNull()
     expect(parsePointList('1,2 3,4')).toEqual([1, 2, 3, 4])
+    // W4f-9: a coordinate is a decimal literal or nothing; a typo inside a
+    // pair refuses the list instead of reading its numeric prefix.
+    expect(parsePointList('1,2 3abc,4')).toBeNull()
+    expect(parsePointList('1,2 3,4x')).toBeNull()
+    expect(parsePointList(' 1.5,2e1 -3,.5 ')).toEqual([1.5, 20, -3, 0.5])
     const many = Array.from({ length: MAX_CREATE_POINTS + 1 }, (_, i) => `${i},0`).join(' ')
     expect(parsePointList(many)).toBeNull()
     expect(parsePointList(null)).toBeNull()

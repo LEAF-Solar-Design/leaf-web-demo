@@ -115,9 +115,22 @@ function trimSnapshots(stack, limit = MAX_UNDO_BYTES) {
   return stack
 }
 
-function fmtDelta(raw) {
-  const n = Number.parseFloat(raw)
+// W4f-9: an operand is a decimal literal or nothing. Number.parseFloat read
+// "10abc" as 10 and "1,5" as 1, so a typo drew a wrong line instead of a
+// refusal; the strict reading (the same grammar the prompt's point
+// expressions use) fails closed on anything that is not a finite number.
+const DECIMAL_LITERAL = /^[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?$/
+export function readNumber(raw) {
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null
+  if (typeof raw !== 'string') return null
+  const text = raw.trim()
+  if (!text || text.length > 64 || !DECIMAL_LITERAL.test(text)) return null
+  const n = Number(text)
   return Number.isFinite(n) ? n : null
+}
+
+function fmtDelta(raw) {
+  return readNumber(raw)
 }
 
 async function sha256Hex(bytes) {
@@ -154,9 +167,9 @@ export function parsePointList(raw) {
     if (!pair) continue
     const parts = pair.split(',')
     if (parts.length !== 2) return null
-    const x = Number.parseFloat(parts[0])
-    const y = Number.parseFloat(parts[1])
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return null
+    const x = readNumber(parts[0])
+    const y = readNumber(parts[1])
+    if (x === null || y === null) return null
     points.push(x, y)
     if (points.length > MAX_CREATE_POINTS * 2) return null
   }
@@ -216,7 +229,8 @@ export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer } = 
     payload.dy = deltaY
   }
   if (op === 'moveVertex' || op === 'addVertex' || op === 'deleteVertex') {
-    const vi = Number.parseInt(vertexIndex, 10)
+    // W4f-9: digits only; parseInt read "3abc" as 3.
+    const vi = /^\s*\d{1,9}\s*$/.test(String(vertexIndex ?? '')) ? Number.parseInt(vertexIndex, 10) : NaN
     if (!Number.isInteger(vi) || vi < 0) {
       return { refusal: `${op} refused: vertex must be a non-negative integer.` }
     }
