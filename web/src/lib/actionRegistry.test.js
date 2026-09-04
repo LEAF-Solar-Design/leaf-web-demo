@@ -482,9 +482,9 @@ describe('the accessible name', () => {
     expect(accessibleName('delete-marked-panel', REASONS.writeLocked))
       .toBe('delete-marked-panel (unavailable: another session holds the edit lock)')
     expect(accessibleName('line', DRAW_REASONS.noDocument))
-      .toBe('line (unavailable: opens on an imported DXF)')
+      .toBe('line (unavailable: no drawing in the browser engine yet)')
     expect(accessibleName('move', MODIFY_REASONS.noSelection))
-      .toBe('move (unavailable: select an entity in the imported DXF)')
+      .toBe('move (unavailable: select an entity in the drawing)')
   })
 
   it('is the bare label when the action is live', () => {

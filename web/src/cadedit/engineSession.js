@@ -76,6 +76,10 @@ const INITIAL_SESSION = Object.freeze({
   selectedId: '',
   status: '',
   savedBytes: null,
+  // W4g-1b: the bytes the last successful save committed (the same reference
+  // `savedBytes` held then). `dirty` below is savedBytes !== committedBytes:
+  // an undo back to the committed snapshot reads clean by reference.
+  committedBytes: null,
   busy: false,
   // Engine-truth gate (ACCEPTANCE): entity/byte readouts render ONLY for a
   // document that actually passed through the engine. There is no setter for
@@ -385,6 +389,7 @@ export default function useEngineSession({
           entityCount: message.entityCount ?? 0,
           selectedId: '',
           savedBytes: null,
+          committedBytes: null,
           busy: false,
           engineParsed: true,
           geometrySource: GEOMETRY_SOURCE.ENGINE_PARSE,
@@ -461,6 +466,7 @@ export default function useEngineSession({
           entityCount: 0,
           selectedId: '',
           savedBytes: null,
+          committedBytes: null,
           // Nothing passed through the engine: no engine-truth readout is owed.
           engineParsed: false,
           geometrySource: null,
@@ -478,6 +484,35 @@ export default function useEngineSession({
     boundaryRef.current = boundary
     return boundary
   }, [patch])
+
+  // W4g-1b: the ONE load path. `open(file)` reads a chosen file into it;
+  // `openBytes(bytes, name)` is what the head opener calls with bytes it
+  // already holds (no File object, no second read). Same size ceiling, same
+  // history floor, same boundary message. Fails closed on any other shape.
+  const openBytes = useCallback((bytes, name) => {
+    // toString, not instanceof: bytes from another realm (a test harness, a
+    // worker) are still bytes.
+    if (Object.prototype.toString.call(bytes) !== '[object Uint8Array]' || typeof name !== 'string' || !name) return
+    if (bytes.length > MAX_DOCUMENT_BYTES) {
+      patch({
+        errorKind: SESSION_ERROR.LIMIT,
+        status: `Refused ${name}: ${bytes.length} bytes exceeds the ${MAX_DOCUMENT_BYTES}-byte limit.`,
+      })
+      return
+    }
+    patch({ busy: true, documentId: name, errorKind: null, status: `Opening ${name}...` })
+    const boundary = ensureBoundary()
+    // W4f slice F: the opened bytes are the floor of the undo history.
+    clearHistory()
+    historyRef.current.original = bytes
+    if (!boundary.post({ type: 'loadDocument', documentId: name, bytes })) {
+      patch({
+        busy: false,
+        errorKind: SESSION_ERROR.TRANSPORT,
+        status: `Could not send ${name} to the engine.`,
+      })
+    }
+  }, [ensureBoundary, patch])
 
   const open = useCallback(async (file) => {
     if (!file) return
@@ -501,18 +536,8 @@ export default function useEngineSession({
     // The read outlived this session (drawing switch, reset, unmount): drop
     // the bytes rather than post a document nobody asked for any more.
     if (generation !== generationRef.current) return
-    const boundary = ensureBoundary()
-    // W4f slice F: the opened bytes are the floor of the undo history.
-    clearHistory()
-    historyRef.current.original = bytes
-    if (!boundary.post({ type: 'loadDocument', documentId: file.name, bytes })) {
-      patch({
-        busy: false,
-        errorKind: SESSION_ERROR.TRANSPORT,
-        status: `Could not send ${file.name} to the engine.`,
-      })
-    }
-  }, [ensureBoundary, patch])
+    openBytes(bytes, file.name)
+  }, [openBytes, patch])
 
   const select = useCallback((entityId) => {
     setSession((current) => (current.selectedId === entityId
@@ -596,6 +621,7 @@ export default function useEngineSession({
         busy: false,
         receipt,
         savedVersion: nv ?? null,
+        committedBytes: bytes,
         errorKind: null,
         status: `Saved as version ${nv} (parent ${receipt?.new_version?.parent}), `
           + `digest ${String(receipt?.source_sha256 || digest).slice(0, 12)}…, `
@@ -671,8 +697,8 @@ export default function useEngineSession({
   useEffect(() => () => { teardown() }, [teardown])
 
   const actions = useMemo(() => ({
-    open, select, applyEdit, create, save, reset, undo, redo,
-  }), [applyEdit, create, open, redo, reset, save, select, undo])
+    open, openBytes, select, applyEdit, create, save, reset, undo, redo,
+  }), [applyEdit, create, open, openBytes, redo, reset, save, select, undo])
 
   const selected = useMemo(
     () => session.entities.find((entity) => entity.id === session.selectedId) || null,
@@ -686,6 +712,10 @@ export default function useEngineSession({
     // spawns a fresh worker.
     recoverable: session.errorKind === SESSION_ERROR.CRASHED,
     reparsed: session.geometrySource === GEOMETRY_SOURCE.ENGINE_REPARSE,
+    // W4g-1b: edited since the last save (or since the open, when nothing
+    // was saved). By reference: an undo back to the committed snapshot is
+    // clean, a new edit after a save is dirty.
+    dirty: session.savedBytes !== null && session.savedBytes !== session.committedBytes,
     actions,
   }
 }

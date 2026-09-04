@@ -590,27 +590,70 @@ test.describe('route matrix, rail ON', () => {
     await expect(layerToggleAny).toHaveAttribute('aria-pressed', 'true')
     if (!cadEditOn) return
 
-    // Modify is unavailable on the console's own drawing (the engine edits
-    // an imported DXF only) and SAYS SO: a visible note, and each tool's
-    // reason in its accessible name — never a silently greyed group.
+    // W4g-1b (engine reach): on a FRESH VISIT the console's own drawing
+    // opens in the browser engine (GET .../dxf -> the store's open path), so
+    // the canvas shows the engine document of the head and the Draw tools
+    // are live with NO import. The ribbon says what it is doing on the way
+    // ("opening ... in the browser engine...") and, were the open to fail,
+    // why, never a silently greyed group.
     const modify = ribbon.locator('[data-group="modify"]')
-    await expect(modify.locator('.ribbon-note')).toHaveText('opens on an imported DXF')
     const draw = ribbon.locator('[data-group="draw"]')
-    await expect(draw.locator('.ribbon-note')).toHaveText('opens on an imported DXF')
+    const engineServedEarly = await request.get('/engine/engine.js').catch(() => null)
+    if (engineServedEarly && engineServedEarly.status() === 200) {
+      // The stamp is `<drawing id>-v<head>.dxf` (the stack's console drawing
+      // is `demo`; staging's is `rooftop_demo`), and no import has happened
+      // yet, so any head stamp is the opener's.
+      await expect(page.locator('.workspace-card[data-engine-document*="-v"]')).toHaveCount(1, { timeout: 60_000 })
+      const headDoc = await page.locator('.workspace-card').getAttribute('data-engine-document')
+      test.info().annotations.push({ type: 'engine-reach', description: `head opened as ${headDoc}` })
+      await expect(draw.locator('.ribbon-note')).toHaveCount(0)
+      await expect(draw.locator('[data-tool="draw:createLine"]')).toBeEnabled()
+      // Loaded, nothing selected: Modify names the next missing thing.
+      await expect(modify.locator('.ribbon-note')).toHaveText('select an entity in the drawing')
+      // The fresh-visit edit: a line drawn on the console's own drawing, the
+      // engine's entity count up by one, and the edit saved as a NEW VERSION
+      // of that drawing (the same write-back every save uses).
+      const countBefore = Number(await page.getByTestId('cad-edit-entity-count').textContent())
+      expect(countBefore).toBeGreaterThan(0)
+      await draw.locator('[data-tool="draw:createLine"]').click()
+      await page.getByLabel('ribbon x', { exact: true }).fill('0')
+      await page.getByLabel('ribbon y', { exact: true }).fill('0')
+      await page.getByLabel('ribbon x2').fill('10')
+      await page.getByLabel('ribbon y2').fill('10')
+      await page.getByLabel('ribbon y2').press('Enter')
+      await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBefore + 1), { timeout: 60_000 })
+      await page.keyboard.press('Escape')
+      // The edit is dirty and the project target exists, so Save is live
+      // (the write-back itself is proven by tests/test_save_edited_version.py
+      // and the acceptance prover; saving HERE would add a version to the
+      // stack's shared demo drawing and move the head under the specs that
+      // count versions from a known start). The engine's own Undo returns
+      // the copy to clean instead.
+      const saveBtn = ribbon.locator('[data-tool="save-version"]')
+      await page.getByRole('tab', { name: 'Insert' }).click()
+      await expect(saveBtn).toBeEnabled()
+      await ribbon.locator('[data-tool="undo-edit"]').click()
+      await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBefore), { timeout: 60_000 })
+      await expect(saveBtn).toBeDisabled()
+      await page.getByRole('tab', { name: 'Draw' }).click()
+    } else {
+      await expect(modify.locator('.ribbon-note')).toHaveText(/no drawing in the browser engine yet|could not be opened in the browser engine/)
+      await expect(draw.locator('.ribbon-note')).toHaveText(/no drawing in the browser engine yet|could not be opened in the browser engine/)
+      for (const btn of await draw.locator('.ribbon-tool').all()) await expect(btn).toBeDisabled()
+    }
     // W4e: the reference's Draw column (rectangle, ellipse, point) and its
     // other six Modify tools are present and honestly off ("not in the
     // browser engine yet"); the engine's own four and six carry the
     // document reason. 4 + 3 and 6 + 6: the reference's grid.
     await expect(draw.locator('.ribbon-tool')).toHaveCount(7)
     await expect(draw.locator('[data-tool^="draw:create"]')).toHaveCount(4)
-    for (const btn of await draw.locator('.ribbon-tool').all()) await expect(btn).toBeDisabled()
     const modifyTools = modify.locator('.ribbon-tool')
     await expect(modifyTools).toHaveCount(12)
     let modifyReal = 0
     for (const btn of await modifyTools.all()) {
       await expect(btn).toBeDisabled()
       const name = await btn.getAttribute('aria-label')
-      if (name.includes('(unavailable: opens on an imported DXF)')) modifyReal += 1
+      if (/\(unavailable: (select an entity in the drawing|no drawing in the browser engine yet|opening .*|the drawing could not be opened.*)\)/.test(name)) modifyReal += 1
       else expect(name).toContain('(unavailable: not in the browser engine yet)')
     }
     expect(modifyReal).toBe(6)
@@ -688,7 +731,7 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.locator('.workspace-card[data-engine-document="ribbon.dxf"]')).toHaveCount(1)
     await page.getByRole('tab', { name: 'Draw' }).click()
     // Loaded, nothing selected: the ribbon names the next missing thing.
-    await expect(modify.locator('.ribbon-note')).toHaveText('select an entity in the imported DXF')
+    await expect(modify.locator('.ribbon-note')).toHaveText('select an entity in the drawing')
     await page.getByRole('radio').first().check()
     await expect(modify.locator('.ribbon-note')).toHaveCount(0)
     const del = ribbon.locator('[data-tool="modify:delete"]')
@@ -698,7 +741,7 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByRole('status').filter({ hasText: /delete applied/ })).toHaveCount(1, { timeout: 60_000 })
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('1')
     // The deleted entity's selection cleared with it (selection identity).
-    await expect(modify.locator('.ribbon-note')).toHaveText('select an entity in the imported DXF')
+    await expect(modify.locator('.ribbon-note')).toHaveText('select an entity in the drawing')
 
     // W4d Slice B / W4e slice H: the Draw group creates real entities in
     // the imported document. A tool ARMS and the command line prompts for

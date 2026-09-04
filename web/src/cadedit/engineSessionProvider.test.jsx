@@ -899,7 +899,7 @@ describe('the band\'s Undo edit / Redo edit (W4f slice F)', () => {
   it('are disabled with the reason until an edit exists, then Undo re-loads the bytes before it and Redo steps forward', async () => {
     const studio = mount()
     expect(quick('quick-undo-edit').disabled).toBe(true)
-    expect(quick('quick-undo-edit').title).toBe('opens on an imported DXF')
+    expect(quick('quick-undo-edit').title).toBe('no drawing in the browser engine yet')
     await openAndLoad(studio, [LINE])
     expect(quick('quick-undo-edit').title).toBe('nothing to undo')
     expect(quick('quick-redo-edit').title).toBe('nothing to redo')

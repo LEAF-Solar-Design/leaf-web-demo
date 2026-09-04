@@ -879,6 +879,55 @@ export async function saveEditedDrawingVersion(drawingId, bytes, parentVersion, 
   return body
 }
 
+// W4g-1b (engine reach): the drawing's head as DXF bytes for the browser
+// engine (GET /api/drawings/{id}/dxf, W4g-1a). Resolves
+// `{ bytes, version, head, source, etag }`; `bytes` is null on a 304 (the
+// caller passed the ETag it already holds). Bounded twice: the transfer has
+// a budget, and a body over the engine's own ceiling is refused here from
+// Content-Length before a byte is read (the store would refuse it anyway,
+// after the whole transfer). Errors carry `.status` like every http() error.
+export const MAX_DRAWING_DXF_BYTES = 16 * 1024 * 1024
+export const DRAWING_DXF_TIMEOUT_MS = 20_000
+
+export async function fetchDrawingDxf(drawingId, { version = 'head', etag = null, fetchImpl = fetch } = {}) {
+  const path = `/api/drawings/${encodeURIComponent(drawingId)}/dxf?version=${encodeURIComponent(String(version))}`
+  const headers = { 'X-Tenant-Id': TENANT, ...guestDrawingHeaders(drawingId), ...authHeaders() }
+  if (etag) headers['If-None-Match'] = etag
+  const res = noteUnauthorized(
+    await fetchWithBudget(fetchImpl, `${API_BASE}${path}`, { headers }, DRAWING_DXF_TIMEOUT_MS),
+    path, headers.Authorization,
+  )
+  const meta = {
+    version: Number(res.headers.get('x-leaf-version')) || null,
+    head: Number(res.headers.get('x-leaf-head')) || null,
+    source: res.headers.get('x-leaf-dxf-source') || '',
+    etag: res.headers.get('etag') || null,
+  }
+  if (res.status === 304) return { bytes: null, ...meta }
+  if (!res.ok) {
+    let body = null
+    try { body = await res.clone().json() } catch { /* non-JSON errors keep the status-only contract */ }
+    const e = new Error(body?.error?.message || `GET ${path} -> ${res.status}`)
+    e.status = res.status
+    e.body = body
+    trackErrorShown({ http_status: res.status, error_code: body?.error?.error_code, endpoint_class: '/api/drawings' })
+    throw e
+  }
+  const declared = Number(res.headers.get('content-length'))
+  if (Number.isFinite(declared) && declared > MAX_DRAWING_DXF_BYTES) {
+    const e = new Error(`the drawing's DXF is ${declared} bytes, over the ${MAX_DRAWING_DXF_BYTES}-byte browser engine ceiling`)
+    e.status = 413
+    throw e
+  }
+  const buffer = await res.arrayBuffer()
+  if (buffer.byteLength > MAX_DRAWING_DXF_BYTES) {
+    const e = new Error(`the drawing's DXF is ${buffer.byteLength} bytes, over the ${MAX_DRAWING_DXF_BYTES}-byte browser engine ceiling`)
+    e.status = 413
+    throw e
+  }
+  return { bytes: new Uint8Array(buffer), ...meta }
+}
+
 export async function getDrawingUploadStatus(drawingId, guestSession = null, tenantId = null) {
   const headers = { 'X-Tenant-Id': tenantId || TENANT, ...authHeaders() }
   if (guestSession) headers['X-Guest-Session'] = guestSession

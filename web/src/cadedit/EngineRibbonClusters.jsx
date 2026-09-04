@@ -23,7 +23,8 @@
  * IMPORTED DXF only — the console's server-loaded drawing never enters it
  * (engine reach is chipped). So on the console's own drawing these groups
  * are unavailable, and they SAY SO: the panel note and every tool's reason
- * read "opens on an imported DXF" until a document is open, then name the
+ * read "no drawing in the browser engine yet" (or, since W4g-1b, what the
+ * head opener is doing about it) until a document is open, then name the
  * next thing missing (a selection, a busy engine, a crashed worker). The
  * reference's tools this engine has no operation for (rectangle, copy,
  * mirror, ...) are present, disabled, with "not in the browser engine yet".
@@ -74,7 +75,7 @@ function hasVisibleEscOwner() {
 export { DRAW_REASONS, MODIFY_REASONS, drawReason, modifyReason } from '../lib/actionRegistry.js'
 
 export const SAVE_REASONS = Object.freeze({
-  noDocument: 'opens on an imported DXF',
+  noDocument: 'no drawing in the browser engine yet',
   nothingEdited: 'edit something first',
   noTarget: 'download-only here: no project target',
   busy: 'engine busy: wait for the current edit',
@@ -180,9 +181,9 @@ const offTool = ({ id, label, icon }, size = 'small') => ({
 })
 
 export default function EngineRibbonClusters({ importOpen = false, onToggleImport, panels = ['draw', 'modify'] }) {
-  const { session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap } = useEngineSessionContext()
-  const modify = modifyReason(session)
-  const draw = drawReason(session)
+  const { session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap, reach } = useEngineSessionContext()
+  const modify = modifyReason(session, reach)
+  const draw = drawReason(session, reach)
   const save = saveReason(session, canSave)
   const { applyEdit, create } = session.actions
   const quickSlot = useSlot(QUICK_FILE_SLOT_ID)
