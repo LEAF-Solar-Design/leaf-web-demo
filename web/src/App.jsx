@@ -2451,6 +2451,8 @@ export default function App() {
       onUseAuthored,
       running: !!running,
       previewing: !!previewing,
+      writeLocked,
+      writeEntitled: canRunWrite,
     })
     // Per-tool placement: a tool whose record names a ribbon tab is grouped
     // into a cluster for THAT tab instead of the Manage families panel. A
