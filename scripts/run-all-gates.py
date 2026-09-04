@@ -1484,9 +1484,28 @@ def build_suites() -> List[Suite]:
               #   nit 4 (NOTE column ballooning the whole table) +0 test but
               #     the truncation is pinned by the blocker-3 rewrite's sibling
               #     assertion; _lockfile_blob_sha's own direct pin: +1
+              # 82 -> 85 (same branch, round-2 REVIEW FIX, 2026-09-04): +3
+              # for the round-2 blocker, which was that the SHIPPED CI
+              # wiring ranked prior proofs backwards. test-gate.yml lists
+              # candidates newest-created FIRST and copies them in that
+              # order, so every file mtime is its copy time and mtime order
+              # is exactly reversed; ranking now reads the artifact id out
+              # of the <artifact_id>.json name the workflow writes.
+              #   +1 the newest ARTIFACT ID wins over the newest mtime,
+              #     written in the order the workflow copies them so the
+              #     old ranking would pick the oldest candidate
+              #   +1 a filename that carries no artifact id is SKIPPED, not
+              #     guessed newest
+              #   +1 a proof without a PASS for EVERY registered audit suite
+              #     is never verified (absent, UNAVAILABLE and MISSING all
+              #     refuse), which is the other half of the same blocker
               # Local run on this tree (worktree C:/tmp/leaf-gate-audit):
-              # 82 passed, 0 failed, 355.96s.
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 82),
+              # 85 passed, 0 failed, in 25.58s. Wall time is NOT a contract:
+              # three earlier runs of this same suite on this host measured
+              # 94s, 140s and 356s, entirely tracking how many other lanes
+              # were building at the time. The count is the contract; the
+              # clock is not.
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 85),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
@@ -2824,28 +2843,34 @@ def emit_gate_proof(path: Path, *, fingerprint: str, total: int,
     shard result files); only entries for kind="npm-audit" suites are ever
     written out, as `audit_suites`, and only a PASS entry also carries the
     CURRENT lockfile_blob_sha (see _lockfile_blob_sha) — an UNAVAILABLE entry
-    is recorded honestly but with no blob sha, so it can never later serve as
-    a transitivity ancestor (see the SCHEMA 2 note above). None/empty is
-    accepted (older call sites, or a suite id this run never touched) and
-    simply yields an empty audit_suites list — never a crash and never a
-    silently-fabricated PASS."""
+    is recorded honestly but with no blob sha, so it can never serve as a
+    transitivity ancestor. EVERY registered kind="npm-audit" suite gets an
+    entry, including MISSING when the map is None or lacks that id (an older
+    call site, or a suite this run never touched): verify_gate_proof requires
+    a PASS for every one of them, so an omitted entry would read as "nothing
+    to refuse" and hand out a green skip. Never a fabricated PASS."""
     tree, head, problem = checkout_tree_identity(repo)
     if problem:
         return problem
     audit_suites: list[dict] = []
-    if suite_statuses:
-        for s in build_suites():
-            if s.kind != "npm-audit":
-                continue
-            status = suite_statuses.get(s.id)
-            if status is None:
-                continue
-            entry: dict = {"id": s.id, "status": status}
-            if status == "PASS":
-                sha = _lockfile_blob_sha(s.cwd)
-                if sha:
-                    entry["lockfile_blob_sha"] = sha
-            audit_suites.append(entry)
+    statuses = suite_statuses or {}
+    for s in build_suites():
+        if s.kind != "npm-audit":
+            continue
+        # An HONEST RECORD, one entry per registered audit suite, always:
+        # PASS (with the lockfile blob sha that makes transitivity possible),
+        # UNAVAILABLE for a registry outage, or MISSING when this run never
+        # reported the suite at all. The entry is never omitted, because
+        # verify_gate_proof requires a PASS for EVERY registered audit suite
+        # and an absent entry would otherwise read as "nothing to refuse".
+        # Minting stays honest; refusing the REUSE is verify's job.
+        status = statuses.get(s.id) or "MISSING"
+        entry: dict = {"id": s.id, "status": status}
+        if status == "PASS":
+            sha = _lockfile_blob_sha(s.cwd)
+            if sha:
+                entry["lockfile_blob_sha"] = sha
+        audit_suites.append(entry)
     payload = {
         "schema": GATE_PROOF_SCHEMA,
         "kind": GATE_PROOF_KIND,
@@ -2930,16 +2955,27 @@ def verify_gate_proof(proof_path: Path, expect_tree: str) -> int:
               "this checkout derives (a different catalog, or a proof minted "
               "from a differently-rooted checkout); refusing to reuse")
         return 1
+    # EVERY registered audit suite must carry a PASS entry. Refusing only
+    # UNAVAILABLE would let an absent entry (or an empty list) read as
+    # "nothing to refuse" and hand a reusable green skip to a proof that
+    # never proved the lockfile clean.
     audit_suites = data.get("audit_suites")
-    if isinstance(audit_suites, list):
-        unavailable = sorted({e.get("id") for e in audit_suites
-                              if isinstance(e, dict) and e.get("status") == "UNAVAILABLE"})
-        if unavailable:
-            print(f"NOT VERIFIED: proof carries an UNAVAILABLE audit suite "
-                  f"({', '.join(map(str, unavailable))}); a registry-outage "
-                  f"proof is never reused as a green skip, the next build "
-                  f"must re-run the gate")
-            return 1
+    audit_suites = audit_suites if isinstance(audit_suites, list) else []
+    passed = {e.get("id") for e in audit_suites
+              if isinstance(e, dict) and e.get("status") == "PASS"}
+    not_passed = []
+    for s_ in suites:
+        if s_.kind != "npm-audit" or s_.id in passed:
+            continue
+        seen = next((e.get("status") for e in audit_suites
+                     if isinstance(e, dict) and e.get("id") == s_.id), None)
+        not_passed.append(f"{s_.id}={seen or 'absent'}")
+    if not_passed:
+        print(f"NOT VERIFIED: proof does not carry a PASS for every audit "
+              f"suite ({', '.join(not_passed)}); a registry-outage or "
+              f"evidence-free proof is never reused as a green skip, the "
+              f"next build must re-run the gate")
+        return 1
     src = data.get("source") if isinstance(data.get("source"), dict) else {}
     print(f"VERIFIED: gate proof binds tree {tree} on catalog fingerprint "
           f"{fingerprint} (self-reported mint: run {src.get('run_id') or '?'} "
@@ -3003,22 +3039,42 @@ def write_result_json(path: str, *, fingerprint: str, total: int,
 
 def _newest_proof_with_passed_audit(prior_proofs_dir: Path, suite_id: str
                                     ) -> Optional[tuple[str, str, str]]:
-    """(blob_sha, source_path, tree) from the NEWEST (by file mtime) document
-    under prior_proofs_dir that is a schema-2 leaf-gate-proof carrying a PASS
+    """(blob_sha, source_path, tree) from the NEWEST document under
+    prior_proofs_dir that is a schema-2 leaf-gate-proof carrying a PASS
     entry for suite_id in its audit_suites -- or None. Deliberately looks at
     ONLY the single newest such file, never falls back to an older one that
     might happen to match: an attacker (or an honest but stale cache) citing
     an ancient proof must never satisfy this on a technicality, and "the
     newest artifact the workflow can see" is exactly what the CI wiring
     downloads into this directory (see test-gate.yml's "Download recent
-    gate-proof artifacts" step). blob_sha is '' (not None) when that file's
+    gate-proof artifacts" step).
+
+    NEWEST IS THE ARTIFACT ID IN THE FILE NAME, never the file mtime. That
+    step downloads candidates newest-created FIRST and copies them in that
+    order, so every mtime is the COPY time and mtime order is exactly
+    backwards (measured 2026-09-04: the oldest-created proof won). GitHub
+    artifact ids increase with creation, and the step names each file
+    "<artifact_id>.json", so the id IS the creation order and it survives
+    any copy. A file whose stem is not an integer cannot be ranked and is
+    SKIPPED rather than guessed at: unrankable is not newest.
+
+    blob_sha is '' (not None) when that file's
     PASS entry carries no lockfile_blob_sha -- a caller comparing shas must
     treat that as a non-match, never a wildcard. Never raises: an unreadable
     directory or a corrupt file is skipped exactly like verify_shard_results'
     own shard parse loop, and the fail-closed direction is always "no match"."""
     try:
-        paths = sorted(prior_proofs_dir.rglob("*.json"),
-                       key=lambda p: p.stat().st_mtime, reverse=True)
+        ranked: list[tuple[int, Path]] = []
+        for candidate in prior_proofs_dir.rglob("*.json"):
+            stem = candidate.stem
+            if not stem.isdigit():
+                print(f"prior gate proof {candidate.name} is not named "
+                      f"<artifact_id>.json; cannot rank it by creation, "
+                      f"skipping", file=sys.stderr)
+                continue
+            ranked.append((int(stem), candidate))
+        paths = [c for _, c in sorted(ranked, key=lambda pair: pair[0],
+                                      reverse=True)]
     except OSError:
         return None
     for p in paths:

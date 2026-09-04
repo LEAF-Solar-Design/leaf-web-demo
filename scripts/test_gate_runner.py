@@ -891,7 +891,7 @@ def test_verifier_proves_via_lockfile_transitivity_with_a_matching_prior_proof(
 
     prior_dir = tmp_path / "prior-proofs"
     prior_dir.mkdir()
-    (prior_dir / "gate-proof.json").write_text(_json.dumps({
+    (prior_dir / "40001.json").write_text(_json.dumps({
         "schema": g.GATE_PROOF_SCHEMA, "kind": g.GATE_PROOF_KIND,
         "tree": "a" * 40, "head_sha": "b" * 40,
         "catalog_fingerprint": "f" * 64, "total_suites": 1,
@@ -922,7 +922,7 @@ def test_verifier_fails_transitivity_when_prior_proof_blob_sha_differs(
 
     prior_dir = tmp_path / "prior-proofs"
     prior_dir.mkdir()
-    (prior_dir / "gate-proof.json").write_text(_json.dumps({
+    (prior_dir / "40001.json").write_text(_json.dumps({
         "schema": g.GATE_PROOF_SCHEMA, "kind": g.GATE_PROOF_KIND,
         "tree": "a" * 40, "head_sha": "b" * 40,
         "catalog_fingerprint": "f" * 64, "total_suites": 1,
@@ -1886,9 +1886,16 @@ def test_emit_gate_proof_writes_a_bound_schema2_document(tmp_path):
     assert data["head_sha"] == head
     assert data["catalog_fingerprint"] == "f" * 64
     assert data["total_suites"] == 5
-    # No suite_statuses given: audit_suites is present but empty, never
-    # fabricated.
-    assert data["audit_suites"] == []
+    # No suite_statuses given: EVERY registered audit suite still gets an
+    # entry, with status MISSING. An omitted entry was the fail-open hole
+    # (verify_gate_proof requires a PASS for every registered audit suite, so
+    # "absent" would have read as "nothing to refuse"). A MISSING entry can
+    # never carry a lockfile blob sha, so it can never be a transitivity
+    # ancestor either.
+    audit_ids = [x.id for x in g.build_suites() if x.kind == "npm-audit"]
+    assert [e["id"] for e in data["audit_suites"]] == audit_ids
+    assert {e["status"] for e in data["audit_suites"]} == {"MISSING"}
+    assert all("lockfile_blob_sha" not in e for e in data["audit_suites"])
 
 
 def test_emit_gate_proof_records_audit_suite_status_and_blob_sha_only_for_pass(
@@ -1947,7 +1954,12 @@ def test_verify_gate_proof_accepts_its_own_emission(tmp_path, capsys):
     repo = _scratch_git_checkout(tmp_path)
     fingerprint = g.catalog_fingerprint(g.build_suites())
     out = tmp_path / "gate-proof.json"
-    assert g.emit_gate_proof(out, fingerprint=fingerprint, total=1, repo=repo) == ""
+    assert g.emit_gate_proof(
+        out, fingerprint=fingerprint, total=1, repo=repo,
+        # Emission now REFUSES without a PASS for every registered audit
+        # suite, so a round trip must supply them.
+        suite_statuses={s.id: "PASS" for s in g.build_suites()
+                        if s.kind == "npm-audit"}) == ""
     tree, _, _ = g.checkout_tree_identity(repo)
 
     rc = g.verify_gate_proof(out, tree)
@@ -2001,9 +2013,13 @@ def test_verify_gate_proof_refuses_every_forgery(tmp_path, capsys):
     # round-1 blocker 2, requirement 1: a proof minted while (or laundered
     # from) a registry outage must never be reused as a green skip, even
     # though its tree and catalog fingerprint both check out.
-    refuse(tree, "UNAVAILABLE audit suite",
+    refuse(tree, "PASS for every audit suite",
            lambda d: d.update(audit_suites=[
                {"id": "harness-audit-high", "status": "UNAVAILABLE"}]))
+    # ...and the same refusal covers an audit suite that is simply absent,
+    # which is what an evidence-free proof looks like.
+    refuse(tree, "PASS for every audit suite",
+           lambda d: d.update(audit_suites=[]))
 
     # Unreadable file.
     missing = tmp_path / "missing.json"
@@ -2140,3 +2156,82 @@ def test_vitest_skip_in_a_jsx_file_that_is_not_allowlisted_still_fails(tmp_path)
 
     assert result.status == "FAIL"
     assert "non-allowlisted vitest skip" in result.note
+
+
+def _write_proof(g, tmp_path, artifact_id, blob, *, status="PASS",
+                 suite="harness-audit-high", fingerprint="fp", total=1):
+    """A schema-2 proof named the way test-gate.yml names it."""
+    import json
+    entry = {"id": suite, "status": status}
+    if status == "PASS":
+        entry["lockfile_blob_sha"] = blob
+    doc = {
+        "schema": g.GATE_PROOF_SCHEMA,
+        "kind": g.GATE_PROOF_KIND,
+        "tree": "t" * 40,
+        "head_sha": "h" * 40,
+        "catalog_fingerprint": fingerprint,
+        "total_suites": total,
+        "audit_suites": [entry] if entry["status"] != "ABSENT" else [],
+    }
+    p = tmp_path / f"{artifact_id}.json"
+    p.write_text(json.dumps(doc), encoding="utf-8")
+    return p
+
+
+def test_the_prior_proof_chosen_is_the_newest_artifact_id_not_the_newest_mtime(tmp_path):
+    """test-gate.yml downloads candidates newest-created FIRST and copies them
+    in that order, so every mtime is the copy time and mtime order is exactly
+    backwards. Written in that same order here, the newest ARTIFACT ID wins."""
+    g = _load_runner()
+    newest = _write_proof(g, tmp_path, 3000, "1" * 40)   # first written, oldest mtime
+    _write_proof(g, tmp_path, 2000, "2" * 40)
+    _write_proof(g, tmp_path, 1000, "3" * 40)            # last written, newest mtime
+    got = g._newest_proof_with_passed_audit(tmp_path, "harness-audit-high")
+    assert got is not None
+    assert got[0] == "1" * 40, got
+    assert got[1] == str(newest), got
+
+
+def test_a_prior_proof_that_cannot_be_ranked_is_skipped_not_guessed(tmp_path):
+    """A file not named <artifact_id>.json carries no creation order, so it is
+    skipped rather than treated as the newest."""
+    import json
+    g = _load_runner()
+    _write_proof(g, tmp_path, 1000, "3" * 40)
+    doc = json.loads((tmp_path / "1000.json").read_text(encoding="utf-8"))
+    doc["audit_suites"][0]["lockfile_blob_sha"] = "9" * 40
+    (tmp_path / "gate-proof-latest.json").write_text(json.dumps(doc), encoding="utf-8")
+    got = g._newest_proof_with_passed_audit(tmp_path, "harness-audit-high")
+    assert got is not None and got[0] == "3" * 40, got
+
+
+def test_a_proof_without_a_pass_for_every_audit_suite_is_never_verified(tmp_path, capsys):
+    """UNAVAILABLE, MISSING and absent all fail closed: only a PASS entry for
+    every registered audit suite makes a proof reusable as a green skip."""
+    import json
+    g = _load_runner()
+    suites = g.build_suites()
+    audit_ids = [s.id for s in suites if s.kind == "npm-audit"]
+    assert audit_ids, "the catalog must register at least one npm-audit suite"
+    fingerprint = g.catalog_fingerprint(suites)
+    # verify_gate_proof compares the DOCUMENT's tree against expect_tree; a
+    # literal is enough here and keeps the test independent of the worktree
+    # state (checkout_tree_identity returns '' on a dirty or unusual tree).
+    tree = "a1" * 20
+    for block, why in (([], "absent"),
+                       ([{"id": audit_ids[0], "status": "UNAVAILABLE"}], "unavailable"),
+                       ([{"id": audit_ids[0], "status": "MISSING"}], "missing")):
+        doc = {
+            "schema": g.GATE_PROOF_SCHEMA,
+            "kind": g.GATE_PROOF_KIND,
+            "tree": tree,
+            "head_sha": "h" * 40,
+            "catalog_fingerprint": fingerprint,
+            "total_suites": len(suites),
+            "audit_suites": block,
+        }
+        path = tmp_path / f"proof-{why}.json"
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        assert g.verify_gate_proof(path, tree) == 1, why
+        assert "PASS for every audit suite" in capsys.readouterr().out, why
