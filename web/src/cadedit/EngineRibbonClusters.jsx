@@ -163,6 +163,18 @@ export const PROMPTS = Object.freeze({
     { ask: 'Specify offset distance:', fields: [['dist', 'distance']] },
     { ask: 'Specify point on side to offset:', fields: [['x', 'x'], ['y', 'y']] },
   ] },
+  // W4g-5b: the reference asks for the grid, then the spacing; the polar
+  // form asks how many and how far round. The count INCLUDES the source in
+  // both, which is what a drafter means by "4 copies around a circle".
+  arrayRect: { verb: 'ARRAYRECT', steps: [
+    { ask: 'Enter number of rows and columns:', fields: [['rows', 'rows', 'numeric'], ['cols', 'columns', 'numeric']] },
+    { ask: 'Specify distance between rows and columns:', fields: [['rowGap', 'row spacing'], ['colGap', 'column spacing']] },
+  ] },
+  arrayPolar: { verb: 'ARRAYPOLAR', steps: [
+    { ask: 'Specify centre point of array:', fields: [['cx', 'cx'], ['cy', 'cy']] },
+    { ask: 'Enter number of items, including the source:', fields: [['count', 'items', 'numeric']] },
+    { ask: 'Specify angle to fill:', fields: [['totalDeg', 'angle to fill']] },
+  ] },
   moveVertex: { verb: 'MOVE VERTEX', steps: [
     { ask: 'Specify vertex:', fields: [['vertexIndex', 'vertex', 'numeric']] },
     { ask: 'Specify displacement:', fields: [['dx', 'dx'], ['dy', 'dy']] },

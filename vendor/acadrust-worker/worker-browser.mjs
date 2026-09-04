@@ -160,7 +160,9 @@ async function applyEdit(engine, message) {
   if (!current) return refused(op, 'no_document_loaded')
   const doc = current.doc
   let createdHandle = null
-  let explodedHandles = null
+  // Every op that makes MORE than one entity (explode's parts, an
+  // array's copies) reports them here, in document order.
+  let createdHandles = null
   const create = CREATE_OPS[op]
   if (create) {
     if (typeof doc[op] !== 'function') return refused(op, `engine_lacks_create:${op}`)
@@ -213,7 +215,20 @@ async function applyEdit(engine, message) {
         const parts = doc.explodeEntity(index)
         if (!Array.isArray(parts) || parts.length === 0) return refused(op, 'explode_returned_no_parts')
         createdHandle = handleId(parts[0], 'create_returned_no_handle')
-        explodedHandles = parts.map((h) => handleId(h, 'create_returned_no_handle'))
+        createdHandles = parts.map((h) => handleId(h, 'create_returned_no_handle'))
+      } else if (op === 'arrayRect' || op === 'arrayPolar') {
+        // ONE engine op for the whole array: every applied edit re-parses the
+        // document and hands the bytes back, so N client-side copies would
+        // cost N round trips and N undo steps. The wrapper bounds the count
+        // and refuses before it writes.
+        const fn = op === 'arrayRect' ? 'arrayRectEntity' : 'arrayPolarEntity'
+        if (typeof doc[fn] !== 'function') return refused(op, `engine_lacks_op:${op}`)
+        const made = op === 'arrayRect'
+          ? doc.arrayRectEntity(index, Number(payload.rows), Number(payload.cols), Number(payload.rowGap), Number(payload.colGap))
+          : doc.arrayPolarEntity(index, Number(payload.count), Number(payload.cx), Number(payload.cy), Number(payload.totalDeg))
+        if (!Array.isArray(made) || made.length === 0) return refused(op, 'array_returned_no_copies')
+        createdHandle = handleId(made[0], 'create_returned_no_handle')
+        createdHandles = made.map((h) => handleId(h, 'create_returned_no_handle'))
       } else return refused(op, `unknown_op:${op}`)
     } catch (error) {
       // The wrapper validates before it writes, so a refusal here means the
@@ -243,20 +258,15 @@ async function applyEdit(engine, message) {
     bytes: written,
     byteLength: written.length,
   }
-  if (createdHandle !== null) {
-    // What was just drawn, found again BY HANDLE in the re-parse (an index
-    // is not an identity). null means the writer dropped it: the caller
-    // must treat that as a defect, never as success.
-    const created = entities.find((e) => e.handle === createdHandle)
-    reply.createdId = created ? created.id : null
-  }
-  if (explodedHandles !== null) {
-    // Every segment the explode made, by id, in document order; a part the
-    // writer dropped reads as null in its slot rather than vanishing.
-    reply.createdIds = explodedHandles.map((h) => {
-      const hit = entities.find((e) => e.handle === h)
-      return hit ? hit.id : null
-    })
+  if (createdHandle !== null || createdHandles !== null) {
+    // Found again BY HANDLE in the re-parse (an index is not an identity),
+    // through ONE index of the entity list: a find per created handle is
+    // quadratic on an array of a thousand copies. null in a slot means the
+    // writer dropped that entity, which the caller treats as a defect, never
+    // as success.
+    const byHandle = new Map(entities.map((e) => [e.handle, e.id]))
+    if (createdHandle !== null) reply.createdId = byHandle.get(createdHandle) ?? null
+    if (createdHandles !== null) reply.createdIds = createdHandles.map((h) => byHandle.get(h) ?? null)
   }
   return reply
 }

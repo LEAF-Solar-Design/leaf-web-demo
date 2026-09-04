@@ -194,6 +194,9 @@ describe('honest triggers', () => {
       // W4g-5: OFFSET joined the row (a parallel copy, computed here and
       // drawn by the engine's own create).
       'modify:copy', 'modify:mirror', 'modify:rotate', 'modify:scale', 'modify:explode', 'modify:offset',
+      // W4g-5b: ARRAY, as the reference's two forms, because they take
+      // different operands.
+      'modify:arrayRect', 'modify:arrayPolar',
     ])
   })
 
