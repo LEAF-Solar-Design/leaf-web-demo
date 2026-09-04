@@ -52,6 +52,7 @@ import EngineSessionProvider from './cadedit/EngineSessionProvider.jsx'
 import EngineRibbonClusters from './cadedit/EngineRibbonClusters.jsx'
 import CommandLineArmer from './cadedit/CommandLineArmer.jsx'
 import EngineDocumentView from './cadedit/EngineDocumentView.jsx'
+import EngineHeadOpener from './cadedit/EngineHeadOpener.jsx'
 import CanvasPointPicker from './cadedit/CanvasPointPicker.jsx'
 import { COCKPIT_COMMAND_EVENT, parseDrawingCommand } from './lib/commandWords.js'
 import { markInstant } from './lib/instant.js'
@@ -86,6 +87,7 @@ import {
   getDrawingVersions, undoDrawing, redoDrawing, takeCheckout, releaseCheckout, nlPrompt,
   createOrg, listProjects, createProject, openProject, subscribeUnauthorized,
   saveEditedDrawingVersion,
+  fetchDrawingDxf,
 } from './api.js'
 import { matchPrompt } from './mock/mockNlPrompt.js'
 import { shouldStartTour } from './demo/tourEntry.js'
@@ -2959,6 +2961,19 @@ export default function App() {
                     if (intake) el.dataset.engineDocument = intake.documentId
                     else delete el.dataset.engineDocument
                   }}
+                />
+              )}
+              {/* W4g-1b: the console's OWN drawing opens in the engine at
+                  mount (GET .../dxf), so Draw/Modify are live without an
+                  import; a moved head (a tool run, undo/redo, restore)
+                  re-opens a clean engine copy. Live sessions only: mock has
+                  no server head to fetch, and stays import-only, honestly. */}
+              {ENV_CAD_EDIT && (
+                <EngineHeadOpener
+                  drawingId={REQUESTED_DRAWING_ID}
+                  enabled={!mock && !!intake}
+                  headKey={drawingState?.head ?? null}
+                  fetchDxf={fetchDrawingDxf}
                 />
               )}
               {/* W4f slice A1: a click on the drawing answers the armed

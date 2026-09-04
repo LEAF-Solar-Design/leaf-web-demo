@@ -79,6 +79,23 @@ const ARMED_GROUPS = new Set(['draw', 'modify'])
 const ARMED_OP = /^[a-zA-Z]{1,32}$/
 const sameFrom = (a, b) => (!a && !b) || (!!a && !!b && a[0] === b[0] && a[1] === b[1])
 
+/**
+ * W4g-1b: engine reach, the state of opening the console's own drawing in
+ * the engine (EngineHeadOpener writes it, the ribbon's reason ladder reads
+ * it). A closed vocabulary; `sentence` is what the ribbon shows while the
+ * engine holds no document.
+ */
+export const REACH_STATE = Object.freeze({
+  IDLE: 'idle',
+  OPENING: 'opening',
+  OPEN: 'open',
+  FAILED: 'failed',
+  STALE: 'stale',
+})
+const REACH_STATES = new Set(Object.values(REACH_STATE))
+const MAX_REACH_SENTENCE = 300
+export const REACH_IDLE = Object.freeze({ state: REACH_STATE.IDLE, sentence: '' })
+
 export default function EngineSessionProvider({
   createWorker = defaultCreateWorker,
   saveTarget = null,
@@ -149,10 +166,27 @@ export default function EngineSessionProvider({
   const [osnap, setOsnapState] = useState(true)
   const setOsnap = useCallback((next) => { setOsnapState(next === true) }, [])
 
+  // W4g-1b: engine reach. Fails closed on any shape outside the vocabulary
+  // (a consumer bug never puts a non-sentence on the ribbon); bounded text.
+  const [reach, setReachState] = useState(REACH_IDLE)
+  const setReach = useCallback((next) => {
+    if (!next || typeof next !== 'object' || !REACH_STATES.has(next.state)) return
+    const sentence = typeof next.sentence === 'string' ? next.sentence.slice(0, MAX_REACH_SENTENCE) : ''
+    const version = Number.isInteger(next.version) && next.version > 0 ? next.version : null
+    const head = Number.isInteger(next.head) && next.head > 0 ? next.head : null
+    const source = typeof next.source === 'string' ? next.source.slice(0, 32) : ''
+    setReachState((current) => (
+      current.state === next.state && current.sentence === sentence
+        && current.version === version && current.head === head && current.source === source
+        ? current
+        : Object.freeze({ state: next.state, sentence, version, head, source })
+    ))
+  }, [])
+
   const canSave = saveTarget !== null && saveTarget !== undefined
   const value = useMemo(
-    () => ({ session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap }),
-    [session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap],
+    () => ({ session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap, reach, setReach }),
+    [session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap, reach, setReach],
   )
   return <EngineSessionContext.Provider value={value}>{children}</EngineSessionContext.Provider>
 }

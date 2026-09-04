@@ -90,19 +90,30 @@ export const REASONS = Object.freeze({
   publishing: 'publishing: not in the runnable catalog yet',
 })
 
+// W4g-1b (engine reach): the console's own drawing opens in the engine at
+// mount, so "no document" is a state, not "import something first".
 export const DRAW_REASONS = Object.freeze({
-  noDocument: 'opens on an imported DXF',
+  noDocument: 'no drawing in the browser engine yet',
   crashed: 'engine stopped: open a drawing again',
   busy: 'engine busy: wait for the current edit',
 })
 
 export const MODIFY_REASONS = Object.freeze({
-  noDocument: 'opens on an imported DXF',
+  noDocument: 'no drawing in the browser engine yet',
   crashed: 'engine stopped: open a drawing again',
   busy: 'engine busy: wait for the current edit',
-  noSelection: 'select an entity in the imported DXF',
+  noSelection: 'select an entity in the drawing',
   readOnlyKind: 'read-only entity kind',
 })
+
+// W4g-1b: while the engine holds no document, the reach state (the provider's
+// record of opening the console's own drawing) names what is happening, or
+// why it could not happen, instead of the bare "no drawing" sentence. Only
+// the opening and failed states speak; open or idle leaves the ladder's own.
+function reachSentence(reach) {
+  if (!reach || typeof reach.sentence !== 'string' || !reach.sentence) return ''
+  return reach.state === 'opening' || reach.state === 'failed' ? reach.sentence : ''
+}
 
 // The global key ladder's own vocabulary. A ladder rung with nothing to act on
 // is not an error — it is an action that is not available right now, and it
@@ -127,19 +138,19 @@ export const KNOWN_REASON_VALUES = Object.freeze(new Set([
 // The order is the order a drafter resolves the blockers in.
 
 /** Why the Draw group is unavailable right now, or '' when it is live. Creation needs no selection. */
-export function drawReason(session) {
-  if (!session) return DRAW_REASONS.noDocument
+export function drawReason(session, reach = null) {
+  if (!session) return reachSentence(reach) || DRAW_REASONS.noDocument
   if (session.errorKind === SESSION_ERROR.CRASHED) return DRAW_REASONS.crashed
-  if (!session.engineParsed) return DRAW_REASONS.noDocument
+  if (!session.engineParsed) return reachSentence(reach) || DRAW_REASONS.noDocument
   if (session.busy) return DRAW_REASONS.busy
   return ''
 }
 
 /** Why the Modify group is unavailable right now, or '' when it is live. */
-export function modifyReason(session) {
-  if (!session) return MODIFY_REASONS.noDocument
+export function modifyReason(session, reach = null) {
+  if (!session) return reachSentence(reach) || MODIFY_REASONS.noDocument
   if (session.errorKind === SESSION_ERROR.CRASHED) return MODIFY_REASONS.crashed
-  if (!session.engineParsed) return MODIFY_REASONS.noDocument
+  if (!session.engineParsed) return reachSentence(reach) || MODIFY_REASONS.noDocument
   if (session.busy) return MODIFY_REASONS.busy
   if (!session.selected) return MODIFY_REASONS.noSelection
   if (session.selected.editable === false) return MODIFY_REASONS.readOnlyKind

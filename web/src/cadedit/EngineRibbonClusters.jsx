@@ -74,7 +74,7 @@ function hasVisibleEscOwner() {
 export { DRAW_REASONS, MODIFY_REASONS, drawReason, modifyReason } from '../lib/actionRegistry.js'
 
 export const SAVE_REASONS = Object.freeze({
-  noDocument: 'opens on an imported DXF',
+  noDocument: 'no drawing in the browser engine yet',
   nothingEdited: 'edit something first',
   noTarget: 'download-only here: no project target',
   busy: 'engine busy: wait for the current edit',
@@ -180,9 +180,9 @@ const offTool = ({ id, label, icon }, size = 'small') => ({
 })
 
 export default function EngineRibbonClusters({ importOpen = false, onToggleImport, panels = ['draw', 'modify'] }) {
-  const { session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap } = useEngineSessionContext()
-  const modify = modifyReason(session)
-  const draw = drawReason(session)
+  const { session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap, reach } = useEngineSessionContext()
+  const modify = modifyReason(session, reach)
+  const draw = drawReason(session, reach)
   const save = saveReason(session, canSave)
   const { applyEdit, create } = session.actions
   const quickSlot = useSlot(QUICK_FILE_SLOT_ID)

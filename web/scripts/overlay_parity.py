@@ -29,6 +29,9 @@ REFERENCE_EDGES_Y = (28, 123, 155, 181, 909)
 REFERENCE_EDGE_X = 250
 EDGE_TOLERANCE = 2
 CHROME_GATE = 6.0
+# W4g-1b canvas parity (the same drawing from the intake and from the engine
+# projection): mean absolute pixel difference over the canvas box alone.
+CANVAS_GATE = 2.0
 LUMA_STEP = 18
 
 
@@ -107,6 +110,15 @@ def main(argv):
 
     whole = mean_abs_diff(ref, ours)
     chrome = mean_abs_diff(ref, ours, mask)
+    # W4g-1b: the canvas box ALONE (the inverse mask), for the engine-view
+    # parity gate: the same drawing drawn from the intake and from the
+    # engine's projection must look the same on the canvas. Reported always;
+    # `--canvas-only` makes it the gate (at or below CANVAS_GATE) instead of
+    # the chrome number, because that comparison is ours-vs-ours, not
+    # ours-vs-reference.
+    canvas_only = '--canvas-only' in flags
+    canvas_mask = ImageChops.invert(mask)
+    canvas_diff = mean_abs_diff(ref, ours, canvas_mask)
 
     # Three probe columns: x=100 (the pane), x=700 (the bands over the
     # canvas), and x=300 for the viewport strip's bottom edge (y=181): the
@@ -132,7 +144,10 @@ def main(argv):
     within_x = dx is not None and abs(dx) <= EDGE_TOLERANCE
     ok = ok and within_x
     rows.append({'axis': 'x', 'reference': REFERENCE_EDGE_X, 'ours': got_x, 'delta': dx, 'ok': within_x})
-    ok = ok and chrome <= CHROME_GATE
+    if canvas_only:
+        ok = canvas_diff <= CANVAS_GATE
+    else:
+        ok = ok and chrome <= CHROME_GATE
 
     out_dir = out_dir or ours_path.parent
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -147,6 +162,8 @@ def main(argv):
     report = {
         'reference': str(ref_path), 'ours': str(ours_path),
         'whole_frame_diff_pct': round(whole, 2), 'chrome_diff_pct': round(chrome, 2),
+        'canvas_diff_pct': round(canvas_diff, 2), 'canvas_gate_pct': CANVAS_GATE,
+        'gate_mode': 'canvas-only' if canvas_only else 'chrome',
         'chrome_gate_pct': CHROME_GATE, 'edge_tolerance_px': EDGE_TOLERANCE,
         'edges': rows, 'our_edges_y': our_y[:60], 'our_edges_x': our_x[:20], 'gate': ok,
     }
