@@ -47,6 +47,14 @@ Special handling, all documented on the scoreboard:
     duplicate runs one test file twice and can answer to two different
     expected floors at once — a scoreboard that cannot say which floor the
     gate stands on.
+  * `harness-audit-high` (kind="npm-audit") tells a real lockfile advisory
+    apart from an npmjs.org registry outage: exit 0 is PASS, exit 1 with a
+    parseable advisory JSON report is FAIL, and a registry/transport error
+    (5xx, ECONNRESET/ETIMEDOUT, no JSON report) is UNAVAILABLE — retried up to
+    AUDIT_MAX_ATTEMPTS times with backoff INSIDE this one suite (never
+    re-entering the outage through the generic --retry), never counted as a
+    shard failure, and called out on the scoreboard with a
+    "NOT PROVEN BY AUDIT" line. See run_npm_audit_suite.
 
 USAGE
 -----
@@ -1446,7 +1454,14 @@ def build_suites() -> List[Suite]:
               # printed `scripts test_gate_runner.py  >=60  66  PASS` with no
               # skip note; a local run on 237b90c0 agrees at 66 executed, 0
               # skipped.
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 66),
+              # 66 -> 73 (fix/gate-audit-registry-outage, 2026-09-04): +7 for
+              # the harness-audit-high registry-outage fix -- clean/real-
+              # advisory/recovers-after-two-outages/still-UNAVAILABLE-after-
+              # three cases, the named worst-case-wall constant, the
+              # scoreboard's NOT PROVEN BY AUDIT line, and the shard fan-in
+              # treating UNAVAILABLE as not-FAILED. Local run on this tree
+              # (worktree C:/tmp/leaf-gate-audit): 73 passed, 0 failed.
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 73),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
@@ -1583,8 +1598,21 @@ def build_suites() -> List[Suite]:
               [_npx(), "tsc", "--noEmit"], None),
         Suite("harness-tsc-build", "harness npx tsc -p tsconfig.build.json", "tsc", HARNESS,
               [_npx(), "tsc", "-p", "tsconfig.build.json"], None),
-        Suite("harness-audit-high", "harness npm audit (high threshold)", "script", HARNESS,
-              [_npm(), "audit", "--audit-level=high"], None),
+        # kind="npm-audit" (not "script"): the advisory-bulk registry endpoint
+        # has real outages, and a plain FAIL cannot tell "the lockfile has a
+        # real advisory" apart from "npmjs.org answered 503 this minute". See
+        # run_npm_audit_suite / _classify_npm_audit for the classification and
+        # bounded-backoff contract (worst case AUDIT_WORST_CASE_WALL_S = 140s).
+        # --fetch-retries=0 + --fetch-timeout bound ONE npm attempt so this
+        # runner's own backoff is what retries, not npm's (default
+        # fetch-timeout=300000ms x fetch-retries=2 measured the ~700-840s
+        # shard this fix exists to close). --json gives a parseable advisory
+        # report so a real finding is never confused with a transport error.
+        Suite("harness-audit-high", "harness npm audit (high threshold)",
+              "npm-audit", HARNESS,
+              [_npm(), "audit", "--audit-level=high", "--json", "--no-fund",
+               "--fetch-retries=0", f"--fetch-timeout={AUDIT_FETCH_TIMEOUT_S * 1000}"],
+              None),
         Suite("web-customization-check", "web customization static check", "script", WEB,
               [_npm(), "run", "check:customization"], None),
         Suite("web-customize-panel-check", "R7 self-edit panel boundary check", "script", WEB,
@@ -1912,6 +1940,184 @@ def parse_vitest(text: str) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# npm audit: registry-outage-tolerant classification (harness-audit-high)
+# --------------------------------------------------------------------------- #
+# The advisory-bulk endpoint (registry.npmjs.org/-/npm/v1/security/advisories/bulk)
+# has real outages: 503 Service Unavailable, "npm error audit endpoint returned
+# an error". That is NOT a lockfile finding, but before this fix the runner
+# could not tell the difference: npm's OWN internal retry loop (default
+# fetch-retries=2, fetch-timeout=300000ms) turned one outage into a ~700-840s
+# shard, the runner's generic --retry re-ran the whole thing once more
+# immediately into the same outage, and the suite reported a plain FAIL --
+# measured 2026-09-04 on PR #989 (run 33840004101), PR #987 (run 33859010815,
+# twice), and PR #1004 (run 33855837981), each ~15 minutes of runner time for
+# a result that said nothing about the dependency tree.
+#
+# Fix: classify every attempt as PASS (exit 0) / FAIL (a JSON advisory report
+# at/above the level) / UNAVAILABLE (registry or transport error, no usable
+# JSON report) and retry ONLY the UNAVAILABLE case, bounded, entirely inside
+# ONE run_suite() call so the outer --retry never re-enters the same outage.
+# npm's own retry loop is disabled (--fetch-retries=0) and its per-attempt
+# wait is capped (--fetch-timeout) so a single attempt cannot itself balloon;
+# this runner does the backoff instead.
+#
+# Worst-case wall, named so a regression against it reads like a failing test:
+#   AUDIT_MAX_ATTEMPTS * AUDIT_FETCH_TIMEOUT_S + sum(AUDIT_BACKOFF_S)
+#   =  3 * 20s            + (20s + 60s)                = 140s
+# against the ~1500s two attempts cost today (~10x headroom kept deliberately
+# for process overhead and CI scheduling jitter).
+AUDIT_MAX_ATTEMPTS = 3
+AUDIT_BACKOFF_S: tuple[int, ...] = (20, 60)   # sleep before internal attempt 2, 3
+AUDIT_FETCH_TIMEOUT_S = 20                    # --fetch-timeout bound per attempt
+AUDIT_SUBPROCESS_TIMEOUT_S = 45               # hard safety net if npm ignores it
+AUDIT_WORST_CASE_WALL_S = (AUDIT_MAX_ATTEMPTS * AUDIT_FETCH_TIMEOUT_S
+                           + sum(AUDIT_BACKOFF_S))  # == 140
+AUDIT_ADVISORY_ENDPOINT = "registry.npmjs.org/-/npm/v1/security/advisories/bulk"
+_AUDIT_TRANSPORT_MARKERS = (
+    "audit endpoint returned an error",
+    "ECONNRESET", "ETIMEDOUT", "ECONNREFUSED", "EAI_AGAIN", "ENOTFOUND",
+)
+_AUDIT_HTTP5XX = re.compile(r"\b5\d\d\b")
+
+
+def _classify_npm_audit(rc: int, stdout: str, stderr: str,
+                        timed_out: bool) -> tuple[str, str]:
+    """Classify one npm-audit attempt. Never guesses: a real JSON advisory
+    report wins on its own terms regardless of exit code text, and an
+    unrecognized failure with no report and no transport signal FAILS closed
+    rather than being swallowed as merely unavailable."""
+    if rc == 0:
+        return "PASS", ""
+    report = None
+    if stdout.strip():
+        try:
+            candidate = json.loads(stdout)
+        except json.JSONDecodeError:
+            candidate = None
+        if isinstance(candidate, dict) and (
+                "vulnerabilities" in candidate or "advisories" in candidate):
+            report = candidate
+    if report is not None:
+        # metadata.vulnerabilities carries per-severity counts PLUS its own
+        # "total" key (all severities, not just at/above --audit-level) --
+        # summing every value would double-count total against itself.
+        vulns = report.get("metadata", {}).get("vulnerabilities", {})
+        if isinstance(vulns, dict) and isinstance(vulns.get("total"), int):
+            total = vulns["total"]
+        elif isinstance(vulns, dict):
+            total = sum(v for k, v in vulns.items()
+                       if k != "total" and isinstance(v, int))
+        else:
+            total = None
+        detail = f"{total} advisories reported (all severities)" if total is not None \
+            else "advisories reported"
+        return "FAIL", f"real advisory report: {detail}"
+    combined = f"{stdout}\n{stderr}"
+    if timed_out:
+        return "UNAVAILABLE", (
+            f"registry unavailable (no response within "
+            f"{AUDIT_FETCH_TIMEOUT_S}s): {AUDIT_ADVISORY_ENDPOINT}")
+    http5xx = _AUDIT_HTTP5XX.search(combined)
+    transport = any(marker in combined for marker in _AUDIT_TRANSPORT_MARKERS)
+    if transport or http5xx:
+        code = f"HTTP {http5xx.group(0)}" if http5xx else "transport error"
+        return "UNAVAILABLE", f"registry unavailable ({code}): {AUDIT_ADVISORY_ENDPOINT}"
+    last = next((ln for ln in combined.strip().splitlines()[::-1] if ln.strip()), "")
+    return "FAIL", f"unrecognized audit failure (exit {rc}, no JSON report): {last[:160]}"
+
+
+def _cheap_lockfile_sha(cwd: Path) -> str:
+    """Best-effort last commit that touched this suite's lockfile, purely to
+    make the UNAVAILABLE note answer 'has the tree moved since the last green
+    run' without a network call. Never raises, never blocks a real result on
+    a git hiccup: any failure just reports 'unknown'."""
+    lockfile = cwd / "package-lock.json"
+    if not lockfile.exists():
+        return "unknown"
+    try:
+        out = subprocess.run(
+            ["git", "log", "-1", "--format=%H", "--", "package-lock.json"],
+            cwd=str(cwd), capture_output=True, text=True, timeout=5,
+            encoding="utf-8", errors="replace",
+        )
+        sha = out.stdout.strip()
+        return sha if (out.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}", sha)) \
+            else "unknown"
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+
+
+def _run_npm_audit_attempt(argv: List[str], cwd: Path, logf, attempt: int) -> tuple:
+    """One bounded npm-audit subprocess call. Returns
+    (rc, stdout, stderr, timed_out, spawn_err)."""
+    spawn_command, use_shell, shell_executable = normalize_spawn_command(argv)
+    logf.write(f"$ (cwd={cwd}) {' '.join(argv)}\n"
+              f"$ internal attempt {attempt}/{AUDIT_MAX_ATTEMPTS} "
+              f"@ {time.strftime('%Y-%m-%dT%H:%M:%S')}\n")
+    logf.flush()
+    timed_out = False
+    spawn_err = ""
+    try:
+        proc = subprocess.run(
+            spawn_command, cwd=str(cwd), env=clean_env(),
+            capture_output=True, text=True, timeout=AUDIT_SUBPROCESS_TIMEOUT_S,
+            shell=use_shell, executable=shell_executable,
+            encoding="utf-8", errors="replace",
+        )
+        stdout, stderr, rc = proc.stdout or "", proc.stderr or "", proc.returncode
+    except subprocess.TimeoutExpired as exc:
+        stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
+        stderr = ((exc.stderr or "") if isinstance(exc.stderr, str) else "") + \
+            f"\n[TIMEOUT >{AUDIT_SUBPROCESS_TIMEOUT_S}s]"
+        rc, timed_out = 124, True
+    except OSError as exc:
+        spawn_err = f"{type(exc).__name__}: {str(exc)[:160]}"
+        stdout, stderr, rc = "", f"[SPAWN FAILURE] {spawn_err}", 127
+    logf.write(stdout + "\n" + stderr + "\n\n")
+    logf.flush()
+    return rc, stdout, stderr, timed_out, spawn_err
+
+
+def run_npm_audit_suite(suite: Suite, log_path: Path) -> Result:
+    """kind == 'npm-audit': up to AUDIT_MAX_ATTEMPTS bounded attempts with
+    backoff between UNAVAILABLE (registry outage) results, all inside this one
+    call so the runner's generic --retry (immediate, no backoff) never
+    re-enters the same outage. A real advisory report FAILS on the first
+    attempt, exactly as before; only UNAVAILABLE is retried."""
+    argv = [str(a) for a in suite.argv]
+    t0 = time.perf_counter()
+    status, note = "FAIL", "no attempt executed"
+    with open(log_path, "w", encoding="utf-8", errors="replace") as logf:
+        for i in range(1, AUDIT_MAX_ATTEMPTS + 1):
+            rc, stdout, stderr, timed_out, spawn_err = _run_npm_audit_attempt(
+                argv, suite.cwd, logf, i)
+            if spawn_err:
+                status, note = "FAIL", f"spawn failure: {spawn_err}"
+            else:
+                status, note = _classify_npm_audit(rc, stdout, stderr, timed_out)
+            if status != "UNAVAILABLE":
+                break
+            if i < AUDIT_MAX_ATTEMPTS:
+                backoff = AUDIT_BACKOFF_S[i - 1]
+                logf.write(f"[UNAVAILABLE attempt {i}/{AUDIT_MAX_ATTEMPTS}: {note}; "
+                          f"retrying in {backoff}s]\n\n")
+                logf.flush()
+                time.sleep(backoff)
+        seconds = time.perf_counter() - t0
+        if status == "UNAVAILABLE":
+            sha = _cheap_lockfile_sha(suite.cwd)
+            note = (f"{note} after {AUDIT_MAX_ATTEMPTS} attempts; "
+                    f"NOT PROVEN BY AUDIT: registry unavailable, lockfile "
+                    f"unchanged since {sha}")
+        elif status == "PASS" and i > 1:
+            note = f"recovered from registry outage on attempt {i}/{AUDIT_MAX_ATTEMPTS}"
+        logf.write((note or "(no note)") + "\n")
+    return Result(suite, status,
+                  {"PASS": "ok", "FAIL": "err", "UNAVAILABLE": "unavailable"}[status],
+                  seconds, note=note, log_path=log_path, counts={})
+
+
+# --------------------------------------------------------------------------- #
 # runner
 # --------------------------------------------------------------------------- #
 def reset_authored_tools(log_dir: Path) -> str:
@@ -1950,6 +2156,14 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
         return Result(suite, "SKIP", "skip", 0.0,
                       note=f"opt-in: set {suite.opt_in_env}=1 (needs Docker)",
                       log_path=None)
+
+    # npm-audit runs its OWN bounded, backed-off attempt loop (see
+    # run_npm_audit_suite): a registry outage must never masquerade as a
+    # lockfile finding, and it must never re-enter the same outage through the
+    # generic --retry below. This bypasses the fault-injection drill and the
+    # generic subprocess path entirely; a real advisory report still FAILS.
+    if suite.kind == "npm-audit":
+        return run_npm_audit_suite(suite, log_path)
 
     pre_note = ""
     if suite.reset_authored:
@@ -2676,10 +2890,14 @@ def verify_shard_results(results_dir: Path) -> int:
             # Statuses are an allowlist, not a denylist: rejecting only the
             # literal FAIL would let a corrupt file carrying any OTHER value
             # (say NOT_RUN) count as complete passing coverage — fail-open in
-            # the acceptance instrument (sol-critic #436 round 1).
+            # the acceptance instrument (sol-critic #436 round 1). UNAVAILABLE
+            # (a registry/transport outage on an audit-style suite, never a
+            # lockfile finding) is recognized alongside PASS/FAIL/SKIP; the
+            # FAIL-only check below is what keeps it from ever counting as a
+            # failed shard.
             unknown = [f"{e.get('id')}={e.get('status')!r}"
                        for e in entries
-                       if e.get("status") not in ("PASS", "FAIL", "SKIP")]
+                       if e.get("status") not in ("PASS", "FAIL", "SKIP", "UNAVAILABLE")]
             if unknown:
                 problems.append(
                     f"shard {i}: unrecognized status(es): {', '.join(unknown)}")
@@ -2809,9 +3027,11 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
     npass = sum(1 for r in results if r.status == "PASS")
     nfail = sum(1 for r in results if r.status == "FAIL")
     nskip = sum(1 for r in results if r.status == "SKIP")
+    nunavailable = sum(1 for r in results if r.status == "UNAVAILABLE")
     total_tests = sum(r.counts.get("passed", 0) for r in results)
     total_skipped = sum(r.counts.get("skipped", 0) for r in results)
-    print(f"  suites: {npass} PASS  {nfail} FAIL  {nskip} SKIP   "
+    print(f"  suites: {npass} PASS  {nfail} FAIL  {nskip} SKIP  "
+          f"{nunavailable} UNAVAILABLE   "
           f"| test cases passed: {total_tests}  skipped: {total_skipped}   "
           f"| wall: {wall:.1f}s")
     # The counts above are only meaningful next to WHICH suites they counted.
@@ -2832,6 +3052,16 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
     if allskip:
         print(f"  NO COVERAGE (every test skipped, host artifact absent): "
               f"{', '.join(allskip)}")
+    # A registry outage is a distinct outcome, not a failed gate, and a single
+    # row in a long scoreboard is exactly as easy to miss as a flake -- call it
+    # out by name so the merge step (and a human skimming CI) can see it
+    # without diffing every row. The suite's own note already carries the
+    # "NOT PROVEN BY AUDIT" text (see run_npm_audit_suite); this only makes
+    # sure it cannot scroll past unseen.
+    for r in results:
+        if r.status == "UNAVAILABLE":
+            print(f"  {r.note}" if r.note else
+                  f"  NOT PROVEN BY AUDIT: {r.suite.id} registry unavailable")
     print("=" * len(line))
 
 

@@ -543,6 +543,172 @@ def test_selected_script_environment_skip_is_a_failure(tmp_path):
     assert result.got == "err"
 
 
+# --------------------------------------------------------------------------- #
+# npm-audit: registry-outage-tolerant classification (harness-audit-high)
+#
+# WHY: measured 2026-09-04 on PR #989 (run 33840004101), PR #987 (run
+# 33859010815, twice) and PR #1004 (run 33855837981) — the advisory-bulk
+# registry endpoint answered 503, npm's own internal retry loop turned that
+# into a ~700-840s shard, the runner's generic --retry re-ran it once more
+# immediately into the same outage, and a real dependency-tree question came
+# back red for an unrelated external outage. These pin the fixed contract: a
+# real advisory report still FAILS the shard exactly as before, but a
+# registry/transport error is UNAVAILABLE, retried with bounded backoff
+# entirely inside run_suite(), and never counted as a failed gate.
+# --------------------------------------------------------------------------- #
+def _fake_npm_script(tmp_path, name: str, body: str) -> Path:
+    path = tmp_path / name
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_npm_audit_clean_exit_zero_passes_without_retry(tmp_path, monkeypatch):
+    g = _load_runner()
+    sleeps: list = []
+    monkeypatch.setattr(g.time, "sleep", lambda s: sleeps.append(s))
+    fake = _fake_npm_script(tmp_path, "fake_npm_clean.py",
+        "import json, sys\n"
+        "print(json.dumps({'vulnerabilities': {}, "
+        "'metadata': {'vulnerabilities': {'high': 0}}}))\n"
+        "sys.exit(0)\n")
+    suite = g.Suite("npm-audit-clean", "npm audit clean", "npm-audit", SCRIPTS,
+                    [sys.executable, str(fake)], None)
+
+    result = g.run_suite(suite, tmp_path)
+
+    assert result.status == "PASS"
+    assert sleeps == []
+
+
+def test_npm_audit_real_advisory_report_fails_without_retry(tmp_path, monkeypatch):
+    """A real finding must never be retried away or reclassified: it fails on
+    the FIRST attempt, same as a plain non-zero exit did before this fix."""
+    g = _load_runner()
+    sleeps: list = []
+    monkeypatch.setattr(g.time, "sleep", lambda s: sleeps.append(s))
+    fake = _fake_npm_script(tmp_path, "fake_npm_vuln.py",
+        "import json, sys\n"
+        "print(json.dumps({'vulnerabilities': {'left-pad': {'severity': 'high'}}, "
+        "'metadata': {'vulnerabilities': {'high': 2}}}))\n"
+        "sys.exit(1)\n")
+    suite = g.Suite("npm-audit-vuln", "npm audit vuln", "npm-audit", SCRIPTS,
+                    [sys.executable, str(fake)], None)
+
+    result = g.run_suite(suite, tmp_path)
+
+    assert result.status == "FAIL"
+    assert "real advisory report" in result.note
+    assert sleeps == []
+
+
+def test_npm_audit_recovers_from_two_transient_outages_as_one_row(
+        tmp_path, monkeypatch):
+    """503 twice, then a clean report: ONE result row, PASS, and the runner's
+    own bounded backoff (never npm's ~700s internal retry loop) is what
+    crossed the outage."""
+    g = _load_runner()
+    sleeps: list = []
+    monkeypatch.setattr(g.time, "sleep", lambda s: sleeps.append(s))
+    counter = tmp_path / "attempts.txt"
+    fake = _fake_npm_script(tmp_path, "fake_npm_flaky.py",
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        f"counter = Path(r'{counter}')\n"
+        "n = (int(counter.read_text()) if counter.exists() else 0) + 1\n"
+        "counter.write_text(str(n))\n"
+        "if n <= 2:\n"
+        "    print('npm warn audit 503 Service Unavailable', file=sys.stderr)\n"
+        "    print('npm error audit endpoint returned an error', file=sys.stderr)\n"
+        "    sys.exit(1)\n"
+        "print(json.dumps({'vulnerabilities': {}, "
+        "'metadata': {'vulnerabilities': {'high': 0}}}))\n"
+        "sys.exit(0)\n")
+    suite = g.Suite("npm-audit-flaky", "npm audit flaky", "npm-audit", SCRIPTS,
+                    [sys.executable, str(fake)], None)
+
+    result = g.run_suite(suite, tmp_path)
+
+    assert result.status == "PASS"
+    assert "recovered from registry outage on attempt 3" in result.note
+    assert sleeps == [20, 60]              # AUDIT_BACKOFF_S, applied twice
+    assert counter.read_text() == "3"      # exactly 3 subprocess spawns, not 2x3
+
+
+def test_npm_audit_three_transient_outages_is_unavailable_not_fail(
+        tmp_path, monkeypatch):
+    g = _load_runner()
+    sleeps: list = []
+    monkeypatch.setattr(g.time, "sleep", lambda s: sleeps.append(s))
+    fake = _fake_npm_script(tmp_path, "fake_npm_down.py",
+        "import sys\n"
+        "print('npm warn audit 503 Service Unavailable', file=sys.stderr)\n"
+        "print('npm error audit endpoint returned an error', file=sys.stderr)\n"
+        "sys.exit(1)\n")
+    suite = g.Suite("npm-audit-down", "npm audit down", "npm-audit", SCRIPTS,
+                    [sys.executable, str(fake)], None)
+
+    result = g.run_suite(suite, tmp_path)
+
+    assert result.status == "UNAVAILABLE"
+    assert result.status != "FAIL"
+    assert sleeps == [20, 60]               # bounded: 2 backoffs, 3 attempts, then stop
+    assert "NOT PROVEN BY AUDIT: registry unavailable, lockfile unchanged since" \
+        in result.note
+
+
+def test_npm_audit_worst_case_wall_is_bounded_far_below_the_old_outage_cost():
+    """The number this whole fix exists to name: 3 attempts x a bounded
+    per-attempt timeout, plus the two backoff sleeps, must stay a small
+    fraction of the ~1500s two attempts cost before this fix."""
+    g = _load_runner()
+    assert g.AUDIT_WORST_CASE_WALL_S == (
+        g.AUDIT_MAX_ATTEMPTS * g.AUDIT_FETCH_TIMEOUT_S + sum(g.AUDIT_BACKOFF_S))
+    assert g.AUDIT_WORST_CASE_WALL_S < 300   # ~5x headroom under 1500s / 2 attempts
+
+
+def test_scoreboard_prints_not_proven_by_audit_line_for_unavailable_result(
+        capsys, tmp_path):
+    """One annotated row in a long scoreboard is easy to miss (the FLAKED and
+    NO COVERAGE lines exist for the same reason) — UNAVAILABLE gets the same
+    treatment, and the summary counts it separately from FAIL."""
+    g = _load_runner()
+    suite = g.Suite("harness-audit-high", "harness npm audit (high threshold)",
+                    "npm-audit", SCRIPTS, [sys.executable, "-c", "pass"], None)
+    result = g.Result(
+        suite, "UNAVAILABLE", "unavailable", 42.0,
+        note=("registry unavailable (HTTP 503): "
+              "registry.npmjs.org/-/npm/v1/security/advisories/bulk "
+              "after 3 attempts; NOT PROVEN BY AUDIT: registry unavailable, "
+              "lockfile unchanged since abc123"),
+        counts={})
+
+    g.print_scoreboard([result], tmp_path, 42.0)
+    out = capsys.readouterr().out
+
+    assert ("NOT PROVEN BY AUDIT: registry unavailable, lockfile unchanged "
+            "since abc123") in out
+    assert "0 PASS  0 FAIL  0 SKIP  1 UNAVAILABLE" in out
+
+
+def test_verifier_treats_unavailable_as_not_failed_and_still_proves(
+        tmp_path, monkeypatch, capsys):
+    """A registry-outage row must never fail the shard fan-in the way a real
+    FAIL does, and it is a recognized status, not an 'unrecognized status'
+    corruption finding."""
+    g = _load_runner()
+    stubs = _shard_stub_suites(g)
+    monkeypatch.setattr(g, "build_suites", lambda: stubs)
+    _write_shard_files(g, stubs, tmp_path, statuses={"stub-alpha": "UNAVAILABLE"})
+
+    rc = g.verify_shard_results(tmp_path)
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    assert "unrecognized status" not in out
+    assert "FAILED suites" not in out
+    assert "PROVEN" in out
+
+
 def test_vitest_skip_fails_gate(tmp_path):
     g = _load_runner()
     output = (
