@@ -15,8 +15,11 @@ const BY_ID = new Map(PRODUCT_SURFACES.map((surface) => [surface.id, surface]))
  * The families a surface's rail and ribbon carry. `familyIds: null` means
  * the whole catalog (CAD); a non-empty fold filters AND orders by the list.
  * A DECLARED empty fold (`familyIds: []`, sheets) is honest, not a lag: it
- * returns no families on purpose, and the rail renders "No tools for this
- * surface yet." rather than fabricating a catalog the page never reads.
+ * returns no families on purpose. No reachable caller asks for sheets today
+ * (the one production caller, App.jsx, is guarded on studioGround and its
+ * activeSurface is never 'sheets'), so the test row for it pins the fold's
+ * SHAPE, not anything rendered; the "No tools for this surface yet." empty
+ * state belongs to DraftingRibbon, not to this map.
  * Unknown surface ids (no manifest record at all) fail open to the whole
  * catalog instead — a new tab must never boot with an empty tool rail
  * because this map lagged.

@@ -531,7 +531,7 @@ describe('Surface Contract, sheets is the fifth surface, and today it renders no
     // that the two literal ids ENUMS.scene declares are still the ones the
     // arm and the router actually name, not that any structure derives them.
     const siteRoot = readFileSync(`${process.cwd()}/src/site/SiteRoot.jsx`, 'utf8')
-    expect(siteRoot).toContain("scene === 'sheets'")
+    expect(siteRoot).toContain(") : scene === 'sheets' ? (")   // the RENDER arm (:234), not the :93 eject target
     const routeScene = readFileSync(`${process.cwd()}/src/site/routeScene.js`, 'utf8')
     for (const id of ENUMS.scene) {
       expect(routeScene).toContain(`return '${id}'`)
