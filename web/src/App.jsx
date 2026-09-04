@@ -3649,25 +3649,29 @@ export default function App() {
         <SurfaceFrame.Toast />
       </div>
 
-      {/* The right rail column (aside.rail's grid seat, styles.css). Slice 6b
-          moved the conversation list here (off the ground: it used to mount
-          inside <main>, in the same normal-flow subtree as the workspace
-          card, where the studio pointer chain's `main.center-scroll > *`
-          restore made its painted head a click shield over the card window —
-          e2e receipt one-shell-mount.spec.mjs "the pointer chain punches
-          through"). Gate is the contract, not a surface literal, and not
-          `agentMode` — the list is how you get BACK to a conversation, so
-          hiding it until one is open would hide it exactly when it is
-          needed. It stacks ABOVE the job monitor rather than inventing a
-          second layout: `.rail-stack` takes over the grid seat `aside.rail`
-          held alone, the list gets a bounded, scrollable share of it, and the
-          job monitor keeps its own spine/expand posture untouched
-          (W4d Slice D: 44px spine on drafting surfaces, full rail
+      {/* The right rail column (aside.rail's grid seat, styles.css). Slice 6b
+          moved the conversation list here (off the ground: it used to mount
+          inside <main>, in the same normal-flow subtree as the workspace
+          card, where the studio pointer chain's `main.center-scroll > *`
+          restore made its painted head a click shield over the card window —
+          e2e receipt one-shell-mount.spec.mjs "the pointer chain punches
+          through"). Gate is the contract, not a surface literal, and not
+          `agentMode` — the list is how you get BACK to a conversation, so
+          hiding it until one is open would hide it exactly when it is
+          needed. It stacks ABOVE the job monitor rather than inventing a
+          second layout: `.rail-stack` takes over the grid seat `aside.rail`
+          held alone, the list gets a bounded, scrollable share of it, and the
+          job monitor keeps its own spine/expand posture untouched
+          (W4d Slice D: 44px spine on drafting surfaces, full rail
           otherwise). Slice 13a: JobInbox joins the same column below the
           job monitor; it renders whenever the job rail slot would (the same
-          `frame.jobRail` gate, read off the frame, see SurfaceFrame.Inbox). */}
-      <div className="rail-stack">
-        {!mock && <SurfaceFrame.Conversations />}
+          `frame.jobRail` gate, read off the frame, see SurfaceFrame.Inbox).
+          Slice 11a (merged, #1013) is already the rail's own row content:
+          BuildQueueCard renders per-record inside SurfaceFrame.JobRail
+          (components/JobRail.jsx), not as a separate sibling here. */}
+
+      <div className="rail-stack">
+        {!mock && <SurfaceFrame.Conversations />}
         <SurfaceFrame.JobRail />
         <SurfaceFrame.Inbox />
       </div>

@@ -2038,8 +2038,10 @@ export default function ToolCast({
             this slot renders the rail exactly when this tab is showing.
             Slice 13a: JobInbox joins the same right-spine column (`.rail-col`,
             styles.css), gated by the same `frame.jobRail` presence as the
-            rail itself — see SurfaceFrame.Inbox. BuildQueueCard (slice 11a,
-            PR #1013, not yet merged) is expected to join this same stack. */}
+            rail itself — see SurfaceFrame.Inbox. Slice 11a (merged, #1013)
+            is already inside this stack too: BuildQueueCard renders as the
+            rail's own per-record rows (components/JobRail.jsx), not a
+            separate sibling here. */}
         <div className="rail-col">
           <SurfaceFrame.JobRail />
           <SurfaceFrame.Inbox />
