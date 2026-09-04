@@ -302,6 +302,12 @@
     },
     "offset": {
       "term": "offset"
+    },
+    "array": {
+      "term": "array"
+    },
+    "array-polar": {
+      "term": "polar array"
     }
   }
 }

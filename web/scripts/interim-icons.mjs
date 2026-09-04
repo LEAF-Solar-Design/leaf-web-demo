@@ -11,6 +11,10 @@ export const INTERIM_ICONS = Object.freeze({
   explode: '<path d="M8 15l3-6 3 4 3-5"/><path d="M4 8l2 2M20 5l-2 2M3 17l2-1M21 19l-2-1M12 3v2M12 19v2"/>',
   // W4g-5: a source segment and its parallel copy, with the gap marked.
   offset: '<path d="M4 8h16"/><path d="M4 16h16"/><path d="M12 8v8"/><path d="M10 10l2-2 2 2M10 14l2 2 2-2"/>',
+  // W4g-5b: a rectangular array, the source and its copies in a grid.
+  array: '<rect x="4" y="4" width="6" height="6"/><rect x="14" y="4" width="6" height="6"/><rect x="4" y="14" width="6" height="6"/><rect x="14" y="14" width="6" height="6"/>',
+  // W4g-5b: a polar array, copies swept about a centre.
+  'array-polar': '<circle cx="12" cy="12" r="1.5"/><rect x="10" y="3" width="4" height="4"/><rect x="17" y="14" width="4" height="4"/><rect x="3" y="14" width="4" height="4"/><path d="M12 9a3 3 0 0 1 3 3"/>',
   'new-file': '<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/><path d="M12 11v6M9 14h6"/>',
   open: '<path d="M3 6h6l2 2h10v11H3z"/><path d="M3 10h18"/>',
   save: '<path d="M4 4h13l3 3v13H4z"/><path d="M8 4v5h7V4"/><path d="M8 20v-6h8v6"/>',
