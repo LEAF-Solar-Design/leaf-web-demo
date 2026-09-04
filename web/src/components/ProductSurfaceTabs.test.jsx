@@ -240,12 +240,23 @@ describe('F-7: surface frames render the live tenant catalog', () => {
   it('F-9: BOTH shells hand the frame the derivation — no call-site can opt out', () => {
     // The finding was a composition defect invisible to a component test, so
     // this binds the two real call sites: /app (App.jsx) and /try (ToolCast).
+    //
+    // Slice 4a moved the <ProductSurfaceFrame> element itself into
+    // site/SurfaceFrame.jsx, so the call site each scene owns is now its ONE
+    // <SurfaceFrame> mount. Same two assertions, same regex shape, pointed at
+    // where the props are actually passed — plus the third leg the move
+    // created: the frame must forward them, or both scenes could pass them
+    // into a black hole and this pin would still read green.
     for (const file of ['../App.jsx', '../site/ToolCast.jsx']) {
       const src = readFileSync(`${process.cwd()}/src/components/${file}`.replace('/components/../', '/'), 'utf8')
-      const frame = src.slice(src.indexOf('<ProductSurfaceFrame'))
+      const frame = src.slice(src.indexOf('<SurfaceFrame'))
       expect(frame).toContain('workspaceProject={workspaceProjectState}')
       expect(frame).toContain('onCreateProject=')
     }
+    const surfaceFrame = readFileSync(`${process.cwd()}/src/site/SurfaceFrame.jsx`, 'utf8')
+    const forwarded = surfaceFrame.slice(surfaceFrame.indexOf('<ProductSurfaceFrame'))
+    expect(forwarded).toContain('workspaceProject={frame.workspaceProject}')
+    expect(forwarded).toContain('onCreateProject={frame.onCreateProject}')
   })
 
   it('F-9: the rail CONSUMES the derivation and never performs one', () => {

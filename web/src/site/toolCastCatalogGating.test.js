@@ -11,8 +11,17 @@ const toolCast = read('./ToolCast.jsx')
 
 describe('no-drawing Catalog browse wiring', () => {
   it('wires the session controller into the persistent product-nav sign-out control', () => {
+    // Slice 4a: the <ProductSurfaceTabs> element moved into
+    // site/SurfaceFrame.jsx, so the stage passes these two on its ONE
+    // <SurfaceFrame> mount instead. Same regex shape, same two bindings,
+    // pointed at the element that now carries them — plus the forwarding leg,
+    // so passing them into a frame that dropped them cannot read green.
     expect(toolCast).toMatch(
-      /<ProductSurfaceTabs[\s\S]{0,500}signedIn=\{isSignedIn\(\)\}[\s\S]{0,100}onSignOut=\{platformSession\.actions\.signOut\}/,
+      /<SurfaceFrame[\s\S]{0,3000}signedIn=\{isSignedIn\(\)\}[\s\S]{0,100}onSignOut=\{platformSession\.actions\.signOut\}/,
+    )
+    const surfaceFrame = read('./SurfaceFrame.jsx')
+    expect(surfaceFrame).toMatch(
+      /<ProductSurfaceTabs[\s\S]{0,500}signedIn=\{frame\.signedIn\}[\s\S]{0,100}onSignOut=\{frame\.onSignOut\}/,
     )
   })
 

@@ -22,6 +22,50 @@ const stripped = esbuild.transformSync(appSource, { loader: 'jsx' }).code
 const promptBoxSessionBinding = /React\.createElement\(\s*PromptBox,\s*\{[^}]*\bsessionId:\s*agentSessionId\b/
 const conversePanelSessionBinding = /React\.createElement\(\s*ConversePanel,\s*\{[^}]*\bsessionId:\s*agentSessionId\b/
 
+// ---------------------------------------------------------------------------
+// Orphaned-setter scan (slice 4a). Every `setX(...)` a module CALLS must have a
+// declaration somewhere in that module: a useState destructure, a controller
+// destructure (`const { setOverlayStale } = drawing`, including renames like
+// `reportError: setRunErr`), a plain binding, a parameter, or a browser global.
+//
+// esbuild's output keeps ordinary comments, so a `setX(` written inside one
+// would otherwise read as a live call: strip comments before scanning, or the
+// pin reports a phantom orphan and gets muted by the next person.
+// ---------------------------------------------------------------------------
+const SETTER = 'set[A-Z][\\w$]*'
+const BROWSER_SETTERS = new Set(['setTimeout', 'setInterval'])
+
+function decomment(code) {
+  return code
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .split('\n')
+    .map((line) => {
+      const at = line.indexOf('//')
+      return at === -1 ? line : line.slice(0, at)
+    })
+    .join('\n')
+}
+
+function orphanSetters(jsxSource) {
+  const code = decomment(esbuild.transformSync(jsxSource, { loader: 'jsx' }).code)
+  const declared = new Set(BROWSER_SETTERS)
+  let match
+  // Lookahead, never consume, on the trailing delimiter: two setters adjacent
+  // in one destructure share the comma between them, and a consuming match
+  // would swallow it and hide the second one.
+  for (const pattern of [
+    new RegExp(`\\[[^\\]]*?(${SETTER})\\s*(?=[,\\]])`, 'g'),
+    new RegExp(`(?:[{,:]\\s*)(${SETTER})\\s*(?=[,}=])`, 'g'),
+    new RegExp(`(?:const|let|var|function)\\s+(${SETTER})`, 'g'),
+    new RegExp(`[(,]\\s*(${SETTER})\\s*(?=[,)=])`, 'g'),
+  ]) while ((match = pattern.exec(code))) declared.add(match[1])
+
+  const called = new Set()
+  const callPattern = new RegExp(`(?<![.\\w$])(${SETTER})\\s*\\(`, 'g')
+  while ((match = callPattern.exec(code))) called.add(match[1])
+  return [...called].filter((name) => !declared.has(name)).sort()
+}
+
 // Bindings App declares AND passes into JSX. Add a row whenever a new one is
 // introduced; the cost is one line and the failure it catches is a white screen.
 const DECLARED_AND_USED = [
@@ -142,6 +186,32 @@ describe('App.jsx wiring', () => {
       /drawingId:\s*REQUESTED_DRAWING_ID[\s\S]*drawingState:\s*drawingSummary/,
     )
     assert.match(stripped, /fallbackDrawingId:\s*REQUESTED_DRAWING_ID/)
+  })
+
+  // Standardization slice 4a wrote this after making the exact mistake it
+  // catches. Lifting the nav rail into site/NavRail.jsx moved the author fold's
+  // `const [authorOpen, setAuthorOpen] = useState(false)` out of App while
+  // SEVEN build-lane call sites kept calling setAuthorOpen(true). `npm run
+  // build` passed (an undefined identifier in a callback is a RUNTIME
+  // ReferenceError, not a build error), every unit row passed, and the first
+  // click that opened the author panel would have thrown.
+  //
+  // The rows above catch a declaration swallowed by a comment; this catches a
+  // declaration DELETED while its callers stayed, which is the shape every
+  // extract-a-component refactor can produce. Generic on purpose: it needs no
+  // maintenance when a new piece of state arrives.
+  it('calls no useState setter it does not declare (orphaned setter after a hoist)', () => {
+    assert.deepEqual(orphanSetters(appSource), [],
+      'App.jsx calls these setters but declares none of them: a component '
+      + 'extraction took the useState with it and left the call sites behind')
+  })
+
+  it('fails when a setter declaration is deleted from under its callers', () => {
+    // Falsification: the exact 4a mutation, replayed.
+    const mutated = appSource.replace(
+      /const \[authorOpen, setAuthorOpen\] = useState\(false\)/, '')
+    assert.notEqual(mutated, appSource, 'the falsification mutation must apply')
+    assert.deepEqual(orphanSetters(mutated), ['setAuthorOpen'])
   })
 
   it('refuses a live legacy write when version bootstrap did not produce a pin', () => {

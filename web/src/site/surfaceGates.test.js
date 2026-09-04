@@ -189,7 +189,19 @@ describe('Surface Contract — every repointed gate equals its old literal', () 
 // Every file that renders shell chrome from a surface: the two scenes, the
 // product frame (its project-slot gate was the one comparison #978 missed) and
 // the grounds. A new shell file joins this list the day it reads a surface.
-const SHELLS = ['../App.jsx', './ToolCast.jsx', '../components/ProductSurfaceTabs.jsx', './SurfaceGrounds.jsx']
+// Slice 4a added SurfaceFrame.jsx (the ONE wrapper both scenes mount, which
+// now owns the tabs / product frame / entitlement / job rail / toast / cockpit
+// gates for both) and NavRail.jsx (the console rail, which owns its own
+// collapse-button gate). Both read declared slots; neither may drift back to a
+// literal, which is exactly what this scan is for.
+const SHELLS = [
+  '../App.jsx',
+  './ToolCast.jsx',
+  '../components/ProductSurfaceTabs.jsx',
+  './SurfaceGrounds.jsx',
+  './SurfaceFrame.jsx',
+  './NavRail.jsx',
+]
 const SURFACE_LITERAL = /activeSurface\s*[!=]==\s*['"]/
 // The frame and the grounds hold the surface as `surface` / `surface.id`, so a
 // literal comparison there hides from the activeSurface probe. Second probe.
