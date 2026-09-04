@@ -264,6 +264,10 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     : []
   const effective = { ...inputs }
   let expressionRefusal = ''
+  // The fields whose expression did not resolve: outlined by name (a
+  // malformed pair still parseFloats to its first number, so the numeric
+  // test alone would not blame it).
+  const failedExpression = new Set()
   let previousPoint = armed && armed.from ? [armed.from[0], armed.from[1]] : null
   for (const step of pointSteps) {
     const [[kx], [ky]] = step.fields
@@ -272,8 +276,10 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     const raw = inputs[kx]
     if (isPointExpression(raw)) {
       const point = resolvePointExpression(raw, anchor)
-      if (point) { effective[kx] = String(point[0]); effective[ky] = String(point[1]) }
-      else if (!expressionRefusal) expressionRefusal = `${prompt.verb} refused: ${pointExpressionRefusal(raw, anchor)}`
+      if (point) { effective[kx] = String(point[0]); effective[ky] = String(point[1]) } else {
+        failedExpression.add(kx)
+        if (!expressionRefusal) expressionRefusal = `${prompt.verb} refused: ${pointExpressionRefusal(raw, anchor)}`
+      }
     }
     if (!isDelta) {
       const px = Number.parseFloat(effective[kx])
@@ -479,7 +485,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     }
     // A numeric field that does not read as a number while the command is
     // refused is the one to fix: outlined, and named by the note.
-    const invalid = mode === 'decimal' && !!liveRefusal && !readsAsNumber(effective[key])
+    const invalid = mode === 'decimal' && !!liveRefusal && (failedExpression.has(key) || !readsAsNumber(effective[key]))
     return (
       <input
         key={`${key}:${label}`}

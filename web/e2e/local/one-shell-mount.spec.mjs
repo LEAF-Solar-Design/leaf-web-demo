@@ -899,6 +899,30 @@ test.describe('route matrix, rail ON', () => {
     await page.getByLabel('ribbon x2', { exact: true }).fill('50')
     await expect(page.getByTestId('cockpit-prompt-note')).toHaveCount(0)
     await expect(page.getByTestId('cockpit-prompt-run')).toBeEnabled()
+    // W4f-8: the point grammar. "@10,0" in the next-point field is relative
+    // to the first point (the chain point from the last draw): Run is live,
+    // Enter draws, and the chain moves on by exactly 10 in x. A malformed
+    // pair is named and its own field outlined. "20<90" is an absolute polar
+    // point: the segment ends at (0, 20).
+    const chainX = Number(await page.getByLabel('ribbon x', { exact: true }).inputValue())
+    const chainY = await page.getByLabel('ribbon y', { exact: true }).inputValue()
+    await page.getByLabel('ribbon x2', { exact: true }).fill('@10,0')
+    await expect(page.getByTestId('cockpit-prompt-note')).toHaveCount(0)
+    await expect(page.getByTestId('cockpit-prompt-run')).toBeEnabled()
+    await page.getByLabel('ribbon x2', { exact: true }).press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('6', { timeout: 60_000 })
+    await expect(page.getByLabel('ribbon x', { exact: true })).toHaveValue(r3(chainX + 10))
+    await expect(page.getByLabel('ribbon y', { exact: true })).toHaveValue(chainY)
+    await page.getByLabel('ribbon x2', { exact: true }).fill('1,2,3')
+    await expect(page.getByTestId('cockpit-prompt-note')).toHaveText('LINE refused: "1,2,3" is not a point: use x,y, @dx,dy, dist<angle or @dist<angle.')
+    await expect(page.getByLabel('ribbon x2', { exact: true })).toHaveAttribute('aria-invalid', 'true')
+    await expect(page.getByTestId('cockpit-prompt-run')).toBeDisabled()
+    await page.getByLabel('ribbon x2', { exact: true }).fill('20<90')
+    await expect(page.getByTestId('cockpit-prompt-note')).toHaveCount(0)
+    await page.getByLabel('ribbon x2', { exact: true }).press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('7', { timeout: 60_000 })
+    await expect(page.getByLabel('ribbon x', { exact: true })).toHaveValue('0')
+    await expect(page.getByLabel('ribbon y', { exact: true })).toHaveValue('20')
     const underCard = () => page.evaluate(() => {
       // The card is a full-width pass-through layer; the floating "Edit a
       // DXF drawing" workbench is the child that sits over the drawing.

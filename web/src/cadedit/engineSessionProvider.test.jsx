@@ -737,9 +737,11 @@ describe('the command prompt (W4e slice H): a tool arms, the command line asks i
     expect(note().textContent).toBe('LINE refused: "@" needs a previous point to measure from.')
     expect(screen.getByLabelText('ribbon x').getAttribute('aria-invalid')).toBe('true')
     expect(run().disabled).toBe(true)
-    // A malformed expression is named, and the y field is not blamed.
+    // A malformed expression is named and its own field is outlined (even
+    // though "10,5,6" parseFloats to 10); the y field is not blamed.
     fireEvent.change(screen.getByLabelText('ribbon x'), { target: { value: '10,5,6' } })
     expect(note().textContent).toBe('LINE refused: "10,5,6" is not a point: use x,y, @dx,dy, dist<angle or @dist<angle.')
+    expect(screen.getByLabelText('ribbon x').getAttribute('aria-invalid')).toBe('true')
     expect(screen.getByLabelText('ribbon y').getAttribute('aria-invalid')).toBeNull()
     fireEvent.change(screen.getByLabelText('ribbon x'), { target: { value: '3,4' } })
     expect(note()).toBeNull()
