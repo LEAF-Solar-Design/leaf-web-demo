@@ -746,3 +746,61 @@ describe('the credential guard sits on the transport, not on the composers', () 
     assert.ok(bare(readStripped('site/ToolCast.jsx')).includes('setCredentialMountAvailable(!transportMock)'))
   })
 })
+
+// PR #987 mechanical-fix round: two nits the security lens found once the
+// override became a call parameter, both of them a refusal that got dropped
+// on the floor rather than rendered or forwarded.
+describe('a dropped refusal is still a leak (round 4)', () => {
+  // ToolCast's PUBLIC_DEMO branch used to append `{ text, ... }` to the
+  // visible demo transcript and clear the prompt UNCONDITIONALLY, including
+  // when `dispatch` returned undefined because the transport refused — which
+  // echoed the credential-shaped paste back onscreen and wiped the input
+  // before "Send anyway" had anything left to re-issue. The fix reads the
+  // controller's live state (not the render-time `secretRefusal`, which this
+  // closure cannot trust after an `await`) and gates both the append and the
+  // clear on it.
+  it('a secret refusal never reaches the demo transcript, and the prompt survives it', () => {
+    const source = bare(readStripped('site/ToolCast.jsx'))
+    const refusedAt = source.indexOf('constrefused=!!catalog.controller.getState().secretRefusal')
+    assert.notEqual(refusedAt, -1, 'dispatchRequest must read the live refusal off the controller')
+    const guardAt = source.indexOf('if(PUBLIC_DEMO&&!refused){', refusedAt)
+    assert.notEqual(guardAt, -1, 'the demo-transcript branch must be gated on !refused')
+    assert.ok(guardAt > refusedAt, 'refused must be computed before it gates the branch')
+    const actionableAt = source.indexOf('constactionable=', guardAt)
+    assert.notEqual(actionableAt, -1)
+    const appendAt = source.indexOf(
+      'setDemoTurns(current=>[...current,{id,text,reply:demoReplyFor(text,decision)}]);',
+      guardAt,
+    )
+    const clearAt = source.indexOf('setPrompt("");', guardAt)
+    assert.notEqual(appendAt, -1, 'the transcript append must still exist on the real-dispatch path')
+    assert.notEqual(clearAt, -1, 'the prompt clear must still exist on the real-dispatch path')
+    assert.ok(appendAt > guardAt && appendAt < actionableAt, 'the append must sit inside the !refused branch')
+    assert.ok(clearAt > guardAt && clearAt < actionableAt, 'the prompt clear must sit inside the !refused branch')
+  })
+
+  // useAuthorStageController minted the AuthorPanel's turn authority with
+  // `authorityProvider(initial.description)` — no allowSecretOnce — so a
+  // "Send anyway" re-stage of credential-shaped text had the AUTHORITY MINT
+  // itself refused (it starts a converse turn on the same guarded transport)
+  // and silently fell back to null-authority. The override the user just
+  // clicked never reached the call it was meant to authorise.
+  it('the authority mint forwards allowSecretOnce, both shells', () => {
+    const authSource = bare(readStripped('controllers/useAuthorStageController.js'))
+    assert.ok(
+      authSource.includes('authorityProvider(initial.description,{allowSecretOnce})'),
+      'useAuthorStageController must forward allowSecretOnce into the authority mint',
+    )
+    for (const file of ['App.jsx', 'site/ToolCast.jsx']) {
+      const source = bare(readStripped(file))
+      assert.ok(
+        /authorAuthorityProvider=useCallback\(async\(description,\{allowSecretOnce=false\}=\{\}\)=>/.test(source),
+        `${file}: authorAuthorityProvider must accept allowSecretOnce`,
+      )
+      assert.ok(
+        /,\{allowSecretOnce\}\)/.test(source),
+        `${file}: authorAuthorityProvider must forward allowSecretOnce to its turn-start call`,
+      )
+    }
+  })
+})

@@ -617,13 +617,18 @@ export default function ToolCast({
   // Wide margin under the server's TURN_MAX_S default of 300s.
   const AUTHOR_AUTHORITY_TTL_MS = 120_000
   const authorAuthorityRef = useRef(null) // { sessionId, turnId, mintedAt }
-  const authorAuthorityProvider = useCallback(async (description) => {
+  const authorAuthorityProvider = useCallback(async (description, { allowSecretOnce = false } = {}) => {
     const cached = authorAuthorityRef.current
     if (cached && Date.now() - cached.mintedAt < AUTHOR_AUTHORITY_TTL_MS) {
       return { sessionId: cached.sessionId, turnId: cached.turnId }
     }
     try {
-      const response = await startTurnRef.current(description, { source: 'author_panel', purpose: 'stage_authority' })
+      // `allowSecretOnce` must reach this mint too: it starts a converse turn
+      // on the SAME guarded transport, so an AuthorPanel "Send anyway"
+      // re-stage with credential-shaped text would otherwise have its
+      // authority mint refused here and silently fall back to
+      // null-authority — a refusal the click never saw or overrode.
+      const response = await startTurnRef.current(description, { source: 'author_panel', purpose: 'stage_authority' }, { allowSecretOnce })
       const mintedSession = response?.session_id
       if (!mintedSession || !response?.turn_id) return null
       authorAuthorityRef.current = { sessionId: mintedSession, turnId: response.turn_id, mintedAt: Date.now() }
@@ -1234,7 +1239,15 @@ export default function ToolCast({
     setPhase('starting')
     if (text.startsWith('/')) setLeftView('catalog')
     const decision = await catalog.actions.dispatch(text, { allowSecretOnce })
-    if (PUBLIC_DEMO) {
+    // `catalog.controller.getState()` (not the render-time `secretRefusal`
+    // destructured above) because this closure keeps running after the
+    // await regardless of whether React has re-rendered yet; the controller
+    // is the one live source. A refusal must never reach the visible demo
+    // transcript (it would echo the credential-shaped text back onscreen)
+    // and must leave the prompt in place, or "Send anyway" has nothing left
+    // to re-issue — the affordance would render but do nothing.
+    const refused = !!catalog.controller.getState().secretRefusal
+    if (PUBLIC_DEMO && !refused) {
       const id = `demo-turn-${++demoTurnSeqRef.current}`
       setDemoTurns((current) => [...current, { id, text, reply: demoReplyFor(text, decision) }])
       setPrompt('')
@@ -1250,7 +1263,7 @@ export default function ToolCast({
     if (decision) setPhase('proposal')
     else setPhase('failed')
     return decision
-  }, [busy, catalog.actions, hasDrawing, jobRunning, platformSession.status, prompt, routing])
+  }, [busy, catalog.actions, catalog.controller, hasDrawing, jobRunning, platformSession.status, prompt, routing])
 
   const runRequest = useCallback(() => dispatchRequest(), [dispatchRequest])
 

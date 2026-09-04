@@ -84,7 +84,12 @@ export default function useAuthorStageController({
       let authority = null
       if (authorityProvider && !initial.poll_url) {
         try {
-          authority = (await authorityProvider(initial.description)) || null
+          // `allowSecretOnce` MUST reach the mint too: an AuthorPanel "Send
+          // anyway" re-stages credential-shaped text with the override, and a
+          // provider that guards its own POST (the converse turn start does)
+          // would otherwise refuse the mint itself and swallow it into a
+          // silent no-authority fallback — the override never actually landed.
+          authority = (await authorityProvider(initial.description, { allowSecretOnce })) || null
         } catch {
           authority = null
         }

@@ -1002,7 +1002,7 @@ export default function App() {
   const agentSessionIdRef = useRef(agentSessionId)
   useEffect(() => { agentSessionIdRef.current = agentSessionId }, [agentSessionId])
   const authorAuthorityRef = useRef(null) // { sessionId, turnId, mintedAt }
-  const authorAuthorityProvider = useCallback(async (description) => {
+  const authorAuthorityProvider = useCallback(async (description, { allowSecretOnce = false } = {}) => {
     // No entitlement pre-check here: entitlements load async, and a stage
     // click can beat them (proven by the e2e). A mint against a tenant that
     // truly cannot converse just fails and falls through to null, which the
@@ -1013,7 +1013,12 @@ export default function App() {
       return { sessionId: cached.sessionId, turnId: cached.turnId }
     }
     try {
-      const response = await startAgentTurn(description, { source: 'author_panel', purpose: 'stage_authority' })
+      // `allowSecretOnce` must reach this mint too: it starts a converse turn
+      // on the SAME guarded transport (startTurn -> the wire), so an
+      // AuthorPanel "Send anyway" re-stage with credential-shaped text would
+      // otherwise have its authority mint refused here and silently fall
+      // back to null-authority — a refusal the click never saw or overrode.
+      const response = await startAgentTurn(description, { source: 'author_panel', purpose: 'stage_authority' }, { allowSecretOnce })
       // The response's own session id, never the state-fed ref alone: the
       // first mint resolves before React has re-rendered the fresh sessionId.
       const sessionId = response?.session_id || agentSessionIdRef.current
