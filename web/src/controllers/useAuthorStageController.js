@@ -160,7 +160,12 @@ export default function useAuthorStageController({
     if (!guard.ok) return Promise.reject(new SecretRefusedError(guard.refusal))
     const current = readInflightAuthor(storageRef.current)
     if (authorPointerValid(current, accountScope)) {
-      return runPointer(current, { reconnecting: true })
+      // A valid pointer that never got its poll_url (the first POST did not
+      // land) is re-run here, and its mint runs again: the caller's live
+      // override rides along, or a Send-anyway re-stage would be refused at
+      // the mint and swallowed into a null authority. The mount-time resumes
+      // below carry no override on purpose: nobody consented on that call.
+      return runPointer(current, { reconnecting: true, allowSecretOnce })
     }
     if (current) clearInflightAuthor(null, storageRef.current)
     resumedRef.current = true

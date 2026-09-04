@@ -97,6 +97,30 @@ describe('useAuthorStageController turn-authority provider', () => {
   // and actually reaches the authority mint this test is pinning.
   const FAKE_GENERIC = `api_key: ${'x'.repeat(24)}`
 
+  it('forwards allowSecretOnce on the re-run of a valid pointer that never got its poll_url', async () => {
+    // The gap a lens found one path over: stage() re-runs a persisted pointer
+    // whose first POST never landed (no poll_url), and that re-run mints again.
+    const authorityProvider = vi.fn(async () => ({ sessionId: 'session-1', turnId: 'turn-1' }))
+    let calls = 0
+    const stageAuthorTool = vi.fn(async () => {
+      calls += 1
+      if (calls === 1) throw new Error('network down before accept')
+      return staged()
+    })
+    const storage = memoryStorage()
+    const { result } = renderHook(() => useAuthorStageController({
+      mock: false, storage, stageAuthorTool, authorityProvider,
+    }))
+    await act(async () => {
+      await result.current.stage(FAKE_GENERIC, null, { allowSecretOnce: true }).catch(() => null)
+    })
+    authorityProvider.mockClear()
+    await act(async () => {
+      await result.current.stage(FAKE_GENERIC, null, { allowSecretOnce: true })
+    })
+    expect(authorityProvider).toHaveBeenCalledTimes(1)
+    expect(authorityProvider).toHaveBeenCalledWith(FAKE_GENERIC, { allowSecretOnce: true })
+  })
   it('forwards allowSecretOnce to the authority provider on a Send-anyway re-stage', async () => {
     const authorityProvider = vi.fn(async () => ({ sessionId: 'session-1', turnId: 'turn-1' }))
     const stageAuthorTool = vi.fn(async () => staged())
