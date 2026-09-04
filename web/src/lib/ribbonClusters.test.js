@@ -375,4 +375,23 @@ describe('authorCluster', () => {
     expect(authorCluster({ onOpen: () => {}, authored, previewing: true }).tools[1].reason)
       .toBe(REASONS.previewing)
   })
+
+  it('carries the write gating onto an authored write tool, mirroring familyCluster (3c)', () => {
+    const authored = { name: 'delete-marked-panel', catalog_digest: 'sha256:abc', capabilities: ['drawing.write'] }
+    const locked = authorCluster({ onOpen: () => {}, authored, writeLocked: true })
+    expect(locked.tools[1].disabled).toBe(true)
+    expect(locked.tools[1].reason).toBe(REASONS.writeLocked)
+    const noted = authorCluster({ onOpen: () => {}, authored, writeLocked: true, writeLockNote: 'held by ops' })
+    expect(noted.tools[1].reason).toBe('held by ops')
+    const unentitled = authorCluster({ onOpen: () => {}, authored, writeEntitled: false })
+    expect(unentitled.tools[1].disabled).toBe(true)
+    expect(unentitled.tools[1].reason).toBe(REASONS.writeUnentitled)
+  })
+
+  it('leaves an authored read tool live under a write lock and without write entitlement', () => {
+    const readTool = { name: 'panel-audit', catalog_digest: 'sha256:abc', capabilities: ['drawing.read'] }
+    const cluster = authorCluster({ onOpen: () => {}, authored: readTool, writeLocked: true, writeEntitled: false })
+    expect(cluster.tools[1].disabled).toBe(false)
+    expect(cluster.tools[1].reason).toBe('')
+  })
 })

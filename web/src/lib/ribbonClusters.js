@@ -300,6 +300,10 @@ export function authorCluster({
   // "run the one I just made" is a ribbon command too, and it says honestly
   // when the catalog has not caught up: no digest, no runnable tool.
   authored = null, onUseAuthored = null, running = false, previewing = false,
+  // ToolsPanel-parity write gating (same rungs, same REASONS strings as
+  // familyCluster): an authored WRITE tool is exactly as honest about a held
+  // edit lock or a plan without editing tools as any catalog tool is.
+  writeLocked = false, writeEntitled = true, writeLockNote = '',
 } = {}) {
   // The two distinct reasons (an unentitled plan, an authoring stage that is
   // off) are the record's own ladder; this builder supplies only the context.
@@ -310,13 +314,20 @@ export function authorCluster({
   }))
   if (authored && authored.name) {
     const settled = typeof authored.catalog_digest === 'string' && !!authored.catalog_digest
+    const isWrite = isWriteTool(authored)
+    const locked = !!writeLocked && isWrite
+    const entBlocked = isWrite && !writeEntitled
     const authoredReason = !settled
       ? REASONS.publishing
       : running
         ? REASONS.running
         : previewing
           ? REASONS.previewing
-          : ''
+          : locked
+            ? (writeLockNote || REASONS.writeLocked)
+            : entBlocked
+              ? REASONS.writeUnentitled
+              : ''
     tools.push({
       id: `authored:${authored.name}`,
       label: authored.name,
@@ -324,7 +335,7 @@ export function authorCluster({
       icon: toolIcon(authored),
       size: toolPlacementSize(authored),
       title: authored.description || `Run ${authored.name}`,
-      write: isWriteTool(authored),
+      write: isWrite,
       disabled: !!authoredReason,
       reason: authoredReason,
       onClick: () => onUseAuthored?.(authored),
