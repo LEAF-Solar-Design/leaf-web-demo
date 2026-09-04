@@ -116,8 +116,18 @@ export function orthoPoint(state, x, y) {
  * Kinds: 0 endpoint, 1 midpoint, 2 centre.
  */
 export const MAX_SNAP_POINTS = 20000
-export const SNAP_KIND = Object.freeze({ END: 0, MID: 1, CENTRE: 2 })
-const SNAP_KIND_NAME = Object.freeze(['endpoint', 'midpoint', 'centre'])
+export const SNAP_KIND = Object.freeze({ END: 0, MID: 1, CENTRE: 2, QUADRANT: 3 })
+const SNAP_KIND_NAME = Object.freeze(['endpoint', 'midpoint', 'centre', 'quadrant'])
+const DEG = Math.PI / 180
+
+// A DXF arc sweeps counter-clockwise from start to end; an end below the
+// start wraps through 360 (the same rule the viewer intake draws it with).
+function arcSweepDeg(startDeg, endDeg) {
+  let sweep = endDeg - startDeg
+  while (sweep <= 0) sweep += 360
+  while (sweep > 360) sweep -= 360
+  return sweep
+}
 
 export function buildSnapIndex(entities) {
   const xs = []
@@ -130,7 +140,30 @@ export function buildSnapIndex(entities) {
   for (const e of Array.isArray(entities) ? entities : []) {
     const v = Array.isArray(e?.vertices) ? e.vertices : []
     if (e?.type === 'CIRCLE' || e?.type === 'ARC') {
-      if (v[0]) push(v[0][0], v[0][1], SNAP_KIND.CENTRE)
+      // The centre; then, with a finite positive radius, a circle's four
+      // quadrants, or an arc's two endpoints and its midpoint (W4f-5b).
+      const c = v[0]
+      if (!c) continue
+      const cx = c[0]
+      const cy = c[1]
+      push(cx, cy, SNAP_KIND.CENTRE)
+      const r = e.radius
+      if (!finite(r) || r <= 0) continue
+      if (e.type === 'CIRCLE') {
+        push(cx + r, cy, SNAP_KIND.QUADRANT)
+        push(cx, cy + r, SNAP_KIND.QUADRANT)
+        push(cx - r, cy, SNAP_KIND.QUADRANT)
+        push(cx, cy - r, SNAP_KIND.QUADRANT)
+      } else if (finite(e.startDeg) && finite(e.endDeg)) {
+        const sweep = arcSweepDeg(e.startDeg, e.endDeg)
+        const at = (deg) => [cx + r * Math.cos(deg * DEG), cy + r * Math.sin(deg * DEG)]
+        const a = at(e.startDeg)
+        const b = at(e.startDeg + sweep)
+        const m = at(e.startDeg + sweep / 2)
+        push(a[0], a[1], SNAP_KIND.END)
+        push(b[0], b[1], SNAP_KIND.END)
+        push(m[0], m[1], SNAP_KIND.MID)
+      }
       continue
     }
     if (e?.type !== 'LINE' && e?.type !== 'LWPOLYLINE') continue

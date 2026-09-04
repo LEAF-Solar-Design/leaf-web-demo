@@ -124,13 +124,31 @@ describe('pointPicking (W4f slice A1): clicks on the drawing answer the prompts'
       { id: 'bad', type: 'LINE', layer: '0', vertices: [[NaN, 1], [2, Infinity]] },
     ]
     const index = buildSnapIndex(entities)
-    // LINE: 2 ends + 1 mid; closed triangle: 3 ends + 3 mids; circle: 1 centre; OTHER and non-finite: nothing.
-    expect(index.n).toBe(10)
+    // LINE: 2 ends + 1 mid; closed triangle: 3 ends + 3 mids; circle: 1
+    // centre + 4 quadrants (W4f-5b); OTHER and non-finite: nothing.
+    expect(index.n).toBe(14)
     expect(index.truncated).toBe(false)
     expect(snapPoint(index, 9.6, 0.3, 1)).toEqual({ x: 10, y: 0, kind: 'endpoint' })
     expect(snapPoint(index, 5.2, -0.4, 1)).toEqual({ x: 5, y: 0, kind: 'midpoint' })
     expect(snapPoint(index, 25.1, 4.9, 1)).toEqual({ x: 25, y: 5, kind: 'midpoint' })
     expect(snapPoint(index, 49, 51, 2)).toEqual({ x: 50, y: 50, kind: 'centre' })
+    expect(snapPoint(index, 55.3, 49.8, 1)).toEqual({ x: 55, y: 50, kind: 'quadrant' })
+    expect(snapPoint(index, 50.2, 44.9, 1)).toEqual({ x: 50, y: 45, kind: 'quadrant' })
+    // A circle with no usable radius keeps only its centre; an arc has its
+    // centre, both endpoints and its midpoint, sweeping counter-clockwise
+    // (an end below the start wraps through 360).
+    expect(buildSnapIndex([{ id: 'c0', type: 'CIRCLE', layer: '0', vertices: [[1, 1]], radius: 0 }]).n).toBe(1)
+    expect(buildSnapIndex([{ id: 'cn', type: 'CIRCLE', layer: '0', vertices: [[1, 1]] }]).n).toBe(1)
+    const arc = buildSnapIndex([{ id: 'a', type: 'ARC', layer: '0', vertices: [[0, 0]], radius: 10, startDeg: 0, endDeg: 90 }])
+    expect(arc.n).toBe(4)
+    expect(snapPoint(arc, 9.8, 0.3, 1)).toEqual({ x: 10, y: 0, kind: 'endpoint' })
+    expect(snapPoint(arc, 0.2, 9.7, 1)).toEqual({ x: expect.closeTo(0, 9), y: 10, kind: 'endpoint' })
+    const mid = snapPoint(arc, 7, 7, 1)
+    expect(mid.kind).toBe('midpoint')
+    expect(mid.x).toBeCloseTo(10 * Math.SQRT1_2, 9)
+    expect(mid.y).toBeCloseTo(10 * Math.SQRT1_2, 9)
+    const wrap = buildSnapIndex([{ id: 'w', type: 'ARC', layer: '0', vertices: [[0, 0]], radius: 10, startDeg: 270, endDeg: 90 }])
+    expect(snapPoint(wrap, 9.9, 0.1, 1)).toEqual({ x: 10, y: expect.closeTo(0, 9), kind: 'midpoint' })
     // Out of reach, or nothing to search, or a bad tolerance: nothing.
     expect(snapPoint(index, 9.6, 0.3, 0.3)).toBeNull()
     expect(snapPoint(index, 70, 70, 1)).toBeNull()
