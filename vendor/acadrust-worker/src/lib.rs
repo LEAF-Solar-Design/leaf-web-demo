@@ -546,7 +546,14 @@ impl ParsedDxf {
 
     /// EXPLODE: a polyline becomes its segments (lines, arcs for bulges);
     /// the source is removed. Returns the new handles in document order.
-    /// A LINE, CIRCLE or ARC has nothing to explode into and is refused.
+    /// Only LWPOLYLINE and POLYLINE explode, and the kind is checked BEFORE
+    /// the crate is asked: a LINE has nothing to explode into, and the
+    /// crate's explode of a CIRCLE or ARC yields one "part" that is the same
+    /// geometry (a circle comes back as a 0..2pi arc, which the writer emits
+    /// as 50=0 / 51=360 and readers draw as nothing), so an empty-parts guard
+    /// alone would let EXPLODE erase a circle (kimi on #1010). The parts are
+    /// added before the source is removed, so a refused part never strands a
+    /// document with its source gone.
     fn explode_entity_core(&mut self, index: usize) -> Result<Vec<String>, Refusal> {
         let (handle, layer, parts) = {
             let entity = self
@@ -557,6 +564,9 @@ impl ParsedDxf {
             if !editable(entity) {
                 return refuse("entity_kind_not_editable");
             }
+            if !matches!(entity, EntityType::LwPolyline(_) | EntityType::Polyline2D(_)) {
+                return refuse("entity_not_explodable");
+            }
             let parts = entity.explode();
             if parts.is_empty() {
                 return refuse("entity_not_explodable");
@@ -566,14 +576,14 @@ impl ParsedDxf {
             }
             (entity.common().handle, entity.common().layer.clone(), parts)
         };
-        self.inner
-            .remove_entity(handle)
-            .ok_or_else(|| "entity_handle_not_found".to_string())?;
         let mut handles = Vec::with_capacity(parts.len());
         for mut part in parts {
             part.as_entity_mut().set_handle(Handle::NULL);
             handles.push(self.add_created(part, &layer)?);
         }
+        self.inner
+            .remove_entity(handle)
+            .ok_or_else(|| "entity_handle_not_found".to_string())?;
         Ok(handles)
     }
 
@@ -1236,6 +1246,28 @@ mod created_entity_roundtrip {
         assert_eq!(hs.len(), 3);
         // A line has nothing to explode into.
         assert_eq!(code(doc.explode_entity_core(0)), "entity_not_explodable");
+    }
+
+    #[test]
+    fn w4g4_explode_refuses_a_circle_an_arc_and_a_line_by_kind_and_leaves_them_whole() {
+        // kimi on #1010: the crate's explode of a CIRCLE returns one part, a
+        // 0..2pi ARC the writer emits as 50=0 / 51=360 (a zero-span arc that
+        // readers draw as nothing), so an empty-parts guard alone would let
+        // EXPLODE erase a circle. The kind is refused before the crate is
+        // asked, and the document is untouched: same kinds, same handles.
+        let mut doc = empty_doc();
+        doc.create_circle_core(5.0, 5.0, 2.0, "C").unwrap();
+        doc.create_arc_core(0.0, 0.0, 3.0, 0.0, 90.0, "C").unwrap();
+        doc.create_line_core(0.0, 0.0, 1.0, 1.0, "C").unwrap();
+        let before = handles(&doc);
+        assert_eq!(code(doc.explode_entity_core(0)), "entity_not_explodable");
+        assert_eq!(code(doc.explode_entity_core(1)), "entity_not_explodable");
+        assert_eq!(code(doc.explode_entity_core(2)), "entity_not_explodable");
+        assert_eq!(kinds(&doc), vec!["CIRCLE", "ARC", "LINE"]);
+        assert_eq!(handles(&doc), before);
+        // And after a write + re-parse the circle is still a circle.
+        let back = rewrite(&doc);
+        assert_eq!(kinds(&back), vec!["CIRCLE", "ARC", "LINE"]);
     }
 
     #[test]
