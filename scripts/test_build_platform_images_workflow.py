@@ -899,10 +899,12 @@ def main() -> None:
         assert not raw_key or "\\" not in raw_key.group(1), (
             "escape sequences in a mapping key are banned: %r" % line)
 
-    # SEVEN jobs hold the ECR push credential (see the note above the
+    # SEVEN jobs hold an ECR OIDC credential (see the note above the
     # deferred assignment for the roster and for why this is parsed, not
-    # text-matched). The seventh is cve-harvest (D3, 2026-08-26): it reads
-    # leaf-platform-* digests out of ECR to scan them and pushes nothing.
+    # text-matched). Six of them can push. The seventh is cve-harvest (D3,
+    # 2026-08-26): it reads leaf-platform-* digests out of ECR to scan them
+    # and pushes nothing, and since the pull-role repoint it holds a
+    # credential that CANNOT push, not merely one it declines to use.
     oidc_grants = [
         l for l in structural
         if _key_of(l) == "id-token" and _value_of(l) == "write"
@@ -1809,6 +1811,7 @@ def main() -> None:
 
     release_role = "${{ secrets.AWS_ECR_PUSH_ROLE }}"
     cache_role = "${{ secrets.AWS_ECR_BUILDCACHE_PUSH_ROLE }}"
+    pull_role = "${{ secrets.AWS_ECR_PULL_ROLE }}"
     assert _assumed_roles(warm_block) == [cache_role], (
         "the warm job's single credentials step must assume the "
         "buildcache-scoped role and nothing else")
@@ -1823,7 +1826,7 @@ def main() -> None:
         release_role,  # speculate: pushes real spec-* images by design
         release_role,  # speculate-manifest: reads live digests
         release_role,  # adopt: aliases the release tag onto digests
-        release_role,  # cve-harvest: pulls the published digests to scan
+        pull_role,  # cve-harvest: pull-only, it scans and pushes nothing
     ], ("exactly seven role assumptions in the workflow, in job order "
         "warm, build, verify, speculate, speculate-manifest, adopt, "
         "cve-harvest")
@@ -1832,6 +1835,20 @@ def main() -> None:
     # substring AWS_ECR_PUSH_ROLE.)
     assert "AWS_ECR_PUSH_ROLE" not in warm_block
     assert "AWS_ECR_BUILDCACHE_PUSH_ROLE" not in build_block
+    # cve-harvest pulls the five published digests and scans them. It builds
+    # nothing, tags nothing, pushes nothing, so it holds the pull-only role
+    # (leaf-github-web-demo-ecr-pull-role) and must never regain a push
+    # credential -- the substring form also catches a push role reintroduced
+    # in a comment as documentation of the old state.
+    harvest_block = text.split("
+  cve-harvest:
+", 1)[1].split(
+        "
+  handoff:
+", 1)[0]
+    assert _assumed_roles(harvest_block) == [pull_role]
+    assert "AWS_ECR_PUSH_ROLE" not in harvest_block
+    assert "AWS_ECR_BUILDCACHE_PUSH_ROLE" not in harvest_block
 
     # ALL cache traffic lives in the dedicated *-buildcache repositories,
     # asserted on comment-stripped executable shell lines with the exact
@@ -2920,8 +2937,10 @@ def main() -> None:
     # stop matching the release role's trust once the leaf_iam.tf transition
     # removes the ref-based subject. Parsed, not text-matched, so a
     # commented copy or a {name: ...} mapping variant cannot satisfy it.
-    # cve-harvest joined the set with D3 (2026-08-26): it reaches the
-    # release role only to PULL the published digests it scans.
+    # cve-harvest joined the set with D3 (2026-08-26) and stays in it after
+    # the pull-role repoint: leaf-github-web-demo-ecr-pull-role trusts the
+    # SAME repo:...:environment:ecr-release subject, so dropping the
+    # environment here would break the scan gate's own assumption too.
     release_env_jobs = {"build", "verify", "speculate", "speculate-manifest",
                         "adopt", "cve-harvest"}
     for job_name in release_env_jobs:
