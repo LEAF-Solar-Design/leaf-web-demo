@@ -435,8 +435,10 @@ jobs:
           # 33917147537: this step failed with zero diagnostic output while the
           # same suite locally was 47 passed / 45 skipped, so the failing row was
           # one of the live PostgreSQL tests and this was the only place it could
-          # have been seen. The eight sibling steps in this file already use the
-          # guarded form; these two had drifted from it.
+          # have been seen. Every OTHER step in this file that captures pytest
+          # into $out already uses the guarded form (the one step that runs
+          # pytest bare, with no $out at all, is documented above as exempt);
+          # these two had drifted from it.
           if ! out=$(python -m pytest -q tests/test_reconcile_sessions_authority.py -rs 2>&1); then
             printf '%s\n' "$out"
             echo 'FAIL: sessions authority reconciler tests failed (full output above)'
