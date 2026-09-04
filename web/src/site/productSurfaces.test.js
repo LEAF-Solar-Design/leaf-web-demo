@@ -139,6 +139,7 @@ describe('product surface contract', () => {
 //   versions        App.jsx:3041 VersionHistory inside the card gated at 2859
 //   conversations   converse.js:129-134 sessionCacheKey(project, drawing)
 //   builds.routes   App.jsx:2710 catalog run path; no marathon route exists
+//   builds.card     'job-rail' (slice 11a): JobRail hosts the BuildQueueCard
 //   contextMenu     zero contextmenu handlers under web/src
 //   everything else undeclared today (null)
 // ---------------------------------------------------------------------------
@@ -155,7 +156,7 @@ const CONTRACT_FIXTURE = {
     versions: 'none',
     conversations: { scope: 'drawing' },
     integrations: null,
-    builds: { routes: ['one-shot'] },
+    builds: { routes: ['one-shot'], card: 'job-rail' },
     contextMenu: [],
     shortcuts: null,
     entitlements: null,
@@ -175,7 +176,7 @@ const CONTRACT_FIXTURE = {
     versions: 'drawing',
     conversations: { scope: 'drawing' },
     integrations: null,
-    builds: { routes: ['one-shot'] },
+    builds: { routes: ['one-shot'], card: 'job-rail' },
     contextMenu: [],
     shortcuts: null,
     entitlements: null,
@@ -200,7 +201,7 @@ const CONTRACT_FIXTURE = {
     versions: 'drawing',
     conversations: { scope: 'drawing' },
     integrations: null,
-    builds: { routes: ['one-shot'] },
+    builds: { routes: ['one-shot'], card: 'job-rail' },
     contextMenu: [],
     shortcuts: null,
     entitlements: null,
@@ -222,7 +223,7 @@ const CONTRACT_FIXTURE = {
     integrations: null,
     // The console carries NO ship-lane launch control (IosSurface.jsx:3-4 is
     // props-only); the repo's only one is the stage's ToolCast.jsx:2114.
-    builds: { routes: ['one-shot'] },
+    builds: { routes: ['one-shot'], card: 'job-rail' },
     contextMenu: [],
     shortcuts: null,
     entitlements: null,
@@ -254,7 +255,7 @@ const CONTRACT_FIXTURE = {
     versions: 'none',
     conversations: { scope: null },
     integrations: null,
-    builds: { routes: [] },
+    builds: { routes: [], card: null },
     contextMenu: [],
     shortcuts: null,
     entitlements: null,
@@ -317,7 +318,9 @@ describe('Surface Contract — schema', () => {
       expect(Object.keys(contract.rails).sort()).toEqual(['dock', 'left', 'right'])
       expect(Object.keys(contract.groundMaterial).sort()).toEqual(['layerAccent', 'solarStrings'])
       expect(Object.keys(contract.conversations)).toEqual(['scope'])
-      expect(Object.keys(contract.builds)).toEqual(['routes'])
+      expect(Object.keys(contract.builds)).toEqual(['routes', 'card'])
+      // builds.card (slice 11a): the card's host, or null where no rail mounts.
+      expect([null, 'job-rail']).toContain(contract.builds.card)
     })
 
     it(`${id} carries only legal enum values and honest types`, () => {

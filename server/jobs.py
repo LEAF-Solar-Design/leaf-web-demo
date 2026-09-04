@@ -883,6 +883,7 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
             platform_link.forget(job_id)
             _emit_job_terminal(status)
             _emit_job_terminal_event(job_id, status, error, provenance)
+            _write_terminal_receipt(job_id)
         return outcome
     applied = False
     with _lock:
@@ -973,8 +974,25 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
         _emit_job_terminal(status)
         _emit_job_terminal_event(job_id, status, error, provenance,
                                  tenant_id=event_tenant_id, tool=event_tool)
+        _write_terminal_receipt(job_id)
         return "applied"
     return "not_owner"  # pragma: no cover - defensive
+
+
+def _write_terminal_receipt(job_id: str) -> None:
+    """Slice 11a: leave the SHA-stamped receipt.json beside the record once a
+    terminal outcome is APPLIED (never on duplicate / conflict / not_owner, so
+    the first outcome is the one the receipt records). Runs OUTSIDE _lock, after
+    the row committed, and is best effort by contract: build_receipts swallows
+    its own failures and this wrapper covers the import, so a receipt can never
+    turn an applied terminal callback into an error."""
+    try:
+        import build_receipts  # noqa: PLC0415 - lazy, keeps jobs importable alone
+
+        build_receipts.write_terminal_receipt(get_job(job_id))
+    except Exception as exc:  # noqa: BLE001 - a receipt must never break the job
+        print(f"[leaf-jobs] terminal receipt skipped for {job_id}: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
 
 
 # --------------------------------------------------------------------------- #

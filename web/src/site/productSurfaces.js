@@ -231,6 +231,11 @@ export const PRODUCT_SURFACES = Object.freeze([
         //   onRequestCatalogRun) is mounted on every surface; no marathon
         //   route exists in this client at all.
         routes: ['one-shot'],
+        // card: slice 11a. WHERE the BuildQueueCard is hosted: the job
+        //   monitor (components/JobRail.jsx) renders one card per record on
+        //   every studio surface, expanded here (rails.right 'job-rail').
+        //   The toolbar badge (SurfaceFrame.Builds) reads this slot too.
+        card: 'job-rail',
       },
       // contextMenu: zero contextmenu handlers exist under web/src (grep,
       //   2026-09-03) — declared empty, not undeclared.
@@ -311,7 +316,9 @@ export const PRODUCT_SURFACES = Object.freeze([
       versions: 'drawing',
       conversations: { scope: 'drawing' }, // converse.js:129-134
       integrations: null,
-      builds: { routes: ['one-shot'] }, // App.jsx:2710 catalog run path
+      // builds.card: slice 11a, the job monitor hosts the card (a spine here
+      //   by default, rails.right 'job-spine'; the toolbar badge opens it).
+      builds: { routes: ['one-shot'], card: 'job-rail' }, // App.jsx:2710 catalog run path
       contextMenu: [],
       shortcuts: null,
       entitlements: null,
@@ -381,7 +388,7 @@ export const PRODUCT_SURFACES = Object.freeze([
       versions: 'drawing', // App.jsx:3041 inside the shown card (App.jsx:2859)
       conversations: { scope: 'drawing' }, // converse.js:129-134
       integrations: null,
-      builds: { routes: ['one-shot'] }, // App.jsx:2710
+      builds: { routes: ['one-shot'], card: 'job-rail' }, // App.jsx:2710; card: slice 11a, the job monitor hosts it
       contextMenu: [],
       shortcuts: null,
       entitlements: null,
@@ -443,6 +450,9 @@ export const PRODUCT_SURFACES = Object.freeze([
         //   data-testid="ios-ship-launch"). Recorded as a divergence in the
         //   doc, never invented into the console contract.
         routes: ['one-shot'],
+        // card: slice 11a, the job monitor hosts the card (expanded here,
+        //   rails.right 'job-rail'), on the stage's Jobs tab as well.
+        card: 'job-rail',
       },
       contextMenu: [],
       shortcuts: null,
@@ -537,7 +547,11 @@ export const PRODUCT_SURFACES = Object.freeze([
       integrations: null,
       // builds.routes: declared EMPTY. SheetsPage has no run or build control
       //   of any kind, so this is an absence that was read, not one assumed.
-      builds: { routes: [] },
+      // builds.card: null, slice 11a. No rail mounts in the sheets arm
+      //   (rails.right 'none'), so there is no host for a BuildQueueCard and
+      //   the toolbar badge has no toolbar to sit in; the doc's field table
+      //   carries the reason.
+      builds: { routes: [], card: null },
       // contextMenu: zero contextmenu handlers exist under web/src.
       contextMenu: [],
       shortcuts: null,

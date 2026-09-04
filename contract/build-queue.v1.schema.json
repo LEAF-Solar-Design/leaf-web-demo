@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafautomation.ai/contract/build-queue.v1.schema.json",
+  "title": "leaf.build-queue.v1",
+  "description": "One build record as GET /api/builds returns it and as the BuildQueueCard renders it (standardization slice 11a). Mirrors web/src/lib/buildQueue.js parseBuildRecord and server/build_queue.py validate_record; those validators are the enforcement, this schema is the shared statement of the shape.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "lane", "state", "title", "requested_by", "started", "elapsed_ms", "estimate_ms", "cost_usd", "receipts", "terminal", "actions", "status"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "lane": { "enum": ["fold", "broker", "fleet"] },
+    "state": { "enum": ["queued", "running", "verifying", "done", "failed"] },
+    "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "requested_by": { "type": ["string", "null"], "minLength": 1, "maxLength": 200 },
+    "started": { "type": ["integer", "null"], "minimum": 1, "description": "epoch milliseconds" },
+    "elapsed_ms": { "type": ["integer", "null"], "minimum": 0 },
+    "estimate_ms": { "type": ["integer", "null"], "minimum": 1 },
+    "cost_usd": { "type": ["number", "null"], "minimum": 0 },
+    "receipts": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "ref", "at"],
+        "properties": {
+          "kind": { "enum": ["terminal", "verification", "promotion", "artifact", "gate-proof"] },
+          "ref": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "at": { "type": ["integer", "null"], "minimum": 1, "description": "epoch milliseconds" }
+        }
+      }
+    },
+    "terminal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verified", "promoted"],
+      "properties": {
+        "verified": { "type": "boolean", "description": "the lane's own terminal artifact exists; never inferred from state" },
+        "promoted": { "type": "boolean", "description": "a receipt of kind promotion exists; never inferred" }
+      }
+    },
+    "actions": {
+      "type": "array",
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": { "enum": ["cancel", "retry", "promote"] }
+    },
+    "status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["word", "tint", "detail"],
+      "properties": {
+        "word": { "type": "string", "minLength": 1, "maxLength": 200, "description": "the lane's own status vocabulary (JobRail's for the broker)" },
+        "tint": { "enum": ["ok", "warn", "err", "mut"] },
+        "detail": { "type": ["string", "null"], "minLength": 1, "maxLength": 200 }
+      }
+    }
+  }
+}

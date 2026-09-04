@@ -1,0 +1,101 @@
+"""
+The platform's OWN client for the fleet gateway (standardization slice 11a).
+
+GET /api/builds reads the fleet lane through this module with the platform's
+credential, never the browser's: the browser holds a tenant session, and a
+tenant session must not become a fleet credential by way of a proxy. The
+credential is read from the environment INSIDE ``_token()`` at call time and
+put on one header; it is never logged, never returned, never placed in a URL.
+
+Configuration (both env names, no values, ever, in a log or a body):
+  LEAF_FLEET_GATEWAY_URL     the gateway's base URL; unset = the lane is
+                             unconfigured and reads as [] with a warning
+  LEAF_FLEET_GATEWAY_TOKEN   the bearer the gateway issued to this platform
+
+Wire shape this client expects from ``GET {url}/tasks?tenant=<id>&limit=<n>``:
+  { "tasks": [ { task_id, title, owner, state, state_since, last_evidence_at,
+                 detail, terminal_state, created_at, requested_by?, receipts? } ] }
+which is the collector's ``task_state`` row joined to ``tasks`` (the shape
+slice 11c teaches the collector to serve). Rows are handed to
+``build_queue.from_fleet_task`` untouched; this module only bounds them.
+
+HARDENING CONTRACT. One request, one bounded timeout (FLEET_TIMEOUT_S), one
+bounded body (MAX_BODY_BYTES), a closed set of accepted shapes. Every failure
+(unset URL, DNS, refused, timeout, non-200, oversized, non-JSON, wrong shape)
+raises FleetGatewayUnavailable with a SHORT reason the route turns into one
+warning string; the reason never carries the token or the response body.
+"""
+from __future__ import annotations
+
+import json
+import os
+import urllib.error
+import urllib.parse
+import urllib.request
+from typing import Any, Callable, Dict, List, Optional
+
+URL_ENV = "LEAF_FLEET_GATEWAY_URL"
+TOKEN_ENV = "LEAF_FLEET_GATEWAY_TOKEN"
+FLEET_TIMEOUT_S = 3.0
+MAX_BODY_BYTES = 256 * 1024
+MAX_ROWS = 200
+
+
+class FleetGatewayUnavailable(Exception):
+    """The fleet lane could not be read. ``str(exc)`` is safe to surface."""
+
+
+def configured() -> bool:
+    return bool(os.environ.get(URL_ENV, "").strip())
+
+
+def _base_url() -> str:
+    raw = os.environ.get(URL_ENV, "").strip().rstrip("/")
+    if not raw:
+        raise FleetGatewayUnavailable("gateway not configured")
+    parsed = urllib.parse.urlsplit(raw)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise FleetGatewayUnavailable("gateway url is not http(s)")
+    return raw
+
+
+def _token() -> Optional[str]:
+    token = os.environ.get(TOKEN_ENV, "")
+    token = token.strip()
+    return token or None
+
+
+def list_tasks(tenant_id: str, limit: int, *,
+               opener: Optional[Callable[..., Any]] = None) -> List[Dict[str, Any]]:
+    """The tenant's fleet rows, bounded. Raises FleetGatewayUnavailable."""
+    base = _base_url()
+    bounded = max(1, min(int(limit), MAX_ROWS))
+    query = urllib.parse.urlencode({"tenant": str(tenant_id), "limit": bounded})
+    request = urllib.request.Request(f"{base}/tasks?{query}", method="GET")
+    request.add_header("Accept", "application/json")
+    token = _token()
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+    open_fn = opener or urllib.request.urlopen
+    try:
+        with open_fn(request, timeout=FLEET_TIMEOUT_S) as response:
+            status = getattr(response, "status", 200)
+            if status != 200:
+                raise FleetGatewayUnavailable(f"gateway answered {int(status)}")
+            raw = response.read(MAX_BODY_BYTES + 1)
+    except FleetGatewayUnavailable:
+        raise
+    except urllib.error.HTTPError as exc:
+        raise FleetGatewayUnavailable(f"gateway answered {int(exc.code)}") from None
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        raise FleetGatewayUnavailable(f"gateway unreachable ({type(exc).__name__})") from None
+    if len(raw) > MAX_BODY_BYTES:
+        raise FleetGatewayUnavailable("gateway body over bound")
+    try:
+        body = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise FleetGatewayUnavailable("gateway body is not JSON") from None
+    if not isinstance(body, dict) or not isinstance(body.get("tasks"), list):
+        raise FleetGatewayUnavailable("gateway body has no tasks list")
+    rows = [row for row in body["tasks"] if isinstance(row, dict)]
+    return rows[:bounded]

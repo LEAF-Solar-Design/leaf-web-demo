@@ -625,6 +625,17 @@ export async function listJobs(tenantId = TENANT, limit = 20) {
   return data.jobs || []
 }
 
+// GET the tenant's builds across every lane (slice 11a): the broker's jobs,
+// the fleet gateway's tasks (read server-side with the platform's own
+// credential, never ours), and the multi-round runs the tenant owns, behind
+// ONE record shape (lib/buildQueue.js). Bounded by a timeout so a slow lane
+// upstream never holds the poll; the caller validates every record.
+export const BUILDS_FETCH_TIMEOUT_MS = 8000
+export async function listBuilds(tenantId = TENANT, limit = 20) {
+  const bounded = Math.max(1, Math.min(Number(limit) || 20, 200))
+  return http(`/api/builds?limit=${bounded}`, { headers: { 'X-Tenant-Id': tenantId } }, BUILDS_FETCH_TIMEOUT_MS)
+}
+
 // Turn a terminal job record into a §3 result envelope (the shape the UI
 // renders). Complete -> the stored envelope verbatim; failed (or a
 // complete-without-result edge) -> a §3-shaped error envelope.

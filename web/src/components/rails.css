@@ -77,3 +77,40 @@ button.rail-row { cursor: pointer; }
   font-family: var(--font-mono); font-size: 11px; color: var(--muted-2);
   max-width: 340px; overflow: hidden; text-overflow: ellipsis;
 }
+
+/* --- slice 11a: the BuildQueueCard hosted in the rail ---
+   A card is the 32px ledger row above, wrapped so a meta line and the wired
+   action chips can sit under it without nesting a button in a button. A
+   broker row with nothing to add renders the row alone, so the ledger is
+   unchanged for today's jobs. */
+.bq-card { display: flex; flex-direction: column; }
+.bq-stages { display: inline-flex; align-items: center; gap: 2px; margin-left: 4px; }
+.bq-mark {
+  font-family: var(--font-mono); font-size: 11px; line-height: 1;
+  color: var(--muted-2); opacity: .45; font-variant-numeric: tabular-nums;
+}
+.bq-mark.on { opacity: 1; }
+.bq-mark.verified.on { color: var(--primary); }
+.bq-mark.promoted.on { color: var(--primary-hover); }
+.bq-meta {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px;
+  padding: 0 2px 6px 18px; font-size: 11px; color: var(--muted-2);
+  font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+}
+.bq-meta b { font-weight: 500; color: var(--muted); }
+.bq-actions { display: flex; gap: 6px; padding: 0 2px 8px 18px; }
+.rail-builds-group { margin-top: 8px; }
+
+/* --- slice 11a: the running-count badge in the console toolbar --- */
+.builds-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 22px; padding: 0 8px; border-radius: 11px;
+  font-family: var(--font-mono); font-size: 11px; font-variant-numeric: tabular-nums;
+  color: var(--primary-hover); background: var(--accent-tint); white-space: nowrap;
+}
+.builds-badge::before {
+  content: ''; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--primary); animation: builds-badge-pulse 1.6s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) { .builds-badge::before { animation: none; } }
+@keyframes builds-badge-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }

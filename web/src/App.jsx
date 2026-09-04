@@ -104,6 +104,7 @@ import {
 } from './converse.js'
 import { useWorkspaceControllers } from './controllers/WorkspaceControllerProvider.jsx'
 import { entitlementAllowed } from './controllers/platform/index.js'
+import useBuildQueue from './controllers/useBuildQueue.js'
 import useJobController from './controllers/useJobController.js'
 import useAuthorStageController from './controllers/useAuthorStageController.js'
 import useDrawingVersionController from './controllers/useDrawingVersionController.js'
@@ -2296,6 +2297,10 @@ export default function App() {
   // W4d Slice D: the job monitor's posture on drafting surfaces (spine by
   // default; in-memory only, like the nav posture).
   const [jobRailExpanded, setJobRailExpanded] = useState(false)
+  // Slice 11a: the builds poll (GET /api/builds, validated records from
+  // every lane). Mock mode makes no request; the rail hosts one
+  // BuildQueueCard per record and the toolbar badge counts the open ones.
+  const buildQueue = useBuildQueue({ mock })
   // W4e: the ribbon shows ONE tab's panels at a time (the reference's
   // Draw / Insert / Annotate / View / Manage); the top band switches it.
   // Slice 2: the opening tab is the contract's declared home tab, not a
@@ -2748,6 +2753,7 @@ export default function App() {
         inflight: inflightPtr,
         reattaching,
         onSelectJob,
+        builds: buildQueue.builds,
       }}
       toast={{ toast, onDone: onToastDone }}
     >
@@ -3144,6 +3150,10 @@ export default function App() {
               </button>
             )}
             <div className="viewer-actions">
+              {/* Slice 11a: the running-count badge. Renders nothing at zero
+                  and where the contract declares no build card, so the idle
+                  band is byte-identical; one click expands the job spine. */}
+              <SurfaceFrame.Builds />
               {/* Version-completed events surface as NT2 toasts; only the genuine
                   read-only-preview advisory keeps an amber note here. */}
               {!mock && previewing && (
