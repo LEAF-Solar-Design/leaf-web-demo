@@ -40,6 +40,7 @@ import { useCallback, useEffect, useMemo } from 'react'
 
 import { ENV_CAD_EDIT } from './flag.js'
 import { DEFAULT_EDIT_INPUTS, useEngineSessionOptional } from './EngineSessionProvider.jsx'
+import LiveRegion from '../components/LiveRegion.jsx'
 
 function fmt(n) {
   return Number.isInteger(n) ? String(n) : n.toFixed(2)
