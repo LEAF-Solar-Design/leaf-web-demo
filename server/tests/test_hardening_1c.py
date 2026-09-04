@@ -117,6 +117,23 @@ def test_f17_explicit_wildcard_opt_in_is_honored(monkeypatch):
     assert _cors_origins(monkeypatch, cors_env="*", auth_live=True) == ["*"]
 
 
+def test_w4g2_dxf_route_headers_are_exposed_cross_origin():
+    """W4g-2 (engine reach): the browser only sees the DXF route's version /
+    head / leg headers and its ETag on a cross-origin API when the middleware
+    exposes them; the head opener's fallback covers the version, the 304 path
+    needs the ETag for real."""
+    import app as appmod  # noqa: PLC0415
+    from fastapi.middleware.cors import CORSMiddleware  # noqa: PLC0415
+
+    exposed = None
+    for mw in appmod.app.user_middleware:
+        if mw.cls is CORSMiddleware:
+            exposed = mw.kwargs.get("expose_headers")
+    assert exposed is not None, "CORS middleware not wired"
+    for name in ("ETag", "X-Leaf-Version", "X-Leaf-Head", "X-Leaf-Dxf-Source"):
+        assert name in exposed
+
+
 def test_f17_app_middleware_is_wired_from_the_env_helper():
     """The real FastAPI app's CORS middleware takes its allow_origins from
     app._cors_origins() (not a hardcoded ["*"]) and keeps allow_credentials False."""

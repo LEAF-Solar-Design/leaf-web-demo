@@ -36,7 +36,7 @@
  * tab remounts. Bounded the same way (a group from the fixed pair and a
  * short op token, or null), and it disarms itself when the document goes.
  */
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 
 import { useDrawingIdentityOptional } from '../drawing/DrawingIdentityProvider.jsx'
 
@@ -100,6 +100,11 @@ export default function EngineSessionProvider({
   createWorker = defaultCreateWorker,
   saveTarget = null,
   onSaved = null,
+  // W4g-2 (one head): the host learns when the engine holds edits nobody
+  // saved (session.dirty), so a catalog write tool that would move the
+  // server head under them can be refused with the reason. Called only on
+  // a change, with a boolean.
+  onDirtyChange = null,
   children,
 }) {
   // No identity provider means no drawing identity, which is a real state
@@ -182,6 +187,13 @@ export default function EngineSessionProvider({
         : Object.freeze({ state: next.state, sentence, version, head, source })
     ))
   }, [])
+
+  const dirty = session.dirty === true
+  const onDirtyChangeRef = useRef(onDirtyChange)
+  onDirtyChangeRef.current = onDirtyChange
+  useEffect(() => { onDirtyChangeRef.current?.(dirty) }, [dirty])
+  // Unmount: the host must not keep a stale "dirty" over a provider that is gone.
+  useEffect(() => () => { onDirtyChangeRef.current?.(false) }, [])
 
   const canSave = saveTarget !== null && saveTarget !== undefined
   const value = useMemo(

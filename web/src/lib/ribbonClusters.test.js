@@ -60,6 +60,18 @@ describe('catalogClusters', () => {
     expect(toolsOf(clusters[0])['count-by-layer'].disabled).toBe(false)
   })
 
+  it('W4g-2: unsaved browser-engine edits disable write tools with the reason; read tools stay live; the lock outranks it', () => {
+    const dirty = catalogClusters(FAMS, { onRequestRun: () => {}, engineDirty: true })
+    const write = toolsOf(dirty[1])['delete-marked-panel']
+    expect(write.disabled).toBe(true)
+    expect(write.reason).toBe(REASONS.unsavedEngineEdits)
+    expect(toolsOf(dirty[0])['count-by-layer'].disabled).toBe(false)
+    const both = catalogClusters(FAMS, { onRequestRun: () => {}, engineDirty: true, writeLocked: true })
+    expect(toolsOf(both[1])['delete-marked-panel'].reason).toBe(REASONS.writeLocked)
+    const clean = catalogClusters(FAMS, { onRequestRun: () => {}, engineDirty: false })
+    expect(toolsOf(clean[1])['delete-marked-panel'].disabled).toBe(false)
+  })
+
   it('prefers the caller-supplied lock note and names the plan when unentitled', () => {
     const locked = catalogClusters(FAMS, { onRequestRun: () => {}, writeLocked: true, writeLockNote: 'held by ops' })
     expect(toolsOf(locked[1])['delete-marked-panel'].reason).toBe('held by ops')

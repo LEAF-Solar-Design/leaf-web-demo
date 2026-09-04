@@ -623,18 +623,28 @@ test.describe('route matrix, rail ON', () => {
       await page.getByLabel('ribbon y2').press('Enter')
       await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBefore + 1), { timeout: 60_000 })
       await page.keyboard.press('Escape')
+      // W4g-2 (one head): with the edit unsaved, every catalog WRITE tool on
+      // the ribbon is disabled with the reason (a run would move the server
+      // head under the browser copy); read tools stay live. The stack's
+      // catalog carries at least one write tool on the Manage families.
+      await page.getByRole('tab', { name: 'Manage' }).click()
+      const dirtyBlocked = ribbon.locator('.ribbon-tool[aria-label*="the browser engine holds unsaved edits"]')
+      await expect(dirtyBlocked.first()).toBeAttached({ timeout: 10_000 })
+      test.info().annotations.push({ type: 'one-head', description: `${await dirtyBlocked.count()} write tools held while dirty` })
       // The edit is dirty and the project target exists, so Save is live
       // (the write-back itself is proven by tests/test_save_edited_version.py
       // and the acceptance prover; saving HERE would add a version to the
       // stack's shared demo drawing and move the head under the specs that
       // count versions from a known start). The engine's own Undo returns
-      // the copy to clean instead.
+      // the copy to clean instead, and the write tools come back with it.
       const saveBtn = ribbon.locator('[data-tool="save-version"]')
       await page.getByRole('tab', { name: 'Insert' }).click()
       await expect(saveBtn).toBeEnabled()
       await ribbon.locator('[data-tool="undo-edit"]').click()
       await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBefore), { timeout: 60_000 })
       await expect(saveBtn).toBeDisabled()
+      await page.getByRole('tab', { name: 'Manage' }).click()
+      await expect(dirtyBlocked).toHaveCount(0)
       await page.getByRole('tab', { name: 'Draw' }).click()
     } else {
       await expect(modify.locator('.ribbon-note')).toHaveText(/no drawing in the browser engine yet|could not be opened in the browser engine/)

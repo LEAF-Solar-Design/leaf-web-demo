@@ -84,6 +84,10 @@ export const REASONS = Object.freeze({
   nothingToUndo: 'nothing to undo',
   nothingToRedo: 'nothing to redo',
   notInEngine: 'not in the browser engine yet',
+  // W4g-2 (one head): a write tool would move the server head under a
+  // browser copy that holds edits nobody saved; the drafter decides which
+  // survives before anything runs.
+  unsavedEngineEdits: 'the browser engine holds unsaved edits: save or discard them first',
   // The publish settled in the author card but the catalog has not issued the
   // tool a digest yet, so there is nothing runnable to arm. Same sentence the
   // one honest resolver (site/publishedCatalogTool.js) fails with.

@@ -212,6 +212,12 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    # W4g-2 (engine reach): the DXF route's answer carries the version, the
+    # head and the leg it took as headers, plus an ETag for the 304 path. A
+    # cross-origin page (a split web/API deployment, the local proof stack)
+    # only sees them when they are exposed; the client falls back to the head
+    # it already holds, but the ETag round trip needs the real header.
+    expose_headers=["ETag", "X-Leaf-Version", "X-Leaf-Head", "X-Leaf-Dxf-Source"],
 )
 install_error_handlers(app)
 
