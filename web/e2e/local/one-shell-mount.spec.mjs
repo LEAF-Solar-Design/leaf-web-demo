@@ -627,7 +627,10 @@ test.describe('route matrix, rail ON', () => {
       await page.getByRole('tab', { name: 'Insert' }).click()
       await expect(saveBtn).toBeEnabled()
       await saveBtn.click()
-      await expect(page.getByRole('status').filter({ hasText: /Saved as version \d+/ })).toHaveCount(1, { timeout: 60_000 })
+      // The engine's status line lives in the import workbench, which is
+      // display:none while the pane is closed (the fresh visit never opened
+      // it), so a role query would not see it: read the node itself.
+      await expect(page.locator('.cad-edit-workbench [role="status"]').filter({ hasText: /Saved as version \d+/ })).toHaveCount(1, { timeout: 60_000 })
       await page.getByRole('tab', { name: 'Draw' }).click()
     } else {
       await expect(modify.locator('.ribbon-note')).toHaveText(/no drawing in the browser engine yet|could not be opened in the browser engine/)
