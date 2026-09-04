@@ -41,6 +41,15 @@ describe('W4g-5b store: ARRAY operand reading', () => {
       .toBe('Polar array refused: the count includes the source, so it must be at least 2.')
     expect(buildEditPayload('arrayPolar', 'e1', { count: '4', cx: '0', cy: '0', totalDeg: '0' }).refusal)
       .toBe('Polar array refused: an angle of 0 puts every copy on the source.')
+    // Past one turn the sweep wraps: 3 items over 720 degrees is a step of
+    // 360, so both copies land on the original as invisible duplicates.
+    expect(buildEditPayload('arrayPolar', 'e1', { count: '3', cx: '0', cy: '0', totalDeg: '720' }).refusal)
+      .toBe('Polar array refused: the angle to fill cannot be more than one full turn.')
+    expect(buildEditPayload('arrayPolar', 'e1', { count: '4', cx: '0', cy: '0', totalDeg: '-720' }).refusal)
+      .toBe('Polar array refused: the angle to fill cannot be more than one full turn.')
+    // A full turn either way is exactly fillable and stays accepted.
+    expect(buildEditPayload('arrayPolar', 'e1', { count: '4', cx: '0', cy: '0', totalDeg: '360' }).payload.totalDeg).toBe(360)
+    expect(buildEditPayload('arrayPolar', 'e1', { count: '4', cx: '0', cy: '0', totalDeg: '-360' }).payload.totalDeg).toBe(-360)
   })
 
   it('carries the engine\'s own copy bound, so a count the prompt refuses never reaches the document', () => {

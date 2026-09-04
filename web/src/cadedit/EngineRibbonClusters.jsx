@@ -95,9 +95,10 @@ const DRAW_OFF = Object.freeze([
 ])
 
 // The entity operations the compiled engine performs are registry records
-// too (`forGroup('modify')`): the six original ones and, since W4g-4, COPY,
-// MIRROR, ROTATE, SCALE and EXPLODE. The reference's Modify tools this engine
-// still lacks (the intersection verbs, W4g-6) stay honest placeholders.
+// too (`forGroup('modify')`): the six original ones, COPY, MIRROR, ROTATE,
+// SCALE and EXPLODE (W4g-4), OFFSET (W4g-5a) and ARRAY's two forms (W4g-5b).
+// The reference's Modify tools this engine still lacks (the intersection
+// verbs, W4g-6) stay honest placeholders.
 const MODIFY_OFF = Object.freeze([
   { id: 'modify:trim', label: 'Trim', icon: 'trim' },
   { id: 'modify:extend', label: 'Extend', icon: 'extend' },

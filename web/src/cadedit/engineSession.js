@@ -317,6 +317,10 @@ export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer, x1,
       const sweep = fmtDelta(totalDeg)
       if (sweep === null) return { refusal: 'Polar array refused: the angle to fill must be a number (degrees).' }
       if (sweep === 0) return { refusal: 'Polar array refused: an angle of 0 puts every copy on the source.' }
+      // Past one turn the sweep wraps and copies land back on the source
+      // (3 items over 720 degrees puts both on the original). The engine
+      // refuses it too; this is the sentence a drafter reads.
+      if (Math.abs(sweep) > 360) return { refusal: 'Polar array refused: the angle to fill cannot be more than one full turn.' }
       payload.count = n
       payload.cx = bx
       payload.cy = by

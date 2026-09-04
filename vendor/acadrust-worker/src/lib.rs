@@ -673,6 +673,15 @@ impl ParsedDxf {
         if total_deg == 0.0 {
             return refuse("array_sweep_zero");
         }
+        // "Angle to fill" cannot fill more than one turn. Past 360 the sweep
+        // wraps and copies start landing on the source: a count of 3 over 720
+        // gives a step of 360, so BOTH copies sit exactly on the original as
+        // invisible duplicates. That is the same fault array_spacing_zero
+        // already refuses for the rectangular form, so it is refused here too
+        // rather than silently drawn.
+        if total_deg.abs() > 360.0 {
+            return refuse("array_sweep_past_full_turn");
+        }
         // A full turn shares its first and last position, so the step divides
         // by count there and by count - 1 for an open sweep.
         let full_turn = (total_deg.abs() - 360.0).abs() < 1e-9;
@@ -1494,6 +1503,13 @@ mod created_entity_roundtrip {
         // A full turn shares its first and last position, so four positions
         // are 90 degrees apart and the fourth does NOT sit on the source.
         assert_eq!(centres(&doc), vec![(10.0, 0.0), (0.0, 10.0), (-10.0, 0.0), (-0.0, -10.0)]);
+        // A full turn is exactly fillable in either direction; only a sweep
+        // PAST one turn is refused, because there the copies wrap onto the
+        // source.
+        let mut ccw = empty_doc();
+        ccw.create_circle_core(10.0, 0.0, 1.0, "P").unwrap();
+        assert_eq!(ccw.array_polar_core(0, 4, 0.0, 0.0, -360.0).unwrap().len(), 3);
+        assert_eq!(centres(&ccw), vec![(10.0, 0.0), (-0.0, -10.0), (-10.0, 0.0), (0.0, 10.0)]);
     }
 
     #[test]
@@ -1523,6 +1539,8 @@ mod created_entity_roundtrip {
         assert_eq!(code(doc.array_polar_core(0, 2000, 0.0, 0.0, 90.0)), "array_too_many_copies");
         assert_eq!(code(doc.array_polar_core(0, 4, f64::INFINITY, 0.0, 90.0)), "coordinate_not_finite");
         assert_eq!(code(doc.array_polar_core(0, 4, 0.0, 0.0, 0.0)), "array_sweep_zero");
+        assert_eq!(code(doc.array_polar_core(0, 3, 0.0, 0.0, 720.0)), "array_sweep_past_full_turn");
+        assert_eq!(code(doc.array_polar_core(0, 4, 0.0, 0.0, -720.0)), "array_sweep_past_full_turn");
         assert_eq!(code(doc.array_polar_core(9, 4, 0.0, 0.0, 90.0)), "entity_index_out_of_range");
         assert_eq!(handles(&doc), before, "a refused array adds nothing");
         assert_eq!(kinds(&doc), vec!["CIRCLE"]);
