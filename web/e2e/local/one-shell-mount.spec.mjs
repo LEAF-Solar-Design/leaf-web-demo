@@ -486,7 +486,9 @@ test.describe('route matrix, rail ON', () => {
   })
 
   test("the cockpit's actual tools (W4d Slice A): real groups, honest gating, one engine session", async ({ page, request }) => {
-    test.setTimeout(180_000)
+    // W4g-4: the verb rows (COPY, ROTATE, EXPLODE x2 on the real engine) grew this
+    // row past three minutes on a loaded host; five is its budget now.
+    test.setTimeout(300_000)
     await requireLocalReady(request, test, API_BASE)
     await setRail(page, '1')
     await page.goto('/app')
