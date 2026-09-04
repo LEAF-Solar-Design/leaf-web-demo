@@ -623,14 +623,18 @@ test.describe('route matrix, rail ON', () => {
       await page.getByLabel('ribbon y2').press('Enter')
       await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBefore + 1), { timeout: 60_000 })
       await page.keyboard.press('Escape')
+      // The edit is dirty and the project target exists, so Save is live
+      // (the write-back itself is proven by tests/test_save_edited_version.py
+      // and the acceptance prover; saving HERE would add a version to the
+      // stack's shared demo drawing and move the head under the specs that
+      // count versions from a known start). The engine's own Undo returns
+      // the copy to clean instead.
       const saveBtn = ribbon.locator('[data-tool="save-version"]')
       await page.getByRole('tab', { name: 'Insert' }).click()
       await expect(saveBtn).toBeEnabled()
-      await saveBtn.click()
-      // The engine's status line lives in the import workbench, which is
-      // display:none while the pane is closed (the fresh visit never opened
-      // it), so a role query would not see it: read the node itself.
-      await expect(page.locator('.cad-edit-workbench [role="status"]').filter({ hasText: /Saved as version \d+/ })).toHaveCount(1, { timeout: 60_000 })
+      await ribbon.locator('[data-tool="undo-edit"]').click()
+      await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBefore), { timeout: 60_000 })
+      await expect(saveBtn).toBeDisabled()
       await page.getByRole('tab', { name: 'Draw' }).click()
     } else {
       await expect(modify.locator('.ribbon-note')).toHaveText(/no drawing in the browser engine yet|could not be opened in the browser engine/)
