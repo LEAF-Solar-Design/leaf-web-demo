@@ -13,7 +13,7 @@ import CockpitTopBand from './site/CockpitTopBand.jsx'
 import DraftingRibbon from './site/DraftingRibbon.jsx'
 import PropertiesDock, { drawingExtents } from './site/PropertiesDock.jsx'
 import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
-import { ladderListener, slashCommandHandlers } from './lib/actionRegistry.js'
+import { byId, ladderListener, slashCommandHandlers } from './lib/actionRegistry.js'
 import { REASONS, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
 import { isWriteTool } from './lib/toolRecord.js'
 import { resolvePublishedCatalogTool } from './site/publishedCatalogTool.js'
@@ -83,6 +83,7 @@ import {
 } from './runIntent.js'
 import useExit from './useExit.js'
 import DetailsDrawer from './components/DetailsDrawer.jsx'
+import ShortcutSheet from './components/ShortcutSheet.jsx'
 import {
   config, getSession, getTools, getCapabilities, runTool, runToolAsync,
   getJob, recordToEnvelope, publishStagedAuthor, getDrawingIntake,
@@ -314,6 +315,9 @@ export default function App() {
   // --- NT2 toast (one slot — newest replaces) + DT2 details drawer ---
   const [toast, setToast] = useState(null)   // {id, text, action?}
   const [drawer, setDrawer] = useState(null) // {title, rows[], action?, foot?}
+
+  // --- slice 10b: the shortcut sheet (Shift+? / bar:shortcuts) ---
+  const [shortcutsOpen, setShortcutsOpen] = useState(false)
 
   // --- Claude account grant (Concern 2 — the user's Claude login) ---
   // Kept strictly apart from the platform identity above (AUTH.md §0). The token
@@ -2158,6 +2162,7 @@ export default function App() {
       onRetryTools: () => retryTools(),
       onRetryCatalog: () => loadCatalog(),
       onRetryRefresh: () => onRetryViewerRefresh(),
+      onOpenShortcuts: () => setShortcutsOpen(true),
     })
     // Hotkey-driven changes land frame-of-keypress (data-instant, W0#7). The
     // listener stamps only a branch that will handle the key: type-to-fall-
@@ -2606,6 +2611,66 @@ export default function App() {
     toggleLayer, railFamilies, onRequestCatalogRun, writeLocked, canRunWrite, canBuild, entOf, ribbonTab, colorForLayer, paneOpen,
     lastAuthoredTool, onUseAuthored, setFamilyOpen, engineDirty])
   const ribbonClusters = ribbon.clusters
+
+  // Slice 10b: the palette's action rows. NOT a second ctx or a second
+  // reason ladder — the SAME cluster builders the ribbon calls above
+  // (ribbonClusters.js), called again with the same live state, so a
+  // disabled row's reason is the ribbon's own sentence, not a copy that can
+  // drift. Flattened across every tab (the ribbon memo above returns only
+  // the ACTIVE tab's clusters); the palette must find "undo" whether or not
+  // the Draw tab is on screen. Catalog/layers/reference-panel tools are left
+  // out of this pass: they are per-drawing dynamic data, already reachable
+  // through the tools artifact index below, and folding them in here would
+  // duplicate that list rather than add to it.
+  const paletteActions = useMemo(() => {
+    if (!(studioGround && drafting)) return []
+    const view = viewCluster({ viewerRef, hasDrawing: !!shown, paneOpen, onTogglePane: () => setPaneOpen((o) => !o) })
+    const version = versionCluster({
+      hasVersions: !!drawingState,
+      canUndo,
+      canRedo,
+      versionBusy: !!versionBusy,
+      running: !!running,
+      previewing: !!previewing,
+      mutationsBlocked: !!drawingMutationsBlocked,
+      historyOpen,
+      onUndo,
+      onRedo,
+      onToggleHistory: onToggleHistoryTracked,
+    })
+    const rail = navSpine ? [railCluster({ onExpand: () => setNavExpanded(true) })] : []
+    const author = authorCluster({
+      entitled: entOf('build'),
+      available: canBuild,
+      onOpen: () => {
+        setNavExpanded(true)
+        setAuthorOpen(true)
+        authorSectionRef.current?.scrollIntoView?.({ block: 'nearest' })
+      },
+      authored: lastAuthoredTool,
+      onUseAuthored,
+      running: !!running,
+      previewing: !!previewing,
+      writeLocked,
+      writeEntitled: canRunWrite,
+    })
+    const tools = [...view.tools, ...version.tools, ...rail.flatMap((c) => c.tools), ...author.tools]
+    const shortcuts = byId('bar:shortcuts')
+    return [
+      ...tools.map((t) => ({
+        id: t.id, label: t.label, icon: t.icon, kbd: null,
+        disabled: !!t.disabled, reason: t.reason || '', onSelect: t.onClick,
+      })),
+      // The one 'bar' action honest about a real palette row (slice 10b):
+      // Enter runs it, a click or tap runs it, its own kbd cap is real.
+      {
+        id: shortcuts.id, label: shortcuts.label, icon: shortcuts.icon, kbd: shortcuts.kbd,
+        disabled: false, reason: '', onSelect: () => setShortcutsOpen(true),
+      },
+    ]
+  }, [studioGround, drafting, shown, paneOpen, drawingState, canUndo, canRedo, versionBusy, running,
+    previewing, drawingMutationsBlocked, historyOpen, onUndo, onRedo, onToggleHistoryTracked, navSpine,
+    entOf, canBuild, lastAuthoredTool, onUseAuthored, writeLocked, canRunWrite])
   // W4e round 2: the pane's Drawing section, the document's own facts from
   // the intake (counts) and one pass over its vertices (extents). Studio
   // drafting surfaces only; null everywhere else so the dock renders as before.
@@ -2775,6 +2840,12 @@ export default function App() {
           skills={catalogSkills}
           commandActions={slashCommandActions}
           sessionId={agentSessionId}
+          // Slice 10b/10c: the act-scope palette's action rows (the ribbon's
+          // own live tools, a second time) and the drawing the versions
+          // artifact index and the find-scope search are scoped to.
+          paletteActions={paletteActions}
+          onOpenShortcuts={() => setShortcutsOpen(true)}
+          drawingId={REQUESTED_DRAWING_ID}
           imageAttachmentsEnabled={false}
           // W4d Slice E seating: on drafting surfaces under the studio the
           // well is the reference's one-line docked "Command:" prompt.
@@ -3717,6 +3788,8 @@ export default function App() {
       {/* DT2 drawer: fixed over the events rail (row 2, col 3) — the rail
           behind never re-flows. Esc (global ladder) or the header cap closes. */}
       <DetailsDrawer data={drawer} onClose={() => setDrawer(null)} />
+
+      <ShortcutSheet open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
 
       {/* M5: the ?demo=tour walkthrough. Mock-only — the tour drives real mock
           handlers, so it must never point at a live/paid backend. */}
