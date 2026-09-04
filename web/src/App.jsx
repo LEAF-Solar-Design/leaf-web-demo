@@ -624,7 +624,11 @@ export default function App() {
   const { state: catalogState, actions: catalogActions } = useCatalogController({
     services: catalogServices,
     adapters: catalogAdapters,
-    context: { mock, entitlements, running: false, agentDisabled },
+    // `credentialMountAvailable` is the honest answer to "is the Claude
+    // accounts panel on screen": it is mounted under `{!mock && ...}` below, so
+    // in mock mode the anthropic refusal must NOT tell the user to go there.
+    // Same expression as the mount gate, deliberately, so the two cannot drift.
+    context: { mock, entitlements, running: false, agentDisabled, credentialMountAvailable: !mock },
   })
   const {
     tools,
@@ -639,12 +643,14 @@ export default function App() {
     routeError: routeErr,
     agentMode,
     agentBanner,
+    secretRefusal,
     hintLane,
     runnableTools: slashTools,
     capabilityCount: capCount,
   } = catalogState
   const {
     retryTools,
+    allowSecretOnce,
     // The awaitable catalog refetch. `loadCatalog` regroups families; this is
     // the flat runnable list the published-tool resolver needs.
     loadTools: loadCatalogTools,
@@ -2650,6 +2656,14 @@ export default function App() {
           inputRef={barInputRef}
           routeActive={!!route}
           onOpenAuthor={onOpenAuthor}
+          // Slice 8a fix round 2: the AUTHORITY is the controller's dispatch,
+          // which every bar path (Enter, Run, Retry chip, R key, the tour)
+          // funnels through. The bar renders the controller's verdict and
+          // arms its one-shot override; its own pre-check only saves a round
+          // trip on the keystroke path.
+          secretRefusal={secretRefusal}
+          onAllowSecretOnce={allowSecretOnce}
+          credentialMountAvailable={!mock}
           // The registry supersedes the tools-only list when it loaded (its
           // entries carry `kind`, which is what groups the picker); a failed
           // fetch falls back to exactly today's list.
@@ -3375,6 +3389,9 @@ export default function App() {
           <ConversePanel
             sessionId={agentSessionId}
             userTurns={agentTurns}
+            // This panel and ClaudeAccountPanel are both mounted under `!mock`,
+            // so where this can refuse, that control is on screen.
+            credentialMountAvailable={!mock}
             onDismiss={clearAgentMode}
             onLinkClaude={() => setClaudeOpen(true)}
             onAttachJob={onAttachAgentJob}
@@ -3456,7 +3473,9 @@ export default function App() {
           />
           {/* Slice 4a: the command well is the frame's `commandBar` render
               prop (declared at the SurfaceFrame call above), so slice 5 has one
-              seat to unify. The element and its props are unchanged. */}
+              seat to unify. The element and its props are unchanged. Slice 8a
+              wires secretRefusal/onAllowSecretOnce/credentialMountAvailable
+              at that same declaration, not here. */}
           <SurfaceFrame.CommandBar />
         </div>
 

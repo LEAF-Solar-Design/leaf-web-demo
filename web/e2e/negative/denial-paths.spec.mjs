@@ -3,9 +3,15 @@ import {
   expectNoCreatedWork,
   installNegativeApi,
   openApp,
+  openTry,
   proposeCat,
   submitReadRun,
 } from './negativeApiFixture.mjs'
+
+// Structurally valid, entirely fake — no real key appears in this repo.
+const FAKE_TOKEN = `sk-ant-api03-${'A9_-'.repeat(12)}`
+const ANTHROPIC_REFUSAL =
+  'That looks like an Anthropic API key. Credentials never go to the model. Mount it under Claude accounts instead.'
 
 test.describe('negative browser contracts', () => {
   test.setTimeout(60_000)
@@ -146,26 +152,57 @@ test.describe('negative browser contracts', () => {
     const { evidence, state } = await installNegativeApi(page)
     await openApp(page)
 
-    // Structurally valid, entirely fake — no real key appears in this repo.
-    const fakeToken = `sk-ant-api03-${'A9_-'.repeat(12)}`
-    await page.getByLabel('Command bar').fill(fakeToken)
+    await page.getByLabel('Command bar').fill(FAKE_TOKEN)
     await page.getByLabel('Command bar').press('Enter')
 
     const notice = page.getByTestId('secret-notice')
     await expect(notice).toBeVisible()
-    await expect(page.getByTestId('secret-notice-reason')).toHaveText(
-      'That looks like an Anthropic API key. Credentials never go to the model. Mount it under Claude accounts in the header instead.',
-    )
+    await expect(page.getByTestId('secret-notice-reason')).toHaveText(ANTHROPIC_REFUSAL)
     // A named shape has no override.
     await expect(page.getByTestId('secret-send-anyway')).toHaveCount(0)
     // The rendered notice shows a four-character shape prefix and bullets only.
     await expect(page.getByTestId('secret-notice-mask')).toHaveText('sk-a••••••••')
-    await expect(notice).not.toContainText(fakeToken.slice(4))
+    await expect(notice).not.toContainText(FAKE_TOKEN.slice(4))
 
     const messagePosts = evidence.calls.filter((call) => /^POST \/api\/sessions\/[^/]+\/messages$/.test(call))
     expect(messagePosts, 'a credential must never reach the conversation endpoint').toEqual([])
+    expect(evidence.calls.filter((call) => call === 'POST /api/nl-prompt')).toEqual([])
     expect(evidence.runSubmissions).toBe(0)
     await expect(page).toHaveURL(/\/app$/)
+    expectNoCreatedWork(expect, evidence, state)
+  })
+
+  // The SAME negative on the OTHER bar. /try's ToolCast bar was the composer
+  // both earlier review rounds missed: it has no guard of its own, it reaches
+  // POST /api/nl-prompt (and, when entitled, a real agent turn) with the raw
+  // text, and it shares this bar's testid and aria-label — which is why the
+  // /app row above could look surface-agnostic while testing one surface. The
+  // guard now lives at createCatalogController.dispatch, the funnel BOTH bars
+  // pass through, and this row is what proves it from outside the code.
+  test('the /try bar refuses a pasted credential before /api/nl-prompt fires', async ({ page }) => {
+    const { evidence, state } = await installNegativeApi(page)
+    await openTry(page)
+    await expect(page).toHaveURL(/\/try$/)
+
+    await page.getByLabel('Command bar').fill(FAKE_TOKEN)
+    await page.getByLabel('Command bar').press('Enter')
+
+    const notice = page.getByTestId('tc-secret-notice')
+    await expect(notice).toBeVisible()
+    await expect(page.getByTestId('tc-secret-notice-reason')).toHaveText(ANTHROPIC_REFUSAL)
+    await expect(page.getByTestId('tc-secret-send-anyway')).toHaveCount(0)
+    await expect(page.getByTestId('tc-secret-notice-mask')).toHaveText('sk-a••••••••')
+    await expect(notice).not.toContainText(FAKE_TOKEN.slice(4))
+
+    // The primary assertion: the router never saw it.
+    expect(
+      evidence.calls.filter((call) => call === 'POST /api/nl-prompt'),
+      'a credential must never reach the prompt router',
+    ).toEqual([])
+    const messagePosts = evidence.calls.filter((call) => /^POST \/api\/sessions\/[^/]+\/messages$/.test(call))
+    expect(messagePosts, 'a credential must never reach the conversation endpoint').toEqual([])
+    expect(evidence.runSubmissions).toBe(0)
+    await expect(page).toHaveURL(/\/try$/)
     expectNoCreatedWork(expect, evidence, state)
   })
 })

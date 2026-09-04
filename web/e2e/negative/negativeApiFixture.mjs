@@ -128,6 +128,18 @@ export async function openApp(page) {
   await page.getByLabel('Command bar').waitFor()
 }
 
+/**
+ * The /try operator scene (StageScene -> ToolCast), the OTHER surface with a
+ * free-text command bar. It carries the SAME `data-testid="command-bar"` and
+ * `aria-label="Command bar"` as the app bar, so a spec that does not pin the
+ * URL can silently drive the wrong one; every /try row here pins it.
+ */
+export async function openTry(page) {
+  await page.goto('/try')
+  await page.getByTestId('operator-phase').waitFor()
+  await page.getByLabel('Command bar').waitFor()
+}
+
 export async function proposeCat(page) {
   const request = 'Rearrange the existing panels in this drawing into the shape of a sitting cat.'
   await page.getByLabel('Command bar').fill(request)

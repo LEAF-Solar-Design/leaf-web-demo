@@ -6,6 +6,7 @@ import {
   slashDecision,
 } from './catalogRouting.js'
 import { track } from '../../telemetry.js'
+import { evaluateSecretGuard } from '../../lib/secretPatterns.js'
 
 const DEFAULT_THRESHOLDS = { CHIP_ONLY: 0.8, RACE_MIN: 0.55 }
 
@@ -23,6 +24,11 @@ const initialState = Object.freeze({
   routeError: null,
   agentMode: null,
   agentBanner: null,
+  // The credential refusal (slice 8a fix round 2): `{id, reason, masked,
+  // overridable}` or null. It carries a MASK, never the value. Every bar that
+  // renders this controller reads it from here, so the notice cannot drift
+  // from the decision that produced it.
+  secretRefusal: null,
 })
 
 const defaultHumanize = (error) => String(error?.message || error || 'Something went wrong')
@@ -47,9 +53,18 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     entitlements: null,
     running: false,
     agentDisabled: true,
+    // Is the header's Claude accounts panel actually mounted right now? Only a
+    // true answer lets the anthropic refusal point at it. DEFAULTS FALSE so a
+    // surface that never answers names no control rather than inventing one.
+    credentialMountAvailable: false,
     ...context,
   }
   let started = false
+  // Armed by an explicit "Send anyway" and READ-AND-DISARMED at the very top of
+  // dispatch, above every early return, so a click that lands while the bar is
+  // busy spends the override on a no-op instead of latching it open for the
+  // next keystroke. Spending it on nothing is the fail-closed direction.
+  let secretOverrideArmed = false
   let toolsRequest = 0
   let catalogRequest = 0
   let snapshot = null
@@ -157,19 +172,51 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   }
 
   const setPrompt = (value) => {
-    // Typing over a shown route resolves it: the user moved on.
+    // Typing over a shown route resolves it: the user moved on. An edit also
+    // retires the credential refusal, which was about the text that WAS there;
+    // a notice outliving its text reads as a stuck error.
     if (state.route) noteRouteResolved('invalidated', state.route)
     adapters.dismissDecision?.()
     publish({
       prompt: value,
       route: state.route ? null : state.route,
       routeError: state.routeError ? null : state.routeError,
+      secretRefusal: state.secretRefusal ? null : state.secretRefusal,
     })
   }
 
   const dispatch = async (override) => {
+    // --- credential guard (slice 8a fix round 2): THE ONE FUNNEL ------------
+    // EVERY bar path arrives here: the app bar's Enter/Run/slash pick
+    // (PromptBox -> App.onDispatch), the /try bar's Enter and Run button
+    // (ToolCast.dispatchRequest), App's failed-strip Retry chip and its R-key
+    // twin (both call onDispatch with a non-string, so the text comes from
+    // `state.prompt` — whatever sits in the bar at click time, which is how a
+    // credential pasted DURING an in-flight route used to reach the wire), and
+    // the tour's canned prompts. Guarding the composers one at a time is what
+    // failed twice: the census was short by one both times. This is the choke
+    // point, so a new bar cannot be added around it.
+    //
+    // Read-and-disarm the override FIRST, above every early return below, so a
+    // "Send anyway" click that lands while the bar is busy is spent on a no-op
+    // rather than left armed for the next unrelated Enter.
+    const allowedOnce = secretOverrideArmed
+    secretOverrideArmed = false
     const text = (typeof override === 'string' ? override : state.prompt).trim()
     if (!text || state.routing || current.running) return undefined
+    if (!allowedOnce) {
+      const refusal = evaluateSecretGuard(text, {
+        credentialMountAvailable: !!current.credentialMountAvailable,
+      })
+      if (refusal) {
+        // Pattern identity ONLY. The value reaches no log, no telemetry payload
+        // and no DOM node outside the masked span the bars render.
+        track('prompt.secret_refused', { pattern_id: refusal.id })
+        publish({ secretRefusal: refusal })
+        return undefined
+      }
+    }
+    if (state.secretRefusal) publish({ secretRefusal: null })
     // W4f slice B: a typed CAD command word (LINE, C, MOVE ...) on a drafting
     // surface is the cockpit's business, not the router's. The adapter
     // returns true only when the whole text is exactly one known word and
@@ -277,6 +324,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
         routeError: null,
         agentMode: null,
         agentBanner: null,
+        secretRefusal: null,
       })
     },
     openAgentMode() { publish({ agentMode: 'primary' }) },
@@ -292,6 +340,18 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       return commitDecision(alternativeDecision(state.route, name), { routeOutcome: 'alternative_picked' })
     },
     clearRouteError() { publish({ routeError: null }) },
+    /**
+     * Arm the one-shot override behind an overridable (generic-shape-only)
+     * refusal. Spent by the VERY NEXT dispatch whatever that dispatch does, so
+     * it can never latch open; a named shape renders no control that calls it.
+     */
+    allowSecretOnce() {
+      secretOverrideArmed = true
+      publish({ secretRefusal: null })
+    },
+    clearSecretRefusal() {
+      if (state.secretRefusal) publish({ secretRefusal: null })
+    },
   })
 
   return Object.freeze({

@@ -37,6 +37,13 @@ import {
 const names = (entries) => entries.map((e) => e.name)
 const promptBoxSource = readFileSync(new URL('./components/PromptBox.jsx', import.meta.url), 'utf8')
 const promptBoxStripped = esbuild.transformSync(promptBoxSource, { loader: 'jsx' }).code
+const strip = (relative) => esbuild.transformSync(
+  readFileSync(new URL(relative, import.meta.url), 'utf8'),
+  { loader: 'jsx' },
+).code
+const conversePanelStripped = strip('./components/ConversePanel.jsx')
+const toolCastStripped = strip('./site/ToolCast.jsx')
+const catalogControllerStripped = strip('./controllers/catalog/createCatalogController.js')
 
 describe('autoGrowHeight', () => {
   it('leaves the single-line well to CSS', () => {
@@ -509,5 +516,118 @@ describe('queued-turn reconciliation: drop-before-202 (round 3)', () => {
     const accepted = acceptQueuedTurn(state, { queuedId: 'q-2', text: 'mine' })
     assert.equal(accepted.action, 'queue')
     assert.equal(accepted.state.queuedTurn.queuedId, 'q-2')
+  })
+})
+
+
+// --- the credential guard's shape, read off the source (slice 8a round 2) ---
+//
+// These are ORDERING and CENSUS pins, which is exactly what unit tests over
+// pure modules and jsdom tests over one component each could not give. Two
+// review rounds died on the same defect: the guard installed per composer while
+// the promise was per app. A behaviour test proves one path; these prove there
+// is only one path to prove.
+//
+// esbuild strips comments, so a pin cannot be satisfied by a comment claiming
+// the property. Verified in both directions by neutering each property and
+// watching the matching row go red.
+describe('credential guard: the funnel is the authority', () => {
+  const orderIn = (source, opener, first, second, window = 2000) => {
+    const start = source.indexOf(opener)
+    assert.notEqual(start, -1, `could not find ${opener}`)
+    const body = source.slice(start, start + window)
+    const a = body.indexOf(first)
+    const b = body.indexOf(second)
+    assert.notEqual(a, -1, `could not find ${first}`)
+    assert.notEqual(b, -1, `could not find ${second}`)
+    return a < b
+  }
+
+  it('the controller evaluates the guard before the router ever sees the text', () => {
+    const dispatchAt = catalogControllerStripped.indexOf('const dispatch = async (override)')
+    assert.notEqual(dispatchAt, -1)
+    const body = catalogControllerStripped.slice(dispatchAt, dispatchAt + 4000)
+    const guardAt = body.indexOf('evaluateSecretGuard(')
+    const routeAt = body.indexOf('services.routePrompt(')
+    assert.notEqual(guardAt, -1, 'dispatch must evaluate the guard')
+    assert.notEqual(routeAt, -1, 'dispatch must be the one caller of routePrompt')
+    assert.ok(guardAt < routeAt, 'the guard must run before routePrompt')
+  })
+
+  it('the controller reads-and-disarms the override above every early return', () => {
+    // The round-1 fail-open, ported: an override read BELOW the busy/empty
+    // return latches armed when the dispatch is a no-op, and the next
+    // unrelated Enter spends it on a hard-refusal shape.
+    assert.ok(
+      orderIn(
+        catalogControllerStripped,
+        'const dispatch = async (override)',
+        'secretOverrideArmed = false',
+        'current.running) return',
+      ),
+      'the override must be spent before dispatch can return early',
+    )
+  })
+
+  it('routePrompt has exactly one caller, so no bar can route around the guard', () => {
+    const callers = catalogControllerStripped.split('services.routePrompt(').length - 1
+    assert.equal(callers, 1)
+  })
+
+  it('the reply box reads-and-disarms above its busy early return', () => {
+    assert.ok(
+      orderIn(
+        conversePanelStripped,
+        'const send = async (nextText = input)',
+        'secretOverrideRef.current = false',
+        '|| busy) return false',
+      ),
+      'ConversePanel.send must spend the override before it can return early',
+    )
+  })
+
+  it('the reply box guards before postMessage', () => {
+    assert.ok(
+      orderIn(
+        conversePanelStripped,
+        'const send = async (nextText = input)',
+        'evaluateSecretGuard(',
+        'postMessage(sessionId',
+        4000,
+      ),
+    )
+  })
+
+  // /try's ToolCast bar carries the SAME data-testid and aria-label as the app
+  // bar, and it is the composer both earlier review rounds missed. It has no
+  // guard of its own BY DESIGN: everything it sends goes through the funnel,
+  // and it renders the funnel's verdict.
+  it('the /try bar sends only through the controller, never straight to the router', () => {
+    assert.match(toolCastStripped, /catalog\.actions\.dispatch\(text\)/)
+    // nlPrompt is wired in as the controller's routePrompt service and is never
+    // called directly; a direct call would be a bar around the funnel.
+    const direct = toolCastStripped.split('nlPrompt').length - 1
+    assert.equal(direct, 2, 'nlPrompt may appear only as an import and as the routePrompt service')
+    assert.doesNotMatch(toolCastStripped, /nlPrompt\(/)
+  })
+
+  it('the /try bar renders the funnel refusal with its own testids', () => {
+    assert.match(toolCastStripped, /"tc-secret-notice"/)
+    assert.match(toolCastStripped, /"tc-secret-notice-reason"/)
+    assert.match(toolCastStripped, /"tc-secret-notice-mask"/)
+    assert.match(toolCastStripped, /secretRefusal\.reason/)
+    assert.match(toolCastStripped, /secretRefusal\.masked/)
+    // The override is a controller action, so it is spent by the controller.
+    assert.match(toolCastStripped, /catalog\.actions\.allowSecretOnce\(\)/)
+  })
+
+  it('both bars answer the mount question, so the copy is honest per mode', () => {
+    assert.match(toolCastStripped, /credentialMountAvailable:\s*!transportMock/)
+    assert.match(promptBoxStripped, /evaluateSecretGuard\(sent,\s*\{\s*credentialMountAvailable\s*\}\)/)
+  })
+
+  it('the app bar renders the controller verdict, not only its own', () => {
+    assert.match(promptBoxStripped, /const shownSecret = secretRefusal \|\| secretNotice/)
+    assert.match(promptBoxStripped, /onAllowSecretOnce\?\.\(\)/)
   })
 })

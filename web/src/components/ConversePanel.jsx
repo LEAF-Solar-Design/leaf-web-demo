@@ -182,6 +182,10 @@ function bannerFor(e) {
 }
 
 export default function ConversePanel({
+  // Is the header's Claude accounts panel actually mounted? Only a true answer
+  // lets the anthropic refusal point at it (App mounts both this panel and that
+  // one under `!mock`). Defaults false: name no surface rather than invent one.
+  credentialMountAvailable = false,
   sessionId,
   userTurns = [],            // [{turnId, text}] — turns App dispatched into this session
   onDismiss,                 // hide the panel (the server-side turn is never cancelled)
@@ -477,20 +481,27 @@ export default function ConversePanel({
   })))
 
   const send = async (nextText = input) => {
-    const text = String(nextText).trim()
-    if ((!text && !attachments.length) || busy) return false
-    // --- credential guard (slice 8a fix round) ---------------------------
+    // --- credential guard (slice 8a fix round 2) -------------------------
     // This box is a second free-text path to POST /api/sessions/{id}/messages,
     // the very endpoint the command bar's guard protects, so an unguarded
     // send() here would let a pasted key reach model context two inches below
     // a notice promising it never would. Same pure decision, same frozen copy
     // (lib/secretPatterns.js), same fail-closed rule: any hit refuses, and only
-    // a wholly overridable hit set offers a way past. Read-and-disarm the
-    // override first so an early return cannot leave it armed.
+    // a wholly overridable hit set offers a way past.
+    //
+    // THE READ-AND-DISARM SITS ABOVE EVERY EARLY RETURN, and that ordering is
+    // the whole fix. Round 1 spent the override below the busy/empty guard, so
+    // a "Send anyway" click that landed while a turn was in flight armed the
+    // ref and then returned without spending it; onChange cleared the notice
+    // but not the ref, and the next Enter skipped the guard entirely and
+    // posted a hard-refusal shape. Spending an override on a no-op send is the
+    // fail-closed direction, so it happens FIRST, unconditionally.
     const allowedOnce = secretOverrideRef.current
     secretOverrideRef.current = false
+    const text = String(nextText).trim()
+    if ((!text && !attachments.length) || busy) return false
     if (!allowedOnce) {
-      const refusal = evaluateSecretGuard(text)
+      const refusal = evaluateSecretGuard(text, { credentialMountAvailable })
       if (refusal) {
         setSecretNotice(refusal)
         // Pattern identity ONLY — the value reaches no log, no telemetry
@@ -543,6 +554,11 @@ export default function ConversePanel({
   const answerQuestion = async (questionId, optionLabel) => {
     const choice = chooseQuestionOption(questionChoices, events, questionId, optionLabel)
     if (choice.action !== 'send') return
+    // A refusal raised by an app-supplied choice string has no text of its own
+    // for the user to edit, so the reply box's onChange can never retire it.
+    // The next choice does instead: picking again is the natural next act on
+    // this surface, and it is what that notice was about.
+    setSecretNotice(null)
     setQuestionChoices(choice.state)
     if (!await send(choice.text)) {
       setQuestionChoices((state) => clearSendingQuestion(state, questionId))
@@ -965,6 +981,11 @@ export default function ConversePanel({
               type="button"
               className="chip-neutral"
               data-testid="converse-secret-send-anyway"
+              // Disabled while a turn is in flight: send() returns early when
+              // busy, so a click here could only ever arm the override without
+              // spending it. The read-and-disarm above makes that safe anyway;
+              // this makes it unreachable, and honest on screen.
+              disabled={busy}
               onClick={() => { secretOverrideRef.current = true; setSecretNotice(null); send() }}
             >
               Send anyway

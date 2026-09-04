@@ -759,6 +759,10 @@ export default function ToolCast({
       entitlements: null,
       running: busy || jobRunning,
       agentDisabled: transportMock || !platform.isEntitled('converse'),
+      // The trust rail mounts ClaudeAccountPanel, which returns null under
+      // mock (`if (mock) return null`), so this is the same answer the control
+      // gives itself. False means the refusal names no surface at all.
+      credentialMountAvailable: !transportMock,
     },
   })
 
@@ -803,6 +807,11 @@ export default function ToolCast({
     routing,
     routeError,
     agentBanner,
+    // Slice 8a fix round 2: the credential refusal the FUNNEL raised
+    // (createCatalogController.dispatch). This bar has no guard of its own by
+    // design — a per-composer guard is what left this surface open through two
+    // review rounds — so what it renders is the decision that was enforced.
+    secretRefusal,
   } = catalog.state
   useEffect(() => {
     if (capabilityCatalog.families.length === 0) return
@@ -1477,6 +1486,31 @@ export default function ToolCast({
             onOpenAuthor={() => setLeftView('author')}
             onDismiss={catalog.actions.dismissRoute}
           />
+          {secretRefusal && (
+            <div className="tc-secret-notice" role="alert" data-testid="tc-secret-notice">
+              <span className="dot red" aria-hidden="true" />
+              <span className="strip-sentence" data-testid="tc-secret-notice-reason">{secretRefusal.reason}</span>
+              {/* At most a four-character shape prefix behind a fixed bullet run
+                  (maskForNotice). This is the ONLY place any character of the
+                  pasted credential is rendered, and it is never the entropy. */}
+              <span className="dim" data-testid="tc-secret-notice-mask">{secretRefusal.masked}</span>
+              {secretRefusal.overridable && (
+                <button
+                  type="button"
+                  className="chip-neutral"
+                  data-testid="tc-secret-send-anyway"
+                  // Arms the controller's one-shot override, which the very
+                  // next dispatch reads and disarms above its own early
+                  // returns. Disabled whenever this bar cannot dispatch, so a
+                  // click can never arm a latch it has no chance to spend.
+                  disabled={platformSession.status !== 'active' || !hasDrawing || busy || jobRunning || routing}
+                  onClick={() => { catalog.actions.allowSecretOnce(); runRequest() }}
+                >
+                  Send anyway
+                </button>
+              )}
+            </div>
+          )}
           <div className="tc-bar-input-row">
             <span className="tc-bar-caret">›</span>
             <input
@@ -1625,6 +1659,7 @@ export default function ToolCast({
             <ConversePanel
               sessionId={sessionId}
               userTurns={turns}
+              credentialMountAvailable={!transportMock}
               onDismiss={() => {}}
               onLinkClaude={() => { setRightView('trust'); setClaudeOpen(true) }}
               onAttachJob={attachJob}
@@ -2030,6 +2065,10 @@ export default function ToolCast({
         <div className="tc-rail-foot"><span className="tc-link muted">{PROOF_MODE ? (phase === 'complete' || phase === 'undone' ? 'Cat oracle, sitting-v1' : 'Contract proof, no APS claim') : 'Tool results appear here'}</span></div>
       </aside>
 
+      {/* Slice 4a: the command well is the frame's `commandBar` render
+          prop (commandBarBlock above), so slice 5 has one seat to unify.
+          Slice 8a wires the secretRefusal notice + Send-anyway override at
+          that same declaration, not here. */}
       <SurfaceFrame.CommandBar />
 
       <div className={`tc-caption${focusView ? ' tc-focus-hidden' : ''}`} data-cast="tool">

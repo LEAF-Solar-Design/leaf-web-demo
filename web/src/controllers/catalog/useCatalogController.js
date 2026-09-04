@@ -18,6 +18,10 @@ export function useCatalogController(options) {
     options.context?.entitlements,
     options.context?.running,
     options.context?.agentDisabled,
+    // Slice 8a: the refusal copy names the header's credential panel only where
+    // it is actually mounted, so a mode flip MUST re-reach the controller. A
+    // missing dep here would freeze the honest-copy answer at first render.
+    options.context?.credentialMountAvailable,
   ])
 
   useEffect(() => {

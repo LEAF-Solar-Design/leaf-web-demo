@@ -22,6 +22,13 @@
 //     there at all).
 //   * FAILS CLOSED. Any hit refuses the dispatch. Only the deliberately fuzzy
 //     generic pattern carries `overridable: true`.
+//   * THE THREAT MODEL IS THE ACCIDENTAL PASTE, and the boundary is stated so
+//     nobody reads this as anti-exfiltration. Every pattern is a SINGLE-LINE
+//     character-class run, so a token carrying a zero-width joiner, or split
+//     across lines, matches nothing. A user who wants to defeat this can; a
+//     user who pasted the wrong buffer cannot. Widening it to catch deliberate
+//     evasion would cost false refusals on ordinary drawing data, which is the
+//     failure that makes a guard get switched off.
 //
 // Regex objects are module-level and carry `g`, so `lastIndex` is reset before
 // every scan (JS is single-threaded and findSecrets is synchronous, so no
@@ -65,6 +72,12 @@ export const SECRET_PATTERNS = Object.freeze([
     group: 2,
     // `(?!ant-)` is a fixed-width guard at one position, not a branch inside a
     // repetition, so it costs O(1) per start and keeps the scan linear.
+    //
+    // KNOWN AND ACCEPTED: `/` is a valid left boundary, so a slash command
+    // named `sk-` plus 20+ word characters reads as an OpenAI key. Nothing in
+    // the registry starts with `sk-`, and the fix would be to weaken the left
+    // boundary, which is precisely how this guard goes soft. Cosmetic, and it
+    // fails in the safe direction.
     regex: new RegExp(`${B}(sk-(?!ant-)[A-Za-z0-9_-]{20,512})`, 'gd'),
   }),
   Object.freeze({
@@ -224,42 +237,91 @@ export function maskForNotice(text, hit) {
 
 // ---------------------------------------------------------------------------
 // The refusal copy and the shared decision, so EVERY composer that can reach
-// model context refuses identically (slice 8a, fix round 1).
+// model context refuses identically (slice 8a, fix round 2).
 //
-// HONESTY RULE, and why the closing sentence differs by shape: the notice names
-// what was recognised, states the rule plainly, and offers a next step this
-// product can actually deliver TODAY. The only credential surface that exists
-// is the header's "Claude accounts" panel (ClaudeAccountPanel.jsx, mounted at
-// App.jsx), and it mounts ANTHROPIC credentials only — the Surface Contract
-// says so itself with `integrations: null` (src/site/productSurfaces.js). So
-// exactly one sentence may point at it, and every other shape says plainly
-// that nothing here can hold it yet. The first revision of this copy sent all
-// nine shapes to a "Link a service" surface that exists nowhere in the
-// product; a notice that routes the user somewhere unreachable is a lie in a
-// friendly voice, and it was pinned by tests, which froze it in place.
+// HONESTY RULE, and why the closing sentence differs by shape AND by mode: the
+// notice names what was recognised, states the rule plainly, and offers a next
+// step this product can actually deliver TODAY. The only credential surface
+// that exists is the header's "Claude accounts" panel (ClaudeAccountPanel.jsx),
+// it mounts ANTHROPIC credentials only — the Surface Contract says so itself
+// with `integrations: null` (src/site/productSurfaces.js) — and App.jsx mounts
+// it under `{!mock && ...}`, so in mock mode it is NOT ON SCREEN AT ALL.
 //
-// Pinned character-for-character by PromptBox.secretGuard.test.jsx, so a
-// reword is a deliberate act, not a drive-by.
+// That is why the mountable tail is a RUNTIME choice, not a table constant:
+// `credentialMountAvailable` is the caller's answer to "is that panel actually
+// mounted right now", it DEFAULTS TO FALSE (a caller that does not know says
+// nothing exists rather than inventing a control), and only a true answer lets
+// the anthropic sentence point at the header. Two earlier revisions of this
+// copy were false in a shipped mode: the first sent all nine shapes to a "Link
+// a service" surface that exists nowhere, the second sent mock-mode users to a
+// header panel that mock mode does not render. A notice that routes the user
+// somewhere unreachable is a lie in a friendly voice, and tests froze both.
+//
+// Pinned character-for-character IN BOTH MODES by
+// PromptBox.secretGuard.test.jsx, so a reword is a deliberate act.
 
-/** Next step for a shape this product CAN mount today. Anthropic only. */
-export const MOUNTABLE_NEXT_STEP = 'Mount it under Claude accounts in the header instead.'
+/**
+ * Next step for a shape this product CAN mount today. Anthropic only, and only
+ * where the panel is on screen. It names the CONTROL and not its position: the
+ * app header and /try's trust rail both mount it, so "in the header" was false
+ * on one of the two surfaces that can show this notice.
+ */
+export const MOUNTABLE_NEXT_STEP = 'Mount it under Claude accounts instead.'
 /** Next step for every shape no surface here can hold yet. Names no fiction. */
 export const UNMOUNTABLE_NEXT_STEP = 'No surface here can hold one yet, so keep it out of the message.'
 
 const RULE = 'Credentials never go to the model.'
 const reason = (what, next) => `That looks like ${what}. ${RULE} ${next}`
 
-export const SECRET_REASONS = Object.freeze({
-  anthropic: reason('an Anthropic API key', MOUNTABLE_NEXT_STEP),
-  openai: reason('an OpenAI API key', UNMOUNTABLE_NEXT_STEP),
-  github: reason('a GitHub token', UNMOUNTABLE_NEXT_STEP),
-  aws_access_key: reason('an AWS access key ID', UNMOUNTABLE_NEXT_STEP),
-  aws_secret_key: reason('an AWS secret access key', UNMOUNTABLE_NEXT_STEP),
-  slack: reason('a Slack token', UNMOUNTABLE_NEXT_STEP),
-  jwt: reason('a JSON Web Token', UNMOUNTABLE_NEXT_STEP),
-  private_key: reason('a private key', UNMOUNTABLE_NEXT_STEP),
-  generic: reason('a credential', UNMOUNTABLE_NEXT_STEP),
+/** What each shape is called. One noun phrase per id, mode-independent. */
+const WHAT = Object.freeze({
+  anthropic: 'an Anthropic API key',
+  openai: 'an OpenAI API key',
+  github: 'a GitHub token',
+  aws_access_key: 'an AWS access key ID',
+  aws_secret_key: 'an AWS secret access key',
+  slack: 'a Slack token',
+  jwt: 'a JSON Web Token',
+  private_key: 'a private key',
+  generic: 'a credential',
 })
+
+/**
+ * The copy as it reads WHERE THE CLAUDE ACCOUNTS PANEL IS MOUNTED. Exactly one
+ * shape (anthropic) may point at it, because it is the only credential this
+ * product can hold.
+ */
+export const SECRET_REASONS = Object.freeze({
+  anthropic: reason(WHAT.anthropic, MOUNTABLE_NEXT_STEP),
+  openai: reason(WHAT.openai, UNMOUNTABLE_NEXT_STEP),
+  github: reason(WHAT.github, UNMOUNTABLE_NEXT_STEP),
+  aws_access_key: reason(WHAT.aws_access_key, UNMOUNTABLE_NEXT_STEP),
+  aws_secret_key: reason(WHAT.aws_secret_key, UNMOUNTABLE_NEXT_STEP),
+  slack: reason(WHAT.slack, UNMOUNTABLE_NEXT_STEP),
+  jwt: reason(WHAT.jwt, UNMOUNTABLE_NEXT_STEP),
+  private_key: reason(WHAT.private_key, UNMOUNTABLE_NEXT_STEP),
+  generic: reason(WHAT.generic, UNMOUNTABLE_NEXT_STEP),
+})
+
+/**
+ * The copy as it reads WHERE NO CREDENTIAL SURFACE IS MOUNTED — mock mode, the
+ * signed-out demo, and any caller that has not answered the question. Every
+ * shape, anthropic included, says plainly that nothing here can hold it.
+ */
+export const SECRET_REASONS_NO_MOUNT = Object.freeze({
+  ...SECRET_REASONS,
+  anthropic: reason(WHAT.anthropic, UNMOUNTABLE_NEXT_STEP),
+})
+
+/**
+ * The refusal sentence for one shape in one mode. FAILS HONEST: an unknown id
+ * falls back to the generic sentence, and an unanswered mount question falls
+ * back to naming no surface at all.
+ */
+export function secretReasonFor(id, credentialMountAvailable = false) {
+  const table = credentialMountAvailable ? SECRET_REASONS : SECRET_REASONS_NO_MOUNT
+  return table[id] || table.generic
+}
 
 /**
  * The shared refusal decision every send path runs BEFORE the text leaves the
@@ -271,6 +333,10 @@ export const SECRET_REASONS = Object.freeze({
  * beside a labelled assignment can never be talked past. The reported id is
  * the strongest hit, so the sentence never understates what was found.
  *
+ * FAILS HONEST: `credentialMountAvailable` defaults to false, so a caller that
+ * has not answered "is the Claude accounts panel actually on screen" gets copy
+ * that names no surface, never copy that invents one.
+ *
  * The credential VALUE never leaves this module: `findSecrets` hands back
  * positions only, and `maskForNotice` emits a four-character shape prefix
  * behind a fixed bullet run.
@@ -278,13 +344,13 @@ export const SECRET_REASONS = Object.freeze({
  * Linear time on the hot path (no allocation beyond the hit array); measured
  * under 1.2 ms on 64 KB adversarial input against a 50 ms budget.
  */
-export function evaluateSecretGuard(text) {
+export function evaluateSecretGuard(text, { credentialMountAvailable = false } = {}) {
   const hits = findSecrets(text)
   if (hits.length === 0) return null
   const worst = hits.find((hit) => !hit.overridable) || hits[0]
   return {
     id: worst.id,
-    reason: SECRET_REASONS[worst.id] || SECRET_REASONS.generic,
+    reason: secretReasonFor(worst.id, credentialMountAvailable),
     masked: maskForNotice(text, worst),
     overridable: hits.every((hit) => hit.overridable),
   }

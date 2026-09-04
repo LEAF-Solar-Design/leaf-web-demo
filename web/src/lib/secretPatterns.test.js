@@ -318,13 +318,25 @@ describe('linear time on 64 KB of adversarial near-misses', () => {
     ['all', repeatTo('sk-ant-eyJ.eyJ.AKIA xoxb- ghp_ token= -----BEGIN ')],
   ]
 
+  // MIN OF SEVEN, not one sample. What the 50 ms budget is about is the cost of
+  // the SCAN — whether a quantifier backtracks — and a single sample also
+  // measures whatever the host did during it. A GC pause on a loaded box put
+  // one 0.5 ms scan at 155 ms and failed this gate with the regexes unchanged,
+  // which is a gate that teaches people to rerun rather than to look. The
+  // minimum is the honest steady-state figure and it still catches the defect
+  // this exists for: a quadratic pattern is slow on EVERY sample.
+  const SAMPLES = 7
   it.each(ADVERSARIAL)('%s scans a 64 KB input inside the budget', (_name, input) => {
     expect(input.length).toBe(KB64)
     findSecrets(input) // warm the JIT so the measurement is of the scan, not of compilation
-    const started = performance.now()
-    const hits = findSecrets(input)
-    const elapsed = performance.now() - started
+    let best = Infinity
+    let hits = []
+    for (let i = 0; i < SAMPLES; i += 1) {
+      const started = performance.now()
+      hits = findSecrets(input)
+      best = Math.min(best, performance.now() - started)
+    }
     expect(hits.length).toBeLessThanOrEqual(MAX_HITS)
-    expect(elapsed, `${_name} took ${elapsed.toFixed(1)}ms`).toBeLessThan(BUDGET_MS)
+    expect(best, `${_name} took ${best.toFixed(2)}ms (min of ${SAMPLES})`).toBeLessThan(BUDGET_MS)
   })
 })

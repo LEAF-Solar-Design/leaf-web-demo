@@ -27,7 +27,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import useExit from '../useExit.js'
 import { authHeaders, config, noteUnauthorized } from '../api.js'
 import { modChord } from '../lib/keys.js'
-import { SECRET_REASONS, evaluateSecretGuard } from '../lib/secretPatterns.js'
+import { SECRET_REASONS, SECRET_REASONS_NO_MOUNT, evaluateSecretGuard } from '../lib/secretPatterns.js'
 import { isWriteTool } from '../lib/toolRecord.js'
 import { track } from '../telemetry.js'
 import CockpitIcon from '../site/CockpitIcon.jsx'
@@ -59,7 +59,7 @@ const STATIC_COMMANDS = slashStaticEntries()
 // the SAME sentences and must not import a React component to get them. Kept
 // re-exported here: PromptBox.secretGuard.test.jsx and any consumer that
 // already reads it from the bar keep working unchanged.
-export { SECRET_REASONS }
+export { SECRET_REASONS, SECRET_REASONS_NO_MOUNT }
 
 // The bar's scopes, mapped onto the app's lanes (find→run · act→solve ·
 // build→author). Selecting find/act returns you to the composer (the router
@@ -89,6 +89,20 @@ export default function PromptBox({
   // client would silently ignore.
   commandActions = {},
   imageAttachmentsEnabled = false,
+  // --- credential guard (slice 8a fix round 2) ---------------------------
+  // THE AUTHORITY IS THE CONTROLLER, not this component. Every bar path —
+  // this composer's Enter/Run/slash pick, the failed-strip Retry chip, the
+  // R-key re-dispatch, the tour — funnels through
+  // createCatalogController.dispatch, which evaluates the same guard and
+  // publishes its verdict here as `secretRefusal`. The local pre-check below
+  // only saves a round trip on the keystroke path; the funnel is what makes
+  // the promise true for paths this component never sees.
+  secretRefusal = null,
+  onAllowSecretOnce = null,
+  // Is the header's Claude accounts panel actually mounted? Only a true answer
+  // lets the anthropic refusal point at it. Defaults false: name no surface
+  // rather than invent one.
+  credentialMountAvailable = false,
   // W4d Slice E: the reference's one-line docked "Command:" prompt. The DOM
   // is the same well; this only adds a class the studio's drafting-surface
   // CSS lays out as one row, and swaps the caret glyph for the prompt word.
@@ -197,6 +211,12 @@ export default function PromptBox({
   useEffect(() => { setMenuDismissed(false); setMenuIdx(0); setSecretNotice(null) }, [value])
   const idx = Math.min(menuIdx, Math.max(0, matches.length - 1))
 
+  // The controller's verdict wins: it is the one the funnel actually enforced,
+  // and it is the only one that exists for a path this component never saw
+  // (the Retry chip, the R key). The local pre-check's notice is the fallback
+  // for the keystroke that never reached the controller at all.
+  const shownSecret = secretRefusal || secretNotice
+
   // Tab: complete the name into the input (trailing space closes the menu and
   // starts args mode). Enter: complete and hand off to dispatch in one act.
   const changePrompt = (nextValue, nextCaret = String(nextValue ?? '').length) => {
@@ -219,7 +239,7 @@ export default function PromptBox({
     const allowedOnce = secretOverrideRef.current
     secretOverrideRef.current = false
     if (!allowedOnce) {
-      const refusal = evaluateSecretGuard(sent)
+      const refusal = evaluateSecretGuard(sent, { credentialMountAvailable })
       if (refusal) {
         setSecretNotice(refusal)
         // Pattern identity ONLY. The value reaches no log, no telemetry payload
@@ -533,22 +553,28 @@ export default function PromptBox({
             style={{ height: autoGrowHeight(value), resize: 'none', overflowY: 'auto' }}
           />
         </div>
-        {secretNotice && (
+        {shownSecret && (
           <div className="bar-secret-notice" role="alert" data-testid="secret-notice">
             <span className="dot red" aria-hidden="true" />
-            <span className="strip-sentence" data-testid="secret-notice-reason">{secretNotice.reason}</span>
+            <span className="strip-sentence" data-testid="secret-notice-reason">{shownSecret.reason}</span>
             {/* At most a four-character shape prefix behind a fixed bullet run
                 (maskForNotice). This is the ONLY place any character of the
                 pasted credential is rendered, and it is never the entropy. */}
-            <span className="dim" data-testid="secret-notice-mask">{secretNotice.masked}</span>
-            {secretNotice.overridable && (
+            <span className="dim" data-testid="secret-notice-mask">{shownSecret.masked}</span>
+            {shownSecret.overridable && (
               <button
                 type="button"
                 className="chip-neutral"
                 data-testid="secret-send-anyway"
+                // Arms BOTH latches, because either layer may be the one
+                // holding this refusal, and each spends its own on the very
+                // next dispatch. Disabled while routing so a click that cannot
+                // dispatch cannot arm anything either.
+                disabled={routing}
                 onClick={() => {
                   secretOverrideRef.current = true
                   setSecretNotice(null)
+                  onAllowSecretOnce?.()
                   dispatchPrompt()
                 }}
               >
