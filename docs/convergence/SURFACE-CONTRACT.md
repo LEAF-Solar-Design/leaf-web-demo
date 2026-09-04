@@ -438,9 +438,26 @@ PromptBox's new props, every one optional and defaulting to the console's render
 origin/main BEFORE the edit): `classNames` (`bar`, `wrap`, `input`, `run`, each ADDED beside
 the box's own class, never a rename), `projectSlot`, `keycap`, `disabledReason` (undefined
 keeps the box's rule; a string disables Run with the sentence as its title; null enables),
-`runLabel`, `routingLabel`, `placeholder`, `dropIngestEnabled`.
+`runLabel`, `routingLabel`, `placeholder`, `dropIngestEnabled`, `mcpDiscoveryEnabled`.
 
-Two decisions recorded here because nothing else records them:
+Three decisions recorded here because nothing else records them:
+
+- **The MCP discovery fetch is gated on `mcpDiscoveryEnabled`** (default `true`, so the
+  console is unaffected). PromptBox's mount effect calls the tenant-scoped, private
+  `/api/converse/mcp` endpoint for the slash picker's server list; mounting it unconditionally
+  on the public, often signed-out `/try` stage made a signed-out load call that endpoint
+  anyway, and a 401 from a tenant without the `converse` entitlement could wipe a signed-in
+  stage user's token (`api.js`'s `noteUnauthorized` used to fire on ANY 401 whose bearer
+  matched the stored one, no matter how minor the call). The stage passes
+  `isSignedIn() && platform.isEntitled('converse')` (the same predicate `agentDisabled`
+  already uses); `false` skips the fetch, so a signed-out mount makes NO network call. The
+  discovery call is also now unconditionally non-fatal: `noteUnauthorized` takes a bounded
+  `{ fatal = true }` option, and this one call passes `fatal: false`, so its 401 can never
+  wipe `leaf.jwt` or fire the unauthorized listeners, regardless of the caller's predicate.
+  Pinned by `promptBox.stage.test.jsx` (no call when disabled, a call when enabled, a 401
+  left untouched), `api.noteUnauthorized.test.js` (`fatal: false` never wipes), and the e2e
+  negative row `e2e/negative/stage-signed-out.spec.mjs` (a signed-out `/try` load never
+  requests `/api/converse/mcp`).
 
 - **The G2 drop catcher is OFF on the stage** (`dropIngestEnabled={false}`). PromptBox's well
   is the console's ONE drop target for manifests, and it answers a drop with the honest
@@ -466,14 +483,18 @@ shape is pinned by `promptBox.stage.test.jsx` and `toolCastStageBar.test.js` ins
 
 | # | file | change |
 | --- | --- | --- |
-| 1 | `web/src/components/PromptBox.jsx` | the optional stage props above; `runDisabled` derived once (caller ladder when passed, else routing / empty prompt); history is appended only for a dispatch the ladder lets through; drag handlers register only while `dropIngestEnabled` |
-| 2 | `web/src/site/ToolCast.jsx` | `.tc-bar-input-row` and `.tc-bar-controls` replaced by one `<PromptBox>` inside `.tc-bar`; `runOnEnter` deleted (PromptBox owns Enter); `STAGE_BAR_CLASSES` and `STAGE_BAR_KEYCAP` module constants; the drop handler, strips and `RoutePanel` untouched |
+| 1 | `web/src/components/PromptBox.jsx` | the optional stage props above; `runDisabled` derived once (caller ladder when passed, else routing / empty prompt); history is appended only for a dispatch the ladder lets through; drag handlers register only while `dropIngestEnabled`; the MCP discovery fetch gated on `mcpDiscoveryEnabled` and its 401 marked non-fatal (BLOCKER 1) |
+| 2 | `web/src/site/ToolCast.jsx` | `.tc-bar-input-row` and `.tc-bar-controls` replaced by one `<PromptBox>` inside `.tc-bar`; `runOnEnter` deleted (PromptBox owns Enter); `STAGE_BAR_CLASSES` and `STAGE_BAR_KEYCAP` module constants; the drop handler, strips and `RoutePanel` untouched; `mcpDiscoveryEnabled={isSignedIn() && platform.isEntitled('converse')}` passed to `PromptBox` (BLOCKER 1) |
 | 3 | `web/src/site/stageRunReasons.js` | `STAGE_RUN_REASONS` (frozen) and `stageRunDisabledReason()`, the old predicate as sentences in its evaluation order |
 | 4 | `web/src/site/landing.css` | dead `.tc-bar-caret` / `.tc-bar-controls` / `.tc-bar-scopes` rules removed; the `.tc-bar .bar` seating block; the 600px block re-pinned at the seated specificity |
-| 5 | `web/src/components/promptBox.stage.test.jsx` | the console's default sequence pinned from a pre-edit capture; the stage aliases, ladder, keycap, labels, `routeActive` Enter guard, drop catcher off, `commandLine` caret |
-| 6 | `web/src/site/stageRunReasons.test.js` | exact sentences, rung order, the 64-state equivalence with the old OR, frozen map |
-| 7 | `web/src/site/toolCastStageBar.test.js` | source-shape: one PromptBox inside `.tc-bar` after `RoutePanel`, the props above, the drop handler still the stage's, the hand-rolled rows gone, `landing.css` retired and seated |
-| 8 | this file | this section |
+| 5 | `web/src/api.js` | `noteUnauthorized` gains a bounded `{ fatal = true }` option (BLOCKER 1); every existing call site is unchanged (the default stays `true`) |
+| 6 | `web/src/components/promptBox.stage.test.jsx` | the console's default sequence pinned from a pre-edit capture; the stage aliases, ladder, keycap, labels, `routeActive` Enter guard, drop catcher off, `commandLine` caret; a BLOCKER 1 suite (no call when `mcpDiscoveryEnabled` is false, a call when true, a 401 leaves `leaf.jwt` and the unauthorized listeners untouched) |
+| 7 | `web/src/api.noteUnauthorized.test.js` | two BLOCKER 1 cases: `fatal: false` never wipes even when the sent token matches the stored one, and still passes a non-401 through |
+| 8 | `web/src/site/stageRunReasons.test.js` | exact sentences, rung order, the 64-state equivalence with the old OR, frozen map |
+| 9 | `web/src/site/toolCastStageBar.test.js` | source-shape: one PromptBox inside `.tc-bar` after `RoutePanel`, the props above, the drop handler still the stage's, the hand-rolled rows gone, `landing.css` retired and seated |
+| 10 | `web/e2e/negative/stage-signed-out.spec.mjs` (new) | BLOCKER 1's e2e negative row: a signed-out `/try` load makes no `/api/converse/mcp` request, wired into `proof:unified:wave0` / `proof:fixture` |
+| 11 | `web/package.json` | the new negative spec added to `proof:unified:wave0` and `proof:fixture` |
+| 12 | this file | this section |
 
 Not touched: `App.jsx` (the console passes nothing new), `SurfaceFrame.jsx` (the
 `commandBar` slot already existed), `RoutePanel.jsx`, `composer.js`, every e2e spec (the

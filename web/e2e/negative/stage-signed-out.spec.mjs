@@ -9,13 +9,21 @@ import { installNegativeApi } from './negativeApiFixture.mjs'
 // under http://leaf-proof.invalid/api/** (this config's VITE_API_BASE) and
 // records each one in evidence.calls, so a call that never happened is
 // provable, not merely unobserved.
+//
+// Not asserted here: the "You are not signed in" SessionGate heading. This
+// fixture's /api/session mock always succeeds (VITE_CAT_PROOF's deterministic
+// proof mode never shows that gate, by design, regardless of auth state) — a
+// signed-out load still renders the full operator demo. isSignedIn() (src/
+// auth.js) reads only localStorage['leaf.jwt'], so a fresh Playwright context
+// (no seeded token) is signed-out by that predicate on its own; asserted
+// directly instead of through UI that this fixture does not exercise.
 test.describe('negative browser contracts: the stage', () => {
   test('a signed-out /try load makes no /api/converse/mcp request', async ({ page }) => {
     const { evidence } = await installNegativeApi(page)
 
     await page.goto('/try')
     await page.getByLabel('Command bar').waitFor()
-    await expect(page.getByRole('heading', { name: 'You are not signed in' })).toBeVisible()
+    expect(await page.evaluate(() => localStorage.getItem('leaf.jwt'))).toBeNull()
 
     // Give the mount effect a full turn: if the fetch were unconditional it
     // would have fired and installNegativeApi would have logged it already.
