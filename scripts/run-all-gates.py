@@ -1629,6 +1629,15 @@ def build_suites() -> List[Suite]:
         Suite("web-honesty-ladder",
               "every disabled or absent control carries a reason", "script", WEB,
               [_npm(), "run", "check:honesty-ladder"], None),
+        # Standardization slice 4b. The guided tours spotlight by data-tour
+        # anchor first (className chain as the fallback) and the step ->
+        # anchor map lives in the Surface Contract, so an anchor a refactor
+        # drops from a shell would fail SILENTLY at runtime: the fallback
+        # keeps the tour working and nobody learns the anchor is dead. This
+        # gate reads the contract and both shells' source and fails on that.
+        Suite("web-tour-anchors",
+              "every tour anchor the contract names exists in its shell's source", "script", WEB,
+              [_npm(), "run", "check:tour-anchors"], None),
         Suite("web-composer-contract",
               "web composer prompt history + queued turn state", "script", WEB,
               [_npm(), "run", "check:composer"], None),

@@ -9,6 +9,8 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import ProductSurfaceTabs, { ProductSurfaceFrame } from './ProductSurfaceTabs.jsx'
+import ContinuityStore from '../site/ContinuityStore.jsx'
+import SurfaceFrame from '../site/SurfaceFrame.jsx'
 import { PRODUCT_SURFACES, productSurfaceStates } from '../site/productSurfaces.js'
 import { deriveWorkspaceProjectState } from '../site/workspaceProjectState.js'
 
@@ -29,6 +31,25 @@ const catalogB = {
     { family_id: 'custom', label: 'Custom authored tools', capabilities: [{ name: 'setback-check', label: 'Setback check' }] },
     { family_id: 'stringing', label: 'Stringing', capabilities: [{ name: 'autofill-string-targets', label: 'String targets' }] },
   ],
+}
+
+// Slice 4b: the rail and the sign-out are rendered by SiteRoot's
+// ContinuityStore from what the scene's SurfaceFrame publishes, and the tabs
+// adopt them. `nav()` below mounts that whole path, the way a scene does,
+// so every F-8 / sign-out pin here exercises the shipped wiring rather
+// than props the tabs no longer take (site/continuityHoist.test.jsx pins
+// the markup byte-identical to the pre-4b render).
+function navInStore({ surface, workspaceProject = null, catalog = null, signedIn = false, onSignOut = null, scene = 'stage' }) {
+  return (
+    <ContinuityStore search={`?surface=${surface}`}>
+      <SurfaceFrame
+        scene={scene} activeSurface={surface} states={states} onSelect={() => {}}
+        workspaceProject={workspaceProject} catalog={catalog} signedIn={signedIn} onSignOut={onSignOut}
+      >
+        <SurfaceFrame.Tabs />
+      </SurfaceFrame>
+    </ContinuityStore>
+  )
 }
 
 function frame(surface, catalog, catalogError = null) {
@@ -95,15 +116,7 @@ describe('F-7: surface frames render the live tenant catalog', () => {
     const openProject = deriveWorkspaceProjectState({
       openProjectId: 'p-1', projectName: 'rooftop_demo', orgId: 'org-1',
     })
-    const nav = (surface) => (
-      <ProductSurfaceTabs
-        activeSurface={surface}
-        states={states}
-        onSelect={() => {}}
-        workspaceProject={openProject}
-        catalog={catalogA}
-      />
-    )
+    const nav = (surface) => navInStore({ surface, workspaceProject: openProject, catalog: catalogA })
     const { rerender } = render(nav('browser'))
     const rail = screen.getByTestId('continuity-rail')
     expect(rail.dataset.pulse).toBe('false')
@@ -115,9 +128,7 @@ describe('F-7: surface frames render the live tenant catalog', () => {
   })
 
   it('F-8: the rail renders only live data — no catalog, no counts', () => {
-    render(
-      <ProductSurfaceTabs activeSurface="browser" states={states} onSelect={() => {}} />,
-    )
+    render(navInStore({ surface: 'browser' }))
     const rail = screen.getByTestId('continuity-rail')
     expect(rail.textContent).toContain('no project open')
     expect(rail.textContent).not.toContain('families')
@@ -133,12 +144,7 @@ describe('F-7: surface frames render the live tenant catalog', () => {
   })
 
   it('F-9: the rail names the mounted drawing instead of claiming nothing is open', () => {
-    render(
-      <ProductSurfaceTabs
-        activeSurface="browser" states={states} onSelect={() => {}}
-        workspaceProject={drawingOnly} catalog={catalogA}
-      />,
-    )
+    render(navInStore({ surface: 'browser', workspaceProject: drawingOnly, catalog: catalogA }))
     const rail = screen.getByTestId('continuity-rail')
     expect(rail.dataset.projectState).toBe('drawing-only')
     expect(rail.textContent).toContain('rooftop_demo')
@@ -288,7 +294,7 @@ describe('F-7: surface frames render the live tenant catalog', () => {
     const src = readFileSync(`${process.cwd()}/src/components/ProductSurfaceTabs.jsx`, 'utf8')
     expect(src).not.toContain('deriveWorkspaceProjectState')
     expect(src).not.toContain("'legacy'")
-    render(<ProductSurfaceTabs activeSurface="browser" states={states} onSelect={() => {}} />)
+    render(navInStore({ surface: 'browser' }))
     expect(screen.getByTestId('continuity-rail').dataset.projectState).toBe('empty')
   })
 
@@ -361,10 +367,7 @@ describe('F-7: surface frames render the live tenant catalog', () => {
   it('F-9: rail and card agree — one derivation, never two answers on one screen', () => {
     render(
       <>
-        <ProductSurfaceTabs
-          activeSurface="browser" states={states} onSelect={() => {}}
-          workspaceProject={drawingOnly} catalog={catalogA}
-        />
+        {navInStore({ surface: 'browser', workspaceProject: drawingOnly, catalog: catalogA })}
         <ProductSurfaceFrame
           activeSurface="browser" states={states} catalog={catalogA} catalogError={null}
           workspaceProject={drawingOnly} onCreateProject={() => {}}
@@ -395,45 +398,26 @@ describe('F-7: surface frames render the live tenant catalog', () => {
   // remounts across a surface switch (same F-8 node-identity contract as
   // the continuity rail), so it is the persistent home for the control.
   it('renders no sign-out control when signed out', () => {
-    render(
-      <ProductSurfaceTabs
-        activeSurface="browser" states={states} onSelect={() => {}}
-        signedIn={false} onSignOut={() => {}}
-      />,
-    )
+    render(navInStore({ surface: 'browser', signedIn: false, onSignOut: () => {} }))
     expect(screen.queryByRole('button', { name: /sign out/i })).toBeNull()
   })
 
   it('renders no sign-out control when signed in but no handler is wired', () => {
-    render(
-      <ProductSurfaceTabs
-        activeSurface="browser" states={states} onSelect={() => {}}
-        signedIn
-      />,
-    )
+    render(navInStore({ surface: 'browser', signedIn: true }))
     expect(screen.queryByRole('button', { name: /sign out/i })).toBeNull()
   })
 
   it('renders a persistent sign-out control when signed in, and invokes signOut on click', () => {
     const signOut = []
-    render(
-      <ProductSurfaceTabs
-        activeSurface="browser" states={states} onSelect={() => {}}
-        signedIn onSignOut={() => signOut.push(true)}
-      />,
-    )
+    render(navInStore({ surface: 'browser', signedIn: true, onSignOut: () => signOut.push(true) }))
     const btn = screen.getByRole('button', { name: /sign out/i })
     fireEvent.click(btn)
     expect(signOut).toEqual([true])
   })
 
   it('the sign-out control survives a surface switch on the same always-mounted nav', () => {
-    const nav = (surface) => (
-      <ProductSurfaceTabs
-        activeSurface={surface} states={states} onSelect={() => {}}
-        signedIn onSignOut={() => {}}
-      />
-    )
+    const onSignOut = () => {}
+    const nav = (surface) => navInStore({ surface, signedIn: true, onSignOut })
     const { rerender } = render(nav('browser'))
     const before = screen.getByRole('button', { name: /sign out/i })
     rerender(nav('solar'))

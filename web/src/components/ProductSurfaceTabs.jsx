@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { PRODUCT_SURFACES, SHARED_WORKSPACE_CAPABILITIES, productSurface, surfaceContract } from '../site/productSurfaces.js'
 import { EMPTY_WORKSPACE_PROJECT, WORKSPACE_PROJECT_COPY } from '../site/workspaceProjectState.js'
+import { useContinuityHost } from '../site/continuityStore.js'
 import { moveRovingTab } from '../lib/roving.js'
 
 // F-8: the continuity layer, made visible. Lives in the always-mounted nav so
@@ -9,6 +10,12 @@ import { moveRovingTab } from '../lib/roving.js'
 // the open project and the same catalog fold every surface consumes (F-7).
 // A surface change pulses it (class toggle, never a remount); the pulse and
 // every other F-8 motion is disabled under prefers-reduced-motion in CSS.
+//
+// Slice 4b: RENDERED by site/ContinuityStore.jsx (mounted once by SiteRoot,
+// above the scene ternary), not by the tabs below. The store portals this
+// rail and AccountSignOut into a host node the nav ADOPTS (see
+// ProductSurfaceTabs), so the never-remounts contract now also holds across
+// the /try <-> /app scene crossing. The component itself is unchanged.
 export function ContinuityRail({ activeSurface, workspaceProject = null, catalog }) {
   const [pulse, setPulse] = useState(false)
   const first = useRef(true)
@@ -58,12 +65,31 @@ export function AccountSignOut({ signedIn = false, onSignOut = null }) {
   )
 }
 
-export default function ProductSurfaceTabs({
-  activeSurface, states, onSelect, workspaceProject = null, catalog = null,
-  signedIn = false, onSignOut = null,
-}) {
+// Slice 4b: the tabs no longer take `workspaceProject` / `catalog` /
+// `signedIn` / `onSignOut`. The scene's SurfaceFrame publishes those to the
+// ContinuityStore (site/continuityStore.js), which renders the rail and the
+// sign-out into ONE host node; this nav adopts that node right after the
+// tablist, so the DOM under `.tc-product-nav` is what it always was:
+// tablist, rail, sign-out. Outside a store (a tabs band rendered alone) the
+// host is null and the nav renders its tablist and nothing else: fails closed.
+export default function ProductSurfaceTabs({ activeSurface, states, onSelect }) {
+  const host = useContinuityHost()
+  const navRef = useRef(null)
+  // Layout effect: the host is in place before paint, in the same commit the
+  // frame publishes (also a layout effect, and an ancestor's, so it runs
+  // after this one). On unmount the host is detached with its children
+  // intact and the next scene's nav adopts the SAME node, which is the
+  // cross-scene never-remounts contract (continuityHoist.test.jsx). React
+  // never reconciles the nav's own children after mount (the tablist is
+  // unconditional), so a foreign last child is safe here by construction.
+  useLayoutEffect(() => {
+    const nav = navRef.current
+    if (!nav || !host) return undefined
+    nav.appendChild(host)
+    return () => { if (host.parentNode === nav) nav.removeChild(host) }
+  }, [host])
   return (
-    <nav className="tc-product-nav" data-cast="tool" aria-label="Product workspace">
+    <nav ref={navRef} className="tc-product-nav" data-cast="tool" aria-label="Product workspace">
       <div className="tc-product-tabs" role="tablist" aria-label="Workspace profile" onKeyDown={moveRovingTab}>
         {/* One tab per surface that DECLARES one (slice 5b): the band reads
             contract.chrome.tab instead of assuming every record is a tab, so
@@ -99,19 +125,13 @@ export default function ProductSurfaceTabs({
           )
         })}
       </div>
-      <ContinuityRail
-        activeSurface={activeSurface}
-        workspaceProject={workspaceProject}
-        catalog={catalog}
-      />
-      {/* Persistent identity control: the ONE place in the always-mounted nav
-          (never remounts on a surface switch — same F-8 contract as the
-          continuity rail) that lets a signed-in operator leave. Before this,
-          sign-out lived only behind Trust panel -> Account details -> drawer,
-          so the console had no reachable exit for an end user (2026-09-02
-          reconciliation, row B11). Same signOut path the Trust panel drawer
-          already calls -- never raw logout(). */}
-      <AccountSignOut signedIn={signedIn} onSignOut={onSignOut} />
+      {/* The continuity rail and the persistent identity control (the ONE
+          place in the always-mounted nav that lets a signed-in operator
+          leave; 2026-09-02 reconciliation, row B11, same signOut path the
+          Trust panel drawer calls, never raw logout()) stand HERE, right
+          after the tablist, inside the host node the layout effect above
+          adopts. Slice 4b moved their owner to SiteRoot's ContinuityStore,
+          not their place. */}
     </nav>
   )
 }

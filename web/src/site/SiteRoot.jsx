@@ -29,6 +29,7 @@ import { activeCastForScene, sceneAllowsMarketingEject, sceneForPath } from './r
 import { ONE_SHELL_ENABLED } from '../lib/runtimeFlags.js'
 import { StudioGroundContext } from './studioGround.js'
 import StageScene from './StageScene.jsx'
+import ContinuityStore from './ContinuityStore.jsx'
 import { WorkspaceControllerProvider } from '../controllers/WorkspaceControllerProvider.jsx'
 import { consoleWorkspaceMount } from '../controllers/workspaceMount.js'
 import { handleRedirectCallback, isSignedIn } from '../auth.js'
@@ -190,6 +191,15 @@ export default function SiteRoot() {
   // scene changes instead of unmounting it. `mode` follows the scene; the
   // provider keeps an identity per mode, so the console and the stage never
   // read each other's.
+  //
+  // Slice 4b: ONE ContinuityStore inside it, above the scene ternary, for the
+  // same reason. It OWNS the F-8 continuity rail and the AccountSignOut
+  // control (site/ContinuityStore.jsx) so they survive the /try <-> /app
+  // crossing as the same nodes; the active scene's SurfaceFrame publishes the
+  // derived state they show, and that scene's tabs adopt them into the nav.
+  // It holds a snapshot, never a controller: no second session or catalog
+  // controller exists above the scenes, and the ONE EngineSessionProvider
+  // stays App's engine mount.
   return (
     <DrawingIdentityProvider
       mode={scene === 'app' ? DRAWING_MODE_CONSOLE : DRAWING_MODE_OPERATOR}
@@ -197,6 +207,7 @@ export default function SiteRoot() {
       publicDemo={DEMO.publicDemo}
       liveDemo={DEMO.liveDemo}
     >
+      <ContinuityStore search={BOOT_SEARCH}>
       {scene === 'app' ? (
         ONE_SHELL_ENABLED ? (
           // W3 one-shell mount (docs/convergence/ACCEPTANCE.md): scene 'app'
@@ -238,6 +249,7 @@ export default function SiteRoot() {
       ) : (
         <StageScene scene={scene} stageRef={stageRef} publicDemo={PUBLIC_DEMO} />
       )}
+      </ContinuityStore>
     </DrawingIdentityProvider>
   )
 }

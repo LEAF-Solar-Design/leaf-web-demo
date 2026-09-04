@@ -1042,7 +1042,7 @@ const Viewer = forwardRef(function Viewer(
   }, [pendingEdit, buildTick])
 
   return (
-    <div ref={mountRef} className="viewer-canvas">
+    <div ref={mountRef} className="viewer-canvas" data-tour="viewer">
       {glError && (
         <div className="viewer-fallback">
           3D preview needs WebGL, which is unavailable in this browser.

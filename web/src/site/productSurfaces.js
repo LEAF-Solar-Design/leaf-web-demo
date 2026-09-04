@@ -64,6 +64,64 @@ export function deepFreeze(value, seen = new WeakSet()) {
   return value
 }
 
+// ---------------------------------------------------------------------------
+// TOUR ANCHORS (standardization slice 4b). Per shell, a map from a guided-tour
+// STEP id to the `data-tour` id of the element that step spotlights.
+// DemoTour resolves `[data-tour="<id>"]` first and falls back to the step's
+// own className chain, so the step arrays (src/demo/tourScript.js TOUR_STEPS,
+// site/ToolCast.jsx UNIFIED_TOUR_STEPS) are byte-identical to before; the
+// contract carries the anchor, not the script. Both shells expose the SAME
+// anchor vocabulary on their own elements:
+//
+//   shell        the scene root: App.jsx `.app` / StageScene.jsx `.stage-root`
+//   viewer       the drawing: Viewer.jsx `.viewer-canvas` / StageLayer.jsx
+//                `.stage-viewer` (which wraps the shared Viewer; tree order
+//                makes the outer one win on the stage)
+//   command-bar  PromptBox.jsx `.bar` / ToolCast.jsx `.tc-bar`
+//   right-rail   ToolCast.jsx `.tc-rail-r` only (the console's own job rail,
+//                JobRail.jsx `aside.rail`, mounts no step that spotlights it,
+//                so it carries no anchor of its own; `.tc-rail-r` wraps the
+//                shared JobRail on the stage, tree order making the wrapper
+//                win there too)
+//
+// A step is mapped ONLY where its className chain names one element. A chain
+// that picks among candidates by presence (`.strip-decision, .bar-dock`,
+// `.author-section, .workspace-card`, `.converse-confirm, .tc-operator-rail`)
+// stays a chain: an anchor is one element, and anchoring such a step would
+// change which element wins. Those steps are simply absent from the map. A
+// `left-rail` anchor existed through slice 4b's first cut (NavRail.jsx
+// `aside.nav`, ToolCast.jsx `.tc-operator-rail`) but named no such step on
+// either shell — the console never spotlights the nav rail at all, and the
+// stage's only rail-adjacent step (`approval`) is exactly the multi-candidate
+// chain above — so the attribute was dead vocabulary and was removed rather
+// than kept as a reservation; see check_tour_anchors.mjs's orphan check.
+//
+// scripts/check_tour_anchors.mjs is the gate: every mapped step id exists in
+// that shell's step array, every anchor id is one of the declared ones above,
+// every anchor id is present as `data-tour="<id>"` in that shell's source,
+// and every `data-tour` id a shell's source carries is referenced by some
+// step map (the reverse direction, so a leftover or mistyped attribute with
+// no consumer fails loudly instead of sitting unused).
+// ---------------------------------------------------------------------------
+// The console tour (App.jsx, mock-gated, mounts on every studio surface).
+const CONSOLE_TOUR_ANCHORS = Object.freeze({
+  welcome: 'shell',
+  viewer: 'viewer',
+  count: 'command-bar',
+  edge: 'command-bar',
+  measure: 'command-bar',
+})
+// The stage walk (ToolCast.jsx UNIFIED_TOUR_STEPS), mounted inside the cad
+// arm only (ToolCast.jsx `stageBranch === 'cad'`), so cad is the one surface
+// that declares it; browser, solar and ios declare null on the stage.
+const STAGE_TOUR_ANCHORS = Object.freeze({
+  welcome: 'shell',
+  viewer: 'viewer',
+  request: 'command-bar',
+  versions: 'right-rail',
+  trust: 'right-rail',
+})
+
 // Per-surface projection of the ONE tenant capability catalog (F-7).
 // `familyIds` filters the live folded families each surface features in its
 // frame; null means the surface presents the whole catalog (iOS ships the
@@ -182,9 +240,10 @@ export const PRODUCT_SURFACES = Object.freeze([
       resetOn: null,
       // a11y: no per-surface a11y declaration exists.
       a11y: null,
-      // tourAnchors: the tour is mock-gated (App.jsx:2761 and :3519), not
-      //   surface data.
-      tourAnchors: null,
+      // tourAnchors: the console tour mounts on every studio surface
+      //   (App.jsx, mock-gated); the stage walk lives in the cad arm only, so
+      //   the stage declares no tour here. See CONSOLE_TOUR_ANCHORS above.
+      tourAnchors: { console: CONSOLE_TOUR_ANCHORS, stage: null },
     }),
   }),
   Object.freeze({
@@ -254,7 +313,9 @@ export const PRODUCT_SURFACES = Object.freeze([
       entitlements: null,
       resetOn: null,
       a11y: null,
-      tourAnchors: null,
+      // tourAnchors: the ONE surface both tours run on: the console tour
+      //   (mock-gated) and the stage walk (ToolCast.jsx, the cad arm).
+      tourAnchors: { console: CONSOLE_TOUR_ANCHORS, stage: STAGE_TOUR_ANCHORS },
     }),
   }),
   Object.freeze({
@@ -322,7 +383,9 @@ export const PRODUCT_SURFACES = Object.freeze([
       entitlements: null,
       resetOn: null,
       a11y: null,
-      tourAnchors: null,
+      // tourAnchors: the console tour mounts here; the stage takes the frame
+      //   arm for solar (no walk), so the stage declares none.
+      tourAnchors: { console: CONSOLE_TOUR_ANCHORS, stage: null },
     }),
   }),
   Object.freeze({
@@ -382,7 +445,9 @@ export const PRODUCT_SURFACES = Object.freeze([
       entitlements: null,
       resetOn: null,
       a11y: null,
-      tourAnchors: null,
+      // tourAnchors: the console tour mounts here; the stage's ios arm has no
+      //   walk, so the stage declares none.
+      tourAnchors: { console: CONSOLE_TOUR_ANCHORS, stage: null },
     }),
   }),
   // -------------------------------------------------------------------------
@@ -475,7 +540,9 @@ export const PRODUCT_SURFACES = Object.freeze([
       entitlements: null,
       resetOn: null,
       a11y: null,
-      tourAnchors: null,
+      // tourAnchors: neither shell hosts this surface (scene: 'sheets'), so
+      //   neither declares a tour. Both keys present, both absent on purpose.
+      tourAnchors: { console: null, stage: null },
     }),
   }),
 ])

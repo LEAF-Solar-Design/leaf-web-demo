@@ -202,6 +202,13 @@
   from { opacity: 0; transform: translateY(7px); }
   to { opacity: 1; transform: none; }
 }
+/* Slice 4b: the host node SiteRoot's ContinuityStore renders the rail and the
+   sign-out into, adopted by the nav right after the tablist. `contents`
+   means it generates NO box: the rail and the button are the nav's flex
+   items exactly as when the tabs rendered them inline, so every rule below
+   and every descendant rule keyed on .tc-product-nav / .app still applies
+   unchanged. */
+.tc-continuity-host { display: contents; }
 .tc-continuity {
   margin-left: auto; display: flex; align-items: center; flex-wrap: wrap;
   gap: 4px 12px; min-width: 0; color: #949494; font-size: 10.5px;

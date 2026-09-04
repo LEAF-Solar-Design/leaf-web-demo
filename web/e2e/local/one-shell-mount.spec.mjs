@@ -184,7 +184,14 @@ test.describe('route matrix, rail ON', () => {
     // furniture (the command bar is the prompt).
     await expect(page.locator('.app[data-surface="cad"]')).toHaveCount(1)
     await expect(page.locator('.home-q')).toBeHidden()
-    await expect(page.locator('.tc-continuity')).toBeHidden()
+    // Attached AND hidden (slice 4b): the rail is owned by SiteRoot's
+    // ContinuityStore and adopted into this nav, so it must EXIST here (CSS
+    // hides it on the drafting surfaces; nothing unmounts it). A bare
+    // toBeHidden() passes on an absent element, which is the regression the
+    // hoist could produce.
+    const continuity = page.locator('.tc-continuity')
+    await expect(continuity).toBeAttached()
+    await expect(continuity).toBeHidden()
     // Rails float: inset with rounded corners; header and footer are dark.
     const chrome = await page.evaluate(() => {
       const cs = (sel) => getComputedStyle(document.querySelector(sel))

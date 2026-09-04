@@ -1435,6 +1435,7 @@ export default function ToolCast({
       <div className={`tc-bar-wrap${focusView ? ' tc-focus-hidden' : ''}`} data-cast="tool" style={{ '--rank': 2 }}>
         <div
           className={`tc-bar ${uploadDragActive ? 'upload-drag-active' : ''}`}
+          data-tour="command-bar"
           onDragEnter={(event) => { event.preventDefault(); setUploadDragActive(true) }}
           onDragOver={(event) => { event.preventDefault(); setUploadDragActive(true) }}
           onDragLeave={(event) => {
@@ -1761,7 +1762,7 @@ export default function ToolCast({
         </div>
       </aside>
 
-      <aside className={`tc-rail tc-rail-r${focusView ? ' tc-focus-hidden' : ''}`} aria-label="Operations controls" data-cast="tool" style={{ '--rank': 1 }}>
+      <aside className={`tc-rail tc-rail-r${focusView ? ' tc-focus-hidden' : ''}`} data-tour="right-rail" aria-label="Operations controls" data-cast="tool" style={{ '--rank': 1 }}>
         <div className="tc-rail-head">
           <span className="tc-rail-title">Operations</span>
           <span className="tc-rail-sub">controller state</span>
@@ -2056,6 +2057,10 @@ export default function ToolCast({
       {tourOn && sessionReady && (
         <DemoTour
           steps={UNIFIED_TOUR_STEPS}
+          // Slice 4b: the stage's declared anchors for this surface (step id
+          // -> data-tour id), null where the stage declares no tour. The step
+          // array above is untouched; the contract carries the anchor map.
+          anchors={surfaceContract(activeSurface).tourAnchors?.stage ?? null}
           index={tourIndex}
           onIndexChange={moveTour}
           onCannedPrompt={runTourPrompt}

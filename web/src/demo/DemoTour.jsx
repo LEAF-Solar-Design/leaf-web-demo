@@ -16,7 +16,13 @@ import './demo.css'
 
 const MARGIN = 14
 
-function resolveTarget(selector) {
+// A tour anchor id is a short lowercase slug (`shell`, `viewer`,
+// `command-bar`, `right-rail`). Anything else is refused before it reaches
+// querySelector, so a contract typo or a hostile string can never become a
+// selector: the step falls back to its className target, exactly as before.
+const ANCHOR_ID = /^[a-z][a-z0-9-]{0,63}$/
+
+function resolveSelectorChain(selector) {
   if (!selector) return null
   for (const part of String(selector).split(',')) {
     const el = document.querySelector(part.trim())
@@ -25,8 +31,31 @@ function resolveTarget(selector) {
   return null
 }
 
+/**
+ * Slice 4b: the spotlight resolves `[data-tour="<id>"]` FIRST, then the
+ * step's className chain. `anchors` is the per-shell map from
+ * `surfaceContract(id).tourAnchors` (step id -> anchor id), or null where the
+ * shell declares no tour for that surface; a step the map does not name keeps
+ * its className resolution unchanged. The anchor lookup returns the first
+ * match in TREE ORDER, so an outer shell element wins over a shared inner
+ * component that carries the same id (the stage's `.stage-viewer` wraps the
+ * shared Viewer; its `.tc-rail-r` wraps the shared JobRail), which is what
+ * keeps each shell's spotlight on the element its className target chose.
+ * Exported for the anchor-resolution unit test.
+ */
+export function resolveTourTarget(step, anchors = null) {
+  if (!step) return null
+  const anchorId = anchors && typeof anchors === 'object' ? anchors[step.id] : null
+  if (typeof anchorId === 'string' && ANCHOR_ID.test(anchorId)) {
+    const el = document.querySelector(`[data-tour="${anchorId}"]`)
+    if (el) return el
+  }
+  return resolveSelectorChain(step.target)
+}
+
 export default function DemoTour({
   steps = TOUR_STEPS,
+  anchors = null,
   index: controlledIndex,
   onIndexChange,
   onCannedPrompt,
@@ -49,7 +78,7 @@ export default function DemoTour({
   // --- spotlight geometry --------------------------------------------------
   const [rect, setRect] = useState(null)
   const measure = useCallback(() => {
-    const el = resolveTarget(step?.target)
+    const el = resolveTourTarget(step, anchors)
     const next = (() => {
       if (!el) return null
       const r = el.getBoundingClientRect()
@@ -65,11 +94,11 @@ export default function DemoTour({
         && prev.width === next.width && prev.height === next.height) return prev
       return next
     })
-  }, [step])
+  }, [step, anchors])
 
   useLayoutEffect(() => {
     measure()
-    const el = resolveTarget(step?.target)
+    const el = resolveTourTarget(step, anchors)
     if (el && el.scrollIntoView) {
       try { el.scrollIntoView({ block: 'nearest', behavior: 'smooth' }) } catch { /* older browsers */ }
     }
@@ -90,7 +119,7 @@ export default function DemoTour({
       window.removeEventListener('resize', measure)
       window.removeEventListener('scroll', measure, true)
     }
-  }, [measure, step])
+  }, [measure, step, anchors])
 
   // --- fire the canned prompt once per beat --------------------------------
   const firedFor = useRef(null)

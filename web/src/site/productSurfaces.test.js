@@ -161,7 +161,7 @@ const CONTRACT_FIXTURE = {
     entitlements: null,
     resetOn: null,
     a11y: null,
-    tourAnchors: null,
+    tourAnchors: { console: { welcome: 'shell', viewer: 'viewer', count: 'command-bar', edge: 'command-bar', measure: 'command-bar' }, stage: null },
   },
   cad: {
     ground: 'drawing',
@@ -181,7 +181,7 @@ const CONTRACT_FIXTURE = {
     entitlements: null,
     resetOn: null,
     a11y: null,
-    tourAnchors: null,
+    tourAnchors: { console: { welcome: 'shell', viewer: 'viewer', count: 'command-bar', edge: 'command-bar', measure: 'command-bar' }, stage: { welcome: 'shell', viewer: 'viewer', request: 'command-bar', versions: 'right-rail', trust: 'right-rail' } },
   },
   solar: {
     ground: 'drawing',
@@ -206,7 +206,7 @@ const CONTRACT_FIXTURE = {
     entitlements: null,
     resetOn: null,
     a11y: null,
-    tourAnchors: null,
+    tourAnchors: { console: { welcome: 'shell', viewer: 'viewer', count: 'command-bar', edge: 'command-bar', measure: 'command-bar' }, stage: null },
   },
   ios: {
     ground: 'device-stage',
@@ -228,7 +228,7 @@ const CONTRACT_FIXTURE = {
     entitlements: null,
     resetOn: null,
     a11y: null,
-    tourAnchors: null,
+    tourAnchors: { console: { welcome: 'shell', viewer: 'viewer', count: 'command-bar', edge: 'command-bar', measure: 'command-bar' }, stage: null },
   },
   // SHEETS (slice 5b). Written from the sheets arm, not from the module:
   //   scene           SiteRoot.jsx:234-237 `scene === 'sheets'` renders bare
@@ -260,7 +260,7 @@ const CONTRACT_FIXTURE = {
     entitlements: null,
     resetOn: null,
     a11y: null,
-    tourAnchors: null,
+    tourAnchors: { console: null, stage: null },
   },
 }
 

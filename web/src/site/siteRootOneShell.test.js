@@ -106,7 +106,9 @@ describe('App portal wiring', () => {
     expect((src.match(/<CockpitStatus/g) || [])).toHaveLength(1)
     expect(src).toMatch(/\{studioGround && intake && groundShowsDrawing\(activeSurface\) && \(\s*\n?\s*<ViewCluster/)
     expect(src).toMatch(/\{studioGround && groundShowsDrawing\(activeSurface\) && \(\s*\n?\s*<CockpitStatus/)
-    expect(src).toMatch(/<div className="app" data-surface=\{studioGround \? activeSurface : undefined\}>/)
+    // (`data-tour="shell"` after it is slice 4b's console tour anchor; the
+    // surface attribute's gate is what this pin guards.)
+    expect(src).toMatch(/<div className="app" data-surface=\{studioGround \? activeSurface : undefined\} data-tour="shell">/)
   })
 
   it('never seeds intake synchronously — the single-mount invariant of the portal', () => {

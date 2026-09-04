@@ -37,6 +37,8 @@ import JobRail from '../components/JobRail.jsx'
 import ProductSurfaceTabs, { ProductSurfaceFrame } from '../components/ProductSurfaceTabs.jsx'
 import Toast from '../components/Toast.jsx'
 
+import ContinuityStore from './ContinuityStore.jsx'
+import { CONTINUITY_HOST_CLASS, useContinuityPublish } from './continuityStore.js'
 import { StatusToggles } from './DrawingCockpit.jsx'
 import SurfaceFrame from './SurfaceFrame.jsx'
 import { surfaceContract } from './productSurfaces.js'
@@ -121,10 +123,21 @@ const POSTURE = Object.freeze({
 // tag + className + testid, in document order. Text is deliberately excluded:
 // this pin is about STRUCTURE and identity hooks, which is what a CSS rule, a
 // screenshot row and a Playwright locator all key off.
+//
+// Slice 4b, the ONE named exclusion: the continuity HOST. SiteRoot's
+// ContinuityStore renders the rail and the sign-out into a host <div> the
+// nav adopts right after the tablist, and landing.css gives that host
+// `display: contents`, so it generates no box: the rail and the button are
+// the nav's flex items exactly as when the tabs rendered them inline. The
+// walker flattens it (its children are walked in place; the host itself is
+// not emitted), which is the same view the browser's box tree has, and the
+// fixture captured before 4a stays the oracle. site/continuityHoist.test.jsx
+// pins the host's class, its CSS rule, and the byte-identical markup inside.
 function sequence(node) {
   const out = []
   const walk = (el) => {
     for (const child of el.children) {
+      if (child.classList.contains(CONTINUITY_HOST_CLASS)) { walk(child); continue }
       out.push([
         child.tagName.toLowerCase(),
         child.getAttribute('class') || '',
@@ -137,8 +150,21 @@ function sequence(node) {
   return out
 }
 
+// The scene's publish, transcribed: SurfaceFrame calls useContinuityPublish
+// with these five fields (SurfaceFrame.jsx); this stand-in does the same so
+// the transcription of today's TABS mount carries the same data through the
+// same store path without mounting a frame (which would be testing the
+// subject with itself).
+function Published({ activeSurface, workspaceProject = null, catalog = null, signedIn = false, onSignOut = null, children }) {
+  useContinuityPublish({ activeSurface, workspaceProject, catalog, signedIn, onSignOut })
+  return children
+}
+
+// Every slot renders inside ONE store, the way SiteRoot mounts every scene
+// (slice 4b). The store adds no element to the slot's subtree; the rail and
+// the sign-out appear where the tabs adopt the host and nowhere else.
 function slotSequence(element) {
-  const { container, unmount } = render(<div>{element}</div>)
+  const { container, unmount } = render(<div><ContinuityStore>{element}</ContinuityStore></div>)
   const seq = sequence(container.firstChild)
   unmount()
   return seq
@@ -159,15 +185,17 @@ function todayConsole(activeSurface) {
   const jobSpine = slots.rails.right === 'job-spine'
   const { wideViewport, jobRailExpanded } = POSTURE
   return {
-    // App.jsx:2868-2873
+    // App.jsx:2868-2873. Slice 4b: the rail's data and the sign-out are
+    // PUBLISHED (App passes no signedIn, so no sign-out), and the tabs adopt
+    // the store's host; the element sequence is the pre-4b one.
     tabs: (
-      <ProductSurfaceTabs
-        activeSurface={activeSurface}
-        states={STATES}
-        onSelect={noop}
-        workspaceProject={EMPTY_WORKSPACE_PROJECT}
-        catalog={CATALOG}
-      />
+      <Published activeSurface={activeSurface} workspaceProject={EMPTY_WORKSPACE_PROJECT} catalog={CATALOG}>
+        <ProductSurfaceTabs
+          activeSurface={activeSurface}
+          states={STATES}
+          onSelect={noop}
+        />
+      </Published>
     ),
     // App.jsx:2898-2910
     frame: slots.chrome.productFrame ? (
@@ -218,17 +246,16 @@ function todayConsole(activeSurface) {
 function todayStage(activeSurface) {
   const slots = surfaceContract(activeSurface)
   return {
-    // ToolCast.jsx:1422-1430 — the stage passes signedIn/onSignOut.
+    // ToolCast.jsx:1422-1430 — the stage passes signedIn/onSignOut (slice
+    // 4b: published to the store, adopted by the tabs; see todayConsole).
     tabs: (
-      <ProductSurfaceTabs
-        activeSurface={activeSurface}
-        states={STATES}
-        onSelect={noop}
-        workspaceProject={EMPTY_WORKSPACE_PROJECT}
-        catalog={CATALOG}
-        signedIn
-        onSignOut={noop}
-      />
+      <Published activeSurface={activeSurface} workspaceProject={EMPTY_WORKSPACE_PROJECT} catalog={CATALOG} signedIn onSignOut={noop}>
+        <ProductSurfaceTabs
+          activeSurface={activeSurface}
+          states={STATES}
+          onSelect={noop}
+        />
+      </Published>
     ),
     // ToolCast.jsx:2138-2147
     frame: slots.chrome.stageBranch === 'frame' ? (

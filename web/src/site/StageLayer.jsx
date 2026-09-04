@@ -85,7 +85,7 @@ const StageLayer = forwardRef(function StageLayer({
       {fallback ? (
         <StageFallback2D />
       ) : (
-        <div className={`stage-viewer${entered ? ' in' : ''}${settled ? ' settled' : ''}`}>
+        <div className={`stage-viewer${entered ? ' in' : ''}${settled ? ' settled' : ''}`} data-tour="viewer">
           <Suspense fallback={null}>
             {(intakeOverride || intake) && (
               <>
