@@ -28,6 +28,8 @@ import Legend from '../components/Legend.jsx'
 import ProjectSwitcher from '../components/ProjectSwitcher.jsx'
 import SelectionReadout from '../components/SelectionReadout.jsx'
 import RoutePanel from '../components/RoutePanel.jsx'
+// Slice 5a: the console's command bar IS the stage's command bar.
+import PromptBox from '../components/PromptBox.jsx'
 import ResultPanel from '../components/ResultPanel.jsx'
 import QuotaCard from '../components/QuotaCard.jsx'
 import DegradedBanner from '../components/DegradedBanner.jsx'
@@ -35,6 +37,7 @@ import DegradedBanner from '../components/DegradedBanner.jsx'
 // frame, the entitlement gate, the job rail and the toast all mount through
 // its slots now, so the stage and the console cannot drift apart again.
 import SurfaceFrame from './SurfaceFrame.jsx'
+import { stageRunDisabledReason } from './stageRunReasons.js'
 import SessionGate from '../components/SessionGate.jsx'
 import OpsDrawer from '../components/OpsDrawer.jsx'
 import WorkspaceSummary from '../components/WorkspaceSummary.jsx'
@@ -105,6 +108,19 @@ const CAT_REQUEST = 'Rearrange the existing panels in this drawing into the shap
 // "44 tools" before a drawing exists, so the tab must let a signed-in user look);
 // only running a tool still needs one.
 const CATALOG_NEEDS_DRAWING_NOTE = 'Upload a DWG or DXF to run this tool.'
+// Slice 5a: the stage's command bar is the console's PromptBox (components/
+// PromptBox.jsx), mounted below where the hand-rolled input row and controls
+// row stood. These are the hooks the e2e rows key off, ADDED beside
+// PromptBox's own classes on the same nodes (36 assertions across web/e2e
+// query .tc-bar-input, .tc-run, .tc-bar-proj, .tc-bar-key and
+// aria-label="Command bar"; the scout table is in the PR). Module-scoped so
+// the props are referentially stable across renders.
+const STAGE_BAR_CLASSES = Object.freeze({ wrap: 'tc-bar-input-row', input: 'tc-bar-input', run: 'tc-run' })
+// Static on purpose: staging polish-pins asserts the literal text ⌘K, on a
+// Linux runner, where PromptBox's own platform-aware keycap would print
+// Ctrl+K. SiteRoot.jsx binds the real chord (metaKey || ctrlKey + K) and
+// focuses .tc-bar-input; the cap only names it.
+const STAGE_BAR_KEYCAP = <span className="key tc-bar-key">⌘K</span>
 const PROOF_MODE =
   import.meta.env.VITE_CAT_PROOF === '1' ||
   new URLSearchParams(window.location.search).get('proof') === '1'
@@ -1316,10 +1332,6 @@ export default function ToolCast({
     await redoDrawingVersion(checkout.actions.getCapability())
   }, [busy, canRedo, checkout.actions, jobRunning, redoDrawingVersion, sessionReady])
 
-  const runOnEnter = (event) => {
-    if (event.key === 'Enter') runRequest()
-  }
-
   // Wave D one-shot iOS ship lane. The surface consumes REAL readiness: the
   // projection module fails closed to `launchable === false` for missing,
   // invalid, stale, cross-tenant, unhealthy, or secret-shaped records, so a
@@ -1460,8 +1472,9 @@ export default function ToolCast({
   )
 
   // Slice 4a: the stage's command well, handed to the frame as its
-  // `commandBar` render prop. The JSX is untouched; slice 5 replaces it with
-  // the console's PromptBox from this one seat.
+  // `commandBar` render prop. Slice 5a replaced the hand-rolled rows inside
+  // it with the console's PromptBox from this one seat; the wrap, the bar,
+  // the strips, RoutePanel and the drop handler are still the stage's.
   const commandBarBlock = (
       <div className={`tc-bar-wrap${focusView ? ' tc-focus-hidden' : ''}`} data-cast="tool" style={{ '--rank': 2 }}>
         <div
@@ -1508,6 +1521,15 @@ export default function ToolCast({
             onOpenAuthor={() => setLeftView('author')}
             onDismiss={catalog.actions.dismissRoute}
           />
+          {/* Standardization slice 8a round 3: the bar has no guard of its
+              own. This is the refusal the TRANSPORT raised and the catalog
+              controller caught, so what is on screen is the decision that
+              was actually enforced. Kept as the stage's own hand-rolled
+              notice (its own tc-secret-* testids, its own dispatchRequest
+              re-issue) rather than threaded into PromptBox's secretRefusal
+              prop: PromptBox already renders this exact notice for the
+              console, and passing the same prop here would stack a second,
+              redundant one under the stage's own. */}
           {secretRefusal && (
             <div className="tc-secret-notice" role="alert" data-testid="tc-secret-notice">
               <span className="dot red" aria-hidden="true" />
@@ -1533,30 +1555,76 @@ export default function ToolCast({
               )}
             </div>
           )}
-          <div className="tc-bar-input-row">
-            <span className="tc-bar-caret">›</span>
-            <input
-              type="text"
-              className="tc-bar-input"
-              value={prompt}
-              onChange={(event) => changePrompt(event.target.value)}
-              onKeyDown={runOnEnter}
-              aria-label="Command bar"
-              data-testid="command-bar"
-              placeholder={PUBLIC_DEMO
-                ? 'Message the demo or describe a CAD task.'
-                : PROOF_MODE
-                ? `Try: ${CAT_REQUEST}`
-                : 'Describe a change to this drawing. Nothing runs until you submit it.'}
-            />
-            <button type="button" className="tc-run" onClick={runRequest} disabled={platformSession.status !== 'active' || !hasDrawing || busy || jobRunning || routing || phase === 'loading'}>{routing ? 'Routing' : PUBLIC_DEMO ? 'Send' : 'Run'}</button>
-          </div>
-          <div className="tc-bar-controls">
-            <span className="tc-bar-chip">Scope · this drawing</span>
-            <span className="tc-bar-scopes">{PUBLIC_DEMO ? 'message · review · run · version' : 'plan · approve · execute · version'}</span>
-            <span className="tc-bar-proj">{activeDrawingId || 'No drawing'}</span>
-            <span className="key tc-bar-key">⌘K</span>
-          </div>
+          {/* Slice 5a: ONE PromptBox everywhere. The console's command bar
+              (components/PromptBox.jsx) replaces the stage's hand-rolled
+              input row and controls row; the strips, RoutePanel and the
+              DWG/DXF drop handler above stay the stage's, inside .tc-bar,
+              exactly where they stood.
+                - RoutePanel stays the resolver. routeActive makes Enter a
+                  no-op in the well while a decision is showing (RoutePanel's
+                  own window listener confirms it); hintLane colours the
+                  scope menu's lane dots off the same route.
+                - dispatchRequest is onDispatch: PromptBox hands (override,
+                  { images }) and the stage ignores the images, since
+                  attachments are off here.
+                - The Run ladder is the OLD predicate, rung for rung, as one
+                  honest sentence (site/stageRunReasons.js); null is all-clear.
+                  There was never an empty-prompt rung on the stage (the
+                  public demo's Send is asserted enabled on an empty bar), so
+                  disabledReason is passed even when null.
+                - dropIngestEnabled={false}: the G2 ingest catcher is OFF on
+                  the stage. A drop on .tc-bar already means "open this
+                  drawing" (the onDrop above, cat-standards-surface:68), and
+                  one gesture cannot honestly carry two meanings. PromptBox
+                  registers no drag handlers when it is off, so the event
+                  bubbles here untouched.
+                - Gained, not replaced: the slash picker with CockpitIcon rows,
+                  @ mounts, session-keyed prompt history (keyed by the
+                  converse session), the IME guard, Shift+Enter newline and
+                  the combobox aria wiring.
+                - Retired: the static "Scope · this drawing" chip and the
+                  .tc-bar-scopes lane string; PromptBox's live .bar-scope chip
+                  replaces both. */}
+          <PromptBox
+            value={prompt}
+            onChange={changePrompt}
+            onDispatch={dispatchRequest}
+            routing={routing}
+            hintLane={route?.lane}
+            projectName={activeDrawingId || 'No drawing'}
+            routeActive={!!route}
+            onOpenAuthor={() => setLeftView('author')}
+            tools={tools}
+            sessionId={sessionId}
+            imageAttachmentsEnabled={false}
+            dropIngestEnabled={false}
+            // BLOCKER 1 (2026-09-04): the stage is public and often
+            // signed-out, so the MCP discovery fetch (a tenant-scoped,
+            // private endpoint) may never run unconditionally the way the
+            // console runs it. Same predicate agentDisabled already uses at
+            // line ~768 (transportMock excluded there is not relevant here:
+            // discovery is harmless idle in mock mode either way).
+            mcpDiscoveryEnabled={isSignedIn() && platform.isEntitled('converse')}
+            commandLine
+            classNames={STAGE_BAR_CLASSES}
+            projectSlot={<span className="bar-proj tc-bar-proj">{activeDrawingId || 'No drawing'}</span>}
+            keycap={STAGE_BAR_KEYCAP}
+            disabledReason={stageRunDisabledReason({
+              sessionActive: platformSession.status === 'active',
+              hasDrawing,
+              busy,
+              jobRunning,
+              routing,
+              loading: phase === 'loading',
+            })}
+            runLabel={PUBLIC_DEMO ? 'Send' : 'Run'}
+            routingLabel="Routing"
+            placeholder={PUBLIC_DEMO
+              ? 'Message the demo or describe a CAD task.'
+              : PROOF_MODE
+              ? `Try: ${CAT_REQUEST}`
+              : 'Describe a change to this drawing. Nothing runs until you submit it.'}
+          />
         </div>
       </div>
   )

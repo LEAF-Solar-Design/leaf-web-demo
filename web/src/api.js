@@ -98,8 +98,16 @@ export function subscribeUnauthorized(listener) {
 // and the previous unconditional wipe here cleared the fresh token every time,
 // stranding every signed-in user back in the guest workspace (found by the
 // 2026-08-08 production synthetic walk).
-export function noteUnauthorized(response, source = 'api', sentAuth = undefined) {
+// `fatal` (default true): a bounded opt-out for a caller whose 401 must never
+// tear down the session, e.g. an advisory discovery call that is never
+// load-bearing (PromptBox's tenant-scoped MCP list, BLOCKER 1 2026-09-04:
+// a tenant without that call's entitlement could 401 a signed-in stage user
+// off a background call the stage never made). `fatal: false` returns the
+// response untouched: no localStorage wipe, no unauthorized listener firing.
+// Every other call site is unchanged (the default stays true).
+export function noteUnauthorized(response, source = 'api', sentAuth = undefined, { fatal = true } = {}) {
   if (response?.status !== 401) return response
+  if (!fatal) return response
   const sentToken = typeof sentAuth === 'string' && sentAuth.startsWith('Bearer ')
     ? sentAuth.slice('Bearer '.length)
     : null

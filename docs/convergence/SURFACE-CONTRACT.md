@@ -1,6 +1,6 @@
 # The Surface Contract
 
-Standardization slices 1-2, 4b and 5b of 13. Plan: `C:/Users/ehaug/.claude/plans/staged-wiggling-fairy.md`,
+Standardization slices 1-2, 4b, 5a and 5b of 13. Plan: `C:/Users/ehaug/.claude/plans/staged-wiggling-fairy.md`,
 section "The Surface Contract", element table row 1.
 
 **Slice 1** froze the contract as DATA on `web/src/site/productSurfaces.js`, with every
@@ -35,6 +35,12 @@ the tabs adopt), so both survive the `/try` <-> `/app` crossing as the same node
 same markup in the same place, and filled `tourAnchors` on every record: the guided tours
 now spotlight by `data-tour` anchor first with the className chain as the fallback, the step
 arrays untouched. See "What slice 4b changed" below.
+
+**Slice 5a** made the command bar ONE component. The stage (`/try`, `ToolCast.jsx`) used to
+hand-roll its own bar (`.tc-bar-input-row` with a plain `<input>`, a `.tc-run` button and a
+static controls row); it now mounts the console's `PromptBox` inside its `.tc-bar`, through
+`SurfaceFrame`'s `commandBar` slot, and the console passes nothing new, so `/app` renders
+byte for byte as before (pinned). See "The stage's command bar" below.
 
 `docs/convergence/ACCEPTANCE.md` is frozen and is not edited by any slice.
 
@@ -401,6 +407,98 @@ until now enforced by nothing. The gate is static, so it never renders a surface
 carries its own positive controls: fixture sources with a reasonless disabled record, an
 unfrozen map, a placeholder reason and a dangling key each drive the same functions red.
 Adding a slot to the contract therefore means adding its field-table row in the same change.
+
+## The stage's command bar (slice 5a)
+
+`web/src/components/PromptBox.jsx` is the ONE command bar. Before this slice the stage
+rendered its own (`ToolCast.jsx`, the `.tc-bar` block): a plain `<input>` whose only key
+handling was Enter, a Run button on a six-rung inline predicate, and a controls row of
+static copy. The console's `PromptBox` had the slash picker, `@` mounts, session-keyed
+prompt history, the IME guard, Shift+Enter, the combobox aria wiring and a live scope
+chip, none of which the stage had. Slice 5a mounts `PromptBox` where the stage's rows
+stood, and the stage GAINS all of that.
+
+What the stage KEEPS, because 36 e2e rows query it (the scout table is in the PR):
+
+| hook | where it rides now |
+| --- | --- |
+| `aria-label="Command bar"`, `data-testid="command-bar"` | PromptBox's `<textarea>` (always did) |
+| `.tc-bar-wrap`, `.tc-bar` | still the stage's own wrapper divs; the strips, `RoutePanel` and the DWG/DXF drop handler stay inside `.tc-bar` exactly where they stood |
+| `.tc-bar-input` | PromptBox's textarea, as a second class beside `bar-field` (`classNames.input`) |
+| `.tc-bar-input-row` | PromptBox's `.bar-input` row (`classNames.wrap`) |
+| `.tc-run` | PromptBox's Run chip beside `chip-act` (`classNames.run`), its text `Run` / `Send` (public demo) / `Routing` |
+| `.tc-bar-proj` | the stage's `projectSlot` node, `bar-proj tc-bar-proj`, still the drawing id or `No drawing` |
+| `.tc-bar-key` | the stage's static `keycap` node, literal `⌘K` (staging polish-pins asserts the text on a Linux runner, where PromptBox's own platform-aware cap would print `Ctrl+K`); `SiteRoot.jsx` still binds the real chord and focuses `.tc-bar-input` |
+| the Run ladder | the OLD predicate (`session active`, `drawing`, `busy`, `job`, `routing`, `phase loading`), rung for rung, as ONE sentence through PromptBox's `disabledReason` (`web/src/site/stageRunReasons.js`, frozen `STAGE_RUN_REASONS`, held by the honesty-ladder gate); `null` is all-clear, and the stage never had an empty-prompt rung (the public demo's `Send` is asserted enabled on an empty bar) |
+| `RoutePanel` | still the stage's resolver; PromptBox gets `routeActive={!!route}` so Enter in the well is a no-op while a decision shows, and `hintLane={route?.lane}` colours the scope menu's dots off the same route |
+| phone legibility | `.tc-bar .bar-input .tc-bar-input { font-size: 16px }` at 600px wide, the floor `standards-surface` and `responsive-keyboard` read off `.tc-bar-input` |
+
+PromptBox's new props, every one optional and defaulting to the console's render
+(`promptBox.stage.test.jsx` pins the default element sequence against a capture taken from
+origin/main BEFORE the edit): `classNames` (`bar`, `wrap`, `input`, `run`, each ADDED beside
+the box's own class, never a rename), `projectSlot`, `keycap`, `disabledReason` (undefined
+keeps the box's rule; a string disables Run with the sentence as its title; null enables),
+`runLabel`, `routingLabel`, `placeholder`, `dropIngestEnabled`, `mcpDiscoveryEnabled`.
+
+Three decisions recorded here because nothing else records them:
+
+- **The MCP discovery fetch is gated on `mcpDiscoveryEnabled`** (default `true`, so the
+  console is unaffected). PromptBox's mount effect calls the tenant-scoped, private
+  `/api/converse/mcp` endpoint for the slash picker's server list; mounting it unconditionally
+  on the public, often signed-out `/try` stage made a signed-out load call that endpoint
+  anyway, and a 401 from a tenant without the `converse` entitlement could wipe a signed-in
+  stage user's token (`api.js`'s `noteUnauthorized` used to fire on ANY 401 whose bearer
+  matched the stored one, no matter how minor the call). The stage passes
+  `isSignedIn() && platform.isEntitled('converse')` (the same predicate `agentDisabled`
+  already uses); `false` skips the fetch, so a signed-out mount makes NO network call. The
+  discovery call is also now unconditionally non-fatal: `noteUnauthorized` takes a bounded
+  `{ fatal = true }` option, and this one call passes `fatal: false`, so its 401 can never
+  wipe `leaf.jwt` or fire the unauthorized listeners, regardless of the caller's predicate.
+  Pinned by `promptBox.stage.test.jsx` (no call when disabled, a call when enabled, a 401
+  left untouched), `api.noteUnauthorized.test.js` (`fatal: false` never wipes), and the e2e
+  negative row `e2e/negative/stage-signed-out.spec.mjs` (a signed-out `/try` load never
+  requests `/api/converse/mcp`).
+
+- **The G2 drop catcher is OFF on the stage** (`dropIngestEnabled={false}`). PromptBox's well
+  is the console's ONE drop target for manifests, and it answers a drop with the honest
+  "ingest isn't connected" strip. On the stage a drop on `.tc-bar` already means "open this
+  DWG or DXF" (`cat-standards-surface.spec.mjs:68` dispatches a `DragEvent` on that node and
+  expects a second upload). One gesture cannot carry two meanings, so with the flag off
+  PromptBox registers no drag handlers at all and the event reaches the stage's handler
+  untouched.
+- **Retired copy.** The static `.tc-bar-chip` "Scope · this drawing" and the `.tc-bar-scopes`
+  lane string ("plan · approve · execute · version", "message · review · run · version" in
+  the demo) are gone; nothing asserted either. PromptBox's live `.bar-scope` chip (find ·
+  act · build, with lane hit dots) replaces both. `landing.css` drops the `.tc-bar-caret`,
+  `.tc-bar-controls` and `.tc-bar-scopes` rules with them and seats the well inside `.tc-bar`
+  by specificity (styles.css loads after it).
+
+The `SurfaceFrame` render fixture (`surfaceFrame.today-fixture.json`) was recaptured with
+`SURFACE_FRAME_CAPTURE=1` after the edit and is byte-identical: the fixture's `commandBar`
+slot is a sentinel render prop on both scenes by design (the frame emits what the scene
+hands it, untouched), so the stage's new bar is not observable there. The stage bar's own
+shape is pinned by `promptBox.stage.test.jsx` and `toolCastStageBar.test.js` instead.
+
+## What slice 5a changed
+
+| # | file | change |
+| --- | --- | --- |
+| 1 | `web/src/components/PromptBox.jsx` | the optional stage props above; `runDisabled` derived once (caller ladder when passed, else routing / empty prompt); history is appended only for a dispatch the ladder lets through; drag handlers register only while `dropIngestEnabled`; the MCP discovery fetch gated on `mcpDiscoveryEnabled` and its 401 marked non-fatal (BLOCKER 1) |
+| 2 | `web/src/site/ToolCast.jsx` | `.tc-bar-input-row` and `.tc-bar-controls` replaced by one `<PromptBox>` inside `.tc-bar`; `runOnEnter` deleted (PromptBox owns Enter); `STAGE_BAR_CLASSES` and `STAGE_BAR_KEYCAP` module constants; the drop handler, strips and `RoutePanel` untouched; `mcpDiscoveryEnabled={isSignedIn() && platform.isEntitled('converse')}` passed to `PromptBox` (BLOCKER 1) |
+| 3 | `web/src/site/stageRunReasons.js` | `STAGE_RUN_REASONS` (frozen) and `stageRunDisabledReason()`, the old predicate as sentences in its evaluation order |
+| 4 | `web/src/site/landing.css` | dead `.tc-bar-caret` / `.tc-bar-controls` / `.tc-bar-scopes` rules removed; the `.tc-bar .bar` seating block; the 600px block re-pinned at the seated specificity |
+| 5 | `web/src/api.js` | `noteUnauthorized` gains a bounded `{ fatal = true }` option (BLOCKER 1); every existing call site is unchanged (the default stays `true`) |
+| 6 | `web/src/components/promptBox.stage.test.jsx` | the console's default sequence pinned from a pre-edit capture; the stage aliases, ladder, keycap, labels, `routeActive` Enter guard, drop catcher off, `commandLine` caret; a BLOCKER 1 suite (no call when `mcpDiscoveryEnabled` is false, a call when true, a 401 leaves `leaf.jwt` and the unauthorized listeners untouched) |
+| 7 | `web/src/api.noteUnauthorized.test.js` | two BLOCKER 1 cases: `fatal: false` never wipes even when the sent token matches the stored one, and still passes a non-401 through |
+| 8 | `web/src/site/stageRunReasons.test.js` | exact sentences, rung order, the 64-state equivalence with the old OR, frozen map |
+| 9 | `web/src/site/toolCastStageBar.test.js` | source-shape: one PromptBox inside `.tc-bar` after `RoutePanel`, the props above, the drop handler still the stage's, the hand-rolled rows gone, `landing.css` retired and seated |
+| 10 | `web/e2e/negative/stage-signed-out.spec.mjs` (new) | BLOCKER 1's e2e negative row: a signed-out `/try` load makes no `/api/converse/mcp` request, wired into `proof:unified:wave0` / `proof:fixture` |
+| 11 | `web/package.json` | the new negative spec added to `proof:unified:wave0` and `proof:fixture` |
+| 12 | this file | this section |
+
+Not touched: `App.jsx` (the console passes nothing new), `SurfaceFrame.jsx` (the
+`commandBar` slot already existed), `RoutePanel.jsx`, `composer.js`, every e2e spec (the
+36 rows are the acceptance criteria, not the thing under edit).
 
 ## What slice 5b changed
 
