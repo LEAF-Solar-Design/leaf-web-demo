@@ -820,6 +820,44 @@ def restore_version(drawing_id: str, version: int,
     return with_envelope_fields(view)
 
 
+def _receive_edited_dxf(file: UploadFile, source_digest: str):
+    """The integrity half every browser-edit save shares (F-3 and the W4g-3
+    plan route): read the body under the upload cap, refuse a non-.dxf name,
+    recompute the sha256 and refuse a digest mismatch, parse through the real
+    intake path. Returns (bytes, digest, intake) or the typed refusal."""
+    import dxf_intake
+
+    cap = guest_uploads.max_upload_bytes()
+    try:
+        data = file.file.read(cap + 1)
+    except Exception:  # noqa: BLE001 — transport read faults answer typed, never a plain 500
+        return error_response(ErrorCode.BAD_PARAMS,
+                              "could not read the uploaded body",
+                              retryable=True, status_code=400)
+    if len(data) > cap:
+        return error_response(ErrorCode.BAD_PARAMS,
+                              f"file exceeds the {cap} byte cap",
+                              retryable=False, status_code=413)
+    if not str(file.filename or "").lower().endswith(".dxf"):
+        return error_response(ErrorCode.BAD_PARAMS,
+                              "edited saves accept .dxf only",
+                              retryable=False, status_code=400)
+    actual_digest = hashlib.sha256(data).hexdigest()
+    if not hmac.compare_digest(actual_digest, str(source_digest or "").lower()):
+        return error_response(
+            ErrorCode.BAD_PARAMS,
+            "source_digest does not match the received bytes; refusing to "
+            "version a payload that differs from what was edited",
+            retryable=False, status_code=400)
+    try:
+        intake = dxf_intake.parse_dxf_bytes(data, source_name=file.filename or "edited.dxf")
+    except dxf_intake.DxfParseError as exc:
+        return error_response(ErrorCode.BAD_PARAMS,
+                              f"edited document does not parse: {exc}",
+                              retryable=False, status_code=422)
+    return data, actual_digest, intake
+
+
 @router.post("/api/drawings/{drawing_id}/versions/edited")
 def save_edited_version(drawing_id: str,
                         file: UploadFile = File(...),
@@ -867,34 +905,10 @@ def save_edited_version(drawing_id: str,
                               retryable=False, status_code=400)
     drawing_id = str(re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", drawing_id).group(0))
 
-    cap = guest_uploads.max_upload_bytes()
-    try:
-        data = file.file.read(cap + 1)
-    except Exception:  # noqa: BLE001 — transport read faults answer typed, never a plain 500
-        return error_response(ErrorCode.BAD_PARAMS,
-                              "could not read the uploaded body",
-                              retryable=True, status_code=400)
-    if len(data) > cap:
-        return error_response(ErrorCode.BAD_PARAMS,
-                              f"file exceeds the {cap} byte cap",
-                              retryable=False, status_code=413)
-    if not str(file.filename or "").lower().endswith(".dxf"):
-        return error_response(ErrorCode.BAD_PARAMS,
-                              "edited saves accept .dxf only",
-                              retryable=False, status_code=400)
-    actual_digest = hashlib.sha256(data).hexdigest()
-    if not hmac.compare_digest(actual_digest, str(source_digest or "").lower()):
-        return error_response(
-            ErrorCode.BAD_PARAMS,
-            "source_digest does not match the received bytes; refusing to "
-            "version a payload that differs from what was edited",
-            retryable=False, status_code=400)
-    try:
-        intake = dxf_intake.parse_dxf_bytes(data, source_name=file.filename or "edited.dxf")
-    except dxf_intake.DxfParseError as exc:
-        return error_response(ErrorCode.BAD_PARAMS,
-                              f"edited document does not parse: {exc}",
-                              retryable=False, status_code=422)
+    received = _receive_edited_dxf(file, source_digest)
+    if isinstance(received, JSONResponse):
+        return received
+    data, actual_digest, intake = received
 
     backend = _backend(str(tenant_id))
     try:
@@ -976,6 +990,217 @@ def save_edited_version(drawing_id: str,
         "source_stored": source_stored,
         # Truthful cost receipt: the engine ran in the tenant's browser.
         "cost": {"engine_usd": 0.0, "engine": "client-wasm"},
+    }, tenant_id)
+    return JSONResponse(status_code=201, content=with_envelope_fields(view))
+
+
+# W4g-3b: the plan form field is JSON, bounded here before json.loads sees a
+# byte. 512 KB is thousands of operations (a browser save is the DIFF of the
+# engine document against the head, not the document) and sits under the
+# multipart parser's own 1024 KB per-part cap, so this cap is the one that
+# answers, with the typed 413, rather than the parser's bare 400.
+MAX_PLAN_FORM_BYTES = 512 * 1024
+PLAN_TOOL_NAME = "cad-edit-plan"
+
+
+@router.post("/api/drawings/{drawing_id}/versions/plan")
+def save_plan_version(drawing_id: str,
+                      file: UploadFile = File(...),
+                      parent_version: int = Form(...),
+                      source_digest: str = Form(...),
+                      plan: str = Form(...),
+                      tenant_id: str = Depends(deps.require_active_tenant),
+                      x_checkout_capability: Optional[str] = Header(default=None)) -> Any:
+    """W4g-3b (one head): save a browser edit as a NEW VERSION through the
+    commit leg the SERVER picks (operator decision 1, 2026-09-04); the client
+    never chooses. The body carries BOTH forms of the edit: the engine's exact
+    DXF bytes (digest-bound, the F-3 contract) and the `plan`, the diff of the
+    engine document against the head in the frozen mutation contract v2.
+
+      - a DWG-backed head at APS_LIVE=0 takes `commit: "dwg-plan"`: the plan
+        is validated against the head's intake, lowered (the same refusals the
+        live WorkItem would raise), applied by the mock writer, and the
+        applied intake becomes the version payload (run_write_mock's idiom);
+      - a DWG-backed head at APS_LIVE=1 takes the DXF sidecar until W4g-3c
+        wires the live WorkItem leg, and SAYS so in `commit_note`;
+      - a head with no DWG source (an intake-backed mock drawing, an earlier
+        sidecar version) takes `commit: "dxf-sidecar"`: the F-3 leg verbatim;
+      - a plan that names no operation takes the sidecar too (nothing the
+        contract could express changed).
+
+    Everything else is the F-3 contract: the integrity half, the single-writer
+    gate, the drain fence, compare-and-set on the parent (checked here before
+    any work and again by the store under the commit guard), 403/503/409, and
+    a truthful cost."""
+    blocked = _mutation_gate()
+    if blocked is not None:
+        return blocked
+    import store  # da/store.py; importable via write_loop's sys.path setup
+    import mutation_plan
+
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", drawing_id or ""):
+        return error_response(ErrorCode.BAD_PARAMS,
+                              "malformed drawing id",
+                              retryable=False, status_code=400)
+    drawing_id = str(re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", drawing_id).group(0))
+
+    if len(plan) > MAX_PLAN_FORM_BYTES:
+        return error_response(ErrorCode.BAD_PARAMS,
+                              f"plan exceeds the {MAX_PLAN_FORM_BYTES} byte cap",
+                              retryable=False, status_code=413)
+    try:
+        plan_obj = json.loads(plan)
+    except ValueError:
+        return error_response(ErrorCode.BAD_PARAMS, "plan is not JSON",
+                              retryable=False, status_code=400)
+    if not isinstance(plan_obj, dict) or not isinstance(plan_obj.get("mutations"), dict):
+        return error_response(ErrorCode.BAD_PARAMS,
+                              "plan must be an object with a mutations object",
+                              retryable=False, status_code=400)
+    mutations = plan_obj["mutations"]
+    names_an_op = any(
+        isinstance(mutations.get(field), list) and mutations.get(field)
+        for field in ("added", "removed", "transforms", "set_layer", "set_points",
+                      "set_circle", "set_arc")
+    )
+
+    received = _receive_edited_dxf(file, source_digest)
+    if isinstance(received, JSONResponse):
+        return received
+    data, actual_digest, intake = received
+
+    backend = _backend(str(tenant_id))
+    try:
+        write_loop.ensure_demo_drawing(backend, str(tenant_id), drawing_id)
+        holder, fence = _lock_authorization(drawing_id, tenant_id, backend,
+                                            x_checkout_capability)
+        head_v, vkey = store.resolve_version(backend, str(tenant_id), drawing_id, "head")
+        head_source = backend.get(vkey)
+    except (checkout_capability.CapabilityRejected,
+            checkout_capability.CapabilityUnavailable) as exc:
+        return _denied(exc)
+    except (KeyError, ValueError):
+        return error_response(ErrorCode.BAD_PARAMS,
+                              "drawing unavailable or malformed request",
+                              retryable=False, status_code=400)
+    if int(parent_version) != int(head_v):
+        return error_response(
+            ErrorCode.BAD_PARAMS,
+            "stale parent: the named parent_version is no longer the "
+            "head; refresh the drawing and re-apply the edit",
+            retryable=True, status_code=409)
+
+    dwg_backed = head_source.startswith(write_loop.DWG_MAGIC)
+    if not names_an_op:
+        leg, note = "dxf-sidecar", "the plan names no operation; the DXF carries this save"
+    elif not dwg_backed:
+        leg, note = "dxf-sidecar", "the head has no DWG source; the DXF carries this save"
+    elif deps.APS_LIVE:
+        leg, note = "dxf-sidecar", "live plan commit lands with W4g-3c; the DXF carries this save"
+    else:
+        leg, note = "dwg-plan", "mock writer: the plan applied to the head's intake"
+
+    plan_digest: Optional[str] = None
+    if leg == "dwg-plan":
+        try:
+            _base_v, base_intake = write_loop.read_intake(
+                backend, str(tenant_id), drawing_id, int(head_v))
+        except write_loop.ProofStateUnreadable as exc:
+            return error_response(ErrorCode.INTERNAL, str(exc),
+                                  retryable=True, status_code=503)
+        except (KeyError, ValueError):
+            return error_response(ErrorCode.BAD_PARAMS,
+                                  "drawing unavailable or malformed request",
+                                  retryable=False, status_code=400)
+        try:
+            canonical = mutation_plan.validate_mutations(
+                base_intake, mutations, allow_transforms=True, allow_xdata=False)
+            # The lowering runs here too, so a plan the live WorkItem would
+            # refuse (a non-planar polyline, a collinear closed one) is refused
+            # on this leg as well, with the same sentence.
+            plan_bytes = mutation_plan.emit_plan(
+                canonical, base_sha256=hashlib.sha256(head_source).hexdigest(),
+                base_intake=base_intake)
+        except ValueError as exc:
+            return error_response(ErrorCode.BAD_PARAMS,
+                                  f"the edit plan was refused: {exc}",
+                                  retryable=False, status_code=422)
+        plan_digest = mutation_plan.plan_sha256(plan_bytes)
+        try:
+            new_intake = write_loop.apply_mutations(base_intake, canonical)
+        except ValueError as exc:
+            return error_response(ErrorCode.BAD_PARAMS,
+                                  f"the edit plan could not be applied: {exc}",
+                                  retryable=False, status_code=422)
+        payload = json.dumps(new_intake, separators=(",", ":")).encode("utf-8")
+        intake_digest = hashlib.sha256(payload).hexdigest()
+        meta = {"tool": PLAN_TOOL_NAME, "source": "cad_edit",
+                "plan_sha256": plan_digest,
+                "source_sha256": actual_digest,
+                "intake_sha256": intake_digest,
+                "note": "browser edit plan, mock writer (intake payload)"}
+        cost = {"engine_usd": 0.0, "engine": "mock-writer"}
+    else:
+        payload = json.dumps(intake, separators=(",", ":")).encode("utf-8")
+        intake_digest = hashlib.sha256(payload).hexdigest()
+        meta = {"tool": "cad-edit-surface", "source": "cad_edit",
+                "source_sha256": actual_digest,
+                "intake_sha256": intake_digest,
+                "note": "browser edit via the isolated engine worker"}
+        cost = {"engine_usd": 0.0, "engine": "client-wasm"}
+
+    try:
+        with write_loop.drawing_mutation_commit_guard() as commit_enabled:
+            if not commit_enabled:
+                return error_response(
+                    ErrorCode.INTERNAL,
+                    "drawing mutations are temporarily disabled for a storage cutover",
+                    retryable=True, status_code=503)
+            new_v = write_loop._put_bytes_version(
+                backend, str(tenant_id), drawing_id, payload,
+                parent_version=int(parent_version),
+                meta=meta, holder=holder, fence=fence,
+                require_parent_is_head=True)
+    except store.CheckoutDenied as exc:
+        return _denied(checkout_capability.CapabilityRejected(str(exc)))
+    except ValueError as exc:
+        if str(exc).startswith(("stale parent", "stale drawing head")):
+            return error_response(
+                ErrorCode.BAD_PARAMS,
+                "stale parent: the named parent_version is no longer the "
+                "head; refresh the drawing and re-apply the edit",
+                retryable=True, status_code=409)
+        return error_response(ErrorCode.BAD_PARAMS,
+                              "version write rejected by the store",
+                              retryable=False, status_code=400)
+    except Exception as exc:  # noqa: BLE001 — persist faults answer typed, never a raw 500
+        return error_response(ErrorCode.INTERNAL,
+                              f"version persist failed: {type(exc).__name__}",
+                              retryable=False, status_code=500)
+
+    # The sidecar leg keeps the raw full-fidelity DXF beside the version (F-3);
+    # the plan leg's version is the applied intake, which the engine reopens
+    # through the synthesizer, so no sidecar is stored for it.
+    source_stored = False
+    if leg == "dxf-sidecar":
+        source_stored = True
+        try:
+            backend.put(write_loop.edited_source_key(str(tenant_id), drawing_id, new_v), data)
+        except Exception:  # noqa: BLE001
+            source_stored = False
+
+    view = deps.tenant_echo({
+        "drawing_id": drawing_id,
+        "new_version": {"drawing_id": drawing_id, "version": new_v,
+                        "parent": int(parent_version)},
+        "head": new_v,
+        "commit": leg,
+        "commit_note": note,
+        "plan_sha256": plan_digest,
+        "source_sha256": actual_digest,
+        "intake_sha256": intake_digest,
+        "source_stored": source_stored,
+        "cost": cost,
     }, tenant_id)
     return JSONResponse(status_code=201, content=with_envelope_fields(view))
 

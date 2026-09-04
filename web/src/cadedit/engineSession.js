@@ -39,6 +39,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { EngineBoundary } from '../cad/engineWorker.js'
 import { SESSION_ERROR } from './engineSessionErrors.js'
+import { diffPlan } from './mutationDiff.js'
 
 // Mirrors the worker's own bound. Checked against File.size BEFORE any read.
 export const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
@@ -80,6 +81,12 @@ const INITIAL_SESSION = Object.freeze({
   // `savedBytes` held then). `dirty` below is savedBytes !== committedBytes:
   // an undo back to the committed snapshot reads clean by reference.
   committedBytes: null,
+  // W4g-3b: the entity list the HEAD document loaded with (null for a hand
+  // import, which has no head to diff against). A save posts the diff of the
+  // current list against it as the mutation plan; a successful save moves it
+  // to the list just saved. The snapshot stack never touches it: an undo back
+  // to the loaded state diffs to nothing.
+  committedEntities: null,
   busy: false,
   // Engine-truth gate (ACCEPTANCE): entity/byte readouts render ONLY for a
   // document that actually passed through the engine. There is no setter for
@@ -338,6 +345,8 @@ export default function useEngineSession({
   createWorkerRef.current = createWorker
   const saveTargetRef = useRef(saveTarget)
   saveTargetRef.current = saveTarget
+  // W4g-3b: whether the load in flight is the head (see openBytes).
+  const committedLoadRef = useRef(false)
   const onSavedRef = useRef(onSaved)
   onSavedRef.current = onSaved
   // In-flight latch for the version write. See save().
@@ -434,6 +443,7 @@ export default function useEngineSession({
           selectedId: '',
           savedBytes: null,
           committedBytes: null,
+          committedEntities: committedLoadRef.current ? entities : null,
           busy: false,
           engineParsed: true,
           geometrySource: GEOMETRY_SOURCE.ENGINE_PARSE,
@@ -512,6 +522,7 @@ export default function useEngineSession({
           selectedId: '',
           savedBytes: null,
           committedBytes: null,
+          committedEntities: null,
           // Nothing passed through the engine: no engine-truth readout is owed.
           engineParsed: false,
           geometrySource: null,
@@ -534,7 +545,7 @@ export default function useEngineSession({
   // `openBytes(bytes, name)` is what the head opener calls with bytes it
   // already holds (no File object, no second read). Same size ceiling, same
   // history floor, same boundary message. Fails closed on any other shape.
-  const openBytes = useCallback((bytes, name) => {
+  const openBytes = useCallback((bytes, name, opts = null) => {
     // toString, not instanceof: bytes from another realm (a test harness, a
     // worker) are still bytes.
     if (Object.prototype.toString.call(bytes) !== '[object Uint8Array]' || typeof name !== 'string' || !name) return
@@ -545,6 +556,10 @@ export default function useEngineSession({
       })
       return
     }
+    // W4g-3b: `{ committed: true }` says these bytes ARE the head (the
+    // opener's call), so the entity list this load produces becomes the base
+    // a save diffs against. Any other shape (a hand import) keeps no base.
+    committedLoadRef.current = !!(opts && typeof opts === 'object' && opts.committed === true)
     patch({ busy: true, documentId: name, errorKind: null, status: `Opening ${name}...` })
     const boundary = ensureBoundary()
     // W4f slice F: the opened bytes are the floor of the undo history.
@@ -655,22 +670,37 @@ export default function useEngineSession({
     savingRef.current = true
     patch({ busy: true, errorKind: null, status: 'Saving to the project as a new version...' })
     const generation = generationRef.current
+    // W4g-3b: the edit as a plan, when the engine holds the head. A diff the
+    // contract cannot carry (a kind change, past the operation bound) sends
+    // NO plan and names why in the status; the server then takes the DXF
+    // sidecar leg and says so in its receipt. A hand import has nothing to
+    // diff against and never sends one.
+    const { committedEntities, entities } = sessionRef.current
+    let plan = null
+    let planNote = ''
+    if (committedEntities) {
+      const diff = diffPlan(committedEntities, entities)
+      if (diff.mutations) plan = { mutations: diff.mutations, count: diff.count }
+      else planNote = ` No plan sent: ${diff.reason}.`
+    }
     try {
       const digest = await sha256Hex(bytes)
-      const receipt = await target.save(bytes, target.headVersion, digest)
+      const receipt = await target.save(bytes, target.headVersion, digest, plan)
       // A save that outlived its document must not report a version onto a
       // session that has since switched drawings.
       if (generation !== generationRef.current) return null
       const nv = receipt?.new_version?.version ?? receipt?.head
+      const commit = receipt?.commit ? ` through the ${receipt.commit} leg` : ''
       patch({
         busy: false,
         receipt,
         savedVersion: nv ?? null,
         committedBytes: bytes,
+        committedEntities: committedEntities ? sessionRef.current.entities : null,
         errorKind: null,
-        status: `Saved as version ${nv} (parent ${receipt?.new_version?.parent}), `
+        status: `Saved as version ${nv} (parent ${receipt?.new_version?.parent})${commit}, `
           + `digest ${String(receipt?.source_sha256 || digest).slice(0, 12)}…, `
-          + `engine cost $${receipt?.cost?.engine_usd ?? 0}.`,
+          + `engine cost $${receipt?.cost?.engine_usd ?? 0}.${planNote}`,
       })
       onSavedRef.current?.(receipt)
       return receipt

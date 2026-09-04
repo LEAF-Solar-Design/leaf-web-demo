@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react'
 import { applyViewPose, cameraPose, unprojectClientToPlane } from './viewerMath.js'
+import { intakeRoundPolylines } from '../cadedit/engineIntake.js'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
@@ -174,7 +175,13 @@ const Viewer = forwardRef(function Viewer(
       rotateEnabledRef.current,
     )
 
-    const polylines = activeIntake.polylines || []
+    // W4g-3b: circles and arcs a server intake carries (the contract v2's
+    // additive lists) draw as sampled polylines; an intake without them
+    // draws exactly as before ([] appended).
+    const roundPolylines = intakeRoundPolylines(activeIntake)
+    const polylines = roundPolylines.length
+      ? [...(activeIntake.polylines || []), ...roundPolylines]
+      : (activeIntake.polylines || [])
     const inserts = activeIntake.inserts || []
     const faces3d = activeIntake.faces3d || []
     // W4f slice A0: an ENGINE document (the browser engine's imported DXF,
