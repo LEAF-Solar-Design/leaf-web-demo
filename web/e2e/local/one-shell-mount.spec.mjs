@@ -348,6 +348,27 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.locator('.strip-decision')).toHaveCount(0)
     await expect(page).toHaveURL(/\/app\?dev=1$/)
 
+    // W4g-1c (engine reach on the public demo): the mock console opens its
+    // own drawing in the browser engine too, from the static /sample.dxf
+    // (the synthesis of the very intake it draws) as version 1, so Draw goes
+    // live with no import; Save stays honestly off (mock has no target).
+    // Only where the engine is served and the build carries the engine
+    // groups (the cad_edit row's own guard).
+    await page.getByRole('tab', { name: 'Draw' }).click()
+    const engineServedMock = await request.get('/engine/engine.js').catch(() => null)
+    const cadEditOnMock = (await ribbon.locator('[data-group="modify"]').count()) > 0
+    if (engineServedMock && engineServedMock.status() === 200 && cadEditOnMock) {
+      await expect(page.locator('.workspace-card[data-engine-document$="-v1.dxf"]')).toHaveCount(1, { timeout: 60_000 })
+      await expect(ribbon.locator('[data-tool="draw:createLine"]')).toBeEnabled()
+      await expect(ribbon.locator('[data-group="draw"] .ribbon-note')).toHaveCount(0)
+      await page.getByRole('tab', { name: 'Insert' }).click()
+      await expect(ribbon.locator('[data-tool="save-version"]')).toBeDisabled()
+      test.info().annotations.push({ type: 'engine-reach', description: `public demo: ${await page.locator('.workspace-card').getAttribute('data-engine-document')} opened from /sample.dxf` })
+    } else {
+      test.info().annotations.push({ type: 'engine-reach', description: 'public demo reach not proven here: engine not served or engine groups absent' })
+    }
+    await page.getByRole('tab', { name: 'Manage' }).click()
+
     // A family label in the band expands the rail AND opens that family
     // (the affordance the spine's monogram carried before Slice D).
     const familyLabel = ribbon.locator('[data-family] .ribbon-cluster-label.as-button').first()

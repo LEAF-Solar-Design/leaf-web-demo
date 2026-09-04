@@ -977,6 +977,37 @@ export async function fetchDrawingDxf(drawingId, { version = 'head', etag = null
   return { bytes: new Uint8Array(buffer), ...meta }
 }
 
+// W4g-1c (engine reach on the public demo): the demo draws /sample.intake.json
+// with no server session, so its "head" is the static DXF beside it,
+// /sample.dxf, the synthesis of that intake by the same code the DXF route
+// runs (web/scripts/build_sample_dxf.py; the manifest binds the two and
+// server/tests/test_sample_dxf_asset.py pins it). Same answer shape as
+// fetchDrawingDxf, same budget, same ceiling; version 1 is the demo's only
+// head, and there is nothing to save it back to (the target stays null).
+export const SAMPLE_DXF_PATH = '/sample.dxf'
+
+export async function fetchSampleDxf(drawingId, { fetchImpl = fetch } = {}) {
+  const res = await fetchWithBudget(fetchImpl, SAMPLE_DXF_PATH, {}, DRAWING_DXF_TIMEOUT_MS)
+  if (!res.ok) {
+    const e = new Error(`GET ${SAMPLE_DXF_PATH} -> ${res.status}`)
+    e.status = res.status
+    throw e
+  }
+  const declared = Number(res.headers.get('content-length'))
+  if (Number.isFinite(declared) && declared > MAX_DRAWING_DXF_BYTES) {
+    const e = new Error(`the demo drawing's DXF is ${declared} bytes, over the ${MAX_DRAWING_DXF_BYTES}-byte browser engine ceiling`)
+    e.status = 413
+    throw e
+  }
+  const buffer = await res.arrayBuffer()
+  if (buffer.byteLength > MAX_DRAWING_DXF_BYTES) {
+    const e = new Error(`the demo drawing's DXF is ${buffer.byteLength} bytes, over the ${MAX_DRAWING_DXF_BYTES}-byte browser engine ceiling`)
+    e.status = 413
+    throw e
+  }
+  return { bytes: new Uint8Array(buffer), version: 1, head: 1, source: 'sample-static', etag: null, drawingId }
+}
+
 export async function getDrawingUploadStatus(drawingId, guestSession = null, tenantId = null) {
   const headers = { 'X-Tenant-Id': tenantId || TENANT, ...authHeaders() }
   if (guestSession) headers['X-Guest-Session'] = guestSession

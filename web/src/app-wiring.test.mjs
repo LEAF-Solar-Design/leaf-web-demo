@@ -429,4 +429,18 @@ describe('App.jsx wiring', () => {
       assert.doesNotMatch(mutatedStripped.slice(start, start + 2600), /engineDirtyRef\.current/)
     })
   })
+
+  // W4g-1c (engine reach on the public demo): the opener mounts for mock
+  // too, with the static sample DXF as its head at version 1; live keeps the
+  // DXF route and the server's head. The rail-OFF and non-drafting gates are
+  // unchanged (studioGround, drafting, intake).
+  it('the head opener reaches the public demo through the static sample DXF', () => {
+    assert.match(
+      stripped,
+      /React\.createElement\(\s*EngineHeadOpener,\s*\{[^}]*enabled:\s*!!studioGround && !!drafting && !!intake/,
+    )
+    assert.match(stripped, /headKey:\s*drawingState\?\.head \?\? \(mock \? 1 : null\)/)
+    assert.match(stripped, /fetchDxf:\s*mock \? fetchSampleDxf : fetchDrawingDxf/)
+    assert.doesNotMatch(stripped, /enabled:\s*!!studioGround && !!drafting && !mock/)
+  })
 })

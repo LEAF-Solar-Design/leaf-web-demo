@@ -1,0 +1,8 @@
+{
+  "bytes": 424391,
+  "dxf_sha256": "6bd2732729f7e0e52812bdaaf6941ab0f5a688720f9c6282b091bbff493dc446",
+  "entities": 2345,
+  "intake_sha256": "7a0fae2648132bfd47990d80e01ad6cd65590c56154b66d61f4c40d81513b3dd",
+  "schema": 1,
+  "source": "sample.intake.json"
+}
