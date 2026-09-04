@@ -235,17 +235,23 @@ function flush() {
     if (!state.buffer.length) return
     const events = sendable(state.buffer.splice(0, FLUSH_AT))
     if (!events.length) { if (state.buffer.length) schedule(); return }
-    post(events).catch(() => {
+    // The batch is REGISTERED BEFORE the request leaves, not in the failure
+    // callback: it is no longer in `state.buffer`, and a revoke that lands
+    // while the POST is still on the wire must reach it too, or a failure
+    // after that revoke would arm a retry carrying the very events the
+    // viewer took back. payload() serialized the body at call time, so a
+    // revoke compacting this array in place cannot touch the request in
+    // flight; it only decides what the ONE retry may carry. Bounded: past
+    // RETRY_BATCH_MAX a batch is sent once and never retried. sendable()
+    // below still re-fences, for a revoke that raced the subscription (a
+    // listener set at LISTENER_MAX refuses new subscribers).
+    const tracked = state.retryBatches.size < RETRY_BATCH_MAX
+    if (tracked) state.retryBatches.add(events)
+    post(events).then(() => {
+      if (tracked) state.retryBatches.delete(events)
+    }, () => {
       // ONE retry PER BATCH, then drop (loss-tolerant by contract).
-      //
-      // The batch is REGISTERED while it waits, because it is no longer in
-      // `state.buffer` and a revoke has to be able to destroy it there too.
-      // Registered, a revoke compacts this very array in place, so a re-grant
-      // inside the 2 s window finds nothing usage-shaped left to resurrect.
-      // sendable() below still re-fences, for a revoke that raced the
-      // subscription (a listener set at LISTENER_MAX refuses new subscribers).
-      if (state.retryBatches.size >= RETRY_BATCH_MAX) return
-      state.retryBatches.add(events)
+      if (!tracked) return
       unrefTimer(setTimeout(() => {
         state.retryBatches.delete(events)
         const retry = sendable(events)

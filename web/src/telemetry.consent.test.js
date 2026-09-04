@@ -269,6 +269,42 @@ describe('a usage event ALREADY QUEUED when the viewer revokes', () => {
     }
   })
 
+  it('is DESTROYED while the first POST is still in flight: a revoke mid-request decides what the retry may carry', async () => {
+    // The third place a usage event can be: neither in state.buffer nor yet
+    // handed to the 2 s retry, but inside a POST that has not resolved. If the
+    // batch were registered only in the failure callback, a revoke landing
+    // during the request would find an empty registry, the rejection would
+    // arm a retry with the usage event intact, and a re-grant inside the
+    // window would post the revoked event again. Registering BEFORE the
+    // request leaves closes that gap; this spec pins it.
+    const { mod, fetchMock } = await loadTelemetry({ consented: true })
+    const consent = await import('./lib/telemetryConsent.js')
+    vi.useFakeTimers()
+
+    try {
+      let rejectFirst
+      fetchMock.mockImplementation(() => new Promise((_, reject) => { rejectFirst = reject }))
+      mod.trackUsage('search.submitted', { q_len: 4 })
+      mod.track('run.finished', { ok: true })
+      mod.flushNow()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(fetchMock).toHaveBeenCalledTimes(1)   // on the wire, unresolved
+
+      consent.setUsageConsent(false)   // revoke while the request is in flight
+      consent.setUsageConsent(true)    // re-grant before it fails
+      fetchMock.mockImplementation(() => Promise.resolve({ ok: true, status: 202 }))
+      rejectFirst(new Error('offline'))
+      await vi.advanceTimersByTimeAsync(2100)
+
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      const retried = JSON.parse(fetchMock.mock.calls[1][1].body).events
+      expect(retried.map((e) => e.event_name)).toEqual(['run.finished'])
+      expect(consent.usageConsentGranted()).toBe(true)   // non-vacuous: consent IS back on
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('cannot grow the pending-retry set without bound', async () => {
     // The registry that makes the purge reach in-flight batches is itself a
     // queue, so it is capped (RETRY_BATCH_MAX = 8). A host rejecting every

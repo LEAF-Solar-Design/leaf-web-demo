@@ -392,12 +392,15 @@ usage-shaped and needs consent. A refused event is never built and never queued,
 consent later ships nothing that was refused while the switch was off. **A revoke reaches
 events that are already queued, not just the next one built:** every buffered event carries
 its class on a symbol key that JSON.stringify cannot serialize, and a revoke purges the
-usage-class events out of BOTH places one can be waiting: the shared buffer, and any batch a
-failed POST handed to the 2 s retry, which is held outside that buffer and is therefore the
-one queue a buffer-only purge would miss. Each send seam (the 5 s flush, `flushNow`, the
-pagehide beacon, the 2 s retry) re-checks consent on the way out as well. So a usage event
-queued a moment before the switch went off is destroyed rather than posted, and a re-grant
-inside the retry window cannot resurrect it. The switch is the permission, not a data tap:
+usage-class events out of EVERY place one can be waiting: the shared buffer, a batch whose
+POST is still on the wire (registered before the request leaves, so a revoke during the
+request still decides what its one retry may carry), and any batch a failed POST already
+handed to the 2 s retry. All of those are held outside the buffer, which is why a buffer-only
+purge would miss them. Each send seam (the 5 s flush, `flushNow`, the pagehide beacon, the
+2 s retry) re-checks consent on the way out as well. So a usage event queued a moment before
+the switch went off is destroyed rather than posted, and a re-grant inside the retry window
+cannot resurrect it. The one thing a revoke cannot recall is a request that already left the
+browser under a valid grant; that request was consented when it was sent. The switch is the permission, not a data tap:
 no usage emitter exists in the tree yet, so its copy is present-tense honest about that
 ("Allow sharing how you use the studio (menu picks, searches) once those signals exist"),
 and the emitters slices 10-13 add are what start flowing under an existing yes. When the
