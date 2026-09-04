@@ -9,6 +9,7 @@
 // from EngineRibbonClusters (it reads the ONE engine session), so this band
 // never touches the session. Tabs that have no real panel set yet are
 // disabled with their reason, never a fake tab.
+import { accessibleName } from '../lib/actionRegistry.js'
 import { moveRovingTab } from '../lib/roving.js'
 import CockpitIcon from './CockpitIcon.jsx'
 
@@ -36,7 +37,7 @@ export function QuickButton({ tool }) {
       data-tool={dataTool || undefined}
       disabled={disabled}
       title={unavailable ? `${label}: ${reason}` : (title || label)}
-      aria-label={unavailable ? `${label} (unavailable: ${reason})` : label}
+      aria-label={accessibleName(label, unavailable ? reason : '')}
       aria-expanded={typeof expanded === 'boolean' ? expanded : undefined}
       aria-controls={controls || undefined}
       onClick={onClick}
@@ -69,7 +70,7 @@ export default function CockpitTopBand({ tab = 'draw', onTab, before = [], after
               tabIndex={selected ? 0 : -1}
               disabled={off}
               title={off ? `${t.label}: ${t.reason}` : t.label}
-              aria-label={off ? `${t.label} (unavailable: ${t.reason})` : t.label}
+              aria-label={accessibleName(t.label, off ? t.reason : '')}
               onClick={() => { if (!off) onTab?.(t.id) }}
             >
               {t.label}

@@ -155,6 +155,13 @@ export function historyKeydown(state, event = {}) {
   return result(current, false)
 }
 
+// The CLIENT's own "/" command entries (slice 10a). One action record per
+// command, in web/src/lib/actionRegistry.js, so the row the picker lists and
+// the handler filterRunnable gates on are two projections of ONE record
+// instead of two literals that can drift. Server-declared commands still come
+// from the registry endpoint; skills and resources are untouched.
+export { slashStaticEntries, slashCommandHandlers } from './lib/actionRegistry.js'
+
 // The slash menu's entry kinds, in the order the picker groups them. Commands
 // act on the session, skills author or run a procedure, tools are the tenant's
 // registered capabilities — the same three-way split the terminal client shows.

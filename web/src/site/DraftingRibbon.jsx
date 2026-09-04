@@ -32,6 +32,7 @@
 // silently no-ops on gated writes.
 import { useLayoutEffect, useRef } from 'react'
 
+import { accessibleName } from '../lib/actionRegistry.js'
 import { familyMonogram } from '../lib/surfaceRails.js'
 import CockpitIcon from './CockpitIcon.jsx'
 
@@ -73,7 +74,7 @@ export function RibbonTool({ tool }) {
       data-size={size}
       disabled={disabled}
       title={unavailable ? reason : (title || label)}
-      aria-label={unavailable ? `${label} (unavailable: ${reason})` : label}
+      aria-label={accessibleName(label, unavailable ? reason : '')}
       aria-pressed={typeof pressed === 'boolean' ? pressed : undefined}
       aria-expanded={typeof expanded === 'boolean' ? expanded : undefined}
       aria-controls={controls || undefined}
@@ -95,7 +96,7 @@ export function RibbonWidget({ widget }) {
     <label className="ribbon-widget" data-widget={id} title={unavailable ? reason : label}>
       <span className="ribbon-note">{label}</span>
       <select
-        aria-label={unavailable ? `${label} (unavailable: ${reason})` : label}
+        aria-label={accessibleName(label, unavailable ? reason : '')}
         value={value}
         disabled={disabled}
         onChange={(event) => onChange?.(event.target.value)}

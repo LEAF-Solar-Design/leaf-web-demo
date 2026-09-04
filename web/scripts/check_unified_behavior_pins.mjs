@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const app = readFileSync(join(ROOT, 'src', 'App.jsx'), 'utf8')
+const registry = readFileSync(join(ROOT, 'src', 'lib', 'actionRegistry.js'), 'utf8')
 const jobs = readFileSync(join(ROOT, 'src', 'controllers', 'useJobController.js'), 'utf8')
 const toolCast = readFileSync(join(ROOT, 'src', 'site', 'ToolCast.jsx'), 'utf8')
 const styles = readFileSync(join(ROOT, 'src', 'styles.css'), 'utf8')
@@ -31,10 +32,29 @@ assert(
     jobs.includes('pointer.job_id === closedJobId'),
   'page hide must retain one deduplicated in-flight job close beacon',
 )
+// The R ladder moved into the action registry with standardization slice 10a
+// (one record behind the ribbon, the engine ops, the slash picker and the key
+// ladder). The CLAIM is unchanged and re-pointed at the file that now owns it:
+// one keypress fires at most one rung, 'result' is never one of them (it is
+// ResultPanel's own listener, and duplicating it sent two POST /api/run from a
+// single keypress), and App still supplies every handler the rungs name.
 assert(
-  app.includes("rTarget && rTarget !== 'result'") &&
-    app.includes("if (rTarget === 'route') onDispatch()") &&
-    app.includes("else if (rTarget === 'refresh') onRetryViewerRefresh()"),
+  registry.includes("export const RETRY_RUNGS = Object.freeze({") &&
+    registry.includes("route: (ctx) => ctx.onRetryRoute?.()") &&
+    registry.includes("history: (ctx) => ctx.onRetryHistory?.()") &&
+    registry.includes("tools: (ctx) => ctx.onRetryTools?.()") &&
+    registry.includes("catalog: (ctx) => ctx.onRetryCatalog?.()") &&
+    registry.includes("refresh: (ctx) => ctx.onRetryRefresh?.()") &&
+    // single-fire: the decision names ONE rung and the run dispatches ONE
+    // handler out of the frozen table.
+    registry.includes("if (rung) return { id: 'bar:retry'") &&
+    registry.includes("RETRY_RUNGS[id](ctx)") &&
+    // 'result' is absent from the table, so retryRung() cannot return it.
+    !registry.includes("result: (ctx) =>") &&
+    registry.includes("if (ctx.rTarget === 'result') return LADDER_REASONS.retryOwnedByResult") &&
+    app.includes('const decision = ladderDecision(e, ctx)') &&
+    app.includes('onRetryRoute: () => onDispatch()') &&
+    app.includes('onRetryRefresh: () => onRetryViewerRefresh()'),
   'the R ladder must remain single-fire and cover its priority targets',
 )
 assert(

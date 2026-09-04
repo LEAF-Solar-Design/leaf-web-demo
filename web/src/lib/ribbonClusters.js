@@ -20,7 +20,14 @@
 // present, disabled, and say so (operator decision, W4e plan: mirror the
 // reference's eight Draw-tab panels).
 import { zoomViewer } from '../site/DrawingCockpit.jsx'
+import { REASONS, forCluster, ribbonTool } from './actionRegistry.js'
 import { isWriteTool, toolIcon, toolPlacementSize, toolPlacementTab } from './toolRecord.js'
+
+// The reason vocabulary moved to the action registry with slice 10a, because
+// `when(ctx)` is the registry's half of the honesty contract this file's header
+// states. Re-exported unchanged so every importer and every pinned test reads
+// the same frozen object it always did.
+export { REASONS } from './actionRegistry.js'
 
 export const RIBBON_RATIONALE = 'Ribbon selection. Confirm the exact tool and parameters before it runs.'
 export const ZOOM_IN = 1.25
@@ -28,26 +35,6 @@ export const ZOOM_OUT = 0.8
 // A drawing can carry hundreds of layers; the ribbon is a strip, not a
 // palette. Past this the cluster says how many more live in the pane.
 export const MAX_LAYER_TOOLS = 10
-
-export const REASONS = Object.freeze({
-  writeLocked: 'another session holds the edit lock',
-  writeUnentitled: 'your plan does not include editing tools',
-  buildUnentitled: 'your plan does not include authoring tools',
-  buildUnavailable: 'the authoring stage is off on this deployment',
-  noDrawing: 'no drawing loaded',
-  noVersions: 'no versioned drawing',
-  versionBusy: 'a version change is in flight',
-  running: 'a run is in flight',
-  previewing: 'viewing a version, read-only',
-  mutationsBlocked: 'edits are blocked on this drawing',
-  nothingToUndo: 'nothing to undo',
-  nothingToRedo: 'nothing to redo',
-  notInEngine: 'not in the browser engine yet',
-  // The publish settled in the author card but the catalog has not issued the
-  // tool a digest yet, so there is nothing runnable to arm. Same sentence the
-  // one honest resolver (site/publishedCatalogTool.js) fails with.
-  publishing: 'publishing: not in the runnable catalog yet',
-})
 
 // Every catalog tool used to be one hardcoded icon and one hardcoded size. The
 // record now answers both, and a record that answers neither renders exactly as
@@ -181,19 +168,12 @@ function familyCluster(fam, tools, gate, onOpenFamily) {
  * affordance that brings it back; the rail's own header collapses it again.
  */
 export function railCluster({ onExpand } = {}) {
+  const ctx = { onExpand: () => onExpand?.() }
   return {
     id: 'rail',
     label: 'Rail',
     kind: 'group',
-    tools: [{
-      id: 'rail-expand',
-      label: 'expand',
-      text: 'Tool rail',
-      icon: 'sidebar',
-      size: 'large',
-      title: 'Expand the tool rail',
-      onClick: () => onExpand?.(),
-    }],
+    tools: forCluster('rail').map((action) => ribbonTool(action, ctx)),
   }
 }
 
@@ -203,26 +183,26 @@ export function railCluster({ onExpand } = {}) {
  * pressed-state tool, the way back after the pane's own close control.
  */
 export function viewCluster({ viewerRef, hasDrawing = false, paneOpen = null, onTogglePane = null } = {}) {
-  const reason = hasDrawing ? '' : REASONS.noDrawing
-  const tool = (id, label, text, icon, title, onClick) => ({
-    id, label, text, icon, size: 'large', title, disabled: !hasDrawing, reason, onClick,
-  })
-  const tools = [
-    tool('fit', 'fit', 'Fit', 'fit', 'Fit the drawing to the view', () => { viewerRef?.current?.setView?.('home') }),
-    tool('zoom-in', 'zoom-in', 'Zoom in', 'zoom-in', 'Zoom in', () => { zoomViewer(viewerRef?.current, ZOOM_IN) }),
-    tool('zoom-out', 'zoom-out', 'Zoom out', 'zoom-out', 'Zoom out', () => { zoomViewer(viewerRef?.current, ZOOM_OUT) }),
-  ]
-  if (typeof onTogglePane === 'function') {
-    tools.push({
-      id: 'properties-pane',
-      label: 'properties',
-      text: 'Properties',
-      icon: 'sidebar',
-      size: 'large',
-      title: paneOpen ? 'Close the properties pane' : 'Open the properties pane',
-      pressed: !!paneOpen,
-      onClick: () => onTogglePane(),
-    })
+  // The four records live in the registry; this builder supplies the CONTEXT
+  // they close over (the viewer ref surface is React's, never the registry's).
+  const ctx = {
+    hasDrawing,
+    paneOpen,
+    onFit: () => { viewerRef?.current?.setView?.('home') },
+    onZoomIn: () => { zoomViewer(viewerRef?.current, ZOOM_IN) },
+    onZoomOut: () => { zoomViewer(viewerRef?.current, ZOOM_OUT) },
+    onTogglePane: () => onTogglePane?.(),
+  }
+  const tools = []
+  for (const action of forCluster('view')) {
+    // The pane toggle is seated only when the caller owns a pane; without one
+    // there is nothing to toggle, so the record is absent rather than dead.
+    if (action.id === 'properties-pane') {
+      if (typeof onTogglePane !== 'function') continue
+      tools.push(ribbonTool(action, ctx, { pressed: !!paneOpen }))
+      continue
+    }
+    tools.push(ribbonTool(action, ctx))
   }
   return { id: 'view', label: 'View', kind: 'group', tools }
 }
@@ -241,40 +221,30 @@ export function versionCluster({
   onRedo,
   onToggleHistory,
 } = {}) {
-  const shared = !hasVersions
-    ? REASONS.noVersions
-    : versionBusy
-      ? REASONS.versionBusy
-      : running
-        ? REASONS.running
-        : previewing
-          ? REASONS.previewing
-          : mutationsBlocked
-            ? REASONS.mutationsBlocked
-            : ''
-  const undoReason = shared || (!canUndo ? REASONS.nothingToUndo : '')
-  const redoReason = shared || (!canRedo ? REASONS.nothingToRedo : '')
-  const historyReason = !hasVersions ? REASONS.noVersions : versionBusy ? REASONS.versionBusy : ''
+  // undo / redo / history are three registry records under EXACTLY the
+  // toolbar's gates; the shared ladder (and history's shorter one, because
+  // reading the chain is never a write) lives in each record's `when`.
+  const ctx = {
+    hasVersions,
+    canUndo,
+    canRedo,
+    versionBusy,
+    running,
+    previewing,
+    mutationsBlocked,
+    onUndo: () => onUndo?.(),
+    onRedo: () => onRedo?.(),
+    onToggleHistory: () => onToggleHistory?.(),
+  }
   return {
     id: 'version',
     label: 'Version',
     kind: 'group',
-    tools: [
-      { id: 'undo', label: 'undo', text: 'Undo', icon: 'undo', size: 'large', title: 'Undo the last version', disabled: !!undoReason, reason: undoReason, onClick: () => onUndo?.() },
-      { id: 'redo', label: 'redo', text: 'Redo', icon: 'redo', size: 'large', title: 'Redo the undone version', disabled: !!redoReason, reason: redoReason, onClick: () => onRedo?.() },
-      {
-        id: 'history',
-        label: 'history',
-        text: 'History',
-        icon: 'history',
-        size: 'large',
-        title: 'Open the version history',
-        disabled: !!historyReason,
-        reason: historyReason,
-        expanded: !!historyOpen,
-        onClick: () => onToggleHistory?.(),
-      },
-    ],
+    tools: forCluster('version').map((action) => ribbonTool(
+      action,
+      ctx,
+      action.id === 'history' ? { expanded: !!historyOpen } : {},
+    )),
   }
 }
 
@@ -331,18 +301,13 @@ export function authorCluster({
   // when the catalog has not caught up: no digest, no runnable tool.
   authored = null, onUseAuthored = null, running = false, previewing = false,
 } = {}) {
-  const reason = !entitled ? REASONS.buildUnentitled : !available ? REASONS.buildUnavailable : ''
-  const tools = [{
-    id: 'author-tool',
-    label: 'author-tool',
-    text: 'Author tool',
-    icon: 'wand',
-    size: 'large',
-    title: 'Build a new tool from plain English',
-    disabled: !!reason,
-    reason,
-    onClick: () => onOpen?.(),
-  }]
+  // The two distinct reasons (an unentitled plan, an authoring stage that is
+  // off) are the record's own ladder; this builder supplies only the context.
+  const tools = forCluster('author').map((action) => ribbonTool(action, {
+    entitled,
+    available,
+    onOpen: () => onOpen?.(),
+  }))
   if (authored && authored.name) {
     const settled = typeof authored.catalog_digest === 'string' && !!authored.catalog_digest
     const authoredReason = !settled

@@ -38,6 +38,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { EngineBoundary } from '../cad/engineWorker.js'
+import { SESSION_ERROR } from './engineSessionErrors.js'
 
 // Mirrors the worker's own bound. Checked against File.size BEFORE any read.
 export const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
@@ -61,15 +62,10 @@ export const GEOMETRY_SOURCE = Object.freeze({
 })
 
 /** Typed session errors. `CRASHED` is recoverable: open a document again. */
-export const SESSION_ERROR = Object.freeze({
-  REFUSED: 'refused',     // the engine refused one edit; the document stands
-  ENGINE: 'engine',       // the engine refused the document itself
-  TRANSPORT: 'transport', // the boundary would not carry the message
-  READ: 'read',           // the browser could not read the chosen file
-  LIMIT: 'limit',         // the file is over the byte cap
-  SAVE: 'save',           // the version write failed or was refused
-  CRASHED: 'crashed',     // the worker died under us
-})
+// The typed error kinds live in their own module so web/src/lib/actionRegistry.js
+// (React-free by contract) can read them without importing this hook module.
+// Re-exported here unchanged: every existing importer keeps its path.
+export { SESSION_ERROR } from './engineSessionErrors.js'
 
 const NO_ENTITIES = Object.freeze([])
 
