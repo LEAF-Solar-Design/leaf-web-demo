@@ -245,13 +245,21 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // drafter never learns of a bad operand from a refused run. Only while
   // the group itself is live (its reason ladder comes first); the store
   // judges again when the command runs.
-  const liveRefusal = prompt && !promptReason
+  // A numeric operand not yet given (an empty field: the next point of a
+  // chained LINE, a cleared radius) is a step still waiting, not a mistake:
+  // Run waits quietly with that step's ask as its title, no sentence, no
+  // outline, as the reference's prompt simply keeps asking.
+  const waitingStep = prompt
+    ? prompt.steps.find((step) => step.fields.some(([key, , mode = 'decimal']) => mode === 'decimal' && String(inputs[key] ?? '').trim() === ''))
+    : null
+  const liveRefusal = prompt && !promptReason && !waitingStep
     ? ((armedGroup === 'draw'
       ? buildCreatePayload(armedOp, inputs)
       : buildEditPayload(armedOp, session.selectedId, inputs)).refusal || '')
     : ''
-  const runOff = promptOff || !!liveRefusal
+  const runOff = promptOff || !!liveRefusal || !!waitingStep
   const runReason = promptReason || liveRefusal
+  const runHold = runReason || (waitingStep ? waitingStep.ask : '')
   const toggleArmed = (group, op) => setArmed(armedOp === op ? null : { group, op })
   // W4f-3: LINE chains. A run remembers where the segment ends; once the
   // engine has drawn it, that end becomes the next segment's first point.
@@ -301,6 +309,11 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
       if (Number.isFinite(x) && Number.isFinite(y)) {
         setInput('x', chain.x)
         setInput('y', chain.y)
+        // The next point is not given yet: empty fields, so the prompt keeps
+        // asking "Specify next point:" instead of calling the leftover end a
+        // degenerate line (W4f-6 live validation).
+        setInput('x2', '')
+        setInput('y2', '')
         setArmed({ group: 'draw', op: 'createLine', from: [x, y] })
         nextField = '[aria-label="ribbon x2"]:not([disabled])'
       }
@@ -496,8 +509,8 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
           data-testid="cockpit-prompt-run"
           onClick={run}
           disabled={runOff}
-          title={runOff ? runReason : `Run ${prompt.verb.toLowerCase()} (Enter)`}
-          aria-label={runOff ? `Run (unavailable: ${runReason})` : 'Run'}
+          title={runOff ? runHold : `Run ${prompt.verb.toLowerCase()} (Enter)`}
+          aria-label={runOff ? `Run (unavailable: ${runHold})` : 'Run'}
         >
           Run <kbd className="key">Enter</kbd>
         </button>

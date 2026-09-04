@@ -537,6 +537,14 @@ describe('the command prompt (W4e slice H): a tool arms, the command line asks i
     expect(screen.getByLabelText('ribbon y').value).toBe('7')
     expect(studio.context.armed).toEqual({ group: 'draw', op: 'createLine', from: [5, 7] })
     expect(document.activeElement).toBe(screen.getByLabelText('ribbon x2'))
+    // The next point is not given yet: empty fields, Run waits quietly with
+    // the step's ask, no sentence (W4f-6).
+    expect(screen.getByLabelText('ribbon x2').value).toBe('')
+    expect(screen.getByLabelText('ribbon y2').value).toBe('')
+    expect(screen.queryByTestId('cockpit-prompt-note')).toBeNull()
+    expect(screen.getByTestId('cockpit-prompt-run').disabled).toBe(true)
+    expect(screen.getByTestId('cockpit-prompt-run').title).toBe('Specify next point:')
+    fireEvent.change(screen.getByLabelText('ribbon y2'), { target: { value: '7' } })
     // The Command bar (any field outside the prompt) holding the focus when
     // the engine answers keeps it; the chain still applies.
     fireEvent.change(screen.getByLabelText('ribbon x2'), { target: { value: '9' } })
@@ -652,6 +660,15 @@ describe('the command prompt (W4e slice H): a tool arms, the command line asks i
     expect(note().textContent).toBe('Line refused: the two points must differ.')
     expect(screen.getByLabelText('ribbon x').getAttribute('aria-invalid')).toBeNull()
     expect(run().disabled).toBe(true)
+    // An empty numeric field is a step still waiting, not a mistake: no
+    // sentence, no outline, Run waits with that step's ask.
+    fireEvent.change(screen.getByLabelText('ribbon x2'), { target: { value: '' } })
+    expect(note()).toBeNull()
+    expect(screen.getByLabelText('ribbon x2').getAttribute('aria-invalid')).toBeNull()
+    expect(run().disabled).toBe(true)
+    expect(run().title).toBe('Specify next point:')
+    fireEvent.keyDown(screen.getByLabelText('ribbon x2'), { key: 'Enter' })
+    expect(studio.workers[0].posted.filter((message) => message.type === 'applyEdit')).toHaveLength(0)
     // The fix releases Run and Enter runs.
     fireEvent.change(screen.getByLabelText('ribbon x2'), { target: { value: '50' } })
     expect(note()).toBeNull()
