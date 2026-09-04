@@ -2492,7 +2492,9 @@ export default function App() {
   // so they can read the ONE engine session through context. Studio-only:
   // rail OFF the ribbon never mounts and this list is never read.
   const ribbon = useMemo(() => {
-    if (!(studioGround && drafting)) return { clusters: [], quickBefore: [], quickAfter: [] }
+    if (!(studioGround && drafting)) {
+      return { clusters: [], quickBefore: [], quickAfter: [], view: null, version: null, rail: [], author: null }
+    }
     const view = viewCluster({ viewerRef, hasDrawing: !!shown, paneOpen, onTogglePane: () => setPaneOpen((o) => !o) })
     const version = versionCluster({
       hasVersions: !!drawingState,
@@ -2589,6 +2591,13 @@ export default function App() {
     const [undo, redo] = version.tools
     return {
       clusters: byTab[ribbonTab] || byTab.draw,
+      // Slice 10b: the palette (below) reads these FOUR straight off this
+      // one computation rather than calling their builders a second time —
+      // the ONE authorCluster call this file may carry
+      // (appCheckoutWiring.test.js "3c": a second, independently-built call
+      // is exactly the drift hazard that guard exists to catch), and one
+      // fewer set of live builder calls to keep in sync generally.
+      view, version, rail, author,
       quickBefore: [
         { id: 'new', label: 'New drawing', icon: 'new-file', disabled: true, reason: 'new drawings start on the project board (Start tab)' },
       ],
@@ -2612,48 +2621,20 @@ export default function App() {
     lastAuthoredTool, onUseAuthored, setFamilyOpen, engineDirty])
   const ribbonClusters = ribbon.clusters
 
-  // Slice 10b: the palette's action rows. NOT a second ctx or a second
-  // reason ladder — the SAME cluster builders the ribbon calls above
-  // (ribbonClusters.js), called again with the same live state, so a
-  // disabled row's reason is the ribbon's own sentence, not a copy that can
-  // drift. Flattened across every tab (the ribbon memo above returns only
-  // the ACTIVE tab's clusters); the palette must find "undo" whether or not
-  // the Draw tab is on screen. Catalog/layers/reference-panel tools are left
-  // out of this pass: they are per-drawing dynamic data, already reachable
-  // through the tools artifact index below, and folding them in here would
-  // duplicate that list rather than add to it.
+  // Slice 10b: the palette's action rows, read straight off `ribbon`'s own
+  // view/version/rail/author fields — NOT a second ctx or a second reason
+  // ladder, and not a second call to any cluster builder (appCheckoutWiring
+  // "3c" pins authorCluster to exactly one call site; a second, independently
+  // -built call is precisely the drift hazard that guard exists to catch).
+  // Flattened across every tab (ribbon.clusters is tab-filtered); the
+  // palette must find "undo" whether or not the Draw tab is on screen.
+  // Catalog/layers/reference-panel tools are left out of this pass: they are
+  // per-drawing dynamic data, already reachable through the tools artifact
+  // index below, and folding them in here would duplicate that list rather
+  // than add to it.
   const paletteActions = useMemo(() => {
-    if (!(studioGround && drafting)) return []
-    const view = viewCluster({ viewerRef, hasDrawing: !!shown, paneOpen, onTogglePane: () => setPaneOpen((o) => !o) })
-    const version = versionCluster({
-      hasVersions: !!drawingState,
-      canUndo,
-      canRedo,
-      versionBusy: !!versionBusy,
-      running: !!running,
-      previewing: !!previewing,
-      mutationsBlocked: !!drawingMutationsBlocked,
-      historyOpen,
-      onUndo,
-      onRedo,
-      onToggleHistory: onToggleHistoryTracked,
-    })
-    const rail = navSpine ? [railCluster({ onExpand: () => setNavExpanded(true) })] : []
-    const author = authorCluster({
-      entitled: entOf('build'),
-      available: canBuild,
-      onOpen: () => {
-        setNavExpanded(true)
-        setAuthorOpen(true)
-        authorSectionRef.current?.scrollIntoView?.({ block: 'nearest' })
-      },
-      authored: lastAuthoredTool,
-      onUseAuthored,
-      running: !!running,
-      previewing: !!previewing,
-      writeLocked,
-      writeEntitled: canRunWrite,
-    })
+    const { view, version, rail, author } = ribbon
+    if (!view) return []
     const tools = [...view.tools, ...version.tools, ...rail.flatMap((c) => c.tools), ...author.tools]
     const shortcuts = byId('bar:shortcuts')
     return [
@@ -2668,9 +2649,7 @@ export default function App() {
         disabled: false, reason: '', onSelect: () => setShortcutsOpen(true),
       },
     ]
-  }, [studioGround, drafting, shown, paneOpen, drawingState, canUndo, canRedo, versionBusy, running,
-    previewing, drawingMutationsBlocked, historyOpen, onUndo, onRedo, onToggleHistoryTracked, navSpine,
-    entOf, canBuild, lastAuthoredTool, onUseAuthored, writeLocked, canRunWrite])
+  }, [ribbon])
   // W4e round 2: the pane's Drawing section, the document's own facts from
   // the intake (counts) and one pass over its vertices (extents). Studio
   // drafting surfaces only; null everywhere else so the dock renders as before.
