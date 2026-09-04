@@ -35,6 +35,7 @@ import { createContext, useContext } from 'react'
 
 import ConversationListComponent from '../components/ConversationList.jsx'
 import EntitlementGate from '../components/EntitlementGate.jsx'
+import JobInboxComponent from '../components/JobInbox.jsx'
 import JobRailComponent from '../components/JobRail.jsx'
 import ProductSurfaceTabs, { ProductSurfaceFrame } from '../components/ProductSurfaceTabs.jsx'
 import ToastComponent from '../components/Toast.jsx'
@@ -384,6 +385,24 @@ function Builds() {
   )
 }
 
+/**
+ * JobInbox (standardization slice 13a). Mounted beside SurfaceFrame.JobRail
+ * in both scenes (inside the shared `.rail-col` wrapper — styles.css), gated
+ * by the SAME `frame.jobRail` presence the rail itself reads: this slot
+ * never invents its own surface predicate, it reads the one the frame
+ * already carries. The console always passes a `jobRail` object; the stage
+ * passes one only while `rightView === 'jobs'`, so the inbox tracks the
+ * rail's own visibility exactly, on both scenes, with no new gate to keep in
+ * sync. Reads the notification bus directly (lib/notifications.js) — no
+ * prop threading, so it carries no scene-specific data through the frame at
+ * all.
+ */
+function Inbox() {
+  const frame = useSlot()
+  if (!frame?.jobRail) return null
+  return <JobInboxComponent />
+}
+
 /** Toast. App.jsx:3502 / ToolCast.jsx:2040. */
 function FrameToast() {
   const frame = useSlot()
@@ -457,5 +476,6 @@ SurfaceFrame.Entitlement = Entitlement
 SurfaceFrame.CommandBar = CommandBar
 SurfaceFrame.JobRail = JobRail
 SurfaceFrame.Builds = Builds
+SurfaceFrame.Inbox = Inbox
 SurfaceFrame.Toast = FrameToast
 SurfaceFrame.Cockpit = Cockpit

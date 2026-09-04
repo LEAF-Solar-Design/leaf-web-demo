@@ -8,6 +8,7 @@ import { CockpitStatus, FootRegion, StatusTabs, ViewCluster } from './site/Drawi
 // Slice 4a: the ONE shell wrapper both scenes mount, and the console nav
 // rail it used to spell inline. Every shared chrome gate lives there now.
 import SurfaceFrame from './site/SurfaceFrame.jsx'
+import { useToastBus } from './lib/notifications.js'
 import NavRail from './site/NavRail.jsx'
 import CockpitTopBand from './site/CockpitTopBand.jsx'
 import DraftingRibbon from './site/DraftingRibbon.jsx'
@@ -313,7 +314,10 @@ export default function App() {
   const [customizeOpen, setCustomizeOpen] = useState(customizeFlag)
 
   // --- NT2 toast (one slot — newest replaces) + DT2 details drawer ---
-  const [toast, setToast] = useState(null)   // {id, text, action?}
+  // Slice 13a: the toast is now ONE bus (lib/notifications.js) shared with
+  // ToolCast.jsx, read through useToastBus — this closure no longer owns the
+  // {id, text, action?} state itself.
+  const { toast, showToast, onToastDone, clearToast } = useToastBus()
   const [drawer, setDrawer] = useState(null) // {title, rows[], action?, foot?}
 
   // --- slice 10b: the shortcut sheet (Shift+? / bar:shortcuts) ---
@@ -420,7 +424,6 @@ export default function App() {
 
   const resultBlockRef = useRef(null)   // toast "View" scroll target (result)
   const workspaceCardRef = useRef(null) // toast "View" scroll target (viewer)
-  const toastSeqRef = useRef(0)         // monotonic toast ids
   const cannedSeq = useRef(0)           // supersedes an in-flight tour beat (typing + dispatch)
   const runIntentSessionRef = useRef(null)
   if (!runIntentSessionRef.current) {
@@ -800,7 +803,7 @@ export default function App() {
     let alive = true
     resetDrawing(); setLoadErr(null)
     resetCatalogTransient()
-    setToast(null); setDrawer(null); setTenant(null)
+    clearToast(); setDrawer(null); setTenant(null)
     setTier(null); setOrg(null)
     clearAgentSession()
     mockVersions.reset()
@@ -948,13 +951,7 @@ export default function App() {
   // continues the real elapsed time instead of restarting at zero.
   // Tick the calm "running · N.Ns" clock while a live job runs (no animated loader).
   // --- NT2 toast plumbing (one slot — newest replaces; Toast auto-fades ~5s) --
-  const showToast = useCallback((t) => {
-    toastSeqRef.current += 1
-    setToast({ id: toastSeqRef.current, ...t })
-  }, [])
-  const onToastDone = useCallback((id) => {
-    setToast((cur) => (cur && cur.id === id ? null : cur))
-  }, [])
+  // showToast / onToastDone now come from useToastBus() above (slice 13a).
   const viewResult = useCallback(() => {
     resultBlockRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' })
   }, [])
@@ -3652,24 +3649,27 @@ export default function App() {
         <SurfaceFrame.Toast />
       </div>
 
-      {/* The right rail column (aside.rail's grid seat, styles.css). Slice 6b
-          moved the conversation list here (off the ground: it used to mount
-          inside <main>, in the same normal-flow subtree as the workspace
-          card, where the studio pointer chain's `main.center-scroll > *`
-          restore made its painted head a click shield over the card window —
-          e2e receipt one-shell-mount.spec.mjs "the pointer chain punches
-          through"). Gate is the contract, not a surface literal, and not
-          `agentMode` — the list is how you get BACK to a conversation, so
-          hiding it until one is open would hide it exactly when it is
-          needed. It stacks ABOVE the job monitor rather than inventing a
-          second layout: `.rail-stack` takes over the grid seat `aside.rail`
-          held alone, the list gets a bounded, scrollable share of it, and the
-          job monitor keeps its own spine/expand posture untouched
-          (W4d Slice D: 44px spine on drafting surfaces, full rail
-          otherwise). */}
-      <div className="rail-stack">
-        {!mock && <SurfaceFrame.Conversations />}
+      {/* The right rail column (aside.rail's grid seat, styles.css). Slice 6b
+          moved the conversation list here (off the ground: it used to mount
+          inside <main>, in the same normal-flow subtree as the workspace
+          card, where the studio pointer chain's `main.center-scroll > *`
+          restore made its painted head a click shield over the card window —
+          e2e receipt one-shell-mount.spec.mjs "the pointer chain punches
+          through"). Gate is the contract, not a surface literal, and not
+          `agentMode` — the list is how you get BACK to a conversation, so
+          hiding it until one is open would hide it exactly when it is
+          needed. It stacks ABOVE the job monitor rather than inventing a
+          second layout: `.rail-stack` takes over the grid seat `aside.rail`
+          held alone, the list gets a bounded, scrollable share of it, and the
+          job monitor keeps its own spine/expand posture untouched
+          (W4d Slice D: 44px spine on drafting surfaces, full rail
+          otherwise). Slice 13a: JobInbox joins the same column below the
+          job monitor; it renders whenever the job rail slot would (the same
+          `frame.jobRail` gate, read off the frame, see SurfaceFrame.Inbox). */}
+      <div className="rail-stack">
+        {!mock && <SurfaceFrame.Conversations />}
         <SurfaceFrame.JobRail />
+        <SurfaceFrame.Inbox />
       </div>
 
       <footer className="foot-bar" data-checkout-instance={checkout.instanceId} data-controller-instance={workspaceInstanceId}>
