@@ -62,6 +62,13 @@ def drawing(monkeypatch):
             raise ValueError(f"version {version} missing")
         return version, key
 
+    def resolve_entry(_backend, _tenant, _drawing, version):
+        # The restore service reads the source row out of the ONE manifest
+        # read that resolves the version (slice 6a); same refusal, same key,
+        # plus the manifest row (no `source_ref` here, so a restore stamps null).
+        version, key = resolve(_backend, _tenant, _drawing, version)
+        return version, key, {"v": version}
+
     def put(_backend, _tenant, _drawing, content, parent_version, meta,
             holder=None, fence=None, require_parent_is_head=False):
         assert require_parent_is_head is True
@@ -90,7 +97,7 @@ def drawing(monkeypatch):
     monkeypatch.setitem(sys.modules, "store", types.SimpleNamespace(
         ANONYMOUS_HOLDER="anonymous", load_manifest=manifest,
         authority_mode=lambda: "legacy",
-        resolve_version=resolve,
+        resolve_version=resolve, resolve_version_entry=resolve_entry,
         CheckoutDenied=_CheckoutDenied, CheckoutParamError=_CheckoutParamError,
         checkout_active=lambda *a, **k: False,
         acquire_checkout_fence=lambda *a, **k: None,

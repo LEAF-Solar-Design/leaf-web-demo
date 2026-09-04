@@ -158,20 +158,31 @@ the `/sheets` arm, added by slice 5b and read off `SiteRoot.jsx` / `SheetsPage.j
   capture of the pre-slice drawer. /try's loader now forwards `include_deltas=1`, so the two
   shells show the same deltas; the e2e row that asserted its absence is re-pinned.
 - **`source_ref` is provenance, never a guess.** A version row carries the sha256 of the
-  writing tool's `leaf.tool-source.v1` receipt when there is one, and `null` otherwise. The
-  server bounds and charset-validates it on the way out (`server/routers/drawings.py`
-  `_source_ref`), a restore carries the source version's value forward because the new head's
-  bytes ARE that version's bytes, and nothing anywhere invents an author for a version that
-  has none. Two fences make that literal rather than aspirational. **(a) Receipt-backed or
-  absent.** The stamp fires only when the planner envelope carries a passing
-  `leaf.tool-execution.v1` microvm receipt (`server/write_loop.py`
-  `_valid_microvm_provenance`). On the `subprocess` sandbox tier no receipt stands behind the
-  planner's assertion about its own source, and `tool_loader` adopts a tool's own
-  `{ok, result}` return whole, so an ungated stamp would let a tenant-authored tool write any
-  64-hex digest permanently into the version chain. **(b) The chip claims only what the digest
-  proves.** `ToolSourceReceipt` (`harness/contract/HARNESS-CONTRACT.md`) is paths, byte counts
-  and digests, with no author, model or session identity in it, so `SourceRefChip` renders
-  `authored tool · {sha8}` and never names a model or a person.
+  writing tool's published body when the server holds one, and `null` otherwise. The server
+  bounds and charset-validates it on the way out (`server/routers/drawings.py` `_source_ref`),
+  a restore carries the source version's value forward because the new head's bytes ARE that
+  version's bytes (the row is threaded out of the one manifest read that proved the version
+  exists, `da/store.py` `resolve_version_entry`), and nothing anywhere invents an author for a
+  version that has none. The rule that makes this literal on EVERY execution tier:
+  **server-held or absent.** The digest is measured by the server itself, at stamp time, over
+  the published tool body it resolves for the tool id the mutation binding names
+  (`server/tool_loader.py` `published_tool_source_sha256`: the same UTF-8 text every sandbox
+  tier is fed, the same text the harness's `leaf.tool-source.v1` receipt hashed when the tool
+  was submitted, and the same text a genuine microvm receipt hashes), measured BEFORE the
+  planner runs. Nothing the sandbox returned is ever the value: on the in-process and
+  `subprocess` tiers `execution_provenance` is whatever the tool body chose to say, since
+  `tool_loader` adopts a tool's own `{ok, result}` return whole, and a shape check of a claim
+  the attacker controls is not a fence, so `tool_loader` now drops a tool-supplied
+  `execution_provenance` at the seam it enters and `write_loop` never reads the envelope for
+  the stamp (`_server_held_source_ref`). If the server holds no published body for that tool
+  id (an APS-only or dangling package, a staged design-time source, a platform builtin, an
+  unreadable file) the row is `null`: honest absence. Where a verified
+  `leaf.tool-execution.v1` microvm receipt exists it is only cross-checked against the
+  server's digest; a mismatch withholds the stamp with a warning log, never the sandbox value.
+  **The chip claims only what the digest proves.** `ToolSourceReceipt`
+  (`harness/contract/HARNESS-CONTRACT.md`) is paths, byte counts and digests, with no author,
+  model or session identity in it, so `SourceRefChip` renders `authored tool · {sha8}` and
+  never names a model or a person.
 - **`authoring` is `true` on every surface.** `AuthorPanel` (`App.jsx:2735`) sits in the nav
   rail, which is not surface-gated. On cad and solar the rail collapses to a spine by
   default, so the panel is reached through the ribbon's author cluster (`App.jsx:2429`)

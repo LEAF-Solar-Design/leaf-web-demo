@@ -623,8 +623,10 @@ def get_versions(drawing_id: str, include_deltas: bool = False,
     # Deltas are OPT-IN (?include_deltas=1): computing them loads and parses
     # EVERY version payload (O(N) blob reads, O(N^2) row work under the
     # PostgreSQL authority), and the app hits this route at startup merely to
-    # read checkout state. Only the history drawer asks for deltas, and the
-    # default response shape stays exactly what it was before this feature.
+    # read checkout state. Only the version list asks for deltas (the ONE
+    # `VersionList` primitive behind /app's history drawer and /try's Versions
+    # tab, slice 6a), and the default response shape stays exactly what it
+    # was before this feature.
     rows = []
     if include_deltas:
         deltas = _version_deltas(backend, str(tenant_id), drawing_id, entries)
@@ -659,26 +661,18 @@ def restore_drawing_version(tenant_id: str, drawing_id: str, target_version: int
 
     backend = backend if backend is not None else _backend(tenant_id)
     try:
-        source_v, source_key = store.resolve_version(
+        source_v, source_key, source_entry = store.resolve_version_entry(
             backend, tenant_id, drawing_id, int(target_version))
         source_bytes = backend.get(source_key)
     except (KeyError, ValueError) as exc:
         raise RestoreSourceUnavailable(str(exc)) from exc
 
-    # Read the source version's provenance BEFORE the write guard, from the
-    # same manifest `resolve_version` just proved the version is in. A
-    # manifest that cannot be read here is not a restore failure: provenance
-    # degrades to None and the restore proceeds, because losing a chip must
-    # never cost a tenant a recovery.
-    source_ref: Optional[str] = None
-    try:
-        for entry in store.load_manifest(
-                backend, tenant_id, drawing_id).get("versions", []):
-            if int(entry.get("v")) == int(source_v):
-                source_ref = _source_ref(entry.get("source_ref"))
-                break
-    except (KeyError, ValueError, TypeError):
-        source_ref = None
+    # The source version's provenance comes out of the SAME manifest read that
+    # just proved the version exists (`resolve_version_entry` threads the row
+    # out), validated on the way through like every other reader of the
+    # column. A row without one restores as null: the restoring actor is not
+    # an author.
+    source_ref: Optional[str] = _source_ref(source_entry.get("source_ref"))
 
     try:
         _, source_intake = write_loop.read_intake(

@@ -1,11 +1,13 @@
 """
 Authored-tool provenance on a version row (standardization slice 6a).
 
-`_version_row()` grew ONE nullable key, `source_ref`: the sha256 the harness
-recorded in a `leaf.tool-source.v1` receipt over an authored tool's source +
-manifest (harness/contract/HARNESS-CONTRACT.md). It reaches the write path as
-`execution_provenance.source_sha256`, is bound into the mutation binding as
-`tool_source_sha256` (server/write_loop.py), is stored verbatim by the store
+`_version_row()` grew ONE nullable key, `source_ref`: the sha256 of the writing
+tool's PUBLISHED body as the server itself measures it at stamp time
+(server/tool_loader.py `published_tool_source_sha256`, the same text the
+harness's `leaf.tool-source.v1` receipt hashed on submit). It is bound into the
+mutation binding as `tool_source_sha256` and stamped by server/write_loop.py
+(`_server_held_source_ref`: never a value the sandbox returned; the seam rows
+live in tests/test_live_mutation_plan.py), is stored verbatim by the store
 (da/store.py `put_drawing` / `_pg_put`), and is bounded + charset-validated on
 the way out so a drifted or hostile stored value can never be rendered as
 provenance.

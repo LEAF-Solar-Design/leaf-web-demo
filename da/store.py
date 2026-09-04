@@ -1796,9 +1796,14 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
         return new_v
 
 
-def resolve_version(backend: StorageBackend, tenant_id: str, drawing_id: str,
-                    version="head") -> tuple[int, str]:
-    """Resolve `version` (an int, "head", or "latest") to (version_int, object_key)."""
+def resolve_version_entry(backend: StorageBackend, tenant_id: str, drawing_id: str,
+                          version="head") -> tuple[int, str, dict]:
+    """Resolve `version` to (version_int, object_key, manifest_row) in ONE manifest read.
+
+    The row is a copy of the manifest's own entry for that version, so a caller
+    that needs its metadata (restore reads `source_ref`) does not load the
+    manifest a second time to find what this call already proved is there.
+    """
     tid = sanitize_id(tenant_id)
     did = sanitize_id(drawing_id)
     m = load_manifest(backend, tid, did)
@@ -1810,10 +1815,18 @@ def resolve_version(backend: StorageBackend, tenant_id: str, drawing_id: str,
     else:
         v = int(version)
 
-    known = {int(e["v"]) for e in m["versions"]}
-    if v not in known:
-        raise ValueError(f"version {v} not in manifest for {tid}/{did} (known={sorted(known)})")
-    return v, drawing_version_key(tid, did, v)
+    entry = next((e for e in m["versions"] if int(e["v"]) == v), None)
+    if entry is None:
+        known = sorted(int(e["v"]) for e in m["versions"])
+        raise ValueError(f"version {v} not in manifest for {tid}/{did} (known={known})")
+    return v, drawing_version_key(tid, did, v), dict(entry)
+
+
+def resolve_version(backend: StorageBackend, tenant_id: str, drawing_id: str,
+                    version="head") -> tuple[int, str]:
+    """Resolve `version` (an int, "head", or "latest") to (version_int, object_key)."""
+    v, key, _entry = resolve_version_entry(backend, tenant_id, drawing_id, version)
+    return v, key
 
 
 def undo(backend: StorageBackend, tenant_id: str, drawing_id: str, *,

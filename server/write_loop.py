@@ -1212,6 +1212,39 @@ def _valid_microvm_provenance(value: Any) -> bool:
     )
 
 
+def _server_held_source_ref(server_digest: Any, provenance: Any,
+                            *, tool: Any) -> Optional[str]:
+    """The digest a version row may carry as ``source_ref``, or None.
+
+    SERVER-HELD OR ABSENT, on every tier. ``server_digest`` is what THIS process
+    measured over the published tool body it resolved for the tool id BEFORE the
+    planner ran (``tool_loader.published_tool_source_sha256``). Nothing the sandbox
+    returned is ever the value: on the in-process and ``subprocess`` tiers the
+    envelope's ``execution_provenance`` is whatever the tool body chose to say, and
+    a shape check of a claim the attacker controls is not a fence. Where the loader
+    produced a verified microvm receipt it is CROSS-CHECKED here, and a disagreement
+    withholds the stamp with a warning rather than trusting either side. An
+    unstamped version reads as null, "provenance not established", never as a
+    forged authorship claim. Fails closed on a malformed server digest too.
+    """
+    if not (isinstance(server_digest, str)
+            and re.fullmatch(r"[0-9a-f]{64}", server_digest) is not None):
+        server_digest = None
+    receipt = provenance if _valid_microvm_provenance(provenance) else None
+    if server_digest is None:
+        if receipt is not None:
+            LOGGER.warning(
+                "source_ref_withheld tool=%s reason=no_server_held_source receipt=%s",
+                tool, receipt["source_sha256"])
+        return None
+    if receipt is not None and receipt["source_sha256"] != server_digest:
+        LOGGER.warning(
+            "source_ref_withheld tool=%s reason=receipt_mismatch server=%s receipt=%s",
+            tool, server_digest, receipt["source_sha256"])
+        return None
+    return server_digest
+
+
 def _scratch_upload_bytes(da: Any, key: str, data: bytes, suffix: str) -> None:
     fd, path = tempfile.mkstemp(suffix=suffix)
     try:
@@ -1737,6 +1770,13 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
 
         if run_tool_dynamic_fn is None:
             raise ValueError("live authored write requires a sandboxed planner")
+        # Version-row provenance is measured HERE, by this process, over the
+        # published tool body it holds for the tool id, and BEFORE the planner
+        # runs so the digest names the body the sandbox is about to be fed.
+        # `_server_held_source_ref` says why the envelope is never the source.
+        import tool_loader
+        server_source_sha256 = tool_loader.published_tool_source_sha256(
+            tool, tenant_id)
         planner_started = time.perf_counter()
         planner_env = run_tool_dynamic_fn(
             tool, base_intake, dict(params or {}), aps_live=False, da=None,
@@ -1782,10 +1822,10 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
             "base_version": head_v,
             "base_source_sha256": base_sha,
             "tool_manifest_sha256": tool_digest,
-            "tool_source_sha256": (
-                provenance.get("source_sha256")
-                if isinstance(provenance, dict) else None
-            ),
+            # Server-measured over the published body (above); the planner's
+            # own claim about its source is not a binding fact and is not
+            # recorded anywhere.
+            "tool_source_sha256": server_source_sha256,
             "plan_sha256": plan_digest,
         }
         planner_result["mutations"] = canonical
@@ -1918,28 +1958,27 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                     retryable=True, tool=name, version=tool_version,
                 ), 503)
             version_write_started = time.perf_counter()
+            # SERVER-HELD OR ABSENT, on every tier. The stamp is the digest
+            # this process measured over the published tool body it resolved
+            # for the tool id before the planner ran; the planner envelope is
+            # never the source. On the in-process and `subprocess` sandbox
+            # tiers (LEAF_SANDBOX != e2b-microvm, which broker.py permits for
+            # tenant-authored tools outside production) `execution_provenance`
+            # is whatever the tool body chose to say, since tool_loader adopts
+            # a tool's own {ok, result} return whole, so a forged 64-hex digest
+            # there must never reach the version chain. A verified microvm
+            # receipt, where one exists, is only cross-checked against the
+            # server's digest; a mismatch withholds the stamp with a warning.
+            # Null reads as "provenance not established", never as a forged
+            # authorship claim.
+            source_ref = _server_held_source_ref(
+                server_source_sha256, provenance, tool=name)
             new_v = _put_bytes_version(
                 backend, tenant_id, drawing_id, out_bytes,
                 parent_version=head_v,
                 meta={"tool": name, "workitem_id": status.get("id"),
                       "plan_sha256": plan_digest,
-                      # RECEIPT-BACKED ONLY, fails closed on every other tier.
-                      # `binding["tool_source_sha256"]` is what the planner
-                      # ASSERTED about its own source; on the `subprocess`
-                      # sandbox tier (LEAF_SANDBOX != e2b, and broker.py
-                      # permits that posture for tenant-authored tools outside
-                      # production) NO receipt stands behind that assertion, so
-                      # a tenant-authored tool body could put any 64-hex string
-                      # in its own `execution_provenance` and have it stamped
-                      # permanently into the version chain. So stamp the digest
-                      # only when the envelope carries a passing
-                      # `leaf.tool-execution.v1` microvm receipt over it. An
-                      # unstamped version reads as null, "provenance not
-                      # established", never as a forged authorship claim.
-                      "source_ref": (
-                          binding["tool_source_sha256"]
-                          if _valid_microvm_provenance(provenance) else None
-                      ),
+                      "source_ref": source_ref,
                       "note": "live authored mutation plan"},
                 holder=holder, fence=fence, require_parent_is_head=True,
             )

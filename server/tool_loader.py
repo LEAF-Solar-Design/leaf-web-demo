@@ -1105,6 +1105,38 @@ def is_trusted_builtin_tool(tool: Dict[str, Any],
     return (name, engine_op, local.name) in _platform_builtin_package_ids()
 
 
+def published_tool_source_sha256(tool: Dict[str, Any],
+                                 tenant_id: Optional[str] = None) -> Optional[str]:
+    """The sha256 of the PUBLISHED tool body THIS process holds for ``tool``, or None.
+
+    A version row's ``source_ref`` (server/write_loop.py) comes from here and from
+    nothing a sandbox returned. The digest is MEASURED by the broker over the file
+    ``resolve_local_file`` names for the tool id, which is the exact text every
+    sandbox tier is fed: ``_run_in_sandbox`` and ``_run_in_sandbox_e2b`` both read
+    ``local`` as UTF-8 text, and the microvm receipt's ``sourceHash`` is sha256 over
+    that same text (``_run_source_in_sandbox_e2b``'s audit block), so a genuine
+    receipt agrees with this value byte for byte and a forged one cannot.
+
+    Fails to None, never to a guess: an APS-only or dangling package (no body to
+    hash), an unreadable or non-UTF-8 file, a body over the fixed sandbox source
+    bound, and a platform builtin (its provenance is the platform release; no
+    ``leaf.tool-source.v1`` receipt was ever issued for it, so a version it wrote
+    must not wear the authored-tool chip).
+    """
+    if is_trusted_builtin_tool(tool, tenant_id):
+        return None
+    local = resolve_local_file(tool, tenant_id)
+    if local is None:
+        return None
+    try:
+        encoded = local.read_text(encoding="utf-8").encode("utf-8")
+    except (OSError, ValueError):  # UnicodeDecodeError is a ValueError
+        return None
+    if len(encoded) > _SANDBOX_LIMITS["source_bytes"]:
+        return None
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _needs_aps(tool: Dict[str, Any], tenant_id: Optional[str] = None) -> bool:
     """True when the tool has no local .py and must run on APS DA."""
     return resolve_local_file(tool, tenant_id) is None
@@ -1298,6 +1330,14 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
     if isinstance(coerced, dict):  # the tool returned a full envelope
         env = coerced
         env.setdefault("degraded_mode", degraded)
+        # `execution_provenance` is what THIS loader verified about the run,
+        # never what the tool body says about itself. A full envelope is
+        # adopted whole here, so on the in-process and subprocess tiers a
+        # tenant body could otherwise hand back a receipt-shaped claim (a
+        # passing `leaf.tool-execution.v1` microvm receipt over any 64-hex
+        # digest) and every downstream reader would take it as verified.
+        # Dropped at the seam it enters; only a `_MicrovmSuccess` sets it.
+        env.pop("execution_provenance", None)
         if execution_provenance is not None:
             env["execution_provenance"] = execution_provenance
         return env
