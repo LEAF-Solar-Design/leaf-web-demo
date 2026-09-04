@@ -694,10 +694,11 @@ test.describe('route matrix, rail ON', () => {
     // document reason. 4 + 3 and 6 + 6: the reference's grid.
     // W4g-4: RECTANG joined the Draw group (5 real + 2 off) and COPY, MIRROR,
     // ROTATE, SCALE, EXPLODE joined Modify (11 real + trim/extend off).
+    // W4g-5a: OFFSET made it 12 real, so the Modify row is 14.
     await expect(draw.locator('.ribbon-tool')).toHaveCount(7)
     await expect(draw.locator('[data-tool^="draw:create"]')).toHaveCount(5)
     const modifyTools = modify.locator('.ribbon-tool')
-    await expect(modifyTools).toHaveCount(13)
+    await expect(modifyTools).toHaveCount(14)
     let modifyReal = 0
     for (const btn of await modifyTools.all()) {
       await expect(btn).toBeDisabled()
@@ -705,7 +706,7 @@ test.describe('route matrix, rail ON', () => {
       if (/\(unavailable: (select an entity in the drawing|no drawing in the browser engine yet|opening .*|the drawing could not be opened.*)\)/.test(name)) modifyReal += 1
       else expect(name).toContain('(unavailable: not in the browser engine yet)')
     }
-    expect(modifyReal).toBe(11)
+    expect(modifyReal).toBe(12)
 
     // View drives the viewer: fit is live with a drawing loaded (View tab).
     await page.getByRole('tab', { name: 'View' }).click()
