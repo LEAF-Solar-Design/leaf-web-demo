@@ -15,6 +15,7 @@ import PropertiesDock, { drawingExtents } from './site/PropertiesDock.jsx'
 import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
 import { ladderListener, slashCommandHandlers } from './lib/actionRegistry.js'
 import { REASONS, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
+import { isWriteTool } from './lib/toolRecord.js'
 import { resolvePublishedCatalogTool } from './site/publishedCatalogTool.js'
 import { entityGeometry } from './lib/entityMetrics.js'
 import { setCredentialMountAvailable } from './lib/secretGuardTransport.js'
@@ -959,6 +960,16 @@ export default function App() {
   // would move the server head under them, so it is refused with the reason
   // until the drafter saves or discards.
   const [engineDirty, setEngineDirty] = useState(false)
+  // The same fact as a ref, for the EXECUTION-time check in onRun: a confirm
+  // that awaited the catalog refetch holds the onRun it started with, so a
+  // closure read there could be older than the edit that made the engine
+  // dirty (kimi on #1008, finding 1). The state drives the ribbon's reasons;
+  // the ref drives the refusal.
+  const engineDirtyRef = useRef(false)
+  const onEngineDirtyChange = useCallback((dirty) => {
+    engineDirtyRef.current = !!dirty
+    setEngineDirty(!!dirty)
+  }, [])
   const {
     jobs,
     currentJobId,
@@ -1284,7 +1295,7 @@ export default function App() {
       setRunErr('This workspace has no canonical drawing version to run. Import a drawing first.')
       return
     }
-    const isWrite = (catalogTool.capabilities || []).includes('drawing.write')
+    const isWrite = isWriteTool(catalogTool)
     if (
       !mock
       && isWrite
@@ -1466,7 +1477,18 @@ export default function App() {
     intentConfirmed = false, runContext = null, idempotencyKey = null,
   } = {}) => {
     if (previewing) return null
-    if (writeLocked && (tool.capabilities || []).includes('drawing.write')) return null
+    const isWrite = isWriteTool(tool)
+    if (writeLocked && isWrite) return null
+    // W4g-2 (one head), held at EXECUTION time. armDecision refuses the click
+    // that stages a run, but the confirm strip stays open while the drafter
+    // keeps drawing (engine tools never touch the run intent), so an edit
+    // made between arming and confirming reaches here with the engine dirty.
+    // Every path to a run ends in this call (the confirm click, the mock
+    // path, the tour), and the ref carries the current fact, not a closure's.
+    if (isWrite && engineDirtyRef.current) {
+      setRunErr(`${tool.name} not run: ${REASONS.unsavedEngineEdits}.`)
+      return null
+    }
     runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
     // ranTool lets the controller resolve a shown route honestly: this run IS
     // the routed tool -> accepted; a different tool -> invalidated.
@@ -2555,7 +2577,7 @@ export default function App() {
   }, [studioGround, drafting, shown, drawingState, canUndo, canRedo, versionBusy, running, previewing,
     drawingMutationsBlocked, historyOpen, onUndo, onRedo, onToggleHistoryTracked, layerCounts, visibleLayers,
     toggleLayer, railFamilies, onRequestCatalogRun, writeLocked, canRunWrite, canBuild, entOf, ribbonTab, colorForLayer, paneOpen,
-    lastAuthoredTool, onUseAuthored, setFamilyOpen])
+    lastAuthoredTool, onUseAuthored, setFamilyOpen, engineDirty])
   const ribbonClusters = ribbon.clusters
   // W4e round 2: the pane's Drawing section, the document's own facts from
   // the intake (counts) and one pass over its vertices (extents). Studio
@@ -2642,7 +2664,7 @@ export default function App() {
     }
   }
   const engineScope = (node) => (ENV_CAD_EDIT ? (
-    <EngineSessionProvider saveTarget={engineSaveTarget} onSaved={onEngineSaved} onDirtyChange={setEngineDirty}>{node}</EngineSessionProvider>
+    <EngineSessionProvider saveTarget={engineSaveTarget} onSaved={onEngineSaved} onDirtyChange={onEngineDirtyChange}>{node}</EngineSessionProvider>
   ) : node)
 
   return (

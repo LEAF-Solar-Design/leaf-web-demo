@@ -364,4 +364,50 @@ describe('App.jsx wiring', () => {
       assert.match(opener, /openBytes\(bytes, headDocumentId\(drawingId, version\), \{ committed: true \}\)/)
     })
   })
+
+  // W4g-2 (one head), kimi on #1008 finding 1: the dirty refusal must hold at
+  // EXECUTION time, not only when the run is armed. The confirm strip stays
+  // open while the drafter keeps drawing (engine tools never touch the run
+  // intent), so onRun, every path's last stop before runJob, reads the
+  // CURRENT fact from a ref and refuses before anything is submitted.
+  describe('W4g-2 one head: unsaved browser edits refuse a write tool at execution time', () => {
+    const onRunStart = stripped.indexOf('onRun = useCallback')
+    const onRunBody = stripped.slice(onRunStart, onRunStart + 2600)
+
+    it('onRun refuses a write tool while the engine is dirty, before runJob', () => {
+      assert.notEqual(onRunStart, -1)
+      const refusal = onRunBody.indexOf('engineDirtyRef.current')
+      const run = onRunBody.indexOf('runJob(')
+      assert.notEqual(refusal, -1, 'onRun must read engineDirtyRef.current')
+      assert.notEqual(run, -1)
+      assert.ok(refusal < run, 'the dirty refusal must precede runJob')
+      assert.match(onRunBody.slice(refusal, run), /REASONS\.unsavedEngineEdits[\s\S]*return null/)
+    })
+
+    it('the ref and the ribbon state are written by the one dirty-change callback the provider gets', () => {
+      assert.match(stripped, /onEngineDirtyChange = useCallback\(\(dirty\) => \{\s*engineDirtyRef\.current = !!dirty;\s*setEngineDirty\(!!dirty\);/)
+      assert.match(stripped, /React\.createElement\(\s*EngineSessionProvider,\s*\{[^}]*onDirtyChange:\s*onEngineDirtyChange/)
+    })
+
+    it('armDecision and onRun share the one write predicate', () => {
+      const armStart = stripped.indexOf('armDecision = useCallback')
+      assert.notEqual(armStart, -1)
+      assert.match(stripped.slice(armStart, armStart + 1600), /isWrite = isWriteTool\(catalogTool\)/)
+      assert.match(onRunBody, /isWrite = isWriteTool\(tool\)/)
+    })
+
+    it('the ribbon memo recomputes when the engine dirty state flips', () => {
+      // The deps array that closes the ribbon useMemo names engineDirty
+      // (kimi on #1008 finding 2: read inside, absent from the deps).
+      assert.match(stripped, /lastAuthoredTool,\s*onUseAuthored,\s*setFamilyOpen,\s*engineDirty\s*\]\)/)
+    })
+
+    it('fails when the execution-time refusal is removed', () => {
+      const mutated = appSource.replace(/if \(isWrite && engineDirtyRef\.current\) \{[\s\S]*?return null\r?\n\s*\}\r?\n/, '')
+      assert.notEqual(mutated, appSource, 'the falsification mutation must apply')
+      const mutatedStripped = esbuild.transformSync(mutated, { loader: 'jsx' }).code
+      const start = mutatedStripped.indexOf('onRun = useCallback')
+      assert.doesNotMatch(mutatedStripped.slice(start, start + 2600), /engineDirtyRef\.current/)
+    })
+  })
 })
