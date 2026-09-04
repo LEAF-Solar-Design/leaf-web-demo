@@ -97,5 +97,22 @@ describe('slice 5a: the stage mounts PromptBox where its .tc-bar rows stood', ()
     expect(landing).toMatch(/^\.tc-bar \.bar \.bar-controls \.tc-run \{$/m)
     // The phone legibility floor (>= 16px) the e2e rows read off .tc-bar-input.
     expect(landing).toMatch(/^  \.tc-bar \.bar-input \.tc-bar-input \{ min-width: 0; font-size: 16px; \}$/m)
+    // Dead CSS retired: .tc-bar-blink had no renderer (the static caret never
+    // toggled a class), and its keyframes went with it.
+    for (const dead of ['.tc-bar-blink', '@keyframes tc-blink']) {
+      expect(landing.includes(dead), `${dead} should be gone from landing.css`).toBe(false)
+    }
+  })
+
+  // Carried item (round 2): hiding .tc-bar-proj and .tc-bar-key at 600px used
+  // to leave .tc-run right-aligned only because the now-retired
+  // .tc-bar-scopes static badge carried margin-left:auto ahead of it. A
+  // toolCastStageBar.test.js source-pin (this file mounts nothing — see the
+  // header comment), so this asserts the CSS text itself; the SurfaceFrame
+  // fixture cannot observe the stage bar at all (a sentinel render prop,
+  // surfaceFrame.render.test.jsx:103), which is why the pin lives here.
+  it('the phone breakpoint restores the right-edge push onto .tc-run itself', () => {
+    const phoneBlock = landing.slice(landing.indexOf('@media (max-width: 600px)'), landing.indexOf('@media (max-height: 650px)'))
+    expect(phoneBlock).toMatch(/^  \.tc-bar \.bar-controls \.tc-run \{ margin-left: auto; \}$/m)
   })
 })

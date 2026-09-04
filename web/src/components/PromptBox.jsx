@@ -23,7 +23,7 @@
 // path exists in src/api.js, so a drop surfaces the honest X1-style red strip
 // (never a silent ignore).
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import useExit from '../useExit.js'
 import { authHeaders, config, noteUnauthorized } from '../api.js'
 import { modChord } from '../lib/keys.js'
@@ -147,6 +147,13 @@ export default function PromptBox({
   //   entirely, so a signed-out mount makes NO network call.
   mcpDiscoveryEnabled = true,
 }) {
+  // a11y (carried item 2, slice 5a round 2): disabledReason used to ride ONLY
+  // on the Run chip's title, which a hover-only tooltip never reaches by
+  // keyboard or screen reader. runReasonId names a visually-hidden node
+  // (App.jsx's inline-style pattern: no .sr-only utility exists in the
+  // sheet) that aria-describedby points the chip at whenever a reason
+  // string is present, so the same sentence title= carries reaches both.
+  const runReasonId = useId()
   const [focused, setFocused] = useState(false)
   const [scopeOpen, setScopeOpen] = useState(false)
   const [scopeIdx, setScopeIdx] = useState(0)
@@ -646,9 +653,21 @@ export default function PromptBox({
             onClick={() => dispatchPrompt()}
             disabled={runDisabled}
             title={disabledReason || undefined}
+            aria-describedby={disabledReason ? runReasonId : undefined}
           >
             {routing ? routingLabel : runLabel}
           </button>
+          {disabledReason && (
+            <span
+              id={runReasonId}
+              style={{
+                position: 'absolute', width: 1, height: 1, padding: 0, margin: -1,
+                overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap', border: 0,
+              }}
+            >
+              {disabledReason}
+            </span>
+          )}
         </div>
         {scopeMenu.shown && (
           <div

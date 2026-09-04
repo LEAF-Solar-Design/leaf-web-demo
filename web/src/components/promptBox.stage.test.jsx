@@ -179,6 +179,33 @@ describe('the stage mount (/try): the tc-bar hooks ride on PromptBox’s own nod
     expect(run).toHaveAttribute('title', reason)
   })
 
+  // a11y (carried item, round 2): title= is hover-only, so a keyboard or
+  // screen-reader user never reached the honest reason before this. The
+  // chip now names a visually-hidden node by aria-describedby that carries
+  // the identical sentence, and the node mounts ONLY while a reason exists.
+  it('a disabledReason string also names a visually-hidden node by aria-describedby with the same sentence', () => {
+    const reason = 'Upload a DWG or DXF before running a request.'
+    const { container } = mount({ ...STAGE, value: 'count panels', disabledReason: reason })
+    const run = container.querySelector('.tc-run')
+    const describedBy = run.getAttribute('aria-describedby')
+    expect(describedBy).toBeTruthy()
+    // React's useId() ids carry colons (":r1:"), not valid in a CSS id
+    // selector, so look the node up by attribute instead of #id.
+    const reasonNode = container.querySelector(`[id="${describedBy}"]`)
+    expect(reasonNode).toHaveTextContent(reason)
+    // Visually hidden, not merely a hover tooltip: clipped to nothing, not display:none
+    // (a screen reader skips a display:none node too, so the a11y fix needs this exact shape).
+    expect(reasonNode.style.position).toBe('absolute')
+    expect(reasonNode.style.width).toBe('1px')
+    expect(reasonNode.style.overflow).toBe('hidden')
+  })
+
+  it('disabledReason null (the stage default) writes no aria-describedby and mounts no hidden reason node', () => {
+    const { container } = mount(STAGE)
+    const run = container.querySelector('.tc-run')
+    expect(run).not.toHaveAttribute('aria-describedby')
+  })
+
   it('Enter is a no-op while a route is shown (routeActive), and dispatches otherwise', () => {
     const onDispatch = vi.fn()
     const { container, rerender } = mount({ ...STAGE, value: 'count panels', onDispatch, routeActive: true })
