@@ -390,10 +390,14 @@ const ribbon = (id, label, display, icon, title, when, run, extra = {}) => ({
 })
 
 /** One drafting-engine op record. `op` and `group` are the engine's own names. */
-const engineOp = (group, op, label, display, icon, title, size) => ({
+// `panel` is WHERE a record sits on the ribbon; `group` is HOW it runs. They
+// differ only for W4g-5d's TEXT, a draw create the reference seats in its
+// Annotation panel, so every gate that admits `draw` admits it unchanged.
+const engineOp = (group, op, label, display, icon, title, size, panel = group) => ({
   id: `${group}:${op}`,
   op,
   group,
+  panel,
   label,
   text: display,
   icon,
@@ -465,6 +469,9 @@ const ACTION_LIST = [
   // W4g-4 RECTANG: two opposite corners; the store lowers it to the closed
   // polyline the engine draws.
   engineOp('draw', 'createRectangle', 'rectangle', 'Rectangle', 'rectangle', 'Draw a rectangle from corner x,y to corner x2,y2', 'small'),
+  // W4g-5d: single-line TEXT. A create (group draw) seated in the reference's
+  // Annotation panel.
+  engineOp('draw', 'createText', 'text', 'Text', 'text', 'Place a line of text at x,y with a height and rotation', 'large', 'annotation'),
 
   // Modify: the entity operations the compiled engine performs.
   engineOp('modify', 'delete', 'delete', 'Delete', 'delete', 'Delete the selected entity', 'small'),

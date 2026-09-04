@@ -73,7 +73,7 @@
 //! `cargo test` (the tests at the bottom of this file) instead of only in a
 //! browser. The exported names and semantics are unchanged.
 
-use acadrust::entities::{Arc as ArcEntity, Circle, Entity, EntityType, Line, LwPolyline};
+use acadrust::entities::{Arc as ArcEntity, Circle, Entity, EntityType, Line, LwPolyline, Text};
 use acadrust::types::{Handle, Transform, Vector2, Vector3};
 use acadrust::{CadDocument, DxfReader, DxfWriter};
 use serde::Serialize;
@@ -134,6 +134,7 @@ fn editable(entity: &EntityType) -> bool {
             | EntityType::Polyline2D(_)
             | EntityType::Circle(_)
             | EntityType::Arc(_)
+            | EntityType::Text(_)
     )
 }
 
@@ -144,6 +145,7 @@ fn kind_name(entity: &EntityType) -> &'static str {
         EntityType::Polyline2D(_) => "POLYLINE",
         EntityType::Circle(_) => "CIRCLE",
         EntityType::Arc(_) => "ARC",
+        EntityType::Text(_) => "TEXT",
         _ => "OTHER",
     }
 }
@@ -167,6 +169,7 @@ fn vertices_of(entity: &EntityType) -> Vec<[f64; 3]> {
         // The centre is the one point a circle or arc is addressed by.
         EntityType::Circle(c) => vec![[c.center.x, c.center.y, c.center.z]],
         EntityType::Arc(a) => vec![[a.center.x, a.center.y, a.center.z]],
+        EntityType::Text(t) => vec![[t.insertion_point.x, t.insertion_point.y, t.insertion_point.z]],
         _ => Vec::new(),
     }
 }
@@ -183,6 +186,27 @@ fn closed_of(entity: &EntityType) -> bool {
 /// projection carried only the centre before, so the viewer could not show
 /// the engine document. `None` for every other kind (JSON null), and the
 /// angles come out in DEGREES, the same unit the create operands take.
+fn text_of(entity: &EntityType) -> Option<String> {
+    match entity {
+        EntityType::Text(t) => Some(t.value.clone()),
+        _ => None,
+    }
+}
+
+fn height_of(entity: &EntityType) -> Option<f64> {
+    match entity {
+        EntityType::Text(t) => Some(t.height),
+        _ => None,
+    }
+}
+
+fn rotation_deg_of(entity: &EntityType) -> Option<f64> {
+    match entity {
+        EntityType::Text(t) => Some(t.rotation.to_degrees()),
+        _ => None,
+    }
+}
+
 fn radius_of(entity: &EntityType) -> Option<f64> {
     match entity {
         EntityType::Circle(c) => Some(c.radius),
@@ -208,6 +232,10 @@ const MAX_CREATED_VERTICES: usize = 100_000;
 /// The most copies one ARRAY may add. Matches the store's own create bound,
 /// so a plan the client refuses cannot arrive here either.
 const MAX_ARRAY_COPIES: usize = 1_000;
+
+/// The most characters one TEXT may carry. A DXF group value is one line;
+/// the client refuses the same number so a long paste never reaches here.
+const MAX_TEXT_CHARS: usize = 1024;
 
 fn all_finite(values: &[f64]) -> bool {
     values.iter().all(|v| v.is_finite())
@@ -703,6 +731,53 @@ impl ParsedDxf {
         Ok(handles)
     }
 
+    // ----------------------------------------------------------------------
+    // W4g-5d: TEXT, single-line. The crate carries Text (value, insertion
+    // point, height, rotation in radians) and the writer emits it, so the
+    // engine's job is to validate and add; the drafter's height and angle are
+    // the DXF's own fields, so a round trip keeps them exactly. The intake the
+    // server keeps for a text carries layer, point and value only (DXF 1/10/
+    // 20, not 40/50), so the projection below carries height and rotation
+    // itself: what the browser drew is what the browser can read back.
+    // ----------------------------------------------------------------------
+
+    /// TEXT at (x, y), `height` drawing units tall, rotated `rotation_deg`
+    /// counter-clockwise, reading `value`. Refuses before the document is
+    /// touched: a non-finite number, a height that is not strictly positive,
+    /// an empty value, a value over MAX_TEXT_CHARS, or a value carrying a
+    /// control character (a DXF group value is one line; a newline inside it
+    /// would split the record and the writer would emit a broken file).
+    fn create_text_core(
+        &mut self,
+        x: f64,
+        y: f64,
+        height: f64,
+        rotation_deg: f64,
+        value: &str,
+        layer: &str,
+    ) -> Result<String, Refusal> {
+        if !all_finite(&[x, y, height, rotation_deg]) {
+            return refuse("coordinate_not_finite");
+        }
+        if height <= 0.0 {
+            return refuse("text_height_not_positive");
+        }
+        let trimmed = value.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            return refuse("text_empty");
+        }
+        if trimmed.chars().count() > MAX_TEXT_CHARS {
+            return refuse("text_too_long");
+        }
+        if trimmed.chars().any(|c| c.is_control()) {
+            return refuse("text_control_character");
+        }
+        let text = Text::with_value(trimmed, Vector3::new(x, y, 0.0))
+            .with_height(height)
+            .with_rotation(rotation_deg.to_radians());
+        self.add_created(EntityType::Text(text), layer)
+    }
+
     fn create_line_core(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, layer: &str) -> Result<String, Refusal> {
         if !all_finite(&[x1, y1, x2, y2]) {
             return refuse("coordinate_not_finite");
@@ -837,6 +912,11 @@ impl ParsedDxf {
                     // for every other kind, so a consumer that ignores them
                     // sees the exact shape it saw before.
                     "radius": radius_of(e),
+                    // W4g-5d: a TEXT carries its own value, height and
+                    // rotation (degrees); null for every other kind.
+                    "text": text_of(e),
+                    "height": height_of(e),
+                    "rotationDeg": rotation_deg_of(e),
                     "startDeg": sweep_deg_of(e).map(|(start, _)| start),
                     "endDeg": sweep_deg_of(e).map(|(_, end)| end),
                 })
@@ -990,6 +1070,14 @@ impl ParsedDxf {
         handles
             .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
             .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// TEXT at (x, y), `height` tall, rotated `rotation_deg`, reading `value`
+    /// on `layer` (empty = `0`). Refuses a non-finite number, a height that is
+    /// not positive, an empty or over-long value and any control character.
+    #[wasm_bindgen(js_name = createText)]
+    pub fn create_text(&mut self, x: f64, y: f64, height: f64, rotation_deg: f64, value: &str, layer: &str) -> Result<String, JsValue> {
+        self.create_text_core(x, y, height, rotation_deg, value, layer).map_err(js_err)
     }
 
     /// Creates a LINE from (x1, y1) to (x2, y2) on `layer` (empty = `0`).
@@ -1544,5 +1632,53 @@ mod created_entity_roundtrip {
         assert_eq!(code(doc.array_polar_core(9, 4, 0.0, 0.0, 90.0)), "entity_index_out_of_range");
         assert_eq!(handles(&doc), before, "a refused array adds nothing");
         assert_eq!(kinds(&doc), vec!["CIRCLE"]);
+    }
+
+    // ---- W4g-5d: TEXT ------------------------------------------------------
+
+    #[test]
+    fn w4g5d_text_creates_projects_and_survives_rewrite_with_its_own_fields() {
+        let mut doc = empty_doc();
+        let handle = doc.create_text_core(10.0, 20.0, 2.5, 30.0, "Panel A", "Notes").expect("text");
+        assert!(!handle.is_empty());
+        assert_eq!(kinds(&doc), vec!["TEXT"]);
+        let e = doc.inner.entities().next().unwrap();
+        assert!(editable(e), "a TEXT is editable (delete, move, copy, clipboard)");
+        assert_eq!(text_of(e).as_deref(), Some("Panel A"));
+        assert_eq!(height_of(e), Some(2.5));
+        assert!((rotation_deg_of(e).unwrap() - 30.0).abs() < 1e-9);
+        assert_eq!(vertices_of(e), vec![[10.0, 20.0, 0.0]]);
+        assert_eq!(e.common().layer, "Notes");
+        // Height and rotation are the DXF's own fields, so the re-parse keeps
+        // them exactly; the intake the server keeps would not.
+        let back = rewrite(&doc);
+        let b = back.inner.entities().next().unwrap();
+        assert_eq!(text_of(b).as_deref(), Some("Panel A"));
+        assert_eq!(height_of(b), Some(2.5));
+        assert!((rotation_deg_of(b).unwrap() - 30.0).abs() < 1e-6);
+        assert_eq!(vertices_of(b), vec![[10.0, 20.0, 0.0]]);
+    }
+
+    #[test]
+    fn w4g5d_text_refuses_before_touching_the_document() {
+        let mut doc = empty_doc();
+        doc.create_circle_core(0.0, 0.0, 1.0, "P").unwrap();
+        let before = handles(&doc);
+        assert_eq!(code(doc.create_text_core(f64::NAN, 0.0, 1.0, 0.0, "x", "")), "coordinate_not_finite");
+        assert_eq!(code(doc.create_text_core(0.0, 0.0, 0.0, 0.0, "x", "")), "text_height_not_positive");
+        assert_eq!(code(doc.create_text_core(0.0, 0.0, -1.0, 0.0, "x", "")), "text_height_not_positive");
+        assert_eq!(code(doc.create_text_core(0.0, 0.0, 1.0, 0.0, "", "")), "text_empty");
+        assert_eq!(code(doc.create_text_core(0.0, 0.0, 1.0, 0.0, "
+", "")), "text_empty");
+        let long = "a".repeat(MAX_TEXT_CHARS + 1);
+        assert_eq!(code(doc.create_text_core(0.0, 0.0, 1.0, 0.0, &long, "")), "text_too_long");
+        assert_eq!(code(doc.create_text_core(0.0, 0.0, 1.0, 0.0, "line one
+line two", "")), "text_control_character");
+        assert_eq!(code(doc.create_text_core(0.0, 0.0, 1.0, 0.0, "tab	here", "")), "text_control_character");
+        assert_eq!(handles(&doc), before, "a refused text adds nothing");
+        assert_eq!(kinds(&doc), vec!["CIRCLE"]);
+        // Exactly the bound is accepted.
+        let max = "b".repeat(MAX_TEXT_CHARS);
+        assert!(doc.create_text_core(0.0, 0.0, 1.0, 0.0, &max, "").is_ok());
     }
 }

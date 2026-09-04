@@ -10,6 +10,8 @@ export const MAX_POINTS = 200_000
 export const CIRCLE_SEGMENTS = 48
 export const ARC_STEP_DEG = 7.5
 export const MIN_ARC_POINTS = 8
+/** A TEXT's outline box is this many heights wide per character. */
+export const TEXT_ADVANCE = 0.6
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v)
 const point = (v) => (Array.isArray(v) && finite(v[0]) && finite(v[1]) ? [v[0], v[1], finite(v[2]) ? v[2] : 0] : null)
@@ -62,6 +64,23 @@ export function entityToPolyline(entity) {
   const layer = typeof entity.layer === 'string' && entity.layer ? entity.layer : '0'
   const verts = Array.isArray(entity.vertices) ? entity.vertices : []
   const type = String(entity.type || '')
+  // W4g-5d: a TEXT draws as its outline box until the viewer draws glyphs:
+  // the insertion point at the box's bottom-left, the box `height` tall and
+  // TEXT_ADVANCE * height wide per character (a conventional average glyph
+  // advance), rotated about the insertion point. Honest about being a box,
+  // never a fabricated glyph; the pick and the selection land on it.
+  if (type === 'TEXT') {
+    const c = point(verts[0])
+    const h = entity.height
+    const chars = typeof entity.text === 'string' ? [...entity.text].length : 0
+    if (!c || !finite(h) || h <= 0 || chars < 1) return null
+    const rad = (finite(entity.rotationDeg) ? entity.rotationDeg : 0) * (Math.PI / 180)
+    const w = TEXT_ADVANCE * h * chars
+    const cos = Math.cos(rad)
+    const sin = Math.sin(rad)
+    const at = (dx, dy) => [c[0] + dx * cos - dy * sin, c[1] + dx * sin + dy * cos, c[2]]
+    return { handle, layer, pts: [at(0, 0), at(w, 0), at(w, h), at(0, h)], closed: true }
+  }
   if (type === 'CIRCLE' || type === 'ARC') {
     const c = point(verts[0])
     const r = entity.radius

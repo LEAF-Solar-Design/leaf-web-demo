@@ -103,6 +103,12 @@ function projectEntities(doc) {
       // the viewer can show the engine document; older wrappers without
       // them read as null too.
       radius: entity.radius ?? null,
+      // W4g-5d: a TEXT's own value, height and rotation (degrees); null
+      // for every other kind. The server's intake keeps none of these, so
+      // this projection is where the browser reads them back.
+      text: entity.text ?? null,
+      height: entity.height ?? null,
+      rotationDeg: entity.rotationDeg ?? null,
       startDeg: entity.startDeg ?? null,
       endDeg: entity.endDeg ?? null,
     }
@@ -153,6 +159,10 @@ const CREATE_OPS = Object.freeze({
     Number(p.cx), Number(p.cy), Number(p.radius), Number(p.startDeg), Number(p.endDeg), String(p.layer ?? '')),
   createPolyline: (doc, p) => doc.createPolyline(
     Float64Array.from(Array.isArray(p.points) ? p.points : []), Boolean(p.closed), String(p.layer ?? '')),
+  // W4g-5d: TEXT. The wrapper refuses a non-finite number, a height that
+  // is not positive, an empty or over-long value and any control character.
+  createText: (doc, p) => doc.createText(
+    Number(p.x), Number(p.y), Number(p.height), Number(p.rotationDeg), String(p.text ?? ''), String(p.layer ?? '')),
 })
 
 async function applyEdit(engine, message) {

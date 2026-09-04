@@ -2574,7 +2574,10 @@ export default function App() {
       // engine consumer portals the real tools into it; with the flag off
       // it is the honest placeholder. Either way the row's shape is the
       // same, which is what the prompt seat and the band height depend on.
-      draw: [annotation, layers, block, properties, groups,
+      // W4g-5d: the engine renders a REAL Annotation panel (TEXT live, the
+      // rest honest) third, where the reference seats it; the placeholder is
+      // for the flag-off build, as with Clipboard.
+      draw: [...(ENV_CAD_EDIT ? [] : [annotation]), layers, block, properties, groups,
         ENV_CAD_EDIT ? clipboardSeat : clipboardOff, ...(tabFamilies.draw || [])],
       insert: [block, ...(tabFamilies.insert || [])],
       annotate: [annotation, ...(tabFamilies.annotate || [])],
@@ -3071,7 +3074,7 @@ export default function App() {
                 <EngineRibbonClusters
                   importOpen={importOpen}
                   onToggleImport={() => setImportOpen((o) => !o)}
-                  panels={ribbonTab === 'insert' ? ['file'] : ribbonTab === 'draw' ? ['draw', 'modify', 'clipboard'] : []}
+                  panels={ribbonTab === 'insert' ? ['file'] : ribbonTab === 'draw' ? ['draw', 'modify', 'annotation', 'clipboard'] : []}
                 />
               )}
               {/* W4f slice B: the command line's typed words (LINE, C, MOVE ...)

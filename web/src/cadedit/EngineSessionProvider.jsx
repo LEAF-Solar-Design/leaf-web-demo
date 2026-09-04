@@ -72,6 +72,8 @@ export const DEFAULT_EDIT_INPUTS = Object.freeze({
   // turn. Every default is a command the store accepts, so a fresh
   // prompt shows no refusal sentence.
   rows: '2', cols: '3', rowGap: '10', colGap: '10', count: '4', totalDeg: '360',
+  // W4g-5d TEXT: a readable height, no rotation, a value the store accepts.
+  height: '2.5', rot: '0', text: 'TEXT',
 })
 
 const INPUT_KEYS = new Set(Object.keys(DEFAULT_EDIT_INPUTS))

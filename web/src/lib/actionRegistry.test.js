@@ -187,6 +187,8 @@ describe('honest triggers', () => {
     // W4g-4: RECTANG joined Draw; COPY, MIRROR, ROTATE, SCALE, EXPLODE joined Modify.
     expect(forGroup('draw').map((a) => a.id)).toEqual([
       'draw:createLine', 'draw:createPolyline', 'draw:createCircle', 'draw:createArc', 'draw:createRectangle',
+      // W4g-5d: TEXT is a draw create seated in the Annotation panel.
+      'draw:createText',
     ])
     expect(forGroup('modify').map((a) => a.id)).toEqual([
       'modify:delete', 'modify:move', 'modify:moveVertex',

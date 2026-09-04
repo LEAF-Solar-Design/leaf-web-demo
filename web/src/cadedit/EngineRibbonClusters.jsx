@@ -99,6 +99,12 @@ const DRAW_OFF = Object.freeze([
 // SCALE and EXPLODE (W4g-4), OFFSET (W4g-5a) and ARRAY's two forms (W4g-5b).
 // The reference's Modify tools this engine still lacks (the intersection
 // verbs, W4g-6) stay honest placeholders.
+// W4g-5d: the reference's other Annotation tools stay honest placeholders
+// beside the real TEXT (dimensions and leaders run through APS, W4g-7).
+const ANNOTATION_OFF = Object.freeze([
+  { id: 'annotation:dimensions', label: 'Dimensions', icon: 'dimension', size: 'large' },
+  { id: 'annotation:leader', label: 'Leader', icon: 'leader', size: 'large' },
+])
 const MODIFY_OFF = Object.freeze([
   { id: 'modify:trim', label: 'Trim', icon: 'trim' },
   { id: 'modify:extend', label: 'Extend', icon: 'extend' },
@@ -135,6 +141,14 @@ export const PROMPTS = Object.freeze({
     { ask: 'Specify radius:', fields: [['r', 'r']] },
     { ask: 'Specify start angle:', fields: [['a0', 'start']] },
     { ask: 'Specify end angle:', fields: [['a1', 'end']] },
+    { ask: 'Layer:', fields: [['layer', 'layer', 'text']] },
+  ] },
+  // W4g-5d: the reference's TEXT asks where, how tall, which way, then what.
+  createText: { verb: 'TEXT', steps: [
+    { ask: 'Specify start point of text:', fields: [['x', 'x'], ['y', 'y']] },
+    { ask: 'Specify height:', fields: [['height', 'height']] },
+    { ask: 'Specify rotation angle of text:', fields: [['rot', 'rotation']] },
+    { ask: 'Enter text:', fields: [['text', 'text', 'text']] },
     { ask: 'Layer:', fields: [['layer', 'layer', 'text']] },
   ] },
   createRectangle: { verb: 'RECTANG', steps: [
@@ -618,7 +632,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
       )}
       {show.has('draw') && (
         <RibbonCluster id="draw" label="Draw" note={draw || null}>
-          {forGroup('draw').map((action) => {
+          {forGroup('draw').filter((action) => action.panel === 'draw').map((action) => {
             // The record's reason, read ONCE per record per render: it is the
             // disabled flag and the sentence both.
             const reason = action.when(engineCtx)
@@ -670,6 +684,32 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
             )
           })}
           {MODIFY_OFF.map((tool) => <RibbonTool key={tool.id} tool={offTool(tool)} />)}
+        </RibbonCluster>
+      )}
+      {show.has('annotation') && (
+        <RibbonCluster id="annotation" label="Annotation" note={draw || null}>
+          {forGroup('draw').filter((action) => action.panel === 'annotation').map((action) => {
+            const reason = action.when(engineCtx)
+            return (
+              <RibbonTool
+                key={action.op}
+                tool={{
+                  id: action.id,
+                  label: action.label,
+                  text: action.text,
+                  icon: action.icon,
+                  size: action.size,
+                  title: action.title(engineCtx),
+                  write: action.write,
+                  disabled: !!reason,
+                  reason,
+                  ...armedAttrs(action.op),
+                  onClick: () => action.run(engineCtx),
+                }}
+              />
+            )
+          })}
+          {ANNOTATION_OFF.map((tool) => <RibbonTool key={tool.id} tool={offTool(tool)} />)}
         </RibbonCluster>
       )}
       {show.has('clipboard') && clipboardSlot && createPortal(
