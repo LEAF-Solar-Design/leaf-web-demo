@@ -87,6 +87,7 @@ import {
   getDrawingVersions, undoDrawing, redoDrawing, takeCheckout, releaseCheckout, nlPrompt,
   createOrg, listProjects, createProject, openProject, subscribeUnauthorized,
   saveEditedDrawingVersion,
+  saveDrawingVersionPlan,
   fetchDrawingDxf,
 } from './api.js'
 import { matchPrompt } from './mock/mockNlPrompt.js'
@@ -2559,7 +2560,11 @@ export default function App() {
   const engineSaveTarget = !mock && intake ? {
     drawingId: REQUESTED_DRAWING_ID,
     headVersion: null,
-    save: async (bytes, _parent, digest) => {
+    // W4g-3b (one head): a save that carries a `plan` (the store's diff of
+    // the head document, present only when the engine holds the head) goes
+    // to the plan route, where the SERVER picks the commit leg and says so
+    // in the receipt; a hand-imported document keeps the F-3 sidecar route.
+    save: async (bytes, _parent, digest, plan = null) => {
       const chain = await getDrawingVersions(false, REQUESTED_DRAWING_ID)
       // The store publishes ONLY under a live single-writer checkout (the
       // postgres authority fails closed without one — staging's exact
@@ -2582,6 +2587,10 @@ export default function App() {
       }
       const cap = held || acquired.checkout_capability
       try {
+        if (plan && plan.mutations) {
+          return await saveDrawingVersionPlan(
+            REQUESTED_DRAWING_ID, bytes, chain.head, digest, plan.mutations, cap)
+        }
         return await saveEditedDrawingVersion(
           REQUESTED_DRAWING_ID, bytes, chain.head, digest, cap)
       } finally {

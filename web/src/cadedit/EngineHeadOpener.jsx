@@ -157,7 +157,9 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
         setReach({ state: REACH_STATE.FAILED, sentence: 'the drawing could not be opened in the browser engine: the server answered without a document; import a DXF instead' })
         return
       }
-      openBytes(bytes, headDocumentId(drawingId, version))
+      // W4g-3b: this document IS the head, so the store keeps the entity
+      // list it loads as the base a save diffs against (the mutation plan).
+      openBytes(bytes, headDocumentId(drawingId, version), { committed: true })
       setReach({ state: REACH_STATE.OPEN, sentence: '', version, head: Number(answer?.head) || version, source: String(answer?.source || '') })
     })()
     return () => {

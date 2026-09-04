@@ -879,6 +879,32 @@ export async function saveEditedDrawingVersion(drawingId, bytes, parentVersion, 
   return body
 }
 
+// W4g-3b (one head): save a browser edit through the commit leg the SERVER
+// picks (POST /api/drawings/{id}/versions/plan). The body carries both forms
+// of the edit: the exact DXF bytes with the client digest (the F-3 contract,
+// verbatim) and `mutations`, the diff of the engine document against the
+// head in the mutation contract v2; the receipt's `commit` says which leg
+// carried it ("dwg-plan" or "dxf-sidecar") and `commit_note` why.
+export async function saveDrawingVersionPlan(drawingId, bytes, parentVersion, digest, mutations, capability = null) {
+  const form = new FormData()
+  form.append('file', new Blob([bytes], { type: 'application/dxf' }), 'edited.dxf')
+  form.append('parent_version', String(parentVersion))
+  form.append('source_digest', digest)
+  form.append('plan', JSON.stringify({ mutations: mutations || {} }))
+  const headers = { 'X-Tenant-Id': TENANT, ...authHeaders() }
+  if (capability) headers['X-Checkout-Capability'] = capability
+  const path = `/api/drawings/${encodeURIComponent(drawingId)}/versions/plan`
+  const res = await apiFetch(`${API_BASE}${path}`, { method: 'POST', headers, body: form }, path)
+  const body = await res.json().catch(() => null)
+  if (!res.ok) {
+    const error = new Error(body?.error?.message || `POST ${path} -> ${res.status}`)
+    error.status = res.status
+    error.body = body
+    throw error
+  }
+  return body
+}
+
 // W4g-1b (engine reach): the drawing's head as DXF bytes for the browser
 // engine (GET /api/drawings/{id}/dxf, W4g-1a). Resolves
 // `{ bytes, version, head, source, etag }`; `bytes` is null on a 304 (the

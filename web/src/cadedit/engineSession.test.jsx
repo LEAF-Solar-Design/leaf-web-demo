@@ -397,6 +397,74 @@ describe('save completion', () => {
     await act(async () => { await session.current.actions.save() })
     expect(save).not.toHaveBeenCalled()
   })
+
+  // W4g-3b (one head): a HEAD document (openBytes with { committed: true },
+  // the opener's call) saves its edit as a PLAN, the diff of the current
+  // entity list against the one it loaded with, in the contract v2; the
+  // receipt's commit leg reads back in the status; a later save diffs from
+  // the list just saved. A hand import has no base and sends no plan.
+  const MOVED_LINE = { ...LINE, vertices: [[1, 1], [2, 2]] }
+  const planReceipt = { ...receipt, commit: 'dwg-plan', commit_note: 'mock writer' }
+
+  async function headSession(saveTarget) {
+    const session = mountSession({ saveTarget })
+    act(() => session.current.actions.openBytes(new Uint8Array([9, 9]), 'demo-v1.dxf', { committed: true }))
+    session.workers[0].emit(loadedMessage([LINE, POLY], 'demo-v1.dxf'))
+    return session
+  }
+
+  it('a head document saves the diff as a plan and reads the commit leg back', async () => {
+    const save = vi.fn(async (bytes, parent, digest, plan) => {
+      expect(bytes).toEqual(new Uint8Array([1, 2, 3]))
+      expect(parent).toBe(4)
+      // The fixture's id is not decimal, so it crosses unchanged (a real
+      // worker id like "37986" would read as the DXF hex "9462").
+      expect(plan).toEqual({
+        mutations: { set_points: [{ handle: 'e1', closed: false, pts: [[1, 1, 0], [2, 2, 0]] }] },
+        count: 1,
+      })
+      return planReceipt
+    })
+    const session = await headSession({ headVersion: 4, save })
+    expect(session.current.committedEntities).toEqual([LINE, POLY])
+    act(() => session.current.actions.select('e1'))
+    act(() => session.current.actions.applyEdit('move', { dx: '1', dy: '1' }))
+    session.workers[0].emit(editedMessage('move', [MOVED_LINE, POLY]))
+    await act(async () => { await session.current.actions.save() })
+    expect(save).toHaveBeenCalledTimes(1)
+    expect(session.current.status).toContain('through the dwg-plan leg')
+    // The list just saved is the new base: a save with no further edit
+    // would diff to nothing.
+    expect(session.current.committedEntities).toEqual([MOVED_LINE, POLY])
+    expect(session.current.dirty).toBe(false)
+  })
+
+  it('a diff the plan cannot carry sends no plan and says why', async () => {
+    const save = vi.fn(async (bytes, parent, digest, plan) => {
+      expect(plan).toBeNull()
+      return receipt
+    })
+    const session = await headSession({ headVersion: 4, save })
+    act(() => session.current.actions.select('e1'))
+    act(() => session.current.actions.applyEdit('move', { dx: '1', dy: '1' }))
+    // The worker reports e1 as a CIRCLE now: a kind change no plan expresses.
+    session.workers[0].emit(editedMessage('move', [{ id: 'e1', type: 'CIRCLE', layer: 'Panels', vertices: [[0, 0]], radius: 2 }, POLY]))
+    await act(async () => { await session.current.actions.save() })
+    expect(save).toHaveBeenCalledTimes(1)
+    expect(session.current.status).toContain('No plan sent: entity e1 changed kind from LINE to CIRCLE')
+  })
+
+  it('a hand import has no base and sends no plan', async () => {
+    const save = vi.fn(async (bytes, parent, digest, plan) => {
+      expect(plan).toBeNull()
+      return receipt
+    })
+    const session = await editedSession({ headVersion: 4, save })
+    expect(session.current.committedEntities).toBeNull()
+    await act(async () => { await session.current.actions.save() })
+    expect(save).toHaveBeenCalledTimes(1)
+    expect(session.current.status).not.toContain('leg')
+  })
 })
 
 describe('worker crash is a RECOVERABLE state', () => {

@@ -98,3 +98,27 @@ export function engineIntake(entities, documentId = '') {
   }
   return { source: 'engine', documentId: String(documentId || ''), polylines, inserts: [], faces3d: [], points, truncated }
 }
+
+/**
+ * W4g-3b: a SERVER intake may carry the two additive lists the contract v2
+ * writes, `circles` [{handle, layer, c, r}] and `arcs` [{handle, layer, c,
+ * r, start_deg, end_deg}]. The viewer draws polylines, so they are sampled
+ * here with the same rule the engine document uses (48-gon, 7.5 deg arc
+ * steps); a malformed record is skipped, never thrown on. Returns [] for an
+ * intake without them, so every existing intake draws exactly as before.
+ */
+export function intakeRoundPolylines(intake) {
+  const out = []
+  if (!intake || typeof intake !== 'object') return out
+  for (const c of Array.isArray(intake.circles) ? intake.circles : []) {
+    const centre = point(c?.c)
+    if (!centre || !finite(c.r) || c.r <= 0) continue
+    out.push({ handle: String(c.handle ?? ''), layer: typeof c.layer === 'string' && c.layer ? c.layer : '0', pts: circlePoints(centre[0], centre[1], centre[2], c.r), closed: true })
+  }
+  for (const a of Array.isArray(intake.arcs) ? intake.arcs : []) {
+    const centre = point(a?.c)
+    if (!centre || !finite(a.r) || a.r <= 0 || !finite(a.start_deg) || !finite(a.end_deg)) continue
+    out.push({ handle: String(a.handle ?? ''), layer: typeof a.layer === 'string' && a.layer ? a.layer : '0', pts: arcPoints(centre[0], centre[1], centre[2], a.r, a.start_deg, a.end_deg), closed: false })
+  }
+  return out
+}
