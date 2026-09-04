@@ -1495,10 +1495,11 @@ export default function ToolCast({
 
   return (
     // Slice 4a: THE SURFACE FRAME (site/SurfaceFrame.jsx). Local names are
-    // aliased HERE, at the call boundary — platformSession -> session,
-    // capabilityCatalog -> catalog — so the frame never learns the stage's
-    // private vocabulary. `posture` is null: the stage has no studio rail, and
-    // that null is what tells the frame it is not the console.
+    // aliased HERE, at the call boundary (platformSession -> session,
+    // capabilityCatalog -> catalog) so the frame never learns the stage's
+    // private vocabulary. `scene="stage"` is what tells the frame which scene
+    // it is in; `posture` is null only because the stage has no studio rail,
+    // and the frame no longer infers anything from that null.
     <SurfaceFrame
       scene="stage"
       activeSurface={activeSurface}

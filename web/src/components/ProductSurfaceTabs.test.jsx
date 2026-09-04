@@ -252,10 +252,13 @@ describe('F-7: surface frames render the live tenant catalog', () => {
     // (`<SurfaceFrame `) or wrap to the next (`<SurfaceFrame\n`) — never on a
     // slot. `src.indexOf('<SurfaceFrame')` alone also matches
     // `<SurfaceFrame.Tabs`, `<SurfaceFrame.Frame`, `<SurfaceFrame.JobRail`
-    // etc: every one of those sorts before the real mount in App.jsx and
-    // ToolCast.jsx (App.jsx:2868 sits after 2606; ToolCast.jsx:1538 sits
-    // after 1502), so an unanchored scan silently slices from a slot instead
-    // and would read the mount's own props as absent.
+    // etc. Today the mount happens to be the FIRST match in both files
+    // (App.jsx mount at 2606, first slot at 2869; ToolCast.jsx mount at
+    // 1502, first slot at 1539), so a bare indexOf would land correctly by
+    // accident of ordering. The anchor makes mount-vs-slot an ASSERTION:
+    // if a slot ever moves above the mount, an unanchored scan would slice
+    // from the slot and read the mount's own props as absent; this one fails
+    // loudly instead.
     // The next character after `SurfaceFrame` is what tells a mount
     // (` ` or a line break, before its attributes) from a slot (`.`, before
     // `Tabs`, `Frame`, `JobRail`...): the character class IS the assertion

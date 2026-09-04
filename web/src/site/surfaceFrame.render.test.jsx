@@ -332,17 +332,22 @@ function capture(built) {
   return out
 }
 
-describe.runIf(CAPTURE)('fixture capture (SURFACE_FRAME_CAPTURE=1)', () => {
-  it('writes the transcription of today to disk', () => {
-    const out = {}
-    for (const testCase of CASES) {
-      out[testCase.key] = capture(
-        testCase.console ? todayConsole(testCase.surface) : todayStage(testCase.surface),
-      )
-    }
-    writeFileSync(FIXTURE_PATH, `${JSON.stringify(out, null, 2)}\n`)
+// A plain `if`, not describe.runIf: runIf registers a SKIPPED suite when the
+// env var is unset, and the web-vitest gate fails closed on any skip outside
+// its allowlist. With `if`, nothing is registered on an ordinary run.
+if (CAPTURE) {
+  describe('fixture capture (SURFACE_FRAME_CAPTURE=1)', () => {
+    it('writes the transcription of today to disk', () => {
+      const out = {}
+      for (const testCase of CASES) {
+        out[testCase.key] = capture(
+          testCase.console ? todayConsole(testCase.surface) : todayStage(testCase.surface),
+        )
+      }
+      writeFileSync(FIXTURE_PATH, `${JSON.stringify(out, null, 2)}\n`)
+    })
   })
-})
+}
 
 describe.skipIf(CAPTURE)('SurfaceFrame — zero visual change against the captured shell', () => {
   it('the fixture covers every scene x surface case', () => {
