@@ -56,6 +56,40 @@
   --ck-pane: 250px;
   --ck-spine: 56px;
   font-family: var(--ck-font);
+
+  /* ---- slice 13b: the cad-skin scope of the --leaf-* namespace ----
+     This selector is already the reference CAD application's own re-pin
+     (the block above); every --leaf-* name here is a var() reference to one
+     of those --ck-* values declared in this same rule, so it carries no
+     value of its own. It is the sibling of landing.css's dark-default
+     scope: names in the two never collide, and this list covers every
+     --ck-* token this file consumes (see cadSkinCoverage.test.js). */
+  --leaf-font: var(--ck-font);
+  --leaf-chrome: var(--ck-chrome);
+  --leaf-recess: var(--ck-recess);
+  --leaf-title: var(--ck-title);
+  --leaf-field: var(--ck-field);
+  --leaf-canvas: var(--ck-canvas);
+  --leaf-active: var(--ck-active);
+  --leaf-model: var(--ck-model);
+  --leaf-sel: var(--ck-sel);
+  --leaf-cmd: var(--ck-cmd);
+  --leaf-label: var(--ck-label);
+  --leaf-ink: var(--ck-ink);
+  --leaf-ink-dim: var(--ck-ink-dim);
+  --leaf-ink-off: var(--ck-ink-off);
+  --leaf-edge: var(--ck-edge);
+  --leaf-divider: var(--ck-divider);
+  --leaf-hover: var(--ck-hover);
+  --leaf-bulb: var(--ck-bulb);
+  --leaf-warn: var(--ck-warn);
+  --leaf-top: var(--ck-top);
+  --leaf-ribbon: var(--ck-ribbon);
+  --leaf-doctabs: var(--ck-doctabs);
+  --leaf-canvas-top: var(--ck-canvas-top);
+  --leaf-status: var(--ck-status);
+  --leaf-pane: var(--ck-pane);
+  --leaf-spine: var(--ck-spine);
 }
 
 /* ---- the ground: the drawing occupies exactly the reference's canvas ---- */
