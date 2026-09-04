@@ -227,6 +227,11 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const { applyEdit, create, copyToClipboard, pasteFromClipboard } = session.actions
   const quickSlot = useSlot(QUICK_FILE_SLOT_ID)
   const promptSlot = useSlot(PROMPT_SLOT_ID)
+  // W4g-5c: the reference puts Clipboard LAST, and the ribbon renders these
+  // engine children BEFORE App's cluster list, so a cluster rendered here
+  // would sit third and push the row (it did: the prompt seat moved 148px).
+  // App renders the panel at the end and this fills it with the real tools.
+  const clipboardSlot = useSlot('cockpit-clipboard-slot')
   const show = new Set(Array.isArray(panels) ? panels : [])
 
   // The armed command (provider state, so it outlives the ribbon's tab
@@ -654,30 +659,29 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
           {MODIFY_OFF.map((tool) => <RibbonTool key={tool.id} tool={offTool(tool)} />)}
         </RibbonCluster>
       )}
-      {show.has('clipboard') && (
-        <RibbonCluster id="clipboard" label="Clipboard">
-          {forGroup('clipboard').map((action) => {
-            const reason = action.when(engineCtx)
-            return (
-              <RibbonTool
-                key={action.op}
-                tool={{
-                  id: action.id,
-                  label: action.label,
-                  text: action.text,
-                  icon: action.icon,
-                  size: action.size,
-                  title: action.title(engineCtx),
-                  write: action.write,
-                  disabled: !!reason,
-                  reason,
-                  ...armedAttrs(action.op),
-                  onClick: () => action.run(engineCtx),
-                }}
-              />
-            )
-          })}
-        </RibbonCluster>
+      {show.has('clipboard') && clipboardSlot && createPortal(
+        forGroup('clipboard').map((action) => {
+          const reason = action.when(engineCtx)
+          return (
+            <RibbonTool
+              key={action.op}
+              tool={{
+                id: action.id,
+                label: action.label,
+                text: action.text,
+                icon: action.icon,
+                size: action.size,
+                title: action.title(engineCtx),
+                write: action.write,
+                disabled: !!reason,
+                reason,
+                ...armedAttrs(action.op),
+                onClick: () => action.run(engineCtx),
+              }}
+            />
+          )
+        }),
+        clipboardSlot,
       )}
       {promptRow && (promptSlot ? createPortal(promptRow, promptSlot) : promptRow)}
     </>

@@ -536,14 +536,12 @@ test.describe('route matrix, rail ON', () => {
     const groupsOf = () => ribbon.locator('.ribbon-cluster').evaluateAll((els) => els.map((el) => el.dataset.group || `family:${el.dataset.family}`))
     let groups = await groupsOf()
     const cadEditOn = groups.includes('modify')
-    // W4g-5c: Clipboard is a REAL engine group now, so with the engine on
-    // it renders with Draw and Modify (children come before this list) and
-    // leaves the reference tail; with the engine off it is still the
-    // honest placeholder at the end, where the reference puts it.
-    const referenceTail = ['annotation', 'layers', 'block', 'properties', 'groups']
-    expect(groups).toEqual(cadEditOn
-      ? ['draw', 'modify', 'clipboard', ...referenceTail]
-      : [...referenceTail, 'clipboard'])
+    // W4g-5c: Clipboard is REAL with the engine on, but it keeps the
+    // reference's LAST seat either way: App renders the panel there and
+    // the engine portals its tools into it, rather than adding a third
+    // engine cluster on the left (which moved the prompt seat 148px).
+    const referenceTail = ['annotation', 'layers', 'block', 'properties', 'groups', 'clipboard']
+    expect(groups).toEqual(cadEditOn ? ['draw', 'modify', ...referenceTail] : referenceTail)
     await page.getByRole('tab', { name: 'View' }).click()
     expect(await groupsOf()).toEqual(['view', 'version', 'layers'])
     await page.getByRole('tab', { name: 'Manage' }).click()
