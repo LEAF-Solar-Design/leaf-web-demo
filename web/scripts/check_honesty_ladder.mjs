@@ -24,17 +24,22 @@
 //      `SOME_REASONS.key` reference is resolved the way check 1 resolves one
 //      (a dangling key fails), and anything else — a template literal, a
 //      function call, a ternary — is an expression this scanner declines to
-//      evaluate, so it is counted under "unverifiable reason expressions"
-//      rather than judged silently pass/fail.
+//      evaluate, so it is counted under "unverifiable reason expressions",
+//      never judged silently pass/fail, against a pinned BUDGET (today: 16)
+//      that ratchets down only: a new one anywhere is a hard failure, and
+//      fixing one must lower the pin in the same change.
 //   3. ABSENT CONTRACT SLOTS. Every slot in productSurfaces.js's PRODUCT_SURFACES
 //      contract that is absent — null, undefined, false, 'none', or an empty
 //      array, every spelling a surface has used to mean "nothing renders
 //      here" — on some surface has a ROW in docs/convergence/SURFACE-CONTRACT.md's
-//      field table (anchored on the row's first cell, the backticked slot name),
-//      and that row's own last cell holds a real reason: non-empty, not a bare
-//      `-` / `n/a` / `TBD` placeholder, at least as long as a map-entry sentence
-//      (check 1's floor). A slot naming itself in the table with nothing said
-//      about why is exactly as silent as no row at all, and used to pass.
+//      field table (anchored on the row's first cell, the backticked slot name,
+//      and matching the header row's own column count — a row short or long a
+//      cell cannot be trusted to hold its reason at the header-named index),
+//      and that row's reason-column cell holds a real reason: non-empty, not a
+//      bare `-` / `n/a` / `TBD` placeholder, at least as long as a map-entry
+//      sentence (check 1's floor). A slot naming itself in the table with
+//      nothing said about why, or a row missing the very column that would
+//      say why, is exactly as silent as no row at all, and both used to pass.
 //   4. POSITIVE CONTROL. Fixture sources with a disabled-and-reasonless record,
 //      an unfrozen map, a placeholder reason and a dangling key each FAIL the
 //      same functions checks 1-3 run. A gate nobody has watched go red is a
@@ -62,7 +67,10 @@
 //     (a template literal included — interpolation makes "readable in the
 //     diff" unprovable here) is only counted as unverifiable, never failed,
 //     because this scanner cannot prove a computed inline reason is bad any
-//     more than it can prove one is good.
+//     more than it can prove one is good. An "unverifiable" count is not a
+//     free pass forever: it is pinned to a BUDGET (today: 16) that only ever
+//     ratchets down, so a new one anywhere fails the gate and a fixed one
+//     must lower the pin in the same change — see `UNVERIFIABLE_REASON_BUDGET`.
 //   - Check 2 covers records written as object literals. A record assembled
 //     field by field, or spread in from elsewhere, is invisible to it — the
 //     scanner never sees the record come together, so it has nothing to
@@ -71,14 +79,23 @@
 //     placeholder check a REASONS map entry runs (check 1's prose rule), but
 //     NOT its "opens with a letter" clause: this doc's own convention opens a
 //     cell with a backticked file:line reference before the prose, and
-//     rejecting that would fail the real table, not just a bad one.
+//     rejecting that would fail the real table, not just a bad one. Which
+//     cell IS the reason cell is never assumed by POSITION (`row[row.length -
+//     1]` reads whichever cell happens to be last, including one some OTHER
+//     column's text shifted into after a column got deleted): it is read
+//     from the header row's own column count and the index of the column
+//     whose heading names it (`fieldTableShape`), and a row whose cell count
+//     does not match the header — too short, too long, or reduced to only
+//     the slot's own name — is a violation before any cell is read by
+//     position at all.
 import assert from 'node:assert/strict'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, relative, sep } from 'node:path'
 import { describe, it } from 'node:test'
 
-const here = dirname(fileURLToPath(import.meta.url))
+const SELF_PATH = fileURLToPath(import.meta.url)
+const here = dirname(SELF_PATH)
 const WEB = join(here, '..')
 const REPO = join(WEB, '..')
 const SRC = join(WEB, 'src')
@@ -447,6 +464,41 @@ export function reasonlessDisabled(src, mapsByName = new Map()) {
     .filter((r) => disabledReasonViolation(r, mapsByName) !== null)
 }
 
+// A budget, not a blanket allowance. "Unverifiable" (check 2's third bucket:
+// not a plain string, not a resolvable REASONS.key — an identifier read from
+// scope, a function call) used to be only WARNED and COUNTED, never asserted:
+// the count could climb without limit and the gate would stay green forever,
+// which is the same silent gap check 1-3 exist to close, just moved one
+// bucket over. Pinned to the exact count this gate's own output reported on
+// 2026-09-04 (Todo: 13d, round 2): `4 reason maps · 26 sentences ·
+// 93 key references · 17 disabled records · 26 absent contract slots ·
+// 16 unverifiable reason expressions`. The pin only ever RATCHETS: a new
+// unverifiable reason anywhere pushes the count over budget and fails the
+// gate outright; giving an existing one a real string or REASONS.key lowers
+// the live count below budget, which ALSO fails — on purpose, so the budget
+// constant itself must drop in the same change, or nobody would ever notice
+// the ratchet had room to tighten.
+const UNVERIFIABLE_REASON_BUDGET = 16
+
+/**
+ * Whether an "unverifiable reason expressions" count holds against its
+ * pinned budget, and why not when it doesn't — naming the exact delta and,
+ * via `details` (each entry already carries `file:line: ...`), which file(s)
+ * hold them. `null` when the count matches the budget exactly, the only
+ * shape that passes: this ratchet has no slack in either direction.
+ */
+export function unverifiableReasonBudgetViolation(actualCount, budget, details = []) {
+  if (actualCount === budget) return null
+  const delta = actualCount - budget
+  const direction = delta > 0 ? 'rose' : 'fell'
+  const instruction = delta > 0
+    ? `a new unverifiable reason expression was added without a plain-string or REASONS.key reason — give it one, or if it is deliberate, raise UNVERIFIABLE_REASON_BUDGET to ${actualCount} in this same change`
+    : `an unverifiable reason expression was fixed — lower UNVERIFIABLE_REASON_BUDGET to ${actualCount} in this same change, or the pin is not tracking a number anyone trusts`
+  const where = details.length ? ` Currently: ${details.join('; ')}` : ''
+  return `unverifiable reason expressions ${direction} from the pinned budget of ${budget} to ${actualCount} `
+    + `(${delta > 0 ? '+' : ''}${delta}): ${instruction}.${where}`
+}
+
 // --- check 3: absent contract slots ---------------------------------------
 
 /**
@@ -481,7 +533,12 @@ export function docSection(doc, heading) {
  * when the line is not a table row (does not open with `|`). A backslash-
  * escaped pipe (`\|`, this doc's own convention for a literal `|` inside a
  * union type like `` `'a' \| 'b'` ``) is kept as a literal character, never
- * read as a column boundary.
+ * read as a column boundary. A row that omits its closing pipe still yields
+ * its final cell: the scan below only pushes a cell when it HITS a `|`, so a
+ * row cut short at the end would otherwise drop whatever text follows the
+ * last pipe on the floor — silently reporting one cell fewer than the row
+ * actually has, which is exactly the wrong direction for a check that must
+ * never UNDER-count a row's columns.
  */
 export function splitTableRow(line) {
   const trimmed = line.trim()
@@ -494,6 +551,10 @@ export function splitTableRow(line) {
     if (c === '|') { cells.push(cur.trim()); cur = ''; continue }
     cur += c
   }
+  // A well-formed row's closing `|` is its last character, so `cur` is empty
+  // here and this adds nothing; only a row missing that closing pipe leaves
+  // real text in `cur`, and that text is the row's last cell.
+  if (cur.trim().length > 0) cells.push(cur.trim())
   return cells
 }
 
@@ -509,6 +570,71 @@ export function fieldTableRow(fieldTable, slot) {
   for (const line of fieldTable.split('\n')) {
     const cells = splitTableRow(line)
     if (cells && cells.length > 0 && cells[0] === wanted) return cells
+  }
+  return null
+}
+
+/**
+ * The field table's HEADER row: the cells of the first table-shaped line in
+ * the section (its `--- | --- | ---` separator, and then every slot row,
+ * follow it). `null` when the section holds no table row at all — a section
+ * that never turned into a table names nothing to anchor a column index on.
+ */
+export function fieldTableHeader(fieldTable) {
+  for (const line of fieldTable.split('\n')) {
+    const cells = splitTableRow(line)
+    if (cells) return cells
+  }
+  return null
+}
+
+// The header cell that names the reason column, matched at the START of its
+// text (never a substring match anywhere in it) so a real heading — this
+// table's own "where it is read (and the literal it replaced)", or a plainer
+// "reason" a future table might use — resolves, while a heading that merely
+// mentions "reason" partway through some other label does not.
+const REASON_HEADER = /^(?:reason\b|where it is read\b)/i
+
+/**
+ * The field table's shape, learned ONCE from its own header row: the total
+ * column count every slot row must match, and the index of the column whose
+ * heading names it as the reason column. `null` when the section has no
+ * header row, or the header names no reason-shaped column — FAIL CLOSED:
+ * every row check downstream must refuse to judge a row rather than guess
+ * which cell holds the reason when the header itself does not say.
+ *
+ * This is what closes the short-row evasion a row-position read
+ * (`row[row.length - 1]`) cannot: a row reduced to only its own slot name, or
+ * shortened by deleting its reason column, no longer smuggles some OTHER
+ * cell into the reason slot by shifting into the new "last" position — the
+ * reason lives at a header-FIXED index, and a row whose cell count does not
+ * match the header is rejected before any of its cells are read by position.
+ */
+export function fieldTableShape(fieldTable) {
+  const header = fieldTableHeader(fieldTable)
+  if (!header) return null
+  const reasonIndex = header.findIndex((h) => REASON_HEADER.test(h.trim()))
+  if (reasonIndex === -1) return null
+  return { columnCount: header.length, reasonIndex }
+}
+
+/**
+ * Why a slot's field-table row fails the honesty ladder on SHAPE alone
+ * (before its reason cell's prose is ever read), or `null` when the row's
+ * cell count matches the header's exactly. `shape` is `fieldTableShape(...)`;
+ * a `null` shape (the header itself could not be read) fails every row
+ * closed rather than silently passing them.
+ */
+export function fieldTableRowShapeViolation(row, shape, slot) {
+  if (!shape) {
+    return 'the field table has no header row naming a reason-shaped column '
+      + '(expected a heading starting with "reason" or "where it is read") — '
+      + `\`${slot}\`'s row cannot be judged without knowing which cell holds the reason`
+  }
+  if (row.length !== shape.columnCount) {
+    return `row for \`${slot}\` has ${row.length} cells, expected ${shape.columnCount} `
+      + "(the header row's column count) — a row missing or gaining a column cannot be "
+      + 'trusted to hold its reason at the header-named position'
   }
   return null
 }
@@ -626,10 +752,23 @@ for (const path of DISABLED_RECORD_FILES) {
   }
 }
 
+// The budget ratchet (blocker 2, round 2): "unverifiable" stops being a free
+// pass the instant the count drifts off its pin, in EITHER direction.
+{
+  const why = unverifiableReasonBudgetViolation(unverifiableReasons.length, UNVERIFIABLE_REASON_BUDGET, unverifiableReasons)
+  if (why) record(rel(SELF_PATH), 1, why)
+}
+
 const { PRODUCT_SURFACES } = await import(new URL('../src/site/productSurfaces.js', import.meta.url))
 const doc = readFileSync(SURFACE_CONTRACT_DOC, 'utf8')
 const fieldTable = docSection(doc, '## Field table')
 const docFile = rel(SURFACE_CONTRACT_DOC)
+const fieldTableShapeResult = fieldTableShape(fieldTable)
+if (!fieldTableShapeResult) {
+  record(docFile, 1, 'the field table has no header row naming a reason-shaped column (expected a heading '
+    + 'starting with "reason" or "where it is read") — no absent slot\'s row can be judged without knowing '
+    + 'which cell holds the reason')
+}
 const seenSlots = new Set()
 for (const surface of PRODUCT_SURFACES) {
   for (const slot of absentSlots(surface.contract)) {
@@ -645,7 +784,14 @@ for (const surface of PRODUCT_SURFACES) {
       record(docFile, 1, `\`${slot}\` is declared absent on surface "${surface.id}" but has no row in the field table, where the rationale lives`)
       continue
     }
-    const reasonCell = row[row.length - 1]
+    if (!fieldTableShapeResult) continue // already recorded once, above; do not repeat per slot
+    const shapeWhy = fieldTableRowShapeViolation(row, fieldTableShapeResult, slot)
+    if (shapeWhy) {
+      record(docFile, 1, `\`${slot}\` is declared absent on surface "${surface.id}": ${shapeWhy} — this is exactly how a `
+        + 'name-only row or a row with its reason column deleted used to sneak past this gate')
+      continue
+    }
+    const reasonCell = row[fieldTableShapeResult.reasonIndex]
     const why = fieldTableReasonViolation(reasonCell)
     if (why) {
       record(docFile, 1, `\`${slot}\` is declared absent on surface "${surface.id}" and has a field-table row, but its reason cell is ${why} — a slot cannot be absent with nothing said about why`)
@@ -767,6 +913,16 @@ describe('honesty ladder', () => {
     // drove this half of check 3 red on purpose before now — it was reached
     // only through the real doc, which happened to have real prose in every
     // row's last cell (`a11y` excepted — that row is fixed alongside this).
+    //
+    // Round 2's re-open (opus refuter): the fix above still read the reason
+    // cell by POSITION (`row[row.length - 1]`), so a row that lost a cell
+    // entirely — reduced to `| \`slot\` |` (just its own name) or to
+    // `| \`slot\` | null | meaning |` (the reason column deleted) — read
+    // some OTHER cell, or its own name, as if it were the reason, and both
+    // still passed 23/23. The header-anchored shape check below closes that:
+    // a row's cell count is checked against the header's BEFORE any cell is
+    // read by position, so a short row fails on cell count, not on
+    // whatever text happened to land in the wrong slot.
     describe('a field-table row must hold a real reason, not just its own name', () => {
       const miniFieldTable = [
         '| field | type | meaning | where it is read |',
@@ -777,7 +933,15 @@ describe('honesty ladder', () => {
         '| `naSlot` | null | a thing | n/a |',
         "| `pipedType` | `'a' \\| 'b'` | a thing | a real sentence describing why this is absent here |",
         '| `otherSlot` | null | a thing | mentions `ghostSlot` in passing, but this row is otherSlot\'s, not ghostSlot\'s |',
+        '| `nameOnlySlot` |',
+        '| `reasonColumnDeletedSlot` | null | tour anchor ids that used to have a reason column |',
+        '| `noClosingPipeSlot` | null | a thing | a real sentence with no closing pipe',
       ].join('\n')
+      const shape = fieldTableShape(miniFieldTable)
+
+      it('learns the header\'s column count and reason-column index from its own header row', () => {
+        assert.deepEqual(shape, { columnCount: 4, reasonIndex: 3 })
+      })
 
       it('locates a row by its anchored first cell, and only that cell', () => {
         assert.equal(fieldTableRow(miniFieldTable, 'missingSlot'), null)
@@ -798,11 +962,13 @@ describe('honesty ladder', () => {
         const row = fieldTableRow(miniFieldTable, 'pipedType')
         assert.equal(row[1], "`'a' | 'b'`")
         assert.equal(row.length, 4)
+        assert.equal(fieldTableRowShapeViolation(row, shape, 'pipedType'), null)
       })
 
       it('passes a real sentence in the reason cell', () => {
         const row = fieldTableRow(miniFieldTable, 'goodSlot')
-        assert.equal(fieldTableReasonViolation(row[row.length - 1]), null)
+        assert.equal(fieldTableRowShapeViolation(row, shape, 'goodSlot'), null)
+        assert.equal(fieldTableReasonViolation(row[shape.reasonIndex]), null)
       })
 
       // THE HOLE: a row present with an EMPTY reason cell used to pass,
@@ -810,24 +976,81 @@ describe('honesty ladder', () => {
       // name appeared anywhere in the field-table section.
       it('fails a row whose reason cell is empty', () => {
         const row = fieldTableRow(miniFieldTable, 'noReasonSlot')
-        assert.match(fieldTableReasonViolation(row[row.length - 1]) || '', /empty/)
+        assert.equal(fieldTableRowShapeViolation(row, shape, 'noReasonSlot'), null)
+        assert.match(fieldTableReasonViolation(row[shape.reasonIndex]) || '', /empty/)
       })
 
       it('fails a row whose reason cell is a bare dash', () => {
         const row = fieldTableRow(miniFieldTable, 'dashSlot')
-        assert.match(fieldTableReasonViolation(row[row.length - 1]) || '', /empty/)
+        assert.match(fieldTableReasonViolation(row[shape.reasonIndex]) || '', /empty/)
       })
 
       it('fails a row whose reason cell is a bare "n/a"', () => {
         const row = fieldTableRow(miniFieldTable, 'naSlot')
-        assert.match(fieldTableReasonViolation(row[row.length - 1]) || '', /placeholder/)
+        assert.match(fieldTableReasonViolation(row[shape.reasonIndex]) || '', /placeholder/)
+      })
+
+      // ROUND 2's exact evasion #1: a row reduced to ONLY the slot's own
+      // backticked name. `row[row.length - 1]` would read `` `nameOnlySlot` ``
+      // itself as the "reason" — 15 characters, opens with a backtick not a
+      // placeholder, so the prose check alone waves it through. The shape
+      // check must catch it on cell count before the prose check ever runs.
+      it('fails a row reduced to only the slot\'s own name (no other cells at all)', () => {
+        const row = fieldTableRow(miniFieldTable, 'nameOnlySlot')
+        assert.deepEqual(row, ['`nameOnlySlot`'])
+        assert.equal(fieldTableReasonViolation(row[row.length - 1]), null,
+          'sanity: the slot\'s own backticked name reads as valid prose on its own — the shape check, not the prose check, is what must catch this')
+        assert.match(fieldTableRowShapeViolation(row, shape, 'nameOnlySlot') || '', /row for `nameOnlySlot` has 1 cells, expected 4/)
+      })
+
+      // ROUND 2's exact evasion #2: the reason COLUMN deleted, leaving three
+      // cells whose last one is the MEANING cell, not a reason — and long
+      // enough prose to pass check 1's floor regardless.
+      it('fails a row whose reason column was deleted, even though its remaining last cell reads like real prose', () => {
+        const row = fieldTableRow(miniFieldTable, 'reasonColumnDeletedSlot')
+        assert.equal(row.length, 3)
+        assert.equal(fieldTableReasonViolation(row[row.length - 1]), null,
+          'sanity: the deleted-column row\'s last cell (the meaning text) passes the prose rule on its own — the shape check, not the prose check, is what must catch this')
+        assert.match(fieldTableRowShapeViolation(row, shape, 'reasonColumnDeletedSlot') || '', /row for `reasonColumnDeletedSlot` has 3 cells, expected 4/)
+      })
+
+      // The trailing-cell fix to `splitTableRow`: a row missing only its
+      // closing pipe must still parse its real last cell, not be
+      // misdiagnosed as short one column because the parser dropped it.
+      it('a row missing only its closing pipe still parses its last cell and passes', () => {
+        const row = fieldTableRow(miniFieldTable, 'noClosingPipeSlot')
+        assert.deepEqual(row, ['`noClosingPipeSlot`', 'null', 'a thing', 'a real sentence with no closing pipe'])
+        assert.equal(fieldTableRowShapeViolation(row, shape, 'noClosingPipeSlot'), null)
+        assert.equal(fieldTableReasonViolation(row[shape.reasonIndex]), null)
+      })
+
+      // A header with no reason-shaped column at all must fail CLOSED, not
+      // guess some column is the reason.
+      it('a header naming no reason-shaped column fails closed instead of guessing an index', () => {
+        const noReasonHeaderTable = [
+          '| field | type | meaning |',
+          '| --- | --- | --- |',
+          '| `x` | null | nothing to see |',
+        ].join('\n')
+        assert.equal(fieldTableShape(noReasonHeaderTable), null)
+        assert.match(
+          fieldTableRowShapeViolation(fieldTableRow(noReasonHeaderTable, 'x'), fieldTableShape(noReasonHeaderTable), 'x') || '',
+          /has no header row naming a reason-shaped column/)
+      })
+
+      it('a section with no table row at all fails closed the same way', () => {
+        assert.equal(fieldTableShape('just some prose, no pipes anywhere in this section'), null)
       })
 
       // The real table, the real contract: every absent slot on every real
-      // surface must resolve to a real row with a real reason. This is the
-      // targeted check-3 assertion; the catch-all `violations.length === 0`
-      // test below would also fail, but this one names the exact slot.
-      it('the real field table gives every absent slot a row with a real reason', () => {
+      // surface must resolve to a real row, of the header's own shape, with
+      // a real reason at the header-named index. This is the targeted
+      // check-3 assertion; the catch-all `violations.length === 0` test
+      // below would also fail, but this one names the exact slot and cell
+      // count.
+      it('the real field table gives every absent slot a correctly-shaped row with a real reason', () => {
+        const realShape = fieldTableShape(fieldTable)
+        assert.ok(realShape, 'the real field table\'s header row must resolve a reason-shaped column')
         const seen = new Set()
         for (const surface of PRODUCT_SURFACES) {
           for (const slot of absentSlots(surface.contract)) {
@@ -835,10 +1058,27 @@ describe('honesty ladder', () => {
             seen.add(slot)
             const row = fieldTableRow(fieldTable, slot)
             assert.ok(row, `\`${slot}\` (absent on surface "${surface.id}") has no row in the field table`)
-            const why = fieldTableReasonViolation(row[row.length - 1])
+            const shapeWhy = fieldTableRowShapeViolation(row, realShape, slot)
+            assert.equal(shapeWhy, null, shapeWhy)
+            const why = fieldTableReasonViolation(row[realShape.reasonIndex])
             assert.equal(why, null, `\`${slot}\`'s field-table reason cell: ${why}`)
           }
         }
+      })
+    })
+
+    describe('splitTableRow keeps a trailing cell when a row omits its closing pipe', () => {
+      it('parses a well-formed row identically with or without checking the closing pipe', () => {
+        assert.deepEqual(splitTableRow('| a | b | c |'), ['a', 'b', 'c'])
+      })
+      it('recovers the final cell of a row missing its closing pipe', () => {
+        assert.deepEqual(splitTableRow('| a | b | c'), ['a', 'b', 'c'])
+      })
+      it('recovers a single-cell row missing its closing pipe', () => {
+        assert.deepEqual(splitTableRow('| a'), ['a'])
+      })
+      it('does not manufacture a phantom trailing cell for a well-formed row ending exactly on its closing pipe', () => {
+        assert.deepEqual(splitTableRow('| a | b |'), ['a', 'b'])
       })
     })
 
@@ -895,6 +1135,119 @@ describe('honesty ladder', () => {
       assert.equal(maps[0].name, 'FAKE_REASONS')
       assert.equal(maps[0].frozen, true)
       assert.match(reasonProseViolation(maps[0].entries[0].value) || '', /char floor/)
+    })
+  })
+
+  // Round 2, blocker 2: "unverifiable reason expressions" used to be only
+  // WARNED and COUNTED, never asserted — a new one could be added anywhere,
+  // forever, without ever failing the gate. Pinned to a budget that ratchets
+  // in both directions: over budget (a new one appeared) and under it (one
+  // got fixed but the pin was not lowered) are both violations.
+  describe('unverifiable reason expressions are asserted against a pinned budget, not silently counted', () => {
+    it('matches the budget exactly: null', () => {
+      assert.equal(unverifiableReasonBudgetViolation(16, 16), null)
+    })
+
+    it('a count above budget fails, naming the exact delta', () => {
+      const why = unverifiableReasonBudgetViolation(17, 16, ['web/src/lib/ribbonClusters.js:999: reason is `newThing`'])
+      assert.match(why, /rose from the pinned budget of 16 to 17 \(\+1\)/)
+      assert.match(why, /raise UNVERIFIABLE_REASON_BUDGET to 17/)
+      assert.match(why, /ribbonClusters\.js:999/, 'the violation must name the file the new one lives in')
+    })
+
+    it('a count below budget also fails — the ratchet must tighten, not just hold', () => {
+      const why = unverifiableReasonBudgetViolation(15, 16, [])
+      assert.match(why, /fell from the pinned budget of 16 to 15 \(-1\)/)
+      assert.match(why, /lower UNVERIFIABLE_REASON_BUDGET to 15/)
+    })
+
+    it('the live tree sits exactly on its pinned budget today', () => {
+      assert.equal(unverifiableReasons.length, UNVERIFIABLE_REASON_BUDGET,
+        `the tree carries ${unverifiableReasons.length} unverifiable reason expressions; `
+        + `UNVERIFIABLE_REASON_BUDGET must be updated to match in the same change:\n${unverifiableReasons.join('\n')}`)
+    })
+
+    // The wiring proof: one MORE identifier-style reason than the real tree
+    // carries today, added to a SCRATCH COPY (a string, never written to
+    // disk) of a live disabled-record file, must push the real total over
+    // budget — proving the budget is wired to the same counts the running
+    // gate computes, not just correct as a fixture in isolation.
+    it('one added identifier-reason record in a scratch copy of a live file pushes the real tree over budget', () => {
+      const livePath = DISABLED_RECORD_FILES[0]
+      const liveSrc = readFileSync(livePath, 'utf8')
+      const realCountInThisFile = findDisabledRecords(liveSrc)
+        .filter((r) => unverifiableReasonExpr(r) != null).length
+      const scratchSrc = `${liveSrc}\nconst __budgetScratchTool = { id: 'z', label: 'z', disabled: true, reason: describeScratchLock(x), onClick: () => {} }\n`
+      const scratchCountInThisFile = findDisabledRecords(scratchSrc)
+        .filter((r) => unverifiableReasonExpr(r) != null).length
+      assert.equal(scratchCountInThisFile, realCountInThisFile + 1,
+        'the injected record must be the only difference the scratch copy introduces')
+      const projectedTreeTotal = unverifiableReasons.length - realCountInThisFile + scratchCountInThisFile
+      assert.equal(projectedTreeTotal, unverifiableReasons.length + 1)
+      assert.match(
+        unverifiableReasonBudgetViolation(projectedTreeTotal, UNVERIFIABLE_REASON_BUDGET, unverifiableReasons),
+        /rose from the pinned budget of 16 to 17 \(\+1\)/)
+    })
+  })
+
+  // NIT (round 2 review): the production check-3 CALL SITE was unpinned — the
+  // tests above all call the exported functions directly, so reverting the
+  // GATE's own executed body back to a position-based reason read
+  // (`row[row.length - 1]`) or a substring row scan (`fieldTable.includes`)
+  // would stay green on the real doc while every test above kept passing.
+  // This pin reads THIS FILE's own source and asserts the executed check-3
+  // body is actually wired through the header-anchored shape, then proves
+  // each assertion is load-bearing against hand-written text shaped exactly
+  // like the two real regressions it exists to catch (mutation-checked: each
+  // assertion is shown failing against the reverted shape it targets).
+  describe('check 3\'s production call site stays wired to the header-anchored shape (source pin)', () => {
+    const selfSrc = readFileSync(SELF_PATH, 'utf8')
+    const bodyStart = selfSrc.indexOf('const { PRODUCT_SURFACES }')
+    const bodyEnd = selfSrc.indexOf('// --- check 4', bodyStart)
+    const check3Body = bodyStart !== -1 && bodyEnd !== -1 ? selfSrc.slice(bodyStart, bodyEnd) : ''
+
+    const SHAPE_CALL = /fieldTableShape\s*\(\s*fieldTable\s*\)/
+    const ROW_CALL = /fieldTableRow\s*\(\s*fieldTable\s*,\s*slot\s*\)/
+    const SHAPE_VIOLATION_CALL = /fieldTableRowShapeViolation\s*\(\s*row\s*,\s*fieldTableShapeResult\s*,\s*slot\s*\)/
+    const REASON_INDEX_READ = /row\[fieldTableShapeResult\.reasonIndex\]/
+    const POSITIONAL_READ = /row\[row\.length\s*-\s*1\]/
+
+    it('found check 3\'s executed body in this file (the markers did not move)', () => {
+      assert.ok(check3Body.length > 200, 'could not isolate check 3\'s gate body between "const { PRODUCT_SURFACES }" and "// --- check 4" — the markers moved, and this pin is now checking nothing')
+    })
+
+    it('the real source calls fieldTableShape() once, looks up each row through the anchored fieldTableRow(), judges its shape via fieldTableRowShapeViolation(), and reads the reason cell at the header-learned index', () => {
+      assert.match(check3Body, SHAPE_CALL)
+      assert.match(check3Body, ROW_CALL)
+      assert.match(check3Body, SHAPE_VIOLATION_CALL)
+      assert.match(check3Body, REASON_INDEX_READ)
+    })
+
+    it('the real source never reads a field-table reason cell by position (row.length - 1) — that is exactly what let a short row smuggle the wrong cell through', () => {
+      assert.doesNotMatch(check3Body, POSITIONAL_READ)
+    })
+
+    // Mutation check: hand-written text shaped exactly like the two real
+    // regressions this pin exists to catch must fail the same assertions —
+    // proving the regexes actually discriminate, not just happen to match
+    // today's file by coincidence.
+    it('mutation: a body that dropped the shape check (kept only the old positional read) fails this pin', () => {
+      const reverted = `
+        const row = fieldTableRow(fieldTable, slot)
+        if (!row) { record(docFile, 1, 'no row'); continue }
+        const reasonCell = row[row.length - 1]
+        const why = fieldTableReasonViolation(reasonCell)
+      `
+      assert.match(reverted, ROW_CALL) // the row lookup alone is not enough...
+      assert.doesNotMatch(reverted, SHAPE_CALL) // ...the shape call must ALSO be present
+      assert.doesNotMatch(reverted, SHAPE_VIOLATION_CALL)
+      assert.match(reverted, POSITIONAL_READ) // and the banned positional read is exactly what comes back
+    })
+
+    it('mutation: a body that reverted the anchored lookup to a substring scan fails this pin (recreates the original pre-13d bug)', () => {
+      const reverted = "if (!fieldTable.includes(`\\`${slot}\\``)) { record(docFile, 1, 'no row'); continue }"
+      assert.doesNotMatch(reverted, ROW_CALL)
+      assert.doesNotMatch(reverted, SHAPE_CALL)
     })
   })
 
