@@ -543,6 +543,418 @@ def test_selected_script_environment_skip_is_a_failure(tmp_path):
     assert result.got == "err"
 
 
+# --------------------------------------------------------------------------- #
+# npm-audit: registry-outage-tolerant classification (harness-audit-high)
+#
+# WHY: measured 2026-09-04 on PR #989 (run 33840004101), PR #987 (run
+# 33859010815, twice) and PR #1004 (run 33855837981) — the advisory-bulk
+# registry endpoint answered 503, npm's own internal retry loop turned that
+# into a ~700-840s shard, the runner's generic --retry re-ran it once more
+# immediately into the same outage, and a real dependency-tree question came
+# back red for an unrelated external outage. These pin the fixed contract: a
+# real advisory report still FAILS the shard exactly as before, but a
+# registry/transport error is UNAVAILABLE, retried with bounded backoff
+# entirely inside run_suite(), and never counted as a failed gate.
+# --------------------------------------------------------------------------- #
+def _fake_npm_script(tmp_path, name: str, body: str) -> Path:
+    path = tmp_path / name
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_npm_audit_clean_exit_zero_passes_without_retry(tmp_path, monkeypatch):
+    g = _load_runner()
+    sleeps: list = []
+    monkeypatch.setattr(g.time, "sleep", lambda s: sleeps.append(s))
+    fake = _fake_npm_script(tmp_path, "fake_npm_clean.py",
+        "import json, sys\n"
+        "print(json.dumps({'vulnerabilities': {}, "
+        "'metadata': {'vulnerabilities': {'high': 0}}}))\n"
+        "sys.exit(0)\n")
+    suite = g.Suite("npm-audit-clean", "npm audit clean", "npm-audit", SCRIPTS,
+                    [sys.executable, str(fake)], None)
+
+    result = g.run_suite(suite, tmp_path)
+
+    assert result.status == "PASS"
+    assert sleeps == []
+
+
+def test_npm_audit_real_advisory_report_fails_without_retry(tmp_path, monkeypatch):
+    """A real finding must never be retried away or reclassified: it fails on
+    the FIRST attempt, same as a plain non-zero exit did before this fix."""
+    g = _load_runner()
+    sleeps: list = []
+    monkeypatch.setattr(g.time, "sleep", lambda s: sleeps.append(s))
+    fake = _fake_npm_script(tmp_path, "fake_npm_vuln.py",
+        "import json, sys\n"
+        "print(json.dumps({'vulnerabilities': {'left-pad': {'severity': 'high'}}, "
+        "'metadata': {'vulnerabilities': {'high': 2}}}))\n"
+        "sys.exit(1)\n")
+    suite = g.Suite("npm-audit-vuln", "npm audit vuln", "npm-audit", SCRIPTS,
+                    [sys.executable, str(fake)], None)
+
+    result = g.run_suite(suite, tmp_path)
+
+    assert result.status == "FAIL"
+    assert "real advisory report" in result.note
+    assert sleeps == []
+
+
+def test_npm_audit_real_advisory_report_counts_only_at_or_above_the_configured_level():
+    """round-1 nit 5: metadata.vulnerabilities.total is ALL severities, but
+    this suite's argv hardcodes --audit-level=high, so the count that answers
+    'did this cross the gate's own threshold' is high+critical, never the
+    all-severities total -- a low/moderate-only report exiting non-zero for
+    some other reason must never read as if it broke a threshold it did not
+    reach."""
+    import json as _json
+    g = _load_runner()
+    status, note = g._classify_npm_audit(
+        1, _json.dumps({"vulnerabilities": {"a": {"severity": "low"}}}), "", False)
+    assert status == "FAIL" and "real advisory report" in note
+
+    status, note = g._classify_npm_audit(
+        1, _json.dumps({
+            "vulnerabilities": {"a": {"severity": "low"}, "b": {"severity": "high"}},
+            "metadata": {"vulnerabilities": {"low": 1, "high": 1, "total": 2}},
+        }), "", False)
+    assert status == "FAIL"
+    assert "1 advisories at/above high (2 total across all severities)" in note
+
+
+def test_npm_audit_bare_5xx_digit_in_unrelated_text_does_not_mask_a_real_failure():
+    """The exact repro that caught round-1 blocker 1: a whole-blob
+    `re.search(r'\\b5\\d\\d\\b')` classified ANY bare 500-599 number as a
+    registry outage, so a corrupt lockfile's EJSONPARSE byte offset, or an
+    unrelated package version, silently became UNAVAILABLE instead of FAIL.
+    Direct classifier calls, not end-to-end, matching the round-1 reviewer's
+    own inputs."""
+    g = _load_runner()
+    status, note = g._classify_npm_audit(
+        1, "",
+        "npm error code EJSONPARSE\n"
+        "npm error Unexpected token } in JSON at position 512 while "
+        "parsing package-lock.json",
+        False)
+    assert status == "FAIL", note
+    assert "unrecognized audit failure" in note
+
+    status, note = g._classify_npm_audit(
+        1, "",
+        "npm warn deprecated foo@1.500.0\n"
+        "npm error some completely unrecognized transport failure",
+        False)
+    assert status == "FAIL", note
+
+
+def test_npm_audit_classifies_real_5xx_signals_by_line_adjacency():
+    """The three real transport shapes _audit_transport_signal recognizes,
+    each requiring its number/errno to sit on the marker's OWN line -- never
+    a whole-blob search, which is exactly what made the false positive above
+    possible."""
+    g = _load_runner()
+    status, note = g._classify_npm_audit(
+        1, "",
+        f"npm error request to https://{g.AUDIT_ADVISORY_ENDPOINT} failed, "
+        f"reason: 503", False)
+    assert status == "UNAVAILABLE" and "HTTP 503" in note
+
+    status, note = g._classify_npm_audit(
+        1, "", "npm warn audit Bad Gateway", False)
+    assert status == "UNAVAILABLE" and "HTTP 502" in note
+
+    status, note = g._classify_npm_audit(
+        1, "", "npm error network ECONNRESET", False)
+    assert status == "UNAVAILABLE" and "ECONNRESET" in note
+
+    # The same errno text on a line that is NOT an npm-error line (e.g. a
+    # test assertion echoed to stdout) must never count.
+    status, note = g._classify_npm_audit(
+        1, "", "assertion failed: expected ECONNRESET, got nothing", False)
+    assert status == "FAIL", note
+
+
+def test_npm_audit_recovers_from_two_transient_outages_as_one_row(
+        tmp_path, monkeypatch):
+    """503 twice, then a clean report: ONE result row, PASS, and the runner's
+    own bounded backoff (never npm's ~700s internal retry loop) is what
+    crossed the outage."""
+    g = _load_runner()
+    sleeps: list = []
+    monkeypatch.setattr(g.time, "sleep", lambda s: sleeps.append(s))
+    counter = tmp_path / "attempts.txt"
+    fake = _fake_npm_script(tmp_path, "fake_npm_flaky.py",
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        f"counter = Path(r'{counter}')\n"
+        "n = (int(counter.read_text()) if counter.exists() else 0) + 1\n"
+        "counter.write_text(str(n))\n"
+        "if n <= 2:\n"
+        "    print('npm warn audit 503 Service Unavailable', file=sys.stderr)\n"
+        "    print('npm error audit endpoint returned an error', file=sys.stderr)\n"
+        "    sys.exit(1)\n"
+        "print(json.dumps({'vulnerabilities': {}, "
+        "'metadata': {'vulnerabilities': {'high': 0}}}))\n"
+        "sys.exit(0)\n")
+    suite = g.Suite("npm-audit-flaky", "npm audit flaky", "npm-audit", SCRIPTS,
+                    [sys.executable, str(fake)], None)
+
+    result = g.run_suite(suite, tmp_path)
+
+    assert result.status == "PASS"
+    assert "recovered from registry outage on attempt 3" in result.note
+    assert sleeps == [20, 60]              # AUDIT_BACKOFF_S, applied twice
+    assert counter.read_text() == "3"      # exactly 3 subprocess spawns, not 2x3
+
+
+def test_npm_audit_three_transient_outages_is_unavailable_not_fail(
+        tmp_path, monkeypatch):
+    g = _load_runner()
+    sleeps: list = []
+    monkeypatch.setattr(g.time, "sleep", lambda s: sleeps.append(s))
+    fake = _fake_npm_script(tmp_path, "fake_npm_down.py",
+        "import sys\n"
+        "print('npm warn audit 503 Service Unavailable', file=sys.stderr)\n"
+        "print('npm error audit endpoint returned an error', file=sys.stderr)\n"
+        "sys.exit(1)\n")
+    suite = g.Suite("npm-audit-down", "npm audit down", "npm-audit", SCRIPTS,
+                    [sys.executable, str(fake)], None)
+
+    result = g.run_suite(suite, tmp_path)
+
+    assert result.status == "UNAVAILABLE"
+    assert result.status != "FAIL"
+    assert sleeps == [20, 60]               # bounded: 2 backoffs, 3 attempts, then stop
+    assert "NOT PROVEN BY AUDIT: registry unavailable, lockfile unchanged since" \
+        in result.note
+
+
+def test_npm_audit_worst_case_wall_is_bounded_far_below_the_old_outage_cost():
+    """The number this whole fix exists to name: 3 attempts x a bounded
+    per-attempt timeout, plus the two backoff sleeps, must stay a small
+    fraction of the ~1500s two attempts cost before this fix.
+
+    round-1 nit 1: this MUST use AUDIT_SUBPROCESS_TIMEOUT_S, the timeout that
+    actually fires (subprocess.run's hard kill), never AUDIT_FETCH_TIMEOUT_S
+    (npm's own --fetch-timeout hint, which bounds one HTTP request inside
+    npm, not the child process) — the prior version of this assertion named
+    a bound (140s) the code did not enforce (the true one was 215s at the
+    old 45s subprocess timeout)."""
+    g = _load_runner()
+    assert g.AUDIT_WORST_CASE_WALL_S == (
+        g.AUDIT_MAX_ATTEMPTS * g.AUDIT_SUBPROCESS_TIMEOUT_S + sum(g.AUDIT_BACKOFF_S))
+    assert g.AUDIT_WORST_CASE_WALL_S < 500   # ~4x headroom under 1500s / 2 attempts
+
+
+def test_scoreboard_prints_not_proven_by_audit_line_for_unavailable_result(
+        capsys, tmp_path):
+    """One annotated row in a long scoreboard is easy to miss (the FLAKED and
+    NO COVERAGE lines exist for the same reason) — UNAVAILABLE gets the same
+    treatment, and the summary counts it separately from FAIL.
+
+    round-1 blocker 3: the note text this asserts also sits inside the row's
+    own NOTE column, so a substring-anywhere-in-stdout check passed even with
+    the callout block deleted entirely (confirmed by mutation: 7 passed, 66
+    deselected, on the SAME assertion this replaces). The fix counts PRINTED
+    LINES whose own stripped text starts with the distinct "NOT PROVEN BY
+    AUDIT:" prefix — the row line always starts with the suite label, never
+    with that prefix, so only the callout block can produce one, and deleting
+    it is a real mutation kill (verified below by literally deleting it)."""
+    g = _load_runner()
+    suite_a = g.Suite("harness-audit-high", "harness npm audit (high threshold)",
+                      "npm-audit", SCRIPTS, [sys.executable, "-c", "pass"], None)
+    suite_b = g.Suite("harness-audit-other", "harness npm audit (other)",
+                      "npm-audit", SCRIPTS, [sys.executable, "-c", "pass"], None)
+    result_a = g.Result(
+        suite_a, "UNAVAILABLE", "unavailable", 42.0,
+        note=("registry unavailable (HTTP 503): "
+              "registry.npmjs.org/-/npm/v1/security/advisories/bulk "
+              "after 3 attempts; NOT PROVEN BY AUDIT: registry unavailable, "
+              "lockfile unchanged since abc123"),
+        counts={})
+    result_b = g.Result(
+        suite_b, "UNAVAILABLE", "unavailable", 7.0,
+        note="registry unavailable (HTTP 502): endpoint after 3 attempts; "
+             "lockfile unchanged since def456",
+        counts={})
+
+    g.print_scoreboard([result_a, result_b], tmp_path, 49.0)
+    out = capsys.readouterr().out
+
+    callout_lines = [ln for ln in out.splitlines()
+                     if ln.strip().startswith("NOT PROVEN BY AUDIT:")]
+    assert len(callout_lines) == 2, out
+    assert "lockfile unchanged since abc123" in callout_lines[0]
+    assert "lockfile unchanged since def456" in callout_lines[1]
+    assert "0 PASS  0 FAIL  0 SKIP  2 UNAVAILABLE" in out
+
+
+def test_scoreboard_note_column_truncates_a_very_long_note_but_keeps_it_in_the_callout(
+        capsys, tmp_path):
+    """round-1 nit 4: an untruncated NOTE column let one UNAVAILABLE row's
+    ~250-character note stretch the whole table's '='*len(line) rule to
+    match. The column truncates; the callout line below the table (asserted
+    separately above) still carries the note in full, so nothing is lost."""
+    g = _load_runner()
+    suite = g.Suite("harness-audit-high", "harness npm audit (high threshold)",
+                    "npm-audit", SCRIPTS, [sys.executable, "-c", "pass"], None)
+    long_note = "x" * 250
+    result = g.Result(suite, "UNAVAILABLE", "unavailable", 1.0,
+                      note=long_note, counts={})
+
+    g.print_scoreboard([result], tmp_path, 1.0)
+    out = capsys.readouterr().out
+
+    assert all(len(ln) < 200 for ln in out.splitlines()
+              if not ln.strip().startswith("NOT PROVEN BY AUDIT:")), out
+    assert long_note not in out.split("NOT PROVEN BY AUDIT:")[0]  # truncated in the table
+    assert long_note in out                                        # but present in the callout
+
+
+def _shard_stub_suites_with_audit(g):
+    """_shard_stub_suites plus one kind='npm-audit' stub whose cwd is the
+    REAL harness/ directory — so _lockfile_blob_sha resolves an actual git
+    blob in THIS repo rather than needing a scratch checkout, letting the
+    transitivity tests compare 'the current value' against 'a recorded
+    value' without caring what that value actually is."""
+    return _shard_stub_suites(g) + [
+        g.Suite("stub-audit", "stub audit", "npm-audit", g.HARNESS,
+                [sys.executable, "-c", "pass"], None)]
+
+
+def test_verifier_refuses_unavailable_on_a_non_audit_suite(
+        tmp_path, monkeypatch, capsys):
+    """UNAVAILABLE is legitimate ONLY for a kind='npm-audit' suite — it is
+    what run_npm_audit_suite alone ever produces, for a registry/transport
+    outage, never a lockfile finding. A shard reporting it for any other
+    suite kind is corrupt, not a legitimate audit outage, so it must be named
+    as shard-set corruption rather than silently entering the transitivity
+    path (this replaces the round-1 test that treated exactly this shape as
+    a free PROVEN — see blocker 2's design change)."""
+    g = _load_runner()
+    stubs = _shard_stub_suites(g)
+    monkeypatch.setattr(g, "build_suites", lambda: stubs)
+    _write_shard_files(g, stubs, tmp_path, statuses={"stub-alpha": "UNAVAILABLE"})
+
+    rc = g.verify_shard_results(tmp_path)
+    out = capsys.readouterr().out
+
+    assert rc == 1, out
+    assert "not an npm-audit suite" in out
+    assert "unrecognized status" not in out
+
+
+def test_verifier_unavailable_audit_suite_fails_closed_with_no_prior_proof(
+        tmp_path, monkeypatch, capsys):
+    """round-1 blocker 2: UNAVAILABLE must never become a reusable green
+    proof by itself. With no prior_proofs_dir at all, and with one that
+    exists but holds no matching candidate, the fan-in must FAIL — never the
+    bare PROVEN line — while still recognizing UNAVAILABLE as a legitimate,
+    non-corrupt status (not 'unrecognized status', not 'FAILED suites')."""
+    g = _load_runner()
+    stubs = _shard_stub_suites_with_audit(g)
+    monkeypatch.setattr(g, "build_suites", lambda: stubs)
+    _write_shard_files(g, stubs, tmp_path, statuses={"stub-audit": "UNAVAILABLE"})
+
+    rc = g.verify_shard_results(tmp_path)   # prior_proofs_dir omitted
+    out = capsys.readouterr().out
+
+    assert rc == 1, out
+    assert "unrecognized status" not in out
+    assert "FAILED suites" not in out
+    assert "PROVEN: every suite" not in out
+    assert "NOT PROVEN BY AUDIT: stub-audit unavailable" in out
+    assert "no prior gate-proof artifact" in out
+
+    empty_dir = tmp_path / "empty-prior-proofs"
+    empty_dir.mkdir()
+    rc = g.verify_shard_results(tmp_path, prior_proofs_dir=empty_dir)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "no prior gate-proof artifact" in out
+
+
+def test_verifier_proves_via_lockfile_transitivity_with_a_matching_prior_proof(
+        tmp_path, monkeypatch, capsys):
+    """The one legitimate way an UNAVAILABLE audit still exits 0: the newest
+    prior proof under prior_proofs_dir shows the EXACT SAME lockfile bytes
+    (git blob sha, not commit sha — the whole point is a byte-identical
+    lockfile on a DIFFERENT tree) already passed audit."""
+    import json as _json
+    g = _load_runner()
+    stubs = _shard_stub_suites_with_audit(g)
+    monkeypatch.setattr(g, "build_suites", lambda: stubs)
+    _write_shard_files(g, stubs, tmp_path, statuses={"stub-audit": "UNAVAILABLE"})
+    current_sha = g._lockfile_blob_sha(g.HARNESS)
+    assert current_sha, "sanity: harness/package-lock.json must be a real git blob"
+
+    prior_dir = tmp_path / "prior-proofs"
+    prior_dir.mkdir()
+    (prior_dir / "40001.json").write_text(_json.dumps({
+        "schema": g.GATE_PROOF_SCHEMA, "kind": g.GATE_PROOF_KIND,
+        "tree": "a" * 40, "head_sha": "b" * 40,
+        "catalog_fingerprint": "f" * 64, "total_suites": 1,
+        "audit_suites": [{"id": "stub-audit", "status": "PASS",
+                          "lockfile_blob_sha": current_sha}],
+        "source": {},
+    }), encoding="utf-8")
+
+    rc = g.verify_shard_results(tmp_path, prior_proofs_dir=prior_dir)
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    assert "PROVEN: every suite" not in out
+    assert "NOT PROVEN BY AUDIT: stub-audit unavailable" in out
+    assert "transitivity holds" in out
+
+
+def test_verifier_fails_transitivity_when_prior_proof_blob_sha_differs(
+        tmp_path, monkeypatch, capsys):
+    """A prior proof that PASSED the audit on DIFFERENT lockfile bytes must
+    never satisfy transitivity — the whole premise is byte-identical input,
+    never 'some earlier audit passed at some point.'"""
+    import json as _json
+    g = _load_runner()
+    stubs = _shard_stub_suites_with_audit(g)
+    monkeypatch.setattr(g, "build_suites", lambda: stubs)
+    _write_shard_files(g, stubs, tmp_path, statuses={"stub-audit": "UNAVAILABLE"})
+
+    prior_dir = tmp_path / "prior-proofs"
+    prior_dir.mkdir()
+    (prior_dir / "40001.json").write_text(_json.dumps({
+        "schema": g.GATE_PROOF_SCHEMA, "kind": g.GATE_PROOF_KIND,
+        "tree": "a" * 40, "head_sha": "b" * 40,
+        "catalog_fingerprint": "f" * 64, "total_suites": 1,
+        "audit_suites": [{"id": "stub-audit", "status": "PASS",
+                          "lockfile_blob_sha": "0" * 40}],
+        "source": {},
+    }), encoding="utf-8")
+
+    rc = g.verify_shard_results(tmp_path, prior_proofs_dir=prior_dir)
+    out = capsys.readouterr().out
+
+    assert rc == 1, out
+    assert "transitivity failed" in out
+    assert "lockfile blob" in out
+
+
+def test_lockfile_blob_sha_is_the_real_git_blob_or_empty_when_absent(tmp_path):
+    """_lockfile_blob_sha reads the exact-bytes git BLOB hash (distinct from
+    _cheap_lockfile_sha's COMMIT hash above it), matching `git rev-parse` from
+    the real checkout, and returns '' — never a placeholder like 'unknown' —
+    when there is nothing to hash, so two failures can never compare equal."""
+    g = _load_runner()
+    want = subprocess.run(
+        ["git", "-C", str(g.HARNESS), "rev-parse", "HEAD:./package-lock.json"],
+        capture_output=True, text=True, timeout=10, check=True,
+        encoding="utf-8", errors="replace").stdout.strip()
+
+    assert g._lockfile_blob_sha(g.HARNESS) == want
+    assert g._HEX40.fullmatch(want)
+    assert g._lockfile_blob_sha(tmp_path) == ""
+
+
 def test_vitest_skip_fails_gate(tmp_path):
     g = _load_runner()
     output = (
@@ -1067,6 +1479,7 @@ def test_shard_cli_rejects_incoherent_flag_combinations(tmp_path):
          "--only", "platform-static"],                            # subset shard
         ["--verify-shard-results", str(tmp_path),
          "--shard-count", "2"],                                   # mixed modes
+        ["--prior-proofs-dir", str(tmp_path)],                    # no fan-in
     )
     for extra in cases:
         proc = subprocess.run(
@@ -1457,7 +1870,7 @@ def test_checkout_tree_identity_refuses_a_non_git_directory(tmp_path):
     assert "not a usable git checkout" in problem
 
 
-def test_emit_gate_proof_writes_a_bound_schema1_document(tmp_path):
+def test_emit_gate_proof_writes_a_bound_schema2_document(tmp_path):
     g = _load_runner()
     repo = _scratch_git_checkout(tmp_path)
     out = tmp_path / "proofs" / "gate-proof.json"
@@ -1467,12 +1880,58 @@ def test_emit_gate_proof_writes_a_bound_schema1_document(tmp_path):
     assert problem == ""
     data = __import__("json").loads(out.read_text(encoding="utf-8"))
     tree, head, _ = g.checkout_tree_identity(repo)
-    assert data["schema"] == 1
+    assert data["schema"] == 2
     assert data["kind"] == "leaf-gate-proof"
     assert data["tree"] == tree
     assert data["head_sha"] == head
     assert data["catalog_fingerprint"] == "f" * 64
     assert data["total_suites"] == 5
+    # No suite_statuses given: EVERY registered audit suite still gets an
+    # entry, with status MISSING. An omitted entry was the fail-open hole
+    # (verify_gate_proof requires a PASS for every registered audit suite, so
+    # "absent" would have read as "nothing to refuse"). A MISSING entry can
+    # never carry a lockfile blob sha, so it can never be a transitivity
+    # ancestor either.
+    audit_ids = [x.id for x in g.build_suites() if x.kind == "npm-audit"]
+    assert [e["id"] for e in data["audit_suites"]] == audit_ids
+    assert {e["status"] for e in data["audit_suites"]} == {"MISSING"}
+    assert all("lockfile_blob_sha" not in e for e in data["audit_suites"])
+
+
+def test_emit_gate_proof_records_audit_suite_status_and_blob_sha_only_for_pass(
+        tmp_path, monkeypatch):
+    """audit_suites carries ONLY kind='npm-audit' suites (never the other
+    ~200), and only a PASS entry gets a lockfile_blob_sha — an UNAVAILABLE
+    entry is recorded honestly with no fresh sha, so it can never itself
+    serve as a future transitivity ancestor (see the schema-2 header note)."""
+    g = _load_runner()
+    repo = _scratch_git_checkout(tmp_path)
+    stubs = [
+        g.Suite("stub-audit", "stub audit", "npm-audit", g.HARNESS,
+                [sys.executable, "-c", "pass"], None),
+        g.Suite("stub-audit-down", "stub audit down", "npm-audit", g.HARNESS,
+                [sys.executable, "-c", "pass"], None),
+        g.Suite("stub-plain", "stub plain", "pytest", SCRIPTS,
+                [sys.executable, "-c", "pass"], 1),
+    ]
+    monkeypatch.setattr(g, "build_suites", lambda: stubs)
+    out = tmp_path / "gate-proof.json"
+    want_sha = g._lockfile_blob_sha(g.HARNESS)
+
+    problem = g.emit_gate_proof(
+        out, fingerprint="f" * 64, total=3, repo=repo,
+        suite_statuses={"stub-audit": "PASS", "stub-audit-down": "UNAVAILABLE",
+                        "stub-plain": "PASS"})
+
+    assert problem == ""
+    data = __import__("json").loads(out.read_text(encoding="utf-8"))
+    audit_by_id = {e["id"]: e for e in data["audit_suites"]}
+    assert set(audit_by_id) == {"stub-audit", "stub-audit-down"}   # never stub-plain
+    assert audit_by_id["stub-audit"] == {"id": "stub-audit", "status": "PASS",
+                                         "lockfile_blob_sha": want_sha}
+    assert audit_by_id["stub-audit-down"] == {"id": "stub-audit-down",
+                                              "status": "UNAVAILABLE"}
+    assert "lockfile_blob_sha" not in audit_by_id["stub-audit-down"]
 
 
 def test_emit_gate_proof_refuses_rather_than_fabricates(tmp_path):
@@ -1495,7 +1954,12 @@ def test_verify_gate_proof_accepts_its_own_emission(tmp_path, capsys):
     repo = _scratch_git_checkout(tmp_path)
     fingerprint = g.catalog_fingerprint(g.build_suites())
     out = tmp_path / "gate-proof.json"
-    assert g.emit_gate_proof(out, fingerprint=fingerprint, total=1, repo=repo) == ""
+    assert g.emit_gate_proof(
+        out, fingerprint=fingerprint, total=1, repo=repo,
+        # Emission now REFUSES without a PASS for every registered audit
+        # suite, so a round trip must supply them.
+        suite_statuses={s.id: "PASS" for s in g.build_suites()
+                        if s.kind == "npm-audit"}) == ""
     tree, _, _ = g.checkout_tree_identity(repo)
 
     rc = g.verify_gate_proof(out, tree)
@@ -1534,10 +1998,10 @@ def test_verify_gate_proof_refuses_every_forgery(tmp_path, capsys):
     # A non-hex expectation is a caller bug, never a pass.
     refuse("HEAD", "must be a 40-hex git tree id")
     # Wrong document type / schema.
-    refuse(tree, "not a schema-1 leaf-gate-proof",
+    refuse(tree, "not a schema-2 leaf-gate-proof",
            lambda d: d.update(kind="something-else"))
-    refuse(tree, "not a schema-1 leaf-gate-proof",
-           lambda d: d.update(schema=2))
+    refuse(tree, "not a schema-2 leaf-gate-proof",
+           lambda d: d.update(schema=1))
     # A proof whose own tree field is garbage.
     refuse(tree, "no 40-hex tree", lambda d: d.update(tree="not-hex"))
     # A proof for the right tree but a different catalog: same tree hash with
@@ -1546,6 +2010,16 @@ def test_verify_gate_proof_refuses_every_forgery(tmp_path, capsys):
            lambda d: d.update(catalog_fingerprint="0" * 64))
     refuse(tree, "catalog fingerprint differs",
            lambda d: d.pop("catalog_fingerprint"))
+    # round-1 blocker 2, requirement 1: a proof minted while (or laundered
+    # from) a registry outage must never be reused as a green skip, even
+    # though its tree and catalog fingerprint both check out.
+    refuse(tree, "PASS for every audit suite",
+           lambda d: d.update(audit_suites=[
+               {"id": "harness-audit-high", "status": "UNAVAILABLE"}]))
+    # ...and the same refusal covers an audit suite that is simply absent,
+    # which is what an evidence-free proof looks like.
+    refuse(tree, "PASS for every audit suite",
+           lambda d: d.update(audit_suites=[]))
 
     # Unreadable file.
     missing = tmp_path / "missing.json"
@@ -1599,8 +2073,8 @@ def test_fanin_emits_proof_only_on_a_proven_gate(tmp_path, monkeypatch, capsys):
     _write_shard_files(g, stubs, tmp_path)
     emitted = []
 
-    def fake_emit(path, *, fingerprint, total, repo=None):
-        emitted.append((str(path), fingerprint, total))
+    def fake_emit(path, *, fingerprint, total, repo=None, suite_statuses=None):
+        emitted.append((str(path), fingerprint, total, suite_statuses))
         return ""
 
     monkeypatch.setattr(g, "emit_gate_proof", fake_emit)
@@ -1613,7 +2087,8 @@ def test_fanin_emits_proof_only_on_a_proven_gate(tmp_path, monkeypatch, capsys):
     rc = g.main()
     out = capsys.readouterr().out
     assert rc == 0
-    assert emitted == [(str(proof_path), g.catalog_fingerprint(stubs), len(stubs))]
+    assert emitted == [(str(proof_path), g.catalog_fingerprint(stubs), len(stubs),
+                        {s.id: "PASS" for s in stubs})]
     assert "gate proof emitted" in out
 
     # A refused emission is reported but the PROVEN verdict stands.
@@ -1681,3 +2156,82 @@ def test_vitest_skip_in_a_jsx_file_that_is_not_allowlisted_still_fails(tmp_path)
 
     assert result.status == "FAIL"
     assert "non-allowlisted vitest skip" in result.note
+
+
+def _write_proof(g, tmp_path, artifact_id, blob, *, status="PASS",
+                 suite="harness-audit-high", fingerprint="fp", total=1):
+    """A schema-2 proof named the way test-gate.yml names it."""
+    import json
+    entry = {"id": suite, "status": status}
+    if status == "PASS":
+        entry["lockfile_blob_sha"] = blob
+    doc = {
+        "schema": g.GATE_PROOF_SCHEMA,
+        "kind": g.GATE_PROOF_KIND,
+        "tree": "t" * 40,
+        "head_sha": "h" * 40,
+        "catalog_fingerprint": fingerprint,
+        "total_suites": total,
+        "audit_suites": [entry] if entry["status"] != "ABSENT" else [],
+    }
+    p = tmp_path / f"{artifact_id}.json"
+    p.write_text(json.dumps(doc), encoding="utf-8")
+    return p
+
+
+def test_the_prior_proof_chosen_is_the_newest_artifact_id_not_the_newest_mtime(tmp_path):
+    """test-gate.yml downloads candidates newest-created FIRST and copies them
+    in that order, so every mtime is the copy time and mtime order is exactly
+    backwards. Written in that same order here, the newest ARTIFACT ID wins."""
+    g = _load_runner()
+    newest = _write_proof(g, tmp_path, 3000, "1" * 40)   # first written, oldest mtime
+    _write_proof(g, tmp_path, 2000, "2" * 40)
+    _write_proof(g, tmp_path, 1000, "3" * 40)            # last written, newest mtime
+    got = g._newest_proof_with_passed_audit(tmp_path, "harness-audit-high")
+    assert got is not None
+    assert got[0] == "1" * 40, got
+    assert got[1] == str(newest), got
+
+
+def test_a_prior_proof_that_cannot_be_ranked_is_skipped_not_guessed(tmp_path):
+    """A file not named <artifact_id>.json carries no creation order, so it is
+    skipped rather than treated as the newest."""
+    import json
+    g = _load_runner()
+    _write_proof(g, tmp_path, 1000, "3" * 40)
+    doc = json.loads((tmp_path / "1000.json").read_text(encoding="utf-8"))
+    doc["audit_suites"][0]["lockfile_blob_sha"] = "9" * 40
+    (tmp_path / "gate-proof-latest.json").write_text(json.dumps(doc), encoding="utf-8")
+    got = g._newest_proof_with_passed_audit(tmp_path, "harness-audit-high")
+    assert got is not None and got[0] == "3" * 40, got
+
+
+def test_a_proof_without_a_pass_for_every_audit_suite_is_never_verified(tmp_path, capsys):
+    """UNAVAILABLE, MISSING and absent all fail closed: only a PASS entry for
+    every registered audit suite makes a proof reusable as a green skip."""
+    import json
+    g = _load_runner()
+    suites = g.build_suites()
+    audit_ids = [s.id for s in suites if s.kind == "npm-audit"]
+    assert audit_ids, "the catalog must register at least one npm-audit suite"
+    fingerprint = g.catalog_fingerprint(suites)
+    # verify_gate_proof compares the DOCUMENT's tree against expect_tree; a
+    # literal is enough here and keeps the test independent of the worktree
+    # state (checkout_tree_identity returns '' on a dirty or unusual tree).
+    tree = "a1" * 20
+    for block, why in (([], "absent"),
+                       ([{"id": audit_ids[0], "status": "UNAVAILABLE"}], "unavailable"),
+                       ([{"id": audit_ids[0], "status": "MISSING"}], "missing")):
+        doc = {
+            "schema": g.GATE_PROOF_SCHEMA,
+            "kind": g.GATE_PROOF_KIND,
+            "tree": tree,
+            "head_sha": "h" * 40,
+            "catalog_fingerprint": fingerprint,
+            "total_suites": len(suites),
+            "audit_suites": block,
+        }
+        path = tmp_path / f"proof-{why}.json"
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        assert g.verify_gate_proof(path, tree) == 1, why
+        assert "PASS for every audit suite" in capsys.readouterr().out, why

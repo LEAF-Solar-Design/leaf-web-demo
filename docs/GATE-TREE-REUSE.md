@@ -42,6 +42,36 @@ and runs the full gate.
    gate (no branch protection on this plan); the skip path is fail-closed at
    every seam listed above.
 
+## Registry-outage transitivity (schema 2, 2026-09-04)
+
+`harness-audit-high` (the npm-audit suite) can report `UNAVAILABLE` instead of
+PASS/FAIL when npmjs.org's advisory endpoint is down (see `run_npm_audit_suite`
+in `run-all-gates.py`). This changes what a proof means:
+
+* A proof's `audit_suites` block records every `kind="npm-audit"` suite's
+  status, and only a PASS entry also carries the CURRENT git blob sha of that
+  suite's `package-lock.json` (`lockfile_blob_sha`) — never an UNAVAILABLE
+  entry, so an outage-time proof can never itself become a future ancestor.
+* **Probe and re-verify both refuse an UNAVAILABLE proof.** `--verify-gate-
+  proof` (called by both the probe job above and the fan-in's own re-verify
+  step) refuses any proof whose `audit_suites` carries an UNAVAILABLE status —
+  no workflow change was needed for this, since both already call the same
+  function.
+* **The fan-in itself never prints the bare PROVEN line while any suite is
+  UNAVAILABLE.** It prints `NOT PROVEN BY AUDIT: <suite> unavailable (...)`
+  instead, and exits 0 ONLY when the CURRENT lockfile blob sha equals the one
+  recorded in the newest proof under `--prior-proofs-dir` whose own
+  `audit_suites` entry for that suite is PASS — "the exact same bytes already
+  passed audit on some earlier tree." No prior-proofs directory, no matching
+  entry, or a differing blob sha all FAIL the fan-in with the same distinct
+  line. The "Download recent gate-proof artifacts" step in `test-gate.yml`
+  populates that directory (bounded, same-repo/gate-workflow provenance
+  allowlist as the probe job, best-effort — any failure there just leaves the
+  directory empty, which fails closed, never redly).
+
+This keeps the merge honest by TRANSITIVITY (same lockfile bytes, previously
+proven clean), never by assuming an outage is harmless.
+
 ## Trust boundary
 
 The proof file's self-reported `source` block is informational only.

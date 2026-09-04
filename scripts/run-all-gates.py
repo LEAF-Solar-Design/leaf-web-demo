@@ -47,6 +47,18 @@ Special handling, all documented on the scoreboard:
     duplicate runs one test file twice and can answer to two different
     expected floors at once — a scoreboard that cannot say which floor the
     gate stands on.
+  * `harness-audit-high` (kind="npm-audit") tells a real lockfile advisory
+    apart from an npmjs.org registry outage: exit 0 is PASS, exit 1 with a
+    parseable advisory JSON report is FAIL, and a registry/transport error is
+    UNAVAILABLE — retried up to AUDIT_MAX_ATTEMPTS times with backoff INSIDE
+    this one suite (never re-entering the outage through the generic
+    --retry), never counted as a shard failure, and called out on the
+    scoreboard with a "NOT PROVEN BY AUDIT" line. See run_npm_audit_suite for
+    the classification (a transport signal requires line-adjacency to its own
+    marker — never a bare 5xx digit anywhere in the output) and
+    verify_shard_results for what an UNAVAILABLE suite costs the fan-in: never
+    a free PROVEN, only a lockfile-blob-sha transitivity proof against a prior
+    PASSED audit, or a FAIL naming exactly that.
 
 USAGE
 -----
@@ -1446,7 +1458,54 @@ def build_suites() -> List[Suite]:
               # printed `scripts test_gate_runner.py  >=60  66  PASS` with no
               # skip note; a local run on 237b90c0 agrees at 66 executed, 0
               # skipped.
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 66),
+              # 66 -> 73 (fix/gate-audit-registry-outage, round 1, 2026-09-04):
+              # +7 for the harness-audit-high registry-outage fix -- clean/
+              # real-advisory/recovers-after-two-outages/still-UNAVAILABLE-
+              # after-three cases, the named worst-case-wall constant, the
+              # scoreboard's NOT PROVEN BY AUDIT line, and the shard fan-in
+              # treating UNAVAILABLE as not-FAILED.
+              # 73 -> 82 (same branch, round-1 REVIEW FIX, 2026-09-04): +9 for
+              # the three round-1 blockers plus the nits, none of which moved
+              # this floor when they landed:
+              #   blocker 1 (fail-open classifier) +3: the exact EJSONPARSE/
+              #     package-version false-positive repro, the four real
+              #     line-adjacent transport signals, the severity-aware FAIL
+              #     count (folds in nit 5)
+              #   blocker 2 (UNAVAILABLE became a reusable green proof) +5:
+              #     emit_gate_proof's audit_suites + lockfile_blob_sha,
+              #     verify_gate_proof refusing an UNAVAILABLE audit suite, the
+              #     fan-in refusing a non-npm-audit UNAVAILABLE as corruption,
+              #     failing closed with no prior proof, and proving via
+              #     lockfile-blob transitivity against a matching one
+              #   blocker 3 (vacuous scoreboard-line test) +1: asserting the
+              #     "NOT PROVEN BY AUDIT:" prefix starts its OWN printed line
+              #     exactly once per row, which a real mutation (deleting the
+              #     callout block) now turns red
+              #   nit 4 (NOTE column ballooning the whole table) +0 test but
+              #     the truncation is pinned by the blocker-3 rewrite's sibling
+              #     assertion; _lockfile_blob_sha's own direct pin: +1
+              # 82 -> 85 (same branch, round-2 REVIEW FIX, 2026-09-04): +3
+              # for the round-2 blocker, which was that the SHIPPED CI
+              # wiring ranked prior proofs backwards. test-gate.yml lists
+              # candidates newest-created FIRST and copies them in that
+              # order, so every file mtime is its copy time and mtime order
+              # is exactly reversed; ranking now reads the artifact id out
+              # of the <artifact_id>.json name the workflow writes.
+              #   +1 the newest ARTIFACT ID wins over the newest mtime,
+              #     written in the order the workflow copies them so the
+              #     old ranking would pick the oldest candidate
+              #   +1 a filename that carries no artifact id is SKIPPED, not
+              #     guessed newest
+              #   +1 a proof without a PASS for EVERY registered audit suite
+              #     is never verified (absent, UNAVAILABLE and MISSING all
+              #     refuse), which is the other half of the same blocker
+              # Local run on this tree (worktree C:/tmp/leaf-gate-audit):
+              # 85 passed, 0 failed, in 25.58s. Wall time is NOT a contract:
+              # three earlier runs of this same suite on this host measured
+              # 94s, 140s and 356s, entirely tracking how many other lanes
+              # were building at the time. The count is the contract; the
+              # clock is not.
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 85),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
@@ -1583,8 +1642,21 @@ def build_suites() -> List[Suite]:
               [_npx(), "tsc", "--noEmit"], None),
         Suite("harness-tsc-build", "harness npx tsc -p tsconfig.build.json", "tsc", HARNESS,
               [_npx(), "tsc", "-p", "tsconfig.build.json"], None),
-        Suite("harness-audit-high", "harness npm audit (high threshold)", "script", HARNESS,
-              [_npm(), "audit", "--audit-level=high"], None),
+        # kind="npm-audit" (not "script"): the advisory-bulk registry endpoint
+        # has real outages, and a plain FAIL cannot tell "the lockfile has a
+        # real advisory" apart from "npmjs.org answered 503 this minute". See
+        # run_npm_audit_suite / _classify_npm_audit for the classification and
+        # bounded-backoff contract (worst case AUDIT_WORST_CASE_WALL_S = 140s).
+        # --fetch-retries=0 + --fetch-timeout bound ONE npm attempt so this
+        # runner's own backoff is what retries, not npm's (default
+        # fetch-timeout=300000ms x fetch-retries=2 measured the ~700-840s
+        # shard this fix exists to close). --json gives a parseable advisory
+        # report so a real finding is never confused with a transport error.
+        Suite("harness-audit-high", "harness npm audit (high threshold)",
+              "npm-audit", HARNESS,
+              [_npm(), "audit", "--audit-level=high", "--json", "--no-fund",
+               "--fetch-retries=0", f"--fetch-timeout={AUDIT_FETCH_TIMEOUT_S * 1000}"],
+              None),
         Suite("web-customization-check", "web customization static check", "script", WEB,
               [_npm(), "run", "check:customization"], None),
         Suite("web-customize-panel-check", "R7 self-edit panel boundary check", "script", WEB,
@@ -1912,6 +1984,282 @@ def parse_vitest(text: str) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# npm audit: registry-outage-tolerant classification (harness-audit-high)
+# --------------------------------------------------------------------------- #
+# The advisory-bulk endpoint (registry.npmjs.org/-/npm/v1/security/advisories/bulk)
+# has real outages: 503 Service Unavailable, "npm error audit endpoint returned
+# an error". That is NOT a lockfile finding, but before this fix the runner
+# could not tell the difference: npm's OWN internal retry loop (default
+# fetch-retries=2, fetch-timeout=300000ms) turned one outage into a ~700-840s
+# shard, the runner's generic --retry re-ran the whole thing once more
+# immediately into the same outage, and the suite reported a plain FAIL --
+# measured 2026-09-04 on PR #989 (run 33840004101), PR #987 (run 33859010815,
+# twice), and PR #1004 (run 33855837981), each ~15 minutes of runner time for
+# a result that said nothing about the dependency tree.
+#
+# Fix: classify every attempt as PASS (exit 0) / FAIL (a JSON advisory report
+# at/above the level) / UNAVAILABLE (registry or transport error, no usable
+# JSON report) and retry ONLY the UNAVAILABLE case, bounded, entirely inside
+# ONE run_suite() call so the outer --retry never re-enters the same outage.
+# npm's own retry loop is disabled (--fetch-retries=0) and its per-attempt
+# wait is capped (--fetch-timeout) so a single attempt cannot itself balloon;
+# this runner does the backoff instead.
+#
+# Worst-case wall, named so a regression against it reads like a failing test.
+# This MUST use the subprocess hard-kill (AUDIT_SUBPROCESS_TIMEOUT_S), never
+# npm's own --fetch-timeout hint: --fetch-timeout bounds one HTTP request
+# inside npm, not the child process, so it is not what actually stops a stuck
+# attempt. A version of this constant computed from AUDIT_FETCH_TIMEOUT_S
+# (140s) named a bound the code did not enforce (round-1 nit 1); this is the
+# real one:
+#   AUDIT_MAX_ATTEMPTS * AUDIT_SUBPROCESS_TIMEOUT_S + sum(AUDIT_BACKOFF_S)
+#   =  3 * 90s                  + (20s + 60s)                = 350s
+# against the ~1500s two attempts cost today (~4x headroom).
+AUDIT_MAX_ATTEMPTS = 3
+AUDIT_BACKOFF_S: tuple[int, ...] = (20, 60)   # sleep before internal attempt 2, 3
+AUDIT_FETCH_TIMEOUT_S = 20                    # --fetch-timeout bound per attempt
+# 45s measured too thin (round-1 nit 2): a healthy attempt through this runner
+# took 22.8s, and the raw command 7.6s-15.0s; 45s left under 2x margin over a
+# real, non-outage run under CI load, which would misclassify a merely SLOW
+# registry as UNAVAILABLE. 90s keeps ~4x margin over the slowest healthy
+# measurement while staying a small fraction of npm's own ~700-840s internal
+# retry loop this fix exists to bound.
+AUDIT_SUBPROCESS_TIMEOUT_S = 90                # hard safety net if npm ignores it
+AUDIT_WORST_CASE_WALL_S = (AUDIT_MAX_ATTEMPTS * AUDIT_SUBPROCESS_TIMEOUT_S
+                           + sum(AUDIT_BACKOFF_S))  # == 350
+AUDIT_ADVISORY_ENDPOINT = "registry.npmjs.org/-/npm/v1/security/advisories/bulk"
+# Real reason phrases npm itself prints next to a 5xx transport failure. Used
+# ONLY as a same-LINE co-occurrence check (see _audit_transport_signal) —
+# never a whole-blob substring test — specifically so this can never fire on
+# an unrelated 5xx-shaped number (an EJSONPARSE byte offset, a package version
+# like 1.500.0) that happens to share a digit pattern with a real HTTP status.
+_AUDIT_REASON_PHRASES: tuple[tuple[str, str], ...] = (
+    ("Service Unavailable", "503"),
+    ("Bad Gateway", "502"),
+    ("Gateway Timeout", "504"),
+    ("Internal Server Error", "500"),
+)
+_AUDIT_ERRNOS = ("ECONNRESET", "ETIMEDOUT", "ECONNREFUSED", "EAI_AGAIN", "ENOTFOUND")
+_AUDIT_HTTP5XX = re.compile(r"\b5\d\d\b")
+
+
+def _audit_transport_signal(combined: str) -> Optional[str]:
+    """A REAL registry/transport signal, or None. Every branch below requires
+    the number or errno to sit on the SAME LINE as its own marker — never a
+    whole-blob regex search — because round 1 caught exactly that shape of
+    bug: `_AUDIT_HTTP5XX.search(combined)` matched a bare 500-599 number
+    ANYWHERE in npm's output, so an EJSONPARSE byte offset ("...at position
+    512...") or a package version ("foo@1.500.0") reclassified a real,
+    non-registry failure as a registry outage. The four signal shapes here are
+    exactly the ones _classify_npm_audit's docstring promises and nothing
+    more; an unrecognized failure still falls through to FAIL."""
+    # (a) npm's own explicit "the audit endpoint itself errored" text — this
+    # phrase is npm's, never emitted for any other condition, so it needs no
+    # line-adjacency check of its own.
+    if "audit endpoint returned an error" in combined:
+        return "audit endpoint returned an error"
+    for line in combined.splitlines():
+        # (b1) an HTTP status on the SAME LINE as the advisories endpoint URL.
+        if AUDIT_ADVISORY_ENDPOINT in line:
+            m = _AUDIT_HTTP5XX.search(line)
+            if m:
+                return f"HTTP {m.group(0)}"
+        # (b2) an "npm warn audit" / "npm error" line carrying a real HTTP
+        # reason phrase — the digit on that SAME line if npm printed one,
+        # else the phrase's own mapped code.
+        if "npm warn audit" in line or "npm error" in line:
+            for phrase, code in _AUDIT_REASON_PHRASES:
+                if phrase in line:
+                    m = _AUDIT_HTTP5XX.search(line)
+                    return f"HTTP {m.group(0) if m else code}"
+        # (c) a known errno, but ONLY on an npm error line — the same errno
+        # text inside, say, a test's own assertion message must never count.
+        if "npm error" in line:
+            for errno in _AUDIT_ERRNOS:
+                if errno in line:
+                    return f"errno {errno}"
+    return None
+
+
+def _classify_npm_audit(rc: int, stdout: str, stderr: str,
+                        timed_out: bool) -> tuple[str, str]:
+    """Classify one npm-audit attempt. Never guesses: a real JSON advisory
+    report wins on its own terms regardless of exit code text, and an
+    unrecognized failure with no report and no transport signal FAILS closed
+    rather than being swallowed as merely unavailable."""
+    if rc == 0:
+        return "PASS", ""
+    report = None
+    if stdout.strip():
+        try:
+            candidate = json.loads(stdout)
+        except json.JSONDecodeError:
+            candidate = None
+        if isinstance(candidate, dict) and (
+                "vulnerabilities" in candidate or "advisories" in candidate):
+            report = candidate
+    if report is not None:
+        # metadata.vulnerabilities carries per-severity counts PLUS its own
+        # "total" key (all severities, not just at/above --audit-level) --
+        # summing every value would double-count total against itself. This
+        # suite's argv hardcodes --audit-level=high (see its Suite(...)
+        # registration), so the count that answers "did this cross the gate's
+        # own threshold" is high+critical, not the all-severities total: a
+        # report with only low/moderate findings that exits non-zero for some
+        # OTHER reason must never read as if it broke a threshold it did not
+        # reach (round-1 nit 5).
+        vulns = report.get("metadata", {}).get("vulnerabilities", {})
+        if isinstance(vulns, dict) and isinstance(vulns.get("total"), int):
+            total = vulns["total"]
+        elif isinstance(vulns, dict):
+            total = sum(v for k, v in vulns.items()
+                       if k != "total" and isinstance(v, int))
+        else:
+            total = None
+        if isinstance(vulns, dict):
+            at_or_above = sum(v for k, v in vulns.items()
+                              if k in ("high", "critical") and isinstance(v, int))
+        else:
+            at_or_above = None
+        if total is not None and at_or_above is not None:
+            detail = (f"{at_or_above} advisories at/above high "
+                      f"({total} total across all severities)")
+        elif total is not None:
+            detail = f"{total} advisories reported (all severities)"
+        else:
+            detail = "advisories reported"
+        return "FAIL", f"real advisory report: {detail}"
+    combined = f"{stdout}\n{stderr}"
+    if timed_out:
+        return "UNAVAILABLE", (
+            f"registry unavailable (no response within "
+            f"{AUDIT_SUBPROCESS_TIMEOUT_S}s): {AUDIT_ADVISORY_ENDPOINT}")
+    signal = _audit_transport_signal(combined)
+    if signal is not None:
+        return "UNAVAILABLE", f"registry unavailable ({signal}): {AUDIT_ADVISORY_ENDPOINT}"
+    last = next((ln for ln in combined.strip().splitlines()[::-1] if ln.strip()), "")
+    return "FAIL", f"unrecognized audit failure (exit {rc}, no JSON report): {last[:160]}"
+
+
+def _cheap_lockfile_sha(cwd: Path) -> str:
+    """Best-effort last commit that touched this suite's lockfile, purely to
+    make the UNAVAILABLE note answer 'has the tree moved since the last green
+    run' without a network call. Never raises, never blocks a real result on
+    a git hiccup: any failure just reports 'unknown'."""
+    lockfile = cwd / "package-lock.json"
+    if not lockfile.exists():
+        return "unknown"
+    try:
+        out = subprocess.run(
+            ["git", "log", "-1", "--format=%H", "--", "package-lock.json"],
+            cwd=str(cwd), capture_output=True, text=True, timeout=5,
+            encoding="utf-8", errors="replace",
+        )
+        sha = out.stdout.strip()
+        return sha if (out.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}", sha)) \
+            else "unknown"
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+
+
+def _lockfile_blob_sha(cwd: Path) -> str:
+    """The git BLOB hash of cwd/package-lock.json at HEAD — the exact-bytes
+    identity the lockfile-transitivity rule is built on (see verify_shard_
+    results' UNAVAILABLE handling), distinct from _cheap_lockfile_sha's COMMIT
+    hash above: two different commits (different trees) can carry the
+    byte-identical lockfile, and it is exactly that case the transitivity rule
+    exists to recognize — "same audit input, already proven clean, on some
+    EARLIER tree" — so a commit hash would refuse a match a blob hash allows.
+    Never raises, returns '' (never a placeholder string) on any failure, so a
+    caller comparing shas never gets a false-equal from two unreadable results
+    both defaulting to the same sentinel."""
+    lockfile = cwd / "package-lock.json"
+    if not lockfile.exists():
+        return ""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "HEAD:./package-lock.json"],
+            capture_output=True, text=True, timeout=5,
+            encoding="utf-8", errors="replace",
+        )
+        sha = out.stdout.strip()
+        return sha if (out.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}", sha)) \
+            else ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def _run_npm_audit_attempt(argv: List[str], cwd: Path, logf, attempt: int) -> tuple:
+    """One bounded npm-audit subprocess call. Returns
+    (rc, stdout, stderr, timed_out, spawn_err)."""
+    spawn_command, use_shell, shell_executable = normalize_spawn_command(argv)
+    logf.write(f"$ (cwd={cwd}) {' '.join(argv)}\n"
+              f"$ internal attempt {attempt}/{AUDIT_MAX_ATTEMPTS} "
+              f"@ {time.strftime('%Y-%m-%dT%H:%M:%S')}\n")
+    logf.flush()
+    timed_out = False
+    spawn_err = ""
+    try:
+        proc = subprocess.run(
+            spawn_command, cwd=str(cwd), env=clean_env(),
+            capture_output=True, text=True, timeout=AUDIT_SUBPROCESS_TIMEOUT_S,
+            shell=use_shell, executable=shell_executable,
+            encoding="utf-8", errors="replace",
+        )
+        stdout, stderr, rc = proc.stdout or "", proc.stderr or "", proc.returncode
+    except subprocess.TimeoutExpired as exc:
+        stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
+        stderr = ((exc.stderr or "") if isinstance(exc.stderr, str) else "") + \
+            f"\n[TIMEOUT >{AUDIT_SUBPROCESS_TIMEOUT_S}s]"
+        rc, timed_out = 124, True
+    except OSError as exc:
+        spawn_err = f"{type(exc).__name__}: {str(exc)[:160]}"
+        stdout, stderr, rc = "", f"[SPAWN FAILURE] {spawn_err}", 127
+    logf.write(stdout + "\n" + stderr + "\n\n")
+    logf.flush()
+    return rc, stdout, stderr, timed_out, spawn_err
+
+
+def run_npm_audit_suite(suite: Suite, log_path: Path) -> Result:
+    """kind == 'npm-audit': up to AUDIT_MAX_ATTEMPTS bounded attempts with
+    backoff between UNAVAILABLE (registry outage) results, all inside this one
+    call so the runner's generic --retry (immediate, no backoff) never
+    re-enters the same outage. A real advisory report FAILS on the first
+    attempt, exactly as before; only UNAVAILABLE is retried."""
+    argv = [str(a) for a in suite.argv]
+    t0 = time.perf_counter()
+    status, note = "FAIL", "no attempt executed"
+    with open(log_path, "w", encoding="utf-8", errors="replace") as logf:
+        for i in range(1, AUDIT_MAX_ATTEMPTS + 1):
+            rc, stdout, stderr, timed_out, spawn_err = _run_npm_audit_attempt(
+                argv, suite.cwd, logf, i)
+            if spawn_err:
+                status, note = "FAIL", f"spawn failure: {spawn_err}"
+            else:
+                status, note = _classify_npm_audit(rc, stdout, stderr, timed_out)
+            if status != "UNAVAILABLE":
+                break
+            if i < AUDIT_MAX_ATTEMPTS:
+                backoff = AUDIT_BACKOFF_S[i - 1]
+                logf.write(f"[UNAVAILABLE attempt {i}/{AUDIT_MAX_ATTEMPTS}: {note}; "
+                          f"retrying in {backoff}s]\n\n")
+                logf.flush()
+                time.sleep(backoff)
+        seconds = time.perf_counter() - t0
+        if status == "UNAVAILABLE":
+            sha = _cheap_lockfile_sha(suite.cwd)
+            note = (f"{note} after {AUDIT_MAX_ATTEMPTS} attempts; "
+                    f"NOT PROVEN BY AUDIT: registry unavailable, lockfile "
+                    f"unchanged since {sha}")
+        elif status == "PASS" and i > 1:
+            note = f"recovered from registry outage on attempt {i}/{AUDIT_MAX_ATTEMPTS}"
+        logf.write((note or "(no note)") + "\n")
+    return Result(suite, status,
+                  {"PASS": "ok", "FAIL": "err", "UNAVAILABLE": "unavailable"}[status],
+                  seconds, note=note, log_path=log_path, counts={})
+
+
+# --------------------------------------------------------------------------- #
 # runner
 # --------------------------------------------------------------------------- #
 def reset_authored_tools(log_dir: Path) -> str:
@@ -1950,6 +2298,14 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
         return Result(suite, "SKIP", "skip", 0.0,
                       note=f"opt-in: set {suite.opt_in_env}=1 (needs Docker)",
                       log_path=None)
+
+    # npm-audit runs its OWN bounded, backed-off attempt loop (see
+    # run_npm_audit_suite): a registry outage must never masquerade as a
+    # lockfile finding, and it must never re-enter the same outage through the
+    # generic --retry below. This bypasses the fault-injection drill and the
+    # generic subprocess path entirely; a real advisory report still FAILS.
+    if suite.kind == "npm-audit":
+        return run_npm_audit_suite(suite, log_path)
 
     pre_note = ""
     if suite.reset_authored:
@@ -2410,8 +2766,33 @@ def catalog_fingerprint(suites: List[Suite]) -> str:
 # source, so the consuming workflow establishes provenance from the artifact
 # listing's own workflow_run metadata (same-repository origin, gate-workflow
 # path) BEFORE this verifier ever opens the file.
+#
+# SCHEMA 2 (this fix, 2026-09-04): a proof now also carries `audit_suites`, one
+# entry per kind="npm-audit" suite this run observed — {id, status, and, ONLY
+# when status is PASS, lockfile_blob_sha}. Two rules this buys, both enforced
+# by CODE, not by convention:
+#   1. verify_gate_proof REFUSES any proof whose audit_suites carries a
+#      status of UNAVAILABLE. A registry outage must never become a reusable
+#      green skip — this is the one check standing between "npmjs.org was
+#      down for five minutes" and "the audit gate silently never runs again
+#      for 30 days" (round-1 blocker 2). It runs inside the SAME function the
+#      probe job and the fan-in's own re-verify step both already call, so
+#      neither needed a workflow change to gain this refusal.
+#   2. A proof can only ever be an ancestor for the transitivity rule in
+#      verify_shard_results (an UNAVAILABLE audit this run, but the exact same
+#      lockfile bytes already passed audit on some earlier tree) when its
+#      OWN audit_suites entry for that suite id is PASS. An UNAVAILABLE
+#      audit-suite status is recorded here too (never laundered into PASS),
+#      but it carries no lockfile_blob_sha and so can never itself serve as
+#      the next build's ancestor — the chain can only ever be exactly one
+#      real green run long, never an indefinite string of "outage, but
+#      blessed by the last outage" proofs.
+# Bumping the schema also means an OLD schema-1 proof (minted before this fix)
+# is refused outright rather than silently trusted with an assumption about
+# fields it never wrote — the correct direction for a proof format gaining a
+# new required check.
 # --------------------------------------------------------------------------- #
-GATE_PROOF_SCHEMA = 1
+GATE_PROOF_SCHEMA = 2
 GATE_PROOF_KIND = "leaf-gate-proof"
 _HEX40 = re.compile(r"[0-9a-f]{40}")
 
@@ -2451,14 +2832,45 @@ def checkout_tree_identity(repo: Path = REPO) -> tuple[str, str, str]:
 
 
 def emit_gate_proof(path: Path, *, fingerprint: str, total: int,
-                    repo: Path = REPO) -> str:
+                    repo: Path = REPO,
+                    suite_statuses: Optional[dict[str, str]] = None) -> str:
     """Write the tree-bound proof document. Returns '' on success, else the
     reason emission was REFUSED. Never raises and never fabricates: a refusal
     only costs the next identical-tree build its skip (it runs the full gate),
-    so the caller must not turn a refusal into a red verdict."""
+    so the caller must not turn a refusal into a red verdict.
+
+    `suite_statuses` is the {suite_id: status} map this run observed (from the
+    shard result files); only entries for kind="npm-audit" suites are ever
+    written out, as `audit_suites`, and only a PASS entry also carries the
+    CURRENT lockfile_blob_sha (see _lockfile_blob_sha) — an UNAVAILABLE entry
+    is recorded honestly but with no blob sha, so it can never serve as a
+    transitivity ancestor. EVERY registered kind="npm-audit" suite gets an
+    entry, including MISSING when the map is None or lacks that id (an older
+    call site, or a suite this run never touched): verify_gate_proof requires
+    a PASS for every one of them, so an omitted entry would read as "nothing
+    to refuse" and hand out a green skip. Never a fabricated PASS."""
     tree, head, problem = checkout_tree_identity(repo)
     if problem:
         return problem
+    audit_suites: list[dict] = []
+    statuses = suite_statuses or {}
+    for s in build_suites():
+        if s.kind != "npm-audit":
+            continue
+        # An HONEST RECORD, one entry per registered audit suite, always:
+        # PASS (with the lockfile blob sha that makes transitivity possible),
+        # UNAVAILABLE for a registry outage, or MISSING when this run never
+        # reported the suite at all. The entry is never omitted, because
+        # verify_gate_proof requires a PASS for EVERY registered audit suite
+        # and an absent entry would otherwise read as "nothing to refuse".
+        # Minting stays honest; refusing the REUSE is verify's job.
+        status = statuses.get(s.id) or "MISSING"
+        entry: dict = {"id": s.id, "status": status}
+        if status == "PASS":
+            sha = _lockfile_blob_sha(s.cwd)
+            if sha:
+                entry["lockfile_blob_sha"] = sha
+        audit_suites.append(entry)
     payload = {
         "schema": GATE_PROOF_SCHEMA,
         "kind": GATE_PROOF_KIND,
@@ -2466,6 +2878,7 @@ def emit_gate_proof(path: Path, *, fingerprint: str, total: int,
         "head_sha": head,
         "catalog_fingerprint": fingerprint,
         "total_suites": total,
+        "audit_suites": audit_suites,
         # Informational ONLY. Provenance is established by the consuming
         # workflow from the artifact's workflow_run metadata; nothing may
         # trust this self-reported block.
@@ -2488,8 +2901,17 @@ def emit_gate_proof(path: Path, *, fingerprint: str, total: int,
 
 def verify_gate_proof(proof_path: Path, expect_tree: str) -> int:
     """Exit code for --verify-gate-proof: 0 only when the document is a
-    schema-1 tree-bound gate proof whose tree equals `expect_tree` AND whose
-    catalog fingerprint equals the one THIS checkout derives. Runs nothing.
+    schema-2 tree-bound gate proof whose tree equals `expect_tree`, whose
+    catalog fingerprint equals the one THIS checkout derives, AND whose
+    audit_suites carries no UNAVAILABLE status. Runs nothing.
+
+    The UNAVAILABLE check is requirement (1) of the round-1 blocker-2 fix: a
+    registry outage must never become a reusable green skip. It runs here,
+    inside the ONE function both the reuse probe and the fan-in's own
+    tree-identity re-verify step call, so neither needed a workflow change —
+    a proof minted while npmjs.org was down (or shown provably unchanged only
+    via the lockfile-transitivity rule in verify_shard_results) can never
+    itself be replayed as "the audit already ran clean here".
 
     The fingerprint check is not redundant with tree equality even though the
     catalog is a pure function of the tree: it is what makes that dependence
@@ -2513,7 +2935,7 @@ def verify_gate_proof(proof_path: Path, expect_tree: str) -> int:
         return 1
     if not isinstance(data, dict) or data.get("schema") != GATE_PROOF_SCHEMA \
             or data.get("kind") != GATE_PROOF_KIND:
-        print("NOT VERIFIED: not a schema-1 leaf-gate-proof document")
+        print("NOT VERIFIED: not a schema-2 leaf-gate-proof document")
         return 1
     tree = data.get("tree")
     if not (isinstance(tree, str) and _HEX40.fullmatch(tree)):
@@ -2532,6 +2954,27 @@ def verify_gate_proof(proof_path: Path, expect_tree: str) -> int:
         print("NOT VERIFIED: proof's catalog fingerprint differs from the one "
               "this checkout derives (a different catalog, or a proof minted "
               "from a differently-rooted checkout); refusing to reuse")
+        return 1
+    # EVERY registered audit suite must carry a PASS entry. Refusing only
+    # UNAVAILABLE would let an absent entry (or an empty list) read as
+    # "nothing to refuse" and hand a reusable green skip to a proof that
+    # never proved the lockfile clean.
+    audit_suites = data.get("audit_suites")
+    audit_suites = audit_suites if isinstance(audit_suites, list) else []
+    passed = {e.get("id") for e in audit_suites
+              if isinstance(e, dict) and e.get("status") == "PASS"}
+    not_passed = []
+    for s_ in suites:
+        if s_.kind != "npm-audit" or s_.id in passed:
+            continue
+        seen = next((e.get("status") for e in audit_suites
+                     if isinstance(e, dict) and e.get("id") == s_.id), None)
+        not_passed.append(f"{s_.id}={seen or 'absent'}")
+    if not_passed:
+        print(f"NOT VERIFIED: proof does not carry a PASS for every audit "
+              f"suite ({', '.join(not_passed)}); a registry-outage or "
+              f"evidence-free proof is never reused as a green skip, the "
+              f"next build must re-run the gate")
         return 1
     src = data.get("source") if isinstance(data.get("source"), dict) else {}
     print(f"VERIFIED: gate proof binds tree {tree} on catalog fingerprint "
@@ -2594,9 +3037,102 @@ def write_result_json(path: str, *, fingerprint: str, total: int,
     out.write_text(json.dumps(payload, indent=1), encoding="utf-8")
 
 
-def verify_shard_results(results_dir: Path) -> int:
+def _newest_proof_with_passed_audit(prior_proofs_dir: Path, suite_id: str
+                                    ) -> Optional[tuple[str, str, str]]:
+    """(blob_sha, source_path, tree) from the NEWEST document under
+    prior_proofs_dir that is a schema-2 leaf-gate-proof carrying a PASS
+    entry for suite_id in its audit_suites -- or None. Deliberately looks at
+    ONLY the single newest such file, never falls back to an older one that
+    might happen to match: an attacker (or an honest but stale cache) citing
+    an ancient proof must never satisfy this on a technicality, and "the
+    newest artifact the workflow can see" is exactly what the CI wiring
+    downloads into this directory (see test-gate.yml's "Download recent
+    gate-proof artifacts" step).
+
+    NEWEST IS THE ARTIFACT ID IN THE FILE NAME, never the file mtime. That
+    step downloads candidates newest-created FIRST and copies them in that
+    order, so every mtime is the COPY time and mtime order is exactly
+    backwards (measured 2026-09-04: the oldest-created proof won). GitHub
+    artifact ids increase with creation, and the step names each file
+    "<artifact_id>.json", so the id IS the creation order and it survives
+    any copy. A file whose stem is not an integer cannot be ranked and is
+    SKIPPED rather than guessed at: unrankable is not newest.
+
+    blob_sha is '' (not None) when that file's
+    PASS entry carries no lockfile_blob_sha -- a caller comparing shas must
+    treat that as a non-match, never a wildcard. Never raises: an unreadable
+    directory or a corrupt file is skipped exactly like verify_shard_results'
+    own shard parse loop, and the fail-closed direction is always "no match"."""
+    try:
+        ranked: list[tuple[int, Path]] = []
+        for candidate in prior_proofs_dir.rglob("*.json"):
+            stem = candidate.stem
+            if not stem.isdigit():
+                print(f"prior gate proof {candidate.name} is not named "
+                      f"<artifact_id>.json; cannot rank it by creation, "
+                      f"skipping", file=sys.stderr)
+                continue
+            ranked.append((int(stem), candidate))
+        paths = [c for _, c in sorted(ranked, key=lambda pair: pair[0],
+                                      reverse=True)]
+    except OSError:
+        return None
+    for p in paths:
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not (isinstance(data, dict) and data.get("schema") == GATE_PROOF_SCHEMA
+                and data.get("kind") == GATE_PROOF_KIND):
+            continue
+        for e in data.get("audit_suites", []) or []:
+            if (isinstance(e, dict) and e.get("id") == suite_id
+                    and e.get("status") == "PASS"):
+                sha = e.get("lockfile_blob_sha")
+                return (sha if isinstance(sha, str) else "", str(p),
+                       str(data.get("tree", "?")))
+    return None
+
+
+def _shard_suite_statuses(results_dir: Path) -> dict[str, str]:
+    """Best-effort {suite_id: status} straight from the schema-1 shard result
+    files under results_dir, for emit_gate_proof's audit_suites block. Reads
+    the same files verify_shard_results already proved complete; never
+    raises, and a missing/corrupt file just costs that file's entries, same
+    tolerance as the fan-in's own parse loop."""
+    out: dict[str, str] = {}
+    for p in sorted(results_dir.rglob("*.json")):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not (isinstance(data, dict) and data.get("schema") == 1):
+            continue
+        for e in data.get("results", []) or []:
+            if isinstance(e, dict) and isinstance(e.get("id"), str) \
+                    and isinstance(e.get("status"), str):
+                out[e["id"]] = e["status"]
+    return out
+
+
+def verify_shard_results(results_dir: Path, *,
+                         prior_proofs_dir: Optional[Path] = None) -> int:
     """Fan-in: prove the shard set covered the exact catalog, exactly once,
-    on the same tree, and everything passed. Exit 0 only on that proof.
+    on the same tree, and everything passed. Exit 0 only on that proof — WITH
+    ONE EXCEPTION, and it is never a free pass: an UNAVAILABLE npm-audit
+    suite (a registry/transport outage, never a lockfile finding — see
+    run_npm_audit_suite) never prints the plain PROVEN line. Instead this
+    prints "NOT PROVEN BY AUDIT: <suite> unavailable (<reason>)" and exits 0
+    ONLY when the audit's own input is provably unchanged: the CURRENT git
+    blob sha of the suite's package-lock.json equals the blob sha recorded in
+    the NEWEST proof under `prior_proofs_dir` whose audit_suites entry for
+    that suite id is PASS (see _newest_proof_with_passed_audit and emit_gate_
+    proof's schema-2 note above). No prior_proofs_dir, no matching file, or a
+    differing blob sha all FAIL the fan-in with the same distinct line — this
+    keeps the merge honest by TRANSITIVITY (same lockfile bytes, previously
+    proven clean on some earlier tree) and never by assumption. UNAVAILABLE
+    on any OTHER suite kind is treated as shard corruption: that status is
+    legitimate only for kind="npm-audit".
 
     Every check here exists because its absence is a silent hole:
       * missing/duplicate shard  -> a slice of the catalog never ran
@@ -2676,10 +3212,14 @@ def verify_shard_results(results_dir: Path) -> int:
             # Statuses are an allowlist, not a denylist: rejecting only the
             # literal FAIL would let a corrupt file carrying any OTHER value
             # (say NOT_RUN) count as complete passing coverage — fail-open in
-            # the acceptance instrument (sol-critic #436 round 1).
+            # the acceptance instrument (sol-critic #436 round 1). UNAVAILABLE
+            # (a registry/transport outage on an audit-style suite, never a
+            # lockfile finding) is recognized alongside PASS/FAIL/SKIP; the
+            # FAIL-only check below is what keeps it from ever counting as a
+            # failed shard.
             unknown = [f"{e.get('id')}={e.get('status')!r}"
                        for e in entries
-                       if e.get("status") not in ("PASS", "FAIL", "SKIP")]
+                       if e.get("status") not in ("PASS", "FAIL", "SKIP", "UNAVAILABLE")]
             if unknown:
                 problems.append(
                     f"shard {i}: unrecognized status(es): {', '.join(unknown)}")
@@ -2715,6 +3255,12 @@ def verify_shard_results(results_dir: Path) -> int:
                     problems.append(
                         f"shard {i}: {suite.id} SKIP but the suite has no "
                         f"suite-level skip gate")
+                elif status == "UNAVAILABLE" and suite.kind != "npm-audit":
+                    problems.append(
+                        f"shard {i}: {suite.id} UNAVAILABLE but is not an "
+                        f"npm-audit suite (that status is legitimate only "
+                        f"for a registry/transport outage on "
+                        f"kind=\"npm-audit\")")
             failed = [e.get("id") for e in entries if e.get("status") == "FAIL"]
             if failed:
                 problems.append(f"shard {i}: FAILED suites: {', '.join(map(str, failed))}")
@@ -2750,6 +3296,63 @@ def verify_shard_results(results_dir: Path) -> int:
         for problem in problems:
             print(f"NOT PROVEN: {problem}")
         return 1
+
+    entries_by_id: dict[str, dict] = {}
+    for d in shards.values():
+        for e in _dict_entries(d):
+            if isinstance(e.get("id"), str):
+                entries_by_id[e["id"]] = e
+    unavailable_ids = sorted(sid for sid, e in entries_by_id.items()
+                             if e.get("status") == "UNAVAILABLE")
+
+    if unavailable_ids:
+        # Never the plain PROVEN line for this run: every UNAVAILABLE suite
+        # gets its own distinct callout (grep-able by the "NOT PROVEN BY
+        # AUDIT:" prefix), and the fan-in's exit code depends on whether EVERY
+        # one of them can cite an unbroken lockfile-blob chain back to a real
+        # PASS -- never on assuming the outage is harmless.
+        transitivity_ok = True
+        for sid in unavailable_ids:
+            entry = entries_by_id[sid]
+            print(f"NOT PROVEN BY AUDIT: {sid} unavailable "
+                  f"({entry.get('note') or 'no reason recorded'})")
+            suite = suites_by_id.get(sid)
+            current_sha = _lockfile_blob_sha(suite.cwd) if suite is not None else ""
+            found = (_newest_proof_with_passed_audit(prior_proofs_dir, sid)
+                     if prior_proofs_dir is not None else None)
+            if not current_sha:
+                transitivity_ok = False
+                print(f"NOT PROVEN BY AUDIT: {sid} transitivity failed: this "
+                      f"checkout's own lockfile blob sha is unreadable")
+            elif found is None:
+                transitivity_ok = False
+                print(f"NOT PROVEN BY AUDIT: {sid} transitivity failed: no "
+                      f"prior gate-proof artifact with a PASSED audit is "
+                      f"visible under {prior_proofs_dir or '(none given)'}")
+            else:
+                candidate_sha, candidate_path, candidate_tree = found
+                if candidate_sha != current_sha:
+                    transitivity_ok = False
+                    print(f"NOT PROVEN BY AUDIT: {sid} transitivity failed: "
+                          f"lockfile blob {current_sha} differs from the "
+                          f"newest passed-audit proof {candidate_path} (tree "
+                          f"{candidate_tree}, blob "
+                          f"{candidate_sha or '(none recorded)'})")
+                else:
+                    print(f"NOT PROVEN BY AUDIT: {sid} transitivity holds: "
+                          f"lockfile blob {current_sha} unchanged since "
+                          f"{candidate_path} (tree {candidate_tree})")
+        if not transitivity_ok:
+            return 1
+        print("NOT PROVEN BY AUDIT: registry unavailable this run for "
+              f"{', '.join(unavailable_ids)}, but every one is provably "
+              "unchanged since a prior PASSED audit (lockfile-blob "
+              "transitivity) -- treated as proven for THIS run only: the "
+              "proof this run emits records the UNAVAILABLE status honestly "
+              "and carries no fresh blob sha, so it can never itself serve "
+              "as a future transitivity ancestor")
+        return 0
+
     print("PROVEN: every suite in the catalog ran exactly once on one catalog "
           "fingerprint and passed")
     return 0
@@ -2784,11 +3387,21 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
         for i, cell in enumerate(row):
             widths[i] = max(widths[i], len(str(cell)))
     widths[0] = min(widths[0], 40)
+    # A full UNAVAILABLE note ("registry unavailable (...): ... after 3
+    # attempts; NOT PROVEN BY AUDIT: ...") can run past 200 characters and
+    # stretch the whole table (the "="*len(line) rule) to match (round-1
+    # nit 4) — cap it here and truncate in fmt() below. Nothing is lost: the
+    # UNAVAILABLE callout right after this table (search "NOT PROVEN BY
+    # AUDIT:") always prints the note in full, and the shard/log-dir JSON
+    # never truncates it either.
+    widths[5] = min(widths[5], 100)
 
     def fmt(row) -> str:
         cells = []
         for i, cell in enumerate(row):
             cell = str(cell)
+            if i == 5 and len(cell) > widths[5]:
+                cell = cell[:widths[5] - 1] + "…"
             if i in (1, 2, 3, 4):
                 cells.append(cell.rjust(widths[i]))
             else:
@@ -2809,9 +3422,11 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
     npass = sum(1 for r in results if r.status == "PASS")
     nfail = sum(1 for r in results if r.status == "FAIL")
     nskip = sum(1 for r in results if r.status == "SKIP")
+    nunavailable = sum(1 for r in results if r.status == "UNAVAILABLE")
     total_tests = sum(r.counts.get("passed", 0) for r in results)
     total_skipped = sum(r.counts.get("skipped", 0) for r in results)
-    print(f"  suites: {npass} PASS  {nfail} FAIL  {nskip} SKIP   "
+    print(f"  suites: {npass} PASS  {nfail} FAIL  {nskip} SKIP  "
+          f"{nunavailable} UNAVAILABLE   "
           f"| test cases passed: {total_tests}  skipped: {total_skipped}   "
           f"| wall: {wall:.1f}s")
     # The counts above are only meaningful next to WHICH suites they counted.
@@ -2832,6 +3447,23 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
     if allskip:
         print(f"  NO COVERAGE (every test skipped, host artifact absent): "
               f"{', '.join(allskip)}")
+    # A registry outage is a distinct outcome, not a failed gate, and a single
+    # row in a long scoreboard is exactly as easy to miss as a flake -- call it
+    # out by name so the merge step (and a human skimming CI) can see it
+    # without diffing every row. Every callout line is printed with the
+    # literal "NOT PROVEN BY AUDIT: " prefix at its own start — never just
+    # echoing the note verbatim — so it is a structurally distinct, grep-able
+    # marker distinct from the row's NOTE column (which never starts a line
+    # with that text; the row always starts with the suite label). round-1
+    # blocker 3: the prior version printed the bare note when one was
+    # present, which happened to ALSO contain this phrase mid-string (see
+    # run_npm_audit_suite), so a test asserting the phrase appeared anywhere
+    # in stdout passed even with this whole block deleted — the row's own
+    # NOTE column already carried it.
+    for r in results:
+        if r.status == "UNAVAILABLE":
+            detail = r.note or f"{r.suite.id} registry unavailable"
+            print(f"  NOT PROVEN BY AUDIT: {detail}")
     print("=" * len(line))
 
 
@@ -2877,6 +3509,14 @@ def main() -> int:
                          "+ catalog fingerprint) to PATH. Emission is refused, never "
                          "fabricated, on a dirty or non-git checkout; a refusal does "
                          "not change the verify exit code.")
+    ap.add_argument("--prior-proofs-dir", default=None, metavar="DIR",
+                    help="with --verify-shard-results only: a directory of "
+                         "previously-fetched gate-proof.json documents (the "
+                         "newest by file mtime wins) the fan-in may cite as the "
+                         "lockfile-transitivity ancestor for an UNAVAILABLE "
+                         "npm-audit suite -- never trusted for anything else. "
+                         "Optional; omitting it means an UNAVAILABLE suite "
+                         "always fails the fan-in (fail closed).")
     ap.add_argument("--verify-gate-proof", default=None, metavar="FILE",
                     help="proof-check mode (with --expect-tree): exit 0 only when "
                          "FILE is a tree-bound gate proof for exactly that tree and "
@@ -2904,19 +3544,26 @@ def main() -> int:
               "fan-in's verified verdict, never a standalone claim")
         return 2
 
+    if args.prior_proofs_dir and not args.verify_shard_results:
+        print("--prior-proofs-dir requires --verify-shard-results")
+        return 2
+
     if args.verify_shard_results:
         if (args.only or args.result_json or args.shard_count != 1
                 or args.shard_index is not None):
             print("--verify-shard-results is a fan-in mode and takes no run flags "
                   "(--only/--shard-count/--shard-index/--result-json)")
             return 2
-        rc = verify_shard_results(Path(args.verify_shard_results))
+        results_dir = Path(args.verify_shard_results)
+        prior_dir = Path(args.prior_proofs_dir) if args.prior_proofs_dir else None
+        rc = verify_shard_results(results_dir, prior_proofs_dir=prior_dir)
         if args.emit_proof:
             if rc == 0:
                 suites = build_suites()
                 problem = emit_gate_proof(
                     Path(args.emit_proof),
-                    fingerprint=catalog_fingerprint(suites), total=len(suites))
+                    fingerprint=catalog_fingerprint(suites), total=len(suites),
+                    suite_statuses=_shard_suite_statuses(results_dir))
                 if problem:
                     print(f"gate proof NOT emitted ({problem}); the verdict "
                           f"above stands — the next identical-tree build just "
@@ -3020,7 +3667,10 @@ def main() -> int:
         tail = f"{res.got:>4}  {res.seconds:5.1f}s"
         if res.note:
             tail += f"  {res.note}"
-        print(f"{res.status:<4} {tail}")
+        # Width 11, not 4: UNAVAILABLE (11 chars) previously just overran a
+        # 4-wide field with no padding, misaligning every row after it
+        # (round-1 nit 4) — PASS/FAIL/SKIP still fit inside 11 with room.
+        print(f"{res.status:<11} {tail}")
         if res.status == "FAIL" and args.fail_fast:
             print(f"  --fail-fast: stopping after {suite.id}")
             break
