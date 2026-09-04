@@ -35,7 +35,7 @@ import { createPortal } from 'react-dom'
 import { RibbonCluster, RibbonTool } from '../site/DraftingRibbon.jsx'
 import { QuickButton, QUICK_FILE_SLOT_ID } from '../site/CockpitTopBand.jsx'
 
-import { DRAW_REASONS, MODIFY_REASONS, drawReason, forGroup, modifyReason } from '../lib/actionRegistry.js'
+import { DRAW_REASONS, MODIFY_REASONS, clipboardReason, drawReason, forGroup, modifyReason } from '../lib/actionRegistry.js'
 
 import { buildCreatePayload, buildEditPayload, readNumber } from './engineSession.js'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
@@ -254,7 +254,11 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const armedOp = armed ? armed.op : ''
   const armedGroup = armed ? armed.group : ''
   const prompt = armedOp ? PROMPTS[armedOp] : null
-  const promptReason = armedGroup === 'draw' ? draw : armedGroup === 'modify' ? modify : ''
+  // W4g-5c: a clipboard arm (PASTE, typed or clicked) reads the clipboard
+  // ladder, so the prompt says "nothing on the clipboard yet" with Run held
+  // exactly as the ribbon button is held, rather than a live Run that the
+  // store then refuses.
+  const promptReason = armedGroup === 'draw' ? draw : armedGroup === 'modify' ? modify : armedGroup === 'clipboard' ? clipboardReason(session, reach) : ''
   const promptOff = !!promptReason
   const fieldsOff = promptOff && promptReason !== MODIFY_REASONS.noSelection
   // W4f-6: live validation. The store's own payload builders judge the
