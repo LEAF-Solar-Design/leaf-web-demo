@@ -169,8 +169,13 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
       machine.current = state
       for (const [key, value] of writes) setInput(key, value)
       const nextStep = wantsPick(state) ? state.sequence[Math.min(state.step, state.sequence.length - 1)] : null
-      if (nextStep) focusField(nextStep.keys ? nextStep.keys[0] : nextStep.key)
-      else focusRun()
+      // The caret moves after React has painted the writes: a Run button
+      // that was disabled a moment ago (an empty or refused operand, W4f-6)
+      // only takes focus once the render has enabled it.
+      window.requestAnimationFrame(() => {
+        if (nextStep) focusField(nextStep.keys ? nextStep.keys[0] : nextStep.key)
+        else focusRun()
+      })
       draw()
     }
     const onLeave = () => { last = null; const v = viewer(); v?.setRubberBand?.(null); if (v) showMarker(v, null) }

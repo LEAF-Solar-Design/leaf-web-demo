@@ -519,15 +519,18 @@ describe.skipIf(!HAS_ENGINE)('acceptance: the Draw group creates real entities t
   it('the engine refuses a degenerate create with its typed reason and mutates nothing', async () => {
     renderCockpit()
     await openDocument(ONE_LINE_DXF)
-    // The client sentence catches r=0; force the engine-side refusal with a
-    // sweep the client cannot see through: 0 -> 360 is a full turn = zero.
+    // A full turn (0 -> 360, 0 -> 720) is a zero sweep: the store's builder
+    // refuses it, and since W4f-6 that sentence shows on the prompt as the
+    // operand is typed while Run waits, so nothing reaches the engine and
+    // nothing mutates.
     fireEvent.click(drawTool('createArc'))
     fireEvent.change(screen.getByLabelText('ribbon end'), { target: { value: '360' } })
+    expect(screen.getByTestId('cockpit-prompt-note').textContent).toContain('Arc refused')
+    expect(screen.getByTestId('cockpit-prompt-run').disabled).toBe(true)
     runPrompt()
-    await statusContains('Arc refused')
     fireEvent.change(screen.getByLabelText('ribbon end'), { target: { value: '720' } })
+    expect(screen.getByTestId('cockpit-prompt-note').textContent).toContain('Arc refused')
     runPrompt()
-    await statusContains('Arc refused')
     expect(screen.getByTestId('cad-edit-entity-count').textContent).toBe('1')
   })
 

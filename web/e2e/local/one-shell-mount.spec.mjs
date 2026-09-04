@@ -741,9 +741,13 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('3')
     await expect(page.getByTestId('cad-edit-entity-list')).toContainText('CIRCLE on layer 0')
     // A degenerate create is refused as a sentence, and nothing changes.
+    // W4f-6: the sentence shows on the prompt as the operand is typed and
+    // Run waits, so Enter posts nothing (before, it read from the status
+    // after a refused run).
     await page.getByLabel('ribbon r').fill('0')
+    await expect(page.getByTestId('cockpit-prompt-note')).toHaveText('Circle refused: r must be greater than 0.')
+    await expect(page.getByTestId('cockpit-prompt-run')).toBeDisabled()
     await page.getByLabel('ribbon r').press('Enter')
-    await expect(page.getByRole('status').filter({ hasText: /Circle refused: r must be greater than 0/ })).toHaveCount(1)
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('3')
     // Esc cancels the command; the prompt leaves with it.
     await page.getByLabel('ribbon r').press('Escape')
@@ -838,6 +842,11 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByLabel('ribbon x', { exact: true })).toHaveValue(r3(b.wx))
     await expect(page.getByLabel('ribbon y', { exact: true })).toHaveValue(r3(b.wy))
     await expect(page.getByLabel('ribbon x2', { exact: true })).toBeFocused()
+    // (W4f-6: the next point is not given yet, so the fields are empty and
+    // Run waits quietly with the step's ask, no sentence)
+    await expect(page.getByLabel('ribbon x2', { exact: true })).toHaveValue('')
+    await expect(page.getByTestId('cockpit-prompt-note')).toHaveCount(0)
+    await expect(page.getByTestId('cockpit-prompt-run')).toBeDisabled()
     // W4f-4: F8 turns ORTHO on (the prompt's chip is pressed); the next
     // pick, measured from the chain point, snaps to the axis of the larger
     // move: the pixel below is far to the right of b and a little down, so
@@ -873,6 +882,16 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByLabel('ribbon y2', { exact: true })).toHaveValue('5')
     await page.keyboard.press('F3')
     await expect(page.getByTestId('cockpit-osnap')).toHaveAttribute('aria-pressed', 'false')
+    // W4f-6: the prompt validates as you type with the store's own sentence:
+    // a word in x2 outlines the field, names the refusal and holds Run; the
+    // number back releases it.
+    await page.getByLabel('ribbon x2', { exact: true }).fill('abc')
+    await expect(page.getByLabel('ribbon x2', { exact: true })).toHaveAttribute('aria-invalid', 'true')
+    await expect(page.getByTestId('cockpit-prompt-note')).toHaveText('Line refused: x, y, x2 and y2 must all be numbers.')
+    await expect(page.getByTestId('cockpit-prompt-run')).toBeDisabled()
+    await page.getByLabel('ribbon x2', { exact: true }).fill('50')
+    await expect(page.getByTestId('cockpit-prompt-note')).toHaveCount(0)
+    await expect(page.getByTestId('cockpit-prompt-run')).toBeEnabled()
     const underCard = () => page.evaluate(() => {
       // The card is a full-width pass-through layer; the floating "Edit a
       // DXF drawing" workbench is the child that sits over the drawing.
