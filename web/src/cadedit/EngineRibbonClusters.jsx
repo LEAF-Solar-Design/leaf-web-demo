@@ -34,7 +34,9 @@ import { createPortal } from 'react-dom'
 import { RibbonCluster, RibbonTool } from '../site/DraftingRibbon.jsx'
 import { QuickButton, QUICK_FILE_SLOT_ID } from '../site/CockpitTopBand.jsx'
 
-import { SESSION_ERROR, buildCreatePayload, buildEditPayload, readNumber } from './engineSession.js'
+import { DRAW_REASONS, MODIFY_REASONS, drawReason, forGroup, modifyReason } from '../lib/actionRegistry.js'
+
+import { buildCreatePayload, buildEditPayload, readNumber } from './engineSession.js'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
 import { isPointExpression, pointExpressionRefusal, resolvePointExpression } from './pointExpression.js'
 
@@ -62,13 +64,14 @@ function hasVisibleEscOwner() {
   })
 }
 
-export const MODIFY_REASONS = Object.freeze({
-  noDocument: 'opens on an imported DXF',
-  crashed: 'engine stopped: open a drawing again',
-  busy: 'engine busy: wait for the current edit',
-  noSelection: 'select an entity in the imported DXF',
-  readOnlyKind: 'read-only entity kind',
-})
+// The Draw and Modify vocabulary and their reason ladders moved to the action
+// registry with slice 10a (one record behind the ribbon, the engine ops, the
+// slash picker and the key ladder). Re-exported unchanged: every importer and
+// every pinned assertion in engineSessionProvider.test.jsx reads the same
+// frozen objects and the same pure functions it always did. SAVE_REASONS stays
+// here — the File panel's save is not an action record (see the registry's
+// header for what is deliberately absent).
+export { DRAW_REASONS, MODIFY_REASONS, drawReason, modifyReason } from '../lib/actionRegistry.js'
 
 export const SAVE_REASONS = Object.freeze({
   noDocument: 'opens on an imported DXF',
@@ -77,24 +80,13 @@ export const SAVE_REASONS = Object.freeze({
   busy: 'engine busy: wait for the current edit',
 })
 
-export const DRAW_REASONS = Object.freeze({
-  noDocument: 'opens on an imported DXF',
-  crashed: 'engine stopped: open a drawing again',
-  busy: 'engine busy: wait for the current edit',
-})
-
 const NOT_IN_ENGINE = 'not in the browser engine yet'
 
 // W4d Slice B: the Draw group. Each button creates ONE primitive from the
 // numeric operands (no canvas rubber-banding in this slice; that is a later
 // interaction wave). The engine validates again and refuses with a typed
-// reason; the selection lands on what was just drawn.
-const DRAW_OPS = Object.freeze([
-  { op: 'createLine', label: 'line', text: 'Line', icon: 'line', title: 'Draw a line from x,y to x2,y2' },
-  { op: 'createPolyline', label: 'polyline', text: 'Polyline', icon: 'polyline', title: 'Draw a polyline through the points listed (x,y pairs)' },
-  { op: 'createCircle', label: 'circle', text: 'Circle', icon: 'circle', title: 'Draw a circle at x,y with radius r' },
-  { op: 'createArc', label: 'arc', text: 'Arc', icon: 'arc', title: 'Draw an arc at x,y with radius r from start to end (degrees)' },
-])
+// reason; the selection lands on what was just drawn. The four ops are
+// registry records now (`forGroup('draw')`), not a literal table here.
 // The reference's small Draw column, not in this engine yet.
 const DRAW_OFF = Object.freeze([
   { id: 'draw:rectangle', label: 'Rectangle', icon: 'rectangle' },
@@ -102,23 +94,8 @@ const DRAW_OFF = Object.freeze([
   { id: 'draw:point', label: 'Point', icon: 'point' },
 ])
 
-/** Why the Draw group is unavailable right now, or '' when it is live. Creation needs no selection. */
-export function drawReason(session) {
-  if (!session) return DRAW_REASONS.noDocument
-  if (session.errorKind === SESSION_ERROR.CRASHED) return DRAW_REASONS.crashed
-  if (!session.engineParsed) return DRAW_REASONS.noDocument
-  if (session.busy) return DRAW_REASONS.busy
-  return ''
-}
-
-const OPS = Object.freeze([
-  { op: 'delete', label: 'delete', text: 'Delete', icon: 'delete', title: 'Delete the selected entity' },
-  { op: 'move', label: 'move', text: 'Move', icon: 'move', title: 'Move the selected entity by dx, dy' },
-  { op: 'moveVertex', label: 'move-vertex', text: 'Move vertex', icon: 'move-vertex', title: 'Move one vertex of the selection by dx, dy' },
-  { op: 'addVertex', label: 'add-vertex', text: 'Add vertex', icon: 'add-vertex', title: 'Insert a vertex after the given one, at dx, dy' },
-  { op: 'deleteVertex', label: 'delete-vertex', text: 'Delete vertex', icon: 'delete-vertex', title: 'Delete one vertex of the selection' },
-  { op: 'setLayer', label: 'set-layer', text: 'Set layer', icon: 'set-layer', title: 'Reassign the selection to the layer named' },
-])
+// The six real entity operations the compiled engine performs are registry
+// records too (`forGroup('modify')`).
 // The reference's other six Modify tools, not in this engine yet: with the
 // six real ones they fill the reference's 3x4 grid.
 const MODIFY_OFF = Object.freeze([
@@ -175,21 +152,6 @@ export const PROMPTS = Object.freeze({
   deleteVertex: { verb: 'DELETE VERTEX', steps: [{ ask: 'Specify vertex:', fields: [['vertexIndex', 'vertex', 'numeric']] }] },
   setLayer: { verb: 'SET LAYER', steps: [{ ask: 'Specify layer:', fields: [['layer', 'set layer', 'text']] }] },
 })
-
-/**
- * Why the Modify group is unavailable right now, or '' when it is live.
- * Pure over the session record so the ladder is checkable on its own; the
- * order is the order a user resolves them in.
- */
-export function modifyReason(session) {
-  if (!session) return MODIFY_REASONS.noDocument
-  if (session.errorKind === SESSION_ERROR.CRASHED) return MODIFY_REASONS.crashed
-  if (!session.engineParsed) return MODIFY_REASONS.noDocument
-  if (session.busy) return MODIFY_REASONS.busy
-  if (!session.selected) return MODIFY_REASONS.noSelection
-  if (session.selected.editable === false) return MODIFY_REASONS.readOnlyKind
-  return ''
-}
 
 /** Why "save as a version" is unavailable right now, or '' when it is live. */
 export function saveReason(session, canSave) {
@@ -300,6 +262,19 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const runReason = promptReason || liveRefusal
   const runHold = runReason || (waitingStep ? waitingStep.ask : '')
   const toggleArmed = (group, op) => setArmed(armedOp === op ? null : { group, op })
+  // The one context the Draw and Modify records read: the session their reason
+  // ladders judge, and the single activation handler they name. Arming vs.
+  // running is the CONSUMER's decision (a tool with operands opens the command
+  // prompt; one without runs on click), which is why the record hands the op
+  // back rather than dispatching itself.
+  const engineCtx = {
+    session,
+    onActivate: (group, op) => {
+      if (PROMPTS[op]) { toggleArmed(group, op); return }
+      if (group === 'draw') create(op, inputs)
+      else applyEdit(op, inputs)
+    },
+  }
   // W4f-3: LINE chains. A run remembers where the segment ends; once the
   // engine has drawn it, that end becomes the next segment's first point.
   const chainRef = useRef(null)
@@ -578,47 +553,57 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
       )}
       {show.has('draw') && (
         <RibbonCluster id="draw" label="Draw" note={draw || null}>
-          {DRAW_OPS.map(({ op, label, text, icon, title }) => (
-            <RibbonTool
-              key={op}
-              tool={{
-                id: `draw:${op}`,
-                label,
-                text,
-                icon,
-                size: 'large',
-                title,
-                write: true,
-                disabled: !!draw,
-                reason: draw,
-                ...armedAttrs(op),
-                onClick: () => (PROMPTS[op] ? toggleArmed('draw', op) : create(op, inputs)),
-              }}
-            />
-          ))}
+          {forGroup('draw').map((action) => {
+            // The record's reason, read ONCE per record per render: it is the
+            // disabled flag and the sentence both.
+            const reason = action.when(engineCtx)
+            return (
+              <RibbonTool
+                key={action.op}
+                tool={{
+                  id: action.id,
+                  label: action.label,
+                  text: action.text,
+                  icon: action.icon,
+                  size: action.size,
+                  title: action.title(engineCtx),
+                  write: action.write,
+                  disabled: !!reason,
+                  reason,
+                  ...armedAttrs(action.op),
+                  onClick: () => action.run(engineCtx),
+                }}
+              />
+            )
+          })}
           {DRAW_OFF.map((tool) => <RibbonTool key={tool.id} tool={offTool(tool)} />)}
         </RibbonCluster>
       )}
       {show.has('modify') && (
         <RibbonCluster id="modify" label="Modify" note={modify || null}>
-          {OPS.map(({ op, label, text, icon, title }) => (
-            <RibbonTool
-              key={op}
-              tool={{
-                id: `modify:${op}`,
-                label,
-                text,
-                icon,
-                size: 'small',
-                title,
-                write: true,
-                disabled: !!modify,
-                reason: modify,
-                ...armedAttrs(op),
-                onClick: () => (PROMPTS[op] ? toggleArmed('modify', op) : applyEdit(op, inputs)),
-              }}
-            />
-          ))}
+          {forGroup('modify').map((action) => {
+            // The record's reason, read ONCE per record per render: it is the
+            // disabled flag and the sentence both.
+            const reason = action.when(engineCtx)
+            return (
+              <RibbonTool
+                key={action.op}
+                tool={{
+                  id: action.id,
+                  label: action.label,
+                  text: action.text,
+                  icon: action.icon,
+                  size: action.size,
+                  title: action.title(engineCtx),
+                  write: action.write,
+                  disabled: !!reason,
+                  reason,
+                  ...armedAttrs(action.op),
+                  onClick: () => action.run(engineCtx),
+                }}
+              />
+            )
+          })}
           {MODIFY_OFF.map((tool) => <RibbonTool key={tool.id} tool={offTool(tool)} />)}
         </RibbonCluster>
       )}

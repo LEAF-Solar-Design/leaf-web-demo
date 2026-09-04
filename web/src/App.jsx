@@ -13,6 +13,7 @@ import CockpitTopBand from './site/CockpitTopBand.jsx'
 import DraftingRibbon from './site/DraftingRibbon.jsx'
 import PropertiesDock, { drawingExtents } from './site/PropertiesDock.jsx'
 import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
+import { ladderListener, slashCommandHandlers } from './lib/actionRegistry.js'
 import { authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
 import { resolvePublishedCatalogTool } from './site/publishedCatalogTool.js'
 import { entityGeometry } from './lib/entityMetrics.js'
@@ -677,10 +678,10 @@ export default function App() {
   // Placed after the catalog-controller destructuring that binds
   // `onPromptChange` (the canonical way to set the well's text — it also
   // invalidates a stale route) and before the JSX that reads this map.
-  const slashCommandActions = useMemo(() => ({
-    help: () => {
-      // The menu IS the help: reopen it on a bare slash and put the caret back
-      // in the well so the next keystroke filters.
+  const slashCommandActions = useMemo(() => slashCommandHandlers(['slash:help'], {
+    // The menu IS the help: reopen it on a bare slash and put the caret back
+    // in the well so the next keystroke filters.
+    onHelp: () => {
       onPromptChange('/')
       barInputRef.current?.focus()
     },
@@ -2038,80 +2039,64 @@ export default function App() {
   }, [running, resultOwnsR, routeErr, historyOpen, historyErr, historyLoading,
       toolsErr, catalogErr, toolsOpen, anyFamilyOpen, mock, authRequired, refreshFail])
 
-  // Global key ladder: ⌘K summons the bar; Esc closes the topmost surface
-  // (drawer > history > route/failed strip > running run > selection > open
-  // project); R retries the highest-priority visible error (outside text
-  // inputs); any OTHER bare printable keystroke falls into the prompt bar
-  // (type-to-fall-through).
+  // Global key ladder, TABLE-DRIVEN from the action registry (slice 10a):
+  // ⌘K summons the bar; Esc closes the topmost surface (drawer > history >
+  // route/failed strip > running run > selection > open project); R retries the
+  // highest-priority visible error (outside text inputs); any OTHER bare
+  // printable keystroke falls into the prompt bar (type-to-fall-through).
+  //
+  // The ORDER and the SKIP RULES are the registry's `ladderDecision`, a pure
+  // function actionRegistry.test.js walks against the old if/else as literals,
+  // and the listener is the registry's `ladderListener`. What stays here is
+  // what only this shell can supply: the shell state and the handlers.
   useEffect(() => {
-    const onKey = (e) => {
-      const tag = ((e.target && e.target.tagName) || '').toLowerCase()
-      const typing = tag === 'input' || tag === 'textarea'
-      // Hotkey-driven changes land frame-of-keypress (data-instant, W0#7).
-      // Stamp only a branch that will handle the key. An ordinary r/R typed
-      // into a field, or an inactive retry rung, must keep normal motion.
-      if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
-        markInstant()
-        e.preventDefault()
-        barInputRef.current?.focus()
-        return
-      }
-      if (e.key === 'Escape') {
-        if (drawer) { markInstant(); setDrawer(null); return }
-        if (historyOpen) { markInstant(); closeHistory(); return }
-        if (route) { markInstant(); dismissRoute(); return }
-        if (routeErr || runErr) { markInstant(); clearRouteError(); clearRunErr(); return }
-        if (running) {
-          markInstant()
-          // P2 wave C-2: latency tolerance in the wild. Esc-on-running is the
-          // ONE interrupt gesture (the rail keeps the job; nothing cancels
-          // server-side). Refs, not deps: elapsed ticks every 1s and must
-          // not re-subscribe this listener.
-          track('run.interrupted', {
-            ...(interruptSnapshotRef.current.tool ? { tool: interruptSnapshotRef.current.tool } : {}),
-            ...(interruptSnapshotRef.current.elapsedMs != null
-              ? { elapsed_ms: interruptSnapshotRef.current.elapsedMs } : {}),
-          })
-          interruptRun()
-          return
-        }
-        if (selectedHandle) { markInstant(); setSelectedHandle(null); return }
-        // Bottom rung: the WorkspaceSummary Esc cap — close the open project
-        // only once every higher surface has already yielded.
-        if (openProjectId) { markInstant(); onCloseProject() }
-        return
-      }
-      // R: fire the ladder's active rung. rTarget === 'result' means
-      // ResultPanel's own listener owns the keypress (duplicating it here
-      // double-fired the retry: two POST /api/run from one keypress).
-      if (!typing && (e.key === 'r' || e.key === 'R') &&
-          !e.metaKey && !e.ctrlKey && !e.altKey &&
-          rTarget && rTarget !== 'result') {
-        markInstant()
-        e.preventDefault()
-        if (rTarget === 'route') onDispatch()
-        else if (rTarget === 'history') loadHistory()
-        else if (rTarget === 'tools') retryTools()
-        else if (rTarget === 'catalog') loadCatalog()
-        else if (rTarget === 'refresh') onRetryViewerRefresh()
-        return
-      }
-      // Type-to-fall-through (operator rule): a bare printable keystroke on the
-      // surface always falls into the prompt bar. Focus BEFORE the default
-      // action so the character itself lands in the input; visible mnemonic
-      // rungs above (⌘K, Esc, R-on-failed-strip) keep priority. Never steals
-      // from an editable element.
-      const editable = typing || tag === 'select' || (e.target && e.target.isContentEditable)
-      // A focused interactive control keeps its keys (Space must ACTIVATE a
-      // button, not yank focus); Space never falls through; overlays (drawer,
-      // history) keep typing local to themselves.
-      const interactive = e.target instanceof Element &&
-        e.target.closest('button, a, summary, [role="button"], [role="option"], [role="menuitem"]')
-      if (!editable && !interactive && !drawer && !historyOpen &&
-          !e.metaKey && !e.ctrlKey && !e.altKey && e.key.length === 1 && e.key !== ' ') {
-        barInputRef.current?.focus()
-      }
+    // The plain shell state the decision reads, built ONCE per subscription
+    // (this effect re-runs when any of it changes), never per keystroke: a key
+    // that is not the ladder's allocates nothing here, as the pre-slice
+    // if/else chain allocated nothing.
+    const shell = {
+      drawer,
+      historyOpen,
+      route,
+      routeErr,
+      runErr,
+      running,
+      selectedHandle,
+      openProjectId,
+      rTarget,
     }
+    // The handlers the record names, built only once a decision came back.
+    const ladderHandlers = (state) => ({
+      ...state,
+      focusBar: () => barInputRef.current?.focus(),
+      onCloseDrawer: () => setDrawer(null),
+      onCloseHistory: () => closeHistory(),
+      onDismissRoute: () => dismissRoute(),
+      onClearErrors: () => { clearRouteError(); clearRunErr() },
+      onInterruptRun: () => {
+        // P2 wave C-2: latency tolerance in the wild. Esc-on-running is the
+        // ONE interrupt gesture (the rail keeps the job; nothing cancels
+        // server-side). Refs, not deps: elapsed ticks every 1s and must
+        // not re-subscribe this listener.
+        track('run.interrupted', {
+          ...(interruptSnapshotRef.current.tool ? { tool: interruptSnapshotRef.current.tool } : {}),
+          ...(interruptSnapshotRef.current.elapsedMs != null
+            ? { elapsed_ms: interruptSnapshotRef.current.elapsedMs } : {}),
+        })
+        interruptRun()
+      },
+      onClearSelection: () => setSelectedHandle(null),
+      onCloseProject: () => onCloseProject(),
+      onRetryRoute: () => onDispatch(),
+      onRetryHistory: () => loadHistory(),
+      onRetryTools: () => retryTools(),
+      onRetryCatalog: () => loadCatalog(),
+      onRetryRefresh: () => onRetryViewerRefresh(),
+    })
+    // Hotkey-driven changes land frame-of-keypress (data-instant, W0#7). The
+    // listener stamps only a branch that will handle the key: type-to-fall-
+    // through must keep normal motion, and so must an inactive retry rung.
+    const onKey = ladderListener(shell, ladderHandlers, markInstant)
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [drawer, historyOpen, route, routeErr, runErr, running, selectedHandle,

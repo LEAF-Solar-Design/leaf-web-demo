@@ -36,6 +36,8 @@ import {
   filterRunnable,
   historyKeydown,
   mergePickerEntries,
+  slashCommandHandlers,
+  slashStaticEntries,
   pickerTrigger,
   rankEntries,
   replacePickerTrigger,
@@ -45,12 +47,10 @@ import {
   IMAGE_MEDIA_TYPES,
 } from '../composer.js'
 
-const MCP_COMMAND = {
-  kind: 'command',
-  name: 'mcp',
-  description: 'show mounted MCP servers',
-  client_action: 'mcp',
-}
+// The client's own "/" rows, projected from the action registry (slice 10a):
+// `mcp` is the one command with no server entry, so this client contributes
+// both its row and its handler. Built once at module load, like the registry.
+const STATIC_COMMANDS = slashStaticEntries()
 
 // The bar's scopes, mapped onto the app's lanes (find→run · act→solve ·
 // build→author). Selecting find/act returns you to the composer (the router
@@ -149,12 +149,12 @@ export default function PromptBox({
   const trigger = pickerTrigger(value, caret, isComposing)
   const afterSlash = trigger?.kind === 'slash' ? trigger.query : null
   const entrySource = useMemo(
-    () => mergePickerEntries(tools, skills, mcpServers, [MCP_COMMAND]),
+    () => mergePickerEntries(tools, skills, mcpServers, STATIC_COMMANDS),
     [tools, skills, mcpServers],
   )
   const localCommandActions = useMemo(() => ({
     ...commandActions,
-    mcp: () => setMcpOpen(true),
+    ...slashCommandHandlers(['slash:mcp'], { onOpenMcp: () => setMcpOpen(true) }),
   }), [commandActions])
 
   // Name-prefix matches rank first (the Tab target reads left-to-right), then
