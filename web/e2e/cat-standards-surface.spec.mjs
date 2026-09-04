@@ -230,7 +230,13 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
   await expect(page.getByText('Backend').locator('..')).toContainText('healthy')
   await expect(page.locator('.tc-trust-row').filter({ hasText: 'Claude account' })).toContainText('linked · oauth')
   await expect(page.getByText('Runs today').locator('..')).toContainText('1')
-  await expect(page.getByText('Spend remaining').locator('..')).toContainText('$10.00')
+  // The usage ledger (a3f4a6d6, #869) replaced the 'Spend remaining' row with
+  // Spend today / Spend total and a Cap row; the proof fixture serves
+  // cap { usd_cap: 10, remaining: 10, enabled: true }, so the honest contract
+  // is the cap's two figures, not a row that only exists in the no-usage fallback.
+  await expect(page.getByText('Spend today')).toBeVisible()
+  await expect(page.getByText('Cap $10.00')).toBeVisible()
+  await expect(page.getByText('$10.00 left')).toBeVisible()
   await expect(page.getByText('Entitlements')).toBeVisible()
   await page.getByRole('button', { name: /Claude accounts 1 mounted/ }).click()
   await page.getByRole('button', { name: 'Unlink', exact: true }).click()

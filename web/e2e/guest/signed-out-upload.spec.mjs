@@ -46,7 +46,7 @@ test('a signed-out guest can upload and inspect but cannot dispatch a run', asyn
   // drawing that was never one (the HONEST TAG fix, 94e96cdd / #888).
   await expect(page.locator('.proj-chip.static .tag')).toHaveText('Drawing')
   await expect(page.locator('.proj-chip.static .name')).toHaveText(receipt.drawing_id)
-  await expect(page.locator('.proj-chip').getByRole('button')).toHaveCount(0)
+  await expect(page.locator('button.proj-chip')).toHaveCount(0)  // the chip itself is the button when interactive; signed out it is a static span
   await expect(page.locator('.tc-bar-proj')).toHaveText(receipt.drawing_id)
   await expect(runButton).toBeDisabled()
   expect(observed.some((entry) => entry.startsWith('POST /api/run '))).toBe(false)
