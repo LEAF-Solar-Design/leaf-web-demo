@@ -121,7 +121,16 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
         return
       }
       const bytes = answer?.bytes
-      const version = Number(answer?.version)
+      // The version comes from the answer's X-Leaf-Version header; on a
+      // cross-origin API (the local stack, any split deployment) the browser
+      // hides custom headers unless the server exposes them, so the head
+      // number the host already holds (headKey, the drawing's head) is the
+      // fallback: the fetch asked for `head`, and that is what it got.
+      const answered = Number(answer?.version)
+      const known = Number(headKey)
+      const version = Number.isInteger(answered) && answered > 0
+        ? answered
+        : Number.isInteger(known) && known > 0 ? known : NaN
       // toString, not instanceof: a Uint8Array from another realm (a
       // worker, a test harness) is still bytes.
       if (Object.prototype.toString.call(bytes) !== '[object Uint8Array]' || !Number.isInteger(version) || version < 1) {

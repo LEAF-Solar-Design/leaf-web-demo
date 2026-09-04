@@ -181,6 +181,21 @@ describe('EngineHeadOpener', () => {
     expect(fetchDxf).not.toHaveBeenCalled()
   })
 
+  it('hidden version headers (a cross-origin API) fall back to the head the host holds; no head at all is the sentence', async () => {
+    const fetchDxf = vi.fn(async () => ({ bytes: BYTES, version: null, head: null, source: '', etag: null }))
+    const studio = mount({ fetchDxf, headKey: 7 })
+    await settle()
+    await waitFor(() => expect(workers.length).toBe(1))
+    const post = workers[0].posted.find((m) => m.type === 'loadDocument')
+    expect(post.documentId).toBe(headDocumentId('rooftop_demo', 7))
+    expect(studio.context.reach.version).toBe(7)
+    cleanup()
+    const again = mount({ fetchDxf, headKey: null })
+    await settle()
+    expect(again.context.reach.state).toBe(REACH_STATE.FAILED)
+    expect(note()).toContain('answered without a document')
+  })
+
   it('a server answer without a document is a sentence, not a crash', async () => {
     const fetchDxf = vi.fn(async () => ({ bytes: null, version: 0 }))
     const studio = mount({ fetchDxf })
