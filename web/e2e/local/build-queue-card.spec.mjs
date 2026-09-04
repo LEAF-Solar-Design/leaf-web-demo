@@ -96,7 +96,7 @@ test('one real job rides the BuildQueueCard from running to a verified, unpromot
   await expect(row.locator('.rail-word')).toHaveText(/running|submitted/)
   await expect(card.locator('.bq-stages')).toHaveCount(0)
 
-  // 4. to done: verified by its own completion, not promoted, receipt attached
+  // 4. to done: verified by its own terminal receipt, not promoted
   await expect(card).toHaveAttribute('data-state', 'done', { timeout: 90_000 })
   await expect(row.locator('.rail-word')).toHaveText('complete')
   await expect(card).toHaveAttribute('data-verified', '1')

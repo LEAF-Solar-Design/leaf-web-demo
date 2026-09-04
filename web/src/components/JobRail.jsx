@@ -13,9 +13,8 @@
 // build record (lib/buildQueue.js): a job row maps through fromBrokerJob,
 // which carries this file's former stateTag / costUsd / dot vocabulary
 // verbatim, so a broker row renders exactly as before. `builds` (optional,
-// GET /api/builds records already parsed) adds the other lanes below the
-// jobs; its broker-lane records are skipped here because `jobs` is the live
-// source for that lane and already carries the current-session semantics.
+// GET /api/builds records already parsed) adds terminal receipts to matching
+// broker rows and adds records that the recent-jobs list does not carry.
 import { useEffect, useState } from 'react'
 import './rails.css'
 
@@ -35,11 +34,18 @@ function focusComposer() {
   if (el) el.focus()
 }
 
-function JobRow({ job, current, onSelect }) {
-  const record = fromBrokerJob(job)
+function JobRow({ job, buildRecord, current, onSelect }) {
+  const mapped = fromBrokerJob(job)
   // A job whose status this rail has no word for renders nothing rather than
   // a guessed row (fromBrokerJob fails closed on an unknown status).
-  if (!record) return null
+  if (!mapped) return null
+  // GET /api/builds adds the terminal receipt that proves verification. Use
+  // that record only when it describes the same job state, so an older build
+  // poll cannot replace a newer jobs poll with stale status.
+  const record = buildRecord && buildRecord.lane === 'broker'
+    && buildRecord.id === mapped.id && buildRecord.state === mapped.state
+    ? buildRecord
+    : mapped
   return (
     <BuildQueueCard
       record={record}
@@ -49,12 +55,12 @@ function JobRow({ job, current, onSelect }) {
   )
 }
 
-// The records `builds` adds to the rail: every lane but broker (see the
-// header), newest first by `started`.
-function extraBuilds(builds) {
+// The records `builds` adds below the live jobs: every non-broker lane plus
+// older broker records absent from the recent-jobs list, newest first.
+function extraBuilds(builds, knownJobIds) {
   if (!Array.isArray(builds) || builds.length === 0) return []
   return builds
-    .filter((r) => r && r.lane !== 'broker')
+    .filter((r) => r && (r.lane !== 'broker' || !knownJobIds.has(r.id)))
     .sort((a, b) => (b.started || 0) - (a.started || 0))
 }
 
@@ -66,7 +72,12 @@ export default function JobRail({ mock, jobs, currentJob, inflight, reattaching,
   const list = jobs || []
   const knownIds = new Set(list.map((j) => j.job_id))
   const showCurrent = currentJob && (!currentJob.job_id || !knownIds.has(currentJob.job_id))
-  const extra = extraBuilds(builds)
+  const brokerBuilds = new Map(
+    (Array.isArray(builds) ? builds : [])
+      .filter((record) => record && record.lane === 'broker')
+      .map((record) => [record.id, record]),
+  )
+  const extra = extraBuilds(builds, knownIds)
   // The same number the toolbar badge shows (SurfaceFrame.jsx's Builds()):
   // open jobs, open records from the other lanes, plus the current-session
   // job when it is not already one of `jobs` — one shared definition
@@ -101,13 +112,14 @@ export default function JobRail({ mock, jobs, currentJob, inflight, reattaching,
       <JobRow
         key={job.job_id}
         job={job}
+        buildRecord={brokerBuilds.get(job.job_id)}
         current={selectedId != null && job.job_id === selectedId}
         onSelect={onSelectJob}
       />,
     )
   }
   if (extra.length > 0) {
-    rows.push(<div key="builds-group" className="rail-day rail-builds-group">Autonomous runs and fleet tasks</div>)
+    rows.push(<div key="builds-group" className="rail-day rail-builds-group">Other builds and autonomous tasks</div>)
     // Day-grouped exactly like the jobs ledger above (TM1): a clock-only
     // tail is only honest inside a day boundary, so a week-old run must get
     // one too, not just the live jobs list.
@@ -172,7 +184,14 @@ export default function JobRail({ mock, jobs, currentJob, inflight, reattaching,
       )}
 
       <div className="rail-ledger">
-        {showCurrent && <JobRow job={currentJob} current onSelect={onSelectJob} />}
+        {showCurrent && (
+          <JobRow
+            job={currentJob}
+            buildRecord={currentJob.job_id ? brokerBuilds.get(currentJob.job_id) : undefined}
+            current
+            onSelect={onSelectJob}
+          />
+        )}
         {rows}
       </div>
 
