@@ -101,6 +101,41 @@ export default function PromptBox({
   // CSS lays out as one row, and swaps the caret glyph for the prompt word.
   // False (the default, and rail OFF) renders byte-for-byte as before.
   commandLine = false,
+  // Standardization slice 5a: the stage (/try, site/ToolCast.jsx) mounts THIS
+  // component where its hand-rolled .tc-bar block stood, and 36 e2e rows key
+  // off that block's hooks. Everything below is optional and defaults to
+  // today's console render, byte for byte (promptBox.stage.test.jsx pins the
+  // default element sequence against a capture taken before this slice).
+  //
+  // classNames: extra class names ADDED beside the box's own, never a rename:
+  //   `bar` on the .bar well, `wrap` on the .bar-input row, `input` on the
+  //   textarea, `run` on the Run chip. The box's classes stay (its CSS keys
+  //   off them); the alias is a second hook on the same node.
+  classNames = {},
+  // projectSlot: what renders where the `.bar-proj` label stands (a node, or
+  //   a render prop receiving projectName). The caller owns its classes, and
+  //   `bar-proj` is the one that carries the row's margin-left:auto.
+  projectSlot = null,
+  // keycap: what renders where the ⌘K / Enter keycap swaps (a node, or a
+  //   render prop receiving { focused }). The stage passes a static ⌘K
+  //   because staging polish-pins asserts that exact text.
+  keycap = null,
+  // disabledReason: the caller-owned Run ladder. Left undefined, the box
+  //   keeps its own rule (routing, or an empty prompt). A string disables Run
+  //   and rides on the chip as its title, the honest reason; null enables it.
+  disabledReason,
+  // runLabel / routingLabel: the chip's copy at rest and while routing. The
+  //   stage says "Send" in the public demo and "Routing" without the ellipsis,
+  //   both asserted by e2e rows.
+  runLabel = 'Run',
+  routingLabel = 'Routing…',
+  placeholder = 'Find, act, or build… ( / for tools)',
+  // dropIngestEnabled: the G2 drop catcher below. The stage turns it OFF
+  //   because a drop on its bar already means "open this DWG or DXF"
+  //   (ToolCast's own handler on .tc-bar), and one gesture cannot carry two
+  //   meanings. With it off the well registers no drag handlers at all, so
+  //   the event bubbles to the stage's handler untouched.
+  dropIngestEnabled = true,
 }) {
   const [focused, setFocused] = useState(false)
   const [scopeOpen, setScopeOpen] = useState(false)
@@ -162,6 +197,15 @@ export default function PromptBox({
     return () => { live = false }
   }, [])
 
+  // Slice 5a: an alias is appended to the box's own class, never swapped in
+  // for it, so the console's selectors and the stage's both resolve.
+  const withAlias = (base, alias) => (alias ? `${base} ${alias}` : base)
+  // The Run chip's disabled state: the caller's ladder when one was passed
+  // (a string is a reason, null is all-clear), else the box's own rule.
+  const runDisabled = disabledReason === undefined
+    ? (routing || !value.trim())
+    : !!disabledReason
+
   const trigger = pickerTrigger(value, caret, isComposing)
   const afterSlash = trigger?.kind === 'slash' ? trigger.query : null
   const entrySource = useMemo(
@@ -210,7 +254,7 @@ export default function PromptBox({
   // host short-circuits authorises exactly nothing.
   const dispatchPrompt = (override, { allowSecretOnce = false } = {}) => {
     const sent = typeof override === 'string' ? override : value
-    if (sent.trim() && !routing) {
+    if (sent.trim() && !routing && !runDisabled) {
       historyRef.current = appendPromptHistory(historyRef.current, sent, sessionId)
     }
     const dispatched = onDispatch(override, { images: attachments, allowSecretOnce })
@@ -401,13 +445,13 @@ export default function PromptBox({
         </div>
       )}
       <div
-        className={`bar${dragging ? ' drag' : ''}${commandLine ? ' bar-command-line' : ''}`}
+        className={withAlias(`bar${dragging ? ' drag' : ''}${commandLine ? ' bar-command-line' : ''}`, classNames.bar)}
         data-tour="command-bar"
         ref={rootRef}
-        onDragEnter={onDragEnter}
-        onDragOver={onDragOver}
-        onDragLeave={onDragLeave}
-        onDrop={onDrop}
+        onDragEnter={dropIngestEnabled ? onDragEnter : undefined}
+        onDragOver={dropIngestEnabled ? onDragOver : undefined}
+        onDragLeave={dropIngestEnabled ? onDragLeave : undefined}
+        onDrop={dropIngestEnabled ? onDrop : undefined}
       >
         {dragging && (
           <div className="bar-drop-hint" aria-hidden="true">Drop manifest to ingest — runs sandboxed</div>
@@ -477,7 +521,7 @@ export default function PromptBox({
             <div className="resolver-header">Tools are approval-gated.</div>
           </div>
         )}
-        <div className="bar-input">
+        <div className={withAlias('bar-input', classNames.wrap)}>
           <span className="bar-caret" aria-hidden="true">{commandLine ? 'Command:' : '›'}</span>
           {/* A textarea, not an input: Shift+Enter (and Ctrl+J) must be able to
               put a real newline in the buffer — an <input> silently cannot hold
@@ -492,7 +536,7 @@ export default function PromptBox({
             // reset, background, colour, font and the 16 px mobile zoom guard
             // all vanish without this class. styles.css already carries the
             // `.bar-field` alternate for exactly this swap.
-            className="bar-field"
+            className={withAlias('bar-field', classNames.input)}
             value={value}
             onChange={(e) => changePrompt(e.target.value, e.target.selectionStart)}
             onSelect={(e) => setCaret(e.target.selectionStart)}
@@ -502,7 +546,7 @@ export default function PromptBox({
             onKeyDown={onKeyDown}
             onFocus={() => setFocused(true)}
             onBlur={() => setFocused(false)}
-            placeholder="Find, act, or build… ( / for tools)"
+            placeholder={placeholder}
             spellCheck={false}
             aria-label="Command bar"
             data-testid="command-bar"
@@ -570,15 +614,20 @@ export default function PromptBox({
           >
             scope ▾
           </button>
-          <span className="bar-proj">{projectName}</span>
-          {focused ? <span className="key hot">Enter</span> : <span className="key">{modChord('K')}</span>}
+          {projectSlot != null
+            ? (typeof projectSlot === 'function' ? projectSlot(projectName) : projectSlot)
+            : <span className="bar-proj">{projectName}</span>}
+          {keycap != null
+            ? (typeof keycap === 'function' ? keycap({ focused }) : keycap)
+            : (focused ? <span className="key hot">Enter</span> : <span className="key">{modChord('K')}</span>)}
           <button
             type="button"
-            className="chip-act"
+            className={withAlias('chip-act', classNames.run)}
             onClick={() => dispatchPrompt()}
-            disabled={routing || !value.trim()}
+            disabled={runDisabled}
+            title={disabledReason || undefined}
           >
-            {routing ? 'Routing…' : 'Run'}
+            {routing ? routingLabel : runLabel}
           </button>
         </div>
         {scopeMenu.shown && (
