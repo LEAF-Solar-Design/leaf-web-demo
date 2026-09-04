@@ -180,6 +180,7 @@ export default function DraftingRibbon({ clusters = [], tab = 'draw', children =
           widgets={cluster.widgets || []}
           onLabelClick={cluster.onLabelClick || null}
           labelTitle={cluster.labelTitle || ''}
+          extra={cluster.extra || null}
         >
           {(cluster.tools || []).map((tool) => <RibbonTool key={tool.id} tool={tool} />)}
         </RibbonCluster>
