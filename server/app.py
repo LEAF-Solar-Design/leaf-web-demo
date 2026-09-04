@@ -47,6 +47,7 @@ from routers import (
     author,
     cad_upload,
     capabilities,
+    change_to_live as change_to_live_router,
     checkpoints,
     conversations as conversations_router,
     deployment_identity,
@@ -258,6 +259,14 @@ app.include_router(overlay.router)  # T1 runtime overlay: propose a preview, dec
 app.include_router(ios_ship.router)  # Wave D one-shot iOS: readiness, one reviewed idempotent launch, status, receipt
 app.include_router(ios_ship_provider_router.router)  # internal provider callbacks, bearer-file auth only
 app.include_router(ios_surface.router)  # Wave D consume-only iOS readiness surface, fail-closed behind LEAF_IOS_SURFACE_ENABLED (GET /api/ios-surface/status refuses 404 while off)
+# slice 12a: GET /api/change-class (repo + shape -> delivery ladder, a pure
+# function of the caller's own strings) + GET /api/receipts (the receipts that
+# exist). Mounted unconditionally because the ADMISSION is per scope inside the
+# router, not per mount: /api/receipts?scope=job: is tenant data bound to the
+# caller, while scope=pr:/tree:/train read this repository's private CI state
+# with the platform's own credential and require the platform_customize
+# entitlement, the same gate GET /api/platform/source runs.
+app.include_router(change_to_live_router.router)
 app.include_router(glug_routes.router)
 # SOURCE SEAM (ios_surface): fn({tenant_id, project_id, revision}) -> a sanitized
 # leaf.ios-ship-surface.v1 dict. Wired to the INTERIM in-repo projection of the

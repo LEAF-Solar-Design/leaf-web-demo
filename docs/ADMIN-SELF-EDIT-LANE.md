@@ -223,9 +223,24 @@ Enable (per admin account, staging first):
    LAST): `LEAF_PLATFORM_MERGE_ENABLED=1`,
    `LEAF_PLATFORM_MERGE_TOKEN=<fine-grained PAT: Contents read+write AND
    Pull-requests read+write, THIRD token, never shared with the other two>`.
+   Optional delivery-receipt reads (`GET /api/receipts`, slice 12a):
+   `LEAF_RECEIPTS_GITHUB_TOKEN=<fine-grained PAT with exactly ONE permission:
+   Actions read — FOURTH token, never shared with the other three>` and
+   optionally `LEAF_RECONCILER_RECEIPT_URL` (https only) for the reconciler feed. This one is
+   separate for a concrete reason rather than symmetry: the Actions artifacts
+   and runs APIs the receipts reader calls need `Actions: read`, which the PR
+   PAT above deliberately does not carry. Leave it unset and both artifact
+   sources answer `source_unreachable` and render no rows — the honest inert
+   state, and the intended one until an operator decides to grant it. Do NOT
+   widen the PR PAT to make receipts work; that couples two revocations that
+   are kept separate on purpose.
 3. Verify dark-ness elsewhere: every non-admin tier answers 403
    `entitlement_required: platform_customize`; a non-allowlisted admin answers
-   404 `platform_customize_disabled`.
+   404 `platform_customize_disabled`. That same 403 covers
+   `GET /api/receipts?scope=pr:|tree:|train`, which reads this repository's
+   private CI state with the platform's own credential and therefore rides the
+   same admission as `GET /api/platform/source`; `scope=job:` is tenant data
+   and is bound to the calling tenant instead.
 
 Disable (any one suffices; all are env-only, no deploy):
 unset `LEAF_CUSTOMIZATION_R7_MODE` · remove the tenant from the allowlist ·
