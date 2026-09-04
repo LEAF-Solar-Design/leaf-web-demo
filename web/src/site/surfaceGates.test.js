@@ -27,14 +27,22 @@ import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_PRODUCT_SURFACE,
   PRODUCT_SURFACES,
+  normalizeProductSurface,
   surfaceContract,
   surfaceGround,
 } from './productSurfaces.js'
 import { groundShowsDrawing } from './SurfaceGrounds.jsx'
 
-// The four ids as a literal, so a surface added without a row here fails the
-// completeness test below rather than quietly going unpinned.
-const SURFACE_IDS = ['browser', 'cad', 'solar', 'ios']
+// Every id the module ships, as a literal, so a surface added without a row
+// here fails the completeness test below rather than quietly going unpinned.
+const SURFACE_IDS = ['browser', 'cad', 'solar', 'ios', 'sheets']
+
+// The four the CONSOLE hosts (`scene: 'app'`). The OLD table below is the
+// pre-slice-2 console's own predicates, and those predicates only ever ran for
+// these ids, so applying them to a surface the console never renders would be
+// a fabricated oracle, not a stricter one. Slice 5b's fifth surface gets its
+// own column instead, further down, written from the sheets arm.
+const STUDIO_SURFACE_IDS = ['browser', 'cad', 'solar', 'ios']
 
 // ---------------------------------------------------------------------------
 // The old predicates, verbatim from the pre-slice-2 source. Each cites the
@@ -66,7 +74,7 @@ const OLD = {
 }
 
 describe('Surface Contract — every repointed gate equals its old literal', () => {
-  for (const id of SURFACE_IDS) {
+  for (const id of STUDIO_SURFACE_IDS) {
     const c = surfaceContract(id)
 
     it(`${id}: chrome.productFrame === (id !== 'cad')`, () => {
@@ -133,7 +141,7 @@ describe('Surface Contract — every repointed gate equals its old literal', () 
   }
 
   it('groundShowsDrawing, now derived from the contract, keeps its truth table', () => {
-    for (const id of SURFACE_IDS) expect(groundShowsDrawing(id)).toBe(OLD.drafting(id))
+    for (const id of STUDIO_SURFACE_IDS) expect(groundShowsDrawing(id)).toBe(OLD.drafting(id))
     // The signature is unchanged and it still fails closed on a non-surface:
     // a Set miss, never a normalization to the CAD default.
     expect(groundShowsDrawing(undefined)).toBe(false)
@@ -159,9 +167,9 @@ describe('Surface Contract — every repointed gate equals its old literal', () 
   it('is not vacuous: the table actually separates the four surfaces', () => {
     // A table where every expectation is the same value would pass against a
     // constant contract. Prove the gates disagree across surfaces.
-    expect(new Set(SURFACE_IDS.map((id) => surfaceContract(id).chrome.stageBranch)).size).toBe(3)
-    expect(SURFACE_IDS.filter((id) => surfaceContract(id).chrome.cockpit)).toEqual(['cad', 'solar'])
-    expect(SURFACE_IDS.filter((id) => surfaceContract(id).chrome.productFrame))
+    expect(new Set(STUDIO_SURFACE_IDS.map((id) => surfaceContract(id).chrome.stageBranch)).size).toBe(3)
+    expect(STUDIO_SURFACE_IDS.filter((id) => surfaceContract(id).chrome.cockpit)).toEqual(['cad', 'solar'])
+    expect(STUDIO_SURFACE_IDS.filter((id) => surfaceContract(id).chrome.productFrame))
       .toEqual(['browser', 'solar', 'ios'])
     // The solar quirk this slice PRESERVES: the frame renders over a shown
     // workspace card. If a later slice fixes it, this line is the tripwire.
@@ -171,6 +179,74 @@ describe('Surface Contract — every repointed gate equals its old literal', () 
     // gives solar the frame arm while the console gives it a cockpit.
     expect(surfaceContract('solar').chrome.stageBranch).toBe('frame')
     expect(surfaceContract('solar').chrome.cockpit).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// THE SHEETS COLUMN (standardization slice 5b).
+//
+// The OLD table above cannot be extended to sheets, and pretending it could
+// would be the dishonest move: `id !== 'cad'` returns TRUE for 'sheets', but
+// the console never renders a product frame for it, because the console never
+// renders it at all. The oracle for this column is the sheets ARM, and the
+// facts are written as literals here the same way the four old predicates are.
+// ---------------------------------------------------------------------------
+const SHEETS = {
+  // SiteRoot.jsx:234-237  ) : scene === 'sheets' ? (<Suspense><SheetsPage/></Suspense>)
+  // routeScene.js:30      /sheets and /sheets/<code> -> scene 'sheets'
+  scene: 'sheets',
+  // SheetsPage.jsx:54     <main className="sheets-root">, no drawing canvas,
+  //                       no project board, no device stage.
+  ground: 'sheet',
+  // ProductSurfaceTabs.jsx:72 renders a tab per record that declares one.
+  tab: false,
+}
+
+describe('Surface Contract, the sheets column (slice 5b)', () => {
+  const c = surfaceContract('sheets')
+
+  it('sheets: scene names the SiteRoot arm that hosts it, and it is not the console', () => {
+    expect(c.scene).toBe(SHEETS.scene)
+    expect(c.scene).not.toBe(surfaceContract(DEFAULT_PRODUCT_SURFACE).scene)
+  })
+
+  it('sheets: ground is the new fourth kind, so the drawing gate excludes it', () => {
+    expect(surfaceGround('sheets')).toBe(SHEETS.ground)
+    expect(groundShowsDrawing('sheets')).toBe(false)
+    expect(surfaceGround('sheets') === 'board').toBe(false)
+    expect(surfaceGround('sheets') === 'device-stage').toBe(false)
+  })
+
+  it('sheets: chrome.tab is false, so the tab band is unchanged by this slice', () => {
+    expect(c.chrome.tab).toBe(SHEETS.tab)
+    for (const id of STUDIO_SURFACE_IDS) expect(surfaceContract(id).chrome.tab).toBe(true)
+  })
+
+  it('sheets: every console chrome slot is DECLARED absent, none of it undeclared', () => {
+    // A chrome-free page was read, not guessed, so these are false rather than
+    // null. stageBranch is the one honest null: the stage never casts this
+    // surface, so no arm of its ternary is the answer.
+    expect(c.chrome.productFrame).toBe(false)
+    expect(c.chrome.workspaceCard).toBe(false)
+    expect(c.chrome.cockpit).toBe(false)
+    expect(c.chrome.projectSlot).toBe(null)
+    expect(c.chrome.stageBranch).toBe(null)
+    expect(c.commandLine).toBe(false)
+    expect(c.authoring).toBe(false)
+    expect(c.rails).toEqual({ left: 'none', right: 'none', dock: null })
+    expect(c.toolbar).toEqual({ ribbon: false, home: null, quick: null })
+    expect(c.builds.routes).toEqual([])
+  })
+
+  it("sheets: the old console predicates DISAGREE with it, which is why it has its own column", () => {
+    // Proof that reusing the OLD table here would have been wrong, not just
+    // unnecessary: three of its predicates return the opposite of the truth.
+    expect(OLD.productFrame('sheets')).toBe(true)
+    expect(c.chrome.productFrame).toBe(false)
+    expect(OLD.stageBranch('sheets')).toBe('frame')
+    expect(c.chrome.stageBranch).toBe(null)
+    // And the reason they never applied: the console cannot select this id.
+    expect(normalizeProductSurface('sheets')).toBe(DEFAULT_PRODUCT_SURFACE)
   })
 })
 

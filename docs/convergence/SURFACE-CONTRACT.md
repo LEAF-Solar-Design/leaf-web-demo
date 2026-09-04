@@ -1,6 +1,6 @@
 # The Surface Contract
 
-Standardization slices 1-2 of 13. Plan: `C:/Users/ehaug/.claude/plans/staged-wiggling-fairy.md`,
+Standardization slices 1-2 and 5b of 13. Plan: `C:/Users/ehaug/.claude/plans/staged-wiggling-fairy.md`,
 section "The Surface Contract", element table row 1.
 
 **Slice 1** froze the contract as DATA on `web/src/site/productSurfaces.js`, with every
@@ -22,7 +22,14 @@ The operator rule the contract exists to serve, verbatim:
 > "nothing HAS to be there, but everything needs to be ABLE to be there, according to
 > agent/operator decisions, effortlessly as a key/staple functionality"
 
-`docs/convergence/ACCEPTANCE.md` is frozen and is not edited by either slice.
+**Slice 5b** added the FIFTH surface record, `sheets`, and two new slots on every record:
+`chrome.tab` (does this surface render in the tab band) and `scene` (which `SiteRoot` arm
+hosts it). Sheets ships `tab: false` and `scene: 'sheets'`, so the slice renders nothing
+new: `ProductSurfaceTabs` now filters on `chrome.tab`, and all four studio surfaces declare
+`true`, so the band is byte-identical. The manifest now covers `/sheets`; the studio still
+does not host it. See "Sheets, the fifth surface" below.
+
+`docs/convergence/ACCEPTANCE.md` is frozen and is not edited by any slice.
 
 ## How to read a value
 
@@ -41,16 +48,20 @@ papers over.
 
 `where it is read` is the slice-2 consumer: the site that now asks the contract.
 The literal each one replaced is named beside it, and is pinned equal to the
-contract value for all four ids by `web/src/site/surfaceGates.test.js`.
+contract value for the four STUDIO ids by `web/src/site/surfaceGates.test.js`.
+Sheets (`scene: 'sheets'`) is pinned by its own column in the same file, against
+the sheets arm rather than against the console predicates, which never ran for it.
 
 | field | type | meaning | where it is read (and the literal it replaced) |
 | --- | --- | --- | --- |
-| `ground` | `'drawing' \| 'board' \| 'device-stage'` | the canvas kind under the shell | `web/src/site/SurfaceGrounds.jsx:106` derives `DRAWING_SURFACES` from the contract (`contract.ground === 'drawing'`), read by `groundShowsDrawing()` at `:111`; it replaced the literal `new Set(['cad','solar'])`; the two non-drawing kinds are named in `web/e2e/local/one-shell-mount.spec.mjs:131` and rendered by `ProjectBoardGround` (`SurfaceGrounds.jsx:133`, active on `surfaceGround(surface) === 'board'` at `:298`, was `surface === 'browser'`) and `DeviceGround` (`:222`, active on `=== 'device-stage'` at `:306`, was `surface === 'ios'`) |
-| `chrome.productFrame` | boolean | the `<ProductSurfaceFrame>` wrapper renders | `web/src/App.jsx:2838` `surfaceSlots.chrome.productFrame`; replaced `activeSurface !== 'cad'` |
+| `ground` | `'drawing' \| 'board' \| 'device-stage' \| 'sheet'` | the canvas kind under the shell | `web/src/site/SurfaceGrounds.jsx:111` derives `DRAWING_SURFACES` from the contract (`contract.ground === 'drawing'`), read by `groundShowsDrawing()` at `:116`; it replaced the literal `new Set(['cad','solar'])`; the two non-drawing kinds are named in `web/e2e/local/one-shell-mount.spec.mjs:131` and rendered by `ProjectBoardGround` (`SurfaceGrounds.jsx:137`, active on `surfaceGround(surface) === 'board'` at `:303`, was `surface === 'browser'`) and `DeviceGround` (`:226`, active on `=== 'device-stage'` at `:311`, was `surface === 'ios'`) |
+| `chrome.productFrame` | boolean | the `<ProductSurfaceFrame>` wrapper renders | `web/src/App.jsx:2898` `surfaceSlots.chrome.productFrame`; replaced `activeSurface !== 'cad'` |
 | `chrome.workspaceCard` | boolean | the drawing workspace card is visible | `web/src/App.jsx:2859` `display: surfaceSlots.chrome.workspaceCard ? undefined : 'none'`; replaced `activeSurface === 'cad' \|\| activeSurface === 'solar'` |
 | `chrome.cockpit` | boolean | the drafting cockpit bands mount | `web/src/App.jsx:2269` `const drafting = surfaceSlots.chrome.cockpit` (was `groundShowsDrawing(activeSurface)`), consumed as `studioGround && drafting` at `:2562` (top band) and `:2898` (ribbon), and ~20 further sites. The name is kept because the App wiring pin guards that exact shape, and because the W4f cockpit owner asked that `drawingCommandOnRef` (`:2280`) and the three `ENV_CAD_EDIT` mounts stay on this one predicate |
 | `chrome.stageBranch` | `'cad' \| 'ios' \| 'frame'` | which arm of the stage's ternary this surface takes | `web/src/site/ToolCast.jsx:223` `const stageBranch = surfaceContract(activeSurface).chrome.stageBranch`, switched at `:1434` (`cad`), `:2077` (`ios`), `:2139` (frame fallthrough); it replaced the inline surface-literal ternary. The ios readiness effects (`:1302`, `:1361`) and the `useIosSurface` enabled gate (`:1328`) read the same binding, so the hook still mirrors its render gate exactly |
 | `chrome.projectSlot` | `'ios-surface' \| null` | what fills the frame's project slot | `web/src/App.jsx:2846-2847` `surfaceSlots.chrome.projectSlot === 'ios-surface'`; replaced `activeSurface === 'ios'` |
+| `chrome.tab` | boolean | this surface renders a tab in the profile band | `web/src/components/ProductSurfaceTabs.jsx:72` `PRODUCT_SURFACES.filter(({ contract }) => contract.chrome.tab)`; replaced an unfiltered `.map` over every record. Also the STUDIO'S SELECTION SET: `productSurfaces.js` derives the ids `normalizeProductSurface()` accepts from this slot, so `?surface=<id>` can only ever name a tab that exists (slice 5b) |
+| `scene` | `'app' \| 'sheets'` | which `SiteRoot` arm hosts this surface | `web/src/site/SiteRoot.jsx:228-232` (the console arm, all four studio surfaces) and `:234-237` (`scene === 'sheets'`, bare `<SheetsPage/>`); the path mapping is `web/src/site/routeScene.js:30`. Declarative only today: `SiteRoot` still switches on its own `scene` value, and repointing that switch onto this slot is later-slice work (slice 5b) |
 | `toolbar.ribbon` | boolean | `DraftingRibbon` mounts | `web/src/App.jsx:2898` |
 | `toolbar.home` | ribbon tab id \| null | the tab the ribbon opens on | `web/src/App.jsx:2234` `useState(() => surfaceContract(activeSurface).toolbar.home ?? surfaceContract(DEFAULT_PRODUCT_SURFACE).toolbar.home)`; replaced the literal `useState('draw')`. The fallback is load-bearing, not decoration: the ribbon tab is console-GLOBAL state, so a surface that declares no home tab (its ribbon never mounts) must still leave a real tab selected for the next surface that does. The id vocabulary is `web/src/site/CockpitTopBand.jsx:17-26` `RIBBON_TABS` |
 | `toolbar.quick` | array \| null | quick-access ids | undeclared: `CockpitTopBand.jsx:52` takes `before`/`after` as PROPS, built imperatively at `web/src/App.jsx:2453-2468`. There is no data source to read ids from, so `null` on every surface |
@@ -74,30 +85,36 @@ contract value for all four ids by `web/src/site/surfaceGates.test.js`.
 
 ## The matrix (console values, equal to today)
 
-| slot | browser | cad | solar | ios |
-| --- | --- | --- | --- | --- |
-| `ground` | `board` | `drawing` | `drawing` | `device-stage` |
-| `chrome.productFrame` | `true` | `false` | `true` | `true` |
-| `chrome.workspaceCard` | `false` | `true` | `true` | `false` |
-| `chrome.cockpit` | `false` | `true` | `true` | `false` |
-| `chrome.stageBranch` | `frame` | `cad` | `frame` | `ios` |
-| `chrome.projectSlot` | `null` | `null` | `null` | `ios-surface` |
-| `toolbar.ribbon` | `false` | `true` | `true` | `false` |
-| `toolbar.home` | `null` | `draw` | `draw` | `null` |
-| `toolbar.quick` | `null` | `null` | `null` | `null` |
-| `rails.left` | `nav` | `spine` | `spine` | `nav` |
-| `rails.right` | `job-rail` | `job-spine` | `job-spine` | `job-rail` |
-| `rails.dock` | `null` | `[layers, drawing, selection, plan]` | `[layers, drawing, selection, plan]` | `null` |
-| `groundMaterial.layerAccent` | `null` | `null` | `solar` | `null` |
-| `groundMaterial.solarStrings` | `false` | `false` | `true` | `false` |
-| `commandLine` | `false` | `true` | `true` | `false` |
-| `authoring` | `true` | `true` | `true` | `true` |
-| `versions` | `none` | `drawing` | `drawing` | `none` |
-| `conversations.scope` | `drawing` | `drawing` | `drawing` | `drawing` |
-| `integrations` | `null` | `null` | `null` | `null` |
-| `builds.routes` | `[one-shot]` | `[one-shot]` | `[one-shot]` | `[one-shot]` |
-| `contextMenu` | `[]` | `[]` | `[]` | `[]` |
-| `shortcuts` / `entitlements` / `resetOn` / `a11y` / `tourAnchors` | `null` | `null` | `null` | `null` |
+The four studio columns are the console values, equal to today. The **sheets** column is
+the `/sheets` arm, added by slice 5b and read off `SiteRoot.jsx` / `SheetsPage.jsx`, not off
+`App.jsx` (the console never renders this surface).
+
+| slot | browser | cad | solar | ios | sheets |
+| --- | --- | --- | --- | --- | --- |
+| `scene` | `app` | `app` | `app` | `app` | `sheets` |
+| `ground` | `board` | `drawing` | `drawing` | `device-stage` | `sheet` |
+| `chrome.tab` | `true` | `true` | `true` | `true` | `false` |
+| `chrome.productFrame` | `true` | `false` | `true` | `true` | `false` |
+| `chrome.workspaceCard` | `false` | `true` | `true` | `false` | `false` |
+| `chrome.cockpit` | `false` | `true` | `true` | `false` | `false` |
+| `chrome.stageBranch` | `frame` | `cad` | `frame` | `ios` | `null` |
+| `chrome.projectSlot` | `null` | `null` | `null` | `ios-surface` | `null` |
+| `toolbar.ribbon` | `false` | `true` | `true` | `false` | `false` |
+| `toolbar.home` | `null` | `draw` | `draw` | `null` | `null` |
+| `toolbar.quick` | `null` | `null` | `null` | `null` | `null` |
+| `rails.left` | `nav` | `spine` | `spine` | `nav` | `none` |
+| `rails.right` | `job-rail` | `job-spine` | `job-spine` | `job-rail` | `none` |
+| `rails.dock` | `null` | `[layers, drawing, selection, plan]` | `[layers, drawing, selection, plan]` | `null` | `null` |
+| `groundMaterial.layerAccent` | `null` | `null` | `solar` | `null` | `null` |
+| `groundMaterial.solarStrings` | `false` | `false` | `true` | `false` | `false` |
+| `commandLine` | `false` | `true` | `true` | `false` | `false` |
+| `authoring` | `true` | `true` | `true` | `true` | `false` |
+| `versions` | `none` | `drawing` | `drawing` | `none` | `none` |
+| `conversations.scope` | `drawing` | `drawing` | `drawing` | `drawing` | `null` |
+| `integrations` | `null` | `null` | `null` | `null` | `null` |
+| `builds.routes` | `[one-shot]` | `[one-shot]` | `[one-shot]` | `[one-shot]` | `[]` |
+| `contextMenu` | `[]` | `[]` | `[]` | `[]` | `[]` |
+| `shortcuts` / `entitlements` / `resetOn` / `a11y` / `tourAnchors` | `null` | `null` | `null` | `null` | `null` |
 
 ### Notes on values that surprise
 
@@ -140,6 +157,66 @@ contract value for all four ids by `web/src/site/surfaceGates.test.js`.
 - **`conversations.scope` is `drawing` even where there is no drawing.**
   `sessionCacheKey` falls back to the literal `'default'` drawing key
   (`converse.js:132`), so the scope shape is drawing-keyed on every surface.
+
+## Sheets, the fifth surface (slice 5b)
+
+`/sheets` is a public page: `SiteRoot.jsx:234-237` renders a bare `<SheetsPage/>` inside a
+`<Suspense>` with no wrapper of any kind, reached from `routeScene.js:30`. It has no
+session gate, no drawing, no toolbar, no rail and no prompt. `SheetsPage.jsx` mounts
+`<SheetsSet>` and nothing else (`:54-55`); `loadDemoSolve()` (`:31`) is a soft enhancement
+with static fallbacks, never a gate.
+
+**The decision: it stays its own `SiteRoot` arm, and the contract covers it anyway.**
+
+Evidence for keeping it a separate arm, which is what shipped:
+
+- `SiteRoot.jsx:48` draws the ownership boundary in the source: "Built by a sibling agent
+  (`src/site/sheets/**` is theirs), referenced only".
+- `web/e2e/local/one-shell-mount.spec.mjs:236` makes "the studio branch lives ONLY in the
+  scene-app arm" an invariant, using `/sheets` as the negative control. Folding sheets into
+  the studio would invert that test's premise, not extend it. That row is unchanged here.
+- It is the only surface with no session concept at all. The other four each read
+  `sessionActive` in `productSurfaceStates`; sheets has no precondition to read.
+
+Evidence for covering it in the contract, which is also what shipped:
+
+- The operator rule: everything must be ABLE to be there. A surface the manifest cannot
+  describe is a surface no later slice can move, and the schema already models "declare
+  everything even where this surface has none of it" (see the browser and iOS rows).
+- A future consumer reading `PRODUCT_SURFACES` would otherwise need a hand-written carve-out
+  for the one route the manifest does not know about.
+
+The two are reconciled by the two new slots. `scene` records WHICH arm hosts a surface, so
+the contract can describe `/sheets` without claiming the studio renders it. `chrome.tab`
+records whether the band shows it, and sheets ships `false`, so slice 5b changes no pixel.
+Flipping that one value is the entire config change if the answer ever becomes yes.
+
+### `?surface=sheets` on `/app` normalizes to the DEFAULT
+
+`normalizeProductSurface()` now derives its accepted set from `chrome.tab` rather than from
+"every id the module ships". A sheets id arriving at the console therefore falls closed to
+`cad`, exactly like `?surface=nonsense` does.
+
+The honest reason: `/app` never hosts sheets. Resolving the id would select a tab the band
+does not render, leaving the tablist with no selected tab and `ProductSurfaceFrame`
+describing a page the console cannot show, a worse failure than the fall-closed, and one
+no user could act on. `searchForProductSurface()` shares the normalizer, so the console
+cannot mint such a link either.
+
+Selection and LOOKUP are kept apart, and that distinction is load-bearing: `productSurface()`
+and `surfaceContract()` resolve every id the module ships, so `surfaceContract('sheets')`
+returns the sheets contract rather than CAD's. Both halves are pinned in
+`productSurfaces.test.js` ("a sheets selector on /app falls closed to the default, but the
+record stays addressable"); without the second half, every sheets assertion in the suite
+would have been silently reading CAD's contract.
+
+### `ground: 'sheet'` excludes it from the drawing set by construction
+
+`SurfaceGrounds.jsx:110-112` derives `DRAWING_SURFACES` from `contract.ground === 'drawing'`.
+A fourth ground kind is therefore excluded with no edit to that file and no chance of the
+two drifting, the alternative, a literal exclusion list, is exactly what slice 2 removed.
+`groundShowsDrawing('sheets')` is `false`, and the drawing grounds are still exactly `cad`
+and `solar` with a fifth row present.
 
 ## Divergences between the two shells
 
@@ -278,3 +355,19 @@ until now enforced by nothing. The gate is static, so it never renders a surface
 carries its own positive controls: fixture sources with a reasonless disabled record, an
 unfrozen map, a placeholder reason and a dangling key each drive the same functions red.
 Adding a slot to the contract therefore means adding its field-table row in the same change.
+
+## What slice 5b changed
+
+| # | file | change |
+| --- | --- | --- |
+| 1 | `web/src/site/productSurfaces.js` | the fifth record (`sheets`), every value cited to `SiteRoot.jsx` / `SheetsPage.jsx` / `routeScene.js`; the new `scene` and `chrome.tab` slots on all five records; `SELECTABLE_SURFACE_IDS` derived from `chrome.tab` and read by `normalizeProductSurface()`; `productSurface()` resolves any SHIPPED id (selection and lookup split); `productSurfaceStates()` gains a constant `sheets: { state: 'available', label: 'Ready' }` row |
+| 2 | `web/src/components/ProductSurfaceTabs.jsx` | one line: the band maps over `PRODUCT_SURFACES.filter(({ contract }) => contract.chrome.tab)` instead of every record |
+| 3 | `web/src/site/productSurfaces.test.js` | id list and count (5), the `sheets` `CONTRACT_FIXTURE` entry, `scene` in `CONTRACT_KEYS`, `tab` in the chrome key set, `'sheet'` and the `scene` enum in `ENUMS`, the normalization decision pinned both ways, the constant sheets status row, and a sheets suite (copy, chrome-free contract, scene, tab, ground) |
+| 4 | `web/src/site/surfaceGates.test.js` | `SURFACE_IDS` is all five (so the completeness row catches a sixth), `STUDIO_SURFACE_IDS` is the four the old console predicates actually ran for, and a "sheets column" suite written against the sheets arm, including a row proving the old predicates DISAGREE with it, which is why it has its own column |
+| 5 | `web/src/components/ProductSurfaceTabs.test.jsx` | a jsdom suite: exactly four tabs, in manifest order, no Sheets tab, the count derived from `chrome.tab` on both sides, and every rendered tab carrying a real status label |
+| 6 | this file | the `sheets` matrix column, the two new field-table rows, and the decision above |
+
+Not touched: `SurfaceGrounds.jsx` (the derivation already excludes a new ground kind),
+`App.jsx`, `ToolCast.jsx`, `SiteRoot.jsx`, `src/site/sheets/**` (a sibling agent's), and the
+`/sheets` row in `web/e2e/local/one-shell-mount.spec.mjs`, whose premise this slice
+deliberately preserves.

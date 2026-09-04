@@ -65,7 +65,11 @@ export default function ProductSurfaceTabs({
   return (
     <nav className="tc-product-nav" data-cast="tool" aria-label="Product workspace">
       <div className="tc-product-tabs" role="tablist" aria-label="Workspace profile" onKeyDown={moveRovingTab}>
-        {PRODUCT_SURFACES.map((surface) => {
+        {/* One tab per surface that DECLARES one (slice 5b): the band reads
+            contract.chrome.tab instead of assuming every record is a tab, so
+            Sheets can be a manifest row without appearing here. All four
+            studio surfaces declare true, so this renders what it rendered. */}
+        {PRODUCT_SURFACES.filter(({ contract }) => contract.chrome.tab).map((surface) => {
           const selected = surface.id === activeSurface
           const status = states[surface.id]
           return (
