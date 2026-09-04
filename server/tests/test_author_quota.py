@@ -523,7 +523,12 @@ def test_service_charges_immediately_before_the_harness_call():
         'raise CustomizationServiceError("invalid_stage_request", 422)',   # mode/description
         'raise CustomizationServiceError("builder_entitlement_missing", 403)',  # tier
         "self._authority().authorize_stage(",                             # role/binding
-        "return self._receipt(change)",                                   # STAGED replay
+        # STAGED replay. The literal tracks the call's current shape: slice 12a
+        # made `_verify_bound_stage_policy` return the changed paths it already
+        # read so `_receipt` can stamp the change class without a second
+        # `diff-tree`. The ASSERTION is unchanged -- this replay must still
+        # return before the charge.
+        "return self._receipt(change, changed=changed)",
         'raise CustomizationServiceError("stage_not_available")',         # bad state
         # An unconfigured harness 503s every attempt deterministically, so its
         # guard must also refuse before the charge (source.index finds the
