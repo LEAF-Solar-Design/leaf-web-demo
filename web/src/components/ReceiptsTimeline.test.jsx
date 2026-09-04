@@ -146,6 +146,45 @@ describe('ReceiptsTimeline honest states', () => {
     expect(text).not.toContain('already in flight')
   })
 
+  it('carries an unreadable-run detail through without inventing a budget overrun', () => {
+    // The third cause the server names: one run record could not be read. The
+    // server composes the detail per door, so the component must show it as
+    // given and must not add the budget clause the other door uses.
+    render(
+      <ReceiptsTimeline
+        rows={[]}
+        unavailable={[{
+          source: 'github-artifacts',
+          reason: 'source_busy',
+          detail: "1 run record(s) for 'prewarm-relay-receipt-pr-9' could not be read "
+            + '(a transient GitHub error or an unusable body); the ones verified are shown, '
+            + 'never rendered as a confirmed absence',
+        }]}
+      />,
+    )
+    const text = screen.getByTestId('receipts-unavailable').textContent
+    expect(text).toContain('was not fully read')
+    expect(text).toContain('could not be read')
+    expect(text).not.toContain('provenance budget')
+  })
+
+  it('shows the inflight-cap detail as the server wrote it', () => {
+    // The first cause: the server refused over its inflight cap. The clause
+    // stays neutral; the server's own sentence names the load.
+    render(
+      <ReceiptsTimeline
+        rows={[]}
+        unavailable={[{
+          source: 'github-artifacts',
+          reason: 'source_busy',
+          detail: 'too many GitHub reads were already in flight for this deployment; try again shortly',
+        }]}
+      />,
+    )
+    const text = screen.getByTestId('receipts-unavailable').textContent
+    expect(text).toContain('was not fully read')
+    expect(text).toContain('already in flight')
+  })
   it('does not claim emptiness while a read is still in flight', () => {
     render(<ReceiptsTimeline rows={[]} unavailable={[]} loading />)
     expect(screen.getByTestId('receipts-loading')).toBeTruthy()

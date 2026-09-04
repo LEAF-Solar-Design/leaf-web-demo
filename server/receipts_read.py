@@ -557,7 +557,11 @@ def _fetch_artifacts_verified(
     verified: list[tuple[dict, str]] = []
     resolved: dict[int, Optional[str]] = {}
     lookups_spent = 0
-    incomplete = False
+    # Two DOORS into the same honest answer, tracked separately so the detail
+    # sentence names the one that actually fired (never a budget overrun for a
+    # run record that simply could not be read).
+    budget_exhausted = False
+    unreadable_runs = 0
     for item in candidates:
         run = item.get("workflow_run")
         run_id = run.get("id") if isinstance(run, Mapping) else None
@@ -565,7 +569,7 @@ def _fetch_artifacts_verified(
             continue
         if run_id not in resolved:
             if lookups_spent >= MAX_PROVENANCE_LOOKUPS:
-                incomplete = True
+                budget_exhausted = True
                 continue
             lookups_spent += 1
             resolved[run_id] = _run_workflow_path(run_id)
@@ -573,10 +577,9 @@ def _fetch_artifacts_verified(
         if path is None:
             # The run record itself could not be read (network failure, or an
             # unusable body). Inconclusive -- never rendered as a confirmed
-            # non-match -- so it folds into the same incomplete/busy answer
-            # the cap-exhaustion branch above uses, reached through a
-            # different door.
-            incomplete = True
+            # non-match -- so it reaches the same busy answer as the budget
+            # door above, but the detail names THIS cause, not a budget overrun.
+            unreadable_runs += 1
             continue
         if path not in allowed:
             # VERIFIED: this run really did mint the artifact, and it really
@@ -585,12 +588,21 @@ def _fetch_artifacts_verified(
             continue
         verified.append((dict(item), path))
 
-    if incomplete:
+    if budget_exhausted or unreadable_runs:
+        causes: list[str] = []
+        if budget_exhausted:
+            causes.append(
+                f"more runs uploaded an artifact named {name!r} than the per-name "
+                "provenance budget could check"
+            )
+        if unreadable_runs:
+            causes.append(
+                f"{unreadable_runs} run record(s) for {name!r} could not be read "
+                "(a transient GitHub error or an unusable body)"
+            )
         return verified, _unavailable(
             "github-artifacts", REASON_BUSY,
-            f"more runs uploaded an artifact named {name!r} than the per-name "
-            "provenance budget could check; the ones verified are shown, "
-            "never rendered as a confirmed absence",
+            "; ".join(causes) + "; the ones verified are shown, never rendered as a confirmed absence",
         )
     return verified, None
 
@@ -642,7 +654,8 @@ def _bytes_summary(size: Any) -> str:
 _reconciler_lock = threading.Lock()
 # A failure is cached exactly like a success (`value` XOR `unavailable` set),
 # so a repeatedly-failing reconciler costs one outbound read per
-# RECONCILER_CACHE_SECONDS, never one per request.
+# RECONCILER_CACHE_SECONDS per cache miss; concurrent misses inside one window
+# are bounded by the shared inflight semaphore, not by this lock.
 _reconciler_cache: dict[str, Any] = {
     "at": 0.0, "url": "", "value": None, "unavailable": None,
 }

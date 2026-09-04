@@ -120,6 +120,9 @@ def _platform_scope_gate(tenant: Any) -> Optional[JSONResponse]:
     """
     from routers import platform_customize as platform_customize_router  # noqa: PLC0415 - lazy, avoids an import cycle
 
+    # The sibling gate returns (tenant_id, tier) on admission; this route reads
+    # nothing from it on purpose (the scope is tenant-independent once admitted),
+    # only the refusal matters here. Keep the tuple discarded, not re-derived.
     admitted = platform_customize_router._gate(tenant)
     if isinstance(admitted, JSONResponse):
         return admitted

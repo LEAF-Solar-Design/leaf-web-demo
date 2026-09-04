@@ -429,6 +429,25 @@ def test_an_unreadable_run_record_is_incomplete_not_a_confident_empty(monkeypatc
     assert body["rows"] == []
     assert body["unavailable"], "an unreadable run record must not read as a confirmed absence"
     assert body["unavailable"][0]["reason"] == rr.REASON_BUSY
+    # Round-3 finding: the detail must name THIS door, never the budget one
+    # (one artifact, one failing run, four of five slots unspent).
+    detail = body["unavailable"][0]["detail"]
+    assert "could not be read" in detail, detail
+    assert "provenance budget" not in detail, detail
+
+
+def test_both_doors_fired_name_both_causes(monkeypatch):
+    """Six unreadable runs exhaust the budget AND fail to read: the detail
+    names both causes, in that order, and still never reads as an absence."""
+    _configure_github(monkeypatch)
+    name = "prevarm-relay-receipt-pr-9".replace("prevarm", "prewarm")
+    arts = [_artifact(name, run_id=7000 + i, created=f"2026-09-02T10:{i:02d}:00Z") for i in range(6)]
+    _stub_github(monkeypatch, {name: arts}, run_paths={})
+    body = rr.read_receipts("pr:9")
+    assert body["rows"] == []
+    detail = body["unavailable"][0]["detail"]
+    assert "provenance budget" in detail and "could not be read" in detail, detail
+    assert detail.index("provenance budget") < detail.index("could not be read")
 
 
 def test_a_second_repository_cannot_be_served_this_ones_cached_rows(monkeypatch):
