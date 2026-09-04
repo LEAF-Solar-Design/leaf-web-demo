@@ -11,7 +11,7 @@
 //
 //   1. `todayConsole()` / `todayStage()` below are a LITERAL transcription of
 //      the pre-slice-4a mount sites, prop for prop, each cited to the line it
-//      came from on origin/main ae5c01bf. They import the same leaf components
+//      came from on origin/main 1a6d6630. They import the same leaf components
 //      the scenes import; they are not a paraphrase of SurfaceFrame.
 //   2. `surfaceFrame.today-fixture.json` was captured by rendering THOSE
 //      transcriptions on the untouched worktree, BEFORE App.jsx or
@@ -47,7 +47,7 @@ const FIXTURE_PATH = join(dirname(fileURLToPath(import.meta.url)), 'surfaceFrame
 // can do for itself: SURFACE_FRAME_CAPTURE=1 npx vitest run src/site/surfaceFrame.render.test.jsx
 // rewrites the fixture from the transcription and asserts nothing. The
 // committed fixture was captured that way on the UNTOUCHED worktree at
-// origin/main ae5c01bf, before App.jsx or ToolCast.jsx were edited, which is
+// origin/main 1a6d6630, before App.jsx or ToolCast.jsx were edited, which is
 // what makes it evidence rather than a restatement of the new code.
 const CAPTURE = process.env.SURFACE_FRAME_CAPTURE === '1'
 const FIXTURE = CAPTURE ? null : JSON.parse(readFileSync(FIXTURE_PATH, 'utf8'))
@@ -146,7 +146,7 @@ function slotSequence(element) {
 
 // ---------------------------------------------------------------------------
 // TODAY, transcribed. Every branch below is the pre-slice-4a source; the
-// citation is the line on origin/main ae5c01bf.
+// citation is the line on origin/main 1a6d6630.
 // ---------------------------------------------------------------------------
 
 /** App.jsx's console mounts. `studioGround`/`drafting`/`wideViewport` are the
@@ -269,6 +269,7 @@ function todayStage(activeSurface) {
 
 function framed(activeSurface, { console: isConsole }) {
   const common = {
+    scene: isConsole ? 'console' : 'stage',
     activeSurface,
     states: STATES,
     catalog: CATALOG,
@@ -427,16 +428,53 @@ describe.skipIf(CAPTURE)('SurfaceFrame — the gates it now owns', () => {
   it('the command bar slot emits the scene node untouched', () => {
     const node = <section className="scene-owned" data-testid="scene-bar"><b className="inner" /></section>
     const asNode = slotSequence(
-      <SurfaceFrame activeSurface="cad" states={STATES} commandBar={node}>
+      <SurfaceFrame scene="console" activeSurface="cad" states={STATES} commandBar={node}>
         <SurfaceFrame.CommandBar />
       </SurfaceFrame>,
     )
     const asRenderProp = slotSequence(
-      <SurfaceFrame activeSurface="cad" states={STATES} commandBar={() => node}>
+      <SurfaceFrame scene="console" activeSurface="cad" states={STATES} commandBar={() => node}>
         <SurfaceFrame.CommandBar />
       </SurfaceFrame>,
     )
     expect(asNode).toEqual(['section|scene-owned|scene-bar', 'b|inner|'])
     expect(asRenderProp).toEqual(asNode)
+  })
+
+  // isConsole() used to infer console-vs-stage from whether `posture` was
+  // null, which falls OPEN: a caller that forgot posture, or typo'd a surface
+  // id into the wrong prop, silently resolved to "stage" and every
+  // console-only gate below (Cockpit, the docked entitlement placement, the
+  // job-rail spine) would go quiet instead of the mount failing. `scene` is
+  // now a required, explicit two-value contract, validated once at the
+  // provider, so a wrong scene is loud on the FIRST render, not a silently
+  // wrong gate three components deep.
+  describe('scene is a required, explicit contract — a wrong one throws, never falls open', () => {
+    it('throws when scene is not passed at all', () => {
+      expect(() => render(
+        <SurfaceFrame activeSurface="cad" states={STATES}>
+          <SurfaceFrame.Tabs />
+        </SurfaceFrame>,
+      )).toThrow(/scene must be 'console' or 'stage'/)
+    })
+
+    it('throws when scene is a garbage value (e.g. a surface id typoed into it)', () => {
+      expect(() => render(
+        <SurfaceFrame scene="cad" activeSurface="cad" states={STATES}>
+          <SurfaceFrame.Tabs />
+        </SurfaceFrame>,
+      )).toThrow(/scene must be 'console' or 'stage'/)
+    })
+
+    it('accepts exactly "console" and "stage", nothing else', () => {
+      for (const scene of ['console', 'stage']) {
+        expect(() => render(
+          <SurfaceFrame scene={scene} activeSurface="cad" states={STATES}>
+            <SurfaceFrame.Tabs />
+          </SurfaceFrame>,
+        )).not.toThrow()
+        cleanup()
+      }
+    })
   })
 })

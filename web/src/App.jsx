@@ -2604,6 +2604,7 @@ export default function App() {
     // no DOM. Local names are aliased HERE, at the call boundary, so the frame
     // never learns App's private vocabulary.
     <SurfaceFrame
+      scene="console"
       activeSurface={activeSurface}
       states={surfaceStates}
       catalog={catalog}

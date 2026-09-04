@@ -247,9 +247,28 @@ describe('F-7: surface frames render the live tenant catalog', () => {
     // where the props are actually passed — plus the third leg the move
     // created: the frame must forward them, or both scenes could pass them
     // into a black hole and this pin would still read green.
+    // Anchor on the MOUNT — the opening tag of the one <SurfaceFrame ...> a
+    // scene renders once, whether its attributes start on the same line
+    // (`<SurfaceFrame `) or wrap to the next (`<SurfaceFrame\n`) — never on a
+    // slot. `src.indexOf('<SurfaceFrame')` alone also matches
+    // `<SurfaceFrame.Tabs`, `<SurfaceFrame.Frame`, `<SurfaceFrame.JobRail`
+    // etc: every one of those sorts before the real mount in App.jsx and
+    // ToolCast.jsx (App.jsx:2868 sits after 2606; ToolCast.jsx:1538 sits
+    // after 1502), so an unanchored scan silently slices from a slot instead
+    // and would read the mount's own props as absent.
+    // The next character after `SurfaceFrame` is what tells a mount
+    // (` ` or a line break, before its attributes) from a slot (`.`, before
+    // `Tabs`, `Frame`, `JobRail`...): the character class IS the assertion
+    // that this is the mount, not a `<SurfaceFrame.Tabs`-shaped false anchor.
+    // App.jsx is CRLF, ToolCast.jsx is LF, so match `\r` too.
+    const mountAnchor = (src) => {
+      const at = /<SurfaceFrame[ \r\n]/.exec(src)
+      expect(at, 'no <SurfaceFrame> mount found (only slots, or none at all)').toBeTruthy()
+      return at.index
+    }
     for (const file of ['../App.jsx', '../site/ToolCast.jsx']) {
       const src = readFileSync(`${process.cwd()}/src/components/${file}`.replace('/components/../', '/'), 'utf8')
-      const frame = src.slice(src.indexOf('<SurfaceFrame'))
+      const frame = src.slice(mountAnchor(src))
       expect(frame).toContain('workspaceProject={workspaceProjectState}')
       expect(frame).toContain('onCreateProject=')
     }

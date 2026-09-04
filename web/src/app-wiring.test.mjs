@@ -31,19 +31,68 @@ const conversePanelSessionBinding = /React\.createElement\(\s*ConversePanel,\s*\
 // esbuild's output keeps ordinary comments, so a `setX(` written inside one
 // would otherwise read as a live call: strip comments before scanning, or the
 // pin reports a phantom orphan and gets muted by the next person.
+//
+// A naive `line.indexOf('//')` has the opposite failure: a string literal
+// containing a URL (`'https://example.com'`) puts a `//` on the line before
+// any real comment does, so the cut lands inside the string and silently
+// drops every token after it — including a genuine setter call later on that
+// same line.
+//
+// The two failures cannot be fixed as two independent regex passes run in
+// either order: masking string literals BEFORE stripping comments treats
+// every English contraction inside a comment ("the controller's alone",
+// "this render's decision") as an unterminated string that swallows
+// thousands of real characters — including live useState declarations —
+// until the next stray apostrophe; stripping comments first, with a
+// naive scanner, is exactly the original `//`-in-a-URL bug. Only a single
+// pass that tracks "am I inside a string right now" and "am I inside a
+// comment right now" as ONE mutually-exclusive state can get both right:
+// a `//` is a comment only when no string is open, and a quote opens a
+// string only when no comment is open (so an apostrophe on a commented-out
+// line, or a `//` inside a real string, both stay inert).
 // ---------------------------------------------------------------------------
 const SETTER = 'set[A-Z][\\w$]*'
 const BROWSER_SETTERS = new Set(['setTimeout', 'setInterval'])
 
 function decomment(code) {
-  return code
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .split('\n')
-    .map((line) => {
-      const at = line.indexOf('//')
-      return at === -1 ? line : line.slice(0, at)
-    })
-    .join('\n')
+  let out = ''
+  let i = 0
+  const n = code.length
+  while (i < n) {
+    const ch = code[i]
+    const next = code[i + 1]
+    if (ch === '/' && next === '*') {
+      i += 2
+      while (i < n && !(code[i] === '*' && code[i + 1] === '/')) i++
+      i += 2
+      out += ' '
+      continue
+    }
+    if (ch === '/' && next === '/') {
+      i += 2
+      while (i < n && code[i] !== '\n') i++
+      continue // the newline itself is copied on the next loop iteration
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      const quote = ch
+      out += ch
+      i++
+      while (i < n && code[i] !== quote) {
+        if (code[i] === '\\' && i + 1 < n) {
+          out += code[i] + code[i + 1]
+          i += 2
+          continue
+        }
+        out += code[i]
+        i++
+      }
+      if (i < n) { out += code[i]; i++ } // the closing quote
+      continue
+    }
+    out += ch
+    i++
+  }
+  return out
 }
 
 function orphanSetters(jsxSource) {
@@ -200,11 +249,30 @@ describe('App.jsx wiring', () => {
   // declaration DELETED while its callers stayed, which is the shape every
   // extract-a-component refactor can produce. Generic on purpose: it needs no
   // maintenance when a new piece of state arrives.
-  it('calls no useState setter it does not declare (orphaned setter after a hoist)', () => {
-    assert.deepEqual(orphanSetters(appSource), [],
-      'App.jsx calls these setters but declares none of them: a component '
-      + 'extraction took the useState with it and left the call sites behind')
-  })
+  //
+  // Slice 4a split the console's shell across four files (App.jsx plus the
+  // extracted site/ToolCast.jsx, site/SurfaceFrame.jsx and site/NavRail.jsx),
+  // and the exact mistake this pin exists for — a useState hoisted out while
+  // its call sites stayed behind — can land in any one of the four just as
+  // easily as it landed in App. Loop the same scan over all four; each module
+  // is scanned on its own, since a setter genuinely declared in one and
+  // called from another (a prop, not a closure) is not an orphan and this pin
+  // must not treat cross-module wiring as a defect.
+  const ORPHAN_SETTER_SOURCES = [
+    { label: 'App.jsx', path: './App.jsx' },
+    { label: 'site/ToolCast.jsx', path: './site/ToolCast.jsx' },
+    { label: 'site/SurfaceFrame.jsx', path: './site/SurfaceFrame.jsx' },
+    { label: 'site/NavRail.jsx', path: './site/NavRail.jsx' },
+  ]
+
+  for (const { label, path } of ORPHAN_SETTER_SOURCES) {
+    it(`${label} calls no useState setter it does not declare (orphaned setter after a hoist)`, () => {
+      const source = readFileSync(new URL(path, import.meta.url), 'utf8')
+      assert.deepEqual(orphanSetters(source), [],
+        `${label} calls these setters but declares none of them: a component `
+        + 'extraction took the useState with it and left the call sites behind')
+    })
+  }
 
   it('fails when a setter declaration is deleted from under its callers', () => {
     // Falsification: the exact 4a mutation, replayed.

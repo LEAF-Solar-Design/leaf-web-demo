@@ -56,11 +56,27 @@ export function useSurfaceFrame() {
   return useContext(SurfaceFrameContext)
 }
 
-// The console passes a posture; the stage passes null. That is the ONE
-// discriminator the frame needs, and it is a real difference (the console has
-// a studio rail with expand/collapse postures; the stage has none), never a
-// scene name smuggled in as data.
-const isConsole = (frame) => !!frame && frame.posture !== null && frame.posture !== undefined
+// `scene` is the ONE discriminator the frame reads for console/stage — an
+// explicit, required declaration, never inferred from whether some other prop
+// happens to be truthy. Inferring it from `posture` (the console passes one,
+// the stage passes null) used to fall OPEN: a caller that forgot to pass
+// posture, or passed it as `undefined` by a typo, silently read as "stage"
+// instead of failing. A wrong scene is a programming error the frame can
+// catch on every render of every test that mounts it, so validateScene throws
+// instead of guessing.
+const VALID_SCENES = new Set(['console', 'stage'])
+
+function validateScene(scene) {
+  if (VALID_SCENES.has(scene)) return
+  throw new Error(
+    `SurfaceFrame: scene must be 'console' or 'stage', got ${JSON.stringify(scene)}. `
+    + 'Every mount declares which shell it is; this is not a runtime condition '
+    + 'to render around, and console.error-then-continue would let the frame '
+    + "resolve every console/stage gate against the WRONG scene's rules.",
+  )
+}
+
+const isConsole = (frame) => frame?.scene === 'console'
 
 // Fail closed: a slot whose frame is missing, or whose surface record cannot
 // be resolved, renders nothing instead of throwing. `surfaceContract` already
@@ -82,6 +98,10 @@ function useSlot() {
  * `capabilityCatalog` -> `catalog` — so the frame never learns a scene's
  * private vocabulary:
  *
+ *   scene             REQUIRED. 'console' | 'stage' — App.jsx passes
+ *                     'console', ToolCast.jsx passes 'stage'. The one
+ *                     declared discriminator every console/stage gate below
+ *                     reads; anything else throws (see validateScene above).
  *   activeSurface     the declared surface id driving every gate below
  *   states            productSurfaceStates() result for the tabs
  *   catalog           the ONE tenant capability catalog (F-7)
@@ -120,6 +140,7 @@ function useSlot() {
  * the scene's render, so this adds no work a re-render did not already do.
  */
 export default function SurfaceFrame({
+  scene,
   activeSurface,
   states = null,
   catalog = null,
@@ -138,7 +159,9 @@ export default function SurfaceFrame({
   onSignOut = null,
   children = null,
 }) {
+  validateScene(scene)
   const value = {
+    scene,
     activeSurface,
     // The declared slots for this surface, resolved once per render and shared
     // by every slot below, so two slots can never read two different records.

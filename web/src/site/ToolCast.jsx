@@ -1500,6 +1500,7 @@ export default function ToolCast({
     // private vocabulary. `posture` is null: the stage has no studio rail, and
     // that null is what tells the frame it is not the console.
     <SurfaceFrame
+      scene="stage"
       activeSurface={activeSurface}
       states={productStates}
       catalog={capabilityCatalog}
