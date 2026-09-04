@@ -45,6 +45,7 @@ from envelopes import install_error_handlers, with_envelope_fields
 from routers import (
     agent,
     author,
+    builds as builds_router,
     cad_upload,
     capabilities,
     change_to_live as change_to_live_router,
@@ -231,6 +232,7 @@ app.include_router(skills.router)
 app.include_router(agent.router)  # S4: POST /api/agent/approvals/{confirmation_id} (record-only)
 app.include_router(tools.router)
 app.include_router(jobs_router.router)
+app.include_router(builds_router.router)  # slice 11a: GET /api/builds, one record shape over the broker, fleet and fold lanes
 app.include_router(capabilities.router)
 app.include_router(mcp_status.router)
 app.include_router(mcp_gateway.router)

@@ -89,6 +89,7 @@ the sheets arm rather than against the console predicates, which never ran for i
 | `conversations.scope` | `'project' \| 'drawing' \| null` | what an AI conversation is scoped to | `web/src/converse.js:129-134` `sessionCacheKey(drawingId, projectId)` caches ONE session per project+drawing pair; `ConversePanel` mounts at `web/src/App.jsx:3306` with no surface gate |
 | `integrations` | null | which mounts show, how a new one is linked | undeclared: the only link surface is the header's Claude account panel (`web/src/App.jsx:2630`), which is global, not per-surface |
 | `builds.routes` | array | what this surface can launch | `web/src/App.jsx:2710` `ToolsPanel onRequestRun` -> `onRequestCatalogRun`, mounted on every surface. No marathon route exists in this client at all |
+| `builds.card` | `'job-rail' \| null` | where the BuildQueueCard is hosted on this surface | slice 11a. `web/src/components/JobRail.jsx` hosts one `web/src/components/BuildQueueCard.jsx` per build record (`web/src/lib/buildQueue.js`: lane broker / fold / fleet, a two-stage `terminal.verified` / `terminal.promoted` that is never inferred), on every studio surface, expanded where `rails.right` is `job-rail` and behind the spine where it is `job-spine`; `web/src/site/SurfaceFrame.jsx` `Builds` (the console toolbar's running-count badge, `App.jsx` `.viewer-actions`) renders only where this slot is non-null and only while work is open. `null` on sheets: the sheets arm mounts no rail at all (`rails.right: 'none'`), so there is no host for a card and no toolbar for a badge; an absence that was read off `SheetsPage.jsx`, not assumed |
 | `contextMenu` | array | element kinds exposing "configure / ask the agent" | `[]` on every surface: zero `contextmenu` / `onContextMenu` handlers exist anywhere under `web/src` (ripgrep, 2026-09-03). Declared empty, not undeclared |
 | `shortcuts` | null | per-surface keyboard/touch triggers | undeclared: no per-surface shortcut registry exists |
 | `entitlements` | null | per-surface per-tool entitlement | undeclared: `web/src/components/EntitlementGate.jsx:15` `ROWS` are TIER capability keys (`run_read`, `run_write`, `build`, `converse`), never per-surface |
@@ -128,6 +129,7 @@ the `/sheets` arm, added by slice 5b and read off `SiteRoot.jsx` / `SheetsPage.j
 | `conversations.scope` | `drawing` | `drawing` | `drawing` | `drawing` | `null` |
 | `integrations` | `null` | `null` | `null` | `null` | `null` |
 | `builds.routes` | `[one-shot]` | `[one-shot]` | `[one-shot]` | `[one-shot]` | `[]` |
+| `builds.card` | `job-rail` | `job-rail` | `job-rail` | `job-rail` | `null` |
 | `contextMenu` | `[]` | `[]` | `[]` | `[]` | `[]` |
 | `shortcuts` / `entitlements` / `resetOn` / `a11y` | `null` | `null` | `null` | `null` | `null` |
 | `tourAnchors.console` | console map | console map | console map | console map | `null` |

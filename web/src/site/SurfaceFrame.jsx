@@ -38,6 +38,8 @@ import JobRailComponent from '../components/JobRail.jsx'
 import ProductSurfaceTabs, { ProductSurfaceFrame } from '../components/ProductSurfaceTabs.jsx'
 import ToastComponent from '../components/Toast.jsx'
 
+import { currentJobCountsAsRunning, runningBuildCount } from '../lib/buildQueue.js'
+
 import { StatusToggles } from './DrawingCockpit.jsx'
 import { useContinuityPublish } from './continuityStore.js'
 import { surfaceContract } from './productSurfaces.js'
@@ -129,9 +131,13 @@ function useSlot() {
  *   commandBar        render prop (or node): App's PromptBox, ToolCast's
  *                     .tc-bar block, until slice 5 unifies them
  *   jobRail           { mock, jobs, currentJob, inflight, reattaching,
- *                      onSelectJob } or null. The stage gates its own
+ *                      onSelectJob, builds? } or null. The stage gates its own
  *                      `rightView === 'jobs'` OUTSIDE the frame by passing
  *                      null, so the frame never assumes rightView exists.
+ *                      Slice 11a: `builds` is the validated GET /api/builds
+ *                      list (useBuildQueue); the rail hosts every lane's
+ *                      BuildQueueCard from it, and the Builds slot below
+ *                      counts its open work into the toolbar badge.
  *   toast             { toast, onDone }
  *   signedIn/onSignOut  the AccountSignOut beside the tabs (the stage passes
  *                     them; the console's sign-out lives in its own header
@@ -316,10 +322,54 @@ function JobRail() {
       inflight={rail.inflight}
       reattaching={rail.reattaching}
       onSelectJob={rail.onSelectJob}
+      builds={rail.builds}
       spine={spined && !!posture.wideViewport && !posture.jobRailExpanded}
       onExpand={spined ? posture.onJobRailExpand : undefined}
       onCollapse={spined && posture.jobRailExpanded ? posture.onJobRailCollapse : undefined}
     />
+  )
+}
+
+/**
+ * The running-count badge (slice 11a). Mounted in the console's document
+ * band; renders ONLY where the contract declares a build card location
+ * (`contract.builds.card`, null on sheets) AND there is open work to count,
+ * so an idle shell is byte-identical to today's. The count is the same
+ * number the job monitor's spine shows: the live jobs plus every open
+ * record `builds` carries from the other lanes. A button when the rail is
+ * collapsed to a spine (one click expands it), a status chip otherwise.
+ */
+function Builds() {
+  const frame = useSlot()
+  if (!frame || !frame.jobRail || !frame.contract.builds || !frame.contract.builds.card) return null
+  const rail = frame.jobRail
+  const jobs = Array.isArray(rail.jobs) ? rail.jobs : []
+  let count = jobs.filter((j) => j.status === 'running' || j.status === 'submitted').length
+  if (currentJobCountsAsRunning(rail.currentJob, jobs)) count += 1
+  count += runningBuildCount(Array.isArray(rail.builds) ? rail.builds.filter((r) => r.lane !== 'broker') : [])
+  if (count === 0) return null
+  const label = count === 1 ? '1 running' : `${count} running`
+  const posture = frame.posture
+  const spined = !!posture && !!posture.studio && frame.contract.rails.right === 'job-spine'
+    && !!posture.wideViewport && !posture.jobRailExpanded && typeof posture.onJobRailExpand === 'function'
+  if (spined) {
+    return (
+      <button
+        type="button"
+        className="builds-badge"
+        data-testid="builds-badge"
+        aria-label={`${label}: open the job monitor`}
+        title="Open the job monitor"
+        onClick={posture.onJobRailExpand}
+      >
+        {label}
+      </button>
+    )
+  }
+  return (
+    <span className="builds-badge" data-testid="builds-badge" role="status" aria-label={`${label} build${count === 1 ? '' : 's'}`}>
+      {label}
+    </span>
   )
 }
 
@@ -357,5 +407,6 @@ SurfaceFrame.Frame = Frame
 SurfaceFrame.Entitlement = Entitlement
 SurfaceFrame.CommandBar = CommandBar
 SurfaceFrame.JobRail = JobRail
+SurfaceFrame.Builds = Builds
 SurfaceFrame.Toast = FrameToast
 SurfaceFrame.Cockpit = Cockpit
