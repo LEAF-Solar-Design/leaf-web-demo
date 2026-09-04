@@ -6,13 +6,13 @@
 // by id and kept portaling into the detached original, so the panel rendered
 // empty after the first tab switch and the proof's copy click found nothing.
 // These rows pin the re-resolution below the e2e.
-import { cleanup, render } from '@testing-library/react'
+import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import DraftingRibbon from '../site/DraftingRibbon.jsx'
 
 import EngineRibbonClusters from './EngineRibbonClusters.jsx'
-import EngineSessionProvider from './EngineSessionProvider.jsx'
+import EngineSessionProvider, { useEngineSessionContext } from './EngineSessionProvider.jsx'
 
 class IdleWorker {
   constructor() { this.listeners = new Map() }
@@ -31,9 +31,13 @@ const seat = () => ({
 
 const DRAW_TAB = ['draw', 'modify', 'clipboard']
 
+let context
+function Probe() { context = useEngineSessionContext(); return null }
+
 function Tree({ clusters, panels }) {
   return (
     <DraftingRibbon clusters={clusters}>
+      <Probe />
       <EngineRibbonClusters importOpen={false} onToggleImport={() => {}} panels={panels} />
     </DraftingRibbon>
   )
@@ -95,5 +99,21 @@ describe('W4g-5c the Clipboard seat', () => {
     rerender(ui([seat()], DRAW_TAB))
     expect(slot()).toBe(before)
     expect(before.querySelector('[data-tool="clipboard:pasteClip"]')).toBe(button)
+  })
+
+  it('the provider ARMS a clipboard command, so PASTE opens its prompt; an unknown group is still dropped', () => {
+    mount()
+    // The fourth proof: Paste clicked, no prompt. setArmed's group bound knew
+    // draw and modify and dropped the third engine group silently.
+    act(() => { context.setArmed({ group: 'clipboard', op: 'pasteClip' }) })
+    expect(context.armed).toEqual({ group: 'clipboard', op: 'pasteClip' })
+    const prompt = document.querySelector('[data-testid="cockpit-prompt"]')
+    expect(prompt).not.toBeNull()
+    expect(prompt.getAttribute('data-op')).toBe('pasteClip')
+    expect(prompt.textContent).toContain('PASTE')
+    expect(prompt.textContent).toContain('Specify insertion point:')
+    // The bound still holds against a group nobody registered.
+    act(() => { context.setArmed({ group: 'annotation', op: 'text' }) })
+    expect(context.armed).toEqual({ group: 'clipboard', op: 'pasteClip' })
   })
 })

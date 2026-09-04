@@ -85,7 +85,12 @@ const INPUT_LIMITS = Object.freeze({ pts: MAX_POINT_LIST_CHARS })
 // The two ribbon groups whose tools prompt for operands, and the op token's
 // shape (a JS identifier the clusters own; the engine validates the op
 // again when it runs).
-const ARMED_GROUPS = new Set(['draw', 'modify'])
+// W4g-5c: the clipboard is the third engine group whose commands take a
+// prompt (PASTE asks where). A group missing here is dropped SILENTLY by
+// setArmed, which is the bound doing its job against an unknown group;
+// the fourth proof of the clipboard slice found Paste clicked and no
+// prompt opened, because this line still knew two groups.
+const ARMED_GROUPS = new Set(['draw', 'modify', 'clipboard'])
 const ARMED_OP = /^[a-zA-Z]{1,32}$/
 const sameFrom = (a, b) => (!a && !b) || (!!a && !!b && a[0] === b[0] && a[1] === b[1])
 
