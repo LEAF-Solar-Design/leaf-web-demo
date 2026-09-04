@@ -72,4 +72,25 @@ describe('noteUnauthorized token-wipe guard', () => {
     expect(localStorage.getItem(AUTH_KEY)).toBe('live-token')
     expect(notified).toEqual([])
   })
+
+  // BLOCKER 1 (2026-09-04): a bounded opt-out for an advisory call whose 401
+  // must never tear down the session (PromptBox's tenant-scoped MCP list
+  // discovery, mounted on the public /try stage). fatal:false must skip the
+  // wipe and the notification even for a 401 that DID carry the live token
+  // — the one case the default (fatal:true) path treats as a real logout.
+  it('{ fatal: false } never wipes and never notifies, even when the sent token matches the stored one', () => {
+    localStorage.setItem(AUTH_KEY, 'live-token')
+    const out = noteUnauthorized(res401, '/api/converse/mcp', 'Bearer live-token', { fatal: false })
+    expect(out).toBe(res401)
+    expect(localStorage.getItem(AUTH_KEY)).toBe('live-token')
+    expect(notified).toEqual([])
+  })
+
+  it('{ fatal: false } still passes a non-401 response through untouched', () => {
+    localStorage.setItem(AUTH_KEY, 'live-token')
+    const ok = { status: 200 }
+    expect(noteUnauthorized(ok, '/api/converse/mcp', 'Bearer live-token', { fatal: false })).toBe(ok)
+    expect(localStorage.getItem(AUTH_KEY)).toBe('live-token')
+    expect(notified).toEqual([])
+  })
 })

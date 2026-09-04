@@ -136,6 +136,16 @@ export default function PromptBox({
   //   meanings. With it off the well registers no drag handlers at all, so
   //   the event bubbles to the stage's handler untouched.
   dropIngestEnabled = true,
+  // mcpDiscoveryEnabled: gates the tenant-scoped MCP list fetch below.
+  //   Default true keeps the console's byte-for-byte behavior (it never
+  //   passes this prop). The stage passes signedIn && isEntitled('converse')
+  //   because BLOCKER 1 (2026-09-04): mounting this component on the public,
+  //   signed-out /try stage made every load call a tenant-scoped private
+  //   endpoint the signed-out stage has no business calling, and a tenant
+  //   without the converse entitlement could 401 a SIGNED-IN stage user off
+  //   a background call the stage never made. A false value skips the fetch
+  //   entirely, so a signed-out mount makes NO network call.
+  mcpDiscoveryEnabled = true,
 }) {
   const [focused, setFocused] = useState(false)
   const [scopeOpen, setScopeOpen] = useState(false)
@@ -180,13 +190,23 @@ export default function PromptBox({
 
   // Both picker surfaces get the tenant-scoped, redacted list. Full resource
   // enumeration is a follow-up because it needs a harness proxy endpoint.
+  // Gated on mcpDiscoveryEnabled (BLOCKER 1): a signed-out mount, or a caller
+  // that passes false, makes NO network call — this is a discovery call for
+  // the slash picker, never load-bearing, so a 401 off it is marked
+  // non-fatal (fatal: false) and never wipes the stored token or fires the
+  // unauthorized listeners, even for a signed-in user on a tenant without
+  // the converse entitlement.
   useEffect(() => {
+    if (!mcpDiscoveryEnabled) {
+      setMcpServers([])
+      return undefined
+    }
     let live = true
     const loadMcp = async () => {
       try {
         const headers = { 'X-Tenant-Id': config.tenant, ...authHeaders() }
         const response = await fetch(`${config.apiBase}/api/converse/mcp`, { headers })
-        noteUnauthorized(response, '/api/converse/mcp', headers.Authorization)
+        noteUnauthorized(response, '/api/converse/mcp', headers.Authorization, { fatal: false })
         const body = response.ok ? await response.json().catch(() => null) : null
         if (live) setMcpServers(Array.isArray(body?.servers) ? body.servers : [])
       } catch {
@@ -195,7 +215,7 @@ export default function PromptBox({
     }
     loadMcp()
     return () => { live = false }
-  }, [])
+  }, [mcpDiscoveryEnabled])
 
   // Slice 5a: an alias is appended to the box's own class, never swapped in
   // for it, so the console's selectors and the stage's both resolve.

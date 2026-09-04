@@ -8,10 +8,11 @@
 // the console passes none of them, so the FIRST suite here is the console's
 // guarantee: the default render is byte-identical to the element sequence
 // captured from origin/main's PromptBox BEFORE this slice touched the file.
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import PromptBox from './PromptBox.jsx'
+import { subscribeUnauthorized } from '../api.js'
 
 // tag|class|testid, depth first: the same probe surfaceFrame.render.test.jsx
 // uses, so a class rename, a moved node or a dropped testid all read as a
@@ -203,5 +204,54 @@ describe('the stage mount (/try): the tc-bar hooks ride on PromptBox’s own nod
     const { container } = mount(STAGE)
     expect(container.querySelector('.bar')).toHaveClass('bar-command-line')
     expect(container.querySelector('.bar-caret')).toHaveTextContent('Command:')
+  })
+})
+
+// BLOCKER 1 (found 2026-09-04, fixed same day): mounting PromptBox on the
+// public, often signed-out /try stage made the tenant-scoped
+// /api/converse/mcp discovery fetch run unconditionally on every load — a
+// signed-out visitor called a private endpoint, and a signed-in visitor on a
+// tenant without the converse entitlement could be logged out of /try by this
+// background call's 401. mcpDiscoveryEnabled gates the fetch; the discovery
+// call is also unconditionally non-fatal (noteUnauthorized fatal:false) so a
+// 401 on it can never wipe the stored token or fire the unauthorized
+// listeners, regardless of the caller's predicate.
+describe('mcpDiscoveryEnabled gates the /api/converse/mcp discovery fetch (BLOCKER 1)', () => {
+  it('mcpDiscoveryEnabled=false (the signed-out stage default) makes NO network call', async () => {
+    mount({ mcpDiscoveryEnabled: false })
+    // Give any errant microtask a turn before asserting the negative.
+    await Promise.resolve()
+    expect(globalThis.fetch).not.toHaveBeenCalled()
+  })
+
+  it('mcpDiscoveryEnabled=true (signed in and entitled) fetches the tenant MCP list', async () => {
+    globalThis.fetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ servers: [{ id: 'srv-1' }] }),
+    })
+    mount({ mcpDiscoveryEnabled: true })
+    await waitFor(() => expect(globalThis.fetch).toHaveBeenCalledTimes(1))
+    expect(globalThis.fetch.mock.calls[0][0]).toContain('/api/converse/mcp')
+  })
+
+  it('a 401 on the discovery call leaves leaf.jwt and the unauthorized listeners untouched', async () => {
+    localStorage.setItem('leaf.jwt', 'live-token')
+    const notified = []
+    const unsubscribe = subscribeUnauthorized((source) => notified.push(source))
+    globalThis.fetch.mockResolvedValueOnce({ ok: false, status: 401, json: () => Promise.resolve(null) })
+    try {
+      mount({ mcpDiscoveryEnabled: true })
+      await waitFor(() => expect(globalThis.fetch).toHaveBeenCalledTimes(1))
+      // Flush loadMcp's post-fetch microtasks (the noteUnauthorized call and
+      // the state update both ride the same fetch resolution).
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(localStorage.getItem('leaf.jwt')).toBe('live-token')
+      expect(notified).toEqual([])
+    } finally {
+      unsubscribe()
+      localStorage.removeItem('leaf.jwt')
+    }
   })
 })

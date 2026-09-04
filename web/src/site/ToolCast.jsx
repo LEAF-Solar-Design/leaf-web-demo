@@ -1598,6 +1598,13 @@ export default function ToolCast({
             sessionId={sessionId}
             imageAttachmentsEnabled={false}
             dropIngestEnabled={false}
+            // BLOCKER 1 (2026-09-04): the stage is public and often
+            // signed-out, so the MCP discovery fetch (a tenant-scoped,
+            // private endpoint) may never run unconditionally the way the
+            // console runs it. Same predicate agentDisabled already uses at
+            // line ~768 (transportMock excluded there is not relevant here:
+            // discovery is harmless idle in mock mode either way).
+            mcpDiscoveryEnabled={isSignedIn() && platform.isEntitled('converse')}
             commandLine
             classNames={STAGE_BAR_CLASSES}
             projectSlot={<span className="bar-proj tc-bar-proj">{activeDrawingId || 'No drawing'}</span>}
