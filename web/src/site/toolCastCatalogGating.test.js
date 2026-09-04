@@ -29,10 +29,18 @@ describe('no-drawing Catalog browse wiring', () => {
     expect(toolCast).toMatch(
       /<SurfaceFrame(?:[^>]|(?<=\=)>){0,2000}signedIn=\{isSignedIn\(\)\}(?:[^>]|(?<=\=)>){0,100}onSignOut=\{platformSession\.actions\.signOut\}/,
     )
+    // Slice 4b: the frame no longer hands these to <ProductSurfaceTabs>. It
+    // publishes them to the ContinuityStore, which renders the sign-out
+    // control the nav adopts. The forwarding leg therefore pins the publish
+    // call, and the tabs must NOT still receive them (a second path would be
+    // a second owner).
     const surfaceFrame = read('./SurfaceFrame.jsx')
     expect(surfaceFrame).toMatch(
-      /<ProductSurfaceTabs[\s\S]{0,500}signedIn=\{frame\.signedIn\}[\s\S]{0,100}onSignOut=\{frame\.onSignOut\}/,
+      /useContinuityPublish\(\{[^}]{0,200}\bsignedIn\b[^}]{0,60}\bonSignOut\b[^}]{0,20}\}\)/,
     )
+    expect(surfaceFrame).not.toMatch(/<ProductSurfaceTabs[\s\S]{0,500}signedIn=/)
+    const store = read('./ContinuityStore.jsx')
+    expect(store).toMatch(/<AccountSignOut signedIn=\{snapshot\.signedIn\} onSignOut=\{snapshot\.onSignOut\} \/>/)
   })
 
   it('gates the Catalog tab on session readiness alone, not on having a drawing open', () => {

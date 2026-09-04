@@ -62,13 +62,14 @@ demo_gate() {
   # npm must not try the network for its own housekeeping during `npm run`.
   export NO_UPDATE_NOTIFIER=1 npm_config_update_notifier=false npm_config_fund=false npm_config_audit=false
 
-  echo "--- oracles (7, all numbers recomputed from the real engine/intake)"
+  echo "--- oracles (8, all numbers recomputed from the real engine/intake)"
   ( cd web \
     && node scripts/check_author.mjs \
     && node scripts/check_demostate.mjs \
     && node scripts/check_writeloop.mjs \
     && node scripts/check_errors.mjs \
     && node scripts/check_tourscript.mjs \
+    && node --test scripts/check_tour_anchors.mjs \
     && node test/check_routes.mjs \
     && node test/check_integration.mjs
   ) || { echo "--- FAILED: node oracles"; return 1; }

@@ -1,6 +1,6 @@
 # The Surface Contract
 
-Standardization slices 1-2 and 5b of 13. Plan: `C:/Users/ehaug/.claude/plans/staged-wiggling-fairy.md`,
+Standardization slices 1-2, 4b and 5b of 13. Plan: `C:/Users/ehaug/.claude/plans/staged-wiggling-fairy.md`,
 section "The Surface Contract", element table row 1.
 
 **Slice 1** froze the contract as DATA on `web/src/site/productSurfaces.js`, with every
@@ -28,6 +28,13 @@ hosts it). Sheets ships `tab: false` and `scene: 'sheets'`, so the slice renders
 new: `ProductSurfaceTabs` now filters on `chrome.tab`, and all four studio surfaces declare
 `true`, so the band is byte-identical. The manifest now covers `/sheets`; the studio still
 does not host it. See "Sheets, the fifth surface" below.
+
+**Slice 4b** hoisted the OWNER of the continuity rail and the sign-out control above the
+scene ternary (`SiteRoot` mounts one `ContinuityStore`; the scene's `SurfaceFrame` publishes,
+the tabs adopt), so both survive the `/try` <-> `/app` crossing as the same nodes with the
+same markup in the same place, and filled `tourAnchors` on every record: the guided tours
+now spotlight by `data-tour` anchor first with the className chain as the fallback, the step
+arrays untouched. See "What slice 4b changed" below.
 
 `docs/convergence/ACCEPTANCE.md` is frozen and is not edited by any slice.
 
@@ -81,7 +88,9 @@ the sheets arm rather than against the console predicates, which never ran for i
 | `entitlements` | null | per-surface per-tool entitlement | undeclared: `web/src/components/EntitlementGate.jsx:15` `ROWS` are TIER capability keys (`run_read`, `run_write`, `build`, `converse`), never per-surface |
 | `resetOn` | null | scope reset on tenant/project switch | undeclared: no effect in `App.jsx` keys off `activeSurface` to reset scope |
 | `a11y` | null | per-surface accessibility declarations | undeclared: `web/src/site/productSurfaces.js:179` states no per-surface a11y declaration exists, so `null` on every surface |
-| `tourAnchors` | null | tour anchor ids | undeclared: the tour is mock-gated (`web/src/App.jsx:2761`), not surface data |
+| `tourAnchors` | `{ console, stage }` | per shell, the guided tour's step id -> `data-tour` anchor id map | slice 4b. `web/src/demo/DemoTour.jsx` `resolveTourTarget` resolves `[data-tour="<id>"]` FIRST and the step's className chain second; `web/src/App.jsx` passes `surfaceSlots.tourAnchors?.console`, `web/src/site/ToolCast.jsx` passes `surfaceContract(activeSurface).tourAnchors?.stage`. The two step arrays are byte-identical to before; the contract carries the anchor. Vocabulary (both shells, their own elements): `shell`, `viewer`, `command-bar`, `right-rail` (`left-rail` existed through this slice's first cut and was removed as unreferenced vocabulary, see "What slice 4b changed" below). A step whose className chain picks among candidates by presence is deliberately NOT mapped. Gate: `web/scripts/check_tour_anchors.mjs` (`check:tour-anchors`), which fails on a `data-tour` id present in source that no step map references, not only on a mapped id absent from source; the pairing itself (an anchored step resolves to the same element its className chain would have picked) is pinned by `web/src/demo/demoTourAnchors.test.jsx`, not the e2e walk |
+| `tourAnchors.console` | map \| null | the console tour's anchors on this surface | the console tour (`App.jsx`, mock-gated) mounts on every studio surface, so the four `scene: 'app'` records carry the same map (`CONSOLE_TOUR_ANCHORS` in `productSurfaces.js`); `null` on sheets, which the console never hosts |
+| `tourAnchors.stage` | map \| null | the stage walk's anchors on this surface | the stage walk (`ToolCast.jsx` `UNIFIED_TOUR_STEPS`) mounts inside the cad arm only (`chrome.stageBranch === 'cad'`), so cad declares `STAGE_TOUR_ANCHORS` and browser / solar / ios / sheets declare `null`: no walk mounts there, so no anchor can be spotlit there. The gate pins the map to exactly the surfaces whose stage arm mounts the walk |
 
 ## The matrix (console values, equal to today)
 
@@ -114,7 +123,9 @@ the `/sheets` arm, added by slice 5b and read off `SiteRoot.jsx` / `SheetsPage.j
 | `integrations` | `null` | `null` | `null` | `null` | `null` |
 | `builds.routes` | `[one-shot]` | `[one-shot]` | `[one-shot]` | `[one-shot]` | `[]` |
 | `contextMenu` | `[]` | `[]` | `[]` | `[]` | `[]` |
-| `shortcuts` / `entitlements` / `resetOn` / `a11y` / `tourAnchors` | `null` | `null` | `null` | `null` | `null` |
+| `shortcuts` / `entitlements` / `resetOn` / `a11y` | `null` | `null` | `null` | `null` | `null` |
+| `tourAnchors.console` | console map | console map | console map | console map | `null` |
+| `tourAnchors.stage` | `null` | stage map | `null` | `null` | `null` |
 
 ### Notes on values that surprise
 
@@ -406,6 +417,39 @@ Not touched: `SurfaceGrounds.jsx` (the derivation already excludes a new ground 
 `App.jsx`, `ToolCast.jsx`, `SiteRoot.jsx`, `src/site/sheets/**` (a sibling agent's), and the
 `/sheets` row in `web/e2e/local/one-shell-mount.spec.mjs`, whose premise this slice
 deliberately preserves.
+
+## What slice 4b changed
+
+The continuity hoist and the tour anchors. Zero visual change on every surface: the
+rendered markup, classes and testids of the continuity rail and the sign-out control are
+byte-identical (`web/src/site/continuityHoist.test.jsx` pins them against a fixture captured on
+the untouched tree), and their DOM position is unchanged; only their OWNER moved up the tree.
+
+| # | file | change |
+| --- | --- | --- |
+| 1 | `web/src/site/continuityStore.js` (new) | the ContinuityStore context and hooks: `useContinuityHost` (the nav adopts the store's host node), `useContinuityPublish` (the scene's frame publishes `activeSurface`, `workspaceProject`, `catalog`, `signedIn`, `onSignOut`), the snapshot normalizer and the host factory. Fails closed outside a store |
+| 2 | `web/src/site/ContinuityStore.jsx` (new) | the provider `SiteRoot` mounts ONCE, above the scene ternary, inside `DrawingIdentityProvider`. Owns one host `<div class="tc-continuity-host">` (`display: contents`, so no box) for the life of the page and portals `<ContinuityRail>` + `<AccountSignOut>` into it. Holds a snapshot, never a controller: no second session or catalog controller exists above the scenes |
+| 3 | `web/src/site/SiteRoot.jsx` | wraps the scene ternary in `<ContinuityStore search={BOOT_SEARCH}>` (the boot search string seeds `activeSurface`); the arm shape the one-shell pins assert is unchanged |
+| 4 | `web/src/components/ProductSurfaceTabs.jsx` | no longer renders the rail or the sign-out, and no longer takes `workspaceProject` / `catalog` / `signedIn` / `onSignOut`; a layout effect adopts the store's host right after the tablist, so the nav's children are still tablist, rail, sign-out. `ContinuityRail` and `AccountSignOut` stay exported from here (App's header still imports the latter) |
+| 5 | `web/src/site/SurfaceFrame.jsx` | the frame is the ONE publisher for its scene (`useContinuityPublish`); its Tabs slot passes only `activeSurface` / `states` / `onSelect` |
+| 6 | `web/src/site/landing.css` | `.tc-continuity-host { display: contents; }` |
+| 7 | `web/src/demo/DemoTour.jsx` | `anchors` prop; `resolveTourTarget` resolves `[data-tour="<id>"]` first (slug-validated), className chain second; exported for its unit test |
+| 8 | `web/src/site/productSurfaces.js` | `tourAnchors` filled on all five records as `{ console, stage }` (`CONSOLE_TOUR_ANCHORS`, `STAGE_TOUR_ANCHORS`); the step arrays are untouched |
+| 9 | both shells | additive `data-tour` attributes: console `shell` (`App.jsx .app`), `viewer` (`Viewer.jsx .viewer-canvas`), `command-bar` (`PromptBox.jsx .bar`); stage `shell` (`StageScene.jsx .stage-root`), `viewer` (`StageLayer.jsx .stage-viewer`), `command-bar` (`ToolCast.jsx .tc-bar`), `right-rail` (`.tc-rail-r`). Both `DemoTour` mounts pass the contract map. A `left-rail` anchor (`NavRail.jsx aside.nav`, `ToolCast.jsx .tc-operator-rail` x2) and the console's own `right-rail` (`JobRail.jsx aside.rail`) were added in this slice's first cut and then REMOVED (lens-2 review): no step on either shell ever spotlighted the nav rail, and the console never spotlights the job rail either, so both were dead vocabulary — attribute present, zero consumers, a drift class the gate below now also catches directly |
+| 10 | `web/scripts/check_tour_anchors.mjs` (new) | the gate (`check:tour-anchors`, suite `web-tour-anchors`, and in `dispatch/run-local-ci.sh` beside `check_tourscript.mjs`): vocabulary, step ids, per-shell presence in source, shape, resolution order, no orphaned source vocabulary (the reverse of presence), positive controls |
+| 11 | `web/e2e/local/continuity-cross-scene.spec.mjs` (new) | `/try` -> capture the rail's label -> `/app` -> attached, the SAME node (a JS expando set on `/try` reads back), the shared parts of the label byte-equal (the static label and the tenant catalog item; the project item is each scene's own F-9 derivation, and on the managed stack the stage's operator identity starts with no drawing while the console boots its drawing) -> `/try` -> the full label byte-equal again, and a coach dismissed before the crossing is not re-offered; rail ON and rail OFF. The carry of the stage's value across the crossing window is a timing race in a browser, so it is pinned in `continuityHoist.test.jsx` instead. `one-shell-mount.spec.mjs`'s W4b row now asserts the rail attached-and-hidden on CAD |
+| 12 | this file | the `tourAnchors` rows and this section |
+
+### FirstRunCoach is NOT hoisted (recorded deviation)
+
+The slice plan's line listed the coach with the rail. It stays scene-scoped, on purpose: its
+visibility contract is `sessionAuthRequired && !sessionWasActiveThisPageLoad`, both of which
+are the stage's own facts; the module-scope `sessionWasActiveThisPageLoad` flag
+(`ToolCast.jsx`) already survives the `/app` crossing, and its dismissal is a localStorage key
+(`leaf.coach.dismissed.v1`) that survives everything. The hp01 suite (16 rows at runtime) pins its entrance and
+exit choreography against the tool scene's `data-cast` fade, which a SiteRoot-level mount would
+have to re-derive. It renders null on scene `app`, as before, and the new e2e row proves the
+dismissal carries across the crossing without the hoist.
 
 ## Daily-session set
 

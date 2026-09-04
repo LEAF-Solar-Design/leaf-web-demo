@@ -1,0 +1,222 @@
+{
+  "console:browser": {
+    "empty+catalog": {
+      "rail": "<div class=\"tc-continuity\" data-testid=\"continuity-rail\" data-pulse=\"false\" data-project-state=\"empty\"><span class=\"tc-continuity-label\">Carried across every profile</span><span class=\"tc-continuity-item\">no project open</span><span class=\"tc-continuity-item\">catalog · <strong>2 families / 3 tools</strong></span><span class=\"tc-continuity-item tc-continuity-static\">conversation · approvals · runs · receipts</span></div>",
+      "signOut": null,
+      "navChildren": [
+        "tc-product-tabs",
+        "tc-continuity"
+      ]
+    },
+    "drawing-only+catalog": {
+      "rail": "<div class=\"tc-continuity\" data-testid=\"continuity-rail\" data-pulse=\"false\" data-project-state=\"drawing-only\"><span class=\"tc-continuity-label\">Carried across every profile</span><span class=\"tc-continuity-item\">drawing · <strong>rooftop_demo</strong></span><span class=\"tc-continuity-item\">no workspace project</span><span class=\"tc-continuity-item\">catalog · <strong>2 families / 3 tools</strong></span><span class=\"tc-continuity-item tc-continuity-static\">conversation · approvals · runs · receipts</span></div>",
+      "signOut": null,
+      "navChildren": [
+        "tc-product-tabs",
+        "tc-continuity"
+      ]
+    },
+    "project+nocatalog": {
+      "rail": "<div class=\"tc-continuity\" data-testid=\"continuity-rail\" data-pulse=\"false\" data-project-state=\"project\"><span class=\"tc-continuity-label\">Carried across every profile</span><span class=\"tc-continuity-item\">project · <strong>rooftop_demo</strong></span><span class=\"tc-continuity-item tc-continuity-static\">conversation · approvals · runs · receipts</span></div>",
+      "signOut": null,
+      "navChildren": [
+        "tc-product-tabs",
+        "tc-continuity"
+      ]
+    }
+  },
+  "console:cad": {
+    "empty+catalog": {
+      "rail": "<div class=\"tc-continuity\" data-testid=\"continuity-rail\" data-pulse=\"false\" data-project-state=\"empty\"><span class=\"tc-continuity-label\">Carried across every profile</span><span class=\"tc-continuity-item\">no project open</span><span class=\"tc-continuity-item\">catalog · <strong>2 families / 3 tools</strong></span><span class=\"tc-continuity-item tc-continuity-static\">conversation · approvals · runs · receipts</span></div>",
+      "signOut": null,
+      "navChildren": [
+        "tc-product-tabs",
+        "tc-continuity"
+      ]
+    },
+    "drawing-only+catalog": {
+      "rail": "<div class=\"tc-continuity\" data-testid=\"continuity-rail\" data-pulse=\"false\" data-project-state=\"drawing-only\"><span class=\"tc-continuity-label\">Carried across every profile</span><span class=\"tc-continuity-item\">drawing · <strong>rooftop_demo</strong></span><span class=\"tc-continuity-item\">no workspace project</span><span class=\"tc-continuity-item\">catalog · <strong>2 families / 3 tools</strong></span><span class=\"tc-continuity-item tc-continuity-static\">conversation · approvals · runs · receipts</span></div>",
+      "signOut": null,
+      "navChildren": [
+        "tc-product-tabs",
+        "tc-continuity"
+      ]
+    },
+    "project+nocatalog": {
+      "rail": "<div class=\"tc-continuity\" data-testid=\"continuity-rail\" data-pulse=\"false\" data-project-state=\"project\"><span class=\"tc-continuity-label\">Carried across every profile</span><span class=\"tc-continuity-item\">project · <strong>rooftop_demo</strong></span><span class=\"tc-continuity-item tc-continuity-static\">conversation · approvals · runs · receipts</span></div>",
+      "signOut": null,
+      "navChildren": [
+        "tc-product-tabs",
+        "tc-continuity"
+      ]
+    }
+  },
+  "console:solar": {
+    "empty+catalog": {
+      "rail": "<div class=\"tc-continuity\" data-testid=\"continuity-rail\" data-pulse=\"false\" data-project-state=\"empty\"><span class=\"tc-continuity-label\">Carried across every profile</span><span class=\"tc-continuity-item\">no project open</span><span class=\"tc-continuity-item\">catalog · <strong>2 families / 3 tools</strong></span><span class=\"tc-continuity-item tc-continuity-static\">conversation · approvals · runs · receipts</span></div>",
+      "signOut": null,
+      "navChildren": [
+        "tc-product-tabs",
+        "tc-continuity"
+      ]
+    },
+    "drawing-only+catalog": {
+      "rail": "<div class=\"tc-continuity\" data-testid=\"continuity-rail\" data-pulse=\"false\" data-project-state=\"drawing-only\"><span class=\"tc-continuity-label\">Carried across every profile</span><span class=\"tc-continuity-item\">drawing · <strong>rooftop_demo</strong></span><span class=\"tc-continuity-item\">no workspace project</span><span class=\"tc-continuity-item\">catalog · <strong>2 families / 3 tools</strong></span><span class=\"tc-continuity-item tc-continuity-static\">conversation · approvals · runs · receipts</span></div>",
+      "signOut": null,
+      "navChildren": [
+        "tc-product-tabs",
+        "tc-continuity"
+      ]
+    },
+    "project+nocatalog": {
+      "rail": "<div class=\"tc-continuity\" data-testid=\"continuity-rail\" data-pulse=\"false\" data-project-state=\"project\"><span class=\"tc-continuity-label\">Carried across every profile</span><span class=\"tc-continuity-item\">project · <strong>rooftop_demo</strong></span><span class=\"tc-continuity-item tc-continuity-static\">conversation · approvals · runs · receipts</span></div>",
+      "signOut": null,
+      "navChildren": [
+        "tc-product-tabs",
+        "tc-continuity"
+      ]
+    }
+  },
+  "console:ios": {
+    "empty+catalog": {
+      "rail": "<div class=\"tc-continuity\" data-testid=\"continuity-rail\" data-pulse=\"false\" data-project-state=\"empty\"><span class=\"tc-continuity-label\">Carried across every profile</span><span class=\"tc-continuity-item\">no project open</span><span class=\"tc-continuity-item\">catalog · <strong>2 families / 3 tools</strong></span><span class=\"tc-continuity-item tc-continuity-static\">conversation · approvals · runs · receipts</span></div>",
+      "signOut": null,
+      "navChildren": [
+        "tc-product-tabs",
+        "tc-continuity"
+      ]
+    },
+    "drawing-only+catalog": {
+      "rail": "<div class=\"tc-continuity\" data-testid=\"continuity-rail\" data-pulse=\"false\" data-project-state=\"drawing-only\"><span class=\"tc-continuity-label\">Carried across every profile</span><span class=\"tc-continuity-item\">drawing · <strong>rooftop_demo</strong></span><span class=\"tc-continuity-item\">no workspace project</span><span class=\"tc-continuity-item\">catalog · <strong>2 families / 3 tools</strong></span><span class=\"tc-continuity-item tc-continuity-static\">conversation · approvals · runs · receipts</span></div>",
+      "signOut": null,
+      "navChildren": [
+        "tc-product-tabs",
+        "tc-continuity"
+      ]
+    },
+    "project+nocatalog": {
+      "rail": "<div class=\"tc-continuity\" data-testid=\"continuity-rail\" data-pulse=\"false\" data-project-state=\"project\"><span class=\"tc-continuity-label\">Carried across every profile</span><span class=\"tc-continuity-item\">project · <strong>rooftop_demo</strong></span><span class=\"tc-continuity-item tc-continuity-static\">conversation · approvals · runs · receipts</span></div>",
+      "signOut": null,
+      "navChildren": [
+        "tc-product-tabs",
+        "tc-continuity"
+      ]
+    }
+  },
+  "stage:browser": {
+    "empty+catalog": {
+      "rail": "<div class=\"tc-continuity\" data-testid=\"continuity-rail\" data-pulse=\"false\" data-project-state=\"empty\"><span class=\"tc-continuity-label\">Carried across every profile</span><span class=\"tc-continuity-item\">no project open</span><span class=\"tc-continuity-item\">catalog · <strong>2 families / 3 tools</strong></span><span class=\"tc-continuity-item tc-continuity-static\">conversation · approvals · runs · receipts</span></div>",
+      "signOut": "<button type=\"button\" class=\"chip-danger tc-account-signout\">Sign out</button>",
+      "navChildren": [
+        "tc-product-tabs",
+        "tc-continuity",
+        "chip-danger tc-account-signout"
+      ]
+    },
+    "drawing-only+catalog": {
+      "rail": "<div class=\"tc-continuity\" data-testid=\"continuity-rail\" data-pulse=\"false\" data-project-state=\"drawing-only\"><span class=\"tc-continuity-label\">Carried across every profile</span><span class=\"tc-continuity-item\">drawing · <strong>rooftop_demo</strong></span><span class=\"tc-continuity-item\">no workspace project</span><span class=\"tc-continuity-item\">catalog · <strong>2 families / 3 tools</strong></span><span class=\"tc-continuity-item tc-continuity-static\">conversation · approvals · runs · receipts</span></div>",
+      "signOut": "<button type=\"button\" class=\"chip-danger tc-account-signout\">Sign out</button>",
+      "navChildren": [
+        "tc-product-tabs",
+        "tc-continuity",
+        "chip-danger tc-account-signout"
+      ]
+    },
+    "project+nocatalog": {
+      "rail": "<div class=\"tc-continuity\" data-testid=\"continuity-rail\" data-pulse=\"false\" data-project-state=\"project\"><span class=\"tc-continuity-label\">Carried across every profile</span><span class=\"tc-continuity-item\">project · <strong>rooftop_demo</strong></span><span class=\"tc-continuity-item tc-continuity-static\">conversation · approvals · runs · receipts</span></div>",
+      "signOut": "<button type=\"button\" class=\"chip-danger tc-account-signout\">Sign out</button>",
+      "navChildren": [
+        "tc-product-tabs",
+        "tc-continuity",
+        "chip-danger tc-account-signout"
+      ]
+    }
+  },
+  "stage:cad": {
+    "empty+catalog": {
+      "rail": "<div class=\"tc-continuity\" data-testid=\"continuity-rail\" data-pulse=\"false\" data-project-state=\"empty\"><span class=\"tc-continuity-label\">Carried across every profile</span><span class=\"tc-continuity-item\">no project open</span><span class=\"tc-continuity-item\">catalog · <strong>2 families / 3 tools</strong></span><span class=\"tc-continuity-item tc-continuity-static\">conversation · approvals · runs · receipts</span></div>",
+      "signOut": "<button type=\"button\" class=\"chip-danger tc-account-signout\">Sign out</button>",
+      "navChildren": [
+        "tc-product-tabs",
+        "tc-continuity",
+        "chip-danger tc-account-signout"
+      ]
+    },
+    "drawing-only+catalog": {
+      "rail": "<div class=\"tc-continuity\" data-testid=\"continuity-rail\" data-pulse=\"false\" data-project-state=\"drawing-only\"><span class=\"tc-continuity-label\">Carried across every profile</span><span class=\"tc-continuity-item\">drawing · <strong>rooftop_demo</strong></span><span class=\"tc-continuity-item\">no workspace project</span><span class=\"tc-continuity-item\">catalog · <strong>2 families / 3 tools</strong></span><span class=\"tc-continuity-item tc-continuity-static\">conversation · approvals · runs · receipts</span></div>",
+      "signOut": "<button type=\"button\" class=\"chip-danger tc-account-signout\">Sign out</button>",
+      "navChildren": [
+        "tc-product-tabs",
+        "tc-continuity",
+        "chip-danger tc-account-signout"
+      ]
+    },
+    "project+nocatalog": {
+      "rail": "<div class=\"tc-continuity\" data-testid=\"continuity-rail\" data-pulse=\"false\" data-project-state=\"project\"><span class=\"tc-continuity-label\">Carried across every profile</span><span class=\"tc-continuity-item\">project · <strong>rooftop_demo</strong></span><span class=\"tc-continuity-item tc-continuity-static\">conversation · approvals · runs · receipts</span></div>",
+      "signOut": "<button type=\"button\" class=\"chip-danger tc-account-signout\">Sign out</button>",
+      "navChildren": [
+        "tc-product-tabs",
+        "tc-continuity",
+        "chip-danger tc-account-signout"
+      ]
+    }
+  },
+  "stage:solar": {
+    "empty+catalog": {
+      "rail": "<div class=\"tc-continuity\" data-testid=\"continuity-rail\" data-pulse=\"false\" data-project-state=\"empty\"><span class=\"tc-continuity-label\">Carried across every profile</span><span class=\"tc-continuity-item\">no project open</span><span class=\"tc-continuity-item\">catalog · <strong>2 families / 3 tools</strong></span><span class=\"tc-continuity-item tc-continuity-static\">conversation · approvals · runs · receipts</span></div>",
+      "signOut": "<button type=\"button\" class=\"chip-danger tc-account-signout\">Sign out</button>",
+      "navChildren": [
+        "tc-product-tabs",
+        "tc-continuity",
+        "chip-danger tc-account-signout"
+      ]
+    },
+    "drawing-only+catalog": {
+      "rail": "<div class=\"tc-continuity\" data-testid=\"continuity-rail\" data-pulse=\"false\" data-project-state=\"drawing-only\"><span class=\"tc-continuity-label\">Carried across every profile</span><span class=\"tc-continuity-item\">drawing · <strong>rooftop_demo</strong></span><span class=\"tc-continuity-item\">no workspace project</span><span class=\"tc-continuity-item\">catalog · <strong>2 families / 3 tools</strong></span><span class=\"tc-continuity-item tc-continuity-static\">conversation · approvals · runs · receipts</span></div>",
+      "signOut": "<button type=\"button\" class=\"chip-danger tc-account-signout\">Sign out</button>",
+      "navChildren": [
+        "tc-product-tabs",
+        "tc-continuity",
+        "chip-danger tc-account-signout"
+      ]
+    },
+    "project+nocatalog": {
+      "rail": "<div class=\"tc-continuity\" data-testid=\"continuity-rail\" data-pulse=\"false\" data-project-state=\"project\"><span class=\"tc-continuity-label\">Carried across every profile</span><span class=\"tc-continuity-item\">project · <strong>rooftop_demo</strong></span><span class=\"tc-continuity-item tc-continuity-static\">conversation · approvals · runs · receipts</span></div>",
+      "signOut": "<button type=\"button\" class=\"chip-danger tc-account-signout\">Sign out</button>",
+      "navChildren": [
+        "tc-product-tabs",
+        "tc-continuity",
+        "chip-danger tc-account-signout"
+      ]
+    }
+  },
+  "stage:ios": {
+    "empty+catalog": {
+      "rail": "<div class=\"tc-continuity\" data-testid=\"continuity-rail\" data-pulse=\"false\" data-project-state=\"empty\"><span class=\"tc-continuity-label\">Carried across every profile</span><span class=\"tc-continuity-item\">no project open</span><span class=\"tc-continuity-item\">catalog · <strong>2 families / 3 tools</strong></span><span class=\"tc-continuity-item tc-continuity-static\">conversation · approvals · runs · receipts</span></div>",
+      "signOut": "<button type=\"button\" class=\"chip-danger tc-account-signout\">Sign out</button>",
+      "navChildren": [
+        "tc-product-tabs",
+        "tc-continuity",
+        "chip-danger tc-account-signout"
+      ]
+    },
+    "drawing-only+catalog": {
+      "rail": "<div class=\"tc-continuity\" data-testid=\"continuity-rail\" data-pulse=\"false\" data-project-state=\"drawing-only\"><span class=\"tc-continuity-label\">Carried across every profile</span><span class=\"tc-continuity-item\">drawing · <strong>rooftop_demo</strong></span><span class=\"tc-continuity-item\">no workspace project</span><span class=\"tc-continuity-item\">catalog · <strong>2 families / 3 tools</strong></span><span class=\"tc-continuity-item tc-continuity-static\">conversation · approvals · runs · receipts</span></div>",
+      "signOut": "<button type=\"button\" class=\"chip-danger tc-account-signout\">Sign out</button>",
+      "navChildren": [
+        "tc-product-tabs",
+        "tc-continuity",
+        "chip-danger tc-account-signout"
+      ]
+    },
+    "project+nocatalog": {
+      "rail": "<div class=\"tc-continuity\" data-testid=\"continuity-rail\" data-pulse=\"false\" data-project-state=\"project\"><span class=\"tc-continuity-label\">Carried across every profile</span><span class=\"tc-continuity-item\">project · <strong>rooftop_demo</strong></span><span class=\"tc-continuity-item tc-continuity-static\">conversation · approvals · runs · receipts</span></div>",
+      "signOut": "<button type=\"button\" class=\"chip-danger tc-account-signout\">Sign out</button>",
+      "navChildren": [
+        "tc-product-tabs",
+        "tc-continuity",
+        "chip-danger tc-account-signout"
+      ]
+    }
+  }
+}

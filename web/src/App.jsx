@@ -2675,7 +2675,7 @@ export default function App() {
       }}
       toast={{ toast, onDone: onToastDone }}
     >
-    <div className="app" data-surface={studioGround ? activeSurface : undefined}>
+    <div className="app" data-surface={studioGround ? activeSurface : undefined} data-tour="shell">
       <header className="top">
         <div className="mark"><span className="diamond" aria-hidden="true" /> Leaf — build CAD tools with AI</div>
         {/* W4e: on the studio's drafting surfaces the header IS the
@@ -3594,6 +3594,9 @@ export default function App() {
           handlers, so it must never point at a live/paid backend. */}
       {mock && tourOn && (
         <DemoTour
+          // Slice 4b: the console's declared anchors for this surface (step id
+          // -> data-tour id). TOUR_STEPS is untouched; the contract carries it.
+          anchors={surfaceSlots.tourAnchors?.console ?? null}
           onCannedPrompt={onCannedPrompt}
           onIndexChange={onTourStepChange}
           onExit={onTourExit}

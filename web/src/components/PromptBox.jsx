@@ -381,6 +381,7 @@ export default function PromptBox({
       )}
       <div
         className={`bar${dragging ? ' drag' : ''}${commandLine ? ' bar-command-line' : ''}`}
+        data-tour="command-bar"
         ref={rootRef}
         onDragEnter={onDragEnter}
         onDragOver={onDragOver}

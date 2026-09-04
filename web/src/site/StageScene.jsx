@@ -53,7 +53,7 @@ export default function StageScene({ scene, stageRef, publicDemo = false }) {
       drawingOptions={mount.drawingOptions}
       retryNotFound={mount.retryNotFound}
     >
-      <main className="stage-root" data-scene={scene} ref={stageRef} aria-label={scene === 'tool' ? 'Leaf operator workspace' : 'Leaf product overview'}>
+      <main className="stage-root" data-tour="shell" data-scene={scene} ref={stageRef} aria-label={scene === 'tool' ? 'Leaf operator workspace' : 'Leaf product overview'}>
         <StageLayer
           ref={stageLayerRef}
           intakeOverride={scene === 'tool' ? operatorIntake : null}

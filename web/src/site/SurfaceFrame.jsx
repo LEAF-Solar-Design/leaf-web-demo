@@ -39,6 +39,7 @@ import ProductSurfaceTabs, { ProductSurfaceFrame } from '../components/ProductSu
 import ToastComponent from '../components/Toast.jsx'
 
 import { StatusToggles } from './DrawingCockpit.jsx'
+import { useContinuityPublish } from './continuityStore.js'
 import { surfaceContract } from './productSurfaces.js'
 
 // Undefined (not null) is the "no provider" sentinel: a slot mounted outside a
@@ -132,8 +133,11 @@ function useSlot() {
  *                      `rightView === 'jobs'` OUTSIDE the frame by passing
  *                      null, so the frame never assumes rightView exists.
  *   toast             { toast, onDone }
- *   signedIn/onSignOut  the tabs' AccountSignOut (the stage passes them; the
- *                     console's sign-out lives in its own header today)
+ *   signedIn/onSignOut  the AccountSignOut beside the tabs (the stage passes
+ *                     them; the console's sign-out lives in its own header
+ *                     today). Slice 4b: published to the ContinuityStore
+ *                     with workspaceProject / catalog / activeSurface, never
+ *                     handed to the tabs
  *
  * The context value is rebuilt each render, exactly like the props objects it
  * replaces. Its only consumers are the slots below, which are already inside
@@ -160,6 +164,12 @@ export default function SurfaceFrame({
   children = null,
 }) {
   validateScene(scene)
+  // Slice 4b: the frame is the ONE publisher of the continuity snapshot for
+  // its scene. SiteRoot's ContinuityStore renders the rail and the sign-out
+  // from what is published here, and the Tabs slot below adopts them into
+  // the nav, so neither scene passes those four props any further down. A
+  // no-op outside a store (fails closed, never throws).
+  useContinuityPublish({ activeSurface, workspaceProject, catalog, signedIn, onSignOut })
   const value = {
     scene,
     activeSurface,
@@ -190,7 +200,15 @@ export default function SurfaceFrame({
 // props, so the rendered subtree is byte-identical. The line citations are the
 // pre-slice-4a source each slot replaces.
 
-/** ProductSurfaceTabs. App.jsx:2868-2873 / ToolCast.jsx:1422-1430. */
+/**
+ * ProductSurfaceTabs. App.jsx:2868-2873 / ToolCast.jsx:1422-1430.
+ *
+ * Slice 4b: the rail and the sign-out are no longer props of the tabs. The
+ * frame publishes `workspaceProject` / `catalog` / `signedIn` / `onSignOut` to
+ * the ContinuityStore (see the useContinuityPublish call in SurfaceFrame),
+ * and the tabs adopt the store's host node, so the DOM under the nav is
+ * unchanged while its owner now outlives the scene.
+ */
 function Tabs() {
   const frame = useSlot()
   // Fail closed: the tabs index `states[surface.id]` for all four surfaces, so
@@ -201,10 +219,6 @@ function Tabs() {
       activeSurface={frame.activeSurface}
       states={frame.states}
       onSelect={frame.onSelect}
-      workspaceProject={frame.workspaceProject}
-      catalog={frame.catalog}
-      signedIn={frame.signedIn}
-      onSignOut={frame.onSignOut}
     />
   )
 }
@@ -335,7 +349,9 @@ function Cockpit() {
 // at the mount site as what it is. Each reference is a stable module-level
 // function, so a surface switch re-renders these fibers and never remounts
 // them — which is the F-8 never-remounts contract the continuity rail and the
-// sign-out control inside ProductSurfaceTabs depend on.
+// sign-out control beside ProductSurfaceTabs depend on (since slice 4b those
+// two are owned by SiteRoot's ContinuityStore and adopted by the tabs, so the
+// contract holds across the scene crossing as well).
 SurfaceFrame.Tabs = Tabs
 SurfaceFrame.Frame = Frame
 SurfaceFrame.Entitlement = Entitlement
