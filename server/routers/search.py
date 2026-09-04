@@ -91,8 +91,8 @@ def _version_rows(tenant: Any, drawing_id: Optional[str], needle: str) -> List[D
     if not drawing_id:
         return []
     try:
-        import store  # da/store.py; importable via write_loop's sys.path setup
-        import write_loop
+        import write_loop  # imported first: its own top-level code puts da/ (store.py's home) on sys.path
+        import store
 
         backend = write_loop.backend_for_tenant(str(tenant), aps_live=False, da=None)
         write_loop.ensure_demo_drawing(backend, str(tenant), drawing_id)

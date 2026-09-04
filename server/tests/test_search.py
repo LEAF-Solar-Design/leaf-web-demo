@@ -54,8 +54,8 @@ def _bootstrap_version_note(tmp_path, monkeypatch, tenant: str, drawing_id: str,
     """Bootstrap `drawing_id` for `tenant` (the cached demo intake, same path
     every fresh id takes) then overwrite v1's note to a tenant-unique string,
     so a search hit on that string PROVES which tenant's store answered."""
+    import write_loop  # imported first: its own top-level code puts da/ (store.py's home) on sys.path
     import store
-    import write_loop
 
     backend = write_loop.backend_for_tenant(tenant, aps_live=False, da=None)
     write_loop.ensure_demo_drawing(backend, tenant, drawing_id)
