@@ -19,8 +19,8 @@ test('session 401 renders one calm gate and disables execution', async ({ page }
   await expect(page.getByRole('heading', { name: 'You are not signed in' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Run', exact: true })).toBeDisabled()
   await expect(page.getByText(/drawing backend is unavailable/i)).toHaveCount(0)
-  await page.getByLabel('Command bar').fill('hello')
-  await page.getByLabel('Command bar').press('Enter')
+  await page.getByLabel('Command bar', { exact: true }).fill('hello')
+  await page.getByLabel('Command bar', { exact: true }).press('Enter')
   await page.waitForTimeout(250)
   expect(calls.some((call) => call.path === '/api/nl-prompt')).toBe(false)
   expect(calls.filter((call) => call.path !== '/api/session' && !call.path.startsWith('/api/site/'))).toEqual([])
@@ -121,11 +121,11 @@ test('Explore the demo keeps the CAD operator on try and runs without private AP
   await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeEnabled()
 
   calls.length = 0
-  await page.getByLabel('Command bar').fill('hello')
-  await page.getByLabel('Command bar').press('Enter')
+  await page.getByLabel('Command bar', { exact: true }).fill('hello')
+  await page.getByLabel('Command bar', { exact: true }).press('Enter')
   await expect(page.getByTestId('demo-conversation')).toContainText('hello')
   await expect(page.getByTestId('demo-conversation')).toContainText('interactive Leaf CAD demo')
-  await expect(page.getByLabel('Command bar')).toHaveValue('')
+  await expect(page.getByLabel('Command bar', { exact: true })).toHaveValue('')
   await expect(page.getByRole('button', { name: 'Run count-by-layer' })).toHaveCount(0)
   const privateCalls = () => calls.filter((call) =>
     call.path.startsWith('/api/') &&
@@ -133,7 +133,7 @@ test('Explore the demo keeps the CAD operator on try and runs without private AP
     call.path !== '/api/telemetry')
   expect(privateCalls()).toEqual([])
 
-  await page.getByLabel('Command bar').fill('count panels per layer')
+  await page.getByLabel('Command bar', { exact: true }).fill('count panels per layer')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
   await expect(page.getByTestId('demo-conversation')).toContainText('count-by-layer')
   await expect(page.getByRole('button', { name: 'Run count-by-layer' })).toBeVisible()
@@ -160,7 +160,7 @@ test('signed-in demo URL keeps the CAD surface and uses the live conversation se
   await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
   await expect(page.getByTestId('demo-conversation')).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Run', exact: true })).toBeEnabled()
-  await page.getByLabel('Command bar').fill('hello from the mounted account')
+  await page.getByLabel('Command bar', { exact: true }).fill('hello from the mounted account')
   await page.getByRole('button', { name: 'Run', exact: true }).click()
   await expect.poll(() => calls.some((call) => call.method === 'POST' && call.path === '/api/sessions')).toBe(true)
   await expect.poll(() => calls.some((call) => call.method === 'POST' && call.path === '/api/sessions/cat-session/messages')).toBe(true)
@@ -194,7 +194,7 @@ test('a Claude grant-required response does not expire the separate Leaf login',
 
   await page.goto('/try')
   await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
-  await page.getByLabel('Command bar').fill('hello from a Leaf session')
+  await page.getByLabel('Command bar', { exact: true }).fill('hello from a Leaf session')
   await page.getByRole('button', { name: 'Run', exact: true }).click()
 
   await expect(page.getByText('Chat needs a linked Claude account.')).toBeVisible()

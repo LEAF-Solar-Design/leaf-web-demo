@@ -235,7 +235,7 @@ test('an unreadable /try head locks every write path, recovers history, and hand
   await page.getByRole('tab', { name: /Catalog/ }).click()
   await expect(page.getByRole('button', { name: 'Review & run' })).toBeDisabled()
 
-  const command = page.getByLabel('Command bar')
+  const command = page.getByLabel('Command bar', { exact: true })
   await command.fill('/arrange-panels-as-cat')
   await page.locator('.tc-run').click()
   await expect(page.getByRole('button', { name: 'Run arrange-panels-as-cat' })).toHaveCount(0)

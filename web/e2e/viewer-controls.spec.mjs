@@ -42,7 +42,7 @@ test('the Version 2 sculpture can orbit at the deployed acceptance viewport', as
   await install(page)
   await page.goto('/try')
   await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
-  await page.getByLabel('Command bar').fill(REQUEST)
+  await page.getByLabel('Command bar', { exact: true }).fill(REQUEST)
   await page.getByRole('button', { name: 'Run', exact: true }).click()
   const approval = page.locator('.converse-confirm').filter({ hasText: 'arrange-panels-as-cat' })
   await approval.getByRole('button', { name: 'Approve' }).click()

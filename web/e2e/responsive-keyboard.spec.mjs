@@ -58,6 +58,6 @@ test('shortcut focus and roving tab arrows operate the visible controls', async 
   await expect(catalog).toBeFocused()
   await expect(catalog).toHaveAttribute('aria-selected', 'true')
   await page.keyboard.press('Control+K')
-  await expect(page.getByLabel('Command bar')).toBeFocused()
+  await expect(page.getByLabel('Command bar', { exact: true })).toBeFocused()
   await expect(page.locator('[aria-live="polite"]')).toHaveCount(1)
 })

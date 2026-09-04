@@ -34,7 +34,7 @@ test('shared conversation controller reattaches once after a stale session', asy
 
   await page.goto('/app')
   await expect(page.locator('.viewer-title')).toContainText('cat.dwg', { timeout: 10_000 })
-  await page.getByLabel('Command bar').fill(REQUEST)
+  await page.getByLabel('Command bar', { exact: true }).fill(REQUEST)
   await page.getByRole('button', { name: 'Run' }).click()
   await expect(page.locator('.converse-confirm')).toContainText('arrange-panels-as-cat', { timeout: 15_000 })
   expect({ sessionCreates, messagePosts }).toEqual({ sessionCreates: 2, messagePosts: 2 })

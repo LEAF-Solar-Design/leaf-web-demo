@@ -70,7 +70,7 @@ test.describe('route matrix, rail ON', () => {
     // one Command bar, one main landmark (the console's own).
     expect(await page.locator('[data-checkout-instance]').count()).toBe(1)
     expect(await page.locator('[data-controller-instance]').count()).toBe(1)
-    await expect(page.getByLabel('Command bar')).toHaveCount(1)
+    await expect(page.getByLabel('Command bar', { exact: true })).toHaveCount(1)
     await expect(page.locator('main')).toHaveCount(1)
     // No stage furniture leaked into console mode.
     await expect(page.locator('.tc-operator-rail')).toHaveCount(0)
@@ -560,7 +560,7 @@ test.describe('route matrix, rail ON', () => {
     const inputBox = await well.locator('.bar-input').boundingBox()
     const controlsBox = await well.locator('.bar-controls').boundingBox()
     expect(Math.abs(inputBox.y - controlsBox.y)).toBeLessThan(12)
-    await expect(page.getByLabel('Command bar')).toHaveCount(1)
+    await expect(page.getByLabel('Command bar', { exact: true })).toHaveCount(1)
     test.info().annotations.push({ type: 'cad_edit', description: cadEditOn ? 'VITE_CAD_EDIT=1: engine groups proven' : 'VITE_CAD_EDIT off in this build: engine groups absent by construction' })
 
     // Every group is VISIBLE at 1600 wide: the band wraps instead of hiding
@@ -755,7 +755,7 @@ test.describe('route matrix, rail ON', () => {
 
     // W4f slice B: a typed command word on the Command bar arms the same
     // prompt and clears the bar; the natural-language router never sees it.
-    const bar = page.getByLabel('Command bar')
+    const bar = page.getByLabel('Command bar', { exact: true })
     await bar.fill('circle')
     await bar.press('Enter')
     await expect(promptRow).toHaveAttribute('data-op', 'createCircle')
@@ -1221,7 +1221,7 @@ test.describe('route matrix, rail OFF + rollback', () => {
     await expectOneCanvasIn(page, '.viewer-wrap')
     expect(await page.locator('[data-checkout-instance]').count()).toBe(1)
     expect(await page.locator('[data-controller-instance]').count()).toBe(1)
-    await expect(page.getByLabel('Command bar')).toHaveCount(1)
+    await expect(page.getByLabel('Command bar', { exact: true })).toHaveCount(1)
     await expect(page.locator('main')).toHaveCount(1)
     await expect(page).toHaveURL(/\/app$/)
 
