@@ -79,6 +79,10 @@ export const PRODUCT_SURFACES = Object.freeze([
       //   excludes browser; e2e/local/one-shell-mount.spec.mjs:131 names it
       //   "the project board for Browser".
       ground: 'board',
+      // scene: SiteRoot.jsx:228-232 mounts <App/> for scene 'app'; this
+      //   surface is one of the studio's tabs, so the arm that hosts it is
+      //   the console. (Slice 5b added the slot; see the sheets record.)
+      scene: 'app',
       chrome: {
         // productFrame: App.jsx:2838 `activeSurface !== 'cad'` -> true.
         //   (The stage agrees: ToolCast.jsx:2139 renders the frame here too.)
@@ -95,6 +99,11 @@ export const PRODUCT_SURFACES = Object.freeze([
         stageBranch: 'frame',
         // projectSlot: App.jsx:2846 fills the slot for 'ios' only.
         projectSlot: null,
+        // tab: ProductSurfaceTabs.jsx:68 renders one tab per record whose
+        //   contract declares `chrome.tab`. Slice 5b added the slot and the
+        //   filter together; the four studio surfaces all declared `true`, so
+        //   the band is byte-identical to the un-filtered map it replaced.
+        tab: true,
       },
       toolbar: {
         // ribbon: App.jsx:2898 `studioGround && drafting` -> no DraftingRibbon.
@@ -184,6 +193,7 @@ export const PRODUCT_SURFACES = Object.freeze([
     contract: deepFreeze({
       // ground: SurfaceGrounds.jsx:106 DRAWING_SURFACES includes 'cad'.
       ground: 'drawing',
+      scene: 'app', // SiteRoot.jsx:228-232, a studio tab
       chrome: {
         // productFrame: App.jsx:2838 `activeSurface !== 'cad'` -> false.
         productFrame: false,
@@ -194,6 +204,7 @@ export const PRODUCT_SURFACES = Object.freeze([
         // stageBranch: ToolCast.jsx:1434 `activeSurface === 'cad'`.
         stageBranch: 'cad',
         projectSlot: null,
+        tab: true, // ProductSurfaceTabs.jsx:68
       },
       toolbar: {
         // ribbon: App.jsx:2898 `studioGround && drafting` -> DraftingRibbon mounts.
@@ -252,6 +263,7 @@ export const PRODUCT_SURFACES = Object.freeze([
     contract: deepFreeze({
       // ground: SurfaceGrounds.jsx:106 DRAWING_SURFACES includes 'solar'.
       ground: 'drawing',
+      scene: 'app', // SiteRoot.jsx:228-232, a studio tab
       chrome: {
         // productFrame: App.jsx:2838 `activeSurface !== 'cad'` -> TRUE on solar.
         //   The frame renders over the shown workspace card; this is today's
@@ -265,6 +277,7 @@ export const PRODUCT_SURFACES = Object.freeze([
         //   (ToolCast.jsx:2139) — the stage has NO drafting cockpit for solar.
         stageBranch: 'frame',
         projectSlot: null,
+        tab: true, // ProductSurfaceTabs.jsx:68
       },
       toolbar: {
         ribbon: true, // App.jsx:2898
@@ -309,6 +322,7 @@ export const PRODUCT_SURFACES = Object.freeze([
       // ground: SurfaceGrounds.jsx:106 excludes ios; one-shell-mount.spec.mjs:131
       //   names it "the device stage for iOS" (DeviceGround, SurfaceGrounds.jsx:222).
       ground: 'device-stage',
+      scene: 'app', // SiteRoot.jsx:228-232, a studio tab
       chrome: {
         // productFrame: App.jsx:2838 -> true (with the iOS project slot).
         //   Stage divergence: ToolCast.jsx:2077 gives ios its own rail instead.
@@ -321,6 +335,7 @@ export const PRODUCT_SURFACES = Object.freeze([
         stageBranch: 'ios',
         // projectSlot: App.jsx:2846-2847 mounts <IosSurface> into the frame.
         projectSlot: 'ios-surface',
+        tab: true, // ProductSurfaceTabs.jsx:68
       },
       toolbar: {
         ribbon: false, // App.jsx:2898
@@ -356,12 +371,119 @@ export const PRODUCT_SURFACES = Object.freeze([
       tourAnchors: null,
     }),
   }),
+  // -------------------------------------------------------------------------
+  // SHEETS (standardization slice 5b). The fifth surface, and the first one
+  // the studio does NOT host: /sheets is its own SiteRoot arm
+  // (SiteRoot.jsx:234-237, routeScene.js:30), a public page with no session,
+  // no drawing and no chrome of any kind. It is in the manifest because the
+  // operator rule says everything must be ABLE to be there, and it ships
+  // `chrome.tab: false` because today it genuinely is not: flipping that one
+  // value is the whole config change, and nothing else here would move.
+  //
+  // Every slot below is FALSE or 'none' rather than null, because a
+  // chrome-free page is a DECLARED absence, not an undeclared one. The
+  // genuinely-undeclared slots stay null, exactly as on the four studio
+  // records.
+  // -------------------------------------------------------------------------
+  Object.freeze({
+    id: 'sheets',
+    label: 'Sheets',
+    // Copy read off the page itself, never invented: SheetsPage.jsx:1-2
+    // ("renders the Website Sheets drawing set as one scrolling page", anchor
+    // ids l-000 · g-000 · a-101 · a-102 · e-401 · c-201 · s-501) and
+    // SheetsPage.jsx:16 (the /sheets/<code> deep link).
+    eyebrow: 'Website drawing set',
+    title: 'Read the Website Sheets drawing set as one scrolling page',
+    description: 'Seven sheets (l-000, g-000, a-101, a-102, e-401, c-201, s-501) on one public page, each deep-linkable at /sheets/<code>.',
+    // familyIds: the page renders no capability catalog at all (SheetsPage.jsx
+    //   mounts <SheetsSet> and nothing else, :54-55), so its fold is empty:
+    //   declared, not "the whole catalog" (which is what null means).
+    familyIds: Object.freeze([]),
+    contract: deepFreeze({
+      // ground: a new enum value. SheetsPage renders <main className="sheets-root">
+      //   (SheetsPage.jsx:54), not a drawing canvas, not a project board, not
+      //   a device stage. SurfaceGrounds.jsx:110-112 derives DRAWING_SURFACES
+      //   from `contract.ground === 'drawing'`, so 'sheet' is excluded from the
+      //   drawing set BY CONSTRUCTION: no edit to that file, and no chance of
+      //   the two drifting.
+      ground: 'sheet',
+      // scene: SiteRoot.jsx:234-237 `scene === 'sheets'` renders <SheetsPage/>
+      //   as a sibling arm of the console, routeScene.js:30 maps /sheets and
+      //   /sheets/<code> to it. This is the slot that says the studio does not
+      //   host this surface, and it is why chrome.tab is false below.
+      scene: 'sheets',
+      chrome: {
+        // Nothing wraps SheetsPage: SiteRoot.jsx:234-237 is <Suspense> around
+        // the bare component, with no ProductSurfaceFrame, no workspace card
+        // and no cockpit band anywhere in the arm.
+        productFrame: false,
+        workspaceCard: false,
+        cockpit: false,
+        // stageBranch: null, genuinely undeclared, not "no branch". The stage
+        //   ternary (ToolCast.jsx:1434 / :2077 / :2139) is never reached: this
+        //   surface is not a stage cast at all, so no arm of it is the answer.
+        stageBranch: null,
+        projectSlot: null,
+        // tab: ProductSurfaceTabs.jsx:68 filters on this slot. False today, so
+        //   slice 5b renders the same four tabs it rendered before.
+        tab: false,
+      },
+      // No toolbar markup exists in src/site/sheets/** (SheetsPage.jsx renders
+      // SheetsSet only, :54-55).
+      toolbar: { ribbon: false, home: null, quick: null },
+      // No rails: nothing in the sheets arm mounts a nav rail, job rail or dock.
+      rails: { left: 'none', right: 'none', dock: null },
+      // groundMaterial: the solar accent and the string overlay are drawing-
+      //   ground material (App.jsx:2296, :2313); this ground carries neither.
+      groundMaterial: { layerAccent: null, solarStrings: false },
+      // commandLine: App.jsx:3419's PromptBox is inside the console; the sheets
+      //   arm mounts no prompt at all.
+      commandLine: false,
+      // authoring: no AuthorPanel is reachable from a page with no rail.
+      authoring: false,
+      versions: 'none',
+      // conversations.scope: null, undeclared. No ConversePanel is mounted in
+      //   this arm and no drawing identity is consumed for one, so a scope
+      //   here would be a guess.
+      conversations: { scope: null },
+      integrations: null,
+      // builds.routes: declared EMPTY. SheetsPage has no run or build control
+      //   of any kind, so this is an absence that was read, not one assumed.
+      builds: { routes: [] },
+      // contextMenu: zero contextmenu handlers exist under web/src.
+      contextMenu: [],
+      shortcuts: null,
+      entitlements: null,
+      resetOn: null,
+      a11y: null,
+      tourAnchors: null,
+    }),
+  }),
 ])
 
+// Every id the module ships a RECORD for. Record lookup only, never the
+// studio's selection set, which is the next constant.
 const SURFACE_IDS = new Set(PRODUCT_SURFACES.map(({ id }) => id))
 
+// The ids the STUDIO can select, derived from the same slot the tab band
+// renders from (`chrome.tab`), so a selector can only ever name a tab that
+// exists. Computed once at module load; `has` stays O(1) on every route parse.
+//
+// Slice 5b decision, and the reason these are two sets rather than one:
+// /app never hosts sheets (`scene: 'sheets'`), so `?surface=sheets` on /app
+// must NOT select a tab that does not render, it falls closed to the default
+// surface, exactly like `?surface=nonsense` does. Resolving it to a real-but-
+// invisible surface would leave the tablist with no selected tab and the frame
+// describing a page the console cannot show. productSurfaces.test.js pins both
+// halves: the normalize-to-default, and the fact that the RECORD is still
+// addressable so `surfaceContract('sheets')` returns the sheets contract
+// rather than CAD's.
+const SELECTABLE_SURFACE_IDS = new Set(
+  PRODUCT_SURFACES.filter(({ contract }) => contract?.chrome?.tab).map(({ id }) => id),
+)
+
 export function normalizeProductSurface(value) {
-  return SURFACE_IDS.has(value) ? value : DEFAULT_PRODUCT_SURFACE
+  return SELECTABLE_SURFACE_IDS.has(value) ? value : DEFAULT_PRODUCT_SURFACE
 }
 
 export function productSurfaceFromSearch(search = '') {
@@ -397,25 +519,41 @@ export function productSurfaceStates({ sessionActive, hasDrawing, apsLive, iosRe
     ios: iosReady
       ? { state: 'available', label: 'Ready' }
       : { state: 'setup', label: 'Setup required' },
+    // sheets: the one surface with NO precondition. SheetsPage.jsx renders its
+    // content immediately with no auth gate, no drawing and no readiness
+    // check; loadDemoSolve (:30) is a soft enhancement with static fallbacks
+    // (:26-28), never a gate. So this row takes no argument and has no branch:
+    // inventing a sign-in or setup state here would be a fabricated condition.
+    sheets: { state: 'available', label: 'Ready' },
   }
 }
 
+/**
+ * The RECORD for a surface id. Distinct from selection: every id the module
+ * ships is addressable here, including ones the studio cannot select
+ * (`chrome.tab: false`), so a contract lookup returns that surface's own
+ * contract rather than the default's. An id the module does not ship still
+ * falls closed to the default record rather than returning undefined.
+ */
 export function productSurface(id) {
-  const normalized = normalizeProductSurface(id)
-  return PRODUCT_SURFACES.find((surface) => surface.id === normalized)
+  const known = SURFACE_IDS.has(id) ? id : DEFAULT_PRODUCT_SURFACE
+  return PRODUCT_SURFACES.find((surface) => surface.id === known)
 }
 
 /**
- * The Surface Contract for a surface. Normalizes exactly like
- * productSurface(), so an unknown id falls closed to the CAD contract rather
- * than returning undefined into a consumer's slot lookup.
+ * The Surface Contract for a surface. Resolves exactly like productSurface(),
+ * so an unknown id falls closed to the CAD contract rather than returning
+ * undefined into a consumer's slot lookup, and a shipped-but-unselectable id
+ * ('sheets') returns its OWN contract.
  */
 export function surfaceContract(id) {
   return productSurface(id).contract
 }
 
 /**
- * The declared ground kind: 'drawing' | 'board' | 'device-stage'. Equal to
+ * The declared ground kind: 'drawing' | 'board' | 'device-stage' | 'sheet'.
+ * ('sheet' is slice 5b's addition, and the reason SurfaceGrounds excludes the
+ * sheets surface from its drawing set without a line of its own.) Equal to
  * groundShowsDrawing(id) === (surfaceGround(id) === 'drawing') by
  * construction today; productSurfaces.test.js pins that equality.
  */

@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import ProductSurfaceTabs, { ProductSurfaceFrame } from './ProductSurfaceTabs.jsx'
-import { productSurfaceStates } from '../site/productSurfaces.js'
+import { PRODUCT_SURFACES, productSurfaceStates } from '../site/productSurfaces.js'
 import { deriveWorkspaceProjectState } from '../site/workspaceProjectState.js'
 
 afterEach(cleanup)
@@ -448,6 +448,41 @@ describe('F-7: surface frames render the live tenant catalog', () => {
       expect(src).not.toContain('Solar automations')
       expect(src).not.toContain('Browser artifacts')
       expect(src).not.toContain('not loaded yet')
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Slice 5b: the band renders one tab per surface that DECLARES one, and Sheets
+// declares none. The point of these rows is that the fifth manifest record
+// changed no pixel here.
+// ---------------------------------------------------------------------------
+describe('slice 5b: the tab band renders only tab-declaring surfaces', () => {
+  it('renders exactly the four studio tabs, in manifest order, and no Sheets tab', () => {
+    render(<ProductSurfaceTabs activeSurface="cad" states={states} onSelect={() => {}} />)
+    const tabs = screen.getAllByRole('tab')
+    expect(tabs.map((tab) => tab.dataset.surface)).toEqual(['browser', 'cad', 'solar', 'ios'])
+    expect(tabs).toHaveLength(4)
+    expect(screen.queryByRole('tab', { name: 'Sheets' })).toBeNull()
+    expect(document.querySelector('[data-surface="sheets"]')).toBeNull()
+  })
+
+  it('renders one tab per tab-declaring record, derived, not a hardcoded four', () => {
+    // Derived on BOTH sides, so flipping chrome.tab on any record makes this
+    // row follow it instead of failing as a stale count.
+    const declared = PRODUCT_SURFACES.filter(({ contract }) => contract.chrome.tab)
+    render(<ProductSurfaceTabs activeSurface="cad" states={states} onSelect={() => {}} />)
+    expect(screen.getAllByRole('tab').map((tab) => tab.dataset.surface))
+      .toEqual(declared.map(({ id }) => id))
+    // Not vacuous: the manifest really does ship a record the band skips.
+    expect(declared.length).toBeLessThan(PRODUCT_SURFACES.length)
+    expect(PRODUCT_SURFACES.some(({ id }) => id === 'sheets')).toBe(true)
+  })
+
+  it('every rendered tab reads a real status row (no undefined label)', () => {
+    render(<ProductSurfaceTabs activeSurface="cad" states={states} onSelect={() => {}} />)
+    for (const tab of screen.getAllByRole('tab')) {
+      expect(tab.querySelector('small').textContent.trim()).not.toBe('')
     }
   })
 })
