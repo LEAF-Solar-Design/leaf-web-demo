@@ -1506,10 +1506,10 @@ mod created_entity_roundtrip {
         // A full turn is exactly fillable in either direction; only a sweep
         // PAST one turn is refused, because there the copies wrap onto the
         // source.
-        let mut ccw = empty_doc();
-        ccw.create_circle_core(10.0, 0.0, 1.0, "P").unwrap();
-        assert_eq!(ccw.array_polar_core(0, 4, 0.0, 0.0, -360.0).unwrap().len(), 3);
-        assert_eq!(centres(&ccw), vec![(10.0, 0.0), (-0.0, -10.0), (-10.0, 0.0), (0.0, 10.0)]);
+        let mut clockwise = empty_doc();
+        clockwise.create_circle_core(10.0, 0.0, 1.0, "P").unwrap();
+        assert_eq!(clockwise.array_polar_core(0, 4, 0.0, 0.0, -360.0).unwrap().len(), 3);
+        assert_eq!(centres(&clockwise), vec![(10.0, 0.0), (-0.0, -10.0), (-10.0, 0.0), (0.0, 10.0)]);
     }
 
     #[test]
