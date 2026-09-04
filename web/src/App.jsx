@@ -2966,12 +2966,15 @@ export default function App() {
               {/* W4g-1b: the console's OWN drawing opens in the engine at
                   mount (GET .../dxf), so Draw/Modify are live without an
                   import; a moved head (a tool run, undo/redo, restore)
-                  re-opens a clean engine copy. Live sessions only: mock has
-                  no server head to fetch, and stays import-only, honestly. */}
+                  re-opens a clean engine copy. Live sessions on the studio's
+                  drafting surfaces only: mock has no server head to fetch
+                  (import-only, honestly), and the rail-OFF shell stays
+                  byte-identical (no fetch, no engine view, no card stamp
+                  outside the cockpit). */}
               {ENV_CAD_EDIT && (
                 <EngineHeadOpener
                   drawingId={REQUESTED_DRAWING_ID}
-                  enabled={!mock && !!intake}
+                  enabled={!!studioGround && !!drafting && !mock && !!intake}
                   headKey={drawingState?.head ?? null}
                   fetchDxf={fetchDrawingDxf}
                 />
