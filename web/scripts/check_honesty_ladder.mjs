@@ -71,30 +71,13 @@ const DISABLED_RECORD_FILES = [
 const MIN_REASON_CHARS = 12
 const PLACEHOLDER = /(\?\?\?|\b(?:TODO|TBD|FIXME|XXX|WIP|N\/A|LOREM)\b)/i
 
-// Dated exemptions the reviewer is meant to argue with. Each entry names the
-// exact string, so it cannot drift into covering a different value, and says
-// what would retire it. NEVER add one to make a new violation go away: fix the
-// violation in its own file instead.
-const REASON_LENGTH_ALLOWLIST = [
-  {
-    // 2026-09-03 (slice 13d). 'engine busy' is 11 characters, one under the
-    // bar, and it is honest prose. It is also pinned BYTE FOR BYTE by
-    // web/src/cadedit/engineSessionProvider.test.jsx (title / aria-label /
-    // note assertions), so lengthening it is a product-copy change plus a
-    // test-pin change that belongs to the engine ribbon's owner, not to the
-    // gate that found it. Retire this entry when that copy is revisited.
-    file: 'web/src/cadedit/EngineRibbonClusters.jsx',
-    maps: ['MODIFY_REASONS', 'SAVE_REASONS', 'DRAW_REASONS'],
-    key: 'busy',
-    value: 'engine busy',
-    added: '2026-09-03',
-  },
-]
-
-function allowlisted(file, map, key, value) {
-  return REASON_LENGTH_ALLOWLIST.some((e) =>
-    e.file === file && e.maps.includes(map) && e.key === key && e.value === value)
-}
+// NO EXEMPTIONS, and none is available. This gate has no allowlist and no
+// escape hatch on purpose: a reason too short to be a sentence gets fixed in
+// the file that owns the copy, never waived here. An earlier draft of this
+// slice carved out 'engine busy' (11 chars) on the stated premise that the
+// literal was pinned byte for byte by a test. No test pinned it, because every
+// assertion compares against the constant (MODIFY_REASONS.busy and friends),
+// so the copy was lengthened in its own file and the mechanism deleted with it.
 
 // --- source scanning -------------------------------------------------------
 
@@ -422,7 +405,6 @@ for (const f of reasonFiles) {
       scannedCounts.values += 1
       const why = reasonProseViolation(entry.value)
       if (!why) continue
-      if (entry.value !== null && allowlisted(f.file, map.name, entry.key, entry.value)) continue
       record(f.file, entry.line, `${map.name}.${entry.key}: ${why}`)
     }
   }
@@ -554,4 +536,4 @@ describe('honesty ladder', () => {
 console.log(
   `honesty ladder: ${scannedCounts.maps} reason maps · ${scannedCounts.values} sentences · `
   + `${scannedCounts.refs} key references · ${scannedCounts.records} disabled records · `
-  + `${scannedCounts.slots} absent contract slots · ${REASON_LENGTH_ALLOWLIST.length} dated allowlist entr(y/ies)`)
+  + `${scannedCounts.slots} absent contract slots`)
