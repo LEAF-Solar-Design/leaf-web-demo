@@ -91,6 +91,7 @@ import {
   saveEditedDrawingVersion,
   saveDrawingVersionPlan,
   fetchDrawingDxf,
+  fetchSampleDxf,
 } from './api.js'
 import { matchPrompt } from './mock/mockNlPrompt.js'
 import { shouldStartTour } from './demo/tourEntry.js'
@@ -3048,17 +3049,19 @@ export default function App() {
               {/* W4g-1b: the console's OWN drawing opens in the engine at
                   mount (GET .../dxf), so Draw/Modify are live without an
                   import; a moved head (a tool run, undo/redo, restore)
-                  re-opens a clean engine copy. Live sessions on the studio's
-                  drafting surfaces only: mock has no server head to fetch
-                  (import-only, honestly), and the rail-OFF shell stays
-                  byte-identical (no fetch, no engine view, no card stamp
-                  outside the cockpit). */}
+                  re-opens a clean engine copy. The studio's drafting surfaces
+                  only; the rail-OFF shell stays byte-identical (no fetch, no
+                  engine view, no card stamp outside the cockpit). W4g-1c:
+                  the public demo (mock) has no server head, so its head is
+                  the static /sample.dxf, the synthesis of the very intake it
+                  draws, at version 1; the Draw tools go live there too, and
+                  Save stays honestly off (no target). */}
               {ENV_CAD_EDIT && (
                 <EngineHeadOpener
                   drawingId={REQUESTED_DRAWING_ID}
-                  enabled={!!studioGround && !!drafting && !mock && !!intake}
-                  headKey={drawingState?.head ?? null}
-                  fetchDxf={fetchDrawingDxf}
+                  enabled={!!studioGround && !!drafting && !!intake}
+                  headKey={drawingState?.head ?? (mock ? 1 : null)}
+                  fetchDxf={mock ? fetchSampleDxf : fetchDrawingDxf}
                 />
               )}
               {/* W4f slice A1: a click on the drawing answers the armed
