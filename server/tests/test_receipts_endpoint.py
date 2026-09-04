@@ -30,7 +30,9 @@ Run:
 """
 from __future__ import annotations
 
+import http.client
 import json
+import re
 import sys
 import urllib.parse
 from pathlib import Path
@@ -41,6 +43,7 @@ SERVER_DIR = Path(__file__).resolve().parent.parent
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
+import deps  # noqa: E402
 import entitlements  # noqa: E402
 import receipts_read as rr  # noqa: E402
 
@@ -343,11 +346,85 @@ def test_an_unidentifiable_run_is_dropped(monkeypatch):
     assert rr.read_receipts("pr:9")["rows"] == []
 
 
-def test_the_minting_allowlist_matches_the_workflows_that_actually_upload():
-    """Read from the workflow files, not from memory."""
+def test_the_cap_reports_incomplete_rather_than_a_false_empty(monkeypatch):
+    """Round-2 finding 3: MAX_PROVENANCE_LOOKUPS must bound WORK, not
+    correctness. Six newer same-repo artifacts from a workflow that may NOT
+    mint this receipt must not spend the whole per-name lookup budget and
+    collapse an older, real gate proof into a confident-looking empty answer
+    -- and when the budget runs out before every candidate is examined, the
+    answer must say so rather than read as a confirmed absence."""
+    _configure_github(monkeypatch)
+    tree = "b" * 40
+    name = f"gate-proof-{tree}"
+    foreign = [
+        _artifact(name, run_id=9000 + i, created=f"2026-09-02T10:{i:02d}:00Z")
+        for i in range(6)
+    ]
+    real = _artifact(name, run_id=8000, created="2026-09-01T00:00:00Z")
+    _stub_github(monkeypatch, {name: foreign + [real]}, run_paths={
+        **{9000 + i: ".github/workflows/some-other-lane.yml" for i in range(6)},
+        8000: GATE_WORKFLOW,
+    })
+    body = rr.read_receipts(f"tree:{tree}")
+    assert [row for row in body["rows"] if row["kind"] == "gate-proof"] == [], \
+        "the real receipt sat past the lookup budget and was never reached"
+    assert body["unavailable"], "the cap being hit must be visible, never a silent empty"
+    assert body["unavailable"][0]["reason"] == rr.REASON_BUSY
+
+
+def test_a_repeated_run_id_does_not_spend_a_second_lookup_slot(monkeypatch):
+    """Two artifacts minted by the SAME run share one budget slot: the memo
+    already makes the second lookup free, so it must not count against
+    MAX_PROVENANCE_LOOKUPS as if it were a distinct candidate."""
+    _configure_github(monkeypatch)
+    name = "prewarm-relay-receipt-pr-9"
+    same_run = [
+        _artifact(name, run_id=42, created=f"2026-09-01T10:{i:02d}:00Z")
+        for i in range(rr.MAX_PROVENANCE_LOOKUPS + 3)
+    ]
+    _stub_github(monkeypatch, {name: same_run}, run_paths={42: PREWARM_WORKFLOW})
+    body = rr.read_receipts("pr:9")
+    assert len(body["rows"]) == len(same_run), \
+        "one distinct run id must verify every artifact it minted, not just the cap's worth"
+    assert body["unavailable"] == []
+
+
+def test_the_minting_allowlist_names_a_real_uploader_per_kind():
+    """Read from the workflow files, not from memory: a receipt kind's
+    allowlist can legitimately include a workflow that only REUSES an
+    artifact another run minted (gate-proof's build-platform-images.yml
+    entry), so the check is "at least one allowlisted workflow really
+    uploads the exact name pattern this module reads that kind by", not
+    "every allowlisted file exists" (which passes even on a renamed
+    artifact) and not "every allowlisted workflow uploads it" (which is
+    false for a legitimate reuse-only entry)."""
     root = SERVER_DIR.parent
-    for workflow in sorted({w for paths in rr.MINTING_WORKFLOWS.values() for w in paths}):
-        assert (root / workflow).is_file(), f"{workflow} is allowlisted but absent"
+    # kind -> the literal (non-``${{ }}``) prefix receipts_read.py reads that
+    # kind's artifact name by, taken from its own f-strings in read_receipts.
+    kind_prefix = {
+        "prewarm-relay": "prewarm-relay-receipt-pr-",
+        "gate-proof": "gate-proof-",
+        "supply-set": "spec-v3-supply-set-",
+    }
+    assert set(kind_prefix) == set(rr.MINTING_WORKFLOWS), \
+        "this test must cover every receipt kind the module allowlists"
+
+    upload_step = re.compile(
+        r"uses:\s*actions/upload-artifact@v\d+\s*\n(?:[^\n]*\n){0,6}?\s*name:\s*(\S.*)"
+    )
+    for kind, prefix in kind_prefix.items():
+        uploaders = []
+        for workflow in sorted(rr.MINTING_WORKFLOWS[kind]):
+            path = root / workflow
+            assert path.is_file(), f"{workflow} is allowlisted but absent"
+            text = path.read_text(encoding="utf-8")
+            names = [raw.strip().split("${{", 1)[0] for raw in upload_step.findall(text)]
+            if prefix in names:
+                uploaders.append(workflow)
+        assert uploaders, (
+            f"no workflow allowlisted for {kind!r} contains an "
+            f"actions/upload-artifact step named exactly {prefix!r}"
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -516,6 +593,48 @@ def test_an_oversize_body_is_refused_rather_than_truncated(monkeypatch):
         rr._get_json("https://example.com/x", headers={}, cap=1024)
 
 
+class _TruncatedResponse:
+    """A response that dies mid-transfer: http.client's real behavior for a
+    connection dropped before the declared Content-Length is delivered is its
+    own IncompleteRead, an HTTPException subclass that is neither OSError nor
+    ValueError."""
+
+    def read(self, n):
+        raise http.client.IncompleteRead(b"partial", 40)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_a_transport_failure_neither_oserror_nor_valueerror_is_normalized(monkeypatch):
+    """Round-2 finding 1: every caller of _get_json matches only
+    (OSError, urllib.error.HTTPError, ValueError, _CredentialUnavailable), so
+    an un-normalized IncompleteRead would escape every one of them uncaught."""
+    monkeypatch.setattr(rr.urllib.request, "urlopen",
+                        lambda request, timeout=None: _TruncatedResponse())
+    with pytest.raises(OSError):
+        rr._get_json("https://example.com/x", headers={}, cap=1024)
+
+
+def test_a_truncated_response_is_the_honest_state_at_the_route_never_a_500(monkeypatch):
+    """Pinned at the ROUTE, not just at _get_json: a truncated transfer must
+    make the actual endpoint answer 200 with the honest unavailable state,
+    never an unhandled 500."""
+    tenant = _admit_platform(monkeypatch)
+    monkeypatch.setenv(rr.ENV_RECONCILER_URL, "https://raw.example.com/latest.json")
+    monkeypatch.setattr(rr.urllib.request, "urlopen",
+                        lambda request, timeout=None: _TruncatedResponse())
+
+    resp = _client(tenant).get("/api/receipts", params={"scope": "train"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["rows"] == []
+    assert body["unavailable"][0]["reason"] == rr.REASON_UNREACHABLE
+
+
 def test_an_unexpected_artifact_shape_is_unreadable_not_a_crash(monkeypatch):
     _configure_github(monkeypatch)
     monkeypatch.setattr(rr, "_get_json", lambda url, *, headers, cap: (
@@ -539,6 +658,62 @@ def test_the_reconciler_read_is_cached_for_sixty_seconds(monkeypatch):
     rr.read_receipts("train")
     rr.read_receipts("train")
     assert len(hits) == 1, "the 60 s cache must not re-read on every request"
+
+
+def test_twenty_train_requests_cost_a_bounded_number_of_reconciler_reads(monkeypatch):
+    """Round-2 finding 2: the module docstring claims every outbound call is
+    bounded and cached; pinned at the volume the finding names."""
+    monkeypatch.setenv(rr.ENV_RECONCILER_URL, "https://raw.example.com/latest.json")
+    hits = []
+
+    def fake(url, *, headers, cap):
+        hits.append(url)
+        return {"receipts": [{"at": "2026-09-02T12:00:00Z", "summary": "one"}]}
+
+    monkeypatch.setattr(rr, "_get_json", fake)
+    for _ in range(20):
+        assert len(rr.read_receipts("train")["rows"]) == 1
+    assert len(hits) == 1, hits
+
+
+def test_a_failing_reconciler_read_is_cached_too(monkeypatch):
+    """Round-2 finding 2: a failing reconciler read must be cached exactly
+    like a success -- a repeatedly-unreachable receipt inbox costs one read
+    per RECONCILER_CACHE_SECONDS, never one per request."""
+    monkeypatch.setenv(rr.ENV_RECONCILER_URL, "https://raw.example.com/latest.json")
+    hits = []
+
+    def fake(url, *, headers, cap):
+        hits.append(url)
+        raise OSError("HTTP 500")
+
+    monkeypatch.setattr(rr, "_get_json", fake)
+    for _ in range(10):
+        assert rr.read_receipts("train")["unavailable"][0]["reason"] == rr.REASON_UNREACHABLE
+    assert len(hits) == 1, "the failure must be cached like a success"
+
+
+def test_the_reconciler_shares_the_inflight_cap(monkeypatch):
+    """Round-2 finding 2: _fetch_reconciler must acquire the SAME
+    MAX_INFLIGHT_GITHUB semaphore the GitHub reads do -- the module docstring
+    claims every outbound read this module makes is bounded that way, and the
+    reconciler read was the one call site that skipped it."""
+    monkeypatch.setenv(rr.ENV_RECONCILER_URL, "https://raw.example.com/latest.json")
+    held = [rr._inflight.acquire(blocking=False) for _ in range(rr.MAX_INFLIGHT_GITHUB)]
+    try:
+        assert all(held)
+        monkeypatch.setattr(rr, "_get_json", lambda *a, **k: pytest.fail(
+            "over the inflight cap, the reconciler must not be read at all"))
+        body = rr.read_receipts("train")
+        assert body["rows"] == []
+        assert body["unavailable"][0]["reason"] == rr.REASON_BUSY
+    finally:
+        for _ in held:
+            rr._inflight.release()
+    # and the refusal is not cached as if it were an answer
+    monkeypatch.setattr(rr, "_get_json", lambda url, *, headers, cap: {
+        "receipts": [{"at": "2026-09-02T12:00:00Z", "summary": "one"}]})
+    assert len(rr.read_receipts("train")["rows"]) == 1
 
 
 def test_the_artifact_read_is_cached_so_a_loop_cannot_burn_the_shared_budget(monkeypatch):
@@ -595,7 +770,12 @@ def test_the_memos_are_bounded(monkeypatch):
 # --------------------------------------------------------------------------- #
 # 6. the endpoint
 # --------------------------------------------------------------------------- #
-def _client():
+def _client(tenant=None):
+    """``tenant`` overrides ``deps.require_tenant`` for this app instance only,
+    so a test can arm ``_platform_scope_gate``'s own ``deps.auth_live()`` check
+    (finding 5) without also routing ``require_tenant`` itself onto the live
+    JWT path it would otherwise take once that same module-level flag flips.
+    """
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
@@ -605,22 +785,47 @@ def _client():
     app = FastAPI()
     install_error_handlers(app)
     app.include_router(router_module.router)
+    if tenant is not None:
+        app.dependency_overrides[deps.require_tenant] = lambda: tenant
     return TestClient(app, raise_server_exceptions=False)
 
 
 def _grant_platform(monkeypatch, granted=True):
-    """Grant (or withhold) the capability the platform scopes require."""
+    """Grant (or withhold) the ``platform_customize`` capability alone. Used
+    only by the ``job:`` scope tests below, where the platform gate is never
+    even reached -- see ``_admit_platform`` for the full R7 chain."""
     monkeypatch.setattr(
         entitlements, "entitlements_for",
         lambda tier, roles=(), elevated=False: {"platform_customize": granted},
     )
 
 
+def _admit_platform(monkeypatch, *, granted=True, rollout=True, tenant=None):
+    """Arm the FULL R7 admission chain ``_platform_scope_gate`` now shares
+    with ``platform_customize._gate`` (finding 5): live auth, the
+    ``platform_customize`` entitlement, and -- when ``rollout`` -- the R7
+    internal allowlist for the returned tenant. Returns the tenant id to pass
+    to ``_client()``."""
+    tenant = tenant if tenant is not None else deps.DEFAULT_TENANT
+    monkeypatch.setattr(deps, "auth_live", lambda: True)
+    if rollout:
+        monkeypatch.setenv("LEAF_CUSTOMIZATION_R7_MODE", "internal")
+        monkeypatch.setenv("LEAF_CUSTOMIZATION_INTERNAL_TENANTS", str(tenant))
+    else:
+        monkeypatch.delenv("LEAF_CUSTOMIZATION_R7_MODE", raising=False)
+        monkeypatch.delenv("LEAF_CUSTOMIZATION_INTERNAL_TENANTS", raising=False)
+    monkeypatch.setattr(
+        entitlements, "entitlements_for",
+        lambda tier, roles=(), elevated=False: {"platform_customize": granted},
+    )
+    return tenant
+
+
 def test_endpoint_returns_rows_and_the_envelope(monkeypatch):
-    _grant_platform(monkeypatch)
+    tenant = _admit_platform(monkeypatch)
     _configure_github(monkeypatch)
     _prewarm_fixture(monkeypatch)
-    resp = _client().get("/api/receipts", params={"scope": "pr:988"})
+    resp = _client(tenant).get("/api/receipts", params={"scope": "pr:988"})
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["contract"] == rr.CONTRACT
@@ -630,8 +835,8 @@ def test_endpoint_returns_rows_and_the_envelope(monkeypatch):
 
 
 def test_endpoint_is_honest_when_no_source_is_configured(monkeypatch):
-    _grant_platform(monkeypatch)
-    resp = _client().get("/api/receipts", params={"scope": "pr:988"})
+    tenant = _admit_platform(monkeypatch)
+    resp = _client(tenant).get("/api/receipts", params={"scope": "pr:988"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["rows"] == []
@@ -654,11 +859,11 @@ def test_endpoint_requires_a_scope():
 def test_a_platform_scope_is_403_without_the_entitlement(monkeypatch, scope):
     """Any signed-in account of any tier would otherwise walk pr:1..N and
     tree:<sha> and read back a private repository's CI state."""
-    _grant_platform(monkeypatch, granted=False)
+    tenant = _admit_platform(monkeypatch, granted=False)
     _configure_github(monkeypatch)
     monkeypatch.setattr(rr, "_get_json", lambda *a, **k: pytest.fail(
         "the gate must refuse BEFORE any outbound call"))
-    resp = _client().get("/api/receipts", params={"scope": scope})
+    resp = _client(tenant).get("/api/receipts", params={"scope": scope})
     assert resp.status_code == 403, resp.text
     body = resp.json()
     assert body["entitlement_required"] is True
@@ -673,13 +878,44 @@ def test_the_default_tier_does_not_carry_the_platform_capability():
 
 
 def test_an_unreadable_entitlement_policy_fails_closed_with_503(monkeypatch):
+    tenant = deps.DEFAULT_TENANT
+    monkeypatch.setattr(deps, "auth_live", lambda: True)
+
     def explode(*args, **kwargs):
         raise entitlements.EntitlementsError("policy unreadable")
 
     monkeypatch.setattr(entitlements, "entitlements_for", explode)
-    resp = _client().get("/api/receipts", params={"scope": "train"})
+    resp = _client(tenant).get("/api/receipts", params={"scope": "train"})
     assert resp.status_code == 503, resp.text
     assert resp.json()["entitlement_required"] is True
+
+
+# --------------------------------------------------------------------------- #
+# 7b. finding 5: the platform gate shares live-auth and the R7 rollout with
+# platform_customize._gate, reused rather than re-derived
+# --------------------------------------------------------------------------- #
+def test_a_platform_scope_is_503_when_auth_is_not_live(monkeypatch):
+    """auth_live() false means the whole platform-CI surface is dark, the same
+    503 platform_customize._gate answers its own callers with."""
+    tenant = _admit_platform(monkeypatch)
+    monkeypatch.setattr(deps, "auth_live", lambda: False)
+    monkeypatch.setattr(rr, "_get_json", lambda *a, **k: pytest.fail(
+        "the gate must refuse BEFORE any outbound call"))
+    resp = _client(tenant).get("/api/receipts", params={"scope": "train"})
+    assert resp.status_code == 503, resp.text
+    assert resp.json()["reason_code"] == "platform_customize_auth_required"
+
+
+def test_a_platform_scope_is_refused_when_the_r7_rollout_is_off(monkeypatch):
+    """Live auth and the entitlement both pass, but the tenant is not on the R7
+    internal allowlist: the SAME refusal platform_customize._gate gives for a
+    disabled rollout, never a silent 403 or a fabricated read."""
+    tenant = _admit_platform(monkeypatch, rollout=False)
+    monkeypatch.setattr(rr, "_get_json", lambda *a, **k: pytest.fail(
+        "the gate must refuse BEFORE any outbound call"))
+    resp = _client(tenant).get("/api/receipts", params={"scope": "train"})
+    assert resp.status_code == 404, resp.text
+    assert resp.json()["reason_code"] == "platform_customize_disabled"
 
 
 def test_a_job_scope_needs_no_platform_entitlement(monkeypatch, tmp_path):

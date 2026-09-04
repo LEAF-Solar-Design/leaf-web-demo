@@ -99,16 +99,24 @@ The GitHub budget is bounded three ways, because this module spends a SHARED
 credential whose 5000/hr also carries ``platform_customize``'s PR opening and
 review observation:
 
-  * EVERY lookup is cached. Artifact listings are cached per name for
-    ``ARTIFACT_CACHE_SECONDS`` (failures included, so a 403 loop costs one call
-    per minute, not one per request); the repository id and a run's workflow
-    path are immutable, so both are cached for the process lifetime in
-    bounded, FIFO-evicted maps.
+  * EVERY lookup is cached. Artifact listings are cached per ``(slug, name)``
+    for ``ARTIFACT_CACHE_SECONDS`` (failures included, so a 403 loop costs one
+    call per minute, not one per request), the reconciler read the same way for
+    ``RECONCILER_CACHE_SECONDS``; the repository id and a run's workflow path
+    are immutable, so both are cached for the process lifetime in bounded,
+    FIFO-evicted maps (keyed by slug too, so a future second repository can
+    never alias another repository's cached rows or run path onto its own).
   * Run-provenance lookups are capped at ``MAX_PROVENANCE_LOOKUPS`` per artifact
-    name, applied to the NEWEST candidates after the free checks, so one request
-    can never fan out to a hundred run reads.
-  * ``MAX_INFLIGHT_GITHUB`` bounds how many requests may be inside a GitHub call
-    at once. The cap is acquired NON-BLOCKING: over it, a caller gets an honest
+    name, spent on DISTINCT run ids only (a repeated run id is already free via
+    the workflow-path memo). The cap bounds WORK, never correctness: every
+    candidate that clears the two free checks is walked, newest first, so the
+    budget is never spent on the wrong slice before verification is even
+    attempted. When the budget runs out before every candidate has been
+    walked, the answer says so (``source_busy``) alongside whatever verified,
+    so an incomplete check is never rendered as a confirmed empty answer.
+  * ``MAX_INFLIGHT_GITHUB`` bounds how many requests may be inside an outbound
+    read this module makes -- a GitHub call or the reconciler's -- at once. The
+    cap is acquired NON-BLOCKING: over it, a caller gets an honest
     ``source_busy`` immediately instead of queueing. These routes are sync ``def``
     on purpose -- urllib blocks, so the threadpool is where it belongs -- and
     this semaphore is what stops the route from holding more than
@@ -265,12 +273,29 @@ def _credential_detail() -> str:
 # bounded HTTP
 # --------------------------------------------------------------------------- #
 def _get_json(url: str, *, headers: Mapping[str, str], cap: int) -> Any:
-    """One bounded GET. Raises OSError/ValueError; never leaks a header value."""
+    """One bounded GET. Raises ONLY ``OSError`` or ``ValueError``, never a
+    header value: every caller here matches exactly that pair (plus
+    ``_CredentialUnavailable`` where relevant), so a narrower failure at this
+    boundary would escape uncaught and reach a route as an unhandled 500
+    instead of the honest ``source_unreachable`` state.
+
+    A truncated transfer -- the connection drops before the declared
+    Content-Length is delivered -- makes ``http.client`` raise its own
+    ``HTTPException`` subclass (``IncompleteRead``, a bad status line, ...),
+    which is neither ``OSError`` nor ``ValueError``. The read is wrapped so
+    that failure, and anything else this narrow, is normalized rather than
+    left to escape.
+    """
     request = urllib.request.Request(url, method="GET", headers=dict(headers))
-    with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_S) as response:
-        # read(cap + 1) so an oversized body is DETECTED rather than silently
-        # truncated into malformed JSON.
-        payload = response.read(cap + 1)
+    try:
+        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_S) as response:
+            # read(cap + 1) so an oversized body is DETECTED rather than
+            # silently truncated into malformed JSON.
+            payload = response.read(cap + 1)
+    except (OSError, ValueError):
+        raise
+    except Exception as exc:  # boundary normalization -- see docstring above
+        raise OSError("the response could not be read to completion") from exc
     if len(payload) > cap:
         raise ValueError("response exceeded the size cap")
     return json.loads(payload.decode("utf-8"))
@@ -305,12 +330,17 @@ class _CredentialUnavailable(RuntimeError):
 # bounded memos and the inflight cap
 # --------------------------------------------------------------------------- #
 _github_lock = threading.Lock()
-# name -> (monotonic_at, rows, unavailable). Failures are cached too, so a 403
-# loop costs one call per ARTIFACT_CACHE_SECONDS rather than one per request.
-_artifact_cache: dict[str, tuple] = {}
-# slug -> repository id, and run id -> workflow path. Both immutable upstream.
+# (slug, name) -> (monotonic_at, rows, unavailable). Failures are cached too,
+# so a 403 loop costs one call per ARTIFACT_CACHE_SECONDS rather than one per
+# request. Keyed by slug as well as name: this deployment's credential only
+# ever names one repository today, but a bare `name` key would let a future
+# second repository alias another repository's cached rows onto its own name.
+_artifact_cache: dict[tuple[str, str], tuple] = {}
+# slug -> repository id, and (slug, run id) -> workflow path. Both immutable
+# upstream; the run-path memo carries the slug for the same alias-proofing
+# reason the artifact cache does.
 _repo_id_memo: dict[str, int] = {}
-_run_path_memo: dict[int, str] = {}
+_run_path_memo: dict[tuple[str, int], str] = {}
 _inflight = threading.BoundedSemaphore(MAX_INFLIGHT_GITHUB)
 
 
@@ -361,10 +391,17 @@ def _run_workflow_path(run_id: int) -> Optional[str]:
 
     Never read from inside the artifact. One ``@ref`` suffix is stripped because
     some GitHub surfaces render workflow paths that way; the match after that is
-    exact, so a near-miss path is a refusal rather than a prefix hit.
+    exact, so a near-miss path is a refusal rather than a prefix hit. Memoized by
+    ``(slug, run_id)``, not ``run_id`` alone: a run id is only unique WITHIN one
+    repository, so a bare-int key would let a future second repository's run 42
+    return the first repository's cached path.
     """
+    creds = github_credentials()
+    if isinstance(creds, str):
+        return None
+    cache_key = (creds[0], run_id)
     with _github_lock:
-        cached = _run_path_memo.get(run_id)
+        cached = _run_path_memo.get(cache_key)
     if cached is not None:
         return cached
     try:
@@ -375,7 +412,7 @@ def _run_workflow_path(run_id: int) -> Optional[str]:
     if not isinstance(path, str) or not path:
         return None
     path = path.split("@", 1)[0]
-    _memo_put(_run_path_memo, run_id, path)
+    _memo_put(_run_path_memo, cache_key, path)
     return path
 
 
@@ -407,16 +444,19 @@ def _fetch_artifacts_named(
     """The artifacts named EXACTLY this that clear provenance. ``(pairs, unavailable)``.
 
     Each pair is ``(artifact, verified_workflow_path)``; nothing reaches a row
-    without one. Cached for ``ARTIFACT_CACHE_SECONDS`` per name, failures
-    included, and bounded by the inflight cap.
+    without one. Cached for ``ARTIFACT_CACHE_SECONDS`` per ``(slug, name)``,
+    failures included, and bounded by the inflight cap. Keyed by slug as well
+    as name so a future second repository's artifacts of the same name can
+    never be served from this one's cache entry.
     """
     creds = github_credentials()
     if isinstance(creds, str):
         return [], _unavailable("github-artifacts", creds, _credential_detail())
+    cache_key = (creds[0], name)
 
     now = time.monotonic()
     with _github_lock:
-        entry = _artifact_cache.get(name)
+        entry = _artifact_cache.get(cache_key)
         fresh = entry is not None and (now - entry[0]) < ARTIFACT_CACHE_SECONDS
     if fresh:
         # Copied out: a cached entry is shared across every concurrent reader,
@@ -434,7 +474,7 @@ def _fetch_artifacts_named(
         found, missing = _fetch_artifacts_verified(name, row_kind)
     finally:
         _inflight.release()
-    _memo_put(_artifact_cache, name, (time.monotonic(), tuple(found), missing))
+    _memo_put(_artifact_cache, cache_key, (time.monotonic(), tuple(found), missing))
     return found, missing
 
 
@@ -482,18 +522,44 @@ def _fetch_artifacts_verified(
     ]
     candidates.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
 
+    # The cap bounds WORK (network calls on a shared token), never correctness:
+    # it must never be applied by slicing `candidates` before verification, or
+    # newer artifacts from a workflow that cannot mint this receipt spend the
+    # whole budget and a genuinely older, valid receipt is never even examined
+    # -- collapsing a present receipt into a confident-looking empty answer
+    # (round-2 finding 3). So every candidate is walked; only a run id NOT
+    # already attempted this call spends a budget slot (a repeat is already
+    # free via `_run_workflow_path`'s own memo). If the cap is exhausted before
+    # every candidate has been walked, the answer says so -- `source_busy`,
+    # never a silent empty -- so a reader can tell "not fully checked" apart
+    # from "checked and absent".
     verified: list[tuple[dict, str]] = []
-    for item in candidates[:MAX_PROVENANCE_LOOKUPS]:
+    attempted_run_ids: set[int] = set()
+    incomplete = False
+    for item in candidates:
         run = item.get("workflow_run")
         run_id = run.get("id") if isinstance(run, Mapping) else None
         if not isinstance(run_id, int) or isinstance(run_id, bool) or run_id <= 0:
             continue
+        if run_id not in attempted_run_ids:
+            if len(attempted_run_ids) >= MAX_PROVENANCE_LOOKUPS:
+                incomplete = True
+                continue
+            attempted_run_ids.add(run_id)
         path = _run_workflow_path(run_id)
         if path is None or path not in allowed:
             # Minted by something that may not mint this receipt (or by a run
             # we cannot identify). Absent, never rendered unverified.
             continue
         verified.append((dict(item), path))
+
+    if incomplete:
+        return verified, _unavailable(
+            "github-artifacts", REASON_BUSY,
+            f"more runs uploaded an artifact named {name!r} than the per-name "
+            "provenance budget could check; the ones verified are shown, "
+            "never rendered as a confirmed absence",
+        )
     return verified, None
 
 
@@ -542,7 +608,12 @@ def _bytes_summary(size: Any) -> str:
 # the reconciler's latest.json, cached
 # --------------------------------------------------------------------------- #
 _reconciler_lock = threading.Lock()
-_reconciler_cache: dict[str, Any] = {"at": 0.0, "url": "", "value": None}
+# A failure is cached exactly like a success (`value` XOR `unavailable` set),
+# so a repeatedly-failing reconciler costs one outbound read per
+# RECONCILER_CACHE_SECONDS, never one per request.
+_reconciler_cache: dict[str, Any] = {
+    "at": 0.0, "url": "", "value": None, "unavailable": None,
+}
 
 
 def _fetch_reconciler() -> tuple[list[dict[str, str]], Optional[dict[str, str]]]:
@@ -552,7 +623,11 @@ def _fetch_reconciler() -> tuple[list[dict[str, str]], Optional[dict[str, str]]]
     repository would either 404 forever or, worse, render another project's
     receipts as this platform's. Unset -> an honest unavailable naming the
     variable, which is the correct state on a deployment that has not wired the
-    receipt inbox.
+    receipt inbox. The outbound read itself shares ``_inflight`` with the
+    GitHub calls (one shared cap over every outbound read this module makes)
+    and its failure is cached for ``RECONCILER_CACHE_SECONDS`` exactly like a
+    success, so an unreachable inbox costs one read per window, not one per
+    request.
     """
     url = os.environ.get(ENV_RECONCILER_URL, "").strip()
     if not url:
@@ -570,28 +645,46 @@ def _fetch_reconciler() -> tuple[list[dict[str, str]], Optional[dict[str, str]]]
     with _reconciler_lock:
         cached = _reconciler_cache
         fresh = (
-            cached["value"] is not None
-            and cached["url"] == url
+            cached["url"] == url
             and (now - float(cached["at"])) < RECONCILER_CACHE_SECONDS
+            and (cached["value"] is not None or cached["unavailable"] is not None)
         )
         value = cached["value"] if fresh else None
-    if value is None:
-        try:
-            value = _get_json(
-                url,
-                headers={
-                    "Accept": "application/json",
-                    "User-Agent": "leaf-platform-receipts",
-                },
-                cap=MAX_RECONCILER_BYTES,
-            )
-        except (OSError, urllib.error.HTTPError, ValueError):
+        unavailable = (dict(cached["unavailable"]) if fresh and cached["unavailable"]
+                       else None)
+
+    if value is None and unavailable is None:
+        if not _inflight.acquire(blocking=False):
+            # Over the cap. Not cached: a refusal here is never mistaken for
+            # an answer on the next call within the window.
             return [], _unavailable(
-                "reconciler", REASON_UNREACHABLE,
-                "the receipt inbox did not answer",
+                "reconciler", REASON_BUSY,
+                "too many receipt reads are already in flight; try again shortly",
             )
+        try:
+            try:
+                value = _get_json(
+                    url,
+                    headers={
+                        "Accept": "application/json",
+                        "User-Agent": "leaf-platform-receipts",
+                    },
+                    cap=MAX_RECONCILER_BYTES,
+                )
+            except (OSError, urllib.error.HTTPError, ValueError):
+                unavailable = _unavailable(
+                    "reconciler", REASON_UNREACHABLE,
+                    "the receipt inbox did not answer",
+                )
+        finally:
+            _inflight.release()
         with _reconciler_lock:
-            _reconciler_cache.update({"at": now, "url": url, "value": value})
+            _reconciler_cache.update({
+                "at": now, "url": url, "value": value, "unavailable": unavailable,
+            })
+
+    if unavailable is not None:
+        return [], unavailable
 
     if not isinstance(value, Mapping):
         return [], _unavailable(
@@ -622,7 +715,9 @@ def _fetch_reconciler() -> tuple[list[dict[str, str]], Optional[dict[str, str]]]
 def reset_reconciler_cache() -> None:
     """Drop the 60 s cache. For tests and for an operator-forced re-read."""
     with _reconciler_lock:
-        _reconciler_cache.update({"at": 0.0, "url": "", "value": None})
+        _reconciler_cache.update({
+            "at": 0.0, "url": "", "value": None, "unavailable": None,
+        })
 
 
 # --------------------------------------------------------------------------- #
