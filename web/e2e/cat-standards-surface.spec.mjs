@@ -102,7 +102,16 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
   await expect(page.getByRole('button', { name: 'Take edit lock' })).toBeVisible()
   mark('viewer and checkout')
 
-  await page.getByRole('button', { name: /^Project / }).click()
+  // HONEST TAG (94e96cdd, #888): a mounted drawing with no open workspace
+  // project is tagged "Drawing", never "Project" — that renamed a drawing as
+  // a project, which is the exact bug 94e96cdd fixed. The header chip reads
+  // /^Drawing / (Chromium's accessible name for this flex-gap chip joins the
+  // tag and label with a space); the F-8 continuity rail says the same state
+  // in words.
+  await expect(page.getByText('no workspace project')).toBeVisible()
+  // Scoped to the switcher root: an unscoped /^Drawing / also matches the
+  // file input's own implicit button role (aria-label "Drawing file").
+  await page.locator('.proj-switch').getByRole('button', { name: /^Drawing / }).click()
   await page.getByRole('menuitem', { name: /Cat Roof/ }).click()
   await expect(page.getByText('Cat Roof').first()).toBeVisible()
   await expect(page.getByText('1 drawing version')).toBeVisible()
@@ -187,7 +196,7 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
   mark('author published and run')
   await page.getByRole('tab', { name: 'Operator' }).click()
 
-  const command = page.getByLabel('Command bar')
+  const command = page.getByLabel('Command bar', { exact: true })
   await command.fill(REQUEST)
   await expect(command).toHaveValue(REQUEST)
   await page.getByRole('button', { name: 'Run', exact: true }).click()
@@ -221,7 +230,13 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
   await expect(page.getByText('Backend').locator('..')).toContainText('healthy')
   await expect(page.locator('.tc-trust-row').filter({ hasText: 'Claude account' })).toContainText('linked · oauth')
   await expect(page.getByText('Runs today').locator('..')).toContainText('1')
-  await expect(page.getByText('Spend remaining').locator('..')).toContainText('$10.00')
+  // The usage ledger (a3f4a6d6, #869) replaced the 'Spend remaining' row with
+  // Spend today / Spend total and a Cap row; the proof fixture serves
+  // cap { usd_cap: 10, remaining: 10, enabled: true }, so the honest contract
+  // is the cap's two figures, not a row that only exists in the no-usage fallback.
+  await expect(page.getByText('Spend today')).toBeVisible()
+  await expect(page.getByText('Cap $10.00')).toBeVisible()
+  await expect(page.getByText('$10.00 left')).toBeVisible()
   await expect(page.getByText('Entitlements')).toBeVisible()
   await page.getByRole('button', { name: /Claude accounts 1 mounted/ }).click()
   await page.getByRole('button', { name: 'Unlink', exact: true }).click()

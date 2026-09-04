@@ -21,7 +21,7 @@ test('Escape dismisses a proposal before a second Escape leaves the unified scen
   await expect(page).toHaveURL(/\/try$/)
   await expect(page.getByRole('button', { name: 'Run count-panels' })).toHaveCount(0)
   await expect(page.locator('.route')).toHaveCount(0)
-  const command = page.getByLabel('Command bar')
+  const command = page.getByLabel('Command bar', { exact: true })
   await expect(command).toBeFocused()
 
   await command.evaluate((element) => element.blur())

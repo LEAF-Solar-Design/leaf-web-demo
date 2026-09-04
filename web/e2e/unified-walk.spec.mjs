@@ -27,7 +27,7 @@ test('guided walk drives the real cat flow through the unified operator scene', 
   await expect(tour).toContainText('The resident drawing')
   await tour.getByRole('button', { name: 'Next' }).click()
   await expect(tour).toContainText('Ask Claude for the cat edit')
-  await expect(page.getByLabel('Command bar')).toHaveValue(REQUEST, { timeout: 10_000 })
+  await expect(page.getByLabel('Command bar', { exact: true })).toHaveValue(REQUEST, { timeout: 10_000 })
   const approval = page.getByTestId('operator-surface').getByRole('button', { name: 'Approve' })
   await expect(approval).toBeVisible({ timeout: 15_000 })
   expect(calls.indexOf('POST /api/nl-prompt')).toBeLessThan(calls.indexOf('POST /api/sessions/cat-session/messages'))

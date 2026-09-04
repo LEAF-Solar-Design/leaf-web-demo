@@ -35,7 +35,7 @@ test('the unified drawing controller survives a site recast without reloading ve
   const checkoutBefore = await surface.getAttribute('data-checkout-instance')
   expect(checkoutBefore).toBeTruthy()
   expect(await page.locator('[data-checkout-instance]').count()).toBe(1)
-  await expect(page.getByLabel('Command bar')).toHaveValue(REQUEST)
+  await expect(page.getByLabel('Command bar', { exact: true })).toHaveValue(REQUEST)
   await page.getByRole('button', { name: 'Run', exact: true }).click()
   await expect(surface.getByRole('button', { name: 'Approve' })).toBeVisible({ timeout: 15_000 })
   await surface.getByRole('button', { name: 'Approve' }).click()

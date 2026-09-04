@@ -79,7 +79,7 @@ test('live surface stays empty until upload and binds every controller to the up
   await expect(page.getByTestId('operator-phase')).toHaveText(/No drawing yet/)
   await expect(page.getByTestId('version-head')).toHaveText('No version')
   await expect(page.locator('.tc-bar-proj')).toHaveText('No drawing')
-  await expect(page.getByLabel('Command bar')).toHaveValue('')
+  await expect(page.getByLabel('Command bar', { exact: true })).toHaveValue('')
   await expect(page.getByText('Live services')).toBeVisible()
   await expect(page.getByText('Requests are not preloaded or simulated.')).toBeVisible()
   await expect(page.getByText('Deterministic browser proof.')).toHaveCount(0)
@@ -106,7 +106,7 @@ test('live surface stays empty until upload and binds every controller to the up
 
   await page.getByRole('button', { name: 'Take edit lock' }).click()
   await expect.poll(() => calls.some((call) => call.method === 'POST' && call.path === '/api/drawings/uploaded-cat/checkout')).toBe(true)
-  await page.getByLabel('Command bar').fill('Inspect this uploaded drawing.')
+  await page.getByLabel('Command bar', { exact: true }).fill('Inspect this uploaded drawing.')
   await page.getByRole('button', { name: 'Run', exact: true }).click()
   await expect.poll(() => conversationBodies.length).toBe(1)
   expect(conversationBodies[0]).toMatchObject({ drawing_id: 'uploaded-cat' })
@@ -185,7 +185,7 @@ test('a replacement upload starts a conversation scoped to the replacement drawi
     await expect(page.locator('.tc-bar-proj')).toHaveText(drawingId)
   }
   const send = async (text) => {
-    await page.getByLabel('Command bar').fill(text)
+    await page.getByLabel('Command bar', { exact: true }).fill(text)
     await page.getByRole('button', { name: 'Run', exact: true }).click()
   }
 

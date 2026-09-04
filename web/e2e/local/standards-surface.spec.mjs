@@ -44,7 +44,7 @@ test('real local operator flow preserves unified accessibility, keyboard, respon
   await expect(catalogTab).toBeFocused()
   await expect(catalogTab).toHaveAttribute('aria-selected', 'true')
   await page.keyboard.press('Control+K')
-  const command = page.getByLabel('Command bar')
+  const command = page.getByLabel('Command bar', { exact: true })
   await expect(command).toBeFocused()
 
   for (const locator of [

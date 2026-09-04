@@ -125,7 +125,7 @@ export async function installNegativeApi(page, { approval = null, run = null } =
 
 export async function openApp(page) {
   await page.goto('/app')
-  await page.getByLabel('Command bar').waitFor()
+  await page.getByLabel('Command bar', { exact: true }).waitFor()
 }
 
 /**
@@ -154,7 +154,7 @@ export async function openTry(page) {
 
 export async function proposeCat(page) {
   const request = 'Rearrange the existing panels in this drawing into the shape of a sitting cat.'
-  await page.getByLabel('Command bar').fill(request)
+  await page.getByLabel('Command bar', { exact: true }).fill(request)
   await page.getByRole('button', { name: 'Run', exact: true }).click()
   const card = page.locator('.converse-confirm').filter({ hasText: 'arrange-panels-as-cat' })
   await card.waitFor()
@@ -162,7 +162,7 @@ export async function proposeCat(page) {
 }
 
 export async function submitReadRun(page) {
-  await page.getByLabel('Command bar').fill('/count-by-layer')
+  await page.getByLabel('Command bar', { exact: true }).fill('/count-by-layer')
   await page.getByRole('button', { name: 'Run', exact: true }).click()
   await page.getByRole('button', { name: 'Run count-by-layer' }).click()
 }

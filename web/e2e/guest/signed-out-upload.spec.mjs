@@ -40,7 +40,13 @@ test('a signed-out guest can upload and inspect but cannot dispatch a run', asyn
   await expect(page.locator('.drawing-upload-ready')).toHaveText('Drawing ready', { timeout: 20_000 })
   await expect(page.getByText('Panels preserved').locator('..')).toContainText('1')
   await expect(page.getByTestId('guest-view-only')).toContainText('Guest uploads are view-only.')
-  await expect(page.getByRole('button', { name: new RegExp(`Project ${receipt.drawing_id}`) })).toBeVisible()
+  // Guest contract: signed out, no platform session, so transportMock is true
+  // and ProjectSwitcher.jsx's `mock` branch renders the static, buttonless
+  // chip (proj-chip static) -- tagged "Drawing", never "Project" over a
+  // drawing that was never one (the HONEST TAG fix, 94e96cdd / #888).
+  await expect(page.locator('.proj-chip.static .tag')).toHaveText('Drawing')
+  await expect(page.locator('.proj-chip.static .name')).toHaveText(receipt.drawing_id)
+  await expect(page.locator('button.proj-chip')).toHaveCount(0)  // the chip itself is the button when interactive; signed out it is a static span
   await expect(page.locator('.tc-bar-proj')).toHaveText(receipt.drawing_id)
   await expect(runButton).toBeDisabled()
   expect(observed.some((entry) => entry.startsWith('POST /api/run '))).toBe(false)

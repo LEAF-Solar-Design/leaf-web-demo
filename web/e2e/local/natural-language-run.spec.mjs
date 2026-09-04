@@ -39,7 +39,7 @@ test('natural language routes through real catalog review, dispatch, and result'
 
   await page.goto('/try?proof=1')
   await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
-  const command = page.getByLabel('Command bar')
+  const command = page.getByLabel('Command bar', { exact: true })
   await command.fill(REQUEST)
   const routeResponse = page.waitForResponse((response) => {
     const url = new URL(response.url())

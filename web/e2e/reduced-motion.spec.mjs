@@ -47,7 +47,7 @@ test('reduced motion completes the operator flow without hiding filled panes', a
   expect(reducedCaptionMotion.transitionDelay).toBe('0s')
 
   await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready')
-  await page.getByLabel('Command bar').fill(REQUEST)
+  await page.getByLabel('Command bar', { exact: true }).fill(REQUEST)
   await page.getByRole('button', { name: 'Run', exact: true }).click()
   await page.getByRole('button', { name: 'Approve' }).click()
   await expect(page.getByTestId('operator-phase')).toContainText('Cat version ready', { timeout: 15_000 })

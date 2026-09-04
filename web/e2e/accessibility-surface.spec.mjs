@@ -36,7 +36,7 @@ test('the unified scene exposes landmarks, named controls, status, and visible k
   for (const locator of [
     page.getByRole('tab', { name: 'Operator' }),
     page.getByRole('tab', { name: 'Execution' }),
-    page.getByLabel('Command bar'),
+    page.getByLabel('Command bar', { exact: true }),
     page.getByRole('button', { name: 'Run', exact: true }),
     page.locator('#workspace-tabpanel'),
   ]) {

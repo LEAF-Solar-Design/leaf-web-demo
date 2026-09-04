@@ -41,7 +41,7 @@ test('operator request produces an approved cat version and undo restores its pa
   await expect(page.locator('.viewer-title')).toContainText('cat.dwg', { timeout: 15_000 })
   await expect(page.locator('body')).not.toHaveText('Internal Server Error')
   await expect(page.locator('.vite-error-overlay')).toHaveCount(0)
-  await page.getByLabel('Command bar').fill(REQUEST)
+  await page.getByLabel('Command bar', { exact: true }).fill(REQUEST)
   await page.getByRole('button', { name: 'Run' }).click()
 
   const approval = page.locator('.converse-confirm').filter({ hasText: 'arrange-panels-as-cat' })
