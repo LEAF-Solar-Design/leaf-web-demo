@@ -54,6 +54,7 @@ import useCatalogController from '../controllers/catalog/useCatalogController.js
 import { setCredentialMountAvailable } from '../lib/secretGuardTransport.js'
 import { resolvePublishedCatalogTool } from './publishedCatalogTool.js'
 import { track, setTourStep } from '../telemetry.js'
+import useBuildQueue from '../controllers/useBuildQueue.js'
 import useJobController from '../controllers/useJobController.js'
 import useAuthorStageController from '../controllers/useAuthorStageController.js'
 import usePlatformTrustController from '../controllers/platform/usePlatformTrustController.js'
@@ -622,6 +623,13 @@ export default function ToolCast({
     formatError: () => 'The panel run did not produce a readable result.',
   })
   resetJobRef.current = resetJob
+
+  // Slice 11a: the same builds poll App.jsx runs (GET /api/builds, mock mode
+  // makes no request), wired here so the stage's job rail stops being an
+  // undeclared divergence from the console's (productSurfaces.js `builds.card`
+  // says 'job-rail' on every surface this contract declares; the stage was
+  // silently mounting the rail with no `builds` prop at all).
+  const buildQueue = useBuildQueue({ mock: transportMock })
 
   // Turn-authority provider for the author panel's stage POST: the server
   // fail-closes (409 stage_authority_invalid) without X-Authority-Session-Id/
@@ -1667,6 +1675,7 @@ export default function ToolCast({
         inflight,
         reattaching,
         onSelectJob: inspectHistoricalJob,
+        builds: buildQueue.builds,
       } : null}
       toast={{ toast, onDone: (id) => setToast((current) => current?.id === id ? null : current) }}
       signedIn={isSignedIn()}

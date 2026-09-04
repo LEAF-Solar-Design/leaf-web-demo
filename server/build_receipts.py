@@ -35,6 +35,8 @@ from typing import Any, Dict, Optional
 
 SCHEMA = "leaf.build-receipt.v1"
 MAX_RECEIPT_BYTES = 16 * 1024
+MAX_WRITE_FIELD_CHARS = 2000
+MAX_SCAN_DIR_ENTRIES = 5000
 _ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 _ID_DOT_ONLY = re.compile(r"^\.+$")
 
@@ -162,6 +164,28 @@ def read_terminal_receipt(job_id: Any, *, base: Optional[Path] = None) -> Option
     if not isinstance(digest, str) or digest != _digest(body):
         return None
     return body
+
+
+def list_receipt_job_ids(*, base: Optional[Path] = None) -> "set[str]":
+    """The job ids that have a ``receipts/<job_id>/`` subdirectory: ONE
+    bounded ``scandir`` pass (MAX_SCAN_DIR_ENTRIES), so a caller checking many
+    job ids (GET /api/builds, up to 200 terminal jobs per request) can skip
+    the open+parse+digest cost of ``read_terminal_receipt`` for every job that
+    has no receipt at all, which is the common case (old jobs, or a job whose
+    receipt write failed). Best effort: an unreadable or missing directory
+    reads as no ids, never raises."""
+    root = base if base is not None else receipts_dir()
+    out: "set[str]" = set()
+    try:
+        with os.scandir(root) as it:
+            for i, entry in enumerate(it):
+                if i >= MAX_SCAN_DIR_ENTRIES:
+                    break
+                if entry.is_dir(follow_symlinks=False):
+                    out.add(entry.name)
+    except OSError:
+        return set()
+    return out
 
 
 def terminal_receipt_entry(job_id: Any, *, base: Optional[Path] = None) -> Optional[Dict[str, Any]]:

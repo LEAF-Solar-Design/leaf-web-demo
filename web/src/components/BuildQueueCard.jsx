@@ -19,7 +19,11 @@ import { fmtWhen } from '../lib/railTime.js'
  *  spelled on the record's coarse state and tint. */
 export function dotClassFor(record) {
   switch (record.state) {
-    case 'running': return 'dot live pulse'
+    // A fleet task collapsed to the coarse 'running' state so it stays open
+    // work (waiting_human / blocked / stalled), but it is not LIVE work: the
+    // amber tint already says so, so it gets the same advisory square 'done'
+    // and 'failed' use for a warn tint, never the live pulse.
+    case 'running': return record.status.tint === 'warn' ? 'dot square' : 'dot live pulse'
     case 'queued': return 'dot hollow'
     case 'verifying': return 'dot live'
     case 'failed': return record.status.tint === 'warn' ? 'dot square' : 'dot red'
@@ -67,9 +71,18 @@ export default function BuildQueueCard({ record, current = false, onSelect, acti
     ? record.actions.filter((verb) => typeof actions[verb] === 'function')
     : []
   // A broker row already carries its cost in the detail (JobRail's "$0.0123"
-  // after "complete"); the other lanes report spend on the meta line.
+  // after "complete"); the other lanes report spend on the meta line. Fold's
+  // figure is a MEASURED spend (spent_usd); fleet's is an opaque pass-through
+  // that may be either, so only fold gets the "spent" word — the two must
+  // not read identically when one is a fact and the other is not.
   const cost = record.lane !== 'broker' && record.cost_usd != null ? formatCostUsd(record.cost_usd) : null
-  const hasMeta = !!record.requested_by || record.receipts.length > 0 || !!record.estimate_ms || !!cost
+  const costText = cost && record.lane === 'fold' ? `spent ${cost}` : cost
+  // The fold mapper adds one synthesized receipt (kind 'verification', ref
+  // `${id}#verified_at`) so the wire's verified-needs-a-receipt rule holds;
+  // it is a fact about this record, not an external artifact, so it is
+  // counted separately from the "N receipts" a person can actually open.
+  const visibleReceipts = record.receipts.filter((r) => r.ref !== `${record.id}#verified_at`)
+  const hasMeta = !!record.requested_by || visibleReceipts.length > 0 || !!record.estimate_ms || !!cost
   const rowClass = ['rail-row', 'build-queue-card', current ? 'current' : ''].filter(Boolean).join(' ')
 
   const inner = (
@@ -82,7 +95,12 @@ export default function BuildQueueCard({ record, current = false, onSelect, acti
       </span>
       {tail && <span className="rail-when" title={when ? when.abs : undefined}>{tail}</span>}
       {terminal && (
-        <span className="bq-stages" aria-label="Terminal stages">
+        // No aria-label here: an element's aria-label REPLACES its subtree in
+        // the accessible-name computation, so a labelled wrapper around the
+        // two role="img" Stage marks would erase both their labels from the
+        // enclosing button's name (an a11y regression on the exact rows that
+        // carry the verified/promoted marks). The marks stand on their own.
+        <span className="bq-stages">
           <Stage
             on={record.terminal.verified}
             name="verified"
@@ -125,10 +143,10 @@ export default function BuildQueueCard({ record, current = false, onSelect, acti
             </span>
           )}
           {record.estimate_ms != null && <span className="bq-estimate">est. {elapsedText(record.estimate_ms)}</span>}
-          {cost && <span className="rail-cost">{cost}</span>}
-          {record.receipts.length > 0 && (
-            <span className="bq-receipts" title={record.receipts.map((r) => `${r.kind}: ${r.ref}`).join('\n')}>
-              {record.receipts.length === 1 ? '1 receipt' : `${record.receipts.length} receipts`}
+          {costText && <span className="rail-cost">{costText}</span>}
+          {visibleReceipts.length > 0 && (
+            <span className="bq-receipts" title={visibleReceipts.map((r) => `${r.kind}: ${r.ref}`).join('\n')}>
+              {visibleReceipts.length === 1 ? '1 receipt' : `${visibleReceipts.length} receipts`}
             </span>
           )}
         </div>

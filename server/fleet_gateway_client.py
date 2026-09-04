@@ -19,16 +19,23 @@ which is the collector's ``task_state`` row joined to ``tasks`` (the shape
 slice 11c teaches the collector to serve). Rows are handed to
 ``build_queue.from_fleet_task`` untouched; this module only bounds them.
 
-HARDENING CONTRACT. One request, one bounded timeout (FLEET_TIMEOUT_S), one
-bounded body (MAX_BODY_BYTES), a closed set of accepted shapes. Every failure
-(unset URL, DNS, refused, timeout, non-200, oversized, non-JSON, wrong shape)
-raises FleetGatewayUnavailable with a SHORT reason the route turns into one
-warning string; the reason never carries the token or the response body.
+HARDENING CONTRACT. One request, one bounded TOTAL deadline (FLEET_TIMEOUT_S,
+wall clock across connect AND read, not just each socket operation: the
+socket timeout alone bounds a single recv(), so a gateway trickling a few
+bytes per read could otherwise hold the calling thread far past the nominal
+timeout), one bounded body (MAX_BODY_BYTES, read in chunks against that same
+deadline), a closed set of accepted shapes. Every failure (unset URL, DNS,
+refused, timeout, non-200, oversized, non-JSON, wrong shape, a malformed HTTP
+response) raises FleetGatewayUnavailable with a SHORT reason the route turns
+into one warning string; the reason never carries the token or the response
+body.
 """
 from __future__ import annotations
 
+import http.client
 import json
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -39,6 +46,7 @@ TOKEN_ENV = "LEAF_FLEET_GATEWAY_TOKEN"
 FLEET_TIMEOUT_S = 3.0
 MAX_BODY_BYTES = 256 * 1024
 MAX_ROWS = 200
+_READ_CHUNK_BYTES = 64 * 1024
 
 
 class FleetGatewayUnavailable(Exception):
@@ -77,17 +85,27 @@ def list_tasks(tenant_id: str, limit: int, *,
     if token:
         request.add_header("Authorization", f"Bearer {token}")
     open_fn = opener or urllib.request.urlopen
+    # A TOTAL deadline, not just the per-socket-operation timeout urlopen sets:
+    # a gateway that trickles the response could otherwise keep each recv()
+    # inside FLEET_TIMEOUT_S while the call as a whole runs unbounded.
+    deadline = time.monotonic() + FLEET_TIMEOUT_S
     try:
         with open_fn(request, timeout=FLEET_TIMEOUT_S) as response:
             status = getattr(response, "status", 200)
             if status != 200:
                 raise FleetGatewayUnavailable(f"gateway answered {int(status)}")
-            raw = response.read(MAX_BODY_BYTES + 1)
+            raw = _read_bounded(response, MAX_BODY_BYTES + 1, deadline)
     except FleetGatewayUnavailable:
         raise
     except urllib.error.HTTPError as exc:
         raise FleetGatewayUnavailable(f"gateway answered {int(exc.code)}") from None
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError, http.client.HTTPException) as exc:
+        # http.client.HTTPException (IncompleteRead / BadStatusLine /
+        # LineTooLong, raised inside response.read()/getresponse()) is NOT an
+        # OSError, so it must be listed explicitly: without it, a truncated
+        # or malformed HTTP response escapes this function uncaught and 500s
+        # the whole /api/builds endpoint, discarding the broker and fold
+        # records already computed alongside it.
         raise FleetGatewayUnavailable(f"gateway unreachable ({type(exc).__name__})") from None
     if len(raw) > MAX_BODY_BYTES:
         raise FleetGatewayUnavailable("gateway body over bound")

@@ -12,18 +12,24 @@
 //                  durable state file: rounds, spent_usd, mission_complete,
 //                  unverified_complete, escalated, per-milestone verified_at.
 //   lane 'fleet'   a task the fleet collector tracks: task_state.state plus
-//                  tasks.owner, which is the HONEST requested_by fallback until
-//                  the gateway stamps a requester (slice 11b).
+//                  the gateway's own `requested_by` stamp when it sends one
+//                  (slice 11b); `null` until then. `tasks.owner` names who is
+//                  EXECUTING the task, never who asked for it, so it is never
+//                  substituted in.
 //
 // TWO-STAGE TERMINAL, never inferred. `terminal.verified` is true only when
-// the lane's OWN terminal artifact exists (a complete job, a multi-round run's
-// milestone verified_at under a real oracle, a gate-proof or verification
-// receipt on a fleet task). `terminal.promoted` is true only when a PROMOTION
-// artifact exists (the prewarm cutover receipt `leaf.staging-prewarm-relay.v1`,
-// an App Store Connect result carrying a build id, a janitor promotion stage),
-// carried as a receipt of kind 'promotion'. A state of 'done' never implies
-// either flag, and neither flag is ever derived from elapsed time, from a
-// status word, or from the other flag.
+// the lane's OWN terminal artifact exists: a broker job's own terminal
+// receipt (kind 'terminal', written beside the completed job), a multi-round
+// run's milestone verified_at under a real oracle, or a gate-proof/
+// verification receipt on a fleet task. A bare 'done'/'complete' status word
+// is NOT evidence on its own, on any lane: the wire validator enforces this
+// (a record cannot claim verified:true without one of those receipt kinds
+// present, the same way it already refuses promoted:true with no promotion
+// receipt). `terminal.promoted` is true only when a PROMOTION artifact exists
+// (the prewarm cutover receipt `leaf.staging-prewarm-relay.v1`, an App Store
+// Connect result carrying a build id, a janitor promotion stage), carried as
+// a receipt of kind 'promotion'. Neither flag is ever derived from elapsed
+// time, from a status word, or from the other flag.
 //
 // PURE: no React, no fetch, no clock, no locale. Time-relative text ("5 m",
 // a clock) is the card's job, because it depends on Date.now().
@@ -239,6 +245,10 @@ function withPromotion(receipts, input) {
 
 const hasPromotion = (receipts) => receipts.some((r) => r.kind === 'promotion')
 const hasVerification = (receipts) => receipts.some((r) => r.kind === 'verification' || r.kind === 'gate-proof')
+/** Any receipt kind that counts as terminal evidence: a broker job's own
+ *  terminal receipt, or a verification/gate-proof receipt on any lane. The
+ *  wire validator requires one of these before it accepts `verified: true`. */
+const hasTerminalEvidence = (receipts) => receipts.some((r) => r.kind === 'terminal' || r.kind === 'verification' || r.kind === 'gate-proof')
 
 // --- the record ------------------------------------------------------------
 
@@ -302,9 +312,13 @@ export function parseBuildRecord(input) {
   if (!isPlainObject(input.terminal)) return fail('terminal: not an object')
   if (typeof input.terminal.verified !== 'boolean') return fail('terminal.verified: not a boolean')
   if (typeof input.terminal.promoted !== 'boolean') return fail('terminal.promoted: not a boolean')
-  // The one cross-field rule the wire may not violate: a promotion is a
-  // receipt, so `promoted` without a promotion receipt is an inference.
+  // The cross-field rules the wire may not violate: a promotion is a
+  // receipt, so `promoted` without a promotion receipt is an inference; a
+  // verified build is verified BY a terminal, verification or gate-proof
+  // receipt, so `verified` without one of those is a status word wearing a
+  // verdict.
   if (input.terminal.promoted && !hasPromotion(receipts)) return fail('terminal.promoted: true without a promotion receipt')
+  if (input.terminal.verified && !hasTerminalEvidence(receipts)) return fail('terminal.verified: true without a terminal, verification or gate-proof receipt')
   if (!Array.isArray(input.actions)) return fail('actions: not an array')
   if (input.actions.length > BUILD_ACTIONS.length) return fail('actions: more than the declared verbs')
   const actions = []
@@ -413,8 +427,12 @@ export function fromBrokerJob(job, { sessionId = 'this-session' } = {}) {
     estimate_ms: null,
     cost_usd: cost,
     receipts,
-    // A complete job IS the broker's terminal artifact. A failed job has none.
-    terminal: { verified: state === 'done', promoted: hasPromotion(receipts) },
+    // A complete job is verified ONLY when its own terminal receipt (or a
+    // verification/gate-proof receipt) is present. `state === 'done'` alone
+    // is the status word the route already knows can outrun the receipt (a
+    // missing, oversized or digest-mismatched file reads as absent), so it
+    // is never enough on its own — including for a degraded_mode completion.
+    terminal: { verified: state === 'done' && hasTerminalEvidence(receipts), promoted: hasPromotion(receipts) },
     actions,
     status: { word: tag.label, tint: tag.tint, detail: clip(typeof detail === 'string' ? detail : null) },
   })
@@ -543,8 +561,9 @@ const FLEET_STATES = Object.freeze({
  *   { task_id, title, owner, state, state_since, last_evidence_at, detail,
  *     terminal_state, created_at, requested_by?, receipts?, estimate_ms?,
  *     cost_usd?, prewarm_relay? | app_store_connect_result? | promotion_stage? }
- * `requested_by` is the gateway's stamp when present (slice 11b); until then
- * `owner` is the honest fallback and is labelled as such by the caller.
+ * `requested_by` is the gateway's own stamp when present (slice 11b); until
+ * then it is `null`. `owner` names who is EXECUTING the task, not who asked
+ * for it, so it is never substituted in as a requester.
  * A complete task is verified ONLY by a verification or gate-proof receipt:
  * the collector's 'complete' is transcript evidence, not a verdict.
  */
@@ -563,8 +582,7 @@ export function fromFleetTask(row) {
   else actions = verified && !promoted ? ['promote'] : []
   const started = toEpochMs(row.created_at)
   const last = toEpochMs(row.last_evidence_at)
-  const requestedBy = clip(typeof row.requested_by === 'string' ? row.requested_by
-    : typeof row.owner === 'string' ? row.owner : null)
+  const requestedBy = clip(typeof row.requested_by === 'string' ? row.requested_by : null)
   return freezeRecord({
     id,
     lane: 'fleet',
@@ -599,4 +617,18 @@ export function runningBuildCount(records) {
 /** Whether a record is terminal (the row becomes a button in the rail). */
 export function isTerminalBuild(record) {
   return !!record && (record.state === 'done' || record.state === 'failed')
+}
+
+/**
+ * Whether an in-flight current-session job should add one to a running
+ * count: it must be open work AND not already counted among `jobs` by its
+ * own job_id. The ONE definition of this rule (JobRail's spine count and the
+ * toolbar badge both call it) so the two can never again show two different
+ * numbers for the same open work.
+ */
+export function currentJobCountsAsRunning(currentJob, jobs) {
+  if (!currentJob || (currentJob.status !== 'running' && currentJob.status !== 'submitted')) return false
+  if (!currentJob.job_id) return true
+  const list = Array.isArray(jobs) ? jobs : []
+  return !list.some((j) => j.job_id === currentJob.job_id)
 }

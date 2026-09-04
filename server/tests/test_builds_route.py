@@ -253,7 +253,9 @@ def test_fold_lane_reads_only_the_tenants_runs_and_skips_malformed_state(client,
     assert running["state"] == "running" and running["status"]["word"] == "round 2"
     assert running["actions"] == ["cancel"]
     assert body["sources"]["fold"] == "runs-dir"
-    assert any("run-broken skipped" in w for w in body["warnings"])
+    # Counted, not named per-run (marathon_runs.list_runs): one aggregate
+    # warning, not one string per malformed directory.
+    assert "fold: 1 run(s) skipped (state.json missing, oversized or malformed)" in body["warnings"]
     assert "run-theirs" not in json.dumps(body)
     for record in body["builds"]:
         build_queue.validate_record(record)

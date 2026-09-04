@@ -10,9 +10,13 @@ the same cases through the JS, so a rule changed on one side and not the other
 fails a test on the side that did not move.
 
 TWO-STAGE TERMINAL, never inferred. ``terminal.verified`` is true only when the
-lane's OWN terminal artifact exists (a complete job, a marathon milestone's
-``verified_at`` under a real oracle, a verification or gate-proof receipt on a
-fleet task). ``terminal.promoted`` is true only when a PROMOTION artifact exists
+lane's OWN terminal artifact exists: a broker job's own terminal receipt (kind
+``terminal``, written beside the completed job), a marathon milestone's
+``verified_at`` under a real oracle, or a verification/gate-proof receipt on a
+fleet task. A bare ``done``/``complete`` status word is NOT evidence on any
+lane: ``validate_record`` refuses ``verified: true`` with no qualifying
+receipt, the same way it already refuses ``promoted: true`` with none.
+``terminal.promoted`` is true only when a PROMOTION artifact exists
 (the prewarm cutover receipt ``leaf.staging-prewarm-relay.v1`` with something
 dispatched, an App Store Connect result carrying a build id, a janitor
 promotion stage), carried as a receipt of kind ``promotion``.
@@ -254,6 +258,12 @@ def _has_verification(receipts: List[Dict[str, Any]]) -> bool:
     return any(r["kind"] in ("verification", "gate-proof") for r in receipts)
 
 
+def _has_terminal_evidence(receipts: List[Dict[str, Any]]) -> bool:
+    """Any receipt kind that counts as terminal evidence: a broker job's own
+    terminal receipt, or a verification/gate-proof receipt on any lane."""
+    return any(r["kind"] in ("terminal", "verification", "gate-proof") for r in receipts)
+
+
 # --------------------------------------------------------------------------- #
 # the record
 # --------------------------------------------------------------------------- #
@@ -342,6 +352,8 @@ def validate_record(value: Any) -> Dict[str, Any]:
         raise fail("terminal.promoted: not a boolean")
     if terminal["promoted"] and not _has_promotion(receipts):
         raise fail("terminal.promoted: true without a promotion receipt")
+    if terminal["verified"] and not _has_terminal_evidence(receipts):
+        raise fail("terminal.verified: true without a terminal, verification or gate-proof receipt")
     raw_actions = value.get("actions")
     if not isinstance(raw_actions, list):
         raise fail("actions: not an array")
@@ -423,13 +435,19 @@ def from_broker_job(job: Any, session_id: str = "this-session") -> Optional[Dict
     else:
         actions = []
     requested_by = job.get("requested_by")
+    # A complete job is verified ONLY when its own terminal receipt (or a
+    # verification/gate-proof receipt) is present. `state == "done"` alone is
+    # the status word the route already knows can outrun the receipt (a
+    # missing, oversized or digest-mismatched file reads as absent), so it is
+    # never enough on its own — including for a degraded_mode completion.
+    verified = state == "done" and _has_terminal_evidence(receipts)
     return _record(
         id=rec_id, lane="broker", state=state, title=title,
         requested_by=_clip(requested_by if isinstance(requested_by, str) else None),
         started=to_epoch_ms(job.get("created_at")),
         elapsed_ms=_non_negative_int(job.get("elapsed_ms")),
         estimate_ms=None, cost_usd=cost, receipts=receipts,
-        verified=state == "done", promoted=_has_promotion(receipts),
+        verified=verified, promoted=_has_promotion(receipts),
         actions=actions, word=tag["label"], tint=tag["tint"],
         detail=_clip(detail if isinstance(detail, str) else None),
     )
@@ -556,10 +574,11 @@ def from_fleet_task(row: Any) -> Optional[Dict[str, Any]]:
     started = to_epoch_ms(row.get("created_at"))
     last = to_epoch_ms(row.get("last_evidence_at"))
     elapsed = last - started if started is not None and last is not None and last >= started else None
+    # The gateway's own stamp only (slice 11b), or null: `owner` names who is
+    # EXECUTING the task, never who asked for it.
     requested_by = row.get("requested_by")
     if not isinstance(requested_by, str):
-        owner = row.get("owner")
-        requested_by = owner if isinstance(owner, str) else None
+        requested_by = None
     title = row.get("title")
     estimate = _non_negative_int(row.get("estimate_ms"))
     detail = row.get("detail")

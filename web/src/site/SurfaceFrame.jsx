@@ -38,7 +38,7 @@ import JobRailComponent from '../components/JobRail.jsx'
 import ProductSurfaceTabs, { ProductSurfaceFrame } from '../components/ProductSurfaceTabs.jsx'
 import ToastComponent from '../components/Toast.jsx'
 
-import { runningBuildCount } from '../lib/buildQueue.js'
+import { currentJobCountsAsRunning, runningBuildCount } from '../lib/buildQueue.js'
 
 import { StatusToggles } from './DrawingCockpit.jsx'
 import { useContinuityPublish } from './continuityStore.js'
@@ -344,11 +344,8 @@ function Builds() {
   if (!frame || !frame.jobRail || !frame.contract.builds || !frame.contract.builds.card) return null
   const rail = frame.jobRail
   const jobs = Array.isArray(rail.jobs) ? rail.jobs : []
-  const knownIds = new Set(jobs.map((j) => j.job_id))
   let count = jobs.filter((j) => j.status === 'running' || j.status === 'submitted').length
-  const current = rail.currentJob
-  if (current && (current.status === 'running' || current.status === 'submitted')
-    && (!current.job_id || !knownIds.has(current.job_id))) count += 1
+  if (currentJobCountsAsRunning(rail.currentJob, jobs)) count += 1
   count += runningBuildCount(Array.isArray(rail.builds) ? rail.builds.filter((r) => r.lane !== 'broker') : [])
   if (count === 0) return null
   const label = count === 1 ? '1 running' : `${count} running`

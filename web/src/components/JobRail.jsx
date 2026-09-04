@@ -20,7 +20,7 @@ import { useEffect, useState } from 'react'
 import './rails.css'
 
 import BuildQueueCard from './BuildQueueCard.jsx'
-import { fromBrokerJob, runningBuildCount } from '../lib/buildQueue.js'
+import { currentJobCountsAsRunning, fromBrokerJob, runningBuildCount } from '../lib/buildQueue.js'
 import { dayLabel, fmtWhen } from '../lib/railTime.js'
 
 // TM1 time helpers moved to lib/railTime.js (slice 11a); re-exported so
@@ -67,8 +67,13 @@ export default function JobRail({ mock, jobs, currentJob, inflight, reattaching,
   const knownIds = new Set(list.map((j) => j.job_id))
   const showCurrent = currentJob && (!currentJob.job_id || !knownIds.has(currentJob.job_id))
   const extra = extraBuilds(builds)
+  // The same number the toolbar badge shows (SurfaceFrame.jsx's Builds()):
+  // open jobs, open records from the other lanes, plus the current-session
+  // job when it is not already one of `jobs` — one shared definition
+  // (currentJobCountsAsRunning) so the badge and this spine cannot drift.
   const liveCount = list.filter((j) => j.status === 'running' || j.status === 'submitted').length
     + runningBuildCount(extra)
+    + (currentJobCountsAsRunning(currentJob, list) ? 1 : 0)
   // SL1: the row whose envelope the center pane is showing carries `current`.
   const selectedId = currentJob && currentJob.job_id
 
@@ -103,7 +108,16 @@ export default function JobRail({ mock, jobs, currentJob, inflight, reattaching,
   }
   if (extra.length > 0) {
     rows.push(<div key="builds-group" className="rail-day rail-builds-group">Autonomous runs and fleet tasks</div>)
+    // Day-grouped exactly like the jobs ledger above (TM1): a clock-only
+    // tail is only honest inside a day boundary, so a week-old run must get
+    // one too, not just the live jobs list.
+    let lastExtraDay = null
     for (const record of extra) {
+      const w = fmtWhen(record.started)
+      if (w && w.day !== lastExtraDay) {
+        rows.push(<div key={`extra-day-${w.day}`} className="rail-day">{dayLabel(w.date)}</div>)
+        lastExtraDay = w.day
+      }
       rows.push(<BuildQueueCard key={`${record.lane}:${record.id}`} record={record} />)
     }
   }
