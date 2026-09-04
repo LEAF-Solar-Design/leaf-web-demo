@@ -75,11 +75,16 @@ const REPO = join(WEB, '..')
 const SRC = join(WEB, 'src')
 const SURFACE_CONTRACT_DOC = join(REPO, 'docs', 'convergence', 'SURFACE-CONTRACT.md')
 
-// The two files that build ribbon/tool records as object literals. Check 2
-// parses these deeply; adding a third builder means adding it here.
+// The files that build ribbon/tool records. Check 2 parses these deeply; a
+// new builder is added here. actionRegistry.js (slice 10a) is the third: its
+// ribbonTool() assigns `disabled` and `reason` field by field today, which
+// check 2 cannot see (the header's limits), so it contributes no literal
+// record yet; a `disabled:` literal written there later is judged like the
+// other two, and its four *REASONS maps are read by check 1 regardless.
 const DISABLED_RECORD_FILES = [
   join(SRC, 'lib', 'ribbonClusters.js'),
   join(SRC, 'cadedit', 'EngineRibbonClusters.jsx'),
+  join(SRC, 'lib', 'actionRegistry.js'),
 ]
 
 // A reason is a sentence, not a token. 12 characters is roughly "three short

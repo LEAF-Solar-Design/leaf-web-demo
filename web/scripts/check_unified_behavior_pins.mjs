@@ -38,21 +38,31 @@ assert(
 // one keypress fires at most one rung, 'result' is never one of them (it is
 // ResultPanel's own listener, and duplicating it sent two POST /api/run from a
 // single keypress), and App still supplies every handler the rungs name.
+// The RETRY_RUNGS table itself, sliced from its opening to its closing `})`,
+// so the 'result' check reads the table and only the table, and tolerates
+// whitespace: `result:`, `result :` and `result:(ctx)=>` all fail it.
+const retryStart = registry.indexOf('export const RETRY_RUNGS = Object.freeze({')
+const retryEnd = retryStart >= 0 ? registry.indexOf('})', retryStart) : -1
+const retryTable = retryStart >= 0 && retryEnd > retryStart ? registry.slice(retryStart, retryEnd) : ''
 assert(
-  registry.includes("export const RETRY_RUNGS = Object.freeze({") &&
-    registry.includes("route: (ctx) => ctx.onRetryRoute?.()") &&
-    registry.includes("history: (ctx) => ctx.onRetryHistory?.()") &&
-    registry.includes("tools: (ctx) => ctx.onRetryTools?.()") &&
-    registry.includes("catalog: (ctx) => ctx.onRetryCatalog?.()") &&
-    registry.includes("refresh: (ctx) => ctx.onRetryRefresh?.()") &&
+  retryTable.length > 0 &&
+    retryTable.includes("route: (ctx) => ctx.onRetryRoute?.()") &&
+    retryTable.includes("history: (ctx) => ctx.onRetryHistory?.()") &&
+    retryTable.includes("tools: (ctx) => ctx.onRetryTools?.()") &&
+    retryTable.includes("catalog: (ctx) => ctx.onRetryCatalog?.()") &&
+    retryTable.includes("refresh: (ctx) => ctx.onRetryRefresh?.()") &&
     // single-fire: the decision names ONE rung and the run dispatches ONE
     // handler out of the frozen table.
     registry.includes("if (rung) return { id: 'bar:retry'") &&
     registry.includes("RETRY_RUNGS[id](ctx)") &&
     // 'result' is absent from the table, so retryRung() cannot return it.
-    !registry.includes("result: (ctx) =>") &&
+    !/\bresult\s*:/.test(retryTable) &&
     registry.includes("if (ctx.rTarget === 'result') return LADDER_REASONS.retryOwnedByResult") &&
-    app.includes('const decision = ladderDecision(e, ctx)') &&
+    // App mounts the registry's listener over plain shell state and a handler
+    // builder the listener calls only once a decision came back, and still
+    // supplies every handler the rungs name.
+    registry.includes('const decision = ladderDecision(event, shell)') &&
+    app.includes('ladderListener(shell, ladderHandlers, markInstant)') &&
     app.includes('onRetryRoute: () => onDispatch()') &&
     app.includes('onRetryRefresh: () => onRetryViewerRefresh()'),
   'the R ladder must remain single-fire and cover its priority targets',

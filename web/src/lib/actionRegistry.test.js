@@ -5,9 +5,10 @@
 //    with the `kbd` cap.
 // 2. EVERY DECLARED TRIGGER IS REAL. A record that says mouse:'click' has a
 //    run its renderer wires to onClick; one that says keyboard:'kbd' carries a
-//    cap the ladder actually fires; one that says touch:'tap' is a plain
-//    button, so the tap and the click are the same handler. Nothing claims a
-//    trigger it does not have — that is the whole point of the slice.
+//    cap the ladder actually fires; one that says touch:'tap' is a plain click
+//    target (a <button>, or the "/" picker's div[role=option] row), so the tap
+//    and the click are the same handler. Nothing claims a trigger it does not
+//    have: that is the whole point of the slice.
 // 3. THE LADDER TABLE EQUALS THE OLD LADDER. `OLD_LADDER` below is App.jsx's
 //    if/else chain as it stood before this slice, copied as literals, and the
 //    registry's pure `ladderDecision` is asserted to agree with it across a
@@ -35,9 +36,11 @@ import {
   drawReason,
   escapeRung,
   forCluster,
+  forGroup,
   forSurface,
   keyboardTable,
   ladderDecision,
+  ladderListener,
   modifyReason,
   retryRung,
   ribbonTool,
@@ -144,9 +147,10 @@ describe('honest triggers', () => {
         expect(mouse).toBeNull()
       }
 
-      // touch:'tap' — a tap IS a click on a plain button: the SAME handler,
-      // no bespoke touch path. 'pointer' belongs to CanvasPointPicker alone,
-      // which registers no action, so no record may claim it.
+      // touch:'tap': a tap IS a click on a plain click target (a <button>, or
+      // the "/" picker's div[role=option] row): the SAME handler, no bespoke
+      // touch path. 'pointer' belongs to CanvasPointPicker alone, which
+      // registers no action, so no record may claim it.
       if (touch === 'tap') expect(mouse).toBe('click')
       else expect(touch).toBeNull()
 
@@ -177,16 +181,40 @@ describe('honest triggers', () => {
     }
   })
 
-  it('projects the ribbon clusters the builders seat, in registry order', () => {
+  it('projects the ribbon clusters and the engine groups the builders seat, in registry order', () => {
     expect(forCluster('view').map((a) => a.id)).toEqual(['fit', 'zoom-in', 'zoom-out', 'properties-pane'])
     expect(forCluster('version').map((a) => a.id)).toEqual(['undo', 'redo', 'history'])
-    expect(forCluster('draw').map((a) => a.id)).toEqual([
+    expect(forGroup('draw').map((a) => a.id)).toEqual([
       'draw:createLine', 'draw:createPolyline', 'draw:createCircle', 'draw:createArc',
     ])
-    expect(forCluster('modify').map((a) => a.id)).toEqual([
+    expect(forGroup('modify').map((a) => a.id)).toEqual([
       'modify:delete', 'modify:move', 'modify:moveVertex',
       'modify:addVertex', 'modify:deleteVertex', 'modify:setLayer',
     ])
+  })
+
+  // A ribbon cluster and an engine group are two fields. A future ribbon
+  // cluster named draw or modify must not merge with the engine group.
+  it('never conflates a ribbon cluster with an engine group of the same name', () => {
+    expect(forCluster('draw')).toEqual([])
+    expect(forCluster('modify')).toEqual([])
+    expect(forGroup('view')).toEqual([])
+    expect(forGroup('version')).toEqual([])
+    expect(forCluster('no-such-cluster')).toEqual([])
+    expect(forSurface('no-such-surface')).toEqual([])
+  })
+
+  // The paint path (every ribbon build, every engine render) reads these, so
+  // a lookup is one Map read that hands back the SAME frozen list each call.
+  it('answers forCluster / forGroup / forSurface from a load-time index: the same frozen list every call', () => {
+    for (const [select, key] of [[forCluster, 'view'], [forGroup, 'draw'], [forSurface, 'ribbon']]) {
+      const first = select(key)
+      expect(select(key)).toBe(first)
+      expect(Object.isFrozen(first)).toBe(true)
+      expect(() => { first.push(first[0]) }).toThrow(TypeError)
+    }
+    // A miss is the one frozen empty list too, never a fresh allocation.
+    expect(forCluster('no-such-cluster')).toBe(forGroup('no-such-group'))
   })
 
   it('omits disabled and reason for an ungated record, and carries both for a gated one', () => {
@@ -341,9 +369,9 @@ describe('the key ladder, table-driven', () => {
         }
       }
     }
-    // A guard on the guard: a matrix that silently shrank would pass vacuously.
-    expect(cases).toBe(TARGETS.length * KEYS.length * SHELL_STATES.length)
-    expect(cases).toBeGreaterThan(1000)
+    // A guard on the guard: the literal, not the product, so a matrix that
+    // silently shrank (a target, key or state dropped) fails here by name.
+    expect(cases).toBe(1872)
   })
 
   it('pops exactly one Esc rung, topmost first, and runs only that handler', () => {
@@ -401,6 +429,45 @@ describe('the key ladder, table-driven', () => {
     expect(ladderDecision(null, {})).toBeNull()
     expect(ladderDecision({}, {})).toBeNull()
   })
+
+  // The listener App.jsx mounts. The pre-slice if/else built nothing for a key
+  // that was not its own; the handler context (thirteen closures in App) must
+  // not be built per keystroke either, only once a decision came back.
+  it('builds the handler context only for a key the ladder takes, never for the rest', () => {
+    const shell = { drawer: 'tools', rTarget: 'route' }
+    const closed = []
+    const handlers = vi.fn((state) => ({ ...state, onCloseDrawer: () => closed.push('drawer') }))
+    const markInstant = vi.fn()
+    const preventDefault = vi.fn()
+    const onKey = ladderListener(shell, handlers, markInstant)
+    const body = document.createElement('div')
+    // Not the ladder's: Tab, an arrow, Space, a modified letter, a printable
+    // key typed into a field. No context, no instant stamp, no preventDefault.
+    for (const spec of [{ key: 'Tab' }, { key: 'ArrowDown' }, { key: ' ' }, { key: 'a', altKey: true }]) {
+      onKey({ ...spec, target: body, preventDefault })
+    }
+    onKey({ key: 'a', target: el('<input />'), preventDefault })
+    expect(handlers).not.toHaveBeenCalled()
+    expect(markInstant).not.toHaveBeenCalled()
+    expect(preventDefault).not.toHaveBeenCalled()
+    // The ladder's: ONE context, built from the same shell, and the rung ran.
+    onKey({ key: 'Escape', target: body, preventDefault })
+    expect(handlers).toHaveBeenCalledTimes(1)
+    expect(handlers).toHaveBeenCalledWith(shell)
+    expect(closed).toEqual(['drawer'])
+    expect(markInstant).toHaveBeenCalledTimes(1)
+    expect(preventDefault).not.toHaveBeenCalled()
+    // R with a live rung: preventDefault, instant, and one more context.
+    onKey({ key: 'r', target: body, preventDefault })
+    expect(handlers).toHaveBeenCalledTimes(2)
+    expect(preventDefault).toHaveBeenCalledTimes(1)
+    expect(markInstant).toHaveBeenCalledTimes(2)
+  })
+
+  it('refuses a listener with no shell or no handler builder at construction, not on the first key', () => {
+    expect(() => ladderListener({}, null, () => {})).toThrow(TypeError)
+    expect(() => ladderListener(null, () => ({}), () => {})).toThrow(TypeError)
+  })
 })
 
 // --- 4: the accessible-name composer --------------------------------------
@@ -423,6 +490,19 @@ describe('the accessible name', () => {
   it('is the bare label when the action is live', () => {
     expect(accessibleName('fit', '')).toBe('fit')
     expect(accessibleName('fit')).toBe('fit')
+  })
+
+  // The template this replaced rendered `aria-label={label}` for a live
+  // control, and React omits the attribute for undefined. A control with no
+  // label keeps that omission; it never gains an aria-label="" a screen
+  // reader announces as nothing. A reason with no subject is not a name
+  // either. An empty-string label is a name, and stays one.
+  it('omits the name (undefined) when there is no label, and keeps an empty one', () => {
+    expect(accessibleName(undefined)).toBeUndefined()
+    expect(accessibleName(null, '')).toBeUndefined()
+    expect(accessibleName(undefined, REASONS.noDrawing)).toBeUndefined()
+    expect(accessibleName('')).toBe('')
+    expect(accessibleName('', '')).toBe('')
   })
 
   it('composes the same name for a record the ribbon would render disabled', () => {

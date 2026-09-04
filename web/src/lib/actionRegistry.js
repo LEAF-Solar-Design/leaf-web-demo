@@ -17,10 +17,15 @@
 // taken away carries the sentence that says WHY. `when(ctx)` returns '' when
 // the action is live and the exact reason string otherwise — the same strings
 // the ribbon renders as `<label> (unavailable: <reason>)`. A reason that is
-// not one of the frozen maps below is a contract break, and validateRegistry
-// refuses it at module load rather than rendering a greyed control with no
-// sentence. The honesty-ladder gate (scripts/check_honesty_ladder.mjs) reads
-// the maps in this file the same way it reads every other `*REASONS` map.
+// not one of the frozen maps below is a contract break. validateRegistry holds
+// the part of that a module load can hold: every `when` is a function, is
+// total over the empty context, and names no sentence outside the maps for
+// that context. A function's range cannot be enumerated at load, so the
+// guarantee across shell states is the sixteen-context probe in
+// actionRegistry.test.js ("never names a reason outside the registered
+// vocabulary, in any context"). The honesty-ladder gate
+// (scripts/check_honesty_ladder.mjs) reads the maps in this file the same way
+// it reads every other `*REASONS` map.
 //
 // HONEST TRIGGERS, the point of the slice. `triggers` records what an action
 // can ACTUALLY be reached by today, never what it should be reachable by:
@@ -31,7 +36,9 @@
 //                       answers Enter/Space because the platform maps them to
 //                       click; that is the mouse trigger's DOM affordance, not
 //                       a keyboard trigger this registry declares.
-//   touch:    'tap'     a plain button: a tap IS a click, no bespoke handler.
+//   touch:    'tap'     a plain click target (a <button>, or the "/" picker's
+//                       div[role=option] row): a tap IS a click, no bespoke
+//                       handler.
 //             'pointer' real pointer* handlers (only CanvasPointPicker.jsx).
 //             null      no touch path.
 // `kbd` is null for every action that has no shortcut today. Slice 10b assigns
@@ -162,7 +169,11 @@ export function versionSharedReason(ctx = {}) {
  * byte, so it is composed here once and asserted against those literals.
  */
 export function accessibleName(label, reason = '') {
-  const name = String(label ?? '')
+  // No label, no name: the attribute is OMITTED (undefined), as the template
+  // this replaced omitted it, never stamped as aria-label="" for a screen
+  // reader to announce as nothing. An empty-string label is a name and stays.
+  if (label == null) return undefined
+  const name = String(label)
   const why = String(reason ?? '')
   return why ? `${name} (unavailable: ${why})` : name
 }
@@ -242,11 +253,13 @@ function isInteractiveTarget(target) {
  *   instant        whether the change lands frame-of-keypress (markInstant).
  *
  * Order and skip rules are the ladder's own, unchanged: Cmd/Ctrl+K wins even
- * inside a field; Esc pops one rung and consumes the key whether or not a rung
- * was open; R fires only outside a text field, only unmodified, and only when
- * a retry rung is live, otherwise the key FALLS THROUGH to the bar; and any
- * other bare printable keystroke falls into the bar unless the target is
- * editable or interactive, or an overlay (drawer, history) owns the typing.
+ * inside a field; Esc pops one rung when one is open (never preventDefaulted,
+ * so a focused control still sees the key) and returns null when nothing is
+ * open, so the ladder leaves the key alone; R fires only outside a text field,
+ * only unmodified, and only when a retry rung is live, otherwise the key FALLS
+ * THROUGH to the bar; and any other bare printable keystroke falls into the
+ * bar unless the target is editable or interactive, or an overlay (drawer,
+ * history) owns the typing.
  */
 export function ladderDecision(event, ctx = {}) {
   if (!event || typeof event.key !== 'string') return null
@@ -259,8 +272,9 @@ export function ladderDecision(event, ctx = {}) {
 
   if (event.key === 'Escape') {
     const rung = escapeRung(ctx)
-    // No open rung: the key is still the ladder's (Esc never falls through to
-    // the bar — its key is not printable), it simply has nothing to close.
+    // No open rung: nothing to close, so the ladder leaves the key alone
+    // (null, no preventDefault). Esc is not printable, so it never reaches the
+    // type-to-fall-through route below either.
     return rung ? { id: 'bar:escape', rung, route: 'kbd', preventDefault: false, instant: true } : null
   }
 
@@ -283,13 +297,35 @@ export function ladderDecision(event, ctx = {}) {
   return null
 }
 
+/**
+ * The window keydown listener the shell mounts, built on the pure decision.
+ * NO ALLOCATION ON A NON-LADDER KEY: `shell` is the plain state the decision
+ * reads, built ONCE per subscription by the caller (never per keystroke), and
+ * `handlers(shell)` builds the context the record runs against and is called
+ * ONLY after a decision came back. The pre-slice if/else chain allocated
+ * nothing for a key that was not its own, and neither does this. `markInstant`
+ * stamps the frame-of-keypress change (data-instant) a decision asks for.
+ * Fails closed at construction, not on the first keystroke.
+ */
+export function ladderListener(shell, handlers, markInstant) {
+  if (!shell || typeof shell !== 'object') throw new TypeError('ladderListener: shell must be an object')
+  if (typeof handlers !== 'function') throw new TypeError('ladderListener: handlers must be a function')
+  return (event) => {
+    const decision = ladderDecision(event, shell)
+    if (!decision) return
+    if (decision.instant) markInstant?.()
+    if (decision.preventDefault) event.preventDefault()
+    byId(decision.id)?.run(handlers(shell))
+  }
+}
+
 // --- the records -----------------------------------------------------------
 
 const NO_TRIGGERS = { mouse: null, keyboard: null, touch: null }
 // A plain <button>: clicked, tapped, no keyboard path of its own.
 const BUTTON_TRIGGERS = Object.freeze({ mouse: 'click', keyboard: null, touch: 'tap' })
-// A "/" picker row: clicked, tapped, and Enter on the highlighted row picks it
-// (PromptBox.jsx's menu keydown).
+// A "/" picker row, a div[role=option] rather than a <button>: clicked, tapped,
+// and Enter on the highlighted row picks it (PromptBox.jsx's menu keydown).
 const PICKER_TRIGGERS = Object.freeze({ mouse: 'click', keyboard: 'enter', touch: 'tap' })
 // A key-ladder rung: no pointer path at all, by design.
 const KEY_TRIGGERS = Object.freeze({ mouse: null, keyboard: 'kbd', touch: null })
@@ -560,6 +596,32 @@ export const ACTIONS = Object.freeze(validateRegistry(ACTION_LIST).map((a) => Ob
 
 const BY_ID = new Map(ACTIONS.map((a) => [a.id, a]))
 
+/**
+ * Records grouped by one field, in registry order, each list frozen. Built
+ * once with the registry, so a lookup on the paint path is one Map read that
+ * hands back the SAME array every call: nothing allocates, and a consumer
+ * that mutates the list gets a TypeError instead of changing every other
+ * caller's view of the cluster.
+ */
+function indexBy(field) {
+  const lists = new Map()
+  for (const a of ACTIONS) {
+    const key = a[field]
+    if (key == null) continue
+    if (!lists.has(key)) lists.set(key, [])
+    lists.get(key).push(a)
+  }
+  for (const [key, list] of lists) lists.set(key, Object.freeze(list))
+  return lists
+}
+const BY_SURFACE = indexBy('surface')
+// `cluster` (a ribbon cluster) and `group` (an engine group) are two fields
+// and two indexes: a ribbon cluster named draw or modify must never merge
+// with the engine group of the same name.
+const BY_CLUSTER = indexBy('cluster')
+const BY_GROUP = indexBy('group')
+const NONE = Object.freeze([])
+
 // --- selectors -------------------------------------------------------------
 
 /** One record by id, or null. O(1): the index is built once with the registry. */
@@ -567,14 +629,19 @@ export function byId(id) {
   return BY_ID.get(id) || null
 }
 
-/** Every record on one surface, in registry order. */
+/** Every record on one surface, in registry order. O(1), no allocation. */
 export function forSurface(surface) {
-  return ACTIONS.filter((a) => a.surface === surface)
+  return BY_SURFACE.get(surface) || NONE
 }
 
-/** Every record in one ribbon cluster or engine group, in registry order. */
+/** Every record in one RIBBON cluster, in registry order. O(1), no allocation. */
 export function forCluster(cluster) {
-  return ACTIONS.filter((a) => a.cluster === cluster || a.group === cluster)
+  return BY_CLUSTER.get(cluster) || NONE
+}
+
+/** Every record in one ENGINE group (draw, modify), in registry order. O(1), no allocation. */
+export function forGroup(group) {
+  return BY_GROUP.get(group) || NONE
 }
 
 /**

@@ -13,7 +13,7 @@ import CockpitTopBand from './site/CockpitTopBand.jsx'
 import DraftingRibbon from './site/DraftingRibbon.jsx'
 import PropertiesDock, { drawingExtents } from './site/PropertiesDock.jsx'
 import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
-import { byId as actionById, ladderDecision, slashCommandHandlers } from './lib/actionRegistry.js'
+import { ladderListener, slashCommandHandlers } from './lib/actionRegistry.js'
 import { authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
 import { resolvePublishedCatalogTool } from './site/publishedCatalogTool.js'
 import { entityGeometry } from './lib/entityMetrics.js'
@@ -2046,55 +2046,57 @@ export default function App() {
   // printable keystroke falls into the prompt bar (type-to-fall-through).
   //
   // The ORDER and the SKIP RULES are the registry's `ladderDecision`, a pure
-  // function actionRegistry.test.js walks against the old if/else as literals.
-  // What stays here is what only this shell can supply: the handlers, and the
-  // markInstant / preventDefault the decision asks for.
+  // function actionRegistry.test.js walks against the old if/else as literals,
+  // and the listener is the registry's `ladderListener`. What stays here is
+  // what only this shell can supply: the shell state and the handlers.
   useEffect(() => {
-    const onKey = (e) => {
-      const ctx = {
-        drawer,
-        historyOpen,
-        route,
-        routeErr,
-        runErr,
-        running,
-        selectedHandle,
-        openProjectId,
-        rTarget,
-        focusBar: () => barInputRef.current?.focus(),
-        onCloseDrawer: () => setDrawer(null),
-        onCloseHistory: () => closeHistory(),
-        onDismissRoute: () => dismissRoute(),
-        onClearErrors: () => { clearRouteError(); clearRunErr() },
-        onInterruptRun: () => {
-          // P2 wave C-2: latency tolerance in the wild. Esc-on-running is the
-          // ONE interrupt gesture (the rail keeps the job; nothing cancels
-          // server-side). Refs, not deps: elapsed ticks every 1s and must
-          // not re-subscribe this listener.
-          track('run.interrupted', {
-            ...(interruptSnapshotRef.current.tool ? { tool: interruptSnapshotRef.current.tool } : {}),
-            ...(interruptSnapshotRef.current.elapsedMs != null
-              ? { elapsed_ms: interruptSnapshotRef.current.elapsedMs } : {}),
-          })
-          interruptRun()
-        },
-        onClearSelection: () => setSelectedHandle(null),
-        onCloseProject: () => onCloseProject(),
-        onRetryRoute: () => onDispatch(),
-        onRetryHistory: () => loadHistory(),
-        onRetryTools: () => retryTools(),
-        onRetryCatalog: () => loadCatalog(),
-        onRetryRefresh: () => onRetryViewerRefresh(),
-      }
-      const decision = ladderDecision(e, ctx)
-      if (!decision) return
-      // Hotkey-driven changes land frame-of-keypress (data-instant, W0#7).
-      // Stamp only a branch that will handle the key: type-to-fall-through
-      // must keep normal motion, and so must an inactive retry rung.
-      if (decision.instant) markInstant()
-      if (decision.preventDefault) e.preventDefault()
-      actionById(decision.id)?.run(ctx)
+    // The plain shell state the decision reads, built ONCE per subscription
+    // (this effect re-runs when any of it changes), never per keystroke: a key
+    // that is not the ladder's allocates nothing here, as the pre-slice
+    // if/else chain allocated nothing.
+    const shell = {
+      drawer,
+      historyOpen,
+      route,
+      routeErr,
+      runErr,
+      running,
+      selectedHandle,
+      openProjectId,
+      rTarget,
     }
+    // The handlers the record names, built only once a decision came back.
+    const ladderHandlers = (state) => ({
+      ...state,
+      focusBar: () => barInputRef.current?.focus(),
+      onCloseDrawer: () => setDrawer(null),
+      onCloseHistory: () => closeHistory(),
+      onDismissRoute: () => dismissRoute(),
+      onClearErrors: () => { clearRouteError(); clearRunErr() },
+      onInterruptRun: () => {
+        // P2 wave C-2: latency tolerance in the wild. Esc-on-running is the
+        // ONE interrupt gesture (the rail keeps the job; nothing cancels
+        // server-side). Refs, not deps: elapsed ticks every 1s and must
+        // not re-subscribe this listener.
+        track('run.interrupted', {
+          ...(interruptSnapshotRef.current.tool ? { tool: interruptSnapshotRef.current.tool } : {}),
+          ...(interruptSnapshotRef.current.elapsedMs != null
+            ? { elapsed_ms: interruptSnapshotRef.current.elapsedMs } : {}),
+        })
+        interruptRun()
+      },
+      onClearSelection: () => setSelectedHandle(null),
+      onCloseProject: () => onCloseProject(),
+      onRetryRoute: () => onDispatch(),
+      onRetryHistory: () => loadHistory(),
+      onRetryTools: () => retryTools(),
+      onRetryCatalog: () => loadCatalog(),
+      onRetryRefresh: () => onRetryViewerRefresh(),
+    })
+    // Hotkey-driven changes land frame-of-keypress (data-instant, W0#7). The
+    // listener stamps only a branch that will handle the key: type-to-fall-
+    // through must keep normal motion, and so must an inactive retry rung.
+    const onKey = ladderListener(shell, ladderHandlers, markInstant)
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [drawer, historyOpen, route, routeErr, runErr, running, selectedHandle,

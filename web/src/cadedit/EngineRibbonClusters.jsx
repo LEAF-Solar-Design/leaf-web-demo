@@ -34,7 +34,7 @@ import { createPortal } from 'react-dom'
 import { RibbonCluster, RibbonTool } from '../site/DraftingRibbon.jsx'
 import { QuickButton, QUICK_FILE_SLOT_ID } from '../site/CockpitTopBand.jsx'
 
-import { DRAW_REASONS, MODIFY_REASONS, drawReason, forCluster, modifyReason } from '../lib/actionRegistry.js'
+import { DRAW_REASONS, MODIFY_REASONS, drawReason, forGroup, modifyReason } from '../lib/actionRegistry.js'
 
 import { buildCreatePayload, buildEditPayload, readNumber } from './engineSession.js'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
@@ -86,7 +86,7 @@ const NOT_IN_ENGINE = 'not in the browser engine yet'
 // numeric operands (no canvas rubber-banding in this slice; that is a later
 // interaction wave). The engine validates again and refuses with a typed
 // reason; the selection lands on what was just drawn. The four ops are
-// registry records now (`forCluster('draw')`), not a literal table here.
+// registry records now (`forGroup('draw')`), not a literal table here.
 // The reference's small Draw column, not in this engine yet.
 const DRAW_OFF = Object.freeze([
   { id: 'draw:rectangle', label: 'Rectangle', icon: 'rectangle' },
@@ -95,7 +95,7 @@ const DRAW_OFF = Object.freeze([
 ])
 
 // The six real entity operations the compiled engine performs are registry
-// records too (`forCluster('modify')`).
+// records too (`forGroup('modify')`).
 // The reference's other six Modify tools, not in this engine yet: with the
 // six real ones they fill the reference's 3x4 grid.
 const MODIFY_OFF = Object.freeze([
@@ -553,47 +553,57 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
       )}
       {show.has('draw') && (
         <RibbonCluster id="draw" label="Draw" note={draw || null}>
-          {forCluster('draw').map((action) => (
-            <RibbonTool
-              key={action.op}
-              tool={{
-                id: action.id,
-                label: action.label,
-                text: action.text,
-                icon: action.icon,
-                size: action.size,
-                title: action.title(engineCtx),
-                write: action.write,
-                disabled: !!action.when(engineCtx),
-                reason: action.when(engineCtx),
-                ...armedAttrs(action.op),
-                onClick: () => action.run(engineCtx),
-              }}
-            />
-          ))}
+          {forGroup('draw').map((action) => {
+            // The record's reason, read ONCE per record per render: it is the
+            // disabled flag and the sentence both.
+            const reason = action.when(engineCtx)
+            return (
+              <RibbonTool
+                key={action.op}
+                tool={{
+                  id: action.id,
+                  label: action.label,
+                  text: action.text,
+                  icon: action.icon,
+                  size: action.size,
+                  title: action.title(engineCtx),
+                  write: action.write,
+                  disabled: !!reason,
+                  reason,
+                  ...armedAttrs(action.op),
+                  onClick: () => action.run(engineCtx),
+                }}
+              />
+            )
+          })}
           {DRAW_OFF.map((tool) => <RibbonTool key={tool.id} tool={offTool(tool)} />)}
         </RibbonCluster>
       )}
       {show.has('modify') && (
         <RibbonCluster id="modify" label="Modify" note={modify || null}>
-          {forCluster('modify').map((action) => (
-            <RibbonTool
-              key={action.op}
-              tool={{
-                id: action.id,
-                label: action.label,
-                text: action.text,
-                icon: action.icon,
-                size: action.size,
-                title: action.title(engineCtx),
-                write: action.write,
-                disabled: !!action.when(engineCtx),
-                reason: action.when(engineCtx),
-                ...armedAttrs(action.op),
-                onClick: () => action.run(engineCtx),
-              }}
-            />
-          ))}
+          {forGroup('modify').map((action) => {
+            // The record's reason, read ONCE per record per render: it is the
+            // disabled flag and the sentence both.
+            const reason = action.when(engineCtx)
+            return (
+              <RibbonTool
+                key={action.op}
+                tool={{
+                  id: action.id,
+                  label: action.label,
+                  text: action.text,
+                  icon: action.icon,
+                  size: action.size,
+                  title: action.title(engineCtx),
+                  write: action.write,
+                  disabled: !!reason,
+                  reason,
+                  ...armedAttrs(action.op),
+                  onClick: () => action.run(engineCtx),
+                }}
+              />
+            )
+          })}
           {MODIFY_OFF.map((tool) => <RibbonTool key={tool.id} tool={offTool(tool)} />)}
         </RibbonCluster>
       )}
