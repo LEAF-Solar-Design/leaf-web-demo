@@ -354,12 +354,18 @@ _HARDCODED_DEFAULTS` (byte-identical mirror), `server/billing_tiers.py
 TIER_VOCABULARY`/`CLAIM_TIERS`, the Action's `PLAN_TIER` values, and the
 platform lane's fail-closed literal (`platform/entitlements.py`).
 
-**11.3 Capability vocabulary (frozen, 9 members):**
+**11.3 Capability vocabulary (frozen, 10 members; grown 2026-09-04 per the
+§11 promotion ritual — standardization slice 8b, tenant MCP registry):**
 
 `run_read`, `run_write`, `solve`, `build`, `converse`,
-`agent_write_autopilot`, `deploy`, `platform_customize`, `upload`
+`agent_write_autopilot`, `deploy`, `platform_customize`, `upload`,
+`link_service`
 (`server/entitlements.py CAPABILITIES` + every `entitlements.json` entry —
 per-tier boolean values stay operator-tunable; the KEY SET is what is frozen).
+`link_service` gates the write routes of the tenant MCP server registry
+(`routers/tenant_mcp.py`: register, connect, unlink) — false on
+demo/restricted/guest, true on self_hosted/hosted_starter/hosted_pro/admin.
+The registry's list route is owner-role gated only, not capability-gated.
 
 **11.4 Billing note:** the plan→tier mapping that FEEDS this vocabulary is
 canonicalized in `server/billing_tiers.py` and parity-gated against the

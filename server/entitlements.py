@@ -41,10 +41,16 @@ from envelopes import ErrorCode, error_obj
 # `upload` (guest-upload lane, §19) gates POST /api/drawings/upload — per-key
 # omission still defaults False, so adding it here forces every policy entry to
 # grant it EXPLICITLY.
+# `link_service` (standardization slice 8b, contract/AUTH.md §11.3 promotion
+# ritual, 2026-09-04) gates the write routes of the tenant MCP server registry
+# (routers/tenant_mcp.py): registering a server, starting its OAuth connect,
+# and unlinking it. False on demo/restricted/guest (a signed-out or lapsed
+# identity should not be minting outbound OAuth clients); true on every paid
+# tier. The list route is owner-role gated only, not capability-gated.
 CAPABILITIES = (
     "run_read", "run_write", "solve", "build",
     "converse", "agent_write_autopilot", "deploy", "platform_customize",
-    "upload",
+    "upload", "link_service",
 )
 
 # Fail-safe defaults — used verbatim if the JSON file is absent or unreadable. These
@@ -52,31 +58,31 @@ CAPABILITIES = (
 _HARDCODED_DEFAULTS: Dict[str, Dict[str, bool]] = {
     "demo": {"run_read": True, "run_write": True, "solve": True, "build": True,
              "converse": True, "agent_write_autopilot": True, "deploy": True,
-             "platform_customize": False, "upload": True},
+             "platform_customize": False, "upload": True, "link_service": False},
     "restricted": {"run_read": True, "run_write": False, "solve": False, "build": False,
                    "converse": False, "agent_write_autopilot": False, "deploy": False,
-                   "platform_customize": False, "upload": False},
+                   "platform_customize": False, "upload": False, "link_service": False},
     "self_hosted": {"run_read": True, "run_write": True, "solve": True, "build": True,
                     "converse": True, "agent_write_autopilot": True, "deploy": True,
-                    "platform_customize": False, "upload": True},
+                    "platform_customize": False, "upload": True, "link_service": True},
     "hosted_starter": {"run_read": True, "run_write": True, "solve": False, "build": True,
                        "converse": True, "agent_write_autopilot": False, "deploy": False,
-                       "platform_customize": False, "upload": True},
+                       "platform_customize": False, "upload": True, "link_service": True},
     "hosted_pro": {"run_read": True, "run_write": True, "solve": True, "build": True,
                    "converse": True, "agent_write_autopilot": True, "deploy": True,
-                   "platform_customize": False, "upload": True},
+                   "platform_customize": False, "upload": True, "link_service": True},
     # Operator-granted staff tier (W14 admin self-edit lane). The ONLY tier
     # carrying platform_customize; minted solely from an operator-set
     # app_metadata.leaf_admin flag, never from a billing plan.
     "admin": {"run_read": True, "run_write": True, "solve": True, "build": True,
               "converse": True, "agent_write_autopilot": True, "deploy": True,
-              "platform_customize": True, "upload": True},
+              "platform_customize": True, "upload": True, "link_service": True},
     # Ephemeral signed-out guests (§19): upload + nothing else. Their intake
     # reads go through require_tenant (guest session) but run/solve/build/
     # converse are all denied — extraction-only, fail closed.
     "guest": {"run_read": False, "run_write": False, "solve": False, "build": False,
               "converse": False, "agent_write_autopilot": False, "deploy": False,
-              "platform_customize": False, "upload": True},
+              "platform_customize": False, "upload": True, "link_service": False},
 }
 
 DEFAULT_TIER = "demo"
