@@ -68,6 +68,10 @@ export const DEFAULT_EDIT_INPUTS = Object.freeze({
   // W4g-5 OFFSET: how far the parallel copy sits from its source; the SIDE
   // is the point clicked (x, y), so the verb needs no side operand of its own.
   dist: '5',
+  // W4g-5b ARRAY: a 2 x 3 grid ten apart, and four items round a full
+  // turn. Every default is a command the store accepts, so a fresh
+  // prompt shows no refusal sentence.
+  rows: '2', cols: '3', rowGap: '10', colGap: '10', count: '4', totalDeg: '360',
 })
 
 const INPUT_KEYS = new Set(Object.keys(DEFAULT_EDIT_INPUTS))

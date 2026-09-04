@@ -161,7 +161,11 @@ export const CREATE_OPS = Object.freeze(['createLine', 'createCircle', 'createAr
 // W4g-4: edits that MAKE an entity (a displaced copy, a mirrored copy, the
 // segments of an explode) report what they made by id like the Draw group
 // does; the selection lands on it.
-export const CREATING_EDITS = Object.freeze(['copy', 'mirror', 'explode'])
+/// The most copies one ARRAY may add. The engine carries the same number,
+/// so a count the prompt refuses could not have reached the document either.
+export const MAX_ARRAY_COPIES = 1000
+
+export const CREATING_EDITS = Object.freeze(['copy', 'mirror', 'explode', 'arrayRect', 'arrayPolar'])
 // RECTANG is a closed four-point polyline to the engine: the store lowers it
 // before the post, so the worker's op vocabulary is unchanged.
 const WORKER_OP = Object.freeze({ createRectangle: 'createPolyline' })
@@ -243,7 +247,7 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
  * either `{ payload }` or `{ refusal }` with the exact operator-facing
  * sentence — never both, never a throw.
  */
-export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer, x1, y1, x2, y2, keep, cx, cy, deg, factor } = {}) {
+export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer, x1, y1, x2, y2, keep, cx, cy, deg, factor, rows, cols, rowGap, colGap, count, totalDeg } = {}) {
   const payload = { entityId }
   if (op === 'move' || op === 'copy') {
     const deltaX = fmtDelta(dx)
@@ -278,6 +282,49 @@ export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer, x1,
       if (f === null) return { refusal: 'Scale refused: the factor must be a number.' }
       if (f <= 0) return { refusal: 'Scale refused: the factor must be greater than 0.' }
       payload.factor = f
+    }
+  }
+  // W4g-5b: ARRAY is ONE engine op, never N copies, because every applied
+  // edit re-parses the whole document. The counts are read the strict way
+  // (whole numbers only) and bounded here as well as in the engine, so a
+  // typo refuses on the prompt instead of asking the engine for a million
+  // entities.
+  if (op === 'arrayRect' || op === 'arrayPolar') {
+    const whole = (value) => (/^\s*\d{1,7}\s*$/.test(String(value ?? '')) ? Number.parseInt(value, 10) : NaN)
+    if (op === 'arrayRect') {
+      const r = whole(rows)
+      const c = whole(cols)
+      if (!Number.isInteger(r) || !Number.isInteger(c)) return { refusal: 'Array refused: rows and columns must be whole numbers.' }
+      if (r < 1 || c < 1) return { refusal: 'Array refused: rows and columns must be at least 1.' }
+      if (r * c - 1 < 1) return { refusal: 'Array refused: 1 row by 1 column is the source alone, so there is nothing to copy.' }
+      if (r * c - 1 > MAX_ARRAY_COPIES) return { refusal: `Array refused: that is more than ${MAX_ARRAY_COPIES} copies.` }
+      const rg = fmtDelta(rowGap)
+      const cg = fmtDelta(colGap)
+      if (rg === null || cg === null) return { refusal: 'Array refused: the row and column spacing must both be numbers.' }
+      if (rg === 0 && cg === 0) return { refusal: 'Array refused: with no spacing every copy lands on the source.' }
+      payload.rows = r
+      payload.cols = c
+      payload.rowGap = rg
+      payload.colGap = cg
+    } else {
+      const n = whole(count)
+      if (!Number.isInteger(n)) return { refusal: 'Polar array refused: the count must be a whole number.' }
+      if (n < 2) return { refusal: 'Polar array refused: the count includes the source, so it must be at least 2.' }
+      if (n - 1 > MAX_ARRAY_COPIES) return { refusal: `Polar array refused: that is more than ${MAX_ARRAY_COPIES} copies.` }
+      const bx = fmtDelta(cx)
+      const by = fmtDelta(cy)
+      if (bx === null || by === null) return { refusal: 'Polar array refused: the centre x and y must both be numbers.' }
+      const sweep = fmtDelta(totalDeg)
+      if (sweep === null) return { refusal: 'Polar array refused: the angle to fill must be a number (degrees).' }
+      if (sweep === 0) return { refusal: 'Polar array refused: an angle of 0 puts every copy on the source.' }
+      // Past one turn the sweep wraps and copies land back on the source
+      // (3 items over 720 degrees puts both on the original). The engine
+      // refuses it too; this is the sentence a drafter reads.
+      if (Math.abs(sweep) > 360) return { refusal: 'Polar array refused: the angle to fill cannot be more than one full turn.' }
+      payload.count = n
+      payload.cx = bx
+      payload.cy = by
+      payload.totalDeg = sweep
     }
   }
   if (op === 'moveVertex' || op === 'addVertex' || op === 'deleteVertex') {

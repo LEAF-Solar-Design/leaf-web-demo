@@ -725,10 +725,11 @@ test.describe('route matrix, rail ON', () => {
     // W4g-4: RECTANG joined the Draw group (5 real + 2 off) and COPY, MIRROR,
     // ROTATE, SCALE, EXPLODE joined Modify (11 real + trim/extend off).
     // W4g-5a: OFFSET made it 12 real, so the Modify row is 14.
+    // W4g-5b: ARRAY's two forms make it 14 real, so the row is 16.
     await expect(draw.locator('.ribbon-tool')).toHaveCount(7)
     await expect(draw.locator('[data-tool^="draw:create"]')).toHaveCount(5)
     const modifyTools = modify.locator('.ribbon-tool')
-    await expect(modifyTools).toHaveCount(14)
+    await expect(modifyTools).toHaveCount(16)
     let modifyReal = 0
     for (const btn of await modifyTools.all()) {
       await expect(btn).toBeDisabled()
@@ -736,7 +737,7 @@ test.describe('route matrix, rail ON', () => {
       if (/\(unavailable: (select an entity in the drawing|no drawing in the browser engine yet|opening .*|the drawing could not be opened.*)\)/.test(name)) modifyReal += 1
       else expect(name).toContain('(unavailable: not in the browser engine yet)')
     }
-    expect(modifyReal).toBe(12)
+    expect(modifyReal).toBe(14)
 
     // View drives the viewer: fit is live with a drawing loaded (View tab).
     await page.getByRole('tab', { name: 'View' }).click()
@@ -1115,6 +1116,36 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeOffset + 1), { timeout: 60_000 })
     test.info().annotations.push({ type: 'offset', description: `offset drew one parallel entity (${countBeforeOffset} -> ${countBeforeOffset + 1})` })
     await page.keyboard.press('Escape')
+
+    // W4g-5b ARRAY: ONE engine operation for the whole grid, so a 2 x 3
+    // rectangular array of the selection adds exactly five entities in one
+    // round trip and one undo step (never five round trips). A count that
+    // would copy nothing is refused on the prompt with the sentence, before
+    // any engine call.
+    const countBeforeArray = Number(await page.getByTestId('cad-edit-entity-count').textContent())
+    await page.getByRole('radio').last().check()
+    await ribbon.locator('[data-tool="modify:arrayRect"]').click()
+    await page.getByLabel('ribbon rows', { exact: true }).fill('1')
+    await page.getByLabel('ribbon columns', { exact: true }).fill('1')
+    await expect(page.getByTestId('cockpit-prompt-note'))
+      .toHaveText(/1 row by 1 column is the source alone/, { timeout: 20_000 })
+    await page.getByLabel('ribbon rows', { exact: true }).fill('2')
+    await page.getByLabel('ribbon columns', { exact: true }).fill('3')
+    await page.getByLabel('ribbon row spacing', { exact: true }).fill('8')
+    await page.getByLabel('ribbon column spacing', { exact: true }).fill('8')
+    await page.getByLabel('ribbon column spacing', { exact: true }).press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count'))
+      .toHaveText(String(countBeforeArray + 5), { timeout: 60_000 })
+    test.info().annotations.push({ type: 'array', description: `2 x 3 array added five entities in one op (${countBeforeArray} -> ${countBeforeArray + 5})` })
+    // One operation means ONE undo step: the whole array goes back
+    // together. `u` is the ENGINE undo (the band's Undo edit), not the
+    // version undo, which is a different tool with a different id.
+    await page.keyboard.press('Escape')
+    await expect(page.locator('.cockpit-band [data-tool="quick-undo-edit"]')).toBeEnabled()
+    await bar.fill('u')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count'))
+      .toHaveText(String(countBeforeArray), { timeout: 60_000 })
 
     // A sentence is still a sentence: it routes, it never arms. LAST in the
     // row on purpose: while its route decision is shown the Command bar's

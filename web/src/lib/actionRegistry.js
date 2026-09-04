@@ -458,6 +458,8 @@ const ACTION_LIST = [
   engineOp('modify', 'scale', 'scale', 'Scale', 'scale', 'Scale the selection about a base point by a factor', 'small'),
   engineOp('modify', 'explode', 'explode', 'Explode', 'explode', 'Explode the selected polyline into its segments', 'small'),
   engineOp('modify', 'offset', 'offset', 'Offset', 'offset', 'Draw a parallel copy of the selection, the distance you give, on the side you click', 'small'),
+  engineOp('modify', 'arrayRect', 'array', 'Array', 'array', 'Copy the selection into a grid of rows and columns', 'small'),
+  engineOp('modify', 'arrayPolar', 'array-polar', 'Polar array', 'array-polar', 'Copy the selection around a centre point through an angle', 'small'),
 
   // The "/" picker's CLIENT commands. `clientAction` is the key composer.js's
   // filterRunnable gates on: a command whose handler is missing is dropped

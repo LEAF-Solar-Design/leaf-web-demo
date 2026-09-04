@@ -205,6 +205,10 @@ fn sweep_deg_of(entity: &EntityType) -> Option<(f64, f64)> {
 // zero-sweep arc, a degenerate line, an odd or oversized point list).
 const MAX_CREATED_VERTICES: usize = 100_000;
 
+/// The most copies one ARRAY may add. Matches the store's own create bound,
+/// so a plan the client refuses cannot arrive here either.
+const MAX_ARRAY_COPIES: usize = 1_000;
+
 fn all_finite(values: &[f64]) -> bool {
     values.iter().all(|v| v.is_finite())
 }
@@ -587,6 +591,118 @@ impl ParsedDxf {
         Ok(handles)
     }
 
+    // ----------------------------------------------------------------------
+    // W4g-5b: ARRAY. One engine operation, never N client-side copies. Every
+    // applied edit re-parses the whole document and hands the bytes back (125
+    // ms parse + 73 ms write on the 2,345-entity demo head), so a 10 x 10
+    // array built as client copies would cost about 20 seconds and 100 undo
+    // snapshots. Inside the engine it is one parse, one write, one snapshot.
+    // The source is cloned ONCE and each copy clones that clone, so the cost
+    // is linear in the copies and never re-walks the entity list.
+    // ----------------------------------------------------------------------
+
+    /// ARRAY, rectangular: `rows` x `cols` positions of the entity at
+    /// `index`, spaced `row_gap` in y and `col_gap` in x. The source holds
+    /// position (0, 0) and is not one of the copies, so a 2 x 3 array adds
+    /// five entities. Refuses before the document is touched.
+    fn array_rect_core(
+        &mut self,
+        index: usize,
+        rows: usize,
+        cols: usize,
+        row_gap: f64,
+        col_gap: f64,
+    ) -> Result<Vec<String>, Refusal> {
+        if rows == 0 || cols == 0 {
+            return refuse("array_count_not_positive");
+        }
+        let positions = rows
+            .checked_mul(cols)
+            .ok_or_else(|| "array_too_many_copies".to_string())?;
+        let copies = positions - 1;
+        if copies == 0 {
+            return refuse("array_count_not_positive");
+        }
+        if copies > MAX_ARRAY_COPIES {
+            return refuse("array_too_many_copies");
+        }
+        if !all_finite(&[row_gap, col_gap]) {
+            return refuse("coordinate_not_finite");
+        }
+        if row_gap == 0.0 && col_gap == 0.0 {
+            // Every copy would land exactly on the source: a pile, not an array.
+            return refuse("array_spacing_zero");
+        }
+        let (source, layer) = self.cloned_for_create(index)?;
+        let mut handles = Vec::with_capacity(copies);
+        for r in 0..rows {
+            for c in 0..cols {
+                if r == 0 && c == 0 {
+                    continue;
+                }
+                let mut copy = source.clone();
+                copy.translate(Vector3::new(col_gap * c as f64, row_gap * r as f64, 0.0));
+                handles.push(self.add_created(copy, &layer)?);
+            }
+        }
+        Ok(handles)
+    }
+
+    /// ARRAY, polar: `count` positions of the entity at `index` swept
+    /// `total_deg` about (cx, cy). `count` counts the source, so a count of 4
+    /// over 360 degrees adds three copies at 90-degree steps. The rotation
+    /// composes exactly the way ROTATE does, so a polar array of an already
+    /// rotated entity stays exact.
+    fn array_polar_core(
+        &mut self,
+        index: usize,
+        count: usize,
+        cx: f64,
+        cy: f64,
+        total_deg: f64,
+    ) -> Result<Vec<String>, Refusal> {
+        if count < 2 {
+            return refuse("array_count_not_positive");
+        }
+        if count - 1 > MAX_ARRAY_COPIES {
+            return refuse("array_too_many_copies");
+        }
+        if !all_finite(&[cx, cy, total_deg]) {
+            return refuse("coordinate_not_finite");
+        }
+        if total_deg == 0.0 {
+            return refuse("array_sweep_zero");
+        }
+        // "Angle to fill" cannot fill more than one turn. Past 360 the sweep
+        // wraps and copies start landing on the source: a count of 3 over 720
+        // gives a step of 360, so BOTH copies sit exactly on the original as
+        // invisible duplicates. That is the same fault array_spacing_zero
+        // already refuses for the rectangular form, so it is refused here too
+        // rather than silently drawn.
+        if total_deg.abs() > 360.0 {
+            return refuse("array_sweep_past_full_turn");
+        }
+        // A full turn shares its first and last position, so the step divides
+        // by count there and by count - 1 for an open sweep.
+        let full_turn = (total_deg.abs() - 360.0).abs() < 1e-9;
+        let divisor = if full_turn { count } else { count - 1 } as f64;
+        let step = total_deg / divisor;
+        let (source, layer) = self.cloned_for_create(index)?;
+        let mut handles = Vec::with_capacity(count - 1);
+        for k in 1..count {
+            let mut copy = source.clone();
+            let transform = Transform::from_translation(Vector3::new(-cx, -cy, 0.0))
+                .then(&Transform::from_rotation(
+                    Vector3::new(0.0, 0.0, 1.0),
+                    (step * k as f64).to_radians(),
+                ))
+                .then(&Transform::from_translation(Vector3::new(cx, cy, 0.0)));
+            copy.apply_transform(&transform);
+            handles.push(self.add_created(copy, &layer)?);
+        }
+        Ok(handles)
+    }
+
     fn create_line_core(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, layer: &str) -> Result<String, Refusal> {
         if !all_finite(&[x1, y1, x2, y2]) {
             return refuse("coordinate_not_finite");
@@ -829,6 +945,48 @@ impl ParsedDxf {
     #[wasm_bindgen(js_name = explodeEntity)]
     pub fn explode_entity(&mut self, index: usize) -> Result<JsValue, JsValue> {
         let handles = self.explode_entity_core(index).map_err(js_err)?;
+        handles
+            .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+
+    /// ARRAY, rectangular: rows x cols positions spaced row_gap in y and
+    /// col_gap in x, the source holding the first. One engine operation for
+    /// the whole array, so one parse, one write and one undo step. Returns
+    /// the new handles in the order they were added.
+    #[wasm_bindgen(js_name = arrayRectEntity)]
+    pub fn array_rect_entity(
+        &mut self,
+        index: usize,
+        rows: usize,
+        cols: usize,
+        row_gap: f64,
+        col_gap: f64,
+    ) -> Result<JsValue, JsValue> {
+        let handles = self
+            .array_rect_core(index, rows, cols, row_gap, col_gap)
+            .map_err(js_err)?;
+        handles
+            .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// ARRAY, polar: count positions swept total_deg about (cx, cy), the
+    /// source holding the first. A full turn shares its first and last
+    /// position, so its step divides by count rather than count - 1.
+    #[wasm_bindgen(js_name = arrayPolarEntity)]
+    pub fn array_polar_entity(
+        &mut self,
+        index: usize,
+        count: usize,
+        cx: f64,
+        cy: f64,
+        total_deg: f64,
+    ) -> Result<JsValue, JsValue> {
+        let handles = self
+            .array_polar_core(index, count, cx, cy, total_deg)
+            .map_err(js_err)?;
         handles
             .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
             .map_err(|e| JsValue::from_str(&e.to_string()))
@@ -1301,5 +1459,90 @@ mod created_entity_roundtrip {
         assert_eq!(kinds(&back), vec!["LINE", "LINE", "LINE", "LINE", "LINE"]);
         let v = verts(&back, 1);
         assert!(near(v[1][0], 0.0) && near(v[1][1], 17.0), "rotated copy after re-parse: {:?}", v);
+    }
+
+    // ---- W4g-5b: ARRAY -----------------------------------------------------
+
+    /// Every CIRCLE centre in document order, rounded to the writer's own
+    /// precision so a re-parse compares equal.
+    fn centres(doc: &ParsedDxf) -> Vec<(f64, f64)> {
+        doc.inner
+            .entities()
+            .filter_map(|e| match e {
+                EntityType::Circle(c) => Some((
+                    (c.center.x * 1e6).round() / 1e6,
+                    (c.center.y * 1e6).round() / 1e6,
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn w4g5b_rectangular_array_adds_every_position_but_the_source() {
+        let mut doc = empty_doc();
+        doc.create_circle_core(0.0, 0.0, 1.0, "P").unwrap();
+        let handles_added = doc.array_rect_core(0, 2, 3, 10.0, 5.0).expect("2 x 3 array");
+        // 2 x 3 positions, the source holds one, so five copies.
+        assert_eq!(handles_added.len(), 5);
+        assert_eq!(
+            centres(&doc),
+            vec![(0.0, 0.0), (5.0, 0.0), (10.0, 0.0), (0.0, 10.0), (5.0, 10.0), (10.0, 10.0)],
+        );
+        // Every copy is on the source's layer and survives write + re-parse.
+        assert!(doc.inner.entities().all(|e| e.common().layer == "P"));
+        assert_eq!(centres(&rewrite(&doc)).len(), 6);
+    }
+
+    #[test]
+    fn w4g5b_polar_array_over_a_full_turn_divides_by_the_count() {
+        let mut doc = empty_doc();
+        doc.create_circle_core(10.0, 0.0, 1.0, "P").unwrap();
+        let added = doc.array_polar_core(0, 4, 0.0, 0.0, 360.0).expect("polar array");
+        assert_eq!(added.len(), 3);
+        // A full turn shares its first and last position, so four positions
+        // are 90 degrees apart and the fourth does NOT sit on the source.
+        assert_eq!(centres(&doc), vec![(10.0, 0.0), (0.0, 10.0), (-10.0, 0.0), (-0.0, -10.0)]);
+        // A full turn is exactly fillable in either direction; only a sweep
+        // PAST one turn is refused, because there the copies wrap onto the
+        // source.
+        let mut clockwise = empty_doc();
+        clockwise.create_circle_core(10.0, 0.0, 1.0, "P").unwrap();
+        assert_eq!(clockwise.array_polar_core(0, 4, 0.0, 0.0, -360.0).unwrap().len(), 3);
+        assert_eq!(centres(&clockwise), vec![(10.0, 0.0), (-0.0, -10.0), (-10.0, 0.0), (0.0, 10.0)]);
+    }
+
+    #[test]
+    fn w4g5b_polar_array_over_an_open_sweep_divides_by_the_gaps() {
+        let mut doc = empty_doc();
+        doc.create_circle_core(10.0, 0.0, 1.0, "P").unwrap();
+        doc.array_polar_core(0, 3, 0.0, 0.0, 180.0).expect("open sweep");
+        // Three positions across 180 degrees are 90 degrees apart: the last
+        // one lands exactly on the sweep's end.
+        assert_eq!(centres(&doc), vec![(10.0, 0.0), (0.0, 10.0), (-10.0, 0.0)]);
+    }
+
+    #[test]
+    fn w4g5b_array_refuses_before_touching_the_document() {
+        let mut doc = empty_doc();
+        doc.create_circle_core(0.0, 0.0, 1.0, "P").unwrap();
+        let before = handles(&doc);
+        assert_eq!(code(doc.array_rect_core(0, 0, 3, 1.0, 1.0)), "array_count_not_positive");
+        assert_eq!(code(doc.array_rect_core(0, 3, 0, 1.0, 1.0)), "array_count_not_positive");
+        // One row by one column is the source alone: no copy to make.
+        assert_eq!(code(doc.array_rect_core(0, 1, 1, 1.0, 1.0)), "array_count_not_positive");
+        assert_eq!(code(doc.array_rect_core(0, 40, 40, 1.0, 1.0)), "array_too_many_copies");
+        assert_eq!(code(doc.array_rect_core(0, 2, 2, f64::NAN, 1.0)), "coordinate_not_finite");
+        assert_eq!(code(doc.array_rect_core(0, 2, 2, 0.0, 0.0)), "array_spacing_zero");
+        assert_eq!(code(doc.array_rect_core(9, 2, 2, 1.0, 1.0)), "entity_index_out_of_range");
+        assert_eq!(code(doc.array_polar_core(0, 1, 0.0, 0.0, 90.0)), "array_count_not_positive");
+        assert_eq!(code(doc.array_polar_core(0, 2000, 0.0, 0.0, 90.0)), "array_too_many_copies");
+        assert_eq!(code(doc.array_polar_core(0, 4, f64::INFINITY, 0.0, 90.0)), "coordinate_not_finite");
+        assert_eq!(code(doc.array_polar_core(0, 4, 0.0, 0.0, 0.0)), "array_sweep_zero");
+        assert_eq!(code(doc.array_polar_core(0, 3, 0.0, 0.0, 720.0)), "array_sweep_past_full_turn");
+        assert_eq!(code(doc.array_polar_core(0, 4, 0.0, 0.0, -720.0)), "array_sweep_past_full_turn");
+        assert_eq!(code(doc.array_polar_core(9, 4, 0.0, 0.0, 90.0)), "entity_index_out_of_range");
+        assert_eq!(handles(&doc), before, "a refused array adds nothing");
+        assert_eq!(kinds(&doc), vec!["CIRCLE"]);
     }
 }

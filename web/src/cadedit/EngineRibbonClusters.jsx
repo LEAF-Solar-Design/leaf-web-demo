@@ -95,9 +95,10 @@ const DRAW_OFF = Object.freeze([
 ])
 
 // The entity operations the compiled engine performs are registry records
-// too (`forGroup('modify')`): the six original ones and, since W4g-4, COPY,
-// MIRROR, ROTATE, SCALE and EXPLODE. The reference's Modify tools this engine
-// still lacks (the intersection verbs, W4g-6) stay honest placeholders.
+// too (`forGroup('modify')`): the six original ones, COPY, MIRROR, ROTATE,
+// SCALE and EXPLODE (W4g-4), OFFSET (W4g-5a) and ARRAY's two forms (W4g-5b).
+// The reference's Modify tools this engine still lacks (the intersection
+// verbs, W4g-6) stay honest placeholders.
 const MODIFY_OFF = Object.freeze([
   { id: 'modify:trim', label: 'Trim', icon: 'trim' },
   { id: 'modify:extend', label: 'Extend', icon: 'extend' },
@@ -162,6 +163,18 @@ export const PROMPTS = Object.freeze({
   offset: { verb: 'OFFSET', steps: [
     { ask: 'Specify offset distance:', fields: [['dist', 'distance']] },
     { ask: 'Specify point on side to offset:', fields: [['x', 'x'], ['y', 'y']] },
+  ] },
+  // W4g-5b: the reference asks for the grid, then the spacing; the polar
+  // form asks how many and how far round. The count INCLUDES the source in
+  // both, which is what a drafter means by "4 copies around a circle".
+  arrayRect: { verb: 'ARRAYRECT', steps: [
+    { ask: 'Enter number of rows and columns:', fields: [['rows', 'rows', 'numeric'], ['cols', 'columns', 'numeric']] },
+    { ask: 'Specify distance between rows and columns:', fields: [['rowGap', 'row spacing'], ['colGap', 'column spacing']] },
+  ] },
+  arrayPolar: { verb: 'ARRAYPOLAR', steps: [
+    { ask: 'Specify centre point of array:', fields: [['cx', 'cx'], ['cy', 'cy']] },
+    { ask: 'Enter number of items, including the source:', fields: [['count', 'items', 'numeric']] },
+    { ask: 'Specify angle to fill:', fields: [['totalDeg', 'angle to fill']] },
   ] },
   moveVertex: { verb: 'MOVE VERTEX', steps: [
     { ask: 'Specify vertex:', fields: [['vertexIndex', 'vertex', 'numeric']] },

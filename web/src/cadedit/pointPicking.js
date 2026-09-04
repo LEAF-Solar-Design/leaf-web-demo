@@ -33,6 +33,9 @@ export const PICK_SEQUENCES = Object.freeze({
   createRectangle: [{ kind: 'point', keys: ['x', 'y'] }, { kind: 'point', keys: ['x2', 'y2'] }],
   // W4g-5 OFFSET: one pick, the side the parallel copy goes on.
   offset: [{ kind: 'point', keys: ['x', 'y'] }],
+  // W4g-5b: a polar array picks its centre; a rectangular array's operands
+  // are counts and distances, so it has nothing on the canvas to pick.
+  arrayPolar: [{ kind: 'point', keys: ['cx', 'cy'] }],
 })
 
 /**

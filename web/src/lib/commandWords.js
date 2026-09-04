@@ -40,6 +40,14 @@ const WORDS = Object.freeze({
   // W4g-5: the reference's OFFSET, one letter like the rest of its Modify row.
   offset: { group: 'modify', op: 'offset', verb: 'OFFSET' },
   o: { group: 'modify', op: 'offset', verb: 'OFFSET' },
+  // W4g-5b: the reference splits ARRAY into ARRAYRECT and ARRAYPOLAR, and
+  // so do we, because the two take different operands. AR is the
+  // rectangular one, as it is in AutoCAD after the default option.
+  array: { group: 'modify', op: 'arrayRect', verb: 'ARRAYRECT' },
+  arrayrect: { group: 'modify', op: 'arrayRect', verb: 'ARRAYRECT' },
+  ar: { group: 'modify', op: 'arrayRect', verb: 'ARRAYRECT' },
+  arraypolar: { group: 'modify', op: 'arrayPolar', verb: 'ARRAYPOLAR' },
+  pa: { group: 'modify', op: 'arrayPolar', verb: 'ARRAYPOLAR' },
   rectang: { group: 'draw', op: 'createRectangle', verb: 'RECTANG' },
   rectangle: { group: 'draw', op: 'createRectangle', verb: 'RECTANG' },
   rec: { group: 'draw', op: 'createRectangle', verb: 'RECTANG' },

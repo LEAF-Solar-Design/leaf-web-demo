@@ -37,7 +37,7 @@ describe('W4g-4 store: operand reading for the new verbs', () => {
       .toEqual({ payload: { points: [0, 0, 4, 0, 4, 3, 0, 3], closed: true, layer: 'P' } })
     expect(buildCreatePayload('createRectangle', { x: '0', y: '0', x2: '0', y2: '3' }).refusal).toBe('Rectangle refused: the corners must differ in both x and y.')
     expect(buildCreatePayload('createRectangle', { x: '0', y: 'q', x2: '1', y2: '3' }).refusal).toBe('Rectangle refused: x, y, x2 and y2 must all be numbers.')
-    expect(CREATING_EDITS).toEqual(['copy', 'mirror', 'explode'])
+    expect(CREATING_EDITS).toEqual(['copy', 'mirror', 'explode', 'arrayRect', 'arrayPolar'])
   })
 })
 
