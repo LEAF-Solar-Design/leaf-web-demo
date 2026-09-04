@@ -145,8 +145,14 @@ CREATE TABLE IF NOT EXISTS sessions (
   active_turn_tier TEXT,
   active_turn_subject TEXT,
   model           TEXT,
+  scope_kind      TEXT,
+  scope_handle    TEXT,
+  title           TEXT,
   UNIQUE(tenant_id, drawing_id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_sessions_tenant_recent
+  ON sessions(tenant_id, updated_at DESC, session_id DESC);
 
 CREATE TABLE IF NOT EXISTS session_events (
   session_id  TEXT,
@@ -213,8 +219,55 @@ def _db() -> sqlite3.Connection:
         # additively and idempotently, same posture as active_turn_tier above.
         if "model" not in session_cols:
             _conn.execute("ALTER TABLE sessions ADD COLUMN model TEXT")
+        # Slice 6b: the conversation scope envelope ({kind, handle}) and the
+        # title GET /api/sessions lists. Same additive, idempotent posture as
+        # `model`; a row from before this cut reads NULL and the router derives
+        # its scope from (drawing_id, project_id) instead of inventing one.
+        for column in ("scope_kind", "scope_handle", "title"):
+            if column not in session_cols:
+                _conn.execute(f"ALTER TABLE sessions ADD COLUMN {column} TEXT")
         _conn.commit()
     return _conn
+
+
+# --------------------------------------------------------------------------- #
+# conversation scope + title (standardization slice 6b)
+# --------------------------------------------------------------------------- #
+#: The closed set of scope kinds a session row may carry. routers/sessions.py
+#: validates the wire against the SAME tuple (test_contract_freeze pins the
+#: two, plus web/src/converse.js SCOPE_KINDS, equal).
+SCOPE_KINDS = ("project", "drawing", "entity")
+#: The listed title is the first user text of the conversation, bounded here
+#: and CHECK-bounded in PostgreSQL (0053) to the same figure.
+TITLE_MAX_CHARS = 120
+
+
+def _validate_scope(scope_kind: Optional[str], scope_handle: Optional[str]) -> None:
+    """Fail closed on a half-formed or unknown scope BEFORE it reaches a row.
+    The router already refuses these at the wire; this is the store's own
+    guard so no other caller can write what the CHECK constraints forbid."""
+    if (scope_kind is None) != (scope_handle is None):
+        raise ValueError("scope_kind and scope_handle must be provided together")
+    if scope_kind is not None:
+        if scope_kind not in SCOPE_KINDS:
+            raise ValueError(f"unknown scope kind {scope_kind!r}")
+        if not isinstance(scope_handle, str) or not scope_handle or len(scope_handle) > 128:
+            raise ValueError("scope_handle must be a non-empty string of at most 128 chars")
+
+
+def title_from_turn_started(data: Any) -> Optional[str]:
+    """The listed title for a `turn_started` event: its user text with
+    whitespace collapsed and bounded to TITLE_MAX_CHARS, or None when the turn
+    carried no text (a confirm turn, an image-only turn). Pure; no I/O."""
+    if not isinstance(data, dict):
+        return None
+    text = data.get("text")
+    if not isinstance(text, str):
+        return None
+    collapsed = " ".join(text.split())
+    if not collapsed:
+        return None
+    return collapsed[:TITLE_MAX_CHARS]
 
 
 def _exec(sql: str, args: tuple = ()) -> None:
@@ -262,6 +315,9 @@ def _row_to_session(row: sqlite3.Row) -> Dict[str, Any]:
         "active_turn_id": row["active_turn_id"],
         "turn_started_at": row["turn_started_at"],
         "model": row["model"],
+        "scope_kind": row["scope_kind"],
+        "scope_handle": row["scope_handle"],
+        "title": row["title"],
     }
 
 
@@ -304,6 +360,7 @@ def _row_to_approval(row: sqlite3.Row) -> Dict[str, Any]:
 # --------------------------------------------------------------------------- #
 def get_or_create_session(
     tenant_id: str, drawing_id: str, model: Optional[str] = None,
+    *, scope_kind: Optional[str] = None, scope_handle: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Idempotent per (tenant_id, drawing_id): INSERT OR IGNORE a fresh candidate
     row under the lock, then SELECT the (possibly pre-existing) row by the
@@ -315,7 +372,14 @@ def get_or_create_session(
     the allowed Claude family). When supplied it is persisted on create AND, on a
     repeat attach with a different model, updated — so re-opening a session with a
     new model re-selects it. When None the stored model is left untouched (the
-    turn engine falls back to the env default)."""
+    turn engine falls back to the env default).
+
+    `scope_kind` / `scope_handle` (slice 6b) is the conversation scope envelope
+    the caller attached with. Both or neither; validated here and at the wire.
+    Persisted on create and, on a repeat attach that names a scope, reflected
+    onto the row (last explicit scope wins) WITHOUT bumping updated_at, because
+    re-attaching is not conversation activity and the list orders on it."""
+    _validate_scope(scope_kind, scope_handle)
     ensure_started()
     candidate_id = str(uuid.uuid4())
     now = time.time()
@@ -323,9 +387,11 @@ def get_or_create_session(
         conn = _db()
         conn.execute(
             "INSERT OR IGNORE INTO sessions"
-            " (session_id, tenant_id, drawing_id, status, created_at, updated_at, last_seq, model)"
-            " VALUES (?,?,?,?,?,?,0,?)",
-            (candidate_id, tenant_id, drawing_id, "active", now, now, model),
+            " (session_id, tenant_id, drawing_id, status, created_at, updated_at,"
+            " last_seq, model, scope_kind, scope_handle)"
+            " VALUES (?,?,?,?,?,?,0,?,?,?)",
+            (candidate_id, tenant_id, drawing_id, "active", now, now, model,
+             scope_kind, scope_handle),
         )
         if model is not None:
             # Reflect an explicit model onto the (possibly pre-existing) row.
@@ -333,6 +399,14 @@ def get_or_create_session(
                 "UPDATE sessions SET model = ?, updated_at = ?"
                 " WHERE tenant_id = ? AND drawing_id = ?",
                 (model, now, tenant_id, drawing_id),
+            )
+        if scope_kind is not None:
+            conn.execute(
+                "UPDATE sessions SET scope_kind = ?, scope_handle = ?"
+                " WHERE tenant_id = ? AND drawing_id = ?"
+                " AND (scope_kind IS NOT ? OR scope_handle IS NOT ?)",
+                (scope_kind, scope_handle, tenant_id, drawing_id,
+                 scope_kind, scope_handle),
             )
         conn.commit()
         conn.row_factory = sqlite3.Row
@@ -351,6 +425,86 @@ def get_session(session_id: str) -> Optional[Dict[str, Any]]:
     codebase — see deps.py/require_tenant)."""
     rows = _query("SELECT * FROM sessions WHERE session_id = ?", (session_id,))
     return _row_to_session(rows[0]) if rows else None
+
+
+# --------------------------------------------------------------------------- #
+# list (GET /api/sessions, slice 6b)
+# --------------------------------------------------------------------------- #
+#: Hard cap on one page. routers/sessions.py clamps the wire `limit` to this
+#: too, so the two contracts cannot drift apart silently.
+LIST_MAX_LIMIT = 50
+
+
+def _list_filter_sql(
+    scope_kind: Optional[str], scope_handle: Optional[str], *, placeholder: str,
+    project_column: Optional[str],
+) -> tuple:
+    """The WHERE fragment for one scope filter, shared by both backends.
+
+    A `drawing` scope matches the drawing's session whatever kind it was
+    attached with (an entity-scoped conversation is still that drawing's
+    session); a `project` scope matches the project's rows by their bound
+    project column where one exists (PostgreSQL) and by the stored envelope
+    otherwise; an `entity` scope matches only rows attached with that exact
+    envelope. Bounded: at most two parameters."""
+    if scope_kind is None:
+        return "", ()
+    if scope_kind == "drawing":
+        return f" AND s.drawing_id = {placeholder}", (scope_handle,)
+    if scope_kind == "project" and project_column:
+        return f" AND s.{project_column}::text = {placeholder}", (scope_handle,)
+    return (
+        f" AND s.scope_kind = {placeholder} AND s.scope_handle = {placeholder}",
+        (scope_kind, scope_handle),
+    )
+
+
+def list_sessions(
+    tenant_id: str, *, scope_kind: Optional[str] = None,
+    scope_handle: Optional[str] = None, limit: int = 20,
+    cursor: Optional[tuple] = None,
+) -> tuple:
+    """One tenant's sessions, newest-first on (updated_at DESC, session_id DESC),
+    one bounded query: LIMIT clamped to [1, LIST_MAX_LIMIT], the `turn_count`
+    a correlated COUNT over the row's own `turn_started` events (a PK-prefix
+    scan per listed row, never a per-row round trip), and keyset paging on
+    `cursor = (updated_at, session_id)` from the previous page's last row.
+    Returns `(rows, next_cursor)`; `next_cursor` is None on the last page.
+    Tenant-scoped by construction: the WHERE names the caller's tenant_id and
+    nothing else can widen it."""
+    _validate_scope(scope_kind, scope_handle)
+    bounded = max(1, min(int(limit), LIST_MAX_LIMIT))
+    filter_sql, filter_args = _list_filter_sql(
+        scope_kind, scope_handle, placeholder="?", project_column=None,
+    )
+    cursor_sql, cursor_args = "", ()
+    if cursor is not None:
+        after_updated, after_id = float(cursor[0]), str(cursor[1])
+        cursor_sql = (
+            " AND (s.updated_at < ? OR (s.updated_at = ? AND s.session_id < ?))"
+        )
+        cursor_args = (after_updated, after_updated, after_id)
+    rows = _query(
+        "SELECT s.*,"
+        " (SELECT COUNT(*) FROM session_events e"
+        "  WHERE e.session_id = s.session_id AND e.type = 'turn_started')"
+        " AS turn_count"
+        " FROM sessions s WHERE s.tenant_id = ?"
+        f"{filter_sql}{cursor_sql}"
+        " ORDER BY s.updated_at DESC, s.session_id DESC LIMIT ?",
+        (tenant_id, *filter_args, *cursor_args, bounded + 1),
+    )
+    page = list(rows)[:bounded]
+    out = []
+    for row in page:
+        session = _row_to_session(row)
+        session["turn_count"] = int(row["turn_count"] or 0)
+        out.append(session)
+    next_cursor = None
+    if len(rows) > bounded and page:
+        last = page[-1]
+        next_cursor = (float(last["updated_at"] or 0.0), str(last["session_id"]))
+    return out, next_cursor
 
 
 # --------------------------------------------------------------------------- #
@@ -383,6 +537,16 @@ def append_event(session_id: str, turn_id: Optional[str], type: str,
             "UPDATE sessions SET last_seq = ?, updated_at = ? WHERE session_id = ?",
             (seq, now, session_id),
         )
+        if type == "turn_started":
+            # Slice 6b: the listed title is the FIRST user text, written once
+            # in the same transaction as the event that carries it. `title IS
+            # NULL` keeps every later turn from rewriting it.
+            title = title_from_turn_started(data)
+            if title is not None:
+                conn.execute(
+                    "UPDATE sessions SET title = ? WHERE session_id = ? AND title IS NULL",
+                    (title, session_id),
+                )
         if type in ("turn_complete", "error") and turn_id is not None:
             # Publish the terminal event and release its active-turn CAS in the
             # same transaction. A transcript reader that sees the terminal
@@ -827,6 +991,7 @@ def unconsume_approval(confirmation_id: str, session_id: str, tenant_id: str) ->
 _legacy_ensure_started = ensure_started
 _legacy_get_or_create_session = get_or_create_session
 _legacy_get_session = get_session
+_legacy_list_sessions = list_sessions
 _legacy_append_event = append_event
 _legacy_append_confirmation_resolved_once = append_confirmation_resolved_once
 _legacy_events_after = events_after
@@ -908,6 +1073,11 @@ def _pg_session(row: Dict[str, Any]) -> Dict[str, Any]:
         "active_turn_id": row["active_turn_id"],
         "turn_started_at": row["turn_started_at"],
         "model": row["model"],
+        # 0053 columns; `.get` so a row read during the migration's own
+        # rollout (column not yet present) projects NULL rather than raising.
+        "scope_kind": row.get("scope_kind"),
+        "scope_handle": row.get("scope_handle"),
+        "title": row.get("title"),
     }
     # Keep legacy and unscoped PostgreSQL responses byte-compatible.  The
     # project keys appear only for a project-bound durable conversation.
@@ -971,7 +1141,9 @@ def _pg_get_or_create_session(
     session_id: Optional[str] = None, created_at: Optional[float] = None,
     model: Optional[str] = None,
     org_id: Optional[str] = None, project_id: Optional[str] = None,
+    scope_kind: Optional[str] = None, scope_handle: Optional[str] = None,
 ) -> Dict[str, Any]:
+    _validate_scope(scope_kind, scope_handle)
     project_scoped = org_id is not None or project_id is not None
     if project_scoped:
         if org_id is None or project_id is None:
@@ -995,17 +1167,29 @@ def _pg_get_or_create_session(
             conn.execute(
                 "INSERT INTO app_sessions"
                 " (session_id, tenant_id, drawing_id, status, created_at,"
-                " updated_at, last_seq, model, org_id, project_id)"
-                " VALUES (%s,%s,%s,'active',%s,%s,0,%s,%s,%s)"
+                " updated_at, last_seq, model, org_id, project_id,"
+                " scope_kind, scope_handle)"
+                " VALUES (%s,%s,%s,'active',%s,%s,0,%s,%s,%s,%s,%s)"
                 " ON CONFLICT DO NOTHING",
                 (candidate_id, storage_tenant, drawing_id, now, now, model,
-                 canonical_org, canonical_project),
+                 canonical_org, canonical_project, scope_kind, scope_handle),
             )
             if model is not None:
                 conn.execute(
                     "UPDATE app_sessions SET model = %s, updated_at = %s"
                     " WHERE org_id = %s AND project_id = %s",
                     (model, now, canonical_org, canonical_project),
+                )
+            if scope_kind is not None:
+                # Last explicit scope wins; never bumps updated_at (see the
+                # legacy twin's docstring).
+                conn.execute(
+                    "UPDATE app_sessions SET scope_kind = %s, scope_handle = %s"
+                    " WHERE org_id = %s AND project_id = %s"
+                    " AND (scope_kind IS DISTINCT FROM %s"
+                    "      OR scope_handle IS DISTINCT FROM %s)",
+                    (scope_kind, scope_handle, canonical_org, canonical_project,
+                     scope_kind, scope_handle),
                 )
             row = conn.execute(
                 "SELECT * FROM app_sessions WHERE org_id = %s AND project_id = %s",
@@ -1014,16 +1198,27 @@ def _pg_get_or_create_session(
         else:
             conn.execute(
                 "INSERT INTO app_sessions"
-                " (session_id, tenant_id, drawing_id, status, created_at, updated_at, last_seq, model)"
-                " VALUES (%s,%s,%s,'active',%s,%s,0,%s)"
+                " (session_id, tenant_id, drawing_id, status, created_at, updated_at,"
+                " last_seq, model, scope_kind, scope_handle)"
+                " VALUES (%s,%s,%s,'active',%s,%s,0,%s,%s,%s)"
                 " ON CONFLICT (tenant_id, drawing_id) DO NOTHING",
-                (candidate_id, tenant_id, drawing_id, now, now, model),
+                (candidate_id, tenant_id, drawing_id, now, now, model,
+                 scope_kind, scope_handle),
             )
             if model is not None:
                 conn.execute(
                     "UPDATE app_sessions SET model = %s, updated_at = %s"
                     " WHERE tenant_id = %s AND drawing_id = %s",
                     (model, now, tenant_id, drawing_id),
+                )
+            if scope_kind is not None:
+                conn.execute(
+                    "UPDATE app_sessions SET scope_kind = %s, scope_handle = %s"
+                    " WHERE tenant_id = %s AND drawing_id = %s"
+                    " AND (scope_kind IS DISTINCT FROM %s"
+                    "      OR scope_handle IS DISTINCT FROM %s)",
+                    (scope_kind, scope_handle, tenant_id, drawing_id,
+                     scope_kind, scope_handle),
                 )
             row = conn.execute(
                 "SELECT * FROM app_sessions WHERE tenant_id = %s AND drawing_id = %s",
@@ -1040,6 +1235,62 @@ def _pg_get_session(session_id: str) -> Optional[Dict[str, Any]]:
         cur.execute("SELECT * FROM app_sessions WHERE session_id = %s", (session_id,))
         row = cur.fetchone()
     return _pg_session(row) if row else None
+
+
+#: Statement timeout for the one list query: it is bounded by LIMIT and served
+#: from idx_app_sessions_{tenant,org}_recent, so a query that outlives this is
+#: a stuck backend, not a big page, and the caller fails closed instead of
+#: holding a pool connection.
+_PG_LIST_STATEMENT_TIMEOUT_MS = 5000
+
+
+def _pg_list_sessions(
+    tenant_id: str, *, scope_kind: Optional[str] = None,
+    scope_handle: Optional[str] = None, limit: int = 20,
+    cursor: Optional[tuple] = None,
+) -> tuple:
+    """PostgreSQL twin of the legacy list. The tenant term covers BOTH storage
+    tenancies 0039 introduced: unscoped rows carry the tenant as tenant_id,
+    project-bound rows carry it as org_id (their tenant_id is the reserved
+    `project:<org>:<project>` marker). The router still re-reads project
+    membership per listed project before a project row reaches a client."""
+    _validate_scope(scope_kind, scope_handle)
+    bounded = max(1, min(int(limit), LIST_MAX_LIMIT))
+    filter_sql, filter_args = _list_filter_sql(
+        scope_kind, scope_handle, placeholder="%s", project_column="project_id",
+    )
+    cursor_sql, cursor_args = "", ()
+    if cursor is not None:
+        after_updated, after_id = float(cursor[0]), str(cursor[1])
+        cursor_sql = (
+            " AND (s.updated_at < %s OR (s.updated_at = %s AND s.session_id < %s))"
+        )
+        cursor_args = (after_updated, after_updated, after_id)
+    db = _platform_db()
+    with db.transaction(read_only=True) as conn:
+        conn.execute(f"SET LOCAL statement_timeout = {int(_PG_LIST_STATEMENT_TIMEOUT_MS)}")
+        rows = conn.execute(
+            "SELECT s.*,"
+            " (SELECT COUNT(*) FROM app_session_events e"
+            "  WHERE e.session_id = s.session_id AND e.type = 'turn_started')"
+            " AS turn_count"
+            " FROM app_sessions s"
+            " WHERE (s.tenant_id = %s OR s.org_id::text = %s)"
+            f"{filter_sql}{cursor_sql}"
+            " ORDER BY s.updated_at DESC, s.session_id DESC LIMIT %s",
+            (tenant_id, tenant_id, *filter_args, *cursor_args, bounded + 1),
+        ).fetchall()
+    page = list(rows)[:bounded]
+    out = []
+    for row in page:
+        session = _pg_session(row)
+        session["turn_count"] = int(row.get("turn_count") or 0)
+        out.append(session)
+    next_cursor = None
+    if len(rows) > bounded and page:
+        last = page[-1]
+        next_cursor = (float(last["updated_at"] or 0.0), str(last["session_id"]))
+    return out, next_cursor
 
 
 def _legacy_turn_fence(session_id: str) -> Optional[tuple]:
@@ -1100,6 +1351,14 @@ def _pg_append_event(
             (session_id, seq, turn_id, type,
              json.dumps(data if data is not None else {}), now),
         )
+        if type == "turn_started":
+            title = title_from_turn_started(data)
+            if title is not None:
+                conn.execute(
+                    "UPDATE app_sessions SET title = %s"
+                    " WHERE session_id = %s AND title IS NULL",
+                    (title, session_id),
+                )
         if type in ("turn_complete", "error") and turn_id is not None:
             conn.execute(
                 "UPDATE app_sessions SET active_turn_id = NULL,"
@@ -1443,6 +1702,7 @@ def ensure_started() -> None:
 def get_or_create_session(
     tenant_id: str, drawing_id: str, model: Optional[str] = None,
     *, org_id: Optional[str] = None, project_id: Optional[str] = None,
+    scope_kind: Optional[str] = None, scope_handle: Optional[str] = None,
 ) -> Dict[str, Any]:
     mode = _store_mode()
     project_scoped = org_id is not None or project_id is not None
@@ -1452,18 +1712,23 @@ def get_or_create_session(
     if mode == "postgres":
         return _pg_get_or_create_session(
             tenant_id, drawing_id, model=model, org_id=org_id,
-            project_id=project_id,
+            project_id=project_id, scope_kind=scope_kind,
+            scope_handle=scope_handle,
         )
     if mode in _DUAL_WRITE_MODES:
         # Do not mutate the legacy authority when its required mirror is
         # already known to be unavailable.
         _pg_ensure_started()
-    legacy = _legacy_get_or_create_session(tenant_id, drawing_id, model)
+    legacy = _legacy_get_or_create_session(
+        tenant_id, drawing_id, model,
+        scope_kind=scope_kind, scope_handle=scope_handle,
+    )
     if mode in _DUAL_WRITE_MODES:
         postgres = _pg_get_or_create_session(
             tenant_id, drawing_id,
             session_id=legacy["session_id"], created_at=legacy["created_at"],
             model=legacy["model"],
+            scope_kind=legacy["scope_kind"], scope_handle=legacy["scope_handle"],
         )
         _shadow_equal("session identity", legacy["session_id"], postgres["session_id"])
         if mode in _SHADOW_READ_MODES:
@@ -1481,6 +1746,32 @@ def get_session(session_id: str) -> Optional[Dict[str, Any]]:
     if mode in _SHADOW_READ_MODES:
         _shadow_equal("session", legacy, _pg_get_session(session_id))
     return legacy
+
+
+def list_sessions(
+    tenant_id: str, *, scope_kind: Optional[str] = None,
+    scope_handle: Optional[str] = None, limit: int = 20,
+    cursor: Optional[tuple] = None,
+) -> tuple:
+    """`(rows, next_cursor)` for GET /api/sessions, on whichever authority the
+    mode selects. Reads never mirror.
+
+    DELIBERATELY NOT shadow-compared, unlike the single-row reads above. The
+    PostgreSQL tenant term is a strict SUPERSET of the legacy one (0039 stores a
+    project-bound row under `org_id` with a reserved `tenant_id` marker, and
+    the legacy store cannot hold one at all), so the two backends answer with
+    different ROW SETS by construction. A page is a window over a row set, so
+    one project row shifts every later row across the page boundary and a
+    comparison would raise on a correct pair of answers. Row-level drift is
+    already covered where it is comparable: `get_session`'s shadow read.
+    """
+    mode = _store_mode()
+    kwargs = dict(
+        scope_kind=scope_kind, scope_handle=scope_handle, limit=limit, cursor=cursor,
+    )
+    if mode == "postgres":
+        return _pg_list_sessions(tenant_id, **kwargs)
+    return _legacy_list_sessions(tenant_id, **kwargs)
 
 
 def append_event(

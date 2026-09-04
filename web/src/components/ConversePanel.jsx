@@ -901,7 +901,14 @@ export default function ConversePanel({
         </section>
       )}
 
-      <div className="converse-log" ref={logRef} onScroll={onLogScroll} role="log" aria-live="polite" aria-atomic="false" aria-label="Assistant conversation">
+      <LiveRegion
+        className="converse-log"
+        ref={logRef}
+        onScroll={onLogScroll}
+        role="log"
+        atomic={false}
+        label="Assistant conversation"
+      >
         {model.turns.length === 0 && pendingUserTurns.length === 0 && (
           <div className="converse-note">
             <span className="dot hollow" aria-hidden="true" />
@@ -948,7 +955,7 @@ export default function ConversePanel({
             </div>
           </div>
         ))}
-      </div>
+      </LiveRegion>
 
       {secretNotice && (
         <div className="converse-secret-notice" role="alert" data-testid="converse-secret-notice">

@@ -92,7 +92,7 @@ export default function EditSurface({ enabled = ENV_CAD_EDIT }) {
           </div>
         ))}
       </div>
-      <p role="status" aria-live="polite">{status}</p>
+      <LiveRegion as="p" role="status">{status}</LiveRegion>
     </section>
   )
 }

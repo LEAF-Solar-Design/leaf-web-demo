@@ -7,7 +7,7 @@ import {
   retryAnnotation,
   undoAnnotation,
 } from './annotationClient.js'
-import { openStream } from './converse.js'
+import { ensureSession, normalizeScope, openStream, sessionCacheKey } from './converse.js'
 
 const EVENT_TYPES = new Set([
   'annotation_previewed',
@@ -23,7 +23,55 @@ function actionKey(prefix) {
   return `${prefix}-${nonce}`
 }
 
-export function useAnnotations(sessionId, { enabled = true } = {}) {
+/**
+ * Resolve `session` -> a session id, for the TWO shapes this hook accepts
+ * since slice 6b:
+ *
+ *   useAnnotations(sessionId, ...)          a bare id, exactly as before
+ *   useAnnotations({kind, handle, drawingId?}, ...)   a conversation scope
+ *
+ * A scope is attached with the SAME idempotent `ensureSession` cache the
+ * composer uses, so a scope and a bare id for the same conversation resolve to
+ * one session and one stream, never two. Until it resolves (and forever, if
+ * the attach fails) the hook holds `null`, which is the disabled path it has
+ * always had: no fetch, no stream, no annotation card. Fails closed; never
+ * throws into the caller's render.
+ */
+function useResolvedSessionId(session, enabled) {
+  const isScope = !!session && typeof session === 'object'
+  const scope = isScope ? normalizeScope(session) : null
+  // A stable primitive dependency: two structurally equal scope OBJECTS are
+  // different identities every render, which would restart the attach on every
+  // render. The cache key is what actually names the conversation.
+  const scopeKey = scope ? sessionCacheKey(scope) : null
+  const [resolved, setResolved] = useState(null)
+  useEffect(() => {
+    if (!isScope) return undefined
+    if (!enabled || !scopeKey || !scope) {
+      setResolved(null)
+      return undefined
+    }
+    let live = true
+    setResolved(null)
+    ensureSession(scope)
+      .then((created) => {
+        if (live && created && created.session_id) setResolved(created.session_id)
+      })
+      .catch(() => {
+        // The annotation lane degrades to "no card", the same as an
+        // unattached session. The composer surfaces the attach failure.
+        if (live) setResolved(null)
+      })
+    return () => { live = false }
+    // `scope` is rebuilt from `session` each render; `scopeKey` is its identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isScope, enabled, scopeKey])
+  if (!isScope) return typeof session === 'string' && session ? session : null
+  return resolved
+}
+
+export function useAnnotations(session, { enabled = true } = {}) {
+  const sessionId = useResolvedSessionId(session, enabled)
   const [annotation, setAnnotation] = useState(null)
   const [loaded, setLoaded] = useState(false)
   const [busy, setBusy] = useState(false)
