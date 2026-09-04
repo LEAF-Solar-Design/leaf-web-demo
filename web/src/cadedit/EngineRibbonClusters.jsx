@@ -207,11 +207,20 @@ export function saveReason(session, canSave) {
 // cockpit is not mounted, which makes the caller render inline.
 function useSlot(id) {
   const [node, setNode] = useState(null)
+  // No dependency list on purpose. A slot that lives inside the tab-switched
+  // cluster list (the Clipboard seat, W4g-5c) is unmounted and re-created as
+  // a NEW node on every switch away from its tab and back, and a lookup
+  // keyed on the id alone kept portaling into the detached original: the
+  // panel rendered empty after the first tab switch and the proof's copy
+  // click found nothing to click. Resolving after every render and bailing
+  // out on the same node costs one getElementById per render and no extra
+  // commit; the band and prompt slots are stable nodes and behave as before.
   useEffect(() => {
     if (typeof document === 'undefined') return undefined
-    setNode(document.getElementById(id) || null)
+    const found = document.getElementById(id) || null
+    setNode((prev) => (prev === found ? prev : found))
     return undefined
-  }, [id])
+  })
   return node
 }
 
