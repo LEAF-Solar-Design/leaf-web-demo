@@ -481,7 +481,17 @@ export function reasonlessDisabled(src, mapsByName = new Map()) {
 // already has, once: rebasing this change onto a main that had meanwhile
 // resolved 5 of the original 16 dropped the live count to 11, and this
 // pin caught it — see the git history of this line for the receipt.)
-const UNVERIFIABLE_REASON_BUDGET = 11
+//
+// Raised 11 -> 12 by W4g-5c, deliberately and with the gate's own sanction.
+// The twelfth is the Clipboard cluster in EngineRibbonClusters.jsx, a THIRD
+// engine group rendering `action.when(engineCtx)` exactly as the Draw and
+// Modify clusters already do (both already inside this budget). The reason
+// is not unverified, only statically unreadable from here: it comes from a
+// pure ladder function with its own unit rows, and actionRegistry throws at
+// runtime on any `when()` result outside KNOWN_REASON_VALUES, which is the
+// check this gate cannot perform through a variable. A fourth engine group
+// would land here the same way; anything else must earn its own line.
+const UNVERIFIABLE_REASON_BUDGET = 12
 
 /**
  * Whether an "unverifiable reason expressions" count holds against its

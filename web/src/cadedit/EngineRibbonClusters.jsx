@@ -176,6 +176,11 @@ export const PROMPTS = Object.freeze({
     { ask: 'Enter number of items, including the source:', fields: [['count', 'items', 'numeric']] },
     { ask: 'Specify angle to fill:', fields: [['totalDeg', 'angle to fill']] },
   ] },
+  // W4g-5c: PASTE asks where to put it. The record's anchor (a centre for
+  // a circle or an arc, the first vertex otherwise) lands on this point.
+  pasteClip: { verb: 'PASTE', steps: [
+    { ask: 'Specify insertion point:', fields: [['x', 'x'], ['y', 'y']] },
+  ] },
   moveVertex: { verb: 'MOVE VERTEX', steps: [
     { ask: 'Specify vertex:', fields: [['vertexIndex', 'vertex', 'numeric']] },
     { ask: 'Specify displacement:', fields: [['dx', 'dx'], ['dy', 'dy']] },
@@ -219,7 +224,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const modify = modifyReason(session, reach)
   const draw = drawReason(session, reach)
   const save = saveReason(session, canSave)
-  const { applyEdit, create } = session.actions
+  const { applyEdit, create, copyToClipboard, pasteFromClipboard } = session.actions
   const quickSlot = useSlot(QUICK_FILE_SLOT_ID)
   const promptSlot = useSlot(PROMPT_SLOT_ID)
   const show = new Set(Array.isArray(panels) ? panels : [])
@@ -310,6 +315,9 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     onActivate: (group, op) => {
       if (PROMPTS[op]) { toggleArmed(group, op); return }
       if (group === 'draw') create(op, inputs)
+      // W4g-5c: CUT and COPY touch no engine op at all, so they are neither
+      // a create nor an edit; PASTE arms its base-point prompt above.
+      else if (op === 'copyClip' || op === 'cutClip') copyToClipboard(op === 'cutClip')
       else applyEdit(op, inputs)
     },
   }
@@ -326,6 +334,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     }
     chainRef.current = armedOp === 'createLine' ? { x: effective.x2, y: effective.y2 } : null
     if (armedGroup === 'draw') create(armedOp, effective)
+    else if (armedOp === 'pasteClip') pasteFromClipboard(effective)
     else applyEdit(armedOp, effective)
   }
   const cancel = () => {
@@ -643,6 +652,31 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
             )
           })}
           {MODIFY_OFF.map((tool) => <RibbonTool key={tool.id} tool={offTool(tool)} />)}
+        </RibbonCluster>
+      )}
+      {show.has('clipboard') && (
+        <RibbonCluster id="clipboard" label="Clipboard">
+          {forGroup('clipboard').map((action) => {
+            const reason = action.when(engineCtx)
+            return (
+              <RibbonTool
+                key={action.op}
+                tool={{
+                  id: action.id,
+                  label: action.label,
+                  text: action.text,
+                  icon: action.icon,
+                  size: action.size,
+                  title: action.title(engineCtx),
+                  write: action.write,
+                  disabled: !!reason,
+                  reason,
+                  ...armedAttrs(action.op),
+                  onClick: () => action.run(engineCtx),
+                }}
+              />
+            )
+          })}
         </RibbonCluster>
       )}
       {promptRow && (promptSlot ? createPortal(promptRow, promptSlot) : promptRow)}

@@ -2555,7 +2555,9 @@ export default function App() {
       writeEntitled: canRunWrite,
       engineDirty,
     })
-    const [annotation, block, properties, groups, clipboard] = referencePanels()
+    // W4g-5c: the Clipboard panel is REAL now and the engine consumer
+    // renders it, so referencePanels no longer supplies a placeholder.
+    const [annotation, block, properties, groups] = referencePanels()
     // The reference's Draw tab: Draw, Modify (engine children, rendered
     // first), Annotation, Layers, Block, Properties, Groups, Clipboard.
     const byTab = {
@@ -3055,7 +3057,7 @@ export default function App() {
                 <EngineRibbonClusters
                   importOpen={importOpen}
                   onToggleImport={() => setImportOpen((o) => !o)}
-                  panels={ribbonTab === 'insert' ? ['file'] : ribbonTab === 'draw' ? ['draw', 'modify'] : []}
+                  panels={ribbonTab === 'insert' ? ['file'] : ribbonTab === 'draw' ? ['draw', 'modify', 'clipboard'] : []}
                 />
               )}
               {/* W4f slice B: the command line's typed words (LINE, C, MOVE ...)

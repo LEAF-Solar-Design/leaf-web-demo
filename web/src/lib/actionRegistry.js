@@ -110,6 +110,13 @@ export const MODIFY_REASONS = Object.freeze({
   readOnlyKind: 'read-only entity kind',
 })
 
+// W4g-5c: the clipboard's ladder. CUT and COPY answer to the Modify ladder
+// (they act on a selection); PASTE does not need a selection at all, it needs
+// a record on the clipboard, so it has its own last rung.
+export const CLIPBOARD_REASONS = Object.freeze({
+  empty: 'nothing on the clipboard yet',
+})
+
 // W4g-1b: while the engine holds no document, the reach state (the provider's
 // record of opening the console's own drawing) names what is happening, or
 // why it could not happen, instead of the bare "no drawing" sentence. Only
@@ -133,6 +140,7 @@ export const KNOWN_REASON_VALUES = Object.freeze(new Set([
   ...Object.values(REASONS),
   ...Object.values(DRAW_REASONS),
   ...Object.values(MODIFY_REASONS),
+  ...Object.values(CLIPBOARD_REASONS),
   ...Object.values(LADDER_REASONS),
 ]))
 
@@ -158,6 +166,18 @@ export function modifyReason(session, reach = null) {
   if (session.busy) return MODIFY_REASONS.busy
   if (!session.selected) return MODIFY_REASONS.noSelection
   if (session.selected.editable === false) return MODIFY_REASONS.readOnlyKind
+  return ''
+}
+
+/**
+ * PASTE's ladder: everything the document itself must satisfy (through the
+ * draw ladder, since a paste CREATES and needs no selection), then the
+ * clipboard's own emptiness.
+ */
+export function clipboardReason(session, reach = null) {
+  const document = drawReason(session, reach)
+  if (document) return document
+  if (!session?.clipboard) return CLIPBOARD_REASONS.empty
   return ''
 }
 
@@ -384,9 +404,13 @@ const engineOp = (group, op, label, display, icon, title, size) => ({
   title: text(title),
   // W4g-1b: the reach state rides the context so a button's reason says
   // what the panel note says while the console's drawing is opening.
+  // Each engine group answers to its own ladder: draw needs a document,
+  // modify needs a selection, and paste needs a clipboard rather than either.
   when: group === 'draw'
     ? (ctx) => drawReason(ctx.session, ctx.reach)
-    : (ctx) => modifyReason(ctx.session, ctx.reach),
+    : op === 'pasteClip'
+      ? (ctx) => clipboardReason(ctx.session, ctx.reach)
+      : (ctx) => modifyReason(ctx.session, ctx.reach),
   // Arming vs. running is the consumer's decision (a tool with operands opens
   // the command prompt; one without runs on click), so the record names the
   // one handler and passes the op.
@@ -460,6 +484,10 @@ const ACTION_LIST = [
   engineOp('modify', 'offset', 'offset', 'Offset', 'offset', 'Draw a parallel copy of the selection, the distance you give, on the side you click', 'small'),
   engineOp('modify', 'arrayRect', 'array', 'Array', 'array', 'Copy the selection into a grid of rows and columns', 'small'),
   engineOp('modify', 'arrayPolar', 'array-polar', 'Polar array', 'array-polar', 'Copy the selection around a centre point through an angle', 'small'),
+  // W4g-5c: the reference's Clipboard panel, in its order and its sizes.
+  engineOp('clipboard', 'pasteClip', 'paste', 'Paste', 'paste', 'Paste the clipboard entity at a base point', 'large'),
+  engineOp('clipboard', 'cutClip', 'cut', 'Cut', 'cut', 'Put the selection on the clipboard and delete it', 'small'),
+  engineOp('clipboard', 'copyClip', 'copy-clip', 'Copy', 'copy', 'Put the selection on the clipboard', 'small'),
 
   // The "/" picker's CLIENT commands. `clientAction` is the key composer.js's
   // filterRunnable gates on: a command whose handler is missing is dropped

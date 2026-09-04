@@ -40,6 +40,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { EngineBoundary } from '../cad/engineWorker.js'
 import { SESSION_ERROR } from './engineSessionErrors.js'
 import { offsetEntity } from './offset.js'
+import { clipboardRecord, describeRecord, pasteOp } from './clipboard.js'
 import { diffPlan } from './mutationDiff.js'
 
 // Mirrors the worker's own bound. Checked against File.size BEFORE any read.
@@ -98,6 +99,12 @@ const INITIAL_SESSION = Object.freeze({
   errorKind: null,
   receipt: null,
   savedVersion: null,
+  // W4g-5c: the session clipboard, ONE frozen record of copied geometry.
+  // Not bytes and not a live entity: an entity would go stale the moment
+  // the document is edited, since the list is replaced wholesale on every
+  // apply. Survives a document switch on purpose, the way every clipboard
+  // a drafter already uses does; cleared only by reset.
+  clipboard: null,
   // W4f slice F: how many engine edits can be undone / redone right now.
   // The snapshots themselves (whole-document bytes) live in refs, never in
   // React state; these counts are what the affordances read.
@@ -844,9 +851,42 @@ export default function useEngineSession({
 
   useEffect(() => () => { teardown() }, [teardown])
 
+  // W4g-5c CUT / COPY / PASTE. No engine op: a copy is a record of the
+  // selection's own geometry, and a paste is one create at a base point
+  // through the same path the Draw group uses.
+  const copyToClipboard = useCallback((cut = false) => {
+    const { entities, selectedId } = sessionRef.current
+    const entity = entities.find((candidate) => candidate.id === selectedId)
+    const verb = cut ? 'Cut' : 'Copy'
+    if (!entity) {
+      patch({ errorKind: SESSION_ERROR.REFUSED, status: `${verb} refused: select an entity first.` })
+      return
+    }
+    // The record is taken BEFORE anything is deleted, so a cut that cannot be
+    // put on the clipboard leaves the drawing exactly as it was.
+    const { record, refusal } = clipboardRecord(entity, verb)
+    if (refusal) {
+      patch({ errorKind: SESSION_ERROR.REFUSED, status: refusal })
+      return
+    }
+    patch({ clipboard: record, errorKind: null, status: `${verb}: ${describeRecord(record)} is on the clipboard.` })
+    if (cut) applyEdit('delete', {})
+  }, [applyEdit, patch])
+
+  const pasteFromClipboard = useCallback((inputs) => {
+    const record = sessionRef.current.clipboard
+    const answer = pasteOp(record, readNumber(inputs?.x), readNumber(inputs?.y))
+    if (answer.refusal) {
+      patch({ errorKind: SESSION_ERROR.REFUSED, status: answer.refusal })
+      return
+    }
+    create(answer.op, answer.inputs)
+  }, [create, patch])
+
   const actions = useMemo(() => ({
     open, openBytes, select, applyEdit, create, save, reset, undo, redo,
-  }), [applyEdit, create, open, openBytes, redo, reset, save, select, undo])
+    copyToClipboard, pasteFromClipboard,
+  }), [applyEdit, copyToClipboard, create, open, openBytes, pasteFromClipboard, redo, reset, save, select, undo])
 
   const selected = useMemo(
     () => session.entities.find((entity) => entity.id === session.selectedId) || null,
