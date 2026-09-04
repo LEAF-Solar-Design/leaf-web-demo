@@ -316,7 +316,13 @@ describe('App.jsx wiring', () => {
     // ...and that gate is the ONLY thing deciding it, on every FootRegion:
     // three mounts, each reading the same binding, so they cannot disagree
     // about whether the bar is regioned and leave a half-wrapped footer.
-    const gated = stripped.match(/React\.createElement\(\s*FootRegion,\s*\{\s*on:\s*footRegions\b/g) || []
+    // Built from a string, not a regex literal: the honesty gate masks
+    // comments and STRINGS and then balances braces per file, and it cannot
+    // see a regex literal, so an escaped `\{` with no partner in one reads to
+    // it as an unclosed block and the whole file is reported as untrustworthy
+    // ("braces do not balance after comment/string masking"). Same pattern,
+    // same match; the braces now sit inside a masked string.
+    const gated = stripped.match(new RegExp('React\\.createElement\\(\\s*FootRegion,\\s*\\{\\s*on:\\s*footRegions\\b', 'g')) || []
     assert.equal(gated.length, 3, `expected 3 FootRegion mounts on footRegions, saw ${gated.length}`)
     assert.equal((stripped.match(/React\.createElement\(\s*FootRegion\b/g) || []).length, 3)
   })
@@ -331,7 +337,8 @@ describe('App.jsx wiring', () => {
     // the mount on data (legendEl || readoutEl) is the white-screen shape.
     assert.match(
       stripped,
-      /if \(studioGround && dockSections && wideViewport\) \{\s*return[^;]*React\.createElement\(\s*PropertiesDock/,
+      // A string for the same reason as the FootRegion pin above.
+      new RegExp('if \\(studioGround && dockSections && wideViewport\\) \\{\\s*return[^;]*React\\.createElement\\(\\s*PropertiesDock'),
     )
     assert.doesNotMatch(
       stripped,
@@ -385,8 +392,20 @@ describe('App.jsx wiring', () => {
     })
 
     it('the ref and the ribbon state are written by the one dirty-change callback the provider gets', () => {
-      assert.match(stripped, /onEngineDirtyChange = useCallback\(\(dirty\) => \{\s*engineDirtyRef\.current = !!dirty;\s*setEngineDirty\(!!dirty\);/)
-      assert.match(stripped, /React\.createElement\(\s*EngineSessionProvider,\s*\{[^}]*onDirtyChange:\s*onEngineDirtyChange/)
+      // Read as text spans rather than one brace-carrying pattern: the
+      // honesty gate's scanner masks comments and strings and then balances
+      // braces per file, and an escaped `\{` inside a regex literal reads to
+      // it as an unclosed block (it reported this very file rather than
+      // silently trusting it).
+      const start = stripped.indexOf('onEngineDirtyChange = useCallback')
+      assert.notEqual(start, -1, 'App must declare onEngineDirtyChange')
+      const body = stripped.slice(start, start + 220)
+      assert.match(body, /engineDirtyRef\.current = !!dirty/)
+      assert.match(body, /setEngineDirty\(!!dirty\)/)
+      const provider = stripped.indexOf('React.createElement(EngineSessionProvider')
+      const providerLoose = provider === -1 ? stripped.indexOf('EngineSessionProvider,') : provider
+      assert.notEqual(providerLoose, -1, 'the provider must be mounted')
+      assert.match(stripped.slice(providerLoose, providerLoose + 400), /onDirtyChange:\s*onEngineDirtyChange/)
     })
 
     it('armDecision and onRun share the one write predicate', () => {

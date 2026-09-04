@@ -14,7 +14,11 @@ test('checkout conflict, expiry, take, and release stay authoritative in the uni
 
   const seed = await request.post(`${API_BASE}/api/drawings/${DRAWING_ID}/checkout`, {
     headers: TENANT_HEADERS,
-    data: { holder: OTHER_HOLDER, ttl_s: 30 },
+    // See the twin in console-checkout-ownership.spec.mjs: a 30 s lease can
+    // expire during a cold boot, and an expired lock is free by design, so
+    // the row went red on correct behaviour. The expiry half is the
+    // deliberate 0.5 s lease below.
+    data: { holder: OTHER_HOLDER, ttl_s: 300 },
   })
   expect(seed.status()).toBe(200)
   const seedBody = await seed.json()
