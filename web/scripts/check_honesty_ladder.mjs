@@ -10,18 +10,27 @@
 // and `undefined` is silent: no test, no build error, no console warning.
 //
 // The four checks:
-//   1. REASON MAPS. Every `export const *REASONS` under web/src is
+//   1. REASON MAPS. Every `const *REASONS` under web/src (exported or not) is
 //      Object.freeze'd and every value is a non-empty sentence (>= 12 chars, no
 //      TODO/tbd/???). Every `SOMETHING_REASONS.key` reference anywhere under
 //      web/src resolves to a key that map actually defines.
 //   2. DISABLED RECORDS. Every object literal in ribbonClusters.js and
-//      EngineRibbonClusters.jsx that declares `disabled:` also declares
-//      `reason` (`disabled: false` is exempt: a control that is never taken
-//      away owes no explanation).
+//      EngineRibbonClusters.jsx that declares `disabled:` also declares a
+//      `reason` that holds up (`disabled: false` is exempt: a control that is
+//      never taken away owes no explanation). A `reason` isn't just a key
+//      that must exist — its value is judged by what it IS: a plain string
+//      runs the same prose rule check 1 runs on a map entry (so `reason: ''`
+//      or `reason: 'TODO'` fails exactly as a map entry would), a
+//      `SOME_REASONS.key` reference is resolved the way check 1 resolves one
+//      (a dangling key fails), and anything else — a template literal, a
+//      function call, a ternary — is an expression this scanner declines to
+//      evaluate, so it is counted under "unverifiable reason expressions"
+//      rather than judged silently pass/fail.
 //   3. ABSENT CONTRACT SLOTS. Every slot in productSurfaces.js's PRODUCT_SURFACES
-//      contract that is null / false / 'none' on some surface is named in
-//      docs/convergence/SURFACE-CONTRACT.md's field table, so the reader can
-//      find out why it is absent.
+//      contract that is absent — null, undefined, false, 'none', or an empty
+//      array, every spelling a surface has used to mean "nothing renders
+//      here" — on some surface is named in docs/convergence/SURFACE-CONTRACT.md's
+//      field table, so the reader can find out why it is absent.
 //   4. POSITIVE CONTROL. Fixture sources with a disabled-and-reasonless record,
 //      an unfrozen map, a placeholder reason and a dangling key each FAIL the
 //      same functions checks 1-3 run. A gate nobody has watched go red is a
@@ -38,14 +47,22 @@
 //     holding an unbalanced quote or brace would confuse the scanner, so every
 //     file this gate parses deeply must brace-balance after masking or it is
 //     reported as unparseable (a violation, not a silent skip).
-//   - Reason maps are matched by EXPORT NAME across the whole tree, not by
-//     import graph. Two different files exporting the same map name would
+//   - Reason maps are matched by DECLARED NAME across the whole tree, not by
+//     import graph. Two different files declaring the same map name would
 //     collide, so the gate refuses that outright (check 1e).
-//   - A reason value must be a plain quoted string. A computed or templated
-//     value is a violation, because a sentence a human can read in the diff is
-//     the whole point.
+//   - A REASON MAP value must be a plain quoted string; a computed or
+//     templated value there is a hard violation, because a sentence a human
+//     can read in the diff is the whole point. An INLINE `reason:` on a
+//     disabled record is judged more leniently by design: a string or a
+//     resolvable REASONS.key is verified the same way, but anything else
+//     (a template literal included — interpolation makes "readable in the
+//     diff" unprovable here) is only counted as unverifiable, never failed,
+//     because this scanner cannot prove a computed inline reason is bad any
+//     more than it can prove one is good.
 //   - Check 2 covers records written as object literals. A record assembled
-//     field by field, or spread in from elsewhere, is invisible to it.
+//     field by field, or spread in from elsewhere, is invisible to it — the
+//     scanner never sees the record come together, so it has nothing to
+//     brace-match against.
 import assert from 'node:assert/strict'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -233,8 +250,11 @@ export function matchBrace(masked, open) {
 // --- check 1: reason maps --------------------------------------------------
 
 // `REASONS` is itself a valid map name, so the capture cannot demand a prefix
-// before the word; the suffix test happens on the captured name instead.
-const MAP_DECL = /export\s+const\s+([A-Za-z_$][\w$]*)\s*=\s*/g
+// before the word; the suffix test happens on the captured name instead. The
+// `export` keyword is optional: a `const FOO_REASONS = ...` a component keeps
+// module-private is just as capable of rendering an empty reason as an
+// exported one, and an unexported map used to be invisible to this gate.
+const MAP_DECL = /(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*=\s*/g
 
 /**
  * Every exported `*REASONS` map in one source: its name, whether it is frozen,
@@ -301,7 +321,9 @@ export function reasonProseViolation(value) {
 
 /**
  * Every object literal in one source that declares a `disabled` key, with the
- * depth-0 keys it declares beside it. `disabledIsFalse` marks the exempt case.
+ * depth-0 keys it declares beside it, plus whatever text the record wrote for
+ * `reason` (`reasonRaw`, `null` when the key is absent or has no readable
+ * value — e.g. shorthand `reason,`). `disabledIsFalse` marks the exempt case.
  */
 export function findDisabledRecords(src) {
   const masked = maskSource(src)
@@ -314,31 +336,119 @@ export function findDisabledRecords(src) {
     const disabled = entries.find((e) => e.key === 'disabled')
     if (!disabled) continue
     const value = disabled.valueStart == null ? '' : src.slice(disabled.valueStart, disabled.valueEnd).trim()
+    const reasonEntry = entries.find((e) => e.key === 'reason')
+    // Shorthand (`reason,`, no colon) has no value range to slice — its value
+    // IS the identifier `reason` read from scope, so that identifier is its
+    // own raw text: not a string, not a `MAP.key`, so it classifies as an
+    // unverifiable expression rather than a false "no readable value".
+    const reasonRaw = reasonEntry
+      ? (reasonEntry.valueStart != null
+          ? src.slice(reasonEntry.valueStart, reasonEntry.valueEnd).trim()
+          : reasonEntry.key)
+      : null
     found.push({
       line: lineOf(src, disabled.keyStart),
       keys: entries.map((e) => e.key),
       disabledValue: value,
       disabledIsFalse: value === 'false',
+      hasReason: entries.some((e) => e.key === 'reason'),
+      reasonLine: reasonEntry ? lineOf(src, reasonEntry.keyStart) : null,
+      reasonRaw,
     })
   }
   return found
 }
 
-/** Records that take a control away without saying why. */
-export function reasonlessDisabled(src) {
+/**
+ * What kind of value a `reason:` (or a REASONS map entry) holds, textually.
+ * `'string'` carries the unescaped literal, `'ref'` a `SOME_REASONS.key`
+ * member read, everything else is `'other'` — an expression this scanner
+ * declines to evaluate (a template literal included: it could hold real
+ * prose, but interpolation makes "readable in the diff" unprovable here).
+ */
+export function classifyReasonValue(raw) {
+  if (raw == null) return { kind: 'missing' }
+  const v = raw.trim()
+  if (v.length === 0) return { kind: 'missing' }
+  const q = v[0]
+  if ((q === '"' || q === "'") && v.length >= 2 && v[v.length - 1] === q) {
+    return { kind: 'string', value: v.slice(1, -1).replace(/\\(.)/g, '$1') }
+  }
+  // A template literal with NO interpolation is a plain string in a different
+  // coat (an empty `` would render an empty reason), so it is judged as one.
+  // Only an interpolated template stays 'other' (its prose is not readable here).
+  if (q === '`' && v.length >= 2 && v[v.length - 1] === '`' && !v.includes('${')) {
+    return { kind: 'string', value: v.slice(1, -1).replace(/\\(.)/g, '$1') }
+  }
+  const refMatch = /^([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)$/.exec(v)
+  if (refMatch && refMatch[1].endsWith('REASONS')) {
+    return { kind: 'ref', map: refMatch[1], key: refMatch[2] }
+  }
+  return { kind: 'other', raw: v }
+}
+
+/**
+ * Why a disabled record's `reason` fails the honesty ladder, or `null` when
+ * it holds up. A plain string runs the same prose rule as a map value; a
+ * `REASONS.key` reference is resolved against `mapsByName` exactly as check 1
+ * resolves one (an unresolvable map name is the same alias/shadow leniency
+ * documented in the header, not a violation). An `'other'` expression is
+ * deliberately NOT judged here — see `unverifiableReasonExpr`.
+ */
+export function disabledReasonViolation(rec, mapsByName = new Map()) {
+  if (rec.disabledIsFalse) return null
+  if (!rec.hasReason) return 'declares no `reason`'
+  const cls = classifyReasonValue(rec.reasonRaw)
+  if (cls.kind === 'missing') return 'declares `reason` with no readable value'
+  if (cls.kind === 'string') {
+    const why = reasonProseViolation(cls.value)
+    return why ? `declares \`reason\` that is ${why}` : null
+  }
+  if (cls.kind === 'ref') {
+    const map = mapsByName.get(cls.map)
+    if (!map) return null // alias or a locally shadowed name; see the header's limits
+    if (!map.entries.some((e) => e.key === cls.key)) {
+      return `declares \`reason: ${cls.map}.${cls.key}\`, which is not a key of ${cls.map} — it reads as undefined`
+    }
+    return null
+  }
+  return null // 'other': unverifiable, counted separately, never silently passed
+}
+
+/**
+ * The raw text of a disabled record's `reason` when it is an expression this
+ * gate cannot verify (not a string literal, not a resolvable REASONS.key) —
+ * the "count it, don't pass it silently" half of the fix. `null` when the
+ * record is exempt, reasonless, or already judged by `disabledReasonViolation`.
+ */
+export function unverifiableReasonExpr(rec) {
+  if (rec.disabledIsFalse || !rec.hasReason) return null
+  const cls = classifyReasonValue(rec.reasonRaw)
+  return cls.kind === 'other' ? cls.raw : null
+}
+
+/** Records that take a control away without a reason that holds up. */
+export function reasonlessDisabled(src, mapsByName = new Map()) {
   return findDisabledRecords(src)
-    .filter((r) => !r.disabledIsFalse && !r.keys.includes('reason'))
+    .filter((r) => disabledReasonViolation(r, mapsByName) !== null)
 }
 
 // --- check 3: absent contract slots ---------------------------------------
 
-/** Dotted paths in a contract tree whose value is null, false or 'none'. */
+/**
+ * Dotted paths in a contract tree whose value is absent: null, undefined,
+ * false, 'none', or an empty array. Each of these renders nothing, exactly
+ * like null did — a reader hunting for "why isn't X here" must find the same
+ * answer regardless of which absent-spelling the surface picked.
+ */
 export function absentSlots(contract, prefix = '') {
   const out = []
   for (const [key, value] of Object.entries(contract)) {
     const path = prefix ? `${prefix}.${key}` : key
+    const isEmptyArray = Array.isArray(value) && value.length === 0
     if (value && typeof value === 'object' && !Array.isArray(value)) out.push(...absentSlots(value, path))
-    else if (value === null || value === false || value === 'none') out.push(path)
+    // Every spelling of "nothing here": null, undefined, false, 'none', '', 0, [].
+    else if (value === null || value === undefined || value === false || value === 'none' || value === '' || value === 0 || isEmptyArray) out.push(path)
   }
   return out
 }
@@ -383,7 +493,8 @@ const sources = listSources(SRC).map((path) => ({ path, file: rel(path), src: re
 // read one, and parsing 270 files deeply buys nothing.
 const reasonFiles = sources.filter((f) => f.src.includes('REASONS'))
 const mapsByName = new Map()
-const scannedCounts = { maps: 0, values: 0, refs: 0, records: 0, slots: 0 }
+const scannedCounts = { maps: 0, values: 0, refs: 0, records: 0, slots: 0, unverifiableReasons: 0 }
+const unverifiableReasons = []
 
 for (const f of reasonFiles) {
   const balance = braceBalance(maskSource(f.src))
@@ -429,9 +540,19 @@ for (const path of DISABLED_RECORD_FILES) {
     record(file, 1, `braces do not balance after comment/string masking (net ${balance.depth}) — disabled records cannot be checked here`)
     continue
   }
-  scannedCounts.records += findDisabledRecords(src).length
-  for (const r of reasonlessDisabled(src)) {
-    record(file, r.line, `record sets \`disabled: ${r.disabledValue}\` and declares no \`reason\` — the honesty contract in ribbonClusters.js forbids a greyed control with no sentence`)
+  const records = findDisabledRecords(src)
+  scannedCounts.records += records.length
+  for (const r of records) {
+    const why = disabledReasonViolation(r, mapsByName)
+    if (why) {
+      record(file, r.reasonLine ?? r.line, `record sets \`disabled: ${r.disabledValue}\` and ${why} — the honesty contract in ribbonClusters.js forbids a greyed control with no sentence`)
+      continue
+    }
+    const raw = unverifiableReasonExpr(r)
+    if (raw) {
+      scannedCounts.unverifiableReasons += 1
+      unverifiableReasons.push(`${file}:${r.reasonLine}: reason is \`${raw}\` — not a plain string or a resolvable REASONS.key, so this gate cannot verify it and does not silently pass it`)
+    }
   }
 }
 
@@ -446,7 +567,7 @@ for (const surface of PRODUCT_SURFACES) {
     seenSlots.add(slot)
     scannedCounts.slots += 1
     if (!doc.includes(`\`${slot}\``)) {
-      record(docFile, 1, `\`${slot}\` is declared absent (null / false / 'none') on surface "${surface.id}" but the doc never names it`)
+      record(docFile, 1, `\`${slot}\` is declared absent (null / undefined / false / 'none' / '' / 0 / []) on surface "${surface.id}" but the doc never names it`)
     } else if (!fieldTable.includes(`\`${slot}\``)) {
       record(docFile, 1, `\`${slot}\` is declared absent on surface "${surface.id}" but has no row in the field table, where the rationale lives`)
     }
@@ -477,6 +598,33 @@ const FIXTURES = {
   shortReason: `export const FAKE_REASONS = Object.freeze({ locked: 'nope' })`,
   computedReason: `export const FAKE_REASONS = Object.freeze({ locked: someLabel(x) })`,
   goodMap: `export const FAKE_REASONS = Object.freeze({ locked: 'another session holds the edit lock' })`,
+  // Hole 3: a REASONS map the gate must catch even when nobody exports it.
+  unexportedBadMap: `const FAKE_REASONS = Object.freeze({ locked: 'nope' })`,
+  // Hole 1: an inline `reason:` that has the KEY but not a real sentence.
+  emptyInlineReason: `
+    const tool = { id: 'x', label: 'x', disabled: true, reason: '', onClick: () => {} }
+  `,
+  todoInlineReason: `
+    const tool = { id: 'x', label: 'x', disabled: true, reason: 'TODO', onClick: () => {} }
+  `,
+  // Hole 1: an inline `reason: SOME_REASONS.key` must resolve like check 1.
+  refInlineReasonBad: `
+    const tool = { id: 'x', label: 'x', disabled: true, reason: FAKE_REASONS.missing, onClick: () => {} }
+  `,
+  refInlineReasonGood: `
+    const tool = { id: 'x', label: 'x', disabled: true, reason: FAKE_REASONS.locked, onClick: () => {} }
+  `,
+  // Hole 1: anything else is unverifiable, not silently passed.
+  computedInlineReason: `
+    const tool = { id: 'x', label: 'x', disabled: true, reason: describeLock(x), onClick: () => {} }
+  `,
+  // A live pattern in ribbonClusters.js: `reason` built above and passed by
+  // shorthand. It has no value range to read, so it must land in the same
+  // unverifiable bucket as a computed reason, never in "no readable value".
+  shorthandReason: `
+    const reason = hasDrawing ? '' : REASONS.noDrawing
+    const tool = { id: 'x', label: 'x', disabled: !hasDrawing, reason, onClick: () => {} }
+  `,
 }
 
 describe('honesty ladder', () => {
@@ -521,8 +669,70 @@ describe('honesty ladder', () => {
     })
     it('finds an absent slot and misses a present one', () => {
       assert.deepEqual(
-        absentSlots({ chrome: { productFrame: false, stageBranch: 'cad' }, versions: 'none', dock: null, routes: ['one-shot'] }),
-        ['chrome.productFrame', 'versions', 'dock'])
+        absentSlots({
+          chrome: { productFrame: false, stageBranch: 'cad' },
+          versions: 'none',
+          dock: null,
+          routes: ['one-shot'],
+          emptyRoutes: [],
+          unset: undefined,
+        }),
+        ['chrome.productFrame', 'versions', 'dock', 'emptyRoutes', 'unset'])
+    })
+
+    // Hole 1a: check 2 used to test only that `reason` exists as a KEY. An
+    // inline `reason: ''` or `reason: 'TODO'` used to pass; both must now run
+    // through the same prose rule a map entry runs through.
+    it('flags an inline reason that is empty or a placeholder, not just present', () => {
+      assert.equal(reasonlessDisabled(FIXTURES.emptyInlineReason).length, 1)
+      assert.equal(reasonlessDisabled(FIXTURES.todoInlineReason).length, 1)
+      assert.match(
+        disabledReasonViolation(findDisabledRecords(FIXTURES.emptyInlineReason)[0]) || '', /empty/)
+      assert.match(
+        disabledReasonViolation(findDisabledRecords(FIXTURES.todoInlineReason)[0]) || '', /placeholder/)
+    })
+
+    // Hole 1b: an inline `reason: SOME_REASONS.key` must resolve against the
+    // map exactly as a bare `SOME_REASONS.key` reference does in check 1 — a
+    // dangling key fails, a real one passes.
+    it('resolves an inline REASONS.<key> reason the same way check 1 resolves a bare reference', () => {
+      const map = findReasonMaps(FIXTURES.goodMap)[0]
+      const mapsByName = new Map([[map.name, map]])
+      const bad = findDisabledRecords(FIXTURES.refInlineReasonBad)[0]
+      const good = findDisabledRecords(FIXTURES.refInlineReasonGood)[0]
+      assert.match(disabledReasonViolation(bad, mapsByName) || '', /not a key of FAKE_REASONS/)
+      assert.equal(disabledReasonViolation(good, mapsByName), null)
+      // An unresolvable map name (alias/shadow) is check 1's documented
+      // leniency, not a new violation — mirrored here, not re-litigated.
+      assert.equal(disabledReasonViolation(bad), null)
+    })
+
+    // Hole 1c: anything that is neither a string nor a resolvable reference
+    // must never pass SILENTLY — it is counted, not judged.
+    it('counts a non-string non-ref inline reason as unverifiable instead of passing it silently', () => {
+      const rec = findDisabledRecords(FIXTURES.computedInlineReason)[0]
+      assert.equal(disabledReasonViolation(rec), null)
+      assert.equal(unverifiableReasonExpr(rec), 'describeLock(x)')
+      assert.equal(reasonlessDisabled(FIXTURES.computedInlineReason).length, 0)
+    })
+    // A shorthand `reason,` has no value range at all — it must not misread
+    // as "declares reason with no readable value" (a false hard failure);
+    // it is exactly the "any other expression" case, counted, not judged.
+    it('treats shorthand `reason,` as unverifiable, not as a missing value', () => {
+      const rec = findDisabledRecords(FIXTURES.shorthandReason)[0]
+      assert.equal(rec.hasReason, true)
+      assert.equal(disabledReasonViolation(rec), null)
+      assert.equal(unverifiableReasonExpr(rec), 'reason')
+      assert.equal(reasonlessDisabled(FIXTURES.shorthandReason).length, 0)
+    })
+
+    // Hole 3: an unexported `const *REASONS` used to be invisible to MAP_DECL.
+    it('finds a REASONS map even when it is not exported, and still judges its values', () => {
+      const maps = findReasonMaps(FIXTURES.unexportedBadMap)
+      assert.equal(maps.length, 1)
+      assert.equal(maps[0].name, 'FAKE_REASONS')
+      assert.equal(maps[0].frozen, true)
+      assert.match(reasonProseViolation(maps[0].entries[0].value) || '', /char floor/)
     })
   })
 
@@ -533,7 +743,10 @@ describe('honesty ladder', () => {
   })
 })
 
+for (const line of unverifiableReasons) console.warn(`unverifiable reason expression: ${line}`)
+
 console.log(
   `honesty ladder: ${scannedCounts.maps} reason maps · ${scannedCounts.values} sentences · `
   + `${scannedCounts.refs} key references · ${scannedCounts.records} disabled records · `
-  + `${scannedCounts.slots} absent contract slots`)
+  + `${scannedCounts.slots} absent contract slots · `
+  + `${scannedCounts.unverifiableReasons} unverifiable reason expressions`)
