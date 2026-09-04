@@ -125,6 +125,10 @@ def test_set_points_on_a_line_shaped_polyline_lowers_through_the_up_plane():
     ({"added": [{"handle": "n", "layer": "0", "closed": False, "pts": [[0, 0]]}]}, "invalid point count"),
     ({"added": [{"handle": "A", "kind": "CIRCLE", "layer": "0", "c": [0, 0], "r": 1}]}, "conflicting added handle"),
     ({"set_circle": [{"handle": "E1", "c": [0, 0], "r": 1}]}, "tilted"),
+    # kimi on #1012: a replacement naming the current geometry is a no-op,
+    # the same rule set_layer and set_points already apply.
+    ({"set_circle": [{"handle": "C1", "c": [10, 10], "r": 3}]}, "no-op"),
+    ({"set_arc": [{"handle": "D1", "c": [20, 0, 0], "r": 2, "start_deg": 0, "end_deg": 90}]}, "no-op"),
 ])
 def test_v2_refusals_name_the_fault(bad, needle):
     base = _base()

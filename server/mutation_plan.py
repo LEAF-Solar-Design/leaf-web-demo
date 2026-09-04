@@ -133,6 +133,22 @@ def _normal_is_up(entity: Dict[str, Any]) -> bool:
         return False
 
 
+def _same_round(entity: Dict[str, Any], centre: List[float], radius: float,
+                start: Optional[float] = None, end: Optional[float] = None) -> bool:
+    """True when a circle/arc replacement names the entity's current geometry
+    exactly (the same no-op rule set_layer and set_points apply)."""
+    try:
+        current = [float(v) for v in (entity.get("c") or [])]
+        current += [0.0] * (3 - len(current))
+        if current[:3] != centre or float(entity.get("r")) != radius:
+            return False
+        if start is None:
+            return True
+        return float(entity.get("start_deg")) == start and float(entity.get("end_deg")) == end
+    except (TypeError, ValueError):
+        return False
+
+
 def _index_intake(intake: Dict[str, Any]) -> Dict[str, Tuple[str, Dict[str, Any]]]:
     """Every handle the intake names, with its kind. A handle that appears
     twice anywhere is ambiguous and is dropped, so no op can name it."""
@@ -147,7 +163,7 @@ def _index_intake(intake: Dict[str, Any]) -> Dict[str, Tuple[str, Dict[str, Any]
             raise ValueError(f"intake {field} must be a list")
         total += len(entities)
         if total > MAX_ENTITIES:
-            raise ValueError("intake polylines exceed the supported entity bound")
+            raise ValueError("intake entities exceed the supported entity bound")
         for entity in entities:
             if not isinstance(entity, dict):
                 continue
@@ -324,6 +340,8 @@ def validate_mutations(
         radius = _number(raw.get("r"), f"set_circle {handle!r} r")
         if radius <= 0:
             raise ValueError(f"set_circle {handle!r} r must be positive")
+        if reject_noop and _same_round(entity, centre, radius):
+            raise ValueError(f"set_circle {handle!r} is a no-op")
         geometry_seen.add(handle)
         set_circle.append({"handle": handle, "c": centre, "r": radius})
 
@@ -344,6 +362,8 @@ def validate_mutations(
         end = _number(raw.get("end_deg"), f"set_arc {handle!r} end_deg", limit=MAX_ANGLE_DEG)
         if abs(math.fmod(end - start, 360.0)) < 1e-9:
             raise ValueError(f"set_arc {handle!r} has no sweep")
+        if reject_noop and _same_round(entity, centre, radius, start, end):
+            raise ValueError(f"set_arc {handle!r} is a no-op")
         geometry_seen.add(handle)
         set_arc.append({
             "handle": handle, "c": centre, "r": radius,
