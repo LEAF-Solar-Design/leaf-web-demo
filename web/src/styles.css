@@ -1357,7 +1357,12 @@ footer .warn-txt { color: var(--status-warning); }
 .ent-consent-row { border-bottom: 0; padding: 4px 0; }
 .ent-consent-copy { margin-top: 4px; }
 .ent-consent-reason { margin-top: 4px; color: var(--muted-2); }
-/* Leaf standard switch: 32x18 pill, on = accent track + on-accent knob. */
+/* Takes its values from the repo's ONE switch rule, `.toggle, .switch input`
+   further down this file: 32x18 pill, accent track when on, --on-accent knob
+   when on, and the same two-layer keyboard ring. It cannot BE that rule --
+   that one styles a native checkbox through ::before, this is a
+   <button role="switch"> with a real child knob -- and it differs in exactly
+   one place, called out below: the OFF knob. */
 .ent-switch {
   position: relative; flex: 0 0 auto;
   width: 32px; height: 18px; padding: 0; border-radius: 9px;
@@ -1371,11 +1376,19 @@ footer .warn-txt { color: var(--status-warning); }
   transition: transform .12s ease, background .12s ease;
 }
 .ent-switch.on { background: var(--primary); border-color: var(--primary); }
-.ent-switch.on .ent-switch-knob { background: var(--card); transform: translateX(14px); }
-/* The pane's one halo, per the Leaf forms standard. */
+.ent-switch.on .ent-switch-knob { background: var(--on-accent); transform: translateX(14px); }
+/* The one departure from `.toggle`: its OFF knob is --card (white) on a
+   #c6c4b9 track. This pill's off track is --bar-chip (#e5e3da, paper-light),
+   where a white knob would vanish, so the off knob is --muted-2 above. The ON
+   state, which is the state that makes a claim about collection, is identical. */
+/* The shared two-layer keyboard ring (the M-g a11y rule at the bottom of this
+   file, and `.toggle:focus-visible`). It replaces a 12%-alpha halo that
+   computed to about 1.2:1 on paper, well under the 3:1 WCAG 1.4.11 asks of a
+   focus indicator -- keyboard focus on the panel's only control was
+   effectively invisible. */
 .ent-switch:focus-visible {
-  outline: none; border-color: var(--primary);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 12%, transparent);
+  outline: none;
+  box-shadow: 0 0 0 2px var(--card), 0 0 0 4px var(--primary);
 }
 .ent-switch:disabled { cursor: not-allowed; opacity: .45; }
 @media (prefers-reduced-motion: reduce) {

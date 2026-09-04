@@ -389,6 +389,12 @@ meaning of the yes changes; absent, malformed, or unreadable storage all read as
 consented. The rule lives in exactly one place, `buildEvent` in `web/src/telemetry.js`, and it
 fails closed: an event whose class is anything but the literal `product` is treated as
 usage-shaped and needs consent. A refused event is never built and never queued, so granting
-consent later ships nothing that was refused while the switch was off. When the build-time
+consent later ships nothing that was refused while the switch was off. **A revoke reaches
+events that are already queued, not just the next one built:** every buffered event carries
+its class on a symbol key that JSON.stringify cannot serialize, a revoke purges the
+usage-class events out of the shared buffer, and each send seam (the 5 s flush, `flushNow`,
+the pagehide beacon, the 2 s post-failure retry) re-checks consent on the way out, so a
+usage event queued a moment before the switch went off is destroyed rather than posted, and
+a later re-grant cannot resurrect it. When the build-time
 kill switch is on, the switch renders disabled with its reason in text
 ("Telemetry is off for this build.") rather than as a dead control.

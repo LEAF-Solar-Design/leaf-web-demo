@@ -50,8 +50,10 @@ function entValue(ents, key) {
   return ents[key] !== false
 }
 
-/** The consent switch. A real ARIA switch, not a checkbox pretending: the
- * Leaf standard's 32x18 pill (accent track on, on-accent knob).
+/** The consent switch. A real ARIA switch, not a checkbox pretending. Its
+ * 32x18 pill takes its values from `.toggle, .switch input` in styles.css,
+ * the repo's one switch rule: accent track on, --on-accent knob on, and the
+ * shared two-layer keyboard ring every other control uses.
  *
  * KEYBOARD, and why the handler exists at all: a native <button> activates on
  * Enter (keydown) and Space (keyup), so a click handler alone would already

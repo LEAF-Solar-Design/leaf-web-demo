@@ -109,7 +109,10 @@ describe('usage-shaped events WITH consent', () => {
     expect(events[0].labels).toMatchObject({ q_len: 4 })
   })
 
-  it('stop the moment the viewer revokes, with no reload', async () => {
+  it('refuse every NEW event the moment the viewer revokes, with no reload', async () => {
+    // NEW events only. The events already queued when the switch went off
+    // are the next describe block, which is a separate guarantee: this one
+    // alone was once read as the whole promise and was not.
     const { mod, fetchMock } = await loadTelemetry({ consented: true })
     const consent = await import('./lib/telemetryConsent.js')
 
@@ -118,6 +121,150 @@ describe('usage-shaped events WITH consent', () => {
     mod.flushNow()
 
     expect(postedEvents(fetchMock)).toEqual([])
+  })
+})
+
+describe('a usage event ALREADY QUEUED when the viewer revokes', () => {
+  // The half the first version of this slice got wrong, and the reason this
+  // suite exists. `buildEvent` gates at BUILD time, so an event queued while
+  // consented sat in the shared buffer behind the 5 s timer and was posted by
+  // whatever drained it next — the timer, `flushNow`, the pagehide beacon, or
+  // the 2 s post-failure retry. Each of those seams gets a spec here, because
+  // a fix that closed only the timer would have looked green.
+
+  it('is purged from the buffer and never reaches the wire', async () => {
+    const { mod, fetchMock } = await loadTelemetry({ consented: true })
+    const consent = await import('./lib/telemetryConsent.js')
+
+    expect(mod.trackUsage('search.submitted', { q_len: 4 })).toBeDefined()
+    consent.setUsageConsent(false)
+    mod.flushNow()
+
+    expect(postedEvents(fetchMock)).toEqual([])
+  })
+
+  it('is dropped without taking the product events queued beside it', async () => {
+    // The purge is surgical. Product events are not consent-gated, and losing
+    // the operational record on every revoke would be its own defect.
+    const { mod, fetchMock } = await loadTelemetry({ consented: true })
+    const consent = await import('./lib/telemetryConsent.js')
+
+    mod.track('run.finished', { ok: true })
+    mod.trackUsage('search.submitted', { q_len: 4 })
+    mod.track('version.restored', { n: 2 })
+    consent.setUsageConsent(false)
+    mod.flushNow()
+
+    expect(postedEvents(fetchMock).map((e) => e.event_name))
+      .toEqual(['run.finished', 'version.restored'])
+  })
+
+  it('is dropped even with a nearly full batch waiting behind the timer', async () => {
+    // FLUSH_AT is 20, so 19 queued events is the worst case that can sit
+    // unflushed: the reviewer measured "up to 20 events / 5 s of usage-shaped
+    // data" reaching fetch after the switch went off.
+    const { mod, fetchMock } = await loadTelemetry({ consented: true })
+    const consent = await import('./lib/telemetryConsent.js')
+
+    for (let i = 0; i < 19; i += 1) mod.trackUsage('menu.action', { id: i })
+    consent.setUsageConsent(false)
+    mod.flushNow()
+
+    expect(postedEvents(fetchMock)).toEqual([])
+  })
+
+  it('does not leave with the pagehide beacon, though product events still do', async () => {
+    // Revoking and then closing the tab is one continuous human action, so
+    // this is the seam a revoke is most likely to race.
+    const { mod } = await loadTelemetry({ consented: true })
+    const consent = await import('./lib/telemetryConsent.js')
+    const beacon = vi.fn(() => true)
+    const orig = Object.getOwnPropertyDescriptor(navigator, 'sendBeacon')
+    Object.defineProperty(navigator, 'sendBeacon', {
+      value: beacon, configurable: true, writable: true,
+    })
+
+    try {
+      mod.trackUsage('search.submitted', { q_len: 4 })
+      mod.track('run.finished', { ok: true })
+      consent.setUsageConsent(false)
+      window.dispatchEvent(new Event('pagehide'))
+
+      expect(beacon).toHaveBeenCalledTimes(1)
+      const blob = beacon.mock.calls[0][1]
+      // A jsdom Blob has no .text(), and undici's Response stringifies it
+      // rather than reading it, so FileReader is the one reader that works.
+      const raw = await new Promise((res, rej) => {
+        const fr = new FileReader()
+        fr.onload = () => res(String(fr.result))
+        fr.onerror = () => rej(fr.error)
+        fr.readAsText(blob)
+      })
+      const body = JSON.parse(raw)
+      expect(body.events.map((e) => e.event_name)).toEqual(['run.finished'])
+    } finally {
+      if (orig) Object.defineProperty(navigator, 'sendBeacon', orig)
+      else delete navigator.sendBeacon
+    }
+  })
+
+  it('is dropped from a batch already retrying when the revoke lands', async () => {
+    // flush() posts once and, on failure, replays THE SAME batch 2 s later
+    // from a closure that had already captured it. Without a re-check at the
+    // retry, a revoke inside that window sent the usage events anyway.
+    const { mod, fetchMock } = await loadTelemetry({ consented: true })
+    const consent = await import('./lib/telemetryConsent.js')
+    vi.useFakeTimers()
+
+    try {
+      fetchMock.mockImplementation(() => Promise.reject(new Error('offline')))
+      mod.trackUsage('search.submitted', { q_len: 4 })
+      mod.track('run.finished', { ok: true })
+      mod.flushNow()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+
+      consent.setUsageConsent(false)
+      fetchMock.mockImplementation(() => Promise.resolve({ ok: true, status: 202 }))
+      await vi.advanceTimersByTimeAsync(2100)
+
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      const retried = JSON.parse(fetchMock.mock.calls[1][1].body).events
+      expect(retried.map((e) => e.event_name)).toEqual(['run.finished'])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('is DESTROYED by the revoke, not merely fenced: a re-grant cannot resurrect it', async () => {
+    // This is the spec that separates the two halves of the fix. The wire-time
+    // fence alone would let these events sit in the buffer through the revoke
+    // and then POST the moment the viewer turned the switch back on, which is
+    // the same leak on a longer fuse. The buffer purge is what makes the
+    // revoke destructive, so this goes red if the subscription is removed.
+    const { mod, fetchMock } = await loadTelemetry({ consented: true })
+    const consent = await import('./lib/telemetryConsent.js')
+
+    mod.trackUsage('search.submitted', { q_len: 4 })
+    consent.setUsageConsent(false)
+    consent.setUsageConsent(true)
+    mod.flushNow()
+
+    expect(postedEvents(fetchMock)).toEqual([])
+  })
+
+  it('carries no internal class marker to the wire', async () => {
+    // The marker the purge reads is on a Symbol key precisely so it cannot be
+    // serialized. If it ever becomes a string key, this spec goes red before
+    // an internal label reaches the ingest door.
+    const { mod, fetchMock } = await loadTelemetry({ consented: true })
+
+    mod.trackUsage('search.submitted', { q_len: 4 })
+    mod.flushNow()
+
+    const [event] = postedEvents(fetchMock)
+    expect(Object.keys(event).sort())
+      .toEqual(['client_ts', 'event_name', 'event_type', 'labels'])
   })
 })
 

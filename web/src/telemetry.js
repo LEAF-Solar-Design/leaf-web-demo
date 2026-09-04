@@ -27,7 +27,7 @@ import { sceneForPath } from './site/routeScene.js'
 // its own beyond the platform — so it cannot form a cycle either. The rule it
 // carries is documented at buildEvent: usage-shaped events need the viewer's
 // yes, product events do not.
-import { usageConsentGranted } from './lib/telemetryConsent.js'
+import { subscribeUsageConsent, usageConsentGranted } from './lib/telemetryConsent.js'
 const DISABLED = import.meta.env?.VITE_TELEMETRY_DISABLED === '1'
 
 /** The build-time kill switch, exported so the Plan panel can state the
@@ -45,6 +45,13 @@ export const EVENT_CLASS = Object.freeze({
   // picks. Describes the viewer, so it needs the viewer's yes.
   usage: 'usage',
 })
+
+// Every queued event carries its class, because a revoke has to find events
+// that are ALREADY in the buffer. The key is a SYMBOL on purpose:
+// JSON.stringify skips symbol-keyed properties by construction, so this
+// internal label can never reach the ingest door however `payload()` is later
+// changed. An own string key would need a strip step a future edit can forget.
+const EVENT_CLASS_KEY = Symbol('leaf.telemetry.eventClass')
 const API_BASE = import.meta.env?.VITE_API_BASE ?? ''
 const FLUSH_AT = 20
 const FLUSH_MS = 5000
@@ -158,14 +165,58 @@ function unrefTimer(timer) {
   try { timer?.unref?.() } catch { /* no-op */ }
 }
 
+/** The WIRE-TIME consent fence, and the second half of the guarantee
+ * `buildEvent` starts. buildEvent decides at BUILD time; this decides at SEND
+ * time, which is the only moment that actually matters to a viewer who
+ * revoked while events were sitting behind the 5 s timer.
+ *
+ * Returns the batch UNCHANGED (no copy, no allocation) while consent is
+ * granted — the only path a consenting viewer ever takes. Only a revoked
+ * viewer pays one O(batch <= FLUSH_AT) pass. Fails closed: an event carrying
+ * no class marker is treated as usage-shaped. */
+function sendable(events) {
+  if (usageConsentGranted()) return events
+  return events.filter((ev) => ev?.[EVENT_CLASS_KEY] === EVENT_CLASS.product)
+}
+
+/** Drop every usage-class event still waiting in the buffer. Runs ONLY on a
+ * revoke, so the emit path stays allocation-free; the pass is
+ * O(buffer <= BUFFER_MAX) and compacts IN PLACE, because `state.buffer` is the
+ * shared queue and rebinding it would strand a splice already in flight. */
+function purgeUsageEvents() {
+  try {
+    const buf = state.buffer
+    let kept = 0
+    for (let i = 0; i < buf.length; i += 1) {
+      const ev = buf[i]
+      if (ev?.[EVENT_CLASS_KEY] === EVENT_CLASS.product) { buf[kept] = ev; kept += 1 }
+    }
+    buf.length = kept
+  } catch { /* telemetry never breaks the product */ }
+}
+
+// A revoke must reach events ALREADY QUEUED, not only the next one built.
+// Without this subscription, up to FLUSH_AT usage events sitting behind the
+// 5 s timer (or the pagehide beacon, or the 2 s post-failure retry) would
+// still leave the browser after the viewer said no.
+try {
+  subscribeUsageConsent((granted) => { if (!granted) purgeUsageEvents() })
+} catch { /* no-op: sendable() still fences every send seam */ }
+
 function flush() {
   try {
     if (state.timer) { clearTimeout(state.timer); state.timer = null }
     if (!state.buffer.length) return
-    const events = state.buffer.splice(0, FLUSH_AT)
+    const events = sendable(state.buffer.splice(0, FLUSH_AT))
+    if (!events.length) { if (state.buffer.length) schedule(); return }
     post(events).catch(() => {
-      // ONE retry PER BATCH, then drop — loss-tolerant by contract.
-      unrefTimer(setTimeout(() => { post(events).catch(() => {}) }, 2000))
+      // ONE retry PER BATCH, then drop — loss-tolerant by contract. The batch
+      // is re-fenced on the way out: a revoke inside the 2 s window drops its
+      // usage half instead of replaying it.
+      unrefTimer(setTimeout(() => {
+        const retry = sendable(events)
+        if (retry.length) post(retry).catch(() => {})
+      }, 2000))
     })
     if (state.buffer.length) schedule()
   } catch { /* telemetry never breaks the product */ }
@@ -194,11 +245,18 @@ function schedule() {
  * where it is decided, not inferred from a call site.
  *
  * A refused event is not built, so `track` cannot queue it: there is no
- * buffered usage event waiting for a later consent to release it. */
+ * buffered usage event waiting for a later consent to release it.
+ *
+ * The OTHER direction is deliberately NOT this function's job and is not
+ * implied by it: an event built while consent was granted can still be in the
+ * buffer when the viewer revokes a second later. That half is carried by
+ * `purgeUsageEvents` (the buffer is emptied of usage events on revoke) and by
+ * `sendable` (every send seam re-checks). This function only stamps the class
+ * those two read. */
 export function buildEvent(name, props, eventType, eventClass) {
   if (DISABLED || typeof fetch !== 'function') return undefined
   if (eventClass !== EVENT_CLASS.product && !usageConsentGranted()) return undefined
-  return {
+  const event = {
     event_type: eventType,
     event_name: name,
     client_ts: Date.now() / 1000,
@@ -206,6 +264,12 @@ export function buildEvent(name, props, eventType, eventClass) {
       ? { ...props, tour_step: state.tourStep }
       : props,
   }
+  // Stamp the class so a later revoke can find this event again once it is
+  // sitting in the shared buffer. Fails closed exactly as the gate above does:
+  // anything but the exact product literal is marked usage-shaped.
+  event[EVENT_CLASS_KEY] =
+    eventClass === EVENT_CLASS.product ? EVENT_CLASS.product : EVENT_CLASS.usage
+  return event
 }
 
 function enqueue(event) {
@@ -608,7 +672,11 @@ function beaconFlush() {
     // crash recorded a moment before the page was torn down is already in the
     // buffer and leaves with the beacon like any other event.
     if (!state.buffer.length) return
-    const events = state.buffer.splice(0, FLUSH_AT)
+    // The same wire-time fence flush() uses. pagehide is the seam a revoke is
+    // MOST likely to race, because turning the switch off and then closing the
+    // tab is one continuous human action.
+    const events = sendable(state.buffer.splice(0, FLUSH_AT))
+    if (!events.length) return
     if (navigator?.sendBeacon) {
       // sendBeacon cannot carry auth headers; the pre-auth allowlist covers
       // the anonymous allowlist, and identified events flushed here may drop —

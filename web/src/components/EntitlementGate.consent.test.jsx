@@ -13,6 +13,9 @@
  * purpose: this row is an addition, and a spec that only looks at the new
  * thing cannot notice that the old thing moved.
  */
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
@@ -157,5 +160,43 @@ describe('the entitlement rows above it', () => {
     render(<EntitlementGate mock />)
     expect(screen.getByText(/demo tier · full access/)).toBeInTheDocument()
     expect(switchEl()).toBeInTheDocument()
+  })
+})
+
+describe('the switch is styled to the repo\'s one switch rule', () => {
+  // styles.css is not applied in jsdom, so these are static assertions on the
+  // stylesheet source — the same seam overlayTheme.test.js uses. The first
+  // version of this row failed both: its focus ring was a 12%-alpha halo
+  // (~1.2:1 on paper, against the 3:1 WCAG 1.4.11 floor) on the Plan panel's
+  // ONLY interactive control, and it appealed to a "Leaf standard" that
+  // existed nowhere in the tree while contradicting the rule that does.
+  const css = readFileSync(resolve(process.cwd(), 'src/styles.css'), 'utf8')
+  const jsx = readFileSync(resolve(process.cwd(), 'src/components/EntitlementGate.jsx'), 'utf8')
+  const RING = 'box-shadow: 0 0 0 2px var(--card), 0 0 0 4px var(--primary);'
+
+  it('uses the same two-layer keyboard focus ring as every other control', () => {
+    // Sliced, not matched: a regex literal carrying braces unbalances the
+    // honesty-ladder scanner (check_honesty_ladder.mjs masks comments and
+    // strings but not regex literals) and it reports the whole file untrusted.
+    const at = css.indexOf('.ent-switch:focus-visible')
+    expect(at).toBeGreaterThan(-1)
+    const rule = css.slice(at, css.indexOf('}', at) + 1)
+    expect(rule).toContain(RING)
+    // The invisible halo, by name: a colour-mixed 3px shadow at 12% alpha.
+    expect(rule).not.toContain('color-mix')
+    // And the rule it now matches, verbatim, so the two cannot drift apart.
+    expect(css).toContain(`.toggle:focus-visible, .switch input:focus-visible { ${RING} }`)
+  })
+
+  it('turns the knob --on-accent when on, exactly like .toggle:checked', () => {
+    expect(css).toContain('.ent-switch.on .ent-switch-knob { background: var(--on-accent);')
+    expect(css).toContain('background: var(--on-accent); }')
+  })
+
+  it('appeals to no switch standard that does not exist in the tree', () => {
+    for (const phrase of ['Leaf standard switch', 'Leaf forms standard', "Leaf standard's"]) {
+      expect(css, phrase).not.toContain(phrase)
+      expect(jsx, phrase).not.toContain(phrase)
+    }
   })
 })
