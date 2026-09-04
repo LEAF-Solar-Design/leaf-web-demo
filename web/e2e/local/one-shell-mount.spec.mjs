@@ -652,6 +652,38 @@ test.describe('route matrix, rail ON', () => {
       await expect(saveBtn).toBeDisabled()
       await page.getByRole('tab', { name: 'Manage' }).click()
       await expect(dirtyBlocked).toHaveCount(0)
+      // W4g-2 (one head), confirm-time race: arm a catalog WRITE tool while
+      // the engine is clean, then draw before confirming. The final Run click
+      // must refuse the now-dirty engine and must not post a run.
+      const armedWrite = ribbon.locator('.ribbon-tool[data-tool="delete-marked-panel"]')
+      const armedWriteCount = await armedWrite.count()
+      test.info().annotations.push({ type: 'one-head', description: armedWriteCount ? 'confirm-time row: delete-marked-panel armed while clean' : 'delete-marked-panel not on this ribbon: confirm-time row skipped' })
+      if (armedWriteCount) {
+        await expect(armedWrite).toBeEnabled()
+        await armedWrite.click()
+        const confirm = page.getByRole('button', { name: 'Run delete-marked-panel' })
+        await expect(confirm).toBeVisible({ timeout: 10_000 })
+        await page.getByRole('tab', { name: 'Draw' }).click()
+        await draw.locator('[data-tool="draw:createLine"]').click()
+        await page.getByLabel('ribbon x', { exact: true }).fill('0')
+        await page.getByLabel('ribbon y', { exact: true }).fill('0')
+        await page.getByLabel('ribbon x2').fill('20')
+        await page.getByLabel('ribbon y2').fill('20')
+        await page.getByLabel('ribbon y2').press('Enter')
+        await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBefore + 1), { timeout: 60_000 })
+        const runPosts = []
+        const onRequest = (request) => { if (request.method() === 'POST' && request.url().includes('/api/run')) runPosts.push(request.url()) }
+        page.on('request', onRequest)
+        await confirm.click()
+        await expect(page.getByRole('alert').filter({ hasText: 'the browser engine holds unsaved edits' })).toBeVisible({ timeout: 10_000 })
+        await page.waitForTimeout(1500)
+        page.off('request', onRequest)
+        expect(runPosts).toHaveLength(0)
+        await page.keyboard.press('Escape')
+        await page.getByRole('tab', { name: 'Insert' }).click()
+        await ribbon.locator('[data-tool="undo-edit"]').click()
+        await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBefore), { timeout: 60_000 })
+      }
       await page.getByRole('tab', { name: 'Draw' }).click()
     } else {
       await expect(modify.locator('.ribbon-note')).toHaveText(/no drawing in the browser engine yet|could not be opened in the browser engine/)

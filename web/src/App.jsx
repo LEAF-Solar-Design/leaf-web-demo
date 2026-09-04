@@ -15,6 +15,7 @@ import PropertiesDock, { drawingExtents } from './site/PropertiesDock.jsx'
 import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
 import { ladderListener, slashCommandHandlers } from './lib/actionRegistry.js'
 import { REASONS, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
+import { isWriteTool } from './lib/toolRecord.js'
 import { resolvePublishedCatalogTool } from './site/publishedCatalogTool.js'
 import { entityGeometry } from './lib/entityMetrics.js'
 import { setCredentialMountAvailable } from './lib/secretGuardTransport.js'
@@ -959,6 +960,14 @@ export default function App() {
   // would move the server head under them, so it is refused with the reason
   // until the drafter saves or discards.
   const [engineDirty, setEngineDirty] = useState(false)
+  // Keep the current dirty fact available to the execution-time guard. A
+  // confirm that was opened while clean can outlive the render that opened
+  // it, so onRun must not rely on that render's state closure.
+  const engineDirtyRef = useRef(false)
+  const onEngineDirtyChange = useCallback((dirty) => {
+    engineDirtyRef.current = !!dirty
+    setEngineDirty(!!dirty)
+  }, [])
   const {
     jobs,
     currentJobId,
@@ -1284,7 +1293,7 @@ export default function App() {
       setRunErr('This workspace has no canonical drawing version to run. Import a drawing first.')
       return
     }
-    const isWrite = (catalogTool.capabilities || []).includes('drawing.write')
+    const isWrite = isWriteTool(catalogTool)
     if (
       !mock
       && isWrite
@@ -1466,7 +1475,14 @@ export default function App() {
     intentConfirmed = false, runContext = null, idempotencyKey = null,
   } = {}) => {
     if (previewing) return null
-    if (writeLocked && (tool.capabilities || []).includes('drawing.write')) return null
+    const isWrite = isWriteTool(tool)
+    if (writeLocked && isWrite) return null
+    // The confirm strip can remain open while the drafter edits. Recheck the
+    // current engine fact at the final shared stop before any run is posted.
+    if (isWrite && engineDirtyRef.current) {
+      setRunErr(`${tool.name} not run: ${REASONS.unsavedEngineEdits}.`)
+      return null
+    }
     runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
     // ranTool lets the controller resolve a shown route honestly: this run IS
     // the routed tool -> accepted; a different tool -> invalidated.
@@ -2555,7 +2571,7 @@ export default function App() {
   }, [studioGround, drafting, shown, drawingState, canUndo, canRedo, versionBusy, running, previewing,
     drawingMutationsBlocked, historyOpen, onUndo, onRedo, onToggleHistoryTracked, layerCounts, visibleLayers,
     toggleLayer, railFamilies, onRequestCatalogRun, writeLocked, canRunWrite, canBuild, entOf, ribbonTab, colorForLayer, paneOpen,
-    lastAuthoredTool, onUseAuthored, setFamilyOpen])
+    lastAuthoredTool, onUseAuthored, setFamilyOpen, engineDirty])
   const ribbonClusters = ribbon.clusters
   // W4e round 2: the pane's Drawing section, the document's own facts from
   // the intake (counts) and one pass over its vertices (extents). Studio
@@ -2642,7 +2658,7 @@ export default function App() {
     }
   }
   const engineScope = (node) => (ENV_CAD_EDIT ? (
-    <EngineSessionProvider saveTarget={engineSaveTarget} onSaved={onEngineSaved} onDirtyChange={setEngineDirty}>{node}</EngineSessionProvider>
+    <EngineSessionProvider saveTarget={engineSaveTarget} onSaved={onEngineSaved} onDirtyChange={onEngineDirtyChange}>{node}</EngineSessionProvider>
   ) : node)
 
   return (

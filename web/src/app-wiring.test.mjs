@@ -364,4 +364,68 @@ describe('App.jsx wiring', () => {
       assert.match(opener, /openBytes\(bytes, headDocumentId\(drawingId, version\), \{ committed: true \}\)/)
     })
   })
+
+  // W4g-2 one head: arming a write while clean is not enough. The confirm
+  // strip can stay open while the browser engine becomes dirty, so every run
+  // path must meet the current dirty fact again at its last shared stop.
+  describe('unsaved browser edits refuse a write tool at execution time', () => {
+    const onRunStart = stripped.indexOf('onRun = useCallback')
+    const onRunBody = stripped.slice(onRunStart, onRunStart + 3200)
+
+    it('refuses before runJob reads or posts the run', () => {
+      assert.notEqual(onRunStart, -1, 'onRun must survive comment stripping')
+      const refusal = onRunBody.indexOf('engineDirtyRef.current')
+      const run = onRunBody.indexOf('runJob(')
+      assert.notEqual(refusal, -1, 'onRun must read the current dirty ref')
+      assert.notEqual(run, -1, 'onRun must reach the shared runJob controller')
+      assert.ok(refusal < run, 'the dirty refusal must precede runJob')
+      const refusalBody = onRunBody.slice(refusal, run)
+      assert.ok(refusalBody.includes('unsavedEngineEdits'))
+      assert.ok(refusalBody.includes('return null'))
+    })
+
+    it('updates the ref and ribbon state through the provider callback', () => {
+      const callbackStart = stripped.indexOf('onEngineDirtyChange = useCallback')
+      assert.notEqual(callbackStart, -1)
+      const callbackBody = stripped.slice(callbackStart, callbackStart + 300)
+      assert.ok(callbackBody.includes('engineDirtyRef.current = !!dirty'))
+      assert.ok(callbackBody.includes('setEngineDirty(!!dirty)'))
+
+      const providerStart = stripped.indexOf('React.createElement(EngineSessionProvider')
+      assert.notEqual(providerStart, -1)
+      const providerMount = stripped.slice(providerStart, providerStart + 400)
+      assert.ok(providerMount.includes('onDirtyChange: onEngineDirtyChange'))
+    })
+
+    it('uses the shared write predicate at arm and execution time', () => {
+      const armStart = stripped.indexOf('armDecision = useCallback')
+      assert.notEqual(armStart, -1)
+      assert.ok(stripped.slice(armStart, armStart + 1800).includes('isWrite = isWriteTool(catalogTool)'))
+      assert.ok(onRunBody.includes('isWrite = isWriteTool(tool)'))
+    })
+
+    it('recomputes the ribbon when engine dirty state changes', () => {
+      const ribbonStart = stripped.indexOf('ribbon = useMemo')
+      assert.notEqual(ribbonStart, -1)
+      const ribbonBody = stripped.slice(ribbonStart, ribbonStart + 12000)
+      const dependencyAnchor = ribbonBody.lastIndexOf('lastAuthoredTool')
+      const dirtyDependency = ribbonBody.indexOf('engineDirty', dependencyAnchor)
+      const memoEnd = ribbonBody.indexOf(']);', dependencyAnchor)
+      assert.notEqual(dependencyAnchor, -1)
+      assert.notEqual(dirtyDependency, -1)
+      assert.ok(dirtyDependency < memoEnd, 'engineDirty must be inside the ribbon memo dependency list')
+    })
+
+    it('fails after deleting the execution-time refusal', () => {
+      const activeRunStart = appSource.lastIndexOf('const onRun = useCallback')
+      const refusalStart = appSource.indexOf('    if (isWrite && engineDirtyRef.current)', activeRunStart)
+      const nextStatement = appSource.indexOf('    runIntentStateRef.current', refusalStart)
+      assert.notEqual(refusalStart, -1, 'the falsification mutation must find the guard')
+      assert.notEqual(nextStatement, -1, 'the falsification mutation must find the next statement')
+      const mutated = appSource.slice(0, refusalStart) + appSource.slice(nextStatement)
+      const mutatedStripped = esbuild.transformSync(mutated, { loader: 'jsx' }).code
+      const start = mutatedStripped.indexOf('onRun = useCallback')
+      assert.equal(mutatedStripped.slice(start, start + 3200).indexOf('engineDirtyRef.current'), -1)
+    })
+  })
 })
