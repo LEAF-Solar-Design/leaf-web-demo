@@ -329,7 +329,14 @@ export default function PromptBox({
     activeScope === 'find' && !trigger ? findResultRows(findResults) : []
   ), [activeScope, trigger, findResults])
   const scopeRows = activeScope === 'act' ? paletteRows : activeScope === 'find' ? findRows : []
-  const scopeMenuOpen = !!activeScope && !trigger && !menuDismissed && !routeActive && !scopeMenu.shown
+  // NOT gated on scopeMenu.shown (unlike menuOpen above): activeScope is set
+  // in the SAME tick pickScope closes the scope picker, so gating on the
+  // picker's own 180 ms exit fade left this palette dark for that whole
+  // window — a real defect an assertion caught (std/palette-search-s10bc
+  // continuation judgment), not a style choice to preserve. The picker's own
+  // render below drops out on `!activeScope` instead, so the two never
+  // double-render.
+  const scopeMenuOpen = !!activeScope && !trigger && !menuDismissed && !routeActive
 
   // Any edit re-arms a dismissed menu and re-anchors the highlight. The
   // credential refusal is retired by the controller's own setPrompt, which the
@@ -843,7 +850,7 @@ export default function PromptBox({
             </span>
           )}
         </div>
-        {scopeMenu.shown && (
+        {scopeMenu.shown && !activeScope && (
           <div
             className={`resolver${scopeMenu.exiting ? ' exit' : ''}`}
             role="listbox"
