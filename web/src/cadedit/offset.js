@@ -156,7 +156,12 @@ function miter(prevDir, nextDir, corner, offsetVector, nextOffsetVector) {
  * current.
  */
 export function offsetEntity(entity, distance, px, py) {
-  const d = typeof distance === 'number' ? distance : Number(distance)
+  // Preserve the distinction between a missing/invalid operand and zero.
+  // `Number(null)` is zero, which would turn a malformed distance into the
+  // wrong refusal sentence at the store boundary.
+  const d = typeof distance === 'number'
+    ? distance
+    : (typeof distance === 'string' && distance.trim() ? Number(distance) : Number.NaN)
   if (!finite(d)) return { refusal: 'Offset refused: the distance must be a number.' }
   if (d <= 0) return { refusal: 'Offset refused: the distance must be greater than 0.' }
   const kind = String(entity?.type || '')

@@ -20,9 +20,9 @@ describe('commandWords (W4f slice B): typed CAD words on the command line', () =
   })
 
   it('W4g-5: offset and its one-letter form arm the OFFSET prompt', () => {
-    expect(parseDrawingCommand('offset')).toEqual({ group: 'modify', op: 'offset', verb: 'OFFSET' })
-    expect(parseDrawingCommand('o')).toEqual({ group: 'modify', op: 'offset', verb: 'OFFSET' })
-    expect(parseDrawingCommand('  OFFSET  ')).toEqual({ group: 'modify', op: 'offset', verb: 'OFFSET' })
+    expect(parseDrawingCommand('offset')).toMatchObject({ group: 'modify', op: 'offset', verb: 'OFFSET', word: 'offset' })
+    expect(parseDrawingCommand('o')).toMatchObject({ group: 'modify', op: 'offset', verb: 'OFFSET', word: 'o' })
+    expect(parseDrawingCommand('  OFFSET  ')).toMatchObject({ group: 'modify', op: 'offset', verb: 'OFFSET', word: 'OFFSET' })
   })
 
   it('never claims a sentence, a slash tool, an empty or oversized text, or an unknown word', () => {
