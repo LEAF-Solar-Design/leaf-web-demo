@@ -643,13 +643,79 @@ jobs:
           pattern: gate-shard-*-${{ github.run_id }}
           path: ${{ runner.temp }}/shard-results
 
+      # Lockfile-transitivity input for run-all-gates.py's UNAVAILABLE handling
+      # in verify_shard_results (see that function's docstring): a live
+      # npmjs.org outage must never become a free PROVEN, so an UNAVAILABLE
+      # harness-audit-high suite only lets the fan-in exit 0 when the CURRENT
+      # lockfile blob sha equals the one recorded in the newest visible proof
+      # whose audit_suites entry for that suite id is PASS. This step is
+      # BEST-EFFORT ONLY and never changes the verdict on its own: any failure
+      # here (rate limit, network, zero candidates) just leaves the directory
+      # empty or absent, and the Python side already treats that as "no such
+      # prior proof exists" — fail closed, not a workflow-level failure. Same
+      # same-repository / gate-workflow provenance allowlist as the probe job
+      # above, because this feeds a security-relevant "already proven clean"
+      # claim, never a red->green.
+      - name: Download recent gate-proof artifacts (lockfile transitivity input)
+        if: ${{ needs.probe.outputs.reuse != 'true' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          mkdir -p "$RUNNER_TEMP/prior-gate-proofs"
+          repo_id="$(gh api "repos/$GITHUB_REPOSITORY" --jq .id 2>/dev/null)"
+          # Bounded to one page of the newest 30 artifacts repo-wide: this is
+          # a best-effort hint, never a completeness claim, so it never
+          # paginates further looking for more candidates.
+          listing="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=30" 2>/dev/null)"
+          if [[ -z "$repo_id" || -z "$listing" ]]; then
+            echo "no candidate listing available; proceeding with zero prior proofs"
+            exit 0
+          fi
+          mapfile -t candidates < <(jq -r --argjson repo_id "$repo_id" '
+            .artifacts
+            | sort_by(.created_at) | reverse | .[]
+            | select(.expired | not)
+            | select(.name | startswith("gate-proof-"))
+            | select(.workflow_run.head_repository_id == $repo_id)
+            | [.id, .workflow_run.id] | @tsv' <<<"$listing" 2>/dev/null)
+          n=0
+          for row in "${candidates[@]}"; do
+            [[ -n "$row" ]] || continue
+            (( n < 15 )) || break   # bounded: at most 15 downloads this run
+            candidate_id="${row%%$'\t'*}"; candidate_run="${row##*$'\t'}"
+            # Same mint-workflow allowlist as the probe job: only a run of
+            # this repo's own gate workflows may have produced this content.
+            path="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run" --jq .path 2>/dev/null)"
+            path="${path%%@*}"
+            case "$path" in
+              .github/workflows/test-gate.yml|.github/workflows/build-platform-images.yml) ;;
+              *) continue ;;
+            esac
+            rm -rf "$RUNNER_TEMP/prior-proof-dl"
+            mkdir -p "$RUNNER_TEMP/prior-proof-dl"
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$candidate_id/zip" \
+              > "$RUNNER_TEMP/prior-proof-dl.zip" 2>/dev/null || continue
+            unzip -q -o "$RUNNER_TEMP/prior-proof-dl.zip" -d "$RUNNER_TEMP/prior-proof-dl" || continue
+            [[ -f "$RUNNER_TEMP/prior-proof-dl/gate-proof.json" ]] || continue
+            cp "$RUNNER_TEMP/prior-proof-dl/gate-proof.json" \
+               "$RUNNER_TEMP/prior-gate-proofs/$candidate_id.json"
+            n=$((n + 1))
+          done
+          echo "fetched $n prior gate-proof candidate(s) for lockfile transitivity"
+          exit 0
+
       - name: Verify the complete gate
         if: ${{ needs.probe.outputs.reuse != 'true' }}
         env:
           SHARD_JOB_RESULT: ${{ needs.shards.result }}
         # Two independent conditions, both required:
         #   1. the verifier proves the shard set covered the exact catalog on
-        #      one fingerprint with zero failures;
+        #      one fingerprint with zero failures (or, for an UNAVAILABLE
+        #      npm-audit suite, proves lockfile-blob transitivity against
+        #      --prior-proofs-dir instead — never a free pass, see
+        #      verify_shard_results);
         #   2. the shard matrix job itself succeeded — artifact presence alone
         #      must never pass the gate.
         # --emit-proof writes the tree-bound proof document only when the
@@ -658,6 +724,7 @@ jobs:
         run: |
           python scripts/run-all-gates.py \
             --verify-shard-results "$RUNNER_TEMP/shard-results" \
+            --prior-proofs-dir "$RUNNER_TEMP/prior-gate-proofs" \
             --emit-proof "$RUNNER_TEMP/gate-proof/gate-proof.json"
           test "$SHARD_JOB_RESULT" = "success"
 
