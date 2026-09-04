@@ -160,6 +160,9 @@ class Source:
                     ("last_seq", "INTEGER DEFAULT 0"), ("active_turn_id", "TEXT"),
                     ("turn_started_at", "REAL"), ("active_turn_tier", "TEXT"),
                     ("active_turn_subject", "TEXT"), ("model", "TEXT"),
+                    ("scope_kind", "TEXT"), ("scope_handle", "TEXT"),
+                    ("title", "TEXT"),
+                    ("turn_count", "INTEGER NOT NULL DEFAULT 0"),
                 )
             )
             conn.execute("ALTER TABLE sessions RENAME TO sessions_indexed")
@@ -186,6 +189,27 @@ def _rows(database, table: str, **where) -> list[dict]:
     with database.cursor() as cur:
         cur.execute(f"SELECT * FROM {table} WHERE {clause}", tuple(where.values()))
         return [dict(row) for row in cur.fetchall()]
+
+
+def test_drop_identity_index_preserves_the_current_legacy_session_shape(source):
+    """The duplicate-identity fixture must not lag the live SQLite schema."""
+    first = source.session(
+        scope_kind="drawing",
+        scope_handle="drawing-scope",
+        title="Scoped conversation",
+        turn_count=1,
+    )
+    with RECONCILE._legacy_connection(source.path) as conn:
+        before = [tuple(row) for row in conn.execute("PRAGMA table_info(sessions)")]
+
+    source.drop_identity_index()
+
+    with RECONCILE._legacy_connection(source.path) as conn:
+        after = [tuple(row) for row in conn.execute("PRAGMA table_info(sessions)")]
+    assert after == before
+    # The one intended delta is that a second row can now use the same legacy
+    # tenant-and-drawing identity, which lets the trap-6 test reach the gate.
+    source.session(drawing_id=first["drawing_id"])
 
 
 # --------------------------------------------------------------------------- #
