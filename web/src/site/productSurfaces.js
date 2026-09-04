@@ -84,11 +84,15 @@ export function deepFreeze(value, seen = new WeakSet()) {
 //                shared JobRail on the stage, tree order making the wrapper
 //                win there too)
 //
-// A step is mapped ONLY where its className chain names one element. A chain
-// that picks among candidates by presence (`.strip-decision, .bar-dock`,
-// `.author-section, .workspace-card`, `.converse-confirm, .tc-operator-rail`)
-// stays a chain: an anchor is one element, and anchoring such a step would
-// change which element wins. Those steps are simply absent from the map. A
+// The rule an anchored step obeys: its `data-tour` sits on the element its
+// className chain resolves to on THAT shell, which the oracle pins at the
+// source level (the tag carrying the anchor names one of the chain's classes;
+// check 8 in check_tour_anchors.mjs). Chains that pick among candidates by
+// presence are anchored only where the shell renders exactly one of them
+// (`.viewer-canvas, .workspace-card` on the console viewer; `.bar, .bar-dock,
+// .workspace-card` on the console command bar); a chain whose winner varies
+// per surface (`.strip-decision, .bar-dock`, `.author-section, .workspace-card`,
+// `.converse-confirm, .tc-operator-rail`) stays a chain and is absent from the map. A
 // `left-rail` anchor existed through slice 4b's first cut (NavRail.jsx
 // `aside.nav`, ToolCast.jsx `.tc-operator-rail`) but named no such step on
 // either shell — the console never spotlights the nav rail at all, and the

@@ -45,25 +45,30 @@
 //      anchor each drive the same functions red, so a broken scan cannot
 //      report green.
 //
+//   8. PAIRING (source-level, the check the two earlier rounds only claimed).
+//      For every mapped step, the JSX opening tag that carries its
+//      `data-tour="<id>"` must ALSO carry one of the class names from that
+//      step's own className chain (tourScript.js `target` for the console,
+//      UNIFIED_TOUR_STEPS `target` for the stage). An anchor moved onto a
+//      sibling (`.viewer-fallback` instead of `.viewer-canvas`, an inner
+//      `div.tc-rail-head` instead of `aside.tc-rail-r`) fails here, on the
+//      real source, with the file and the chain named. The positive control
+//      does exactly those two moves on the real Viewer.jsx and ToolCast.jsx
+//      text and shows the check goes red.
+//   9. NO STRAY ANCHOR ANYWHERE. Every `.jsx` under src/ is walked; a
+//      `data-tour` in a file outside CONSOLE_SOURCES / STAGE_SOURCES fails,
+//      so the per-shell lists cannot silently miss a new carrier.
+//
 // Static only, and honest about it: this proves the attribute exists in the
-// file and is consumed by a step, not that the element renders on a given
-// surface, or that the RIGHT element is what actually lights up in a browser.
-// That second, narrower claim — an anchored step resolves to the SAME element
-// its className chain would have picked, i.e. the anchor was not mis-placed
-// on a sibling — is pinned by web/src/demo/demoTourAnchors.test.jsx: a jsdom
-// suite that mounts each shell's real markup shape, calls resolveTourTarget
-// once WITH the contract's anchors and once with anchors withheld (className
-// chain only) for every mapped step, and asserts they resolve to the same
-// node. Its own positive control proves that pairing is a real tripwire, not
-// a vacuous one, by moving a `data-tour` attribute onto an unrelated sibling
-// and showing the two resolutions then diverge. The e2e walk
-// (e2e/unified-walk.spec.mjs) drives the tour end to end through the real
-// app and asserts on step copy, the command bar, and app state as the walk
-// proceeds; it never reads `.tour-spot`'s geometry or which node is under it,
-// so it is not, and was never, a check on which element the spotlight lands
-// on — the line that used to claim otherwise was wrong, not just imprecise.
+// file, is consumed by a step, and sits on a tag whose class the step's own
+// chain names; it does not prove the element renders on a given surface.
+// web/src/demo/demoTourAnchors.test.jsx pins resolveTourTarget's ORDER
+// (anchor first, chain second) in jsdom over fixture markup; it is not, and
+// no longer claims to be, a pin on the real shells' markup. The e2e walk
+// (e2e/unified-walk.spec.mjs) asserts step copy, the command bar and app
+// state, never which node the spotlight lands on.
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, relative } from 'node:path'
 import { describe, it } from 'node:test'
@@ -124,6 +129,94 @@ export function stageStepIds(toolCastSource) {
   const end = toolCastSource.indexOf('\n]', start)
   const block = toolCastSource.slice(start, end === -1 ? undefined : end)
   return [...block.matchAll(/^\s*id: '([^']+)',$/gm)].map((m) => m[1])
+}
+
+/** The stage's steps as { id, target } pairs, same bounded block as stageStepIds (id list). */
+export function stageStepRecords(toolCastSource) {
+  const start = toolCastSource.indexOf('const UNIFIED_TOUR_STEPS = [')
+  if (start === -1) return []
+  const end = toolCastSource.indexOf('\n]', start)
+  const block = toolCastSource.slice(start, end === -1 ? undefined : end)
+  const out = []
+  const re = /^\s*id: '([^']+)',$[\s\S]*?^\s*target: (?:'([^']*)'|null),$/gm
+  for (const m of block.matchAll(re)) out.push({ id: m[1], target: m[2] ?? null })
+  return out
+}
+
+/** The class names a step's chain names, in order; [] for a null target. */
+export function chainClasses(target) {
+  if (typeof target !== 'string') return []
+  return target.split(',').map((t) => t.trim()).filter((t) => t.startsWith('.')).map((t) => t.slice(1)).filter(Boolean)
+}
+
+/**
+ * Every JSX opening tag in `source` that carries `data-tour="<id>"`, as its
+ * raw text from `<` to the tag's own `>`. A `>` that is part of an arrow
+ * (`=>`) inside an attribute expression does not end the tag. Bounded: a tag
+ * longer than MAX_TAG_CHARS is returned truncated, never scanned further.
+ */
+export const MAX_TAG_CHARS = 4000
+export function tagsCarrying(source, id) {
+  const text = String(source)
+  const needle = `data-tour="${id}"`
+  const out = []
+  let from = 0
+  for (;;) {
+    const at = text.indexOf(needle, from)
+    if (at === -1) break
+    from = at + needle.length
+    let start = text.lastIndexOf('<', at)
+    while (start > 0 && !/[A-Za-z]/.test(text[start + 1])) start = text.lastIndexOf('<', start - 1)
+    if (start === -1) continue
+    let end = at
+    for (;;) {
+      end = text.indexOf('>', end + 1)
+      if (end === -1 || end - start > MAX_TAG_CHARS) { end = Math.min(start + MAX_TAG_CHARS, text.length); break }
+      if (text[end - 1] !== '=') break
+    }
+    out.push(text.slice(start, end + 1))
+  }
+  return out
+}
+
+const wordRe = (cls) => new RegExp(`(^|[^A-Za-z0-9_-])${cls.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9_-])`)
+
+/**
+ * PAIRING. For each [stepId, anchorId] in `anchorMap`, every tag in `sources`
+ * (path -> text) carrying that anchor must name one of the step's chain
+ * classes in its own text (className literal or template). Returns violation
+ * strings; empty means every anchored tag pairs with its step. Pure.
+ */
+export function pairingViolations(sources, steps, anchorMap) {
+  const out = []
+  if (!anchorMap) return out
+  const byId = new Map(steps.map((st) => [st.id, st]))
+  for (const [stepId, anchorId] of Object.entries(anchorMap)) {
+    const st = byId.get(stepId)
+    if (!st) continue  // check 2 reports the unknown step
+    const classes = chainClasses(st.target)
+    if (!classes.length) { out.push(`step ${stepId} is anchored to "${anchorId}" but its chain names no class to pair with`); continue }
+    for (const [path, text] of Object.entries(sources)) {
+      for (const tag of tagsCarrying(text, anchorId)) {
+        if (!classes.some((c) => wordRe(c).test(tag))) {
+          out.push(`${path}: the tag carrying data-tour="${anchorId}" (step ${stepId}) names none of ${classes.map((c) => '.' + c).join(', ')}; the anchor sits on the wrong element`)
+        }
+      }
+    }
+  }
+  return out.sort()
+}
+
+/** Every .jsx path under a directory, recursively, bounded to MAX_WALK files. */
+export const MAX_WALK = 2000
+export function walkJsx(dir, acc = []) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (acc.length >= MAX_WALK) break
+    const full = join(dir, entry.name)
+    if (entry.isDirectory()) { if (entry.name !== 'node_modules') walkJsx(full, acc) }
+    else if (entry.name.endsWith('.jsx') && !entry.name.includes('.test.')) acc.push(full)
+  }
+  return acc
 }
 
 /**
@@ -201,6 +294,10 @@ for (const p of STAGE_SOURCES) for (const a of anchorsInSource(read(p))) stageAn
 const consoleReferenced = referencedAnchors(PRODUCT_SURFACES, 'console')
 const stageReferenced = referencedAnchors(PRODUCT_SURFACES, 'stage')
 const facts = { consoleSteps, stageSteps, consoleAnchors, stageAnchors }
+const consoleSources = Object.fromEntries(CONSOLE_SOURCES.map((p) => [p, read(p)]))
+const stageSources = Object.fromEntries(STAGE_SOURCES.map((p) => [p, read(p)]))
+const stageStepList = stageStepRecords(toolCast)
+const listedSources = new Set([...CONSOLE_SOURCES, ...STAGE_SOURCES])
 
 describe('tour anchors: the contract names anchors that exist (slice 4b)', () => {
   it('reads both step arrays and both shells (the scan is not vacuous)', () => {
@@ -249,6 +346,24 @@ describe('tour anchors: the contract names anchors that exist (slice 4b)', () =>
     assert.doesNotMatch(block, /\banchor:/)
   })
 
+  for (const surface of PRODUCT_SURFACES) {
+    it(`${surface.id}: every anchored tag carries a class from its step's own chain (pairing)`, () => {
+      assert.deepEqual(pairingViolations(consoleSources, TOUR_STEPS, surface.contract.tourAnchors.console), [], 'console')
+      assert.deepEqual(pairingViolations(stageSources, stageStepList, surface.contract.tourAnchors.stage), [], 'stage')
+    })
+  }
+
+  it('no .jsx under src/ outside the two shell lists carries a data-tour attribute (stray anchor)', () => {
+    const stray = []
+    for (const full of walkJsx(SRC)) {
+      const p = rel(full)
+      if (listedSources.has(p)) continue
+      // Only attribute LITERALS count: DemoTour.jsx's `[data-tour="${anchorId}"]` selector and
+      // its docstring's `<id>` are not carriers, and neither is a slug.
+      for (const id of anchorsInSource(readFileSync(full, 'utf8'))) if (ANCHOR_ID.test(id)) stray.push(`${p}: data-tour="${id}"`)
+    }
+    assert.deepEqual(stray.sort(), [], 'a new carrier must be listed under CONSOLE_SOURCES or STAGE_SOURCES')
+  })
   it('no shell carries a data-tour id that no step map references (no orphaned vocabulary)', () => {
     assert.deepEqual(orphanedAnchors(consoleAnchors, consoleReferenced), [], 'console')
     assert.deepEqual(orphanedAnchors(stageAnchors, stageReferenced), [], 'stage')
@@ -314,5 +429,37 @@ describe('tour anchors: positive control (the gate goes red on the drift it exis
   it('the source scanners find what they should (so an empty scan cannot pass)', () => {
     assert.deepEqual([...anchorsInSource('<a data-tour="shell"/><b data-tour="viewer"/>')].sort(), ['shell', 'viewer'])
     assert.deepEqual(stageStepIds("const UNIFIED_TOUR_STEPS = [\n  {\n    id: 'a',\n  },\n  {\n    id: 'b',\n  },\n]\nconst other = [{ id: 'c' }]\n"), ['a', 'b'])
+  })
+
+  it('pairing goes red when the real viewer anchor moves onto its fallback sibling', () => {
+    const viewer = read('src/components/Viewer.jsx')
+    const moved = viewer
+      .replace('className="viewer-canvas" data-tour="viewer"', 'className="viewer-canvas"')
+      .replace('<div className="viewer-fallback"', '<div className="viewer-fallback" data-tour="viewer"')
+    assert.notEqual(moved, viewer, 'the fixture actually moved the attribute')
+    const v = pairingViolations({ 'src/components/Viewer.jsx': moved }, TOUR_STEPS, cad.contract.tourAnchors.console)
+    assert.ok(v.some((x) => x.includes('data-tour="viewer"')), v.join('; '))
+    assert.deepEqual(pairingViolations({ 'src/components/Viewer.jsx': viewer }, TOUR_STEPS, cad.contract.tourAnchors.console), [])
+  })
+
+  it('pairing goes red when the real right-rail anchor moves onto the inner rail head', () => {
+    const src = read('src/site/ToolCast.jsx')
+    const moved = src
+      .replace(' data-tour="right-rail"', '')
+      .replace('<div className="tc-rail-head"', '<div className="tc-rail-head" data-tour="right-rail"')
+    assert.notEqual(moved, src, 'the fixture actually moved the attribute')
+    const v = pairingViolations({ 'src/site/ToolCast.jsx': moved }, stageStepRecords(src), cad.contract.tourAnchors.stage)
+    assert.ok(v.some((x) => x.includes('data-tour="right-rail"')), v.join('; '))
+  })
+
+  it('a chain with no class to pair with is itself a violation', () => {
+    const v = pairingViolations({ 'x.jsx': '<div data-tour="shell" />' }, [{ id: 'welcome', target: null }], { welcome: 'shell' })
+    assert.equal(v.length, 1)
+  })
+
+  it('tagsCarrying crosses an arrow inside an attribute and stops at the tag', () => {
+    const tags = tagsCarrying('<div onX={(e) => go(e)} data-tour="shell" className="app"><span>x</span></div>', 'shell')
+    assert.equal(tags.length, 1)
+    assert.ok(tags[0].endsWith('className="app">'), tags[0])
   })
 })
