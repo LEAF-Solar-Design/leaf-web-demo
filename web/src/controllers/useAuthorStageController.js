@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { config, stageAuthorTool as defaultStageAuthorTool } from '../api.js'
+import { SecretRefusedError, guardedText } from '../lib/secretGuardTransport.js'
 import {
   AUTHOR_POINTER_TTL_MS,
   authorAccountScope,
@@ -61,7 +62,7 @@ export default function useAuthorStageController({
     return next
   }, [])
 
-  const runPointer = useCallback(async (initial, { reconnecting = false } = {}) => {
+  const runPointer = useCallback(async (initial, { reconnecting = false, allowSecretOnce = false } = {}) => {
     if (!initial) return null
     abortRef.current?.abort()
     const abortController = new AbortController()
@@ -83,7 +84,12 @@ export default function useAuthorStageController({
       let authority = null
       if (authorityProvider && !initial.poll_url) {
         try {
-          authority = (await authorityProvider(initial.description)) || null
+          // `allowSecretOnce` MUST reach the mint too: an AuthorPanel "Send
+          // anyway" re-stages credential-shaped text with the override, and a
+          // provider that guards its own POST (the converse turn start does)
+          // would otherwise refuse the mint itself and swallow it into a
+          // silent no-authority fallback — the override never actually landed.
+          authority = (await authorityProvider(initial.description, { allowSecretOnce })) || null
         } catch {
           authority = null
         }
@@ -93,6 +99,7 @@ export default function useAuthorStageController({
         initial.description,
         initial.target_tool_name || null,
         {
+          allowSecretOnce,
           idempotencyKey: initial.idempotency_key,
           pollUrl: initial.poll_url || null,
           changeSetId: initial.change_set_id || null,
@@ -142,11 +149,23 @@ export default function useAuthorStageController({
     }
   }, [authorityProvider, mock, persist, stageAuthorTool])
 
-  const stage = useCallback((description, targetToolName = null) => {
+  const stage = useCallback((description, targetToolName = null, { allowSecretOnce = false } = {}) => {
     if (!enabled) return Promise.resolve(null)
+    // THE STORAGE BOUNDARY, guarded by the same seam the transport uses.
+    // stageAuthorTool is the authority and refuses this text on the wire, but
+    // this function writes the description to localStorage FIRST (the durable
+    // authoring pointer), and a credential must not land in storage either.
+    // Same decision, same frozen copy, same typed throw — not a second policy.
+    const guard = guardedText(description, { allowSecretOnce, credentialMountAvailable: !mock })
+    if (!guard.ok) return Promise.reject(new SecretRefusedError(guard.refusal))
     const current = readInflightAuthor(storageRef.current)
     if (authorPointerValid(current, accountScope)) {
-      return runPointer(current, { reconnecting: true })
+      // A valid pointer that never got its poll_url (the first POST did not
+      // land) is re-run here, and its mint runs again: the caller's live
+      // override rides along, or a Send-anyway re-stage would be refused at
+      // the mint and swallowed into a null authority. The mount-time resumes
+      // below carry no override on purpose: nobody consented on that call.
+      return runPointer(current, { reconnecting: true, allowSecretOnce })
     }
     if (current) clearInflightAuthor(null, storageRef.current)
     resumedRef.current = true
@@ -163,7 +182,7 @@ export default function useAuthorStageController({
     }
     if (!mock) persist(next)
     else setPointer(next)
-    return runPointer(next)
+    return runPointer(next, { allowSecretOnce })
   }, [accountScope, enabled, mock, persist, runPointer])
 
   const resume = useCallback(() => {

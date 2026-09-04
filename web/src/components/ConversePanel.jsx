@@ -29,6 +29,7 @@ import {
   clipboardImagesToAttachments,
   thumbnailImages,
 } from '../composer.js'
+import { isSecretRefused } from '../lib/secretGuardTransport.js'
 import Markdown from './Markdown.jsx'
 import { contextPct, fmtDetail, orDash, usageCost, usageModel } from '../usage.js'
 import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
@@ -204,6 +205,10 @@ export default function ConversePanel({
   const [expandedTools, setExpandedTools] = useState({}) // chip key -> expanded (full args/result)
   const [attachments, setAttachments] = useState([])
   const [attachmentError, setAttachmentError] = useState(null)
+  // The credential refusal the TRANSPORT raised, held only to render it:
+  // {id, reason, masked, overridable} or null. This composer evaluates nothing
+  // itself (round 3) — converse.postMessage refuses and throws, send() catches.
+  const [secretNotice, setSecretNotice] = useState(null)
   const attachmentUrlsRef = useRef(new Set())
   const logRef = useRef(null)
   const jobSeenRef = useRef(new Set())
@@ -470,7 +475,12 @@ export default function ConversePanel({
     reader.readAsDataURL(image.file)
   })))
 
-  const send = async (nextText = input) => {
+  // allowSecretOnce is the "Send anyway" click's authorisation, carried as a
+  // PARAMETER into the one postMessage it authorises. Nothing here remembers
+  // it: a click that lands while the box is busy returns early below and
+  // authorises exactly nothing, which is the fail-closed direction and the
+  // round-3 fix for the latch two earlier rounds shipped.
+  const send = async (nextText = input, { allowSecretOnce = false } = {}) => {
     const text = String(nextText).trim()
     if ((!text && !attachments.length) || busy) return false
     let delivered = false
@@ -491,22 +501,32 @@ export default function ConversePanel({
       setInput('')
       clearAttachments()
       setAttachmentError(null)
+      // The send landed, so whatever refusal was on screen is spent.
+      setSecretNotice(null)
     }
     try {
       const images = await attachmentPayloads()
       try {
-        accept(await postMessage(sessionId, { ...(text ? { text } : {}), ...(images.length ? { images } : {}) }), images)
+        accept(await postMessage(sessionId, {
+          ...(text ? { text } : {}),
+          ...(images.length ? { images } : {}),
+          allowSecretOnce,
+        }), images)
         track('conversation.message_sent', { input_kind: text ? 'typed' : 'image_only', text_len: text.length })
       } catch (e) {
         if (!shouldRetryWithQueue(classifyAgentError(e), { text, images })) throw e
-        accept(await postMessage(sessionId, { text, queue: true }), images)
+        accept(await postMessage(sessionId, { text, queue: true, allowSecretOnce }), images)
         // P2: the direct post failed (turn busy) and the queued retry landed —
         // the panel recovered the send rather than surfacing an error.
         track('conversation.recovered', { reason: 'busy_retry_queued' })
       }
       delivered = true
     } catch (e) {
-      setSendErr(bannerFor(e))
+      // A credential refusal never left the browser, so it is NOT a send
+      // failure banner ("the assistant is unavailable" would be a lie about a
+      // client-side decision). It renders as this composer's own notice.
+      if (isSecretRefused(e)) setSecretNotice(e.refusal)
+      else setSendErr(bannerFor(e))
     } finally {
       setSending(false)
     }
@@ -516,6 +536,11 @@ export default function ConversePanel({
   const answerQuestion = async (questionId, optionLabel) => {
     const choice = chooseQuestionOption(questionChoices, events, questionId, optionLabel)
     if (choice.action !== 'send') return
+    // A refusal raised by an app-supplied choice string has no text of its own
+    // for the user to edit, so the reply box's onChange can never retire it.
+    // The next choice does instead: picking again is the natural next act on
+    // this surface, and it is what that notice was about.
+    setSecretNotice(null)
     setQuestionChoices(choice.state)
     if (!await send(choice.text)) {
       setQuestionChoices((state) => clearSendingQuestion(state, questionId))
@@ -925,10 +950,38 @@ export default function ConversePanel({
         ))}
       </div>
 
+      {secretNotice && (
+        <div className="converse-secret-notice" role="alert" data-testid="converse-secret-notice">
+          <span className="dot red" aria-hidden="true" />
+          <span className="strip-sentence" data-testid="converse-secret-notice-reason">{secretNotice.reason}</span>
+          {/* At most a four-character shape prefix behind a fixed bullet run
+              (maskForNotice). This is the ONLY place any character of the
+              pasted credential is rendered, and it is never the entropy. */}
+          <span className="dim" data-testid="converse-secret-notice-mask">{secretNotice.masked}</span>
+          {/* Rendered only when re-sending would actually send something: a
+              refusal raised by an app-supplied choice string has no text in the
+              box, and a button whose click does nothing is worse than no
+              button. Disabled while a turn is in flight for the same reason. */}
+          {secretNotice.overridable && !!input.trim() && (
+            <button
+              type="button"
+              className="chip-neutral"
+              data-testid="converse-secret-send-anyway"
+              disabled={busy}
+              onClick={() => send(undefined, { allowSecretOnce: true })}
+            >
+              Send anyway
+            </button>
+          )}
+        </div>
+      )}
+
       <div className="converse-input">
         <input
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          // Any edit retires the refusal, which was about the text that WAS
+          // there; a notice outliving its text reads as a stuck error.
+          onChange={(e) => { setInput(e.target.value); setSecretNotice(null) }}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send() }
           }}
@@ -963,7 +1016,13 @@ export default function ConversePanel({
             {stopping ? 'Stopping…' : 'Stop'}
           </button>
         ) : (
-          <button type="button" className="chip-act" onClick={send} disabled={busy || (!input.trim() && !attachments.length)}>
+          // onClick={send} handed the CLICK EVENT to send()'s text parameter,
+          // so the button posted the literal string "[object Object]" instead
+          // of the typed reply (probed on this branch before the fix:
+          // postMessage received {text: "[object Object]"}). Wrapping it is
+          // what makes the button send the input at all, and therefore what
+          // puts it behind the credential guard.
+          <button type="button" className="chip-act" onClick={() => send()} disabled={busy || (!input.trim() && !attachments.length)}>
             {sending ? 'Sending…' : 'Send'}
           </button>
         )}

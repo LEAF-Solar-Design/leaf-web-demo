@@ -128,6 +128,30 @@ export async function openApp(page) {
   await page.getByLabel('Command bar').waitFor()
 }
 
+/**
+ * The /try operator scene (StageScene -> ToolCast), the OTHER surface with a
+ * free-text command bar. It carries the SAME `data-testid="command-bar"` and
+ * `aria-label="Command bar"` as the app bar, so a spec that does not pin the
+ * URL can silently drive the wrong one; every /try row here pins it.
+ */
+export async function openTry(page) {
+  await page.goto('/try')
+  await page.getByTestId('operator-phase').waitFor()
+  await page.getByLabel('Command bar').waitFor()
+  // AND wait until the bar can actually dispatch. ToolCast.dispatchRequest
+  // early-returns unless the platform session is active, a drawing is seated
+  // and nothing is in flight, and the Run button carries exactly that
+  // precondition set. Typing before it goes live makes the keypress a silent
+  // no-op, which is how a credential row went red on a loaded box while
+  // passing alone: the assertion was racing hydration, not the guard.
+  await page.getByRole('button', { name: /^(Run|Send)$/ }).and(page.locator('.tc-run')).first()
+    .waitFor({ state: 'visible' })
+  await page.waitForFunction(() => {
+    const run = document.querySelector('.tc-run')
+    return !!run && !run.disabled
+  }, null, { timeout: 30_000 })
+}
+
 export async function proposeCat(page) {
   const request = 'Rearrange the existing panels in this drawing into the shape of a sitting cat.'
   await page.getByLabel('Command bar').fill(request)

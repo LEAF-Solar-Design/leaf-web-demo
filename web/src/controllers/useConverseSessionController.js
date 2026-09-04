@@ -80,14 +80,18 @@ export default function useConverseSessionController({ drawingId, retryNotFound 
     resetSession(drawingId, projectRef.current)
   }, [drawingId])
 
-  const startTurn = useCallback(async (text, classifierHint) => {
+  // `allowSecretOnce` is a per-call authorisation for an OVERRIDABLE credential
+  // refusal, handed straight to converse.postMessage, which is where the guard
+  // lives. Nothing here stores it, so a retry that never reaches postMessage
+  // authorises nothing.
+  const startTurn = useCallback(async (text, classifierHint, { allowSecretOnce = false } = {}) => {
     const requestedProjectId = projectRef.current
     const requestId = requestedProjectId ? createRequestId() : null
     const send = async (id) => {
       if (projectRef.current !== requestedProjectId) {
         throw new Error('Project changed while starting the conversation')
       }
-      const payload = { text, classifier_hint: classifierHint }
+      const payload = { text, classifier_hint: classifierHint, allowSecretOnce }
       if (requestedProjectId) {
         payload.queue = true
         payload.request_id = requestId

@@ -674,6 +674,20 @@
 .tc-bar > .strip-decision,
 .tc-bar > .resolver { margin: 8px 8px 0; }
 .tc-bar-input-row { display: flex; align-items: center; gap: 10px; padding: 13px 16px 9px; }
+/* The credential refusal the FUNNEL raised (slice 8a). Same shape as the app
+   bar's .bar-secret-notice, in /try's dark chrome: that rule is scoped under
+   `.bar`, which this surface is not, so reusing the class would have rendered
+   an unstyled row. */
+.tc-secret-notice {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 16px; padding: 7px 9px;
+  border: 1px solid rgba(248, 113, 113, .45);
+  border-radius: 6px;
+  background: rgba(248, 113, 113, .10);
+  font-size: 12px; color: #e4e4e7;
+}
+.tc-secret-notice .strip-sentence { flex: 1; }
+.tc-secret-notice .dim { color: #a1a1aa; font-variant-numeric: tabular-nums; }
 .tc-bar-caret { font: 600 13px ui-monospace, monospace; color: #22c55e; }
 .tc-bar-input {
   flex: 1; border: 0; outline: none; background: none;

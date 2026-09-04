@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
 import { authorTool } from '../api'
+import { isSecretRefused } from '../lib/secretGuardTransport.js'
 
 // "Author a tool" — a text description -> POST /api/author -> a generated
 // tool card + code preview, added to the tool list so it's immediately
@@ -238,6 +239,13 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
   const [authored, setAuthored] = useState(null)
   const [publishing, setPublishing] = useState(false)
   const [publishErr, setPublishErr] = useState(null)
+  // The credential refusal the TRANSPORT raised (api.stageAuthorTool /
+  // api.authorTool, and the author pointer's storage boundary), held only to
+  // render it: {id, reason, masked, overridable} or null. This panel evaluates
+  // nothing itself. The round-3 review found this textarea reaching the
+  // authoring agent with no guard anywhere on the path; the guard now sits on
+  // the wire, and this is the notice that says so.
+  const [secretNotice, setSecretNotice] = useState(null)
   const lastSignal = useRef(null)
   const startRef = useRef(null)
   const authoredRef = useRef(null)
@@ -298,14 +306,20 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
   // `override` lets a caller submit a description that hasn't round-tripped
   // through state yet (the tour seed). Click handlers pass a MouseEvent, so only
   // a string is honoured — mirroring the existing seed/override pattern.
-  async function submit(override) {
+  // `allowSecretOnce` is the "Send anyway" click's authorisation, carried as a
+  // PARAMETER of this one staging call. Nothing here remembers it, so a click
+  // that cannot submit (locked, unentitled, empty) authorises nothing at all.
+  async function submit(override, { allowSecretOnce = false } = {}) {
     const d = (typeof override === 'string' ? override : desc).trim()
     if (!d || !buildEntitled) return
-    setBusy(true); setErr(null); setPublishErr(null); setGrantGate(false); setBuildGate(false); setSvcGate(false); setQuotaGate(null); setAuthored(null)
+    setBusy(true); setErr(null); setPublishErr(null); setGrantGate(false); setBuildGate(false); setSvcGate(false); setQuotaGate(null); setAuthored(null); setSecretNotice(null)
     try {
-      const res = await onAuthor(d, targetToolName)
+      const res = await onAuthor(d, targetToolName, { allowSecretOnce })
       setAuthored(res)
     } catch (e) {
+      // A credential refusal never left the browser. It is not an outage, not
+      // a plan gate and not a red failure: it is this panel's own notice.
+      if (isSecretRefused(e)) { setSecretNotice(e.refusal); return }
       // Auth-off demo mode: the R5 stage lane fail-closes with
       // `customization_auth_required` (it hard-requires live auth). The
       // customization contract (§7 Legacy authoring) sanctions the legacy direct
@@ -315,10 +329,11 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
       // never the staged-lifecycle claim, which would be false for this shape.
       if (e && e.body && e.body.reason_code === 'customization_auth_required') {
         try {
-          const res = await authorTool(false, d)
+          const res = await authorTool(false, d, { allowSecretOnce })
           setAuthored({ ...res, legacy_demo: true })
           return
         } catch (e2) {
+          if (isSecretRefused(e2)) { setSecretNotice(e2.refusal); return }
           if (e2 && e2.entitlementRequired) setBuildGate(true)
           else if (e2 && e2.grantRequired) setGrantGate(true)
           else if (isServiceDown(e2)) setSvcGate(true)
@@ -404,13 +419,39 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
             : (notLinked || grantGate)
               ? <AuthorGate onLinkClaude={onLinkClaude} />
               : null}
+      {secretNotice && (
+        <div className="author-secret-notice" role="alert" data-testid="author-secret-notice">
+          <span className="dot red" aria-hidden="true" />
+          <span className="strip-sentence" data-testid="author-secret-notice-reason">{secretNotice.reason}</span>
+          {/* At most a four-character shape prefix behind a fixed bullet run
+              (maskForNotice). This is the ONLY place any character of the
+              pasted credential is rendered, and it is never the entropy. */}
+          <span className="dim" data-testid="author-secret-notice-mask">{secretNotice.masked}</span>
+          {secretNotice.overridable && (
+            <button
+              type="button"
+              className="chip-neutral"
+              data-testid="author-secret-send-anyway"
+              // Re-issues the SAME staging call with the override as a call
+              // parameter. Nothing is armed, so a click that cannot submit
+              // authorises nothing rather than latching open.
+              disabled={authorLocked || !desc.trim() || !buildEntitled}
+              onClick={() => submit(undefined, { allowSecretOnce: true })}
+            >
+              Send anyway
+            </button>
+          )}
+        </div>
+      )}
       {/* F1 anatomy: 12px muted label above the field */}
       <label className="field-label" htmlFor="author-desc">What should the tool do?</label>
       <textarea
         id="author-desc"
         ref={descRef}
         value={desc}
-        onChange={(e) => setDesc(e.target.value)}
+        // An edit retires the refusal, which was about the text that WAS
+        // there; a notice outliving its text reads as a stuck error.
+        onChange={(e) => { setDesc(e.target.value); setSecretNotice(null) }}
         placeholder={targetToolName ? 'Describe the repair to make to this tool' : 'e.g. count panels within 24in of the roof edge'}
         rows={3}
         disabled={authorLocked}

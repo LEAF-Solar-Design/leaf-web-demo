@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, it } from 'node:test'
 
 import esbuild from 'esbuild'
@@ -37,6 +39,60 @@ import {
 const names = (entries) => entries.map((e) => e.name)
 const promptBoxSource = readFileSync(new URL('./components/PromptBox.jsx', import.meta.url), 'utf8')
 const promptBoxStripped = esbuild.transformSync(promptBoxSource, { loader: 'jsx' }).code
+const strip = (relative) => esbuild.transformSync(
+  readFileSync(new URL(relative, import.meta.url), 'utf8'),
+  { loader: 'jsx' },
+).code
+// Every source file under web/src, comments and string bodies intact but JSX
+// stripped, addressed by its path relative to src/. The census pins below walk
+// this list rather than a hand-kept file list, so a NEW file that sends free
+// text is caught the moment it appears.
+const SRC_ROOT = fileURLToPath(new URL('.', import.meta.url))
+const IS_TEST = /\.(test|spec)\.[cm]?[jt]sx?$/
+function listSrcFiles(dir = SRC_ROOT, prefix = '') {
+  const out = []
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name
+    if (entry.isDirectory()) {
+      if (entry.name === 'assets') continue
+      out.push(...listSrcFiles(join(dir, entry.name), rel))
+    } else if (/\.[cm]?[jt]sx?$/.test(entry.name) && !IS_TEST.test(entry.name)) {
+      out.push(rel)
+    }
+  }
+  return out.sort()
+}
+const SRC_FILES = listSrcFiles()
+const srcCache = new Map()
+const readSrc = (rel) => {
+  if (!srcCache.has(rel)) srcCache.set(rel, readFileSync(join(SRC_ROOT, rel), 'utf8'))
+  return srcCache.get(rel)
+}
+// Comment-stripped, for pins on identifiers: a comment that merely NAMES a
+// deleted latch must not red a gate, and a comment claiming a property must
+// not satisfy one. Falls back to the raw text if a file will not transform,
+// which fails in the strict direction (the pin still sees everything).
+// Whitespace-insensitive comparison, so a reformat cannot move a pin.
+const bare = (text) => String(text).replace(/\s+/g, '')
+const strippedCache = new Map()
+const readStripped = (rel) => {
+  if (!strippedCache.has(rel)) {
+    let out
+    try {
+      // minifyWhitespace is what actually removes comments; a plain
+      // transform keeps them, which would let a comment satisfy a pin.
+      out = esbuild.transformSync(readSrc(rel), { loader: 'jsx', minifyWhitespace: true }).code
+    } catch {
+      out = readSrc(rel)
+    }
+    strippedCache.set(rel, out)
+  }
+  return strippedCache.get(rel)
+}
+// Only a module that can issue a request can be a second sender. A mock or a
+// doc comment naming an endpoint is not one, and counting it would push this
+// census toward being switched off.
+const SENDERS = SRC_FILES.filter((file) => /\bfetch\(/.test(readSrc(file)))
 
 describe('autoGrowHeight', () => {
   it('leaves the single-line well to CSS', () => {
@@ -509,5 +565,242 @@ describe('queued-turn reconciliation: drop-before-202 (round 3)', () => {
     const accepted = acceptQueuedTurn(state, { queuedId: 'q-2', text: 'mine' })
     assert.equal(accepted.action, 'queue')
     assert.equal(accepted.state.queuedTurn.queuedId, 'q-2')
+  })
+})
+
+
+// --- THE GUARD IS ON THE WIRE: source pins (slice 8a, round 3) -------------
+//
+// These are CENSUS and ORDERING pins, and they are the rows that make the PR's
+// claim checkable at all. Three review rounds died on the same shape of
+// defect: the guard installed per composer while the promise was per app, and
+// the composer census short by one every time (the reply box, then the /try bar
+// and the retry paths, then the Author-a-tool textarea). A behaviour test
+// proves one path. These prove there is only one path to prove.
+//
+// EVERY assertion below reads COMMENT-STRIPPED source (readStripped, which uses
+// esbuild's minifyWhitespace — a plain transform keeps comments, and a pin a
+// comment can satisfy is not a pin) and compares with whitespace removed, so
+// neither a claim in prose nor a reformat can move a row. Each was verified in
+// both directions by neutering the property and watching it go red.
+describe('the credential guard sits on the transport, not on the composers', () => {
+  const GUARDED = [
+    // [file, function opener, the first network call in its body]
+    ['api.js', 'async function nlPrompt(', 'apiFetch('],
+    ['api.js', 'async function authorTool(', 'apiFetch('],
+    ['api.js', 'async function stageAuthorTool(', 'apiFetch('],
+    ['converse.js', 'async function postMessage(', 'await post('],
+    ['operatorClient.js', 'async function postMessage(', 'postJson('],
+  ]
+
+  for (const [file, opener, network] of GUARDED) {
+    const label = opener.replace('async function ', '').replace('(', '')
+    it(`${file} ${label} guards before it touches the network`, () => {
+      const source = bare(readStripped(file))
+      const at = source.indexOf(bare(opener))
+      assert.notEqual(at, -1, `could not find ${opener} in ${file}`)
+      const body = source.slice(at, at + 3000)
+      const guardAt = body.indexOf('guardedText(')
+      const throwAt = body.indexOf('newSecretRefusedError(')
+      const networkAt = body.indexOf(bare(network))
+      assert.notEqual(guardAt, -1, `${file} ${label} must call the guard seam`)
+      assert.notEqual(throwAt, -1, `${file} ${label} must throw the typed refusal`)
+      assert.notEqual(networkAt, -1, `could not find ${network} in ${file} ${label}`)
+      assert.ok(guardAt < networkAt, `${file} ${label}: the guard must run before ${network}`)
+      assert.ok(throwAt < networkAt, `${file} ${label}: the refusal must throw before ${network}`)
+    })
+  }
+
+  // The endpoints that carry user-typed free text toward a model. Each may be
+  // named by exactly ONE module that can issue a request, so a second sender
+  // cannot appear beside the guarded one. (A mock or a doc comment naming an
+  // endpoint is not a sender, and counting it would push this census toward
+  // being switched off.)
+  const ENDPOINTS = [
+    ['/api/nl-prompt', 'api.js'],
+    ['/api/author/stage', 'api.js'],
+    ['/api/sessions/${encodeURIComponent(sessionId)}/messages', 'converse.js'],
+    ['/api/operator/sessions/${encodeURIComponent(sessionId)}/messages', 'operatorClient.js'],
+  ]
+
+  it('every free-text endpoint is spoken by exactly one module', () => {
+    for (const [endpoint, owner] of ENDPOINTS) {
+      const senders = SENDERS.filter((file) => readStripped(file).includes(endpoint))
+      assert.deepEqual(senders, [owner], `${endpoint} must be sent only by ${owner}`)
+    }
+  })
+
+  // The composers, the controller and the shells must NOT evaluate the guard.
+  // A local copy of the decision is what made three rounds of review read a
+  // composer as the authority while some other path stayed open.
+  it('only the seam evaluates the guard', () => {
+    const evaluators = SRC_FILES.filter((file) => readStripped(file).includes('evaluateSecretGuard('))
+    assert.deepEqual(evaluators, ['lib/secretGuardTransport.js', 'lib/secretPatterns.js'])
+  })
+
+  // guardedText has exactly one caller outside the transports: the author
+  // pointer's STORAGE boundary, which writes the description to localStorage
+  // before any transport runs. Named here so it stays a deliberate exception.
+  it('the guard seam is called only by the transports and the storage boundary', () => {
+    const callers = SRC_FILES.filter((file) => readStripped(file).includes('guardedText('))
+    assert.deepEqual(callers, [
+      'api.js',
+      'controllers/useAuthorStageController.js',
+      'converse.js',
+      'lib/secretGuardTransport.js',
+      'operatorClient.js',
+    ])
+  })
+
+  // THE ROUND-3 FIX, pinned as an absence. Round 2's override was a latch: a
+  // module variable in the controller and a ref in two components. Both hosts
+  // short-circuit above the controller, so a "Send anyway" click whose
+  // follow-on call never arrived left it armed, and the NEXT dispatch of ANY
+  // text skipped the guard. The override is now a call parameter, so there is
+  // nothing to strand.
+  it('no override state is stored anywhere', () => {
+    for (const file of SRC_FILES) {
+      const source = readStripped(file)
+      for (const latch of ['secretOverrideArmed', 'secretOverrideRef', 'allowSecretOnce()']) {
+        assert.ok(!source.includes(latch), `${file} must not hold an override latch (${latch})`)
+      }
+    }
+  })
+
+  it('the override reaches the wire as a parameter on the call it authorises', () => {
+    // The command bar and the /try bar hand it to dispatch; the controller
+    // hands it to the router and the agent turn; the reply box and the author
+    // panel hand it to their own transports.
+    const carries = [
+      ['components/PromptBox.jsx', 'dispatchPrompt(void 0, { allowSecretOnce: true })'],
+      ['components/PromptBox.jsx', 'onDispatch(override, { images: attachments, allowSecretOnce })'],
+      ['site/ToolCast.jsx', 'dispatchRequest(void 0, { allowSecretOnce: true })'],
+      ['site/ToolCast.jsx', 'catalog.actions.dispatch(text, { allowSecretOnce })'],
+      ['controllers/catalog/createCatalogController.js', 'services.routePrompt(current.mock, text, state.tools, { allowSecretOnce })'],
+      ['controllers/catalog/createCatalogController.js', 'adapters.startAgentTurn(text, hint, { allowSecretOnce })'],
+      ['components/ConversePanel.jsx', 'send(void 0, { allowSecretOnce: true })'],
+      ['components/AuthorPanel.jsx', 'submit(void 0, { allowSecretOnce: true })'],
+    ]
+    for (const [file, snippet] of carries) {
+      assert.ok(
+        bare(readStripped(file)).includes(bare(snippet)),
+        `${file} must carry the override as a call parameter: ${snippet}`,
+      )
+    }
+  })
+
+  it('the authorisation never rides the wire itself', () => {
+    // converse.postMessage builds its payload field by field; allowSecretOnce
+    // must be destructured out of the options and never assigned into it.
+    const source = bare(readStripped('converse.js'))
+    const at = source.indexOf('asyncfunctionpostMessage(')
+    const body = source.slice(at, source.indexOf('await post(', at))
+    assert.ok(body.includes('allowSecretOnce'), 'postMessage must accept the flag')
+    assert.ok(!body.includes('payload.allowSecretOnce'), 'the flag must never enter the payload')
+  })
+
+  // The controller is the RENDER CHANNEL for the bar paths (App's Retry chip
+  // and its R key dispatch around every composer), so it must catch the typed
+  // refusal rather than let it read as a routing outage.
+  it('the controller catches the refusal and publishes it, not a route error', () => {
+    const source = bare(readStripped('controllers/catalog/createCatalogController.js'))
+    const at = source.indexOf(bare('const dispatch = async (override,'))
+    assert.notEqual(at, -1)
+    const body = source.slice(at, at + 5000)
+    assert.ok(body.includes('isSecretRefused(error)'), 'dispatch must recognise the refusal')
+    const refusalAt = body.indexOf(bare('publish({ secretRefusal: error.refusal'))
+    const routeErrAt = body.indexOf(bare('routeError: humanizeError(error)'))
+    assert.notEqual(refusalAt, -1)
+    assert.notEqual(routeErrAt, -1)
+    assert.ok(refusalAt < routeErrAt, 'a refusal must be handled before the generic route error')
+  })
+
+  it('routePrompt still has exactly one caller, so no bar routes around it', () => {
+    const source = readStripped('controllers/catalog/createCatalogController.js')
+    assert.equal(source.split('services.routePrompt(').length - 1, 1)
+  })
+
+  it('the /try bar sends only through the controller, never straight to the router', () => {
+    const source = readStripped('site/ToolCast.jsx')
+    // nlPrompt may appear only as an import and as the routePrompt service.
+    assert.equal(source.split('nlPrompt').length - 1, 2)
+    assert.ok(!/nlPrompt\(/.test(source))
+  })
+
+  it('all four composers render a refusal with their own testids', () => {
+    for (const [file, prefix] of [
+      ['components/PromptBox.jsx', 'secret-notice'],
+      ['components/ConversePanel.jsx', 'converse-secret-notice'],
+      ['site/ToolCast.jsx', 'tc-secret-notice'],
+      ['components/AuthorPanel.jsx', 'author-secret-notice'],
+    ]) {
+      const source = readStripped(file)
+      assert.ok(source.includes(`"${prefix}"`), `${prefix} must be rendered`)
+      assert.ok(source.includes(`"${prefix}-reason"`), `${prefix}-reason must be rendered`)
+      assert.ok(source.includes(`"${prefix}-mask"`), `${prefix}-mask must be rendered`)
+    }
+  })
+
+  it('both shells answer the mount question for the transports', () => {
+    assert.ok(bare(readStripped('App.jsx')).includes('setCredentialMountAvailable(!mock)'))
+    assert.ok(bare(readStripped('site/ToolCast.jsx')).includes('setCredentialMountAvailable(!transportMock)'))
+  })
+})
+
+// PR #987 mechanical-fix round: two nits the security lens found once the
+// override became a call parameter, both of them a refusal that got dropped
+// on the floor rather than rendered or forwarded.
+describe('a dropped refusal is still a leak (round 4)', () => {
+  // ToolCast's PUBLIC_DEMO branch used to append `{ text, ... }` to the
+  // visible demo transcript and clear the prompt UNCONDITIONALLY, including
+  // when `dispatch` returned undefined because the transport refused — which
+  // echoed the credential-shaped paste back onscreen and wiped the input
+  // before "Send anyway" had anything left to re-issue. The fix reads the
+  // controller's live state (not the render-time `secretRefusal`, which this
+  // closure cannot trust after an `await`) and gates both the append and the
+  // clear on it.
+  it('a secret refusal never reaches the demo transcript, and the prompt survives it', () => {
+    const source = bare(readStripped('site/ToolCast.jsx'))
+    const refusedAt = source.indexOf('constrefused=!!catalog.controller.getState().secretRefusal')
+    assert.notEqual(refusedAt, -1, 'dispatchRequest must read the live refusal off the controller')
+    const guardAt = source.indexOf('if(PUBLIC_DEMO&&!refused){', refusedAt)
+    assert.notEqual(guardAt, -1, 'the demo-transcript branch must be gated on !refused')
+    assert.ok(guardAt > refusedAt, 'refused must be computed before it gates the branch')
+    const actionableAt = source.indexOf('constactionable=', guardAt)
+    assert.notEqual(actionableAt, -1)
+    const appendAt = source.indexOf(
+      'setDemoTurns(current=>[...current,{id,text,reply:demoReplyFor(text,decision)}]);',
+      guardAt,
+    )
+    const clearAt = source.indexOf('setPrompt("");', guardAt)
+    assert.notEqual(appendAt, -1, 'the transcript append must still exist on the real-dispatch path')
+    assert.notEqual(clearAt, -1, 'the prompt clear must still exist on the real-dispatch path')
+    assert.ok(appendAt > guardAt && appendAt < actionableAt, 'the append must sit inside the !refused branch')
+    assert.ok(clearAt > guardAt && clearAt < actionableAt, 'the prompt clear must sit inside the !refused branch')
+  })
+
+  // useAuthorStageController minted the AuthorPanel's turn authority with
+  // `authorityProvider(initial.description)` — no allowSecretOnce — so a
+  // "Send anyway" re-stage of credential-shaped text had the AUTHORITY MINT
+  // itself refused (it starts a converse turn on the same guarded transport)
+  // and silently fell back to null-authority. The override the user just
+  // clicked never reached the call it was meant to authorise.
+  it('the authority mint forwards allowSecretOnce, both shells', () => {
+    const authSource = bare(readStripped('controllers/useAuthorStageController.js'))
+    assert.ok(
+      authSource.includes('authorityProvider(initial.description,{allowSecretOnce})'),
+      'useAuthorStageController must forward allowSecretOnce into the authority mint',
+    )
+    for (const file of ['App.jsx', 'site/ToolCast.jsx']) {
+      const source = bare(readStripped(file))
+      assert.ok(
+        /authorAuthorityProvider=useCallback\(async\(description,\{allowSecretOnce=false\}=\{\}\)=>/.test(source),
+        `${file}: authorAuthorityProvider must accept allowSecretOnce`,
+      )
+      assert.ok(
+        /,\{allowSecretOnce\}\)/.test(source),
+        `${file}: authorAuthorityProvider must forward allowSecretOnce to its turn-start call`,
+      )
+    }
   })
 })

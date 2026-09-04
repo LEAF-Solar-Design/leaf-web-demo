@@ -20,6 +20,12 @@ import { listMockCatalogTools, registerMockCatalogTool } from './mock/mockCatalo
 import { fetchWithBudget } from './fetchBudget.js'
 import * as mockVersions from './mock/mockVersions.js'
 import { track, trackErrorShown } from './telemetry.js'
+// The credential guard rides the WIRE, not the composers (slice 8a round 3).
+// Every function below that carries user-typed free text toward a model calls
+// guardedText FIRST — above its mock branch too, so the demo and the live app
+// refuse identically — and throws SecretRefusedError instead of sending. See
+// lib/secretGuardTransport.js for why the guard is here and not in a composer.
+import { SecretRefusedError, guardedText } from './lib/secretGuardTransport.js'
 
 // A deployed static bundle talks to the app through the same public origin.
 // Local stacks pass VITE_API_BASE explicitly from .env or docker-compose.
@@ -193,7 +199,16 @@ export async function getSession(mock, dwg = 'rooftop_demo') {
 // falls back to the SAME client stub and flags `stub:true` so the UI can say it
 // routed locally. Always resolves to a normalized route object with
 // `alternatives` defaulted to [].
-export async function nlPrompt(mock, text, tools = []) {
+export async function nlPrompt(mock, text, tools = [], { allowSecretOnce = false } = {}) {
+  // GUARDED TRANSPORT. Above the mock branch on purpose: the client-side stub
+  // reaches no model, but a bar that accepts a pasted key in the demo and
+  // refuses it in production teaches the wrong thing, and the demo is where
+  // most people first paste something. `credentialMountAvailable: !mock` is
+  // the same answer the Claude accounts panel gives itself (it renders null
+  // under mock), so the closing sentence never points at a control that is
+  // not on screen.
+  const guard = guardedText(text, { allowSecretOnce, credentialMountAvailable: !mock })
+  if (!guard.ok) throw new SecretRefusedError(guard.refusal)
   if (mock) return { ...matchPrompt(text, tools), stub: true }
   try {
     const res = await apiFetch(`${API_BASE}/api/nl-prompt`, {
@@ -1059,7 +1074,13 @@ export async function redoDrawing(mock, drawingId, capability) {
 // grant-required rejection instead of a red failure. The templated path (no
 // agent) still returns a normal 2xx envelope, so template authoring is
 // unaffected by whether a Claude account is linked.
-export async function authorTool(mock, description) {
+export async function authorTool(mock, description, { allowSecretOnce = false } = {}) {
+  // GUARDED TRANSPORT. server/routers/author.py forwards `description`
+  // verbatim to the Agent SDK author harness, so this free text reaches a real
+  // model — the round-3 review's open path, closed here rather than at the
+  // AuthorPanel textarea, because the textarea is not the only caller.
+  const guard = guardedText(description, { allowSecretOnce, credentialMountAvailable: !mock })
+  if (!guard.ok) throw new SecretRefusedError(guard.refusal)
   if (mock) {
     await nap(700)
     return authorMock(description)
@@ -1238,6 +1259,18 @@ async function pollAuthorStage(accepted, opts = {}) {
 // R5: stage only. The server resolves base and policy fields, while this client
 // carries the public contract request and never treats staging as publication.
 export async function stageAuthorTool(mock, description, targetToolName = null, opts = {}) {
+  // GUARDED TRANSPORT. The description is what the authoring agent reads, so
+  // it is guarded on every call that CARRIES it. A poll/reconnect (`pollUrl`
+  // set) re-enters this function to read a durable status and sends no
+  // description at all; guarding that would refuse the resume of a send the
+  // user already authorised, for text that is not on the wire.
+  if (!opts.pollUrl) {
+    const guard = guardedText(description, {
+      allowSecretOnce: opts.allowSecretOnce === true,
+      credentialMountAvailable: !mock,
+    })
+    if (!guard.ok) throw new SecretRefusedError(guard.refusal)
+  }
   if (mock) {
     await nap(700)
     const authored = authorMock(description)

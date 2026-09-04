@@ -33,7 +33,7 @@ describe('useAuthorStageController turn-authority provider', () => {
     await act(async () => { await result.current.stage('count panels near the ridge line') })
 
     expect(authorityProvider).toHaveBeenCalledTimes(1)
-    expect(authorityProvider).toHaveBeenCalledWith('count panels near the ridge line')
+    expect(authorityProvider).toHaveBeenCalledWith('count panels near the ridge line', { allowSecretOnce: false })
     expect(stageAuthorTool).toHaveBeenCalledTimes(1)
     const opts = stageAuthorTool.mock.calls[0][3]
     expect(opts.authority).toEqual({ sessionId: 'session-1', turnId: 'turn-1' })
@@ -80,5 +80,58 @@ describe('useAuthorStageController turn-authority provider', () => {
     const opts = stageAuthorTool.mock.calls[0][3]
     expect(opts.authority).toBeNull()
     expect(result.current.phase).toBe('succeeded')
+  })
+
+  // Regression pin (S8a fix round 4): an AuthorPanel "Send anyway" call
+  // forwards allowSecretOnce to `stage`, and that authorisation must reach
+  // the authority mint too. A provider that ignores the second argument
+  // guards its own POST on the SAME wire (the converse turn start), so
+  // dropping the flag here would refuse the mint and silently swallow the
+  // override into a null-authority fallback -- the override never actually
+  // landed on the call it was meant to authorise.
+  //
+  // The generic ("api_key: xxxx...") shape, not an AWS-style key: that shape
+  // is the ONE overridable pattern (evaluateSecretGuard fails every other
+  // shape closed, with no way past it), so it is the only text for which
+  // `stage(..., { allowSecretOnce: true })` clears the storage-boundary guard
+  // and actually reaches the authority mint this test is pinning.
+  const FAKE_GENERIC = `api_key: ${'x'.repeat(24)}`
+
+  it('forwards allowSecretOnce on the re-run of a valid pointer that never got its poll_url', async () => {
+    // The gap a lens found one path over: stage() re-runs a persisted pointer
+    // whose first POST never landed (no poll_url), and that re-run mints again.
+    const authorityProvider = vi.fn(async () => ({ sessionId: 'session-1', turnId: 'turn-1' }))
+    let calls = 0
+    const stageAuthorTool = vi.fn(async () => {
+      calls += 1
+      if (calls === 1) throw new Error('network down before accept')
+      return staged()
+    })
+    const storage = memoryStorage()
+    const { result } = renderHook(() => useAuthorStageController({
+      mock: false, storage, stageAuthorTool, authorityProvider,
+    }))
+    await act(async () => {
+      await result.current.stage(FAKE_GENERIC, null, { allowSecretOnce: true }).catch(() => null)
+    })
+    authorityProvider.mockClear()
+    await act(async () => {
+      await result.current.stage(FAKE_GENERIC, null, { allowSecretOnce: true })
+    })
+    expect(authorityProvider).toHaveBeenCalledTimes(1)
+    expect(authorityProvider).toHaveBeenCalledWith(FAKE_GENERIC, { allowSecretOnce: true })
+  })
+  it('forwards allowSecretOnce to the authority provider on a Send-anyway re-stage', async () => {
+    const authorityProvider = vi.fn(async () => ({ sessionId: 'session-1', turnId: 'turn-1' }))
+    const stageAuthorTool = vi.fn(async () => staged())
+    const { result } = renderHook(() => useAuthorStageController({
+      mock: false, storage: memoryStorage(), stageAuthorTool, authorityProvider,
+    }))
+
+    await act(async () => {
+      await result.current.stage(FAKE_GENERIC, null, { allowSecretOnce: true })
+    })
+
+    expect(authorityProvider).toHaveBeenCalledWith(FAKE_GENERIC, { allowSecretOnce: true })
   })
 })
