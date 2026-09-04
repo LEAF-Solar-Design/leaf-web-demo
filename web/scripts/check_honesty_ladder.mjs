@@ -29,8 +29,12 @@
 //   3. ABSENT CONTRACT SLOTS. Every slot in productSurfaces.js's PRODUCT_SURFACES
 //      contract that is absent — null, undefined, false, 'none', or an empty
 //      array, every spelling a surface has used to mean "nothing renders
-//      here" — on some surface is named in docs/convergence/SURFACE-CONTRACT.md's
-//      field table, so the reader can find out why it is absent.
+//      here" — on some surface has a ROW in docs/convergence/SURFACE-CONTRACT.md's
+//      field table (anchored on the row's first cell, the backticked slot name),
+//      and that row's own last cell holds a real reason: non-empty, not a bare
+//      `-` / `n/a` / `TBD` placeholder, at least as long as a map-entry sentence
+//      (check 1's floor). A slot naming itself in the table with nothing said
+//      about why is exactly as silent as no row at all, and used to pass.
 //   4. POSITIVE CONTROL. Fixture sources with a disabled-and-reasonless record,
 //      an unfrozen map, a placeholder reason and a dangling key each FAIL the
 //      same functions checks 1-3 run. A gate nobody has watched go red is a
@@ -63,6 +67,11 @@
 //     field by field, or spread in from elsewhere, is invisible to it — the
 //     scanner never sees the record come together, so it has nothing to
 //     brace-match against.
+//   - A field-table row's reason cell runs the SAME length floor and
+//     placeholder check a REASONS map entry runs (check 1's prose rule), but
+//     NOT its "opens with a letter" clause: this doc's own convention opens a
+//     cell with a backticked file:line reference before the prose, and
+//     rejecting that would fail the real table, not just a bad one.
 import assert from 'node:assert/strict'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -467,6 +476,62 @@ export function docSection(doc, heading) {
   return end === -1 ? rest : rest.slice(0, end)
 }
 
+/**
+ * One markdown table row's cells: unescaped, trimmed, in order — or `null`
+ * when the line is not a table row (does not open with `|`). A backslash-
+ * escaped pipe (`\|`, this doc's own convention for a literal `|` inside a
+ * union type like `` `'a' \| 'b'` ``) is kept as a literal character, never
+ * read as a column boundary.
+ */
+export function splitTableRow(line) {
+  const trimmed = line.trim()
+  if (!trimmed.startsWith('|')) return null
+  const cells = []
+  let cur = ''
+  for (let i = 1; i < trimmed.length; i += 1) {
+    const c = trimmed[i]
+    if (c === '\\' && trimmed[i + 1] === '|') { cur += '|'; i += 1; continue }
+    if (c === '|') { cells.push(cur.trim()); cur = ''; continue }
+    cur += c
+  }
+  return cells
+}
+
+/**
+ * The cells of the field table's row for `slot` — ANCHORED: only a row whose
+ * FIRST cell is exactly the backticked slot name (e.g. `` `tourAnchors` ``)
+ * counts. A mention of the same token inside another row's prose (a cross-
+ * reference, say) is not a row for that slot and must not be read as one;
+ * `null` when no row's first cell matches.
+ */
+export function fieldTableRow(fieldTable, slot) {
+  const wanted = `\`${slot}\``
+  for (const line of fieldTable.split('\n')) {
+    const cells = splitTableRow(line)
+    if (cells && cells.length > 0 && cells[0] === wanted) return cells
+  }
+  return null
+}
+
+// A lone dash (or a run of them) is markdown's own "nothing here" filler for
+// an empty cell; it must be judged exactly like an empty cell, not like prose
+// that happens to be short.
+const BLANK_CELL = /^[-–—]+$/
+
+/**
+ * Why a field table's reason cell (the row's LAST cell, where every existing
+ * row's rationale already lives) fails to hold a real reason, or `null` when
+ * it holds up. Same length floor and placeholder list as `reasonProseViolation`
+ * — see the header's "Known limits" for the one rule it deliberately skips.
+ */
+export function fieldTableReasonViolation(cell) {
+  const v = (cell ?? '').trim()
+  if (v.length === 0 || BLANK_CELL.test(v)) return 'empty (or a bare dash, markdown\'s own "nothing here")'
+  if (PLACEHOLDER.test(v)) return `placeholder text (${JSON.stringify(v)})`
+  if (v.length < MIN_REASON_CHARS) return `${v.length} chars, under the ${MIN_REASON_CHARS}-char floor (${JSON.stringify(v)})`
+  return null
+}
+
 // --- file walk -------------------------------------------------------------
 
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', '.git', 'coverage'])
@@ -573,8 +638,17 @@ for (const surface of PRODUCT_SURFACES) {
     scannedCounts.slots += 1
     if (!doc.includes(`\`${slot}\``)) {
       record(docFile, 1, `\`${slot}\` is declared absent (null / undefined / false / 'none' / '' / 0 / []) on surface "${surface.id}" but the doc never names it`)
-    } else if (!fieldTable.includes(`\`${slot}\``)) {
+      continue
+    }
+    const row = fieldTableRow(fieldTable, slot)
+    if (!row) {
       record(docFile, 1, `\`${slot}\` is declared absent on surface "${surface.id}" but has no row in the field table, where the rationale lives`)
+      continue
+    }
+    const reasonCell = row[row.length - 1]
+    const why = fieldTableReasonViolation(reasonCell)
+    if (why) {
+      record(docFile, 1, `\`${slot}\` is declared absent on surface "${surface.id}" and has a field-table row, but its reason cell is ${why} — a slot cannot be absent with nothing said about why`)
     }
   }
 }
@@ -683,6 +757,89 @@ describe('honesty ladder', () => {
           unset: undefined,
         }),
         ['chrome.productFrame', 'versions', 'dock', 'emptyRoutes', 'unset'])
+    })
+
+    // Check 3's own hole (fix-forward, slice 13d, mutation-proven on main
+    // twice): the field-table lookup used to test only "does this backticked
+    // token appear ANYWHERE in the section", so a row reduced to
+    // `| \`slot\` |  |  |  |` (the name present, the reason cell blank) or one
+    // whose reason cell was a bare `-` both still passed. No fixture ever
+    // drove this half of check 3 red on purpose before now — it was reached
+    // only through the real doc, which happened to have real prose in every
+    // row's last cell (`a11y` excepted — that row is fixed alongside this).
+    describe('a field-table row must hold a real reason, not just its own name', () => {
+      const miniFieldTable = [
+        '| field | type | meaning | where it is read |',
+        '| --- | --- | --- | --- |',
+        '| `goodSlot` | null | a thing | undeclared: no per-surface support exists anywhere in the client |',
+        '| `noReasonSlot` | null | a thing |  |',
+        '| `dashSlot` | null | a thing | - |',
+        '| `naSlot` | null | a thing | n/a |',
+        "| `pipedType` | `'a' \\| 'b'` | a thing | a real sentence describing why this is absent here |",
+        '| `otherSlot` | null | a thing | mentions `ghostSlot` in passing, but this row is otherSlot\'s, not ghostSlot\'s |',
+      ].join('\n')
+
+      it('locates a row by its anchored first cell, and only that cell', () => {
+        assert.equal(fieldTableRow(miniFieldTable, 'missingSlot'), null)
+        assert.deepEqual(
+          fieldTableRow(miniFieldTable, 'goodSlot'),
+          ['`goodSlot`', 'null', 'a thing', 'undeclared: no per-surface support exists anywhere in the client'])
+      })
+
+      // THE OLD BUG's exact shape: `ghostSlot` never owns a row, but its
+      // backticked name appears inside another row's prose. The old check
+      // (`fieldTable.includes(\`\\\`${slot}\\\`\`)`) would call that a match;
+      // the anchored lookup must not.
+      it('does not mistake a mention inside another row\'s prose for that slot\'s own row', () => {
+        assert.equal(fieldTableRow(miniFieldTable, 'ghostSlot'), null)
+      })
+
+      it('keeps a backslash-escaped pipe inside a cell as a literal character, not a column split', () => {
+        const row = fieldTableRow(miniFieldTable, 'pipedType')
+        assert.equal(row[1], "`'a' | 'b'`")
+        assert.equal(row.length, 4)
+      })
+
+      it('passes a real sentence in the reason cell', () => {
+        const row = fieldTableRow(miniFieldTable, 'goodSlot')
+        assert.equal(fieldTableReasonViolation(row[row.length - 1]), null)
+      })
+
+      // THE HOLE: a row present with an EMPTY reason cell used to pass,
+      // because the old check only asked whether the slot's own backticked
+      // name appeared anywhere in the field-table section.
+      it('fails a row whose reason cell is empty', () => {
+        const row = fieldTableRow(miniFieldTable, 'noReasonSlot')
+        assert.match(fieldTableReasonViolation(row[row.length - 1]) || '', /empty/)
+      })
+
+      it('fails a row whose reason cell is a bare dash', () => {
+        const row = fieldTableRow(miniFieldTable, 'dashSlot')
+        assert.match(fieldTableReasonViolation(row[row.length - 1]) || '', /empty/)
+      })
+
+      it('fails a row whose reason cell is a bare "n/a"', () => {
+        const row = fieldTableRow(miniFieldTable, 'naSlot')
+        assert.match(fieldTableReasonViolation(row[row.length - 1]) || '', /placeholder/)
+      })
+
+      // The real table, the real contract: every absent slot on every real
+      // surface must resolve to a real row with a real reason. This is the
+      // targeted check-3 assertion; the catch-all `violations.length === 0`
+      // test below would also fail, but this one names the exact slot.
+      it('the real field table gives every absent slot a row with a real reason', () => {
+        const seen = new Set()
+        for (const surface of PRODUCT_SURFACES) {
+          for (const slot of absentSlots(surface.contract)) {
+            if (seen.has(slot)) continue
+            seen.add(slot)
+            const row = fieldTableRow(fieldTable, slot)
+            assert.ok(row, `\`${slot}\` (absent on surface "${surface.id}") has no row in the field table`)
+            const why = fieldTableReasonViolation(row[row.length - 1])
+            assert.equal(why, null, `\`${slot}\`'s field-table reason cell: ${why}`)
+          }
+        }
+      })
     })
 
     // Hole 1a: check 2 used to test only that `reason` exists as a KEY. An
