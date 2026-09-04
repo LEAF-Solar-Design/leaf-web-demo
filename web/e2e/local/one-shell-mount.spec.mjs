@@ -700,7 +700,7 @@ test.describe('route matrix, rail ON', () => {
           await page.getByLabel('ribbon y2').press('Enter')
           await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBefore + 1), { timeout: 60_000 })
           await confirm.click()
-          await expect(page.getByRole('alert').filter({ hasText: 'the browser engine holds unsaved edits' })).toBeVisible({ timeout: 10_000 })
+          await expect(page.locator('.strip-failed').filter({ hasText: 'the browser engine holds unsaved edits' })).toBeVisible({ timeout: 10_000 })
           await page.waitForTimeout(1500)
           expect(runPosts).toHaveLength(0)
           test.info().annotations.push({ type: 'one-head', description: 'confirm-time refusal alert visible; POST /api/run count 0 from arm through refusal' })
