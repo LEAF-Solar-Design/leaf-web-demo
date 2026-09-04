@@ -332,8 +332,12 @@ def test_versions_chain_after_two_writes(stack):
     assert [e["parent"] for e in versions] == [None, 1, 2]   # parent links form the chain
     # every row carries the manifest fields (optional ones may be null)
     for e in versions:
+        # `source_ref` (slice 6a) is the authored-tool receipt digest; null
+        # here because these versions were written by a mock tool with no
+        # receipt, and null is what "not established" looks like.
         assert set(e.keys()) == {"v", "parent", "created", "bytes", "sha256",
-                                 "tool", "workitem_id", "note"}
+                                 "tool", "workitem_id", "note", "source_ref"}
+        assert e["source_ref"] is None
         assert isinstance(e["created"], str) and e["created"]
         assert isinstance(e["bytes"], int)
         assert isinstance(e["sha256"], str) and len(e["sha256"]) == 64

@@ -176,6 +176,8 @@ def test_demo_bootstrap_unchanged(client):
         "bytes": body["versions"][0]["bytes"],
         "sha256": body["versions"][0]["sha256"],
         "tool": None, "workitem_id": None, "note": "initial ingest",
+        # slice 6a: an ingest has no authored-tool receipt, so no provenance.
+        "source_ref": None,
     }
 
     ir = client.get(f"/api/drawings/{write_loop.DEMO_DRAWING_ID}/intake",

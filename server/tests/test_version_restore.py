@@ -196,7 +196,10 @@ def test_restore_creates_new_head_preserving_chain(client, tmp_path):
     body = r.json()
     assert body["error"] is None
     assert body["restored_from"] == 1
-    assert body["new_version"] == {"drawing_id": DRAWING, "version": 4, "parent": 3}
+    # `source_ref` (slice 6a): the restored source carried no authored-tool
+    # receipt, so the new head reports none rather than crediting "restore".
+    assert body["new_version"] == {"drawing_id": DRAWING, "version": 4,
+                                   "parent": 3, "source_ref": None}
     assert body["head"] == 4 and body["latest"] == 4
 
     versions = client.get(f"/api/drawings/{DRAWING}/versions",
@@ -215,6 +218,7 @@ def test_restore_creates_new_head_preserving_chain(client, tmp_path):
         "v": 1, "parent": None, "created": rows[1]["created"],
         "bytes": rows[1]["bytes"], "sha256": rows[1]["sha256"],
         "tool": None, "workitem_id": None, "note": "initial ingest", "delta": None,
+        "source_ref": None,
     }
     assert rows[4]["parent"] == 3
 
@@ -635,7 +639,7 @@ def test_readable_history_recovers_an_unreadable_committed_head(client, tmp_path
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["new_version"] == {
-        "drawing_id": DRAWING, "version": 5, "parent": 4,
+        "drawing_id": DRAWING, "version": 5, "parent": 4, "source_ref": None,
     }
     assert body["restored_head_readable"] is True
     version, intake = write_loop.read_intake(backend, TENANT, DRAWING, 5)
@@ -770,7 +774,7 @@ def test_restore_accepts_the_current_checkout_capability(client, tmp_path, monke
         headers={**_h(TENANT), "X-Checkout-Capability": capability})
     assert restored.status_code == 200, restored.text
     assert restored.json()["new_version"] == {
-        "drawing_id": DRAWING, "version": 4, "parent": 3}
+        "drawing_id": DRAWING, "version": 4, "parent": 3, "source_ref": None}
 
 
 def test_restore_route_is_tenant_isolated(client, tmp_path):

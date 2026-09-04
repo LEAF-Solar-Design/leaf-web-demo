@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import time
 from pathlib import Path
 
 import pytest
 
+import tool_loader
 import write_loop
 import store
 from mutation_plan import emit_plan, validate_mutations, world_to_ocs
@@ -31,8 +33,23 @@ def _mutations():
     return {"removed": ["A"], "added": [added]}
 
 
-def _planner(mutations=None):
+# A passing `leaf.tool-execution.v1` microvm receipt as the stub planner
+# returns it. The write path never stamps its digest; where the server holds
+# a published body for the tool it only CROSS-CHECKS the receipt against the
+# digest it measured itself (write_loop `_server_held_source_ref`).
+MICROVM_RECEIPT = {
+    "contract": "leaf.tool-execution.v1", "provider": "e2b",
+    "isolation": "microvm", "passed": True,
+    "source_sha256": "a" * 64,
+}
+
+
+def _planner(mutations=None, provenance=None):
     calls = []
+    envelope_provenance = (
+        copy.deepcopy(MICROVM_RECEIPT) if provenance is None
+        else copy.deepcopy(provenance)
+    )
 
     def run(*args, **kwargs):
         calls.append((args, kwargs))
@@ -41,11 +58,7 @@ def _planner(mutations=None):
             "result": {"mutations": copy.deepcopy(mutations or _mutations()),
                        "planner_value": "preserved"},
             "overlay": {"kind": "preserved"},
-            "execution_provenance": {
-                "contract": "leaf.tool-execution.v1", "provider": "e2b",
-                "isolation": "microvm", "passed": True,
-                "source_sha256": "a" * 64,
-            },
+            "execution_provenance": copy.deepcopy(envelope_provenance),
             "timing_ms": 1, "cost": None, "degraded_mode": False,
         }
 
@@ -754,3 +767,372 @@ def test_live_publish_uses_parent_head_cas(monkeypatch, tmp_path):
     assert status == 400 and "stale parent" in env["error"]["message"]
     assert observed["require_parent_is_head"] is True
     assert store.load_manifest(backend, "tenant", "drawing")["head"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Provenance is SERVER-HELD or absent (standardization slice 6a, third round)
+#
+# The digest stamped as `source_ref` is measured by THIS process over the
+# published tool body it resolves for the tool id
+# (`tool_loader.published_tool_source_sha256`), BEFORE the planner runs. The
+# planner envelope is never the source: on the in-process and `subprocess`
+# sandbox tiers (broker.py permits both for tenant-authored tools outside
+# production) tool_loader adopts a tool's own `{ok, result}` return whole, so
+# `execution_provenance` there is whatever the tool body chose to say, and a
+# shape check of a claim the attacker controls is not a fence. Two fences now:
+# tool_loader drops a tool-supplied `execution_provenance` at the seam it
+# enters, and write_loop stamps only what the server measured, cross-checking
+# a verified microvm receipt against it where one exists.
+#
+# The rows below drive the REAL tool_loader -> write_loop seam on both
+# non-microvm tiers with a body that forges a passing microvm receipt over a
+# 64-hex digest, then the stub-planner rows pin the cross-check.
+# ---------------------------------------------------------------------------
+FORGED = "f" * 64
+
+# A receipt-SHAPED claim: exactly what `_valid_microvm_provenance` accepts, so
+# the only thing standing between it and the version chain is the design.
+FORGED_RECEIPT = {
+    "contract": "leaf.tool-execution.v1", "provider": "e2b",
+    "isolation": "microvm", "passed": True, "source_sha256": FORGED,
+}
+
+
+def _capture_version_meta(monkeypatch):
+    """Record the meta stamped on the committed version, still committing it."""
+    seen = {}
+    real = write_loop._put_bytes_version
+
+    def capturing(*args, **kwargs):
+        seen["meta"] = copy.deepcopy(kwargs.get("meta"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(write_loop, "_put_bytes_version", capturing)
+    return seen
+
+
+def _tenant_repo(tmp_path, monkeypatch):
+    """Point tool_loader's tenant-repo root at a tmp repo (test_hardening_2b's recipe)."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    monkeypatch.setattr(tool_loader, "_tenant_repo_root", lambda tid=None: repo)
+    return repo
+
+
+def _published_tool(repo, name, source):
+    """Publish `source` as the tenant's tools/<name>/tool.py; return its record.
+
+    The record is what the broker folds from the tenant registry (a name and a
+    repo-relative entry). The server resolves that entry against its own copy
+    of the tenant repo, which is the ONLY place the stamp may read from.
+    """
+    body = repo / "tools" / name / "tool.py"
+    body.parent.mkdir(parents=True, exist_ok=True)
+    body.write_text(source, encoding="utf-8")
+    return {"name": name, "version": "1", "entry": f"tools/{name}/tool.py"}
+
+
+def _server_digest(source):
+    """What `published_tool_source_sha256` measures: sha256 over the UTF-8 text."""
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+def _forging_body(mutations, provenance):
+    """A body returning a FULL envelope whose `execution_provenance` is `provenance`.
+
+    tool_loader adopts a full `{ok, result}` return whole, so without the seam
+    fence this claim would ride the envelope into write_loop untouched.
+    """
+    return (
+        "import json\n"
+        f"MUTATIONS = json.loads({json.dumps(json.dumps(mutations))})\n"
+        f"PROVENANCE = json.loads({json.dumps(json.dumps(provenance))})\n"
+        "\n"
+        "def run(intake, params):\n"
+        "    return {'ok': True, 'tool': 'forger', 'version': '1',\n"
+        "            'result': {'mutations': MUTATIONS, 'planner_value': 'forged'},\n"
+        "            'overlay': None, 'timing_ms': 1, 'cost': None,\n"
+        "            'degraded_mode': False, 'error': None,\n"
+        "            'execution_provenance': PROVENANCE}\n"
+    )
+
+
+def _honest_body(mutations):
+    """A body that returns a plain (result, overlay) pair and claims nothing."""
+    return (
+        "import json\n"
+        f"MUTATIONS = json.loads({json.dumps(json.dumps(mutations))})\n"
+        "\n"
+        "def run(intake, params):\n"
+        "    return ({'mutations': MUTATIONS, 'planner_value': 'honest'}, None)\n"
+    )
+
+
+def _select_tier(monkeypatch, tier):
+    monkeypatch.delenv("LEAF_TOOL_SANDBOX_PROVIDER", raising=False)
+    if tier == "subprocess":
+        monkeypatch.setenv("LEAF_SANDBOX", "e2b")
+    else:
+        monkeypatch.delenv("LEAF_SANDBOX", raising=False)
+    assert tool_loader._sandbox_tier() == ("subprocess" if tier == "subprocess" else "off")
+
+
+# --------------------------------------------------------------------------- #
+# The real seam: tool_loader.run_tool_dynamic -> write_loop.run_write_live
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("tier", ["subprocess", "in-process"])
+def test_real_seam_a_forged_receipt_is_never_stamped_the_server_digest_is(
+        monkeypatch, tmp_path, tier):
+    _select_tier(monkeypatch, tier)
+    backend = _store(tmp_path)
+    repo = _tenant_repo(tmp_path, monkeypatch)
+    source = _forging_body(_mutations(), FORGED_RECEIPT)
+    tool = _published_tool(repo, f"forger-{tier}", source)
+    expected = _server_digest(source)
+    assert expected != FORGED
+    seen = _capture_version_meta(monkeypatch)
+
+    env, status = write_loop.run_write_live(
+        tool, {"drawing_id": "drawing"}, "tenant", backend=backend,
+        da=FakeDa(_actual_success()), t0=time.perf_counter(),
+        run_tool_dynamic_fn=tool_loader.run_tool_dynamic,
+    )
+
+    assert status == 200, env
+    # The REAL body ran and its envelope was adopted whole (the seam is live).
+    assert env["result"]["planner_value"] == "forged"
+    # The stamp is what the server measured over the published body...
+    assert seen["meta"]["source_ref"] == expected
+    assert env["result"]["mutation_binding"]["tool_source_sha256"] == expected
+    rows = store.load_manifest(backend, "tenant", "drawing")["versions"]
+    assert [r.get("source_ref") for r in rows] == [None, expected]
+    # ...and the forgery reached neither the chain nor the envelope: the loader
+    # dropped the tool-supplied claim at the seam it entered.
+    assert FORGED not in json.dumps(env)
+    assert FORGED not in json.dumps(rows)
+
+
+@pytest.mark.parametrize("tier", ["subprocess", "in-process"])
+def test_real_seam_stamps_the_server_digest_without_any_claim_from_the_body(
+        monkeypatch, tmp_path, tier):
+    # Positive control for the design: a body that claims NOTHING about
+    # itself still gets the server's digest, so the stamp is server-derived,
+    # not merely "the sandbox's claim when it happens to be right".
+    _select_tier(monkeypatch, tier)
+    backend = _store(tmp_path)
+    repo = _tenant_repo(tmp_path, monkeypatch)
+    source = _honest_body(_mutations())
+    tool = _published_tool(repo, f"honest-{tier}", source)
+    seen = _capture_version_meta(monkeypatch)
+
+    env, status = write_loop.run_write_live(
+        tool, {"drawing_id": "drawing"}, "tenant", backend=backend,
+        da=FakeDa(_actual_success()), t0=time.perf_counter(),
+        run_tool_dynamic_fn=tool_loader.run_tool_dynamic,
+    )
+
+    assert status == 200, env
+    assert env["result"]["planner_value"] == "honest"
+    assert seen["meta"]["source_ref"] == _server_digest(source)
+    assert env["result"]["mutation_binding"]["tool_source_sha256"] == _server_digest(source)
+
+
+def test_real_seam_stamps_null_when_the_server_holds_no_published_body(
+        monkeypatch, tmp_path):
+    # A design-time STAGED source runs on the subprocess tier without a
+    # published body behind the tool id (tool_loader's `test_source` seam).
+    # The body forges a receipt; the server holds nothing for that id, so the
+    # honest answer is null, and the forgery still goes nowhere.
+    _select_tier(monkeypatch, "subprocess")
+    backend = _store(tmp_path)
+    _tenant_repo(tmp_path, monkeypatch)  # empty: nothing published
+    tool = {"name": "candidate", "version": "1", "entry": "tools/candidate/tool.py"}
+    staged = _forging_body(_mutations(), FORGED_RECEIPT)
+    assert tool_loader.resolve_local_file(tool, "tenant") is None
+    assert tool_loader.published_tool_source_sha256(tool, "tenant") is None
+    seen = _capture_version_meta(monkeypatch)
+
+    def staged_planner(*args, **kwargs):
+        return tool_loader.run_tool_dynamic(*args, test_source=staged, **kwargs)
+
+    env, status = write_loop.run_write_live(
+        tool, {"drawing_id": "drawing"}, "tenant", backend=backend,
+        da=FakeDa(_actual_success()), t0=time.perf_counter(),
+        run_tool_dynamic_fn=staged_planner,
+    )
+
+    assert status == 200, env
+    assert env["result"]["planner_value"] == "forged"
+    assert seen["meta"]["source_ref"] is None
+    assert env["result"]["mutation_binding"]["tool_source_sha256"] is None
+    rows = store.load_manifest(backend, "tenant", "drawing")["versions"]
+    assert [r.get("source_ref") for r in rows] == [None, None]
+    assert FORGED not in json.dumps(env)
+
+
+def test_the_loader_drops_a_tool_supplied_execution_provenance_at_the_seam(
+        monkeypatch, tmp_path):
+    # The first fence in isolation: even before write_loop, a full envelope
+    # adopted from a tool body carries no `execution_provenance` of the
+    # tool's choosing on a tier that produced no verified receipt.
+    _select_tier(monkeypatch, "subprocess")
+    repo = _tenant_repo(tmp_path, monkeypatch)
+    tool = _published_tool(repo, "seam", _forging_body(_mutations(), FORGED_RECEIPT))
+    env = tool_loader.run_tool_dynamic(
+        tool, _base(), {}, aps_live=False, da=None, tenant_id="tenant")
+    assert env["ok"] is True and env["result"]["planner_value"] == "forged"
+    assert "execution_provenance" not in env
+
+
+def test_published_tool_source_sha256_measures_the_body_the_sandbox_is_fed(
+        monkeypatch, tmp_path):
+    # The value the stamp uses is the value a GENUINE microvm receipt carries:
+    # tool_loader's audit hashes `local.read_text("utf-8")` re-encoded, and so
+    # does this. A body with CRLF endings on disk hashes the same either way,
+    # because both read through the same universal-newline text path.
+    repo = _tenant_repo(tmp_path, monkeypatch)
+    source = "def run(intake, params):\n    return ({'ok': 1}, None)\n"
+    tool = _published_tool(repo, "measured", source)
+    local = tool_loader.resolve_local_file(tool, "tenant")
+    assert local is not None
+    audit_style = hashlib.sha256(
+        local.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+    assert tool_loader.published_tool_source_sha256(tool, "tenant") == audit_style
+    assert tool_loader.published_tool_source_sha256(tool, "tenant") == _server_digest(source)
+    # Absence is honest on every miss the server can have.
+    assert tool_loader.published_tool_source_sha256(
+        {"name": "nobody", "version": "1"}, "tenant") is None
+    assert tool_loader.published_tool_source_sha256(
+        {"name": "dangling", "entry": "tools/dangling/tool.py"}, "tenant") is None
+    local.write_bytes(b"\xff\xfe not utf-8 \x00")
+    assert tool_loader.published_tool_source_sha256(tool, "tenant") is None
+
+
+# --------------------------------------------------------------------------- #
+# The cross-check: a VERIFIED microvm receipt against the server's digest
+# --------------------------------------------------------------------------- #
+def test_a_verified_receipt_that_agrees_with_the_server_is_stamped(
+        monkeypatch, tmp_path):
+    backend = _store(tmp_path)
+    repo = _tenant_repo(tmp_path, monkeypatch)
+    source = _honest_body(_mutations())
+    tool = _published_tool(repo, "agreed", source)
+    expected = _server_digest(source)
+    planner, _ = _planner(provenance={**MICROVM_RECEIPT, "source_sha256": expected})
+    seen = _capture_version_meta(monkeypatch)
+    env, status = write_loop.run_write_live(
+        tool, {"drawing_id": "drawing"}, "tenant", backend=backend,
+        da=FakeDa(_actual_success()), t0=time.perf_counter(),
+        run_tool_dynamic_fn=planner,
+    )
+    assert status == 200
+    assert seen["meta"]["source_ref"] == expected
+    assert env["result"]["mutation_binding"]["tool_source_sha256"] == expected
+    rows = store.load_manifest(backend, "tenant", "drawing")["versions"]
+    assert [r.get("source_ref") for r in rows] == [None, expected]
+
+
+def test_a_verified_receipt_that_disagrees_withholds_the_stamp_with_a_warning(
+        monkeypatch, tmp_path, caplog):
+    backend = _store(tmp_path)
+    repo = _tenant_repo(tmp_path, monkeypatch)
+    source = _honest_body(_mutations())
+    tool = _published_tool(repo, "disagreed", source)
+    planner, _ = _planner()  # MICROVM_RECEIPT: "a" * 64, not the body's digest
+    assert _server_digest(source) != "a" * 64
+    seen = _capture_version_meta(monkeypatch)
+    with caplog.at_level("WARNING", logger="write_loop"):
+        env, status = write_loop.run_write_live(
+            tool, {"drawing_id": "drawing"}, "tenant", backend=backend,
+            da=FakeDa(_actual_success()), t0=time.perf_counter(),
+            run_tool_dynamic_fn=planner,
+        )
+    # The write succeeds; what fails closed is the PROVENANCE CLAIM. Neither
+    # side's digest is trusted over the other.
+    assert status == 200
+    assert seen["meta"]["source_ref"] is None
+    rows = store.load_manifest(backend, "tenant", "drawing")["versions"]
+    assert [r.get("source_ref") for r in rows] == [None, None]
+    assert any("source_ref_withheld" in r.getMessage()
+               and "reason=receipt_mismatch" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_a_receipt_alone_without_a_server_held_body_is_never_stamped(
+        monkeypatch, tmp_path, caplog):
+    # Before this round a passing receipt was stamped verbatim. It is not
+    # anymore: with nothing server-held behind the tool id there is nothing
+    # to attribute, and the receipt's digest is never copied into the chain.
+    backend = _store(tmp_path)
+    planner, _ = _planner()
+    seen = _capture_version_meta(monkeypatch)
+    with caplog.at_level("WARNING", logger="write_loop"):
+        env, status = write_loop.run_write_live(
+            {"name": "author-tool", "version": "1"},
+            {"drawing_id": "drawing"}, "tenant", backend=backend,
+            da=FakeDa(_actual_success()), t0=time.perf_counter(),
+            run_tool_dynamic_fn=planner,
+        )
+    assert status == 200
+    assert seen["meta"]["source_ref"] is None
+    assert env["result"]["mutation_binding"]["tool_source_sha256"] is None
+    rows = store.load_manifest(backend, "tenant", "drawing")["versions"]
+    assert [r.get("source_ref") for r in rows] == [None, None]
+    assert any("reason=no_server_held_source" in r.getMessage()
+               for r in caplog.records)
+
+
+@pytest.mark.parametrize("bad", [
+    None, 123, "A" * 64, "a" * 63, "sha256:" + "a" * 64, "g" * 64,
+])
+def test_a_malformed_server_digest_fails_closed(bad):
+    assert write_loop._server_held_source_ref(bad, {}, tool="t") is None
+    assert write_loop._server_held_source_ref(bad, MICROVM_RECEIPT, tool="t") is None
+    # Not vacuous: a well-formed one passes with no receipt and with an
+    # agreeing receipt.
+    good = "0123456789abcdef" * 4
+    assert write_loop._server_held_source_ref(good, {}, tool="t") == good
+    assert write_loop._server_held_source_ref(
+        good, {**MICROVM_RECEIPT, "source_sha256": good}, tool="t") == good
+
+
+@pytest.mark.parametrize("provenance", [
+    # The subprocess tier: a real posture, no receipt, forged digest.
+    {"contract": "leaf.tool-execution.v1", "provider": "subprocess",
+     "isolation": "process", "passed": True, "source_sha256": "b" * 64},
+    # Right provider, right isolation, but the run did not pass.
+    {"contract": "leaf.tool-execution.v1", "provider": "e2b",
+     "isolation": "microvm", "passed": False, "source_sha256": "b" * 64},
+    # Right provider, wrong isolation.
+    {"contract": "leaf.tool-execution.v1", "provider": "e2b",
+     "isolation": "process", "passed": True, "source_sha256": "b" * 64},
+    # A tool that simply asserts a digest and nothing else.
+    {"source_sha256": "b" * 64},
+    # A digest that is not a sha256 at all.
+    {"contract": "leaf.tool-execution.v1", "provider": "e2b",
+     "isolation": "microvm", "passed": True, "source_sha256": "not-a-digest"},
+    # No provenance whatsoever.
+    {},
+], ids=["subprocess-tier", "not-passed", "wrong-isolation",
+        "bare-assertion", "not-a-sha256", "absent"])
+def test_a_planner_assertion_without_a_server_held_body_is_never_stamped(
+        monkeypatch, tmp_path, provenance):
+    backend = _store(tmp_path)
+    planner, _ = _planner(provenance=provenance)
+    seen = _capture_version_meta(monkeypatch)
+    env, status = write_loop.run_write_live(
+        {"name": "author-tool", "version": "1"},
+        {"drawing_id": "drawing"}, "tenant", backend=backend,
+        da=FakeDa(_actual_success()), t0=time.perf_counter(),
+        run_tool_dynamic_fn=planner,
+    )
+    # The write itself still succeeds outside the protected production
+    # posture; what fails closed is the PROVENANCE CLAIM, not the write.
+    assert status == 200
+    assert seen["meta"]["source_ref"] is None
+    rows = store.load_manifest(backend, "tenant", "drawing")["versions"]
+    assert [r.get("source_ref") for r in rows] == [None, None]
+    # The planner's own claim is not a binding fact and is recorded nowhere:
+    # the binding carries the server's measurement, which is null here.
+    assert env["result"]["mutation_binding"]["tool_source_sha256"] is None
+    assert "b" * 64 not in json.dumps(env["result"]["mutation_binding"])

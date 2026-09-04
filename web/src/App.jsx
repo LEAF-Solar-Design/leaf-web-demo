@@ -2283,6 +2283,10 @@ export default function App() {
   const dockSections = surfaceSlots.rails.dock
   // The job monitor's declared posture. Was `drafting` inline at the JobRail.
   const jobSpine = surfaceSlots.rails.right === 'job-spine'
+  // Slice 6a: the version history button + drawer mount where the CONTRACT
+  // says versions exist (`drawing` today on cad and solar), never on a surface
+  // literal, and the same predicate now gates /try's version tab.
+  const versionsMounted = surfaceSlots.versions !== 'none'
   // Typed command words arm the engine only where the cockpit is: the studio's
   // drafting surfaces with the engine built in (ENV_CAD_EDIT first, so a
   // flag-off build folds the whole feature to false). Slice 2 keeps this and
@@ -3058,7 +3062,7 @@ export default function App() {
                   >
                     Redo
                   </button>
-                  <div className="vh-anchor">
+                  {versionsMounted && <div className="vh-anchor">
                     <button
                       className="btn ghost"
                       onClick={onToggleHistoryTracked}
@@ -3086,7 +3090,7 @@ export default function App() {
                         mutationBlocked={drawingMutationsBlocked}
                       />
                     )}
-                  </div>
+                  </div>}
                 </>
               )}
               {isEditFixture && (

@@ -1105,6 +1105,82 @@ def is_trusted_builtin_tool(tool: Dict[str, Any],
     return (name, engine_op, local.name) in _platform_builtin_package_ids()
 
 
+def published_tool_source_sha256(tool: Dict[str, Any],
+                                 tenant_id: Optional[str] = None) -> Optional[str]:
+    """The sha256 of the PUBLISHED tool body THIS process holds for ``tool``, or None.
+
+    A version row's ``source_ref`` (server/write_loop.py) comes from here and from
+    nothing a sandbox returned. The digest is MEASURED by the broker over the file
+    ``resolve_local_file`` names for the tool id, which is the exact text every
+    sandbox tier is fed: ``_run_in_sandbox`` and ``_run_in_sandbox_e2b`` both read
+    ``local`` as UTF-8 text, and the microvm receipt's ``sourceHash`` is sha256 over
+    that same text (``_run_source_in_sandbox_e2b``'s audit block), so a genuine
+    receipt agrees with this value byte for byte and a forged one cannot.
+
+    Fails to None, never to a guess: an APS-only or dangling package (no body to
+    hash), an unreadable or non-UTF-8 file, a body over the fixed sandbox source
+    bound, and a platform builtin (its provenance is the platform release; no
+    ``leaf.tool-source.v1`` receipt was ever issued for it, so a version it wrote
+    must not wear the authored-tool chip).
+    """
+    if is_trusted_builtin_tool(tool, tenant_id):
+        return None
+    local = resolve_local_file(tool, tenant_id)
+    if local is None:
+        return None
+    # Containment, restated HERE so the read below is provably inside an allowed
+    # root: resolve_local_file already refused absolute / `..` / `~` references
+    # (_is_unsafe_ref) and containment-checked the join (_resolve_within, inside
+    # the vendored fold core), but that library boundary is opaque to a static
+    # taint scan, so the same rule is applied once more on the normalised real
+    # path against the SAME roots. A path outside every root is None, never read.
+    contained = _contained_published_path(local, tenant_id)
+    if contained is None:
+        return None
+    try:
+        # Bounded read of the raw bytes, then the SAME text-mode view the sandbox
+        # tiers get from Path.read_text: UTF-8 decode with universal newlines
+        # (CRLF and lone CR become LF), re-encoded. A CRLF body on Windows must
+        # hash to what the sandbox and a genuine receipt hash, not to its raw bytes.
+        with open(contained, "rb") as handle:
+            raw = handle.read(_SANDBOX_LIMITS["source_bytes"] + 1)
+        text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        encoded = text.encode("utf-8")
+    except (OSError, ValueError):  # UnicodeDecodeError is a ValueError
+        return None
+    if len(encoded) > _SANDBOX_LIMITS["source_bytes"]:
+        return None
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _published_source_roots(tenant_id: Optional[str] = None) -> List[Path]:
+    """Every root a published tool body may resolve under: the requesting tenant's
+    repo, the server dir, authored/ and builtins/. Mirrors resolve_local_file's
+    candidate roots exactly; there is no fifth place a body can live."""
+    roots: List[Path] = []
+    troot = _tenant_repo_root(tenant_id)
+    if troot is not None:
+        roots.append(troot)
+    roots.extend((SERVER_DIR, AUTHORED_DIR, BUILTIN_DIR))
+    return roots
+
+
+def _contained_published_path(local: Path, tenant_id: Optional[str] = None) -> Optional[str]:
+    """The normalised real path of ``local`` when it lies INSIDE one of the allowed
+    roots, else None. os.path.normpath over os.path.realpath, then a prefix check
+    against each normalised root plus a separator, so ``root2`` cannot pass as
+    ``root`` and a symlink out of the root is measured at its target. Fails to None
+    on any OS error."""
+    try:
+        real = os.path.normpath(os.path.realpath(str(local)))
+        for root in _published_source_roots(tenant_id):
+            base = os.path.normpath(os.path.realpath(str(root)))
+            if real.startswith(base + os.sep):
+                return real
+    except OSError:
+        return None
+    return None
+
 def _needs_aps(tool: Dict[str, Any], tenant_id: Optional[str] = None) -> bool:
     """True when the tool has no local .py and must run on APS DA."""
     return resolve_local_file(tool, tenant_id) is None
@@ -1298,6 +1374,14 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
     if isinstance(coerced, dict):  # the tool returned a full envelope
         env = coerced
         env.setdefault("degraded_mode", degraded)
+        # `execution_provenance` is what THIS loader verified about the run,
+        # never what the tool body says about itself. A full envelope is
+        # adopted whole here, so on the in-process and subprocess tiers a
+        # tenant body could otherwise hand back a receipt-shaped claim (a
+        # passing `leaf.tool-execution.v1` microvm receipt over any 64-hex
+        # digest) and every downstream reader would take it as verified.
+        # Dropped at the seam it enters; only a `_MicrovmSuccess` sets it.
+        env.pop("execution_provenance", None)
         if execution_provenance is not None:
             env["execution_provenance"] = execution_provenance
         return env

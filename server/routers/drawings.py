@@ -58,6 +58,12 @@ class RestoredDrawingVersion:
     version: int
     parent_version: int
     restored_head_readable: bool
+    # The restored source version's authored-tool receipt digest, carried
+    # forward because the new head's BYTES are that version's bytes verbatim
+    # (`source_bytes` is copied, not re-planned). Attributing them to the tool
+    # whose receipt produced them is a fact about the payload, not a guess
+    # about the restore. `None` whenever the source carried none.
+    source_ref: Optional[str] = None
 
 
 class RestoreSourceUnavailable(Exception):
@@ -433,9 +439,42 @@ def _denied(exc: Exception) -> JSONResponse:
                           status_code=403)
 
 
+# The authored-tool provenance a version row may carry. It is the sha256 the
+# SERVER measured over the published tool body it holds for the tool id
+# (server/tool_loader.py published_tool_source_sha256, stamped in
+# server/write_loop.py), the same bytes a genuine `leaf.tool-source.v1`
+# receipt hashes; nothing a sandbox returned is ever stored. NOTHING else is
+# minted here: a version written by a tool whose body the server does not hold
+# carries null, and null means "not established", never "unauthored".
+_SOURCE_REF_MAX_LEN = 128          # bound before any regex touches the value
+_SOURCE_REF_RE = re.compile(r"\A[0-9a-f]{64}\Z")
+
+
+def _source_ref(value: Any) -> Optional[str]:
+    """Validate a stored `source_ref` on the way OUT. Fails closed to None.
+
+    The manifest is store-owned data, and the PostgreSQL authority's column is
+    free text, so a drifted, truncated or hostile value must never reach the
+    wire dressed as provenance. Bounded first (a pathological megabyte string
+    is rejected on length, never scanned), then charset-validated against the
+    exact shape a `leaf.tool-source.v1` receipt digest has: 64 lowercase hex
+    characters. Anything else reads as "no provenance", which is the honest
+    answer for a value we cannot vouch for. No allocation on the hot path
+    beyond the one `str` check; called once per version row."""
+    if not isinstance(value, str):
+        return None
+    if len(value) > _SOURCE_REF_MAX_LEN:
+        return None
+    return value if _SOURCE_REF_RE.match(value) else None
+
+
 def _version_row(e: Dict[str, Any]) -> Dict[str, Any]:
     """One manifest `versions[]` entry → the version-history row shape
-    (CONTRACT-ADDENDUM §11 manifest fields; missing optional fields → null)."""
+    (CONTRACT-ADDENDUM §11 manifest fields; missing optional fields → null).
+
+    `source_ref` (added standardization slice 6a) is a NULLABLE addition to a
+    frozen shape: every existing key keeps its meaning, and a client that does
+    not know the key is unaffected."""
     parent = e.get("parent")
     return {
         "v": int(e["v"]),
@@ -446,6 +485,7 @@ def _version_row(e: Dict[str, Any]) -> Dict[str, Any]:
         "tool": e.get("tool"),
         "workitem_id": e.get("workitem_id"),
         "note": e.get("note"),
+        "source_ref": _source_ref(e.get("source_ref")),
     }
 
 
@@ -583,8 +623,10 @@ def get_versions(drawing_id: str, include_deltas: bool = False,
     # Deltas are OPT-IN (?include_deltas=1): computing them loads and parses
     # EVERY version payload (O(N) blob reads, O(N^2) row work under the
     # PostgreSQL authority), and the app hits this route at startup merely to
-    # read checkout state. Only the history drawer asks for deltas, and the
-    # default response shape stays exactly what it was before this feature.
+    # read checkout state. Only the version list asks for deltas (the ONE
+    # `VersionList` primitive behind /app's history drawer and /try's Versions
+    # tab, slice 6a), and the default response shape stays exactly what it
+    # was before this feature.
     rows = []
     if include_deltas:
         deltas = _version_deltas(backend, str(tenant_id), drawing_id, entries)
@@ -619,11 +661,18 @@ def restore_drawing_version(tenant_id: str, drawing_id: str, target_version: int
 
     backend = backend if backend is not None else _backend(tenant_id)
     try:
-        source_v, source_key = store.resolve_version(
+        source_v, source_key, source_entry = store.resolve_version_entry(
             backend, tenant_id, drawing_id, int(target_version))
         source_bytes = backend.get(source_key)
     except (KeyError, ValueError) as exc:
         raise RestoreSourceUnavailable(str(exc)) from exc
+
+    # The source version's provenance comes out of the SAME manifest read that
+    # just proved the version exists (`resolve_version_entry` threads the row
+    # out), validated on the way through like every other reader of the
+    # column. A row without one restores as null: the restoring actor is not
+    # an author.
+    source_ref: Optional[str] = _source_ref(source_entry.get("source_ref"))
 
     try:
         _, source_intake = write_loop.read_intake(
@@ -655,7 +704,9 @@ def restore_drawing_version(tenant_id: str, drawing_id: str, target_version: int
                     new_version = write_loop._put_bytes_version(
                         backend, tenant_id, drawing_id, source_bytes,
                         parent_version=parent_version,
-                        meta={"tool": actor, "note": f"{actor} of version {target_version}"},
+                        meta={"tool": actor,
+                              "note": f"{actor} of version {target_version}",
+                              "source_ref": source_ref},
                         holder=put_holder, fence=fence,
                         require_parent_is_head=True,
                     )
@@ -675,6 +726,7 @@ def restore_drawing_version(tenant_id: str, drawing_id: str, target_version: int
         version=int(new_version),
         parent_version=parent_version,
         restored_head_readable=restored_head_readable,
+        source_ref=source_ref,
     )
 
 
@@ -753,7 +805,11 @@ def restore_version(drawing_id: str, version: int,
         "drawing_id": drawing_id,
         "restored_from": int(version),
         "new_version": {"drawing_id": drawing_id, "version": restored.version,
-                        "parent": restored.parent_version},
+                        "parent": restored.parent_version,
+                        # Slice 6a: the row the client is about to render
+                        # already knows its provenance, so the drawer need not
+                        # re-read the chain to draw the chip.
+                        "source_ref": restored.source_ref},
         "head": restored.version,
         "latest": restored.version,
         # False only in the narrow committed-but-mirror-failed live case: the

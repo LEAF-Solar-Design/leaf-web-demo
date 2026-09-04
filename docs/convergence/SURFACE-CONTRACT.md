@@ -72,7 +72,7 @@ the sheets arm rather than against the console predicates, which never ran for i
 | `groundMaterial.solarStrings` | boolean | the bundled solved string overlay is eligible | `web/src/App.jsx:2313` `surfaceSlots.groundMaterial.solarStrings`; replaced `activeSurface === 'solar'`. The SURFACE term only: the `mock`, demo-sample and head-v1 honesty gates beside it still decide whether anything renders, and none of them is surface data |
 | `commandLine` | boolean | the docked one-line "Command:" mode | `web/src/App.jsx:3419` `commandLine={!!studioGround && surfaceSlots.commandLine}` (the surface term was `drafting`) |
 | `authoring` | boolean \| null | the author/build lane is reachable | `web/src/App.jsx:2735` `<AuthorPanel>`, inside the nav rail (`:2645`) which is not surface-gated |
-| `versions` | `'drawing' \| 'none' \| null` | the version source and its restore route | `web/src/App.jsx:3041` `<VersionHistory>`, which sits inside the workspace card whose display gate is `:2859` |
+| `versions` | `'drawing' \| 'none' \| null` | the version source and its restore route | Slice 6a: BOTH shells mount the one primitive `web/src/components/VersionList.jsx`, gated on `surfaceContract(id).versions !== 'none'` — /app through the `<VersionHistory>` drawer (`web/src/App.jsx`, the `vh-anchor` block), /try through the Versions tab (`web/src/site/ToolCast.jsx`, `versionsMounted`) |
 | `conversations.scope` | `'project' \| 'drawing' \| null` | what an AI conversation is scoped to | `web/src/converse.js:129-134` `sessionCacheKey(drawingId, projectId)` caches ONE session per project+drawing pair; `ConversePanel` mounts at `web/src/App.jsx:3306` with no surface gate |
 | `integrations` | null | which mounts show, how a new one is linked | undeclared: the only link surface is the header's Claude account panel (`web/src/App.jsx:2630`), which is global, not per-surface |
 | `builds.routes` | array | what this surface can launch | `web/src/App.jsx:2710` `ToolsPanel onRequestRun` -> `onRequestCatalogRun`, mounted on every surface. No marathon route exists in this client at all |
@@ -144,10 +144,45 @@ the `/sheets` arm, added by slice 5b and read off `SiteRoot.jsx` / `SheetsPage.j
 - **`chrome.cockpit` equals `ground === 'drawing'` today.** It is declared separately anyway,
   per the operator rule: every slot must be declarable per surface, so a future surface can
   take a drawing ground without the drafting cockpit, or the reverse.
-- **`versions` is `none` on browser and iOS because of a display gate, not an unmount.**
-  `VersionHistory` (`App.jsx:3041`) is inside the workspace card, which is hidden with
-  `display: none` (`App.jsx:2859`) rather than unmounted, so live drawing, lock and job state
-  survive a tab switch. The user-visible answer is still "no version history here".
+- **`versions` is now a real mount gate on both shells (slice 6a).** It was a display gate:
+  `VersionHistory` sat inside the workspace card, hidden with `display: none` rather than
+  unmounted, and /try's version tab was not gated at all. Both now read
+  `surfaceContract(id).versions !== 'none'`, so on browser and iOS the history button, the
+  drawer and the Versions tab are absent rather than merely invisible. The workspace card
+  still hides rather than unmounts, so live drawing, lock and job state survive a tab switch.
+- **One version list, two skins.** `web/src/components/VersionList.jsx` owns the behaviour:
+  newest-first ordering, the delta chip, the authored-tool provenance chip, the two-step
+  restore/recover confirm machine with its single-flight guard, and the read-only preview
+  strip. Each surface keeps its own markup (`vh-row-v{n}` in the drawer, `try-version-v{n}`
+  in the tab), pinned byte for byte by `web/src/components/versionList.test.jsx` against a
+  capture of the pre-slice drawer. /try's loader now forwards `include_deltas=1`, so the two
+  shells show the same deltas; the e2e row that asserted its absence is re-pinned.
+- **`source_ref` is provenance, never a guess.** A version row carries the sha256 of the
+  writing tool's published body when the server holds one, and `null` otherwise. The server
+  bounds and charset-validates it on the way out (`server/routers/drawings.py` `_source_ref`),
+  a restore carries the source version's value forward because the new head's bytes ARE that
+  version's bytes (the row is threaded out of the one manifest read that proved the version
+  exists, `da/store.py` `resolve_version_entry`), and nothing anywhere invents an author for a
+  version that has none. The rule that makes this literal on EVERY execution tier:
+  **server-held or absent.** The digest is measured by the server itself, at stamp time, over
+  the published tool body it resolves for the tool id the mutation binding names
+  (`server/tool_loader.py` `published_tool_source_sha256`: the same UTF-8 text every sandbox
+  tier is fed, the same text the harness's `leaf.tool-source.v1` receipt hashed when the tool
+  was submitted, and the same text a genuine microvm receipt hashes), measured BEFORE the
+  planner runs. Nothing the sandbox returned is ever the value: on the in-process and
+  `subprocess` tiers `execution_provenance` is whatever the tool body chose to say, since
+  `tool_loader` adopts a tool's own `{ok, result}` return whole, and a shape check of a claim
+  the attacker controls is not a fence, so `tool_loader` now drops a tool-supplied
+  `execution_provenance` at the seam it enters and `write_loop` never reads the envelope for
+  the stamp (`_server_held_source_ref`). If the server holds no published body for that tool
+  id (an APS-only or dangling package, a staged design-time source, a platform builtin, an
+  unreadable file) the row is `null`: honest absence. Where a verified
+  `leaf.tool-execution.v1` microvm receipt exists it is only cross-checked against the
+  server's digest; a mismatch withholds the stamp with a warning log, never the sandbox value.
+  **The chip claims only what the digest proves.** `ToolSourceReceipt`
+  (`harness/contract/HARNESS-CONTRACT.md`) is paths, byte counts and digests, with no author,
+  model or session identity in it, so `SourceRefChip` renders `authored tool · {sha8}` and
+  never names a model or a person.
 - **`authoring` is `true` on every surface.** `AuthorPanel` (`App.jsx:2735`) sits in the nav
   rail, which is not surface-gated. On cad and solar the rail collapses to a spine by
   default, so the panel is reached through the ribbon's author cluster (`App.jsx:2429`)

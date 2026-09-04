@@ -900,7 +900,7 @@ def _pg_manifest(tenant_id: str, drawing_id: str) -> dict:
         cur.execute(
             """
             SELECT version, parent_version, created_at, byte_count,
-                   content_sha256, workitem_id, tool, note
+                   content_sha256, workitem_id, tool, note, source_ref
             FROM drawing_store_versions
             WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
               AND state = 'ready'
@@ -934,6 +934,7 @@ def _pg_manifest(tenant_id: str, drawing_id: str) -> dict:
             "workitem_id": row["workitem_id"],
             "tool": row["tool"],
             "note": row["note"],
+            "source_ref": row["source_ref"],
         } for row in rows],
         "checkout": checkout,
     }
@@ -1334,11 +1335,12 @@ def _pg_put(
             """
             INSERT INTO drawing_store_versions
               (tenant_id, drawing_id, version, parent_version, object_key,
-               byte_count, content_sha256, workitem_id, tool, note, state)
+               byte_count, content_sha256, workitem_id, tool, note,
+               source_ref, state)
             VALUES
               (%(tenant)s, %(drawing)s, %(version)s, %(parent)s, %(key)s,
                %(bytes)s, %(sha)s, %(workitem)s, %(tool)s, %(note)s,
-               'reserved')
+               %(source_ref)s, 'reserved')
             """,
             {
                 "tenant": tenant_id, "drawing": drawing_id,
@@ -1346,6 +1348,7 @@ def _pg_put(
                 "bytes": len(data), "sha": digest,
                 "workitem": meta.get("workitem_id"), "tool": meta.get("tool"),
                 "note": meta.get("note"),
+                "source_ref": meta.get("source_ref"),
             },
         )
         # Carried to finalize as the lock this version was reserved against. When
@@ -1781,6 +1784,12 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
             "bytes": len(data), "sha256": _sha256(data),
             "workitem_id": meta.get("workitem_id"), "tool": meta.get("tool"),
             "note": meta.get("note"),
+            # Authored-tool provenance: the server's own sha256 over the
+            # published tool body (never a sandbox claim), when the server
+            # held one. Stored verbatim and validated on the
+            # way OUT (server/routers/drawings.py `_source_ref`), so a drifted
+            # value can never be dressed as provenance by a reader.
+            "source_ref": meta.get("source_ref"),
         })
         m["head"] = new_v
         m["latest"] = new_v
@@ -1788,9 +1797,14 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
         return new_v
 
 
-def resolve_version(backend: StorageBackend, tenant_id: str, drawing_id: str,
-                    version="head") -> tuple[int, str]:
-    """Resolve `version` (an int, "head", or "latest") to (version_int, object_key)."""
+def resolve_version_entry(backend: StorageBackend, tenant_id: str, drawing_id: str,
+                          version="head") -> tuple[int, str, dict]:
+    """Resolve `version` to (version_int, object_key, manifest_row) in ONE manifest read.
+
+    The row is a copy of the manifest's own entry for that version, so a caller
+    that needs its metadata (restore reads `source_ref`) does not load the
+    manifest a second time to find what this call already proved is there.
+    """
     tid = sanitize_id(tenant_id)
     did = sanitize_id(drawing_id)
     m = load_manifest(backend, tid, did)
@@ -1802,10 +1816,18 @@ def resolve_version(backend: StorageBackend, tenant_id: str, drawing_id: str,
     else:
         v = int(version)
 
-    known = {int(e["v"]) for e in m["versions"]}
-    if v not in known:
-        raise ValueError(f"version {v} not in manifest for {tid}/{did} (known={sorted(known)})")
-    return v, drawing_version_key(tid, did, v)
+    entry = next((e for e in m["versions"] if int(e["v"]) == v), None)
+    if entry is None:
+        known = sorted(int(e["v"]) for e in m["versions"])
+        raise ValueError(f"version {v} not in manifest for {tid}/{did} (known={known})")
+    return v, drawing_version_key(tid, did, v), dict(entry)
+
+
+def resolve_version(backend: StorageBackend, tenant_id: str, drawing_id: str,
+                    version="head") -> tuple[int, str]:
+    """Resolve `version` (an int, "head", or "latest") to (version_int, object_key)."""
+    v, key, _entry = resolve_version_entry(backend, tenant_id, drawing_id, version)
+    return v, key
 
 
 def undo(backend: StorageBackend, tenant_id: str, drawing_id: str, *,
