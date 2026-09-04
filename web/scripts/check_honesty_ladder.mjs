@@ -25,7 +25,7 @@
 //      (a dangling key fails), and anything else — a template literal, a
 //      function call, a ternary — is an expression this scanner declines to
 //      evaluate, so it is counted under "unverifiable reason expressions",
-//      never judged silently pass/fail, against a pinned BUDGET (today: 16)
+//      never judged silently pass/fail, against a pinned BUDGET (today: 11)
 //      that ratchets down only: a new one anywhere is a hard failure, and
 //      fixing one must lower the pin in the same change.
 //   3. ABSENT CONTRACT SLOTS. Every slot in productSurfaces.js's PRODUCT_SURFACES
@@ -68,7 +68,7 @@
 //     diff" unprovable here) is only counted as unverifiable, never failed,
 //     because this scanner cannot prove a computed inline reason is bad any
 //     more than it can prove one is good. An "unverifiable" count is not a
-//     free pass forever: it is pinned to a BUDGET (today: 16) that only ever
+//     free pass forever: it is pinned to a BUDGET (today: 11) that only ever
 //     ratchets down, so a new one anywhere fails the gate and a fixed one
 //     must lower the pin in the same change — see `UNVERIFIABLE_REASON_BUDGET`.
 //   - Check 2 covers records written as object literals. A record assembled
@@ -470,15 +470,18 @@ export function reasonlessDisabled(src, mapsByName = new Map()) {
 // the count could climb without limit and the gate would stay green forever,
 // which is the same silent gap check 1-3 exist to close, just moved one
 // bucket over. Pinned to the exact count this gate's own output reported on
-// 2026-09-04 (Todo: 13d, round 2): `4 reason maps · 26 sentences ·
-// 93 key references · 17 disabled records · 26 absent contract slots ·
-// 16 unverifiable reason expressions`. The pin only ever RATCHETS: a new
-// unverifiable reason anywhere pushes the count over budget and fails the
-// gate outright; giving an existing one a real string or REASONS.key lowers
-// the live count below budget, which ALSO fails — on purpose, so the budget
-// constant itself must drop in the same change, or nobody would ever notice
-// the ratchet had room to tighten.
-const UNVERIFIABLE_REASON_BUDGET = 16
+// 2026-09-04 (Todo: 13d, round 2, rebased onto main): `6 reason maps ·
+// 31 sentences · 128 key references · 12 disabled records ·
+// 26 absent contract slots · 11 unverifiable reason expressions`. The pin
+// only ever RATCHETS: a new unverifiable reason anywhere pushes the count
+// over budget and fails the gate outright; giving an existing one a real
+// string or REASONS.key lowers the live count below budget, which ALSO
+// fails — on purpose, so the budget constant itself must drop in the same
+// change, or nobody would ever notice the ratchet had room to tighten. (It
+// already has, once: rebasing this change onto a main that had meanwhile
+// resolved 5 of the original 16 dropped the live count to 11, and this
+// pin caught it — see the git history of this line for the receipt.)
+const UNVERIFIABLE_REASON_BUDGET = 11
 
 /**
  * Whether an "unverifiable reason expressions" count holds against its
@@ -1184,9 +1187,9 @@ describe('honesty ladder', () => {
         'the injected record must be the only difference the scratch copy introduces')
       const projectedTreeTotal = unverifiableReasons.length - realCountInThisFile + scratchCountInThisFile
       assert.equal(projectedTreeTotal, unverifiableReasons.length + 1)
-      assert.match(
-        unverifiableReasonBudgetViolation(projectedTreeTotal, UNVERIFIABLE_REASON_BUDGET, unverifiableReasons),
-        /rose from the pinned budget of 16 to 17 \(\+1\)/)
+      const why = unverifiableReasonBudgetViolation(projectedTreeTotal, UNVERIFIABLE_REASON_BUDGET, unverifiableReasons)
+      const expectRose = new RegExp(`rose from the pinned budget of ${UNVERIFIABLE_REASON_BUDGET} to ${projectedTreeTotal} \\(\\+1\\)`)
+      assert.match(why, expectRose)
     })
   })
 
