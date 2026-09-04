@@ -18,6 +18,7 @@ import {
   SECRET_PATTERNS,
   findSecrets,
   maskForNotice,
+  evaluateSecretGuard,
 } from './secretPatterns.js'
 
 // Every credential below is FAKE and structurally valid only — never a real key.
@@ -279,6 +280,39 @@ describe('maskForNotice', () => {
     expect(masked.length).toBe(MASK_PREFIX + MASK_BULLETS)
   })
 
+  it('shows bullets ALONE for a shape whose match is the value (generic, aws secret)', () => {
+    // For these two the capture group IS the credential, so its first four
+    // characters are entropy, not shape; a prefix here would be a leak.
+    const bullets = '•'.repeat(MASK_BULLETS)
+    const generic = 'api_key=supersecretvalue1234567890'
+    const [g] = findSecrets(generic)
+    expect(g.id).toBe('generic')
+    expect(maskForNotice(generic, g)).toBe(bullets)
+    const secret = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'
+    const pair = `${secret} AKIAIOSFODNN7EXAMPLE`
+    const hits = findSecrets(pair)
+    const aws = hits.find((h) => h.id === 'aws_secret_key')
+    expect(aws).toBeTruthy()
+    expect(maskForNotice(pair, aws)).toBe(bullets)
+    expect(maskForNotice(pair, aws)).not.toContain(secret.slice(0, 4))
+    // and the whole refusal path agrees, not only the helper
+    expect(evaluateSecretGuard(generic).masked).toBe(bullets)
+  })
+
+  it('every pattern declares shapePrefix, and a true one really opens with fixed characters', () => {
+    for (const p of SECRET_PATTERNS) {
+      expect(typeof p.shapePrefix, p.id).toBe('boolean')
+    }
+    const fixed = { anthropic: 'sk-a', openai: 'sk-', github: 'gh', aws_access_key: 'AKIA', slack: 'xox', jwt: 'eyJ', private_key: '----' }
+    for (const [id, head] of Object.entries(fixed)) {
+      const p = SECRET_PATTERNS.find((x) => x.id === id)
+      expect(p.shapePrefix, id).toBe(true)
+      expect(p.regex.source.replace(/^\(\^\|\[\^[^\]]*\]\)\(?/, '').replace(/^\(/, '').replace(/^-----/, '----')).toMatch(new RegExp('^' + head.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    }
+    for (const id of ['aws_secret_key', 'generic']) {
+      expect(SECRET_PATTERNS.find((x) => x.id === id).shapePrefix, id).toBe(false)
+    }
+  })
   it('never reveals the credential length', () => {
     const short = `ghp_${'f'.repeat(20)}`
     const long = `ghp_${'f'.repeat(200)}`

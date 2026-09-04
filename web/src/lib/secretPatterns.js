@@ -34,7 +34,10 @@
 // every scan (JS is single-threaded and findSecrets is synchronous, so no
 // interleaving can observe a dirty index). No allocation per pattern per call.
 
-/** Characters of the match a notice may show. A shape prefix, never entropy. */
+/** Characters of the match a notice may show, and ONLY for a pattern whose
+ * match opens with fixed shape characters (`shapePrefix: true`, e.g. "sk-a").
+ * A pattern whose captured match IS the value (`shapePrefix: false`) shows
+ * bullets alone: its first characters are entropy, not shape. */
 export const MASK_PREFIX = 4
 /** Fixed bullet count — the mask NEVER reveals the credential's length. */
 export const MASK_BULLETS = 8
@@ -60,6 +63,7 @@ const B = '(^|[^A-Za-z0-9_-])'
 export const SECRET_PATTERNS = Object.freeze([
   Object.freeze({
     id: 'anthropic',
+    shapePrefix: true,
     label: 'Anthropic API key',
     overridable: false,
     group: 2,
@@ -67,6 +71,7 @@ export const SECRET_PATTERNS = Object.freeze([
   }),
   Object.freeze({
     id: 'openai',
+    shapePrefix: true,
     label: 'OpenAI API key',
     overridable: false,
     group: 2,
@@ -82,6 +87,7 @@ export const SECRET_PATTERNS = Object.freeze([
   }),
   Object.freeze({
     id: 'github',
+    shapePrefix: true,
     label: 'GitHub token',
     overridable: false,
     group: 2,
@@ -89,6 +95,7 @@ export const SECRET_PATTERNS = Object.freeze([
   }),
   Object.freeze({
     id: 'aws_access_key',
+    shapePrefix: true,
     label: 'AWS access key ID',
     overridable: false,
     group: 2,
@@ -96,6 +103,7 @@ export const SECRET_PATTERNS = Object.freeze([
   }),
   Object.freeze({
     id: 'aws_secret_key',
+    shapePrefix: false,
     label: 'AWS secret access key',
     overridable: false,
     group: 2,
@@ -107,6 +115,7 @@ export const SECRET_PATTERNS = Object.freeze([
   }),
   Object.freeze({
     id: 'slack',
+    shapePrefix: true,
     label: 'Slack token',
     overridable: false,
     group: 2,
@@ -114,6 +123,7 @@ export const SECRET_PATTERNS = Object.freeze([
   }),
   Object.freeze({
     id: 'jwt',
+    shapePrefix: true,
     label: 'JSON Web Token',
     overridable: false,
     group: 2,
@@ -124,6 +134,7 @@ export const SECRET_PATTERNS = Object.freeze([
   }),
   Object.freeze({
     id: 'private_key',
+    shapePrefix: true,
     label: 'private key',
     overridable: false,
     group: 1,
@@ -132,6 +143,7 @@ export const SECRET_PATTERNS = Object.freeze([
   }),
   Object.freeze({
     id: 'generic',
+    shapePrefix: false,
     label: 'credential',
     // The ONE overridable shape: a labelled assignment is a strong hint, not
     // proof, so a tenant who means it can send anyway — once, by an explicit
@@ -220,14 +232,22 @@ export function findSecrets(text) {
 
 /**
  * The ONLY function permitted to read a credential's characters: at most
- * MASK_PREFIX of them (a shape prefix such as "sk-a", never entropy) followed
- * by a FIXED bullet run, so neither the value nor its length is echoed.
+ * MASK_PREFIX of them, and ONLY when the hit's pattern opens with fixed shape
+ * characters (`shapePrefix: true`: "sk-a", "AKIA", "ghp_", "xoxb", "eyJ",
+ * "----"), followed by a FIXED bullet run, so neither the value nor its length
+ * is echoed. A hit whose match IS the value (`aws_secret_key`, `generic`) gets
+ * bullets alone: its opening characters are the secret's own entropy.
  *
- * Any bad input degrades to bullets alone — it NEVER falls back to raw text.
+ * Any bad input, and any hit not marked shapePrefix, degrades to bullets
+ * alone — it NEVER falls back to raw text. Fails closed on a missing flag.
  */
 export function maskForNotice(text, hit) {
   const bullets = '•'.repeat(MASK_BULLETS)
   if (typeof text !== 'string' || !hit) return bullets
+  // Looked up by id, never carried on the hit (the hit's key set is frozen by
+  // test); an unknown id is not a shape and gets bullets alone.
+  const pattern = SECRET_PATTERNS.find((p) => p.id === hit.id)
+  if (!pattern || pattern.shapePrefix !== true) return bullets
   const { index, length } = hit
   if (!Number.isInteger(index) || !Number.isInteger(length)) return bullets
   if (index < 0 || length <= 0 || index >= text.length) return bullets
