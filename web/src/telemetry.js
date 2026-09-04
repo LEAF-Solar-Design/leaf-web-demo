@@ -23,7 +23,35 @@
 // here instead would drift the moment a route is added, and a hand-rolled one
 // is exactly how a customer name reaches BigQuery inside a pathname.
 import { sceneForPath } from './site/routeScene.js'
+// The consent rail (slice 13c). A second leaf module — pure, no imports of
+// its own beyond the platform — so it cannot form a cycle either. The rule it
+// carries is documented at buildEvent: usage-shaped events need the viewer's
+// yes, product events do not.
+import { subscribeUsageConsent, usageConsentGranted } from './lib/telemetryConsent.js'
 const DISABLED = import.meta.env?.VITE_TELEMETRY_DISABLED === '1'
+
+/** The build-time kill switch, exported so the Plan panel can state the
+ * honest reason its consent row is disabled instead of re-reading the env
+ * (two readers of one fence is how they disagree). */
+export const TELEMETRY_BUILD_DISABLED = DISABLED
+
+/** The two classes of event this module carries. See buildEvent. */
+export const EVENT_CLASS = Object.freeze({
+  // What the app did: a run finished, a version restored, an exception was
+  // caught. The operational record. Gated only by the build-time kill switch,
+  // exactly as before slice 13c.
+  product: 'product',
+  // What a person typed or picked: search queries, menu actions, palette
+  // picks. Describes the viewer, so it needs the viewer's yes.
+  usage: 'usage',
+})
+
+// Every queued event carries its class, because a revoke has to find events
+// that are ALREADY in the buffer. The key is a SYMBOL on purpose:
+// JSON.stringify skips symbol-keyed properties by construction, so this
+// internal label can never reach the ingest door however `payload()` is later
+// changed. An own string key would need a strip step a future edit can forget.
+const EVENT_CLASS_KEY = Symbol('leaf.telemetry.eventClass')
 const API_BASE = import.meta.env?.VITE_API_BASE ?? ''
 const FLUSH_AT = 20
 const FLUSH_MS = 5000
@@ -37,8 +65,16 @@ const EXCEPTION_CAP = 10        // global-handler emissions per session
 const HASH_INPUT_MAX = 4096     // bound the work a digest does on the main thread
 const KEY_SAMPLE_MAX = 20       // keys sampled when describing an unserializable reason
 const DIGEST_WIDTH = 16         // 2^53-1 is 16 digits; a digest is ALWAYS this wide
+// Batches waiting on the 2 s post-failure retry. Bounded for the same reason
+// BUFFER_MAX exists: a host that rejects every POST must not be able to grow
+// an unbounded set of pending arrays. Past the cap a batch is DROPPED, which
+// telemetry is allowed to do (loss-tolerant by contract) and a leak is not.
+const RETRY_BATCH_MAX = 8
 const state = {
   buffer: [],
+  // The batches the retry timer is holding. They live OUT of `buffer`, so a
+  // revoke that only compacted `buffer` would miss them: see purgeUsageEvents.
+  retryBatches: new Set(),
   timer: null,
   sessionId: null,
   tourStep: null,
@@ -137,14 +173,90 @@ function unrefTimer(timer) {
   try { timer?.unref?.() } catch { /* no-op */ }
 }
 
+/** The WIRE-TIME consent fence, and the second half of the guarantee
+ * `buildEvent` starts. buildEvent decides at BUILD time; this decides at SEND
+ * time, which is the only moment that actually matters to a viewer who
+ * revoked while events were sitting behind the 5 s timer.
+ *
+ * Returns the batch UNCHANGED (no copy, no allocation) while consent is
+ * granted — the only path a consenting viewer ever takes. Only a revoked
+ * viewer pays one O(batch <= FLUSH_AT) pass. Fails closed: an event carrying
+ * no class marker is treated as usage-shaped. */
+function sendable(events) {
+  if (usageConsentGranted()) return events
+  return events.filter(isProduct)
+}
+
+function isProduct(ev) {
+  return ev?.[EVENT_CLASS_KEY] === EVENT_CLASS.product
+}
+
+/** Drop every usage-class event out of ONE queue, IN PLACE. The array
+ * identity is load-bearing (a caller may be a splice already in flight, or a
+ * retry closure that captured the array), so this never rebinds or copies.
+ * O(n) over a queue already bounded by BUFFER_MAX or FLUSH_AT. */
+function compactToProduct(events) {
+  let kept = 0
+  for (let i = 0; i < events.length; i += 1) {
+    const ev = events[i]
+    if (isProduct(ev)) { events[kept] = ev; kept += 1 }
+  }
+  events.length = kept
+}
+
+/** Drop every usage-class event still waiting ANYWHERE in this module. Runs
+ * ONLY on a revoke, so the emit path stays allocation-free.
+ *
+ * BOTH queues, and the second one is the whole point: `state.buffer` holds
+ * what has not been sent yet, and `state.retryBatches` holds the batches a
+ * failed POST handed to a 2 s timer. A purge of the buffer alone leaves the
+ * retry as the same leak on a longer fuse: revoke, re-grant inside that
+ * window, and the send-time fence sees consent again and posts what the viewer
+ * revoked. Destroying the events here is what makes a revoke DESTRUCTIVE
+ * rather than merely fenced. */
+function purgeUsageEvents() {
+  try {
+    compactToProduct(state.buffer)
+    for (const batch of state.retryBatches) compactToProduct(batch)
+  } catch { /* telemetry never breaks the product */ }
+}
+
+// A revoke must reach events ALREADY QUEUED, not only the next one built.
+// Without this subscription, up to FLUSH_AT usage events sitting behind the
+// 5 s timer (or the pagehide beacon, or the 2 s post-failure retry) would
+// still leave the browser after the viewer said no.
+try {
+  subscribeUsageConsent((granted) => { if (!granted) purgeUsageEvents() })
+} catch { /* no-op: sendable() still fences every send seam */ }
+
 function flush() {
   try {
     if (state.timer) { clearTimeout(state.timer); state.timer = null }
     if (!state.buffer.length) return
-    const events = state.buffer.splice(0, FLUSH_AT)
-    post(events).catch(() => {
-      // ONE retry PER BATCH, then drop — loss-tolerant by contract.
-      unrefTimer(setTimeout(() => { post(events).catch(() => {}) }, 2000))
+    const events = sendable(state.buffer.splice(0, FLUSH_AT))
+    if (!events.length) { if (state.buffer.length) schedule(); return }
+    // The batch is REGISTERED BEFORE the request leaves, not in the failure
+    // callback: it is no longer in `state.buffer`, and a revoke that lands
+    // while the POST is still on the wire must reach it too, or a failure
+    // after that revoke would arm a retry carrying the very events the
+    // viewer took back. payload() serialized the body at call time, so a
+    // revoke compacting this array in place cannot touch the request in
+    // flight; it only decides what the ONE retry may carry. Bounded: past
+    // RETRY_BATCH_MAX a batch is sent once and never retried. sendable()
+    // below still re-fences, for a revoke that raced the subscription (a
+    // listener set at LISTENER_MAX refuses new subscribers).
+    const tracked = state.retryBatches.size < RETRY_BATCH_MAX
+    if (tracked) state.retryBatches.add(events)
+    post(events).then(() => {
+      if (tracked) state.retryBatches.delete(events)
+    }, () => {
+      // ONE retry PER BATCH, then drop (loss-tolerant by contract).
+      if (!tracked) return
+      unrefTimer(setTimeout(() => {
+        state.retryBatches.delete(events)
+        const retry = sendable(events)
+        if (retry.length) post(retry).catch(() => {})
+      }, 2000))
     })
     if (state.buffer.length) schedule()
   } catch { /* telemetry never breaks the product */ }
@@ -159,10 +271,32 @@ function schedule() {
 }
 
 /** Build one event WITHOUT queuing it. Kept split from `track` because the
- * DISABLED / no-fetch decision belongs in exactly one place. */
-function buildEvent(name, props, eventType) {
+ * DISABLED / no-fetch / CONSENT decision belongs in exactly one place.
+ *
+ * `eventClass` is REQUIRED and FAILS CLOSED: only the literal
+ * `EVENT_CLASS.product` is a product event. An omitted class, a typo, a class
+ * a future caller invents — every one of them is treated as usage-shaped and
+ * therefore needs consent. The safe default has to be the restrictive one,
+ * because the failure mode of the other default is collecting a person's
+ * search queries without asking, and that is not recoverable by a later fix.
+ *
+ * Exported for its own spec: the refusal is the product promise ("no
+ * usage-shaped data before the toggle is on"), so it is tested at the seam
+ * where it is decided, not inferred from a call site.
+ *
+ * A refused event is not built, so `track` cannot queue it: there is no
+ * buffered usage event waiting for a later consent to release it.
+ *
+ * The OTHER direction is deliberately NOT this function's job and is not
+ * implied by it: an event built while consent was granted can still be in the
+ * buffer when the viewer revokes a second later. That half is carried by
+ * `purgeUsageEvents` (the buffer is emptied of usage events on revoke) and by
+ * `sendable` (every send seam re-checks). This function only stamps the class
+ * those two read. */
+export function buildEvent(name, props, eventType, eventClass) {
   if (DISABLED || typeof fetch !== 'function') return undefined
-  return {
+  if (eventClass !== EVENT_CLASS.product && !usageConsentGranted()) return undefined
+  const event = {
     event_type: eventType,
     event_name: name,
     client_ts: Date.now() / 1000,
@@ -170,6 +304,12 @@ function buildEvent(name, props, eventType) {
       ? { ...props, tour_step: state.tourStep }
       : props,
   }
+  // Stamp the class so a later revoke can find this event again once it is
+  // sitting in the shared buffer. Fails closed exactly as the gate above does:
+  // anything but the exact product literal is marked usage-shaped.
+  event[EVENT_CLASS_KEY] =
+    eventClass === EVENT_CLASS.product ? EVENT_CLASS.product : EVENT_CLASS.usage
+  return event
 }
 
 function enqueue(event) {
@@ -186,7 +326,28 @@ function enqueue(event) {
  * threw. */
 export function track(name, props = {}, eventType = 'custom_event') {
   try {
-    const event = buildEvent(name, props, eventType)
+    const event = buildEvent(name, props, eventType, EVENT_CLASS.product)
+    if (!event) return undefined
+    enqueue(event)
+    return event
+  } catch { return undefined /* telemetry never breaks the product */ }
+}
+
+/** Queue one USAGE-SHAPED event — a search query, a menu action, a palette
+ * pick: anything that describes how a person uses the studio rather than what
+ * the app did.
+ *
+ * Returns undefined and queues NOTHING when the viewer has not turned the Plan
+ * panel's "Usage telemetry" switch on. There is no buffering-until-consent and
+ * no retroactive send: a refused event does not exist.
+ *
+ * Slices 10-13's emitters call THIS, never `track`. The separation is the
+ * whole guarantee — one function whose events are gated, one whose events are
+ * the operational record — and a caller that picks the wrong one is a review
+ * finding, not a runtime surprise, because the names say which is which. */
+export function trackUsage(name, props = {}, eventType = 'custom_event') {
+  try {
+    const event = buildEvent(name, props, eventType, EVENT_CLASS.usage)
     if (!event) return undefined
     enqueue(event)
     return event
@@ -551,7 +712,11 @@ function beaconFlush() {
     // crash recorded a moment before the page was torn down is already in the
     // buffer and leaves with the beacon like any other event.
     if (!state.buffer.length) return
-    const events = state.buffer.splice(0, FLUSH_AT)
+    // The same wire-time fence flush() uses. pagehide is the seam a revoke is
+    // MOST likely to race, because turning the switch off and then closing the
+    // tab is one continuous human action.
+    const events = sendable(state.buffer.splice(0, FLUSH_AT))
+    if (!events.length) return
     if (navigator?.sendBeacon) {
       // sendBeacon cannot carry auth headers; the pre-auth allowlist covers
       // the anonymous allowlist, and identified events flushed here may drop —

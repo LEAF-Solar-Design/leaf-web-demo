@@ -11,6 +11,44 @@
 // from the ORGANIZATION AGGREGATE (any active/trialing subscription in the org
 // entitles every member), so this panel must only ever reflect the server
 // payload — never infer entitlement from anything client-side.
+//
+// Slice 13c adds the panel's FIRST control: the usage-telemetry consent
+// switch. It sits below the entitlement rows in its own block, so the rows
+// above keep their exact markup and hairline rhythm.
+import { useId, useSyncExternalStore } from 'react'
+
+import {
+  setUsageConsent,
+  subscribeUsageConsent,
+  usageConsentGranted,
+} from '../lib/telemetryConsent.js'
+import { TELEMETRY_BUILD_DISABLED } from '../telemetry.js'
+
+// The exact copy. Honest on both halves: it names what would be collected AND
+// says what the switch does not touch, because a toggle that silently also
+// governed crash reporting would be the same lie in the other direction.
+//
+// PRESENT TENSE, deliberately: no usage emitter exists in the tree yet (grep
+// trackUsage across web/src and only telemetry.js and its own specs answer),
+// so copy reading "Share how you use the studio" would promise a viewer who
+// turns this on that something starts flowing today. It does not. The switch
+// is the permission, and the permission is real now; the signals arrive with
+// the emitters slices 10-13 add.
+export const CONSENT_LABEL = 'Usage telemetry'
+export const CONSENT_COPY = 'Allow sharing how you use the studio (menu picks, searches) once those signals exist. Product events are unaffected.'
+
+// REASONS style: one sentence naming why the control cannot be used, never a
+// disabled control with no explanation. Exact-string tested — a reworded
+// reason is a product change and should fail the spec, not slip through.
+export const CONSENT_REASONS = Object.freeze({
+  buildDisabled: 'Telemetry is off for this build.',
+  // The fence is a BUILD flag, and the grant outlives it. Saying only "off for
+  // this build" would let a viewer read the OFF-looking row as "my yes is
+  // gone", and the next build without the fence would then resume collecting
+  // with no re-ask. So the stored yes is stated, and taking it back is offered
+  // in the same sentence as the control that does it.
+  storedGrantKept: 'Your saved yes is kept and would resume in a build without this fence. Turn the switch off to take it back now.',
+})
 
 const ROWS = [
   { key: 'run_read', label: 'Run read-only tools', hint: 'drawing.read', short: 'read tools' },
@@ -25,7 +63,108 @@ function entValue(ents, key) {
   return ents[key] !== false
 }
 
-export default function EntitlementGate({ tier, entitlements, loading, mock }) {
+/** The consent switch. A real ARIA switch, not a checkbox pretending. Its
+ * 32x18 pill takes its values from `.toggle, .switch input` in styles.css,
+ * the repo's one switch rule: accent track on, --on-accent knob on, and the
+ * shared two-layer keyboard ring every other control uses.
+ *
+ * KEYBOARD, and why the handler exists at all: a native <button> activates on
+ * Enter (keydown) and Space (keyup), so a click handler alone would already
+ * work in a browser — but not deterministically under test, and a switch whose
+ * keyboard path is untested is a switch that breaks silently. The handler
+ * calls preventDefault() on both keys, which CANCELS the browser's synthesized
+ * click, so every activation path (mouse, touch tap, Space, Enter) toggles
+ * exactly once. Removing the preventDefault would double-toggle on Enter.
+ *
+ * Touch: a tap on a <button> is a click; no extra pointer plumbing, and the
+ * 32x18 pill sits inside a row-height hit target.
+ *
+ * Under the build fence the switch is ONE-WAY, not dead. A viewer must always
+ * be able to take consent back, so a stored grant keeps the control operable
+ * and clicking it revokes; only the granting direction is refused, and once
+ * nothing is stored the button is `disabled` (a native disabled button fires
+ * neither click nor keydown, so that refusal needs no handler-side guard).
+ * Both reasons render as text below, never only as a title attribute a
+ * keyboard or screen reader user would never reach, and both are named by
+ * aria-describedby so the focused control announces them. */
+function UsageConsentRow({ buildDisabled }) {
+  const labelId = useId()
+  const copyId = `${labelId}-copy`
+  const reasonId = `${labelId}-reason`
+  const keptId = `${labelId}-kept`
+  // The store is external (shared with the emitter and with any other mounted
+  // panel), so this is exactly what useSyncExternalStore exists for: no
+  // effect-based mirror to drift, and a revoke in one panel is instantly true
+  // in the other and in telemetry.js's next buildEvent call.
+  const granted = useSyncExternalStore(
+    subscribeUsageConsent,
+    usageConsentGranted,
+    // Server snapshot: nothing is consented before a browser exists.
+    () => false,
+  )
+  // The switch shows the STORED state, under the fence too: the grant is what
+  // the control governs, and it survives the build flag. What the fence
+  // changes is what the grant DOES, and that is what the reason text below
+  // says. Hiding the stored yes here would tell a viewer their consent was
+  // gone while a build without the fence would silently resume on it.
+  const on = granted
+  // One-way under the fence: revoke yes, grant never.
+  const canToggle = !buildDisabled || granted
+
+  const toggle = () => {
+    if (buildDisabled && !granted) return   // belt and braces beside `disabled`
+    setUsageConsent(!granted)
+  }
+  const onKeyDown = (ev) => {
+    if (ev.key !== ' ' && ev.key !== 'Spacebar' && ev.key !== 'Enter') return
+    ev.preventDefault()
+    toggle()
+  }
+
+  return (
+    <div className="ent-consent">
+      <div className={`ent-row ent-consent-row ${on ? 'on' : 'off'}`}>
+        <span className="ent-label" id={labelId}>
+          {CONSENT_LABEL}<span className="dim"> · this browser</span>
+        </span>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={on}
+          aria-labelledby={labelId}
+          aria-describedby={[
+            copyId,
+            buildDisabled ? reasonId : null,
+            buildDisabled && granted ? keptId : null,
+          ].filter(Boolean).join(' ')}
+          className={`ent-switch${on ? ' on' : ''}`}
+          disabled={!canToggle}
+          onClick={toggle}
+          onKeyDown={onKeyDown}
+        >
+          <span className="ent-switch-knob" aria-hidden="true" />
+        </button>
+      </div>
+      <p className="ent-note ent-consent-copy" id={copyId}>{CONSENT_COPY}</p>
+      {buildDisabled ? (
+        <p className="ent-note ent-consent-reason" id={reasonId}>{CONSENT_REASONS.buildDisabled}</p>
+      ) : null}
+      {buildDisabled && granted ? (
+        <p className="ent-note ent-consent-reason" id={keptId}>{CONSENT_REASONS.storedGrantKept}</p>
+      ) : null}
+    </div>
+  )
+}
+
+export default function EntitlementGate({
+  tier,
+  entitlements,
+  loading,
+  mock,
+  // Defaulted from the build fence so every existing mount site is unchanged;
+  // a prop only so the disabled arm has a spec that does not need a rebuild.
+  telemetryDisabled = TELEMETRY_BUILD_DISABLED,
+}) {
   const ents = entitlements?.entitlements || null
   // A real policy read exists only in live mode with the endpoint deployed.
   const known = !mock && !!entitlements
@@ -75,6 +214,8 @@ export default function EntitlementGate({ tier, entitlements, loading, mock }) {
           Some capabilities aren’t in the {tierLabel} plan ({rows.filter((r) => !r.on).map((r) => r.short).join(', ')}); a higher tier unlocks them.
         </p>
       )}
+
+      <UsageConsentRow buildDisabled={telemetryDisabled} />
     </section>
   )
 }

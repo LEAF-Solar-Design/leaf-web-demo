@@ -79,7 +79,14 @@
       "span|ent-label|",
       "span|dim|",
       "span|ent-state on|",
-      "p|ent-note amber|"
+      "p|ent-note amber|",
+      "div|ent-consent|",
+      "div|ent-row ent-consent-row off|",
+      "span|ent-label|",
+      "span|dim|",
+      "button|ent-switch|",
+      "span|ent-switch-knob|",
+      "p|ent-note ent-consent-copy|"
     ],
     "entitlementDocked": [],
     "commandBar": [
@@ -149,7 +156,14 @@
       "span|ent-label|",
       "span|dim|",
       "span|ent-state on|",
-      "p|ent-note amber|"
+      "p|ent-note amber|",
+      "div|ent-consent|",
+      "div|ent-row ent-consent-row off|",
+      "span|ent-label|",
+      "span|dim|",
+      "button|ent-switch|",
+      "span|ent-switch-knob|",
+      "p|ent-note ent-consent-copy|"
     ],
     "commandBar": [
       "div|cb-sentinel|command-bar-sentinel"
@@ -267,7 +281,14 @@
       "span|ent-label|",
       "span|dim|",
       "span|ent-state on|",
-      "p|ent-note amber|"
+      "p|ent-note amber|",
+      "div|ent-consent|",
+      "div|ent-row ent-consent-row off|",
+      "span|ent-label|",
+      "span|dim|",
+      "button|ent-switch|",
+      "span|ent-switch-knob|",
+      "p|ent-note ent-consent-copy|"
     ],
     "commandBar": [
       "div|cb-sentinel|command-bar-sentinel"
@@ -385,7 +406,14 @@
       "span|ent-label|",
       "span|dim|",
       "span|ent-state on|",
-      "p|ent-note amber|"
+      "p|ent-note amber|",
+      "div|ent-consent|",
+      "div|ent-row ent-consent-row off|",
+      "span|ent-label|",
+      "span|dim|",
+      "button|ent-switch|",
+      "span|ent-switch-knob|",
+      "p|ent-note ent-consent-copy|"
     ],
     "entitlementDocked": [],
     "commandBar": [
@@ -488,7 +516,14 @@
       "span|ent-label|",
       "span|dim|",
       "span|ent-state on|",
-      "p|ent-note amber|"
+      "p|ent-note amber|",
+      "div|ent-consent|",
+      "div|ent-row ent-consent-row off|",
+      "span|ent-label|",
+      "span|dim|",
+      "button|ent-switch|",
+      "span|ent-switch-knob|",
+      "p|ent-note ent-consent-copy|"
     ],
     "entitlementDocked": [],
     "commandBar": [
@@ -558,7 +593,14 @@
       "span|ent-label|",
       "span|dim|",
       "span|ent-state on|",
-      "p|ent-note amber|"
+      "p|ent-note amber|",
+      "div|ent-consent|",
+      "div|ent-row ent-consent-row off|",
+      "span|ent-label|",
+      "span|dim|",
+      "button|ent-switch|",
+      "span|ent-switch-knob|",
+      "p|ent-note ent-consent-copy|"
     ],
     "entitlementDocked": [],
     "commandBar": [
@@ -661,7 +703,14 @@
       "span|ent-label|",
       "span|dim|",
       "span|ent-state on|",
-      "p|ent-note amber|"
+      "p|ent-note amber|",
+      "div|ent-consent|",
+      "div|ent-row ent-consent-row off|",
+      "span|ent-label|",
+      "span|dim|",
+      "button|ent-switch|",
+      "span|ent-switch-knob|",
+      "p|ent-note ent-consent-copy|"
     ],
     "entitlementDocked": [],
     "commandBar": [
@@ -731,7 +780,14 @@
       "span|ent-label|",
       "span|dim|",
       "span|ent-state on|",
-      "p|ent-note amber|"
+      "p|ent-note amber|",
+      "div|ent-consent|",
+      "div|ent-row ent-consent-row off|",
+      "span|ent-label|",
+      "span|dim|",
+      "button|ent-switch|",
+      "span|ent-switch-knob|",
+      "p|ent-note ent-consent-copy|"
     ],
     "entitlementDocked": [],
     "commandBar": [

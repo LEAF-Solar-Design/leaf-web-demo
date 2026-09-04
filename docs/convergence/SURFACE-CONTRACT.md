@@ -371,3 +371,42 @@ Not touched: `SurfaceGrounds.jsx` (the derivation already excludes a new ground 
 `App.jsx`, `ToolCast.jsx`, `SiteRoot.jsx`, `src/site/sheets/**` (a sibling agent's), and the
 `/sheets` row in `web/e2e/local/one-shell-mount.spec.mjs`, whose premise this slice
 deliberately preserves.
+
+## Daily-session set
+
+### Usage-telemetry consent (slice 13c)
+
+The studio collects two classes of telemetry event and they are gated differently. **Product
+events** are what the app did (a run finished, a version restored, an exception was caught):
+they are the operational record, they describe the system rather than the person, and their
+only gate is the build-time kill switch `VITE_TELEMETRY_DISABLED=1`, exactly as before this
+slice. **Usage-shaped events** are what a person typed and picked (search queries, menu
+actions, palette picks; the emitters slices 10-13 add): they describe the viewer, so **no
+usage-shaped data is collected before the Plan panel's "Usage telemetry" switch is on.** The
+grant is per browser, stored under a versioned key (`leaf.telemetry.usage_consent.v1`,
+`web/src/lib/telemetryConsent.js`) that is bumped rather than reinterpreted whenever the
+meaning of the yes changes; absent, malformed, or unreadable storage all read as NOT
+consented. The rule lives in exactly one place, `buildEvent` in `web/src/telemetry.js`, and it
+fails closed: an event whose class is anything but the literal `product` is treated as
+usage-shaped and needs consent. A refused event is never built and never queued, so granting
+consent later ships nothing that was refused while the switch was off. **A revoke reaches
+events that are already queued, not just the next one built:** every buffered event carries
+its class on a symbol key that JSON.stringify cannot serialize, and a revoke purges the
+usage-class events out of EVERY place one can be waiting: the shared buffer, a batch whose
+POST is still on the wire (registered before the request leaves, so a revoke during the
+request still decides what its one retry may carry), and any batch a failed POST already
+handed to the 2 s retry. All of those are held outside the buffer, which is why a buffer-only
+purge would miss them. Each send seam (the 5 s flush, `flushNow`, the pagehide beacon, the
+2 s retry) re-checks consent on the way out as well. So a usage event queued a moment before
+the switch went off is destroyed rather than posted, and a re-grant inside the retry window
+cannot resurrect it. The one thing a revoke cannot recall is a request that already left the
+browser under a valid grant; that request was consented when it was sent. The switch is the permission, not a data tap:
+no usage emitter exists in the tree yet, so its copy is present-tense honest about that
+("Allow sharing how you use the studio (menu picks, searches) once those signals exist"),
+and the emitters slices 10-13 add are what start flowing under an existing yes. When the
+build-time kill switch is on, nothing usage-shaped can leave whatever is stored, and the row
+says exactly that in text ("Telemetry is off for this build.") rather than being a dead
+control: a stored grant stays visible and stays revocable, with the second reason naming
+what a build flag does not change ("Your saved yes is kept and would resume in a build
+without this fence. Turn the switch off to take it back now."), while granting under the
+fence is refused.

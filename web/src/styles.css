@@ -1349,6 +1349,52 @@ footer .warn-txt { color: var(--status-warning); }
 .ent-note { margin: 10px 0 0; font-size: 12px; color: var(--muted); line-height: 1.5; }
 .ent-note.amber { color: var(--status-warning); }
 
+/* --- usage-telemetry consent (slice 13c) ---------------------------------
+   Its own block BELOW .ent-rows, never inside it: the entitlement rows keep
+   their exact hairline rhythm (.ent-row:last-child drops its border) and the
+   panel's read-only half stays visually read-only. */
+.ent-consent { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
+.ent-consent-row { border-bottom: 0; padding: 4px 0; }
+.ent-consent-copy { margin-top: 4px; }
+.ent-consent-reason { margin-top: 4px; color: var(--muted-2); }
+/* Takes its values from the repo's ONE switch rule, `.toggle, .switch input`
+   further down this file: 32x18 pill, accent track when on, --on-accent knob
+   when on, and the same two-layer keyboard ring. It cannot BE that rule --
+   that one styles a native checkbox through ::before, this is a
+   <button role="switch"> with a real child knob -- and it differs in exactly
+   one place, called out below: the OFF knob. */
+.ent-switch {
+  position: relative; flex: 0 0 auto;
+  width: 32px; height: 18px; padding: 0; border-radius: 9px;
+  border: 1px solid var(--border); background: var(--bar-chip);
+  cursor: pointer; transition: background .12s ease, border-color .12s ease;
+}
+.ent-switch-knob {
+  position: absolute; top: 2px; left: 2px;
+  width: 12px; height: 12px; border-radius: 50%;
+  background: var(--muted-2);
+  transition: transform .12s ease, background .12s ease;
+}
+.ent-switch.on { background: var(--primary); border-color: var(--primary); }
+.ent-switch.on .ent-switch-knob { background: var(--on-accent); transform: translateX(14px); }
+/* The one departure from `.toggle`: its OFF knob is --card (white) on a
+   #c6c4b9 track. This pill's off track is --bar-chip (#e5e3da, paper-light),
+   where a white knob would vanish, so the off knob is --muted-2 above. The ON
+   state, which is the state that makes a claim about collection, is identical. */
+/* The shared two-layer keyboard ring (the M-g a11y rule at the bottom of this
+   file, and `.toggle:focus-visible`). It replaces a 12%-alpha halo that
+   computed to about 1.2:1 on paper, well under the 3:1 WCAG 1.4.11 asks of a
+   focus indicator -- keyboard focus on the panel's only control was
+   effectively invisible. */
+.ent-switch:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--card), 0 0 0 4px var(--primary);
+}
+.ent-switch:disabled { cursor: not-allowed; opacity: .45; }
+@media (prefers-reduced-motion: reduce) {
+  .ent-switch, .ent-switch-knob { transition: none; }
+}
+
 /* --- calm plan-gate note copy in RoutePanel (amber, not red) --- */
 .route-note.amber { color: var(--status-warning); }
 
