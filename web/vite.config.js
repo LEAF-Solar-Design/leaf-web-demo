@@ -21,11 +21,18 @@ function cadEngineDevServer() {
     name: 'cad-engine-dev-server',
     configureServer(server) {
       const vendorRoot = path.resolve(HERE, '..', 'vendor')
-      const pkgDir = existsSync(vendorRoot)
-        ? readdirSync(vendorRoot)
-          .map((name) => path.join(vendorRoot, name, 'pkg-web'))
-          .find((candidate) => existsSync(candidate))
-        : undefined
+      // Managed local proofs compile the same wasm-pack output as production
+      // into their isolated run directory. Normal developer runs keep the
+      // shape-based vendor discovery below, so no generated engine bytes need
+      // to be written into or retained by the checkout.
+      const managedPkgDir = process.env.LEAF_CAD_ENGINE_PKG_DIR
+      const pkgDir = managedPkgDir
+        ? path.resolve(managedPkgDir)
+        : existsSync(vendorRoot)
+          ? readdirSync(vendorRoot)
+            .map((name) => path.join(vendorRoot, name, 'pkg-web'))
+            .find((candidate) => existsSync(candidate))
+          : undefined
       server.middlewares.use('/engine', (req, res, next) => {
         if (!pkgDir) { next(); return }
         // The pkg is built with --out-name engine (see the Dockerfile's

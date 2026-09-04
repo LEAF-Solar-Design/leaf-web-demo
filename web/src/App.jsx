@@ -1291,7 +1291,10 @@ export default function App() {
       runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
       return decision
     }
-    if (!mock && !tenant) return
+    // A resolved platform session is the authority gate. Off-auth local stacks
+    // intentionally omit the auth-only tenant echo and use config.tenant for
+    // their X-Tenant-Id stub, so `tenant` itself cannot be the live-run gate.
+    if (!mock && session.status !== 'active') return
     if (!catalogRunContextRef.current) {
       setRunErr('This workspace has no canonical drawing version to run. Import a drawing first.')
       return
@@ -1352,7 +1355,7 @@ export default function App() {
       })
     }
     return armed
-  }, [tools, mock, tenant, prepareRunParams, running, previewing, writeLocked, canRunWrite, catalogRunContext, engineDirty])
+  }, [tools, mock, session.status, prepareRunParams, running, previewing, writeLocked, canRunWrite, catalogRunContext, engineDirty])
   catalogUiRef.current = { armDecision, startAgentTurn, running }
 
   const onRequestCatalogRun = useCallback((tool, params, rationale = null, source = 'catalog') => {
