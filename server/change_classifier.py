@@ -15,6 +15,40 @@ still ``full-relay``; a fold whose commit is refused downstream was still
 ``fold``. Read every ``lands_in`` value as "the ladder for this shape", and
 never as an ETA the platform owes anybody.
 
+WHICH REPOSITORY (REQUIRED, NOT INFERRED)
+-----------------------------------------
+``repo`` is a REQUIRED keyword, and the reason is a real collision rather than
+ceremony. Two different repositories are addressed by the same-looking path
+strings: the TENANT repository, whose mutability vocabulary lives in
+``platform_release_policy.json`` (``tools/**`` tenant_owned, ``config/**``
+slushy, ``.github/workflows/**`` and the lockfiles frozen), and THIS platform
+repository, whose delivery ladder is ``web/`` / ``server/`` / ``platform/`` /
+migrations. They genuinely overlap: ``leaf-web-demo`` has a real tracked
+top-level ``tools/`` directory, so ``tools/skills-bundle/build.mjs`` is a
+platform build input AND matches the tenant ``tools/**`` fold rule. A single
+flat path space answering both would have called that change ``fold`` /
+``seconds`` -- a change that needs the image build and the relay, advertised as
+landing with no deploy. That is the one OPTIMISTIC error the worst-rank-wins
+design exists to prevent, so the discriminator is required and unguessable:
+
+``repo="tenant"``    the tenant repository. ONLY the mutability vocabulary
+                     applies. A tenant artifact folds; a frozen path and a path
+                     no tenant rule claims are both ``denied``, because a tenant
+                     cannot land either.
+``repo="platform"``  this repository. ONLY the delivery ladder applies, and the
+                     tenant vocabulary is never consulted. ``web/``-only rides
+                     the prewarm relay; EVERY other structurally-sound path
+                     rides the full relay, because the image build carries the
+                     whole tree. That is pessimistic on purpose (a docs-only
+                     change does not really need a relay), and pessimism is the
+                     side this module already commits to. In the platform repo
+                     ``denied`` therefore means one thing only: the path is
+                     malformed.
+
+An absent or unknown ``repo`` raises rather than defaulting. A default would be
+a guess about which namespace the caller meant, and the collision above is
+exactly where a guess goes optimistic.
+
 THE LADDER
 ----------
 ``fold``                every changed path is a tenant-repository artifact the
@@ -50,8 +84,8 @@ ladder above -- all-tenant-artifact sets fold, web-only sets prewarm, anything
 touching server/platform/migrations takes the relay -- and it also answers the
 mixed sets the clauses leave open, always on the pessimistic side.
 
-THE FIRST GATE
---------------
+THE FIRST GATE (``repo="tenant"``)
+----------------------------------
 ``platform_release_policy.classify_path`` runs FIRST, over every path, before
 any ladder rule is consulted. It rejects a path that is not repository-relative
 and canonical (traversal, absolute, backslash, uppercase, non-NFC, empty
@@ -78,9 +112,16 @@ folds. A path it refuses or denies is re-checked against ``_safe_path``, which
 carries the SAFETY half of ``normalize_path`` verbatim -- repository-relative,
 forward slashes, NFC, no empty segment, no ``.``/``..``, no control bytes --
 and drops only the lowercase convention. A path that fails THAT is genuinely
-malformed and is ``denied`` on the spot. A path that passes it is simply not
-tenant-proposable, so the delivery ladder classifies it; if no delivery surface
-claims it either, ``denied`` is the real answer and its reason names the path.
+malformed and is ``denied`` for the structural reason. A path that passes it is
+simply not tenant-proposable, which in the TENANT repository is still
+``denied``: a tenant cannot land a change to a file no tenant rule claims. The
+``web/src/App.jsx`` and ``server/app.py`` cases the paragraph above describes
+are not tenant changes at all -- they are ``repo="platform"`` changes, and the
+delivery ladder, not the tenant vocabulary, is what classifies them.
+
+``repo="platform"`` runs ``_safe_path`` alone and then the ladder. The tenant
+policy is not consulted, which is what keeps ``tools/skills-bundle/build.mjs``
+out of the fold class it has no business in.
 
 PURITY AND I/O
 --------------
@@ -164,6 +205,12 @@ _WEB_PREFIXES = ("web/",)
 _KIND_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}[a-z0-9]$|^[a-z]$")
 KIND_MARATHON = "marathon"
 
+# The two path namespaces, named so a caller cannot pass one by accident. There
+# is deliberately no default: see WHICH REPOSITORY in the module docstring.
+REPO_TENANT = "tenant"
+REPO_PLATFORM = "platform"
+REPOS = frozenset({REPO_TENANT, REPO_PLATFORM})
+
 
 class ChangeClassifierError(ValueError):
     """A change-class request is malformed. Nothing malformed gets a class."""
@@ -173,17 +220,21 @@ def classify_change(
     paths: Sequence[str],
     kind: Optional[str] = None,
     *,
+    repo: Optional[str] = None,
     policy: Optional[PlatformReleasePolicy] = None,
     release_id: Optional[str] = None,
 ) -> dict[str, str]:
-    """Return ``{klass, reason, lands_in}`` for a change of this shape.
+    """Return ``{klass, reason, lands_in, repo}`` for a change of this shape.
 
     The answer is honest data for a capsule or a build card and NEVER a promise
     that the change will land, or land in that time -- see the module docstring.
 
-    ``policy`` and ``release_id`` are injectable so a caller that already holds
-    a loaded policy (and every test) can run this with no I/O at all.
+    ``repo`` is REQUIRED (``"tenant"`` or ``"platform"``): the two namespaces
+    collide on real paths, and defaulting would guess. ``policy`` and
+    ``release_id`` are injectable so a caller that already holds a loaded policy
+    (and every test) can run this with no I/O at all.
     """
+    repo_token = _validated_repo(repo)
     checked = _validated_paths(paths)
     kind_token = _validated_kind(kind)
 
@@ -191,40 +242,89 @@ def classify_change(
         return _result(
             KLASS_DENIED,
             "no paths were supplied, so there is nothing to classify",
+            repo_token,
         )
 
-    resolved_policy, resolved_release = _resolve_policy(policy, release_id)
+    # The tenant vocabulary is the only thing that needs the policy, so a
+    # platform classification stays completely I/O free.
+    if repo_token == REPO_TENANT:
+        resolved_policy, resolved_release = _resolve_policy(policy, release_id)
+    else:
+        resolved_policy, resolved_release = None, ""
 
-    worst = KLASS_FOLD if checked else KLASS_FLEET
-    reason = (
-        "every changed path is a tenant-repository artifact, so the next "
-        "request reads it straight from the tenant repository"
-        if checked
-        else "a marathon is many rounds of autonomous work, not one delivery"
-    )
+    # No seed class: every reason a caller reads is a REAL path's sentence, so
+    # a set can never be described by a class no path in it actually produced.
+    worst: Optional[str] = None
+    reason = ""
     for path in checked:
-        klass, why = _classify_one(path, resolved_policy, resolved_release)
-        if _RANK[klass] > _RANK[worst]:
+        klass, why = _classify_one(path, repo_token, resolved_policy, resolved_release)
+        if worst is None or _RANK[klass] > _RANK[worst]:
             worst, reason = klass, why
             if klass == KLASS_DENIED:
                 # Nothing outranks denied; stop walking the rest.
                 break
 
-    if kind_token == KIND_MARATHON and _RANK[KLASS_FLEET] > _RANK[worst]:
+    if worst is None or (kind_token == KIND_MARATHON
+                         and _RANK[KLASS_FLEET] > _RANK[worst]):
+        # `worst is None` means no paths at all, which the guard above already
+        # narrowed to the marathon case.
         worst = KLASS_FLEET
         reason = "a marathon is many rounds of autonomous work, not one delivery"
 
-    return _result(worst, reason)
+    return _result(worst, reason, repo_token)
 
 
 def _classify_one(
+    path: str, repo: str, policy: Optional[PlatformReleasePolicy], release_id: str
+) -> tuple[str, str]:
+    """One path's class and the sentence that says why, in ONE namespace."""
+    if repo == REPO_PLATFORM:
+        return _classify_platform_path(path)
+    assert policy is not None  # _resolve_policy ran for REPO_TENANT
+    return _classify_tenant_path(path, policy, release_id)
+
+
+def _classify_platform_path(path: str) -> tuple[str, str]:
+    """This repository's delivery ladder. No tenant vocabulary, ever.
+
+    Pessimistic by construction: the image build carries the whole tree, so the
+    only path that reads faster than the full relay is a ``web/``-only one the
+    prewarm relay can stage (``STAGE_SERVICES: "web"``). Everything else --
+    ``server/``, ``platform/``, a migration, and equally ``engine/``,
+    ``scripts/``, ``tools/``, ``docs/``, a lockfile, a workflow -- rides the
+    relay. Nothing here is ``denied`` except a malformed path: a real file in
+    this repository always lands somehow, and calling it "not allowed" would be
+    a lie about the changes that ship every day.
+    """
+    unsafe = _safe_path(path)
+    if unsafe is not None:
+        return (
+            KLASS_DENIED,
+            f"{path!r} is not an acceptable repository path: {unsafe}",
+        )
+    if path.startswith(_WEB_PREFIXES) and not _is_relay_path(path):
+        return (
+            KLASS_PREWARM,
+            f"{path!r} is web-only, so a reviewed PR is eligible for the "
+            f"prewarm relay's web leg",
+        )
+    return (
+        KLASS_FULL_RELAY,
+        f"{path!r} is carried by the platform image build, so it rides the "
+        f"build, dispatch, reconcile and finalize relay",
+    )
+
+
+def _classify_tenant_path(
     path: str, policy: PlatformReleasePolicy, release_id: str
 ) -> tuple[str, str]:
-    """One path's class and the sentence that says why.
+    """The tenant repository's mutability vocabulary, and nothing else.
 
     THE FIRST GATE, in order: the platform mutability policy, then the safety
-    half of its own normalizer, then the delivery ladder. Nothing reaches the
-    ladder that ``_safe_path`` has not accepted.
+    half of its own normalizer. A structurally-sound path that no tenant rule
+    claims is ``denied``, because a tenant cannot land a change to it -- that is
+    a statement about the TENANT repository and says nothing about the platform
+    surface of the same name.
     """
     try:
         mutability = platform_release_policy.classify_path(policy, release_id, path)
@@ -264,25 +364,15 @@ def _classify_one(
             f"{path!r} is not an acceptable repository path: {unsafe}",
         )
 
-    # Refused or denied by a TENANT-relative rule, but structurally sound.
-    # That is the expected answer for platform-repository code, so hand it to
-    # the delivery ladder.
-    if _is_relay_path(path):
-        return (
-            KLASS_FULL_RELAY,
-            f"{path!r} is platform code or a migration, so it rides the "
-            f"build, dispatch, reconcile and finalize relay",
-        )
-    if path.startswith(_WEB_PREFIXES):
-        return (
-            KLASS_PREWARM,
-            f"{path!r} is web-only, so a reviewed PR is eligible for the "
-            f"prewarm relay's web leg",
-        )
+    # Refused or denied by a TENANT-relative rule, but structurally sound: the
+    # tenant simply may not change this file. The delivery ladder is NOT
+    # consulted here -- a same-looking path in the platform repository is a
+    # different file, and answering for it would be the namespace merge this
+    # module's `repo` discriminator exists to prevent.
     return (
         KLASS_DENIED,
-        f"no platform mutability rule and no known delivery surface claims "
-        f"{path!r}",
+        f"no tenant-repository mutability rule claims {path!r}, so no tenant "
+        f"change to it can land",
     )
 
 
@@ -380,6 +470,18 @@ def _validated_paths(paths: Any) -> tuple[str, ...]:
     return tuple(out)
 
 
+def _validated_repo(repo: Any) -> str:
+    """The namespace, REQUIRED. Absent is a refusal, never a default."""
+    if repo is None:
+        raise ChangeClassifierError(
+            f"repo is required and must be one of {sorted(REPOS)}: the tenant "
+            f"and platform repositories share path shapes, so it cannot be guessed"
+        )
+    if not isinstance(repo, str) or repo not in REPOS:
+        raise ChangeClassifierError(f"repo must be one of {sorted(REPOS)}")
+    return repo
+
+
 def _validated_kind(kind: Any) -> Optional[str]:
     if kind is None:
         return None
@@ -393,8 +495,10 @@ def _validated_kind(kind: Any) -> Optional[str]:
     return token
 
 
-def _result(klass: str, reason: str) -> dict[str, str]:
-    return {"klass": klass, "reason": reason, "lands_in": LANDS_IN[klass]}
+def _result(klass: str, reason: str, repo: str) -> dict[str, str]:
+    # `repo` rides the answer so a rendered class can never be read against the
+    # wrong namespace: the same path string means different things in each.
+    return {"klass": klass, "reason": reason, "lands_in": LANDS_IN[klass], "repo": repo}
 
 
 __all__ = [
@@ -408,5 +512,8 @@ __all__ = [
     "LANDS_IN",
     "MAX_PATHS",
     "MAX_PATH_LENGTH",
+    "REPOS",
+    "REPO_PLATFORM",
+    "REPO_TENANT",
     "classify_change",
 ]

@@ -1902,8 +1902,14 @@ class CustomizationService:
         if not changed:
             return None
         try:
+            # repo=TENANT, always: `changed` is the staged TENANT change set,
+            # validated against the tenant repository's own mutability policy a
+            # few lines up. Handing these paths to the platform ladder would
+            # classify a tenant tools/** edit as an image build.
             return change_classifier.classify_change(
-                list(changed), None, release_id=change.desired_platform_release
+                list(changed), None,
+                repo=change_classifier.REPO_TENANT,
+                release_id=change.desired_platform_release,
             )
         except (change_classifier.ChangeClassifierError, PlatformReleasePolicyError):
             # Decoration must never turn a valid stage receipt into an error.

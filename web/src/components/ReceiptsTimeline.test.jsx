@@ -109,6 +109,20 @@ describe('ReceiptsTimeline honest states', () => {
     expect(screen.queryByTestId('receipts-empty')).toBeNull()
   })
 
+  it('says a source was skipped for load rather than calling it empty', () => {
+    // The server refuses over its inflight cap instead of holding a slot. That
+    // is "we did not look", never "nothing happened".
+    render(
+      <ReceiptsTimeline
+        rows={[]}
+        unavailable={[{ source: 'github-artifacts', reason: 'source_busy', detail: '' }]}
+      />,
+    )
+    expect(screen.getByTestId('receipts-unavailable').textContent)
+      .toContain('already in flight')
+    expect(screen.queryByTestId('receipts-empty')).toBeNull()
+  })
+
   it('does not claim emptiness while a read is still in flight', () => {
     render(<ReceiptsTimeline rows={[]} unavailable={[]} loading />)
     expect(screen.getByTestId('receipts-loading')).toBeTruthy()

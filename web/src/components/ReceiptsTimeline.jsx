@@ -29,6 +29,14 @@
  * Every field is treated as untrusted text: rows originate in workflow
  * artifacts and a receipt file, so nothing here is rendered as markup and the
  * only link rendered is an http(s) URL that passed `safeHref`.
+ *
+ * What a row MEANS is decided server-side, not here. A "Gate proof" row only
+ * reaches this component after `receipts_read` has checked that the artifact is
+ * un-expired, was minted by a run of this repository (not a fork's), and came
+ * from an allowlisted minting workflow; the row's own summary names that
+ * workflow. This component never upgrades a row's status, and there is no
+ * "unverified" state to render, because an unverified artifact never becomes a
+ * row at all.
  */
 
 const KIND_LABELS = {
@@ -43,6 +51,7 @@ const REASON_SENTENCES = {
   source_unavailable: 'is not configured on this deployment, so it was not read',
   source_unreachable: 'did not answer, so its receipts are not shown',
   receipt_unreadable: 'answered with something this reader could not parse',
+  source_busy: 'was not read this time because too many reads were already in flight',
 }
 
 /** A short commit for display. Never pads, never invents, never truncates a
