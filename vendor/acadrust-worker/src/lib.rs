@@ -80,7 +80,7 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 // ---------------------------------------------------------------------------
-// Card F-3 (editing surface engine leg). Everything below is LEAF wrapper
+// Card F-3 (editing surface engine leg). Everything below is Leaf Automation wrapper
 // code: the crate stays unmodified and rev-pinned (the license review's
 // tripwire), and every mutation goes through the crate's own public surface
 // (entities_mut(), common_mut(), the public vertex Vecs, add_entity()).

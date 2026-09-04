@@ -1,5 +1,5 @@
 {
-  "_comment": "W4e icons8 manifest: every cockpit icon key -> the icons8 search term that resolves it in ONE style. web/scripts/fetch_icons8.mjs resolves each key through the icons8 API through the icons8 MCP (mcp.icons8.com, Bearer key; the REST publicApi refuses Basic-plan keys) with the operator's key (credential store, never argv), pins the resolved icon id here on --pin, and writes public/icons8-sprite.svg + assets/icons8/built.json. Licence: icons8 paid account of the LEAF operator, attribution-free per the icons8 Pro terms; the sprite carries the platform name and the pinned ids as its receipt.",
+  "_comment": "W4e icons8 manifest: every cockpit icon key -> the icons8 search term that resolves it in ONE style. web/scripts/fetch_icons8.mjs resolves each key through the icons8 API through the icons8 MCP (mcp.icons8.com, Bearer key; the REST publicApi refuses Basic-plan keys) with the operator's key (credential store, never argv), pins the resolved icon id here on --pin, and writes public/icons8-sprite.svg + assets/icons8/built.json. Licence: icons8 paid account of the Leaf Automation operator, attribution-free per the icons8 Pro terms; the sprite carries the platform name and the pinned ids as its receipt.",
   "platform": "fluent-systems-regular",
   "icons": {
     "new-file": {
