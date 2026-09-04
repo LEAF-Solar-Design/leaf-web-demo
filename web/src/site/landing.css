@@ -896,6 +896,58 @@
   --font-sans: 'Inter Tight', 'Inter', system-ui, sans-serif;
   --font-display: 'Inter Tight', 'Inter', system-ui, sans-serif;
   --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  /* ---- slice 13b: the --leaf-* namespace, dark-default scope ----
+     Every --leaf-* name below is a var() reference to a token already
+     re-pinned above in this same .stage-root block, so it carries no value
+     of its own: introducing the namespace moves nothing on screen. This is
+     the "dark default" scope; cockpit.css declares a sibling `cad-skin`
+     scope for the reference CAD application's own metrics, and .leaf-light
+     below is reserved for the design session's light values. */
+  --leaf-background: var(--background);
+  --leaf-foreground: var(--foreground);
+  --leaf-card: var(--card);
+  --leaf-card-grad: var(--card-grad);
+  --leaf-border: var(--border);
+  --leaf-primary: var(--primary);
+  --leaf-primary-hover: var(--primary-hover);
+  --leaf-on-accent: var(--on-accent);
+  --leaf-muted: var(--muted);
+  --leaf-muted-2: var(--muted-2);
+  --leaf-status-success: var(--status-success);
+  --leaf-status-warning: var(--status-warning);
+  --leaf-status-danger: var(--status-danger);
+  --leaf-status-info: var(--status-info);
+  --leaf-bar-well: var(--bar-well);
+  --leaf-bar-chip: var(--bar-chip);
+  --leaf-bar-focus-ring: var(--bar-focus-ring);
+  --leaf-keycap: var(--keycap);
+  --leaf-hairline: var(--hairline);
+  --leaf-rail: var(--rail);
+  --leaf-input: var(--input);
+  --leaf-accent-tint: var(--accent-tint);
+  --leaf-accent-tint-hover: var(--accent-tint-hover);
+  --leaf-warn-tint: var(--warn-tint);
+  --leaf-danger-tint: var(--danger-tint);
+  --leaf-sheet: var(--sheet);
+  --leaf-code-bg: var(--code-bg);
+  --leaf-grid-line: var(--grid-line);
+  --leaf-rule-strong: var(--rule-strong);
+  --leaf-hover-tint: var(--hover-tint);
+  --leaf-hover-tint-strong: var(--hover-tint-strong);
+  --leaf-shadow-pop: var(--shadow-pop);
+  --leaf-font-label: var(--font-label);
+  --leaf-font-sans: var(--font-sans);
+  --leaf-font-display: var(--font-display);
+  --leaf-font-mono: var(--font-mono);
+}
+
+/* .leaf-light: reserved, wired to nothing yet. The design session has not
+   ratified light-mode values for this namespace; when it does, they land
+   here through the sync lane. Declaring no values now is deliberate — an
+   empty scope cannot repaint anything it is applied to, so adopting the
+   class ahead of the ratified values is inert rather than a half theme. */
+.leaf-light {
 }
 
 /* usage ledger (showcase #2): the cap bar rides inside the trust row */
