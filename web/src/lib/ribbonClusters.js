@@ -56,12 +56,13 @@ export function catalogClusters(families, {
   writeLocked = false,
   writeEntitled = true,
   writeLockNote = '',
+  engineDirty = false,
 } = {}) {
   const list = Array.isArray(families) ? families : []
   if (list.length === 0) {
     return [{ id: 'tools', label: 'Tools', kind: 'group', note: 'No tools for this surface yet.', tools: [] }]
   }
-  const gate = { onRequestRun, running, previewing, writeLocked, writeEntitled, writeLockNote }
+  const gate = { onRequestRun, running, previewing, writeLocked, writeEntitled, writeLockNote, engineDirty }
   // Tools that name their own tab leave this cluster (they are built by
   // catalogTabClusters instead); a family whose tools ALL moved leaves no
   // empty panel behind.
@@ -95,9 +96,10 @@ export function catalogTabClusters(families, {
   writeLocked = false,
   writeEntitled = true,
   writeLockNote = '',
+  engineDirty = false,
 } = {}) {
   const list = Array.isArray(families) ? families : []
-  const gate = { onRequestRun, running, previewing, writeLocked, writeEntitled, writeLockNote }
+  const gate = { onRequestRun, running, previewing, writeLocked, writeEntitled, writeLockNote, engineDirty }
   const byTab = {}
   for (const fam of list) {
     // One pass per family, bucketed by tab: no per-tab rescan of the catalog.
@@ -121,7 +123,7 @@ export function catalogTabClusters(families, {
 
 /** One family cluster over an explicit tool list. The single tool projection. */
 function familyCluster(fam, tools, gate, onOpenFamily) {
-  const { onRequestRun, running, previewing, writeLocked, writeEntitled, writeLockNote } = gate
+  const { onRequestRun, running, previewing, writeLocked, writeEntitled, writeLockNote, engineDirty } = gate
   return {
     id: fam.family_id,
     label: fam.label,
@@ -135,6 +137,7 @@ function familyCluster(fam, tools, gate, onOpenFamily) {
       const isWrite = isWriteTool(tool)
       const locked = !!writeLocked && isWrite
       const entBlocked = isWrite && !writeEntitled
+      const dirtyBlocked = isWrite && !!engineDirty
       const reason = running
         ? REASONS.running
         : previewing
@@ -143,7 +146,9 @@ function familyCluster(fam, tools, gate, onOpenFamily) {
             ? (writeLockNote || REASONS.writeLocked)
             : entBlocked
               ? REASONS.writeUnentitled
-              : ''
+              : dirtyBlocked
+                ? REASONS.unsavedEngineEdits
+                : ''
       return {
         id: tool.name,
         label: tool.name,
@@ -153,7 +158,7 @@ function familyCluster(fam, tools, gate, onOpenFamily) {
         size: toolPlacementSize(tool),
         title: tool.description || tool.name,
         write: isWrite,
-        disabled: !!running || !!previewing || locked || entBlocked,
+        disabled: !!running || !!previewing || locked || entBlocked || dirtyBlocked,
         reason,
         onClick: () => onRequestRun(tool, null, RIBBON_RATIONALE, 'ribbon'),
       }

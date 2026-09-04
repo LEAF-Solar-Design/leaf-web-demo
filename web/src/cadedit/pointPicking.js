@@ -23,6 +23,14 @@ export const PICK_SEQUENCES = Object.freeze({
   move: [{ kind: 'base' }, { kind: 'delta', keys: ['dx', 'dy'] }],
   moveVertex: [{ kind: 'base' }, { kind: 'delta', keys: ['dx', 'dy'] }],
   addVertex: [{ kind: 'base' }, { kind: 'delta', keys: ['dx', 'dy'] }],
+  // W4g-4: COPY picks like MOVE (base, then the displacement); MIRROR picks
+  // its line's two points; ROTATE and SCALE pick the base point (the angle
+  // and the factor are typed); RECTANG picks two corners.
+  copy: [{ kind: 'base' }, { kind: 'delta', keys: ['dx', 'dy'] }],
+  mirror: [{ kind: 'point', keys: ['x1', 'y1'] }, { kind: 'point', keys: ['x2', 'y2'] }],
+  rotate: [{ kind: 'point', keys: ['cx', 'cy'] }],
+  scale: [{ kind: 'point', keys: ['cx', 'cy'] }],
+  createRectangle: [{ kind: 'point', keys: ['x', 'y'] }, { kind: 'point', keys: ['x2', 'y2'] }],
 })
 
 /**
@@ -223,9 +231,14 @@ export function ghostFor(state, x, y) {
     if (!picked.length) return null
     return { pts: [...picked, [x, y]], closed: false }
   }
-  if (op === 'createLine') {
+  if (op === 'createLine' || op === 'mirror') {
     if (!last || picked.length >= 2) return null
     return { pts: [last, [x, y]], closed: false }
+  }
+  // W4g-4: the rectangle from the first corner to the cursor.
+  if (op === 'createRectangle') {
+    if (!last || picked.length >= 2) return null
+    return { pts: [last, [x, last[1]], [x, y], [last[0], y]], closed: true }
   }
   if (base) return { pts: [base, [x, y]], closed: false }
   return null

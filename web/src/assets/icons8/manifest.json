@@ -296,6 +296,9 @@
       "term": "orthogonal view",
       "id": "QF5IzJ0wwINJ",
       "name": "orthogonal-view"
+    },
+    "explode": {
+      "term": "explode"
     }
   }
 }

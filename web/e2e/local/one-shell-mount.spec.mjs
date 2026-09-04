@@ -630,18 +630,28 @@ test.describe('route matrix, rail ON', () => {
       await page.getByLabel('ribbon y2').press('Enter')
       await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBefore + 1), { timeout: 60_000 })
       await page.keyboard.press('Escape')
+      // W4g-2 (one head): with the edit unsaved, every catalog WRITE tool on
+      // the ribbon is disabled with the reason (a run would move the server
+      // head under the browser copy); read tools stay live. The stack's
+      // catalog carries at least one write tool on the Manage families.
+      await page.getByRole('tab', { name: 'Manage' }).click()
+      const dirtyBlocked = ribbon.locator('.ribbon-tool[aria-label*="the browser engine holds unsaved edits"]')
+      await expect(dirtyBlocked.first()).toBeAttached({ timeout: 10_000 })
+      test.info().annotations.push({ type: 'one-head', description: `${await dirtyBlocked.count()} write tools held while dirty` })
       // The edit is dirty and the project target exists, so Save is live
       // (the write-back itself is proven by tests/test_save_edited_version.py
       // and the acceptance prover; saving HERE would add a version to the
       // stack's shared demo drawing and move the head under the specs that
       // count versions from a known start). The engine's own Undo returns
-      // the copy to clean instead.
+      // the copy to clean instead, and the write tools come back with it.
       const saveBtn = ribbon.locator('[data-tool="save-version"]')
       await page.getByRole('tab', { name: 'Insert' }).click()
       await expect(saveBtn).toBeEnabled()
       await ribbon.locator('[data-tool="undo-edit"]').click()
       await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBefore), { timeout: 60_000 })
       await expect(saveBtn).toBeDisabled()
+      await page.getByRole('tab', { name: 'Manage' }).click()
+      await expect(dirtyBlocked).toHaveCount(0)
       await page.getByRole('tab', { name: 'Draw' }).click()
     } else {
       await expect(modify.locator('.ribbon-note')).toHaveText(/no drawing in the browser engine yet|could not be opened in the browser engine/)
@@ -652,10 +662,12 @@ test.describe('route matrix, rail ON', () => {
     // other six Modify tools are present and honestly off ("not in the
     // browser engine yet"); the engine's own four and six carry the
     // document reason. 4 + 3 and 6 + 6: the reference's grid.
+    // W4g-4: RECTANG joined the Draw group (5 real + 2 off) and COPY, MIRROR,
+    // ROTATE, SCALE, EXPLODE joined Modify (11 real + trim/extend off).
     await expect(draw.locator('.ribbon-tool')).toHaveCount(7)
-    await expect(draw.locator('[data-tool^="draw:create"]')).toHaveCount(4)
+    await expect(draw.locator('[data-tool^="draw:create"]')).toHaveCount(5)
     const modifyTools = modify.locator('.ribbon-tool')
-    await expect(modifyTools).toHaveCount(12)
+    await expect(modifyTools).toHaveCount(13)
     let modifyReal = 0
     for (const btn of await modifyTools.all()) {
       await expect(btn).toBeDisabled()
@@ -663,7 +675,7 @@ test.describe('route matrix, rail ON', () => {
       if (/\(unavailable: (select an entity in the drawing|no drawing in the browser engine yet|opening .*|the drawing could not be opened.*)\)/.test(name)) modifyReal += 1
       else expect(name).toContain('(unavailable: not in the browser engine yet)')
     }
-    expect(modifyReal).toBe(6)
+    expect(modifyReal).toBe(11)
 
     // View drives the viewer: fit is live with a drawing loaded (View tab).
     await page.getByRole('tab', { name: 'View' }).click()
@@ -990,6 +1002,36 @@ test.describe('route matrix, rail ON', () => {
     await page.keyboard.press('Escape')
     await expect(page.locator('.workspace-card[data-cockpit-picking="1"]')).toHaveCount(0)
     expect(await underCard()).toEqual({ ground: false, card: true })
+
+    // W4g-4: the reference's Modify verbs on the REAL engine. COPY of the
+    // last drawn line lands a new entity (+1) and selects it; ROTATE about a
+    // base point keeps the count; EXPLODE refuses a LINE with the engine's
+    // own code, and turns the imported 3-vertex open polyline into its two
+    // segments (-1 +2).
+    await page.getByRole('tab', { name: 'Draw' }).click()
+    await page.getByRole('radio').last().check()
+    const countBeforeVerbs = Number(await page.getByTestId('cad-edit-entity-count').textContent())
+    await ribbon.locator('[data-tool="modify:copy"]').click()
+    await page.getByLabel('ribbon dx', { exact: true }).fill('5')
+    await page.getByLabel('ribbon dy', { exact: true }).fill('5')
+    await page.getByLabel('ribbon dy', { exact: true }).press('Enter')
+    await expect(page.getByRole('status').filter({ hasText: /copy applied: entity \d+ drawn/ })).toHaveCount(1, { timeout: 60_000 })
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeVerbs + 1))
+    await ribbon.locator('[data-tool="modify:rotate"]').click()
+    await page.getByLabel('ribbon cx', { exact: true }).fill('0')
+    await page.getByLabel('ribbon cy', { exact: true }).fill('0')
+    await page.getByLabel('ribbon angle', { exact: true }).fill('90')
+    await page.getByLabel('ribbon angle', { exact: true }).press('Enter')
+    await expect(page.getByRole('status').filter({ hasText: /rotate applied/ })).toHaveCount(1, { timeout: 60_000 })
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeVerbs + 1))
+    await ribbon.locator('[data-tool="modify:explode"]').click()
+    await expect(page.getByRole('status').filter({ hasText: /Edit refused \(explode\): entity_not_explodable/ })).toHaveCount(1, { timeout: 60_000 })
+    await page.getByRole('radio').first().check()
+    await ribbon.locator('[data-tool="modify:explode"]').click()
+    await expect(page.getByRole('status').filter({ hasText: /explode applied: entity \d+ drawn/ })).toHaveCount(1, { timeout: 60_000 })
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeVerbs + 2))
+    await page.keyboard.press('Escape')
+
     // A sentence is still a sentence: it routes, it never arms. LAST in the
     // row on purpose: while its route decision is shown the Command bar's
     // Enter belongs to the decision strip, so a word typed after it would be

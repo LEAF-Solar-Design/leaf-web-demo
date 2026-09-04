@@ -36,7 +36,7 @@
  * tab remounts. Bounded the same way (a group from the fixed pair and a
  * short op token, or null), and it disarms itself when the document goes.
  */
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 
 import { useDrawingIdentityOptional } from '../drawing/DrawingIdentityProvider.jsx'
 
@@ -62,6 +62,9 @@ export const DEFAULT_EDIT_INPUTS = Object.freeze({
   // angle span in degrees, a point list, and the closed flag as a string
   // (every input is a string; the store parses and refuses).
   x: '0', y: '0', x2: '100', y2: '0', r: '10', a0: '0', a1: '90', pts: '0,0 100,0 100,50', closed: 'false',
+  // W4g-4 Modify verbs: the mirror line's two points and the keep flag, the
+  // base point, the rotation angle (degrees) and the scale factor.
+  x1: '0', y1: '0', keep: 'true', cx: '0', cy: '0', deg: '90', factor: '2',
 })
 
 const INPUT_KEYS = new Set(Object.keys(DEFAULT_EDIT_INPUTS))
@@ -100,6 +103,11 @@ export default function EngineSessionProvider({
   createWorker = defaultCreateWorker,
   saveTarget = null,
   onSaved = null,
+  // W4g-2 (one head): the host learns when the engine holds edits nobody
+  // saved (session.dirty), so a catalog write tool that would move the
+  // server head under them can be refused with the reason. Called only on
+  // a change, with a boolean.
+  onDirtyChange = null,
   children,
 }) {
   // No identity provider means no drawing identity, which is a real state
@@ -182,6 +190,13 @@ export default function EngineSessionProvider({
         : Object.freeze({ state: next.state, sentence, version, head, source })
     ))
   }, [])
+
+  const dirty = session.dirty === true
+  const onDirtyChangeRef = useRef(onDirtyChange)
+  onDirtyChangeRef.current = onDirtyChange
+  useEffect(() => { onDirtyChangeRef.current?.(dirty) }, [dirty])
+  // Unmount: the host must not keep a stale "dirty" over a provider that is gone.
+  useEffect(() => () => { onDirtyChangeRef.current?.(false) }, [])
 
   const canSave = saveTarget !== null && saveTarget !== undefined
   const value = useMemo(

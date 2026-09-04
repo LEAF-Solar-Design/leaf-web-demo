@@ -14,7 +14,7 @@ import DraftingRibbon from './site/DraftingRibbon.jsx'
 import PropertiesDock, { drawingExtents } from './site/PropertiesDock.jsx'
 import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
 import { ladderListener, slashCommandHandlers } from './lib/actionRegistry.js'
-import { authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
+import { REASONS, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
 import { resolvePublishedCatalogTool } from './site/publishedCatalogTool.js'
 import { entityGeometry } from './lib/entityMetrics.js'
 import { loadDemoSolve } from './site/intakeCache.js'
@@ -944,6 +944,11 @@ export default function App() {
   }, [])
 
   const completedVersionRef = useRef(null)
+  // W4g-2 (one head): true while the browser engine holds edits nobody
+  // saved (EngineSessionProvider reports the change). A catalog write tool
+  // would move the server head under them, so it is refused with the reason
+  // until the drafter saves or discards.
+  const [engineDirty, setEngineDirty] = useState(false)
   const {
     jobs,
     currentJobId,
@@ -1275,6 +1280,13 @@ export default function App() {
       return
     }
     if (running || previewing || (isWrite && (writeLocked || !canRunWrite))) return
+    // W4g-2 (one head): every run path (ribbon, rail, slash, the natural-
+    // language route, the tour) arms through here, so this is the one place
+    // a write tool is refused while the browser engine holds unsaved edits.
+    if (isWrite && engineDirty) {
+      setRunErr(`${catalogTool.name} not run: ${REASONS.unsavedEngineEdits}.`)
+      return
+    }
     const prepared = prepareRunParams(catalogTool, decision.params)
     const staged = stageRunIntent(runIntentStateRef.current, {
       intentId: `${runIntentSessionRef.current}:${++runIntentSeqRef.current}`,
@@ -1313,7 +1325,7 @@ export default function App() {
       })
     }
     return armed
-  }, [tools, mock, tenant, prepareRunParams, running, previewing, writeLocked, canRunWrite, catalogRunContext])
+  }, [tools, mock, tenant, prepareRunParams, running, previewing, writeLocked, canRunWrite, catalogRunContext, engineDirty])
   catalogUiRef.current = { armDecision, startAgentTurn, running }
 
   const onRequestCatalogRun = useCallback((tool, params, rationale = null, source = 'catalog') => {
@@ -2452,6 +2464,7 @@ export default function App() {
       previewing: !!previewing,
       writeLocked,
       writeEntitled: canRunWrite,
+      engineDirty,
     })
     const author = authorCluster({
       // The plan's own answer, then the folded entitlement-AND-availability
@@ -2484,6 +2497,7 @@ export default function App() {
       previewing: !!previewing,
       writeLocked,
       writeEntitled: canRunWrite,
+      engineDirty,
     })
     const [annotation, block, properties, groups, clipboard] = referencePanels()
     // The reference's Draw tab: Draw, Modify (engine children, rendered
@@ -2597,7 +2611,7 @@ export default function App() {
     }
   }
   const engineScope = (node) => (ENV_CAD_EDIT ? (
-    <EngineSessionProvider saveTarget={engineSaveTarget} onSaved={onEngineSaved}>{node}</EngineSessionProvider>
+    <EngineSessionProvider saveTarget={engineSaveTarget} onSaved={onEngineSaved} onDirtyChange={setEngineDirty}>{node}</EngineSessionProvider>
   ) : node)
 
   return (

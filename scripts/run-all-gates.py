@@ -588,6 +588,16 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_appbundle_activity_spec.py"), 7),
         Suite("server-dxf-intake-lines-text", "server tests/test_dxf_intake_lines_text.py",
               "pytest", SERVER, _py_pytest("tests/test_dxf_intake_lines_text.py"), 4),
+        # W4g engine reach (2026-09-04): the intake -> DXF synthesizer (the
+        # pinned inverse of dxf_intake), the drawing DXF route with its three
+        # fail-closed legs, and the browser-edited version write-back (card
+        # F-3, which had no row until this slice). Dependency-free, no skips.
+        Suite("server-intake-dxf", "server tests/test_intake_dxf.py", "pytest", SERVER,
+              _py_pytest("tests/test_intake_dxf.py"), 19),
+        Suite("server-drawing-dxf-route", "server tests/test_drawing_dxf_route.py", "pytest", SERVER,
+              _py_pytest("tests/test_drawing_dxf_route.py"), 10),
+        Suite("server-save-edited-version", "server tests/test_save_edited_version.py", "pytest", SERVER,
+              _py_pytest("tests/test_save_edited_version.py"), 9),
         # issue #29 red-suite registry (https://github.com/Evan-Haug/leaf-web-demo/issues/29):
         # all six now fixed-then-registered. test_sessions_e2e's measured "7 errors"
         # were purely its module `harness` fixture failing `npm run build` in a

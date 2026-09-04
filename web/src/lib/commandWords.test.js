@@ -26,7 +26,8 @@ describe('commandWords (W4f slice B): typed CAD words on the command line', () =
     expect(parseDrawingCommand('')).toBeNull()
     expect(parseDrawingCommand('   ')).toBeNull()
     expect(parseDrawingCommand('>')).toBeNull()
-    expect(parseDrawingCommand('rectangle')).toBeNull()
+    // W4g-4 made `rectangle` a real word (RECTANG); `triangle` is the unknown one now.
+    expect(parseDrawingCommand('triangle')).toBeNull()
     expect(parseDrawingCommand('lines')).toBeNull()
     expect(parseDrawingCommand(null)).toBeNull()
     expect(parseDrawingCommand(42)).toBeNull()

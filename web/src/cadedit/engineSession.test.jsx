@@ -602,6 +602,7 @@ describe('draw dispatch (W4d Draw group): creation needs no selection, and the s
   })
 
   it('the create op list is the closed set the worker dispatches on', () => {
-    expect([...CREATE_OPS]).toEqual(['createLine', 'createCircle', 'createArc', 'createPolyline'])
+    // W4g-4: RECTANG is a create the STORE lowers to createPolyline before the post.
+    expect([...CREATE_OPS]).toEqual(['createLine', 'createCircle', 'createArc', 'createPolyline', 'createRectangle'])
   })
 })

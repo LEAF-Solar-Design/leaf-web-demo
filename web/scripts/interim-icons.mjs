@@ -5,6 +5,10 @@
 // Each value is the symbol's inner markup; the builder wraps it in the shared
 // stroke group and the 0 0 24 24 viewBox.
 export const INTERIM_ICONS = Object.freeze({
+  // W4g-4 EXPLODE: a polyline bursting into its segments (drawn here until
+  // the icons8 fetch pins one; fetch_icons8.mjs --merge-interim adds it to
+  // the served sprite beside the icons8 set).
+  explode: '<path d="M8 15l3-6 3 4 3-5"/><path d="M4 8l2 2M20 5l-2 2M3 17l2-1M21 19l-2-1M12 3v2M12 19v2"/>',
   'new-file': '<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/><path d="M12 11v6M9 14h6"/>',
   open: '<path d="M3 6h6l2 2h10v11H3z"/><path d="M3 10h18"/>',
   save: '<path d="M4 4h13l3 3v13H4z"/><path d="M8 4v5h7V4"/><path d="M8 20v-6h8v6"/>',

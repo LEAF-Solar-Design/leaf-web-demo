@@ -32,14 +32,14 @@ function fileOf(name = 'hand.dxf') {
 
 let workers
 let handle
-function mount({ drawingId = 'rooftop_demo', enabled = true, headKey = 1, fetchDxf } = {}) {
+function mount({ drawingId = 'rooftop_demo', enabled = true, headKey = 1, fetchDxf, onDirtyChange = null } = {}) {
   workers = []
   handle = {}
   const createWorker = vi.fn(() => { const w = new ScriptedWorker(); workers.push(w); return w })
   function Probe() { handle.context = useEngineSessionContext(); return null }
   function Tree(props) {
     return (
-      <EngineSessionProvider createWorker={createWorker}>
+      <EngineSessionProvider createWorker={createWorker} onDirtyChange={props.onDirtyChange}>
         <Probe />
         <EngineHeadOpener drawingId={props.drawingId} enabled={props.enabled} headKey={props.headKey} fetchDxf={props.fetchDxf} />
         <DraftingRibbon clusters={[]}>
@@ -49,8 +49,8 @@ function mount({ drawingId = 'rooftop_demo', enabled = true, headKey = 1, fetchD
       </EngineSessionProvider>
     )
   }
-  const utils = render(<Tree drawingId={drawingId} enabled={enabled} headKey={headKey} fetchDxf={fetchDxf} />)
-  handle.rerender = (next) => utils.rerender(<Tree drawingId={drawingId} enabled={enabled} headKey={headKey} fetchDxf={fetchDxf} {...next} />)
+  const utils = render(<Tree drawingId={drawingId} enabled={enabled} headKey={headKey} fetchDxf={fetchDxf} onDirtyChange={onDirtyChange} />)
+  handle.rerender = (next) => utils.rerender(<Tree drawingId={drawingId} enabled={enabled} headKey={headKey} fetchDxf={fetchDxf} onDirtyChange={onDirtyChange} {...next} />)
   handle.unmount = utils.unmount
   return handle
 }
@@ -166,6 +166,25 @@ describe('EngineHeadOpener', () => {
     expect(studio.context.reach.state).toBe(REACH_STATE.STALE)
     expect(studio.context.session.documentId).toBe(headDocumentId('rooftop_demo', 2))
     expect(studio.context.session.entityCount).toBe(2)
+  })
+
+  it('W4g-2: the provider reports dirty to the host on change only (edit -> true, save -> false, unmount -> false)', async () => {
+    const onDirtyChange = vi.fn()
+    const fetchDxf = vi.fn(async () => answer(1))
+    const studio = mount({ fetchDxf, onDirtyChange })
+    await settle()
+    await waitFor(() => expect(workers.length).toBe(1))
+    loaded(workers[0], headDocumentId('rooftop_demo', 1))
+    expect(onDirtyChange).toHaveBeenLastCalledWith(false)
+    const calls = onDirtyChange.mock.calls.length
+    workers[0].emit({ type: 'editApplied', op: 'createLine', ok: true, entities: [LINE, { ...LINE, id: 'e2' }], entityCount: 2, bytes: new Uint8Array([48, 10]), byteLength: 2 })
+    expect(onDirtyChange).toHaveBeenLastCalledWith(true)
+    expect(onDirtyChange.mock.calls.length).toBe(calls + 1)
+    // A second edit is still dirty: no second call.
+    workers[0].emit({ type: 'editApplied', op: 'createLine', ok: true, entities: [LINE, { ...LINE, id: 'e2' }, { ...LINE, id: 'e3' }], entityCount: 3, bytes: new Uint8Array([48, 11]), byteLength: 2 })
+    expect(onDirtyChange.mock.calls.length).toBe(calls + 1)
+    studio.unmount()
+    expect(onDirtyChange).toHaveBeenLastCalledWith(false)
   })
 
   it('disabled, or without a drawing, it opens nothing and the ribbon keeps the plain reason', async () => {

@@ -90,20 +90,15 @@ const NOT_IN_ENGINE = 'not in the browser engine yet'
 // registry records now (`forGroup('draw')`), not a literal table here.
 // The reference's small Draw column, not in this engine yet.
 const DRAW_OFF = Object.freeze([
-  { id: 'draw:rectangle', label: 'Rectangle', icon: 'rectangle' },
   { id: 'draw:ellipse', label: 'Ellipse', icon: 'ellipse' },
   { id: 'draw:point', label: 'Point', icon: 'point' },
 ])
 
-// The six real entity operations the compiled engine performs are registry
-// records too (`forGroup('modify')`).
-// The reference's other six Modify tools, not in this engine yet: with the
-// six real ones they fill the reference's 3x4 grid.
+// The entity operations the compiled engine performs are registry records
+// too (`forGroup('modify')`): the six original ones and, since W4g-4, COPY,
+// MIRROR, ROTATE, SCALE and EXPLODE. The reference's Modify tools this engine
+// still lacks (the intersection verbs, W4g-6) stay honest placeholders.
 const MODIFY_OFF = Object.freeze([
-  { id: 'modify:copy', label: 'Copy', icon: 'copy' },
-  { id: 'modify:mirror', label: 'Mirror', icon: 'mirror' },
-  { id: 'modify:rotate', label: 'Rotate', icon: 'rotate' },
-  { id: 'modify:scale', label: 'Scale', icon: 'scale' },
   { id: 'modify:trim', label: 'Trim', icon: 'trim' },
   { id: 'modify:extend', label: 'Extend', icon: 'extend' },
 ])
@@ -141,7 +136,27 @@ export const PROMPTS = Object.freeze({
     { ask: 'Specify end angle:', fields: [['a1', 'end']] },
     { ask: 'Layer:', fields: [['layer', 'layer', 'text']] },
   ] },
+  createRectangle: { verb: 'RECTANG', steps: [
+    { ask: 'Specify first corner point:', fields: [['x', 'x'], ['y', 'y']] },
+    { ask: 'Specify other corner point:', fields: [['x2', 'x2'], ['y2', 'y2']] },
+    { ask: 'Layer:', fields: [['layer', 'layer', 'text']] },
+  ] },
   move: { verb: 'MOVE', steps: [{ ask: 'Specify displacement:', fields: [['dx', 'dx'], ['dy', 'dy']] }] },
+  // W4g-4: the reference's verbs, in its words.
+  copy: { verb: 'COPY', steps: [{ ask: 'Specify displacement:', fields: [['dx', 'dx'], ['dy', 'dy']] }] },
+  mirror: { verb: 'MIRROR', steps: [
+    { ask: 'Specify first point of mirror line:', fields: [['x1', 'x1'], ['y1', 'y1']] },
+    { ask: 'Specify second point of mirror line:', fields: [['x2', 'x2'], ['y2', 'y2']] },
+    { ask: 'Keep source:', fields: [['keep', 'keep source', 'checkbox']] },
+  ] },
+  rotate: { verb: 'ROTATE', steps: [
+    { ask: 'Specify base point:', fields: [['cx', 'cx'], ['cy', 'cy']] },
+    { ask: 'Specify rotation angle:', fields: [['deg', 'angle']] },
+  ] },
+  scale: { verb: 'SCALE', steps: [
+    { ask: 'Specify base point:', fields: [['cx', 'cx'], ['cy', 'cy']] },
+    { ask: 'Specify scale factor:', fields: [['factor', 'factor']] },
+  ] },
   moveVertex: { verb: 'MOVE VERTEX', steps: [
     { ask: 'Specify vertex:', fields: [['vertexIndex', 'vertex', 'numeric']] },
     { ask: 'Specify displacement:', fields: [['dx', 'dx'], ['dy', 'dy']] },
@@ -270,6 +285,9 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // back rather than dispatching itself.
   const engineCtx = {
     session,
+    // W4g-1b: the reach state, so a record's reason says what the panel
+    // note says while the console's own drawing is opening (or failed to).
+    reach,
     onActivate: (group, op) => {
       if (PROMPTS[op]) { toggleArmed(group, op); return }
       if (group === 'draw') create(op, inputs)

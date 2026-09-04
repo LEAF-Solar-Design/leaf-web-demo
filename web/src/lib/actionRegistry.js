@@ -84,6 +84,10 @@ export const REASONS = Object.freeze({
   nothingToUndo: 'nothing to undo',
   nothingToRedo: 'nothing to redo',
   notInEngine: 'not in the browser engine yet',
+  // W4g-2 (one head): a write tool would move the server head under a
+  // browser copy that holds edits nobody saved; the drafter decides which
+  // survives before anything runs.
+  unsavedEngineEdits: 'the browser engine holds unsaved edits: save or discard them first',
   // The publish settled in the author card but the catalog has not issued the
   // tool a digest yet, so there is nothing runnable to arm. Same sentence the
   // one honest resolver (site/publishedCatalogTool.js) fails with.
@@ -378,9 +382,11 @@ const engineOp = (group, op, label, display, icon, title, size) => ({
   gated: true,
   kbd: null,
   title: text(title),
+  // W4g-1b: the reach state rides the context so a button's reason says
+  // what the panel note says while the console's drawing is opening.
   when: group === 'draw'
-    ? (ctx) => drawReason(ctx.session)
-    : (ctx) => modifyReason(ctx.session),
+    ? (ctx) => drawReason(ctx.session, ctx.reach)
+    : (ctx) => modifyReason(ctx.session, ctx.reach),
   // Arming vs. running is the consumer's decision (a tool with operands opens
   // the command prompt; one without runs on click), so the record names the
   // one handler and passes the op.
@@ -432,14 +438,25 @@ const ACTION_LIST = [
   engineOp('draw', 'createPolyline', 'polyline', 'Polyline', 'polyline', 'Draw a polyline through the points listed (x,y pairs)', 'large'),
   engineOp('draw', 'createCircle', 'circle', 'Circle', 'circle', 'Draw a circle at x,y with radius r', 'large'),
   engineOp('draw', 'createArc', 'arc', 'Arc', 'arc', 'Draw an arc at x,y with radius r from start to end (degrees)', 'large'),
+  // W4g-4 RECTANG: two opposite corners; the store lowers it to the closed
+  // polyline the engine draws.
+  engineOp('draw', 'createRectangle', 'rectangle', 'Rectangle', 'rectangle', 'Draw a rectangle from corner x,y to corner x2,y2', 'small'),
 
-  // Modify: the six real entity operations the compiled engine performs.
+  // Modify: the entity operations the compiled engine performs.
   engineOp('modify', 'delete', 'delete', 'Delete', 'delete', 'Delete the selected entity', 'small'),
   engineOp('modify', 'move', 'move', 'Move', 'move', 'Move the selected entity by dx, dy', 'small'),
   engineOp('modify', 'moveVertex', 'move-vertex', 'Move vertex', 'move-vertex', 'Move one vertex of the selection by dx, dy', 'small'),
   engineOp('modify', 'addVertex', 'add-vertex', 'Add vertex', 'add-vertex', 'Insert a vertex after the given one, at dx, dy', 'small'),
   engineOp('modify', 'deleteVertex', 'delete-vertex', 'Delete vertex', 'delete-vertex', 'Delete one vertex of the selection', 'small'),
   engineOp('modify', 'setLayer', 'set-layer', 'Set layer', 'set-layer', 'Reassign the selection to the layer named', 'small'),
+  // W4g-4: the reference's Modify verbs the crate carries (COPY, MIRROR,
+  // ROTATE, SCALE, EXPLODE), each a real engine op with a prompt; EXPLODE
+  // takes no operands and runs on click like Delete.
+  engineOp('modify', 'copy', 'copy', 'Copy', 'copy', 'Copy the selected entity by dx, dy', 'small'),
+  engineOp('modify', 'mirror', 'mirror', 'Mirror', 'mirror', 'Mirror the selection about a line through two points', 'small'),
+  engineOp('modify', 'rotate', 'rotate', 'Rotate', 'rotate', 'Rotate the selection about a base point by an angle (degrees)', 'small'),
+  engineOp('modify', 'scale', 'scale', 'Scale', 'scale', 'Scale the selection about a base point by a factor', 'small'),
+  engineOp('modify', 'explode', 'explode', 'Explode', 'explode', 'Explode the selected polyline into its segments', 'small'),
 
   // The "/" picker's CLIENT commands. `clientAction` is the key composer.js's
   // filterRunnable gates on: a command whose handler is missing is dropped

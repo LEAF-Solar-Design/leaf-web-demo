@@ -74,7 +74,7 @@
 //! browser. The exported names and semantics are unchanged.
 
 use acadrust::entities::{Arc as ArcEntity, Circle, Entity, EntityType, Line, LwPolyline};
-use acadrust::types::{Vector2, Vector3};
+use acadrust::types::{Handle, Transform, Vector2, Vector3};
 use acadrust::{CadDocument, DxfReader, DxfWriter};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
@@ -439,6 +439,154 @@ impl ParsedDxf {
         Ok(handle_id(handle.value()))
     }
 
+    // ----------------------------------------------------------------------
+    // W4g-4: the reference's Modify verbs the crate already carries. Every op
+    // validates its operands BEFORE touching the document, refuses the same
+    // kinds translate refuses, and names its refusal with the store's codes.
+    // A verb that creates (copy, mirror-with-source, explode) hands the new
+    // handle(s) back so the client can select what it drew.
+    // ----------------------------------------------------------------------
+
+    /// The entity at `index` as an owned clone with a NULL handle, so
+    /// `add_entity` allocates a fresh one (a clone that kept its handle would
+    /// overwrite the original in the document's map).
+    fn cloned_for_create(&self, index: usize) -> Result<(EntityType, String), Refusal> {
+        let entity = self
+            .inner
+            .entities()
+            .nth(index)
+            .ok_or_else(|| "entity_index_out_of_range".to_string())?;
+        if !editable(entity) {
+            return refuse("entity_kind_not_editable");
+        }
+        let layer = entity.common().layer.clone();
+        let mut copy = entity.clone();
+        copy.as_entity_mut().set_handle(Handle::NULL);
+        Ok((copy, layer))
+    }
+
+    /// COPY: a clone of the entity displaced by (dx, dy). The source stays.
+    fn copy_entity_core(&mut self, index: usize, dx: f64, dy: f64) -> Result<String, Refusal> {
+        if !all_finite(&[dx, dy]) {
+            return refuse("delta_not_finite");
+        }
+        let (mut copy, layer) = self.cloned_for_create(index)?;
+        copy.translate(Vector3::new(dx, dy, 0.0));
+        self.add_created(copy, &layer)
+    }
+
+    /// MIRROR about the line (x1, y1)-(x2, y2). With `keep_source` the
+    /// mirrored copy is a new entity (its handle is returned); without it the
+    /// entity is mirrored in place and the answer is empty.
+    fn mirror_entity_core(
+        &mut self,
+        index: usize,
+        x1: f64,
+        y1: f64,
+        x2: f64,
+        y2: f64,
+        keep_source: bool,
+    ) -> Result<String, Refusal> {
+        if !all_finite(&[x1, y1, x2, y2]) {
+            return refuse("coordinate_not_finite");
+        }
+        if x1 == x2 && y1 == y2 {
+            return refuse("mirror_line_zero_length");
+        }
+        let transform = Transform::from_mirror_line(Vector3::new(x1, y1, 0.0), Vector3::new(x2, y2, 0.0));
+        if keep_source {
+            let (mut copy, layer) = self.cloned_for_create(index)?;
+            copy.apply_mirror(&transform);
+            return self.add_created(copy, &layer);
+        }
+        let entity = self.entity_mut(index)?;
+        if !editable(entity) {
+            return refuse("entity_kind_not_editable");
+        }
+        entity.apply_mirror(&transform);
+        Ok(String::new())
+    }
+
+    /// ROTATE about the base point (cx, cy) by `deg` counter-clockwise.
+    fn rotate_entity_core(&mut self, index: usize, cx: f64, cy: f64, deg: f64) -> Result<(), Refusal> {
+        if !all_finite(&[cx, cy, deg]) {
+            return refuse("coordinate_not_finite");
+        }
+        // translate(-c) then rotate then translate(+c): `then` applies self first.
+        let transform = Transform::from_translation(Vector3::new(-cx, -cy, 0.0))
+            .then(&Transform::from_rotation(Vector3::new(0.0, 0.0, 1.0), deg.to_radians()))
+            .then(&Transform::from_translation(Vector3::new(cx, cy, 0.0)));
+        let entity = self.entity_mut(index)?;
+        if !editable(entity) {
+            return refuse("entity_kind_not_editable");
+        }
+        entity.apply_transform(&transform);
+        Ok(())
+    }
+
+    /// SCALE about the base point (cx, cy) by `factor` (strictly positive).
+    fn scale_entity_core(&mut self, index: usize, cx: f64, cy: f64, factor: f64) -> Result<(), Refusal> {
+        if !all_finite(&[cx, cy, factor]) {
+            return refuse("coordinate_not_finite");
+        }
+        if factor <= 0.0 {
+            return refuse("scale_not_positive");
+        }
+        let transform = Transform::from_scaling_with_origin(
+            Vector3::new(factor, factor, factor),
+            Vector3::new(cx, cy, 0.0),
+        );
+        let entity = self.entity_mut(index)?;
+        if !editable(entity) {
+            return refuse("entity_kind_not_editable");
+        }
+        entity.apply_transform(&transform);
+        Ok(())
+    }
+
+    /// EXPLODE: a polyline becomes its segments (lines, arcs for bulges);
+    /// the source is removed. Returns the new handles in document order.
+    /// Only LWPOLYLINE and POLYLINE explode, and the kind is checked BEFORE
+    /// the crate is asked: a LINE has nothing to explode into, and the
+    /// crate's explode of a CIRCLE or ARC yields one "part" that is the same
+    /// geometry (a circle comes back as a 0..2pi arc, which the writer emits
+    /// as 50=0 / 51=360 and readers draw as nothing), so an empty-parts guard
+    /// alone would let EXPLODE erase a circle (kimi on #1010). The parts are
+    /// added before the source is removed, so a refused part never strands a
+    /// document with its source gone.
+    fn explode_entity_core(&mut self, index: usize) -> Result<Vec<String>, Refusal> {
+        let (handle, layer, parts) = {
+            let entity = self
+                .inner
+                .entities()
+                .nth(index)
+                .ok_or_else(|| "entity_index_out_of_range".to_string())?;
+            if !editable(entity) {
+                return refuse("entity_kind_not_editable");
+            }
+            if !matches!(entity, EntityType::LwPolyline(_) | EntityType::Polyline2D(_)) {
+                return refuse("entity_not_explodable");
+            }
+            let parts = entity.explode();
+            if parts.is_empty() {
+                return refuse("entity_not_explodable");
+            }
+            if parts.len() > MAX_CREATED_VERTICES {
+                return refuse("explode_too_many_parts");
+            }
+            (entity.common().handle, entity.common().layer.clone(), parts)
+        };
+        let mut handles = Vec::with_capacity(parts.len());
+        for mut part in parts {
+            part.as_entity_mut().set_handle(Handle::NULL);
+            handles.push(self.add_created(part, &layer)?);
+        }
+        self.inner
+            .remove_entity(handle)
+            .ok_or_else(|| "entity_handle_not_found".to_string())?;
+        Ok(handles)
+    }
+
     fn create_line_core(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, layer: &str) -> Result<String, Refusal> {
         if !all_finite(&[x1, y1, x2, y2]) {
             return refuse("coordinate_not_finite");
@@ -638,6 +786,52 @@ impl ParsedDxf {
     #[wasm_bindgen(js_name = setEntityLayer)]
     pub fn set_entity_layer(&mut self, index: usize, layer: &str) -> Result<(), JsValue> {
         self.set_entity_layer_core(index, layer).map_err(js_err)
+    }
+
+    /// W4g-4 COPY: a displaced clone of the entity at `index`; returns the
+    /// new entity's handle. Refuses a non-finite delta and read-only kinds.
+    #[wasm_bindgen(js_name = copyEntity)]
+    pub fn copy_entity(&mut self, index: usize, dx: f64, dy: f64) -> Result<String, JsValue> {
+        self.copy_entity_core(index, dx, dy).map_err(js_err)
+    }
+
+    /// W4g-4 MIRROR about the line (x1, y1)-(x2, y2). `keep_source` true
+    /// returns the mirrored copy's handle; false mirrors in place and
+    /// returns an empty string. Refuses a zero-length line.
+    #[wasm_bindgen(js_name = mirrorEntity)]
+    pub fn mirror_entity(
+        &mut self,
+        index: usize,
+        x1: f64,
+        y1: f64,
+        x2: f64,
+        y2: f64,
+        keep_source: bool,
+    ) -> Result<String, JsValue> {
+        self.mirror_entity_core(index, x1, y1, x2, y2, keep_source).map_err(js_err)
+    }
+
+    /// W4g-4 ROTATE about (cx, cy) by `deg` counter-clockwise.
+    #[wasm_bindgen(js_name = rotateEntity)]
+    pub fn rotate_entity(&mut self, index: usize, cx: f64, cy: f64, deg: f64) -> Result<(), JsValue> {
+        self.rotate_entity_core(index, cx, cy, deg).map_err(js_err)
+    }
+
+    /// W4g-4 SCALE about (cx, cy) by a strictly positive `factor`.
+    #[wasm_bindgen(js_name = scaleEntity)]
+    pub fn scale_entity(&mut self, index: usize, cx: f64, cy: f64, factor: f64) -> Result<(), JsValue> {
+        self.scale_entity_core(index, cx, cy, factor).map_err(js_err)
+    }
+
+    /// W4g-4 EXPLODE: the entity's segments as new entities (handles in
+    /// document order); the source is removed. Refused for kinds with
+    /// nothing to explode into.
+    #[wasm_bindgen(js_name = explodeEntity)]
+    pub fn explode_entity(&mut self, index: usize) -> Result<JsValue, JsValue> {
+        let handles = self.explode_entity_core(index).map_err(js_err)?;
+        handles
+            .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+            .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     /// Creates a LINE from (x1, y1) to (x2, y2) on `layer` (empty = `0`).
@@ -990,5 +1184,122 @@ mod created_entity_roundtrip {
         dedup.dedup();
         assert_eq!(dedup.len(), handles.len(), "handles stay unique after a create: {:?}", handles);
         assert!(handles.contains(&handle.value()), "the created handle is the one written");
+    }
+
+    fn verts(doc: &ParsedDxf, index: usize) -> Vec<[f64; 3]> {
+        vertices_of(doc.inner.entities().nth(index).expect("entity at index"))
+    }
+
+    #[test]
+    fn w4g4_copy_rotate_scale_and_mirror_move_the_right_points_and_keep_the_layer() {
+        let mut doc = empty_doc();
+        let original = doc.create_line_core(0.0, 0.0, 10.0, 0.0, "A").unwrap();
+        // COPY: a second line displaced by (5, 5) on the same layer, new handle.
+        let copy = doc.copy_entity_core(0, 5.0, 5.0).unwrap();
+        assert_ne!(copy, original);
+        assert_eq!(kinds(&doc), vec!["LINE", "LINE"]);
+        let v = verts(&doc, 1);
+        assert!(near(v[0][0], 5.0) && near(v[0][1], 5.0) && near(v[1][0], 15.0) && near(v[1][1], 5.0));
+        assert_eq!(doc.inner.entities().nth(1).unwrap().common().layer, "A");
+        // ROTATE the copy 90 deg CCW about its start (5, 5): the end (15, 5) -> (5, 15).
+        doc.rotate_entity_core(1, 5.0, 5.0, 90.0).unwrap();
+        let v = verts(&doc, 1);
+        assert!(near(v[0][0], 5.0) && near(v[0][1], 5.0), "the base point stays: {:?}", v);
+        assert!(near(v[1][0], 5.0) && near(v[1][1], 15.0), "the end rotated: {:?}", v);
+        // SCALE x2 about (5, 5): the end (5, 15) -> (5, 25).
+        doc.scale_entity_core(1, 5.0, 5.0, 2.0).unwrap();
+        let v = verts(&doc, 1);
+        assert!(near(v[1][0], 5.0) && near(v[1][1], 25.0), "the end scaled: {:?}", v);
+        // MIRROR the original about the y axis, keeping the source: a third line (0,0)-(-10,0).
+        let mirrored = doc.mirror_entity_core(0, 0.0, 0.0, 0.0, 1.0, true).unwrap();
+        assert!(!mirrored.is_empty());
+        assert_eq!(doc.inner.entities().count(), 3);
+        let v = verts(&doc, 2);
+        assert!(near(v[1][0], -10.0) && near(v[1][1], 0.0), "mirrored copy: {:?}", v);
+        // MIRROR in place: the mirrored copy comes back to (10, 0), no new entity, empty answer.
+        assert_eq!(doc.mirror_entity_core(2, 0.0, 0.0, 0.0, 1.0, false).unwrap(), "");
+        assert_eq!(doc.inner.entities().count(), 3);
+        let v = verts(&doc, 2);
+        assert!(near(v[1][0], 10.0), "mirrored back: {:?}", v);
+        // Every handle stays unique after the verbs.
+        let mut hs = handles(&doc);
+        hs.sort_unstable();
+        hs.dedup();
+        assert_eq!(hs.len(), 3);
+    }
+
+    #[test]
+    fn w4g4_explode_replaces_a_polyline_with_its_segments_and_refuses_the_rest() {
+        let mut doc = empty_doc();
+        let poly = doc
+            .create_polyline_core(&[0.0, 0.0, 4.0, 0.0, 4.0, 3.0], true, "P")
+            .unwrap();
+        let parts = doc.explode_entity_core(0).unwrap();
+        assert_eq!(parts.len(), 3, "a closed triangle explodes into three segments: {:?}", parts);
+        assert!(kinds(&doc).iter().all(|k| *k == "LINE"), "{:?}", kinds(&doc));
+        assert!(doc.inner.entities().all(|e| e.common().layer == "P"));
+        let gone: u64 = poly.parse().unwrap();
+        assert!(!handles(&doc).contains(&gone), "the source polyline is removed");
+        let mut hs = handles(&doc);
+        hs.sort_unstable();
+        hs.dedup();
+        assert_eq!(hs.len(), 3);
+        // A line has nothing to explode into.
+        assert_eq!(code(doc.explode_entity_core(0)), "entity_not_explodable");
+    }
+
+    #[test]
+    fn w4g4_explode_refuses_a_circle_an_arc_and_a_line_by_kind_and_leaves_them_whole() {
+        // kimi on #1010: the crate's explode of a CIRCLE returns one part, a
+        // 0..2pi ARC the writer emits as 50=0 / 51=360 (a zero-span arc that
+        // readers draw as nothing), so an empty-parts guard alone would let
+        // EXPLODE erase a circle. The kind is refused before the crate is
+        // asked, and the document is untouched: same kinds, same handles.
+        let mut doc = empty_doc();
+        doc.create_circle_core(5.0, 5.0, 2.0, "C").unwrap();
+        doc.create_arc_core(0.0, 0.0, 3.0, 0.0, 90.0, "C").unwrap();
+        doc.create_line_core(0.0, 0.0, 1.0, 1.0, "C").unwrap();
+        let before = handles(&doc);
+        assert_eq!(code(doc.explode_entity_core(0)), "entity_not_explodable");
+        assert_eq!(code(doc.explode_entity_core(1)), "entity_not_explodable");
+        assert_eq!(code(doc.explode_entity_core(2)), "entity_not_explodable");
+        assert_eq!(kinds(&doc), vec!["CIRCLE", "ARC", "LINE"]);
+        assert_eq!(handles(&doc), before);
+        // And after a write + re-parse the circle is still a circle.
+        let back = rewrite(&doc);
+        assert_eq!(kinds(&back), vec!["CIRCLE", "ARC", "LINE"]);
+    }
+
+    #[test]
+    fn w4g4_verbs_refuse_before_touching_the_document() {
+        let mut doc = empty_doc();
+        doc.create_line_core(0.0, 0.0, 10.0, 0.0, "A").unwrap();
+        let before = rewrite(&doc).inner.entities().count();
+        assert_eq!(code(doc.copy_entity_core(0, f64::NAN, 0.0)), "delta_not_finite");
+        assert_eq!(code(doc.mirror_entity_core(0, 1.0, 1.0, 1.0, 1.0, true)), "mirror_line_zero_length");
+        assert_eq!(code(doc.mirror_entity_core(0, f64::INFINITY, 0.0, 1.0, 1.0, false)), "coordinate_not_finite");
+        assert_eq!(code(doc.rotate_entity_core(0, 0.0, 0.0, f64::NAN)), "coordinate_not_finite");
+        assert_eq!(code(doc.scale_entity_core(0, 0.0, 0.0, 0.0)), "scale_not_positive");
+        assert_eq!(code(doc.scale_entity_core(0, 0.0, 0.0, -2.0)), "scale_not_positive");
+        assert_eq!(code(doc.rotate_entity_core(9, 0.0, 0.0, 1.0)), "entity_index_out_of_range");
+        assert_eq!(code(doc.copy_entity_core(9, 1.0, 1.0)), "entity_index_out_of_range");
+        assert_eq!(code(doc.explode_entity_core(9)), "entity_index_out_of_range");
+        assert_eq!(doc.inner.entities().count(), before);
+        let v = verts(&doc, 0);
+        assert!(near(v[1][0], 10.0) && near(v[1][1], 0.0), "untouched: {:?}", v);
+    }
+
+    #[test]
+    fn w4g4_verbs_survive_write_and_reparse() {
+        let mut doc = empty_doc();
+        doc.create_line_core(0.0, 0.0, 10.0, 0.0, "A").unwrap();
+        doc.copy_entity_core(0, 0.0, 7.0).unwrap();
+        doc.rotate_entity_core(1, 0.0, 7.0, 90.0).unwrap();
+        doc.create_polyline_core(&[20.0, 0.0, 24.0, 0.0, 24.0, 3.0], true, "P").unwrap();
+        doc.explode_entity_core(2).unwrap();
+        let back = rewrite(&doc);
+        assert_eq!(kinds(&back), vec!["LINE", "LINE", "LINE", "LINE", "LINE"]);
+        let v = verts(&back, 1);
+        assert!(near(v[1][0], 0.0) && near(v[1][1], 17.0), "rotated copy after re-parse: {:?}", v);
     }
 }
