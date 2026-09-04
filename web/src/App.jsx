@@ -2555,11 +2555,27 @@ export default function App() {
       writeEntitled: canRunWrite,
       engineDirty,
     })
-    const [annotation, block, properties, groups, clipboard] = referencePanels()
-    // The reference's Draw tab: Draw, Modify (engine children, rendered
-    // first), Annotation, Layers, Block, Properties, Groups, Clipboard.
+    // W4g-5c: the Clipboard panel is REAL now and the engine consumer
+    // renders it, so referencePanels no longer supplies a placeholder.
+    const [annotation, block, properties, groups, clipboardOff] = referencePanels()
+    const clipboardSeat = {
+      id: 'clipboard', label: 'Clipboard', kind: 'group', tools: [],
+      extra: <div id="cockpit-clipboard-slot" className="ribbon-cluster-tools" />,
+    }
+    // The reference's Draw tab: Draw, Modify, Clipboard (engine children,
+    // rendered first), then Annotation, Layers, Block, Properties, Groups.
+    // NOTE: the reference puts Clipboard LAST. The ribbon renders engine
+    // children before this list, so a real Clipboard panel cannot sit at
+    // the end without a portal; the deviation is deliberate and named in
+    // the W4g-5c PR, with the parity re-measure owed.
     const byTab = {
-      draw: [annotation, layers, block, properties, groups, clipboard, ...(tabFamilies.draw || [])],
+      // The Clipboard panel stays LAST, where the reference puts it. With
+      // the flag ON it is an EMPTY cluster carrying a slot div, and the
+      // engine consumer portals the real tools into it; with the flag off
+      // it is the honest placeholder. Either way the row's shape is the
+      // same, which is what the prompt seat and the band height depend on.
+      draw: [annotation, layers, block, properties, groups,
+        ENV_CAD_EDIT ? clipboardSeat : clipboardOff, ...(tabFamilies.draw || [])],
       insert: [block, ...(tabFamilies.insert || [])],
       annotate: [annotation, ...(tabFamilies.annotate || [])],
       view: [view, version, layers, ...(tabFamilies.view || [])],
@@ -3055,7 +3071,7 @@ export default function App() {
                 <EngineRibbonClusters
                   importOpen={importOpen}
                   onToggleImport={() => setImportOpen((o) => !o)}
-                  panels={ribbonTab === 'insert' ? ['file'] : ribbonTab === 'draw' ? ['draw', 'modify'] : []}
+                  panels={ribbonTab === 'insert' ? ['file'] : ribbonTab === 'draw' ? ['draw', 'modify', 'clipboard'] : []}
                 />
               )}
               {/* W4f slice B: the command line's typed words (LINE, C, MOVE ...)

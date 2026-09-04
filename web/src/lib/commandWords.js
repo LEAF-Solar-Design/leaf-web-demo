@@ -48,6 +48,10 @@ const WORDS = Object.freeze({
   ar: { group: 'modify', op: 'arrayRect', verb: 'ARRAYRECT' },
   arraypolar: { group: 'modify', op: 'arrayPolar', verb: 'ARRAYPOLAR' },
   pa: { group: 'modify', op: 'arrayPolar', verb: 'ARRAYPOLAR' },
+  // W4g-5c: the reference's clipboard commands, in its own words.
+  copyclip: { group: 'clipboard', op: 'copyClip', verb: 'COPYCLIP' },
+  cutclip: { group: 'clipboard', op: 'cutClip', verb: 'CUTCLIP' },
+  pasteclip: { group: 'clipboard', op: 'pasteClip', verb: 'PASTECLIP' },
   rectang: { group: 'draw', op: 'createRectangle', verb: 'RECTANG' },
   rectangle: { group: 'draw', op: 'createRectangle', verb: 'RECTANG' },
   rec: { group: 'draw', op: 'createRectangle', verb: 'RECTANG' },

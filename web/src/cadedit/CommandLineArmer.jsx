@@ -21,10 +21,16 @@ import { COCKPIT_COMMAND_EVENT } from '../lib/commandWords.js'
 import { PROMPTS, modifyReason } from './EngineRibbonClusters.jsx'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
 
-const GROUPS = new Set(['draw', 'modify'])
+// W4g-5c: the clipboard is the third engine group whose words this gate
+// admits. A group missing here is dropped SILENTLY (App has already cleared
+// the bar), which is what kimi found on #1025: COPYCLIP / CUTCLIP /
+// PASTECLIP were registered as words and died here.
+const GROUPS = new Set(['draw', 'modify', 'clipboard'])
 // Ops with no operands run the moment the word arrives: delete on a live
 // selection, undo/redo on the engine's own history (W4f slice F).
-const RUN_ON_ARRIVAL = new Set(['delete', 'undo', 'redo'])
+// W4g-5c: COPYCLIP and CUTCLIP take no operands either; PASTECLIP has a
+// prompt (where to put it) and arms like a draw word.
+const RUN_ON_ARRIVAL = new Set(['delete', 'undo', 'redo', 'copyClip', 'cutClip'])
 
 /** The event detail is a command the engine can take: { group, op } and nothing surprising. */
 export function acceptsCommand(detail) {
@@ -36,7 +42,7 @@ export function acceptsCommand(detail) {
 
 export default function CommandLineArmer() {
   const { session, inputs, setArmed } = useEngineSessionContext()
-  const { applyEdit, undo, redo } = session.actions
+  const { applyEdit, undo, redo, copyToClipboard } = session.actions
   useEffect(() => {
     if (typeof window === 'undefined') return undefined
     const onCommand = (event) => {
@@ -44,6 +50,13 @@ export default function CommandLineArmer() {
       if (!acceptsCommand(detail)) return
       if (detail.op === 'undo') { undo(); return }
       if (detail.op === 'redo') { redo(); return }
+      if (detail.op === 'copyClip' || detail.op === 'cutClip') {
+        // Like ERASE: on a live selection it runs, and the store's own
+        // refusal sentence covers the rest (no selection, a kind that
+        // cannot go on the clipboard).
+        copyToClipboard(detail.op === 'cutClip')
+        return
+      }
       if (RUN_ON_ARRIVAL.has(detail.op)) {
         // ERASE with a live selection runs, as the ribbon's Delete does; with
         // nothing to act on it arms nothing (the ribbon's note names why).
@@ -54,6 +67,6 @@ export default function CommandLineArmer() {
     }
     window.addEventListener(COCKPIT_COMMAND_EVENT, onCommand)
     return () => window.removeEventListener(COCKPIT_COMMAND_EVENT, onCommand)
-  }, [session, inputs, setArmed, applyEdit, undo, redo])
+  }, [session, inputs, setArmed, applyEdit, undo, redo, copyToClipboard])
   return null
 }

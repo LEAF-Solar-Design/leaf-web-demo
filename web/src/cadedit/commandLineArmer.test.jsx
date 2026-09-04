@@ -95,7 +95,33 @@ describe('CommandLineArmer (W4f slice B)', () => {
     expect(posted[posted.length - 1]).toEqual({ type: 'applyEdit', op: 'delete', payload: { entityId: 'e1' } })
   })
 
+  // W4g-5c: the clipboard words. kimi on #1025 found them registered as words
+  // and dropped here, because this gate knew two groups; the ribbon arm had
+  // the same defect one layer down. Both layers are pinned now.
+  it('PASTECLIP arms the PASTE prompt; COPYCLIP copies without touching the engine; CUTCLIP posts the delete', async () => {
+    mount()
+    await openAndLoad()
+    command({ group: 'clipboard', op: 'pasteClip' })
+    expect(promptEl()).not.toBeNull()
+    expect(promptEl().getAttribute('data-op')).toBe('pasteClip')
+    expect(promptEl().textContent).toContain('PASTE')
+    // Nothing copied yet: the prompt reads the clipboard ladder and holds Run.
+    expect(promptEl().textContent).toContain('nothing on the clipboard yet')
+    fireEvent.click(screen.getByRole('radio'))
+    const before = workers[0].posted.length
+    command({ group: 'clipboard', op: 'copyClip' })
+    expect(workers[0].posted.length).toBe(before)
+    expect(screen.getByRole('status').textContent).toContain('is on the clipboard')
+    command({ group: 'clipboard', op: 'cutClip' })
+    const posted = workers[0].posted
+    expect(posted[posted.length - 1]).toEqual({ type: 'applyEdit', op: 'delete', payload: { entityId: 'e1' } })
+  })
+
   it('acceptsCommand is the fail-closed gate', () => {
+    expect(acceptsCommand({ group: 'clipboard', op: 'pasteClip' })).toBe(true)
+    expect(acceptsCommand({ group: 'clipboard', op: 'copyClip' })).toBe(true)
+    expect(acceptsCommand({ group: 'clipboard', op: 'cutClip' })).toBe(true)
+    expect(acceptsCommand({ group: 'annotation', op: 'text' })).toBe(false)
     expect(acceptsCommand({ group: 'draw', op: 'createArc' })).toBe(true)
     expect(acceptsCommand({ group: 'modify', op: 'delete' })).toBe(true)
     expect(acceptsCommand({ group: 'modify', op: 'hasOwnProperty' })).toBe(false)

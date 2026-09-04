@@ -396,6 +396,9 @@ export function referencePanels() {
         offTool('groups:ungroup', 'Ungroup', 'ungroup', 'large'),
       ],
     },
+    // W4g-5c: the engine renders a REAL Clipboard panel when the cad_edit
+    // flag is on, and App drops this one then. It stays here for the flag-off
+    // build, where the reference's row would otherwise lose a panel.
     {
       id: 'clipboard', label: 'Clipboard', kind: 'group', note,
       tools: [

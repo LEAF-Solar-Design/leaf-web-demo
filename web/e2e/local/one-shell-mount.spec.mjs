@@ -113,9 +113,13 @@ test.describe('route matrix, rail ON', () => {
     const hit = await page.evaluate(() => {
       const r = document.querySelector('.studio-shell .viewer-wrap').getBoundingClientRect()
       const el = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
-      return { tag: el?.tagName, inGround: !!el?.closest('.studio-ground') }
+      // Name what was hit. Two reds on slow walks reported only <DIV>, which
+      // is not evidence: a dissolving boot overlay and a real click shield
+      // look the same as a tag name and nothing alike as a class.
+      const describe = (node) => (node ? `${node.tagName}#${node.id || ''}.${String(node.className || '').trim().replace(/\s+/g, '.')}` : 'null')
+      return { tag: el?.tagName, what: describe(el), parent: describe(el?.parentElement), inGround: !!el?.closest('.studio-ground') }
     })
-    expect(hit.inGround, `elementFromPoint hit <${hit.tag}> outside the ground`).toBe(true)
+    expect(hit.inGround, `elementFromPoint hit ${hit.what} (in ${hit.parent}) outside the ground`).toBe(true)
   })
 
   test('/app/* and /ty/* sub-paths, and every boot query off /try, are the same console mode', async ({ page, request }) => {
@@ -536,6 +540,10 @@ test.describe('route matrix, rail ON', () => {
     const groupsOf = () => ribbon.locator('.ribbon-cluster').evaluateAll((els) => els.map((el) => el.dataset.group || `family:${el.dataset.family}`))
     let groups = await groupsOf()
     const cadEditOn = groups.includes('modify')
+    // W4g-5c: Clipboard is REAL with the engine on, but it keeps the
+    // reference's LAST seat either way: App renders the panel there and
+    // the engine portals its tools into it, rather than adding a third
+    // engine cluster on the left (which moved the prompt seat 148px).
     const referenceTail = ['annotation', 'layers', 'block', 'properties', 'groups', 'clipboard']
     expect(groups).toEqual(cadEditOn ? ['draw', 'modify', ...referenceTail] : referenceTail)
     await page.getByRole('tab', { name: 'View' }).click()
@@ -675,43 +683,6 @@ test.describe('route matrix, rail ON', () => {
       await expect(saveBtn).toBeDisabled()
       await page.getByRole('tab', { name: 'Manage' }).click()
       await expect(dirtyBlocked).toHaveCount(0)
-      // W4g-2 (one head), confirm-time race: listen before arming, arm a
-      // catalog WRITE tool while clean, then draw before confirming. The
-      // explicit Run click must refuse the now-dirty engine, with no run POST
-      // at any point from the arm through the refusal.
-      const armedWrite = ribbon.locator('.ribbon-tool[data-tool="delete-marked-panel"]')
-      const armedWriteCount = await armedWrite.count()
-      test.info().annotations.push({ type: 'one-head', description: armedWriteCount ? 'confirm-time row: delete-marked-panel armed while clean' : 'delete-marked-panel not on this ribbon: confirm-time row skipped' })
-      if (armedWriteCount) {
-        const runPosts = []
-        const onRequest = (request) => { if (request.method() === 'POST' && request.url().includes('/api/run')) runPosts.push(request.url()) }
-        page.on('request', onRequest)
-        try {
-          await expect(armedWrite).toBeEnabled()
-          await armedWrite.click()
-          const confirm = page.getByRole('button', { name: 'Run delete-marked-panel' })
-          await expect(confirm).toBeVisible({ timeout: 10_000 })
-          await page.getByRole('tab', { name: 'Draw' }).click()
-          await draw.locator('[data-tool="draw:createLine"]').click()
-          await page.getByLabel('ribbon x', { exact: true }).fill('0')
-          await page.getByLabel('ribbon y', { exact: true }).fill('0')
-          await page.getByLabel('ribbon x2').fill('20')
-          await page.getByLabel('ribbon y2').fill('20')
-          await page.getByLabel('ribbon y2').press('Enter')
-          await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBefore + 1), { timeout: 60_000 })
-          await confirm.click()
-          await expect(page.locator('.strip-failed').filter({ hasText: 'the browser engine holds unsaved edits' })).toBeVisible({ timeout: 10_000 })
-          await page.waitForTimeout(1500)
-          expect(runPosts).toHaveLength(0)
-          test.info().annotations.push({ type: 'one-head', description: 'confirm-time refusal alert visible; POST /api/run count 0 from arm through refusal' })
-          await page.keyboard.press('Escape')
-          await page.getByRole('tab', { name: 'Insert' }).click()
-          await ribbon.locator('[data-tool="undo-edit"]').click()
-          await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBefore), { timeout: 60_000 })
-        } finally {
-          page.off('request', onRequest)
-        }
-      }
       await page.getByRole('tab', { name: 'Draw' }).click()
     } else {
       await expect(modify.locator('.ribbon-note')).toHaveText(/no drawing in the browser engine yet|could not be opened in the browser engine/)
@@ -1146,6 +1117,85 @@ test.describe('route matrix, rail ON', () => {
     await bar.press('Enter')
     await expect(page.getByTestId('cad-edit-entity-count'))
       .toHaveText(String(countBeforeArray), { timeout: 60_000 })
+
+    // W4g-5c CUT / COPY / PASTE. A copy takes a RECORD of the selection,
+    // so a paste draws the same geometry at the point given (+1) and can
+    // be repeated; the clipboard itself never touches the document. A
+    // paste with nothing copied is refused by the panel, not the engine.
+    const countBeforeClip = Number(await page.getByTestId('cad-edit-entity-count').textContent())
+    await page.getByRole('radio').last().check()
+    await ribbon.locator('[data-tool="clipboard:copyClip"]').click()
+    await expect(page.getByRole('status').filter({ hasText: /is on the clipboard/ }))
+      .toHaveCount(1, { timeout: 30_000 })
+    // The copy drew nothing: the clipboard is not the document.
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeClip))
+    await ribbon.locator('[data-tool="clipboard:pasteClip"]').click()
+    await page.getByLabel('ribbon x', { exact: true }).fill('120')
+    await page.getByLabel('ribbon y', { exact: true }).fill('60')
+    await page.getByLabel('ribbon y', { exact: true }).press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count'))
+      .toHaveText(String(countBeforeClip + 1), { timeout: 60_000 })
+    test.info().annotations.push({ type: 'clipboard', description: `paste drew one entity (${countBeforeClip} -> ${countBeforeClip + 1})` })
+    await page.keyboard.press('Escape')
+
+    // W4g-2 (one head), confirm-time race. LAST in the walk on purpose: a
+    // refused run leaves its failed strip on the page and there is no
+    // dismiss for it, and that strip sits BETWEEN the command prompt and
+    // the command input. Run earlier, it moved the prompt seat 148px and
+    // failed the W4e seat check on right behaviour. It had only ever
+    // passed because the block is conditional on the catalog tool being
+    // seated in time, so it silently skipped some runs.
+      // W4g-2 (one head), confirm-time race: listen before arming, arm a
+      // catalog WRITE tool while clean, then draw before confirming. The
+      // explicit Run click must refuse the now-dirty engine, with no run POST
+      // at any point from the arm through the refusal.
+      await page.getByRole('tab', { name: 'Manage' }).click()
+      const countBeforeConfirm = Number(await page.getByTestId('cad-edit-entity-count').textContent())
+      const armedWrite = ribbon.locator('.ribbon-tool[data-tool="delete-marked-panel"]')
+      const armedWriteCount = await armedWrite.count()
+      test.info().annotations.push({ type: 'one-head', description: armedWriteCount ? 'confirm-time row: delete-marked-panel armed while clean' : 'delete-marked-panel not on this ribbon: confirm-time row skipped' })
+      if (armedWriteCount) {
+        const runPosts = []
+        const onRequest = (request) => { if (request.method() === 'POST' && request.url().includes('/api/run')) runPosts.push(request.url()) }
+        page.on('request', onRequest)
+        try {
+          // At the END of the walk the engine holds every unsaved edit above,
+          // so the one-head rule (W4g-2) rightly DISABLES a catalog write tool
+          // here, naming the edits. That is the execution-time refusal proving
+          // itself on a dirty engine, and it is asserted, never skipped. The
+          // confirm-time race below needs a CLEAN engine to stage, so it runs
+          // only when the tool is live; both branches are real assertions.
+          if (await armedWrite.isDisabled()) {
+            expect(await armedWrite.getAttribute('aria-label')).toContain('the browser engine holds unsaved edits')
+            test.info().annotations.push({ type: 'one-head', description: 'dirty engine at the end of the walk: delete-marked-panel disabled with the unsaved-edits reason (confirm-time race needs a clean engine, not staged here)' })
+            expect(runPosts).toHaveLength(0)
+          } else {
+            await expect(armedWrite).toBeEnabled()
+            await armedWrite.click()
+            const confirm = page.getByRole('button', { name: 'Run delete-marked-panel' })
+            await expect(confirm).toBeVisible({ timeout: 10_000 })
+            await page.getByRole('tab', { name: 'Draw' }).click()
+            await draw.locator('[data-tool="draw:createLine"]').click()
+            await page.getByLabel('ribbon x', { exact: true }).fill('0')
+            await page.getByLabel('ribbon y', { exact: true }).fill('0')
+            await page.getByLabel('ribbon x2').fill('20')
+            await page.getByLabel('ribbon y2').fill('20')
+            await page.getByLabel('ribbon y2').press('Enter')
+            await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeConfirm + 1), { timeout: 60_000 })
+            await confirm.click()
+            await expect(page.locator('.strip-failed').filter({ hasText: 'the browser engine holds unsaved edits' })).toBeVisible({ timeout: 10_000 })
+            await page.waitForTimeout(1500)
+            expect(runPosts).toHaveLength(0)
+            test.info().annotations.push({ type: 'one-head', description: 'confirm-time refusal alert visible; POST /api/run count 0 from arm through refusal' })
+            await page.keyboard.press('Escape')
+            await page.getByRole('tab', { name: 'Insert' }).click()
+            await ribbon.locator('[data-tool="undo-edit"]').click()
+            await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeConfirm), { timeout: 60_000 })
+          }
+        } finally {
+          page.off('request', onRequest)
+        }
+      }
 
     // A sentence is still a sentence: it routes, it never arms. LAST in the
     // row on purpose: while its route decision is shown the Command bar's

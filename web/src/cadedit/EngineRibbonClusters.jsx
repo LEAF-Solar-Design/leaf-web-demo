@@ -35,7 +35,7 @@ import { createPortal } from 'react-dom'
 import { RibbonCluster, RibbonTool } from '../site/DraftingRibbon.jsx'
 import { QuickButton, QUICK_FILE_SLOT_ID } from '../site/CockpitTopBand.jsx'
 
-import { DRAW_REASONS, MODIFY_REASONS, drawReason, forGroup, modifyReason } from '../lib/actionRegistry.js'
+import { DRAW_REASONS, MODIFY_REASONS, clipboardReason, drawReason, forGroup, modifyReason } from '../lib/actionRegistry.js'
 
 import { buildCreatePayload, buildEditPayload, readNumber } from './engineSession.js'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
@@ -176,6 +176,11 @@ export const PROMPTS = Object.freeze({
     { ask: 'Enter number of items, including the source:', fields: [['count', 'items', 'numeric']] },
     { ask: 'Specify angle to fill:', fields: [['totalDeg', 'angle to fill']] },
   ] },
+  // W4g-5c: PASTE asks where to put it. The record's anchor (a centre for
+  // a circle or an arc, the first vertex otherwise) lands on this point.
+  pasteClip: { verb: 'PASTE', steps: [
+    { ask: 'Specify insertion point:', fields: [['x', 'x'], ['y', 'y']] },
+  ] },
   moveVertex: { verb: 'MOVE VERTEX', steps: [
     { ask: 'Specify vertex:', fields: [['vertexIndex', 'vertex', 'numeric']] },
     { ask: 'Specify displacement:', fields: [['dx', 'dx'], ['dy', 'dy']] },
@@ -202,11 +207,20 @@ export function saveReason(session, canSave) {
 // cockpit is not mounted, which makes the caller render inline.
 function useSlot(id) {
   const [node, setNode] = useState(null)
+  // No dependency list on purpose. A slot that lives inside the tab-switched
+  // cluster list (the Clipboard seat, W4g-5c) is unmounted and re-created as
+  // a NEW node on every switch away from its tab and back, and a lookup
+  // keyed on the id alone kept portaling into the detached original: the
+  // panel rendered empty after the first tab switch and the proof's copy
+  // click found nothing to click. Resolving after every render and bailing
+  // out on the same node costs one getElementById per render and no extra
+  // commit; the band and prompt slots are stable nodes and behave as before.
   useEffect(() => {
     if (typeof document === 'undefined') return undefined
-    setNode(document.getElementById(id) || null)
+    const found = document.getElementById(id) || null
+    setNode((prev) => (prev === found ? prev : found))
     return undefined
-  }, [id])
+  })
   return node
 }
 
@@ -219,9 +233,14 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const modify = modifyReason(session, reach)
   const draw = drawReason(session, reach)
   const save = saveReason(session, canSave)
-  const { applyEdit, create } = session.actions
+  const { applyEdit, create, copyToClipboard, pasteFromClipboard } = session.actions
   const quickSlot = useSlot(QUICK_FILE_SLOT_ID)
   const promptSlot = useSlot(PROMPT_SLOT_ID)
+  // W4g-5c: the reference puts Clipboard LAST, and the ribbon renders these
+  // engine children BEFORE App's cluster list, so a cluster rendered here
+  // would sit third and push the row (it did: the prompt seat moved 148px).
+  // App renders the panel at the end and this fills it with the real tools.
+  const clipboardSlot = useSlot('cockpit-clipboard-slot')
   const show = new Set(Array.isArray(panels) ? panels : [])
 
   // The armed command (provider state, so it outlives the ribbon's tab
@@ -235,7 +254,11 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const armedOp = armed ? armed.op : ''
   const armedGroup = armed ? armed.group : ''
   const prompt = armedOp ? PROMPTS[armedOp] : null
-  const promptReason = armedGroup === 'draw' ? draw : armedGroup === 'modify' ? modify : ''
+  // W4g-5c: a clipboard arm (PASTE, typed or clicked) reads the clipboard
+  // ladder, so the prompt says "nothing on the clipboard yet" with Run held
+  // exactly as the ribbon button is held, rather than a live Run that the
+  // store then refuses.
+  const promptReason = armedGroup === 'draw' ? draw : armedGroup === 'modify' ? modify : armedGroup === 'clipboard' ? clipboardReason(session, reach) : ''
   const promptOff = !!promptReason
   const fieldsOff = promptOff && promptReason !== MODIFY_REASONS.noSelection
   // W4f-6: live validation. The store's own payload builders judge the
@@ -310,6 +333,9 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     onActivate: (group, op) => {
       if (PROMPTS[op]) { toggleArmed(group, op); return }
       if (group === 'draw') create(op, inputs)
+      // W4g-5c: CUT and COPY touch no engine op at all, so they are neither
+      // a create nor an edit; PASTE arms its base-point prompt above.
+      else if (op === 'copyClip' || op === 'cutClip') copyToClipboard(op === 'cutClip')
       else applyEdit(op, inputs)
     },
   }
@@ -326,6 +352,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     }
     chainRef.current = armedOp === 'createLine' ? { x: effective.x2, y: effective.y2 } : null
     if (armedGroup === 'draw') create(armedOp, effective)
+    else if (armedOp === 'pasteClip') pasteFromClipboard(effective)
     else applyEdit(armedOp, effective)
   }
   const cancel = () => {
@@ -644,6 +671,30 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
           })}
           {MODIFY_OFF.map((tool) => <RibbonTool key={tool.id} tool={offTool(tool)} />)}
         </RibbonCluster>
+      )}
+      {show.has('clipboard') && clipboardSlot && createPortal(
+        forGroup('clipboard').map((action) => {
+          const reason = action.when(engineCtx)
+          return (
+            <RibbonTool
+              key={action.op}
+              tool={{
+                id: action.id,
+                label: action.label,
+                text: action.text,
+                icon: action.icon,
+                size: action.size,
+                title: action.title(engineCtx),
+                write: action.write,
+                disabled: !!reason,
+                reason,
+                ...armedAttrs(action.op),
+                onClick: () => action.run(engineCtx),
+              }}
+            />
+          )
+        }),
+        clipboardSlot,
       )}
       {promptRow && (promptSlot ? createPortal(promptRow, promptSlot) : promptRow)}
     </>
