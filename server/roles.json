@@ -10,7 +10,8 @@
       "agent_write_autopilot": true,
       "deploy": true,
       "platform_customize": false,
-      "upload": true
+      "upload": true,
+      "link_service": true
     },
     "elevated_grants": {
       "platform_customize": true
