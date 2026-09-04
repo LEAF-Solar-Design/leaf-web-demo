@@ -130,6 +130,31 @@ export function StatusTabs({ name = '', onStart = null }) {
   )
 }
 
+// A status-bar REGION (P1 studio-shell pass).
+//
+// The reference's bar is not a run of equal cells: the document tabs own the
+// left end and the drafting instruments own the right, with a gap between,
+// and ours carries a third group the reference has no equivalent for — the
+// honesty signals (backend, solver, catalog fold, build). Flex `order` alone
+// arranged those three into ONE continuous strip: measured on the studio at
+// 1512x950 before this pass, every segment from x=505 to x=1504 was an
+// unbroken run of identical 1px #383838-separated cells on one transparent
+// ground, so a coordinate readout and a build hash read as neighbours.
+//
+// So each group is a real element here, and the boundary is a region edge
+// with its own ground. `on` is the gate: OFF, this renders a fragment and
+// contributes NO element, which is how the old shell's flat status bar (and
+// every non-drafting surface) keeps its DOM byte-identical. Nothing is
+// conditional inside the region, so the branch is one comparison per render.
+export function FootRegion({ on, name, children }) {
+  if (!on) return <>{children}</>
+  return (
+    <span className={`foot-region foot-region-${name}`} data-testid={`foot-region-${name}`}>
+      {children}
+    </span>
+  )
+}
+
 const STATUS_TOGGLES = Object.freeze([
   { id: 'snap', label: 'Snap mode', icon: 'snap' },
   { id: 'grid', label: 'Grid display', icon: 'grid' },

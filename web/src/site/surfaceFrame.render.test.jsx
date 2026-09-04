@@ -349,6 +349,45 @@ if (CAPTURE) {
   })
 }
 
+// ---------------------------------------------------------------------------
+// DELIBERATE DIVERGENCES from the frozen fixture.
+//
+// The fixture is EVIDENCE: bytes captured on the untouched worktree at
+// origin/main 1a6d6630, before slice 4a edited anything. Regenerating it to
+// clear a failure would destroy exactly the property that makes it evidence,
+// and would re-capture every OTHER row from today's code at the same time.
+//
+// So a slice that changes the shell ON PURPOSE records the change here, one
+// scene:surface:slot at a time, with the reason. Every row not listed is
+// still compared against the frozen bytes, unchanged.
+const DIVERGENCES = {
+  // P1 studio-shell pass: solar declared chrome.productFrame TRUE, which put
+  // a 450px opaque marketing card in the console's flow over solar's OWN
+  // ribbon, document band and canvas (measured y=28..478 at 1512x950; ground
+  // top y=155; document band pushed from y~123 to y=585). Solar IS the CAD
+  // workspace on the solar tool set (operator directive 2026-09-01), so the
+  // contract now says false and this slot renders nothing — the same empty
+  // sequence console:cad has always had. See productSurfaces.js's solar
+  // record and surfaceGates.test.js's own DIVERGENCES table.
+  'console:solar': { frame: [] },
+}
+
+/** The expectation for one slot: the frozen fixture, unless this slot is a
+ *  recorded divergence. Never falls back silently — a key that names a slot
+ *  the fixture does not have would be a typo that quietly disabled a row. */
+function expected(key, slot) {
+  const override = DIVERGENCES[key]
+  if (override && slot in override) return override[slot]
+  return FIXTURE[key][slot]
+}
+
+/** Every slot of one case, divergences applied. */
+function expectedCase(key) {
+  const out = {}
+  for (const slot of SLOTS) out[slot] = expected(key, slot)
+  return out
+}
+
 describe.skipIf(CAPTURE)('SurfaceFrame — zero visual change against the captured shell', () => {
   it('the fixture covers every scene x surface case', () => {
     expect(Object.keys(FIXTURE).sort()).toEqual(CASES.map((c) => c.key).sort())
@@ -358,7 +397,7 @@ describe.skipIf(CAPTURE)('SurfaceFrame — zero visual change against the captur
     for (const testCase of CASES) {
       it(`${testCase.key} renders today's captured element sequence`, () => {
         const built = testCase.console ? todayConsole(testCase.surface) : todayStage(testCase.surface)
-        expect(capture(built)).toEqual(FIXTURE[testCase.key])
+        expect(capture(built)).toEqual(expectedCase(testCase.key))
       })
     }
   })
@@ -368,10 +407,29 @@ describe.skipIf(CAPTURE)('SurfaceFrame — zero visual change against the captur
       const built = () => framed(testCase.surface, { console: testCase.console })
       for (const slot of SLOTS) {
         it(`${testCase.key} · ${slot}`, () => {
-          expect(slotSequence(built()[slot])).toEqual(FIXTURE[testCase.key][slot])
+          expect(slotSequence(built()[slot])).toEqual(expected(testCase.key, slot))
         })
       }
     }
+  })
+
+  it('every recorded divergence names a real case and slot, and actually diverges', () => {
+    // A divergence table is dangerous in exactly two ways: a typo'd key that
+    // silently overrides nothing, and an entry left behind after the shell
+    // moved back, which would then be pinning the fixture's own value while
+    // claiming to be an exception. Both are caught here.
+    for (const [key, slots] of Object.entries(DIVERGENCES)) {
+      expect(Object.keys(FIXTURE)).toContain(key)
+      for (const [slot, value] of Object.entries(slots)) {
+        expect(SLOTS).toContain(slot)
+        expect(value).not.toEqual(FIXTURE[key][slot])
+      }
+    }
+    // And the one we expect today, by name, so silently emptying the table
+    // (which would make every row above compare to the frozen bytes again,
+    // and fail) cannot be mistaken for "the divergence was reverted".
+    expect(DIVERGENCES['console:solar'].frame).toEqual([])
+    expect(FIXTURE['console:solar'].frame.length).toBeGreaterThan(0)
   })
 
   it('the sequence probe would catch a changed class name (positive control)', () => {

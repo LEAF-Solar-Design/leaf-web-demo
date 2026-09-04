@@ -91,6 +91,17 @@
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) header.top .chip-act .key { font-size: 9px; padding: 0 4px; }
 .cockpit-quick { display: inline-flex; align-items: center; gap: 1px; height: var(--ck-top); }
 .cockpit-quick-slot { display: contents; }
+/* Below 981px the status bar keeps the OLD SHELL's flat layout (no regions:
+   App.jsx gates them on wideViewport, the same breakpoint). The P1 pass moved
+   the cursor readout and the drafting toggles below the build hash in the
+   DOM so the wide regions read left to right without `order:`; the narrow bar
+   has no regions to read, and its order IS its DOM order, so this one rule
+   puts the build hash back at the end where it has always been. Scoped to the
+   studio's drafting surfaces, which are the only place those two mounts
+   render at all. */
+@media (max-width: 980px) {
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar > span[style] { order: 1; }
+}
 .cockpit-quick button, .cockpit-strip button, .doc-tab-add, .cockpit-pane-tools button {
   width: 24px; height: 24px; padding: 0; border: 0; border-radius: 3px;
   background: transparent; color: var(--ck-ink); cursor: pointer;
@@ -509,16 +520,52 @@
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-mode:hover { color: var(--ck-ink); }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-mode[aria-pressed="true"] { color: #0b1a22; background: var(--ck-active); border-color: var(--ck-active); }
 
-  /* ---- y 911-940: the status bar ---- */
+  /* ---- y 911-940: the status bar, as THREE REGIONS ----
+     The bar is a grid of three real elements (FootRegion, App.jsx), not one
+     flex strip: documents at the left, our honesty band in the middle, the
+     drawing instruments anchored at the right. Before this pass `order:`
+     alone did the arranging, and the result measured as an unbroken run of
+     identical 1px-separated cells from x=505 to x=1504 — a coordinate
+     readout and a build hash sitting as neighbours in one strip. Region
+     grounds and edges are what separate them now; the `order:` block that
+     used to live below is gone, because DOM order IS the layout. */
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar {
     height: var(--ck-status); min-height: 0; box-sizing: border-box;
-    padding: 0 8px 0 0; gap: 0; flex-wrap: nowrap; overflow: hidden;
+    display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: stretch;
+    /* 30px clears the reference's menu glyph, drawn by ::before at left: 0. */
+    padding: 0 0 0 30px; gap: 0; overflow: hidden;
     background: var(--ck-recess); backdrop-filter: none; border-top: 2px solid #424242;
     font: 400 11px var(--ck-font); letter-spacing: 0; text-transform: none; color: #cfcfcf;
     font-variant-numeric: tabular-nums;
   }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar > * { height: 29px; padding: 0 8px; gap: 5px; white-space: nowrap; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar > * + * { border-left: 1px solid #383838; padding-left: 8px; }
+  /* A SEGMENT is a leaf inside a region (studio) or a direct child of the
+     bar (every other surface, where FootRegion renders no element). */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) :is(footer.foot-bar > :not(.foot-region), .foot-region > *) {
+    height: 29px; padding: 0 8px; gap: 5px; white-space: nowrap;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .foot-region {
+    display: flex; align-items: center; height: 29px; min-width: 0; padding: 0;
+  }
+  /* Documents: the reference's Model tab, the drawing, +. No internal rules —
+     the Model tab's own fill is the separation. */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .foot-region-docs { justify-content: flex-start; }
+  /* The honesty band: backend, solver, catalog fold, spend, build. These ARE
+     a list of like things, so they keep dividers BETWEEN them — the divider
+     now means "another signal", not "another cell in the bar". It yields
+     first when the bar is narrow (min-width: 0 + overflow), because a
+     coordinate readout and the document tabs must never be the thing that
+     gets clipped. */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .foot-region-system {
+    justify-content: flex-end; overflow: hidden; padding: 0 10px;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .foot-region-system > * + * { border-left: 1px solid #383838; }
+  /* The instruments: coordinates, scale, counts, selection, then the drafting
+     toggles. Its own recessed ground and lit left edge are what make it a
+     region at a glance rather than the far end of a strip. */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .foot-region-instruments {
+    justify-content: flex-end; padding-right: 6px; background: var(--ck-chrome);
+    box-shadow: inset 1px 0 0 var(--ck-edge);
+  }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar :is(.dim, .foot-stat, .ok-txt, .warn-txt) { color: #cfcfcf; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar .chip-act,
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar .chip-neutral {
@@ -588,28 +635,34 @@
 }
 .ci-glyph[data-size="large"] { font-size: 13px; }
 
-/* ---- W4e slice I: the status bar's composition ------------------------
+/* ---- W4e slice I / P1: the status bar's composition -------------------
    Reference, left to right: Model tab (#0f74a6), the drawing's name tab, +;
    then, at the right, coordinates, the drafting toggles, and the view
-   controls. Ours keeps its honesty signals (backend, solver, catalog fold)
-   as small muted segments after the coordinates. Flex order does the
-   arrangement; the DOM order (and every locator) is unchanged. */
+   controls. Ours keeps its honesty signals (backend, solver, catalog fold,
+   build) as a muted band between the two.
+
+   Slice I did this with flex `order:` on a flat bar, and the operator's read
+   of the result was correct: reordering is not grouping, and the bar still
+   rendered as one continuous strip. The arrangement is now the DOM's, in
+   three regions (see the block above); what survives here is the SKIN of the
+   individual segments, which the regions do not supply. */
 @media (min-width: 981px) {
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar > * { order: 5; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar > .cockpit-status-tabs { order: 1; padding: 0; gap: 0; border-left: 0; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar > .cockpit-status { order: 3; margin-left: auto; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar > .cockpit-status-toggles { order: 4; padding: 0 4px; gap: 2px; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar > :is(.foot-stat, .dim) { order: 6; color: #9a9a9a; font-size: 10.5px; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .foot-region-docs { padding: 0; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-status-tabs { padding: 0; gap: 0; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-status-toggles { padding: 0 4px; gap: 2px; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .foot-region-system :is(.foot-stat, .dim) { color: #9a9a9a; font-size: 10.5px; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar .ok-txt { color: #8fbf9f; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar .warn-txt { color: #c9a86a; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar > .chip-neutral { order: 2; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar > span[style] { order: 7; color: #9a9a9a; font-size: 10.5px; margin-left: 0 !important; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .foot-region-system > span[style] { color: #9a9a9a; font-size: 10.5px; margin-left: 0 !important; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar .foot-model-tab,
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar .foot-doc-tab,
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar .foot-doc-add {
     display: inline-flex; align-items: center; height: 29px; padding: 0 12px; font: 400 12px var(--ck-font); white-space: nowrap;
   }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar .foot-model-tab { background: var(--ck-model); color: #fff; margin-left: 30px; }
+  /* No margin hack for the menu glyph any more: the bar's own padding-left
+     reserves that 30px, so the region actually starts where it looks like it
+     starts and the docs region's edge is not a lie. */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar .foot-model-tab { background: var(--ck-model); color: #fff; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar .foot-doc-tab { color: #d4d4d4; max-width: 280px; overflow: hidden; text-overflow: ellipsis; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar .foot-doc-add {
     width: 29px; padding: 0; justify-content: center; border: 0; background: transparent; color: #d4d4d4; font-size: 15px; cursor: pointer;

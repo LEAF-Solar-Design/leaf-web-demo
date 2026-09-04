@@ -115,7 +115,10 @@ describe('product surface contract', () => {
 //
 //   ground          SurfaceGrounds.jsx:106 DRAWING_SURFACES = new Set(['cad','solar'])
 //                   e2e/local/one-shell-mount.spec.mjs:131 (board / device stage)
-//   productFrame    App.jsx:2838  activeSurface !== 'cad'
+//   productFrame    App.jsx:2838  activeSurface !== 'cad', EXCEPT solar,
+//                   which the P1 studio-shell pass flipped to false on
+//                   purpose (see the solar row's note and surfaceGates.test.js
+//                   DIVERGENCES); every other id still equals the literal
 //   workspaceCard   App.jsx:2859  activeSurface === 'cad' || activeSurface === 'solar'
 //   cockpit         App.jsx:2269  drafting = groundShowsDrawing(activeSurface),
 //                   mounted at App.jsx:2562 (band) and App.jsx:2898 (ribbon)
@@ -183,9 +186,12 @@ const CONTRACT_FIXTURE = {
   solar: {
     ground: 'drawing',
     scene: 'app',
-    // productFrame is TRUE on solar: App.jsx:2838 tests `!== 'cad'`, so the
-    // frame renders over the shown workspace card. Today's behaviour, pinned.
-    chrome: { productFrame: true, workspaceCard: true, cockpit: true, stageBranch: 'frame', projectSlot: null, tab: true },
+    // productFrame is FALSE on solar. The old site (App.jsx:2838) tested
+    // `!== 'cad'` and so rendered the frame OVER the shown workspace card;
+    // the P1 studio-shell pass fixed that, and this fixture row records the
+    // fixed value. stageBranch stays 'frame': the stage genuinely diverges
+    // from the console here (D1), and this pass did not touch the stage.
+    chrome: { productFrame: false, workspaceCard: true, cockpit: true, stageBranch: 'frame', projectSlot: null, tab: true },
     toolbar: { ribbon: true, home: 'draw', quick: null },
     rails: { left: 'spine', right: 'job-spine', dock: ['layers', 'drawing', 'selection', 'plan'] },
     groundMaterial: { layerAccent: 'solar', solarStrings: true },

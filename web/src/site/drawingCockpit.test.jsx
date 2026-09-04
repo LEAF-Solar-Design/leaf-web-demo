@@ -7,7 +7,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 
-import { CockpitStatus, ViewCluster, formatCoordinate, formatScale, zoomViewer } from './DrawingCockpit.jsx'
+import { CockpitStatus, FootRegion, ViewCluster, formatCoordinate, formatScale, zoomViewer } from './DrawingCockpit.jsx'
 
 afterEach(cleanup)
 
@@ -45,6 +45,64 @@ describe('ViewCluster', () => {
     expect(() => fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }))).not.toThrow()
     expect(zoomViewer(null, 2)).toBe(false)
     expect(zoomViewer({ getPose: () => null, setView: vi.fn() }, 2)).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// FootRegion (P1 studio-shell pass).
+//
+// The claim this pass makes is "the status bar is three REGIONS, not one
+// strip arranged by flex order". Two things have to hold for that to be true
+// rather than a restyle, and each is asserted here on the DOM itself:
+//
+//   ON  — the group is a real element that wraps exactly its own children,
+//         so a region edge exists to style. A test that only read a class
+//         name would pass against a wrapper that grouped the wrong nodes.
+//   OFF — the wrapper contributes NO element at all. That is what keeps the
+//         old shell's flat footer byte-identical, and "off renders a plain
+//         <span> with no class" would break it silently, so the assertion is
+//         on childElementCount, not on the class.
+// ---------------------------------------------------------------------------
+describe('FootRegion', () => {
+  const host = () => {
+    const el = document.createElement('footer')
+    document.body.appendChild(el)
+    return el
+  }
+
+  it('ON: wraps its children in one named region element', () => {
+    const { container } = render(
+      <FootRegion on name="instruments"><span className="a">A</span><span className="b">B</span></FootRegion>,
+      { container: host() },
+    )
+    const region = container.querySelector('.foot-region')
+    expect(region).not.toBeNull()
+    expect(region.className).toBe('foot-region foot-region-instruments')
+    expect(region.dataset.testid).toBe('foot-region-instruments')
+    // The children are INSIDE it, and are the only things inside it.
+    expect([...region.children].map((c) => c.className)).toEqual(['a', 'b'])
+    // ...and the region is the footer's only child: nothing leaked out beside it.
+    expect(container.childElementCount).toBe(1)
+  })
+
+  it('OFF: contributes no element, so the un-regioned footer is unchanged', () => {
+    const children = <><span className="a">A</span><span className="b">B</span></>
+    const off = render(<FootRegion on={false} name="instruments">{children}</FootRegion>, { container: host() })
+    expect(off.container.querySelector('.foot-region')).toBeNull()
+    // Byte-identity with rendering the same children with no wrapper at all.
+    const bare = render(<>{children}</>, { container: host() })
+    expect(off.container.innerHTML).toBe(bare.container.innerHTML)
+    expect(off.container.childElementCount).toBe(2)
+  })
+
+  it('OFF is the default posture for a falsy gate, never a truthy-ish one', () => {
+    // `on` reaches this from App.jsx as `Boolean(studioGround) && drafting`,
+    // so undefined/null/0 must all mean OFF — a region that appeared on a
+    // non-drafting surface would put a wrapper in the old shell's footer.
+    for (const gate of [undefined, null, 0, '']) {
+      const r = render(<FootRegion on={gate} name="docs"><span className="a">A</span></FootRegion>, { container: host() })
+      expect(r.container.querySelector('.foot-region')).toBeNull()
+    }
   })
 })
 
