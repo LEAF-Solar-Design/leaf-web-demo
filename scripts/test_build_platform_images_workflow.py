@@ -1840,12 +1840,8 @@ def main() -> None:
     # (leaf-github-web-demo-ecr-pull-role) and must never regain a push
     # credential -- the substring form also catches a push role reintroduced
     # in a comment as documentation of the old state.
-    harvest_block = text.split("
-  cve-harvest:
-", 1)[1].split(
-        "
-  handoff:
-", 1)[0]
+    harvest_block = text.split("\n  cve-harvest:\n", 1)[1].split(
+        "\n  handoff:\n", 1)[0]
     assert _assumed_roles(harvest_block) == [pull_role]
     assert "AWS_ECR_PUSH_ROLE" not in harvest_block
     assert "AWS_ECR_BUILDCACHE_PUSH_ROLE" not in harvest_block
