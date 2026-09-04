@@ -91,6 +91,24 @@ def test_read_fails_closed(tmp_path):
     assert br.read_terminal_receipt("missing", base=tmp_path) is None
 
 
+def test_write_clips_oversized_provenance_fields_so_the_receipt_stays_readable(tmp_path):
+    """B7 (writer/reader bound mismatch): `execution_path` and `error_code`
+    come from caller-controlled provenance/error dicts. Without a write-side
+    bound matching the reader's MAX_RECEIPT_BYTES, a large value writes a
+    receipt that then reads back as ABSENT forever, silently, with the file
+    still on disk."""
+    huge = "x" * (br.MAX_RECEIPT_BYTES * 2)
+    rec = dict(_terminal(), provenance={"attempt": 1, "execution_path": huge, "fallback": False},
+               error={"error_code": huge}, status="failed")
+    path = br.write_terminal_receipt(rec, base=tmp_path)
+    assert path is not None
+    assert path.stat().st_size <= br.MAX_RECEIPT_BYTES
+    read = br.read_terminal_receipt("a1b2c3", base=tmp_path)
+    assert read is not None, "an oversized provenance field must not make the whole receipt unreadable"
+    assert len(read["execution_path"]) == br.MAX_WRITE_FIELD_CHARS
+    assert len(read["error_code"]) == br.MAX_WRITE_FIELD_CHARS
+
+
 def test_receipts_dir_prefers_the_env_override_then_sits_beside_the_jobs_db(monkeypatch, tmp_path):
     monkeypatch.setenv("LEAF_BUILD_RECEIPTS_DIR", str(tmp_path / "elsewhere"))
     assert br.receipts_dir() == tmp_path / "elsewhere"

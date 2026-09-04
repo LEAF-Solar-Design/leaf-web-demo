@@ -73,6 +73,28 @@ def _digest(body: Dict[str, Any]) -> str:
     return hashlib.sha256(_canonical(without)).hexdigest()
 
 
+def _write_str(value: Any) -> str:
+    """A required text field going INTO a written receipt: coerced to str
+    (matches the pre-hardening `str(x or "")` behaviour) then clipped to
+    MAX_WRITE_FIELD_CHARS."""
+    return str(value or "")[:MAX_WRITE_FIELD_CHARS]
+
+
+def _write_opt_str(value: Any) -> Optional[str]:
+    """An optional text field going INTO a written receipt, clipped to
+    MAX_WRITE_FIELD_CHARS.
+
+    The reader enforces MAX_RECEIPT_BYTES (16 KB) on the whole file; without a
+    matching bound here, an oversized `execution_path` or `error_code` (both
+    copied from caller-controlled provenance/error dicts) could push a single
+    receipt over that cap, and it would then read back as ABSENT forever with
+    the file still sitting on disk, silently.
+    """
+    if not isinstance(value, str):
+        return None
+    return value[:MAX_WRITE_FIELD_CHARS]
+
+
 def build_receipt(rec: Dict[str, Any], *, source_sha: Optional[str] = None,
                   now: Optional[float] = None) -> Optional[Dict[str, Any]]:
     """The receipt body for a TERMINAL job record, or None when the record is
@@ -85,16 +107,16 @@ def build_receipt(rec: Dict[str, Any], *, source_sha: Optional[str] = None,
     body: Dict[str, Any] = {
         "schema": SCHEMA,
         "job_id": job_id,
-        "tenant_id": str(rec.get("tenant_id") or ""),
-        "tool": str(rec.get("tool") or ""),
+        "tenant_id": _write_str(rec.get("tenant_id")),
+        "tool": _write_str(rec.get("tool")),
         "status": rec["status"],
         "attempt": int(rec.get("attempt") or 0),
-        "execution_path": provenance.get("execution_path"),
+        "execution_path": _write_opt_str(provenance.get("execution_path")),
         "fallback": bool(provenance.get("fallback", False)),
         "created_at": rec.get("created_at"),
         "finished_at": rec.get("finished_at"),
         "elapsed_ms": rec.get("elapsed_ms"),
-        "error_code": error.get("error_code") if error else None,
+        "error_code": _write_opt_str(error.get("error_code")) if error else None,
         "source_sha": source_sha if source_sha else os.environ.get("LEAF_SOURCE_SHA", "unknown"),
         "written_at": float(now if now is not None else time.time()),
     }
