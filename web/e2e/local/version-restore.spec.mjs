@@ -1,6 +1,17 @@
 import { expect, test } from '@playwright/test'
 import { REQUEST, catProofResponse, makeCatProofState } from '../catProofFixture.mjs'
 
+// A DRAWING mutation, which is what "read-only preview" is about. Telemetry is
+// a non-GET too, but it carries no drawing write and the surface emits it on
+// interaction (including the preview click itself), so counting it makes the
+// preview assertion flaky in a way that says nothing about read-only-ness.
+// Everything else non-GET still counts, so a real write during a preview
+// fails these rows exactly as before.
+const TELEMETRY_PATHS = new Set(['/api/telemetry'])
+function isDrawingMutation(method, path) {
+  return method !== 'GET' && !TELEMETRY_PATHS.has(path)
+}
+
 function versionRows(head) {
   return [
     { v: 1, parent: null, tool: 'base', note: 'Original drawing', delta: null },
@@ -30,9 +41,9 @@ async function mountVersionSurface(page, {
   let restoreCount = 0
   let intakeReadsAfterRestore = 0
   let deltasRequested = false
-  // Every non-GET request the surface makes to the API. A read-only preview
-  // must add NOTHING to this list; asserting on disabled buttons alone would
-  // pass against a UI that greys a control and still fires the request.
+  // Every drawing-mutating request the surface makes to the API. A read-only
+  // preview must add NOTHING to this list; asserting on disabled buttons alone
+  // would pass against a UI that greys a control and still fires the request.
   const mutating = []
   let releaseHistoryRefresh
   const historyRefreshGate = new Promise((resolve) => { releaseHistoryRefresh = resolve })
@@ -43,7 +54,7 @@ async function mountVersionSurface(page, {
     const method = request.method()
     const path = url.pathname
     const body = request.postData() ? request.postDataJSON() : {}
-    if (method !== 'GET') mutating.push(`${method} ${path}`)
+    if (isDrawingMutation(method, path)) mutating.push(`${method} ${path}`)
     let result
 
     if (path === '/api/drawings/cat-panels/versions' && method === 'GET') {
@@ -320,7 +331,7 @@ test('/try requests deltas like /app and still hides recovery controls while its
     const request = route.request()
     const url = new URL(request.url())
     if (url.pathname.includes('/versions')) versionQueries.push(url.search)
-    if (request.method() !== 'GET') mutating.push(`${request.method()} ${url.pathname}`)
+    if (isDrawingMutation(request.method(), url.pathname)) mutating.push(`${request.method()} ${url.pathname}`)
     const body = request.postData() ? request.postDataJSON() : {}
     const result = catProofResponse({
       method: request.method(), path: url.pathname, body,

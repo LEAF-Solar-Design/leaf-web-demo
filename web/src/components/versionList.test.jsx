@@ -112,7 +112,7 @@ describe('authored-tool provenance chip', () => {
       )
       const chips = container.querySelectorAll('[data-testid="vh-source-ref"]')
       expect(chips.length).toBe(1)
-      expect(chips[0].textContent).toBe(`authored by Claude · ${RECEIPT.slice(0, 8)}`)
+      expect(chips[0].textContent).toBe(`authored tool · ${RECEIPT.slice(0, 8)}`)
       // The full digest rides the title; only 8 characters are shown.
       expect(chips[0].getAttribute('title')).toBe(`Authored tool receipt ${RECEIPT}`)
       unmount()
@@ -131,6 +131,25 @@ describe('authored-tool provenance chip', () => {
     const { container } = render(<SourceRefChip sourceRef={RECEIPT} />)
     expect(container.querySelector('a')).toBe(null)
     expect(container.innerHTML).not.toContain('href')
+  })
+
+  // The receipt behind this digest (ToolSourceReceipt: contract,
+  // source_sha256, manifest_sha256, byte counts, entry, manifest) carries NO
+  // author, no model and no session identity, so the chip must not name one.
+  // A human-written or differently-modelled registered tool gets this same
+  // chip, and claiming otherwise would be exactly the invention this surface
+  // forbids. This row fires on EVERY authored version, on every tier.
+  it('claims only what the digest proves — never a model or a person', () => {
+    const { container } = render(<SourceRefChip sourceRef={RECEIPT} />)
+    const chip = container.querySelector('[data-testid="vh-source-ref"]')
+    expect(chip.textContent).toBe(`authored tool · ${RECEIPT.slice(0, 8)}`)
+    const rendered = `${chip.textContent} ${chip.getAttribute('title')}`.toLowerCase()
+    for (const identity of [
+      'claude', 'anthropic', 'gpt', 'openai', 'copilot', 'model',
+      'by evan', 'human', 'ai ',
+    ]) {
+      expect(rendered).not.toContain(identity)
+    }
   })
 })
 

@@ -72,6 +72,13 @@ export function DeltaChip({ delta }) {
 // `_source_ref`), so anything that reaches here is 64 lowercase hex or null.
 // This chip renders ONLY when a row actually carries one — absence means "not
 // established", and this file never invents an author for a version.
+//
+// It says "authored tool", not who or what wrote that tool, because the
+// receipt behind the digest carries NO author identity: `ToolSourceReceipt`
+// (harness/contract/HARNESS-CONTRACT.md) is exact paths, byte counts and
+// digests only. The digest proves "these bytes came from a tool source with
+// this digest" and nothing more, so naming a model or a person here would be
+// the same invention this surface forbids everywhere else.
 export function SourceRefChip({ sourceRef }) {
   if (typeof sourceRef !== 'string' || sourceRef.length === 0) return null
   return (
@@ -80,7 +87,7 @@ export function SourceRefChip({ sourceRef }) {
       data-testid="vh-source-ref"
       title={`Authored tool receipt ${sourceRef}`}
     >
-      authored by Claude · {sourceRef.slice(0, 8)}
+      authored tool · {sourceRef.slice(0, 8)}
     </span>
   )
 }

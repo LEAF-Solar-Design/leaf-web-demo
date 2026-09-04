@@ -31,8 +31,21 @@ def _mutations():
     return {"removed": ["A"], "added": [added]}
 
 
-def _planner(mutations=None):
+# A passing `leaf.tool-execution.v1` microvm receipt: the ONLY provenance the
+# write path may stamp onto a version (write_loop `_valid_microvm_provenance`).
+MICROVM_RECEIPT = {
+    "contract": "leaf.tool-execution.v1", "provider": "e2b",
+    "isolation": "microvm", "passed": True,
+    "source_sha256": "a" * 64,
+}
+
+
+def _planner(mutations=None, provenance=None):
     calls = []
+    envelope_provenance = (
+        copy.deepcopy(MICROVM_RECEIPT) if provenance is None
+        else copy.deepcopy(provenance)
+    )
 
     def run(*args, **kwargs):
         calls.append((args, kwargs))
@@ -41,11 +54,7 @@ def _planner(mutations=None):
             "result": {"mutations": copy.deepcopy(mutations or _mutations()),
                        "planner_value": "preserved"},
             "overlay": {"kind": "preserved"},
-            "execution_provenance": {
-                "contract": "leaf.tool-execution.v1", "provider": "e2b",
-                "isolation": "microvm", "passed": True,
-                "source_sha256": "a" * 64,
-            },
+            "execution_provenance": copy.deepcopy(envelope_provenance),
             "timing_ms": 1, "cost": None, "degraded_mode": False,
         }
 
@@ -754,3 +763,87 @@ def test_live_publish_uses_parent_head_cas(monkeypatch, tmp_path):
     assert status == 400 and "stale parent" in env["error"]["message"]
     assert observed["require_parent_is_head"] is True
     assert store.load_manifest(backend, "tenant", "drawing")["head"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Provenance is receipt-backed or absent (standardization slice 6a, fix round)
+#
+# `binding["tool_source_sha256"]` is what the PLANNER asserted about its own
+# source. On the `subprocess` sandbox tier (LEAF_SANDBOX != e2b, which
+# broker.py permits for tenant-authored tools outside production) no receipt
+# stands behind that assertion, and tool_loader adopts a tool's own
+# `{ok, result}` return whole without overwriting `execution_provenance`. So a
+# tenant-authored tool body could name any 64-hex digest and have it stamped
+# permanently into the version chain and rendered as an authorship claim.
+# The stamp therefore fires ONLY on a passing microvm receipt.
+# ---------------------------------------------------------------------------
+def _capture_version_meta(monkeypatch):
+    """Record the meta stamped on the committed version, still committing it."""
+    seen = {}
+    real = write_loop._put_bytes_version
+
+    def capturing(*args, **kwargs):
+        seen["meta"] = copy.deepcopy(kwargs.get("meta"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(write_loop, "_put_bytes_version", capturing)
+    return seen
+
+
+def test_live_stamps_source_ref_from_a_passing_microvm_receipt(monkeypatch, tmp_path):
+    backend = _store(tmp_path)
+    planner, _ = _planner()
+    seen = _capture_version_meta(monkeypatch)
+    env, status = write_loop.run_write_live(
+        {"name": "author-tool", "version": "1"},
+        {"drawing_id": "drawing"}, "tenant", backend=backend,
+        da=FakeDa(_actual_success()), t0=time.perf_counter(),
+        run_tool_dynamic_fn=planner,
+    )
+    assert status == 200
+    assert seen["meta"]["source_ref"] == "a" * 64
+    assert env["result"]["mutation_binding"]["tool_source_sha256"] == "a" * 64
+    rows = store.load_manifest(backend, "tenant", "drawing")["versions"]
+    assert [r.get("source_ref") for r in rows] == [None, "a" * 64]
+
+
+@pytest.mark.parametrize("provenance", [
+    # The subprocess tier: a real posture, no receipt, forged digest.
+    {"contract": "leaf.tool-execution.v1", "provider": "subprocess",
+     "isolation": "process", "passed": True, "source_sha256": "b" * 64},
+    # Right provider, right isolation, but the run did not pass.
+    {"contract": "leaf.tool-execution.v1", "provider": "e2b",
+     "isolation": "microvm", "passed": False, "source_sha256": "b" * 64},
+    # Right provider, wrong isolation.
+    {"contract": "leaf.tool-execution.v1", "provider": "e2b",
+     "isolation": "process", "passed": True, "source_sha256": "b" * 64},
+    # A tool that simply asserts a digest and nothing else.
+    {"source_sha256": "b" * 64},
+    # A digest that is not a sha256 at all.
+    {"contract": "leaf.tool-execution.v1", "provider": "e2b",
+     "isolation": "microvm", "passed": True, "source_sha256": "not-a-digest"},
+    # No provenance whatsoever.
+    {},
+], ids=["subprocess-tier", "not-passed", "wrong-isolation",
+        "bare-assertion", "not-a-sha256", "absent"])
+def test_a_planner_assertion_without_a_receipt_is_never_stamped(
+        monkeypatch, tmp_path, provenance):
+    backend = _store(tmp_path)
+    planner, _ = _planner(provenance=provenance)
+    seen = _capture_version_meta(monkeypatch)
+    env, status = write_loop.run_write_live(
+        {"name": "author-tool", "version": "1"},
+        {"drawing_id": "drawing"}, "tenant", backend=backend,
+        da=FakeDa(_actual_success()), t0=time.perf_counter(),
+        run_tool_dynamic_fn=planner,
+    )
+    # The write itself still succeeds outside the protected production
+    # posture — what fails closed is the PROVENANCE CLAIM, not the write.
+    assert status == 200
+    assert seen["meta"]["source_ref"] is None
+    rows = store.load_manifest(backend, "tenant", "drawing")["versions"]
+    assert [r.get("source_ref") for r in rows] == [None, None]
+    # The binding still records what the planner asserted (it is a binding
+    # fact, not a provenance claim); only the STAMP is gated.
+    asserted = provenance.get("source_sha256")
+    assert env["result"]["mutation_binding"]["tool_source_sha256"] == asserted

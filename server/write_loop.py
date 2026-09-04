@@ -1923,13 +1923,23 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                 parent_version=head_v,
                 meta={"tool": name, "workitem_id": status.get("id"),
                       "plan_sha256": plan_digest,
-                      # The `leaf.tool-source.v1` receipt digest the sandboxed
-                      # planner reported for THIS tool's source + manifest,
-                      # already bound into `binding` above. It is the only
-                      # provenance the write path can vouch for; every other
-                      # write site leaves it unset, and an unset value reads
-                      # as null rather than as an unauthored version.
-                      "source_ref": binding["tool_source_sha256"],
+                      # RECEIPT-BACKED ONLY, fails closed on every other tier.
+                      # `binding["tool_source_sha256"]` is what the planner
+                      # ASSERTED about its own source; on the `subprocess`
+                      # sandbox tier (LEAF_SANDBOX != e2b, and broker.py
+                      # permits that posture for tenant-authored tools outside
+                      # production) NO receipt stands behind that assertion, so
+                      # a tenant-authored tool body could put any 64-hex string
+                      # in its own `execution_provenance` and have it stamped
+                      # permanently into the version chain. So stamp the digest
+                      # only when the envelope carries a passing
+                      # `leaf.tool-execution.v1` microvm receipt over it. An
+                      # unstamped version reads as null, "provenance not
+                      # established", never as a forged authorship claim.
+                      "source_ref": (
+                          binding["tool_source_sha256"]
+                          if _valid_microvm_provenance(provenance) else None
+                      ),
                       "note": "live authored mutation plan"},
                 holder=holder, fence=fence, require_parent_is_head=True,
             )
