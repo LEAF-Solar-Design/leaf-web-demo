@@ -696,6 +696,63 @@ describe('the command prompt (W4e slice H): a tool arms, the command line asks i
     expect(run().disabled).toBe(false)
   })
 
+  it('a point field takes the command line\'s grammar: x,y, @dx,dy, dist<angle and @dist<angle resolve against the previous point, commit as numbers on the run, and a bad one is named (W4f-8)', async () => {
+    const studio = mount()
+    await openAndLoad(studio, [LINE])
+    const note = () => screen.queryByTestId('cockpit-prompt-note')
+    const run = () => screen.getByTestId('cockpit-prompt-run')
+    const lastPosted = () => { const p = studio.workers[0].posted; return p[p.length - 1] }
+    fireEvent.click(drawTool('createLine'))
+    // Relative to the first point (0,0): the fields keep the text, Run is
+    // live, the run posts the resolved numbers and writes them back.
+    fireEvent.change(screen.getByLabelText('ribbon x2'), { target: { value: '@10,5' } })
+    expect(note()).toBeNull()
+    expect(run().disabled).toBe(false)
+    expect(screen.getByLabelText('ribbon x2').getAttribute('aria-invalid')).toBeNull()
+    fireEvent.keyDown(screen.getByLabelText('ribbon x2'), { key: 'Enter' })
+    expect(lastPosted()).toEqual({ type: 'applyEdit', op: 'createLine', payload: { x1: 0, y1: 0, x2: 10, y2: 5, layer: '' } })
+    expect(screen.getByLabelText('ribbon x2').value).toBe('10')
+    expect(screen.getByLabelText('ribbon y2').value).toBe('5')
+    studio.workers[0].emit({ ...editApplied('createLine', [LINE, { ...LINE, id: 'e9' }]), createdId: 'e9' })
+    // The chain now starts at (10,5): a relative polar next point measures
+    // from there; an absolute polar measures from the origin.
+    expect(studio.context.armed.from).toEqual([10, 5])
+    fireEvent.change(screen.getByLabelText('ribbon x2'), { target: { value: '@20<90' } })
+    expect(note()).toBeNull()
+    fireEvent.keyDown(screen.getByLabelText('ribbon x2'), { key: 'Enter' })
+    expect(lastPosted().payload).toEqual({ x1: 10, y1: 5, x2: 10, y2: 25, layer: '' })
+    studio.workers[0].emit({ ...editApplied('createLine', [LINE, { ...LINE, id: 'e9' }, { ...LINE, id: 'e10' }]), createdId: 'e10' })
+    fireEvent.change(screen.getByLabelText('ribbon x2'), { target: { value: '10<180' } })
+    fireEvent.keyDown(screen.getByLabelText('ribbon x2'), { key: 'Enter' })
+    expect(lastPosted().payload).toEqual({ x1: 10, y1: 25, x2: -10, y2: 0, layer: '' })
+    studio.workers[0].emit({ ...editApplied('createLine', [LINE, { ...LINE, id: 'e9' }, { ...LINE, id: 'e10' }, { ...LINE, id: 'e11' }]), createdId: 'e11' })
+    // A first point may be relative too, to the chain point; without one
+    // (a fresh arming) "@" has nothing to measure from and says so.
+    fireEvent.change(screen.getByLabelText('ribbon x'), { target: { value: '@1,1' } })
+    fireEvent.change(screen.getByLabelText('ribbon x2'), { target: { value: '5,5' } })
+    expect(note()).toBeNull()
+    fireEvent.keyDown(screen.getByLabelText('ribbon x'), { key: 'Escape' })
+    fireEvent.click(drawTool('createLine'))
+    fireEvent.change(screen.getByLabelText('ribbon x'), { target: { value: '@1,1' } })
+    expect(note().textContent).toBe('LINE refused: "@" needs a previous point to measure from.')
+    expect(screen.getByLabelText('ribbon x').getAttribute('aria-invalid')).toBe('true')
+    expect(run().disabled).toBe(true)
+    // A malformed expression is named, and the y field is not blamed.
+    fireEvent.change(screen.getByLabelText('ribbon x'), { target: { value: '10,5,6' } })
+    expect(note().textContent).toBe('LINE refused: "10,5,6" is not a point: use x,y, @dx,dy, dist<angle or @dist<angle.')
+    expect(screen.getByLabelText('ribbon y').getAttribute('aria-invalid')).toBeNull()
+    fireEvent.change(screen.getByLabelText('ribbon x'), { target: { value: '3,4' } })
+    expect(note()).toBeNull()
+    // A displacement takes the grammar from the origin: "10<90" moves by (0, 10).
+    fireEvent.keyDown(screen.getByLabelText('ribbon x'), { key: 'Escape' })
+    fireEvent.click(screen.getAllByRole('radio')[0])
+    act(() => { studio.context.setArmed({ group: 'modify', op: 'move' }) })
+    fireEvent.change(screen.getByLabelText('ribbon dx'), { target: { value: '10<90' } })
+    expect(note()).toBeNull()
+    fireEvent.keyDown(screen.getByLabelText('ribbon dx'), { key: 'Enter' })
+    expect(lastPosted()).toEqual({ type: 'applyEdit', op: 'move', payload: { entityId: 'e1', dx: 0, dy: 10 } })
+  })
+
   it('an open dialog owns Esc even when its opener kept focus outside the layer', async () => {
     const studio = mount()
     await openAndLoad(studio, [LINE])

@@ -36,6 +36,7 @@ import { QuickButton, QUICK_FILE_SLOT_ID } from '../site/CockpitTopBand.jsx'
 
 import { SESSION_ERROR, buildCreatePayload, buildEditPayload } from './engineSession.js'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
+import { isPointExpression, pointExpressionRefusal, resolvePointExpression } from './pointExpression.js'
 
 // W4f-6: the store's own number reading (a field that parses to a finite
 // number is what a run would take), so the outline and the sentence agree.
@@ -249,13 +250,44 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // chained LINE, a cleared radius) is a step still waiting, not a mistake:
   // Run waits quietly with that step's ask as its title, no sentence, no
   // outline, as the reference's prompt simply keeps asking.
-  const waitingStep = prompt
-    ? prompt.steps.find((step) => step.fields.some(([key, , mode = 'decimal']) => mode === 'decimal' && String(inputs[key] ?? '').trim() === ''))
+  // W4f-8: a point step's FIRST field may hold the command line's point
+  // grammar ("x,y", "@dx,dy", "dist<angle", "@dist<angle") instead of a
+  // number. It resolves against the step's anchor (the previous point: the
+  // chain point for a first point, the first point for a next point, the
+  // origin for a displacement) into both fields' EFFECTIVE values, which is
+  // what validation and the run read; the typed text stays in the field
+  // until the run commits the numbers, so the record and the chain carry
+  // plain numbers, as a pick would. A step is a point step when it asks for
+  // exactly two decimal operands.
+  const pointSteps = prompt
+    ? prompt.steps.filter((step) => step.fields.length === 2 && step.fields.every(([, , mode = 'decimal']) => mode === 'decimal'))
+    : []
+  const effective = { ...inputs }
+  let expressionRefusal = ''
+  let previousPoint = armed && armed.from ? [armed.from[0], armed.from[1]] : null
+  for (const step of pointSteps) {
+    const [[kx], [ky]] = step.fields
+    const isDelta = kx === 'dx'
+    const anchor = isDelta ? [0, 0] : previousPoint
+    const raw = inputs[kx]
+    if (isPointExpression(raw)) {
+      const point = resolvePointExpression(raw, anchor)
+      if (point) { effective[kx] = String(point[0]); effective[ky] = String(point[1]) }
+      else if (!expressionRefusal) expressionRefusal = `${prompt.verb} refused: ${pointExpressionRefusal(raw, anchor)}`
+    }
+    if (!isDelta) {
+      const px = Number.parseFloat(effective[kx])
+      const py = Number.parseFloat(effective[ky])
+      if (Number.isFinite(px) && Number.isFinite(py)) previousPoint = [px, py]
+    }
+  }
+  const waitingStep = prompt && !expressionRefusal
+    ? prompt.steps.find((step) => step.fields.some(([key, , mode = 'decimal']) => mode === 'decimal' && String(effective[key] ?? '').trim() === ''))
     : null
   const liveRefusal = prompt && !promptReason && !waitingStep
-    ? ((armedGroup === 'draw'
-      ? buildCreatePayload(armedOp, inputs)
-      : buildEditPayload(armedOp, session.selectedId, inputs)).refusal || '')
+    ? (expressionRefusal || (armedGroup === 'draw'
+      ? buildCreatePayload(armedOp, effective)
+      : buildEditPayload(armedOp, session.selectedId, effective)).refusal || '')
     : ''
   const runOff = promptOff || !!liveRefusal || !!waitingStep
   const runReason = promptReason || liveRefusal
@@ -266,9 +298,15 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const chainRef = useRef(null)
   const run = () => {
     if (!prompt || runOff) return
-    chainRef.current = armedOp === 'createLine' ? { x: inputs.x2, y: inputs.y2 } : null
-    if (armedGroup === 'draw') create(armedOp, inputs)
-    else applyEdit(armedOp, inputs)
+    // Commit resolved expressions as numbers before the engine sees them:
+    // the fields, the record and the chain all carry what was drawn.
+    for (const step of pointSteps) {
+      const [[kx], [ky]] = step.fields
+      if (isPointExpression(inputs[kx])) { setInput(kx, effective[kx]); setInput(ky, effective[ky]) }
+    }
+    chainRef.current = armedOp === 'createLine' ? { x: effective.x2, y: effective.y2 } : null
+    if (armedGroup === 'draw') create(armedOp, effective)
+    else applyEdit(armedOp, effective)
   }
   const cancel = () => {
     const toolId = armed ? `${armed.group}:${armed.op}` : ''
@@ -441,7 +479,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     }
     // A numeric field that does not read as a number while the command is
     // refused is the one to fix: outlined, and named by the note.
-    const invalid = mode === 'decimal' && !!liveRefusal && !readsAsNumber(inputs[key])
+    const invalid = mode === 'decimal' && !!liveRefusal && !readsAsNumber(effective[key])
     return (
       <input
         key={`${key}:${label}`}
