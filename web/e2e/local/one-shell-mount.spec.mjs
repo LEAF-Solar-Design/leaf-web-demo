@@ -113,9 +113,13 @@ test.describe('route matrix, rail ON', () => {
     const hit = await page.evaluate(() => {
       const r = document.querySelector('.studio-shell .viewer-wrap').getBoundingClientRect()
       const el = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
-      return { tag: el?.tagName, inGround: !!el?.closest('.studio-ground') }
+      // Name what was hit. Two reds on slow walks reported only <DIV>, which
+      // is not evidence: a dissolving boot overlay and a real click shield
+      // look the same as a tag name and nothing alike as a class.
+      const describe = (node) => (node ? `${node.tagName}#${node.id || ''}.${String(node.className || '').trim().replace(/\s+/g, '.')}` : 'null')
+      return { tag: el?.tagName, what: describe(el), parent: describe(el?.parentElement), inGround: !!el?.closest('.studio-ground') }
     })
-    expect(hit.inGround, `elementFromPoint hit <${hit.tag}> outside the ground`).toBe(true)
+    expect(hit.inGround, `elementFromPoint hit ${hit.what} (in ${hit.parent}) outside the ground`).toBe(true)
   })
 
   test('/app/* and /ty/* sub-paths, and every boot query off /try, are the same console mode', async ({ page, request }) => {
