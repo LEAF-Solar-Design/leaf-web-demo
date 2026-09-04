@@ -27,7 +27,9 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import useExit from '../useExit.js'
 import { authHeaders, config, noteUnauthorized } from '../api.js'
 import { modChord } from '../lib/keys.js'
+import { findSecrets, maskForNotice } from '../lib/secretPatterns.js'
 import { isWriteTool } from '../lib/toolRecord.js'
+import { track } from '../telemetry.js'
 import CockpitIcon from '../site/CockpitIcon.jsx'
 import {
   appendPromptHistory,
@@ -51,6 +53,24 @@ import {
 // `mcp` is the one command with no server entry, so this client contributes
 // both its row and its handler. Built once at module load, like the registry.
 const STATIC_COMMANDS = slashStaticEntries()
+
+// The credential-refusal copy, one frozen sentence per pattern id (slice 8a).
+// The honesty ladder's rule: the notice names WHAT was recognised, states the
+// rule plainly, and points at the surface that actually solves it — it never
+// says "blocked" without a next step, and it never echoes the credential.
+// Pinned character-for-character by PromptBox.secretGuard.test.jsx, so a
+// reword is a deliberate act, not a drive-by.
+export const SECRET_REASONS = Object.freeze({
+  anthropic: 'That looks like an Anthropic API key. Credentials never go to the model. Mount it under Link a service instead.',
+  openai: 'That looks like an OpenAI API key. Credentials never go to the model. Mount it under Link a service instead.',
+  github: 'That looks like a GitHub token. Credentials never go to the model. Mount it under Link a service instead.',
+  aws_access_key: 'That looks like an AWS access key ID. Credentials never go to the model. Mount it under Link a service instead.',
+  aws_secret_key: 'That looks like an AWS secret access key. Credentials never go to the model. Mount it under Link a service instead.',
+  slack: 'That looks like a Slack token. Credentials never go to the model. Mount it under Link a service instead.',
+  jwt: 'That looks like a JSON Web Token. Credentials never go to the model. Mount it under Link a service instead.',
+  private_key: 'That looks like a private key. Credentials never go to the model. Mount it under Link a service instead.',
+  generic: 'That looks like a credential. Credentials never go to the model. Mount it under Link a service instead.',
+})
 
 // The bar's scopes, mapped onto the app's lanes (find→run · act→solve ·
 // build→author). Selecting find/act returns you to the composer (the router
@@ -102,6 +122,12 @@ export default function PromptBox({
   const [mcpServers, setMcpServers] = useState([])
   const [attachments, setAttachments] = useState([])
   const [attachmentError, setAttachmentError] = useState(null)
+  // The credential refusal (slice 8a): `{id, reason, masked, overridable}`, or
+  // null. It carries a MASK, never the value — see maskForNotice.
+  const [secretNotice, setSecretNotice] = useState(null)
+  // Armed by an explicit "Send anyway" click and disarmed by the very next
+  // dispatch, so an override is genuinely once and can never latch open.
+  const secretOverrideRef = useRef(false)
   const attachmentUrlsRef = useRef(new Set())
   const historyRef = useRef(createPromptHistoryState(sessionId))
 
@@ -176,8 +202,10 @@ export default function PromptBox({
   // once. scopeMenu.shown covers both the open and the fading state.
   const menuOpen = !!trigger && !menuDismissed && !routeActive && !scopeMenu.shown
 
-  // Any edit re-arms a dismissed menu and re-anchors the highlight.
-  useEffect(() => { setMenuDismissed(false); setMenuIdx(0) }, [value])
+  // Any edit re-arms a dismissed menu and re-anchors the highlight — and
+  // retires the credential refusal, which is about the text that WAS there.
+  // A notice that outlived its text would read as a stuck error.
+  useEffect(() => { setMenuDismissed(false); setMenuIdx(0); setSecretNotice(null) }, [value])
   const idx = Math.min(menuIdx, Math.max(0, matches.length - 1))
 
   // Tab: complete the name into the input (trailing space closes the menu and
@@ -189,6 +217,33 @@ export default function PromptBox({
   }
   const dispatchPrompt = (override) => {
     const sent = typeof override === 'string' ? override : value
+    // --- credential guard (slice 8a) -------------------------------------
+    // The ONE choke point: Enter, the Run chip and a picked slash command all
+    // arrive here, so a token-shaped paste cannot reach model context through
+    // any of them. Fails CLOSED — any hit refuses, and only a wholly
+    // overridable hit set (the fuzzy generic pattern) offers a way past.
+    // Read-and-disarm the override first so a throw below cannot leave it set.
+    const allowedOnce = secretOverrideRef.current
+    secretOverrideRef.current = false
+    if (!allowedOnce) {
+      const hits = findSecrets(sent)
+      if (hits.length > 0) {
+        // Report the strongest hit: a named token shape outranks the generic
+        // one, so a paste containing both is never described as overridable.
+        const worst = hits.find((hit) => !hit.overridable) || hits[0]
+        setSecretNotice({
+          id: worst.id,
+          reason: SECRET_REASONS[worst.id] || SECRET_REASONS.generic,
+          masked: maskForNotice(sent, worst),
+          overridable: hits.every((hit) => hit.overridable),
+        })
+        // Pattern identity ONLY. The value reaches no log, no telemetry payload
+        // and no DOM node outside the masked span.
+        track('prompt.secret_refused', { pattern_id: worst.id })
+        return Promise.resolve(undefined)
+      }
+    }
+    setSecretNotice(null)
     if (sent.trim() && !routing) {
       historyRef.current = appendPromptHistory(historyRef.current, sent, sessionId)
     }
@@ -493,6 +548,30 @@ export default function PromptBox({
             style={{ height: autoGrowHeight(value), resize: 'none', overflowY: 'auto' }}
           />
         </div>
+        {secretNotice && (
+          <div className="bar-secret-notice" role="alert" data-testid="secret-notice">
+            <span className="dot red" aria-hidden="true" />
+            <span className="strip-sentence" data-testid="secret-notice-reason">{secretNotice.reason}</span>
+            {/* At most a four-character shape prefix behind a fixed bullet run
+                (maskForNotice). This is the ONLY place any character of the
+                pasted credential is rendered, and it is never the entropy. */}
+            <span className="dim" data-testid="secret-notice-mask">{secretNotice.masked}</span>
+            {secretNotice.overridable && (
+              <button
+                type="button"
+                className="chip-neutral"
+                data-testid="secret-send-anyway"
+                onClick={() => {
+                  secretOverrideRef.current = true
+                  setSecretNotice(null)
+                  dispatchPrompt()
+                }}
+              >
+                Send anyway
+              </button>
+            )}
+          </div>
+        )}
         {(attachmentError || attachments.length > 0) && (
           <div className="converse-note" role={attachmentError ? 'alert' : undefined}>
             {attachmentError && <span className="dim">{attachmentError}</span>}

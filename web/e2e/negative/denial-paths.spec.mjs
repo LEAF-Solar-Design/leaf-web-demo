@@ -137,4 +137,35 @@ test.describe('negative browser contracts', () => {
     expect(evidence.runSubmissions).toBe(1)
     expectNoCreatedWork(expect, evidence, state)
   })
+
+  // Standardization slice 8a. The negative that matters most: the credential
+  // must never reach the wire. Asserting the notice alone would pass even if
+  // the POST also fired, so the request evidence is the primary assertion and
+  // the copy is the secondary one.
+  test('a pasted credential is refused before any message request fires', async ({ page }) => {
+    const { evidence, state } = await installNegativeApi(page)
+    await openApp(page)
+
+    // Structurally valid, entirely fake — no real key appears in this repo.
+    const fakeToken = `sk-ant-api03-${'A9_-'.repeat(12)}`
+    await page.getByLabel('Command bar').fill(fakeToken)
+    await page.getByLabel('Command bar').press('Enter')
+
+    const notice = page.getByTestId('secret-notice')
+    await expect(notice).toBeVisible()
+    await expect(page.getByTestId('secret-notice-reason')).toHaveText(
+      'That looks like an Anthropic API key. Credentials never go to the model. Mount it under Link a service instead.',
+    )
+    // A named shape has no override.
+    await expect(page.getByTestId('secret-send-anyway')).toHaveCount(0)
+    // The rendered notice shows a four-character shape prefix and bullets only.
+    await expect(page.getByTestId('secret-notice-mask')).toHaveText('sk-a••••••••')
+    await expect(notice).not.toContainText(fakeToken.slice(4))
+
+    const messagePosts = evidence.calls.filter((call) => /^POST \/api\/sessions\/[^/]+\/messages$/.test(call))
+    expect(messagePosts, 'a credential must never reach the conversation endpoint').toEqual([])
+    expect(evidence.runSubmissions).toBe(0)
+    await expect(page).toHaveURL(/\/app$/)
+    expectNoCreatedWork(expect, evidence, state)
+  })
 })
