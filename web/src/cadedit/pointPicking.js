@@ -113,7 +113,8 @@ export function orthoPoint(state, x, y) {
  * segment endpoint and midpoint of LINE / LWPOLYLINE entities and the
  * centre of CIRCLE / ARC. Bounded by MAX_SNAP_POINTS (the rest of a huge
  * document simply has no snaps: never a refusal, never an unbounded scan).
- * Kinds: 0 endpoint, 1 midpoint, 2 centre.
+ * Kinds: 0 endpoint, 1 midpoint, 2 centre, 3 quadrant (a circle's four axis
+ * points, W4f-5b; arcs contribute their endpoints and midpoint instead).
  */
 export const MAX_SNAP_POINTS = 20000
 export const SNAP_KIND = Object.freeze({ END: 0, MID: 1, CENTRE: 2, QUADRANT: 3 })
