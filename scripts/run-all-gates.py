@@ -1621,6 +1621,14 @@ def build_suites() -> List[Suite]:
         # could gate anything.
         Suite("web-app-wiring", "App.jsx structural wiring pins", "script", WEB,
               [_npm(), "run", "check:app-wiring"], None),
+        # Standardization slice 13d. ribbonClusters.js has carried an HONESTY
+        # CONTRACT in its file header since W4d ("a greyed control with no
+        # reason is the gap ToolsPanel's lock-note closed"), and nothing
+        # enforced it: a reason map missing a key renders an EMPTY reason, and
+        # `undefined` is silent — no test, no build error, no console warning.
+        Suite("web-honesty-ladder",
+              "every disabled or absent control carries a reason", "script", WEB,
+              [_npm(), "run", "check:honesty-ladder"], None),
         Suite("web-composer-contract",
               "web composer prompt history + queued turn state", "script", WEB,
               [_npm(), "run", "check:composer"], None),

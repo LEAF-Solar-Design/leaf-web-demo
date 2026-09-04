@@ -36,6 +36,7 @@
     "check:proof-receipt": "node --test e2e/proofReceipt.test.mjs",
     "check:workbench-id": "node --test src/site/workbenchId.test.mjs",
     "check:app-wiring": "node --test src/app-wiring.test.mjs",
+    "check:honesty-ladder": "node --test scripts/check_honesty_ladder.mjs",
     "check:composer": "node --test src/composer.test.mjs",
     "check:project-session-binding": "node --test src/controllers/projectSessionBinding.test.mjs",
     "check:markdown": "node --test src/markdown.test.mjs",

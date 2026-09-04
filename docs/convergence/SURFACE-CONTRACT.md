@@ -260,3 +260,21 @@ Also in this slice:
 - `web/src/lib/surfaceRails.js` already reads the manifest.
 - The literal `import.meta.env.VITE_CAD_EDIT === '1'` fence is untouched at every call
   site, as the "Hardcoded forever" section requires.
+
+## The honesty-ladder gate (slice 13d)
+
+`web/scripts/check_honesty_ladder.mjs` (npm script `check:honesty-ladder`, suite
+`web-honesty-ladder` in `scripts/run-all-gates.py`) enforces this document against the code
+rather than trusting it. Its third check walks every surface's `contract` in
+`productSurfaces.js`, collects each slot whose value is `null`, `false` or `'none'`, and
+fails if that slot name has no row in the "Field table" section above, so a slot cannot be
+declared absent in the manifest without a written rationale a reader can find. The other
+three checks enforce the same rule one level down in the product: every exported `*REASONS`
+map under `web/src` is frozen and holds real sentences, every `SOME_REASONS.key` reference
+resolves to a key that map defines (an undefined key renders an EMPTY reason, which is
+silent at runtime), and every ribbon or tool record that sets `disabled` also sets `reason`,
+which is the HONESTY CONTRACT stated in `web/src/lib/ribbonClusters.js`'s file header and
+until now enforced by nothing. The gate is static, so it never renders a surface, and it
+carries its own positive controls: fixture sources with a reasonless disabled record, an
+unfrozen map, a placeholder reason and a dangling key each drive the same functions red.
+Adding a slot to the contract therefore means adding its field-table row in the same change.

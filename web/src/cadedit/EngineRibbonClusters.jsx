@@ -63,7 +63,7 @@ function hasVisibleEscOwner() {
 export const MODIFY_REASONS = Object.freeze({
   noDocument: 'opens on an imported DXF',
   crashed: 'engine stopped: open a drawing again',
-  busy: 'engine busy',
+  busy: 'engine busy: wait for the current edit',
   noSelection: 'select an entity in the imported DXF',
   readOnlyKind: 'read-only entity kind',
 })
@@ -72,13 +72,13 @@ export const SAVE_REASONS = Object.freeze({
   noDocument: 'opens on an imported DXF',
   nothingEdited: 'edit something first',
   noTarget: 'download-only here: no project target',
-  busy: 'engine busy',
+  busy: 'engine busy: wait for the current edit',
 })
 
 export const DRAW_REASONS = Object.freeze({
   noDocument: 'opens on an imported DXF',
   crashed: 'engine stopped: open a drawing again',
-  busy: 'engine busy',
+  busy: 'engine busy: wait for the current edit',
 })
 
 const NOT_IN_ENGINE = 'not in the browser engine yet'
@@ -402,8 +402,8 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // with its reason when there is nothing to step to. They ride the File
   // panel inline and the top band as quick-access buttons, like Open/Save.
   const historyReason = !session.engineParsed
-    ? 'opens on an imported DXF'
-    : session.busy ? 'engine busy' : ''
+    ? MODIFY_REASONS.noDocument
+    : session.busy ? MODIFY_REASONS.busy : ''
   const undoReason = historyReason || (session.undoDepth ? '' : 'nothing to undo')
   const redoReason = historyReason || (session.redoDepth ? '' : 'nothing to redo')
   fileTools.push(
