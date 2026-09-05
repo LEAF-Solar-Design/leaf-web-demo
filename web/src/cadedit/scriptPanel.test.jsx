@@ -203,4 +203,28 @@ describe('W4g-7a the script runner', () => {
     await waitFor(() => expect(status().textContent).toBe(`Script stopped at line 1: the engine did not answer within ${LINE_BUDGET_MS / 1000} s.`), { timeout: 5000 })
     expect(posts()).toHaveLength(1)
   })
+
+  it('a canvas pick\'s aperture never reaches a scripted TRIM', async () => {
+    mount()
+    const V9 = { ...H, id: '9', handle: '9', index: 1, vertices: [[5, -5, 0], [5, 5, 0]] }
+    const V11 = { ...H, id: '11', handle: '11', index: 2, vertices: [[6, -5, 0], [6, 5, 0]] }
+    await openAndLoad([H, V9, V11])
+    act(() => { context.session.actions.select('7') })
+    act(() => {
+      context.setInput('edge', '9')
+      context.setInput('ex', '5')
+      context.setInput('ey', '3')
+      context.setInput('etol', '0.2')
+    })
+    expect(context.inputs.etol).toBe('0.2')
+    setScript('trim 11 6.02,0')
+    fireEvent.click(runButton())
+    expect(posts()).toHaveLength(1)
+    expect(posts()[0].op).toBe('batch')
+    expect(posts()[0].payload.verb).toBe('trim')
+    // The store lowers the kept points [[0,0],[6,0]] to a flat wire payload.
+    expect(JSON.stringify(posts()[0])).toContain('"points":[0,0,6,0]')
+    expect(status().textContent).toBe('Running line 1: TRIM (1 of 1)...')
+    expect(context.inputs.etol).toBe('0.2')
+  })
 })
