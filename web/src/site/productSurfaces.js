@@ -211,8 +211,9 @@ export const PRODUCT_SURFACES = Object.freeze([
       // commandLine: App.jsx:3419 PromptBox commandLine={!!studioGround && drafting}.
       commandLine: false,
       // authoring: App.jsx:2735 AuthorPanel sits in the nav rail, which is not
-      //   surface-gated (App.jsx:2645, 2653). (Stage divergence: the build lane
-      //   is cad-only, ToolCast.jsx:1434/1523.)
+      //   surface-gated (App.jsx:2645, 2653). Slice 7a closed the stage's own
+      //   divergence (D3): ToolCast.jsx's workspace rail now reads this same
+      //   slot (`authoringOnStage`) instead of the old cad-only literal.
       authoring: true,
       // versions: App.jsx:3041 VersionHistory lives inside the workspace card,
       //   whose display gate (App.jsx:2859) hides it off cad/solar.
