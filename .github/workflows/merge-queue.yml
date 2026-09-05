@@ -1,0 +1,438 @@
+name: merge-queue
+
+# ---------------------------------------------------------------------------
+# Slice C of the merge-queue design (verdicts/merge-queue-design-astra.md,
+# points 1, 2, 4, 7, 8). This is the GROUP-level controller: it never builds
+# or deploys anything itself. mq-review proves every PR in the group's
+# ordered prefix already carries a passing kimi-critic-review on its own
+# head; mq-supply proves exactly one provider-bound speculative image set
+# exists for the group's tree (or that the group is docs-only, in which case
+# there is nothing to build); mq-prewarm proves the relay (slice B) staged
+# every service the group needs and that terraform's own deploy receipts
+# confirm the staged task never touched weights, then it fails EXPLICITLY if
+# either dependency failed or was cancelled, so a skipped job can never read
+# as green.
+#
+# GitHub couples a PR's required checks with the merge queue's: the SAME two
+# context names (mq-review, mq-prewarm) must exist on both a pull_request run
+# and a merge_group run, or a PR can never satisfy its required checks well
+# enough to enter the queue. On pull_request events both jobs publish a
+# neutral "queue preparation deferred" success and do nothing else; the real
+# work only ever runs for merge_group's checks_requested.
+# ---------------------------------------------------------------------------
+
+on:
+  merge_group:
+    types: [checks_requested]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+  statuses: write
+  checks: write
+
+concurrency:
+  # One head sha, one controller run. Never cancelled: a running group check
+  # is proof-in-progress, and cancelling it would let a superseding event
+  # race a still-open verdict rather than wait for it.
+  group: merge-queue-${{ github.event.merge_group.head_sha || github.event.pull_request.head.sha }}
+  cancel-in-progress: false
+
+env:
+  # The provider workflow mq-supply waits on, and the exact checks its
+  # producer run must pass — read-only repeats of build-platform-images.yml's
+  # own adopt.decide gate (its `adopt` job, ~line 2987): repository id, path,
+  # event, branch, status, conclusion, then the immutable archive digest
+  # verified against a real download.
+  SUPPLY_PROVIDER_WORKFLOW_PATH: .github/workflows/build-platform-images.yml
+  SUPPLY_SET_POLLS: "40"
+  SUPPLY_SET_INTERVAL: "30"
+  # Which services the relay (slice B) prewarms, and this controller must
+  # therefore find dispatched and staged. Mirrors prewarm-staging-cutover.yml's
+  # STAGE_SERVICES; a change in either direction must land in both files in
+  # the same commit; app stays paused there for the same reason it is absent
+  # here (its merge deploy does not yet reuse a same-tree stage).
+  STAGE_SERVICES: "web"
+  RELAY_RECEIPT_POLLS: "30"
+  RELAY_RECEIPT_INTERVAL: "60"
+  TERRAFORM_RECEIPT_POLLS: "40"
+  TERRAFORM_RECEIPT_INTERVAL: "60"
+  INFRA_REPO: LEAF-Solar-Design/leaf-automation-aws-terraform
+  DEPLOY_WORKFLOW: deploy-leaf-platform-staging.yml
+
+jobs:
+  mq-review:
+    name: mq-review
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      head_sha: ${{ steps.queue.outputs.head_sha }}
+    steps:
+      - name: Publish the deferred queue-preparation success (pull_request)
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          echo "::notice::mq-review: queue preparation deferred until this PR enters the merge queue."
+
+      - name: Read the live merge queue and resolve this group's members
+        id: queue
+        if: github.event_name == 'merge_group'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: |
+          set -euo pipefail
+          # Never infer members from head_ref alone: it names one PR, not the
+          # group. The members are the ordered prefix of live queue entries
+          # up to and including the entry whose headCommit.oid is our head.
+          QUERY='query($owner:String!,$name:String!,$cursor:String){repository(owner:$owner,name:$name){mergeQueue(branch:"main"){entries(first:100,after:$cursor){pageInfo{hasNextPage endCursor}nodes{position baseCommit{oid}headCommit{oid}pullRequest{number headRefOid}}}}}}'
+          OWNER="${GITHUB_REPOSITORY%%/*}"
+          NAME="${GITHUB_REPOSITORY##*/}"
+          echo "[]" > entries.json
+          CURSOR="null"
+          while :; do
+            PAGE=$(gh api graphql -f query="$QUERY" -F owner="$OWNER" -F name="$NAME" -F cursor="$CURSOR") || {
+              echo "::error::mq-review: GraphQL queue read failed."
+              exit 1
+            }
+            jq -c '[.data.repository.mergeQueue.entries.nodes[]]' <<<"$PAGE" > page-nodes.json
+            jq -c -s '.[0] + .[1]' entries.json page-nodes.json > entries.tmp && mv entries.tmp entries.json
+            HAS_NEXT=$(jq -r '.data.repository.mergeQueue.entries.pageInfo.hasNextPage' <<<"$PAGE")
+            [ "$HAS_NEXT" = "true" ] || break
+            CURSOR=$(jq -r '.data.repository.mergeQueue.entries.pageInfo.endCursor' <<<"$PAGE")
+          done
+          jq -c 'sort_by(.position | tonumber)' entries.json > entries-sorted.json
+          IDX=$(jq -r --arg head "$HEAD_SHA" '[.[] | .headCommit.oid] | index($head)' entries-sorted.json)
+          if [ "$IDX" = "null" ]; then
+            echo "::error::mq-review: group head $HEAD_SHA was not found in the live queue."
+            exit 1
+          fi
+          jq -c --argjson idx "$IDX" '.[0:($idx + 1)]' entries-sorted.json > members.json
+          cp members.json members-check.json
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "mq-review: group has $((IDX + 1)) member(s)."
+
+      - name: Require the newest kimi-critic-review status on every member
+        if: github.event_name == 'merge_group'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          COUNT=$(jq 'length' members.json)
+          [ "$COUNT" -gt 0 ] || { echo "::error::mq-review: group has no members."; exit 1; }
+          i=0
+          while [ "$i" -lt "$COUNT" ]; do
+            MEMBER=$(jq -c ".[$i]" members.json)
+            SHA=$(jq -r '.pullRequest.headRefOid' <<<"$MEMBER")
+            NUMBER=$(jq -r '.pullRequest.number' <<<"$MEMBER")
+            [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::mq-review: member #$NUMBER has no usable head sha."; exit 1; }
+            gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$SHA/statuses?per_page=100" \
+              | jq -s 'add // []' > "statuses-$i.json"
+            # Newest by created_at, never the newest by list order: the
+            # statuses API is not guaranteed sorted.
+            STATE=$(jq -r '[.[] | select(.context == "kimi-critic-review")] | sort_by(.created_at) | last | .state // "absent"' "statuses-$i.json")
+            if [ "$STATE" != "success" ]; then
+              echo "::error::mq-review: PR #$NUMBER ($SHA) newest kimi-critic-review state is '$STATE', not success."
+              exit 1
+            fi
+            i=$((i + 1))
+          done
+          echo "mq-review: kimi-critic-review is success on all $COUNT member(s)."
+
+      - name: Re-read the queue and require the same membership
+        if: github.event_name == 'merge_group'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: |
+          set -euo pipefail
+          # A drift here (a member superseded or reordered while the checks
+          # above ran) invalidates the verdict just proven: fail closed.
+          QUERY='query($owner:String!,$name:String!,$cursor:String){repository(owner:$owner,name:$name){mergeQueue(branch:"main"){entries(first:100,after:$cursor){pageInfo{hasNextPage endCursor}nodes{position baseCommit{oid}headCommit{oid}pullRequest{number headRefOid}}}}}}'
+          OWNER="${GITHUB_REPOSITORY%%/*}"
+          NAME="${GITHUB_REPOSITORY##*/}"
+          echo "[]" > entries-recheck.json
+          CURSOR="null"
+          while :; do
+            PAGE=$(gh api graphql -f query="$QUERY" -F owner="$OWNER" -F name="$NAME" -F cursor="$CURSOR") || {
+              echo "::error::mq-review: GraphQL post-check re-read failed."
+              exit 1
+            }
+            jq -c '[.data.repository.mergeQueue.entries.nodes[]]' <<<"$PAGE" > page-nodes.json
+            jq -c -s '.[0] + .[1]' entries-recheck.json page-nodes.json > entries-recheck.tmp && mv entries-recheck.tmp entries-recheck.json
+            HAS_NEXT=$(jq -r '.data.repository.mergeQueue.entries.pageInfo.hasNextPage' <<<"$PAGE")
+            [ "$HAS_NEXT" = "true" ] || break
+            CURSOR=$(jq -r '.data.repository.mergeQueue.entries.pageInfo.endCursor' <<<"$PAGE")
+          done
+          jq -c 'sort_by(.position | tonumber)' entries-recheck.json > entries-recheck-sorted.json
+          IDX=$(jq -r --arg head "$HEAD_SHA" '[.[] | .headCommit.oid] | index($head)' entries-recheck-sorted.json)
+          if [ "$IDX" = "null" ]; then
+            echo "::error::mq-review: group head $HEAD_SHA is no longer in the live queue."
+            exit 1
+          fi
+          jq -c --argjson idx "$IDX" '.[0:($idx + 1)]' entries-recheck-sorted.json > members-recheck.json
+          if ! diff -q \
+              <(jq -c 'map({number: .pullRequest.number, head: .headCommit.oid})' members-check.json) \
+              <(jq -c 'map({number: .pullRequest.number, head: .headCommit.oid})' members-recheck.json) \
+              >/dev/null; then
+            echo "::error::mq-review: queue membership drifted between the check read and the post-check re-read."
+            exit 1
+          fi
+          echo "mq-review: post-check re-read confirms unchanged membership."
+
+  mq-supply:
+    name: mq-supply
+    if: github.event_name == 'merge_group'
+    needs: mq-review
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    outputs:
+      supply: ${{ steps.docs.outputs.supply || steps.wait.outputs.supply }}
+      tree: ${{ steps.tree.outputs.tree }}
+      producer_run_id: ${{ steps.wait.outputs.producer_run_id }}
+      producer_run_attempt: ${{ steps.wait.outputs.producer_run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.merge_group.head_sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Resolve the group commit's tree
+        id: tree
+        run: |
+          set -euo pipefail
+          TREE=$(git rev-parse 'HEAD^{tree}')
+          [[ "$TREE" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::mq-supply: checkout has no tree."; exit 1; }
+          echo "tree=$TREE" >> "$GITHUB_OUTPUT"
+
+      - name: Recompute the docs-noop verdict over this group
+        id: docs
+        run: |
+          set -euo pipefail
+          echo "supply=" >> "$GITHUB_OUTPUT"
+          if ! git rev-parse --verify --quiet 'HEAD^1' >/dev/null 2>&1; then
+            echo "::notice::mq-supply: no first parent to diff; treating as build (fail open to building)."
+            exit 0
+          fi
+          FILES=$(git diff --no-renames --name-only 'HEAD^1' HEAD) || {
+            echo "::notice::mq-supply: could not read the group diff; treating as build."
+            exit 0
+          }
+          VERDICT=$(printf '%s\n' "$FILES" | python3 scripts/docs_noop_filter.py) || VERDICT=build
+          if [ "$VERDICT" = "skip" ]; then
+            echo "supply=none" >> "$GITHUB_OUTPUT"
+            echo "::notice::mq-supply: reason=docs-only"
+          fi
+
+      - name: Wait for the provider-bound speculative supply set
+        id: wait
+        if: steps.docs.outputs.supply != 'none'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TREE: ${{ steps.tree.outputs.tree }}
+        run: |
+          set -euo pipefail
+          echo "supply=none" >> "$GITHUB_OUTPUT"
+          ARTIFACT_NAME="spec-v3-supply-set-$TREE"
+          REPO_ID=$(gh api "repos/$GITHUB_REPOSITORY" --jq .id)
+          ATTEMPT=0
+          while [ "$ATTEMPT" -lt "$SUPPLY_SET_POLLS" ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            LISTING=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$ARTIFACT_NAME&per_page=30" 2>/dev/null || true)
+            if [ -n "$LISTING" ]; then
+              # Exactly one exact provider-bound candidate is required. The
+              # SAME checks build-platform-images.yml's adopt job makes,
+              # repeated here read-only.
+              CANDIDATE=$(jq -r --argjson repo_id "$REPO_ID" '
+                [.artifacts[]?
+                 | select(.expired | not)
+                 | select(.workflow_run.head_repository_id == $repo_id)]
+                | if length == 1 then .[0] | [.id, .workflow_run.id, .digest] | @tsv else empty end
+              ' <<<"$LISTING")
+              if [ -n "$CANDIDATE" ]; then
+                IFS=$'\t' read -r CAND_ID CAND_RUN CAND_DIGEST <<<"$CANDIDATE"
+                if [[ "$CAND_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                  RUN_RECORD=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CAND_RUN" 2>/dev/null || true)
+                  if [ -n "$RUN_RECORD" ]; then
+                    PATH_OK=$(jq -r --arg p "$SUPPLY_PROVIDER_WORKFLOW_PATH" '(.path // "" | sub("@.*$"; "")) == $p' <<<"$RUN_RECORD")
+                    EVENT_OK=$(jq -r '.event == "workflow_dispatch"' <<<"$RUN_RECORD")
+                    BRANCH_OK=$(jq -r '.head_branch == "main"' <<<"$RUN_RECORD")
+                    STATUS_OK=$(jq -r '.status == "completed"' <<<"$RUN_RECORD")
+                    CONCLUSION_OK=$(jq -r '.conclusion == "success"' <<<"$RUN_RECORD")
+                    if [ "$PATH_OK" = "true" ] && [ "$EVENT_OK" = "true" ] && [ "$BRANCH_OK" = "true" ] \
+                        && [ "$STATUS_OK" = "true" ] && [ "$CONCLUSION_OK" = "true" ]; then
+                      gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$CAND_ID/zip" > spec-candidate.zip 2>/dev/null || true
+                      if [ -s spec-candidate.zip ]; then
+                        ACTUAL_DIGEST="sha256:$(sha256sum spec-candidate.zip | awk '{print $1}')"
+                        if [ "$ACTUAL_DIGEST" = "$CAND_DIGEST" ]; then
+                          ATTEMPT_NUM=$(jq -r '.run_attempt' <<<"$RUN_RECORD")
+                          echo "supply=present" >> "$GITHUB_OUTPUT"
+                          echo "producer_run_id=$CAND_RUN" >> "$GITHUB_OUTPUT"
+                          echo "producer_run_attempt=$ATTEMPT_NUM" >> "$GITHUB_OUTPUT"
+                          echo "mq-supply: provider-bound supply set verified after $ATTEMPT poll(s) (run $CAND_RUN)."
+                          exit 0
+                        fi
+                      fi
+                    fi
+                  fi
+                fi
+              fi
+            fi
+            if [ "$ATTEMPT" -lt "$SUPPLY_SET_POLLS" ]; then
+              sleep "$SUPPLY_SET_INTERVAL"
+            fi
+          done
+          echo "::error::mq-supply: no exact provider-bound $ARTIFACT_NAME after $SUPPLY_SET_POLLS polls."
+          exit 1
+
+  mq-prewarm:
+    name: mq-prewarm
+    needs: [mq-review, mq-supply]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Publish the deferred queue-preparation success (pull_request)
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          echo "::notice::mq-prewarm: queue preparation deferred until this PR enters the merge queue."
+
+      - name: Fail explicitly on a failed or cancelled dependency
+        if: >-
+          github.event_name == 'merge_group' &&
+          (needs.mq-review.result == 'failure' || needs.mq-review.result == 'cancelled' ||
+           needs.mq-supply.result == 'failure' || needs.mq-supply.result == 'cancelled')
+        run: |
+          set -euo pipefail
+          echo "::error::mq-prewarm: refusing to stage; mq-review=${{ needs.mq-review.result }} mq-supply=${{ needs.mq-supply.result }}."
+          exit 1
+
+      - name: Recognize a docs-only group
+        id: docs
+        if: github.event_name == 'merge_group' && needs.mq-supply.outputs.supply == 'none'
+        run: |
+          set -euo pipefail
+          echo "docs_only=true" >> "$GITHUB_OUTPUT"
+          echo "::notice::mq-prewarm: reason=docs-only group: nothing to stage."
+
+      - name: Wait for the relay's prewarm receipt for this group
+        id: relay
+        if: github.event_name == 'merge_group' && needs.mq-supply.outputs.supply == 'present'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GROUP_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: |
+          set -euo pipefail
+          SHA12="${GROUP_HEAD_SHA:0:12}"
+          NAME="prewarm-relay-receipt-mg-$SHA12"
+          echo "present=false" >> "$GITHUB_OUTPUT"
+          ATTEMPT=0
+          while [ "$ATTEMPT" -lt "$RELAY_RECEIPT_POLLS" ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            LISTING=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$NAME&per_page=30" 2>/dev/null || true)
+            NEWEST_ID=$(jq -r '[.artifacts[]? | select(.expired == false)] | sort_by(.created_at) | last | .id // empty' <<<"${LISTING:-{}}" 2>/dev/null || true)
+            if [ -n "$NEWEST_ID" ]; then
+              if gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$NEWEST_ID/zip" > relay-receipt.zip 2>/dev/null; then
+                rm -rf relay-receipt && mkdir -p relay-receipt
+                if unzip -o -q relay-receipt.zip -d relay-receipt 2>/dev/null \
+                    && [ -f relay-receipt/prewarm-relay-receipt.json ]; then
+                  RECEIPT_HEAD=$(jq -r '.group.head_sha // empty' relay-receipt/prewarm-relay-receipt.json)
+                  if [ "$RECEIPT_HEAD" = "$GROUP_HEAD_SHA" ]; then
+                    MIGRATION_REFUSAL=$(jq -r '.migration_refusal // false' relay-receipt/prewarm-relay-receipt.json)
+                    echo "present=true" >> "$GITHUB_OUTPUT"
+                    echo "migration_refusal=$MIGRATION_REFUSAL" >> "$GITHUB_OUTPUT"
+                    if [ "$MIGRATION_REFUSAL" = "true" ]; then
+                      echo "::notice::mq-prewarm: reason=migration candidate: normal deploy path"
+                      exit 0
+                    fi
+                    MISSING=""
+                    echo "{}" > dispatched-map.json
+                    for SERVICE in $STAGE_SERVICES; do
+                      RUN_ID=$(jq -r --arg s "$SERVICE" '[.dispatched[]? | select(.service == $s)] | last | .run_id // empty' relay-receipt/prewarm-relay-receipt.json)
+                      if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+                        MISSING="${MISSING:+$MISSING }$SERVICE"
+                      else
+                        jq --arg s "$SERVICE" --argjson r "$RUN_ID" '. + {($s): $r}' dispatched-map.json > dispatched-map.tmp && mv dispatched-map.tmp dispatched-map.json
+                      fi
+                    done
+                    if [ -n "$MISSING" ]; then
+                      echo "::error::mq-prewarm: relay receipt is missing a dispatched run id for: $MISSING."
+                      exit 1
+                    fi
+                    echo "dispatched_json=$(jq -c . dispatched-map.json)" >> "$GITHUB_OUTPUT"
+                    echo "mq-prewarm: relay receipt $NAME verified after $ATTEMPT poll(s)."
+                    exit 0
+                  fi
+                fi
+              fi
+            fi
+            if [ "$ATTEMPT" -lt "$RELAY_RECEIPT_POLLS" ]; then
+              sleep "$RELAY_RECEIPT_INTERVAL"
+            fi
+          done
+          echo "::error::mq-prewarm: no matching $NAME after $RELAY_RECEIPT_POLLS polls."
+          exit 1
+
+      - name: Wait for every dispatched terraform staging receipt
+        if: >-
+          github.event_name == 'merge_group' && needs.mq-supply.outputs.supply == 'present' &&
+          steps.relay.outputs.present == 'true' && steps.relay.outputs.migration_refusal != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.TERRAFORM_REPO_TOKEN }}
+          TREE: ${{ needs.mq-supply.outputs.tree }}
+          GROUP_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          DISPATCHED_JSON: ${{ steps.relay.outputs.dispatched_json }}
+        run: |
+          set -euo pipefail
+          SHA12="${GROUP_HEAD_SHA:0:12}"
+          EXPECTED_TAG="spec-$TREE-$SHA12"
+          ARNS=""
+          for SERVICE in $STAGE_SERVICES; do
+            RUN_ID=$(jq -r --arg s "$SERVICE" '.[$s] // empty' <<<"$DISPATCHED_JSON")
+            [ -n "$RUN_ID" ] || { echo "::error::mq-prewarm: no dispatched run id carried forward for $SERVICE."; exit 1; }
+            ATTEMPT=0
+            FOUND=""
+            while [ "$ATTEMPT" -lt "$TERRAFORM_RECEIPT_POLLS" ]; do
+              ATTEMPT=$((ATTEMPT + 1))
+              RUN_RECORD=$(gh api "repos/$INFRA_REPO/actions/runs/$RUN_ID" 2>/dev/null || true)
+              STATUS=$(jq -r '.status // empty' <<<"${RUN_RECORD:-{}}" 2>/dev/null || true)
+              CONCLUSION=$(jq -r '.conclusion // empty' <<<"${RUN_RECORD:-{}}" 2>/dev/null || true)
+              if [ "$STATUS" = "completed" ]; then
+                if [ "$CONCLUSION" != "success" ]; then
+                  echo "::error::mq-prewarm: terraform deploy run $RUN_ID for $SERVICE concluded '$CONCLUSION', not success."
+                  exit 1
+                fi
+                ATTEMPT_NUM=$(jq -r '.run_attempt' <<<"$RUN_RECORD")
+                ARTIFACTS=$(gh api "repos/$INFRA_REPO/actions/runs/$RUN_ID/artifacts?per_page=100" 2>/dev/null || true)
+                NAME="staging-prewarm-receipt-$SERVICE-run-$RUN_ID-attempt-$ATTEMPT_NUM"
+                ARTIFACT_ID=$(jq -r --arg n "$NAME" '[.artifacts[]? | select(.name == $n and .expired == false)] | if length == 1 then .[0].id else empty end' <<<"$ARTIFACTS")
+                [ -n "$ARTIFACT_ID" ] || { echo "::error::mq-prewarm: expected exactly one $NAME artifact."; exit 1; }
+                gh api "repos/$INFRA_REPO/actions/artifacts/$ARTIFACT_ID/zip" > "receipt-$SERVICE.zip"
+                rm -rf "receipt-$SERVICE" && mkdir -p "receipt-$SERVICE"
+                unzip -o -q "receipt-$SERVICE.zip" -d "receipt-$SERVICE"
+                RECEIPT="receipt-$SERVICE/staged-prewarm-receipt.json"
+                [ -f "$RECEIPT" ] || { echo "::error::mq-prewarm: $NAME carries no staged-prewarm-receipt.json."; exit 1; }
+                REC_SERVICE=$(jq -r '.service // empty' "$RECEIPT")
+                REC_TAG=$(jq -r '.image_tag // empty' "$RECEIPT")
+                REC_WEIGHTS=$(jq -r '.weights_touched // "missing"' "$RECEIPT")
+                [ "$REC_SERVICE" = "$SERVICE" ] || { echo "::error::mq-prewarm: $NAME service mismatch ($REC_SERVICE)."; exit 1; }
+                [ "$REC_TAG" = "$EXPECTED_TAG" ] || { echo "::error::mq-prewarm: $NAME image_tag mismatch ($REC_TAG != $EXPECTED_TAG)."; exit 1; }
+                [ "$REC_WEIGHTS" = "false" ] || { echo "::error::mq-prewarm: $NAME weights_touched is '$REC_WEIGHTS', not false."; exit 1; }
+                ARN=$(jq -r '.task_definition_arn // empty' "$RECEIPT")
+                ARNS="${ARNS:+$ARNS }$ARN"
+                FOUND=true
+                break
+              fi
+              if [ "$ATTEMPT" -lt "$TERRAFORM_RECEIPT_POLLS" ]; then
+                sleep "$TERRAFORM_RECEIPT_INTERVAL"
+              fi
+            done
+            [ "$FOUND" = "true" ] || { echo "::error::mq-prewarm: terraform deploy run $RUN_ID for $SERVICE never completed after $TERRAFORM_RECEIPT_POLLS polls."; exit 1; }
+          done
+          echo "mq-prewarm: staged task definitions: $ARNS"
