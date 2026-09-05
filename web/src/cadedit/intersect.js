@@ -22,6 +22,8 @@
 import { bulgeArc } from './engineIntake.js'
 
 export const MAX_INTERSECT_POINTS = 1000
+// Coordinate contract: 16 significant digits keep the kernel's 1e-9 tolerances representable up to 1e9.
+export const MAX_COORD = 1e9
 /** The most steps one verb lowers to: FILLET and CHAMFER cut two entities and create one. */
 export const MAX_BATCH_STEPS = 4
 const EPSILON = 1e-9
@@ -41,6 +43,8 @@ const dot = (a, b) => a[0] * b[0] + a[1] * b[1]
 const cross = (a, b) => a[0] * b[1] - a[1] * b[0]
 const len = (a) => Math.hypot(a[0], a[1])
 const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1])
+const radialTol = (p, r, eps) => eps + 16 * Number.EPSILON * (Math.abs(p[0]) + Math.abs(p[1]) + r)
+const onSupport = (p, c, r, eps) => Math.abs(dist(p, c) - r) <= radialTol(p, r, eps)
 const same = (a, b, eps) => dist(a, b) <= eps
 function normDeg(a) {
   let d = a % 360
@@ -79,6 +83,7 @@ export function curveOf(entity, role = 'entity') {
   for (const v of raw) {
     const p = point2(v)
     if (!p) return { refusal: `the ${role} has a point that is not a number` }
+    if (Math.abs(p[0]) > MAX_COORD || Math.abs(p[1]) > MAX_COORD) return { refusal: `the ${role} has a coordinate beyond 1e9` }
     pts.push(p)
   }
   if (kind === 'LINE') {
@@ -121,6 +126,7 @@ export function curveOf(entity, role = 'entity') {
   const c = pts[0]
   const r = entity?.radius
   if (!c || !finite(r) || r <= 0) return { refusal: `the ${role} ${kind.toLowerCase()} has no centre or radius` }
+  if (r > MAX_COORD) return { refusal: `the ${role} ${kind.toLowerCase()} is larger than 1e9` }
   if (kind === 'CIRCLE') return { kind: 'CIRCLE', c, r }
   const start = entity?.startDeg
   const end = entity?.endDeg
@@ -217,24 +223,23 @@ function segSeg(a, b, c, d) {
   const u = cross(ac, r) / denom
   return { t, u, p: add(a, scale(r, t)) }
 }
-/** Segment a-b against the circle (c, r): up to two { t, p }. */
+/** Segment a-b against the circle (c, r): up to two { t, p }, solved along the line's unit direction
+ * (the foot of the centre by a dot product, the centre's distance to the line by a cross product), so a
+ * far-away segment does not cancel the circle away; a tangent within EPSILON is one root. */
 function segCircle(a, b, c, r) {
   const d = sub(b, a)
+  const L = len(d)
+  if (L <= EPSILON) return []
+  const u = scale(d, 1 / L)
   const f = sub(a, c)
-  const A = dot(d, d)
-  if (A <= EPSILON * EPSILON) return []
-  const B = 2 * dot(f, d)
-  const C = dot(f, f) - r * r
-  const disc = B * B - 4 * A * C
-  // A bulge-derived radius can split an exact tangent through roundoff,
-  // making a full turn look like a valid extension just short of its start.
-  const discEps = 4 * Number.EPSILON * (B * B + Math.abs(4 * A * C))
-  if (disc < -discEps) return []
-  const root = disc <= discEps ? 0 : Math.sqrt(disc)
-  const t1 = (-B - root) / (2 * A)
-  const t2 = (-B + root) / (2 * A)
-  const out = [{ t: t1, p: add(a, scale(d, t1)) }]
-  if (root > EPSILON * Math.sqrt(A)) out.push({ t: t2, p: add(a, scale(d, t2)) })
+  const tc = -dot(f, u)          // world-unit param of the foot of c on the line, from a
+  const dist = cross(u, f)       // signed distance from c to the line
+  const gap = r - Math.abs(dist) // > 0: two roots; ~0: tangent; < 0: none
+  if (gap < -EPSILON) return []
+  const h = gap <= EPSILON ? 0 : Math.sqrt(r * r - dist * dist)
+  const at = (w) => ({ t: w / L, p: add(a, scale(u, w)) })
+  const out = [at(tc - h)]
+  if (h > EPSILON) out.push(at(tc + h))
   return out
 }
 /** Circle (c1, r1) against circle (c2, r2): up to two points. */
@@ -289,6 +294,7 @@ export function crossings(target, edge, extend = 'none', tol = EPSILON) {
       const epsT = arc ? TINY_DEG / Math.abs(arc.sweep) : EPSILON
       const accept = (t) => (t >= -epsT || lowOk) && (t <= 1 + epsT || highOk)
       const hitOnTarget = (t, p) => {
+        if (arc && !onSupport(p, arc.c, arc.r, eps)) return
         if (!accept(t)) return
         const o = arc ? segOffset(arc, p) : null
         if (same(p, a, eps) || (arc && Math.min(o, 360 - o) <= TINY_DEG)) push(i, a)
@@ -300,7 +306,7 @@ export function crossings(target, edge, extend = 'none', tol = EPSILON) {
           const { a: c, b: d, arc: edgeArc } = edgeSeg
           if (arc && edgeArc) {
             for (const p of circleCircle(arc.c, arc.r, edgeArc.c, edgeArc.r)) {
-              if (withinSeg(edgeSeg, p)) hitOnTarget(segParam(arc, p), p)
+              if (onSupport(p, edgeArc.c, edgeArc.r, eps) && withinSeg(edgeSeg, p)) hitOnTarget(segParam(arc, p), p)
             }
           } else if (arc) {
             for (const hit of segCircle(c, d, arc.c, arc.r)) {
@@ -308,7 +314,7 @@ export function crossings(target, edge, extend = 'none', tol = EPSILON) {
             }
           } else if (edgeArc) {
             for (const hit of segCircle(a, b, edgeArc.c, edgeArc.r)) {
-              if (withinSeg(edgeSeg, hit.p)) hitOnTarget(hit.t, hit.p)
+              if (onSupport(hit.p, edgeArc.c, edgeArc.r, eps) && withinSeg(edgeSeg, hit.p)) hitOnTarget(hit.t, hit.p)
             }
           } else {
             const hit = segSeg(a, b, c, d)
@@ -317,11 +323,11 @@ export function crossings(target, edge, extend = 'none', tol = EPSILON) {
         }
       } else if (arc) {
         for (const p of circleCircle(arc.c, arc.r, edge.c, edge.r)) {
-          if (withinArc(edge, p)) hitOnTarget(segParam(arc, p), p)
+          if (onSupport(p, edge.c, edge.r, eps) && withinArc(edge, p)) hitOnTarget(segParam(arc, p), p)
         }
       } else {
         for (const hit of segCircle(a, b, edge.c, edge.r)) {
-          if (withinArc(edge, hit.p)) hitOnTarget(hit.t, hit.p)
+          if (onSupport(hit.p, edge.c, edge.r, eps) && withinArc(edge, hit.p)) hitOnTarget(hit.t, hit.p)
         }
       }
     }
@@ -333,14 +339,14 @@ export function crossings(target, edge, extend = 'none', tol = EPSILON) {
     for (const seg of edgeSegs) {
       if (seg.arc) {
         for (const p of circleCircle(target.c, target.r, seg.arc.c, seg.arc.r)) {
-          if (withinSeg(seg, p)) push(param(p), p)
+          if (onSupport(p, target.c, target.r, eps) && onSupport(p, seg.arc.c, seg.arc.r, eps) && withinSeg(seg, p)) push(param(p), p)
         }
       } else {
-        for (const hit of segCircle(seg.a, seg.b, target.c, target.r)) if (inUnit(hit.t)) push(param(hit.p), hit.p)
+        for (const hit of segCircle(seg.a, seg.b, target.c, target.r)) if (onSupport(hit.p, target.c, target.r, eps) && inUnit(hit.t)) push(param(hit.p), hit.p)
       }
     }
   } else {
-    for (const p of circleCircle(target.c, target.r, edge.c, edge.r)) if (withinArc(edge, p)) push(param(p), p)
+    for (const p of circleCircle(target.c, target.r, edge.c, edge.r)) if (onSupport(p, target.c, target.r, eps) && onSupport(p, edge.c, edge.r, eps) && withinArc(edge, p)) push(param(p), p)
   }
   return out.sort((x, y) => x.s - y.s)
 }
@@ -351,6 +357,7 @@ export function crossings(target, edge, extend = 'none', tol = EPSILON) {
 function piece(curve, a, b, eps) {
   const pts = []
   const bulges = []
+  let unwritable = false
   const n = curve.pts.length
   const bulgePart = (k, u, v) => {
     const seg = curve.segs[curve.closed ? ((k % n) + n) % n : k]
@@ -360,6 +367,8 @@ function piece(curve, a, b, eps) {
   }
   const push = (p, bulge) => {
     const q = [clean(p[0]), clean(p[1])]
+    const last = pts[pts.length - 1]
+    if (last && last[0] === q[0] && last[1] === q[1] && Math.abs(bulges[bulges.length - 1]) > BULGE_EPS) unwritable = true
     if (pts.length && Math.abs(bulges[bulges.length - 1]) <= BULGE_EPS && same(pts[pts.length - 1], p, EPSILON)) {
       bulges[bulges.length - 1] = bulge
     } else {
@@ -373,7 +382,7 @@ function piece(curve, a, b, eps) {
     push(curve.pts[((k % n) + n) % n], bulgePart(k, 0, Math.min(1, b - k)))
   }
   push(pointAt(curve, b), 0)
-  return { pts, bulges }
+  return { pts, bulges, unwritable }
 }
 const bulgesOrNull = (list) => list?.some((b) => Math.abs(b) > BULGE_EPS) ? list : null
 // A polyline step carries one bulge per point when any kept segment curves.
@@ -387,6 +396,7 @@ const layerOf = (entity) => String(entity?.layer ?? '')
 
 function readPair(verb, x, y, what) {
   if (!finite(x) || !finite(y)) return refuse(verb, `${what} x and y must both be numbers`)
+  if (Math.abs(x) > MAX_COORD || Math.abs(y) > MAX_COORD) return refuse(verb, `${what} x and y must be within 1e9`)
   return null
 }
 function readCurves(verb, target, edge, edgeRole, curvedOk = { target: false, edge: false }) {
@@ -429,6 +439,7 @@ export function trimEntity(target, edge, px, py, tol = EPSILON) {
     const hi = inside.find((c) => c.s > sp) || null
     const first = lo ? piece(T, 0, lo.s, eps) : null
     const second = hi ? piece(T, hi.s, end, eps) : null
+    if (first?.unwritable || second?.unwritable) return refuse(verb, 'a kept arc is shorter than the drawing precision')
     const keepFirst = first && first.pts.length >= 2
     const keepSecond = second && second.pts.length >= 2
     if (!keepFirst && !keepSecond) return refuse(verb, 'nothing of the selection would remain')
@@ -453,6 +464,7 @@ export function trimEntity(target, edge, px, py, tol = EPSILON) {
     if (lo === hi) return refuse(verb, 'a closed polyline needs two crossings with the cutting edge to lose a piece')
     const n = T.pts.length
     const kept = piece(T, hi.s, lo.s + (hi.s < lo.s ? 0 : n), eps)
+    if (kept.unwritable) return refuse(verb, 'a kept arc is shorter than the drawing precision')
     if (kept.pts.length < 2) return refuse(verb, 'nothing of the selection would remain')
     return { steps: [setVertices(target.id, kept.pts, false, bulgesOrNull(kept.bulges))] }
   }

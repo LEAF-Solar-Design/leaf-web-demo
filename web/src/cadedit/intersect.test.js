@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
-  MAX_BATCH_STEPS, MAX_INTERSECT_POINTS, chamferLines, crossings, curveOf, extendEntity, filletLines,
+  MAX_BATCH_STEPS, MAX_COORD, MAX_INTERSECT_POINTS, chamferLines, crossings, curveOf, extendEntity, filletLines,
   locate, nearestEntity, trimEntity,
 } from './intersect.js'
 
@@ -907,7 +907,7 @@ describe('Astra refutations (W4g-6e record 4)', () => {
   })
 
   it('keeps crossings that are close in param but far apart in space', () => {
-    const target = line('l', [0, 0], [1e10, 0])
+    const target = line('l', [0, 0], [1e9, 0])
     // The lower semicircle about (100,1), r 2, meets y = 0 at x = 100 +/- sqrt(3).
     const edge = poly('q', [[98, 1], [102, 1]], false, 'A', [1, 0])
     expect(crossings(curveOf(target), curveOf(edge))).toHaveLength(2)
@@ -926,7 +926,8 @@ describe('Astra refutations (W4g-6e record 4)', () => {
     expect(second).toEqual({ op: 'createLine' })
     const { x, ...rest } = inputs
     expect(x).toBeCloseTo(101.732050808, 6)
-    expect(rest).toEqual({ y: 0, x2: 1e10, y2: 0, layer: 'A' })
+    expect(rest).toEqual({ y: 0, x2: 1e9, y2: 0, layer: 'A' })
+    expect(trimEntity(line('l', [0, 0], [1e10, 0]), edge, 100, 0, 1e-9).refusal).toMatch(/beyond 1e9/)
   })
 
   it('keeps an interior crossing at a coordinate that revisits the start', () => {
@@ -971,7 +972,7 @@ describe('Astra refutations (W4g-6e record 4)', () => {
   })
 
   it('keeps near-start crossings interior on a very long line', () => {
-    const target = line('l', [0, 0], [1e12, 0])
+    const target = line('l', [0, 0], [1e9, 0])
     const edge = poly('q', [[98, 1], [102, 1]], false, 'A', [1, 0])
     const out = trimEntity(target, edge, 100, 0, 1e-9)
     expect(out.refusal).toBeUndefined()
@@ -988,7 +989,8 @@ describe('Astra refutations (W4g-6e record 4)', () => {
     expect(second).toEqual({ op: 'createLine' })
     const { x, ...rest } = inputs
     expect(x).toBeCloseTo(101.732050808, 6)
-    expect(rest).toEqual({ y: 0, x2: 1e12, y2: 0, layer: 'A' })
+    expect(rest).toEqual({ y: 0, x2: 1e9, y2: 0, layer: 'A' })
+    expect(trimEntity(line('l', [0, 0], [1e12, 0]), edge, 100, 0, 1e-9).refusal).toMatch(/beyond 1e9/)
   })
 
   it('keeps both crossings and retained arcs of a tiny semicircle cut by a chord', () => {
@@ -1020,5 +1022,69 @@ describe('Astra refutations (W4g-6e record 4)', () => {
     expect(createdBulges).toHaveLength(2)
     expect(createdBulges[0]).toBeCloseTo(0.1622776602, 9)
     expect(createdBulges[1]).toBe(0)
+  })
+})
+
+describe('Astra refutations, round four (W4g-6e record 7)', () => {
+  it('keeps both crossings and retained arcs with a cutter at a billion units', () => {
+    const target = poly('p', [[-5, 0], [5, 0]], false, 'A', [1, 0])
+    const edge = line('e', [-1e9, -3], [1e9, -3])
+    // The radius-5 lower semicircle meets y = -3 at x = +/-4.
+    const hits = crossings(curveOf(target), curveOf(edge))
+    expect(hits).toHaveLength(2)
+    expect(hits[0].s).toBeCloseTo(0.204833, 6)
+    expect(hits[1].s).toBeCloseTo(0.795167, 6)
+    ;[[-4, -3], [4, -3]].forEach((p, i) => {
+      expect(hits[i].p).toHaveLength(2)
+      p.forEach((v, j) => expect(hits[i].p[j]).toBeCloseTo(v, 6))
+    })
+    const out = trimEntity(target, edge, -3, -4, 1e-9)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(2)
+    const { points, bulges, ...first } = out.steps[0]
+    expect(first).toEqual({ op: 'setVertices', entityId: 'p', closed: false })
+    expect(points).toHaveLength(2)
+    ;[[-5, 0], [-4, -3]].forEach((p, i) => {
+      expect(points[i]).toHaveLength(2)
+      p.forEach((v, j) => expect(points[i][j]).toBeCloseTo(v, 6))
+    })
+    expect(bulges).toHaveLength(2)
+    expect(bulges[0]).toBeCloseTo(0.1622776602, 9)
+    expect(bulges[1]).toBe(0)
+    const { inputs, ...second } = out.steps[1]
+    expect(second).toEqual({ op: 'createPolyline' })
+    const { bulges: createdBulges, ...rest } = inputs
+    expect(rest).toEqual({ pts: '4,-3 5,0', closed: false, layer: 'A' })
+    expect(createdBulges).toHaveLength(2)
+    expect(createdBulges[0]).toBeCloseTo(0.1622776602, 9)
+    expect(createdBulges[1]).toBe(0)
+  })
+
+  it('refuses the cutter at two to the thirtieth before emitting steps', () => {
+    const target = poly('p', [[-5, 0], [5, 0]], false, 'A', [1, 0])
+    const out = trimEntity(target, line('e', [-1073741824, -3], [1073741824, -3]), -3, -4, 1e-9)
+    expect(out.refusal).toMatch(/beyond 1e9/)
+    expect(out).not.toHaveProperty('steps')
+  })
+
+  it('keeps a tangent at scale as one snapped vertex crossing', () => {
+    const target = poly('k', [[0, 0], [10, 0], [15, 5]], false, 'A', [0, Math.tan(Math.PI / 8), 0])
+    const edge = line('s', [-1e8, 0], [10, 0])
+    expect(crossings(curveOf(target), curveOf(edge))).toEqual([{ s: 1, p: [10, 0] }])
+  })
+
+  it('refuses a kept arc whose chord collapses at the drawing precision', () => {
+    const target = poly('p', [[0, 0], [4e-10, 0], [10, 0], [20, 0]], false, 'A', [1e11, 0, 0, 0])
+    const out = trimEntity(target, line('e', [15, -1], [15, 1]), 19, 0, 1e-9)
+    expect(out).toEqual({ refusal: 'Trim refused: a kept arc is shorter than the drawing precision.' })
+    expect(out).not.toHaveProperty('steps')
+  })
+
+  it('bounds pick coordinates, vertices and round radii at 1e9', () => {
+    expect(MAX_COORD).toBe(1e9)
+    const target = poly('p', [[0, 0], [10, 0]], false, 'A', [1, 0])
+    expect(trimEntity(target, line('e', [5, -6], [5, 6]), 2e9, 0).refusal).toMatch(/within 1e9/)
+    expect(curveOf(circle('c', [0, 0], 2e9)).refusal).toMatch(/larger than 1e9/)
+    expect(curveOf(line('l', [0, 0], [2e9, 0])).refusal).toMatch(/beyond 1e9/)
   })
 })
