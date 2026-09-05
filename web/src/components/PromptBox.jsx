@@ -154,6 +154,13 @@ export default function PromptBox({
   //   a background call the stage never made. A false value skips the fetch
   //   entirely, so a signed-out mount makes NO network call.
   mcpDiscoveryEnabled = true,
+  // Slice 8c: the tenant's CONNECTED Link-a-service registry servers, already
+  // filtered and mapped to {name: label, host} by the caller (never the raw
+  // registry record, never the router's `id`). Joins the same @ mounts list
+  // as the broker-discovered `mcpServers` below, through the SAME
+  // mcpDiscoveryEnabled gate — a signed-out or non-entitled mount shows
+  // neither source, one predicate instead of two.
+  connectedMcpServers = [],
 }) {
   // a11y (carried item 2, slice 5a round 2): disabledReason used to ride ONLY
   // on the Run chip's title, which a hover-only tooltip never reaches by
@@ -285,9 +292,10 @@ export default function PromptBox({
 
   const trigger = pickerTrigger(value, caret, isComposing)
   const afterSlash = trigger?.kind === 'slash' ? trigger.query : null
+  const linkedResources = mcpDiscoveryEnabled ? connectedMcpServers : []
   const entrySource = useMemo(
-    () => mergePickerEntries(tools, skills, mcpServers, STATIC_COMMANDS),
-    [tools, skills, mcpServers],
+    () => mergePickerEntries(tools, skills, [...mcpServers, ...linkedResources], STATIC_COMMANDS),
+    [tools, skills, mcpServers, linkedResources],
   )
   const localCommandActions = useMemo(() => ({
     ...commandActions,

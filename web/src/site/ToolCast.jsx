@@ -23,6 +23,7 @@ import ConversePanel from '../components/ConversePanel.jsx'
 import AuthorPanel from '../components/AuthorPanel.jsx'
 import CapabilityCatalog from '../components/CapabilityCatalog.jsx'
 import ClaudeAccountPanel from '../components/ClaudeAccountPanel.jsx'
+import useTenantMcpRegistry from '../useTenantMcpRegistry.js'
 import CheckoutControls from '../components/CheckoutControls.jsx'
 import DetailsDrawer from '../components/DetailsDrawer.jsx'
 import DrawingUploadControl from '../components/DrawingUploadControl.jsx'
@@ -329,6 +330,16 @@ export default function ToolCast({
   const [authorSeedSignal, setAuthorSeedSignal] = useState(0)
   const [authorTargetTool, setAuthorTargetTool] = useState(null)
   const [claudeOpen, setClaudeOpen] = useState(false)
+  const mcpRegistry = useTenantMcpRegistry({ mock: transportMock })
+  const [linkServiceOpen, setLinkServiceOpen] = useState(false)
+  // The command bar's @ mounts list gains connected registry servers by
+  // LABEL, mirroring App.jsx's identical memo.
+  const connectedMcpServers = useMemo(
+    () => mcpRegistry.servers
+      .filter((server) => server.state === 'connected')
+      .map((server) => ({ name: server.label, host: server.host })),
+    [mcpRegistry.servers],
+  )
   const [workspaceBootstrapRequired, setWorkspaceBootstrapRequired] = useState(false)
   const [sessionRetry, setSessionRetry] = useState(0)
   // Slice 13a: the toast is now ONE bus (lib/notifications.js) shared with
@@ -1631,6 +1642,7 @@ export default function ToolCast({
             // line ~768 (transportMock excluded there is not relevant here:
             // discovery is harmless idle in mock mode either way).
             mcpDiscoveryEnabled={isSignedIn() && platform.isEntitled('converse')}
+            connectedMcpServers={connectedMcpServers}
             commandLine
             classNames={STAGE_BAR_CLASSES}
             projectSlot={<span className="bar-proj tc-bar-proj">{activeDrawingId || 'No drawing'}</span>}
@@ -1654,6 +1666,23 @@ export default function ToolCast({
         </div>
       </div>
   )
+
+  // Standardization slice 8c. Precomputed like commandBarBlock above: the
+  // <SurfaceFrame> tag stays compact so the sign-out pin (a bounded 0-2000
+  // char span to `signedIn=`) keeps holding as slots accrete.
+  const integrationsBlock = {
+    mock: transportMock,
+    servers: mcpRegistry.servers,
+    loading: mcpRegistry.loading,
+    busy: mcpRegistry.busy,
+    error: mcpRegistry.error,
+    open: linkServiceOpen,
+    onToggle: setLinkServiceOpen,
+    onRegister: mcpRegistry.register,
+    onConnect: mcpRegistry.connect,
+    onHealth: mcpRegistry.health,
+    onUnlink: mcpRegistry.unlink,
+  }
 
   return (
     // Slice 4a: THE SURFACE FRAME (site/SurfaceFrame.jsx). Local names are
@@ -1707,6 +1736,7 @@ export default function ToolCast({
           setLeftView('operator')
         },
       }}
+      integrations={integrationsBlock}
       signedIn={isSignedIn()}
       onSignOut={platformSession.actions.signOut}
     >
@@ -2254,6 +2284,11 @@ export default function ToolCast({
             >
               Account details
             </button>
+            {/* Standardization slice 8c: the Link-a-service drawer sits in
+                the rail column (aside.tc-rail-r), beside the account trigger
+                it is modeled on, never inside the drawing window's
+                overlay-card region. */}
+            <SurfaceFrame.Integrations />
           </div>
         )}
         {rightView === 'view' && (

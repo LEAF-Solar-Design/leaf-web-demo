@@ -224,9 +224,14 @@ export const PRODUCT_SURFACES = Object.freeze([
         //   is not surface-gated, so the scope is the same on every surface.
         scope: 'drawing',
       },
-      // integrations: the only link surface today is the header's Claude
-      //   account panel (App.jsx:2630), which is global, not per-surface.
-      integrations: null,
+      // integrations: standardization slice 8c. The Link-a-service drawer
+      //   (Claude accounts' sibling terminal panel) mounts on every studio
+      //   surface a tenant can reach — 'standard-flow' names the one drawer
+      //   shape this slice ships, so a later slice can add a second flow
+      //   without this slot's meaning drifting. browser has no drawing or
+      //   device stage but IS a tenant-owned workspace, so it declares the
+      //   slot exactly like cad/solar/ios.
+      integrations: { link: 'standard-flow' },
       builds: {
         // routes: the nav rail's ToolsPanel run path (App.jsx:2710 ->
         //   onRequestCatalogRun) is mounted on every surface; no marathon
@@ -316,7 +321,7 @@ export const PRODUCT_SURFACES = Object.freeze([
       // versions: App.jsx:3041 VersionHistory inside the shown workspace card.
       versions: 'drawing',
       conversations: { scope: 'drawing' }, // converse.js:129-134
-      integrations: null,
+      integrations: { link: 'standard-flow' }, // slice 8c, see the browser record's note
       // builds.card: slice 11a, the job monitor hosts the card (a spine here
       //   by default, rails.right 'job-spine'; the toolbar badge opens it).
       builds: { routes: ['one-shot'], card: 'job-rail' }, // App.jsx:2710 catalog run path
@@ -388,7 +393,7 @@ export const PRODUCT_SURFACES = Object.freeze([
       authoring: true, // App.jsx:2735
       versions: 'drawing', // App.jsx:3041 inside the shown card (App.jsx:2859)
       conversations: { scope: 'drawing' }, // converse.js:129-134
-      integrations: null,
+      integrations: { link: 'standard-flow' }, // slice 8c, see the browser record's note
       builds: { routes: ['one-shot'], card: 'job-rail' }, // App.jsx:2710; card: slice 11a, the job monitor hosts it
       contextMenu: [],
       shortcuts: null,
@@ -442,7 +447,7 @@ export const PRODUCT_SURFACES = Object.freeze([
       authoring: true, // App.jsx:2735 (the nav rail is not surface-gated)
       versions: 'none', // App.jsx:3041 inside the hidden card (App.jsx:2859)
       conversations: { scope: 'drawing' }, // converse.js:129-134
-      integrations: null,
+      integrations: { link: 'standard-flow' }, // slice 8c, see the browser record's note
       builds: {
         // routes: the console mounts IosSurface, which is props-only and
         //   carries NO launch control (IosSurface.jsx:3-4 "no fetch, no
@@ -545,6 +550,9 @@ export const PRODUCT_SURFACES = Object.freeze([
       //   this arm and no drawing identity is consumed for one, so a scope
       //   here would be a guess.
       conversations: { scope: null },
+      // integrations: null, undeclared. A public, session-less page has no
+      //   tenant to link a service FROM (slice 8c's drawer is a tenant-owner
+      //   affordance); this is the same class of absence as conversations.scope.
       integrations: null,
       // builds.routes: declared EMPTY. SheetsPage has no run or build control
       //   of any kind, so this is an absence that was read, not one assumed.

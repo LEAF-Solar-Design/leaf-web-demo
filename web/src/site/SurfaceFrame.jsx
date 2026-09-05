@@ -37,6 +37,7 @@ import ConversationListComponent from '../components/ConversationList.jsx'
 import EntitlementGate from '../components/EntitlementGate.jsx'
 import JobInboxComponent from '../components/JobInbox.jsx'
 import JobRailComponent from '../components/JobRail.jsx'
+import LinkServiceDrawer from '../components/LinkServiceDrawer.jsx'
 import ProductSurfaceTabs, { ProductSurfaceFrame } from '../components/ProductSurfaceTabs.jsx'
 import ToastComponent from '../components/Toast.jsx'
 
@@ -149,6 +150,14 @@ function useSlot() {
  *                     Null means "this scene mounts no conversation list" and
  *                     the slot renders nothing, the same fail-closed posture
  *                     jobRail already has
+ *   integrations      standardization slice 8c. { mock, servers, loading,
+ *                     busy, error, open, onToggle, onRegister, onConnect,
+ *                     onHealth, onUnlink } or null. THE gate is the declared
+ *                     slot (`contract.integrations?.link === 'standard-flow'`),
+ *                     same posture as `conversations`: null means this scene
+ *                     mounts no Link-a-service drawer and the slot renders
+ *                     nothing, fail-closed twice in a row (no frame, no
+ *                     declared slot) before ever reaching the wiring.
  *   signedIn/onSignOut  the AccountSignOut beside the tabs (the stage passes
  *                     them; the console's sign-out lives in its own header
  *                     today). Slice 4b: published to the ContinuityStore
@@ -176,6 +185,7 @@ export default function SurfaceFrame({
   jobRail = null,
   toast = null,
   conversations = null,
+  integrations = null,
   signedIn = false,
   onSignOut = null,
   children = null,
@@ -207,6 +217,7 @@ export default function SurfaceFrame({
     jobRail,
     toast,
     conversations,
+    integrations,
     signedIn,
     onSignOut,
   }
@@ -462,6 +473,40 @@ function Conversations() {
   )
 }
 
+/**
+ * LinkServiceDrawer, standardization slice 8c. THE gate is the declared slot
+ * and nothing else, the exact house rule Conversations above states:
+ *
+ *   contract.integrations?.link === 'standard-flow'
+ *
+ * Fails closed three times, in order: no frame, no `integrations` wiring
+ * from the scene, no declared slot value. A surface that has not declared
+ * the slot (today: 'sheets', a public chrome-free page with no session to
+ * link a service FROM) renders nothing even if a scene mistakenly passed
+ * wiring for it.
+ */
+function Integrations() {
+  const frame = useSlot()
+  const wiring = frame?.integrations
+  if (!wiring) return null
+  if (frame.contract.integrations?.link !== 'standard-flow') return null
+  return (
+    <LinkServiceDrawer
+      mock={wiring.mock}
+      servers={wiring.servers}
+      loading={wiring.loading}
+      busy={wiring.busy}
+      error={wiring.error}
+      open={wiring.open}
+      onToggle={wiring.onToggle}
+      onRegister={wiring.onRegister}
+      onConnect={wiring.onConnect}
+      onHealth={wiring.onHealth}
+      onUnlink={wiring.onUnlink}
+    />
+  )
+}
+
 // The slots are statics on the frame, not separate named exports: one import
 // gives a scene the wrapper AND every slot, and `<SurfaceFrame.Tabs />` reads
 // at the mount site as what it is. Each reference is a stable module-level
@@ -472,6 +517,7 @@ function Conversations() {
 // contract holds across the scene crossing as well).
 SurfaceFrame.Tabs = Tabs
 SurfaceFrame.Conversations = Conversations
+SurfaceFrame.Integrations = Integrations
 SurfaceFrame.Frame = Frame
 SurfaceFrame.Entitlement = Entitlement
 SurfaceFrame.CommandBar = CommandBar

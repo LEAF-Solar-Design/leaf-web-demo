@@ -276,6 +276,26 @@ describe('MCP picker sources', () => {
       { kind: 'resource', name: 'roof-mcp', description: 'mcp.example.test', insertionText: '@roof-mcp:' },
     ])
   })
+
+  // Standardization slice 8c: a Link-a-service registry record only ever
+  // reaches this function pre-mapped to {name, host} (App.jsx/ToolCast.jsx),
+  // but this asserts the projection ITSELF, independent of that call-site
+  // discipline: even a hostile resource carrying extra fields never gets
+  // spread into the picker entry, so a token, a credentialed URL, or an
+  // upstream tool name riding along has no path into the mention list.
+  it('projects a resource entry to name/host only, never spreading a hostile extra field', () => {
+    const hostile = {
+      name: 'billing-tool',
+      host: 'mcp.example.test',
+      token: 'sk-ant-hostile00000000000000000000000000000000000000',
+      upstream_tool: 'internal-billing-export',
+      url: 'https://user:hunter2@mcp.example.test/sse',
+    }
+    const [entry] = mergePickerEntries([], [], [hostile], [])
+    assert.deepEqual(entry, {
+      kind: 'resource', name: 'billing-tool', description: 'mcp.example.test', insertionText: '@billing-tool:',
+    })
+  })
 })
 
 describe('pickerTrigger', () => {

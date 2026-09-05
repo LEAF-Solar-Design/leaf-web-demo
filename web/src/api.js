@@ -587,6 +587,57 @@ export async function unlinkClaudeGrant(accountId) {
   })
 }
 
+// --- Tenant MCP server registry (standardization slice 8c) --------------
+// Wraps server/routers/tenant_mcp.py (slice 8b), mounted at
+// /api/tenant/mcp-servers. Every response is that router's own safe
+// projection: {id, label, host, state, linked_at} on list/register,
+// {authorize_url} on connect, {id, state} on health, {deleted} on unlink.
+// This layer maps those fields ONLY — it never invents a field the router
+// does not return, and never carries a raw fetch object past this file.
+//   GET    /api/tenant/mcp-servers               list (safe projection)
+//   POST   /api/tenant/mcp-servers {url,label}    register
+//   POST   /api/tenant/mcp-servers/{id}/connect   start the OAuth flow
+//   GET    /api/tenant/mcp-servers/{id}/health    bounded ping
+//   DELETE /api/tenant/mcp-servers/{id}           unlink
+// listTenantMcpServers degrades to [] on a sibling that isn't deployed yet,
+// same posture as getClaudeGrant's null degrade.
+export async function listTenantMcpServers() {
+  try {
+    const body = await http('/api/tenant/mcp-servers', { headers: { 'X-Tenant-Id': TENANT } })
+    return Array.isArray(body?.servers) ? body.servers : []
+  } catch {
+    return []
+  }
+}
+
+export async function registerTenantMcpServer(url, label) {
+  return http('/api/tenant/mcp-servers', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT },
+    body: JSON.stringify({ url, label }),
+  })
+}
+
+export async function connectTenantMcpServer(id) {
+  return http(`/api/tenant/mcp-servers/${encodeURIComponent(id)}/connect`, {
+    method: 'POST',
+    headers: { 'X-Tenant-Id': TENANT },
+  })
+}
+
+export async function healthTenantMcpServer(id) {
+  return http(`/api/tenant/mcp-servers/${encodeURIComponent(id)}/health`, {
+    headers: { 'X-Tenant-Id': TENANT },
+  })
+}
+
+export async function unlinkTenantMcpServer(id) {
+  return http(`/api/tenant/mcp-servers/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers: { 'X-Tenant-Id': TENANT },
+  })
+}
+
 // Defensive detector for the authoring "grant required" signal (Concern 2). The
 // sibling backend documents the exact field; until it lands we key on EITHER an
 // explicit `grant_required` flag OR the §10 error code/message mentioning a
