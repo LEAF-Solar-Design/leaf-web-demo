@@ -91,10 +91,40 @@ class FakeStore:
         return dict(result)
 
 
+class FakeExecution:
+    def __init__(self, store):
+        self.store = store
+        self.calls = []
+
+    def read_execution(self, org, project, campaign, *, limit):
+        self.calls.append((org, project, campaign, limit))
+        self.store._require(org, project, campaign)
+        hidden = dict(spec={'secret': True}, verify_command='private command', fence=9,
+                      idempotency_key='private key', payload_fingerprint='private fingerprint',
+                      active_attempt={'worker_id': 'worker', 'fence': 9,
+                                      'budget_reservation_ref': 'budget', 'outward_operation_key': 'operation'},
+                      result={'private': True}, artifact_ref='artifact', resource_identity='resource',
+                      rollback_identity='rollback', payload={'private': True}, future_secret='secret',
+                      dispatch={'action': 'mount-fleet-adapter'})
+        return {
+            'tasks': [dict(hidden, task_id='task', task_key='build', title='Build recipes', kind='build',
+                           status='reconcile_required', stages=['build'], current_stage='build',
+                           depends_on=['design'], blocked_by_questions=['question'], created_at='now', updated_at='now')],
+            'pending_questions': [dict(hidden, question_id='question', question_key='format', prompt='Which format?',
+                                       options=['PDF'], status='open', blocks_dispatch=True, task_ids=['task'], created_at='now')],
+            'receipts': [dict(hidden, receipt_id='receipt', task_id='task', stage='build', outcome='unknown',
+                              verified=False, created_at='now', reconciles_receipt_id=None)],
+            'events': [dict(hidden, event_id='event', task_id='task', event_type='task_created', created_at='now')],
+            'future_secret': 'secret',
+        }
+
+
 @pytest.fixture
 def setup(monkeypatch):
     store = FakeStore()
     router.set_store(store)
+    store.execution = FakeExecution(store)
+    router.set_execution_store(store.execution)
     allowed = {PROJECT, OTHER}
 
     def access(tenant, project_id, *, write):
@@ -113,6 +143,7 @@ def setup(monkeypatch):
     with TestClient(app) as client:
         yield client, store, allowed
     router.set_store(None)
+    router.set_execution_store(None)
 
 
 def _submit(client, **overrides):
@@ -127,6 +158,73 @@ def _question(client):
         'options': ['tags', 'collections']})
     assert response.status_code == 201
     return campaign, response.json()['question']['question_id']
+
+
+def test_execution_projection_and_limit_validation(setup):
+    client, store, _ = setup
+    campaign = _submit(client).json()['campaign']['campaign_id']
+    url = f'/api/campaigns/{campaign}/execution'
+    response = client.get(url, params={'project_id': PROJECT})
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {'ok', 'execution'} and body['ok'] is True
+    expected = {
+        'tasks': {'task_id', 'task_key', 'title', 'kind', 'status', 'stages', 'current_stage',
+                  'depends_on', 'blocked_by_questions', 'created_at', 'updated_at'},
+        'questions': {'question_id', 'question_key', 'prompt', 'options', 'status', 'blocks_dispatch', 'task_ids', 'created_at'},
+        'receipts': {'receipt_id', 'task_id', 'stage', 'outcome', 'verified', 'created_at', 'reconciles_receipt_id'},
+        'events': {'event_id', 'task_id', 'event_type', 'created_at'},
+    }
+    assert set(body['execution']) == set(expected)
+    for name, keys in expected.items():
+        assert len(body['execution'][name]) == 1
+        assert set(body['execution'][name][0]) == keys
+    assert '"dispatch":' not in response.text
+    assert store.execution.calls == [(ORG, PROJECT, campaign, 50)]
+    for value, clamped in [('999', 200), ('0', 1), ('-20', 1)]:
+        assert client.get(url, params={'project_id': PROJECT, 'limit': value}).status_code == 200
+        assert store.execution.calls[-1] == (ORG, PROJECT, campaign, clamped)
+    calls = len(store.execution.calls)
+    assert client.get(url, params={'project_id': PROJECT, 'limit': 'bad'}).status_code == 400
+    assert len(store.execution.calls) == calls
+
+
+def test_execution_missing_scope_and_invalid_ids(setup):
+    client, store, _ = setup
+    campaign = _submit(client).json()['campaign']['campaign_id']
+    foreign = client.get(f'/api/campaigns/{campaign}/execution', params={'project_id': OTHER})
+    missing = client.get(f'/api/campaigns/{uuid.uuid4()}/execution', params={'project_id': OTHER})
+    assert foreign.status_code == missing.status_code == 404
+    assert foreign.json() == missing.json() == {'ok': False, 'error': {
+        'error_code': 'project_unavailable', 'message': 'project is unavailable', 'retryable': False}}
+    calls = len(store.execution.calls)
+    for identifier, params in [('bad', {'project_id': PROJECT}), (campaign, {'project_id': 'bad'}), (campaign, {})]:
+        assert client.get(f'/api/campaigns/{identifier}/execution', params=params).status_code == 400
+    assert len(store.execution.calls) == calls
+
+
+def test_execution_forbidden_never_calls_ledger(setup):
+    client, store, allowed = setup
+    campaign = _submit(client).json()['campaign']['campaign_id']
+    allowed.remove(PROJECT)
+    response = client.get(f'/api/campaigns/{campaign}/execution', params={'project_id': PROJECT})
+    assert response.status_code == 403
+    assert response.json()['error']['error_code'] == 'forbidden'
+    assert store.execution.calls == []
+
+
+def test_execution_store_failure_is_retryable_503(setup, monkeypatch):
+    client, _, _ = setup
+    campaign = _submit(client).json()['campaign']['campaign_id']
+
+    def unavailable():
+        raise RuntimeError('private database failure')
+
+    monkeypatch.setattr(router, '_execution_store', unavailable)
+    response = client.get(f'/api/campaigns/{campaign}/execution', params={'project_id': PROJECT})
+    assert response.status_code == 503
+    assert response.json() == {'ok': False, 'error': {'error_code': 'campaigns_unavailable',
+        'message': 'campaign store is unavailable', 'retryable': True}}
 
 
 def test_submission_replay_conflict_verified_identity_and_dispatch(setup):

@@ -16,6 +16,20 @@ import platform_link
 
 router = APIRouter()
 _STORE = None
+_EXECUTION = None
+
+
+def set_execution_store(obj):
+    global _EXECUTION
+    _EXECUTION = obj
+
+
+def _execution_store():
+    if _EXECUTION is not None:
+        return _EXECUTION
+    _store()
+    from leaf_platform import campaign_execution
+    return campaign_execution
 
 
 def set_store(obj):
@@ -69,7 +83,7 @@ def _dispatch(row):
     return result
 
 
-def _execute(tenant, project_id, operation, key, *, created=False):
+def _execute(tenant, project_id, operation, key, *, created=False, project=_dispatch):
     try:
         store = _store()
     except Exception:
@@ -80,7 +94,7 @@ def _execute(tenant, project_id, operation, key, *, created=False):
         if result is None:
             return _failure(404, 'project_unavailable', 'project is unavailable')
         status = 201 if created and not result.get('replayed', False) else 200
-        projected = [_dispatch(row) for row in result] if isinstance(result, list) else _dispatch(result)
+        projected = [project(row) for row in result] if isinstance(result, list) else project(result)
         return JSONResponse(status_code=status, content={'ok': True, key: projected})
     except platform_link.ProjectSessionForbidden:
         return _failure(403, 'forbidden', 'project role does not permit access')
@@ -138,6 +152,32 @@ def get_campaign(campaign_id: str, request: Request, tenant: Any = Depends(deps.
     except ValueError as exc:
         return _failure(400, 'invalid_request', str(exc))
     return _execute(tenant, project, lambda store, org: store.get_campaign(org, project, campaign_id), 'campaign')
+
+
+def _project(snapshot):
+    fields = {
+        'tasks': ('tasks', ('task_id', 'task_key', 'title', 'kind', 'status', 'stages',
+                           'current_stage', 'depends_on', 'blocked_by_questions', 'created_at', 'updated_at')),
+        'questions': ('pending_questions', ('question_id', 'question_key', 'prompt', 'options',
+                                            'status', 'blocks_dispatch', 'task_ids', 'created_at')),
+        'receipts': ('receipts', ('receipt_id', 'task_id', 'stage', 'outcome', 'verified',
+                                 'created_at', 'reconciles_receipt_id')),
+        'events': ('events', ('event_id', 'task_id', 'event_type', 'created_at')),
+    }
+    return {name: [{key: row[key] for key in keys if key in row} for row in snapshot.get(source, [])]
+            for name, (source, keys) in fields.items()}
+
+
+@router.get('/api/campaigns/{campaign_id}/execution')
+def execution(campaign_id: str, request: Request, tenant: Any = Depends(deps.require_tenant)):
+    try:
+        project, campaign_id = _id(request.query_params.get('project_id')), _id(campaign_id)
+        limit = max(1, min(200, int(request.query_params.get('limit', '50'))))
+    except ValueError as exc:
+        return _failure(400, 'invalid_request', str(exc))
+    return _execute(tenant, project, lambda store, org: _project(
+        _execution_store().read_execution(org, project, campaign_id, limit=limit)),
+        'execution', project=lambda row: row)
 
 
 @router.post('/api/campaigns/{campaign_id}/questions')
