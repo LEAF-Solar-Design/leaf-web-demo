@@ -48,7 +48,7 @@ describe('the console ConversationList sits in the rail column, not over the gro
   })
 
   it('the column owns the rail grid seat on desktop and the stacked order on narrow layouts', () => {
-    assert.match(css, /@media \(min-width: 981px\) \{\s*\.rail-stack \{ grid-row: 2; grid-column: 3; \}/,
+    assert.match(css, /@media \(min-width: 981px\) \{\n  \.rail-stack \{ grid-row: 2; grid-column: 3; \}\n\}/,
       '.rail-stack must claim grid-row 2 / grid-column 3 on desktop, the seat aside.rail held alone')
     assert.match(css, /\.app > \.rail-stack \{ order: 3; \}/,
       '.rail-stack must keep the rail\'s order 3 in the stacked (<=980px) layout')
@@ -57,5 +57,15 @@ describe('the console ConversationList sits in the rail column, not over the gro
   it('bounds the list inside the column so it can never push the job monitor off the rail', () => {
     assert.match(css, /\.rail-stack \.conversation-list \{[^}]*max-height: 40%;[^}]*overflow-y: auto;/s,
       'the list must be capped at 40% of the column and scroll independently')
+  })
+
+  it('the column owns the rail edge; neither child draws a border-left of its own', () => {
+    assert.match(css, /\.rail-stack \{[^}]*border-left: 1px solid var\(--border\);/s,
+      '.rail-stack must draw the left edge once')
+    const list = css.match(/\.rail-stack \.conversation-list \{[^}]*\}/s)
+    const rail = css.match(/\naside\.rail \{[^}]*\}/s)
+    assert.ok(list && rail, 'both child rules must exist')
+    assert.equal(list[0].includes('border-left'), false, 'the list must not repeat the edge')
+    assert.equal(rail[0].includes('border-left'), false, 'aside.rail must not repeat the edge')
   })
 })
