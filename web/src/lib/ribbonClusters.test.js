@@ -94,6 +94,46 @@ describe('catalogClusters', () => {
       expect(clusters[0].note).toBe('No tools for this surface yet.')
     }
   })
+
+  // Standardization slice 8c. Nothing is projected onto any real catalog yet
+  // (server/mcp_tool_projection.py always returns []), so this is a fixture:
+  // no live surface can produce this record today, but the honesty path that
+  // will disable it once one does is real and pinned here, not left to be
+  // discovered the day the projection stops being empty.
+  it('an mcp-sourced tool cannot run on this surface yet, and says so', () => {
+    const mcpFams = [{
+      family_id: 'measurement',
+      label: 'Measurement',
+      capabilities: [{
+        name: 'list-linked-service-items',
+        description: 'Lists items from a connected service.',
+        capabilities: ['drawing.read'],
+        mcp_source: { server_id: 'abcdef0123456789abcdef01', tool: 'list-items' },
+      }],
+    }]
+    const clusters = catalogClusters(mcpFams, { onRequestRun: () => {} })
+    const tool = toolsOf(clusters[0])['list-linked-service-items']
+    expect(tool.disabled).toBe(true)
+    expect(tool.reason).toBe(REASONS.mcpToolNotWired)
+    expect(tool.mcpSource).toEqual({ server_id: 'abcdef0123456789abcdef01', tool: 'list-items' })
+  })
+
+  it('a hostile mcp_source is dropped, so the tool runs like an ordinary catalog row', () => {
+    const badFams = [{
+      family_id: 'measurement',
+      label: 'Measurement',
+      capabilities: [{
+        name: 'count-by-layer',
+        description: 'Counts entities per layer.',
+        capabilities: ['drawing.read'],
+        mcp_source: { server_id: 'not-hex-shaped', tool: 'list-items' },
+      }],
+    }]
+    const clusters = catalogClusters(badFams, { onRequestRun: () => {} })
+    const tool = toolsOf(clusters[0])['count-by-layer']
+    expect(tool.disabled).toBe(false)
+    expect(tool.mcpSource).toBeUndefined()
+  })
 })
 
 describe('the rail affordances the band carries while the rail is hidden', () => {

@@ -77,6 +77,18 @@
       "returns": { "type": "object" },
       "capabilities": ["drawing.read"],
       "provenance": { "author": "agent", "created": "2026-07-17T00:00:00Z" }
+    },
+    {
+      "name": "list-linked-service-items",
+      "version": "1.0.0",
+      "description": "Placeholder fixture for a tool projected from a connected MCP service (standardization slice 8c); not runnable until upstream tool projection ships.",
+      "kind": "script",
+      "engine_op": "list_linked_service_items",
+      "params": { "type": "object", "properties": {}, "required": [] },
+      "returns": { "type": "object" },
+      "capabilities": ["drawing.read"],
+      "provenance": { "author": "agent", "created": "2026-09-04T00:00:00Z" },
+      "mcp_source": { "server_id": "abcdef0123456789abcdef01", "tool": "list-items" }
     }
   ]
 }
