@@ -166,7 +166,7 @@ export function locate(curve, p) {
       } else {
         const ab = sub(b, a)
         const l2 = dot(ab, ab)
-        t = l2 <= EPSILON ? 0 : dot(sub(p, a), ab) / l2
+        t = l2 <= EPSILON * EPSILON ? 0 : dot(sub(p, a), ab) / l2
         t = t < 0 ? 0 : t > 1 ? 1 : t
         d = dist(p, add(a, scale(ab, t)))
       }
@@ -222,7 +222,7 @@ function segCircle(a, b, c, r) {
   const d = sub(b, a)
   const f = sub(a, c)
   const A = dot(d, d)
-  if (A <= EPSILON) return []
+  if (A <= EPSILON * EPSILON) return []
   const B = 2 * dot(f, d)
   const C = dot(f, f) - r * r
   const disc = B * B - 4 * A * C
@@ -360,8 +360,7 @@ function piece(curve, a, b, eps) {
   }
   const push = (p, bulge) => {
     const q = [clean(p[0]), clean(p[1])]
-    if (pts.length && Math.abs(bulges[bulges.length - 1]) <= BULGE_EPS && same(pts[pts.length - 1], p, eps)) {
-      pts[pts.length - 1] = q
+    if (pts.length && Math.abs(bulges[bulges.length - 1]) <= BULGE_EPS && same(pts[pts.length - 1], p, EPSILON)) {
       bulges[bulges.length - 1] = bulge
     } else {
       pts.push(q)
@@ -422,7 +421,7 @@ export function trimEntity(target, edge, px, py, tol = EPSILON) {
   const layer = layerOf(target)
   if (T.kind === 'LINE' || (T.kind === 'POLY' && !T.closed)) {
     const end = T.kind === 'LINE' ? 1 : T.pts.length - 1
-    const inside = crossings(T, E, 'none', eps).filter((c) => c.s > EPSILON && c.s < end - EPSILON)
+    const inside = crossings(T, E, 'none', eps).filter((c) => c.s > 0 && c.s < end)
     if (!inside.length) return refuse(verb, 'the cutting edge does not cross the selection')
     const sp = locate(T, pick).s
     if (inside.some((c) => same(c.p, pointAt(T, sp), eps))) return refuse(verb, 'click on the part to remove, away from the crossing')

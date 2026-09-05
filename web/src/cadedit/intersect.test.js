@@ -939,4 +939,55 @@ describe('Astra refutations (W4g-6e record 4)', () => {
       bulges: [1, 0, 0],
     }] })
   })
+
+  it('keeps the endpoint of a retained arc before a short straight segment', () => {
+    const target = poly('p', [[0, 0], [0.001, 0], [0.002, 0], [10, 0], [20, 0]], false, 'A', [100000, 0, 0, 0, 0])
+    const out = trimEntity(target, line('e', [15, -1], [15, 1]), 19, 0, 0.01)
+    expect(out).toEqual({ steps: [{
+      op: 'setVertices', entityId: 'p', points: [[0, 0], [0.001, 0], [0.002, 0], [10, 0], [15, 0]], closed: false,
+      bulges: [100000, 0, 0, 0, 0],
+    }] })
+  })
+
+  it('solves a short cutter through an arc and keeps the remaining quarter circle', () => {
+    const target = poly('p', [[0, 0], [10, 0]], false, 'A', [1, 0])
+    const edge = line('e', [5, -5.000001], [5, -4.999999])
+    const hits = crossings(curveOf(target), curveOf(edge))
+    expect(hits).toHaveLength(1)
+    expect(hits[0].s).toBeCloseTo(0.5, 9)
+    const out = trimEntity(target, edge, 2, -4, 1e-9)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(1)
+    const { points, bulges, ...shape } = out.steps[0]
+    expect(shape).toEqual({ op: 'setVertices', entityId: 'p', closed: false })
+    expect(points).toHaveLength(2)
+    ;[[5, -5], [10, 0]].forEach((p, i) => {
+      expect(points[i]).toHaveLength(2)
+      p.forEach((v, j) => expect(points[i][j]).toBeCloseTo(v, 6))
+    })
+    expect(bulges).toHaveLength(2)
+    expect(bulges[0]).toBeCloseTo(Math.tan(Math.PI / 8), 9)
+    expect(bulges[1]).toBe(0)
+  })
+
+  it('keeps near-start crossings interior on a very long line', () => {
+    const target = line('l', [0, 0], [1e12, 0])
+    const edge = poly('q', [[98, 1], [102, 1]], false, 'A', [1, 0])
+    const out = trimEntity(target, edge, 100, 0, 1e-9)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(2)
+    const { points, ...first } = out.steps[0]
+    expect(first).toEqual({ op: 'setVertices', entityId: 'l', closed: false })
+    expect(points).toHaveLength(2)
+    expect(points[0]).toEqual([0, 0])
+    expect(points[1]).toHaveLength(2)
+    expect(points[1][0]).toBeCloseTo(98.267949192, 6)
+    expect(points[1][1]).toBe(0)
+    expect(out.steps[0]).not.toHaveProperty('bulges')
+    const { inputs, ...second } = out.steps[1]
+    expect(second).toEqual({ op: 'createLine' })
+    const { x, ...rest } = inputs
+    expect(x).toBeCloseTo(101.732050808, 6)
+    expect(rest).toEqual({ y: 0, x2: 1e12, y2: 0, layer: 'A' })
+  })
 })
