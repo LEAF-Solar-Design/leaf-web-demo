@@ -104,6 +104,7 @@ def run_step(body: str, workdir: Path, env: dict) -> dict:
         "SUPPLY_PROVIDER_WORKFLOW_PATH": ".github/workflows/build-platform-images.yml",
         "SUPPLY_SET_POLLS": "1",
         "SUPPLY_SET_INTERVAL": "0",
+        "HEAD_SHA": "a" * 40,
         "STAGE_SERVICES": "web",
         "RELAY_RECEIPT_POLLS": "1",
         "RELAY_RECEIPT_INTERVAL": "0",
@@ -165,6 +166,14 @@ def _install_fake_gh(workdir: Path) -> Path:
             fi
             for arg in "$@"; do
               case "$arg" in
+                */actions/runs\\?*)
+                  cat "$DIR/dispatcher-runs.json"
+                  exit 0
+                  ;;
+                */actions/runs/*/jobs\\?*)
+                  cat "$DIR/dispatcher-jobs.json"
+                  exit 0
+                  ;;
                 */commits/*/statuses*)
                   SHA=$(printf '%s' "$arg" | sed -E 's#.*/commits/([0-9a-f]+)/statuses.*#\\1#')
                   RESP="$DIR/statuses-$SHA.json"
@@ -335,6 +344,21 @@ def test_post_check_reread_passes_on_unchanged_membership(tmp_path):
     assert result["__returncode__"] == 0, result["__stderr__"]
 
 
+@needs_shell
+def test_post_check_reread_rejects_changed_pr_head_with_same_group_head(tmp_path):
+    _install_fake_gh(tmp_path)
+    head = "a" * 40
+    checked = [member_node(1, 10, head)]
+    (tmp_path / "members-check.json").write_text(json.dumps(checked), encoding="utf-8")
+    checked[0]["pullRequest"]["headRefOid"] = "b" * 40
+    (tmp_path / "graphql-response-1.json").write_text(
+        json.dumps(graphql_page(checked)), encoding="utf-8",
+    )
+    result = run_step(step_body("mq-review", "Re-read the queue"), tmp_path, {"HEAD_SHA": head})
+    assert result["__returncode__"] != 0
+    assert "membership drifted" in result["__stdout__"]
+
+
 # --------------------------------------------------------------------------- #
 # mq-supply: the docs-only recompute, executed against a real git repo
 # --------------------------------------------------------------------------- #
@@ -371,6 +395,7 @@ def _group_repo(tmp_path, changed: str | None) -> Path:
 )
 def test_docs_only_group_recomputed_from_the_real_diff(tmp_path, changed, expect_supply_none):
     repo = _group_repo(tmp_path, changed)
+    _dispatcher_evidence(repo)
     result = run_step(step_body("mq-supply", "Recompute the docs-noop verdict"), repo, {})
     assert result["__returncode__"] == 0, result["__stderr__"]
     if expect_supply_none:
@@ -385,6 +410,70 @@ def test_docs_only_recompute_fails_open_with_no_first_parent(tmp_path):
     result = run_step(step_body("mq-supply", "Recompute the docs-noop verdict"), repo, {})
     assert result["__returncode__"] == 0, result["__stderr__"]
     assert result.get("supply") in ("", None)
+
+
+def _dispatcher_evidence(repo, missing=None, conclusion="skipped"):
+    _install_fake_gh(repo)
+    runs = [{
+        "id": 12, "event": "merge_group", "head_sha": "a" * 40,
+        "path": ".github/workflows/speculate-platform-images.yml",
+        "created_at": "2026-09-05T00:00:00Z",
+    }]
+    steps = [{"name": "Dispatch the merge-group build on the main ref",
+              "conclusion": conclusion}]
+    jobs = [{"name": "dispatch-group", "conclusion": "success",
+             "steps": [] if missing == "step" else steps}]
+    (repo / "dispatcher-runs.json").write_text(
+        json.dumps({"workflow_runs": [] if missing == "run" else runs}), encoding="utf-8",
+    )
+    (repo / "dispatcher-jobs.json").write_text(
+        json.dumps({"jobs": [] if missing == "job" else jobs}), encoding="utf-8",
+    )
+
+
+@needs_shell
+@pytest.mark.parametrize("missing,conclusion", [
+    (None, "success"), ("run", "skipped"), ("job", "skipped"), ("step", "skipped"),
+])
+def test_local_docs_verdict_requires_dispatcher_skip_evidence(tmp_path, missing, conclusion):
+    repo = _group_repo(tmp_path, "docs/whatever.md")
+    _dispatcher_evidence(repo, missing, conclusion)
+    result = run_step(step_body("mq-supply", "Recompute the docs-noop verdict"), repo, {})
+    assert result["__returncode__"] == 0, result["__stderr__"]
+    assert result.get("supply") in ("", None)
+
+
+@needs_shell
+@pytest.mark.parametrize("receipt,accepted", [({"weights_touched": False}, True), ({}, False)])
+def test_receipt_weights_presence_uses_the_workflow_jq_expression(tmp_path, receipt, accepted):
+    body = step_body("mq-prewarm", "Wait for every dispatched terraform staging receipt")
+    expression = re.search(r"REC_WEIGHTS=\$\(jq -r '([^']+)'", body).group(1)
+    (tmp_path / "receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+    result = run_step(
+        "REC_WEIGHTS=$(jq -r %s receipt.json)\n[ \"$REC_WEIGHTS\" = \"false\" ]\n"
+        % shlex.quote(expression), tmp_path, {},
+    )
+    assert (result["__returncode__"] == 0) == accepted
+
+
+def test_boolean_receipt_fields_never_use_jq_alternative_operator():
+    assert not re.search(r"\.(?:weights_touched|migration_refusal)\s*//", workflow_text())
+
+
+def test_every_network_command_has_a_timeout():
+    for job in workflow_document()["jobs"].values():
+        for step in job["steps"]:
+            body = step.get("run", "").replace("\\\n", " ")
+            for line in body.splitlines():
+                if line.lstrip().startswith("#"):
+                    continue
+                for command in re.finditer(r"\b(gh|curl)\s+", line):
+                    prefix = line[:command.start()]
+                    wrapped = re.search(r"\btimeout\s+[1-9][0-9]*\s+$", prefix)
+                    assert wrapped or (
+                        command.group(1) == "curl"
+                        and re.search(r"--max-time\s+[1-9][0-9]*", line[command.end():])
+                    ), line
 
 
 # --------------------------------------------------------------------------- #
@@ -532,8 +621,8 @@ def test_permissions_are_least():
         "contents": "read",
         "pull-requests": "read",
         "actions": "read",
-        "statuses": "write",
-        "checks": "write",
+        "statuses": "read",
+        "checks": "read",
     }
 
 

@@ -32,8 +32,8 @@ permissions:
   contents: read
   pull-requests: read
   actions: read
-  statuses: write
-  checks: write
+  statuses: read
+  checks: read
 
 concurrency:
   # One head sha, one controller run. Never cancelled: a running group check
@@ -95,7 +95,7 @@ jobs:
           echo "[]" > entries.json
           CURSOR="null"
           while :; do
-            PAGE=$(gh api graphql -f query="$QUERY" -F owner="$OWNER" -F name="$NAME" -F cursor="$CURSOR") || {
+            PAGE=$(timeout 60 gh api graphql -f query="$QUERY" -F owner="$OWNER" -F name="$NAME" -F cursor="$CURSOR") || {
               echo "::error::mq-review: GraphQL queue read failed."
               exit 1
             }
@@ -130,7 +130,7 @@ jobs:
             SHA=$(jq -r '.pullRequest.headRefOid' <<<"$MEMBER")
             NUMBER=$(jq -r '.pullRequest.number' <<<"$MEMBER")
             [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::mq-review: member #$NUMBER has no usable head sha."; exit 1; }
-            gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$SHA/statuses?per_page=100" \
+            timeout 60 gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$SHA/statuses?per_page=100" \
               | jq -s 'add // []' > "statuses-$i.json"
             # Newest by created_at, never the newest by list order: the
             # statuses API is not guaranteed sorted.
@@ -158,7 +158,7 @@ jobs:
           echo "[]" > entries-recheck.json
           CURSOR="null"
           while :; do
-            PAGE=$(gh api graphql -f query="$QUERY" -F owner="$OWNER" -F name="$NAME" -F cursor="$CURSOR") || {
+            PAGE=$(timeout 60 gh api graphql -f query="$QUERY" -F owner="$OWNER" -F name="$NAME" -F cursor="$CURSOR") || {
               echo "::error::mq-review: GraphQL post-check re-read failed."
               exit 1
             }
@@ -176,8 +176,8 @@ jobs:
           fi
           jq -c --argjson idx "$IDX" '.[0:($idx + 1)]' entries-recheck-sorted.json > members-recheck.json
           if ! diff -q \
-              <(jq -c 'map({number: .pullRequest.number, head: .headCommit.oid})' members-check.json) \
-              <(jq -c 'map({number: .pullRequest.number, head: .headCommit.oid})' members-recheck.json) \
+              <(jq -c 'map({number: .pullRequest.number, headRefOid: .pullRequest.headRefOid, head: .headCommit.oid, position: .position})' members-check.json) \
+              <(jq -c 'map({number: .pullRequest.number, headRefOid: .pullRequest.headRefOid, head: .headCommit.oid, position: .position})' members-recheck.json) \
               >/dev/null; then
             echo "::error::mq-review: queue membership drifted between the check read and the post-check re-read."
             exit 1
@@ -212,6 +212,9 @@ jobs:
 
       - name: Recompute the docs-noop verdict over this group
         id: docs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.merge_group.head_sha }}
         run: |
           set -euo pipefail
           echo "supply=" >> "$GITHUB_OUTPUT"
@@ -225,8 +228,27 @@ jobs:
           }
           VERDICT=$(printf '%s\n' "$FILES" | python3 scripts/docs_noop_filter.py) || VERDICT=build
           if [ "$VERDICT" = "skip" ]; then
-            echo "supply=none" >> "$GITHUB_OUTPUT"
-            echo "::notice::mq-supply: reason=docs-only"
+            # Bound discovery to the newest matching run in one page. Missing
+            # or unfinished evidence falls through to the supply-set wait.
+            RUNS=$(timeout 60 gh api "repos/$GITHUB_REPOSITORY/actions/runs?event=merge_group&head_sha=$HEAD_SHA&per_page=100" 2>/dev/null || true)
+            DISPATCH_RUN=$(jq -r --arg head "$HEAD_SHA" '
+              [.workflow_runs[]?
+               | select(.event == "merge_group" and .head_sha == $head)
+               | select((.path | sub("@.*$"; "")) == ".github/workflows/speculate-platform-images.yml")]
+              | sort_by(.created_at, .id) | last | .id // empty
+            ' <<<"${RUNS:-{}}" 2>/dev/null || true)
+            if [[ "$DISPATCH_RUN" =~ ^[0-9]+$ ]]; then
+              JOBS=$(timeout 60 gh api "repos/$GITHUB_REPOSITORY/actions/runs/$DISPATCH_RUN/jobs?filter=latest&per_page=100" 2>/dev/null || true)
+              DISPATCH_SKIPPED=$(jq -r '
+                [.jobs[]? | select(.name == "dispatch-group" and .conclusion == "success")
+                 | .steps[]? | select(.name == "Dispatch the merge-group build on the main ref")]
+                | length == 1 and .[0].conclusion == "skipped"
+              ' <<<"${JOBS:-{}}" 2>/dev/null || true)
+              if [ "$DISPATCH_SKIPPED" = "true" ]; then
+                echo "supply=none" >> "$GITHUB_OUTPUT"
+                echo "::notice::mq-supply: reason=docs-only"
+              fi
+            fi
           fi
 
       - name: Wait for the provider-bound speculative supply set
@@ -239,11 +261,11 @@ jobs:
           set -euo pipefail
           echo "supply=none" >> "$GITHUB_OUTPUT"
           ARTIFACT_NAME="spec-v3-supply-set-$TREE"
-          REPO_ID=$(gh api "repos/$GITHUB_REPOSITORY" --jq .id)
+          REPO_ID=$(timeout 60 gh api "repos/$GITHUB_REPOSITORY" --jq .id)
           ATTEMPT=0
           while [ "$ATTEMPT" -lt "$SUPPLY_SET_POLLS" ]; do
             ATTEMPT=$((ATTEMPT + 1))
-            LISTING=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$ARTIFACT_NAME&per_page=30" 2>/dev/null || true)
+            LISTING=$(timeout 60 gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$ARTIFACT_NAME&per_page=30" 2>/dev/null || true)
             if [ -n "$LISTING" ]; then
               # Exactly one exact provider-bound candidate is required. The
               # SAME checks build-platform-images.yml's adopt job makes,
@@ -257,7 +279,7 @@ jobs:
               if [ -n "$CANDIDATE" ]; then
                 IFS=$'\t' read -r CAND_ID CAND_RUN CAND_DIGEST <<<"$CANDIDATE"
                 if [[ "$CAND_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-                  RUN_RECORD=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CAND_RUN" 2>/dev/null || true)
+                  RUN_RECORD=$(timeout 60 gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CAND_RUN" 2>/dev/null || true)
                   if [ -n "$RUN_RECORD" ]; then
                     PATH_OK=$(jq -r --arg p "$SUPPLY_PROVIDER_WORKFLOW_PATH" '(.path // "" | sub("@.*$"; "")) == $p' <<<"$RUN_RECORD")
                     EVENT_OK=$(jq -r '.event == "workflow_dispatch"' <<<"$RUN_RECORD")
@@ -266,7 +288,7 @@ jobs:
                     CONCLUSION_OK=$(jq -r '.conclusion == "success"' <<<"$RUN_RECORD")
                     if [ "$PATH_OK" = "true" ] && [ "$EVENT_OK" = "true" ] && [ "$BRANCH_OK" = "true" ] \
                         && [ "$STATUS_OK" = "true" ] && [ "$CONCLUSION_OK" = "true" ]; then
-                      gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$CAND_ID/zip" > spec-candidate.zip 2>/dev/null || true
+                      timeout 60 gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$CAND_ID/zip" > spec-candidate.zip 2>/dev/null || true
                       if [ -s spec-candidate.zip ]; then
                         ACTUAL_DIGEST="sha256:$(sha256sum spec-candidate.zip | awk '{print $1}')"
                         if [ "$ACTUAL_DIGEST" = "$CAND_DIGEST" ]; then
@@ -335,16 +357,16 @@ jobs:
           ATTEMPT=0
           while [ "$ATTEMPT" -lt "$RELAY_RECEIPT_POLLS" ]; do
             ATTEMPT=$((ATTEMPT + 1))
-            LISTING=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$NAME&per_page=30" 2>/dev/null || true)
+            LISTING=$(timeout 60 gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$NAME&per_page=30" 2>/dev/null || true)
             NEWEST_ID=$(jq -r '[.artifacts[]? | select(.expired == false)] | sort_by(.created_at) | last | .id // empty' <<<"${LISTING:-{}}" 2>/dev/null || true)
             if [ -n "$NEWEST_ID" ]; then
-              if gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$NEWEST_ID/zip" > relay-receipt.zip 2>/dev/null; then
+              if timeout 60 gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$NEWEST_ID/zip" > relay-receipt.zip 2>/dev/null; then
                 rm -rf relay-receipt && mkdir -p relay-receipt
                 if unzip -o -q relay-receipt.zip -d relay-receipt 2>/dev/null \
                     && [ -f relay-receipt/prewarm-relay-receipt.json ]; then
                   RECEIPT_HEAD=$(jq -r '.group.head_sha // empty' relay-receipt/prewarm-relay-receipt.json)
                   if [ "$RECEIPT_HEAD" = "$GROUP_HEAD_SHA" ]; then
-                    MIGRATION_REFUSAL=$(jq -r '.migration_refusal // false' relay-receipt/prewarm-relay-receipt.json)
+                    MIGRATION_REFUSAL=$(jq -r 'if has("migration_refusal") then (.migration_refusal|tostring) else "false" end' relay-receipt/prewarm-relay-receipt.json)
                     echo "present=true" >> "$GITHUB_OUTPUT"
                     echo "migration_refusal=$MIGRATION_REFUSAL" >> "$GITHUB_OUTPUT"
                     if [ "$MIGRATION_REFUSAL" = "true" ]; then
@@ -400,7 +422,7 @@ jobs:
             FOUND=""
             while [ "$ATTEMPT" -lt "$TERRAFORM_RECEIPT_POLLS" ]; do
               ATTEMPT=$((ATTEMPT + 1))
-              RUN_RECORD=$(gh api "repos/$INFRA_REPO/actions/runs/$RUN_ID" 2>/dev/null || true)
+              RUN_RECORD=$(timeout 60 gh api "repos/$INFRA_REPO/actions/runs/$RUN_ID" 2>/dev/null || true)
               STATUS=$(jq -r '.status // empty' <<<"${RUN_RECORD:-{}}" 2>/dev/null || true)
               CONCLUSION=$(jq -r '.conclusion // empty' <<<"${RUN_RECORD:-{}}" 2>/dev/null || true)
               if [ "$STATUS" = "completed" ]; then
@@ -409,18 +431,18 @@ jobs:
                   exit 1
                 fi
                 ATTEMPT_NUM=$(jq -r '.run_attempt' <<<"$RUN_RECORD")
-                ARTIFACTS=$(gh api "repos/$INFRA_REPO/actions/runs/$RUN_ID/artifacts?per_page=100" 2>/dev/null || true)
+                ARTIFACTS=$(timeout 60 gh api "repos/$INFRA_REPO/actions/runs/$RUN_ID/artifacts?per_page=100" 2>/dev/null || true)
                 NAME="staging-prewarm-receipt-$SERVICE-run-$RUN_ID-attempt-$ATTEMPT_NUM"
                 ARTIFACT_ID=$(jq -r --arg n "$NAME" '[.artifacts[]? | select(.name == $n and .expired == false)] | if length == 1 then .[0].id else empty end' <<<"$ARTIFACTS")
                 [ -n "$ARTIFACT_ID" ] || { echo "::error::mq-prewarm: expected exactly one $NAME artifact."; exit 1; }
-                gh api "repos/$INFRA_REPO/actions/artifacts/$ARTIFACT_ID/zip" > "receipt-$SERVICE.zip"
+                timeout 60 gh api "repos/$INFRA_REPO/actions/artifacts/$ARTIFACT_ID/zip" > "receipt-$SERVICE.zip"
                 rm -rf "receipt-$SERVICE" && mkdir -p "receipt-$SERVICE"
                 unzip -o -q "receipt-$SERVICE.zip" -d "receipt-$SERVICE"
                 RECEIPT="receipt-$SERVICE/staged-prewarm-receipt.json"
                 [ -f "$RECEIPT" ] || { echo "::error::mq-prewarm: $NAME carries no staged-prewarm-receipt.json."; exit 1; }
                 REC_SERVICE=$(jq -r '.service // empty' "$RECEIPT")
                 REC_TAG=$(jq -r '.image_tag // empty' "$RECEIPT")
-                REC_WEIGHTS=$(jq -r '.weights_touched // "missing"' "$RECEIPT")
+                REC_WEIGHTS=$(jq -r 'if has("weights_touched") then (.weights_touched|tostring) else "missing" end' "$RECEIPT")
                 [ "$REC_SERVICE" = "$SERVICE" ] || { echo "::error::mq-prewarm: $NAME service mismatch ($REC_SERVICE)."; exit 1; }
                 [ "$REC_TAG" = "$EXPECTED_TAG" ] || { echo "::error::mq-prewarm: $NAME image_tag mismatch ($REC_TAG != $EXPECTED_TAG)."; exit 1; }
                 [ "$REC_WEIGHTS" = "false" ] || { echo "::error::mq-prewarm: $NAME weights_touched is '$REC_WEIGHTS', not false."; exit 1; }
