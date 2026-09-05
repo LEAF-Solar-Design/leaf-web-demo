@@ -224,3 +224,35 @@ describe('CanvasPointPicker (W4f slice A1)', () => {
     expect(document.activeElement).toBe(screen.getByTestId('cockpit-prompt-run'))
   })
 })
+
+// W4g-6: the EDGE pick. A click resolves to the nearest entity OTHER than the
+// selection within the aperture (one extra unproject SNAP_PX to the right),
+// writes its id and the click point, and moves the caret on to the point step.
+describe('W4g-6 edge picks', () => {
+  const H = { id: '7', type: 'LINE', layer: 'A', closed: false, editable: true, vertices: [[0, 0, 0], [10, 0, 0]], radius: null, startDeg: null, endDeg: null }
+  const V = { id: '9', type: 'LINE', layer: 'B', closed: false, editable: true, vertices: [[5, -5, 0], [5, 5, 0]], radius: null, startDeg: null, endDeg: null }
+
+  it('a TRIM click on the other line fills the edge field and its point; a click on nothing waits; the next click is the plain point', async () => {
+    mount()
+    await openAndLoad([H, V])
+    act(() => { context.session.actions.select('7') })
+    fireEvent.click(document.querySelector('.drafting-ribbon [data-tool="modify:trim"]'))
+    await waitFor(() => expect(screen.getByTestId('cockpit-prompt').getAttribute('data-op')).toBe('trim'))
+    // World = client / 10: (52, 30) is (5.2, 3), 0.2 from the vertical and
+    // 3 from the horizontal (the selection, never a candidate). The aperture
+    // is 10 px = 1 world unit here.
+    click(300, 300)
+    expect(screen.getByLabelText('ribbon edge', { exact: true }).value).toBe('')
+    click(52, 30)
+    expect(screen.getByLabelText('ribbon edge', { exact: true }).value).toBe('9')
+    // TRIM shows no edge-point fields (FILLET and CHAMFER do), but the click
+    // point rides the record all the same, read by the planner.
+    expect(context.inputs.ex).toBe('5.2')
+    expect(context.inputs.ey).toBe('3')
+    expect(document.activeElement).toBe(screen.getByLabelText('ribbon x', { exact: true }))
+    click(80, 5)
+    expect(screen.getByLabelText('ribbon x', { exact: true }).value).toBe('8')
+    expect(screen.getByLabelText('ribbon y', { exact: true }).value).toBe('0.5')
+    expect(screen.getByRole('button', { name: 'Run' }).disabled).toBe(false)
+  })
+})

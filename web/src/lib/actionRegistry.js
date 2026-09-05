@@ -498,6 +498,13 @@ const ACTION_LIST = [
   engineOp('modify', 'offset', 'offset', 'Offset', 'offset', 'Draw a parallel copy of the selection, the distance you give, on the side you click', 'small'),
   engineOp('modify', 'arrayRect', 'array', 'Array', 'array', 'Copy the selection into a grid of rows and columns', 'small'),
   engineOp('modify', 'arrayPolar', 'array-polar', 'Polar array', 'array-polar', 'Copy the selection around a centre point through an angle', 'small'),
+  // W4g-6: the intersection verbs. The geometry is computed in the browser
+  // (intersect.js) and the engine applies it as ONE batch, so each is one
+  // round trip and one undo step however many entities it touches.
+  engineOp('modify', 'trim', 'trim', 'Trim', 'trim', 'Cut the selection at a cutting edge and remove the part you click', 'small'),
+  engineOp('modify', 'extend', 'extend', 'Extend', 'extend', 'Lengthen the selection until it meets a boundary edge', 'small'),
+  engineOp('modify', 'fillet', 'fillet', 'Fillet', 'fillet', 'Round the corner between the selection and a second line with an arc', 'small'),
+  engineOp('modify', 'chamfer', 'chamfer', 'Chamfer', 'chamfer', 'Bevel the corner between the selection and a second line', 'small'),
   // W4g-5c: the reference's Clipboard panel, in its order and its sizes.
   engineOp('clipboard', 'pasteClip', 'paste', 'Paste', 'paste', 'Paste the clipboard entity at a base point', 'large'),
   engineOp('clipboard', 'cutClip', 'cut', 'Cut', 'cut', 'Put the selection on the clipboard and delete it', 'small'),

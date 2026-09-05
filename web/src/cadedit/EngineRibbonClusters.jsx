@@ -96,18 +96,14 @@ const DRAW_OFF = Object.freeze([
 
 // The entity operations the compiled engine performs are registry records
 // too (`forGroup('modify')`): the six original ones, COPY, MIRROR, ROTATE,
-// SCALE and EXPLODE (W4g-4), OFFSET (W4g-5a) and ARRAY's two forms (W4g-5b).
-// The reference's Modify tools this engine still lacks (the intersection
-// verbs, W4g-6) stay honest placeholders.
+// SCALE and EXPLODE (W4g-4), OFFSET (W4g-5a), ARRAY's two forms (W4g-5b)
+// and the intersection verbs TRIM, EXTEND, FILLET and CHAMFER (W4g-6).
+// Nothing in the reference's Modify panel is a placeholder any more.
 // W4g-5d: the reference's other Annotation tools stay honest placeholders
 // beside the real TEXT (dimensions and leaders run through APS, W4g-7).
 const ANNOTATION_OFF = Object.freeze([
   { id: 'annotation:dimensions', label: 'Dimensions', icon: 'dimension', size: 'large' },
   { id: 'annotation:leader', label: 'Leader', icon: 'leader', size: 'large' },
-])
-const MODIFY_OFF = Object.freeze([
-  { id: 'modify:trim', label: 'Trim', icon: 'trim' },
-  { id: 'modify:extend', label: 'Extend', icon: 'extend' },
 ])
 
 /**
@@ -174,6 +170,29 @@ export const PROMPTS = Object.freeze({
   ] },
   // W4g-5: the reference asks for the distance, then a point on the side the
   // copy goes; the click IS the side, so there is no third step.
+  // W4g-6: the intersection verbs. The second entity is an `edge` field the
+  // canvas click fills (its id, and the point clicked on it); the last step
+  // is the point on the selection that says which part to remove, extend
+  // or keep.
+  trim: { verb: 'TRIM', steps: [
+    { ask: 'Select cutting edge:', fields: [['edge', 'edge', 'edge']] },
+    { ask: 'Select object to trim (point on the part to remove):', fields: [['x', 'x'], ['y', 'y']] },
+  ] },
+  extend: { verb: 'EXTEND', steps: [
+    { ask: 'Select boundary edge:', fields: [['edge', 'edge', 'edge']] },
+    { ask: 'Select object to extend (point near the end):', fields: [['x', 'x'], ['y', 'y']] },
+  ] },
+  fillet: { verb: 'FILLET', steps: [
+    { ask: 'Enter fillet radius:', fields: [['r', 'radius']] },
+    { ask: 'Select second object:', fields: [['edge', 'edge', 'edge'], ['ex', 'edge x'], ['ey', 'edge y']] },
+    { ask: 'Point on the first object, on the part to keep:', fields: [['x', 'x'], ['y', 'y']] },
+  ] },
+  chamfer: { verb: 'CHAMFER', steps: [
+    { ask: 'Enter first chamfer distance:', fields: [['d1', 'first distance']] },
+    { ask: 'Enter second chamfer distance:', fields: [['d2', 'second distance']] },
+    { ask: 'Select second line:', fields: [['edge', 'edge', 'edge'], ['ex', 'edge x'], ['ey', 'edge y']] },
+    { ask: 'Point on the first line, on the part to keep:', fields: [['x', 'x'], ['y', 'y']] },
+  ] },
   offset: { verb: 'OFFSET', steps: [
     { ask: 'Specify offset distance:', fields: [['dist', 'distance']] },
     { ask: 'Specify point on side to offset:', fields: [['x', 'x'], ['y', 'y']] },
@@ -323,7 +342,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     }
   }
   const waitingStep = prompt && !expressionRefusal
-    ? prompt.steps.find((step) => step.fields.some(([key, , mode = 'decimal']) => mode === 'decimal' && String(effective[key] ?? '').trim() === ''))
+    ? prompt.steps.find((step) => step.fields.some(([key, , mode = 'decimal']) => (mode === 'decimal' || mode === 'edge') && String(effective[key] ?? '').trim() === ''))
     : null
   const liveRefusal = prompt && !promptReason && !waitingStep
     ? (expressionRefusal || (armedGroup === 'draw'
@@ -546,7 +565,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
         key={`${key}:${label}`}
         className={`cp-input${wide ? ' wide' : ''}`}
         type="text"
-        inputMode={mode}
+        inputMode={mode === 'edge' ? 'text' : mode}
         value={inputs[key]}
         onChange={(event) => setInput(key, event.target.value)}
         aria-label={`ribbon ${label}`}
@@ -683,7 +702,6 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
               />
             )
           })}
-          {MODIFY_OFF.map((tool) => <RibbonTool key={tool.id} tool={offTool(tool)} />)}
         </RibbonCluster>
       )}
       {show.has('annotation') && (

@@ -74,6 +74,10 @@ export const DEFAULT_EDIT_INPUTS = Object.freeze({
   rows: '2', cols: '3', rowGap: '10', colGap: '10', count: '4', totalDeg: '360',
   // W4g-5d TEXT: a readable height, no rotation, a value the store accepts.
   height: '2.5', rot: '0', text: 'TEXT',
+  // W4g-6: the second entity an intersection verb names (its id and the
+  // point clicked on it), empty until picked so the step waits; the
+  // chamfer distances default to the reference's D1=0 D2=0 (a corner).
+  edge: '', ex: '', ey: '', d1: '0', d2: '0',
 })
 
 const INPUT_KEYS = new Set(Object.keys(DEFAULT_EDIT_INPUTS))

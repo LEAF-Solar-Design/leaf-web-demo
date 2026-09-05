@@ -202,6 +202,9 @@ describe('honest triggers', () => {
       // W4g-5b: ARRAY, as the reference's two forms, because they take
       // different operands.
       'modify:arrayRect', 'modify:arrayPolar',
+      // W4g-6: the intersection verbs, planned in the browser and applied
+      // by the engine as one batch.
+      'modify:trim', 'modify:extend', 'modify:fillet', 'modify:chamfer',
     ])
   })
 

@@ -19,7 +19,7 @@
 import { useEffect, useRef } from 'react'
 
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
-import { applyPick, buildSnapIndex, ghostFor, orthoPoint, snapPoint, startPicking, wantsPick } from './pointPicking.js'
+import { applyPick, buildSnapIndex, currentStep, ghostFor, orthoPoint, snapPoint, startPicking, wantsPick } from './pointPicking.js'
 
 const CLICK_MOVE_PX = 5
 const CLICK_MAX_MS = 500
@@ -77,6 +77,11 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
   fromRef.current = armedFrom
   const inputsRef = useRef(inputs)
   inputsRef.current = inputs
+  // W4g-6: an edge pick resolves against the entity list, minus the selection.
+  const entitiesRef = useRef(session.entities)
+  entitiesRef.current = session.entities
+  const selectedRef = useRef(session.selectedId)
+  selectedRef.current = session.selectedId
   const onPickingRef = useRef(onPicking)
   onPickingRef.current = onPicking
   const machine = useRef(null)
@@ -162,9 +167,18 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
       if (!v || !m || !wantsPick(m) || typeof v.unproject !== 'function') return
       const p = v.unproject(event.clientX, event.clientY)
       if (!p) return
-      const hit = snapAt(v, m, event.clientX, event.clientY, p)
-      const [px, py] = hit ? [hit.x, hit.y] : (orthoRef.current ? orthoPoint(m, p.x, p.y) : [p.x, p.y])
-      const { state, writes } = applyPick(m, px, py, inputsRef.current)
+      // W4g-6: an edge step names an ENTITY, so the raw click (no snap, no
+      // ORTHO) resolves against the entity list within the same aperture
+      // the object snap uses, one extra unproject SNAP_PX to the right.
+      const edgeStep = currentStep(m)?.kind === 'edge'
+      const hit = edgeStep ? null : snapAt(v, m, event.clientX, event.clientY, p)
+      const [px, py] = hit ? [hit.x, hit.y] : (!edgeStep && orthoRef.current ? orthoPoint(m, p.x, p.y) : [p.x, p.y])
+      let edgeCtx = null
+      if (edgeStep) {
+        const q = v.unproject(event.clientX + SNAP_PX, event.clientY)
+        edgeCtx = { entities: entitiesRef.current, tol: q ? Math.abs(q.x - p.x) : 0, exceptId: selectedRef.current }
+      }
+      const { state, writes } = applyPick(m, px, py, inputsRef.current, edgeCtx)
       if (!writes.length && state === m) return
       machine.current = state
       for (const [key, value] of writes) setInput(key, value)
