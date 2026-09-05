@@ -1,9 +1,25 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import ElementContextMenu, { actionsForKind, CONTEXT_MENU_REASONS, rowsForIdentity } from './ElementContextMenu.jsx'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
+import ElementContextMenu, { actionsForKind, askClaudeReason, CONTEXT_MENU_REASONS, rowsForIdentity } from './ElementContextMenu.jsx'
 import { byId } from '../lib/actionRegistry.js'
+
+const ensureSessionMock = vi.fn()
+const postMessageMock = vi.fn()
+vi.mock('../converse.js', () => ({
+  ensureSession: (...args) => ensureSessionMock(...args),
+  postMessage: (...args) => postMessageMock(...args),
+}))
+vi.mock('../useAnnotations.js', () => ({
+  useAnnotations: () => ({
+    annotation: null, busy: false, error: null, confirmation: null,
+    preview: vi.fn(), accept: vi.fn(), reject: vi.fn(), retry: vi.fn(), undo: vi.fn(),
+  }),
+}))
 
 afterEach(cleanup)
 
@@ -153,5 +169,96 @@ describe('ElementContextMenu (mounted)', () => {
     await screen.findByTestId('element-context-menu')
     fireEvent.keyDown(document, { key: 'Escape' })
     await waitFor(() => expect(screen.queryByTestId('element-context-menu')).toBeNull())
+  })
+})
+
+describe('the scoped prompt posts through the ONE guarded transport (source pin)', () => {
+  // Static, not behavioural: this file must reach the network only through
+  // converse.js's postMessage (which runs the credential guard before it
+  // touches fetch — see converse.js's own header) and must never call fetch
+  // itself, so a future edit cannot route a second, unguarded sender in.
+  const source = readFileSync(resolve(process.cwd(), 'src/components/ElementContextMenu.jsx'), 'utf8')
+
+  it("imports postMessage/ensureSession from converse.js, never calling fetch directly", () => {
+    expect(source).toMatch(/import\s*\{\s*ensureSession,\s*postMessage\s*\}\s*from\s*'\.\.\/converse\.js'/)
+    expect(source).not.toMatch(/\bfetch\(/)
+  })
+
+  it('calls postMessage, not some other transport, to send the typed text', () => {
+    expect(source).toMatch(/await postMessage\(created\.session_id, \{ text: trimmed \}\)/)
+  })
+})
+
+describe('askClaudeReason (pure)', () => {
+  it('names the real reason for a kind with no conversation scope', () => {
+    expect(askClaudeReason({ kind: 'job', id: 'x' }, {})).toBe(CONTEXT_MENU_REASONS.askClaudeScoped)
+    expect(askClaudeReason(null, {})).toBe(CONTEXT_MENU_REASONS.askClaudeScoped)
+  })
+  it('names the drawing gap for an entity with no drawingId in ctx', () => {
+    expect(askClaudeReason({ kind: 'entity', id: 'AB12' }, {})).toBe(CONTEXT_MENU_REASONS.askClaudeNoDrawing)
+  })
+  it('is live for an entity selection carrying a real drawingId', () => {
+    expect(askClaudeReason({ kind: 'entity', id: 'AB12' }, { drawingId: 'demo' })).toBe('')
+  })
+})
+
+describe('the scoped "Ask Claude to…" flow (mounted)', () => {
+  beforeEach(() => {
+    ensureSessionMock.mockReset()
+    postMessageMock.mockReset()
+  })
+
+  it('is enabled for an entity selection with a real drawingId, and opens the scoped prompt', async () => {
+    render(<Scene ctx={{ drawingId: 'demo' }} />)
+    fireEvent.contextMenu(screen.getByTestId('canvas'))
+    const ask = await screen.findByTestId('element-context-menu-ask-claude')
+    expect(ask.getAttribute('aria-disabled')).not.toBe('true')
+    fireEvent.click(ask)
+    await screen.findByTestId('ask-claude-panel')
+    expect(screen.getByTestId('ask-claude-input')).toBeTruthy()
+  })
+
+  it('stays disabled for a non-entity kind even with a drawingId in ctx', async () => {
+    render(<Scene ctx={{ drawingId: 'demo' }} />)
+    fireEvent.contextMenu(screen.getByTestId('ribbon-fit'))
+    const ask = await screen.findByTestId('element-context-menu-ask-claude')
+    expect(ask.getAttribute('aria-disabled')).toBe('true')
+    expect(ask.getAttribute('data-reason')).toBe(CONTEXT_MENU_REASONS.askClaudeScoped)
+  })
+
+  it('posts through ensureSession + converse.postMessage with the entity scope envelope', async () => {
+    ensureSessionMock.mockResolvedValue({ session_id: 'sess-1' })
+    postMessageMock.mockResolvedValue({ turn_id: 't1', status: 'started' })
+    render(<Scene ctx={{ drawingId: 'demo' }} />)
+    fireEvent.contextMenu(screen.getByTestId('canvas'))
+    fireEvent.click(await screen.findByTestId('element-context-menu-ask-claude'))
+    const input = await screen.findByTestId('ask-claude-input')
+    fireEvent.change(input, { target: { value: 'move this panel left' } })
+    fireEvent.click(screen.getByTestId('ask-claude-send'))
+    await waitFor(() => expect(postMessageMock).toHaveBeenCalled())
+    expect(ensureSessionMock).toHaveBeenCalledWith({ kind: 'entity', handle: 'AB12', drawingId: 'demo' })
+    expect(postMessageMock).toHaveBeenCalledWith('sess-1', { text: 'move this panel left' })
+  })
+
+  it('shows the secret guard refusal inline and never silently clears the input', async () => {
+    ensureSessionMock.mockResolvedValue({ session_id: 'sess-1' })
+    const refusal = {
+      id: 'anthropic', reason: 'That looks like an Anthropic API key.',
+      masked: 'sk-a••••••••', overridable: false,
+    }
+    const err = new Error(refusal.reason)
+    err.secretRefused = true
+    err.refusal = refusal
+    postMessageMock.mockRejectedValue(err)
+    render(<Scene ctx={{ drawingId: 'demo' }} />)
+    fireEvent.contextMenu(screen.getByTestId('canvas'))
+    fireEvent.click(await screen.findByTestId('element-context-menu-ask-claude'))
+    const input = await screen.findByTestId('ask-claude-input')
+    const secretShaped = 'sk-ant-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    fireEvent.change(input, { target: { value: secretShaped } })
+    fireEvent.click(screen.getByTestId('ask-claude-send'))
+    await screen.findByTestId('ask-claude-secret-notice')
+    expect(screen.getByTestId('ask-claude-secret-notice-reason').textContent).toBe(refusal.reason)
+    expect(input.value).toBe(secretShaped)
   })
 })
