@@ -50,6 +50,19 @@ _MIGRATION_LEDGER_COLUMNS = {"name", "sha256", "applied_at"}
 # compatibility contract, not a provider choice. Additions stay additive so an
 # older application can continue to read a database prepared by a newer image.
 _REQUIRED_COLUMNS = {
+    "campaigns": {
+        "campaign_id", "org_id", "project_id", "tenant_id", "principal_id",
+        "title", "prompt", "idempotency_key", "submission_fingerprint", "status",
+        "dispatch_ref", "created_at", "updated_at",
+    },
+    "campaign_questions": {
+        "question_id", "campaign_id", "org_id", "project_id", "question_key",
+        "prompt", "options", "asked_by", "blocks_dispatch", "status", "created_at",
+    },
+    "campaign_answers": {
+        "answer_id", "question_id", "campaign_id", "org_id", "project_id",
+        "principal_id", "answer", "answer_fingerprint", "created_at",
+    },
     "arlo_lab_inputs": {"input_version_id", "org_id", "project_id", "example_id",
                         "example_version", "input_sha256", "request_json", "created_at"},
     # Immutable versioned template store (card C2-1R / migration 0049). The
@@ -532,6 +545,12 @@ def _catalog_contract(relation: str, *definition_fragments: str) -> Dict[str, An
 # stores, the project lifecycle is part of the canonical platform API whenever
 # this application image is running.
 _REQUIRED_CONSTRAINTS = {
+    "campaigns_scope_idempotency_unique": _catalog_contract(
+        "campaigns", "UNIQUE (org_id, project_id, idempotency_key)"),
+    "campaign_questions_key_unique": _catalog_contract(
+        "campaign_questions", "UNIQUE (campaign_id, question_key)"),
+    "campaign_answers_question_unique": _catalog_contract(
+        "campaign_answers", "UNIQUE (question_id)"),
     "ios_ship_readiness_pkey": _catalog_contract(
         "ios_ship_readiness", "PRIMARY KEY (org_id, project_id, tenant_id)"),
     "ios_ship_readiness_project_fk": _catalog_contract(
@@ -637,6 +656,9 @@ _REQUIRED_INDEXES = {
 }
 
 _REQUIRED_TRIGGERS = {
+    "campaign_answers_immutable": _catalog_contract(
+        "campaign_answers", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
+        "EXECUTE FUNCTION leaf_reject_ledger_mutation()"),
     "ios_ship_receipts_immutable": _catalog_contract(
         "ios_ship_receipts", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
         "EXECUTE FUNCTION leaf_reject_ledger_mutation()"),
