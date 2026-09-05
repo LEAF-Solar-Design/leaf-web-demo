@@ -1343,7 +1343,8 @@ def build_suites() -> List[Suite]:
               # while it waits for a runner); since that job moved to an
               # ephemeral CodeBuild runner it reads `web app`, and a change in
               # either direction must come back through that test.
-              _py_pytest("test_prewarm_staging_cutover_workflow.py"), 25),
+              # 25 -> 26: the run-URL extraction is guarded (|| true) so a gh that prints no run URL falls back to the mark scan instead of aborting the loop before the next service.
+              _py_pytest("test_prewarm_staging_cutover_workflow.py"), 26),
         Suite("platform-release-manifest",
               "scripts test_platform_release_manifest.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_platform_release_manifest.py"), 88),

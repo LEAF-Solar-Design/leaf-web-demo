@@ -325,7 +325,8 @@ jobs:
             # older gh that prints something else can never bind us to a
             # stranger's run. The mark scan below remains the fallback for
             # every gh that prints nothing.
-            RUN_ID=$(printf '%s' "$DISPATCH_OUTPUT" | grep -oE 'actions/runs/[0-9]+' | head -1 | cut -d/ -f3)
+            # `|| true`: under set -euo pipefail a no-match grep would abort the step here, before the mark-scan fallback below and before the next service.
+            RUN_ID=$(printf '%s' "$DISPATCH_OUTPUT" | grep -oE 'actions/runs/[0-9]+' | head -1 | cut -d/ -f3 || true)
             if [ -n "$RUN_ID" ]; then
               if gh api "repos/$INFRA_REPO/actions/runs/$RUN_ID" \
                   --jq 'select(.path == (".github/workflows/" + env.DEPLOY_WORKFLOW)) | .display_title' 2>/dev/null \
