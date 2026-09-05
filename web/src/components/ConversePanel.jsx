@@ -30,6 +30,7 @@ import {
   thumbnailImages,
 } from '../composer.js'
 import { formatElementId } from '../lib/elementIdentity.js'
+import { REASONS } from '../lib/actionRegistry.js'
 import { isSecretRefused } from '../lib/secretGuardTransport.js'
 import Markdown from './Markdown.jsx'
 import LiveRegion from './LiveRegion.jsx'
@@ -191,6 +192,9 @@ export default function ConversePanel({
   onAttachJob,               // (jobId, tool) -> App's existing §7 job attach affordance
   onJobLinked,               // a job_linked event arrived -> refresh the job rail
   writeLocked = false,
+  // The browser engine holds unsaved edits (App's engineDirty); a write
+  // approval is held with the one-head sentence.
+  engineDirty = false,
 }) {
   const [events, setEvents] = useState([])
   const [input, setInput] = useState('')
@@ -211,6 +215,15 @@ export default function ConversePanel({
   // {id, reason, masked, overridable} or null. This composer evaluates nothing
   // itself (round 3) — converse.postMessage refuses and throws, send() catches.
   const [secretNotice, setSecretNotice] = useState(null)
+  const writeLockedRef = useRef(writeLocked)
+  const engineDirtyRef = useRef(engineDirty)
+  const refreshApprovalsRef = useRef(null)
+  writeLockedRef.current = writeLocked
+  engineDirtyRef.current = engineDirty
+  const writeHold = (isWrite) => {
+    const held = isWrite && (writeLocked || engineDirty)
+    return { held, label: writeLocked ? 'Editing locked' : 'Unsaved browser edits', title: writeLocked ? undefined : REASONS.unsavedEngineEdits }
+  }
   const attachmentUrlsRef = useRef(new Set())
   const logRef = useRef(null)
   const jobSeenRef = useRef(new Set())
@@ -274,6 +287,7 @@ export default function ConversePanel({
         if (!closed) setPendingApprovalsError(true)
       }
     }
+    refreshApprovalsRef.current = refresh
     void refresh()
     const timer = window.setInterval(refresh, 5000)
     return () => { closed = true; window.clearInterval(timer) }
@@ -578,13 +592,19 @@ export default function ConversePanel({
   // accepts no other spelling.
   const decide = async (
     confirmationId, ok, blocked = false, owningSessionId = sessionId,
-    decisionRecorded = false,
+    decisionRecorded = false, isWrite = false,
   ) => {
     if (deciding || (ok && blocked)) return
     setDeciding(confirmationId); setSendErr(null)
     try {
       const res = await resolveApproval(
-        confirmationId, owningSessionId, ok, decisionRecorded)
+        confirmationId, owningSessionId, ok, decisionRecorded, {
+          beforeResume: () => !(ok && isWrite && (writeLockedRef.current || engineDirtyRef.current)),
+        })
+      if (res.held) {
+        await refreshApprovalsRef.current?.()
+        return
+      }
       setDecidedLocal((m) => ({ ...m, [confirmationId]: ok }))
       setPendingApprovals((current) => current.filter(
         (approval) => approval.confirmation_id !== confirmationId))
@@ -616,6 +636,7 @@ export default function ConversePanel({
 
   const renderPendingApproval = (approval) => {
     const isWrite = approval.capability === 'drawing.write'
+    const hold = writeHold(isWrite)
     const summary = paramsSummary(approval.params)
     const resumeRequired = approval.resume_required === true
     return (
@@ -639,29 +660,32 @@ export default function ConversePanel({
           <button
             type="button"
             className="chip-act"
-            disabled={deciding === approval.confirmation_id || (approval.approved && isWrite && writeLocked)}
+            disabled={deciding === approval.confirmation_id || (approval.approved && hold.held)}
+            title={approval.approved && hold.held ? hold.title : undefined}
             onClick={() => decide(
               approval.confirmation_id,
               !!approval.approved,
-              !!approval.approved && isWrite && writeLocked,
+              !!approval.approved && hold.held,
               approval.session_id,
               true,
+              isWrite,
             )}
           >
             {deciding === approval.confirmation_id
               ? 'Resuming…'
-              : (approval.approved ? 'Resume approved request' : 'Complete denial')}
+              : (approval.approved ? (hold.held ? hold.label : 'Resume approved request') : 'Complete denial')}
           </button>
         ) : (
           <>
             <button
               type="button"
               className="chip-act"
-              disabled={deciding === approval.confirmation_id || (isWrite && writeLocked)}
+              disabled={deciding === approval.confirmation_id || hold.held}
+              title={hold.held ? hold.title : undefined}
               onClick={() => decide(
-                approval.confirmation_id, true, isWrite && writeLocked, approval.session_id)}
+                approval.confirmation_id, true, hold.held, approval.session_id, false, isWrite)}
             >
-              {deciding === approval.confirmation_id ? 'Sending…' : (isWrite && writeLocked ? 'Editing locked' : 'Approve')}
+              {deciding === approval.confirmation_id ? 'Sending…' : (hold.held ? hold.label : 'Approve')}
             </button>
             <button
               type="button"
@@ -753,6 +777,7 @@ export default function ConversePanel({
       const settled = resolved || localPick != null
       const settledOk = resolved ? resolved.approved : localPick
       const isWrite = item.capability === 'drawing.write'
+      const hold = writeHold(isWrite)
       const summary = item.kind === 'proposal' ? paramsSummary(item.params) : null
       if (!settled && pendingApprovals.some(
         (approval) => approval.confirmation_id === item.id)) return null
@@ -791,10 +816,11 @@ export default function ConversePanel({
               <button
                 type="button"
                 className="chip-act"
-                disabled={deciding === item.id || (isWrite && writeLocked)}
-                onClick={() => decide(item.id, true, isWrite && writeLocked)}
+                disabled={deciding === item.id || hold.held}
+                title={hold.held ? hold.title : undefined}
+                onClick={() => decide(item.id, true, hold.held, sessionId, false, isWrite)}
               >
-                {deciding === item.id ? 'Sending…' : (isWrite && writeLocked ? 'Editing locked' : 'Approve')}
+                {deciding === item.id ? 'Sending…' : (hold.held ? hold.label : 'Approve')}
               </button>
               <button
                 type="button"

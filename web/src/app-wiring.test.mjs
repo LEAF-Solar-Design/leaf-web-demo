@@ -453,4 +453,12 @@ describe('App.jsx wiring', () => {
     assert.match(stripped, /fetchDxf:\s*mock \? fetchSampleDxf : fetchDrawingDxf/)
     assert.doesNotMatch(stripped, /enabled:\s*!!studioGround && !!drafting && !mock/)
   })
+
+  it('passes the browser engine dirty state to the assistant approval card', () => {
+    const binding = new RegExp('(<ConversePanel\\b(?:(?!/>)[\\s\\S])*?)\\s+engineDirty=\\{engineDirty\\}')
+    assert.match(appSource, binding)
+    const mutated = appSource.replace(binding, '$1')
+    assert.notEqual(mutated, appSource, 'the falsification mutation must remove the ConversePanel attribute')
+    assert.doesNotMatch(mutated, binding)
+  })
 })
