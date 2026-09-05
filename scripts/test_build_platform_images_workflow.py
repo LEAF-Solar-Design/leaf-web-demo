@@ -4017,7 +4017,10 @@ def check_docs_noop_filter(text: str) -> None:
         # (still two, on steps[2] and steps[3]), no new token, no new endpoint
         # class, no live mutation. Not a secret: Actions already prints this
         # envelope in the relay log the same way it prints the supply one.
-        "6085947af98d186777348c526b1fe38b460f80a1631fcd8f68100a1d5063ceb1"
+        # Hash updated 2026-09-05: remove the final contract freshness read
+        # after both exact child results passed. Dispatch sites, inputs,
+        # secrets and pre-dispatch binding are unchanged; no mutation added.
+        "7cead6d4d8a11a68b6f176c461651abad0897d76192c7d8120e548c72552673c"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
