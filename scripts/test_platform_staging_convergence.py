@@ -156,10 +156,16 @@ def canonical(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
 
+def _fixed_member(filename: str) -> zipfile.ZipInfo:
+    info = zipfile.ZipInfo(filename, date_time=(1980, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_DEFLATED
+    return info
+
+
 def archive(filename: str, payload: bytes) -> bytes:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as value:
-        value.writestr(filename, payload)
+        value.writestr(_fixed_member(filename), payload)
     return buffer.getvalue()
 
 
@@ -167,7 +173,7 @@ def archive_members(entries: dict[str, bytes]) -> bytes:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as value:
         for filename, payload in entries.items():
-            value.writestr(filename, payload)
+            value.writestr(_fixed_member(filename), payload)
     return buffer.getvalue()
 
 
