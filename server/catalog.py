@@ -177,11 +177,11 @@ def _capability_entry(tool: Dict[str, Any]) -> Dict[str, Any]:
         # Only the route's combined static and runtime authority marker may
         # advertise live APS. Raw registry metadata alone always fails closed.
         "aps_live": tool.get("_aps_live_runtime_authorized") is _APS_LIVE_AUTHORIZED,
-        # Optional presentation the RECORD carries (icon key, ribbon placement).
-        # This projection is the single point that decides what /api/capabilities
-        # exposes per tool, so the pass-through lives here and nowhere else. A
-        # malformed value is dropped with a warning rather than breaking the
-        # whole catalog on one bad tool.
+        # Optional fields the RECORD carries (icon key, ribbon placement,
+        # mcp_source origin). This projection is the single point that decides
+        # what /api/capabilities exposes per tool, so the pass-through lives
+        # here and nowhere else. A malformed value is dropped with a warning
+        # rather than breaking the whole catalog on one bad tool.
         **tool_record_fields.sanitize_optional_fields(tool),
     }
 

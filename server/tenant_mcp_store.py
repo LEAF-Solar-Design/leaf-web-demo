@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import time
 from pathlib import Path
@@ -38,6 +39,22 @@ MAX_TENANT_FILE_BYTES = 262_144      # 256 KiB: ~25 records with generous OAuth 
 MAX_PENDING = 200                    # in-flight OAuth connects across ALL tenants at once
 PENDING_TTL_S = 600.0                # 10 minutes: an authorization code flow the user abandons expires
 MAX_PENDING_FILE_BYTES = 131_072     # 128 KiB: MAX_PENDING small records, capped read
+
+# The exact shape `register()` mints below: `secrets.token_hex(12)`, 24 lowercase
+# hex characters. Standardization slice 8c's `mcp_source.server_id` (a tool
+# record's optional field, validated in server/tool_record_fields.py) calls
+# this shape check rather than re-typing the regex a second place.
+_SERVER_ID_RE = re.compile(r"^[0-9a-f]{24}$")
+
+
+def is_valid_server_id(value: Any) -> bool:
+    """Shape check only — does an id LOOK like one this registry could have
+    minted? Never looks up a tenant's actual records (a caller validating a
+    record field has no tenant context to check against), so a well-shaped
+    id for a server that was since unlinked, or belongs to a different
+    tenant, still reads True here; the catalog assembly step is what scopes
+    a projected tool to its own tenant's connected servers."""
+    return isinstance(value, str) and bool(_SERVER_ID_RE.fullmatch(value))
 
 
 class TenantMcpStoreError(Exception):

@@ -82,6 +82,18 @@ def test_a_record_that_declares_nothing_gets_no_new_keys():
     entry = catalog._capability_entry(_tool())
     assert "icon" not in entry
     assert "placement" not in entry
+    assert "mcp_source" not in entry
+
+
+# A registry id shape tenant_mcp_store.register() actually mints
+# (secrets.token_hex(12)): 24 lowercase hex characters.
+_VALID_SERVER_ID = "abcdef0123456789abcdef01"
+
+
+def test_valid_mcp_source_reaches_the_capability_entry():
+    entry = catalog._capability_entry(
+        _tool(mcp_source={"server_id": _VALID_SERVER_ID, "tool": "list-items"}))
+    assert entry["mcp_source"] == {"server_id": _VALID_SERVER_ID, "tool": "list-items"}
 
 
 # --------------------------------------------------------------------------- #
@@ -116,6 +128,27 @@ def test_an_invalid_placement_is_dropped_not_raised(bad_placement, caplog):
     with caplog.at_level(logging.WARNING, logger="tool_record_fields"):
         entry = catalog._capability_entry(_tool(placement=bad_placement))
     assert "placement" not in entry
+
+
+@pytest.mark.parametrize("bad_mcp_source", [
+    {"server_id": "not-hex-shaped", "tool": "list-items"},   # hostile server_id
+    {"server_id": _VALID_SERVER_ID[:-1], "tool": "list-items"},  # one char short
+    {"server_id": _VALID_SERVER_ID.upper(), "tool": "list-items"},  # uppercase
+    {"server_id": _VALID_SERVER_ID, "tool": ""},              # hostile tool: empty
+    {"server_id": _VALID_SERVER_ID, "tool": "x" * 65},        # hostile tool: over bound
+    {"server_id": _VALID_SERVER_ID, "tool": 7},               # hostile tool: not a string
+    {"server_id": _VALID_SERVER_ID, "tool": "list-items", "extra": 1},  # unknown key
+    {"tool": "list-items"},                                   # missing server_id
+    {"server_id": _VALID_SERVER_ID},                          # missing tool
+    "not-an-object",
+    7,
+])
+def test_an_invalid_mcp_source_is_dropped_not_raised(bad_mcp_source, caplog):
+    with caplog.at_level(logging.WARNING, logger="tool_record_fields"):
+        entry = catalog._capability_entry(_tool(mcp_source=bad_mcp_source))
+    assert "mcp_source" not in entry
+    assert entry["name"] == "count-by-layer"
+    assert any("count-by-layer" in rec.getMessage() for rec in caplog.records)
 
 
 def test_one_bad_tool_never_breaks_the_rest_of_the_catalog():
@@ -185,7 +218,11 @@ def test_the_authoring_api_rejects_an_over_long_icon_at_the_model_boundary():
 
 
 def test_validate_accepts_what_sanitize_accepts():
-    fields = {"icon": "toolbox", "placement": {"tab": "manage", "size": "row"}}
+    fields = {
+        "icon": "toolbox",
+        "placement": {"tab": "manage", "size": "row"},
+        "mcp_source": {"server_id": _VALID_SERVER_ID, "tool": "list-items"},
+    }
     assert tool_record_fields.validate_optional_fields(fields) == fields
     assert tool_record_fields.sanitize_optional_fields({"name": "t", **fields}) == fields
 
