@@ -79,6 +79,12 @@ describe('W4g-6 store: the planner over the session and the lowering to the work
     // W4g-6b: a fillet against an ARC plans through the same door and lowers to a setArc step the worker takes.
     const planned = planIntersectVerb('fillet', session([H, ARC_HALF], '7'), { edge: '11', r: '1', x: '2', y: '0', ex: '7', ey: '3' })
     expect(planned.steps.map((s) => s.op)).toEqual(['setVertices', 'setArc', 'createArc'])
+    // W4g-6c: against a CIRCLE the plan carries no step for the circle at all: the line's cut and the new arc, a two-step batch.
+    const DISC = { ...ARC_HALF, id: '12', handle: '12', index: 3, type: 'CIRCLE', closed: true, startDeg: null, endDeg: null }
+    const round = planIntersectVerb('fillet', session([H, DISC], '7'), { edge: '12', r: '1', x: '2', y: '0', ex: '7', ey: '3' })
+    expect(round.steps.map((s) => s.op)).toEqual(['setVertices', 'createArc'])
+    expect(round.steps.some((s) => s.entityId === '12')).toBe(false)
+    expect(lowerSteps(round.steps).steps).toHaveLength(2)
     const lowered = lowerSteps(planned.steps)
     expect(lowered.steps[1].op).toBe('setArc')
     expect(lowered.steps[1].payload).toMatchObject({ entityId: '11', cx: 10, cy: 0, radius: 5, startDeg: 90 })

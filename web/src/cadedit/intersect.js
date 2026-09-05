@@ -574,6 +574,8 @@ const footOnLine = (L, C) => {
 }
 const onCircleToward = (c, R, C) => add(c, scale(sub(C, c), R / dist(C, c)))
 const arcStep = (id, A, keep) => setArc(id, A.c, A.r, keep.start, keep.end)
+/** The keep of a whole circle: admissible, nothing cut (W4g-6c). */
+const WHOLE = Object.freeze({ whole: true })
 
 /**
  * FILLET where at least one object is an ARC: the fillet circle is tangent
@@ -581,15 +583,19 @@ const arcStep = (id, A, keep) => setArc(id, A.c, A.r, keep.start, keep.end)
  * offsets; every such centre is a candidate, admissible when each tangent
  * point leaves a kept part with length on its pick's side, and the one
  * nearest the picks wins. r = 0 is the corner at the crossing nearest the
- * picks. Circles are not trimmed by a fillet and polylines need bulges the
- * engine does not carry yet: both refused naming the reason.
+ * picks. A CIRCLE (W4g-6c) is never cut: the reference leaves it whole and
+ * adds the fillet arc, so its side has no kept part to test and no step to
+ * emit; two circles at r = 0 have no corner to make. Polylines need bulges
+ * the engine does not carry yet: refused naming the reason.
  */
 function filletWithArc(verb, target, edge, A, B, r, p1, p2) {
   const kinds = [A.kind, B.kind]
-  if (kinds.includes('CIRCLE')) return refuse(verb, 'a circle is not trimmed by a fillet; not in this round')
   if (kinds.includes('POLY')) return refuse(verb, 'a polyline corner needs a bulge the engine does not carry yet; not in this round')
   const aLine = A.kind === 'LINE'
   const bLine = B.kind === 'LINE'
+  const aWhole = A.kind === 'CIRCLE'
+  const bWhole = B.kind === 'CIRCLE'
+  if (r === 0 && aWhole && bWhole) return refuse(verb, 'two circles have no corner to make; a fillet between circles needs a radius greater than 0')
   // Candidate contact points: for r = 0 the crossings themselves (extension
   // allowed on both curves), else the tangent circle centres.
   const candidates = []
@@ -618,8 +624,10 @@ function filletWithArc(verb, target, edge, A, B, r, p1, p2) {
   }
   let best = null
   for (const cand of candidates) {
-    const keepA = aLine ? lineKeep(A, cand.T1, p1) : arcKeep(A, angleOf(A.c, cand.T1), p1)
-    const keepB = bLine ? lineKeep(B, cand.T2, p2) : arcKeep(B, angleOf(B.c, cand.T2), p2)
+    // A whole circle is always admissible on its side: nothing of it is kept
+    // or cut, the picks alone choose among its candidates.
+    const keepA = aLine ? lineKeep(A, cand.T1, p1) : aWhole ? WHOLE : arcKeep(A, angleOf(A.c, cand.T1), p1)
+    const keepB = bLine ? lineKeep(B, cand.T2, p2) : bWhole ? WHOLE : arcKeep(B, angleOf(B.c, cand.T2), p2)
     if (!keepA || !keepB) continue
     const cost = dist(p1, cand.T1) + dist(p2, cand.T2)
     if (!best || cost < best.cost) best = { ...cand, keepA, keepB, cost }
@@ -629,10 +637,9 @@ function filletWithArc(verb, target, edge, A, B, r, p1, p2) {
       ? 'the picks name parts that cannot meet at a crossing'
       : 'the radius is too large for the room the picks leave, or the picks name parts that cannot meet')
   }
-  const steps = [
-    aLine ? setVertices(target.id, cutLine(A, best.keepA, best.T1), false) : arcStep(target.id, A, best.keepA),
-    bLine ? setVertices(edge.id, cutLine(B, best.keepB, best.T2), false) : arcStep(edge.id, B, best.keepB),
-  ]
+  const steps = []
+  if (!aWhole) steps.push(aLine ? setVertices(target.id, cutLine(A, best.keepA, best.T1), false) : arcStep(target.id, A, best.keepA))
+  if (!bWhole) steps.push(bLine ? setVertices(edge.id, cutLine(B, best.keepB, best.T2), false) : arcStep(edge.id, B, best.keepB))
   if (r > 0) {
     const a1 = angleOf(best.C, best.T1)
     const a2 = angleOf(best.C, best.T2)
