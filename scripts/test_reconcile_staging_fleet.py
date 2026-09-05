@@ -367,15 +367,71 @@ class PlanTests(unittest.TestCase):
         )
         self.assertEqual([s["position"] for s in plan["steps"]], [1, 2, 3, 4])
 
-    def test_reconcile_steps_always_carry_digest_aware_reconcile(self) -> None:
-        """The settled-state read is best effort, so the safety comes from the
-        provider re-reading live state under the lock and skipping a service
-        that is already exact."""
-        plan = subject.build_plan(fixture(lagging=("broker",)))
-        step = next(s for s in plan["steps"] if s["kind"] == "reconcile")
-        self.assertEqual(step["inputs"]["digest_aware_reconcile"], "true")
-        self.assertEqual(step["inputs"]["app_deploy_intent"], "forward")
-        self.assertEqual(step["inputs"]["expected_task_definition"], "auto-live")
+    def test_non_relay_steps_use_direct_mode_and_exact_receipt_baselines(self) -> None:
+        # Provider run 33938761749 refused digest-aware broker before credentials.
+        # Its next baseline check also permits auto-live only for web/app.
+        plan = subject.build_plan(fixture(lagging=subject.NON_RELAY_SERVICES))
+        for step in plan["steps"]:
+            if step["kind"] != "reconcile":
+                continue
+            with self.subTest(service=step["service"]):
+                inputs = step["inputs"]
+                self.assertEqual(inputs["digest_aware_reconcile"], "false")
+                self.assertNotIn("convergence_id", inputs)
+                self.assertEqual(inputs["deploy_strategy"], "direct")
+                self.assertEqual(inputs["app_deploy_intent"], "forward")
+                self.assertEqual(
+                    inputs["expected_task_definition"],
+                    f"{ACCOUNT}/leaf-platform-{step['service']}:762",
+                )
+
+    def test_missing_non_relay_baseline_cannot_dispatch_or_restamp(self) -> None:
+        for service in subject.NON_RELAY_SERVICES:
+            with self.subTest(service=service):
+                plan = subject.build_plan(fixture(missing_receipt=(service,)))
+                self.assertFalse(plan["armable"])
+                self.assertNotIn(service, [step["service"] for step in plan["steps"]])
+                self.assertTrue(any(
+                    reason.startswith("SERVICE_BASELINE_UNKNOWN")
+                    for reason in plan["not_armable_because"]
+                ))
+
+    def test_non_relay_receipts_can_be_found_after_a_busy_product_page(self) -> None:
+        provider = fixture(lagging=subject.NON_RELAY_SERVICES)
+        query = (
+            "event=workflow_dispatch&status=success"
+            f"&per_page={subject.MAX_DEPLOY_RUN_SCAN}"
+        )
+        endpoint = runs_endpoint(DEPLOY_WF, query)
+        rows = provider.json_values[(TF, endpoint)]["workflow_runs"]
+        provider.json_values[(TF, endpoint)] = {
+            "workflow_runs": [run_row(SETTLED["app"], service="app")]
+            * subject.MAX_DEPLOY_RUN_SCAN,
+        }
+        provider.json_values[(TF, endpoint + "&page=2")] = {"workflow_runs": rows}
+        plan = subject.build_plan(provider)
+        self.assertTrue(plan["armable"], plan["not_armable_because"])
+        self.assertEqual([s["service"] for s in plan["steps"]], [
+            "broker", "harness", "canonical-worker", "app",
+        ])
+
+    def test_settled_scan_stops_at_its_bound_without_guessing_baselines(self) -> None:
+        provider = fixture()
+        query = (
+            "event=workflow_dispatch&status=success"
+            f"&per_page={subject.MAX_DEPLOY_RUN_SCAN}"
+        )
+        for page in range(1, subject.MAX_DEPLOY_RUN_PAGES + 1):
+            endpoint = runs_endpoint(DEPLOY_WF, query)
+            if page > 1:
+                endpoint += f"&page={page}"
+            provider.json_values[(TF, endpoint)] = {
+                "workflow_runs": [run_row(SETTLED["app"], service="app")]
+                * subject.MAX_DEPLOY_RUN_SCAN,
+            }
+        plan = subject.build_plan(provider)
+        self.assertFalse(plan["armable"])
+        self.assertEqual(plan["services"]["broker"]["status"], "unknown")
 
     def test_the_restamp_never_uses_auto_live_and_names_the_app_baseline(self) -> None:
         """The provider refuses auto-live unless app_deploy_intent is forward,
