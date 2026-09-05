@@ -52,6 +52,11 @@ describe('W4g-6 store: the planner over the session and the lowering to the work
     })
     expect(planIntersectVerb('trim', session([V], '7'), { edge: '9', x: '8', y: '0' }).refusal).toBe('Trim refused: the selected entity is no longer in the document.')
     expect(planIntersectVerb('trim', session([H], '7'), { edge: '9', x: '8', y: '0' }).refusal).toBe('Trim refused: the cutting edge is no longer in the document.')
+    // The typed path names only what a canvas pick could: a read-only entity is refused, never rewritten.
+    expect(planIntersectVerb('fillet', session([H, { ...V, editable: false }], '7'), { edge: '9', r: '1', x: '2', y: '0', ex: '5', ey: '3' }).refusal)
+      .toBe('Fillet refused: the second object is read-only in the browser engine.')
+    expect(planIntersectVerb('trim', session([H, { ...V, editable: false }], '7'), { edge: '9', x: '8', y: '0' }).refusal)
+      .toBe('Trim refused: the cutting edge is read-only in the browser engine.')
     expect(planIntersectVerb('trim', session([H, V], '7'), { edge: '', x: '8', y: '0' }).refusal).toMatch(/select the cutting edge/)
     // The geometry's own refusal comes through the same door.
     expect(planIntersectVerb('trim', session([H, V], '7'), { edge: '9', x: '5', y: '0' }).refusal).toBe('Trim refused: click on the part to remove, away from the crossing.')
@@ -90,7 +95,11 @@ describe('W4g-6 store: the planner over the session and the lowering to the work
     })
     expect(lowerSteps([]).refusal).toBe('Edit refused: the plan has no steps.')
     expect(lowerSteps(Array.from({ length: MAX_BATCH_STEPS + 1 }, () => ({ op: 'delete', entityId: '9' }))).refusal).toBe(`Edit refused: the plan has more than ${MAX_BATCH_STEPS} steps.`)
-    expect(lowerSteps([{ op: 'setVertices', entityId: '7', points: [[0, 0]], closed: false }]).refusal).toMatch(/needs 2 to 1000 points/)
+    expect(lowerSteps([{ op: 'setVertices', entityId: '7', points: [[0, 0]], closed: false }]).refusal).toMatch(/needs 2 to 1002 points/)
+    // A trim of a 1000-point polyline keeps at most its points plus two cut points.
+    const many = (n) => Array.from({ length: n }, (_, i) => [i, 0])
+    expect(lowerSteps([{ op: 'setVertices', entityId: '7', points: many(1002), closed: false }]).steps).toHaveLength(1)
+    expect(lowerSteps([{ op: 'setVertices', entityId: '7', points: many(1003), closed: false }]).refusal).toMatch(/needs 2 to 1002 points/)
     expect(lowerSteps([{ op: 'setVertices', entityId: '7', points: [[0, 0], [Number.NaN, 1]], closed: false }]).refusal).toBe('Edit refused: a geometry step has a point that is not a number.')
     expect(lowerSteps([{ op: 'setArc', entityId: '11', x: 0, y: 0, r: 0, a0: 0, a1: 90 }]).refusal).toBe('Edit refused: an arc step needs a radius greater than 0.')
     expect(lowerSteps([{ op: 'setArc', entityId: '11', x: 0, y: 0, r: 1, a0: 0, a1: 360 }]).refusal).toBe('Edit refused: an arc step needs a start and end that differ.')

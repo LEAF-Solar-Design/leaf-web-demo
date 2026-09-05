@@ -200,6 +200,9 @@ describe('extendEntity', () => {
     expect(extendEntity(arc('a', [0, 0], 5, 0, 270), line('b', [5, -10], [5, 10]), 0, -5).refusal).toBe('Extend refused: extending that far would close the arc into a full turn.')
     // A boundary crossing the arc ITSELF lies behind the end, not ahead of it.
     expect(extendEntity(arc('a', [0, 0], 5, 0, 270), line('b', [0, -10], [0, 10]), 0, -5).refusal).toBe('Extend refused: the boundary edge does not lie ahead of that end.')
+    // Even one degree before the end (a radial boundary through 269 degrees), with a picking aperture in play.
+    const radial = line('r', [0, 0], [10 * Math.cos(269 * Math.PI / 180), 10 * Math.sin(269 * Math.PI / 180)])
+    expect(extendEntity(arc('a', [0, 0], 5, 0, 270), radial, 0, -5, 0.2).refusal).toBe('Extend refused: the boundary edge does not lie ahead of that end.')
   })
 
   it('refuses what has no end and what lies behind', () => {
@@ -242,6 +245,23 @@ describe('filletLines', () => {
     expect(out.steps[0]).toEqual({ op: 'setVertices', entityId: 'x', points: [[8, 0], [0, 0]], closed: false })
   })
 
+  it('refuses a radius whose tangent point would fall past a kept end, naming the largest that fits', () => {
+    // 90 degrees, both kept parts 10 long: tan(45) * 10 = 10 is the most; 20 overshoots, 10 exactly leaves no line.
+    const x = line('x', [0, 0], [10, 0])
+    const y = line('y', [10, 0], [10, 10])
+    expect(filletLines(x, y, 20, 2, 0, 10, 8).refusal).toBe('Fillet refused: the radius is too large for these two lines (at most 10 fits).')
+    expect(filletLines(x, y, 10, 2, 0, 10, 8).refusal).toBe('Fillet refused: the radius is too large for these two lines (at most 10 fits).')
+    expect(filletLines(x, y, 9.999, 2, 0, 10, 8).steps).toHaveLength(3)
+    // The shorter kept part bounds it: the second line kept 4 long allows tan(45) * 4 = 4.
+    expect(filletLines(x, line('y2', [10, 0], [10, 4]), 5, 2, 0, 10, 3).refusal).toBe('Fillet refused: the radius is too large for these two lines (at most 4 fits).')
+    // A pick past the first line's own end names a part with no length on that side.
+    expect(filletLines(x, y, 1, 12, 0, 10, 8).refusal).toBe('Fillet refused: the part of the first line to keep has no length on that side of the crossing.')
+    // An acute corner explodes r / tan(theta / 2): 45 degrees between the kept parts, r = 4 needs 9.66, r = 5 does not fit 10.
+    const diag = line('d', [10, 0], [0, 10])
+    expect(filletLines(x, diag, 4, 2, 0, 2, 8).steps).toHaveLength(3)
+    expect(filletLines(x, diag, 5, 2, 0, 2, 8).refusal).toMatch(/^Fillet refused: the radius is too large for these two lines \(at most 4\.142 fits\)\.$/)
+  })
+
   it('refuses parallel lines, a pick on the crossing, a negative radius and non-lines', () => {
     expect(filletLines(line('x', [0, 0], [10, 0]), line('y', [0, 1], [10, 1]), 1, 2, 0, 2, 1).refusal).toBe('Fillet refused: the two lines are parallel and never meet.')
     expect(filletLines(line('x', [0, 0], [10, 0]), line('y', [10, 0], [10, 10]), 2, 10, 0, 10, 8).refusal).toMatch(/click on the first line to one side of the crossing/)
@@ -264,5 +284,9 @@ describe('chamferLines', () => {
     // Both distances 0: the sharp corner, no third line.
     expect(chamferLines(line('x', [0, 0], [8, 0]), line('y', [10, 2], [10, 10]), 0, 0, 2, 0, 10, 8).steps).toHaveLength(2)
     expect(chamferLines(line('x', [0, 0], [10, 0]), line('y', [10, 0], [10, 10]), -1, 1, 2, 0, 10, 8).refusal).toBe('Chamfer refused: both distances must be numbers that are 0 or more.')
+    // A distance that reaches or passes a kept end has no line left to cut, on either line.
+    expect(chamferLines(line('x', [0, 0], [10, 0]), line('y', [10, 0], [10, 10]), 20, 1, 2, 0, 10, 8).refusal).toBe('Chamfer refused: the first distance is too large for the first line (less than 10 fits).')
+    expect(chamferLines(line('x', [0, 0], [10, 0]), line('y', [10, 0], [10, 10]), 1, 10, 2, 0, 10, 8).refusal).toBe('Chamfer refused: the second distance is too large for the second line (less than 10 fits).')
+    expect(chamferLines(line('x', [0, 0], [10, 0]), line('y', [10, 0], [10, 10]), 9.99, 9.99, 2, 0, 10, 8).steps).toHaveLength(3)
   })
 })

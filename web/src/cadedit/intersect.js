@@ -24,6 +24,9 @@ export const MAX_INTERSECT_POINTS = 1000
 export const MAX_BATCH_STEPS = 4
 const EPSILON = 1e-9
 const DEG = Math.PI / 180
+// The angular tolerance that decides whether a crossing sits AT an arc's own
+// endpoint (degrees): tight on purpose, the aperture is a picking notion.
+const TINY_DEG = 1e-7
 const KINDS = new Set(['LINE', 'LWPOLYLINE', 'CIRCLE', 'ARC'])
 
 const finite = Number.isFinite
@@ -425,8 +428,10 @@ export function extendEntity(target, edge, px, py, tol = EPSILON) {
     // c.s is the offset from the start, counter-clockwise, on the full
     // circle. Only a crossing in the GAP (past the end, before the start) lies
     // ahead of either end; the arc's own far endpoint counts as the gap's far
-    // limit, and reaching it is the full turn refused below.
-    const inGap = c.s > T.sweep - epsA || c.s < epsA
+    // limit, and reaching it is the full turn refused below. The band is a
+    // tight angular tolerance, never the aperture: a crossing ON the arc a
+    // degree before its end is behind that end, not in the gap.
+    const inGap = c.s >= T.sweep - TINY_DEG || c.s <= TINY_DEG
     if (!inGap) continue
     const ahead = atEnd ? normDeg(c.s - T.sweep) : normDeg(-c.s)
     if (ahead > epsA && (best === null || ahead < best)) best = ahead
@@ -467,8 +472,19 @@ function corner(verb, target, edge, px, py, ex, ey) {
   const cosT = Math.max(-1, Math.min(1, dot(sa.u, sb.u)))
   const theta = Math.acos(cosT)
   if (theta <= EPSILON || Math.PI - theta <= EPSILON) return refuse(verb, 'the two kept parts point the same way; no corner to make')
+  // How much of each line lies on its kept side of the crossing: the tangent
+  // or cut point must fall INSIDE that length, or the "cut" would write a
+  // point past the kept end and turn the line into something the drafter
+  // never drew (a pick past a line's own end names a part with no length).
+  sa.reach = dist(X, A.pts[sa.keptIndex])
+  sb.reach = dist(X, B.pts[sb.keptIndex])
+  if (sa.reach <= EPSILON) return refuse(verb, 'the part of the first line to keep has no length on that side of the crossing')
+  if (sb.reach <= EPSILON) return refuse(verb, 'the part of the second line to keep has no length on that side of the crossing')
   return { A, B, X, sa, sb, theta }
 }
+// The figure a refusal names: cleaned of float noise first (an exact 10 reads
+// 9.999999999999998 off tan), then floored to three decimals so it always fits.
+const fmt3 = (v) => String(Math.floor(clean(v) * 1000) / 1000)
 /** A line's new endpoints: the tangent/cut point replaces the end on the far side of X. */
 function cutLine(L, s, P) {
   const pts = L.pts.map((p) => [p[0], p[1]])
@@ -496,6 +512,13 @@ export function filletLines(target, edge, r, px, py, ex, ey) {
     return { steps: [setVertices(target.id, cutLine(A, sa, X), false), setVertices(edge.id, cutLine(B, sb, X), false)] }
   }
   const along = r / Math.tan(theta / 2)
+  // The tangent points sit `along` from the crossing on each kept side; past
+  // a kept end there is no line to be tangent to. Name the largest radius
+  // these two lines can take, so the next try is not a guess.
+  if (along >= Math.min(sa.reach, sb.reach) - EPSILON) {
+    const most = Math.tan(theta / 2) * Math.min(sa.reach, sb.reach)
+    return refuse(verb, `the radius is too large for these two lines (at most ${fmt3(most)} fits)`)
+  }
   const T1 = add(X, scale(sa.u, along))
   const T2 = add(X, scale(sb.u, along))
   const bis = add(sa.u, sb.u)
@@ -530,6 +553,10 @@ export function chamferLines(target, edge, d1, d2, px, py, ex, ey) {
   const c = corner(verb, target, edge, px, py, ex, ey)
   if (c.refusal) return c
   const { A, B, X, sa, sb } = c
+  // Each cut point sits its distance from the crossing on the kept side; a
+  // distance that reaches or passes the kept end has no line left to cut.
+  if (d1 >= sa.reach - EPSILON) return refuse(verb, `the first distance is too large for the first line (less than ${fmt3(sa.reach)} fits)`)
+  if (d2 >= sb.reach - EPSILON) return refuse(verb, `the second distance is too large for the second line (less than ${fmt3(sb.reach)} fits)`)
   const P1 = add(X, scale(sa.u, d1))
   const P2 = add(X, scale(sb.u, d2))
   const steps = [setVertices(target.id, cutLine(A, sa, P1), false), setVertices(edge.id, cutLine(B, sb, P2), false)]

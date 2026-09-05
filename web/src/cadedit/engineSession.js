@@ -40,7 +40,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { EngineBoundary } from '../cad/engineWorker.js'
 import { SESSION_ERROR } from './engineSessionErrors.js'
 import { offsetEntity } from './offset.js'
-import { MAX_BATCH_STEPS, chamferLines, extendEntity, filletLines, trimEntity } from './intersect.js'
+import { MAX_BATCH_STEPS, MAX_INTERSECT_POINTS, chamferLines, extendEntity, filletLines, trimEntity } from './intersect.js'
 import { clipboardRecord, describeRecord, pasteOp } from './clipboard.js'
 import { diffPlan } from './mutationDiff.js'
 
@@ -299,6 +299,9 @@ export function planIntersectVerb(op, session, inputs = {}) {
   if (!target) return { refusal: `${verb.name} refused: the selected entity is no longer in the document.` }
   const edge = (entities || []).find((candidate) => candidate.id === checked.payload.edge)
   if (!edge) return { refusal: `${verb.name} refused: the ${verb.edge} is no longer in the document.` }
+  // The typed path reaches exactly the candidates a canvas pick can name: a
+  // read-only entity is never one (FILLET and CHAMFER rewrite the edge).
+  if (edge.editable === false) return { refusal: `${verb.name} refused: the ${verb.edge} is read-only in the browser engine.` }
   const { x, y } = checked.payload
   if (op === 'trim') return trimEntity(target, edge, x, y)
   if (op === 'extend') return extendEntity(target, edge, x, y)
@@ -329,8 +332,10 @@ export function lowerSteps(steps) {
     if (op === 'delete') {
       lowered.push({ op, payload: { entityId } })
     } else if (op === 'setVertices') {
+      // A trim keeps at most the entity's own points plus its two cut points,
+      // so the bound is the kernel's, plus two, not the create bound.
       const pts = Array.isArray(step.points) ? step.points : null
-      if (!pts || pts.length < 2 || pts.length > MAX_CREATE_POINTS) return { refusal: `Edit refused: a geometry step needs 2 to ${MAX_CREATE_POINTS} points.` }
+      if (!pts || pts.length < 2 || pts.length > MAX_INTERSECT_POINTS + 2) return { refusal: `Edit refused: a geometry step needs 2 to ${MAX_INTERSECT_POINTS + 2} points.` }
       const flat = []
       for (const pt of pts) {
         if (!Array.isArray(pt) || !Number.isFinite(pt[0]) || !Number.isFinite(pt[1])) return { refusal: 'Edit refused: a geometry step has a point that is not a number.' }
