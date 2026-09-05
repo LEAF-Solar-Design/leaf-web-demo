@@ -35,7 +35,7 @@
     "check:published-catalog-tool": "node --test src/site/publishedCatalogTool.test.mjs",
     "check:proof-receipt": "node --test e2e/proofReceipt.test.mjs",
     "check:workbench-id": "node --test src/site/workbenchId.test.mjs",
-    "check:app-wiring": "node --test src/app-wiring.test.mjs",
+    "check:app-wiring": "node --test src/app-wiring.test.mjs src/site/conversationListSeat.test.mjs",
     "check:honesty-ladder": "node --test scripts/check_honesty_ladder.mjs",
     "check:tour-anchors": "node --test scripts/check_tour_anchors.mjs",
     "check:composer": "node --test src/composer.test.mjs",

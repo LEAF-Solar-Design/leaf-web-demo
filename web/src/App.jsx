@@ -3496,14 +3496,6 @@ export default function App() {
           />
         )}
 
-        {/* Slice 6b: the conversation list stands BESIDE the panel, mounted by
-            the frame on every surface whose contract declares a conversation
-            scope. The gate is the contract, not a surface literal, and not
-            `agentMode` — the list is how you get BACK to a conversation, so
-            hiding it until one is open would hide it exactly when it is
-            needed. */}
-        {!mock && <SurfaceFrame.Conversations />}
-
         {!mock && agentMode && agentSessionId && (
           <ConversePanel
             sessionId={agentSessionId}
@@ -3610,14 +3602,25 @@ export default function App() {
         <SurfaceFrame.Toast />
       </div>
 
-      {/* W4d Slice D seating: on drafting surfaces under the studio the job
-          monitor boots as a 44px spine on the right (the reference gives that
-          edge to the viewport and the viewcube); its live count stays visible
-          and one click expands it. Rail OFF: no spine, the rail renders
-          exactly as before. Slice 4a: that derivation (contract.rails.right
-          === 'job-spine', ANDed with the studio and viewport terms) is the
-          frame's, from the posture passed above. */}
-      <SurfaceFrame.JobRail />
+      {/* The right rail column (aside.rail's grid seat, styles.css). Slice 6b
+          moved the conversation list here (off the ground: it used to mount
+          inside <main>, in the same normal-flow subtree as the workspace
+          card, where the studio pointer chain's `main.center-scroll > *`
+          restore made its painted head a click shield over the card window —
+          e2e receipt one-shell-mount.spec.mjs "the pointer chain punches
+          through"). Gate is the contract, not a surface literal, and not
+          `agentMode` — the list is how you get BACK to a conversation, so
+          hiding it until one is open would hide it exactly when it is
+          needed. It stacks ABOVE the job monitor rather than inventing a
+          second layout: `.rail-stack` takes over the grid seat `aside.rail`
+          held alone, the list gets a bounded, scrollable share of it, and the
+          job monitor keeps its own spine/expand posture untouched
+          (W4d Slice D: 44px spine on drafting surfaces, full rail
+          otherwise). */}
+      <div className="rail-stack">
+        {!mock && <SurfaceFrame.Conversations />}
+        <SurfaceFrame.JobRail />
+      </div>
 
       <footer className="foot-bar" data-checkout-instance={checkout.instanceId} data-controller-instance={workspaceInstanceId}>
         {/* P1: on the studio's drafting surfaces the bar is three REGIONS —
