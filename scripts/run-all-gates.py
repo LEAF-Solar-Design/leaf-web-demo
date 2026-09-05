@@ -1370,7 +1370,7 @@ def build_suites() -> List[Suite]:
               # 39 -> 43 (slice B v2): replace event-trust pins with live-queue
               # validation (queued and superseded rows), and pin the secret-free
               # dispatcher, main-ref guard, and recorded-base step guards.
-              _py_pytest("test_prewarm_staging_cutover_workflow.py"), 43),
+              _py_pytest("test_prewarm_staging_cutover_workflow.py"), 44),
         # Merge-queue group controller (slice C: mq-review, mq-supply,
         # mq-prewarm). 32 = the executed matrix: mq-review's GraphQL
         # pagination and post-check re-read run against a fake gh (a queue

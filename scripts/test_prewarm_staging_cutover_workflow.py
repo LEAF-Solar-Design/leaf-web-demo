@@ -37,6 +37,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "prewarm-staging-cutover.yml"
 
+GROUP_WORKFLOW = WORKFLOW.with_name("prewarm-staging-group.yml")
 def _usable_bash() -> str:
     """A bash that can itself run jq and git, which is not the same question as
     whether the HOST has them: on Windows the `bash` on PATH can be a WSL shim
@@ -76,8 +77,16 @@ def workflow_document() -> dict:
     return yaml.load(workflow_text(), Loader=yaml.BaseLoader)
 
 
+def group_workflow_document() -> dict:
+    return yaml.load(GROUP_WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+
+
+def workflow_jobs() -> dict:
+    return {**workflow_document()["jobs"], **group_workflow_document()["jobs"]}
+
+
 def step_body(job: str, name_fragment: str) -> str:
-    for step in workflow_document()["jobs"][job]["steps"]:
+    for step in workflow_jobs()[job]["steps"]:
         if name_fragment in step.get("name", "") and "run" in step:
             return step["run"]
     raise AssertionError("no %r step with a run body in job %s" % (name_fragment, job))
@@ -401,9 +410,12 @@ def test_the_group_concurrency_keys_use_the_head_sha():
     group = concurrency["group"]
     assert "github.event_name == 'merge_group'" in group
     assert "github.event.merge_group.head_sha" in group
-    assert "inputs.group_head_sha" in group
+    assert "inputs.group_head_sha" not in group
     assert "prewarm-staging-cutover-mg-dispatch-{0}" in group
-    assert "prewarm-staging-cutover-mg-stage-{0}" in group
+    stage_concurrency = group_workflow_document()["concurrency"]
+    assert "inputs.group_head_sha" in stage_concurrency["group"]
+    assert "prewarm-staging-cutover-mg-stage-{0}" in stage_concurrency["group"]
+    assert stage_concurrency["cancel-in-progress"] == "true"
     # PR events must keep their own per-PR, per-action key untouched.
     assert "github.event.pull_request.number" in group
     assert "github.event.action == 'closed' && 'descale' || 'stage'" in group
@@ -414,9 +426,9 @@ def test_the_group_concurrency_keys_use_the_head_sha():
 
 
 def test_the_group_job_runs_only_for_main_dispatch_with_a_head():
-    condition = workflow_document()["jobs"]["stage-group"]["if"]
+    condition = group_workflow_document()["jobs"]["stage-group"]["if"]
     assert condition == "github.event_name == 'workflow_dispatch' && inputs.group_head_sha != '' && github.ref == 'refs/heads/main'"
-    assert workflow_document()["jobs"]["stage-group"]["needs"] == "guard-ref"
+    assert group_workflow_document()["jobs"]["stage-group"]["needs"] == "guard-ref"
 
 
 GROUP_ELIGIBILITY_ENV = {
@@ -469,14 +481,14 @@ def test_the_group_dispatcher_has_only_two_permissions_and_no_secrets():
     assert "secrets." not in str(job)
     assert "uses" not in job["steps"][0]
     body = job["steps"][0]["run"]
-    assert "gh workflow run prewarm-staging-cutover.yml" in body
+    assert "gh workflow run prewarm-staging-group.yml" in body
     assert '--ref main -f "group_head_sha=$HEAD_SHA"' in body
     assert "PR_NUMBER" not in str(job)
     assert "::warning::" in body
 
 
 def test_the_dispatch_input_and_main_ref_guard():
-    document = workflow_document()
+    document = group_workflow_document()
     field = document["on"]["workflow_dispatch"]["inputs"]["group_head_sha"]
     assert field["type"] == "string" and field["default"] == ""
     guard = document["jobs"]["guard-ref"]
@@ -484,6 +496,17 @@ def test_the_dispatch_input_and_main_ref_guard():
     body = step_body("guard-ref", "Require the main workflow ref")
     assert '"$GITHUB_REF" != "refs/heads/main"' in body
     assert "exit 1" in body
+
+
+def test_the_group_workflow_has_only_the_dispatch_trigger():
+    document = group_workflow_document()
+    assert set(document["on"]) == {"workflow_dispatch"}
+    assert set(document["on"]["workflow_dispatch"]["inputs"]) == {"group_head_sha"}
+    assert document["permissions"] == workflow_document()["permissions"]
+    for key, value in document["env"].items():
+        assert workflow_document()["env"][key] == value
+    assert "stage-group" not in workflow_document()["jobs"]
+    assert "group_head_sha" not in str(workflow_document()["on"]["workflow_dispatch"])
 
 
 def test_live_queue_validation_and_superseded_steps_are_pinned():
@@ -496,7 +519,7 @@ def test_live_queue_validation_and_superseded_steps_are_pinned():
                      '^[0-9a-fA-F]{40}$'):
         assert required in body
     assert "exit 0" in body
-    job = workflow_document()["jobs"]["stage-group"]
+    job = group_workflow_document()["jobs"]["stage-group"]
     assert "github.event.merge_group" not in str(job)
     for step in job["steps"]:
         if step.get("uses", "").startswith("actions/checkout") or step.get("id") in {"parentage", "receipt"}:
@@ -506,7 +529,7 @@ def test_live_queue_validation_and_superseded_steps_are_pinned():
 
 
 def test_the_group_checkout_targets_the_exact_head_sha():
-    steps = workflow_document()["jobs"]["stage-group"]["steps"]
+    steps = group_workflow_document()["jobs"]["stage-group"]["steps"]
     checkout = next(s for s in steps if s.get("uses", "").startswith("actions/checkout"))
     assert checkout["with"]["ref"] == "${{ steps.group.outputs.head_sha }}"
     assert checkout["with"]["fetch-depth"] == "2"
@@ -583,7 +606,7 @@ def test_the_group_receipt_carries_a_group_object_not_a_pr_number():
 
 
 def test_the_group_receipt_artifact_is_named_by_short_sha():
-    steps = workflow_document()["jobs"]["stage-group"]["steps"]
+    steps = group_workflow_document()["jobs"]["stage-group"]["steps"]
     upload = next(s for s in steps if s.get("uses", "").startswith("actions/upload-artifact"))
     assert upload["with"]["name"] == "prewarm-relay-receipt-mg-${{ steps.group.outputs.sha12 }}"
     assert upload["with"]["retention-days"] == "30"
