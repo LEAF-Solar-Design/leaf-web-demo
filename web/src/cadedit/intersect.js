@@ -277,7 +277,7 @@ const segParam = (arc, p) => {
   const o = segOffset(arc, p)
   return (360 - o <= TINY_DEG ? o - 360 : o) / Math.abs(arc.sweep)
 }
-const inSpan = (t, L) => t * L >= -EPSILON && t * L <= L + EPSILON
+const inSpanPt = (p, a, b, u) => dot(sub(p, a), u) >= -EPSILON && dot(sub(p, b), u) <= EPSILON
 
 /**
  * Where `edge` crosses `target`: [{ s, p }] on the target's own param (LINE/
@@ -303,12 +303,13 @@ export function crossings(target, edge, extend = 'none', tol = EPSILON) {
     for (const { a, b, i, arc } of segs) {
       const lowOk = !arc && (extend === 'start' || extend === 'both') && i === 0 && !target.closed
       const highOk = !arc && (extend === 'end' || extend === 'both') && i === last && !target.closed
-      const L = arc ? 0 : dist(a, b)
+      const u = arc ? null : scale(sub(b, a), 1 / dist(a, b))
       const epsT = arc ? TINY_DEG / Math.abs(arc.sweep) : 0
-      const accept = (t) => arc ? t >= -epsT && t <= 1 + epsT : inSpan(t, L) || (lowOk && t < 0) || (highOk && t > 1)
+      const accept = (t, p) => arc ? t >= -epsT && t <= 1 + epsT
+        : inSpanPt(p, a, b, u) || (lowOk && dot(sub(p, a), u) < 0) || (highOk && dot(sub(p, b), u) > 0)
       const hitOnTarget = (t, p, inputScale) => {
         if (arc && !onSupport(p, arc.c, arc.r, eps, inputScale)) return
-        if (!accept(t)) return
+        if (!accept(t, p)) return
         const o = arc ? segOffset(arc, p) : null
         if (same(p, a, eps) || (arc && Math.min(o, 360 - o) <= TINY_DEG)) push(i, a)
         else if (same(p, b, eps) || (arc && Math.abs(o - Math.abs(arc.sweep)) <= TINY_DEG)) push(i + 1, b)
@@ -317,6 +318,7 @@ export function crossings(target, edge, extend = 'none', tol = EPSILON) {
       if (edgeSegs) {
         for (const edgeSeg of edgeSegs) {
           const { a: c, b: d, arc: edgeArc } = edgeSeg
+          const edgeU = edgeArc ? null : scale(sub(d, c), 1 / dist(c, d))
           if (arc && edgeArc) {
             const inputScale = Math.max(...[...arc.c, ...edgeArc.c].map(Math.abs)) + arc.r + edgeArc.r
             for (const p of circleCircle(arc.c, arc.r, edgeArc.c, edgeArc.r)) {
@@ -325,7 +327,7 @@ export function crossings(target, edge, extend = 'none', tol = EPSILON) {
           } else if (arc) {
             const inputScale = Math.max(...[...c, ...d, ...arc.c].map(Math.abs)) + arc.r
             for (const hit of segCircle(c, d, arc.c, arc.r)) {
-              if (inSpan(hit.t, dist(c, d))) hitOnTarget(segParam(arc, hit.p), hit.p, inputScale)
+              if (inSpanPt(hit.p, c, d, edgeU)) hitOnTarget(segParam(arc, hit.p), hit.p, inputScale)
             }
           } else if (edgeArc) {
             const inputScale = Math.max(...[...a, ...b, ...edgeArc.c].map(Math.abs)) + edgeArc.r
@@ -334,7 +336,7 @@ export function crossings(target, edge, extend = 'none', tol = EPSILON) {
             }
           } else {
             const hit = segSeg(a, b, c, d)
-            if (hit && inSpan(hit.u, dist(c, d))) hitOnTarget(hit.t, hit.p)
+            if (hit && inSpanPt(hit.p, c, d, edgeU)) hitOnTarget(hit.t, hit.p)
           }
         }
       } else if (arc) {
@@ -362,7 +364,8 @@ export function crossings(target, edge, extend = 'none', tol = EPSILON) {
         }
       } else {
         const inputScale = Math.max(...[...seg.a, ...seg.b, ...target.c].map(Math.abs)) + target.r
-        for (const hit of segCircle(seg.a, seg.b, target.c, target.r)) if (onSupport(hit.p, target.c, target.r, eps, inputScale) && inSpan(hit.t, dist(seg.a, seg.b))) push(param(hit.p), hit.p)
+        const u = scale(sub(seg.b, seg.a), 1 / dist(seg.a, seg.b))
+        for (const hit of segCircle(seg.a, seg.b, target.c, target.r)) if (onSupport(hit.p, target.c, target.r, eps, inputScale) && inSpanPt(hit.p, seg.a, seg.b, u)) push(param(hit.p), hit.p)
       }
     }
   } else {

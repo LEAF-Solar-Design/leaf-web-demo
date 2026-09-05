@@ -1214,3 +1214,36 @@ describe('Astra refutations, round six (W4g-6e record 9)', () => {
     expect(bulges[1]).toBe(0)
   })
 })
+
+describe('Astra refutations, round seven (W4g-6e record 10)', () => {
+  it('refuses a long cutter that stops more than EPSILON short of the arc', () => {
+    const target = poly('p', [[-5, 0], [5, 0]], false, 'A', [1, 0])
+    const edge = line('e', [0, -536870917], [0, -(5 + 2 ** -26)])
+    // The 2^-26 shortfall disappears in the length measured from the far start.
+    expect(crossings(curveOf(target), curveOf(edge))).toEqual([])
+    expect(trimEntity(target, edge, -3, -4, 1e-9).refusal).toBe('Trim refused: the cutting edge does not cross the selection.')
+  })
+
+  it('accepts a long cutter ending within EPSILON of the arc', () => {
+    const target = poly('p', [[-5, 0], [5, 0]], false, 'A', [1, 0])
+    const edge = line('e', [0, -536870917], [0, -5.0000000005])
+    const hits = crossings(curveOf(target), curveOf(edge))
+    expect(hits).toHaveLength(1)
+    expect(hits[0].s).toBeCloseTo(0.5, 9)
+    expect(hits[0].p).toHaveLength(2)
+    ;[0, -5].forEach((v, j) => expect(hits[0].p[j]).toBeCloseTo(v, 9))
+    const out = trimEntity(target, edge, -3, -4, 1e-9)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(1)
+    const { points, bulges, ...shape } = out.steps[0]
+    expect(shape).toEqual({ op: 'setVertices', entityId: 'p', closed: false })
+    expect(points).toHaveLength(2)
+    ;[[0, -5], [5, 0]].forEach((p, i) => {
+      expect(points[i]).toHaveLength(2)
+      p.forEach((v, j) => expect(points[i][j]).toBeCloseTo(v, 9))
+    })
+    expect(bulges).toHaveLength(2)
+    expect(bulges[0]).toBeCloseTo(Math.tan(Math.PI / 8), 9)
+    expect(bulges[1]).toBe(0)
+  })
+})
