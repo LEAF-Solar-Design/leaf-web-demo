@@ -648,6 +648,7 @@ export default function useEngineSession({
 
   const teardown = useCallback(() => {
     generationRef.current += 1
+    savingRef.current = false
     boundaryRef.current?.terminate()
     boundaryRef.current = null
     clearHistory()
@@ -1067,7 +1068,7 @@ export default function useEngineSession({
         savedVersion: live && !readBackPending ? null : nv ?? null,
         committedBytes: bytes,
         committedEntities: live ? null : committedEntities ? sessionRef.current.entities : null,
-        committedVersion: live ? null : nv ?? null,
+        committedVersion: live ? (readBackPending ? nv ?? null : null) : nv ?? null,
         errorKind: null,
         status: `Saved as version ${nv} (parent ${receipt?.new_version?.parent})${commit}, `
           + `digest ${String(receipt?.source_sha256 || digest).slice(0, 12)}…, `
@@ -1089,7 +1090,7 @@ export default function useEngineSession({
       })
       return null
     } finally {
-      savingRef.current = false
+      if (generation === generationRef.current) savingRef.current = false
     }
   }, [patch])
 

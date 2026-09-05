@@ -2734,6 +2734,9 @@ export default function App() {
     // to the plan route, where the SERVER picks the commit leg and says so
     // in the receipt; a hand-imported document keeps the F-3 sidecar route.
     save: async (bytes, parent, digest, plan = null, onStatus = null) => {
+      // A hand import has no committed head, so fetch the chain head at save
+      // time; a head document always carries its committed version.
+      if (parent == null) parent = (await getDrawingVersions(false, REQUESTED_DRAWING_ID)).head
       // The store publishes ONLY under a live single-writer checkout (the
       // postgres authority fails closed without one — staging's exact
       // first-save refusal). Use the session's held capability when there
@@ -2754,6 +2757,7 @@ export default function App() {
         }
       }
       const cap = held || acquired.checkout_capability
+      let keepLock = false
       try {
         if (plan && plan.mutations) {
           return await saveDrawingVersionPlan(
@@ -2761,8 +2765,11 @@ export default function App() {
         }
         return await saveEditedDrawingVersion(
           REQUESTED_DRAWING_ID, bytes, parent, digest, cap)
+      } catch (error) {
+        keepLock = error?.outcomeUnknown === true
+        throw error
       } finally {
-        if (acquired) {
+        if (acquired && !keepLock) {
           releaseCheckout(REQUESTED_DRAWING_ID, cap).catch(() => {})
         }
       }

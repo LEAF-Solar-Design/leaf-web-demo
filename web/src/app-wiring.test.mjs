@@ -354,8 +354,12 @@ describe('App.jsx wiring', () => {
     it('routes by the plan, inside the same checkout the F-3 save takes', () => {
       const start = stripped.indexOf('engineSaveTarget = ')
       assert.notEqual(start, -1)
-      const body = stripped.slice(start, start + 2600)
+      const body = stripped.slice(start, start + 3400)
       assert.match(body, /save: async \(bytes, parent, digest, plan = null, onStatus = null\)/)
+      // W1: a hand import gets the real parent, and an unknown job keeps its fence.
+      assert.match(body, /if \(parent == null\)\s*parent = \(await getDrawingVersions\(false, REQUESTED_DRAWING_ID\)\)\.head/)
+      assert.match(body, /keepLock = error\?\.outcomeUnknown === true/)
+      assert.match(body, /if \(acquired && !keepLock\)/)
       const planCall = body.indexOf('saveDrawingVersionPlan(')
       const sidecarCall = body.indexOf('saveEditedDrawingVersion(')
       assert.notEqual(planCall, -1)

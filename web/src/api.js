@@ -755,6 +755,10 @@ function subscribeJob(jobId, onStatus) {
     }
     const handleRec = (rec) => {
       if (settled || !rec) return
+      if (typeof rec.job_id === 'string' && rec.job_id !== jobId) {
+        fail(new Error(`job record mismatch: asked for ${jobId}, got ${rec.job_id}`))
+        return
+      }
       emit(rec)
       if (TERMINAL.has(rec.status)) finish(rec)
     }
@@ -1002,6 +1006,34 @@ function clearPlanJob(drawingId) {
 }
 
 export async function saveDrawingVersionPlan(drawingId, bytes, parentVersion, digest, mutations, capability = null, opts = {}) {
+  const pending = loadPlanJobPointer(drawingId)
+  if (pending) {
+    let env
+    try {
+      env = await attachToJob(pending, { onStatus: opts.onStatus })
+    } catch {
+      const error = new Error(`outcome unknown: job ${pending} may still be running; reopen the drawing to see whether the version landed`)
+      error.outcomeUnknown = true
+      error.jobId = pending
+      throw error
+    }
+    clearPlanJob(drawingId)
+    if (env?.ok === true) {
+      const version = env.result?.new_version?.version
+      if (!Number.isInteger(version) || version <= 0) {
+        const error = new Error('live commit reported no version')
+        error.status = 502
+        error.jobId = pending
+        error.body = env
+        throw error
+      }
+      const error = new Error(`an earlier save landed as version ${version}; reopen the drawing before saving again`)
+      error.status = 409
+      error.landedVersion = version
+      error.jobId = pending
+      throw error
+    }
+  }
   const form = new FormData()
   form.append('file', new Blob([bytes], { type: 'application/dxf' }), 'edited.dxf')
   form.append('parent_version', String(parentVersion))
@@ -1018,7 +1050,13 @@ export async function saveDrawingVersionPlan(drawingId, bytes, parentVersion, di
     error.body = body
     throw error
   }
-  if (res.status === 202 && body?.job_id) {
+  if (res.status === 202) {
+    if (typeof body?.job_id !== 'string') {
+      const error = new Error('the server accepted the plan without a job id')
+      error.status = 502
+      error.body = body
+      throw error
+    }
     const jobId = body.job_id
     rememberPlanJob(drawingId, jobId)
     let env
@@ -1040,6 +1078,14 @@ export async function saveDrawingVersionPlan(drawingId, bytes, parentVersion, di
       error.status = 422
       error.body = env
       error.jobId = jobId
+      throw error
+    }
+    const version = env.result?.new_version?.version
+    if (!Number.isInteger(version) || version <= 0) {
+      const error = new Error('live commit reported no version')
+      error.status = 502
+      error.jobId = jobId
+      error.body = env
       throw error
     }
     return {

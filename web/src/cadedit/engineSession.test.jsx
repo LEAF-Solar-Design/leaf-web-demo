@@ -493,16 +493,22 @@ describe('save completion', () => {
     expect(onSaved).toHaveBeenCalledWith(liveReceipt)
   })
 
-  it('a live receipt whose read-back is pending keeps the saved version and says so', async () => {
+  it('S2 a live receipt whose read-back is pending keeps the version as the next parent', async () => {
     const liveReceipt = { ...planReceipt, live: true, new_version_readable: false }
-    const session = await editedHeadSession({ headVersion: 4, save: async () => liveReceipt })
+    const save = vi.fn(async () => liveReceipt)
+    const session = await editedHeadSession({ headVersion: null, save })
     await act(async () => { await session.current.actions.save() })
     expect(session.current.savedVersion).toBe(5)
     expect(session.current.committedEntities).toBeNull()
-    expect(session.current.committedVersion).toBeNull()
+    expect(session.current.committedVersion).toBe(5)
     expect(session.current.dirty).toBe(false)
     expect(session.current.status).toContain('read-back is pending')
     expect(session.current.status).not.toContain('reopening')
+    await act(async () => { await session.current.actions.save() })
+    expect(save).toHaveBeenNthCalledWith(
+      2, new Uint8Array([1, 2, 3]), 5, expect.stringMatching(/^[0-9a-f]{64}$/),
+      null, expect.any(Function),
+    )
   })
 
   it('a missing engine cost is unknown, never an invented zero', async () => {
@@ -548,6 +554,53 @@ describe('save completion', () => {
     expect(session.workers[0].posted).toEqual(posted)
     expect(file.arrayBuffer).not.toHaveBeenCalled()
     expect(save).toHaveBeenCalledTimes(1)
+  })
+
+  it('S1 opens a new drawing after reset and keeps its save latch when the old save settles', async () => {
+    let resolveFirst
+    let signalFirstStarted
+    let signalSecondStarted
+    const firstStarted = new Promise((resolve) => { signalFirstStarted = resolve })
+    const secondStarted = new Promise((resolve) => { signalSecondStarted = resolve })
+    const save = vi.fn()
+      .mockImplementationOnce(() => {
+        signalFirstStarted()
+        return new Promise((resolve) => { resolveFirst = resolve })
+      })
+      .mockImplementationOnce(() => {
+        signalSecondStarted()
+        return new Promise(() => {})
+      })
+    const session = await editedHeadSession({ headVersion: 4, save })
+    let firstPending
+    await act(async () => { firstPending = session.current.actions.save(); await firstStarted })
+    act(() => session.current.actions.reset())
+    expect(session.workers[0].terminated).toBe(true)
+    const bytes = new Uint8Array([7, 7])
+    act(() => {
+      expect(session.current.actions.openBytes(bytes, 'other-v4.dxf', { committed: true, version: 4 })).not.toBeNull()
+    })
+    expect(session.workers).toHaveLength(2)
+    expect(session.workers[1].posted).toContainEqual({ type: 'loadDocument', documentId: 'other-v4.dxf', bytes })
+    session.workers[1].emit(loadedMessage([LINE, POLY], 'other-v4.dxf'))
+    act(() => session.current.actions.select('e1'))
+    act(() => session.current.actions.applyEdit('move', { dx: '1', dy: '1' }))
+    session.workers[1].emit(editedMessage('move', [MOVED_LINE, POLY]))
+    await act(async () => { void session.current.actions.save(); await secondStarted })
+    const posted = session.workers[1].posted.slice()
+    await act(async () => {
+      resolveFirst(planReceipt)
+      expect(await firstPending).toBeNull()
+    })
+    act(() => {
+      expect(session.current.actions.applyEdit('move', { dx: '8', dy: '8' })).toBeNull()
+    })
+    expect(session.current.status).toBe('a save is in flight; wait for its receipt')
+    expect(session.current.documentId).toBe('other-v4.dxf')
+    expect(session.current.committedVersion).toBe(4)
+    expect(session.current.busy).toBe(true)
+    expect(session.workers[1].posted).toEqual(posted)
+    expect(save).toHaveBeenCalledTimes(2)
   })
 
   it('shows job progress while waiting and leaves a failed job dirty without an onSaved callback', async () => {
