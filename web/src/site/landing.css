@@ -1247,7 +1247,10 @@
 .nav-spine { display: flex; flex-direction: column; align-items: center; gap: 6px; }
 /* Explicit ink on the dark rail — inherited color never beats a declared
    one (kimi, twice): 240,242,240 at .88 on the rail material clears 4.5:1. */
-.spine-btn {
+/* `.inbox-toggle` (components/JobInbox.jsx) shares this look by selector
+   rather than by wearing `.spine-btn`: the rail-OFF byte-identity e2e row
+   counts the spine's marker classes as studio-only furniture. */
+.spine-btn, .inbox-toggle {
   width: 34px; height: 34px; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
   font: 600 12px var(--font-mono); letter-spacing: .02em;
@@ -1256,8 +1259,8 @@
   border: 1px solid rgba(240, 242, 240, .26); border-radius: 6px;
   cursor: pointer;
 }
-.spine-btn:hover { background: rgba(240, 242, 240, .12); }
-.spine-btn:focus-visible { outline: 2px solid #7fd6a6; outline-offset: 1px; }
+.spine-btn:hover, .inbox-toggle:hover { background: rgba(240, 242, 240, .12); }
+.spine-btn:focus-visible, .inbox-toggle:focus-visible { outline: 2px solid #7fd6a6; outline-offset: 1px; }
 .spine-expand { font-size: 13px; }
 /* The collapse control inside the expanded rail head: same button, inline. */
 .fam-title .spine-collapse { float: right; width: 24px; height: 24px; font-size: 12px; }

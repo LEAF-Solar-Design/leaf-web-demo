@@ -387,7 +387,8 @@ function Builds() {
 
 /**
  * JobInbox (standardization slice 13a). Mounted beside SurfaceFrame.JobRail
- * in both scenes (inside the shared `.rail-col` wrapper — styles.css), gated
+ * in both scenes (the console's `.rail-stack` column in App.jsx, the stage's
+ * `.rail-col` wrapper in ToolCast.jsx — styles.css owns both), gated
  * by the SAME `frame.jobRail` presence the rail itself reads: this slot
  * never invents its own surface predicate, it reads the one the frame
  * already carries. The console always passes a `jobRail` object; the stage
