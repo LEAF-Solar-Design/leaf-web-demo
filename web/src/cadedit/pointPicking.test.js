@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
+import { entityToPolyline } from './engineIntake.js'
 
 import {
-  MAX_SNAP_POINTS, PICK_SEQUENCES, applyPick, buildSnapIndex, currentStep, ghostFor, orthoAnchor, orthoPoint, snapPoint, startPicking, wantsPick,
+  MAX_SNAP_POINTS, PICK_SEQUENCES, SNAP_KIND, applyPick, buildSnapIndex, currentStep, ghostFor, orthoAnchor, orthoPoint, snapPoint, startPicking, wantsPick,
 } from './pointPicking.js'
 
 describe('pointPicking (W4f slice A1): clicks on the drawing answer the prompts', () => {
@@ -165,5 +166,96 @@ describe('pointPicking (W4f slice A1): clicks on the drawing answer the prompts'
     const capped = buildSnapIndex(many)
     expect(capped.n).toBe(MAX_SNAP_POINTS)
     expect(capped.truncated).toBe(true)
+  })
+})
+
+describe('OSNAP on curved polyline segments (W4g-6d follow-up)', () => {
+  it('a bulged segment offers the ARC midpoint and its centre; a straight one the chord midpoint; a bad list reads as straight', () => {
+    // Bulge 1 from (0,0) to (10,0) is the LOWER semicircle about (5,0) (the crate's convention): its midpoint is (5,-5).
+    const curved = { id: '1', type: 'LWPOLYLINE', layer: '0', closed: false, editable: true, vertices: [[0, 0, 0], [10, 0, 0], [10, 10, 0]], bulges: [1, 0, 0], radius: null, startDeg: null, endDeg: null }
+    const index = buildSnapIndex([curved])
+    const at = []
+    for (let i = 0; i < index.n; i += 1) at.push([index.xs[i], index.ys[i], index.kinds[i]])
+    expect(at).toContainEqual([0, 0, SNAP_KIND.END])
+    expect(at).toContainEqual([10, 0, SNAP_KIND.END])
+    expect(at).toContainEqual([10, 10, SNAP_KIND.END])
+    const mids = at.filter((p) => p[2] === SNAP_KIND.MID)
+    expect(mids).toHaveLength(2)
+    expect(mids[0][0]).toBeCloseTo(5, 9)
+    expect(mids[0][1]).toBeCloseTo(-5, 9)
+    expect(mids[1]).toEqual([10, 5, SNAP_KIND.MID])
+    const centres = at.filter((p) => p[2] === SNAP_KIND.CENTRE)
+    expect(centres).toHaveLength(1)
+    expect(centres[0][0]).toBeCloseTo(5, 9)
+    expect(centres[0][1]).toBeCloseTo(0, 9)
+    // The same polyline read straight (no list, or a list that does not match) keeps the chord midpoints and no centre.
+    for (const bulges of [undefined, [1], [1, 0]]) {
+      const flat = buildSnapIndex([{ ...curved, bulges }])
+      const kinds = [...flat.kinds]
+      expect(kinds.filter((k) => k === SNAP_KIND.CENTRE)).toHaveLength(0)
+      expect(kinds.filter((k) => k === SNAP_KIND.MID)).toHaveLength(2)
+      expect([flat.xs[3], flat.ys[3]]).toEqual([5, 0])
+    }
+    // A closed polyline's closing segment carries the LAST vertex's bulge.
+    const ring = { ...curved, closed: true, vertices: [[0, 0, 0], [10, 0, 0], [10, 10, 0]], bulges: [0, 0, -1] }
+    const ringIndex = buildSnapIndex([ring])
+    const ringAt = []
+    for (let i = 0; i < ringIndex.n; i += 1) ringAt.push([ringIndex.xs[i], ringIndex.ys[i], ringIndex.kinds[i]])
+    // The closing segment (10,10) -> (0,0) with bulge -1 is a clockwise semicircle about (5,5).
+    const closingCentre = ringAt.find((p) => p[2] === SNAP_KIND.CENTRE)
+    expect(closingCentre[0]).toBeCloseTo(5, 9)
+    expect(closingCentre[1]).toBeCloseTo(5, 9)
+    const closingMid = ringAt.filter((p) => p[2] === SNAP_KIND.MID)[2]
+    expect(Math.hypot(closingMid[0] - 5, closingMid[1] - 5)).toBeCloseTo(Math.hypot(5, 5), 9)
+    expect(closingMid[0]).toBeCloseTo(10, 9)
+    expect(closingMid[1]).toBeCloseTo(0, 9)
+  })
+
+  it('a closed two-vertex polyline offers its closing ARC (Astra, adversarial read): drawn by the mapper, snapped here too; two straight sides still offer one chord midpoint', () => {
+    const lens = { id: '2', type: 'LWPOLYLINE', layer: '0', closed: true, editable: true, vertices: [[0, 0, 0], [10, 0, 0]], bulges: [0, 1], radius: null, startDeg: null, endDeg: null }
+    const index = buildSnapIndex([lens])
+    const at = []
+    for (let i = 0; i < index.n; i += 1) at.push([index.xs[i], index.ys[i], index.kinds[i]])
+    expect(at.filter((p) => p[2] === SNAP_KIND.END)).toHaveLength(2)
+    const mids = at.filter((p) => p[2] === SNAP_KIND.MID)
+    expect(mids).toHaveLength(2)
+    expect(mids[0]).toEqual([5, 0, SNAP_KIND.MID])
+    expect(mids[1][0]).toBeCloseTo(5, 9)
+    expect(mids[1][1]).toBeCloseTo(5, 9)
+    const centres = at.filter((p) => p[2] === SNAP_KIND.CENTRE)
+    expect(centres).toHaveLength(1)
+    expect(centres[0][0]).toBeCloseTo(5, 9)
+    expect(centres[0][1]).toBeCloseTo(0, 9)
+    // Two straight sides: one chord midpoint, never the same point twice.
+    const flat = buildSnapIndex([{ ...lens, bulges: [0, 0] }])
+    expect([...flat.kinds].filter((k) => k === SNAP_KIND.MID)).toHaveLength(1)
+    expect([...flat.kinds].filter((k) => k === SNAP_KIND.CENTRE)).toHaveLength(0)
+    // The mapper draws that closing arc, so the two agree: its samples pass through (5, 5).
+    const drawn = entityToPolyline(lens)
+    expect(drawn.closed).toBe(true)
+    expect(drawn.pts.some((p) => Math.abs(p[0] - 5) < 1e-9 && Math.abs(p[1] - 5) < 1e-9)).toBe(true)
+    // The FIRST side curved and the closing side straight (Astra, round two): the arc's MID and CENTRE
+    // AND the straight side's chord midpoint. Bulge 0.5 on a chord of 10: radius 6.25, centre (5, 3.75),
+    // midpoint (5, -2.5).
+    const firstCurved = buildSnapIndex([{ ...lens, bulges: [0.5, 0] }])
+    const fc = []
+    for (let i = 0; i < firstCurved.n; i += 1) fc.push([firstCurved.xs[i], firstCurved.ys[i], firstCurved.kinds[i]])
+    const fcMids = fc.filter((p) => p[2] === SNAP_KIND.MID)
+    expect(fcMids).toHaveLength(2)
+    expect(fcMids[0][0]).toBeCloseTo(5, 9)
+    expect(fcMids[0][1]).toBeCloseTo(-2.5, 9)
+    expect(fcMids[1]).toEqual([5, 0, SNAP_KIND.MID])
+    const fcCentres = fc.filter((p) => p[2] === SNAP_KIND.CENTRE)
+    expect(fcCentres).toHaveLength(1)
+    expect(fcCentres[0][0]).toBeCloseTo(5, 9)
+    expect(fcCentres[0][1]).toBeCloseTo(3.75, 9)
+    // Both sides curved: two arcs, two centres.
+    const both = buildSnapIndex([{ ...lens, bulges: [1, 1] }])
+    expect([...both.kinds].filter((k) => k === SNAP_KIND.MID)).toHaveLength(2)
+    expect([...both.kinds].filter((k) => k === SNAP_KIND.CENTRE)).toHaveLength(2)
+    // A non-boolean closed flag reads as open, as it does for the drawing.
+    const truthy = buildSnapIndex([{ ...lens, closed: 1, bulges: [0, 1] }])
+    expect([...truthy.kinds].filter((k) => k === SNAP_KIND.MID)).toHaveLength(1)
+    expect([...truthy.kinds].filter((k) => k === SNAP_KIND.CENTRE)).toHaveLength(0)
   })
 })

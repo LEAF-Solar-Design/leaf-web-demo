@@ -15,6 +15,7 @@ const finite = (v) => typeof v === 'number' && Number.isFinite(v)
 const num = (s) => { const n = Number.parseFloat(s); return Number.isFinite(n) ? n : null }
 
 import { nearestEntity } from './intersect.js'
+import { bulgeArc } from './engineIntake.js'
 /** The pick sequence per op, or null for ops with nothing to pick. */
 export const PICK_SEQUENCES = Object.freeze({
   createLine: [{ kind: 'point', keys: ['x', 'y'] }, { kind: 'point', keys: ['x2', 'y2'] }],
@@ -217,11 +218,28 @@ export function buildSnapIndex(entities) {
     }
     if (e?.type !== 'LINE' && e?.type !== 'LWPOLYLINE') continue
     for (let i = 0; i < v.length; i += 1) push(v[i][0], v[i][1], SNAP_KIND.END)
-    const segments = e.type === 'LWPOLYLINE' && e.closed && v.length > 2 ? v.length : v.length - 1
+    const bulges = Array.isArray(e.bulges) && e.bulges.length === v.length ? e.bulges : null
+    // A closed polyline visits its closing segment. Two vertices closed by two
+    // STRAIGHT sides would offer one chord midpoint twice, so that case alone
+    // keeps one segment; when either side curves (a bulge on either vertex)
+    // both sides are real and the drawing shows both.
+    const curvedAt = (i) => !!(bulges && Number.isFinite(bulges[i]) && Math.abs(bulges[i]) > 1e-10)
+    const twoSides = v.length === 2 && (curvedAt(0) || curvedAt(1))
+    const segments = e.type === 'LWPOLYLINE' && e.closed === true && (v.length > 2 || twoSides) ? v.length : v.length - 1
+    // A curved segment (a bulge on its start vertex, one per vertex, the
+    // mapper's rule) offers the ARC's midpoint, not the chord's, and its
+    // centre; a list that does not match the points reads as straight, as
+    // it does for the drawing.
     for (let i = 0; i < segments; i += 1) {
       const a = v[i]
       const b = v[(i + 1) % v.length]
-      if (a && b) push((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, SNAP_KIND.MID)
+      if (!a || !b) continue
+      const arc = bulges ? bulgeArc(a, b, bulges[i]) : null
+      if (arc) {
+        const mid = arc.a0 + arc.sweep / 2
+        push(arc.cx + arc.r * Math.cos(mid), arc.cy + arc.r * Math.sin(mid), SNAP_KIND.MID)
+        push(arc.cx, arc.cy, SNAP_KIND.CENTRE)
+      } else push((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, SNAP_KIND.MID)
     }
   }
   return Object.freeze({ n: xs.length, xs: Float64Array.from(xs), ys: Float64Array.from(ys), kinds: Uint8Array.from(kinds), truncated: xs.length >= MAX_SNAP_POINTS })
