@@ -463,6 +463,16 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
             except (ValueError, AttributeError):
                 raise ValueError("a canonical drawing version UUID is required") from None
             request_tenant = _canonical_tenant_id(tenant_id, platform_context)
+            if tool["name"] == "arlo-design":
+                try:
+                    jobs.platform_link.require_project_access(
+                        tenant_id, platform_context["project_id"], write=True)
+                except jobs.platform_link.ProjectSessionForbidden:
+                    return error_response(ErrorCode.FORBIDDEN, "project access denied",
+                                          retryable=False, status_code=403)
+                except LookupError:
+                    return error_response(ErrorCode.BAD_PARAMS, "project not found",
+                                          retryable=False, status_code=404)
             job_id = jobs.platform_link.submit_canonical_solve(
                 platform_context, request_tenant, str(tool["name"]), params,
                 idempotency_key, input_version_id)

@@ -410,6 +410,10 @@ def submit_canonical_solve(context: Dict[str, Any], request_tenant_id: str,
     _load_platform()
     import leaf_platform.entitlements as platform_entitlements  # noqa: PLC0415
 
+    if tool_name == "arlo-design":
+        from leaf_platform.arlo_lab import load_registered_request
+        load_registered_request({**context, "input_version_id": input_version_id}, params)
+
     try:
         job = _canonical_jobs_module().submit_solve_job(
             context["org_id"], context["project_id"], str(request_tenant_id), tool_name,

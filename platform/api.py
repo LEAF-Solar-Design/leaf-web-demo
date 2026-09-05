@@ -20,7 +20,7 @@ from typing import Any, Dict, Literal, NamedTuple, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from . import (billing, deps as platform_deps, entitlements, project_lifecycle,
+from . import (arlo_lab, billing, deps as platform_deps, entitlements, project_lifecycle,
                store, unit_economics)
 from .deps import (get_org_id, get_review_binding_id, get_write_binding_id, get_write_org_id,
                    require_auth_when_live)
@@ -52,6 +52,11 @@ class CreateOrgBody(BaseModel):
 
 class CreateProjectBody(BaseModel):
     name: str = Field(min_length=1, max_length=200)
+
+
+class RegisterArloExampleBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    example_version: str = Field(min_length=1, max_length=32)
 
 
 class CreateBlankProjectBody(BaseModel):
@@ -296,6 +301,29 @@ def create_project(
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from None
     return {"project": project.to_dict(), "created": created}
+
+
+@router.post("/projects/{project_id}/arlo-examples/{example_id}/inputs", status_code=201)
+def register_arlo_example(project_id: uuid.UUID, example_id: str, body: RegisterArloExampleBody,
+                          idempotency_key: str = Header(alias="Idempotency-Key"),
+                          actor: _LifecycleActor = Depends(_get_lifecycle_actor)):
+    return _lifecycle_response(lambda: arlo_lab.register_input(
+        actor.org_id, project_id, actor.binding_id, example_id=example_id,
+        example_version=body.example_version, idempotency_key=idempotency_key))
+
+
+@router.get("/projects/{project_id}/arlo-jobs/{job_id}")
+def get_arlo_job(project_id: uuid.UUID, job_id: uuid.UUID,
+                 actor: _LifecycleActor = Depends(_get_lifecycle_actor)):
+    return _lifecycle_response(lambda: arlo_lab.job_view(
+        actor.org_id, project_id, actor.binding_id, job_id))
+
+
+@router.post("/projects/{project_id}/arlo-jobs/{job_id}/cancel")
+def cancel_arlo_job(project_id: uuid.UUID, job_id: uuid.UUID,
+                    actor: _LifecycleActor = Depends(_get_lifecycle_actor)):
+    return _lifecycle_response(lambda: arlo_lab.job_view(
+        actor.org_id, project_id, actor.binding_id, job_id, cancel=True))
 
 
 @router.post("/projects/blank", status_code=201)

@@ -1,5 +1,6 @@
 """Focused process, identity and custody checks for canonical ARLO designs."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import time
@@ -81,10 +82,35 @@ def test_context_is_required_even_when_request_claims_identity(field):
     {"solver_root": "untrusted"}, {"contract": "unknown"}, {"scenario": []},
     {"catalog": []}, {"budget": {"timeout_seconds": float("nan")}},
     {"budget": {"timeout_seconds": 181}},
+    {"native_bindings": []}, {"native_bindings": "untrusted"},
 ])
 def test_invalid_request_refuses_before_process(change):
     with pytest.raises(ValueError):
         arlo_design._validated_input({**request(), **change}, CONTEXT)
+
+
+@pytest.mark.parametrize("native_bindings", [None, {}])
+def test_native_bindings_accepts_model_null_default_or_object(native_bindings):
+    body = arlo_design._validated_input({**request(), "native_bindings": native_bindings}, CONTEXT)
+    assert body["native_bindings"] == native_bindings
+
+
+def test_normalized_lab_input_hash_matches_real_engine_request():
+    configured_root = os.environ.get("ARLO_TEST_SOLVER_ROOT")
+    if not configured_root:
+        pytest.skip("ARLO_TEST_SOLVER_ROOT is required for the separate engine integration check")
+    canonical_worker.platform_link._load_platform()
+    from leaf_platform.arlo_lab import load_example
+
+    params = load_example("feeder-lab-v1", "1")
+    result = arlo_design.run(params, job_context=CONTEXT,
+                             solver_root=Path(configured_root), timeout_s=30)
+    assert result["solver_input"]["native_bindings"] is None
+    assert result["solver_result"]["status"] == "complete"
+    assert result["input_sha256"] == arlo_design._sha256(result["solver_input"])
+    assert result["solver_result"]["request_hash"] == result["input_sha256"]
+    assert all(proposal["source"]["request_hash"] == result["input_sha256"]
+               for proposal in result["solver_result"]["proposals"])
 
 
 def test_source_change_rejected(solver_root, monkeypatch):

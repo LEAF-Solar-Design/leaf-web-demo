@@ -50,6 +50,8 @@ _MIGRATION_LEDGER_COLUMNS = {"name", "sha256", "applied_at"}
 # compatibility contract, not a provider choice. Additions stay additive so an
 # older application can continue to read a database prepared by a newer image.
 _REQUIRED_COLUMNS = {
+    "arlo_lab_inputs": {"input_version_id", "org_id", "project_id", "example_id",
+                        "example_version", "input_sha256", "request_json", "created_at"},
     # Immutable versioned template store (card C2-1R / migration 0049). The
     # table, not server/templates.py's in-process catalog, is authoritative
     # for any (template_id, version) it has published.
