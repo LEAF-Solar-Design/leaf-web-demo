@@ -39,7 +39,9 @@ import { DRAW_REASONS, MODIFY_REASONS, clipboardReason, drawReason, forGroup, mo
 
 import { buildCreatePayload, buildEditPayload, readNumber } from './engineSession.js'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
-import { isPointExpression, pointExpressionRefusal, resolvePointExpression } from './pointExpression.js'
+import { isPointExpression } from './pointExpression.js'
+import { resolvePromptInputs } from './promptInputs.js'
+import ScriptPanel from './ScriptPanel.jsx'
 
 // W4f-6: the store's own number reading (a field the store would take as a
 // number), so the outline and the sentence agree; W4f-9 made that reading
@@ -274,6 +276,8 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // would sit third and push the row (it did: the prompt seat moved 148px).
   // App renders the panel at the end and this fills it with the real tools.
   const clipboardSlot = useSlot('cockpit-clipboard-slot')
+  // W4g-7a: the View tab's Script seat, an App cluster the panel portals into.
+  const scriptSlot = useSlot('cockpit-script-slot')
   const show = new Set(Array.isArray(panels) ? panels : [])
 
   // The armed command (provider state, so it outlives the ribbon's tab
@@ -313,37 +317,9 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // until the run commits the numbers, so the record and the chain carry
   // plain numbers, as a pick would. A step is a point step when it asks for
   // exactly two decimal operands.
-  const pointSteps = prompt
-    ? prompt.steps.filter((step) => step.fields.length === 2 && step.fields.every(([, , mode = 'decimal']) => mode === 'decimal'))
-    : []
-  const effective = { ...inputs }
-  let expressionRefusal = ''
-  // The fields whose expression did not resolve: outlined by name (a
-  // malformed pair still parseFloats to its first number, so the numeric
-  // test alone would not blame it).
-  const failedExpression = new Set()
-  let previousPoint = armed && armed.from ? [armed.from[0], armed.from[1]] : null
-  for (const step of pointSteps) {
-    const [[kx], [ky]] = step.fields
-    const isDelta = kx === 'dx'
-    const anchor = isDelta ? [0, 0] : previousPoint
-    const raw = inputs[kx]
-    if (isPointExpression(raw)) {
-      const point = resolvePointExpression(raw, anchor)
-      if (point) { effective[kx] = String(point[0]); effective[ky] = String(point[1]) } else {
-        failedExpression.add(kx)
-        if (!expressionRefusal) expressionRefusal = `${prompt.verb} refused: ${pointExpressionRefusal(raw, anchor)}`
-      }
-    }
-    if (!isDelta) {
-      const px = Number.parseFloat(effective[kx])
-      const py = Number.parseFloat(effective[ky])
-      if (Number.isFinite(px) && Number.isFinite(py)) previousPoint = [px, py]
-    }
-  }
-  const waitingStep = prompt && !expressionRefusal
-    ? prompt.steps.find((step) => step.fields.some(([key, , mode = 'decimal']) => (mode === 'decimal' || mode === 'edge') && String(effective[key] ?? '').trim() === ''))
-    : null
+  // W4g-7a: the resolution lives in promptInputs.js, shared with the script
+  // runner, so a script line and a typed prompt read the same numbers.
+  const { effective, expressionRefusal, failedExpression, waitingStep, pointSteps } = resolvePromptInputs(prompt, inputs, armed && armed.from ? armed.from : null)
   const liveRefusal = prompt && !promptReason && !waitingStep
     ? (expressionRefusal || (armedGroup === 'draw'
       ? buildCreatePayload(armedOp, effective)
@@ -754,6 +730,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
         }),
         clipboardSlot,
       )}
+      {show.has('script') && scriptSlot && createPortal(<ScriptPanel />, scriptSlot)}
       {promptRow && (promptSlot ? createPortal(promptRow, promptSlot) : promptRow)}
     </>
   )

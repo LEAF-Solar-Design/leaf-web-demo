@@ -547,7 +547,9 @@ test.describe('route matrix, rail ON', () => {
     const referenceTail = ['annotation', 'layers', 'block', 'properties', 'groups', 'clipboard']
     expect(groups).toEqual(cadEditOn ? ['draw', 'modify', ...referenceTail] : referenceTail)
     await page.getByRole('tab', { name: 'View' }).click()
-    expect(await groupsOf()).toEqual(['view', 'version', 'layers'])
+    // W4g-7a: the View tab carries the Script seat with the engine on (the
+    // reference's SCRIPT, run from the browser).
+    expect(await groupsOf()).toEqual(cadEditOn ? ['view', 'version', 'layers', 'script'] : ['view', 'version', 'layers'])
     await page.getByRole('tab', { name: 'Manage' }).click()
     groups = await groupsOf()
     expect(groups[0]).toBe('rail')
@@ -715,6 +717,23 @@ test.describe('route matrix, rail ON', () => {
     // View drives the viewer: fit is live with a drawing loaded (View tab).
     await page.getByRole('tab', { name: 'View' }).click()
     await expect(ribbon.locator('[data-tool="fit"]')).toBeEnabled()
+    // W4g-7a SCRIPT on the REAL engine: two command lines run one after the
+    // other through the same words and prompts the command line uses (+2),
+    // and a script whose line the store refuses stops with the line number
+    // and the sentence, drawing nothing.
+    if (cadEditOn && (await page.getByTestId('cad-edit-entity-count').count())) {
+      const countBeforeScript = Number(await page.getByTestId('cad-edit-entity-count').textContent())
+      const script = page.getByLabel('ribbon script', { exact: true })
+      await script.fill('; W4g-7a\nline 600,600 620,600\ncircle 610,610 5')
+      await page.getByTestId('cockpit-script-run').click()
+      await expect(page.getByTestId('cockpit-script-status')).toHaveText('Script ran 2 commands.', { timeout: 120_000 })
+      await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeScript + 2))
+      test.info().annotations.push({ type: 'script', description: `script ran two lines on the engine (${countBeforeScript} -> ${countBeforeScript + 2})` })
+      await script.fill('circle 0,0 abc')
+      await page.getByTestId('cockpit-script-run').click()
+      await expect(page.getByTestId('cockpit-script-status')).toHaveText(/^Script stopped at line 1: Circle refused/, { timeout: 20_000 })
+      await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeScript + 2))
+    }
     // Version: the toolbar's exact gates, each disabled control naming why.
     const undo = ribbon.locator('[data-tool="undo"]')
     if (await undo.isDisabled()) expect(await undo.getAttribute('aria-label')).toMatch(/\(unavailable: /)

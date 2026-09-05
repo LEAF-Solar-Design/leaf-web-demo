@@ -2582,6 +2582,13 @@ export default function App() {
       id: 'clipboard', label: 'Clipboard', kind: 'group', tools: [],
       extra: <div id="cockpit-clipboard-slot" className="ribbon-cluster-tools" />,
     }
+    // W4g-7a: the View tab's Script seat (the reference's SCRIPT): an empty
+    // cluster carrying a slot div the engine consumer portals the panel into,
+    // present only with the flag on (the panel drives the engine session).
+    const scriptSeat = {
+      id: 'script', label: 'Script', kind: 'group', tools: [],
+      extra: <div id="cockpit-script-slot" className="ribbon-cluster-tools" />,
+    }
     // The reference's Draw tab: Draw, Modify, Clipboard (engine children,
     // rendered first), then Annotation, Layers, Block, Properties, Groups.
     // NOTE: the reference puts Clipboard LAST. The ribbon renders engine
@@ -2601,7 +2608,7 @@ export default function App() {
         ENV_CAD_EDIT ? clipboardSeat : clipboardOff, ...(tabFamilies.draw || [])],
       insert: [block, ...(tabFamilies.insert || [])],
       annotate: [annotation, ...(tabFamilies.annotate || [])],
-      view: [view, version, layers, ...(tabFamilies.view || [])],
+      view: [view, version, layers, ...(ENV_CAD_EDIT ? [scriptSeat] : []), ...(tabFamilies.view || [])],
       manage: [...rail, ...families, ...(tabFamilies.manage || []), author],
     }
     const [undo, redo] = version.tools
@@ -3169,7 +3176,7 @@ export default function App() {
                 <EngineRibbonClusters
                   importOpen={importOpen}
                   onToggleImport={() => setImportOpen((o) => !o)}
-                  panels={ribbonTab === 'insert' ? ['file'] : ribbonTab === 'draw' ? ['draw', 'modify', 'annotation', 'clipboard'] : []}
+                  panels={ribbonTab === 'insert' ? ['file'] : ribbonTab === 'draw' ? ['draw', 'modify', 'annotation', 'clipboard'] : ribbonTab === 'view' ? ['script'] : []}
                 />
               )}
               {/* W4f slice B: the command line's typed words (LINE, C, MOVE ...)
