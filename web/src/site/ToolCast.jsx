@@ -1650,6 +1650,23 @@ export default function ToolCast({
       </div>
   )
 
+  // Standardization slice 8c. Precomputed like commandBarBlock above: the
+  // <SurfaceFrame> tag stays compact so the sign-out pin (a bounded 0-2000
+  // char span to `signedIn=`) keeps holding as slots accrete.
+  const integrationsBlock = {
+    mock: transportMock,
+    servers: mcpRegistry.servers,
+    loading: mcpRegistry.loading,
+    busy: mcpRegistry.busy,
+    error: mcpRegistry.error,
+    open: linkServiceOpen,
+    onToggle: setLinkServiceOpen,
+    onRegister: mcpRegistry.register,
+    onConnect: mcpRegistry.connect,
+    onHealth: mcpRegistry.health,
+    onUnlink: mcpRegistry.unlink,
+  }
+
   return (
     // Slice 4a: THE SURFACE FRAME (site/SurfaceFrame.jsx). Local names are
     // aliased HERE, at the call boundary (platformSession -> session,
@@ -1702,19 +1719,7 @@ export default function ToolCast({
           setLeftView('operator')
         },
       }}
-      integrations={{
-        mock: transportMock,
-        servers: mcpRegistry.servers,
-        loading: mcpRegistry.loading,
-        busy: mcpRegistry.busy,
-        error: mcpRegistry.error,
-        open: linkServiceOpen,
-        onToggle: setLinkServiceOpen,
-        onRegister: mcpRegistry.register,
-        onConnect: mcpRegistry.connect,
-        onHealth: mcpRegistry.health,
-        onUnlink: mcpRegistry.unlink,
-      }}
+      integrations={integrationsBlock}
       signedIn={isSignedIn()}
       onSignOut={platformSession.actions.signOut}
     >
