@@ -1344,6 +1344,7 @@ def build_suites() -> List[Suite]:
               # ephemeral CodeBuild runner it reads `web app`, and a change in
               # either direction must come back through that test.
               # 25 -> 26: the run-URL extraction is guarded (|| true) so a gh that prints no run URL falls back to the mark scan instead of aborting the loop before the next service.
+              # (2026-09-05) STAGE_SERVICES reads `web` again: the app prewarm was refused by the deploy workflow's posture gate; the pin names the gate and the way back.
               _py_pytest("test_prewarm_staging_cutover_workflow.py"), 26),
         Suite("platform-release-manifest",
               "scripts test_platform_release_manifest.py", "pytest",
