@@ -308,6 +308,12 @@
     },
     "array-polar": {
       "term": "polar array"
+    },
+    "fillet": {
+      "term": "fillet"
+    },
+    "chamfer": {
+      "term": "chamfer"
     }
   }
 }

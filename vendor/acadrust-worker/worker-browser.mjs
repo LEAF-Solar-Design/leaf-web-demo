@@ -164,89 +164,139 @@ const CREATE_OPS = Object.freeze({
   createText: (doc, p) => doc.createText(
     Number(p.x), Number(p.y), Number(p.height), Number(p.rotationDeg), String(p.text ?? ''), String(p.layer ?? '')),
 })
+// The op string off the boundary is looked up in a Map of the table's OWN
+// entries, never as a computed property: a prototype name such as
+// `constructor` finds nothing, and no call is ever made through a name the
+// boundary chose (CodeQL js/unvalidated-dynamic-method-call).
+const CREATE_TABLE = new Map(Object.entries(CREATE_OPS))
+
+// W4g-6: the most steps one `batch` carries. FILLET and CHAMFER cut two
+// entities and create one; a TRIM that splits keeps one and creates one.
+// Mirrored by the store's MAX_BATCH_STEPS (intersect.js).
+const MAX_BATCH_STEPS = 4
+
+/**
+ * One op against the held document. Returns { createdHandle, createdHandles }
+ * (null when the op made nothing) or THROWS the typed reason. Every wrapper
+ * validates before it writes, so a throw means the document is untouched.
+ * Shared by the single-op path and the batch, so the two can never drift.
+ */
+function applyOne(doc, op, payload) {
+  const p = payload && typeof payload === 'object' ? payload : {}
+  const create = CREATE_TABLE.get(op)
+  if (typeof create === 'function') {
+    if (typeof doc[op] !== 'function') throw new Error(`engine_lacks_create:${op}`)
+    return { createdHandle: handleId(create(doc, p), 'create_returned_no_handle'), createdHandles: null }
+  }
+  const index = entityIndex(doc, p)
+  if (index === null) throw new Error('bad_entity_id')
+  const need = (fn) => { if (typeof doc[fn] !== 'function') throw new Error(`engine_lacks_op:${op}`) }
+  let createdHandle = null
+  let createdHandles = null
+  if (op === 'delete') doc.deleteEntity(index)
+  else if (op === 'move') doc.translateEntity(index, Number(p.dx), Number(p.dy))
+  else if (op === 'moveVertex') doc.moveVertex(index, Number(p.vertexIndex), Number(p.dx), Number(p.dy))
+  else if (op === 'addVertex') doc.addVertexAfter(index, Number(p.vertexIndex), Number(p.x), Number(p.y))
+  else if (op === 'deleteVertex') doc.deleteVertex(index, Number(p.vertexIndex))
+  else if (op === 'setLayer') doc.setEntityLayer(index, String(p.layer ?? ''))
+  // W4g-4: the reference's Modify verbs the crate carries. COPY,
+  // MIRROR-with-source and EXPLODE create: their new handle(s) ride the
+  // same createdId leg as the Draw group so the selection lands on what
+  // was made. Each wrapper refuses before it writes.
+  else if (op === 'copy') {
+    need('copyEntity')
+    createdHandle = handleId(doc.copyEntity(index, Number(p.dx), Number(p.dy)), 'create_returned_no_handle')
+  } else if (op === 'mirror') {
+    need('mirrorEntity')
+    const keep = p.keep === true
+    const made = doc.mirrorEntity(index, Number(p.x1), Number(p.y1), Number(p.x2), Number(p.y2), keep)
+    if (keep) createdHandle = handleId(made, 'create_returned_no_handle')
+  } else if (op === 'rotate') {
+    need('rotateEntity')
+    doc.rotateEntity(index, Number(p.cx), Number(p.cy), Number(p.deg))
+  } else if (op === 'scale') {
+    need('scaleEntity')
+    doc.scaleEntity(index, Number(p.cx), Number(p.cy), Number(p.factor))
+  } else if (op === 'explode') {
+    need('explodeEntity')
+    const parts = doc.explodeEntity(index)
+    if (!Array.isArray(parts) || parts.length === 0) throw new Error('explode_returned_no_parts')
+    createdHandle = handleId(parts[0], 'create_returned_no_handle')
+    createdHandles = parts.map((h) => handleId(h, 'create_returned_no_handle'))
+  } else if (op === 'arrayRect' || op === 'arrayPolar') {
+    // ONE engine op for the whole array: every applied edit re-parses the
+    // document and hands the bytes back, so N client-side copies would
+    // cost N round trips and N undo steps. The wrapper bounds the count
+    // and refuses before it writes.
+    need(op === 'arrayRect' ? 'arrayRectEntity' : 'arrayPolarEntity')
+    const made = op === 'arrayRect'
+      ? doc.arrayRectEntity(index, Number(p.rows), Number(p.cols), Number(p.rowGap), Number(p.colGap))
+      : doc.arrayPolarEntity(index, Number(p.count), Number(p.cx), Number(p.cy), Number(p.totalDeg))
+    if (!Array.isArray(made) || made.length === 0) throw new Error('array_returned_no_copies')
+    createdHandle = handleId(made[0], 'create_returned_no_handle')
+    createdHandles = made.map((h) => handleId(h, 'create_returned_no_handle'))
+  } else if (op === 'setVertices') {
+    // W4g-6: an entity's own geometry replaced (a LINE's two points, a
+    // polyline's list and closed flag); the wrapper bounds and refuses first.
+    need('setVertices')
+    doc.setVertices(index, Float64Array.from(Array.isArray(p.points) ? p.points : []), Boolean(p.closed))
+  } else if (op === 'setArc') {
+    need('setArc')
+    doc.setArc(index, Number(p.cx), Number(p.cy), Number(p.radius), Number(p.startDeg), Number(p.endDeg))
+  } else throw new Error(`unknown_op:${op}`)
+  return { createdHandle, createdHandles }
+}
 
 async function applyEdit(engine, message) {
   const { op, payload } = message
   if (!current) return refused(op, 'no_document_loaded')
   const doc = current.doc
   let createdHandle = null
-  // Every op that makes MORE than one entity (explode's parts, an
-  // array's copies) reports them here, in document order.
+  // Every op that makes MORE than one entity (explode's parts, an array's
+  // copies, a batch's creates) reports them here, in document order.
   let createdHandles = null
-  const create = CREATE_OPS[op]
-  if (create) {
-    if (typeof doc[op] !== 'function') return refused(op, `engine_lacks_create:${op}`)
-    try {
-      createdHandle = handleId(
-        create(doc, payload && typeof payload === 'object' ? payload : {}),
-        'create_returned_no_handle',
-      )
-    } catch (error) {
-      // The wrapper validates before it writes: a refusal here means the
-      // document was NOT mutated. Surface the typed reason string as-is.
-      current = null
-      return refused(op, error instanceof Error ? error.message : String(error))
+  if (op === 'batch') {
+    // W4g-6: one verb, several steps, ONE turn. The steps run in order
+    // against the held document, each addressed by handle (so a delete
+    // inside the batch cannot skew a later step); the bytes before the
+    // first step are the snapshot a refusal restores. So a batch is atomic,
+    // all of it or none, and costs exactly one write-back (one undo step)
+    // either way.
+    const steps = Array.isArray(payload?.steps) ? payload.steps : null
+    if (!steps || steps.length === 0) return refused(op, 'batch_empty')
+    if (steps.length > MAX_BATCH_STEPS) return refused(op, 'batch_too_many_steps')
+    const snapshot = engine.writeDxf(doc)
+    const restore = () => { current = { documentId: current.documentId, doc: engine.parseDxf(snapshot) } }
+    const made = []
+    for (let i = 0; i < steps.length; i += 1) {
+      const step = steps[i] && typeof steps[i] === 'object' ? steps[i] : {}
+      const stepOp = String(step.op ?? '')
+      if (stepOp === 'batch') { restore(); return refused(op, `step_${i}_batch_nested`) }
+      try {
+        const r = applyOne(doc, stepOp, step.payload)
+        if (r.createdHandle !== null) made.push(r.createdHandle)
+        if (r.createdHandles !== null) for (const h of r.createdHandles) made.push(h)
+      } catch (error) {
+        restore()
+        return refused(op, `step_${i}_${stepOp}:${error instanceof Error ? error.message : String(error)}`)
+      }
     }
+    // The selection lands on the LAST entity a batch made (a fillet's arc,
+    // a chamfer's line, a split's far part); every one rides createdIds.
+    if (made.length) { createdHandle = made[made.length - 1]; createdHandles = made }
   } else {
-    let index
     try {
-      index = entityIndex(doc, payload)
+      const r = applyOne(doc, op, payload)
+      createdHandle = r.createdHandle
+      createdHandles = r.createdHandles
     } catch (error) {
-      return refused(op, error instanceof Error ? error.message : String(error))
-    }
-    if (index === null) return refused(op, 'bad_entity_id')
-    try {
-      if (op === 'delete') doc.deleteEntity(index)
-      else if (op === 'move') doc.translateEntity(index, Number(payload.dx), Number(payload.dy))
-      else if (op === 'moveVertex') doc.moveVertex(index, Number(payload.vertexIndex), Number(payload.dx), Number(payload.dy))
-      else if (op === 'addVertex') doc.addVertexAfter(index, Number(payload.vertexIndex), Number(payload.x), Number(payload.y))
-      else if (op === 'deleteVertex') doc.deleteVertex(index, Number(payload.vertexIndex))
-      else if (op === 'setLayer') doc.setEntityLayer(index, String(payload.layer ?? ''))
-      // W4g-4: the reference's Modify verbs the crate carries. COPY,
-      // MIRROR-with-source and EXPLODE create: their new handle(s) ride the
-      // same createdId leg as the Draw group so the selection lands on what
-      // was made. Each wrapper refuses before it writes.
-      else if (op === 'copy') {
-        if (typeof doc.copyEntity !== 'function') return refused(op, `engine_lacks_op:${op}`)
-        createdHandle = handleId(doc.copyEntity(index, Number(payload.dx), Number(payload.dy)), 'create_returned_no_handle')
-      } else if (op === 'mirror') {
-        if (typeof doc.mirrorEntity !== 'function') return refused(op, `engine_lacks_op:${op}`)
-        const keep = payload.keep === true
-        const made = doc.mirrorEntity(index, Number(payload.x1), Number(payload.y1), Number(payload.x2), Number(payload.y2), keep)
-        if (keep) createdHandle = handleId(made, 'create_returned_no_handle')
-      } else if (op === 'rotate') {
-        if (typeof doc.rotateEntity !== 'function') return refused(op, `engine_lacks_op:${op}`)
-        doc.rotateEntity(index, Number(payload.cx), Number(payload.cy), Number(payload.deg))
-      } else if (op === 'scale') {
-        if (typeof doc.scaleEntity !== 'function') return refused(op, `engine_lacks_op:${op}`)
-        doc.scaleEntity(index, Number(payload.cx), Number(payload.cy), Number(payload.factor))
-      } else if (op === 'explode') {
-        if (typeof doc.explodeEntity !== 'function') return refused(op, `engine_lacks_op:${op}`)
-        const parts = doc.explodeEntity(index)
-        if (!Array.isArray(parts) || parts.length === 0) return refused(op, 'explode_returned_no_parts')
-        createdHandle = handleId(parts[0], 'create_returned_no_handle')
-        createdHandles = parts.map((h) => handleId(h, 'create_returned_no_handle'))
-      } else if (op === 'arrayRect' || op === 'arrayPolar') {
-        // ONE engine op for the whole array: every applied edit re-parses the
-        // document and hands the bytes back, so N client-side copies would
-        // cost N round trips and N undo steps. The wrapper bounds the count
-        // and refuses before it writes.
-        const fn = op === 'arrayRect' ? 'arrayRectEntity' : 'arrayPolarEntity'
-        if (typeof doc[fn] !== 'function') return refused(op, `engine_lacks_op:${op}`)
-        const made = op === 'arrayRect'
-          ? doc.arrayRectEntity(index, Number(payload.rows), Number(payload.cols), Number(payload.rowGap), Number(payload.colGap))
-          : doc.arrayPolarEntity(index, Number(payload.count), Number(payload.cx), Number(payload.cy), Number(payload.totalDeg))
-        if (!Array.isArray(made) || made.length === 0) return refused(op, 'array_returned_no_copies')
-        createdHandle = handleId(made[0], 'create_returned_no_handle')
-        createdHandles = made.map((h) => handleId(h, 'create_returned_no_handle'))
-      } else return refused(op, `unknown_op:${op}`)
-    } catch (error) {
-      // The wrapper validates before it writes, so a refusal here means the
-      // document was NOT mutated. Surface the typed reason string as-is.
+      // Every wrapper validates before it writes, so a refusal here means the
+      // document was NOT mutated and stays held (a refused create used to
+      // drop it, which left the store believing in a document the worker no
+      // longer had). Surface the typed reason string as-is.
       return refused(op, error instanceof Error ? error.message : String(error))
     }
   }
-
   // Write-back leg: serialize, reparse, report from the REPARSE — the UI
   // renders what the written bytes actually say.
   const written = engine.writeDxf(doc)

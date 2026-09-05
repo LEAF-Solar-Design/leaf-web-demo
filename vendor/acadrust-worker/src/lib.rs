@@ -455,6 +455,101 @@ impl ParsedDxf {
         }
     }
 
+    // ----------------------------------------------------------------------
+    // W4g-6: the two geometry primitives the intersection verbs (TRIM,
+    // EXTEND, FILLET, CHAMFER) lower to. The browser computes the new shape
+    // from the crossing; the engine only replaces an entity's OWN geometry,
+    // so one verb is one batch of these plus the existing creates and
+    // deletes. Both refuse BEFORE the document is touched.
+    // ----------------------------------------------------------------------
+
+    /// Replaces the geometry of the entity at `index` with the flat
+    /// `[x0, y0, x1, y1, ...]` list: a LINE takes exactly two distinct
+    /// points, a LWPOLYLINE / POLYLINE2D takes 2..MAX_CREATED_VERTICES and
+    /// the closed flag. Bulges and widths the old vertices carried go with
+    /// them (the verbs that call this only ever produce straight runs).
+    fn set_vertices_core(&mut self, index: usize, points: &[f64], closed: bool) -> Result<(), Refusal> {
+        if points.len() % 2 != 0 {
+            return refuse("points_not_pairs");
+        }
+        let count = points.len() / 2;
+        if count < 2 {
+            return refuse("polyline_needs_two_vertices");
+        }
+        if count > MAX_CREATED_VERTICES {
+            return refuse("polyline_too_many_vertices");
+        }
+        if !all_finite(points) {
+            return refuse("coordinate_not_finite");
+        }
+        match self.entity_mut(index)? {
+            EntityType::Line(line) => {
+                if count != 2 {
+                    return refuse("line_has_fixed_endpoints");
+                }
+                if points[0] == points[2] && points[1] == points[3] {
+                    return refuse("line_zero_length");
+                }
+                line.start = Vector3::new(points[0], points[1], line.start.z);
+                line.end = Vector3::new(points[2], points[3], line.end.z);
+                Ok(())
+            }
+            EntityType::LwPolyline(poly) => {
+                poly.vertices = points
+                    .chunks_exact(2)
+                    .map(|p| acadrust::entities::LwVertex::from_coords(p[0], p[1]))
+                    .collect();
+                poly.is_closed = closed;
+                Ok(())
+            }
+            EntityType::Polyline2D(poly) => {
+                let elevation = poly.elevation;
+                poly.vertices = points
+                    .chunks_exact(2)
+                    .map(|p| acadrust::entities::Vertex2D::new(Vector3::new(p[0], p[1], elevation)))
+                    .collect();
+                poly.flags.set_closed(closed);
+                Ok(())
+            }
+            EntityType::Circle(_) | EntityType::Arc(_) => refuse("entity_kind_has_no_vertex_list"),
+            _ => refuse("entity_kind_not_editable"),
+        }
+    }
+
+    /// Replaces an ARC's centre, radius and sweep (degrees, counter-clockwise
+    /// from start to end, as the DXF stores them). Refuses a non-positive
+    /// radius, a zero sweep, and every other kind (a CIRCLE has no sweep to
+    /// set; a TRIM of a circle deletes it and creates the arc).
+    fn set_arc_core(
+        &mut self,
+        index: usize,
+        cx: f64,
+        cy: f64,
+        radius: f64,
+        start_deg: f64,
+        end_deg: f64,
+    ) -> Result<(), Refusal> {
+        if !all_finite(&[cx, cy, radius, start_deg, end_deg]) {
+            return refuse("coordinate_not_finite");
+        }
+        if radius <= 0.0 {
+            return refuse("radius_not_positive");
+        }
+        if ((end_deg - start_deg) % 360.0).abs() < 1e-9 {
+            return refuse("arc_sweep_zero");
+        }
+        match self.entity_mut(index)? {
+            EntityType::Arc(a) => {
+                a.center = Vector3::new(cx, cy, a.center.z);
+                a.radius = radius;
+                a.start_angle = start_deg.to_radians();
+                a.end_angle = end_deg.to_radians();
+                Ok(())
+            }
+            EntityType::Circle(_) => refuse("circle_has_no_sweep"),
+            _ => refuse("entity_kind_not_an_arc"),
+        }
+    }
     fn set_entity_layer_core(&mut self, index: usize, layer: &str) -> Result<(), Refusal> {
         let trimmed = layer.trim();
         if trimmed.is_empty() {
@@ -998,6 +1093,29 @@ impl ParsedDxf {
 
     /// W4g-4 COPY: a displaced clone of the entity at `index`; returns the
     /// new entity's handle. Refuses a non-finite delta and read-only kinds.
+    /// W4g-6: replaces the geometry of a LINE (two points) or a polyline
+    /// (2..MAX_CREATED_VERTICES points plus the closed flag) from a flat
+    /// `[x0, y0, x1, y1, ...]` list. Refuses before it writes.
+    #[wasm_bindgen(js_name = setVertices)]
+    pub fn set_vertices(&mut self, index: usize, points: &[f64], closed: bool) -> Result<(), JsValue> {
+        self.set_vertices_core(index, points, closed).map_err(js_err)
+    }
+
+    /// W4g-6: replaces an ARC's centre, radius and sweep (degrees). Refuses
+    /// before it writes.
+    #[wasm_bindgen(js_name = setArc)]
+    pub fn set_arc(
+        &mut self,
+        index: usize,
+        cx: f64,
+        cy: f64,
+        radius: f64,
+        start_deg: f64,
+        end_deg: f64,
+    ) -> Result<(), JsValue> {
+        self.set_arc_core(index, cx, cy, radius, start_deg, end_deg).map_err(js_err)
+    }
+
     #[wasm_bindgen(js_name = copyEntity)]
     pub fn copy_entity(&mut self, index: usize, dx: f64, dy: f64) -> Result<String, JsValue> {
         self.copy_entity_core(index, dx, dy).map_err(js_err)
@@ -1692,6 +1810,86 @@ line two", "")), "text_control_character");
         // Exactly the bound is accepted.
         let max = "b".repeat(MAX_TEXT_CHARS);
         assert!(doc.create_text_core(0.0, 0.0, 1.0, 0.0, &max, "").is_ok());
+    }
+
+    // ---- W4g-6: the geometry primitives behind TRIM / EXTEND / FILLET / CHAMFER
+
+    /// The written bytes: a refusal must leave them identical, not merely the
+    /// handles and kinds.
+    fn engine_bytes(doc: &ParsedDxf) -> Vec<u8> {
+        DxfWriter::new(&doc.inner).write_to_vec().expect("writer serializes the document")
+    }
+
+    #[test]
+    fn w4g6_set_vertices_rewrites_a_line_and_a_polyline_and_survives_rewrite() {
+        let mut doc = empty_doc();
+        doc.create_line_core(0.0, 0.0, 10.0, 0.0, "A").unwrap();
+        doc.create_polyline_core(&[0.0, 0.0, 10.0, 0.0, 10.0, 10.0, 0.0, 10.0], true, "B").unwrap();
+        let before = handles(&doc);
+        // A TRIM of the line at x = 4 keeps [0, 4].
+        doc.set_vertices_core(0, &[0.0, 0.0, 4.0, 0.0], false).expect("a line takes two points");
+        // A TRIM that opens the square at its last segment keeps three corners.
+        doc.set_vertices_core(1, &[0.0, 0.0, 10.0, 0.0, 10.0, 10.0], false).expect("a polyline takes a list");
+        let entities: Vec<&EntityType> = doc.inner.entities().collect();
+        assert_eq!(vertices_of(entities[0]), vec![[0.0, 0.0, 0.0], [4.0, 0.0, 0.0]]);
+        assert_eq!(vertices_of(entities[1]).len(), 3);
+        assert!(!closed_of(entities[1]), "the closed flag follows the call");
+        assert_eq!(entities[1].common().layer, "B", "the layer is not geometry");
+        assert_eq!(handles(&doc), before, "geometry replacement keeps the handles");
+        let back = rewrite(&doc);
+        let again: Vec<&EntityType> = back.inner.entities().collect();
+        assert_eq!(vertices_of(again[0]), vec![[0.0, 0.0, 0.0], [4.0, 0.0, 0.0]]);
+        assert_eq!(vertices_of(again[1]).len(), 3);
+        assert!(!closed_of(again[1]));
+        // And back to closed, four corners: the flag is settable both ways.
+        let mut back = back;
+        back.set_vertices_core(1, &[0.0, 0.0, 10.0, 0.0, 10.0, 10.0, 0.0, 10.0], true).unwrap();
+        assert!(closed_of(back.inner.entities().nth(1).unwrap()));
+    }
+
+    #[test]
+    fn w4g6_set_vertices_refuses_before_touching_the_document() {
+        let mut doc = empty_doc();
+        doc.create_line_core(0.0, 0.0, 10.0, 0.0, "A").unwrap();
+        doc.create_circle_core(5.0, 5.0, 2.0, "A").unwrap();
+        doc.create_polyline_core(&[0.0, 0.0, 1.0, 0.0, 1.0, 1.0], false, "A").unwrap();
+        let snapshot = engine_bytes(&doc);
+        assert_eq!(code(doc.set_vertices_core(0, &[0.0, 0.0, 4.0], false)), "points_not_pairs");
+        assert_eq!(code(doc.set_vertices_core(0, &[0.0, 0.0], false)), "polyline_needs_two_vertices");
+        assert_eq!(code(doc.set_vertices_core(0, &[0.0, 0.0, f64::NAN, 0.0], false)), "coordinate_not_finite");
+        assert_eq!(code(doc.set_vertices_core(0, &[0.0, 0.0, 1.0, 0.0, 2.0, 0.0], false)), "line_has_fixed_endpoints");
+        assert_eq!(code(doc.set_vertices_core(0, &[3.0, 3.0, 3.0, 3.0], false)), "line_zero_length");
+        assert_eq!(code(doc.set_vertices_core(1, &[0.0, 0.0, 4.0, 0.0], false)), "entity_kind_has_no_vertex_list");
+        let too_many: Vec<f64> = vec![0.0; (MAX_CREATED_VERTICES + 1) * 2];
+        assert_eq!(code(doc.set_vertices_core(2, &too_many, false)), "polyline_too_many_vertices");
+        assert_eq!(code(doc.set_vertices_core(9, &[0.0, 0.0, 1.0, 1.0], false)), "entity_index_out_of_range");
+        assert_eq!(engine_bytes(&doc), snapshot, "every refusal leaves the document byte-identical");
+    }
+
+    #[test]
+    fn w4g6_set_arc_rewrites_and_refuses() {
+        let mut doc = empty_doc();
+        doc.create_arc_core(0.0, 0.0, 5.0, 0.0, 90.0, "A").unwrap();
+        doc.create_circle_core(0.0, 0.0, 5.0, "A").unwrap();
+        doc.create_line_core(0.0, 0.0, 1.0, 1.0, "A").unwrap();
+        // A TRIM that keeps the arc's first 30 degrees, moved and shrunk.
+        doc.set_arc_core(0, 1.0, 2.0, 3.0, 10.0, 40.0).expect("an arc takes a new sweep");
+        let a = doc.inner.entities().next().unwrap();
+        assert_eq!(vertices_of(a), vec![[1.0, 2.0, 0.0]]);
+        assert!(near(radius_of(a).unwrap(), 3.0));
+        let (s, e) = sweep_deg_of(a).unwrap();
+        assert!(near(s, 10.0) && near(e, 40.0), "degrees in, degrees out: {} {}", s, e);
+        let back = rewrite(&doc);
+        let (s, e) = sweep_deg_of(back.inner.entities().next().unwrap()).unwrap();
+        assert!(near(s, 10.0) && near(e, 40.0));
+        let snapshot = engine_bytes(&doc);
+        assert_eq!(code(doc.set_arc_core(0, 0.0, 0.0, 0.0, 0.0, 90.0)), "radius_not_positive");
+        assert_eq!(code(doc.set_arc_core(0, 0.0, 0.0, 1.0, 30.0, 390.0)), "arc_sweep_zero");
+        assert_eq!(code(doc.set_arc_core(0, f64::INFINITY, 0.0, 1.0, 0.0, 90.0)), "coordinate_not_finite");
+        assert_eq!(code(doc.set_arc_core(1, 0.0, 0.0, 1.0, 0.0, 90.0)), "circle_has_no_sweep");
+        assert_eq!(code(doc.set_arc_core(2, 0.0, 0.0, 1.0, 0.0, 90.0)), "entity_kind_not_an_arc");
+        assert_eq!(code(doc.set_arc_core(9, 0.0, 0.0, 1.0, 0.0, 90.0)), "entity_index_out_of_range");
+        assert_eq!(engine_bytes(&doc), snapshot, "every refusal leaves the document byte-identical");
     }
 
     #[test]

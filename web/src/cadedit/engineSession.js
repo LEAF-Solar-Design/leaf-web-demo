@@ -40,6 +40,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { EngineBoundary } from '../cad/engineWorker.js'
 import { SESSION_ERROR } from './engineSessionErrors.js'
 import { offsetEntity } from './offset.js'
+import { MAX_BATCH_STEPS, MAX_INTERSECT_POINTS, chamferLines, extendEntity, filletLines, trimEntity } from './intersect.js'
 import { clipboardRecord, describeRecord, pasteOp } from './clipboard.js'
 import { diffPlan } from './mutationDiff.js'
 
@@ -175,7 +176,16 @@ export const MAX_TEXT_CHARS = 1024
 
 export const MAX_ARRAY_COPIES = 1000
 
-export const CREATING_EDITS = Object.freeze(['copy', 'mirror', 'explode', 'arrayRect', 'arrayPolar'])
+export const CREATING_EDITS = Object.freeze(['copy', 'mirror', 'explode', 'arrayRect', 'arrayPolar', 'batch'])
+// W4g-6: the verbs whose geometry is planned in the browser (intersect.js)
+// and applied by the engine as ONE batch. `edge` names the second entity
+// the prompt asks for; `point` names the point on the selection.
+export const INTERSECT_VERBS = Object.freeze({
+  trim: { name: 'Trim', edge: 'cutting edge', point: 'the point on the part to remove:' },
+  extend: { name: 'Extend', edge: 'boundary edge', point: 'the point near the end to extend:' },
+  fillet: { name: 'Fillet', edge: 'second object', point: 'the point on the first line:' },
+  chamfer: { name: 'Chamfer', edge: 'second line', point: 'the point on the first line:' },
+})
 // RECTANG is a closed four-point polyline to the engine: the store lowers it
 // before the post, so the worker's op vocabulary is unchanged.
 const WORKER_OP = Object.freeze({ createRectangle: 'createPolyline' })
@@ -275,12 +285,112 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
 }
 
 /**
+ * W4g-6: the batch an intersection verb lowers to, from the session's own
+ * entity list and the prompt's operands: `{ steps }` in intersect.js's terms
+ * or `{ refusal }`. Pure so a row can drive it without a worker.
+ */
+export function planIntersectVerb(op, session, inputs = {}) {
+  const verb = INTERSECT_VERBS[op]
+  if (!verb) return { refusal: `Edit refused: unknown operation ${op}.` }
+  const { entities, selectedId } = session
+  const checked = buildEditPayload(op, selectedId, inputs)
+  if (checked.refusal) return { refusal: checked.refusal }
+  const target = (entities || []).find((candidate) => candidate.id === selectedId)
+  if (!target) return { refusal: `${verb.name} refused: the selected entity is no longer in the document.` }
+  const edge = (entities || []).find((candidate) => candidate.id === checked.payload.edge)
+  if (!edge) return { refusal: `${verb.name} refused: the ${verb.edge} is no longer in the document.` }
+  // The typed path reaches exactly the candidates a canvas pick can name: a
+  // read-only entity is never one (FILLET and CHAMFER rewrite the edge).
+  if (edge.editable === false) return { refusal: `${verb.name} refused: the ${verb.edge} is read-only in the browser engine.` }
+  const { x, y } = checked.payload
+  if (op === 'trim') return trimEntity(target, edge, x, y)
+  if (op === 'extend') return extendEntity(target, edge, x, y)
+  if (op === 'fillet') return filletLines(target, edge, fmtDelta(inputs.r), x, y, fmtDelta(inputs.ex), fmtDelta(inputs.ey))
+  return chamferLines(target, edge, fmtDelta(inputs.d1), fmtDelta(inputs.d2), x, y, fmtDelta(inputs.ex), fmtDelta(inputs.ey))
+}
+
+/**
+ * W4g-6: intersect.js's steps lowered to the worker's payloads, every one
+ * validated by the SAME builders a single op goes through (a create through
+ * buildCreatePayload; a geometry replacement bounded here). `{ steps }` of
+ * `{ op, payload }`, or `{ refusal }` naming the first bad step.
+ */
+export function lowerSteps(steps) {
+  if (!Array.isArray(steps) || steps.length === 0) return { refusal: 'Edit refused: the plan has no steps.' }
+  if (steps.length > MAX_BATCH_STEPS) return { refusal: `Edit refused: the plan has more than ${MAX_BATCH_STEPS} steps.` }
+  const lowered = []
+  for (const step of steps) {
+    const op = String(step?.op ?? '')
+    if (CREATE_OPS.includes(op)) {
+      const { payload, refusal } = buildCreatePayload(op, step.inputs || {})
+      if (refusal) return { refusal }
+      lowered.push({ op, payload })
+      continue
+    }
+    const entityId = String(step?.entityId ?? '')
+    if (!entityId) return { refusal: `Edit refused: step ${op} names no entity.` }
+    if (op === 'delete') {
+      lowered.push({ op, payload: { entityId } })
+    } else if (op === 'setVertices') {
+      // A trim keeps at most the entity's own points plus its two cut points,
+      // so the bound is the kernel's, plus two, not the create bound.
+      const pts = Array.isArray(step.points) ? step.points : null
+      if (!pts || pts.length < 2 || pts.length > MAX_INTERSECT_POINTS + 2) return { refusal: `Edit refused: a geometry step needs 2 to ${MAX_INTERSECT_POINTS + 2} points.` }
+      const flat = []
+      for (const pt of pts) {
+        if (!Array.isArray(pt) || !Number.isFinite(pt[0]) || !Number.isFinite(pt[1])) return { refusal: 'Edit refused: a geometry step has a point that is not a number.' }
+        flat.push(pt[0], pt[1])
+      }
+      lowered.push({ op, payload: { entityId, points: flat, closed: step.closed === true } })
+    } else if (op === 'setArc') {
+      const [cx, cy, radius, startDeg, endDeg] = [step.x, step.y, step.r, step.a0, step.a1].map(fmtDelta)
+      if ([cx, cy, radius, startDeg, endDeg].some((v) => v === null)) return { refusal: 'Edit refused: an arc step has a value that is not a number.' }
+      if (radius <= 0) return { refusal: 'Edit refused: an arc step needs a radius greater than 0.' }
+      if ((endDeg - startDeg) % 360 === 0) return { refusal: 'Edit refused: an arc step needs a start and end that differ.' }
+      lowered.push({ op, payload: { entityId, cx, cy, radius, startDeg, endDeg } })
+    } else return { refusal: `Edit refused: unknown step ${op}.` }
+  }
+  return { steps: lowered }
+}
+
+/**
  * Edit-input validation, refused here rather than at the engine. Returns
  * either `{ payload }` or `{ refusal }` with the exact operator-facing
  * sentence — never both, never a throw.
  */
-export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer, x1, y1, x2, y2, keep, cx, cy, deg, factor, rows, cols, rowGap, colGap, count, totalDeg } = {}) {
+export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer, x1, y1, x2, y2, keep, cx, cy, deg, factor, rows, cols, rowGap, colGap, count, totalDeg, edge, ex, ey, x, y, r, d1, d2 } = {}) {
   const payload = { entityId }
+  // W4g-6: the intersection verbs validate their OPERANDS here, so the
+  // prompt holds Run with the sentence as the drafter types; whether the
+  // geometry works out (a crossing, a corner) is intersect.js's answer at
+  // run time, as OFFSET's is. The payload is never posted as-is: the run
+  // path plans a batch from the two entities.
+  if (INTERSECT_VERBS[op]) {
+    const verb = INTERSECT_VERBS[op]
+    const edgeId = String(edge ?? '').trim()
+    if (!edgeId) return { refusal: `${verb.name} refused: select the ${verb.edge} by clicking it on the drawing.` }
+    if (edgeId === String(entityId ?? '')) return { refusal: `${verb.name} refused: the ${verb.edge} must be a different entity from the selection.` }
+    const px = fmtDelta(x)
+    const py = fmtDelta(y)
+    if (px === null || py === null) return { refusal: `${verb.name} refused: ${verb.point} x and y must both be numbers.` }
+    if (op === 'fillet') {
+      const radius = fmtDelta(r)
+      if (radius === null) return { refusal: 'Fillet refused: the radius must be a number.' }
+      if (radius < 0) return { refusal: 'Fillet refused: the radius must be 0 or more.' }
+    }
+    if (op === 'chamfer') {
+      const first = fmtDelta(d1)
+      const second = fmtDelta(d2)
+      if (first === null || second === null) return { refusal: 'Chamfer refused: both distances must be numbers.' }
+      if (first < 0 || second < 0) return { refusal: 'Chamfer refused: both distances must be 0 or more.' }
+    }
+    if (op === 'fillet' || op === 'chamfer') {
+      const qx = fmtDelta(ex)
+      const qy = fmtDelta(ey)
+      if (qx === null || qy === null) return { refusal: `${verb.name} refused: the point on the ${verb.edge} (edge x, edge y) must both be numbers.` }
+    }
+    return { payload: { ...payload, edge: edgeId, x: px, y: py } }
+  }
   if (op === 'move' || op === 'copy') {
     const deltaX = fmtDelta(dx)
     const deltaY = fmtDelta(dy)
@@ -431,6 +541,9 @@ export default function useEngineSession({
   onSavedRef.current = onSaved
   // In-flight latch for the version write. See save().
   const savingRef = useRef(false)
+  // W4g-6: the verb behind an in-flight batch, so its reply and its undo
+  // step read under the verb's name rather than `batch`.
+  const batchVerbRef = useRef(null)
   // W4f slice F: the undo machinery. `current` is the bytes the engine holds
   // right now (the opened file, then each applied edit's written bytes);
   // `undo`/`redo` hold {bytes, op}; `reload` names an undo/redo re-load in
@@ -536,11 +649,15 @@ export default function useEngineSession({
         return
       }
       if (message.type === 'editApplied') {
+        // W4g-6: a batch answers as `batch`; the verb that posted it is the
+        // name the drafter sees (and the undo stack keeps).
+        const label = message.op === 'batch' ? (batchVerbRef.current || 'batch') : message.op
+        if (message.op === 'batch') batchVerbRef.current = null
         if (!message.ok) {
           patch({
             busy: false,
             errorKind: SESSION_ERROR.REFUSED,
-            status: `Edit refused (${message.op}): ${message.reason ?? 'unknown reason'}`,
+            status: `Edit refused (${label}): ${message.reason ?? 'unknown reason'}`,
           })
           return
         }
@@ -560,7 +677,7 @@ export default function useEngineSession({
         // StrictMode runs twice).
         const history = historyRef.current
         if (message.bytes && history.current) {
-          history.undo.push({ bytes: history.current, op: message.op })
+          history.undo.push({ bytes: history.current, op: label })
           trimSnapshots(history.undo)
           history.redo = []
         }
@@ -580,10 +697,10 @@ export default function useEngineSession({
           geometrySource: GEOMETRY_SOURCE.ENGINE_REPARSE,
           errorKind: createLost ? SESSION_ERROR.REFUSED : null,
           status: createLost
-            ? `${message.op} applied, but the new entity was not found after re-parse. ${reparsed}`
+            ? `${label} applied, but the new entity was not found after re-parse. ${reparsed}`
             : createdId
-              ? `${message.op} applied: entity ${createdId} drawn. ${reparsed}`
-              : `${message.op} applied. ${reparsed}`,
+              ? `${label} applied: entity ${createdId} drawn. ${reparsed}`
+              : `${label} applied. ${reparsed}`,
         }))
         return
       }
@@ -740,6 +857,38 @@ export default function useEngineSession({
         return
       }
       create(answer.op, answer.inputs)
+      return
+    }
+    // W4g-6 TRIM / EXTEND / FILLET / CHAMFER: the geometry is planned here
+    // (intersect.js) from the selection and the second entity, and the
+    // engine applies the plan as ONE batch: one round trip, one undo step,
+    // all of it or none of it.
+    if (INTERSECT_VERBS[op]) {
+      const planned = planIntersectVerb(op, sessionRef.current, inputs)
+      if (planned.refusal) {
+        patch({ errorKind: SESSION_ERROR.REFUSED, status: planned.refusal })
+        return
+      }
+      const lowered = lowerSteps(planned.steps)
+      if (lowered.refusal) {
+        patch({ errorKind: SESSION_ERROR.REFUSED, status: lowered.refusal })
+        return
+      }
+      const boundary = boundaryRef.current
+      if (!boundary) {
+        patch({ errorKind: SESSION_ERROR.TRANSPORT, status: 'Edit refused: no document is open.' })
+        return
+      }
+      batchVerbRef.current = op
+      patch({ busy: true, errorKind: null })
+      if (!boundary.post({ type: 'applyEdit', op: 'batch', payload: { verb: op, steps: lowered.steps } })) {
+        batchVerbRef.current = null
+        patch({
+          busy: false,
+          errorKind: SESSION_ERROR.TRANSPORT,
+          status: `Edit refused (${op}): the boundary rejected the message.`,
+        })
+      }
       return
     }
     const { payload, refusal } = buildEditPayload(op, sessionRef.current.selectedId, inputs)

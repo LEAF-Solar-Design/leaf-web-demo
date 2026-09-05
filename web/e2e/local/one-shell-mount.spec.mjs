@@ -697,10 +697,12 @@ test.describe('route matrix, rail ON', () => {
     // ROTATE, SCALE, EXPLODE joined Modify (11 real + trim/extend off).
     // W4g-5a: OFFSET made it 12 real, so the Modify row is 14.
     // W4g-5b: ARRAY's two forms make it 14 real, so the row is 16.
+    // W4g-6: TRIM, EXTEND, FILLET and CHAMFER are real and the two placeholders
+    // leave, so the row is 18 and every one of the 18 is real.
     await expect(draw.locator('.ribbon-tool')).toHaveCount(7)
     await expect(draw.locator('[data-tool^="draw:create"]')).toHaveCount(5)
     const modifyTools = modify.locator('.ribbon-tool')
-    await expect(modifyTools).toHaveCount(16)
+    await expect(modifyTools).toHaveCount(18)
     let modifyReal = 0
     for (const btn of await modifyTools.all()) {
       await expect(btn).toBeDisabled()
@@ -708,7 +710,7 @@ test.describe('route matrix, rail ON', () => {
       if (/\(unavailable: (select an entity in the drawing|no drawing in the browser engine yet|opening .*|the drawing could not be opened.*)\)/.test(name)) modifyReal += 1
       else expect(name).toContain('(unavailable: not in the browser engine yet)')
     }
-    expect(modifyReal).toBe(14)
+    expect(modifyReal).toBe(18)
 
     // View drives the viewer: fit is live with a drawing loaded (View tab).
     await page.getByRole('tab', { name: 'View' }).click()
@@ -1162,6 +1164,74 @@ test.describe('route matrix, rail ON', () => {
       .toHaveText(String(countBeforeText + 1), { timeout: 60_000 })
     test.info().annotations.push({ type: 'text', description: `TEXT placed one entity (${countBeforeText} -> ${countBeforeText + 1})` })
     await page.keyboard.press('Escape')
+
+    // W4g-6 TRIM and FILLET on the REAL engine. Two crossing lines drawn by
+    // typed operands; the second is the selection. TRIM names the first as
+    // the cutting edge (its id typed into the same field the canvas click
+    // fills) and a point on the part to remove: the count holds and the
+    // selection's far end moves to the crossing. FILLET rounds the corner
+    // with one arc (+1) in ONE batch, so ONE engine undo takes the whole
+    // fillet back: both lines regrow and the arc goes.
+    const countBeforeTrim = Number(await page.getByTestId('cad-edit-entity-count').textContent())
+    const workbenchStatus = page.locator('.cad-edit-workbench [role="status"]')
+    await page.keyboard.press('Escape')
+    await bar.fill('l')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'createLine', { timeout: 20_000 })
+    await page.getByLabel('ribbon x', { exact: true }).fill('300')
+    await page.getByLabel('ribbon y', { exact: true }).fill('300')
+    await page.getByLabel('ribbon x2', { exact: true }).fill('320')
+    await page.getByLabel('ribbon y2', { exact: true }).fill('300')
+    await page.getByLabel('ribbon y2', { exact: true }).press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeTrim + 1), { timeout: 60_000 })
+    await page.keyboard.press('Escape')
+    const cuttingEdge = await page.getByRole('radio').last().getAttribute('value')
+    expect(cuttingEdge).toBeTruthy()
+    await bar.fill('l')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'createLine', { timeout: 20_000 })
+    await page.getByLabel('ribbon x', { exact: true }).fill('310')
+    await page.getByLabel('ribbon y', { exact: true }).fill('290')
+    await page.getByLabel('ribbon x2', { exact: true }).fill('310')
+    await page.getByLabel('ribbon y2', { exact: true }).fill('310')
+    await page.getByLabel('ribbon y2', { exact: true }).press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeTrim + 2), { timeout: 60_000 })
+    await page.keyboard.press('Escape')
+    await page.getByRole('radio').last().check()
+    await bar.fill('tr')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'trim', { timeout: 20_000 })
+    // An empty edge holds Run with the ask, like an empty operand.
+    // (The prompt's own Run, by class: the page holds other buttons whose
+    // accessible name starts with Run, and a held Run is named by its ask.)
+    await expect(page.locator('[data-testid="cockpit-prompt"] .cp-run')).toBeDisabled()
+    await page.getByLabel('ribbon edge', { exact: true }).fill(cuttingEdge)
+    await page.getByLabel('ribbon x', { exact: true }).fill('310')
+    await page.getByLabel('ribbon y', { exact: true }).fill('305')
+    await page.getByLabel('ribbon y', { exact: true }).press('Enter')
+    await expect(workbenchStatus).toContainText('trim applied', { timeout: 60_000 })
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeTrim + 2))
+    test.info().annotations.push({ type: 'trim', description: `trim cut the selection at the crossing with ${cuttingEdge} (count held at ${countBeforeTrim + 2})` })
+    await page.keyboard.press('Escape')
+    await bar.fill('f')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'fillet', { timeout: 20_000 })
+    await page.getByLabel('ribbon radius', { exact: true }).fill('2')
+    await page.getByLabel('ribbon edge', { exact: true }).fill(cuttingEdge)
+    await page.getByLabel('ribbon edge x', { exact: true }).fill('318')
+    await page.getByLabel('ribbon edge y', { exact: true }).fill('300')
+    await page.getByLabel('ribbon x', { exact: true }).fill('310')
+    await page.getByLabel('ribbon y', { exact: true }).fill('292')
+    await page.getByLabel('ribbon y', { exact: true }).press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeTrim + 3), { timeout: 60_000 })
+    await expect(workbenchStatus).toContainText('fillet applied: entity')
+    test.info().annotations.push({ type: 'fillet', description: `fillet drew one arc in one batch (${countBeforeTrim + 2} -> ${countBeforeTrim + 3})` })
+    // One batch is ONE undo step: the arc goes and both lines regrow together.
+    await page.keyboard.press('Escape')
+    await expect(page.locator('.cockpit-band [data-tool="quick-undo-edit"]')).toBeEnabled()
+    await bar.fill('u')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeTrim + 2), { timeout: 60_000 })
 
     // W4g-2 (one head), confirm-time race. LAST in the walk on purpose: a
     // refused run leaves its failed strip on the page and there is no

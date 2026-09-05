@@ -48,6 +48,15 @@ const WORDS = Object.freeze({
   ar: { group: 'modify', op: 'arrayRect', verb: 'ARRAYRECT' },
   arraypolar: { group: 'modify', op: 'arrayPolar', verb: 'ARRAYPOLAR' },
   pa: { group: 'modify', op: 'arrayPolar', verb: 'ARRAYPOLAR' },
+  // W4g-6: the intersection verbs, the reference's own aliases.
+  trim: { group: 'modify', op: 'trim', verb: 'TRIM' },
+  tr: { group: 'modify', op: 'trim', verb: 'TRIM' },
+  extend: { group: 'modify', op: 'extend', verb: 'EXTEND' },
+  ex: { group: 'modify', op: 'extend', verb: 'EXTEND' },
+  fillet: { group: 'modify', op: 'fillet', verb: 'FILLET' },
+  f: { group: 'modify', op: 'fillet', verb: 'FILLET' },
+  chamfer: { group: 'modify', op: 'chamfer', verb: 'CHAMFER' },
+  cha: { group: 'modify', op: 'chamfer', verb: 'CHAMFER' },
   // W4g-5d: the reference's TEXT, one letter like the rest of its Draw row.
   text: { group: 'draw', op: 'createText', verb: 'TEXT' },
   t: { group: 'draw', op: 'createText', verb: 'TEXT' },

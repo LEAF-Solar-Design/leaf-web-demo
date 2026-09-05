@@ -14,6 +14,7 @@ const round3 = (v) => {
 const finite = (v) => typeof v === 'number' && Number.isFinite(v)
 const num = (s) => { const n = Number.parseFloat(s); return Number.isFinite(n) ? n : null }
 
+import { nearestEntity } from './intersect.js'
 /** The pick sequence per op, or null for ops with nothing to pick. */
 export const PICK_SEQUENCES = Object.freeze({
   createLine: [{ kind: 'point', keys: ['x', 'y'] }, { kind: 'point', keys: ['x2', 'y2'] }],
@@ -40,6 +41,13 @@ export const PICK_SEQUENCES = Object.freeze({
   createText: [{ kind: 'point', keys: ['x', 'y'] }],
   // W4g-5c: a paste picks where it goes.
   pasteClip: [{ kind: 'point', keys: ['x', 'y'] }],
+  // W4g-6: each intersection verb names a second ENTITY first (the click
+  // lands on it and the point on it rides along), then a point on the
+  // selection that says which part to remove, extend or keep.
+  trim: [{ kind: 'edge', keys: ['edge', 'ex', 'ey'] }, { kind: 'point', keys: ['x', 'y'] }],
+  extend: [{ kind: 'edge', keys: ['edge', 'ex', 'ey'] }, { kind: 'point', keys: ['x', 'y'] }],
+  fillet: [{ kind: 'edge', keys: ['edge', 'ex', 'ey'] }, { kind: 'point', keys: ['x', 'y'] }],
+  chamfer: [{ kind: 'edge', keys: ['edge', 'ex', 'ey'] }, { kind: 'point', keys: ['x', 'y'] }],
 })
 
 /**
@@ -72,11 +80,20 @@ export function currentStep(state) {
  * Refuses non-finite input (no writes, same state). `inputs` is the operator
  * record (strings), read for the current polyline list on an append.
  */
-export function applyPick(state, x, y, inputs = {}) {
+export function applyPick(state, x, y, inputs = {}, context = null) {
   const step = currentStep(state)
   if (!step || !finite(x) || !finite(y)) return { state, writes: [] }
   const picked = [...state.picked, [x, y]]
   const next = { ...state, picked, step: state.step + 1 }
+  if (step.kind === 'edge') {
+    // W4g-6: the click names an ENTITY (the cutting edge, the boundary,
+    // the second object): the nearest one within the aperture other than
+    // the selection, from `context` { entities, tol, exceptId }. A click
+    // that lands on nothing writes nothing and the step waits.
+    const hit = context ? nearestEntity(context.entities, x, y, context.tol, context.exceptId) : null
+    if (!hit) return { state, writes: [] }
+    return { state: next, writes: [[step.keys[0], String(hit.id)], [step.keys[1], round3(x)], [step.keys[2], round3(y)]] }
+  }
   if (step.kind === 'point') return { state: next, writes: [[step.keys[0], round3(x)], [step.keys[1], round3(y)]] }
   if (step.kind === 'radius') {
     const [cx, cy] = state.picked[state.picked.length - 1] || [num(inputs[step.from[0]]) ?? 0, num(inputs[step.from[1]]) ?? 0]
