@@ -50,6 +50,13 @@ _MIGRATION_LEDGER_COLUMNS = {"name", "sha256", "applied_at"}
 # compatibility contract, not a provider choice. Additions stay additive so an
 # older application can continue to read a database prepared by a newer image.
 _REQUIRED_COLUMNS = {
+    "campaign_dispatch_bindings": {
+        "attempt_id", "task_id", "org_id", "project_id", "campaign_id", "fence", "stage",
+        "request_id", "machine_id", "run_id", "leaf_id", "registration_id", "root_request_id",
+        "gateway_project_id", "source_ref", "packet_digest", "budget_class", "reservation_micro_usd",
+        "submission_digest", "binding_fingerprint", "state", "reservation_id", "admitted_at",
+        "remote_fencing_token", "verdict_fingerprint", "settled_at", "created_at",
+    },
     "campaigns": {
         "campaign_id", "org_id", "project_id", "tenant_id", "principal_id",
         "title", "prompt", "idempotency_key", "submission_fingerprint", "status",
@@ -572,6 +579,12 @@ def _catalog_contract(relation: str, *definition_fragments: str) -> Dict[str, An
 # stores, the project lifecycle is part of the canonical platform API whenever
 # this application image is running.
 _REQUIRED_CONSTRAINTS = {
+    "campaign_dispatch_bindings_request_unique": _catalog_contract(
+        "campaign_dispatch_bindings", "UNIQUE (request_id)"),
+    "campaign_dispatch_bindings_leaf_unique": _catalog_contract(
+        "campaign_dispatch_bindings", "UNIQUE (leaf_id)"),
+    "campaign_dispatch_bindings_task_fence_unique": _catalog_contract(
+        "campaign_dispatch_bindings", "UNIQUE (task_id, fence)"),
     "campaigns_scope_idempotency_unique": _catalog_contract(
         "campaigns", "UNIQUE (org_id, project_id, idempotency_key)"),
     "campaign_questions_key_unique": _catalog_contract(
