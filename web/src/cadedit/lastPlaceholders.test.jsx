@@ -14,7 +14,7 @@ import { parseDrawingCommand } from '../lib/commandWords.js'
 import EngineRibbonClusters, { PROMPTS } from './EngineRibbonClusters.jsx'
 import EngineSessionProvider from './EngineSessionProvider.jsx'
 import { CREATE_OPS, buildCreatePayload, buildEditPayload, lowerSteps, planMatchprop } from './engineSession.js'
-import { ELLIPSE_SEGMENTS, POINT_MARK, entityToPolyline } from './engineIntake.js'
+import { ELLIPSE_SEGMENTS, POINT_MARK, POINT_MARK_FRACTION, engineIntake, entityToPolyline, pointMarkSize } from './engineIntake.js'
 import { diffPlan } from './mutationDiff.js'
 import { ELLIPSE_GHOST_RATIO, PICK_SEQUENCES, SNAP_KIND, applyPick, buildSnapIndex, ghostFor, startPicking } from './pointPicking.js'
 
@@ -93,7 +93,19 @@ describe('W4g-4b POINT and ELLIPSE creates', () => {
     // Missing or bad axis / ratio: nothing drawn, never a throw.
     expect(entityToPolyline({ ...ellipse, majorAxis: [0, 0] })).toBeNull()
     expect(entityToPolyline({ ...ellipse, ratio: 0 })).toBeNull()
+    // A ratio above 1 is not a DXF ellipse (the minor axis would be the major): drawn as nothing, never with swapped axes.
+    expect(entityToPolyline({ ...ellipse, ratio: 1.5 })).toBeNull()
+    expect(entityToPolyline({ ...ellipse, ratio: 1 })).not.toBeNull()
     expect(entityToPolyline({ ...ellipse, majorAxis: null })).toBeNull()
+    // The marker's size follows the drawing: a share of its larger extent, floored for a drawing of points alone.
+    expect(pointMarkSize({ w: 1000, h: 200 })).toBe(1000 * POINT_MARK_FRACTION)
+    expect(pointMarkSize({ w: 10, h: 10 })).toBe(POINT_MARK)
+    expect(pointMarkSize(null)).toBe(POINT_MARK)
+    const wide = { id: '22', type: 'LINE', layer: '0', closed: false, editable: true, vertices: [[0, 0, 0], [1000, 0, 0]], radius: null, startDeg: null, endDeg: null }
+    const built = engineIntake([wide, point], 'x.dxf')
+    const mark = built.polylines.find((pl) => pl.handle === '14')
+    expect(mark.pts[0][0]).toBeCloseTo(3 - 5, 9)
+    expect(engineIntake([point], 'y.dxf').polylines[0].pts[0][0]).toBeCloseTo(3 - POINT_MARK, 9)
     const index = buildSnapIndex([point, ellipse])
     expect(index.n).toBe(2)
     expect([...index.kinds]).toEqual([SNAP_KIND.END, SNAP_KIND.CENTRE])
@@ -170,5 +182,31 @@ describe('W4g-4b MATCHPROP', () => {
     expect(drawIds).toEqual(['draw:createLine', 'draw:createPolyline', 'draw:createCircle', 'draw:createArc', 'draw:createRectangle', 'draw:createEllipse', 'draw:createPoint'])
     expect(drawIds).not.toContain('draw:ellipse')
     expect(document.querySelectorAll('.ribbon-cluster[data-group="properties"]')).toHaveLength(1)
+  })
+
+  it('the Properties portal survives a tab switch away and back, which re-creates the slot as a NEW node', () => {
+    const seat = () => ({
+      id: 'properties', label: 'Properties', kind: 'group', tools: [],
+      extra: <div id="cockpit-properties-slot" className="ribbon-slot" />,
+    })
+    const createWorker = vi.fn(() => new IdleWorker())
+    const ui = (clusters, panels) => (
+      <EngineSessionProvider createWorker={createWorker}>
+        <DraftingRibbon clusters={clusters}>
+          <EngineRibbonClusters importOpen={false} onToggleImport={() => {}} panels={panels} />
+        </DraftingRibbon>
+      </EngineSessionProvider>
+    )
+    const { rerender } = render(ui([seat()], ['draw', 'modify', 'properties']))
+    const first = document.getElementById('cockpit-properties-slot')
+    expect(first.querySelectorAll('[data-tool="modify:matchprop"]')).toHaveLength(1)
+    rerender(ui([], []))
+    expect(document.getElementById('cockpit-properties-slot')).toBeNull()
+    expect(document.querySelectorAll('[data-tool="modify:matchprop"]')).toHaveLength(0)
+    rerender(ui([seat()], ['draw', 'modify', 'properties']))
+    const again = document.getElementById('cockpit-properties-slot')
+    expect(again).not.toBe(first)
+    expect(again.querySelectorAll('[data-tool="modify:matchprop"]')).toHaveLength(1)
+    expect(document.querySelectorAll('[data-tool="modify:matchprop"]')).toHaveLength(1)
   })
 })

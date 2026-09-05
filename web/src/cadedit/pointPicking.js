@@ -250,7 +250,10 @@ export function snapPoint(index, x, y, tol) {
   return { x: xs[best], y: ys[best], kind: SNAP_KIND_NAME[kinds[best]] }
 }
 
-// W4g-4b: the ratio the ellipse ghost is drawn at (the prompt's default).
+// W4g-4b: the FIXED ratio the ellipse ghost is drawn at. The ratio input has
+// no default (a step still waiting until typed), so the preview and the
+// result agree only when the drafter types this value; the ghost shows the
+// axis, the typed ratio decides the shape.
 export const ELLIPSE_GHOST_RATIO = 0.5
 
 /** The rubber band for the cursor at world (x, y): [[x,y],...] plus closed, or null. */
@@ -279,7 +282,7 @@ export function ghostFor(state, x, y) {
     return { pts: [last, [x, y]], closed: false }
   }
   // W4g-4b: the ellipse about the centre with the cursor as the axis
-  // endpoint, at the prompt's default ratio (the typed ratio is read at run).
+  // endpoint, at a fixed preview ratio (the typed ratio is read at run).
   if (op === 'createEllipse') {
     if (!last || picked.length >= 2) return null
     const ax = x - last[0]

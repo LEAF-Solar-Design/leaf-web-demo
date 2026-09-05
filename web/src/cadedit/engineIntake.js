@@ -12,10 +12,15 @@ export const ARC_STEP_DEG = 7.5
 export const MIN_ARC_POINTS = 8
 /** A TEXT's outline box is this many heights wide per character. */
 export const TEXT_ADVANCE = 0.6
-// W4g-4b: a POINT draws as a small bow-tie marker of this half-size in
-// drawing units (honest about being a marker, like PDMODE 3's cross); an
-// ELLIPSE samples this many points around its full turn.
+// W4g-4b: a POINT draws as a small bow-tie marker (honest about being a
+// marker, like PDMODE 3's cross). Its half-size is a fraction of the
+// drawing's larger extent (PDSIZE's negative form: a share of what is on
+// screen at fit), floored at POINT_MARK drawing units for a drawing that is
+// nothing but points; a marker in fixed drawing units read as invisible on
+// a millimetre drawing and as geometry on a feet drawing (kimi, #1059). An
+// ELLIPSE samples ELLIPSE_SEGMENTS points around its full turn.
 export const POINT_MARK = 0.5
+export const POINT_MARK_FRACTION = 0.005
 export const ELLIPSE_SEGMENTS = 64
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v)
@@ -94,8 +99,19 @@ export function bulgePoints(a, b, bulge, z) {
   return out
 }
 
-/** One entity -> one intake polyline, or null when it has nothing drawable. */
-export function entityToPolyline(entity) {
+/**
+ * The half-size of a POINT marker for a drawing whose entities span the
+ * box `extent` ({ w, h } in drawing units): a fraction of the larger side,
+ * never below POINT_MARK. Null or a degenerate box means the floor.
+ */
+export function pointMarkSize(extent) {
+  const w = extent && finite(extent.w) ? extent.w : 0
+  const h = extent && finite(extent.h) ? extent.h : 0
+  return Math.max(POINT_MARK, POINT_MARK_FRACTION * Math.max(w, h))
+}
+
+/** One entity -> one intake polyline, or null when it has nothing drawable. `markSize` is a POINT marker's half-size. */
+export function entityToPolyline(entity, markSize = POINT_MARK) {
   if (!entity || typeof entity !== 'object') return null
   const handle = hexHandle(entity.id ?? entity.handle ?? '')
   const layer = typeof entity.layer === 'string' && entity.layer ? entity.layer : '0'
@@ -123,14 +139,14 @@ export function entityToPolyline(entity) {
   if (type === 'POINT') {
     const c = point(verts[0])
     if (!c) return null
-    const s = POINT_MARK
+    const s = finite(markSize) && markSize > 0 ? markSize : POINT_MARK
     return { handle, layer, pts: [[c[0] - s, c[1] - s, c[2]], [c[0] + s, c[1] + s, c[2]], [c[0], c[1], c[2]], [c[0] - s, c[1] + s, c[2]], [c[0] + s, c[1] - s, c[2]]], closed: false }
   }
   if (type === 'ELLIPSE') {
     const c = point(verts[0])
     const axis = Array.isArray(entity.majorAxis) ? entity.majorAxis : null
     const ratio = entity.ratio
-    if (!c || !axis || !finite(axis[0]) || !finite(axis[1]) || (axis[0] === 0 && axis[1] === 0) || !finite(ratio) || ratio <= 0) return null
+    if (!c || !axis || !finite(axis[0]) || !finite(axis[1]) || (axis[0] === 0 && axis[1] === 0) || !finite(ratio) || ratio <= 0 || ratio > 1) return null
     const pts = new Array(ELLIPSE_SEGMENTS)
     for (let i = 0; i < ELLIPSE_SEGMENTS; i += 1) {
       const t = (i / ELLIPSE_SEGMENTS) * Math.PI * 2
@@ -181,8 +197,25 @@ export function engineIntake(entities, documentId = '') {
   const polylines = []
   let points = 0
   let truncated = 0
-  for (const entity of Array.isArray(entities) ? entities : []) {
-    const pl = entityToPolyline(entity)
+  const list = Array.isArray(entities) ? entities : []
+  // One pass for the drawing's extent (every vertex, plus a circle's or
+  // arc's radius), so a POINT marker is sized to what the drawing spans.
+  let minX = Infinity; let minY = Infinity; let maxX = -Infinity; let maxY = -Infinity
+  for (const entity of list) {
+    const verts = Array.isArray(entity?.vertices) ? entity.vertices : []
+    const r = (entity?.type === 'CIRCLE' || entity?.type === 'ARC') && finite(entity.radius) && entity.radius > 0 ? entity.radius : 0
+    for (const v of verts) {
+      const p = point(v)
+      if (!p) continue
+      if (p[0] - r < minX) minX = p[0] - r
+      if (p[0] + r > maxX) maxX = p[0] + r
+      if (p[1] - r < minY) minY = p[1] - r
+      if (p[1] + r > maxY) maxY = p[1] + r
+    }
+  }
+  const markSize = pointMarkSize(minX <= maxX ? { w: maxX - minX, h: maxY - minY } : null)
+  for (const entity of list) {
+    const pl = entityToPolyline(entity, markSize)
     if (!pl) continue
     if (points + pl.pts.length > MAX_POINTS) { truncated += 1; continue }
     points += pl.pts.length
