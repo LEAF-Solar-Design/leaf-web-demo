@@ -180,9 +180,9 @@ function applyOne(doc, op, payload) {
   const p = payload && typeof payload === 'object' ? payload : {}
   // The op is a string off the boundary: only an OWN key of the create
   // table names a create (a prototype name such as `constructor` is not
-  // one), and only a function in that slot is ever called.
-  if (Object.prototype.hasOwnProperty.call(CREATE_OPS, op) && typeof CREATE_OPS[op] === 'function') {
-    const create = CREATE_OPS[op]
+  // one), and the callee is checked to be a function before it is called.
+  const create = Object.prototype.hasOwnProperty.call(CREATE_OPS, op) ? CREATE_OPS[op] : null
+  if (typeof create === 'function') {
     if (typeof doc[op] !== 'function') throw new Error(`engine_lacks_create:${op}`)
     return { createdHandle: handleId(create(doc, p), 'create_returned_no_handle'), createdHandles: null }
   }
