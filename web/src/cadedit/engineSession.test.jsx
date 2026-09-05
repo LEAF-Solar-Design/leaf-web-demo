@@ -30,6 +30,7 @@ import useEngineSession, {
   SESSION_ERROR,
   buildCreatePayload,
   buildEditPayload,
+  lowerSteps,
   parsePointList,
   surviveSelection,
 } from './engineSession.js'
@@ -711,5 +712,25 @@ describe('draw dispatch (W4d Draw group): creation needs no selection, and the s
     // W4g-4: RECTANG is a create the STORE lowers to createPolyline before the post.
     // W4g-5d: TEXT is a create the worker dispatches straight to createText.
     expect([...CREATE_OPS]).toEqual(['createLine', 'createCircle', 'createArc', 'createPolyline', 'createRectangle', 'createText', 'createPoint', 'createEllipse'])
+  })
+})
+
+describe('W4g-6e: a created polyline carries its bulges through the builder and the lowering', () => {
+  it('a per-vertex finite list rides; an all-zero or absent list keeps the straight wire shape; anything else is refused', () => {
+    const pts = '0,0 10,0 10,10'
+    expect(buildCreatePayload('createPolyline', { pts, bulges: [1, 0, 0] }).payload)
+      .toEqual({ points: [0, 0, 10, 0, 10, 10], closed: false, layer: '', bulges: [1, 0, 0] })
+    expect(buildCreatePayload('createPolyline', { pts, bulges: [0, 0, 0] }).payload)
+      .toEqual({ points: [0, 0, 10, 0, 10, 10], closed: false, layer: '' })
+    expect(buildCreatePayload('createPolyline', { pts }).payload)
+      .toEqual({ points: [0, 0, 10, 0, 10, 10], closed: false, layer: '' })
+    for (const bad of [[1], [1, 0, 0, 0], [1, 'x', 0], [1, NaN, 0], [1, Infinity, 0], '1 0 0', { 0: 1 }]) {
+      expect(buildCreatePayload('createPolyline', { pts, bulges: bad }).refusal).toMatch(/one bulge per vertex/)
+    }
+    // A plan step lowers through the same builder, so its bulges ride to the worker.
+    const { steps, refusal } = lowerSteps([{ op: 'createPolyline', inputs: { pts, closed: true, layer: 'K', bulges: [0, 0.5, 0] } }])
+    expect(refusal).toBeUndefined()
+    expect(steps[0]).toEqual({ op: 'createPolyline', payload: { points: [0, 0, 10, 0, 10, 10], closed: true, layer: 'K', bulges: [0, 0.5, 0] } })
+    expect(lowerSteps([{ op: 'createPolyline', inputs: { pts, bulges: [1] } }]).refusal).toMatch(/one bulge per vertex/)
   })
 })

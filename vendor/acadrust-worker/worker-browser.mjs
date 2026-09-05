@@ -163,7 +163,7 @@ const CREATE_OPS = Object.freeze({
   createArc: (doc, p) => doc.createArc(
     Number(p.cx), Number(p.cy), Number(p.radius), Number(p.startDeg), Number(p.endDeg), String(p.layer ?? '')),
   createPolyline: (doc, p) => doc.createPolyline(
-    Float64Array.from(Array.isArray(p.points) ? p.points : []), Boolean(p.closed), String(p.layer ?? '')),
+    Float64Array.from(Array.isArray(p.points) ? p.points : []), Boolean(p.closed), String(p.layer ?? ''), Float64Array.from(Array.isArray(p.bulges) ? p.bulges : [])),
   // W4g-5d: TEXT. The wrapper refuses a non-finite number, a height that
   // is not positive, an empty or over-long value and any control character.
   createText: (doc, p) => doc.createText(
