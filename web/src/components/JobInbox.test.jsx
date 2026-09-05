@@ -75,6 +75,23 @@ describe('JobInbox', () => {
     expect(screen.queryByText('Keyboard toggle probe notice')).not.toBeInTheDocument()
   })
 
+  it('wears no studio spine furniture: the rail-OFF byte-identity row counts .spine-collapse and requires 0', () => {
+    // one-shell-mount.spec.mjs "rail off is byte-for-byte the old shell" asserts
+    // `.spine-collapse` has count 0 with the rail off; the inbox mounts rail-OFF
+    // too (it tracks the job rail slot, which the console always passes), so its
+    // toggle must never reuse JobRail's / NavRail's collapse-to-spine classes.
+    // This went red on main after #1023 (d29c78f1) shipped the toggle as
+    // `.spine-btn .spine-collapse`; a sibling proof on f28c0e00 caught it.
+    const bus = createNotificationBus(5)
+    bus.push({ text: 'spine furniture probe' })
+    const { container } = render(<JobInbox bus={bus} />)
+    expect(container.querySelector('.spine-collapse')).toBeNull()
+    expect(container.querySelector('.spine-btn')).toBeNull()
+    expect(container.querySelector('.spine-expand')).toBeNull()
+    expect(container.querySelector('[data-spine]')).toBeNull()
+    expect(container.querySelector('.inbox-toggle')).not.toBeNull()
+  })
+
   it('every row action (Retry, Dismiss) is also a real <button>', () => {
     const bus = createNotificationBus(5)
     bus.push({ text: 'button-shape probe' })

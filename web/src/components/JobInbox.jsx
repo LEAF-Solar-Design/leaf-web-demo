@@ -1,8 +1,9 @@
-// JobInbox (standardization slice 13a): the right spine's "what you missed"
-// card. Reads the ONE notification bus (lib/notifications.js) directly — no
-// props threaded from either scene — so mounting it needs nothing beyond the
-// SurfaceFrame.Inbox slot (site/SurfaceFrame.jsx) both scenes already call
-// beside SurfaceFrame.JobRail.
+// JobInbox (standardization slice 13a): the right rail column's "what you
+// missed" card. Reads the ONE notification bus (lib/notifications.js)
+// directly — no props threaded from either scene — so mounting it needs
+// nothing beyond the SurfaceFrame.Inbox slot (site/SurfaceFrame.jsx) both
+// scenes already call beside SurfaceFrame.JobRail (the console's `.rail-stack`
+// column in App.jsx, the stage's `.rail-col` wrapper in ToolCast.jsx).
 //
 // Row grammar borrows JobRail's own ledger classes (.rail-row, .rail-ledger,
 // .rail-note, TM1's fmtWhen — imported, not re-typed) since a notice and a
@@ -67,9 +68,16 @@ export default function JobInbox({ bus } = {}) {
       <h2>
         Notifications
         <span className="n">{visible.length}</span>
+        {/* Its own class, NOT `.spine-btn .spine-collapse`: those are the
+            studio spine's furniture (JobRail / NavRail collapse-to-spine), and
+            the rail-OFF byte-identity row (one-shell-mount.spec.mjs "rail off
+            is byte-for-byte the old shell") counts `.spine-collapse` and
+            requires 0. The inbox renders rail-ON and rail-OFF alike, so it
+            must never wear a studio-only marker. The look is shared by
+            selector in landing.css (`.spine-btn, .inbox-toggle`). */}
         <button
           type="button"
-          className="spine-btn spine-collapse"
+          className="inbox-toggle"
           aria-expanded={expanded}
           aria-label={expanded ? 'Collapse the notification inbox' : 'Expand the notification inbox'}
           title={expanded ? 'Collapse' : 'Expand'}
