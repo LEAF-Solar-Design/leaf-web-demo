@@ -51,11 +51,11 @@ import urllib.parse
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 SERVER_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SERVER_DIR.parent
@@ -85,6 +85,7 @@ from tool_loader import (  # noqa: E402
 from tool_validate import validate_params  # noqa: E402
 import write_loop  # noqa: E402  (M2 write branch; never imports da.* at top)
 import platform_link  # noqa: E402  (collision-safe leaf_platform store loader)
+from jobs import PLAN_TOOL, PLAN_TOOL_NAME  # noqa: E402
 
 try:  # noqa: E402 - APS domain metrics via CloudWatch EMF; best-effort, optional
     import emf_metrics
@@ -1256,7 +1257,8 @@ def active_workitem_for(job_id: Optional[str]) -> Optional[str]:
 _active_workitems.update(_replay_persisted_workitems())
 
 
-def _submission_recorder(req: "BrokerRunRequest", run_token: Optional[str]):
+def _submission_recorder(req: "Union[BrokerRunRequest, BrokerPlanRunRequest]",
+                         run_token: Optional[str]):
     """The `on_submitted` callback for one run, or None when there is nothing to
     correlate. No job_id -> no callback -> the call is byte-for-byte unchanged."""
     if not req.job_id:
@@ -1296,6 +1298,29 @@ class BrokerRunRequest(BaseModel):
     # deliberately NOT part of _broker_request_fingerprint: the fingerprint
     # identifies the WORK, and adding a per-job field would make an existing
     # ledger row's fingerprint unrecognisable on replay.
+    job_id: Optional[str] = None
+
+
+class PlanBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    drawing_id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,62}$")
+    parent_version: int = Field(ge=1, strict=True)
+    mutations: Dict[str, Any]
+    plan_sha256: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    source_sha256: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+
+
+class BrokerPlanRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tenant_id: str
+    plan: PlanBody
+    dwg: str
+    dwg_version: int = Field(strict=True)
+    ledger_event_key: Optional[str] = None
+    checkout_holder: Optional[str] = None
+    checkout_fence: Optional[int] = None
     job_id: Optional[str] = None
 
 
@@ -1392,19 +1417,25 @@ def _publish_blank_dwg(
     }
 
 
-def _broker_request_fingerprint(req: BrokerRunRequest) -> str:
-    fingerprint_input = {
-        "tenant_id": req.tenant_id,
-        "tool": req.tool,
-        "params": req.params,
-        "dwg": req.dwg,
-        "aps_live": bool(req.aps_live),
-        "dwg_version": req.dwg_version,
-    }
-    if req.test_source is not None:
-        fingerprint_input["test_source_sha256"] = hashlib.sha256(
-            req.test_source.encode("utf-8")
-        ).hexdigest()
+def _broker_request_fingerprint(req: Union[BrokerRunRequest, BrokerPlanRunRequest]) -> str:
+    if isinstance(req, BrokerPlanRunRequest):
+        fingerprint_input = {
+            "tenant_id": req.tenant_id, "plan": req.plan.model_dump(),
+            "dwg": req.dwg, "aps_live": True, "dwg_version": req.dwg_version,
+        }
+    else:
+        fingerprint_input = {
+            "tenant_id": req.tenant_id,
+            "tool": req.tool,
+            "params": req.params,
+            "dwg": req.dwg,
+            "aps_live": bool(req.aps_live),
+            "dwg_version": req.dwg_version,
+        }
+        if req.test_source is not None:
+            fingerprint_input["test_source_sha256"] = hashlib.sha256(
+                req.test_source.encode("utf-8")
+            ).hexdigest()
     canonical = json.dumps(
         fingerprint_input, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -2496,6 +2527,8 @@ def blank_dwg_feasibility(req: BlankDwgFeasibilityRequest) -> JSONResponse:
 
 @app.post("/broker/run", dependencies=[Depends(require_broker_auth)])
 def broker_run(req: BrokerRunRequest) -> JSONResponse:
+    if (req.tool or {}).get("name") == PLAN_TOOL_NAME:
+        return _broker_run(req)
     if not write_loop.is_write_tool(req.tool or {}):
         return _broker_run(req)
     with write_loop.drawing_mutation_commit_guard() as commit_enabled:
@@ -2512,10 +2545,48 @@ def broker_run(req: BrokerRunRequest) -> JSONResponse:
         return _broker_run(req)
 
 
+@app.post("/broker/run-plan", dependencies=[Depends(require_broker_auth)])
+def broker_run_plan(req: BrokerPlanRunRequest) -> JSONResponse:
+    """Apply a server-owned data plan under the live drawing mutation guard.
+
+    A positive readiness result cached up to 60 s followed by an alias move
+    leaves a window in which the WorkItem runs against the moved alias. The
+    receipt records the Activity version observed by the readiness check.
+    """
+    with write_loop.drawing_mutation_commit_guard() as commit_enabled:
+        if not commit_enabled:
+            return JSONResponse(
+                status_code=503,
+                content=err_envelope(
+                    ErrorCode.APS_UNAVAILABLE,
+                    "drawing mutations are temporarily disabled for a storage cutover",
+                    retryable=True,
+                    tool=PLAN_TOOL_NAME,
+                ),
+            )
+        return _broker_run_plan(req)
+
+
+def _broker_run_plan(req: BrokerPlanRunRequest) -> JSONResponse:
+    return _broker_run_request(req)
+
+
 def _broker_run(req: BrokerRunRequest) -> JSONResponse:
-    """Run one tool for one tenant. Appends exactly ONE attribution line."""
+    if (req.tool or {}).get("name") == PLAN_TOOL_NAME:
+        return JSONResponse(
+            status_code=DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS],
+            content=err_envelope(ErrorCode.BAD_PARAMS, "reserved tool name",
+                                 retryable=False, tool=PLAN_TOOL_NAME),
+        )
+    return _broker_run_request(req)
+
+
+def _broker_run_request(req: Union[BrokerRunRequest, BrokerPlanRunRequest]) -> JSONResponse:
+    """Share admission and one terminal attribution for tool and plan requests."""
     t0 = time.perf_counter()
-    tool = req.tool or {}
+    is_plan = isinstance(req, BrokerPlanRunRequest)
+    tool = PLAN_TOOL if is_plan else (req.tool or {})
+    aps_live = True if is_plan else bool(req.aps_live)
     engine_op = tool.get("engine_op", "")
     entry: Dict[str, Any] = {
         "ts": time.time(),
@@ -2523,7 +2594,7 @@ def _broker_run(req: BrokerRunRequest) -> JSONResponse:
         "tool": tool.get("name"),
         "engine_op": engine_op,
         "aps_endpoint": APS_ENDPOINT,
-        "aps_live": bool(req.aps_live),
+        "aps_live": aps_live,
         "engine_seconds": None,
         "usd_est": None,
         "status": "unknown",
@@ -2554,12 +2625,12 @@ def _broker_run(req: BrokerRunRequest) -> JSONResponse:
             spend_cap = usage.cap_for(req.tenant_id) if usage else None
             daily_limit = (
                 usage.daily_run_limit_for(tier)
-                if usage is not None and req.aps_live else None
+                if usage is not None and aps_live else None
             )
             admission = _postgres_store().admit_run(
                 ledger_event_key,
                 req.tenant_id,
-                aps_live=bool(req.aps_live),
+                aps_live=aps_live,
                 estimated_usd=estimate,
                 spend_cap=spend_cap,
                 daily_limit=daily_limit,
@@ -2626,12 +2697,17 @@ def _broker_run(req: BrokerRunRequest) -> JSONResponse:
             if decision != "acquired":
                 raise BrokerStateError(f"unknown broker admission result {decision!r}")
 
-        terminal_env, terminal_status = _execute(
+        execute = _execute_plan if is_plan else _execute
+        terminal_env, terminal_status = execute(
             req, tool, engine_op, t0, entry,
             quota_reserved=postgres_mode,
             admission=admission,
             run_token=run_token,
         )
+        if is_plan and "activity_version" in entry:
+            terminal_env = dict(terminal_env)
+            terminal_env["result"] = dict(
+                terminal_env.get("result") or {}, activity_version=entry["activity_version"])
         entry["status"] = (
             "ok" if terminal_env.get("ok")
             else (terminal_env.get("error") or {}).get("error_code", "error")
@@ -2712,7 +2788,7 @@ def _broker_run(req: BrokerRunRequest) -> JSONResponse:
 
 
 def _start_admitted_execution(
-    req: BrokerRunRequest, admission: Optional[Dict[str, Any]], *,
+    req: Union[BrokerRunRequest, BrokerPlanRunRequest], admission: Optional[Dict[str, Any]], *,
     aps_submission: Optional[bool] = None,
 ) -> None:
     """Persist the irreversible boundary immediately before tool execution."""
@@ -2731,6 +2807,96 @@ def _start_admitted_execution(
         admission["capacity_wait"] = True
         raise ApsCapacityUnavailable()
     admission["execution_started"] = True
+
+
+PLAN_READINESS_TTL_S = 60
+_plan_readiness_cache: Optional[Tuple[float, Dict[str, Any]]] = None
+_plan_readiness_lock = threading.Lock()
+
+
+def _plan_activity_ready() -> Tuple[bool, Dict[str, Any]]:
+    """Bound the Activity alias/version read to one call per cache interval."""
+    global _plan_readiness_cache
+    with _plan_readiness_lock:
+        now = time.monotonic()
+        if (_plan_readiness_cache is not None
+                and now - _plan_readiness_cache[0] < PLAN_READINESS_TTL_S):
+            result = _plan_readiness_cache[1]
+        else:
+            try:
+                import mutation_apply
+                result = mutation_apply.readiness()
+                if not isinstance(result, dict):
+                    raise ValueError("invalid mutation Activity readiness result")
+            except Exception as exc:  # readiness failure must never enable a run
+                result = {"ready": False, "mismatches": [str(exc)]}
+            _plan_readiness_cache = (time.monotonic(), result)
+        return result.get("ready") is True, result
+
+
+def _execute_plan(req: BrokerPlanRunRequest, tool: Dict[str, Any], engine_op: str,
+                  t0: float, entry: Dict[str, Any], *, quota_reserved: bool = False,
+                  admission: Optional[Dict[str, Any]] = None,
+                  run_token: Optional[str] = None):
+    if tenant_disabled(req.tenant_id):
+        return (err_envelope(
+            ErrorCode.TENANT_DISABLED,
+            f"tenant {req.tenant_id!r} is disabled by the kill-switch",
+            retryable=False, tool=PLAN_TOOL_NAME,
+        ), DEFAULT_HTTP_STATUS[ErrorCode.TENANT_DISABLED])
+    if not write_loop.drawing_mutations_enabled():
+        return (err_envelope(
+            ErrorCode.APS_UNAVAILABLE,
+            "drawing mutations are temporarily disabled for a storage cutover",
+            retryable=True, tool=PLAN_TOOL_NAME,
+        ), 503)
+    if not quota_reserved:
+        capped = _cap_preflight(req.tenant_id, PLAN_TOOL)
+        if capped is not None:
+            return capped
+
+    required_cap = entitlements.tool_required_capability(PLAN_TOOL)
+    tier = _tenant_tier(req.tenant_id)
+    if not entitlements.entitlements_for(tier).get(required_cap, False):
+        return (err_envelope(
+            ErrorCode.ENTITLEMENT_REQUIRED,
+            f"tier {tier!r} is not entitled to {required_cap!r} for tool {PLAN_TOOL_NAME!r}",
+            retryable=False, tool=PLAN_TOOL_NAME,
+        ), DEFAULT_HTTP_STATUS[ErrorCode.ENTITLEMENT_REQUIRED])
+    if not quota_reserved:
+        capped_runs = _run_quota_preflight(req.tenant_id, tier, PLAN_TOOL)
+        if capped_runs is not None:
+            return capped_runs
+    if req.dwg_version != req.plan.parent_version:
+        return _classified_bad_params(
+            "plan_parent_version_mismatch",
+            "dwg_version must equal plan.parent_version", tool=PLAN_TOOL_NAME,
+        )
+
+    _require_supported_live_completion_mode()
+    ready, readiness = _plan_activity_ready()
+    if not ready:
+        mismatches = "; ".join(str(item) for item in readiness.get("mismatches", []))
+        return (err_envelope(
+            ErrorCode.APS_UNAVAILABLE, f"mutation Activity not ready: {mismatches}",
+            retryable=True, tool=PLAN_TOOL_NAME,
+        ), 503)
+    activity_version = (readiness.get("activity") or {}).get("version")
+    entry["activity_version"] = activity_version
+    da = _get_da()
+    if da is None or not hasattr(da, "run_tool"):
+        return (err_envelope(
+            ErrorCode.APS_UNAVAILABLE,
+            "a live browser edit needs the APS client; there is no degraded writer for a data plan",
+            retryable=True, tool=PLAN_TOOL_NAME,
+        ), 503)
+    backend = write_loop.default_backend(aps_live=True, da=da)
+    _start_admitted_execution(req, admission, aps_submission=True)
+    return write_loop.run_data_plan_live(
+        req.plan.model_dump(), req.tenant_id, backend=backend, da=da, t0=t0,
+        ledger_entry=entry, holder=req.checkout_holder, fence=req.checkout_fence,
+        on_submitted=_submission_recorder(req, run_token),
+    )
 
 
 def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: float,

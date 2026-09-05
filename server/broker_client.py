@@ -118,6 +118,31 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
         raise BrokerUnreachable(f"broker at {broker_url()} returned non-JSON: {exc}") from exc
 
 
+def run_plan_via_broker(tenant_id: str, plan: Dict[str, Any], dwg: str,
+                        timeout_s: Optional[float] = None,
+                        dwg_version: Optional[int] = None,
+                        ledger_event_key: Optional[str] = None,
+                        checkout_holder: Optional[str] = None,
+                        checkout_fence: Optional[int] = None,
+                        job_id: Optional[str] = None) -> Dict[str, Any]:
+    """POST a durable browser plan to the server-owned live-write endpoint."""
+    try:
+        resp = requests.post(
+            f"{broker_url()}/broker/run-plan",
+            json={"tenant_id": tenant_id, "plan": plan, "dwg": dwg,
+                  "dwg_version": dwg_version, "ledger_event_key": ledger_event_key,
+                  "checkout_holder": checkout_holder, "checkout_fence": checkout_fence,
+                  "job_id": job_id},
+            headers=broker_headers(),
+            timeout=timeout_s or 600,
+        )
+        return resp.json()
+    except (requests.ConnectionError, requests.Timeout) as exc:
+        raise BrokerUnreachable(f"broker at {broker_url()} unreachable: {exc}") from exc
+    except ValueError as exc:
+        raise BrokerUnreachable(f"broker at {broker_url()} returned non-JSON: {exc}") from exc
+
+
 def reap_via_broker(records: list, timeout_s: Optional[float] = None) -> Dict[str, Any]:
     """POST /broker/reap -> cancel the orphaned WorkItems named by ``records``.
 

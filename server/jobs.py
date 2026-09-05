@@ -116,6 +116,10 @@ DB_PATH = Path(os.environ.get("JOBS_DB", str(SERVER_DIR / "jobs.db")))
 # over-cap submission is rejected with an HTTP 400 before the job row is written.
 MAX_PARAMS_BYTES = int(os.environ.get("JOB_MAX_PARAMS_BYTES", str(64 * 1024)))
 
+PLAN_TOOL_NAME = "cad-edit-plan"
+PLAN_TOOL = {"name": PLAN_TOOL_NAME, "version": "1.0.0",
+             "capabilities": ["drawing.write"], "kind": "plan"}
+
 
 def job_max_s() -> float:
     return float(os.environ.get("JOB_MAX_S", "540"))
@@ -577,6 +581,35 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
     is a key-reuse question, not a different run input.
     """
     _reject_oversized_params(params)
+    return _submit_job(
+        tenant_id, tool, params, dwg, aps_live, org_id, project_id, dwg_version,
+        idempotency_key=idempotency_key, authority_mode=authority_mode,
+        platform_context=platform_context, checkout_holder=checkout_holder,
+        checkout_fence=checkout_fence,
+    )
+
+
+def submit_plan_job(tenant_id: str, plan: Dict[str, Any], dwg: str, *,
+                    checkout_holder: Optional[str], checkout_fence: Optional[int]) -> str:
+    """Put a browser's full data plan on the durable live-write job lane."""
+    _reject_oversized_params(plan)
+    return _submit_job(
+        tenant_id, PLAN_TOOL, plan, dwg, True,
+        dwg_version=int(plan["parent_version"]), checkout_holder=checkout_holder,
+        checkout_fence=checkout_fence, plan=plan,
+    )
+
+
+def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg: str,
+                aps_live: bool, org_id: Optional[str] = None,
+                project_id: Optional[str] = None, dwg_version: Optional[int] = None, *,
+                idempotency_key: Optional[str] = None,
+                authority_mode: str = "legacy_sqlite",
+                platform_context: Optional[Dict[str, Any]] = None,
+                checkout_holder: Optional[str] = None,
+                checkout_fence: Optional[int] = None,
+                plan: Optional[Dict[str, Any]] = None) -> str:
+    """Shared durable insert and executor hand-off for tool and data-plan jobs."""
     if project_id and not idempotency_key:
         raise ValueError("Idempotency-Key is required for project-scoped runs")
     fingerprint_payload = {
@@ -588,6 +621,8 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
         # not silently deduped to the prior job.
         "dwgVersion": dwg_version,
     }
+    if plan is not None:
+        fingerprint_payload["plan"] = True
     submission_fingerprint = hashlib.sha256(json.dumps(
         fingerprint_payload, sort_keys=True, separators=(",", ":"), default=str,
     ).encode("utf-8")).hexdigest()
@@ -596,6 +631,8 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
     now = time.time()
     execution = {"tool": tool, "aps_live": bool(aps_live), "dwg_version": dwg_version,
                  "checkout_holder": checkout_holder, "checkout_fence": checkout_fence}
+    if plan is not None:
+        execution["plan"] = plan
     created = True
     if job_store_mode() == "postgres":
         job_id, created = _pg_store.submit({
@@ -658,7 +695,8 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
     executor = _executors.get(lane_for(tool, aps_live))
     assert executor is not None
     executor.submit(_run_job, job_id, tenant_id, tool, params, dwg, aps_live, dwg_version,
-                    checkout_holder, checkout_fence)
+                    checkout_holder, checkout_fence,
+                    **({"plan": plan} if plan is not None else {}))
     return job_id
 
 
@@ -1007,6 +1045,8 @@ def _progress_phase(
     §15). Read tools -> 'executing'; write tools -> 'storing version' (mock APS_LIVE=0)
     / 'extracting' (live re-extract APS_LIVE=1). Short + stable strings; documented in
     §15 as the vocabulary SSE/poll consumers can render."""
+    if (tool or {}).get("name") == PLAN_TOOL_NAME:
+        return "applying plan"
     caps = (tool or {}).get("capabilities") or []
     if isinstance(params, dict) and params.get("dry_run") is True:
         return "executing"
@@ -1036,7 +1076,8 @@ def _retry_or_finish(job_id: str, worker_id: str, tenant_id: str, tool: Dict[str
                      error: Dict[str, Any], provenance: Dict[str, Any],
                      dwg_version: Optional[int] = None,
                      checkout_holder: Optional[str] = None,
-                     checkout_fence: Optional[int] = None) -> None:
+                     checkout_fence: Optional[int] = None,
+                     plan: Optional[Dict[str, Any]] = None) -> None:
     """Release a retryable attempt back to submitted, or record its final failure."""
     rec = get_job(job_id)
     if rec is None or not isinstance(rec.get("lease"), dict) or rec["lease"].get("owner") != worker_id:
@@ -1072,7 +1113,8 @@ def _retry_or_finish(job_id: str, worker_id: str, tenant_id: str, tool: Dict[str
                 # it would re-run the job as an unnamed writer and skip the
                 # single-writer check the first attempt was subject to.
                 executor.submit(_run_job, job_id, tenant_id, tool, params, dwg, aps_live,
-                                dwg_version, checkout_holder, checkout_fence)
+                                dwg_version, checkout_holder, checkout_fence,
+                                **({"plan": plan} if plan is not None else {}))
         return
     _finish(job_id, "failed", time.time(), error=error, worker_id=worker_id,
             provenance=provenance)
@@ -1081,7 +1123,8 @@ def _retry_or_finish(job_id: str, worker_id: str, tenant_id: str, tool: Dict[str
 def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
              dwg: str, aps_live: bool, dwg_version: Optional[int] = None,
              checkout_holder: Optional[str] = None,
-             checkout_fence: Optional[int] = None) -> None:
+             checkout_fence: Optional[int] = None,
+             plan: Optional[Dict[str, Any]] = None) -> None:
     # NOTE: `holder` below is the thread-result box, unrelated to the checkout
     # holder — hence the qualified `checkout_holder` name on this lane.
     worker_id = str(uuid.uuid4())
@@ -1100,6 +1143,14 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
 
     def _call() -> None:
         try:
+            if plan is not None:
+                holder["env"] = broker_client.run_plan_via_broker(
+                    tenant_id, plan, dwg, timeout_s=max_s + 30,
+                    dwg_version=dwg_version, ledger_event_key=f"{job_id}:broker-run",
+                    checkout_holder=checkout_holder, checkout_fence=checkout_fence,
+                    job_id=job_id,
+                )
+                return
             holder["env"] = broker_client.run_via_broker(
                 tenant_id, tool, params, dwg, aps_live, timeout_s=max_s + 30,
                 dwg_version=dwg_version,
@@ -1131,7 +1182,8 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
         _retry_or_finish(job_id, worker_id, tenant_id, tool, params, dwg, aps_live, err,
                          {"attempt": attempt, "execution_path": "cloud" if aps_live else "local",
                           "failure": "timeout"}, dwg_version=dwg_version,
-                         checkout_holder=checkout_holder, checkout_fence=checkout_fence)
+                         checkout_holder=checkout_holder, checkout_fence=checkout_fence,
+                         plan=plan)
         return
 
     if "exc" in holder:
@@ -1146,7 +1198,8 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
         # the irreversible execution boundary. Replay the stable cloud event
         # key through retry handling. Never buy a separate local execution.
         _retry_or_finish(job_id, worker_id, tenant_id, tool, params, dwg, aps_live, err, cloud_failure, dwg_version=dwg_version,
-                         checkout_holder=checkout_holder, checkout_fence=checkout_fence)
+                         checkout_holder=checkout_holder, checkout_fence=checkout_fence,
+                         plan=plan)
         return
 
     env = holder.get("env") or {}
@@ -1169,6 +1222,7 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
                       "failure": {"code": err.get("error_code"), "message": err.get("message")}}
         if (
             aps_live
+            and plan is None
             and err.get("error_code") != ErrorCode.TURN_IN_PROGRESS
             and _allows_local_fallback(tool)
         ):
@@ -1176,7 +1230,8 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
                                 dwg_version, checkout_holder, checkout_fence)
             return
         _retry_or_finish(job_id, worker_id, tenant_id, tool, params, dwg, aps_live, err, provenance, dwg_version=dwg_version,
-                         checkout_holder=checkout_holder, checkout_fence=checkout_fence)
+                         checkout_holder=checkout_holder, checkout_fence=checkout_fence,
+                         plan=plan)
 
 
 def _allows_local_fallback(tool: Dict[str, Any]) -> bool:
@@ -1606,6 +1661,9 @@ def _redispatch_record(job_id: str) -> bool:
             rows = _query("SELECT execution_json FROM jobs WHERE job_id = ?", (job_id,))
             execution = json.loads(rows[0]["execution_json"] or "{}")
         tool = execution["tool"]
+        plan = execution.get("plan")
+        if tool.get("name") == PLAN_TOOL_NAME and not isinstance(plan, dict):
+            raise KeyError("plan")
         aps_live = bool(execution.get("aps_live", False))
         # Recover the version pin from the durable execution context so a
         # restart-recovered pinned job does not silently rerun against head.
@@ -1636,7 +1694,8 @@ def _redispatch_record(job_id: str) -> bool:
     if executor is None:
         return False
     executor.submit(_run_job, job_id, rec["tenant_id"], tool, rec["params"], rec["dwg"],
-                    aps_live, dwg_version, checkout_holder, checkout_fence)
+                    aps_live, dwg_version, checkout_holder, checkout_fence,
+                    **({"plan": plan} if plan is not None else {}))
     return True
 
 
