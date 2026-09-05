@@ -261,6 +261,34 @@ def fixture(
 
 
 class YieldTests(unittest.TestCase):
+    def test_only_proven_oversize_dispatches_without_jobs_are_inert(self) -> None:
+        # Captured provider topology from the 2026-09-04 oversize incident.
+        run_id = 33830277169
+        revision = "49e265747ca7812d6f4c45e64aba93ce2169daf4"
+        path = f".github/workflows/{DEPLOY_WF}"
+        cases = (
+            ("oversize", 522389, {"total_count": 0, "jobs": []}, "clear"),
+            ("within_limit", 512000, {"total_count": 0, "jobs": []}, "yielded"),
+            ("has_job", 522389, {"total_count": 1, "jobs": [{"id": 1}]}, "yielded"),
+            ("unreadable_jobs", 522389, None, "yielded"),
+            ("unreadable_source", None, {"total_count": 0, "jobs": []}, "yielded"),
+        )
+        for label, size, jobs, expected in cases:
+            with self.subTest(label=label):
+                provider = fixture()
+                row = run_row(run_id, status="queued", head_sha=revision)
+                row.update(event="workflow_dispatch", path=path)
+                provider.json_values[(TF, runs_endpoint(DEPLOY_WF, "per_page=50"))] = {
+                    "workflow_runs": [row]
+                }
+                if jobs is not None:
+                    provider.json_values[(TF, f"/actions/runs/{run_id}/jobs?per_page=1")] = jobs
+                if size is not None:
+                    provider.json_values[(TF, f"/contents/{path}?ref={revision}")] = {
+                        "type": "file", "size": size,
+                    }
+                self.assertEqual(subject.yield_check(provider)["status"], expected)
+
     def test_yields_to_a_live_relay_and_to_any_live_staging_deploy(self) -> None:
         """This lane is strictly lower priority than the relay.
 
@@ -530,6 +558,7 @@ class LaneShapeTests(unittest.TestCase):
         steps = self.lane()["jobs"]["plan"]["steps"]
         code = next(s["run"] for s in steps if "gh workflow run" in str(s.get("run", "")))
         self.assertIn("staging_is_busy", code)
+        self.assertIn("--check-idle", code)
         # Re-checked INSIDE the per-leg loop, not once before it.
         self.assertLess(code.index("for i in $(seq"), code.index("if staging_is_busy"))
         # Each leg is watched to a terminal state and anything but success stops

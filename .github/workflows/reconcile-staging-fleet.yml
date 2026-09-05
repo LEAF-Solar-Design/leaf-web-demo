@@ -179,14 +179,15 @@ jobs:
           before_deadline() { [ "$(date +%s)" -lt "$DEADLINE" ]; }
 
           staging_is_busy() {
-            local legs relays
-            legs=$(gh run list --repo "$INFRA_REPO" --workflow "$INFRA_WORKFLOW" \
-              --limit 20 --json status \
-              --jq '[.[] | select(.status != "completed")] | length')
-            relays=$(GH_TOKEN="$HOME_TOKEN" gh run list --repo "$GITHUB_REPOSITORY" \
-              --workflow dispatch-staging-deploys.yml --limit 10 --json status \
-              --jq '[.[] | select(.status != "completed")] | length')
-            [ "$legs" != "0" ] || [ "$relays" != "0" ]
+            # Share the planner's evidence check, including its exact exclusion
+            # for oversized immutable workflows with zero jobs. An unreadable
+            # provider still returns nonzero and makes this function busy.
+            if APP_GITHUB_TOKEN="$HOME_TOKEN" TERRAFORM_GITHUB_TOKEN="$GH_TOKEN" \
+              python -m scripts.reconcile_staging_fleet --check-idle; then
+              return 1
+            else
+              return 0
+            fi
           }
 
           COUNT=$(jq -r '.steps | length' "$PLAN")
