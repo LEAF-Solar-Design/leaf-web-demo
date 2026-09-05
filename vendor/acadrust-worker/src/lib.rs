@@ -328,8 +328,10 @@ impl ParsedDxf {
                 // text armed MOVE and the engine then refused it with a false
                 // sentence. The insertion point moves; value, height and rotation
                 // stay exactly what the drafter set.
-                t.insertion_point.x += dx;
-                t.insertion_point.y += dy;
+                // The crate's own translate, never a hand move of one field: an
+                // aligned or fit text (common in real DXF) carries a second
+                // alignment point that moves with the insertion point.
+                t.translate(Vector3::new(dx, dy, 0.0));
                 Ok(())
             }
             _ => refuse("entity_kind_not_editable"),
@@ -1704,5 +1706,28 @@ line two", "")), "text_control_character");
         assert!((rotation_deg_of(e).unwrap() - 30.0).abs() < 1e-9);
         let back = rewrite(&doc);
         assert_eq!(vertices_of(back.inner.entities().next().unwrap()), vec![[15.0, 13.0, 0.0]]);
+    }
+
+    #[test]
+    fn w4g5d_move_carries_an_aligned_texts_second_point_too() {
+        // An aligned or fit text (common in real DXF) has an alignment point;
+        // a hand move of the insertion point alone would tear it, which is
+        // why MOVE delegates to the crate's own translate.
+        let mut doc = empty_doc();
+        let mut text = Text::with_value("Fit", Vector3::new(0.0, 0.0, 0.0)).with_height(1.0);
+        text.alignment_point = Some(Vector3::new(10.0, 0.0, 0.0));
+        doc.add_created(EntityType::Text(text), "N").unwrap();
+        doc.translate_entity_core(0, 3.0, 4.0).unwrap();
+        // Bound first: a match on the iterator's temporary as the tail
+        // expression outlives `doc` (E0597).
+        let moved = doc.inner.entities().next().unwrap();
+        match moved {
+            EntityType::Text(t) => {
+                assert_eq!((t.insertion_point.x, t.insertion_point.y), (3.0, 4.0));
+                let a = t.alignment_point.expect("alignment point kept");
+                assert_eq!((a.x, a.y), (13.0, 4.0));
+            }
+            other => panic!("expected a TEXT, got {}", kind_name(other)),
+        };
     }
 }
