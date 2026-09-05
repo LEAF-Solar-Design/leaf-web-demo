@@ -167,6 +167,29 @@ def cad_engine_selector() -> Dict[str, Any]:
     }
 
 
+@router.get("/api/surface-config")
+def surface_config(tenant=Depends(deps.require_tenant)) -> Any:
+    """GET /api/surface-config — the tenant's surface-config overlay
+    (standardization slice 7b), through the SAME per-tenant fold
+    `/api/capabilities` uses.
+
+    Returns `{surfaces: <overlay>}` where `<overlay>` is EXACTLY what
+    `deps.effective_surface_config` returns: the validated overlay only,
+    never a server-side copy of the productSurfaces.js defaults (the web
+    owns that merge). `{surfaces: {}}` covers both "no file" and "file
+    failed to validate" — the fold fails closed either way, never a 500.
+    `source` is present only when the tenant's repo resolves and its file
+    exists, so the web's provenance chip has no digest/timestamp to show
+    for a tenant with no overlay at all.
+    """
+    overlay = deps.effective_surface_config(str(tenant))
+    payload: Dict[str, Any] = {"surfaces": overlay}
+    source = deps.surface_config_source(str(tenant))
+    if source is not None:
+        payload["source"] = source
+    return with_envelope_fields(payload)
+
+
 @router.get("/api/converse/registry")
 def converse_registry_route(tenant=Depends(deps.require_tenant)) -> Any:
     """The composer's `/` picker: commands + skills + tools in one catalog.

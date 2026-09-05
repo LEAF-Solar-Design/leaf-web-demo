@@ -15,6 +15,8 @@ import importlib.util
 import json
 import os
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -183,6 +185,86 @@ def load_tenant_repo_tools(tenant_id: str = _DEFAULT_TENANT) -> List[Dict[str, A
         print(f"[leaf-demo] bad tenant registry.json at {reg}: {exc}", file=sys.stderr)
 
     return load_repo_registry_tools(tenant_repo_dir(tenant_id), on_error=_bad_registry)
+
+
+# --------------------------------------------------------------------------- #
+# per-tenant surface-config overlay fold (standardization slice 7b)
+# --------------------------------------------------------------------------- #
+
+# 30s: long enough that a route-matrix burst against one tenant folds the
+# file once, short enough that an author's just-committed surface-config.json
+# is visible within one polling cycle with no deploy. Bounds the hot-path cost
+# to one stat+parse per tenant per window instead of one per request.
+SURFACE_CONFIG_CACHE_TTL_SECONDS = 30.0
+_surface_config_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+
+# One stderr warning per tenant per process, not per request: a tenant whose
+# repo carries a permanently broken overlay must not spam the log on every
+# poll. Bounded so an unbounded stream of distinct tenant ids (never expected
+# in practice — tenants are provisioned, not attacker-controlled cardinality)
+# cannot grow this set for the life of the process.
+_MAX_SURFACE_CONFIG_WARNED_TENANTS = 10_000
+_surface_config_warned_tenants: set = set()
+
+
+def effective_surface_config(tenant_id: str = _DEFAULT_TENANT) -> Dict[str, Any]:
+    """Fold ONE tenant's surface-config.json overlay when that tenant's repo
+    resolves, through the SAME tenant_repo_dir this file's registry fold uses.
+
+    Returns ONLY the validated overlay — never a server-side copy of the
+    contract defaults, which stay owned by web/src/site/productSurfaces.js;
+    the web merges. Fails closed to `{}` on any loader error (missing repo,
+    missing file, oversize, bad JSON, unknown surface id/slot): the vendored
+    reader (mushy-code extraction, slice 7b) already enforces the closed
+    schema vocabulary and never raises past this call.
+
+    Cached per tenant for SURFACE_CONFIG_CACHE_TTL_SECONDS (bounded TTL, see
+    the constant above)."""
+    tenant_key = str(tenant_id)
+    now = time.monotonic()
+    cached = _surface_config_cache.get(tenant_key)
+    if cached is not None and now - cached[0] < SURFACE_CONFIG_CACHE_TTL_SECONDS:
+        return cached[1]
+
+    from _vendor.mushy_fold.surface_config import load_repo_surface_config
+
+    def _bad_surface_config(cfg: Path, exc: Exception) -> None:
+        if (tenant_key not in _surface_config_warned_tenants
+                and len(_surface_config_warned_tenants) < _MAX_SURFACE_CONFIG_WARNED_TENANTS):
+            _surface_config_warned_tenants.add(tenant_key)
+            print(f"[leaf-demo] bad tenant surface-config.json at {cfg}: {exc}",
+                  file=sys.stderr)
+
+    overlay = load_repo_surface_config(
+        tenant_repo_dir(tenant_id), on_error=_bad_surface_config
+    )
+    _surface_config_cache[tenant_key] = (now, overlay)
+    return overlay
+
+
+def surface_config_source(tenant_id: str = _DEFAULT_TENANT) -> Optional[Dict[str, Any]]:
+    """`{sha256, authored_at}` of the tenant's RAW surface-config.json file,
+    independent of whether it validated: identity of the committed file, not
+    a claim about its content (the `submitSurfaceConfig` author-tool receipt
+    stamps the same sha256 at commit time). `None` when the tenant's repo
+    does not resolve, the file is absent, or it cannot be read — the route
+    folds all three into its own "no source" branch."""
+    root = tenant_repo_dir(tenant_id)
+    if root is None:
+        return None
+    cfg = Path(root) / "surface-config.json"
+    try:
+        if not cfg.exists():
+            return None
+        blob = cfg.read_bytes()
+    except OSError:
+        return None
+    return {
+        "sha256": hashlib.sha256(blob).hexdigest(),
+        "authored_at": datetime.fromtimestamp(
+            cfg.stat().st_mtime, tz=timezone.utc
+        ).isoformat(),
+    }
 
 
 # in-memory authored registry (seeded from disk at startup).

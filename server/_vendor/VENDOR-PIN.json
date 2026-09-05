@@ -1,14 +1,26 @@
 {
   "contract": "leaf.vendor-pin.v1",
-  "disposition": "wired-core: deps.load_tenant_repo_tools delegates the call-time registry read to the vendored mushy_fold core (deps.py imports _vendor.mushy_fold.registry.load_repo_registry_tools; PR #474). Tenant resolution and the malformed-registry stderr diagnostic stay in-repo. The 08-31 capability audit misreported this as never-imported; refuted against deps.py:180. Changing what deps.py imports from this package re-records this disposition (test_mushy_fold_vendor_disposition.py is the tripwire). Recorded 2026-08-31, card F-7.",
+  "disposition": "wired-core: deps.load_tenant_repo_tools delegates the call-time registry read to the vendored mushy_fold core (deps.py imports _vendor.mushy_fold.registry.load_repo_registry_tools; PR #474). deps.effective_surface_config does the same against mushy_fold.surface_config.load_repo_surface_config (standardization slice 7b). Tenant resolution and the malformed-registry/surface-config stderr diagnostics stay in-repo. The 08-31 capability audit misreported this as never-imported; refuted against deps.py:180. Changing what deps.py imports from this package re-records this disposition (test_mushy_fold_vendor_disposition.py is the tripwire). Recorded 2026-08-31, card F-7; extended 2026-09-04 for surface_config.py.",
   "files": {
     "__init__.py": "71321bd64198ffa084693370c0a1235bf8bd89c2649c53d6a049e90c7d2a109e",
     "entry.py": "b4f8948286cd5e52ee9e0be9c65974ec62d04cd03ee0c6676e8a0265b9bfbfdf",
     "ids.py": "16f4820ae14cee12ca2b5e94e121b83fb916a2ecdfd7fa1dd5b787719dbbf206",
     "paths.py": "b332223da548d20d2e6ba7b8813c1eec186fb762cef6a1f3af5aef5702366159",
-    "registry.py": "2a8af0cc5909516af2537190aa37207c8d0b23e94277148b6efbda8df0e38384"
+    "registry.py": "2a8af0cc5909516af2537190aa37207c8d0b23e94277148b6efbda8df0e38384",
+    "surface_config.py": "be6d918a2fd61502f5d7211675650203d1ec917359a75eae4fc380586cfe50a1"
+  },
+  "file_upstream_commits": {
+    "surface_config.py": "e146b78352bba788de80421787b871d62c42f86f"
   },
   "surface": "packages/fold-py/src/mushy_fold",
   "upstream": "LEAF-Solar-Design/mushy-code",
-  "upstream_commit": "52e8a367d8ca322856e9cd3a7455a6f399a34b2a"
+  "upstream_commit": "52e8a367d8ca322856e9cd3a7455a6f399a34b2a",
+  "contract_files": {
+    "surface-config.v1.schema.json": {
+      "path": "contract/surface-config.v1.schema.json",
+      "sha256": "cbd708a04718e816e1d76718432e9953b78b228644b10d8c6243d53f3c519959",
+      "upstream_path": "contract/surface-config.v1.schema.json",
+      "upstream_commit": "e146b78352bba788de80421787b871d62c42f86f"
+    }
+  }
 }
