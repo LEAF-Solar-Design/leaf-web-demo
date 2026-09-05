@@ -27,7 +27,9 @@ const promptBox = barBlock.slice(barBlock.indexOf('<PromptBox'), barBlock.indexO
 describe('slice 5a: the stage mounts PromptBox where its .tc-bar rows stood', () => {
   it('imports the console PromptBox and the stage reason ladder', () => {
     expect(toolCast).toMatch(/^import PromptBox from '\.\.\/components\/PromptBox\.jsx'$/m)
-    expect(toolCast).toMatch(/^import \{ stageRunDisabledReason \} from '\.\/stageRunReasons\.js'$/m)
+    // Slice 13d added stageHelpPaletteRow to the same import (the stage's
+    // declared-and-disabled Help row, stageRunReasons.js's own note).
+    expect(toolCast).toMatch(/^import \{ stageRunDisabledReason, stageHelpPaletteRow \} from '\.\/stageRunReasons\.js'$/m)
   })
 
   it('mounts exactly one PromptBox, inside .tc-bar, after RoutePanel', () => {

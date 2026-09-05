@@ -47,6 +47,33 @@ export default function ShortcutSheet({ open, onClose }) {
           index today. Named here rather than rendered as a row nothing
           backs. */}
       <div className="resolver-header">Sheet anchors and receipts: no shortcut index yet</div>
+      {/* Slice 13d: the Docs section. Two links, both real files this repo
+          ships today (docs/ARCHITECTURE.md, docs/convergence/SURFACE-CONTRACT.md)
+          rather than an in-app help route — none exists (grep of routeScene.js
+          and SiteRoot.jsx). GitHub blob links off the repo's own origin, so a
+          renamed or deleted doc breaks loudly on GitHub's own 404, not silently
+          here; DOC_LINKS is the one place either target is spelled. */}
+      <div className="resolver-header">Docs</div>
+      {DOC_LINKS.map((doc) => (
+        <a
+          className="resolver-row"
+          key={doc.href}
+          data-testid="shortcut-doc-link"
+          href={doc.href}
+          target="_blank"
+          rel="noreferrer"
+        >
+          <span className="lbar" aria-hidden="true" />
+          <span className="label">{doc.label}</span>
+        </a>
+      ))}
     </div>
   )
 }
+
+const REPO_BLOB = 'https://github.com/LEAF-Solar-Design/leaf-web-demo/blob/main'
+
+export const DOC_LINKS = Object.freeze([
+  Object.freeze({ label: 'Architecture overview', href: `${REPO_BLOB}/docs/ARCHITECTURE.md` }),
+  Object.freeze({ label: 'Surface contract (the honesty ladder\'s own doc)', href: `${REPO_BLOB}/docs/convergence/SURFACE-CONTRACT.md` }),
+])

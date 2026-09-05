@@ -13,6 +13,8 @@
 // Pure: no React, no DOM. The exact strings are pinned by
 // stageRunReasons.test.js, and nothing else spells them.
 
+import { byId } from '../lib/actionRegistry.js'
+
 export const STAGE_RUN_REASONS = Object.freeze({
   session: 'Sign in to run a request on this drawing.',
   drawing: 'Upload a DWG or DXF before running a request.',
@@ -30,6 +32,38 @@ export const STAGE_RUN_REASONS = Object.freeze({
  * a missing field fails closed on the rung it belongs to, which is the honest
  * reading of "I do not know whether you are signed in": you are not.
  */
+// The stage's Help ladder (standardization slice 13d): one static rung.
+// ToolCast never mounts ShortcutSheet and wires no Shift+? rung (Slice 5a/10b
+// stopped at the console), so the stage's "Keyboard shortcuts" palette row
+// (byId('bar:shortcuts'), the SAME registry record the console's row reads —
+// nothing forked) is declared here as disabled rather than either hidden
+// (which would let a real registry cap go dark on this surface with nothing
+// to check it against) or wired to a handler nobody built (which would run
+// nothing and say the cap works when it does not).
+export const STAGE_HELP_REASONS = Object.freeze({
+  shortcuts: 'The keyboard shortcut sheet is not wired into the public stage yet.',
+})
+
+/**
+ * The stage's ONE act-scope palette row for the console's shortcut sheet:
+ * byId('bar:shortcuts')'s own id/label/icon/kbd (never re-typed), declared
+ * disabled with STAGE_HELP_REASONS.shortcuts. A pure function, not a JSX
+ * literal, so stageRunReasons.test.js can pin its shape without mounting
+ * ToolCast.jsx.
+ */
+export function stageHelpPaletteRow() {
+  const action = byId('bar:shortcuts')
+  return {
+    id: action.id,
+    label: action.label,
+    icon: action.icon,
+    kbd: action.kbd,
+    disabled: true,
+    reason: STAGE_HELP_REASONS.shortcuts,
+    onSelect: () => {},
+  }
+}
+
 export function stageRunDisabledReason({
   sessionActive = false,
   hasDrawing = false,
