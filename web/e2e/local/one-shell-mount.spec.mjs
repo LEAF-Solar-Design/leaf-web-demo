@@ -697,12 +697,12 @@ test.describe('route matrix, rail ON', () => {
     // ROTATE, SCALE, EXPLODE joined Modify (11 real + trim/extend off).
     // W4g-5a: OFFSET made it 12 real, so the Modify row is 14.
     // W4g-5b: ARRAY's two forms make it 14 real, so the row is 16.
-    // W4g-6: TRIM, EXTEND, FILLET and CHAMFER are real, so the row is 20
-    // and every one of the 20 is real (no placeholder is left).
+    // W4g-6: TRIM, EXTEND, FILLET and CHAMFER are real and the two placeholders
+    // leave, so the row is 18 and every one of the 18 is real.
     await expect(draw.locator('.ribbon-tool')).toHaveCount(7)
     await expect(draw.locator('[data-tool^="draw:create"]')).toHaveCount(5)
     const modifyTools = modify.locator('.ribbon-tool')
-    await expect(modifyTools).toHaveCount(20)
+    await expect(modifyTools).toHaveCount(18)
     let modifyReal = 0
     for (const btn of await modifyTools.all()) {
       await expect(btn).toBeDisabled()
