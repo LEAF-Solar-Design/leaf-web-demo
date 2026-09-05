@@ -67,8 +67,8 @@ def _validated_input(params: dict, job_context: dict) -> dict:
             raise ValueError(f"{name} must be an array of objects")
     if not body["catalog"]:
         raise ValueError("catalog must not be empty")
-    if "native_bindings" in body and not isinstance(body["native_bindings"], dict):
-        raise ValueError("native_bindings must be an object")
+    if body.get("native_bindings") is not None and not isinstance(body["native_bindings"], dict):
+        raise ValueError("native_bindings must be null or an object")
     budget = body.get("budget", {})
     if not isinstance(budget, dict):
         raise ValueError("budget must be an object")

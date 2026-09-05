@@ -110,7 +110,8 @@
       "native_type_id": "synthetic-conduit-basic",
       "diameter_m": 0.025,
       "material_unit_cost": 2.0,
-      "labor_hours": 0.03
+      "labor_hours": 0.03,
+      "max_span_m": null
     },
     {
       "id": "conduit-premium",
@@ -118,7 +119,8 @@
       "native_type_id": "synthetic-conduit-premium",
       "diameter_m": 0.025,
       "material_unit_cost": 3.0,
-      "labor_hours": 0.04
+      "labor_hours": 0.04,
+      "max_span_m": null
     },
     {
       "id": "elbow-standard",
@@ -126,7 +128,8 @@
       "native_type_id": "synthetic-elbow-standard",
       "diameter_m": 0.025,
       "material_unit_cost": 5.0,
-      "labor_hours": 0.1
+      "labor_hours": 0.1,
+      "max_span_m": null
     },
     {
       "id": "box-standard",
@@ -134,7 +137,8 @@
       "native_type_id": "synthetic-box-standard",
       "diameter_m": 0.025,
       "material_unit_cost": 15.0,
-      "labor_hours": 0.3
+      "labor_hours": 0.3,
+      "max_span_m": null
     },
     {
       "id": "support-standard",
@@ -524,6 +528,7 @@
       "host_id": "synthetic-rail"
     }
   ],
+  "native_bindings": null,
   "budget": {
     "beam_width": 8,
     "max_revision_rounds": 4,

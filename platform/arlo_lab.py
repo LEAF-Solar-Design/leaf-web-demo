@@ -19,7 +19,7 @@ from .db import connection, run_transaction
 
 CONTRACT = "arlo_lab_example_v1"
 _EXAMPLES = {("feeder-lab-v1", "1"): (
-    "feeder-lab-v1.json", "3c59c7cd642950f8036ca27c5a605cf4c226eeb8c076e9b9fe9528cd9c1784bf")}
+    "feeder-lab-v1.json", "088e7cc50a8148dee695c00f1556c2e57660793caafe02b908d810c0ebc51e32")}
 _EXAMPLE_ROOT = Path(__file__).resolve().parent / "examples" / "arlo"
 
 
