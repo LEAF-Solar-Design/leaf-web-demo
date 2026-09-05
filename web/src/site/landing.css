@@ -1259,8 +1259,8 @@
   border: 1px solid rgba(240, 242, 240, .26); border-radius: 6px;
   cursor: pointer;
 }
-.spine-btn:hover { background: rgba(240, 242, 240, .12); }
-.spine-btn:focus-visible { outline: 2px solid #7fd6a6; outline-offset: 1px; }
+.spine-btn:hover, .inbox-toggle:hover { background: rgba(240, 242, 240, .12); }
+.spine-btn:focus-visible, .inbox-toggle:focus-visible { outline: 2px solid #7fd6a6; outline-offset: 1px; }
 .spine-expand { font-size: 13px; }
 /* The collapse control inside the expanded rail head: same button, inline. */
 .fam-title .spine-collapse { float: right; width: 24px; height: 24px; font-size: 12px; }
