@@ -990,4 +990,35 @@ describe('Astra refutations (W4g-6e record 4)', () => {
     expect(x).toBeCloseTo(101.732050808, 6)
     expect(rest).toEqual({ y: 0, x2: 1e12, y2: 0, layer: 'A' })
   })
+
+  it('keeps both crossings and retained arcs of a tiny semicircle cut by a chord', () => {
+    const target = poly('p', [[-0.00001, 0], [0.00001, 0]], false, 'A', [1, 0])
+    const edge = line('e', [-0.00002, -0.000006], [0.00002, -0.000006])
+    // The radius-1e-5 lower semicircle meets y = -6e-6 at x = +/-8e-6.
+    const hits = crossings(curveOf(target), curveOf(edge))
+    expect(hits).toHaveLength(2)
+    expect(hits[0].s).toBeCloseTo(0.204833, 6)
+    expect(hits[1].s).toBeCloseTo(0.795167, 6)
+    const out = trimEntity(target, edge, 0, -0.00001, 1e-9)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(2)
+    const { points, bulges, ...first } = out.steps[0]
+    expect(first).toEqual({ op: 'setVertices', entityId: 'p', closed: false })
+    expect(points).toHaveLength(2)
+    ;[[-0.00001, 0], [-0.000008, -0.000006]].forEach((p, i) => {
+      expect(points[i]).toHaveLength(2)
+      p.forEach((v, j) => expect(points[i][j]).toBeCloseTo(v, 9))
+    })
+    // Each retained 36.869898-degree arc has bulge sqrt(10) - 3.
+    expect(bulges).toHaveLength(2)
+    expect(bulges[0]).toBeCloseTo(0.1622776602, 9)
+    expect(bulges[1]).toBe(0)
+    const { inputs, ...second } = out.steps[1]
+    expect(second).toEqual({ op: 'createPolyline' })
+    const { bulges: createdBulges, ...rest } = inputs
+    expect(rest).toEqual({ pts: '0.000008,-0.000006 0.00001,0', closed: false, layer: 'A' })
+    expect(createdBulges).toHaveLength(2)
+    expect(createdBulges[0]).toBeCloseTo(0.1622776602, 9)
+    expect(createdBulges[1]).toBe(0)
+  })
 })

@@ -234,7 +234,7 @@ function segCircle(a, b, c, r) {
   const t1 = (-B - root) / (2 * A)
   const t2 = (-B + root) / (2 * A)
   const out = [{ t: t1, p: add(a, scale(d, t1)) }]
-  if (root > EPSILON) out.push({ t: t2, p: add(a, scale(d, t2)) })
+  if (root > EPSILON * Math.sqrt(A)) out.push({ t: t2, p: add(a, scale(d, t2)) })
   return out
 }
 /** Circle (c1, r1) against circle (c2, r2): up to two points. */
