@@ -1360,3 +1360,46 @@ describe('Astra refutations, round ten (W4g-6e record 13)', () => {
     ;[5, -5].forEach((v, j) => expect(hits[0].p[j]).toBeCloseTo(v, 8))
   })
 })
+
+describe('Astra refutations, round eleven (W4g-6e record 14)', () => {
+  it('keeps tiny perpendicular crossings and both retained trim pieces', () => {
+    const h = 2 ** -17
+    const target = poly('p', [[0, 0], [h, 0], [2 * h, 0]], false, 'A', [0, 1, 0])
+    const edge = poly('e', [[h / 2, h / 2], [h / 2, -h], [3 * h / 2, -h], [3 * h / 2, h / 2]], false)
+    // The U crosses the chord halfway and the lower semicircle at its bottom.
+    const hits = crossings(curveOf(target), curveOf(edge))
+    expect(hits).toHaveLength(2)
+    expect(hits[0].s).toBeCloseTo(0.5, 9)
+    expect(hits[1].s).toBeCloseTo(1.5, 9)
+    const out = trimEntity(target, edge, h, 0, 1e-9)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(2)
+    const { points, ...first } = out.steps[0]
+    expect(first).toEqual({ op: 'setVertices', entityId: 'p', closed: false })
+    expect(out.steps[0]).not.toHaveProperty('bulges')
+    expect(points).toHaveLength(2)
+    ;[[0, 0], [h / 2, 0]].forEach((p, i) => {
+      expect(points[i]).toHaveLength(2)
+      p.forEach((v, j) => expect(points[i][j]).toBeCloseTo(v, 12))
+    })
+    const { inputs, ...second } = out.steps[1]
+    expect(second).toEqual({ op: 'createPolyline' })
+    const { pts, bulges, ...rest } = inputs
+    expect(rest).toEqual({ closed: false, layer: 'A' })
+    const createdPoints = parsePts(pts)
+    expect(createdPoints).toHaveLength(2)
+    ;[[3 * h / 2, -h / 2], [2 * h, 0]].forEach((p, i) => {
+      expect(createdPoints[i]).toHaveLength(2)
+      p.forEach((v, j) => expect(createdPoints[i][j]).toBeCloseTo(v, 12))
+    })
+    expect(bulges).toHaveLength(2)
+    expect(bulges[0]).toBeCloseTo(Math.tan(Math.PI / 8), 9)
+    expect(bulges[1]).toBe(0)
+  })
+
+  it('keeps genuinely parallel tiny segments without crossings', () => {
+    const target = line('a', [0, 0], [1e-5, 0])
+    const edge = line('b', [0, 1e-9], [1e-5, 1e-9])
+    expect(crossings(curveOf(target), curveOf(edge))).toEqual([])
+  })
+})

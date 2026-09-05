@@ -229,11 +229,11 @@ export function nearestEntity(entities, x, y, tol, exceptId = null) {
 // ---- crossings ---------------------------------------------------------------
 
 /** Segment a-b against segment c-d: { t, u, p } or null (parallel and collinear both cross nowhere). */
-function segSeg(a, b, c, d) {
+function segSeg(a, b, c, d, eps = EPSILON) {
   const r = sub(b, a)
   const s = sub(d, c)
   const denom = cross(r, s)
-  if (Math.abs(denom) <= EPSILON * (1 + len(r) * len(s))) return null
+  if (Math.abs(denom) <= eps * len(r) * len(s)) return null
   const ac = sub(c, a)
   const t = cross(ac, s) / denom
   const u = cross(ac, r) / denom
@@ -349,7 +349,7 @@ export function crossings(target, edge, extend = 'none', tol = EPSILON) {
               if (onSupport(hit.p, edgeArc.c, edgeArc.r, eps, inputScale) && withinSeg(edgeSeg, hit.p)) hitOnTarget(hit.t, hit.p)
             }
           } else {
-            const hit = segSeg(a, b, c, d)
+            const hit = segSeg(a, b, c, d, gEps)
             if (hit && inSpanPt(hit.p, c, d, edgeU, gEps)) hitOnTarget(hit.t, hit.p)
           }
         }
