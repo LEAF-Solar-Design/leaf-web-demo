@@ -73,7 +73,7 @@
 //! `cargo test` (the tests at the bottom of this file) instead of only in a
 //! browser. The exported names and semantics are unchanged.
 
-use acadrust::entities::{Arc as ArcEntity, Circle, Entity, EntityType, Line, LwPolyline, Text};
+use acadrust::entities::{Arc as ArcEntity, Circle, Entity, EntityType, Line, LwPolyline, Text, Point, Ellipse};
 use acadrust::types::{Handle, Transform, Vector2, Vector3};
 use acadrust::{CadDocument, DxfReader, DxfWriter};
 use serde::Serialize;
@@ -135,6 +135,8 @@ fn editable(entity: &EntityType) -> bool {
             | EntityType::Circle(_)
             | EntityType::Arc(_)
             | EntityType::Text(_)
+            | EntityType::Point(_)
+            | EntityType::Ellipse(_)
     )
 }
 
@@ -146,6 +148,9 @@ fn kind_name(entity: &EntityType) -> &'static str {
         EntityType::Circle(_) => "CIRCLE",
         EntityType::Arc(_) => "ARC",
         EntityType::Text(_) => "TEXT",
+        // W4g-4b: the reference's Draw column, engine-backed now.
+        EntityType::Point(_) => "POINT",
+        EntityType::Ellipse(_) => "ELLIPSE",
         _ => "OTHER",
     }
 }
@@ -170,6 +175,10 @@ fn vertices_of(entity: &EntityType) -> Vec<[f64; 3]> {
         EntityType::Circle(c) => vec![[c.center.x, c.center.y, c.center.z]],
         EntityType::Arc(a) => vec![[a.center.x, a.center.y, a.center.z]],
         EntityType::Text(t) => vec![[t.insertion_point.x, t.insertion_point.y, t.insertion_point.z]],
+        // W4g-4b: a POINT is its location; an ELLIPSE is addressed by its centre
+        // (the axis and ratio ride beside it in the projection).
+        EntityType::Point(p) => vec![[p.location.x, p.location.y, p.location.z]],
+        EntityType::Ellipse(e) => vec![[e.center.x, e.center.y, e.center.z]],
         _ => Vec::new(),
     }
 }
@@ -216,6 +225,22 @@ fn height_of(entity: &EntityType) -> Option<f64> {
 fn rotation_deg_of(entity: &EntityType) -> Option<f64> {
     match entity {
         EntityType::Text(t) => Some(t.rotation.to_degrees()),
+        _ => None,
+    }
+}
+
+/// W4g-4b: an ELLIPSE's major-axis endpoint RELATIVE to its centre and its
+/// minor-to-major ratio, so the client can draw it; `None` for every other kind.
+fn major_axis_of(entity: &EntityType) -> Option<[f64; 2]> {
+    match entity {
+        EntityType::Ellipse(e) => Some([e.major_axis.x, e.major_axis.y]),
+        _ => None,
+    }
+}
+
+fn ratio_of(entity: &EntityType) -> Option<f64> {
+    match entity {
+        EntityType::Ellipse(e) => Some(e.minor_axis_ratio),
         _ => None,
     }
 }
@@ -345,6 +370,16 @@ impl ParsedDxf {
                 // aligned or fit text (common in real DXF) carries a second
                 // alignment point that moves with the insertion point.
                 t.translate(Vector3::new(dx, dy, 0.0));
+                Ok(())
+            }
+            // W4g-4b: a POINT moves its location, an ELLIPSE its centre (the
+            // axis is relative to the centre and rides along unchanged).
+            EntityType::Point(p) => {
+                p.location = Vector3::new(p.location.x + dx, p.location.y + dy, p.location.z);
+                Ok(())
+            }
+            EntityType::Ellipse(el) => {
+                el.center = Vector3::new(el.center.x + dx, el.center.y + dy, el.center.z);
                 Ok(())
             }
             _ => refuse("entity_kind_not_editable"),
@@ -914,6 +949,32 @@ impl ParsedDxf {
         self.add_created(EntityType::Text(text), layer)
     }
 
+    /// W4g-4b POINT: one location. Refuses a non-finite coordinate before
+    /// the document is touched.
+    fn create_point_core(&mut self, x: f64, y: f64, layer: &str) -> Result<String, Refusal> {
+        if !all_finite(&[x, y]) {
+            return refuse("coordinate_not_finite");
+        }
+        self.add_created(EntityType::Point(Point::from_coords(x, y, 0.0)), layer)
+    }
+
+    /// W4g-4b ELLIPSE: the centre, the major-axis endpoint RELATIVE to the
+    /// centre (non-zero) and the minor-to-major ratio in (0, 1]; a full
+    /// ellipse (the crate's default parameters). Refuses before it writes.
+    fn create_ellipse_core(&mut self, cx: f64, cy: f64, ax: f64, ay: f64, ratio: f64, layer: &str) -> Result<String, Refusal> {
+        if !all_finite(&[cx, cy, ax, ay, ratio]) {
+            return refuse("coordinate_not_finite");
+        }
+        if ax == 0.0 && ay == 0.0 {
+            return refuse("ellipse_axis_zero");
+        }
+        if ratio <= 0.0 || ratio > 1.0 {
+            return refuse("ellipse_ratio_out_of_range");
+        }
+        let ellipse = Ellipse::from_center_axes(Vector3::new(cx, cy, 0.0), Vector3::new(ax, ay, 0.0), ratio);
+        self.add_created(EntityType::Ellipse(ellipse), layer)
+    }
+
     fn create_line_core(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, layer: &str) -> Result<String, Refusal> {
         if !all_finite(&[x1, y1, x2, y2]) {
             return refuse("coordinate_not_finite");
@@ -1057,6 +1118,10 @@ impl ParsedDxf {
                     "rotationDeg": rotation_deg_of(e),
                     "startDeg": sweep_deg_of(e).map(|(start, _)| start),
                     "endDeg": sweep_deg_of(e).map(|(_, end)| end),
+                    // W4g-4b: an ELLIPSE's axis endpoint (relative to the centre)
+                    // and ratio; null for every other kind.
+                    "majorAxis": major_axis_of(e),
+                    "ratio": ratio_of(e),
                 })
             })
             .collect();
@@ -1124,6 +1189,20 @@ impl ParsedDxf {
 
     /// W4g-4 COPY: a displaced clone of the entity at `index`; returns the
     /// new entity's handle. Refuses a non-finite delta and read-only kinds.
+    /// W4g-4b: a POINT at (x, y) on `layer`; refuses before it writes.
+    #[wasm_bindgen(js_name = createPoint)]
+    pub fn create_point(&mut self, x: f64, y: f64, layer: &str) -> Result<String, JsValue> {
+        self.create_point_core(x, y, layer).map_err(js_err)
+    }
+
+    /// W4g-4b: an ELLIPSE at (cx, cy) with the major-axis endpoint (ax, ay)
+    /// relative to the centre and the minor-to-major ratio; refuses before it
+    /// writes.
+    #[wasm_bindgen(js_name = createEllipse)]
+    pub fn create_ellipse(&mut self, cx: f64, cy: f64, ax: f64, ay: f64, ratio: f64, layer: &str) -> Result<String, JsValue> {
+        self.create_ellipse_core(cx, cy, ax, ay, ratio, layer).map_err(js_err)
+    }
+
     /// W4g-6: replaces the geometry of a LINE (two points) or a polyline
     /// (2..MAX_CREATED_VERTICES points plus the closed flag) from a flat
     /// `[x0, y0, x1, y1, ...]` list; `bulges` empty or one per point
@@ -1877,6 +1956,67 @@ line two", "")), "text_control_character");
         let mut back = back;
         back.set_vertices_core(1, &[0.0, 0.0, 10.0, 0.0, 10.0, 10.0, 0.0, 10.0], true, &[]).unwrap();
         assert!(closed_of(back.inner.entities().nth(1).unwrap()));
+    }
+
+    #[test]
+    fn w4g4b_point_and_ellipse_create_move_transform_and_survive_rewrite() {
+        let mut doc = empty_doc();
+        let point = doc.create_point_core(3.0, 4.0, "P").expect("a point");
+        let ellipse = doc.create_ellipse_core(10.0, 0.0, 5.0, 0.0, 0.5, "E").expect("an ellipse");
+        assert_ne!(point, ellipse);
+        let back = rewrite(&doc);
+        let entities: Vec<&EntityType> = back.inner.entities().collect();
+        assert_eq!(kind_name(entities[0]), "POINT");
+        assert_eq!(kind_name(entities[1]), "ELLIPSE");
+        assert!(editable(entities[0]) && editable(entities[1]), "both kinds are editable");
+        assert_eq!(vertices_of(entities[0]), vec![[3.0, 4.0, 0.0]]);
+        assert_eq!(vertices_of(entities[1]), vec![[10.0, 0.0, 0.0]]);
+        assert_eq!(major_axis_of(entities[1]), Some([5.0, 0.0]));
+        assert_eq!(ratio_of(entities[1]), Some(0.5));
+        assert_eq!(major_axis_of(entities[0]), None);
+        assert_eq!(entities[0].common().layer, "P");
+        assert_eq!(entities[1].common().layer, "E");
+        // MOVE moves the location and the centre; the axis is relative and stays.
+        let mut back = back;
+        back.translate_entity_core(0, 1.0, 1.0).unwrap();
+        back.translate_entity_core(1, -10.0, 2.0).unwrap();
+        let moved: Vec<&EntityType> = back.inner.entities().collect();
+        assert_eq!(vertices_of(moved[0]), vec![[4.0, 5.0, 0.0]]);
+        assert_eq!(vertices_of(moved[1]), vec![[0.0, 2.0, 0.0]]);
+        assert_eq!(major_axis_of(moved[1]), Some([5.0, 0.0]));
+        // ROTATE by 90 degrees about the ellipse's own centre turns the axis, not the centre.
+        back.rotate_entity_core(1, 0.0, 2.0, 90.0).unwrap();
+        let turned = back.inner.entities().nth(1).unwrap();
+        let axis = major_axis_of(turned).unwrap();
+        assert!((axis[0]).abs() < 1e-9 && (axis[1] - 5.0).abs() < 1e-9, "axis after rotation: {:?}", axis);
+        assert_eq!(vertices_of(turned), vec![[0.0, 2.0, 0.0]]);
+        // SCALE by 2 about the origin doubles the axis and the centre's distance.
+        back.scale_entity_core(1, 0.0, 0.0, 2.0).unwrap();
+        let bigger = back.inner.entities().nth(1).unwrap();
+        let axis = major_axis_of(bigger).unwrap();
+        assert!((axis[1] - 10.0).abs() < 1e-9, "axis after scale: {:?}", axis);
+        assert_eq!(vertices_of(bigger), vec![[0.0, 4.0, 0.0]]);
+        assert_eq!(ratio_of(bigger), Some(0.5), "a uniform scale keeps the ratio");
+        // The written document reads back with the same kinds and numbers.
+        let again = rewrite(&back);
+        let list: Vec<&EntityType> = again.inner.entities().collect();
+        assert_eq!(kind_name(list[1]), "ELLIPSE");
+        assert_eq!(vertices_of(list[1]), vec![[0.0, 4.0, 0.0]]);
+    }
+
+    #[test]
+    fn w4g4b_point_and_ellipse_refuse_before_touching_the_document() {
+        let mut doc = empty_doc();
+        doc.create_line_core(0.0, 0.0, 1.0, 0.0, "A").unwrap();
+        let before = engine_bytes(&doc);
+        assert_eq!(code(doc.create_point_core(f64::NAN, 0.0, "A")), "coordinate_not_finite");
+        assert_eq!(code(doc.create_ellipse_core(0.0, 0.0, 0.0, 0.0, 0.5, "A")), "ellipse_axis_zero");
+        assert_eq!(code(doc.create_ellipse_core(0.0, 0.0, 5.0, 0.0, 0.0, "A")), "ellipse_ratio_out_of_range");
+        assert_eq!(code(doc.create_ellipse_core(0.0, 0.0, 5.0, 0.0, 1.5, "A")), "ellipse_ratio_out_of_range");
+        assert_eq!(code(doc.create_ellipse_core(0.0, 0.0, 5.0, f64::INFINITY, 0.5, "A")), "coordinate_not_finite");
+        assert_eq!(engine_bytes(&doc), before, "a refusal touches nothing");
+        // A ratio of exactly 1 is a circle-shaped ellipse and legal.
+        doc.create_ellipse_core(0.0, 0.0, 5.0, 0.0, 1.0, "A").expect("ratio 1 is legal");
     }
 
     #[test]

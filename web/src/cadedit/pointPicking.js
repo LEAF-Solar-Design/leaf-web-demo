@@ -48,6 +48,11 @@ export const PICK_SEQUENCES = Object.freeze({
   extend: [{ kind: 'edge', keys: ['edge', 'ex', 'ey'] }, { kind: 'point', keys: ['x', 'y'] }],
   fillet: [{ kind: 'edge', keys: ['edge', 'ex', 'ey'] }, { kind: 'point', keys: ['x', 'y'] }],
   chamfer: [{ kind: 'edge', keys: ['edge', 'ex', 'ey'] }, { kind: 'point', keys: ['x', 'y'] }],
+  // W4g-4b: a POINT is one pick; an ELLIPSE picks its centre then the axis
+  // endpoint (the ratio is typed); MATCHPROP picks the destination entity.
+  createPoint: [{ kind: 'point', keys: ['x', 'y'] }],
+  createEllipse: [{ kind: 'point', keys: ['x', 'y'] }, { kind: 'point', keys: ['x2', 'y2'] }],
+  matchprop: [{ kind: 'edge', keys: ['edge', 'ex', 'ey'] }],
 })
 
 /**
@@ -201,6 +206,15 @@ export function buildSnapIndex(entities) {
       }
       continue
     }
+    // W4g-4b: a POINT is its own endpoint; an ELLIPSE offers its centre.
+    if (e?.type === 'POINT') {
+      if (v[0]) push(v[0][0], v[0][1], SNAP_KIND.END)
+      continue
+    }
+    if (e?.type === 'ELLIPSE') {
+      if (v[0]) push(v[0][0], v[0][1], SNAP_KIND.CENTRE)
+      continue
+    }
     if (e?.type !== 'LINE' && e?.type !== 'LWPOLYLINE') continue
     for (let i = 0; i < v.length; i += 1) push(v[i][0], v[i][1], SNAP_KIND.END)
     const segments = e.type === 'LWPOLYLINE' && e.closed && v.length > 2 ? v.length : v.length - 1
@@ -236,6 +250,9 @@ export function snapPoint(index, x, y, tol) {
   return { x: xs[best], y: ys[best], kind: SNAP_KIND_NAME[kinds[best]] }
 }
 
+// W4g-4b: the ratio the ellipse ghost is drawn at (the prompt's default).
+export const ELLIPSE_GHOST_RATIO = 0.5
+
 /** The rubber band for the cursor at world (x, y): [[x,y],...] plus closed, or null. */
 export function ghostFor(state, x, y) {
   if (!state?.sequence || !finite(x) || !finite(y)) return null
@@ -260,6 +277,23 @@ export function ghostFor(state, x, y) {
   if (op === 'createLine' || op === 'mirror') {
     if (!last || picked.length >= 2) return null
     return { pts: [last, [x, y]], closed: false }
+  }
+  // W4g-4b: the ellipse about the centre with the cursor as the axis
+  // endpoint, at the prompt's default ratio (the typed ratio is read at run).
+  if (op === 'createEllipse') {
+    if (!last || picked.length >= 2) return null
+    const ax = x - last[0]
+    const ay = y - last[1]
+    if (ax === 0 && ay === 0) return null
+    const n = 48
+    const pts = new Array(n)
+    for (let i = 0; i < n; i += 1) {
+      const t = (i / n) * Math.PI * 2
+      const c = Math.cos(t)
+      const sn = Math.sin(t) * ELLIPSE_GHOST_RATIO
+      pts[i] = [last[0] + ax * c - ay * sn, last[1] + ay * c + ax * sn]
+    }
+    return { pts, closed: true }
   }
   // W4g-4: the rectangle from the first corner to the cursor.
   if (op === 'createRectangle') {

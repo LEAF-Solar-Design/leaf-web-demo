@@ -26,7 +26,7 @@ class IdleWorker {
  *  new cluster list on every tab change. */
 const seat = () => ({
   id: 'clipboard', label: 'Clipboard', kind: 'group', tools: [],
-  extra: <div id="cockpit-clipboard-slot" className="ribbon-cluster-tools" />,
+  extra: <div id="cockpit-clipboard-slot" className="ribbon-slot" />,
 })
 
 const DRAW_TAB = ['draw', 'modify', 'clipboard']

@@ -701,8 +701,12 @@ test.describe('route matrix, rail ON', () => {
     // W4g-5b: ARRAY's two forms make it 14 real, so the row is 16.
     // W4g-6: TRIM, EXTEND, FILLET and CHAMFER are real and the two placeholders
     // leave, so the row is 18 and every one of the 18 is real.
+    // W4g-4b: ELLIPSE and POINT are real, so all 7 Draw tools are creates and
+    // the Properties seat (after Layers and Block, the reference's place)
+    // carries the real Match tool in its slot beside its honest ByLayer fields.
     await expect(draw.locator('.ribbon-tool')).toHaveCount(7)
-    await expect(draw.locator('[data-tool^="draw:create"]')).toHaveCount(5)
+    await expect(draw.locator('[data-tool^="draw:create"]')).toHaveCount(7)
+    await expect(page.locator('#cockpit-properties-slot [data-tool="modify:matchprop"]')).toHaveCount(1)
     const modifyTools = modify.locator('.ribbon-tool')
     await expect(modifyTools).toHaveCount(18)
     let modifyReal = 0
@@ -1292,6 +1296,61 @@ test.describe('route matrix, rail ON', () => {
     await bar.press('Enter')
     await expect(page.locator('.cockpit-band [data-tool="quick-redo-edit"]')).toBeEnabled({ timeout: 60_000 })
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeTrim + 3))
+
+    // W4g-4b on the REAL engine: a POINT (+1) and an ELLIPSE (+1) by typed
+    // operands, then MATCHPROP: a LINE drawn on its own layer is the source,
+    // the earlier cutting edge the destination (its id typed into the same
+    // edge field a canvas click fills); the workbench's own entity label
+    // reads the copied layer back, the count holds, one engine undo puts
+    // the old layer back.
+    await page.keyboard.press('Escape')
+    await bar.fill('po')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'createPoint', { timeout: 20_000 })
+    await page.getByLabel('ribbon x', { exact: true }).fill('360')
+    await page.getByLabel('ribbon y', { exact: true }).fill('300')
+    await page.getByLabel('ribbon y', { exact: true }).press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeTrim + 4), { timeout: 60_000 })
+    await page.keyboard.press('Escape')
+    await bar.fill('el')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'createEllipse', { timeout: 20_000 })
+    await page.getByLabel('ribbon x', { exact: true }).fill('380')
+    await page.getByLabel('ribbon y', { exact: true }).fill('300')
+    await page.getByLabel('ribbon x2', { exact: true }).fill('390')
+    await page.getByLabel('ribbon y2', { exact: true }).fill('300')
+    await page.getByLabel('ribbon ratio', { exact: true }).fill('0.5')
+    await page.getByLabel('ribbon ratio', { exact: true }).press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeTrim + 5), { timeout: 60_000 })
+    test.info().annotations.push({ type: 'point-ellipse', description: `POINT and ELLIPSE drew one entity each (${countBeforeTrim + 3} -> ${countBeforeTrim + 5})` })
+    await page.keyboard.press('Escape')
+    await bar.fill('l')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'createLine', { timeout: 20_000 })
+    await page.getByLabel('ribbon x', { exact: true }).fill('400')
+    await page.getByLabel('ribbon y', { exact: true }).fill('290')
+    await page.getByLabel('ribbon x2', { exact: true }).fill('400')
+    await page.getByLabel('ribbon y2', { exact: true }).fill('310')
+    await page.getByLabel('ribbon layer', { exact: true }).fill('W4G4B')
+    await page.getByLabel('ribbon layer', { exact: true }).press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeTrim + 6), { timeout: 60_000 })
+    await page.keyboard.press('Escape')
+    const destinationRow = page.locator('.cad-edit-workbench label', { has: page.locator(`input[type="radio"][value="${cuttingEdge}"]`) })
+    await expect(destinationRow).not.toContainText('on layer W4G4B')
+    await page.getByRole('radio').last().check()
+    await bar.fill('ma')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'matchprop', { timeout: 20_000 })
+    await page.getByLabel('ribbon edge', { exact: true }).fill(cuttingEdge)
+    await page.getByLabel('ribbon edge', { exact: true }).press('Enter')
+    await expect(workbenchStatus).toContainText('matchprop applied', { timeout: 60_000 })
+    await expect(destinationRow).toContainText('on layer W4G4B')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeTrim + 6))
+    test.info().annotations.push({ type: 'matchprop', description: `MATCHPROP copied layer W4G4B onto ${cuttingEdge} in one step (count held at ${countBeforeTrim + 6})` })
+    await page.keyboard.press('Escape')
+    await bar.fill('u')
+    await bar.press('Enter')
+    await expect(destinationRow).not.toContainText('on layer W4G4B', { timeout: 60_000 })
 
     // W4g-2 (one head), confirm-time race. LAST in the walk on purpose: a
     // refused run leaves its failed strip on the page and there is no

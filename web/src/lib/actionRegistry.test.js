@@ -190,6 +190,8 @@ describe('honest triggers', () => {
     // W4g-4: RECTANG joined Draw; COPY, MIRROR, ROTATE, SCALE, EXPLODE joined Modify.
     expect(forGroup('draw').map((a) => a.id)).toEqual([
       'draw:createLine', 'draw:createPolyline', 'draw:createCircle', 'draw:createArc', 'draw:createRectangle',
+      // W4g-4b: the rest of the reference's small Draw column.
+      'draw:createEllipse', 'draw:createPoint',
       // W4g-5d: TEXT is a draw create seated in the Annotation panel.
       'draw:createText',
     ])
@@ -205,6 +207,8 @@ describe('honest triggers', () => {
       // W4g-6: the intersection verbs, planned in the browser and applied
       // by the engine as one batch.
       'modify:trim', 'modify:extend', 'modify:fillet', 'modify:chamfer',
+      // W4g-4b: MATCHPROP, a Modify record seated in the Properties panel.
+      'modify:matchprop',
     ])
   })
 

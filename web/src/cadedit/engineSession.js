@@ -165,7 +165,7 @@ export function surviveSelection(previousId, entities) {
 }
 
 /** The W4d Draw group's operations: creation needs no selection. */
-export const CREATE_OPS = Object.freeze(['createLine', 'createCircle', 'createArc', 'createPolyline', 'createRectangle', 'createText'])
+export const CREATE_OPS = Object.freeze(['createLine', 'createCircle', 'createArc', 'createPolyline', 'createRectangle', 'createText', 'createPoint', 'createEllipse'])
 // W4g-4: edits that MAKE an entity (a displaced copy, a mirrored copy, the
 // segments of an explode) report what they made by id like the Draw group
 // does; the selection lands on it.
@@ -222,7 +222,7 @@ export function parsePointList(raw) {
  * with a typed reason; this layer exists so a typo costs a sentence, not a
  * round trip.
  */
-export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, layer, height, rot, text } = {}) {
+export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, layer, height, rot, text, ratio } = {}) {
   const layerName = String(layer ?? '').trim()
   if (op === 'createLine') {
     const [x1, y1, xx2, yy2] = [x, y, x2, y2].map(fmtDelta)
@@ -267,6 +267,24 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
     if (/[\u0000-\u001f\u007f-\u009f]/.test(value)) return { refusal: 'Text refused: one line only, with no control characters.' }
     return { payload: { x: px, y: py, height: h, rotationDeg: angle, text: value, layer: layerName } }
   }
+  if (op === 'createPoint') {
+    // W4g-4b POINT: one location.
+    const [px, py] = [x, y].map(fmtDelta)
+    if (px === null || py === null) return { refusal: 'Point refused: x and y must both be numbers.' }
+    return { payload: { x: px, y: py, layer: layerName } }
+  }
+  if (op === 'createEllipse') {
+    // W4g-4b ELLIPSE: the centre, the axis ENDPOINT (absolute, as picked) and
+    // the minor-to-major ratio in (0, 1]; the engine takes the axis relative
+    // to the centre, so the difference is sent, never the endpoint.
+    const [cx, cy, ex, ey] = [x, y, x2, y2].map(fmtDelta)
+    if ([cx, cy, ex, ey].some((v) => v === null)) return { refusal: 'Ellipse refused: the centre x, y and the axis endpoint x2, y2 must all be numbers.' }
+    if (cx === ex && cy === ey) return { refusal: 'Ellipse refused: the axis endpoint must differ from the centre.' }
+    const k = fmtDelta(ratio)
+    if (k === null) return { refusal: 'Ellipse refused: the ratio must be a number.' }
+    if (k <= 0 || k > 1) return { refusal: 'Ellipse refused: the ratio (minor to major) must be greater than 0 and at most 1.' }
+    return { payload: { cx, cy, ax: ex - cx, ay: ey - cy, ratio: k, layer: layerName } }
+  }
   if (op === 'createPolyline') {
     const points = parsePointList(pts)
     if (!points) return { refusal: `Polyline refused: enter at least two points as x,y pairs (at most ${MAX_CREATE_POINTS}).` }
@@ -282,6 +300,27 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
     return { payload: { points: [x1, y1, xx2, y1, xx2, yy2, x1, yy2], closed: true, layer: layerName } }
   }
   return { refusal: `Draw refused: unknown operation ${op}.` }
+}
+
+/**
+ * W4g-4b MATCHPROP: ONE setLayer step on the destination with the source's
+ * layer, from the session's own entity list; `{ steps }` or `{ refusal }`.
+ * A destination already on that layer is a refusal (nothing would change),
+ * a read-only one too. Pure so a row can drive it without a worker.
+ */
+export function planMatchprop(session, inputs = {}) {
+  const { entities, selectedId } = session
+  const checked = buildEditPayload('matchprop', selectedId, inputs)
+  if (checked.refusal) return { refusal: checked.refusal }
+  const source = (entities || []).find((candidate) => candidate.id === selectedId)
+  if (!source) return { refusal: 'Match refused: the selected entity is no longer in the document.' }
+  const target = (entities || []).find((candidate) => candidate.id === checked.payload.edge)
+  if (!target) return { refusal: 'Match refused: the destination object is no longer in the document.' }
+  if (target.editable === false) return { refusal: 'Match refused: the destination object is read-only in the browser engine.' }
+  const layer = String(source.layer ?? '').trim()
+  if (!layer) return { refusal: 'Match refused: the selection has no layer to copy.' }
+  if (String(target.layer ?? '') === layer) return { refusal: `Match refused: the destination is already on layer ${layer}.` }
+  return { steps: [{ op: 'setLayer', entityId: target.id, layer }] }
 }
 
 /**
@@ -331,6 +370,11 @@ export function lowerSteps(steps) {
     if (!entityId) return { refusal: `Edit refused: step ${op} names no entity.` }
     if (op === 'delete') {
       lowered.push({ op, payload: { entityId } })
+    } else if (op === 'setLayer') {
+      // W4g-4b: MATCHPROP's one step, the same shape the single op posts.
+      const layer = String(step.layer ?? '').trim()
+      if (!layer) return { refusal: 'Edit refused: a layer step names no layer.' }
+      lowered.push({ op, payload: { entityId, layer } })
     } else if (op === 'setVertices') {
       // A trim keeps at most the entity's own points plus its two cut points,
       // so the bound is the kernel's, plus two, not the create bound.
@@ -374,6 +418,15 @@ export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer, x1,
   // geometry works out (a crossing, a corner) is intersect.js's answer at
   // run time, as OFFSET's is. The payload is never posted as-is: the run
   // path plans a batch from the two entities.
+  if (op === 'matchprop') {
+    // W4g-4b MATCHPROP: the selection is the source, the pick names the
+    // destination; the layer is copied (the reference copies colour,
+    // linetype and lineweight too, which wait on the contract).
+    const edgeId = String(edge ?? '').trim()
+    if (!edgeId) return { refusal: 'Match refused: select the destination object by clicking it on the drawing.' }
+    if (edgeId === String(entityId ?? '')) return { refusal: 'Match refused: the destination must be a different entity from the selection.' }
+    return { payload: { ...payload, edge: edgeId } }
+  }
   if (INTERSECT_VERBS[op]) {
     const verb = INTERSECT_VERBS[op]
     const edgeId = String(edge ?? '').trim()
@@ -875,8 +928,8 @@ export default function useEngineSession({
     // (intersect.js) from the selection and the second entity, and the
     // engine applies the plan as ONE batch: one round trip, one undo step,
     // all of it or none of it.
-    if (INTERSECT_VERBS[op]) {
-      const planned = planIntersectVerb(op, sessionRef.current, inputs)
+    if (INTERSECT_VERBS[op] || op === 'matchprop') {
+      const planned = op === 'matchprop' ? planMatchprop(sessionRef.current, inputs) : planIntersectVerb(op, sessionRef.current, inputs)
       if (planned.refusal) {
         patch({ errorKind: SESSION_ERROR.REFUSED, status: planned.refusal })
         return
