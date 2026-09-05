@@ -1,0 +1,43 @@
+.campaign-panel,
+.campaign-panel .panel-sub,
+.campaign-panel form,
+.campaign-panel label,
+.campaign-questions,
+.campaign-questions > li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.campaign-panel {
+  padding: 1rem;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+}
+
+.campaign-panel input,
+.campaign-panel textarea,
+.campaign-panel select {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  font: inherit;
+  color: inherit;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 0.375rem;
+  padding: 0.625rem;
+}
+
+.campaign-panel textarea { min-height: 6rem; resize: vertical; }
+.campaign-panel p { margin: 0; overflow-wrap: anywhere; }
+.campaign-panel h3 { margin: 0; }
+.campaign-panel .dim { color: var(--muted); }
+.campaign-questions { list-style: none; padding: 0; margin: 0; }
+.campaign-questions > li { padding-block: 0.75rem; border-bottom: 1px solid var(--border); }
+.campaign-status { padding: 0.75rem; background: var(--accent-tint); }
+.campaign-answer { white-space: pre-wrap; }
+.campaign-error { padding: 0.75rem; border: 1px solid var(--border); }
+.campaign-panel button { justify-self: start; }

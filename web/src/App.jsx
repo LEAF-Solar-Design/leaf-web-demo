@@ -41,6 +41,7 @@ import VersionHistory from './components/VersionHistory.jsx'
 import * as mockVersions from './mock/mockVersions.js'
 import ProjectSwitcher from './components/ProjectSwitcher.jsx'
 import WorkspaceSummary from './components/WorkspaceSummary.jsx'
+import CampaignPanel from './campaigns/CampaignPanel.jsx'
 import OpsDrawer from './components/OpsDrawer.jsx'
 import CustomizePanel from './components/CustomizePanel.jsx'
 import CheckoutControls from './components/CheckoutControls.jsx'
@@ -3108,6 +3109,10 @@ export default function App() {
             onSelectVersion={selectCanonicalVersion}
             onClose={onCloseProject}
           />
+        )}
+
+        {!mock && openProjectId && (
+          <CampaignPanel projectId={openProjectId} projectName={currentProjectName} signedIn={signedIn} />
         )}
 
         <SurfaceFrame.Tabs />
