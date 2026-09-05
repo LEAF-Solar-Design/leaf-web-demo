@@ -14,6 +14,7 @@ Env:
     APS_LIVE=1             -> tool runs route through the broker to APS DA
     APP_PORT=8130          -> port for `python app.py`
 """
+# merge-queue smoke 2026-09-05: first queued merge on main; no behaviour change.
 from __future__ import annotations
 
 import os
