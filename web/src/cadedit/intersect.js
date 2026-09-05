@@ -268,7 +268,7 @@ const inUnit = (u) => u >= -EPSILON && u <= 1 + EPSILON
  * names 'start' / 'end' / 'both' and the target is straight; CIRCLE: the
  * angle; ARC: the offset from its start, on the FULL circle so callers can
  * extend). The edge is never extended (the reference's default edge mode).
- * Segment endpoints snap within `tol`; only equal params merge, so distinct
+ * Segment endpoints snap within `tol`; only equal params at the same point merge, so distinct
  * visits to a self-crossing point remain distinct crossings.
  */
 export function crossings(target, edge, extend = 'none', tol = EPSILON) {
@@ -276,7 +276,7 @@ export function crossings(target, edge, extend = 'none', tol = EPSILON) {
   const eps = Math.max(tol, EPSILON)
   const push = (s, p) => {
     if (target.closed && target.segs && s === target.segs.length) s = 0
-    if (!out.some((o) => Math.abs(o.s - s) <= 1e-9)) out.push({ s, p })
+    if (!out.some((o) => Math.abs(o.s - s) <= 1e-9 && same(o.p, p, eps))) out.push({ s, p })
   }
   const straight = target.kind === 'LINE' || target.kind === 'POLY'
   const edgeSegs = edge.kind === 'LINE' || edge.kind === 'POLY' ? edge.segs : null
@@ -360,7 +360,7 @@ function piece(curve, a, b, eps) {
   }
   const push = (p, bulge) => {
     const q = [clean(p[0]), clean(p[1])]
-    if (pts.length && same(pts[pts.length - 1], p, eps)) {
+    if (pts.length && Math.abs(bulges[bulges.length - 1]) <= BULGE_EPS && same(pts[pts.length - 1], p, eps)) {
       pts[pts.length - 1] = q
       bulges[bulges.length - 1] = bulge
     } else {
@@ -422,7 +422,7 @@ export function trimEntity(target, edge, px, py, tol = EPSILON) {
   const layer = layerOf(target)
   if (T.kind === 'LINE' || (T.kind === 'POLY' && !T.closed)) {
     const end = T.kind === 'LINE' ? 1 : T.pts.length - 1
-    const inside = crossings(T, E, 'none', eps).filter((c) => c.s > EPSILON && c.s < end - EPSILON && !same(c.p, T.pts[0], eps) && !same(c.p, T.pts[T.pts.length - 1], eps))
+    const inside = crossings(T, E, 'none', eps).filter((c) => c.s > EPSILON && c.s < end - EPSILON)
     if (!inside.length) return refuse(verb, 'the cutting edge does not cross the selection')
     const sp = locate(T, pick).s
     if (inside.some((c) => same(c.p, pointAt(T, sp), eps))) return refuse(verb, 'click on the part to remove, away from the crossing')

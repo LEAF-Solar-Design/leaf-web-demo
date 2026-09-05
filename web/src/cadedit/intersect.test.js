@@ -894,3 +894,49 @@ describe('EXTEND on a curved end segment (W4g-6e)', () => {
     expect(a1).toBeCloseTo(215.615884258, 6)
   })
 })
+
+describe('Astra refutations (W4g-6e record 4)', () => {
+  it('preserves a tiny chord with a huge bulge through an unrelated end trim', () => {
+    // The 0.001 chord and bulge 100000 describe an arc of radius 25 and sagitta 50.
+    const target = poly('p', [[0, 0], [0.001, 0], [10, 0], [20, 0]], false, 'A', [100000, 0, 0, 0])
+    const out = trimEntity(target, line('e', [15, -1], [15, 1]), 19, 0, 0.01)
+    expect(out).toEqual({ steps: [{
+      op: 'setVertices', entityId: 'p', points: [[0, 0], [0.001, 0], [10, 0], [15, 0]], closed: false,
+      bulges: [100000, 0, 0, 0],
+    }] })
+  })
+
+  it('keeps crossings that are close in param but far apart in space', () => {
+    const target = line('l', [0, 0], [1e10, 0])
+    // The lower semicircle about (100,1), r 2, meets y = 0 at x = 100 +/- sqrt(3).
+    const edge = poly('q', [[98, 1], [102, 1]], false, 'A', [1, 0])
+    expect(crossings(curveOf(target), curveOf(edge))).toHaveLength(2)
+    const out = trimEntity(target, edge, 100, 0, 1e-9)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(2)
+    const { points, ...first } = out.steps[0]
+    expect(first).toEqual({ op: 'setVertices', entityId: 'l', closed: false })
+    expect(points).toHaveLength(2)
+    expect(points[0]).toEqual([0, 0])
+    expect(points[1]).toHaveLength(2)
+    expect(points[1][0]).toBeCloseTo(98.267949192, 6)
+    expect(points[1][1]).toBe(0)
+    expect(out.steps[0]).not.toHaveProperty('bulges')
+    const { inputs, ...second } = out.steps[1]
+    expect(second).toEqual({ op: 'createLine' })
+    const { x, ...rest } = inputs
+    expect(x).toBeCloseTo(101.732050808, 6)
+    expect(rest).toEqual({ y: 0, x2: 1e10, y2: 0, layer: 'A' })
+  })
+
+  it('keeps an interior crossing at a coordinate that revisits the start', () => {
+    const target = poly('p', [[0, 0], [10, 0], [0, 0], [0, 10]], false, 'A', [1, 0, 0, 0])
+    // y = x meets the arc start at s = 0 and the return visit at s = 2.
+    const edge = line('e', [-1, -1], [1, 1])
+    expect(crossings(curveOf(target), curveOf(edge))).toEqual([{ s: 0, p: [0, 0] }, { s: 2, p: [0, 0] }])
+    expect(trimEntity(target, edge, 0, 5, 1e-9)).toEqual({ steps: [{
+      op: 'setVertices', entityId: 'p', points: [[0, 0], [10, 0], [0, 0]], closed: false,
+      bulges: [1, 0, 0],
+    }] })
+  })
+})

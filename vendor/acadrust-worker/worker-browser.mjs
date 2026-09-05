@@ -163,7 +163,8 @@ function entityIndex(doc, payload) {
 // anything else: a value of another shape is refused, not read as straight.
 function bulgeList(raw) {
   if (raw == null) return new Float64Array(0)
-  if (Array.isArray(raw) || ArrayBuffer.isView(raw)) return Float64Array.from(raw, Number)
+  if (Array.isArray(raw)) return Float64Array.from(raw, (v) => (typeof v === 'number' ? v : NaN))
+  if (ArrayBuffer.isView(raw) && !(raw instanceof DataView)) return Float64Array.from(raw)
   throw new Error('bulges_not_a_list')
 }
 

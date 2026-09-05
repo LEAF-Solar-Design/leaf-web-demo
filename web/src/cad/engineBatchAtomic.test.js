@@ -132,6 +132,10 @@ const SCRIPT = [
   'out.holeBulge = summary(await handleMessage({ type: "applyEdit", op: "createPolyline", payload: { points: [0, 0, 10, 0, 10, 10], closed: false, layer: "A", bulges: [1, , 0] } }, engine))',
   'out.notAList = summary(await handleMessage({ type: "applyEdit", op: "createPolyline", payload: { points: [0, 0, 10, 0, 10, 10], closed: false, layer: "A", bulges: "1 0 0" } }, engine))',
   'out.afterRefusals = summary(await handleMessage({ type: "applyEdit", op: "createLine", payload: { x1: 70, y1: 70, x2: 80, y2: 70, layer: "A" } }, engine))',
+  // W4g-6e (record 4): the worker reads bulges strictly: a boolean or null is not a number, a DataView is not a list.
+  'out.boolBulge = summary(await handleMessage({ type: "applyEdit", op: "createPolyline", payload: { points: [0, 0, 10, 0], closed: false, layer: "A", bulges: [true, null] } }, engine))',
+  'out.viewBulge = summary(await handleMessage({ type: "applyEdit", op: "createPolyline", payload: { points: [0, 0, 10, 0], closed: false, layer: "A", bulges: new DataView(new ArrayBuffer(16)) } }, engine))',
+  'out.afterStrict = summary(await handleMessage({ type: "applyEdit", op: "createLine", payload: { x1: 90, y1: 90, x2: 95, y2: 90, layer: "A" } }, engine))',
   'process.stdout.write(JSON.stringify({ ids, out }))',
 ].join('\n')
 
@@ -258,5 +262,12 @@ describe.skipIf(!GLUE)('the worker batch on the real engine', () => {
     expect(out.notAList.reason).toBe('bulges_not_a_list')
     expect(out.afterRefusals.ok).toBe(true)
     expect(out.afterRefusals.entities).toHaveLength(out.typedCurved.entities.length + 1)
+    // W4g-6e (record 4): strict bulge reading at the worker boundary.
+    expect(out.boolBulge.ok).toBe(false)
+    expect(out.boolBulge.reason).toBe('bulge_not_finite')
+    expect(out.viewBulge.ok).toBe(false)
+    expect(out.viewBulge.reason).toBe('bulges_not_a_list')
+    expect(out.afterStrict.ok).toBe(true)
+    expect(out.afterStrict.entities).toHaveLength(out.afterRefusals.entities.length + 1)
   })
 })
