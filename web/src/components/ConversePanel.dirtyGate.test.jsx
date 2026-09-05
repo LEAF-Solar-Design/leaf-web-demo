@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 
 let APPROVALS = []
 let streamHandlers = null
+let deferred = { promise: Promise.resolve() }
 
 vi.mock('../telemetry.js', () => ({ track: vi.fn() }))
 vi.mock('../converse.js', () => ({
@@ -11,13 +12,17 @@ vi.mock('../converse.js', () => ({
     return { close: vi.fn() }
   }),
   postMessage: vi.fn(),
-  resolveApproval: vi.fn(async () => ({ turn_id: 'turn-2', status: 'started' })),
+  resolveApproval: vi.fn(async (id, sid, ok, recorded, hooks) => {
+    await deferred.promise
+    const allowed = hooks?.beforeResume ? hooks.beforeResume() : true
+    return allowed ? { turn_id: 'turn-2', status: 'started' } : { held: true, recorded: true }
+  }),
   cancelTurn: vi.fn(),
   classifyAgentError: vi.fn(() => 'unreachable'),
   listPendingApprovals: vi.fn(() => Promise.resolve(APPROVALS)),
 }))
 
-import { resolveApproval } from '../converse.js'
+import { listPendingApprovals, resolveApproval } from '../converse.js'
 import { REASONS } from '../lib/actionRegistry.js'
 import ConversePanel from './ConversePanel.jsx'
 
@@ -35,6 +40,7 @@ afterEach(() => {
   vi.clearAllMocks()
   APPROVALS = []
   streamHandlers = null
+  deferred = { promise: Promise.resolve() }
 })
 
 const setup = async (props = {}) => {
@@ -81,7 +87,9 @@ describe('assistant write approvals honour the one-head rule', () => {
     expect(approve).toBeEnabled()
     fireEvent.click(approve)
     await waitFor(() => expect(resolveApproval).toHaveBeenCalledTimes(1))
-    expect(resolveApproval).toHaveBeenCalledWith('c1', 'session-1', true, false)
+    expect(resolveApproval).toHaveBeenCalledWith('c1', 'session-1', true, false, {
+      beforeResume: expect.any(Function),
+    })
   })
 
   it('never holds a read approval for unsaved browser edits', async () => {
@@ -118,7 +126,9 @@ describe('assistant write approvals honour the one-head rule', () => {
     expect(approve).toBeEnabled()
     fireEvent.click(approve)
     await waitFor(() => expect(resolveApproval).toHaveBeenCalledTimes(1))
-    expect(resolveApproval).toHaveBeenCalledWith('c9', 'session-1', true, false)
+    expect(resolveApproval).toHaveBeenCalledWith('c9', 'session-1', true, false, {
+      beforeResume: expect.any(Function),
+    })
   })
 
   it('names a held approved resume request with the held label', async () => {
@@ -130,5 +140,35 @@ describe('assistant write approvals honour the one-head rule', () => {
     expect(resume).toHaveAttribute('title', REASONS.unsavedEngineEdits)
     fireEvent.click(resume)
     expect(resolveApproval).not.toHaveBeenCalled()
+  })
+
+  it('an edit that lands during the approval record holds the resume', async () => {
+    let finishApproval
+    deferred = { promise: new Promise((resolve) => { finishApproval = resolve }) }
+    APPROVALS = [WRITE_APPROVAL]
+    const onDismiss = vi.fn()
+    const { rerender } = render(
+      <ConversePanel sessionId="session-1" onDismiss={onDismiss} engineDirty={false} />,
+    )
+    await screen.findByText(/delete-marked-panel/)
+    expect(listPendingApprovals).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
+    expect(resolveApproval).toHaveBeenCalledTimes(1)
+    const resolution = resolveApproval.mock.results[0].value
+    rerender(<ConversePanel sessionId="session-1" onDismiss={onDismiss} engineDirty />)
+    APPROVALS = [{ ...WRITE_APPROVAL, resume_required: true, approved: true }]
+    await act(async () => {
+      finishApproval()
+      await resolution
+    })
+
+    await expect(resolution).resolves.toEqual({ held: true, recorded: true })
+    await waitFor(() => expect(listPendingApprovals).toHaveBeenCalledTimes(2))
+    const resume = screen.getByRole('button', { name: 'Unsaved browser edits' })
+    expect(resume).toBeDisabled()
+    expect(resume).toHaveAttribute('title', REASONS.unsavedEngineEdits)
+    expect(screen.queryByRole('button', { name: 'Deny' })).not.toBeInTheDocument()
+    expect(screen.queryByText('thinking…')).not.toBeInTheDocument()
   })
 })

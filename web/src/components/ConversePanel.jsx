@@ -215,6 +215,11 @@ export default function ConversePanel({
   // {id, reason, masked, overridable} or null. This composer evaluates nothing
   // itself (round 3) — converse.postMessage refuses and throws, send() catches.
   const [secretNotice, setSecretNotice] = useState(null)
+  const writeLockedRef = useRef(writeLocked)
+  const engineDirtyRef = useRef(engineDirty)
+  const refreshApprovalsRef = useRef(null)
+  writeLockedRef.current = writeLocked
+  engineDirtyRef.current = engineDirty
   const writeHold = (isWrite) => {
     const held = isWrite && (writeLocked || engineDirty)
     return { held, label: writeLocked ? 'Editing locked' : 'Unsaved browser edits', title: writeLocked ? undefined : REASONS.unsavedEngineEdits }
@@ -282,6 +287,7 @@ export default function ConversePanel({
         if (!closed) setPendingApprovalsError(true)
       }
     }
+    refreshApprovalsRef.current = refresh
     void refresh()
     const timer = window.setInterval(refresh, 5000)
     return () => { closed = true; window.clearInterval(timer) }
@@ -586,13 +592,19 @@ export default function ConversePanel({
   // accepts no other spelling.
   const decide = async (
     confirmationId, ok, blocked = false, owningSessionId = sessionId,
-    decisionRecorded = false,
+    decisionRecorded = false, isWrite = false,
   ) => {
     if (deciding || (ok && blocked)) return
     setDeciding(confirmationId); setSendErr(null)
     try {
       const res = await resolveApproval(
-        confirmationId, owningSessionId, ok, decisionRecorded)
+        confirmationId, owningSessionId, ok, decisionRecorded, {
+          beforeResume: () => !(ok && isWrite && (writeLockedRef.current || engineDirtyRef.current)),
+        })
+      if (res.held) {
+        await refreshApprovalsRef.current?.()
+        return
+      }
       setDecidedLocal((m) => ({ ...m, [confirmationId]: ok }))
       setPendingApprovals((current) => current.filter(
         (approval) => approval.confirmation_id !== confirmationId))
@@ -656,6 +668,7 @@ export default function ConversePanel({
               !!approval.approved && hold.held,
               approval.session_id,
               true,
+              isWrite,
             )}
           >
             {deciding === approval.confirmation_id
@@ -670,7 +683,7 @@ export default function ConversePanel({
               disabled={deciding === approval.confirmation_id || hold.held}
               title={hold.held ? hold.title : undefined}
               onClick={() => decide(
-                approval.confirmation_id, true, hold.held, approval.session_id)}
+                approval.confirmation_id, true, hold.held, approval.session_id, false, isWrite)}
             >
               {deciding === approval.confirmation_id ? 'Sending…' : (hold.held ? hold.label : 'Approve')}
             </button>
@@ -805,7 +818,7 @@ export default function ConversePanel({
                 className="chip-act"
                 disabled={deciding === item.id || hold.held}
                 title={hold.held ? hold.title : undefined}
-                onClick={() => decide(item.id, true, hold.held)}
+                onClick={() => decide(item.id, true, hold.held, sessionId, false, isWrite)}
               >
                 {deciding === item.id ? 'Sending…' : (hold.held ? hold.label : 'Approve')}
               </button>
