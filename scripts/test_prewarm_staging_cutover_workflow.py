@@ -358,32 +358,30 @@ def test_the_dispatch_stages_both_colours_on_the_prewarm_rail():
     assert "if length == 1 then .[0].databaseId else empty end" in body
 
 
-def test_web_and_app_are_staged_now_that_the_posture_gate_admits_an_idle_app_prewarm():
+def test_app_is_paused_until_the_merge_deploy_can_reuse_a_staged_candidate():
     """A cross-repo coupling this repo cannot check mechanically, so it is pinned.
 
     The old pin's runner condition has been met since 2026-08-24, when the deploy
     job moved to an ephemeral CodeBuild-backed runner, one per run, with a
     measured queue wait of 0.4 min.
 
-    The app leg was dispatched on 2026-09-05 (terraform run 33949283388) and
-    refused by deploy-leaf-platform-staging.yml's "Verify protected runtime
-    posture" gate. The lane-close step is hard-skipped under prewarm, so the
-    checker sees a forward app intent over an OPEN drawing-write lane and
-    refuses before any mutation. `app` came out in #1058.
-
     Terraform #1474 (7f2f40e5) now admits an idle weight-0 prewarm with its
     truthful no-closure state, while a normal forward deploy over an open
-    lane still refuses. Both colour-surfaced services are staged again,
-    web first.
+    lane still refuses. The earlier pins' runner and posture conditions are met.
 
-    Removing `app`, reordering, or adding a service the deploy workflow
-    refuses under prewarm is a deliberate edit that must come back through
-    this test.
+    The first successful app prewarm (run 33952930173) was not adopted by the
+    merge deploy (run 33953973668), which reported "Staged document differs
+    from this run's candidate". Both builds bake the source sha into the image,
+    so the speculative and merge images differ even for an identical tree.
+
+    `app` is paused until the build/supply workflow's reuse path admits an
+    exact-tree speculative producer. Restoring it is a deliberate edit that
+    must come back through this test in the same change, web then app.
     """
     services = workflow_document()["env"]["STAGE_SERVICES"].split()
-    assert services == ["web", "app"], (
-        "STAGE_SERVICES is %s; dispatch order must be web then app now that "
-        "the posture gate admits an idle weight-0 app prewarm" % services
+    assert services == ["web"], (
+        "STAGE_SERVICES is %s; app is paused until the build/supply workflow's "
+        "reuse path admits an exact-tree speculative producer" % services
     )
 
 
