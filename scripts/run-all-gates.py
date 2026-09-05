@@ -1623,9 +1623,10 @@ def build_suites() -> List[Suite]:
         # separate decision from correcting a description of the tree, and
         # doing both in a refactor PR would hide one behind the other.
         #
-        # The 17 skips are exactly the two allow-listed files below: one
-        # real-wasm harness case and sixteen editing-surface cases. An
-        # opted-in machine (local wasm build present) executes one more.
+        # The 18 skips are exactly the three allow-listed files below: one
+        # real-wasm harness case, sixteen editing-surface cases and the W4g-6
+        # batch-atomicity case. An opted-in machine (local wasm build present)
+        # executes them instead.
         Suite("web-vitest", "web npm run test:unit (vitest)", "vitest", WEB,
               [_npm(), "run", "test:unit"], 731,
               allowed_vitest_skips=(
@@ -1641,6 +1642,12 @@ def build_suites() -> List[Suite]:
                   # cases, the three W4d Draw-group cases, and the lossless
                   # u64-handle collision regression.
                   ("src/cadedit/cadEditSurface.test.jsx", 16),
+                  # W4g-6: the worker's `batch` op on the REAL compiled engine
+                  # (a three-step fillet in one reply, an atomic refusal, the
+                  # bounds, a refused create keeping the document), gated on the
+                  # same machine-local pkg-node build. One test; it ran green on
+                  # the building machine and its numbers are on PR #1036.
+                  ("src/cad/engineBatchAtomic.test.js", 1),
               )),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
