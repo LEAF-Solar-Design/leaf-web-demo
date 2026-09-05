@@ -1346,6 +1346,26 @@ def build_suites() -> List[Suite]:
               # 25 -> 26: the run-URL extraction is guarded (|| true) so a gh that prints no run URL falls back to the mark scan instead of aborting the loop before the next service.
               # (2026-09-05, later still) STAGE_SERVICES reads `web`: the app prewarm succeeds but its merge did not reuse it because main moved under the PR (stale stage); the pin names freshness as the way back.
               _py_pytest("test_prewarm_staging_cutover_workflow.py"), 26),
+        # Merge-queue group controller (slice C: mq-review, mq-supply,
+        # mq-prewarm). 32 = the executed matrix: mq-review's GraphQL
+        # pagination and post-check re-read run against a fake gh (a queue
+        # entry that only exists on page 2 is exactly what a broken
+        # pagination loop would miss), the four-case newest-status-wins
+        # matrix over a two-member group (one member with no
+        # kimi-critic-review status at all must fail the whole group, not
+        # just itself), and the docs-noop recompute runs against a real git
+        # repository reusing the same scripts/docs_noop_filter.py the build
+        # workflow does. The rest are structural pins with no local
+        # executable surface: the provider-check list mirrored from
+        # build-platform-images.yml's adopt job, the receipt names and
+        # per-service terraform checks (service, image_tag, weights_touched
+        # false), the docs-only and migration-refusal exemptions, mq-prewarm's
+        # if:always() plus its explicit dependency-failure branch, the
+        # concurrency key, least permissions, and that TERRAFORM_REPO_TOKEN
+        # never reaches any step but the one that reads the terraform repo.
+        Suite("merge-queue-workflow",
+              "scripts test_merge_queue_workflow.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_merge_queue_workflow.py"), 32),
         Suite("platform-release-manifest",
               "scripts test_platform_release_manifest.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_platform_release_manifest.py"), 88),
