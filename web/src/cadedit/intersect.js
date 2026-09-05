@@ -60,7 +60,7 @@ function sweepDeg(startDeg, endDeg) {
 }
 const angleOf = (c, p) => normDeg(Math.atan2(p[1] - c[1], p[0] - c[0]) / DEG)
 const onCircle = (c, r, deg) => [c[0] + r * Math.cos(deg * DEG), c[1] + r * Math.sin(deg * DEG)]
-// Emitted numbers are rounded to a nanometre of drawing unit: the maths above
+// Straight geometry is rounded to a nanometre of drawing unit: the maths above
 // leaves 1e-16 noise on exact corners (a 90-degree fillet's tangent point read
 // 2.0000000000000004), and the engine writes what it is given.
 const clean = (v) => {
@@ -117,6 +117,10 @@ export function curveOf(entity, role = 'entity') {
         if (!curvedSeg) return { refusal: `the ${role} polyline has a curved segment of zero length` }
         const { cx, cy, r, a0, sweep } = curvedSeg
         if (![cx, cy, r, a0, sweep].every(finite)) return { refusal: `the ${role} polyline has a bulge that overflows` }
+        // At the bound, compare r = d|bulge|/4 + d/(4|bulge|) without losing its small term.
+        const quarterChord = r === MAX_COORD ? dist(a, b) / 4 : 0
+        const absBulge = Math.abs(bulges[i])
+        if (r > MAX_COORD || (r === MAX_COORD && quarterChord / absBulge > MAX_COORD - quarterChord * absBulge)) return { refusal: `the ${role} polyline has an arc larger than 1e9` }
         arc = { c: [cx, cy], r, start: normDeg(a0 / DEG), sweep: sweep / DEG }
       }
       segs.push({ i, a, b, arc })
@@ -147,6 +151,8 @@ function pointAt(curve, s) {
     if (i < 0) { i = 0; t = s }
   }
   const { a, b, arc } = curve.segs[i]
+  if (arc && t === 0) return [a[0], a[1]]
+  if (arc && t === 1) return [b[0], b[1]]
   if (arc) return onCircle(arc.c, arc.r, arc.start + arc.sweep * t)
   return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
 }
@@ -265,7 +271,7 @@ const segParam = (arc, p) => {
   const o = segOffset(arc, p)
   return (360 - o <= TINY_DEG ? o - 360 : o) / Math.abs(arc.sweep)
 }
-const inUnit = (u) => u >= -EPSILON && u <= 1 + EPSILON
+const inSpan = (t, L) => t * L >= -EPSILON && t * L <= L + EPSILON
 
 /**
  * Where `edge` crosses `target`: [{ s, p }] on the target's own param (LINE/
@@ -291,8 +297,9 @@ export function crossings(target, edge, extend = 'none', tol = EPSILON) {
     for (const { a, b, i, arc } of segs) {
       const lowOk = !arc && (extend === 'start' || extend === 'both') && i === 0 && !target.closed
       const highOk = !arc && (extend === 'end' || extend === 'both') && i === last && !target.closed
-      const epsT = arc ? TINY_DEG / Math.abs(arc.sweep) : EPSILON
-      const accept = (t) => (t >= -epsT || lowOk) && (t <= 1 + epsT || highOk)
+      const L = arc ? 0 : dist(a, b)
+      const epsT = arc ? TINY_DEG / Math.abs(arc.sweep) : 0
+      const accept = (t) => arc ? t >= -epsT && t <= 1 + epsT : inSpan(t, L) || (lowOk && t < 0) || (highOk && t > 1)
       const hitOnTarget = (t, p) => {
         if (arc && !onSupport(p, arc.c, arc.r, eps)) return
         if (!accept(t)) return
@@ -310,7 +317,7 @@ export function crossings(target, edge, extend = 'none', tol = EPSILON) {
             }
           } else if (arc) {
             for (const hit of segCircle(c, d, arc.c, arc.r)) {
-              if (inUnit(hit.t)) hitOnTarget(segParam(arc, hit.p), hit.p)
+              if (inSpan(hit.t, dist(c, d))) hitOnTarget(segParam(arc, hit.p), hit.p)
             }
           } else if (edgeArc) {
             for (const hit of segCircle(a, b, edgeArc.c, edgeArc.r)) {
@@ -318,7 +325,7 @@ export function crossings(target, edge, extend = 'none', tol = EPSILON) {
             }
           } else {
             const hit = segSeg(a, b, c, d)
-            if (hit && inUnit(hit.u)) hitOnTarget(hit.t, hit.p)
+            if (hit && inSpan(hit.u, dist(c, d))) hitOnTarget(hit.t, hit.p)
           }
         }
       } else if (arc) {
@@ -342,7 +349,7 @@ export function crossings(target, edge, extend = 'none', tol = EPSILON) {
           if (onSupport(p, target.c, target.r, eps) && onSupport(p, seg.arc.c, seg.arc.r, eps) && withinSeg(seg, p)) push(param(p), p)
         }
       } else {
-        for (const hit of segCircle(seg.a, seg.b, target.c, target.r)) if (onSupport(hit.p, target.c, target.r, eps) && inUnit(hit.t)) push(param(hit.p), hit.p)
+        for (const hit of segCircle(seg.a, seg.b, target.c, target.r)) if (onSupport(hit.p, target.c, target.r, eps) && inSpan(hit.t, dist(seg.a, seg.b))) push(param(hit.p), hit.p)
       }
     }
   } else {
@@ -366,7 +373,8 @@ function piece(curve, a, b, eps) {
     return Math.tan((v - u) * seg.arc.sweep * DEG / 4)
   }
   const push = (p, bulge) => {
-    const q = [clean(p[0]), clean(p[1])]
+    const straight = Math.abs(bulges[bulges.length - 1] ?? 0) <= BULGE_EPS && Math.abs(bulge) <= BULGE_EPS
+    const q = straight ? [clean(p[0]), clean(p[1])] : [p[0], p[1]]
     const last = pts[pts.length - 1]
     if (last && last[0] === q[0] && last[1] === q[1] && Math.abs(bulges[bulges.length - 1]) > BULGE_EPS) unwritable = true
     if (pts.length && Math.abs(bulges[bulges.length - 1]) <= BULGE_EPS && same(pts[pts.length - 1], p, EPSILON)) {
@@ -390,7 +398,8 @@ const setVertices = (entityId, pts, closed, bulges = null) => ({ op: 'setVertice
 const setArc = (entityId, c, r, a0, a1) => ({ op: 'setArc', entityId, x: clean(c[0]), y: clean(c[1]), r, a0: clean(normDeg(a0)), a1: clean(normDeg(a1)) })
 const createArc = (c, r, a0, a1, layer) => ({ op: 'createArc', inputs: { x: clean(c[0]), y: clean(c[1]), r, a0: clean(normDeg(a0)), a1: clean(normDeg(a1)), layer } })
 const createLine = (a, b, layer) => ({ op: 'createLine', inputs: { x: clean(a[0]), y: clean(a[1]), x2: clean(b[0]), y2: clean(b[1]), layer } })
-const createPolyline = (pts, closed, layer, bulges = null) => ({ op: 'createPolyline', inputs: { pts: pts.map((p) => `${clean(p[0])},${clean(p[1])}`).join(' '), closed, layer, ...(bulges ? { bulges } : {}) } })
+const decimal = (v) => String(v).includes('e') ? (Number.isInteger(v) ? String(v) : v.toFixed(20).replace(/0+$/, '').replace(/\.$/, '')) : String(v)
+const createPolyline = (pts, closed, layer, bulges = null) => ({ op: 'createPolyline', inputs: { pts: pts.map((p) => `${decimal(p[0])},${decimal(p[1])}`).join(' '), closed, layer, ...(bulges ? { bulges } : {}) } })
 const refuse = (verb, why) => ({ refusal: `${verb} refused: ${why}.` })
 const layerOf = (entity) => String(entity?.layer ?? '')
 
@@ -537,7 +546,7 @@ export function extendEntity(target, edge, px, py, tol = EPSILON) {
       const pts = T.pts.map((p) => [p[0], p[1]])
       const bulges = T.bulges.slice()
       const angle = atEnd ? start + sweep + sigma * best : start - sigma * best
-      pts[atEnd ? n - 1 : 0] = onCircle(c, r, angle).map(clean)
+      pts[atEnd ? n - 1 : 0] = onCircle(c, r, angle)
       bulges[atEnd ? n - 2 : 0] = Math.tan((sweep + sigma * best) * DEG / 4)
       return { steps: [setVertices(target.id, pts, false, bulgesOrNull(bulges))] }
     }

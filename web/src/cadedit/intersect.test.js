@@ -12,6 +12,7 @@ const poly = (id, pts, closed, layer = 'A', bulges = null) => ({ id, type: 'LWPO
 const circle = (id, c, r) => ({ id, type: 'CIRCLE', layer: 'A', closed: true, vertices: [[...c, 0]], radius: r, startDeg: null, endDeg: null, editable: true })
 const arc = (id, c, r, s, e) => ({ id, type: 'ARC', layer: 'A', closed: false, vertices: [[...c, 0]], radius: r, startDeg: s, endDeg: e, editable: true })
 const text = (id) => ({ id, type: 'TEXT', layer: 'A', closed: false, vertices: [[1, 1, 0]], radius: null, startDeg: null, endDeg: null, editable: true })
+const parsePts = (pts) => pts.split(' ').map((p) => p.split(',').map(Number))
 
 // The horizontal (0,0)-(10,0) and the vertical through x = 5.
 const H = () => line('h', [0, 0], [10, 0])
@@ -507,7 +508,7 @@ describe('polyline corners and bulges (W4g-6d)', () => {
     expect(shape).toEqual({ op: 'setVertices', entityId: 'arcy', closed: false })
     expect(points).toHaveLength(3)
     expect(points.slice(0, 2)).toEqual([[0, -5], [5, -5]])
-    near(points[2][0], 7.5); expect(points[2][1]).toEqual(0)
+    near(points[2][0], 7.5); expect(points[2][1]).toBeCloseTo(0, 9)
     expect(bulges).toHaveLength(3)
     near(bulges[0], 0); near(bulges[1], Math.sqrt(5) - 2); near(bulges[2], 0)
     const cutLine = trimEntity(H(), arcy, 8, 0)
@@ -626,7 +627,7 @@ describe('TRIM on curved polylines (W4g-6e)', () => {
     points.forEach((p, i) => {
       expect(actual[i]).toHaveLength(2)
       p.forEach((v, j) => {
-        if (Number.isInteger(v)) expect(actual[i][j]).toEqual(v)
+        if (bulges === null && Number.isInteger(v)) expect(actual[i][j]).toEqual(v)
         else near(actual[i][j], v)
       })
     })
@@ -635,11 +636,22 @@ describe('TRIM on curved polylines (W4g-6e)', () => {
   }
   const expectCreated = (step, pts, bulges = null) => {
     expect(step.op).toEqual('createPolyline')
-    const { bulges: actual, ...inputs } = step.inputs
-    expect(inputs).toEqual({ pts, closed: false, layer: 'A' })
+    const { bulges: actual, pts: actualPts, ...inputs } = step.inputs
+    expect(inputs).toEqual({ closed: false, layer: 'A' })
     expect(Object.keys(step).sort()).toEqual(['inputs', 'op'])
-    if (bulges === null) expect(step.inputs).not.toHaveProperty('bulges')
-    else expectBulges(actual, bulges)
+    if (bulges === null) {
+      expect(actualPts).toEqual(pts)
+      expect(step.inputs).not.toHaveProperty('bulges')
+    } else {
+      const points = parsePts(actualPts)
+      const want = parsePts(pts)
+      expect(points).toHaveLength(want.length)
+      want.forEach((p, i) => {
+        expect(points[i]).toHaveLength(2)
+        p.forEach((v, j) => near(points[i][j], v))
+      })
+      expectBulges(actual, bulges)
+    }
   }
 
   it('locates and picks the arc instead of its chord', () => {
@@ -810,10 +822,7 @@ describe('EXTEND on a curved end segment (W4g-6e)', () => {
     expect(actual).toHaveLength(points.length)
     points.forEach((p, i) => {
       expect(actual[i]).toHaveLength(2)
-      p.forEach((v, j) => {
-        if (Number.isInteger(v)) expect(actual[i][j]).toEqual(v)
-        else expect(actual[i][j]).toBeCloseTo(v, 9)
-      })
+      p.forEach((v, j) => expect(actual[i][j]).toBeCloseTo(v, 9))
     })
     expect(actualBulges).toHaveLength(bulges.length)
     bulges.forEach((b, i) => {
@@ -1017,8 +1026,14 @@ describe('Astra refutations (W4g-6e record 4)', () => {
     expect(bulges[1]).toBe(0)
     const { inputs, ...second } = out.steps[1]
     expect(second).toEqual({ op: 'createPolyline' })
-    const { bulges: createdBulges, ...rest } = inputs
-    expect(rest).toEqual({ pts: '0.000008,-0.000006 0.00001,0', closed: false, layer: 'A' })
+    const { bulges: createdBulges, pts, ...rest } = inputs
+    expect(rest).toEqual({ closed: false, layer: 'A' })
+    const createdPoints = parsePts(pts)
+    expect(createdPoints).toHaveLength(2)
+    ;[[0.000008, -0.000006], [0.00001, 0]].forEach((p, i) => {
+      expect(createdPoints[i]).toHaveLength(2)
+      p.forEach((v, j) => expect(createdPoints[i][j]).toBeCloseTo(v, 9))
+    })
     expect(createdBulges).toHaveLength(2)
     expect(createdBulges[0]).toBeCloseTo(0.1622776602, 9)
     expect(createdBulges[1]).toBe(0)
@@ -1053,8 +1068,14 @@ describe('Astra refutations, round four (W4g-6e record 7)', () => {
     expect(bulges[1]).toBe(0)
     const { inputs, ...second } = out.steps[1]
     expect(second).toEqual({ op: 'createPolyline' })
-    const { bulges: createdBulges, ...rest } = inputs
-    expect(rest).toEqual({ pts: '4,-3 5,0', closed: false, layer: 'A' })
+    const { bulges: createdBulges, pts, ...rest } = inputs
+    expect(rest).toEqual({ closed: false, layer: 'A' })
+    const createdPoints = parsePts(pts)
+    expect(createdPoints).toHaveLength(2)
+    ;[[4, -3], [5, 0]].forEach((p, i) => {
+      expect(createdPoints[i]).toHaveLength(2)
+      p.forEach((v, j) => expect(createdPoints[i][j]).toBeCloseTo(v, 9))
+    })
     expect(createdBulges).toHaveLength(2)
     expect(createdBulges[0]).toBeCloseTo(0.1622776602, 9)
     expect(createdBulges[1]).toBe(0)
@@ -1073,11 +1094,14 @@ describe('Astra refutations, round four (W4g-6e record 7)', () => {
     expect(crossings(curveOf(target), curveOf(edge))).toEqual([{ s: 1, p: [10, 0] }])
   })
 
-  it('refuses a kept arc whose chord collapses at the drawing precision', () => {
+  it('keeps the exact endpoints of an arc with a chord below the drawing precision', () => {
     const target = poly('p', [[0, 0], [4e-10, 0], [10, 0], [20, 0]], false, 'A', [1e11, 0, 0, 0])
     const out = trimEntity(target, line('e', [15, -1], [15, 1]), 19, 0, 1e-9)
-    expect(out).toEqual({ refusal: 'Trim refused: a kept arc is shorter than the drawing precision.' })
-    expect(out).not.toHaveProperty('steps')
+    expect(out).toEqual({ steps: [{
+      op: 'setVertices', entityId: 'p', points: [[0, 0], [4e-10, 0], [10, 0], [15, 0]], closed: false,
+      bulges: [1e11, 0, 0, 0],
+    }] })
+    expect(out.steps[0].points[1][0]).toBe(4e-10)
   })
 
   it('bounds pick coordinates, vertices and round radii at 1e9', () => {
@@ -1086,5 +1110,69 @@ describe('Astra refutations, round four (W4g-6e record 7)', () => {
     expect(trimEntity(target, line('e', [5, -6], [5, 6]), 2e9, 0).refusal).toMatch(/within 1e9/)
     expect(curveOf(circle('c', [0, 0], 2e9)).refusal).toMatch(/larger than 1e9/)
     expect(curveOf(line('l', [0, 0], [2e9, 0])).refusal).toMatch(/beyond 1e9/)
+  })
+})
+
+describe('Astra refutations, round five (W4g-6e record 8)', () => {
+  it('accepts cutter endpoints only within a world-unit tolerance of the arc', () => {
+    const target = poly('p', [[-5, 0], [5, 0]], false, 'A', [1, 0])
+    const edge = line('e', [0, -1e9], [0, -5.5])
+    expect(crossings(curveOf(target), curveOf(edge))).toEqual([])
+    expect(trimEntity(target, edge, -3, -4, 1e-9).refusal).toBe('Trim refused: the cutting edge does not cross the selection.')
+    const edge2 = line('e', [0, -1e9], [0, -4.9999999995])
+    const hits = crossings(curveOf(target), curveOf(edge2))
+    expect(hits).toHaveLength(1)
+    expect(hits[0].s).toBeCloseTo(0.5, 9)
+    expect(hits[0].p).toHaveLength(2)
+    ;[0, -5].forEach((v, j) => expect(hits[0].p[j]).toBeCloseTo(v, 9))
+    const out = trimEntity(target, edge2, -3, -4, 1e-9)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(1)
+    const { points, bulges, ...shape } = out.steps[0]
+    expect(shape).toEqual({ op: 'setVertices', entityId: 'p', closed: false })
+    expect(points).toHaveLength(2)
+    ;[[0, -5], [5, 0]].forEach((p, i) => {
+      expect(points[i]).toHaveLength(2)
+      p.forEach((v, j) => expect(points[i][j]).toBeCloseTo(v, 9))
+    })
+    expect(bulges).toHaveLength(2)
+    expect(bulges[0]).toBeCloseTo(Math.tan(Math.PI / 8), 9)
+    expect(bulges[1]).toBe(0)
+  })
+
+  it('keeps the exact endpoints of a tiny chord with a huge bulge', () => {
+    const target = poly('p', [[0, 0], [1.4e-9, 0], [10, 0], [20, 0]], false, 'A', [1e10, 0, 0, 0])
+    const out = trimEntity(target, line('e', [15, -1], [15, 1]), 19, 0, 1e-9)
+    expect(out).toEqual({ steps: [{
+      op: 'setVertices', entityId: 'p', points: [[0, 0], [1.4e-9, 0], [10, 0], [15, 0]], closed: false,
+      bulges: [1e10, 0, 0, 0],
+    }] })
+    expect(out.steps[0].points[1][0]).toBe(1.4e-9)
+  })
+
+  it('creates the far curved piece with full endpoint precision', () => {
+    const target = poly('p', [[0, 0], [10, 0]], false, 'A', [1, 0])
+    const edge = line('y', [0, -4.330127018922193], [10, -4.330127018922193])
+    const out = trimEntity(target, edge, 5, -5)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(2)
+    const { inputs, ...shape } = out.steps[1]
+    expect(shape).toEqual({ op: 'createPolyline' })
+    const { pts, bulges, ...rest } = inputs
+    expect(rest).toEqual({ closed: false, layer: 'A' })
+    const points = parsePts(pts)
+    expect(points).toHaveLength(2)
+    ;[[7.5, -4.330127018922193], [10, 0]].forEach((p, i) => {
+      expect(points[i]).toHaveLength(2)
+      p.forEach((v, j) => expect(points[i][j]).toBeCloseTo(v, 12))
+    })
+    expect(bulges).toHaveLength(2)
+    expect(bulges[0]).toBeCloseTo(Math.tan(Math.PI / 12), 9)
+    expect(bulges[1]).toBe(0)
+  })
+
+  it('refuses a bulged arc larger than the coordinate bound', () => {
+    expect(curveOf(poly('p', [[0, 0], [1, 0]], false, 'A', [4e9, 0])).refusal).toMatch(/arc larger than 1e9/)
+    expect(curveOf(poly('p', [[0, 0], [1, 0]], false, 'A', [1e3, 0])).refusal).toBeUndefined()
   })
 })
