@@ -361,8 +361,8 @@ describe('App.jsx wiring', () => {
       assert.notEqual(planCall, -1)
       assert.notEqual(sidecarCall, -1)
       assert.doesNotMatch(body, /save(?:DrawingVersionPlan|EditedDrawingVersion)\([^)]*chain\.head/)
-      assert.match(body, /saveDrawingVersionPlan\(\s*REQUESTED_DRAWING_ID, bytes, parent, digest, plan\.mutations, cap, \{\s*onStatus\s*\}\s*\)/)
-      assert.match(body, /saveEditedDrawingVersion\(\s*REQUESTED_DRAWING_ID, bytes, parent, digest, cap\s*\)/)
+    assert.match(body, /saveDrawingVersionPlan\(\s*REQUESTED_DRAWING_ID,\s*bytes,\s*parent,\s*digest,\s*plan\.mutations,\s*cap,\s*\{\s*onStatus\s*\}\s*\)/)
+    assert.match(body, /saveEditedDrawingVersion\(\s*REQUESTED_DRAWING_ID,\s*bytes,\s*parent,\s*digest,\s*cap\s*\)/)
       assert.ok(planCall < sidecarCall, 'the plan route is tried first, behind the plan check')
       assert.match(body.slice(0, planCall), /if \(plan && plan\.mutations\)/)
       // Both calls sit inside the acquire -> save -> release try block.
