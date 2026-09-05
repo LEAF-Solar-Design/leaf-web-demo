@@ -1338,11 +1338,11 @@ def build_suites() -> List[Suite]:
               # 22 -> 24: the trigger set is a secret-handling decision, so it
               # is pinned, and so is the rule that the merge preview is READ and
               # never executed while the cross-repo token is in scope.
-              # 24 -> 25: STAGE_SERVICES is pinned to `web`. The app deploy job
-              # is self-hosted, and a run holds the staging mutex while it waits
-              # for a runner, so relaying an app prewarm blocks every staging
-              # deploy behind that one busy runner. Restoring `app` must come
-              # back through that test.
+              # 24 -> 25: STAGE_SERVICES is pinned. It read `web` alone while the
+              # app deploy job was self-hosted (a run holds the staging mutex
+              # while it waits for a runner); since that job moved to an
+              # ephemeral CodeBuild runner it reads `web app`, and a change in
+              # either direction must come back through that test.
               _py_pytest("test_prewarm_staging_cutover_workflow.py"), 25),
         Suite("platform-release-manifest",
               "scripts test_platform_release_manifest.py", "pytest",
