@@ -1403,3 +1403,39 @@ describe('Astra refutations, round eleven (W4g-6e record 14)', () => {
     expect(crossings(curveOf(target), curveOf(edge))).toEqual([])
   })
 })
+
+describe('Kimi notes on #1064 (W4g-6e record 15)', () => {
+  // The exact pins on 4e-10, 1.4e-9, 5e-10 and 1.5e-9 chords (records 7, 8
+  // and 9) still hold: their bands are below 1e-23 while the grid is 4e-10
+  // or more away, so the noise clean never touches them.
+  it('places a near-tangent chord at the 1e9 corner from the gap, not r*r - d*d', () => {
+    const target = circle('c', [0, 0], 1e9)
+    const d = 999999999.99999
+    const edge = line('e', [-1000, -d], [1000, -d])
+    const hits = crossings(curveOf(target), curveOf(edge))
+    expect(hits).toHaveLength(2)
+    const h = Math.sqrt((1e9 - d) * (1e9 + d))
+    expect(h).toBeCloseTo(141.51735103700588, 6)
+    hits.sort((a, b) => a.s - b.s)
+    expect(hits[0].p[0]).toBeCloseTo(-h, 6)
+    expect(hits[1].p[0]).toBeCloseTo(h, 6)
+    expect(hits[0].p[1]).toBe(-d)
+    expect(hits[1].p[1]).toBe(-d)
+    expect(hits[0].s).toBeCloseTo(269.999991892, 6)
+    expect(hits[1].s).toBeCloseTo(270.000008108, 6)
+  })
+
+  it('keeps the exact endpoint of a lower semicircle cut at its bottom', () => {
+    const target = poly('p', [[0, 0], [20, 0]], false, 'A', [1, 0])
+    const edge = line('e', [10, -12], [10, -8])
+    const out = trimEntity(target, edge, 15, -8)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(1)
+    const { points, bulges, ...shape } = out.steps[0]
+    expect(shape).toEqual({ op: 'setVertices', entityId: 'p', closed: false })
+    expect(points).toEqual([[0, 0], [10, -10]])
+    expect(bulges).toHaveLength(2)
+    expect(bulges[0]).toBeCloseTo(Math.tan(Math.PI / 8), 9)
+    expect(bulges[1]).toBe(0)
+  })
+})

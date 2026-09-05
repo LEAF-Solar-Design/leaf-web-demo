@@ -77,6 +77,14 @@ const clean = (v) => {
   const r = Math.round(v * 1e9) / 1e9
   return Object.is(r, -0) ? 0 : r
 }
+// Snap v to the 1e-9 grid only when it is within `band` of it: the noise
+// onCircle / atan2 leave is a few ulps of the geometry, a real coordinate
+// is not. The caller bounds `band` by the chord the point belongs to, so
+// a bulge cannot amplify the snap (record 8: a bulge scales ANY endpoint
+// shift by shift / chord; keeping the shift below 8 ulps of the chord
+// keeps radius and sagitta within 16 * sqrt(2) ulps, about 5e-15).
+const NOISE_ULPS = 8 * Number.EPSILON
+const cleanNoise = (v, band) => { const r = clean(v); return Math.abs(v - r) <= band ? r : v }
 const point2 = (v) => (Array.isArray(v) && finite(v[0]) && finite(v[1]) ? [v[0], v[1]] : null)
 
 /**
@@ -241,7 +249,9 @@ function segSeg(a, b, c, d, eps = EPSILON) {
 }
 /** Segment a-b against the circle (c, r): up to two { t, w, p }, solved along the line's unit direction
  * (the foot of the centre by a dot product, the centre's distance to the line by a cross product), so a
- * far-away segment does not cancel the circle away; a tangent within gEps is one root. */
+ * far-away segment does not cancel the circle away; a tangent within gEps is one root. The half-chord comes
+ * from the gap times (r + |d|), never from r*r - d*d: that difference of squares cancels near a tangent at
+ * large r (r*r - d*d loses precision to the ulp of r*r), while gap = r - |d| stays exact there (Sterbenz). */
 function segCircle(a, b, c, r, gEps = EPSILON) {
   const d = sub(b, a)
   const L = len(d)
@@ -252,7 +262,7 @@ function segCircle(a, b, c, r, gEps = EPSILON) {
   const dist = cross(u, f)       // signed distance from c to the line
   const gap = r - Math.abs(dist) // > 0: two roots; ~0: tangent; < 0: none
   if (gap < -gEps) return []
-  const h = gap <= gEps ? 0 : Math.sqrt(r * r - dist * dist)
+  const h = gap <= gEps ? 0 : Math.sqrt(gap * (r + Math.abs(dist)))
   const n = [-u[1], u[0]]
   const foot = add(c, scale(n, dist))
   const at = (offset) => {
@@ -421,6 +431,19 @@ function piece(curve, a, b, gEps) {
     push(curve.pts[((k % n) + n) % n], bulgePart(k, 0, Math.min(1, b - k)))
   }
   push(pointAt(curve, b), 0)
+  // A point adjacent to a curved segment carries onCircle / atan2 noise; snap
+  // it to the grid only within a band bounded by its shorter retained chord,
+  // measured on the raw (pre-snap) points, so a bulge cannot amplify the snap.
+  const raw = pts.map((p) => [p[0], p[1]])
+  for (let i = 0; i < raw.length; i += 1) {
+    const curvedAfter = Math.abs(bulges[i]) > BULGE_EPS
+    const curvedBefore = i > 0 && Math.abs(bulges[i - 1]) > BULGE_EPS
+    if (!curvedAfter && !curvedBefore) continue
+    const before = i > 0 ? dist(raw[i - 1], raw[i]) : Infinity
+    const after = i < raw.length - 1 ? dist(raw[i], raw[i + 1]) : Infinity
+    const L = Math.min(before, after)
+    if (finite(L) && L > 0) pts[i] = [cleanNoise(raw[i][0], NOISE_ULPS * L), cleanNoise(raw[i][1], NOISE_ULPS * L)]
+  }
   return { pts, bulges, unwritable }
 }
 const bulgesOrNull = (list) => list?.some((b) => Math.abs(b) > BULGE_EPS) ? list : null
@@ -579,7 +602,11 @@ export function extendEntity(target, edge, px, py, tol = EPSILON) {
       const pts = T.pts.map((p) => [p[0], p[1]])
       const bulges = T.bulges.slice()
       const angle = atEnd ? start + sweep + sigma * best : start - sigma * best
-      pts[atEnd ? n - 1 : 0] = onCircle(c, r, angle)
+      const k = atEnd ? n - 1 : 0
+      const j = atEnd ? n - 2 : 1
+      pts[k] = onCircle(c, r, angle)
+      const L = dist(pts[k], pts[j])
+      pts[k] = [cleanNoise(pts[k][0], NOISE_ULPS * L), cleanNoise(pts[k][1], NOISE_ULPS * L)]
       bulges[atEnd ? n - 2 : 0] = Math.tan((sweep + sigma * best) * DEG / 4)
       return { steps: [setVertices(target.id, pts, false, bulgesOrNull(bulges))] }
     }
