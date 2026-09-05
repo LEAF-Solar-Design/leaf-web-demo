@@ -407,12 +407,16 @@ describe('save completion', () => {
 
   it('a moved head (409) reads back as a refusal, not a success', async () => {
     const conflict = Object.assign(new Error('stale parent 4: head is now 6; refresh'), { status: 409 })
-    const session = await editedSession({ headVersion: 4, save: async () => { throw conflict } })
+    const onSaved = vi.fn()
+    const session = await editedSession({ headVersion: 4, save: async () => { throw conflict } }, onSaved)
     await act(async () => { await session.current.actions.save() })
     expect(session.current.status).toBe('Save refused: stale parent 4: head is now 6; refresh')
     expect(session.current.errorKind).toBe(SESSION_ERROR.SAVE)
     expect(session.current.receipt).toBeNull()
     expect(session.current.savedVersion).toBeNull()
+    expect(session.current.dirty).toBe(true)
+    expect(session.current.savedBytes).toEqual(new Uint8Array([1, 2, 3]))
+    expect(onSaved).not.toHaveBeenCalled()
   })
 
   it('two clicks in one tick write ONE version — `busy` alone cannot gate that', async () => {
@@ -451,6 +455,145 @@ describe('save completion', () => {
     session.workers[0].emit(loadedMessage([LINE, POLY], 'demo-v1.dxf'))
     return session
   }
+
+  async function editedHeadSession(saveTarget, onSaved) {
+    const session = mountSession({ saveTarget, onSaved })
+    act(() => session.current.actions.openBytes(new Uint8Array([9, 9]), 'demo-v4.dxf', { committed: true, version: 4 }))
+    session.workers[0].emit(loadedMessage([LINE, POLY], 'demo-v4.dxf'))
+    act(() => session.current.actions.select('e1'))
+    act(() => session.current.actions.applyEdit('move', { dx: '1', dy: '1' }))
+    session.workers[0].emit(editedMessage('move', [MOVED_LINE, POLY]))
+    return session
+  }
+
+  it('saves with the engine committed parent even when the target head moved', async () => {
+    const save = vi.fn(async () => planReceipt)
+    const session = await editedHeadSession({ headVersion: 5, save })
+    expect(session.current.committedVersion).toBe(4)
+    await act(async () => { await session.current.actions.save() })
+    expect(save).toHaveBeenCalledWith(
+      new Uint8Array([1, 2, 3]), 4, expect.stringMatching(/^[0-9a-f]{64}$/),
+      expect.objectContaining({ count: 1 }), expect.any(Function),
+    )
+    expect(session.current.committedVersion).toBe(5)
+  })
+
+  it('a readable live receipt clears the local base and asks to reopen the committed version', async () => {
+    const liveReceipt = { ...planReceipt, live: true, new_version_readable: true }
+    const onSaved = vi.fn()
+    const session = await editedHeadSession({ headVersion: 4, save: async () => liveReceipt }, onSaved)
+    const bytes = session.current.savedBytes
+    await act(async () => { await session.current.actions.save() })
+    expect(session.current.savedVersion).toBeNull()
+    expect(session.current.committedEntities).toBeNull()
+    expect(session.current.committedVersion).toBeNull()
+    expect(session.current.committedBytes).toBe(bytes)
+    expect(session.current.dirty).toBe(false)
+    expect(session.current.status).toMatch(/reopening the committed version from the server\.\.\.$/)
+    expect(onSaved).toHaveBeenCalledWith(liveReceipt)
+  })
+
+  it('a live receipt whose read-back is pending keeps the saved version and says so', async () => {
+    const liveReceipt = { ...planReceipt, live: true, new_version_readable: false }
+    const session = await editedHeadSession({ headVersion: 4, save: async () => liveReceipt })
+    await act(async () => { await session.current.actions.save() })
+    expect(session.current.savedVersion).toBe(5)
+    expect(session.current.committedEntities).toBeNull()
+    expect(session.current.committedVersion).toBeNull()
+    expect(session.current.dirty).toBe(false)
+    expect(session.current.status).toContain('read-back is pending')
+    expect(session.current.status).not.toContain('reopening')
+  })
+
+  it('a missing engine cost is unknown, never an invented zero', async () => {
+    const session = await editedSession({ headVersion: 4, save: async () => ({ ...receipt, cost: { engine_usd: null } }) })
+    await act(async () => { await session.current.actions.save() })
+    expect(session.current.status).toContain('engine cost unknown')
+    expect(session.current.status).not.toContain('engine cost $')
+  })
+
+  it('refuses imports and edits in the same tick as a save and while its target is still pending', async () => {
+    let signalStarted
+    const started = new Promise((resolve) => { signalStarted = resolve })
+    const save = vi.fn(() => { signalStarted(); return new Promise(() => {}) })
+    const session = await editedHeadSession({ headVersion: 4, save })
+    const before = session.current
+    const posted = session.workers[0].posted.slice()
+    const file = fileOf('other.dxf')
+    file.arrayBuffer = vi.fn(file.arrayBuffer)
+    await act(async () => {
+      void session.current.actions.save()
+      expect(session.current.actions.openBytes(new Uint8Array([7]), 'other.dxf')).toBeNull()
+      expect(session.current.actions.applyEdit('move', { dx: '8', dy: '8' })).toBeNull()
+      expect(session.current.actions.create('createLine', { x: '0', y: '0', x2: '3', y2: '3' })).toBeNull()
+      expect(await session.current.actions.open(file)).toBeNull()
+      await started
+    })
+    expect(session.current.status).toBe('a save is in flight; wait for its receipt')
+    act(() => {
+      expect(session.current.actions.openBytes(new Uint8Array([8]), 'later.dxf')).toBeNull()
+      expect(session.current.actions.applyEdit('delete', {})).toBeNull()
+    })
+    expect(session.current.status).toBe('a save is in flight; wait for its receipt')
+    expect(session.current.busy).toBe(true)
+    expect(session.current.documentId).toBe(before.documentId)
+    expect(session.current.entities).toBe(before.entities)
+    expect(session.current.savedBytes).toBe(before.savedBytes)
+    expect(session.current.committedEntities).toBe(before.committedEntities)
+    expect(session.current.committedVersion).toBe(4)
+    expect(session.current.selectedId).toBe(before.selectedId)
+    expect(session.current.undoDepth).toBe(before.undoDepth)
+    expect(session.current.redoDepth).toBe(before.redoDepth)
+    expect(session.current.dirty).toBe(true)
+    expect(session.workers[0].posted).toEqual(posted)
+    expect(file.arrayBuffer).not.toHaveBeenCalled()
+    expect(save).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows job progress while waiting and leaves a failed job dirty without an onSaved callback', async () => {
+    let reportStatus
+    let rejectSave
+    let signalStarted
+    const started = new Promise((resolve) => { signalStarted = resolve })
+    const save = vi.fn((bytes, parent, digest, plan, onStatus) => {
+      reportStatus = onStatus
+      signalStarted()
+      return new Promise((resolve, reject) => { rejectSave = reject })
+    })
+    const onSaved = vi.fn()
+    const session = await editedHeadSession({ headVersion: 4, save }, onSaved)
+    const before = session.current
+    let pending
+    await act(async () => { pending = session.current.actions.save(); await started })
+    act(() => reportStatus({ status: 'running', progress: 'writing DWG' }))
+    expect(session.current.status).toBe('Saving to the project as a new version... (job running: writing DWG)')
+    act(() => reportStatus({ status: 'running' }))
+    expect(session.current.status).toBe('Saving to the project as a new version... (job running)')
+    await act(async () => {
+      rejectSave(Object.assign(new Error('APS rejected the plan'), { status: 422 }))
+      await pending
+    })
+    expect(session.current.status).toBe('Save failed: APS rejected the plan')
+    expect(session.current.dirty).toBe(true)
+    expect(session.current.savedBytes).toBe(before.savedBytes)
+    expect(session.current.committedEntities).toBe(before.committedEntities)
+    expect(session.current.committedVersion).toBe(4)
+    expect(session.current.busy).toBe(false)
+    expect(onSaved).not.toHaveBeenCalled()
+  })
+
+  it('reports an unknown outcome verbatim and keeps the edit dirty', async () => {
+    const message = 'outcome unknown: job plan-4 may still be running; reopen the drawing to see whether the version landed'
+    const onSaved = vi.fn()
+    const session = await editedHeadSession({ headVersion: 4, save: async () => {
+      throw Object.assign(new Error(message), { outcomeUnknown: true })
+    } }, onSaved)
+    await act(async () => { await session.current.actions.save() })
+    expect(session.current.status).toBe(message)
+    expect(session.current.dirty).toBe(true)
+    expect(session.current.committedVersion).toBe(4)
+    expect(onSaved).not.toHaveBeenCalled()
+  })
 
   it('a head document saves the diff as a plan and reads the commit leg back', async () => {
     const save = vi.fn(async (bytes, parent, digest, plan) => {

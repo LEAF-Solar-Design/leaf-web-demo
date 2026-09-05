@@ -90,6 +90,7 @@ const INITIAL_SESSION = Object.freeze({
   // to the list just saved. The snapshot stack never touches it: an undo back
   // to the loaded state diffs to nothing.
   committedEntities: null,
+  committedVersion: null,
   busy: false,
   // Engine-truth gate (ACCEPTANCE): entity/byte readouts render ONLY for a
   // document that actually passed through the engine. There is no setter for
@@ -623,6 +624,7 @@ export default function useEngineSession({
   saveTargetRef.current = saveTarget
   // W4g-3b: whether the load in flight is the head (see openBytes).
   const committedLoadRef = useRef(false)
+  const committedVersionRef = useRef(null)
   const onSavedRef = useRef(onSaved)
   onSavedRef.current = onSaved
   // In-flight latch for the version write. See save().
@@ -723,6 +725,7 @@ export default function useEngineSession({
           savedBytes: null,
           committedBytes: null,
           committedEntities: committedLoadRef.current ? entities : null,
+          committedVersion: committedLoadRef.current ? committedVersionRef.current : null,
           busy: false,
           engineParsed: true,
           geometrySource: GEOMETRY_SOURCE.ENGINE_PARSE,
@@ -806,6 +809,7 @@ export default function useEngineSession({
           savedBytes: null,
           committedBytes: null,
           committedEntities: null,
+          committedVersion: null,
           // Nothing passed through the engine: no engine-truth readout is owed.
           engineParsed: false,
           geometrySource: null,
@@ -829,6 +833,10 @@ export default function useEngineSession({
   // already holds (no File object, no second read). Same size ceiling, same
   // history floor, same boundary message. Fails closed on any other shape.
   const openBytes = useCallback((bytes, name, opts = null) => {
+    if (savingRef.current) {
+      patch({ status: 'a save is in flight; wait for its receipt' })
+      return null
+    }
     // toString, not instanceof: bytes from another realm (a test harness, a
     // worker) are still bytes.
     if (Object.prototype.toString.call(bytes) !== '[object Uint8Array]' || typeof name !== 'string' || !name) return
@@ -843,6 +851,7 @@ export default function useEngineSession({
     // opener's call), so the entity list this load produces becomes the base
     // a save diffs against. Any other shape (a hand import) keeps no base.
     committedLoadRef.current = !!(opts && typeof opts === 'object' && opts.committed === true)
+    committedVersionRef.current = committedLoadRef.current && Number.isInteger(opts.version) && opts.version > 0 ? opts.version : null
     patch({ busy: true, documentId: name, errorKind: null, status: `Opening ${name}...` })
     const boundary = ensureBoundary()
     // W4f slice F: the opened bytes are the floor of the undo history.
@@ -858,6 +867,10 @@ export default function useEngineSession({
   }, [ensureBoundary, patch])
 
   const open = useCallback(async (file) => {
+    if (savingRef.current) {
+      patch({ status: 'a save is in flight; wait for its receipt' })
+      return null
+    }
     if (!file) return
     if (file.size > MAX_DOCUMENT_BYTES) {
       patch({
@@ -892,6 +905,10 @@ export default function useEngineSession({
   // selection. Refused here for malformed input (a sentence, no round trip),
   // refused as TRANSPORT when nothing is open.
   const create = useCallback((op, inputs) => {
+    if (savingRef.current) {
+      patch({ status: 'a save is in flight; wait for its receipt' })
+      return null
+    }
     if (!CREATE_OPS.includes(op)) {
       patch({ errorKind: SESSION_ERROR.REFUSED, status: `Draw refused: unknown operation ${op}.` })
       return
@@ -917,6 +934,10 @@ export default function useEngineSession({
   }, [patch])
 
   const applyEdit = useCallback((op, inputs) => {
+    if (savingRef.current) {
+      patch({ status: 'a save is in flight; wait for its receipt' })
+      return null
+    }
     // Nothing selected is not an error, it is a no-op: the affordances that
     // dispatch an edit are disabled until something is.
     if (!sessionRef.current.selectedId) return
@@ -1016,6 +1037,11 @@ export default function useEngineSession({
     // sidecar leg and says so in its receipt. A hand import has nothing to
     // diff against and never sends one.
     const { committedEntities, entities } = sessionRef.current
+    const parent = sessionRef.current.committedVersion ?? target.headVersion
+    const onStatus = ({ status, progress }) => {
+      if (generation !== generationRef.current || !savingRef.current) return
+      patch({ status: `Saving to the project as a new version... (job ${status}${progress ? ': ' + progress : ''})` })
+    }
     let plan = null
     let planNote = ''
     if (committedEntities) {
@@ -1025,22 +1051,29 @@ export default function useEngineSession({
     }
     try {
       const digest = await sha256Hex(bytes)
-      const receipt = await target.save(bytes, target.headVersion, digest, plan)
+      const receipt = await target.save(bytes, parent, digest, plan, onStatus)
       // A save that outlived its document must not report a version onto a
       // session that has since switched drawings.
       if (generation !== generationRef.current) return null
       const nv = receipt?.new_version?.version ?? receipt?.head
       const commit = receipt?.commit ? ` through the ${receipt.commit} leg` : ''
+      const live = receipt?.live === true
+      const readBackPending = live && receipt.new_version_readable === false
+      const cost = typeof receipt?.cost?.engine_usd === 'number'
+        ? `engine cost $${receipt.cost.engine_usd}` : 'engine cost unknown'
       patch({
         busy: false,
         receipt,
-        savedVersion: nv ?? null,
+        savedVersion: live && !readBackPending ? null : nv ?? null,
         committedBytes: bytes,
-        committedEntities: committedEntities ? sessionRef.current.entities : null,
+        committedEntities: live ? null : committedEntities ? sessionRef.current.entities : null,
+        committedVersion: live ? null : nv ?? null,
         errorKind: null,
         status: `Saved as version ${nv} (parent ${receipt?.new_version?.parent})${commit}, `
           + `digest ${String(receipt?.source_sha256 || digest).slice(0, 12)}…, `
-          + `engine cost $${receipt?.cost?.engine_usd ?? 0}.${planNote}`,
+          + `${cost}.${planNote}`
+          + (readBackPending ? ' The committed version read-back is pending.'
+            : live ? ' reopening the committed version from the server...' : ''),
       })
       onSavedRef.current?.(receipt)
       return receipt
@@ -1049,9 +1082,10 @@ export default function useEngineSession({
       patch({
         busy: false,
         errorKind: SESSION_ERROR.SAVE,
-        status: error?.status === 409
-          ? `Save refused: ${error.message}`
-          : `Save failed: ${error?.message || error}`,
+        status: error?.outcomeUnknown ? error.message
+          : error?.status === 409
+            ? `Save refused: ${error.message}`
+            : `Save failed: ${error?.message || error}`,
       })
       return null
     } finally {

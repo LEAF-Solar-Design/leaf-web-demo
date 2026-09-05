@@ -92,6 +92,8 @@ describe('EngineHeadOpener', () => {
     expect(post.bytes).toBe(BYTES)
     loaded(workers[0], post.documentId)
     expect(studio.context.session.engineParsed).toBe(true)
+    expect(studio.context.session.committedVersion).toBe(3)
+    expect(studio.context.session.committedEntities).toEqual([LINE])
     expect(studio.context.reach.state).toBe(REACH_STATE.OPEN)
     expect(studio.context.reach.version).toBe(3)
     expect(screen.getByRole('button', { name: 'line' })).toBeEnabled()

@@ -2723,8 +2723,8 @@ export default function App() {
   // exactly as the surface's own call site does (bundleFence.test.js).
   //
   // F-3 persistence leg: live (non-mock) sessions can save edited bytes as a
-  // NEW VERSION of the open drawing. The parent is fetched FRESH at save
-  // time; the server's compare-and-set still guards the race. Mock/demo
+  // NEW VERSION of the open drawing. The engine supplies its committed
+  // parent; the server's compare-and-set still guards the race. Mock/demo
   // stays download-only, honestly.
   const engineSaveTarget = !mock && intake ? {
     drawingId: REQUESTED_DRAWING_ID,
@@ -2733,8 +2733,7 @@ export default function App() {
     // the head document, present only when the engine holds the head) goes
     // to the plan route, where the SERVER picks the commit leg and says so
     // in the receipt; a hand-imported document keeps the F-3 sidecar route.
-    save: async (bytes, _parent, digest, plan = null) => {
-      const chain = await getDrawingVersions(false, REQUESTED_DRAWING_ID)
+    save: async (bytes, parent, digest, plan = null, onStatus = null) => {
       // The store publishes ONLY under a live single-writer checkout (the
       // postgres authority fails closed without one — staging's exact
       // first-save refusal). Use the session's held capability when there
@@ -2758,10 +2757,10 @@ export default function App() {
       try {
         if (plan && plan.mutations) {
           return await saveDrawingVersionPlan(
-            REQUESTED_DRAWING_ID, bytes, chain.head, digest, plan.mutations, cap)
+            REQUESTED_DRAWING_ID, bytes, parent, digest, plan.mutations, cap, { onStatus })
         }
         return await saveEditedDrawingVersion(
-          REQUESTED_DRAWING_ID, bytes, chain.head, digest, cap)
+          REQUESTED_DRAWING_ID, bytes, parent, digest, cap)
       } finally {
         if (acquired) {
           releaseCheckout(REQUESTED_DRAWING_ID, cap).catch(() => {})
