@@ -2636,7 +2636,7 @@ def main() -> None:
         s
         for s in re.split(r"\n      - ", manifest_block)
         if s.startswith("name: Mint the provider-bound speculative v3 supply set")
-        or "uses: actions/upload-artifact" in s
+        or ("uses: actions/upload-artifact" in s and "spec-v3-supply-set" in s)
     ]
     assert len(mint_or_upload) == 2
     assert [
@@ -7772,6 +7772,60 @@ def test_merge_group_duplicate_supply_set_guard_precedes_mint_and_upload() -> No
     ])
 
 
+def test_speculative_tag_readiness_is_minted_from_digests_not_v3_evidence() -> None:
+    """The readiness record must survive a v3 duplicate-guard skip.
+
+    The v3 supply-set upload is gated on `steps.evidence`, which exits early
+    (complete=false) whenever another run already minted that TREE's
+    artifact -- even if that other run prepared a different SOURCE. Gating
+    the readiness record on the same output would let the relay wait
+    forever for a record this run will never mint. It must gate on
+    `steps.digests` instead, which is true whenever THIS run's own tag has
+    all five images, duplicate v3 evidence or not.
+    """
+
+    def check(doc):
+        steps = doc["jobs"]["speculate-manifest"]["steps"]
+        digests = next(s for s in steps if s.get("id") == "digests")
+        v3_upload = next(
+            s for s in steps
+            if s.get("uses") == "actions/upload-artifact@v4"
+            and "spec-v3-supply-set" in str(s.get("with", {}))
+        )
+        materialize = next(s for s in steps if s.get("id") == "readiness")
+        readiness_upload = next(
+            s for s in steps
+            if s.get("uses") == "actions/upload-artifact@v4"
+            and "spec-tag-readiness" in str(s.get("with", {}))
+        )
+        assert steps.index(v3_upload) < steps.index(materialize) < steps.index(readiness_upload)
+        assert materialize["if"] == "steps.digests.outputs.complete == 'true'"
+        assert readiness_upload["if"] == "steps.digests.outputs.complete == 'true'"
+        assert "steps.evidence" not in str(materialize)
+        assert "steps.evidence" not in str(readiness_upload)
+        digests_code = _executable_bash(digests["run"])
+        assert digests_code.index('echo "complete=false"') < digests_code.index("exit 0")
+        assert readiness_upload["with"]["name"] == (
+            "spec-tag-readiness-${{ needs.prepare.outputs.source_tree }}"
+            "-${{ needs.prepare.outputs.source_sha }}"
+        )
+        assert readiness_upload["with"]["if-no-files-found"] == "error"
+        assert readiness_upload["with"]["retention-days"] == 30
+        materialize_code = _executable_bash(materialize["run"])
+        assert "leaf.speculative-tag-readiness.v1" in materialize_code
+        for field in (
+            "source_sha", "source_tree", "image_tag",
+            "producer_run_id", "producer_run_attempt", "repository_id",
+        ):
+            assert field in materialize_code
+    _mq_falsify(check, [
+        ("id: readiness\n        if: steps.digests.outputs.complete == 'true'",
+         "id: readiness\n        if: steps.evidence.outputs.complete == 'true'"),
+        ("- name: Upload the speculative tag-readiness record\n        if: steps.digests.outputs.complete == 'true'",
+         "- name: Upload the speculative tag-readiness record\n        if: steps.evidence.outputs.complete == 'true'"),
+    ])
+
+
 def test_merge_group_dispatches_exact_head_on_main_without_pr_input() -> None:
     def check(doc):
         assert doc[True]["merge_group"] == {"types": ["checks_requested"]}
@@ -7816,3 +7870,4 @@ def test_merge_group_docs_noop_uses_trusted_parent_and_fails_open() -> None:
 
 if __name__ == "__main__":
     main()
+    test_speculative_tag_readiness_is_minted_from_digests_not_v3_evidence()

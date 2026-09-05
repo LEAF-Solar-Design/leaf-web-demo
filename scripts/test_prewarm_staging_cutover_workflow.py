@@ -22,13 +22,16 @@ degrades instead of reddening a PR.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
 import textwrap
+import zipfile
 
 import pytest
 import yaml
@@ -38,6 +41,9 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "prewarm-staging-cutover.yml"
 
 GROUP_WORKFLOW = WORKFLOW.with_name("prewarm-staging-group.yml")
+BUILD_WORKFLOW = WORKFLOW.with_name("build-platform-images.yml")
+
+
 def _usable_bash() -> str:
     """A bash that can itself run jq and git, which is not the same question as
     whether the HOST has them: on Windows the `bash` on PATH can be a WSL shim
@@ -68,6 +74,30 @@ needs_shell = pytest.mark.skipif(
 )
 
 
+def _has_unzip() -> bool:
+    """The readiness step's own tests need unzip, unlike every other step
+    exercised in this file: probe it separately so a dev box without it
+    skips just these tests instead of failing them (CI always has one)."""
+    if not BASH:
+        return False
+    try:
+        subprocess.run(
+            [BASH, "-c", "command -v unzip >/dev/null"],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+    except Exception:
+        return False
+    return True
+
+
+needs_unzip = pytest.mark.skipif(
+    not _has_unzip(),
+    reason="no unzip in this bash (CI always has one)",
+)
+
+
 def workflow_text() -> str:
     return WORKFLOW.read_text(encoding="utf-8")
 
@@ -79,6 +109,34 @@ def workflow_document() -> dict:
 
 def group_workflow_document() -> dict:
     return yaml.load(GROUP_WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+
+
+def build_workflow_document() -> dict:
+    return yaml.load(BUILD_WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+
+
+def _step_by_id(job_steps: list, step_id: str) -> dict:
+    for step in job_steps:
+        if step.get("id") == step_id:
+            return step
+    raise AssertionError("no step id=%r among %d steps" % (step_id, len(job_steps)))
+
+
+_GH_EXPRESSION = re.compile(r"\$\{\{\s*([^}]+?)\s*\}\}")
+
+
+def _bind_gh_expressions(script: str, bindings: dict) -> str:
+    """Replace `${{ ... }}` GitHub Actions expressions the way the runner
+    would, so the producer's own step body can be executed verbatim rather
+    than re-typed as a hand-built fixture."""
+
+    def repl(match: "re.Match[str]") -> str:
+        key = match.group(1)
+        if key not in bindings:
+            raise AssertionError("unbound GitHub expression %r in producer step" % key)
+        return bindings[key]
+
+    return _GH_EXPRESSION.sub(repl, script)
 
 
 def workflow_jobs() -> dict:
@@ -602,6 +660,244 @@ def test_the_group_receipt_carries_a_group_object_not_a_pr_number():
     body = step_body("stage-group", "Emit the relay receipt")
     assert "group: {head_sha: $head_sha, base_sha: $base_sha, members: $members}" in body
     assert "pr: $pr" not in body
+    assert '--arg schema "leaf.staging-prewarm-relay.v1"' in body
+
+
+def _readiness_gh(workdir: Path, listing: dict, run_record: dict | None, zip_bytes: bytes | None) -> None:
+    """A `gh` that answers the readiness step's three API reads."""
+    binary = workdir / "bin"
+    binary.mkdir(exist_ok=True)
+    (workdir / "listing.json").write_text(json.dumps(listing), encoding="utf-8")
+    if run_record is not None:
+        (workdir / "run.json").write_text(json.dumps(run_record), encoding="utf-8")
+    if zip_bytes is not None:
+        (workdir / "artifact.zip").write_bytes(zip_bytes)
+    script = binary / "gh"
+    script.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            for arg in "$@"; do
+              case "$arg" in
+                *"/actions/artifacts/"*"/zip") cat "$(dirname "$0")/../artifact.zip"; exit 0 ;;
+                *"/actions/artifacts?name="*) cat "$(dirname "$0")/../listing.json"; exit 0 ;;
+                *"/actions/runs/"*) cat "$(dirname "$0")/../run.json"; exit 0 ;;
+              esac
+            done
+            echo "{}"
+            """
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    script.chmod(0o755)
+
+
+def _readiness_record(tree: str, source_sha: str, *, image_tag: str, run_id: int, run_attempt: int, repository_id: int) -> dict:
+    return {
+        "schema": "leaf.speculative-tag-readiness.v1",
+        "source_sha": source_sha,
+        "source_tree": tree,
+        "image_tag": image_tag,
+        "digests": {
+            "app": "sha256:" + "a" * 64,
+            "broker": "sha256:" + "b" * 64,
+            "canonical_worker": "sha256:" + "c" * 64,
+            "harness": "sha256:" + "d" * 64,
+            "web": "sha256:" + "e" * 64,
+        },
+        "producer_workflow_path": ".github/workflows/build-platform-images.yml",
+        "producer_run_id": run_id,
+        "producer_run_attempt": run_attempt,
+        "repository_id": repository_id,
+    }
+
+
+def _readiness_zip(tmp_path: Path, record: dict) -> tuple[bytes, str]:
+    """Zip the record the same way upload-artifact would, return (bytes, its sha256:<hex>)."""
+    zip_path = tmp_path / "fixture-source.zip"
+    with zipfile.ZipFile(zip_path, "w") as archive:
+        archive.writestr("spec-tag-readiness.json", json.dumps(record))
+    data = zip_path.read_bytes()
+    digest = "sha256:%s" % hashlib.sha256(data).hexdigest()
+    return data, digest
+
+
+READINESS_TREE = "1" * 40
+READINESS_SOURCE_SHA = "2" * 40
+READINESS_IMAGE_TAG = "spec-%s-%s" % (READINESS_TREE, READINESS_SOURCE_SHA[:12])
+READINESS_REPO_ID = 555
+READINESS_RUN_ID = 99
+READINESS_RUN_ATTEMPT = 2
+
+READINESS_ENV = {
+    "GH_TOKEN": "unused",
+    "TREE": READINESS_TREE,
+    "SOURCE_SHA": READINESS_SOURCE_SHA,
+    "IMAGE_TAG": READINESS_IMAGE_TAG,
+    "REPO_ID": str(READINESS_REPO_ID),
+    "SUPPLY_SET_POLLS": "1",
+    "SUPPLY_SET_INTERVAL": "0",
+}
+
+READINESS_LISTING_TEMPLATE = {
+    "id": 1,
+    "expired": False,
+    "workflow_run": {"id": READINESS_RUN_ID, "head_repository_id": READINESS_REPO_ID},
+}
+
+READINESS_RUN_RECORD = {
+    "path": ".github/workflows/build-platform-images.yml@refs/heads/main",
+    "event": "workflow_dispatch",
+    "head_branch": "main",
+    "run_attempt": READINESS_RUN_ATTEMPT,
+}
+
+
+@needs_shell
+def test_the_readiness_step_is_false_on_an_empty_listing(tmp_path):
+    _readiness_gh(tmp_path, {"artifacts": []}, None, None)
+    result = run_step(
+        step_body("stage-group", "Wait for the exact speculative tag-readiness"),
+        tmp_path,
+        READINESS_ENV,
+    )
+    assert result["ready"] == "false"
+
+
+@needs_shell
+@needs_unzip
+def test_the_readiness_step_is_true_for_the_exact_matching_record(tmp_path):
+    """Proves adoption WITHOUT consulting the older v3 supply-set artifact:
+    this test runs the readiness step body alone, over a fixture bound to
+    this run's own tree, source and tag."""
+    record = _readiness_record(
+        READINESS_TREE, READINESS_SOURCE_SHA, image_tag=READINESS_IMAGE_TAG,
+        run_id=READINESS_RUN_ID, run_attempt=READINESS_RUN_ATTEMPT,
+        repository_id=READINESS_REPO_ID,
+    )
+    zip_bytes, digest = _readiness_zip(tmp_path, record)
+    listing = {"artifacts": [{**READINESS_LISTING_TEMPLATE, "digest": digest}]}
+    _readiness_gh(tmp_path, listing, READINESS_RUN_RECORD, zip_bytes)
+    result = run_step(
+        step_body("stage-group", "Wait for the exact speculative tag-readiness"),
+        tmp_path,
+        READINESS_ENV,
+    )
+    assert result["ready"] == "true"
+
+
+@needs_shell
+@needs_unzip
+def test_the_readiness_step_rejects_an_earlier_preview_cohorts_tag_for_the_same_tree(tmp_path):
+    """Same tree, a real matching digest, but the record names an EARLIER
+    preview cohort's own source and tag -- exactly the artifact that used to
+    unblock the relay early. Content validation, not just presence, must
+    refuse it."""
+    earlier_source_sha = "3" * 40
+    earlier_tag = "spec-%s-%s" % (READINESS_TREE, earlier_source_sha[:12])
+    record = _readiness_record(
+        READINESS_TREE, earlier_source_sha, image_tag=earlier_tag,
+        run_id=READINESS_RUN_ID, run_attempt=READINESS_RUN_ATTEMPT,
+        repository_id=READINESS_REPO_ID,
+    )
+    zip_bytes, digest = _readiness_zip(tmp_path, record)
+    listing = {"artifacts": [{**READINESS_LISTING_TEMPLATE, "digest": digest}]}
+    _readiness_gh(tmp_path, listing, READINESS_RUN_RECORD, zip_bytes)
+    result = run_step(
+        step_body("stage-group", "Wait for the exact speculative tag-readiness"),
+        tmp_path,
+        READINESS_ENV,
+    )
+    assert result["ready"] == "false"
+
+
+@needs_shell
+@needs_unzip
+def test_the_relay_accepts_the_producers_own_materialized_readiness_record(tmp_path):
+    """A hand-built fixture only proves the relay's OWN opinion of the
+    schema. Run build-platform-images.yml's actual materialize step body,
+    with faked digest/identity inputs and the v3 dedup guard never
+    consulted, and feed the relay the producer's REAL byte output -- the
+    only proof the two sides still agree on the wire format."""
+    producer_source_sha = "6" * 40
+    producer_tree = "7" * 40
+    producer_tag = "spec-%s-%s" % (producer_tree, producer_source_sha[:12])
+    producer_run_id = 4242
+    producer_run_attempt = 3
+    producer_repo_id = 909
+
+    materialize_step = _step_by_id(
+        build_workflow_document()["jobs"]["speculate-manifest"]["steps"], "readiness"
+    )
+    bound_script = _bind_gh_expressions(materialize_step["run"], {
+        "needs.prepare.outputs.source_sha": producer_source_sha,
+        "steps.digests.outputs.app": "sha256:" + "a" * 64,
+        "steps.digests.outputs.broker": "sha256:" + "b" * 64,
+        "steps.digests.outputs.canonical_worker": "sha256:" + "c" * 64,
+        "steps.digests.outputs.harness": "sha256:" + "d" * 64,
+        "steps.digests.outputs.web": "sha256:" + "e" * 64,
+        "github.repository_id": str(producer_repo_id),
+    })
+    run_step(bound_script, tmp_path, {
+        "SOURCE_TREE": producer_tree,
+        "SPEC_TAG": producer_tag,
+        "GITHUB_RUN_ID": str(producer_run_id),
+        "GITHUB_RUN_ATTEMPT": str(producer_run_attempt),
+        "RUNNER_TEMP": ".",
+    })
+    raw_record = (tmp_path / "spec-tag-readiness.json").read_bytes()
+    record = json.loads(raw_record)
+    assert record["schema"] == "leaf.speculative-tag-readiness.v1"
+    assert record["source_sha"] == producer_source_sha
+    assert record["image_tag"] == producer_tag
+    assert record["producer_workflow_path"] == ".github/workflows/build-platform-images.yml"
+
+    zip_path = tmp_path / "fixture-source.zip"
+    with zipfile.ZipFile(zip_path, "w") as archive:
+        archive.writestr("spec-tag-readiness.json", raw_record)
+    digest = "sha256:%s" % hashlib.sha256(zip_path.read_bytes()).hexdigest()
+
+    listing = {"artifacts": [{
+        "id": 1, "expired": False,
+        "workflow_run": {"id": producer_run_id, "head_repository_id": producer_repo_id},
+        "digest": digest,
+    }]}
+    run_record = {
+        "path": ".github/workflows/build-platform-images.yml@refs/heads/main",
+        "event": "workflow_dispatch",
+        "head_branch": "main",
+        "run_attempt": producer_run_attempt,
+    }
+    _readiness_gh(tmp_path, listing, run_record, zip_path.read_bytes())
+    result = run_step(
+        step_body("stage-group", "Wait for the exact speculative tag-readiness"),
+        tmp_path,
+        {
+            "GH_TOKEN": "unused",
+            "TREE": producer_tree,
+            "SOURCE_SHA": producer_source_sha,
+            "IMAGE_TAG": producer_tag,
+            "REPO_ID": str(producer_repo_id),
+            "SUPPLY_SET_POLLS": "1",
+            "SUPPLY_SET_INTERVAL": "0",
+        },
+    )
+    assert result["ready"] == "true"
+
+
+def test_the_dispatch_step_now_gates_on_readiness_not_supply_presence():
+    dispatch = next(
+        s for s in group_workflow_document()["jobs"]["stage-group"]["steps"]
+        if s.get("id") == "dispatch"
+    )
+    assert dispatch["if"] == "steps.readiness.outputs.ready == 'true'"
+
+
+def test_the_receipt_carries_an_honest_tag_ready_boolean():
+    body = step_body("stage-group", "Emit the relay receipt")
+    assert 'tag_ready: ($tag_ready == "true")' in body
+    assert '--arg tag_ready "${TAG_READY:-false}"' in body
     assert '--arg schema "leaf.staging-prewarm-relay.v1"' in body
 
 
