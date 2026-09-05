@@ -171,6 +171,7 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
       // ORTHO) resolves against the entity list within the same aperture
       // the object snap uses, one extra unproject SNAP_PX to the right.
       const edgeStep = currentStep(m)?.kind === 'edge'
+      const apertureStep = currentStep(m)?.aperture === true
       const hit = edgeStep ? null : snapAt(v, m, event.clientX, event.clientY, p)
       const [px, py] = hit ? [hit.x, hit.y] : (!edgeStep && orthoRef.current ? orthoPoint(m, p.x, p.y) : [p.x, p.y])
       let edgeCtx = null
@@ -183,7 +184,13 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
           && String((entitiesRef.current || []).find((e) => e && e.id === selectedRef.current)?.type || '').toUpperCase() === 'LWPOLYLINE'
         edgeCtx = { entities: entitiesRef.current, tol: q ? Math.abs(q.x - p.x) : 0, exceptId: selfCorner ? null : selectedRef.current }
       }
-      const { state, writes } = applyPick(m, px, py, inputsRef.current, edgeCtx)
+      let apertureCtx = null
+      if (apertureStep) {
+        const q = v.unproject(event.clientX + SNAP_PX, event.clientY)
+        const tol = q ? Math.abs(q.x - p.x) : 0
+        apertureCtx = { tol }
+      }
+      const { state, writes } = applyPick(m, px, py, inputsRef.current, edgeStep ? edgeCtx : apertureCtx)
       if (!writes.length && state === m) return
       machine.current = state
       for (const [key, value] of writes) setInput(key, value)

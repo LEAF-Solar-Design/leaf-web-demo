@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import CadEditSurface from './CadEditSurface.jsx'
 import EngineRibbonClusters, { PROMPTS } from './EngineRibbonClusters.jsx'
-import EngineSessionProvider, { useEngineSessionContext } from './EngineSessionProvider.jsx'
+import EngineSessionProvider, { DEFAULT_EDIT_INPUTS, useEngineSessionContext } from './EngineSessionProvider.jsx'
 import { CREATING_EDITS, INTERSECT_VERBS, buildEditPayload, lowerSteps, planIntersectVerb } from './engineSession.js'
 import { MAX_BATCH_STEPS } from './intersect.js'
 import { PICK_SEQUENCES, applyPick, ghostFor, startPicking } from './pointPicking.js'
@@ -69,6 +69,17 @@ describe('W4g-6 store: the planner over the session and the lowering to the work
     // The geometry's own refusal comes through the same door.
     expect(planIntersectVerb('trim', session([H, V], '7'), { edge: '9', x: '5', y: '0' }).refusal).toBe('Trim refused: click on the part to remove, away from the crossing.')
     expect(planIntersectVerb('nope', session([H, V], '7'), {}).refusal).toBe('Edit refused: unknown operation nope.')
+  })
+
+  it('uses a valid pick aperture for trim and falls back to the default otherwise', () => {
+    const inputs = { edge: '9', x: '5.02', y: '0' }
+    const expected = { steps: [{ op: 'setVertices', entityId: '7', points: [[0, 0], [5, 0]], closed: false }] }
+    expect(planIntersectVerb('trim', session([H, V], '7'), { ...inputs, etol: '0.05' }).refusal)
+      .toBe('Trim refused: click on the part to remove, away from the crossing.')
+    expect(planIntersectVerb('trim', session([H, V], '7'), inputs)).toEqual(expected)
+    for (const etol of ['abc', '-1', '0', '1e10']) {
+      expect(planIntersectVerb('trim', session([H, V], '7'), { ...inputs, etol })).toEqual(expected)
+    }
   })
 
   it('plans a fillet and a chamfer between the selection and the second line', () => {
@@ -162,6 +173,8 @@ describe('W4g-6 words, records, picks and prompts', () => {
       expect(PICK_SEQUENCES[op].map((s) => s.kind)).toEqual(['edge', 'point'])
       expect(PICK_SEQUENCES[op][0].keys).toEqual(['edge', 'ex', 'ey'])
     }
+    expect(PICK_SEQUENCES.trim[1].aperture).toBe(true)
+    expect(PICK_SEQUENCES.extend[1].aperture).toBeUndefined()
     let state = startPicking('trim')
     // (5.05, 3) is 0.05 from the vertical, well within a 0.2 aperture; the selection (H) is skipped.
     const miss = applyPick(state, 5.05, 3, {}, { entities: [H, V], tol: 0.01, exceptId: '7' })
@@ -172,9 +185,12 @@ describe('W4g-6 words, records, picks and prompts', () => {
     state = hit.state
     // No context at all (a typed prompt) writes nothing either.
     expect(applyPick(startPicking('trim'), 5, 3, {}).writes).toEqual([])
-    // The second step is a plain point; no ghost on the way.
+    // The second step carries the removal point's aperture; no ghost on the way.
     expect(ghostFor(state, 8, 1)).toBeNull()
+    expect(applyPick(state, 8, 0.5, {}, { tol: 0.2 }).writes).toEqual([['x', '8'], ['y', '0.5'], ['etol', '0.2']])
     expect(applyPick(state, 8, 0.5, {}).writes).toEqual([['x', '8'], ['y', '0.5']])
+    const fillet = applyPick(startPicking('fillet'), 5.05, 3, {}, { entities: [H, V], tol: 0.2, exceptId: '7' })
+    expect(applyPick(fillet.state, 8, 0.5, {}, { tol: 0.2 }).writes).toEqual([['x', '8'], ['y', '0.5']])
   })
 
   it('the prompts use the reference words, with the edge as a text field', () => {
@@ -242,6 +258,34 @@ beforeEach(() => {
 })
 afterEach(() => { cleanup(); context = null })
 
+describe('W4g-6 provider: the aperture belongs to the last canvas removal point pick', () => {
+  it('clears the aperture when the removal point is typed and preserves it when the picker writes it last', () => {
+    mount()
+    expect(DEFAULT_EDIT_INPUTS.etol).toBe('')
+    act(() => {
+      context.setInput('etol', '0.2')
+      context.setInput('x', '5.02')
+    })
+    expect(context.inputs.etol).toBe('')
+    expect(context.inputs.x).toBe('5.02')
+    act(() => {
+      context.setInput('etol', '0.2')
+      context.setInput('y', '0')
+    })
+    expect(context.inputs.etol).toBe('')
+    expect(context.inputs.y).toBe('0')
+    act(() => {
+      context.setInput('x', '5')
+      context.setInput('y', '1')
+      context.setInput('etol', '0.2')
+    })
+    expect(context.inputs.etol).toBe('0.2')
+    act(() => { context.setInput('edge', '11') })
+    expect(context.inputs.etol).toBe('0.2')
+    expect(context.inputs.edge).toBe('11')
+  })
+})
+
 describe('W4g-6 ribbon: a fillet posts ONE batch and its reply selects the arc under the verb name', () => {
   it('arms on the tool, holds Run while the edge is empty, posts the lowered batch, and reads the reply back as fillet', async () => {
     const Y = { ...V, id: '9', handle: '9', vertices: [[10, 0, 0], [10, 10, 0]] }
@@ -281,6 +325,34 @@ describe('W4g-6 ribbon: a fillet posts ONE batch and its reply selects the arc u
     expect(context.session.selectedId).toBe('11')
     expect(context.session.status).toMatch(/^fillet applied: entity 11 drawn\./)
     expect(context.session.undoDepth).toBe(1)
+  })
+
+  it('a re-armed TRIM keeps the picked edge but uses the default aperture for a typed removal point', async () => {
+    mount()
+    await openAndLoad([H, V], '7')
+    fireEvent.click(tool('trim'))
+    await waitFor(() => expect(screen.getByTestId('cockpit-prompt').getAttribute('data-op')).toBe('trim'))
+    act(() => {
+      context.setInput('edge', '9')
+      context.setInput('x', '5')
+      context.setInput('y', '1')
+      context.setInput('etol', '0.2')
+    })
+    fireEvent.keyDown(field('x'), { key: 'Escape' })
+    expect(context.armed).toBeNull()
+    fireEvent.click(tool('trim'))
+    await waitFor(() => expect(screen.getByTestId('cockpit-prompt').getAttribute('data-op')).toBe('trim'))
+    expect(field('edge').value).toBe('9')
+    expect(context.inputs.etol).toBe('0.2')
+    fireEvent.change(field('x'), { target: { value: '5.02' } })
+    fireEvent.change(field('y'), { target: { value: '0' } })
+    expect(context.inputs.etol).toBe('')
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Run' }).disabled).toBe(false))
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }))
+    const posts = workers[0].posted.filter((m) => m.type === 'applyEdit')
+    expect(posts).toHaveLength(1)
+    expect(JSON.stringify(posts[0])).toContain('"points":[0,0,5,0]')
+    expect(context.session.status).not.toMatch(/refused/i)
   })
 
   it('a refused batch reads back under the verb too, with the worker step named, and the document stays', async () => {

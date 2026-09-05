@@ -6,6 +6,9 @@
 // store or the engine refuses stops the script with its number and the
 // refusal's own sentence; the lines before it stay applied (each is its own
 // undo step, as in the reference).
+// A script line speaks only to its prompt, so a key the prompt does not
+// show (today the aperture of a canvas edge pick, `etol`) resets to its
+// default and a canvas pick can never reach a typed cut.
 //
 // The runner is a small state machine over the session: a line is dispatched
 // through the store's own actions, then the session is watched until the
@@ -17,7 +20,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { clipboardReason, drawReason, modifyReason } from '../lib/actionRegistry.js'
 import { parseDrawingCommand } from '../lib/commandWords.js'
 import { PROMPTS } from './EngineRibbonClusters.jsx'
-import { useEngineSessionContext } from './EngineSessionProvider.jsx'
+import { DEFAULT_EDIT_INPUTS, useEngineSessionContext } from './EngineSessionProvider.jsx'
 import { buildCreatePayload, buildEditPayload } from './engineSession.js'
 import { resolvePromptInputs } from './promptInputs.js'
 import { BARE_OPS, MAX_SCRIPT_CHARS, parseScript } from './script.js'
@@ -81,7 +84,12 @@ export default function ScriptPanel() {
       else actions.applyEdit(line.op, {})
     } else {
       const prompt = PROMPTS[line.op]
-      const merged = { ...inputsRef.current, ...line.inputs }
+      const shown = new Set(prompt.steps.flatMap((step) => step.fields.map((field) => field[0])))
+      const merged = { ...inputsRef.current }
+      for (const key in DEFAULT_EDIT_INPUTS) {
+        if (!shown.has(key)) merged[key] = DEFAULT_EDIT_INPUTS[key]
+      }
+      Object.assign(merged, line.inputs)
       const { effective, expressionRefusal, waitingStep } = resolvePromptInputs(prompt, merged, null)
       if (expressionRefusal) { stop('stopped', `Script stopped at line ${line.line}: ${expressionRefusal}`); return }
       if (waitingStep) { stop('stopped', `Script stopped at line ${line.line}: ${line.verb} still needs "${waitingStep.ask}"`); return }

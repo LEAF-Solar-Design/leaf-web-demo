@@ -693,13 +693,36 @@ describe('TRIM on curved polylines (W4g-6e)', () => {
     expectVertices(head.steps[0], 'm', [[0, 0], [10, 0]])
   })
 
-  it('snaps a near-end arc crossing within the aperture, leaving no sliver', () => {
+  it('the aperture never moves a cut: a crossing 1e-4 from the vertex stays a crossing', () => {
     // The lower root is about 1e-4 from (10,0), within the 1e-3 aperture.
     const cutter = line('n', [10 - 1e-9, -1], [10 - 1e-9, 10])
     expect(crossings(curveOf(SEMI3()), curveOf(cutter), 'none', 1e-3)).toEqual([{ s: 1, p: [10, 0] }])
     const out = trimEntity(SEMI3(), cutter, 3, -4, 1e-3)
     expect(out.steps).toHaveLength(1)
-    expectVertices(out.steps[0], 'p', [[10, 0], [10, 10]])
+    expect(out.steps[0]).toMatchObject({ op: 'setVertices', entityId: 'p', closed: false })
+    const { points, bulges } = out.steps[0]
+    expect(points).toHaveLength(3)
+    expect(points[0][0]).toBeCloseTo(9.999999999, 9)
+    expect(points[0][1]).toBeCloseTo(-0.000100000004, 9)
+    expect(points[1]).toEqual([10, 0])
+    expect(points[2]).toEqual([10, 10])
+    expect(bulges).toHaveLength(3)
+    expect(bulges[0]).toBeCloseTo(5.0000002e-6, 12)
+    expect(bulges[1]).toBe(0)
+    expect(bulges[2]).toBe(0)
+  })
+
+  it('the pick aperture only refuses an ambiguous pick', () => {
+    const target = poly('p', [[0, 0], [10, 0], [10, 10]], false)
+    const edge = line('c', [5, -1], [5, 1])
+    expect(trimEntity(target, edge, 5.02, 0, 0.05).refusal)
+      .toBe('Trim refused: click on the part to remove, away from the crossing.')
+    expect(trimEntity(target, edge, 5.02, 0)).toEqual({
+      steps: [{ op: 'setVertices', entityId: 'p', points: [[0, 0], [5, 0]], closed: false }],
+    })
+    expect(trimEntity(target, line('c', [5.03, -1], [5.03, 1]), 5.1, 0, 0.05)).toEqual({
+      steps: [{ op: 'setVertices', entityId: 'p', points: [[0, 0], [5.03, 0]], closed: false }],
+    })
   })
 
   it('opens a closed polyline across its curved closing segment and keeps both arc fragments', () => {
@@ -1401,5 +1424,41 @@ describe('Astra refutations, round eleven (W4g-6e record 14)', () => {
     const target = line('a', [0, 0], [1e-5, 0])
     const edge = line('b', [0, 1e-9], [1e-5, 1e-9])
     expect(crossings(curveOf(target), curveOf(edge))).toEqual([])
+  })
+})
+
+describe('Kimi notes on #1064 (W4g-6e record 15)', () => {
+  // The exact pins on 4e-10, 1.4e-9, 5e-10 and 1.5e-9 chords (records 7, 8
+  // and 9) still hold: their bands are below 1e-23 while the grid is 4e-10
+  // or more away, so the noise clean never touches them.
+  it('places a near-tangent chord at the 1e9 corner from the gap, not r*r - d*d', () => {
+    const target = circle('c', [0, 0], 1e9)
+    const d = 999999999.99999
+    const edge = line('e', [-1000, -d], [1000, -d])
+    const hits = crossings(curveOf(target), curveOf(edge))
+    expect(hits).toHaveLength(2)
+    const h = Math.sqrt((1e9 - d) * (1e9 + d))
+    expect(h).toBeCloseTo(141.51735103700588, 6)
+    hits.sort((a, b) => a.s - b.s)
+    expect(hits[0].p[0]).toBeCloseTo(-h, 6)
+    expect(hits[1].p[0]).toBeCloseTo(h, 6)
+    expect(hits[0].p[1]).toBe(-d)
+    expect(hits[1].p[1]).toBe(-d)
+    expect(hits[0].s).toBeCloseTo(269.999991892, 6)
+    expect(hits[1].s).toBeCloseTo(270.000008108, 6)
+  })
+
+  it('keeps the exact endpoint of a lower semicircle cut at its bottom', () => {
+    const target = poly('p', [[0, 0], [20, 0]], false, 'A', [1, 0])
+    const edge = line('e', [10, -12], [10, -8])
+    const out = trimEntity(target, edge, 15, -8)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(1)
+    const { points, bulges, ...shape } = out.steps[0]
+    expect(shape).toEqual({ op: 'setVertices', entityId: 'p', closed: false })
+    expect(points).toEqual([[0, 0], [10, -10]])
+    expect(bulges).toHaveLength(2)
+    expect(bulges[0]).toBeCloseTo(Math.tan(Math.PI / 8), 9)
+    expect(bulges[1]).toBe(0)
   })
 })
