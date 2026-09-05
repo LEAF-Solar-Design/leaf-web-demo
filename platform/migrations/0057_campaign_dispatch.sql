@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS campaign_dispatch_bindings (
   CHECK (state <> 'settled' OR (verdict_fingerprint IS NOT NULL AND remote_fencing_token IS NOT NULL)),
   FOREIGN KEY (org_id, project_id) REFERENCES projects(org_id, project_id) ON DELETE CASCADE
 );
+-- expand-contract: contract-of=0056
 ALTER TABLE campaign_events DROP CONSTRAINT IF EXISTS campaign_events_event_type_check;
 ALTER TABLE campaign_events ADD CONSTRAINT campaign_events_event_type_check CHECK (event_type IN (
   'task_submitted','question_linked','attempt_claimed','attempt_expired','stage_succeeded',
