@@ -35,6 +35,8 @@ name: Speculate platform images
 on:
   pull_request:
     branches: [main]
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -42,7 +44,7 @@ permissions:
   actions: write
 
 concurrency:
-  group: speculate-platform-images-${{ github.event.pull_request.number }}
+  group: speculate-platform-images-${{ github.event_name == 'merge_group' && format('mg-{0}', github.event.merge_group.head_sha) || github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
@@ -119,6 +121,57 @@ jobs:
             -f "speculative=true" \
             -f "speculative_pr_number=$PR_NUMBER"; then
             echo "Dispatched a speculative build of PR #$PR_NUMBER at $HEAD_SHA."
+          else
+            echo "::warning::Speculative dispatch failed; the merge run will fall back to a full build."
+          fi
+
+  dispatch-group:
+    if: github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          ref: ${{ github.event.merge_group.head_sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Dispatch the merge-group build on the main ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::Merge-group head is not an exact commit."
+            exit 1
+          }
+          # Only the file list comes from the candidate. Execute the filter
+          # from its trusted first parent, with the same fail-open posture.
+          DISPATCH=true
+          if git rev-parse --verify --quiet 'HEAD^1' >/dev/null 2>&1 \
+            && git show 'HEAD^1:scripts/docs_noop_filter.py' \
+              > "$RUNNER_TEMP/docs_noop_filter.py" 2>/dev/null; then
+            if FILES=$(git diff --no-renames --name-only HEAD^1 HEAD 2>/dev/null); then
+              if VERDICT=$(printf '%s\n' "$FILES" | python3 "$RUNNER_TEMP/docs_noop_filter.py" 2>/dev/null); then
+                if [ "$VERDICT" = "skip" ]; then
+                  echo "::notice::Merge group changes documentation only; skipping speculation."
+                  DISPATCH=false
+                fi
+              fi
+            fi
+          fi
+          if [ "$DISPATCH" != "true" ]; then
+            exit 0
+          fi
+          if gh workflow run build-platform-images.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            -f "source_sha=$HEAD_SHA" \
+            -f "speculative=true" \
+            -f "speculative_group_head=$HEAD_SHA"; then
+            echo "Dispatched a speculative build of merge group $HEAD_SHA."
           else
             echo "::warning::Speculative dispatch failed; the merge run will fall back to a full build."
           fi
