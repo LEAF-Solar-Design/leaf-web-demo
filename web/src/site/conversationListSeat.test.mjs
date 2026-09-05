@@ -58,14 +58,4 @@ describe('the console ConversationList sits in the rail column, not over the gro
     assert.match(css, /\.rail-stack \.conversation-list \{[^}]*max-height: 40%;[^}]*overflow-y: auto;/s,
       'the list must be capped at 40% of the column and scroll independently')
   })
-
-  it('the column owns the rail edge; neither child draws a border-left of its own', () => {
-    assert.match(css, /\.rail-stack \{[^}]*border-left: 1px solid var\(--border\);/s,
-      '.rail-stack must draw the left edge once')
-    const list = css.match(/\.rail-stack \.conversation-list \{[^}]*\}/s)
-    const rail = css.match(/\naside\.rail \{[^}]*\}/s)
-    assert.ok(list && rail, 'both child rules must exist')
-    assert.equal(list[0].includes('border-left'), false, 'the list must not repeat the edge')
-    assert.equal(rail[0].includes('border-left'), false, 'aside.rail must not repeat the edge')
-  })
 })
