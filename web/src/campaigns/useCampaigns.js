@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import * as api from './api.js'
 
 const empty = () => ({ status: 'idle', refreshing: false, error: null, errorAction: null,
-  campaigns: [], selectedId: null, selected: null, questions: [], answers: {}, pending: {} })
+  campaigns: [], selectedId: null, selected: null, questions: [], answers: {}, pending: {},
+  execution: null, executionLoading: false, executionError: null })
 const newKey = () => globalThis.crypto?.randomUUID?.() || `k-${Date.now()}-${Math.random().toString(16).slice(2)}`
 
 export default function useCampaigns(projectId, { enabled = true } = {}) {
@@ -52,11 +53,23 @@ export default function useCampaigns(projectId, { enabled = true } = {}) {
       for (const question of questions) {
         if (question.answer != null) answers[question.question_id] = question.answer
       }
+      const changedSelection = context.selectedId !== selectedId
       context.selectedId = selectedId
-      update({ campaigns, selectedId, selected, questions, answers, status: 'ready', refreshing: false })
+      update({ campaigns, selectedId, selected, questions, answers, status: 'ready', refreshing: false,
+        executionLoading: !!selectedId, ...(changedSelection || !selectedId ? { execution: null, executionError: null } : {}) })
+      if (selectedId) {
+        try {
+          const result = await api.getExecution(projectId, selectedId)
+          if (!live()) return null
+          update({ execution: result.execution, executionLoading: false, executionError: null })
+        } catch (executionError) {
+          if (!live()) return null
+          update({ executionError, executionLoading: false })
+        }
+      }
       return { campaigns, selected, questions }
     } catch (error) {
-      if (live()) update({ error, errorAction: 'load', refreshing: false, ...(!refresh ? { status: 'error' } : {}) })
+      if (live()) update({ error, errorAction: 'load', refreshing: false, executionLoading: false, ...(!refresh ? { status: 'error' } : {}) })
       return null
     }
   }, [context, current, enabled, projectId, update])
@@ -74,7 +87,8 @@ export default function useCampaigns(projectId, { enabled = true } = {}) {
     context.selectedId = id
     context.locks = {}
     questionKeyRef.current = null
-    update({ selectedId: id, selected: null, questions: [], answers: {}, pending: {}, error: null, errorAction: null })
+    update({ selectedId: id, selected: null, questions: [], answers: {}, pending: {}, error: null, errorAction: null,
+      execution: null, executionLoading: false, executionError: null })
     return load({ preferredId: id })
   }, [context, current, load, update])
 
