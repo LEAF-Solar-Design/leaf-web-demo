@@ -71,7 +71,8 @@ NON_RELAY_SERVICES = ("broker", "harness", "canonical-worker")
 
 # Bounded scan. The reconciler reads recent deploy runs to find each service's
 # most recent settled state; it never walks the whole history.
-MAX_DEPLOY_RUN_SCAN = 60
+MAX_DEPLOY_RUN_SCAN = 100
+MAX_DEPLOY_RUN_PAGES = 3
 MAX_RELAY_RUN_SCAN = 20
 # Hard ceiling on rows accepted from one listing, so a provider that ignores
 # per_page cannot make this lane allocate without bound.
@@ -386,37 +387,34 @@ def _settled_service_state(provider: Provider) -> dict[str, dict[str, Any]]:
     Deliberately evidence-based rather than an AWS read: this repository holds
     no AWS credentials, and the receipt already records the terminal digest and
     task definition the deploy landed on. It is a BEST-EFFORT view of live
-    state, because a later deploy dispatched by anyone else could have moved a
-    service since. That is safe here for two reasons: the plan is only read by
-    a human, and every deploy step it names carries digest_aware_reconcile,
-    which makes the provider skip a service that is already exact.
+    state, because a later deploy could have moved a service since. Each direct
+    deploy pins this receipt's exact task definition. The provider compares it
+    with live state under its mutation lock and refuses a stale baseline.
     """
-    rows = _run_page(
-        provider,
-        TF_REPOSITORY,
-        "deploy-leaf-platform-staging.yml",
-        f"event=workflow_dispatch&status=success&per_page={MAX_DEPLOY_RUN_SCAN}",
-    )
     # Pick the newest candidate per service from run metadata FIRST, then read
-    # at most one artifact each. Downloading a receipt per scanned run instead
-    # would be a per-item network round trip over a 60-run window to recover 5
-    # facts, and broker appears about twice in such a window, so the naive shape
-    # pays ~50 archive downloads on every tick of a 30-minute schedule.
+    # at most one artifact each. Non-relay services can fall outside the first
+    # page during a busy web/app release window (worker was row 96 on 2026-09-05).
+    # Read at most three metadata pages, stopping as soon as all five are found.
     candidates: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        if not isinstance(row, dict):
-            raise ContractError("PROVIDER_RUN_LIST_INVALID")
-        title = row.get("display_title")
-        if not isinstance(title, str):
-            continue
-        match = RUN_TITLE.match(title)
-        if match is None:
-            continue
-        service = match.group("service")
-        if service not in SERVICE_ORDER or service in candidates:
-            continue
-        candidates[service] = row
-        if len(candidates) == len(SERVICE_ORDER):
+    for page in range(1, MAX_DEPLOY_RUN_PAGES + 1):
+        query = f"event=workflow_dispatch&status=success&per_page={MAX_DEPLOY_RUN_SCAN}"
+        if page > 1:
+            query += f"&page={page}"
+        rows = _run_page(provider, TF_REPOSITORY, "deploy-leaf-platform-staging.yml", query)
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ContractError("PROVIDER_RUN_LIST_INVALID")
+            title = row.get("display_title")
+            if not isinstance(title, str):
+                continue
+            match = RUN_TITLE.match(title)
+            if match is None:
+                continue
+            service = match.group("service")
+            if service not in SERVICE_ORDER or service in candidates:
+                continue
+            candidates[service] = row
+        if len(candidates) == len(SERVICE_ORDER) or len(rows) < MAX_DEPLOY_RUN_SCAN:
             break
 
     state: dict[str, dict[str, Any]] = {}
@@ -464,13 +462,15 @@ def _settled_service_state(provider: Provider) -> dict[str, dict[str, Any]]:
     return state
 
 
-def _dispatch_step(service: str, image_tag: str, *, position: int) -> dict[str, Any]:
+def _dispatch_step(
+    service: str, image_tag: str, baseline: str, *, position: int
+) -> dict[str, Any]:
     """One forward reconcile of a non-relay service.
 
-    digest_aware_reconcile is what makes this safe to name even when the
-    best-effort read above is stale: the provider re-reads live state under the
-    lock and skips a service that is already exact, so a redundant step costs a
-    no-op run rather than a redeploy.
+    V3 supply permits digest-aware routing only for web/app. The other three
+    services require direct mode and an exact reviewed baseline, never
+    auto-live. The closed supply envelope still binds the selected digest;
+    the provider's locked baseline check refuses intervening deployments.
     """
     return {
         "position": position,
@@ -480,10 +480,11 @@ def _dispatch_step(service: str, image_tag: str, *, position: int) -> dict[str, 
         "repository": TF_REPOSITORY,
         "inputs": {
             "service": service,
-            "expected_task_definition": "auto-live",
+            "expected_task_definition": baseline,
             "image_tag": image_tag,
             "app_deploy_intent": "forward",
-            "digest_aware_reconcile": "true",
+            "digest_aware_reconcile": "false",
+            "deploy_strategy": "direct",
         },
         "requires_relay_supply_evidence": True,
     }
@@ -575,13 +576,23 @@ def build_plan(provider: Provider) -> dict[str, Any]:
 
     blockers: list[str] = []
     steps: list[dict[str, Any]] = []
+    missing_baselines: list[str] = []
     position = 0
     for service in NON_RELAY_SERVICES:
         if service in lagging:
+            current = settled.get(service)
+            if current is None:
+                missing_baselines.append(service)
+                blockers.append(
+                    f"SERVICE_BASELINE_UNKNOWN: {service} has no settled receipt; "
+                    "the provider requires its exact task-definition baseline."
+                )
+                continue
             position += 1
             steps.append(
                 _dispatch_step(
-                    service, release["service_tags"][service], position=position
+                    service, release["service_tags"][service],
+                    current["task_definition"], position=position
                 )
             )
 
@@ -628,6 +639,8 @@ def build_plan(provider: Provider) -> dict[str, Any]:
     # perfectly good report and still be undispatchable, and every reason it is
     # undispatchable is already a fact stated above rather than a new judgement.
     not_armable: list[str] = []
+    if missing_baselines:
+        not_armable.append(f"SERVICE_BASELINE_UNKNOWN: {missing_baselines}")
     if yielded["status"] != "clear":
         not_armable.append(f"YIELDED: {yielded['reason']}")
     if not envelope["present"]:
