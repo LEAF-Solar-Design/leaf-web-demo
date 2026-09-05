@@ -733,4 +733,15 @@ describe('W4g-6e: a created polyline carries its bulges through the builder and 
     expect(steps[0]).toEqual({ op: 'createPolyline', payload: { points: [0, 0, 10, 0, 10, 10], closed: true, layer: 'K', bulges: [0, 0.5, 0] } })
     expect(lowerSteps([{ op: 'createPolyline', inputs: { pts, bulges: [1] } }]).refusal).toMatch(/one bulge per vertex/)
   })
+  it('a sparse list is refused: a hole is not a bulge', () => {
+    const pts = '0,0 10,0 10,10'
+    for (const bad of [[0, , 0], [1, , 0], new Array(3), [, 0, 0]]) {
+      expect(buildCreatePayload('createPolyline', { pts, bulges: bad }).refusal).toMatch(/one bulge per vertex/)
+    }
+    expect(lowerSteps([{ op: 'createPolyline', inputs: { pts, bulges: [0, , 0] } }]).refusal).toMatch(/one bulge per vertex/)
+    // A dense list still rides, and its copy is a plain dense array.
+    const { payload } = buildCreatePayload('createPolyline', { pts, bulges: [0, 0.25, 0] })
+    expect(payload.bulges).toEqual([0, 0.25, 0])
+    expect(Object.keys(payload.bulges)).toEqual(['0', '1', '2'])
+  })
 })

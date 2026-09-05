@@ -125,6 +125,13 @@ const SCRIPT = [
   'out.curved = summary(await handleMessage({ type: "applyEdit", op: "createPolyline", payload: { points: [0, 0, 10, 0, 10, 10], closed: false, layer: "A", bulges: [1, 0, 0] } }, engine))',
   'out.badCreateBulges = summary(await handleMessage({ type: "applyEdit", op: "createPolyline", payload: { points: [0, 0, 10, 0, 10, 10], closed: false, layer: "A", bulges: [1] } }, engine))',
   'out.afterBadCreateBulges = summary(await handleMessage({ type: "applyEdit", op: "createLine", payload: { x1: 50, y1: 50, x2: 60, y2: 50, layer: "A" } }, engine))',
+  // W4g-6e (record 0b): the worker honours a typed array, refuses a hole through the crate, and refuses
+  // a value that is not a list, creating nothing in either refusal.
+  'out.typedCurved = summary(await handleMessage({ type: "applyEdit", op: "createPolyline", payload: { points: [0, 0, 10, 0, 10, 10], closed: false, layer: "A", bulges: new Float64Array([1, 0, 0]) } }, engine))',
+  'out.typedShort = summary(await handleMessage({ type: "applyEdit", op: "createPolyline", payload: { points: [0, 0, 10, 0, 10, 10], closed: false, layer: "A", bulges: new Float64Array([1]) } }, engine))',
+  'out.holeBulge = summary(await handleMessage({ type: "applyEdit", op: "createPolyline", payload: { points: [0, 0, 10, 0, 10, 10], closed: false, layer: "A", bulges: [1, , 0] } }, engine))',
+  'out.notAList = summary(await handleMessage({ type: "applyEdit", op: "createPolyline", payload: { points: [0, 0, 10, 0, 10, 10], closed: false, layer: "A", bulges: "1 0 0" } }, engine))',
+  'out.afterRefusals = summary(await handleMessage({ type: "applyEdit", op: "createLine", payload: { x1: 70, y1: 70, x2: 80, y2: 70, layer: "A" } }, engine))',
   'process.stdout.write(JSON.stringify({ ids, out }))',
 ].join('\n')
 
@@ -238,5 +245,18 @@ describe.skipIf(!GLUE)('the worker batch on the real engine', () => {
     expect(out.badCreateBulges.reason).toBe('bulges_not_per_vertex')
     expect(out.afterBadCreateBulges.ok).toBe(true)
     expect(out.afterBadCreateBulges.entities).toHaveLength(out.curved.entities.length + 1)
+    // W4g-6e (record 0b): a typed array is honoured; a short typed array, a hole and a non-list are refused with no create.
+    expect(out.typedCurved.ok).toBe(true)
+    const typed = out.typedCurved.entities.find((e) => e.id === out.typedCurved.createdId)
+    expect(typed.bulges).toHaveLength(3)
+    expect(typed.bulges[0]).toBeCloseTo(1, 12)
+    expect(out.typedShort.ok).toBe(false)
+    expect(out.typedShort.reason).toBe('bulges_not_per_vertex')
+    expect(out.holeBulge.ok).toBe(false)
+    expect(out.holeBulge.reason).toBe('bulge_not_finite')
+    expect(out.notAList.ok).toBe(false)
+    expect(out.notAList.reason).toBe('bulges_not_a_list')
+    expect(out.afterRefusals.ok).toBe(true)
+    expect(out.afterRefusals.entities).toHaveLength(out.typedCurved.entities.length + 1)
   })
 })

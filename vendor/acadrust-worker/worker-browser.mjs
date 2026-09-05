@@ -157,13 +157,23 @@ function entityIndex(doc, payload) {
 // handle. An engine that lacks the method (the JS stand-in) is refused
 // EXPLICITLY, as a typed reason — never a TypeError read as a crash, never a
 // pretend success.
+// W4g-6e: a bulge list at the boundary is absent (every segment straight), an
+// Array or a typed array (one number per vertex; the crate checks the count and
+// finiteness, and a hole or a non-number becomes NaN and is refused), never
+// anything else: a value of another shape is refused, not read as straight.
+function bulgeList(raw) {
+  if (raw == null) return new Float64Array(0)
+  if (Array.isArray(raw) || ArrayBuffer.isView(raw)) return Float64Array.from(raw, Number)
+  throw new Error('bulges_not_a_list')
+}
+
 const CREATE_OPS = Object.freeze({
   createLine: (doc, p) => doc.createLine(Number(p.x1), Number(p.y1), Number(p.x2), Number(p.y2), String(p.layer ?? '')),
   createCircle: (doc, p) => doc.createCircle(Number(p.cx), Number(p.cy), Number(p.radius), String(p.layer ?? '')),
   createArc: (doc, p) => doc.createArc(
     Number(p.cx), Number(p.cy), Number(p.radius), Number(p.startDeg), Number(p.endDeg), String(p.layer ?? '')),
   createPolyline: (doc, p) => doc.createPolyline(
-    Float64Array.from(Array.isArray(p.points) ? p.points : []), Boolean(p.closed), String(p.layer ?? ''), Float64Array.from(Array.isArray(p.bulges) ? p.bulges : [])),
+    Float64Array.from(Array.isArray(p.points) ? p.points : []), Boolean(p.closed), String(p.layer ?? ''), bulgeList(p.bulges)),
   // W4g-5d: TEXT. The wrapper refuses a non-finite number, a height that
   // is not positive, an empty or over-long value and any control character.
   createText: (doc, p) => doc.createText(

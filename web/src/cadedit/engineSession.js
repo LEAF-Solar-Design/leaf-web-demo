@@ -293,10 +293,16 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
     // straight polyline is unchanged: the list rides only when a bulge is set.
     let bulgeList = null
     if (bulges != null) {
-      if (!Array.isArray(bulges) || bulges.length !== points.length / 2 || bulges.some((b) => typeof b !== 'number' || !Number.isFinite(b))) {
+      if (!Array.isArray(bulges) || bulges.length !== points.length / 2) {
         return { refusal: 'Polyline refused: one bulge per vertex, each a finite number.' }
       }
-      if (bulges.some((b) => b !== 0)) bulgeList = bulges.slice()
+      let anySet = false
+      for (let i = 0; i < bulges.length; i += 1) {
+        const b = bulges[i]
+        if (typeof b !== 'number' || !Number.isFinite(b)) return { refusal: 'Polyline refused: one bulge per vertex, each a finite number.' }
+        if (b !== 0) anySet = true
+      }
+      if (anySet) bulgeList = Array.from(bulges)
     }
     return { payload: { points, closed: closed === true || closed === 'true', layer: layerName, ...(bulgeList ? { bulges: bulgeList } : {}) } }
   }
