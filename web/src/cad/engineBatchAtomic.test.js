@@ -68,7 +68,7 @@ const SCRIPT = [
   'const loaded = await handleMessage({ type: "loadDocument", documentId: "x.dxf", bytes }, engine)',
   'const ids = loaded.entities.map((e) => e.id)',
   'const [h, v, c] = ids',
-  'const summary = (r) => ({ ok: r.ok, op: r.op, reason: r.reason ?? null, createdId: r.createdId ?? null, createdIds: r.createdIds ?? null, count: r.entityCount ?? null, entities: (r.entities || []).map((e) => ({ id: e.id, type: e.type, vertices: e.vertices, bulges: e.bulges, closed: e.closed, radius: e.radius, startDeg: e.startDeg, endDeg: e.endDeg })) })',
+  'const summary = (r) => ({ ok: r.ok, op: r.op, reason: r.reason ?? null, createdId: r.createdId ?? null, createdIds: r.createdIds ?? null, count: r.entityCount ?? null, entities: (r.entities || []).map((e) => ({ id: e.id, type: e.type, layer: e.layer, editable: e.editable, vertices: e.vertices, bulges: e.bulges, closed: e.closed, radius: e.radius, startDeg: e.startDeg, endDeg: e.endDeg, majorAxis: e.majorAxis, ratio: e.ratio })) })',
   // A fillet: both lines cut to their tangent points, one arc made, in one turn.
   'out.fillet = summary(await handleMessage({ type: "applyEdit", op: "batch", payload: { verb: "fillet", steps: [',
   '  { op: "setVertices", payload: { entityId: h, points: [0, 0, 8, 0], closed: false } },',
@@ -109,6 +109,17 @@ const SCRIPT = [
   '] } }, engine))',
   'out.badBulges = summary(await handleMessage({ type: "applyEdit", op: "setVertices", payload: { entityId: sq, points: [0, 0, 10, 0, 10, 10], closed: true, bulges: [0, 0] } }, engine))',
   'out.straightAgain = summary(await handleMessage({ type: "applyEdit", op: "setVertices", payload: { entityId: sq, points: [0, 0, 10, 0, 10, 10], closed: true } }, engine))',
+  // W4g-4b: a POINT and an ELLIPSE through the worker's create table; the projection carries the
+  // ellipse's axis (relative) and ratio after the engine's write + re-parse; MATCHPROP is one setLayer
+  // step in a batch; the crate's refusals reach the boundary as codes.
+  'out.point = summary(await handleMessage({ type: "applyEdit", op: "createPoint", payload: { x: 3, y: 4, layer: "P" } }, engine))',
+  'out.ellipse = summary(await handleMessage({ type: "applyEdit", op: "createEllipse", payload: { cx: 10, cy: 0, ax: 5, ay: 0, ratio: 0.5, layer: "E" } }, engine))',
+  'out.badEllipse = summary(await handleMessage({ type: "applyEdit", op: "createEllipse", payload: { cx: 10, cy: 0, ax: 0, ay: 0, ratio: 0.5, layer: "E" } }, engine))',
+  'out.badRatio = summary(await handleMessage({ type: "applyEdit", op: "createEllipse", payload: { cx: 10, cy: 0, ax: 5, ay: 0, ratio: 2, layer: "E" } }, engine))',
+  'out.movedPoint = summary(await handleMessage({ type: "applyEdit", op: "move", payload: { entityId: out.point.createdId, dx: 1, dy: 1 } }, engine))',
+  'out.matched = summary(await handleMessage({ type: "applyEdit", op: "batch", payload: { verb: "matchprop", steps: [',
+  '  { op: "setLayer", payload: { entityId: out.point.createdId, layer: "E" } },',
+  '] } }, engine))',
   'process.stdout.write(JSON.stringify({ ids, out }))',
 ].join('\n')
 
@@ -122,6 +133,24 @@ describe.skipIf(!GLUE)('the worker batch on the real engine', () => {
     const { ids, out } = JSON.parse(raw)
     expect(ids).toHaveLength(3)
     const [h, v] = ids
+
+    // W4g-4b: POINT and ELLIPSE are real entities to the engine, editable, with the ellipse's axis and ratio
+    // in the projection; MATCHPROP's one-step batch relayers the destination; the refusals name their codes.
+    expect(out.point.ok).toBe(true)
+    const madePoint = out.point.entities.find((e) => e.id === out.point.createdId)
+    expect(madePoint).toMatchObject({ type: 'POINT', layer: 'P', editable: true, vertices: [[3, 4, 0]], majorAxis: null, ratio: null })
+    expect(out.ellipse.ok).toBe(true)
+    const madeEllipse = out.ellipse.entities.find((e) => e.id === out.ellipse.createdId)
+    expect(madeEllipse).toMatchObject({ type: 'ELLIPSE', layer: 'E', editable: true, vertices: [[10, 0, 0]], majorAxis: [5, 0], ratio: 0.5 })
+    expect(out.badEllipse.ok).toBe(false)
+    expect(out.badEllipse.reason).toBe('ellipse_axis_zero')
+    expect(out.badRatio.ok).toBe(false)
+    expect(out.badRatio.reason).toBe('ellipse_ratio_out_of_range')
+    expect(out.movedPoint.ok).toBe(true)
+    expect(out.movedPoint.entities.find((e) => e.id === out.point.createdId).vertices).toEqual([[4, 5, 0]])
+    expect(out.matched.ok).toBe(true)
+    expect(out.matched.op).toBe('batch')
+    expect(out.matched.entities.find((e) => e.id === out.point.createdId).layer).toBe('E')
 
     // W4g-6d: the corner fillet's bulge survives the engine's write + re-parse and comes back in the projection.
     expect(out.square.ok).toBe(true)

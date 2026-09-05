@@ -64,6 +64,13 @@ const WORDS = Object.freeze({
   copyclip: { group: 'clipboard', op: 'copyClip', verb: 'COPYCLIP' },
   cutclip: { group: 'clipboard', op: 'cutClip', verb: 'CUTCLIP' },
   pasteclip: { group: 'clipboard', op: 'pasteClip', verb: 'PASTECLIP' },
+  // W4g-4b: the reference's POINT, ELLIPSE and MATCHPROP, in its own aliases.
+  point: { group: 'draw', op: 'createPoint', verb: 'POINT' },
+  po: { group: 'draw', op: 'createPoint', verb: 'POINT' },
+  ellipse: { group: 'draw', op: 'createEllipse', verb: 'ELLIPSE' },
+  el: { group: 'draw', op: 'createEllipse', verb: 'ELLIPSE' },
+  matchprop: { group: 'modify', op: 'matchprop', verb: 'MATCHPROP' },
+  ma: { group: 'modify', op: 'matchprop', verb: 'MATCHPROP' },
   rectang: { group: 'draw', op: 'createRectangle', verb: 'RECTANG' },
   rectangle: { group: 'draw', op: 'createRectangle', verb: 'RECTANG' },
   rec: { group: 'draw', op: 'createRectangle', verb: 'RECTANG' },

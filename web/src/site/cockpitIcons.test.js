@@ -85,8 +85,10 @@ describe('cockpit icons (W4e)', () => {
   })
 
   it('every icon key the cockpit uses is in the manifest', () => {
-    const used = new Set()
-    for (const file of SOURCES) for (const key of iconKeysIn(readFileSync(file, 'utf8'))) used.add(key)
+    // W4g-4b: the registry's records count here too (declaredIconKeys reads
+    // them); the source-literal placeholders they replaced are gone, and a
+    // floor over literals alone would read a retired placeholder as a loss.
+    const used = declaredIconKeys()
     expect(used.size).toBeGreaterThan(20)
     const missing = [...used].filter((k) => !declared.has(k)).sort()
     expect(missing).toEqual([])

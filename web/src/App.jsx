@@ -2598,6 +2598,13 @@ export default function App() {
       id: 'script', label: 'Script', kind: 'group', tools: [],
       extra: <div id="cockpit-script-slot" className="ribbon-cluster-tools" />,
     }
+    // W4g-4b: the Properties panel keeps its reference seat (after Layers and
+    // Block) and its honest ByLayer fields; with the flag on its one tool,
+    // Match, is real and the engine consumer portals it into this slot.
+    const propertiesSeat = {
+      ...properties, tools: [],
+      extra: <div id="cockpit-properties-slot" className="ribbon-cluster-tools" />,
+    }
     // The reference's Draw tab: Draw, Modify, Clipboard (engine children,
     // rendered first), then Annotation, Layers, Block, Properties, Groups.
     // NOTE: the reference puts Clipboard LAST. The ribbon renders engine
@@ -2613,7 +2620,7 @@ export default function App() {
       // W4g-5d: the engine renders a REAL Annotation panel (TEXT live, the
       // rest honest) third, where the reference seats it; the placeholder is
       // for the flag-off build, as with Clipboard.
-      draw: [...(ENV_CAD_EDIT ? [] : [annotation]), layers, block, properties, groups,
+      draw: [...(ENV_CAD_EDIT ? [] : [annotation]), layers, block, ENV_CAD_EDIT ? propertiesSeat : properties, groups,
         ENV_CAD_EDIT ? clipboardSeat : clipboardOff, ...(tabFamilies.draw || [])],
       insert: [block, ...(tabFamilies.insert || [])],
       annotate: [annotation, ...(tabFamilies.annotate || [])],
@@ -3186,7 +3193,7 @@ export default function App() {
                 <EngineRibbonClusters
                   importOpen={importOpen}
                   onToggleImport={() => setImportOpen((o) => !o)}
-                  panels={ribbonTab === 'insert' ? ['file'] : ribbonTab === 'draw' ? ['draw', 'modify', 'annotation', 'clipboard'] : ribbonTab === 'view' ? ['script'] : []}
+                  panels={ribbonTab === 'insert' ? ['file'] : ribbonTab === 'draw' ? ['draw', 'modify', 'annotation', 'clipboard', 'properties'] : ribbonTab === 'view' ? ['script'] : []}
                 />
               )}
               {/* W4f slice B: the command line's typed words (LINE, C, MOVE ...)

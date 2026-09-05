@@ -495,7 +495,12 @@ export function reasonlessDisabled(src, mapsByName = new Map()) {
 // Raised 12 -> 13 by W4g-5d: the Annotation cluster, the fourth engine
 // group rendering `action.when(engineCtx)`, exactly as the line above
 // said it would. Same verified ladder (drawReason), same runtime throw.
-const UNVERIFIABLE_REASON_BUDGET = 13
+//
+// Raised 13 -> 14 by W4g-4b: the Properties seat's portal (MATCHPROP, a
+// Modify record seated in the reference's Properties panel) renders
+// `action.when(engineCtx)` the same way, the fifth such site. Same verified
+// ladder (modifyReason), same runtime throw.
+const UNVERIFIABLE_REASON_BUDGET = 14
 
 /**
  * Whether an "unverifiable reason expressions" count holds against its

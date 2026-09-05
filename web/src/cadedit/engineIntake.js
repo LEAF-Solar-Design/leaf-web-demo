@@ -12,6 +12,11 @@ export const ARC_STEP_DEG = 7.5
 export const MIN_ARC_POINTS = 8
 /** A TEXT's outline box is this many heights wide per character. */
 export const TEXT_ADVANCE = 0.6
+// W4g-4b: a POINT draws as a small bow-tie marker of this half-size in
+// drawing units (honest about being a marker, like PDMODE 3's cross); an
+// ELLIPSE samples this many points around its full turn.
+export const POINT_MARK = 0.5
+export const ELLIPSE_SEGMENTS = 64
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v)
 const point = (v) => (Array.isArray(v) && finite(v[0]) && finite(v[1]) ? [v[0], v[1], finite(v[2]) ? v[2] : 0] : null)
@@ -112,6 +117,28 @@ export function entityToPolyline(entity) {
     const sin = Math.sin(rad)
     const at = (dx, dy) => [c[0] + dx * cos - dy * sin, c[1] + dx * sin + dy * cos, c[2]]
     return { handle, layer, pts: [at(0, 0), at(w, 0), at(w, h), at(0, h)], closed: true }
+  }
+  // W4g-4b: a POINT is a marker; an ELLIPSE is sampled from its centre, its
+  // major axis (relative to the centre) and its minor-to-major ratio.
+  if (type === 'POINT') {
+    const c = point(verts[0])
+    if (!c) return null
+    const s = POINT_MARK
+    return { handle, layer, pts: [[c[0] - s, c[1] - s, c[2]], [c[0] + s, c[1] + s, c[2]], [c[0], c[1], c[2]], [c[0] - s, c[1] + s, c[2]], [c[0] + s, c[1] - s, c[2]]], closed: false }
+  }
+  if (type === 'ELLIPSE') {
+    const c = point(verts[0])
+    const axis = Array.isArray(entity.majorAxis) ? entity.majorAxis : null
+    const ratio = entity.ratio
+    if (!c || !axis || !finite(axis[0]) || !finite(axis[1]) || (axis[0] === 0 && axis[1] === 0) || !finite(ratio) || ratio <= 0) return null
+    const pts = new Array(ELLIPSE_SEGMENTS)
+    for (let i = 0; i < ELLIPSE_SEGMENTS; i += 1) {
+      const t = (i / ELLIPSE_SEGMENTS) * Math.PI * 2
+      const cs = Math.cos(t)
+      const sn = Math.sin(t) * ratio
+      pts[i] = [c[0] + axis[0] * cs - axis[1] * sn, c[1] + axis[1] * cs + axis[0] * sn, c[2]]
+    }
+    return { handle, layer, pts, closed: true }
   }
   if (type === 'CIRCLE' || type === 'ARC') {
     const c = point(verts[0])

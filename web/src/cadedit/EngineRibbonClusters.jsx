@@ -90,11 +90,10 @@ const NOT_IN_ENGINE = 'not in the browser engine yet'
 // interaction wave). The engine validates again and refuses with a typed
 // reason; the selection lands on what was just drawn. The four ops are
 // registry records now (`forGroup('draw')`), not a literal table here.
-// The reference's small Draw column, not in this engine yet.
-const DRAW_OFF = Object.freeze([
-  { id: 'draw:ellipse', label: 'Ellipse', icon: 'ellipse' },
-  { id: 'draw:point', label: 'Point', icon: 'point' },
-])
+// W4g-4b: the reference's small Draw column is engine-backed now (RECTANG,
+// ELLIPSE, POINT are registry records); nothing in the Draw panel is a
+// placeholder any more.
+const DRAW_OFF = Object.freeze([])
 
 // The entity operations the compiled engine performs are registry records
 // too (`forGroup('modify')`): the six original ones, COPY, MIRROR, ROTATE,
@@ -148,6 +147,21 @@ export const PROMPTS = Object.freeze({
     { ask: 'Specify rotation angle of text:', fields: [['rot', 'rotation']] },
     { ask: 'Enter text:', fields: [['text', 'text', 'text']] },
     { ask: 'Layer:', fields: [['layer', 'layer', 'text']] },
+  ] },
+  // W4g-4b: the reference's POINT, ELLIPSE (centre, axis endpoint, then the
+  // minor-to-major ratio typed) and MATCHPROP (the destination picked).
+  createPoint: { verb: 'POINT', steps: [
+    { ask: 'Specify a point:', fields: [['x', 'x'], ['y', 'y']] },
+    { ask: 'Layer:', fields: [['layer', 'layer', 'text']] },
+  ] },
+  createEllipse: { verb: 'ELLIPSE', steps: [
+    { ask: 'Specify center of ellipse:', fields: [['x', 'x'], ['y', 'y']] },
+    { ask: 'Specify endpoint of axis:', fields: [['x2', 'x2'], ['y2', 'y2']] },
+    { ask: 'Specify ratio (minor to major, 0 to 1):', fields: [['ratio', 'ratio']] },
+    { ask: 'Layer:', fields: [['layer', 'layer', 'text']] },
+  ] },
+  matchprop: { verb: 'MATCHPROP', steps: [
+    { ask: 'Select destination object:', fields: [['edge', 'edge', 'edge']] },
   ] },
   createRectangle: { verb: 'RECTANG', steps: [
     { ask: 'Specify first corner point:', fields: [['x', 'x'], ['y', 'y']] },
@@ -278,6 +292,10 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const clipboardSlot = useSlot('cockpit-clipboard-slot')
   // W4g-7a: the View tab's Script seat, an App cluster the panel portals into.
   const scriptSlot = useSlot('cockpit-script-slot')
+  // W4g-4b: the reference's Properties panel sits after Layers and Block;
+  // App renders it there (its ByLayer fields still honest placeholders) with
+  // a slot the real Match tool is portaled into, the Clipboard idiom.
+  const propertiesSlot = useSlot('cockpit-properties-slot')
   const show = new Set(Array.isArray(panels) ? panels : [])
 
   // The armed command (provider state, so it outlives the ribbon's tab
@@ -655,7 +673,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
       )}
       {show.has('modify') && (
         <RibbonCluster id="modify" label="Modify" note={modify || null}>
-          {forGroup('modify').map((action) => {
+          {forGroup('modify').filter((action) => action.panel === 'modify').map((action) => {
             // The record's reason, read ONCE per record per render: it is the
             // disabled flag and the sentence both.
             const reason = action.when(engineCtx)
@@ -729,6 +747,30 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
           )
         }),
         clipboardSlot,
+      )}
+      {show.has('properties') && propertiesSlot && createPortal(
+        forGroup('modify').filter((action) => action.panel === 'properties').map((action) => {
+          const reason = action.when(engineCtx)
+          return (
+            <RibbonTool
+              key={action.op}
+              tool={{
+                id: action.id,
+                label: action.label,
+                text: action.text,
+                icon: action.icon,
+                size: action.size,
+                title: action.title(engineCtx),
+                write: action.write,
+                disabled: !!reason,
+                reason,
+                ...armedAttrs(action.op),
+                onClick: () => action.run(engineCtx),
+              }}
+            />
+          )
+        }),
+        propertiesSlot,
       )}
       {show.has('script') && scriptSlot && createPortal(<ScriptPanel />, scriptSlot)}
       {promptRow && (promptSlot ? createPortal(promptRow, promptSlot) : promptRow)}

@@ -101,7 +101,9 @@ function opaqueOf(entity) {
   const type = String(entity.type || '')
   if (!type || ROUND_KINDS.has(type) || LINEAR_KINDS.has(type)) return null
   const print = JSON.stringify([type, entity.layer ?? null, entity.vertices ?? null, entity.radius ?? null, entity.startDeg ?? null,
-    entity.endDeg ?? null, entity.text ?? null, entity.height ?? null, entity.rotationDeg ?? null, entity.bulges ?? null, entity.closed === true])
+    entity.endDeg ?? null, entity.text ?? null, entity.height ?? null, entity.rotationDeg ?? null, entity.bulges ?? null, entity.closed === true,
+    // W4g-4b: an ELLIPSE's axis and ratio (the row that added them caught their absence here).
+    entity.majorAxis ?? null, entity.ratio ?? null])
   return { kind: 'OPAQUE', type, print }
 }
 

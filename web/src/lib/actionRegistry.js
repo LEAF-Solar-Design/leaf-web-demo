@@ -480,6 +480,9 @@ const ACTION_LIST = [
   // W4g-4 RECTANG: two opposite corners; the store lowers it to the closed
   // polyline the engine draws.
   engineOp('draw', 'createRectangle', 'rectangle', 'Rectangle', 'rectangle', 'Draw a rectangle from corner x,y to corner x2,y2', 'small'),
+  // W4g-4b: the rest of the reference's small Draw column, engine-backed.
+  engineOp('draw', 'createEllipse', 'ellipse', 'Ellipse', 'ellipse', 'Draw an ellipse from a centre, an axis endpoint and a minor-to-major ratio', 'small'),
+  engineOp('draw', 'createPoint', 'point', 'Point', 'point', 'Place a point at x,y', 'small'),
   // W4g-5d: single-line TEXT. A create (group draw) seated in the reference's
   // Annotation panel.
   engineOp('draw', 'createText', 'text', 'Text', 'text', 'Place a line of text at x,y with a height and rotation', 'large', 'annotation'),
@@ -509,6 +512,10 @@ const ACTION_LIST = [
   engineOp('modify', 'extend', 'extend', 'Extend', 'extend', 'Lengthen the selection until it meets a boundary edge', 'small'),
   engineOp('modify', 'fillet', 'fillet', 'Fillet', 'fillet', 'Round the corner between the selection and a second line, arc or circle with an arc', 'small'),
   engineOp('modify', 'chamfer', 'chamfer', 'Chamfer', 'chamfer', 'Bevel the corner between the selection and a second line', 'small'),
+  // W4g-4b: the reference's MATCHPROP, seated in its Properties panel. It
+  // copies the selection's LAYER to the object you pick; colour, linetype
+  // and lineweight wait on the contract (the panel's ByLayer fields say so).
+  engineOp('modify', 'matchprop', 'match', 'Match', 'match', "Copy the selection's layer to the object you click (colour, linetype and lineweight are not carried yet)", 'large', 'properties'),
   // W4g-5c: the reference's Clipboard panel, in its order and its sizes.
   engineOp('clipboard', 'pasteClip', 'paste', 'Paste', 'paste', 'Paste the clipboard entity at a base point', 'large'),
   engineOp('clipboard', 'cutClip', 'cut', 'Cut', 'cut', 'Put the selection on the clipboard and delete it', 'small'),

@@ -111,6 +111,9 @@ function projectEntities(doc) {
       rotationDeg: entity.rotationDeg ?? null,
       // W4g-6d: one bulge per vertex for a polyline, null for every other kind.
       bulges: Array.isArray(entity.bulges) ? entity.bulges : null,
+      // W4g-4b: an ELLIPSE's axis endpoint (relative to the centre) and ratio.
+      majorAxis: Array.isArray(entity.majorAxis) ? entity.majorAxis : null,
+      ratio: entity.ratio ?? null,
       startDeg: entity.startDeg ?? null,
       endDeg: entity.endDeg ?? null,
     }
@@ -165,6 +168,11 @@ const CREATE_OPS = Object.freeze({
   // is not positive, an empty or over-long value and any control character.
   createText: (doc, p) => doc.createText(
     Number(p.x), Number(p.y), Number(p.height), Number(p.rotationDeg), String(p.text ?? ''), String(p.layer ?? '')),
+  // W4g-4b: POINT and ELLIPSE (the axis endpoint RELATIVE to the centre, the
+  // minor-to-major ratio); the wrapper refuses before it writes.
+  createPoint: (doc, p) => doc.createPoint(Number(p.x), Number(p.y), String(p.layer ?? '')),
+  createEllipse: (doc, p) => doc.createEllipse(
+    Number(p.cx), Number(p.cy), Number(p.ax), Number(p.ay), Number(p.ratio), String(p.layer ?? '')),
 })
 // The op string off the boundary is looked up in a Map of the table's OWN
 // entries, never as a computed property: a prototype name such as
