@@ -263,7 +263,7 @@ def fixture(
 class YieldTests(unittest.TestCase):
     def test_only_proven_oversize_dispatches_without_jobs_are_inert(self) -> None:
         # Captured provider topology from the 2026-09-04 oversize incident.
-        run_id = 33830277169
+        run_id = 33830277170  # Not in the frozen incident registry.
         revision = "49e265747ca7812d6f4c45e64aba93ce2169daf4"
         path = f".github/workflows/{DEPLOY_WF}"
         cases = (
@@ -288,6 +288,41 @@ class YieldTests(unittest.TestCase):
                         "type": "file", "size": size,
                     }
                 self.assertEqual(subject.yield_check(provider)["status"], expected)
+
+    def test_frozen_incident_does_not_require_new_contents_permission(self) -> None:
+        path = f".github/workflows/{DEPLOY_WF}"
+        for run_id in subject.OVERSIZE_INCIDENT_RUNS:
+            with self.subTest(run_id=run_id):
+                provider = fixture()
+                row = run_row(run_id, status="queued", head_sha=subject.OVERSIZE_INCIDENT_REVISION)
+                row.update(event="workflow_dispatch", path=path)
+                provider.json_values[(TF, f"/actions/runs/{run_id}/jobs?per_page=1")] = {
+                    "total_count": 0, "jobs": [],
+                }
+                # No Contents response: Actions-only workflow credentials.
+                self.assertTrue(subject._unstartable_dispatch(provider, TF, DEPLOY_WF, row))
+
+    def test_frozen_incident_never_admits_drift_or_a_real_job(self) -> None:
+        run_id = 33835703473
+        path = f".github/workflows/{DEPLOY_WF}"
+        for label in ("id", "revision", "path", "repository", "job", "unreadable_jobs"):
+            with self.subTest(label=label):
+                provider = fixture()
+                row = run_row(run_id, status="queued", head_sha=subject.OVERSIZE_INCIDENT_REVISION)
+                row.update(event="workflow_dispatch", path=path)
+                if label == "id":
+                    row["id"] += 1
+                if label == "revision":
+                    row["head_sha"] = "0" * 40
+                if label == "path":
+                    row["path"] = ".github/workflows/other.yml"
+                repository = APP if label == "repository" else TF
+                if label != "unreadable_jobs":
+                    provider.json_values[(repository, f"/actions/runs/{row['id']}/jobs?per_page=1")] = {
+                        "total_count": 1 if label == "job" else 0,
+                        "jobs": [{"id": 1}] if label == "job" else [],
+                    }
+                self.assertFalse(subject._unstartable_dispatch(provider, repository, DEPLOY_WF, row))
 
     def test_yields_to_a_live_relay_and_to_any_live_staging_deploy(self) -> None:
         """This lane is strictly lower priority than the relay.
