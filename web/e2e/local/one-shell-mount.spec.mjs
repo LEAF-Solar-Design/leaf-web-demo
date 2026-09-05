@@ -1337,7 +1337,12 @@ test.describe('route matrix, rail ON', () => {
     await page.keyboard.press('Escape')
     const destinationRow = page.locator('.cad-edit-workbench label', { has: page.locator(`input[type="radio"][value="${cuttingEdge}"]`) })
     await expect(destinationRow).not.toContainText('on layer W4G4B')
-    await page.getByRole('radio').last().check()
+    // The source is the line on W4G4B, found by its own label (never by list order);
+    // its id is read back after the copy to prove the selection stayed on it.
+    const sourceRow = page.locator('.cad-edit-workbench label', { hasText: 'on layer W4G4B' })
+    await expect(sourceRow).toHaveCount(1)
+    await sourceRow.locator('input[type="radio"]').check()
+    const sourceId = await sourceRow.locator('input[type="radio"]').getAttribute('value')
     await bar.fill('ma')
     await bar.press('Enter')
     await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'matchprop', { timeout: 20_000 })
@@ -1345,6 +1350,7 @@ test.describe('route matrix, rail ON', () => {
     await page.getByLabel('ribbon edge', { exact: true }).press('Enter')
     await expect(workbenchStatus).toContainText('matchprop applied', { timeout: 60_000 })
     await expect(destinationRow).toContainText('on layer W4G4B')
+    await expect(page.locator(`input[type="radio"][value="${sourceId}"]`)).toBeChecked()
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeTrim + 6))
     test.info().annotations.push({ type: 'matchprop', description: `MATCHPROP copied layer W4G4B onto ${cuttingEdge} in one step (count held at ${countBeforeTrim + 6})` })
     await page.keyboard.press('Escape')
