@@ -50,6 +50,15 @@ _MIGRATION_LEDGER_COLUMNS = {"name", "sha256", "applied_at"}
 # compatibility contract, not a provider choice. Additions stay additive so an
 # older application can continue to read a database prepared by a newer image.
 _REQUIRED_COLUMNS = {
+    "campaign_host_enrollments": {
+        "enrollment_id", "org_id", "project_id", "campaign_id", "machine_id", "service_subject",
+        "state", "enrolled_by_binding_id", "enabled_by_binding_id", "created_at", "enabled_at", "revoked_at",
+    },
+    "campaign_capability_links": {
+        "link_id", "org_id", "project_id", "campaign_id", "task_id", "enrollment_id", "capability",
+        "author_stage_id", "change_set_id", "publication_id", "effective_catalog_id",
+        "first_invocation_receipt_id", "second_invocation_receipt_id", "state",
+    },
     "campaign_dispatch_bindings": {
         "attempt_id", "task_id", "org_id", "project_id", "campaign_id", "fence", "stage",
         "request_id", "machine_id", "run_id", "leaf_id", "registration_id", "root_request_id",
@@ -579,6 +588,10 @@ def _catalog_contract(relation: str, *definition_fragments: str) -> Dict[str, An
 # stores, the project lifecycle is part of the canonical platform API whenever
 # this application image is running.
 _REQUIRED_CONSTRAINTS = {
+    "campaign_host_enrollments_machine_unique": _catalog_contract(
+        "campaign_host_enrollments", "UNIQUE (campaign_id, machine_id)"),
+    "campaign_capability_links_task_unique": _catalog_contract(
+        "campaign_capability_links", "UNIQUE (campaign_id, task_id)"),
     "campaign_dispatch_bindings_request_unique": _catalog_contract(
         "campaign_dispatch_bindings", "UNIQUE (request_id)"),
     "campaign_dispatch_bindings_leaf_unique": _catalog_contract(

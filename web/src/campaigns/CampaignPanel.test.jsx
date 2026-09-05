@@ -28,6 +28,35 @@ afterEach(cleanup)
 const panel = props => <CampaignPanel projectId={P} projectName="Document studio" signedIn {...props} />
 
 describe('campaign panel in the project workspace', () => {
+  it('shows configured hosts, connects once and keeps capability status pending', async () => {
+    campaign.allowedMachines = ['VM-C', 'VM-D']
+    campaign.enrollments = [{ enrollment_id: Q, machine_id: 'VM-C', state: 'pending', capability_link: { state: 'pending_link' } }]
+    campaign.enroll = vi.fn().mockResolvedValue({ enrollment: {} })
+    campaign.enableEnrollment = vi.fn().mockResolvedValue({ enrollment: {} })
+    campaign.revokeEnrollment = vi.fn().mockResolvedValue({ enrollment: {} })
+    render(panel())
+    const select = screen.getByLabelText('Campaign machine')
+    expect([...select.options].map(option => option.value)).toEqual(['VM-C', 'VM-D'])
+    fireEvent.change(select, { target: { value: 'VM-D' } })
+    const connect = screen.getByRole('button', { name: 'Connect VM-C to this campaign' })
+    fireEvent.click(connect)
+    fireEvent.click(connect)
+    await screen.findByText('Host enrollment recorded.')
+    expect(campaign.enroll).toHaveBeenCalledExactlyOnceWith('VM-D')
+    expect(screen.getByText('Capability not yet published')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Enable' }))
+    await screen.findByText('Host enrollment enabled.')
+    expect(campaign.enableEnrollment).toHaveBeenCalledExactlyOnceWith(Q)
+    fireEvent.click(screen.getByRole('button', { name: 'Revoke' }))
+    await screen.findByText('Host enrollment revoked.')
+    expect(campaign.revokeEnrollment).toHaveBeenCalledExactlyOnceWith(Q)
+  })
+
+  it('explains unavailable host configuration without a connect action', () => {
+    render(panel())
+    expect(screen.getByText(/No campaign machines are configured/)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Connect VM-C to this campaign' })).toBeNull()
+  })
   it('shows the original prompt and recorded execution without internal metadata or inferred completion', () => {
     const hidden = { spec: 'spec secret', worker: 'worker secret', fence: 'fence secret',
       active_attempt: 'attempt secret', dispatch: 'mount-fleet-adapter', artifact_ref: C }

@@ -31,6 +31,10 @@ beforeEach(() => {
   api.listCampaigns.mockResolvedValue({ campaigns: [row] })
   api.getCampaign.mockImplementation(async (_project, id) => ({ campaign: { ...row, campaign_id: id } }))
   api.listQuestions.mockResolvedValue({ questions: [open] })
+  api.listEnrollments.mockResolvedValue({ enrollment: { enrollments: [], allowed_machines: ['VM-C'] } })
+  api.requestEnrollment.mockResolvedValue({ enrollment: { enrollment_id: Q, state: 'pending' } })
+  api.enableEnrollment.mockResolvedValue({ enrollment: { enrollment_id: Q, state: 'enabled' } })
+  api.revokeEnrollment.mockResolvedValue({ enrollment: { enrollment_id: Q, state: 'revoked' } })
   api.getExecution.mockResolvedValue({ execution: { tasks: [], questions: [], receipts: [], events: [] } })
   api.submitCampaign.mockResolvedValue({ campaign: row })
   api.askQuestion.mockResolvedValue({ question: open })
@@ -45,6 +49,28 @@ async function ready() {
 }
 
 describe('project campaign hook', () => {
+  it('loads configured machines and serializes enrollment mutations', async () => {
+    const hook = await ready()
+    expect(hook.result.current.allowedMachines).toEqual(['VM-C'])
+    const pending = deferred()
+    api.requestEnrollment.mockReturnValue(pending.promise)
+    let first
+    act(() => { first = hook.result.current.enroll('VM-C'); hook.result.current.enroll('VM-C') })
+    expect(api.requestEnrollment).toHaveBeenCalledExactlyOnceWith(P, C, 'VM-C')
+    await act(async () => { pending.resolve({ enrollment: { enrollment_id: Q } }); await first })
+    await act(async () => { await hook.result.current.enableEnrollment(Q) })
+    expect(api.enableEnrollment).toHaveBeenCalledExactlyOnceWith(P, C, Q)
+    await act(async () => { await hook.result.current.revokeEnrollment(Q) })
+    expect(api.revokeEnrollment).toHaveBeenCalledExactlyOnceWith(P, C, Q)
+  })
+
+  it('keeps campaign and questions available when enrollment loading fails', async () => {
+    api.listEnrollments.mockRejectedValue(new Error('Hosts unavailable'))
+    const hook = await ready()
+    expect(hook.result.current.questions).toEqual([open])
+    expect(hook.result.current.enrollmentError.message).toBe('Hosts unavailable')
+    expect(hook.result.current.allowedMachines).toEqual([])
+  })
   it('reads execution after campaign details are ready and preserves an empty snapshot', async () => {
     const pending = deferred()
     api.getExecution.mockReturnValue(pending.promise)
@@ -307,6 +333,21 @@ describe('real campaign HTTP transport', () => {
     localStorage.removeItem('leaf.jwt')
     await expect(client.listCampaigns(P)).rejects.toMatchObject({ status: 0, message: 'Sign in to submit a campaign.' })
     expect(fetcher).not.toHaveBeenCalled()
+  })
+
+  it('sends enrollment actions without subject or publication fields', async () => {
+    await client.listEnrollments(P, C)
+    await client.requestEnrollment(P, C, 'VM-C')
+    await client.enableEnrollment(P, C, Q)
+    await client.revokeEnrollment(P, C, Q)
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+      `https://campaign.test/api/campaigns/${C}/enrollments?project_id=${P}`,
+      `https://campaign.test/api/campaigns/${C}/enrollments`,
+      `https://campaign.test/api/campaigns/${C}/enrollments/${Q}/enable`,
+      `https://campaign.test/api/campaigns/${C}/enrollments/${Q}/revoke`,
+    ])
+    expect(JSON.parse(fetcher.mock.calls[1][1].body)).toEqual({ project_id: P, machine_id: 'VM-C' })
+    expect(JSON.parse(fetcher.mock.calls[2][1].body)).toEqual({ project_id: P })
   })
 
   it.each([[999, 200], [0, 1], [-20, 1], [2.9, 2], ['bad', 50]])('clamps execution limit %s to %s', async (limit, count) => {
