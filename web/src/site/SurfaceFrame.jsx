@@ -45,7 +45,7 @@ import { currentJobCountsAsRunning, runningBuildCount } from '../lib/buildQueue.
 
 import { StatusToggles } from './DrawingCockpit.jsx'
 import { useContinuityPublish } from './continuityStore.js'
-import { surfaceContract } from './productSurfaces.js'
+import { useSurfaceContract } from './useSurfaceContract.js'
 
 // Undefined (not null) is the "no provider" sentinel: a slot mounted outside a
 // frame renders nothing rather than throwing into the scene's tree. Fails
@@ -171,6 +171,12 @@ function useSlot() {
 export default function SurfaceFrame({
   scene,
   activeSurface,
+  // Slice 7b: fetches the tenant's surface-config overlay (see `contract`
+  // below). Defaults to `true` (no network call) so a test or a bare mount
+  // that never learns about the overlay renders byte-identical to before
+  // instead of racing an unmocked fetch; both real scenes pass their own
+  // live mock flag explicitly (App.jsx `mock`, ToolCast.jsx `transportMock`).
+  mock = true,
   states = null,
   catalog = null,
   catalogError = null,
@@ -205,9 +211,13 @@ export default function SurfaceFrame({
   const value = {
     scene,
     activeSurface,
+    mock,
     // The declared slots for this surface, resolved once per render and shared
     // by every slot below, so two slots can never read two different records.
-    contract: surfaceContract(activeSurface),
+    // Slice 7b: reads the tenant's surface-config overlay through the hook;
+    // byte-identical to `surfaceContract(activeSurface)` for a tenant with no
+    // overlay (useSurfaceContract's own contract).
+    contract: useSurfaceContract(activeSurface, mock),
     states,
     catalog,
     catalogError,
@@ -254,6 +264,7 @@ function Tabs() {
       activeSurface={frame.activeSurface}
       states={frame.states}
       onSelect={frame.onSelect}
+      mock={frame.mock}
     />
   )
 }

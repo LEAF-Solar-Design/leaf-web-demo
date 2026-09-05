@@ -37,6 +37,11 @@ let _fetchStarted = false
 let _overlay = {}
 let _source = null
 const _listeners = new Set()
+// One console.warn per surface id, ever (not per render, not per overlay
+// settle): the server already fails the WHOLE overlay file closed on an
+// unknown slot, so a client seeing one at all means defense-in-depth fired,
+// not a live incident worth repeating on every re-render of every consumer.
+const _warnedUnknownSlotIds = new Set()
 
 function _notify() {
   for (const listener of Array.from(_listeners)) listener()
@@ -68,6 +73,7 @@ export function _resetSurfaceConfigOverlayForTests() {
   _overlay = {}
   _source = null
   _listeners.clear()
+  _warnedUnknownSlotIds.clear()
 }
 
 /** The raw tenant overlay (`{surfaceId: {slot: value}}`), `{}` until the ONE
@@ -91,6 +97,15 @@ export function useSurfaceConfigSource(mock = false) {
   return _source
 }
 
+/** Non-hook read of the same `_source` `useSurfaceConfigSource` returns. For a
+ * consumer that already subscribes via `useSurfaceConfigOverlay` (the overlay
+ * and the source settle in the SAME callback, before the one `_notify()`), so
+ * a second hook subscription here would be a redundant listener, not a more
+ * current value. Safe to call in a loop (a plain function, not a hook). */
+export function peekSurfaceConfigSource() {
+  return _source
+}
+
 /** Pure merge, no hooks: `overlay[id]`'s declared slots (OVERLAY_SLOT_NAMES
  * only) deep-merged one level onto `surfaceContract(id)`. Returns the SAME
  * frozen object `surfaceContract(id)` returns — not a clone — when the
@@ -100,6 +115,17 @@ export function mergeSurfaceContract(id, overlay) {
   const base = surfaceContract(id)
   const patch = overlay?.[id]
   if (!isPlainObject(patch) || Object.keys(patch).length === 0) return base
+  // Defense-in-depth only (see the module comment): the server already fails
+  // the WHOLE file closed on an unknown slot, so this ignores it rather than
+  // enforcing anything, and warns once so a drifted client is discoverable.
+  const unknown = Object.keys(patch).filter((key) => !OVERLAY_SLOT_NAMES.includes(key))
+  if (unknown.length > 0 && !_warnedUnknownSlotIds.has(id)) {
+    _warnedUnknownSlotIds.add(id)
+    // eslint-disable-next-line no-console
+    console.warn(
+      `surface-config overlay for "${id}" carries unknown slot(s) [${unknown.join(', ')}]; ignoring them.`,
+    )
+  }
   const merged = { ...base }
   for (const slot of OVERLAY_SLOT_NAMES) {
     if (!(slot in patch)) continue

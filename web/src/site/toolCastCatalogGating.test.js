@@ -63,10 +63,23 @@ describe('no-drawing Catalog browse wiring', () => {
 // wherever the contract declares `authoring` on the surface, ios excepted
 // (the ship lane is checked first and keeps its own untouched rail).
 describe('the workspace rail mounts on every authoring surface, not only cad', () => {
-  const AUTHORING_ON_STAGE_DECLARATION = /const authoringOnStage = surfaceContract\(activeSurface\)\.authoring === true/
+  // Slice 7b: `surfaceSlots` is the ONE `useSurfaceContract(activeSurface,
+  // transportMock)` call this file also pins below (byte-identical to the
+  // bare `surfaceContract(activeSurface)` for a tenant with no overlay), so
+  // every declared-slot read in this describe block, including this one,
+  // goes through it instead of re-reading the bare contract per call site.
+  const AUTHORING_ON_STAGE_DECLARATION = /const authoringOnStage = surfaceSlots\.authoring === true/
+  const AUTHORING_ON_STAGE_BARE_CONTRACT = /const authoringOnStage = surfaceContract\(activeSurface\)\.authoring === true/
 
-  it('derives authoringOnStage from the ONE declared authoring slot', () => {
+  it('derives authoringOnStage from the ONE declared authoring slot, through the overlay hook', () => {
     expect(toolCast).toMatch(AUTHORING_ON_STAGE_DECLARATION)
+    // A regression back to the pre-7b bare read would fail this, not just
+    // silently pass a widened pattern: the two regexes are mutually exclusive.
+    expect(toolCast).not.toMatch(AUTHORING_ON_STAGE_BARE_CONTRACT)
+  })
+
+  it('reads surfaceSlots off useSurfaceContract, not the bare contract function', () => {
+    expect(toolCast).toMatch(/const surfaceSlots = useSurfaceContract\(activeSurface, transportMock\)/)
   })
 
   it('checks the ios ship-lane arm before the authoring arm, so ios never reaches it', () => {

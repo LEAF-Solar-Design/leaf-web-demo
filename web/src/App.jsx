@@ -2771,6 +2771,7 @@ export default function App() {
     // never learns App's private vocabulary.
     <SurfaceFrame
       scene="console"
+      mock={mock}
       activeSurface={activeSurface}
       states={surfaceStates}
       catalog={catalog}
