@@ -243,6 +243,19 @@ export default function ToolCast({
   // console is documented, and preserved here on purpose, not fixed).
   // src/site/surfaceGates.test.js pins this equal to the old ternary.
   const stageBranch = surfaceContract(activeSurface).chrome.stageBranch
+  // Slice 7a (standardization, D3 close): the workspace rail (Operator /
+  // Catalog / Author / Project) used to mount only inside the `stageBranch
+  // === 'cad'` arm below, diverging from the console's un-gated AuthorPanel
+  // (App.jsx:2735, docs/convergence/SURFACE-CONTRACT.md's D3 row). It now
+  // mounts on every surface the CONTRACT declares reachable, the same one
+  // `authoring` slot the console's note already calls true on every surface
+  // — no second `authoringStage` slot was added. `stageBranch === 'ios'` is
+  // checked BEFORE this in the render ternary below (not through this flag),
+  // which is what keeps the ios ship lane — its own rail, D1/D2, untouched —
+  // the sole content on ios's stage even though ios's own `authoring` stays
+  // `true` (it truly is reachable from the console's un-gated rail, so
+  // flipping it to `false` would misdeclare the console's own behaviour).
+  const authoringOnStage = surfaceContract(activeSurface).authoring === true
   // Slice 6a: the version tab mounts where the CONTRACT says versions exist
   // (`drawing` today on cad and solar), never on a surface literal. A surface
   // declaring `none` gets no Versions tab and no version panel at all.
@@ -1378,9 +1391,13 @@ export default function ToolCast({
   // Consume-only iOS readiness (ios_surface, cards D-1..D-4): one point-in-time
   // read of GET /api/ios-surface/status per (project, revision), distinct from the
   // ios_ship LAUNCH lane above (this one only ever reads). `enabled` mirrors the
-  // render gate below EXACTLY (incl. stageBranch === 'cad') so the hook is inert
-  // whenever the panel is not mounted -- otherwise a project switch on the iOS
-  // product surface, where this panel does not render, would fetch for nothing.
+  // render gate below EXACTLY so the hook is inert whenever the panel is not
+  // mounted -- otherwise a project switch on a surface where this panel does
+  // not render would fetch for nothing. The panel's own render gate never
+  // named `stageBranch` (it sat inside the old cad-only arm only because that
+  // arm's OUTER condition was `stageBranch === 'cad'`); slice 7a widened the
+  // outer condition to `authoringOnStage`, so this drops the same term to
+  // keep matching the render gate it mirrors, not to loosen it on purpose.
   // Not a live poll: a build's stage advancing (BUILT -> RECEIPT) is picked up on
   // the next project/revision change or remount, not on a timer. The backend
   // refuses (404) while LEAF_IOS_SURFACE_ENABLED is off regardless.
@@ -1388,7 +1405,7 @@ export default function ToolCast({
     workspace.openProjectId,
     workspace.canonicalVersionId,
     {
-      enabled: ENV_IOS_SURFACE && stageBranch === 'cad' && leftView === 'workspace'
+      enabled: ENV_IOS_SURFACE && leftView === 'workspace'
         && !PUBLIC_DEMO && !transportMock && canOperate,
     },
   )
@@ -1697,8 +1714,83 @@ export default function ToolCast({
       <SurfaceFrame.Tabs />
       {/* Slice 2: the stage's arm is the contract's declared stageBranch. It
           replaces the inline cad-then-ios-then-frame surface-literal ternary
-          that spanned this block. */}
-      {stageBranch === 'cad' ? (
+          that spanned this block.
+          Slice 7a: ios is checked FIRST, ahead of `authoringOnStage`, so the
+          ship lane below (D1/D2, untouched) stays the only thing ios's stage
+          renders even though ios's own `authoring` slot is `true`. The
+          workspace-rail arm's own condition changed from `stageBranch ===
+          'cad'` to `authoringOnStage`, so cad, solar and browser all reach
+          it; the two sub-pieces that are genuinely cad-only — the guided
+          tour's restart trigger and its DemoTour mount, since
+          `tourAnchors.stage` is declared `null` on every surface but cad
+          (SURFACE-CONTRACT.md, "the stage walk ... mounts inside the cad arm
+          only") — stay additionally keyed on `stageBranch === 'cad'` below.
+          Every other element in this arm already reads a contract- or
+          state-derived gate (`versionsMounted`, `hasDrawing`, `canOperate`)
+          that degrades to an honest empty/disabled state on a surface with
+          no open drawing, so no further gating was added to it. */}
+      {stageBranch === 'ios' ? (
+      <>
+      <div className="tc-topcluster tc-topcluster-product" data-cast="tool" style={{ '--rank': 3 }}>
+        {projectSlot}
+        <span className="tc-solve" data-testid="ios-ship-status">
+          <span className={`dot ${iosShip.launchable ? 'live' : 'hollow'}`} />
+          {iosShip.launchable ? 'Ship lane ready' : 'Ship lane setup required'}
+        </span>
+        <button type="button" className="tc-back" onClick={() => navigate('/')}>Back to the site</button>
+        <span className="key">Esc</span>
+      </div>
+      <aside className="tc-rail tc-rail-l tc-operator-rail" aria-label="iOS ship lane" data-cast="tool" data-testid="ios-ship-lane" style={{ '--rank': 0 }}>
+        <div className="tc-rail-head">
+          <span className="tc-rail-title">iOS ship lane</span>
+          <span className="tc-rail-sub">readiness · launch · receipt</span>
+        </div>
+        <div className="tc-rail-body">
+          <p className="tc-rail-note">
+            Turn an approved project revision into a TestFlight build through the mounted Apple
+            ship lane. Apple passwords, two-factor codes, keys, certificates, and profiles never
+            enter this browser.
+          </p>
+          {!iosShip.launchable && (
+            <p className="tc-rail-note" data-testid="ios-ship-setup">
+              {iosShip.setupAction
+                ? `Setup action: ${iosShip.setupAction}`
+                : 'The ship lane is not ready. No launch control is available.'}
+            </p>
+          )}
+          {iosShipLaunchAffordance(iosShip, {
+            projectId: workspace.openProjectId,
+            revision: workspace.canonicalVersionId,
+            sessionActive: platformSession.status === 'active',
+          }) && (
+            <button
+              type="button"
+              className="tc-run"
+              data-testid="ios-ship-launch"
+              disabled={iosShipBusy}
+              onClick={launchIosShip}
+            >
+              {iosShipBusy ? 'Launching' : 'Launch TestFlight build'}
+            </button>
+          )}
+          {iosShipExecution && (
+            <p className="tc-rail-note" data-testid="ios-ship-execution">
+              Build {iosShipExecution.build_number} · {iosShipExecution.status}
+              {iosShipExecution.failed_stage ? ` at ${iosShipExecution.failed_stage}` : ''}
+            </p>
+          )}
+          {iosShipReceipt && (
+            <div className="tc-rail-note" data-testid="ios-ship-receipt">
+              <strong>TestFlight receipt</strong>
+              <div>{iosShipReceipt.bundle_identifier} · {iosShipReceipt.marketing_version} ({iosShipReceipt.build_number})</div>
+              <div>{iosShipReceipt.app_store_connect_result?.status} · {iosShipReceipt.app_store_connect_result?.build_id}</div>
+            </div>
+          )}
+          {iosShipError && <p className="tc-rail-note" data-testid="ios-ship-error">{iosShipError}</p>}
+        </div>
+      </aside>
+      </>
+      ) : authoringOnStage ? (
       <>
       <div className="tc-topcluster tc-topcluster-product" data-cast="tool" style={{ '--rank': 3 }}>
         {projectSlot}
@@ -1718,7 +1810,7 @@ export default function ToolCast({
           </button>
         )}
         <button type="button" className="tc-back" onClick={() => navigate('/')}>Back to the site</button>
-        {LIVE_TOUR_REQUESTED && sessionReady && !tourOn && shouldStartTour(window.location.search) && (
+        {stageBranch === 'cad' && LIVE_TOUR_REQUESTED && sessionReady && !tourOn && shouldStartTour(window.location.search) && (
           <button
             type="button"
             className="tc-back"
@@ -2222,7 +2314,7 @@ export default function ToolCast({
           <OpsDrawer onDismiss={() => setOpsOpen(false)} />
         </div>
       )}
-      {tourOn && sessionReady && (
+      {stageBranch === 'cad' && tourOn && sessionReady && (
         <DemoTour
           steps={UNIFIED_TOUR_STEPS}
           // Slice 4b: the stage's declared anchors for this surface (step id
@@ -2255,67 +2347,6 @@ export default function ToolCast({
           sceneActive={active}
         />
       )}
-      </>
-      ) : stageBranch === 'ios' ? (
-      <>
-      <div className="tc-topcluster tc-topcluster-product" data-cast="tool" style={{ '--rank': 3 }}>
-        {projectSlot}
-        <span className="tc-solve" data-testid="ios-ship-status">
-          <span className={`dot ${iosShip.launchable ? 'live' : 'hollow'}`} />
-          {iosShip.launchable ? 'Ship lane ready' : 'Ship lane setup required'}
-        </span>
-        <button type="button" className="tc-back" onClick={() => navigate('/')}>Back to the site</button>
-        <span className="key">Esc</span>
-      </div>
-      <aside className="tc-rail tc-rail-l tc-operator-rail" aria-label="iOS ship lane" data-cast="tool" data-testid="ios-ship-lane" style={{ '--rank': 0 }}>
-        <div className="tc-rail-head">
-          <span className="tc-rail-title">iOS ship lane</span>
-          <span className="tc-rail-sub">readiness · launch · receipt</span>
-        </div>
-        <div className="tc-rail-body">
-          <p className="tc-rail-note">
-            Turn an approved project revision into a TestFlight build through the mounted Apple
-            ship lane. Apple passwords, two-factor codes, keys, certificates, and profiles never
-            enter this browser.
-          </p>
-          {!iosShip.launchable && (
-            <p className="tc-rail-note" data-testid="ios-ship-setup">
-              {iosShip.setupAction
-                ? `Setup action: ${iosShip.setupAction}`
-                : 'The ship lane is not ready. No launch control is available.'}
-            </p>
-          )}
-          {iosShipLaunchAffordance(iosShip, {
-            projectId: workspace.openProjectId,
-            revision: workspace.canonicalVersionId,
-            sessionActive: platformSession.status === 'active',
-          }) && (
-            <button
-              type="button"
-              className="tc-run"
-              data-testid="ios-ship-launch"
-              disabled={iosShipBusy}
-              onClick={launchIosShip}
-            >
-              {iosShipBusy ? 'Launching' : 'Launch TestFlight build'}
-            </button>
-          )}
-          {iosShipExecution && (
-            <p className="tc-rail-note" data-testid="ios-ship-execution">
-              Build {iosShipExecution.build_number} · {iosShipExecution.status}
-              {iosShipExecution.failed_stage ? ` at ${iosShipExecution.failed_stage}` : ''}
-            </p>
-          )}
-          {iosShipReceipt && (
-            <div className="tc-rail-note" data-testid="ios-ship-receipt">
-              <strong>TestFlight receipt</strong>
-              <div>{iosShipReceipt.bundle_identifier} · {iosShipReceipt.marketing_version} ({iosShipReceipt.build_number})</div>
-              <div>{iosShipReceipt.app_store_connect_result?.status} · {iosShipReceipt.app_store_connect_result?.build_id}</div>
-            </div>
-          )}
-          {iosShipError && <p className="tc-rail-note" data-testid="ios-ship-error">{iosShipError}</p>}
-        </div>
-      </aside>
       </>
       ) : (
         <SurfaceFrame.Frame />
