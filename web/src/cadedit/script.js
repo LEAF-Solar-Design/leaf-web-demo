@@ -96,7 +96,8 @@ export function promptSlots(prompt) {
 export function parseScript(text, parseWord, prompts) {
   if (typeof text !== 'string') return { refusal: 'the script is not text', line: 0 }
   if (text.length > MAX_SCRIPT_CHARS) return { refusal: `the script is longer than ${MAX_SCRIPT_CHARS} characters`, line: 0 }
-  const rows = text.split(/\r\n|\r|\n/)
+  // A file conventionally ends with a line terminator; that is not a line.
+  const rows = text.replace(/(\r\n|\r|\n)$/, '').split(/\r\n|\r|\n/)
   if (rows.length > MAX_SCRIPT_LINES) return { refusal: `the script has more than ${MAX_SCRIPT_LINES} lines`, line: 0 }
   const lines = []
   for (let i = 0; i < rows.length; i += 1) {

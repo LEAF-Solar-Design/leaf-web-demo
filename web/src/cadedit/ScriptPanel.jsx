@@ -62,12 +62,18 @@ export default function ScriptPanel() {
       ? (current.busy ? drawReason(current, reachRef.current) : (line.op === 'undo' ? current.undoDepth : current.redoDepth) > 0 ? '' : `nothing to ${line.op}`)
       : gateFor(line.group, current, reachRef.current)
     if (gate) { stop('stopped', `Script stopped at line ${line.line}: ${line.verb} is unavailable (${gate}).`); return }
-    const before = { status: current.status, count: current.entityCount, undo: current.undoDepth, redo: current.redoDepth }
-    run.awaiting = { index, sawBusy: false, before, at: Date.now() }
+    const before = { status: current.status, count: current.entityCount, undo: current.undoDepth, redo: current.redoDepth, clipboard: current.clipboard }
+    run.awaiting = { index, sawBusy: false, answered: false, before, at: Date.now() }
     if (BARE_OPS.has(line.op)) {
       if (line.op === 'undo') actions.undo()
       else if (line.op === 'redo') actions.redo()
-      else if (line.op === 'copyClip' || line.op === 'cutClip') actions.copyToClipboard(line.op === 'cutClip')
+      else if (line.op === 'copyClip') {
+        // COPY touches no engine op: it is answered the moment it returns,
+        // whether or not its status sentence differs from the last one (the
+        // same selection copied twice reads the same sentence; kimi, #1046).
+        actions.copyToClipboard(false)
+        run.awaiting.answered = true
+      } else if (line.op === 'cutClip') actions.copyToClipboard(true)
       else actions.applyEdit(line.op, {})
     } else {
       const prompt = PROMPTS[line.op]
@@ -104,8 +110,8 @@ export default function ScriptPanel() {
     const line = run.lines[index]
     if (session.busy) { run.awaiting.sawBusy = true; return }
     const changed = session.status !== before.status || session.entityCount !== before.count
-      || session.undoDepth !== before.undo || session.redoDepth !== before.redo
-    if (!run.awaiting.sawBusy && !changed) return
+      || session.undoDepth !== before.undo || session.redoDepth !== before.redo || session.clipboard !== before.clipboard
+    if (!run.awaiting.sawBusy && !changed && !run.awaiting.answered) return
     if (session.errorKind) { stop('stopped', `Script stopped at line ${line.line}: ${session.status}`); return }
     run.awaiting = null
     const next = index + 1
@@ -126,6 +132,9 @@ export default function ScriptPanel() {
   }
   const onFile = (event) => {
     const file = event.target.files && event.target.files[0]
+    // Choosing the same file again must read it again (an edited .scr under
+    // the same name): the input forgets its value once the file is taken.
+    event.target.value = ''
     if (!file) return
     if (file.size > MAX_SCRIPT_CHARS) { setReport({ phase: 'stopped', text: `Script stopped before running: the file is longer than ${MAX_SCRIPT_CHARS} characters.` }); return }
     file.text().then((content) => setText(content)).catch(() => setReport({ phase: 'stopped', text: 'Script stopped before running: the file could not be read.' }))
