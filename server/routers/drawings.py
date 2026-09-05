@@ -1163,24 +1163,50 @@ def save_plan_version(drawing_id: str,
                     write_loop._extractor_round(value, 3)
                     if isinstance(value, (int, float)) and not isinstance(value, bool) else value
                     for value in xy)
-                entries[(str(entity["handle"]) if entity.get("handle") is not None else None,
+                entries[(entity.get("kind"),
+                         str(entity["handle"]) if entity.get("handle") is not None else None,
                          str(entity["layer"]) if entity.get("layer") is not None else None,
                          *xy, entity.get("text"))] += 1
             return entries
 
         try:
-            if text_entities(uploaded.get("texts") or []) != text_entities(base_intake.get("texts") or []):
+            if "texts" in base_intake and (
+                text_entities(uploaded.get("texts") or [])
+                != text_entities(base_intake.get("texts") or [])
+            ):
                 raise ValueError("text entities differ from the head")
+            quantized_upload = write_loop.quantize_intake_like_extractor(uploaded)
+            quantized_base = write_loop.quantize_intake_like_extractor(expected_base)
+            named_handles = {str(handle) for handle in canonical.get("removed", [])}
+            for operation in ("set_layer", "set_circle", "set_arc", "set_points", "transforms"):
+                named_handles.update(str(entry["handle"]) for entry in canonical.get(operation, []))
             for field in ("circles", "arcs"):
-                for entity in uploaded.get(field) or []:
+                head_by_handle = {
+                    str(entity["handle"]): entity
+                    for entity in quantized_base.get(field) or []
+                    if isinstance(entity, dict) and entity.get("handle") is not None
+                }
+                for entity in quantized_upload.get(field) or []:
                     normal = entity.get("nrm", [0.0, 0.0, 1.0])
                     if len(normal) != 3 or any(
                         not abs(value - expected) <= 1e-9
                         for value, expected in zip(normal, [0.0, 0.0, 1.0])
                     ):
                         raise ValueError("an entity lies outside the drawing plane")
+                    handle = str(entity.get("handle"))
+                    reference = head_by_handle.get(handle)
+                    if handle not in named_handles and reference is not None:
+                        differs = any(entity.get(key) != reference.get(key) for key in ("layer", "c", "r"))
+                        if field == "arcs":
+                            differs = differs or any(
+                                write_loop._extractor_round(write_loop._plan_number(entity[key]), 3)
+                                != write_loop._extractor_round(write_loop._plan_number(reference[key]), 3)
+                                for key in ("start_deg", "end_deg")
+                            )
+                        if differs:
+                            raise ValueError("an unchanged entity differs from the head")
             write_loop.verify_live_mutation_effects(
-                expected_base, write_loop.quantize_intake_like_extractor(uploaded), canonical)
+                expected_base, quantized_upload, canonical)
         except ValueError as exc:
             return error_response(ErrorCode.BAD_PARAMS,
                                   f"the uploaded DXF does not carry the plan's result: {exc}",

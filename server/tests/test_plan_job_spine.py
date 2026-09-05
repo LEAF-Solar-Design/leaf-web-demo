@@ -148,6 +148,21 @@ def test_plan_recovery_preserves_plan_and_refuses_missing_context(spine, plan):
     assert "cannot recover job" in record["error"]["message"]
 
 
+def test_plan_recovery_refuses_a_malformed_execution_tool(spine, plan):
+    job_id = _submit(plan)
+    spine[jobs.LANE_SLOW].calls.clear()
+    execution = _execution(job_id)
+    execution["tool"] = []
+    jobs._exec("UPDATE jobs SET execution_json = ? WHERE job_id = ?",
+               (json.dumps(execution), job_id))
+    assert jobs._redispatch_record(job_id) is False
+    assert all(not executor.calls for executor in spine.values())
+    record = jobs.get_job(job_id)
+    assert record["status"] == "failed"
+    assert record["error"]["error_code"] == "INTERNAL"
+    assert record["error"]["message"] == "cannot recover job: missing execution context"
+
+
 def test_plan_recovery_refuses_a_catalog_tool_hidden_in_execution(spine, plan):
     plan["parent_version"] = 1
     job_id = _submit(plan)

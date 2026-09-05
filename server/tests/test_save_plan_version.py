@@ -128,14 +128,15 @@ def plan_submissions(client, monkeypatch):
 
 
 @pytest.fixture()
-def live(client, tmp_path, monkeypatch, plan_submissions):
+def live(client, tmp_path, monkeypatch, plan_submissions, request):
     import deps  # noqa: PLC0415
     import jobs  # noqa: PLC0415
 
     monkeypatch.setattr(deps, "APS_LIVE", True)
     monkeypatch.setenv("LEAF_PLAN_LIVE_LEG", "1")
     monkeypatch.setattr(jobs, "job_max_s", lambda: 540)
-    backend = _seed_dwg_backed(tmp_path, intake=_live_base_intake())
+    intake = request.param if hasattr(request, "param") else _live_base_intake()
+    backend = _seed_dwg_backed(tmp_path, intake=intake)
     return client, backend, plan_submissions
 
 
@@ -309,6 +310,61 @@ def test_live_leg_accepts_extractor_quantum_without_changing_the_plan(live):
     assert _head(client, DWG_DRAWING) == 1
 
 
+def test_live_leg_quantizes_upload_through_the_plan_number_pipeline(live):
+    client, _backend, submissions = live
+    capability = _checkout(client)
+    mutations = {"set_points": [{"handle": "1F", "pts": [[1, 2, 0], [4.0004999999996, 6, 0]]}]}
+    data = EDITED_DXF.replace(b"11\n4\n21\n6\n", b"11\n4.0004999999996\n21\n6\n")
+    resp = _post(client, DWG_DRAWING, mutations, data=data, capability=capability)
+    assert resp.status_code == 202, resp.text
+    assert len(submissions) == 1
+    assert submissions[0]["plan"]["mutations"]["set_points"][0]["pts"] == mutations["set_points"][0]["pts"]
+    assert _head(client, DWG_DRAWING) == 1
+
+
+@pytest.mark.parametrize("live,kind,angles", [
+    pytest.param({**_live_base_intake(), "circles": [
+        {"handle": "2A", "layer": "New", "c": [0.0, 0.0, 0.0], "r": 3.0},
+    ]}, "CIRCLE", "", id="circle"),
+    pytest.param({**_live_base_intake(), "arcs": [
+        {"handle": "2A", "layer": "New", "c": [0.0, 0.0, 0.0], "r": 3.0,
+         "start_deg": 0.0, "end_deg": 90.0},
+    ]}, "ARC", "50\n0\n51\n90\n", id="arc"),
+], indirect=["live"])
+@pytest.mark.parametrize("radius,status", [("3", 202), ("3.0004", 202), ("3.0014", 422)])
+def test_live_leg_unchanged_round_entity_matches_head_at_quantum(live, kind, angles, radius, status):
+    client, _backend, submissions = live
+    capability = _checkout(client)
+    entity = (f"0\n{kind}\n5\n2A\n8\nNew\n10\n0\n20\n0\n40\n{radius}\n" + angles).encode("ascii")
+    data = EDITED_DXF.replace(b"0\nENDSEC\n", entity + b"0\nENDSEC\n")
+    resp = _post(client, DWG_DRAWING, _live_mutations(), data=data, capability=capability)
+    assert resp.status_code == status, resp.text
+    if status == 202:
+        assert len(submissions) == 1
+    else:
+        assert resp.json()["error"]["message"] == (
+            "the uploaded DXF does not carry the plan's result: an unchanged entity differs from the head")
+        assert submissions == []
+    assert _head(client, DWG_DRAWING) == 1
+
+
+@pytest.mark.parametrize("live", [{**_live_base_intake(), "arcs": [
+    {"handle": "2A", "layer": "New", "c": [0.0, 0.0, 0.0], "r": 3.0,
+     "start_deg": 0.0, "end_deg": 90.0},
+]}], indirect=True)
+@pytest.mark.parametrize("angles", [b"50\n0.0006\n51\n90\n", b"50\n0\n51\n90.0006\n"])
+def test_live_leg_unchanged_arc_angles_match_head_at_quantum(live, angles):
+    client, _backend, submissions = live
+    capability = _checkout(client)
+    arc = b"0\nARC\n5\n2A\n8\nNew\n10\n0\n20\n0\n40\n3\n" + angles
+    data = EDITED_DXF.replace(b"0\nENDSEC\n", arc + b"0\nENDSEC\n")
+    resp = _post(client, DWG_DRAWING, _live_mutations(), data=data, capability=capability)
+    assert resp.status_code == 422, resp.text
+    assert "an unchanged entity differs from the head" in resp.json()["error"]["message"]
+    assert submissions == []
+    assert _head(client, DWG_DRAWING) == 1
+
+
 def test_live_leg_refuses_a_contradiction_beyond_the_extractor_quantum(live):
     client, _backend, submissions = live
     mutations = {"set_points": [{"handle": "1F", "pts": [[1, 2], [4.0004, 6]]}]}
@@ -320,11 +376,38 @@ def test_live_leg_refuses_a_contradiction_beyond_the_extractor_quantum(live):
     assert _head(client, DWG_DRAWING) == 1
 
 
+def test_live_leg_skips_text_comparison_when_head_does_not_list_texts(live):
+    client, _backend, submissions = live
+    capability = _checkout(client)
+    text = b"0\nTEXT\n5\n2A\n8\nNew\n10\n0\n20\n0\n40\n1\n1\nEXTRA\n"
+    data = EDITED_DXF.replace(b"0\nENDSEC\n", text + b"0\nENDSEC\n")
+    resp = _post(client, DWG_DRAWING, _live_mutations(), data=data, capability=capability)
+    assert resp.status_code == 202, resp.text
+    assert len(submissions) == 1
+    assert _head(client, DWG_DRAWING) == 1
+
+
+@pytest.mark.parametrize("live", [{**_live_base_intake(), "texts": []}], indirect=True)
 def test_live_leg_refuses_text_entities_not_carried_by_the_plan(live):
     client, _backend, submissions = live
     text = b"0\nTEXT\n5\n2A\n8\nNew\n10\n0\n20\n0\n40\n1\n1\nEXTRA\n"
     data = EDITED_DXF.replace(b"0\nENDSEC\n", text + b"0\nENDSEC\n")
     resp = _post(client, DWG_DRAWING, _live_mutations(), data=data)
+    assert resp.status_code == 422, resp.text
+    assert "text entities differ from the head" in resp.json()["error"]["message"]
+    assert submissions == []
+    assert _head(client, DWG_DRAWING) == 1
+
+
+@pytest.mark.parametrize("live", [{**_live_base_intake(), "texts": [
+    {"kind": "TEXT", "layer": "New", "pt": [0.0, 0.0], "text": "OLD", "handle": "2A"},
+]}], indirect=True)
+def test_live_leg_refuses_a_change_from_text_to_mtext(live):
+    client, _backend, submissions = live
+    capability = _checkout(client)
+    text = b"0\nMTEXT\n5\n2A\n8\nNew\n10\n0\n20\n0\n40\n1\n1\nOLD\n"
+    data = EDITED_DXF.replace(b"0\nENDSEC\n", text + b"0\nENDSEC\n")
+    resp = _post(client, DWG_DRAWING, _live_mutations(), data=data, capability=capability)
     assert resp.status_code == 422, resp.text
     assert "text entities differ from the head" in resp.json()["error"]["message"]
     assert submissions == []

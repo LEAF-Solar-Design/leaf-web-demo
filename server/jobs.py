@@ -1661,6 +1661,8 @@ def _redispatch_record(job_id: str) -> bool:
             rows = _query("SELECT execution_json FROM jobs WHERE job_id = ?", (job_id,))
             execution = json.loads(rows[0]["execution_json"] or "{}")
         tool = execution["tool"]
+        if not isinstance(tool, dict):
+            raise KeyError("tool")
         plan = execution.get("plan")
         if rec.get("tool") == PLAN_TOOL_NAME or tool.get("name") == PLAN_TOOL_NAME:
             if (rec.get("tool") != PLAN_TOOL_NAME or tool.get("name") != PLAN_TOOL_NAME

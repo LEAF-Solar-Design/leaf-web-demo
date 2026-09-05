@@ -1391,7 +1391,7 @@ def quantize_intake_like_extractor(intake: dict) -> dict:
 
     def number(value):
         if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return _extractor_round(value, 3)
+            return _extractor_round(_plan_number(value), 3)
         return value
 
     for entity in quantized.get("polylines") or []:
