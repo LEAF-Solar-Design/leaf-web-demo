@@ -178,8 +178,11 @@ const MAX_BATCH_STEPS = 4
  */
 function applyOne(doc, op, payload) {
   const p = payload && typeof payload === 'object' ? payload : {}
-  const create = CREATE_OPS[op]
-  if (create) {
+  // The op is a string off the boundary: only an OWN key of the create
+  // table names a create (a prototype name such as `constructor` is not
+  // one), and only a function in that slot is ever called.
+  if (Object.prototype.hasOwnProperty.call(CREATE_OPS, op) && typeof CREATE_OPS[op] === 'function') {
+    const create = CREATE_OPS[op]
     if (typeof doc[op] !== 'function') throw new Error(`engine_lacks_create:${op}`)
     return { createdHandle: handleId(create(doc, p), 'create_returned_no_handle'), createdHandles: null }
   }

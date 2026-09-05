@@ -96,6 +96,9 @@ const SCRIPT = [
   // A refused single create keeps the document held: the next edit still lands.
   'out.badCreate = summary(await handleMessage({ type: "applyEdit", op: "createLine", payload: { x1: 1, y1: 1, x2: 1, y2: 1, layer: "A" } }, engine))',
   'out.afterBadCreate = summary(await handleMessage({ type: "applyEdit", op: "setLayer", payload: { entityId: h, layer: "B" } }, engine))',
+  // An op named after a prototype property is not a create and calls nothing.
+  'out.proto = summary(await handleMessage({ type: "applyEdit", op: "constructor", payload: { entityId: h } }, engine))',
+  'out.protoInBatch = summary(await handleMessage({ type: "applyEdit", op: "batch", payload: { verb: "trim", steps: [{ op: "hasOwnProperty", payload: { entityId: h } }] } }, engine))',
   'process.stdout.write(JSON.stringify({ ids, out }))',
 ].join('\n')
 
@@ -153,5 +156,9 @@ describe.skipIf(!GLUE)('the worker batch on the real engine', () => {
     expect(out.badCreate).toMatchObject({ ok: false, op: 'createLine', reason: 'line_zero_length' })
     expect(out.afterBadCreate.ok).toBe(true)
     expect(out.afterBadCreate.count).toBe(4)
+    // The op string off the boundary never reaches a prototype slot of the
+    // create table: `constructor` is an unknown op, in a batch too.
+    expect(out.proto).toMatchObject({ ok: false, reason: 'unknown_op:constructor' })
+    expect(out.protoInBatch).toMatchObject({ ok: false, reason: 'step_0_hasOwnProperty:unknown_op:hasOwnProperty' })
   })
 })
