@@ -362,19 +362,31 @@ describe('filletLines on arcs (W4g-6b)', () => {
     // a line too far from the circle for any circle of that radius to touch both is the refusal.
     expect(filletLines(X(), half(), 100, 2, 0, 7, 3).steps).toHaveLength(3)
     expect(filletLines(line('f', [0, 20], [20, 20]), half(), 1, 2, 20, 7, 3).refusal).toBe('Fillet refused: no circle of that radius is tangent to both objects.')
-    // A line tangent to the arc's circle touches without crossing: no corner at r = 0, and at r > 0 the offset
-    // pair that meets at the touch point itself (both tangent points coincident, a zero-sweep arc) is no fillet
-    // either (kimi, #1051): the same sentence, never a step the crate refuses as arc_sweep_zero.
-    expect(filletLines(line('t', [0, 5], [20, 5]), half(), 0, 2, 5, 9, 4).refusal).toBe('Fillet refused: the two objects touch without crossing; no corner to make.')
-    expect(filletLines(line('t', [0, 5], [20, 5]), half(), 1, 9, 5, 9, 4).refusal).toBe('Fillet refused: the two objects touch without crossing; no corner to make.')
-    // Two arcs whose circles touch at (5,0): the same at r = 1 and at r = 0.
+    // A line tangent to the arc's circle touches without crossing: no corner at r = 0. At r > 0 the offset
+    // pair meeting at the touch point itself (both tangent points coincident, a zero-sweep arc) is no fillet
+    // and is skipped (kimi, #1051); what remains is the CUSP fillet the reference draws too: its centre 1 below
+    // the line and 6 from the arc's centre, C = (10 - sqrt 20, 4), the arc kept to atan2(4, Cx - 10) = 138.19.
+    const tangent = line('t', [0, 5], [20, 5])
+    expect(filletLines(tangent, half(), 0, 2, 5, 9, 4).refusal).toBe('Fillet refused: the two objects touch without crossing; no corner to make.')
+    const cusp = filletLines(tangent, half(), 1, 9, 5, 9, 4)
+    const cuspX = 10 - Math.sqrt(20)
+    expect(cusp.steps).toHaveLength(3)
+    near(cusp.steps[0].points[0][0], cuspX); expect(cusp.steps[0].points[0][1]).toBe(5); expect(cusp.steps[0].points[1]).toEqual([20, 5])
+    near(cusp.steps[1].a0, 90); near(cusp.steps[1].a1, ((Math.atan2(4, cuspX - 10) * DEG) + 360) % 360)
+    near(cusp.steps[2].inputs.x, cuspX); near(cusp.steps[2].inputs.y, 4); expect(cusp.steps[2].inputs.r).toBe(1)
+    // Two arcs whose circles touch at (5,0): r = 0 has no corner; r = 1 is the VALLEY fillet between them, its
+    // centre 6 from both centres, C = (5, sqrt 11), the arcs kept to atan2(sqrt 11, 5) = 33.56 and from 146.44.
     const touchA = arc('ta', [0, 0], 5, 0, 90)
     const touchB = arc('tb', [10, 0], 5, 90, 180)
-    expect(filletLines(touchA, touchB, 1, 4.9, 1, 5.1, 1).refusal).toBe('Fillet refused: the two objects touch without crossing; no corner to make.')
     expect(filletLines(touchA, touchB, 0, 4.9, 1, 5.1, 1).refusal).toBe('Fillet refused: the two objects touch without crossing; no corner to make.')
-    // Every emitted arc keeps a real sweep: no plan carries a0 === a1.
-    for (const r of [0.5, 1, 3]) {
-      const plan = filletLines(X(), half(), r, 2, 0, 7, 3)
+    const valley = filletLines(touchA, touchB, 1, 4.9, 1, 5.1, 1)
+    const s11 = Math.sqrt(11)
+    expect(valley.steps).toHaveLength(3)
+    expect(valley.steps[0].a0).toBe(0); near(valley.steps[0].a1, Math.atan2(s11, 5) * DEG)
+    near(valley.steps[1].a0, 180 - Math.atan2(s11, 5) * DEG); expect(valley.steps[1].a1).toBe(180)
+    near(valley.steps[2].inputs.x, 5); near(valley.steps[2].inputs.y, s11); expect(valley.steps[2].inputs.r).toBe(1)
+    // Every emitted arc keeps a real sweep: no plan carries a0 === a1, the crossing, cusp and valley cases alike.
+    for (const plan of [0.5, 1, 3].map((r) => filletLines(X(), half(), r, 2, 0, 7, 3)).concat([cusp, valley])) {
       for (const s of plan.steps) {
         if (s.op === 'setArc') expect(((s.a1 - s.a0) % 360 + 360) % 360).toBeGreaterThan(1e-6)
         if (s.op === 'createArc') expect(((s.inputs.a1 - s.inputs.a0) % 360 + 360) % 360).toBeGreaterThan(1e-6)
