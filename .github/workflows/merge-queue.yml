@@ -51,12 +51,6 @@ env:
   SUPPLY_PROVIDER_WORKFLOW_PATH: .github/workflows/build-platform-images.yml
   SUPPLY_SET_POLLS: "40"
   SUPPLY_SET_INTERVAL: "30"
-  # Which services the relay (slice B) prewarms, and this controller must
-  # therefore find dispatched and staged. Mirrors prewarm-staging-cutover.yml's
-  # STAGE_SERVICES; a change in either direction must land in both files in
-  # the same commit; app stays paused there for the same reason it is absent
-  # here (its merge deploy does not yet reuse a same-tree stage).
-  STAGE_SERVICES: "web"
   RELAY_RECEIPT_POLLS: "30"
   RELAY_RECEIPT_INTERVAL: "60"
   TERRAFORM_RECEIPT_POLLS: "40"
@@ -373,20 +367,50 @@ jobs:
                       echo "::notice::mq-prewarm: reason=migration candidate: normal deploy path"
                       exit 0
                     fi
-                    MISSING=""
-                    echo "{}" > dispatched-map.json
-                    for SERVICE in $STAGE_SERVICES; do
-                      RUN_ID=$(jq -r --arg s "$SERVICE" '[.dispatched[]? | select(.service == $s)] | last | .run_id // empty' relay-receipt/prewarm-relay-receipt.json)
-                      if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
-                        MISSING="${MISSING:+$MISSING }$SERVICE"
-                      else
-                        jq --arg s "$SERVICE" --argjson r "$RUN_ID" '. + {($s): $r}' dispatched-map.json > dispatched-map.tmp && mv dispatched-map.tmp dispatched-map.json
-                      fi
-                    done
-                    if [ -n "$MISSING" ]; then
-                      echo "::error::mq-prewarm: relay receipt is missing a dispatched run id for: $MISSING."
+                    if ! timeout 60 gh api "repos/$GITHUB_REPOSITORY/contents/.github/workflows/prewarm-staging-group.yml?ref=$GROUP_HEAD_SHA" > relay-workflow.json; then
+                      echo "::error::mq-prewarm: cannot read the group head relay configuration."
                       exit 1
                     fi
+                    python3 - <<'PY'
+          import base64
+          import json
+          import re
+          from pathlib import Path
+
+          def fail(message):
+              raise SystemExit("::error::mq-prewarm: " + message)
+
+          entries = json.loads(Path("relay-receipt/prewarm-relay-receipt.json").read_text()).get("dispatched")
+          if not isinstance(entries, list) or not entries:
+              fail("relay dispatched nothing for this group")
+          dispatched = {}
+          for entry in entries:
+              if not isinstance(entry, dict):
+                  fail("invalid dispatched entry for service <unknown>")
+              service, run_id = entry.get("service"), entry.get("run_id")
+              if (not isinstance(service, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", service)
+                      or entry.get("disposition") != "dispatched"
+                      or type(run_id) is not int or run_id <= 0):
+                  fail(f"invalid dispatched run for service {service!r}")
+              if service in dispatched:
+                  fail(f"duplicate dispatched service {service}")
+              dispatched[service] = run_id
+          try:
+              response = json.loads(Path("relay-workflow.json").read_text())
+              source = base64.b64decode(response["content"]).decode("utf-8")
+              lines = re.findall(r"(?m)^\s*STAGE[_]SERVICES\s*:(.*)$", source)
+              match = re.fullmatch(r'''\s*(["'])([a-z0-9-]+(?: +[a-z0-9-]+)*)\1\s*(?:#.*)?''', lines[0]) if len(lines) == 1 else None
+              if match is None:
+                  fail("relay configured service list absent or unparsable")
+              configured = set(match[2].split())
+          except (KeyError, ValueError, TypeError, UnicodeError):
+              fail("relay configured service list absent or unparsable")
+          print("mq-prewarm: dispatched services: " + " ".join(sorted(dispatched)))
+          print("mq-prewarm: configured services: " + " ".join(sorted(configured)))
+          if set(dispatched) != configured:
+              fail("relay dispatched services differ from configured services")
+          Path("dispatched-map.json").write_text(json.dumps(dispatched))
+          PY
                     echo "dispatched_json=$(jq -c . dispatched-map.json)" >> "$GITHUB_OUTPUT"
                     echo "mq-prewarm: relay receipt $NAME verified after $ATTEMPT poll(s)."
                     exit 0
@@ -415,38 +439,40 @@ jobs:
           SHA12="${GROUP_HEAD_SHA:0:12}"
           EXPECTED_TAG="spec-$TREE-$SHA12"
           ARNS=""
-          for SERVICE in $STAGE_SERVICES; do
-            RUN_ID=$(jq -r --arg s "$SERVICE" '.[$s] // empty' <<<"$DISPATCHED_JSON")
+          SERVICES=$(jq -ej 'keys | if length > 0 then join(" ") else error("empty dispatched set") end' <<<"$DISPATCHED_JSON")
+          for SERVICE in $SERVICES; do
+            RUN_ID=$(jq -j --arg s "$SERVICE" '.[$s] // empty' <<<"$DISPATCHED_JSON")
             [ -n "$RUN_ID" ] || { echo "::error::mq-prewarm: no dispatched run id carried forward for $SERVICE."; exit 1; }
             ATTEMPT=0
             FOUND=""
             while [ "$ATTEMPT" -lt "$TERRAFORM_RECEIPT_POLLS" ]; do
               ATTEMPT=$((ATTEMPT + 1))
               RUN_RECORD=$(timeout 60 gh api "repos/$INFRA_REPO/actions/runs/$RUN_ID" 2>/dev/null || true)
-              STATUS=$(jq -r '.status // empty' <<<"${RUN_RECORD:-{}}" 2>/dev/null || true)
-              CONCLUSION=$(jq -r '.conclusion // empty' <<<"${RUN_RECORD:-{}}" 2>/dev/null || true)
+              STATUS=$(jq -j '.status // empty' <<<"${RUN_RECORD:-{}}" 2>/dev/null || true)
+              CONCLUSION=$(jq -j '.conclusion // empty' <<<"${RUN_RECORD:-{}}" 2>/dev/null || true)
               if [ "$STATUS" = "completed" ]; then
                 if [ "$CONCLUSION" != "success" ]; then
                   echo "::error::mq-prewarm: terraform deploy run $RUN_ID for $SERVICE concluded '$CONCLUSION', not success."
                   exit 1
                 fi
-                ATTEMPT_NUM=$(jq -r '.run_attempt' <<<"$RUN_RECORD")
+                ATTEMPT_NUM=$(jq -j '.run_attempt' <<<"$RUN_RECORD")
                 ARTIFACTS=$(timeout 60 gh api "repos/$INFRA_REPO/actions/runs/$RUN_ID/artifacts?per_page=100" 2>/dev/null || true)
                 NAME="staging-prewarm-receipt-$SERVICE-run-$RUN_ID-attempt-$ATTEMPT_NUM"
-                ARTIFACT_ID=$(jq -r --arg n "$NAME" '[.artifacts[]? | select(.name == $n and .expired == false)] | if length == 1 then .[0].id else empty end' <<<"$ARTIFACTS")
+                ARTIFACT_ID=$(jq -j --arg n "$NAME" '[.artifacts[]? | select(.name == $n and .expired == false)] | if length == 1 then .[0].id else empty end' <<<"$ARTIFACTS")
                 [ -n "$ARTIFACT_ID" ] || { echo "::error::mq-prewarm: expected exactly one $NAME artifact."; exit 1; }
                 timeout 60 gh api "repos/$INFRA_REPO/actions/artifacts/$ARTIFACT_ID/zip" > "receipt-$SERVICE.zip"
                 rm -rf "receipt-$SERVICE" && mkdir -p "receipt-$SERVICE"
                 unzip -o -q "receipt-$SERVICE.zip" -d "receipt-$SERVICE"
                 RECEIPT="receipt-$SERVICE/staged-prewarm-receipt.json"
                 [ -f "$RECEIPT" ] || { echo "::error::mq-prewarm: $NAME carries no staged-prewarm-receipt.json."; exit 1; }
-                REC_SERVICE=$(jq -r '.service // empty' "$RECEIPT")
-                REC_TAG=$(jq -r '.image_tag // empty' "$RECEIPT")
-                REC_WEIGHTS=$(jq -r 'if has("weights_touched") then (.weights_touched|tostring) else "missing" end' "$RECEIPT")
+                REC_SERVICE=$(jq -j '.service // empty' "$RECEIPT")
+                REC_TAG=$(jq -j '.image_tag // empty' "$RECEIPT")
+                REC_WEIGHTS=$(jq -j 'if has("weights_touched") then (.weights_touched|tostring) else "missing" end' "$RECEIPT")
                 [ "$REC_SERVICE" = "$SERVICE" ] || { echo "::error::mq-prewarm: $NAME service mismatch ($REC_SERVICE)."; exit 1; }
                 [ "$REC_TAG" = "$EXPECTED_TAG" ] || { echo "::error::mq-prewarm: $NAME image_tag mismatch ($REC_TAG != $EXPECTED_TAG)."; exit 1; }
                 [ "$REC_WEIGHTS" = "false" ] || { echo "::error::mq-prewarm: $NAME weights_touched is '$REC_WEIGHTS', not false."; exit 1; }
-                ARN=$(jq -r '.task_definition_arn // empty' "$RECEIPT")
+                ARN=$(jq -j '.task_definition_arn // empty' "$RECEIPT")
+                [ -n "$ARN" ] || { echo "::error::mq-prewarm: empty task definition ARN for $SERVICE."; exit 1; }
                 ARNS="${ARNS:+$ARNS }$ARN"
                 FOUND=true
                 break
@@ -457,4 +483,5 @@ jobs:
             done
             [ "$FOUND" = "true" ] || { echo "::error::mq-prewarm: terraform deploy run $RUN_ID for $SERVICE never completed after $TERRAFORM_RECEIPT_POLLS polls."; exit 1; }
           done
+          [ -n "$ARNS" ] || { echo "::error::mq-prewarm: empty staged task definition ARN list."; exit 1; }
           echo "mq-prewarm: staged task definitions: $ARNS"

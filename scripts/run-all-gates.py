@@ -1390,7 +1390,7 @@ def build_suites() -> List[Suite]:
         # never reaches any step but the one that reads the terraform repo.
         Suite("merge-queue-workflow",
               "scripts test_merge_queue_workflow.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_merge_queue_workflow.py"), 41),
+              SCRIPTS_DIR, _py_pytest("test_merge_queue_workflow.py"), 55),
         Suite("platform-release-manifest",
               "scripts test_platform_release_manifest.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_platform_release_manifest.py"), 88),
