@@ -257,14 +257,17 @@ function segCircle(a, b, c, r) {
 /** Circle (c1, r1) against circle (c2, r2): up to two points. */
 function circleCircle(c1, r1, c2, r2) {
   const dd = dist(c1, c2)
-  if (dd <= EPSILON || dd > r1 + r2 + EPSILON || dd < Math.abs(r1 - r2) - EPSILON) return []
-  const a = (r1 * r1 - r2 * r2 + dd * dd) / (2 * dd)
-  const h2 = r1 * r1 - a * a
-  const h = Math.sqrt(Math.max(0, h2))
+  const gapExt = r1 + r2 - dd
+  const gapInt = dd - Math.abs(r1 - r2)
+  if (dd <= EPSILON || gapExt < -EPSILON || gapInt < -EPSILON) return []
   const u = scale(sub(c2, c1), 1 / dd)
+  if (gapExt <= EPSILON) return [add(c1, scale(u, r1))]
+  if (gapInt <= EPSILON) return [add(c1, scale(u, r1 >= r2 ? r1 : -r1))]
+  const a = ((r1 - r2) * (r1 + r2) + dd * dd) / (2 * dd)
+  const h2 = (r1 - a) * (r1 + a)
+  const h = Math.sqrt(Math.max(0, h2))
   const m = add(c1, scale(u, a))
   const n = [-u[1], u[0]]
-  if (h <= EPSILON) return [m]
   return [add(m, scale(n, h)), sub(m, scale(n, h))]
 }
 const withinArc = (curve, p) => (curve.kind !== 'ARC' ? true : normDeg(angleOf(curve.c, p) - curve.start) <= curve.sweep + EPSILON)
@@ -568,12 +571,22 @@ export function extendEntity(target, edge, px, py, tol = EPSILON) {
       return { steps: [setVertices(target.id, pts, false, bulgesOrNull(bulges))] }
     }
     const hits = crossings(T, E, atEnd ? 'end' : 'start', eps)
-    const last = n - 1
     let chosen = null
+    let best = null
     if (atEnd) {
-      for (const c of hits) if (c.s > last + EPSILON && (!chosen || c.s < chosen.s)) chosen = c
+      const dEnd = sub(T.pts[n - 1], T.pts[n - 2])
+      const uEnd = scale(dEnd, 1 / len(dEnd))
+      for (const c of hits) {
+        const ahead = dot(sub(c.p, T.pts[n - 1]), uEnd)
+        if (ahead > EPSILON && (best === null || ahead < best)) { chosen = c; best = ahead }
+      }
     } else {
-      for (const c of hits) if (c.s < -EPSILON && (!chosen || c.s > chosen.s)) chosen = c
+      const dStart = sub(T.pts[1], T.pts[0])
+      const uStart = scale(dStart, 1 / len(dStart))
+      for (const c of hits) {
+        const ahead = dot(sub(c.p, T.pts[0]), uStart)
+        if (ahead < -EPSILON && (best === null || ahead > best)) { chosen = c; best = ahead }
+      }
     }
     if (!chosen) return refuse(verb, 'the boundary edge does not lie ahead of that end')
     const pts = T.pts.map((p) => [p[0], p[1]])

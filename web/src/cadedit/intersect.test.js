@@ -1247,3 +1247,59 @@ describe('Astra refutations, round seven (W4g-6e record 10)', () => {
     expect(bulges[1]).toBe(0)
   })
 })
+
+describe('Astra refutations, round eight (W4g-6e record 11)', () => {
+  it('keeps an internal tangency at a billion as one crossing and trims to it', () => {
+    const target = poly('p', [[0, -1e9], [0, 1e9]], false, 'A', [1, 0])
+    const edge = circle('c', [1, 0], 999999999)
+    // The right semicircle and the inner circle touch at (1e9, 0), halfway along the arc.
+    const hits = crossings(curveOf(target), curveOf(edge))
+    expect(hits).toHaveLength(1)
+    expect(hits[0].s).toBeCloseTo(0.5, 6)
+    expect(hits[0].p).toHaveLength(2)
+    ;[1e9, 0].forEach((v, j) => expect(hits[0].p[j]).toBeCloseTo(v, 3))
+    const out = trimEntity(target, edge, 0, -1e9, 1e-9)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(1)
+    const { points, bulges, ...shape } = out.steps[0]
+    expect(shape).toEqual({ op: 'setVertices', entityId: 'p', closed: false })
+    expect(points).toHaveLength(2)
+    ;[[1e9, 0], [0, 1e9]].forEach((p, i) => {
+      expect(points[i]).toHaveLength(2)
+      p.forEach((v, j) => expect(points[i][j]).toBeCloseTo(v, 3))
+    })
+    expect(bulges).toHaveLength(2)
+    expect(bulges[0]).toBeCloseTo(Math.tan(Math.PI / 8), 9)
+    expect(bulges[1]).toBe(0)
+  })
+
+  it('extends a billion-unit straight end by half a unit and preserves the first arc', () => {
+    const target = poly('p', [[-1e9, -2], [-1e9, 0], [0, 0]], false, 'A', [1, 0, 0])
+    const edge = line('e', [0.5, -1], [0.5, 1])
+    const out = extendEntity(target, edge, 0, 0, 1e-9)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(1)
+    const { points, ...shape } = out.steps[0]
+    expect(shape).toEqual({ op: 'setVertices', entityId: 'p', closed: false, bulges: [1, 0, 0] })
+    expect(points).toHaveLength(3)
+    expect(points[0]).toEqual([-1e9, -2])
+    expect(points[1]).toEqual([-1e9, 0])
+    expect(points[2]).toHaveLength(2)
+    ;[0.5, 0].forEach((v, j) => expect(points[2][j]).toBeCloseTo(v, 6))
+  })
+
+  it('extends a billion-unit straight start by half a unit and preserves the last arc', () => {
+    const target = poly('q', [[0, 0], [1e9, 0], [1e9, 2]], false, 'A', [0, 1, 0])
+    const edge = line('e', [-0.5, -1], [-0.5, 1])
+    const out = extendEntity(target, edge, 0, 0, 1e-9)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(1)
+    const { points, ...shape } = out.steps[0]
+    expect(shape).toEqual({ op: 'setVertices', entityId: 'q', closed: false, bulges: [0, 1, 0] })
+    expect(points).toHaveLength(3)
+    expect(points[0]).toHaveLength(2)
+    ;[-0.5, 0].forEach((v, j) => expect(points[0][j]).toBeCloseTo(v, 6))
+    expect(points[1]).toEqual([1e9, 0])
+    expect(points[2]).toEqual([1e9, 2])
+  })
+})
