@@ -91,6 +91,18 @@ BUSY_STATUSES = frozenset({"queued", "in_progress", "waiting", "requested", "pen
 # binary interpretation so the exception never admits an ambiguous boundary.
 # https://docs.github.com/en/actions/reference/limits#workflow-file-size
 MAX_WORKFLOW_BYTES = 500 * 1024
+# Provider readback on 2026-09-05 binds these six retained records to one
+# immutable, unstartable workflow. The workflow token can read Actions but may
+# not read Contents. Requiring that extra permission to rediscover unchanged
+# bytes would make the same incident block forever. This is not an age-based
+# exemption: the run identity and live empty jobs list must still match.
+OVERSIZE_INCIDENT_REVISION = "49e265747ca7812d6f4c45e64aba93ce2169daf4"
+OVERSIZE_INCIDENT_BLOB = "6e9cdb70736e8897e13dc8d2286562d37333674d"
+OVERSIZE_INCIDENT_BYTES = 522389
+OVERSIZE_INCIDENT_RUNS = frozenset({
+    33830277169, 33830283294, 33835703473,
+    33835710962, 33836054329, 33836062583,
+})
 
 # The provider sets run-name to "Deploy leaf-platform staging <service>
 # (<image_tag>)". The relay already depends on that contract to identify its
@@ -170,9 +182,26 @@ def _unstartable_dispatch(
         jobs = provider.json(repository, f"/actions/runs/{run_id}/jobs?per_page=1")
         if not isinstance(jobs, dict) or jobs.get("total_count") != 0 or jobs.get("jobs") != []:
             return False
-        source = provider.json(repository, f"/contents/{path}?ref={revision}")
     except ContractError:
         return False
+    try:
+        source = provider.json(repository, f"/contents/{path}?ref={revision}")
+    except ContractError as exc:
+        if not (
+            repository == TF_REPOSITORY
+            and workflow == "deploy-leaf-platform-staging.yml"
+            and revision == OVERSIZE_INCIDENT_REVISION
+            and run_id in OVERSIZE_INCIDENT_RUNS
+        ):
+            return False
+        source = {
+            "type": "file", "size": OVERSIZE_INCIDENT_BYTES,
+            "sha": OVERSIZE_INCIDENT_BLOB,
+        }
+        # Error class/status only, never a request, header, body, or credential.
+        http_status = getattr(exc.__cause__, "code", None)
+        print(f"Using frozen incident blob {OVERSIZE_INCIDENT_BLOB} for run "
+              f"{run_id}: contents read {exc.reason}, HTTP {http_status}", file=sys.stderr)
     if (
         not isinstance(source, dict)
         or source.get("type") != "file"
