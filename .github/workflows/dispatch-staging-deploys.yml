@@ -1913,9 +1913,9 @@ jobs:
           if [ "$SUPPLY_SCHEMA" = "leaf.staging-supply-set.v3" ]; then
             # The source was frozen before dispatch, and both exact surface
             # results below are terminal evidence for that source. A later
-            # main commit cannot invalidate those settled child deployments;
-            # the next relay owns that newer source independently.
-            require_contract_still_latest
+            # source or Terraform consumer commit cannot invalidate those
+            # settled child deployments. Contract freshness gates dispatch,
+            # not publication of the frozen results already verified above.
             jq -s \
               --slurpfile supply staging-supply-set.json \
               --arg sha "$BUILD_HEAD_SHA" \

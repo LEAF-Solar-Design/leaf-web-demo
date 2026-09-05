@@ -5877,6 +5877,62 @@ def test_v3_relay_publishes_frozen_receipt_after_main_advances() -> None:
     assert out.count("Dispatched ") == 2, out
 
 
+def test_settled_relay_receipt_survives_a_new_consumer_contract() -> None:
+    """Reproduce relay 33949224748's late veto after both children succeeded."""
+    relay = _strict_yaml(
+        (WORKFLOW.parent / "dispatch-staging-deploys.yml").read_text(encoding="utf-8")
+    )
+    shipped = _relay_deploy_step(relay["jobs"]["dispatch"])["run"]
+    settled = shipped[shipped.index("# EVERY service landed"):]
+    bash = shutil.which("bash")
+    assert bash and shutil.which("jq")
+    with tempfile.TemporaryDirectory() as tmp_name:
+        tmp = Path(tmp_name)
+        (tmp / "surface-results").mkdir()
+        source = "d" * 40
+        for service in ("web", "app"):
+            result = {
+                "schema": "leaf.staging-surface-result.v1",
+                "service": service,
+                "release_source_revision": source,
+                "convergence_id": f"{source}-1-{service}",
+                "candidate_image_digest": "sha256:" + "a" * 64,
+                "terminal_image_digest": "sha256:" + "a" * 64,
+                "terraform_workflow_blob": "b" * 40,
+                "surface_receipt_sha256": "c" * 64,
+                "outcome": "deployed",
+                "aws_mutation_count": 1,
+            }
+            (tmp / "surface-results" / f"{service}.json").write_text(
+                json.dumps(result), encoding="utf-8")
+        (tmp / "staging-supply-set.json").write_text(
+            json.dumps({"schema": "leaf.staging-supply-set.v3", "source_revision": source}),
+            encoding="utf-8")
+        script = tmp / "receipt.sh"
+        script.write_text(
+            "set -euo pipefail\n"
+            "require_contract_still_latest() {\n"
+            "  echo 'newer Terraform consumer contract refused: consumer semantics changed' >&2\n"
+            "  return 1\n}\n" + settled,
+            encoding="utf-8")
+        env = dict(os.environ, SUPPLY_SCHEMA="leaf.staging-supply-set.v3",
+                   BUILD_HEAD_SHA=source, BUILD_RUN_ATTEMPT="1",
+                   GITHUB_RUN_ID="424242", SUPPLY_SHA256="f" * 64,
+                   GITHUB_OUTPUT=str(tmp / "github_output"))
+        process = subprocess.run([bash, str(script)], cwd=tmp, env=env,
+                                 text=True, capture_output=True)
+        assert process.returncode == 0, process.stdout + process.stderr
+        receipt = json.loads((tmp / "staging-converged.json").read_text())
+        assert receipt["release_source_revision"] == source
+        assert receipt["schema"] == "leaf.staging-converged.v2"
+        assert set(receipt["surface_results"]) == {"web", "app"}
+        assert (tmp / "github_output").read_text().strip() == "converged=true"
+        assert "consumer semantics changed" not in process.stderr
+    # The provider binding still gates dispatch, not completed evidence.
+    assert sum(line.strip() == "require_contract_still_latest"
+               for line in _executable_bash(shipped).splitlines()) == 1
+
+
 
 
 _MANIFEST_FAKE_GH = r"""#!/usr/bin/env bash
