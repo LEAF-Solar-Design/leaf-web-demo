@@ -256,6 +256,18 @@ describe('filletLines', () => {
     expect(filletLines(x, line('y2', [10, 0], [10, 4]), 5, 2, 0, 10, 3).refusal).toBe('Fillet refused: the radius is too large for these two lines (at most 4 fits).')
     // A pick past the first line's own end names a part with no length on that side.
     expect(filletLines(x, y, 1, 12, 0, 10, 8).refusal).toBe('Fillet refused: the part of the first line to keep has no length on that side of the crossing.')
+    // The same when the two lines do NOT touch and the pick lies beyond the
+    // crossing: the endpoint in the picked direction sits BEHIND the crossing
+    // (reach is signed), so nothing of the line is on that side. Kimi's three
+    // repros, round two: fillet r = 1, chamfer, and the r = 0 corner.
+    const far = line('f', [15, -5], [15, 5])
+    expect(filletLines(x, far, 1, 16, 0, 15, 1).refusal).toBe('Fillet refused: the part of the first line to keep has no length on that side of the crossing.')
+    expect(chamferLines(x, far, 1, 1, 16, 0, 15, 1).refusal).toBe('Chamfer refused: the part of the first line to keep has no length on that side of the crossing.')
+    expect(filletLines(x, far, 0, 16, 0, 15, 1).refusal).toBe('Fillet refused: the part of the first line to keep has no length on that side of the crossing.')
+    // And the legitimate extension to a corner the lines do not yet reach: the
+    // pick ON the line, the crossing ahead, the tangent point at 15 - 1.
+    expect(filletLines(x, far, 1, 9, 0, 15, 1).steps[0]).toEqual({ op: 'setVertices', entityId: 'x', points: [[0, 0], [14, 0]], closed: false })
+    expect(filletLines(x, far, 0, 9, 0, 15, 1).steps[0]).toEqual({ op: 'setVertices', entityId: 'x', points: [[0, 0], [15, 0]], closed: false })
     // An acute corner explodes r / tan(theta / 2): 45 degrees between the kept parts, r = 4 needs 9.66, r = 5 does not fit 10.
     const diag = line('d', [10, 0], [0, 10])
     expect(filletLines(x, diag, 4, 2, 0, 2, 8).steps).toHaveLength(3)

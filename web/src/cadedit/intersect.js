@@ -472,12 +472,15 @@ function corner(verb, target, edge, px, py, ex, ey) {
   const cosT = Math.max(-1, Math.min(1, dot(sa.u, sb.u)))
   const theta = Math.acos(cosT)
   if (theta <= EPSILON || Math.PI - theta <= EPSILON) return refuse(verb, 'the two kept parts point the same way; no corner to make')
-  // How much of each line lies on its kept side of the crossing: the tangent
-  // or cut point must fall INSIDE that length, or the "cut" would write a
-  // point past the kept end and turn the line into something the drafter
-  // never drew (a pick past a line's own end names a part with no length).
-  sa.reach = dist(X, A.pts[sa.keptIndex])
-  sb.reach = dist(X, B.pts[sb.keptIndex])
+  // How much of each line lies on its kept side of the crossing: the SIGNED
+  // projection of the kept endpoint onto the kept direction from X. Two lines
+  // need not touch (a short line is extended to the corner), so the endpoint
+  // in direction u can sit BEHIND the crossing; an unsigned distance would
+  // read that as reach and the "cut" would write a point the line never
+  // occupied (kimi, round two). The tangent or cut point must fall inside
+  // this length; a pick past a line's own end names a part with no length.
+  sa.reach = dot(sub(A.pts[sa.keptIndex], X), sa.u)
+  sb.reach = dot(sub(B.pts[sb.keptIndex], X), sb.u)
   if (sa.reach <= EPSILON) return refuse(verb, 'the part of the first line to keep has no length on that side of the crossing')
   if (sb.reach <= EPSILON) return refuse(verb, 'the part of the second line to keep has no length on that side of the crossing')
   return { A, B, X, sa, sb, theta }
