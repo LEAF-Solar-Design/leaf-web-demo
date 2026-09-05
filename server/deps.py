@@ -211,13 +211,12 @@ _surface_config_warned_tenants: set = set()
 def _contained_tenant_root(tenant_id: Any) -> Optional[str]:
     """The tenant's repo root for the surface-config reads, or None.
 
-    tenant_repo_dir already runs tenant_paths._safe_component, but the path
-    built from its result HERE (surface_config_source, and the vendored
-    reader effective_surface_config hands it to) is a new read site, and
-    static analysis credits only an inline LITERAL fullmatch at the site as
-    the taint barrier. The literal is tenant_id_validator's canonical rule,
-    restated for that reason alone and pinned equal to it by
-    server/tests/test_codeql_barrier_literals.py; it is not a second rule."""
+    tenant_repo_dir already runs tenant_paths._safe_component; the literal
+    fullmatch here restates tenant_id_validator's canonical rule at this read
+    site the way tenant_paths._safe_component does (pinned equal to it by
+    server/tests/test_codeql_barrier_literals.py; it is not a second rule).
+    The read itself is contained by _contained_surface_config_path below:
+    the FILE, not only the tenant id, is measured against the root."""
     tid = str(tenant_id).strip() if tenant_id is not None else ""
     if not tid:
         tid = _DEFAULT_TENANT
@@ -226,6 +225,35 @@ def _contained_tenant_root(tenant_id: Any) -> Optional[str]:
         return None
     root = tenant_repo_dir(m.group(0))
     return None if root is None else str(root)
+
+
+_SURFACE_CONFIG_FILE = "surface-config.json"
+
+
+def _contained_surface_config_path(root: str) -> Optional[str]:
+    """The normalised real path of ``<root>/surface-config.json`` when that is
+    exactly where the file lives INSIDE ``root``, else None.
+
+    os.path.normpath over os.path.realpath for both the root and the file,
+    then a prefix check against the root plus a separator (the shape of
+    tool_loader._contained_published_path), then equality with the root's
+    own ``surface-config.json`` path: a symlink under that name is refused
+    whatever it points at, so nothing outside the tenant repo is ever read
+    and nothing inside it is read under another name. Fails closed to None
+    on any OS error. Absence is NOT refused: a missing file normalises to
+    the root's own path and the callers fold "absent" themselves."""
+    try:
+        base = os.path.normpath(os.path.realpath(root))
+        real = os.path.normpath(
+            os.path.realpath(os.path.join(root, _SURFACE_CONFIG_FILE))
+        )
+    except OSError:
+        return None
+    if not real.startswith(base + os.sep):
+        return None
+    if real != os.path.join(base, _SURFACE_CONFIG_FILE):
+        return None
+    return real
 
 
 def effective_surface_config(tenant_id: str = _DEFAULT_TENANT) -> Dict[str, Any]:
@@ -256,8 +284,19 @@ def effective_surface_config(tenant_id: str = _DEFAULT_TENANT) -> Dict[str, Any]
             print(f"[leaf-demo] bad tenant surface-config.json at {cfg}: {exc}",
                   file=sys.stderr)
 
+    root = _contained_tenant_root(tenant_id)
+    real = None if root is None else _contained_surface_config_path(root)
+    if root is not None and real is None:
+        # A surface-config.json that resolves outside the tenant repo, or is
+        # a symlink under that name, is refused BEFORE the vendored reader
+        # is handed a root; it then sees no root and folds to {}.
+        _bad_surface_config(
+            Path(root) / _SURFACE_CONFIG_FILE,
+            ValueError("surface-config.json resolves outside the tenant repo"),
+        )
     overlay = load_repo_surface_config(
-        _contained_tenant_root(tenant_id), on_error=_bad_surface_config
+        None if real is None else Path(os.path.dirname(real)),
+        on_error=_bad_surface_config,
     )
     _surface_config_cache[tenant_key] = (now, overlay)
     return overlay
@@ -268,12 +307,15 @@ def surface_config_source(tenant_id: str = _DEFAULT_TENANT) -> Optional[Dict[str
     independent of whether it validated: identity of the committed file, not
     a claim about its content (the `submitSurfaceConfig` author-tool receipt
     stamps the same sha256 at commit time). `None` when the tenant's repo
-    does not resolve, the file is absent, or it cannot be read — the route
-    folds all three into its own "no source" branch."""
+    does not resolve, the file is absent or a symlink, or it cannot be read — the route
+    folds all of these into its own "no source" branch."""
     root = _contained_tenant_root(tenant_id)
     if root is None:
         return None
-    cfg = Path(root) / "surface-config.json"
+    real = _contained_surface_config_path(root)
+    if real is None:
+        return None
+    cfg = Path(real)
     try:
         if not cfg.exists():
             return None

@@ -210,3 +210,59 @@ def test_route_tenant_isolation(monkeypatch, tmp_path):
     r2 = c.get("/api/surface-config", headers=_h("t2")).json()
     assert r1["surfaces"] == o1
     assert r2["surfaces"] == o2
+
+
+# =========================================================================== #
+# containment of the FILE (round 4): surface-config.json must be a real file at
+# the tenant root; a symlink under that name is refused on both read sites
+# =========================================================================== #
+def _symlink_or_skip(target: Path, link: Path) -> None:
+    import os
+    import pytest
+    try:
+        os.symlink(str(target), str(link))
+    except (OSError, NotImplementedError) as exc:  # no symlink privilege (Windows)
+        pytest.skip(f"symlink unavailable on this host: {exc}")
+
+
+def test_symlinked_surface_config_is_refused_by_the_fold(monkeypatch, tmp_path, capsys):
+    import deps
+    _reset_cache(monkeypatch)
+    base = tmp_path / "tenants"
+    root = _seed(base, "t1", None)
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps({"sheets": {"chrome": {"tab": "sheets"}}}), encoding="utf-8")
+    _symlink_or_skip(outside, root / "surface-config.json")
+    monkeypatch.setenv("LEAF_TENANTS_DIR", str(base))
+    monkeypatch.delenv("LEAF_TENANT_REPO", raising=False)
+
+    assert deps.effective_surface_config("t1") == {}
+    assert "resolves outside the tenant repo" in capsys.readouterr().err
+
+
+def test_symlinked_surface_config_has_no_source(monkeypatch, tmp_path):
+    import deps
+    _reset_cache(monkeypatch)
+    base = tmp_path / "tenants"
+    root = _seed(base, "t1", None)
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}", encoding="utf-8")
+    _symlink_or_skip(outside, root / "surface-config.json")
+    monkeypatch.setenv("LEAF_TENANTS_DIR", str(base))
+    monkeypatch.delenv("LEAF_TENANT_REPO", raising=False)
+
+    assert deps.surface_config_source("t1") is None
+
+
+def test_contained_surface_config_path_is_the_roots_own_file_or_none(tmp_path):
+    import os
+    import deps
+    root = tmp_path / "repo"
+    root.mkdir()
+    own = os.path.normpath(os.path.realpath(str(root / "surface-config.json")))
+    # absent: the root's own path (the callers fold "absent" themselves)
+    assert deps._contained_surface_config_path(str(root)) == own
+    (root / "surface-config.json").write_text("{}", encoding="utf-8")
+    assert deps._contained_surface_config_path(str(root)) == own
+    # the reader is handed the directory the checked file lives in, never the raw root
+    assert os.path.dirname(own) == os.path.normpath(os.path.realpath(str(root)))
