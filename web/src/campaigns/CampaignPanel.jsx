@@ -5,6 +5,8 @@ import './campaigns.css'
 const conflictMessage = 'This question already has a different recorded answer. Reload to see it.'
 const messageOf = error => error?.code === 'answer_conflict' ? conflictMessage : error?.message || String(error)
 const statusWords = { accepted: 'Accepted, not running', running: 'Running', succeeded: 'Succeeded', failed: 'Failed', cancelled: 'Cancelled' }
+const executionWords = value => ({ reconcile_required: 'Outcome unknown, reconciliation required', claimed: 'In progress', pending: 'Waiting' })[value]
+  || String(value || '').replaceAll('_', ' ')
 
 function Alert({ error, onReload, retry = 'Reload' }) {
   const ref = useRef(null)
@@ -117,7 +119,7 @@ function SignedInPanel({ projectId, projectName }) {
   const selected = campaign.selected
   return <>
     <p className="dim">{projectName ? `${projectName} / Campaign` : 'Project / Campaign'}</p>
-    <SubmitForm key={campaign.selectedId || 'new'} campaign={campaign} />
+    <SubmitForm key={`form:${campaign.selectedId || 'new'}`} campaign={campaign} />
     {campaign.status === 'loading' && <div role="status" aria-label="Loading campaigns">
       <div className="skeleton-stack" aria-hidden="true"><div className="skeleton-row" /><div className="skeleton-row" /></div>
     </div>}
@@ -128,11 +130,36 @@ function SignedInPanel({ projectId, projectName }) {
     </label>}
     {selected && <div className="panel-sub campaign-status" data-state={selected.status}>
       <h3>{selected.title}</h3>
+      <p className="campaign-prompt">{selected.prompt}</p>
       <p role="status">{statusWords[selected.status] || selected.status}</p>
       {selected.dispatch?.available === false && <p role="status">The build fleet is not connected yet.</p>}
       {selected.dispatch?.available === true && <p role="status">Build fleet available</p>}
     </div>}
-    {selected && <div className="panel-sub" key={campaign.selectedId}>
+    {selected && <section className="panel-sub campaign-execution" aria-label="Execution">
+      <h3>Execution</h3>
+      {campaign.executionLoading && <p role="status">Loading execution…</p>}
+      <Alert error={campaign.executionError} onReload={campaign.refetch} retry="Try again" />
+      {campaign.execution && <>
+        {campaign.execution.tasks.length === 0 && <p>No tasks recorded yet.</p>}
+        <ul>{campaign.execution.tasks.map(task => <li key={task.task_id}>
+          <h4>{task.title}</h4>
+          <p>{executionWords(task.current_stage)}</p>
+          <p>{executionWords(task.status)}</p>
+          {task.depends_on?.length > 0 && <p>Waits for: {task.depends_on.join(', ')}</p>}
+          {task.blocked_by_questions?.length > 0 && <p>Blocked by an open question</p>}
+        </li>)}</ul>
+        <h4>Activity</h4>
+        <ul>{campaign.execution.receipts.map(receipt => <li key={receipt.receipt_id}>
+          {executionWords(receipt.stage)}: {executionWords(receipt.outcome)}
+          {receipt.verified === true && ' (verified)'}
+          {receipt.reconciles_receipt_id && ' (reconciliation)'}
+        </li>)}</ul>
+        <ul>{campaign.execution.events.map(event => <li key={event.event_id}>
+          {executionWords(event.event_type)}{event.created_at && <> · <time dateTime={event.created_at}>{new Date(event.created_at).toLocaleString()}</time></>}
+        </li>)}</ul>
+      </>}
+    </section>}
+    {selected && <div className="panel-sub" key={`questions:${campaign.selectedId}`}>
       <h3>Questions</h3>
       <ul className="campaign-questions">
         {campaign.questions.map(question => {
