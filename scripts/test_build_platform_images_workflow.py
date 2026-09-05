@@ -665,7 +665,7 @@ def main() -> None:
     assert "source_sha:" in text
     assert "source_sha: ${{ steps.source.outputs.sha }}" in text
     assert "source_mode: ${{ steps.source.outputs.mode }}" in text
-    assert "ref: ${{ inputs.source_sha || github.sha }}" in text
+    assert "ref: ${{ inputs.speculative_group_head && github.sha || inputs.source_sha || github.sha }}" in text
     assert "ref: ${{ needs.prepare.outputs.source_sha }}" in text
     assert "LEAF_SOURCE_SHA=${{ needs.prepare.outputs.source_sha }}" in text
     assert "AUTOFILL_SOLVER_REVISION={0}" in text
@@ -704,7 +704,7 @@ def main() -> None:
     # stops; it never reaches the preview fetch. The wrong-head error
     # stays word-for-word, and the merged jq sits between the open check
     # and that error, so it can only fire once the open arm has refused.
-    assert source_body.count('echo "superseded=true" >> "$GITHUB_OUTPUT"') == 1
+    assert source_body.count('echo "superseded=true" >> "$GITHUB_OUTPUT"') == 2
     assert "Speculation superseded by merge" in source_body
     assert (
         "Speculative source must be the exact current head of the open "
@@ -2196,6 +2196,8 @@ def main() -> None:
     assert (
         "group: build-platform-images-${{ inputs.promote && "
         "format('handoff-run-{0}', github.run_id) || inputs.speculative && "
+        "inputs.speculative_group_head && "
+        "format('speculative-mg-{0}', inputs.speculative_group_head) || inputs.speculative && "
         "format('speculative-pr-{0}', inputs.speculative_pr_number) || github.ref }}"
     ) in text
     assert (
@@ -4267,9 +4269,12 @@ def check_speculative_dispatcher(dispatcher_text: str) -> None:
     assert "secrets." not in dispatcher_text
     dsp_doc = _strict_yaml(dispatcher_text)
     # YAML parses the `on:` key as boolean True.
-    assert dsp_doc[True] == {"pull_request": {"branches": ["main"]}}
+    assert dsp_doc[True] == {
+        "pull_request": {"branches": ["main"]},
+        "merge_group": {"types": ["checks_requested"]},
+    }
     assert dsp_doc["permissions"] == {"contents": "read", "actions": "write"}
-    assert set(dsp_doc["jobs"]) == {"dispatch"}
+    assert set(dsp_doc["jobs"]) == {"dispatch", "dispatch-group"}
     dispatch_job = dsp_doc["jobs"]["dispatch"]
     assert "permissions" not in dispatch_job, (
         "a job-level permissions block would REPLACE the workflow-level set"
@@ -7579,6 +7584,234 @@ def test_digest_aware_relay_enables_only_v3_and_keeps_v1_v2_compatibility() -> N
         in executable
     )
     assert 'schema: "leaf.staging-converged.v1"' in executable
+
+
+def _mq_source(doc: dict) -> str:
+    return _executable_bash(next(
+        step["run"] for step in doc["jobs"]["prepare"]["steps"]
+        if step.get("id") == "source"
+    ))
+
+
+def _mq_group_arm(doc: dict) -> str:
+    source = _mq_source(doc)
+    return source.split('if [ -n "$SPECULATIVE_GROUP_HEAD" ]; then', 1)[1].split(
+        'if [[ ! "$SPECULATIVE_PR_NUMBER"', 1
+    )[0]
+
+
+def _mq_falsify(check, mutations, *, dispatcher=False) -> None:
+    """Each row proves its own pin rejects a concrete broken workflow."""
+    path = WORKFLOW.parent / "speculate-platform-images.yml" if dispatcher else WORKFLOW
+    original = path.read_text(encoding="utf-8")
+    check(_strict_yaml(original))
+    for old, new in mutations:
+        assert old in original, ("merge-group fixture drift", old)
+        mutant = original.replace(old, new)
+        assert mutant != original
+        try:
+            check(_strict_yaml(mutant))
+        except AssertionError:
+            continue
+        raise AssertionError(f"merge-group pin accepted mutation: {old!r}")
+
+
+def test_merge_group_input_contract() -> None:
+    def check(doc):
+        value = doc[True]["workflow_dispatch"]["inputs"]["speculative_group_head"]
+        assert value == {
+            "description": "Optional exact 40-hex merge-group head commit. Requires speculative=true, source_sha equal to this SHA, and an empty speculative_pr_number.",
+            "type": "string", "required": False, "default": "",
+        }
+    _mq_falsify(check, [('default: ""', 'default: "invalid"'),
+                        ('Optional exact 40-hex merge-group', 'Optional unverified merge-group')])
+
+
+def test_merge_group_requires_speculative_mode() -> None:
+    def check(doc):
+        code = _mq_source(doc)
+        assert re.search(
+            r'if \[ -n "\$SPECULATIVE_GROUP_HEAD" \] && \[ "\$SPECULATIVE_INPUT" != "true" \]; then\s*'
+            r'echo "::error::speculative_group_head requires speculative=true\."\s*'
+            r'exit 1\s*fi',
+            code,
+        )
+        assert code.index('speculative_group_head requires speculative=true.') < code.index('QUEUE=')
+    _mq_falsify(check, [
+        ('[ "$SPECULATIVE_INPUT" != "true" ]', '[ "$SPECULATIVE_INPUT" = "true" ]'),
+    ])
+
+
+def test_merge_group_requires_exactly_one_selector() -> None:
+    def check(doc):
+        code = _mq_source(doc)
+        assert re.search(
+            r'if \{ \[ -n "\$SPECULATIVE_PR_NUMBER" \] && \[ -n "\$SPECULATIVE_GROUP_HEAD" \]; \} \|\|\s*'
+            r'\{ \[ -z "\$SPECULATIVE_PR_NUMBER" \] && \[ -z "\$SPECULATIVE_GROUP_HEAD" \]; \}; then\s*'
+            r'echo "::error::Speculative builds require exactly one[^\n]+\n\s*exit 1\s*fi',
+            code,
+        )
+        assert code.index('if [ "$GITHUB_REF" != "refs/heads/main" ]') < code.index("QUEUE=")
+    _mq_falsify(check, [
+        ('[ -n "$SPECULATIVE_PR_NUMBER" ] && [ -n "$SPECULATIVE_GROUP_HEAD" ]',
+         '[ -n "$SPECULATIVE_PR_NUMBER" ] && [ -z "$SPECULATIVE_GROUP_HEAD" ]'),
+        ('[ -z "$SPECULATIVE_PR_NUMBER" ] && [ -z "$SPECULATIVE_GROUP_HEAD" ]',
+         '[ -z "$SPECULATIVE_PR_NUMBER" ] && [ -n "$SPECULATIVE_GROUP_HEAD" ]'),
+    ])
+
+
+def test_merge_group_live_queue_and_superseded_exit() -> None:
+    def check(doc):
+        code = _mq_group_arm(doc)
+        for token in ('QUEUE=$(gh api graphql', 'repository(owner: $owner, name: $name)',
+                      'mergeQueue(branch: "main")', 'entries(first: 50)',
+                      'nodes { headCommit { oid } baseCommit { oid } pullRequest { number } }',
+                      '.value.headCommit.oid == $head', '(.errors // [] | length) == 0'):
+            assert token in code
+        assert re.search(r'if \[ -z "\$GROUP_ENTRY" \]; then\s*echo [^\n]+\s*'
+                         r'echo "superseded=true" >> "\$GITHUB_OUTPUT"\s*exit 0\s*fi', code)
+        assert code.index('echo "superseded=true"') < code.index('fetch --no-tags')
+        assert doc["jobs"]["prepare"]["steps"][0]["with"]["ref"] == (
+            "${{ inputs.speculative_group_head && github.sha || inputs.source_sha || github.sha }}"
+        )
+    _mq_falsify(check, [
+        ('mergeQueue(branch: "main")', 'mergeQueue(branch: "other")'),
+        ('.value.headCommit.oid == $head', '.value.baseCommit.oid == $head'),
+        ('echo "superseded=true"', 'echo "superseded=false"'),
+    ])
+
+
+def test_merge_group_arm_has_no_pr_or_label_read() -> None:
+    def check(doc):
+        code = _mq_group_arm(doc)
+        assert not re.search(r'pulls/|labels|api_get|\.head\.sha|SPECULATIVE_PR_NUMBER', code)
+        assert re.search(r'exit 0\s*fi\s*$', code)
+    _mq_falsify(check, [
+        ('QUEUE=$(gh api graphql', 'PULL=$(api_get "repos/$GITHUB_REPOSITORY/pulls/1")\n              QUEUE=$(gh api graphql'),
+        ('QUEUE=$(gh api graphql', 'LABELS=$(gh api "repos/$GITHUB_REPOSITORY/issues/1/labels")\n              QUEUE=$(gh api graphql'),
+    ])
+
+
+def test_merge_group_fetch_binds_head_base_members_and_candidate() -> None:
+    def check(doc):
+        code = _mq_group_arm(doc)
+        for token in ('[[ "$SPECULATIVE_GROUP_HEAD" =~ ^[0-9a-f]{40}$ ]]',
+                      '[ "$SOURCE_SHA_INPUT" = "$SPECULATIVE_GROUP_HEAD" ]',
+                      'fetch --no-tags --depth=2 origin "$SPECULATIVE_GROUP_HEAD"',
+                      'GROUP_SHA=$(git rev-parse FETCH_HEAD)',
+                      '[ "$GROUP_SHA" != "$SPECULATIVE_GROUP_HEAD" ]',
+                      '[ "$(git rev-parse --verify "$GROUP_SHA^1")" != "$GROUP_BASE" ]',
+                      'nodes[:($index + 1)]', 'map(.pullRequest.number)', 'join(",")',
+                      'git checkout --quiet "$GROUP_SHA"', 'echo "sha=$GROUP_SHA"',
+                      'echo "group_members=$GROUP_MEMBERS"', 'echo "group_base=$GROUP_BASE"'):
+            assert token in code
+        for key in ("group_members", "group_base"):
+            assert doc["jobs"]["prepare"]["outputs"][key] == "${{ steps.source.outputs." + key + " }}"
+        mint = next(s for s in doc["jobs"]["speculate-manifest"]["steps"] if s.get("id") == "evidence")
+        assert '--release-source-revision "${{ needs.prepare.outputs.source_sha }}"' in mint["run"]
+    _mq_falsify(check, [
+        ('"$GROUP_SHA^1"', '"$GROUP_SHA^2"'),
+        ('nodes[:($index + 1)]', 'nodes[:$index]'),
+        ('echo "sha=$GROUP_SHA"', 'echo "sha=$SOURCE_SHA_INPUT"'),
+    ])
+
+
+def test_merge_group_speculate_checkouts_keep_exact_sha_guard() -> None:
+    def check(doc):
+        for name in ("speculate", "speculate-manifest"):
+            steps = doc["jobs"][name]["steps"]
+            checkout = next(s for s in steps if s.get("uses") == "actions/checkout@v4")
+            assert checkout["with"]["ref"] == (
+                "${{ inputs.speculative_group_head || format('refs/pull/{0}/merge', inputs.speculative_pr_number) }}"
+            )
+            assert checkout["with"]["persist-credentials"] is False
+            guard = next(s for s in steps if s.get("name") == "Require the same merge preview prepare resolved")
+            assert '[ "$checked_out" != "$PREPARED_SHA" ]' in _executable_bash(guard["run"])
+            assert guard["env"]["PREPARED_SHA"] == "${{ needs.prepare.outputs.source_sha }}"
+    _mq_falsify(check, [
+        ("inputs.speculative_group_head || format('refs/pull/{0}/merge'", "inputs.source_sha || format('refs/pull/{0}/merge'"),
+        ('[ "$checked_out" != "$PREPARED_SHA" ]', '[ "$checked_out" = "$PREPARED_SHA" ]'),
+    ])
+
+
+def test_merge_group_concurrency_preserves_pr_and_handoff_keys() -> None:
+    def check(doc):
+        key = doc["concurrency"]["group"]
+        assert "inputs.speculative && inputs.speculative_group_head && format('speculative-mg-{0}', inputs.speculative_group_head)" in key
+        assert "format('speculative-pr-{0}', inputs.speculative_pr_number)" in key
+        assert "format('handoff-run-{0}', github.run_id)" in key
+    _mq_falsify(check, [("format('speculative-mg-{0}', inputs.speculative_group_head)",
+                         "format('speculative-pr-{0}', inputs.speculative_group_head)")])
+
+
+def test_merge_group_duplicate_supply_set_guard_precedes_mint_and_upload() -> None:
+    def check(doc):
+        job = doc["jobs"]["speculate-manifest"]
+        assert job["concurrency"] == {
+            "group": "speculative-supply-set-${{ needs.prepare.outputs.source_tree }}",
+            "cancel-in-progress": False,
+        }
+        assert job["permissions"]["actions"] == "read"
+        steps = job["steps"]
+        mint = next(s for s in steps if s.get("id") == "evidence")
+        code = _executable_bash(mint["run"])
+        for token in ('gh api --paginate --slurp', 'spec-v3-supply-set-$SOURCE_TREE',
+                      '.name == $name', '.expired == false', 'fromdateiso8601) > now',
+                      '.workflow_run.repository_id == $repo', '.workflow_run.head_repository_id == $repo',
+                      '.workflow_run.id != $run'):
+            assert token in code
+        assert re.search(r'if \[ -n "\$EXISTING" \]; then\s*echo "::notice::[^\n]*\$EXISTING[^\n]*\n\s*exit 0\s*fi', code)
+        assert code.index('echo "complete=false"') < code.index('EXISTING=') < code.index('generate-v3') < code.index('echo "complete=true"')
+        upload = next(s for s in steps if s.get("uses") == "actions/upload-artifact@v4")
+        assert steps.index(mint) < steps.index(upload)
+        assert upload["if"] == "steps.evidence.outputs.complete == 'true'"
+    _mq_falsify(check, [
+        ('.workflow_run.id != $run', '.workflow_run.id == $run'),
+        ('[ -n "$EXISTING" ]', '[ -z "$EXISTING" ]'),
+        ('fromdateiso8601) > now', 'fromdateiso8601) < now'),
+    ])
+
+
+def test_merge_group_dispatches_exact_head_on_main_without_pr_input() -> None:
+    def check(doc):
+        assert doc[True]["merge_group"] == {"types": ["checks_requested"]}
+        assert "format('mg-{0}', github.event.merge_group.head_sha)" in doc["concurrency"]["group"]
+        job = doc["jobs"]["dispatch-group"]
+        assert job["if"] == "github.event_name == 'merge_group'"
+        assert job["steps"][0]["with"] == {
+            "ref": "${{ github.event.merge_group.head_sha }}",
+            "fetch-depth": 2, "persist-credentials": False,
+        }
+        step = job["steps"][1]
+        assert step["env"]["HEAD_SHA"] == "${{ github.event.merge_group.head_sha }}"
+        code = _executable_bash(step["run"])
+        for token in ('if gh workflow run build-platform-images.yml', '--ref main',
+                      '-f "source_sha=$HEAD_SHA"', '-f "speculative=true"',
+                      '-f "speculative_group_head=$HEAD_SHA"; then', '::warning::Speculative dispatch failed'):
+            assert token in code
+        assert 'speculative_pr_number' not in code
+    _mq_falsify(check, [
+        ('--ref main', '--ref candidate'),
+        ('-f "speculative_group_head=$HEAD_SHA"', '-f "speculative_pr_number=1"'),
+    ], dispatcher=True)
+
+
+def test_merge_group_docs_noop_uses_trusted_parent_and_fails_open() -> None:
+    def check(doc):
+        code = _executable_bash(doc["jobs"]["dispatch-group"]["steps"][1]["run"])
+        for token in ('DISPATCH=true', "git show 'HEAD^1:scripts/docs_noop_filter.py'",
+                      'git diff --no-renames --name-only HEAD^1 HEAD',
+                      'python3 "$RUNNER_TEMP/docs_noop_filter.py"',
+                      'if [ "$VERDICT" = "skip" ]; then', 'DISPATCH=false'):
+            assert token in code
+        assert re.search(r'if \[ "\$DISPATCH" != "true" \]; then\s*exit 0\s*fi', code)
+        assert code.index('DISPATCH=true') < code.index('DISPATCH=false') < code.index('gh workflow run')
+        assert 'python3 scripts/' not in code
+    _mq_falsify(check, [
+        ("HEAD^1:scripts/docs_noop_filter.py", "HEAD:scripts/docs_noop_filter.py"),
+        ('git diff --no-renames --name-only HEAD^1 HEAD', 'git diff --name-only HEAD^1 HEAD'),
+        ('DISPATCH=false', 'DISPATCH=true'),
+    ], dispatcher=True)
 
 
 if __name__ == "__main__":

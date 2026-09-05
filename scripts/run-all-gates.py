@@ -1294,7 +1294,7 @@ def build_suites() -> List[Suite]:
               # script or token, +1 that the envelope gets its OWN artifact,
               # because the finalizer reads the receipt with _zip_member and
               # that refuses any archive holding more than one file.
-              _py_pytest("test_build_platform_images_workflow.py"), 19),
+              _py_pytest("test_build_platform_images_workflow.py"), 36),
         # Vendored mushy-code integrity (PR #474 review, P2): the pin verifier
         # must be a CI fact, not a manual command. Registered with its suite the
         # day it shipped — no fix-then-register debt. 2 = verify READY + the

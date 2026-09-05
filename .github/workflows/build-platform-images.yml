@@ -123,6 +123,11 @@ on:
         description: "Required with speculative: the open PR whose head is source_sha."
         type: string
         required: false
+      speculative_group_head:
+        description: "Optional exact 40-hex merge-group head commit. Requires speculative=true, source_sha equal to this SHA, and an empty speculative_pr_number."
+        type: string
+        required: false
+        default: ""
       force_rebuild_all:
         description: "Build and attest all five surfaces even when signed fingerprints are reusable."
         type: boolean
@@ -171,7 +176,7 @@ concurrency:
   # older run only saves runners.
   # A handoff only reads immutable release evidence and writes its own artifact.
   # Isolate it from main builds so a later push cannot cancel an accepted release.
-  group: build-platform-images-${{ inputs.promote && format('handoff-run-{0}', github.run_id) || inputs.speculative && format('speculative-pr-{0}', inputs.speculative_pr_number) || github.ref }}
+  group: build-platform-images-${{ inputs.promote && format('handoff-run-{0}', github.run_id) || inputs.speculative && inputs.speculative_group_head && format('speculative-mg-{0}', inputs.speculative_group_head) || inputs.speculative && format('speculative-pr-{0}', inputs.speculative_pr_number) || github.ref }}
   cancel-in-progress: ${{ inputs.speculative || github.event_name == 'push' }}
 
 jobs:
@@ -194,6 +199,8 @@ jobs:
       source_sha: ${{ steps.source.outputs.sha }}
       source_mode: ${{ steps.source.outputs.mode }}
       superseded: ${{ steps.source.outputs.superseded }}
+      group_members: ${{ steps.source.outputs.group_members }}
+      group_base: ${{ steps.source.outputs.group_base }}
       workflow_blob: ${{ steps.source.outputs.workflow_blob }}
       source_tree: ${{ steps.tag.outputs.tree }}
       solver_revision: ${{ steps.solver.outputs.revision }}
@@ -203,7 +210,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_sha || github.sha }}
+          ref: ${{ inputs.speculative_group_head && github.sha || inputs.source_sha || github.sha }}
           fetch-depth: 2
           persist-credentials: false
 
@@ -289,6 +296,7 @@ jobs:
           SOURCE_SHA_INPUT: ${{ inputs.source_sha }}
           SPECULATIVE_INPUT: ${{ inputs.speculative }}
           SPECULATIVE_PR_NUMBER: ${{ inputs.speculative_pr_number }}
+          SPECULATIVE_GROUP_HEAD: ${{ inputs.speculative_group_head }}
           STAGING_ACCEPTANCE_RUN_ID: ${{ inputs.staging_acceptance_workflow_run_id }}
           STAGING_ACCEPTANCE_ARTIFACT: ${{ inputs.staging_acceptance_artifact }}
           RELEASE_WORKFLOW_RUN_ID: ${{ inputs.release_workflow_run_id }}
@@ -332,20 +340,83 @@ jobs:
               echo "::error::source_sha must be a full 40-character lowercase hexadecimal commit."
               exit 1
             fi
-            if [ "$CURRENT_SHA" != "$SOURCE_SHA_INPUT" ]; then
+            if [ -z "$SPECULATIVE_GROUP_HEAD" ] && [ "$CURRENT_SHA" != "$SOURCE_SHA_INPUT" ]; then
               echo "::error::Checkout did not resolve to source_sha."
               exit 1
             fi
           fi
 
+          if [ -n "$SPECULATIVE_GROUP_HEAD" ] && [ "$SPECULATIVE_INPUT" != "true" ]; then
+            echo "::error::speculative_group_head requires speculative=true."
+            exit 1
+          fi
           if [ "$SPECULATIVE_INPUT" = "true" ]; then
             if [ "$PROMOTE_INPUT" = "true" ]; then
               echo "::error::A speculative run can never promote."
               exit 1
             fi
             if [ -z "$SOURCE_SHA_INPUT" ]; then
-              echo "::error::Speculative builds require the exact PR head as source_sha."
+              echo "::error::Speculative builds require the exact candidate as source_sha."
               exit 1
+            fi
+            if { [ -n "$SPECULATIVE_PR_NUMBER" ] && [ -n "$SPECULATIVE_GROUP_HEAD" ]; } ||
+               { [ -z "$SPECULATIVE_PR_NUMBER" ] && [ -z "$SPECULATIVE_GROUP_HEAD" ]; }; then
+              echo "::error::Speculative builds require exactly one of speculative_pr_number or speculative_group_head."
+              exit 1
+            fi
+            if [ -n "$SPECULATIVE_GROUP_HEAD" ]; then
+              [[ "$SPECULATIVE_GROUP_HEAD" =~ ^[0-9a-f]{40}$ ]] &&
+                [ "$SOURCE_SHA_INPUT" = "$SPECULATIVE_GROUP_HEAD" ] || {
+                  echo "::error::source_sha must equal the exact 40-hex merge-group head."
+                  exit 1
+                }
+              QUEUE=$(gh api graphql \
+                -f owner="${GITHUB_REPOSITORY%%/*}" \
+                -f name="${GITHUB_REPOSITORY#*/}" \
+                -f query='query($owner: String!, $name: String!) {
+                  repository(owner: $owner, name: $name) {
+                    mergeQueue(branch: "main") {
+                      entries(first: 50) {
+                        nodes { headCommit { oid } baseCommit { oid } pullRequest { number } }
+                      }
+                    }
+                  }
+                }')
+              jq -e '(.errors // [] | length) == 0 and
+                (.data.repository.mergeQueue.entries.nodes | type) == "array"' \
+                <<<"$QUEUE" >/dev/null
+              GROUP_ENTRY=$(jq -c --arg head "$SPECULATIVE_GROUP_HEAD" '
+                .data.repository.mergeQueue.entries.nodes
+                | to_entries | map(select(.value.headCommit.oid == $head))
+                | first // empty' <<<"$QUEUE")
+              if [ -z "$GROUP_ENTRY" ]; then
+                echo "::notice::Merge group $SPECULATIVE_GROUP_HEAD is no longer queued; speculation is superseded."
+                echo "superseded=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              GROUP_BASE=$(jq -r '.value.baseCommit.oid' <<<"$GROUP_ENTRY")
+              GROUP_INDEX=$(jq -r '.key' <<<"$GROUP_ENTRY")
+              GROUP_MEMBERS=$(jq -er --argjson index "$GROUP_INDEX" '
+                .data.repository.mergeQueue.entries.nodes[:($index + 1)]
+                | map(.pullRequest.number)
+                | if all(.[]; type == "number" and . > 0 and floor == .)
+                  then map(tostring) | join(",") else error("invalid queue members") end
+                ' <<<"$QUEUE")
+              [[ "$GROUP_BASE" =~ ^[0-9a-f]{40}$ ]] || exit 1
+              git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf '%s' "x-access-token:$GH_TOKEN" | base64 -w0)" \
+                fetch --no-tags --depth=2 origin "$SPECULATIVE_GROUP_HEAD"
+              GROUP_SHA=$(git rev-parse FETCH_HEAD)
+              if [ "$GROUP_SHA" != "$SPECULATIVE_GROUP_HEAD" ] ||
+                 [ "$(git rev-parse --verify "$GROUP_SHA^1")" != "$GROUP_BASE" ]; then
+                echo "::error::Fetched merge group does not match the live queue head and base."
+                exit 1
+              fi
+              git checkout --quiet "$GROUP_SHA"
+              echo "sha=$GROUP_SHA" >> "$GITHUB_OUTPUT"
+              echo "group_members=$GROUP_MEMBERS" >> "$GITHUB_OUTPUT"
+              echo "group_base=$GROUP_BASE" >> "$GITHUB_OUTPUT"
+              echo "mode=speculative" >> "$GITHUB_OUTPUT"
+              exit 0
             fi
             if [[ ! "$SPECULATIVE_PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]]; then
               echo "::error::Speculative builds require the open PR number."
@@ -2213,7 +2284,7 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          ref: refs/pull/${{ inputs.speculative_pr_number }}/merge
+          ref: ${{ inputs.speculative_group_head || format('refs/pull/{0}/merge', inputs.speculative_pr_number) }}
           # Deep enough for the cache step's first-parent ancestor walk
           # (its --max-count is 15); nothing here reads further back.
           fetch-depth: 20
@@ -2717,6 +2788,9 @@ jobs:
   # leg's conclusion.
   speculate-manifest:
     needs: [prepare, speculate]
+    concurrency:
+      group: speculative-supply-set-${{ needs.prepare.outputs.source_tree }}
+      cancel-in-progress: false
     if: >-
       ${{ !cancelled() && github.event_name == 'workflow_dispatch' &&
           inputs.speculative && needs.prepare.result == 'success' &&
@@ -2727,6 +2801,7 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      actions: read
 
     env:
       AWS_REGION: us-east-1
@@ -2737,7 +2812,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: refs/pull/${{ inputs.speculative_pr_number }}/merge
+          ref: ${{ inputs.speculative_group_head || format('refs/pull/{0}/merge', inputs.speculative_pr_number) }}
           persist-credentials: false
 
       - name: Require the same merge preview prepare resolved
@@ -2803,9 +2878,26 @@ jobs:
       - name: Mint the provider-bound speculative v3 supply set
         id: evidence
         if: steps.digests.outputs.complete == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY_ID: ${{ github.repository_id }}
         run: |
           set -euo pipefail
           echo "complete=false" >> "$GITHUB_OUTPUT"
+          EXISTING=$(gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts?name=spec-v3-supply-set-$SOURCE_TREE&per_page=100" \
+            | jq -r --arg name "spec-v3-supply-set-$SOURCE_TREE" \
+              --argjson repo "$REPOSITORY_ID" --argjson run "$GITHUB_RUN_ID" '
+                [.[].artifacts[] | select(.name == $name and .expired == false
+                  and (.expires_at | fromdateiso8601) > now
+                  and .workflow_run.repository_id == $repo
+                  and .workflow_run.head_repository_id == $repo
+                  and .workflow_run.id != $run)] | first
+                | if . == null then empty else "\(.name) (artifact \(.id))" end')
+          if [ -n "$EXISTING" ]; then
+            echo "::notice::Supply set already exists from another run: $EXISTING; no duplicate will be minted."
+            exit 0
+          fi
           declare -A entries digests
           digests[app]="${{ steps.digests.outputs.app }}"
           digests[broker]="${{ steps.digests.outputs.broker }}"
