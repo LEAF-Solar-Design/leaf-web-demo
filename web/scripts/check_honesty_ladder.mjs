@@ -491,7 +491,11 @@ export function reasonlessDisabled(src, mapsByName = new Map()) {
 // runtime on any `when()` result outside KNOWN_REASON_VALUES, which is the
 // check this gate cannot perform through a variable. A fourth engine group
 // would land here the same way; anything else must earn its own line.
-const UNVERIFIABLE_REASON_BUDGET = 12
+//
+// Raised 12 -> 13 by W4g-5d: the Annotation cluster, the fourth engine
+// group rendering `action.when(engineCtx)`, exactly as the line above
+// said it would. Same verified ladder (drawReason), same runtime throw.
+const UNVERIFIABLE_REASON_BUDGET = 13
 
 /**
  * Whether an "unverifiable reason expressions" count holds against its

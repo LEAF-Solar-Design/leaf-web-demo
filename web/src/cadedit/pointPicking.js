@@ -36,6 +36,8 @@ export const PICK_SEQUENCES = Object.freeze({
   // W4g-5b: a polar array picks its centre; a rectangular array's operands
   // are counts and distances, so it has nothing on the canvas to pick.
   arrayPolar: [{ kind: 'point', keys: ['cx', 'cy'] }],
+  // W4g-5d: TEXT picks its start point.
+  createText: [{ kind: 'point', keys: ['x', 'y'] }],
   // W4g-5c: a paste picks where it goes.
   pasteClip: [{ kind: 'point', keys: ['x', 'y'] }],
 })

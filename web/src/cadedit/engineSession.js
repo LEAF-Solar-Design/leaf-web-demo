@@ -164,12 +164,15 @@ export function surviveSelection(previousId, entities) {
 }
 
 /** The W4d Draw group's operations: creation needs no selection. */
-export const CREATE_OPS = Object.freeze(['createLine', 'createCircle', 'createArc', 'createPolyline', 'createRectangle'])
+export const CREATE_OPS = Object.freeze(['createLine', 'createCircle', 'createArc', 'createPolyline', 'createRectangle', 'createText'])
 // W4g-4: edits that MAKE an entity (a displaced copy, a mirrored copy, the
 // segments of an explode) report what they made by id like the Draw group
 // does; the selection lands on it.
 /// The most copies one ARRAY may add. The engine carries the same number,
 /// so a count the prompt refuses could not have reached the document either.
+/// The most characters one TEXT may carry; the engine carries the same number.
+export const MAX_TEXT_CHARS = 1024
+
 export const MAX_ARRAY_COPIES = 1000
 
 export const CREATING_EDITS = Object.freeze(['copy', 'mirror', 'explode', 'arrayRect', 'arrayPolar'])
@@ -209,7 +212,7 @@ export function parsePointList(raw) {
  * with a typed reason; this layer exists so a typo costs a sentence, not a
  * round trip.
  */
-export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, layer } = {}) {
+export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, layer, height, rot, text } = {}) {
   const layerName = String(layer ?? '').trim()
   if (op === 'createLine') {
     const [x1, y1, xx2, yy2] = [x, y, x2, y2].map(fmtDelta)
@@ -231,6 +234,28 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
     if (radius <= 0) return { refusal: 'Arc refused: r must be greater than 0.' }
     if ((endDeg - startDeg) % 360 === 0) return { refusal: 'Arc refused: start and end must differ (degrees).' }
     return { payload: { cx, cy, radius, startDeg, endDeg, layer: layerName } }
+  }
+  // W4g-5d: TEXT. The same bounds the engine enforces, read here first so a
+  // bad value refuses on the prompt with a sentence and never round-trips: a
+  // DXF group value is one line, so a control character (a pasted newline,
+  // a tab) is refused rather than split into a broken record.
+  if (op === 'createText') {
+    const [px, py] = [x, y].map(fmtDelta)
+    if (px === null || py === null) return { refusal: 'Text refused: x and y must both be numbers.' }
+    const h = fmtDelta(height)
+    if (h === null) return { refusal: 'Text refused: the height must be a number.' }
+    if (h <= 0) return { refusal: 'Text refused: the height must be greater than 0.' }
+    const angle = fmtDelta(rot)
+    if (angle === null) return { refusal: 'Text refused: the rotation must be a number (degrees).' }
+    const value = String(text ?? '').replace(/[\r\n]+$/, '')
+    if (!value.trim()) return { refusal: 'Text refused: enter the text to place.' }
+    if ([...value].length > MAX_TEXT_CHARS) return { refusal: `Text refused: at most ${MAX_TEXT_CHARS} characters.` }
+    // eslint-disable-next-line no-control-regex
+    // C1 controls too (U+0080..U+009F, a NEL from a paste): the crate's
+    // char::is_control covers the whole Cc category, and the prompt must
+    // refuse everything the engine would, never the reverse (kimi on #1028).
+    if (/[\u0000-\u001f\u007f-\u009f]/.test(value)) return { refusal: 'Text refused: one line only, with no control characters.' }
+    return { payload: { x: px, y: py, height: h, rotationDeg: angle, text: value, layer: layerName } }
   }
   if (op === 'createPolyline') {
     const points = parsePointList(pts)

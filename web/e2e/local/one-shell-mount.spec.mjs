@@ -1138,6 +1138,31 @@ test.describe('route matrix, rail ON', () => {
     test.info().annotations.push({ type: 'clipboard', description: `paste drew one entity (${countBeforeClip} -> ${countBeforeClip + 1})` })
     await page.keyboard.press('Escape')
 
+    // W4g-5d TEXT, single-line, on the REAL engine: the typed word arms the
+    // prompt in the Annotation panel's own seat, the four operands and the
+    // value place one entity (+1) whose outline box the canvas draws, and a
+    // value with a tab in it holds Run with the sentence before any engine
+    // call (a DXF group value is one line).
+    const countBeforeText = Number(await page.getByTestId('cad-edit-entity-count').textContent())
+    await page.keyboard.press('Escape')
+    await bar.fill('t')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'createText', { timeout: 20_000 })
+    await expect(ribbon.locator('[data-group="annotation"] [data-tool="draw:createText"]')).toHaveAttribute('aria-expanded', 'true')
+    await page.getByLabel('ribbon x', { exact: true }).fill('30')
+    await page.getByLabel('ribbon y', { exact: true }).fill('30')
+    await page.getByLabel('ribbon height', { exact: true }).fill('4')
+    await page.getByLabel('ribbon rotation', { exact: true }).fill('15')
+    await page.getByLabel('ribbon text', { exact: true }).fill('tab\there')
+    await expect(page.getByTestId('cockpit-prompt-note')).toHaveText(/one line only, with no control characters/, { timeout: 20_000 })
+    await page.getByLabel('ribbon text', { exact: true }).fill('Panel A')
+    await expect(page.getByTestId('cockpit-prompt-note')).toHaveCount(0)
+    await page.getByLabel('ribbon text', { exact: true }).press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count'))
+      .toHaveText(String(countBeforeText + 1), { timeout: 60_000 })
+    test.info().annotations.push({ type: 'text', description: `TEXT placed one entity (${countBeforeText} -> ${countBeforeText + 1})` })
+    await page.keyboard.press('Escape')
+
     // W4g-2 (one head), confirm-time race. LAST in the walk on purpose: a
     // refused run leaves its failed strip on the page and there is no
     // dismiss for it, and that strip sits BETWEEN the command prompt and
