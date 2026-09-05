@@ -29,6 +29,7 @@ import {
   clipboardImagesToAttachments,
   thumbnailImages,
 } from '../composer.js'
+import { formatElementId } from '../lib/elementIdentity.js'
 import { isSecretRefused } from '../lib/secretGuardTransport.js'
 import Markdown from './Markdown.jsx'
 import LiveRegion from './LiveRegion.jsx'
@@ -618,7 +619,7 @@ export default function ConversePanel({
     const summary = paramsSummary(approval.params)
     const resumeRequired = approval.resume_required === true
     return (
-      <div key={approval.confirmation_id} className="strip-decision converse-confirm">
+      <div key={approval.confirmation_id} className="strip-decision converse-confirm" data-element-id={formatElementId('approval', approval.confirmation_id) || undefined}>
         <span className="dot square" aria-hidden="true" />
         <span className="strip-sentence">
           {approval.kind === 'customize_platform' ? (
@@ -756,7 +757,7 @@ export default function ConversePanel({
       if (!settled && pendingApprovals.some(
         (approval) => approval.confirmation_id === item.id)) return null
       return (
-        <div key={i} className="strip-decision converse-confirm">
+        <div key={i} className="strip-decision converse-confirm" data-element-id={formatElementId('item', item.id) || undefined}>
           <span className="dot square" aria-hidden="true" />
           <span className="strip-sentence">
             {item.kind === 'proposal' ? (
@@ -917,7 +918,7 @@ export default function ConversePanel({
           </div>
         )}
         {model.turns.map((t) => (
-          <div key={t.turnId} className="converse-turn">
+          <div key={t.turnId} className="converse-turn" data-element-id={formatElementId('turn', t.turnId) || undefined}>
             {userTextByTurn.get(t.turnId) && (
               <div className="converse-msg user">{userTextByTurn.get(t.turnId)}</div>
             )}
@@ -945,7 +946,7 @@ export default function ConversePanel({
           </div>
         )}
         {pendingUserTurns.map((u) => (
-          <div key={u.turnId} className="converse-turn">
+          <div key={u.turnId} className="converse-turn" data-element-id={formatElementId('turn', u.turnId) || undefined}>
             {(u.text || u.images?.length > 0) && <div className="converse-msg user">{u.text}</div>}
             {thumbnailImages(u.images).map((src, index) => (
               <img key={`${u.turnId}-pending-image-${index}`} src={src} alt="Pending image attachment" width="96" height="72" style={{ objectFit: 'cover', margin: '4px 4px 4px 0' }} />

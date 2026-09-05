@@ -17,6 +17,7 @@
 //     context, lock, and job state, exactly as the workspace card always
 //     did (`display: none`, not unmount).
 import { useLayoutEffect, useState } from 'react'
+import { formatElementId } from '../lib/elementIdentity.js'
 import { PRODUCT_SURFACES, SHARED_WORKSPACE_CAPABILITIES, surfaceGround } from './productSurfaces.js'
 import { EMPTY_WORKSPACE_PROJECT } from './workspaceProjectState.js'
 import { deriveIosState, humanizeStage, IOS_STATE_LABEL } from '../ios/IosSurface.jsx'
@@ -172,7 +173,7 @@ export function ProjectBoardGround({
                 <strong>{versions.length} drawing version{versions.length === 1 ? '' : 's'}</strong>
                 <ul>
                   {[...versions].slice(-3).reverse().map((version) => (
-                    <li key={version.version_id}>v{version.seq} · {shortId(version.drawing_id)}</li>
+                    <li key={version.version_id} data-element-id={formatElementId('version', version.version_id) || undefined}>v{version.seq} · {shortId(version.drawing_id)}</li>
                   ))}
                 </ul>
               </>
@@ -183,7 +184,7 @@ export function ProjectBoardGround({
             {jobs.length ? (
               <ul>
                 {jobs.map((job) => (
-                  <li key={job.job_id}>
+                  <li key={job.job_id} data-element-id={formatElementId('job', job.job_id) || undefined}>
                     <strong>{job.tool_name || job.kind}</strong> · {job.status || 'pending'}
                   </li>
                 ))}
@@ -193,7 +194,14 @@ export function ProjectBoardGround({
           <section className="ground-tile" data-tile="tools" aria-label="Built tools">
             <h3>Built tools</h3>
             {tools.length ? (
-              <ul>{tools.map((tool, i) => <li key={tool.tool_id || tool.name || i}>{tool.name || tool.tool_id}</li>)}</ul>
+              <ul>{tools.map((tool, i) => {
+                const realId = tool.tool_id || tool.name || ''
+                return (
+                  <li key={realId || i} data-element-id={(realId && formatElementId('tool', realId)) || undefined}>
+                    {tool.name || tool.tool_id}
+                  </li>
+                )
+              })}</ul>
             ) : <p className="ground-empty">{workspace ? 'No built tools yet' : 'Authored tools attach to the project'}</p>}
           </section>
           <section className="ground-tile" data-tile="catalog" aria-label="Catalog">
@@ -201,7 +209,9 @@ export function ProjectBoardGround({
             {families.length ? (
               <>
                 <strong>{families.length} {families.length === 1 ? 'family' : 'families'} · {capabilityTotal(families)} tools</strong>
-                <ul>{families.map((family) => <li key={family.family_id}>{family.label}</li>)}</ul>
+                <ul>{families.map((family) => (
+                  <li key={family.family_id} data-element-id={formatElementId('family', family.family_id) || undefined}>{family.label}</li>
+                ))}</ul>
               </>
             ) : <p className="ground-empty">Loading the live catalog</p>}
           </section>
@@ -263,7 +273,7 @@ export function DeviceGround({
         <div className="ground-device-side">
           <ol className="ground-lane" aria-label="Ship lane">
             {rungs.map((rung) => (
-              <li key={rung.id} data-rung={rung.id} data-lit={rung.lit ? 'true' : 'false'}>
+              <li key={rung.id} data-rung={rung.id} data-lit={rung.lit ? 'true' : 'false'} data-element-id={formatElementId('rung', rung.id) || undefined}>
                 <span className={`dot ${rung.lit ? 'live' : 'hollow'}`} aria-hidden="true" />
                 {rung.label}
               </li>

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react'
 import { applyViewPose, cameraPose, unprojectClientToPlane } from './viewerMath.js'
 import { intakeRoundPolylines } from '../cadedit/engineIntake.js'
+import { formatElementId } from '../lib/elementIdentity.js'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
@@ -1049,7 +1050,16 @@ const Viewer = forwardRef(function Viewer(
   }, [pendingEdit, buildTick])
 
   return (
-    <div ref={mountRef} className="viewer-canvas" data-tour="viewer">
+    <div
+      ref={mountRef}
+      className="viewer-canvas"
+      data-tour="viewer"
+      // The ONE element identity a WebGL entity gets, since it has no DOM
+      // node of its own: the current selection, reflected through the same
+      // `selectedHandle` prop the click-to-pick path already drives. No
+      // selection means no attribute, never a fabricated handle.
+      data-element-id={(selectedHandle && formatElementId('entity', selectedHandle)) || undefined}
+    >
       {glError && (
         <div className="viewer-fallback">
           3D preview needs WebGL, which is unavailable in this browser.

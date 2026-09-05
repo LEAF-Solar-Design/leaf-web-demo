@@ -10,6 +10,7 @@
 // never touches the session. Tabs that have no real panel set yet are
 // disabled with their reason, never a fake tab.
 import { accessibleName } from '../lib/actionRegistry.js'
+import { formatElementId } from '../lib/elementIdentity.js'
 import { moveRovingTab } from '../lib/roving.js'
 import CockpitIcon from './CockpitIcon.jsx'
 
@@ -35,6 +36,7 @@ export function QuickButton({ tool }) {
       type="button"
       data-quick={id}
       data-tool={dataTool || undefined}
+      data-element-id={(dataTool && formatElementId('tool', dataTool)) || undefined}
       disabled={disabled}
       title={unavailable ? `${label}: ${reason}` : (title || label)}
       aria-label={accessibleName(label, unavailable ? reason : '')}
