@@ -337,7 +337,7 @@ describe('tour anchors: the contract names anchors that exist (slice 4b)', () =>
     assert.ok(anchorAt > -1, 'DemoTour queries [data-tour=...]')
     assert.ok(chainAt > anchorAt, 'the className chain is the FALLBACK, after the anchor lookup')
     assert.match(read('src/App.jsx'), /<DemoTour[\s\S]{0,400}anchors=\{surfaceSlots\.tourAnchors\?\.console \?\? null\}/)
-    assert.match(toolCast, /<DemoTour[\s\S]{0,600}anchors=\{surfaceContract\(activeSurface\)\.tourAnchors\?\.stage \?\? null\}/)
+    assert.match(toolCast, /<DemoTour[\s\S]{0,600}anchors=\{surfaceSlots\.tourAnchors\?\.stage \?\? null\}/)
   })
 
   it('the step arrays are untouched by the anchor work (no step carries an anchor field)', () => {

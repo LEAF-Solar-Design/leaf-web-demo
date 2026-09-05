@@ -3,6 +3,9 @@ import { PRODUCT_SURFACES, SHARED_WORKSPACE_CAPABILITIES, productSurface, surfac
 import { EMPTY_WORKSPACE_PROJECT, WORKSPACE_PROJECT_COPY } from '../site/workspaceProjectState.js'
 import { useContinuityHost } from '../site/continuityStore.js'
 import { moveRovingTab } from '../lib/roving.js'
+import {
+  mergeSurfaceContract, peekSurfaceConfigSource, touchedSurfaceConfigSlots, useSurfaceConfigOverlay,
+} from '../site/useSurfaceContract.js'
 
 // F-8: the continuity layer, made visible. Lives in the always-mounted nav so
 // it NEVER remounts on a profile switch (that persistence is the point, and
@@ -72,9 +75,16 @@ export function AccountSignOut({ signedIn = false, onSignOut = null }) {
 // tablist, so the DOM under `.tc-product-nav` is what it always was:
 // tablist, rail, sign-out. Outside a store (a tabs band rendered alone) the
 // host is null and the nav renders its tablist and nothing else: fails closed.
-export default function ProductSurfaceTabs({ activeSurface, states, onSelect }) {
+export default function ProductSurfaceTabs({ activeSurface, states, onSelect, mock = true }) {
   const host = useContinuityHost()
   const navRef = useRef(null)
+  // Slice 7b: which tabs render is the tenant's OVERLAID chrome.tab, not the
+  // frozen default — a mock-tenant overlay that flips `chrome.tab` true for a
+  // surface that ships `false` by default (e.g. sheets) makes a new tab
+  // appear here with no deploy. `mock` defaults to `true` (no network call)
+  // so a bare render (a unit test that mounts this component directly)
+  // renders the SAME tabs an empty overlay would produce.
+  const overlay = useSurfaceConfigOverlay(mock)
   // Layout effect: the host is in place before paint, in the same commit the
   // frame publishes (also a layout effect, and an ancestor's, so it runs
   // after this one). On unmount the host is detached with its children
@@ -95,35 +105,51 @@ export default function ProductSurfaceTabs({ activeSurface, states, onSelect }) 
             contract.chrome.tab instead of assuming every record is a tab, so
             Sheets can be a manifest row without appearing here. All four
             studio surfaces declare true, so this renders what it rendered. */}
-        {PRODUCT_SURFACES.filter(({ contract }) => contract.chrome.tab).map((surface) => {
-          const selected = surface.id === activeSurface
-          const status = states[surface.id]
-          // aria-controls points at #product-surface-panel, which is the
-          // ProductSurfaceFrame — and a surface that declares no frame
-          // renders no such element. A tab whose aria-controls names a
-          // missing id is a broken reference to a screen reader, so the
-          // attribute is carried by the surfaces that HAVE the panel and
-          // omitted by the ones that do not (cad always; solar since the P1
-          // pass). Read from the contract, never from a surface id.
-          const controlsPanel = surface.contract.chrome.productFrame
-          return (
-            <button
-              key={surface.id}
-              id={`product-surface-tab-${surface.id}`}
-              type="button"
-              role="tab"
-              aria-label={surface.label}
-              aria-selected={selected}
-              aria-controls={controlsPanel ? 'product-surface-panel' : undefined}
-              tabIndex={selected ? 0 : -1}
-              data-surface={surface.id}
-              onClick={() => onSelect(surface.id)}
-            >
-              <span>{surface.label}</span>
-              <small data-state={status.state}>{status.label}</small>
-            </button>
-          )
-        })}
+        {PRODUCT_SURFACES
+          .filter((surface) => mergeSurfaceContract(surface.id, overlay).chrome.tab)
+          .map((surface) => {
+            const contract = mergeSurfaceContract(surface.id, overlay)
+            const selected = surface.id === activeSurface
+            const status = states[surface.id]
+            // aria-controls points at #product-surface-panel, which is the
+            // ProductSurfaceFrame — and a surface that declares no frame
+            // renders no such element. A tab whose aria-controls names a
+            // missing id is a broken reference to a screen reader, so the
+            // attribute is carried by the surfaces that HAVE the panel and
+            // omitted by the ones that do not (cad always; solar since the P1
+            // pass). Read from the contract, never from a surface id.
+            const controlsPanel = contract.chrome.productFrame
+            // Slice 7b provenance: the chip names ONLY the slot this render
+            // actually used off the overlay (chrome, since that is what gates
+            // this tab's existence), and only fires when the tenant's own
+            // overlay touched it — never on a default tenant (an empty
+            // overlay makes `touchedSurfaceConfigSlots` return `[]`).
+            const chromeAuthored = touchedSurfaceConfigSlots(surface.id, overlay).includes('chrome')
+            const source = chromeAuthored ? peekSurfaceConfigSource() : null
+            const sha8 = typeof source?.sha256 === 'string' ? source.sha256.slice(0, 8) : null
+            return (
+              <button
+                key={surface.id}
+                id={`product-surface-tab-${surface.id}`}
+                type="button"
+                role="tab"
+                aria-label={surface.label}
+                aria-selected={selected}
+                aria-controls={controlsPanel ? 'product-surface-panel' : undefined}
+                tabIndex={selected ? 0 : -1}
+                data-surface={surface.id}
+                onClick={() => onSelect(surface.id)}
+              >
+                <span>{surface.label}</span>
+                <small data-state={status.state}>{status.label}</small>
+                {sha8 && (
+                  <span className="tc-surface-config-chip" data-testid="surface-config-provenance">
+                    surface config authored by Claude · {sha8}
+                  </span>
+                )}
+              </button>
+            )
+          })}
       </div>
       {/* The continuity rail and the persistent identity control (the ONE
           place in the always-mounted nav that lets a signed-in operator

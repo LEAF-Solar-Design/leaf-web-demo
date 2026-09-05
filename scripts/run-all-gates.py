@@ -361,6 +361,16 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_wave4.py"), 9),
         Suite("server-wave5", "server tests/test_wave5.py", "pytest", SERVER,
               _py_pytest("tests/test_wave5.py"), 21),
+        # Card F-7 tripwire (mushy_fold vendor pin) — shipped with PR #474 but
+        # never registered here, so it only ever ran by hand until this row.
+        # Standardization slice 7b extended it in the same PR that gave it a
+        # gate row for the first time.
+        Suite("server-vendor", "server tests/test_mushy_fold_vendor_disposition.py",
+              "pytest", SERVER,
+              _py_pytest("tests/test_mushy_fold_vendor_disposition.py"), 4),
+        # standardization slice 7b: the surface-config overlay fold + route.
+        Suite("server-surface-config", "server tests/test_surface_config.py", "pytest",
+              SERVER, _py_pytest("tests/test_surface_config.py"), 10),
         Suite("server-grant-admin-authority", "server tests/test_grant_admin_authority.py",
               "pytest", SERVER, _py_pytest("tests/test_grant_admin_authority.py"), 9),
         Suite("server-microvm", "server tests/test_hardening_2c_microvm.py", "pytest", SERVER,

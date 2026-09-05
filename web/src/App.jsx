@@ -71,6 +71,7 @@ import {
   searchForProductSurface,
   surfaceContract,
 } from './site/productSurfaces.js'
+import { useSurfaceContract } from './site/useSurfaceContract.js'
 import { fetchIosSurfaceStatus } from './ios/iosSurfaceStatus.js'
 // `logout` is no longer imported here: the session controller owns ending a
 // session (useSessionController defaults endSession to auth.js logout).
@@ -2330,6 +2331,11 @@ export default function App() {
   // surface's home. That fallback is what makes this equal to today's
   // useState('draw') on all four ids, and it is what keeps the ribbon from
   // mounting with no tab selected after a browser -> cad switch.
+  // Reads the STATIC contract, not useSurfaceContract: a useState lazy
+  // initializer runs exactly once at mount, before hooks can be called
+  // inside it, and before the overlay fetch (slice 7b) could possibly have
+  // settled — so an overlay's toolbar.home override was never reachable here
+  // even if this read the hook's result instead.
   const [ribbonTab, setRibbonTab] = useState(() => (
     surfaceContract(activeSurface).toolbar.home
     ?? surfaceContract(DEFAULT_PRODUCT_SURFACE).toolbar.home
@@ -2361,7 +2367,10 @@ export default function App() {
   // a frozen literal, so `surfaceSlots` is a safe useMemo dependency.
   // Behaviour is IDENTICAL: src/site/surfaceGates.test.js pins each derived
   // value equal to the literal predicate it replaced, on all four ids.
-  const surfaceSlots = surfaceContract(activeSurface)
+  // Slice 7b: reads the tenant's surface-config overlay through the hook
+  // instead of the bare contract; byte-identical to `surfaceContract(id)`
+  // for a tenant with no overlay (useSurfaceContract's own contract).
+  const surfaceSlots = useSurfaceContract(activeSurface, mock)
   // Keeps its name: ~20 sites read `studioGround && drafting`, and the App
   // wiring pin (src/app-wiring.test.mjs) guards that exact shape against the
   // white screen it was written for. Was groundShowsDrawing(activeSurface).
@@ -2769,6 +2778,7 @@ export default function App() {
     // never learns App's private vocabulary.
     <SurfaceFrame
       scene="console"
+      mock={mock}
       activeSurface={activeSurface}
       states={surfaceStates}
       catalog={catalog}

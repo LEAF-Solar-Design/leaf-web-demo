@@ -324,6 +324,20 @@ export async function getCapabilities(mock) {
   }
 }
 
+// --- Surface-config overlay (standardization slice 7b) -------------------
+// GET /api/surface-config -> {surfaces: <tenant overlay>, source?: {sha256,
+// authored_at}}. Mock mode makes NO network call (matches getCapabilities):
+// the demo tenant never authors an overlay file, so there is nothing to read.
+export async function getSurfaceConfig(mock) {
+  if (mock) return { surfaces: {} }
+  const data = await http('/api/surface-config', { headers: { 'X-Tenant-Id': TENANT } })
+  const surfaces = data?.surfaces
+  return {
+    surfaces: (surfaces && typeof surfaces === 'object') ? surfaces : {},
+    source: (data?.source && typeof data.source === 'object') ? data.source : null,
+  }
+}
+
 // --- Projects / Orgs workspace (platform/api.py; UI wave 2) --------------
 // The canonical org-scoped Project/Job entity. Every project/job read is scoped
 // by an `X-Org-Id` header; the org id is minted by POST /api/orgs and persisted

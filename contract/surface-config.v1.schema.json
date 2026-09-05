@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://mushy-code.internal/contract/surface-config.v1.schema.json",
+  "title": "leaf.surface-config.v1",
+  "description": "Per-surface-id PARTIAL of the contract slots web/src/site/productSurfaces.js declares (chrome.*, toolbar.*, rails.*, commandLine, authoring, versions, conversations.scope, builds.routes, contextMenu, groundMaterial.*, plus chrome.tab from slice 5b). productSurfaces.js is the ENUM source of truth; this schema was authored from slice7-spec.md's slot list because that file lives in the leaf-web-demo repo, which this schema's mushy-code lane cannot read (separate lane, separate PR). The leaf-web-demo half pins byte-for-byte equality between the two by test. An overlay supplies a SUBSET of a surface's slots (every slot is optional); an unknown surface id or an unknown slot name fails the WHOLE file closed (additionalProperties:false at the surface-id and slot-name levels), never a partial merge.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "browser": { "$ref": "#/$defs/surfaceOverlay" },
+    "cad": { "$ref": "#/$defs/surfaceOverlay" },
+    "solar": { "$ref": "#/$defs/surfaceOverlay" },
+    "ios": { "$ref": "#/$defs/surfaceOverlay" },
+    "sheets": { "$ref": "#/$defs/surfaceOverlay" }
+  },
+  "$defs": {
+    "surfaceOverlay": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "chrome": { "$ref": "#/$defs/chromeSlot" },
+        "toolbar": { "$ref": "#/$defs/genericSlotObject" },
+        "rails": { "$ref": "#/$defs/genericSlotObject" },
+        "commandLine": { "$ref": "#/$defs/genericSlotObject" },
+        "authoring": {
+          "type": "boolean",
+          "description": "Mirrors surfaceContract(id).authoring (slice 7a): whether the workspace rail's Author tab mounts for this surface."
+        },
+        "versions": { "$ref": "#/$defs/genericSlotObject" },
+        "conversations": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "scope": { "type": "string" }
+          }
+        },
+        "builds": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "routes": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        },
+        "contextMenu": { "$ref": "#/$defs/genericSlotObject" },
+        "groundMaterial": { "$ref": "#/$defs/genericSlotObject" }
+      }
+    },
+    "chromeSlot": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tab": {
+          "type": "string",
+          "description": "The slice-5b chrome tab id (e.g. the fifth 'sheets' tab)."
+        }
+      },
+      "$comment": "chrome carries more fields in productSurfaces.js than this schema enumerates (title, icon, and similar); only chrome.tab is named by the slice-7 spec text this schema was authored from. Widening this object to the full chrome.* shape needs a read of productSurfaces.js, which is out of this lane's reach; the leaf-web-demo half pins full equality by test."
+    },
+    "genericSlotObject": {
+      "type": "object",
+      "$comment": "toolbar / rails / commandLine / versions / contextMenu / groundMaterial: named as slots by the slice-7 spec, but their interior field shape lives in productSurfaces.js, which is out of this lane's reach. Typed as an object (bounded by the fold's overall size cap) rather than additionalProperties:false, pending the leaf-web-demo half's test-pinned equality."
+    }
+  }
+}

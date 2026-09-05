@@ -84,8 +84,9 @@ import {
 import VersionList, { VersionPreviewStrip } from '../components/VersionList.jsx'
 import { navigate } from './router.js'
 import {
-  productSurfaceFromSearch, productSurfaceStates, searchForProductSurface, surfaceContract,
+  productSurfaceFromSearch, productSurfaceStates, searchForProductSurface,
 } from './productSurfaces.js'
+import { useSurfaceContract } from './useSurfaceContract.js'
 import { deriveWorkspaceProjectState } from './workspaceProjectState.js'
 import {
   emptyIosShipReadiness,
@@ -236,31 +237,6 @@ export default function ToolCast({
 }) {
   const [prompt, setPrompt] = useState(PROOF_MODE ? CAT_REQUEST : '')
   const [activeSurface, setActiveSurface] = useState(() => productSurfaceFromSearch(window.location.search))
-  // THE SURFACE CONTRACT (standardization slice 2, docs/convergence/
-  // SURFACE-CONTRACT.md). The stage picks its arm from the DECLARED branch
-  // instead of comparing activeSurface to a string literal. Truth table is
-  // unchanged: 'cad' for cad, 'ios' for ios, 'frame' for browser AND solar
-  // (the stage gives Solar CAD no drafting cockpit; that divergence from the
-  // console is documented, and preserved here on purpose, not fixed).
-  // src/site/surfaceGates.test.js pins this equal to the old ternary.
-  const stageBranch = surfaceContract(activeSurface).chrome.stageBranch
-  // Slice 7a (standardization, D3 close): the workspace rail (Operator /
-  // Catalog / Author / Project) used to mount only inside the `stageBranch
-  // === 'cad'` arm below, diverging from the console's un-gated AuthorPanel
-  // (App.jsx:2735, docs/convergence/SURFACE-CONTRACT.md's D3 row). It now
-  // mounts on every surface the CONTRACT declares reachable, the same one
-  // `authoring` slot the console's note already calls true on every surface
-  // — no second `authoringStage` slot was added. `stageBranch === 'ios'` is
-  // checked BEFORE this in the render ternary below (not through this flag),
-  // which is what keeps the ios ship lane — its own rail, D1/D2, untouched —
-  // the sole content on ios's stage even though ios's own `authoring` stays
-  // `true` (it truly is reachable from the console's un-gated rail, so
-  // flipping it to `false` would misdeclare the console's own behaviour).
-  const authoringOnStage = surfaceContract(activeSurface).authoring === true
-  // Slice 6a: the version tab mounts where the CONTRACT says versions exist
-  // (`drawing` today on cad and solar), never on a surface literal. A surface
-  // declaring `none` gets no Versions tab and no version panel at all.
-  const versionsMounted = surfaceContract(activeSurface).versions !== 'none'
   const {
     converse,
     bindConverseProject,
@@ -286,6 +262,38 @@ export default function ToolCast({
   const transportMock = PUBLIC_DEMO || !sessionReady
   const sessionReadyRef = useRef(sessionReady)
   sessionReadyRef.current = sessionReady
+  // THE SURFACE CONTRACT (standardization slice 2, docs/convergence/
+  // SURFACE-CONTRACT.md). Slice 7b: reads the tenant's surface-config overlay
+  // through the hook instead of the bare contract; byte-identical to
+  // `surfaceContract(id)` for a tenant with no overlay (useSurfaceContract's
+  // own contract). `transportMock` must be computed first (it depends on
+  // platformSession above), so this sits here rather than beside
+  // `activeSurface`.
+  const surfaceSlots = useSurfaceContract(activeSurface, transportMock)
+  // The stage picks its arm from the DECLARED branch instead of comparing
+  // activeSurface to a string literal. Truth table is unchanged: 'cad' for
+  // cad, 'ios' for ios, 'frame' for browser AND solar (the stage gives Solar
+  // CAD no drafting cockpit; that divergence from the console is documented,
+  // and preserved here on purpose, not fixed).
+  // src/site/surfaceGates.test.js pins this equal to the old ternary.
+  const stageBranch = surfaceSlots.chrome.stageBranch
+  // Slice 7a (standardization, D3 close): the workspace rail (Operator /
+  // Catalog / Author / Project) used to mount only inside the `stageBranch
+  // === 'cad'` arm below, diverging from the console's un-gated AuthorPanel
+  // (App.jsx:2735, docs/convergence/SURFACE-CONTRACT.md's D3 row). It now
+  // mounts on every surface the CONTRACT declares reachable, the same one
+  // `authoring` slot the console's note already calls true on every surface
+  // — no second `authoringStage` slot was added. `stageBranch === 'ios'` is
+  // checked BEFORE this in the render ternary below (not through this flag),
+  // which is what keeps the ios ship lane — its own rail, D1/D2, untouched —
+  // the sole content on ios's stage even though ios's own `authoring` stays
+  // `true` (it truly is reachable from the console's un-gated rail, so
+  // flipping it to `false` would misdeclare the console's own behaviour).
+  const authoringOnStage = surfaceSlots.authoring === true
+  // Slice 6a: the version tab mounts where the CONTRACT says versions exist
+  // (`drawing` today on cad and solar), never on a surface literal. A surface
+  // declaring `none` gets no Versions tab and no version panel at all.
+  const versionsMounted = surfaceSlots.versions !== 'none'
   // The refusal copy points at the Claude accounts panel only where this shell
   // mounts one. The trust rail does, and the panel self-guards with
   // `if (mock) return null`, so this is the same answer the control gives
@@ -1701,6 +1709,7 @@ export default function ToolCast({
     // and the frame no longer infers anything from that null.
     <SurfaceFrame
       scene="stage"
+      mock={transportMock}
       activeSurface={activeSurface}
       states={productStates}
       catalog={capabilityCatalog}
@@ -2378,7 +2387,7 @@ export default function ToolCast({
           // Slice 4b: the stage's declared anchors for this surface (step id
           // -> data-tour id), null where the stage declares no tour. The step
           // array above is untouched; the contract carries the anchor map.
-          anchors={surfaceContract(activeSurface).tourAnchors?.stage ?? null}
+          anchors={surfaceSlots.tourAnchors?.stage ?? null}
           index={tourIndex}
           onIndexChange={moveTour}
           onCannedPrompt={runTourPrompt}
