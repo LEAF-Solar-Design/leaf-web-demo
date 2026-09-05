@@ -174,7 +174,16 @@ def _validated_result(value: Any, body: dict) -> dict:
 def run(params: dict, *, job_context: dict, solver_root: Path | None = None,
         python_binary: str | None = None, timeout_s: float = MAX_SOLVE_SECONDS + 10,
         cancelled: Callable[[], bool] | None = None) -> dict:
-    body = _validated_input(params, job_context)
+    if job_context.get("job_id") is not None:
+        # A durable canonical job must consume its registered immutable input.
+        # Direct local solver experiments without job IDs keep their old seam.
+        import platform_link
+        platform_link._load_platform()
+        from leaf_platform.arlo_lab import load_registered_request
+        source_params = load_registered_request(job_context, params)
+    else:
+        source_params = params
+    body = _validated_input(source_params, job_context)
     if isinstance(timeout_s, bool) or not math.isfinite(timeout_s) or timeout_s <= 0:
         raise ValueError("adapter timeout must be positive and finite")
     root = _root(solver_root)
