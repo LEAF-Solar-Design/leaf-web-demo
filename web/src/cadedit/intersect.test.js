@@ -1176,3 +1176,41 @@ describe('Astra refutations, round five (W4g-6e record 8)', () => {
     expect(curveOf(poly('p', [[0, 0], [1, 0]], false, 'A', [1e3, 0])).refusal).toBeUndefined()
   })
 })
+
+describe('Astra refutations, round six (W4g-6e record 9)', () => {
+  it('keeps a short straight segment before a large-bulge arc exactly', () => {
+    const target = poly('p', [[0, 0], [5e-10, 0], [1.5e-9, 0], [10, 0], [20, 0]], false, 'A', [0, 1e10, 0, 0, 0])
+    const out = trimEntity(target, line('e', [15, -1], [15, 1]), 19, 0, 1e-9)
+    expect(out).toEqual({ steps: [{
+      op: 'setVertices', entityId: 'p', points: [[0, 0], [5e-10, 0], [1.5e-9, 0], [10, 0], [15, 0]], closed: false,
+      bulges: [0, 1e10, 0, 0, 0],
+    }] })
+    expect(out.steps[0].points[1][0]).toBe(5e-10)
+    expect(out.steps[0].points[2][0]).toBe(1.5e-9)
+  })
+
+  it('keeps the crossing and retained arc with a diagonal billion-unit cutter', () => {
+    const target = poly('p', [[-1, 0], [1, 0]], false, 'A', [1, 0])
+    const edge = line('e', [-1e9, -1e9], [1e9, 1e9])
+    // Only the 225-degree root lies on the lower unit semicircle.
+    const hits = crossings(curveOf(target), curveOf(edge))
+    expect(hits).toHaveLength(1)
+    expect(hits[0].s).toBeCloseTo(0.25, 6)
+    expect(hits[0].p).toHaveLength(2)
+    ;[-0.707106781, -0.707106781].forEach((v, j) => expect(hits[0].p[j]).toBeCloseTo(v, 6))
+    const out = trimEntity(target, edge, 0, -1, 1e-9)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(1)
+    const { points, bulges, ...shape } = out.steps[0]
+    expect(shape).toEqual({ op: 'setVertices', entityId: 'p', closed: false })
+    expect(points).toHaveLength(2)
+    ;[[-1, 0], [-0.707106781, -0.707106781]].forEach((p, i) => {
+      expect(points[i]).toHaveLength(2)
+      p.forEach((v, j) => expect(points[i][j]).toBeCloseTo(v, 6))
+    })
+    // The retained 45-degree arc has bulge tan(pi / 16).
+    expect(bulges).toHaveLength(2)
+    expect(bulges[0]).toBeCloseTo(0.1989123674, 9)
+    expect(bulges[1]).toBe(0)
+  })
+})

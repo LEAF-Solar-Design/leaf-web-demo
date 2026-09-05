@@ -43,8 +43,8 @@ const dot = (a, b) => a[0] * b[0] + a[1] * b[1]
 const cross = (a, b) => a[0] * b[1] - a[1] * b[0]
 const len = (a) => Math.hypot(a[0], a[1])
 const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1])
-const radialTol = (p, r, eps) => eps + 16 * Number.EPSILON * (Math.abs(p[0]) + Math.abs(p[1]) + r)
-const onSupport = (p, c, r, eps) => Math.abs(dist(p, c) - r) <= radialTol(p, r, eps)
+const radialTol = (r, eps, scale) => eps + 16 * Number.EPSILON * (scale + r)
+const onSupport = (p, c, r, eps, scale) => Math.abs(dist(p, c) - r) <= radialTol(r, eps, scale)
 const same = (a, b, eps) => dist(a, b) <= eps
 function normDeg(a) {
   let d = a % 360
@@ -229,7 +229,7 @@ function segSeg(a, b, c, d) {
   const u = cross(ac, r) / denom
   return { t, u, p: add(a, scale(r, t)) }
 }
-/** Segment a-b against the circle (c, r): up to two { t, p }, solved along the line's unit direction
+/** Segment a-b against the circle (c, r): up to two { t, w, p }, solved along the line's unit direction
  * (the foot of the centre by a dot product, the centre's distance to the line by a cross product), so a
  * far-away segment does not cancel the circle away; a tangent within EPSILON is one root. */
 function segCircle(a, b, c, r) {
@@ -243,9 +243,15 @@ function segCircle(a, b, c, r) {
   const gap = r - Math.abs(dist) // > 0: two roots; ~0: tangent; < 0: none
   if (gap < -EPSILON) return []
   const h = gap <= EPSILON ? 0 : Math.sqrt(r * r - dist * dist)
-  const at = (w) => ({ t: w / L, p: add(a, scale(u, w)) })
-  const out = [at(tc - h)]
-  if (h > EPSILON) out.push(at(tc + h))
+  const n = [-u[1], u[0]]
+  const foot = add(c, scale(n, dist))
+  const at = (offset) => {
+    const p = add(foot, scale(u, offset))
+    const w = tc + offset
+    return { t: w / L, w, p }
+  }
+  const out = [at(-h)]
+  if (h > EPSILON) out.push(at(h))
   return out
 }
 /** Circle (c1, r1) against circle (c2, r2): up to two points. */
@@ -300,8 +306,8 @@ export function crossings(target, edge, extend = 'none', tol = EPSILON) {
       const L = arc ? 0 : dist(a, b)
       const epsT = arc ? TINY_DEG / Math.abs(arc.sweep) : 0
       const accept = (t) => arc ? t >= -epsT && t <= 1 + epsT : inSpan(t, L) || (lowOk && t < 0) || (highOk && t > 1)
-      const hitOnTarget = (t, p) => {
-        if (arc && !onSupport(p, arc.c, arc.r, eps)) return
+      const hitOnTarget = (t, p, inputScale) => {
+        if (arc && !onSupport(p, arc.c, arc.r, eps, inputScale)) return
         if (!accept(t)) return
         const o = arc ? segOffset(arc, p) : null
         if (same(p, a, eps) || (arc && Math.min(o, 360 - o) <= TINY_DEG)) push(i, a)
@@ -312,16 +318,19 @@ export function crossings(target, edge, extend = 'none', tol = EPSILON) {
         for (const edgeSeg of edgeSegs) {
           const { a: c, b: d, arc: edgeArc } = edgeSeg
           if (arc && edgeArc) {
+            const inputScale = Math.max(...[...arc.c, ...edgeArc.c].map(Math.abs)) + arc.r + edgeArc.r
             for (const p of circleCircle(arc.c, arc.r, edgeArc.c, edgeArc.r)) {
-              if (onSupport(p, edgeArc.c, edgeArc.r, eps) && withinSeg(edgeSeg, p)) hitOnTarget(segParam(arc, p), p)
+              if (onSupport(p, edgeArc.c, edgeArc.r, eps, inputScale) && withinSeg(edgeSeg, p)) hitOnTarget(segParam(arc, p), p, inputScale)
             }
           } else if (arc) {
+            const inputScale = Math.max(...[...c, ...d, ...arc.c].map(Math.abs)) + arc.r
             for (const hit of segCircle(c, d, arc.c, arc.r)) {
-              if (inSpan(hit.t, dist(c, d))) hitOnTarget(segParam(arc, hit.p), hit.p)
+              if (inSpan(hit.t, dist(c, d))) hitOnTarget(segParam(arc, hit.p), hit.p, inputScale)
             }
           } else if (edgeArc) {
+            const inputScale = Math.max(...[...a, ...b, ...edgeArc.c].map(Math.abs)) + edgeArc.r
             for (const hit of segCircle(a, b, edgeArc.c, edgeArc.r)) {
-              if (onSupport(hit.p, edgeArc.c, edgeArc.r, eps) && withinSeg(edgeSeg, hit.p)) hitOnTarget(hit.t, hit.p)
+              if (onSupport(hit.p, edgeArc.c, edgeArc.r, eps, inputScale) && withinSeg(edgeSeg, hit.p)) hitOnTarget(hit.t, hit.p)
             }
           } else {
             const hit = segSeg(a, b, c, d)
@@ -329,12 +338,14 @@ export function crossings(target, edge, extend = 'none', tol = EPSILON) {
           }
         }
       } else if (arc) {
+        const inputScale = Math.max(...[...arc.c, ...edge.c].map(Math.abs)) + arc.r + edge.r
         for (const p of circleCircle(arc.c, arc.r, edge.c, edge.r)) {
-          if (onSupport(p, edge.c, edge.r, eps) && withinArc(edge, p)) hitOnTarget(segParam(arc, p), p)
+          if (onSupport(p, edge.c, edge.r, eps, inputScale) && withinArc(edge, p)) hitOnTarget(segParam(arc, p), p, inputScale)
         }
       } else {
+        const inputScale = Math.max(...[...a, ...b, ...edge.c].map(Math.abs)) + edge.r
         for (const hit of segCircle(a, b, edge.c, edge.r)) {
-          if (onSupport(hit.p, edge.c, edge.r, eps) && withinArc(edge, hit.p)) hitOnTarget(hit.t, hit.p)
+          if (onSupport(hit.p, edge.c, edge.r, eps, inputScale) && withinArc(edge, hit.p)) hitOnTarget(hit.t, hit.p)
         }
       }
     }
@@ -345,15 +356,18 @@ export function crossings(target, edge, extend = 'none', tol = EPSILON) {
   if (edgeSegs) {
     for (const seg of edgeSegs) {
       if (seg.arc) {
+        const inputScale = Math.max(...[...target.c, ...seg.arc.c].map(Math.abs)) + target.r + seg.arc.r
         for (const p of circleCircle(target.c, target.r, seg.arc.c, seg.arc.r)) {
-          if (onSupport(p, target.c, target.r, eps) && onSupport(p, seg.arc.c, seg.arc.r, eps) && withinSeg(seg, p)) push(param(p), p)
+          if (onSupport(p, target.c, target.r, eps, inputScale) && onSupport(p, seg.arc.c, seg.arc.r, eps, inputScale) && withinSeg(seg, p)) push(param(p), p)
         }
       } else {
-        for (const hit of segCircle(seg.a, seg.b, target.c, target.r)) if (onSupport(hit.p, target.c, target.r, eps) && inSpan(hit.t, dist(seg.a, seg.b))) push(param(hit.p), hit.p)
+        const inputScale = Math.max(...[...seg.a, ...seg.b, ...target.c].map(Math.abs)) + target.r
+        for (const hit of segCircle(seg.a, seg.b, target.c, target.r)) if (onSupport(hit.p, target.c, target.r, eps, inputScale) && inSpan(hit.t, dist(seg.a, seg.b))) push(param(hit.p), hit.p)
       }
     }
   } else {
-    for (const p of circleCircle(target.c, target.r, edge.c, edge.r)) if (onSupport(p, target.c, target.r, eps) && onSupport(p, edge.c, edge.r, eps) && withinArc(edge, p)) push(param(p), p)
+    const inputScale = Math.max(...[...target.c, ...edge.c].map(Math.abs)) + target.r + edge.r
+    for (const p of circleCircle(target.c, target.r, edge.c, edge.r)) if (onSupport(p, target.c, target.r, eps, inputScale) && onSupport(p, edge.c, edge.r, eps, inputScale) && withinArc(edge, p)) push(param(p), p)
   }
   return out.sort((x, y) => x.s - y.s)
 }
@@ -377,7 +391,7 @@ function piece(curve, a, b, eps) {
     const q = straight ? [clean(p[0]), clean(p[1])] : [p[0], p[1]]
     const last = pts[pts.length - 1]
     if (last && last[0] === q[0] && last[1] === q[1] && Math.abs(bulges[bulges.length - 1]) > BULGE_EPS) unwritable = true
-    if (pts.length && Math.abs(bulges[bulges.length - 1]) <= BULGE_EPS && same(pts[pts.length - 1], p, EPSILON)) {
+    if (pts.length && straight && same(pts[pts.length - 1], p, EPSILON)) {
       bulges[bulges.length - 1] = bulge
     } else {
       pts.push(q)
