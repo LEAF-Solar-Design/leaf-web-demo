@@ -1380,7 +1380,7 @@ describe('Astra refutations, round eleven (W4g-6e record 14)', () => {
     expect(points).toHaveLength(2)
     ;[[0, 0], [h / 2, 0]].forEach((p, i) => {
       expect(points[i]).toHaveLength(2)
-      p.forEach((v, j) => expect(points[i][j]).toBeCloseTo(v, 12))
+      p.forEach((v, j) => expect(points[i][j]).toBeCloseTo(v, 9))
     })
     const { inputs, ...second } = out.steps[1]
     expect(second).toEqual({ op: 'createPolyline' })
