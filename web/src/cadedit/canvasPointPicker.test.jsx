@@ -245,6 +245,7 @@ describe('W4g-6 edge picks', () => {
     expect(screen.getByLabelText('ribbon edge', { exact: true }).value).toBe('')
     click(52, 30)
     expect(screen.getByLabelText('ribbon edge', { exact: true }).value).toBe('9')
+    expect(context.inputs.etol).toBe('')
     // TRIM shows no edge-point fields (FILLET and CHAMFER do), but the click
     // point rides the record all the same, read by the planner.
     expect(context.inputs.ex).toBe('5.2')
@@ -253,6 +254,7 @@ describe('W4g-6 edge picks', () => {
     click(80, 5)
     expect(screen.getByLabelText('ribbon x', { exact: true }).value).toBe('8')
     expect(screen.getByLabelText('ribbon y', { exact: true }).value).toBe('0.5')
+    expect(Number(context.inputs.etol)).toBeCloseTo(1, 9)
     expect(screen.getByRole('button', { name: 'Run' }).disabled).toBe(false)
   })
 

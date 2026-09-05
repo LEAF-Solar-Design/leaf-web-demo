@@ -45,7 +45,7 @@ export const PICK_SEQUENCES = Object.freeze({
   // W4g-6: each intersection verb names a second ENTITY first (the click
   // lands on it and the point on it rides along), then a point on the
   // selection that says which part to remove, extend or keep.
-  trim: [{ kind: 'edge', keys: ['edge', 'ex', 'ey'] }, { kind: 'point', keys: ['x', 'y'] }],
+  trim: [{ kind: 'edge', keys: ['edge', 'ex', 'ey'] }, { kind: 'point', keys: ['x', 'y'], aperture: true }],
   extend: [{ kind: 'edge', keys: ['edge', 'ex', 'ey'] }, { kind: 'point', keys: ['x', 'y'] }],
   fillet: [{ kind: 'edge', keys: ['edge', 'ex', 'ey'] }, { kind: 'point', keys: ['x', 'y'] }],
   chamfer: [{ kind: 'edge', keys: ['edge', 'ex', 'ey'] }, { kind: 'point', keys: ['x', 'y'] }],
@@ -85,6 +85,8 @@ export function currentStep(state) {
  * One click at world (x, y) -> { state, writes: [[key, value], ...] }.
  * Refuses non-finite input (no writes, same state). `inputs` is the operator
  * record (strings), read for the current polyline list on an append.
+ * On an aperture step, `context.tol` describes TRIM's removal point click
+ * and is written after the point coordinates.
  */
 export function applyPick(state, x, y, inputs = {}, context = null) {
   const step = currentStep(state)
@@ -99,10 +101,13 @@ export function applyPick(state, x, y, inputs = {}, context = null) {
     const hit = context ? nearestEntity(context.entities, x, y, context.tol, context.exceptId) : null
     if (!hit) return { state, writes: [] }
     const writes = [[step.keys[0], String(hit.id)], [step.keys[1], round3(x)], [step.keys[2], round3(y)]]
-    if (Number.isFinite(context.tol) && context.tol > 0) writes.push(['etol', String(context.tol)])
     return { state: next, writes }
   }
-  if (step.kind === 'point') return { state: next, writes: [[step.keys[0], round3(x)], [step.keys[1], round3(y)]] }
+  if (step.kind === 'point') {
+    const writes = [[step.keys[0], round3(x)], [step.keys[1], round3(y)]]
+    if (step.aperture === true && Number.isFinite(context?.tol) && context.tol > 0) writes.push(['etol', String(context.tol)])
+    return { state: next, writes }
+  }
   if (step.kind === 'radius') {
     const [cx, cy] = state.picked[state.picked.length - 1] || [num(inputs[step.from[0]]) ?? 0, num(inputs[step.from[1]]) ?? 0]
     const r = Math.hypot(x - cx, y - cy)

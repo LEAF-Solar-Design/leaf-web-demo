@@ -78,7 +78,7 @@ export const DEFAULT_EDIT_INPUTS = Object.freeze({
   // point clicked on it), empty until picked so the step waits; the
   // chamfer distances default to the reference's D1=0 D2=0 (a corner).
   edge: '', ex: '', ey: '', d1: '0', d2: '0',
-  // The world aperture of the last canvas edge pick; empty for a typed edge.
+  // The world aperture of the last canvas click on TRIM's removal point; empty once x or y is typed.
   etol: '',
   // W4g-4b: ELLIPSE's minor-to-major ratio (a step still waiting until typed).
   ratio: '',
@@ -148,7 +148,7 @@ export default function EngineSessionProvider({
     const limit = INPUT_LIMITS[key] ?? MAX_INPUT_CHARS
     const bounded = value.length > limit ? value.slice(0, limit) : value
     setInputs((current) => {
-      if (key === 'edge') return Object.freeze({ ...current, edge: bounded, etol: '' })
+      if (key === 'x' || key === 'y') return current[key] === bounded && current.etol === '' ? current : Object.freeze({ ...current, [key]: bounded, etol: '' })
       return current[key] === bounded ? current : Object.freeze({ ...current, [key]: bounded })
     })
   }, [])
