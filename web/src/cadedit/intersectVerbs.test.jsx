@@ -19,6 +19,8 @@ import DraftingRibbon from '../site/DraftingRibbon.jsx'
 const H = { id: '7', handle: '7', index: 0, type: 'LINE', layer: 'A', closed: false, editable: true, vertices: [[0, 0, 0], [10, 0, 0]], radius: null, startDeg: null, endDeg: null }
 const V = { id: '9', handle: '9', index: 1, type: 'LINE', layer: 'A', closed: false, editable: true, vertices: [[5, -5, 0], [5, 5, 0]], radius: null, startDeg: null, endDeg: null }
 const ARC = { id: '11', handle: '11', index: 2, type: 'ARC', layer: 'A', closed: false, editable: true, vertices: [[8, 2, 0]], radius: 2, startDeg: 270, endDeg: 0 }
+// The left half of the circle centred (10,0) radius 5, crossing H at (5,0).
+const ARC_HALF = { id: '11', handle: '11', index: 2, type: 'ARC', layer: 'A', closed: false, editable: true, vertices: [[10, 0, 0]], radius: 5, startDeg: 90, endDeg: 270 }
 const session = (entities, selectedId) => ({ entities, selectedId })
 
 describe('W4g-6 store: the operands are read live, before any geometry', () => {
@@ -74,6 +76,19 @@ describe('W4g-6 store: the planner over the session and the lowering to the work
     })
     expect(planIntersectVerb('chamfer', session([H, Y], '7'), { edge: '9', d1: '2', d2: '3', x: '2', y: '0', ex: '10', ey: '8' }).steps[2])
       .toEqual({ op: 'createLine', inputs: { x: 8, y: 0, x2: 10, y2: 3, layer: 'A' } })
+    // W4g-6b: a fillet against an ARC plans through the same door and lowers to a setArc step the worker takes.
+    const planned = planIntersectVerb('fillet', session([H, ARC_HALF], '7'), { edge: '11', r: '1', x: '2', y: '0', ex: '7', ey: '3' })
+    expect(planned.steps.map((s) => s.op)).toEqual(['setVertices', 'setArc', 'createArc'])
+    // W4g-6c: against a CIRCLE the plan carries no step for the circle at all: the line's cut and the new arc, a two-step batch.
+    const DISC = { ...ARC_HALF, id: '12', handle: '12', index: 3, type: 'CIRCLE', closed: true, startDeg: null, endDeg: null }
+    const round = planIntersectVerb('fillet', session([H, DISC], '7'), { edge: '12', r: '1', x: '2', y: '0', ex: '7', ey: '3' })
+    expect(round.steps.map((s) => s.op)).toEqual(['setVertices', 'createArc'])
+    expect(round.steps.some((s) => s.entityId === '12')).toBe(false)
+    expect(lowerSteps(round.steps).steps).toHaveLength(2)
+    const lowered = lowerSteps(planned.steps)
+    expect(lowered.steps[1].op).toBe('setArc')
+    expect(lowered.steps[1].payload).toMatchObject({ entityId: '11', cx: 10, cy: 0, radius: 5, startDeg: 90 })
+    expect(lowered.steps[1].payload.endDeg).toBeCloseTo(170.4059, 3)
     expect(planIntersectVerb('extend', session([{ ...H, vertices: [[0, 0, 0], [4, 0, 0]] }, Y], '7'), { edge: '9', x: '4', y: '0' })).toEqual({
       steps: [{ op: 'setVertices', entityId: '7', points: [[0, 0], [10, 0]], closed: false }],
     })
