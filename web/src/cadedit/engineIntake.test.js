@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { ARC_STEP_DEG, CIRCLE_SEGMENTS, MAX_POINTS, MIN_ARC_POINTS, engineIntake, entityToPolyline, hexHandle } from './engineIntake.js'
+import { bulgePoints, ARC_STEP_DEG, CIRCLE_SEGMENTS, MAX_POINTS, MIN_ARC_POINTS, engineIntake, entityToPolyline, hexHandle } from './engineIntake.js'
 
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps
 
@@ -72,5 +72,51 @@ describe('engineIntake (W4f slice A0): engine entities -> viewer intake', () => 
     expect(capped.points).toBeLessThanOrEqual(MAX_POINTS)
     expect(capped.truncated).toBe(5)
     expect(engineIntake(undefined)).toMatchObject({ polylines: [], points: 0, truncated: 0 })
+  })
+})
+
+describe('W4g-6d: a polyline bulge draws as its arc', () => {
+  it('samples the points between the two vertices along the arc the bulge describes, with the crate\'s conventions', () => {
+    // Bulge 1 is a semicircle: centre at the chord's midpoint (5,0), radius 5, counter-clockwise from (0,0)
+    // to (10,0), which passes BELOW the chord (the same arc explode() would make: 180..360 degrees).
+    const pts = bulgePoints([0, 0, 0], [10, 0, 0], 1, 0)
+    expect(pts.length).toBeGreaterThanOrEqual(6)
+    for (const p of pts) {
+      expect(Math.hypot(p[0] - 5, p[1])).toBeCloseTo(5, 9)
+      expect(p[1]).toBeLessThan(0)
+      expect(p[2]).toBe(0)
+    }
+    // A negative bulge takes the other side; a straight or degenerate segment yields nothing.
+    for (const p of bulgePoints([0, 0, 0], [10, 0, 0], -1, 0)) expect(p[1]).toBeGreaterThan(0)
+    expect(bulgePoints([0, 0, 0], [10, 0, 0], 0, 0)).toEqual([])
+    expect(bulgePoints([0, 0, 0], [10, 0, 0], Number.NaN, 0)).toEqual([])
+    expect(bulgePoints([3, 3, 0], [3, 3, 0], 1, 0)).toEqual([])
+    // The 90-degree fillet a polyline corner writes (tan(pi/8) from (10,8) to (8,10)) bows toward the old corner about (8,8).
+    const fillet = bulgePoints([10, 8, 1], [8, 10, 1], Math.tan(Math.PI / 8), 1)
+    for (const p of fillet) {
+      expect(Math.hypot(p[0] - 8, p[1] - 8)).toBeCloseTo(2, 9)
+      expect(p[0] + p[1]).toBeGreaterThan(18)
+      expect(p[2]).toBe(1)
+    }
+  })
+
+  it('the mapper draws a curved polyline with its arcs in place, keeps the closed flag, and ignores a list that does not match', () => {
+    const base = { id: '20', type: 'LWPOLYLINE', layer: 'A', closed: true, editable: true, vertices: [[0, 0, 0], [10, 0, 0], [10, 8, 0], [8, 10, 0], [0, 10, 0]], radius: null, startDeg: null, endDeg: null }
+    const flat = entityToPolyline(base)
+    expect(flat.pts).toHaveLength(5)
+    const curved = entityToPolyline({ ...base, bulges: [0, 0, Math.tan(Math.PI / 8), 0, 0] })
+    expect(curved.closed).toBe(true)
+    expect(curved.pts.length).toBeGreaterThan(5)
+    // The vertices themselves are still in the list, in order, with the arc's points between (10,8) and (8,10).
+    const at = (p) => curved.pts.findIndex((q) => q[0] === p[0] && q[1] === p[1])
+    expect(at([10, 8])).toBe(2)
+    expect(at([8, 10])).toBe(curved.pts.length - 2)
+    for (const p of curved.pts.slice(3, -2)) expect(Math.hypot(p[0] - 8, p[1] - 8)).toBeCloseTo(2, 9)
+    // The closing segment's bulge (on the last vertex) draws too.
+    const closing = entityToPolyline({ ...base, vertices: [[0, 0, 0], [10, 0, 0], [10, 10, 0]], bulges: [0, 0, 1] })
+    expect(closing.pts.length).toBeGreaterThan(3)
+    expect(closing.pts[2]).toEqual([10, 10, 0])
+    // Mismatched list: drawn straight, never thrown on.
+    expect(entityToPolyline({ ...base, bulges: [1] }).pts).toHaveLength(5)
   })
 })

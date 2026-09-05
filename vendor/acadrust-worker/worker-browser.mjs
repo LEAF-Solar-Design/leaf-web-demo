@@ -109,6 +109,8 @@ function projectEntities(doc) {
       text: entity.text ?? null,
       height: entity.height ?? null,
       rotationDeg: entity.rotationDeg ?? null,
+      // W4g-6d: one bulge per vertex for a polyline, null for every other kind.
+      bulges: Array.isArray(entity.bulges) ? entity.bulges : null,
       startDeg: entity.startDeg ?? null,
       endDeg: entity.endDeg ?? null,
     }
@@ -239,7 +241,9 @@ function applyOne(doc, op, payload) {
     // W4g-6: an entity's own geometry replaced (a LINE's two points, a
     // polyline's list and closed flag); the wrapper bounds and refuses first.
     need('setVertices')
-    doc.setVertices(index, Float64Array.from(Array.isArray(p.points) ? p.points : []), Boolean(p.closed))
+    // W4g-6d: `bulges` is empty (every segment straight) or one per point;
+    // the wrapper refuses a list of the wrong length or a non-finite value.
+    doc.setVertices(index, Float64Array.from(Array.isArray(p.points) ? p.points : []), Boolean(p.closed), Float64Array.from(Array.isArray(p.bulges) ? p.bulges : []))
   } else if (op === 'setArc') {
     need('setArc')
     doc.setArc(index, Number(p.cx), Number(p.cy), Number(p.radius), Number(p.startDeg), Number(p.endDeg))

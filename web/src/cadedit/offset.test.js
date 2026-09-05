@@ -121,3 +121,12 @@ describe('offsetEntity', () => {
     expect(offsetEntity(doubled, 1, 5, 1).refusal).toMatch(/segment 0 of this polyline has zero length/)
   })
 })
+
+describe('W4g-6d: a curved polyline is refused, never offset as its chords', () => {
+  it('names the fault before asking for a side', () => {
+    const curved = { id: 'c', type: 'LWPOLYLINE', layer: 'A', closed: false, editable: true, vertices: [[0, 0, 0], [10, 0, 0], [10, 10, 0]], bulges: [0, 0.5, 0], radius: null, startDeg: null, endDeg: null }
+    expect(offsetEntity(curved, 1, 5, 1).refusal).toBe('Offset refused: this polyline has curved segments; not in this round.')
+    expect(offsetEntity({ ...curved, bulges: [0, 0, 0] }, 1, 5, 1).refusal).toBeUndefined()
+    expect(offsetEntity({ ...curved, bulges: [0, Number.NaN, 0] }, 1, 5, 1).refusal).toBe('Offset refused: this polyline has curved segments; not in this round.')
+  })
+})

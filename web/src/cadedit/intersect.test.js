@@ -8,7 +8,7 @@ import {
 } from './intersect.js'
 
 const line = (id, a, b, layer = 'A') => ({ id, type: 'LINE', layer, closed: false, vertices: [[...a, 0], [...b, 0]], radius: null, startDeg: null, endDeg: null, editable: true })
-const poly = (id, pts, closed, layer = 'A') => ({ id, type: 'LWPOLYLINE', layer, closed, vertices: pts.map((p) => [...p, 0]), radius: null, startDeg: null, endDeg: null, editable: true })
+const poly = (id, pts, closed, layer = 'A', bulges = null) => ({ id, type: 'LWPOLYLINE', layer, closed, vertices: pts.map((p) => [...p, 0]), radius: null, startDeg: null, endDeg: null, editable: true, ...(bulges ? { bulges } : {}) })
 const circle = (id, c, r) => ({ id, type: 'CIRCLE', layer: 'A', closed: true, vertices: [[...c, 0]], radius: r, startDeg: null, endDeg: null, editable: true })
 const arc = (id, c, r, s, e) => ({ id, type: 'ARC', layer: 'A', closed: false, vertices: [[...c, 0]], radius: r, startDeg: s, endDeg: e, editable: true })
 const text = (id) => ({ id, type: 'TEXT', layer: 'A', closed: false, vertices: [[1, 1, 0]], radius: null, startDeg: null, endDeg: null, editable: true })
@@ -478,6 +478,93 @@ describe('filletLines against a circle (W4g-6c)', () => {
     expect(filletLines(line('f', [0, 20], [20, 20]), disc(), 1, 2, 20, 7, 3).refusal).toBe('Fillet refused: no circle of that radius is tangent to both objects.')
     expect(filletLines(line('f', [0, 20], [20, 20]), disc(), 0, 2, 20, 7, 3).refusal).toBe('Fillet refused: the two objects never meet, even extended.')
     expect(chamferLines(X(), disc(), 1, 1, 2, 0, 7, 3).refusal).toBe('Chamfer refused: the second object is a CIRCLE; CHAMFER between lines takes two lines.')
+  })
+})
+
+describe('polyline corners and bulges (W4g-6d)', () => {
+  const B = Math.tan(Math.PI / 8) // the bulge of a 90-degree fillet: tan of a quarter of the included angle
+  const near = (v, want) => expect(v).toBeCloseTo(want, 9)
+  // The counter-clockwise 10 x 10 square and its clockwise twin.
+  const SQ = () => poly('sq', [[0, 0], [10, 0], [10, 10], [0, 10]], true)
+  const CW = () => poly('cw', [[0, 0], [0, 10], [10, 10], [10, 0]], true)
+
+  it('curveOf reads one bulge per vertex, refuses a list that does not match, and reads no list as straight', () => {
+    const curved = curveOf(poly('p', [[0, 0], [10, 0], [10, 10]], false, 'A', [0, 0.5, 0]))
+    expect(curved).toMatchObject({ kind: 'POLY', curved: true, bulges: [0, 0.5, 0] })
+    expect(curveOf(poly('p', [[0, 0], [10, 0], [10, 10]], false))).toMatchObject({ curved: false, bulges: [0, 0, 0] })
+    expect(curveOf(poly('p', [[0, 0], [10, 0], [10, 10]], false, 'A', [0, 0])).refusal).toMatch(/bulge list does not match its points/)
+    expect(curveOf(poly('p', [[0, 0], [10, 0], [10, 10]], false, 'A', [0, Number.NaN, 0])).refusal).toMatch(/a bulge that is not a number/)
+    // Below the crate's own straight threshold a bulge is straight.
+    expect(curveOf(poly('p', [[0, 0], [10, 0]], false, 'A', [1e-12, 0])).curved).toBe(false)
+  })
+
+  it('refuses a polyline with a curved segment on every verb whose maths is on chords, naming the role', () => {
+    const arcy = poly('arcy', [[0, -5], [5, -5], [5, 5]], false, 'A', [0, 0.5, 0])
+    expect(trimEntity(arcy, H(), 5, 3).refusal).toBe('Trim refused: the selection is a polyline with curved segments; not in this round.')
+    expect(trimEntity(H(), arcy, 8, 0).refusal).toBe('Trim refused: the cutting edge is a polyline with curved segments; not in this round.')
+    expect(extendEntity(arcy, H(), 5, 4).refusal).toBe('Extend refused: the selection is a polyline with curved segments; not in this round.')
+    expect(extendEntity(line('e', [0, 0], [4, 0]), arcy, 4, 0).refusal).toBe('Extend refused: the boundary edge is a polyline with curved segments; not in this round.')
+    expect(filletLines(H(), arcy, 1, 2, 0, 5, 3).refusal).toBe('Fillet refused: the second object is a polyline with curved segments; not in this round.')
+    expect(chamferLines(H(), arcy, 1, 1, 2, 0, 5, 3).refusal).toBe('Chamfer refused: the second object is a polyline with curved segments; not in this round.')
+    // A straight polyline still trims as before.
+    expect(trimEntity(H(), poly('v', [[5, -5], [5, 5]], false), 8, 0).steps).toHaveLength(1)
+  })
+
+  it('FILLET at a polyline corner: V becomes two tangent points and the first carries the arc as a bulge, ONE step', () => {
+    // The corner (10,10): picks (10,5) on the second side and (5,10) on the third; r = 2 at 90 degrees puts
+    // T1 = (10,8), T2 = (8,10), the square turns LEFT there so the bulge is +tan(pi/8) = 0.4142 (centre (8,8)).
+    const out = filletLines(SQ(), SQ(), 2, 10, 5, 5, 10)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(1)
+    expect(out.steps[0]).toMatchObject({ op: 'setVertices', entityId: 'sq', closed: true, points: [[0, 0], [10, 0], [10, 8], [8, 10], [0, 10]] })
+    expect(out.steps[0].bulges).toHaveLength(5)
+    near(out.steps[0].bulges[2], B)
+    expect(out.steps[0].bulges.filter((b) => b === 0)).toHaveLength(4)
+    // The picks in the other order name the same corner and the same plan.
+    expect(filletLines(SQ(), SQ(), 2, 5, 10, 10, 5).steps).toEqual(out.steps)
+    // The clockwise square turns RIGHT at (10,10): the same points, the bulge negative.
+    const cw = filletLines(CW(), CW(), 2, 5, 10, 10, 5)
+    expect(cw.steps[0].points).toEqual([[0, 0], [0, 10], [8, 10], [10, 8], [10, 0]])
+    near(cw.steps[0].bulges[2], -B)
+    // The corner at the FIRST vertex (0,0) is where the closing segment meets the first: the two new points lead the list.
+    const wrap = filletLines(SQ(), SQ(), 2, 0, 5, 5, 0)
+    expect(wrap.steps[0].points).toEqual([[0, 2], [2, 0], [10, 0], [10, 10], [0, 10]])
+    near(wrap.steps[0].bulges[0], B)
+    // An open L keeps its ends: the corner (10,0) of (0,0)-(10,0)-(10,10).
+    const L = poly('l', [[0, 0], [10, 0], [10, 10]], false)
+    const open = filletLines(L, L, 2, 5, 0, 10, 5)
+    expect(open.steps[0]).toMatchObject({ closed: false, points: [[0, 0], [8, 0], [10, 2], [10, 10]] })
+    near(open.steps[0].bulges[1], B)
+    // A bulge the polyline already carries elsewhere rides through unchanged.
+    const mixed = poly('m', [[0, 0], [10, 0], [10, 10], [0, 10]], false, 'A', [0.3, 0, 0, 0])
+    const kept = filletLines(mixed, mixed, 2, 10, 5, 5, 10)
+    expect(kept.steps[0].points).toEqual([[0, 0], [10, 0], [10, 8], [8, 10], [0, 10]])
+    expect(kept.steps[0].bulges[0]).toBe(0.3); near(kept.steps[0].bulges[2], B)
+  })
+
+  it('CHAMFER at a polyline corner: V becomes the two cut points, no bulge', () => {
+    expect(chamferLines(SQ(), SQ(), 2, 3, 10, 5, 5, 10).steps).toEqual([
+      { op: 'setVertices', entityId: 'sq', points: [[0, 0], [10, 0], [10, 8], [7, 10], [0, 10]], closed: true, bulges: [0, 0, 0, 0, 0] },
+    ])
+    expect(chamferLines(SQ(), SQ(), 0, 0, 10, 5, 5, 10).refusal).toBe('Chamfer refused: the corner is already sharp; a chamfer on a polyline corner needs a distance greater than 0.')
+    expect(chamferLines(SQ(), SQ(), 10, 1, 10, 5, 5, 10).refusal).toBe('Chamfer refused: the first distance is too large for the first segment (less than 10 fits).')
+    expect(chamferLines(SQ(), SQ(), 1, 10, 10, 5, 5, 10).refusal).toBe('Chamfer refused: the second distance is too large for the second segment (less than 10 fits).')
+  })
+
+  it('refuses what is not a corner of one polyline, each naming why', () => {
+    expect(filletLines(SQ(), SQ(), 0, 10, 5, 5, 10).refusal).toBe('Fillet refused: the corner is already sharp; a fillet on a polyline corner needs a radius greater than 0.')
+    expect(filletLines(SQ(), SQ(), 20, 10, 5, 5, 10).refusal).toBe('Fillet refused: the radius is too large for these two segments (at most 10 fits).')
+    expect(filletLines(SQ(), SQ(), 2, 10, 3, 10, 7).refusal).toBe('Fillet refused: click two different segments of the polyline that meet at the corner.')
+    expect(filletLines(SQ(), SQ(), 2, 5, 0, 5, 10).refusal).toBe('Fillet refused: the two segments do not meet at a corner; click two segments that share a vertex.')
+    // Open: the first and last segments do not meet.
+    const openSq = poly('o', [[0, 0], [10, 0], [10, 10], [0, 10]], false)
+    expect(filletLines(openSq, openSq, 2, 0, 5, 5, 10).refusal).toBe('Fillet refused: the two segments do not meet at a corner; click two segments that share a vertex.')
+    // A curved segment AT the corner; one segment only; a line named as its own second object.
+    const curvedCorner = poly('c', [[0, 0], [10, 0], [10, 10], [0, 10]], true, 'A', [0, 0.4, 0, 0])
+    expect(filletLines(curvedCorner, curvedCorner, 2, 10, 5, 5, 10).refusal).toBe('Fillet refused: a segment at that corner is curved; not in this round.')
+    expect(filletLines(poly('one', [[0, 0], [10, 0]], false), poly('one', [[0, 0], [10, 0]], false), 2, 2, 0, 8, 0).refusal).toBe('Fillet refused: the polyline has one segment; no corner to make.')
+    expect(filletLines(H(), H(), 1, 2, 0, 8, 0).refusal).toBe('Fillet refused: select a different entity as the second object.')
+    expect(chamferLines(H(), H(), 1, 1, 2, 0, 8, 0).refusal).toBe('Chamfer refused: select a different entity as the second object.')
   })
 })
 

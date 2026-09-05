@@ -341,7 +341,16 @@ export function lowerSteps(steps) {
         if (!Array.isArray(pt) || !Number.isFinite(pt[0]) || !Number.isFinite(pt[1])) return { refusal: 'Edit refused: a geometry step has a point that is not a number.' }
         flat.push(pt[0], pt[1])
       }
-      lowered.push({ op, payload: { entityId, points: flat, closed: step.closed === true } })
+      // W4g-6d: a polyline step may carry one bulge per point (a corner
+      // fillet's arc, and every bulge the polyline already had); absent or
+      // empty means every segment straight. Anything else is refused here,
+      // before the engine sees it.
+      const bulges = step.bulges == null ? [] : step.bulges
+      if (!Array.isArray(bulges) || (bulges.length !== 0 && bulges.length !== pts.length) || bulges.some((b) => !Number.isFinite(b))) {
+        return { refusal: 'Edit refused: a geometry step needs one bulge per point, or none.' }
+      }
+      // Straight plans keep the wire shape they had: `bulges` rides only when one is set.
+      lowered.push({ op, payload: { entityId, points: flat, closed: step.closed === true, ...(bulges.some((b) => b !== 0) ? { bulges } : {}) } })
     } else if (op === 'setArc') {
       const [cx, cy, radius, startDeg, endDeg] = [step.x, step.y, step.r, step.a0, step.a1].map(fmtDelta)
       if ([cx, cy, radius, startDeg, endDeg].some((v) => v === null)) return { refusal: 'Edit refused: an arc step has a value that is not a number.' }
@@ -369,7 +378,10 @@ export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer, x1,
     const verb = INTERSECT_VERBS[op]
     const edgeId = String(edge ?? '').trim()
     if (!edgeId) return { refusal: `${verb.name} refused: select the ${verb.edge} by clicking it on the drawing.` }
-    if (edgeId === String(entityId ?? '')) return { refusal: `${verb.name} refused: the ${verb.edge} must be a different entity from the selection.` }
+    // W4g-6d: FILLET / CHAMFER may name the selection itself as the second
+    // object when it is a polyline (its own corner); the kernel decides by
+    // kind. TRIM / EXTEND never cut an entity against itself.
+    if (edgeId === String(entityId ?? '') && op !== 'fillet' && op !== 'chamfer') return { refusal: `${verb.name} refused: the ${verb.edge} must be a different entity from the selection.` }
     const px = fmtDelta(x)
     const py = fmtDelta(y)
     if (px === null || py === null) return { refusal: `${verb.name} refused: ${verb.point} x and y must both be numbers.` }

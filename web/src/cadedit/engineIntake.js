@@ -57,6 +57,38 @@ function arcPoints(cx, cy, z, r, startDeg, endDeg) {
   return pts
 }
 
+/**
+ * W4g-6d: the points BETWEEN a and b along the arc a DXF bulge describes
+ * (tan of a quarter of the included angle, positive counter-clockwise): the
+ * crate's own rule (explode's arc_from_bulge), radius d (1 + b^2) / 4|b| and
+ * the centre d (1 - b^2) / 4b along the chord's left perpendicular from its
+ * midpoint. Endpoints excluded (they are the polyline's own vertices); a
+ * straight or degenerate segment yields nothing. Bounded by the arc sampler's
+ * own step, so a full semicircle is 24 points.
+ */
+export function bulgePoints(a, b, bulge, z) {
+  if (!Number.isFinite(bulge) || Math.abs(bulge) <= 1e-10) return []
+  const dx = b[0] - a[0]
+  const dy = b[1] - a[1]
+  const d = Math.hypot(dx, dy)
+  if (d <= 1e-12) return []
+  const b2 = bulge * bulge
+  const r = (d * (1 + b2)) / (4 * Math.abs(bulge))
+  const off = (d * (1 - b2)) / (4 * bulge)
+  const cx = (a[0] + b[0]) / 2 + (-dy / d) * off
+  const cy = (a[1] + b[1]) / 2 + (dx / d) * off
+  const a0 = Math.atan2(a[1] - cy, a[0] - cx)
+  // The arc turns through 4 atan(|bulge|), the bulge's sign giving the sense.
+  const sweep = 4 * Math.atan(Math.abs(bulge)) * (bulge > 0 ? 1 : -1)
+  const n = Math.max(MIN_ARC_POINTS, Math.ceil(Math.abs(sweep) / (ARC_STEP_DEG * Math.PI / 180)) + 1)
+  const out = []
+  for (let i = 1; i < n - 1; i += 1) {
+    const t = a0 + (sweep * i) / (n - 1)
+    out.push([cx + r * Math.cos(t), cy + r * Math.sin(t), z])
+  }
+  return out
+}
+
 /** One entity -> one intake polyline, or null when it has nothing drawable. */
 export function entityToPolyline(entity) {
   if (!entity || typeof entity !== 'object') return null
@@ -96,7 +128,21 @@ export function entityToPolyline(entity) {
     if (p) pts.push(p)
   }
   if (pts.length < 2) return null
-  return { handle, layer, pts, closed: entity.closed === true }
+  const closed = entity.closed === true
+  // W4g-6d: a curved segment (bulge on its start vertex) draws as its arc;
+  // a list that does not match the points is ignored as straight, since a
+  // drawing is better than none and the kernel refuses such a list itself.
+  const bulges = Array.isArray(entity.bulges) && entity.bulges.length === verts.length && pts.length === verts.length ? entity.bulges : null
+  if (bulges && bulges.some((b) => Number.isFinite(b) && Math.abs(b) > 1e-10)) {
+    const out = []
+    const last = closed ? pts.length : pts.length - 1
+    for (let i = 0; i < pts.length; i += 1) {
+      out.push(pts[i])
+      if (i < last) out.push(...bulgePoints(pts[i], pts[(i + 1) % pts.length], bulges[i], pts[i][2]))
+    }
+    return { handle, layer, pts: out, closed }
+  }
+  return { handle, layer, pts, closed }
 }
 
 /**

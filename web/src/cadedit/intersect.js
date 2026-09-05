@@ -28,6 +28,8 @@ const DEG = Math.PI / 180
 // endpoint (degrees): tight on purpose, the aperture is a picking notion.
 const TINY_DEG = 1e-7
 const KINDS = new Set(['LINE', 'LWPOLYLINE', 'CIRCLE', 'ARC'])
+// A bulge below this is a straight segment (the crate's own explode threshold).
+const BULGE_EPS = 1e-10
 
 const finite = Number.isFinite
 const sub = (a, b) => [a[0] - b[0], a[1] - b[1]]
@@ -84,7 +86,20 @@ export function curveOf(entity, role = 'entity') {
   }
   if (kind === 'LWPOLYLINE') {
     if (pts.length < 2) return { refusal: `the ${role} polyline has fewer than two points` }
-    return { kind: 'POLY', pts, closed: entity.closed === true }
+    // W4g-6d: the projection carries one bulge per vertex (the segment that
+    // STARTS at it); absent or null means every segment straight. A list of
+    // the wrong length or a value that is not a number is refused, never
+    // read as straight: this kernel's maths is on chords, and a curved
+    // segment must be seen to be refused.
+    const rawB = entity.bulges == null ? [] : entity.bulges
+    if (!Array.isArray(rawB) || (rawB.length !== 0 && rawB.length !== pts.length)) return { refusal: `the ${role} polyline's bulge list does not match its points` }
+    const bulges = new Array(pts.length).fill(0)
+    for (let i = 0; i < rawB.length; i += 1) {
+      if (!finite(rawB[i])) return { refusal: `the ${role} polyline has a bulge that is not a number` }
+      bulges[i] = rawB[i]
+    }
+    const curved = bulges.some((b) => Math.abs(b) > BULGE_EPS)
+    return { kind: 'POLY', pts, closed: entity.closed === true, bulges, curved }
   }
   const c = pts[0]
   const r = entity?.radius
@@ -270,7 +285,9 @@ function dedupe(pts, eps) {
   for (const p of pts) if (!out.length || !same(out[out.length - 1], p, eps)) out.push([clean(p[0]), clean(p[1])])
   return out
 }
-const setVertices = (entityId, pts, closed) => ({ op: 'setVertices', entityId, points: pts, closed })
+// W4g-6d: a polyline step may carry one bulge per point; a straight rewrite
+// (every trim, extend and two-entity fillet) carries none and keeps its shape.
+const setVertices = (entityId, pts, closed, bulges = null) => ({ op: 'setVertices', entityId, points: pts, closed, ...(bulges ? { bulges } : {}) })
 const setArc = (entityId, c, r, a0, a1) => ({ op: 'setArc', entityId, x: clean(c[0]), y: clean(c[1]), r, a0: clean(normDeg(a0)), a1: clean(normDeg(a1)) })
 const createArc = (c, r, a0, a1, layer) => ({ op: 'createArc', inputs: { x: clean(c[0]), y: clean(c[1]), r, a0: clean(normDeg(a0)), a1: clean(normDeg(a1)), layer } })
 const createLine = (a, b, layer) => ({ op: 'createLine', inputs: { x: clean(a[0]), y: clean(a[1]), x2: clean(b[0]), y2: clean(b[1]), layer } })
@@ -289,6 +306,11 @@ function readCurves(verb, target, edge, edgeRole) {
   if (a.refusal) return refuse(verb, a.refusal)
   const b = curveOf(edge, edgeRole)
   if (b.refusal) return refuse(verb, b.refusal)
+  // W4g-6d: every crossing and tangent here is computed on straight chords,
+  // so a polyline with a curved segment is refused rather than rewritten
+  // flat (the write-back would keep the chords the drawing never had).
+  if (a.curved) return refuse(verb, 'the selection is a polyline with curved segments; not in this round')
+  if (b.curved) return refuse(verb, `the ${edgeRole} is a polyline with curved segments; not in this round`)
   return { a, b }
 }
 
@@ -441,6 +463,97 @@ export function extendEntity(target, edge, px, py, tol = EPSILON) {
   return atEnd
     ? { steps: [setArc(target.id, T.c, T.r, T.start, T.end + best)] }
     : { steps: [setArc(target.id, T.c, T.r, T.start - best, T.end)] }
+}
+
+// ---- FILLET / CHAMFER at a polyline's own corner (W4g-6d) ------------------------------------
+
+/**
+ * The corner of ONE polyline the two picks name: the segment nearest each
+ * pick (by the curve param), which must be two different segments sharing a
+ * vertex V (the closing segment counts on a closed polyline), both straight.
+ * Returns { P, vIdx, u1, u2, L1, L2, theta } with u1 the unit direction from
+ * V back along the first segment, u2 from V along the second, L1 / L2 their
+ * lengths, theta the angle between them; or { refusal }.
+ */
+function polyCorner(verb, target, p1, p2) {
+  const P = curveOf(target, 'selection')
+  if (P.refusal) return refuse(verb, P.refusal)
+  if (P.kind !== 'POLY') return refuse(verb, `select a different entity as the second ${verb === 'Chamfer' ? 'line' : 'object'}`)
+  const n = P.pts.length
+  const segCount = P.closed ? n : n - 1
+  if (segCount < 2) return refuse(verb, 'the polyline has one segment; no corner to make')
+  const segOf = (p) => Math.min(segCount - 1, Math.max(0, Math.floor(locate(P, p).s)))
+  const i1 = segOf(p1)
+  const i2 = segOf(p2)
+  if (i1 === i2) return refuse(verb, 'click two different segments of the polyline that meet at the corner')
+  // Which segment comes first along the polyline: the shared vertex is the
+  // second one's start. On a closed polyline the last segment meets the first.
+  let first
+  let second
+  if ((i1 + 1) % segCount === i2 && (i1 + 1 < segCount || P.closed)) [first, second] = [i1, i2]
+  else if ((i2 + 1) % segCount === i1 && (i2 + 1 < segCount || P.closed)) [first, second] = [i2, i1]
+  else return refuse(verb, 'the two segments do not meet at a corner; click two segments that share a vertex')
+  if (Math.abs(P.bulges[first]) > BULGE_EPS || Math.abs(P.bulges[second]) > BULGE_EPS) return refuse(verb, 'a segment at that corner is curved; not in this round')
+  const vIdx = second
+  const V = P.pts[vIdx]
+  const A = P.pts[first]
+  const B = P.pts[(second + 1) % n]
+  const d1 = sub(A, V)
+  const d2 = sub(B, V)
+  const L1 = len(d1)
+  const L2 = len(d2)
+  if (L1 <= EPSILON || L2 <= EPSILON) return refuse(verb, 'a segment at that corner has zero length')
+  const u1 = scale(d1, 1 / L1)
+  const u2 = scale(d2, 1 / L2)
+  const theta = Math.acos(Math.max(-1, Math.min(1, dot(u1, u2))))
+  if (theta <= EPSILON || Math.PI - theta <= EPSILON) return refuse(verb, 'the two segments point the same way; no corner to make')
+  return { P, vIdx, V, u1, u2, L1, L2, theta }
+}
+/** The polyline with V replaced by two points (and the first point's bulge), as ONE setVertices step. */
+function cornerStep(target, c, T1, T2, bulge) {
+  const { P, vIdx } = c
+  const pts = P.pts.map((p) => [p[0], p[1]])
+  const bulges = P.bulges.slice()
+  pts.splice(vIdx, 1, [clean(T1[0]), clean(T1[1])], [clean(T2[0]), clean(T2[1])])
+  // The new first point carries the corner's bulge; the second keeps the
+  // bulge V had (straight, checked), so the segment after it is unchanged.
+  bulges.splice(vIdx, 1, clean(bulge), bulges[vIdx])
+  return setVertices(target.id, pts, P.closed, bulges)
+}
+/**
+ * FILLET at a polyline's own corner: V becomes T1 and T2, each r / tan(theta / 2)
+ * from V along its segment, and T1 carries the arc as a bulge: tan of a quarter
+ * of the included angle (pi - theta), positive when the polyline turns left
+ * at V (the crate's convention, positive counter-clockwise).
+ */
+function filletPolyCorner(target, r, p1, p2) {
+  const verb = 'Fillet'
+  if (r === 0) return refuse(verb, 'the corner is already sharp; a fillet on a polyline corner needs a radius greater than 0')
+  const c = polyCorner(verb, target, p1, p2)
+  if (c.refusal) return c
+  const { V, u1, u2, L1, L2, theta } = c
+  const along = r / Math.tan(theta / 2)
+  if (along >= Math.min(L1, L2) - EPSILON) {
+    const most = Math.tan(theta / 2) * Math.min(L1, L2)
+    return refuse(verb, `the radius is too large for these two segments (at most ${fmt3(most)} fits)`)
+  }
+  const T1 = add(V, scale(u1, along))
+  const T2 = add(V, scale(u2, along))
+  // Travel at T1 is -u1 (into V), then u2 away: a left turn is counter-clockwise.
+  const turn = cross(u2, u1)
+  const bulge = (turn > 0 ? 1 : -1) * Math.tan((Math.PI - theta) / 4)
+  return { steps: [cornerStep(target, c, T1, T2, bulge)] }
+}
+/** CHAMFER at a polyline's own corner: V becomes P1 (d1 back along the first segment) and P2 (d2 along the second), no arc. */
+function chamferPolyCorner(target, d1, d2, p1, p2) {
+  const verb = 'Chamfer'
+  if (d1 === 0 && d2 === 0) return refuse(verb, 'the corner is already sharp; a chamfer on a polyline corner needs a distance greater than 0')
+  const c = polyCorner(verb, target, p1, p2)
+  if (c.refusal) return c
+  const { V, u1, u2, L1, L2 } = c
+  if (d1 >= L1 - EPSILON) return refuse(verb, `the first distance is too large for the first segment (less than ${fmt3(L1)} fits)`)
+  if (d2 >= L2 - EPSILON) return refuse(verb, `the second distance is too large for the second segment (less than ${fmt3(L2)} fits)`)
+  return { steps: [cornerStep(target, c, add(V, scale(u1, d1)), add(V, scale(u2, d2)), 0)] }
 }
 
 // ---- FILLET / CHAMFER ------------------------------------------------------------------
@@ -656,6 +769,10 @@ export function filletLines(target, edge, r, px, py, ex, ey) {
   if (bad) return bad
   bad = readPair(verb, ex, ey, 'the point on the second line:')
   if (bad) return bad
+  // W4g-6d: both picks on the selection itself name a corner of ONE
+  // polyline (the reference's FILLET on a polyline); any other same-entity
+  // ask is refused by readCurves below.
+  if (target && edge && target.id === edge.id && String(target.type || '').toUpperCase() === 'LWPOLYLINE') return filletPolyCorner(target, r, [px, py], [ex, ey])
   // W4g-6b: an ARC on either side takes the tangent-circle path; two lines
   // keep the corner path below.
   const kinds = readCurves(verb, target, edge, 'second object')
@@ -706,6 +823,7 @@ export function chamferLines(target, edge, d1, d2, px, py, ex, ey) {
   if (bad) return bad
   bad = readPair(verb, ex, ey, 'the point on the second line:')
   if (bad) return bad
+  if (target && edge && target.id === edge.id && String(target.type || '').toUpperCase() === 'LWPOLYLINE') return chamferPolyCorner(target, d1, d2, [px, py], [ex, ey])
   const c = corner(verb, target, edge, px, py, ex, ey)
   if (c.refusal) return c
   const { A, B, X, sa, sb } = c

@@ -12,11 +12,13 @@ const text = (id) => ({ id: String(id), type: 'TEXT', layer: '0', closed: false,
 describe('planGeometry', () => {
   it('reads each kind into the contract terms and leaves the rest out', () => {
     expect(planGeometry(line(10))).toEqual({ kind: 'LINE', layer: '0', pts: [[0, 0, 0], [3, 4, 0]] })
-    expect(planGeometry(poly(11))).toEqual({ kind: 'LWPOLYLINE', layer: 'Panels', closed: true, pts: [[0, 0, 0], [2, 0, 0], [2, 2, 0], [0, 2, 0]] })
+    // W4g-6d: a polyline's geometry also carries its bulges and the curved flag (straight here).
+    expect(planGeometry(poly(11))).toMatchObject({ bulges: [0, 0, 0, 0], curved: false })
+    expect(planGeometry(poly(11))).toMatchObject({ kind: 'LWPOLYLINE', layer: 'Panels', closed: true, pts: [[0, 0, 0], [2, 0, 0], [2, 2, 0], [0, 2, 0]] })
     expect(planGeometry(circle(193))).toEqual({ kind: 'CIRCLE', layer: 'Round', c: [10, 10, 0], r: 3 })
     expect(planGeometry(arc(209))).toEqual({ kind: 'ARC', layer: 'Round', c: [20, 0, 0], r: 2, start_deg: 0, end_deg: 90 })
     expect(planGeometry(text(12))).toBeNull()
-    expect(planGeometry({ ...poly(11), type: 'POLYLINE', closed: false, vertices: [[0, 0], [1, 1]] })).toEqual({ kind: 'LWPOLYLINE', layer: 'Panels', closed: false, pts: [[0, 0, 0], [1, 1, 0]] })
+    expect(planGeometry({ ...poly(11), type: 'POLYLINE', closed: false, vertices: [[0, 0], [1, 1]] })).toMatchObject({ kind: 'LWPOLYLINE', layer: 'Panels', closed: false, pts: [[0, 0, 0], [1, 1, 0]] })
   })
 
   it('refuses a malformed entity instead of guessing', () => {
@@ -88,5 +90,35 @@ describe('diffPlan', () => {
     const before = [line(10), line(10, { layer: 'Twice' })]
     const after = [line(10, { layer: 'Moved' }), line(10)]
     expect(diffPlan(before, after)).toEqual({ mutations: {}, count: 0, reason: null })
+  })
+})
+
+describe('W4g-6d: what the contract cannot carry is refused, never dropped', () => {
+  const B = Math.tan(Math.PI / 8)
+  it('an editable TEXT that is added, removed or changed refuses the plan; an unchanged one costs nothing; a read-only foreign kind is ignored', () => {
+    const t = (extra = {}) => ({ id: '12', type: 'TEXT', layer: '0', closed: false, vertices: [[1, 1, 0]], radius: null, startDeg: null, endDeg: null, text: 'hi', height: 2.5, rotationDeg: 0, editable: true, ...extra })
+    expect(diffPlan([line(10)], [line(10), t()]).reason).toBe('entity C is a TEXT the plan cannot carry, and it was added')
+    expect(diffPlan([line(10), t()], [line(10)]).reason).toBe('entity C is a TEXT the plan cannot carry, and it was removed')
+    expect(diffPlan([line(10), t()], [line(10), t({ vertices: [[5, 5, 0]] })]).reason).toBe('entity C is a TEXT the plan cannot carry, and it changed')
+    expect(diffPlan([line(10), t()], [line(10), t({ text: 'bye' })]).reason).toBe('entity C is a TEXT the plan cannot carry, and it changed')
+    expect(diffPlan([line(10), t()], [line(10, { layer: 'Moved' }), t()])).toEqual({ mutations: { set_layer: [{ handle: 'A', layer: 'Moved' }] }, count: 1, reason: null })
+    // The engine never changes a read-only entity, so its presence or absence is never a plan's business.
+    const insert = { id: '13', type: 'INSERT', layer: '0', closed: false, vertices: [], radius: null, startDeg: null, endDeg: null, editable: false }
+    expect(diffPlan([line(10), insert], [line(10)])).toEqual({ mutations: {}, count: 0, reason: null })
+  })
+
+  it('a curved polyline: unchanged or relayered is fine, moved or filleted or added refuses, removed is a plain removal', () => {
+    const curved = (extra = {}) => poly(11, { bulges: [0, B, 0, 0], ...extra })
+    expect(diffPlan([curved()], [curved()])).toEqual({ mutations: {}, count: 0, reason: null })
+    expect(diffPlan([curved()], [curved({ layer: 'Elsewhere' })])).toEqual({ mutations: { set_layer: [{ handle: 'B', layer: 'Elsewhere' }] }, count: 1, reason: null })
+    expect(diffPlan([curved()], [curved({ vertices: [[1, 0, 0], [3, 0, 0], [3, 2, 0], [1, 2, 0]] })]).reason).toBe('polyline B has curved segments the plan cannot carry')
+    // The corner fillet of W4g-6d: a straight square gains a bulge (and a vertex).
+    const filleted = poly(11, { vertices: [[0, 0, 0], [2, 0, 0], [2, 1, 0], [1, 2, 0], [0, 2, 0]], bulges: [0, 0, B, 0, 0] })
+    expect(diffPlan([poly(11)], [filleted]).reason).toBe('polyline B has curved segments the plan cannot carry')
+    expect(diffPlan([poly(11)], [poly(11, { bulges: [0, 0, 0, 0] })])).toEqual({ mutations: {}, count: 0, reason: null })
+    expect(diffPlan([], [curved()]).reason).toBe('polyline B has curved segments the plan cannot carry')
+    expect(diffPlan([curved()], [])).toEqual({ mutations: { removed: ['B'] }, count: 1, reason: null })
+    // A bulge list that does not match its points is curved for this purpose too (never read as straight).
+    expect(diffPlan([poly(11)], [poly(11, { vertices: [[0, 0, 0], [3, 0, 0], [3, 3, 0], [0, 3, 0]], bulges: [0.1] })]).reason).toBe('polyline B has curved segments the plan cannot carry')
   })
 })

@@ -1252,6 +1252,47 @@ test.describe('route matrix, rail ON', () => {
     await bar.press('Enter')
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeTrim + 2), { timeout: 60_000 })
 
+    // W4g-6d FILLET at a polyline's OWN corner on the REAL engine: a RECTANG
+    // by typed corners (+1), then FILLET with the rectangle itself as the
+    // second object (its id typed into the same edge field a canvas click on
+    // it fills), the edge point on its top side and the first point on its
+    // right side naming the corner (350, 310). The polyline stays ONE entity
+    // (count held) and gains its rounded corner as a bulge; one engine undo
+    // takes the corner back.
+    await page.keyboard.press('Escape')
+    await bar.fill('rec')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'createRectangle', { timeout: 20_000 })
+    await page.getByLabel('ribbon x', { exact: true }).fill('330')
+    await page.getByLabel('ribbon y', { exact: true }).fill('290')
+    await page.getByLabel('ribbon x2', { exact: true }).fill('350')
+    await page.getByLabel('ribbon y2', { exact: true }).fill('310')
+    await page.getByLabel('ribbon y2', { exact: true }).press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeTrim + 3), { timeout: 60_000 })
+    await page.keyboard.press('Escape')
+    const rectangle = await page.getByRole('radio').last().getAttribute('value')
+    expect(rectangle).toBeTruthy()
+    await page.getByRole('radio').last().check()
+    await bar.fill('f')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'fillet', { timeout: 20_000 })
+    await page.getByLabel('ribbon radius', { exact: true }).fill('3')
+    await page.getByLabel('ribbon edge', { exact: true }).fill(rectangle)
+    await page.getByLabel('ribbon edge x', { exact: true }).fill('340')
+    await page.getByLabel('ribbon edge y', { exact: true }).fill('310')
+    await page.getByLabel('ribbon x', { exact: true }).fill('350')
+    await page.getByLabel('ribbon y', { exact: true }).fill('300')
+    await page.getByLabel('ribbon y', { exact: true }).press('Enter')
+    await expect(workbenchStatus).toContainText('fillet applied.', { timeout: 60_000 })
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeTrim + 3))
+    test.info().annotations.push({ type: 'fillet-polyline', description: `fillet rounded the rectangle's own corner in one step (count held at ${countBeforeTrim + 3})` })
+    await page.keyboard.press('Escape')
+    await expect(page.locator('.cockpit-band [data-tool="quick-undo-edit"]')).toBeEnabled()
+    await bar.fill('u')
+    await bar.press('Enter')
+    await expect(page.locator('.cockpit-band [data-tool="quick-redo-edit"]')).toBeEnabled({ timeout: 60_000 })
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeTrim + 3))
+
     // W4g-2 (one head), confirm-time race. LAST in the walk on purpose: a
     // refused run leaves its failed strip on the page and there is no
     // dismiss for it, and that strip sits BETWEEN the command prompt and

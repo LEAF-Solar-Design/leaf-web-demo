@@ -12,7 +12,11 @@
 // changed kind or a plan past MAX_PLAN_OPERATIONS is refused with a sentence,
 // and the caller (the store's save) sends NO plan in that case, so the
 // server takes the DXF sidecar leg with its own note; nothing is dropped
-// silently. Handles cross as DXF hex (the worker names them in decimal).
+// silently. W4g-6d closes two gaps in that promise: an EDITABLE entity of a
+// kind the contract does not carry (a TEXT the browser made, moved or
+// erased) and a polyline whose curved segments (bulges) the contract's
+// point lists cannot express are refusals too, never omissions. Handles
+// cross as DXF hex (the worker names them in decimal).
 import { hexHandle } from './engineIntake.js'
 
 export const MAX_PLAN_OPERATIONS = 5000
@@ -23,6 +27,8 @@ export const COORDINATE_EPSILON = 1e-9
 
 const ROUND_KINDS = new Set(['CIRCLE', 'ARC'])
 const LINEAR_KINDS = new Set(['LINE', 'LWPOLYLINE', 'POLYLINE'])
+// A bulge below this is a straight segment (the kernel's and the crate's threshold).
+const BULGE_EPS = 1e-10
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v)
 
@@ -75,13 +81,34 @@ export function planGeometry(entity) {
   }
   if (type === 'LINE') return pts.length === 2 ? { kind: 'LINE', layer, pts } : null
   if (pts.length < 2) return null
-  return { kind: 'LWPOLYLINE', layer, closed: entity.closed === true, pts }
+  // W4g-6d: the projection's bulges ride along so a curved polyline is seen;
+  // the contract's point list cannot carry them, so a geometry change on
+  // such a polyline is a refusal in diffPlan, never a flattened set_points.
+  const rawB = Array.isArray(entity.bulges) ? entity.bulges : []
+  const bulges = rawB.length === pts.length && rawB.every(finite) ? rawB.slice() : new Array(pts.length).fill(0)
+  const curved = rawB.length !== 0 && (rawB.length !== pts.length || !rawB.every(finite) || bulges.some((b) => Math.abs(b) > BULGE_EPS))
+  return { kind: 'LWPOLYLINE', layer, closed: entity.closed === true, pts, bulges, curved }
+}
+
+/**
+ * An editable entity the contract has no kind for (TEXT today): a fingerprint
+ * of everything the projection reports, so a change, an add or a removal is
+ * SEEN and refused instead of dropped. Null for a read-only entity (the engine
+ * never changes those) and for a kind the plan carries.
+ */
+function opaqueOf(entity) {
+  if (!entity || typeof entity !== 'object' || entity.editable === false) return null
+  const type = String(entity.type || '')
+  if (!type || ROUND_KINDS.has(type) || LINEAR_KINDS.has(type)) return null
+  const print = JSON.stringify([type, entity.layer ?? null, entity.vertices ?? null, entity.radius ?? null, entity.startDeg ?? null,
+    entity.endDeg ?? null, entity.text ?? null, entity.height ?? null, entity.rotationDeg ?? null, entity.bulges ?? null, entity.closed === true])
+  return { kind: 'OPAQUE', type, print }
 }
 
 function indexByHandle(entities) {
   const out = new Map()
   for (const entity of Array.isArray(entities) ? entities : []) {
-    const geometry = planGeometry(entity)
+    const geometry = planGeometry(entity) || opaqueOf(entity)
     if (!geometry) continue
     const handle = hexHandle(entity.id ?? entity.handle ?? '')
     if (!handle) continue
@@ -128,11 +155,23 @@ export function diffPlan(committed, current) {
   const setPoints = []
   const setCircle = []
   const setArc = []
+  const cannot = (reason) => ({ mutations: null, count: 0, reason })
   for (const [handle, was] of before) {
     const now = after.get(handle)
-    if (!now) { removed.push(handle); continue }
+    if (!now) {
+      // A kind the contract has no add for still has a remove (by handle);
+      // an OPAQUE entity erased is one the plan cannot see go.
+      if (was.kind === 'OPAQUE') return cannot(`entity ${handle} is a ${was.type} the plan cannot carry, and it was removed`)
+      removed.push(handle)
+      continue
+    }
+    if (was.kind === 'OPAQUE' || now.kind === 'OPAQUE') {
+      if (was.kind === now.kind && was.print === now.print) continue
+      const name = was.kind === 'OPAQUE' ? was.type : now.type
+      return cannot(`entity ${handle} is a ${name} the plan cannot carry, and it changed`)
+    }
     if (was.kind !== now.kind && !(isLinear(was) && isLinear(now))) {
-      return { mutations: null, count: 0, reason: `entity ${handle} changed kind from ${was.kind} to ${now.kind}, which the plan cannot express` }
+      return cannot(`entity ${handle} changed kind from ${was.kind} to ${now.kind}, which the plan cannot express`)
     }
     if (was.layer !== now.layer) setLayer.push({ handle, layer: now.layer })
     if (now.kind === 'CIRCLE') {
@@ -142,12 +181,23 @@ export function diffPlan(committed, current) {
     } else {
       const wasClosed = was.kind === 'LWPOLYLINE' && was.closed
       const nowClosed = now.kind === 'LWPOLYLINE' && now.closed
-      if (wasClosed !== nowClosed || !samePoints(was.pts, now.pts)) {
+      const wasB = was.bulges || []
+      const nowB = now.bulges || []
+      const sameBulges = wasB.length === nowB.length && wasB.every((b, i) => sameNumber(b, nowB[i]))
+      if (wasClosed !== nowClosed || !samePoints(was.pts, now.pts) || !sameBulges) {
+        // A set_points carries points only: a curved polyline (before or
+        // after) would be written back as its chords. Refuse, never flatten.
+        if (was.curved || now.curved) return cannot(`polyline ${handle} has curved segments the plan cannot carry`)
         setPoints.push({ handle, closed: nowClosed, pts: now.pts })
       }
     }
   }
-  for (const [handle, now] of after) if (!before.has(handle)) added.push(addedRecord(handle, now))
+  for (const [handle, now] of after) {
+    if (before.has(handle)) continue
+    if (now.kind === 'OPAQUE') return cannot(`entity ${handle} is a ${now.type} the plan cannot carry, and it was added`)
+    if (now.curved) return cannot(`polyline ${handle} has curved segments the plan cannot carry`)
+    added.push(addedRecord(handle, now))
+  }
   const count = added.length + removed.length + setLayer.length + setPoints.length + setCircle.length + setArc.length
   if (count > MAX_PLAN_OPERATIONS) {
     return { mutations: null, count, reason: `this edit changes ${count} entities, over the ${MAX_PLAN_OPERATIONS} a plan can carry` }

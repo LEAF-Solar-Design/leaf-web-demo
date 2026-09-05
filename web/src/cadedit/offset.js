@@ -123,6 +123,10 @@ function sourceFault(kind, entity, verts) {
   if (verts.length > MAX_OFFSET_POINTS) {
     return `Offset refused: this polyline has ${verts.length} vertices, over the ${MAX_OFFSET_POINTS} an offset can carry.`
   }
+  // W4g-6d: the offset is computed on chords; a curved segment (a bulge the
+  // projection now reports) would be offset as the chord it is not.
+  const bulges = Array.isArray(entity?.bulges) ? entity.bulges : []
+  if (bulges.some((b) => !Number.isFinite(b) || Math.abs(b) > 1e-10)) return 'Offset refused: this polyline has curved segments; not in this round.'
   return null
 }
 
