@@ -15,9 +15,9 @@ import uuid
 from typing import Any, Dict
 
 import platform_link
-from solver_adapters import autofill
+from solver_adapters import arlo_design, autofill
 
-ADAPTERS = {autofill.TOOL_NAME: autofill.run}
+ADAPTERS = {autofill.TOOL_NAME: autofill.run, arlo_design.TOOL_NAME: arlo_design.run}
 DEFAULT_LEASE_SECONDS = 30.0
 
 
@@ -69,11 +69,17 @@ def worker_id() -> str:
     return f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4()}"
 
 
-def run_once(owner: str, *, lease_seconds: float = DEFAULT_LEASE_SECONDS) -> bool:
+def run_once(owner: str, *, lease_seconds: float = DEFAULT_LEASE_SECONDS,
+             tool_name: str = autofill.TOOL_NAME) -> bool:
     if lease_seconds <= 0:
         raise ValueError("lease_seconds must be positive")
     canonical_jobs = platform_link._canonical_jobs_module()
-    descriptor = autofill.descriptor()
+    if tool_name == autofill.TOOL_NAME:
+        descriptor = autofill.descriptor()
+    elif tool_name == arlo_design.TOOL_NAME:
+        descriptor = arlo_design.descriptor()
+    else:
+        raise ValueError(f"no canonical solver adapter for {tool_name}")
     canonical_jobs.record_worker_heartbeat(
         owner, descriptor["tool_name"], descriptor["runtime"], descriptor["source_revision"],
         descriptor["source_sha256"])
@@ -89,7 +95,11 @@ def run_once(owner: str, *, lease_seconds: float = DEFAULT_LEASE_SECONDS) -> boo
         adapter = ADAPTERS.get(str(job.get("tool_name")))
         if adapter is None:
             raise ValueError(f"no canonical solver adapter for {job.get('tool_name')}")
-        result = adapter(dict(job.get("params") or {}))
+        params = dict(job.get("params") or {})
+        if tool_name == arlo_design.TOOL_NAME:
+            result = adapter(params, job_context=job, cancelled=lambda: guard.lost)
+        else:
+            result = adapter(params)
         provenance = {**base_provenance,
                       "worker_id": owner,
                       "solver_revision": result["solver_revision"],
@@ -127,11 +137,12 @@ def run_once(owner: str, *, lease_seconds: float = DEFAULT_LEASE_SECONDS) -> boo
 
 
 def serve(*, poll_seconds: float = 1.0, lease_seconds: float = DEFAULT_LEASE_SECONDS,
-          once: bool = False, stop_event: threading.Event | None = None) -> None:
+          once: bool = False, stop_event: threading.Event | None = None,
+          tool_name: str = autofill.TOOL_NAME) -> None:
     owner = worker_id()
     stop = stop_event or threading.Event()
     while not stop.is_set():
-        claimed = run_once(owner, lease_seconds=lease_seconds)
+        claimed = run_once(owner, lease_seconds=lease_seconds, tool_name=tool_name)
         if once:
             return
         if not claimed:
@@ -141,6 +152,7 @@ def serve(*, poll_seconds: float = 1.0, lease_seconds: float = DEFAULT_LEASE_SEC
 def main() -> None:
     parser = argparse.ArgumentParser(description="Leaf canonical solve worker")
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--tool", choices=sorted(ADAPTERS), default=autofill.TOOL_NAME)
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     parser.add_argument("--lease-seconds", type=float, default=float(
         os.environ.get("LEAF_CANONICAL_LEASE_SECONDS", DEFAULT_LEASE_SECONDS)))
@@ -152,7 +164,8 @@ def main() -> None:
     for signum in (signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, lambda _signum, _frame: stop.set())
     serve(poll_seconds=max(args.poll_seconds, 0.05),
-          lease_seconds=max(args.lease_seconds, 1.0), once=args.once, stop_event=stop)
+          lease_seconds=max(args.lease_seconds, 1.0), once=args.once, stop_event=stop,
+          tool_name=args.tool)
 
 
 if __name__ == "__main__":

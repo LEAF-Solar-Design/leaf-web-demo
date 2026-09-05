@@ -1,6 +1,39 @@
 {
   "tools": [
     {
+      "name": "arlo-design",
+      "version": "1.0.0",
+      "description": "Generate electrical feeder assembly proposals through the local ARLO design worker. Proposals require separate engineering review and native verification.",
+      "kind": "solver",
+      "engine_op": "arlo_design",
+      "family_id": "placement",
+      "canonical_only": true,
+      "params": {
+        "type": "object",
+        "properties": {
+          "contract": {"type": "string", "enum": ["arlo_design_request_v1"]},
+          "organization_id": {"type": "string"},
+          "project_id": {"type": "string"},
+          "input_version_id": {"type": "string"},
+          "scenario": {"type": "object"},
+          "catalog_version": {"type": "string", "minLength": 1},
+          "requirements_version": {"type": "string", "minLength": 1},
+          "catalog": {"type": "array", "items": {"type": "object"}, "minItems": 1},
+          "requirements": {"type": "object"},
+          "placement_candidates": {"type": "array", "items": {"type": "object"}},
+          "native_bindings": {"type": "object"},
+          "budget": {"type": "object"},
+          "seed": {"type": "integer"},
+          "objective_version": {"type": "string"}
+        },
+        "required": ["contract", "scenario", "catalog_version", "requirements_version", "catalog", "requirements", "placement_candidates"],
+        "additionalProperties": false
+      },
+      "returns": {"type": "object"},
+      "capabilities": ["solve"],
+      "provenance": {"source": "arlo-3dml/arlo/design", "entry": "python -m arlo.design"}
+    },
+    {
       "name": "string-autofill-opt",
       "version": "1.0.0",
       "description": "Runs the existing AutoFill target solver and records deterministic input/result hashes and source revision.",
