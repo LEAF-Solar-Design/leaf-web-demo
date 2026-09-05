@@ -498,7 +498,7 @@ describe('polyline corners and bulges (W4g-6d)', () => {
     expect(curveOf(poly('p', [[0, 0], [10, 0]], false, 'A', [1e-12, 0])).curved).toBe(false)
   })
 
-  it('trims curved polylines but refuses a curved end extension and two-entity curved corners', () => {
+  it('trims curved polylines but refuses a boundary behind a curved end and two-entity curved corners', () => {
     const arcy = poly('arcy', [[0, -5], [5, -5], [5, 5]], false, 'A', [0, 0.5, 0])
     // The arc about (1.25,0), r 6.25, meets H only at (7.5,0), halfway along.
     const trimmed = trimEntity(arcy, H(), 5, 3)
@@ -516,7 +516,7 @@ describe('polyline corners and bulges (W4g-6d)', () => {
     expect(cutShape).toEqual({ op: 'setVertices', entityId: 'h', closed: false })
     expect(cutPoints).toHaveLength(2)
     expect(cutPoints[0]).toEqual([0, 0]); near(cutPoints[1][0], 7.5); expect(cutPoints[1][1]).toEqual(0)
-    expect(extendEntity(arcy, H(), 5, 4).refusal).toBe('Extend refused: the end segment to extend is curved; not in this round.')
+    expect(extendEntity(arcy, H(), 5, 4).refusal).toBe('Extend refused: the boundary edge does not lie ahead of that end.')
     const extended = extendEntity(line('e', [0, 0], [4, 0]), arcy, 4, 0)
     expect(extended.steps).toHaveLength(1)
     const { points: endPoints, ...endShape } = extended.steps[0]
@@ -794,5 +794,103 @@ describe('TRIM on curved polylines (W4g-6e)', () => {
     const straight = extendEntity(line('l', [5, -10], [5, -6]), SEMI(), 5, -6)
     expect(straight.steps).toHaveLength(1)
     expectVertices(straight.steps[0], 'l', [[5, -10], [5, -5]])
+  })
+})
+
+describe('EXTEND on a curved end segment (W4g-6e)', () => {
+  const B45 = Math.tan(Math.PI / 8)
+  const B135 = Math.tan(135 * Math.PI / 180 / 4)
+  // The terminal arc is about (10,5), r 5, start 270, sweep +90.
+  const hook = () => poly('k', [[0, 0], [10, 0], [15, 5]], false, 'A', [0, B45, 0])
+  const expectVertices = (out, id, points, bulges) => {
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(1)
+    const { points: actual, bulges: actualBulges, ...shape } = out.steps[0]
+    expect(shape).toEqual({ op: 'setVertices', entityId: id, closed: false })
+    expect(actual).toHaveLength(points.length)
+    points.forEach((p, i) => {
+      expect(actual[i]).toHaveLength(2)
+      p.forEach((v, j) => {
+        if (Number.isInteger(v)) expect(actual[i][j]).toEqual(v)
+        else expect(actual[i][j]).toBeCloseTo(v, 9)
+      })
+    })
+    expect(actualBulges).toHaveLength(bulges.length)
+    bulges.forEach((b, i) => {
+      if (Number.isInteger(b)) expect(actualBulges[i]).toEqual(b)
+      else expect(actualBulges[i]).toBeCloseTo(b, 9)
+    })
+  }
+
+  it('extends arcy to the vertical boundary crossing in its gap', () => {
+    const arcy = poly('arcy', [[0, -5], [5, -5], [5, 5]], false, 'A', [0, 0.5, 0])
+    // x = 0 reaches (0,sqrt(37.5)), growing the sweep to about 154.667 degrees.
+    const out = extendEntity(arcy, line('t', [0, 0], [0, 10]), 5, 4)
+    expectVertices(out, 'arcy', [[0, -5], [5, -5], [0, 6.123724357]], [0, 0.8001991550, 0])
+  })
+
+  it('extends a positive terminal arc along its circle to a signed 135-degree sweep', () => {
+    // The root at 45 degrees is in the boundary span; the root at 135 is not.
+    const out = extendEntity(hook(), line('b', [10, 8.535533905932738], [20, 8.535533905932738]), 16, 6)
+    expectVertices(out, 'k', [[0, 0], [10, 0], [13.535533906, 8.535533906]], [0, B135, 0])
+  })
+
+  it('extends a negative terminal arc along its circle with a negative bulge', () => {
+    const hookCw = poly('w', [[0, 0], [10, 0], [15, -5]], false, 'A', [0, -B45, 0])
+    const out = extendEntity(hookCw, line('b', [10, -8.535533905932738], [20, -8.535533905932738]), 16, -6)
+    expectVertices(out, 'w', [[0, 0], [10, 0], [13.535533906, -8.535533906]], [0, -B135, 0])
+  })
+
+  it('extends the start of a positive first arc and preserves the remaining vertices', () => {
+    const first = poly('f', [[10, 0], [15, 5], [20, 5]], false, 'A', [B45, 0, 0])
+    // The root at 225 degrees is 45 degrees before the start; 315 is off the span.
+    const out = extendEntity(first, line('b', [0, 1.4644660940672622], [10, 1.4644660940672622]), 9, 0)
+    expectVertices(out, 'f', [[6.464466094, 1.464466094], [15, 5], [20, 5]], [B135, 0, 0])
+  })
+
+  it('refuses crossings behind the end, a full turn, no root and a closed target without steps', () => {
+    const ahead = 'Extend refused: the boundary edge does not lie ahead of that end.'
+    const cases = [
+      // Only the 315-degree root is on this edge, strictly inside the existing arc.
+      [extendEntity(hook(), line('v', [13.535533905932738, -10], [13.535533905932738, 4]), 16, 6), ahead],
+      // The tangent is the arc's start, so reaching it would complete a full turn.
+      [extendEntity(hook(), line('s', [5, 0], [10, 0]), 16, 6), 'Extend refused: extending that far would close the arc into a full turn.'],
+      [extendEntity(hook(), line('n', [0, 20], [20, 20]), 16, 6), ahead],
+      [extendEntity(poly('c', [[0, 0], [10, 0], [10, 10]], true, 'A', [1, 0, 0]), H(), 5, 5), 'Extend refused: a closed polyline has no end to extend.'],
+    ]
+    for (const [out, refusal] of cases) {
+      expect(out).toEqual({ refusal })
+      expect(out).not.toHaveProperty('steps')
+    }
+  })
+
+  it('extends a straight start while carrying the curved end unchanged', () => {
+    const out = extendEntity(hook(), line('l', [-3, -5], [-3, 5]), 1, 0)
+    expectVertices(out, 'k', [[-3, 0], [10, 0], [15, 5]], [0, B45, 0])
+  })
+
+  it('keeps every other vertex and bulge exactly when extending the terminal arc', () => {
+    const out = extendEntity(hook(), line('b', [10, 8.535533905932738], [20, 8.535533905932738]), 16, 6)
+    expect(out.steps).toHaveLength(1)
+    const { points, bulges } = out.steps[0]
+    expect(points[0]).toEqual([0, 0])
+    expect(points[1]).toEqual([10, 0])
+    expect(bulges[0]).toBe(0)
+    expect(bulges[2]).toBe(0)
+  })
+
+  it('reports the full-circle crossing so an ARC entity extends to a curved polyline boundary', () => {
+    const arcEntity = arc('a', [0, 0], 5, 0, 90)
+    const bowl = poly('q', [[-10, 2], [0, 2]], false, 'A', [1, 0])
+    // The lower circle root lies on the bowl and in the target's gap; the upper root is off the bowl.
+    const hits = crossings(curveOf(arcEntity), curveOf(bowl))
+    expect(hits).toHaveLength(1)
+    expect(hits[0].s).toBeCloseTo(215.615884258, 6)
+    const out = extendEntity(arcEntity, bowl, -1, 5)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(1)
+    const { a1, ...shape } = out.steps[0]
+    expect(shape).toEqual({ op: 'setArc', entityId: 'a', x: 0, y: 0, r: 5, a0: 0 })
+    expect(a1).toBeCloseTo(215.615884258, 6)
   })
 })

@@ -226,8 +226,11 @@ function segCircle(a, b, c, r) {
   const B = 2 * dot(f, d)
   const C = dot(f, f) - r * r
   const disc = B * B - 4 * A * C
-  if (disc < 0) return []
-  const root = Math.sqrt(Math.max(0, disc))
+  // A bulge-derived radius can split an exact tangent through roundoff,
+  // making a full turn look like a valid extension just short of its start.
+  const discEps = 4 * Number.EPSILON * (B * B + Math.abs(4 * A * C))
+  if (disc < -discEps) return []
+  const root = disc <= discEps ? 0 : Math.sqrt(disc)
   const t1 = (-B - root) / (2 * A)
   const t2 = (-B + root) / (2 * A)
   const out = [{ t: t1, p: add(a, scale(d, t1)) }]
@@ -330,7 +333,7 @@ export function crossings(target, edge, extend = 'none', tol = EPSILON) {
     for (const seg of edgeSegs) {
       if (seg.arc) {
         for (const p of circleCircle(target.c, target.r, seg.arc.c, seg.arc.r)) {
-          if (withinSeg(seg, p) && withinArc(target, p)) push(param(p), p)
+          if (withinSeg(seg, p)) push(param(p), p)
         }
       } else {
         for (const hit of segCircle(seg.a, seg.b, target.c, target.r)) if (inUnit(hit.t)) push(param(hit.p), hit.p)
@@ -503,7 +506,30 @@ export function extendEntity(target, edge, px, py, tol = EPSILON) {
   if (T.kind === 'LINE' || T.kind === 'POLY') {
     const n = T.pts.length
     const atEnd = dist(pick, T.pts[n - 1]) <= dist(pick, T.pts[0])
-    if (T.segs[atEnd ? T.segs.length - 1 : 0].arc) return refuse(verb, 'the end segment to extend is curved; not in this round')
+    const arc = T.segs[atEnd ? T.segs.length - 1 : 0].arc
+    if (arc) {
+      const { c, r, start, sweep } = arc
+      const sigma = Math.sign(sweep)
+      const magnitude = Math.abs(sweep)
+      const epsA = (eps / r) / DEG + EPSILON
+      const all = crossings({ kind: 'CIRCLE', c, r }, E, 'none', eps)
+      let best = null
+      for (const hit of all) {
+        const o = normDeg(sigma * (hit.s - start))
+        const inGap = o >= magnitude - TINY_DEG || o <= TINY_DEG
+        if (!inGap) continue
+        const ahead = atEnd ? normDeg(o - magnitude) : normDeg(-o)
+        if (ahead > epsA && (best === null || ahead < best)) best = ahead
+      }
+      if (best === null) return refuse(verb, 'the boundary edge does not lie ahead of that end')
+      if (magnitude + best >= 360 - epsA) return refuse(verb, 'extending that far would close the arc into a full turn')
+      const pts = T.pts.map((p) => [p[0], p[1]])
+      const bulges = T.bulges.slice()
+      const angle = atEnd ? start + sweep + sigma * best : start - sigma * best
+      pts[atEnd ? n - 1 : 0] = onCircle(c, r, angle).map(clean)
+      bulges[atEnd ? n - 2 : 0] = Math.tan((sweep + sigma * best) * DEG / 4)
+      return { steps: [setVertices(target.id, pts, false, bulgesOrNull(bulges))] }
+    }
     const hits = crossings(T, E, atEnd ? 'end' : 'start', eps)
     const last = n - 1
     let chosen = null
