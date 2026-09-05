@@ -755,7 +755,7 @@ function subscribeJob(jobId, onStatus) {
     }
     const handleRec = (rec) => {
       if (settled || !rec) return
-      if (typeof rec.job_id === 'string' && rec.job_id !== jobId) {
+      if (typeof rec.job_id !== 'string' || rec.job_id !== jobId) {
         fail(new Error(`job record mismatch: asked for ${jobId}, got ${rec.job_id}`))
         return
       }
@@ -768,6 +768,10 @@ function subscribeJob(jobId, onStatus) {
         errStreak = 0
         handleRec(rec)
       } catch (e) {
+        if (e?.status === 404) {
+          fail(Object.assign(new Error(`job ${jobId} not found`), { status: 404 }))
+          return
+        }
         errStreak += 1
         if (errStreak >= 12) fail(new Error(`lost job ${jobId}: ${e.message || e}`))
       }
@@ -991,17 +995,17 @@ export async function saveEditedDrawingVersion(drawingId, bytes, parentVersion, 
 const PLAN_JOB_POINTER_PREFIX = 'leaf.cadedit.plan-job.'
 
 export function loadPlanJobPointer(drawingId) {
-  try { return sessionStorage.getItem(PLAN_JOB_POINTER_PREFIX + drawingId) || null }
+  try { return sessionStorage.getItem(PLAN_JOB_POINTER_PREFIX + TENANT + '.' + drawingId) || null }
   catch { return null }
 }
 
 function rememberPlanJob(drawingId, jobId) {
-  try { sessionStorage.setItem(PLAN_JOB_POINTER_PREFIX + drawingId, jobId) }
+  try { sessionStorage.setItem(PLAN_JOB_POINTER_PREFIX + TENANT + '.' + drawingId, jobId) }
   catch { /* storage unavailable */ }
 }
 
 function clearPlanJob(drawingId) {
-  try { sessionStorage.removeItem(PLAN_JOB_POINTER_PREFIX + drawingId) }
+  try { sessionStorage.removeItem(PLAN_JOB_POINTER_PREFIX + TENANT + '.' + drawingId) }
   catch { /* storage unavailable */ }
 }
 
@@ -1011,17 +1015,26 @@ export async function saveDrawingVersionPlan(drawingId, bytes, parentVersion, di
     let env
     try {
       env = await attachToJob(pending, { onStatus: opts.onStatus })
-    } catch {
-      const error = new Error(`outcome unknown: job ${pending} may still be running; reopen the drawing to see whether the version landed`)
-      error.outcomeUnknown = true
-      error.jobId = pending
-      throw error
+    } catch (cause) {
+      if (cause?.status !== 404) {
+        const error = new Error(`outcome unknown: job ${pending} may still be running; reopen the drawing to see whether the version landed`)
+        error.outcomeUnknown = true
+        error.jobId = pending
+        throw error
+      }
     }
     clearPlanJob(drawingId)
     if (env?.ok === true) {
       const version = env.result?.new_version?.version
       if (!Number.isInteger(version) || version <= 0) {
         const error = new Error('live commit reported no version')
+        error.status = 502
+        error.jobId = pending
+        error.body = env
+        throw error
+      }
+      if (typeof env.result.new_version.drawing_id === 'string' && env.result.new_version.drawing_id !== drawingId) {
+        const error = new Error('live commit named another drawing')
         error.status = 502
         error.jobId = pending
         error.body = env
@@ -1051,7 +1064,7 @@ export async function saveDrawingVersionPlan(drawingId, bytes, parentVersion, di
     throw error
   }
   if (res.status === 202) {
-    if (typeof body?.job_id !== 'string') {
+    if (typeof body?.job_id !== 'string' || body.job_id.length === 0) {
       const error = new Error('the server accepted the plan without a job id')
       error.status = 502
       error.body = body
@@ -1083,6 +1096,13 @@ export async function saveDrawingVersionPlan(drawingId, bytes, parentVersion, di
     const version = env.result?.new_version?.version
     if (!Number.isInteger(version) || version <= 0) {
       const error = new Error('live commit reported no version')
+      error.status = 502
+      error.jobId = jobId
+      error.body = env
+      throw error
+    }
+    if (typeof env.result.new_version.drawing_id === 'string' && env.result.new_version.drawing_id !== drawingId) {
+      const error = new Error('live commit named another drawing')
       error.status = 502
       error.jobId = jobId
       error.body = env

@@ -989,6 +989,7 @@ export default function App() {
   // dirty (kimi on #1008, finding 1). The state drives the ribbon's reasons;
   // the ref drives the refusal.
   const engineDirtyRef = useRef(false)
+  const pendingSavesRef = useRef(new Map())
   const onEngineDirtyChange = useCallback((dirty) => {
     engineDirtyRef.current = !!dirty
     setEngineDirty(!!dirty)
@@ -2745,8 +2746,14 @@ export default function App() {
       // prover runs. A refused acquire surfaces the real holder instead of
       // the store's opaque 400.
       const held = checkout.actions.getCapability()
+      // A lease taken for a save whose outcome is unknown is retained for the
+      // next save of the same drawing, never re-acquired and never leaked past
+      // a terminal outcome.
+      const retained = pendingSavesRef.current.get(REQUESTED_DRAWING_ID)
       let acquired = null
-      if (!held) {
+      if (!held && retained) {
+        acquired = { checkout_capability: retained.cap }
+      } else if (!held) {
         acquired = await takeCheckout(REQUESTED_DRAWING_ID, 'cad-edit-save')
         if (!acquired.acquired) {
           const e = new Error('drawing is checked out by '
@@ -2767,10 +2774,14 @@ export default function App() {
           REQUESTED_DRAWING_ID, bytes, parent, digest, cap)
       } catch (error) {
         keepLock = error?.outcomeUnknown === true
+        if (acquired && keepLock) {
+          pendingSavesRef.current.set(REQUESTED_DRAWING_ID, { cap, jobId: error.jobId ?? null })
+        }
         throw error
       } finally {
         if (acquired && !keepLock) {
           releaseCheckout(REQUESTED_DRAWING_ID, cap).catch(() => {})
+          pendingSavesRef.current.delete(REQUESTED_DRAWING_ID)
         }
       }
     },

@@ -5,7 +5,7 @@ import { config, loadPlanJobPointer, saveDrawingVersionPlan } from './api.js'
 
 const DRAWING = 'demo-plan'
 const JOB = 'plan-job-4'
-const POINTER = 'leaf.cadedit.plan-job.' + DRAWING
+const POINTER = 'leaf.cadedit.plan-job.' + config.tenant + '.' + DRAWING
 const BYTES = new Uint8Array([48, 10, 69, 79, 70, 10])
 const ACCEPTED = {
   drawing_id: DRAWING, job_id: JOB, parent: 4, commit: 'dwg-plan',
@@ -144,6 +144,65 @@ describe('saveDrawingVersionPlan job receipts', () => {
     expect(fetchImpl.mock.calls.filter(([, opts]) => opts?.method === 'POST')).toHaveLength(0)
     expect(storage.removeItem).not.toHaveBeenCalled()
     expect(loadPlanJobPointer(DRAWING)).toBe('plan-job-old')
+  })
+
+  it('A7 refuses a 202 with an empty job id without subscribing or changing storage', async () => {
+    const body = { ...ACCEPTED, job_id: '' }
+    serve([], body)
+    await expect(save()).rejects.toMatchObject({
+      message: 'the server accepted the plan without a job id', status: 502, body,
+    })
+    expect(streams).toHaveLength(0)
+    expect(storage.setItem).not.toHaveBeenCalled()
+    expect(storage.removeItem).not.toHaveBeenCalled()
+    expect(loadPlanJobPointer(DRAWING)).toBeNull()
+  })
+
+  it('A8 rejects a numeric job id and reattaches to the accepted job', async () => {
+    const fetchImpl = serve([{ ...complete(), job_id: 42 }, complete()])
+    await expect(save()).resolves.toMatchObject({ job_id: JOB, head: 5, live: true })
+    expect(fetchImpl).toHaveBeenCalledTimes(3)
+    expect(streams).toHaveLength(2)
+    expect(streams.every((stream) => stream.close.mock.calls.length === 1)).toBe(true)
+    expect(loadPlanJobPointer(DRAWING)).toBeNull()
+  })
+
+  it('A9 refuses a completed job naming another drawing and clears its terminal pointer', async () => {
+    const record = complete()
+    record.result.result.new_version = { drawing_id: 'other', version: 9, parent: 4 }
+    serve([record])
+    await expect(save()).rejects.toMatchObject({
+      message: 'live commit named another drawing', status: 502, jobId: JOB, body: record.result,
+    })
+    expect(storage.removeItem).toHaveBeenCalledWith(POINTER)
+    expect(loadPlanJobPointer(DRAWING)).toBeNull()
+  })
+
+  it('A10 clears a stale 404 pointer before posting a new plan without retrying the missing job', async () => {
+    storage.setItem(POINTER, 'plan-job-old')
+    const missing = Object.assign(new Error('job plan-job-old not found'), { status: 404 })
+    const fetchImpl = serve([complete()], ACCEPTED, 202, [missing])
+    await expect(save()).resolves.toMatchObject({ job_id: JOB, head: 5, live: true })
+    expect(fetchImpl.mock.calls[0][0]).toBe(`${config.apiBase}/api/jobs/plan-job-old`)
+    expect(fetchImpl.mock.calls.filter(([url]) => url === `${config.apiBase}/api/jobs/plan-job-old`)).toHaveLength(1)
+    expect(fetchImpl.mock.calls.filter(([, opts]) => opts?.method === 'POST')).toHaveLength(1)
+    expect(fetchImpl).toHaveBeenCalledTimes(3)
+    expect(storage.removeItem).toHaveBeenCalledWith(POINTER)
+    expect(storage.removeItem.mock.invocationCallOrder[0]).toBeLessThan(fetchImpl.mock.invocationCallOrder[1])
+    expect(loadPlanJobPointer(DRAWING)).toBeNull()
+  })
+
+  it('A11 writes and reads the pending job under the configured tenant', async () => {
+    serve([{ status: 'running' }, complete()])
+    const pending = save()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(storage.setItem).toHaveBeenCalledWith('leaf.cadedit.plan-job.' + config.tenant + '.' + DRAWING, JOB)
+    expect(loadPlanJobPointer(DRAWING)).toBe(JOB)
+    expect(storage.getItem).toHaveBeenLastCalledWith('leaf.cadedit.plan-job.' + config.tenant + '.' + DRAWING)
+    expect(storage.getItem('leaf.cadedit.plan-job.' + DRAWING)).toBeNull()
+    await vi.advanceTimersByTimeAsync(1000)
+    await expect(pending).resolves.toMatchObject({ job_id: JOB, head: 5, live: true })
+    expect(loadPlanJobPointer(DRAWING)).toBeNull()
   })
 
   it('returns a 201 body without subscribing or storing a job', async () => {
