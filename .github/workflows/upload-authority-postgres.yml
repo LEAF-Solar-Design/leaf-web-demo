@@ -222,7 +222,13 @@ jobs:
         run: |
           # A skipped concurrency suite reports green and proves nothing.
           # This is the check the review's finding actually needs.
-          out=$(python -m pytest -q tests/test_overlay_store_postgres.py -rs)
+          # Guarded like every sibling step: a bare `out=$(...)` aborts the step
+          # under `bash -e {0}` before the printf below can run, so a red suite
+          # reached the log as nothing but the exit code (the #1017 gate).
+          if ! out=$(python -m pytest -q tests/test_overlay_store_postgres.py -rs); then
+            printf '%s\n' "$out"
+            exit 1
+          fi
           printf '%s\n' "$out" | tail -5
           # A bash string match rather than `echo "$out" | grep -qi`. This is
           # DEFENSIVE, not a bug fix: the pipeline form is correct as this
