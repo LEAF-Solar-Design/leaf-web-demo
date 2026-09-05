@@ -30,6 +30,7 @@ import {
   thumbnailImages,
 } from '../composer.js'
 import { formatElementId } from '../lib/elementIdentity.js'
+import { REASONS } from '../lib/actionRegistry.js'
 import { isSecretRefused } from '../lib/secretGuardTransport.js'
 import Markdown from './Markdown.jsx'
 import LiveRegion from './LiveRegion.jsx'
@@ -191,6 +192,9 @@ export default function ConversePanel({
   onAttachJob,               // (jobId, tool) -> App's existing §7 job attach affordance
   onJobLinked,               // a job_linked event arrived -> refresh the job rail
   writeLocked = false,
+  // The browser engine holds unsaved edits (App's engineDirty); a write
+  // approval is held with the one-head sentence.
+  engineDirty = false,
 }) {
   const [events, setEvents] = useState([])
   const [input, setInput] = useState('')
@@ -616,6 +620,9 @@ export default function ConversePanel({
 
   const renderPendingApproval = (approval) => {
     const isWrite = approval.capability === 'drawing.write'
+    const writeHeld = isWrite && (writeLocked || engineDirty)
+    const heldLabel = writeLocked ? 'Editing locked' : 'Unsaved browser edits'
+    const heldTitle = writeLocked ? undefined : REASONS.unsavedEngineEdits
     const summary = paramsSummary(approval.params)
     const resumeRequired = approval.resume_required === true
     return (
@@ -639,11 +646,12 @@ export default function ConversePanel({
           <button
             type="button"
             className="chip-act"
-            disabled={deciding === approval.confirmation_id || (approval.approved && isWrite && writeLocked)}
+            disabled={deciding === approval.confirmation_id || (approval.approved && writeHeld)}
+            title={approval.approved && writeHeld ? heldTitle : undefined}
             onClick={() => decide(
               approval.confirmation_id,
               !!approval.approved,
-              !!approval.approved && isWrite && writeLocked,
+              !!approval.approved && writeHeld,
               approval.session_id,
               true,
             )}
@@ -657,11 +665,12 @@ export default function ConversePanel({
             <button
               type="button"
               className="chip-act"
-              disabled={deciding === approval.confirmation_id || (isWrite && writeLocked)}
+              disabled={deciding === approval.confirmation_id || writeHeld}
+              title={writeHeld ? heldTitle : undefined}
               onClick={() => decide(
-                approval.confirmation_id, true, isWrite && writeLocked, approval.session_id)}
+                approval.confirmation_id, true, writeHeld, approval.session_id)}
             >
-              {deciding === approval.confirmation_id ? 'Sending…' : (isWrite && writeLocked ? 'Editing locked' : 'Approve')}
+              {deciding === approval.confirmation_id ? 'Sending…' : (writeHeld ? heldLabel : 'Approve')}
             </button>
             <button
               type="button"
