@@ -174,6 +174,19 @@ fn vertices_of(entity: &EntityType) -> Vec<[f64; 3]> {
     }
 }
 
+/// W4g-6d: a polyline's bulge per vertex (tan of a quarter of the segment's
+/// included angle, positive counter-clockwise, 0 straight), so the client can
+/// SEE a curved segment (refuse the verbs whose maths is on chords, draw the
+/// arc on the canvas) and carry every bulge back through set_vertices. `None`
+/// for every other kind, so a consumer that ignores it sees the old shape.
+fn bulges_of(entity: &EntityType) -> Option<Vec<f64>> {
+    match entity {
+        EntityType::LwPolyline(poly) => Some(poly.vertices.iter().map(|v| v.bulge).collect()),
+        EntityType::Polyline2D(poly) => Some(poly.vertices.iter().map(|v| v.bulge).collect()),
+        _ => None,
+    }
+}
+
 fn closed_of(entity: &EntityType) -> bool {
     match entity {
         EntityType::LwPolyline(poly) => poly.is_closed,
@@ -466,9 +479,12 @@ impl ParsedDxf {
     /// Replaces the geometry of the entity at `index` with the flat
     /// `[x0, y0, x1, y1, ...]` list: a LINE takes exactly two distinct
     /// points, a LWPOLYLINE / POLYLINE2D takes 2..MAX_CREATED_VERTICES and
-    /// the closed flag. Bulges and widths the old vertices carried go with
-    /// them (the verbs that call this only ever produce straight runs).
-    fn set_vertices_core(&mut self, index: usize, points: &[f64], closed: bool) -> Result<(), Refusal> {
+    /// the closed flag. `bulges` is empty (every segment straight) or exactly
+    /// one finite value per point (W4g-6d: a corner fillet writes one, and a
+    /// caller that read the projection carries the others back unchanged);
+    /// widths the old vertices carried go with them. Refuses before it
+    /// touches the document.
+    fn set_vertices_core(&mut self, index: usize, points: &[f64], closed: bool, bulges: &[f64]) -> Result<(), Refusal> {
         if points.len() % 2 != 0 {
             return refuse("points_not_pairs");
         }
@@ -482,6 +498,13 @@ impl ParsedDxf {
         if !all_finite(points) {
             return refuse("coordinate_not_finite");
         }
+        if !bulges.is_empty() && bulges.len() != count {
+            return refuse("bulges_not_per_vertex");
+        }
+        if !all_finite(bulges) {
+            return refuse("bulge_not_finite");
+        }
+        let bulge_at = |i: usize| -> f64 { if bulges.is_empty() { 0.0 } else { bulges[i] } };
         match self.entity_mut(index)? {
             EntityType::Line(line) => {
                 if count != 2 {
@@ -497,7 +520,8 @@ impl ParsedDxf {
             EntityType::LwPolyline(poly) => {
                 poly.vertices = points
                     .chunks_exact(2)
-                    .map(|p| acadrust::entities::LwVertex::from_coords(p[0], p[1]))
+                    .enumerate()
+                    .map(|(i, p)| acadrust::entities::LwVertex::with_bulge(Vector2::new(p[0], p[1]), bulge_at(i)))
                     .collect();
                 poly.is_closed = closed;
                 Ok(())
@@ -506,7 +530,12 @@ impl ParsedDxf {
                 let elevation = poly.elevation;
                 poly.vertices = points
                     .chunks_exact(2)
-                    .map(|p| acadrust::entities::Vertex2D::new(Vector3::new(p[0], p[1], elevation)))
+                    .enumerate()
+                    .map(|(i, p)| {
+                        let mut v = acadrust::entities::Vertex2D::new(Vector3::new(p[0], p[1], elevation));
+                        v.bulge = bulge_at(i);
+                        v
+                    })
                     .collect();
                 poly.flags.set_closed(closed);
                 Ok(())
@@ -1015,6 +1044,8 @@ impl ParsedDxf {
                     "closed": closed_of(e),
                     "editable": editable(e),
                     "vertices": vertices_of(e),
+                    // W4g-6d: one bulge per vertex for a polyline, null otherwise.
+                    "bulges": bulges_of(e),
                     // W4f: circles and arcs are drawable from these; null
                     // for every other kind, so a consumer that ignores them
                     // sees the exact shape it saw before.
@@ -1095,10 +1126,11 @@ impl ParsedDxf {
     /// new entity's handle. Refuses a non-finite delta and read-only kinds.
     /// W4g-6: replaces the geometry of a LINE (two points) or a polyline
     /// (2..MAX_CREATED_VERTICES points plus the closed flag) from a flat
-    /// `[x0, y0, x1, y1, ...]` list. Refuses before it writes.
+    /// `[x0, y0, x1, y1, ...]` list; `bulges` empty or one per point
+    /// (W4g-6d). Refuses before it writes.
     #[wasm_bindgen(js_name = setVertices)]
-    pub fn set_vertices(&mut self, index: usize, points: &[f64], closed: bool) -> Result<(), JsValue> {
-        self.set_vertices_core(index, points, closed).map_err(js_err)
+    pub fn set_vertices(&mut self, index: usize, points: &[f64], closed: bool, bulges: &[f64]) -> Result<(), JsValue> {
+        self.set_vertices_core(index, points, closed, bulges).map_err(js_err)
     }
 
     /// W4g-6: replaces an ARC's centre, radius and sweep (degrees). Refuses
@@ -1827,9 +1859,9 @@ line two", "")), "text_control_character");
         doc.create_polyline_core(&[0.0, 0.0, 10.0, 0.0, 10.0, 10.0, 0.0, 10.0], true, "B").unwrap();
         let before = handles(&doc);
         // A TRIM of the line at x = 4 keeps [0, 4].
-        doc.set_vertices_core(0, &[0.0, 0.0, 4.0, 0.0], false).expect("a line takes two points");
+        doc.set_vertices_core(0, &[0.0, 0.0, 4.0, 0.0], false, &[]).expect("a line takes two points");
         // A TRIM that opens the square at its last segment keeps three corners.
-        doc.set_vertices_core(1, &[0.0, 0.0, 10.0, 0.0, 10.0, 10.0], false).expect("a polyline takes a list");
+        doc.set_vertices_core(1, &[0.0, 0.0, 10.0, 0.0, 10.0, 10.0], false, &[]).expect("a polyline takes a list");
         let entities: Vec<&EntityType> = doc.inner.entities().collect();
         assert_eq!(vertices_of(entities[0]), vec![[0.0, 0.0, 0.0], [4.0, 0.0, 0.0]]);
         assert_eq!(vertices_of(entities[1]).len(), 3);
@@ -1843,8 +1875,41 @@ line two", "")), "text_control_character");
         assert!(!closed_of(again[1]));
         // And back to closed, four corners: the flag is settable both ways.
         let mut back = back;
-        back.set_vertices_core(1, &[0.0, 0.0, 10.0, 0.0, 10.0, 10.0, 0.0, 10.0], true).unwrap();
+        back.set_vertices_core(1, &[0.0, 0.0, 10.0, 0.0, 10.0, 10.0, 0.0, 10.0], true, &[]).unwrap();
         assert!(closed_of(back.inner.entities().nth(1).unwrap()));
+    }
+
+    #[test]
+    fn w4g6d_set_vertices_carries_bulges_and_refuses_a_bad_list() {
+        let mut doc = empty_doc();
+        // A 10 x 10 square; the projection reports four straight vertices.
+        doc.create_polyline_core(&[0.0, 0.0, 10.0, 0.0, 10.0, 10.0, 0.0, 10.0], true, "B").unwrap();
+        let first = doc.inner.entities().next().unwrap();
+        assert_eq!(bulges_of(first), Some(vec![0.0, 0.0, 0.0, 0.0]));
+        // The corner at (10,10) filleted with r = 2: (8,10) carries tan(pi / 8) toward (10,8); five vertices, still closed.
+        let b = (std::f64::consts::PI / 8.0).tan();
+        let pts = [0.0, 0.0, 10.0, 0.0, 10.0, 8.0, 8.0, 10.0, 0.0, 10.0];
+        let bad = [0.0, 0.0, 0.0, 0.0];
+        assert_eq!(code(doc.set_vertices_core(0, &pts, true, &bad)), "bulges_not_per_vertex");
+        assert_eq!(code(doc.set_vertices_core(0, &pts, true, &[0.0, 0.0, f64::NAN, 0.0, 0.0])), "bulge_not_finite");
+        assert_eq!(bulges_of(doc.inner.entities().next().unwrap()), Some(vec![0.0; 4]), "a refusal touches nothing");
+        doc.set_vertices_core(0, &pts, true, &[0.0, 0.0, b, 0.0, 0.0]).expect("one bulge per point");
+        let back = rewrite(&doc);
+        let poly = back.inner.entities().next().unwrap();
+        assert_eq!(vertices_of(poly).len(), 5);
+        assert!(closed_of(poly));
+        let got = bulges_of(poly).unwrap();
+        assert!((got[2] - b).abs() < 1e-12, "the bulge survives write + re-parse: {:?}", got);
+        assert!(got.iter().enumerate().all(|(i, v)| i == 2 || *v == 0.0));
+        // An empty list means every segment straight, whatever the polyline carried before.
+        let mut back = back;
+        back.set_vertices_core(0, &pts, true, &[]).unwrap();
+        assert_eq!(bulges_of(back.inner.entities().next().unwrap()), Some(vec![0.0; 5]));
+        // A LINE ignores an empty list and refuses a non-empty one only by count (two points, two bulges is the shape).
+        back.create_line_core(0.0, 0.0, 5.0, 0.0, "A").unwrap();
+        assert_eq!(bulges_of(back.inner.entities().nth(1).unwrap()), None, "a line has no bulge list");
+        back.set_vertices_core(1, &[0.0, 0.0, 6.0, 0.0], false, &[0.0, 0.0]).expect("a line takes a per-point list too");
+        assert_eq!(code(back.set_vertices_core(1, &[0.0, 0.0, 6.0, 0.0], false, &[0.0])), "bulges_not_per_vertex");
     }
 
     #[test]
@@ -1854,15 +1919,15 @@ line two", "")), "text_control_character");
         doc.create_circle_core(5.0, 5.0, 2.0, "A").unwrap();
         doc.create_polyline_core(&[0.0, 0.0, 1.0, 0.0, 1.0, 1.0], false, "A").unwrap();
         let snapshot = engine_bytes(&doc);
-        assert_eq!(code(doc.set_vertices_core(0, &[0.0, 0.0, 4.0], false)), "points_not_pairs");
-        assert_eq!(code(doc.set_vertices_core(0, &[0.0, 0.0], false)), "polyline_needs_two_vertices");
-        assert_eq!(code(doc.set_vertices_core(0, &[0.0, 0.0, f64::NAN, 0.0], false)), "coordinate_not_finite");
-        assert_eq!(code(doc.set_vertices_core(0, &[0.0, 0.0, 1.0, 0.0, 2.0, 0.0], false)), "line_has_fixed_endpoints");
-        assert_eq!(code(doc.set_vertices_core(0, &[3.0, 3.0, 3.0, 3.0], false)), "line_zero_length");
-        assert_eq!(code(doc.set_vertices_core(1, &[0.0, 0.0, 4.0, 0.0], false)), "entity_kind_has_no_vertex_list");
+        assert_eq!(code(doc.set_vertices_core(0, &[0.0, 0.0, 4.0], false, &[])), "points_not_pairs");
+        assert_eq!(code(doc.set_vertices_core(0, &[0.0, 0.0], false, &[])), "polyline_needs_two_vertices");
+        assert_eq!(code(doc.set_vertices_core(0, &[0.0, 0.0, f64::NAN, 0.0], false, &[])), "coordinate_not_finite");
+        assert_eq!(code(doc.set_vertices_core(0, &[0.0, 0.0, 1.0, 0.0, 2.0, 0.0], false, &[])), "line_has_fixed_endpoints");
+        assert_eq!(code(doc.set_vertices_core(0, &[3.0, 3.0, 3.0, 3.0], false, &[])), "line_zero_length");
+        assert_eq!(code(doc.set_vertices_core(1, &[0.0, 0.0, 4.0, 0.0], false, &[])), "entity_kind_has_no_vertex_list");
         let too_many: Vec<f64> = vec![0.0; (MAX_CREATED_VERTICES + 1) * 2];
-        assert_eq!(code(doc.set_vertices_core(2, &too_many, false)), "polyline_too_many_vertices");
-        assert_eq!(code(doc.set_vertices_core(9, &[0.0, 0.0, 1.0, 1.0], false)), "entity_index_out_of_range");
+        assert_eq!(code(doc.set_vertices_core(2, &too_many, false, &[])), "polyline_too_many_vertices");
+        assert_eq!(code(doc.set_vertices_core(9, &[0.0, 0.0, 1.0, 1.0], false, &[])), "entity_index_out_of_range");
         assert_eq!(engine_bytes(&doc), snapshot, "every refusal leaves the document byte-identical");
     }
 

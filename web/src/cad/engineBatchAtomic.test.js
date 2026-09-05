@@ -68,7 +68,7 @@ const SCRIPT = [
   'const loaded = await handleMessage({ type: "loadDocument", documentId: "x.dxf", bytes }, engine)',
   'const ids = loaded.entities.map((e) => e.id)',
   'const [h, v, c] = ids',
-  'const summary = (r) => ({ ok: r.ok, op: r.op, reason: r.reason ?? null, createdId: r.createdId ?? null, createdIds: r.createdIds ?? null, count: r.entityCount ?? null, entities: (r.entities || []).map((e) => ({ id: e.id, type: e.type, vertices: e.vertices, radius: e.radius, startDeg: e.startDeg, endDeg: e.endDeg })) })',
+  'const summary = (r) => ({ ok: r.ok, op: r.op, reason: r.reason ?? null, createdId: r.createdId ?? null, createdIds: r.createdIds ?? null, count: r.entityCount ?? null, entities: (r.entities || []).map((e) => ({ id: e.id, type: e.type, vertices: e.vertices, bulges: e.bulges, closed: e.closed, radius: e.radius, startDeg: e.startDeg, endDeg: e.endDeg })) })',
   // A fillet: both lines cut to their tangent points, one arc made, in one turn.
   'out.fillet = summary(await handleMessage({ type: "applyEdit", op: "batch", payload: { verb: "fillet", steps: [',
   '  { op: "setVertices", payload: { entityId: h, points: [0, 0, 8, 0], closed: false } },',
@@ -99,6 +99,16 @@ const SCRIPT = [
   // An op named after a prototype property is not a create and calls nothing.
   'out.proto = summary(await handleMessage({ type: "applyEdit", op: "constructor", payload: { entityId: h } }, engine))',
   'out.protoInBatch = summary(await handleMessage({ type: "applyEdit", op: "batch", payload: { verb: "trim", steps: [{ op: "hasOwnProperty", payload: { entityId: h } }] } }, engine))',
+  // W4g-6d: a polyline's own corner fillet is ONE setVertices carrying a bulge; the projection reads it back
+  // after the write + re-parse, a list of the wrong length is refused by the crate before anything changes,
+  // and a straight rewrite with no list leaves every bulge at 0.
+  'out.square = summary(await handleMessage({ type: "applyEdit", op: "createPolyline", payload: { points: [0, 0, 10, 0, 10, 10, 0, 10], closed: true, layer: "A" } }, engine))',
+  'const sq = out.square.createdId',
+  'out.cornerFillet = summary(await handleMessage({ type: "applyEdit", op: "batch", payload: { verb: "fillet", steps: [',
+  '  { op: "setVertices", payload: { entityId: sq, points: [0, 0, 10, 0, 10, 8, 8, 10, 0, 10], closed: true, bulges: [0, 0, 0.414213562, 0, 0] } },',
+  '] } }, engine))',
+  'out.badBulges = summary(await handleMessage({ type: "applyEdit", op: "setVertices", payload: { entityId: sq, points: [0, 0, 10, 0, 10, 10], closed: true, bulges: [0, 0] } }, engine))',
+  'out.straightAgain = summary(await handleMessage({ type: "applyEdit", op: "setVertices", payload: { entityId: sq, points: [0, 0, 10, 0, 10, 10], closed: true } }, engine))',
   'process.stdout.write(JSON.stringify({ ids, out }))',
 ].join('\n')
 
@@ -112,6 +122,25 @@ describe.skipIf(!GLUE)('the worker batch on the real engine', () => {
     const { ids, out } = JSON.parse(raw)
     expect(ids).toHaveLength(3)
     const [h, v] = ids
+
+    // W4g-6d: the corner fillet's bulge survives the engine's write + re-parse and comes back in the projection.
+    expect(out.square.ok).toBe(true)
+    expect(out.cornerFillet.ok).toBe(true)
+    const rounded = out.cornerFillet.entities.find((e) => e.id === out.square.createdId)
+    expect(rounded.type).toBe('LWPOLYLINE')
+    expect(rounded.closed).toBe(true)
+    expect(rounded.vertices).toEqual([[0, 0, 0], [10, 0, 0], [10, 8, 0], [8, 10, 0], [0, 10, 0]])
+    expect(rounded.bulges).toHaveLength(5)
+    expect(rounded.bulges[2]).toBeCloseTo(0.414213562, 9)
+    expect(rounded.bulges.filter((b) => b === 0)).toHaveLength(4)
+    expect(out.badBulges.ok).toBe(false)
+    expect(out.badBulges.reason).toBe('bulges_not_per_vertex')
+    const stillRounded = out.badBulges.entities?.find?.((e) => e.id === out.square.createdId)
+    if (stillRounded) expect(stillRounded.vertices).toHaveLength(5)
+    expect(out.straightAgain.ok).toBe(true)
+    const straight = out.straightAgain.entities.find((e) => e.id === out.square.createdId)
+    expect(straight.vertices).toHaveLength(3)
+    expect(straight.bulges).toEqual([0, 0, 0])
 
     // The fillet: three steps, one reply, the arc selected, both lines cut.
     expect(out.fillet.ok).toBe(true)

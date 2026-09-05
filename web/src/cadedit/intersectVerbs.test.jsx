@@ -22,6 +22,8 @@ const ARC = { id: '11', handle: '11', index: 2, type: 'ARC', layer: 'A', closed:
 // The left half of the circle centred (10,0) radius 5, crossing H at (5,0).
 const ARC_HALF = { id: '11', handle: '11', index: 2, type: 'ARC', layer: 'A', closed: false, editable: true, vertices: [[10, 0, 0]], radius: 5, startDeg: 90, endDeg: 270 }
 const session = (entities, selectedId) => ({ entities, selectedId })
+// W4g-6d: the counter-clockwise 10 x 10 square, a polyline whose own corner FILLET / CHAMFER can round.
+const SQ = { id: '13', handle: '13', index: 3, type: 'LWPOLYLINE', layer: 'A', closed: true, editable: true, vertices: [[0, 0, 0], [10, 0, 0], [10, 10, 0], [0, 10, 0]], bulges: [0, 0, 0, 0], radius: null, startDeg: null, endDeg: null }
 
 describe('W4g-6 store: the operands are read live, before any geometry', () => {
   it('every verb needs a second entity other than the selection and a numeric point', () => {
@@ -38,6 +40,10 @@ describe('W4g-6 store: the operands are read live, before any geometry', () => {
     expect(buildEditPayload('fillet', '7', { edge: '9', x: '1', y: '1', r: '-1', ex: '5', ey: '3' }).refusal).toBe('Fillet refused: the radius must be 0 or more.')
     expect(buildEditPayload('fillet', '7', { edge: '9', x: '1', y: '1', r: '2', ex: '', ey: '3' }).refusal).toBe('Fillet refused: the point on the second object (edge x, edge y) must both be numbers.')
     expect(buildEditPayload('fillet', '7', { edge: '9', x: '1', y: '1', r: '0', ex: '5', ey: '3' })).toEqual({ payload: { entityId: '7', edge: '9', x: 1, y: 1 } })
+    // W4g-6d: FILLET / CHAMFER may name the selection itself (a polyline's own corner); the kernel judges the kind.
+    expect(buildEditPayload('fillet', '13', { edge: '13', x: '10', y: '5', r: '2', ex: '5', ey: '10' })).toEqual({ payload: { entityId: '13', edge: '13', x: 10, y: 5 } })
+    expect(buildEditPayload('chamfer', '13', { edge: '13', x: '10', y: '5', d1: '2', d2: '3', ex: '5', ey: '10' }).payload).toMatchObject({ entityId: '13', edge: '13' })
+    expect(buildEditPayload('extend', '7', { edge: '7', x: '1', y: '1' }).refusal).toBe('Extend refused: the boundary edge must be a different entity from the selection.')
     expect(buildEditPayload('chamfer', '7', { edge: '9', x: '1', y: '1', d1: '1', d2: 'two', ex: '5', ey: '3' }).refusal).toBe('Chamfer refused: both distances must be numbers.')
     expect(buildEditPayload('chamfer', '7', { edge: '9', x: '1', y: '1', d1: '1', d2: '-2', ex: '5', ey: '3' }).refusal).toBe('Chamfer refused: both distances must be 0 or more.')
     expect(buildEditPayload('chamfer', '7', { edge: '9', x: '1', y: '1', d1: '1', d2: '2', ex: '5', ey: 'q' }).refusal).toBe('Chamfer refused: the point on the second line (edge x, edge y) must both be numbers.')
@@ -85,6 +91,15 @@ describe('W4g-6 store: the planner over the session and the lowering to the work
     expect(round.steps.map((s) => s.op)).toEqual(['setVertices', 'createArc'])
     expect(round.steps.some((s) => s.entityId === '12')).toBe(false)
     expect(lowerSteps(round.steps).steps).toHaveLength(2)
+    // W4g-6d: a polyline's own corner plans ONE setVertices step whose bulge list rides to the worker,
+    // and a line named as its own second object is refused by the kernel, not the store.
+    const corner = planIntersectVerb('fillet', session([SQ], '13'), { edge: '13', r: '2', x: '10', y: '5', ex: '5', ey: '10' })
+    expect(corner.steps).toHaveLength(1)
+    const low = lowerSteps(corner.steps)
+    expect(low.steps[0].payload).toMatchObject({ entityId: '13', closed: true, points: [0, 0, 10, 0, 10, 8, 8, 10, 0, 10] })
+    expect(low.steps[0].payload.bulges).toHaveLength(5)
+    expect(low.steps[0].payload.bulges[2]).toBeCloseTo(Math.tan(Math.PI / 8), 9)
+    expect(planIntersectVerb('fillet', session([H, SQ], '7'), { edge: '7', r: '2', x: '2', y: '0', ex: '8', ey: '0' }).refusal).toBe('Fillet refused: select a different entity as the second object.')
     const lowered = lowerSteps(planned.steps)
     expect(lowered.steps[1].op).toBe('setArc')
     expect(lowered.steps[1].payload).toMatchObject({ entityId: '11', cx: 10, cy: 0, radius: 5, startDeg: 90 })
@@ -116,6 +131,11 @@ describe('W4g-6 store: the planner over the session and the lowering to the work
     expect(lowerSteps([{ op: 'setVertices', entityId: '7', points: many(1002), closed: false }]).steps).toHaveLength(1)
     expect(lowerSteps([{ op: 'setVertices', entityId: '7', points: many(1003), closed: false }]).refusal).toMatch(/needs 2 to 1002 points/)
     expect(lowerSteps([{ op: 'setVertices', entityId: '7', points: [[0, 0], [Number.NaN, 1]], closed: false }]).refusal).toBe('Edit refused: a geometry step has a point that is not a number.')
+    // W4g-6d: a bulge list rides only when one is set, and a bad list is refused before the engine sees it.
+    expect(lowerSteps([{ op: 'setVertices', entityId: '7', points: [[0, 0], [8, 0]], closed: false, bulges: [0, 0] }]).steps[0].payload).toEqual({ entityId: '7', points: [0, 0, 8, 0], closed: false })
+    expect(lowerSteps([{ op: 'setVertices', entityId: '7', points: [[0, 0], [8, 0]], closed: false, bulges: [0.5, 0] }]).steps[0].payload).toEqual({ entityId: '7', points: [0, 0, 8, 0], closed: false, bulges: [0.5, 0] })
+    expect(lowerSteps([{ op: 'setVertices', entityId: '7', points: [[0, 0], [8, 0]], closed: false, bulges: [0.5] }]).refusal).toBe('Edit refused: a geometry step needs one bulge per point, or none.')
+    expect(lowerSteps([{ op: 'setVertices', entityId: '7', points: [[0, 0], [8, 0]], closed: false, bulges: [0.5, Number.NaN] }]).refusal).toBe('Edit refused: a geometry step needs one bulge per point, or none.')
     expect(lowerSteps([{ op: 'setArc', entityId: '11', x: 0, y: 0, r: 0, a0: 0, a1: 90 }]).refusal).toBe('Edit refused: an arc step needs a radius greater than 0.')
     expect(lowerSteps([{ op: 'setArc', entityId: '11', x: 0, y: 0, r: 1, a0: 0, a1: 360 }]).refusal).toBe('Edit refused: an arc step needs a start and end that differ.')
     expect(lowerSteps([{ op: 'delete', entityId: '' }]).refusal).toBe('Edit refused: step delete names no entity.')

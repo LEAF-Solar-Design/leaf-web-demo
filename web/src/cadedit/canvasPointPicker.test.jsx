@@ -255,4 +255,39 @@ describe('W4g-6 edge picks', () => {
     expect(screen.getByLabelText('ribbon y', { exact: true }).value).toBe('0.5')
     expect(screen.getByRole('button', { name: 'Run' }).disabled).toBe(false)
   })
+
+  it('W4g-6d: a FILLET edge click on the selected POLYLINE names it (its own corner); on a selected LINE it still waits', async () => {
+    // The square sits away from H so a click on either names one entity only.
+    const SQ = { id: '13', type: 'LWPOLYLINE', layer: 'A', closed: true, editable: true, vertices: [[20, 20, 0], [30, 20, 0], [30, 30, 0], [20, 30, 0]], bulges: [0, 0, 0, 0], radius: null, startDeg: null, endDeg: null }
+    mount()
+    await openAndLoad([H, SQ])
+    act(() => { context.session.actions.select('13') })
+    fireEvent.click(document.querySelector('.drafting-ribbon [data-tool="modify:fillet"]'))
+    await waitFor(() => expect(screen.getByTestId('cockpit-prompt').getAttribute('data-op')).toBe('fillet'))
+    // The radius is the prompt's first step; the edge fields follow it.
+    fireEvent.change(screen.getByLabelText('ribbon radius', { exact: true }), { target: { value: '2' } })
+    await waitFor(() => expect(screen.getByLabelText('ribbon edge', { exact: true }).value).toBe(''))
+    // (250, 300) is world (25, 30): on the square's top side, 20 from every other entity.
+    click(250, 300)
+    expect(screen.getByLabelText('ribbon edge', { exact: true }).value).toBe('13')
+    expect(context.inputs.ex).toBe('25')
+    expect(context.inputs.ey).toBe('30')
+    // The point step then lands on the square's right side: the two picks name the corner (30,30).
+    click(300, 250)
+    expect(screen.getByLabelText('ribbon x', { exact: true }).value).toBe('30')
+    expect(screen.getByLabelText('ribbon y', { exact: true }).value).toBe('25')
+    // A LINE is never its own second object: the same click on the selection waits.
+    // (A second click on the armed tool cancels it; the third arms it again.)
+    fireEvent.click(document.querySelector('.drafting-ribbon [data-tool="modify:fillet"]'))
+    await waitFor(() => expect(screen.queryByTestId('cockpit-prompt')).toBeNull())
+    act(() => { context.session.actions.select('7') })
+    fireEvent.click(document.querySelector('.drafting-ribbon [data-tool="modify:fillet"]'))
+    await waitFor(() => expect(screen.getByTestId('cockpit-prompt').getAttribute('data-op')).toBe('fillet'))
+    fireEvent.change(screen.getByLabelText('ribbon radius', { exact: true }), { target: { value: '2' } })
+    // The edge field keeps its last value across a re-arm; clear it so the click's silence is visible.
+    fireEvent.change(screen.getByLabelText('ribbon edge', { exact: true }), { target: { value: '' } })
+    await waitFor(() => expect(screen.getByLabelText('ribbon edge', { exact: true }).value).toBe(''))
+    click(20, 0)
+    expect(screen.getByLabelText('ribbon edge', { exact: true }).value).toBe('')
+  })
 })
