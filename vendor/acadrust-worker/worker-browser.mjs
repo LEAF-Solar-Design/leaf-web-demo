@@ -164,6 +164,11 @@ const CREATE_OPS = Object.freeze({
   createText: (doc, p) => doc.createText(
     Number(p.x), Number(p.y), Number(p.height), Number(p.rotationDeg), String(p.text ?? ''), String(p.layer ?? '')),
 })
+// The op string off the boundary is looked up in a Map of the table's OWN
+// entries, never as a computed property: a prototype name such as
+// `constructor` finds nothing, and no call is ever made through a name the
+// boundary chose (CodeQL js/unvalidated-dynamic-method-call).
+const CREATE_TABLE = new Map(Object.entries(CREATE_OPS))
 
 // W4g-6: the most steps one `batch` carries. FILLET and CHAMFER cut two
 // entities and create one; a TRIM that splits keeps one and creates one.
@@ -178,10 +183,7 @@ const MAX_BATCH_STEPS = 4
  */
 function applyOne(doc, op, payload) {
   const p = payload && typeof payload === 'object' ? payload : {}
-  // The op is a string off the boundary: only an OWN key of the create
-  // table names a create (a prototype name such as `constructor` is not
-  // one), and the callee is checked to be a function before it is called.
-  const create = Object.prototype.hasOwnProperty.call(CREATE_OPS, op) ? CREATE_OPS[op] : null
+  const create = CREATE_TABLE.get(op)
   if (typeof create === 'function') {
     if (typeof doc[op] !== 'function') throw new Error(`engine_lacks_create:${op}`)
     return { createdHandle: handleId(create(doc, p), 'create_returned_no_handle'), createdHandles: null }
