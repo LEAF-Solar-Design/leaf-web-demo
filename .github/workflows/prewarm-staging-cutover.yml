@@ -116,7 +116,19 @@ env:
   # refuses. The relay dispatches on --ref main, so that corrected gate is
   # what every prewarm runs against. Dispatch order is the list order: web
   # first, then app queues on the group behind it.
-  STAGE_SERVICES: "web app"
+  # PAUSED (2026-09-05, later still): the app prewarm now succeeds (run
+  # 33952930173 staged leaf-platform-app:796 at weight 0), but the merge
+  # deploy that followed (run 33953973668) reported "Staged document differs
+  # from this run's candidate; falling back to the normal warm path": both
+  # builds bake LEAF_SOURCE_SHA into the image, so the preview-built
+  # speculative image and the merge-built image differ even for an identical
+  # tree, and full task-definition equality can never adopt the stage. Until
+  # the build/supply workflow admits an exact-tree speculative producer at
+  # the merge (the reuse path), an app prewarm costs about 9 CodeBuild
+  # minutes and lengthens the shared ECS-mutation queue in front of the
+  # merge for no saving. Restore `app` here in the change that lands that
+  # reuse, list order web then app.
+  STAGE_SERVICES: "web"
   # Bounded wait for the speculative supply set: 20 polls x 30s.
   SUPPLY_SET_POLLS: "20"
   SUPPLY_SET_INTERVAL: "30"
