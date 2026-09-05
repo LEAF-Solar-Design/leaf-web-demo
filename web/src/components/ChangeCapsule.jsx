@@ -1,3 +1,9 @@
+// WHAT THIS CAPSULE DOES NOT DO YET (the ledger's 9c row is not claimed by
+// the PR that added it): containment checks the scoped delta through an
+// injected resolver, not a live manifest check against the repo, and accept
+// does not commit the transform into the user's repo through the fold. Both
+// are owed; the capsule shows state honestly meanwhile and never reads as
+// settled before a receipt says so.
 // THE CHANGE CAPSULE (standardization slice 9c, second half of the 9b
 // right-click work: web/src/components/ElementContextMenu.jsx mounts one of
 // these once its scoped "Ask Claude to…" prompt has posted).
