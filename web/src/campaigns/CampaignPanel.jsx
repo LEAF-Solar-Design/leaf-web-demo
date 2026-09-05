@@ -114,6 +114,37 @@ function AnswerForm({ question, campaign }) {
   </form>
 }
 
+function EnrollmentPanel({ campaign }) {
+  const [machine, setMachine] = useState('')
+  const action = useAction()
+  const machines = campaign.allowedMachines || []
+  const selected = machines.includes(machine) ? machine : machines[0] || ''
+  const busy = action.busy || !!campaign.pending.enroll
+  return <section className="panel-sub" aria-label="Enrollment">
+    <h3>Enrollment</h3>
+    <Alert error={campaign.enrollmentError} onReload={campaign.refetch} />
+    {machines.length === 0 ? <p>No campaign machines are configured. Ask your workspace operator to configure a host.</p> : <>
+      <label>Campaign machine<select value={selected} disabled={busy} onChange={event => setMachine(event.target.value)}>
+        {machines.map(value => <option key={value} value={value}>{value}</option>)}
+      </select></label>
+      <button type="button" className="btn primary" disabled={busy || !selected} aria-busy={busy}
+        onClick={() => action.run(() => campaign.enroll(selected), 'Host enrollment recorded.')}>
+        Connect VM-C to this campaign
+      </button>
+    </>}
+    <ul>{(campaign.enrollments || []).map(row => <li key={row.enrollment_id}>
+      <p>{row.machine_id}: {executionWords(row.state)}</p>
+      {row.capability_link?.state === 'pending_link' && <p>Capability not yet published</p>}
+      {row.state === 'pending' && <button type="button" className="chip-act" disabled={action.busy || !!campaign.pending[`enrollment:${row.enrollment_id}`]}
+        onClick={() => action.run(() => campaign.enableEnrollment(row.enrollment_id), 'Host enrollment enabled.')}>Enable</button>}
+      {row.state !== 'revoked' && <button type="button" className="chip-act" disabled={action.busy || !!campaign.pending[`enrollment:${row.enrollment_id}`]}
+        onClick={() => action.run(() => campaign.revokeEnrollment(row.enrollment_id), 'Host enrollment revoked.')}>Revoke</button>}
+    </li>)}</ul>
+    <Alert error={action.error} onReload={campaign.refetch} />
+    <span role="status">{action.outcome}</span>
+  </section>
+}
+
 function SignedInPanel({ projectId, projectName }) {
   const campaign = useCampaigns(projectId, { enabled: true })
   const selected = campaign.selected
@@ -159,6 +190,7 @@ function SignedInPanel({ projectId, projectName }) {
         </li>)}</ul>
       </>}
     </section>}
+    {selected && <EnrollmentPanel key={`enrollment:${campaign.selectedId}`} campaign={campaign} />}
     {selected && <div className="panel-sub" key={`questions:${campaign.selectedId}`}>
       <h3>Questions</h3>
       <ul className="campaign-questions">

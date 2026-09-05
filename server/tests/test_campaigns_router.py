@@ -1,9 +1,10 @@
 """HTTP proofs for the project campaign authority, using its store seam."""
 import uuid
+import os
 from types import SimpleNamespace
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 import deps
@@ -33,7 +34,53 @@ class FakeStore:
 
     def __init__(self):
         self.campaigns, self.questions, self.answers = {}, {}, {}
+        self.enrollments = {}
         self.calls = []
+
+    def allowed_machines(self):
+        return ['VM-C', 'VM-D']
+
+    def list_enrollments(self, org, project, campaign):
+        self._require(org, project, campaign)
+        return [row for row in self.enrollments.values() if row['campaign_id'] == campaign]
+
+    def request_enrollment(self, org, project, campaign, principal, *, machine_id):
+        self._require(org, project, campaign)
+        self.calls.append(('enroll', org, project, campaign, principal, machine_id))
+        if machine_id not in self.allowed_machines():
+            raise CampaignError('invalid_machine')
+        for row in self.enrollments.values():
+            if row['campaign_id'] == campaign and row['machine_id'] == machine_id:
+                return {**row, 'replayed': True}
+        row = dict(enrollment_id=str(uuid.uuid4()), org_id=org, project_id=project,
+                   campaign_id=campaign, machine_id=machine_id, state='pending',
+                   capability_link={'state': 'pending_link'})
+        self.enrollments[row['enrollment_id']] = row
+        return dict(row)
+
+    def _change_enrollment(self, org, project, campaign, eid, principal, state):
+        self._require(org, project, campaign)
+        row = self.enrollments.get(eid)
+        if not row or (row['org_id'], row['project_id'], row['campaign_id']) != (org, project, campaign):
+            raise CampaignUnavailable('project_unavailable')
+        if row['state'] == 'revoked' and state == 'enabled':
+            raise CampaignConflict('enrollment_revoked')
+        replayed = row['state'] == state
+        row['state'] = state
+        return {**row, 'replayed': replayed}
+
+    def enable_enrollment(self, *args):
+        return self._change_enrollment(*args, 'enabled')
+
+    def revoke_enrollment(self, *args):
+        return self._change_enrollment(*args, 'revoked')
+
+    def resolve_worker_enrollment(self, eid, subject):
+        row = self.enrollments.get(eid)
+        if not row or row['state'] != 'enabled' or subject != os.environ.get('LEAF_CAMPAIGN_WORKER_SUBJECT'):
+            raise CampaignError('worker_forbidden')
+        self.calls.append(('recover', row['org_id'], row['project_id'], row['campaign_id']))
+        return []
 
     def submit_campaign(self, org, project, tenant, principal, **fields):
         self.calls.append(('submit', org, project, tenant, principal))
@@ -123,6 +170,7 @@ class FakeExecution:
 def setup(monkeypatch):
     store = FakeStore()
     router.set_store(store)
+    router.set_enrollment_store(store)
     store.execution = FakeExecution(store)
     router.set_execution_store(store.execution)
     allowed = {PROJECT, OTHER}
@@ -144,11 +192,103 @@ def setup(monkeypatch):
         yield client, store, allowed
     router.set_store(None)
     router.set_execution_store(None)
+    router.set_enrollment_store(None)
 
 
 def _submit(client, **overrides):
     return client.post('/api/campaigns', headers={'Idempotency-Key': 'key'}, json={
         'project_id': PROJECT, 'title': 'ReciPDF', 'prompt': 'Organize recipes', **overrides})
+
+
+def test_enrollment_human_routes_and_server_owned_fields(setup):
+    client, store, allowed = setup
+    campaign = _submit(client).json()['campaign']['campaign_id']
+    url = f'/api/campaigns/{campaign}/enrollments'
+    payload = {'project_id': PROJECT, 'machine_id': 'VM-C', 'service_subject': 'forged',
+               'publication_id': 'forged', 'first_invocation_receipt_id': 'forged'}
+    listed = client.get(url, params={'project_id': PROJECT})
+    assert listed.json()['enrollment']['allowed_machines'] == ['VM-C', 'VM-D']
+    first = client.post(url, json=payload)
+    assert first.status_code == 201
+    row = first.json()['enrollment']
+    assert row['capability_link']['state'] == 'pending_link'
+    assert 'service_subject' not in row and 'publication_id' not in row
+    assert store.calls[-1] == ('enroll', ORG, PROJECT, campaign, PRINCIPAL, 'VM-C')
+    assert client.post(url, json=payload).status_code == 200
+    assert len(store.enrollments) == 1
+    assert client.post(url, json={**payload, 'machine_id': 'other'}).status_code == 400
+    eid = row['enrollment_id']
+    for action in ('enable', 'revoke'):
+        assert client.post(f'{url}/{eid}/{action}', json={'project_id': OTHER}).status_code == 404
+    allowed.remove(PROJECT)
+    for action in ('enable', 'revoke'):
+        assert client.post(f'{url}/{eid}/{action}', json={'project_id': PROJECT}).status_code == 403
+    assert client.post(url, json=payload).status_code == 403
+
+
+def test_worker_recovery_always_verifies_bearer_and_derives_scope(setup, monkeypatch):
+    import auth
+    client, store, _ = setup
+    monkeypatch.setenv('LEAF_CAMPAIGN_WORKER_SUBJECT', 'service-worker')
+    monkeypatch.setenv('LEAF_AUTH_ENABLED', '0')
+    verified = []
+
+    def verify(header):
+        verified.append(header)
+        if header not in ('Bearer signed', 'Bearer wrong'):
+            raise HTTPException(401, 'Invalid bearer')
+        return {'sub': 'service-worker' if header == 'Bearer signed' else 'wrong'}
+
+    monkeypatch.setattr(auth, 'verify_platform_token', verify)
+    campaign = _submit(client).json()['campaign']['campaign_id']
+    url = f'/api/campaigns/{campaign}/enrollments'
+    row = client.post(url, json={'project_id': PROJECT, 'machine_id': 'VM-C'}).json()['enrollment']
+    eid = row['enrollment_id']
+    recover = '/internal/campaign-worker/recover'
+    body = {'enrollment_id': eid}
+    assert client.post(recover, json=body).status_code == 401
+    assert client.post(recover, json=body, headers={'Authorization': 'Bearer unsigned'}).status_code == 401
+    assert client.post(recover, json=body, headers={'Authorization': 'Bearer wrong'}).status_code == 403
+    headers = {'Authorization': 'Bearer signed'}
+    assert client.post(recover, json=body, headers=headers).status_code == 403
+    assert client.post(f'{url}/{eid}/enable', json={'project_id': PROJECT}).status_code == 200
+    assert client.post(recover, json=body, headers=headers).json() == {'ok': True, 'pending_remote_bindings': []}
+    assert store.calls[-1] == ('recover', ORG, PROJECT, campaign)
+    assert client.post(recover, json={**body, 'project_id': OTHER}, headers=headers).status_code == 400
+    assert client.post(recover, json={'enrollment_id': str(uuid.uuid4())}, headers=headers).status_code == 403
+    assert client.post(f'{url}/{eid}/revoke', json={'project_id': PROJECT}).status_code == 200
+    assert client.post(recover, json=body, headers=headers).status_code == 403
+    assert client.post(url, json={'project_id': PROJECT, 'machine_id': 'VM-C'}).json()['enrollment']['state'] == 'revoked'
+    assert None in verified and 'Bearer unsigned' in verified
+
+
+def test_worker_uses_real_signature_verifier_with_tenant_auth_off(setup, monkeypatch):
+    import time
+    import auth
+    import jwt
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    client, _, _ = setup
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    monkeypatch.setattr(auth, '_signing_key', lambda token: key.public_key())
+    monkeypatch.setenv('LEAF_AUTH_LIVE', '0')
+    monkeypatch.setenv('LEAF_CAMPAIGN_WORKER_SUBJECT', 'service-worker')
+    campaign = _submit(client).json()['campaign']['campaign_id']
+    url = f'/api/campaigns/{campaign}/enrollments'
+    row = client.post(url, json={'project_id': PROJECT, 'machine_id': 'VM-C'}).json()['enrollment']
+    eid = row['enrollment_id']
+    client.post(f'{url}/{eid}/enable', json={'project_id': PROJECT})
+    claims = {'sub': 'service-worker', 'iat': int(time.time()), 'exp': int(time.time()) + 300,
+              'iss': auth.issuer(), 'aud': auth.audience()}
+    recover = '/internal/campaign-worker/recover'
+    for token, status in (
+        (jwt.encode(claims, key, algorithm='RS256'), 200),
+        (jwt.encode(claims, '', algorithm='none'), 401),
+        (jwt.encode({**claims, 'sub': 'wrong'}, key, algorithm='RS256'), 403),
+    ):
+        response = client.post(recover, json={'enrollment_id': eid}, headers={'Authorization': 'Bearer ' + token})
+        assert response.status_code == status
+    assert client.post(recover, json={'enrollment_id': eid}).status_code == 401
 
 
 def _question(client):
