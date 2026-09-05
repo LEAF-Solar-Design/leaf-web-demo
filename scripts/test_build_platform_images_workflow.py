@@ -4017,7 +4017,10 @@ def check_docs_noop_filter(text: str) -> None:
         # (still two, on steps[2] and steps[3]), no new token, no new endpoint
         # class, no live mutation. Not a secret: Actions already prints this
         # envelope in the relay log the same way it prints the supply one.
-        "6085947af98d186777348c526b1fe38b460f80a1631fcd8f68100a1d5063ceb1"
+        # Hash updated 2026-09-05: remove the final contract freshness read
+        # after both exact child results passed. Dispatch sites, inputs,
+        # secrets and pre-dispatch binding are unchanged; no mutation added.
+        "7cead6d4d8a11a68b6f176c461651abad0897d76192c7d8120e548c72552673c"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -5875,6 +5878,62 @@ def test_v3_relay_publishes_frozen_receipt_after_main_advances() -> None:
         for result in receipt["surface_results"].values()
     )
     assert out.count("Dispatched ") == 2, out
+
+
+def test_settled_relay_receipt_survives_a_new_consumer_contract() -> None:
+    """Reproduce relay 33949224748's late veto after both children succeeded."""
+    relay = _strict_yaml(
+        (WORKFLOW.parent / "dispatch-staging-deploys.yml").read_text(encoding="utf-8")
+    )
+    shipped = _relay_deploy_step(relay["jobs"]["dispatch"])["run"]
+    settled = shipped[shipped.index("# EVERY service landed"):]
+    bash = shutil.which("bash")
+    assert bash and shutil.which("jq")
+    with tempfile.TemporaryDirectory() as tmp_name:
+        tmp = Path(tmp_name)
+        (tmp / "surface-results").mkdir()
+        source = "d" * 40
+        for service in ("web", "app"):
+            result = {
+                "schema": "leaf.staging-surface-result.v1",
+                "service": service,
+                "release_source_revision": source,
+                "convergence_id": f"{source}-1-{service}",
+                "candidate_image_digest": "sha256:" + "a" * 64,
+                "terminal_image_digest": "sha256:" + "a" * 64,
+                "terraform_workflow_blob": "b" * 40,
+                "surface_receipt_sha256": "c" * 64,
+                "outcome": "deployed",
+                "aws_mutation_count": 1,
+            }
+            (tmp / "surface-results" / f"{service}.json").write_text(
+                json.dumps(result), encoding="utf-8")
+        (tmp / "staging-supply-set.json").write_text(
+            json.dumps({"schema": "leaf.staging-supply-set.v3", "source_revision": source}),
+            encoding="utf-8")
+        script = tmp / "receipt.sh"
+        script.write_text(
+            "set -euo pipefail\n"
+            "require_contract_still_latest() {\n"
+            "  echo 'newer Terraform consumer contract refused: consumer semantics changed' >&2\n"
+            "  return 1\n}\n" + settled,
+            encoding="utf-8")
+        env = dict(os.environ, SUPPLY_SCHEMA="leaf.staging-supply-set.v3",
+                   BUILD_HEAD_SHA=source, BUILD_RUN_ATTEMPT="1",
+                   GITHUB_RUN_ID="424242", SUPPLY_SHA256="f" * 64,
+                   GITHUB_OUTPUT=str(tmp / "github_output"))
+        process = subprocess.run([bash, str(script)], cwd=tmp, env=env,
+                                 text=True, capture_output=True)
+        assert process.returncode == 0, process.stdout + process.stderr
+        receipt = json.loads((tmp / "staging-converged.json").read_text())
+        assert receipt["release_source_revision"] == source
+        assert receipt["schema"] == "leaf.staging-converged.v2"
+        assert set(receipt["surface_results"]) == {"web", "app"}
+        assert (tmp / "github_output").read_text().strip() == "converged=true"
+        assert "consumer semantics changed" not in process.stderr
+    # The provider binding still gates dispatch, not completed evidence.
+    assert sum(line.strip() == "require_contract_still_latest"
+               for line in _executable_bash(shipped).splitlines()) == 1
 
 
 
