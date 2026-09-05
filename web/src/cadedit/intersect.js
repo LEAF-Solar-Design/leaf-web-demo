@@ -602,12 +602,19 @@ function filletWithArc(verb, target, edge, A, B, r, p1, p2) {
     for (const X of points) candidates.push({ C: null, T1: X, T2: X })
   } else {
     const centres = aLine ? lineCircleCentres(A, B.c, B.r, r) : bLine ? lineCircleCentres(B, A.c, A.r, r) : circleCircleCentres(A.c, A.r, B.c, B.r, r)
+    let touching = false
     for (const C of centres) {
       const T1 = aLine ? footOnLine(A, C) : onCircleToward(A.c, A.r, C)
       const T2 = bLine ? footOnLine(B, C) : onCircleToward(B.c, B.r, C)
+      // Where the two curves touch without crossing, an offset pair meets at
+      // the touch point itself: both tangent points coincide and the fillet
+      // would be a zero-sweep arc (kimi, #1051). That candidate is no fillet.
+      if (same(T1, T2, 1e-7)) { touching = true; continue }
       candidates.push({ C, T1, T2 })
     }
-    if (!candidates.length) return refuse(verb, 'no circle of that radius is tangent to both objects')
+    if (!candidates.length) {
+      return refuse(verb, touching ? 'the two objects touch without crossing; no corner to make' : 'no circle of that radius is tangent to both objects')
+    }
   }
   let best = null
   for (const cand of candidates) {
