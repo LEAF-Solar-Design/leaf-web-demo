@@ -507,7 +507,7 @@ const ACTION_LIST = [
   // round trip and one undo step however many entities it touches.
   engineOp('modify', 'trim', 'trim', 'Trim', 'trim', 'Cut the selection at a cutting edge and remove the part you click', 'small'),
   engineOp('modify', 'extend', 'extend', 'Extend', 'extend', 'Lengthen the selection until it meets a boundary edge', 'small'),
-  engineOp('modify', 'fillet', 'fillet', 'Fillet', 'fillet', 'Round the corner between the selection and a second line with an arc', 'small'),
+  engineOp('modify', 'fillet', 'fillet', 'Fillet', 'fillet', 'Round the corner between the selection and a second line, arc or circle with an arc', 'small'),
   engineOp('modify', 'chamfer', 'chamfer', 'Chamfer', 'chamfer', 'Bevel the corner between the selection and a second line', 'small'),
   // W4g-5c: the reference's Clipboard panel, in its order and its sizes.
   engineOp('clipboard', 'pasteClip', 'paste', 'Paste', 'paste', 'Paste the clipboard entity at a base point', 'large'),
