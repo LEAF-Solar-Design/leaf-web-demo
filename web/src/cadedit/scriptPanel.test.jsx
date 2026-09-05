@@ -148,6 +148,35 @@ describe('W4g-7a the script runner', () => {
     expect(posts()).toHaveLength(0)
   })
 
+  it('COPYCLIP is answered the moment it returns, even when its sentence repeats; the same file can be chosen twice', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    mount()
+    await openAndLoad([H])
+    act(() => { context.session.actions.select('7') })
+    // The ribbon's own COPY first, so the script's first line repeats its sentence exactly.
+    act(() => { context.session.actions.copyToClipboard(false) })
+    const sentence = context.session.status
+    expect(sentence).toMatch(/clipboard/i)
+    setScript('copyclip\ncopyclip\nline 0,0 1,1')
+    fireEvent.click(runButton())
+    // Both copies answered without the engine, the line posted at once: no 60 s stall.
+    await waitFor(() => expect(posts()).toHaveLength(1))
+    expect(posts()[0].op).toBe('createLine')
+    expect(status().textContent).toBe('Running line 3: LINE (3 of 3)...')
+    expect(context.session.status).toBe(sentence)
+    // The same File chosen twice reads twice (the input forgets its value).
+    const file = new File(['circle 1,1 2\n'], 'a.scr', { type: 'text/plain' })
+    file.text = async () => 'circle 1,1 2\n'
+    reply('createLine', [H, L2], { createdId: '8' })
+    await waitFor(() => expect(status().getAttribute('data-phase')).toBe('done'))
+    const input = screen.getByLabelText('Script file')
+    await act(async () => { fireEvent.change(input, { target: { files: [file] } }); await Promise.resolve(); await Promise.resolve() })
+    await waitFor(() => expect(screen.getByLabelText('ribbon script').value).toBe('circle 1,1 2\n'))
+    setScript('')
+    await act(async () => { fireEvent.change(input, { target: { files: [file] } }); await Promise.resolve(); await Promise.resolve() })
+    await waitFor(() => expect(screen.getByLabelText('ribbon script').value).toBe('circle 1,1 2\n'))
+  })
+
   it('a bare ERASE runs on the selection, and an engine that never answers is stopped by the line budget', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     mount()

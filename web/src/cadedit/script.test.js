@@ -69,6 +69,9 @@ describe('parseScript', () => {
     expect(parse('x'.repeat(MAX_SCRIPT_CHARS + 1)).refusal).toMatch(/longer than/)
     expect(parse(Array.from({ length: MAX_SCRIPT_LINES + 1 }, () => 'e').join('\n')).refusal).toMatch(/more than 5000 lines/)
     expect(parse(Array.from({ length: MAX_SCRIPT_LINES }, () => 'e').join('\n')).lines).toHaveLength(MAX_SCRIPT_LINES)
+    // A file's trailing line terminator is not a line: 5000 lines plus it still parse.
+    expect(parse(Array.from({ length: MAX_SCRIPT_LINES }, () => 'e').join('\r\n') + '\r\n').lines).toHaveLength(MAX_SCRIPT_LINES)
+    expect(parse('line 0,0 1,1\n').lines).toHaveLength(1)
     expect(parse(42).refusal).toBe('the script is not text')
     expect(parse('').lines).toEqual([])
   })
