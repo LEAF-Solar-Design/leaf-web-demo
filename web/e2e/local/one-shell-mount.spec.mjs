@@ -1202,7 +1202,9 @@ test.describe('route matrix, rail ON', () => {
     await bar.press('Enter')
     await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'trim', { timeout: 20_000 })
     // An empty edge holds Run with the ask, like an empty operand.
-    await expect(page.getByRole('button', { name: 'Run' })).toBeDisabled()
+    // (The prompt's own Run, by class: the page holds other buttons whose
+    // accessible name starts with Run, and a held Run is named by its ask.)
+    await expect(page.locator('[data-testid="cockpit-prompt"] .cp-run')).toBeDisabled()
     await page.getByLabel('ribbon edge', { exact: true }).fill(cuttingEdge)
     await page.getByLabel('ribbon x', { exact: true }).fill('310')
     await page.getByLabel('ribbon y', { exact: true }).fill('305')
