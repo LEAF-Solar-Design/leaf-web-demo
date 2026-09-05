@@ -10,6 +10,10 @@ import { describe, expect, it } from 'vitest'
 
 import manifest from '../assets/icons8/manifest.json'
 import built from '../assets/icons8/built.json'
+// W4g-5b icons, kimi on #1030: the registry's engineOp icons are positional
+// arguments no scrape above collects, which is how ARRAY shipped two glyph
+// fallbacks past this gate. The registry is imported and asked directly.
+import { ACTIONS } from '../lib/actionRegistry.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SOURCES = [
@@ -90,6 +94,22 @@ describe('cockpit icons (W4e)', () => {
     // A key that is in neither renders as a monogram on staging, silently.
     const unresolved = unresolvedIconKeys(declaredIconKeys(), built.ids || [])
     expect(unresolved).toEqual([])
+  })
+
+  it('every registry record with an icon resolves in the built sprite (not a scrape: the records themselves)', () => {
+    const registryIcons = ACTIONS.map((a) => a.icon).filter((icon) => typeof icon === 'string' && icon)
+    expect(registryIcons.length).toBeGreaterThan(30)
+    expect(registryIcons).toContain('array')
+    expect(registryIcons).toContain('array-polar')
+    expect(unresolvedIconKeys(registryIcons, built.ids || [])).toEqual([])
+  })
+
+  it('names a registry icon the sprite lost, rather than passing vacuously', () => {
+    // The falsification kimi ran by hand: drop the two ARRAY ids from the
+    // built list and the registry check must say so by name.
+    const registryIcons = ACTIONS.map((a) => a.icon).filter(Boolean)
+    const without = (built.ids || []).filter((id) => id !== 'array' && id !== 'array-polar')
+    expect(unresolvedIconKeys(registryIcons, without)).toEqual(['array', 'array-polar'])
   })
 
   it('fails on an unknown key rather than passing vacuously', () => {
