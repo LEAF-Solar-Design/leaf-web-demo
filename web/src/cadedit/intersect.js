@@ -574,18 +574,19 @@ export function extendEntity(target, edge, px, py, tol = EPSILON) {
     let chosen = null
     let best = null
     if (atEnd) {
+      const last = n - 1
       const dEnd = sub(T.pts[n - 1], T.pts[n - 2])
       const uEnd = scale(dEnd, 1 / len(dEnd))
       for (const c of hits) {
         const ahead = dot(sub(c.p, T.pts[n - 1]), uEnd)
-        if (ahead > EPSILON && (best === null || ahead < best)) { chosen = c; best = ahead }
+        if (c.s > last - 1 && ahead > EPSILON && (best === null || ahead < best)) { chosen = c; best = ahead }
       }
     } else {
       const dStart = sub(T.pts[1], T.pts[0])
       const uStart = scale(dStart, 1 / len(dStart))
       for (const c of hits) {
         const ahead = dot(sub(c.p, T.pts[0]), uStart)
-        if (ahead < -EPSILON && (best === null || ahead > best)) { chosen = c; best = ahead }
+        if (c.s < 1 && ahead < -EPSILON && (best === null || ahead > best)) { chosen = c; best = ahead }
       }
     }
     if (!chosen) return refuse(verb, 'the boundary edge does not lie ahead of that end')

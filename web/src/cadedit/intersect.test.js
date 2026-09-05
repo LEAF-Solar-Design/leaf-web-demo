@@ -1303,3 +1303,22 @@ describe('Astra refutations, round eight (W4g-6e record 11)', () => {
     expect(points[2]).toEqual([1e9, 2])
   })
 })
+
+describe('Astra refutations, round nine (W4g-6e record 12)', () => {
+  it('refuses crossings on another arc when extending either straight end', () => {
+    const target = poly('p', [[3, 2], [3, 0], [0, 0], [1, 0]], false, 'A', [1, 0, 0, 0])
+    const edge = line('e', [0, 1], [5, 1])
+    expect(extendEntity(target, edge, 1, 0, 1e-9).refusal).toBe('Extend refused: the boundary edge does not lie ahead of that end.')
+    const mirrored = poly('q', [[1, 0], [0, 0], [3, 0], [3, 2]], false, 'A', [0, 0, -1, 0])
+    expect(extendEntity(mirrored, edge, 1, 0, 1e-9).refusal).toBe('Extend refused: the boundary edge does not lie ahead of that end.')
+  })
+
+  it('extends the terminal straight segment and ignores the earlier arc crossing', () => {
+    const target = poly('p', [[3, 2], [3, 0], [0, 0], [1, 0]], false, 'A', [1, 0, 0, 0])
+    const edge = line('v', [2, -1], [2, 1])
+    expect(extendEntity(target, edge, 1, 0, 1e-9)).toEqual({ steps: [{
+      op: 'setVertices', entityId: 'p', points: [[3, 2], [3, 0], [0, 0], [2, 0]], closed: false,
+      bulges: [1, 0, 0, 0],
+    }] })
+  })
+})
