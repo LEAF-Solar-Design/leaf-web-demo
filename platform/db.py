@@ -63,6 +63,33 @@ _REQUIRED_COLUMNS = {
         "answer_id", "question_id", "campaign_id", "org_id", "project_id",
         "principal_id", "answer", "answer_fingerprint", "created_at",
     },
+    "campaign_tasks": {
+        "task_id", "org_id", "project_id", "campaign_id", "task_key", "kind",
+        "parent_task_id", "title", "spec", "capability", "stages", "owned_paths",
+        "declared_artifacts", "source_sha", "verify_command", "idempotency_key",
+        "payload_fingerprint", "status", "current_stage", "fence", "created_at", "updated_at",
+    },
+    "campaign_task_dependencies": {
+        "task_id", "depends_on_task_id", "org_id", "project_id", "campaign_id",
+    },
+    "campaign_task_questions": {
+        "task_id", "question_id", "org_id", "project_id", "campaign_id",
+    },
+    "campaign_task_attempts": {
+        "attempt_id", "task_id", "org_id", "project_id", "campaign_id", "fence",
+        "attempt_token_hash", "worker_id", "stage", "outward_operation_key",
+        "claimed_at", "deadline_at", "settled_at", "status", "budget_reservation_ref",
+    },
+    "campaign_stage_receipts": {
+        "receipt_id", "task_id", "attempt_id", "org_id", "project_id", "campaign_id",
+        "stage", "fence", "outcome", "result", "result_fingerprint", "artifact_ref",
+        "outward_operation_key", "resource_identity", "rollback_identity", "verified",
+        "reconciles_receipt_id", "created_at",
+    },
+    "campaign_events": {
+        "event_id", "seq", "org_id", "project_id", "campaign_id", "task_id",
+        "attempt_id", "fence", "event_type", "payload", "created_at",
+    },
     "arlo_lab_inputs": {"input_version_id", "org_id", "project_id", "example_id",
                         "example_version", "input_sha256", "request_json", "created_at"},
     # Immutable versioned template store (card C2-1R / migration 0049). The
@@ -551,6 +578,22 @@ _REQUIRED_CONSTRAINTS = {
         "campaign_questions", "UNIQUE (campaign_id, question_key)"),
     "campaign_answers_question_unique": _catalog_contract(
         "campaign_answers", "UNIQUE (question_id)"),
+    "campaign_tasks_key_unique": _catalog_contract(
+        "campaign_tasks", "UNIQUE (campaign_id, task_key)"),
+    "campaign_tasks_idempotency_unique": _catalog_contract(
+        "campaign_tasks", "UNIQUE (org_id, project_id, campaign_id, idempotency_key)"),
+    "campaign_task_dependencies_pkey": _catalog_contract(
+        "campaign_task_dependencies", "PRIMARY KEY (task_id, depends_on_task_id)"),
+    "campaign_task_questions_pkey": _catalog_contract(
+        "campaign_task_questions", "PRIMARY KEY (task_id, question_id)"),
+    "campaign_task_attempts_fence_unique": _catalog_contract(
+        "campaign_task_attempts", "UNIQUE (task_id, fence)"),
+    "campaign_stage_receipts_attempt_unique": _catalog_contract(
+        "campaign_stage_receipts", "UNIQUE (attempt_id)"),
+    "campaign_stage_receipts_reconciliation_unique": _catalog_contract(
+        "campaign_stage_receipts", "UNIQUE (reconciles_receipt_id)"),
+    "campaign_events_seq_key": _catalog_contract(
+        "campaign_events", "UNIQUE (seq)"),
     "ios_ship_readiness_pkey": _catalog_contract(
         "ios_ship_readiness", "PRIMARY KEY (org_id, project_id, tenant_id)"),
     "ios_ship_readiness_project_fk": _catalog_contract(
@@ -658,6 +701,12 @@ _REQUIRED_INDEXES = {
 _REQUIRED_TRIGGERS = {
     "campaign_answers_immutable": _catalog_contract(
         "campaign_answers", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
+        "EXECUTE FUNCTION leaf_reject_ledger_mutation()"),
+    "campaign_stage_receipts_immutable": _catalog_contract(
+        "campaign_stage_receipts", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
+        "EXECUTE FUNCTION leaf_reject_ledger_mutation()"),
+    "campaign_events_immutable": _catalog_contract(
+        "campaign_events", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
         "EXECUTE FUNCTION leaf_reject_ledger_mutation()"),
     "ios_ship_receipts_immutable": _catalog_contract(
         "ios_ship_receipts", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
