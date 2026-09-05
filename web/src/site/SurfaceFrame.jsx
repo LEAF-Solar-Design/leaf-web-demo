@@ -31,7 +31,7 @@
 // nothing here compares a surface id to a string literal. Every gate reads a
 // declared slot off surfaceContract(activeSurface).
 // ---------------------------------------------------------------------------
-import { createContext, useContext } from 'react'
+import { createContext, lazy, Suspense, useContext } from 'react'
 
 import ConversationListComponent from '../components/ConversationList.jsx'
 import EntitlementGate from '../components/EntitlementGate.jsx'
@@ -188,6 +188,11 @@ export default function SurfaceFrame({
   integrations = null,
   signedIn = false,
   onSignOut = null,
+  // Slice 9b. Whatever ladder fields the scene can supply for a registry
+  // action's `when(ctx)` (hasDrawing, hasVersions, canUndo, ... — see
+  // actionRegistry.js). `{}` is a real, honest ctx: every gated row reads
+  // its worst-case reason from it rather than a fabricated "available".
+  contextMenuCtx = {},
   children = null,
 }) {
   validateScene(scene)
@@ -220,6 +225,7 @@ export default function SurfaceFrame({
     integrations,
     signedIn,
     onSignOut,
+    contextMenuCtx,
   }
   return <SurfaceFrameContext.Provider value={value}>{children}</SurfaceFrameContext.Provider>
 }
@@ -507,6 +513,35 @@ function Integrations() {
   )
 }
 
+/**
+ * ElementContextMenu (standardization slice 9b). THE gate is the declared
+ * slot and nothing else: `contract.contextMenu` is a non-empty array of
+ * element kinds. `[]` on a surface (today: every surface until this slice's
+ * follow-ups populate it) mounts nothing, exactly the "if a surface declares
+ * none, nothing mounts" rule the slice spec states. The mounted component
+ * itself does not read `contract.contextMenu` — it answers ANY element
+ * carrying `data-element-id` — so the per-surface kind list is enforced
+ * HERE, at the one mount gate, not duplicated inside the menu.
+ */
+// Lazy: Radix's own dependency weight (~34 KB gz) has no place in the shell's
+// FIRST paint when the menu itself renders nothing until a real right-click,
+// Shift+F10 or long-press fires. `Suspense` falls back to null, never a
+// spinner: there is no visible slot for one to occupy, and the trigger
+// itself needs no bytes loaded before a pointer or key event asks for it.
+const LazyElementContextMenu = lazy(() => import('../components/ElementContextMenu.jsx'))
+
+function ContextMenuSlot() {
+  const frame = useSlot()
+  if (!frame) return null
+  const kinds = frame.contract?.contextMenu
+  if (!Array.isArray(kinds) || kinds.length === 0) return null
+  return (
+    <Suspense fallback={null}>
+      <LazyElementContextMenu ctx={frame.contextMenuCtx} />
+    </Suspense>
+  )
+}
+
 // The slots are statics on the frame, not separate named exports: one import
 // gives a scene the wrapper AND every slot, and `<SurfaceFrame.Tabs />` reads
 // at the mount site as what it is. Each reference is a stable module-level
@@ -526,3 +561,4 @@ SurfaceFrame.Builds = Builds
 SurfaceFrame.Inbox = Inbox
 SurfaceFrame.Toast = FrameToast
 SurfaceFrame.Cockpit = Cockpit
+SurfaceFrame.ContextMenu = ContextMenuSlot

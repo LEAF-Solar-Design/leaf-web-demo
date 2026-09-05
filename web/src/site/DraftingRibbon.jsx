@@ -33,6 +33,7 @@
 import { useLayoutEffect, useRef } from 'react'
 
 import { accessibleName } from '../lib/actionRegistry.js'
+import { formatElementId } from '../lib/elementIdentity.js'
 import { familyMonogram } from '../lib/surfaceRails.js'
 import CockpitIcon from './CockpitIcon.jsx'
 
@@ -71,6 +72,7 @@ export function RibbonTool({ tool }) {
       type="button"
       className={`ribbon-tool${write ? ' write' : ''}`}
       data-tool={id}
+      data-element-id={formatElementId('tool', id) || undefined}
       data-size={size}
       disabled={disabled}
       title={unavailable ? reason : (title || label)}
