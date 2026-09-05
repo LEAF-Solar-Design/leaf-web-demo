@@ -283,13 +283,17 @@ def claim_task(org_id, project_id, campaign_id, *, worker_id, lease_seconds,
             if attempt is None:
                 continue
             _event(cur, scope, task, 'attempt_expired', attempt)
-            if attempt['stage'] in OUTWARD:
+            binding = _dispatch_binding(cur, scope, attempt)
+            if binding or attempt['stage'] in OUTWARD:
+                key = attempt['outward_operation_key']
+                if binding:
+                    key = key or binding['request_id']
                 values = _values('unknown', {'reason': 'lease_expired'}, None,
-                                 attempt['outward_operation_key'], None, None, False)
+                                 key, None, None, False)
                 _receipt(cur, scope, task, attempt, values)
                 _advance(cur, scope, task, 'unknown')
                 _event(cur, scope, task, 'outcome_unknown', attempt,
-                       {'outward_operation_key': attempt['outward_operation_key']})
+                       {'outward_operation_key': key})
             else:
                 cur.execute("UPDATE campaign_tasks SET status='pending', updated_at=NOW() WHERE " +
                             SCOPE + ' AND task_id=%(task)s', params)
@@ -362,6 +366,8 @@ def settle_attempt(org_id, project_id, campaign_id, attempt_id, *, attempt_token
         if (not hmac.compare_digest(hashlib.sha256(attempt_token.encode()).hexdigest(),
                                     attempt['attempt_token_hash']) or fence != attempt['fence']):
             _conflict('stale_attempt')
+        if _dispatch_binding(cur, scope, attempt):
+            _conflict('remote_reconciliation_required')
         cur.execute('SELECT * FROM campaign_stage_receipts WHERE ' + SCOPE +
                     ' AND attempt_id=%(attempt)s', params)
         receipt = cur.fetchone()
@@ -405,6 +411,8 @@ def reconcile_outward(org_id, project_id, campaign_id, task_id, *, outward_opera
         unknown = cur.fetchone()
         if unknown is None:
             _conflict('reconcile_identity_mismatch')
+        if _dispatch_binding(cur, scope, unknown):
+            _conflict('remote_reconciliation_required')
         cur.execute('SELECT * FROM campaign_stage_receipts WHERE ' + SCOPE +
                     ' AND reconciles_receipt_id=%(unknown)s', {**scope, 'unknown': unknown['receipt_id']})
         existing = cur.fetchone()
@@ -432,6 +440,270 @@ def reconcile_outward(org_id, project_id, campaign_id, task_id, *, outward_opera
         _event(cur, scope, task, 'reconciled', attempt,
                {'reconciles_receipt_id': str(unknown['receipt_id'])})
         return _row(receipt)
+
+
+def _canonical_digest(value):
+    # Matches fleet.gateway.delegation.canonical_digest, including UTF-8.
+    try:
+        return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'),
+                                         ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+    except (ValueError, TypeError, OverflowError, UnicodeError):
+        _invalid('dispatch material must be JSON')
+
+
+def _dispatch_binding(cur, scope, attempt):
+    cur.execute('SELECT * FROM campaign_dispatch_bindings WHERE ' + SCOPE +
+                ' AND task_id=%(task)s AND attempt_id=%(attempt)s AND fence=%(fence)s',
+                {**scope, 'task': attempt['task_id'], 'attempt': attempt['attempt_id'],
+                 'fence': attempt['fence']})
+    return cur.fetchone()
+
+
+def _remote_attempt(cur, scope, attempt_id):
+    cur.execute('SELECT task_id FROM campaign_task_attempts WHERE ' + SCOPE +
+                ' AND attempt_id=%(attempt)s', {**scope, 'attempt': attempt_id})
+    pointer = cur.fetchone()
+    if pointer is None:
+        _missing()
+    task = _task(cur, scope, pointer['task_id'])
+    cur.execute('SELECT *, deadline_at<=clock_timestamp() AS overdue '
+                'FROM campaign_task_attempts WHERE ' + SCOPE +
+                ' AND task_id=%(task)s AND attempt_id=%(attempt)s FOR UPDATE',
+                {**scope, 'task': task['task_id'], 'attempt': attempt_id})
+    return task, cur.fetchone()
+
+
+def _submission(binding):
+    return dict(version=1, request_id=binding['request_id'],
+                root_request_id=binding['root_request_id'], registration_id=binding['registration_id'],
+                project_id=binding['gateway_project_id'], source_ref=binding['source_ref'],
+                packet_digest=binding['packet_digest'], budget_class=binding['budget_class'],
+                reservation_micro_usd=binding['reservation_micro_usd'])
+
+
+def _public_binding(binding, *, replayed=False):
+    return {**_row(binding, replayed=replayed), 'submission': _submission(binding)}
+
+
+def _remote_integer(value, *, minimum=0):
+    if type(value) is not int or not minimum <= value <= 9223372036854775807:
+        _invalid('dispatch number must be an integer in range')
+
+
+def bind_remote_dispatch(org_id, project_id, campaign_id, attempt_id, *, fence,
+                         machine_id, run_id, registration_id, root_request_id,
+                         gateway_project_id, source_ref, packet_digest, budget_class,
+                         reservation_micro_usd):
+    """Freeze a server adapter's request before submit; no spending authority is granted."""
+    scope = {**_scope(org_id, project_id), 'campaign': _uuid(campaign_id)}
+    attempt_id = _uuid(attempt_id)
+    _remote_integer(fence)
+    _remote_integer(reservation_micro_usd, minimum=1)
+    material = dict(machine_id=machine_id, run_id=run_id, registration_id=registration_id,
+                    root_request_id=root_request_id, gateway_project_id=gateway_project_id,
+                    source_ref=source_ref, packet_digest=packet_digest, budget_class=budget_class,
+                    reservation_micro_usd=reservation_micro_usd)
+    for name, maximum in (('machine_id', 200), ('run_id', 128), ('registration_id', 128),
+                           ('root_request_id', 200), ('gateway_project_id', 200),
+                           ('source_ref', 40), ('packet_digest', 64), ('budget_class', 8)):
+        _text(material[name], name, maximum)
+    if (not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', run_id)
+            or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', registration_id)
+            or not re.fullmatch(r'[0-9a-f]{40}', source_ref)
+            or not re.fullmatch(r'[0-9a-f]{64}', packet_digest)
+            or budget_class not in ('explicit', 'daily')):
+        _invalid()
+    with _cursor() as cur:
+        _check(cur, scope)
+        task, attempt = _remote_attempt(cur, scope, attempt_id)
+        identity = dict(campaign=str(scope['campaign']), task=str(task['task_id']),
+                        attempt=str(attempt_id), fence=fence, stage=attempt['stage'])
+        request_id = 'cd-' + _fingerprint('leaf.campaign.dispatch.v1', identity)[:48]
+        leaf_id = 'vmc-' + _canonical_digest([machine_id, request_id])[:48]
+        material.update(request_id=request_id, leaf_id=leaf_id)
+        submission_material = {**_submission(material), 'machine_id': machine_id,
+                               'leaf_id': leaf_id, 'run_id': run_id}
+        digest = _canonical_digest(submission_material)
+        fingerprint = _fingerprint('leaf.campaign.dispatch.binding.v1',
+                                   {**identity, **submission_material})
+        binding = _dispatch_binding(cur, scope, attempt)
+        if binding:
+            if binding['binding_fingerprint'] != fingerprint:
+                _conflict('dispatch_conflict')
+            return _public_binding(binding, replayed=True)
+        if (attempt['status'] != 'active' or attempt['overdue']
+                or fence != attempt['fence'] or fence != task['fence']):
+            _conflict('stale_attempt')
+        if source_ref != task['source_sha']:
+            _conflict('dispatch_identity_mismatch')
+        cur.execute(
+            'INSERT INTO campaign_dispatch_bindings (attempt_id, task_id, org_id, project_id, '
+            'campaign_id, fence, stage, request_id, machine_id, run_id, leaf_id, registration_id, '
+            'root_request_id, gateway_project_id, source_ref, packet_digest, budget_class, '
+            'reservation_micro_usd, submission_digest, binding_fingerprint) VALUES '
+            '(%(attempt)s, %(task)s, %(org)s, %(project)s, %(campaign)s, %(fence)s, %(stage)s, '
+            '%(request_id)s, %(machine_id)s, %(run_id)s, %(leaf_id)s, %(registration_id)s, '
+            '%(root_request_id)s, %(gateway_project_id)s, %(source_ref)s, %(packet_digest)s, '
+            '%(budget_class)s, %(reservation_micro_usd)s, %(digest)s, %(fingerprint)s) RETURNING *',
+            {**scope, **material, 'attempt': attempt_id, 'task': task['task_id'], 'fence': fence,
+             'stage': attempt['stage'], 'digest': digest, 'fingerprint': fingerprint})
+        binding = cur.fetchone()
+        _event(cur, scope, task, 'remote_bound', attempt, {'request_id': request_id})
+        return _public_binding(binding)
+
+
+def record_remote_admission(org_id, project_id, campaign_id, attempt_id, *,
+                            leaf_id, run_id, submission_digest, reservation_id=None):
+    """Record trusted gateway readback, including after the coordinator lease expires."""
+    scope = {**_scope(org_id, project_id), 'campaign': _uuid(campaign_id)}
+    attempt_id = _uuid(attempt_id)
+    if reservation_id is not None:
+        _text(reservation_id, 'reservation_id', 128)
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', reservation_id):
+            _invalid()
+    with _cursor() as cur:
+        _check(cur, scope)
+        task, attempt = _remote_attempt(cur, scope, attempt_id)
+        binding = _dispatch_binding(cur, scope, attempt)
+        if (binding is None or leaf_id != binding['leaf_id'] or run_id != binding['run_id']
+                or submission_digest != binding['submission_digest']):
+            _conflict('dispatch_identity_mismatch')
+        if reservation_id is not None and binding['reservation_id'] not in (None, reservation_id):
+            _conflict('dispatch_conflict')
+        if binding['state'] == 'settled':
+            if reservation_id is not None and reservation_id != binding['reservation_id']:
+                _conflict('dispatch_conflict')
+            return _public_binding(binding, replayed=True)
+        if binding['state'] == 'admitted' and (reservation_id is None or binding['reservation_id'] == reservation_id):
+            return _public_binding(binding, replayed=True)
+        cur.execute("UPDATE campaign_dispatch_bindings SET state='admitted', "
+                    'admitted_at=COALESCE(admitted_at, NOW()), '
+                    'reservation_id=COALESCE(reservation_id, %(reservation)s) WHERE ' + SCOPE +
+                    ' AND task_id=%(task)s AND attempt_id=%(attempt)s AND fence=%(fence)s RETURNING *',
+                    {**scope, 'task': task['task_id'], 'attempt': attempt_id,
+                     'fence': attempt['fence'], 'reservation': reservation_id})
+        binding = cur.fetchone()
+        _event(cur, scope, task, 'remote_admitted', attempt, {'leaf_id': leaf_id})
+        return _public_binding(binding)
+
+
+def settle_remote_attempt(org_id, project_id, campaign_id, attempt_id, *, fence, verdict,
+                          outcome, result, artifact_ref=None, resource_identity=None,
+                          rollback_identity=None, verified=False):
+    """Settle only from a trusted adapter that verified gateway and immutable producer evidence.
+
+    Identity matching here is not signature verification or billing authority.
+    These methods are server-only and must never be exposed as browser ingress.
+    """
+    scope = {**_scope(org_id, project_id), 'campaign': _uuid(campaign_id)}
+    attempt_id = _uuid(attempt_id)
+    _remote_integer(fence)
+    if (not isinstance(verdict, dict) or type(verdict.get('fencing_token')) is not int
+            or not 0 <= verdict['fencing_token'] <= 9223372036854775807):
+        _conflict('dispatch_identity_mismatch')
+    # This validated counter is not a credential. Keep secret rejection for
+    # every other verdict field, including nested material.
+    _secret({key: value for key, value in verdict.items() if key != 'fencing_token'})
+    verdict_fingerprint = _canonical_digest(verdict)
+    if outcome == 'unknown':
+        _invalid('remote settlement requires a terminal outcome')
+    with _cursor() as cur:
+        _check(cur, scope)
+        task, attempt = _remote_attempt(cur, scope, attempt_id)
+        binding = _dispatch_binding(cur, scope, attempt)
+        if (binding is None or verdict.get('run_id') != binding['run_id']
+                or verdict.get('leaf_id') != binding['leaf_id']):
+            _conflict('dispatch_identity_mismatch')
+        if fence != binding['fence']:
+            _conflict('stale_attempt')
+        key = attempt['outward_operation_key'] or binding['request_id']
+        values = _values(outcome, result, artifact_ref, key,
+                         resource_identity, rollback_identity, verified)
+        params = {**scope, 'task': task['task_id'], 'attempt': attempt_id, 'fence': fence}
+        cur.execute('SELECT * FROM campaign_stage_receipts WHERE ' + SCOPE +
+                    ' AND task_id=%(task)s AND attempt_id=%(attempt)s AND fence=%(fence)s', params)
+        receipt = cur.fetchone()
+        if binding['state'] == 'settled':
+            if attempt['status'] == 'expired' and receipt:
+                cur.execute('SELECT * FROM campaign_stage_receipts WHERE ' + SCOPE +
+                            ' AND task_id=%(task)s AND reconciles_receipt_id=%(unknown)s',
+                            {**params, 'unknown': receipt['receipt_id']})
+                receipt = cur.fetchone()
+            if (receipt is None or receipt['result_fingerprint'] != values['result_fingerprint']
+                    or binding['verdict_fingerprint'] != verdict_fingerprint
+                    or binding['remote_fencing_token'] != verdict['fencing_token']):
+                _conflict('settlement_conflict')
+            return _row(receipt, replayed=True)
+        if binding['state'] != 'admitted':
+            _conflict('dispatch_identity_mismatch')
+        if (fence != task['fence'] or task['current_stage'] != attempt['stage']
+                or attempt['status'] not in ('active', 'expired')):
+            _conflict('stale_attempt')
+        _evidence(task, values)
+        if attempt['status'] == 'active' and attempt['overdue']:
+            cur.execute("UPDATE campaign_task_attempts SET status='expired' WHERE " + SCOPE +
+                        ' AND task_id=%(task)s AND attempt_id=%(attempt)s AND fence=%(fence)s', params)
+            _event(cur, scope, task, 'attempt_expired', attempt)
+            receipt = _receipt(cur, scope, task, attempt,
+                               _values('unknown', {'reason': 'lease_expired'}, None, key, None, None, False))
+            _advance(cur, scope, task, 'unknown')
+            _event(cur, scope, task, 'outcome_unknown', attempt, {'outward_operation_key': key})
+            attempt['status'], task['status'] = 'expired', 'reconcile_required'
+        if attempt['status'] == 'expired':
+            if (task['status'] != 'reconcile_required' or receipt is None
+                    or receipt['outcome'] != 'unknown' or receipt['outward_operation_key'] != key):
+                _conflict('stale_attempt')
+            unknown = receipt
+            cur.execute('SELECT receipt_id FROM campaign_stage_receipts WHERE ' + SCOPE +
+                        ' AND task_id=%(task)s AND reconciles_receipt_id=%(unknown)s',
+                        {**params, 'unknown': unknown['receipt_id']})
+            if cur.fetchone():
+                _conflict('stale_attempt')
+            cur.execute('UPDATE campaign_tasks SET fence=fence+1, updated_at=NOW() WHERE ' + SCOPE +
+                        ' AND task_id=%(task)s RETURNING *', params)
+            task = cur.fetchone()
+            cur.execute(
+                'INSERT INTO campaign_task_attempts (attempt_id, task_id, org_id, project_id, campaign_id, '
+                'fence, attempt_token_hash, worker_id, stage, deadline_at, settled_at, status, outward_operation_key) '
+                'VALUES (%(id)s, %(task)s, %(org)s, %(project)s, %(campaign)s, %(next_fence)s, %(hash)s, '
+                "'reconciliation', %(stage)s, NOW(), NOW(), 'settled', %(key)s) RETURNING *",
+                {**params, 'id': uuid.uuid4(), 'next_fence': task['fence'], 'key': key,
+                 'hash': hashlib.sha256(secrets.token_bytes(32)).hexdigest(), 'stage': attempt['stage']})
+            reconciliation = cur.fetchone()
+            receipt = _receipt(cur, scope, task, reconciliation, values, unknown['receipt_id'])
+            _event(cur, scope, task, 'reconciled', reconciliation,
+                   {'reconciles_receipt_id': str(unknown['receipt_id'])})
+        else:
+            if receipt is not None:
+                _conflict('stale_attempt')
+            receipt = _receipt(cur, scope, task, attempt, values)
+            cur.execute("UPDATE campaign_task_attempts SET status='settled', settled_at=NOW() WHERE " + SCOPE +
+                        ' AND task_id=%(task)s AND attempt_id=%(attempt)s AND fence=%(fence)s', params)
+            _event(cur, scope, task, {'succeeded': 'stage_succeeded', 'failed': 'stage_failed'}[outcome], attempt)
+        _advance(cur, scope, task, outcome)
+        cur.execute("UPDATE campaign_dispatch_bindings SET state='settled', settled_at=NOW(), "
+                    'remote_fencing_token=%(remote_fence)s, verdict_fingerprint=%(verdict)s WHERE ' + SCOPE +
+                    ' AND task_id=%(task)s AND attempt_id=%(attempt)s AND fence=%(fence)s',
+                    {**params, 'remote_fence': verdict['fencing_token'], 'verdict': verdict_fingerprint})
+        _event(cur, scope, task, 'remote_settled', attempt, {'receipt_id': str(receipt['receipt_id'])})
+        return _row(receipt)
+
+
+def pending_remote_bindings(org_id, project_id, campaign_id):
+    """Return frozen request bodies for restart recovery without coordinator memory."""
+    scope = {**_scope(org_id, project_id), 'campaign': _uuid(campaign_id)}
+    with _cursor() as cur:
+        _check(cur, scope)
+        cur.execute(
+            'SELECT b.* FROM campaign_dispatch_bindings b JOIN campaign_task_attempts a '
+            'ON a.org_id=b.org_id AND a.project_id=b.project_id AND a.campaign_id=b.campaign_id '
+            'AND a.task_id=b.task_id AND a.attempt_id=b.attempt_id AND a.fence=b.fence '
+            'JOIN campaign_tasks t ON t.org_id=b.org_id AND t.project_id=b.project_id '
+            'AND t.campaign_id=b.campaign_id AND t.task_id=b.task_id AND t.fence=b.fence '
+            'WHERE b.org_id=%(org)s AND b.project_id=%(project)s AND b.campaign_id=%(campaign)s '
+            "AND b.state<>'settled' AND (a.status='active' OR t.status='reconcile_required') "
+            'ORDER BY b.created_at, b.attempt_id', scope)
+        return [_public_binding(row) for row in cur.fetchall()]
 
 
 def retry_task(org_id, project_id, campaign_id, task_id):

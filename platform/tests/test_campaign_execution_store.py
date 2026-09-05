@@ -263,6 +263,13 @@ def test_foreign_scope_denied_without_writes(make_org):
             (execution.retry_task, (*foreign, task['task_id']), {}),
             (execution.reconcile_outward, (*foreign, task['task_id']),
              dict(outward_operation_key='key', outcome='failed', result={})),
+            (_bind, (foreign, attempt), {}),
+            (execution.pending_remote_bindings, foreign, {}),
+            (execution.record_remote_admission, (*foreign, attempt['attempt_id']),
+             dict(leaf_id='vmc-' + 'a' * 48, run_id='run', submission_digest='b' * 64)),
+            (execution.settle_remote_attempt, (*foreign, attempt['attempt_id']),
+             dict(fence=attempt['fence'], verdict={'run_id': 'run', 'leaf_id': 'vmc-' + 'a' * 48,
+                                                'fencing_token': 1}, outcome='failed', result={})),
         ):
             _code('project_unavailable', function, *args, **kwargs)
     read = execution.read_execution(*scope)
@@ -288,3 +295,216 @@ def test_store_has_no_ddl_or_job_submission():
     source = (Path(__file__).resolve().parents[1] / 'campaign_execution.py').read_text(encoding='utf-8')
     assert not re.search(r'\b(?:CREATE|ALTER|DROP)\s+(?:TABLE|INDEX|TRIGGER|FUNCTION)', source, re.I)
     assert not re.search(r'\bINSERT\s+INTO\s+jobs\b', source, re.I)
+    router = (Path(__file__).resolve().parents[2] / 'server' / 'routers' / 'campaigns.py').read_text(encoding='utf-8')
+    for method in ('bind_remote_dispatch', 'record_remote_admission',
+                   'settle_remote_attempt', 'pending_remote_bindings'):
+        assert method not in router
+
+
+def _bind(scope, attempt, **changes):
+    payload = dict(fence=attempt['fence'], machine_id='recipe-machine', run_id='recipe-run',
+                   registration_id='recipe-registration', root_request_id='recipe-root',
+                   gateway_project_id='recipe-project', source_ref='a' * 40,
+                   packet_digest='b' * 64, budget_class='explicit', reservation_micro_usd=1000000)
+    payload.update(changes)
+    return execution.bind_remote_dispatch(*scope, attempt['attempt_id'], **payload)
+
+
+def _admit(scope, binding, **changes):
+    payload = {key: binding[key] for key in ('leaf_id', 'run_id', 'submission_digest')}
+    payload.update(changes)
+    return execution.record_remote_admission(*scope, binding['attempt_id'], **payload)
+
+
+def _remote_settle(scope, binding, **changes):
+    payload = dict(fence=binding['fence'], verdict=dict(run_id=binding['run_id'],
+                   leaf_id=binding['leaf_id'], fencing_token=3), outcome='succeeded',
+                   result={}, artifact_ref='diff:remote')
+    payload.update(changes)
+    return execution.settle_remote_attempt(*scope, binding['attempt_id'], **payload)
+
+
+def test_remote_binding_freezes_gateway_submission_before_restart(make_org):
+    scope, _, _ = _seed(make_org)
+    _submit(scope)
+    attempt = _claim(scope)
+    binding = _bind(scope, attempt, machine_id='recipe-é', root_request_id='root-é')
+    # Fleet producer: core/claudewalk/fleet/gateway/delegation.py,
+    # Submission.model_dump(), canonical_digest and remote_leaf_id (v1).
+    # Pin its full JSON bytes independently of the store's serializer.
+    # Frozen UTF-8 vector generated from that producer's canonical bytes.
+    vector = dict(version=1, request_id='cd-' + '0' * 48, root_request_id='root-é',
+                  registration_id='recipe-registration', project_id='recipe-project',
+                  source_ref='a' * 40, packet_digest='b' * 64, budget_class='explicit',
+                  reservation_micro_usd=1000000, machine_id='recipe-é', run_id='recipe-run',
+                  leaf_id='vmc-9f66d7a919b9c914e23e3d748243943547cde9556cff3486')
+    assert 'vmc-' + execution._canonical_digest(['recipe-é', vector['request_id']])[:48] == vector['leaf_id']
+    assert execution._canonical_digest(vector) == 'eafbfad5977d9ad72919176040c901f4cce826ead73469679fe8e8ef7afa5776'
+    leaf_bytes = ('["recipe-é","' + binding['request_id'] + '"]').encode('utf-8')
+    assert binding['leaf_id'] == 'vmc-' + hashlib.sha256(leaf_bytes).hexdigest()[:48]
+    body = binding['submission']
+    assert body == dict(version=1, request_id=binding['request_id'], root_request_id='root-é',
+                        registration_id='recipe-registration', project_id='recipe-project',
+                        source_ref='a' * 40, packet_digest='b' * 64,
+                        budget_class='explicit', reservation_micro_usd=1000000)
+    producer_bytes = (
+        '{"budget_class":"explicit","leaf_id":"' + binding['leaf_id'] +
+        '","machine_id":"recipe-é","packet_digest":"' + 'b' * 64 +
+        '","project_id":"recipe-project","registration_id":"recipe-registration",'
+        '"request_id":"' + binding['request_id'] + '","reservation_micro_usd":1000000,'
+        '"root_request_id":"root-é","run_id":"recipe-run","source_ref":"' + 'a' * 40 +
+        '","version":1}').encode('utf-8')
+    assert binding['submission_digest'] == hashlib.sha256(producer_bytes).hexdigest()
+    # Simulate submit outcome unknown: the only local durable state is bound.
+    db.reset_pool()
+    pending = execution.pending_remote_bindings(*scope)
+    assert len(pending) == 1 and pending[0]['submission'] == body
+    replay = _bind(scope, attempt, machine_id='recipe-é', root_request_id='root-é')
+    assert replay['replayed'] and replay['submission_digest'] == binding['submission_digest']
+    assert replay['leaf_id'] == binding['leaf_id']
+    assert attempt['attempt_token'] not in json.dumps(pending)
+    admitted = _admit(scope, binding)
+    assert admitted['state'] == 'admitted' and admitted['reservation_id'] is None
+    db.reset_pool()
+    assert _admit(scope, binding)['replayed']
+    assert len(execution.read_execution(*scope)['events']) == 4
+    _remote_settle(scope, binding)
+
+
+def test_remote_admission_identity_and_frozen_material(make_org):
+    scope, _, _ = _seed(make_org)
+    _submit(scope)
+    attempt = _claim(scope)
+    binding = _bind(scope, attempt)
+    for changes in ({'machine_id': 'other'}, {'run_id': 'other'}, {'registration_id': 'other'},
+                    {'root_request_id': 'other'}, {'gateway_project_id': 'other'},
+                    {'source_ref': 'c' * 40}, {'packet_digest': 'c' * 64},
+                    {'budget_class': 'daily'}, {'reservation_micro_usd': 2}):
+        _code('dispatch_conflict', _bind, scope, attempt, **changes)
+    for changes in ({'leaf_id': 'vmc-' + 'c' * 48}, {'run_id': 'other'},
+                    {'submission_digest': 'c' * 64}):
+        _code('dispatch_identity_mismatch', _admit, scope, binding, **changes)
+    assert len(execution.read_execution(*scope)['events']) == 3
+    assert execution.pending_remote_bindings(*scope)[0]['state'] == 'bound'
+    _code('dispatch_identity_mismatch', _remote_settle, scope, binding)
+    _admit(scope, binding, reservation_id='reservation-1')
+    assert _admit(scope, binding)['reservation_id'] == 'reservation-1'
+    _code('dispatch_conflict', _admit, scope, binding, reservation_id='reservation-2')
+    _code('remote_reconciliation_required', _settle, scope, attempt)
+    _remote_settle(scope, binding)
+    assert _admit(scope, binding, reservation_id='reservation-1')['replayed']
+    _code('dispatch_conflict', _admit, scope, binding, reservation_id='reservation-2')
+
+
+@pytest.mark.parametrize('stage', execution.STAGES)
+@pytest.mark.parametrize('sweep', [False, True])
+def test_remote_expiry_in_every_stage_recovers_atomically(make_org, stage, sweep):
+    scope, _, _ = _seed(make_org)
+    task = _submit(scope, stages=[stage])
+    attempt = _claim(scope)
+    binding = _bind(scope, attempt)
+    _expire(attempt)
+    if sweep:
+        assert _claim(scope) is None
+        assert execution.read_execution(*scope)['tasks'][0]['status'] == 'reconcile_required'
+        key = attempt['outward_operation_key'] or binding['request_id']
+        _code('remote_reconciliation_required', execution.reconcile_outward, *scope, task['task_id'],
+              outward_operation_key=key, outcome='failed', result={})
+    db.reset_pool()
+    assert _bind(scope, attempt)['replayed']
+    assert execution.pending_remote_bindings(*scope)[0]['submission'] == binding['submission']
+    _admit(scope, binding)
+    receipt = _remote_settle(scope, binding, outcome='failed')
+    assert receipt['reconciles_receipt_id'] is not None
+    assert receipt['fence'] == attempt['fence'] + 1
+    read = execution.read_execution(*scope)
+    assert len(read['receipts']) == 2 and read['tasks'][0]['status'] == 'failed'
+    unknown = next(row for row in read['receipts'] if row['outcome'] == 'unknown')
+    assert unknown['receipt_id'] == receipt['reconciles_receipt_id']
+    assert unknown['outward_operation_key'] == (attempt['outward_operation_key'] or binding['request_id'])
+    assert execution.pending_remote_bindings(*scope) == []
+    db.reset_pool()
+    replay = _remote_settle(scope, binding, outcome='failed')
+    assert replay['replayed'] and replay['receipt_id'] == receipt['receipt_id']
+
+
+def test_remote_accepted_settlement_replays_after_later_fence(make_org):
+    scope, _, _ = _seed(make_org)
+    _submit(scope, stages=['implementation', 'build_test'])
+    attempt = _claim(scope)
+    binding = _bind(scope, attempt)
+    _admit(scope, binding)
+    receipt = _remote_settle(scope, binding)
+    later = _claim(scope)
+    later_binding = _bind(scope, later)
+    _expire(later)
+    assert _claim(scope) is None
+    db.reset_pool()
+    replay = _remote_settle(scope, binding)
+    assert replay['replayed'] and replay['receipt_id'] == receipt['receipt_id']
+    assert _bind(scope, attempt)['replayed']
+    assert _admit(scope, binding)['replayed']
+    _code('dispatch_conflict', _admit, scope, binding, reservation_id='late-reservation')
+    assert [row['attempt_id'] for row in execution.pending_remote_bindings(*scope)] == [later_binding['attempt_id']]
+    for verdict in (dict(run_id=binding['run_id'], leaf_id=binding['leaf_id'], fencing_token=4),
+                    dict(run_id=binding['run_id'], leaf_id=binding['leaf_id'], fencing_token=3, changed=True)):
+        _code('settlement_conflict', _remote_settle, scope, binding, verdict=verdict)
+    _code('settlement_conflict', _remote_settle, scope, binding, result={'changed': True})
+    assert len(execution.read_execution(*scope)['receipts']) == 2
+
+
+def test_late_remote_success_advances_and_replays_without_claim_token(make_org):
+    scope, _, _ = _seed(make_org)
+    _submit(scope, stages=['implementation', 'build_test'])
+    attempt = _claim(scope)
+    binding = _bind(scope, attempt)
+    _expire(attempt)
+    db.reset_pool()
+    recovered = execution.pending_remote_bindings(*scope)[0]
+    _admit(scope, recovered)
+    receipt = _remote_settle(scope, recovered)
+    read = execution.read_execution(*scope)
+    assert read['tasks'][0]['current_stage'] == 'build_test'
+    assert read['tasks'][0]['status'] == 'pending'
+    assert len(read['receipts']) == 2 and receipt['reconciles_receipt_id'] is not None
+    later = _claim(scope)
+    assert later['fence'] > receipt['fence']
+    db.reset_pool()
+    assert _remote_settle(scope, recovered)['receipt_id'] == receipt['receipt_id']
+    assert execution.pending_remote_bindings(*scope) == []
+
+
+def test_remote_source_scope_fence_and_numeric_denials(make_org):
+    scope, _, _ = _seed(make_org)
+    task = _submit(scope)
+    attempt = _claim(scope)
+    _code('dispatch_identity_mismatch', _bind, scope, attempt, source_ref='c' * 40)
+    _code('stale_attempt', _bind, scope, attempt, fence=attempt['fence'] + 1)
+    for value in (True, 1.0, '1', 0, -1, 9223372036854775808):
+        _code('invalid_request', _bind, scope, attempt, reservation_micro_usd=value)
+    for value in (True, 1.0, '1'):
+        _code('invalid_request', _bind, scope, attempt, fence=value)
+    assert len(execution.read_execution(*scope)['events']) == 2
+    binding = _bind(scope, attempt)
+    _admit(scope, binding)
+    for value in (True, 3.0, '3', -1, 9223372036854775808):
+        _code('dispatch_identity_mismatch', _remote_settle, scope, binding,
+              verdict=dict(run_id=binding['run_id'], leaf_id=binding['leaf_id'], fencing_token=value))
+    for key in ('run_id', 'leaf_id'):
+        verdict = dict(run_id=binding['run_id'], leaf_id=binding['leaf_id'], fencing_token=3)
+        verdict[key] = 'other'
+        _code('dispatch_identity_mismatch', _remote_settle, scope, binding, verdict=verdict)
+    # A moved, unsettled task fence is not a provider acceptance replay.
+    with db.connection() as conn:
+        conn.execute('UPDATE campaign_tasks SET fence=fence+1 WHERE task_id=%s', (uuid.UUID(task['task_id']),))
+    _code('stale_attempt', _remote_settle, scope, binding)
+    assert execution.read_execution(*scope)['receipts'] == []
+
+
+def test_first_remote_binding_requires_live_lease(make_org):
+    scope, _, _ = _seed(make_org)
+    _submit(scope)
+    attempt = _claim(scope)
+    _expire(attempt)
+    _code('stale_attempt', _bind, scope, attempt)
+    assert execution.pending_remote_bindings(*scope) == []
