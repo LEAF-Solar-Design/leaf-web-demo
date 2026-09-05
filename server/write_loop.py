@@ -83,6 +83,9 @@ GUEST_TENANT_PREFIX = "guest-"
 # Fixed reviewed Activity. Tenant-authored code can produce data only; it can
 # never select an Activity or supply executable input to Design Automation.
 WRITE_ACTIVITY = "LeafApplyMutations"
+DATA_PLAN_TOOL_NAME = "cad-edit-plan"
+DATA_PLAN_TOOL_VERSION = "1.0.0"
+DATA_PLAN_PROVENANCE_CONTRACT = "leaf.data-plan.v1"
 MAX_OUTPUT_INTAKE_BYTES = 64 * 1024 * 1024
 USD_PER_HR = float(os.environ.get("APS_USD_PER_HR", "10"))
 
@@ -1838,6 +1841,217 @@ class LiveMutationEffectMismatch(RuntimeError):
     pass
 
 
+def _apply_plan_live(*, tenant_id: str, drawing_id: str, head_v: int,
+                     vkey: str, execution_source: bytes,
+                     bridged_legacy_bootstrap: bool, base_intake: Dict[str, Any],
+                     canonical: Dict[str, Any], plan_bytes: bytes,
+                     plan_digest: str, backend, da: Any, name: str,
+                     tool_version: str, t0: float,
+                     ledger_entry: Optional[Dict[str, Any]],
+                     holder: Optional[str], fence: Optional[int], on_submitted,
+                     source_ref: Optional[str], meta_note: str,
+                     envelope: Dict[str, Any], result: Dict[str, Any],
+                     provenance: Dict[str, Any], planner_ms: Optional[int],
+                     drawing_fetch_ms: Optional[int],
+                     scratch_keys) -> Tuple[Dict[str, Any], int]:
+    """Apply one validated plan, verify its WorkItem output, and publish it."""
+    import store
+    output_inspection_ms = None
+    version_write_ms = None
+    publish_ms = None
+    aps_timing = None
+    ts = int(time.time())
+    run_nonce = secrets.token_hex(8)
+    if isinstance(backend, store.OSSBackend) and not bridged_legacy_bootstrap:
+        in_url = da.signed_download_url(vkey)
+    else:
+        input_key = (
+            da.ephemeral_input_key(
+                f"{store.sanitize_id(drawing_id)}_v{head_v}_{run_nonce}.dwg",
+                tenant_id=tenant_id, ts=ts,
+            ) if hasattr(da, "ephemeral_input_key")
+            else f"t/{store.sanitize_id(tenant_id)}/in/{ts}_"
+                 f"{store.sanitize_id(drawing_id)}_v{head_v}_{run_nonce}.dwg"
+        )
+        _scratch_upload_bytes(da, input_key, execution_source, ".dwg")
+        scratch_keys.append(input_key)
+        in_url = _scratch_download_url(da, input_key)
+
+    plan_key = (
+        da.ephemeral_input_key(
+            f"{store.sanitize_id(drawing_id)}_{run_nonce}_mutation-plan.txt",
+            tenant_id=tenant_id, ts=ts,
+        ) if hasattr(da, "ephemeral_input_key")
+        else f"t/{store.sanitize_id(tenant_id)}/in/{ts}_"
+             f"{store.sanitize_id(drawing_id)}_{run_nonce}_mutation-plan.txt"
+    )
+    _scratch_upload_bytes(da, plan_key, plan_bytes, ".txt")
+    scratch_keys.append(plan_key)
+    plan_url = _scratch_download_url(da, plan_key)
+
+    output_name = f"{store.sanitize_id(drawing_id)}_write_{run_nonce}"
+    out_key = (
+        da.ephemeral_output_key(
+            output_name, tenant_id=tenant_id, ts=ts, suffix=".dwg")
+        if hasattr(da, "ephemeral_output_key")
+        else f"t/{store.sanitize_id(tenant_id)}/out/{ts}_{output_name}.dwg"
+    )
+    scratch_keys.append(out_key)
+    upload_key, out_url = _scratch_upload_url(da, out_key)
+    intake_key = (
+        da.ephemeral_output_key(
+            f"{output_name}_intake", tenant_id=tenant_id, ts=ts,
+            suffix=".txt")
+        if hasattr(da, "ephemeral_output_key")
+        else f"t/{store.sanitize_id(tenant_id)}/out/{ts}_{output_name}_intake.txt"
+    )
+    scratch_keys.append(intake_key)
+    intake_upload_key, intake_url = _scratch_upload_url(da, intake_key)
+    arguments = {
+        "HostDwg": {"url": in_url, "verb": "get"},
+        "Plan": {"url": plan_url, "verb": "get"},
+        "Result": {"url": out_url, "verb": "put"},
+        "Intake": {"url": intake_url, "verb": "put"},
+    }
+    submit_kwargs: Dict[str, Any] = {
+        "dry_run": False, "poll": True, "tenant_id": tenant_id,
+    }
+    if on_submitted is not None and _accepts_on_submitted(da.submit_workitem):
+        submit_kwargs["on_submitted"] = on_submitted
+    submitted_at = time.time()
+    status = da.submit_workitem(
+        da.activity_qualified(WRITE_ACTIVITY), arguments, **submit_kwargs)
+    if hasattr(da, "_workitem_timing"):
+        aps_timing = da._workitem_timing(
+            status, submitted_at=submitted_at)
+    if status.get("status") != "success":
+        return (err_envelope(
+            ErrorCode.WORKITEM_FAILED,
+            "APS write WorkItem did not succeed", retryable=True,
+            tool=name, version=tool_version,
+        ), DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED])
+    output_inspection_started = time.perf_counter()
+    out_bytes = _scratch_download_bytes(da, out_key, upload_key)
+    if not out_bytes:
+        raise LiveMutationEffectMismatch("write produced 0-byte output.dwg")
+    if not out_bytes.startswith(b"AC10"):
+        raise LiveMutationEffectMismatch(
+            "write produced an invalid output.dwg header")
+    try:
+        intake_bytes = _scratch_download_bytes(
+            da, intake_key, intake_upload_key)
+        if not intake_bytes:
+            raise LiveMutationEffectMismatch(
+                "write produced no output inspection intake")
+        if len(intake_bytes) > MAX_OUTPUT_INTAKE_BYTES:
+            raise LiveMutationEffectMismatch(
+                "output inspection intake exceeds the size limit")
+        from intake_parse import parse_text
+        output_intake = parse_text(
+            intake_bytes.decode("utf-8", "replace"), drawing_id)
+    except ValueError as exc:
+        raise LiveMutationEffectMismatch(
+            "output inspection intake is malformed") from exc
+    if not isinstance(output_intake, dict):
+        raise LiveMutationEffectMismatch(
+            "output inspection is not an intake object")
+    if output_intake.get("parseErrors"):
+        raise LiveMutationEffectMismatch(
+            "output inspection intake contains malformed records")
+    output_intake["dwg"] = drawing_id
+    normalized_base = copy.deepcopy(base_intake)
+    normalized_base["dwg"] = drawing_id
+    try:
+        verify_live_mutation_effects(normalized_base, output_intake, canonical)
+    except ValueError as exc:
+        raise LiveMutationEffectMismatch(str(exc)) from exc
+    output_inspection_ms = int(
+        (time.perf_counter() - output_inspection_started) * 1000)
+
+    engine_seconds = da._engine_seconds(status)
+    cost = None if engine_seconds is None else {
+        "engine_seconds": engine_seconds,
+        "usd_est": round(engine_seconds / 3600.0 * USD_PER_HR, 4),
+    }
+    if ledger_entry is not None and isinstance(cost, dict):
+        ledger_entry.update(cost)
+    with drawing_mutation_commit_guard() as commit_enabled:
+        if not commit_enabled:
+            return (err_envelope(
+                ErrorCode.APS_UNAVAILABLE,
+                "drawing mutations were drained before write commit",
+                retryable=True, tool=name, version=tool_version,
+            ), 503)
+        version_write_started = time.perf_counter()
+        new_v = _put_bytes_version(
+            backend, tenant_id, drawing_id, out_bytes,
+            parent_version=head_v,
+            meta={"tool": name, "workitem_id": status.get("id"),
+                  "plan_sha256": plan_digest,
+                  "source_ref": source_ref,
+                  "note": meta_note},
+            holder=holder, fence=fence, require_parent_is_head=True,
+        )
+        version_write_ms = int(
+            (time.perf_counter() - version_write_started) * 1000)
+        readable = False
+        publish_started = time.perf_counter()
+        try:
+            publish_intake_cache(
+                backend, tenant_id, drawing_id, new_v, out_bytes, output_intake)
+            read_intake(backend, tenant_id, drawing_id, new_v)
+            readable = True
+        except Exception:  # noqa: BLE001
+            readable = False
+        publish_ms = int((time.perf_counter() - publish_started) * 1000)
+
+    result.update({
+        "new_version": {
+            "drawing_id": drawing_id, "version": new_v, "parent": head_v,
+        },
+        "new_version_readable": readable,
+        "workitem_id": status.get("id"),
+        "output_dwg_bytes": len(out_bytes),
+    })
+    envelope["result"] = result
+    envelope["cost"] = cost
+    total_ms = int((time.perf_counter() - t0) * 1000)
+    envelope["timing_ms"] = total_ms
+    aps_spans = (
+        aps_timing.get("spans_ms", {})
+        if isinstance(aps_timing, dict) else {}
+    )
+    cad_spans = {
+        "planner": planner_ms,
+        "submit": aps_spans.get("submit"),
+        "queue": aps_spans.get("queue"),
+        "task_start": aps_spans.get("task_start"),
+        "image_pull": None,
+        "drawing_fetch": drawing_fetch_ms,
+        "engine": aps_spans.get("engine"),
+        "output_upload": aps_spans.get("output_upload"),
+        "output_inspection": output_inspection_ms,
+        "version_write": version_write_ms,
+        "publish": publish_ms,
+        "client_delivery": None,
+    }
+    provenance["cad_timing"] = {
+        "contract": "leaf.cad-timing.v1",
+        "total_ms": total_ms,
+        "spans_ms": cad_spans,
+        "provider_accounted_ms": (
+            aps_timing.get("accounted_ms")
+            if isinstance(aps_timing, dict) else None
+        ),
+        "unavailable_spans": [
+            name for name, duration in cad_spans.items()
+            if duration is None
+        ],
+    }
+    envelope["degraded_mode"] = False
+    return envelope, 200
+
+
 def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str, *,
                    backend, da: Any, t0: float, run_tool_dynamic_fn=None,
                    ledger_entry: Optional[Dict[str, Any]] = None,
@@ -1855,10 +2069,6 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
     drawing_fetch_started = timing_started
     drawing_fetch_ms = None
     planner_ms = None
-    output_inspection_ms = None
-    version_write_ms = None
-    publish_ms = None
-    aps_timing = None
     try:
         try:
             store.load_manifest(backend, tenant_id, drawing_id)
@@ -1977,211 +2187,34 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
             planner_env["result"] = planner_result
             return planner_env, 200
 
-        ts = int(time.time())
-        run_nonce = secrets.token_hex(8)
-        if isinstance(backend, store.OSSBackend) and not bridged_legacy_bootstrap:
-            in_url = da.signed_download_url(vkey)
-        else:
-            input_key = (
-                da.ephemeral_input_key(
-                    f"{store.sanitize_id(drawing_id)}_v{head_v}_{run_nonce}.dwg",
-                    tenant_id=tenant_id, ts=ts,
-                ) if hasattr(da, "ephemeral_input_key")
-                else f"t/{store.sanitize_id(tenant_id)}/in/{ts}_"
-                     f"{store.sanitize_id(drawing_id)}_v{head_v}_{run_nonce}.dwg"
-            )
-            _scratch_upload_bytes(da, input_key, execution_source, ".dwg")
-            scratch_keys.append(input_key)
-            in_url = _scratch_download_url(da, input_key)
-
-        plan_key = (
-            da.ephemeral_input_key(
-                f"{store.sanitize_id(drawing_id)}_{run_nonce}_mutation-plan.txt",
-                tenant_id=tenant_id, ts=ts,
-            ) if hasattr(da, "ephemeral_input_key")
-            else f"t/{store.sanitize_id(tenant_id)}/in/{ts}_"
-                 f"{store.sanitize_id(drawing_id)}_{run_nonce}_mutation-plan.txt"
+        # SERVER-HELD OR ABSENT, on every tier. The stamp is the digest
+        # this process measured over the published tool body it resolved
+        # for the tool id before the planner ran; the planner envelope is
+        # never the source. On the in-process and `subprocess` sandbox
+        # tiers (LEAF_SANDBOX != e2b-microvm, which broker.py permits for
+        # tenant-authored tools outside production) `execution_provenance`
+        # is whatever the tool body chose to say, since tool_loader adopts
+        # a tool's own {ok, result} return whole, so a forged 64-hex digest
+        # there must never reach the version chain. A verified microvm
+        # receipt, where one exists, is only cross-checked against the
+        # server's digest; a mismatch withholds the stamp with a warning.
+        # Null reads as "provenance not established", never as a forged
+        # authorship claim.
+        source_ref = _server_held_source_ref(
+            server_source_sha256, provenance, tool=name)
+        return _apply_plan_live(
+            tenant_id=tenant_id, drawing_id=drawing_id, head_v=head_v, vkey=vkey,
+            execution_source=execution_source,
+            bridged_legacy_bootstrap=bridged_legacy_bootstrap,
+            base_intake=base_intake, canonical=canonical, plan_bytes=plan_bytes,
+            plan_digest=plan_digest, backend=backend, da=da, name=name,
+            tool_version=tool_version, t0=t0, ledger_entry=ledger_entry,
+            holder=holder, fence=fence, on_submitted=on_submitted,
+            source_ref=source_ref, meta_note="live authored mutation plan",
+            envelope=planner_env, result=planner_result, provenance=provenance,
+            planner_ms=planner_ms, drawing_fetch_ms=drawing_fetch_ms,
+            scratch_keys=scratch_keys,
         )
-        _scratch_upload_bytes(da, plan_key, plan_bytes, ".txt")
-        scratch_keys.append(plan_key)
-        plan_url = _scratch_download_url(da, plan_key)
-
-        output_name = f"{store.sanitize_id(drawing_id)}_write_{run_nonce}"
-        out_key = (
-            da.ephemeral_output_key(
-                output_name, tenant_id=tenant_id, ts=ts, suffix=".dwg")
-            if hasattr(da, "ephemeral_output_key")
-            else f"t/{store.sanitize_id(tenant_id)}/out/{ts}_{output_name}.dwg"
-        )
-        scratch_keys.append(out_key)
-        upload_key, out_url = _scratch_upload_url(da, out_key)
-        intake_key = (
-            da.ephemeral_output_key(
-                f"{output_name}_intake", tenant_id=tenant_id, ts=ts,
-                suffix=".txt")
-            if hasattr(da, "ephemeral_output_key")
-            else f"t/{store.sanitize_id(tenant_id)}/out/{ts}_{output_name}_intake.txt"
-        )
-        scratch_keys.append(intake_key)
-        intake_upload_key, intake_url = _scratch_upload_url(da, intake_key)
-        arguments = {
-            "HostDwg": {"url": in_url, "verb": "get"},
-            "Plan": {"url": plan_url, "verb": "get"},
-            "Result": {"url": out_url, "verb": "put"},
-            "Intake": {"url": intake_url, "verb": "put"},
-        }
-        submit_kwargs: Dict[str, Any] = {
-            "dry_run": False, "poll": True, "tenant_id": tenant_id,
-        }
-        if on_submitted is not None and _accepts_on_submitted(da.submit_workitem):
-            submit_kwargs["on_submitted"] = on_submitted
-        submitted_at = time.time()
-        status = da.submit_workitem(
-            da.activity_qualified(WRITE_ACTIVITY), arguments, **submit_kwargs)
-        if hasattr(da, "_workitem_timing"):
-            aps_timing = da._workitem_timing(
-                status, submitted_at=submitted_at)
-        if status.get("status") != "success":
-            return (err_envelope(
-                ErrorCode.WORKITEM_FAILED,
-                "APS write WorkItem did not succeed", retryable=True,
-                tool=name, version=tool_version,
-            ), DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED])
-        output_inspection_started = time.perf_counter()
-        out_bytes = _scratch_download_bytes(da, out_key, upload_key)
-        if not out_bytes:
-            raise LiveMutationEffectMismatch("write produced 0-byte output.dwg")
-        if not out_bytes.startswith(b"AC10"):
-            raise LiveMutationEffectMismatch(
-                "write produced an invalid output.dwg header")
-        try:
-            intake_bytes = _scratch_download_bytes(
-                da, intake_key, intake_upload_key)
-            if not intake_bytes:
-                raise LiveMutationEffectMismatch(
-                    "write produced no output inspection intake")
-            if len(intake_bytes) > MAX_OUTPUT_INTAKE_BYTES:
-                raise LiveMutationEffectMismatch(
-                    "output inspection intake exceeds the size limit")
-            from intake_parse import parse_text
-            output_intake = parse_text(
-                intake_bytes.decode("utf-8", "replace"), drawing_id)
-        except ValueError as exc:
-            raise LiveMutationEffectMismatch(
-                "output inspection intake is malformed") from exc
-        if not isinstance(output_intake, dict):
-            raise LiveMutationEffectMismatch(
-                "output inspection is not an intake object")
-        if output_intake.get("parseErrors"):
-            raise LiveMutationEffectMismatch(
-                "output inspection intake contains malformed records")
-        output_intake["dwg"] = drawing_id
-        normalized_base = copy.deepcopy(base_intake)
-        normalized_base["dwg"] = drawing_id
-        try:
-            verify_live_mutation_effects(normalized_base, output_intake, canonical)
-        except ValueError as exc:
-            raise LiveMutationEffectMismatch(str(exc)) from exc
-        output_inspection_ms = int(
-            (time.perf_counter() - output_inspection_started) * 1000)
-
-        engine_seconds = da._engine_seconds(status)
-        cost = None if engine_seconds is None else {
-            "engine_seconds": engine_seconds,
-            "usd_est": round(engine_seconds / 3600.0 * USD_PER_HR, 4),
-        }
-        if ledger_entry is not None and isinstance(cost, dict):
-            ledger_entry.update(cost)
-        with drawing_mutation_commit_guard() as commit_enabled:
-            if not commit_enabled:
-                return (err_envelope(
-                    ErrorCode.APS_UNAVAILABLE,
-                    "drawing mutations were drained before write commit",
-                    retryable=True, tool=name, version=tool_version,
-                ), 503)
-            version_write_started = time.perf_counter()
-            # SERVER-HELD OR ABSENT, on every tier. The stamp is the digest
-            # this process measured over the published tool body it resolved
-            # for the tool id before the planner ran; the planner envelope is
-            # never the source. On the in-process and `subprocess` sandbox
-            # tiers (LEAF_SANDBOX != e2b-microvm, which broker.py permits for
-            # tenant-authored tools outside production) `execution_provenance`
-            # is whatever the tool body chose to say, since tool_loader adopts
-            # a tool's own {ok, result} return whole, so a forged 64-hex digest
-            # there must never reach the version chain. A verified microvm
-            # receipt, where one exists, is only cross-checked against the
-            # server's digest; a mismatch withholds the stamp with a warning.
-            # Null reads as "provenance not established", never as a forged
-            # authorship claim.
-            source_ref = _server_held_source_ref(
-                server_source_sha256, provenance, tool=name)
-            new_v = _put_bytes_version(
-                backend, tenant_id, drawing_id, out_bytes,
-                parent_version=head_v,
-                meta={"tool": name, "workitem_id": status.get("id"),
-                      "plan_sha256": plan_digest,
-                      "source_ref": source_ref,
-                      "note": "live authored mutation plan"},
-                holder=holder, fence=fence, require_parent_is_head=True,
-            )
-            version_write_ms = int(
-                (time.perf_counter() - version_write_started) * 1000)
-            readable = False
-            publish_started = time.perf_counter()
-            try:
-                publish_intake_cache(
-                    backend, tenant_id, drawing_id, new_v, out_bytes, output_intake)
-                read_intake(backend, tenant_id, drawing_id, new_v)
-                readable = True
-            except Exception:  # noqa: BLE001
-                readable = False
-            publish_ms = int((time.perf_counter() - publish_started) * 1000)
-
-        planner_result.update({
-            "new_version": {
-                "drawing_id": drawing_id, "version": new_v, "parent": head_v,
-            },
-            "new_version_readable": readable,
-            "workitem_id": status.get("id"),
-            "output_dwg_bytes": len(out_bytes),
-        })
-        planner_env["result"] = planner_result
-        planner_env["cost"] = cost
-        total_ms = int((time.perf_counter() - t0) * 1000)
-        planner_env["timing_ms"] = total_ms
-        aps_spans = (
-            aps_timing.get("spans_ms", {})
-            if isinstance(aps_timing, dict) else {}
-        )
-        cad_spans = {
-            "planner": planner_ms,
-            "submit": aps_spans.get("submit"),
-            "queue": aps_spans.get("queue"),
-            "task_start": aps_spans.get("task_start"),
-            "image_pull": None,
-            "drawing_fetch": drawing_fetch_ms,
-            "engine": aps_spans.get("engine"),
-            "output_upload": aps_spans.get("output_upload"),
-            "output_inspection": output_inspection_ms,
-            "version_write": version_write_ms,
-            "publish": publish_ms,
-            "client_delivery": None,
-        }
-        provenance["cad_timing"] = {
-            "contract": "leaf.cad-timing.v1",
-            "total_ms": total_ms,
-            "spans_ms": cad_spans,
-            "provider_accounted_ms": (
-                aps_timing.get("accounted_ms")
-                if isinstance(aps_timing, dict) else None
-            ),
-            "unavailable_spans": [
-                name for name, duration in cad_spans.items()
-                if duration is None
-            ],
-        }
-        planner_env["degraded_mode"] = False
-        return planner_env, 200
     except store.CheckoutDenied as exc:
         return _checkout_denied(exc, name, tool_version)
     except ProofStateUnreadable as exc:
@@ -2206,6 +2239,193 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
         # Keep their text out of the client envelope. The exception class is
         # enough to group the failure without persisting credential-shaped data.
         LOGGER.error("live authored write failed: %s", type(exc).__name__)
+        return (err_envelope(
+            ErrorCode.WORKITEM_FAILED, "live drawing mutation failed",
+            retryable=True, tool=name, version=tool_version,
+        ), DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED])
+    finally:
+        _cleanup_scratch_objects(da, scratch_keys)
+
+
+def run_data_plan_live(plan: Dict[str, Any], tenant_id: str, *, backend, da: Any,
+                       t0: float, ledger_entry: Optional[Dict[str, Any]] = None,
+                       holder: Optional[str] = None, fence: Optional[int] = None,
+                       on_submitted=None) -> Tuple[Dict[str, Any], int]:
+    """Apply a browser's validated DATA plan without running caller code.
+
+    Only the broker's plan endpoint may reach this entrypoint, never a tool
+    record. No planner or sandbox runs, so the protected-posture microvm
+    check does not apply. This process builds provenance from the revalidated
+    plan and its parent, never from caller-supplied provenance.
+    """
+    import store
+    holder = _named_or_anonymous(store, holder)
+    name = DATA_PLAN_TOOL_NAME
+    tool_version = DATA_PLAN_TOOL_VERSION
+    scratch_keys = []
+    drawing_fetch_started = time.perf_counter()
+    try:
+        if da is None:
+            return (err_envelope(
+                ErrorCode.APS_UNAVAILABLE,
+                "a live browser edit needs the APS client; there is no "
+                "degraded writer for a data plan",
+                retryable=True, tool=name, version=tool_version,
+            ), 503)
+        if not isinstance(plan, dict):
+            raise ValueError("data plan must be an object")
+        drawing_id = plan.get("drawing_id")
+        if not isinstance(drawing_id, str) or not drawing_id.strip():
+            raise ValueError("data plan drawing_id must be a nonempty string")
+        parent_version = plan.get("parent_version")
+        if type(parent_version) is not int or parent_version < 1:
+            raise ValueError("data plan parent_version must be a positive integer")
+        if not isinstance(plan.get("mutations"), dict):
+            raise ValueError("data plan mutations must be an object")
+        for field in ("plan_sha256", "source_sha256"):
+            digest = plan.get(field)
+            if (not isinstance(digest, str)
+                    or re.fullmatch(r"[0-9a-fA-F]{64}", digest) is None):
+                raise ValueError(f"data plan {field} must be a 64-hex digest")
+
+        try:
+            store.load_manifest(backend, tenant_id, drawing_id)
+        except KeyError:
+            return (err_envelope(
+                ErrorCode.BAD_PARAMS,
+                f"drawing not in store: {tenant_id}/{drawing_id} "
+                f"(ingest it before a live write)", retryable=False,
+                tool=name, version=tool_version,
+            ), DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
+
+        import guest_uploads
+        marker = guest_uploads.read_marker(backend, tenant_id, drawing_id)
+        if (marker is None and guest_uploads.upload_store_mode() == "legacy"
+                and backend.exists(upload_marker_key(tenant_id, drawing_id))):
+            marker = {}
+        if marker is not None:
+            source_ext = str(marker.get("source_ext") or "")
+            if not source_ext:
+                source_ext = os.path.splitext(
+                    str(marker.get("filename") or ""))[1].lower()
+            if source_ext != ".dwg":
+                return (err_envelope(
+                    ErrorCode.BAD_PARAMS,
+                    f"live writes need a DWG source; drawing {drawing_id!r} was "
+                    f"uploaded as {source_ext or 'an unknown format'}",
+                    retryable=False, tool=name, version=tool_version,
+                ), DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
+
+        if not drawing_mutations_enabled():
+            return (err_envelope(
+                ErrorCode.APS_UNAVAILABLE,
+                "drawing mutations are temporarily disabled",
+                retryable=True, tool=name, version=tool_version,
+            ), 503)
+        store.authorize_checkout(backend, tenant_id, drawing_id, holder, fence)
+
+        head_v, vkey = store.resolve_version(
+            backend, tenant_id, drawing_id, "head")
+        if int(head_v) != int(parent_version):
+            return (err_envelope(
+                ErrorCode.BAD_PARAMS,
+                f"stale parent: the drawing head is now v{head_v} and the plan "
+                f"was computed against v{parent_version}; reopen the drawing "
+                "and save again",
+                retryable=True, tool=name, version=tool_version,
+            ), 409)
+        base_v, base_intake = read_intake(
+            backend, tenant_id, drawing_id, head_v)
+        if base_v != head_v:
+            raise ValueError("base intake resolved to a different version")
+        stored_source = backend.get(vkey)
+        execution_source, bridged_legacy_bootstrap = (
+            _live_execution_source_bytes(stored_source))
+        base_sha = hashlib.sha256(execution_source).hexdigest()
+        drawing_fetch_ms = int(
+            (time.perf_counter() - drawing_fetch_started) * 1000)
+
+        try:
+            canonical = validate_mutations(
+                base_intake, plan["mutations"],
+                allow_transforms=True, allow_xdata=False,
+            )
+            plan_bytes = emit_plan(
+                canonical, base_sha256=base_sha, base_intake=base_intake)
+        except ValueError as exc:
+            return (err_envelope(
+                ErrorCode.BAD_PARAMS, f"the edit plan was refused: {exc}",
+                retryable=False, tool=name, version=tool_version,
+            ), 422)
+        plan_digest = plan_sha256(plan_bytes)
+        if plan_digest != plan["plan_sha256"]:
+            return (err_envelope(
+                ErrorCode.BAD_PARAMS,
+                "the plan re-emitted against its parent no longer matches "
+                "the submitted plan digest",
+                retryable=False, tool=name, version=tool_version,
+            ), 422)
+
+        binding = {
+            "drawing_id": drawing_id,
+            "base_version": head_v,
+            "base_source_sha256": base_sha,
+            "plan_sha256": plan_digest,
+            "source_sha256": plan["source_sha256"],
+        }
+        provenance = {
+            "contract": DATA_PLAN_PROVENANCE_CONTRACT,
+            "isolation": "none-needed",
+            **binding,
+        }
+        result = {
+            "mutations": canonical,
+            "mutation_binding": binding,
+            "commit": "dwg-plan",
+            "plan_sha256": plan_digest,
+            "source_sha256": plan["source_sha256"],
+        }
+        envelope = ok_envelope(
+            tool=name, version=tool_version, result=result, overlay=None,
+            timing_ms=0, cost=None)
+        envelope["execution_provenance"] = provenance
+        return _apply_plan_live(
+            tenant_id=tenant_id, drawing_id=drawing_id, head_v=head_v, vkey=vkey,
+            execution_source=execution_source,
+            bridged_legacy_bootstrap=bridged_legacy_bootstrap,
+            base_intake=base_intake, canonical=canonical, plan_bytes=plan_bytes,
+            plan_digest=plan_digest, backend=backend, da=da, name=name,
+            tool_version=tool_version, t0=t0, ledger_entry=ledger_entry,
+            holder=holder, fence=fence, on_submitted=on_submitted,
+            source_ref=None, meta_note="live browser edit plan",
+            envelope=envelope, result=result, provenance=provenance,
+            planner_ms=None, drawing_fetch_ms=drawing_fetch_ms,
+            scratch_keys=scratch_keys,
+        )
+    except store.CheckoutDenied as exc:
+        return _checkout_denied(exc, name, tool_version)
+    except ProofStateUnreadable as exc:
+        return (err_envelope(ErrorCode.INTERNAL, str(exc), retryable=True,
+                             tool=name, version=tool_version), 503)
+    except LiveMutationEffectMismatch as exc:
+        return (err_envelope(
+            ErrorCode.WORKITEM_FAILED, str(exc), retryable=False,
+            tool=name, version=tool_version,
+        ), DEFAULT_HTTP_STATUS[ErrorCode.WORKITEM_FAILED])
+    except FileNotFoundError as exc:
+        return (err_envelope(ErrorCode.APS_UNAVAILABLE, str(exc), retryable=False,
+                             tool=name, version=tool_version),
+                DEFAULT_HTTP_STATUS[ErrorCode.APS_UNAVAILABLE])
+    except (KeyError, ValueError) as exc:
+        return (err_envelope(
+            ErrorCode.BAD_PARAMS, f"drawing/mutation unavailable: {exc}",
+            retryable=False, tool=name, version=tool_version,
+        ), DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
+    except Exception as exc:  # noqa: BLE001
+        # Transport exceptions can contain signed APS or object-store URLs.
+        # Keep their text out of the client envelope. The exception class is
+        # enough to group the failure without persisting credential-shaped data.
+        LOGGER.error("live data plan write failed: %s", type(exc).__name__)
         return (err_envelope(
             ErrorCode.WORKITEM_FAILED, "live drawing mutation failed",
             retryable=True, tool=name, version=tool_version,
