@@ -1367,7 +1367,10 @@ def build_suites() -> List[Suite]:
               # the renamed pin (test_web_and_app_are_staged_again_because_the_
               # merge_group_makes_the_stage_fresh) replaces the paused one
               # 1-for-1, no count change from that row.
-              _py_pytest("test_prewarm_staging_cutover_workflow.py"), 39),
+              # 39 -> 43 (slice B v2): replace event-trust pins with live-queue
+              # validation (queued and superseded rows), and pin the secret-free
+              # dispatcher, main-ref guard, and recorded-base step guards.
+              _py_pytest("test_prewarm_staging_cutover_workflow.py"), 43),
         # Merge-queue group controller (slice C: mq-review, mq-supply,
         # mq-prewarm). 32 = the executed matrix: mq-review's GraphQL
         # pagination and post-check re-read run against a fake gh (a queue

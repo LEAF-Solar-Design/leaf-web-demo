@@ -366,8 +366,8 @@ def test_the_dispatch_stages_both_colours_on_the_prewarm_rail():
 def test_web_and_app_are_staged_again_because_the_merge_group_makes_the_stage_fresh():
     """The freshness gap that paused `app` (#1067, #1068) is closed by the group path.
 
-    `app` was staged (#1055), paused for the runner-serialising mutation group
-    (#1058), restored once terraform #1474 taught the posture gate to admit an
+    `app` was staged (#1055), paused when the posture gate refused a prewarm
+    over an open drawing-write lane (#1058), restored once terraform #1474 admitted an
     idle weight-0 prewarm (#1060), then paused again because the PR-mode stage
     is taken on the merge PREVIEW and a busy main could move under it before
     the real merge (#1067, #1068): the merge's actual tree then had no
@@ -375,8 +375,8 @@ def test_web_and_app_are_staged_again_because_the_merge_group_makes_the_stage_fr
 
     The merge-group job stages the group's own head, whose first parent is
     checked equal to its base at stage time (`stage-group`'s "Require the
-    group head's first parent to equal its base" step), so nothing can move
-    main under it before the merge deploy consumes the stage. Both colours are
+    group head's first parent to equal its base" step), so it is fresh at stage
+    time. Later invalidation or replay remains possible. Both colours are
     back in STAGE_SERVICES for that path; the PR path also re-covers app,
     which is accepted only because the PR triggers are provisional until the
     queue retires them.
@@ -396,14 +396,14 @@ def test_merge_group_trigger_fires_only_on_checks_requested():
     )
 
 
-def test_the_group_concurrency_key_is_fixed_and_always_cancels_in_progress():
+def test_the_group_concurrency_keys_use_the_head_sha():
     concurrency = workflow_document()["concurrency"]
     group = concurrency["group"]
     assert "github.event_name == 'merge_group'" in group
-    assert "'prewarm-staging-cutover-mg-stage'" in group, (
-        "a merge group has no PR number, and the queue is serial, so its "
-        "concurrency key must be fixed rather than per-group"
-    )
+    assert "github.event.merge_group.head_sha" in group
+    assert "inputs.group_head_sha" in group
+    assert "prewarm-staging-cutover-mg-dispatch-{0}" in group
+    assert "prewarm-staging-cutover-mg-stage-{0}" in group
     # PR events must keep their own per-PR, per-action key untouched.
     assert "github.event.pull_request.number" in group
     assert "github.event.action == 'closed' && 'descale' || 'stage'" in group
@@ -413,36 +413,96 @@ def test_the_group_concurrency_key_is_fixed_and_always_cancels_in_progress():
     )
 
 
-def test_the_group_job_runs_only_for_merge_group_events():
+def test_the_group_job_runs_only_for_main_dispatch_with_a_head():
     condition = workflow_document()["jobs"]["stage-group"]["if"]
-    assert condition == "github.event_name == 'merge_group'"
+    assert condition == "github.event_name == 'workflow_dispatch' && inputs.group_head_sha != '' && github.ref == 'refs/heads/main'"
+    assert workflow_document()["jobs"]["stage-group"]["needs"] == "guard-ref"
 
 
 GROUP_ELIGIBILITY_ENV = {
     "HEAD_SHA": "a" * 40,
-    "BASE_SHA": "b" * 40,
-    "HEAD_REF": "refs/heads/gh-readonly-queue/main/pr-42-abcdef0123456789",
 }
 
 
 @needs_shell
-def test_the_group_eligibility_step_reads_no_pr_api_and_no_label(tmp_path):
-    """Queued IS eligible: no `gh api` call and no `.labels` read anywhere in the step.
-
-    Unlike the PR path's eligibility step, which reads the PR and its reviews
-    through `gh api`, this step has nothing to ask GitHub: the trigger itself
-    (`checks_requested`) already means the group is queued.
-    """
-    body = step_body("stage-group", "Record the merge-group head and base")
-    assert "gh api" not in body
-    assert "labels" not in body
+@pytest.mark.parametrize("queued", [True, False])
+def test_the_group_eligibility_requires_a_live_queue_entry(tmp_path, queued):
+    body = step_body("stage-group", "Validate and record the live merge-group")
     (tmp_path / "bin").mkdir()
+    entries = [
+        {"position": 1, "headCommit": {"oid": "c" * 40},
+         "baseCommit": {"oid": "d" * 40}, "pullRequest": {"number": 41}},
+        {"position": 2, "headCommit": {"oid": "a" * 40 if queued else "e" * 40},
+         "baseCommit": {"oid": "b" * 40}, "pullRequest": {"number": 42}},
+        {"position": 3, "headCommit": {"oid": "f" * 40},
+         "baseCommit": {"oid": "b" * 40}, "pullRequest": {"number": 43}},
+    ]
+    pages = [
+        {"data": {"repository": {"mergeQueue": {"entries": {"nodes": nodes}}}}}
+        for nodes in (entries[:1], entries[1:])
+    ]
+    (tmp_path / "queue-fixture.json").write_text(
+        "\n".join(json.dumps(page) for page in pages), encoding="utf-8"
+    )
+    gh = tmp_path / "bin" / "gh"
+    gh.write_text("#!/bin/sh\ncat queue-fixture.json\n", encoding="utf-8", newline="\n")
+    gh.chmod(0o755)
     result = run_step(body, tmp_path, GROUP_ELIGIBILITY_ENV)
+    assert result["superseded"] == ("false" if queued else "true")
+    if not queued:
+        assert "eligible" not in result
+        assert "base_sha" not in result
+        return
     assert result["eligible"] == "true"
     assert result["reason"] == "merge group"
     assert result["head_sha"] == "a" * 40
     assert result["base_sha"] == "b" * 40
     assert result["sha12"] == "a" * 12
+    assert json.loads(result["members"]) == [41, 42]
+
+
+def test_the_group_dispatcher_has_only_two_permissions_and_no_secrets():
+    job = workflow_document()["jobs"]["dispatch-group"]
+    assert job["if"] == "github.event_name == 'merge_group'"
+    assert job["permissions"] == {"actions": "write", "contents": "read"}
+    assert len(job["steps"]) == 1
+    assert "secrets." not in str(job)
+    assert "uses" not in job["steps"][0]
+    body = job["steps"][0]["run"]
+    assert "gh workflow run prewarm-staging-cutover.yml" in body
+    assert '--ref main -f "group_head_sha=$HEAD_SHA"' in body
+    assert "PR_NUMBER" not in str(job)
+    assert "::warning::" in body
+
+
+def test_the_dispatch_input_and_main_ref_guard():
+    document = workflow_document()
+    field = document["on"]["workflow_dispatch"]["inputs"]["group_head_sha"]
+    assert field["type"] == "string" and field["default"] == ""
+    guard = document["jobs"]["guard-ref"]
+    assert guard["if"] == "github.event_name == 'workflow_dispatch'"
+    body = step_body("guard-ref", "Require the main workflow ref")
+    assert '"$GITHUB_REF" != "refs/heads/main"' in body
+    assert "exit 1" in body
+
+
+def test_live_queue_validation_and_superseded_steps_are_pinned():
+    body = step_body("stage-group", "Validate and record the live merge-group")
+    for required in ('gh api graphql --paginate', 'mergeQueue(branch: "main")',
+                     'entries(first: 50, after: $endCursor)',
+                     'pageInfo { hasNextPage endCursor }',
+                     'headCommit { oid } baseCommit { oid } pullRequest { number }',
+                     'select(.headCommit.oid == $head)', 'superseded=true',
+                     '^[0-9a-fA-F]{40}$'):
+        assert required in body
+    assert "exit 0" in body
+    job = workflow_document()["jobs"]["stage-group"]
+    assert "github.event.merge_group" not in str(job)
+    for step in job["steps"]:
+        if step.get("uses", "").startswith("actions/checkout") or step.get("id") in {"parentage", "receipt"}:
+            assert "steps.group.outputs.eligible == 'true'" in step["if"]
+    parentage = next(s for s in job["steps"] if s.get("id") == "parentage")
+    assert parentage["env"]["BASE_SHA"] == "${{ steps.group.outputs.base_sha }}"
 
 
 def test_the_group_checkout_targets_the_exact_head_sha():
@@ -517,7 +577,7 @@ def test_the_dispatch_step_is_identical_on_the_group_path():
 
 def test_the_group_receipt_carries_a_group_object_not_a_pr_number():
     body = step_body("stage-group", "Emit the relay receipt")
-    assert "group: {head_sha: $head_sha, base_sha: $base_sha, head_ref: $head_ref}" in body
+    assert "group: {head_sha: $head_sha, base_sha: $base_sha, members: $members}" in body
     assert "pr: $pr" not in body
     assert '--arg schema "leaf.staging-prewarm-relay.v1"' in body
 
