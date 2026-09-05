@@ -358,28 +358,32 @@ def test_the_dispatch_stages_both_colours_on_the_prewarm_rail():
     assert "if length == 1 then .[0].databaseId else empty end" in body
 
 
-def test_only_web_is_staged_until_the_posture_gate_admits_an_idle_app_prewarm():
+def test_web_and_app_are_staged_now_that_the_posture_gate_admits_an_idle_app_prewarm():
     """A cross-repo coupling this repo cannot check mechanically, so it is pinned.
 
     The old pin's runner condition has been met since 2026-08-24, when the deploy
-    job moved to an ephemeral CodeBuild-backed runner, one per run.
+    job moved to an ephemeral CodeBuild-backed runner, one per run, with a
+    measured queue wait of 0.4 min.
 
     The app leg was dispatched on 2026-09-05 (terraform run 33949283388) and
     refused by deploy-leaf-platform-staging.yml's "Verify protected runtime
     posture" gate. The lane-close step is hard-skipped under prewarm, so the
     checker sees a forward app intent over an OPEN drawing-write lane and
-    refuses before any mutation.
+    refuses before any mutation. `app` came out in #1058.
 
-    Restoring `app` is a deliberate edit that must come back through this test
-    in the same change that makes the checker and workflow admit an idle
-    weight-0 app prewarm as its own admission reason, with the writer-safety
-    evidence the design requires. Restore dispatch order web then app.
+    Terraform #1474 (7f2f40e5) now admits an idle weight-0 prewarm with its
+    truthful no-closure state, while a normal forward deploy over an open
+    lane still refuses. Both colour-surfaced services are staged again,
+    web first.
+
+    Removing `app`, reordering, or adding a service the deploy workflow
+    refuses under prewarm is a deliberate edit that must come back through
+    this test.
     """
     services = workflow_document()["env"]["STAGE_SERVICES"].split()
-    assert services == ["web"], (
-        "STAGE_SERVICES is %s; only web is staged until the deploy workflow's "
-        "posture gate admits an idle weight-0 app prewarm with writer-safety "
-        "evidence; restore app in the same change that lands that admission" % services
+    assert services == ["web", "app"], (
+        "STAGE_SERVICES is %s; dispatch order must be web then app now that "
+        "the posture gate admits an idle weight-0 app prewarm" % services
     )
 
 

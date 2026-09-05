@@ -106,16 +106,17 @@ env:
   # prewarm from ever STARTING ahead of a queued real deploy. Cost: about 9
   # CodeBuild minutes on general1.large at $0.02/min, about $0.18 per app
   # prewarm (operator-approved 2026-09-05).
-  # WHY `app` IS OUT AGAIN (2026-09-05): the first app prewarm (terraform run
-  # 33949283388) was refused by the deploy workflow's "Verify protected
-  # runtime posture" step: the lane-close step is hard-skipped under prewarm,
-  # so the posture checker sees a forward app intent over an OPEN
-  # drawing-write lane and refuses before any mutation. Until that checker
-  # and workflow represent an idle weight-0 prewarm as its own admission
-  # reason (with the writer-safety evidence the design requires), each
-  # eligible PR event would only buy one refused run. Restore `app` here in
-  # the same change that lands that admission, list order web then app.
-  STAGE_SERVICES: "web"
+  # HISTORY (2026-09-05): the first app prewarm (terraform run 33949283388)
+  # was refused by the deploy workflow's "Verify protected runtime posture"
+  # step, because the lane-close step is hard-skipped under prewarm and the
+  # checker then saw a forward app intent over an OPEN drawing-write lane;
+  # `app` came out (#1058) until terraform #1474 (7f2f40e5) taught that gate
+  # the difference: an idle weight-0 prewarm keeps its truthful no-closure
+  # state and is admitted, a normal forward deploy over an open lane still
+  # refuses. The relay dispatches on --ref main, so that corrected gate is
+  # what every prewarm runs against. Dispatch order is the list order: web
+  # first, then app queues on the group behind it.
+  STAGE_SERVICES: "web app"
   # Bounded wait for the speculative supply set: 20 polls x 30s.
   SUPPLY_SET_POLLS: "20"
   SUPPLY_SET_INTERVAL: "30"
