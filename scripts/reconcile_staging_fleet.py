@@ -87,6 +87,10 @@ TASK_DEFINITION_ARN = re.compile(
 # Live-run statuses that mean the shared staging mutation lock is, or is about
 # to be, held by somebody else.
 BUSY_STATUSES = frozenset({"queued", "in_progress", "waiting", "requested", "pending"})
+# GitHub refuses to start workflow files larger than 500 KB. Use the larger
+# binary interpretation so the exception never admits an ambiguous boundary.
+# https://docs.github.com/en/actions/reference/limits#workflow-file-size
+MAX_WORKFLOW_BYTES = 500 * 1024
 
 # The provider sets run-name to "Deploy leaf-platform staging <service>
 # (<image_tag>)". The relay already depends on that contract to identify its
@@ -142,6 +146,45 @@ def _run_page(
     return rows
 
 
+def _unstartable_dispatch(
+    provider: Provider, repository: str, workflow: str, row: dict[str, Any]
+) -> bool:
+    """Prove the oversize/no-jobs incident, never infer it from a run's age.
+
+    GitHub can retain a queued dispatch record even when its immutable workflow
+    cannot start. On 2026-09-04 six such records blocked every reconcile forever.
+    A real job or unreadable evidence still owns the staging lane.
+    """
+    path = f".github/workflows/{workflow}"
+    revision = row.get("head_sha")
+    if (
+        row.get("status") != "queued"
+        or row.get("event") != "workflow_dispatch"
+        or row.get("path") != path
+        or not isinstance(revision, str)
+        or not re.fullmatch(r"[0-9a-f]{40}", revision)
+    ):
+        return False
+    run_id = _positive(row.get("id"), "PROVIDER_RUN_LIST_INVALID")
+    try:
+        jobs = provider.json(repository, f"/actions/runs/{run_id}/jobs?per_page=1")
+        if not isinstance(jobs, dict) or jobs.get("total_count") != 0 or jobs.get("jobs") != []:
+            return False
+        source = provider.json(repository, f"/contents/{path}?ref={revision}")
+    except ContractError:
+        return False
+    if (
+        not isinstance(source, dict)
+        or source.get("type") != "file"
+        or type(source.get("size")) is not int
+        or source["size"] <= MAX_WORKFLOW_BYTES
+    ):
+        return False
+    print(f"Ignoring unstartable dispatch {run_id}: immutable workflow {revision} "
+          f"is {source['size']} bytes and has no jobs", file=sys.stderr)
+    return True
+
+
 def _live_runs(provider: Provider, repository: str, workflow: str) -> list[int]:
     """Run ids of anything not settled. Fails CLOSED: a read that cannot be
     parsed is reported as busy, never as quiet, because standing down costs one
@@ -155,6 +198,8 @@ def _live_runs(provider: Provider, repository: str, workflow: str) -> list[int]:
         if not isinstance(status, str):
             raise ContractError("PROVIDER_RUN_LIST_INVALID")
         if status in BUSY_STATUSES:
+            if _unstartable_dispatch(provider, repository, workflow, row):
+                continue
             live.append(_positive(row.get("id"), "PROVIDER_RUN_LIST_INVALID"))
     return live
 
@@ -640,18 +685,27 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Resolve the staging fleet reconcile-and-restamp plan (read only)."
     )
-    parser.add_argument("--output", required=True)
+    parser.add_argument("--output")
     parser.add_argument("--summary", required=False)
+    parser.add_argument("--check-idle", action="store_true",
+                        help="Check the same lane predicate before a dispatch; exit 1 if busy.")
     return parser
 
 
 def main(argv: list[str]) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if not args.check_idle and not args.output:
+        parser.error("--output is required unless --check-idle is set")
     provider = GitHubProvider(
         os.environ.get("APP_GITHUB_TOKEN", ""),
         os.environ.get("TERRAFORM_GITHUB_TOKEN", ""),
     )
     try:
+        if args.check_idle:
+            result = yield_check(provider)
+            print(json.dumps(result, sort_keys=True))
+            return 0 if result["status"] == "clear" else 1
         plan = build_plan(provider)
     except ContractError as exc:
         print(f"ERROR:{exc}", file=sys.stderr)
