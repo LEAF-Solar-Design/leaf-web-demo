@@ -1030,7 +1030,7 @@ impl ParsedDxf {
         )
     }
 
-    fn create_polyline_core(&mut self, points: &[f64], closed: bool, layer: &str) -> Result<String, Refusal> {
+    fn create_polyline_core(&mut self, points: &[f64], closed: bool, layer: &str, bulges: &[f64]) -> Result<String, Refusal> {
         if points.len() % 2 != 0 {
             return refuse("points_not_pairs");
         }
@@ -1044,12 +1044,25 @@ impl ParsedDxf {
         if !all_finite(points) {
             return refuse("coordinate_not_finite");
         }
+        if !bulges.is_empty() && bulges.len() != count {
+            return refuse("bulges_not_per_vertex");
+        }
+        if !all_finite(bulges) {
+            return refuse("bulge_not_finite");
+        }
         let vertices: Vec<Vector2> = points
             .chunks_exact(2)
             .map(|p| Vector2::new(p[0], p[1]))
             .collect();
         let mut poly = LwPolyline::from_points(vertices);
         poly.is_closed = closed;
+        if !bulges.is_empty() {
+            poly.vertices = points
+                .chunks_exact(2)
+                .enumerate()
+                .map(|(i, p)| acadrust::entities::LwVertex::with_bulge(Vector2::new(p[0], p[1]), bulges[i]))
+                .collect();
+        }
         self.add_created(EntityType::LwPolyline(poly), layer)
     }
 }
@@ -1357,8 +1370,8 @@ impl ParsedDxf {
     /// MAX_CREATED_VERTICES points (bounded allocation), or any non-finite
     /// coordinate — all before the document is touched.
     #[wasm_bindgen(js_name = createPolyline)]
-    pub fn create_polyline(&mut self, points: &[f64], closed: bool, layer: &str) -> Result<String, JsValue> {
-        self.create_polyline_core(points, closed, layer).map_err(js_err)
+    pub fn create_polyline(&mut self, points: &[f64], closed: bool, layer: &str, bulges: &[f64]) -> Result<String, JsValue> {
+        self.create_polyline_core(points, closed, layer, bulges).map_err(js_err)
     }
 }
 
@@ -1459,7 +1472,7 @@ mod created_entity_roundtrip {
         let circle = doc.create_circle_core(3.0, 3.0, 1.5, "Panels").expect("circle");
         let arc = doc.create_arc_core(0.0, 0.0, 2.0, 0.0, 90.0, "").expect("arc");
         let poly = doc
-            .create_polyline_core(&[0.0, 0.0, 4.0, 0.0, 4.0, 3.0], true, "Outline")
+            .create_polyline_core(&[0.0, 0.0, 4.0, 0.0, 4.0, 3.0], true, "Outline", &[])
             .expect("polyline");
         assert_eq!(kinds(&doc), vec!["LINE", "CIRCLE", "ARC", "LWPOLYLINE"]);
         let back = rewrite(&doc);
@@ -1491,11 +1504,11 @@ mod created_entity_roundtrip {
         assert_eq!(code(doc.create_circle_core(0.0, f64::INFINITY, 1.0, "")), "coordinate_not_finite");
         assert_eq!(code(doc.create_arc_core(0.0, 0.0, 1.0, 45.0, 405.0, "")), "arc_sweep_zero");
         assert_eq!(code(doc.create_arc_core(0.0, 0.0, -1.0, 0.0, 90.0, "")), "radius_not_positive");
-        assert_eq!(code(doc.create_polyline_core(&[0.0, 0.0, 1.0], false, "")), "points_not_pairs");
-        assert_eq!(code(doc.create_polyline_core(&[0.0, 0.0], false, "")), "polyline_needs_two_vertices");
-        assert_eq!(code(doc.create_polyline_core(&[0.0, 0.0, 1.0, f64::NAN], false, "")), "coordinate_not_finite");
+        assert_eq!(code(doc.create_polyline_core(&[0.0, 0.0, 1.0], false, "", &[])), "points_not_pairs");
+        assert_eq!(code(doc.create_polyline_core(&[0.0, 0.0], false, "", &[])), "polyline_needs_two_vertices");
+        assert_eq!(code(doc.create_polyline_core(&[0.0, 0.0, 1.0, f64::NAN], false, "", &[])), "coordinate_not_finite");
         let too_many = vec![0.0; (MAX_CREATED_VERTICES + 1) * 2];
-        assert_eq!(code(doc.create_polyline_core(&too_many, false, "")), "polyline_too_many_vertices");
+        assert_eq!(code(doc.create_polyline_core(&too_many, false, "", &[])), "polyline_too_many_vertices");
         let long_layer = "L".repeat(256);
         assert_eq!(code(doc.create_line_core(0.0, 0.0, 1.0, 1.0, &long_layer)), "layer_name_too_long");
         assert_eq!(doc.inner.entities().count(), 0, "no refusal touched the document");
@@ -1535,7 +1548,7 @@ mod created_entity_roundtrip {
         assert_eq!(code(doc.add_vertex_after_core(0, 0, 1.0, 1.0)), "line_has_fixed_endpoints");
         assert_eq!(code(doc.delete_vertex_core(0, 0)), "line_has_fixed_endpoints");
         assert_eq!(code(doc.set_entity_layer_core(0, "   ")), "layer_name_empty");
-        doc.create_polyline_core(&[0.0, 0.0, 1.0, 0.0], false, "").expect("two-vertex polyline");
+        doc.create_polyline_core(&[0.0, 0.0, 1.0, 0.0], false, "", &[]).expect("two-vertex polyline");
         assert_eq!(code(doc.delete_vertex_core(1, 0)), "polyline_needs_two_vertices");
     }
 
@@ -1611,7 +1624,7 @@ mod created_entity_roundtrip {
         doc.create_line_core(0.0, 0.0, 10.0, 5.0, "").expect("line");
         doc.create_circle_core(3.0, 3.0, 1.5, "Panels").expect("circle");
         doc.create_arc_core(0.0, 0.0, 2.0, 30.0, 120.0, "").expect("arc");
-        doc.create_polyline_core(&[0.0, 0.0, 4.0, 0.0, 4.0, 3.0], true, "Outline").expect("polyline");
+        doc.create_polyline_core(&[0.0, 0.0, 4.0, 0.0, 4.0, 3.0], true, "Outline", &[]).expect("polyline");
         let back = rewrite(&doc);
         let entities: Vec<&EntityType> = back.inner.entities().collect();
         assert_eq!(entities.len(), 4);
@@ -1719,7 +1732,7 @@ mod created_entity_roundtrip {
     fn w4g4_explode_replaces_a_polyline_with_its_segments_and_refuses_the_rest() {
         let mut doc = empty_doc();
         let poly = doc
-            .create_polyline_core(&[0.0, 0.0, 4.0, 0.0, 4.0, 3.0], true, "P")
+            .create_polyline_core(&[0.0, 0.0, 4.0, 0.0, 4.0, 3.0], true, "P", &[])
             .unwrap();
         let parts = doc.explode_entity_core(0).unwrap();
         assert_eq!(parts.len(), 3, "a closed triangle explodes into three segments: {:?}", parts);
@@ -1782,7 +1795,7 @@ mod created_entity_roundtrip {
         doc.create_line_core(0.0, 0.0, 10.0, 0.0, "A").unwrap();
         doc.copy_entity_core(0, 0.0, 7.0).unwrap();
         doc.rotate_entity_core(1, 0.0, 7.0, 90.0).unwrap();
-        doc.create_polyline_core(&[20.0, 0.0, 24.0, 0.0, 24.0, 3.0], true, "P").unwrap();
+        doc.create_polyline_core(&[20.0, 0.0, 24.0, 0.0, 24.0, 3.0], true, "P", &[]).unwrap();
         doc.explode_entity_core(2).unwrap();
         let back = rewrite(&doc);
         assert_eq!(kinds(&back), vec!["LINE", "LINE", "LINE", "LINE", "LINE"]);
@@ -1935,7 +1948,7 @@ line two", "")), "text_control_character");
     fn w4g6_set_vertices_rewrites_a_line_and_a_polyline_and_survives_rewrite() {
         let mut doc = empty_doc();
         doc.create_line_core(0.0, 0.0, 10.0, 0.0, "A").unwrap();
-        doc.create_polyline_core(&[0.0, 0.0, 10.0, 0.0, 10.0, 10.0, 0.0, 10.0], true, "B").unwrap();
+        doc.create_polyline_core(&[0.0, 0.0, 10.0, 0.0, 10.0, 10.0, 0.0, 10.0], true, "B", &[]).unwrap();
         let before = handles(&doc);
         // A TRIM of the line at x = 4 keeps [0, 4].
         doc.set_vertices_core(0, &[0.0, 0.0, 4.0, 0.0], false, &[]).expect("a line takes two points");
@@ -2023,7 +2036,7 @@ line two", "")), "text_control_character");
     fn w4g6d_set_vertices_carries_bulges_and_refuses_a_bad_list() {
         let mut doc = empty_doc();
         // A 10 x 10 square; the projection reports four straight vertices.
-        doc.create_polyline_core(&[0.0, 0.0, 10.0, 0.0, 10.0, 10.0, 0.0, 10.0], true, "B").unwrap();
+        doc.create_polyline_core(&[0.0, 0.0, 10.0, 0.0, 10.0, 10.0, 0.0, 10.0], true, "B", &[]).unwrap();
         let first = doc.inner.entities().next().unwrap();
         assert_eq!(bulges_of(first), Some(vec![0.0, 0.0, 0.0, 0.0]));
         // The corner at (10,10) filleted with r = 2: (8,10) carries tan(pi / 8) toward (10,8); five vertices, still closed.
@@ -2053,11 +2066,42 @@ line two", "")), "text_control_character");
     }
 
     #[test]
+    fn w4g6e_create_polyline_carries_bulges_and_refuses_a_bad_list() {
+        let mut doc = empty_doc();
+        // An open three-vertex polyline whose first segment is a semicircle (bulge 1).
+        doc.create_polyline_core(&[0.0, 0.0, 10.0, 0.0, 10.0, 10.0], false, "A", &[1.0, 0.0, 0.0]).expect("one bulge per point");
+        assert_eq!(bulges_of(doc.inner.entities().next().unwrap()), Some(vec![1.0, 0.0, 0.0]));
+        // Refusals touch nothing: still one entity, its list unchanged.
+        assert_eq!(code(doc.create_polyline_core(&[0.0, 0.0, 10.0, 0.0, 10.0, 10.0], false, "A", &[1.0])), "bulges_not_per_vertex");
+        assert_eq!(code(doc.create_polyline_core(&[0.0, 0.0, 10.0, 0.0, 10.0, 10.0], false, "A", &[0.0, f64::NAN, 0.0])), "bulge_not_finite");
+        assert_eq!(code(doc.create_polyline_core(&[0.0, 0.0, 10.0, 0.0, 10.0, 10.0], false, "A", &[0.0, f64::INFINITY, 0.0])), "bulge_not_finite");
+        assert_eq!(doc.inner.entities().count(), 1, "a refusal creates nothing");
+        // The bulge survives write + re-parse; the shape is otherwise the straight create's.
+        let back = rewrite(&doc);
+        let poly = back.inner.entities().next().unwrap();
+        assert_eq!(vertices_of(poly).len(), 3);
+        assert!(!closed_of(poly));
+        let got = bulges_of(poly).unwrap();
+        assert!((got[0] - 1.0).abs() < 1e-12 && got[1] == 0.0 && got[2] == 0.0, "the bulge survives write + re-parse: {:?}", got);
+        // A closed square whose CLOSING segment (the last vertex's bulge) curves; an empty list is all straight.
+        let mut doc = empty_doc();
+        doc.create_polyline_core(&[0.0, 0.0, 10.0, 0.0, 10.0, 10.0, 0.0, 10.0], true, "B", &[0.0, 0.0, 0.0, -0.5]).unwrap();
+        let back = rewrite(&doc);
+        let sq = back.inner.entities().next().unwrap();
+        assert!(closed_of(sq));
+        let got = bulges_of(sq).unwrap();
+        assert!((got[3] + 0.5).abs() < 1e-12 && got[0] == 0.0 && got[1] == 0.0 && got[2] == 0.0, "{:?}", got);
+        let mut doc = empty_doc();
+        doc.create_polyline_core(&[0.0, 0.0, 10.0, 0.0, 10.0, 10.0], false, "A", &[]).unwrap();
+        assert_eq!(bulges_of(doc.inner.entities().next().unwrap()), Some(vec![0.0; 3]));
+    }
+
+    #[test]
     fn w4g6_set_vertices_refuses_before_touching_the_document() {
         let mut doc = empty_doc();
         doc.create_line_core(0.0, 0.0, 10.0, 0.0, "A").unwrap();
         doc.create_circle_core(5.0, 5.0, 2.0, "A").unwrap();
-        doc.create_polyline_core(&[0.0, 0.0, 1.0, 0.0, 1.0, 1.0], false, "A").unwrap();
+        doc.create_polyline_core(&[0.0, 0.0, 1.0, 0.0, 1.0, 1.0], false, "A", &[]).unwrap();
         let snapshot = engine_bytes(&doc);
         assert_eq!(code(doc.set_vertices_core(0, &[0.0, 0.0, 4.0], false, &[])), "points_not_pairs");
         assert_eq!(code(doc.set_vertices_core(0, &[0.0, 0.0], false, &[])), "polyline_needs_two_vertices");

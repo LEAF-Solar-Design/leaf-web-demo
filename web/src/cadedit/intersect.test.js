@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
-  MAX_BATCH_STEPS, MAX_INTERSECT_POINTS, chamferLines, crossings, curveOf, extendEntity, filletLines,
+  MAX_BATCH_STEPS, MAX_COORD, MAX_INTERSECT_POINTS, chamferLines, crossings, curveOf, extendEntity, filletLines,
   locate, nearestEntity, trimEntity,
 } from './intersect.js'
 
@@ -12,6 +12,7 @@ const poly = (id, pts, closed, layer = 'A', bulges = null) => ({ id, type: 'LWPO
 const circle = (id, c, r) => ({ id, type: 'CIRCLE', layer: 'A', closed: true, vertices: [[...c, 0]], radius: r, startDeg: null, endDeg: null, editable: true })
 const arc = (id, c, r, s, e) => ({ id, type: 'ARC', layer: 'A', closed: false, vertices: [[...c, 0]], radius: r, startDeg: s, endDeg: e, editable: true })
 const text = (id) => ({ id, type: 'TEXT', layer: 'A', closed: false, vertices: [[1, 1, 0]], radius: null, startDeg: null, endDeg: null, editable: true })
+const parsePts = (pts) => pts.split(' ').map((p) => p.split(',').map(Number))
 
 // The horizontal (0,0)-(10,0) and the vertical through x = 5.
 const H = () => line('h', [0, 0], [10, 0])
@@ -498,12 +499,31 @@ describe('polyline corners and bulges (W4g-6d)', () => {
     expect(curveOf(poly('p', [[0, 0], [10, 0]], false, 'A', [1e-12, 0])).curved).toBe(false)
   })
 
-  it('refuses a polyline with a curved segment on every verb whose maths is on chords, naming the role', () => {
+  it('trims curved polylines but refuses a boundary behind a curved end and two-entity curved corners', () => {
     const arcy = poly('arcy', [[0, -5], [5, -5], [5, 5]], false, 'A', [0, 0.5, 0])
-    expect(trimEntity(arcy, H(), 5, 3).refusal).toBe('Trim refused: the selection is a polyline with curved segments; not in this round.')
-    expect(trimEntity(H(), arcy, 8, 0).refusal).toBe('Trim refused: the cutting edge is a polyline with curved segments; not in this round.')
-    expect(extendEntity(arcy, H(), 5, 4).refusal).toBe('Extend refused: the selection is a polyline with curved segments; not in this round.')
-    expect(extendEntity(line('e', [0, 0], [4, 0]), arcy, 4, 0).refusal).toBe('Extend refused: the boundary edge is a polyline with curved segments; not in this round.')
+    // The arc about (1.25,0), r 6.25, meets H only at (7.5,0), halfway along.
+    const trimmed = trimEntity(arcy, H(), 5, 3)
+    expect(trimmed.steps).toHaveLength(1)
+    const { points, bulges, ...shape } = trimmed.steps[0]
+    expect(shape).toEqual({ op: 'setVertices', entityId: 'arcy', closed: false })
+    expect(points).toHaveLength(3)
+    expect(points.slice(0, 2)).toEqual([[0, -5], [5, -5]])
+    near(points[2][0], 7.5); expect(points[2][1]).toBeCloseTo(0, 9)
+    expect(bulges).toHaveLength(3)
+    near(bulges[0], 0); near(bulges[1], Math.sqrt(5) - 2); near(bulges[2], 0)
+    const cutLine = trimEntity(H(), arcy, 8, 0)
+    expect(cutLine.steps).toHaveLength(1)
+    const { points: cutPoints, ...cutShape } = cutLine.steps[0]
+    expect(cutShape).toEqual({ op: 'setVertices', entityId: 'h', closed: false })
+    expect(cutPoints).toHaveLength(2)
+    expect(cutPoints[0]).toEqual([0, 0]); near(cutPoints[1][0], 7.5); expect(cutPoints[1][1]).toEqual(0)
+    expect(extendEntity(arcy, H(), 5, 4).refusal).toBe('Extend refused: the boundary edge does not lie ahead of that end.')
+    const extended = extendEntity(line('e', [0, 0], [4, 0]), arcy, 4, 0)
+    expect(extended.steps).toHaveLength(1)
+    const { points: endPoints, ...endShape } = extended.steps[0]
+    expect(endShape).toEqual({ op: 'setVertices', entityId: 'e', closed: false })
+    expect(endPoints).toHaveLength(2)
+    expect(endPoints[0]).toEqual([0, 0]); near(endPoints[1][0], 7.5); expect(endPoints[1][1]).toEqual(0)
     expect(filletLines(H(), arcy, 1, 2, 0, 5, 3).refusal).toBe('Fillet refused: the second object is a polyline with curved segments; not in this round.')
     expect(chamferLines(H(), arcy, 1, 1, 2, 0, 5, 3).refusal).toBe('Chamfer refused: the second object is a polyline with curved segments; not in this round.')
     // A straight polyline still trims as before.
@@ -584,5 +604,802 @@ describe('chamferLines', () => {
     expect(chamferLines(line('x', [0, 0], [10, 0]), line('y', [10, 0], [10, 10]), 20, 1, 2, 0, 10, 8).refusal).toBe('Chamfer refused: the first distance is too large for the first line (less than 10 fits).')
     expect(chamferLines(line('x', [0, 0], [10, 0]), line('y', [10, 0], [10, 10]), 1, 10, 2, 0, 10, 8).refusal).toBe('Chamfer refused: the second distance is too large for the second line (less than 10 fits).')
     expect(chamferLines(line('x', [0, 0], [10, 0]), line('y', [10, 0], [10, 10]), 9.99, 9.99, 2, 0, 10, 8).steps).toHaveLength(3)
+  })
+})
+
+describe('TRIM on curved polylines (W4g-6e)', () => {
+  // Positive bulge 1: the lower semicircle about (5,0), start 180, sweep +180.
+  const SEMI = () => poly('p', [[0, 0], [10, 0]], false, 'A', [1, 0])
+  const SEMI3 = () => poly('p', [[0, 0], [10, 0], [10, 10]], false, 'A', [1, 0, 0])
+  const RING = () => poly('r', [[0, 0], [10, 0], [10, 10], [0, 10]], true, 'A', [0, 0, 0, 1])
+  const B45 = Math.tan(Math.PI / 8)
+  const B60 = Math.tan(Math.PI / 12)
+  const B30 = Math.tan(Math.PI / 24)
+  const near = (v, want) => expect(v).toBeCloseTo(want, 9)
+  const expectBulges = (actual, want) => {
+    expect(actual).toHaveLength(want.length)
+    want.forEach((b, i) => near(actual[i], b))
+  }
+  const expectVertices = (step, id, points, bulges = null) => {
+    const { points: actual, bulges: actualBulges, ...shape } = step
+    expect(shape).toEqual({ op: 'setVertices', entityId: id, closed: false })
+    expect(actual).toHaveLength(points.length)
+    points.forEach((p, i) => {
+      expect(actual[i]).toHaveLength(2)
+      p.forEach((v, j) => {
+        if (bulges === null && Number.isInteger(v)) expect(actual[i][j]).toEqual(v)
+        else near(actual[i][j], v)
+      })
+    })
+    if (bulges === null) expect(step).not.toHaveProperty('bulges')
+    else expectBulges(actualBulges, bulges)
+  }
+  const expectCreated = (step, pts, bulges = null) => {
+    expect(step.op).toEqual('createPolyline')
+    const { bulges: actual, pts: actualPts, ...inputs } = step.inputs
+    expect(inputs).toEqual({ closed: false, layer: 'A' })
+    expect(Object.keys(step).sort()).toEqual(['inputs', 'op'])
+    if (bulges === null) {
+      expect(actualPts).toEqual(pts)
+      expect(step.inputs).not.toHaveProperty('bulges')
+    } else {
+      const points = parsePts(actualPts)
+      const want = parsePts(pts)
+      expect(points).toHaveLength(want.length)
+      want.forEach((p, i) => {
+        expect(points[i]).toHaveLength(2)
+        p.forEach((v, j) => near(points[i][j], v))
+      })
+      expectBulges(actual, bulges)
+    }
+  }
+
+  it('locates and picks the arc instead of its chord', () => {
+    const at = locate(curveOf(SEMI()), [5, -7])
+    expect(at.d).toEqual(2); near(at.s, 0.5)
+    const nearest = nearestEntity([SEMI()], 5, -5.5, 1)
+    expect(Object.keys(nearest).sort()).toEqual(['d', 'id'])
+    expect(nearest.id).toEqual('p'); near(nearest.d, 0.5)
+  })
+
+  it('keeps either half of a positive semicircle as a 90-degree arc', () => {
+    // V meets the lower semicircle at (5,-5), directed fraction 1/2.
+    const tail = trimEntity(SEMI3(), V(), 2, -4)
+    expect(tail.steps).toHaveLength(1)
+    expectVertices(tail.steps[0], 'p', [[5, -5], [10, 0], [10, 10]], [B45, 0, 0])
+    const head = trimEntity(SEMI3(), V(), 8, -4)
+    expect(head.steps).toHaveLength(1)
+    expectVertices(head.steps[0], 'p', [[0, 0], [5, -5]], [B45, 0])
+  })
+
+  it('keeps half of a negative major arc without substituting its minor sweep', () => {
+    // Centre (5,5), r = 5 sqrt(2), start 225, sweep -270: midpoint angle 90.
+    const big = poly('b', [[0, 0], [10, 0]], false, 'A', [-Math.tan(67.5 * Math.PI / 180), 0])
+    const out = trimEntity(big, line('c', [5, 6], [5, 20]), -2.07, 5)
+    expect(out.steps).toHaveLength(1)
+    expectVertices(out.steps[0], 'b', [[5, 12.071067812], [10, 0]], [-Math.tan(33.75 * Math.PI / 180), 0])
+  })
+
+  it('canonicalizes a crossing shared by a chord end and an arc start', () => {
+    const mix = poly('m', [[0, 0], [10, 0], [20, 0]], false, 'A', [0, 1, 0])
+    // y = x - 10 meets (10,0); its other circle root (15,5) is off the sweep.
+    const cutter = line('d', [5, -5], [15, 5])
+    expect(crossings(curveOf(mix), curveOf(cutter))).toEqual([{ s: 1, p: [10, 0] }])
+    const tail = trimEntity(mix, cutter, 2, 0)
+    expect(tail.steps).toHaveLength(1)
+    expectVertices(tail.steps[0], 'm', [[10, 0], [20, 0]], [1, 0])
+    const head = trimEntity(mix, cutter, 15, -4)
+    expect(head.steps).toHaveLength(1)
+    expectVertices(head.steps[0], 'm', [[0, 0], [10, 0]])
+  })
+
+  it('snaps a near-end arc crossing within the aperture, leaving no sliver', () => {
+    // The lower root is about 1e-4 from (10,0), within the 1e-3 aperture.
+    const cutter = line('n', [10 - 1e-9, -1], [10 - 1e-9, 10])
+    expect(crossings(curveOf(SEMI3()), curveOf(cutter), 'none', 1e-3)).toEqual([{ s: 1, p: [10, 0] }])
+    const out = trimEntity(SEMI3(), cutter, 3, -4, 1e-3)
+    expect(out.steps).toHaveLength(1)
+    expectVertices(out.steps[0], 'p', [[10, 0], [10, 10]])
+  })
+
+  it('opens a closed polyline across its curved closing segment and keeps both arc fragments', () => {
+    // x = -3 meets the left semicircle at (-3,9) and (-3,1). Each kept arc
+    // sweeps 36.86989765 degrees, with bulge tan(theta/4) = sqrt(10) - 3.
+    const out = trimEntity(RING(), line('x', [-3, 0], [-3, 10]), -5, 5)
+    expect(out.steps).toHaveLength(1)
+    expectVertices(out.steps[0], 'r', [[-3, 1], [0, 0], [10, 0], [10, 10], [0, 10], [-3, 9]],
+      [Math.sqrt(10) - 3, 0, 0, 0, Math.sqrt(10) - 3, 0])
+  })
+
+  it('removes the middle of an open arc and creates a second polyline with its own bulges', () => {
+    // y = -5 sin(60) meets angles 240 and 300: each kept end sweeps 60 degrees.
+    const cutter = line('y', [0, -4.330127018922193], [10, -4.330127018922193])
+    const out = trimEntity(SEMI(), cutter, 5, -5)
+    expect(out.steps).toHaveLength(2)
+    expectVertices(out.steps[0], 'p', [[0, 0], [2.5, -4.330127019]], [B60, 0])
+    expectCreated(out.steps[1], '7.5,-4.330127019 10,0', [B60, 0])
+  })
+
+  it('intersects chord and arc roles and rejects circle roots outside either directed sweep', () => {
+    // The line's upper root (5,5) is outside SEMI's lower sweep.
+    const straight = trimEntity(line('l', [5, -10], [5, 10]), SEMI(), 5, -8)
+    expect(straight.steps).toHaveLength(1)
+    expectVertices(straight.steps[0], 'l', [[5, -5], [5, 10]])
+    // Two radius-5 circles separated by 5 in y meet at x = 5 +/- sqrt(18.75),
+    // y = -2.5, angles 210 and 330 on SEMI: the kept ends sweep 30 degrees.
+    const up = poly('u', [[10, -5], [0, -5]], false, 'A', [1, 0])
+    const curved = trimEntity(SEMI(), up, 5, -5)
+    expect(curved.steps).toHaveLength(2)
+    expectVertices(curved.steps[0], 'p', [[0, 0], [0.669872981, -2.5]], [B30, 0])
+    expectCreated(curved.steps[1], '9.330127019,-2.5 10,0', [B30, 0])
+    const down = poly('u', [[0, -5], [10, -5]], false, 'A', [1, 0])
+    expect(crossings(curveOf(SEMI()), curveOf(down))).toEqual([])
+    expect(trimEntity(SEMI(), down, 5, -5).refusal).toEqual('Trim refused: the cutting edge does not cross the selection.')
+  })
+
+  it('dedupes tangent roots and coincident supports but preserves distinct visits to one point', () => {
+    const tangent = line('t', [0, -5], [10, -5])
+    const hits = crossings(curveOf(SEMI()), curveOf(tangent))
+    expect(hits).toHaveLength(1)
+    near(hits[0].s, 0.5); expect(hits[0].p).toEqual([5, -5])
+    const tail = trimEntity(SEMI(), tangent, 2, -4)
+    expect(tail.steps).toHaveLength(1)
+    expectVertices(tail.steps[0], 'p', [[5, -5], [10, 0]], [B45, 0])
+    expect(crossings(curveOf(SEMI()), curveOf(poly('q', [[0, 0], [10, 0]], false, 'A', [1, 0])))).toEqual([])
+    const bow = poly('w', [[0, 0], [10, 10], [10, 0], [0, 10]], false)
+    const cutter = line('z', [-1, 5], [11, 5])
+    const visits = crossings(curveOf(bow), curveOf(cutter))
+    expect(visits).toHaveLength(3)
+    ;[0.5, 1.5, 2.5].forEach((s, i) => near(visits[i].s, s))
+    expect(visits.map((h) => h.p)).toEqual([[5, 5], [10, 5], [5, 5]])
+    const out = trimEntity(bow, cutter, 7.5, 7.5)
+    expect(out.steps).toHaveLength(2)
+    expectVertices(out.steps[0], 'w', [[0, 0], [5, 5]])
+    expectCreated(out.steps[1], '10,5 10,0 0,10')
+  })
+
+  it('refuses overflowing bulges and curved segments of zero length before emitting steps', () => {
+    const overflow = poly('o', [[0, 0], [10, 0]], false, 'A', [1e200, 0])
+    const zero = poly('o', [[0, 0], [0, 0], [10, 0]], false, 'A', [0.5, 0, 0])
+    for (const [entity, reason] of [[overflow, 'bulge that overflows'], [zero, 'curved segment of zero length']]) {
+      expect(curveOf(entity).refusal).toMatch(new RegExp(reason))
+      const out = trimEntity(entity, V(), 2, -4)
+      expect(out).toEqual({ refusal: `Trim refused: the selection polyline has a ${reason}.` })
+      expect(out).not.toHaveProperty('steps')
+    }
+  })
+
+  it('admits 1000 points and carries full bulges exactly, but refuses 1001 points', () => {
+    const pts = Array.from({ length: 1000 }, (_, i) => [i, i % 2])
+    const bulges = pts.map(() => 0.1)
+    const cutter = line('k', [500.5, -1], [500.5, 2])
+    const out = trimEntity(poly('g', pts, false, 'A', bulges), cutter, 200, 0.5)
+    expect(out.steps).toHaveLength(1)
+    const { points: kept, bulges: keptBulges, ...shape } = out.steps[0]
+    expect(shape).toEqual({ op: 'setVertices', entityId: 'g', closed: false })
+    expect(kept).toHaveLength(500)
+    near(kept[0][0], 500.5)
+    expect(kept.slice(1)).toEqual(pts.slice(501))
+    expect(keptBulges).toHaveLength(500)
+    expect(keptBulges[0]).toBeGreaterThan(0)
+    expect(keptBulges[0]).toBeLessThan(0.1)
+    keptBulges.slice(1, -1).forEach((b) => expect(b).toBe(0.1))
+    near(keptBulges[499], 0)
+    const tooMany = poly('g', [...pts, [1000, 0]], false, 'A', [...bulges, 0.1])
+    expect(trimEntity(tooMany, cutter, 200, 0.5).refusal).toMatch(/more than 1000 points/)
+  })
+
+  it('stores the closed seam as one crossing at zero and preserves a whole closing arc', () => {
+    // y = x meets vertices 0 and 2; (5,5), the other circle root, is off the arc.
+    const cutter = line('s', [-1, -1], [11, 11])
+    expect(crossings(curveOf(RING()), curveOf(cutter))).toEqual([{ s: 0, p: [0, 0] }, { s: 2, p: [10, 10] }])
+    const out = trimEntity(RING(), cutter, 5, 0)
+    expect(out.steps).toHaveLength(1)
+    expectVertices(out.steps[0], 'r', [[10, 10], [0, 10], [0, 0]], [0, 1, 0])
+  })
+
+  it('extends a straight end without losing other bulges and accepts a curved boundary', () => {
+    const trimmy = poly('e', [[0, 0], [10, 0], [10, 5]], false, 'A', [1, 0, 0])
+    const out = extendEntity(trimmy, line('b', [0, 8], [20, 8]), 10, 6)
+    expect(out.steps).toHaveLength(1)
+    expectVertices(out.steps[0], 'e', [[0, 0], [10, 0], [10, 8]], [1, 0, 0])
+    const straight = extendEntity(line('l', [5, -10], [5, -6]), SEMI(), 5, -6)
+    expect(straight.steps).toHaveLength(1)
+    expectVertices(straight.steps[0], 'l', [[5, -10], [5, -5]])
+  })
+})
+
+describe('EXTEND on a curved end segment (W4g-6e)', () => {
+  const B45 = Math.tan(Math.PI / 8)
+  const B135 = Math.tan(135 * Math.PI / 180 / 4)
+  // The terminal arc is about (10,5), r 5, start 270, sweep +90.
+  const hook = () => poly('k', [[0, 0], [10, 0], [15, 5]], false, 'A', [0, B45, 0])
+  const expectVertices = (out, id, points, bulges) => {
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(1)
+    const { points: actual, bulges: actualBulges, ...shape } = out.steps[0]
+    expect(shape).toEqual({ op: 'setVertices', entityId: id, closed: false })
+    expect(actual).toHaveLength(points.length)
+    points.forEach((p, i) => {
+      expect(actual[i]).toHaveLength(2)
+      p.forEach((v, j) => expect(actual[i][j]).toBeCloseTo(v, 9))
+    })
+    expect(actualBulges).toHaveLength(bulges.length)
+    bulges.forEach((b, i) => {
+      if (Number.isInteger(b)) expect(actualBulges[i]).toEqual(b)
+      else expect(actualBulges[i]).toBeCloseTo(b, 9)
+    })
+  }
+
+  it('extends arcy to the vertical boundary crossing in its gap', () => {
+    const arcy = poly('arcy', [[0, -5], [5, -5], [5, 5]], false, 'A', [0, 0.5, 0])
+    // x = 0 reaches (0,sqrt(37.5)), growing the sweep to about 154.667 degrees.
+    const out = extendEntity(arcy, line('t', [0, 0], [0, 10]), 5, 4)
+    expectVertices(out, 'arcy', [[0, -5], [5, -5], [0, 6.123724357]], [0, 0.8001991550, 0])
+  })
+
+  it('extends a positive terminal arc along its circle to a signed 135-degree sweep', () => {
+    // The root at 45 degrees is in the boundary span; the root at 135 is not.
+    const out = extendEntity(hook(), line('b', [10, 8.535533905932738], [20, 8.535533905932738]), 16, 6)
+    expectVertices(out, 'k', [[0, 0], [10, 0], [13.535533906, 8.535533906]], [0, B135, 0])
+  })
+
+  it('extends a negative terminal arc along its circle with a negative bulge', () => {
+    const hookCw = poly('w', [[0, 0], [10, 0], [15, -5]], false, 'A', [0, -B45, 0])
+    const out = extendEntity(hookCw, line('b', [10, -8.535533905932738], [20, -8.535533905932738]), 16, -6)
+    expectVertices(out, 'w', [[0, 0], [10, 0], [13.535533906, -8.535533906]], [0, -B135, 0])
+  })
+
+  it('extends the start of a positive first arc and preserves the remaining vertices', () => {
+    const first = poly('f', [[10, 0], [15, 5], [20, 5]], false, 'A', [B45, 0, 0])
+    // The root at 225 degrees is 45 degrees before the start; 315 is off the span.
+    const out = extendEntity(first, line('b', [0, 1.4644660940672622], [10, 1.4644660940672622]), 9, 0)
+    expectVertices(out, 'f', [[6.464466094, 1.464466094], [15, 5], [20, 5]], [B135, 0, 0])
+  })
+
+  it('refuses crossings behind the end, a full turn, no root and a closed target without steps', () => {
+    const ahead = 'Extend refused: the boundary edge does not lie ahead of that end.'
+    const cases = [
+      // Only the 315-degree root is on this edge, strictly inside the existing arc.
+      [extendEntity(hook(), line('v', [13.535533905932738, -10], [13.535533905932738, 4]), 16, 6), ahead],
+      // The tangent is the arc's start, so reaching it would complete a full turn.
+      [extendEntity(hook(), line('s', [5, 0], [10, 0]), 16, 6), 'Extend refused: extending that far would close the arc into a full turn.'],
+      [extendEntity(hook(), line('n', [0, 20], [20, 20]), 16, 6), ahead],
+      [extendEntity(poly('c', [[0, 0], [10, 0], [10, 10]], true, 'A', [1, 0, 0]), H(), 5, 5), 'Extend refused: a closed polyline has no end to extend.'],
+    ]
+    for (const [out, refusal] of cases) {
+      expect(out).toEqual({ refusal })
+      expect(out).not.toHaveProperty('steps')
+    }
+  })
+
+  it('extends a straight start while carrying the curved end unchanged', () => {
+    const out = extendEntity(hook(), line('l', [-3, -5], [-3, 5]), 1, 0)
+    expectVertices(out, 'k', [[-3, 0], [10, 0], [15, 5]], [0, B45, 0])
+  })
+
+  it('keeps every other vertex and bulge exactly when extending the terminal arc', () => {
+    const out = extendEntity(hook(), line('b', [10, 8.535533905932738], [20, 8.535533905932738]), 16, 6)
+    expect(out.steps).toHaveLength(1)
+    const { points, bulges } = out.steps[0]
+    expect(points[0]).toEqual([0, 0])
+    expect(points[1]).toEqual([10, 0])
+    expect(bulges[0]).toBe(0)
+    expect(bulges[2]).toBe(0)
+  })
+
+  it('reports the full-circle crossing so an ARC entity extends to a curved polyline boundary', () => {
+    const arcEntity = arc('a', [0, 0], 5, 0, 90)
+    const bowl = poly('q', [[-10, 2], [0, 2]], false, 'A', [1, 0])
+    // The lower circle root lies on the bowl and in the target's gap; the upper root is off the bowl.
+    const hits = crossings(curveOf(arcEntity), curveOf(bowl))
+    expect(hits).toHaveLength(1)
+    expect(hits[0].s).toBeCloseTo(215.615884258, 6)
+    const out = extendEntity(arcEntity, bowl, -1, 5)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(1)
+    const { a1, ...shape } = out.steps[0]
+    expect(shape).toEqual({ op: 'setArc', entityId: 'a', x: 0, y: 0, r: 5, a0: 0 })
+    expect(a1).toBeCloseTo(215.615884258, 6)
+  })
+})
+
+describe('Astra refutations (W4g-6e record 4)', () => {
+  it('preserves a tiny chord with a huge bulge through an unrelated end trim', () => {
+    // The 0.001 chord and bulge 100000 describe an arc of radius 25 and sagitta 50.
+    const target = poly('p', [[0, 0], [0.001, 0], [10, 0], [20, 0]], false, 'A', [100000, 0, 0, 0])
+    const out = trimEntity(target, line('e', [15, -1], [15, 1]), 19, 0, 0.01)
+    expect(out).toEqual({ steps: [{
+      op: 'setVertices', entityId: 'p', points: [[0, 0], [0.001, 0], [10, 0], [15, 0]], closed: false,
+      bulges: [100000, 0, 0, 0],
+    }] })
+  })
+
+  it('keeps crossings that are close in param but far apart in space', () => {
+    const target = line('l', [0, 0], [1e9, 0])
+    // The lower semicircle about (100,1), r 2, meets y = 0 at x = 100 +/- sqrt(3).
+    const edge = poly('q', [[98, 1], [102, 1]], false, 'A', [1, 0])
+    expect(crossings(curveOf(target), curveOf(edge))).toHaveLength(2)
+    const out = trimEntity(target, edge, 100, 0, 1e-9)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(2)
+    const { points, ...first } = out.steps[0]
+    expect(first).toEqual({ op: 'setVertices', entityId: 'l', closed: false })
+    expect(points).toHaveLength(2)
+    expect(points[0]).toEqual([0, 0])
+    expect(points[1]).toHaveLength(2)
+    expect(points[1][0]).toBeCloseTo(98.267949192, 6)
+    expect(points[1][1]).toBe(0)
+    expect(out.steps[0]).not.toHaveProperty('bulges')
+    const { inputs, ...second } = out.steps[1]
+    expect(second).toEqual({ op: 'createLine' })
+    const { x, ...rest } = inputs
+    expect(x).toBeCloseTo(101.732050808, 6)
+    expect(rest).toEqual({ y: 0, x2: 1e9, y2: 0, layer: 'A' })
+    expect(trimEntity(line('l', [0, 0], [1e10, 0]), edge, 100, 0, 1e-9).refusal).toMatch(/beyond 1e9/)
+  })
+
+  it('keeps an interior crossing at a coordinate that revisits the start', () => {
+    const target = poly('p', [[0, 0], [10, 0], [0, 0], [0, 10]], false, 'A', [1, 0, 0, 0])
+    // y = x meets the arc start at s = 0 and the return visit at s = 2.
+    const edge = line('e', [-1, -1], [1, 1])
+    expect(crossings(curveOf(target), curveOf(edge))).toEqual([{ s: 0, p: [0, 0] }, { s: 2, p: [0, 0] }])
+    expect(trimEntity(target, edge, 0, 5, 1e-9)).toEqual({ steps: [{
+      op: 'setVertices', entityId: 'p', points: [[0, 0], [10, 0], [0, 0]], closed: false,
+      bulges: [1, 0, 0],
+    }] })
+  })
+
+  it('keeps the endpoint of a retained arc before a short straight segment', () => {
+    const target = poly('p', [[0, 0], [0.001, 0], [0.002, 0], [10, 0], [20, 0]], false, 'A', [100000, 0, 0, 0, 0])
+    const out = trimEntity(target, line('e', [15, -1], [15, 1]), 19, 0, 0.01)
+    expect(out).toEqual({ steps: [{
+      op: 'setVertices', entityId: 'p', points: [[0, 0], [0.001, 0], [0.002, 0], [10, 0], [15, 0]], closed: false,
+      bulges: [100000, 0, 0, 0, 0],
+    }] })
+  })
+
+  it('solves a short cutter through an arc and keeps the remaining quarter circle', () => {
+    const target = poly('p', [[0, 0], [10, 0]], false, 'A', [1, 0])
+    const edge = line('e', [5, -5.000001], [5, -4.999999])
+    const hits = crossings(curveOf(target), curveOf(edge))
+    expect(hits).toHaveLength(1)
+    expect(hits[0].s).toBeCloseTo(0.5, 9)
+    const out = trimEntity(target, edge, 2, -4, 1e-9)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(1)
+    const { points, bulges, ...shape } = out.steps[0]
+    expect(shape).toEqual({ op: 'setVertices', entityId: 'p', closed: false })
+    expect(points).toHaveLength(2)
+    ;[[5, -5], [10, 0]].forEach((p, i) => {
+      expect(points[i]).toHaveLength(2)
+      p.forEach((v, j) => expect(points[i][j]).toBeCloseTo(v, 6))
+    })
+    expect(bulges).toHaveLength(2)
+    expect(bulges[0]).toBeCloseTo(Math.tan(Math.PI / 8), 9)
+    expect(bulges[1]).toBe(0)
+  })
+
+  it('keeps near-start crossings interior on a very long line', () => {
+    const target = line('l', [0, 0], [1e9, 0])
+    const edge = poly('q', [[98, 1], [102, 1]], false, 'A', [1, 0])
+    const out = trimEntity(target, edge, 100, 0, 1e-9)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(2)
+    const { points, ...first } = out.steps[0]
+    expect(first).toEqual({ op: 'setVertices', entityId: 'l', closed: false })
+    expect(points).toHaveLength(2)
+    expect(points[0]).toEqual([0, 0])
+    expect(points[1]).toHaveLength(2)
+    expect(points[1][0]).toBeCloseTo(98.267949192, 6)
+    expect(points[1][1]).toBe(0)
+    expect(out.steps[0]).not.toHaveProperty('bulges')
+    const { inputs, ...second } = out.steps[1]
+    expect(second).toEqual({ op: 'createLine' })
+    const { x, ...rest } = inputs
+    expect(x).toBeCloseTo(101.732050808, 6)
+    expect(rest).toEqual({ y: 0, x2: 1e9, y2: 0, layer: 'A' })
+    expect(trimEntity(line('l', [0, 0], [1e12, 0]), edge, 100, 0, 1e-9).refusal).toMatch(/beyond 1e9/)
+  })
+
+  it('keeps both crossings and retained arcs of a tiny semicircle cut by a chord', () => {
+    const target = poly('p', [[-0.00001, 0], [0.00001, 0]], false, 'A', [1, 0])
+    const edge = line('e', [-0.00002, -0.000006], [0.00002, -0.000006])
+    // The radius-1e-5 lower semicircle meets y = -6e-6 at x = +/-8e-6.
+    const hits = crossings(curveOf(target), curveOf(edge))
+    expect(hits).toHaveLength(2)
+    expect(hits[0].s).toBeCloseTo(0.204833, 6)
+    expect(hits[1].s).toBeCloseTo(0.795167, 6)
+    const out = trimEntity(target, edge, 0, -0.00001, 1e-9)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(2)
+    const { points, bulges, ...first } = out.steps[0]
+    expect(first).toEqual({ op: 'setVertices', entityId: 'p', closed: false })
+    expect(points).toHaveLength(2)
+    ;[[-0.00001, 0], [-0.000008, -0.000006]].forEach((p, i) => {
+      expect(points[i]).toHaveLength(2)
+      p.forEach((v, j) => expect(points[i][j]).toBeCloseTo(v, 9))
+    })
+    // Each retained 36.869898-degree arc has bulge sqrt(10) - 3.
+    expect(bulges).toHaveLength(2)
+    expect(bulges[0]).toBeCloseTo(0.1622776602, 9)
+    expect(bulges[1]).toBe(0)
+    const { inputs, ...second } = out.steps[1]
+    expect(second).toEqual({ op: 'createPolyline' })
+    const { bulges: createdBulges, pts, ...rest } = inputs
+    expect(rest).toEqual({ closed: false, layer: 'A' })
+    const createdPoints = parsePts(pts)
+    expect(createdPoints).toHaveLength(2)
+    ;[[0.000008, -0.000006], [0.00001, 0]].forEach((p, i) => {
+      expect(createdPoints[i]).toHaveLength(2)
+      p.forEach((v, j) => expect(createdPoints[i][j]).toBeCloseTo(v, 9))
+    })
+    expect(createdBulges).toHaveLength(2)
+    expect(createdBulges[0]).toBeCloseTo(0.1622776602, 9)
+    expect(createdBulges[1]).toBe(0)
+  })
+})
+
+describe('Astra refutations, round four (W4g-6e record 7)', () => {
+  it('keeps both crossings and retained arcs with a cutter at a billion units', () => {
+    const target = poly('p', [[-5, 0], [5, 0]], false, 'A', [1, 0])
+    const edge = line('e', [-1e9, -3], [1e9, -3])
+    // The radius-5 lower semicircle meets y = -3 at x = +/-4.
+    const hits = crossings(curveOf(target), curveOf(edge))
+    expect(hits).toHaveLength(2)
+    expect(hits[0].s).toBeCloseTo(0.204833, 6)
+    expect(hits[1].s).toBeCloseTo(0.795167, 6)
+    ;[[-4, -3], [4, -3]].forEach((p, i) => {
+      expect(hits[i].p).toHaveLength(2)
+      p.forEach((v, j) => expect(hits[i].p[j]).toBeCloseTo(v, 6))
+    })
+    const out = trimEntity(target, edge, -3, -4, 1e-9)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(2)
+    const { points, bulges, ...first } = out.steps[0]
+    expect(first).toEqual({ op: 'setVertices', entityId: 'p', closed: false })
+    expect(points).toHaveLength(2)
+    ;[[-5, 0], [-4, -3]].forEach((p, i) => {
+      expect(points[i]).toHaveLength(2)
+      p.forEach((v, j) => expect(points[i][j]).toBeCloseTo(v, 6))
+    })
+    expect(bulges).toHaveLength(2)
+    expect(bulges[0]).toBeCloseTo(0.1622776602, 9)
+    expect(bulges[1]).toBe(0)
+    const { inputs, ...second } = out.steps[1]
+    expect(second).toEqual({ op: 'createPolyline' })
+    const { bulges: createdBulges, pts, ...rest } = inputs
+    expect(rest).toEqual({ closed: false, layer: 'A' })
+    const createdPoints = parsePts(pts)
+    expect(createdPoints).toHaveLength(2)
+    ;[[4, -3], [5, 0]].forEach((p, i) => {
+      expect(createdPoints[i]).toHaveLength(2)
+      p.forEach((v, j) => expect(createdPoints[i][j]).toBeCloseTo(v, 9))
+    })
+    expect(createdBulges).toHaveLength(2)
+    expect(createdBulges[0]).toBeCloseTo(0.1622776602, 9)
+    expect(createdBulges[1]).toBe(0)
+  })
+
+  it('refuses the cutter at two to the thirtieth before emitting steps', () => {
+    const target = poly('p', [[-5, 0], [5, 0]], false, 'A', [1, 0])
+    const out = trimEntity(target, line('e', [-1073741824, -3], [1073741824, -3]), -3, -4, 1e-9)
+    expect(out.refusal).toMatch(/beyond 1e9/)
+    expect(out).not.toHaveProperty('steps')
+  })
+
+  it('keeps a tangent at scale as one snapped vertex crossing', () => {
+    const target = poly('k', [[0, 0], [10, 0], [15, 5]], false, 'A', [0, Math.tan(Math.PI / 8), 0])
+    const edge = line('s', [-1e8, 0], [10, 0])
+    expect(crossings(curveOf(target), curveOf(edge))).toEqual([{ s: 1, p: [10, 0] }])
+  })
+
+  it('keeps the exact endpoints of an arc with a chord below the drawing precision', () => {
+    const target = poly('p', [[0, 0], [4e-10, 0], [10, 0], [20, 0]], false, 'A', [1e11, 0, 0, 0])
+    const out = trimEntity(target, line('e', [15, -1], [15, 1]), 19, 0, 1e-9)
+    expect(out).toEqual({ steps: [{
+      op: 'setVertices', entityId: 'p', points: [[0, 0], [4e-10, 0], [10, 0], [15, 0]], closed: false,
+      bulges: [1e11, 0, 0, 0],
+    }] })
+    expect(out.steps[0].points[1][0]).toBe(4e-10)
+  })
+
+  it('bounds pick coordinates, vertices and round radii at 1e9', () => {
+    expect(MAX_COORD).toBe(1e9)
+    const target = poly('p', [[0, 0], [10, 0]], false, 'A', [1, 0])
+    expect(trimEntity(target, line('e', [5, -6], [5, 6]), 2e9, 0).refusal).toMatch(/within 1e9/)
+    expect(curveOf(circle('c', [0, 0], 2e9)).refusal).toMatch(/larger than 1e9/)
+    expect(curveOf(line('l', [0, 0], [2e9, 0])).refusal).toMatch(/beyond 1e9/)
+  })
+})
+
+describe('Astra refutations, round five (W4g-6e record 8)', () => {
+  it('accepts cutter endpoints only within a world-unit tolerance of the arc', () => {
+    const target = poly('p', [[-5, 0], [5, 0]], false, 'A', [1, 0])
+    const edge = line('e', [0, -1e9], [0, -5.5])
+    expect(crossings(curveOf(target), curveOf(edge))).toEqual([])
+    expect(trimEntity(target, edge, -3, -4, 1e-9).refusal).toBe('Trim refused: the cutting edge does not cross the selection.')
+    const edge2 = line('e', [0, -1e9], [0, -4.9999999995])
+    const hits = crossings(curveOf(target), curveOf(edge2))
+    expect(hits).toHaveLength(1)
+    expect(hits[0].s).toBeCloseTo(0.5, 9)
+    expect(hits[0].p).toHaveLength(2)
+    ;[0, -5].forEach((v, j) => expect(hits[0].p[j]).toBeCloseTo(v, 9))
+    const out = trimEntity(target, edge2, -3, -4, 1e-9)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(1)
+    const { points, bulges, ...shape } = out.steps[0]
+    expect(shape).toEqual({ op: 'setVertices', entityId: 'p', closed: false })
+    expect(points).toHaveLength(2)
+    ;[[0, -5], [5, 0]].forEach((p, i) => {
+      expect(points[i]).toHaveLength(2)
+      p.forEach((v, j) => expect(points[i][j]).toBeCloseTo(v, 9))
+    })
+    expect(bulges).toHaveLength(2)
+    expect(bulges[0]).toBeCloseTo(Math.tan(Math.PI / 8), 9)
+    expect(bulges[1]).toBe(0)
+  })
+
+  it('keeps the exact endpoints of a tiny chord with a huge bulge', () => {
+    const target = poly('p', [[0, 0], [1.4e-9, 0], [10, 0], [20, 0]], false, 'A', [1e10, 0, 0, 0])
+    const out = trimEntity(target, line('e', [15, -1], [15, 1]), 19, 0, 1e-9)
+    expect(out).toEqual({ steps: [{
+      op: 'setVertices', entityId: 'p', points: [[0, 0], [1.4e-9, 0], [10, 0], [15, 0]], closed: false,
+      bulges: [1e10, 0, 0, 0],
+    }] })
+    expect(out.steps[0].points[1][0]).toBe(1.4e-9)
+  })
+
+  it('creates the far curved piece with full endpoint precision', () => {
+    const target = poly('p', [[0, 0], [10, 0]], false, 'A', [1, 0])
+    const edge = line('y', [0, -4.330127018922193], [10, -4.330127018922193])
+    const out = trimEntity(target, edge, 5, -5)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(2)
+    const { inputs, ...shape } = out.steps[1]
+    expect(shape).toEqual({ op: 'createPolyline' })
+    const { pts, bulges, ...rest } = inputs
+    expect(rest).toEqual({ closed: false, layer: 'A' })
+    const points = parsePts(pts)
+    expect(points).toHaveLength(2)
+    ;[[7.5, -4.330127018922193], [10, 0]].forEach((p, i) => {
+      expect(points[i]).toHaveLength(2)
+      p.forEach((v, j) => expect(points[i][j]).toBeCloseTo(v, 12))
+    })
+    expect(bulges).toHaveLength(2)
+    expect(bulges[0]).toBeCloseTo(Math.tan(Math.PI / 12), 9)
+    expect(bulges[1]).toBe(0)
+  })
+
+  it('refuses a bulged arc larger than the coordinate bound', () => {
+    expect(curveOf(poly('p', [[0, 0], [1, 0]], false, 'A', [4e9, 0])).refusal).toMatch(/arc larger than 1e9/)
+    expect(curveOf(poly('p', [[0, 0], [1, 0]], false, 'A', [1e3, 0])).refusal).toBeUndefined()
+  })
+})
+
+describe('Astra refutations, round six (W4g-6e record 9)', () => {
+  it('keeps a short straight segment before a large-bulge arc exactly', () => {
+    const target = poly('p', [[0, 0], [5e-10, 0], [1.5e-9, 0], [10, 0], [20, 0]], false, 'A', [0, 1e10, 0, 0, 0])
+    const out = trimEntity(target, line('e', [15, -1], [15, 1]), 19, 0, 1e-9)
+    expect(out).toEqual({ steps: [{
+      op: 'setVertices', entityId: 'p', points: [[0, 0], [5e-10, 0], [1.5e-9, 0], [10, 0], [15, 0]], closed: false,
+      bulges: [0, 1e10, 0, 0, 0],
+    }] })
+    expect(out.steps[0].points[1][0]).toBe(5e-10)
+    expect(out.steps[0].points[2][0]).toBe(1.5e-9)
+  })
+
+  it('keeps the crossing and retained arc with a diagonal billion-unit cutter', () => {
+    const target = poly('p', [[-1, 0], [1, 0]], false, 'A', [1, 0])
+    const edge = line('e', [-1e9, -1e9], [1e9, 1e9])
+    // Only the 225-degree root lies on the lower unit semicircle.
+    const hits = crossings(curveOf(target), curveOf(edge))
+    expect(hits).toHaveLength(1)
+    expect(hits[0].s).toBeCloseTo(0.25, 6)
+    expect(hits[0].p).toHaveLength(2)
+    ;[-0.707106781, -0.707106781].forEach((v, j) => expect(hits[0].p[j]).toBeCloseTo(v, 6))
+    const out = trimEntity(target, edge, 0, -1, 1e-9)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(1)
+    const { points, bulges, ...shape } = out.steps[0]
+    expect(shape).toEqual({ op: 'setVertices', entityId: 'p', closed: false })
+    expect(points).toHaveLength(2)
+    ;[[-1, 0], [-0.707106781, -0.707106781]].forEach((p, i) => {
+      expect(points[i]).toHaveLength(2)
+      p.forEach((v, j) => expect(points[i][j]).toBeCloseTo(v, 6))
+    })
+    // The retained 45-degree arc has bulge tan(pi / 16).
+    expect(bulges).toHaveLength(2)
+    expect(bulges[0]).toBeCloseTo(0.1989123674, 9)
+    expect(bulges[1]).toBe(0)
+  })
+})
+
+describe('Astra refutations, round seven (W4g-6e record 10)', () => {
+  it('refuses a long cutter that stops beyond the scaled geometric tolerance of the arc', () => {
+    const target = poly('p', [[-5, 0], [5, 0]], false, 'A', [1, 0])
+    const edge = line('e', [0, -536870917], [0, -(5 + 2 ** -19)])
+    // At this scale gEps is about 9.54e-7, smaller than the 2^-19 shortfall.
+    expect(crossings(curveOf(target), curveOf(edge))).toEqual([])
+    expect(trimEntity(target, edge, -3, -4, 1e-9).refusal).toBe('Trim refused: the cutting edge does not cross the selection.')
+  })
+
+  it('accepts a long cutter ending within the scaled geometric tolerance of the arc', () => {
+    const target = poly('p', [[-5, 0], [5, 0]], false, 'A', [1, 0])
+    const near = line('e', [0, -536870917], [0, -(5 + 2 ** -26)])
+    expect(crossings(curveOf(target), curveOf(near))).toHaveLength(1)
+    const edge = line('e', [0, -536870917], [0, -5.0000000005])
+    const hits = crossings(curveOf(target), curveOf(edge))
+    expect(hits).toHaveLength(1)
+    expect(hits[0].s).toBeCloseTo(0.5, 9)
+    expect(hits[0].p).toHaveLength(2)
+    ;[0, -5].forEach((v, j) => expect(hits[0].p[j]).toBeCloseTo(v, 9))
+    const out = trimEntity(target, edge, -3, -4, 1e-9)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(1)
+    const { points, bulges, ...shape } = out.steps[0]
+    expect(shape).toEqual({ op: 'setVertices', entityId: 'p', closed: false })
+    expect(points).toHaveLength(2)
+    ;[[0, -5], [5, 0]].forEach((p, i) => {
+      expect(points[i]).toHaveLength(2)
+      p.forEach((v, j) => expect(points[i][j]).toBeCloseTo(v, 9))
+    })
+    expect(bulges).toHaveLength(2)
+    expect(bulges[0]).toBeCloseTo(Math.tan(Math.PI / 8), 9)
+    expect(bulges[1]).toBe(0)
+  })
+})
+
+describe('Astra refutations, round eight (W4g-6e record 11)', () => {
+  it('keeps an internal tangency at a billion as one crossing and trims to it', () => {
+    const target = poly('p', [[0, -1e9], [0, 1e9]], false, 'A', [1, 0])
+    const edge = circle('c', [1, 0], 999999999)
+    // The right semicircle and the inner circle touch at (1e9, 0), halfway along the arc.
+    const hits = crossings(curveOf(target), curveOf(edge))
+    expect(hits).toHaveLength(1)
+    expect(hits[0].s).toBeCloseTo(0.5, 6)
+    expect(hits[0].p).toHaveLength(2)
+    ;[1e9, 0].forEach((v, j) => expect(hits[0].p[j]).toBeCloseTo(v, 3))
+    const out = trimEntity(target, edge, 0, -1e9, 1e-9)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(1)
+    const { points, bulges, ...shape } = out.steps[0]
+    expect(shape).toEqual({ op: 'setVertices', entityId: 'p', closed: false })
+    expect(points).toHaveLength(2)
+    ;[[1e9, 0], [0, 1e9]].forEach((p, i) => {
+      expect(points[i]).toHaveLength(2)
+      p.forEach((v, j) => expect(points[i][j]).toBeCloseTo(v, 3))
+    })
+    expect(bulges).toHaveLength(2)
+    expect(bulges[0]).toBeCloseTo(Math.tan(Math.PI / 8), 9)
+    expect(bulges[1]).toBe(0)
+  })
+
+  it('extends a billion-unit straight end by half a unit and preserves the first arc', () => {
+    const target = poly('p', [[-1e9, -2], [-1e9, 0], [0, 0]], false, 'A', [1, 0, 0])
+    const edge = line('e', [0.5, -1], [0.5, 1])
+    const out = extendEntity(target, edge, 0, 0, 1e-9)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(1)
+    const { points, ...shape } = out.steps[0]
+    expect(shape).toEqual({ op: 'setVertices', entityId: 'p', closed: false, bulges: [1, 0, 0] })
+    expect(points).toHaveLength(3)
+    expect(points[0]).toEqual([-1e9, -2])
+    expect(points[1]).toEqual([-1e9, 0])
+    expect(points[2]).toHaveLength(2)
+    ;[0.5, 0].forEach((v, j) => expect(points[2][j]).toBeCloseTo(v, 6))
+  })
+
+  it('extends a billion-unit straight start by half a unit and preserves the last arc', () => {
+    const target = poly('q', [[0, 0], [1e9, 0], [1e9, 2]], false, 'A', [0, 1, 0])
+    const edge = line('e', [-0.5, -1], [-0.5, 1])
+    const out = extendEntity(target, edge, 0, 0, 1e-9)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(1)
+    const { points, ...shape } = out.steps[0]
+    expect(shape).toEqual({ op: 'setVertices', entityId: 'q', closed: false, bulges: [0, 1, 0] })
+    expect(points).toHaveLength(3)
+    expect(points[0]).toHaveLength(2)
+    ;[-0.5, 0].forEach((v, j) => expect(points[0][j]).toBeCloseTo(v, 6))
+    expect(points[1]).toEqual([1e9, 0])
+    expect(points[2]).toEqual([1e9, 2])
+  })
+})
+
+describe('Astra refutations, round nine (W4g-6e record 12)', () => {
+  it('refuses crossings on another arc when extending either straight end', () => {
+    const target = poly('p', [[3, 2], [3, 0], [0, 0], [1, 0]], false, 'A', [1, 0, 0, 0])
+    const edge = line('e', [0, 1], [5, 1])
+    expect(extendEntity(target, edge, 1, 0, 1e-9).refusal).toBe('Extend refused: the boundary edge does not lie ahead of that end.')
+    const mirrored = poly('q', [[1, 0], [0, 0], [3, 0], [3, 2]], false, 'A', [0, 0, -1, 0])
+    expect(extendEntity(mirrored, edge, 1, 0, 1e-9).refusal).toBe('Extend refused: the boundary edge does not lie ahead of that end.')
+  })
+
+  it('extends the terminal straight segment and ignores the earlier arc crossing', () => {
+    const target = poly('p', [[3, 2], [3, 0], [0, 0], [1, 0]], false, 'A', [1, 0, 0, 0])
+    const edge = line('v', [2, -1], [2, 1])
+    expect(extendEntity(target, edge, 1, 0, 1e-9)).toEqual({ steps: [{
+      op: 'setVertices', entityId: 'p', points: [[3, 2], [3, 0], [0, 0], [2, 0]], closed: false,
+      bulges: [1, 0, 0, 0],
+    }] })
+  })
+})
+
+describe('Astra refutations, round ten (W4g-6e record 13)', () => {
+  it('keeps a billion-unit tangent as one crossing and trims the left semicircle to it', () => {
+    const target = poly('p', [[0, 0.6], [0, -0.6]], false, 'A', [1, 0])
+    const edge = line('e', [-600000000, -799999999], [600000000, 800000001])
+    // y = 4x/3 + 1 touches the radius-0.6 left semicircle at (-0.48, 0.36).
+    const hits = crossings(curveOf(target), curveOf(edge))
+    expect(hits).toHaveLength(1)
+    expect(hits[0].s).toBeCloseTo(0.295167235, 5)
+    expect(hits[0].p).toHaveLength(2)
+    ;[-0.48, 0.36].forEach((v, j) => expect(hits[0].p[j]).toBeCloseTo(v, 5))
+    const out = trimEntity(target, edge, 0, 0.6, 1e-9)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(1)
+    const { points, bulges, ...shape } = out.steps[0]
+    expect(shape).toEqual({ op: 'setVertices', entityId: 'p', closed: false })
+    expect(points).toHaveLength(2)
+    ;[[-0.48, 0.36], [0, -0.6]].forEach((p, i) => {
+      expect(points[i]).toHaveLength(2)
+      p.forEach((v, j) => expect(points[i][j]).toBeCloseTo(v, 5))
+    })
+    // The retained 126.8699-degree arc has bulge (sqrt(5) - 1) / 2.
+    expect(bulges).toHaveLength(2)
+    expect(bulges[0]).toBeCloseTo(0.6180339887, 6)
+    expect(bulges[1]).toBe(0)
+  })
+
+  it('keeps the geometric tolerance at 1e-9 at ordinary scale', () => {
+    const target = curveOf(poly('p', [[0, 0], [10, 0]], false, 'A', [1, 0]))
+    expect(crossings(target, curveOf(line('t', [0, -5.000000002], [10, -5.000000002])))).toEqual([])
+    const hits = crossings(target, curveOf(line('t', [0, -5.0000000005], [10, -5.0000000005])))
+    expect(hits).toHaveLength(1)
+    expect(hits[0].p).toHaveLength(2)
+    ;[5, -5].forEach((v, j) => expect(hits[0].p[j]).toBeCloseTo(v, 8))
+  })
+})
+
+describe('Astra refutations, round eleven (W4g-6e record 14)', () => {
+  it('keeps tiny perpendicular crossings and both retained trim pieces', () => {
+    const h = 2 ** -17
+    const target = poly('p', [[0, 0], [h, 0], [2 * h, 0]], false, 'A', [0, 1, 0])
+    const edge = poly('e', [[h / 2, h / 2], [h / 2, -h], [3 * h / 2, -h], [3 * h / 2, h / 2]], false)
+    // The U crosses the chord halfway and the lower semicircle at its bottom.
+    const hits = crossings(curveOf(target), curveOf(edge))
+    expect(hits).toHaveLength(2)
+    expect(hits[0].s).toBeCloseTo(0.5, 9)
+    expect(hits[1].s).toBeCloseTo(1.5, 9)
+    const out = trimEntity(target, edge, h, 0, 1e-9)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(2)
+    const { points, ...first } = out.steps[0]
+    expect(first).toEqual({ op: 'setVertices', entityId: 'p', closed: false })
+    expect(out.steps[0]).not.toHaveProperty('bulges')
+    expect(points).toHaveLength(2)
+    ;[[0, 0], [h / 2, 0]].forEach((p, i) => {
+      expect(points[i]).toHaveLength(2)
+      p.forEach((v, j) => expect(points[i][j]).toBeCloseTo(v, 9))
+    })
+    const { inputs, ...second } = out.steps[1]
+    expect(second).toEqual({ op: 'createPolyline' })
+    const { pts, bulges, ...rest } = inputs
+    expect(rest).toEqual({ closed: false, layer: 'A' })
+    const createdPoints = parsePts(pts)
+    expect(createdPoints).toHaveLength(2)
+    ;[[3 * h / 2, -h / 2], [2 * h, 0]].forEach((p, i) => {
+      expect(createdPoints[i]).toHaveLength(2)
+      p.forEach((v, j) => expect(createdPoints[i][j]).toBeCloseTo(v, 12))
+    })
+    expect(bulges).toHaveLength(2)
+    expect(bulges[0]).toBeCloseTo(Math.tan(Math.PI / 8), 9)
+    expect(bulges[1]).toBe(0)
+  })
+
+  it('keeps genuinely parallel tiny segments without crossings', () => {
+    const target = line('a', [0, 0], [1e-5, 0])
+    const edge = line('b', [0, 1e-9], [1e-5, 1e-9])
+    expect(crossings(curveOf(target), curveOf(edge))).toEqual([])
   })
 })

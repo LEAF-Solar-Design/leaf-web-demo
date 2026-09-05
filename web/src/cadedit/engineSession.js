@@ -222,7 +222,7 @@ export function parsePointList(raw) {
  * with a typed reason; this layer exists so a typo costs a sentence, not a
  * round trip.
  */
-export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, layer, height, rot, text, ratio } = {}) {
+export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, layer, height, rot, text, ratio, bulges } = {}) {
   const layerName = String(layer ?? '').trim()
   if (op === 'createLine') {
     const [x1, y1, xx2, yy2] = [x, y, x2, y2].map(fmtDelta)
@@ -288,7 +288,23 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
   if (op === 'createPolyline') {
     const points = parsePointList(pts)
     if (!points) return { refusal: `Polyline refused: enter at least two points as x,y pairs (at most ${MAX_CREATE_POINTS}).` }
-    return { payload: { points, closed: closed === true || closed === 'true', layer: layerName } }
+    // W4g-6e: a plan step may hand a created polyline its bulges (one per
+    // vertex, finite; the prompt's PLINE sends none). The wire shape of a
+    // straight polyline is unchanged: the list rides only when a bulge is set.
+    let bulgeList = null
+    if (bulges != null) {
+      if (!Array.isArray(bulges) || bulges.length !== points.length / 2) {
+        return { refusal: 'Polyline refused: one bulge per vertex, each a finite number.' }
+      }
+      let anySet = false
+      for (let i = 0; i < bulges.length; i += 1) {
+        const b = bulges[i]
+        if (typeof b !== 'number' || !Number.isFinite(b)) return { refusal: 'Polyline refused: one bulge per vertex, each a finite number.' }
+        if (b !== 0) anySet = true
+      }
+      if (anySet) bulgeList = Array.from(bulges)
+    }
+    return { payload: { points, closed: closed === true || closed === 'true', layer: layerName, ...(bulgeList ? { bulges: bulgeList } : {}) } }
   }
   if (op === 'createRectangle') {
     // W4g-4 RECTANG: two opposite corners -> the closed polyline the engine

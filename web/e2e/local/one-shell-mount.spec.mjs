@@ -1297,6 +1297,61 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.locator('.cockpit-band [data-tool="quick-redo-edit"]')).toBeEnabled({ timeout: 60_000 })
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeTrim + 3))
 
+    // W4g-6e TRIM on a CURVED polyline on the REAL engine: redo the corner
+    // fillet (the rectangle is curved again), draw a vertical LINE through
+    // the rectangle (+1), then TRIM the rectangle by that line with the pick on
+    // its left part. A closed polyline losing a piece opens into ONE polyline
+    // whose kept part carries the rounded corner's bulge (count held), and
+    // one engine undo takes the trim back; a second undo removes the line.
+    await bar.fill('redo')
+    await bar.press('Enter')
+    await expect(page.locator('.cockpit-band [data-tool="quick-redo-edit"]')).toBeDisabled({ timeout: 60_000 })
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeTrim + 3))
+    await bar.fill('l')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'createLine', { timeout: 20_000 })
+    await page.getByLabel('ribbon x', { exact: true }).fill('340')
+    await page.getByLabel('ribbon y', { exact: true }).fill('280')
+    await page.getByLabel('ribbon x2', { exact: true }).fill('340')
+    await page.getByLabel('ribbon y2', { exact: true }).fill('320')
+    await page.getByLabel('ribbon y2', { exact: true }).press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeTrim + 4), { timeout: 60_000 })
+    await page.keyboard.press('Escape')
+    const curvedCutter = await page.getByRole('radio').last().getAttribute('value')
+    expect(curvedCutter).toBeTruthy()
+    await page.locator(`input[type="radio"][value="${rectangle}"]`).check()
+    await bar.fill('tr')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'trim', { timeout: 20_000 })
+    await page.getByLabel('ribbon edge', { exact: true }).fill(curvedCutter)
+    await page.getByLabel('ribbon x', { exact: true }).fill('335')
+    await page.getByLabel('ribbon y', { exact: true }).fill('300')
+    await page.getByLabel('ribbon y', { exact: true }).press('Enter')
+    await expect(workbenchStatus).toContainText('trim applied', { timeout: 60_000 })
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeTrim + 4))
+    test.info().annotations.push({ type: 'trim-curved', description: `trim opened the rounded rectangle at ${curvedCutter} into one polyline (count held at ${countBeforeTrim + 4})` })
+    await page.keyboard.press('Escape')
+    // The kept polyline is still CURVED: OFFSET refuses a curved polyline by its sentence (the store's own
+    // rule, run on the engine's re-parsed projection), which a flattened polyline would have accepted.
+    await page.locator(`input[type="radio"][value="${rectangle}"]`).check()
+    await bar.fill('o')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'offset', { timeout: 20_000 })
+    await page.getByLabel('ribbon distance', { exact: true }).fill('3')
+    await page.getByLabel('ribbon x', { exact: true }).fill('360')
+    await page.getByLabel('ribbon y', { exact: true }).fill('300')
+    await page.getByLabel('ribbon y', { exact: true }).press('Enter')
+    await expect(workbenchStatus).toContainText('curved segments', { timeout: 60_000 })
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeTrim + 4))
+    await page.keyboard.press('Escape')
+    await bar.fill('u')
+    await bar.press('Enter')
+    await expect(page.locator('.cockpit-band [data-tool="quick-redo-edit"]')).toBeEnabled({ timeout: 60_000 })
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeTrim + 4))
+    await bar.fill('u')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeTrim + 3), { timeout: 60_000 })
+
     // W4g-4b on the REAL engine: a POINT (+1) and an ELLIPSE (+1) by typed
     // operands, then MATCHPROP: a LINE drawn on its own layer is the source,
     // the earlier cutting edge the destination (its id typed into the same
