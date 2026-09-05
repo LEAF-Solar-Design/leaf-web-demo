@@ -512,6 +512,7 @@ def test_context_packet_schema_frozen(monkeypatch, tmp_path):
     assert set(packet["entitlements"]) == {
         "run_read", "run_write", "solve", "build", "converse",
         "agent_write_autopilot", "deploy", "platform_customize", "upload",
+        "link_service",
     }, "entitlement capability key set drifted from the §11.3 freeze"
     assert packet["classifier_hint"] is None
     # Catalog cap semantics + the {"more": N} marker, exercised DIRECTLY:

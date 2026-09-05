@@ -99,7 +99,7 @@ def test_unknown_tier_falls_to_restricted_not_demo():
         "run_read": True, "run_write": False, "build": False,
         "solve": False, "converse": False, "agent_write_autopilot": False,
         "deploy": False, "platform_customize": False,
-        "upload": False,
+        "upload": False, "link_service": False,
     }
     # the load-bearing property: an unrecognised tier does NOT get write/build.
     assert ent["run_write"] is False and ent["build"] is False
@@ -115,7 +115,7 @@ def test_per_key_omission_defaults_false(monkeypatch, tmp_path):
         "run_read": True, "run_write": False, "build": False,
         "solve": False, "converse": False, "agent_write_autopilot": False,
         "deploy": False, "platform_customize": False,
-        "upload": False,
+        "upload": False, "link_service": False,
     }
 
 
@@ -125,7 +125,7 @@ def test_demo_tier_stays_full_access():
         "run_read": True, "run_write": True, "build": True,
         "solve": True, "converse": True, "agent_write_autopilot": True,
         "deploy": True, "platform_customize": False,
-        "upload": True,
+        "upload": True, "link_service": False,
     }
 
 

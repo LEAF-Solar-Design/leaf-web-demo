@@ -1,5 +1,5 @@
 {
-  "_note": "Tier -> capability policy (CONTRACT-ADDENDUM §17 + agent spine §18 + guest uploads §19). Operator-tunable: edit these booleans (or point LEAF_ENTITLEMENTS_FILE at another file) to change what each Auth0 tier may do. Read at request time by server/entitlements.py. Off-auth (and unknown) tenants resolve tier 'demo' (full access, friction-free). run_read gates POST /api/run of drawing.read tools; run_write gates drawing.write tools; build gates POST /api/author; converse gates the conversational agent surface; agent_write_autopilot lets the agent auto-dispatch write tools; deploy gates registering an authored tool (R6); platform_customize gates R7 (true ONLY on the operator-granted 'admin' tier — W14 admin self-edit lane, docs/ADMIN-SELF-EDIT-LANE.md); upload gates POST /api/drawings/upload (§19 — the 'guest' tier is the ephemeral signed-out identity: upload only, everything else denied).",
+  "_note": "Tier -> capability policy (CONTRACT-ADDENDUM §17 + agent spine §18 + guest uploads §19). Operator-tunable: edit these booleans (or point LEAF_ENTITLEMENTS_FILE at another file) to change what each Auth0 tier may do. Read at request time by server/entitlements.py. Off-auth (and unknown) tenants resolve tier 'demo' (full access, friction-free). run_read gates POST /api/run of drawing.read tools; run_write gates drawing.write tools; build gates POST /api/author; converse gates the conversational agent surface; agent_write_autopilot lets the agent auto-dispatch write tools; deploy gates registering an authored tool (R6); platform_customize gates R7 (true ONLY on the operator-granted 'admin' tier — W14 admin self-edit lane, docs/ADMIN-SELF-EDIT-LANE.md); upload gates POST /api/drawings/upload (§19 — the 'guest' tier is the ephemeral signed-out identity: upload only, everything else denied); link_service gates the write routes of the tenant MCP server registry (standardization slice 8b, routers/tenant_mcp.py) — registering, connecting, and unlinking an outbound MCP server; false on demo/restricted/guest, true on every paid tier.",
   "demo": {
     "run_read": true,
     "run_write": true,
@@ -9,7 +9,8 @@
     "agent_write_autopilot": true,
     "deploy": true,
     "platform_customize": false,
-    "upload": true
+    "upload": true,
+    "link_service": false
   },
   "self_hosted": {
     "run_read": true,
@@ -20,7 +21,8 @@
     "agent_write_autopilot": true,
     "deploy": true,
     "platform_customize": false,
-    "upload": true
+    "upload": true,
+    "link_service": true
   },
   "hosted_starter": {
     "run_read": true,
@@ -31,7 +33,8 @@
     "agent_write_autopilot": false,
     "deploy": false,
     "platform_customize": false,
-    "upload": true
+    "upload": true,
+    "link_service": true
   },
   "hosted_pro": {
     "run_read": true,
@@ -42,7 +45,8 @@
     "agent_write_autopilot": true,
     "deploy": true,
     "platform_customize": false,
-    "upload": true
+    "upload": true,
+    "link_service": true
   },
   "admin": {
     "run_read": true,
@@ -53,7 +57,8 @@
     "agent_write_autopilot": true,
     "deploy": true,
     "platform_customize": true,
-    "upload": true
+    "upload": true,
+    "link_service": true
   },
   "restricted": {
     "run_read": true,
@@ -64,7 +69,8 @@
     "agent_write_autopilot": false,
     "deploy": false,
     "platform_customize": false,
-    "upload": false
+    "upload": false,
+    "link_service": false
   },
   "guest": {
     "run_read": false,
@@ -75,6 +81,7 @@
     "agent_write_autopilot": false,
     "deploy": false,
     "platform_customize": false,
-    "upload": true
+    "upload": true,
+    "link_service": false
   }
 }

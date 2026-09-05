@@ -45,7 +45,7 @@ FROZEN_CLAIM_TIERS = {
 FROZEN_CAPABILITIES = {
     "run_read", "run_write", "solve", "build",
     "converse", "agent_write_autopilot", "deploy", "platform_customize",
-    "upload",
+    "upload", "link_service",
 }
 # --------------------------------------------------------------------------- #
 

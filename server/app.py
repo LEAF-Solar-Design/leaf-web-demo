@@ -71,6 +71,7 @@ from routers import (
     telemetry,
     templates as templates_router,
     tenant,
+    tenant_mcp,
     tools,
     uploads,
     usage, overlay)
@@ -246,6 +247,7 @@ app.include_router(usage.router)  # UI wave 1: per-tenant spend/quota meter (GET
 app.include_router(ops.router)  # UI wave 2: ops surface (role-gated tenant spend + kill-switch proxy)
 app.include_router(ops_metrics.router)  # APS observability read-API: fleet metrics + in-flight tail + ledger<->job drill-down (X-Ops-Secret)
 app.include_router(tenant.router)  # wave 4: per-tenant Claude grant linking (proxy to harness store)
+app.include_router(tenant_mcp.router)  # slice 8b: tenant MCP server registry (server-side OAuth connect)
 app.include_router(site.router)  # public site-facing namespace for the leaf_website Next app (/api/site/*)
 app.include_router(uploads.router)  # §19 guest/account drawing uploads (+ /api/site/guest-upload-policy in site.router)
 # Dedicated CAD admissibility endpoint (POST /api/cad/upload), fail-closed behind

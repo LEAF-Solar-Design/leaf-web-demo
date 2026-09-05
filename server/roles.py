@@ -78,7 +78,7 @@ _HARDCODED_ROLE_DEFAULTS: Dict[str, Dict[str, Dict[str, bool]]] = {
     "platform_admin": {
         "grants": {"run_read": True, "run_write": True, "solve": True, "build": True,
                    "converse": True, "agent_write_autopilot": True, "deploy": True,
-                   "platform_customize": False, "upload": True},
+                   "platform_customize": False, "upload": True, "link_service": True},
         "elevated_grants": {"platform_customize": True},
     },
     # Reserved preset names for the org-configuration phase. Empty on purpose:

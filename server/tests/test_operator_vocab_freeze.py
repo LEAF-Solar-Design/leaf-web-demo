@@ -37,6 +37,9 @@ FROZEN_TIERS = {
 FROZEN_CAPABILITIES = {
     "run_read", "run_write", "solve", "build", "converse",
     "agent_write_autopilot", "deploy", "platform_customize", "upload",
+    "link_service",  # standardization slice 8b, 2026-09-04 — a tenant
+    # capability (registry write routes), not an operator one; the assertion
+    # below still holds this file's actual invariant (no "operator" entry).
 }
 
 
