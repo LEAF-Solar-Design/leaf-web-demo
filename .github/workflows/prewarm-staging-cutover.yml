@@ -105,9 +105,17 @@ env:
   # does behind a web prewarm; the deploy workflow's prewarm-yield job keeps a
   # prewarm from ever STARTING ahead of a queued real deploy. Cost: about 9
   # CodeBuild minutes on general1.large at $0.02/min, about $0.18 per app
-  # prewarm (operator-approved 2026-09-05). Dispatch order is the list order:
-  # web first, then app queues on the group behind it.
-  STAGE_SERVICES: "web app"
+  # prewarm (operator-approved 2026-09-05).
+  # WHY `app` IS OUT AGAIN (2026-09-05): the first app prewarm (terraform run
+  # 33949283388) was refused by the deploy workflow's "Verify protected
+  # runtime posture" step: the lane-close step is hard-skipped under prewarm,
+  # so the posture checker sees a forward app intent over an OPEN
+  # drawing-write lane and refuses before any mutation. Until that checker
+  # and workflow represent an idle weight-0 prewarm as its own admission
+  # reason (with the writer-safety evidence the design requires), each
+  # eligible PR event would only buy one refused run. Restore `app` here in
+  # the same change that lands that admission, list order web then app.
+  STAGE_SERVICES: "web"
   # Bounded wait for the speculative supply set: 20 polls x 30s.
   SUPPLY_SET_POLLS: "20"
   SUPPLY_SET_INTERVAL: "30"
