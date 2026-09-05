@@ -358,25 +358,27 @@ def test_the_dispatch_stages_both_colours_on_the_prewarm_rail():
     assert "if length == 1 then .[0].databaseId else empty end" in body
 
 
-def test_app_is_not_staged_while_its_deploy_job_is_self_hosted():
+def test_web_and_app_are_staged_now_that_the_app_deploy_job_is_ephemeral():
     """A cross-repo coupling this repo cannot check mechanically, so it is pinned.
 
-    deploy-leaf-platform-staging.yml (terraform repo) runs its deploy job on
-    ubuntu-latest for `web` and on the single self-hosted runner for every other
-    service. A run holds the shared staging mutex from the moment it ENTERS the
-    group -- including while its job waits for a runner -- so an `app` prewarm
-    queued behind that busy runner blocks every staging deploy. Measured
-    2026-08-17: two relayed prewarms sat pending 25 and 44 minutes behind an
-    unrelated iOS capture job and were cancelled off the mutex.
+    `app` was withheld from 2026-08-17 to 2026-09-05: deploy-leaf-platform-staging.yml
+    (terraform repo) then ran its deploy job on the single self-hosted runner, and
+    a run holds the shared staging mutex from the moment it ENTERS the group, so an
+    app prewarm queued behind that busy runner blocked every staging deploy (two
+    relayed prewarms sat 25 and 44 minutes behind an iOS capture job).
 
-    Restoring `app` is a deliberate edit that has to come back through this test,
-    which is the point: whoever does it should first confirm that deploy job runs
-    somewhere always available.
+    Since 2026-08-24 that job runs on an ephemeral CodeBuild-backed runner, one per
+    run (codebuild-leaf-gha-runner-platform-deploy-<run_id>-<attempt>), and on
+    2026-09-05 the deploy job waited 0.4 min for its runner on nine consecutive app
+    relays. The condition the old pin named is met, so both colour-surfaced
+    services are staged, web first. Removing `app` again, reordering, or adding a
+    service the deploy workflow refuses under prewarm (`app` and `web` are the only
+    two it admits) is a deliberate edit that has to come back through this test.
     """
     services = workflow_document()["env"]["STAGE_SERVICES"].split()
-    assert services == ["web"], (
-        "STAGE_SERVICES is %s; `app` may only be staged once its deploy job "
-        "runs on an always-available runner" % services
+    assert services == ["web", "app"], (
+        "STAGE_SERVICES is %s; the two colour-surfaced services are staged in "
+        "dispatch order, web then app" % services
     )
 
 
