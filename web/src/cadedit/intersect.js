@@ -480,7 +480,9 @@ function readCurves(verb, target, edge, edgeRole, curvedOk = { target: false, ed
 /**
  * TRIM: cut the selection (`target`) at its crossings with the cutting edge
  * and remove the part the point (px, py) lies on. Returns { steps } in the
- * store's own terms, or { refusal }. `tol` is the aperture in world units.
+ * store's own terms, or { refusal }. `tol` is the aperture in world units:
+ * it decides only whether the pick is too close to a crossing to name a side.
+ * The geometry never moves with the zoom.
  */
 export function trimEntity(target, edge, px, py, tol = EPSILON) {
   const verb = 'Trim'
@@ -495,7 +497,7 @@ export function trimEntity(target, edge, px, py, tol = EPSILON) {
   const layer = layerOf(target)
   if (T.kind === 'LINE' || (T.kind === 'POLY' && !T.closed)) {
     const end = T.kind === 'LINE' ? 1 : T.pts.length - 1
-    const inside = crossings(T, E, 'none', eps).filter((c) => c.s > 0 && c.s < end)
+    const inside = crossings(T, E, 'none').filter((c) => c.s > 0 && c.s < end)
     if (!inside.length) return refuse(verb, 'the cutting edge does not cross the selection')
     const sp = locate(T, pick).s
     if (inside.some((c) => same(c.p, pointAt(T, sp), eps))) return refuse(verb, 'click on the part to remove, away from the crossing')
@@ -519,7 +521,7 @@ export function trimEntity(target, edge, px, py, tol = EPSILON) {
     // Closed: the removed piece runs between the two crossings around the
     // pick; what remains is one OPEN polyline from the far crossing round to
     // the near one.
-    const all = crossings(T, E, 'none', eps)
+    const all = crossings(T, E, 'none')
     if (all.length < 2) return refuse(verb, 'a closed polyline needs two crossings with the cutting edge to lose a piece')
     const sp = locate(T, pick).s
     if (all.some((c) => same(c.p, pointAt(T, sp), eps))) return refuse(verb, 'click on the part to remove, away from the crossing')
@@ -532,23 +534,24 @@ export function trimEntity(target, edge, px, py, tol = EPSILON) {
     if (kept.pts.length < 2) return refuse(verb, 'nothing of the selection would remain')
     return { steps: [setVertices(target.id, kept.pts, false, bulgesOrNull(kept.bulges))] }
   }
-  const epsA = (eps / T.r) / DEG + EPSILON
+  const pickA = (eps / T.r) / DEG + EPSILON
   if (T.kind === 'CIRCLE') {
-    const all = crossings(T, E, 'none', eps)
+    const all = crossings(T, E, 'none')
     if (all.length < 2) return refuse(verb, 'a circle needs two crossings with the cutting edge to lose a piece')
     const ap = locate(T, pick).s
-    if (all.some((c) => Math.abs(normDeg(c.s - ap)) < epsA || Math.abs(normDeg(ap - c.s)) < epsA)) return refuse(verb, 'click on the part to remove, away from the crossing')
+    if (all.some((c) => Math.abs(normDeg(c.s - ap)) < pickA || Math.abs(normDeg(ap - c.s)) < pickA)) return refuse(verb, 'click on the part to remove, away from the crossing')
     const lo = all.filter((c) => c.s < ap).pop() || all[all.length - 1]
     const hi = all.find((c) => c.s > ap) || all[0]
     if (lo === hi) return refuse(verb, 'a circle needs two crossings with the cutting edge to lose a piece')
     return { steps: [{ op: 'delete', entityId: target.id }, createArc(T.c, T.r, hi.s, lo.s, layer)] }
   }
   // ARC: offsets from the start, inside the sweep only.
-  const inside = crossings(T, E, 'none', eps).filter((c) => c.s > epsA && c.s < T.sweep - epsA)
+  const epsA = (EPSILON / T.r) / DEG + EPSILON
+  const inside = crossings(T, E, 'none').filter((c) => c.s > epsA && c.s < T.sweep - epsA)
   if (!inside.length) return refuse(verb, 'the cutting edge does not cross the selection')
   const at = locate(T, pick)
   if (!at.on) return refuse(verb, 'click on the arc itself, on the part to remove')
-  if (inside.some((c) => Math.abs(c.s - at.s) < epsA)) return refuse(verb, 'click on the part to remove, away from the crossing')
+  if (inside.some((c) => Math.abs(c.s - at.s) < pickA)) return refuse(verb, 'click on the part to remove, away from the crossing')
   const lo = inside.filter((c) => c.s < at.s).pop() || null
   const hi = inside.find((c) => c.s > at.s) || null
   const steps = []
@@ -566,15 +569,15 @@ export function trimEntity(target, edge, px, py, tol = EPSILON) {
  * EXTEND: lengthen the selection's end nearer to (px, py) along its own
  * direction until it meets the boundary edge. A circle or a closed polyline
  * has no end; a boundary that does not lie ahead of the end is a refusal.
+ * Takes no tolerance; every geometric band uses the kernel's own value.
  */
-export function extendEntity(target, edge, px, py, tol = EPSILON) {
+export function extendEntity(target, edge, px, py) {
   const verb = 'Extend'
   const bad = readPair(verb, px, py, 'the point near the end to extend:')
   if (bad) return bad
   const read = readCurves(verb, target, edge, 'boundary edge', { target: true, edge: true })
   if (read.refusal) return read
   const { a: T, b: E } = read
-  const eps = Math.max(tol, EPSILON)
   const gEps = geomEps(Math.max(scaleOf(T), scaleOf(E)))
   const pick = [px, py]
   if (T.kind === 'CIRCLE') return refuse(verb, 'a circle has no end to extend')
@@ -587,8 +590,8 @@ export function extendEntity(target, edge, px, py, tol = EPSILON) {
       const { c, r, start, sweep } = arc
       const sigma = Math.sign(sweep)
       const magnitude = Math.abs(sweep)
-      const epsA = (eps / r) / DEG + EPSILON
-      const all = crossings({ kind: 'CIRCLE', c, r }, E, 'none', eps)
+      const epsA = (EPSILON / r) / DEG + EPSILON
+      const all = crossings({ kind: 'CIRCLE', c, r }, E, 'none')
       let best = null
       for (const hit of all) {
         const o = normDeg(sigma * (hit.s - start))
@@ -610,7 +613,7 @@ export function extendEntity(target, edge, px, py, tol = EPSILON) {
       bulges[atEnd ? n - 2 : 0] = Math.tan((sweep + sigma * best) * DEG / 4)
       return { steps: [setVertices(target.id, pts, false, bulgesOrNull(bulges))] }
     }
-    const hits = crossings(T, E, atEnd ? 'end' : 'start', eps)
+    const hits = crossings(T, E, atEnd ? 'end' : 'start')
     let chosen = null
     let best = null
     if (atEnd) {
@@ -639,8 +642,8 @@ export function extendEntity(target, edge, px, py, tol = EPSILON) {
   const startPt = onCircle(T.c, T.r, T.start)
   const endPt = onCircle(T.c, T.r, T.end)
   const atEnd = dist(pick, endPt) <= dist(pick, startPt)
-  const epsA = (eps / T.r) / DEG + EPSILON
-  const all = crossings(T, E, 'none', eps)
+  const epsA = (EPSILON / T.r) / DEG + EPSILON
+  const all = crossings(T, E, 'none')
   let best = null
   for (const c of all) {
     // c.s is the offset from the start, counter-clockwise, on the full

@@ -98,7 +98,9 @@ export function applyPick(state, x, y, inputs = {}, context = null) {
     // that lands on nothing writes nothing and the step waits.
     const hit = context ? nearestEntity(context.entities, x, y, context.tol, context.exceptId) : null
     if (!hit) return { state, writes: [] }
-    return { state: next, writes: [[step.keys[0], String(hit.id)], [step.keys[1], round3(x)], [step.keys[2], round3(y)]] }
+    const writes = [[step.keys[0], String(hit.id)], [step.keys[1], round3(x)], [step.keys[2], round3(y)]]
+    if (Number.isFinite(context.tol) && context.tol > 0) writes.push(['etol', String(context.tol)])
+    return { state: next, writes }
   }
   if (step.kind === 'point') return { state: next, writes: [[step.keys[0], round3(x)], [step.keys[1], round3(y)]] }
   if (step.kind === 'radius') {

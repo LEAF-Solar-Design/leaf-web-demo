@@ -40,7 +40,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { EngineBoundary } from '../cad/engineWorker.js'
 import { SESSION_ERROR } from './engineSessionErrors.js'
 import { offsetEntity } from './offset.js'
-import { MAX_BATCH_STEPS, MAX_INTERSECT_POINTS, chamferLines, extendEntity, filletLines, trimEntity } from './intersect.js'
+import { MAX_BATCH_STEPS, MAX_COORD, MAX_INTERSECT_POINTS, chamferLines, extendEntity, filletLines, trimEntity } from './intersect.js'
 import { clipboardRecord, describeRecord, pasteOp } from './clipboard.js'
 import { diffPlan } from './mutationDiff.js'
 
@@ -358,7 +358,12 @@ export function planIntersectVerb(op, session, inputs = {}) {
   // read-only entity is never one (FILLET and CHAMFER rewrite the edge).
   if (edge.editable === false) return { refusal: `${verb.name} refused: the ${verb.edge} is read-only in the browser engine.` }
   const { x, y } = checked.payload
-  if (op === 'trim') return trimEntity(target, edge, x, y)
+  if (op === 'trim') {
+    const tol = readNumber(inputs.etol)
+    return Number.isFinite(tol) && tol > 0 && tol <= MAX_COORD
+      ? trimEntity(target, edge, x, y, tol)
+      : trimEntity(target, edge, x, y)
+  }
   if (op === 'extend') return extendEntity(target, edge, x, y)
   if (op === 'fillet') return filletLines(target, edge, fmtDelta(inputs.r), x, y, fmtDelta(inputs.ex), fmtDelta(inputs.ey))
   return chamferLines(target, edge, fmtDelta(inputs.d1), fmtDelta(inputs.d2), x, y, fmtDelta(inputs.ex), fmtDelta(inputs.ey))
