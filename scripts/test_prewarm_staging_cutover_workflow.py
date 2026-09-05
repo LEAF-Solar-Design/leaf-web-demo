@@ -328,7 +328,12 @@ def test_the_preview_checkout_is_never_executed():
 def test_a_close_is_never_cancelled_by_a_newer_stage():
     concurrency = workflow_document()["concurrency"]
     assert "descale" in concurrency["group"] and "stage" in concurrency["group"]
-    assert concurrency["cancel-in-progress"] == "${{ github.event.action != 'closed' }}"
+    # Extended for the group path (a merge group always cancels in progress,
+    # since the queue is serial and there is no close event to protect), but
+    # a PR close (action == 'closed') must still never be cancelled.
+    assert concurrency["cancel-in-progress"] == (
+        "${{ github.event_name == 'merge_group' || github.event.action != 'closed' }}"
+    )
 
 
 def test_only_same_repo_non_fork_non_draft_pull_requests_stage():
@@ -358,34 +363,181 @@ def test_the_dispatch_stages_both_colours_on_the_prewarm_rail():
     assert "if length == 1 then .[0].databaseId else empty end" in body
 
 
-def test_app_is_paused_until_the_merge_deploy_can_reuse_a_staged_candidate():
-    """A cross-repo coupling this repo cannot check mechanically, so it is pinned.
+def test_web_and_app_are_staged_again_because_the_merge_group_makes_the_stage_fresh():
+    """The freshness gap that paused `app` (#1067, #1068) is closed by the group path.
 
-    The old pin's runner condition has been met since 2026-08-24, when the deploy
-    job moved to an ephemeral CodeBuild-backed runner, one per run, with a
-    measured queue wait of 0.4 min.
+    `app` was staged (#1055), paused for the runner-serialising mutation group
+    (#1058), restored once terraform #1474 taught the posture gate to admit an
+    idle weight-0 prewarm (#1060), then paused again because the PR-mode stage
+    is taken on the merge PREVIEW and a busy main could move under it before
+    the real merge (#1067, #1068): the merge's actual tree then had no
+    speculative supply set, and the build rebuilt.
 
-    Terraform #1474 (7f2f40e5) now admits an idle weight-0 prewarm with its
-    truthful no-closure state, while a normal forward deploy over an open
-    lane still refuses. The earlier pins' runner and posture conditions are met.
-
-    The first successful app prewarm (run 33952930173) was not reused by its
-    merge deploy (run 33953973668) because main moved between the stage and
-    the merge (#1061), the merge tree differed from the staged preview's tree,
-    and the merge build's adopt job found no speculative supply set for it
-    and rebuilt. When the trees match the adopt job re-envelopes the
-    speculative manifest with its preview-built digests, so reuse is possible
-    and the missing piece is freshness under a busy main.
-
-    `app` stays paused until a re-stage-on-push, merge-group, or measured-hit-rate
-    decision lands, and restoring it comes back through this test in the same
-    change.
+    The merge-group job stages the group's own head, whose first parent is
+    checked equal to its base at stage time (`stage-group`'s "Require the
+    group head's first parent to equal its base" step), so nothing can move
+    main under it before the merge deploy consumes the stage. Both colours are
+    back in STAGE_SERVICES for that path; the PR path also re-covers app,
+    which is accepted only because the PR triggers are provisional until the
+    queue retires them.
     """
     services = workflow_document()["env"]["STAGE_SERVICES"].split()
-    assert services == ["web"], (
-        "STAGE_SERVICES is %s; app is paused until the build/supply workflow's "
-        "reuse path admits an exact-tree speculative producer" % services
+    assert services == ["web", "app"], (
+        "STAGE_SERVICES is %s; the merge-group path stages the group's exact "
+        "head, so both colours should be back" % services
     )
+
+
+def test_merge_group_trigger_fires_only_on_checks_requested():
+    triggers = workflow_document()["on"]
+    assert triggers["merge_group"]["types"] == ["checks_requested"], (
+        "checks_requested is the only type GitHub sends for a queued group; "
+        "there is no group-destroyed event for this workflow to subscribe to"
+    )
+
+
+def test_the_group_concurrency_key_is_fixed_and_always_cancels_in_progress():
+    concurrency = workflow_document()["concurrency"]
+    group = concurrency["group"]
+    assert "github.event_name == 'merge_group'" in group
+    assert "'prewarm-staging-cutover-mg-stage'" in group, (
+        "a merge group has no PR number, and the queue is serial, so its "
+        "concurrency key must be fixed rather than per-group"
+    )
+    # PR events must keep their own per-PR, per-action key untouched.
+    assert "github.event.pull_request.number" in group
+    assert "github.event.action == 'closed' && 'descale' || 'stage'" in group
+    cancel = concurrency["cancel-in-progress"]
+    assert "github.event_name == 'merge_group'" in cancel, (
+        "the newest queued group's stage must cancel an older one in flight"
+    )
+
+
+def test_the_group_job_runs_only_for_merge_group_events():
+    condition = workflow_document()["jobs"]["stage-group"]["if"]
+    assert condition == "github.event_name == 'merge_group'"
+
+
+GROUP_ELIGIBILITY_ENV = {
+    "HEAD_SHA": "a" * 40,
+    "BASE_SHA": "b" * 40,
+    "HEAD_REF": "refs/heads/gh-readonly-queue/main/pr-42-abcdef0123456789",
+}
+
+
+@needs_shell
+def test_the_group_eligibility_step_reads_no_pr_api_and_no_label(tmp_path):
+    """Queued IS eligible: no `gh api` call and no `.labels` read anywhere in the step.
+
+    Unlike the PR path's eligibility step, which reads the PR and its reviews
+    through `gh api`, this step has nothing to ask GitHub: the trigger itself
+    (`checks_requested`) already means the group is queued.
+    """
+    body = step_body("stage-group", "Record the merge-group head and base")
+    assert "gh api" not in body
+    assert "labels" not in body
+    (tmp_path / "bin").mkdir()
+    result = run_step(body, tmp_path, GROUP_ELIGIBILITY_ENV)
+    assert result["eligible"] == "true"
+    assert result["reason"] == "merge group"
+    assert result["head_sha"] == "a" * 40
+    assert result["base_sha"] == "b" * 40
+    assert result["sha12"] == "a" * 12
+
+
+def test_the_group_checkout_targets_the_exact_head_sha():
+    steps = workflow_document()["jobs"]["stage-group"]["steps"]
+    checkout = next(s for s in steps if s.get("uses", "").startswith("actions/checkout"))
+    assert checkout["with"]["ref"] == "${{ steps.group.outputs.head_sha }}"
+    assert checkout["with"]["fetch-depth"] == "2"
+    assert checkout["with"]["persist-credentials"] == "false"
+
+
+def _repo_with_parent(tmp_path: Path, base_matches: bool) -> tuple[Path, str]:
+    """A two-commit repo; returns (repo, the base sha to assert against)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run = lambda *argv: subprocess.run(argv, cwd=repo, check=True, capture_output=True)
+    run("git", "init", "-q")
+    run("git", "config", "user.email", "t@example.invalid")
+    run("git", "config", "user.name", "t")
+    (repo / "a.txt").write_text("base\n", encoding="utf-8")
+    run("git", "add", "-A")
+    run("git", "commit", "-qm", "base")
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    (repo / "a.txt").write_text("head\n", encoding="utf-8")
+    run("git", "add", "-A")
+    run("git", "commit", "-qm", "head")
+    asserted_base = base_sha if base_matches else "f" * 40
+    return repo, asserted_base
+
+
+@needs_shell
+@pytest.mark.parametrize(
+    "base_matches,expected_ok",
+    [(True, "true"), (False, "false")],
+)
+def test_the_group_first_parent_must_equal_its_base(tmp_path, base_matches, expected_ok):
+    repo, asserted_base = _repo_with_parent(tmp_path, base_matches)
+    (repo / "bin").mkdir()
+    result = run_step(
+        step_body("stage-group", "Require the group head's first parent"),
+        repo,
+        {"BASE_SHA": asserted_base},
+    )
+    assert result["ok"] == expected_ok
+
+
+def test_the_migration_surface_refusal_is_identical_on_the_group_path():
+    pr_body = step_body("stage", "Refuse a candidate that touches")
+    group_body = step_body("stage-group", "Refuse a candidate that touches")
+    assert group_body == pr_body, (
+        "the group path must run the exact same fail-closed migration-surface "
+        "check and tag derivation as the PR path, over the group head instead "
+        "of a merge preview"
+    )
+
+
+def test_the_supply_set_step_is_identical_on_the_group_path():
+    pr_body = step_body("stage", "Wait for the speculative supply set")
+    group_body = step_body("stage-group", "Wait for the speculative supply set")
+    assert group_body == pr_body, (
+        "the supply-set artifact name (spec-v3-supply-set-<tree>) and the "
+        "poll bounds must match the PR path exactly"
+    )
+
+
+def test_the_dispatch_step_is_identical_on_the_group_path():
+    pr_body = step_body("stage", "Dispatch the prewarm")
+    group_body = step_body("stage-group", "Dispatch the prewarm")
+    assert group_body == pr_body
+
+
+def test_the_group_receipt_carries_a_group_object_not_a_pr_number():
+    body = step_body("stage-group", "Emit the relay receipt")
+    assert "group: {head_sha: $head_sha, base_sha: $base_sha, head_ref: $head_ref}" in body
+    assert "pr: $pr" not in body
+    assert '--arg schema "leaf.staging-prewarm-relay.v1"' in body
+
+
+def test_the_group_receipt_artifact_is_named_by_short_sha():
+    steps = workflow_document()["jobs"]["stage-group"]["steps"]
+    upload = next(s for s in steps if s.get("uses", "").startswith("actions/upload-artifact"))
+    assert upload["with"]["name"] == "prewarm-relay-receipt-mg-${{ steps.group.outputs.sha12 }}"
+    assert upload["with"]["retention-days"] == "30"
+
+
+def test_the_descale_job_is_explicit_pr_only_with_the_reaper_comment():
+    document = workflow_document()
+    condition = document["jobs"]["descale"]["if"]
+    assert "github.event_name == 'pull_request_target'" in condition, (
+        "the descale job must be explicit that it is PR-only"
+    )
+    text = workflow_text()
+    assert 'GitHub Actions delivers no "merge group destroyed" event' in text
+    assert "left entirely to the terraform TTL reaper" in text
 
 
 def test_the_relay_never_deploys_normally_or_flips():
