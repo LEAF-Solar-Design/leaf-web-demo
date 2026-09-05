@@ -1,11 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
 let APPROVALS = []
+let streamHandlers = null
 
 vi.mock('../telemetry.js', () => ({ track: vi.fn() }))
 vi.mock('../converse.js', () => ({
-  openStream: vi.fn(() => ({ close: vi.fn() })),
+  openStream: vi.fn((sessionId, afterSeq, handlers) => {
+    streamHandlers = handlers
+    return { close: vi.fn() }
+  }),
   postMessage: vi.fn(),
   resolveApproval: vi.fn(async () => ({ turn_id: 'turn-2', status: 'started' })),
   cancelTurn: vi.fn(),
@@ -30,10 +34,29 @@ afterEach(() => {
   cleanup()
   vi.clearAllMocks()
   APPROVALS = []
+  streamHandlers = null
 })
 
 const setup = async (props = {}) => {
   render(<ConversePanel sessionId="session-1" onDismiss={vi.fn()} {...props} />)
+  await screen.findByText(/delete-marked-panel/)
+}
+
+const setupStream = async (props = {}) => {
+  render(<ConversePanel sessionId="session-1" onDismiss={vi.fn()} {...props} />)
+  act(() => {
+    streamHandlers.onEvent({
+      type: 'proposed_run', turn_id: 't1', seq: 1,
+      data: {
+        confirmation_id: 'c9', tool: 'delete-marked-panel', params: {},
+        capability: 'drawing.write', rationale: 'remove the marked panel',
+      },
+    })
+    streamHandlers.onEvent({
+      type: 'turn_complete', turn_id: 't1', seq: 2,
+      data: { stop_reason: 'end_turn' },
+    })
+  })
   await screen.findByText(/delete-marked-panel/)
 }
 
@@ -73,5 +96,39 @@ describe('assistant write approvals honour the one-head rule', () => {
     await setup({ engineDirty: true, writeLocked: true })
 
     expect(screen.getByRole('button', { name: 'Editing locked' })).toBeDisabled()
+  })
+
+  it("holds the transcript's own proposal card the same way", async () => {
+    APPROVALS = []
+    await setupStream({ engineDirty: true })
+
+    const approve = screen.getByRole('button', { name: 'Unsaved browser edits' })
+    expect(approve).toBeDisabled()
+    expect(approve).toHaveAttribute('title', REASONS.unsavedEngineEdits)
+    fireEvent.click(approve)
+    expect(resolveApproval).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Deny' })).toBeEnabled()
+  })
+
+  it('approves a stream-delivered write once when the browser engine is clean', async () => {
+    APPROVALS = []
+    await setupStream({ engineDirty: false })
+
+    const approve = screen.getByRole('button', { name: 'Approve' })
+    expect(approve).toBeEnabled()
+    fireEvent.click(approve)
+    await waitFor(() => expect(resolveApproval).toHaveBeenCalledTimes(1))
+    expect(resolveApproval).toHaveBeenCalledWith('c9', 'session-1', true, false)
+  })
+
+  it('names a held approved resume request with the held label', async () => {
+    APPROVALS = [{ ...WRITE_APPROVAL, resume_required: true, approved: true }]
+    await setup({ engineDirty: true })
+
+    const resume = screen.getByRole('button', { name: 'Unsaved browser edits' })
+    expect(resume).toBeDisabled()
+    expect(resume).toHaveAttribute('title', REASONS.unsavedEngineEdits)
+    fireEvent.click(resume)
+    expect(resolveApproval).not.toHaveBeenCalled()
   })
 })
