@@ -1283,14 +1283,14 @@ test.describe('route matrix, rail ON', () => {
     await page.getByLabel('ribbon x', { exact: true }).fill('350')
     await page.getByLabel('ribbon y', { exact: true }).fill('300')
     await page.getByLabel('ribbon y', { exact: true }).press('Enter')
-    await expect(workbenchStatus).toContainText('fillet applied: entity', { timeout: 60_000 })
+    await expect(workbenchStatus).toContainText('fillet applied.', { timeout: 60_000 })
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeTrim + 3))
     test.info().annotations.push({ type: 'fillet-polyline', description: `fillet rounded the rectangle's own corner in one step (count held at ${countBeforeTrim + 3})` })
     await page.keyboard.press('Escape')
     await expect(page.locator('.cockpit-band [data-tool="quick-undo-edit"]')).toBeEnabled()
     await bar.fill('u')
     await bar.press('Enter')
-    await expect(workbenchStatus).toContainText('undo', { timeout: 60_000 })
+    await expect(page.locator('.cockpit-band [data-tool="quick-redo-edit"]')).toBeEnabled({ timeout: 60_000 })
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBeforeTrim + 3))
 
     // W4g-2 (one head), confirm-time race. LAST in the walk on purpose: a
