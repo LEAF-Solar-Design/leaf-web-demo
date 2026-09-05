@@ -1344,7 +1344,7 @@ def build_suites() -> List[Suite]:
               # ephemeral CodeBuild runner it reads `web app`, and a change in
               # either direction must come back through that test.
               # 25 -> 26: the run-URL extraction is guarded (|| true) so a gh that prints no run URL falls back to the mark scan instead of aborting the loop before the next service.
-              # (2026-09-05, later still) STAGE_SERVICES reads `web`: the app prewarm succeeds but the merge cannot reuse it yet (source-sha image identity); the pin names the reuse path as the way back.
+              # (2026-09-05, later still) STAGE_SERVICES reads `web`: the app prewarm succeeds but its merge did not reuse it because main moved under the PR (stale stage); the pin names freshness as the way back.
               _py_pytest("test_prewarm_staging_cutover_workflow.py"), 26),
         Suite("platform-release-manifest",
               "scripts test_platform_release_manifest.py", "pytest",

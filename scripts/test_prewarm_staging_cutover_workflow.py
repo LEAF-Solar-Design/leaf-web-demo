@@ -369,14 +369,17 @@ def test_app_is_paused_until_the_merge_deploy_can_reuse_a_staged_candidate():
     truthful no-closure state, while a normal forward deploy over an open
     lane still refuses. The earlier pins' runner and posture conditions are met.
 
-    The first successful app prewarm (run 33952930173) was not adopted by the
-    merge deploy (run 33953973668), which reported "Staged document differs
-    from this run's candidate". Both builds bake the source sha into the image,
-    so the speculative and merge images differ even for an identical tree.
+    The first successful app prewarm (run 33952930173) was not reused by its
+    merge deploy (run 33953973668) because main moved between the stage and
+    the merge (#1061), the merge tree differed from the staged preview's tree,
+    and the merge build's adopt job found no speculative supply set for it
+    and rebuilt. When the trees match the adopt job re-envelopes the
+    speculative manifest with its preview-built digests, so reuse is possible
+    and the missing piece is freshness under a busy main.
 
-    `app` is paused until the build/supply workflow's reuse path admits an
-    exact-tree speculative producer. Restoring it is a deliberate edit that
-    must come back through this test in the same change, web then app.
+    `app` stays paused until a re-stage-on-push, merge-group, or measured-hit-rate
+    decision lands, and restoring it comes back through this test in the same
+    change.
     """
     services = workflow_document()["env"]["STAGE_SERVICES"].split()
     assert services == ["web"], (

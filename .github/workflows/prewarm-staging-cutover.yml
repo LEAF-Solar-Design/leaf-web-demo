@@ -117,17 +117,22 @@ env:
   # what every prewarm runs against. Dispatch order is the list order: web
   # first, then app queues on the group behind it.
   # PAUSED (2026-09-05, later still): the app prewarm now succeeds (run
-  # 33952930173 staged leaf-platform-app:796 at weight 0), but the merge
-  # deploy that followed (run 33953973668) reported "Staged document differs
-  # from this run's candidate; falling back to the normal warm path": both
-  # builds bake LEAF_SOURCE_SHA into the image, so the preview-built
-  # speculative image and the merge-built image differ even for an identical
-  # tree, and full task-definition equality can never adopt the stage. Until
-  # the build/supply workflow admits an exact-tree speculative producer at
-  # the merge (the reuse path), an app prewarm costs about 9 CodeBuild
-  # minutes and lengthens the shared ECS-mutation queue in front of the
-  # merge for no saving. Restore `app` here in the change that lands that
-  # reuse, list order web then app.
+  # 33952930173 staged leaf-platform-app:796 at weight 0), but its merge
+  # deploy did not reuse it. Cause, read from the merge build's adopt job:
+  # the stage is taken on the PR's merge PREVIEW at label time, main moved
+  # under the PR before it merged (#1061 landed between the two), so the
+  # merge commit's tree differed from the staged preview's tree and no
+  # speculative supply set existed for it ("expected one exact
+  # provider-bound speculative v3 artifact, found 0"); the build rebuilt
+  # and the deploy then saw a different task-definition document. When the
+  # trees DO match, the adopt job re-envelopes the speculative manifest with
+  # its preview-built digests, so reuse is possible; what is missing is
+  # freshness under a busy main (nothing re-speculates or re-stages on a
+  # main push or a merge group). Until that is decided (re-stage on main
+  # pushes, stage the merge group, or measure the hit rate), an app prewarm
+  # costs about 9 CodeBuild minutes and lengthens the shared ECS-mutation
+  # queue in front of the merge for a chance, not a saving. Restore `app`
+  # here in the change that lands that decision, list order web then app.
   STAGE_SERVICES: "web"
   # Bounded wait for the speculative supply set: 20 polls x 30s.
   SUPPLY_SET_POLLS: "20"
