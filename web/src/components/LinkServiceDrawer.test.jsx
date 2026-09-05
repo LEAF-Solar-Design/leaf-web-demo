@@ -151,4 +151,10 @@ describe('LinkServiceDrawer', () => {
     expect(container.innerHTML).not.toContain('internal-billing-export')
     expect(container.innerHTML).not.toContain('hunter2')
   })
+
+  it('wears its own trigger class, never the account panel\'s .claude-trigger (trust-state.spec.mjs:98 locates that one alone)', () => {
+    const { container } = render(<LinkServiceDrawer {...baseProps()} />)
+    expect(container.querySelector('.claude-trigger')).toBeNull()
+    expect(container.querySelector('.link-svc-trigger')).not.toBeNull()
+  })
 })

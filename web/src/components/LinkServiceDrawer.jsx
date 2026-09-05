@@ -10,7 +10,7 @@ import useExit from '../useExit.js'
 // {url, label} today — there is no key-kind wire shape to mount a field
 // for, so adding one here would be a client-invented affordance the server
 // cannot honor. It also reuses the trigger+popover CHROME classes
-// (.claude-acct/.claude-trigger/.claude-pop/.ca-*) byte-for-byte: those
+// (.claude-acct/.claude-pop/.ca-*) byte-for-byte, and the trigger's look by selector (.link-svc-trigger beside .claude-trigger): those
 // rules in styles.css/popovers.css are a generic popover primitive, not
 // Claude-specific, so a second consumer costs zero new CSS.
 //
@@ -132,7 +132,12 @@ export default function LinkServiceDrawer({
   return (
     <span className="claude-acct link-svc" ref={rootRef}>
       <button
-        className="claude-trigger"
+        // Its OWN class, not `.claude-trigger`: the trust-state e2e row locates
+        // the account panel's trigger by that class (panel.locator('.claude-trigger'),
+        // web/e2e/local/trust-state.spec.mjs:98) and strict mode needs it alone.
+        // The look is shared by selector (`.claude-trigger, .link-svc-trigger` in
+        // styles.css and landing.css), never by wearing the account's class.
+        className="link-svc-trigger"
         onClick={() => onToggle(!open)}
         aria-expanded={open}
         aria-haspopup="dialog"

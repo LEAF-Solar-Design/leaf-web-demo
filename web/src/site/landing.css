@@ -1606,7 +1606,7 @@
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar :is(.checkout-mine, .checkout-mine b) { color: #7fd6a6; }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar :is(.checkout-chip, .checkout-chip b, .checkout-stale, .checkout-legacy) { color: #f0c97b; }
 .studio-shell header.top .tag.amber { color: #f0c97b; }
-.studio-shell header.top :is(.claude-trigger .ca-k, .claude-trigger .ca-state) { color: rgba(240, 242, 240, .78); }
+.studio-shell header.top :is(.claude-trigger .ca-k, .claude-trigger .ca-state, .link-svc-trigger .ca-k, .link-svc-trigger .ca-state) { color: rgba(240, 242, 240, .78); }
 /* Seen on staging 2026-09-02 (?dev=1, VITE_CAD_EDIT builds): the DXF edit
    workbench sits inside the transparent workspace card and painted paper
    ink over the dark ground. It is chrome touching the drawing, so it takes
