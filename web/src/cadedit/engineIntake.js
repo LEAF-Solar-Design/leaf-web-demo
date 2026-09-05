@@ -68,6 +68,32 @@ function arcPoints(cx, cy, z, r, startDeg, endDeg) {
 }
 
 /**
+ * The arc a DXF bulge describes between a and b: `{ cx, cy, r, a0, sweep }`
+ * (radians, the sweep signed by the bulge, counter-clockwise positive), or
+ * null for a straight or degenerate segment or a bulge that is not a
+ * number. ONE rule for the mapper and the snap index (pointPicking), the
+ * crate's own (explode's arc_from_bulge): radius d (1 + b^2) / 4|b|, the
+ * centre d (1 - b^2) / 4b along the chord's left perpendicular from the
+ * midpoint, the sweep 4 atan(|b|).
+ */
+export function bulgeArc(a, b, bulge) {
+  if (!Number.isFinite(bulge) || Math.abs(bulge) <= 1e-10) return null
+  if (!a || !b || !Number.isFinite(a[0]) || !Number.isFinite(a[1]) || !Number.isFinite(b[0]) || !Number.isFinite(b[1])) return null
+  const dx = b[0] - a[0]
+  const dy = b[1] - a[1]
+  const d = Math.hypot(dx, dy)
+  if (d <= 1e-12) return null
+  const b2 = bulge * bulge
+  const r = (d * (1 + b2)) / (4 * Math.abs(bulge))
+  const off = (d * (1 - b2)) / (4 * bulge)
+  const cx = (a[0] + b[0]) / 2 + (-dy / d) * off
+  const cy = (a[1] + b[1]) / 2 + (dx / d) * off
+  const a0 = Math.atan2(a[1] - cy, a[0] - cx)
+  const sweep = 4 * Math.atan(Math.abs(bulge)) * (bulge > 0 ? 1 : -1)
+  return { cx, cy, r, a0, sweep }
+}
+
+/**
  * W4g-6d: the points BETWEEN a and b along the arc a DXF bulge describes
  * (tan of a quarter of the included angle, positive counter-clockwise): the
  * crate's own rule (explode's arc_from_bulge), radius d (1 + b^2) / 4|b| and
@@ -77,19 +103,9 @@ function arcPoints(cx, cy, z, r, startDeg, endDeg) {
  * own step, so a full semicircle is 24 points.
  */
 export function bulgePoints(a, b, bulge, z) {
-  if (!Number.isFinite(bulge) || Math.abs(bulge) <= 1e-10) return []
-  const dx = b[0] - a[0]
-  const dy = b[1] - a[1]
-  const d = Math.hypot(dx, dy)
-  if (d <= 1e-12) return []
-  const b2 = bulge * bulge
-  const r = (d * (1 + b2)) / (4 * Math.abs(bulge))
-  const off = (d * (1 - b2)) / (4 * bulge)
-  const cx = (a[0] + b[0]) / 2 + (-dy / d) * off
-  const cy = (a[1] + b[1]) / 2 + (dx / d) * off
-  const a0 = Math.atan2(a[1] - cy, a[0] - cx)
-  // The arc turns through 4 atan(|bulge|), the bulge's sign giving the sense.
-  const sweep = 4 * Math.atan(Math.abs(bulge)) * (bulge > 0 ? 1 : -1)
+  const arc = bulgeArc(a, b, bulge)
+  if (!arc) return []
+  const { cx, cy, r, a0, sweep } = arc
   const n = Math.max(MIN_ARC_POINTS, Math.ceil(Math.abs(sweep) / (ARC_STEP_DEG * Math.PI / 180)) + 1)
   const out = []
   for (let i = 1; i < n - 1; i += 1) {
