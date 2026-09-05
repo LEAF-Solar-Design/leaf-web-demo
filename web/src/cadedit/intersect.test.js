@@ -1216,16 +1216,18 @@ describe('Astra refutations, round six (W4g-6e record 9)', () => {
 })
 
 describe('Astra refutations, round seven (W4g-6e record 10)', () => {
-  it('refuses a long cutter that stops more than EPSILON short of the arc', () => {
+  it('refuses a long cutter that stops beyond the scaled geometric tolerance of the arc', () => {
     const target = poly('p', [[-5, 0], [5, 0]], false, 'A', [1, 0])
-    const edge = line('e', [0, -536870917], [0, -(5 + 2 ** -26)])
-    // The 2^-26 shortfall disappears in the length measured from the far start.
+    const edge = line('e', [0, -536870917], [0, -(5 + 2 ** -19)])
+    // At this scale gEps is about 9.54e-7, smaller than the 2^-19 shortfall.
     expect(crossings(curveOf(target), curveOf(edge))).toEqual([])
     expect(trimEntity(target, edge, -3, -4, 1e-9).refusal).toBe('Trim refused: the cutting edge does not cross the selection.')
   })
 
-  it('accepts a long cutter ending within EPSILON of the arc', () => {
+  it('accepts a long cutter ending within the scaled geometric tolerance of the arc', () => {
     const target = poly('p', [[-5, 0], [5, 0]], false, 'A', [1, 0])
+    const near = line('e', [0, -536870917], [0, -(5 + 2 ** -26)])
+    expect(crossings(curveOf(target), curveOf(near))).toHaveLength(1)
     const edge = line('e', [0, -536870917], [0, -5.0000000005])
     const hits = crossings(curveOf(target), curveOf(edge))
     expect(hits).toHaveLength(1)
@@ -1320,5 +1322,41 @@ describe('Astra refutations, round nine (W4g-6e record 12)', () => {
       op: 'setVertices', entityId: 'p', points: [[3, 2], [3, 0], [0, 0], [2, 0]], closed: false,
       bulges: [1, 0, 0, 0],
     }] })
+  })
+})
+
+describe('Astra refutations, round ten (W4g-6e record 13)', () => {
+  it('keeps a billion-unit tangent as one crossing and trims the left semicircle to it', () => {
+    const target = poly('p', [[0, 0.6], [0, -0.6]], false, 'A', [1, 0])
+    const edge = line('e', [-600000000, -799999999], [600000000, 800000001])
+    // y = 4x/3 + 1 touches the radius-0.6 left semicircle at (-0.48, 0.36).
+    const hits = crossings(curveOf(target), curveOf(edge))
+    expect(hits).toHaveLength(1)
+    expect(hits[0].s).toBeCloseTo(0.295167235, 5)
+    expect(hits[0].p).toHaveLength(2)
+    ;[-0.48, 0.36].forEach((v, j) => expect(hits[0].p[j]).toBeCloseTo(v, 5))
+    const out = trimEntity(target, edge, 0, 0.6, 1e-9)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(1)
+    const { points, bulges, ...shape } = out.steps[0]
+    expect(shape).toEqual({ op: 'setVertices', entityId: 'p', closed: false })
+    expect(points).toHaveLength(2)
+    ;[[-0.48, 0.36], [0, -0.6]].forEach((p, i) => {
+      expect(points[i]).toHaveLength(2)
+      p.forEach((v, j) => expect(points[i][j]).toBeCloseTo(v, 5))
+    })
+    // The retained 126.8699-degree arc has bulge (sqrt(5) - 1) / 2.
+    expect(bulges).toHaveLength(2)
+    expect(bulges[0]).toBeCloseTo(0.6180339887, 6)
+    expect(bulges[1]).toBe(0)
+  })
+
+  it('keeps the geometric tolerance at 1e-9 at ordinary scale', () => {
+    const target = curveOf(poly('p', [[0, 0], [10, 0]], false, 'A', [1, 0]))
+    expect(crossings(target, curveOf(line('t', [0, -5.000000002], [10, -5.000000002])))).toEqual([])
+    const hits = crossings(target, curveOf(line('t', [0, -5.0000000005], [10, -5.0000000005])))
+    expect(hits).toHaveLength(1)
+    expect(hits[0].p).toHaveLength(2)
+    ;[5, -5].forEach((v, j) => expect(hits[0].p[j]).toBeCloseTo(v, 8))
   })
 })

@@ -22,11 +22,12 @@
 import { bulgeArc } from './engineIntake.js'
 
 export const MAX_INTERSECT_POINTS = 1000
-// Coordinate contract: 16 significant digits keep the kernel's 1e-9 tolerances representable up to 1e9.
+// Coordinate contract: tolerance scales with the inputs, a few ulps of their magnitude, never below 1e-9.
 export const MAX_COORD = 1e9
 /** The most steps one verb lowers to: FILLET and CHAMFER cut two entities and create one. */
 export const MAX_BATCH_STEPS = 4
 const EPSILON = 1e-9
+const geomEps = (scale) => Math.max(EPSILON, 8 * Number.EPSILON * scale)
 const DEG = Math.PI / 180
 // The angular tolerance that decides whether a crossing sits AT an arc's own
 // endpoint (degrees): tight on purpose, the aperture is a picking notion.
@@ -46,6 +47,15 @@ const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1])
 const radialTol = (r, eps, scale) => eps + 16 * Number.EPSILON * (scale + r)
 const onSupport = (p, c, r, eps, scale) => Math.abs(dist(p, c) - r) <= radialTol(r, eps, scale)
 const same = (a, b, eps) => dist(a, b) <= eps
+function scaleOf(curve) {
+  if (curve.c) return Math.max(Math.abs(curve.c[0]), Math.abs(curve.c[1])) + curve.r
+  let magnitude = 0
+  for (const p of curve.pts) magnitude = Math.max(magnitude, Math.abs(p[0]), Math.abs(p[1]))
+  for (const { arc } of curve.segs) {
+    if (arc) magnitude = Math.max(magnitude, Math.max(Math.abs(arc.c[0]), Math.abs(arc.c[1])) + arc.r)
+  }
+  return magnitude
+}
 function normDeg(a) {
   let d = a % 360
   if (d < 0) d += 360
@@ -231,18 +241,18 @@ function segSeg(a, b, c, d) {
 }
 /** Segment a-b against the circle (c, r): up to two { t, w, p }, solved along the line's unit direction
  * (the foot of the centre by a dot product, the centre's distance to the line by a cross product), so a
- * far-away segment does not cancel the circle away; a tangent within EPSILON is one root. */
-function segCircle(a, b, c, r) {
+ * far-away segment does not cancel the circle away; a tangent within gEps is one root. */
+function segCircle(a, b, c, r, gEps = EPSILON) {
   const d = sub(b, a)
   const L = len(d)
-  if (L <= EPSILON) return []
+  if (L <= gEps) return []
   const u = scale(d, 1 / L)
   const f = sub(a, c)
   const tc = -dot(f, u)          // world-unit param of the foot of c on the line, from a
   const dist = cross(u, f)       // signed distance from c to the line
   const gap = r - Math.abs(dist) // > 0: two roots; ~0: tangent; < 0: none
-  if (gap < -EPSILON) return []
-  const h = gap <= EPSILON ? 0 : Math.sqrt(r * r - dist * dist)
+  if (gap < -gEps) return []
+  const h = gap <= gEps ? 0 : Math.sqrt(r * r - dist * dist)
   const n = [-u[1], u[0]]
   const foot = add(c, scale(n, dist))
   const at = (offset) => {
@@ -251,18 +261,18 @@ function segCircle(a, b, c, r) {
     return { t: w / L, w, p }
   }
   const out = [at(-h)]
-  if (h > EPSILON) out.push(at(h))
+  if (h > gEps) out.push(at(h))
   return out
 }
 /** Circle (c1, r1) against circle (c2, r2): up to two points. */
-function circleCircle(c1, r1, c2, r2) {
+function circleCircle(c1, r1, c2, r2, gEps = EPSILON) {
   const dd = dist(c1, c2)
   const gapExt = r1 + r2 - dd
   const gapInt = dd - Math.abs(r1 - r2)
-  if (dd <= EPSILON || gapExt < -EPSILON || gapInt < -EPSILON) return []
+  if (dd <= gEps || gapExt < -gEps || gapInt < -gEps) return []
   const u = scale(sub(c2, c1), 1 / dd)
-  if (gapExt <= EPSILON) return [add(c1, scale(u, r1))]
-  if (gapInt <= EPSILON) return [add(c1, scale(u, r1 >= r2 ? r1 : -r1))]
+  if (gapExt <= gEps) return [add(c1, scale(u, r1))]
+  if (gapInt <= gEps) return [add(c1, scale(u, r1 >= r2 ? r1 : -r1))]
   const a = ((r1 - r2) * (r1 + r2) + dd * dd) / (2 * dd)
   const h2 = (r1 - a) * (r1 + a)
   const h = Math.sqrt(Math.max(0, h2))
@@ -280,7 +290,7 @@ const segParam = (arc, p) => {
   const o = segOffset(arc, p)
   return (360 - o <= TINY_DEG ? o - 360 : o) / Math.abs(arc.sweep)
 }
-const inSpanPt = (p, a, b, u) => dot(sub(p, a), u) >= -EPSILON && dot(sub(p, b), u) <= EPSILON
+const inSpanPt = (p, a, b, u, gEps) => dot(sub(p, a), u) >= -gEps && dot(sub(p, b), u) <= gEps
 
 /**
  * Where `edge` crosses `target`: [{ s, p }] on the target's own param (LINE/
@@ -294,6 +304,7 @@ const inSpanPt = (p, a, b, u) => dot(sub(p, a), u) >= -EPSILON && dot(sub(p, b),
 export function crossings(target, edge, extend = 'none', tol = EPSILON) {
   const out = []
   const eps = Math.max(tol, EPSILON)
+  const gEps = geomEps(Math.max(scaleOf(target), scaleOf(edge)))
   const push = (s, p) => {
     if (target.closed && target.segs && s === target.segs.length) s = 0
     if (!out.some((o) => Math.abs(o.s - s) <= 1e-9 && same(o.p, p, eps))) out.push({ s, p })
@@ -309,7 +320,7 @@ export function crossings(target, edge, extend = 'none', tol = EPSILON) {
       const u = arc ? null : scale(sub(b, a), 1 / dist(a, b))
       const epsT = arc ? TINY_DEG / Math.abs(arc.sweep) : 0
       const accept = (t, p) => arc ? t >= -epsT && t <= 1 + epsT
-        : inSpanPt(p, a, b, u) || (lowOk && dot(sub(p, a), u) < 0) || (highOk && dot(sub(p, b), u) > 0)
+        : inSpanPt(p, a, b, u, gEps) || (lowOk && dot(sub(p, a), u) < 0) || (highOk && dot(sub(p, b), u) > 0)
       const hitOnTarget = (t, p, inputScale) => {
         if (arc && !onSupport(p, arc.c, arc.r, eps, inputScale)) return
         if (!accept(t, p)) return
@@ -324,32 +335,32 @@ export function crossings(target, edge, extend = 'none', tol = EPSILON) {
           const edgeU = edgeArc ? null : scale(sub(d, c), 1 / dist(c, d))
           if (arc && edgeArc) {
             const inputScale = Math.max(...[...arc.c, ...edgeArc.c].map(Math.abs)) + arc.r + edgeArc.r
-            for (const p of circleCircle(arc.c, arc.r, edgeArc.c, edgeArc.r)) {
+            for (const p of circleCircle(arc.c, arc.r, edgeArc.c, edgeArc.r, gEps)) {
               if (onSupport(p, edgeArc.c, edgeArc.r, eps, inputScale) && withinSeg(edgeSeg, p)) hitOnTarget(segParam(arc, p), p, inputScale)
             }
           } else if (arc) {
             const inputScale = Math.max(...[...c, ...d, ...arc.c].map(Math.abs)) + arc.r
-            for (const hit of segCircle(c, d, arc.c, arc.r)) {
-              if (inSpanPt(hit.p, c, d, edgeU)) hitOnTarget(segParam(arc, hit.p), hit.p, inputScale)
+            for (const hit of segCircle(c, d, arc.c, arc.r, gEps)) {
+              if (inSpanPt(hit.p, c, d, edgeU, gEps)) hitOnTarget(segParam(arc, hit.p), hit.p, inputScale)
             }
           } else if (edgeArc) {
             const inputScale = Math.max(...[...a, ...b, ...edgeArc.c].map(Math.abs)) + edgeArc.r
-            for (const hit of segCircle(a, b, edgeArc.c, edgeArc.r)) {
+            for (const hit of segCircle(a, b, edgeArc.c, edgeArc.r, gEps)) {
               if (onSupport(hit.p, edgeArc.c, edgeArc.r, eps, inputScale) && withinSeg(edgeSeg, hit.p)) hitOnTarget(hit.t, hit.p)
             }
           } else {
             const hit = segSeg(a, b, c, d)
-            if (hit && inSpanPt(hit.p, c, d, edgeU)) hitOnTarget(hit.t, hit.p)
+            if (hit && inSpanPt(hit.p, c, d, edgeU, gEps)) hitOnTarget(hit.t, hit.p)
           }
         }
       } else if (arc) {
         const inputScale = Math.max(...[...arc.c, ...edge.c].map(Math.abs)) + arc.r + edge.r
-        for (const p of circleCircle(arc.c, arc.r, edge.c, edge.r)) {
+        for (const p of circleCircle(arc.c, arc.r, edge.c, edge.r, gEps)) {
           if (onSupport(p, edge.c, edge.r, eps, inputScale) && withinArc(edge, p)) hitOnTarget(segParam(arc, p), p, inputScale)
         }
       } else {
         const inputScale = Math.max(...[...a, ...b, ...edge.c].map(Math.abs)) + edge.r
-        for (const hit of segCircle(a, b, edge.c, edge.r)) {
+        for (const hit of segCircle(a, b, edge.c, edge.r, gEps)) {
           if (onSupport(hit.p, edge.c, edge.r, eps, inputScale) && withinArc(edge, hit.p)) hitOnTarget(hit.t, hit.p)
         }
       }
@@ -362,18 +373,18 @@ export function crossings(target, edge, extend = 'none', tol = EPSILON) {
     for (const seg of edgeSegs) {
       if (seg.arc) {
         const inputScale = Math.max(...[...target.c, ...seg.arc.c].map(Math.abs)) + target.r + seg.arc.r
-        for (const p of circleCircle(target.c, target.r, seg.arc.c, seg.arc.r)) {
+        for (const p of circleCircle(target.c, target.r, seg.arc.c, seg.arc.r, gEps)) {
           if (onSupport(p, target.c, target.r, eps, inputScale) && onSupport(p, seg.arc.c, seg.arc.r, eps, inputScale) && withinSeg(seg, p)) push(param(p), p)
         }
       } else {
         const inputScale = Math.max(...[...seg.a, ...seg.b, ...target.c].map(Math.abs)) + target.r
         const u = scale(sub(seg.b, seg.a), 1 / dist(seg.a, seg.b))
-        for (const hit of segCircle(seg.a, seg.b, target.c, target.r)) if (onSupport(hit.p, target.c, target.r, eps, inputScale) && inSpanPt(hit.p, seg.a, seg.b, u)) push(param(hit.p), hit.p)
+        for (const hit of segCircle(seg.a, seg.b, target.c, target.r, gEps)) if (onSupport(hit.p, target.c, target.r, eps, inputScale) && inSpanPt(hit.p, seg.a, seg.b, u, gEps)) push(param(hit.p), hit.p)
       }
     }
   } else {
     const inputScale = Math.max(...[...target.c, ...edge.c].map(Math.abs)) + target.r + edge.r
-    for (const p of circleCircle(target.c, target.r, edge.c, edge.r)) if (onSupport(p, target.c, target.r, eps, inputScale) && onSupport(p, edge.c, edge.r, eps, inputScale) && withinArc(edge, p)) push(param(p), p)
+    for (const p of circleCircle(target.c, target.r, edge.c, edge.r, gEps)) if (onSupport(p, target.c, target.r, eps, inputScale) && onSupport(p, edge.c, edge.r, eps, inputScale) && withinArc(edge, p)) push(param(p), p)
   }
   return out.sort((x, y) => x.s - y.s)
 }
@@ -381,7 +392,7 @@ export function crossings(target, edge, extend = 'none', tol = EPSILON) {
 // ---- pieces ----------------------------------------------------------------------
 
 /** Vertices and bulges from a to b (a < b), possibly unwrapped across a closed seam. */
-function piece(curve, a, b, eps) {
+function piece(curve, a, b, gEps) {
   const pts = []
   const bulges = []
   let unwritable = false
@@ -397,7 +408,7 @@ function piece(curve, a, b, eps) {
     const q = straight ? [clean(p[0]), clean(p[1])] : [p[0], p[1]]
     const last = pts[pts.length - 1]
     if (last && last[0] === q[0] && last[1] === q[1] && Math.abs(bulges[bulges.length - 1]) > BULGE_EPS) unwritable = true
-    if (pts.length && straight && same(pts[pts.length - 1], p, EPSILON)) {
+    if (pts.length && straight && same(pts[pts.length - 1], p, gEps)) {
       bulges[bulges.length - 1] = bulge
     } else {
       pts.push(q)
@@ -456,6 +467,7 @@ export function trimEntity(target, edge, px, py, tol = EPSILON) {
   if (read.refusal) return read
   const { a: T, b: E } = read
   const eps = Math.max(tol, EPSILON)
+  const gEps = geomEps(Math.max(scaleOf(T), scaleOf(E)))
   const pick = [px, py]
   const layer = layerOf(target)
   if (T.kind === 'LINE' || (T.kind === 'POLY' && !T.closed)) {
@@ -466,8 +478,8 @@ export function trimEntity(target, edge, px, py, tol = EPSILON) {
     if (inside.some((c) => same(c.p, pointAt(T, sp), eps))) return refuse(verb, 'click on the part to remove, away from the crossing')
     const lo = inside.filter((c) => c.s < sp).pop() || null
     const hi = inside.find((c) => c.s > sp) || null
-    const first = lo ? piece(T, 0, lo.s, eps) : null
-    const second = hi ? piece(T, hi.s, end, eps) : null
+    const first = lo ? piece(T, 0, lo.s, gEps) : null
+    const second = hi ? piece(T, hi.s, end, gEps) : null
     if (first?.unwritable || second?.unwritable) return refuse(verb, 'a kept arc is shorter than the drawing precision')
     const keepFirst = first && first.pts.length >= 2
     const keepSecond = second && second.pts.length >= 2
@@ -492,7 +504,7 @@ export function trimEntity(target, edge, px, py, tol = EPSILON) {
     const hi = all.find((c) => c.s > sp) || all[0]
     if (lo === hi) return refuse(verb, 'a closed polyline needs two crossings with the cutting edge to lose a piece')
     const n = T.pts.length
-    const kept = piece(T, hi.s, lo.s + (hi.s < lo.s ? 0 : n), eps)
+    const kept = piece(T, hi.s, lo.s + (hi.s < lo.s ? 0 : n), gEps)
     if (kept.unwritable) return refuse(verb, 'a kept arc is shorter than the drawing precision')
     if (kept.pts.length < 2) return refuse(verb, 'nothing of the selection would remain')
     return { steps: [setVertices(target.id, kept.pts, false, bulgesOrNull(kept.bulges))] }
@@ -540,6 +552,7 @@ export function extendEntity(target, edge, px, py, tol = EPSILON) {
   if (read.refusal) return read
   const { a: T, b: E } = read
   const eps = Math.max(tol, EPSILON)
+  const gEps = geomEps(Math.max(scaleOf(T), scaleOf(E)))
   const pick = [px, py]
   if (T.kind === 'CIRCLE') return refuse(verb, 'a circle has no end to extend')
   if (T.kind === 'POLY' && T.closed) return refuse(verb, 'a closed polyline has no end to extend')
@@ -579,14 +592,14 @@ export function extendEntity(target, edge, px, py, tol = EPSILON) {
       const uEnd = scale(dEnd, 1 / len(dEnd))
       for (const c of hits) {
         const ahead = dot(sub(c.p, T.pts[n - 1]), uEnd)
-        if (c.s > last - 1 && ahead > EPSILON && (best === null || ahead < best)) { chosen = c; best = ahead }
+        if (c.s > last - 1 && ahead > gEps && (best === null || ahead < best)) { chosen = c; best = ahead }
       }
     } else {
       const dStart = sub(T.pts[1], T.pts[0])
       const uStart = scale(dStart, 1 / len(dStart))
       for (const c of hits) {
         const ahead = dot(sub(c.p, T.pts[0]), uStart)
-        if (c.s < 1 && ahead < -EPSILON && (best === null || ahead > best)) { chosen = c; best = ahead }
+        if (c.s < 1 && ahead < -gEps && (best === null || ahead > best)) { chosen = c; best = ahead }
       }
     }
     if (!chosen) return refuse(verb, 'the boundary edge does not lie ahead of that end')
