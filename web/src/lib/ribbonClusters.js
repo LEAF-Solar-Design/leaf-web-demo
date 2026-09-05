@@ -6,8 +6,8 @@
 // Cluster shape: { id, label, kind: 'group' | 'family', note?, tools: [],
 //                  widgets?: [] }.
 // Tool shape:    { id, label, text?, icon?, size?: 'large'|'small'|'row',
-//                  swatch?, title?, reason?, disabled?, pressed?, write?,
-//                  expanded?, controls?, onClick }.
+//                  swatch?, title?, mcpSource?: { server_id, tool }, reason?,
+//                  disabled?, pressed?, write?, expanded?, controls?, onClick }.
 //   `label` is the accessible name (stable, tests key on it); `text` is the
 //   ribbon's display label for large/row tools; `icon` is a CockpitIcon key.
 //
@@ -21,7 +21,7 @@
 // reference's eight Draw-tab panels).
 import { zoomViewer } from '../site/DrawingCockpit.jsx'
 import { REASONS, forCluster, ribbonTool } from './actionRegistry.js'
-import { isWriteTool, toolIcon, toolPlacementSize, toolPlacementTab } from './toolRecord.js'
+import { isWriteTool, toolIcon, toolMcpSource, toolPlacementSize, toolPlacementTab } from './toolRecord.js'
 
 // The reason vocabulary moved to the action registry with slice 10a, because
 // `when(ctx)` is the registry's half of the honesty contract this file's header
@@ -138,17 +138,24 @@ function familyCluster(fam, tools, gate, onOpenFamily) {
       const locked = !!writeLocked && isWrite
       const entBlocked = isWrite && !writeEntitled
       const dirtyBlocked = isWrite && !!engineDirty
-      const reason = running
-        ? REASONS.running
-        : previewing
-          ? REASONS.previewing
-          : locked
-            ? (writeLockNote || REASONS.writeLocked)
-            : entBlocked
-              ? REASONS.writeUnentitled
-              : dirtyBlocked
-                ? REASONS.unsavedEngineEdits
-                : ''
+      // A tool projected from a connected MCP server (mcp_source) has no run
+      // path on any surface yet — the projection itself is stubbed to emit
+      // nothing until a later slice — so it is unconditionally unrunnable,
+      // ahead of every transient gate below.
+      const mcpSource = toolMcpSource(tool)
+      const reason = mcpSource
+        ? REASONS.mcpToolNotWired
+        : running
+          ? REASONS.running
+          : previewing
+            ? REASONS.previewing
+            : locked
+              ? (writeLockNote || REASONS.writeLocked)
+              : entBlocked
+                ? REASONS.writeUnentitled
+                : dirtyBlocked
+                  ? REASONS.unsavedEngineEdits
+                  : ''
       return {
         id: tool.name,
         label: tool.name,
@@ -158,7 +165,8 @@ function familyCluster(fam, tools, gate, onOpenFamily) {
         size: toolPlacementSize(tool),
         title: tool.description || tool.name,
         write: isWrite,
-        disabled: !!running || !!previewing || locked || entBlocked || dirtyBlocked,
+        ...(mcpSource ? { mcpSource } : {}),
+        disabled: !!mcpSource || !!running || !!previewing || locked || entBlocked || dirtyBlocked,
         reason,
         onClick: () => onRequestRun(tool, null, RIBBON_RATIONALE, 'ribbon'),
       }

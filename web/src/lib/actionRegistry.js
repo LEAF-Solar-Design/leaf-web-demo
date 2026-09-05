@@ -92,6 +92,10 @@ export const REASONS = Object.freeze({
   // tool a digest yet, so there is nothing runnable to arm. Same sentence the
   // one honest resolver (site/publishedCatalogTool.js) fails with.
   publishing: 'publishing: not in the runnable catalog yet',
+  // Standardization slice 8c: a record carrying mcp_source (a tool projected
+  // from a connected MCP server) has no run path on any surface yet — the
+  // projection itself is stubbed to emit nothing until a later slice.
+  mcpToolNotWired: 'a tool from a connected service cannot run here yet',
 })
 
 // W4g-1b (engine reach): the console's own drawing opens in the engine at

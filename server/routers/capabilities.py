@@ -16,6 +16,7 @@ import catalog
 import converse_registry
 import customization_service
 import deps
+import mcp_tool_projection
 from envelopes import ErrorCode, error_obj, with_envelope_fields
 from routers import ops as ops_router
 
@@ -76,6 +77,14 @@ def capabilities(x_internal_role: Optional[str] = Header(default=None),
             # None sources disable live APS.
             raw_tools = deps.all_tools(str(tenant))
             tool_sources = [None] * len(raw_tools)
+        # Standardization slice 8c: tools projected from this tenant's OWN
+        # connected MCP servers (server/mcp_tool_projection.py), behind the
+        # same tenant binding every other folded row above uses. Always empty
+        # today (projecting an upstream tool list is a later slice), so this
+        # fans in nothing and changes no response byte for any tenant.
+        mcp_tools = mcp_tool_projection.projected_tools(str(tenant))
+        raw_tools = raw_tools + mcp_tools
+        tool_sources = tool_sources + [None] * len(mcp_tools)
         pin = (
             customization_service.effective_catalog_pin(str(tenant))
             or deps.base_catalog_pin(raw_tools)

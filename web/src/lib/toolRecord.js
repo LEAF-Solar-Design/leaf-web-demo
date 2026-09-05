@@ -25,6 +25,33 @@ export const DEFAULT_TOOL_SIZE = 'large'
 const TABS = new Set(RIBBON_TAB_IDS)
 const SIZES = new Set(PLACEMENT_SIZES)
 
+// Standardization slice 8c: `mcp_source.server_id` mirrors the exact shape
+// server/tenant_mcp_store.py mints (`secrets.token_hex(12)`, 24 lowercase hex
+// chars) and server/tool_record_fields.py validates against the same shape.
+// `tool` is bounded the same as that module's MAX_MCP_TOOL_LEN.
+const MCP_SERVER_ID_RE = /^[0-9a-f]{24}$/
+export const MAX_MCP_TOOL_LEN = 64
+
+// Bounded like tool_record_fields.py's _WARNED ledger: a catalog full of bad
+// rows must stop growing this, not leak one console.warn per bad tool forever.
+const MCP_SOURCE_WARN_MAX = 512
+const _mcpSourceWarned = new Set()
+
+function warnMcpSourceDropped(name) {
+  if (_mcpSourceWarned.has(name) || _mcpSourceWarned.size >= MCP_SOURCE_WARN_MAX) return
+  _mcpSourceWarned.add(name)
+  try {
+    if (import.meta.env?.DEV) {
+      console.warn(`[toolRecord] mcp_source dropped for tool "${name}": malformed`)
+    }
+  } catch { /* a warning never breaks the caller */ }
+}
+
+/** Test seam: forget which tools already warned about a dropped mcp_source. */
+export function resetMcpSourceWarnLedger() {
+  _mcpSourceWarned.clear()
+}
+
 /**
  * Does this tool mutate the drawing? The ONE definition.
  * Fails closed: anything that is not a record with a `drawing.write` string in
@@ -60,4 +87,41 @@ export function toolPlacementTab(tool) {
 export function toolPlacementSize(tool) {
   const size = tool && tool.placement && tool.placement.size
   return typeof size === 'string' && SIZES.has(size) ? size : DEFAULT_TOOL_SIZE
+}
+
+/**
+ * The tool's `{ server_id, tool }` mcp_source, or null.
+ * Mirrors server/tool_record_fields.py's validate_mcp_source: server_id must
+ * look like a registry id (the exact shape server/tenant_mcp_store.py mints);
+ * tool must be a non-empty bounded string; no other keys. An invalid PRESENT
+ * value is dropped (never rendered) and warned once per tool — the same
+ * drop-with-warning discipline as the server's fold-tier read, not the
+ * silent-default discipline toolIcon/toolPlacementTab use, because a
+ * malformed mcp_source is never a legitimate "no preference" the way a bad
+ * icon or placement is.
+ */
+export function toolMcpSource(tool) {
+  const raw = tool && tool.mcp_source
+  if (raw == null) return null
+  const name = (tool && tool.name) || '<unnamed>'
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    warnMcpSourceDropped(name)
+    return null
+  }
+  const keys = Object.keys(raw)
+  if (keys.some((key) => key !== 'server_id' && key !== 'tool')) {
+    warnMcpSourceDropped(name)
+    return null
+  }
+  const serverId = raw.server_id
+  if (typeof serverId !== 'string' || !MCP_SERVER_ID_RE.test(serverId)) {
+    warnMcpSourceDropped(name)
+    return null
+  }
+  const toolName = raw.tool
+  if (typeof toolName !== 'string' || !toolName || toolName.length > MAX_MCP_TOOL_LEN) {
+    warnMcpSourceDropped(name)
+    return null
+  }
+  return { server_id: serverId, tool: toolName }
 }
