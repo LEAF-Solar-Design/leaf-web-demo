@@ -3,7 +3,7 @@ import {
   AUTHORED_TOOL,
   catProofResponse,
   makeCatProofState,
-} from '../catProofFixture.mjs'
+} from './catProofFixture.mjs'
 
 // Slice 7a (standardization, D3 close): the stage's workspace rail used to
 // mount only inside `stageBranch === 'cad'`. This row proves the widened
