@@ -1739,6 +1739,20 @@ export default function ToolCast({
       integrations={integrationsBlock}
       signedIn={isSignedIn()}
       onSignOut={platformSession.actions.signOut}
+      // Slice 9b: the ladder fields the stage can supply. No engine session
+      // is reachable here at all (ACCEPTANCE: the console's CadEditSurface is
+      // the ONE consumer), so entity-kind rows read every session field as
+      // undefined and answer with the ladder's own "no drawing in the
+      // browser engine yet" — true on the stage, not a fabricated gap.
+      contextMenuCtx={{
+        hasVersions: !!drawing.drawingState,
+        canUndo,
+        canRedo,
+        versionBusy: !!drawing.versionBusy,
+        running: busy || jobRunning,
+        previewing: !!drawing.previewing,
+        mutationsBlocked: !!drawing.mutationsBlocked,
+      }}
     >
     <>
       <SurfaceFrame.Tabs />
@@ -2343,6 +2357,7 @@ export default function ToolCast({
             : jobResult?.error?.message || ''}
       </LiveRegion>
       <SurfaceFrame.Toast />
+      <SurfaceFrame.ContextMenu />
       <DetailsDrawer data={drawer} onClose={() => setDrawer(null)} />
       {opsOpen && (
         <div className="drawer-layer tc-ops-layer">

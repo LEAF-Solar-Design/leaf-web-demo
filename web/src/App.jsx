@@ -2773,6 +2773,22 @@ export default function App() {
         ? <IosSurface enabled={ENV_IOS_SURFACE} contract={iosContract} />
         : null}
       session={session}
+      // Slice 9b: the ladder fields the console can supply today. Entity-kind
+      // rows (canvas selection) read `ctx.session`/`ctx.reach`, which live
+      // inside the workspace card's own EngineSessionProvider subtree (a
+      // narrower scope than this mount) — an honest, named gap rather than a
+      // second provider reaching up to here; those rows read every session
+      // field as undefined and answer with the ladder's own "no drawing in
+      // the browser engine yet", never a fabricated availability.
+      contextMenuCtx={{
+        hasVersions: !!drawingState,
+        canUndo,
+        canRedo,
+        versionBusy: !!versionBusy,
+        running: !!running,
+        previewing: !!previewing,
+        mutationsBlocked: !!drawingMutationsBlocked,
+      }}
       posture={{
         studio: !!studioGround,
         navExpanded,
@@ -3682,6 +3698,7 @@ export default function App() {
         </LiveRegion>
 
         <SurfaceFrame.Toast />
+        <SurfaceFrame.ContextMenu />
       </div>
 
       {/* The right rail column (aside.rail's grid seat, styles.css). Slice 6b

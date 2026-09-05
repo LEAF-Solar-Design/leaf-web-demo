@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Leaf — build CAD tools with AI, run on Leaf. Web demo lane.",
+  "description": "Leaf \u2014 build CAD tools with AI, run on Leaf. Web demo lane.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

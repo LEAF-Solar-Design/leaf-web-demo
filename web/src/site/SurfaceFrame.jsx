@@ -31,10 +31,9 @@
 // nothing here compares a surface id to a string literal. Every gate reads a
 // declared slot off surfaceContract(activeSurface).
 // ---------------------------------------------------------------------------
-import { createContext, useContext } from 'react'
+import { createContext, lazy, Suspense, useContext } from 'react'
 
 import ConversationListComponent from '../components/ConversationList.jsx'
-import ElementContextMenu from '../components/ElementContextMenu.jsx'
 import EntitlementGate from '../components/EntitlementGate.jsx'
 import JobInboxComponent from '../components/JobInbox.jsx'
 import JobRailComponent from '../components/JobRail.jsx'
@@ -524,12 +523,23 @@ function Integrations() {
  * carrying `data-element-id` — so the per-surface kind list is enforced
  * HERE, at the one mount gate, not duplicated inside the menu.
  */
+// Lazy: Radix's own dependency weight (~34 KB gz) has no place in the shell's
+// FIRST paint when the menu itself renders nothing until a real right-click,
+// Shift+F10 or long-press fires. `Suspense` falls back to null, never a
+// spinner: there is no visible slot for one to occupy, and the trigger
+// itself needs no bytes loaded before a pointer or key event asks for it.
+const LazyElementContextMenu = lazy(() => import('../components/ElementContextMenu.jsx'))
+
 function ContextMenuSlot() {
   const frame = useSlot()
   if (!frame) return null
   const kinds = frame.contract?.contextMenu
   if (!Array.isArray(kinds) || kinds.length === 0) return null
-  return <ElementContextMenu ctx={frame.contextMenuCtx} />
+  return (
+    <Suspense fallback={null}>
+      <LazyElementContextMenu ctx={frame.contextMenuCtx} />
+    </Suspense>
+  )
 }
 
 // The slots are statics on the frame, not separate named exports: one import

@@ -140,7 +140,9 @@ describe('product surface contract', () => {
 //   conversations   converse.js:129-134 sessionCacheKey(project, drawing)
 //   builds.routes   App.jsx:2710 catalog run path; no marathon route exists
 //   builds.card     'job-rail' (slice 11a): JobRail hosts the BuildQueueCard
-//   contextMenu     zero contextmenu handlers under web/src
+//   contextMenu     standardization slice 9b: SurfaceFrame.jsx `ContextMenu`
+//                   mounts `ElementContextMenu` only where this list is
+//                   non-empty; see each surface's own contextMenu note below
 //   integrations    { link: 'standard-flow' } (slice 8c) on every studio
 //                   surface: SurfaceFrame.Integrations mounts the
 //                   Link-a-service drawer there. sheets stays undeclared
@@ -162,7 +164,9 @@ const CONTRACT_FIXTURE = {
     conversations: { scope: 'drawing' },
     integrations: { link: 'standard-flow' },
     builds: { routes: ['one-shot'], card: 'job-rail' },
-    contextMenu: [],
+    // contextMenu: the board's own tiles (version/job/tool/family) plus the
+    // chat rows ConversePanel renders here (not surface-gated).
+    contextMenu: ['version', 'job', 'tool', 'family', 'turn', 'approval', 'item'],
     shortcuts: null,
     entitlements: null,
     resetOn: null,
@@ -182,7 +186,9 @@ const CONTRACT_FIXTURE = {
     conversations: { scope: 'drawing' },
     integrations: { link: 'standard-flow' },
     builds: { routes: ['one-shot'], card: 'job-rail' },
-    contextMenu: [],
+    // contextMenu: the ribbon's tools, the canvas's current selection, and
+    // the chat rows this drawing ground carries.
+    contextMenu: ['tool', 'entity', 'turn', 'approval', 'item'],
     shortcuts: null,
     entitlements: null,
     resetOn: null,
@@ -207,7 +213,8 @@ const CONTRACT_FIXTURE = {
     conversations: { scope: 'drawing' },
     integrations: { link: 'standard-flow' },
     builds: { routes: ['one-shot'], card: 'job-rail' },
-    contextMenu: [],
+    // contextMenu: same drafting surface as cad (ribbon + canvas selection + chat rows).
+    contextMenu: ['tool', 'entity', 'turn', 'approval', 'item'],
     shortcuts: null,
     entitlements: null,
     resetOn: null,
@@ -229,7 +236,8 @@ const CONTRACT_FIXTURE = {
     // The console carries NO ship-lane launch control (IosSurface.jsx:3-4 is
     // props-only); the repo's only one is the stage's ToolCast.jsx:2114.
     builds: { routes: ['one-shot'], card: 'job-rail' },
-    contextMenu: [],
+    // contextMenu: the device stage's ship-lane rungs plus the chat rows.
+    contextMenu: ['rung', 'turn', 'approval', 'item'],
     shortcuts: null,
     entitlements: null,
     resetOn: null,
