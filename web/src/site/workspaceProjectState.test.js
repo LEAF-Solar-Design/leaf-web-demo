@@ -8,7 +8,7 @@
  * a project. Both halves have to hold: dropping either one recreates the bug.
  */
 import { describe, expect, it } from 'vitest'
-import { deriveWorkspaceProjectState, EMPTY_WORKSPACE_PROJECT, WORKSPACE_PROJECT_COPY } from './workspaceProjectState.js'
+import { deriveWorkspaceProjectState, EMPTY_WORKSPACE_PROJECT, WORKSPACE_PROJECT_COPY, formatProjectsUnavailable } from './workspaceProjectState.js'
 
 describe('deriveWorkspaceProjectState', () => {
   it('the observed production state: a mounted drawing, no workspace project', () => {
@@ -64,7 +64,7 @@ describe('deriveWorkspaceProjectState', () => {
   })
 
   it.each([
-    ['no platform database', { projectsUnavailable: 'Projects unavailable', orgId: 'org-1' }, WORKSPACE_PROJECT_COPY.reasonNoPlatform],
+    ['the caller supplied a reason', { projectsUnavailable: 'Projects unavailable', orgId: 'org-1' }, 'Projects unavailable'],
     ['no workspace org yet', { orgId: null }, WORKSPACE_PROJECT_COPY.reasonNoOrg],
     ['the offline demo build', { mock: true, orgId: 'org-1' }, WORKSPACE_PROJECT_COPY.reasonDemo],
   ])('the action is disabled WITH a stated reason when %s', (_label, extra, reason) => {
@@ -74,6 +74,27 @@ describe('deriveWorkspaceProjectState', () => {
     // A disabled button with no reason is the same dead end as the bare
     // "No project open" line this replaced.
     expect(state.action.reason).toBe(reason)
+  })
+
+  it('preserves the project-service permission error with the action disabled', () => {
+    const state = deriveWorkspaceProjectState({
+      drawingName: 'rooftop_demo', projectsUnavailable: 'platform role does not permit mutation', orgId: 'org-1',
+    })
+    expect(state.action.disabled).toBe(true)
+    expect(state.action.reason).toBe('platform role does not permit mutation')
+    expect(state.action.reason).not.toContain('database')
+  })
+
+  it('uses a neutral service reason for boolean unavailability', () => {
+    const state = deriveWorkspaceProjectState({
+      drawingName: 'rooftop_demo', projectsUnavailable: true, orgId: 'org-1',
+    })
+    expect(state.action.disabled).toBe(true)
+    expect(state.action.reason).toBe(WORKSPACE_PROJECT_COPY.reasonServiceGeneric)
+  })
+
+  it('bounds a long service reason to 200 characters plus an ellipsis', () => {
+    expect(formatProjectsUnavailable('x'.repeat(400))).toBe(`${'x'.repeat(200)}…`)
   })
 
   it('a hostile or accidental long name cannot blow out the header chip line', () => {

@@ -27,6 +27,7 @@
 // Bounded so an accidental or hostile 10k-character name cannot blow out the
 // header chip's single line. The full name still lives in the switcher menu.
 const MAX_LABEL = 64
+const MAX_UNAVAILABLE_REASON = 200
 
 export const WORKSPACE_PROJECT_COPY = Object.freeze({
   // Named so the two concepts can never be read as one. "workspace project" is
@@ -40,9 +41,10 @@ export const WORKSPACE_PROJECT_COPY = Object.freeze({
   emptyExplainer: 'Open a project from the header, or add a drawing to start working in CAD.',
   emptyRail: 'no project open',
   actionLabel: 'Create project from this drawing',
-  // Every disabled reason names the blocker AND where the user goes next.
-  // A bare "unavailable" is what makes a pilot user retry forever.
+  // Use the caller's own message when it supplies a reason.
+  // This module never guesses which backend is missing.
   reasonNoPlatform: 'Workspace projects need the platform database, which this deployment is running without.',
+  reasonServiceGeneric: 'Workspace projects are unavailable right now; the project service reported an error.',
   reasonNoOrg: 'Create a workspace first — the Project menu in the header offers it.',
   reasonDemo: 'This is the offline demo build; it talks to no workspace service.',
   reasonNoHandler: 'This surface is not wired to create projects yet.',
@@ -52,6 +54,15 @@ function trimmedLabel(value) {
   const text = String(value ?? '').trim()
   if (!text) return null
   return text.length > MAX_LABEL ? `${text.slice(0, MAX_LABEL - 1)}…` : text
+}
+
+export function formatProjectsUnavailable(value) {
+  if (!value) return null
+  if (typeof value === 'string') {
+    const text = value.trim()
+    if (text) return text.length > MAX_UNAVAILABLE_REASON ? `${text.slice(0, MAX_UNAVAILABLE_REASON)}…` : text
+  }
+  return WORKSPACE_PROJECT_COPY.reasonServiceGeneric
 }
 
 // Identifiers get the SAME normalization as names. Trimming names but not ids
@@ -126,7 +137,7 @@ export function deriveWorkspaceProjectState({
         reason: mock
           ? WORKSPACE_PROJECT_COPY.reasonDemo
           : projectsUnavailable
-            ? WORKSPACE_PROJECT_COPY.reasonNoPlatform
+            ? formatProjectsUnavailable(projectsUnavailable)
             : !org
               ? WORKSPACE_PROJECT_COPY.reasonNoOrg
               : null,
