@@ -64,6 +64,7 @@ from routers import (
     ops_metrics,
     platform_customize as platform_customize_router,
     prompt,
+    search as search_router,
     session,
     sessions,
     skills,
@@ -243,6 +244,7 @@ app.include_router(author.router)
 app.include_router(platform_customize_router.router)  # W14 admin self-edit lane (R7): admin-tier + internal-mode gated, branch-only
 app.include_router(drawings.router)  # M2 write loop: versioned drawing endpoints
 app.include_router(prompt.router)  # M3: NL prompt router (MATRIX gap #2 — one prompt box -> lanes)
+app.include_router(search_router.router)  # slice 10c: GET /api/search, the bar's find-scope index
 app.include_router(usage.router)  # UI wave 1: per-tenant spend/quota meter (GET /api/usage)
 app.include_router(ops.router)  # UI wave 2: ops surface (role-gated tenant spend + kill-switch proxy)
 app.include_router(ops_metrics.router)  # APS observability read-API: fleet metrics + in-flight tail + ledger<->job drill-down (X-Ops-Secret)

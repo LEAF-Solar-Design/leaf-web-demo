@@ -1046,6 +1046,42 @@ export async function getDrawingVersions(mock, drawingId, { includeDeltas = fals
   })
 }
 
+// GET /api/operator/sessions -> {sessions:[...]}. Slice 10b's act-scope
+// palette artifact index. Operator-gated at the server (contract/OPERATOR.md
+// §1-2): a caller with no granted operator principal gets 404. That is not a
+// palette-load failure — most tenants are not operators — so it is caught
+// here and folded into an honest empty index rather than surfaced as an
+// error strip. Bounded 4s: one slow store must not stall the palette open.
+export async function listOperatorSessions(mock) {
+  if (mock) return { sessions: [] }
+  try {
+    return await http('/api/operator/sessions', {
+      headers: { 'X-Tenant-Id': TENANT },
+    }, 4000)
+  } catch {
+    return { sessions: [] }
+  }
+}
+
+// GET /api/search?q=&drawing_id= — slice 10c's search index, consumed by the
+// bar's find scope. Tenant-scoped and bounded server-side (server/routers/
+// search.py); this wrapper adds its own client-side timeout so a slow
+// backend never stalls the resolver's arrow/Enter keys, and folds any
+// failure into the honest empty-result shape rather than an error the
+// resolver has no row to render.
+export async function searchIndex(mock, q, { drawingId = null } = {}) {
+  if (mock) return { query: String(q || ''), results: [] }
+  const params = new URLSearchParams({ q: String(q || '') })
+  if (drawingId) params.set('drawing_id', drawingId)
+  try {
+    return await http(`/api/search?${params.toString()}`, {
+      headers: { 'X-Tenant-Id': TENANT },
+    }, 4000)
+  } catch {
+    return { query: String(q || ''), results: [] }
+  }
+}
+
 // --- Single-writer checkout take / release (3B) -------------------------
 // Wave-2 landed the checkout as a DISPLAY-ONLY chip (read from /versions). These
 // two calls make it MUTABLE: acquire the single-writer lock, or release it.

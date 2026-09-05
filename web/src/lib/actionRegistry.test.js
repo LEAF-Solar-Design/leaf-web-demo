@@ -168,11 +168,14 @@ describe('honest triggers', () => {
     }
   })
 
-  it('advertises a cap for exactly the three keys bound today, and invents none', () => {
+  it('advertises a cap for exactly the four keys bound today, and invents none', () => {
     expect(keyboardTable()).toEqual([
       { id: 'bar:focus', label: 'Command bar', kbd: 'Mod+K', surface: 'bar' },
       { id: 'bar:escape', label: 'Close the topmost surface', kbd: 'Escape', surface: 'bar' },
       { id: 'bar:retry', label: 'Retry the failed step', kbd: 'R', surface: 'bar' },
+      // Slice 10b: the shortcut sheet's own cap, generated FROM this table
+      // rather than hand-typed a second place.
+      { id: 'bar:shortcuts', label: 'Keyboard shortcuts', kbd: 'Shift+?', surface: 'bar' },
     ])
     // Slice 10b assigns the rest with the design session. Until then every
     // ribbon, engine and picker record records the absence honestly.
@@ -425,6 +428,18 @@ describe('the key ladder, table-driven', () => {
     expect(byId('bar:retry').when({ rTarget: 'result' })).toBe(LADDER_REASONS.retryOwnedByResult)
     expect(byId('bar:retry').when({})).toBe(LADDER_REASONS.nothingToRetry)
     expect(seen).toHaveLength(5)
+  })
+
+  it('Shift+? opens the shortcut sheet outside a text field, and a real "?" typed into one stays a character', () => {
+    const seen = []
+    const ctx = { onOpenShortcuts: () => seen.push('shortcuts') }
+    const outside = ladderDecision({ key: '?', target: { tagName: 'DIV' } }, ctx)
+    expect(outside).toEqual({ id: 'bar:shortcuts', rung: '', route: 'kbd', preventDefault: true, instant: false })
+    byId(outside.id).run(ctx)
+    expect(seen).toEqual(['shortcuts'])
+    // Typing "?" into the bar itself is text, not a shortcut.
+    const typing = ladderDecision({ key: '?', target: { tagName: 'TEXTAREA' } }, {})
+    expect(typing).toBeNull()
   })
 
   it('keeps the interactive-target selector the shell obeys spelled once', () => {

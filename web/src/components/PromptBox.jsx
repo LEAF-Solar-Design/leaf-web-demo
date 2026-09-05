@@ -25,10 +25,11 @@
 
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import useExit from '../useExit.js'
-import { authHeaders, config, noteUnauthorized } from '../api.js'
+import { authHeaders, config, getDrawingVersions, listOperatorSessions, noteUnauthorized, searchIndex } from '../api.js'
 import { modChord } from '../lib/keys.js'
 import { SECRET_REASONS, SECRET_REASONS_NO_MOUNT } from '../lib/secretPatterns.js'
 import { isWriteTool } from '../lib/toolRecord.js'
+import { actionPaletteRows, findResultRows, sessionArtifactRows, toolArtifactRows, versionArtifactRows } from '../lib/palette.js'
 import CockpitIcon from '../site/CockpitIcon.jsx'
 import {
   appendPromptHistory,
@@ -136,6 +137,13 @@ export default function PromptBox({
   //   meanings. With it off the well registers no drag handlers at all, so
   //   the event bubbles to the stage's handler untouched.
   dropIngestEnabled = true,
+  // Slice 10b/10c: the act-scope palette's action rows (App.jsx's ribbon
+  // tools, a second flattening — see App.jsx's `paletteActions`) and the
+  // drawing the versions artifact index and the find-scope search are
+  // scoped to. Both default to the empty/absent shape, so a caller that
+  // passes neither (every existing mount) renders byte-identical to before.
+  paletteActions = [],
+  drawingId = null,
   // mcpDiscoveryEnabled: gates the tenant-scoped MCP list fetch below.
   //   Default true keeps the console's byte-for-byte behavior (it never
   //   passes this prop). The stage passes signedIn && isEntitled('converse')
@@ -168,6 +176,15 @@ export default function PromptBox({
   const [isComposing, setIsComposing] = useState(false)
   const [mcpOpen, setMcpOpen] = useState(false)
   const [mcpServers, setMcpServers] = useState([])
+  // Slice 10b/10c: which named scope (find/act) currently owns the well's
+  // typed text, or null for the ordinary prompt-draft behaviour every
+  // existing mount keeps. Picking 'build' never sets this (onOpenAuthor
+  // owns that lane already); only find/act turn the well into a resolver.
+  const [activeScope, setActiveScope] = useState(null)
+  const [paletteIdx, setPaletteIdx] = useState(0)
+  const [versionsData, setVersionsData] = useState(null)
+  const [sessionsData, setSessionsData] = useState(null)
+  const [findResults, setFindResults] = useState(null)
   const [attachments, setAttachments] = useState([])
   const [attachmentError, setAttachmentError] = useState(null)
   const attachmentUrlsRef = useRef(new Set())
@@ -224,6 +241,39 @@ export default function PromptBox({
     return () => { live = false }
   }, [mcpDiscoveryEnabled])
 
+  // Act-scope artifact indexes (slice 10b): fetched ONCE when the scope
+  // opens, never per keystroke — filtering happens client-side in
+  // lib/palette.js against whatever text is already typed. Each index is
+  // isolated: a failed fetch resolves to the api.js wrapper's own honest
+  // empty shape (getDrawingVersions still throws on a genuinely unknown
+  // drawing, so that one is caught here too), never a thrown error that
+  // would blank the whole palette over one dead index.
+  useEffect(() => {
+    if (activeScope !== 'act') return undefined
+    let live = true
+    if (drawingId) {
+      getDrawingVersions(false, drawingId).then((data) => { if (live) setVersionsData(data) })
+        .catch(() => { if (live) setVersionsData(null) })
+    }
+    listOperatorSessions(false).then((data) => { if (live) setSessionsData(data) })
+    return () => { live = false }
+  }, [activeScope, drawingId])
+
+  // Find-scope search (slice 10c): one request per query, debounced by a
+  // short settle delay so arrow-key/backspace bursts while typing don't fan
+  // out a request per keystroke. The wrapper itself is bounded (4s client
+  // timeout, server-side caps) and never throws.
+  useEffect(() => {
+    if (activeScope !== 'find') return undefined
+    const q = value.trim()
+    if (!q) { setFindResults(null); return undefined }
+    let live = true
+    const timer = setTimeout(() => {
+      searchIndex(false, q, { drawingId }).then((data) => { if (live) setFindResults(data) })
+    }, 150)
+    return () => { live = false; clearTimeout(timer) }
+  }, [activeScope, value, drawingId])
+
   // Slice 5a: an alias is appended to the box's own class, never swapped in
   // for it, so the console's selectors and the stage's both resolve.
   const withAlias = (base, alias) => (alias ? `${base} ${alias}` : base)
@@ -263,11 +313,37 @@ export default function PromptBox({
   // once. scopeMenu.shown covers both the open and the fading state.
   const menuOpen = !!trigger && !menuDismissed && !routeActive && !scopeMenu.shown
 
+  // Slice 10b/10c: the act/find resolver rows, filtered from what is already
+  // typed. `trigger` (the "/" and "@" pickers) still owns the well whenever
+  // it fires — a leading "/" always means "run a tool", scope or no scope —
+  // so this resolver only takes over when no picker trigger is active.
+  const paletteRows = useMemo(() => (
+    activeScope === 'act' && !trigger ? [
+      ...actionPaletteRows(paletteActions, value),
+      ...toolArtifactRows(tools, value),
+      ...versionArtifactRows(versionsData, value),
+      ...sessionArtifactRows(sessionsData, value),
+    ] : []
+  ), [activeScope, trigger, paletteActions, tools, versionsData, sessionsData, value])
+  const findRows = useMemo(() => (
+    activeScope === 'find' && !trigger ? findResultRows(findResults) : []
+  ), [activeScope, trigger, findResults])
+  const scopeRows = activeScope === 'act' ? paletteRows : activeScope === 'find' ? findRows : []
+  // NOT gated on scopeMenu.shown (unlike menuOpen above): activeScope is set
+  // in the SAME tick pickScope closes the scope picker, so gating on the
+  // picker's own 180 ms exit fade left this palette dark for that whole
+  // window — a real defect an assertion caught (std/palette-search-s10bc
+  // continuation judgment), not a style choice to preserve. The picker's own
+  // render below drops out on `!activeScope` instead, so the two never
+  // double-render.
+  const scopeMenuOpen = !!activeScope && !trigger && !menuDismissed && !routeActive
+
   // Any edit re-arms a dismissed menu and re-anchors the highlight. The
   // credential refusal is retired by the controller's own setPrompt, which the
   // same keystroke reaches, so a notice never outlives the text it was about.
-  useEffect(() => { setMenuDismissed(false); setMenuIdx(0) }, [value])
+  useEffect(() => { setMenuDismissed(false); setMenuIdx(0); setPaletteIdx(0) }, [value])
   const idx = Math.min(menuIdx, Math.max(0, matches.length - 1))
+  const paletteIdxClamped = Math.min(paletteIdx, Math.max(0, scopeRows.length - 1))
 
   // Tab: complete the name into the input (trailing space closes the menu and
   // starts args mode). Enter: complete and hand off to dispatch in one act.
@@ -342,6 +418,24 @@ export default function PromptBox({
   }
 
   const onKeyDown = (e) => {
+    // Slice 10b/10c: the act/find resolver takes the SAME arrow/Enter/Esc
+    // keys the "/" picker uses (menuOpen below) — the two never overlap
+    // (scopeMenuOpen stands down the instant `trigger` fires), so this
+    // branch only ever runs when the "/" menu isn't already open.
+    if (scopeMenuOpen && !menuOpen && !e.isComposing) {
+      if (e.key === 'ArrowDown' && scopeRows.length > 0) {
+        e.preventDefault(); setPaletteIdx(Math.min(paletteIdxClamped + 1, scopeRows.length - 1)); return
+      }
+      if (e.key === 'ArrowUp' && scopeRows.length > 0) {
+        e.preventDefault(); setPaletteIdx(Math.max(paletteIdxClamped - 1, 0)); return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault(); e.stopPropagation(); setActiveScope(null); return
+      }
+      if (e.key === 'Enter' && scopeRows[paletteIdxClamped]) {
+        e.preventDefault(); runPaletteRow(scopeRows[paletteIdxClamped]); return
+      }
+    }
     if (menuOpen && !e.isComposing) { // IME candidate navigation keeps its keys
       if (e.key === 'ArrowDown' && matches.length > 0) {
         e.preventDefault(); setMenuIdx(Math.min(idx + 1, matches.length - 1)); return
@@ -415,7 +509,22 @@ export default function PromptBox({
   const pickScope = (s) => {
     setScopeOpen(false)
     if (s.lane === 'build' && onOpenAuthor) { onOpenAuthor(); return }
+    // Slice 10b/10c: find/act now resolve to a real resolver (the palette or
+    // the search results) instead of just returning focus to a blank
+    // composer. Reselecting the SAME scope while it is already active is a
+    // toggle-off, matching the scope chip's own aria-expanded convention.
+    setActiveScope((current) => (current === s.id ? null : s.id))
     inputRef?.current?.focus()
+  }
+  const runPaletteRow = (row) => {
+    if (row.disabled) return
+    if (row.kind === 'action') { row.onSelect?.(); changePrompt(''); setActiveScope(null); return }
+    // An artifact or find-result row has no run handler of its own yet
+    // (slice 10b/10c ship the index, not per-kind navigation): it completes
+    // the well with the row's own `kind:id` reference rather than silently
+    // doing nothing, so picking it is never a dead click.
+    changePrompt(`${row.id} `)
+    setActiveScope(null)
   }
 
   // Scope resolver keys (capture, so the app's global Esc/Enter ladders stand
@@ -535,6 +644,72 @@ export default function PromptBox({
             })}
           </div>
         )}
+        {scopeMenuOpen && activeScope === 'act' && (
+          <div className="resolver act-palette" id="act-palette-listbox" role="listbox" aria-label="Actions and artifacts">
+            <div className="resolver-header">
+              {scopeRows.length > 0
+                ? 'Actions · Enter runs it, or opens a disabled row’s reason'
+                : <>No action or artifact matches {value ? `“${value}”` : 'anything yet — keep typing'}</>}
+            </div>
+            {scopeRows.map((row, i) => (
+              <div
+                key={`${row.kind}:${row.id}`}
+                id={`act-opt-${i}`}
+                className={`resolver-row ${i === paletteIdxClamped ? 'active' : ''}${row.disabled ? ' disabled' : ''}`}
+                role="option"
+                aria-selected={i === paletteIdxClamped}
+                aria-disabled={row.disabled || undefined}
+                onMouseEnter={() => setPaletteIdx(i)}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => runPaletteRow(row)}
+              >
+                <span className="lbar" aria-hidden="true" />
+                {row.kind === 'action' && <CockpitIcon id={row.icon || ''} fallback={row.label} size="small" />}
+                <span className={row.disabled ? 'dot hollow' : 'dot'} aria-hidden="true" />
+                <span className="label">
+                  {row.label}
+                  {/* Honesty ladder (hard rule 1): a disabled row's exact
+                      reason string, never a dash, never silence. */}
+                  {row.disabled && row.reason && <span className="dim"> · unavailable: {row.reason}</span>}
+                  {row.kind !== 'action' && row.description && <span className="dim"> · {row.description}</span>}
+                </span>
+                <span className="count">{row.kind}</span>
+                {row.kind === 'action' && row.kbd && <span className="key hot">{row.kbd}</span>}
+              </div>
+            ))}
+          </div>
+        )}
+        {scopeMenuOpen && activeScope === 'find' && (
+          <div className="resolver find-results" id="find-results-listbox" role="listbox" aria-label="Search results">
+            <div className="resolver-header">
+              {!value.trim()
+                ? 'Type to search drawings in reach, versions, sessions and tools'
+                : scopeRows.length > 0
+                  ? `${scopeRows.length} result${scopeRows.length === 1 ? '' : 's'} · Enter jumps to one`
+                  : `No results for “${value}”`}
+            </div>
+            {scopeRows.map((row, i) => (
+              <div
+                key={`${row.kind}:${row.id}`}
+                id={`find-opt-${i}`}
+                className={`resolver-row ${i === paletteIdxClamped ? 'active' : ''}`}
+                role="option"
+                aria-selected={i === paletteIdxClamped}
+                onMouseEnter={() => setPaletteIdx(i)}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => runPaletteRow(row)}
+              >
+                <span className="lbar" aria-hidden="true" />
+                <span className="dot hollow" aria-hidden="true" />
+                <span className="label">
+                  {row.label}
+                  {row.description && <span className="dim"> · {row.description}</span>}
+                </span>
+                <span className="count">{row.kind}</span>
+              </div>
+            ))}
+          </div>
+        )}
         {mcpOpen && (
           <div className="resolver mcp-panel" role="status" aria-label="Mounted MCP servers">
             <div className="resolver-header">Mounted MCP servers <button type="button" className="chip-neutral" onClick={() => setMcpOpen(false)}>Close</button></div>
@@ -579,9 +754,15 @@ export default function PromptBox({
             data-testid="command-bar"
             role="combobox"
             aria-autocomplete="list"
-            aria-expanded={menuOpen}
-            aria-controls={menuOpen ? 'slash-menu-listbox' : undefined}
-            aria-activedescendant={menuOpen && matches[idx] ? `slash-opt-${idx}` : undefined}
+            aria-expanded={menuOpen || scopeMenuOpen}
+            aria-controls={menuOpen
+              ? 'slash-menu-listbox'
+              : scopeMenuOpen ? (activeScope === 'act' ? 'act-palette-listbox' : 'find-results-listbox') : undefined}
+            aria-activedescendant={menuOpen && matches[idx]
+              ? `slash-opt-${idx}`
+              : scopeMenuOpen && scopeRows[paletteIdxClamped]
+                ? `${activeScope === 'act' ? 'act-opt' : 'find-opt'}-${paletteIdxClamped}`
+                : undefined}
             style={{ height: autoGrowHeight(value), resize: 'none', overflowY: 'auto' }}
           />
         </div>
@@ -669,7 +850,7 @@ export default function PromptBox({
             </span>
           )}
         </div>
-        {scopeMenu.shown && (
+        {scopeMenu.shown && !activeScope && (
           <div
             className={`resolver${scopeMenu.exiting ? ' exit' : ''}`}
             role="listbox"

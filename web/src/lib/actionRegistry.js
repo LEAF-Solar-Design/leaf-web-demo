@@ -292,9 +292,10 @@ function isInteractiveTarget(target) {
  * so a focused control still sees the key) and returns null when nothing is
  * open, so the ladder leaves the key alone; R fires only outside a text field,
  * only unmodified, and only when a retry rung is live, otherwise the key FALLS
- * THROUGH to the bar; and any other bare printable keystroke falls into the
- * bar unless the target is editable or interactive, or an overlay (drawer,
- * history) owns the typing.
+ * THROUGH to the bar; Shift+? (slice 10b) opens the shortcut sheet, same
+ * outside-a-text-field guard as R; and any other bare printable keystroke
+ * falls into the bar unless the target is editable or interactive, or an
+ * overlay (drawer, history) owns the typing.
  */
 export function ladderDecision(event, ctx = {}) {
   if (!event || typeof event.key !== 'string') return null
@@ -317,6 +318,12 @@ export function ladderDecision(event, ctx = {}) {
       && !event.metaKey && !event.ctrlKey && !event.altKey) {
     const rung = retryRung(ctx)
     if (rung) return { id: 'bar:retry', rung, route: 'kbd', preventDefault: true, instant: true }
+  }
+
+  // Shift+? opens the shortcut sheet (slice 10b). Outside text fields only,
+  // same guard as R: a real "?" typed into a field must stay a character.
+  if (!typing && event.key === '?' && !event.metaKey && !event.ctrlKey && !event.altKey) {
+    return { id: 'bar:shortcuts', rung: '', route: 'kbd', preventDefault: true, instant: false }
   }
 
   // Type-to-fall-through (operator rule): a bare printable keystroke on the
@@ -530,8 +537,8 @@ const ACTION_LIST = [
     surface: 'slash',
   },
 
-  // The global key ladder. These three are the ONLY actions in this registry
-  // that carry a `kbd`, because they are the only three bound today.
+  // The global key ladder. These four are the ONLY actions in this registry
+  // that carry a `kbd`, because they are the only four bound today.
   {
     id: 'bar:focus',
     gated: false,
@@ -582,6 +589,25 @@ const ACTION_LIST = [
       return id
     },
     triggers: KEY_TRIGGERS,
+    surface: 'bar',
+  },
+  // Slice 10b: the shortcut sheet, generated from this file's own `kbd`
+  // fields (keyboardTable() below), so a cap added here shows up there with
+  // no second place to update. Unlike the other three ladder rungs this row
+  // is also a real palette row (Enter runs it from the resolver, a click or
+  // tap opens it too), so it is the one 'bar' action honest about all three
+  // triggers rather than the ladder's keyboard-only shape.
+  {
+    id: 'bar:shortcuts',
+    gated: false,
+    label: 'Keyboard shortcuts',
+    text: 'Shortcuts',
+    icon: '',
+    kbd: 'Shift+?',
+    title: text('Open the keyboard shortcut sheet'),
+    when: always,
+    run: (ctx) => ctx.onOpenShortcuts?.(),
+    triggers: Object.freeze({ mouse: 'click', keyboard: 'kbd', touch: 'tap' }),
     surface: 'bar',
   },
 ]
