@@ -2952,6 +2952,50 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      # Bound to the DIGESTS check, never the v3 evidence step: the v3
+      # artifact can be skipped as a duplicate for this exact tree while a
+      # different SOURCE (an earlier same-tree preview cohort) minted it, so
+      # gating readiness on it would let the relay adopt a tag that is not
+      # this run's prepared source. The five verified digests are the only
+      # proof this run's own SPEC_TAG is complete; readiness is minted every
+      # time that is true, duplicate v3 evidence or not.
+      - name: Materialize the speculative tag-readiness record
+        id: readiness
+        if: steps.digests.outputs.complete == 'true'
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg schema "leaf.speculative-tag-readiness.v1" \
+            --arg source_sha "${{ needs.prepare.outputs.source_sha }}" \
+            --arg source_tree "$SOURCE_TREE" \
+            --arg image_tag "$SPEC_TAG" \
+            --arg app "${{ steps.digests.outputs.app }}" \
+            --arg broker "${{ steps.digests.outputs.broker }}" \
+            --arg canonical_worker "${{ steps.digests.outputs.canonical_worker }}" \
+            --arg harness "${{ steps.digests.outputs.harness }}" \
+            --arg web "${{ steps.digests.outputs.web }}" \
+            --arg workflow_path ".github/workflows/build-platform-images.yml" \
+            --argjson run_id "$GITHUB_RUN_ID" \
+            --argjson run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --argjson repository_id "${{ github.repository_id }}" \
+            '{schema: $schema,
+              source_sha: $source_sha, source_tree: $source_tree,
+              image_tag: $image_tag,
+              digests: {app: $app, broker: $broker, canonical_worker: $canonical_worker, harness: $harness, web: $web},
+              producer_workflow_path: $workflow_path,
+              producer_run_id: $run_id, producer_run_attempt: $run_attempt,
+              repository_id: $repository_id}' > "$RUNNER_TEMP/spec-tag-readiness.json"
+          jq . "$RUNNER_TEMP/spec-tag-readiness.json"
+
+      - name: Upload the speculative tag-readiness record
+        if: steps.digests.outputs.complete == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: spec-tag-readiness-${{ needs.prepare.outputs.source_tree }}-${{ needs.prepare.outputs.source_sha }}
+          path: ${{ runner.temp }}/spec-tag-readiness.json
+          if-no-files-found: error
+          retention-days: 30
+
   # Tree-identity adoption (the merge-run half of the speculative lane).
   # BEFORE the first release-tag write this job has the gate-reuse probe's
   # posture: every failure degrades to adopted=false and the full build
