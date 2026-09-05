@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest'
 
 import manifest from '../assets/icons8/manifest.json'
 import built from '../assets/icons8/built.json'
+import { ACTIONS } from '../lib/actionRegistry.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SOURCES = [
@@ -46,6 +47,13 @@ function declaredIconKeys() {
   const used = new Set()
   for (const file of SOURCES) for (const key of iconKeysIn(readFileSync(file, 'utf8'))) used.add(key)
   for (const file of DATA_SOURCES) for (const key of jsonIconKeys(readFileSync(file, 'utf8'))) used.add(key)
+  // The action registry constructs engine records through engineOp(), so its
+  // icon ids are runtime values rather than source literals this file's regex
+  // can see. Read the exported records directly or a missing registry icon can
+  // pass this gate and render as a staging-only monogram.
+  for (const action of ACTIONS) {
+    if (typeof action.icon === 'string' && action.icon) used.add(action.icon)
+  }
   return used
 }
 
@@ -97,6 +105,16 @@ describe('cockpit icons (W4e)', () => {
     expect(unresolvedIconKeys(['definitely-not-an-icon'], built.ids || []))
       .toEqual(['definitely-not-an-icon'])
     expect(declaredIconKeys().size).toBeGreaterThan(20)
+  })
+
+  it('covers action-registry icon ids and fails when ARRAY leaves the sprite', () => {
+    const registryIcons = new Set(ACTIONS.map((action) => action.icon).filter(Boolean))
+    expect(registryIcons.has('array')).toBe(true)
+    expect(registryIcons.has('array-polar')).toBe(true)
+
+    const withoutArray = (built.ids || []).filter((key) => key !== 'array' && key !== 'array-polar')
+    expect(unresolvedIconKeys(declaredIconKeys(), withoutArray))
+      .toEqual(expect.arrayContaining(['array', 'array-polar']))
   })
 
   it('every allow-listed monogram key carries a reason and is really absent', () => {
