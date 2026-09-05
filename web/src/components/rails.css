@@ -68,8 +68,27 @@ button.rail-row { cursor: pointer; }
   font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums;
 }
 
-/* --- NT2 banner helpers (the amber square dot is .banner::before; the tinted
-   lead word is styles.css `.banner b`) --- */
+/* --- JobInbox (slice 13a): the right spine's "what you missed" card. Reuses
+   .rail's own box treatment (border, background, padding, overflow — styles.css)
+   and .rail-row/.rail-ledger/.rail-day/.rail-when's ledger grammar (above) for
+   its list; adds only what a notice row needs beyond a job row: a retry
+   action and, when that action is absent, an honest reason line (.lock-note,
+   styles.css — the same class ToolsPanel already uses for a disabled
+   control's reason). --- */
+aside.job-inbox {
+  border-left: 1px solid var(--border);
+  border-top: 1px solid var(--border);
+  background: var(--rail);
+  overflow-y: auto;
+  padding: 16px 16px;
+  margin-top: 12px;
+  min-height: 0;
+}
+.inbox-row { border-top: 1px solid var(--border); padding: 8px 2px; display: flex; flex-direction: column; gap: 4px; }
+.inbox-row:first-child { border-top: 0; }
+.inbox-row-top { display: flex; align-items: center; gap: 8px; }
+.inbox-row-actions { display: flex; justify-content: flex-end; }
+
 .banner-rest { color: var(--muted); min-width: 0; }
 .banner-tail { margin-left: auto; display: flex; align-items: center; gap: 10px; white-space: nowrap; }
 .banner-since { font-size: 11px; color: var(--muted-2); }

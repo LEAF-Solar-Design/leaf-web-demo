@@ -703,6 +703,13 @@ aside.rail {
   min-height: 0;
   flex: 1 1 auto;
 }
+/* Slice 13a: the stage (ToolCast.jsx) wraps SurfaceFrame.JobRail and
+   SurfaceFrame.Inbox in one `.rail-col` flex column inside its own
+   `aside.tc-rail-r` panel, so the two stack instead of overlapping. It has
+   no grid parent there, so this is the whole rule. The console (App.jsx)
+   does the same stacking, plus the conversation list, in `.rail-stack`
+   below, which is what claims the grid's right-hand cell there. */
+.rail-col { display: flex; flex-direction: column; min-height: 0; }
 /* Pin the rail column to its grid cell on desktop. The DT2 .drawer-layer
    claims row 2 / col 3 explicitly (structural.css), and an auto-placed rail
    then falls to an implicit row UNDER the nav whenever the drawer mounts —

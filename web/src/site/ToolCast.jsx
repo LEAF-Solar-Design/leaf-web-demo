@@ -54,6 +54,7 @@ import useIosSurface from '../ios/useIosSurface.js'
 import { useWorkspaceControllers } from '../controllers/WorkspaceControllerProvider.jsx'
 import useCatalogController from '../controllers/catalog/useCatalogController.js'
 import { setCredentialMountAvailable } from '../lib/secretGuardTransport.js'
+import { useToastBus } from '../lib/notifications.js'
 import { resolvePublishedCatalogTool } from './publishedCatalogTool.js'
 import { track, setTourStep } from '../telemetry.js'
 import useBuildQueue from '../controllers/useBuildQueue.js'
@@ -317,7 +318,9 @@ export default function ToolCast({
   const [claudeOpen, setClaudeOpen] = useState(false)
   const [workspaceBootstrapRequired, setWorkspaceBootstrapRequired] = useState(false)
   const [sessionRetry, setSessionRetry] = useState(0)
-  const [toast, setToast] = useState(null)
+  // Slice 13a: the toast is now ONE bus (lib/notifications.js) shared with
+  // App.jsx, read through useToastBus.
+  const { toast, showToast, onToastDone } = useToastBus()
   const [drawer, setDrawer] = useState(null)
   const [uploadDragActive, setUploadDragActive] = useState(false)
   const [opsOpen, setOpsOpen] = useState(() => !PUBLIC_DEMO && new URLSearchParams(window.location.search).get('ops') === '1')
@@ -326,7 +329,6 @@ export default function ToolCast({
   const [tourIndex, setTourIndex] = useState(0)
   const [demoTurns, setDemoTurns] = useState([])
   const [focusView, setFocusView] = useState(false)
-  const toastSeqRef = useRef(0)
   const accountSessionObservedRef = useRef(false)
   const tourSeqRef = useRef(0)
   const demoTurnSeqRef = useRef(0)
@@ -525,10 +527,7 @@ export default function ToolCast({
     // dep list changes when localStorage gains a token.
   }, [active, drawing.drawingState?.drawing_id, drawing.head, drawing.shown, drawingId, platformSession.actions, platformSession.recoveries, requireAuth, seatIntake, sessionRetry])
 
-  const showToast = useCallback((next) => {
-    toastSeqRef.current += 1
-    setToast({ id: toastSeqRef.current, ...next })
-  }, [])
+  // showToast comes from useToastBus() above (slice 13a).
 
   const onCompleteVersion = useCallback(async (newVersion, envelope) => {
     const scopeAtStart = activeDrawingIdRef.current
@@ -1679,7 +1678,7 @@ export default function ToolCast({
         onSelectJob: inspectHistoricalJob,
         builds: buildQueue.builds,
       } : null}
-      toast={{ toast, onDone: (id) => setToast((current) => current?.id === id ? null : current) }}
+      toast={{ toast, onDone: onToastDone }}
       // Slice 6b. Same two facts the console supplies, spelled in the stage's
       // own vocabulary: `sessionId` is the open conversation, and resuming a
       // row for THIS drawing means showing the operator panel that renders it.
@@ -2036,8 +2035,17 @@ export default function ToolCast({
           )}
         </div></>}
         {/* The rightView gate lives on the frame's `jobRail` prop above, so
-            this slot renders the rail exactly when this tab is showing. */}
-        <SurfaceFrame.JobRail />
+            this slot renders the rail exactly when this tab is showing.
+            Slice 13a: JobInbox joins the same right-spine column (`.rail-col`,
+            styles.css), gated by the same `frame.jobRail` presence as the
+            rail itself — see SurfaceFrame.Inbox. Slice 11a (merged, #1013)
+            is already inside this stack too: BuildQueueCard renders as the
+            rail's own per-record rows (components/JobRail.jsx), not a
+            separate sibling here. */}
+        <div className="rail-col">
+          <SurfaceFrame.JobRail />
+          <SurfaceFrame.Inbox />
+        </div>
         {versionsMounted && rightView === 'versions' && (
           <div className="tc-version-panel" role="region" aria-label="Version history">
             <div className="tc-panel-heading">
