@@ -2,6 +2,9 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
 import ElementContextMenu, { actionsForKind, askClaudeReason, CONTEXT_MENU_REASONS, rowsForIdentity } from './ElementContextMenu.jsx'
 import { byId } from '../lib/actionRegistry.js'
 
@@ -166,6 +169,23 @@ describe('ElementContextMenu (mounted)', () => {
     await screen.findByTestId('element-context-menu')
     fireEvent.keyDown(document, { key: 'Escape' })
     await waitFor(() => expect(screen.queryByTestId('element-context-menu')).toBeNull())
+  })
+})
+
+describe('the scoped prompt posts through the ONE guarded transport (source pin)', () => {
+  // Static, not behavioural: this file must reach the network only through
+  // converse.js's postMessage (which runs the credential guard before it
+  // touches fetch — see converse.js's own header) and must never call fetch
+  // itself, so a future edit cannot route a second, unguarded sender in.
+  const source = readFileSync(resolve(process.cwd(), 'src/components/ElementContextMenu.jsx'), 'utf8')
+
+  it("imports postMessage/ensureSession from converse.js, never calling fetch directly", () => {
+    expect(source).toMatch(/import\s*\{\s*ensureSession,\s*postMessage\s*\}\s*from\s*'\.\.\/converse\.js'/)
+    expect(source).not.toMatch(/\bfetch\(/)
+  })
+
+  it('calls postMessage, not some other transport, to send the typed text', () => {
+    expect(source).toMatch(/await postMessage\(created\.session_id, \{ text: trimmed \}\)/)
   })
 })
 
