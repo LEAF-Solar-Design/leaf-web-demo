@@ -19,12 +19,14 @@ permission and secret boundary, and the fail-closed structure of mq-prewarm.
 from __future__ import annotations
 
 import json
+import base64
 import os
 from pathlib import Path
 import re
 import shlex
 import subprocess
 import textwrap
+import zipfile
 
 import pytest
 import yaml
@@ -105,7 +107,6 @@ def run_step(body: str, workdir: Path, env: dict) -> dict:
         "SUPPLY_SET_POLLS": "1",
         "SUPPLY_SET_INTERVAL": "0",
         "HEAD_SHA": "a" * 40,
-        "STAGE_SERVICES": "web",
         "RELAY_RECEIPT_POLLS": "1",
         "RELAY_RECEIPT_INTERVAL": "0",
         "TERRAFORM_RECEIPT_POLLS": "1",
@@ -447,7 +448,7 @@ def test_local_docs_verdict_requires_dispatcher_skip_evidence(tmp_path, missing,
 @pytest.mark.parametrize("receipt,accepted", [({"weights_touched": False}, True), ({}, False)])
 def test_receipt_weights_presence_uses_the_workflow_jq_expression(tmp_path, receipt, accepted):
     body = step_body("mq-prewarm", "Wait for every dispatched terraform staging receipt")
-    expression = re.search(r"REC_WEIGHTS=\$\(jq -r '([^']+)'", body).group(1)
+    expression = re.search(r"REC_WEIGHTS=\$\(jq -[rj] '([^']+)'", body).group(1)
     (tmp_path / "receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
     result = run_step(
         "REC_WEIGHTS=$(jq -r %s receipt.json)\n[ \"$REC_WEIGHTS\" = \"false\" ]\n"
@@ -565,8 +566,8 @@ def test_relay_receipt_named_by_the_group_head_sha():
 
 def test_relay_receipt_requires_every_stage_service_dispatched():
     body = step_body("mq-prewarm", "Wait for the relay's prewarm receipt")
-    assert "for SERVICE in $STAGE_SERVICES" in body
-    assert "relay receipt is missing a dispatched run id" in body
+    assert 'entry.get("disposition") != "dispatched"' in body
+    assert "relay dispatched nothing for this group" in body
     assert ".group.head_sha" in body
 
 
@@ -658,3 +659,117 @@ def test_every_poll_loop_is_bounded_by_a_named_env_attempt_count():
 def test_lf_endings():
     raw = WORKFLOW.read_bytes()
     assert b"\r" not in raw
+
+
+def _assert_no_service_mirror(text):
+    assert "STAGE_SERVICES" not in text
+
+
+def test_no_service_mirror():
+    _assert_no_service_mirror(workflow_text())
+
+
+def test_no_service_mirror_falsification():
+    with pytest.raises(AssertionError):
+        _assert_no_service_mirror(workflow_text().replace("env:\n", 'env:\n  STAGE_SERVICES: "web"\n', 1))
+
+
+def _prewarm_evidence(tmp_path, entries, relay_source='env:\n  STAGE_SERVICES: "web app"\n', empty_arn=False):
+    binary = tmp_path / "bin"
+    binary.mkdir(exist_ok=True)
+    fake = binary / "gh"
+    fake.write_text(textwrap.dedent('''\
+        #!/usr/bin/env bash
+        set -euo pipefail
+        for arg in "$@"; do
+          case "$arg" in
+            */contents/*)
+              echo "$arg" >> contents-calls.txt
+              cat relay-source.json; exit 0 ;;
+            */actions/artifacts/1/zip) cat relay.zip; exit 0 ;;
+            */actions/artifacts/2/zip) cat web.zip; exit 0 ;;
+            */actions/artifacts/3/zip) cat app.zip; exit 0 ;;
+            */actions/artifacts\?*)
+              echo '{"artifacts":[{"id":1,"expired":false,"created_at":"2026-09-05"}]}'; exit 0 ;;
+            */actions/runs/101/artifacts\?*)
+              echo '{"artifacts":[{"id":2,"expired":false,"name":"staging-prewarm-receipt-web-run-101-attempt-1"}]}'; exit 0 ;;
+            */actions/runs/102/artifacts\?*)
+              echo '{"artifacts":[{"id":3,"expired":false,"name":"staging-prewarm-receipt-app-run-102-attempt-1"}]}'; exit 0 ;;
+            */actions/runs/*)
+              echo "$arg" >> terraform-calls.txt
+              echo '{"status":"completed","conclusion":"success","run_attempt":1}'; exit 0 ;;
+          esac
+        done
+        exit 1
+        '''), encoding="utf-8", newline="\n")
+    fake.chmod(0o755)
+    response = {} if relay_source is None else {"content": base64.b64encode(relay_source.encode()).decode()}
+    (tmp_path / "relay-source.json").write_text(json.dumps(response), encoding="utf-8")
+    with zipfile.ZipFile(tmp_path / "relay.zip", "w") as archive:
+        archive.writestr("prewarm-relay-receipt.json", json.dumps({
+            "group": {"head_sha": "a" * 40}, "dispatched": entries,
+        }))
+    for service in ("web", "app"):
+        with zipfile.ZipFile(tmp_path / f"{service}.zip", "w") as archive:
+            archive.writestr("staged-prewarm-receipt.json", json.dumps({
+                "service": service, "image_tag": "spec-" + "b" * 40 + "-" + "a" * 12,
+                "weights_touched": False,
+                "task_definition_arn": "" if empty_arn else "arn:" + service,
+            }))
+
+
+def _dispatch(service, run_id, disposition="dispatched"):
+    return {"service": service, "run_id": run_id, "disposition": disposition}
+
+
+@needs_shell
+@pytest.mark.parametrize("entries,source,error", [
+    ([], 'STAGE_SERVICES: "web app"', "relay dispatched nothing"),
+    ([_dispatch("web", 101, "dispatch-failed")], 'STAGE_SERVICES: "web"', "web"),
+    ([_dispatch("app", 102, "unresolved")], 'STAGE_SERVICES: "app"', "app"),
+    ([_dispatch("app", None)], 'STAGE_SERVICES: "app"', "app"),
+    ([_dispatch("web", 101)], 'STAGE_SERVICES: "web app"', "differ"),
+    ([_dispatch("web", 101), _dispatch("app", 102)], 'STAGE_SERVICES: "web app"', None),
+    ([_dispatch("web", 101)], 'env: {}', "absent or unparsable"),
+    ([_dispatch("web", 101)], 'STAGE_SERVICES: web', "absent or unparsable"),
+    ([_dispatch("web", 101)], None, "absent or unparsable"),
+])
+def test_relay_dispatched_set_executed(tmp_path, entries, source, error):
+    _prewarm_evidence(tmp_path, entries, source)
+    result = run_step(step_body("mq-prewarm", "Wait for the relay's"), tmp_path,
+                      {"GROUP_HEAD_SHA": "a" * 40})
+    if error:
+        assert result["__returncode__"] != 0
+        assert error in result["__stdout__"] + result["__stderr__"]
+    else:
+        assert result["__returncode__"] == 0, result
+        assert json.loads(result["dispatched_json"]) == {"web": 101, "app": 102}
+        assert "configured services: app web" in result["__stdout__"]
+        assert "dispatched services: app web" in result["__stdout__"]
+        assert (tmp_path / "contents-calls.txt").read_text().strip().endswith(
+            "prewarm-staging-group.yml?ref=" + "a" * 40)
+        waited = run_step(step_body("mq-prewarm", "Wait for every dispatched"), tmp_path,
+                          {"GROUP_HEAD_SHA": "a" * 40, "TREE": "b" * 40,
+                           "DISPATCHED_JSON": result["dispatched_json"]})
+        assert waited["__returncode__"] == 0, waited
+        assert "arn:app arn:web" in waited["__stdout__"]
+
+
+@needs_shell
+@pytest.mark.parametrize("dispatched,empty_arn,accepted", [
+    ({"web": 101, "app": 102}, False, True),
+    ({"web": 101, "app": 102}, True, False),
+    ({}, False, False),
+])
+def test_terraform_wait_uses_dispatched_set_and_requires_arns(tmp_path, dispatched, empty_arn, accepted):
+    _prewarm_evidence(tmp_path, [], empty_arn=empty_arn)
+    result = run_step(step_body("mq-prewarm", "Wait for every dispatched"), tmp_path,
+                      {"GROUP_HEAD_SHA": "a" * 40, "TREE": "b" * 40,
+                       "DISPATCHED_JSON": json.dumps(dispatched)})
+    assert (result["__returncode__"] == 0) == accepted, result
+    if accepted:
+        calls = (tmp_path / "terraform-calls.txt").read_text()
+        assert "/runs/101" in calls and "/runs/102" in calls
+        assert "staged task definitions: arn:app arn:web" in result["__stdout__"]
+    else:
+        assert "empty" in result["__stdout__"] + result["__stderr__"]
