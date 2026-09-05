@@ -450,8 +450,8 @@ function corner(verb, target, edge, px, py, ex, ey) {
   const read = readCurves(verb, target, edge, 'second object')
   if (read.refusal) return read
   const { a: A, b: B } = read
-  if (A.kind !== 'LINE') return refuse(verb, `the selection is a ${target.type}; this round takes two lines`)
-  if (B.kind !== 'LINE') return refuse(verb, `the second object is a ${edge.type}; this round takes two lines`)
+  if (A.kind !== 'LINE') return refuse(verb, `the selection is a ${target.type}; ${verb.toUpperCase()} between lines takes two lines`)
+  if (B.kind !== 'LINE') return refuse(verb, `the second object is a ${edge.type}; ${verb.toUpperCase()} between lines takes two lines`)
   const hit = segSeg(A.pts[0], A.pts[1], B.pts[0], B.pts[1])
   if (!hit) return refuse(verb, 'the two lines are parallel and never meet')
   const X = hit.p
@@ -501,6 +501,147 @@ function cutLine(L, s, P) {
  * arc of radius `r` tangent to both; r = 0 makes the sharp corner. (px, py)
  * says which part of the first line to keep, (ex, ey) which of the second.
  */
+// ---- FILLET on arcs (W4g-6b) ------------------------------------------------------
+
+/**
+ * A line's kept part relative to the point P on it (a crossing or a tangent
+ * point): the endpoint on the pick's side of P, the unit direction from P
+ * toward it, and the SIGNED reach (kimi, #1036 round two). Null when the pick
+ * sits on P or the kept part has no length.
+ */
+function lineKeep(L, P, pick) {
+  const d = sub(L.pts[1], L.pts[0])
+  const along = dot(sub(pick, P), d)
+  if (Math.abs(along) <= EPSILON * (1 + len(d) * len(d))) return null
+  const forward = along > 0
+  const u = scale(d, (forward ? 1 : -1) / len(d))
+  const keptIndex = forward ? 1 : 0
+  const reach = dot(sub(L.pts[keptIndex], P), u)
+  if (reach <= EPSILON) return null
+  return { u, keptIndex, reach }
+}
+/**
+ * An arc's kept part relative to the angle `deg` on its circle (a crossing or
+ * a tangent point) and the pick's angle: `{ start, end }` in degrees, the arc
+ * kept from its start to `deg` or from `deg` to its end, extended through the
+ * gap when `deg` lies beyond the nearer end. Null when the kept sweep would be
+ * empty or a full turn.
+ */
+function arcKeep(A, deg, pick) {
+  const off = normDeg(deg - A.start)
+  // Offsets past the sweep are the gap: the point is ahead of the end when
+  // it is nearer the end than the start, else behind the start.
+  const past = off > A.sweep
+  const ahead = past ? (off - A.sweep) < (360 - off) : false
+  const x = past ? (ahead ? off : off - 360) : off
+  const p = normDeg(angleOf(A.c, pick) - A.start)
+  const keepStart = p < x
+  const sweep = keepStart ? x : A.sweep - x
+  if (sweep <= TINY_DEG || sweep >= 360 - TINY_DEG) return null
+  return keepStart ? { start: A.start, end: A.start + x } : { start: A.start + x, end: A.end }
+}
+/** Every centre of a circle of radius r tangent to line L (offset r to either side) and to circle (c, R) (offset to R + r and R - r). */
+function lineCircleCentres(L, c, R, r) {
+  const d = sub(L.pts[1], L.pts[0])
+  const n = scale([-d[1], d[0]], 1 / len(d))
+  const out = []
+  for (const s of [1, -1]) {
+    const a = add(L.pts[0], scale(n, s * r))
+    const b = add(L.pts[1], scale(n, s * r))
+    for (const rr of [R + r, R - r]) {
+      if (rr <= EPSILON) continue
+      for (const hit of segCircle(a, b, c, rr)) out.push(hit.p)
+    }
+  }
+  return out
+}
+/** Every centre of a circle of radius r tangent to circles (c1, R1) and (c2, R2). */
+function circleCircleCentres(c1, R1, c2, R2, r) {
+  const out = []
+  for (const r1 of [R1 + r, R1 - r]) {
+    if (r1 <= EPSILON) continue
+    for (const r2 of [R2 + r, R2 - r]) {
+      if (r2 <= EPSILON) continue
+      for (const p of circleCircle(c1, r1, c2, r2)) out.push(p)
+    }
+  }
+  return out
+}
+const footOnLine = (L, C) => {
+  const d = sub(L.pts[1], L.pts[0])
+  const t = dot(sub(C, L.pts[0]), d) / dot(d, d)
+  return add(L.pts[0], scale(d, t))
+}
+const onCircleToward = (c, R, C) => add(c, scale(sub(C, c), R / dist(C, c)))
+const arcStep = (id, A, keep) => setArc(id, A.c, A.r, keep.start, keep.end)
+
+/**
+ * FILLET where at least one object is an ARC: the fillet circle is tangent
+ * to both kept parts, so its centre is an intersection of the two curves'
+ * offsets; every such centre is a candidate, admissible when each tangent
+ * point leaves a kept part with length on its pick's side, and the one
+ * nearest the picks wins. r = 0 is the corner at the crossing nearest the
+ * picks. Circles are not trimmed by a fillet and polylines need bulges the
+ * engine does not carry yet: both refused naming the reason.
+ */
+function filletWithArc(verb, target, edge, A, B, r, p1, p2) {
+  const kinds = [A.kind, B.kind]
+  if (kinds.includes('CIRCLE')) return refuse(verb, 'a circle is not trimmed by a fillet; not in this round')
+  if (kinds.includes('POLY')) return refuse(verb, 'a polyline corner needs a bulge the engine does not carry yet; not in this round')
+  const aLine = A.kind === 'LINE'
+  const bLine = B.kind === 'LINE'
+  // Candidate contact points: for r = 0 the crossings themselves (extension
+  // allowed on both curves), else the tangent circle centres.
+  const candidates = []
+  if (r === 0) {
+    const points = aLine
+      ? segCircle(A.pts[0], A.pts[1], B.c, B.r).map((h) => h.p)
+      : bLine ? segCircle(B.pts[0], B.pts[1], A.c, A.r).map((h) => h.p) : circleCircle(A.c, A.r, B.c, B.r)
+    if (points.length === 1) return refuse(verb, 'the two objects touch without crossing; no corner to make')
+    if (!points.length) return refuse(verb, 'the two objects never meet, even extended')
+    for (const X of points) candidates.push({ C: null, T1: X, T2: X })
+  } else {
+    const centres = aLine ? lineCircleCentres(A, B.c, B.r, r) : bLine ? lineCircleCentres(B, A.c, A.r, r) : circleCircleCentres(A.c, A.r, B.c, B.r, r)
+    let touching = false
+    for (const C of centres) {
+      const T1 = aLine ? footOnLine(A, C) : onCircleToward(A.c, A.r, C)
+      const T2 = bLine ? footOnLine(B, C) : onCircleToward(B.c, B.r, C)
+      // Where the two curves touch without crossing, an offset pair meets at
+      // the touch point itself: both tangent points coincide and the fillet
+      // would be a zero-sweep arc (kimi, #1051). That candidate is no fillet.
+      if (same(T1, T2, 1e-7)) { touching = true; continue }
+      candidates.push({ C, T1, T2 })
+    }
+    if (!candidates.length) {
+      return refuse(verb, touching ? 'the two objects touch without crossing; no corner to make' : 'no circle of that radius is tangent to both objects')
+    }
+  }
+  let best = null
+  for (const cand of candidates) {
+    const keepA = aLine ? lineKeep(A, cand.T1, p1) : arcKeep(A, angleOf(A.c, cand.T1), p1)
+    const keepB = bLine ? lineKeep(B, cand.T2, p2) : arcKeep(B, angleOf(B.c, cand.T2), p2)
+    if (!keepA || !keepB) continue
+    const cost = dist(p1, cand.T1) + dist(p2, cand.T2)
+    if (!best || cost < best.cost) best = { ...cand, keepA, keepB, cost }
+  }
+  if (!best) {
+    return refuse(verb, r === 0
+      ? 'the picks name parts that cannot meet at a crossing'
+      : 'the radius is too large for the room the picks leave, or the picks name parts that cannot meet')
+  }
+  const steps = [
+    aLine ? setVertices(target.id, cutLine(A, best.keepA, best.T1), false) : arcStep(target.id, A, best.keepA),
+    bLine ? setVertices(edge.id, cutLine(B, best.keepB, best.T2), false) : arcStep(edge.id, B, best.keepB),
+  ]
+  if (r > 0) {
+    const a1 = angleOf(best.C, best.T1)
+    const a2 = angleOf(best.C, best.T2)
+    const [a0, aEnd] = sweepDeg(a1, a2) <= 180 ? [a1, a2] : [a2, a1]
+    steps.push(createArc(best.C, r, a0, aEnd, layerOf(target)))
+  }
+  return { steps }
+}
+
 export function filletLines(target, edge, r, px, py, ex, ey) {
   const verb = 'Fillet'
   if (!finite(r) || r < 0) return refuse(verb, 'the radius must be a number that is 0 or more')
@@ -508,6 +649,11 @@ export function filletLines(target, edge, r, px, py, ex, ey) {
   if (bad) return bad
   bad = readPair(verb, ex, ey, 'the point on the second line:')
   if (bad) return bad
+  // W4g-6b: an ARC on either side takes the tangent-circle path; two lines
+  // keep the corner path below.
+  const kinds = readCurves(verb, target, edge, 'second object')
+  if (kinds.refusal) return kinds
+  if (kinds.a.kind !== 'LINE' || kinds.b.kind !== 'LINE') return filletWithArc(verb, target, edge, kinds.a, kinds.b, r, [px, py], [ex, ey])
   const c = corner(verb, target, edge, px, py, ex, ey)
   if (c.refusal) return c
   const { A, B, X, sa, sb, theta } = c

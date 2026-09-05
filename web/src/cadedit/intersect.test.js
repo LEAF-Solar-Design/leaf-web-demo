@@ -278,9 +278,122 @@ describe('filletLines', () => {
     expect(filletLines(line('x', [0, 0], [10, 0]), line('y', [0, 1], [10, 1]), 1, 2, 0, 2, 1).refusal).toBe('Fillet refused: the two lines are parallel and never meet.')
     expect(filletLines(line('x', [0, 0], [10, 0]), line('y', [10, 0], [10, 10]), 2, 10, 0, 10, 8).refusal).toMatch(/click on the first line to one side of the crossing/)
     expect(filletLines(line('x', [0, 0], [10, 0]), line('y', [10, 0], [10, 10]), -1, 2, 0, 10, 8).refusal).toBe('Fillet refused: the radius must be a number that is 0 or more.')
-    expect(filletLines(line('x', [0, 0], [10, 0]), circle('c', [10, 0], 3), 1, 2, 0, 10, 3).refusal).toBe('Fillet refused: the second object is a CIRCLE; this round takes two lines.')
-    expect(filletLines(arc('a', [0, 0], 5, 0, 90), line('y', [10, 0], [10, 10]), 1, 2, 0, 10, 8).refusal).toBe('Fillet refused: the selection is a ARC; this round takes two lines.')
+    // W4g-6b: a circle is refused naming why; an arc now takes the tangent-circle path (its rows below).
+    expect(filletLines(line('x', [0, 0], [10, 0]), circle('c', [10, 0], 3), 1, 2, 0, 10, 3).refusal).toBe('Fillet refused: a circle is not trimmed by a fillet; not in this round.')
     expect(filletLines(line('x', [0, 0], [10, 0]), line('y', [10, 0], [10, 10]), 1, Number.NaN, 0, 10, 8).refusal).toMatch(/the point on the first line: x and y must both be numbers/)
+  })
+})
+
+describe('filletLines on arcs (W4g-6b)', () => {
+  // The line y = 0 from (0,0) to (10,0) and the LEFT half of the circle
+  // centred (10,0) radius 5 (an arc 90..270), crossing the line at (5,0).
+  const X = () => line('x', [0, 0], [10, 0])
+  const half = () => arc('a', [10, 0], 5, 90, 270)
+  const near = (v, want) => expect(v).toBeCloseTo(want, 6)
+  const DEG = 180 / Math.PI
+  // The hand derivation, in code: C = (10 - sqrt(35), 1); T2 = O + 5 (C - O) / 6.
+  const CX = 10 - Math.sqrt(35)
+  const T2 = [10 + 5 * (CX - 10) / 6, 5 / 6]
+  const T2_DEG = ((Math.atan2(T2[1], T2[0] - 10) * DEG) + 360) % 360
+  const FILLET_END_DEG = ((Math.atan2(T2[1] - 1, T2[0] - CX) * DEG) + 360) % 360
+
+  it('LINE x ARC, r = 1, keeping the line\'s left part and the arc\'s upper part: the centre is on y = 1 and on the circle of radius 6', () => {
+    // C = (10 - sqrt(35), 1); T1 = (Cx, 0); T2 = O + 5 (C - O) / 6 = (5.0699, 0.8333) at 170.4059 degrees.
+    const out = filletLines(X(), half(), 1, 2, 0, 7, 3)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(3)
+    const cx = 10 - Math.sqrt(35)
+    expect(out.steps[0].op).toBe('setVertices'); expect(out.steps[0].entityId).toBe('x')
+    expect(out.steps[0].points[0]).toEqual([0, 0]); near(out.steps[0].points[1][0], cx); near(out.steps[0].points[1][1], 0)
+    expect(out.steps[1].op).toBe('setArc'); expect(out.steps[1].entityId).toBe('a')
+    near(out.steps[1].a0, 90); near(out.steps[1].a1, T2_DEG); near(out.steps[1].r, 5)
+    expect(T2_DEG).toBeCloseTo(170.4059, 3)
+    expect(out.steps[2].op).toBe('createArc')
+    near(out.steps[2].inputs.x, cx); near(out.steps[2].inputs.y, 1); expect(out.steps[2].inputs.r).toBe(1)
+    near(out.steps[2].inputs.a0, 270); near(out.steps[2].inputs.a1, FILLET_END_DEG)
+    expect(FILLET_END_DEG).toBeCloseTo(350.4059, 3)
+    // The mirror pick set, keeping the arc's LOWER part: the centre drops to y = -1 and the arc keeps 189.59..270.
+    const low = filletLines(X(), half(), 1, 2, 0, 7, -3)
+    near(low.steps[1].a0, 360 - T2_DEG); near(low.steps[1].a1, 270); near(low.steps[2].inputs.y, -1)
+  })
+
+  it('ARC x LINE reads the same corner from the other side, and r = 0 is the corner at the crossing nearest the picks', () => {
+    const swapped = filletLines(half(), X(), 1, 7, 3, 2, 0)
+    expect(swapped.steps[0].op).toBe('setArc'); expect(swapped.steps[0].entityId).toBe('a'); near(swapped.steps[0].a1, T2_DEG)
+    expect(swapped.steps[1].op).toBe('setVertices'); expect(swapped.steps[1].entityId).toBe('x')
+    const corner = filletLines(X(), half(), 0, 2, 0, 7, 3)
+    expect(corner.steps).toEqual([
+      { op: 'setVertices', entityId: 'x', points: [[0, 0], [5, 0]], closed: false },
+      { op: 'setArc', entityId: 'a', x: 10, y: 0, r: 5, a0: 90, a1: 180 },
+    ])
+    // The arc EXTENDS to a crossing beyond its end: an arc 90..150 still meets the line at (5,0) = 180 degrees.
+    const short = filletLines(X(), arc('a', [10, 0], 5, 90, 150), 0, 2, 0, 7, 3)
+    expect(short.steps[1]).toEqual({ op: 'setArc', entityId: 'a', x: 10, y: 0, r: 5, a0: 90, a1: 180 })
+  })
+
+  it('ARC x ARC: the fillet circle is tangent to both (its centre R +/- r from each centre) and both arcs keep positive sweeps', () => {
+    // A: centre (0,0) r 5 from 0..90; B: centre (6,0) r 5 from 90..180; they cross at (3,4).
+    const A = arc('a', [0, 0], 5, 0, 90)
+    const B = arc('b', [6, 0], 5, 90, 180)
+    const corner = filletLines(A, B, 0, 5, 0.5, 2, 1.5)
+    // The crossing (3,4): 53.1301 degrees on A, 126.8699 on B (atan2(4, 3) and atan2(4, -3)).
+    expect(corner.steps[0]).toMatchObject({ op: 'setArc', entityId: 'a', a0: 0 }); near(corner.steps[0].a1, Math.atan2(4, 3) * DEG)
+    expect(corner.steps[1]).toMatchObject({ op: 'setArc', entityId: 'b', a1: 180 }); near(corner.steps[1].a0, Math.atan2(4, -3) * DEG)
+    const out = filletLines(A, B, 1, 5, 0.5, 2, 1.5)
+    expect(out.refusal).toBeUndefined()
+    expect(out.steps).toHaveLength(3)
+    const C = [out.steps[2].inputs.x, out.steps[2].inputs.y]
+    expect(out.steps[2].inputs.r).toBe(1)
+    const dA = Math.hypot(C[0], C[1])
+    const dB = Math.hypot(C[0] - 6, C[1])
+    expect(Math.abs(dA - 6) < 1e-6 || Math.abs(dA - 4) < 1e-6).toBe(true)
+    expect(Math.abs(dB - 6) < 1e-6 || Math.abs(dB - 4) < 1e-6).toBe(true)
+    // Each arc keeps the part on its pick's side, shorter than before, and each kept end is the tangent point (5 from its centre).
+    const sweepOf = (s) => ((s.a1 - s.a0) % 360 + 360) % 360
+    expect(sweepOf(out.steps[0])).toBeGreaterThan(0); expect(sweepOf(out.steps[0])).toBeLessThan(90)
+    expect(sweepOf(out.steps[1])).toBeGreaterThan(0); expect(sweepOf(out.steps[1])).toBeLessThan(90)
+    expect(out.steps[0].a0).toBe(0); expect(out.steps[1].a1).toBe(180)
+  })
+
+  it('refuses a circle, a polyline, a radius no circle can take, and a chamfer with an arc, each naming why', () => {
+    expect(filletLines(X(), circle('c', [10, 0], 5), 1, 2, 0, 7, 3).refusal).toBe('Fillet refused: a circle is not trimmed by a fillet; not in this round.')
+    expect(filletLines(half(), poly('p', [[0, 0], [10, 0], [10, 10]], false), 1, 7, 3, 2, 0).refusal).toBe('Fillet refused: a polyline corner needs a bulge the engine does not carry yet; not in this round.')
+    // Lines and arcs EXTEND to the tangent points (the reference's rule), so a large radius still fits when the offsets meet;
+    // a line too far from the circle for any circle of that radius to touch both is the refusal.
+    expect(filletLines(X(), half(), 100, 2, 0, 7, 3).steps).toHaveLength(3)
+    expect(filletLines(line('f', [0, 20], [20, 20]), half(), 1, 2, 20, 7, 3).refusal).toBe('Fillet refused: no circle of that radius is tangent to both objects.')
+    // A line tangent to the arc's circle touches without crossing: no corner at r = 0. At r > 0 the offset
+    // pair meeting at the touch point itself (both tangent points coincident, a zero-sweep arc) is no fillet
+    // and is skipped (kimi, #1051); what remains is the CUSP fillet the reference draws too: its centre 1 below
+    // the line and 6 from the arc's centre, C = (10 - sqrt 20, 4), the arc kept to atan2(4, Cx - 10) = 138.19.
+    const tangent = line('t', [0, 5], [20, 5])
+    expect(filletLines(tangent, half(), 0, 2, 5, 9, 4).refusal).toBe('Fillet refused: the two objects touch without crossing; no corner to make.')
+    const cusp = filletLines(tangent, half(), 1, 9, 5, 9, 4)
+    const cuspX = 10 - Math.sqrt(20)
+    expect(cusp.steps).toHaveLength(3)
+    near(cusp.steps[0].points[0][0], cuspX); expect(cusp.steps[0].points[0][1]).toBe(5); expect(cusp.steps[0].points[1]).toEqual([20, 5])
+    near(cusp.steps[1].a0, 90); near(cusp.steps[1].a1, ((Math.atan2(4, cuspX - 10) * DEG) + 360) % 360)
+    near(cusp.steps[2].inputs.x, cuspX); near(cusp.steps[2].inputs.y, 4); expect(cusp.steps[2].inputs.r).toBe(1)
+    // Two arcs whose circles touch at (5,0): r = 0 has no corner; r = 1 is the VALLEY fillet between them, its
+    // centre 6 from both centres, C = (5, sqrt 11), the arcs kept to atan2(sqrt 11, 5) = 33.56 and from 146.44.
+    const touchA = arc('ta', [0, 0], 5, 0, 90)
+    const touchB = arc('tb', [10, 0], 5, 90, 180)
+    expect(filletLines(touchA, touchB, 0, 4.9, 1, 5.1, 1).refusal).toBe('Fillet refused: the two objects touch without crossing; no corner to make.')
+    const valley = filletLines(touchA, touchB, 1, 4.9, 1, 5.1, 1)
+    const s11 = Math.sqrt(11)
+    expect(valley.steps).toHaveLength(3)
+    expect(valley.steps[0].a0).toBe(0); near(valley.steps[0].a1, Math.atan2(s11, 5) * DEG)
+    near(valley.steps[1].a0, 180 - Math.atan2(s11, 5) * DEG); expect(valley.steps[1].a1).toBe(180)
+    near(valley.steps[2].inputs.x, 5); near(valley.steps[2].inputs.y, s11); expect(valley.steps[2].inputs.r).toBe(1)
+    // Every emitted arc keeps a real sweep: no plan carries a0 === a1, the crossing, cusp and valley cases alike.
+    for (const plan of [0.5, 1, 3].map((r) => filletLines(X(), half(), r, 2, 0, 7, 3)).concat([cusp, valley])) {
+      for (const s of plan.steps) {
+        if (s.op === 'setArc') expect(((s.a1 - s.a0) % 360 + 360) % 360).toBeGreaterThan(1e-6)
+        if (s.op === 'createArc') expect(((s.inputs.a1 - s.inputs.a0) % 360 + 360) % 360).toBeGreaterThan(1e-6)
+      }
+    }
+    expect(filletLines(line('f', [0, 20], [20, 20]), half(), 0, 2, 20, 7, 3).refusal).toBe('Fillet refused: the two objects never meet, even extended.')
+    expect(chamferLines(X(), half(), 1, 1, 2, 0, 7, 3).refusal).toBe('Chamfer refused: the second object is a ARC; CHAMFER between lines takes two lines.')
   })
 })
 
