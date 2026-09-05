@@ -19,6 +19,8 @@
 // counter-clockwise from start to end with an end below the start wrapping
 // through 360: the DXF rule pointPicking and the intake mapper already use.
 
+import { bulgeArc } from './engineIntake.js'
+
 export const MAX_INTERSECT_POINTS = 1000
 /** The most steps one verb lowers to: FILLET and CHAMFER cut two entities and create one. */
 export const MAX_BATCH_STEPS = 4
@@ -82,15 +84,14 @@ export function curveOf(entity, role = 'entity') {
   if (kind === 'LINE') {
     if (pts.length !== 2) return { refusal: `the ${role} line has no two endpoints` }
     if (same(pts[0], pts[1], EPSILON)) return { refusal: `the ${role} line has zero length` }
-    return { kind: 'LINE', pts, closed: false }
+    return { kind: 'LINE', pts, closed: false, segs: [{ i: 0, a: pts[0], b: pts[1], arc: null }] }
   }
   if (kind === 'LWPOLYLINE') {
     if (pts.length < 2) return { refusal: `the ${role} polyline has fewer than two points` }
     // W4g-6d: the projection carries one bulge per vertex (the segment that
     // STARTS at it); absent or null means every segment straight. A list of
     // the wrong length or a value that is not a number is refused, never
-    // read as straight: this kernel's maths is on chords, and a curved
-    // segment must be seen to be refused.
+    // read as straight.
     const rawB = entity.bulges == null ? [] : entity.bulges
     if (!Array.isArray(rawB) || (rawB.length !== 0 && rawB.length !== pts.length)) return { refusal: `the ${role} polyline's bulge list does not match its points` }
     const bulges = new Array(pts.length).fill(0)
@@ -99,7 +100,23 @@ export function curveOf(entity, role = 'entity') {
       bulges[i] = rawB[i]
     }
     const curved = bulges.some((b) => Math.abs(b) > BULGE_EPS)
-    return { kind: 'POLY', pts, closed: entity.closed === true, bulges, curved }
+    const closed = entity.closed === true
+    const segs = []
+    const count = closed ? pts.length : pts.length - 1
+    for (let i = 0; i < count; i += 1) {
+      const a = pts[i]
+      const b = pts[(i + 1) % pts.length]
+      let arc = null
+      if (Math.abs(bulges[i]) > BULGE_EPS) {
+        const curvedSeg = bulgeArc(a, b, bulges[i])
+        if (!curvedSeg) return { refusal: `the ${role} polyline has a curved segment of zero length` }
+        const { cx, cy, r, a0, sweep } = curvedSeg
+        if (![cx, cy, r, a0, sweep].every(finite)) return { refusal: `the ${role} polyline has a bulge that overflows` }
+        arc = { c: [cx, cy], r, start: normDeg(a0 / DEG), sweep: sweep / DEG }
+      }
+      segs.push({ i, a, b, arc })
+    }
+    return { kind: 'POLY', pts, closed, bulges, curved, segs }
   }
   const c = pts[0]
   const r = entity?.radius
@@ -111,37 +128,48 @@ export function curveOf(entity, role = 'entity') {
   return { kind: 'ARC', c, r, start: normDeg(start), end: normDeg(end), sweep: sweepDeg(start, end) }
 }
 
-/** The straight segments of a LINE / POLY curve (a closed polyline includes its closing one). */
-function segmentsOf(curve) {
-  const { pts } = curve
-  const out = []
-  const n = pts.length
-  const count = curve.closed ? n : n - 1
-  for (let i = 0; i < count; i += 1) out.push([pts[i], pts[(i + 1) % n], i])
-  return out
-}
+/** Angular travel from the start in a segment's own sweep direction. */
+const segOffset = (arc, p) => normDeg((angleOf(arc.c, p) - arc.start) * Math.sign(arc.sweep))
 /** Point at param s of a LINE / POLY curve (s = segment index + fraction). */
 function pointAt(curve, s) {
-  const n = curve.pts.length
-  const count = curve.closed ? n : n - 1
+  const count = curve.segs.length
   let i = Math.floor(s)
   let t = s - i
-  if (i >= count) { i = count - 1; t = 1 }
-  if (i < 0) { i = 0; t = s }
-  const a = curve.pts[i]
-  const b = curve.pts[(i + 1) % n]
+  if (curve.closed) i = ((i % count) + count) % count
+  else {
+    if (i >= count) { i = count - 1; t = 1 }
+    if (i < 0) { i = 0; t = s }
+  }
+  const { a, b, arc } = curve.segs[i]
+  if (arc) return onCircle(arc.c, arc.r, arc.start + arc.sweep * t)
   return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
 }
 /** Nearest point of a curve to p: { d, s } with s the curve param (LINE/POLY) or angle (CIRCLE) or offset from start (ARC, `on` says it lies within the sweep). */
 export function locate(curve, p) {
   if (curve.kind === 'LINE' || curve.kind === 'POLY') {
     let best = null
-    for (const [a, b, i] of segmentsOf(curve)) {
-      const ab = sub(b, a)
-      const l2 = dot(ab, ab)
-      let t = l2 <= EPSILON ? 0 : dot(sub(p, a), ab) / l2
-      t = t < 0 ? 0 : t > 1 ? 1 : t
-      const d = dist(p, add(a, scale(ab, t)))
+    for (const { a, b, i, arc } of curve.segs) {
+      let t
+      let d
+      if (arc) {
+        const o = segOffset(arc, p)
+        const sweep = Math.abs(arc.sweep)
+        if (o <= sweep + EPSILON) {
+          t = Math.min(1, o / sweep)
+          d = Math.abs(dist(p, arc.c) - arc.r)
+        } else {
+          const ds = dist(p, a)
+          const de = dist(p, b)
+          t = ds <= de ? 0 : 1
+          d = Math.min(ds, de)
+        }
+      } else {
+        const ab = sub(b, a)
+        const l2 = dot(ab, ab)
+        t = l2 <= EPSILON ? 0 : dot(sub(p, a), ab) / l2
+        t = t < 0 ? 0 : t > 1 ? 1 : t
+        d = dist(p, add(a, scale(ab, t)))
+      }
       if (!best || d < best.d) best = { d, s: i + t }
     }
     return best
@@ -220,6 +248,15 @@ function circleCircle(c1, r1, c2, r2) {
   return [add(m, scale(n, h)), sub(m, scale(n, h))]
 }
 const withinArc = (curve, p) => (curve.kind !== 'ARC' ? true : normDeg(angleOf(curve.c, p) - curve.start) <= curve.sweep + EPSILON)
+const withinSeg = (seg, p) => {
+  if (!seg.arc) return true
+  const o = segOffset(seg.arc, p)
+  return o <= Math.abs(seg.arc.sweep) + EPSILON || 360 - o <= EPSILON
+}
+const segParam = (arc, p) => {
+  const o = segOffset(arc, p)
+  return (360 - o <= TINY_DEG ? o - 360 : o) / Math.abs(arc.sweep)
+}
 const inUnit = (u) => u >= -EPSILON && u <= 1 + EPSILON
 
 /**
@@ -228,29 +265,60 @@ const inUnit = (u) => u >= -EPSILON && u <= 1 + EPSILON
  * names 'start' / 'end' / 'both' and the target is straight; CIRCLE: the
  * angle; ARC: the offset from its start, on the FULL circle so callers can
  * extend). The edge is never extended (the reference's default edge mode).
- * Crossings closer than `tol` merge.
+ * Segment endpoints snap within `tol`; only equal params merge, so distinct
+ * visits to a self-crossing point remain distinct crossings.
  */
 export function crossings(target, edge, extend = 'none', tol = EPSILON) {
   const out = []
   const eps = Math.max(tol, EPSILON)
-  const push = (s, p) => { if (!out.some((o) => same(o.p, p, eps))) out.push({ s, p }) }
+  const push = (s, p) => {
+    if (target.closed && target.segs && s === target.segs.length) s = 0
+    if (!out.some((o) => Math.abs(o.s - s) <= 1e-9)) out.push({ s, p })
+  }
   const straight = target.kind === 'LINE' || target.kind === 'POLY'
-  const edgeSegs = edge.kind === 'LINE' || edge.kind === 'POLY' ? segmentsOf(edge) : null
+  const edgeSegs = edge.kind === 'LINE' || edge.kind === 'POLY' ? edge.segs : null
   if (straight) {
-    const segs = segmentsOf(target)
+    const segs = target.segs
     const last = segs.length - 1
-    for (const [a, b, i] of segs) {
-      const lowOk = (extend === 'start' || extend === 'both') && i === 0 && !target.closed
-      const highOk = (extend === 'end' || extend === 'both') && i === last && !target.closed
-      const accept = (t) => (t >= -EPSILON || lowOk) && (t <= 1 + EPSILON || highOk)
+    for (const { a, b, i, arc } of segs) {
+      const lowOk = !arc && (extend === 'start' || extend === 'both') && i === 0 && !target.closed
+      const highOk = !arc && (extend === 'end' || extend === 'both') && i === last && !target.closed
+      const epsT = arc ? TINY_DEG / Math.abs(arc.sweep) : EPSILON
+      const accept = (t) => (t >= -epsT || lowOk) && (t <= 1 + epsT || highOk)
+      const hitOnTarget = (t, p) => {
+        if (!accept(t)) return
+        const o = arc ? segOffset(arc, p) : null
+        if (same(p, a, eps) || (arc && Math.min(o, 360 - o) <= TINY_DEG)) push(i, a)
+        else if (same(p, b, eps) || (arc && Math.abs(o - Math.abs(arc.sweep)) <= TINY_DEG)) push(i + 1, b)
+        else push(i + t, p)
+      }
       if (edgeSegs) {
-        for (const [c, d] of edgeSegs) {
-          const hit = segSeg(a, b, c, d)
-          if (hit && inUnit(hit.u) && accept(hit.t)) push(i + hit.t, hit.p)
+        for (const edgeSeg of edgeSegs) {
+          const { a: c, b: d, arc: edgeArc } = edgeSeg
+          if (arc && edgeArc) {
+            for (const p of circleCircle(arc.c, arc.r, edgeArc.c, edgeArc.r)) {
+              if (withinSeg(edgeSeg, p)) hitOnTarget(segParam(arc, p), p)
+            }
+          } else if (arc) {
+            for (const hit of segCircle(c, d, arc.c, arc.r)) {
+              if (inUnit(hit.t)) hitOnTarget(segParam(arc, hit.p), hit.p)
+            }
+          } else if (edgeArc) {
+            for (const hit of segCircle(a, b, edgeArc.c, edgeArc.r)) {
+              if (withinSeg(edgeSeg, hit.p)) hitOnTarget(hit.t, hit.p)
+            }
+          } else {
+            const hit = segSeg(a, b, c, d)
+            if (hit && inUnit(hit.u)) hitOnTarget(hit.t, hit.p)
+          }
+        }
+      } else if (arc) {
+        for (const p of circleCircle(arc.c, arc.r, edge.c, edge.r)) {
+          if (withinArc(edge, p)) hitOnTarget(segParam(arc, p), p)
         }
       } else {
         for (const hit of segCircle(a, b, edge.c, edge.r)) {
-          if (accept(hit.t) && withinArc(edge, hit.p)) push(i + hit.t, hit.p)
+          if (withinArc(edge, hit.p)) hitOnTarget(hit.t, hit.p)
         }
       }
     }
@@ -259,8 +327,14 @@ export function crossings(target, edge, extend = 'none', tol = EPSILON) {
   // A round target: every crossing on the full circle, as an angle or an offset.
   const param = (p) => (target.kind === 'CIRCLE' ? angleOf(target.c, p) : normDeg(angleOf(target.c, p) - target.start))
   if (edgeSegs) {
-    for (const [c, d] of edgeSegs) {
-      for (const hit of segCircle(c, d, target.c, target.r)) if (inUnit(hit.t)) push(param(hit.p), hit.p)
+    for (const seg of edgeSegs) {
+      if (seg.arc) {
+        for (const p of circleCircle(target.c, target.r, seg.arc.c, seg.arc.r)) {
+          if (withinSeg(seg, p) && withinArc(target, p)) push(param(p), p)
+        }
+      } else {
+        for (const hit of segCircle(seg.a, seg.b, target.c, target.r)) if (inUnit(hit.t)) push(param(hit.p), hit.p)
+      }
     }
   } else {
     for (const p of circleCircle(target.c, target.r, edge.c, edge.r)) if (withinArc(edge, p)) push(param(p), p)
@@ -270,28 +344,42 @@ export function crossings(target, edge, extend = 'none', tol = EPSILON) {
 
 // ---- pieces ----------------------------------------------------------------------
 
-/** The vertices of a LINE / POLY curve from param a to param b (a < b), consecutive duplicates dropped. */
+/** Vertices and bulges from a to b (a < b), possibly unwrapped across a closed seam. */
 function piece(curve, a, b, eps) {
-  const pts = [pointAt(curve, a)]
+  const pts = []
+  const bulges = []
   const n = curve.pts.length
-  for (let k = Math.floor(a) + 1; k < b; k += 1) {
-    if (k >= 0 && k < n) pts.push(curve.pts[k])
+  const bulgePart = (k, u, v) => {
+    const seg = curve.segs[curve.closed ? ((k % n) + n) % n : k]
+    if (!seg?.arc) return 0
+    if (u === 0 && v === 1) return curve.bulges[seg.i]
+    return Math.tan((v - u) * seg.arc.sweep * DEG / 4)
   }
-  pts.push(pointAt(curve, b))
-  return dedupe(pts, eps)
+  const push = (p, bulge) => {
+    const q = [clean(p[0]), clean(p[1])]
+    if (pts.length && same(pts[pts.length - 1], p, eps)) {
+      pts[pts.length - 1] = q
+      bulges[bulges.length - 1] = bulge
+    } else {
+      pts.push(q)
+      bulges.push(bulge)
+    }
+  }
+  const first = Math.floor(a)
+  push(pointAt(curve, a), bulgePart(first, a - first, Math.min(1, b - first)))
+  for (let k = Math.floor(a) + 1; k < b; k += 1) {
+    push(curve.pts[((k % n) + n) % n], bulgePart(k, 0, Math.min(1, b - k)))
+  }
+  push(pointAt(curve, b), 0)
+  return { pts, bulges }
 }
-function dedupe(pts, eps) {
-  const out = []
-  for (const p of pts) if (!out.length || !same(out[out.length - 1], p, eps)) out.push([clean(p[0]), clean(p[1])])
-  return out
-}
-// W4g-6d: a polyline step may carry one bulge per point; a straight rewrite
-// (every trim, extend and two-entity fillet) carries none and keeps its shape.
+const bulgesOrNull = (list) => list?.some((b) => Math.abs(b) > BULGE_EPS) ? list : null
+// A polyline step carries one bulge per point when any kept segment curves.
 const setVertices = (entityId, pts, closed, bulges = null) => ({ op: 'setVertices', entityId, points: pts, closed, ...(bulges ? { bulges } : {}) })
 const setArc = (entityId, c, r, a0, a1) => ({ op: 'setArc', entityId, x: clean(c[0]), y: clean(c[1]), r, a0: clean(normDeg(a0)), a1: clean(normDeg(a1)) })
 const createArc = (c, r, a0, a1, layer) => ({ op: 'createArc', inputs: { x: clean(c[0]), y: clean(c[1]), r, a0: clean(normDeg(a0)), a1: clean(normDeg(a1)), layer } })
 const createLine = (a, b, layer) => ({ op: 'createLine', inputs: { x: clean(a[0]), y: clean(a[1]), x2: clean(b[0]), y2: clean(b[1]), layer } })
-const createPolyline = (pts, closed, layer) => ({ op: 'createPolyline', inputs: { pts: pts.map((p) => `${clean(p[0])},${clean(p[1])}`).join(' '), closed, layer } })
+const createPolyline = (pts, closed, layer, bulges = null) => ({ op: 'createPolyline', inputs: { pts: pts.map((p) => `${clean(p[0])},${clean(p[1])}`).join(' '), closed, layer, ...(bulges ? { bulges } : {}) } })
 const refuse = (verb, why) => ({ refusal: `${verb} refused: ${why}.` })
 const layerOf = (entity) => String(entity?.layer ?? '')
 
@@ -299,18 +387,16 @@ function readPair(verb, x, y, what) {
   if (!finite(x) || !finite(y)) return refuse(verb, `${what} x and y must both be numbers`)
   return null
 }
-function readCurves(verb, target, edge, edgeRole) {
+function readCurves(verb, target, edge, edgeRole, curvedOk = { target: false, edge: false }) {
   if (!target || !edge) return refuse(verb, 'select an entity and name a second one')
   if (target.id === edge.id) return refuse(verb, `select a different entity as the ${edgeRole}`)
   const a = curveOf(target, 'selection')
   if (a.refusal) return refuse(verb, a.refusal)
   const b = curveOf(edge, edgeRole)
   if (b.refusal) return refuse(verb, b.refusal)
-  // W4g-6d: every crossing and tangent here is computed on straight chords,
-  // so a polyline with a curved segment is refused rather than rewritten
-  // flat (the write-back would keep the chords the drawing never had).
-  if (a.curved) return refuse(verb, 'the selection is a polyline with curved segments; not in this round')
-  if (b.curved) return refuse(verb, `the ${edgeRole} is a polyline with curved segments; not in this round`)
+  // Only verbs whose write-back preserves curved segments opt in.
+  if (a.curved && !curvedOk.target) return refuse(verb, 'the selection is a polyline with curved segments; not in this round')
+  if (b.curved && !curvedOk.edge) return refuse(verb, `the ${edgeRole} is a polyline with curved segments; not in this round`)
   return { a, b }
 }
 
@@ -325,7 +411,7 @@ export function trimEntity(target, edge, px, py, tol = EPSILON) {
   const verb = 'Trim'
   const bad = readPair(verb, px, py, 'the point on the part to remove:')
   if (bad) return bad
-  const read = readCurves(verb, target, edge, 'cutting edge')
+  const read = readCurves(verb, target, edge, 'cutting edge', { target: true, edge: true })
   if (read.refusal) return read
   const { a: T, b: E } = read
   const eps = Math.max(tol, EPSILON)
@@ -341,14 +427,14 @@ export function trimEntity(target, edge, px, py, tol = EPSILON) {
     const hi = inside.find((c) => c.s > sp) || null
     const first = lo ? piece(T, 0, lo.s, eps) : null
     const second = hi ? piece(T, hi.s, end, eps) : null
-    const keepFirst = first && first.length >= 2
-    const keepSecond = second && second.length >= 2
+    const keepFirst = first && first.pts.length >= 2
+    const keepSecond = second && second.pts.length >= 2
     if (!keepFirst && !keepSecond) return refuse(verb, 'nothing of the selection would remain')
     const steps = []
-    if (keepFirst) steps.push(setVertices(target.id, first, false))
+    if (keepFirst) steps.push(setVertices(target.id, first.pts, false, bulgesOrNull(first.bulges)))
     if (keepSecond) {
-      if (keepFirst) steps.push(T.kind === 'LINE' ? createLine(second[0], second[1], layer) : createPolyline(second, false, layer))
-      else steps.push(setVertices(target.id, second, false))
+      if (keepFirst) steps.push(T.kind === 'LINE' ? createLine(second.pts[0], second.pts[1], layer) : createPolyline(second.pts, false, layer, bulgesOrNull(second.bulges)))
+      else steps.push(setVertices(target.id, second.pts, false, bulgesOrNull(second.bulges)))
     }
     return { steps }
   }
@@ -364,17 +450,9 @@ export function trimEntity(target, edge, px, py, tol = EPSILON) {
     const hi = all.find((c) => c.s > sp) || all[0]
     if (lo === hi) return refuse(verb, 'a closed polyline needs two crossings with the cutting edge to lose a piece')
     const n = T.pts.length
-    const pts = [pointAt(T, hi.s)]
-    if (hi.s < lo.s) {
-      for (let k = Math.floor(hi.s) + 1; k < lo.s; k += 1) pts.push(T.pts[k])
-    } else {
-      for (let k = Math.floor(hi.s) + 1; k < n; k += 1) pts.push(T.pts[k])
-      for (let k = 0; k < lo.s; k += 1) pts.push(T.pts[k])
-    }
-    pts.push(pointAt(T, lo.s))
-    const kept = dedupe(pts, eps)
-    if (kept.length < 2) return refuse(verb, 'nothing of the selection would remain')
-    return { steps: [setVertices(target.id, kept, false)] }
+    const kept = piece(T, hi.s, lo.s + (hi.s < lo.s ? 0 : n), eps)
+    if (kept.pts.length < 2) return refuse(verb, 'nothing of the selection would remain')
+    return { steps: [setVertices(target.id, kept.pts, false, bulgesOrNull(kept.bulges))] }
   }
   const epsA = (eps / T.r) / DEG + EPSILON
   if (T.kind === 'CIRCLE') {
@@ -415,7 +493,7 @@ export function extendEntity(target, edge, px, py, tol = EPSILON) {
   const verb = 'Extend'
   const bad = readPair(verb, px, py, 'the point near the end to extend:')
   if (bad) return bad
-  const read = readCurves(verb, target, edge, 'boundary edge')
+  const read = readCurves(verb, target, edge, 'boundary edge', { target: true, edge: true })
   if (read.refusal) return read
   const { a: T, b: E } = read
   const eps = Math.max(tol, EPSILON)
@@ -425,6 +503,7 @@ export function extendEntity(target, edge, px, py, tol = EPSILON) {
   if (T.kind === 'LINE' || T.kind === 'POLY') {
     const n = T.pts.length
     const atEnd = dist(pick, T.pts[n - 1]) <= dist(pick, T.pts[0])
+    if (T.segs[atEnd ? T.segs.length - 1 : 0].arc) return refuse(verb, 'the end segment to extend is curved; not in this round')
     const hits = crossings(T, E, atEnd ? 'end' : 'start', eps)
     const last = n - 1
     let chosen = null
@@ -436,7 +515,7 @@ export function extendEntity(target, edge, px, py, tol = EPSILON) {
     if (!chosen) return refuse(verb, 'the boundary edge does not lie ahead of that end')
     const pts = T.pts.map((p) => [p[0], p[1]])
     pts[atEnd ? n - 1 : 0] = [clean(chosen.p[0]), clean(chosen.p[1])]
-    return { steps: [setVertices(target.id, pts, false)] }
+    return { steps: [setVertices(target.id, pts, false, bulgesOrNull(T.bulges))] }
   }
   // ARC: along its own circle, the sweep grows toward the nearest crossing
   // beyond the chosen end, and never to a full turn.
