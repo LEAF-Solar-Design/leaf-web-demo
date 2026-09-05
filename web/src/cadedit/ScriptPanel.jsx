@@ -25,9 +25,13 @@ import { BARE_OPS, MAX_SCRIPT_CHARS, parseScript } from './script.js'
 /** The longest one line may wait for the engine's answer. */
 export const LINE_BUDGET_MS = 60_000
 
-function gateFor(group, session, reach) {
+// The registry's own rule (actionRegistry engineOp.when): a draw create by
+// the Draw ladder, PASTE by the clipboard ladder (it needs a record, not a
+// selection), and every other op, COPY and CUT included, by the Modify
+// ladder (they need a selection; kimi, #1049).
+function gateFor(group, op, session, reach) {
   if (group === 'draw') return drawReason(session, reach)
-  if (group === 'clipboard') return clipboardReason(session, reach)
+  if (op === 'pasteClip') return clipboardReason(session, reach)
   return modifyReason(session, reach)
 }
 
@@ -60,7 +64,7 @@ export default function ScriptPanel() {
     // UNDO and REDO are session steps, not group ops: their gate is the depth.
     const gate = line.op === 'undo' || line.op === 'redo'
       ? (current.busy ? drawReason(current, reachRef.current) : (line.op === 'undo' ? current.undoDepth : current.redoDepth) > 0 ? '' : `nothing to ${line.op}`)
-      : gateFor(line.group, current, reachRef.current)
+      : gateFor(line.group, line.op, current, reachRef.current)
     if (gate) { stop('stopped', `Script stopped at line ${line.line}: ${line.verb} is unavailable (${gate}).`); return }
     const before = { status: current.status, count: current.entityCount, undo: current.undoDepth, redo: current.redoDepth, clipboard: current.clipboard }
     run.awaiting = { index, sawBusy: false, answered: false, before, at: Date.now() }
