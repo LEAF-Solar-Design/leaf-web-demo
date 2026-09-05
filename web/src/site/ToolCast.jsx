@@ -40,7 +40,7 @@ import DegradedBanner from '../components/DegradedBanner.jsx'
 // frame, the entitlement gate, the job rail and the toast all mount through
 // its slots now, so the stage and the console cannot drift apart again.
 import SurfaceFrame from './SurfaceFrame.jsx'
-import { stageRunDisabledReason } from './stageRunReasons.js'
+import { stageRunDisabledReason, stageHelpPaletteRow } from './stageRunReasons.js'
 import SessionGate from '../components/SessionGate.jsx'
 import OpsDrawer from '../components/OpsDrawer.jsx'
 import WorkspaceSummary from '../components/WorkspaceSummary.jsx'
@@ -1508,6 +1508,13 @@ export default function ToolCast({
     />
   )
 
+  // Slice 13d: the stage's own act-scope palette row for the console's
+  // shortcut sheet (stageRunReasons.js's stageHelpPaletteRow, built off the
+  // SAME byId('bar:shortcuts') registry record the console's row reads).
+  // Declared and disabled: the stage mounts no ShortcutSheet and no Shift+?
+  // rung, so a live row here would run nothing on click.
+  const stagePaletteActions = [stageHelpPaletteRow()]
+
   // Slice 4a: the stage's command well, handed to the frame as its
   // `commandBar` render prop. Slice 5a replaced the hand-rolled rows inside
   // it with the console's PromptBox from this one seat; the wrap, the bar,
@@ -1643,6 +1650,7 @@ export default function ToolCast({
             // discovery is harmless idle in mock mode either way).
             mcpDiscoveryEnabled={isSignedIn() && platform.isEntitled('converse')}
             connectedMcpServers={connectedMcpServers}
+            paletteActions={stagePaletteActions}
             commandLine
             classNames={STAGE_BAR_CLASSES}
             projectSlot={<span className="bar-proj tc-bar-proj">{activeDrawingId || 'No drawing'}</span>}

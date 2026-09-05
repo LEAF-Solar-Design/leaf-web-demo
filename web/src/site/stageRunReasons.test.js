@@ -8,7 +8,7 @@
 // contract (the honesty-ladder gate says the same thing statically).
 import { describe, expect, it } from 'vitest'
 
-import { STAGE_RUN_REASONS, stageRunDisabledReason } from './stageRunReasons.js'
+import { STAGE_RUN_REASONS, STAGE_HELP_REASONS, stageHelpPaletteRow, stageRunDisabledReason } from './stageRunReasons.js'
 
 const CLEAR = Object.freeze({
   sessionActive: true, hasDrawing: true, busy: false, jobRunning: false, routing: false, loading: false,
@@ -70,5 +70,38 @@ describe('stageRunDisabledReason', () => {
   it('fails closed on a missing field: no argument at all reads as signed out', () => {
     expect(stageRunDisabledReason()).toBe(STAGE_RUN_REASONS.session)
     expect(stageRunDisabledReason({ hasDrawing: true })).toBe(STAGE_RUN_REASONS.session)
+  })
+})
+
+// Standardization slice 13d: the stage's Help ladder. One static rung, since
+// the stage mounts no ShortcutSheet and no Shift+? rung today.
+describe('STAGE_HELP_REASONS', () => {
+  it('is frozen and clears the honesty-ladder floor', () => {
+    expect(Object.isFrozen(STAGE_HELP_REASONS)).toBe(true)
+    for (const value of Object.values(STAGE_HELP_REASONS)) {
+      expect(typeof value).toBe('string')
+      expect(value.length).toBeGreaterThanOrEqual(12)
+      expect(value).toMatch(/^[A-Za-z]/)
+      expect(value).not.toMatch(/\b(TODO|TBD|FIXME)\b|\?\?\?/i)
+    }
+  })
+})
+
+describe('stageHelpPaletteRow', () => {
+  it('carries the console registry record\'s own id, label, icon and cap — nothing re-typed', () => {
+    const row = stageHelpPaletteRow()
+    expect(row).toEqual({
+      id: 'bar:shortcuts',
+      label: 'Keyboard shortcuts',
+      icon: '',
+      kbd: 'Shift+?',
+      disabled: true,
+      reason: STAGE_HELP_REASONS.shortcuts,
+      onSelect: expect.any(Function),
+    })
+  })
+
+  it('declares disabled honestly: selecting it runs nothing (no ShortcutSheet on the stage)', () => {
+    expect(() => stageHelpPaletteRow().onSelect()).not.toThrow()
   })
 })
