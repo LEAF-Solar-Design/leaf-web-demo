@@ -30,6 +30,7 @@ import json
 import os
 import re
 import threading
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -1152,8 +1153,34 @@ def save_plan_version(drawing_id: str,
         expected_base["dwg"] = drawing_id
         uploaded = copy.deepcopy(intake)
         uploaded["dwg"] = drawing_id
+
+        def text_entities(entities):
+            entries = Counter()
+            for entity in entities:
+                point = entity.get("pt") or []
+                xy = [point[index] if index < len(point) else None for index in range(2)]
+                xy = tuple(
+                    write_loop._extractor_round(value, 3)
+                    if isinstance(value, (int, float)) and not isinstance(value, bool) else value
+                    for value in xy)
+                entries[(str(entity["handle"]) if entity.get("handle") is not None else None,
+                         str(entity["layer"]) if entity.get("layer") is not None else None,
+                         *xy, entity.get("text"))] += 1
+            return entries
+
         try:
-            write_loop.verify_live_mutation_effects(expected_base, uploaded, canonical)
+            if text_entities(uploaded.get("texts") or []) != text_entities(base_intake.get("texts") or []):
+                raise ValueError("text entities differ from the head")
+            for field in ("circles", "arcs"):
+                for entity in uploaded.get(field) or []:
+                    normal = entity.get("nrm", [0.0, 0.0, 1.0])
+                    if len(normal) != 3 or any(
+                        not abs(value - expected) <= 1e-9
+                        for value, expected in zip(normal, [0.0, 0.0, 1.0])
+                    ):
+                        raise ValueError("an entity lies outside the drawing plane")
+            write_loop.verify_live_mutation_effects(
+                expected_base, write_loop.quantize_intake_like_extractor(uploaded), canonical)
         except ValueError as exc:
             return error_response(ErrorCode.BAD_PARAMS,
                                   f"the uploaded DXF does not carry the plan's result: {exc}",

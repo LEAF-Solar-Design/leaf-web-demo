@@ -55,7 +55,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SERVER_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SERVER_DIR.parent
@@ -1322,6 +1322,14 @@ class BrokerPlanRunRequest(BaseModel):
     checkout_holder: Optional[str] = None
     checkout_fence: Optional[int] = None
     job_id: Optional[str] = None
+
+    @model_validator(mode="after")
+    def consistent_plan_identity(self) -> BrokerPlanRunRequest:
+        if self.dwg != self.plan.drawing_id:
+            raise ValueError("plan request names a different drawing")
+        if self.dwg_version != self.plan.parent_version:
+            raise ValueError("plan request names a different parent")
+        return self
 
 
 class _BlankDwgBrokerRunRequest(BrokerRunRequest):

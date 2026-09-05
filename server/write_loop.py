@@ -1381,6 +1381,37 @@ def _expected_extracted_points(points: list[list[float]]) -> list[list[float]]:
     return extracted
 
 
+def quantize_intake_like_extractor(intake: dict) -> dict:
+    """Deep-copy geometry at the extractor's 3-decimal quantum.
+
+    Quantize polyline points and circle/arc centres and radii. Leave angles,
+    layers, handles, texts and non-numeric values untouched.
+    """
+    quantized = copy.deepcopy(intake)
+
+    def number(value):
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return _extractor_round(value, 3)
+        return value
+
+    for entity in quantized.get("polylines") or []:
+        if isinstance(entity, dict) and isinstance(entity.get("pts"), list):
+            entity["pts"] = [
+                [number(value) for value in point]
+                if isinstance(point, (list, tuple)) else point
+                for point in entity["pts"]
+            ]
+    for field in ("circles", "arcs"):
+        for entity in quantized.get(field) or []:
+            if not isinstance(entity, dict):
+                continue
+            if isinstance(entity.get("c"), (list, tuple)):
+                entity["c"] = [number(value) for value in entity["c"]]
+            if "r" in entity:
+                entity["r"] = number(entity["r"])
+    return quantized
+
+
 def _polyline_effect_matches(
     expected: Dict[str, Any], actual: Dict[str, Any], *, extracted: bool = False,
 ) -> bool:

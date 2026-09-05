@@ -296,6 +296,63 @@ def test_live_leg_submits_a_plan_job_and_writes_nothing(live):
     assert not backend.exists(write_loop.edited_source_key(TENANT, DWG_DRAWING, 2))
 
 
+def test_live_leg_accepts_extractor_quantum_without_changing_the_plan(live):
+    client, _backend, submissions = live
+    capability = _checkout(client)
+    mutations = {"set_points": [{"handle": "1F", "pts": [[1, 2], [4.0004, 6]]}]}
+    data = EDITED_DXF.replace(b"11\n4\n21\n6\n", b"11\n4.0004\n21\n6\n")
+    resp = _post(client, DWG_DRAWING, mutations, data=data, capability=capability)
+    assert resp.status_code == 202, resp.text
+    assert len(submissions) == 1
+    points = submissions[0]["plan"]["mutations"]["set_points"][0]["pts"]
+    assert points == [[1.0, 2.0, 0.0], [4.0004, 6.0, 0.0]]
+    assert _head(client, DWG_DRAWING) == 1
+
+
+def test_live_leg_refuses_a_contradiction_beyond_the_extractor_quantum(live):
+    client, _backend, submissions = live
+    mutations = {"set_points": [{"handle": "1F", "pts": [[1, 2], [4.0004, 6]]}]}
+    data = EDITED_DXF.replace(b"11\n4\n21\n6\n", b"11\n4.002\n21\n6\n")
+    resp = _post(client, DWG_DRAWING, mutations, data=data)
+    assert resp.status_code == 422, resp.text
+    assert "does not carry the plan's result" in resp.json()["error"]["message"]
+    assert submissions == []
+    assert _head(client, DWG_DRAWING) == 1
+
+
+def test_live_leg_refuses_text_entities_not_carried_by_the_plan(live):
+    client, _backend, submissions = live
+    text = b"0\nTEXT\n5\n2A\n8\nNew\n10\n0\n20\n0\n40\n1\n1\nEXTRA\n"
+    data = EDITED_DXF.replace(b"0\nENDSEC\n", text + b"0\nENDSEC\n")
+    resp = _post(client, DWG_DRAWING, _live_mutations(), data=data)
+    assert resp.status_code == 422, resp.text
+    assert "text entities differ from the head" in resp.json()["error"]["message"]
+    assert submissions == []
+    assert _head(client, DWG_DRAWING) == 1
+
+
+def test_live_leg_refuses_a_circle_outside_the_drawing_plane(live):
+    client, _backend, submissions = live
+    capability = _checkout(client)
+    normal = b"210\n1\n220\n0\n230\n0\n"
+    circle = b"0\nCIRCLE\n5\nC1\n8\nNew\n10\n10\n20\n10\n40\n2\n" + normal
+    data = EDITED_DXF.replace(b"0\nENDSEC\n", circle + b"0\nENDSEC\n")
+    mutations = {**_live_mutations(), "added": [
+        {"kind": "CIRCLE", "handle": "C1", "layer": "New", "c": [10, 10], "r": 2},
+    ]}
+    resp = _post(client, DWG_DRAWING, mutations, data=data, capability=capability)
+    assert resp.status_code == 422, resp.text
+    assert "outside the drawing plane" in resp.json()["error"]["message"]
+    assert submissions == []
+    assert _head(client, DWG_DRAWING) == 1
+
+    resp = _post(client, DWG_DRAWING, mutations, data=data.replace(normal, b""),
+                 capability=capability)
+    assert resp.status_code == 202, resp.text
+    assert len(submissions) == 1
+    assert _head(client, DWG_DRAWING) == 1
+
+
 def test_live_leg_refuses_a_plan_the_dxf_contradicts(live):
     client, _backend, submissions = live
     contradictory = EDITED_DXF.replace(b"11\n4\n21\n6\n", b"11\n9\n21\n6\n")

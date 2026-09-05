@@ -80,9 +80,25 @@ def test_plan_endpoint_rejects_invalid_schema_and_version(client, body, invalid)
     else:
         body["dwg_version"] = 4
     response = client.post("/broker/run-plan", json=body)
-    assert response.status_code == (400 if invalid == "version" else 422)
+    assert response.status_code == 422
     assert response.json()["ok"] is False
     assert response.json()["error"]["error_code"] == "BAD_PARAMS"
+
+
+@pytest.mark.parametrize("field,value,plan_value,needle", [
+    ("dwg", "drawing-a", "drawing-b", "different drawing"),
+    ("dwg_version", 1, 2, "different parent"),
+])
+def test_plan_endpoint_rejects_conflicting_request_identity(
+    client, body, field, value, plan_value, needle,
+):
+    body[field] = value
+    plan_field = "drawing_id" if field == "dwg" else "parent_version"
+    body["plan"][plan_field] = plan_value
+    response = client.post("/broker/run-plan", json=body)
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["error_code"] == "BAD_PARAMS"
+    assert needle in response.json()["error"]["message"]
 
 
 @pytest.mark.parametrize("failure", ["readiness", "readiness-exception", "no-da", "no-run-tool"])

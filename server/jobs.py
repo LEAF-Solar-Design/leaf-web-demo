@@ -1662,8 +1662,10 @@ def _redispatch_record(job_id: str) -> bool:
             execution = json.loads(rows[0]["execution_json"] or "{}")
         tool = execution["tool"]
         plan = execution.get("plan")
-        if tool.get("name") == PLAN_TOOL_NAME and not isinstance(plan, dict):
-            raise KeyError("plan")
+        if rec.get("tool") == PLAN_TOOL_NAME or tool.get("name") == PLAN_TOOL_NAME:
+            if (rec.get("tool") != PLAN_TOOL_NAME or tool.get("name") != PLAN_TOOL_NAME
+                    or not isinstance(plan, dict)):
+                raise KeyError("plan")
         aps_live = bool(execution.get("aps_live", False))
         # Recover the version pin from the durable execution context so a
         # restart-recovered pinned job does not silently rerun against head.
