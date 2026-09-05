@@ -56,3 +56,51 @@ describe('no-drawing Catalog browse wiring', () => {
     expect(toolCast).toMatch(/const CATALOG_NEEDS_DRAWING_NOTE = '.+'/)
   })
 })
+
+// Slice 7a (standardization, D3 close): the workspace rail (Operator /
+// Catalog / Author / Project) used to mount only inside the `stageBranch ===
+// 'cad'` arm (docs/convergence/SURFACE-CONTRACT.md's D3 row). It now mounts
+// wherever the contract declares `authoring` on the surface, ios excepted
+// (the ship lane is checked first and keeps its own untouched rail).
+describe('the workspace rail mounts on every authoring surface, not only cad', () => {
+  const AUTHORING_ON_STAGE_DECLARATION = /const authoringOnStage = surfaceContract\(activeSurface\)\.authoring === true/
+
+  it('derives authoringOnStage from the ONE declared authoring slot', () => {
+    expect(toolCast).toMatch(AUTHORING_ON_STAGE_DECLARATION)
+  })
+
+  it('checks the ios ship-lane arm before the authoring arm, so ios never reaches it', () => {
+    // Order matters: ios's OWN `authoring` slot is `true` (it really is
+    // reachable from the console's un-gated rail), so the only thing that
+    // keeps ios's stage on its own ship-lane rail instead of the workspace
+    // rail below is evaluating `stageBranch === 'ios'` FIRST.
+    expect(toolCast).toMatch(/\{stageBranch === 'ios' \? \(/)
+    const iosArmIndex = toolCast.search(/\{stageBranch === 'ios' \? \(/)
+    const authoringArmIndex = toolCast.search(/\) : authoringOnStage \? \(/)
+    expect(iosArmIndex).toBeGreaterThan(0)
+    expect(authoringArmIndex).toBeGreaterThan(iosArmIndex)
+  })
+
+  it('the workspace rail arm reads authoringOnStage, not the old cad-literal gate', () => {
+    expect(toolCast).toMatch(/\) : authoringOnStage \? \(/)
+    // The stage's Author tab button sits inside that arm on every surface
+    // that reaches it (solar and browser included, now that the arm is not
+    // cad-only), unchanged in its own disabled ladder (canOperate).
+    expect(toolCast).toMatch(/id="workspace-tab-author"/)
+  })
+
+  it('the guided tour stays cad-only inside the widened arm: STAGE_TOUR_ANCHORS is null on every other surface', () => {
+    expect(toolCast).toMatch(/stageBranch === 'cad' && LIVE_TOUR_REQUESTED && sessionReady && !tourOn && shouldStartTour/)
+    expect(toolCast).toMatch(/\{stageBranch === 'cad' && tourOn && sessionReady && \(/)
+  })
+
+  it('falsification: a source that reverted the arm to the old cad-literal gate would not match the current probe', () => {
+    // Built from fragments so this control itself cannot trip the probe above.
+    const reverted = toolCast.replace(
+      /\) : authoringOnStage \? \(/,
+      `) : stageBranch ${'==='} 'cad' ? (`,
+    )
+    expect(reverted).not.toMatch(/\) : authoringOnStage \? \(/)
+    expect(reverted).not.toEqual(toolCast)
+  })
+})
