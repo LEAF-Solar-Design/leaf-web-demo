@@ -243,9 +243,13 @@ export const PRODUCT_SURFACES = Object.freeze([
         //   The toolbar badge (SurfaceFrame.Builds) reads this slot too.
         card: 'job-rail',
       },
-      // contextMenu: zero contextmenu handlers exist under web/src (grep,
-      //   2026-09-03) — declared empty, not undeclared.
-      contextMenu: [],
+      // contextMenu: standardization slice 9b. The board ground's own tiles
+      //   (SurfaceGrounds.jsx ProjectBoardGround: versions, jobs, built
+      //   tools, catalog families) plus the chat rows ConversePanel renders
+      //   here (conversations.scope 'drawing' above, not surface-gated).
+      //   No ribbon (`toolbar.ribbon: false`) and no drawing ground, so
+      //   neither `tool` (ribbon) nor `entity` (canvas selection) apply.
+      contextMenu: ['version', 'job', 'tool', 'family', 'turn', 'approval', 'item'],
       // shortcuts: no per-surface shortcut registry exists.
       shortcuts: null,
       // entitlements: EntitlementGate.jsx:15 ROWS are TIER capability keys
@@ -325,7 +329,11 @@ export const PRODUCT_SURFACES = Object.freeze([
       // builds.card: slice 11a, the job monitor hosts the card (a spine here
       //   by default, rails.right 'job-spine'; the toolbar badge opens it).
       builds: { routes: ['one-shot'], card: 'job-rail' }, // App.jsx:2710 catalog run path
-      contextMenu: [],
+      // contextMenu: the drafting ribbon's tools, the canvas's current
+      //   selection (DraftingRibbon.jsx / Viewer.jsx, both slice 9a), and the
+      //   same chat rows the browser surface carries. No board tiles here:
+      //   the drawing ground replaces the board (`ground: 'drawing'` above).
+      contextMenu: ['tool', 'entity', 'turn', 'approval', 'item'],
       shortcuts: null,
       entitlements: null,
       resetOn: null,
@@ -395,7 +403,10 @@ export const PRODUCT_SURFACES = Object.freeze([
       conversations: { scope: 'drawing' }, // converse.js:129-134
       integrations: { link: 'standard-flow' }, // slice 8c, see the browser record's note
       builds: { routes: ['one-shot'], card: 'job-rail' }, // App.jsx:2710; card: slice 11a, the job monitor hosts it
-      contextMenu: [],
+      // contextMenu: same drafting surface as cad (ribbon + canvas selection
+      //   + chat rows) — solar shares `toolbar.ribbon: true` and
+      //   `ground: 'drawing'` with cad above.
+      contextMenu: ['tool', 'entity', 'turn', 'approval', 'item'],
       shortcuts: null,
       entitlements: null,
       resetOn: null,
@@ -460,7 +471,11 @@ export const PRODUCT_SURFACES = Object.freeze([
         //   rails.right 'job-rail'), on the stage's Jobs tab as well.
         card: 'job-rail',
       },
-      contextMenu: [],
+      // contextMenu: the device stage's ship-lane rungs (SurfaceGrounds.jsx
+      //   DeviceGround, slice 9a) plus the chat rows ConversePanel renders
+      //   here (not surface-gated). No ribbon, no drawing ground: neither
+      //   `tool` nor `entity` applies.
+      contextMenu: ['rung', 'turn', 'approval', 'item'],
       shortcuts: null,
       entitlements: null,
       resetOn: null,

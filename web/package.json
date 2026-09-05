@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Leaf \u2014 build CAD tools with AI, run on Leaf. Web demo lane.",
+  "description": "Leaf — build CAD tools with AI, run on Leaf. Web demo lane.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -55,6 +55,7 @@
   },
   "dependencies": {
     "@auth0/auth0-spa-js": "^2.23.0",
+    "@radix-ui/react-context-menu": "2.3.7",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "three": "^0.169.0"
