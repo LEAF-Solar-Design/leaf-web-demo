@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import './panels.css'
 import useExit from '../useExit.js'
-import { EMPTY_WORKSPACE_PROJECT } from '../site/workspaceProjectState.js'
+import { EMPTY_WORKSPACE_PROJECT, formatProjectsUnavailable } from '../site/workspaceProjectState.js'
 
 // The header PROJECT chip, made real: a calm switcher over the canonical
 // org-scoped Project entity (platform/api.py). LIVE only — in mock mode it is a
@@ -17,9 +17,8 @@ import { EMPTY_WORKSPACE_PROJECT } from '../site/workspaceProjectState.js'
 // is genuinely open. The menu below is unchanged.
 //
 // States (live):
-//   - platform unavailable (no DATABASE_URL / 500): show today's static drawing
-//     name + a calm "Projects unavailable (no database configured)" note. Never
-//     a broken surface.
+//   - platform unavailable (error string from the controller): static drawing
+//     name + the controller's message, or a neutral service note.
 //   - no org stored: a one-line "Create workspace org" affordance (POST /api/orgs).
 //   - org present: the O2 resolver menu — 11px muted header with the count
 //     right in muted, rows with a 2px accent left bar + tint + Enter cap on the
@@ -108,10 +107,9 @@ export default function ProjectSwitcher({
         <div className={`proj-menu resolver${menu.exiting ? ' exit' : ''}`} role="menu">
           {unavailable ? (
             <div className="proj-empty">
-              <div className="proj-note">Projects unavailable (no database configured)</div>
+              <div className="proj-note">{formatProjectsUnavailable(unavailable)}</div>
               <div className="proj-sub">
-                Showing the current drawing — <b>{projectName}</b>. Workspace projects need the
-                platform database; the demo runs fine without it.
+                Showing the current drawing — <b>{projectName}</b>. The demo keeps working without workspace projects.
               </div>
             </div>
           ) : !orgId ? (
