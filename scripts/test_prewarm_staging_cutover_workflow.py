@@ -457,3 +457,14 @@ def test_the_cross_repo_token_is_scoped_to_the_dispatch_steps():
                 assert "gh workflow run" in step.get("run", ""), (
                     "%s: the terraform token is only for dispatching, not for reads" % job_name
                 )
+
+
+def test_run_url_extraction_cannot_abort_the_service_loop():
+    """Under pipefail, a no-match grep makes the run-URL pipeline fail.
+
+    Errexit then aborts the step before the mark scan and before the next service.
+    Guard the extraction so an empty run URL reaches the fallback.
+    """
+    text = workflow_text()
+    assert "RUN_ID=$(printf '%s' \"$DISPATCH_OUTPUT\" | grep -oE 'actions/runs/[0-9]+' | head -1 | cut -d/ -f3 || true)" in text
+    assert "RUN_ID=$(printf '%s' \"$DISPATCH_OUTPUT\" | grep -oE 'actions/runs/[0-9]+' | head -1 | cut -d/ -f3)" not in text
