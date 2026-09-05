@@ -96,3 +96,9 @@ def test_approval_path_literal_restates_the_alnum_collapse():
     literals = _fullmatch_literals(_source("server/agent_gate.py"))
     assert r"[A-Za-z0-9]{0,64}" in literals, (
         "agent_gate._approval_path lost its inline literal barrier")
+
+
+def test_deps_surface_config_root_literal_is_the_canonical_rule():
+    literals = _fullmatch_literals(_source("server/deps.py"))
+    assert CANONICAL_CORE in literals, (
+        "deps._contained_tenant_root lost its inline literal barrier")
