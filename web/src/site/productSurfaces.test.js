@@ -141,6 +141,11 @@ describe('product surface contract', () => {
 //   builds.routes   App.jsx:2710 catalog run path; no marathon route exists
 //   builds.card     'job-rail' (slice 11a): JobRail hosts the BuildQueueCard
 //   contextMenu     zero contextmenu handlers under web/src
+//   integrations    { link: 'standard-flow' } (slice 8c) on every studio
+//                   surface: SurfaceFrame.Integrations mounts the
+//                   Link-a-service drawer there. sheets stays undeclared
+//                   (null): a public, session-less page has no tenant to
+//                   link a service from.
 //   everything else undeclared today (null)
 // ---------------------------------------------------------------------------
 const CONTRACT_FIXTURE = {
@@ -155,7 +160,7 @@ const CONTRACT_FIXTURE = {
     authoring: true,
     versions: 'none',
     conversations: { scope: 'drawing' },
-    integrations: null,
+    integrations: { link: 'standard-flow' },
     builds: { routes: ['one-shot'], card: 'job-rail' },
     contextMenu: [],
     shortcuts: null,
@@ -175,7 +180,7 @@ const CONTRACT_FIXTURE = {
     authoring: true,
     versions: 'drawing',
     conversations: { scope: 'drawing' },
-    integrations: null,
+    integrations: { link: 'standard-flow' },
     builds: { routes: ['one-shot'], card: 'job-rail' },
     contextMenu: [],
     shortcuts: null,
@@ -200,7 +205,7 @@ const CONTRACT_FIXTURE = {
     authoring: true,
     versions: 'drawing',
     conversations: { scope: 'drawing' },
-    integrations: null,
+    integrations: { link: 'standard-flow' },
     builds: { routes: ['one-shot'], card: 'job-rail' },
     contextMenu: [],
     shortcuts: null,
@@ -220,7 +225,7 @@ const CONTRACT_FIXTURE = {
     authoring: true,
     versions: 'none',
     conversations: { scope: 'drawing' },
-    integrations: null,
+    integrations: { link: 'standard-flow' },
     // The console carries NO ship-lane launch control (IosSurface.jsx:3-4 is
     // props-only); the repo's only one is the stage's ToolCast.jsx:2114.
     builds: { routes: ['one-shot'], card: 'job-rail' },

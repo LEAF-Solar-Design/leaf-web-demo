@@ -45,6 +45,7 @@ import OpsDrawer from './components/OpsDrawer.jsx'
 import CustomizePanel from './components/CustomizePanel.jsx'
 import CheckoutControls from './components/CheckoutControls.jsx'
 import ClaudeAccountPanel from './components/ClaudeAccountPanel.jsx'
+import useTenantMcpRegistry from './useTenantMcpRegistry.js'
 import DemoBanner from './components/DemoBanner.jsx'
 import { AccountSignOut } from './components/ProductSurfaceTabs.jsx'
 import { deriveWorkspaceProjectState } from './site/workspaceProjectState.js'
@@ -327,6 +328,21 @@ export default function App() {
   // Kept strictly apart from the platform identity above (AUTH.md §0). The token
   // is write-only: we hold linkage status only, never the token itself.
   const [claudeOpen, setClaudeOpen] = useState(false) // header Claude-account popover open
+
+  // --- Tenant MCP server registry (standardization slice 8c) ---
+  const mcpRegistry = useTenantMcpRegistry({ mock })
+  const [linkServiceOpen, setLinkServiceOpen] = useState(false)
+  // The command bar's @ mounts list gains connected registry servers by
+  // LABEL, never by host or any upstream tool name — mergePickerEntries'
+  // `resource` shape only ever reads `.name`/`.host` off what we hand it, so
+  // the label IS the resource's identity here, the same field the drawer
+  // shows, never the router's internal `id`.
+  const connectedMcpServers = useMemo(
+    () => mcpRegistry.servers
+      .filter((server) => server.state === 'connected')
+      .map((server) => ({ name: server.label, host: server.host })),
+    [mcpRegistry.servers],
+  )
   // M5 guided tour: opened ONLY by the ?demo=tour (or ?demo=1) deep-link, and
   // only while mock is active. Exiting clears the tour and leaves you in mock.
   const [tourOn, setTourOn] = useState(() => {
@@ -2831,6 +2847,9 @@ export default function App() {
           // Rail OFF (and every non-drafting surface) the prop is false and
           // the well renders exactly as before.
           commandLine={!!studioGround && surfaceSlots.commandLine}
+          // Slice 8c: connected Link-a-service servers join the @ mounts
+          // list by label, through the same mcpDiscoveryEnabled gate.
+          connectedMcpServers={connectedMcpServers}
         />
       )}
       jobRail={{
@@ -2843,6 +2862,19 @@ export default function App() {
         builds: buildQueue.builds,
       }}
       toast={{ toast, onDone: onToastDone }}
+      integrations={{
+        mock,
+        servers: mcpRegistry.servers,
+        loading: mcpRegistry.loading,
+        busy: mcpRegistry.busy,
+        error: mcpRegistry.error,
+        open: linkServiceOpen,
+        onToggle: setLinkServiceOpen,
+        onRegister: mcpRegistry.register,
+        onConnect: mcpRegistry.connect,
+        onHealth: mcpRegistry.health,
+        onUnlink: mcpRegistry.unlink,
+      }}
     >
     <div className="app" data-surface={studioGround ? activeSurface : undefined} data-tour="shell">
       <header className="top">
@@ -3677,6 +3709,11 @@ export default function App() {
         {!mock && <SurfaceFrame.Conversations />}
         <SurfaceFrame.JobRail />
         <SurfaceFrame.Inbox />
+        {/* Standardization slice 8c: the Link-a-service drawer sits in the
+            rail column beside the job monitor, never inside <main>'s
+            overlay-card region — the same #1029 lesson the conversation
+            list note above already states for this column. */}
+        <SurfaceFrame.Integrations />
       </div>
 
       <footer className="foot-bar" data-checkout-instance={checkout.instanceId} data-controller-instance={workspaceInstanceId}>
