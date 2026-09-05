@@ -123,13 +123,17 @@ export function RibbonCluster({ id, label, kind = 'group', note = null, extra = 
     <div className="ribbon-cluster" role="group" aria-label={label} {...attrs}>
       <div className="ribbon-cluster-tools">
         {children}
+        {/* W4g-4b: a seat's slot (the Clipboard, Script and Properties seats
+            the engine consumer portals into) sits ON the tools row, between
+            the tools and the widgets. Rendered after the row it was a third
+            grid item under the panel label, off the band. */}
+        {extra}
         {widgets.length > 0 && (
           <div className="ribbon-widgets">
             {widgets.map((widget) => <RibbonWidget key={widget.id} widget={widget} />)}
           </div>
         )}
       </div>
-      {extra}
       {/* The panel label sits on the row under the tools, the reference
           grammar. A family label is a real command (open that family in
           the rail); a fixed group's label is decoration, hidden from

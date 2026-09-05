@@ -148,7 +148,7 @@ describe('W4g-4b MATCHPROP', () => {
     const seat = {
       id: 'properties', label: 'Properties', kind: 'group', tools: [],
       widgets: [{ id: 'prop-color', label: 'Color', value: 'ByLayer', disabled: true, reason: 'not in the browser engine yet' }],
-      extra: <div id="cockpit-properties-slot" className="ribbon-cluster-tools" />,
+      extra: <div id="cockpit-properties-slot" className="ribbon-slot" />,
     }
     render(
       <EngineSessionProvider createWorker={vi.fn(() => new IdleWorker())}>
@@ -159,6 +159,9 @@ describe('W4g-4b MATCHPROP', () => {
     )
     const slot = document.getElementById('cockpit-properties-slot')
     expect([...slot.querySelectorAll('[data-tool]')].map((el) => el.dataset.tool)).toEqual(['modify:matchprop'])
+    // The slot sits ON the tools row (inside .ribbon-cluster-tools, before the widgets), never under the label.
+    expect(slot.parentElement.className).toBe('ribbon-cluster-tools')
+    expect(slot.nextElementSibling?.className).toBe('ribbon-widgets')
     const modify = document.querySelector('.ribbon-cluster[data-group="modify"]')
     expect([...modify.querySelectorAll('[data-tool]')].map((el) => el.dataset.tool)).not.toContain('modify:matchprop')
     expect(modify.querySelectorAll('.ribbon-tool')).toHaveLength(18)

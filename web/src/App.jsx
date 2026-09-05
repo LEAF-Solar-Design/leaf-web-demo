@@ -2589,21 +2589,21 @@ export default function App() {
     const [annotation, block, properties, groups, clipboardOff] = referencePanels()
     const clipboardSeat = {
       id: 'clipboard', label: 'Clipboard', kind: 'group', tools: [],
-      extra: <div id="cockpit-clipboard-slot" className="ribbon-cluster-tools" />,
+      extra: <div id="cockpit-clipboard-slot" className="ribbon-slot" />,
     }
     // W4g-7a: the View tab's Script seat (the reference's SCRIPT): an empty
     // cluster carrying a slot div the engine consumer portals the panel into,
     // present only with the flag on (the panel drives the engine session).
     const scriptSeat = {
       id: 'script', label: 'Script', kind: 'group', tools: [],
-      extra: <div id="cockpit-script-slot" className="ribbon-cluster-tools" />,
+      extra: <div id="cockpit-script-slot" className="ribbon-slot ribbon-slot-panel" />,
     }
     // W4g-4b: the Properties panel keeps its reference seat (after Layers and
     // Block) and its honest ByLayer fields; with the flag on its one tool,
     // Match, is real and the engine consumer portals it into this slot.
     const propertiesSeat = {
       ...properties, tools: [],
-      extra: <div id="cockpit-properties-slot" className="ribbon-cluster-tools" />,
+      extra: <div id="cockpit-properties-slot" className="ribbon-slot" />,
     }
     // The reference's Draw tab: Draw, Modify, Clipboard (engine children,
     // rendered first), then Annotation, Layers, Block, Properties, Groups.

@@ -78,6 +78,8 @@ export const DEFAULT_EDIT_INPUTS = Object.freeze({
   // point clicked on it), empty until picked so the step waits; the
   // chamfer distances default to the reference's D1=0 D2=0 (a corner).
   edge: '', ex: '', ey: '', d1: '0', d2: '0',
+  // W4g-4b: ELLIPSE's minor-to-major ratio (a step still waiting until typed).
+  ratio: '',
 })
 
 const INPUT_KEYS = new Set(Object.keys(DEFAULT_EDIT_INPUTS))

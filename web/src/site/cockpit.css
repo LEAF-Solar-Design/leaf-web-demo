@@ -244,6 +244,15 @@
   display: grid; grid-auto-flow: column; grid-template-rows: repeat(3, 26px);
   gap: 0 2px; align-content: start; align-items: start;
 }
+/* W4g-4b: a seat's slot on the tools row. A tool seat (Clipboard, Properties)
+   is `display: contents`, so the tools portaled into it are items of the
+   3-row grid like any other tool; a panel seat (Script) is one item spanning
+   the three rows. Before this the slots rendered after the row and fell
+   under the label, off the band. */
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-slot { display: contents; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-slot-panel {
+  display: block; grid-row: 1 / span 3; align-self: start; min-width: 0;
+}
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-cluster-label {
   grid-row: 2; align-self: end; justify-content: center; margin: 0; padding: 0 2px; gap: 0;
   font: 400 10px/15px var(--ck-font); letter-spacing: 0; text-transform: none;
