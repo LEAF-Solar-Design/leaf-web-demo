@@ -61,11 +61,23 @@ name: Prewarm staging cutover
 # `git diff` over the tree and nothing else -- no script, no build, no hook --
 # so preview-authored code never runs next to the token.
 on:
+  workflow_dispatch:
   pull_request_review:
     types: [submitted]
   pull_request_target:
     types: [synchronize, labeled, closed]
     branches: [main]
+  # The queue's own stage: a merge group's head already has main folded in
+  # (first parent == base), so its speculative supply set is built against the
+  # exact tree the merge will use. `checks_requested` is the only type GitHub
+  # sends for a queued group; there is no group-destroyed event (see the
+  # descale job's comment). PR triggers stay for now -- retiring them is a
+  # separate change once the queue is the only path -- so a PR stage and a
+  # group stage can briefly cover the same tree; the dispatch's own run-name
+  # identity check (design section 2.3) is what keeps that from double-binding
+  # a run, not a new guard here.
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -75,9 +87,13 @@ permissions:
 
 concurrency:
   # Newest-wins per PR for staging (a superseded stage is pointless work), but
-  # a close/descale must never be cancelled by anything.
-  group: prewarm-staging-cutover-${{ github.event.pull_request.number }}-${{ github.event.action == 'closed' && 'descale' || 'stage' }}
-  cancel-in-progress: ${{ github.event.action != 'closed' }}
+  # a close/descale must never be cancelled by anything. A merge group has no
+  # PR number, so group events and their main-ref stages use head-sha keys.
+  group: >-
+    ${{ github.event_name == 'merge_group'
+    && format('prewarm-staging-cutover-mg-dispatch-{0}', github.event.merge_group.head_sha)
+    || format('prewarm-staging-cutover-{0}-{1}', github.event.pull_request.number, github.event.action == 'closed' && 'descale' || 'stage') }}
+  cancel-in-progress: ${{ github.event_name == 'merge_group' || github.event.action != 'closed' }}
 
 env:
   INFRA_REPO: LEAF-Solar-Design/leaf-automation-aws-terraform
@@ -106,39 +122,55 @@ env:
   # prewarm from ever STARTING ahead of a queued real deploy. Cost: about 9
   # CodeBuild minutes on general1.large at $0.02/min, about $0.18 per app
   # prewarm (operator-approved 2026-09-05).
-  # HISTORY (2026-09-05): the first app prewarm (terraform run 33949283388)
-  # was refused by the deploy workflow's "Verify protected runtime posture"
-  # step, because the lane-close step is hard-skipped under prewarm and the
-  # checker then saw a forward app intent over an OPEN drawing-write lane;
-  # `app` came out (#1058) until terraform #1474 (7f2f40e5) taught that gate
-  # the difference: an idle weight-0 prewarm keeps its truthful no-closure
-  # state and is admitted, a normal forward deploy over an open lane still
-  # refuses. The relay dispatches on --ref main, so that corrected gate is
-  # what every prewarm runs against. Dispatch order is the list order: web
-  # first, then app queues on the group behind it.
-  # PAUSED (2026-09-05, later still): the app prewarm now succeeds (run
-  # 33952930173 staged leaf-platform-app:796 at weight 0), but its merge
-  # deploy did not reuse it. Cause, read from the merge build's adopt job:
-  # the stage is taken on the PR's merge PREVIEW at label time, main moved
-  # under the PR before it merged (#1061 landed between the two), so the
-  # merge commit's tree differed from the staged preview's tree and no
-  # speculative supply set existed for it ("expected one exact
-  # provider-bound speculative v3 artifact, found 0"); the build rebuilt
-  # and the deploy then saw a different task-definition document. When the
-  # trees DO match, the adopt job re-envelopes the speculative manifest with
-  # its preview-built digests, so reuse is possible; what is missing is
-  # freshness under a busy main (nothing re-speculates or re-stages on a
-  # main push or a merge group). Until that is decided (re-stage on main
-  # pushes, stage the merge group, or measure the hit rate), an app prewarm
-  # costs about 9 CodeBuild minutes and lengthens the shared ECS-mutation
-  # queue in front of the merge for a chance, not a saving. Restore `app`
-  # here in the change that lands that decision, list order web then app.
-  STAGE_SERVICES: "web"
+  # HISTORY: app was staged (#1055), paused because the posture gate refused
+  # a prewarm over an open drawing-write lane (#1058),
+  # restored once terraform #1474 taught the posture gate that an idle
+  # weight-0 prewarm is not a forward deploy over an open lane (#1060), then
+  # paused again (#1067, #1068) because the stage was taken on the PR's merge
+  # PREVIEW and a busy main could move out from under it before the real
+  # merge, leaving no speculative supply set for the merge's actual tree. The
+  # merge group closes that gap: its head's first parent is checked equal to
+  # its live queue base, so the group's exact tree is fresh at stage time.
+  # Later invalidation or replay is still possible.
+  # `app` is back in STAGE_SERVICES for the merge-group path; it also
+  # re-covers the PR path below, which is accepted only because the PR
+  # triggers are provisional until the queue retires them (see `on:` above).
+  STAGE_SERVICES: "web app"
   # Bounded wait for the speculative supply set: 20 polls x 30s.
   SUPPLY_SET_POLLS: "20"
   SUPPLY_SET_INTERVAL: "30"
 
 jobs:
+  guard-ref:
+    name: Refuse dispatches outside main
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Require the main workflow ref
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::This relay must run from refs/heads/main."
+            exit 1
+          fi
+
+  dispatch-group:
+    name: Dispatch the group relay from main
+    if: github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Dispatch the main-ref group relay
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: |
+          if ! gh workflow run prewarm-staging-group.yml --repo "$GITHUB_REPOSITORY" --ref main -f "group_head_sha=$HEAD_SHA"; then
+            echo "::warning::Prewarm dispatch for merge group failed; the merge deploy will warm normally."
+          fi
+
   stage:
     name: Stage the idle colour with this PR's speculative candidate
     if: >-
@@ -429,13 +461,20 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+
   descale:
     name: Descale the stage a closed PR left behind
     # Only an UNMERGED close needs this. A merged PR's stage is consumed by the
     # merge deploy (adopted on a document match, overwritten otherwise), so
     # descaling it would remove capacity the deploy is about to use.
+    # PR-ONLY, explicitly. GitHub Actions delivers no "merge group destroyed" event.
+    # A dropped group's stage has no close to react to at all, so it is
+    # left entirely to the terraform TTL reaper (the existing bound). Adding a
+    # descale path here for a group would be pretending an event exists that
+    # does not.
     if: >-
-      github.event.action == 'closed'
+      github.event_name == 'pull_request_target'
+      && github.event.action == 'closed'
       && github.event.pull_request.merged == false
       && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest

@@ -1347,7 +1347,30 @@ def build_suites() -> List[Suite]:
               # either direction must come back through that test.
               # 25 -> 26: the run-URL extraction is guarded (|| true) so a gh that prints no run URL falls back to the mark scan instead of aborting the loop before the next service.
               # (2026-09-05, later still) STAGE_SERVICES reads `web`: the app prewarm succeeds but its merge did not reuse it because main moved under the PR (stale stage); the pin names freshness as the way back.
-              _py_pytest("test_prewarm_staging_cutover_workflow.py"), 26),
+              # 26 -> 39 (merge-queue slice B, relay group mode): the relay now
+              # subscribes to merge_group (checks_requested) with a stage-group
+              # job, the group twin of stage. Thirteen new rows: the trigger's
+              # single type; the fixed mg-stage concurrency key that always
+              # cancels in progress while a PR close still never does; the
+              # group job's event_name-only if:; the eligibility step EXECUTED
+              # to prove it reads no PR API and no label (queued is eligible by
+              # construction); the exact-head checkout's ref/fetch-depth/
+              # persist-credentials; the first-parent-equals-base check EXECUTED
+              # against real git repos in both the matching and mismatched
+              # cases (2 rows); the migration-surface refusal, the supply-set
+              # step, and the dispatch step each pinned byte-identical to the
+              # PR path's step body; the receipt's group object replacing pr;
+              # the mg-<sha12> receipt artifact name; and the descale job's
+              # explicit pull_request_target-only if: with the reaper comment.
+              # STAGE_SERVICES is back to `web app` (the freshness gap that
+              # paused it is closed by the group head's checked parentage), so
+              # the renamed pin (test_web_and_app_are_staged_again_because_the_
+              # merge_group_makes_the_stage_fresh) replaces the paused one
+              # 1-for-1, no count change from that row.
+              # 39 -> 43 (slice B v2): replace event-trust pins with live-queue
+              # validation (queued and superseded rows), and pin the secret-free
+              # dispatcher, main-ref guard, and recorded-base step guards.
+              _py_pytest("test_prewarm_staging_cutover_workflow.py"), 44),
         # Merge-queue group controller (slice C: mq-review, mq-supply,
         # mq-prewarm). 32 = the executed matrix: mq-review's GraphQL
         # pagination and post-check re-read run against a fake gh (a queue

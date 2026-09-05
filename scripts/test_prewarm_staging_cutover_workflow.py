@@ -37,6 +37,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "prewarm-staging-cutover.yml"
 
+GROUP_WORKFLOW = WORKFLOW.with_name("prewarm-staging-group.yml")
 def _usable_bash() -> str:
     """A bash that can itself run jq and git, which is not the same question as
     whether the HOST has them: on Windows the `bash` on PATH can be a WSL shim
@@ -76,8 +77,16 @@ def workflow_document() -> dict:
     return yaml.load(workflow_text(), Loader=yaml.BaseLoader)
 
 
+def group_workflow_document() -> dict:
+    return yaml.load(GROUP_WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+
+
+def workflow_jobs() -> dict:
+    return {**workflow_document()["jobs"], **group_workflow_document()["jobs"]}
+
+
 def step_body(job: str, name_fragment: str) -> str:
-    for step in workflow_document()["jobs"][job]["steps"]:
+    for step in workflow_jobs()[job]["steps"]:
         if name_fragment in step.get("name", "") and "run" in step:
             return step["run"]
     raise AssertionError("no %r step with a run body in job %s" % (name_fragment, job))
@@ -328,7 +337,12 @@ def test_the_preview_checkout_is_never_executed():
 def test_a_close_is_never_cancelled_by_a_newer_stage():
     concurrency = workflow_document()["concurrency"]
     assert "descale" in concurrency["group"] and "stage" in concurrency["group"]
-    assert concurrency["cancel-in-progress"] == "${{ github.event.action != 'closed' }}"
+    # Extended for the group path (a merge group always cancels in progress,
+    # since the queue is serial and there is no close event to protect), but
+    # a PR close (action == 'closed') must still never be cancelled.
+    assert concurrency["cancel-in-progress"] == (
+        "${{ github.event_name == 'merge_group' || github.event.action != 'closed' }}"
+    )
 
 
 def test_only_same_repo_non_fork_non_draft_pull_requests_stage():
@@ -358,34 +372,255 @@ def test_the_dispatch_stages_both_colours_on_the_prewarm_rail():
     assert "if length == 1 then .[0].databaseId else empty end" in body
 
 
-def test_app_is_paused_until_the_merge_deploy_can_reuse_a_staged_candidate():
-    """A cross-repo coupling this repo cannot check mechanically, so it is pinned.
+def test_web_and_app_are_staged_again_because_the_merge_group_makes_the_stage_fresh():
+    """The freshness gap that paused `app` (#1067, #1068) is closed by the group path.
 
-    The old pin's runner condition has been met since 2026-08-24, when the deploy
-    job moved to an ephemeral CodeBuild-backed runner, one per run, with a
-    measured queue wait of 0.4 min.
+    `app` was staged (#1055), paused when the posture gate refused a prewarm
+    over an open drawing-write lane (#1058), restored once terraform #1474 admitted an
+    idle weight-0 prewarm (#1060), then paused again because the PR-mode stage
+    is taken on the merge PREVIEW and a busy main could move under it before
+    the real merge (#1067, #1068): the merge's actual tree then had no
+    speculative supply set, and the build rebuilt.
 
-    Terraform #1474 (7f2f40e5) now admits an idle weight-0 prewarm with its
-    truthful no-closure state, while a normal forward deploy over an open
-    lane still refuses. The earlier pins' runner and posture conditions are met.
-
-    The first successful app prewarm (run 33952930173) was not reused by its
-    merge deploy (run 33953973668) because main moved between the stage and
-    the merge (#1061), the merge tree differed from the staged preview's tree,
-    and the merge build's adopt job found no speculative supply set for it
-    and rebuilt. When the trees match the adopt job re-envelopes the
-    speculative manifest with its preview-built digests, so reuse is possible
-    and the missing piece is freshness under a busy main.
-
-    `app` stays paused until a re-stage-on-push, merge-group, or measured-hit-rate
-    decision lands, and restoring it comes back through this test in the same
-    change.
+    The merge-group job stages the group's own head, whose first parent is
+    checked equal to its base at stage time (`stage-group`'s "Require the
+    group head's first parent to equal its base" step), so it is fresh at stage
+    time. Later invalidation or replay remains possible. Both colours are
+    back in STAGE_SERVICES for that path; the PR path also re-covers app,
+    which is accepted only because the PR triggers are provisional until the
+    queue retires them.
     """
     services = workflow_document()["env"]["STAGE_SERVICES"].split()
-    assert services == ["web"], (
-        "STAGE_SERVICES is %s; app is paused until the build/supply workflow's "
-        "reuse path admits an exact-tree speculative producer" % services
+    assert services == ["web", "app"], (
+        "STAGE_SERVICES is %s; the merge-group path stages the group's exact "
+        "head, so both colours should be back" % services
     )
+
+
+def test_merge_group_trigger_fires_only_on_checks_requested():
+    triggers = workflow_document()["on"]
+    assert triggers["merge_group"]["types"] == ["checks_requested"], (
+        "checks_requested is the only type GitHub sends for a queued group; "
+        "there is no group-destroyed event for this workflow to subscribe to"
+    )
+
+
+def test_the_group_concurrency_keys_use_the_head_sha():
+    concurrency = workflow_document()["concurrency"]
+    group = concurrency["group"]
+    assert "github.event_name == 'merge_group'" in group
+    assert "github.event.merge_group.head_sha" in group
+    assert "inputs.group_head_sha" not in group
+    assert "prewarm-staging-cutover-mg-dispatch-{0}" in group
+    stage_concurrency = group_workflow_document()["concurrency"]
+    assert "inputs.group_head_sha" in stage_concurrency["group"]
+    assert "prewarm-staging-cutover-mg-stage-{0}" in stage_concurrency["group"]
+    assert stage_concurrency["cancel-in-progress"] == "true"
+    # PR events must keep their own per-PR, per-action key untouched.
+    assert "github.event.pull_request.number" in group
+    assert "github.event.action == 'closed' && 'descale' || 'stage'" in group
+    cancel = concurrency["cancel-in-progress"]
+    assert "github.event_name == 'merge_group'" in cancel, (
+        "the newest queued group's stage must cancel an older one in flight"
+    )
+
+
+def test_the_group_job_runs_only_for_main_dispatch_with_a_head():
+    condition = group_workflow_document()["jobs"]["stage-group"]["if"]
+    assert condition == "github.event_name == 'workflow_dispatch' && inputs.group_head_sha != '' && github.ref == 'refs/heads/main'"
+    assert group_workflow_document()["jobs"]["stage-group"]["needs"] == "guard-ref"
+
+
+GROUP_ELIGIBILITY_ENV = {
+    "HEAD_SHA": "a" * 40,
+}
+
+
+@needs_shell
+@pytest.mark.parametrize("queued", [True, False])
+def test_the_group_eligibility_requires_a_live_queue_entry(tmp_path, queued):
+    body = step_body("stage-group", "Validate and record the live merge-group")
+    (tmp_path / "bin").mkdir()
+    entries = [
+        {"position": 1, "headCommit": {"oid": "c" * 40},
+         "baseCommit": {"oid": "d" * 40}, "pullRequest": {"number": 41}},
+        {"position": 2, "headCommit": {"oid": "a" * 40 if queued else "e" * 40},
+         "baseCommit": {"oid": "b" * 40}, "pullRequest": {"number": 42}},
+        {"position": 3, "headCommit": {"oid": "f" * 40},
+         "baseCommit": {"oid": "b" * 40}, "pullRequest": {"number": 43}},
+    ]
+    pages = [
+        {"data": {"repository": {"mergeQueue": {"entries": {"nodes": nodes}}}}}
+        for nodes in (entries[:1], entries[1:])
+    ]
+    (tmp_path / "queue-fixture.json").write_text(
+        "\n".join(json.dumps(page) for page in pages), encoding="utf-8"
+    )
+    gh = tmp_path / "bin" / "gh"
+    gh.write_text("#!/bin/sh\ncat queue-fixture.json\n", encoding="utf-8", newline="\n")
+    gh.chmod(0o755)
+    result = run_step(body, tmp_path, GROUP_ELIGIBILITY_ENV)
+    assert result["superseded"] == ("false" if queued else "true")
+    if not queued:
+        assert "eligible" not in result
+        assert "base_sha" not in result
+        return
+    assert result["eligible"] == "true"
+    assert result["reason"] == "merge group"
+    assert result["head_sha"] == "a" * 40
+    assert result["base_sha"] == "b" * 40
+    assert result["sha12"] == "a" * 12
+    assert json.loads(result["members"]) == [41, 42]
+
+
+def test_the_group_dispatcher_has_only_two_permissions_and_no_secrets():
+    job = workflow_document()["jobs"]["dispatch-group"]
+    assert job["if"] == "github.event_name == 'merge_group'"
+    assert job["permissions"] == {"actions": "write", "contents": "read"}
+    assert len(job["steps"]) == 1
+    assert "secrets." not in str(job)
+    assert "uses" not in job["steps"][0]
+    body = job["steps"][0]["run"]
+    assert "gh workflow run prewarm-staging-group.yml" in body
+    assert '--ref main -f "group_head_sha=$HEAD_SHA"' in body
+    assert "PR_NUMBER" not in str(job)
+    assert "::warning::" in body
+
+
+def test_the_dispatch_input_and_main_ref_guard():
+    document = group_workflow_document()
+    field = document["on"]["workflow_dispatch"]["inputs"]["group_head_sha"]
+    assert field["type"] == "string" and field["default"] == ""
+    guard = document["jobs"]["guard-ref"]
+    assert guard["if"] == "github.event_name == 'workflow_dispatch'"
+    body = step_body("guard-ref", "Require the main workflow ref")
+    assert '"$GITHUB_REF" != "refs/heads/main"' in body
+    assert "exit 1" in body
+
+
+def test_the_group_workflow_has_only_the_dispatch_trigger():
+    document = group_workflow_document()
+    assert set(document["on"]) == {"workflow_dispatch"}
+    assert set(document["on"]["workflow_dispatch"]["inputs"]) == {"group_head_sha"}
+    assert document["permissions"] == workflow_document()["permissions"]
+    for key, value in document["env"].items():
+        assert workflow_document()["env"][key] == value
+    assert "stage-group" not in workflow_document()["jobs"]
+    assert "group_head_sha" not in str(workflow_document()["on"]["workflow_dispatch"])
+
+
+def test_live_queue_validation_and_superseded_steps_are_pinned():
+    body = step_body("stage-group", "Validate and record the live merge-group")
+    for required in ('gh api graphql --paginate', 'mergeQueue(branch: "main")',
+                     'entries(first: 50, after: $endCursor)',
+                     'pageInfo { hasNextPage endCursor }',
+                     'headCommit { oid } baseCommit { oid } pullRequest { number }',
+                     'select(.headCommit.oid == $head)', 'superseded=true',
+                     '^[0-9a-fA-F]{40}$'):
+        assert required in body
+    assert "exit 0" in body
+    job = group_workflow_document()["jobs"]["stage-group"]
+    assert "github.event.merge_group" not in str(job)
+    for step in job["steps"]:
+        if step.get("uses", "").startswith("actions/checkout") or step.get("id") in {"parentage", "receipt"}:
+            assert "steps.group.outputs.eligible == 'true'" in step["if"]
+    parentage = next(s for s in job["steps"] if s.get("id") == "parentage")
+    assert parentage["env"]["BASE_SHA"] == "${{ steps.group.outputs.base_sha }}"
+
+
+def test_the_group_checkout_targets_the_exact_head_sha():
+    steps = group_workflow_document()["jobs"]["stage-group"]["steps"]
+    checkout = next(s for s in steps if s.get("uses", "").startswith("actions/checkout"))
+    assert checkout["with"]["ref"] == "${{ steps.group.outputs.head_sha }}"
+    assert checkout["with"]["fetch-depth"] == "2"
+    assert checkout["with"]["persist-credentials"] == "false"
+
+
+def _repo_with_parent(tmp_path: Path, base_matches: bool) -> tuple[Path, str]:
+    """A two-commit repo; returns (repo, the base sha to assert against)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run = lambda *argv: subprocess.run(argv, cwd=repo, check=True, capture_output=True)
+    run("git", "init", "-q")
+    run("git", "config", "user.email", "t@example.invalid")
+    run("git", "config", "user.name", "t")
+    (repo / "a.txt").write_text("base\n", encoding="utf-8")
+    run("git", "add", "-A")
+    run("git", "commit", "-qm", "base")
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    (repo / "a.txt").write_text("head\n", encoding="utf-8")
+    run("git", "add", "-A")
+    run("git", "commit", "-qm", "head")
+    asserted_base = base_sha if base_matches else "f" * 40
+    return repo, asserted_base
+
+
+@needs_shell
+@pytest.mark.parametrize(
+    "base_matches,expected_ok",
+    [(True, "true"), (False, "false")],
+)
+def test_the_group_first_parent_must_equal_its_base(tmp_path, base_matches, expected_ok):
+    repo, asserted_base = _repo_with_parent(tmp_path, base_matches)
+    (repo / "bin").mkdir()
+    result = run_step(
+        step_body("stage-group", "Require the group head's first parent"),
+        repo,
+        {"BASE_SHA": asserted_base},
+    )
+    assert result["ok"] == expected_ok
+
+
+def test_the_migration_surface_refusal_is_identical_on_the_group_path():
+    pr_body = step_body("stage", "Refuse a candidate that touches")
+    group_body = step_body("stage-group", "Refuse a candidate that touches")
+    assert group_body == pr_body, (
+        "the group path must run the exact same fail-closed migration-surface "
+        "check and tag derivation as the PR path, over the group head instead "
+        "of a merge preview"
+    )
+
+
+def test_the_supply_set_step_is_identical_on_the_group_path():
+    pr_body = step_body("stage", "Wait for the speculative supply set")
+    group_body = step_body("stage-group", "Wait for the speculative supply set")
+    assert group_body == pr_body, (
+        "the supply-set artifact name (spec-v3-supply-set-<tree>) and the "
+        "poll bounds must match the PR path exactly"
+    )
+
+
+def test_the_dispatch_step_is_identical_on_the_group_path():
+    pr_body = step_body("stage", "Dispatch the prewarm")
+    group_body = step_body("stage-group", "Dispatch the prewarm")
+    assert group_body == pr_body
+
+
+def test_the_group_receipt_carries_a_group_object_not_a_pr_number():
+    body = step_body("stage-group", "Emit the relay receipt")
+    assert "group: {head_sha: $head_sha, base_sha: $base_sha, members: $members}" in body
+    assert "pr: $pr" not in body
+    assert '--arg schema "leaf.staging-prewarm-relay.v1"' in body
+
+
+def test_the_group_receipt_artifact_is_named_by_short_sha():
+    steps = group_workflow_document()["jobs"]["stage-group"]["steps"]
+    upload = next(s for s in steps if s.get("uses", "").startswith("actions/upload-artifact"))
+    assert upload["with"]["name"] == "prewarm-relay-receipt-mg-${{ steps.group.outputs.sha12 }}"
+    assert upload["with"]["retention-days"] == "30"
+
+
+def test_the_descale_job_is_explicit_pr_only_with_the_reaper_comment():
+    document = workflow_document()
+    condition = document["jobs"]["descale"]["if"]
+    assert "github.event_name == 'pull_request_target'" in condition, (
+        "the descale job must be explicit that it is PR-only"
+    )
+    text = workflow_text()
+    assert 'GitHub Actions delivers no "merge group destroyed" event' in text
+    assert "left entirely to the terraform TTL reaper" in text
 
 
 def test_the_relay_never_deploys_normally_or_flips():
