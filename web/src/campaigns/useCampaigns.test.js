@@ -31,6 +31,7 @@ beforeEach(() => {
   api.listCampaigns.mockResolvedValue({ campaigns: [row] })
   api.getCampaign.mockImplementation(async (_project, id) => ({ campaign: { ...row, campaign_id: id } }))
   api.listQuestions.mockResolvedValue({ questions: [open] })
+  api.listCapabilities.mockResolvedValue({ capabilities: [] })
   api.listEnrollments.mockResolvedValue({ enrollment: { enrollments: [], allowed_machines: ['VM-C'] } })
   api.requestEnrollment.mockResolvedValue({ enrollment: { enrollment_id: Q, state: 'pending' } })
   api.enableEnrollment.mockResolvedValue({ enrollment: { enrollment_id: Q, state: 'enabled' } })
@@ -40,7 +41,7 @@ beforeEach(() => {
   api.askQuestion.mockResolvedValue({ question: open })
   api.answerQuestion.mockResolvedValue({ answer: receipt })
 })
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); localStorage.clear() })
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); localStorage.clear(); sessionStorage.clear() })
 
 async function ready() {
   const hook = renderHook(() => useCampaigns(P, { enabled: true }))
@@ -49,6 +50,137 @@ async function ready() {
 }
 
 describe('project campaign hook', () => {
+  const digest = 'a'.repeat(64)
+  const host = { enrollment_id: Q, machine_id: 'Host', state: 'enabled', completed_uses: 0,
+    capability_link: { state: 'published', effective_catalog_digest: digest }, invocations: [] }
+  const job = { job_id: D, status: 'running', progress: 'Waiting for host' }
+  function capabilityFixture() {
+    api.listEnrollments.mockResolvedValue({ enrollment: { enrollments: [host], allowed_machines: ['Host'] } })
+    api.listCapabilities.mockResolvedValue({ capabilities: [{ change_set_id: 'listed', label: 'Host capability' }] })
+    api.invokeCapability.mockResolvedValue({ invocation: job })
+    api.bindPublication.mockResolvedValue({ enrollment: host })
+  }
+
+  it('binds only server-listed choices and reloads candidates', async () => {
+    capabilityFixture()
+    const hook = await ready()
+    await act(async () => { await hook.result.current.bindPublication(Q, 'typed-id') })
+    expect(api.bindPublication).not.toHaveBeenCalled()
+    await act(async () => { await hook.result.current.bindPublication(Q, 'listed') })
+    expect(api.bindPublication).toHaveBeenCalledExactlyOnceWith(P, C, Q, 'listed')
+    expect(api.listCapabilities).toHaveBeenCalledTimes(2)
+  })
+
+  it('persists before send, locks duplicate clicks and gives an intentional second use a new key', async () => {
+    capabilityFixture()
+    const hook = await ready()
+    const pending = deferred()
+    api.invokeCapability.mockImplementation((_p, _c, _e, submission) => {
+      expect(JSON.parse(sessionStorage.getItem(`leaf.campaign.invocation:${P}:${C}:${Q}`))).toEqual(submission)
+      return pending.promise
+    })
+    let first
+    act(() => { first = hook.result.current.invokeCapability(Q); hook.result.current.invokeCapability(Q) })
+    expect(api.invokeCapability).toHaveBeenCalledTimes(1)
+    const submission = api.invokeCapability.mock.calls[0][3]
+    expect(submission.effectiveCatalogDigest).toBe(digest)
+    await act(async () => { pending.resolve({ invocation: job }); await first })
+    expect(sessionStorage.getItem(`leaf.campaign.invocation:${P}:${C}:${Q}`)).toBeNull()
+    expect(hook.result.current.submissions).toEqual({})
+    api.invokeCapability.mockResolvedValue({ invocation: { ...job, job_id: B } })
+    await act(async () => { await hook.result.current.invokeCapability(Q) })
+    expect(api.invokeCapability.mock.calls[1][3].idempotencyKey).not.toBe(submission.idempotencyKey)
+  })
+
+  it('recovers response loss across remount with the same key and original digest, never on mount or refresh', async () => {
+    capabilityFixture()
+    const hook = await ready()
+    api.invokeCapability.mockRejectedValue(new Error('Response lost'))
+    await act(async () => { await expect(hook.result.current.invokeCapability(Q)).rejects.toThrow('Response lost') })
+    const submission = api.invokeCapability.mock.calls[0][3]
+    await act(async () => { await expect(hook.result.current.invokeCapability(Q)).rejects.toThrow() })
+    expect(api.invokeCapability.mock.calls[1][3]).toEqual(submission)
+    hook.unmount()
+    api.listEnrollments.mockResolvedValue({ enrollment: { enrollments: [{ ...host,
+      capability_link: { ...host.capability_link, effective_catalog_digest: 'b'.repeat(64) } }], allowed_machines: ['Host'] } })
+    const reconnected = await ready()
+    await act(async () => { await reconnected.result.current.refetch() })
+    expect(api.invokeCapability).toHaveBeenCalledTimes(2)
+    expect(reconnected.result.current.submissions[Q]).toEqual(submission)
+    api.invokeCapability.mockResolvedValue({ invocation: job })
+    await act(async () => { await reconnected.result.current.invokeCapability(Q) })
+    expect(api.invokeCapability.mock.calls[2][3]).toEqual(submission)
+    expect(reconnected.result.current.submissions).toEqual({})
+  })
+
+  it('keeps an in-memory retry stable and discloses disabled storage', async () => {
+    capabilityFixture()
+    vi.stubGlobal('sessionStorage', { getItem: () => { throw new Error('Disabled') },
+      setItem: () => { throw new Error('Disabled') }, removeItem: () => { throw new Error('Disabled') } })
+    const hook = await ready()
+    api.invokeCapability.mockRejectedValue(new Error('Response lost'))
+    await act(async () => { await expect(hook.result.current.invokeCapability(Q)).rejects.toThrow() })
+    await act(async () => { await expect(hook.result.current.invokeCapability(Q)).rejects.toThrow() })
+    expect(api.invokeCapability.mock.calls[1][3]).toEqual(api.invokeCapability.mock.calls[0][3])
+    expect(hook.result.current.recoveryUnavailable).toBe(true)
+  })
+
+  it('retains the submission when a response has no canonical job identity', async () => {
+    capabilityFixture()
+    const hook = await ready()
+    api.invokeCapability.mockResolvedValue({ invocation: { status: 'running' } })
+    await act(async () => { await expect(hook.result.current.invokeCapability(Q)).rejects.toThrow('Submission outcome unknown') })
+    const submission = api.invokeCapability.mock.calls[0][3]
+    expect(hook.result.current.submissions[Q]).toEqual(submission)
+    api.invokeCapability.mockResolvedValue({ invocation: job })
+    await act(async () => { await hook.result.current.invokeCapability(Q) })
+    expect(api.invokeCapability.mock.calls[1][3]).toEqual(submission)
+  })
+
+  it('keeps recovered job identity visible even when the following refresh fails', async () => {
+    capabilityFixture()
+    const hook = await ready()
+    api.listCampaigns.mockRejectedValue(new Error('Readback unavailable'))
+    await act(async () => { await hook.result.current.invokeCapability(Q) })
+    expect(hook.result.current.submissions).toEqual({})
+    expect(hook.result.current.invocationResults[Q]).toEqual(job)
+    expect(sessionStorage.getItem(`leaf.campaign.invocation:${P}:${C}:${Q}`)).toBeNull()
+  })
+
+  it.each(['project', 'campaign'])('ignores a late invocation response after a %s switch', async kind => {
+    capabilityFixture()
+    const hook = renderHook(({ project }) => useCampaigns(project), { initialProps: { project: P } })
+    await waitFor(() => expect(hook.result.current.status).toBe('ready'))
+    const pending = deferred()
+    api.invokeCapability.mockReturnValue(pending.promise)
+    let first
+    act(() => { first = hook.result.current.invokeCapability(Q) })
+    if (kind === 'project') hook.rerender({ project: B })
+    else {
+      api.listCampaigns.mockResolvedValue({ campaigns: [row, { ...row, campaign_id: D }] })
+      await act(async () => { await hook.result.current.select(D) })
+    }
+    await waitFor(() => expect(hook.result.current.status).toBe('ready'))
+    await act(async () => { pending.resolve({ invocation: job }); await first })
+    expect(hook.result.current.invocationResults).toEqual({})
+    expect(hook.result.current.submissions).toEqual({})
+  })
+
+  it('drops stale published choices after a campaign switch', async () => {
+    capabilityFixture()
+    const hook = await ready()
+    const pending = deferred()
+    api.listCapabilities.mockReturnValueOnce(pending.promise)
+    let refresh
+    act(() => { refresh = hook.result.current.refetch() })
+    await waitFor(() => expect(api.listCapabilities).toHaveBeenCalledTimes(2))
+    api.listCampaigns.mockResolvedValue({ campaigns: [row, { ...row, campaign_id: D }] })
+    api.listCapabilities.mockResolvedValue({ capabilities: [] })
+    await act(async () => { await hook.result.current.select(D) })
+    await act(async () => { pending.resolve({ capabilities: [{ change_set_id: 'old' }] }); await refresh })
+    expect(hook.result.current.capabilities).toEqual([])
+  })
+
   it('loads configured machines and serializes enrollment mutations', async () => {
     const hook = await ready()
     expect(hook.result.current.allowedMachines).toEqual(['VM-C'])

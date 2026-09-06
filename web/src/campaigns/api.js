@@ -105,6 +105,22 @@ export async function listEnrollments(projectId, id) {
   return request(`/api/campaigns/${uuid(id, 'campaign')}/enrollments?project_id=${encodeURIComponent(uuid(projectId, 'project'))}`)
 }
 
+export async function listCapabilities(projectId, id) {
+  return request(`/api/campaigns/${uuid(id, 'campaign')}/capabilities?project_id=${encodeURIComponent(uuid(projectId, 'project'))}`)
+}
+
+export async function bindPublication(projectId, id, enrollmentId, changeSetId) {
+  return request(`/api/campaigns/${uuid(id, 'campaign')}/enrollments/${uuid(enrollmentId, 'enrollment')}/publication`, post({
+    project_id: uuid(projectId, 'project'), change_set_id: bounded(changeSetId, 'published tool', 200),
+  }))
+}
+
+export async function invokeCapability(projectId, id, enrollmentId, { effectiveCatalogDigest, idempotencyKey }) {
+  return request(`/api/campaigns/${uuid(id, 'campaign')}/enrollments/${uuid(enrollmentId, 'enrollment')}/invoke`, post({
+    project_id: uuid(projectId, 'project'), effective_catalog_digest: bounded(effectiveCatalogDigest, 'catalog digest', 200),
+  }, { 'Idempotency-Key': bounded(idempotencyKey, 'submission key', 128) }))
+}
+
 export async function requestEnrollment(projectId, id, machineId) {
   return request(`/api/campaigns/${uuid(id, 'campaign')}/enrollments`, post({
     project_id: uuid(projectId, 'project'), machine_id: bounded(machineId, 'machine', 200),
