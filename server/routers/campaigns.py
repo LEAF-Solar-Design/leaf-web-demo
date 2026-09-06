@@ -162,12 +162,18 @@ def enrollments(campaign_id: str, request: Request, tenant: Any = Depends(deps.r
 async def enroll(campaign_id: str, request: Request, tenant: Any = Depends(deps.require_tenant)):
     try:
         body = await _body(request)
+        if 'capability' in body and set(body) != {'project_id', 'machine_id', 'capability'}:
+            raise ValueError('Invalid fields')
+        capability = body.get('capability', 'campaign.host-enrollment')
+        if capability not in ('campaign.host-enrollment', 'campaign.native-release'):
+            raise ValueError('Invalid capability')
         project, campaign_id = _id(body.get('project_id')), _id(campaign_id)
         machine = _text(body.get('machine_id'), 'machine_id', 200)
     except ValueError:
         return _failure(400, 'invalid_request', 'Invalid campaign request')
     return _execute(tenant, project, lambda store, org: _enrollment_store().request_enrollment(
-        org, project, campaign_id, _principal(tenant), machine_id=machine),
+        org, project, campaign_id, _principal(tenant), machine_id=machine,
+        **({'capability': capability} if 'capability' in body else {})),
         'enrollment', created=True, project=lambda row: row)
 
 

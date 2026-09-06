@@ -45,6 +45,9 @@ def authority(monkeypatch):
     monkeypatch.setattr(api.platform_link, 'require_project_access', access)
     platform = api._platform()
     monkeypatch.setattr(platform[0], 'get_campaign', lambda *a: {'tenant_id': ORG})
+    monkeypatch.setattr(platform[2], 'list_enrollments', lambda *a: [{
+        'enrollment_id': ENROLLMENT, 'capability': 'campaign.host-enrollment',
+        'capability_link': {'link_id': LINK, 'capability': 'campaign.host-enrollment'}}])
     return pin, change, service
 
 
@@ -102,6 +105,81 @@ def test_missing_or_unrelated_publication_is_empty(authority):
         raise ChangeSetNotFoundError('private')
     service.store.get_effective_catalog = missing
     assert api.list_capabilities(ORG, PROJECT, CAMPAIGN) == []
+
+
+@pytest.fixture
+def native_row(authority, monkeypatch):
+    row = {'enrollment_id': ENROLLMENT, 'machine_id': 'VM-C', 'state': 'pending',
+           'capability': 'campaign.native-release',
+           'capability_link': {'link_id': LINK, 'state': 'pending_link',
+                               'capability': 'campaign.native-release'}}
+    monkeypatch.setattr(api._platform()[2], 'list_enrollments', lambda *a: [deepcopy(row)])
+    return row
+
+
+@pytest.mark.parametrize('operation,body', [
+    ('publication', {'project_id': PROJECT, 'change_set_id': 'fabricated-host-publication'}),
+    ('invoke', {'project_id': PROJECT, 'effective_catalog_digest': 'a' * 64}),
+])
+def test_native_routes_deny_before_jobs_grants_or_host_publication(native_row, client, monkeypatch, operation, body):
+    import jobs
+    capabilities = api._platform()[1]
+    calls = []
+    def forbidden(*args, **kwargs):
+        calls.append(True)
+        raise AssertionError('Native registration entered host execution')
+    monkeypatch.setattr(api, '_publication', forbidden)
+    monkeypatch.setattr(api, '_admission_lock', forbidden)
+    monkeypatch.setattr(jobs, 'submit_job', forbidden)
+    for name in ('bind_publication', 'invocation_context', 'count_invocation', 'read_host_grant',
+                 'claim_host_operation'):
+        monkeypatch.setattr(capabilities, name, forbidden)
+    path = f'/api/campaigns/{CAMPAIGN}/enrollments/{ENROLLMENT}/{operation}'
+    response = client.post(path, json=body, headers={'Idempotency-Key': 'native-key'})
+    assert response.status_code == 409
+    assert response.json()['error']['error_code'] == 'capability_not_ready'
+    assert not calls
+    response = client.post(path, json={**body, 'project_id': str(uuid.uuid4())},
+                           headers={'Idempotency-Key': 'native-key'})
+    assert response.status_code == 403 and not calls
+
+
+def test_native_snapshot_ignores_fabricated_host_success(native_row, monkeypatch):
+    import build_receipts
+    _, capabilities, enrollment, database = api._platform()
+    native_row['state'] = 'enabled'
+    native_row['capability_link'].update(state='completed', publication_id='host-publication',
+        counted_job_ids=[str(uuid.uuid4()), str(uuid.uuid4())])
+    monkeypatch.setattr(enrollment, 'list_enrollments', lambda *a: [deepcopy(native_row)])
+    monkeypatch.setattr(enrollment, 'allowed_machines', lambda: ['VM-C'])
+    for obj, name in ((api, '_stored_context'), (database, 'cursor'),
+                      (capabilities, 'count_invocation'), (build_receipts, 'read_terminal_receipt')):
+        monkeypatch.setattr(obj, name, lambda *a, **k: pytest.fail('Native host evidence consulted'))
+    result = api.enrollment_snapshot(ORG, PROJECT, CAMPAIGN)
+    row, = result['enrollments']
+    assert result['allowed_machines'] == ['VM-C']
+    assert row['readiness'] == 'setup_required'
+    assert row['readiness_message'] == 'The release executor is not connected.'
+    assert row['invocations'] == [] and row['completed_uses'] == 0
+
+
+def test_native_and_host_snapshot_coexist(native_row, monkeypatch):
+    _, _, enrollment, database = api._platform()
+    host_id = str(uuid.uuid4())
+    host = {'enrollment_id': host_id, 'machine_id': 'VM-C', 'state': 'pending',
+            'capability': 'campaign.host-enrollment',
+            'capability_link': {'link_id': str(uuid.uuid4()), 'state': 'pending_link',
+                                'capability': 'campaign.host-enrollment'}}
+    monkeypatch.setattr(enrollment, 'list_enrollments', lambda *a: [deepcopy(native_row), deepcopy(host)])
+    queries = []
+    @contextmanager
+    def cursor():
+        yield SimpleNamespace(execute=lambda sql, params: queries.append(params), fetchall=lambda: [])
+    monkeypatch.setattr(database, 'cursor', cursor)
+    rows = api.enrollment_snapshot(ORG, PROJECT, CAMPAIGN)['enrollments']
+    assert len(rows) == 2 and rows[0]['readiness'] == 'setup_required'
+    assert rows[1]['enrollment_id'] == host_id and rows[1]['completed_uses'] == 0
+    assert len(queries) == 1 and queries[0][-2] == host_id
 
 
 def test_actual_source_normalization_and_containment(tmp_path, monkeypatch):

@@ -7,6 +7,7 @@ const messageOf = error => error?.code === 'answer_conflict' ? conflictMessage :
 const statusWords = { accepted: 'Accepted, not running', running: 'Running', succeeded: 'Succeeded', failed: 'Failed', cancelled: 'Cancelled' }
 const executionWords = value => ({ reconcile_required: 'Outcome unknown, reconciliation required', claimed: 'In progress', pending: 'Waiting' })[value]
   || String(value || '').replaceAll('_', ' ')
+const nativeRelease = row => row.capability === 'campaign.native-release' || row.capability_link?.capability === 'campaign.native-release'
 
 function Alert({ error, onReload, retry = 'Reload' }) {
   const ref = useRef(null)
@@ -171,6 +172,7 @@ function CapabilityControls({ campaign, row }) {
 
 function EnrollmentPanel({ campaign }) {
   const [machine, setMachine] = useState('')
+  const [capability, setCapability] = useState('campaign.host-enrollment')
   const action = useAction()
   const machines = campaign.allowedMachines || []
   const selected = machines.includes(machine) ? machine : machines[0] || ''
@@ -181,19 +183,27 @@ function EnrollmentPanel({ campaign }) {
     <Alert error={campaign.capabilityError} onReload={campaign.refetch} />
     {campaign.recoveryUnavailable && <p role="status">Browser storage is unavailable. Retry keeps the same submission in this view, but reconnect recovery is unavailable.</p>}
     {machines.length === 0 ? <p>No campaign machines are configured. Ask your workspace operator to configure a host.</p> : <>
+      <label>Registration capability<select value={capability} disabled={busy} onChange={event => setCapability(event.target.value)}>
+        <option value="campaign.host-enrollment">Connect build host</option>
+        <option value="campaign.native-release">Prepare native AWS release</option>
+      </select></label>
       <label>Campaign machine<select value={selected} disabled={busy} onChange={event => setMachine(event.target.value)}>
         {machines.map(value => <option key={value} value={value}>{value}</option>)}
       </select></label>
       <button type="button" className="btn primary" disabled={busy || !selected} aria-busy={busy}
-        onClick={() => action.run(() => campaign.enroll(selected), 'Host enrollment recorded.')}>
-        Connect {selected} to this campaign
+        onClick={() => action.run(() => capability === 'campaign.host-enrollment'
+          ? campaign.enroll(selected) : campaign.enroll(selected, capability),
+        capability === 'campaign.host-enrollment' ? 'Host enrollment recorded.' : 'Native release registration recorded.')}>
+        {capability === 'campaign.host-enrollment' ? `Connect ${selected} to this campaign` : 'Prepare native AWS release'}
       </button>
     </>}
     <ul>{(campaign.enrollments || []).map(row => <li key={row.enrollment_id}>
       <p>{row.machine_id}: {executionWords(row.state)}</p>
-      {row.capability_link?.state === 'pending_link' && <p>Capability not yet published</p>}
-      <CapabilityControls campaign={campaign} row={row} />
-      {row.state === 'pending' && <button type="button" className="chip-act" disabled={action.busy || !!campaign.pending[`enrollment:${row.enrollment_id}`]}
+      {nativeRelease(row) ? <p role="status">Native AWS release: Setup required. {row.readiness_message || 'The release executor is not connected.'}</p> : <>
+        {row.capability_link?.state === 'pending_link' && <p>Capability not yet published</p>}
+        <CapabilityControls campaign={campaign} row={row} />
+      </>}
+      {!nativeRelease(row) && row.state === 'pending' && <button type="button" className="chip-act" disabled={action.busy || !!campaign.pending[`enrollment:${row.enrollment_id}`]}
         onClick={() => action.run(() => campaign.enableEnrollment(row.enrollment_id), 'Host enrollment enabled.')}>Enable</button>}
       {row.state !== 'revoked' && <button type="button" className="chip-act" disabled={action.busy || !!campaign.pending[`enrollment:${row.enrollment_id}`]}
         onClick={() => action.run(() => campaign.revokeEnrollment(row.enrollment_id), 'Host enrollment revoked.')}>Revoke</button>}
