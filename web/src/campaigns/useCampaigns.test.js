@@ -49,6 +49,99 @@ async function ready() {
   return hook
 }
 
+describe('completion state', () => {
+  const finish = { delivery_profile: 'web_tool', intended_user: 'Project owner', workflow: 'Use the tool', artifact_refs: [] }
+  const completion = { release: { release_id: Q, status: 'active' }, stages: [{ stage: 'implementation', status: 'passed' }] }
+  it('reads detail and execution snapshots without mandatory release polling', async () => {
+    api.getCampaign.mockResolvedValue({ campaign: row, completion })
+    const hook = await ready()
+    await waitFor(() => expect(hook.result.current.executionLoading).toBe(false))
+    expect(hook.result.current.completion).toEqual(completion)
+    const next = { ...completion, release: { ...completion.release, status: 'paused' } }
+    api.getExecution.mockResolvedValue({ execution: { tasks: [], receipts: [], events: [], completion: next } })
+    await act(async () => { await hook.result.current.refetch() })
+    expect(hook.result.current.completion).toEqual(next)
+    expect(api.getRelease).not.toHaveBeenCalled()
+    expect(api.listReleases).not.toHaveBeenCalled()
+  })
+  it('preserves release progress and submission keys on failures', async () => {
+    api.getCampaign.mockResolvedValue({ campaign: row, completion })
+    api.createRelease.mockRejectedValue(new Error('Unavailable'))
+    api.transitionRelease.mockRejectedValue(new Error('Pause unavailable'))
+    const hook = await ready()
+    for (let i = 0; i < 2; i++) await act(async () => {
+      await expect(hook.result.current.createRelease(finish)).rejects.toThrow('Unavailable')
+    })
+    expect(api.createRelease.mock.calls[0][2]).toEqual(api.createRelease.mock.calls[1][2])
+    await act(async () => { await expect(hook.result.current.transitionRelease('pause')).rejects.toThrow('Pause unavailable') })
+    expect(api.transitionRelease).toHaveBeenCalledWith(P, C, Q, 'pause')
+    expect(hook.result.current.completion).toEqual(completion)
+  })
+  it('includes mode and finish fields in failed draft identity', async () => {
+    api.submitCampaign.mockRejectedValue(new Error('Unavailable'))
+    const hook = await ready()
+    const drafts = [{ title: 'Tool', prompt: 'Build' }, { title: 'Tool', prompt: 'Build', mode: 'finish', finish }]
+    for (const draft of [drafts[0], drafts[1], drafts[1], { ...drafts[1], finish: { ...finish, delivery_profile: 'cad_file' } }]) {
+      await act(async () => { await expect(hook.result.current.submit(draft)).rejects.toThrow('Unavailable') })
+    }
+    const keys = api.submitCampaign.mock.calls.map(([input]) => input.idempotencyKey)
+    expect(keys[0]).not.toBe(keys[1])
+    expect(keys[1]).toBe(keys[2])
+    expect(keys[2]).not.toBe(keys[3])
+  })
+  it('ignores late release mutation responses after campaign selection', async () => {
+    api.listCampaigns.mockResolvedValue({ campaigns: [row, { ...row, campaign_id: D }] })
+    api.getCampaign.mockImplementation(async (_p, id) => ({ campaign: { ...row, campaign_id: id }, completion: id === C ? completion : null }))
+    const pending = deferred()
+    api.transitionRelease.mockReturnValue(pending.promise)
+    const hook = await ready()
+    let mutation
+    act(() => { mutation = hook.result.current.transitionRelease('pause') })
+    await act(async () => { await hook.result.current.select(D) })
+    expect(hook.result.current.completion).toBeNull()
+    await act(async () => { pending.resolve({ completion }); await mutation })
+    expect(hook.result.current.selectedId).toBe(D)
+    expect(hook.result.current.completion).toBeNull()
+  })
+  it('ignores an old project execution snapshot after switching projects', async () => {
+    const pending = deferred()
+    api.getExecution.mockImplementation(project => project === P ? pending.promise : Promise.resolve({ execution: { tasks: [], receipts: [], events: [] } }))
+    api.getCampaign.mockImplementation(async (project, id) => ({ campaign: { ...row, campaign_id: id }, completion: project === P ? completion : null }))
+    const hook = renderHook(({ project }) => useCampaigns(project), { initialProps: { project: P } })
+    await waitFor(() => expect(api.getExecution).toHaveBeenCalledWith(P, C))
+    hook.rerender({ project: B })
+    expect(hook.result.current.completion).toBeNull()
+    await waitFor(() => expect(hook.result.current.status).toBe('ready'))
+    await act(async () => { pending.resolve({ execution: { completion } }) })
+    expect(hook.result.current.completion).toBeNull()
+  })
+  it('clears completion immediately and ignores a late execution response after campaign change', async () => {
+    const pending = deferred()
+    api.listCampaigns.mockResolvedValue({ campaigns: [row, { ...row, campaign_id: D }] })
+    api.getCampaign.mockImplementation(async (_p, id) => ({ campaign: { ...row, campaign_id: id }, completion: id === C ? completion : null }))
+    api.getExecution.mockImplementation((_p, id) => id === C ? pending.promise : Promise.resolve({ execution: { tasks: [], receipts: [], events: [] } }))
+    const hook = await ready()
+    let selection
+    act(() => { selection = hook.result.current.select(D) })
+    expect(hook.result.current.completion).toBeNull()
+    await act(async () => { await selection })
+    await act(async () => { pending.resolve({ execution: { completion } }) })
+    expect(hook.result.current.selectedId).toBe(D)
+    expect(hook.result.current.completion).toBeNull()
+  })
+  it('retains execution completion on failed refresh and clears an explicit empty snapshot', async () => {
+    api.getExecution.mockResolvedValue({ execution: { tasks: [], receipts: [], events: [], completion } })
+    const hook = await ready()
+    await waitFor(() => expect(hook.result.current.completion).toEqual(completion))
+    api.getExecution.mockRejectedValue(new Error('Execution unavailable'))
+    await act(async () => { await hook.result.current.refetch() })
+    expect(hook.result.current.completion).toEqual(completion)
+    api.getExecution.mockResolvedValue({ execution: { tasks: [], receipts: [], events: [], completion: null } })
+    await act(async () => { await hook.result.current.refetch() })
+    expect(hook.result.current.completion).toBeNull()
+  })
+})
+
 it('registers native release in the selected campaign and reloads setup readiness without execution', async () => {
   const native = { enrollment_id: Q, machine_id: 'VM-C', capability: 'campaign.native-release',
     state: 'pending', readiness: 'setup_required', readiness_message: 'The release executor is not connected.',

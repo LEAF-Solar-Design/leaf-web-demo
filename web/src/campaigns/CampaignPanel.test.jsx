@@ -20,12 +20,136 @@ beforeEach(() => {
     ask: vi.fn().mockResolvedValue({ question: { question_id: Q } }),
     answer: vi.fn().mockResolvedValue({ answer: { answer: 'Use PDF.' } }),
     select: vi.fn(), refetch: vi.fn().mockResolvedValue({ campaigns: [row] }),
+    createRelease: vi.fn().mockResolvedValue({ ok: true }),
+    transitionRelease: vi.fn().mockResolvedValue({ ok: true }),
+    retryReleaseStage: vi.fn().mockResolvedValue({ ok: true }),
   }
   useCampaigns.mockImplementation(() => campaign)
 })
 afterEach(cleanup)
 
 const panel = props => <CampaignPanel projectId={P} projectName="Document studio" signedIn {...props} />
+
+describe('release evidence panel', () => {
+  const stages = ['implementation', 'publication', 'deployment', 'user_verification', 'delivery']
+  function releaseFixture(status = 'active') {
+    campaign.completion = {
+      release: { release_id: Q, status, contract_version: 1, scope_summary: 'Deliver the recipe PDF', deferred_items: ['Mobile app'],
+        contract: { original_goal: 'Organize all family recipes', required_checks: [{ check_id: 'workflow', stage: 'user_verification', description: 'Download a readable PDF' }] } },
+      stages: [], coverage: [], decisions: [{ payload: { reason: 'PDF first, mobile later' } }], remaining: [], deliverables: [],
+      next_action: { message: 'Choose the page size in Questions' },
+    }
+  }
+  it('submits finish mode and can start a release for an existing campaign', async () => {
+    render(panel())
+    fireEvent.click(screen.getByRole('button', { name: 'Finish this project' }))
+    await screen.findByText('Release requested.')
+    expect(campaign.createRelease).toHaveBeenCalledWith({ delivery_profile: 'web_tool', intended_user: 'Project owner', workflow: row.prompt, artifact_refs: [] })
+    fireEvent.change(screen.getByLabelText('Campaign goal'), { target: { value: 'finish' } })
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Family recipes' } })
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Deliver the PDF' } })
+    const form = screen.getByLabelText('Title').closest('form')
+    fireEvent.change(within(form).getByLabelText('Delivery profile'), { target: { value: 'cad_file' } })
+    fireEvent.submit(form)
+    await waitFor(() => expect(campaign.submit).toHaveBeenCalledWith({ title: 'Family recipes', prompt: 'Deliver the PDF', mode: 'finish',
+      finish: { delivery_profile: 'cad_file', intended_user: 'Project owner', workflow: 'Deliver the PDF', artifact_refs: [] } }))
+  })
+  it('renders missing stages and missing check status as unavailable', () => {
+    releaseFixture()
+    campaign.completion.coverage = [{ check_id: 'workflow' }]
+    const { container } = render(panel())
+    expect(container.querySelectorAll('.campaign-release-stages li')).toHaveLength(5)
+    expect([...container.querySelectorAll('.campaign-release-stages li')].every(item => item.textContent.includes('unavailable'))).toBe(true)
+    expect(screen.getByText('Download a readable PDF: unavailable')).toBeTruthy()
+    expect(screen.getByText('Verified checks unavailable.')).toBeTruthy()
+    expect(screen.queryByRole('link')).toBeNull()
+    expect(container.textContent).not.toContain('%')
+  })
+  it('shows completed bounded release, safe validated outputs, replay and original ambition', () => {
+    releaseFixture('finished')
+    campaign.completion.stages = stages.map(stage => ({ stage, status: 'passed', contract_version: 1,
+      evidence: stage === 'delivery' ? { replay_recipe: ['Open the project', 'Download the recipe PDF'], known_limits: ['Desktop only'] } : {} }))
+    campaign.completion.coverage = [{ check_id: 'workflow', status: 'passed' }]
+    campaign.completion.deliverables = [
+      { artifact_ref: 'recipe-pdf', name: 'Recipe PDF', access_path: '/outputs/recipe.pdf', byte_count: 2048,
+        sha256: 'a'.repeat(64), valid: true, retrieved: true },
+      { name: 'Unsafe', access_path: 'javascript:alert(1)', byte_count: 100, sha256: 'a'.repeat(64), valid: true, retrieved: true },
+      { name: 'Unverified', access_path: 'https://example.test/file', byte_count: 100, sha256: 'a'.repeat(64), valid: false, retrieved: true },
+      { name: 'Empty', access_path: '/empty', byte_count: 0, sha256: 'a'.repeat(64), valid: true, retrieved: true },
+    ]
+    render(panel())
+    expect(screen.getByText('Completed release')).toBeTruthy()
+    expect(screen.getByText(/does not mean the entire original ambition is done/)).toBeTruthy()
+    expect(screen.getByText('Organize all family recipes')).toBeTruthy()
+    expect(screen.getByText('Mobile app')).toBeTruthy()
+    expect(screen.getByText('PDF first, mobile later')).toBeTruthy()
+    expect(screen.getByRole('link', { name: 'Recipe PDF' }).getAttribute('href')).toBe('/outputs/recipe.pdf')
+    expect(screen.getAllByRole('link')).toHaveLength(1)
+    expect(screen.getByText('(2 KB)')).toBeTruthy()
+    expect(screen.getByText('Download the recipe PDF')).toBeTruthy()
+    expect(screen.getByText('Desktop only')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Cancel release' })).toBeNull()
+  })
+  it.each([
+    { valid: undefined }, { valid: false }, { retrieved: undefined }, { retrieved: false },
+    { valid: undefined, retrieved: undefined }, { sha256: undefined }, { sha256: 'invalid' },
+    { byte_count: undefined }, { byte_count: -1 },
+  ])('withholds canonical output links without positive proof: %j', overrides => {
+    releaseFixture('finished')
+    campaign.completion.stages = [{ stage: 'delivery', status: 'passed' }]
+    campaign.completion.deliverables = [{ artifact_ref: 'cad-file', name: 'CAD drawing', access_path: '/outputs/drawing.dwg',
+      byte_count: 2048, sha256: 'a'.repeat(64), valid: true, retrieved: true, ...overrides }]
+    render(panel())
+    expect(screen.queryByRole('link')).toBeNull()
+    expect(screen.getByText('CAD drawing: access evidence unavailable')).toBeTruthy()
+  })
+  it('requires explicit proof for accepted artifact aliases', () => {
+    releaseFixture('finished')
+    campaign.completion.stages = [{ stage: 'delivery', status: 'passed' }]
+    const artifact = { name: 'Alias output', download_url: 'https://example.test/output.pdf', size_bytes: 2048,
+      sha256: 'a'.repeat(64), validated: true, retrieval_validated: true, content_validated: true }
+    campaign.completion.deliverables = [artifact]
+    const { rerender } = render(panel())
+    expect(screen.getByRole('link', { name: 'Alias output' }).getAttribute('href')).toBe(artifact.download_url)
+    for (const flag of ['validated', 'retrieval_validated', 'content_validated']) {
+      for (const value of [undefined, false]) {
+        campaign.completion.deliverables = [{ ...artifact, [flag]: value }]
+        rerender(panel())
+        expect(screen.queryByRole('link')).toBeNull()
+      }
+    }
+  })
+  it.each([
+    [{ action: 'retry_stage', stage: 'user_verification' }, 'Retry user verification using the release controls.'],
+    [{ action: 'change_approach' }, 'Choose a different approach before retrying this release.'],
+    [{ action: 'unknown' }, 'Review the release and resolve the pending action before continuing.'],
+  ])('shows a readable structured next action: %j', (nextAction, message) => {
+    releaseFixture()
+    campaign.completion.next_action = nextAction
+    render(panel())
+    expect(screen.getByText(message)).toBeTruthy()
+    expect(screen.queryByText('No user action reported.')).toBeNull()
+  })
+  it('offers pause, resume, cancel and failed-stage retry, retaining progress on errors', async () => {
+    releaseFixture()
+    campaign.completion.stages = [{ stage: 'implementation', status: 'passed' }, { stage: 'publication', status: 'failed' }]
+    campaign.retryReleaseStage.mockRejectedValue(new Error('Retry unavailable'))
+    const { rerender } = render(panel())
+    fireEvent.click(screen.getByRole('button', { name: 'Retry publication' }))
+    await screen.findByText('Retry unavailable')
+    expect(campaign.retryReleaseStage).toHaveBeenCalledWith('publication')
+    expect(screen.getByText('passed')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Pause release' }))
+    await waitFor(() => expect(campaign.transitionRelease).toHaveBeenCalledWith('pause'))
+    campaign.completion.release.status = 'paused'
+    rerender(panel())
+    fireEvent.click(screen.getByRole('button', { name: 'Resume release' }))
+    await waitFor(() => expect(campaign.transitionRelease).toHaveBeenCalledWith('resume'))
+    await screen.findByText('Release resumed.')
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel release' }))
+    await waitFor(() => expect(campaign.transitionRelease).toHaveBeenCalledWith('cancel'))
+  })
+})
 
 it('lets the user register native AWS release and shows setup required without host execution controls', async () => {
   campaign.allowedMachines = ['VM-C']
@@ -198,7 +322,7 @@ describe('campaign panel in the project workspace', () => {
     expect(execution.querySelector('time').textContent).toBe(new Date('2026-09-05T12:00:00Z').toLocaleString())
     expect(execution.textContent).not.toMatch(/spec|worker|fence|attempt|mount-fleet-adapter|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|%|complete/i)
     expect(within(execution).queryAllByRole('button')).toHaveLength(0)
-    expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Submit campaign', 'Ask'])
+    expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Submit campaign', 'Finish this project', 'Ask'])
   })
 
   it('shows loading and empty execution, and retains questions during an execution error', () => {
@@ -214,7 +338,7 @@ describe('campaign panel in the project workspace', () => {
     expect(screen.getByText('No tasks recorded yet.')).toBeTruthy()
     expect(screen.getByText('Which format?')).toBeTruthy()
     expect(screen.getByRole('alert').textContent).toContain('Execution is unavailable.')
-    expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Submit campaign', 'Try again', 'Record answer', 'Ask'])
+    expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Submit campaign', 'Finish this project', 'Try again', 'Record answer', 'Ask'])
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
     expect(campaign.refetch).toHaveBeenCalledTimes(1)
   })

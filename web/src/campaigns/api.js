@@ -67,10 +67,47 @@ function post(body, headers = {}) {
   return { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) }
 }
 
-export async function submitCampaign({ projectId, title, prompt, idempotencyKey }) {
+function finishFields(finish) {
+  if (!finish || typeof finish !== 'object' || Array.isArray(finish)) invalid('finish', 'Choose a delivery profile.')
+  const profile = bounded(finish.delivery_profile, 'delivery profile', 64)
+  if (!/^[a-z][a-z0-9_]*$/.test(profile)) invalid('delivery profile', 'Choose a supported delivery profile.')
+  const refs = finish.artifact_refs ?? []
+  if (!Array.isArray(refs) || refs.length > 100) invalid('artifact references', 'Choose at most 100 project artifacts.')
+  return { delivery_profile: profile, intended_user: bounded(finish.intended_user, 'intended user', 4096),
+    workflow: bounded(finish.workflow, 'workflow', 32768), artifact_refs: refs.map(ref => bounded(ref, 'artifact reference', 2048)) }
+}
+
+export async function submitCampaign({ projectId, title, prompt, idempotencyKey, mode, finish }) {
   const body = { project_id: uuid(projectId, 'project'), title: bounded(title, 'title', 200), prompt: bounded(prompt, 'prompt', 32768) }
+  if (mode !== undefined && mode !== 'finish') invalid('mode', 'Choose a supported campaign mode.')
+  if (mode === 'finish') Object.assign(body, { mode, finish: finishFields(finish) })
   bounded(idempotencyKey, 'submission key', 128)
   return request('/api/campaigns', post(body, { 'Idempotency-Key': idempotencyKey }))
+}
+
+const releasePath = (id, releaseId) => `/api/campaigns/${uuid(id, 'campaign')}/releases${releaseId === undefined ? '' : `/${uuid(releaseId, 'release')}`}`
+
+export async function createRelease(projectId, id, { finish, idempotencyKey }) {
+  return request(releasePath(id), post({ project_id: uuid(projectId, 'project'), finish: finishFields(finish) },
+    { 'Idempotency-Key': bounded(idempotencyKey, 'submission key', 128) }))
+}
+
+export async function getRelease(projectId, id, releaseId) {
+  return request(`${releasePath(id, releaseId)}?project_id=${encodeURIComponent(uuid(projectId, 'project'))}`)
+}
+
+export async function listReleases(projectId, id) {
+  return request(`${releasePath(id)}?project_id=${encodeURIComponent(uuid(projectId, 'project'))}`)
+}
+
+export async function transitionRelease(projectId, id, releaseId, action) {
+  if (!['pause', 'resume', 'cancel'].includes(action)) invalid('action', 'Choose pause, resume or cancel.')
+  return request(`${releasePath(id, releaseId)}/${action}`, post({ project_id: uuid(projectId, 'project') }))
+}
+
+export async function retryReleaseStage(projectId, id, releaseId, stage) {
+  if (!['implementation', 'publication', 'deployment', 'user_verification', 'delivery'].includes(stage)) invalid('stage', 'Choose a release stage.')
+  return request(`${releasePath(id, releaseId)}/retry`, post({ project_id: uuid(projectId, 'project'), stage }))
 }
 
 export async function listCampaigns(projectId, limit = 50) {

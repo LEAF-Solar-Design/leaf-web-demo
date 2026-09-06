@@ -3,7 +3,7 @@ import * as api from './api.js'
 
 const empty = () => ({ status: 'idle', refreshing: false, error: null, errorAction: null,
   campaigns: [], selectedId: null, selected: null, questions: [], answers: {}, pending: {},
-  execution: null, executionLoading: false, executionError: null,
+  execution: null, executionLoading: false, executionError: null, completion: null,
   enrollments: [], allowedMachines: [], enrollmentError: null,
   capabilities: [], capabilityError: null, submissions: {}, invocationResults: {}, recoveryUnavailable: false })
 const newKey = () => globalThis.crypto?.randomUUID?.() || `k-${Date.now()}-${Math.random().toString(16).slice(2)}`
@@ -15,6 +15,7 @@ export default function useCampaigns(projectId, { enabled = true } = {}) {
   const contextRef = useRef(null)
   const generationRef = useRef(0)
   const draftKeyRef = useRef(null)
+  const releaseKeysRef = useRef(new Map())
   const questionKeyRef = useRef(null)
   const submissionsRef = useRef(new Map())
   const resultsRef = useRef(new Map())
@@ -60,6 +61,7 @@ export default function useCampaigns(projectId, { enabled = true } = {}) {
       const selectedId = campaigns.some(row => row.campaign_id === preferredId)
         ? preferredId : campaigns[0]?.campaign_id || null
       let selected = null
+      let completion = null
       let questions = []
       let enrollment = { enrollments: [], allowed_machines: [] }
       let enrollmentError = null
@@ -74,6 +76,9 @@ export default function useCampaigns(projectId, { enabled = true } = {}) {
         if (!live()) return null
         if (enrollmentError || capabilityError) onChoicesError?.(enrollmentError || capabilityError)
         selected = detail.campaign
+        completion = detail.completion !== undefined ? detail.completion
+          : detail.campaign?.completion !== undefined ? detail.campaign.completion
+            : context.selectedId === selectedId ? context.completion ?? null : null
         questions = rows.questions || []
         if (hosts) enrollment = hosts.enrollment
         capabilities = tools?.capabilities || []
@@ -95,7 +100,8 @@ export default function useCampaigns(projectId, { enabled = true } = {}) {
       }
       context.capabilities = capabilities
       context.enrollments = enrollment.enrollments
-      update({ campaigns, selectedId, selected, questions, answers, status: 'ready', refreshing: false,
+      context.completion = completion
+      update({ campaigns, selectedId, selected, completion, questions, answers, status: 'ready', refreshing: false,
         capabilities, capabilityError, submissions, invocationResults, recoveryUnavailable: storageUnavailableRef.current,
         enrollments: enrollment.enrollments, allowedMachines: enrollment.allowed_machines, enrollmentError,
         executionLoading: !!selectedId, ...(changedSelection || !selectedId ? { execution: null, executionError: null } : {}) })
@@ -103,7 +109,10 @@ export default function useCampaigns(projectId, { enabled = true } = {}) {
         try {
           const result = await api.getExecution(projectId, selectedId)
           if (!live()) return null
-          update({ execution: result.execution, executionLoading: false, executionError: null })
+          completion = result.completion !== undefined ? result.completion
+            : result.execution?.completion !== undefined ? result.execution.completion : completion
+          context.completion = completion
+          update({ execution: result.execution, completion, executionLoading: false, executionError: null })
         } catch (executionError) {
           if (!live()) return null
           update({ executionError, executionLoading: false })
@@ -131,23 +140,29 @@ export default function useCampaigns(projectId, { enabled = true } = {}) {
     context.locks = {}
     context.capabilities = []
     context.enrollments = []
+    context.completion = null
     questionKeyRef.current = null
     update({ selectedId: id, selected: null, questions: [], answers: {}, pending: {}, error: null, errorAction: null,
       enrollments: [], allowedMachines: [], enrollmentError: null,
       capabilities: [], capabilityError: null, submissions: {}, invocationResults: {}, recoveryUnavailable: false,
-      execution: null, executionLoading: false, executionError: null })
+      execution: null, executionLoading: false, executionError: null, completion: null })
     return load({ preferredId: id })
   }, [context, current, load, update])
 
   const mutate = useCallback(async (action, operation, preferredId) => {
     if (!enabled || !projectId || !current() || context.locks[action]) return null
     const view = context.view
+    const selectedId = context.selectedId
     const locks = context.locks
     locks[action] = true
     update({ pending: { ...locks }, error: null, errorAction: null })
     try {
       const result = await operation()
-      if (!current(view)) return null
+      if (!current(view) || context.selectedId !== selectedId) return null
+      if (action !== 'submit' && result?.completion !== undefined) {
+        context.completion = result.completion
+        update({ completion: result.completion })
+      }
       if (action === 'submit') draftKeyRef.current = null
       if (action === 'ask') questionKeyRef.current = null
       // An answer receipt is server truth, never the operator's draft.
@@ -158,7 +173,7 @@ export default function useCampaigns(projectId, { enabled = true } = {}) {
       await load({ preferredId: preferredId?.(result) ?? context.selectedId })
       return current(view) ? result : null
     } catch (error) {
-      if (current(view)) setSnapshot(previous => error?.status === 409 && error?.code === 'catalog_drift'
+      if (current(view) && context.selectedId === selectedId) setSnapshot(previous => error?.status === 409 && error?.code === 'catalog_drift'
         && previous.errorAction === 'load' ? previous : { ...previous, error, errorAction: action })
       throw error
     } finally {
@@ -167,12 +182,35 @@ export default function useCampaigns(projectId, { enabled = true } = {}) {
     }
   }, [context, current, enabled, load, projectId, update])
 
-  const submit = useCallback(({ title, prompt }) => {
-    const fingerprint = `${projectId}\n${title}\n${prompt}`
+  const submit = useCallback(({ title, prompt, mode, finish }) => {
+    const fingerprint = JSON.stringify([projectId, title, prompt, mode, finish])
     if (draftKeyRef.current?.fingerprint !== fingerprint) draftKeyRef.current = { fingerprint, key: newKey() }
     const idempotencyKey = draftKeyRef.current.key
-    return mutate('submit', () => api.submitCampaign({ projectId, title, prompt, idempotencyKey }), result => result.campaign.campaign_id)
+    return mutate('submit', () => api.submitCampaign({ projectId, title, prompt, idempotencyKey,
+      ...(mode === undefined ? {} : { mode, finish }) }), result => result.campaign.campaign_id)
   }, [mutate, projectId])
+  const createRelease = useCallback(finish => {
+    const id = context.selectedId
+    if (!id) return Promise.resolve(null)
+    const signature = JSON.stringify([projectId, id, 'finish', finish])
+    if (!releaseKeysRef.current.has(signature)) releaseKeysRef.current.set(signature, newKey())
+    const idempotencyKey = releaseKeysRef.current.get(signature)
+    return mutate('release', async () => {
+      const result = await api.createRelease(projectId, id, { finish, idempotencyKey })
+      releaseKeysRef.current.delete(signature)
+      return result
+    })
+  }, [context, mutate, projectId])
+  const transitionRelease = useCallback(action => {
+    const id = context.selectedId
+    const releaseId = context.completion?.release?.release_id
+    return id && releaseId ? mutate('release', () => api.transitionRelease(projectId, id, releaseId, action)) : Promise.resolve(null)
+  }, [context, mutate, projectId])
+  const retryReleaseStage = useCallback(stage => {
+    const id = context.selectedId
+    const releaseId = context.completion?.release?.release_id
+    return id && releaseId ? mutate('release', () => api.retryReleaseStage(projectId, id, releaseId, stage)) : Promise.resolve(null)
+  }, [context, mutate, projectId])
   const ask = useCallback(({ prompt }) => {
     const id = context.selectedId
     if (!id) return Promise.resolve(null)
@@ -265,5 +303,6 @@ export default function useCampaigns(projectId, { enabled = true } = {}) {
     })
   }, [context, current, enabled, load, mutate, projectId, readSubmission])
   return { ...(snapshot.scope === scope ? snapshot : empty()), select, submit, ask, answer, refetch,
-    enroll, enableEnrollment, revokeEnrollment, bindPublication, invokeCapability }
+    enroll, enableEnrollment, revokeEnrollment, bindPublication, invokeCapability,
+    createRelease, transitionRelease, retryReleaseStage }
 }

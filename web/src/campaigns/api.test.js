@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { bindPublication, invokeCapability, listCapabilities } from './api.js'
 import { requestEnrollment } from './api.js'
+import { submitCampaign, createRelease, getRelease, listReleases, transitionRelease, retryReleaseStage } from './api.js'
 
 vi.mock('../api.js', () => ({
   config: { apiBase: 'https://campaign.test', tenant: 'test-tenant' },
@@ -18,6 +19,41 @@ beforeEach(() => {
   vi.stubGlobal('fetch', fetcher)
 })
 afterEach(() => { vi.unstubAllGlobals(); localStorage.clear() })
+
+describe('completion transport', () => {
+  const finish = { delivery_profile: 'cad_file', intended_user: 'Project owner', workflow: 'Download the drawing', artifact_refs: ['project-artifact'] }
+  it('sends declarative finish fields and strips executable and authoritative extras', async () => {
+    await submitCampaign({ projectId: P, title: 'Drawing', prompt: 'Finish the drawing', mode: 'finish',
+      finish: { ...finish, commands: ['bad'], status: 'finished', checks: ['passed'], grants: ['bad'] },
+      idempotencyKey: 'finish-key', evidence: 'bad' })
+    expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({ project_id: P, title: 'Drawing',
+      prompt: 'Finish the drawing', mode: 'finish', finish })
+    expect(fetcher.mock.calls[0][1].headers['Idempotency-Key']).toBe('finish-key')
+    await createRelease(P, C, { finish, idempotencyKey: 'release-key' })
+    expect(JSON.parse(fetcher.mock.calls[1][1].body)).toEqual({ project_id: P, finish })
+  })
+  it('uses the scoped release routes and rejects client finalization', async () => {
+    await listReleases(P, C)
+    await getRelease(P, C, E)
+    await transitionRelease(P, C, E, 'pause')
+    await retryReleaseStage(P, C, E, 'delivery')
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+      `https://campaign.test/api/campaigns/${C}/releases?project_id=${P}`,
+      `https://campaign.test/api/campaigns/${C}/releases/${E}?project_id=${P}`,
+      `https://campaign.test/api/campaigns/${C}/releases/${E}/pause`,
+      `https://campaign.test/api/campaigns/${C}/releases/${E}/retry`,
+    ])
+    expect(JSON.parse(fetcher.mock.calls[3][1].body)).toEqual({ project_id: P, stage: 'delivery' })
+    await expect(transitionRelease(P, C, E, 'finish')).rejects.toThrow('pause, resume or cancel')
+    await expect(retryReleaseStage(P, C, E, 'execute')).rejects.toThrow('release stage')
+    expect(fetcher).toHaveBeenCalledTimes(4)
+  })
+  it('rejects non-reference objects and malformed profiles before sending', async () => {
+    await expect(createRelease(P, C, { finish: { ...finish, artifact_refs: [{ command: 'bad' }] }, idempotencyKey: 'key' })).rejects.toThrow('Artifact reference')
+    await expect(createRelease(P, C, { finish: { ...finish, delivery_profile: '../execute' }, idempotencyKey: 'key' })).rejects.toThrow('delivery profile')
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+})
 
 describe('native release registration transport', () => {
   it('preserves host omission and sends the selected native capability through enrollment', async () => {
