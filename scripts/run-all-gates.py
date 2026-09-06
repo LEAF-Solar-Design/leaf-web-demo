@@ -309,6 +309,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_backbone.py"), 15),
         Suite("server-campaigns", "server tests/test_campaigns_router.py", "pytest", SERVER,
               _py_pytest("tests/test_campaigns_router.py"), 8),
+        Suite("server-project-repository-source", "server tests/test_project_repository_source.py", "pytest", SERVER,
+              _py_pytest("tests/test_project_repository_source.py"), 8),
         Suite("server-dependency-health", "server tests/test_dependency_health.py", "pytest",
               SERVER, _py_pytest("tests/test_dependency_health.py"), 20),
         Suite("server-auth", "server test_auth.py", "pytest", SERVER,
@@ -1582,6 +1584,11 @@ def build_suites() -> List[Suite]:
         Suite("harness-vitest", "harness npm test (vitest)", "vitest", HARNESS,
               [_npm(), "test"], 317,
               allowed_vitest_skips=(
+                  # Actual producer: project-lifecycle-postgres.yml,
+                  # Run canonical project source PostgreSQL tests. These
+                  # hermetic exemptions require that PostgreSQL job to pass.
+                  ("test/projectRepositorySourceInitialize.test.ts", 5),
+                  ("test/projectRepositorySourceExport.test.ts", 4),
                   ("test/tenantRepoLease.test.ts", 4),
                   ("test/harnessSchema.pg.test.ts", 1),
                   ("test/pgSessionStore.contract.test.ts", 5),

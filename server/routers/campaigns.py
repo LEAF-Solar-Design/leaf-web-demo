@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import sys
 import uuid
@@ -13,6 +14,8 @@ from fastapi.responses import JSONResponse
 
 import deps
 import platform_link
+import project_repository_source
+import campaign_worker_service
 
 router = APIRouter()
 _STORE = None
@@ -112,18 +115,23 @@ def _execute(tenant, project_id, operation, key, *, created=False, project=_disp
         return JSONResponse(status_code=status, content={'ok': True, key: projected})
     except platform_link.ProjectSessionForbidden:
         return _failure(403, 'forbidden', 'project role does not permit access')
+    except project_repository_source.SourceConflict:
+        return _failure(409, 'source_conflict', 'project source conflicts')
+    except project_repository_source.SourceUnavailable:
+        return _failure(503, 'source_unavailable', 'project source is unavailable')
     except LookupError:
         return _failure(404, 'project_unavailable', 'project is unavailable')
     except store.CampaignConflict as exc:
-        return _failure(409, exc.code, str(exc))
+        return _failure(409, exc.code, 'Campaign request conflicts')
     except store.CampaignUnavailable as exc:
         if exc.code == 'project_unavailable':
             return _failure(404, 'project_unavailable', 'project is unavailable')
         if exc.code in ('source_unavailable', 'worker_unavailable'):
-            return _failure(503, exc.code, str(exc))
+            return _failure(503, exc.code, 'Project source is unavailable' if exc.code == 'source_unavailable'
+                            else 'Campaign worker is unavailable')
         return _failure(503, 'campaigns_unavailable', 'campaign store is unavailable')
     except store.CampaignError as exc:
-        return _failure(400, exc.code, str(exc))
+        return _failure(400, exc.code, 'Invalid campaign request')
     except Exception:
         return _failure(503, 'campaigns_unavailable', 'campaign store is unavailable')
 
@@ -139,8 +147,8 @@ def _principal(tenant):
 def enrollments(campaign_id: str, request: Request, tenant: Any = Depends(deps.require_tenant)):
     try:
         project, campaign_id = _id(request.query_params.get('project_id')), _id(campaign_id)
-    except ValueError as exc:
-        return _failure(400, 'invalid_request', str(exc))
+    except ValueError:
+        return _failure(400, 'invalid_request', 'Invalid campaign request')
     return _execute(tenant, project, lambda store, org: {
         'enrollments': _enrollment_store().list_enrollments(org, project, campaign_id),
         'allowed_machines': _enrollment_store().allowed_machines(),
@@ -153,8 +161,8 @@ async def enroll(campaign_id: str, request: Request, tenant: Any = Depends(deps.
         body = await _body(request)
         project, campaign_id = _id(body.get('project_id')), _id(campaign_id)
         machine = _text(body.get('machine_id'), 'machine_id', 200)
-    except ValueError as exc:
-        return _failure(400, 'invalid_request', str(exc))
+    except ValueError:
+        return _failure(400, 'invalid_request', 'Invalid campaign request')
     return _execute(tenant, project, lambda store, org: _enrollment_store().request_enrollment(
         org, project, campaign_id, _principal(tenant), machine_id=machine),
         'enrollment', created=True, project=lambda row: row)
@@ -169,8 +177,8 @@ async def change_enrollment(campaign_id: str, enrollment_id: str, action: str, r
         campaign_id, enrollment_id = _id(campaign_id), _id(enrollment_id)
         if action not in ('enable', 'revoke'):
             raise ValueError('Unknown enrollment action')
-    except ValueError as exc:
-        return _failure(400, 'invalid_request', str(exc))
+    except ValueError:
+        return _failure(400, 'invalid_request', 'Invalid campaign request')
     return _execute(tenant, project, lambda store, org: getattr(
         _enrollment_store(), action + '_enrollment')(
             org, project, campaign_id, enrollment_id, _principal(tenant)),
@@ -184,8 +192,8 @@ async def recover_worker(request: Request, subject: str = Depends(deps.require_c
         if set(body) != {'enrollment_id'}:
             raise ValueError('Only enrollment_id is accepted')
         enrollment_id = _id(body.get('enrollment_id'))
-    except ValueError as exc:
-        return _failure(400, 'invalid_request', str(exc))
+    except ValueError:
+        return _failure(400, 'invalid_request', 'Invalid campaign request')
     try:
         store = _store()
     except Exception:
@@ -201,6 +209,43 @@ async def recover_worker(request: Request, subject: str = Depends(deps.require_c
         return _failure(503, 'campaigns_unavailable', 'Campaign recovery is unavailable')
 
 
+@router.post('/internal/campaign-worker/next')
+async def next_worker(request: Request, subject: str = Depends(deps.require_campaign_worker)):
+    if os.environ.get('LEAF_CAMPAIGN_FIRST_TASK_PRODUCER', '') != 'on':
+        return _failure(503, 'producer_disabled', 'Campaign first-task producer is disabled')
+    try:
+        body = await _body(request)
+        if set(body) != {'enrollment_id'}:
+            raise ValueError('Only enrollment_id is accepted')
+        enrollment_id = _id(body.get('enrollment_id'))
+    except ValueError:
+        return _failure(400, 'invalid_request', 'Invalid campaign request')
+    try:
+        store = _store()
+    except Exception:
+        return _failure(503, 'campaigns_unavailable', 'Campaign planning is unavailable')
+    try:
+        return campaign_worker_service.next_work(enrollment_id, subject)
+    except project_repository_source.SourceConflict:
+        return _failure(409, 'source_conflict', 'Project source conflicts')
+    except project_repository_source.SourceUnavailable:
+        return _failure(503, 'source_unavailable', 'Project source is unavailable')
+    except store.CampaignError as exc:
+        if exc.code in ('worker_forbidden', 'project_unavailable'):
+            return _failure(403, 'worker_forbidden', 'Campaign worker is not authorized')
+        if exc.code in ('plan_source_conflict', 'task_conflict', 'source_conflict'):
+            return _failure(409, 'plan_source_conflict', 'Planning task source conflicts')
+        if exc.code == 'prompt_too_large':
+            return _failure(409, exc.code, 'Shorten the accepted prompt to at most 12000 UTF-8 bytes')
+        if exc.code in ('source_unavailable', 'producer_disabled'):
+            return _failure(503, exc.code, 'Campaign planning is unavailable')
+        if exc.code == 'invalid_request':
+            return _failure(400, exc.code, 'Invalid planning request')
+        return _failure(503, 'campaigns_unavailable', 'Campaign planning is unavailable')
+    except Exception:
+        return _failure(503, 'campaigns_unavailable', 'Campaign planning is unavailable')
+
+
 @router.post('/api/campaigns')
 async def submit(request: Request, tenant: Any = Depends(deps.require_tenant)):
     try:
@@ -209,11 +254,18 @@ async def submit(request: Request, tenant: Any = Depends(deps.require_tenant)):
         title = _text(body.get('title'), 'title', 200)
         prompt = _text(body.get('prompt'), 'prompt', 32768)
         key = _text(request.headers.get('Idempotency-Key'), 'Idempotency-Key', 128)
-    except ValueError as exc:
-        return _failure(400, 'invalid_request', str(exc))
-    return _execute(tenant, project, lambda store, org: store.submit_campaign(
-        org, project, str(getattr(tenant, 'tenant_id', tenant)), _principal(tenant),
-        title=title, prompt=prompt, idempotency_key=key), 'campaign', created=True)
+    except ValueError:
+        return _failure(400, 'invalid_request', 'Invalid campaign request')
+    def admit(store, org):
+        tenant_id = str(getattr(tenant, 'tenant_id', tenant))
+        row = store.submit_campaign(org, project, tenant_id, _principal(tenant),
+                                    title=title, prompt=prompt, idempotency_key=key)
+        if row is not None and os.environ.get('LEAF_PROJECT_SOURCE_PRODUCER', '').strip().lower() == 'on':
+            source = project_repository_source.initialize_project_source(
+                tenant_id, str(org), project, row['prompt'])
+            row = {**row, 'source': source}
+        return row
+    return _execute(tenant, project, admit, 'campaign', created=True)
 
 
 @router.get('/api/campaigns')
@@ -221,8 +273,8 @@ def list_campaigns(request: Request, tenant: Any = Depends(deps.require_tenant))
     try:
         project = _id(request.query_params.get('project_id'))
         limit = max(1, min(200, int(request.query_params.get('limit', '50'))))
-    except ValueError as exc:
-        return _failure(400, 'invalid_request', str(exc))
+    except ValueError:
+        return _failure(400, 'invalid_request', 'Invalid campaign request')
     return _execute(tenant, project, lambda store, org: store.list_campaigns(org, project, limit), 'campaigns')
 
 
@@ -231,8 +283,8 @@ def get_campaign(campaign_id: str, request: Request, tenant: Any = Depends(deps.
     try:
         project = _id(request.query_params.get('project_id'))
         campaign_id = _id(campaign_id)
-    except ValueError as exc:
-        return _failure(400, 'invalid_request', str(exc))
+    except ValueError:
+        return _failure(400, 'invalid_request', 'Invalid campaign request')
     return _execute(tenant, project, lambda store, org: store.get_campaign(org, project, campaign_id), 'campaign')
 
 
@@ -255,8 +307,8 @@ def execution(campaign_id: str, request: Request, tenant: Any = Depends(deps.req
     try:
         project, campaign_id = _id(request.query_params.get('project_id')), _id(campaign_id)
         limit = max(1, min(200, int(request.query_params.get('limit', '50'))))
-    except ValueError as exc:
-        return _failure(400, 'invalid_request', str(exc))
+    except ValueError:
+        return _failure(400, 'invalid_request', 'Invalid campaign request')
     return _execute(tenant, project, lambda store, org: _project(
         _execution_store().read_execution(org, project, campaign_id, limit=limit)),
         'execution', project=lambda row: row)
@@ -277,8 +329,8 @@ async def ask(campaign_id: str, request: Request, tenant: Any = Depends(deps.req
             raise ValueError('options must be at most 16 strings')
         if not isinstance(blocks, bool):
             raise ValueError('blocks_dispatch must be a boolean')
-    except ValueError as exc:
-        return _failure(400, 'invalid_request', str(exc))
+    except ValueError:
+        return _failure(400, 'invalid_request', 'Invalid campaign request')
     return _execute(tenant, project, lambda store, org: store.ask_question(
         org, project, campaign_id, question_key=key, prompt=prompt, options=options,
         asked_by='operator', blocks_dispatch=blocks), 'question', created=True)
@@ -288,8 +340,8 @@ async def ask(campaign_id: str, request: Request, tenant: Any = Depends(deps.req
 def questions(campaign_id: str, request: Request, tenant: Any = Depends(deps.require_tenant)):
     try:
         project, campaign_id = _id(request.query_params.get('project_id')), _id(campaign_id)
-    except ValueError as exc:
-        return _failure(400, 'invalid_request', str(exc))
+    except ValueError:
+        return _failure(400, 'invalid_request', 'Invalid campaign request')
     return _execute(tenant, project, lambda store, org: store.list_questions(org, project, campaign_id), 'questions')
 
 
@@ -301,7 +353,7 @@ async def answer(campaign_id: str, question_id: str, request: Request,
         project = _id(body.get('project_id'))
         campaign_id, question_id = _id(campaign_id), _id(question_id)
         value = _text(body.get('answer'), 'answer', 8192)
-    except ValueError as exc:
-        return _failure(400, 'invalid_request', str(exc))
+    except ValueError:
+        return _failure(400, 'invalid_request', 'Invalid campaign request')
     return _execute(tenant, project, lambda store, org: store.answer_question(
         org, project, campaign_id, question_id, _principal(tenant), answer=value), 'answer', created=True)

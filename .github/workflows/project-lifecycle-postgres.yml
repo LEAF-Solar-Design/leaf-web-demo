@@ -9,6 +9,8 @@ on:
   pull_request:
     paths:
       - '.github/workflows/project-lifecycle-postgres.yml'
+      - 'harness/**'
+      - 'scripts/run-all-gates.py'
       - 'platform/project_lifecycle.py'
       - 'platform/api.py'
       - 'platform/deps.py'
@@ -71,6 +73,44 @@ jobs:
           python-version: "3.12"
       - name: Install platform requirements
         run: python -m pip install -r platform/requirements.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install harness dependencies
+        working-directory: harness
+        run: npm ci
+
+      - name: Run canonical project source PostgreSQL tests
+        working-directory: harness
+        env:
+          PG_REPO_LEASE_TEST_URL: ${{ env.DATABASE_URL }}
+        run: |
+          report="$RUNNER_TEMP/canonical-project-source-vitest.json"
+          rm -f "$report"
+          npm test -- --run test/projectRepositorySourceInitialize.test.ts test/projectRepositorySourceExport.test.ts --reporter=json --outputFile="$report" || exit $?
+          python -I - "$report" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          expected = {
+              Path("test/projectRepositorySourceInitialize.test.ts").resolve(): 5,
+              Path("test/projectRepositorySourceExport.test.ts").resolve(): 4,
+          }
+          report = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          modules = report["testResults"]
+          if len(modules) != 2 or {Path(m["name"]).resolve() for m in modules} != set(expected):
+              sys.exit("FAIL: expected exactly the initializer and exporter modules")
+          for module in modules:
+              name = Path(module["name"]).resolve()
+              assertions = module["assertionResults"]
+              if len(assertions) < expected[name]:
+                  sys.exit(f"FAIL: {name.name} has fewer than {expected[name]} assertions")
+              if module.get("status") != "passed" or any(a.get("status") != "passed" for a in assertions):
+                  sys.exit(f"FAIL: {name.name} contains a non-passing result")
+              print(f"{name.name}: {len(assertions)} passed")
+          PY
 
       - name: Run the project-lifecycle contract
         # A SKIP IS A FAILURE HERE. The suite skips itself when DATABASE_URL is
