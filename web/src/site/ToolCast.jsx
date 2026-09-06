@@ -136,10 +136,10 @@ const DEMO_VALUE = new URLSearchParams(window.location.search).get('demo')
 const PUBLIC_DEMO = DEMO_VALUE === '1' && !isSignedIn()
 const LIVE_TOUR_REQUESTED = DEMO_VALUE === 'tour'
 const LIVE_DEMO = LIVE_TOUR_REQUESTED || (DEMO_VALUE === '1' && isSignedIn())
-const MODE_DRAWING_ID = PROOF_MODE
-  ? 'cat-panels'
-  : PUBLIC_DEMO
-    ? 'demo'
+const MODE_DRAWING_ID = PUBLIC_DEMO
+  ? 'demo'
+  : PROOF_MODE
+    ? 'cat-panels'
     : LIVE_DEMO
       ? 'rooftop_demo'
       : null
@@ -1021,35 +1021,53 @@ export default function ToolCast({
     if (!PUBLIC_DEMO) checkout.actions.refresh()
   }, [busy, canOperate, catalog.actions, catalogRunContext, checkout.actions, checkout.lockedByOther, drawing.mutationsBlocked, drawing.previewing, drawing.shown, jobRunning, previewLocked, runTrackedJob, workspace, writeLocked])
 
-  // The recovery EFFECT only (slice 6a). The two-step confirm, the pending
-  // label, the single-flight guard and the error banner all live in
-  // components/VersionList.jsx now, so /app and /try cannot answer this
-  // differently. Preconditions stay here because they are /try's: recovery is
-  // offered only while the head is genuinely unreadable, and never onto head.
+  // Restore and unreadable-head recovery share the existing service and
+  // VersionList confirmation UI. Guard the effect synchronously as well as
+  // the list's pending state so rapid confirmations cannot submit twice.
   // A rejected restore THROWS so the primitive can render the failure on the
   // row the operator pressed.
+  const restorePendingRef = useRef(null)
   const recoverHistoricalVersion = useCallback(async (versionToRecover) => {
+    // Duplicate confirmations must await the same operation so VersionList
+    // cannot clear its pending controls before the request finishes.
+    // finally clears the reference on settle, so a failed attempt can be retried
+    // and the next confirmation never re-throws a stale rejection.
+    if (restorePendingRef.current) return restorePendingRef.current
     const drawingId = drawing.drawingState?.drawing_id
     const currentHead = Number(drawing.head)
     const target = Number(versionToRecover)
     if (
-      !sessionReady || drawingId == null || !drawing.unreadableHead ||
-      drawing.unreadableHead.pending ||
+      !sessionReady || drawingId == null ||
+      drawing.unreadableHead?.pending ||
       !Number.isFinite(target) || target === currentHead
     ) return
-    try {
-      const result = await restoreDrawingVersion(
-        PUBLIC_DEMO,
-        drawingId,
-        target,
-        checkout.actions.getCapability() || undefined,
-      )
-      await drawing.actions.recordRestore(result)
-      await drawing.actions.loadHistory()
-    } catch (cause) {
-      throw new Error(cause?.message || `Could not recover from v${target}.`)
-    }
-  }, [checkout.actions, drawing.actions, drawing.drawingState?.drawing_id, drawing.head, drawing.unreadableHead, sessionReady])
+    restorePendingRef.current = (async () => {
+      try {
+        // In PUBLIC_DEMO, restore uses the local mock exactly like recovery
+        // and never issues a server request; refuse any non-mock transport.
+        if (PUBLIC_DEMO && transportMock !== true) {
+          throw new Error('Guest sandbox restore requires the local mock.')
+        }
+        const result = await restoreDrawingVersion(
+          transportMock,
+          drawingId,
+          target,
+          checkout.actions.getCapability() || undefined,
+        )
+        await drawing.actions.recordRestore(result)
+        await drawing.actions.loadHistory()
+      } catch (cause) {
+        const message = cause?.message || (drawing.unreadableHead
+          ? `Could not recover from v${target}.`
+          : `Could not restore v${target}.`)
+        const detail = cause?.body?.detail
+        throw new Error(typeof detail === 'string' && detail ? `${message}: ${detail}` : message)
+      } finally {
+        restorePendingRef.current = null
+      }
+    })()
+    return restorePendingRef.current
+  }, [checkout.actions, drawing.actions, drawing.drawingState?.drawing_id, drawing.head, drawing.unreadableHead, sessionReady, transportMock])
 
   const retryCatalogRun = useCallback(() => {
     const last = lastConfirmedRunRef.current
@@ -2225,10 +2243,12 @@ export default function ToolCast({
               onPreview={drawing.actions.previewVersion}
               restore={{
                 run: recoverHistoricalVersion,
-                mode: 'recover',
-                // /try offers recovery ONLY while the head is unreadable, and
-                // never onto the head itself. Unchanged from before the slice.
-                eligible: (_row, isHead) => Boolean(drawing.unreadableHead) && !isHead,
+                mode: drawing.unreadableHead ? 'recover' : 'restore',
+                // In PUBLIC_DEMO, restore uses the local mock exactly like recovery
+                // and never issues a server request, so guests may restore here.
+                // Eligibility is a convenience gate only; restore_version's server checkout fence
+                // is the authority and denies missing capability with 403: Checkout capability required.
+                eligible: (_row, isHead) => sessionReady && !isHead,
                 disabled: Boolean(drawing.unreadableHead?.pending),
               }}
             />
