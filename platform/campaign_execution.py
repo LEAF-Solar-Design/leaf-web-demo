@@ -523,6 +523,117 @@ def _remote_integer(value, *, minimum=0):
         _invalid('dispatch number must be an integer in range')
 
 
+def _attempt_source(cur, scope, attempt, *, result=False):
+    table = 'campaign_attempt_result_sources' if result else 'campaign_attempt_input_sources'
+    cur.execute('SELECT * FROM ' + table + ' WHERE ' + SCOPE +
+                ' AND task_id=%(task)s AND attempt_id=%(attempt)s AND fence=%(fence)s',
+                {**scope, 'task': attempt['task_id'], 'attempt': attempt['attempt_id'],
+                 'fence': attempt['fence']})
+    return cur.fetchone()
+
+
+def _source_material(fence, repository_id, commit_sha, tree_sha):
+    _remote_integer(fence)
+    _text(repository_id, 'repository_id', 200)
+    for name, value in (('commit_sha', commit_sha), ('tree_sha', tree_sha)):
+        _text(value, name, 40)
+        if not re.fullmatch(r'[0-9a-f]{40}', value):
+            _invalid()
+    return dict(repository_id=repository_id, commit_sha=commit_sha, tree_sha=tree_sha)
+
+
+def bind_attempt_input_source(org_id, project_id, campaign_id, attempt_id, *, fence,
+                              repository_id, commit_sha, tree_sha, bundle_sha256, bundle_bytes):
+    """Freeze trusted adapter input without changing adopted task lineage."""
+    scope = {**_scope(org_id, project_id), 'campaign': _uuid(campaign_id)}
+    attempt_id = _uuid(attempt_id)
+    material = _source_material(fence, repository_id, commit_sha, tree_sha)
+    _text(bundle_sha256, 'bundle_sha256', 64)
+    if not re.fullmatch(r'[0-9a-f]{64}', bundle_sha256):
+        _invalid()
+    _remote_integer(bundle_bytes, minimum=1)
+    material.update(bundle_sha256=bundle_sha256, bundle_bytes=bundle_bytes)
+    with _cursor() as cur:
+        _check(cur, scope)
+        task, attempt = _remote_attempt(cur, scope, attempt_id)
+        fingerprint = _fingerprint('leaf.campaign.attempt.input-source.v1',
+                                   {**material, 'attempt': str(attempt_id), 'fence': fence})
+        existing = _attempt_source(cur, scope, attempt)
+        if existing:
+            if existing['source_fingerprint'] != fingerprint:
+                _conflict('input_source_conflict')
+            return _row(existing, replayed=True)
+        if (attempt['status'] != 'active' or attempt['overdue']
+                or fence != attempt['fence'] or fence != task['fence']):
+            _conflict('stale_attempt')
+        if _dispatch_binding(cur, scope, attempt):
+            _conflict('input_source_conflict')
+        cur.execute(
+            'INSERT INTO campaign_attempt_input_sources (attempt_id, task_id, org_id, '
+            'project_id, campaign_id, fence, repository_id, commit_sha, tree_sha, '
+            'bundle_sha256, bundle_bytes, source_fingerprint) VALUES (%(attempt)s, %(task)s, '
+            '%(org)s, %(project)s, %(campaign)s, %(fence)s, %(repository_id)s, %(commit_sha)s, '
+            '%(tree_sha)s, %(bundle_sha256)s, %(bundle_bytes)s, %(fingerprint)s) RETURNING *',
+            {**material, 'org': attempt['org_id'], 'project': attempt['project_id'],
+             'campaign': attempt['campaign_id'], 'task': attempt['task_id'],
+             'attempt': attempt['attempt_id'], 'fence': attempt['fence'],
+             'fingerprint': fingerprint})
+        return _row(cur.fetchone())
+
+
+def record_attempt_result_source(org_id, project_id, campaign_id, attempt_id, *, fence,
+                                 repository_id, commit_sha, tree_sha, publication_receipt):
+    """Preserve sanitized L1 publication readback; L1 owns authority and CAS verification."""
+    scope = {**_scope(org_id, project_id), 'campaign': _uuid(campaign_id)}
+    attempt_id = _uuid(attempt_id)
+    material = _source_material(fence, repository_id, commit_sha, tree_sha)
+    _secret(publication_receipt)
+    if not isinstance(publication_receipt, dict) or not publication_receipt:
+        _invalid('publication receipt must be a nonempty object')
+    digest = _canonical_digest(publication_receipt)
+    if len(json.dumps(publication_receipt, ensure_ascii=False, allow_nan=False).encode()) > 65536:
+        _invalid('publication receipt too large')
+    material.update(publication_receipt=publication_receipt, publication_receipt_sha256=digest)
+    with _cursor() as cur:
+        _check(cur, scope)
+        _, attempt = _remote_attempt(cur, scope, attempt_id)
+        fingerprint = _fingerprint('leaf.campaign.attempt.result-source.v1',
+                                   {**material, 'attempt': str(attempt_id), 'fence': fence})
+        existing = _attempt_source(cur, scope, attempt, result=True)
+        if existing:
+            if existing['result_fingerprint'] != fingerprint:
+                _conflict('result_source_conflict')
+            return _row(existing, replayed=True)
+        if fence != attempt['fence']:
+            _conflict('stale_attempt')
+        input_source = _attempt_source(cur, scope, attempt)
+        if input_source is None or repository_id != input_source['repository_id']:
+            _conflict('result_source_identity_mismatch')
+        cur.execute(
+            'INSERT INTO campaign_attempt_result_sources (attempt_id, task_id, org_id, '
+            'project_id, campaign_id, fence, repository_id, commit_sha, tree_sha, '
+            'publication_receipt, publication_receipt_sha256, result_fingerprint) VALUES '
+            '(%(attempt)s, %(task)s, %(org)s, %(project)s, %(campaign)s, %(fence)s, '
+            '%(repository_id)s, %(commit_sha)s, %(tree_sha)s, %(publication_receipt)s, '
+            '%(publication_receipt_sha256)s, %(fingerprint)s) RETURNING *',
+            {**material, 'publication_receipt': Jsonb(publication_receipt),
+             'org': attempt['org_id'], 'project': attempt['project_id'],
+             'campaign': attempt['campaign_id'], 'task': attempt['task_id'],
+             'attempt': attempt['attempt_id'], 'fence': attempt['fence'],
+             'fingerprint': fingerprint})
+        return _row(cur.fetchone())
+
+
+def read_attempt_sources(org_id, project_id, campaign_id, attempt_id):
+    scope = {**_scope(org_id, project_id), 'campaign': _uuid(campaign_id)}
+    attempt_id = _uuid(attempt_id)
+    with _cursor() as cur:
+        _check(cur, scope)
+        _, attempt = _remote_attempt(cur, scope, attempt_id)
+        return {'input_source': _row(_attempt_source(cur, scope, attempt)),
+                'result_source': _row(_attempt_source(cur, scope, attempt, result=True))}
+
+
 def bind_remote_dispatch(org_id, project_id, campaign_id, attempt_id, *, fence,
                          machine_id, run_id, registration_id, root_request_id,
                          gateway_project_id, source_ref, packet_digest, budget_class,
@@ -567,7 +678,8 @@ def bind_remote_dispatch(org_id, project_id, campaign_id, attempt_id, *, fence,
         if (attempt['status'] != 'active' or attempt['overdue']
                 or fence != attempt['fence'] or fence != task['fence']):
             _conflict('stale_attempt')
-        if source_ref != task['source_sha']:
+        input_source = _attempt_source(cur, scope, attempt)
+        if source_ref != (input_source['commit_sha'] if input_source else task['source_sha']):
             _conflict('dispatch_identity_mismatch')
         cur.execute(
             'INSERT INTO campaign_dispatch_bindings (attempt_id, task_id, org_id, project_id, '
