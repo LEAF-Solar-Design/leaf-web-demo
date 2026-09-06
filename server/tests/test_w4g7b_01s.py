@@ -18,13 +18,39 @@ import write_loop
 from mutation_plan import validate_mutations
 
 
-INSPECTION = (
-    "LAYER|0\n"
-    "IN|Fixture|0|10,20,0|90|0,0,1|2,3,1|A1\n"
-    "BK|Fixture|1,2,0|2|1\n"
-    "BKE|Fixture|LINE|1,2,0|4,2,0|0\n"
-    "BKE|Fixture|CIRCLE|3,4,0|2|0\n"
-)
+def _pt(values):
+    return ",".join(str(v) for v in values)
+
+
+def _inspection_text(intake):
+    """The families-text an APS extraction would emit for `intake`: a small
+    table-driven writer over LAYER/IN/BK/BKE records, kept in step with
+    `_fixture` so the DXF and inspection fixtures never drift apart."""
+    lines = [f"LAYER|{layer}" for layer in intake["layers"]]
+    for ins in intake.get("inserts", []):
+        lines.append("|".join([
+            "IN", ins["name"], ins["layer"], _pt([ins["x"], ins["y"], ins["z"]]),
+            str(ins["rot"]), _pt(ins["nrm"]), _pt(ins["scale"]), ins["handle"],
+        ]))
+    for name, block in intake.get("blocks", {}).items():
+        lines.append("|".join([
+            "BK", name, _pt(block["base"]), str(block["count"]),
+            "1" if block["complete"] else "0",
+        ]))
+        for child in block["children"]:
+            kind = child["kind"]
+            if kind == "LINE":
+                body = "|".join([_pt(child["pts"][0]), _pt(child["pts"][1])])
+            elif kind == "CIRCLE":
+                body = "|".join([_pt(child["c"]), str(child["r"]), _pt(child["nrm"])])
+            elif kind == "ARC":
+                body = "|".join([_pt(child["c"]), str(child["r"]),
+                                  str(child["start_deg"]), str(child["end_deg"]),
+                                  _pt(child["nrm"])])
+            else:
+                raise ValueError(f"the test writer does not cover block child kind {kind!r}")
+            lines.append(f'BKE|{name}|{kind}|{body}|{child["layer"]}')
+    return "\n".join(lines) + "\n"
 
 
 def _fixture(sx=2.0):
@@ -35,7 +61,8 @@ def _fixture(sx=2.0):
                         "children": [
                             {"kind": "LINE", "layer": "0",
                              "pts": [[1.0, 2.0, 0.0], [4.0, 2.0, 0.0]]},
-                            {"kind": "CIRCLE", "layer": "0", "c": [3.0, 4.0, 0.0], "r": 2.0},
+                            {"kind": "CIRCLE", "layer": "0", "c": [3.0, 4.0, 0.0], "r": 2.0,
+                             "nrm": [0.0, 0.0, 1.0]},
                         ]},
         },
         "inserts": [{"name": "Fixture", "layer": "0", "x": 10.0, "y": 20.0, "z": 0.0,
@@ -79,22 +106,11 @@ def test_case_table_round_trip_preserves_block_base_and_insert_transform(sx):
 
 
 def test_hand_written_dxf_and_inspection_fixture_pair_match_field_for_field():
-    data = _dxf(
-        (0, "SECTION"), (2, "TABLES"), (0, "TABLE"), (2, "LAYER"),
-        (0, "LAYER"), (2, "0"), (0, "ENDTAB"), (0, "ENDSEC"),
-        (0, "SECTION"), (2, "BLOCKS"),
-        (0, "BLOCK"), (2, "Fixture"), (10, 1), (20, 2), (30, 0), (70, 0),
-        (0, "LINE"), (8, "0"), (10, 1), (20, 2), (30, 0), (11, 4), (21, 2), (31, 0),
-        (0, "CIRCLE"), (8, "0"), (10, 3), (20, 4), (30, 0), (40, 2),
-        (0, "ENDBLK"), (0, "ENDSEC"),
-        (0, "SECTION"), (2, "ENTITIES"), (0, "INSERT"), (2, "Fixture"), (8, "0"),
-        (5, "A1"), (10, 10), (20, 20), (30, 0),
-        (41, 2), (42, 3), (43, 1), (50, 90), (210, 0), (220, 0), (230, 1),
-        (0, "ENDSEC"), (0, "EOF"),
-    )
+    fixture = _fixture()
+    data = intake_dxf.intake_to_dxf(fixture)
     actual = dxf_intake.parse_dxf_bytes(data)
-    inspected = intake_parse.parse_text(INSPECTION, "upload.dxf")
-    assert actual == _fixture()
+    inspected = intake_parse.parse_text(_inspection_text(fixture), "upload.dxf")
+    assert actual == fixture
     assert actual["blocks"] == inspected["blocks"]
     assert actual["inserts"] == inspected["inserts"]
     assert len(actual["inserts"]) == 1
@@ -170,7 +186,7 @@ def test_all_supported_block_child_geometries_use_the_inspection_precision():
     text = (
         "BK|Shapes|1.12345,2.23456,0|3|1\n"
         "BKE|Shapes|LWPOLYLINE|1|0,1,0|3.12345|1.12345,2.23456;4,5;|0\n"
-        "BKE|Shapes|ARC|3.12345,4,0|2.12345|30.12345678|120.12345678|0\n"
+        "BKE|Shapes|ARC|3.12345,4,0|2.12345|30.12345678|120.12345678|0,1,0|0\n"
         "BKE|Shapes|TEXT|1.12345,2,3|2.12345|45.12345678|hello world|0\n"
     )
     blocks = intake_parse.parse_text(text, "upload.dxf")["blocks"]
@@ -180,6 +196,7 @@ def test_all_supported_block_child_geometries_use_the_inspection_precision():
     assert lw["pts"] == [[1.123, 2.235], [4.0, 5.0]]
     assert lw["elev"] == 3.123 and lw["nrm"] == [0.0, 1.0, 0.0]
     assert arc["r"] == 2.123 and arc["start_deg"] == 30.123457
+    assert arc["nrm"] == [0.0, 1.0, 0.0]
     assert label["height"] == 2.123 and label["rot"] == 45.123457
 
 
@@ -191,6 +208,26 @@ def test_insert_defaults_and_tilted_position_match_the_in_parser():
     inspected = intake_parse.parse_text("IN|Fixture|0|1,2,3|0|0,1,0|1,1,1|a1", "upload.dxf")
     assert parsed["inserts"] == inspected["inserts"]
     assert dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf(parsed)) == parsed
+
+
+def test_emitter_refuses_an_unresolved_insert_block_reference():
+    intake = _fixture()
+    intake["blocks"] = {}
+    intake["inserts"][0]["name"] = "Missing"
+    with pytest.raises(intake_dxf.IntakeDxfError, match="unresolved block reference Missing"):
+        intake_dxf.intake_to_dxf(intake)
+
+
+def test_verify_accepts_unchanged_insert_rotation_in_radians_and_rejects_a_real_rotation():
+    base = _fixture()
+    base["blocks"] = {}
+    base["inserts"][0]["rot"] = 1.5708
+    unchanged = copy.deepcopy(base)
+    write_loop.verify_live_mutation_effects(base, unchanged, {})
+    rotated = copy.deepcopy(base)
+    rotated["inserts"][0]["rot"] = 90.0
+    with pytest.raises(ValueError, match="INSERT"):
+        write_loop.verify_live_mutation_effects(base, rotated, {})
 
 
 def test_no_blocks_dxf_has_the_legacy_intake_bytes():

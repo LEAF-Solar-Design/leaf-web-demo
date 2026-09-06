@@ -112,6 +112,7 @@ MUTATION_INSPECT_BLOCKS += (
       (defun leaf-bk-child (name ed / kind layer body normal points value)
         (setq kind (cdr (assoc 0 ed)) layer (cdr (assoc 8 ed)))
         (if (null layer) (setq layer "0"))
+        (setq layer (vl-string-translate "|\r\n" "   " layer))
         (cond
           ((= kind "LINE")
             (setq body (strcat (leaf-bk-point (cdr (assoc 10 ed)) 3) "|"
@@ -125,9 +126,12 @@ MUTATION_INSPECT_BLOCKS += (
               (leaf-bk-point normal 6) "|"
               (rtos (cond ((cdr (assoc 38 ed))) (T 0.0)) 2 3) "|" points)))
           ((member kind (list "CIRCLE" "ARC"))
+            (setq normal (cdr (assoc 210 ed)))
+            (if (null normal) (setq normal (list 0.0 0.0 1.0)))
             (setq body (strcat (leaf-bk-point (cdr (assoc 10 ed)) 3) "|" (rtos (cdr (assoc 40 ed)) 2 3)))
             (if (= kind "ARC") (setq body (strcat body "|"
-              (leaf-bk-angle (cdr (assoc 50 ed))) "|" (leaf-bk-angle (cdr (assoc 51 ed)))))))
+              (leaf-bk-angle (cdr (assoc 50 ed))) "|" (leaf-bk-angle (cdr (assoc 51 ed))))))
+            (setq body (strcat body "|" (leaf-bk-point normal 6))))
           ((= kind "TEXT")
             (setq value (cond ((cdr (assoc 1 ed))) (T "")))
             (setq value (substr (vl-string-translate "|\r\n" "   " value) 1 512))
@@ -140,6 +144,7 @@ MUTATION_INSPECT_BLOCKS += (
       (setq f (open "{OUT}" "a") bk (tblnext "BLOCK" T) total 0)
       (while bk
         (setq name (cdr (assoc 2 bk)))
+        (if name (setq name (vl-string-translate "|\r\n" "   " name)))
         (if (and name (/= (substr name 1 1) "*") (= 0 (logand 1 (cdr (assoc 70 bk)))))
           (progn
             (setq total (1+ total))
@@ -174,12 +179,12 @@ def build_scr(out_localname: str = OUT_LOCALNAME, *, quit_form: str = QUIT_DEFAU
     """
     lisp = _LISP
     if extra_blocks:
-        if any('"BK|"' in block for block in extra_blocks):
-            # The mutation round trip uses DXF degrees; leave legacy extraction
-            # (whose IN rotation was radians) and its provisioned bytes alone.
-            lisp = lisp.replace(
-                '(rtos (cond (rot rot)(T 0.0)) 2 5)',
-                '(rtos (* 180.0 (/ (cond (rot rot)(T 0.0)) pi)) 2 6)')
+        # The IN record keeps its legacy unit (radians, unconverted) in EVERY
+        # script that carries it: LeafExtract and the mutation-inspect variant
+        # must report the SAME rotation for the SAME physical INSERT, or the
+        # unchanged-INSERT verifier compares radians against degrees and
+        # either rejects a genuine no-op or misses a real rotation. Degrees
+        # are confined to the DM record, never to INSERT rotation.
         lisp = lisp.replace("{QUIT}", "\n".join(extra_blocks) + "\n{QUIT}")
     body = lisp.replace("{OUT}", out_localname).replace("{QUIT}", quit_form)
     # accoreconsole scripts are CRLF; join every progn-line with \r\n and a trailing newline

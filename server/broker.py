@@ -2907,7 +2907,7 @@ def _execute_plan(req: BrokerPlanRunRequest, tool: Dict[str, Any], engine_op: st
     try:
         canonical = mutation_plan.validate_mutations(
             base_intake, req.plan.mutations, allow_transforms=True, allow_xdata=False)
-    except ValueError as exc:
+    except (ValueError, OverflowError, TypeError) as exc:
         return (err_envelope(
             ErrorCode.BAD_PARAMS, f"the edit plan was refused: {exc}",
             retryable=False, tool=PLAN_TOOL_NAME, version=write_loop.DATA_PLAN_TOOL_VERSION,

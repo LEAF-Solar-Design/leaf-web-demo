@@ -109,10 +109,10 @@ def test_mutation_inspect_script_adds_geometry_and_the_bounded_catalogue():
     assert extended != plain
     head, tail = extended.split('(command "_.QUIT" "_Y")')
     legacy_head = plain.split('(command "_.QUIT" "_Y")')[0]
-    degree_head = legacy_head.replace(
-        '(rtos (cond (rot rot)(T 0.0)) 2 5)',
-        '(rtos (* 180.0 (/ (cond (rot rot)(T 0.0)) pi)) 2 6)')
-    assert head.startswith(degree_head)
+    # The IN record keeps its legacy unit (radians, unconverted) in BOTH
+    # scripts: degrees are confined to the DM record, never INSERT rotation.
+    assert head.startswith(legacy_head)
+    assert '(rtos (* 180.0 (/ (cond (rot rot)(T 0.0)) pi)) 2 6)' not in extended
     for tag in ("LN|", "CI|", "AR|", "BK|", "BKE|", "BKCAP|"):
         assert tag in extended and tag not in plain
     assert extended.index('"BK|"') > extended.index('"AR|"')
@@ -399,7 +399,23 @@ def test_v3_readiness_compares_its_own_version(monkeypatch):
         "ready": True, "contract": 3, "mismatches": [],
         "activity": {"alias": "prod", "version": 9},
     }
-    assert all("/activities/LeafApplyMutationsV3/" in call[1] for call in http.calls)
+    assert http.calls[0][1].endswith("/activities/LeafApplyMutationsV3/aliases/prod")
+    assert http.calls[1][1].endswith("/activities/LeafApplyMutationsV3/versions/9")
+
+
+def test_readiness_and_submission_share_the_configurable_alias(monkeypatch):
+    monkeypatch.setattr(subject.client, "ALIAS", "canary")
+    http = Http(get=[Response(200, {"version": 3}), Response(200, subject.activity_spec(2))])
+    monkeypatch.setattr(subject, "requests", http)
+    result = subject.readiness()
+    assert result == {
+        "ready": True, "mismatches": [],
+        "activity": {"alias": "canary", "version": 3},
+        "contract": 2,
+    }
+    assert http.calls[0][1].endswith("/activities/LeafApplyMutations/aliases/canary")
+    assert http.calls[1][1].endswith("/activities/LeafApplyMutations/versions/3")
+    assert subject.CONTRACTS[2].alias == "canary" and subject.CONTRACTS[3].alias == "canary"
 
 
 def test_v3_provision_advances_only_the_separate_activity(monkeypatch):
@@ -492,6 +508,7 @@ def test_dimension_record_reads_coordinate_and_angular_precisions():
 @pytest.mark.parametrize("normal,handle", [
     ("0,0,0", "2A"),
     ("0,0,1", "not-a-handle"),
+    ("0,0,0.0000004", "2A"),  # rounds to the zero vector at the 6-decimal reading
 ])
 def test_malformed_dimension_normal_or_handle_is_a_parse_error(normal, handle):
     import intake_parse
@@ -546,12 +563,13 @@ def test_block_catalogue_is_additive_to_legacy_blockdefs_and_polylines():
     parsed = intake_parse.parse_text(
         legacy + "BK|Fixture|1.12345,2,0|2|1\n"
         "BKE|Fixture|LINE|1,2,0|4,2,0|0\n"
-        "BKE|Fixture|CIRCLE|3,4,0|2.12345|0\nBKCAP|203", "test.dwg")
+        "BKE|Fixture|CIRCLE|3,4,0|2.12345|0,0,1|0\nBKCAP|203", "test.dwg")
     assert parsed.pop("blocks") == {
         "Fixture": {"base": [1.123, 2.0, 0.0], "count": 2, "complete": True,
                     "children": [
                         {"kind": "LINE", "layer": "0", "pts": [[1.0, 2.0, 0.0], [4.0, 2.0, 0.0]]},
-                        {"kind": "CIRCLE", "layer": "0", "c": [3.0, 4.0, 0.0], "r": 2.123},
+                        {"kind": "CIRCLE", "layer": "0", "c": [3.0, 4.0, 0.0], "r": 2.123,
+                         "nrm": [0.0, 0.0, 1.0]},
                     ]},
     }
     assert parsed.pop("blocksCapped") == 203
@@ -568,6 +586,50 @@ def test_block_child_record_closes_the_polyline_before_its_own_geometry():
     assert parsed["blocks"]["Fixture"]["complete"] is False
     assert parsed["blocks"]["Fixture"]["children"] == [
         {"kind": "OTHER", "layer": "", "type": "INSERT"}]
+
+
+def test_bk_with_the_wrong_field_count_is_a_parse_error():
+    import intake_parse
+
+    parsed = intake_parse.parse_text("BK|SITE|Door|0,0,0|1|1", "test.dwg")
+    assert len(parsed["parseErrors"]) == 1 and parsed["parseErrors"][0].startswith("BK:")
+    assert parsed.get("blocks", {}) == {}
+
+
+def test_bke_circle_with_the_wrong_body_arity_is_a_parse_error():
+    import intake_parse
+
+    parsed = intake_parse.parse_text(
+        "BK|B|0,0,0|1|1\nBKE|B|CIRCLE|0,0,0|2|SITE|walls", "test.dwg")
+    assert len(parsed["parseErrors"]) == 1 and parsed["parseErrors"][0].startswith("BKE:")
+    assert parsed["blocks"]["B"]["complete"] is False
+    assert parsed["blocks"]["B"]["children"] == []
+
+
+def test_bke_circle_with_an_extra_field_is_a_parse_error_not_silently_dropped():
+    import intake_parse
+
+    # Legacy (pre-normal) shape: c, r with an extra trailing field before the
+    # layer. The old handler read only body[0]/body[1] and silently ignored
+    # anything past that; arity is now checked, so this refuses instead.
+    parsed = intake_parse.parse_text(
+        "BK|B|0,0,0|1|1\nBKE|B|CIRCLE|0,0,0|2|0,0,1|extra|walls", "test.dwg")
+    assert len(parsed["parseErrors"]) == 1 and parsed["parseErrors"][0].startswith("BKE:")
+    assert parsed["blocks"]["B"]["complete"] is False
+    assert parsed["blocks"]["B"]["children"] == []
+
+
+@pytest.mark.parametrize("record,reason", [
+    ("BKE|B|LINE|bad|1,0,0|0", "bad LINE origin"),
+    ("BKE|B|LWPOLYLINE|0|0,0,1|0||0", "no points"),
+])
+def test_bke_child_parse_failure_marks_the_block_incomplete(record, reason):
+    import intake_parse
+
+    parsed = intake_parse.parse_text(f"BK|B|0,0,0|1|1\n{record}", "test.dwg")
+    assert len(parsed["parseErrors"]) == 1 and parsed["parseErrors"][0].startswith("BKE:"), reason
+    assert parsed["blocks"]["B"]["complete"] is False
+    assert parsed["blocks"]["B"]["children"] == []
 
 
 def test_leafextract_script_matches_the_pre_catalogue_pinned_text():

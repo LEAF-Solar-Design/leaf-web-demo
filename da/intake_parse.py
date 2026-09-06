@@ -123,7 +123,11 @@ def _block_child(kind, body, layer):
                      elev=round(float(elevation), 3),
                      pts=[_block_point(p, width=2) for p in points.split(";") if p])
     elif kind in ("CIRCLE", "ARC"):
-        child.update(c=_block_point(body[0]), r=round(float(body[1]), 3))
+        expected = 5 if kind == "ARC" else 3
+        if len(body) != expected:
+            raise ValueError(f"{kind} body must have {expected} fields")
+        child.update(c=_block_point(body[0]), r=round(float(body[1]), 3),
+                     nrm=_block_point(body[-1], 6))
         if kind == "ARC":
             child.update(start_deg=round(float(body[2]), 6),
                          end_deg=round(float(body[3]), 6))
@@ -217,6 +221,8 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                 if not hnd or any(v not in "0123456789abcdefABCDEF" for v in hnd):
                     raise ValueError("malformed dimension handle")
                 normal = [round(v, 6) for v in n]
+                if not any(normal):
+                    raise ValueError("dimension normal rounds to the zero vector")
                 dimension = {
                     "type": kind, "p1": points[0], "p2": points[1], "dimline": points[2],
                     "rotation_deg": round(float(rotation), 6), "style": style,
@@ -266,7 +272,13 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
             elif tag == "BKE":
                 name, kind, *body, layer = rest.split("|")
                 block = out["blocks"][name]
-                child = _block_child(kind, body, layer)
+                try:
+                    child = _block_child(kind, body, layer)
+                    if kind == "LWPOLYLINE" and len(child.get("pts", [])) < 2:
+                        raise ValueError("LWPOLYLINE needs at least two points")
+                except Exception:
+                    block["complete"] = False
+                    raise
                 if kind == "OTHER":
                     block["complete"] = False
                 if len(block["children"]) < 60:

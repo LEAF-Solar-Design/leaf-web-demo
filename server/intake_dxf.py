@@ -230,6 +230,11 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         if not isinstance(ent, dict):
             _fail(f"{where}: not an object")
         name = _layer_name(ent.get("name"), where)
+        if "blocks" in intake:
+            raw_blocks = intake["blocks"]
+            known = raw_blocks if isinstance(raw_blocks, dict) else {}
+            if not name.startswith("*") and name not in known:
+                _fail(f"{where}: unresolved block reference {name}")
         layer = _layer_name(ent.get("layer"), where)
         point = [_number(ent.get(axis), f"{where}.{axis}") for axis in ("x", "y", "z")]
         normal = _vector(ent.get("nrm", [0, 0, 1]), f"{where}.nrm")
@@ -402,9 +407,12 @@ def _validated_blocks(blocks, note_layer):
                     if not any(row["nrm"]):
                         _fail(f"{where}: nrm must not be the zero vector")
             elif kind in ("CIRCLE", "ARC"):
-                row.update(c=_vector(child.get("c"), where), r=_number(child.get("r"), where))
+                row.update(c=_vector(child.get("c"), where), r=_number(child.get("r"), where),
+                           nrm=_vector(child.get("nrm"), where))
                 if row["r"] <= 0:
                     _fail(f"{where}: r must be positive")
+                if not any(row["nrm"]):
+                    _fail(f"{where}: nrm must not be the zero vector")
                 if kind == "ARC":
                     row.update(start_deg=_number(child.get("start_deg"), where),
                                end_deg=_number(child.get("end_deg"), where))
@@ -438,6 +446,7 @@ def _emit_block_child(child, handle, owner):
         out += _point_groups(child["nrm"], 210)
     elif kind in ("CIRCLE", "ARC"):
         out += ["100", "AcDbCircle", *_point_groups(child["c"]), "40", _num(child["r"])]
+        out += _point_groups(child["nrm"], 210)
         if kind == "ARC":
             out += ["100", "AcDbArc", "50", _num(child["start_deg"]), "51", _num(child["end_deg"])]
     else:

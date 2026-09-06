@@ -211,8 +211,10 @@ def _parse_block_child(pairs, i, kind):
         entity, end = _parse_circle_or_arc(pairs, i, kind)
         if entity is None:
             return {"kind": "OTHER", "type": kind, "layer": ""}, end
-        # BKE centres are block-local OCS points; that record has no normal.
-        child.update(c=[round(v, 3) for v in _group_point(groups)], r=round(entity["r"], 3))
+        # BKE centres are block-local OCS points; the normal is the child's
+        # own 210/220/230 (default +z), matching the top-level CI/AR shape.
+        child.update(c=[round(v, 3) for v in _group_point(groups)], r=round(entity["r"], 3),
+                     nrm=[round(v, 6) for v in _group_point(groups, 210, (0, 0, 1))])
         if kind == "ARC":
             child.update(start_deg=round(entity["start_deg"], 6),
                          end_deg=round(entity["end_deg"], 6))

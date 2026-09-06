@@ -43,7 +43,9 @@ class RoutingDa:
 
     def activity_qualified(self, name):
         self.targets.append(name)
-        return f"owner.{name}+prod"
+        # The real client qualifies by its OWN configurable alias, never a
+        # literal, so this fake mirrors that instead of hardcoding "+prod".
+        return f"owner.{name}+{mutation_apply.client.ALIAS}"
 
     def submit_workitem(self, activity, arguments, **kwargs):
         self.submissions.append((activity, arguments, kwargs))
@@ -170,6 +172,21 @@ def test_v1_bytes_and_catalogue_target_stay_frozen():
     assert da.targets == ["LeafApplyMutations"]
 
 
+def test_submission_and_readiness_target_the_same_configurable_alias(monkeypatch):
+    monkeypatch.setattr(mutation_apply.client, "ALIAS", "canary")
+    canonical = _line_plan()
+    plan = mutation_plan.emit_plan(canonical, base_sha256=BASE_SHA, contract=3)
+    da = RoutingDa()
+
+    def readiness(contract=2):
+        return {"ready": True, "contract": contract, "mismatches": [],
+                "activity": {"alias": mutation_apply.client.ALIAS, "version": 1}}
+
+    monkeypatch.setattr(mutation_apply, "readiness", readiness)
+    _submit(da, canonical, plan)
+    assert da.submissions[0][0] == "owner.LeafApplyMutationsV3+canary"
+
+
 def test_broker_readiness_cache_is_separate_for_each_contract(monkeypatch):
     import broker
 
@@ -263,6 +280,11 @@ def test_broker_selects_readiness_from_the_canonical_plan(
 @pytest.mark.parametrize("mutations,message", [
     ({"added": [None]}, "added entity at index 0 must be an object"),
     ({"added": None}, "mutations.added must be a list"),
+    (
+        {"added": [{"handle": "new-line", "kind": "LINE", "layer": "0",
+                    "pts": [[10 ** 309, 0], [3, 4]]}]},
+        "added entity 'new-line' point 0 is outside the supported range",
+    ),
 ])
 def test_broker_malformed_mutations_keep_the_validator_refusal(
         monkeypatch, broker_plan_request, mutations, message):

@@ -68,7 +68,15 @@ def canonical_json_bytes(value: Any) -> bytes:
 def _number(value: Any, field: str, *, limit: float = MAX_COORDINATE) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{field} must be a number")
-    result = float(value)
+    if isinstance(value, int) and abs(value) > limit:
+        # A huge int (e.g. a 310-digit literal) can raise OverflowError inside
+        # float() before the ordinary range check below ever runs; catch the
+        # int case here so the refusal is always this ValueError, never a 500.
+        raise ValueError(f"{field} is outside the supported range")
+    try:
+        result = float(value)
+    except OverflowError:
+        raise ValueError(f"{field} is outside the supported range") from None
     if not math.isfinite(result):
         raise ValueError(f"{field} must be finite")
     if abs(result) > limit:

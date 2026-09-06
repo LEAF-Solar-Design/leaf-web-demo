@@ -56,15 +56,21 @@ MUTATION_INSPECT_BLOCKS_V3 = MUTATION_INSPECT_BLOCKS
 @dataclass(frozen=True)
 class Contract:
     activity_id: str
-    alias: str
     build_apply: Callable[[], str]
     inspect_blocks: tuple[str, ...]
 
+    @property
+    def alias(self) -> str:
+        # Read at call time, never cached: this must always name the SAME
+        # alias the client actually submits WorkItems to (client.ALIAS, which
+        # tracks APS_ALIAS), so readiness and submission never drift apart.
+        return client.ALIAS
+
 
 CONTRACTS = {
-    2: Contract(activity_id=ACTIVITY_ID, alias=ALIAS,
+    2: Contract(activity_id=ACTIVITY_ID,
                 build_apply=build_apply_scr, inspect_blocks=MUTATION_INSPECT_BLOCKS),
-    3: Contract(activity_id="LeafApplyMutationsV3", alias="prod",
+    3: Contract(activity_id="LeafApplyMutationsV3",
                 build_apply=build_apply_scr_v3, inspect_blocks=MUTATION_INSPECT_BLOCKS_V3),
 }
 
