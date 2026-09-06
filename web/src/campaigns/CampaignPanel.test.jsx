@@ -27,6 +27,46 @@ afterEach(cleanup)
 
 const panel = props => <CampaignPanel projectId={P} projectName="Document studio" signedIn {...props} />
 
+it('lets the user register native AWS release and shows setup required without host execution controls', async () => {
+  campaign.allowedMachines = ['VM-C']
+  campaign.enrollments = []
+  campaign.enroll = vi.fn().mockResolvedValue({ enrollment: { enrollment_id: Q } })
+  campaign.enableEnrollment = vi.fn()
+  campaign.bindPublication = vi.fn()
+  campaign.invokeCapability = vi.fn()
+  campaign.capabilities = [{ change_set_id: 'host-publication', label: 'Host tool' }]
+  const { rerender } = render(panel())
+  expect(screen.getByLabelText('Registration capability').value).toBe('campaign.host-enrollment')
+  fireEvent.change(screen.getByLabelText('Registration capability'), { target: { value: 'campaign.native-release' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Prepare native AWS release' }))
+  await screen.findByText('Native release registration recorded.')
+  expect(campaign.enroll).toHaveBeenCalledExactlyOnceWith('VM-C', 'campaign.native-release')
+  campaign.enrollments = [{ enrollment_id: Q, machine_id: 'VM-C', state: 'pending',
+    capability: 'campaign.native-release', readiness: 'setup_required',
+    readiness_message: 'The release executor is not connected.',
+    capability_link: { capability: 'campaign.native-release', state: 'pending_link' } }]
+  rerender(panel())
+  expect(screen.getByText('Native AWS release: Setup required. The release executor is not connected.')).toBeTruthy()
+  for (const name of ['Enable', 'Run', 'Use capability', 'Use again', 'Bind published tool', 'Recover submission']) {
+    expect(screen.queryByRole('button', { name })).toBeNull()
+  }
+  expect(screen.queryByText(/Verified uses:/)).toBeNull()
+  expect(campaign.enableEnrollment).not.toHaveBeenCalled()
+  expect(campaign.bindPublication).not.toHaveBeenCalled()
+  expect(campaign.invokeCapability).not.toHaveBeenCalled()
+})
+
+it('keeps native release setup required even if a host publication is present on the row', () => {
+  campaign.enrollments = [{ enrollment_id: Q, machine_id: 'VM-C', state: 'enabled', completed_uses: 2,
+    capability: 'campaign.native-release',
+    capability_link: { capability: 'campaign.native-release', state: 'completed', effective_catalog_digest: 'a'.repeat(64) } }]
+  campaign.submissions = { [Q]: { idempotencyKey: 'host-key' } }
+  render(panel())
+  expect(screen.getByText(/Native AWS release: Setup required/)).toBeTruthy()
+  expect(screen.queryByRole('button', { name: 'Recover submission' })).toBeNull()
+  expect(screen.queryByText(/Capability complete/)).toBeNull()
+})
+
 describe('campaign panel in the project workspace', () => {
   const digest = 'a'.repeat(64)
   function capabilityFixture() {

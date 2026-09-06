@@ -187,9 +187,11 @@ export default function useCampaigns(projectId, { enabled = true } = {}) {
     return mutate(`answer:${qid}`, () => api.answerQuestion(projectId, id, qid, text))
   }, [context, mutate, projectId])
   const refetch = useCallback(() => load(), [load])
-  const enroll = useCallback(machine => {
+  const enroll = useCallback((machine, capability) => {
     const id = context.selectedId
-    return id ? mutate('enroll', () => api.requestEnrollment(projectId, id, machine)) : Promise.resolve(null)
+    return id ? mutate('enroll', () => capability === undefined
+      ? api.requestEnrollment(projectId, id, machine)
+      : api.requestEnrollment(projectId, id, machine, capability)) : Promise.resolve(null)
   }, [context, mutate, projectId])
   const enableEnrollment = useCallback(enrollmentId => {
     const id = context.selectedId
