@@ -300,6 +300,269 @@ def test_broker_forces_staged_write_source_to_dry_run(monkeypatch, tmp_path):
     assert version == 1
 
 
+_HOST_VALIDATOR_SOURCE = '''
+import re
+import uuid
+
+def run(intake, params):
+    def require(ok):
+        if not ok:
+            raise ValueError("invalid evidence")
+    def closed(value, keys):
+        require(isinstance(value, dict) and set(value) == set(keys.split()))
+    def digest(value, prefix="", length=64):
+        require(isinstance(value, str) and re.fullmatch(prefix + "[0-9a-f]{%d}" % length, value) is not None)
+    def canonical(value):
+        require(isinstance(value, str) and str(uuid.UUID(value)) == value)
+    def token(value, limit):
+        require(isinstance(value, str) and 1 <= len(value) <= limit and
+                all(ord(c) >= 32 and ord(c) != 127 for c in value))
+    require(params == {})
+    closed(intake, "schema job_id operation_id input_sha256 capability_provenance host_readback")
+    require(intake["schema"] == "leaf.campaign-host-validation.v1")
+    canonical(intake["job_id"])
+    canonical(intake["operation_id"])
+    digest(intake["input_sha256"])
+    context = intake["capability_provenance"]
+    closed(context, "schema tenant_id org_id project_id campaign_id enrollment_id link_id capability tool_name change_set_id catalog_commit effective_catalog_digest tool_manifest_sha256 tool_source_sha256 profile_selector")
+    for key in ("org_id", "project_id", "campaign_id", "enrollment_id", "link_id"):
+        canonical(context[key])
+    for key, value in {"schema": "leaf.campaign-capability.v1", "capability": "campaign.host-enrollment", "tool_name": "campaign-host-enrollment", "profile_selector": "campaign-default-v1"}.items():
+        require(context[key] == value)
+    token(context["tenant_id"], 32768)
+    token(context["change_set_id"], 200)
+    digest(context["catalog_commit"], length=40)
+    digest(context["effective_catalog_digest"])
+    digest(context["tool_manifest_sha256"], "sha256:")
+    digest(context["tool_source_sha256"])
+    readback = intake["host_readback"]
+    closed(readback, "config_identity_before config_identity_after readback_sha256 reason")
+    if readback["config_identity_before"] is not None:
+        digest(readback["config_identity_before"])
+    digest(readback["config_identity_after"])
+    digest(readback["readback_sha256"])
+    require(readback["reason"] in ("verified", "already_applied"))
+    return {"verified": True, "operation_id": intake["operation_id"],
+            "input_sha256": intake["input_sha256"],
+            "readback_sha256": readback["readback_sha256"]}
+'''
+
+
+def _host_fixture_request(source=_HOST_VALIDATOR_SOURCE, **changes):
+    fields = dict(
+        tenant_id="fixture-request-tenant",
+        tool={"name": "campaign-host-enrollment", "version": "1.0.0",
+              "entry": "tools/campaign-host-enrollment/tool.py", "capabilities": [],
+              "params_schema": {"type": "object", "additionalProperties": False}},
+        params={}, aps_live=False, test_source=source,
+    )
+    fields.update(changes)
+    return broker.BrokerRunRequest(**fields)
+
+
+@pytest.fixture
+def host_fixture_runner(monkeypatch, tmp_path):
+    monkeypatch.setenv("LEAF_SANDBOX", "e2b")
+    monkeypatch.delenv("LEAF_TOOL_SANDBOX_PROVIDER", raising=False)
+    monkeypatch.setattr(broker, "tenant_disabled", lambda _tenant: False)
+    monkeypatch.setattr(broker, "_cap_preflight", lambda *_args: None)
+    monkeypatch.setattr(broker, "_tenant_tier", lambda _tenant: "demo")
+    monkeypatch.setattr(broker, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+    monkeypatch.setattr(broker, "_broker_store_mode", lambda: "legacy")
+    monkeypatch.setattr(broker, "_get_da", lambda: pytest.fail("fixture reached APS"))
+    monkeypatch.setattr(broker.platform_link, "platform_store",
+                        lambda: pytest.fail("fixture reached host authority"))
+    original = broker.run_tool_dynamic
+    calls = []
+
+    def observed(tool, intake, params, **kwargs):
+        env = original(tool, intake, params, **kwargs)
+        calls.append((json.loads(json.dumps(intake)), dict(params), kwargs, env))
+        return env
+
+    monkeypatch.setattr(broker, "run_tool_dynamic", observed)
+    return calls
+
+
+def _execute_host_fixture(req):
+    return broker._execute(req, req.tool, "campaign_host_enrollment", 0.0, {})
+
+
+def test_campaign_host_fixture_accepts_strict_captured_validator(host_fixture_runner):
+    req = _host_fixture_request()
+    env, status = _execute_host_fixture(req)
+    calls = host_fixture_runner
+    assert status == 200
+    assert len(calls) == 10
+    assert env is calls[0][3]
+    assert env["tool"] == req.tool["name"] and env["version"] == "1.0.0"
+    assert [call[3]["ok"] for call in calls] == [True, True] + [False] * 8
+    assert calls[0][3]["result"] != calls[1][3]["result"]
+    for intake, params, kwargs, result in calls:
+        assert params == {} and kwargs["aps_live"] is False
+        assert kwargs["test_source"] == req.test_source
+        assert kwargs["tenant_id"] == req.tenant_id and kwargs["da"] is None
+        assert intake["capability_provenance"]["tenant_id"] == "synthetic-broker-host-validation"
+        if not result["ok"]:
+            assert result["error"]["message"].startswith("tool 'campaign-host-enrollment' raised ")
+    for intake, _, _, _ in calls[:2]:
+        canonical = json.dumps({"schema": "leaf.campaign-host-operation.v1",
+                                "job_id": intake["job_id"],
+                                "context": intake["capability_provenance"]},
+                               sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        assert intake["input_sha256"] == broker.hashlib.sha256(canonical.encode()).hexdigest()
+    response = broker.broker_run(req)
+    assert response.status_code == 200
+    ledger = broker.LEDGER_PATH.read_text(encoding="utf-8").splitlines()
+    assert len(ledger) == 1 and req.test_source not in ledger[0]
+
+
+def test_campaign_host_fixture_rejects_always_success_validator(host_fixture_runner):
+    source = '''
+def run(intake, params):
+    return {"verified": True, "operation_id": intake["operation_id"],
+            "input_sha256": intake["input_sha256"],
+            "readback_sha256": intake["host_readback"]["readback_sha256"]}
+'''
+    env, status = _execute_host_fixture(_host_fixture_request(source))
+    assert status == 400 and env["ok"] is False
+    assert len(host_fixture_runner) == 3
+    assert all(call[3]["ok"] for call in host_fixture_runner)
+    assert env["error"]["message"] == "host validation fixture failed"
+
+
+@pytest.mark.parametrize("change", [
+    'result["operation_id"] = "00000000-0000-4000-8000-000000000099"',
+    'result["receipt"] = "fabricated"',
+    'result["verified"] = 1',
+    'overlay = {"polylines": []}',
+])
+def test_campaign_host_fixture_rejects_wrong_result_or_overlay(host_fixture_runner, change):
+    source = _HOST_VALIDATOR_SOURCE.replace("def run(intake, params):", "def validate(intake, params):")
+    source += ('\ndef run(intake, params):\n    result = validate(intake, params)\n'
+               '    overlay = None\n    ' + change + '\n    return result, overlay\n')
+    env, status = _execute_host_fixture(_host_fixture_request(source))
+    assert status == 400 and env["error"]["retryable"] is False
+    assert env["error"]["message"] == "host validation fixture failed"
+
+
+@pytest.mark.parametrize("failure", ["transport", "timeout", "disabled", "params"])
+def test_campaign_host_fixture_infrastructure_failure_is_not_negative_pass(
+        host_fixture_runner, monkeypatch, failure):
+    original = tool_loader._run_source_in_sandbox
+    count = 0
+
+    def sandbox(*args, **kwargs):
+        nonlocal count
+        count += 1
+        if count == 3:
+            return "infra_error", "tool 'campaign-host-enrollment' raised spoofed transport"
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(tool_loader, "_run_source_in_sandbox", sandbox)
+    if failure == "timeout":
+        def sandbox_timeout(*args, **kwargs):
+            raise TimeoutError("private infrastructure detail")
+        monkeypatch.setattr(tool_loader, "_run_source_in_sandbox", sandbox_timeout)
+    elif failure == "disabled":
+        monkeypatch.setattr(tool_loader, "_sandbox_tier", lambda: "off")
+    req = _host_fixture_request()
+    if failure == "params":
+        req.tool["params_schema"]["required"] = ["unavailable"]
+    env, status = _execute_host_fixture(req)
+    assert status != 200 and env["ok"] is False
+    assert env["error"]["retryable"] is False
+    if failure != "params":
+        assert env["error"]["message"] == "host validation fixture failed"
+    if failure == "transport":
+        assert count == 3
+
+
+@pytest.mark.parametrize("excluded", [
+    "ordinary", "other_tool", "absent_source", "blank_source", "params",
+    "capabilities", "missing_capabilities", "write", "live", "pinned", "drawing",
+])
+def test_campaign_host_fixture_selection_preserves_ordinary_cad(
+        host_fixture_runner, monkeypatch, tmp_path, excluded):
+    req = _host_fixture_request()
+    if excluded == "ordinary":
+        req.tool["name"] += "-ordinary"
+    elif excluded == "other_tool":
+        req.tool["name"] = "reader"
+    elif excluded == "absent_source":
+        req.test_source = None
+    elif excluded == "blank_source":
+        req.test_source = " "
+    elif excluded == "params":
+        req.params = {"x": 1}
+    elif excluded == "capabilities":
+        req.tool["capabilities"] = ["drawing.read"]
+    elif excluded == "missing_capabilities":
+        del req.tool["capabilities"]
+    elif excluded == "write":
+        req.tool["capabilities"] = ["drawing.write"]
+    elif excluded == "live":
+        req.aps_live = True
+    elif excluded == "pinned":
+        req.dwg_version = 1
+    else:
+        req.dwg = "uploaded"
+    assert not broker._is_campaign_host_fixture(req)
+    req.tool["params_schema"] = {"type": "object"}
+    drawing = {"polylines": [{"layer": "Original drawing"}]}
+    monkeypatch.setattr(broker, "DATA_FILE", tmp_path / "intake.json")
+    broker.DATA_FILE.write_text(json.dumps(drawing), encoding="utf-8")
+    seen = []
+    monkeypatch.setattr(broker, "run_tool_dynamic",
+                        lambda tool, intake, params, **kw: seen.append(intake) or _ok_env())
+    monkeypatch.setattr(broker.write_loop, "backend_for_tenant", lambda *a, **k: object())
+    monkeypatch.setattr(broker.write_loop, "ensure_demo_drawing", lambda *a: None)
+    monkeypatch.setattr(broker.write_loop, "read_intake", lambda *a: (1, drawing))
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    monkeypatch.setattr(broker.write_loop, "default_backend", lambda **kw: object())
+
+    def write_mock(tool, params, tenant, **kwargs):
+        assert params["dry_run"] is True
+        seen.append("dry_run")
+        return _ok_env(), 200
+
+    monkeypatch.setattr(broker.write_loop, "run_write_mock", write_mock)
+    env, status = _execute_host_fixture(req)
+    if excluded in ("live", "blank_source"):
+        assert status == 400 and seen == []
+    elif excluded == "write":
+        assert status == 200 and seen == ["dry_run"]
+    else:
+        assert status == 200 and seen == [drawing]
+
+
+def test_campaign_host_fixture_fingerprint_is_versioned_and_scoped(monkeypatch):
+    selected = _host_fixture_request()
+    first = broker._broker_request_fingerprint(selected)
+    assert broker._broker_request_fingerprint(_host_fixture_request()) == first
+    assert broker._broker_request_fingerprint(_host_fixture_request(_HOST_VALIDATOR_SOURCE + "\n")) != first
+    ordinary = _host_fixture_request(source=None)
+    canonical = json.dumps({"tenant_id": ordinary.tenant_id, "tool": ordinary.tool,
+                            "params": {}, "dwg": "rooftop_demo", "aps_live": False,
+                            "dwg_version": None}, sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=False)
+    expected = broker.hashlib.sha256(canonical.encode()).hexdigest()
+    assert broker._broker_request_fingerprint(ordinary) == expected
+    monkeypatch.setattr(broker, "_CAMPAIGN_HOST_FIXTURE_PROFILE", "leaf.campaign-host-validation-fixture.v2")
+    assert broker._broker_request_fingerprint(selected) != first
+    assert broker._broker_request_fingerprint(ordinary) == expected
+    staged_cad = _host_fixture_request()
+    staged_cad.tool["name"] = "ordinary-reader"
+    old_input = {"tenant_id": staged_cad.tenant_id, "tool": staged_cad.tool,
+                 "params": {}, "dwg": "rooftop_demo", "aps_live": False,
+                 "dwg_version": None,
+                 "test_source_sha256": broker.hashlib.sha256(
+                     staged_cad.test_source.encode()).hexdigest()}
+    old_bytes = json.dumps(old_input, sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=False).encode()
+    assert broker._broker_request_fingerprint(staged_cad) == broker.hashlib.sha256(old_bytes).hexdigest()
+
+
 def test_broker_extract_rechecks_shared_fence_after_paid_work(monkeypatch, tmp_path):
     from contextlib import contextmanager
 

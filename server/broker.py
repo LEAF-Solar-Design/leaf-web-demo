@@ -1425,6 +1425,125 @@ def _publish_blank_dwg(
     }
 
 
+_CAMPAIGN_HOST_FIXTURE_PROFILE = "leaf.campaign-host-validation-fixture.v1"
+
+
+def _is_campaign_host_fixture(req: BrokerRunRequest) -> bool:
+    return (
+        isinstance(req.test_source, str) and bool(req.test_source.strip())
+        and req.aps_live is False
+        and req.tool.get("name") == "campaign-host-enrollment"
+        and req.tool.get("capabilities") == []
+        and req.params == {}
+        and req.dwg == "rooftop_demo" and req.dwg_version is None
+    )
+
+
+def _campaign_host_fixture(second: bool = False) -> Dict[str, Any]:
+    """Synthetic design-time evidence, never a host or tenant authority."""
+    digit = "2" if second else "1"
+    context = {
+        "schema": "leaf.campaign-capability.v1",
+        "tenant_id": "synthetic-broker-host-validation",
+        "org_id": "00000000-0000-4000-8000-000000000001",
+        "project_id": "00000000-0000-4000-8000-000000000002",
+        "campaign_id": "00000000-0000-4000-8000-000000000003",
+        "enrollment_id": "00000000-0000-4000-8000-000000000004",
+        "link_id": "00000000-0000-4000-8000-000000000005",
+        "capability": "campaign.host-enrollment",
+        "tool_name": "campaign-host-enrollment",
+        "change_set_id": "synthetic-change-" + digit,
+        "catalog_commit": digit * 40,
+        "effective_catalog_digest": digit * 64,
+        "tool_manifest_sha256": "sha256:" + "a" * 64,
+        "tool_source_sha256": "b" * 64,
+        "profile_selector": "campaign-default-v1",
+    }
+    job_id = "00000000-0000-4000-8000-00000000001" + digit
+    operation = {"schema": "leaf.campaign-host-operation.v1",
+                 "job_id": job_id, "context": context}
+    digest = hashlib.sha256(json.dumps(
+        operation, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=False).encode("utf-8")).hexdigest()
+    return {
+        "schema": "leaf.campaign-host-validation.v1",
+        "job_id": job_id,
+        "operation_id": "00000000-0000-4000-8000-00000000002" + digit,
+        "input_sha256": digest,
+        "capability_provenance": context,
+        "host_readback": {
+            "config_identity_before": "c" * 64 if second else None,
+            "config_identity_after": "c" * 64 if second else "d" * 64,
+            "readback_sha256": "e" * 64 if second else "f" * 64,
+            "reason": "already_applied" if second else "verified",
+        },
+    }
+
+
+def _run_campaign_host_fixture(req, tool, run_dynamic, t0):
+    def failed():
+        return (err_envelope(
+            ErrorCode.BAD_PARAMS, "host validation fixture failed",
+            retryable=False, tool=tool.get("name"),
+            version=tool.get("version", "1.0.0")), 400)
+
+    first = None
+    # Fixed finite cases, each with independent objects. No retries.
+    for case in ("verified", "already_applied", "extra_intake", "extra_context",
+                 "extra_readback", "missing_schema", "wrong_schema",
+                 "bad_uuid", "bad_digest", "held"):
+        intake = _campaign_host_fixture(case == "already_applied")
+        expected = {
+            "verified": True, "operation_id": intake["operation_id"],
+            "input_sha256": intake["input_sha256"],
+            "readback_sha256": intake["host_readback"]["readback_sha256"],
+        }
+        if case == "extra_intake":
+            intake["extra"] = True
+        elif case == "extra_context":
+            intake["capability_provenance"]["extra"] = True
+        elif case == "extra_readback":
+            intake["host_readback"]["extra"] = True
+        elif case == "missing_schema":
+            del intake["schema"]
+        elif case == "wrong_schema":
+            intake["schema"] = "invalid"
+        elif case == "bad_uuid":
+            intake["operation_id"] = intake["operation_id"].replace("-", "")
+        elif case == "bad_digest":
+            intake["input_sha256"] = "INVALID"
+        elif case == "held":
+            intake["host_readback"]["reason"] = "lifecycle_handoff_required"
+        try:
+            env = run_dynamic(tool, intake, {}, aps_live=False, da=None,
+                              t0=t0, tenant_id=req.tenant_id)
+        except Exception:  # Infrastructure exceptions never prove rejection.
+            return failed()
+        if not isinstance(env, dict):
+            return failed()
+        if case in ("verified", "already_applied"):
+            result = env.get("result")
+            if (env.get("ok") is not True or "overlay" not in env
+                    or env["overlay"] is not None
+                    or set(env) - {"ok", "tool", "version", "result", "overlay",
+                                   "timing_ms", "cost", "error", "degraded_mode",
+                                   "execution_provenance"}
+                    or not isinstance(result, dict) or result != expected
+                    or result.get("verified") is not True):
+                return failed()
+            if first is None:
+                first = env
+        else:
+            error = env.get("error")
+            if (env.get("ok") is not False or not isinstance(error, dict)
+                    or error.get("error_code") != ErrorCode.INTERNAL
+                    or not isinstance(error.get("message"), str)
+                    or not error["message"].startswith(
+                        "tool 'campaign-host-enrollment' raised ")):
+                return failed()
+    return first, 200
+
+
 def _broker_request_fingerprint(req: Union[BrokerRunRequest, BrokerPlanRunRequest]) -> str:
     if isinstance(req, BrokerPlanRunRequest):
         fingerprint_input = {
@@ -1444,6 +1563,8 @@ def _broker_request_fingerprint(req: Union[BrokerRunRequest, BrokerPlanRunReques
             fingerprint_input["test_source_sha256"] = hashlib.sha256(
                 req.test_source.encode("utf-8")
             ).hexdigest()
+        if _is_campaign_host_fixture(req):
+            fingerprint_input["fixture_profile"] = _CAMPAIGN_HOST_FIXTURE_PROFILE
     canonical = json.dumps(
         fingerprint_input, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -3268,6 +3389,10 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
             time.sleep(min(float(qa_sleep), QA_SLEEP_CAP_S))  # QA latency-simulation hook
         except (TypeError, ValueError):
             pass
+    if _is_campaign_host_fixture(req):
+        _start_admitted_execution(req, admission, aps_submission=False)
+        return _run_campaign_host_fixture(req, tool, run_dynamic, t0)
+
     # Which STORE drawing does this run target? The public `dwg` default
     # ("rooftop_demo") maps to the tenant's well-known `demo` store drawing —
     # unchanged. ANY OTHER dwg now resolves through the tenant's own store
