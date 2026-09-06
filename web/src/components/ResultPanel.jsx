@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { humanKey } from '../labels.js'
 import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
+import ArloProposalReview from './ArloProposalReview.jsx'
 
 // Renders a Result envelope (CONTRACT §3): result data (counts table or
 // key/value), overlay summary, timing + cost receipt, and a normalized error
@@ -104,6 +105,7 @@ function FileLinks({ files }) {
 function ResultBody({ result }) {
   const data = result?.result
   if (!data) return null
+  if (data.solver === 'arlo-design') return <ArloProposalReview key={`${result.job_context?.job_id || 'local'}:${data.result_sha256}`} envelope={data} context={result.job_context} />
   if (data.table && typeof data.table === 'object') {
     const scalars = {}
     for (const [k, v] of Object.entries(data)) {
@@ -272,7 +274,7 @@ export default function ResultPanel({ running, error, result, tool, onRetry, not
               non-billable run reads as a clean "no cloud cost", never
               "$0.0000" (B1). */}
           <div className="receipt">
-            <span>{result.timing_ms} ms</span>
+            <span>{result.result?.solver === 'arlo-design' && !Number.isFinite(result.timing_ms) ? 'Timing unavailable' : `${result.timing_ms} ms`}</span>
             {result.cost ? (
               <>
                 <span className="dim">·</span>
@@ -285,7 +287,7 @@ export default function ResultPanel({ running, error, result, tool, onRetry, not
             ) : (
               <>
                 <span className="dim">·</span>
-                <span className="dim">no cloud cost (mock)</span>
+                <span className="dim">{result.result?.solver === 'arlo-design' ? 'Compute cost unavailable' : 'no cloud cost (mock)'}</span>
               </>
             )}
           </div>

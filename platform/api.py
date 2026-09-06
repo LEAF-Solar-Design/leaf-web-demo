@@ -20,7 +20,7 @@ from typing import Any, Dict, Literal, NamedTuple, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from . import (arlo_lab, billing, deps as platform_deps, entitlements, project_lifecycle,
+from . import (arlo_lab, arlo_review, billing, deps as platform_deps, entitlements, project_lifecycle,
                store, unit_economics)
 from .deps import (get_org_id, get_review_binding_id, get_write_binding_id, get_write_org_id,
                    require_auth_when_live)
@@ -324,6 +324,19 @@ def cancel_arlo_job(project_id: uuid.UUID, job_id: uuid.UUID,
                     actor: _LifecycleActor = Depends(_get_lifecycle_actor)):
     return _lifecycle_response(lambda: arlo_lab.job_view(
         actor.org_id, project_id, actor.binding_id, job_id, cancel=True))
+
+
+@router.get("/projects/{project_id}/arlo-jobs/{job_id}/reviews")
+def get_arlo_reviews(project_id: uuid.UUID, job_id: uuid.UUID,
+                     actor: _LifecycleActor = Depends(_get_lifecycle_actor)):
+    return _lifecycle_response(lambda: arlo_review.reviews(actor.org_id,project_id,actor.binding_id,job_id))
+
+
+@router.post("/projects/{project_id}/arlo-jobs/{job_id}/reviews", status_code=201)
+def review_arlo_proposal(project_id: uuid.UUID, job_id: uuid.UUID, body: arlo_review.ReviewDecision,
+                         idempotency_key: str = Header(alias="Idempotency-Key"),
+                         actor: _LifecycleActor = Depends(_get_lifecycle_actor)):
+    return _lifecycle_response(lambda: arlo_review.review(actor.org_id,project_id,actor.binding_id,job_id,body,idempotency_key))
 
 
 @router.post("/projects/blank", status_code=201)
