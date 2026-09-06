@@ -1,7 +1,7 @@
 """Durable host enrollment for the campaign execution ledger.
 
-Author lifecycle integration is pending. No caller can supply publication or
-invocation evidence here, and enrollment never claims capability completion.
+Publication and invocation evidence is recorded by the trusted capability store.
+Enrollment itself never claims capability completion.
 """
 from __future__ import annotations
 
@@ -30,6 +30,13 @@ def _public(row, link, replayed=False):
     result.pop('dispatch', None)
     result['capability_link'] = {key: str(link[key]) for key in
                                ('link_id', 'task_id', 'capability', 'state')}
+    for key in ('author_stage_id', 'change_set_id', 'publication_id', 'effective_catalog_id',
+                'catalog_commit', 'effective_catalog_digest', 'tool_name', 'tool_manifest_sha256',
+                'tool_source_sha256', 'published_at', 'first_invocation_receipt_id',
+                'second_invocation_receipt_id'):
+        value = link.get(key)
+        result['capability_link'][key] = value.isoformat() if hasattr(value, 'isoformat') else value
+    result['capability_link']['counted_job_ids'] = [str(value) for value in link.get('counted_job_ids', [])]
     return result
 
 
@@ -44,7 +51,11 @@ def _enrollment(cur, scope, enrollment_id):
 
 
 def _link(cur, scope, enrollment_id):
-    cur.execute('SELECT l.* FROM campaign_capability_links l '
+    cur.execute('SELECT l.*, ARRAY(SELECT i.job_id FROM campaign_capability_invocations i '
+                'WHERE i.link_id=l.link_id AND i.org_id=l.org_id AND i.project_id=l.project_id '
+                'AND i.campaign_id=l.campaign_id AND i.enrollment_id=l.enrollment_id '
+                'AND i.counted_at IS NOT NULL ORDER BY i.counted_at, i.job_id) AS counted_job_ids '
+                'FROM campaign_capability_links l '
                 'JOIN campaign_tasks t ON t.task_id=l.task_id AND t.org_id=l.org_id '
                 'AND t.project_id=l.project_id AND t.campaign_id=l.campaign_id '
                 'WHERE l.org_id=%(org)s AND l.project_id=%(project)s '

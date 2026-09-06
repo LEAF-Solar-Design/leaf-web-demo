@@ -50,6 +50,17 @@ _MIGRATION_LEDGER_COLUMNS = {"name", "sha256", "applied_at"}
 # compatibility contract, not a provider choice. Additions stay additive so an
 # older application can continue to read a database prepared by a newer image.
 _REQUIRED_COLUMNS = {
+    "campaign_capability_invocations": {
+        "job_id", "async_job_id", "org_id", "project_id", "job_org_id", "job_project_id",
+        "campaign_id", "link_id", "enrollment_id", "tenant_id", "context", "context_sha256",
+        "created_at", "counted_receipt_digest", "counted_receipt_id", "counted_at",
+    },
+    "campaign_host_operations": {
+        "operation_id", "job_id", "org_id", "project_id", "campaign_id", "link_id",
+        "enrollment_id", "tenant_id", "machine_id", "service_subject", "input_sha256",
+        "profile_selector", "attempt", "fence", "claim_sha256", "lease_expires_at",
+        "stage", "outcome", "stage_evidence", "created_at", "updated_at",
+    },
     "campaign_attempt_input_sources": {
         "attempt_id", "task_id", "org_id", "project_id", "campaign_id", "fence",
         "repository_id", "commit_sha", "tree_sha", "bundle_sha256", "bundle_bytes",
@@ -68,6 +79,8 @@ _REQUIRED_COLUMNS = {
         "link_id", "org_id", "project_id", "campaign_id", "task_id", "enrollment_id", "capability",
         "author_stage_id", "change_set_id", "publication_id", "effective_catalog_id",
         "first_invocation_receipt_id", "second_invocation_receipt_id", "state",
+        "catalog_commit", "effective_catalog_digest", "tool_name", "tool_manifest_sha256",
+        "tool_source_sha256", "published_at",
     },
     "campaign_dispatch_bindings": {
         "attempt_id", "task_id", "org_id", "project_id", "campaign_id", "fence", "stage",
@@ -598,6 +611,12 @@ def _catalog_contract(relation: str, *definition_fragments: str) -> Dict[str, An
 # stores, the project lifecycle is part of the canonical platform API whenever
 # this application image is running.
 _REQUIRED_CONSTRAINTS = {
+    "campaign_capability_invocations_pkey": _catalog_contract(
+        "campaign_capability_invocations", "PRIMARY KEY (job_id)"),
+    "campaign_host_operations_pkey": _catalog_contract(
+        "campaign_host_operations", "PRIMARY KEY (operation_id)"),
+    "campaign_host_operations_job_id_key": _catalog_contract(
+        "campaign_host_operations", "UNIQUE (job_id)"),
     "campaign_host_enrollments_machine_unique": _catalog_contract(
         "campaign_host_enrollments", "UNIQUE (campaign_id, machine_id)"),
     "campaign_capability_links_task_unique": _catalog_contract(
@@ -710,6 +729,16 @@ _REQUIRED_CONSTRAINTS = {
 }
 
 _REQUIRED_INDEXES = {
+    "campaign_host_operations_poll_idx": _catalog_contract(
+        "campaign_host_operations", "(machine_id, created_at, operation_id)", "WHERE", "outcome IS NULL"),
+    "campaigns_host_scope_uq": _catalog_contract(
+        "campaigns", "CREATE UNIQUE INDEX", "(campaign_id, org_id, project_id, tenant_id)"),
+    "campaign_enrollments_host_scope_uq": _catalog_contract(
+        "campaign_host_enrollments", "CREATE UNIQUE INDEX", "(enrollment_id, org_id, project_id, campaign_id)"),
+    "campaign_links_host_scope_uq": _catalog_contract(
+        "campaign_capability_links", "CREATE UNIQUE INDEX", "(link_id, enrollment_id, org_id, project_id, campaign_id)"),
+    "async_jobs_host_scope_uq": _catalog_contract(
+        "async_jobs", "CREATE UNIQUE INDEX", "(job_id, tenant_id, org_id, project_id)"),
     "idx_ios_ship_executions_scope": _catalog_contract(
         "ios_ship_executions", "(org_id, project_id, created_at DESC)"),
     "idx_ios_ship_receipts_scope": _catalog_contract(
@@ -735,6 +764,9 @@ _REQUIRED_INDEXES = {
 }
 
 _REQUIRED_TRIGGERS = {
+    "campaign_invocation_identity_immutable": _catalog_contract(
+        "campaign_capability_invocations", "BEFORE UPDATE", "FOR EACH ROW",
+        "EXECUTE FUNCTION campaign_invocation_identity_immutable()"),
     "campaign_answers_immutable": _catalog_contract(
         "campaign_answers", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
         "EXECUTE FUNCTION leaf_reject_ledger_mutation()"),

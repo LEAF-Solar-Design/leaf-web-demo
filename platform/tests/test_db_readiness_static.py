@@ -86,17 +86,45 @@ def test_migration_manifest_is_ordered_complete_and_credential_free():
     )
 
 
+def test_host_capability_migration_declares_its_runtime_columns():
+    migration = (db._PKG_DIR / "migrations" / "0060_campaign_host_operations.sql").read_text(encoding="utf-8")
+    expected = {
+        "campaign_capability_invocations": {
+            "job_id", "async_job_id", "org_id", "project_id", "job_org_id", "job_project_id",
+            "campaign_id", "link_id", "enrollment_id", "tenant_id", "context", "context_sha256",
+            "created_at", "counted_receipt_digest", "counted_receipt_id", "counted_at",
+        },
+        "campaign_host_operations": {
+            "operation_id", "job_id", "org_id", "project_id", "campaign_id", "link_id",
+            "enrollment_id", "tenant_id", "machine_id", "service_subject", "input_sha256",
+            "profile_selector", "attempt", "fence", "claim_sha256", "lease_expires_at",
+            "stage", "outcome", "stage_evidence", "created_at", "updated_at",
+        },
+    }
+    for table, columns in expected.items():
+        assert db._REQUIRED_COLUMNS[table] == columns
+        definition = migration.split("CREATE TABLE IF NOT EXISTS " + table + " (", 1)[1].split("\n);", 1)[0]
+        for column in columns:
+            assert re.search(r"^  " + column + r"\s", definition, re.MULTILINE)
+    assert {"catalog_commit", "effective_catalog_digest", "tool_name", "tool_manifest_sha256",
+            "tool_source_sha256", "published_at"} <= db._REQUIRED_COLUMNS["campaign_capability_links"]
+    catalog = db.required_catalog_for_selected_authorities({})
+    assert "campaign_host_operations_job_id_key" in catalog["constraints"]
+    assert "campaign_host_operations_poll_idx" in catalog["indexes"]
+    assert "campaign_invocation_identity_immutable" in catalog["triggers"]
+
+
 def test_annotation_migration_is_in_the_unconditional_readiness_inventory():
     manifest_names = [item["name"] for item in db.migration_manifest()]
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
     assert "0042_annotation_batches.sql" in manifest_names
     _assert_closed_world_pin(
-        manifest_names[-1], "0059_campaign_attempt_sources.sql",
+        manifest_names[-1], "0060_campaign_host_operations.sql",
         "Update this pin to the new last migration filename once main adds "
         "one (and the migration_ids pin below to match).",
     )
     _assert_closed_world_pin(
-        inventory["scope"]["migration_ids"][-1], "0059",
+        inventory["scope"]["migration_ids"][-1], "0060",
         "Update this pin (and authority-inventory.json's "
         "scope.migration_ids) to the new last migration id.",
     )
