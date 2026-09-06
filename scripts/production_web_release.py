@@ -17,6 +17,7 @@ from platform_release_manifest import SERVICES, load_json, web_dist_digest
 PROJECT_ID = "prj_tBxvYtXa47THZ8aF59gvRx8W0bBc"
 PROJECT_NAME = "leaf-platform-web"
 STABLE_URL = "https://leaf-platform-web.vercel.app"
+PRODUCTION_HOSTS = ("app.leafdesign.ai", "platform.leafdesign.ai")
 HANDOFF_SCHEMA = "leaf.production-handoff-candidate.v1"
 PREPARED_SCHEMA = "leaf.production-web-prepared.v1"
 RECEIPT_SCHEMA = "leaf.production-web-deployment.v1"
@@ -452,6 +453,7 @@ def deployment_receipt(
         "deployment_id": deployment["id"],
         "deployment_url": f"https://{deployment['url']}",
         "stable_url": STABLE_URL,
+        "production_hosts": list(PRODUCTION_HOSTS),
         "baseline_deployment_id": baseline["id"],
         "release_workflow_run_id": prepared["release_workflow_run_id"],
         "release_workflow_run_attempt": prepared["release_workflow_run_attempt"],

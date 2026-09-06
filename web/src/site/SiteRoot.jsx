@@ -58,6 +58,7 @@ const isEditable = (el) =>
 // Callback and legacy deep-link boot decisions remain in authBoot.js.
 const APP_ONLY_HOSTS = new Set([
   'leaf-platform-web.vercel.app',
+  'app.leafdesign.ai',
   'platform.leafdesign.ai',
   'platform-staging.leafdesign.ai',
 ])

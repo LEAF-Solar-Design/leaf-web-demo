@@ -54,6 +54,7 @@ jobs:
       VERCEL_PROJECT_ID: prj_tBxvYtXa47THZ8aF59gvRx8W0bBc
       VERCEL_PROJECT_NAME: leaf-platform-web
       VERCEL_STABLE_URL: https://leaf-platform-web.vercel.app
+      PRODUCTION_HOSTS: app.leafdesign.ai platform.leafdesign.ai
       SOURCE_SHA: ${{ inputs.source_sha }}
       RELEASE_RUN_ID: ${{ inputs.release_workflow_run_id }}
       RELEASE_RUN_ATTEMPT: ${{ inputs.release_run_attempt }}
@@ -523,6 +524,26 @@ jobs:
             --write-out '%{http_code}' "$VERCEL_STABLE_URL/api/health")
           [ "$API_STATUS" = 404 ]
           ! grep -Eiq '<!doctype html|<html' "$RUN_DIR/stable-api.txt"
+
+      - name: Record public host reachability
+        run: |
+          set -euo pipefail
+          : > "$RUN_DIR/public-hosts.txt"
+          FAILED=0
+          for host in $PRODUCTION_HOSTS; do
+            if resolved=$(getent hosts "$host" 2>/dev/null); then
+              CURL_STATUS=0
+              HTTP_STATUS=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "https://$host/") || CURL_STATUS=$?
+              printf '%s HTTP %s curl exit %s\n' "$host" "$HTTP_STATUS" "$CURL_STATUS" | tee -a "$RUN_DIR/public-hosts.txt"
+              if [ "$CURL_STATUS" -ne 0 ] || [ "$HTTP_STATUS" != 200 ]; then
+                echo "::error::$host did not return HTTP 200"
+                FAILED=1
+              fi
+            else
+              echo "::notice::$host has no DNS record yet" | tee -a "$RUN_DIR/public-hosts.txt"
+            fi
+          done
+          exit "$FAILED"
 
       - name: Emit sanitized production web deployment receipt
         id: receipt

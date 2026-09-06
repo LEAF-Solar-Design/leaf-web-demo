@@ -257,6 +257,8 @@ def test_receipt_binds_new_stable_deployment_and_all_workflow_attempts(tmp_path:
     )
 
     assert receipt["schema"] == "leaf.production-web-deployment.v1"
+    assert receipt["stable_url"] == "https://leaf-platform-web.vercel.app"
+    assert receipt["production_hosts"] == ["app.leafdesign.ai", "platform.leafdesign.ai"]
     assert receipt["deployment_id"] == deployed["id"]
     assert receipt["baseline_deployment_id"] == baseline["id"]
     assert receipt["web_artifact_sha256"] == digest
