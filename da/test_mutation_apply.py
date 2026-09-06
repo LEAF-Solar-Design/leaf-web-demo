@@ -622,6 +622,9 @@ def test_bke_circle_with_an_extra_field_is_a_parse_error_not_silently_dropped():
 @pytest.mark.parametrize("record,reason", [
     ("BKE|B|LINE|bad|1,0,0|0", "bad LINE origin"),
     ("BKE|B|LWPOLYLINE|0|0,0,1|0||0", "no points"),
+    ("BKE|B|CIRCLE|0,0,0|0|0,0,1|0", "zero radius"),
+    ("BKE|B|ARC|0,0,0|-1|0|90|0,0,1|0", "negative radius"),
+    ("BKE|B|CIRCLE|0,0,0|2|0,bad,1|0", "unreadable normal"),
 ])
 def test_bke_child_parse_failure_marks_the_block_incomplete(record, reason):
     import intake_parse
@@ -630,6 +633,52 @@ def test_bke_child_parse_failure_marks_the_block_incomplete(record, reason):
     assert len(parsed["parseErrors"]) == 1 and parsed["parseErrors"][0].startswith("BKE:"), reason
     assert parsed["blocks"]["B"]["complete"] is False
     assert parsed["blocks"]["B"]["children"] == []
+
+
+@pytest.mark.parametrize("header", ["BK|B|0,0,0|1|1\n", ""])
+def test_truncated_bke_marks_its_named_block_incomplete(header):
+    import intake_parse
+
+    parsed = intake_parse.parse_text(header + "BKE|B|LINE", "test.dwg")
+    assert len(parsed["parseErrors"]) == 1 and parsed["parseErrors"][0].startswith("BKE:")
+    assert parsed["blocks"]["B"]["complete"] is False
+    assert parsed["blocks"]["B"]["children"] == []
+
+
+def test_catalogue_decodes_names_and_layers_without_collisions_or_double_decoding():
+    import intake_parse
+
+    parsed = intake_parse.parse_text(
+        "BK|A%7CB|1,2,0|1|1\n"
+        "BKE|A%7CB|LINE|0,0,0|1,0,0|SITE%7Cwalls%0D%0A%257C\n"
+        "BK|A B|7,8,0|0|1\n"
+        "BK|A%257CB|9,10,0|0|1\n"
+        "BK|B%0DC%0AD%25|0,0,0|0|1", "test.dwg")
+    assert not parsed.get("parseErrors")
+    blocks = parsed["blocks"]
+    assert set(blocks) == {"A|B", "A B", "A%7CB", "B\rC\nD%"}
+    assert blocks["A|B"]["base"] == [1.0, 2.0, 0.0]
+    assert blocks["A B"]["base"] == [7.0, 8.0, 0.0]
+    assert blocks["A%7CB"]["base"] == [9.0, 10.0, 0.0]
+    assert blocks["A|B"]["children"][0]["layer"] == "SITE|walls\r\n%7C"
+
+
+def test_catalogue_lisp_looks_up_the_raw_name_and_encodes_only_record_fields():
+    from lisp import MUTATION_INSPECT_BLOCKS
+
+    helper, catalogue = MUTATION_INSPECT_BLOCKS[-2:]
+    assert '(setq name (cdr (assoc 2 bk)))' in catalogue
+    assert '(entnext (tblobjname "BLOCK" name))' in catalogue
+    assert '(leaf-bk-child name bed)' in catalogue
+    assert '(strcat "BK|" (leaf-bk-encode name)' in catalogue
+    assert '(setq name (leaf-bk-encode' not in catalogue
+    assert 'vl-string-translate' not in catalogue
+    assert '(strcat "BKE|" (leaf-bk-encode name)' in helper
+    assert '(setq layer (leaf-bk-encode layer))' in helper
+    for code, escaped in [(37, "%25"), (124, "%7C"), (13, "%0D"), (10, "%0A")]:
+        assert f'((= ch {code}) "{escaped}")' in helper
+    assert '(foreach ch (vl-string->list value)' in helper
+    assert '(vl-string-translate "|\\r\\n" "   " value)' in helper
 
 
 def test_leafextract_script_matches_the_pre_catalogue_pinned_text():

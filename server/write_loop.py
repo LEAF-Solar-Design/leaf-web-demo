@@ -1448,7 +1448,12 @@ def verify_live_mutation_effects(
             or not row["handle"] for row in rows
         ):
             raise ValueError("every re-extracted INSERT must have a nonempty handle")
-        index = {row["handle"]: row for row in rows}
+        # IN reports radians with RTOS precision 5; DXF intake stores 6.
+        # Compare the same reading without changing either intake record.
+        index = {row["handle"]: {
+            key: _extractor_round(value, 5) if key == "rot" else value
+            for key, value in row.items()
+        } for row in rows}
         if len(index) != len(rows):
             raise ValueError("re-extracted output contains duplicate INSERT handles")
         insert_indexes.append(index)

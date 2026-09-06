@@ -24,6 +24,7 @@ extracts through APS.
 """
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -66,6 +67,7 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
     arcs: List[Dict[str, Any]] = []
     inserts: List[Dict[str, Any]] = []
     blocks: Dict[str, Any] = {}
+    parse_errors: List[str] = []
     block_count = 0
     has_blocks = False
     handle_seq = 0
@@ -96,7 +98,7 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             i = j
             continue
         if section == "BLOCKS" and code == 0 and value == "BLOCK":
-            name, block, i = _parse_block(pairs, i + 1)
+            name, block, i = _parse_block(pairs, i + 1, parse_errors)
             if name and not name.startswith("*"):
                 block_count += 1
                 if block_count <= 200:
@@ -154,6 +156,13 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             continue
         i += 1
 
+    resolved_inserts = []
+    for entity in inserts:
+        if entity["name"] not in blocks:
+            parse_errors.append(
+                f"INSERT {entity['handle']}: unresolved block reference {entity['name']}")
+        else:
+            resolved_inserts.append(entity)
     out: Dict[str, Any] = {"dwg": source_name, "layers": layers, "polylines": polylines}
     if texts:
         # ADDITIVE §1 field (frontend ignores unknown keys): drawing labels for tools
@@ -163,12 +172,14 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
         out["circles"] = circles
     if arcs:
         out["arcs"] = arcs
-    if inserts:
-        out["inserts"] = inserts
+    if resolved_inserts:
+        out["inserts"] = resolved_inserts
     if has_blocks:
         out["blocks"] = blocks
     if block_count > 200:
         out["blocksCapped"] = block_count
+    if parse_errors:
+        out["parseErrors"] = parse_errors
     return out
 
 
@@ -190,7 +201,8 @@ def _parse_insert(pairs, i):
     # Match the IN parser's existing x/y/z and nrm keys, including WCS position.
     return {"name": groups.get(2, ""), "layer": groups.get(8, "0") or "0",
             "x": round(point[0], 3), "y": round(point[1], 3), "z": round(point[2], 3),
-            "rot": _float(groups.get(50, "0")), "nrm": [round(v, 6) for v in normal],
+            "rot": round(math.radians(_float(groups.get(50, "0"))), 6),
+            "nrm": [round(v, 6) for v in normal],
             "scale": [_float(groups.get(code, "1")) for code in (41, 42, 43)],
             "handle": groups.get(5, "")}, i
 
@@ -198,19 +210,32 @@ def _parse_insert(pairs, i):
 def _parse_block_child(pairs, i, kind):
     groups, end = _entity_groups(pairs, i)
     child = {"kind": kind, "layer": groups.get(8, "0") or "0"}
+    if kind in ("LINE", "LWPOLYLINE", "CIRCLE", "ARC"):
+        # These children must not inherit the legacy top-level parsers'
+        # substitution of zero for unreadable coordinates.
+        for code, value in pairs[i:end]:
+            if code in (10, 20, 30, 11, 21, 31, 38, 40, 50, 51, 210, 220, 230):
+                if not math.isfinite(float(value)):
+                    raise ValueError("malformed block geometry")
     if kind == "LINE":
+        if not all(code in groups for code in (10, 20, 11, 21)):
+            raise ValueError("LINE needs two points")
         entity, end = _parse_line(pairs, i)
         child["pts"] = [[round(v, 3) for v in p] for p in entity["pts"]]
     elif kind == "LWPOLYLINE":
         entity, end = _parse_lwpolyline(pairs, i)
+        if (len(entity["pts"]) < 2 or
+                sum(code == 10 for code, _ in pairs[i:end]) !=
+                sum(code == 20 for code, _ in pairs[i:end])):
+            raise ValueError("LWPOLYLINE needs at least two complete points")
         child.update(closed=entity["closed"],
                      nrm=[round(v, 6) for v in _group_point(groups, 210, (0, 0, 1))],
                      elev=round(_float(groups.get(38, "0")), 3),
                      pts=[[round(v, 3) for v in p[:2]] for p in entity["pts"]])
     elif kind in ("CIRCLE", "ARC"):
         entity, end = _parse_circle_or_arc(pairs, i, kind)
-        if entity is None:
-            return {"kind": "OTHER", "type": kind, "layer": ""}, end
+        if entity is None or round(entity["r"], 3) <= 0:
+            raise ValueError(f"{kind} radius must be positive")
         # BKE centres are block-local OCS points; the normal is the child's
         # own 210/220/230 (default +z), matching the top-level CI/AR shape.
         child.update(c=[round(v, 3) for v in _group_point(groups)], r=round(entity["r"], 3),
@@ -229,10 +254,12 @@ def _parse_block_child(pairs, i, kind):
         if kind == "POLYLINE":
             _, end = _parse_polyline(pairs, i)
         child = {"kind": "OTHER", "type": kind, "layer": ""}
+    if "nrm" in child and not any(child["nrm"]):
+        raise ValueError("block child normal must not be the zero vector")
     return child, end
 
 
-def _parse_block(pairs, i):
+def _parse_block(pairs, i, parse_errors):
     groups, i = _entity_groups(pairs, i)
     name = groups.get(2, "")
     flags = _int(groups.get(70, "0"))
@@ -248,8 +275,15 @@ def _parse_block(pairs, i):
         if code != 0:
             i += 1
             continue
-        child, i = _parse_block_child(pairs, i + 1, kind)
         block["count"] += 1
+        try:
+            child, end = _parse_block_child(pairs, i + 1, kind)
+        except (ValueError, OverflowError, TypeError) as exc:
+            block["complete"] = False
+            parse_errors.append(f"BKE {name} ({kind}): {exc}")
+            _, i = _entity_groups(pairs, i + 1)
+            continue
+        i = end
         if child["kind"] == "OTHER" or block["count"] > 60:
             block["complete"] = False
         if block["count"] <= 60:

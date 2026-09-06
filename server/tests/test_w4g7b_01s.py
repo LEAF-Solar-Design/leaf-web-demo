@@ -22,6 +22,10 @@ def _pt(values):
     return ",".join(str(v) for v in values)
 
 
+def _catalogue_name(value):
+    return value.replace("%", "%25").replace("|", "%7C").replace("\r", "%0D").replace("\n", "%0A")
+
+
 def _inspection_text(intake):
     """The families-text an APS extraction would emit for `intake`: a small
     table-driven writer over LAYER/IN/BK/BKE records, kept in step with
@@ -34,7 +38,7 @@ def _inspection_text(intake):
         ]))
     for name, block in intake.get("blocks", {}).items():
         lines.append("|".join([
-            "BK", name, _pt(block["base"]), str(block["count"]),
+            "BK", _catalogue_name(name), _pt(block["base"]), str(block["count"]),
             "1" if block["complete"] else "0",
         ]))
         for child in block["children"]:
@@ -49,7 +53,7 @@ def _inspection_text(intake):
                                   _pt(child["nrm"])])
             else:
                 raise ValueError(f"the test writer does not cover block child kind {kind!r}")
-            lines.append(f'BKE|{name}|{kind}|{body}|{child["layer"]}')
+            lines.append(f'BKE|{_catalogue_name(name)}|{kind}|{body}|{_catalogue_name(child["layer"])}')
     return "\n".join(lines) + "\n"
 
 
@@ -62,11 +66,11 @@ def _fixture(sx=2.0):
                             {"kind": "LINE", "layer": "0",
                              "pts": [[1.0, 2.0, 0.0], [4.0, 2.0, 0.0]]},
                             {"kind": "CIRCLE", "layer": "0", "c": [3.0, 4.0, 0.0], "r": 2.0,
-                             "nrm": [0.0, 0.0, 1.0]},
+                             "nrm": [0.0, 1.0, 0.0]},
                         ]},
         },
         "inserts": [{"name": "Fixture", "layer": "0", "x": 10.0, "y": 20.0, "z": 0.0,
-                     "rot": 90.0, "nrm": [0.0, 0.0, 1.0], "scale": [sx, 3.0, 1.0],
+                     "rot": 1.570796, "nrm": [0.0, 0.0, 1.0], "scale": [sx, 3.0, 1.0],
                      "handle": "A1"}],
     }
 
@@ -103,6 +107,8 @@ def test_case_table_round_trip_preserves_block_base_and_insert_transform(sx):
     block = next(row for kind, row in _records(data) if kind == "BLOCK" and row[2] == "Fixture")
     assert block[10] == "1.0" and block[20] == "2.0" and block[30] == "0.0"
     assert block[70] == "0"
+    insert = next(row for kind, row in _records(data) if kind == "INSERT")
+    assert insert[50] == "90.0"
 
 
 def test_hand_written_dxf_and_inspection_fixture_pair_match_field_for_field():
@@ -115,6 +121,34 @@ def test_hand_written_dxf_and_inspection_fixture_pair_match_field_for_field():
     assert actual["inserts"] == inspected["inserts"]
     assert len(actual["inserts"]) == 1
     assert actual["blocks"]["Fixture"]["count"] == 2
+    assert actual["inserts"][0]["rot"] == 1.570796
+    assert actual["blocks"]["Fixture"]["children"][1]["nrm"] == [0.0, 1.0, 0.0]
+
+
+def test_dxf_ninety_degree_insert_parses_to_radians():
+    parsed = dxf_intake.parse_dxf_bytes(_dxf(
+        (0, "SECTION"), (2, "BLOCKS"), (0, "BLOCK"), (2, "B"), (70, 0),
+        (0, "ENDBLK"), (0, "ENDSEC"),
+        (0, "SECTION"), (2, "ENTITIES"), (0, "INSERT"), (2, "B"),
+        (5, "A1"), (50, 90), (0, "ENDSEC"), (0, "EOF")))
+    assert parsed["inserts"][0]["rot"] == 1.570796
+    assert not parsed.get("parseErrors")
+
+
+def test_encoded_block_names_keep_distinct_definitions_and_child_layers():
+    intake = _fixture()
+    intake["inserts"] = []
+    block = intake["blocks"].pop("Fixture")
+    block["children"][0]["layer"] = "SITE|walls%7C"
+    intake["blocks"]["A|B"] = block
+    intake["blocks"]["A B"] = {"base": [7.0, 8.0, 0.0], "count": 0,
+                                "complete": True, "children": []}
+    inspected = intake_parse.parse_text(_inspection_text(intake), "upload.dxf")
+    parsed = dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf(intake))
+    assert inspected["blocks"] == parsed["blocks"] == intake["blocks"]
+    assert inspected["blocks"]["A|B"]["base"] == [1.0, 2.0, 0.0]
+    assert inspected["blocks"]["A B"]["base"] == [7.0, 8.0, 0.0]
+    assert not inspected.get("parseErrors")
 
 
 def test_block_record_owners_and_all_new_handles_are_distinct():
@@ -202,6 +236,8 @@ def test_all_supported_block_child_geometries_use_the_inspection_precision():
 
 def test_insert_defaults_and_tilted_position_match_the_in_parser():
     parsed = dxf_intake.parse_dxf_bytes(_dxf(
+        (0, "SECTION"), (2, "BLOCKS"), (0, "BLOCK"), (2, "Fixture"),
+        (70, 0), (0, "ENDBLK"), (0, "ENDSEC"),
         (0, "SECTION"), (2, "ENTITIES"), (0, "INSERT"), (2, "Fixture"),
         (5, "a1"), (10, 1), (20, 2), (30, 3), (210, 0), (220, 1), (230, 0),
         (0, "ENDSEC"), (0, "EOF")))
@@ -210,24 +246,73 @@ def test_insert_defaults_and_tilted_position_match_the_in_parser():
     assert dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf(parsed)) == parsed
 
 
-def test_emitter_refuses_an_unresolved_insert_block_reference():
+@pytest.mark.parametrize("name,blocks", [
+    ("Missing", {}), ("Missing", None), ("*U1", {}),
+    ("*Model_Space", {}), ("*Paper_Space", {}),
+    ("*Model_Space", {"*Model_Space": {"base": [0, 0, 0], "children": []}}),
+])
+def test_emitter_refuses_an_unresolved_insert_block_reference(name, blocks):
     intake = _fixture()
-    intake["blocks"] = {}
-    intake["inserts"][0]["name"] = "Missing"
-    with pytest.raises(intake_dxf.IntakeDxfError, match="unresolved block reference Missing"):
+    if blocks is None:
+        del intake["blocks"]
+    else:
+        intake["blocks"] = blocks
+    intake["inserts"][0]["name"] = name
+    with pytest.raises(intake_dxf.IntakeDxfError, match="unresolved block reference") as error:
         intake_dxf.intake_to_dxf(intake)
+    assert str(error.value).endswith(name)
+
+
+@pytest.mark.parametrize("name,flags", [("*U1", 1), ("Anonymous", 1), ("*Model_Space", 0)])
+def test_dxf_drops_inserts_whose_definition_was_skipped(name, flags):
+    parsed = dxf_intake.parse_dxf_bytes(_dxf(
+        (0, "SECTION"), (2, "BLOCKS"), (0, "BLOCK"), (2, name), (70, flags),
+        (0, "ENDBLK"), (0, "ENDSEC"),
+        (0, "SECTION"), (2, "ENTITIES"), (0, "INSERT"), (2, name), (5, "A7"),
+        (0, "ENDSEC"), (0, "EOF")))
+    assert not parsed.get("inserts") and parsed["blocks"] == {}
+    assert len(parsed["parseErrors"]) == 1
+    assert "A7" in parsed["parseErrors"][0] and name in parsed["parseErrors"][0]
+
+
+def test_dxf_drops_an_insert_when_there_is_no_blocks_section():
+    parsed = dxf_intake.parse_dxf_bytes(_dxf(
+        (0, "SECTION"), (2, "ENTITIES"), (0, "INSERT"), (2, "Missing"), (5, "A8"),
+        (0, "ENDSEC"), (0, "EOF")))
+    assert not parsed.get("inserts")
+    assert parsed["parseErrors"] == ["INSERT A8: unresolved block reference Missing"]
+
+
+@pytest.mark.parametrize("child", [
+    [(0, "LWPOLYLINE"), (90, 0)],
+    [(0, "LWPOLYLINE"), (90, 1), (10, 0), (20, 0)],
+    [(0, "LINE"), (10, 0), (20, 0)],
+    [(0, "LINE"), (10, "bad"), (20, 0), (11, 1), (21, 0)],
+    [(0, "CIRCLE"), (10, 0), (20, 0), (40, 0)],
+    [(0, "ARC"), (10, 0), (20, 0), (40, -1)],
+    [(0, "CIRCLE"), (10, 0), (20, 0), (40, 2), (210, "bad")],
+])
+def test_dxf_invalid_block_geometry_is_dropped_and_the_intake_still_emits(child):
+    parsed = dxf_intake.parse_dxf_bytes(_block_dxf(child, name="B"))
+    block = parsed["blocks"]["B"]
+    assert block["complete"] is False and block["count"] == 1
+    assert block["children"] == []
+    assert len(parsed["parseErrors"]) == 1 and "B" in parsed["parseErrors"][0]
+    emitted = dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf(parsed))
+    assert emitted["blocks"]["B"]["children"] == []
+    assert not emitted.get("parseErrors")
 
 
 def test_verify_accepts_unchanged_insert_rotation_in_radians_and_rejects_a_real_rotation():
-    base = _fixture()
-    base["blocks"] = {}
-    base["inserts"][0]["rot"] = 1.5708
-    unchanged = copy.deepcopy(base)
-    write_loop.verify_live_mutation_effects(base, unchanged, {})
-    rotated = copy.deepcopy(base)
+    base, unchanged, plan = _v2_case()
+    unchanged["inserts"][0]["rot"] = 1.5708
+    write_loop.verify_live_mutation_effects(base, unchanged, plan)
+    assert base["inserts"][0]["rot"] == 1.570796
+    assert unchanged["inserts"][0]["rot"] == 1.5708
+    rotated = copy.deepcopy(unchanged)
     rotated["inserts"][0]["rot"] = 90.0
     with pytest.raises(ValueError, match="INSERT"):
-        write_loop.verify_live_mutation_effects(base, rotated, {})
+        write_loop.verify_live_mutation_effects(base, rotated, plan)
 
 
 def test_no_blocks_dxf_has_the_legacy_intake_bytes():

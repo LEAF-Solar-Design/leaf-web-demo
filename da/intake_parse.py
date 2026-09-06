@@ -8,6 +8,7 @@ emits the same "families text"; this module turns that text into Intake JSON.
 """
 from __future__ import annotations
 
+import math
 import sys
 
 
@@ -107,9 +108,15 @@ def _strip_mtext(s):
 
 def _block_point(value, places=3, width=3):
     point = [round(float(v), places) for v in value.split(",")]
-    if len(point) != width:
+    if len(point) != width or not all(math.isfinite(v) for v in point):
         raise ValueError("malformed block point")
     return point
+
+
+def _block_name(value):
+    # Decode only the catalogue framing escapes, with percent LAST so an
+    # original literal "%7C" (encoded as "%257C") stays a literal "%7C".
+    return value.replace("%7C", "|").replace("%0D", "\r").replace("%0A", "\n").replace("%25", "%")
 
 
 def _block_child(kind, body, layer):
@@ -122,12 +129,16 @@ def _block_child(kind, body, layer):
         child.update(closed=bool(int(closed) & 1), nrm=_block_point(normal, 6),
                      elev=round(float(elevation), 3),
                      pts=[_block_point(p, width=2) for p in points.split(";") if p])
+        if len(child["pts"]) < 2:
+            raise ValueError("LWPOLYLINE needs at least two points")
     elif kind in ("CIRCLE", "ARC"):
         expected = 5 if kind == "ARC" else 3
         if len(body) != expected:
             raise ValueError(f"{kind} body must have {expected} fields")
         child.update(c=_block_point(body[0]), r=round(float(body[1]), 3),
                      nrm=_block_point(body[-1], 6))
+        if not math.isfinite(child["r"]) or child["r"] <= 0:
+            raise ValueError(f"{kind} radius must be positive")
         if kind == "ARC":
             child.update(start_deg=round(float(body[2]), 6),
                          end_deg=round(float(body[3]), 6))
@@ -139,6 +150,8 @@ def _block_child(kind, body, layer):
         child["type"], = body
     else:
         raise ValueError("unknown block child kind")
+    if "nrm" in child and not any(child["nrm"]):
+        raise ValueError("block child normal must not be the zero vector")
     return child
 
 
@@ -263,6 +276,7 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                     "pts": [[float(v) for v in p.split(",")] for p in pts.split(";") if p]})
             elif tag == "BK":
                 name, base, count, complete = rest.split("|")
+                name = _block_name(name)
                 count = int(count)
                 if count < 0 or complete not in ("0", "1"):
                     raise ValueError("malformed block count or completeness")
@@ -270,12 +284,14 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                     "base": _block_point(base), "count": count,
                     "complete": complete == "1" and count <= 60, "children": []}
             elif tag == "BKE":
-                name, kind, *body, layer = rest.split("|")
-                block = out["blocks"][name]
+                fields = rest.split("|")
+                name = _block_name(fields[0])
+                block = out.setdefault("blocks", {}).setdefault(name, {
+                    "base": [0.0, 0.0, 0.0], "count": 0,
+                    "complete": False, "children": []})
                 try:
-                    child = _block_child(kind, body, layer)
-                    if kind == "LWPOLYLINE" and len(child.get("pts", [])) < 2:
-                        raise ValueError("LWPOLYLINE needs at least two points")
+                    kind, *body, layer = fields[1:]
+                    child = _block_child(kind, body, _block_name(layer))
                 except Exception:
                     block["complete"] = False
                     raise

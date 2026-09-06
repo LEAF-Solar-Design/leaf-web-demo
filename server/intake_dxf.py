@@ -230,11 +230,10 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         if not isinstance(ent, dict):
             _fail(f"{where}: not an object")
         name = _layer_name(ent.get("name"), where)
-        if "blocks" in intake:
-            raw_blocks = intake["blocks"]
-            known = raw_blocks if isinstance(raw_blocks, dict) else {}
-            if not name.startswith("*") and name not in known:
-                _fail(f"{where}: unresolved block reference {name}")
+        raw_blocks = intake.get("blocks", {})
+        known = raw_blocks if isinstance(raw_blocks, dict) else {}
+        if name.startswith("*") or name not in known:
+            _fail(f"{where}: unresolved block reference {name}")
         layer = _layer_name(ent.get("layer"), where)
         point = [_number(ent.get(axis), f"{where}.{axis}") for axis in ("x", "y", "z")]
         normal = _vector(ent.get("nrm", [0, 0, 1]), f"{where}.nrm")
@@ -242,6 +241,13 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
             _fail(f"{where}: nrm must not be the zero vector")
         scale = _vector(ent.get("scale", [1, 1, 1]), f"{where}.scale")
         rotation = _number(ent.get("rot", 0), f"{where}.rot")
+        degrees = math.degrees(rotation)
+        # Recover whole degrees when their radians have the exact same
+        # six-decimal reading (for example 1.570796 represents 90 degrees).
+        whole_degrees = round(degrees)
+        rotation = (float(whole_degrees)
+                    if rotation == round(math.radians(whole_degrees), 6)
+                    else round(degrees, 6))
         h = _real_handle(ent.get("handle"), where, real)
         if h is not None:
             highest = max(highest, int(h, 16))

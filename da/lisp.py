@@ -109,10 +109,17 @@ MUTATION_INSPECT_BLOCKS += (
           (rtos (cond ((caddr p) (caddr p)) (T 0.0)) 2 precision)))
       (defun leaf-bk-angle (a)
         (rtos (* 180.0 (/ (cond (a a) (T 0.0)) pi)) 2 6))
+      (defun leaf-bk-encode (value / result ch)
+        (setq result "")
+        (foreach ch (vl-string->list value)
+          (setq result (strcat result
+            (cond ((= ch 37) "%25") ((= ch 124) "%7C")
+              ((= ch 13) "%0D") ((= ch 10) "%0A") (T (chr ch))))))
+        result)
       (defun leaf-bk-child (name ed / kind layer body normal points value)
         (setq kind (cdr (assoc 0 ed)) layer (cdr (assoc 8 ed)))
         (if (null layer) (setq layer "0"))
-        (setq layer (vl-string-translate "|\r\n" "   " layer))
+        (setq layer (leaf-bk-encode layer))
         (cond
           ((= kind "LINE")
             (setq body (strcat (leaf-bk-point (cdr (assoc 10 ed)) 3) "|"
@@ -138,13 +145,12 @@ MUTATION_INSPECT_BLOCKS += (
             (setq body (strcat (leaf-bk-point (cdr (assoc 10 ed)) 3) "|"
               (rtos (cdr (assoc 40 ed)) 2 3) "|" (leaf-bk-angle (cdr (assoc 50 ed))) "|" value)))
           (T (setq body kind kind "OTHER" layer "")))
-        (strcat "BKE|" name "|" kind "|" body "|" layer))
+        (strcat "BKE|" (leaf-bk-encode name) "|" kind "|" body "|" layer))
       (princ))'''.splitlines()),
     " ".join(r'''(progn
       (setq f (open "{OUT}" "a") bk (tblnext "BLOCK" T) total 0)
       (while bk
         (setq name (cdr (assoc 2 bk)))
-        (if name (setq name (vl-string-translate "|\r\n" "   " name)))
         (if (and name (/= (substr name 1 1) "*") (= 0 (logand 1 (cdr (assoc 70 bk)))))
           (progn
             (setq total (1+ total))
@@ -158,7 +164,7 @@ MUTATION_INSPECT_BLOCKS += (
                   (if (<= cnt 60) (setq rows (cons (leaf-bk-child name bed) rows)))
                   (setq be (entnext be)))
                 (if (null be) (setq complete 0))
-                (write-line (strcat "BK|" name "|" (leaf-bk-point (cdr (assoc 10 bk)) 3) "|"
+                (write-line (strcat "BK|" (leaf-bk-encode name) "|" (leaf-bk-point (cdr (assoc 10 bk)) 3) "|"
                   (itoa cnt) "|" (itoa complete)) f)
                 (foreach row (reverse rows) (write-line row f))))))
         (setq bk (tblnext "BLOCK")))
