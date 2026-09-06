@@ -24,15 +24,16 @@ env:
 phases:
   build:
     commands:
-      - REF=$(git rev-parse --verify -q refs/remotes/origin/main || git rev-parse --verify -q refs/heads/main)
-      - test -n "$REF" || { echo "FATAL: cannot resolve origin/main or main" >&2; exit 1; }
-      - git cat-file -e "$REF:.codebuild/mq.sh" || { echo "FATAL: .codebuild/mq.sh missing at $REF" >&2; exit 1; }
-      - git cat-file -e "$REF:scripts/ci/mq_review.py" || { echo "FATAL: scripts/ci/mq_review.py missing at $REF" >&2; exit 1; }
-      - git show "$REF:.codebuild/mq.sh" > /tmp/mq.sh
-      - git show "$REF:scripts/ci/mq_review.py" > /tmp/mq_review.py
-      - SHORT=$(git rev-parse --short "$REF")
-      - echo "Loading mq-review from $REF ($SHORT)"
-      - MQ_REVIEW_PY=/tmp/mq_review.py bash /tmp/mq.sh
+      - |
+        set -euo pipefail
+        REF=$(git show-ref --verify -s refs/remotes/origin/main 2>/dev/null || git show-ref --verify -s refs/heads/main 2>/dev/null || true)
+        [ -n "$REF" ] || { echo "FATAL: cannot resolve refs/remotes/origin/main or refs/heads/main" >&2; exit 1; }
+        git cat-file -e "$REF:.codebuild/mq.sh" || { echo "FATAL: .codebuild/mq.sh missing at $REF" >&2; exit 1; }
+        git cat-file -e "$REF:scripts/ci/mq_review.py" || { echo "FATAL: scripts/ci/mq_review.py missing at $REF" >&2; exit 1; }
+        git show "$REF:.codebuild/mq.sh" > /tmp/mq.sh
+        git show "$REF:scripts/ci/mq_review.py" > /tmp/mq_review.py
+        echo "loader: running .codebuild/mq.sh and scripts/ci/mq_review.py from $REF ($(git rev-parse --short "$REF"))"
+        MQ_REVIEW_PY=/tmp/mq_review.py bash /tmp/mq.sh
 BUILDSPEC
 )
 
@@ -180,21 +181,19 @@ secret_arn_value() {
 # line. In --dry-run mode this makes no AWS call: it prints two placeholders and says so on stderr.
 connection_arns_value() {
   if [[ $mode == --dry-run ]]; then
-    echo 'dry-run: connection ARNs resolved at run time via codeconnections list-connections' >&2
+    echo 'dry-run: connection ARNs resolved at run time via codeconnections lookup' >&2
     printf '%s\n%s\n' '<resolved at run time>' '<resolved at run time>'
     return 0
   fi
-  local arn status id
-  arn=$(aws_cli codeconnections list-connections \
-    --query "Connections[?ConnectionName=='${connection_display_name}'].ConnectionArn | [0]" \
-    --output text 2>/dev/null) || arn=""
-  status=$(aws_cli codeconnections list-connections \
-    --query "Connections[?ConnectionName=='${connection_display_name}'].ConnectionStatus | [0]" \
-    --output text 2>/dev/null) || status=""
-  if [[ -z $arn || $arn == None ]]; then
-    echo "FATAL: connection $connection_display_name not found" >&2
+  local connection arn status id
+  connection=$(aws_cli codeconnections list-connections \
+    --query "Connections[?ConnectionName=='${connection_display_name}'].[ConnectionArn,ConnectionStatus]" \
+    --output text 2>/dev/null) || connection=""
+  if [[ -z $connection || $connection == None || $connection == *$'\n'* ]]; then
+    echo "FATAL: connection $connection_display_name absent or duplicated" >&2
     exit 1
   fi
+  read -r arn status <<< "$connection"
   if [[ $status != AVAILABLE ]]; then
     echo "FATAL: connection $connection_display_name is not AVAILABLE (status: $status)" >&2
     exit 1

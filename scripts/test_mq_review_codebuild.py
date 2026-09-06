@@ -8,6 +8,7 @@ import shutil
 import subprocess
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("mq_review", ROOT / "scripts/ci/mq_review.py")
@@ -107,13 +108,39 @@ def test_mq_sh_accept_path_execs_python3(tmp_path):
     assert argv == ["/tmp/mq_review.py", "--head-sha", head_sha]
 
 
-def test_loader_uses_qualified_refs():
+def test_loader_is_one_parsed_block():
+    result = subprocess.run([bash(), "scripts/ci/mq-codebuild-project.sh", "--dry-run"],
+                            cwd=ROOT, capture_output=True, text=True, timeout=30, check=True)
+    document = json.loads(result.stdout)
+    spec = yaml.safe_load(document["project"]["source"]["buildspec"])
+    assert spec["version"] == 0.2
+    assert spec["env"]["shell"] == "bash"
+    commands = spec["phases"]["build"]["commands"]
+    assert isinstance(commands, list)
+    assert all(isinstance(command, str) for command in commands)
+    assert len(commands) == 1
+    block = commands[0]
+    previous = -1
+    for substring in (
+        "set -euo pipefail",
+        "git show-ref --verify -s refs/remotes/origin/main",
+        "git show-ref --verify -s refs/heads/main",
+        'git cat-file -e "$REF:.codebuild/mq.sh"',
+        'git cat-file -e "$REF:scripts/ci/mq_review.py"',
+        'git show "$REF:.codebuild/mq.sh" > /tmp/mq.sh',
+        'git show "$REF:scripts/ci/mq_review.py" > /tmp/mq_review.py',
+        "MQ_REVIEW_PY=/tmp/mq_review.py bash /tmp/mq.sh",
+    ):
+        index = block.index(substring)
+        assert index > previous
+        previous = index
+    assert "git rev-parse --verify -q origin/main" not in block
+    assert "bash .codebuild/mq.sh" not in block
+
+
+def test_connection_is_read_once():
     script = (ROOT / "scripts/ci/mq-codebuild-project.sh").read_text()
-    buildspec = script.split("<<'BUILDSPEC'\n", 1)[1].split("\nBUILDSPEC", 1)[0]
-    assert "git rev-parse --verify -q refs/remotes/origin/main" in buildspec
-    assert "git rev-parse --verify -q refs/heads/main" in buildspec
-    assert "git rev-parse --verify -q origin/main" not in buildspec
-    assert "git rev-parse --verify -q main" not in buildspec
+    assert script.count("list-connections") == 1
 
 
 def test_project_dry_run():
