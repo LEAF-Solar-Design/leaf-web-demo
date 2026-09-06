@@ -1,18 +1,24 @@
-"""Native Studio release producer building blocks.
+"""Native Studio gate and release entry point.
 
-No provider is provisioned and nothing runs on import. The release controller
-must establish source admission and gate success before calling build_image.
-This is not yet the complete release entry point or a deployment command.
+Runs only inside the fixed, separately privileged CodeBuild projects. It never
+provisions a provider or deploys a service. Completed-build consumers establish
+the enclosing managed ZIP's immutable AWS provenance independently.
 """
 from __future__ import annotations
 
 import json
 import hashlib
+import argparse
+import base64
+import importlib.util
+import os
 from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 import time
+import urllib.request
 
 
 SERVICES = ("app", "broker", "canonical-worker", "harness", "web")
@@ -192,7 +198,8 @@ def run_gate(root: Path, results_dir: Path, *, env: dict[str, str],
 
 def image_build_command(service: str, source: str, build_number: int,
                         freshness: dict[str, str], metadata: Path, *,
-                        solver_revision: str | None = None) -> list[str]:
+                        solver_revision: str | None = None,
+                        solver_root: Path | None = None) -> list[str]:
     """Construct the current canonical image recipe for one native build.
 
     Native tags do not move production aliases or reuse GitHub run IDs. Every
@@ -219,7 +226,7 @@ def image_build_command(service: str, source: str, build_number: int,
         if not isinstance(solver_revision, str) or not re.fullmatch(r"[0-9a-f]{40}", solver_revision):
             raise ValueError("canonical worker requires exact solver source")
         command += ["--build-arg", f"AUTOFILL_SOLVER_REVISION={solver_revision}",
-                    "--build-context", "autofill_solver=./autofill-solver"]
+                    "--build-context", f"autofill_solver={solver_root if solver_root is not None else './autofill-solver'}"]
     elif solver_revision is not None:
         raise ValueError("solver source is only valid for canonical worker")
     if service == "app":
@@ -232,7 +239,8 @@ def image_build_command(service: str, source: str, build_number: int,
 
 def build_image(root: Path, service: str, source: str, build_number: int,
                 freshness: dict[str, str], metadata: Path, *,
-                solver_revision: str | None = None) -> dict:
+                solver_revision: str | None = None,
+                solver_root: Path | None = None) -> dict:
     """Execute one admitted image build and return its exact pushed digest.
 
     The caller owns authentication, approval, complete source/gate admission,
@@ -240,14 +248,14 @@ def build_image(root: Path, service: str, source: str, build_number: int,
     This function never discovers credentials or launches another AWS build.
     """
     command = image_build_command(service, source, build_number, freshness,
-                                  metadata, solver_revision=solver_revision)
+                                  metadata, solver_revision=solver_revision, solver_root=solver_root)
     actual = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, check=True,
                             text=True, capture_output=True, timeout=10).stdout.strip()
     if actual != source:
         raise ValueError("checkout differs from admitted source")
     if service == "canonical-worker":
         actual_solver = subprocess.run(
-            ["git", "-C", "autofill-solver", "rev-parse", "HEAD"], cwd=root,
+            ["git", "-C", str(solver_root or "autofill-solver"), "rev-parse", "HEAD"], cwd=root,
             check=True, text=True, capture_output=True, timeout=10,
         ).stdout.strip()
         if actual_solver != solver_revision:
@@ -311,3 +319,167 @@ def package_web_image(root: Path, image_digest: str, source: str,
     ):
         raise ValueError("canonical web packer returned invalid identity")
     return dict(receipt, path=str(archive), image_digest=image_digest, source_revision=source)
+
+
+def _git(root: Path, *args: str) -> str:
+    return subprocess.run(["git", *args], cwd=root, check=True, text=True,
+                          capture_output=True, timeout=30).stdout.strip()
+
+
+def admit_checkout(root: Path, source: str, tree: str) -> None:
+    _hex(source, 40, "admitted source")
+    _hex(tree, 40, "admitted tree")
+    if _git(root, "rev-parse", "HEAD") != source or _git(root, "rev-parse", "HEAD^{tree}") != tree:
+        raise ValueError("checkout differs from admitted source/tree")
+    if _git(root, "status", "--porcelain", "--untracked-files=normal"):
+        raise ValueError("native producer requires a clean source checkout")
+
+
+def runtime_identity(mode: str, source: str, env: dict, codebuild) -> dict:
+    """Bind the running job to its fixed project and least-privilege role."""
+    if mode not in ("gate", "release"):
+        raise ValueError("unknown native mode")
+    project = f"leaf-studio-native-{mode}"
+    prefix = "arn:aws:codebuild:us-east-1:807034087062:"
+    identity = _build_identity({"project_arn": prefix + "project/" + project,
+                                "build_arn": env["CODEBUILD_BUILD_ARN"],
+                                "build_number": int(env["CODEBUILD_BUILD_NUMBER"])})
+    response = codebuild.batch_get_builds(ids=[identity["build_arn"]])
+    rows = response.get("builds", [])
+    if response.get("buildsNotFound") or len(rows) != 1:
+        raise ValueError("running native build is not unique")
+    row = rows[0]
+    expected = {"arn": identity["build_arn"], "buildNumber": identity["build_number"],
+                "projectName": project, "resolvedSourceVersion": source,
+                "serviceRole": f"arn:aws:iam::807034087062:role/{project}-role",
+                "buildStatus": "IN_PROGRESS"}
+    if any(row.get(key) != value for key, value in expected.items()):
+        raise ValueError("running native producer identity differs")
+    src = row.get("source", {})
+    if (src.get("type") != "GITHUB"
+            or src.get("location") != "https://github.com/LEAF-Solar-Design/leaf-web-demo.git"
+            or src.get("buildspec") != ".codebuild/release.yml"):
+        raise ValueError("running native source configuration differs")
+    return identity
+
+
+def resolve_freshness(root: Path) -> dict[str, dict[str, str]]:
+    """Fetch the same signed package-channel inputs as the image workflow."""
+    def digest(url):
+        with urllib.request.urlopen(url, timeout=30) as response:
+            payload = response.read(8 * 1024 * 1024 + 1)
+        if not payload or len(payload) > 8 * 1024 * 1024:
+            raise ValueError("package channel document exceeds bound")
+        return hashlib.sha256(payload).hexdigest()
+    hashes = {}
+    for distribution, names in (("bookworm", FRESHNESS["harness"]), ("trixie", TRIXIE)):
+        hashes[names[0]] = digest(f"https://deb.debian.org/debian-security/dists/{distribution}-security/InRelease")
+        hashes[names[1]] = digest(f"https://deb.debian.org/debian/dists/{distribution}-updates/InRelease")
+    repositories = subprocess.run(
+        ["docker", "run", "--rm", "--pull=always", "--platform", "linux/amd64", "--entrypoint", "cat",
+         f"{REGISTRY}/public-ecr/docker/library/nginx:alpine", "/etc/apk/repositories"],
+        cwd=root, check=True, text=True, capture_output=True, timeout=600,
+    ).stdout.splitlines()
+    main = [url for url in repositories if re.fullmatch(r"https://dl-cdn.alpinelinux.org/alpine/v[0-9]+\.[0-9]+/main", url)]
+    if len(main) != 1:
+        raise ValueError("nginx base does not identify one Alpine main channel")
+    hashes[FRESHNESS["web"][0]] = digest(main[0] + "/x86_64/APKINDEX.tar.gz")
+    return {service: {name: hashes[name] for name in FRESHNESS.get(service, TRIXIE)} for service in SERVICES}
+
+
+def load_evidence_contract(root: Path, revision: str):
+    """Use the exact protected secondary-source verifier, never a pip copy."""
+    _hex(revision, 40, "evidence contract revision")
+    if _git(root, "rev-parse", "HEAD") != revision or _git(root, "status", "--porcelain"):
+        raise ValueError("evidence contract checkout differs from admitted revision")
+    path = root / "scripts/verify_release_provider_evidence.py"
+    spec = importlib.util.spec_from_file_location("native_evidence_contract", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def produce_release(root: Path, output: Path, request: dict, env: dict, codebuild, s3) -> dict:
+    """Execute the complete admitted producer, without provisioning or deployment."""
+    if set(request) != {"source_revision", "source_tree", "gate", "contract_revision"}:
+        raise ValueError("release request fields differ")
+    source, tree = request["source_revision"], request["source_tree"]
+    admit_checkout(root, source, tree)
+    identity = runtime_identity("release", source, env, codebuild)
+    contract = load_evidence_contract(Path(env["CODEBUILD_SRC_DIR_provider_contract"]), request["contract_revision"])
+    gate_request = contract.NativeRelease(**request["gate"])
+    if (gate_request.project_arn != "arn:aws:codebuild:us-east-1:807034087062:project/leaf-studio-native-gate"
+            or gate_request.service_role != "arn:aws:iam::807034087062:role/leaf-studio-native-gate-role"
+            or gate_request.source_revision != source
+            or gate_request.repository_url != "https://github.com/LEAF-Solar-Design/leaf-web-demo.git"
+            or gate_request.buildspec != ".codebuild/release.yml"):
+        raise ValueError("gate request differs from fixed native gate/source")
+    _, gate_payload = contract.read_native_release(gate_request, codebuild, s3, max_archive_bytes=4 * 1024 * 1024)
+    proof = contract._members(gate_payload, {"gate-proof.json"}, limit=4 * 1024 * 1024)["gate-proof.json"]
+    work = Path(tempfile.mkdtemp(prefix="leaf-native-release-"))
+    proof_path = work / "gate-proof.json"
+    proof_path.write_bytes(proof)
+    subprocess.run([sys.executable, "scripts/run-all-gates.py", "--verify-gate-proof", str(proof_path), "--expect-tree", tree],
+                   cwd=root, check=True, timeout=120)
+    pins = json.loads((root / "deploy/autofill-solver-sources.json").read_text())
+    if not isinstance(pins, dict) or len(pins) != 1:
+        raise ValueError("release requires one reviewed solver pin")
+    revision, source_hash = next(iter(pins.items()))
+    _hex(revision, 40, "solver revision")
+    _hex(source_hash, 64, "solver content hash")
+    solver_root = Path(env["CODEBUILD_SRC_DIR_autofill_solver"])
+    if _git(solver_root, "rev-parse", "HEAD") != revision or _git(solver_root, "status", "--porcelain"):
+        raise ValueError("solver secondary source differs from reviewed pin")
+    freshness = resolve_freshness(root)
+    images = {}
+    for service in SERVICES:
+        extra = {"solver_revision": revision, "solver_root": solver_root} if service == "canonical-worker" else {}
+        images[service] = build_image(root, service, source, identity["build_number"], freshness[service], work / f"{service}.json", **extra)
+    web = package_web_image(root, images["web"]["image_digest"], source, work / "web")
+    gate = {"producer": {"project_arn": gate_request.project_arn, "build_arn": gate_request.build_arn,
+                         "build_number": gate_request.build_number},
+            "source_revision": source, "source_tree": tree, "proof_sha256": hashlib.sha256(proof).hexdigest(),
+            "archive": {"bucket": gate_request.bucket, "key": gate_request.key,
+                        "version_id": gate_request.version_id, "sha256": gate_request.sha256}}
+    return stage_release(output, source=source, tree=tree, producer=identity, images=images,
+                         web=web, solver={"revision": revision, "source_sha256": source_hash}, gate=gate)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("mode", choices=("gate", "release"))
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--admit-only", action="store_true")
+    args = parser.parse_args()
+    env = dict(os.environ)
+    encoded = env["LEAF_NATIVE_REQUEST_B64"]
+    if len(encoded) > 32768:
+        raise ValueError("native request exceeds bound")
+    request = json.loads(base64.b64decode(encoded, validate=True))
+    root = Path(env["CODEBUILD_SRC_DIR"])
+    import boto3
+    codebuild = boto3.client("codebuild", region_name="us-east-1")
+    if args.admit_only:
+        admit_checkout(root, request["source_revision"], request["source_tree"])
+        runtime_identity(args.mode, request["source_revision"], env, codebuild)
+        return 0
+    if args.mode == "release":
+        produce_release(root, args.output, request, env, codebuild, boto3.client("s3", region_name="us-east-1"))
+    else:
+        if set(request) != {"source_revision", "source_tree"}:
+            raise ValueError("gate request fields differ")
+        admit_checkout(root, request["source_revision"], request["source_tree"])
+        runtime_identity("gate", request["source_revision"], env, codebuild)
+        work = Path(tempfile.mkdtemp(prefix="leaf-native-gate-"))
+        env.pop("DATABASE_URL", None)
+        env.pop("LEAF_CONTAINER_SMOKE", None)
+        env["LEAF_AUTOFILL_SOLVER_ABSENT_OK"] = "1"
+        proof = run_gate(root, work / "results", env=env)
+        args.output.mkdir(parents=True, exist_ok=False)
+        (args.output / "gate-proof.json").write_bytes(proof.read_bytes())
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

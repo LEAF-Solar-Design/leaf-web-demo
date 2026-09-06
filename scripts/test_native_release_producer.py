@@ -203,3 +203,76 @@ def test_web_package_cleans_container_after_copy_failure(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="copy failed"):
         producer.package_web_image(tmp_path, "sha256:" + "e" * 64, "a" * 40, tmp_path / "web")
     assert calls[-1] == ["docker", "rm", "d" * 64]
+
+
+def test_runtime_identity_rejects_gate_on_publisher_role():
+    identity = native_identity("leaf-studio-native-gate")
+    record = dict(arn=identity["build_arn"], buildNumber=7, projectName="leaf-studio-native-gate",
+                  resolvedSourceVersion="a" * 40, buildStatus="IN_PROGRESS",
+                  serviceRole="arn:aws:iam::807034087062:role/leaf-studio-native-release-role")
+    client = SimpleNamespace(batch_get_builds=lambda **kwargs: {"builds": [record]})
+    with pytest.raises(ValueError, match="identity"):
+        producer.runtime_identity("gate", "a" * 40,
+                                  {"CODEBUILD_BUILD_ARN": identity["build_arn"], "CODEBUILD_BUILD_NUMBER": "7"}, client)
+
+
+def test_external_solver_context_preserves_exact_revision():
+    command = producer.image_build_command(
+        "canonical-worker", "a" * 40, 7, {key: "b" * 64 for key in TRIXIE}, Path("metadata.json"),
+        solver_revision="c" * 40, solver_root=Path("/secondary/solver"),
+    )
+    assert "autofill_solver=" + str(Path("/secondary/solver")) in command
+
+
+@pytest.mark.parametrize("gate_succeeds", [True, False])
+def test_composed_release_verifies_gate_before_all_five_builds(tmp_path, monkeypatch, gate_succeeds):
+    inputs = assembly_inputs(tmp_path)
+    gate_identity = native_identity("leaf-studio-native-gate")
+    gate_request = dict(gate_identity, source_revision="a" * 40,
+                        service_role="arn:aws:iam::807034087062:role/leaf-studio-native-gate-role",
+                        repository_url="https://github.com/LEAF-Solar-Design/leaf-web-demo.git",
+                        buildspec=".codebuild/release.yml", bucket="unit-gates", key="gate.zip",
+                        version_id="unit-version", sha256="f" * 64)
+    request = {"source_revision": "a" * 40, "source_tree": "b" * 40,
+               "gate": gate_request, "contract_revision": "d" * 40}
+    (tmp_path / "deploy").mkdir()
+    (tmp_path / "deploy/autofill-solver-sources.json").write_text(json.dumps({"e" * 40: "f" * 64}))
+    work = tmp_path / "scratch"
+    work.mkdir()
+    events = []
+    def gate_read(*args, **kwargs):
+        events.append("gate-provider")
+        if not gate_succeeds:
+            raise ValueError("gate failed")
+        return {}, b"provider archive unit fixture"
+    contract = SimpleNamespace(NativeRelease=SimpleNamespace, read_native_release=gate_read,
+                               _members=lambda *args, **kwargs: {"gate-proof.json": b"canonical proof unit fixture"})
+    monkeypatch.setattr(producer, "admit_checkout", lambda *args: events.append("admit"))
+    monkeypatch.setattr(producer, "runtime_identity", lambda *args: native_identity("leaf-studio-native-release"))
+    monkeypatch.setattr(producer, "load_evidence_contract", lambda *args: contract)
+    monkeypatch.setattr(producer.tempfile, "mkdtemp", lambda **kwargs: str(work))
+    monkeypatch.setattr(producer.subprocess, "run", lambda *args, **kwargs: events.append("canonical-proof"))
+    monkeypatch.setattr(producer, "_git", lambda root, *args: "e" * 40 if args[0] == "rev-parse" else "")
+    monkeypatch.setattr(producer, "resolve_freshness", lambda *args: {service: {} for service in SERVICES})
+    def build(root, service, source, number, freshness, metadata, **kwargs):
+        events.append(service)
+        if service == "canonical-worker":
+            assert kwargs["solver_revision"] == "e" * 40
+            assert kwargs["solver_root"] == Path("/unit/solver")
+        return inputs["images"][service]
+    monkeypatch.setattr(producer, "build_image", build)
+    monkeypatch.setattr(producer, "package_web_image", lambda *args: inputs["web"])
+    env = {"CODEBUILD_SRC_DIR_provider_contract": "/unit/contract", "CODEBUILD_SRC_DIR_autofill_solver": "/unit/solver"}
+    output = tmp_path / "artifacts"
+    if not gate_succeeds:
+        with pytest.raises(ValueError, match="gate failed"):
+            producer.produce_release(tmp_path, output, request, env, object(), object())
+        assert events == ["admit", "gate-provider"]
+        assert not output.exists()
+    else:
+        result = producer.produce_release(tmp_path, output, request, env, object(), object())
+        assert events == ["admit", "gate-provider", "canonical-proof", *SERVICES]
+        assert set(result) == {"staging-supply-set.json", "web-dist.zip"}
+        manifest = json.loads((output / "staging-supply-set.json").read_bytes())
+        assert manifest["gate"]["producer"] == gate_identity
+        assert manifest["producer"]["project_arn"].endswith("/leaf-studio-native-release")
