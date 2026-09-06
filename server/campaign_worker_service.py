@@ -45,7 +45,9 @@ def _planning_wait(cur, execution, scope):
                 " AND task_key='campaign-plan' FOR UPDATE", scope)
     task = cur.fetchone()
     if task and task['current_stage'] == 'build_test' and task['status'] not in ('failed', 'succeeded'):
-        return {'kind': 'awaiting_plan_validation', 'task_id': str(task['task_id'])}
+        from leaf_platform.campaign_plan_adoption import saved_plan_source
+        return {'kind': 'awaiting_plan_validation', 'task_id': str(task['task_id']),
+                'plan_source': saved_plan_source(cur, scope, task['task_id'])}
     return None
 
 

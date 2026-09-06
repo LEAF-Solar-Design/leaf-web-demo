@@ -80,6 +80,19 @@ def submit_task(org_id, project_id, campaign_id, *, task_key, title, spec,
                 declared_artifacts, depends_on, idempotency_key, kind='task',
                 parent_task_id=None):
     scope = {**_scope(org_id, project_id), 'campaign': _uuid(campaign_id)}
+    with _cursor() as cur:
+        return _submit_task_cursor(
+            cur, scope, task_key=task_key, title=title, spec=spec, capability=capability,
+            stages=stages, owned_paths=owned_paths, source_sha=source_sha,
+            verify_command=verify_command, declared_artifacts=declared_artifacts,
+            depends_on=depends_on, idempotency_key=idempotency_key, kind=kind,
+            parent_task_id=parent_task_id)
+
+
+def _submit_task_cursor(cur, scope, *, task_key, title, spec,
+                capability, stages, owned_paths, source_sha, verify_command,
+                declared_artifacts, depends_on, idempotency_key, kind='task',
+                parent_task_id=None):
     for value, name, maximum in ((task_key, 'task_key', 128), (title, 'title', 200),
                                   (spec, 'spec', 16384), (capability, 'capability', 64),
                                   (source_sha, 'source_sha', 40),
@@ -107,74 +120,77 @@ def submit_task(org_id, project_id, campaign_id, *, task_key, title, spec,
                    depends_on=sorted(depends_on), kind=kind,
                    parent_task_id=str(parent) if parent else None)
     fingerprint = _fingerprint('leaf.campaign.task.v1', payload)
-    with _cursor() as cur:
-        _check(cur, scope)
-        # A shared submission lock also serializes distinct idempotency keys
-        # naming the same task, without locking execution or dispatch.
-        _lock(cur, f"campaign-submit:{scope['campaign']}")
-        _lock(cur, f"{scope['campaign']}:{idempotency_key}")
-        cur.execute('SELECT * FROM campaign_tasks WHERE ' + SCOPE +
-                    ' AND (idempotency_key=%(key)s OR task_key=%(task_key)s)',
-                    {**scope, 'key': idempotency_key, 'task_key': task_key})
-        existing = cur.fetchall()
-        if existing:
-            if len(existing) != 1 or existing[0]['payload_fingerprint'] != fingerprint:
-                _conflict('task_conflict')
-            return _row(existing[0], replayed=True)
-        if parent:
-            cur.execute('SELECT task_id FROM campaign_tasks WHERE ' + SCOPE +
-                        ' AND task_id=%(parent)s', {**scope, 'parent': parent})
-            if cur.fetchone() is None:
-                _invalid('parent task must belong to this campaign')
-        cur.execute('SELECT task_id, task_key FROM campaign_tasks WHERE ' + SCOPE +
-                    ' AND task_key=ANY(%(keys)s)', {**scope, 'keys': depends_on})
-        dependencies = cur.fetchall()
-        if len(dependencies) != len(depends_on):
-            _invalid('dependency must already exist in this campaign')
-        cur.execute(
-            'INSERT INTO campaign_tasks (task_id, org_id, project_id, campaign_id, '
-            'task_key, kind, parent_task_id, title, spec, capability, stages, owned_paths, '
-            'source_sha, verify_command, declared_artifacts, idempotency_key, '
-            'payload_fingerprint, current_stage) VALUES (%(id)s, %(org)s, %(project)s, '
-            '%(campaign)s, %(task_key)s, %(kind)s, %(parent)s, %(title)s, %(spec)s, '
-            '%(capability)s, %(stages)s, %(owned_paths)s, %(source_sha)s, %(verify_command)s, '
-            '%(declared_artifacts)s, %(key)s, %(fingerprint)s, %(stage)s) RETURNING *',
-            {**scope, **payload, 'id': uuid.uuid4(), 'parent': parent,
-             'stages': Jsonb(stages), 'owned_paths': Jsonb(owned_paths),
-             'declared_artifacts': Jsonb(declared_artifacts), 'key': idempotency_key,
-             'fingerprint': fingerprint, 'stage': stages[0]})
-        task = cur.fetchone()
-        for dependency in dependencies:
-            cur.execute('INSERT INTO campaign_task_dependencies '
-                        '(org_id, project_id, campaign_id, task_id, depends_on_task_id) '
-                        'VALUES (%(org)s, %(project)s, %(campaign)s, %(task)s, %(dependency)s)',
-                        {**scope, 'task': task['task_id'], 'dependency': dependency['task_id']})
-        _event(cur, scope, task, 'task_submitted')
-        return _row(task)
+    _check(cur, scope)
+    # A shared submission lock also serializes distinct idempotency keys
+    # naming the same task, without locking execution or dispatch.
+    _lock(cur, f"campaign-submit:{scope['campaign']}")
+    _lock(cur, f"{scope['campaign']}:{idempotency_key}")
+    cur.execute('SELECT * FROM campaign_tasks WHERE ' + SCOPE +
+                ' AND (idempotency_key=%(key)s OR task_key=%(task_key)s)',
+                {**scope, 'key': idempotency_key, 'task_key': task_key})
+    existing = cur.fetchall()
+    if existing:
+        if len(existing) != 1 or existing[0]['payload_fingerprint'] != fingerprint:
+            _conflict('task_conflict')
+        return _row(existing[0], replayed=True)
+    if parent:
+        cur.execute('SELECT task_id FROM campaign_tasks WHERE ' + SCOPE +
+                    ' AND task_id=%(parent)s', {**scope, 'parent': parent})
+        if cur.fetchone() is None:
+            _invalid('parent task must belong to this campaign')
+    cur.execute('SELECT task_id, task_key FROM campaign_tasks WHERE ' + SCOPE +
+                ' AND task_key=ANY(%(keys)s)', {**scope, 'keys': depends_on})
+    dependencies = cur.fetchall()
+    if len(dependencies) != len(depends_on):
+        _invalid('dependency must already exist in this campaign')
+    cur.execute(
+        'INSERT INTO campaign_tasks (task_id, org_id, project_id, campaign_id, '
+        'task_key, kind, parent_task_id, title, spec, capability, stages, owned_paths, '
+        'source_sha, verify_command, declared_artifacts, idempotency_key, '
+        'payload_fingerprint, current_stage) VALUES (%(id)s, %(org)s, %(project)s, '
+        '%(campaign)s, %(task_key)s, %(kind)s, %(parent)s, %(title)s, %(spec)s, '
+        '%(capability)s, %(stages)s, %(owned_paths)s, %(source_sha)s, %(verify_command)s, '
+        '%(declared_artifacts)s, %(key)s, %(fingerprint)s, %(stage)s) RETURNING *',
+        {**scope, **payload, 'id': uuid.uuid4(), 'parent': parent,
+         'stages': Jsonb(stages), 'owned_paths': Jsonb(owned_paths),
+         'declared_artifacts': Jsonb(declared_artifacts), 'key': idempotency_key,
+         'fingerprint': fingerprint, 'stage': stages[0]})
+    task = cur.fetchone()
+    for dependency in dependencies:
+        cur.execute('INSERT INTO campaign_task_dependencies '
+                    '(org_id, project_id, campaign_id, task_id, depends_on_task_id) '
+                    'VALUES (%(org)s, %(project)s, %(campaign)s, %(task)s, %(dependency)s)',
+                    {**scope, 'task': task['task_id'], 'dependency': dependency['task_id']})
+    _event(cur, scope, task, 'task_submitted')
+    return _row(task)
 
 
 def link_question(org_id, project_id, campaign_id, task_id, question_id):
     scope = {**_scope(org_id, project_id), 'campaign': _uuid(campaign_id)}
-    task_id, question_id = _uuid(task_id), _uuid(question_id)
     with _cursor() as cur:
-        _check(cur, scope)
-        task = _task(cur, scope, task_id)
-        cur.execute('SELECT question_id FROM campaign_questions WHERE ' + SCOPE +
-                    ' AND question_id=%(question)s', {**scope, 'question': question_id})
-        if cur.fetchone() is None:
-            _missing()
-        params = {**scope, 'task': task_id, 'question': question_id}
-        cur.execute('INSERT INTO campaign_task_questions '
-                    '(org_id, project_id, campaign_id, task_id, question_id) VALUES '
-                    '(%(org)s, %(project)s, %(campaign)s, %(task)s, %(question)s) '
-                    'ON CONFLICT DO NOTHING RETURNING *', params)
-        row = cur.fetchone()
-        if row:
-            _event(cur, scope, task, 'question_linked', payload={'question_id': str(question_id)})
-            return _row(row)
-        cur.execute('SELECT * FROM campaign_task_questions WHERE ' + SCOPE +
-                    ' AND task_id=%(task)s AND question_id=%(question)s', params)
-        return _row(cur.fetchone(), replayed=True)
+        return _link_question_cursor(cur, scope, task_id, question_id)
+
+
+def _link_question_cursor(cur, scope, task_id, question_id):
+    task_id, question_id = _uuid(task_id), _uuid(question_id)
+    _check(cur, scope)
+    task = _task(cur, scope, task_id)
+    cur.execute('SELECT question_id FROM campaign_questions WHERE ' + SCOPE +
+                ' AND question_id=%(question)s', {**scope, 'question': question_id})
+    if cur.fetchone() is None:
+        _missing()
+    params = {**scope, 'task': task_id, 'question': question_id}
+    cur.execute('INSERT INTO campaign_task_questions '
+                '(org_id, project_id, campaign_id, task_id, question_id) VALUES '
+                '(%(org)s, %(project)s, %(campaign)s, %(task)s, %(question)s) '
+                'ON CONFLICT DO NOTHING RETURNING *', params)
+    row = cur.fetchone()
+    if row:
+        _event(cur, scope, task, 'question_linked', payload={'question_id': str(question_id)})
+        return _row(row)
+    cur.execute('SELECT * FROM campaign_task_questions WHERE ' + SCOPE +
+                ' AND task_id=%(task)s AND question_id=%(question)s', params)
+    return _row(cur.fetchone(), replayed=True)
 
 
 def _operation_key(scope, task):
@@ -219,6 +235,8 @@ def _evidence(task, values):
     if values['outcome'] != 'succeeded':
         return
     stage, result = task['current_stage'], values['result']
+    if task['task_key'] == 'campaign-plan' and stage == 'build_test':
+        raise CampaignError('insufficient_evidence', 'semantic plan adoption is required')
     artifact, key = values['artifact_ref'], values['outward_operation_key']
     sufficient = {
         'implementation': bool(artifact),
@@ -256,6 +274,12 @@ def _advance(cur, scope, task, outcome):
         index = task['stages'].index(stage) + 1
         if index < len(task['stages']):
             stage, status = task['stages'][index], 'pending'
+        if status == 'succeeded' and task['kind'] == 'capability':
+            cur.execute('SELECT state FROM campaign_capability_links WHERE ' + SCOPE +
+                        ' AND task_id=%(task)s FOR UPDATE', {**scope, 'task': task['task_id']})
+            link = cur.fetchone()
+            if link is not None and link['state'] != 'completed':
+                raise CampaignError('insufficient_evidence', 'capability lifecycle is incomplete')
     cur.execute('UPDATE campaign_tasks SET status=%(status)s, current_stage=%(stage)s, '
                 'updated_at=NOW() WHERE ' + SCOPE + ' AND task_id=%(task)s',
                 {**scope, 'task': task['task_id'], 'status': status, 'stage': stage})

@@ -140,6 +140,7 @@ def test_mounted_export_restart_replay_and_plan_validation_boundary(mounted, mon
     monkeypatch.setattr(execution, '_claim_task_cursor', unexpected)
     waiting = call(mounted, 'next')
     assert waiting['kind'] == 'awaiting_plan_validation' and waiting['task_id'] == task['task_id']
+    assert waiting['plan_source'] is None
     assert 'attempt' not in waiting and call(mounted, 'recover')['pending_remote_bindings'] == []
     assert mounted.bridge.campaign_worker_service.next_work(mounted.eid, 'worker-service') == waiting
     assert execution.read_execution(*mounted.scope) == snapshot

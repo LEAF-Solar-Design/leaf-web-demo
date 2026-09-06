@@ -13,6 +13,8 @@ import project_repository_source as source_service
 _FIELDS = {
     'next': {'enrollment_id'},
     'recover': {'enrollment_id'},
+    'plan': {'enrollment_id', 'task_id', 'attempt_id', 'fence', 'result_fingerprint',
+             'plan_sha256', 'plan_size_bytes', 'plan_b64'},
     'export': {'enrollment_id', 'attempt_id', 'fence'},
     'bind': {'enrollment_id', 'attempt_id', 'fence', 'run_id', 'registration_id',
              'root_request_id', 'gateway_project_id', 'source_ref', 'packet_digest',
@@ -36,14 +38,14 @@ def _validate(op, body):
         raise BridgeError(400)
     body = dict(body)
     for key, value in body.items():
-        if key in ('enrollment_id', 'attempt_id'):
+        if key in ('enrollment_id', 'attempt_id', 'task_id'):
             if not isinstance(value, str) or len(value) != 36:
                 raise BridgeError(400)
             try:
                 body[key] = str(uuid.UUID(value))
             except ValueError:
                 raise BridgeError(400) from None
-        elif key in ('fence', 'reservation_micro_usd'):
+        elif key in ('fence', 'reservation_micro_usd', 'plan_size_bytes'):
             minimum = 1 if key == 'reservation_micro_usd' else 0
             if type(value) is not int or not minimum <= value <= 9223372036854775807:
                 raise BridgeError(400)
@@ -56,6 +58,14 @@ def _validate(op, body):
             raise BridgeError(400)
     if op == 'settle' and body['outcome'] not in ('succeeded', 'failed'):
         raise BridgeError(400)
+    if op == 'plan':
+        if (not 1 <= body['plan_size_bytes'] <= 262144
+                or len(body['plan_b64']) > 349528):
+            raise BridgeError(413)
+        for key in ('result_fingerprint', 'plan_sha256'):
+            value = body[key]
+            if len(value) != 64 or any(char not in '0123456789abcdef' for char in value):
+                raise BridgeError(400)
     return body
 
 
@@ -152,6 +162,10 @@ def handle(op, body, subject):
     except Exception:
         raise BridgeError(503) from None
     try:
+        if op == 'plan':
+            from leaf_platform.campaign_plan_adoption import adopt_plan
+            return adopt_plan(body['enrollment_id'], subject,
+                              **{key: value for key, value in body.items() if key != 'enrollment_id'})
         if op == 'export':
             return _export(enrollment, execution, body, subject)
         if op == 'next':
@@ -187,7 +201,8 @@ def handle(op, body, subject):
         elif isinstance(exc, execution.CampaignUnavailable):
             status = 503
         elif isinstance(exc, execution.CampaignError):
-            status = 403 if exc.code in ('worker_forbidden', 'project_unavailable') else 400
+            status = (422 if exc.code == 'invalid_plan' else
+                      403 if exc.code in ('worker_forbidden', 'project_unavailable') else 400)
         else:
             status = 503
         raise BridgeError(status) from None

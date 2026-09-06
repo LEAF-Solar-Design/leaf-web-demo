@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
 import sys
@@ -189,9 +190,17 @@ async def change_enrollment(campaign_id: str, enrollment_id: str, action: str, r
 @router.post('/internal/campaigns/bridge/{op}')
 async def campaign_bridge_operation(op: str, request: Request,
                                     subject: str = Depends(deps.require_campaign_worker)):
+    limit = 512 * 1024 if op == 'plan' else 128 * 1024
     try:
-        body = await _body(request)
-    except ValueError:
+        raw = bytearray()
+        async for chunk in request.stream():
+            if len(raw) + len(chunk) > limit:
+                return _failure(413, 'request_too_large', 'Campaign bridge request failed')
+            raw.extend(chunk)
+        body = json.loads(raw)
+        if not isinstance(body, dict):
+            raise ValueError('Invalid body')
+    except (ValueError, UnicodeError):
         return _failure(400, 'invalid_request', 'Invalid campaign bridge request')
     try:
         _store()
@@ -200,7 +209,8 @@ async def campaign_bridge_operation(op: str, request: Request,
         status = exc.status
     except Exception:
         status = 503
-    code = {400: 'invalid_request', 403: 'worker_forbidden', 409: 'bridge_conflict'}.get(
+    code = {400: 'invalid_request', 403: 'worker_forbidden', 409: 'bridge_conflict',
+            413: 'request_too_large', 422: 'invalid_plan'}.get(
         status, 'bridge_unavailable')
     return _failure(status, code, 'Campaign bridge request failed')
 

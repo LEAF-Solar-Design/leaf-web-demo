@@ -332,7 +332,7 @@ def test_real_postgres_oversized_prompt_no_task_or_source(enrolled, prompt):
     assert snapshot(enrolled) == before and enrolled[4] == []
 
 
-def test_real_postgres_unicode_digest_and_idle_after_stages(enrolled):
+def test_real_postgres_unicode_digest_and_syntax_only_build_test_rejected(enrolled):
     prompt = 'Organize cr\u00eape recipes\nPreserve every word.'
     with db.connection() as conn:
         conn.execute('UPDATE campaigns SET prompt=%s WHERE campaign_id=%s',
@@ -340,12 +340,17 @@ def test_real_postgres_unicode_digest_and_idle_after_stages(enrolled):
     first = next_call(enrolled)
     assert first['source']['seed_digest'] == hashlib.sha256(prompt.encode('utf-8')).hexdigest()
     assert first['plan_task']['spec'].endswith(prompt)
-    for stage in ('implementation', 'build_test'):
-        result = first if stage == 'implementation' else next_call(enrolled)
-        attempt = result['attempt']
+    attempt = first['attempt']
+    execution.settle_attempt(*enrolled[0], attempt['attempt_id'],
+        attempt_token=attempt['attempt_token'], fence=attempt['fence'], outcome='succeeded',
+        artifact_ref='artifact:campaign-plan', result={})
+    attempt = next_call(enrolled)['attempt']
+    before = snapshot(enrolled)
+    with pytest.raises(campaigns.CampaignError) as error:
         execution.settle_attempt(*enrolled[0], attempt['attempt_id'],
             attempt_token=attempt['attempt_token'], fence=attempt['fence'], outcome='succeeded',
-            artifact_ref='artifact:campaign-plan', result={} if stage == 'implementation' else
-            {'exit_code': 0, 'verify_command': plan.VERIFY_COMMAND})
-    assert next_call(enrolled)['kind'] == 'idle'
+            artifact_ref='artifact:campaign-plan',
+            result={'exit_code': 0, 'verify_command': plan.VERIFY_COMMAND})
+    assert error.value.code == 'insufficient_evidence'
+    assert snapshot(enrolled) == before
     assert len(snapshot(enrolled)['tasks']) == 2

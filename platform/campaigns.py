@@ -161,6 +161,14 @@ def list_campaigns(org_id, project_id, limit=50):
 def ask_question(org_id, project_id, campaign_id, *, question_key, prompt,
                  options=None, asked_by='operator', blocks_dispatch=True):
     scope = {**_scope(org_id, project_id), 'campaign': _uuid(campaign_id)}
+    with _cursor() as cur:
+        return _ask_question_cursor(cur, scope, question_key=question_key, prompt=prompt,
+                                    options=options, asked_by=asked_by,
+                                    blocks_dispatch=blocks_dispatch)
+
+
+def _ask_question_cursor(cur, scope, *, question_key, prompt,
+                 options=None, asked_by='operator', blocks_dispatch=True):
     _text(question_key, 'question_key', 128)
     if re.fullmatch(r'[A-Za-z0-9._-]+', question_key) is None:
         raise CampaignError('invalid_request', 'invalid question key')
@@ -172,26 +180,25 @@ def ask_question(org_id, project_id, campaign_id, *, question_key, prompt,
         raise CampaignError('invalid_request', 'options must be at most 16 strings')
     if asked_by not in ('operator', 'worker') or not isinstance(blocks_dispatch, bool):
         raise CampaignError('invalid_request', 'invalid question fields')
-    with _cursor() as cur:
-        _lock(cur, f"{scope['campaign']}:{question_key}")
-        if _campaign(cur, scope) is None:
-            _missing()
-        cur.execute('SELECT * FROM campaign_questions WHERE org_id=%(org)s AND project_id=%(project)s '
-                    'AND campaign_id=%(campaign)s AND question_key=%(key)s', {**scope, 'key': question_key})
-        existing = cur.fetchone()
-        if existing:
-            if existing['prompt'] != prompt:
-                raise CampaignConflict('question_conflict', 'question key has a different prompt')
-            return _row(existing, replayed=True)
-        cur.execute(
-            'INSERT INTO campaign_questions (question_id, campaign_id, org_id, project_id, '
-            'question_key, prompt, options, asked_by, blocks_dispatch) '
-            'VALUES (%(id)s, %(campaign)s, %(org)s, %(project)s, %(key)s, %(prompt)s, '
-            '%(options)s, %(asked_by)s, %(blocks)s) RETURNING *',
-            {**scope, 'id': uuid.uuid4(), 'key': question_key, 'prompt': prompt,
-             'options': Jsonb(options) if options is not None else None,
-             'asked_by': asked_by, 'blocks': blocks_dispatch})
-        return _row(cur.fetchone())
+    _lock(cur, f"{scope['campaign']}:{question_key}")
+    if _campaign(cur, scope) is None:
+        _missing()
+    cur.execute('SELECT * FROM campaign_questions WHERE org_id=%(org)s AND project_id=%(project)s '
+                'AND campaign_id=%(campaign)s AND question_key=%(key)s', {**scope, 'key': question_key})
+    existing = cur.fetchone()
+    if existing:
+        if existing['prompt'] != prompt:
+            raise CampaignConflict('question_conflict', 'question key has a different prompt')
+        return _row(existing, replayed=True)
+    cur.execute(
+        'INSERT INTO campaign_questions (question_id, campaign_id, org_id, project_id, '
+        'question_key, prompt, options, asked_by, blocks_dispatch) '
+        'VALUES (%(id)s, %(campaign)s, %(org)s, %(project)s, %(key)s, %(prompt)s, '
+        '%(options)s, %(asked_by)s, %(blocks)s) RETURNING *',
+        {**scope, 'id': uuid.uuid4(), 'key': question_key, 'prompt': prompt,
+         'options': Jsonb(options) if options is not None else None,
+         'asked_by': asked_by, 'blocks': blocks_dispatch})
+    return _row(cur.fetchone())
 
 
 def answer_question(org_id, project_id, campaign_id, question_id, principal_id, *, answer):
