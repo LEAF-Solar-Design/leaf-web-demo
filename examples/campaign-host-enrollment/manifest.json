@@ -1,0 +1,10 @@
+{
+  "name": "campaign-host-enrollment",
+  "version": "1",
+  "entry": "validator.py",
+  "params": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  }
+}
