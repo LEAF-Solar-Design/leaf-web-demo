@@ -136,10 +136,10 @@ const DEMO_VALUE = new URLSearchParams(window.location.search).get('demo')
 const PUBLIC_DEMO = DEMO_VALUE === '1' && !isSignedIn()
 const LIVE_TOUR_REQUESTED = DEMO_VALUE === 'tour'
 const LIVE_DEMO = LIVE_TOUR_REQUESTED || (DEMO_VALUE === '1' && isSignedIn())
-const MODE_DRAWING_ID = PROOF_MODE
-  ? 'cat-panels'
-  : PUBLIC_DEMO
-    ? 'demo'
+const MODE_DRAWING_ID = PUBLIC_DEMO
+  ? 'demo'
+  : PROOF_MODE
+    ? 'cat-panels'
     : LIVE_DEMO
       ? 'rooftop_demo'
       : null
@@ -1041,8 +1041,13 @@ export default function ToolCast({
     ) return
     restorePendingRef.current = (async () => {
       try {
+        // In PUBLIC_DEMO, restore uses the local mock exactly like recovery
+        // and never issues a server request; refuse any non-mock transport.
+        if (PUBLIC_DEMO && transportMock !== true) {
+          throw new Error('Guest sandbox restore requires the local mock.')
+        }
         const result = await restoreDrawingVersion(
-          PUBLIC_DEMO,
+          transportMock,
           drawingId,
           target,
           checkout.actions.getCapability() || undefined,
@@ -1050,15 +1055,17 @@ export default function ToolCast({
         await drawing.actions.recordRestore(result)
         await drawing.actions.loadHistory()
       } catch (cause) {
-        throw new Error(cause?.message || (drawing.unreadableHead
+        const message = cause?.message || (drawing.unreadableHead
           ? `Could not recover from v${target}.`
-          : `Could not restore v${target}.`))
+          : `Could not restore v${target}.`)
+        const detail = cause?.body?.detail
+        throw new Error(typeof detail === 'string' && detail ? `${message}: ${detail}` : message)
       } finally {
         restorePendingRef.current = null
       }
     })()
     return restorePendingRef.current
-  }, [checkout.actions, drawing.actions, drawing.drawingState?.drawing_id, drawing.head, drawing.unreadableHead, sessionReady])
+  }, [checkout.actions, drawing.actions, drawing.drawingState?.drawing_id, drawing.head, drawing.unreadableHead, sessionReady, transportMock])
 
   const retryCatalogRun = useCallback(() => {
     const last = lastConfirmedRunRef.current
@@ -2235,6 +2242,8 @@ export default function ToolCast({
               restore={{
                 run: recoverHistoricalVersion,
                 mode: drawing.unreadableHead ? 'recover' : 'restore',
+                // In PUBLIC_DEMO, restore uses the local mock exactly like recovery
+                // and never issues a server request, so guests may restore here.
                 eligible: (_row, isHead) => sessionReady && !isHead,
                 disabled: Boolean(drawing.unreadableHead?.pending),
               }}

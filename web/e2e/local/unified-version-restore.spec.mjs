@@ -147,13 +147,66 @@ test('unified history still recovers an unreadable committed head', async ({ pag
   await expect(page.getByRole('button', { name: 'Undo', exact: true })).toBeEnabled()
 })
 
+test('guest sandbox restore never reaches the server', async ({ page }) => {
+  const restoreRequests = []
+  page.on('request', (request) => {
+    if (/^\/api\/drawings\/[^/]+\/versions\/[^/]+\/restore\/?$/.test(new URL(request.url()).pathname)) {
+      restoreRequests.push(request.url())
+    }
+  })
+  await page.context().clearCookies()
+  await page.addInitScript(() => localStorage.removeItem('leaf.jwt'))
+  await page.goto('/try?demo=1')
+  await expect(page.getByTestId('operator-phase')).toContainText(/ready/i, { timeout: 15_000 })
+  await expect(page.locator('.tc-caption')).toContainText('Interactive local demo')
+
+  // Seed a readable non-head version in the real local chain. The restore
+  // itself must go through the visitor's confirmation controls below.
+  await page.evaluate(async () => {
+    const versions = await import('/src/mock/mockVersions.js')
+    versions.applyDelete()
+    versions.undo()
+  })
+  await page.getByRole('tab', { name: /^Versions/ }).click()
+  const history = page.getByRole('region', { name: 'Version history' })
+  await expect(history.getByTestId('try-version-v1')).toContainText('head')
+  const source = history.getByTestId('try-version-v2')
+  await source.getByRole('button').first().click()
+  await expect(page.getByTestId('try-preview-write-lock')).toBeVisible()
+  await source.getByRole('button', { name: 'Restore', exact: true }).click()
+  await source.getByRole('button', { name: 'Restore v2', exact: true }).click()
+  await expect(history.getByTestId('try-version-v3')).toContainText('head')
+  await expect(page.getByTestId('try-preview-write-lock')).toHaveCount(0)
+  const restored = await page.evaluate(async () => {
+    const versions = await import('/src/mock/mockVersions.js')
+    const history = versions.list()
+    return {
+      head: history.head,
+      latest: history.latest,
+      versions: history.versions.map(({ v, parent, tool }) => ({ v, parent, tool })),
+      matchesSource: JSON.stringify(versions.headIntake()) === JSON.stringify(versions.intakeAt(2)),
+    }
+  })
+  expect(restored).toEqual({
+    head: 3,
+    latest: 3,
+    versions: [
+      { v: 1, parent: null, tool: 'base' },
+      { v: 2, parent: 1, tool: 'delete-marked-panel' },
+      { v: 3, parent: 1, tool: 'restore' },
+    ],
+    matchesSource: true,
+  })
+  expect(restoreRequests).toEqual([])
+})
+
 test('unified restore preserves the restore service checkout denial', async ({ page }) => {
   const observed = await mountUnifiedHistory(page, { denyRestore: true })
   const history = page.getByRole('region', { name: 'Version history' })
   const source = history.getByTestId('try-version-v2')
   await source.getByRole('button', { name: 'Restore', exact: true }).click()
   await source.getByRole('button', { name: 'Restore v2', exact: true }).click()
-  await expect(history.getByRole('alert')).toHaveText('POST /api/drawings/cat-panels/versions/2/restore -> 403')
+  await expect(history.getByRole('alert')).toHaveText('POST /api/drawings/cat-panels/versions/2/restore -> 403: Checkout capability required.')
   await expect(history.getByTestId('try-version-v1')).toContainText('head')
   await expect(history.getByTestId('try-version-v3')).toHaveCount(0)
   expect(observed.restoreRequests).toHaveLength(1)
