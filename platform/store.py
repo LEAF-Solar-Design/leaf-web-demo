@@ -216,6 +216,39 @@ def register_project_repository_authority(
             ("tenant_id", "organization_id", "project_id", "repo_key")}
 
 
+def ensure_project_repository_authority(
+    tenant_id: object, organization_id: object, project_id: object,
+) -> Dict[str, str]:
+    """Mint once under the live project lock; concurrent admissions converge."""
+    tenant = _canonical_authority_uuid(tenant_id, "tenant_id")
+    organization = _canonical_authority_uuid(organization_id, "organization_id")
+    project = _canonical_authority_uuid(project_id, "project_id")
+    if tenant != organization:
+        raise ProjectRepositoryAuthorityConflict("project repository authority is unavailable")
+    params = {"tenant": tenant, "organization": organization, "project": project,
+              "repo": uuid.uuid4()}
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT project_id FROM live_projects WHERE org_id = %(organization)s "
+            "AND project_id = %(project)s AND status = 'active' FOR UPDATE", params)
+        if cur.fetchone() is None:
+            raise ProjectRepositoryAuthorityConflict("project repository authority is unavailable")
+        cur.execute(
+            "INSERT INTO project_repository_authorities "
+            "(tenant_id, organization_id, project_id, repo_key) VALUES "
+            "(%(tenant)s, %(organization)s, %(project)s, %(repo)s) "
+            "ON CONFLICT (tenant_id, organization_id, project_id) DO NOTHING", params)
+        cur.execute(
+            "SELECT tenant_id, organization_id, project_id, repo_key "
+            "FROM project_repository_authorities WHERE tenant_id = %(tenant)s "
+            "AND organization_id = %(organization)s AND project_id = %(project)s FOR UPDATE", params)
+        row = cur.fetchone()
+        if row is None:
+            raise ProjectRepositoryAuthorityConflict("project repository authority is unavailable")
+    return {key: str(row[key]) for key in
+            ("tenant_id", "organization_id", "project_id", "repo_key")}
+
+
 def resolve_project_repository_authority(
     tenant_id: object, organization_id: object, project_id: object,
 ) -> Optional[Dict[str, str]]:

@@ -68,3 +68,35 @@ def test_mapping_rejects_noncanonical_uuid(make_org, field):
     with pytest.raises(ValueError, match="canonical UUID"):
         store.register_project_repository_authority(
             values["tenant"], values["organization"], values["project"], values["repo"])
+
+
+def test_ensure_concurrent_admissions_converge_and_deleted_replay_refuses(make_org):
+    from concurrent.futures import ThreadPoolExecutor
+    org = make_org("Source admission")
+    project = store.create_project(org.org_id, "Source")
+    args = (str(org.org_id), str(org.org_id), str(project.project_id))
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        rows = list(pool.map(lambda _: store.ensure_project_repository_authority(*args), range(2)))
+    assert rows[0] == rows[1]
+    assert str(uuid.UUID(rows[0]['repo_key'])) == rows[0]['repo_key']
+    assert store.resolve_project_repository_authority(*args) == rows[0]
+    with store.connection() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE projects SET deleted_at = now() WHERE org_id = %s AND project_id = %s",
+                    (org.org_id, project.project_id))
+    with pytest.raises(store.ProjectRepositoryAuthorityConflict):
+        store.ensure_project_repository_authority(*args)
+    assert store.resolve_project_repository_authority(*args) == rows[0]
+
+
+def test_ensure_rejects_wrong_org_inactive_and_noncanonical(make_org):
+    org, other = make_org("Source owner"), make_org("Source foreign")
+    project = store.create_project(org.org_id, "Source")
+    with pytest.raises(store.ProjectRepositoryAuthorityConflict):
+        store.ensure_project_repository_authority(str(other.org_id), str(other.org_id), str(project.project_id))
+    with pytest.raises(ValueError):
+        store.ensure_project_repository_authority('invalid', str(org.org_id), str(project.project_id))
+    with store.connection() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE projects SET status = 'archived' WHERE org_id = %s AND project_id = %s",
+                    (org.org_id, project.project_id))
+    with pytest.raises(store.ProjectRepositoryAuthorityConflict):
+        store.ensure_project_repository_authority(str(org.org_id), str(org.org_id), str(project.project_id))

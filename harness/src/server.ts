@@ -50,6 +50,8 @@ import {
   DEFAULT_TENANT,
   PROJECT_REPOSITORY_INVERSE_PRODUCER_CONTRACT,
   PROJECT_REPOSITORY_SOURCE_WITNESS_CONTRACT,
+  PROJECT_REPOSITORY_SOURCE_INITIALIZER_CONTRACT,
+  ProjectRepositorySourceUnavailable,
 } from "./ports/index.js";
 import type { ConverseRunner, ConverseTurnInput, HarnessPorts, HarnessTurnEvent,
   InstantDrawingContext, InstantSessionAssignment, ProjectRepositoryAuthority,
@@ -349,6 +351,7 @@ const REQUEST_TIMEOUT_MS = 120_000;
 function readJsonBody(
   req: IncomingMessage,
   maxBytes: number = MAX_BODY_BYTES,
+  strictUtf8: boolean = false,
 ): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -400,7 +403,12 @@ function readJsonBody(
       // break the peer's write side — this is the point at which a 413 is
       // actually readable by the client that caused it.
       if (refused) return reject(tooLarge());
-      const raw = Buffer.concat(chunks).toString("utf8").trim();
+      const bytes = Buffer.concat(chunks);
+      const decoded = bytes.toString("utf8");
+      if (strictUtf8 && !Buffer.from(decoded, "utf8").equals(bytes)) {
+        return reject(new AuthorLoopError("invalid UTF-8 body", 400));
+      }
+      const raw = decoded.trim();
       if (!raw) return resolve({});
       try {
         resolve(JSON.parse(raw) as Record<string, unknown>);
@@ -921,6 +929,64 @@ export function createHarness(ports: HarnessPorts, opts?: {
           return send(res, 409, { error: { code: "worker_run_not_active", message: "worker run not active" } });
         }
         return send(res, 200, binding);
+      }
+
+      if (method === "POST" && path === "/internal/project-repository-source/initialize") {
+        const requiredAuth = harnessAuthDenial(req, { ...auth, enabled: true });
+        if (requiredAuth) return send(res, 401, requiredAuth);
+        const provider = ports.tenantRepo as TenantRepoProvider;
+        if (!provider.initializeProjectSource) {
+          return send(res, 503, { error: { code: "source_unavailable", message: "source is unavailable" } });
+        }
+        let authority: ProjectRepositoryAuthority;
+        let seedDocument: string;
+        let seedDigest: string;
+        let digest: string;
+        try {
+          const body = await readJsonBody(req, 256 * 1024, true);
+          if (!isRecord(body) || Object.keys(body).sort().join(",") !==
+              "organization_id,project_id,repo_key,seed_digest,seed_document,tenant_id") throw new Error();
+          for (const key of ["tenant_id", "organization_id", "project_id", "repo_key"]) {
+            if (typeof body[key] !== "string" || !CANONICAL_UUID.test(body[key] as string)) throw new Error();
+          }
+          if (authorityHeader(req, "x-tenant-id") !== body.tenant_id) throw new Error();
+          if (typeof body.seed_document !== "string" || !body.seed_document.length ||
+              [...body.seed_document].length > 32768 || Buffer.byteLength(body.seed_document, "utf8") > 131072 ||
+              body.seed_document.includes("\0") || Buffer.from(body.seed_document, "utf8").toString("utf8") !== body.seed_document ||
+              typeof body.seed_digest !== "string" || !/^[a-f0-9]{64}$/.test(body.seed_digest) ||
+              createHash("sha256").update(body.seed_document, "utf8").digest("hex") !== body.seed_digest) throw new Error();
+          seedDocument = body.seed_document;
+          seedDigest = body.seed_digest;
+          authority = Object.freeze({ tenantId: body.tenant_id as string, organizationId: body.organization_id as string,
+            projectId: body.project_id as string, repoKey: body.repo_key as string });
+          digest = createHash("sha256").update(canonicalJson({
+            contract: PROJECT_REPOSITORY_SOURCE_INITIALIZER_CONTRACT,
+            tenant_id: authority.tenantId, organization_id: authority.organizationId,
+            project_id: authority.projectId, repo_key: authority.repoKey, seed_digest: seedDigest,
+          })).digest("hex");
+        } catch {
+          return send(res, 400, { error: { code: "invalid_request", message: "invalid source request" } });
+        }
+        try {
+          const source = await provider.initializeProjectSource(authority, { seedDocument, seedDigest });
+          if (typeof source.sourceCommit !== "string" || !SHA40.test(source.sourceCommit) ||
+              typeof source.sourceTree !== "string" || !SHA40.test(source.sourceTree) ||
+              typeof source.seedDigest !== "string" || !/^[a-f0-9]{64}$/.test(source.seedDigest) || typeof source.replayed !== "boolean" ||
+              typeof source.writerLeaseId !== "string" || !CANONICAL_UUID.test(source.writerLeaseId) ||
+              typeof source.writerLeaseGeneration !== "string" || !/^[1-9][0-9]*$/.test(source.writerLeaseGeneration) ||
+              (!source.replayed && source.seedDigest !== seedDigest)) throw new Error();
+          return send(res, 200, {
+            contract: PROJECT_REPOSITORY_SOURCE_INITIALIZER_CONTRACT, request_digest: digest,
+            source_commit: source.sourceCommit, source_tree: source.sourceTree, seed_digest: source.seedDigest,
+            replayed: source.replayed, writer_lease_id: source.writerLeaseId,
+            writer_lease_generation: source.writerLeaseGeneration,
+          });
+        } catch (error) {
+          if (error instanceof ProjectRepositorySourceUnavailable) {
+            return send(res, 503, { error: { code: "source_unavailable", message: "source is unavailable" } });
+          }
+          return send(res, 409, { error: { code: "source_conflict", message: "source initialization failed" } });
+        }
       }
 
       if (method === "POST" && path === "/internal/project-repository-source/verify") {

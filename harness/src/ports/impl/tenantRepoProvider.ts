@@ -16,6 +16,8 @@ import type {
 } from "../../vendor/mushy-author/ports/impl/tenantRepoProvider.js";
 import type {
   ProjectRepositoryAuthority,
+  ProjectRepositorySourceInitializationRequest,
+  ProjectRepositorySourceInitializationResult,
   ProjectRepositoryInversePreparationRequest,
   ProjectRepositoryInversePreparationResult,
   ProjectRepositorySourceVerificationRequest,
@@ -25,8 +27,9 @@ import type {
 } from "../index.js";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, realpathSync, mkdirSync, readdirSync, readFileSync, writeFileSync, openSync, fsyncSync, closeSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
+import { ProjectRepositorySourceConflict, ProjectRepositorySourceUnavailable } from "../index.js";
 
 const PROJECT_AUTHORITY_KEYS = [
   "organizationId",
@@ -188,6 +191,151 @@ export class TenantRepoProviderImpl
     return this.projectLease.withProjectLease(authority, async (_witness, runFenced) =>
       runFenced(action),
     );
+  }
+
+  async initializeProjectSource(
+    authorityValue: ProjectRepositoryAuthority,
+    request: ProjectRepositorySourceInitializationRequest,
+  ): Promise<ProjectRepositorySourceInitializationResult> {
+    const authority = requireProjectRepositoryAuthority(authorityValue);
+    if (!request || Object.keys(request).sort().join(",") !== "seedDigest,seedDocument" ||
+        typeof request.seedDocument !== "string" || !request.seedDocument.length ||
+        [...request.seedDocument].length > 32768 || Buffer.byteLength(request.seedDocument, "utf8") > 131072 ||
+        request.seedDocument.includes("\0") || Buffer.from(request.seedDocument, "utf8").toString("utf8") !== request.seedDocument ||
+        typeof request.seedDigest !== "string" || !/^[a-f0-9]{64}$/.test(request.seedDigest) ||
+        createHash("sha256").update(request.seedDocument, "utf8").digest("hex") !== request.seedDigest) {
+      throw new Error("invalid project source seed");
+    }
+    request = Object.freeze({ seedDocument: request.seedDocument, seedDigest: request.seedDigest });
+    const identity = {
+      contract: "leaf.project-repository-source-initializer.v1",
+      tenant_id: authority.tenantId, organization_id: authority.organizationId,
+      project_id: authority.projectId, repo_key: authority.repoKey,
+    };
+    const marker = canonicalJson(identity);
+    return this.withProjectWriterLease(authority, async (witness, runFenced) => runFenced(() => {
+      try {
+      const candidate = (): string => {
+        if (!this.projectBareBase || !existsSync(this.projectBareBase) ||
+            lstatSync(this.projectBareBase).isSymbolicLink() || !lstatSync(this.projectBareBase).isDirectory()) {
+          throw new ProjectRepositorySourceUnavailable("project repository base unavailable");
+        }
+        const base = realpathSync(this.projectBareBase);
+        const path = join(base, `${authority.repoKey}.git`);
+        if (dirname(path) !== base) throw new Error("project repository containment failed");
+        // lstat also catches dangling links, which existsSync deliberately does not.
+        if (readdirSync(base).includes(`${authority.repoKey}.git`)) {
+          if (lstatSync(path).isSymbolicLink() || !lstatSync(path).isDirectory() || realpathSync(path) !== path) {
+            throw new Error("project repository containment failed");
+          }
+        }
+        return path;
+      };
+      const repoDir = candidate();
+      if (!existsSync(repoDir)) mkdirSync(candidate());
+      const markerName = ".leaf-source-owner.json";
+      const checkContents = (dir: string): void => {
+        for (const name of readdirSync(dir)) {
+          const path = join(dir, name);
+          const stat = lstatSync(path);
+          if (stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile())) {
+            throw new Error("project repository contains unsafe entries");
+          }
+          if (stat.isDirectory()) checkContents(path);
+        }
+      };
+      if (!readdirSync(candidate()).includes(markerName)) {
+        if (readdirSync(candidate()).length) throw new Error("project repository is unowned");
+        const fd = openSync(join(candidate(), markerName), "wx");
+        try {
+          writeFileSync(fd, marker, "utf8");
+          fsyncSync(fd);
+        } finally {
+          closeSync(fd);
+        }
+      }
+      checkContents(candidate());
+      if (readFileSync(join(candidate(), markerName), "utf8") !== marker) {
+        throw new Error("project repository ownership conflicts");
+      }
+      const git = (args: string[], input?: string): string => {
+        checkContents(candidate());
+        if (existsSync(join(candidate(), "objects", "info", "alternates")) ||
+            existsSync(join(candidate(), "objects", "info", "http-alternates")) ||
+            existsSync(join(candidate(), "info", "grafts"))) {
+          throw new Error("project repository has external object authority");
+        }
+        if (existsSync(join(candidate(), "config"))) {
+          const config = readFileSync(join(candidate(), "config"), "utf8");
+          for (const line of config.split(/\r?\n/).map(value => value.trim()).filter(Boolean)) {
+            if (line !== "[core]" && !/^(repositoryformatversion\s*=\s*0|filemode\s*=\s*(true|false)|bare\s*=\s*true|logallrefupdates\s*=\s*(true|false)|ignorecase\s*=\s*(true|false)|symlinks\s*=\s*(true|false))$/.test(line)) {
+              throw new Error("project repository configuration is noncanonical");
+            }
+          }
+        }
+        const env = { ...process.env };
+        for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];
+        Object.assign(env, {
+          GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
+          GIT_NO_REPLACE_OBJECTS: "1", GIT_AUTHOR_NAME: "Leaf Source Service",
+          GIT_AUTHOR_EMAIL: "source@leaf.invalid", GIT_COMMITTER_NAME: "Leaf Source Service",
+          GIT_COMMITTER_EMAIL: "source@leaf.invalid", GIT_AUTHOR_DATE: "2000-01-01T00:00:00Z",
+          GIT_COMMITTER_DATE: "2000-01-01T00:00:00Z",
+        });
+        const output = execFileSync("git", ["-c", "core.fsync=all", "--git-dir", candidate(), ...args], {
+          input, env, stdio: [input === undefined ? "ignore" : "pipe", "pipe", "ignore"],
+          maxBuffer: 1024 * 1024,
+        });
+        const text = output.toString("utf8");
+        if (!Buffer.from(text, "utf8").equals(output)) throw new Error("project source is not UTF-8");
+        return text;
+      };
+      if (["HEAD", "config", "objects", "refs"].some((name) => !existsSync(join(candidate(), name)))) {
+        git(["init", "--bare", "--object-format=sha1", "--initial-branch=main", "--template=", candidate()]);
+      }
+      if (git(["rev-parse", "--is-bare-repository"]).trim() !== "true" ||
+          git(["rev-parse", "--show-object-format"]).trim() !== "sha1" ||
+          git(["symbolic-ref", "HEAD"]).trim() !== "refs/heads/main") {
+        throw new Error("project repository is noncanonical");
+      }
+      const refs = git(["for-each-ref", "--format=%(refname)"]).trim().split("\n").filter(Boolean);
+      const replayed = refs.includes("refs/heads/main");
+      if (!replayed) {
+        if (refs.length) throw new Error("project repository is noncanonical");
+        const blob = (text: string): string => git(["hash-object", "-w", "--stdin"], text).trim();
+        const prompt = blob(request.seedDocument);
+        const seed = blob(canonicalJson({ ...identity, seed_digest: request.seedDigest }));
+        const leaf = git(["mktree"], `100644 blob ${seed}\tsource-seed.json\n`).trim();
+        const tree = git(["mktree"], `040000 tree ${leaf}\t.leaf\n100644 blob ${prompt}\tPROMPT.md\n`).trim();
+        const commit = git(["commit-tree", tree], "Leaf project source seed\n").trim();
+        git(["update-ref", "refs/heads/main", commit, "0000000000000000000000000000000000000000"]);
+      }
+      const sourceCommit = git(["rev-parse", "--verify", "refs/heads/main^{commit}"]).trim();
+      const sourceTree = git(["rev-parse", "--verify", `${sourceCommit}^{tree}`]).trim();
+      const seedText = git(["show", `${sourceCommit}:.leaf/source-seed.json`]);
+      const seed: unknown = JSON.parse(seedText);
+      if (!seed || typeof seed !== "object" || Array.isArray(seed)) throw new Error("invalid source metadata");
+      const seedDigest = (seed as Record<string, unknown>).seed_digest;
+      if (typeof seedDigest !== "string" || !/^[a-f0-9]{64}$/.test(seedDigest) ||
+          seedText !== canonicalJson({ ...identity, seed_digest: seedDigest }) ||
+          createHash("sha256").update(git(["show", `${sourceCommit}:PROMPT.md`]), "utf8").digest("hex") !== seedDigest ||
+          !SHA40.test(sourceCommit) || !SHA40.test(sourceTree)) {
+        throw new Error("project source metadata conflicts");
+      }
+      for (const path of ["PROMPT.md", ".leaf/source-seed.json"]) {
+        if (!git(["ls-tree", sourceCommit, "--", path]).startsWith("100644 blob ")) {
+          throw new Error("project source is noncanonical");
+        }
+      }
+      return Object.freeze({ sourceCommit, sourceTree, seedDigest, replayed, ...witness });
+      } catch (error) {
+        if (error instanceof ProjectRepositorySourceUnavailable) throw error;
+        throw new ProjectRepositorySourceConflict("project source conflicts");
+      }
+    })).catch((error: unknown) => {
+      if (error instanceof ProjectRepositorySourceConflict) throw error;
+      throw new ProjectRepositorySourceUnavailable("project source is unavailable");
+    });
   }
 
   async verifyProjectSource(

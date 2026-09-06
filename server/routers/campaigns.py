@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import sys
 import uuid
@@ -13,6 +14,7 @@ from fastapi.responses import JSONResponse
 
 import deps
 import platform_link
+import project_repository_source
 
 router = APIRouter()
 _STORE = None
@@ -112,6 +114,10 @@ def _execute(tenant, project_id, operation, key, *, created=False, project=_disp
         return JSONResponse(status_code=status, content={'ok': True, key: projected})
     except platform_link.ProjectSessionForbidden:
         return _failure(403, 'forbidden', 'project role does not permit access')
+    except project_repository_source.SourceConflict:
+        return _failure(409, 'source_conflict', 'project source conflicts')
+    except project_repository_source.SourceUnavailable:
+        return _failure(503, 'source_unavailable', 'project source is unavailable')
     except LookupError:
         return _failure(404, 'project_unavailable', 'project is unavailable')
     except store.CampaignConflict as exc:
@@ -211,9 +217,16 @@ async def submit(request: Request, tenant: Any = Depends(deps.require_tenant)):
         key = _text(request.headers.get('Idempotency-Key'), 'Idempotency-Key', 128)
     except ValueError as exc:
         return _failure(400, 'invalid_request', str(exc))
-    return _execute(tenant, project, lambda store, org: store.submit_campaign(
-        org, project, str(getattr(tenant, 'tenant_id', tenant)), _principal(tenant),
-        title=title, prompt=prompt, idempotency_key=key), 'campaign', created=True)
+    def admit(store, org):
+        tenant_id = str(getattr(tenant, 'tenant_id', tenant))
+        row = store.submit_campaign(org, project, tenant_id, _principal(tenant),
+                                    title=title, prompt=prompt, idempotency_key=key)
+        if row is not None and os.environ.get('LEAF_PROJECT_SOURCE_PRODUCER', '').strip().lower() == 'on':
+            source = project_repository_source.initialize_project_source(
+                tenant_id, str(org), project, row['prompt'])
+            row = {**row, 'source': source}
+        return row
+    return _execute(tenant, project, admit, 'campaign', created=True)
 
 
 @router.get('/api/campaigns')

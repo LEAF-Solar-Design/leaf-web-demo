@@ -168,6 +168,7 @@ class FakeExecution:
 
 @pytest.fixture
 def setup(monkeypatch):
+    monkeypatch.delenv('LEAF_PROJECT_SOURCE_PRODUCER', raising=False)
     store = FakeStore()
     router.set_store(store)
     router.set_enrollment_store(store)
@@ -486,3 +487,48 @@ def test_lookup_failure_is_404_without_store_call(setup, monkeypatch):
     assert response.status_code == 404
     assert response.json()['error']['error_code'] == 'project_unavailable'
     assert store.calls == []
+
+
+def test_source_failure_preserves_admission_and_retry_uses_persisted_prompt(setup, monkeypatch):
+    client, store, allowed = setup
+    monkeypatch.setenv('LEAF_PROJECT_SOURCE_PRODUCER', 'on')
+    calls = []
+    def produce(tenant, org, project, prompt):
+        assert (tenant, org, project) == (ORG, ORG, PROJECT)
+        assert len(store.campaigns) == 1
+        assert prompt == next(iter(store.campaigns.values()))['prompt']
+        calls.append(prompt)
+        if len(calls) == 1:
+            raise router.project_repository_source.SourceUnavailable('private details')
+        return dict(source_commit='a' * 40, source_tree='b' * 40, seed_digest='c' * 64, replayed=True)
+    monkeypatch.setattr(router.project_repository_source, 'initialize_project_source', produce)
+    failure = _submit(client)
+    assert failure.status_code == 503 and failure.json()['error']['error_code'] == 'source_unavailable'
+    assert 'private' not in failure.text and len(store.campaigns) == 1
+    retry = _submit(client)
+    assert retry.status_code == 200
+    assert retry.json()['campaign']['source']['source_commit'] == 'a' * 40
+    assert len(calls) == 2
+    assert _submit(client, prompt='Changed').json()['error']['error_code'] == 'idempotency_conflict'
+    assert len(calls) == 2
+    assert client.get('/api/campaigns', params={'project_id': PROJECT}).status_code == 200
+    assert len(calls) == 2
+    allowed.remove(PROJECT)
+    before = len(store.calls)
+    assert _submit(client).status_code == 403
+    assert len(store.calls) == before and len(calls) == 2
+
+
+def test_source_feature_off_and_conflict(setup, monkeypatch):
+    client, store, _ = setup
+    calls = []
+    def conflict(*args):
+        calls.append(args)
+        raise router.project_repository_source.SourceConflict('private path')
+    monkeypatch.setattr(router.project_repository_source, 'initialize_project_source', conflict)
+    assert 'source' not in _submit(client).json()['campaign']
+    assert not calls
+    monkeypatch.setenv('LEAF_PROJECT_SOURCE_PRODUCER', 'on')
+    result = _submit(client)
+    assert result.status_code == 409 and result.json()['error']['error_code'] == 'source_conflict'
+    assert 'private' not in result.text and len(store.campaigns) == 1
