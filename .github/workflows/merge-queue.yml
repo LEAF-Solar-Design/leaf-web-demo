@@ -468,11 +468,15 @@ jobs:
                 REC_SERVICE=$(jq -j '.service // empty' "$RECEIPT")
                 REC_TAG=$(jq -j '.image_tag // empty' "$RECEIPT")
                 REC_WEIGHTS=$(jq -j 'if has("weights_touched") then (.weights_touched|tostring) else "missing" end' "$RECEIPT")
+                REC_SCHEMA=$(jq -j '.schema // empty' "$RECEIPT")
+                REC_RUN_ID=$(jq -j '.run_id | tostring' "$RECEIPT")
+                [ "$REC_SCHEMA" = "leaf.staging-prewarm-receipt.v1" ] || { echo "::error::mq-prewarm: $NAME schema mismatch ($REC_SCHEMA)."; exit 1; }
+                [ "$REC_RUN_ID" = "$RUN_ID" ] || { echo "::error::mq-prewarm: $NAME run_id mismatch ($REC_RUN_ID != $RUN_ID)."; exit 1; }
                 [ "$REC_SERVICE" = "$SERVICE" ] || { echo "::error::mq-prewarm: $NAME service mismatch ($REC_SERVICE)."; exit 1; }
                 [ "$REC_TAG" = "$EXPECTED_TAG" ] || { echo "::error::mq-prewarm: $NAME image_tag mismatch ($REC_TAG != $EXPECTED_TAG)."; exit 1; }
                 [ "$REC_WEIGHTS" = "false" ] || { echo "::error::mq-prewarm: $NAME weights_touched is '$REC_WEIGHTS', not false."; exit 1; }
-                ARN=$(jq -j '.task_definition_arn // empty' "$RECEIPT")
-                [ -n "$ARN" ] || { echo "::error::mq-prewarm: empty task definition ARN for $SERVICE."; exit 1; }
+                ARN=$(jq -j '.staged_td_arn | select(type == "string") | select(startswith("arn:aws:ecs:"))' "$RECEIPT")
+                [ -n "$ARN" ] || { echo "::error::mq-prewarm: empty or invalid staged task definition ARN for $SERVICE."; exit 1; }
                 ARNS="${ARNS:+$ARNS }$ARN"
                 FOUND=true
                 break

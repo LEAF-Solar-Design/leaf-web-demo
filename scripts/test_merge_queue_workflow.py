@@ -674,7 +674,7 @@ def test_no_service_mirror_falsification():
         _assert_no_service_mirror(workflow_text().replace("env:\n", 'env:\n  STAGE_SERVICES: "web"\n', 1))
 
 
-def _prewarm_evidence(tmp_path, entries, relay_source='env:\n  STAGE_SERVICES: "web app"\n', empty_arn=False):
+def _prewarm_evidence(tmp_path, entries, relay_source='env:\n  STAGE_SERVICES: "web app"\n', empty_arn=False, receipt_change=None):
     binary = tmp_path / "bin"
     binary.mkdir(exist_ok=True)
     fake = binary / "gh"
@@ -710,12 +710,33 @@ def _prewarm_evidence(tmp_path, entries, relay_source='env:\n  STAGE_SERVICES: "
             "group": {"head_sha": "a" * 40}, "dispatched": entries,
         }))
     for service in ("web", "app"):
+        receipt = {
+            "schema": "leaf.staging-prewarm-receipt.v1",
+            "service": service,
+            "ecs_service": "leaf-platform-" + service + "-alt",
+            "color": "alt",
+            "staged_td_arn": "" if empty_arn else _staged_arn(service),
+            "image_tag": "spec-" + "b" * 40 + "-" + "a" * 12,
+            "image_digest": "sha256:" + "c" * 64,
+            "witness": "synthetic",
+            "run_id": "101" if service == "web" else "102",
+            "run_attempt": "1",
+            "warm_started_at": "2026-09-05T00:00:00Z",
+            "staged_at": "2026-09-05T00:01:00Z",
+            "migration_legs_skipped": True,
+            "mutations_transaction_skipped": True,
+            "weights_touched": False,
+        }
+        if receipt_change == "old-key-only":
+            receipt["task_definition_arn"] = receipt.pop("staged_td_arn")
+        elif receipt_change:
+            receipt.update(receipt_change)
         with zipfile.ZipFile(tmp_path / f"{service}.zip", "w") as archive:
-            archive.writestr("staged-prewarm-receipt.json", json.dumps({
-                "service": service, "image_tag": "spec-" + "b" * 40 + "-" + "a" * 12,
-                "weights_touched": False,
-                "task_definition_arn": "" if empty_arn else "arn:" + service,
-            }))
+            archive.writestr("staged-prewarm-receipt.json", json.dumps(receipt))
+
+
+def _staged_arn(service):
+    return "arn:aws:ecs:us-east-1:123456789012:task-definition/leaf-platform-" + service + "-alt:254"
 
 
 def _dispatch(service, run_id, disposition="dispatched"):
@@ -752,7 +773,7 @@ def test_relay_dispatched_set_executed(tmp_path, entries, source, error):
                           {"GROUP_HEAD_SHA": "a" * 40, "TREE": "b" * 40,
                            "DISPATCHED_JSON": result["dispatched_json"]})
         assert waited["__returncode__"] == 0, waited
-        assert "arn:app arn:web" in waited["__stdout__"]
+        assert _staged_arn("app") + " " + _staged_arn("web") in waited["__stdout__"]
 
 
 @needs_shell
@@ -770,6 +791,28 @@ def test_terraform_wait_uses_dispatched_set_and_requires_arns(tmp_path, dispatch
     if accepted:
         calls = (tmp_path / "terraform-calls.txt").read_text()
         assert "/runs/101" in calls and "/runs/102" in calls
-        assert "staged task definitions: arn:app arn:web" in result["__stdout__"]
+        assert "staged task definitions: " + _staged_arn("app") + " " + _staged_arn("web") in result["__stdout__"]
     else:
         assert "empty" in result["__stdout__"] + result["__stderr__"]
+
+
+@needs_shell
+@pytest.mark.parametrize("receipt_change,error", [
+    (None, None),
+    ("old-key-only", "empty or invalid staged task definition ARN for app"),
+    ({"schema": "wrong-schema"}, "schema mismatch"),
+    ({"run_id": "999"}, "run_id mismatch"),
+    ({"staged_td_arn": "arn:wrong:app"}, "empty or invalid staged task definition ARN for app"),
+    ({"staged_td_arn": 254}, "empty or invalid staged task definition ARN for app"),
+])
+def test_terraform_wait_reads_real_receipt_schema(tmp_path, receipt_change, error):
+    _prewarm_evidence(tmp_path, [], receipt_change=receipt_change)
+    result = run_step(step_body("mq-prewarm", "Wait for every dispatched"), tmp_path,
+                      {"GROUP_HEAD_SHA": "a" * 40, "TREE": "b" * 40,
+                       "DISPATCHED_JSON": json.dumps({"app": 102})})
+    if error:
+        assert result["__returncode__"] != 0, result
+        assert error in result["__stdout__"] + result["__stderr__"]
+    else:
+        assert result["__returncode__"] == 0, result
+        assert "staged task definitions: " + _staged_arn("app") in result["__stdout__"]
