@@ -47,7 +47,7 @@ export default function useCampaigns(projectId, { enabled = true } = {}) {
     if (current()) setSnapshot(previous => ({ ...(previous.scope === scope ? previous : empty()), scope, ...patch }))
   }, [current, scope])
 
-  const load = useCallback(async ({ refresh = true, preferredId = context.selectedId } = {}) => {
+  const load = useCallback(async ({ refresh = true, preferredId = context.selectedId, onChoicesError } = {}) => {
     if (!enabled || !projectId || !current()) return null
     const generation = ++generationRef.current
     const view = context.view
@@ -72,6 +72,7 @@ export default function useCampaigns(projectId, { enabled = true } = {}) {
           api.listCapabilities(projectId, selectedId).catch(error => { capabilityError = error; return null }),
         ])
         if (!live()) return null
+        if (enrollmentError || capabilityError) onChoicesError?.(enrollmentError || capabilityError)
         selected = detail.campaign
         questions = rows.questions || []
         if (hosts) enrollment = hosts.enrollment
@@ -110,6 +111,7 @@ export default function useCampaigns(projectId, { enabled = true } = {}) {
       }
       return { campaigns, selected, questions }
     } catch (error) {
+      if (live()) onChoicesError?.(error)
       if (live()) update({ error, errorAction: 'load', refreshing: false, executionLoading: false, ...(!refresh ? { status: 'error' } : {}) })
       return null
     }
@@ -156,7 +158,8 @@ export default function useCampaigns(projectId, { enabled = true } = {}) {
       await load({ preferredId: preferredId?.(result) ?? context.selectedId })
       return current(view) ? result : null
     } catch (error) {
-      if (current(view)) update({ error, errorAction: action })
+      if (current(view)) setSnapshot(previous => error?.status === 409 && error?.code === 'catalog_drift'
+        && previous.errorAction === 'load' ? previous : { ...previous, error, errorAction: action })
       throw error
     } finally {
       delete locks[action]
@@ -219,7 +222,31 @@ export default function useCampaigns(projectId, { enabled = true } = {}) {
       }
       setSnapshot(previous => ({ ...previous, submissions: { ...previous.submissions, [enrollmentId]: submission },
         recoveryUnavailable: storageUnavailableRef.current }))
-      const result = await api.invokeCapability(projectId, id, enrollmentId, submission)
+      let result
+      try {
+        result = await api.invokeCapability(projectId, id, enrollmentId, submission)
+      } catch (error) {
+        if (error?.status !== 409 || error?.code !== 'catalog_drift') throw error
+        const matches = value => value?.idempotencyKey === submission.idempotencyKey
+          && value?.effectiveCatalogDigest === submission.effectiveCatalogDigest
+        if (matches(submissionsRef.current.get(key))) {
+          submissionsRef.current.set(key, null)
+          try {
+            const stored = sessionStorage.getItem(key)
+            if (stored && matches(JSON.parse(stored))) sessionStorage.removeItem(key)
+          } catch { storageUnavailableRef.current = true }
+          if (current(view)) setSnapshot(previous => {
+            const submissions = { ...previous.submissions }
+            if (matches(submissions[enrollmentId])) delete submissions[enrollmentId]
+            return { ...previous, submissions, recoveryUnavailable: storageUnavailableRef.current }
+          })
+        }
+        let refreshError = null
+        if (current(view)) await load({ preferredId: id, onChoicesError: failure => { refreshError = failure } })
+        const message = 'The published tool changed. No job was submitted. Review its publication binding before using it again.'
+          + (refreshError ? ' Current choices could not be refreshed.' : '')
+        throw Object.assign(new Error(message), error, { message })
+      }
       if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(result?.invocation?.job_id || '')) {
         throw new Error('Submission outcome unknown. Recover submission to retrieve its job.')
       }
@@ -234,7 +261,7 @@ export default function useCampaigns(projectId, { enabled = true } = {}) {
       })
       return result
     })
-  }, [context, current, enabled, mutate, projectId, readSubmission])
+  }, [context, current, enabled, load, mutate, projectId, readSubmission])
   return { ...(snapshot.scope === scope ? snapshot : empty()), select, submit, ask, answer, refetch,
     enroll, enableEnrollment, revokeEnrollment, bindPublication, invokeCapability }
 }
