@@ -201,9 +201,9 @@ describe('extendEntity', () => {
     expect(extendEntity(arc('a', [0, 0], 5, 0, 270), line('b', [5, -10], [5, 10]), 0, -5).refusal).toBe('Extend refused: extending that far would close the arc into a full turn.')
     // A boundary crossing the arc ITSELF lies behind the end, not ahead of it.
     expect(extendEntity(arc('a', [0, 0], 5, 0, 270), line('b', [0, -10], [0, 10]), 0, -5).refusal).toBe('Extend refused: the boundary edge does not lie ahead of that end.')
-    // Even one degree before the end (a radial boundary through 269 degrees), with a picking aperture in play.
+    // Even one degree before the end (a radial boundary through 269 degrees): the kernel's own band, no aperture reaches extend.
     const radial = line('r', [0, 0], [10 * Math.cos(269 * Math.PI / 180), 10 * Math.sin(269 * Math.PI / 180)])
-    expect(extendEntity(arc('a', [0, 0], 5, 0, 270), radial, 0, -5, 0.2).refusal).toBe('Extend refused: the boundary edge does not lie ahead of that end.')
+    expect(extendEntity(arc('a', [0, 0], 5, 0, 270), radial, 0, -5).refusal).toBe('Extend refused: the boundary edge does not lie ahead of that end.')
   })
 
   it('refuses what has no end and what lies behind', () => {
@@ -1301,7 +1301,7 @@ describe('Astra refutations, round eight (W4g-6e record 11)', () => {
   it('extends a billion-unit straight end by half a unit and preserves the first arc', () => {
     const target = poly('p', [[-1e9, -2], [-1e9, 0], [0, 0]], false, 'A', [1, 0, 0])
     const edge = line('e', [0.5, -1], [0.5, 1])
-    const out = extendEntity(target, edge, 0, 0, 1e-9)
+    const out = extendEntity(target, edge, 0, 0)
     expect(out.refusal).toBeUndefined()
     expect(out.steps).toHaveLength(1)
     const { points, ...shape } = out.steps[0]
@@ -1316,7 +1316,7 @@ describe('Astra refutations, round eight (W4g-6e record 11)', () => {
   it('extends a billion-unit straight start by half a unit and preserves the last arc', () => {
     const target = poly('q', [[0, 0], [1e9, 0], [1e9, 2]], false, 'A', [0, 1, 0])
     const edge = line('e', [-0.5, -1], [-0.5, 1])
-    const out = extendEntity(target, edge, 0, 0, 1e-9)
+    const out = extendEntity(target, edge, 0, 0)
     expect(out.refusal).toBeUndefined()
     expect(out.steps).toHaveLength(1)
     const { points, ...shape } = out.steps[0]
@@ -1333,15 +1333,15 @@ describe('Astra refutations, round nine (W4g-6e record 12)', () => {
   it('refuses crossings on another arc when extending either straight end', () => {
     const target = poly('p', [[3, 2], [3, 0], [0, 0], [1, 0]], false, 'A', [1, 0, 0, 0])
     const edge = line('e', [0, 1], [5, 1])
-    expect(extendEntity(target, edge, 1, 0, 1e-9).refusal).toBe('Extend refused: the boundary edge does not lie ahead of that end.')
+    expect(extendEntity(target, edge, 1, 0).refusal).toBe('Extend refused: the boundary edge does not lie ahead of that end.')
     const mirrored = poly('q', [[1, 0], [0, 0], [3, 0], [3, 2]], false, 'A', [0, 0, -1, 0])
-    expect(extendEntity(mirrored, edge, 1, 0, 1e-9).refusal).toBe('Extend refused: the boundary edge does not lie ahead of that end.')
+    expect(extendEntity(mirrored, edge, 1, 0).refusal).toBe('Extend refused: the boundary edge does not lie ahead of that end.')
   })
 
   it('extends the terminal straight segment and ignores the earlier arc crossing', () => {
     const target = poly('p', [[3, 2], [3, 0], [0, 0], [1, 0]], false, 'A', [1, 0, 0, 0])
     const edge = line('v', [2, -1], [2, 1])
-    expect(extendEntity(target, edge, 1, 0, 1e-9)).toEqual({ steps: [{
+    expect(extendEntity(target, edge, 1, 0)).toEqual({ steps: [{
       op: 'setVertices', entityId: 'p', points: [[3, 2], [3, 0], [0, 0], [2, 0]], closed: false,
       bulges: [1, 0, 0, 0],
     }] })
