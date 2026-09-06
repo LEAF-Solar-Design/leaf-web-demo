@@ -7,7 +7,7 @@ policy_name=leaf-mq-codebuild-scoped
 account=807034087062
 region=us-east-1
 log_group=/codebuild/leaf-mq-leaf-web-demo
-secret_name=leaf-github-runner-pat
+secret_name=leaf-mq-review-status-token
 connection_display_name=leaf-gha-runners
 mode=${1:-apply}
 if [[ $# -gt 1 || ! $mode =~ ^(apply|--dry-run|--delete)$ ]]; then
@@ -120,7 +120,7 @@ project_doc = {
         "computeType": "BUILD_GENERAL1_LARGE",
         "image": "aws/codebuild/standard:7.0",
         "environmentVariables": [
-            {"name": "GH_TOKEN", "type": "SECRETS_MANAGER", "value": "leaf-github-runner-pat"},
+            {"name": "GH_TOKEN", "type": "SECRETS_MANAGER", "value": "leaf-mq-review-status-token"},
         ],
     },
     "serviceRole": role_arn,

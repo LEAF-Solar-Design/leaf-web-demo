@@ -212,7 +212,8 @@ def test_project_dry_run():
 
     project = document["project"]
     assert project["environment"]["environmentVariables"] == [
-        {"name": "GH_TOKEN", "type": "SECRETS_MANAGER", "value": "leaf-github-runner-pat"}]
+        {"name": "GH_TOKEN", "type": "SECRETS_MANAGER", "value": "leaf-mq-review-status-token"}]
+    assert "leaf-github-runner-pat" not in result.stdout
     assert document["webhook"]["filterGroups"] == [[
         {"type": "EVENT", "pattern": "PUSH"},
         {"type": "HEAD_REF", "pattern": "^refs/heads/gh-readonly-queue/main/"}], [
@@ -237,7 +238,8 @@ def test_project_dry_run():
 def test_queue_pagination(monkeypatch):
     calls = []
 
-    def api(path, payload):
+    def api(path, payload, step):
+        assert step == "queue query"
         calls.append(payload["variables"]["cursor"])
         second = len(calls) == 2
         return {"data": {"repository": {"mergeQueue": {"entries": {
@@ -252,7 +254,8 @@ def test_queue_pagination(monkeypatch):
 def test_status_pagination(monkeypatch):
     calls = []
 
-    def api(path):
+    def api(path, step):
+        assert step == "statuses read"
         calls.append(path)
         state, date = ("success", "01") if len(calls) == 1 else ("pending", "02")
         row = {"context": mq.REVIEW_CONTEXT, "state": state,
@@ -273,7 +276,7 @@ def test_main_posts_ruleset_context(monkeypatch):
 
     monkeypatch.setattr(mq, "read_queue", queue)
     monkeypatch.setattr(mq, "read_review", lambda head: "success")
-    monkeypatch.setattr(mq, "github", lambda path, payload: posts.append((path, payload)))
+    monkeypatch.setattr(mq, "github", lambda path, payload, step: posts.append((path, payload)))
     monkeypatch.setenv("CODEBUILD_BUILD_URL", "https://example.test/build")
     assert mq.main(["--head-sha", "2" * 40]) == 0
     assert len(reads) == 2
@@ -322,7 +325,7 @@ def test_deferred_omits_unset_build_url(monkeypatch):
     monkeypatch.delenv("CODEBUILD_BUILD_URL", raising=False)
     monkeypatch.setattr(mq, "read_queue", lambda: [])
     monkeypatch.setattr(mq, "read_review", lambda *a: pytest.fail("must not read statuses"))
-    def api(path, payload=None, expected_status=None):
+    def api(path, payload=None, expected_status=None, step=None):
         if "/branches-where-head?" in path:
             return []
         posts.append((path, payload, expected_status))
@@ -356,7 +359,7 @@ def test_deferred_refuses_live_aliases_and_failed_reads(monkeypatch, capsys, sce
     branch_name = "gh-readonly-queue/main/pr-7-abc"
     calls, posts = [], []
 
-    def api(path, payload=None, expected_status=None):
+    def api(path, payload=None, expected_status=None, step=None):
         calls.append((path, payload, expected_status))
         if path == f"repos/{mq.REPO}/statuses/{head}":
             if scenario != "clean":
@@ -416,7 +419,9 @@ def test_deferred_refuses_live_aliases_and_failed_reads(monkeypatch, capsys, sce
         }, 201)]
     else:
         assert posts == []
-    if scenario.endswith(("-failure", "-json")):
+    if scenario.endswith("-failure"):
+        assert "mq-review failed: GitHub request failed" in output
+    if scenario.endswith("-json"):
         assert "unable to read or publish GitHub state" in output
 
 
@@ -446,7 +451,7 @@ def test_github_token_crosses_on_stdin_only(monkeypatch):
 
     class FakeResult:
         returncode = 0
-        stdout = "{}"
+        stdout = "{}\n200"
         stderr = ""
 
     def fake_run(command, input=None, text=None, capture_output=None):
@@ -461,3 +466,21 @@ def test_github_token_crosses_on_stdin_only(monkeypatch):
     assert "--max-time" in command
     assert not any("secret-token-value" in str(arg) for arg in command)
     assert "secret-token-value" in stdin
+
+
+def test_deferred_status_post_failure_reports_only_step_and_codes(monkeypatch, capsys):
+    def fake_run(command, input=None, text=None, capture_output=None):
+        assert command[command.index("--write-out") + 1] == "\n%{http_code}"
+        if any("/branches-where-head?" in arg for arg in command):
+            return subprocess.CompletedProcess(command, 0, '[]\n200', "")
+        assert any("/statuses/" in arg for arg in command)
+        return subprocess.CompletedProcess(
+            command, 22, 'private response body\n404', 'private response header')
+
+    monkeypatch.setenv("GH_TOKEN", "private-token")
+    monkeypatch.setattr(mq, "read_queue", lambda: [])
+    monkeypatch.setattr(mq.subprocess, "run", fake_run)
+    assert mq.main(["--deferred", "--head-sha", "a" * 40]) == 1
+    output = capsys.readouterr()
+    assert output.out == "mq-review failed: GitHub request failed: statuses POST rc=22 http=404\n"
+    assert output.err == ""
