@@ -67,6 +67,102 @@ def _link(cur, scope, enrollment_id):
     return row
 
 
+def _host_contract(machine_id, *, legacy=False):
+    if legacy:
+        return {
+            'title': 'Implement campaign host enrollment',
+            'spec': ('Implement scoped host enrollment for this campaign and configured machine '
+                      + machine_id + '. Inputs: campaign scope, server allowlist, authenticated '
+                      'project writer, deployed source SHA and worker subject. Outputs: durable '
+                      'enrollment and pending canonical capability link. Required host access: '
+                      'the configured worker may read only its enabled campaign recovery ledger. '
+                      'Permissions: project write for admission and enable/revoke; no provider, '
+                      'publication or deployment permission. Retry with the same campaign and '
+                      'machine; preserve revocation and original task source. Evidence: PostgreSQL '
+                      'authorization and replay results, client controls, then canonical author '
+                      'publication and two distinct successful invocations from the future lifecycle '
+                      'producer. Until that producer exists the link remains pending_link.'),
+            'stages': ['implementation', 'build_test'],
+            'owned_paths': ['platform/campaign_enrollment.py', 'server/routers/campaigns.py',
+                            'web/src/campaigns/'],
+            'verify_command': 'python -m pytest -q tests/test_campaign_enrollment_store.py',
+            'declared_artifacts': ['enrollment-implementation', 'postgres-authorization-replay-results']
+        }
+    return dict(
+        title='Verify campaign host enrollment',
+        spec=('Verify the stored campaign, enrollment and canonical publication binding for '
+              + machine_id + '. Preserve the original deployed Leaf source as lineage. '
+              'Inputs are the stored enrollment, publication and two distinct actual async job uses '
+              'with matching immutable invocation context and exact digest-verified host readbacks. '
+              'Only the server-side campaign_capabilities.count_invocation producer may settle this '
+              'verification after both stored host operations succeeded at apply, activate and readback. '
+              'Client receipts, worker summaries and link state alone cannot authorize completion. '
+              'Exact receipt replay recovers missing settlement and otherwise returns the existing '
+              'result without another attempt. No physical automation or live client use is claimed.'),
+        stages=['verification'], owned_paths=[],
+        verify_command='campaign_capabilities.count_invocation',
+        declared_artifacts=['published-capability-binding', 'two-verified-invocation-receipts'])
+
+
+def _host_task(cur, scope, enrollment_id):
+    # Resolve without an enrollment lock, then follow execution's task-first order.
+    link = _link(cur, scope, _uuid(enrollment_id))
+    return _task(cur, scope, link['task_id'])
+
+
+def _repair_host_task(cur, scope, task, machine_id):
+    contract = _host_contract(machine_id)
+    params = {**scope, 'task': task['task_id']}
+    cur.execute('SELECT p.task_key FROM campaign_task_dependencies d JOIN campaign_tasks p '
+                'ON p.task_id=d.depends_on_task_id AND p.org_id=d.org_id '
+                'AND p.project_id=d.project_id AND p.campaign_id=d.campaign_id '
+                'WHERE d.org_id=%(org)s AND d.project_id=%(project)s '
+                'AND d.campaign_id=%(campaign)s AND d.task_id=%(task)s', params)
+    dependencies = [row['task_key'] for row in cur.fetchall()]
+    material = {key: task[key] for key in (
+        'task_key', 'title', 'spec', 'capability', 'stages', 'owned_paths', 'source_sha',
+        'verify_command', 'declared_artifacts', 'kind', 'parent_task_id')}
+    fingerprint = execution._fingerprint(
+        'leaf.campaign.task.v1', execution._task_payload(**material, depends_on=dependencies))
+    if (task['kind'] != 'capability' or task['capability'] != 'campaign.host-enrollment'
+            or task['task_key'] != 'host-enrollment-' + hashlib.sha256(machine_id.encode()).hexdigest()
+            or task['idempotency_key'] != task['task_key']
+            or task['parent_task_id'] is not None or dependencies
+            or fingerprint != task['payload_fingerprint']):
+        raise CampaignConflict('reconcile_required', 'Enrollment task contract requires reconciliation')
+    if all(task[key] == value for key, value in contract.items()):
+        if task['current_stage'] != 'verification':
+            raise CampaignConflict('reconcile_required', 'Enrollment task stage requires reconciliation')
+        return task
+    legacy = _host_contract(machine_id, legacy=True)
+    if (any(task[key] != value for key, value in legacy.items())
+            or task['status'] != 'pending' or task['fence'] != 0
+            or task['current_stage'] != 'implementation'):
+        raise CampaignConflict('reconcile_required', 'Enrollment task contract requires reconciliation')
+    for table in ('campaign_task_attempts', 'campaign_stage_receipts', 'campaign_dispatch_bindings'):
+        cur.execute('SELECT 1 FROM ' + table + ' WHERE ' + SCOPE + ' AND task_id=%(task)s LIMIT 1', params)
+        if cur.fetchone():
+            raise CampaignConflict('reconcile_required', 'Enrollment task has execution history')
+    new_fingerprint = execution._fingerprint(
+        'leaf.campaign.task.v1',
+        execution._task_payload(**{**material, **contract}, depends_on=dependencies))
+    cur.execute('UPDATE campaign_tasks SET title=%(title)s, spec=%(spec)s, stages=%(stages)s, '
+                'owned_paths=%(owned_paths)s, verify_command=%(verify_command)s, '
+                'declared_artifacts=%(declared_artifacts)s, current_stage=\'verification\', '
+                'payload_fingerprint=%(fingerprint)s WHERE ' + SCOPE +
+                ' AND task_id=%(task)s RETURNING *',
+                {**params, **contract, 'stages': execution.Jsonb(contract['stages']),
+                 'owned_paths': execution.Jsonb(contract['owned_paths']),
+                 'declared_artifacts': execution.Jsonb(contract['declared_artifacts']),
+                 'fingerprint': new_fingerprint})
+    task = cur.fetchone()
+    _event(cur, scope, task, 'capability_link_recorded', payload={
+        'old_fingerprint': fingerprint, 'new_fingerprint': new_fingerprint,
+        'changed_fields': sorted([*contract, 'current_stage', 'payload_fingerprint']),
+        'reason': 'Untouched generated host task now verifies the stored two-use lifecycle'})
+    return task
+
+
 def request_enrollment(org_id, project_id, campaign_id, principal_id, *, machine_id):
     scope = {**_scope(org_id, project_id), 'campaign': _uuid(campaign_id)}
     principal = _uuid(principal_id)
@@ -84,6 +180,8 @@ def request_enrollment(org_id, project_id, campaign_id, principal_id, *, machine
                     ' AND machine_id=%(machine)s', {**scope, 'machine': machine_id})
         existing = cur.fetchone()
         if existing:
+            task = _host_task(cur, scope, existing['enrollment_id'])
+            _repair_host_task(cur, scope, task, machine_id)
             return _public(existing, _link(cur, scope, existing['enrollment_id']), True)
         subject = os.environ.get('LEAF_CAMPAIGN_WORKER_SUBJECT', '')
         if not subject or len(subject) > 200:
@@ -97,26 +195,10 @@ def request_enrollment(org_id, project_id, campaign_id, principal_id, *, machine
                 raise CampaignUnavailable('source_unavailable', 'Deployed implementation source is unavailable')
             task = execution.submit_task(
                 org_id, project_id, campaign_id, task_key=key, idempotency_key=key,
-                kind='capability', title='Implement campaign host enrollment',
-                capability='campaign.host-enrollment', source_sha=source,
-                spec=('Implement scoped host enrollment for this campaign and configured machine '
-                      + machine_id + '. Inputs: campaign scope, server allowlist, authenticated '
-                      'project writer, deployed source SHA and worker subject. Outputs: durable '
-                      'enrollment and pending canonical capability link. Required host access: '
-                      'the configured worker may read only its enabled campaign recovery ledger. '
-                      'Permissions: project write for admission and enable/revoke; no provider, '
-                      'publication or deployment permission. Retry with the same campaign and '
-                      'machine; preserve revocation and original task source. Evidence: PostgreSQL '
-                      'authorization and replay results, client controls, then canonical author '
-                      'publication and two distinct successful invocations from the future lifecycle '
-                      'producer. Until that producer exists the link remains pending_link.'),
-                stages=['implementation', 'build_test'],
-                owned_paths=['platform/campaign_enrollment.py', 'server/routers/campaigns.py',
-                             'web/src/campaigns/'],
-                verify_command='python -m pytest -q tests/test_campaign_enrollment_store.py',
-                declared_artifacts=['enrollment-implementation', 'postgres-authorization-replay-results'],
-                depends_on=[])
+                kind='capability', capability='campaign.host-enrollment', source_sha=source,
+                **_host_contract(machine_id), depends_on=[])
         task = _task(cur, scope, _uuid(task['task_id']))
+        task = _repair_host_task(cur, scope, task, machine_id)
         if task['kind'] != 'capability' or task['capability'] != 'campaign.host-enrollment':
             raise CampaignConflict('task_conflict', 'Enrollment task identity conflicts')
         cur.execute('INSERT INTO campaign_host_enrollments '
@@ -144,6 +226,7 @@ def _transition(org_id, project_id, campaign_id, enrollment_id, principal_id, st
     with _cursor() as cur:
         _check(cur, scope)
         _principal(cur, scope, principal)
+        _host_task(cur, scope, enrollment_id)
         row = _enrollment(cur, scope, enrollment_id)
         link = _link(cur, scope, row['enrollment_id'])
         if row['state'] == state:
