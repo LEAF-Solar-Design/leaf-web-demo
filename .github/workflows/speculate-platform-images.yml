@@ -24,7 +24,7 @@ jobs:
   dispatch:
     name: PR-mode speculation retired
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     permissions: {}
     timeout-minutes: 5
     steps:

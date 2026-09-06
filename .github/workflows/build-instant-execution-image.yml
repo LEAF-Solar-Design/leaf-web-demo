@@ -23,7 +23,7 @@ concurrency:
 
 jobs:
   prepare:
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 5
     outputs:
       source_sha: ${{ steps.source.outputs.sha }}
@@ -101,7 +101,7 @@ jobs:
 
   test:
     needs: prepare
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -118,7 +118,7 @@ jobs:
 
   build-scan-push:
     needs: [prepare, test]
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 45
     permissions:
       contents: read

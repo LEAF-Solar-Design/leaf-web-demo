@@ -3717,7 +3717,7 @@ jobs:
       github.event_name == 'workflow_dispatch' &&
       inputs.promote &&
       needs.prepare.outputs.source_mode == 'main'
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 5
 
     permissions:

@@ -82,7 +82,7 @@ concurrency:
 jobs:
   plan:
     name: Resolve the staging fleet reconcile plan
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     # Long enough for a full armed sequence behind the shared staging lock
     # (~63 minutes of legs at the medians above) plus its own polling.
     timeout-minutes: 90

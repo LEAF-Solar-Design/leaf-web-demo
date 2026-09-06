@@ -292,7 +292,7 @@ jobs:
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main'
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     # The relay now watches both deploys to completion (observed: ~8 min for
     # web, ~14 min for app, plus time queued behind the shared staging lock).
     # Comfortably above the step's own 95-minute deadline so the step reports

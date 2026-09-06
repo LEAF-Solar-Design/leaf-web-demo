@@ -18,7 +18,7 @@ concurrency:
 jobs:
   compare:
     name: Compare dormant build and relay evidence
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 5
     steps:
       - name: Check out exact source

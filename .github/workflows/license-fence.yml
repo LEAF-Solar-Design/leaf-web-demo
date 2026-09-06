@@ -41,7 +41,7 @@ permissions:
 jobs:
   license-fence:
     name: license-fence
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
         with:
