@@ -281,3 +281,8 @@ def test_mutation_missing_contract_job_is_caught():
 def test_mutation_concurrency_block_is_caught():
     wf = _load(_FIXTURE_CONCURRENCY_BLOCK)
     assert "concurrency" in wf
+
+
+def test_red_proof_for_leaf_ci_leaf_web_demo():
+    """Deliberate failure: proves the CodeBuild status goes red. Never merge."""
+    assert False, "RED proof for leaf-ci-leaf-web-demo"
