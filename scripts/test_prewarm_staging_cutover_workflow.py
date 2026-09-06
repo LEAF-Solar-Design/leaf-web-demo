@@ -1,23 +1,9 @@
-"""Executable contract for the prewarm staging relay (tf design W2).
+"""Executable contract for the queue-mode prewarm staging relay.
 
-This relay stages UNMERGED code onto a task that runs with the real staging
-task role, so two of its decisions are security controls rather than
-optimisations, and both are EXECUTED here against the real step bodies rather
-than asserted by reading the workflow text:
-
-* **Eligibility.** Only a PR with a standing approval (or the explicit
-  `stage-cutover` label) may be staged. An approval that a later
-  CHANGES_REQUESTED overrode must not still buy a stage -- that is the case a
-  text assertion would never catch.
-* **Migration-surface refusal.** A candidate touching `platform/migrations/`
-  or `platform/db.py` is never staged, and the check FAILS CLOSED: an
-  unreadable preview refuses rather than proceeds. The same step derives the
-  `spec-<tree40>-<preview12>` tag, so executing it also pins the tag shape the
-  terraform deploy admits only under `deploy_mode=prewarm`.
-
-The remaining assertions pin the properties that have no executable surface
-here: which events fire, what the dispatch says, and that a failed dispatch
-degrades instead of reddening a PR.
+PR events only report retirement. Mutation fixtures prove that a dispatch,
+checkout or token cannot return unnoticed. The group relay retains executable
+migration, queue-membership and tag-readiness checks, and unmerged PR closes
+retain targeted descaling of old stages.
 """
 
 from __future__ import annotations
@@ -190,97 +176,60 @@ def run_step(body: str, workdir: Path, env: dict) -> dict:
     return parsed
 
 
-def fake_gh(workdir: Path, pull: dict, reviews: list) -> None:
-    """A `gh` that answers the two API reads the eligibility step makes."""
-    binary = workdir / "bin"
-    binary.mkdir(exist_ok=True)
-    (workdir / "pull.json").write_text(json.dumps(pull), encoding="utf-8")
-    (workdir / "reviews.json.fixture").write_text(json.dumps(reviews), encoding="utf-8")
-    script = binary / "gh"
-    script.write_text(
-        textwrap.dedent(
-            """\
-            #!/usr/bin/env bash
-            for arg in "$@"; do
-              case "$arg" in
-                *"/reviews"*) cat "$(dirname "$0")/../reviews.json.fixture"; exit 0 ;;
-              esac
-            done
-            cat "$(dirname "$0")/../pull.json"
-            """
-        ),
-        encoding="utf-8",
-        newline="\n",
+def _check_pr_notice(document: dict) -> None:
+    job = document["jobs"]["stage"]
+    assert set(job) == {"name", "if", "runs-on", "permissions", "timeout-minutes", "steps"}
+    assert job["if"] == (
+        "(github.event_name == 'pull_request_review' || "
+        "github.event_name == 'pull_request_target') && github.event.action != 'closed'"
     )
-    script.chmod(0o755)
+    assert job["permissions"] == {}
+    assert "secrets." not in str(job)
+    assert len(job["steps"]) == 1
+    step = job["steps"][0]
+    assert set(step) == {"name", "run"}
+    assert step["run"] == (
+        'echo "::notice::PR-mode staging retired 2026-09-05: '
+        'the merge queue builds the group commit; see merge-queue.yml"\n'
+        'exit 0\n'
+    )
 
 
-def review(login: str, state: str, submitted_at: str) -> dict:
-    return {"user": {"login": login}, "state": state, "submitted_at": submitted_at}
-
-
-ELIGIBILITY_ENV = {"PR_NUMBER": "42", "STAGE_LABEL": "stage-cutover", "GH_TOKEN": "unused"}
-
-
-@needs_shell
 @pytest.mark.parametrize(
-    "reviews,labels,expected,because",
-    [
-        ([review("ada", "APPROVED", "2026-08-17T10:00:00Z")], [], "true", "standing approval"),
-        ([], [{"name": "stage-cutover"}], "true", "explicit label override"),
-        ([], [], "false", "nothing makes it eligible"),
-        (
-            [
-                review("ada", "APPROVED", "2026-08-17T10:00:00Z"),
-                review("ada", "CHANGES_REQUESTED", "2026-08-17T11:00:00Z"),
-            ],
-            [],
-            "false",
-            "the approval was overridden by the same reviewer",
-        ),
-        (
-            [
-                review("ada", "APPROVED", "2026-08-17T10:00:00Z"),
-                review("linus", "CHANGES_REQUESTED", "2026-08-17T11:00:00Z"),
-            ],
-            [],
-            "false",
-            "another reviewer is still blocking",
-        ),
-        (
-            [
-                review("ada", "CHANGES_REQUESTED", "2026-08-17T10:00:00Z"),
-                review("ada", "APPROVED", "2026-08-17T11:00:00Z"),
-            ],
-            [],
-            "true",
-            "the reviewer's latest verdict approves",
-        ),
-        (
-            [review("ada", "APPROVED", "2026-08-17T10:00:00Z"), review("bot", "COMMENTED", "2026-08-17T12:00:00Z")],
-            [],
-            "true",
-            "a comment carries no verdict",
-        ),
-        (
-            [review("ada", "CHANGES_REQUESTED", "2026-08-17T10:00:00Z")],
-            [{"name": "stage-cutover"}],
-            "false",
-            "the label never overrides a standing changes-requested",
-        ),
-    ],
+    "mutation",
+    ["dispatch", "secret", "checkout", "job-env", "step-env",
+     "reusable-job", "write-permission", "closed-event"],
 )
-def test_eligibility_is_decided_by_the_standing_review_verdict(tmp_path, reviews, labels, expected, because):
-    fake_gh(tmp_path, {"state": "open", "labels": labels}, reviews)
-    result = run_step(step_body("stage", "Decide stage eligibility"), tmp_path, ELIGIBILITY_ENV)
-    assert result["eligible"] == expected, "%s: %s" % (because, result.get("reason"))
+def test_pr_notice_rejects_staging_regressions(mutation):
+    document = workflow_document()
+    _check_pr_notice(document)
+    job = document["jobs"]["stage"]
+    if mutation == "dispatch":
+        job["steps"][0]["run"] = (
+            'gh workflow run "$DEPLOY_WORKFLOW" --ref main\n'
+            + job["steps"][0]["run"]
+        )
+    elif mutation == "secret":
+        job["steps"][0]["env"] = {"GH_TOKEN": "${{ secrets.TERRAFORM_REPO_TOKEN }}"}
+    elif mutation == "checkout":
+        job["steps"].insert(0, {"uses": "actions/checkout@v4"})
+    elif mutation == "job-env":
+        job["env"] = {"GH_TOKEN": "${{ github.token }}"}
+    elif mutation == "step-env":
+        job["steps"][0]["env"] = {"GH_TOKEN": "${{ github.token }}"}
+    elif mutation == "reusable-job":
+        job["uses"] = "./.github/workflows/prewarm-staging-group.yml"
+    elif mutation == "write-permission":
+        job["permissions"] = {"actions": "write"}
+    else:
+        job["if"] = "github.event_name == 'pull_request_target'"
+    with pytest.raises(AssertionError):
+        _check_pr_notice(document)
 
 
-@needs_shell
-def test_a_closed_pull_request_is_never_staged(tmp_path):
-    fake_gh(tmp_path, {"state": "closed", "labels": [{"name": "stage-cutover"}]}, [])
-    result = run_step(step_body("stage", "Decide stage eligibility"), tmp_path, ELIGIBILITY_ENV)
-    assert result["eligible"] == "false"
+def test_a_closed_pull_request_is_never_staged():
+    _check_pr_notice(workflow_document())
+    assert "github.event.action != 'closed'" in workflow_document()["jobs"]["stage"]["if"]
 
 
 def _preview_repo(tmp_path: Path, changed: str) -> Path:
@@ -321,7 +270,7 @@ CANDIDATE_ENV = {"MIGRATION_SURFACE": "platform/migrations/ platform/db.py"}
 def test_a_candidate_touching_the_migration_surface_is_refused(tmp_path, changed, stageable):
     repo = _preview_repo(tmp_path, changed)
     (repo / "bin").mkdir()
-    result = run_step(step_body("stage", "Refuse a candidate that touches"), repo, CANDIDATE_ENV)
+    result = run_step(step_body("stage-group", "Refuse a candidate that touches"), repo, CANDIDATE_ENV)
     assert result["stageable"] == stageable
     if stageable == "true":
         head = subprocess.run(
@@ -348,7 +297,7 @@ def test_an_unreadable_preview_fails_closed(tmp_path):
     (repo / "only.txt").write_text("one commit\n", encoding="utf-8")
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-qm", "root"], cwd=repo, check=True, capture_output=True)
-    result = run_step(step_body("stage", "Refuse a candidate that touches"), repo, CANDIDATE_ENV)
+    result = run_step(step_body("stage-group", "Refuse a candidate that touches"), repo, CANDIDATE_ENV)
     assert result["stageable"] == "false"
 
 
@@ -383,7 +332,7 @@ def test_the_preview_checkout_is_never_executed():
     anything out of the merge preview would hand it to the PR author. Only git
     plumbing may touch that checkout.
     """
-    body = step_body("stage", "Refuse a candidate that touches")
+    body = step_body("stage-group", "Refuse a candidate that touches")
     for command in ("git rev-parse", "git diff"):
         assert command in body
     for forbidden in ("python", "bash ", "sh ", "npm", "make", "./"):
@@ -403,17 +352,12 @@ def test_a_close_is_never_cancelled_by_a_newer_stage():
     )
 
 
-def test_only_same_repo_non_fork_non_draft_pull_requests_stage():
-    condition = workflow_document()["jobs"]["stage"]["if"]
-    assert "github.event.pull_request.head.repo.fork == false" in condition
-    assert "head.repo.full_name == github.repository" in condition
-    assert "draft == false" in condition
-    assert "base.ref == 'main'" in condition
-    assert "github.event.review.state == 'approved'" in condition
+def test_pr_events_only_report_retirement():
+    _check_pr_notice(workflow_document())
 
 
 def test_the_dispatch_stages_both_colours_on_the_prewarm_rail():
-    body = step_body("stage", "Dispatch the prewarm")
+    body = step_body("stage-group", "Dispatch the prewarm")
     assert "deploy_mode=prewarm" in body
     assert "expected_task_definition=auto-live" in body
     assert "deploy_strategy=bluegreen" in body
@@ -444,11 +388,9 @@ def test_web_and_app_are_staged_again_because_the_merge_group_makes_the_stage_fr
     checked equal to its base at stage time (`stage-group`'s "Require the
     group head's first parent to equal its base" step), so it is fresh at stage
     time. Later invalidation or replay remains possible. Both colours are
-    back in STAGE_SERVICES for that path; the PR path also re-covers app,
-    which is accepted only because the PR triggers are provisional until the
-    queue retires them.
+    back in STAGE_SERVICES for that path. PR events now report retirement.
     """
-    services = workflow_document()["env"]["STAGE_SERVICES"].split()
+    services = group_workflow_document()["env"]["STAGE_SERVICES"].split()
     assert services == ["web", "app"], (
         "STAGE_SERVICES is %s; the merge-group path stages the group's exact "
         "head, so both colours should be back" % services
@@ -631,29 +573,25 @@ def test_the_group_first_parent_must_equal_its_base(tmp_path, base_matches, expe
     assert result["ok"] == expected_ok
 
 
-def test_the_migration_surface_refusal_is_identical_on_the_group_path():
-    pr_body = step_body("stage", "Refuse a candidate that touches")
-    group_body = step_body("stage-group", "Refuse a candidate that touches")
-    assert group_body == pr_body, (
-        "the group path must run the exact same fail-closed migration-surface "
-        "check and tag derivation as the PR path, over the group head instead "
-        "of a merge preview"
-    )
+def test_the_group_candidate_retains_fail_closed_migration_checks():
+    body = step_body("stage-group", "Refuse a candidate that touches")
+    assert "git diff --no-renames --name-only 'HEAD^1' HEAD" in body
+    assert 'echo "stageable=false"' in body
+    assert 'echo "migration_refusal=true"' in body
 
 
-def test_the_supply_set_step_is_identical_on_the_group_path():
-    pr_body = step_body("stage", "Wait for the speculative supply set")
-    group_body = step_body("stage-group", "Wait for the speculative supply set")
-    assert group_body == pr_body, (
-        "the supply-set artifact name (spec-v3-supply-set-<tree>) and the "
-        "poll bounds must match the PR path exactly"
-    )
+def test_the_group_supply_set_step_retains_tree_identity_and_poll_bounds():
+    body = step_body("stage-group", "Wait for the speculative supply set")
+    assert "spec-v3-supply-set-$TREE" in body
+    assert "SUPPLY_SET_POLLS" in body
+    assert "SUPPLY_SET_INTERVAL" in body
 
 
-def test_the_dispatch_step_is_identical_on_the_group_path():
-    pr_body = step_body("stage", "Dispatch the prewarm")
-    group_body = step_body("stage-group", "Dispatch the prewarm")
-    assert group_body == pr_body
+def test_the_group_dispatch_keeps_the_cross_repo_token_off_the_pr_path():
+    steps = group_workflow_document()["jobs"]["stage-group"]["steps"]
+    dispatch = next(step for step in steps if step.get("id") == "dispatch")
+    assert dispatch["env"]["GH_TOKEN"] == "${{ secrets.TERRAFORM_REPO_TOKEN }}"
+    _check_pr_notice(workflow_document())
 
 
 def test_the_group_receipt_carries_a_group_object_not_a_pr_number():
@@ -944,7 +882,7 @@ def _uncommented_workflow() -> str:
     """
     return "".join(
         line + chr(10)
-        for line in workflow_text().splitlines()
+        for line in (workflow_text() + "\n" + GROUP_WORKFLOW.read_text(encoding="utf-8")).splitlines()
         if not line.lstrip().startswith("#")
     )
 
@@ -986,8 +924,7 @@ def test_no_jq_filter_suffixes_a_field_onto_an_optional_iterator():
 
 
 def test_the_cross_repo_token_is_scoped_to_the_dispatch_steps():
-    document = workflow_document()
-    for job_name, job in document["jobs"].items():
+    for job_name, job in workflow_jobs().items():
         for step in job["steps"]:
             env = step.get("env", {})
             if "TERRAFORM_REPO_TOKEN" in str(env.get("GH_TOKEN", "")):
@@ -1002,6 +939,10 @@ def test_run_url_extraction_cannot_abort_the_service_loop():
     Errexit then aborts the step before the mark scan and before the next service.
     Guard the extraction so an empty run URL reaches the fallback.
     """
-    text = workflow_text()
+    text = step_body("stage-group", "Dispatch the prewarm")
     assert "RUN_ID=$(printf '%s' \"$DISPATCH_OUTPUT\" | grep -oE 'actions/runs/[0-9]+' | head -1 | cut -d/ -f3 || true)" in text
     assert "RUN_ID=$(printf '%s' \"$DISPATCH_OUTPUT\" | grep -oE 'actions/runs/[0-9]+' | head -1 | cut -d/ -f3)" not in text
+
+
+def test_pr_stage_is_notice_only():
+    _check_pr_notice(workflow_document())

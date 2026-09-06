@@ -1294,7 +1294,8 @@ def build_suites() -> List[Suite]:
               # script or token, +1 that the envelope gets its OWN artifact,
               # because the finalizer reads the receipt with _zip_member and
               # that refuses any archive holding more than one file.
-              _py_pytest("test_build_platform_images_workflow.py"), 36),
+              # Queue-mode cutover: 37 base rows plus the PR retirement battery.
+              _py_pytest("test_build_platform_images_workflow.py"), 38),
         # Vendored mushy-code integrity (PR #474 review, P2): the pin verifier
         # must be a CI fact, not a manual command. Registered with its suite the
         # day it shipped — no fix-then-register debt. 2 = verify READY + the
@@ -1370,7 +1371,8 @@ def build_suites() -> List[Suite]:
               # 39 -> 43 (slice B v2): replace event-trust pins with live-queue
               # validation (queued and superseded rows), and pin the secret-free
               # dispatcher, main-ref guard, and recorded-base step guards.
-              _py_pytest("test_prewarm_staging_cutover_workflow.py"), 44),
+              # Queue-mode cutover: 50 base rows plus the notice-only PR pin.
+              _py_pytest("test_prewarm_staging_cutover_workflow.py"), 51),
         # Merge-queue group controller (slice C: mq-review, mq-supply,
         # mq-prewarm). 32 = the executed matrix: mq-review's GraphQL
         # pagination and post-check re-read run against a fake gh (a queue
