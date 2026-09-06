@@ -10,6 +10,8 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import sys
+import time
 
 
 SERVICES = ("app", "broker", "canonical-worker", "harness", "web")
@@ -23,6 +25,56 @@ FRESHNESS = {
     "web": ("WEB_ALPINE_MAIN_APKINDEX_SHA256",),
 }
 TRIXIE = ("TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256", "TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256")
+
+
+def run_gate(root: Path, results_dir: Path, *, env: dict[str, str],
+             timeout_seconds: int = 2700) -> Path:
+    """Run all eight canonical shards and require an emitted tree-bound proof.
+
+    Run this in the dedicated test project, not the image-publishing project.
+    Its IAM role may write test artifacts but must not write trusted releases
+    or ECR. The caller supplies the test environment and runtime dependencies.
+    This function makes no assertion that process env is an isolation boundary.
+    """
+    if type(timeout_seconds) is not int or timeout_seconds <= 0:
+        raise ValueError("gate timeout must be positive")
+    root = root.resolve()
+    results_dir = results_dir.resolve()
+    results_dir.mkdir(parents=True, exist_ok=False)
+    proof = results_dir / "gate-proof.json"
+    deadline = time.monotonic() + timeout_seconds
+
+    def run(command, *, check=True, capture_output=False):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("native gate exceeded total runtime bound")
+        return subprocess.run(command, cwd=root, env=env, check=check,
+                              capture_output=capture_output, text=True,
+                              timeout=remaining)
+
+    tree = run(["git", "rev-parse", "HEAD^{tree}"], capture_output=True).stdout.strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", tree):
+        raise ValueError("gate checkout has no exact tree")
+    runner = [sys.executable, "scripts/run-all-gates.py"]
+    failures = []
+    # Serial execution preserves suite filesystem isolation on one checkout.
+    # The single deadline caps the complete gate, not each shard independently.
+    for shard in range(8):
+        result = run(runner + ["--retry", "1", "--shard-count", "8",
+                              "--shard-index", str(shard), "--result-json",
+                              str(results_dir / f"shard-{shard}.json"),
+                              "--log-dir", str(results_dir / f"logs-{shard}")], check=False)
+        if result.returncode != 0:
+            failures.append(shard)
+    # The canonical verifier owns partition/catalog completeness and the proof
+    # format. Do not replace it with a summary of subprocess return codes.
+    run(runner + ["--verify-shard-results", str(results_dir), "--emit-proof", str(proof)])
+    if failures:
+        raise ValueError(f"native gate shards failed: {failures}")
+    if not proof.is_file():
+        raise ValueError("canonical gate did not emit a proof")
+    run(runner + ["--verify-gate-proof", str(proof), "--expect-tree", tree])
+    return proof
 
 
 def image_build_command(service: str, source: str, build_number: int,
@@ -99,3 +151,50 @@ def build_image(root: Path, service: str, source: str, build_number: int,
         raise ValueError("buildx did not return one immutable image digest")
     return {"repository": f"leaf-platform-{service}", "image_digest": digest,
             "source_revision": source, "native_build_number": build_number}
+
+
+def package_web_image(root: Path, image_digest: str, source: str,
+                      output_dir: Path) -> dict:
+    """Package the exact pushed web image's files, including its compiled engine.
+
+    The temporary container is never started. Only its static web files are
+    copied. A second npm build cannot silently create a different release.
+    The canonical archive writer preserves the existing web ZIP wire format.
+    """
+    if (not re.fullmatch(r"sha256:[0-9a-f]{64}", image_digest)
+            or not re.fullmatch(r"[0-9a-f]{40}", source)):
+        raise ValueError("web package requires exact image and source")
+    root, output_dir = root.resolve(), output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=False)
+    dist = output_dir / "dist"
+    dist.mkdir()
+    image = f"{REGISTRY}/leaf-platform-web@{image_digest}"
+    subprocess.run(["docker", "pull", "--platform", "linux/amd64", image],
+                   cwd=root, check=True, timeout=600)
+    container = subprocess.run(
+        ["docker", "create", "--platform", "linux/amd64", "--entrypoint", "/bin/true", image],
+        cwd=root, check=True, text=True, capture_output=True, timeout=60,
+    ).stdout.strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", container):
+        raise ValueError("docker did not return an exact temporary container ID")
+    try:
+        subprocess.run(["docker", "cp", f"{container}:/usr/share/nginx/html/.", str(dist)],
+                       cwd=root, check=True, timeout=120)
+    finally:
+        subprocess.run(["docker", "rm", container], cwd=root, check=True, timeout=60)
+    health = json.loads((dist / "health.json").read_text(encoding="utf-8"))
+    if health.get("source_sha") != source or health.get("ok") is not True:
+        raise ValueError("web image files do not carry the admitted source")
+    archive = output_dir / "web-dist.zip"
+    result = subprocess.run(
+        [sys.executable, "scripts/platform_release_manifest.py", "pack-web-dist",
+         "--root", str(dist), "--output", str(archive)],
+        cwd=root, check=True, text=True, capture_output=True, timeout=120,
+    )
+    receipt = json.loads(result.stdout)
+    if set(receipt) != {"artifact_sha256", "archive_sha256"} or any(
+        not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+        for value in receipt.values()
+    ):
+        raise ValueError("canonical web packer returned invalid identity")
+    return dict(receipt, path=str(archive), image_digest=image_digest, source_revision=source)
