@@ -25,6 +25,10 @@ export interface WriterLeaseWitness {
 
 /** Additive project-repository lease boundary; legacy tenant methods stay unchanged. */
 export interface TenantRepoProvider extends VendoredTenantRepoProvider {
+  exportProjectSourceBundle?(
+    authority: ProjectRepositoryAuthority,
+    request: ProjectRepositorySourceBundleRequest,
+  ): Promise<ProjectRepositorySourceBundleResult>;
   initializeProjectSource?(
     authority: ProjectRepositoryAuthority,
     request: ProjectRepositorySourceInitializationRequest,
@@ -50,6 +54,21 @@ export interface TenantRepoProvider extends VendoredTenantRepoProvider {
 
 export const PROJECT_REPOSITORY_SOURCE_WITNESS_CONTRACT =
   "leaf.project-repository-source-witness.v1";
+
+export const PROJECT_REPOSITORY_SOURCE_BUNDLE_CONTRACT = "leaf.project-repository-source-bundle.v1";
+
+export interface ProjectRepositorySourceBundleRequest {
+  readonly sourceCommit: string;
+  readonly sourceTree: string;
+}
+
+export interface ProjectRepositorySourceBundleResult extends ProjectRepositorySourceBundleRequest {
+  readonly bundle: Buffer;
+  readonly bundleSha256: string;
+  readonly sizeBytes: number;
+  readonly leaseId: string;
+  readonly leaseGeneration: string;
+}
 
 export const PROJECT_REPOSITORY_SOURCE_INITIALIZER_CONTRACT =
   "leaf.project-repository-source-initializer.v1";

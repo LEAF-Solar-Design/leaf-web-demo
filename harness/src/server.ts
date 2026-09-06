@@ -51,6 +51,7 @@ import {
   PROJECT_REPOSITORY_INVERSE_PRODUCER_CONTRACT,
   PROJECT_REPOSITORY_SOURCE_WITNESS_CONTRACT,
   PROJECT_REPOSITORY_SOURCE_INITIALIZER_CONTRACT,
+  PROJECT_REPOSITORY_SOURCE_BUNDLE_CONTRACT,
   ProjectRepositorySourceUnavailable,
 } from "./ports/index.js";
 import type { ConverseRunner, ConverseTurnInput, HarnessPorts, HarnessTurnEvent,
@@ -352,6 +353,7 @@ function readJsonBody(
   req: IncomingMessage,
   maxBytes: number = MAX_BODY_BYTES,
   strictUtf8: boolean = false,
+  uniqueFlatStringKeys: boolean = false,
 ): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -411,7 +413,19 @@ function readJsonBody(
       const raw = decoded.trim();
       if (!raw) return resolve({});
       try {
-        resolve(JSON.parse(raw) as Record<string, unknown>);
+        const body: unknown = JSON.parse(raw);
+        if (uniqueFlatStringKeys) {
+          if (!isRecord(body) || Object.values(body).some(value => typeof value !== "string")) {
+            throw new Error("expected a flat string object");
+          }
+          // Tokenize complete strings so escaped quotes in values cannot look
+          // like keys. JSON.parse has already checked syntax; in a flat object,
+          // more raw keys than parsed keys means a duplicate, including escapes.
+          const keys = [...raw.matchAll(/"(?:[^"\\]|\\.)*"/g)]
+            .filter(match => /^\s*:/.test(raw.slice(match.index! + match[0].length)));
+          if (keys.length !== Object.keys(body).length) throw new Error("duplicate JSON key");
+        }
+        resolve(body as Record<string, unknown>);
       } catch (e) {
         reject(new AuthorLoopError(`invalid JSON body: ${(e as Error).message}`, 400));
       }
@@ -986,6 +1000,64 @@ export function createHarness(ports: HarnessPorts, opts?: {
             return send(res, 503, { error: { code: "source_unavailable", message: "source is unavailable" } });
           }
           return send(res, 409, { error: { code: "source_conflict", message: "source initialization failed" } });
+        }
+      }
+
+      if (method === "POST" && path === "/internal/project-repository-source/export") {
+        const requiredAuth = harnessAuthDenial(req, { ...auth, enabled: true });
+        if (requiredAuth) return send(res, 401, requiredAuth);
+        const provider = ports.tenantRepo as TenantRepoProvider;
+        if (!provider.exportProjectSourceBundle) {
+          return send(res, 503, { error: { code: "source_unavailable", message: "source is unavailable" } });
+        }
+        let authority: ProjectRepositoryAuthority;
+        let sourceCommit: string;
+        let sourceTree: string;
+        let digest: string;
+        try {
+          const body = await readJsonBody(req, 256 * 1024, true, true);
+          if (!isRecord(body) || Object.keys(body).sort().join(",") !==
+              "organization_id,project_id,repo_key,source_commit,source_tree,tenant_id") throw new Error();
+          for (const key of ["tenant_id", "organization_id", "project_id", "repo_key"]) {
+            if (typeof body[key] !== "string" || !CANONICAL_UUID.test(body[key] as string)) throw new Error();
+          }
+          if (authorityHeader(req, "x-tenant-id") !== body.tenant_id ||
+              typeof body.source_commit !== "string" || !SHA40.test(body.source_commit) ||
+              typeof body.source_tree !== "string" || !SHA40.test(body.source_tree)) throw new Error();
+          sourceCommit = body.source_commit;
+          sourceTree = body.source_tree;
+          authority = Object.freeze({ tenantId: body.tenant_id as string, organizationId: body.organization_id as string,
+            projectId: body.project_id as string, repoKey: body.repo_key as string });
+          digest = createHash("sha256").update(canonicalJson({
+            tenant_id: authority.tenantId, organization_id: authority.organizationId,
+            project_id: authority.projectId, repo_key: authority.repoKey,
+            source_commit: sourceCommit, source_tree: sourceTree,
+            contract: PROJECT_REPOSITORY_SOURCE_BUNDLE_CONTRACT })).digest("hex");
+        } catch {
+          return send(res, 400, { error: { code: "invalid_request", message: "invalid source request" } });
+        }
+        try {
+          const source = await provider.exportProjectSourceBundle(authority, { sourceCommit, sourceTree });
+          if (source.sourceCommit !== sourceCommit || source.sourceTree !== sourceTree ||
+              !Buffer.isBuffer(source.bundle) || source.bundle.length < 1 || source.bundle.length > 67108864 ||
+              source.sizeBytes !== source.bundle.length ||
+              createHash("sha256").update(source.bundle).digest("hex") !== source.bundleSha256 ||
+              typeof source.leaseId !== "string" || !CANONICAL_UUID.test(source.leaseId) ||
+              typeof source.leaseGeneration !== "string" || !/^[1-9][0-9]*$/.test(source.leaseGeneration)) throw new Error();
+          res.writeHead(200, {
+            "Content-Type": "application/octet-stream", "Content-Length": source.sizeBytes,
+            "X-Leaf-Source-Contract": PROJECT_REPOSITORY_SOURCE_BUNDLE_CONTRACT,
+            "X-Leaf-Request-Digest": digest, "X-Leaf-Source-Commit": sourceCommit,
+            "X-Leaf-Source-Tree": sourceTree, "X-Leaf-Bundle-Sha256": source.bundleSha256,
+            "X-Leaf-Lease-Id": source.leaseId, "X-Leaf-Lease-Generation": source.leaseGeneration,
+          });
+          res.end(source.bundle);
+          return;
+        } catch (error) {
+          if (error instanceof ProjectRepositorySourceUnavailable) {
+            return send(res, 503, { error: { code: "source_unavailable", message: "source is unavailable" } });
+          }
+          return send(res, 409, { error: { code: "source_conflict", message: "source export failed" } });
         }
       }
 
