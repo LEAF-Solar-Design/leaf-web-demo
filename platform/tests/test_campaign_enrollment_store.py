@@ -169,6 +169,10 @@ def test_revoke_preserves_accepted_receipt_and_pending_binding(seeded):
     scope, principal = seeded
     row = connect(seeded)
     enrollment.enable_enrollment(*scope, row['enrollment_id'], principal)
+    execution.submit_task(*scope, task_key='ordinary-recovery', idempotency_key='ordinary-recovery',
+        title='Ordinary recovery task', spec='Preserve remote recovery on enrollment revocation',
+        capability='recipe.organize', stages=['implementation', 'build_test'], owned_paths=['recipes/'],
+        source_sha='a' * 40, verify_command='pytest', declared_artifacts=['diff'], depends_on=[])
 
     def bind(attempt):
         return execution.bind_remote_dispatch(*scope, attempt['attempt_id'],
@@ -200,3 +204,133 @@ def test_revoke_preserves_accepted_receipt_and_pending_binding(seeded):
     assert receipt in execution.read_execution(*scope)['receipts']
     with pytest.raises(campaigns.CampaignError):
         enrollment.resolve_worker_enrollment(row['enrollment_id'], 'worker-service')
+
+
+def legacy_task(seeded, *, title=None):
+    import hashlib
+
+    scope, _ = seeded
+    key = 'host-enrollment-' + hashlib.sha256(b'VM-C').hexdigest()
+    contract = enrollment._host_contract('VM-C', legacy=True)
+    if title is not None:
+        contract['title'] = title
+    return execution.submit_task(*scope, task_key=key, idempotency_key=key,
+        kind='capability', capability='campaign.host-enrollment', source_sha='a' * 40,
+        **contract, depends_on=[])
+
+
+def test_fresh_host_contract_is_system_verification(seeded):
+    row = connect(seeded)
+    snapshot = execution.read_execution(*seeded[0])
+    task = snapshot['tasks'][0]
+    assert task['task_id'] == row['capability_link']['task_id']
+    assert task['title'] == 'Verify campaign host enrollment'
+    assert task['stages'] == ['verification'] and task['current_stage'] == 'verification'
+    assert task['owned_paths'] == []
+    assert task['verify_command'] == 'campaign_capabilities.count_invocation'
+    assert task['declared_artifacts'] == [
+        'published-capability-binding', 'two-verified-invocation-receipts']
+    assert execution.claim_task(*seeded[0], worker_id='generic', lease_seconds=30) is None
+    scope = dict(zip(('org', 'project', 'campaign'), map(uuid.UUID, map(str, seeded[0]))))
+    with execution._cursor() as cur:
+        assert execution._claim_task_cursor(
+            cur, scope, worker_id='generic', lease=30, task_key=task['task_key']) is None
+
+
+@pytest.mark.parametrize('already_linked', [False, True])
+def test_exact_untouched_legacy_repairs_once(seeded, monkeypatch, already_linked):
+    before = legacy_task(seeded)
+    if already_linked:
+        with monkeypatch.context() as prior:
+            prior.setattr(enrollment, '_repair_host_task', lambda cur, scope, task, machine: task)
+            original_enrollment = connect(seeded)
+    monkeypatch.delenv('LEAF_SOURCE_SHA')
+    row = connect(seeded)
+    if already_linked:
+        assert row['enrollment_id'] == original_enrollment['enrollment_id']
+        assert row['capability_link']['link_id'] == original_enrollment['capability_link']['link_id']
+    after = execution.read_execution(*seeded[0])['tasks'][0]
+    assert row['capability_link']['task_id'] == before['task_id']
+    for key in ('task_id', 'source_sha', 'idempotency_key', 'created_at', 'task_key', 'parent_task_id'):
+        assert after[key] == before[key]
+    assert after['stages'] == ['verification'] and after['fence'] == 0
+    assert after['payload_fingerprint'] != before['payload_fingerprint']
+    assert connect(seeded)['replayed']
+    repairs = [event for event in execution.read_execution(*seeded[0])['events']
+               if event['payload'].get('old_fingerprint')]
+    assert len(repairs) == 1
+    assert repairs[0]['event_type'] == 'capability_link_recorded'
+    assert repairs[0]['payload']['old_fingerprint'] == before['payload_fingerprint']
+    assert repairs[0]['payload']['new_fingerprint'] == after['payload_fingerprint']
+
+
+@pytest.mark.parametrize('history', ['unexpected', 'attempt', 'receipt', 'binding'])
+def test_legacy_history_or_unexpected_contract_is_preserved(seeded, history):
+    task = legacy_task(seeded, title='Different task' if history == 'unexpected' else None)
+    scope = seeded[0]
+    if history != 'unexpected':
+        # Reproduce a historical pre-producer attempt, without the new generic claimer.
+        with db.connection() as conn:
+            attempt = conn.execute(
+                'INSERT INTO campaign_task_attempts (attempt_id, task_id, org_id, project_id, '
+                'campaign_id, fence, attempt_token_hash, worker_id, stage, deadline_at, status) '
+                "VALUES (%s,%s,%s,%s,%s,1,%s,'historical','implementation',"
+                "NOW()+interval '1 hour','active') RETURNING *",
+                (uuid.uuid4(), uuid.UUID(task['task_id']), *map(uuid.UUID, map(str, scope)),
+                 '1' * 64)).fetchone()
+        if history == 'receipt':
+            params = dict(zip(('org', 'project', 'campaign'), map(uuid.UUID, map(str, scope))))
+            with execution._cursor() as cur:
+                execution._receipt(cur, params, task, attempt,
+                    execution._values('failed', {'reason': 'historical'}, None, None, None, None, False))
+        elif history == 'binding':
+            with db.connection() as conn:
+                conn.execute('UPDATE campaign_tasks SET fence=1 WHERE task_id=%s',
+                             (uuid.UUID(task['task_id']),))
+            execution.bind_remote_dispatch(*scope, str(attempt['attempt_id']), fence=1,
+                machine_id='VM-C', run_id='legacy-run', registration_id='legacy-registration',
+                root_request_id='legacy-root', gateway_project_id='legacy-project',
+                source_ref='a' * 40, packet_digest='b' * 64,
+                budget_class='explicit', reservation_micro_usd=100)
+    before = execution.read_execution(*scope)
+    with pytest.raises(campaigns.CampaignConflict) as exc:
+        connect(seeded)
+    assert exc.value.code == 'reconcile_required'
+    assert execution.read_execution(*scope) == before
+    assert enrollment.list_enrollments(*scope) == []
+
+
+@pytest.mark.parametrize('remote', [False, True])
+def test_generic_success_rejects_historical_host_attempt(seeded, remote):
+    import hashlib
+
+    task = legacy_task(seeded)
+    token = '1' * 64
+    attempt_id = uuid.uuid4()
+    with db.connection() as conn:
+        conn.execute('UPDATE campaign_tasks SET fence=1, status=\'claimed\' WHERE task_id=%s',
+                     (uuid.UUID(task['task_id']),))
+        conn.execute(
+            'INSERT INTO campaign_task_attempts (attempt_id,task_id,org_id,project_id,campaign_id,'
+            'fence,attempt_token_hash,worker_id,stage,deadline_at,status) '
+            "VALUES (%s,%s,%s,%s,%s,1,%s,'historical','implementation',"
+            "NOW()+interval '1 hour','active')",
+            (attempt_id, uuid.UUID(task['task_id']), *map(uuid.UUID, map(str, seeded[0])),
+             hashlib.sha256(token.encode()).hexdigest()))
+    if remote:
+        binding = execution.bind_remote_dispatch(*seeded[0], str(attempt_id), fence=1,
+            machine_id='VM-C', run_id='legacy-run', registration_id='legacy-registration',
+            root_request_id='legacy-root', gateway_project_id='legacy-project',
+            source_ref='a' * 40, packet_digest='b' * 64,
+            budget_class='explicit', reservation_micro_usd=100)
+        execution.record_remote_admission(*seeded[0], str(attempt_id), **{
+            key: binding[key] for key in ('leaf_id', 'run_id', 'submission_digest')})
+        with pytest.raises(campaigns.CampaignError, match='internal lifecycle'):
+            execution.settle_remote_attempt(*seeded[0], str(attempt_id), fence=1,
+                verdict={'run_id': binding['run_id'], 'leaf_id': binding['leaf_id'], 'fencing_token': 1},
+                outcome='succeeded', result={}, artifact_ref='diff:fake')
+    else:
+        with pytest.raises(campaigns.CampaignError, match='internal lifecycle'):
+            execution.settle_attempt(*seeded[0], str(attempt_id), attempt_token=token, fence=1,
+                                     outcome='succeeded', result={}, artifact_ref='diff:fake')
+    assert execution.read_execution(*seeded[0])['receipts'] == []

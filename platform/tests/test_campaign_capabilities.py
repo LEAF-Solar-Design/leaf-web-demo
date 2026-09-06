@@ -271,6 +271,145 @@ def test_closed_job_readback_retains_evidence_without_counting(seeded, publicati
     assert enrollment.list_enrollments(*seeded[0])[0]['capability_link']['counted_job_ids'] == []
 
 
+def lifecycle_snapshot(seeded):
+    return enrollment.execution.read_execution(*seeded[0])
+
+
+def completed_uses(seeded, publication):
+    context = ready(seeded, publication)
+    uses = []
+    for _ in range(2):
+        jid = job(context)
+        capabilities.ensure_operation(jid, context)
+        uses.append((jid, finish(context, jid)))
+    return context, uses
+
+
+def assert_one_verification(seeded, publication, uses):
+    snapshot = lifecycle_snapshot(seeded)
+    assert len(snapshot['tasks']) == 1 and snapshot['tasks'][0]['status'] == 'succeeded'
+    task = snapshot['tasks'][0]
+    assert task['stages'] == ['verification'] and task['fence'] == 1
+    assert len(snapshot['receipts']) == 1
+    receipt = snapshot['receipts'][0]
+    assert receipt['stage'] == 'verification' and receipt['outcome'] == 'succeeded'
+    assert receipt['verified'] is True
+    assert 'exit_code' not in receipt['result'] and 'verify_command' not in receipt['result']
+    observed = receipt['result']['observed']
+    assert all(observed['publication_binding'][key] == value for key, value in publication.items())
+    assert observed['publication_binding']['publication_id'] == publication['change_set_id']
+    assert [(use['job_id'], use['receipt_id'], use['receipt_digest'])
+            for use in observed['invocations']] == [
+                (jid, proof.get('receipt_id', proof['digest']), proof['digest']) for jid, proof in uses]
+    assert all(use['readback_sha256'] == '3' * 64 for use in observed['invocations'])
+    assert [event['event_type'] for event in snapshot['events']].count('stage_succeeded') == 1
+    with db.connection() as conn:
+        attempts = conn.execute('SELECT * FROM campaign_task_attempts WHERE task_id=%s',
+                                (uuid.UUID(task['task_id']),)).fetchall()
+    assert len(attempts) == 1 and attempts[0]['worker_id'] == 'capability-lifecycle'
+    assert attempts[0]['status'] == 'settled' and attempts[0]['settled_at'] is not None
+    assert attempts[0]['stage'] == 'verification' and attempts[0]['fence'] == 1
+    assert len(attempts[0]['attempt_token_hash']) == 64
+    assert 'attempt_token_hash' not in str(snapshot)
+    return receipt
+
+
+def test_second_use_settles_once_under_concurrency_and_reconnect(seeded, publication):
+    _, uses = completed_uses(seeded, publication)
+    count(seeded, *uses[0])
+    first = lifecycle_snapshot(seeded)
+    assert first['tasks'][0]['status'] == 'pending'
+    assert first['tasks'][0]['fence'] == 0 and first['receipts'] == []
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: count(seeded, *uses[1]), range(2)))
+    assert sum(result['replayed'] for result in results) == 1
+    receipt = assert_one_verification(seeded, publication, uses)
+    db.reset_pool()
+    for use in uses:
+        assert count(seeded, *use)['replayed']
+    assert assert_one_verification(seeded, publication, uses) == receipt
+
+
+def test_completed_link_recovers_missing_settlement_from_exact_replay(seeded, publication, monkeypatch):
+    _, uses = completed_uses(seeded, publication)
+    complete = enrollment.execution._complete_host_capability
+    # Reproduce the accepted prior producer: it counted actual proofs but had no settler.
+    monkeypatch.setattr(enrollment.execution, '_complete_host_capability', lambda *args: None)
+    for use in uses:
+        count(seeded, *use)
+    assert lifecycle_snapshot(seeded)['receipts'] == []
+    assert enrollment.list_enrollments(*seeded[0])[0]['capability_link']['state'] == 'completed'
+    monkeypatch.setattr(enrollment.execution, '_complete_host_capability', complete)
+    db.reset_pool()
+    assert count(seeded, *uses[1])['replayed']
+    assert_one_verification(seeded, publication, uses)
+
+
+def test_failed_completion_transaction_leaves_no_partial_second_count(seeded, publication, monkeypatch):
+    _, uses = completed_uses(seeded, publication)
+    count(seeded, *uses[0])
+    original = enrollment.execution._event
+
+    def interrupt(cur, scope, task, event_type, *args, **kwargs):
+        if event_type == 'stage_succeeded':
+            raise RuntimeError('crash before commit')
+        return original(cur, scope, task, event_type, *args, **kwargs)
+
+    monkeypatch.setattr(enrollment.execution, '_event', interrupt)
+    with pytest.raises(campaigns.CampaignUnavailable):
+        count(seeded, *uses[1])
+    assert lifecycle_snapshot(seeded)['receipts'] == []
+    assert lifecycle_snapshot(seeded)['tasks'][0]['fence'] == 0
+    assert enrollment.list_enrollments(*seeded[0])[0]['capability_link']['state'] == 'invoked_once'
+    monkeypatch.setattr(enrollment.execution, '_event', original)
+    count(seeded, *uses[1])
+    assert_one_verification(seeded, publication, uses)
+
+
+@pytest.mark.parametrize('damage', [
+    'failed', 'cancelled', 'closed', 'running', 'missing_identity', 'readback',
+    'foreign_context', 'missing_operation'])
+def test_second_count_rechecks_first_stored_proof(seeded, publication, damage):
+    context, uses = completed_uses(seeded, publication)
+    count(seeded, *uses[0])
+    with db.connection() as conn:
+        if damage in ('cancelled', 'closed'):
+            conn.execute("UPDATE async_jobs SET progress='closed' WHERE job_id=%s", (uses[0][0],))
+        elif damage in ('failed', 'running'):
+            conn.execute('UPDATE async_jobs SET status=%s WHERE job_id=%s', (damage, uses[0][0]))
+        elif damage == 'foreign_context':
+            conn.execute('UPDATE async_jobs SET execution_json=%s WHERE job_id=%s',
+                         (Jsonb({'capability_provenance': {**context, 'link_id': str(uuid.uuid4())}}),
+                          uses[0][0]))
+        elif damage == 'missing_operation':
+            conn.execute('DELETE FROM campaign_host_operations WHERE job_id=%s',
+                         (uuid.UUID(uses[0][0]),))
+        elif damage == 'missing_identity':
+            conn.execute('UPDATE campaign_capability_links SET first_invocation_receipt_id=%s '
+                         'WHERE link_id=%s', ('missing-proof', uuid.UUID(context['link_id'])))
+        else:
+            conn.execute("UPDATE campaign_host_operations SET stage_evidence=stage_evidence - 'readback' "
+                         'WHERE job_id=%s', (uuid.UUID(uses[0][0]),))
+    with pytest.raises(campaigns.CampaignConflict):
+        count(seeded, *uses[1])
+    assert lifecycle_snapshot(seeded)['receipts'] == []
+    assert lifecycle_snapshot(seeded)['tasks'][0]['status'] == 'pending'
+
+
+def test_link_state_alone_cannot_complete_task(seeded, publication):
+    context = ready(seeded, publication)
+    with db.connection() as conn:
+        conn.execute("UPDATE campaign_capability_links SET state='completed', "
+                     'first_invocation_receipt_id=%s, second_invocation_receipt_id=%s WHERE link_id=%s',
+                     ('absent-first', 'absent-second', uuid.UUID(context['link_id'])))
+    scope = dict(zip(('org', 'project', 'campaign'), map(uuid.UUID, map(str, seeded[0]))))
+    with pytest.raises(campaigns.CampaignConflict):
+        with enrollment.execution._cursor() as cur:
+            enrollment.execution._complete_host_capability(cur, scope, seeded[2])
+    assert lifecycle_snapshot(seeded)['receipts'] == []
+
+
+
 def test_two_terminal_producer_receipts_count_distinct_jobs(seeded, publication):
     context = ready(seeded, publication)
     first = job(context)

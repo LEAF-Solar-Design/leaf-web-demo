@@ -89,6 +89,7 @@ def _load(cur, scope, enrollment_id, *, enabled=True, live=True):
     project = cur.fetchone()
     if project is None or (live and (project['status'] != 'active' or project['deleted_at'] is not None)):
         _conflict()
+    enrollment._host_task(cur, scope, enrollment_id)
     row = enrollment._enrollment(cur, scope, enrollment_id)
     link = enrollment._link(cur, scope, row['enrollment_id'])
     if enabled and row['state'] != 'enabled':
@@ -449,6 +450,7 @@ def count_invocation(org_id, project_id, campaign_id, enrollment_id, *, job_id, 
         if invocation['counted_at'] is not None:
             if invocation['counted_receipt_digest'] != receipt['digest'] or invocation['counted_receipt_id'] != identity:
                 _conflict()
+            enrollment.execution._complete_host_capability(cur, scope, row['enrollment_id'])
             return enrollment._public(row, enrollment._link(cur, scope, row['enrollment_id']), True)
         cur.execute('SELECT job_id FROM campaign_capability_invocations '
                     'WHERE link_id=%s AND counted_receipt_id=%s', (link['link_id'], identity))
@@ -463,6 +465,7 @@ def count_invocation(org_id, project_id, campaign_id, enrollment_id, *, job_id, 
             cur.execute('UPDATE campaign_capability_links SET ' + column + '=%s, state=%s '
                         'WHERE link_id=%s', (identity, 'invoked_once' if first else 'completed', link['link_id']))
         link = enrollment._link(cur, scope, row['enrollment_id'])
+        enrollment.execution._complete_host_capability(cur, scope, row['enrollment_id'])
         _event(cur, scope, _task(cur, scope, link['task_id']), 'capability_link_recorded',
                payload={'state': link['state'], 'job_id': str(job_id)})
         return enrollment._public(row, link)
