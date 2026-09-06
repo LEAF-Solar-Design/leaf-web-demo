@@ -7,6 +7,24 @@ on:
       - 'contract/customization.v1.schema.json'
       - 'da/store.py'
       - 'platform/authority-inventory.json'
+      - 'platform/campaign_capabilities.py'
+      - 'platform/campaign_enrollment.py'
+      - 'platform/campaign_execution.py'
+      - 'platform/campaigns.py'
+      - 'platform/tests/test_campaign_capabilities.py'
+      - 'server/campaign_capability_api.py'
+      - 'server/campaign_capability_job.py'
+      - 'server/campaign_bridge.py'
+      - 'server/routers/campaigns.py'
+      - 'server/routers/jobs.py'
+      - 'server/build_receipts.py'
+      - 'server/tool_loader.py'
+      - 'server/tool_validate.py'
+      - 'server/deps.py'
+      - 'server/tests/test_campaign_capability_job.py'
+      - 'server/tests/test_campaign_capability_job_access.py'
+      - 'server/tests/test_campaign_capability_api.py'
+      - 'server/tests/test_campaign_capability_api_postgres.py'
       - 'platform/db.py'
       # The two explicit entries are pinned by
       # server/tests/test_postgres_container_wiring.py so nobody can quietly
@@ -349,6 +367,76 @@ jobs:
             echo 'A skipped suite reports green and proves nothing. That is the bug this step exists for.'
             exit 1
           fi
+
+      - name: Run host capability platform PostgreSQL suite
+        working-directory: server
+        run: |
+          report=$(mktemp "$RUNNER_TEMP/host-capability-platform.XXXXXX.xml")
+          if python -m pytest -q -rs ../platform/tests/test_campaign_capabilities.py --junitxml="$report" >"$report.log" 2>&1; then
+            tail -5 "$report.log"
+          else
+            pytest_exit=$?
+            tail -100 "$report.log"
+            exit "$pytest_exit"
+          fi
+          python - "$report" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          cases = list(root.iter("testcase"))
+          if not cases:
+              raise SystemExit("FAIL: no host capability testcases")
+          if any(list(root.iter(tag)) for tag in ("skipped", "error", "failure")):
+              raise SystemExit("FAIL: host capability report contains skipped/error/failure nodes")
+          module = "test_campaign_capabilities"
+          if any(module not in case.get("classname", "").split(".") for case in cases):
+              raise SystemExit("FAIL: unexpected host capability module identity")
+          required = {
+              "test_host_grant_exact_authority_read_preserves_state",
+              "test_completed_link_recovers_missing_settlement_from_exact_replay",
+              "test_link_state_alone_cannot_complete_task",
+          }
+          observed = {case.get("name", "").split("[", 1)[0] for case in cases}
+          missing = required - observed
+          if missing:
+              raise SystemExit(f"FAIL: missing host capability cases: {sorted(missing)}")
+          print(f"Host capability PostgreSQL proof: {len(cases)} cases, no skips")
+          PY
+
+      - name: Run host capability API PostgreSQL suite
+        working-directory: server
+        run: |
+          report=$(mktemp "$RUNNER_TEMP/host-capability-api.XXXXXX.xml")
+          if python -m pytest -q -rs tests/test_campaign_capability_api_postgres.py --junitxml="$report" >"$report.log" 2>&1; then
+            tail -5 "$report.log"
+          else
+            pytest_exit=$?
+            tail -100 "$report.log"
+            exit "$pytest_exit"
+          fi
+          python - "$report" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          cases = list(root.iter("testcase"))
+          if not cases:
+              raise SystemExit("FAIL: no host capability testcases")
+          if any(list(root.iter(tag)) for tag in ("skipped", "error", "failure")):
+              raise SystemExit("FAIL: host capability report contains skipped/error/failure nodes")
+          module = "test_campaign_capability_api_postgres"
+          if any(module not in case.get("classname", "").split(".") for case in cases):
+              raise SystemExit("FAIL: unexpected host capability module identity")
+          required = {
+              "test_real_postgres_capability_api_two_uses_and_unknown_outcome",
+          }
+          observed = {case.get("name", "").split("[", 1)[0] for case in cases}
+          missing = required - observed
+          if missing:
+              raise SystemExit(f"FAIL: missing host capability cases: {sorted(missing)}")
+          print(f"Host capability PostgreSQL proof: {len(cases)} cases, no skips")
+          PY
 
       - name: Run customization authority PostgreSQL tests
         working-directory: server
