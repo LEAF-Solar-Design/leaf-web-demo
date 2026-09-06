@@ -1582,6 +1582,11 @@ def build_suites() -> List[Suite]:
         Suite("harness-vitest", "harness npm test (vitest)", "vitest", HARNESS,
               [_npm(), "test"], 317,
               allowed_vitest_skips=(
+                  # Actual producer: project-lifecycle-postgres.yml,
+                  # Run canonical project source PostgreSQL tests. These
+                  # hermetic exemptions require that PostgreSQL job to pass.
+                  ("test/projectRepositorySourceInitialize.test.ts", 5),
+                  ("test/projectRepositorySourceExport.test.ts", 4),
                   ("test/tenantRepoLease.test.ts", 4),
                   ("test/harnessSchema.pg.test.ts", 1),
                   ("test/pgSessionStore.contract.test.ts", 5),
