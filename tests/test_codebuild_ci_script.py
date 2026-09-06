@@ -16,6 +16,7 @@ BASH = shutil.which("bash")
 
 class TestCodebuildCiScript(unittest.TestCase):
     def test_workflow_commands(self):
+        """Pin CodeBuild's deliberate --with-deps deviation from the workflow."""
         script = CI_PATH.read_text(encoding="utf-8")
         self.assertTrue(script.startswith("#!/usr/bin/env bash\n"))
         commands = [line.strip() for line in script.splitlines()
@@ -38,7 +39,8 @@ class TestCodebuildCiScript(unittest.TestCase):
         self.assertTrue(requirements, "No workflow requirement lines found")
         installed = re.findall(r"^\s*-r\s+(\S+)", script, re.MULTILINE)
         self.assertEqual(installed, requirements)
-        self.assertRegex(script, r"playwright install[^\n]*chromium")
+        self.assertEqual(script.splitlines().count("npx playwright install --with-deps chromium"), 1)
+        self.assertRegex(workflow, r"(?m)^[ \t]*(?:run:[ \t]*)?npx playwright install chromium\b[ \t]*$")
         self.assertIn("check_license_fence.py --self-test", script)
         self.assertIn("check_license_fence.py .", script)
 

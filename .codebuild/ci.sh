@@ -60,6 +60,8 @@ echo "--- 4/6 Reuse web dependencies"
 # No intervening step changes its dependencies, so reuse that npm ci.
 cd "$CODEBUILD_SRC_DIR/web"
 echo "--- 5/6 Install Chromium for browser proofs"
+# The workflow uses `npx playwright install chromium`; --with-deps is added here on purpose
+# because standard:7.0 lacks Chromium's OS libraries and the build runs as root.
 npx playwright install --with-deps chromium
 cd "$CODEBUILD_SRC_DIR"
 echo "--- 6/6 Run unsharded test gate and print scoreboard"
