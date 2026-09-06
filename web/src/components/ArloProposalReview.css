@@ -1,0 +1,13 @@
+.arlo-review { min-width: 0; }
+.arlo-review h4 { margin: 1rem 0 .5rem; }
+.arlo-review label { display: block; margin: .75rem 0; }
+.arlo-review select, .arlo-review textarea { display: block; width: 100%; max-width: 100%; margin-top: .4rem; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 4px; padding: .5rem; font: inherit; }
+.arlo-review textarea { min-height: 70px; resize: vertical; }
+.arlo-geometry { margin: 1rem 0; }
+.arlo-geometry svg { display: block; width: 100%; max-height: 280px; }
+.arlo-geometry figcaption { font-size: .85em; }
+.arlo-actions { display: flex; gap: .6rem; flex-wrap: wrap; }
+.arlo-review pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8em; }
+.arlo-review details { margin-top: 1rem; }
+.arlo-review summary { cursor: pointer; }
+.arlo-review th, .arlo-review td { overflow-wrap: anywhere; }

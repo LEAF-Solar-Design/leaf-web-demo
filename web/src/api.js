@@ -705,6 +705,14 @@ export async function listBuilds(tenantId = TENANT, limit = 20) {
 // renders). Complete -> the stored envelope verbatim; failed (or a
 // complete-without-result edge) -> a §3-shaped error envelope.
 export function recordToEnvelope(rec) {
+  if (rec?.status === 'complete' && rec.result?.solver === 'arlo-design') {
+    return {
+      ok: true, tool: 'arlo-design', version: rec.result.solver_revision,
+      result: rec.result, overlay: null, timing_ms: rec.elapsed_ms ?? null, cost: null,
+      job_context: { job_id: rec.job_id, org_id: rec.org_id, project_id: rec.project_id,
+        input_version_id: rec.input_version_id },
+    }
+  }
   if (rec && rec.status === 'complete' && rec.result) return rec.result
   const err = (rec && rec.error) || { error_code: 'INTERNAL', message: 'job failed', retryable: false }
   return {
@@ -718,6 +726,18 @@ export function recordToEnvelope(rec) {
     error: err,
     degraded_mode: !!(rec && rec.degraded_mode),
   }
+}
+
+export async function getArloReviews(context) {
+  return http(`/api/projects/${encodeURIComponent(context.project_id)}/arlo-jobs/${encodeURIComponent(context.job_id)}/reviews`,
+    { headers: orgHeaders(context.org_id) })
+}
+
+export async function saveArloReview(context, body, idempotencyKey) {
+  return http(`/api/projects/${encodeURIComponent(context.project_id)}/arlo-jobs/${encodeURIComponent(context.job_id)}/reviews`, {
+    method: 'POST', headers: { ...orgHeaders(context.org_id), 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
+    body: JSON.stringify(body),
+  })
 }
 
 // Subscribe to a job until it reaches a terminal state, then resolve with its
