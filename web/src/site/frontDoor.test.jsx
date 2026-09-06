@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   demand: vi.fn(),
   assign: vi.fn(),
   replace: vi.fn(),
+  hrefSet: vi.fn(),
   callback: vi.fn(),
 }))
 
@@ -73,7 +74,8 @@ async function mountFrontDoor(path = '/', hostname = 'platform.leafdesign.ai') {
     search: url.search,
     hostname: url.hostname,
     origin: url.origin,
-    href: url.href,
+    get href() { return url.href },
+    set href(value) { mocks.hrefSet(value) },
     assign: mocks.assign,
     replace: mocks.replace,
   }
@@ -97,21 +99,23 @@ describe('Leaf workspace guest front door', () => {
     await mountFrontDoor('/', hostname)
     expect(document.querySelector('.stage-root').getAttribute('data-scene')).toBe('site')
     expect(mocks.replace).not.toHaveBeenCalled()
-    for (const name of ['Try Branch, no login required', 'Open workspace', 'Solve']) {
+    for (const name of ['Try Branch — no install', 'Open workspace', 'Solve']) {
       fireEvent.click(screen.getByRole('button', { name }))
     }
-    expect(mocks.assign.mock.calls).toEqual([
-      ['/try?demo=1'], ['/try?demo=1'], ['/try?demo=1'],
+    expect(mocks.navigate.mock.calls).toEqual([
+      ['/try'], ['/try'], ['/try'],
     ])
-    expect(mocks.navigate).not.toHaveBeenCalled()
+    expect(mocks.assign).not.toHaveBeenCalled()
+    expect(mocks.hrefSet).not.toHaveBeenCalled()
     expect(mocks.demand).not.toHaveBeenCalled()
   })
 
   it('uses the same guest target for the T shortcut', async () => {
     await mountFrontDoor()
     fireEvent.keyDown(document.body, { key: 't' })
-    expect(mocks.assign).toHaveBeenCalledWith('/try?demo=1')
-    expect(mocks.navigate).not.toHaveBeenCalled()
+    expect(mocks.navigate).toHaveBeenCalledWith('/try')
+    expect(mocks.assign).not.toHaveBeenCalled()
+    expect(mocks.hrefSet).not.toHaveBeenCalled()
   })
 
   it('boots the guest target into the tool scene with public demo enabled', async () => {
@@ -127,7 +131,7 @@ describe('Leaf workspace guest front door', () => {
   it('keeps signed-in workspace buttons and the shortcut on the existing /try navigation', async () => {
     mocks.signedIn.mockReturnValue(true)
     await mountFrontDoor()
-    for (const name of ['Try Branch, no login required', 'Open workspace', 'Solve']) {
+    for (const name of ['Try Branch — no install', 'Open workspace', 'Solve']) {
       fireEvent.click(screen.getByRole('button', { name }))
     }
     fireEvent.keyDown(document.body, { key: 'T' })
@@ -163,8 +167,8 @@ describe('Leaf workspace guest front door', () => {
     await screen.findByRole('alert')
     expect(screen.queryByText('Interest saved. No payment required.')).toBeNull()
     expect(screen.getByRole('button', { name: 'Register interest' }).disabled).toBe(false)
-    fireEvent.click(screen.getByRole('button', { name: 'Try Branch, no login required' }))
-    expect(mocks.assign).toHaveBeenCalledWith('/try?demo=1')
+    fireEvent.click(screen.getByRole('button', { name: 'Try Branch — no install' }))
+    expect(mocks.navigate).toHaveBeenCalledWith('/try')
   })
 
   it('contains no handler assigning the visitor to leafautomation.ai or a payment funnel', () => {
