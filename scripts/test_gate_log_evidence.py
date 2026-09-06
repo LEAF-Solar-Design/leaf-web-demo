@@ -132,3 +132,71 @@ def test_provider_identity_failures(mutation):
     if mutation == "aggregate": jobs[-1]["steps"][0]["name"] = "checkout"
     with pytest.raises(ValueError):
         recovery.recover(client, "catalog-fixture", partitions)
+
+
+def test_helper_opt_in_no_real_process(monkeypatch):
+    monkeypatch.setattr(recovery.subprocess, "run", lambda *a, **k: pytest.fail("helper invoked without opt-in"))
+    with pytest.raises(ValueError, match="opt-in"):
+        recovery.helper_client(Path("."))
+
+
+def test_helper_memory_only_fixed_request(monkeypatch, capsys):
+    calls = []
+    token = "synthetic-qualification-secret"
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(returncode=0, stdout=f"username=fixture\npassword={token}\n".encode(), stderr=b"")
+    monkeypatch.setattr(recovery.subprocess, "run", run)
+    client = recovery.helper_client(Path("."), opted_in=True)
+    assert client.token == token
+    assert len(calls) == 1
+    command, options = calls[0]
+    assert command == ["/codebuild/readonly/bin/git-credential-helper", "get"]
+    assert options["input"] == b"protocol=https\nhost=github.com\npath=LEAF-Solar-Design/leaf-web-demo.git\n\n"
+    assert "env" not in options
+    assert token not in repr(calls)
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("kind", ["absent", "timeout", "refused", "missing", "duplicate", "foreign", "invalid"])
+def test_helper_failure_redacts_output(monkeypatch, capsys, kind):
+    secret = "synthetic-never-print"
+    def run(*args, **kwargs):
+        if kind == "absent": raise OSError(secret)
+        if kind == "timeout": raise recovery.subprocess.TimeoutExpired(secret, 30, output=secret)
+        payload = f"username=fixture\npassword={secret}\n"
+        if kind == "missing": payload = "username=fixture\n"
+        if kind == "duplicate": payload += f"password={secret}\n"
+        if kind == "foreign": payload += "host=foreign.example\n"
+        if kind == "invalid": payload += secret + "\n"
+        return SimpleNamespace(returncode=1 if kind == "refused" else 0, stdout=payload.encode(), stderr=secret.encode())
+    monkeypatch.setattr(recovery.subprocess, "run", run)
+    with pytest.raises(ValueError) as caught:
+        recovery.helper_client(Path("."), opted_in=True)
+    assert secret not in str(caught.value)
+    assert caught.value.__suppress_context__ or kind == "refused"
+    assert capsys.readouterr() == ("", "")
+
+
+def test_helper_http403_fixed_audience_and_redaction():
+    secret = "synthetic-api-secret"
+    client = recovery.GitHub(secret)
+    seen = []
+    class Refused:
+        def open(self, request, **kwargs):
+            seen.append(request)
+            raise recovery.urllib.error.HTTPError("https://api.github.com/" + secret, 403, secret, {}, None)
+    client.opener = Refused()
+    with pytest.raises(ValueError, match="HTTP 403") as caught:
+        client.get(f"repos/{recovery.REPO}/actions/jobs/101553634615/logs", raw=True)
+    assert secret not in str(caught.value)
+    assert caught.value.__suppress_context__
+    assert seen[0].host == "api.github.com"
+    assert seen[0].get_header("Authorization") == "Bearer " + secret
+
+
+def test_helper_redirect_strips_auth():
+    request = urllib.request.Request("https://api.github.com/anything", headers={"Authorization": "Bearer synthetic"})
+    redirected = recovery.LogRedirect().redirect_request(request, None, 302, "", {},
+        "https://fixture.blob.core.windows.net/log?sig=synthetic")
+    assert redirected.get_header("Authorization") is None

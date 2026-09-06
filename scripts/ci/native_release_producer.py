@@ -509,9 +509,26 @@ def main() -> int:
             adapter = load_recovery()
             if type(recovery) is not int or recovery != adapter.RUN:
                 raise ValueError("recovery run outside frozen scope")
-            client = adapter.GitHub(env.get("LEAF_RECOVERY_GITHUB_TOKEN"))
+            helper = env.get("LEAF_RECOVERY_GIT_HELPER") == "1"
+            client = (adapter.helper_client(root, opted_in=True) if helper
+                      else adapter.GitHub(env.get("LEAF_RECOVERY_GITHUB_TOKEN")))
             # Never pass the provider token into focused test subprocesses.
             env.pop("LEAF_RECOVERY_GITHUB_TOKEN", None)
+            if env.get("LEAF_RECOVERY_QUALIFY_ONLY") == "1":
+                if not helper:
+                    raise ValueError("qualification requires the existing CodeBuild helper")
+                binding = adapter.projection(root)
+                fingerprint, partitions = adapter.catalog(root)
+                evidence = adapter.recover(client, fingerprint, partitions)
+                args.output.mkdir(parents=True, exist_ok=False)
+                # Deliberately incompatible with the publisher's gate member.
+                (args.output / "custody-qualification.json").write_text(json.dumps({
+                    "schema": "leaf.github-helper-qualification.v1", "binding": binding,
+                    "run_id": evidence["run_id"], "run_attempt": evidence["run_attempt"],
+                    "authenticated_log_shards": len(evidence["shards"]),
+                    "aggregate_conclusion": evidence["aggregate_conclusion"],
+                    "release_admissible": False}, sort_keys=True), encoding="utf-8")
+                return 0
             document = adapter.produce(root, client, env)
             args.output.mkdir(parents=True, exist_ok=False)
             # Transport filename is fixed by the external archive contract.

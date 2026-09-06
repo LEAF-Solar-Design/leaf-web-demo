@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import urllib.request
+import urllib.error
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -32,6 +33,40 @@ FOCUSED = ("scripts/test_gate_log_evidence.py", "scripts/test_native_release_pro
 def require(condition, message):
     if not condition:
         raise ValueError(message)
+
+
+def helper_client(root, *, opted_in=False):
+    """Only the provider's read-only helper, never a desktop credential chain.
+
+    The fixed helper layout is qualified at runtime, not assumed available.
+    No caller-selected executable or credential store is consulted.
+    """
+    require(opted_in is True, "CodeBuild helper transport requires explicit opt-in")
+    query = f"protocol=https\nhost=github.com\npath={REPO}.git\n\n".encode()
+    try:
+        result = subprocess.run(["/codebuild/readonly/bin/git-credential-helper", "get"],
+            input=query, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError):
+        raise ValueError("CodeBuild helper absent or unavailable") from None
+    require(result.returncode == 0, "CodeBuild helper refused credentials")
+    require(len(result.stdout) <= 16384, "CodeBuild helper response exceeds bound")
+    try:
+        fields = {}
+        for line in result.stdout.decode("utf-8", errors="strict").splitlines():
+            if not line:
+                continue
+            key, value = line.split("=", 1)
+            require(key not in fields, "duplicate helper field")
+            fields[key] = value
+        require(set(fields) <= {"protocol", "host", "path", "username", "password"},
+                "unrecognized helper field")
+        for key, expected in (("protocol", "https"), ("host", "github.com"), ("path", REPO + ".git")):
+            require(fields.get(key, expected) == expected, "helper returned foreign credential scope")
+        require(bool(fields.get("username")) and bool(fields.get("password")), "helper returned incomplete credentials")
+        return GitHub(fields["password"])
+    except (ValueError, UnicodeError):
+        raise ValueError("CodeBuild helper returned invalid credentials") from None
 
 
 class LogRedirect(urllib.request.HTTPRedirectHandler):
@@ -59,8 +94,14 @@ class GitHub:
         request = urllib.request.Request("https://api.github.com/" + path, headers={
             "Authorization": "Bearer " + self.token,
             "Accept": "application/vnd.github+json", "User-Agent": "leaf-gate-recovery"})
-        with self.opener.open(request, timeout=45) as response:
-            data = response.read(8 * 1024 * 1024 + 1)
+        try:
+            with self.opener.open(request, timeout=45) as response:
+                data = response.read(8 * 1024 * 1024 + 1)
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+            raise ValueError(f"GitHub evidence access refused (HTTP {status})") from None
+        except (urllib.error.URLError, OSError):
+            raise ValueError("GitHub evidence transport unavailable") from None
         require(len(data) <= 8 * 1024 * 1024, "provider response exceeds bound")
         return data if raw else json.loads(data)
 

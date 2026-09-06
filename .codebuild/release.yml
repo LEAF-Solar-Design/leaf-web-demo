@@ -6,6 +6,7 @@ version: 0.2
 # arbitrary PR builds on the publishing role. Provider timeout caps both jobs.
 env:
   shell: bash
+  git-credential-helper: yes
   variables:
     PYTHONSAFEPATH: "1"
     PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
@@ -27,7 +28,9 @@ phases:
         if [ "$LEAF_NATIVE_MODE" = gate ] && [ -n "$recovery_run" ]; then
           # Recovery fetches existing provider logs and runs focused code checks.
           # It does not reinstall or rerun the historical eight-shard suite.
-          /tmp/leaf-native-venv/bin/python -m pip install pytest
+          if [ "${LEAF_RECOVERY_QUALIFY_ONLY:-}" != 1 ]; then
+            /tmp/leaf-native-venv/bin/python -m pip install pytest
+          fi
         elif [ "$LEAF_NATIVE_MODE" = gate ]; then
           npm install -g npm@10
           /tmp/leaf-native-venv/bin/python -m pip install \
