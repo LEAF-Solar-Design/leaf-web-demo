@@ -2091,7 +2091,13 @@ export default function ToolCast({
         <div className="tc-rail-tabs" role="tablist" aria-label="Operation panels" onKeyDown={moveRovingTab}>
           <button id="operations-tab-execution" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'execution' ? 0 : -1} aria-selected={rightView === 'execution'} onClick={() => setRightView('execution')}>Execution</button>
           <button id="operations-tab-jobs" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'jobs' ? 0 : -1} aria-selected={rightView === 'jobs'} disabled={!sessionReady} onClick={() => setRightView('jobs')}>Jobs <span>{visibleJobCount}</span></button>
-          {versionsMounted && <button id="operations-tab-versions" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'versions' ? 0 : -1} aria-selected={rightView === 'versions'} disabled={!canOperate} onClick={() => { setRightView('versions'); drawing.actions.loadHistory() }}>Versions <span>{drawing.latest ?? 0}</span></button>}
+          {/* Ruling 1 (guest-first sandbox): the Versions tab follows the View
+              tab's drawing-only gate (`hasDrawing`), not `canOperate`, so a
+              signed-out guest with an uploaded drawing can open version
+              history under guest authority. Every write behind this tab
+              (restore eligibility, checkout capability) stays gated on
+              `sessionReady` separately, see `eligible` below. */}
+          {versionsMounted && <button id="operations-tab-versions" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'versions' ? 0 : -1} aria-selected={rightView === 'versions'} disabled={!hasDrawing} onClick={() => { setRightView('versions'); drawing.actions.loadHistory() }}>Versions <span>{drawing.latest ?? 0}</span></button>}
           <button id="operations-tab-trust" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'trust' ? 0 : -1} aria-selected={rightView === 'trust'} disabled={!sessionReady} onClick={() => { setRightView('trust'); platform.actions.refreshAll() }}>Trust</button>
           <button id="operations-tab-view" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'view' ? 0 : -1} aria-selected={rightView === 'view'} disabled={!hasDrawing} onClick={() => setRightView('view')}>View</button>
         </div>
