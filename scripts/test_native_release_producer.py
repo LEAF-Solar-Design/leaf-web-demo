@@ -275,7 +275,7 @@ def test_composed_release_verifies_gate_before_all_five_builds(tmp_path, monkeyp
             raise ValueError("gate failed")
         return {}, b"provider archive unit fixture"
     contract = SimpleNamespace(NativeRelease=SimpleNamespace, read_native_release=gate_read,
-                               _members=lambda *args, **kwargs: {"gate-proof.json": b"canonical proof unit fixture"})
+                               _members=lambda *args, **kwargs: {"gate-proof.json": b'{"schema":2}'})
     monkeypatch.setattr(producer, "admit_checkout", lambda *args: events.append("admit"))
     monkeypatch.setattr(producer, "runtime_identity", lambda *args: native_identity("leaf-studio-native-release"))
     monkeypatch.setattr(producer, "load_evidence_contract", lambda *args: contract)
@@ -305,3 +305,22 @@ def test_composed_release_verifies_gate_before_all_five_builds(tmp_path, monkeyp
         manifest = json.loads((output / "staging-supply-set.json").read_bytes())
         assert manifest["gate"]["producer"] == gate_identity
         assert manifest["producer"]["project_arn"].endswith("/leaf-studio-native-release")
+
+
+def test_distinct_recovery_proof_dispatch(monkeypatch, tmp_path):
+    seen = []
+    monkeypatch.setattr(producer, "load_recovery", lambda: SimpleNamespace(
+        verify_bound=lambda document, root: seen.append((document, root))))
+    monkeypatch.setattr(producer.subprocess, "run", lambda *a, **k: pytest.fail("must not rerun canonical tests"))
+    proof = {"schema": "leaf.github-log-recovery.v1", "aggregate_conclusion": "failure"}
+    producer.verify_admitted_gate(json.dumps(proof).encode(), tmp_path, tmp_path / "gate-proof.json", "a" * 40)
+    assert seen == [(proof, tmp_path)]
+
+
+def test_recovery_binding_failure_prevents_release_progress(monkeypatch, tmp_path):
+    def reject(*args):
+        raise ValueError("recovery source projection differs")
+    monkeypatch.setattr(producer, "load_recovery", lambda: SimpleNamespace(verify_bound=reject))
+    with pytest.raises(ValueError, match="projection"):
+        producer.verify_admitted_gate(b'{"schema":"leaf.github-log-recovery.v1"}', tmp_path,
+                                     tmp_path / "gate-proof.json", "a" * 40)

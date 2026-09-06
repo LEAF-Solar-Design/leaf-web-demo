@@ -416,6 +416,24 @@ def load_evidence_contract(root: Path, revision: str):
     return module
 
 
+def load_recovery():
+    path = Path(__file__).with_name("recover_gate_log_evidence.py")
+    spec = importlib.util.spec_from_file_location("native_log_recovery", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def verify_admitted_gate(proof: bytes, root: Path, proof_path: Path, tree: str):
+    """Caller MUST authenticate the fixed native gate archive before this call."""
+    document = json.loads(proof)
+    if document.get("schema") == "leaf.github-log-recovery.v1":
+        load_recovery().verify_bound(document, root)
+    else:
+        subprocess.run([sys.executable, "scripts/run-all-gates.py", "--verify-gate-proof",
+                        str(proof_path), "--expect-tree", tree], cwd=root, check=True, timeout=120)
+
+
 def produce_release(root: Path, output: Path, request: dict, env: dict, codebuild, s3) -> dict:
     """Execute the complete admitted producer, without provisioning or deployment."""
     if set(request) != {"source_revision", "source_tree", "gate", "contract_revision"}:
@@ -436,8 +454,7 @@ def produce_release(root: Path, output: Path, request: dict, env: dict, codebuil
     work = Path(tempfile.mkdtemp(prefix="leaf-native-release-"))
     proof_path = work / "gate-proof.json"
     proof_path.write_bytes(proof)
-    subprocess.run([sys.executable, "scripts/run-all-gates.py", "--verify-gate-proof", str(proof_path), "--expect-tree", tree],
-                   cwd=root, check=True, timeout=120)
+    verify_admitted_gate(proof, root, proof_path, tree)
     pins = json.loads((root / "deploy/autofill-solver-sources.json").read_text())
     if not isinstance(pins, dict) or len(pins) != 1:
         raise ValueError("release requires one reviewed solver pin")
@@ -483,10 +500,24 @@ def main() -> int:
     if args.mode == "release":
         produce_release(root, args.output, request, env, codebuild, boto3.client("s3", region_name="us-east-1"))
     else:
-        if set(request) != {"source_revision", "source_tree"}:
+        recovery = request.get("recovery_run")
+        if set(request) != {"source_revision", "source_tree"} | ({"recovery_run"} if recovery is not None else set()):
             raise ValueError("gate request fields differ")
         admit_checkout(root, request["source_revision"], request["source_tree"])
         runtime_identity("gate", request["source_revision"], env, codebuild)
+        if recovery is not None:
+            adapter = load_recovery()
+            if type(recovery) is not int or recovery != adapter.RUN:
+                raise ValueError("recovery run outside frozen scope")
+            client = adapter.GitHub(env.get("LEAF_RECOVERY_GITHUB_TOKEN"))
+            # Never pass the provider token into focused test subprocesses.
+            env.pop("LEAF_RECOVERY_GITHUB_TOKEN", None)
+            document = adapter.produce(root, client, env)
+            args.output.mkdir(parents=True, exist_ok=False)
+            # Transport filename is fixed by the external archive contract.
+            # Payload schema explicitly says log-derived, not canonical proof.
+            (args.output / "gate-proof.json").write_text(json.dumps(document, sort_keys=True), encoding="utf-8")
+            return 0
         work = Path(tempfile.mkdtemp(prefix="leaf-native-gate-"))
         env.pop("DATABASE_URL", None)
         env.pop("LEAF_CONTAINER_SMOKE", None)

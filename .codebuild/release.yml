@@ -23,7 +23,12 @@ phases:
         /tmp/leaf-native-venv/bin/python scripts/ci/native_release_producer.py "$LEAF_NATIVE_MODE" --output "$CODEBUILD_SRC_DIR/native-artifacts" --admit-only
       - |
         set -euo pipefail
-        if [ "$LEAF_NATIVE_MODE" = gate ]; then
+        recovery_run=$(/tmp/leaf-native-venv/bin/python -c 'import os,json,base64; print(json.loads(base64.b64decode(os.environ["LEAF_NATIVE_REQUEST_B64"])).get("recovery_run", ""))')
+        if [ "$LEAF_NATIVE_MODE" = gate ] && [ -n "$recovery_run" ]; then
+          # Recovery fetches existing provider logs and runs focused code checks.
+          # It does not reinstall or rerun the historical eight-shard suite.
+          /tmp/leaf-native-venv/bin/python -m pip install pytest
+        elif [ "$LEAF_NATIVE_MODE" = gate ]; then
           npm install -g npm@10
           /tmp/leaf-native-venv/bin/python -m pip install \
             -r server/requirements.txt -r server/requirements-auth.txt \
