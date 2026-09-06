@@ -43,6 +43,8 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer as createHttpServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { AuthorLoop, AuthorLoopError } from "./agent/authorLoop.js";
+import { CAMPAIGN_SOURCE_BODY_LIMIT, dispatchCampaignSource, type CampaignSourceService } from "./agent/campaignSourceIntegration.js";
+import { ProjectRepositoryEditCoordinator, ProjectRepositoryEditSettlementUnavailable } from "./agent/projectRepositoryEditCoordinator.js";
 import { redactTokens } from "./redact.js";
 import { GrantPoolUnavailableError, GrantRequiredError } from "./ports/impl/oauthGrantProvider.js";
 import { classifyRoute } from "./routing.js";
@@ -354,6 +356,7 @@ function readJsonBody(
   maxBytes: number = MAX_BODY_BYTES,
   strictUtf8: boolean = false,
   uniqueFlatStringKeys: boolean = false,
+  uniqueNestedKeys: boolean = false,
 ): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -414,6 +417,21 @@ function readJsonBody(
       if (!raw) return resolve({});
       try {
         const body: unknown = JSON.parse(raw);
+        if (uniqueNestedKeys) {
+          const stack: (Set<string> | null)[] = [];
+          for (const token of raw.matchAll(/"(?:[^"\\]|\\.)*"|[{}\[\]]/g)) {
+            const value = token[0];
+            if (value === "{") stack.push(new Set());
+            else if (value === "[") stack.push(null);
+            else if (value === "}" || value === "]") stack.pop();
+            else if (/^\s*:/.test(raw.slice(token.index! + value.length))) {
+              const keys = stack[stack.length - 1];
+              const key = JSON.parse(value) as string;
+              if (!keys || keys.has(key)) throw new Error("duplicate JSON key");
+              keys.add(key);
+            }
+          }
+        }
         if (uniqueFlatStringKeys) {
           if (!isRecord(body) || Object.values(body).some(value => typeof value !== "string")) {
             throw new Error("expected a flat string object");
@@ -734,6 +752,7 @@ export interface Harness {
  */
 export function createHarness(ports: HarnessPorts, opts?: {
   auth?: HarnessAuthConfig;
+  projectRepositoryEdits?: CampaignSourceService;
   standardServicesApproval?: {
     dispatchSecret: string;
     host: LeafStandardServicesHumanApprovalHost;
@@ -943,6 +962,31 @@ export function createHarness(ports: HarnessPorts, opts?: {
           return send(res, 409, { error: { code: "worker_run_not_active", message: "worker run not active" } });
         }
         return send(res, 200, binding);
+      }
+
+      if (method === "POST" && ["stage", "publish", "recover"].some(action =>
+          path === `/internal/project-repository-source/${action}`)) {
+        const requiredAuth = harnessAuthDenial(req, { ...auth, enabled: true });
+        if (requiredAuth) return send(res, 401, requiredAuth);
+        const service = opts?.projectRepositoryEdits;
+        if (!service) return send(res, 503, { error: { code: "source_unavailable", message: "source is unavailable" } });
+        res.setHeader("cache-control", "no-store");
+        let body: unknown;
+        try {
+          body = await readJsonBody(req, CAMPAIGN_SOURCE_BODY_LIMIT, true, false, true);
+        } catch {
+          return send(res, 400, { error: { code: "invalid_request", message: "invalid source request" } });
+        }
+        try {
+          const action = path.slice(path.lastIndexOf("/") + 1) as "stage" | "publish" | "recover";
+          return send(res, 200, await dispatchCampaignSource(service, action, body, authorityHeader(req, "x-tenant-id")));
+        } catch (error) {
+          if (error instanceof ProjectRepositoryEditSettlementUnavailable) {
+            return send(res, 503, { error: { code: "settlement_unavailable", message: "source settlement is unavailable" },
+              observation: error.observation, settleRequest: error.settleRequest });
+          }
+          return send(res, 409, { error: { code: "source_conflict", message: "source transaction failed" } });
+        }
       }
 
       if (method === "POST" && path === "/internal/project-repository-source/initialize") {
@@ -1458,6 +1502,7 @@ export async function startReal(port = 8130): Promise<Server> {
   const { createTenantGrantStore, OAuthGrantProviderImpl } = await import("./ports/impl/oauthGrantProvider.js");
   const { TenantRepoProviderImpl } = await import("./ports/impl/tenantRepoProvider.js");
   const { CustomizationCoordinationClient } = await import("./ports/impl/customizationCoordinationClient.js");
+  const { ProjectRepositoryEditCoordinationClient } = await import("./ports/impl/projectRepositoryEditCoordinationClient.js");
   const { SpineTurnAdapter } = await import("./agent/spineTurnAdapter.js");
   const { HttpAppRunClient } = await import("./ports/impl/appRunClient.js");
   const { HttpGateClient } = await import("./ports/impl/gateClient.js");
@@ -1556,7 +1601,12 @@ export async function startReal(port = 8130): Promise<Server> {
         trustRunnerFailureCategories: false,
       }
     : basePorts;
-  const server = createHarness(ports).listen(port);
+  const projectRepositoryEdits = appUrl && dispatchSecret ? new ProjectRepositoryEditCoordinator({
+    leases: basePorts.tenantRepo,
+    changeRepo: authority => basePorts.tenantRepo.projectChangeRepo(authority),
+    coordination: new ProjectRepositoryEditCoordinationClient({ baseUrl: appUrl, dispatchSecret }),
+  }) : undefined;
+  const server = createHarness(ports, { ...(projectRepositoryEdits ? { projectRepositoryEdits } : {}) }).listen(port);
   if (sessionStore) {
     server.once("close", () => { void sessionStore.close(); });
   }

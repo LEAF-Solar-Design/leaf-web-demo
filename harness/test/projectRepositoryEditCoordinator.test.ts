@@ -133,6 +133,29 @@ function stageRequest(overrides: Record<string, unknown> = {}) {
 }
 
 describe("ProjectRepositoryEditCoordinator.stageEdit", () => {
+  it("freezes derived evidence after apply and ignores forged legacy evidence", async () => {
+    const git = fakeGit();
+    const calls: string[] = [];
+    const paths = ["actual.txt"];
+    const request = { ...stageRequest(), apply: () => { calls.push("apply"); },
+      deriveChangeEvidence: () => { calls.push("derive"); return { changedPaths: paths, diffDigest: "a".repeat(64) }; } };
+    const result = await coordinator({ changeRepo: () => git }).stageEdit(
+      request as unknown as import("../src/agent/projectRepositoryEditCoordinator.js").StageProjectRepositoryEditRequest);
+    paths.push("forged.txt");
+    expect(calls).toEqual(["apply", "derive"]);
+    expect(result.receipt.changed_paths).toEqual(["actual.txt"]);
+    expect(result.receipt.diff_digest).toBe("a".repeat(64));
+  });
+
+  it("rejects invalid derived evidence before committing", async () => {
+    const git = fakeGit();
+    const { changedPaths, diffDigest, ...request } = stageRequest();
+    await expect(coordinator({ changeRepo: () => git }).stageEdit({ ...request,
+      deriveChangeEvidence: () => ({ changedPaths: [], diffDigest: "a".repeat(64) }),
+    })).rejects.toMatchObject({ code: "invalid_changed_paths" });
+    expect(git.stageCommitWitness).not.toHaveBeenCalled();
+  });
+
   it("stages a bounded edit, sorts changed paths, and binds the stage lease witness", async () => {
     const coordination = fakeCoordination();
     const git = fakeGit();
@@ -242,19 +265,49 @@ describe("ProjectRepositoryEditCoordinator.publishEdit", () => {
     expect(git.publishToMainObserved).not.toHaveBeenCalled();
   });
 
-  it("refuses a publish observation that does not match the authorized matrix", async () => {
+  it("preserves an unexpected post-CAS observation for recovery without settling it", async () => {
+    const observation = Object.freeze({
+      private_ref: privateRef(EDIT_ID), private_ref_commit: "f".repeat(40),
+      before_main_commit: BASE, after_main_commit: "f".repeat(40), after_main_tree: STAGED_TREE,
+      compare_and_swap: true,
+    });
     const git = fakeGit({
-      publishToMainObserved: vi.fn(() => Object.freeze({
-        private_ref: privateRef(EDIT_ID), private_ref_commit: "f".repeat(40),
-        before_main_commit: BASE, after_main_commit: "f".repeat(40), after_main_tree: STAGED_TREE,
-        compare_and_swap: true,
-      })),
+      publishToMainObserved: vi.fn(() => observation),
     });
     const coordination = fakeCoordination();
     const c = coordinator({ leases: leaseProvider("8", PUBLISH_LEASE), changeRepo: () => git, coordination });
 
-    await expect(c.publishEdit(publishRequest())).rejects.toMatchObject({ code: "publish_observation_mismatch" });
+    let captured: unknown;
+    try {
+      await c.publishEdit(publishRequest());
+    } catch (error) {
+      captured = error;
+    }
+
+    expect(captured).toBeInstanceOf(ProjectRepositoryEditSettlementUnavailable);
+    const unavailable = captured as ProjectRepositoryEditSettlementUnavailable;
+    expect(unavailable.code).toBe("settlement_unavailable");
+    expect(unavailable.observation).toBe(observation);
+    expect(unavailable.settleRequest).toEqual({
+      contract: PROJECT_REPOSITORY_EDIT_COORDINATION_CONTRACT,
+      action: "settle_publish",
+      tenant_id: AUTHORITY.tenantId,
+      organization_id: AUTHORITY.organizationId,
+      project_id: AUTHORITY.projectId,
+      repo_key: AUTHORITY.repoKey,
+      edit_id: EDIT_ID,
+      actor_binding_id: ACTOR_ID,
+      publish_lease_id: PUBLISH_LEASE,
+      publish_lease_generation: 8,
+      private_ref_commit: "f".repeat(40),
+      main_commit: "f".repeat(40),
+      main_tree: STAGED_TREE,
+      expected_version: 2,
+      transition_key: "publish-key:settle",
+    });
+    expect(Object.isFrozen(unavailable.settleRequest)).toBe(true);
     expect(coordination.settlePublish).not.toHaveBeenCalled();
+    expect(git.publishToMainObserved).toHaveBeenCalledTimes(1);
   });
 
   it("wraps a settlement transport failure with the frozen observation, never a second compare-and-swap", async () => {

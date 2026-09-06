@@ -40,9 +40,9 @@ export class ProjectRepositoryEditError extends Error {
 }
 
 /**
- * The publish compare-and-swap landed but settlement transport failed. Carries
- * the frozen observation and exact settle request so recovery can resume from
- * Git truth without a second compare-and-swap or confirmation.
+ * The publish compare-and-swap returned an unexpected observation, or settlement
+ * failed. Carries the frozen observation and exact settle request so recovery
+ * can resume from Git truth without repeating publication or confirmation.
  */
 export class ProjectRepositoryEditSettlementUnavailable extends ProjectRepositoryEditError {
   override readonly name = "ProjectRepositoryEditSettlementUnavailable";
@@ -66,21 +66,30 @@ export interface ProjectRepositoryEditCoordinatorPorts {
   readonly coordination: ProjectRepositoryEditCoordination;
 }
 
-export interface StageProjectRepositoryEditRequest {
+export type DerivedChangeEvidence = {
+  readonly changedPaths: readonly string[];
+  readonly diffDigest: string;
+};
+export type DeriveChangeEvidence = (worktreeDir: string) =>
+  DerivedChangeEvidence | Promise<DerivedChangeEvidence>;
+
+export type StageProjectRepositoryEditRequest = {
   readonly authority: ProjectRepositoryAuthority;
   readonly editId: string;
   readonly actorBindingId: string;
   readonly operation: "edit" | "rollback";
   readonly sourceEditId: string | null;
   readonly expectedBaseCommit: string;
-  readonly changedPaths: readonly string[];
-  readonly diffDigest: string;
   readonly instructionDigest: string;
   readonly idempotencyKey: string;
   readonly commitMessage: string;
   /** The already bounded edit. It receives only the isolated worktree directory. */
   readonly apply: (worktreeDir: string) => void | Promise<void>;
-}
+} & (DerivedChangeEvidence & { readonly deriveChangeEvidence?: never } | {
+  readonly deriveChangeEvidence: DeriveChangeEvidence;
+  readonly changedPaths?: never;
+  readonly diffDigest?: never;
+});
 
 export interface StagedProjectRepositoryEdit {
   readonly witness: ProjectRepositoryStageWitness;
@@ -217,12 +226,21 @@ export class ProjectRepositoryEditCoordinator {
       ? requireUuid(request.sourceEditId ?? fail("invalid_source_edit"), "invalid_source_edit")
       : null;
     const expectedBaseCommit = requireSha(request.expectedBaseCommit, "invalid_base_commit");
-    if (!Array.isArray(request.changedPaths) || request.changedPaths.length < 1 ||
-        request.changedPaths.length > 1000 ||
-        request.changedPaths.some((path) => typeof path !== "string" || path.length < 1)) {
-      fail("invalid_changed_paths");
+    const freezeEvidence = (value: DerivedChangeEvidence): DerivedChangeEvidence => {
+      if (!value || !Array.isArray(value.changedPaths) || value.changedPaths.length < 1 ||
+          value.changedPaths.length > 1000 ||
+          value.changedPaths.some((path) => typeof path !== "string" || path.length < 1) ||
+          new Set(value.changedPaths).size !== value.changedPaths.length) fail("invalid_changed_paths");
+      return Object.freeze({
+        changedPaths: Object.freeze([...value.changedPaths].sort((left, right) =>
+          Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8")))),
+        diffDigest: requireDigest(value.diffDigest, "invalid_diff_digest"),
+      });
+    };
+    if (request.deriveChangeEvidence !== undefined && typeof request.deriveChangeEvidence !== "function") {
+      fail("invalid_change_evidence");
     }
-    const diffDigest = requireDigest(request.diffDigest, "invalid_diff_digest");
+    const legacyEvidence = request.deriveChangeEvidence ? undefined : freezeEvidence(request as DerivedChangeEvidence);
     const instructionDigest = requireDigest(request.instructionDigest, "invalid_instruction_digest");
     const idempotencyKey = requireKey(request.idempotencyKey, "invalid_idempotency_key");
     if (typeof request.commitMessage !== "string" ||
@@ -235,15 +253,20 @@ export class ProjectRepositoryEditCoordinator {
       const stageGeneration = requireGeneration(witness.writerLeaseGeneration, "invalid_lease_witness");
       requireUuid(witness.writerLeaseId, "invalid_lease_witness");
       const repo = this.ports.changeRepo(authority);
+      if (request.deriveChangeEvidence && await runFenced(() => repo.readRef("refs/heads/main")) !== expectedBaseCommit) {
+        fail("source_base_conflict");
+      }
       const change = await runFenced(() => repo.createOrResume(editId, expectedBaseCommit));
       try {
         await runFenced(() => request.apply(change.dir));
+        const evidence = request.deriveChangeEvidence
+          ? await runFenced(async () => freezeEvidence(await request.deriveChangeEvidence!(change.dir)))
+          : legacyEvidence!;
         const stageWitness = await runFenced(() =>
           repo.stageCommitWitness(change, request.commitMessage));
         const main = await runFenced(() => repo.readRef("refs/heads/main"));
         if (main !== expectedBaseCommit) fail("main_moved_during_stage");
-        const changedPaths = [...request.changedPaths].sort((left, right) =>
-          Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8")));
+        const changedPaths = evidence.changedPaths;
         const receipt: ProjectRepositoryStagedReceipt = Object.freeze({
           contract: "leaf.project-repository-edit.v2",
           edit_id: editId,
@@ -261,7 +284,7 @@ export class ProjectRepositoryEditCoordinator {
           staged_head_commit: stageWitness.staged_head_commit,
           staged_tree: stageWitness.staged_tree,
           changed_paths: Object.freeze(changedPaths),
-          diff_digest: diffDigest,
+          diff_digest: evidence.diffDigest,
           instruction_digest: instructionDigest,
           idempotency_key: idempotencyKey,
         });
@@ -350,11 +373,6 @@ export class ProjectRepositoryEditCoordinator {
         }
         return repo.publishToMainObserved(change, matrix.expected_main_commit);
       });
-      if (observation.private_ref_commit !== matrix.staged_head_commit ||
-          observation.after_main_commit !== matrix.staged_head_commit ||
-          observation.after_main_tree !== matrix.staged_tree) {
-        fail("publish_observation_mismatch");
-      }
       const settleRequest: ProjectRepositoryEditSettlePublishRequest = Object.freeze({
         contract: PROJECT_REPOSITORY_EDIT_COORDINATION_CONTRACT,
         action: "settle_publish",
@@ -373,6 +391,11 @@ export class ProjectRepositoryEditCoordinator {
         transition_key: `${transitionKey}:settle`,
       });
       let settlement: ProjectRepositoryEditSettlementResponse;
+      if (observation.private_ref_commit !== matrix.staged_head_commit ||
+          observation.after_main_commit !== matrix.staged_head_commit ||
+          observation.after_main_tree !== matrix.staged_tree) {
+        throw new ProjectRepositoryEditSettlementUnavailable(observation, settleRequest);
+      }
       try {
         settlement = await this.ports.coordination.settlePublish(settleRequest);
       } catch {
@@ -380,7 +403,9 @@ export class ProjectRepositoryEditCoordinator {
         // without a second compare-and-swap or confirmation.
         throw new ProjectRepositoryEditSettlementUnavailable(observation, settleRequest);
       }
-      if (settlement.edit_id !== editId) fail("settlement_mismatch");
+      if (settlement.edit_id !== editId) {
+        throw new ProjectRepositoryEditSettlementUnavailable(observation, settleRequest);
+      }
       return Object.freeze({ matrix, observation, settlement });
     });
   }
