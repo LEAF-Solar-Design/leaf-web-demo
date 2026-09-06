@@ -125,6 +125,21 @@ describe('failed author recovery', () => {
     expect(readInflightAuthor(storage)).not.toBeNull()
   })
 
+  it('keeps a daily quota refusal outside accepted-job recovery through the real transport', async () => {
+    const storage = memoryStorage()
+    const fetch = vi.fn(async () => new Response(JSON.stringify({
+      error_code: 'quota_exceeded', quota_kind: 'daily_author', tier: 'hosted_starter', limit: 1, used: 1,
+      error: { error_code: 'quota_exceeded', quota_kind: 'daily_author', retryable: true },
+    }), { status: 429, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetch)
+    const { result } = renderHook(() => useAuthorStageController({ storage, stageAuthorTool: realStageAuthorTool }))
+    await act(async () => { await result.current.stage(description) })
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(result.current.error.status).toBe(429)
+    expect(result.current.failedRequest).toBeNull()
+    expect(readInflightAuthor(storage)).toBeNull()
+  })
+
   it.each(['account', 'expiry'])('does not restore a failed request outside its %s boundary', async (boundary) => {
     const { storage, hook } = await createFailed()
     hook.unmount()
