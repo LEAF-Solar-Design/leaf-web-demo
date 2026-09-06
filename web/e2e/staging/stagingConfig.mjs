@@ -13,7 +13,7 @@ export const STAGING_BASE_URL_ENV = 'LEAF_E2E_STAGING_BASE_URL'
 export const STAGING_ALLOW_HOST_ENV = 'LEAF_E2E_STAGING_ALLOW_HOST'
 export const DEFAULT_STAGING_BASE_URL = 'https://platform-staging.leafdesign.ai'
 const ALLOWED_OVERRIDE_HOST = /^[a-z0-9-]+(\.[a-z0-9-]+)*\.leafdesign\.ai$/i
-const PRODUCTION_HOST = 'platform.leafdesign.ai'
+export const PRODUCTION_HOSTS = Object.freeze(['app.leafdesign.ai', 'platform.leafdesign.ai'])
 const HERE = dirname(fileURLToPath(import.meta.url))
 export const STAGING_OUTPUT_ROOT = resolve(HERE, '..', '..', '..', 'artifacts', 'unified-surface-proof', 'staging')
 
@@ -32,7 +32,10 @@ export function allowedStagingHostnames(env = process.env) {
   const override = env[STAGING_ALLOW_HOST_ENV] || ''
   const allowed = new Set([defaultHost])
   if (override) {
-    if (!ALLOWED_OVERRIDE_HOST.test(override) || override.toLowerCase() === PRODUCTION_HOST) {
+    if (PRODUCTION_HOSTS.includes(override.toLowerCase())) {
+      throw new StagingHostError(`${STAGING_ALLOW_HOST_ENV}: ${override} is a production host`)
+    }
+    if (!ALLOWED_OVERRIDE_HOST.test(override)) {
       throw new StagingHostError(
         `${STAGING_ALLOW_HOST_ENV} must be a non-production *.leafdesign.ai hostname: ${override}`,
       )
