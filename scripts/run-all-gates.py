@@ -1284,7 +1284,7 @@ def build_suites() -> List[Suite]:
         # dry-run pins, the 40-hex headRefOid guard, the stdin-not-argv token
         # pin, and mq.sh's accept path executed against a stub python3.
         Suite("mq-review-codebuild", "scripts test_mq_review_codebuild.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_mq_review_codebuild.py"), 20),
+              SCRIPTS_DIR, _py_pytest("test_mq_review_codebuild.py"), 39),
         # Registered per the #29 fix-then-register rule (shipped without a
         # gate entry; measured 1 passed on this tree 2026-07-23).
         # 1 -> 2 on 2026-08-07: the staging relay's convergence contract

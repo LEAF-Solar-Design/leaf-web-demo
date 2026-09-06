@@ -59,7 +59,7 @@ def newest_review(statuses):
     return latest["state"]
 
 
-def github(path, payload=None):
+def github(path, payload=None, expected_status=None):
     token = os.environ.get("GH_TOKEN", "")
     if not token or any(c in token for c in '\r\n'):
         raise RuntimeError("GH_TOKEN is missing or invalid")
@@ -74,11 +74,18 @@ def github(path, payload=None):
     if payload is not None:
         command += ["--header", "Content-Type: application/json",
                     "--data-raw", json.dumps(payload)]
+    if expected_status is not None:
+        command += ["--write-out", "\n%{http_code}"]
     result = subprocess.run(command, input=config, text=True, capture_output=True)
     if result.returncode:
         raise RuntimeError("GitHub request failed")
+    body = result.stdout
+    if expected_status is not None:
+        body, separator, status = body.rpartition("\n")
+        if not separator or status != str(expected_status):
+            raise RuntimeError("GitHub returned unexpected HTTP status")
     try:
-        return json.loads(result.stdout)
+        return json.loads(body)
     except ValueError:
         raise RuntimeError("GitHub returned invalid JSON") from None
 
@@ -130,10 +137,45 @@ def read_review(head):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--head-sha", required=True)
+    parser.add_argument("--deferred", action="store_true")
     args = parser.parse_args(argv)
     if not SHA40.fullmatch(args.head_sha):
         parser.error("--head-sha must be a full commit SHA")
     try:
+        if args.deferred:
+            page = 1
+            while True:
+                branches = github(
+                    f"repos/{REPO}/commits/{args.head_sha}/branches-where-head"
+                    f"?per_page=100&page={page}", expected_status=200)
+                if not isinstance(branches, list):
+                    raise RuntimeError("GitHub branches response is invalid")
+                for branch in branches:
+                    name = branch["name"]
+                    if not isinstance(name, str):
+                        raise RuntimeError("GitHub branch name is invalid")
+                    if name.startswith("gh-readonly-queue/"):
+                        print(f"refusing deferred mq-review: {args.head_sha[:12]} "
+                              f"is the head of merge-queue branch {name}")
+                        return 1
+                if len(branches) < 100:
+                    break
+                page += 1
+            for entry in read_queue():
+                head = entry["headCommit"]["oid"]
+                if not isinstance(head, str) or not SHA40.fullmatch(head):
+                    raise RuntimeError("GitHub queue head is invalid")
+                if head.lower() == args.head_sha.lower():
+                    print(f"refusing deferred mq-review: {args.head_sha[:12]} "
+                          "is a live merge-group head")
+                    return 1
+            payload = {"context": CONTEXT, "state": "success",
+                       "description": "deferred: the real mq-review check runs on the merge group"}
+            if os.environ.get("CODEBUILD_BUILD_URL"):
+                payload["target_url"] = os.environ["CODEBUILD_BUILD_URL"]
+            github(f"repos/{REPO}/statuses/{args.head_sha}", payload, expected_status=201)
+            print(f"{CONTEXT}: success: {payload['description']}")
+            return 0
         before = members_for(read_queue(), args.head_sha)
         states = {m["pullRequest"]["headRefOid"]: read_review(m["pullRequest"]["headRefOid"])
                   for m in before}
