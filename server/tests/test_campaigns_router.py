@@ -201,6 +201,72 @@ def _submit(client, **overrides):
         'project_id': PROJECT, 'title': 'ReciPDF', 'prompt': 'Organize recipes', **overrides})
 
 
+@pytest.mark.parametrize('op', ['next', 'export', 'bind', 'admit', 'settle', 'recover'])
+@pytest.mark.parametrize('credential', ['browser', 'admin', 'missing'])
+def test_bridge_every_operation_requires_worker(setup, monkeypatch, op, credential):
+    import auth
+    client, _, _ = setup
+    monkeypatch.setenv('LEAF_CAMPAIGN_WORKER_SUBJECT', 'worker-service')
+
+    def verify(header):
+        if credential == 'missing':
+            raise HTTPException(status_code=401, detail='Authentication required')
+        return {'sub': credential, 'role': 'admin'}
+
+    monkeypatch.setattr(auth, 'verify_platform_token', verify)
+    response = client.post('/internal/campaigns/bridge/' + op, json={'enrollment_id': str(uuid.uuid4())})
+    assert response.status_code == (401 if credential == 'missing' else 403)
+
+
+@pytest.mark.parametrize('op', ['next', 'export', 'bind', 'admit', 'settle', 'recover'])
+def test_bridge_routes_worker_and_redacts_errors(setup, monkeypatch, op):
+    client, _, _ = setup
+    client.app.dependency_overrides[deps.require_campaign_worker] = lambda: 'worker-service'
+    body = {'enrollment_id': str(uuid.uuid4())}
+    calls = []
+
+    def handle(operation, request, subject):
+        calls.append((operation, request, subject))
+        return {'ok': True}
+
+    monkeypatch.setattr(router.campaign_bridge, 'handle', handle)
+    assert client.post('/internal/campaigns/bridge/' + op, json=body).json() == {'ok': True}
+    assert calls == [(op, body, 'worker-service')]
+
+    def fail(*args):
+        raise RuntimeError('PRIVATE_BRIDGE_SENTINEL')
+
+    monkeypatch.setattr(router.campaign_bridge, 'handle', fail)
+    response = client.post('/internal/campaigns/bridge/' + op, json=body)
+    assert response.status_code == 503 and 'PRIVATE_BRIDGE_SENTINEL' not in response.text
+
+
+@pytest.mark.parametrize('op,body', [
+    ('unknown', {}), ('next', {'enrollment_id': 'bad'}),
+    ('next', {'enrollment_id': 3}), ('next', {'enrollment_id': str(uuid.uuid4()), 'org_id': ORG}),
+    ('export', {'enrollment_id': str(uuid.uuid4()), 'attempt_id': str(uuid.uuid4()), 'fence': True}),
+    ('settle', {'enrollment_id': str(uuid.uuid4()), 'verified': True}),
+    ('recover', []),
+])
+def test_bridge_closed_http_requests(setup, op, body):
+    client, _, _ = setup
+    client.app.dependency_overrides[deps.require_campaign_worker] = lambda: 'worker-service'
+    assert client.post('/internal/campaigns/bridge/' + op, json=body).status_code == 400
+
+
+@pytest.mark.parametrize('missing', ['LEAF_CAMPAIGN_BRIDGE', 'LEAF_CAMPAIGN_WORKER_SUBJECT',
+                                     'LEAF_CAMPAIGN_ALLOWED_MACHINES'])
+def test_bridge_defaults_off_without_full_configuration(setup, monkeypatch, missing):
+    client, _, _ = setup
+    client.app.dependency_overrides[deps.require_campaign_worker] = lambda: 'worker-service'
+    monkeypatch.setenv('LEAF_CAMPAIGN_BRIDGE', 'on')
+    monkeypatch.setenv('LEAF_CAMPAIGN_WORKER_SUBJECT', 'worker-service')
+    monkeypatch.setenv('LEAF_CAMPAIGN_ALLOWED_MACHINES', 'VM-C')
+    monkeypatch.delenv(missing)
+    response = client.post('/internal/campaigns/bridge/next', json={'enrollment_id': str(uuid.uuid4())})
+    assert response.status_code == 503
+
+
 @pytest.mark.parametrize('phase,error_type,code,status', [
     ('validation', ValueError, 'invalid_request', 400),
     ('limit', ValueError, 'invalid_request', 400),

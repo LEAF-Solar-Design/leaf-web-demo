@@ -16,6 +16,7 @@ import deps
 import platform_link
 import project_repository_source
 import campaign_worker_service
+import campaign_bridge
 
 router = APIRouter()
 _STORE = None
@@ -183,6 +184,25 @@ async def change_enrollment(campaign_id: str, enrollment_id: str, action: str, r
         _enrollment_store(), action + '_enrollment')(
             org, project, campaign_id, enrollment_id, _principal(tenant)),
         'enrollment', project=lambda row: row)
+
+
+@router.post('/internal/campaigns/bridge/{op}')
+async def campaign_bridge_operation(op: str, request: Request,
+                                    subject: str = Depends(deps.require_campaign_worker)):
+    try:
+        body = await _body(request)
+    except ValueError:
+        return _failure(400, 'invalid_request', 'Invalid campaign bridge request')
+    try:
+        _store()
+        return campaign_bridge.handle(op, body, subject)
+    except campaign_bridge.BridgeError as exc:
+        status = exc.status
+    except Exception:
+        status = 503
+    code = {400: 'invalid_request', 403: 'worker_forbidden', 409: 'bridge_conflict'}.get(
+        status, 'bridge_unavailable')
+    return _failure(status, code, 'Campaign bridge request failed')
 
 
 @router.post('/internal/campaign-worker/recover')
