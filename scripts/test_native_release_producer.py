@@ -2,11 +2,83 @@
 from pathlib import Path
 from types import SimpleNamespace
 import json
+import hashlib
 
 import pytest
 
 from ci.native_release_producer import image_build_command, SERVICES, FRESHNESS, TRIXIE
 from ci import native_release_producer as producer
+
+
+def native_identity(project):
+    prefix = "arn:aws:codebuild:us-east-1:807034087062:"
+    return {"project_arn": prefix + "project/" + project,
+            "build_arn": prefix + "build/" + project + ":12345678-1234-1234-1234-123456789abc",
+            "build_number": 7}
+
+
+def assembly_inputs(tmp_path):
+    archive = tmp_path / "web.zip"
+    archive.write_bytes(b"unit fixture, not a real web ZIP")
+    return dict(
+        source="a" * 40, tree="b" * 40, producer=native_identity("release"),
+        images={service: {"repository": f"leaf-platform-{service}",
+                          "image_digest": "sha256:" + "c" * 64,
+                          "source_revision": "a" * 40, "native_build_number": 7}
+                for service in SERVICES},
+        web={"path": str(archive), "artifact_sha256": "d" * 64,
+             "archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+             "image_digest": "sha256:" + "c" * 64, "source_revision": "a" * 40},
+        solver={"revision": "e" * 40, "source_sha256": "f" * 64},
+        gate={"producer": native_identity("gate"), "source_revision": "a" * 40,
+              "source_tree": "b" * 40, "proof_sha256": "1" * 64,
+              "archive": {"bucket": "unit-gates", "key": "gate.zip",
+                          "version_id": "immutable-unit-version", "sha256": "2" * 64}},
+    )
+
+
+def test_native_manifest_binds_all_artifacts_without_github_ids(tmp_path):
+    inputs = assembly_inputs(tmp_path)
+    manifest = producer.assemble_release(**inputs)
+    assert manifest["schema"] == "leaf.native-release.v1"
+    assert set(manifest["services"]) == set(SERVICES)
+    assert manifest["web"]["member"] == "web-dist.zip"
+    assert "path" not in manifest["web"]
+    assert "build_run_id" not in json.dumps(manifest)
+    inputs["gate"]["archive"]["key"] = "changed"
+    assert manifest["gate"]["archive"]["key"] == "gate.zip"
+
+
+@pytest.mark.parametrize("mutation,match", [
+    (lambda x: x["images"].pop("broker"), "five"),
+    (lambda x: x["images"]["app"].update(source_revision="f" * 40), "source"),
+    (lambda x: x["images"]["app"].update(native_build_number=8), "producer"),
+    (lambda x: x["gate"].update(producer=native_identity("release")), "separate"),
+    (lambda x: x["gate"].update(source_tree="f" * 40), "tree"),
+    (lambda x: x["gate"]["archive"].update(version_id="null"), "immutable"),
+    (lambda x: x["producer"].update(build_arn=native_identity("other")["build_arn"]), "belong"),
+    (lambda x: x["web"].update(image_digest="sha256:" + "f" * 64), "image"),
+    (lambda x: Path(x["web"]["path"]).write_bytes(b"changed"), "bytes changed"),
+])
+def test_native_manifest_rejects_mixed_release(tmp_path, mutation, match):
+    inputs = assembly_inputs(tmp_path)
+    mutation(inputs)
+    with pytest.raises(ValueError, match=match):
+        producer.assemble_release(**inputs)
+
+
+def test_stage_release_writes_only_exact_archive_members(tmp_path):
+    inputs = assembly_inputs(tmp_path)
+    output = tmp_path / "managed-artifacts"
+    members = producer.stage_release(output, **inputs)
+    assert set(members) == {"web-dist.zip", "staging-supply-set.json"}
+    assert {p.name for p in output.iterdir()} == set(members)
+    for name, receipt in members.items():
+        data = (output / name).read_bytes()
+        assert receipt == {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+    assert json.loads((output / "staging-supply-set.json").read_bytes())["provider"] == "aws.codebuild"
+    with pytest.raises(FileExistsError):
+        producer.stage_release(output, **inputs)
 
 
 def recipe(service, **kwargs):
