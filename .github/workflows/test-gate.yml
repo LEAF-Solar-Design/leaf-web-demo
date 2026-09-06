@@ -130,7 +130,7 @@ jobs:
   probe:
     name: gate-reuse-probe
     if: ${{ inputs.ref != '' }}
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 10
     # Same posture as the build workflow's warm job: a probe defect must cost
     # the optimization, never redden the run. Failures are absorbed in-script
@@ -560,7 +560,7 @@ jobs:
     # always(): when a shard fails this job must still run and FAIL with the
     # verifier's naming of what broke, not report as skipped.
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 10
 
     outputs:

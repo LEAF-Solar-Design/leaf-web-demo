@@ -181,7 +181,7 @@ concurrency:
 
 jobs:
   prepare:
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 5
     # Job-level permissions REPLACE the workflow-level set, so the two
     # workflow-level grants are restated. actions:read backs one step:
@@ -2086,7 +2086,7 @@ jobs:
       ${{ !cancelled() && !inputs.promote && !inputs.speculative &&
           needs.prepare.result == 'success' &&
           needs.build.result == 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 10
     environment: ecr-release
     permissions:
@@ -2795,7 +2795,7 @@ jobs:
       ${{ !cancelled() && github.event_name == 'workflow_dispatch' &&
           inputs.speculative && needs.prepare.result == 'success' &&
           needs.prepare.outputs.superseded != 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 10
     environment: ecr-release
     permissions:
@@ -3029,7 +3029,7 @@ jobs:
   adopt:
     needs: [prepare, test]
     if: ${{ !inputs.promote && github.event_name == 'push' && needs.prepare.outputs.build == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 10
     environment: ecr-release
     permissions:
@@ -3554,7 +3554,7 @@ jobs:
           (needs.verify.result == 'success' ||
            (needs.adopt.result == 'success' &&
             needs.adopt.outputs.adopted == 'true')) }}
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 30
     environment: ecr-release
     permissions:
@@ -3717,7 +3717,7 @@ jobs:
       github.event_name == 'workflow_dispatch' &&
       inputs.promote &&
       needs.prepare.outputs.source_mode == 'main'
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 5
 
     permissions:

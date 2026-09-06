@@ -31,7 +31,7 @@ jobs:
   guard-ref:
     name: Refuse dispatches outside main
     if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     permissions: {}
     steps:
       - name: Require the main workflow ref
@@ -45,7 +45,7 @@ jobs:
     name: Stage the idle colour with this merge group's exact head
     needs: guard-ref
     if: github.event_name == 'workflow_dispatch' && inputs.group_head_sha != '' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 25
     steps:
       - name: Validate and record the live merge-group head and base

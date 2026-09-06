@@ -85,7 +85,7 @@ jobs:
   guard-ref:
     name: Refuse dispatches outside main
     if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     permissions: {}
     steps:
       - name: Require the main workflow ref
@@ -98,7 +98,7 @@ jobs:
   dispatch-group:
     name: Dispatch the group relay from main
     if: github.event_name == 'merge_group'
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     permissions:
       actions: write
       contents: read
@@ -115,7 +115,7 @@ jobs:
   stage:
     name: PR-mode staging retired
     if: (github.event_name == 'pull_request_review' || github.event_name == 'pull_request_target') && github.event.action != 'closed'
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     permissions: {}
     timeout-minutes: 5
     steps:
@@ -140,7 +140,7 @@ jobs:
       && github.event.action == 'closed'
       && github.event.pull_request.merged == false
       && github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 10
     steps:
       - name: Find this PR's last relayed candidate
