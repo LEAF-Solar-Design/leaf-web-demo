@@ -238,6 +238,8 @@ def normalize_spawn_command(
 def build_suites() -> List[Suite]:
     repo_name = REPO.name  # "leaf-web-demo"
     suites: List[Suite] = [
+        Suite("mq-review-codebuild", "scripts test_mq_review_codebuild.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_mq_review_codebuild.py"), 14),
         # Executed-count floors: seventeen were re-baselined on 2026-07-25
         # because they sat BELOW their suite's real executed count. A low floor
         # is legal, coverage_verdict PASSes it with an "(executed-count drift:
