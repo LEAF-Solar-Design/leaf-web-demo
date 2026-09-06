@@ -12,6 +12,7 @@ import uuid
 from psycopg.types.json import Jsonb
 
 from . import campaign_enrollment as enrollment
+from .store import _canonical_authority_uuid
 from .campaigns import _principal
 from .campaign_execution import (
     CampaignError, CampaignConflict, CampaignUnavailable, _scope, _uuid,
@@ -344,6 +345,43 @@ def claim_host_operation(subject, body):
         for key in ('outcome', 'stage_evidence', 'replayed'):
             public.pop(key)
         return {'ok': True, 'kind': 'claimed', 'operation': {**public, 'claim': claim}}
+
+
+def read_host_grant(subject, body):
+    _closed(body, ('operation_id', 'claim'))
+    machine = _machine(subject)
+    if not isinstance(body['operation_id'], str) or str(_uuid(body['operation_id'])) != body['operation_id']:
+        _invalid()
+    claim_hash = _claim_value(body['claim'])
+    with _cursor() as cur:
+        _lock(cur, 'campaign-host-machine:' + machine)
+        op, live = _host_scope(cur, body['operation_id'], machine, subject)
+        if (not live or not op['lease_live'] or op['outcome'] is not None
+                or not hmac.compare_digest(op['claim_sha256'] or '', claim_hash)):
+            _conflict()
+        try:
+            tenant = _canonical_authority_uuid(op['tenant_id'], 'tenant_id')
+            organization = _canonical_authority_uuid(op['org_id'], 'organization_id')
+            project = _canonical_authority_uuid(op['project_id'], 'project_id')
+        except ValueError:
+            raise CampaignUnavailable('host_grant_unavailable', 'Host grant is unavailable') from None
+        if tenant != organization:
+            raise CampaignUnavailable('host_grant_unavailable', 'Host grant is unavailable')
+        cur.execute('SELECT repo_key FROM project_repository_authorities '
+                    'WHERE tenant_id=%s AND organization_id=%s AND project_id=%s FOR SHARE',
+                    (tenant, organization, project))
+        authority = cur.fetchone()
+        if authority is None:
+            raise CampaignUnavailable('host_grant_unavailable', 'Host grant is unavailable')
+        try:
+            repository = _canonical_authority_uuid(authority['repo_key'], 'repo_key')
+        except ValueError:
+            raise CampaignUnavailable('host_grant_unavailable', 'Host grant is unavailable') from None
+        return {'ok': True, 'kind': 'grant', 'grant': {
+            **{key: str(op[key]) for key in
+               ('operation_id', 'enrollment_id', 'link_id', 'machine_id', 'campaign_id')},
+            'leaf_project_id': str(project), 'repository_key': str(repository),
+            'input_sha256': op['input_sha256']}}
 
 
 def settle_host_operation(subject, body):

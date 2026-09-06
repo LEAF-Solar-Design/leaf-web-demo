@@ -48,6 +48,169 @@ def publication():
             'tool_manifest_sha256': 'sha256:' + 'd' * 64, 'tool_source_sha256': 'e' * 64}
 
 
+@pytest.fixture
+def host_grant_seeded(make_org, monkeypatch):
+    machine = 'test-host-grant-' + str(uuid.uuid4())
+    monkeypatch.setenv('LEAF_CAMPAIGN_ALLOWED_MACHINES', machine)
+    monkeypatch.setenv('LEAF_CAMPAIGN_HOST_MACHINE_ID', machine)
+    monkeypatch.setenv('LEAF_CAMPAIGN_WORKER_SUBJECT', 'worker-service')
+    monkeypatch.setenv('LEAF_SOURCE_SHA', 'a' * 40)
+    org = make_org()
+    project = store.create_project(org.org_id, 'Host grant project')
+    principal = store.create_identity_binding(org.org_id, 'auth0', 'auth0|' + str(uuid.uuid4()), role='owner')
+    with db.connection() as conn:
+        conn.execute('INSERT INTO project_member_bindings '
+                     '(membership_id,org_id,project_id,binding_id,role,invited_by_binding_id) '
+                     "VALUES (%s,%s,%s,%s,'owner',%s)",
+                     (uuid.uuid4(), org.org_id, project.project_id, principal.binding_id, principal.binding_id))
+    campaign = campaigns.submit_campaign(org.org_id, project.project_id, str(org.org_id),
+        principal.binding_id, title='ReciPDF', prompt='Organize recipes', idempotency_key='host-grant')
+    scope = (org.org_id, project.project_id, campaign['campaign_id'])
+    row = enrollment.request_enrollment(*scope, principal.binding_id, machine_id=machine)
+    return scope, principal.binding_id, row['enrollment_id']
+
+
+@pytest.fixture
+def host_grant_claimed(host_grant_seeded, publication):
+    context = ready(host_grant_seeded, publication)
+    authority = store.register_project_repository_authority(
+        context['tenant_id'], context['org_id'], context['project_id'], str(uuid.uuid4()))
+    jid = job(context)
+    capabilities.ensure_operation(jid, context)
+    return context, authority, claim()
+
+
+def host_grant_request(op):
+    return {key: op[key] for key in ('operation_id', 'claim')}
+
+
+def host_grant_snapshot(op):
+    with db.connection() as conn:
+        return [conn.execute(sql, (value,)).fetchone() for sql, value in (
+            ('SELECT * FROM campaign_host_operations WHERE operation_id=%s', uuid.UUID(op['operation_id'])),
+            ('SELECT * FROM campaign_capability_invocations WHERE job_id=%s', uuid.UUID(op['job_id'])),
+            ('SELECT * FROM async_jobs WHERE job_id=%s', op['job_id']),
+            ('SELECT * FROM campaign_host_enrollments WHERE enrollment_id=%s', uuid.UUID(op['enrollment_id'])),
+            ('SELECT * FROM campaign_capability_links WHERE link_id=%s', uuid.UUID(op['link_id'])))]
+
+
+def test_host_grant_exact_authority_read_preserves_state(host_grant_seeded, host_grant_claimed):
+    context, authority, op = host_grant_claimed
+    settle(op)
+    before = host_grant_snapshot(op)
+    execution = lifecycle_snapshot(host_grant_seeded)
+    expected = {'ok': True, 'kind': 'grant', 'grant': {
+        'operation_id': op['operation_id'], 'enrollment_id': context['enrollment_id'],
+        'link_id': context['link_id'], 'machine_id': op['machine_id'],
+        'campaign_id': context['campaign_id'], 'leaf_project_id': context['project_id'],
+        'repository_key': authority['repo_key'], 'input_sha256': op['input_sha256']}}
+    assert capabilities.read_host_grant('worker-service', host_grant_request(op)) == expected
+    db.reset_pool()
+    assert capabilities.read_host_grant('worker-service', host_grant_request(op)) == expected
+    assert host_grant_snapshot(op) == before
+    assert lifecycle_snapshot(host_grant_seeded) == execution
+    assert op['claim'] not in json.dumps(expected)
+    assert hashlib.sha256(op['claim'].encode()).hexdigest() not in json.dumps(expected)
+
+
+@pytest.mark.parametrize('damage', [
+    'wrong_claim', 'expired', 'foreign_worker', 'foreign_machine', 'revoked', 'closed',
+    'terminal', 'context', 'input', 'project', 'missing_operation'])
+def test_host_grant_rejects_stale_or_foreign_state(
+        host_grant_seeded, host_grant_claimed, monkeypatch, damage):
+    context, _, op = host_grant_claimed
+    request = host_grant_request(op)
+    subject = 'worker-service'
+    if damage == 'wrong_claim':
+        request['claim'] = 'x' * 43
+    elif damage == 'foreign_worker':
+        subject = 'foreign-worker'
+    elif damage == 'foreign_machine':
+        monkeypatch.setenv('LEAF_CAMPAIGN_ALLOWED_MACHINES', 'foreign-machine')
+        monkeypatch.setenv('LEAF_CAMPAIGN_HOST_MACHINE_ID', 'foreign-machine')
+    elif damage == 'revoked':
+        scope, principal, eid = host_grant_seeded
+        enrollment.revoke_enrollment(*scope, eid, principal)
+    elif damage == 'terminal':
+        settle(op, outcome='failed')
+    elif damage == 'missing_operation':
+        request['operation_id'] = str(uuid.uuid4())
+    else:
+        with db.connection() as conn:
+            if damage == 'expired':
+                conn.execute("UPDATE campaign_host_operations SET lease_expires_at=NOW()-interval '1 second' "
+                             'WHERE operation_id=%s', (uuid.UUID(op['operation_id']),))
+            elif damage == 'closed':
+                conn.execute("UPDATE async_jobs SET progress='closed' WHERE job_id=%s", (op['job_id'],))
+            elif damage == 'context':
+                conn.execute('UPDATE async_jobs SET execution_json=%s WHERE job_id=%s',
+                             (Jsonb({'capability_provenance': {**context, 'link_id': str(uuid.uuid4())}}),
+                              op['job_id']))
+            elif damage == 'input':
+                conn.execute('UPDATE campaign_host_operations SET input_sha256=%s WHERE operation_id=%s',
+                             ('0' * 64, uuid.UUID(op['operation_id'])))
+            else:
+                conn.execute('UPDATE projects SET deleted_at=NOW() WHERE project_id=%s',
+                             (uuid.UUID(context['project_id']),))
+    before = host_grant_snapshot(op)
+    error = campaigns.CampaignError if damage == 'foreign_worker' else campaigns.CampaignConflict
+    with pytest.raises(error) as exc:
+        capabilities.read_host_grant(subject, request)
+    assert op['claim'] not in str(exc.value)
+    assert hashlib.sha256(op['claim'].encode()).hexdigest() not in str(exc.value)
+    assert host_grant_snapshot(op) == before
+
+
+def test_host_grant_missing_mapping_ignores_other_project_authority(host_grant_seeded, publication):
+    context = ready(host_grant_seeded, publication)
+    other = store.create_project(uuid.UUID(context['org_id']), 'Other repository')
+    store.register_project_repository_authority(
+        context['tenant_id'], context['org_id'], other.project_id, uuid.uuid4())
+    jid = job(context)
+    capabilities.ensure_operation(jid, context)
+    op = claim()
+    before = host_grant_snapshot(op)
+    with pytest.raises(capabilities.CampaignUnavailable, match='Host grant is unavailable'):
+        capabilities.read_host_grant('worker-service', host_grant_request(op))
+    assert host_grant_snapshot(op) == before
+    assert store.resolve_project_repository_authority(
+        context['tenant_id'], context['org_id'], context['project_id']) is None
+
+
+def test_host_grant_legacy_tenant_is_sanitized_unavailable(seeded, publication):
+    context = ready(seeded, publication)
+    jid = job(context)
+    capabilities.ensure_operation(jid, context)
+    op = claim()
+    before = host_grant_snapshot(op)
+    with pytest.raises(capabilities.CampaignUnavailable, match='Host grant is unavailable') as exc:
+        capabilities.read_host_grant('worker-service', host_grant_request(op))
+    assert context['tenant_id'] not in str(exc.value)
+    assert host_grant_snapshot(op) == before
+
+
+@pytest.mark.parametrize('damage', ['extra', 'missing', 'uuid', 'claim', 'empty', 'list'])
+def test_host_grant_closed_request(host_grant_claimed, damage):
+    _, _, op = host_grant_claimed
+    request = host_grant_request(op)
+    if damage == 'extra':
+        request['repository_key'] = str(uuid.uuid4())
+    elif damage == 'missing':
+        del request['claim']
+    elif damage == 'uuid':
+        request['operation_id'] = '{' + op['operation_id'] + '}'
+    elif damage == 'claim':
+        request['claim'] = 'bad claim'
+    elif damage == 'empty':
+        request = {}
+    else:
+        request = []
+    before = host_grant_snapshot(op)
+    with pytest.raises(campaigns.CampaignError):
+        capabilities.read_host_grant('worker-service', request)
+    assert host_grant_snapshot(op) == before
+
+
 def ready(seeded, publication):
     scope, principal, eid = seeded
     capabilities.bind_publication(*scope, eid, principal, publication=publication)
