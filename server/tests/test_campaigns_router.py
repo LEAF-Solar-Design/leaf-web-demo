@@ -185,6 +185,16 @@ def setup(monkeypatch):
     monkeypatch.setattr(router.platform_link, 'require_project_access', access)
     monkeypatch.setattr(router.platform_link, 'resolve_caller_binding',
                         lambda tenant: SimpleNamespace(binding_id=PRINCIPAL))
+    def snapshot(tenant, project, campaign):
+        try:
+            org = access(tenant, project, write=True)
+            return {'enrollments': store.list_enrollments(org, project, campaign),
+                    'allowed_machines': store.allowed_machines()}
+        except router.platform_link.ProjectSessionForbidden:
+            raise router.campaign_capability_api.CapabilityError(403, 'forbidden') from None
+        except CampaignUnavailable:
+            raise router.campaign_capability_api.CapabilityError(404, 'project_unavailable') from None
+    monkeypatch.setattr(router.campaign_capability_api, 'enrollment_snapshot', snapshot)
     app = FastAPI()
     app.include_router(router.router)
     app.dependency_overrides[deps.require_tenant] = lambda: SimpleNamespace(
@@ -196,7 +206,9 @@ def setup(monkeypatch):
     router.set_enrollment_store(None)
 
 
-@pytest.mark.parametrize('op,limit', [('plan', 512 * 1024), ('export', 128 * 1024),
+@pytest.mark.parametrize('op,limit', [('host_op', 128 * 1024), ('host_settle', 128 * 1024),
+                                    ('host_grant', 128 * 1024),
+                                    ('plan', 512 * 1024), ('export', 128 * 1024),
                                     ('product', 6 * 1024 * 1024)])
 def test_bridge_streamed_body_limits(setup, monkeypatch, op, limit):
     client, _, _ = setup
@@ -241,7 +253,7 @@ def test_bridge_duplicate_keys_rejected_before_effects(setup, monkeypatch):
     assert response.status_code == 400 and not calls
 
 
-@pytest.mark.parametrize('operation', ['plan', 'product'])
+@pytest.mark.parametrize('operation', ['plan', 'product', 'host_op', 'host_settle', 'host_grant'])
 def test_bridge_plan_uses_actual_service_subject_guard(setup, monkeypatch, operation):
     import auth
     client, _, _ = setup
@@ -264,7 +276,8 @@ def _submit(client, **overrides):
         'project_id': PROJECT, 'title': 'ReciPDF', 'prompt': 'Organize recipes', **overrides})
 
 
-@pytest.mark.parametrize('op', ['next', 'export', 'bind', 'admit', 'settle', 'recover', 'plan', 'product'])
+@pytest.mark.parametrize('op', ['next', 'export', 'bind', 'admit', 'settle', 'recover', 'plan', 'product',
+                                'host_op', 'host_settle', 'host_grant'])
 @pytest.mark.parametrize('credential', ['browser', 'admin', 'missing'])
 def test_bridge_every_operation_requires_worker(setup, monkeypatch, op, credential):
     import auth
@@ -281,7 +294,8 @@ def test_bridge_every_operation_requires_worker(setup, monkeypatch, op, credenti
     assert response.status_code == (401 if credential == 'missing' else 403)
 
 
-@pytest.mark.parametrize('op', ['next', 'export', 'bind', 'admit', 'settle', 'recover', 'plan'])
+@pytest.mark.parametrize('op', ['next', 'export', 'bind', 'admit', 'settle', 'recover', 'plan',
+                                'host_op', 'host_settle', 'host_grant'])
 def test_bridge_routes_worker_and_redacts_errors(setup, monkeypatch, op):
     client, _, _ = setup
     client.app.dependency_overrides[deps.require_campaign_worker] = lambda: 'worker-service'

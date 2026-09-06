@@ -174,6 +174,25 @@ def _export(enrollment, execution, body, subject):
 
 def handle(op, body, subject):
     """Validate closed requests, resolve persisted authority, and call the ledger."""
+    if op in ('host_op', 'host_settle', 'host_grant'):
+        try:
+            from leaf_platform import campaign_capabilities as capabilities
+            operation = {'host_op': 'claim_host_operation', 'host_settle': 'settle_host_operation',
+                         'host_grant': 'read_host_grant'}[op]
+            return getattr(capabilities, operation)(subject, body)
+        except Exception as exc:
+            from leaf_platform.campaigns import CampaignError, CampaignConflict, CampaignUnavailable
+            if isinstance(exc, CampaignConflict):
+                status = 409
+            elif isinstance(exc, CampaignUnavailable):
+                status = 503
+            elif isinstance(exc, CampaignError):
+                status = 403 if exc.code in ('worker_forbidden', 'project_unavailable') else 400
+            elif isinstance(exc, (ValueError, TypeError, KeyError)):
+                status = 400
+            else:
+                status = 503
+            raise BridgeError(status) from None
     body = _validate(op, body)
     _configured()
     try:
