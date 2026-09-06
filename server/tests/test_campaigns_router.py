@@ -201,6 +201,39 @@ def _submit(client, **overrides):
         'project_id': PROJECT, 'title': 'ReciPDF', 'prompt': 'Organize recipes', **overrides})
 
 
+@pytest.mark.parametrize('phase,error_type,code,status', [
+    ('validation', ValueError, 'invalid_request', 400),
+    ('limit', ValueError, 'invalid_request', 400),
+    ('store', CampaignError, 'invalid_machine', 400),
+    ('store', CampaignConflict, 'idempotency_conflict', 409),
+    ('store', CampaignUnavailable, 'project_unavailable', 404),
+    ('store', CampaignUnavailable, 'source_unavailable', 503),
+    ('store', CampaignUnavailable, 'worker_unavailable', 503),
+    ('store', CampaignUnavailable, 'campaigns_unavailable', 503),
+])
+def test_campaign_errors_keep_contract_without_exception_text(setup, monkeypatch, phase, error_type, code, status):
+    client, store, _ = setup
+    sentinel = 'PRIVATE_CAMPAIGN_EXCEPTION_SENTINEL'
+
+    def fail(*args, **kwargs):
+        if error_type is ValueError:
+            raise ValueError(sentinel)
+        raise error_type(code, sentinel)
+
+    if phase == 'limit':
+        response = client.get('/api/campaigns', params={'project_id': PROJECT, 'limit': sentinel})
+    else:
+        if phase == 'validation':
+            monkeypatch.setattr(router, '_id', fail)
+        else:
+            monkeypatch.setattr(store, 'submit_campaign', fail)
+        response = _submit(client)
+    assert response.status_code == status
+    assert response.json()['error']['error_code'] == code
+    assert response.json()['error']['retryable'] is (status >= 500)
+    assert sentinel not in response.text
+
+
 def test_enrollment_human_routes_and_server_owned_fields(setup):
     client, store, allowed = setup
     campaign = _submit(client).json()['campaign']['campaign_id']

@@ -154,8 +154,8 @@ describe.skipIf(!url)("real Git project source bundle export", () => {
     expect((await post(undefined, "source-test-secret", randomUUID())).status).toBe(400);
     expect((await post(JSON.stringify({ ...body, path: "forbidden" }))).status).toBe(400);
     expect((await post(JSON.stringify({ ...body, source_commit: "bad" }))).status).toBe(400);
-    expect((await post(JSON.stringify(body).replace("{", '{"repo_key":"' + authority.repoKey + '",'))).status).toBe(400);
-    expect((await post(JSON.stringify(body).replace("{", '{"repo_\\u006bey":"' + authority.repoKey + '",'))).status).toBe(400);
+    expect((await post('{"repo_key":"' + authority.repoKey + '",' + JSON.stringify(body).slice(1))).status).toBe(400);
+    expect((await post('{"repo_\\u006bey":"' + authority.repoKey + '",' + JSON.stringify(body).slice(1))).status).toBe(400);
     expect((await post(" ".repeat(256 * 1024) + JSON.stringify(body))).status).toBe(400);
     expect((await post(JSON.stringify({ ...body, source_tree: "f".repeat(40) }))).status).toBe(409);
     for (let i = 0; i < 2; i++) {
