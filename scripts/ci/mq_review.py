@@ -143,6 +143,32 @@ def main(argv=None):
         parser.error("--head-sha must be a full commit SHA")
     try:
         if args.deferred:
+            page = 1
+            while True:
+                branches = github(
+                    f"repos/{REPO}/commits/{args.head_sha}/branches-where-head"
+                    f"?per_page=100&page={page}", expected_status=200)
+                if not isinstance(branches, list):
+                    raise RuntimeError("GitHub branches response is invalid")
+                for branch in branches:
+                    name = branch["name"]
+                    if not isinstance(name, str):
+                        raise RuntimeError("GitHub branch name is invalid")
+                    if name.startswith("gh-readonly-queue/"):
+                        print(f"refusing deferred mq-review: {args.head_sha[:12]} "
+                              f"is the head of merge-queue branch {name}")
+                        return 1
+                if len(branches) < 100:
+                    break
+                page += 1
+            for entry in read_queue():
+                head = entry["headCommit"]["oid"]
+                if not isinstance(head, str) or not SHA40.fullmatch(head):
+                    raise RuntimeError("GitHub queue head is invalid")
+                if head.lower() == args.head_sha.lower():
+                    print(f"refusing deferred mq-review: {args.head_sha[:12]} "
+                          "is a live merge-group head")
+                    return 1
             payload = {"context": CONTEXT, "state": "success",
                        "description": "deferred: the real mq-review check runs on the merge group"}
             if os.environ.get("CODEBUILD_BUILD_URL"):
