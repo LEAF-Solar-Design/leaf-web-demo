@@ -59,7 +59,7 @@ def newest_review(statuses):
     return latest["state"]
 
 
-def github(path, payload=None, expected_status=None):
+def github(path, payload=None, expected_status=None, step="request"):
     token = os.environ.get("GH_TOKEN", "")
     if not token or any(c in token for c in '\r\n'):
         raise RuntimeError("GH_TOKEN is missing or invalid")
@@ -74,20 +74,19 @@ def github(path, payload=None, expected_status=None):
     if payload is not None:
         command += ["--header", "Content-Type: application/json",
                     "--data-raw", json.dumps(payload)]
-    if expected_status is not None:
-        command += ["--write-out", "\n%{http_code}"]
+    command += ["--write-out", "\n%{http_code}"]
     result = subprocess.run(command, input=config, text=True, capture_output=True)
+    body, separator, status = result.stdout.rpartition("\n")
+    status = status if separator and re.fullmatch(r"[0-9]{3}", status) else "unknown"
+    failure = f"{step} rc={result.returncode} http={status}"
     if result.returncode:
-        raise RuntimeError("GitHub request failed")
-    body = result.stdout
-    if expected_status is not None:
-        body, separator, status = body.rpartition("\n")
-        if not separator or status != str(expected_status):
-            raise RuntimeError("GitHub returned unexpected HTTP status")
+        raise RuntimeError(f"GitHub request failed: {failure}")
+    if status == "unknown" or (expected_status is not None and status != str(expected_status)):
+        raise RuntimeError(f"GitHub returned unexpected HTTP status: {failure}")
     try:
         return json.loads(body)
     except ValueError:
-        raise RuntimeError("GitHub returned invalid JSON") from None
+        raise RuntimeError(f"GitHub returned invalid JSON: {failure}") from None
 
 
 def read_queue():
@@ -103,7 +102,8 @@ def read_queue():
     entries, cursor = [], None
     seen = set()
     while True:
-        response = github("graphql", {"query": query, "variables": {"cursor": cursor}})
+        response = github("graphql", {"query": query, "variables": {"cursor": cursor}},
+                          step="queue query")
         if response.get("errors"):
             raise RuntimeError("GitHub queue query failed")
         queue = response["data"]["repository"]["mergeQueue"]
@@ -125,7 +125,8 @@ def read_review(head):
         raise ValueError("headRefOid must be a full 40-hex commit sha")
     statuses, page = [], 1
     while True:
-        batch = github(f"repos/{REPO}/commits/{head}/statuses?per_page=100&page={page}")
+        batch = github(f"repos/{REPO}/commits/{head}/statuses?per_page=100&page={page}",
+                       step="statuses read")
         if not isinstance(batch, list):
             raise RuntimeError("GitHub statuses response is invalid")
         statuses.extend(batch)
@@ -147,7 +148,7 @@ def main(argv=None):
             while True:
                 branches = github(
                     f"repos/{REPO}/commits/{args.head_sha}/branches-where-head"
-                    f"?per_page=100&page={page}", expected_status=200)
+                    f"?per_page=100&page={page}", expected_status=200, step="branches-where-head")
                 if not isinstance(branches, list):
                     raise RuntimeError("GitHub branches response is invalid")
                 for branch in branches:
@@ -173,7 +174,8 @@ def main(argv=None):
                        "description": "deferred: the real mq-review check runs on the merge group"}
             if os.environ.get("CODEBUILD_BUILD_URL"):
                 payload["target_url"] = os.environ["CODEBUILD_BUILD_URL"]
-            github(f"repos/{REPO}/statuses/{args.head_sha}", payload, expected_status=201)
+            github(f"repos/{REPO}/statuses/{args.head_sha}", payload, expected_status=201,
+                   step="statuses POST")
             print(f"{CONTEXT}: success: {payload['description']}")
             return 0
         before = members_for(read_queue(), args.head_sha)
@@ -188,13 +190,16 @@ def main(argv=None):
                    "description": reason[:139]}
         if os.environ.get("CODEBUILD_BUILD_URL"):
             payload["target_url"] = os.environ["CODEBUILD_BUILD_URL"]
-        github(f"repos/{REPO}/statuses/{args.head_sha}", payload)
+        github(f"repos/{REPO}/statuses/{args.head_sha}", payload, step="statuses POST")
         print(f"{CONTEXT}: {payload['state']}: {payload['description']}")
         return 0 if ok else 1
     except NotQueued:
         print("Not queued: group was destroyed or merged; no status posted")
         return 2
-    except (RuntimeError, KeyError, TypeError, ValueError, OSError):
+    except RuntimeError as exc:
+        print(f"mq-review failed: {exc}")
+        return 1
+    except (KeyError, TypeError, ValueError, OSError):
         # API bodies and subprocess errors can carry sensitive material.
         print("mq-review failed: unable to read or publish GitHub state")
         return 1
