@@ -15,9 +15,8 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
 
 import StageLayer from './StageLayer.jsx'
-import LandingCast from './LandingCast.jsx'
+import LandingCast, { enterWorkspace } from './LandingCast.jsx'
 import ToolCast from './ToolCast.jsx'
-import { navigate } from './router.js'
 import { WorkspaceControllerProvider } from '../controllers/WorkspaceControllerProvider.jsx'
 import { operatorWorkspaceMount } from '../controllers/workspaceMount.js'
 import { useDrawingIdentity } from '../drawing/DrawingIdentityProvider.jsx'
@@ -63,7 +62,7 @@ export default function StageScene({ scene, stageRef, publicDemo = false }) {
           onSelectEntity={scene === 'tool' ? setOperatorSelectedHandle : undefined}
           overlay={scene === 'tool' ? operatorOverlay : null}
         />
-        <LandingCast onTryTool={() => navigate('/try')} />
+        <LandingCast onTryTool={enterWorkspace} />
         <ToolCast
           active={scene === 'tool'}
           drawingId={operatorDrawingId}
