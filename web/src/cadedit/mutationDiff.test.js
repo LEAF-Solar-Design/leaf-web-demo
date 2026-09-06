@@ -137,6 +137,7 @@ describe('W4g-7b-01c: references and definitions are opaque', () => {
   it.each([
     { name: 'Other' }, { ip: [11, 20, 0] }, { rotationDeg: 180 },
     { scale: [-2, 3, 1] }, { layer: 'Elsewhere' },
+    { columns: 2 }, { rows: 2 }, { columnSpacing: 10 }, { rowSpacing: 10 },
   ])('refuses changed INSERT fields: %j', (change) => {
     expect(diffPlan(projection(), projection({ ...insert, ...change }))).toEqual({
       mutations: null, count: 0, reason: 'entity 500 is a INSERT the plan cannot carry, and it changed',
@@ -158,5 +159,20 @@ describe('W4g-7b-01c: references and definitions are opaque', () => {
     const foreign = { id: '123', type: 'FUTURE', editable: false, vertices: [[0, 0, 0], [1, 1, 0]] }
     expect(diffPlan([foreign], [{ ...foreign, vertices: [[2, 2, 0], [3, 3, 0]] }]).reason).toMatch(/FUTURE.*cannot carry/)
     expect(diffPlan([foreign], [foreign])).toEqual({ mutations: {}, count: 0, reason: null })
+  })
+
+  it('refuses a changed digest even when listed children are unchanged', () => {
+    const before = projection(insert, { ...block, complete: false, digest: 'a010000000000001' })
+    const after = structuredClone(before)
+    after.blocks[0].digest = 'a010000000000002'
+    expect(before.blocks[0].children).toEqual(after.blocks[0].children)
+    expect(diffPlan(before, after).reason).toMatch(/definition.*cannot carry/)
+    expect(diffPlan(before, structuredClone(before))).toEqual({ mutations: {}, count: 0, reason: null })
+  })
+
+  it('uses the full digest rather than the bounded drawing catalogue', () => {
+    const before = projection(insert, { ...block, complete: false, digest: 'a010000000000001' })
+    const after = projection(insert, { ...before.blocks[0], children: [] })
+    expect(diffPlan(before, after)).toEqual({ mutations: {}, count: 0, reason: null })
   })
 })

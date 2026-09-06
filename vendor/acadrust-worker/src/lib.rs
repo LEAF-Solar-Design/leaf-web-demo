@@ -316,6 +316,10 @@ fn entity_record(index: usize, entity: &EntityType, can_edit: bool) -> serde_jso
         record["name"] = serde_json::json!(insert.block_name);
         record["ip"] = serde_json::json!([insert.insert_point.x, insert.insert_point.y, insert.insert_point.z]);
         record["scale"] = serde_json::json!([insert.x_scale(), insert.y_scale(), insert.z_scale()]);
+        record["columns"] = serde_json::json!(insert.column_count);
+        record["rows"] = serde_json::json!(insert.row_count);
+        record["columnSpacing"] = serde_json::json!(insert.column_spacing);
+        record["rowSpacing"] = serde_json::json!(insert.row_spacing);
     }
     record
 }
@@ -328,11 +332,39 @@ fn projected_entities(document: &CadDocument) -> Vec<serde_json::Value> {
         .collect()
 }
 
-fn block_catalogue(document: &CadDocument) -> Vec<serde_json::Value> {
+// FNV-1a over length-delimited full records, in membership order. Debug is
+// the pinned crate's full-field representation, including unsupported kinds.
+// Ownership comes from the block's membership, not a missing source group 330
+// that the writer will populate on the first round trip.
+fn block_digest(document: &CadDocument, block: &acadrust::tables::BlockRecord, base_unknown: bool) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    let mut feed = |value: String| {
+        for byte in (value.len() as u64).to_le_bytes().iter().chain(value.as_bytes()) {
+            hash = (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
+        }
+    };
+    feed(format!("{:?}:{base_unknown}:{:?}:{}", block_base(document, block), block.flags, block.xref_path));
+    for handle in &block.entity_handles {
+        feed(handle_id(handle.value()));
+        match document.get_entity(*handle) {
+            Some(entity) => {
+                let mut canonical = entity.clone();
+                if canonical.common().owner_handle.is_null() {
+                    canonical.common_mut().owner_handle = block.handle;
+                }
+                feed(format!("{canonical:?}"));
+            }
+            None => feed("missing".to_string()),
+        }
+    }
+    format!("{hash:016x}")
+}
+
+fn block_catalogue(document: &CadDocument, base_unknown: bool) -> Vec<serde_json::Value> {
     document.block_records.iter()
         .filter(|b| !b.is_model_space() && !b.is_paper_space())
         .map(|block| {
-            let mut complete = block.entity_handles.len() <= BLOCK_CHILD_CAP && !block.flags.has_attributes;
+            let mut complete = !base_unknown && block.entity_handles.len() <= BLOCK_CHILD_CAP && !block.flags.has_attributes;
             let mut children = Vec::new();
             for handle in block.entity_handles.iter().take(BLOCK_CHILD_CAP) {
                 match document.get_entity(*handle) {
@@ -345,7 +377,8 @@ fn block_catalogue(document: &CadDocument) -> Vec<serde_json::Value> {
                     _ => complete = false,
                 }
             }
-            serde_json::json!({ "name": block.name, "base": block_base(document, block), "children": children, "complete": complete })
+            serde_json::json!({ "name": block.name, "base": block_base(document, block), "children": children,
+                "complete": complete, "baseUnknown": base_unknown, "digest": block_digest(document, block, base_unknown) })
         })
         .collect()
 }
@@ -353,6 +386,7 @@ fn block_catalogue(document: &CadDocument) -> Vec<serde_json::Value> {
 // The pinned DXF reader records block handles but discards the BLOCK marker.
 // Retain its base in the wrapper so the post-write pass has the source value.
 fn retain_block_bases(document: &mut CadDocument, bytes: &[u8]) -> Result<(), Refusal> {
+    if bytes.starts_with(b"AutoCAD Binary DXF") { return Ok(()); }
     let text = match std::str::from_utf8(bytes) { Ok(text) => text, Err(_) => return Ok(()) };
     let lines: Vec<&str> = text.lines().collect();
     let code = |i: usize| lines.get(i).and_then(|s| s.trim().parse::<i32>().ok());
@@ -408,11 +442,78 @@ fn retain_block_bases(document: &mut CadDocument, bytes: &[u8]) -> Result<(), Re
     Ok(())
 }
 
+// Inspect source names before the crate's case-insensitive table can replace
+// a definition and orphan its children. TABLES and BLOCKS each list names once.
+fn validate_block_names(bytes: &[u8]) -> Result<(), Refusal> {
+    let mut definitions = HashMap::<String, String>::new();
+    let mut records = HashMap::<String, String>::new();
+    let mut section = String::new();
+    let mut record = String::new();
+    let mut visit = |code: i32, value: &str| -> Result<(), Refusal> {
+        if code == 0 {
+            if value == "ENDSEC" { section.clear(); }
+            record = value.to_string();
+        } else if code == 2 {
+            if record == "SECTION" {
+                section = value.to_string();
+            } else if (section == "BLOCKS" && record == "BLOCK") || (section == "TABLES" && record == "BLOCK_RECORD") {
+                let key = value.to_uppercase();
+                if key == "*MODEL_SPACE" || key.starts_with("*PAPER_SPACE") { return Ok(()); }
+                let names = if record == "BLOCK" { &mut definitions } else { &mut records };
+                if let Some(previous) = names.insert(key, value.to_string()) {
+                    return Err(format!("block names collide case-insensitively: {previous}, {value}"));
+                }
+            }
+        }
+        Ok(())
+    };
+    if !bytes.starts_with(b"AutoCAD Binary DXF") {
+        let text = String::from_utf8_lossy(bytes);
+        let mut lines = text.lines();
+        while let (Some(code), Some(value)) = (lines.next(), lines.next()) {
+            if let Ok(code) = code.trim().parse() { visit(code, value)?; }
+        }
+        return Ok(());
+    }
+    // Binary names need the same preflight. Use the crate's public group-type
+    // mapping to skip values, including pre-R13 single-byte group codes.
+    use acadrust::io::dxf::GroupCodeValueType as ValueType;
+    let mut at = 22usize;
+    let single_byte = bytes.get(at) == Some(&0) && bytes.get(at + 1).map_or(false, |b| (0x20..0x7f).contains(b));
+    while at < bytes.len() {
+        let code = if single_byte && bytes[at] != 255 {
+            let code = i32::from(bytes[at]);
+            at += 1;
+            code
+        } else {
+            if single_byte { at += 1; }
+            let pair = bytes.get(at..at + 2).ok_or("block_name_scan_truncated")?;
+            at += 2;
+            i32::from(i16::from_le_bytes([pair[0], pair[1]]))
+        };
+        let size = match ValueType::from_raw_code(code) {
+            ValueType::String | ValueType::Handle | ValueType::None => {
+                let length = bytes[at..].iter().position(|b| *b == 0).ok_or("block_name_scan_truncated")?;
+                visit(code, &String::from_utf8_lossy(&bytes[at..at + length]))?;
+                length + 1
+            }
+            ValueType::Double | ValueType::Point3D | ValueType::Int64 => 8,
+            ValueType::Int32 => 4,
+            ValueType::Int16 | ValueType::Byte => 2,
+            ValueType::Bool => 1,
+            ValueType::BinaryData => 1 + usize::from(*bytes.get(at).ok_or("block_name_scan_truncated")?),
+        };
+        at = at.checked_add(size).filter(|end| *end <= bytes.len()).ok_or("block_name_scan_truncated")?;
+    }
+    Ok(())
+}
+
 fn parse_dxf_core(bytes: &[u8]) -> Result<ParsedDxf, Refusal> {
+    validate_block_names(bytes)?;
     let mut inner = DxfReader::from_reader(std::io::Cursor::new(bytes.to_vec()))
         .map_err(|e| e.to_string())?.read().map_err(|e| e.to_string())?;
     retain_block_bases(&mut inner, bytes)?;
-    Ok(ParsedDxf { inner, block_base_patched: Cell::new(false) })
+    Ok(ParsedDxf { inner, block_base_patched: Cell::new(false), block_bases_unknown: bytes.starts_with(b"AutoCAD Binary DXF") })
 }
 
 // Validate all BLOCK layouts before emitting any replacement. Keep every byte
@@ -509,6 +610,7 @@ fn created_layer(layer: &str) -> Result<String, Refusal> {
 pub struct ParsedDxf {
     inner: CadDocument,
     block_base_patched: Cell<bool>,
+    block_bases_unknown: bool,
 }
 
 // ---- the cores: every operation, natively testable ------------------------
@@ -524,11 +626,11 @@ impl ParsedDxf {
     }
 
     fn entity_mut(&mut self, index: usize) -> Result<&mut EntityType, Refusal> {
-        self.editable_at(index)?;
+        let handle = self.editable_at(index)?.common().handle;
         self.inner
             .entities_mut()
-            .nth(index)
-            .ok_or_else(|| "entity_index_out_of_range".to_string())
+            .find(|entity| entity.common().handle == handle)
+            .ok_or_else(|| "entity_handle_not_found".to_string())
     }
 
     fn delete_entity_core(&mut self, index: usize) -> Result<(), Refusal> {
@@ -1311,7 +1413,7 @@ impl ParsedDxf {
         let serializer = serde_wasm_bindgen::Serializer::json_compatible();
         let list = projected_entities(&self.inner).serialize(&serializer)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        let blocks = block_catalogue(&self.inner).serialize(&serializer)
+        let blocks = block_catalogue(&self.inner, self.block_bases_unknown).serialize(&serializer)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         if !set_projection_field(&list, &JsValue::from_str("blocks"), &blocks) {
             return Err(JsValue::from_str("block_catalogue_projection_failed"));
@@ -1323,6 +1425,16 @@ impl ParsedDxf {
     #[wasm_bindgen(getter, js_name = blockBasePatched)]
     pub fn block_base_patched(&self) -> bool {
         self.block_base_patched.get()
+    }
+
+    #[wasm_bindgen(getter, js_name = blockBasesUnknown)]
+    pub fn block_bases_unknown(&self) -> bool {
+        self.block_bases_unknown
+    }
+
+    #[wasm_bindgen(setter, js_name = blockBasesUnknown)]
+    pub fn set_block_bases_unknown(&mut self, unknown: bool) {
+        self.block_bases_unknown = unknown;
     }
 
     /// Deletes the entity at `index` (current document order) via the
@@ -1581,7 +1693,7 @@ pub fn write_dxf(doc: &ParsedDxf) -> Result<Vec<u8>, JsValue> {
     let bytes = DxfWriter::new(&doc.inner)
         .write_to_vec()
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let (bytes, patched) = patch_block_bases(&doc.inner, bytes);
+    let (bytes, patched) = if doc.block_bases_unknown { (bytes, false) } else { patch_block_bases(&doc.inner, bytes) };
     doc.block_base_patched.set(patched);
     Ok(bytes)
 }
@@ -1614,7 +1726,7 @@ mod created_entity_roundtrip {
     }
 
     fn empty_doc() -> ParsedDxf {
-        ParsedDxf { inner: CadDocument::new(), block_base_patched: Cell::new(false) }
+        ParsedDxf { inner: CadDocument::new(), block_base_patched: Cell::new(false), block_bases_unknown: false }
     }
 
     fn kinds(doc: &ParsedDxf) -> Vec<&'static str> {
@@ -1635,7 +1747,7 @@ mod created_entity_roundtrip {
     }
 
     fn rewrite(doc: &ParsedDxf) -> ParsedDxf {
-        ParsedDxf { inner: reparse(&doc.inner), block_base_patched: Cell::new(false) }
+        ParsedDxf { inner: reparse(&doc.inner), block_base_patched: Cell::new(false), block_bases_unknown: doc.block_bases_unknown }
     }
 
     fn code<T>(result: Result<T, Refusal>) -> String {
@@ -2370,7 +2482,7 @@ mod block_definition_rows {
 
     fn fixture(children: &str, with_insert: bool) -> Vec<u8> {
         let insert = if with_insert {
-            "0\nINSERT\n5\n500\n8\nRefs\n2\nB\n10\n10\n20\n20\n30\n3\n41\n-2\n42\n3\n43\n4\n50\n90\n"
+            "0\nINSERT\n5\n500\n8\nRefs\n2\nB\n10\n10\n20\n20\n30\n3\n41\n-2\n42\n3\n43\n4\n50\n90\n70\n2\n71\n1\n44\n10\n45\n4\n"
         } else { "" };
         format!("0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1027\n0\nENDSEC\n\
             0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n5\n40\n8\n0\n2\nB\n70\n0\n10\n1\n20\n2\n30\n0\n\
@@ -2394,6 +2506,10 @@ mod block_definition_rows {
         assert_eq!(reference["name"], "B");
         assert_eq!(reference["ip"], serde_json::json!([10.0, 20.0, 3.0]));
         assert_eq!(reference["scale"], serde_json::json!([-2.0, 3.0, 4.0]));
+        assert_eq!(reference["columns"], 2);
+        assert_eq!(reference["rows"], 1);
+        assert_eq!(reference["columnSpacing"], 10.0);
+        assert_eq!(reference["rowSpacing"], 4.0);
         assert_eq!(reference["rotationDeg"], 90.0);
         assert_eq!(reference["layer"], "Refs");
         assert_eq!(reference["editable"], false);
@@ -2409,7 +2525,7 @@ mod block_definition_rows {
         assert_eq!(DxfWriter::new(&doc.inner).write_to_vec().unwrap(), before);
         let no_insert = parsed(fixture(&format!("{LINE}{CIRCLE}"), false));
         assert!(projected_entities(&no_insert.inner).is_empty());
-        let blocks = block_catalogue(&doc.inner);
+        let blocks = block_catalogue(&doc.inner, doc.block_bases_unknown);
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0]["base"], serde_json::json!([1.0, 2.0, 0.0]));
         assert_eq!(blocks[0]["complete"], true);
@@ -2423,7 +2539,7 @@ mod block_definition_rows {
     fn w7b_01c_catalogue_caps_children_and_marks_unsupported_definitions() {
         let children: String = (0..61).map(|i| LINE.replace("100\n", &format!("{:X}\n", 0x100 + i))).collect();
         let doc = parsed(fixture(&children, true));
-        let blocks = block_catalogue(&doc.inner);
+        let blocks = block_catalogue(&doc.inner, doc.block_bases_unknown);
         assert_eq!(blocks[0]["children"].as_array().unwrap().len(), BLOCK_CHILD_CAP);
         assert_eq!(blocks[0]["complete"], false);
         for unsupported in [
@@ -2432,11 +2548,96 @@ mod block_definition_rows {
             "0\nATTDEF\n5\n100\n8\n0\n10\n1\n20\n2\n30\n0\n40\n1\n1\nvalue\n2\nTAG\n3\nprompt\n70\n0\n",
         ] {
             let doc = parsed(fixture(unsupported, true));
-            let blocks = block_catalogue(&doc.inner);
+            let blocks = block_catalogue(&doc.inner, doc.block_bases_unknown);
             assert_eq!(blocks[0]["complete"], false);
             assert!(blocks[0]["children"].as_array().unwrap().is_empty());
             assert_eq!(projected_entities(&doc.inner).len(), 1);
         }
+    }
+
+    #[test]
+    fn w7b_01c_delete_then_move_resolves_the_validated_handle() {
+        let model: String = (0..3).map(|i| format!(
+            "0\nLINE\n5\n{:X}\n8\n0\n10\n{}\n20\n0\n30\n0\n11\n{}\n21\n0\n31\n0\n", 0x600 + i, 10 + i * 10, 11 + i * 10)).collect();
+        let source = String::from_utf8(fixture(LINE, false)).unwrap().replace("2\nENTITIES\n", &format!("2\nENTITIES\n{model}"));
+        let mut doc = parsed(source.into_bytes());
+        let index = |doc: &ParsedDxf, handle: u64| doc.inner.entities().position(|e| e.common().handle == Handle::new(handle)).unwrap();
+        let marker = doc.inner.block_records.get("B").unwrap().block_entity_handle;
+        let untouched: Vec<_> = [Handle::new(0x100), Handle::new(0x601), marker].iter()
+            .map(|h| format!("{:?}", doc.inner.get_entity(*h).unwrap())).collect();
+        doc.delete_entity_core(index(&doc, 0x600)).unwrap();
+        doc.translate_entity_core(index(&doc, 0x602), 5.0, 0.0).unwrap();
+        assert!(doc.inner.get_entity(Handle::new(0x600)).is_none());
+        assert_eq!(vertices_of(doc.inner.get_entity(Handle::new(0x602)).unwrap()), vec![[35.0, 0.0, 0.0], [36.0, 0.0, 0.0]]);
+        for (i, handle) in [Handle::new(0x100), Handle::new(0x601), marker].iter().enumerate() {
+            assert_eq!(format!("{:?}", doc.inner.get_entity(*handle).unwrap()), untouched[i]);
+        }
+    }
+
+    #[test]
+    fn w7b_01c_digest_covers_uncapped_and_unsupported_children_and_properties() {
+        let children: String = (0..61).map(|i| LINE.replace("100\n", &format!("{:X}\n", 0x100 + i))).collect();
+        let mut doc = parsed(fixture(&children, true));
+        let before = block_catalogue(&doc.inner, false);
+        let (written, patched) = patch_block_bases(&doc.inner, DxfWriter::new(&doc.inner).write_to_vec().unwrap());
+        assert!(patched);
+        let back = parsed(written);
+        assert_eq!(before, block_catalogue(&back.inner, false));
+        doc.inner.get_entity_mut(Handle::new(0x100 + 60)).unwrap().translate(Vector3::new(5.0, 0.0, 0.0));
+        let after = block_catalogue(&doc.inner, false);
+        assert_eq!(before[0]["children"], after[0]["children"]);
+        assert_ne!(before[0]["digest"], after[0]["digest"]);
+        assert_eq!(before[0]["digest"].as_str().unwrap().len(), 16);
+
+        let mut doc = parsed(fixture("0\nPOINT\n5\n100\n8\n0\n10\n1\n20\n2\n30\n0\n", true));
+        let before = block_catalogue(&doc.inner, false);
+        doc.inner.get_entity_mut(Handle::new(0x100)).unwrap().translate(Vector3::new(5.0, 0.0, 0.0));
+        let after = block_catalogue(&doc.inner, false);
+        assert_eq!(before[0]["children"], after[0]["children"]);
+        assert_ne!(before[0]["digest"], after[0]["digest"]);
+
+        let mut doc = parsed(fixture(LINE, true));
+        let before = block_catalogue(&doc.inner, false);
+        if let Some(EntityType::Line(line)) = doc.inner.get_entity_mut(Handle::new(0x100)) { line.thickness = 7.0; }
+        assert_ne!(before[0]["digest"], block_catalogue(&doc.inner, false)[0]["digest"]);
+    }
+
+    fn binary_fixture(ascii: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut writer = acadrust::io::dxf::DxfBinaryWriter::new(&mut bytes).unwrap();
+        let source = std::str::from_utf8(ascii).unwrap();
+        let lines: Vec<_> = source.lines().collect();
+        for pair in lines.chunks_exact(2) {
+            let code: i32 = pair[0].parse().unwrap();
+            match code {
+                10..=59 => writer.write_double(code, pair[1].parse().unwrap()).unwrap(),
+                60..=79 => writer.write_i16(code, pair[1].parse().unwrap()).unwrap(),
+                _ => writer.write_string(code, pair[1]).unwrap(),
+            }
+        }
+        bytes
+    }
+
+    #[test]
+    fn w7b_01c_case_collisions_refuse_before_membership_can_leak() {
+        let source = String::from_utf8(fixture(LINE, true)).unwrap();
+        let collision = source.replace("0\nENDSEC\n0\nSECTION\n2\nENTITIES", &format!(
+            "0\nBLOCK\n5\n42\n8\n0\n2\nb\n70\n0\n10\n1\n20\n2\n30\n0\n{}0\nENDBLK\n5\n43\n8\n0\n0\nENDSEC\n0\nSECTION\n2\nENTITIES", LINE.replace("100\n", "101\n")));
+        for bytes in [collision.as_bytes().to_vec(), binary_fixture(collision.as_bytes())] {
+            assert_eq!(parse_dxf_core(&bytes).err().unwrap(), "block names collide case-insensitively: B, b");
+        }
+        assert!(parse_dxf_core(source.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn w7b_01c_binary_blocks_have_unknown_bases() {
+        let doc = parsed(binary_fixture(&fixture(LINE, true)));
+        assert!(doc.block_bases_unknown);
+        let blocks = block_catalogue(&doc.inner, doc.block_bases_unknown);
+        assert_eq!(blocks[0]["baseUnknown"], true);
+        assert_eq!(blocks[0]["complete"], false);
+        assert_eq!(blocks[0]["children"].as_array().unwrap().len(), 1);
+        assert_eq!(projected_entities(&doc.inner)[0]["type"], "INSERT");
     }
 
     #[test]

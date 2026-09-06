@@ -17,7 +17,7 @@ import { existsSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { engineIntake } from '../cadedit/engineIntake.js'
+import { engineIntake, hexHandle } from '../cadedit/engineIntake.js'
 import { diffPlan } from '../cadedit/mutationDiff.js'
 
 function createEditorWorker() {
@@ -296,7 +296,7 @@ const BLOCK_SCRIPT = [
   'const { handleMessage } = await import(pathToFileURL(workerPath).href)',
   'const bytes = new TextEncoder().encode(dxf)',
   'const projection = (entities, blocks = entities?.blocks) => ({ entities: Array.from(entities || []), blocks })',
-  'const reply = (r) => ({ type: r.type, op: r.op, ok: r.ok, reason: r.reason, blockBasePatched: r.blockBasePatched, ...projection(r.entities, r.blocks) })',
+  'const reply = (r) => ({ type: r.type, op: r.op, ok: r.ok, reason: r.reason, refusal: r.refusal, writable: r.writable, blockBasePatched: r.blockBasePatched, ...projection(r.entities, r.blocks) })',
   'const doc = engine.parseDxf(bytes)',
   'const direct = projection(doc.editableEntities())',
   'const written = engine.writeDxf(doc)',
@@ -328,6 +328,47 @@ const BLOCK_SCRIPT = [
   'const movedBytes = new TextEncoder().encode(dxf.replace("10\\n10\\n20\\n20\\n", "10\\n11\\n20\\n20\\n"))',
   'const rawMoved = await handleMessage({ type: "loadDocument", documentId: "raw-moved.dxf", bytes: movedBytes }, engine)',
   'out.rawMoved = reply(rawMoved)',
+  'const load = async (source) => reply(await handleMessage({ type: "loadDocument", documentId: "variant.dxf", bytes: typeof source === "string" ? new TextEncoder().encode(source) : source }, engine))',
+  'const children = dxf.slice(dxf.indexOf("0\\nLINE\\n"), dxf.indexOf("0\\nENDBLK\\n"))',
+  'const childLine = children.slice(0, children.indexOf("0\\nCIRCLE\\n"))',
+  'const onlyLine = dxf.replace(children, childLine)',
+  'const model = Array.from({ length: 3 }, (_, i) => ["0", "LINE", "5", (0x600 + i).toString(16), "8", "0", "10", 10 + i * 10, "20", 0, "30", 0, "11", 11 + i * 10, "21", 0, "31", 0].join("\\n") + "\\n").join("")',
+  'const skewSource = onlyLine.slice(0, onlyLine.indexOf("0\\nINSERT\\n")) + model + "0\\nENDSEC\\n0\\nEOF\\n"',
+  'out.skewBefore = await load(skewSource)',
+  'out.skew = reply(await handleMessage({ type: "applyEdit", op: "batch", payload: { steps: [',
+  '  { op: "delete", payload: { entityId: "1536" } },',
+  '  { op: "move", payload: { entityId: "1538", dx: 5, dy: 0 } },',
+  '] } }, engine))',
+  'const many = Array.from({ length: 61 }, (_, i) => childLine.replace("5\\n100\\n", "5\\n" + (0x100 + i).toString(16) + "\\n"))',
+  'const manySource = dxf.replace(children, many.join(""))',
+  'out.many = await load(manySource)',
+  'const manyDoc = engine.parseDxf(new TextEncoder().encode(manySource))',
+  'out.manyBack = await load(engine.writeDxf(manyDoc)); manyDoc.free()',
+  'many[60] = many[60].replace("10\\n1\\n", "10\\n6\\n")',
+  'out.manyMoved = await load(dxf.replace(children, many.join("")))',
+  'const point = "0\\nPOINT\\n5\\n100\\n8\\n0\\n10\\n1\\n20\\n2\\n30\\n0\\n"',
+  'out.point = await load(dxf.replace(children, point))',
+  'out.pointMoved = await load(dxf.replace(children, point.replace("10\\n1\\n", "10\\n6\\n")))',
+  'out.lowercase = await load(dxf.replace("8\\n0\\n2\\nB\\n10\\n10\\n", "8\\n0\\n2\\nb\\n10\\n10\\n"))',
+  'out.array = await load(onlyLine.replace("50\\n90\\n", "50\\n0\\n70\\n2\\n71\\n1\\n44\\n10\\n45\\n4\\n").replace("41\\n2\\n42\\n3\\n", "41\\n1\\n42\\n1\\n"))',
+  'out.arrayOne = await load(onlyLine.replace("50\\n90\\n", "50\\n0\\n70\\n1\\n71\\n1\\n44\\n10\\n45\\n4\\n").replace("41\\n2\\n42\\n3\\n", "41\\n1\\n42\\n1\\n"))',
+  'const extraBlock = "0\\nBLOCK\\n5\\n42\\n8\\n0\\n2\\nb\\n70\\n0\\n10\\n1\\n20\\n2\\n30\\n0\\n" + childLine.replace("5\\n100\\n", "5\\n102\\n") + "0\\nENDBLK\\n5\\n43\\n8\\n0\\n"',
+  'const colliding = dxf.replace("0\\nENDSEC\\n0\\nSECTION\\n2\\nENTITIES", extraBlock + "0\\nENDSEC\\n0\\nSECTION\\n2\\nENTITIES")',
+  'out.collision = await load(colliding)',
+  'const binary = (text) => {',
+  '  const chunks = [Buffer.from("AutoCAD Binary DXF\\r\\n\\x1a\\x00")]',
+  '  const pairs = text.trimEnd().split("\\n")',
+  '  for (let i = 0; i < pairs.length; i += 2) {',
+  '    const code = Number(pairs[i]); const codeBytes = Buffer.alloc(2); codeBytes.writeInt16LE(code); chunks.push(codeBytes)',
+  '    if (code >= 10 && code <= 59) { const value = Buffer.alloc(8); value.writeDoubleLE(Number(pairs[i + 1])); chunks.push(value) }',
+  '    else if (code >= 60 && code <= 79) { const value = Buffer.alloc(2); value.writeInt16LE(Number(pairs[i + 1])); chunks.push(value) }',
+  '    else chunks.push(Buffer.from(pairs[i + 1] + "\\x00"))',
+  '  }',
+  '  return new Uint8Array(Buffer.concat(chunks))',
+  '}',
+  'out.binaryCollision = await load(binary(colliding))',
+  'out.binary = await load(binary(onlyLine))',
+  'out.binaryEdited = reply(await handleMessage({ type: "applyEdit", op: "createLine", payload: { x1: 0, y1: 0, x2: 1, y2: 0, layer: "0" } }, engine))',
   'process.stdout.write(JSON.stringify(out))',
 ].join('\n')
 
@@ -338,7 +379,7 @@ describe('W4g-7b-01c blocks through the rebuilt wasm and worker', () => {
       encoding: 'utf8', timeout: 90_000, maxBuffer: 16 * 1024 * 1024,
     }))
     expect(out.direct.entities).toHaveLength(1)
-    const reference = { handle: '1280', type: 'INSERT', kind: 'REFERENCE', name: 'B', layer: '0', editable: false, ip: [10, 20, 0], rotationDeg: 90, scale: [2, 3, 1] }
+    const reference = { handle: '1280', type: 'INSERT', kind: 'REFERENCE', name: 'B', layer: '0', editable: false, ip: [10, 20, 0], rotationDeg: 90, scale: [2, 3, 1], columns: 1, rows: 1, columnSpacing: 0, rowSpacing: 0 }
     expect(out.direct.entities[0]).toMatchObject(reference)
     expect(out.direct.blocks).toMatchObject([{ name: 'B', base: [1, 2, 0], complete: true }])
     expect(out.direct.blocks[0].children).toHaveLength(2)
@@ -351,6 +392,7 @@ describe('W4g-7b-01c blocks through the rebuilt wasm and worker', () => {
     const canvas = engineIntake(out.initial)
     expect(canvas.polylines).toHaveLength(2)
     expect(canvas.polylines.map((p) => p.sourceHandle)).toEqual(['500', '500'])
+    expect(canvas.polylines.every((p) => p.sourceHandle === hexHandle(out.initial.entities[0].handle))).toBe(true)
     expect(canvas.polylines[0].pts[0]).toEqual([10, 20, 0])
     expect(canvas.polylines[0].pts[1][0]).toBeCloseTo(10, 9)
     expect(canvas.polylines[0].pts[1][1]).toBeCloseTo(26, 9)
@@ -371,7 +413,35 @@ describe('W4g-7b-01c blocks through the rebuilt wasm and worker', () => {
     expect(out.batched.entities.find((entity) => entity.type === 'LINE').vertices).toEqual([[6, 5, 0], [7, 5, 0]])
     expect(out.batched.blocks).toEqual(out.direct.blocks)
     expect(out.batchRoundtrip.blocks[0].base).toEqual([1, 2, 0])
-    expect(diffPlan(out.initial, out.initial)).toEqual({ mutations: {}, count: 0, reason: null })
+    expect(diffPlan(out.initial, out.roundtrip)).toEqual({ mutations: {}, count: 0, reason: null })
     expect(diffPlan(out.initial, out.rawMoved).reason).toBe('entity 500 is a INSERT the plan cannot carry, and it changed')
+
+    expect(out.skew).toMatchObject({ ok: true, blockBasePatched: true })
+    expect(out.skew.entities.map((e) => e.handle).sort()).toEqual(['1537', '1538'])
+    expect(out.skew.entities.find((e) => e.handle === '1537').vertices).toEqual([[20, 0, 0], [21, 0, 0]])
+    expect(out.skew.entities.find((e) => e.handle === '1538').vertices).toEqual([[35, 0, 0], [36, 0, 0]])
+    expect(out.skew.blocks).toEqual(out.skewBefore.blocks)
+    for (const [before, after] of [[out.many, out.manyMoved], [out.point, out.pointMoved]]) {
+      expect(before.blocks[0].children).toEqual(after.blocks[0].children)
+      expect(before.blocks[0].digest).toMatch(/^[0-9a-f]{16,}$/)
+      expect(before.blocks[0].digest).not.toBe(after.blocks[0].digest)
+      expect(diffPlan(before, after).reason).toMatch(/definition.*cannot carry/)
+    }
+    expect(out.many.blocks[0].children).toHaveLength(60)
+    expect(diffPlan(out.many, out.manyBack)).toEqual({ mutations: {}, count: 0, reason: null })
+    expect(out.lowercase.entities[0].name).toBe('b')
+    expect(engineIntake(out.lowercase).polylines).toHaveLength(2)
+    expect(out.array.entities[0]).toMatchObject({ columns: 2, rows: 1, columnSpacing: 10, rowSpacing: 4 })
+    expect(engineIntake(out.array).polylines.map((p) => p.pts[0])).toEqual([[10, 20, 0], [20, 20, 0]])
+    expect(diffPlan(out.arrayOne, out.array).reason).toMatch(/INSERT.*cannot carry/)
+    for (const collision of [out.collision, out.binaryCollision]) {
+      expect(collision).toMatchObject({ type: 'documentLoaded', writable: false, refusal: 'block names collide case-insensitively: B, b', entities: [], blocks: [] })
+    }
+    expect(out.binary.blocks[0]).toMatchObject({ baseUnknown: true, complete: false })
+    expect(engineIntake(out.binary).polylines).toEqual([])
+    expect(engineIntake(out.binary).inserts).toMatchObject([{ handle: '500', incomplete: true }])
+    expect(out.binaryEdited).toMatchObject({ ok: true, blockBasePatched: false })
+    expect(out.binaryEdited.blocks[0]).toMatchObject({ baseUnknown: true, complete: false })
+    expect(engineIntake(out.binaryEdited).polylines.every((p) => p.sourceHandle == null)).toBe(true)
   })
 })

@@ -21,6 +21,22 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 const CLICK_MOVE_PX = 5      // pointer travel under this = click (not a pan/drag)
 const CLICK_MAX_MS = 500
 
+export function addPickDescriptor(index, handle, descriptor) {
+  if (!index.has(handle)) index.set(handle, [])
+  index.get(handle).push(descriptor)
+}
+
+export function pickHandleFromHits(hits) {
+  for (const hit of hits) {
+    const ud = hit.object.userData
+    if (hit.object.parent?.visible === false) continue
+    const handle = ud.kind === 'polyfill' ? ud.triHandles[hit.faceIndex]
+      : ud.kind === 'blocklines' ? ud.lineHandles[Math.floor(hit.index / 2)] : ud.handle
+    if (handle != null) return handle
+  }
+  return null
+}
+
 function configureControls(controls, enabled, rotate) {
   controls.enabled = enabled !== false
   controls.enableRotate = rotate === true
@@ -245,7 +261,7 @@ const Viewer = forwardRef(function Viewer(
       scene.add(rimLight)
     }
 
-    // pickIndex: handle -> geometry descriptor (for selection highlight redraw)
+    // pickIndex: parent handle -> all geometry descriptors for its highlight.
     const pickIndex = new Map()
     // pickables: flat meshes the raycaster tests (carry handle attribution)
     const pickables = []
@@ -272,7 +288,7 @@ const Viewer = forwardRef(function Viewer(
         const bottomZ = topZ - panelThickness
         minDisplayZ = Math.min(minDisplayZ, bottomZ)
         maxDisplayZ = Math.max(maxDisplayZ, topZ)
-        pickIndex.set(pl.handle, { kind: 'poly', layer: pl.layer, pts })
+        addPickDescriptor(pickIndex, pl.sourceHandle ?? pl.handle, { kind: 'poly', layer: pl.layer, pts })
         // fan-triangulate (panels are convex quads) for a subtle fill; an
         // engine document's OPEN polyline (a line, an arc) is a stroke only.
         const fillThis = !(strokeOnlyOpen && !pl.closed)
@@ -280,7 +296,7 @@ const Viewer = forwardRef(function Viewer(
           fillPos.push(pts[0][0], pts[0][1], topZ)
           fillPos.push(pts[i][0], pts[i][1], topZ)
           fillPos.push(pts[i + 1][0], pts[i + 1][1], topZ)
-          triHandles.push(pl.handle)
+          triHandles.push(pl.sourceHandle ?? pl.handle)
         }
         if (sculpture) {
           // Bottom and four walls turn each unchanged panel into a thin tile.
@@ -346,10 +362,11 @@ const Viewer = forwardRef(function Viewer(
     const insertGroup = new THREE.Group()
     const hs = dataSpan * 0.02 // base half-size of the glyph
     let nInserts = 0
-    const definitions = new Map((activeIntake.blocks || []).map((block) => [block.name, block]))
+    const definitions = new Map((activeIntake.blocks || []).map((block) => [String(block.name).toUpperCase(), block]))
     for (const ins of inserts) {
       if (!ins.pt) continue
-      if (definitions.get(ins.name)?.complete === true && ins.incomplete !== true) continue
+      const definition = definitions.get(String(ins.name).toUpperCase())
+      if (definition?.complete === true && definition.baseUnknown !== true && ins.incomplete !== true) continue
       const geom = new THREE.PlaneGeometry(hs * 2, hs * 2)
       const mat = new THREE.MeshBasicMaterial({
         color: insertColor, transparent: true, opacity: 0.18, depthWrite: false,
@@ -376,7 +393,7 @@ const Viewer = forwardRef(function Viewer(
       insertGroup.add(mesh)
       pickables.push(mesh)
       nInserts++
-      pickIndex.set(ins.handle, { kind: 'insert', layer: ins.layer, pt: ins.pt, rot: ins.rot || 0, scale: [sx || 1, sy || 1], hs })
+      addPickDescriptor(pickIndex, ins.handle, { kind: 'insert', layer: ins.layer, pt: ins.pt, rot: ins.rot || 0, scale: [sx || 1, sy || 1], hs })
     }
     scene.add(insertGroup)
 
@@ -410,7 +427,7 @@ const Viewer = forwardRef(function Viewer(
       bg.setAttribute('position', new THREE.Float32BufferAttribute(bpos, 3))
       const bm = new THREE.LineBasicMaterial({ color: faceColor, transparent: true, opacity: 0.9 })
       faceGroup.add(new THREE.LineSegments(bg, bm))
-      pickIndex.set(f.handle, { kind: 'face', layer: f.layer, pts: ring })
+      addPickDescriptor(pickIndex, f.handle, { kind: 'face', layer: f.layer, pts: ring })
     }
     scene.add(faceGroup)
 
@@ -508,21 +525,7 @@ const Viewer = forwardRef(function Viewer(
       ndc.y = -((e.clientY - rect.top) / rect.height) * 2 + 1
       raycaster.setFromCamera(ndc, camera)
       const hits = raycaster.intersectObjects(pickables, false)
-      let handle = null
-      for (const hit of hits) {
-        const ud = hit.object.userData
-        // respect layer visibility — don't pick hidden geometry
-        const grp = hit.object.parent
-        if (grp && grp.visible === false) continue
-        if (ud.kind === 'polyfill') {
-          handle = ud.triHandles[hit.faceIndex] ?? null
-        } else if (ud.kind === 'blocklines') {
-          handle = ud.lineHandles[Math.floor(hit.index / 2)] ?? null
-        } else if (ud.handle) {
-          handle = ud.handle
-        }
-        if (handle != null) break
-      }
+      const handle = pickHandleFromHits(hits)
       const cb = onSelectRef.current
       if (cb) cb(handle)
     }
@@ -872,8 +875,7 @@ const Viewer = forwardRef(function Viewer(
     g.clear()
     if (!highlightHandles || highlightHandles.length === 0) return
     const fillPos = [], linePos = []
-    for (const h of highlightHandles) {
-      const d = s.pickIndex.get(h)
+    for (const h of highlightHandles) for (const d of s.pickIndex.get(h) || []) {
       if (!d || d.kind !== 'poly') continue
       const pts = d.pts
       for (let i = 1; i < pts.length - 1; i++) {
@@ -904,11 +906,10 @@ const Viewer = forwardRef(function Viewer(
     const g = s.selectionGroup
     g.clear()
     if (!selectedHandle) return
-    const d = s.pickIndex.get(selectedHandle)
-    if (!d) return
     const col = s.tokens.select
     const z = 5
 
+    for (const d of s.pickIndex.get(selectedHandle) || []) {
     if (d.kind === 'poly' || d.kind === 'face') {
       const pts = d.pts
       const fillPos = [], linePos = []
@@ -945,6 +946,7 @@ const Viewer = forwardRef(function Viewer(
       lMesh.scale.set(d.scale[0], d.scale[1], 1)
       lMesh.renderOrder = 21
       g.add(lMesh)
+    }
     }
   }, [selectedHandle, buildTick])
 
@@ -1029,8 +1031,7 @@ const Viewer = forwardRef(function Viewer(
 
     // removed: dashed "struck-out" outline over the entity being deleted
     const remPos = []
-    for (const h of pendingEdit.removed || []) {
-      const d = s.pickIndex.get(h)
+    for (const h of pendingEdit.removed || []) for (const d of s.pickIndex.get(h) || []) {
       if (!d || !d.pts) continue
       const pts = d.pts
       for (let i = 0; i < pts.length; i++) {

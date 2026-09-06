@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import { BLOCK_CHILD_CAP, CIRCLE_SEGMENTS, engineIntake, expandBlockReference } from './engineIntake.js'
+import { BLOCK_CHILD_CAP, CIRCLE_SEGMENTS, MAX_ARRAY_CELLS, engineIntake, expandBlockReference } from './engineIntake.js'
 import { projectionEntities } from './engineSession.js'
 import { diffPlan } from './mutationDiff.js'
+import { addPickDescriptor, pickHandleFromHits } from '../components/Viewer.jsx'
+import * as THREE from 'three'
 
 const line = { handle: '256', type: 'LINE', editable: false, layer: '0', vertices: [[1, 2, 0], [4, 2, 0]], closed: false }
 const circle = { handle: '257', type: 'CIRCLE', editable: false, layer: '0', vertices: [[1, 2, 0]], radius: 1 }
@@ -84,5 +86,53 @@ describe('W4g-7b-01c blockExpansion', () => {
   it('does not turn malformed references into invented geometry', () => {
     expect(expandBlockReference({ ...insert, scale: [2, NaN, 1] }, block)).toEqual({ polylines: [], complete: false })
     expect(expandBlockReference({ ...insert, ip: null }, block)).toEqual({ polylines: [], complete: false })
+  })
+
+  it('expands INSERT array cells in local axes before scale and rotation, with a cell cap', () => {
+    const reference = { ...insert, scale: [1, 1, 1], rotationDeg: 0, columns: 2, rows: 1, columnSpacing: 10, rowSpacing: 4 }
+    const intake = engineIntake(projection(reference))
+    expect(intake.polylines.map((p) => p.pts)).toEqual([
+      [[10, 20, 0], [13, 20, 0]], [[20, 20, 0], [23, 20, 0]],
+    ])
+    expect(intake.polylines.every((p) => p.sourceHandle === '500')).toBe(true)
+    expect(intake.inserts[0].incomplete).toBe(false)
+    const transformed = expandBlockReference({ ...reference, rows: 2, scale: [-2, 3, 1], rotationDeg: 90 }, block)
+    const starts = transformed.polylines.map((p) => p.pts[0])
+    for (const [i, expected] of [[10, 20], [10, 0], [-2, 20], [-2, 0]].entries()) {
+      expect(starts[i][0]).toBeCloseTo(expected[0], 9)
+      expect(starts[i][1]).toBeCloseTo(expected[1], 9)
+    }
+    const capped = engineIntake(projection({ ...reference, columns: MAX_ARRAY_CELLS + 1 }))
+    expect(capped.polylines).toHaveLength(MAX_ARRAY_CELLS)
+    expect(capped.inserts[0].incomplete).toBe(true)
+    expect(expandBlockReference({ ...reference, rows: 0 }, block)).toEqual({ polylines: [], complete: false })
+  })
+
+  it('keeps both child descriptors and a LINE click selects the parent INSERT', () => {
+    const intake = engineIntake(projection(insert, { ...block, children: [line, circle] }))
+    const index = new Map()
+    const meshes = intake.polylines.map((pl) => {
+      addPickDescriptor(index, pl.sourceHandle, { kind: 'poly', pts: pl.pts })
+      const segments = []
+      const handles = []
+      for (let i = 0; i < pl.pts.length - (pl.closed ? 0 : 1); i += 1) {
+        segments.push(...pl.pts[i], ...pl.pts[(i + 1) % pl.pts.length])
+        handles.push(pl.sourceHandle)
+      }
+      const geometry = new THREE.BufferGeometry()
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(segments, 3))
+      const mesh = new THREE.LineSegments(geometry, new THREE.LineBasicMaterial())
+      mesh.userData = { kind: 'blocklines', lineHandles: handles }
+      return mesh
+    })
+    expect(index.get('500')).toHaveLength(2)
+    const ray = new THREE.Raycaster(new THREE.Vector3(10, 25, 10), new THREE.Vector3(0, 0, -1))
+    ray.params.Line.threshold = 0.01
+    const hits = ray.intersectObjects(meshes, false)
+    expect(hits[0].object).toBe(meshes[0])
+    expect(pickHandleFromHits(hits)).toBe('500')
+    ray.set(new THREE.Vector3(7, 20, 10), new THREE.Vector3(0, 0, -1))
+    expect(pickHandleFromHits(ray.intersectObjects(meshes, false))).toBe('500')
+    for (const mesh of meshes) { mesh.geometry.dispose(); mesh.material.dispose() }
   })
 })

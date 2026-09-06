@@ -5,6 +5,17 @@ import { bulgePoints, ARC_STEP_DEG, CIRCLE_SEGMENTS, MAX_POINTS, MIN_ARC_POINTS,
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps
 
 describe('engineIntake (W4f slice A0): engine entities -> viewer intake', () => {
+  it('W4g-7b-01c keeps unknown binary bases as glyphs and resolves definition names without case', () => {
+    const reference = { handle: '1280', type: 'INSERT', name: 'b', ip: [10, 20, 0], scale: [1, 1, 1], rotationDeg: 0 }
+    const definition = { name: 'B', base: [1, 2, 0], complete: true,
+      children: [{ type: 'LINE', vertices: [[1, 2, 0], [4, 2, 0]] }] }
+    const source = { entities: [reference], blocks: [definition] }
+    expect(engineIntake(source).polylines[0].pts).toEqual([[10, 20, 0], [13, 20, 0]])
+    const unknown = engineIntake({ ...source, blocks: [{ ...definition, baseUnknown: true }] })
+    expect(unknown.polylines).toEqual([])
+    expect(unknown.inserts).toMatchObject([{ handle: '500', incomplete: true }])
+  })
+
   it('W4g-1b: the intake handle is the DXF hex form of the worker\'s decimal id, so a canvas pick names the drawing\'s own handle', () => {
     expect(hexHandle('37986')).toBe('9462')
     expect(hexHandle('7')).toBe('7')

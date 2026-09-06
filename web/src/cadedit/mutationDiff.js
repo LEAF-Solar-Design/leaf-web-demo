@@ -103,7 +103,8 @@ function opaqueOf(entity) {
   const print = JSON.stringify([type, entity.layer ?? null, entity.vertices ?? null, entity.radius ?? null, entity.startDeg ?? null,
     entity.endDeg ?? null, entity.text ?? null, entity.height ?? null, entity.rotationDeg ?? null, entity.bulges ?? null, entity.closed === true,
     // W4g-4b: an ELLIPSE's axis and ratio (the row that added them caught their absence here).
-    entity.majorAxis ?? null, entity.ratio ?? null, entity.name ?? null, entity.ip ?? null, entity.scale ?? null])
+    entity.majorAxis ?? null, entity.ratio ?? null, entity.name ?? null, entity.ip ?? null, entity.scale ?? null,
+    entity.columns ?? 1, entity.rows ?? 1, entity.columnSpacing ?? 0, entity.rowSpacing ?? 0])
   return { kind: 'OPAQUE', type, print }
 }
 
@@ -158,12 +159,13 @@ export function diffPlan(committed, current) {
   const setCircle = []
   const setArc = []
   const cannot = (reason) => ({ mutations: null, count: 0, reason })
-  // Definitions are opaque as a whole, including their base and completeness.
-  // Sort object keys so a JSON transport's key order is not a geometry edit.
+  // The engine digest covers EVERY child, including unlisted/unsupported ones.
+  // Keep the legacy full-record fallback for older projections without digests.
   const canonical = (value) => Array.isArray(value) ? value.map(canonical)
     : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])) : value
   const definitions = (projection) => new Map((Array.isArray(projection?.blocks) ? projection.blocks : [])
-    .map((block) => [block.name, JSON.stringify(canonical(block))]))
+    .map((block) => [block.name, typeof block.digest === 'string'
+      ? JSON.stringify([block.name, block.digest]) : JSON.stringify(canonical(block))]))
   const oldBlocks = definitions(committed)
   const newBlocks = definitions(current)
   for (const name of new Set([...oldBlocks.keys(), ...newBlocks.keys()])) {

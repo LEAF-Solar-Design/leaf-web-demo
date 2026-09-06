@@ -85,6 +85,7 @@ const INITIAL_SESSION = Object.freeze({
   documentId: '',
   entities: NO_ENTITIES,
   entityCount: 0,
+  blockBasePatched: false,
   selectedId: '',
   status: '',
   savedBytes: null,
@@ -695,6 +696,12 @@ export default function useEngineSession({
       if (generation !== generationRef.current) return
       if (message.type === 'ready') return
       if (message.type === 'documentLoaded') {
+        if (message.refusal) {
+          clearHistory()
+          setSession((current) => Object.freeze({ ...INITIAL_SESSION, documentId: message.documentId,
+            clipboard: current.clipboard, errorKind: SESSION_ERROR.REFUSED, status: `Load refused: ${message.refusal}` }))
+          return
+        }
         const entities = projectionEntities(message)
         const others = (message.unsupported ?? []).length
         const history = historyRef.current
@@ -710,6 +717,7 @@ export default function useEngineSession({
             ...current,
             entities,
             entityCount: message.entityCount ?? 0,
+            blockBasePatched: message.blockBasePatched ?? false,
             selectedId: surviveSelection(current.selectedId, entities),
             savedBytes: edited ? reload.bytes : null,
             busy: false,
@@ -730,6 +738,7 @@ export default function useEngineSession({
         patch({
           entities,
           entityCount: message.entityCount ?? 0,
+          blockBasePatched: message.blockBasePatched ?? false,
           selectedId: '',
           savedBytes: null,
           committedBytes: null,
@@ -786,6 +795,7 @@ export default function useEngineSession({
           entities,
           entityCount: message.entityCount ?? 0,
           savedBytes: message.bytes ?? null,
+          blockBasePatched: message.blockBasePatched ?? false,
           selectedId: createdId || surviveSelection(current.selectedId, entities),
           undoDepth: history.undo.length,
           redoDepth: history.redo.length,
@@ -1120,7 +1130,8 @@ export default function useEngineSession({
     trimSnapshots(to)
     history.reload = { kind, op: snap.op, bytes: snap.bytes }
     patch({ busy: true, errorKind: null, undoDepth: history.undo.length, redoDepth: history.redo.length })
-    if (!boundary.post({ type: 'loadDocument', documentId: sessionRef.current.documentId, bytes: snap.bytes })) {
+    if (!boundary.post({ type: 'loadDocument', documentId: sessionRef.current.documentId, bytes: snap.bytes,
+      blockBasesUnknown: sessionRef.current.entities.blocks?.some((block) => block.baseUnknown === true) ?? false })) {
       // Put the snapshot back: nothing moved.
       history.reload = null
       to.pop()

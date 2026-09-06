@@ -115,6 +115,10 @@ function projectDocument(doc) {
       name: entity.name,
       ip: entity.ip,
       scale: entity.scale,
+      columns: entity.columns,
+      rows: entity.rows,
+      columnSpacing: entity.columnSpacing,
+      rowSpacing: entity.rowSpacing,
       // W4g-6d: one bulge per vertex for a polyline, null for every other kind.
       bulges: Array.isArray(entity.bulges) ? entity.bulges : null,
       // W4g-4b: an ELLIPSE's axis endpoint (relative to the centre) and ratio.
@@ -303,7 +307,7 @@ async function applyEdit(engine, message) {
     if (!steps || steps.length === 0) return refused(op, 'batch_empty')
     if (steps.length > MAX_BATCH_STEPS) return refused(op, 'batch_too_many_steps')
     const snapshot = engine.writeDxf(doc)
-    const restore = () => { current = { documentId: current.documentId, doc: engine.parseDxf(snapshot) } }
+    const restore = () => { current = { documentId: current.documentId, doc: reparseDocument(engine, snapshot, doc) } }
     const made = []
     for (let i = 0; i < steps.length; i += 1) {
       const step = steps[i] && typeof steps[i] === 'object' ? steps[i] : {}
@@ -338,7 +342,7 @@ async function applyEdit(engine, message) {
   // renders what the written bytes actually say.
   const written = engine.writeDxf(doc)
   const blockBasePatched = doc.blockBasePatched ?? false
-  const reparsed = engine.parseDxf(written)
+  const reparsed = reparseDocument(engine, written, doc)
   let projection
   try {
     projection = projectDocument(reparsed)
@@ -370,6 +374,13 @@ async function applyEdit(engine, message) {
     if (createdHandles !== null) reply.createdIds = createdHandles.map((h) => byHandle.get(h) ?? null)
   }
   return reply
+}
+
+function reparseDocument(engine, bytes, previous) {
+  const doc = engine.parseDxf(bytes)
+  // An ASCII write cannot recover bases lost on binary input.
+  if (previous.blockBasesUnknown === true) doc.blockBasesUnknown = true
+  return doc
 }
 
 /** Handles one boundary message; returns the reply or null. Never throws. */
@@ -413,9 +424,15 @@ export async function handleMessage(raw, engineOverride = null) {
     let doc
     try {
       doc = engine.parseDxf(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes.buffer))
+      if (raw.blockBasesUnknown === true) doc.blockBasesUnknown = true
     } catch (error) {
       current = null
-      return { type: 'error', message: `parse_failed:${error instanceof Error ? error.message : String(error)}` }
+      const reason = error instanceof Error ? error.message : String(error)
+      if (reason.startsWith('block names collide case-insensitively: ')) {
+        return { type: 'documentLoaded', documentId, entityCount: 0, entities: [], blocks: [],
+          blockBasePatched: false, writable: false, refusal: reason, unsupported: [] }
+      }
+      return { type: 'error', message: `parse_failed:${reason}` }
     }
     current = { documentId, doc }
     try {
