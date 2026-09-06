@@ -114,6 +114,61 @@ function AnswerForm({ question, campaign }) {
   </form>
 }
 
+function CapabilityControls({ campaign, row }) {
+  const [choice, setChoice] = useState('')
+  const action = useAction()
+  const tools = campaign.capabilities || []
+  const selected = tools.find(tool => tool.change_set_id === choice) || tools[0]
+  const link = row.capability_link
+  const submission = campaign.submissions?.[row.enrollment_id]
+  const recovered = campaign.invocationResults?.[row.enrollment_id]
+  const invocations = [...(row.invocations || [])]
+  if (recovered && !invocations.some(job => job.job_id === recovered.job_id)) invocations.push(recovered)
+  const count = Number.isInteger(row.completed_uses) && row.completed_uses >= 0 && row.completed_uses <= 2
+    ? row.completed_uses : null
+  const complete = count === 2 && link?.state === 'completed'
+  const busy = action.busy || !!campaign.pending[`enrollment:${row.enrollment_id}`]
+  const waiting = invocations.some(job => !['complete', 'failed'].includes(job.status))
+  const bound = ['published', 'invoked_once', 'completed'].includes(link?.state)
+  return <div className="campaign-capability">
+    {!bound && row.state !== 'revoked' && <>
+      {selected ? <>
+        <label>Published tool for {row.machine_id}<select value={selected.change_set_id} disabled={busy || !!submission}
+          onChange={event => setChoice(event.target.value)}>
+          {tools.map(tool => <option key={tool.change_set_id} value={tool.change_set_id}>{tool.label || tool.tool_name}</option>)}
+        </select></label>
+        <button type="button" className="chip-act" disabled={busy || !!submission} aria-busy={busy}
+          onClick={() => action.run(() => campaign.bindPublication(row.enrollment_id, selected.change_set_id), 'Published tool bound.')}>
+          Bind published tool
+        </button>
+      </> : <p>No published tools are available. Reload status after publication.</p>}
+    </>}
+    <p role="status">{count === null ? 'Verified use count unavailable.' : `Verified uses: ${count} of 2.`}
+      {complete ? ' Capability complete.' : ' Capability not complete.'}</p>
+    <ul>{invocations.map(job => <li key={job.job_id}>
+      <p role="status">{executionWords(job.status)}{job.progress && typeof job.progress === 'string' ? `: ${executionWords(job.progress)}` : ''}</p>
+      {job.reason && <p>{job.reason}</p>}
+      {job.status === 'complete' && job.counted !== true && <p>Verified receipt missing or not accepted. This use is not verified.</p>}
+      {job.counted === true && <p>Verified use recorded.</p>}
+    </li>)}</ul>
+    {submission ? <>
+      <p role="status">Submission outcome unknown. Recover the existing submission before another use.</p>
+      <button type="button" className="chip-act" disabled={busy} aria-busy={busy}
+        onClick={() => action.run(() => campaign.invokeCapability(row.enrollment_id), 'Submission recovered. Reload status for verified progress.')}>
+        Recover submission
+      </button>
+    </> : bound && !complete && <button type="button" className="chip-act"
+      disabled={busy || waiting || row.state !== 'enabled' || !link.effective_catalog_digest || count === null || count >= 2}
+      aria-busy={busy} onClick={() => action.run(() => campaign.invokeCapability(row.enrollment_id), 'Submission recorded. Awaiting verified receipt.')}>
+      {count === 1 ? 'Use again' : 'Use capability'}
+    </button>}
+    <button type="button" className="chip-act" disabled={busy || campaign.refreshing}
+      onClick={() => action.run(campaign.refetch, 'Capability status reloaded.')}>Reload status</button>
+    <Alert error={action.error} />
+    <span role="status">{action.outcome}</span>
+  </div>
+}
+
 function EnrollmentPanel({ campaign }) {
   const [machine, setMachine] = useState('')
   const action = useAction()
@@ -123,18 +178,21 @@ function EnrollmentPanel({ campaign }) {
   return <section className="panel-sub" aria-label="Enrollment">
     <h3>Enrollment</h3>
     <Alert error={campaign.enrollmentError} onReload={campaign.refetch} />
+    <Alert error={campaign.capabilityError} onReload={campaign.refetch} />
+    {campaign.recoveryUnavailable && <p role="status">Browser storage is unavailable. Retry keeps the same submission in this view, but reconnect recovery is unavailable.</p>}
     {machines.length === 0 ? <p>No campaign machines are configured. Ask your workspace operator to configure a host.</p> : <>
       <label>Campaign machine<select value={selected} disabled={busy} onChange={event => setMachine(event.target.value)}>
         {machines.map(value => <option key={value} value={value}>{value}</option>)}
       </select></label>
       <button type="button" className="btn primary" disabled={busy || !selected} aria-busy={busy}
         onClick={() => action.run(() => campaign.enroll(selected), 'Host enrollment recorded.')}>
-        Connect VM-C to this campaign
+        Connect {selected} to this campaign
       </button>
     </>}
     <ul>{(campaign.enrollments || []).map(row => <li key={row.enrollment_id}>
       <p>{row.machine_id}: {executionWords(row.state)}</p>
       {row.capability_link?.state === 'pending_link' && <p>Capability not yet published</p>}
+      <CapabilityControls campaign={campaign} row={row} />
       {row.state === 'pending' && <button type="button" className="chip-act" disabled={action.busy || !!campaign.pending[`enrollment:${row.enrollment_id}`]}
         onClick={() => action.run(() => campaign.enableEnrollment(row.enrollment_id), 'Host enrollment enabled.')}>Enable</button>}
       {row.state !== 'revoked' && <button type="button" className="chip-act" disabled={action.busy || !!campaign.pending[`enrollment:${row.enrollment_id}`]}

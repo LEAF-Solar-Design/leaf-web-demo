@@ -28,6 +28,85 @@ afterEach(cleanup)
 const panel = props => <CampaignPanel projectId={P} projectName="Document studio" signedIn {...props} />
 
 describe('campaign panel in the project workspace', () => {
+  const digest = 'a'.repeat(64)
+  function capabilityFixture() {
+    campaign.allowedMachines = ['Native host']
+    campaign.capabilities = [{ change_set_id: 'server-choice', label: 'Campaign host capability' }]
+    campaign.enrollments = [{ enrollment_id: Q, machine_id: 'Native host', state: 'enabled',
+      completed_uses: 0, capability_link: { state: 'pending_link' }, invocations: [] }]
+    campaign.bindPublication = vi.fn().mockResolvedValue({ enrollment: {} })
+    campaign.invokeCapability = vi.fn().mockResolvedValue({ invocation: {} })
+  }
+
+  it('selects a published label without typed IDs and exposes first then second verified use', async () => {
+    capabilityFixture()
+    const { rerender } = render(panel())
+    const selector = screen.getByLabelText('Published tool for Native host')
+    expect([...selector.options].map(option => [option.value, option.text])).toEqual([['server-choice', 'Campaign host capability']])
+    expect(screen.queryByLabelText(/change set|source|claim|command/i)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Use capability' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Bind published tool' }))
+    await screen.findByText('Published tool bound.')
+    expect(campaign.bindPublication).toHaveBeenCalledExactlyOnceWith(Q, 'server-choice')
+    campaign.enrollments[0].capability_link = { state: 'published', effective_catalog_digest: digest }
+    rerender(panel())
+    expect(screen.getByText('Verified uses: 0 of 2. Capability not complete.')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Use capability' }))
+    await screen.findByText('Submission recorded. Awaiting verified receipt.')
+    expect(campaign.invokeCapability).toHaveBeenCalledExactlyOnceWith(Q)
+    campaign.enrollments[0].completed_uses = 1
+    campaign.enrollments[0].capability_link.state = 'invoked_once'
+    rerender(panel())
+    fireEvent.click(screen.getByRole('button', { name: 'Use again' }))
+    await waitFor(() => expect(campaign.invokeCapability).toHaveBeenCalledTimes(2))
+    campaign.enrollments[0].completed_uses = 2
+    rerender(panel())
+    expect(screen.getByText('Verified uses: 2 of 2. Capability not complete.')).toBeTruthy()
+    campaign.enrollments[0].capability_link.state = 'completed'
+    rerender(panel())
+    expect(screen.getByText('Verified uses: 2 of 2. Capability complete.')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Use again' })).toBeNull()
+  })
+
+  it('shows actual running, held, failed and missing receipt states without counting them', () => {
+    capabilityFixture()
+    campaign.enrollments[0].capability_link = { state: 'published', effective_catalog_digest: digest }
+    campaign.enrollments[0].invocations = [
+      { job_id: 'running-job', status: 'running', progress: 'Waiting for host' },
+      { job_id: 'held-job', status: 'failed', progress: 'held', reason: 'Lifecycle handoff required' },
+      { job_id: 'missing-job', status: 'complete', receipt_available: false, counted: false },
+    ]
+    const { rerender } = render(panel())
+    expect(screen.getByText('running: Waiting for host')).toBeTruthy()
+    expect(screen.getByText('failed: held')).toBeTruthy()
+    expect(screen.getByText('Lifecycle handoff required')).toBeTruthy()
+    expect(screen.getByText(/Verified receipt missing/)).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Use capability' }).disabled).toBe(true)
+    expect(screen.getByText('Verified uses: 0 of 2. Capability not complete.')).toBeTruthy()
+    expect(campaign.invokeCapability).not.toHaveBeenCalled()
+    delete campaign.enrollments[0].completed_uses
+    rerender(panel())
+    expect(screen.getByText('Verified use count unavailable. Capability not complete.')).toBeTruthy()
+  })
+
+  it('offers explicit recovery and storage disclosure without submitting on mount or reload', async () => {
+    capabilityFixture()
+    campaign.submissions = { [Q]: { idempotencyKey: 'pending-key', effectiveCatalogDigest: digest } }
+    campaign.recoveryUnavailable = true
+    render(panel())
+    expect(screen.getByText(/reconnect recovery is unavailable/)).toBeTruthy()
+    expect(screen.getByText(/Submission outcome unknown/)).toBeTruthy()
+    expect(campaign.invokeCapability).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Reload status' }))
+    await screen.findByText('Capability status reloaded.')
+    expect(campaign.invokeCapability).not.toHaveBeenCalled()
+    const recover = screen.getByRole('button', { name: 'Recover submission' })
+    fireEvent.click(recover)
+    fireEvent.click(recover)
+    await screen.findByText('Submission recovered. Reload status for verified progress.')
+    expect(campaign.invokeCapability).toHaveBeenCalledExactlyOnceWith(Q)
+  })
+
   it('shows configured hosts, connects once and keeps capability status pending', async () => {
     campaign.allowedMachines = ['VM-C', 'VM-D']
     campaign.enrollments = [{ enrollment_id: Q, machine_id: 'VM-C', state: 'pending', capability_link: { state: 'pending_link' } }]
@@ -38,7 +117,7 @@ describe('campaign panel in the project workspace', () => {
     const select = screen.getByLabelText('Campaign machine')
     expect([...select.options].map(option => option.value)).toEqual(['VM-C', 'VM-D'])
     fireEvent.change(select, { target: { value: 'VM-D' } })
-    const connect = screen.getByRole('button', { name: 'Connect VM-C to this campaign' })
+    const connect = screen.getByRole('button', { name: 'Connect VM-D to this campaign' })
     fireEvent.click(connect)
     fireEvent.click(connect)
     await screen.findByText('Host enrollment recorded.')
