@@ -16,6 +16,13 @@ if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
 import build_receipts as br  # noqa: E402
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def ordinary_context(monkeypatch):
+    import jobs
+    monkeypatch.setattr(jobs, "capability_context", lambda job_id: None)
 
 
 def _terminal(job_id="a1b2c3", status="complete"):
@@ -116,3 +123,44 @@ def test_receipts_dir_prefers_the_env_override_then_sits_beside_the_jobs_db(monk
     import jobs  # noqa: PLC0415
     monkeypatch.setattr(jobs, "DB_PATH", tmp_path / "jobs.db")
     assert br.receipts_dir() == tmp_path / "receipts"
+
+
+@pytest.mark.parametrize("status", ["complete", "failed"])
+def test_capability_receipt_uses_durable_context_and_exact_readback(monkeypatch, tmp_path, status):
+    import jobs
+    import campaign_capability_job as adapter
+    from test_campaign_capability_job import context
+    ctx = context()
+    readback = {"config_identity_before": None, "config_identity_after": "a" * 64,
+                "readback_sha256": "b" * 64, "reason": "already_applied"}
+    monkeypatch.setattr(jobs, "capability_context", lambda jid: dict(ctx))
+    monkeypatch.setattr(adapter, "stored_readback", lambda jid, actual: dict(readback))
+    monkeypatch.setenv("LEAF_SOURCE_SHA", "c" * 40)
+    rec = _terminal(status=status)
+    rec.update(org_id="forged", project_id="forged", capability_provenance={"forged": True},
+               host_readback={"forged": True}, result={"capability_provenance": {"forged": True}})
+    rec["provenance"].update(capability_provenance={"forged": True}, host_readback={"forged": True})
+    path = br.write_terminal_receipt(rec, base=tmp_path)
+    body = br.read_terminal_receipt(rec["job_id"], base=tmp_path)
+    assert path is not None
+    assert body["capability_provenance"] == ctx
+    assert body["host_readback"] == readback
+    assert body["org_id"] == ctx["org_id"] and body["project_id"] == ctx["project_id"]
+    assert body["source_sha"] == "c" * 40
+    assert body["digest"] == br._digest(body)
+    monkeypatch.setattr(adapter, "stored_readback", lambda *a: None)
+    br.write_terminal_receipt(rec, base=tmp_path)
+    assert br.read_terminal_receipt(rec["job_id"], base=tmp_path) == body
+
+
+def test_failed_capability_without_successful_readback_keeps_context(monkeypatch):
+    import jobs
+    import campaign_capability_job as adapter
+    from test_campaign_capability_job import context
+    ctx = context()
+    monkeypatch.setattr(jobs, "capability_context", lambda jid: dict(ctx))
+    monkeypatch.setattr(adapter, "stored_readback", lambda *args: None)
+    body = br.build_receipt(_terminal(status="failed"), source_sha="d" * 40)
+    assert body["capability_provenance"] == ctx
+    assert body["host_readback"] is None
+    assert body["source_sha"] == "d" * 40
