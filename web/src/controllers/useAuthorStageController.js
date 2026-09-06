@@ -156,14 +156,23 @@ export default function useAuthorStageController({
       if (sequenceRef.current !== sequence) return null
       const terminal = !!cause?.authorTerminal
       if (terminal) {
-        const failedPointer = {
-          ...acceptedPointer,
-          terminal_failed: true,
-          failed_at: acceptedPointer.failed_at || Date.now(),
-          failure: boundedAuthorFailure(cause),
+        const acceptedFailure = acceptedPointer.change_set_id && acceptedPointer.poll_url
+          && cause?.body?.change_set_id === acceptedPointer.change_set_id
+          && ['failed', 'error'].includes(String(cause?.body?.status || '').toLowerCase())
+        if (acceptedFailure) {
+          const failedPointer = {
+            ...acceptedPointer,
+            terminal_failed: true,
+            failed_at: acceptedPointer.failed_at || Date.now(),
+            failure: boundedAuthorFailure(cause),
+          }
+          if (mock) setPointer(failedPointer)
+          else persist(failedPointer)
+        } else {
+          // A quota refusal or invalid response is not an accepted failed job.
+          if (!mock) clearInflightAuthor(acceptedPointer.idempotency_key, storageRef.current)
+          setPointer(null)
         }
-        if (mock) setPointer(failedPointer)
-        else persist(failedPointer)
         setPhase('failed')
         setProgress('request failed')
       } else {
