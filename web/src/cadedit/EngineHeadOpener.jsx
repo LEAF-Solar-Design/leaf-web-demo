@@ -159,7 +159,7 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
       }
       // W4g-3b: this document IS the head, so the store keeps the entity
       // list it loads as the base a save diffs against (the mutation plan).
-      openBytes(bytes, headDocumentId(drawingId, version), { committed: true })
+      openBytes(bytes, headDocumentId(drawingId, version), { committed: true, version })
       setReach({ state: REACH_STATE.OPEN, sentence: '', version, head: Number(answer?.head) || version, source: String(answer?.source || '') })
     })()
     return () => {

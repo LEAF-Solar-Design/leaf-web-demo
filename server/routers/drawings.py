@@ -23,21 +23,26 @@ a documented follow-up (CONTRACT-ADDENDUM §11).
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import hmac
 import json
+import os
 import re
 import threading
+from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, File, Form, Header, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 import checkout_capability
 import deps
 import guest_uploads
+import jobs
 import write_loop
 from envelopes import ErrorCode, error_obj, error_response, with_envelope_fields
 
@@ -1000,7 +1005,13 @@ def save_edited_version(drawing_id: str,
 # multipart parser's own 1024 KB per-part cap, so this cap is the one that
 # answers, with the typed 413, rather than the parser's bare 400.
 MAX_PLAN_FORM_BYTES = 512 * 1024
-PLAN_TOOL_NAME = "cad-edit-plan"
+
+
+# Default OFF. The operator flips this in the same staging window that
+# provisions the mutation Activity. The broker's readiness gate still refuses
+# a plan run against an unready Activity regardless of this flag.
+def plan_live_leg_enabled() -> bool:
+    return os.environ.get("LEAF_PLAN_LIVE_LEG", "").strip() == "1"
 
 
 @router.post("/api/drawings/{drawing_id}/versions/plan")
@@ -1021,8 +1032,13 @@ def save_plan_version(drawing_id: str,
         is validated against the head's intake, lowered (the same refusals the
         live WorkItem would raise), applied by the mock writer, and the
         applied intake becomes the version payload (run_write_mock's idiom);
-      - a DWG-backed head at APS_LIVE=1 takes the DXF sidecar until W4g-3c
-        wires the live WorkItem leg, and SAYS so in `commit_note`;
+      - a DWG-backed head at APS_LIVE=1 with LEAF_PLAN_LIVE_LEG=1 takes the
+        live plan leg: validate and lower, bind the DXF to the result, check
+        the checkout lease, then submit a job under the caller's checkout
+        identity and answer 202; the job carries the receipt;
+      - the live leg defaults OFF and takes the DXF sidecar while gated off;
+        an over-cap job payload also takes the sidecar before submission,
+        and both cases say why in `commit_note`;
       - a head with no DWG source (an intake-backed mock drawing, an earlier
         sidecar version) takes `commit: "dxf-sidecar"`: the F-3 leg verbatim;
       - a plan that names no operation takes the sidecar too (nothing the
@@ -1095,13 +1111,15 @@ def save_plan_version(drawing_id: str,
         leg, note = "dxf-sidecar", "the plan names no operation; the DXF carries this save"
     elif not dwg_backed:
         leg, note = "dxf-sidecar", "the head has no DWG source; the DXF carries this save"
+    elif deps.APS_LIVE and not plan_live_leg_enabled():
+        leg, note = "dxf-sidecar", "live plan commit is gated off (LEAF_PLAN_LIVE_LEG); the DXF carries this save"
     elif deps.APS_LIVE:
-        leg, note = "dxf-sidecar", "live plan commit lands with W4g-3c; the DXF carries this save"
+        leg, note = "dwg-plan-live", "live APS WorkItem; the job carries the receipt"
     else:
         leg, note = "dwg-plan", "mock writer: the plan applied to the head's intake"
 
     plan_digest: Optional[str] = None
-    if leg == "dwg-plan":
+    if leg in ("dwg-plan", "dwg-plan-live"):
         try:
             _base_v, base_intake = write_loop.read_intake(
                 backend, str(tenant_id), drawing_id, int(head_v))
@@ -1126,6 +1144,117 @@ def save_plan_version(drawing_id: str,
                                   f"the edit plan was refused: {exc}",
                                   retryable=False, status_code=422)
         plan_digest = mutation_plan.plan_sha256(plan_bytes)
+
+    if leg == "dwg-plan-live":
+        # The client computes the plan from the same entity list it wrote the
+        # DXF from, so a mismatch is a client defect. Never commit a plan the
+        # bytes beside it contradict.
+        expected_base = copy.deepcopy(base_intake)
+        expected_base["dwg"] = drawing_id
+        uploaded = copy.deepcopy(intake)
+        uploaded["dwg"] = drawing_id
+
+        def text_entities(entities):
+            entries = Counter()
+            for entity in entities:
+                point = entity.get("pt") or []
+                xy = [point[index] if index < len(point) else None for index in range(2)]
+                xy = tuple(
+                    write_loop._extractor_round(value, 3)
+                    if isinstance(value, (int, float)) and not isinstance(value, bool) else value
+                    for value in xy)
+                entries[(entity.get("kind"),
+                         str(entity["handle"]) if entity.get("handle") is not None else None,
+                         str(entity["layer"]) if entity.get("layer") is not None else None,
+                         *xy, entity.get("text"))] += 1
+            return entries
+
+        try:
+            if "texts" in base_intake and (
+                text_entities(uploaded.get("texts") or [])
+                != text_entities(base_intake.get("texts") or [])
+            ):
+                raise ValueError("text entities differ from the head")
+            quantized_upload = write_loop.quantize_intake_like_extractor(uploaded)
+            quantized_base = write_loop.quantize_intake_like_extractor(expected_base)
+            named_handles = {str(handle) for handle in canonical.get("removed", [])}
+            for operation in ("set_layer", "set_circle", "set_arc", "set_points", "transforms"):
+                named_handles.update(str(entry["handle"]) for entry in canonical.get(operation, []))
+            for field in ("circles", "arcs"):
+                head_by_handle = {
+                    str(entity["handle"]): entity
+                    for entity in quantized_base.get(field) or []
+                    if isinstance(entity, dict) and entity.get("handle") is not None
+                }
+                for entity in quantized_upload.get(field) or []:
+                    normal = entity.get("nrm", [0.0, 0.0, 1.0])
+                    if len(normal) != 3 or any(
+                        not abs(value - expected) <= 1e-9
+                        for value, expected in zip(normal, [0.0, 0.0, 1.0])
+                    ):
+                        raise ValueError("an entity lies outside the drawing plane")
+                    handle = str(entity.get("handle"))
+                    reference = head_by_handle.get(handle)
+                    if handle not in named_handles and reference is not None:
+                        differs = any(entity.get(key) != reference.get(key) for key in ("layer", "c", "r"))
+                        if field == "arcs":
+                            differs = differs or any(
+                                write_loop._extractor_round(write_loop._plan_number(entity[key]), 3)
+                                != write_loop._extractor_round(write_loop._plan_number(reference[key]), 3)
+                                for key in ("start_deg", "end_deg")
+                            )
+                        if differs:
+                            raise ValueError("an unchanged entity differs from the head")
+            write_loop.verify_live_mutation_effects(
+                expected_base, quantized_upload, canonical)
+        except ValueError as exc:
+            return error_response(ErrorCode.BAD_PARAMS,
+                                  f"the uploaded DXF does not carry the plan's result: {exc}",
+                                  retryable=False, status_code=422)
+
+        co = store.load_manifest(backend, str(tenant_id), drawing_id).get("checkout")
+        if store.checkout_active(co):
+            remaining = (datetime.fromisoformat(co["expires"])
+                         - datetime.now(timezone.utc)).total_seconds()
+            if remaining < jobs.job_max_s():
+                return error_response(
+                    ErrorCode.BAD_PARAMS,
+                    f"the edit lock has {int(remaining)} s left, less than a live commit "
+                    "may take; refresh the checkout and save again",
+                    retryable=True, status_code=409)
+
+        plan = {"drawing_id": drawing_id, "parent_version": int(parent_version),
+                "mutations": canonical, "plan_sha256": plan_digest,
+                "source_sha256": actual_digest}
+        if len(json.dumps(plan, default=str).encode("utf-8")) > jobs.MAX_PARAMS_BYTES:
+            leg, note = "dxf-sidecar", "the plan exceeds the job payload cap; the DXF carries this save"
+            plan_digest = None
+        else:
+            try:
+                job_id = jobs.submit_plan_job(
+                    str(tenant_id), plan, drawing_id,
+                    checkout_holder=holder, checkout_fence=fence)
+            except HTTPException:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                return error_response(ErrorCode.INTERNAL,
+                                      f"plan submit failed: {type(exc).__name__}",
+                                      retryable=False, status_code=500)
+            view = deps.tenant_echo({
+                "drawing_id": drawing_id,
+                "job_id": job_id,
+                "status": "submitted",
+                "commit": "dwg-plan",
+                "commit_note": note,
+                "parent": int(parent_version),
+                "plan_sha256": plan_digest,
+                "source_sha256": actual_digest,
+                "source_stored": False,
+                "cost": {"engine": "aps-workitem", "engine_usd": None},
+            }, tenant_id)
+            return JSONResponse(status_code=202, content=with_envelope_fields(view))
+
+    if leg == "dwg-plan":
         try:
             new_intake = write_loop.apply_mutations(base_intake, canonical)
         except ValueError as exc:
@@ -1134,7 +1263,7 @@ def save_plan_version(drawing_id: str,
                                   retryable=False, status_code=422)
         payload = json.dumps(new_intake, separators=(",", ":")).encode("utf-8")
         intake_digest = hashlib.sha256(payload).hexdigest()
-        meta = {"tool": PLAN_TOOL_NAME, "source": "cad_edit",
+        meta = {"tool": jobs.PLAN_TOOL_NAME, "source": "cad_edit",
                 "plan_sha256": plan_digest,
                 "source_sha256": actual_digest,
                 "intake_sha256": intake_digest,

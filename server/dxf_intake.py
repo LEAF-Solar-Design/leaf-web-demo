@@ -350,7 +350,8 @@ def _parse_line(pairs: List[Tuple[int, str]], i: int):
     return {"layer": layer, "closed": False, "pts": [a, b], "xdata": None, "handle": handle}, i
 
 
-_MTEXT_FORMAT_CODES = ("\\P", "\\p", "\\f", "\\F", "\\H", "\\W", "\\C", "\\c", "\\Q", "\\T", "\\A", "\\L", "\\l", "\\O", "\\o", "\\K", "\\k", "\\S")
+_MTEXT_FORMAT_CODES = ("\\p", "\\f", "\\F", "\\H", "\\W", "\\C", "\\c", "\\Q", "\\T", "\\A", "\\S")
+_MTEXT_TOGGLE_CODES = ("\\L", "\\l", "\\O", "\\o", "\\K", "\\k")
 _TEXT_MAX_CHARS = 512
 
 
@@ -394,8 +395,11 @@ def _strip_mtext(s: str) -> str:
         c = s[j]
         if c == "\\" and j + 1 < L:
             code = s[j:j + 2]
-            if code == "\\P":
+            if code in ("\\P", "\\~"):
                 out.append(" ")
+                j += 2
+                continue
+            if code in _MTEXT_TOGGLE_CODES:
                 j += 2
                 continue
             if code in ("\\\\", "\\{", "\\}"):

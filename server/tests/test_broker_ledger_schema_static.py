@@ -50,12 +50,12 @@ def test_broker_entry_literal_initializes_every_frozen_key():
     must initialize exactly the frozen key set — a key added there without a
     schema/contract update fails here, and vice versa.
 
-    `broker_run` is a thin wrapper that holds the storage-cutover commit guard
-    and delegates the body to `_broker_run`, so the literal lives in either one.
-    Both names are accepted, but exactly one literal must still be found: this
+    `broker_run` holds the storage-cutover commit guard and delegates through
+    `_broker_run` to `_broker_run_request`, the body shared with the plan route.
+    All three names are accepted, but exactly one literal must still be found: this
     must not degrade into a test that passes because it matched nothing."""
     tree = ast.parse((SERVER_DIR / "broker.py").read_text(encoding="utf-8"))
-    run_entry_points = {"broker_run", "_broker_run"}
+    run_entry_points = {"broker_run", "_broker_run", "_broker_run_request"}
     literals: list[list[str]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name in run_entry_points:

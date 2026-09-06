@@ -9,6 +9,8 @@ from __future__ import annotations
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "da"))
 
@@ -41,6 +43,21 @@ def test_text_and_mtext_land_in_additive_texts_field():
     assert intake["texts"] == [
         {"kind": "TEXT", "layer": "0", "pt": [100.0, 200.0], "text": "NORTH ELEVATION", "handle": "B1"},
         {"kind": "MTEXT", "layer": "0", "pt": [5.0, 6.0], "text": "GROUND FLOOR PLAN", "handle": "B2"},
+    ]
+
+
+@pytest.mark.parametrize("value,expected", [
+    (r"\LEXTRA\l", "EXTRA"),
+    (r"\OEXTRA\o", "EXTRA"),
+    (r"\KEXTRA\k", "EXTRA"),
+    (r"Hello\~World", "Hello World"),
+    (r"{\fArial|b0;Hello} World", "Hello World"),
+])
+def test_mtext_formatting_keeps_visible_text(value, expected):
+    raw = _dxf("0\nMTEXT\n5\nB2\n8\n0\n10\n5\n20\n6\n1\n" + value + "\n")
+    intake = dxf_intake.parse_dxf_bytes(raw, source_name="t.dxf")
+    assert intake["texts"] == [
+        {"kind": "MTEXT", "layer": "0", "pt": [5.0, 6.0], "text": expected, "handle": "B2"},
     ]
 
 

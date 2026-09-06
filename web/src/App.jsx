@@ -989,6 +989,7 @@ export default function App() {
   // dirty (kimi on #1008, finding 1). The state drives the ribbon's reasons;
   // the ref drives the refusal.
   const engineDirtyRef = useRef(false)
+  const pendingSavesRef = useRef(new Map())
   const onEngineDirtyChange = useCallback((dirty) => {
     engineDirtyRef.current = !!dirty
     setEngineDirty(!!dirty)
@@ -2723,8 +2724,8 @@ export default function App() {
   // exactly as the surface's own call site does (bundleFence.test.js).
   //
   // F-3 persistence leg: live (non-mock) sessions can save edited bytes as a
-  // NEW VERSION of the open drawing. The parent is fetched FRESH at save
-  // time; the server's compare-and-set still guards the race. Mock/demo
+  // NEW VERSION of the open drawing. The engine supplies its committed
+  // parent; the server's compare-and-set still guards the race. Mock/demo
   // stays download-only, honestly.
   const engineSaveTarget = !mock && intake ? {
     drawingId: REQUESTED_DRAWING_ID,
@@ -2733,8 +2734,10 @@ export default function App() {
     // the head document, present only when the engine holds the head) goes
     // to the plan route, where the SERVER picks the commit leg and says so
     // in the receipt; a hand-imported document keeps the F-3 sidecar route.
-    save: async (bytes, _parent, digest, plan = null) => {
-      const chain = await getDrawingVersions(false, REQUESTED_DRAWING_ID)
+    save: async (bytes, parent, digest, plan = null, onStatus = null) => {
+      // A hand import has no committed head, so fetch the chain head at save
+      // time; a head document always carries its committed version.
+      if (parent == null) parent = (await getDrawingVersions(false, REQUESTED_DRAWING_ID)).head
       // The store publishes ONLY under a live single-writer checkout (the
       // postgres authority fails closed without one — staging's exact
       // first-save refusal). Use the session's held capability when there
@@ -2743,8 +2746,14 @@ export default function App() {
       // prover runs. A refused acquire surfaces the real holder instead of
       // the store's opaque 400.
       const held = checkout.actions.getCapability()
+      // A lease taken for a save whose outcome is unknown is retained for the
+      // next save of the same drawing, never re-acquired and never leaked past
+      // a terminal outcome.
+      const retained = pendingSavesRef.current.get(REQUESTED_DRAWING_ID)
       let acquired = null
-      if (!held) {
+      if (!held && retained) {
+        acquired = { checkout_capability: retained.cap }
+      } else if (!held) {
         acquired = await takeCheckout(REQUESTED_DRAWING_ID, 'cad-edit-save')
         if (!acquired.acquired) {
           const e = new Error('drawing is checked out by '
@@ -2755,16 +2764,24 @@ export default function App() {
         }
       }
       const cap = held || acquired.checkout_capability
+      let keepLock = false
       try {
         if (plan && plan.mutations) {
           return await saveDrawingVersionPlan(
-            REQUESTED_DRAWING_ID, bytes, chain.head, digest, plan.mutations, cap)
+            REQUESTED_DRAWING_ID, bytes, parent, digest, plan.mutations, cap, { onStatus })
         }
         return await saveEditedDrawingVersion(
-          REQUESTED_DRAWING_ID, bytes, chain.head, digest, cap)
+          REQUESTED_DRAWING_ID, bytes, parent, digest, cap)
+      } catch (error) {
+        keepLock = error?.outcomeUnknown === true
+        if (acquired && keepLock) {
+          pendingSavesRef.current.set(REQUESTED_DRAWING_ID, { cap, jobId: error.jobId ?? null })
+        }
+        throw error
       } finally {
-        if (acquired) {
+        if (acquired && !keepLock) {
           releaseCheckout(REQUESTED_DRAWING_ID, cap).catch(() => {})
+          pendingSavesRef.current.delete(REQUESTED_DRAWING_ID)
         }
       }
     },

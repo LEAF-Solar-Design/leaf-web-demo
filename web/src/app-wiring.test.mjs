@@ -354,12 +354,24 @@ describe('App.jsx wiring', () => {
     it('routes by the plan, inside the same checkout the F-3 save takes', () => {
       const start = stripped.indexOf('engineSaveTarget = ')
       assert.notEqual(start, -1)
-      const body = stripped.slice(start, start + 2600)
-      assert.match(body, /save: async \(bytes, _parent, digest, plan = null\)/)
+      const body = stripped.slice(start, start + 4400)
+      assert.match(body, /save: async \(bytes, parent, digest, plan = null, onStatus = null\)/)
+      // W1: a hand import gets the real parent, and an unknown job keeps its fence.
+      assert.match(body, /if \(parent == null\)\s*parent = \(await getDrawingVersions\(false, REQUESTED_DRAWING_ID\)\)\.head/)
+      assert.match(body, /keepLock = error\?\.outcomeUnknown === true/)
+      assert.match(body, /if \(acquired && !keepLock\)/)
+      // W2: an unknown save reuses its own checkout until a terminal outcome.
+      assert.match(stripped, /pendingSavesRef = useRef\((?:\/\*[^*]*\*\/\s*)?new Map\(\)\)/)
+      assert.match(body, /pendingSavesRef\.current\.get\(REQUESTED_DRAWING_ID\)/)
+      assert.match(body, /pendingSavesRef\.current\.set\(REQUESTED_DRAWING_ID/)
+      assert.match(body, /pendingSavesRef\.current\.delete\(REQUESTED_DRAWING_ID\)/)
       const planCall = body.indexOf('saveDrawingVersionPlan(')
       const sidecarCall = body.indexOf('saveEditedDrawingVersion(')
       assert.notEqual(planCall, -1)
       assert.notEqual(sidecarCall, -1)
+      assert.doesNotMatch(body, /save(?:DrawingVersionPlan|EditedDrawingVersion)\([^)]*chain\.head/)
+      assert.match(body, /saveDrawingVersionPlan\(\s*REQUESTED_DRAWING_ID,\s*bytes,\s*parent,\s*digest,\s*plan\.mutations,\s*cap,\s*\{\s*onStatus\s*\}\s*\)/)
+      assert.match(body, /saveEditedDrawingVersion\(\s*REQUESTED_DRAWING_ID,\s*bytes,\s*parent,\s*digest,\s*cap\s*\)/)
       assert.ok(planCall < sidecarCall, 'the plan route is tried first, behind the plan check')
       assert.match(body.slice(0, planCall), /if \(plan && plan\.mutations\)/)
       // Both calls sit inside the acquire -> save -> release try block.
@@ -368,7 +380,7 @@ describe('App.jsx wiring', () => {
 
     it('the opener marks its load as the head, so the store keeps a diff base', () => {
       const opener = readFileSync(new URL('./cadedit/EngineHeadOpener.jsx', import.meta.url), 'utf8')
-      assert.match(opener, /openBytes\(bytes, headDocumentId\(drawingId, version\), \{ committed: true \}\)/)
+      assert.match(opener, /openBytes\(bytes, headDocumentId\(drawingId, version\), \{ committed: true, version \}\)/)
     })
   })
 

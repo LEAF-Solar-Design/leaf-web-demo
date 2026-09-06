@@ -11,7 +11,7 @@ import pytest
 import tool_loader
 import write_loop
 import store
-from mutation_plan import emit_plan, validate_mutations, world_to_ocs
+from mutation_plan import emit_plan, plan_sha256, validate_mutations, world_to_ocs
 
 
 def _entity(handle, layer="Panels", z=0.0):
@@ -1136,3 +1136,197 @@ def test_a_planner_assertion_without_a_server_held_body_is_never_stamped(
     # the binding carries the server's measurement, which is null here.
     assert env["result"]["mutation_binding"]["tool_source_sha256"] is None
     assert "b" * 64 not in json.dumps(env["result"]["mutation_binding"])
+
+
+# --------------------------------------------------------------------------- #
+# Browser DATA plans share the live apply path without authored-code execution.
+# --------------------------------------------------------------------------- #
+def _data_plan(backend):
+    _, vkey = store.resolve_version(backend, "tenant", "drawing", 1)
+    base_sha = hashlib.sha256(backend.get(vkey)).hexdigest()
+    mutations = _mutations()
+    canonical = validate_mutations(
+        _base(), mutations, allow_transforms=True, allow_xdata=False)
+    plan_bytes = emit_plan(
+        canonical, base_sha256=base_sha, base_intake=_base())
+    return {
+        "drawing_id": "drawing",
+        "parent_version": 1,
+        "mutations": mutations,
+        "plan_sha256": plan_sha256(plan_bytes),
+        "source_sha256": hashlib.sha256(b"browser-edited-dxf").hexdigest(),
+    }
+
+
+def test_data_plan_live_applies_without_a_planner(monkeypatch, tmp_path):
+    backend = _store(tmp_path)
+    plan = _data_plan(backend)
+    da = FakeDa(_actual_success())
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "production")
+    monkeypatch.setenv("LEAF_AUTHORED_EXECUTION", "1")
+
+    def unexpected_planner(*args, **kwargs):
+        pytest.fail("a browser data plan must not resolve or execute tool code")
+
+    monkeypatch.setattr(tool_loader, "run_tool_dynamic", unexpected_planner)
+    monkeypatch.setattr(
+        tool_loader, "published_tool_source_sha256", unexpected_planner)
+    plan["execution_provenance"] = copy.deepcopy(FORGED_RECEIPT)
+    env, status = write_loop.run_data_plan_live(
+        plan, "tenant", backend=backend, da=da, t0=time.perf_counter(),
+    )
+
+    assert status == 200, env
+    assert len(da.submissions) == 1
+    activity, arguments, kwargs = da.submissions[0]
+    assert activity == "owner.LeafApplyMutations+prod"
+    assert set(arguments) == {"HostDwg", "Plan", "Result", "Intake"}
+    assert kwargs["dry_run"] is False and kwargs["poll"] is True
+    assert env["tool"] == "cad-edit-plan" and env["version"] == "1.0.0"
+    result = env["result"]
+    assert result["new_version"] == {
+        "drawing_id": "drawing", "version": 2, "parent": 1,
+    }
+    assert result["new_version_readable"] is True
+    assert result["commit"] == "dwg-plan"
+    assert result["plan_sha256"] == plan["plan_sha256"]
+    assert result["source_sha256"] == plan["source_sha256"]
+    assert result["workitem_id"] == "wi-1"
+    assert result["output_dwg_bytes"] == 70
+    assert env["cost"]["engine_seconds"] == 2.0
+    assert env["timing_ms"] >= 0 and env["degraded_mode"] is False
+    _, vkey = store.resolve_version(backend, "tenant", "drawing", 1)
+    binding = {
+        "drawing_id": "drawing",
+        "base_version": 1,
+        "base_source_sha256": hashlib.sha256(backend.get(vkey)).hexdigest(),
+        "plan_sha256": plan["plan_sha256"],
+        "source_sha256": plan["source_sha256"],
+    }
+    assert result["mutation_binding"] == binding
+    provenance = env["execution_provenance"]
+    assert {key: value for key, value in provenance.items()
+            if key != "cad_timing"} == {
+        "contract": "leaf.data-plan.v1", "isolation": "none-needed", **binding,
+    }
+    assert provenance["cad_timing"]["contract"] == "leaf.cad-timing.v1"
+    assert provenance["cad_timing"]["spans_ms"]["planner"] is None
+    assert provenance["cad_timing"]["spans_ms"]["engine"] == 2000
+    row = store.load_manifest(backend, "tenant", "drawing")["versions"][-1]
+    assert row["tool"] == "cad-edit-plan"
+    assert row["note"] == "live browser edit plan"
+    assert row["source_ref"] is None
+    assert row["workitem_id"] == "wi-1"
+
+
+def test_data_plan_refuses_a_moved_parent_before_any_submission(tmp_path):
+    backend = _store(tmp_path)
+    plan = _data_plan(backend)
+    write_loop._put_bytes_version(
+        backend, "tenant", "drawing", b"AC1032" + b"\x02" * 64,
+        parent_version=1, meta={},
+    )
+    da = FakeDa(_actual_success())
+    env, status = write_loop.run_data_plan_live(
+        plan, "tenant", backend=backend, da=da, t0=time.perf_counter(),
+    )
+    assert status == 409
+    assert env["error"]["error_code"] == "BAD_PARAMS"
+    assert env["error"]["retryable"] is True
+    assert "stale parent" in env["error"]["message"]
+    assert da.submissions == [] and da.staged == {}
+    manifest = store.load_manifest(backend, "tenant", "drawing")
+    assert manifest["head"] == manifest["latest"] == 2
+    assert [row["v"] for row in manifest["versions"]] == [1, 2]
+
+
+def test_data_plan_refuses_a_digest_mismatch_before_any_submission(tmp_path):
+    backend = _store(tmp_path)
+    plan = _data_plan(backend)
+    different = _mutations()
+    different["added"][0]["pts"][0][0] = 11.0
+    canonical = validate_mutations(
+        _base(), different, allow_transforms=True, allow_xdata=False)
+    _, vkey = store.resolve_version(backend, "tenant", "drawing", 1)
+    plan["plan_sha256"] = plan_sha256(emit_plan(
+        canonical, base_sha256=hashlib.sha256(backend.get(vkey)).hexdigest(),
+        base_intake=_base(),
+    ))
+    da = FakeDa(_actual_success())
+    env, status = write_loop.run_data_plan_live(
+        plan, "tenant", backend=backend, da=da, t0=time.perf_counter(),
+    )
+    assert status == 422
+    assert env["error"]["error_code"] == "BAD_PARAMS"
+    assert env["error"]["retryable"] is False
+    assert "no longer matches the submitted plan digest" in env["error"]["message"]
+    assert da.submissions == [] and da.staged == {}
+    assert store.load_manifest(backend, "tenant", "drawing")["head"] == 1
+
+
+def test_data_plan_without_a_da_client_refuses_and_never_mocks(monkeypatch, tmp_path):
+    backend = _store(tmp_path)
+
+    def unexpected_mock(*args, **kwargs):
+        pytest.fail("a live browser data plan must never use the mock writer")
+
+    monkeypatch.setattr(write_loop, "run_write_mock", unexpected_mock)
+    env, status = write_loop.run_data_plan_live(
+        _data_plan(backend), "tenant", backend=backend, da=None,
+        t0=time.perf_counter(),
+    )
+    assert status == 503
+    assert env["error"]["error_code"] == "APS_UNAVAILABLE"
+    assert env["error"]["retryable"] is True
+    assert env["tool"] == "cad-edit-plan" and env["version"] == "1.0.0"
+    assert env["degraded_mode"] is False
+    manifest = store.load_manifest(backend, "tenant", "drawing")
+    assert manifest["head"] == manifest["latest"] == 1
+    assert len(manifest["versions"]) == 1
+
+
+def test_data_plan_effect_mismatch_never_publishes(tmp_path):
+    backend = _store(tmp_path)
+    actual = _actual_success()
+    actual["polylines"] = actual["polylines"][:1]
+    da = FakeDa(actual)
+    env, status = write_loop.run_data_plan_live(
+        _data_plan(backend), "tenant", backend=backend, da=da,
+        t0=time.perf_counter(),
+    )
+    assert status == 502
+    assert env["error"]["error_code"] == "WORKITEM_FAILED"
+    assert env["error"]["retryable"] is False
+    assert len(da.submissions) == 1
+    assert store.load_manifest(backend, "tenant", "drawing")["head"] == 1
+
+
+def test_data_plan_transport_failure_never_returns_exception_text(tmp_path):
+    backend = _store(tmp_path)
+    env, status = write_loop.run_data_plan_live(
+        _data_plan(backend), "tenant", backend=backend,
+        da=RaisingDa(_actual_success()), t0=time.perf_counter(),
+    )
+    assert status == 502
+    assert env["error"]["error_code"] == "WORKITEM_FAILED"
+    assert env["error"]["retryable"] is True
+    assert env["error"]["message"] == "live drawing mutation failed"
+    assert "https://" not in json.dumps(env)
+    assert "do-not-return" not in json.dumps(env)
+    assert store.load_manifest(backend, "tenant", "drawing")["head"] == 1
+
+
+def test_data_plan_checkout_denied_is_a_403_envelope(tmp_path):
+    backend = _store(tmp_path)
+    store.acquire_checkout(backend, "tenant", "drawing", "owner", 300)
+    da = FakeDa(_actual_success())
+    env, status = write_loop.run_data_plan_live(
+        _data_plan(backend), "tenant", backend=backend, da=da,
+        t0=time.perf_counter(), holder="intruder",
+    )
+    assert status == 403
+    assert env["error"]["error_code"] == "FORBIDDEN"
+    assert env["error"]["retryable"] is False
+    assert env["tool"] == "cad-edit-plan" and env["version"] == "1.0.0"
+    assert da.submissions == [] and da.staged == {}
+    assert store.load_manifest(backend, "tenant", "drawing")["head"] == 1

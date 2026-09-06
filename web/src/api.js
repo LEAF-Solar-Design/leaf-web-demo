@@ -755,6 +755,10 @@ function subscribeJob(jobId, onStatus) {
     }
     const handleRec = (rec) => {
       if (settled || !rec) return
+      if (typeof rec.job_id !== 'string' || rec.job_id !== jobId) {
+        fail(new Error(`job record mismatch: asked for ${jobId}, got ${rec.job_id}`))
+        return
+      }
       emit(rec)
       if (TERMINAL.has(rec.status)) finish(rec)
     }
@@ -764,6 +768,10 @@ function subscribeJob(jobId, onStatus) {
         errStreak = 0
         handleRec(rec)
       } catch (e) {
+        if (e?.status === 404) {
+          fail(Object.assign(new Error(`job ${jobId} not found`), { status: 404 }))
+          return
+        }
         errStreak += 1
         if (errStreak >= 12) fail(new Error(`lost job ${jobId}: ${e.message || e}`))
       }
@@ -984,7 +992,61 @@ export async function saveEditedDrawingVersion(drawingId, bytes, parentVersion, 
 // verbatim) and `mutations`, the diff of the engine document against the
 // head in the mutation contract v2; the receipt's `commit` says which leg
 // carried it ("dwg-plan" or "dxf-sidecar") and `commit_note` why.
-export async function saveDrawingVersionPlan(drawingId, bytes, parentVersion, digest, mutations, capability = null) {
+const PLAN_JOB_POINTER_PREFIX = 'leaf.cadedit.plan-job.'
+
+export function loadPlanJobPointer(drawingId) {
+  try { return sessionStorage.getItem(PLAN_JOB_POINTER_PREFIX + TENANT + '.' + drawingId) || null }
+  catch { return null }
+}
+
+function rememberPlanJob(drawingId, jobId) {
+  try { sessionStorage.setItem(PLAN_JOB_POINTER_PREFIX + TENANT + '.' + drawingId, jobId) }
+  catch { /* storage unavailable */ }
+}
+
+function clearPlanJob(drawingId) {
+  try { sessionStorage.removeItem(PLAN_JOB_POINTER_PREFIX + TENANT + '.' + drawingId) }
+  catch { /* storage unavailable */ }
+}
+
+export async function saveDrawingVersionPlan(drawingId, bytes, parentVersion, digest, mutations, capability = null, opts = {}) {
+  const pending = loadPlanJobPointer(drawingId)
+  if (pending) {
+    let env
+    try {
+      env = await attachToJob(pending, { onStatus: opts.onStatus })
+    } catch (cause) {
+      if (cause?.status !== 404) {
+        const error = new Error(`outcome unknown: job ${pending} may still be running; reopen the drawing to see whether the version landed`)
+        error.outcomeUnknown = true
+        error.jobId = pending
+        throw error
+      }
+    }
+    clearPlanJob(drawingId)
+    if (env?.ok === true) {
+      const version = env.result?.new_version?.version
+      if (!Number.isInteger(version) || version <= 0) {
+        const error = new Error('live commit reported no version')
+        error.status = 502
+        error.jobId = pending
+        error.body = env
+        throw error
+      }
+      if (typeof env.result.new_version.drawing_id === 'string' && env.result.new_version.drawing_id !== drawingId) {
+        const error = new Error('live commit named another drawing')
+        error.status = 502
+        error.jobId = pending
+        error.body = env
+        throw error
+      }
+      const error = new Error(`an earlier save landed as version ${version}; reopen the drawing before saving again`)
+      error.status = 409
+      error.landedVersion = version
+      error.jobId = pending
+      throw error
+    }
+  }
   const form = new FormData()
   form.append('file', new Blob([bytes], { type: 'application/dxf' }), 'edited.dxf')
   form.append('parent_version', String(parentVersion))
@@ -1000,6 +1062,71 @@ export async function saveDrawingVersionPlan(drawingId, bytes, parentVersion, di
     error.status = res.status
     error.body = body
     throw error
+  }
+  if (res.status === 202) {
+    if (typeof body?.job_id !== 'string' || body.job_id.length === 0) {
+      const error = new Error('the server accepted the plan without a job id')
+      error.status = 502
+      error.body = body
+      throw error
+    }
+    const jobId = body.job_id
+    rememberPlanJob(drawingId, jobId)
+    let env
+    try {
+      env = await subscribeJob(jobId, opts.onStatus)
+    } catch {
+      try {
+        env = await attachToJob(jobId, opts)
+      } catch {
+        const error = new Error(`outcome unknown: job ${jobId} may still be running; reopen the drawing to see whether the version landed`)
+        error.outcomeUnknown = true
+        error.jobId = jobId
+        throw error
+      }
+    }
+    clearPlanJob(drawingId)
+    if (env?.ok !== true) {
+      const error = new Error(env?.error?.message || 'live commit failed')
+      error.status = 422
+      error.body = env
+      error.jobId = jobId
+      throw error
+    }
+    const version = env.result?.new_version?.version
+    if (!Number.isInteger(version) || version <= 0) {
+      const error = new Error('live commit reported no version')
+      error.status = 502
+      error.jobId = jobId
+      error.body = env
+      throw error
+    }
+    if (typeof env.result.new_version.drawing_id === 'string' && env.result.new_version.drawing_id !== drawingId) {
+      const error = new Error('live commit named another drawing')
+      error.status = 502
+      error.jobId = jobId
+      error.body = env
+      throw error
+    }
+    return {
+      drawing_id: drawingId,
+      job_id: jobId,
+      new_version: env.result.new_version,
+      head: env.result.new_version?.version,
+      parent: body.parent,
+      commit: 'dwg-plan',
+      commit_note: body.commit_note,
+      plan_sha256: body.plan_sha256,
+      source_sha256: body.source_sha256,
+      workitem_id: env.result.workitem_id,
+      new_version_readable: env.result.new_version_readable !== false,
+      live: true,
+      cost: {
+        engine: 'aps-workitem',
+        engine_usd: typeof env.cost?.usd_est === 'number' ? env.cost.usd_est : null,
+        engine_seconds: typeof env.cost?.engine_seconds === 'number' ? env.cost.engine_seconds : null,
+      },
+    }
   }
   return body
 }

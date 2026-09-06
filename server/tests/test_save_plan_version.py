@@ -10,7 +10,9 @@ Pins, each against a hostile shape:
     the plan validated against the head's intake and applied by the mock
     writer, the payload is the applied intake (the engine reopens it through
     the synthesizer), `plan_sha256` names the lowered plan, no sidecar;
-  - a DWG-backed head at APS_LIVE=1 takes the sidecar until W4g-3c and says so;
+  - a DWG-backed head at APS_LIVE=1 takes the sidecar while the live leg is
+    gated off; when enabled, a matching DXF and a sufficient checkout lease
+    submit a plan job without writing a version, unless the payload is over cap;
   - a plan naming no operation takes the sidecar and says so;
   - a plan the contract refuses (an unknown handle) is a 422 that writes
     NOTHING; a plan that is not JSON is a 400; an oversized one a 413;
@@ -65,6 +67,7 @@ def client(tmp_path, monkeypatch):
 
     monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "drawings"))
     monkeypatch.delenv("APS_LIVE", raising=False)
+    monkeypatch.delenv("LEAF_PLAN_LIVE_LEG", raising=False)
     monkeypatch.delenv("LEAF_AUTH_LIVE", raising=False)
 
     from routers import drawings as drawings_router  # noqa: PLC0415
@@ -76,7 +79,7 @@ def client(tmp_path, monkeypatch):
     return TestClient(app, raise_server_exceptions=False)
 
 
-def _seed_dwg_backed(tmp_path):
+def _seed_dwg_backed(tmp_path, *, intake=None):
     """A DWG-backed drawing at v1 with its intake cache published (the shape a
     live ingest leaves), under the same store dir the router resolves."""
     import store  # noqa: PLC0415
@@ -87,8 +90,65 @@ def _seed_dwg_backed(tmp_path):
     source.write_bytes(b"AC1032" + b"\x00" * 64)
     store.ingest_drawing(backend, TENANT, str(source), drawing_id=DWG_DRAWING)
     write_loop.publish_intake_cache(
-        backend, TENANT, DWG_DRAWING, 1, source.read_bytes(), _base_intake())
+        backend, TENANT, DWG_DRAWING, 1, source.read_bytes(),
+        _base_intake() if intake is None else intake)
     return backend
+
+
+def _live_base_intake():
+    """The uploaded DXF's entities before its LINE endpoint edit."""
+    return {
+        "dwg": "source.dwg", "layers": ["New", "Roof"],
+        "polylines": [
+            {"handle": "A", "layer": "Roof", "closed": True, "xdata": None,
+             "pts": [[0.0, 0.0, 0.0], [50.0, 0.0, 0.0], [50.0, 30.0, 0.0]]},
+            {"handle": "1F", "layer": "New", "closed": False, "xdata": None,
+             "pts": [[1.0, 2.0, 0.0], [3.0, 5.0, 0.0]]},
+        ],
+    }
+
+
+def _live_mutations():
+    return {"set_points": [{"handle": "1F", "pts": [[1, 2], [4, 6]]}]}
+
+
+@pytest.fixture()
+def plan_submissions(client, monkeypatch):
+    import jobs  # noqa: PLC0415
+
+    calls = []
+
+    def record(tenant_id, plan, dwg, *, checkout_holder, checkout_fence):
+        calls.append({"tenant_id": tenant_id, "plan": plan, "dwg": dwg,
+                      "checkout_holder": checkout_holder, "checkout_fence": checkout_fence})
+        return "live-plan-job"
+
+    monkeypatch.setattr(jobs, "submit_plan_job", record)
+    return calls
+
+
+@pytest.fixture()
+def live(client, tmp_path, monkeypatch, plan_submissions, request):
+    import deps  # noqa: PLC0415
+    import jobs  # noqa: PLC0415
+
+    monkeypatch.setattr(deps, "APS_LIVE", True)
+    monkeypatch.setenv("LEAF_PLAN_LIVE_LEG", "1")
+    monkeypatch.setattr(jobs, "job_max_s", lambda: 540)
+    intake = request.param if hasattr(request, "param") else _live_base_intake()
+    backend = _seed_dwg_backed(tmp_path, intake=intake)
+    return client, backend, plan_submissions
+
+
+def _checkout(client):
+    resp = client.post(
+        f"/api/drawings/{DWG_DRAWING}/checkout",
+        headers={"X-Tenant-Id": TENANT},
+        json={"holder": "plan-editor", "ttl_s": 3600},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["acquired"] is True
+    return resp.json()["checkout_capability"]
 
 
 def _head(client, drawing):
@@ -98,12 +158,16 @@ def _head(client, drawing):
 
 def _post(client, drawing, mutations, *, data: bytes = EDITED_DXF,
           digest: str | None = None, parent: int | None = None,
-          plan: str | None = None, name: str = "edited.dxf"):
+          plan: str | None = None, name: str = "edited.dxf",
+          capability: str | None = None):
     if parent is None:
         parent = _head(client, drawing)
+    headers = {"X-Tenant-Id": TENANT}
+    if capability is not None:
+        headers["X-Checkout-Capability"] = capability
     return client.post(
         f"/api/drawings/{drawing}/versions/plan",
-        headers={"X-Tenant-Id": TENANT},
+        headers=headers,
         files={"file": (name, io.BytesIO(data), "application/dxf")},
         data={"parent_version": str(parent),
               "source_digest": digest or hashlib.sha256(data).hexdigest(),
@@ -174,17 +238,269 @@ def test_dwg_backed_head_takes_the_plan_leg_through_the_mock_writer(client, tmp_
     assert b"\nCIRCLE\n" in dxf.content and dxf.content.count(b"\nLWPOLYLINE\n") == 2
 
 
-def test_dwg_backed_head_at_aps_live_takes_the_sidecar_until_3c(client, tmp_path, monkeypatch):
+def test_dwg_backed_head_at_aps_live_takes_the_sidecar_while_the_live_leg_is_gated_off(
+        client, tmp_path, monkeypatch, plan_submissions):
     import deps  # noqa: PLC0415
 
     _seed_dwg_backed(tmp_path)
     monkeypatch.setattr(deps, "APS_LIVE", True)
+    monkeypatch.delenv("LEAF_PLAN_LIVE_LEG", raising=False)
     resp = _post(client, DWG_DRAWING, {"set_layer": [{"handle": "A", "layer": "Moved"}]})
     assert resp.status_code == 201, resp.text
     body = resp.json()
     assert body["commit"] == "dxf-sidecar"
-    assert "W4g-3c" in body["commit_note"]
+    assert body["commit_note"] == (
+        "live plan commit is gated off (LEAF_PLAN_LIVE_LEG); the DXF carries this save")
     assert body["source_stored"] is True
+    assert plan_submissions == []
+
+
+def test_live_leg_submits_a_plan_job_and_writes_nothing(live):
+    import mutation_plan  # noqa: PLC0415
+    import store  # noqa: PLC0415
+    import write_loop  # noqa: PLC0415
+
+    client, backend, submissions = live
+    capability = _checkout(client)
+    before = store.load_manifest(backend, TENANT, DWG_DRAWING)
+    co = before["checkout"]
+    mutations = _live_mutations()
+    _, vkey = store.resolve_version(backend, TENANT, DWG_DRAWING, 1)
+    canonical = mutation_plan.validate_mutations(
+        _live_base_intake(), mutations, allow_transforms=True, allow_xdata=False)
+    plan_digest = mutation_plan.plan_sha256(mutation_plan.emit_plan(
+        canonical, base_sha256=hashlib.sha256(backend.get(vkey)).hexdigest(),
+        base_intake=_live_base_intake()))
+
+    resp = _post(client, DWG_DRAWING, mutations, capability=capability)
+    assert resp.status_code == 202, resp.text
+    body = resp.json()
+    assert body["drawing_id"] == DWG_DRAWING
+    assert body["job_id"] == "live-plan-job"
+    assert body["status"] == "submitted"
+    assert body["commit"] == "dwg-plan"
+    assert body["commit_note"] == "live APS WorkItem; the job carries the receipt"
+    assert body["parent"] == 1
+    assert body["plan_sha256"] == plan_digest
+    assert body["source_sha256"] == hashlib.sha256(EDITED_DXF).hexdigest()
+    assert body["source_stored"] is False
+    assert body["cost"] == {"engine": "aps-workitem", "engine_usd": None}
+    assert submissions == [{
+        "tenant_id": TENANT, "dwg": DWG_DRAWING,
+        "plan": {"drawing_id": DWG_DRAWING, "parent_version": 1,
+                 "mutations": canonical, "plan_sha256": plan_digest,
+                 "source_sha256": hashlib.sha256(EDITED_DXF).hexdigest()},
+        "checkout_holder": co["holder"], "checkout_fence": co["fence"],
+    }]
+    assert _head(client, DWG_DRAWING) == 1
+    assert store.load_manifest(backend, TENANT, DWG_DRAWING) == before
+    assert not backend.exists(write_loop.edited_source_key(TENANT, DWG_DRAWING, 2))
+
+
+def test_live_leg_accepts_extractor_quantum_without_changing_the_plan(live):
+    client, _backend, submissions = live
+    capability = _checkout(client)
+    mutations = {"set_points": [{"handle": "1F", "pts": [[1, 2], [4.0004, 6]]}]}
+    data = EDITED_DXF.replace(b"11\n4\n21\n6\n", b"11\n4.0004\n21\n6\n")
+    resp = _post(client, DWG_DRAWING, mutations, data=data, capability=capability)
+    assert resp.status_code == 202, resp.text
+    assert len(submissions) == 1
+    points = submissions[0]["plan"]["mutations"]["set_points"][0]["pts"]
+    assert points == [[1.0, 2.0, 0.0], [4.0004, 6.0, 0.0]]
+    assert _head(client, DWG_DRAWING) == 1
+
+
+def test_live_leg_quantizes_upload_through_the_plan_number_pipeline(live):
+    client, _backend, submissions = live
+    capability = _checkout(client)
+    mutations = {"set_points": [{"handle": "1F", "pts": [[1, 2, 0], [4.0004999999996, 6, 0]]}]}
+    data = EDITED_DXF.replace(b"11\n4\n21\n6\n", b"11\n4.0004999999996\n21\n6\n")
+    resp = _post(client, DWG_DRAWING, mutations, data=data, capability=capability)
+    assert resp.status_code == 202, resp.text
+    assert len(submissions) == 1
+    assert submissions[0]["plan"]["mutations"]["set_points"][0]["pts"] == mutations["set_points"][0]["pts"]
+    assert _head(client, DWG_DRAWING) == 1
+
+
+@pytest.mark.parametrize("live,kind,angles", [
+    pytest.param({**_live_base_intake(), "circles": [
+        {"handle": "2A", "layer": "New", "c": [0.0, 0.0, 0.0], "r": 3.0},
+    ]}, "CIRCLE", "", id="circle"),
+    pytest.param({**_live_base_intake(), "arcs": [
+        {"handle": "2A", "layer": "New", "c": [0.0, 0.0, 0.0], "r": 3.0,
+         "start_deg": 0.0, "end_deg": 90.0},
+    ]}, "ARC", "50\n0\n51\n90\n", id="arc"),
+], indirect=["live"])
+@pytest.mark.parametrize("radius,status", [("3", 202), ("3.0004", 202), ("3.0014", 422)])
+def test_live_leg_unchanged_round_entity_matches_head_at_quantum(live, kind, angles, radius, status):
+    client, _backend, submissions = live
+    capability = _checkout(client)
+    entity = (f"0\n{kind}\n5\n2A\n8\nNew\n10\n0\n20\n0\n40\n{radius}\n" + angles).encode("ascii")
+    data = EDITED_DXF.replace(b"0\nENDSEC\n", entity + b"0\nENDSEC\n")
+    resp = _post(client, DWG_DRAWING, _live_mutations(), data=data, capability=capability)
+    assert resp.status_code == status, resp.text
+    if status == 202:
+        assert len(submissions) == 1
+    else:
+        assert resp.json()["error"]["message"] == (
+            "the uploaded DXF does not carry the plan's result: an unchanged entity differs from the head")
+        assert submissions == []
+    assert _head(client, DWG_DRAWING) == 1
+
+
+@pytest.mark.parametrize("live", [{**_live_base_intake(), "arcs": [
+    {"handle": "2A", "layer": "New", "c": [0.0, 0.0, 0.0], "r": 3.0,
+     "start_deg": 0.0, "end_deg": 90.0},
+]}], indirect=True)
+@pytest.mark.parametrize("angles", [b"50\n0.0006\n51\n90\n", b"50\n0\n51\n90.0006\n"])
+def test_live_leg_unchanged_arc_angles_match_head_at_quantum(live, angles):
+    client, _backend, submissions = live
+    capability = _checkout(client)
+    arc = b"0\nARC\n5\n2A\n8\nNew\n10\n0\n20\n0\n40\n3\n" + angles
+    data = EDITED_DXF.replace(b"0\nENDSEC\n", arc + b"0\nENDSEC\n")
+    resp = _post(client, DWG_DRAWING, _live_mutations(), data=data, capability=capability)
+    assert resp.status_code == 422, resp.text
+    assert "an unchanged entity differs from the head" in resp.json()["error"]["message"]
+    assert submissions == []
+    assert _head(client, DWG_DRAWING) == 1
+
+
+def test_live_leg_refuses_a_contradiction_beyond_the_extractor_quantum(live):
+    client, _backend, submissions = live
+    mutations = {"set_points": [{"handle": "1F", "pts": [[1, 2], [4.0004, 6]]}]}
+    data = EDITED_DXF.replace(b"11\n4\n21\n6\n", b"11\n4.002\n21\n6\n")
+    resp = _post(client, DWG_DRAWING, mutations, data=data)
+    assert resp.status_code == 422, resp.text
+    assert "does not carry the plan's result" in resp.json()["error"]["message"]
+    assert submissions == []
+    assert _head(client, DWG_DRAWING) == 1
+
+
+def test_live_leg_skips_text_comparison_when_head_does_not_list_texts(live):
+    client, _backend, submissions = live
+    capability = _checkout(client)
+    text = b"0\nTEXT\n5\n2A\n8\nNew\n10\n0\n20\n0\n40\n1\n1\nEXTRA\n"
+    data = EDITED_DXF.replace(b"0\nENDSEC\n", text + b"0\nENDSEC\n")
+    resp = _post(client, DWG_DRAWING, _live_mutations(), data=data, capability=capability)
+    assert resp.status_code == 202, resp.text
+    assert len(submissions) == 1
+    assert _head(client, DWG_DRAWING) == 1
+
+
+@pytest.mark.parametrize("live", [{**_live_base_intake(), "texts": []}], indirect=True)
+def test_live_leg_refuses_text_entities_not_carried_by_the_plan(live):
+    client, _backend, submissions = live
+    text = b"0\nTEXT\n5\n2A\n8\nNew\n10\n0\n20\n0\n40\n1\n1\nEXTRA\n"
+    data = EDITED_DXF.replace(b"0\nENDSEC\n", text + b"0\nENDSEC\n")
+    resp = _post(client, DWG_DRAWING, _live_mutations(), data=data)
+    assert resp.status_code == 422, resp.text
+    assert "text entities differ from the head" in resp.json()["error"]["message"]
+    assert submissions == []
+    assert _head(client, DWG_DRAWING) == 1
+
+
+@pytest.mark.parametrize("live", [{**_live_base_intake(), "texts": [
+    {"kind": "TEXT", "layer": "New", "pt": [0.0, 0.0], "text": "OLD", "handle": "2A"},
+]}], indirect=True)
+def test_live_leg_refuses_a_change_from_text_to_mtext(live):
+    client, _backend, submissions = live
+    capability = _checkout(client)
+    text = b"0\nMTEXT\n5\n2A\n8\nNew\n10\n0\n20\n0\n40\n1\n1\nOLD\n"
+    data = EDITED_DXF.replace(b"0\nENDSEC\n", text + b"0\nENDSEC\n")
+    resp = _post(client, DWG_DRAWING, _live_mutations(), data=data, capability=capability)
+    assert resp.status_code == 422, resp.text
+    assert "text entities differ from the head" in resp.json()["error"]["message"]
+    assert submissions == []
+    assert _head(client, DWG_DRAWING) == 1
+
+
+def test_live_leg_refuses_a_circle_outside_the_drawing_plane(live):
+    client, _backend, submissions = live
+    capability = _checkout(client)
+    normal = b"210\n1\n220\n0\n230\n0\n"
+    circle = b"0\nCIRCLE\n5\nC1\n8\nNew\n10\n10\n20\n10\n40\n2\n" + normal
+    data = EDITED_DXF.replace(b"0\nENDSEC\n", circle + b"0\nENDSEC\n")
+    mutations = {**_live_mutations(), "added": [
+        {"kind": "CIRCLE", "handle": "C1", "layer": "New", "c": [10, 10], "r": 2},
+    ]}
+    resp = _post(client, DWG_DRAWING, mutations, data=data, capability=capability)
+    assert resp.status_code == 422, resp.text
+    assert "outside the drawing plane" in resp.json()["error"]["message"]
+    assert submissions == []
+    assert _head(client, DWG_DRAWING) == 1
+
+    resp = _post(client, DWG_DRAWING, mutations, data=data.replace(normal, b""),
+                 capability=capability)
+    assert resp.status_code == 202, resp.text
+    assert len(submissions) == 1
+    assert _head(client, DWG_DRAWING) == 1
+
+
+def test_live_leg_refuses_a_plan_the_dxf_contradicts(live):
+    client, _backend, submissions = live
+    contradictory = EDITED_DXF.replace(b"11\n4\n21\n6\n", b"11\n9\n21\n6\n")
+    resp = _post(client, DWG_DRAWING, _live_mutations(), data=contradictory)
+    assert resp.status_code == 422, resp.text
+    assert "does not carry the plan's result" in resp.json()["error"]["message"]
+    assert resp.json()["error"]["retryable"] is False
+    assert submissions == []
+    assert _head(client, DWG_DRAWING) == 1
+
+
+def test_live_leg_refuses_an_unlowerable_plan_synchronously(live):
+    client, _backend, submissions = live
+    resp = _post(client, DWG_DRAWING, {"set_points": [{
+        "handle": "A", "closed": True,
+        "pts": [[0, 0, 0], [2, 0, 0], [2, 2, 1], [0, 2, 0]],
+    }]})
+    assert resp.status_code == 422, resp.text
+    assert "the edit plan was refused" in resp.json()["error"]["message"]
+    assert "planar" in resp.json()["error"]["message"]
+    assert submissions == []
+    assert _head(client, DWG_DRAWING) == 1
+
+
+def test_live_leg_takes_the_sidecar_when_the_plan_exceeds_the_job_cap(live, monkeypatch):
+    import jobs  # noqa: PLC0415
+    import write_loop  # noqa: PLC0415
+
+    client, backend, submissions = live
+    monkeypatch.setattr(jobs, "MAX_PARAMS_BYTES", 64)
+    resp = _post(client, DWG_DRAWING, _live_mutations())
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["commit"] == "dxf-sidecar"
+    assert body["commit_note"] == (
+        "the plan exceeds the job payload cap; the DXF carries this save")
+    assert body["plan_sha256"] is None
+    assert body["source_stored"] is True
+    assert body["cost"] == {"engine_usd": 0.0, "engine": "client-wasm"}
+    assert backend.get(write_loop.edited_source_key(TENANT, DWG_DRAWING, 2)) == EDITED_DXF
+    assert submissions == []
+    assert _head(client, DWG_DRAWING) == 2
+
+
+def test_live_leg_refuses_a_short_lease(live, monkeypatch):
+    import jobs  # noqa: PLC0415
+
+    client, _backend, submissions = live
+    capability = _checkout(client)
+    monkeypatch.setattr(jobs, "job_max_s", lambda: 7200)
+    resp = _post(client, DWG_DRAWING, _live_mutations(), capability=capability)
+    assert resp.status_code == 409, resp.text
+    assert "edit lock has" in resp.json()["error"]["message"]
+    assert resp.json()["error"]["retryable"] is True
+    assert submissions == []
+    assert _head(client, DWG_DRAWING) == 1
+
+
+def test_live_leg_stale_parent_is_still_a_409_before_anything(live):
+    client, _backend, submissions = live
+    resp = _post(client, DWG_DRAWING, _live_mutations(), parent=0)
+    assert resp.status_code == 409, resp.text
+    assert "stale parent" in resp.json()["error"]["message"]
+    assert submissions == []
+    assert _head(client, DWG_DRAWING) == 1
 
 
 def test_a_plan_naming_no_operation_takes_the_sidecar_and_says_so(client, tmp_path):
