@@ -12,7 +12,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 import deps
 import platform_link
@@ -370,8 +370,16 @@ async def submit(request: Request, tenant: Any = Depends(deps.require_tenant)):
         title = _text(body.get('title'), 'title', 200)
         prompt = _text(body.get('prompt'), 'prompt', 32768)
         key = _text(request.headers.get('Idempotency-Key'), 'Idempotency-Key', 128)
+        if 'mode' in body or 'finish' in body:
+            import campaign_release_service as releases
+            if body.get('mode') != 'finish' or set(body) != {'project_id', 'title', 'prompt', 'mode', 'finish'}:
+                raise ValueError('Invalid finish request')
+            releases.validate_finish(body['finish'])
     except ValueError:
         return _failure(400, 'invalid_request', 'Invalid campaign request')
+    if body.get('mode') == 'finish':
+        return await run_in_threadpool(_release_call, 'campaign', _finish_campaign,
+                                       tenant, project, title, prompt, body['finish'], key)
     def admit(store, org):
         tenant_id = str(getattr(tenant, 'tenant_id', tenant))
         row = store.submit_campaign(org, project, tenant_id, _principal(tenant),
@@ -382,6 +390,100 @@ async def submit(request: Request, tenant: Any = Depends(deps.require_tenant)):
             row = {**row, 'source': source}
         return row
     return _execute(tenant, project, admit, 'campaign', created=True)
+
+
+def _finish_campaign(tenant, project, title, prompt, finish, key):
+    import campaign_release_service as releases
+    org, _, actor = releases.authority(tenant, project)
+    row = _store().submit_campaign(org, project, str(getattr(tenant, 'tenant_id', tenant)),
+                                   actor, title=title, prompt=prompt, idempotency_key=key)
+    if row is None:
+        raise LookupError('Campaign unavailable')
+    completion = releases.create(tenant, project, row['campaign_id'], finish, key)
+    return dict(row, completion=completion)
+
+
+def _release_call(key, function, *args):
+    import campaign_delivery_service as delivery
+    try:
+        return {'ok': True, key: function(*args)}
+    except (platform_link.ProjectSessionForbidden, PermissionError):
+        return _failure(403, 'forbidden', 'Project access denied')
+    except LookupError:
+        return _failure(404, 'release_unavailable', 'Release unavailable')
+    except delivery.DeliveryConflict:
+        return _failure(409, 'release_conflict', 'Artifact or release version conflicts')
+    except Exception as exc:
+        store = _store()
+        if isinstance(exc, store.CampaignConflict):
+            return _failure(409, 'release_conflict', 'Release request conflicts')
+        if isinstance(exc, store.CampaignUnavailable):
+            return _failure(503, 'release_unavailable', 'Release service unavailable')
+        if isinstance(exc, (ValueError, TypeError, KeyError)):
+            return _failure(400, 'invalid_request', 'Invalid release request')
+        return _failure(503, 'release_unavailable', 'Release service unavailable')
+
+
+@router.get('/api/campaigns/{campaign_id}/releases')
+def releases_list(campaign_id: str, request: Request, tenant: Any = Depends(deps.require_tenant)):
+    import campaign_release_service as releases
+    return _release_call('releases', releases.list_releases, tenant,
+                         request.query_params.get('project_id'), campaign_id)
+
+
+@router.post('/api/campaigns/{campaign_id}/releases')
+async def release_create(campaign_id: str, request: Request, tenant: Any = Depends(deps.require_tenant)):
+    import campaign_release_service as releases
+    try:
+        body = await _capability_body(request, ('project_id', 'finish'))
+        project, campaign_id = _id(body['project_id']), _id(campaign_id)
+        releases.validate_finish(body['finish'])
+        key = _text(request.headers.get('Idempotency-Key'), 'Idempotency-Key', 128)
+    except (ValueError, UnicodeError):
+        return _failure(400, 'invalid_request', 'Invalid release request')
+    return await run_in_threadpool(_release_call, 'completion', releases.create,
+                                   tenant, project, campaign_id, body['finish'], key)
+
+
+@router.get('/api/campaigns/{campaign_id}/releases/{release_id}')
+def release_get(campaign_id: str, release_id: str, request: Request,
+                tenant: Any = Depends(deps.require_tenant)):
+    import campaign_release_service as releases
+    return _release_call('completion', releases.snapshot, tenant,
+                         request.query_params.get('project_id'), campaign_id, release_id)
+
+
+@router.post('/api/campaigns/{campaign_id}/releases/{release_id}/{action}')
+async def release_action(campaign_id: str, release_id: str, action: str, request: Request,
+                         tenant: Any = Depends(deps.require_tenant)):
+    import campaign_release_service as releases
+    try:
+        if action not in ('pause', 'resume', 'cancel', 'retry', 'advance'):
+            raise ValueError('Invalid action')
+        fields = ('project_id', 'stage') if action == 'retry' else ('project_id',)
+        body = await _capability_body(request, fields)
+        project, campaign_id, release_id = _id(body['project_id']), _id(campaign_id), _id(release_id)
+    except (ValueError, UnicodeError):
+        return _failure(400, 'invalid_request', 'Invalid release request')
+    function = releases.advance if action == 'advance' else releases.retry if action == 'retry' else releases.transition
+    args = () if action == 'advance' else (body['stage'],) if action == 'retry' else (action,)
+    return await run_in_threadpool(_release_call, 'completion', function,
+                                   tenant, project, campaign_id, release_id, *args)
+
+
+@router.get('/api/campaigns/{campaign_id}/releases/{release_id}/artifacts/{name}')
+def release_artifact(campaign_id: str, release_id: str, name: str, request: Request,
+                     tenant: Any = Depends(deps.require_tenant)):
+    import campaign_release_service as releases
+    from urllib.parse import quote
+    result = _release_call('artifact', releases.read_artifact, tenant,
+                           request.query_params.get('project_id'), campaign_id, release_id, name)
+    if isinstance(result, JSONResponse):
+        return result
+    raw, metadata = result['artifact']
+    return Response(content=raw, media_type=metadata['media_type'], headers={
+        'Content-Disposition': "attachment; filename*=UTF-8''" + quote(name, safe=''),
+        'ETag': '"' + metadata['sha256'] + '"', 'Cache-Control': 'private, no-store'})
 
 
 @router.get('/api/campaigns')
@@ -401,7 +503,11 @@ def get_campaign(campaign_id: str, request: Request, tenant: Any = Depends(deps.
         campaign_id = _id(campaign_id)
     except ValueError:
         return _failure(400, 'invalid_request', 'Invalid campaign request')
-    return _execute(tenant, project, lambda store, org: store.get_campaign(org, project, campaign_id), 'campaign')
+    def read(store, org):
+        import campaign_release_service as releases
+        row = store.get_campaign(org, project, campaign_id)
+        return dict(row, completion=releases.snapshot(tenant, project, campaign_id)) if row else None
+    return _execute(tenant, project, read, 'campaign')
 
 
 def _project(snapshot):
@@ -425,8 +531,11 @@ def execution(campaign_id: str, request: Request, tenant: Any = Depends(deps.req
         limit = max(1, min(200, int(request.query_params.get('limit', '50'))))
     except ValueError:
         return _failure(400, 'invalid_request', 'Invalid campaign request')
-    return _execute(tenant, project, lambda store, org: _project(
-        _execution_store().read_execution(org, project, campaign_id, limit=limit)),
+    def read(store, org):
+        import campaign_release_service as releases
+        result = _project(_execution_store().read_execution(org, project, campaign_id, limit=limit))
+        return dict(result, completion=releases.snapshot(tenant, project, campaign_id))
+    return _execute(tenant, project, read,
         'execution', project=lambda row: row)
 
 
