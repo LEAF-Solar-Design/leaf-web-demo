@@ -1438,6 +1438,28 @@ def verify_live_mutation_effects(
 ) -> None:
     """Refuse publication unless extraction proves exactly the proposed effects."""
     expected = apply_mutations(base, canonical)
+    # INSERTs have no new effects in this slice. Compare their complete
+    # records by handle; their positions are not polyline point lists.
+    insert_indexes = []
+    for intake in (expected, actual):
+        rows = intake.get("inserts", [])
+        if not isinstance(rows, list) or any(
+            not isinstance(row, dict) or not isinstance(row.get("handle"), str)
+            or not row["handle"] for row in rows
+        ):
+            raise ValueError("every re-extracted INSERT must have a nonempty handle")
+        index = {row["handle"]: row for row in rows}
+        if len(index) != len(rows):
+            raise ValueError("re-extracted output contains duplicate INSERT handles")
+        insert_indexes.append(index)
+    if insert_indexes[0] != insert_indexes[1]:
+        raise ValueError("unchanged INSERT has unexpected output geometry")
+    # Old intakes may predate the additive catalogue. Once captured, the
+    # definitions (keyed by name, not entity handle) must stay unchanged.
+    if "blocks" in expected and expected["blocks"] != actual.get("blocks", {}):
+        raise ValueError("unchanged block definitions differ in output")
+    if "blocksCapped" in expected and expected["blocksCapped"] != actual.get("blocksCapped"):
+        raise ValueError("unchanged block catalogue cap differs in output")
     # W4g-3 (contract v2): circles and arcs verify by the same rule as the
     # polylines (LINE included, as a 2-point polyline): everything the plan
     # names carries its expected geometry, everything else is untouched,

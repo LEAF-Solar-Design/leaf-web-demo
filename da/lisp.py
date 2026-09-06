@@ -99,6 +99,69 @@ MUTATION_INSPECT_BLOCKS = (
 )
 
 
+# Both mutation contracts currently share this tuple (including the V3 alias).
+# Keep the catalogue out of _LISP so LeafExtract remains byte-identical.
+MUTATION_INSPECT_BLOCKS += (
+    " ".join(r'''(progn
+      (defun leaf-bk-point (p precision)
+        (if (null p) (setq p (list 0.0 0.0 0.0)))
+        (strcat (rtos (car p) 2 precision) "," (rtos (cadr p) 2 precision) ","
+          (rtos (cond ((caddr p) (caddr p)) (T 0.0)) 2 precision)))
+      (defun leaf-bk-angle (a)
+        (rtos (* 180.0 (/ (cond (a a) (T 0.0)) pi)) 2 6))
+      (defun leaf-bk-child (name ed / kind layer body normal points value)
+        (setq kind (cdr (assoc 0 ed)) layer (cdr (assoc 8 ed)))
+        (if (null layer) (setq layer "0"))
+        (cond
+          ((= kind "LINE")
+            (setq body (strcat (leaf-bk-point (cdr (assoc 10 ed)) 3) "|"
+              (leaf-bk-point (cdr (assoc 11 ed)) 3))))
+          ((= kind "LWPOLYLINE")
+            (setq normal (cdr (assoc 210 ed)) points "")
+            (if (null normal) (setq normal (list 0.0 0.0 1.0)))
+            (foreach g ed (if (= (car g) 10)
+              (setq points (strcat points (rtos (cadr g) 2 3) "," (rtos (caddr g) 2 3) ";"))))
+            (setq body (strcat (itoa (logand 1 (cond ((cdr (assoc 70 ed))) (T 0)))) "|"
+              (leaf-bk-point normal 6) "|"
+              (rtos (cond ((cdr (assoc 38 ed))) (T 0.0)) 2 3) "|" points)))
+          ((member kind (list "CIRCLE" "ARC"))
+            (setq body (strcat (leaf-bk-point (cdr (assoc 10 ed)) 3) "|" (rtos (cdr (assoc 40 ed)) 2 3)))
+            (if (= kind "ARC") (setq body (strcat body "|"
+              (leaf-bk-angle (cdr (assoc 50 ed))) "|" (leaf-bk-angle (cdr (assoc 51 ed)))))))
+          ((= kind "TEXT")
+            (setq value (cond ((cdr (assoc 1 ed))) (T "")))
+            (setq value (substr (vl-string-translate "|\r\n" "   " value) 1 512))
+            (setq body (strcat (leaf-bk-point (cdr (assoc 10 ed)) 3) "|"
+              (rtos (cdr (assoc 40 ed)) 2 3) "|" (leaf-bk-angle (cdr (assoc 50 ed))) "|" value)))
+          (T (setq body kind kind "OTHER" layer "")))
+        (strcat "BKE|" name "|" kind "|" body "|" layer))
+      (princ))'''.splitlines()),
+    " ".join(r'''(progn
+      (setq f (open "{OUT}" "a") bk (tblnext "BLOCK" T) total 0)
+      (while bk
+        (setq name (cdr (assoc 2 bk)))
+        (if (and name (/= (substr name 1 1) "*") (= 0 (logand 1 (cdr (assoc 70 bk)))))
+          (progn
+            (setq total (1+ total))
+            (if (<= total 200)
+              (progn
+                (setq be (entnext (tblobjname "BLOCK" name)) cnt 0 complete 1 rows nil)
+                (while (and be (/= (cdr (assoc 0 (entget be))) "ENDBLK"))
+                  (setq bed (entget be) kind (cdr (assoc 0 bed)) cnt (1+ cnt))
+                  (if (or (> cnt 60) (not (member kind (list "LINE" "LWPOLYLINE" "CIRCLE" "ARC" "TEXT"))))
+                    (setq complete 0))
+                  (if (<= cnt 60) (setq rows (cons (leaf-bk-child name bed) rows)))
+                  (setq be (entnext be)))
+                (if (null be) (setq complete 0))
+                (write-line (strcat "BK|" name "|" (leaf-bk-point (cdr (assoc 10 bk)) 3) "|"
+                  (itoa cnt) "|" (itoa complete)) f)
+                (foreach row (reverse rows) (write-line row f))))))
+        (setq bk (tblnext "BLOCK")))
+      (if (> total 200) (write-line (strcat "BKCAP|" (itoa total)) f))
+      (princ "BK-DONE") (close f))'''.splitlines()),
+)
+
+
 def build_scr(out_localname: str = OUT_LOCALNAME, *, quit_form: str = QUIT_DEFAULT,
               extra_blocks: tuple = ()) -> str:
     """Return the .scr content (CRLF line endings) for the extract Activity.
@@ -111,6 +174,12 @@ def build_scr(out_localname: str = OUT_LOCALNAME, *, quit_form: str = QUIT_DEFAU
     """
     lisp = _LISP
     if extra_blocks:
+        if any('"BK|"' in block for block in extra_blocks):
+            # The mutation round trip uses DXF degrees; leave legacy extraction
+            # (whose IN rotation was radians) and its provisioned bytes alone.
+            lisp = lisp.replace(
+                '(rtos (cond (rot rot)(T 0.0)) 2 5)',
+                '(rtos (* 180.0 (/ (cond (rot rot)(T 0.0)) pi)) 2 6)')
         lisp = lisp.replace("{QUIT}", "\n".join(extra_blocks) + "\n{QUIT}")
     body = lisp.replace("{OUT}", out_localname).replace("{QUIT}", quit_form)
     # accoreconsole scripts are CRLF; join every progn-line with \r\n and a trailing newline

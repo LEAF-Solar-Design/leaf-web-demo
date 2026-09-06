@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -137,6 +138,15 @@ def test_v3_property_keys_are_refused_even_when_empty(operation, entries):
         mutation_plan.validate_mutations({"polylines": []}, mutation)
 
 
+@pytest.mark.parametrize("value", [
+    {"added": [None]}, {"added": None}, "garbage", [], None, 3, True,
+    {"added": {"kind": "INSERT"}}, {"added": [[], "INSERT", 3]},
+    {"set_color": None}, {"set_color": "garbage"}, {"set_color": [None]},
+])
+def test_uses_v3_ignores_malformed_json_shapes(value):
+    assert mutation_plan.uses_v3(value) is False
+
+
 def test_v1_bytes_and_catalogue_target_stay_frozen():
     base = {"polylines": [{"handle": "A", "layer": "Panels", "closed": True,
                             "pts": [[0, 0, 0], [2, 0, 0], [2, 2, 0], [0, 2, 0]]}]}
@@ -183,23 +193,60 @@ def test_broker_readiness_cache_is_separate_for_each_contract(monkeypatch):
     assert calls == [2, 3, 3]
 
 
-@pytest.mark.parametrize("v3,contract", [(False, 2), (True, 3)])
-def test_broker_selects_readiness_from_the_canonical_plan(monkeypatch, v3, contract):
+@pytest.fixture()
+def broker_plan_request(monkeypatch):
     import broker
 
-    canonical = _line_plan()
-    req = broker.BrokerPlanRunRequest(
-        tenant_id="tenant", dwg="drawing", dwg_version=1,
-        plan={"drawing_id": "drawing", "parent_version": 1, "mutations": canonical,
-              "plan_sha256": BASE_SHA, "source_sha256": BASE_SHA},
-    )
     monkeypatch.setattr(broker, "tenant_disabled", lambda tenant: False)
     monkeypatch.setattr(write_loop, "drawing_mutations_enabled", lambda: True)
     monkeypatch.setattr(broker, "_tenant_tier", lambda tenant: "pro")
     monkeypatch.setattr(broker.entitlements, "tool_required_capability", lambda tool: "drawing.write")
     monkeypatch.setattr(broker.entitlements, "entitlements_for", lambda tier: {"drawing.write": True})
     monkeypatch.setattr(broker, "_require_supported_live_completion_mode", lambda: None)
-    monkeypatch.setattr(mutation_plan, "uses_v3", lambda value: v3)
+    da = SimpleNamespace(run_tool=lambda: None)
+    backend = object()
+    monkeypatch.setattr(broker, "_get_da", lambda: da)
+
+    def default_backend(*, aps_live, da):
+        assert aps_live is True
+        return backend
+
+    def read_intake(actual_backend, tenant, drawing, version):
+        assert actual_backend is backend
+        assert (tenant, drawing, version) == ("tenant", "drawing", 1)
+        return 1, {"polylines": []}
+
+    monkeypatch.setattr(write_loop, "default_backend", default_backend)
+    monkeypatch.setattr(write_loop, "read_intake", read_intake)
+
+    def request(mutations):
+        return broker.BrokerPlanRunRequest(
+            tenant_id="tenant", dwg="drawing", dwg_version=1,
+            plan={"drawing_id": "drawing", "parent_version": 1, "mutations": mutations,
+                  "plan_sha256": BASE_SHA, "source_sha256": BASE_SHA},
+        )
+
+    return request
+
+
+@pytest.mark.parametrize("v3,contract", [(False, 2), (True, 3)])
+def test_broker_selects_readiness_from_the_canonical_plan(
+        monkeypatch, broker_plan_request, v3, contract):
+    import broker
+
+    req = broker_plan_request({"added": [{
+        "handle": "new-line", "kind": "LINE", "layer": "0", "pts": [[0, 0], [3, 4]],
+    }]})
+    canonical = _line_plan()
+    selected = []
+
+    def uses_v3(value):
+        assert value == canonical
+        assert value != req.plan.mutations
+        selected.append(value)
+        return v3
+
+    monkeypatch.setattr(mutation_plan, "uses_v3", uses_v3)
     calls = []
 
     def readiness(contract=2):
@@ -209,4 +256,27 @@ def test_broker_selects_readiness_from_the_canonical_plan(monkeypatch, v3, contr
     monkeypatch.setattr(broker, "_plan_activity_ready", readiness)
     env, status = broker._execute_plan(req, {}, "write", 0.0, {}, quota_reserved=True)
     assert status == 503 and env["error"]["error_code"] == ErrorCode.APS_UNAVAILABLE
+    assert selected == [canonical]
     assert calls == [contract]
+
+
+@pytest.mark.parametrize("mutations,message", [
+    ({"added": [None]}, "added entity at index 0 must be an object"),
+    ({"added": None}, "mutations.added must be a list"),
+])
+def test_broker_malformed_mutations_keep_the_validator_refusal(
+        monkeypatch, broker_plan_request, mutations, message):
+    import broker
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("invalid mutations must be refused before routing or execution")
+
+    monkeypatch.setattr(mutation_plan, "uses_v3", unexpected)
+    monkeypatch.setattr(broker, "_plan_activity_ready", unexpected)
+    monkeypatch.setattr(write_loop, "run_data_plan_live", unexpected)
+    req = broker_plan_request(mutations)
+    env, status = broker._execute_plan(req, {}, "write", 0.0, {}, quota_reserved=True)
+    assert status == 422
+    assert env["error"]["error_code"] == ErrorCode.BAD_PARAMS
+    assert env["error"]["message"] == f"the edit plan was refused: {message}"
+    assert env["error"]["retryable"] is False

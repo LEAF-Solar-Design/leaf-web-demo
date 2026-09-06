@@ -477,11 +477,18 @@ def validate_mutations(
     return canonical
 
 
-def uses_v3(canonical: Dict[str, Any]) -> bool:
+def uses_v3(canonical: Any) -> bool:
     """True when canonical data carries a declared v3 capability."""
-    return any(canonical.get(field) for field in V3_SET_OPS) or any(
-        entity.get("kind") in V3_ADD_KINDS
-        for entity in canonical.get("added", [])
+    if not isinstance(canonical, dict):
+        return False
+    for field in V3_SET_OPS:
+        entries = canonical.get(field)
+        if isinstance(entries, list) and any(isinstance(entry, dict) for entry in entries):
+            return True
+    added = canonical.get("added")
+    return isinstance(added, list) and any(
+        isinstance(entity, dict) and entity.get("kind") in V3_ADD_KINDS
+        for entity in added
     )
 
 

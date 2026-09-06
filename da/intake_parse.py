@@ -105,6 +105,39 @@ def _strip_mtext(s):
     return "".join(out)
 
 
+def _block_point(value, places=3, width=3):
+    point = [round(float(v), places) for v in value.split(",")]
+    if len(point) != width:
+        raise ValueError("malformed block point")
+    return point
+
+
+def _block_child(kind, body, layer):
+    child = {"kind": kind, "layer": layer}
+    if kind == "LINE":
+        a, b = body
+        child["pts"] = [_block_point(a), _block_point(b)]
+    elif kind == "LWPOLYLINE":
+        closed, normal, elevation, points = body
+        child.update(closed=bool(int(closed) & 1), nrm=_block_point(normal, 6),
+                     elev=round(float(elevation), 3),
+                     pts=[_block_point(p, width=2) for p in points.split(";") if p])
+    elif kind in ("CIRCLE", "ARC"):
+        child.update(c=_block_point(body[0]), r=round(float(body[1]), 3))
+        if kind == "ARC":
+            child.update(start_deg=round(float(body[2]), 6),
+                         end_deg=round(float(body[3]), 6))
+    elif kind == "TEXT":
+        point, height, rotation, value = body
+        child.update(pt=_block_point(point), height=round(float(height), 3),
+                     rot=round(float(rotation), 6), text=" ".join(value.split())[:512])
+    elif kind == "OTHER":
+        child["type"], = body
+    else:
+        raise ValueError("unknown block child kind")
+    return child
+
+
 def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
     # cur_bd / cur_pl are closed over via the enclosing scope trick; re-bind locally
     state = {"bd": cur_bd, "pl": cur_pl}
@@ -177,9 +210,13 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                 kind, p1, p2, dimline, rotation, style, nrm, measurement, hnd = rest.split("|")
                 points = [[round(float(v), 3) for v in p.split(",")]
                           for p in (p1, p2, dimline)]
-                normal = [round(float(v), 6) for v in nrm.split(",")]
-                if any(len(p) != 3 for p in points) or len(normal) != 3:
+                n = tuple(float(v) for v in nrm.split(","))
+                if any(len(p) != 3 for p in points) or len(n) != 3:
                     raise ValueError("malformed dimension point or normal")
+                o2w((0.0, 0.0, 0.0), n)
+                if not hnd or any(v not in "0123456789abcdefABCDEF" for v in hnd):
+                    raise ValueError("malformed dimension handle")
+                normal = [round(v, 6) for v in n]
                 dimension = {
                     "type": kind, "p1": points[0], "p2": points[1], "dimline": points[2],
                     "rotation_deg": round(float(rotation), 6), "style": style,
@@ -218,6 +255,26 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                 out["blockdefs"][state["bd"]].append({
                     "type": et,
                     "pts": [[float(v) for v in p.split(",")] for p in pts.split(";") if p]})
+            elif tag == "BK":
+                name, base, count, complete = rest.split("|")
+                count = int(count)
+                if count < 0 or complete not in ("0", "1"):
+                    raise ValueError("malformed block count or completeness")
+                out.setdefault("blocks", {})[name] = {
+                    "base": _block_point(base), "count": count,
+                    "complete": complete == "1" and count <= 60, "children": []}
+            elif tag == "BKE":
+                name, kind, *body, layer = rest.split("|")
+                block = out["blocks"][name]
+                child = _block_child(kind, body, layer)
+                if kind == "OTHER":
+                    block["complete"] = False
+                if len(block["children"]) < 60:
+                    block["children"].append(child)
+                else:
+                    block["complete"] = False
+            elif tag == "BKCAP":
+                out["blocksCapped"] = int(rest)
             elif tag == "GEO":
                 out["geodata"].append(rest)
             elif tag == "IMG":

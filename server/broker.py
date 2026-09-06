@@ -2882,7 +2882,37 @@ def _execute_plan(req: BrokerPlanRunRequest, tool: Dict[str, Any], engine_op: st
 
     _require_supported_live_completion_mode()
     import mutation_plan
-    contract = 3 if mutation_plan.uses_v3(req.plan.mutations) else 2
+    da = _get_da()
+    if da is None or not hasattr(da, "run_tool"):
+        return (err_envelope(
+            ErrorCode.APS_UNAVAILABLE,
+            "a live browser edit needs the APS client; there is no degraded writer for a data plan",
+            retryable=True, tool=PLAN_TOOL_NAME,
+        ), 503)
+    backend = write_loop.default_backend(aps_live=True, da=da)
+    try:
+        base_v, base_intake = write_loop.read_intake(
+            backend, req.tenant_id, req.plan.drawing_id, req.plan.parent_version)
+        if base_v != req.plan.parent_version:
+            raise ValueError("base intake resolved to a different version")
+    except write_loop.ProofStateUnreadable as exc:
+        return (err_envelope(
+            ErrorCode.INTERNAL, str(exc), retryable=True, tool=PLAN_TOOL_NAME,
+        ), 503)
+    except (KeyError, ValueError) as exc:
+        return (err_envelope(
+            ErrorCode.BAD_PARAMS, f"drawing/mutation unavailable: {exc}",
+            retryable=False, tool=PLAN_TOOL_NAME,
+        ), DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
+    try:
+        canonical = mutation_plan.validate_mutations(
+            base_intake, req.plan.mutations, allow_transforms=True, allow_xdata=False)
+    except ValueError as exc:
+        return (err_envelope(
+            ErrorCode.BAD_PARAMS, f"the edit plan was refused: {exc}",
+            retryable=False, tool=PLAN_TOOL_NAME, version=write_loop.DATA_PLAN_TOOL_VERSION,
+        ), 422)
+    contract = 3 if mutation_plan.uses_v3(canonical) else 2
     ready, readiness = _plan_activity_ready(contract=contract)
     if not ready:
         mismatches = "; ".join(str(item) for item in readiness.get("mismatches", []))
@@ -2892,14 +2922,6 @@ def _execute_plan(req: BrokerPlanRunRequest, tool: Dict[str, Any], engine_op: st
         ), 503)
     activity_version = (readiness.get("activity") or {}).get("version")
     entry["activity_version"] = activity_version
-    da = _get_da()
-    if da is None or not hasattr(da, "run_tool"):
-        return (err_envelope(
-            ErrorCode.APS_UNAVAILABLE,
-            "a live browser edit needs the APS client; there is no degraded writer for a data plan",
-            retryable=True, tool=PLAN_TOOL_NAME,
-        ), 503)
-    backend = write_loop.default_backend(aps_live=True, da=da)
     _start_admitted_execution(req, admission, aps_submission=True)
     return write_loop.run_data_plan_live(
         req.plan.model_dump(), req.tenant_id, backend=backend, da=da, t0=t0,
