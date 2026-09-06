@@ -531,9 +531,7 @@ jobs:
           : > "$RUN_DIR/public-hosts.txt"
           FAILED=0
           for host in $PRODUCTION_HOSTS; do
-            if [ -z "$(getent hosts "$host" || true)" ]; then
-              echo "::notice::$host has no DNS record yet" | tee -a "$RUN_DIR/public-hosts.txt"
-            else
+            if resolved=$(getent hosts "$host" 2>/dev/null); then
               CURL_STATUS=0
               HTTP_STATUS=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "https://$host/") || CURL_STATUS=$?
               printf '%s HTTP %s curl exit %s\n' "$host" "$HTTP_STATUS" "$CURL_STATUS" | tee -a "$RUN_DIR/public-hosts.txt"
@@ -541,6 +539,8 @@ jobs:
                 echo "::error::$host did not return HTTP 200"
                 FAILED=1
               fi
+            else
+              echo "::notice::$host has no DNS record yet" | tee -a "$RUN_DIR/public-hosts.txt"
             fi
           done
           exit "$FAILED"
