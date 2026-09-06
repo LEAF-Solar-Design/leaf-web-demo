@@ -50,6 +50,16 @@ _MIGRATION_LEDGER_COLUMNS = {"name", "sha256", "applied_at"}
 # compatibility contract, not a provider choice. Additions stay additive so an
 # older application can continue to read a database prepared by a newer image.
 _REQUIRED_COLUMNS = {
+    "campaign_attempt_input_sources": {
+        "attempt_id", "task_id", "org_id", "project_id", "campaign_id", "fence",
+        "repository_id", "commit_sha", "tree_sha", "bundle_sha256", "bundle_bytes",
+        "source_fingerprint", "created_at",
+    },
+    "campaign_attempt_result_sources": {
+        "attempt_id", "task_id", "org_id", "project_id", "campaign_id", "fence",
+        "repository_id", "commit_sha", "tree_sha", "publication_receipt",
+        "publication_receipt_sha256", "result_fingerprint", "created_at",
+    },
     "campaign_host_enrollments": {
         "enrollment_id", "org_id", "project_id", "campaign_id", "machine_id", "service_subject",
         "state", "enrolled_by_binding_id", "enabled_by_binding_id", "created_at", "enabled_at", "revoked_at",
