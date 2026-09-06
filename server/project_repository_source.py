@@ -47,9 +47,11 @@ def _closed_pairs(pairs):
     return result
 
 
-def export_project_source_bundle(tenant_id, organization_id, project_id, source_commit, source_tree):
+def export_project_source_bundle(tenant_id, organization_id, project_id, source_commit, source_tree,
+                                 *, max_bytes=MAX_BUNDLE_BYTES):
     """Read exact private Git bytes using only an existing server-owned mapping."""
-    if (not all(_uuid(value) for value in (tenant_id, organization_id, project_id)) or
+    if (type(max_bytes) is not int or not 1 <= max_bytes <= MAX_BUNDLE_BYTES or
+            not all(_uuid(value) for value in (tenant_id, organization_id, project_id)) or
             not all(_sha(value, 40) for value in (source_commit, source_tree))):
         raise SourceConflict('source authority conflicts')
     base_url = os.environ.get('LEAF_AUTHOR_HARNESS_URL', '').strip().rstrip('/')
@@ -90,7 +92,7 @@ def export_project_source_bundle(tenant_id, organization_id, project_id, source_
         if (values.get('Content-Type') != 'application/octet-stream' or
                 values.get('Content-Encoding', 'identity').lower() != 'identity' or
                 re.fullmatch(r'[1-9][0-9]{0,7}', length) is None or
-                not 1 <= int(length) <= MAX_BUNDLE_BYTES or
+                not 1 <= int(length) <= max_bytes or
                 values.get('X-Leaf-Source-Contract') != BUNDLE_CONTRACT or
                 values.get('X-Leaf-Request-Digest') != request_digest or
                 values.get('X-Leaf-Source-Commit') != source_commit or
@@ -101,7 +103,7 @@ def export_project_source_bundle(tenant_id, organization_id, project_id, source_
         bundle = bytearray()
         digest = hashlib.sha256()
         for chunk in response.iter_content(chunk_size=65536):
-            if len(bundle) + len(chunk) > min(MAX_BUNDLE_BYTES, int(length)):
+            if len(bundle) + len(chunk) > min(max_bytes, int(length)):
                 raise SourceUnavailable('source is unavailable')
             bundle.extend(chunk)
             digest.update(chunk)

@@ -51,6 +51,41 @@ def _planning_wait(cur, execution, scope):
     return None
 
 
+def _product_next(cur, execution, scope, worker_id, lease):
+    if os.environ.get('LEAF_CAMPAIGN_BRIDGE') != 'on':
+        return None
+    from leaf_platform import campaign_product_publication as publication
+    cur.execute('SELECT status FROM campaign_tasks WHERE ' + execution.SCOPE +
+                " AND task_key='campaign-plan'", scope)
+    planning = cur.fetchone()
+    if not planning or planning['status'] != 'succeeded':
+        return None
+    publication.principal(cur, scope)
+    cur.execute('SELECT * FROM campaign_tasks WHERE ' + execution.SCOPE +
+                " AND kind='task' AND task_key<>'campaign-plan' ORDER BY created_at,task_id", scope)
+    tasks = [task for task in cur.fetchall() if publication.product_task(task)]
+    for task in tasks:
+        if task['current_stage'] in ('build_test', 'publication') and task['status'] != 'succeeded':
+            _, _, _, source = publication.saved_context(cur, scope, task['task_id'])
+            return dict(kind='awaiting_product_publication', product_source=source)
+    for task in tasks:
+        if task['current_stage'] != 'implementation' or task['status'] not in ('claimed', 'pending'):
+            continue
+        cur.execute('SELECT * FROM campaign_task_attempts WHERE ' + execution.SCOPE +
+                    " AND task_id=%(task)s AND worker_id=%(worker)s AND status='active' "
+                    'AND deadline_at>clock_timestamp()', dict(scope, task=task['task_id'], worker=worker_id))
+        active = cur.fetchone()
+        if active:
+            return dict(kind='active', task=execution._row(task),
+                        attempt={k: execution._public_attempt(active)[k] for k in _ATTEMPT_FIELDS})
+        claimed = execution._claim_task_cursor(cur, scope, worker_id=worker_id, lease=lease,
+                                               task_key=task['task_key'])
+        if claimed:
+            return dict(kind='claimed', task=execution._row(task),
+                        attempt={k: claimed[k] for k in (*_ATTEMPT_FIELDS, 'attempt_token')})
+    return dict(kind='idle')
+
+
 def next_work(enrollment_id, subject, *, lease_seconds=900):
     enrollment, execution, plan = _platform()
     if os.environ.get('LEAF_CAMPAIGN_FIRST_TASK_PRODUCER', '') != 'on':
@@ -69,6 +104,12 @@ def next_work(enrollment_id, subject, *, lease_seconds=900):
         return dict(response, kind='recover', pending_remote_bindings=bindings)
     if waiting:
         return dict(response, **waiting)
+    with execution._cursor() as cur:
+        scope = enrollment.resolve_worker_scope(cur, enrollment_id, subject)
+        execution._lock(cur, 'campaign-next:' + str(scope['enrollment_id']))
+        product = _product_next(cur, execution, scope, worker_id, lease)
+    if product is not None:
+        return dict(response, **product)
     with execution._cursor() as cur:
         active = _active(cur, execution, scope, worker_id)
     if active:

@@ -230,7 +230,8 @@ def adopt_plan(enrollment_id, subject, *, task_id, attempt_id, fence, result_fin
                     continue
                 task = execution._submit_task_cursor(
                     cur, scope, **{key: item[key] for key in (
-                        'task_key', 'title', 'spec', 'capability', 'stages', 'owned_paths')},
+                        'task_key', 'title', 'spec', 'capability', 'owned_paths')},
+                    stages=['implementation', 'build_test', 'publication'],
                     source_sha=planning['source_sha'], parent_task_id=planning['task_id'],
                     verify_command=shlex.join(item['verify_argv']), declared_artifacts=item['artifacts'],
                     depends_on=item['depends_on'] + ['campaign-plan'] +

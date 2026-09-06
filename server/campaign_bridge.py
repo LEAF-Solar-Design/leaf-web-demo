@@ -13,6 +13,7 @@ import project_repository_source as source_service
 _FIELDS = {
     'next': {'enrollment_id'},
     'recover': {'enrollment_id'},
+    'product': {'enrollment_id', 'task_id', 'attempt_id', 'fence', 'result_fingerprint', 'output'},
     'plan': {'enrollment_id', 'task_id', 'attempt_id', 'fence', 'result_fingerprint',
              'plan_sha256', 'plan_size_bytes', 'plan_b64'},
     'export': {'enrollment_id', 'attempt_id', 'fence'},
@@ -42,6 +43,8 @@ def _validate(op, body):
             if not isinstance(value, str) or len(value) != 36:
                 raise BridgeError(400)
             try:
+                if op == 'product' and str(uuid.UUID(value)) != value:
+                    raise ValueError('noncanonical id')
                 body[key] = str(uuid.UUID(value))
             except ValueError:
                 raise BridgeError(400) from None
@@ -49,7 +52,7 @@ def _validate(op, body):
             minimum = 1 if key == 'reservation_micro_usd' else 0
             if type(value) is not int or not minimum <= value <= 9223372036854775807:
                 raise BridgeError(400)
-        elif key in ('verdict', 'result'):
+        elif key in ('verdict', 'result', 'output'):
             if not isinstance(value, dict):
                 raise BridgeError(400)
         elif key in ('artifact_ref', 'reservation_id') and value is None:
@@ -66,6 +69,16 @@ def _validate(op, body):
             value = body[key]
             if len(value) != 64 or any(char not in '0123456789abcdef' for char in value):
                 raise BridgeError(400)
+    if op == 'product':
+        import campaign_product_execution as product
+        try:
+            if (any(body[k] != str(uuid.UUID(body[k])) for k in ('enrollment_id', 'task_id', 'attempt_id'))
+                    or not product.counter(body['fence'], 1)
+                    or not source_service._sha(body['result_fingerprint'], 64)):
+                raise ValueError('invalid product identity')
+            product.validate_output(body['output'])
+        except (ValueError, TypeError, KeyError):
+            raise BridgeError(400) from None
     return body
 
 
@@ -99,10 +112,13 @@ def _attempt(cur, execution, scope, body, *, active=False):
     task = cur.fetchone()
     if active:
         task, attempt = execution._remote_attempt(cur, scope, uuid.UUID(body['attempt_id']))
-    if (task is None or task['task_key'] != 'campaign-plan'
-            or task['capability'] != 'campaign.plan' or attempt['stage'] != 'implementation'
+    from leaf_platform.campaign_product_publication import product_task, principal
+    planning = task is not None and task['task_key'] == 'campaign-plan' and task['capability'] == 'campaign.plan'
+    if (task is None or not (planning or product_task(task)) or attempt['stage'] != 'implementation'
             or attempt['worker_id'] != 'enrollment-' + str(scope['enrollment_id'])):
         raise execution.CampaignError('worker_forbidden', 'Campaign bridge request failed')
+    if not planning:
+        principal(cur, scope)
     if active and (attempt['status'] != 'active' or attempt['overdue']
                    or task['status'] != 'claimed' or task['current_stage'] != 'implementation'
                    or body['fence'] != attempt['fence'] or body['fence'] != task['fence']):
@@ -114,6 +130,9 @@ def _export(enrollment, execution, body, subject):
     with execution._cursor() as cur:
         scope = _scope(cur, enrollment, body['enrollment_id'], subject)
         task, attempt = _attempt(cur, execution, scope, body, active=True)
+    if task['task_key'] != 'campaign-plan':
+        import campaign_product_execution
+        return campaign_product_execution.export(enrollment, execution, body, subject, scope, task, attempt)
     # Source and harness I/O must never span a ledger transaction or read lock.
     identity = (scope['tenant_id'], str(scope['org']), str(scope['project']))
     seed = source_service.initialize_project_source(*identity, scope['prompt'])
@@ -162,6 +181,9 @@ def handle(op, body, subject):
     except Exception:
         raise BridgeError(503) from None
     try:
+        if op == 'product':
+            import campaign_product_execution
+            return campaign_product_execution.publish(body, subject)
         if op == 'plan':
             from leaf_platform.campaign_plan_adoption import adopt_plan
             return adopt_plan(body['enrollment_id'], subject,
@@ -184,12 +206,12 @@ def handle(op, body, subject):
             _attempt(cur, execution, scope, body)
             args = (scope['org'], scope['project'], scope['campaign'], body['attempt_id'])
             kwargs = {key: value for key, value in body.items() if key not in ('enrollment_id', 'attempt_id')}
-            if op == 'bind':
-                return dict(ok=True, binding=execution.bind_remote_dispatch(
-                    *args, machine_id=scope['machine_id'], **kwargs))
-            if op == 'admit':
-                return dict(ok=True, binding=execution.record_remote_admission(*args, **kwargs))
-            return dict(ok=True, receipt=execution.settle_remote_attempt(*args, **kwargs))
+        if op == 'bind':
+            return dict(ok=True, binding=execution.bind_remote_dispatch(
+                *args, machine_id=scope['machine_id'], **kwargs))
+        if op == 'admit':
+            return dict(ok=True, binding=execution.record_remote_admission(*args, **kwargs))
+        return dict(ok=True, receipt=execution.settle_remote_attempt(*args, **kwargs))
     except BridgeError:
         raise
     except Exception as exc:
@@ -203,6 +225,8 @@ def handle(op, body, subject):
         elif isinstance(exc, execution.CampaignError):
             status = (422 if exc.code == 'invalid_plan' else
                       403 if exc.code in ('worker_forbidden', 'project_unavailable') else 400)
+        elif isinstance(exc, (ValueError, TypeError, KeyError)):
+            status = 400
         else:
             status = 503
         raise BridgeError(status) from None

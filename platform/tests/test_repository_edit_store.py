@@ -310,4 +310,4 @@ def test_concurrent_expected_version_has_one_winner(authority):
     for thread in threads:
         thread.join(timeout=20)
     assert outcomes.count("awaiting_confirmation") == 1
-    assert outcomes.count("stale_transition") == 1
+    assert outcomes.count("idempotency_conflict") == 1

@@ -196,7 +196,8 @@ def setup(monkeypatch):
     router.set_enrollment_store(None)
 
 
-@pytest.mark.parametrize('op,limit', [('plan', 512 * 1024), ('export', 128 * 1024)])
+@pytest.mark.parametrize('op,limit', [('plan', 512 * 1024), ('export', 128 * 1024),
+                                    ('product', 6 * 1024 * 1024)])
 def test_bridge_streamed_body_limits(setup, monkeypatch, op, limit):
     client, _, _ = setup
     client.app.dependency_overrides[deps.require_campaign_worker] = lambda: 'worker-service'
@@ -230,7 +231,18 @@ def test_bridge_plan_semantic_error_is_sanitized(setup, monkeypatch):
     assert response.json()['error']['message'] == 'Campaign bridge request failed'
 
 
-def test_bridge_plan_uses_actual_service_subject_guard(setup, monkeypatch):
+def test_bridge_duplicate_keys_rejected_before_effects(setup, monkeypatch):
+    client, _, _ = setup
+    client.app.dependency_overrides[deps.require_campaign_worker] = lambda: 'worker-service'
+    calls = []
+    monkeypatch.setattr(router.campaign_bridge, 'handle', lambda *args: calls.append(args))
+    response = client.post('/internal/campaigns/bridge/product',
+                           content=b'{"output":{"kind":"files","kind":"files"}}')
+    assert response.status_code == 400 and not calls
+
+
+@pytest.mark.parametrize('operation', ['plan', 'product'])
+def test_bridge_plan_uses_actual_service_subject_guard(setup, monkeypatch, operation):
     import auth
     client, _, _ = setup
     monkeypatch.setenv('LEAF_CAMPAIGN_WORKER_SUBJECT', 'worker-service')
@@ -242,9 +254,9 @@ def test_bridge_plan_uses_actual_service_subject_guard(setup, monkeypatch):
         return {'ok': True}
 
     monkeypatch.setattr(router.campaign_bridge, 'handle', handle)
-    response = client.post('/internal/campaigns/bridge/plan',
+    response = client.post('/internal/campaigns/bridge/' + operation,
                            headers={'Authorization': 'Bearer service-fixture'}, json={})
-    assert response.status_code == 200 and calls == [('plan', 'worker-service')]
+    assert response.status_code == 200 and calls == [(operation, 'worker-service')]
 
 
 def _submit(client, **overrides):
@@ -252,7 +264,7 @@ def _submit(client, **overrides):
         'project_id': PROJECT, 'title': 'ReciPDF', 'prompt': 'Organize recipes', **overrides})
 
 
-@pytest.mark.parametrize('op', ['next', 'export', 'bind', 'admit', 'settle', 'recover', 'plan'])
+@pytest.mark.parametrize('op', ['next', 'export', 'bind', 'admit', 'settle', 'recover', 'plan', 'product'])
 @pytest.mark.parametrize('credential', ['browser', 'admin', 'missing'])
 def test_bridge_every_operation_requires_worker(setup, monkeypatch, op, credential):
     import auth

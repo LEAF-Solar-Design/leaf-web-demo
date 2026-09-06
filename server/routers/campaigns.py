@@ -190,14 +190,17 @@ async def change_enrollment(campaign_id: str, enrollment_id: str, action: str, r
 @router.post('/internal/campaigns/bridge/{op}')
 async def campaign_bridge_operation(op: str, request: Request,
                                     subject: str = Depends(deps.require_campaign_worker)):
-    limit = 512 * 1024 if op == 'plan' else 128 * 1024
+    limit = 6 * 1024 * 1024 if op == 'product' else 512 * 1024 if op == 'plan' else 128 * 1024
     try:
+        length = request.headers.get('content-length')
+        if length is not None and (not length.isdecimal() or int(length) > limit):
+            return _failure(413, 'request_too_large', 'Campaign bridge request failed')
         raw = bytearray()
         async for chunk in request.stream():
             if len(raw) + len(chunk) > limit:
                 return _failure(413, 'request_too_large', 'Campaign bridge request failed')
             raw.extend(chunk)
-        body = json.loads(raw)
+        body = json.loads(raw, object_pairs_hook=project_repository_source._closed_pairs)
         if not isinstance(body, dict):
             raise ValueError('Invalid body')
     except (ValueError, UnicodeError):

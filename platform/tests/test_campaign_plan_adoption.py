@@ -73,6 +73,7 @@ def test_real_postgres_raw_adoption_restart_replay(mounted, size):
     assert source['remote_fencing_token'] == 7 and source['fence'] == request['fence']
     response = call(mounted, 'plan', **request)
     assert response['adopted'] == dict(tasks=1, capability_tasks=0, questions=0)
+    assert children(mounted)[0]['stages'] == ['implementation', 'build_test', 'publication']
     assert response['receipt']['stage'] == 'build_test'
     db.reset_pool()
     replay = call(mounted, 'plan', **request)
