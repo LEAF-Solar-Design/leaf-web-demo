@@ -1270,6 +1270,13 @@ def build_suites() -> List[Suite]:
         # --- scripts (cwd=SCRIPTS_DIR) --- #
         # cwd=SCRIPTS_DIR, not REPO: `python -m pytest` puts the cwd on
         # sys.path, and the repo root would shadow the stdlib `platform`.
+        # mq-review-codebuild: moved into this group 2026-09-06 (round 2,
+        # IAM/loader fit); it always ran with cwd=SCRIPTS_DIR, it just wasn't
+        # registered in this section yet. Floor 14 -> 18: the dedicated-role
+        # dry-run pins, the 40-hex headRefOid guard, the stdin-not-argv token
+        # pin, and mq.sh's accept path executed against a stub python3.
+        Suite("mq-review-codebuild", "scripts test_mq_review_codebuild.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_mq_review_codebuild.py"), 20),
         # Registered per the #29 fix-then-register rule (shipped without a
         # gate entry; measured 1 passed on this tree 2026-07-23).
         # 1 -> 2 on 2026-08-07: the staging relay's convergence contract
