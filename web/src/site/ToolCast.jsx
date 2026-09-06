@@ -1030,6 +1030,8 @@ export default function ToolCast({
   const recoverHistoricalVersion = useCallback(async (versionToRecover) => {
     // Duplicate confirmations must await the same operation so VersionList
     // cannot clear its pending controls before the request finishes.
+    // finally clears the reference on settle, so a failed attempt can be retried
+    // and the next confirmation never re-throws a stale rejection.
     if (restorePendingRef.current) return restorePendingRef.current
     const drawingId = drawing.drawingState?.drawing_id
     const currentHead = Number(drawing.head)
@@ -2244,6 +2246,8 @@ export default function ToolCast({
                 mode: drawing.unreadableHead ? 'recover' : 'restore',
                 // In PUBLIC_DEMO, restore uses the local mock exactly like recovery
                 // and never issues a server request, so guests may restore here.
+                // Eligibility is a convenience gate only; restore_version's server checkout fence
+                // is the authority and denies missing capability with 403: Checkout capability required.
                 eligible: (_row, isHead) => sessionReady && !isHead,
                 disabled: Boolean(drawing.unreadableHead?.pending),
               }}

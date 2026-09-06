@@ -121,6 +121,38 @@ test('unified history cancels without a mutation and confirms once to show the n
   await expect(page.getByRole('button', { name: 'Undo', exact: true })).toBeEnabled()
 })
 
+test('a failed restore can be retried after the error', async ({ page }) => {
+  const observed = await mountUnifiedHistory(page)
+  const restoreRequests = []
+  await page.route('**/api/drawings/cat-panels/versions/2/restore', async (route) => {
+    restoreRequests.push(route.request().url())
+    if (restoreRequests.length === 1) {
+      await route.fulfill({
+        status: 403,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: 'Checkout capability required.' }),
+      })
+      return
+    }
+    await route.fallback()
+  })
+
+  const history = page.getByRole('region', { name: 'Version history' })
+  const source = history.getByTestId('try-version-v2')
+  await source.getByRole('button', { name: 'Restore', exact: true }).click()
+  await source.getByRole('button', { name: 'Restore v2', exact: true }).click()
+  await expect(history.getByRole('alert')).toHaveText('POST /api/drawings/cat-panels/versions/2/restore -> 403: Checkout capability required.')
+  await expect(history.getByTestId('try-version-v1')).toContainText('head')
+  await expect(history.getByTestId('try-version-v3')).toHaveCount(0)
+  expect(restoreRequests).toHaveLength(1)
+
+  await source.getByRole('button', { name: 'Restore v2', exact: true }).click()
+  await expect(history.getByTestId('try-version-v3')).toContainText('head')
+  await expect(history.getByRole('alert')).toHaveCount(0)
+  expect(restoreRequests).toHaveLength(2)
+  expect(observed.headReads).toContain(3)
+})
+
 test('unified history still recovers an unreadable committed head', async ({ page }) => {
   const observed = await mountUnifiedHistory(page, { restoredHeadReadable: false })
   const source = page.getByTestId('try-version-v2')
