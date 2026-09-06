@@ -83,6 +83,12 @@ export async function getCampaign(projectId, id) {
   return request(`/api/campaigns/${uuid(id, 'campaign')}?project_id=${encodeURIComponent(uuid(projectId, 'project'))}`)
 }
 
+export async function getExecution(projectId, id, limit = 50) {
+  const project = uuid(projectId, 'project')
+  const count = Number.isFinite(Number(limit)) ? Math.max(1, Math.min(200, Math.trunc(Number(limit)))) : 50
+  return request(`/api/campaigns/${uuid(id, 'campaign')}/execution?project_id=${encodeURIComponent(project)}&limit=${count}`)
+}
+
 export async function askQuestion(projectId, id, { questionKey, prompt }) {
   bounded(questionKey, 'question key', 128)
   if (!/^[A-Za-z0-9._-]+$/.test(questionKey)) invalid('question key', 'The question key is not valid, so nothing was sent.')
@@ -93,6 +99,24 @@ export async function askQuestion(projectId, id, { questionKey, prompt }) {
 
 export async function listQuestions(projectId, id) {
   return request(`/api/campaigns/${uuid(id, 'campaign')}/questions?project_id=${encodeURIComponent(uuid(projectId, 'project'))}`)
+}
+
+export async function listEnrollments(projectId, id) {
+  return request(`/api/campaigns/${uuid(id, 'campaign')}/enrollments?project_id=${encodeURIComponent(uuid(projectId, 'project'))}`)
+}
+
+export async function requestEnrollment(projectId, id, machineId) {
+  return request(`/api/campaigns/${uuid(id, 'campaign')}/enrollments`, post({
+    project_id: uuid(projectId, 'project'), machine_id: bounded(machineId, 'machine', 200),
+  }))
+}
+
+export async function enableEnrollment(projectId, id, enrollmentId) {
+  return request(`/api/campaigns/${uuid(id, 'campaign')}/enrollments/${uuid(enrollmentId, 'enrollment')}/enable`, post({ project_id: uuid(projectId, 'project') }))
+}
+
+export async function revokeEnrollment(projectId, id, enrollmentId) {
+  return request(`/api/campaigns/${uuid(id, 'campaign')}/enrollments/${uuid(enrollmentId, 'enrollment')}/revoke`, post({ project_id: uuid(projectId, 'project') }))
 }
 
 export async function answerQuestion(projectId, id, qid, answer) {

@@ -21,7 +21,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import Depends, Header, Request
+from fastapi import Depends, Header, Request, HTTPException
+
+
+def require_campaign_worker(request: Request):
+    """Always verify the service bearer, including when tenant auth is disabled."""
+    import auth
+    payload = auth.verify_platform_token(request.headers.get('Authorization'))
+    subject = os.environ.get('LEAF_CAMPAIGN_WORKER_SUBJECT', '')
+    if not subject or payload.get('sub') != subject:
+        raise HTTPException(status_code=403, detail='Campaign worker is not authorized')
+    return subject
 
 # --------------------------------------------------------------------------- #
 # paths + sibling-lane import wiring

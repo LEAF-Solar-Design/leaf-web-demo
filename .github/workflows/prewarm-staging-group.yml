@@ -210,9 +210,119 @@ jobs:
           done
           echo "::notice::No unexpired $NAME after $SUPPLY_SET_POLLS polls; nothing to stage yet. The next push or approval re-triggers this relay."
 
+      - name: Wait for the exact speculative tag-readiness record
+        id: readiness
+        if: steps.supply.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TREE: ${{ steps.candidate.outputs.tree }}
+          SOURCE_SHA: ${{ steps.candidate.outputs.preview_sha }}
+          IMAGE_TAG: ${{ steps.candidate.outputs.image_tag }}
+          REPO_ID: ${{ github.repository_id }}
+        run: |
+          set -euo pipefail
+          echo "ready=false" >> "$GITHUB_OUTPUT"
+          # The v3 supply set above proves SOME complete image set exists for
+          # this tree; it does not prove it is THIS group's exact prepared
+          # source. An earlier same-tree preview cohort can mint that
+          # artifact first, so this second, source-bound record (minted by
+          # the digests check, not the v3 evidence step) is what the
+          # dispatch below actually waits on. Completion of the producer run
+          # is not required: the artifact exists only after all five digests
+          # verify.
+          NAME="spec-tag-readiness-$TREE-$SOURCE_SHA"
+          ATTEMPT=0
+          while [ "$ATTEMPT" -lt "$SUPPLY_SET_POLLS" ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            LISTING=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$NAME&per_page=30" 2>/dev/null || true)
+            if [ -n "$LISTING" ]; then
+              # Exactly one exact same-repository candidate, the same
+              # discipline mq-supply's read-only repeat of this check uses.
+              CANDIDATE=$(jq -r --argjson repo_id "$REPO_ID" '
+                [.artifacts[]?
+                 | select(.expired | not)
+                 | select(.workflow_run.head_repository_id == $repo_id)]
+                | if length == 1 then .[0] | [.id, .workflow_run.id, .digest] | @tsv else empty end
+              ' <<<"$LISTING")
+              if [ -n "$CANDIDATE" ]; then
+                IFS=$'\t' read -r CAND_ID CAND_RUN CAND_DIGEST <<<"$CANDIDATE"
+                if [[ "$CAND_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                  RUN_RECORD=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CAND_RUN" 2>/dev/null || true)
+                  if [ -n "$RUN_RECORD" ]; then
+                    WORKFLOW_PATH=".github/workflows/build-platform-images.yml"
+                    PATH_OK=$(jq -r --arg path "$WORKFLOW_PATH" '(.path // "" | sub("@.*$"; "")) == $path' <<<"$RUN_RECORD")
+                    EVENT_OK=$(jq -r '.event == "workflow_dispatch"' <<<"$RUN_RECORD")
+                    BRANCH_OK=$(jq -r '.head_branch == "main"' <<<"$RUN_RECORD")
+                    ACTUAL_ATTEMPT=$(jq -r '.run_attempt' <<<"$RUN_RECORD")
+                    if [ "$PATH_OK" = "true" ] && [ "$EVENT_OK" = "true" ] && [ "$BRANCH_OK" = "true" ]; then
+                      if gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$CAND_ID/zip" > tag-readiness.zip 2>/dev/null && [ -s tag-readiness.zip ]; then
+                        # Bound the archive itself before touching it: a
+                        # single-JSON-member readiness artifact is never
+                        # legitimately large.
+                        ARCHIVE_SIZE=$(wc -c < tag-readiness.zip)
+                        if [ "$ARCHIVE_SIZE" -le 65536 ]; then
+                          ACTUAL_DIGEST="sha256:$(sha256sum tag-readiness.zip | awk '{print $1}')"
+                          if [ "$ACTUAL_DIGEST" = "$CAND_DIGEST" ]; then
+                            # List, never extract-all: require the archive
+                            # hold exactly the one named member, no
+                            # directories and no smuggled extras, before
+                            # touching disk with its content.
+                            MEMBERS=$(unzip -Z1 tag-readiness.zip 2>/dev/null || true)
+                            if [ "$MEMBERS" = "spec-tag-readiness.json" ]; then
+                              rm -f tag-readiness.json
+                              unzip -p tag-readiness.zip spec-tag-readiness.json 2>/dev/null \
+                                | head -c 16385 > tag-readiness.json
+                              MEMBER_SIZE=$(wc -c < tag-readiness.json)
+                              if [ "$MEMBER_SIZE" -gt 0 ] && [ "$MEMBER_SIZE" -le 16384 ]; then
+                                # Content, not just presence: the SAME checks
+                                # build-platform-images.yml's own mint made, plus
+                                # the run's ACTUAL attempt from the API record
+                                # rather than the file's self-reported one, and
+                                # the ALREADY-VERIFIED provider workflow path
+                                # rather than a second self-reported claim.
+                                if jq -e --arg schema "leaf.speculative-tag-readiness.v1" \
+                                    --arg tree "$TREE" --arg source_sha "$SOURCE_SHA" \
+                                    --arg image_tag "$IMAGE_TAG" \
+                                    --arg workflow_path "$WORKFLOW_PATH" \
+                                    --argjson run "$CAND_RUN" --argjson attempt "$ACTUAL_ATTEMPT" \
+                                    --argjson repo "$REPO_ID" '
+                                  .schema == $schema
+                                  and .source_tree == $tree
+                                  and .source_sha == $source_sha
+                                  and .image_tag == $image_tag
+                                  and .producer_workflow_path == $workflow_path
+                                  and .producer_run_id == $run
+                                  and .producer_run_attempt == $attempt
+                                  and .repository_id == $repo
+                                  and (.digests.app | test("^sha256:[0-9a-f]{64}$"))
+                                  and (.digests.broker | test("^sha256:[0-9a-f]{64}$"))
+                                  and (.digests.canonical_worker | test("^sha256:[0-9a-f]{64}$"))
+                                  and (.digests.harness | test("^sha256:[0-9a-f]{64}$"))
+                                  and (.digests.web | test("^sha256:[0-9a-f]{64}$"))
+                                ' tag-readiness.json >/dev/null 2>&1; then
+                                  echo "ready=true" >> "$GITHUB_OUTPUT"
+                                  echo "Speculative tag readiness $NAME verified after $ATTEMPT poll(s) (run $CAND_RUN)."
+                                  exit 0
+                                fi
+                              fi
+                            fi
+                          fi
+                        fi
+                      fi
+                    fi
+                  fi
+                fi
+              fi
+            fi
+            if [ "$ATTEMPT" -lt "$SUPPLY_SET_POLLS" ]; then
+              sleep "$SUPPLY_SET_INTERVAL"
+            fi
+          done
+          echo "::notice::No exact $NAME after $SUPPLY_SET_POLLS polls; nothing to stage yet. The next push or approval re-triggers this relay."
+
       - name: Dispatch the prewarm for each coloured service
         id: dispatch
-        if: steps.supply.outputs.present == 'true'
+        if: steps.readiness.outputs.ready == 'true'
         env:
           GH_TOKEN: ${{ secrets.TERRAFORM_REPO_TOKEN }}
           IMAGE_TAG: ${{ steps.candidate.outputs.image_tag }}
@@ -311,6 +421,7 @@ jobs:
           TREE: ${{ steps.candidate.outputs.tree }}
           MIGRATION_REFUSAL: ${{ steps.candidate.outputs.migration_refusal }}
           SUPPLY_PRESENT: ${{ steps.supply.outputs.present }}
+          TAG_READY: ${{ steps.readiness.outputs.ready }}
         run: |
           set -euo pipefail
           [ -f dispatched.json ] || echo '[]' > dispatched.json
@@ -325,6 +436,7 @@ jobs:
             --arg tree "${TREE:-}" \
             --arg migration_refusal "${MIGRATION_REFUSAL:-false}" \
             --arg supply_set_present "${SUPPLY_PRESENT:-false}" \
+            --arg tag_ready "${TAG_READY:-false}" \
             --arg run_id "$GITHUB_RUN_ID" \
             --slurpfile dispatched dispatched.json \
             '{schema: $schema,
@@ -333,6 +445,7 @@ jobs:
               image_tag: $image_tag, preview_sha: $preview_sha, tree: $tree,
               migration_refusal: ($migration_refusal == "true"),
               supply_set_present: ($supply_set_present == "true"),
+              tag_ready: ($tag_ready == "true"),
               relay_run_id: $run_id, dispatched: $dispatched[0]}' > prewarm-relay-receipt.json
           jq . prewarm-relay-receipt.json
 

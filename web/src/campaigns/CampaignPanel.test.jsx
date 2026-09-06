@@ -8,12 +8,13 @@ vi.mock('./useCampaigns.js', () => ({ default: vi.fn() }))
 const P = '11111111-1111-1111-1111-111111111111'
 const C = '33333333-3333-3333-3333-333333333333'
 const Q = '55555555-5555-5555-5555-555555555555'
-const row = { campaign_id: C, title: 'Release documents', status: 'accepted', dispatch: { available: false, action: 'mount-fleet-adapter' } }
+const row = { campaign_id: C, title: 'Release documents', prompt: 'Organize recipes\nKeep the original text.', status: 'accepted', dispatch: { available: false, action: 'mount-fleet-adapter' } }
 let campaign
 
 beforeEach(() => {
   campaign = {
     status: 'ready', refreshing: false, error: null, errorAction: null,
+    execution: null, executionLoading: false, executionError: null,
     campaigns: [row], selectedId: C, selected: row, questions: [], answers: {}, pending: {},
     submit: vi.fn().mockResolvedValue({ campaign: row }),
     ask: vi.fn().mockResolvedValue({ question: { question_id: Q } }),
@@ -27,6 +28,84 @@ afterEach(cleanup)
 const panel = props => <CampaignPanel projectId={P} projectName="Document studio" signedIn {...props} />
 
 describe('campaign panel in the project workspace', () => {
+  it('shows configured hosts, connects once and keeps capability status pending', async () => {
+    campaign.allowedMachines = ['VM-C', 'VM-D']
+    campaign.enrollments = [{ enrollment_id: Q, machine_id: 'VM-C', state: 'pending', capability_link: { state: 'pending_link' } }]
+    campaign.enroll = vi.fn().mockResolvedValue({ enrollment: {} })
+    campaign.enableEnrollment = vi.fn().mockResolvedValue({ enrollment: {} })
+    campaign.revokeEnrollment = vi.fn().mockResolvedValue({ enrollment: {} })
+    render(panel())
+    const select = screen.getByLabelText('Campaign machine')
+    expect([...select.options].map(option => option.value)).toEqual(['VM-C', 'VM-D'])
+    fireEvent.change(select, { target: { value: 'VM-D' } })
+    const connect = screen.getByRole('button', { name: 'Connect VM-C to this campaign' })
+    fireEvent.click(connect)
+    fireEvent.click(connect)
+    await screen.findByText('Host enrollment recorded.')
+    expect(campaign.enroll).toHaveBeenCalledExactlyOnceWith('VM-D')
+    expect(screen.getByText('Capability not yet published')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Enable' }))
+    await screen.findByText('Host enrollment enabled.')
+    expect(campaign.enableEnrollment).toHaveBeenCalledExactlyOnceWith(Q)
+    fireEvent.click(screen.getByRole('button', { name: 'Revoke' }))
+    await screen.findByText('Host enrollment revoked.')
+    expect(campaign.revokeEnrollment).toHaveBeenCalledExactlyOnceWith(Q)
+  })
+
+  it('explains unavailable host configuration without a connect action', () => {
+    render(panel())
+    expect(screen.getByText(/No campaign machines are configured/)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Connect VM-C to this campaign' })).toBeNull()
+  })
+  it('shows the original prompt and recorded execution without internal metadata or inferred completion', () => {
+    const hidden = { spec: 'spec secret', worker: 'worker secret', fence: 'fence secret',
+      active_attempt: 'attempt secret', dispatch: 'mount-fleet-adapter', artifact_ref: C }
+    campaign.execution = {
+      tasks: [{ ...hidden, task_id: C, title: 'Publish recipes', current_stage: 'publish', status: 'reconcile_required',
+        depends_on: ['design', 'build'], blocked_by_questions: [Q] }],
+      questions: [],
+      receipts: [{ ...hidden, receipt_id: Q, task_id: C, stage: 'publish', outcome: 'unknown', verified: true, reconciles_receipt_id: C }],
+      events: [{ ...hidden, event_id: C, task_id: C, event_type: 'task_created', created_at: '2026-09-05T12:00:00Z' }],
+    }
+    const { container } = render(panel())
+    expect(container.querySelector('.campaign-prompt').textContent).toBe(row.prompt)
+    const execution = screen.getByRole('region', { name: 'Execution' })
+    expect(within(execution).getByText('Publish recipes')).toBeTruthy()
+    expect(within(execution).getByText('Outcome unknown, reconciliation required')).toBeTruthy()
+    expect(within(execution).getByText('Waits for: design, build')).toBeTruthy()
+    expect(within(execution).getByText('Blocked by an open question')).toBeTruthy()
+    expect(execution.textContent).toContain('publish: unknown (verified) (reconciliation)')
+    expect(execution.textContent).toContain('task created')
+    expect(execution.querySelector('time').textContent).toBe(new Date('2026-09-05T12:00:00Z').toLocaleString())
+    expect(execution.textContent).not.toMatch(/spec|worker|fence|attempt|mount-fleet-adapter|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|%|complete/i)
+    expect(within(execution).queryAllByRole('button')).toHaveLength(0)
+    expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Submit campaign', 'Ask'])
+  })
+
+  it('shows loading and empty execution, and retains questions during an execution error', () => {
+    campaign.executionLoading = true
+    const { rerender } = render(panel())
+    expect(screen.getByText('Loading execution…')).toBeTruthy()
+    expect(screen.queryByText('No tasks recorded yet.')).toBeNull()
+    campaign.executionLoading = false
+    campaign.execution = { tasks: [], questions: [], receipts: [], events: [] }
+    campaign.executionError = new Error('Execution is unavailable.')
+    campaign.questions = [{ question_id: Q, prompt: 'Which format?', status: 'open' }]
+    rerender(panel())
+    expect(screen.getByText('No tasks recorded yet.')).toBeTruthy()
+    expect(screen.getByText('Which format?')).toBeTruthy()
+    expect(screen.getByRole('alert').textContent).toContain('Execution is unavailable.')
+    expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Submit campaign', 'Try again', 'Record answer', 'Ask'])
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    expect(campaign.refetch).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([['claimed', 'In progress'], ['pending', 'Waiting']])('uses plain words for task status %s', (status, words) => {
+    campaign.execution = { tasks: [{ task_id: C, title: 'Build recipes', current_stage: 'build', status }], questions: [], receipts: [], events: [] }
+    render(panel())
+    expect(within(screen.getByRole('region', { name: 'Execution' })).getByText(words)).toBeTruthy()
+  })
+
   it('shows sign-in guidance without mounting a hook or form when signed out', () => {
     const { container, rerender } = render(panel({ signedIn: false }))
     expect(screen.getByRole('status').textContent).toBe('Sign in to submit a campaign.')

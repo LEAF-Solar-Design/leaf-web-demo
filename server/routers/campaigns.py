@@ -16,6 +16,34 @@ import platform_link
 
 router = APIRouter()
 _STORE = None
+_EXECUTION = None
+_ENROLLMENT = None
+
+
+def set_enrollment_store(obj):
+    global _ENROLLMENT
+    _ENROLLMENT = obj
+
+
+def _enrollment_store():
+    if _ENROLLMENT is not None:
+        return _ENROLLMENT
+    _store()
+    from leaf_platform import campaign_enrollment
+    return campaign_enrollment
+
+
+def set_execution_store(obj):
+    global _EXECUTION
+    _EXECUTION = obj
+
+
+def _execution_store():
+    if _EXECUTION is not None:
+        return _EXECUTION
+    _store()
+    from leaf_platform import campaign_execution
+    return campaign_execution
 
 
 def set_store(obj):
@@ -69,7 +97,7 @@ def _dispatch(row):
     return result
 
 
-def _execute(tenant, project_id, operation, key, *, created=False):
+def _execute(tenant, project_id, operation, key, *, created=False, project=_dispatch):
     try:
         store = _store()
     except Exception:
@@ -80,7 +108,7 @@ def _execute(tenant, project_id, operation, key, *, created=False):
         if result is None:
             return _failure(404, 'project_unavailable', 'project is unavailable')
         status = 201 if created and not result.get('replayed', False) else 200
-        projected = [_dispatch(row) for row in result] if isinstance(result, list) else _dispatch(result)
+        projected = [project(row) for row in result] if isinstance(result, list) else project(result)
         return JSONResponse(status_code=status, content={'ok': True, key: projected})
     except platform_link.ProjectSessionForbidden:
         return _failure(403, 'forbidden', 'project role does not permit access')
@@ -91,6 +119,8 @@ def _execute(tenant, project_id, operation, key, *, created=False):
     except store.CampaignUnavailable as exc:
         if exc.code == 'project_unavailable':
             return _failure(404, 'project_unavailable', 'project is unavailable')
+        if exc.code in ('source_unavailable', 'worker_unavailable'):
+            return _failure(503, exc.code, str(exc))
         return _failure(503, 'campaigns_unavailable', 'campaign store is unavailable')
     except store.CampaignError as exc:
         return _failure(400, exc.code, str(exc))
@@ -103,6 +133,72 @@ def _principal(tenant):
     if binding is None:
         raise platform_link.ProjectSessionForbidden('identity binding is unavailable')
     return binding.binding_id
+
+
+@router.get('/api/campaigns/{campaign_id}/enrollments')
+def enrollments(campaign_id: str, request: Request, tenant: Any = Depends(deps.require_tenant)):
+    try:
+        project, campaign_id = _id(request.query_params.get('project_id')), _id(campaign_id)
+    except ValueError as exc:
+        return _failure(400, 'invalid_request', str(exc))
+    return _execute(tenant, project, lambda store, org: {
+        'enrollments': _enrollment_store().list_enrollments(org, project, campaign_id),
+        'allowed_machines': _enrollment_store().allowed_machines(),
+    }, 'enrollment', project=lambda row: row)
+
+
+@router.post('/api/campaigns/{campaign_id}/enrollments')
+async def enroll(campaign_id: str, request: Request, tenant: Any = Depends(deps.require_tenant)):
+    try:
+        body = await _body(request)
+        project, campaign_id = _id(body.get('project_id')), _id(campaign_id)
+        machine = _text(body.get('machine_id'), 'machine_id', 200)
+    except ValueError as exc:
+        return _failure(400, 'invalid_request', str(exc))
+    return _execute(tenant, project, lambda store, org: _enrollment_store().request_enrollment(
+        org, project, campaign_id, _principal(tenant), machine_id=machine),
+        'enrollment', created=True, project=lambda row: row)
+
+
+@router.post('/api/campaigns/{campaign_id}/enrollments/{enrollment_id}/{action}')
+async def change_enrollment(campaign_id: str, enrollment_id: str, action: str, request: Request,
+                            tenant: Any = Depends(deps.require_tenant)):
+    try:
+        body = await _body(request)
+        project = _id(body.get('project_id'))
+        campaign_id, enrollment_id = _id(campaign_id), _id(enrollment_id)
+        if action not in ('enable', 'revoke'):
+            raise ValueError('Unknown enrollment action')
+    except ValueError as exc:
+        return _failure(400, 'invalid_request', str(exc))
+    return _execute(tenant, project, lambda store, org: getattr(
+        _enrollment_store(), action + '_enrollment')(
+            org, project, campaign_id, enrollment_id, _principal(tenant)),
+        'enrollment', project=lambda row: row)
+
+
+@router.post('/internal/campaign-worker/recover')
+async def recover_worker(request: Request, subject: str = Depends(deps.require_campaign_worker)):
+    try:
+        body = await _body(request)
+        if set(body) != {'enrollment_id'}:
+            raise ValueError('Only enrollment_id is accepted')
+        enrollment_id = _id(body.get('enrollment_id'))
+    except ValueError as exc:
+        return _failure(400, 'invalid_request', str(exc))
+    try:
+        store = _store()
+    except Exception:
+        return _failure(503, 'campaigns_unavailable', 'Campaign recovery is unavailable')
+    try:
+        bindings = _enrollment_store().resolve_worker_enrollment(enrollment_id, subject)
+        return {'ok': True, 'pending_remote_bindings': bindings}
+    except store.CampaignError as exc:
+        if exc.code in ('worker_forbidden', 'project_unavailable'):
+            return _failure(403, 'worker_forbidden', 'Campaign worker is not authorized')
+        return _failure(503, 'campaigns_unavailable', 'Campaign recovery is unavailable')
+    except Exception:
+        return _failure(503, 'campaigns_unavailable', 'Campaign recovery is unavailable')
 
 
 @router.post('/api/campaigns')
@@ -138,6 +234,32 @@ def get_campaign(campaign_id: str, request: Request, tenant: Any = Depends(deps.
     except ValueError as exc:
         return _failure(400, 'invalid_request', str(exc))
     return _execute(tenant, project, lambda store, org: store.get_campaign(org, project, campaign_id), 'campaign')
+
+
+def _project(snapshot):
+    fields = {
+        'tasks': ('tasks', ('task_id', 'task_key', 'title', 'kind', 'status', 'stages',
+                           'current_stage', 'depends_on', 'blocked_by_questions', 'created_at', 'updated_at')),
+        'questions': ('pending_questions', ('question_id', 'question_key', 'prompt', 'options',
+                                            'status', 'blocks_dispatch', 'task_ids', 'created_at')),
+        'receipts': ('receipts', ('receipt_id', 'task_id', 'stage', 'outcome', 'verified',
+                                 'created_at', 'reconciles_receipt_id')),
+        'events': ('events', ('event_id', 'task_id', 'event_type', 'created_at')),
+    }
+    return {name: [{key: row[key] for key in keys if key in row} for row in snapshot.get(source, [])]
+            for name, (source, keys) in fields.items()}
+
+
+@router.get('/api/campaigns/{campaign_id}/execution')
+def execution(campaign_id: str, request: Request, tenant: Any = Depends(deps.require_tenant)):
+    try:
+        project, campaign_id = _id(request.query_params.get('project_id')), _id(campaign_id)
+        limit = max(1, min(200, int(request.query_params.get('limit', '50'))))
+    except ValueError as exc:
+        return _failure(400, 'invalid_request', str(exc))
+    return _execute(tenant, project, lambda store, org: _project(
+        _execution_store().read_execution(org, project, campaign_id, limit=limit)),
+        'execution', project=lambda row: row)
 
 
 @router.post('/api/campaigns/{campaign_id}/questions')

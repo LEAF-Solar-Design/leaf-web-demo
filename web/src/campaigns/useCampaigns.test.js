@@ -31,6 +31,11 @@ beforeEach(() => {
   api.listCampaigns.mockResolvedValue({ campaigns: [row] })
   api.getCampaign.mockImplementation(async (_project, id) => ({ campaign: { ...row, campaign_id: id } }))
   api.listQuestions.mockResolvedValue({ questions: [open] })
+  api.listEnrollments.mockResolvedValue({ enrollment: { enrollments: [], allowed_machines: ['VM-C'] } })
+  api.requestEnrollment.mockResolvedValue({ enrollment: { enrollment_id: Q, state: 'pending' } })
+  api.enableEnrollment.mockResolvedValue({ enrollment: { enrollment_id: Q, state: 'enabled' } })
+  api.revokeEnrollment.mockResolvedValue({ enrollment: { enrollment_id: Q, state: 'revoked' } })
+  api.getExecution.mockResolvedValue({ execution: { tasks: [], questions: [], receipts: [], events: [] } })
   api.submitCampaign.mockResolvedValue({ campaign: row })
   api.askQuestion.mockResolvedValue({ question: open })
   api.answerQuestion.mockResolvedValue({ answer: receipt })
@@ -44,6 +49,108 @@ async function ready() {
 }
 
 describe('project campaign hook', () => {
+  it('loads configured machines and serializes enrollment mutations', async () => {
+    const hook = await ready()
+    expect(hook.result.current.allowedMachines).toEqual(['VM-C'])
+    const pending = deferred()
+    api.requestEnrollment.mockReturnValue(pending.promise)
+    let first
+    act(() => { first = hook.result.current.enroll('VM-C'); hook.result.current.enroll('VM-C') })
+    expect(api.requestEnrollment).toHaveBeenCalledExactlyOnceWith(P, C, 'VM-C')
+    await act(async () => { pending.resolve({ enrollment: { enrollment_id: Q } }); await first })
+    await act(async () => { await hook.result.current.enableEnrollment(Q) })
+    expect(api.enableEnrollment).toHaveBeenCalledExactlyOnceWith(P, C, Q)
+    await act(async () => { await hook.result.current.revokeEnrollment(Q) })
+    expect(api.revokeEnrollment).toHaveBeenCalledExactlyOnceWith(P, C, Q)
+  })
+
+  it('keeps campaign and questions available when enrollment loading fails', async () => {
+    api.listEnrollments.mockRejectedValue(new Error('Hosts unavailable'))
+    const hook = await ready()
+    expect(hook.result.current.questions).toEqual([open])
+    expect(hook.result.current.enrollmentError.message).toBe('Hosts unavailable')
+    expect(hook.result.current.allowedMachines).toEqual([])
+  })
+  it('reads execution after campaign details are ready and preserves an empty snapshot', async () => {
+    const pending = deferred()
+    api.getExecution.mockReturnValue(pending.promise)
+    const hook = await ready()
+    expect(api.getExecution).toHaveBeenCalledExactlyOnceWith(P, C)
+    expect(hook.result.current.selected).toEqual(row)
+    expect(hook.result.current.questions).toEqual([open])
+    expect(hook.result.current.executionLoading).toBe(true)
+    const execution = { tasks: [], questions: [], receipts: [], events: [] }
+    await act(async () => { pending.resolve({ execution }); await pending.promise })
+    expect(hook.result.current.execution).toEqual(execution)
+    expect(hook.result.current.executionLoading).toBe(false)
+    expect(hook.result.current.executionError).toBeNull()
+  })
+
+  it('clears execution synchronously on select and drops a delayed old snapshot', async () => {
+    const initial = { tasks: [{ title: 'Original' }], questions: [], receipts: [], events: [] }
+    api.getExecution.mockResolvedValue({ execution: initial })
+    const hook = await ready()
+    await waitFor(() => expect(hook.result.current.execution).toEqual(initial))
+    const old = deferred()
+    api.getExecution.mockReturnValueOnce(old.promise)
+    let refreshing
+    act(() => { refreshing = hook.result.current.refetch() })
+    await waitFor(() => expect(api.getExecution).toHaveBeenCalledTimes(2))
+    api.listCampaigns.mockResolvedValue({ campaigns: [row, { ...row, campaign_id: D }] })
+    const next = { tasks: [{ title: 'New selection' }], questions: [], receipts: [], events: [] }
+    api.getExecution.mockResolvedValue({ execution: next })
+    let selecting
+    act(() => { selecting = hook.result.current.select(D) })
+    expect(hook.result.current.execution).toBeNull()
+    expect(hook.result.current.executionError).toBeNull()
+    await act(async () => { await selecting })
+    expect(api.getExecution).toHaveBeenLastCalledWith(P, D)
+    await act(async () => { old.resolve({ execution: initial }); await refreshing })
+    expect(hook.result.current.execution).toEqual(next)
+  })
+
+  it('resets execution on project change and drops the prior project response', async () => {
+    const old = deferred()
+    api.getExecution.mockImplementation(project => project === P ? old.promise : Promise.resolve({
+      execution: { tasks: [], questions: [], receipts: [], events: [] },
+    }))
+    const hook = renderHook(({ project }) => useCampaigns(project), { initialProps: { project: P } })
+    await waitFor(() => expect(api.getExecution).toHaveBeenCalledWith(P, C))
+    hook.rerender({ project: B })
+    expect(hook.result.current.execution).toBeNull()
+    await waitFor(() => expect(hook.result.current.execution).toEqual({ tasks: [], questions: [], receipts: [], events: [] }))
+    await act(async () => { old.resolve({ execution: { tasks: [{ title: 'Old project' }] } }); await old.promise })
+    expect(hook.result.current.execution.tasks).toEqual([])
+  })
+
+  it('keeps the snapshot, campaigns and questions when execution refresh fails', async () => {
+    const execution = { tasks: [{ title: 'Recorded task' }], questions: [], receipts: [], events: [] }
+    api.getExecution.mockResolvedValue({ execution })
+    const hook = await ready()
+    await waitFor(() => expect(hook.result.current.execution).toEqual(execution))
+    const failure = new Error('Execution is unavailable')
+    api.getExecution.mockRejectedValue(failure)
+    let result
+    await act(async () => { result = await hook.result.current.refetch() })
+    expect(result).toEqual({ campaigns: [row], selected: row, questions: [open] })
+    expect(hook.result.current.execution).toEqual(execution)
+    expect(hook.result.current.executionError).toBe(failure)
+    expect(hook.result.current.executionLoading).toBe(false)
+    expect(hook.result.current.error).toBeNull()
+    expect(hook.result.current.campaigns).toEqual([row])
+    expect(hook.result.current.questions).toEqual([open])
+    api.getExecution.mockResolvedValue({ execution })
+    await act(async () => { await hook.result.current.refetch() })
+    expect(hook.result.current.executionError).toBeNull()
+    api.getExecution.mockRejectedValue(failure)
+    await act(async () => { await hook.result.current.refetch() })
+    expect(hook.result.current.executionError).toBe(failure)
+    api.listCampaigns.mockReturnValue(new Promise(() => {}))
+    act(() => { hook.result.current.select(D) })
+    expect(hook.result.current.execution).toBeNull()
+    expect(hook.result.current.executionError).toBeNull()
+  })
+
   it('selects a submitted replay and refetches before resolving, blocking duplicate submit', async () => {
     const hook = await ready()
     const pending = deferred()
@@ -205,16 +312,18 @@ describe('real campaign HTTP transport', () => {
     expect(fetcher.mock.calls[1][0]).toBe(`https://campaign.test/api/campaigns?project_id=${P}&limit=50`)
   })
 
-  it('sends the other four project-scoped wires without dispatch options', async () => {
+  it('sends the other project-scoped wires without dispatch options', async () => {
     await client.getCampaign(P, C)
     await client.askQuestion(P, C, { questionKey: 'follow-up.1', prompt: 'Why?' })
     await client.listQuestions(P, C)
     await client.answerQuestion(P, C, Q, 'Use PDF.')
+    await client.getExecution(P, C)
     expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
       `https://campaign.test/api/campaigns/${C}?project_id=${P}`,
       `https://campaign.test/api/campaigns/${C}/questions`,
       `https://campaign.test/api/campaigns/${C}/questions?project_id=${P}`,
       `https://campaign.test/api/campaigns/${C}/questions/${Q}/answer`,
+      `https://campaign.test/api/campaigns/${C}/execution?project_id=${P}&limit=50`,
     ])
     expect(JSON.parse(fetcher.mock.calls[1][1].body)).toEqual({ project_id: P, question_key: 'follow-up.1', prompt: 'Why?' })
     expect(JSON.parse(fetcher.mock.calls[3][1].body)).toEqual({ project_id: P, answer: 'Use PDF.' })
@@ -224,6 +333,26 @@ describe('real campaign HTTP transport', () => {
     localStorage.removeItem('leaf.jwt')
     await expect(client.listCampaigns(P)).rejects.toMatchObject({ status: 0, message: 'Sign in to submit a campaign.' })
     expect(fetcher).not.toHaveBeenCalled()
+  })
+
+  it('sends enrollment actions without subject or publication fields', async () => {
+    await client.listEnrollments(P, C)
+    await client.requestEnrollment(P, C, 'VM-C')
+    await client.enableEnrollment(P, C, Q)
+    await client.revokeEnrollment(P, C, Q)
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+      `https://campaign.test/api/campaigns/${C}/enrollments?project_id=${P}`,
+      `https://campaign.test/api/campaigns/${C}/enrollments`,
+      `https://campaign.test/api/campaigns/${C}/enrollments/${Q}/enable`,
+      `https://campaign.test/api/campaigns/${C}/enrollments/${Q}/revoke`,
+    ])
+    expect(JSON.parse(fetcher.mock.calls[1][1].body)).toEqual({ project_id: P, machine_id: 'VM-C' })
+    expect(JSON.parse(fetcher.mock.calls[2][1].body)).toEqual({ project_id: P })
+  })
+
+  it.each([[999, 200], [0, 1], [-20, 1], [2.9, 2], ['bad', 50]])('clamps execution limit %s to %s', async (limit, count) => {
+    await client.getExecution(P, C, limit)
+    expect(fetcher.mock.calls[0][0]).toBe(`https://campaign.test/api/campaigns/${C}/execution?project_id=${P}&limit=${count}`)
   })
 
   it.each([

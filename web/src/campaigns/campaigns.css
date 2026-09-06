@@ -39,5 +39,7 @@
 .campaign-questions > li { padding-block: 0.75rem; border-bottom: 1px solid var(--border); }
 .campaign-status { padding: 0.75rem; background: var(--accent-tint); }
 .campaign-answer { white-space: pre-wrap; }
+.campaign-prompt { white-space: pre-wrap; }
+.campaign-execution ul { list-style: none; padding: 0; margin: 0; }
 .campaign-error { padding: 0.75rem; border: 1px solid var(--border); }
 .campaign-panel button { justify-self: start; }

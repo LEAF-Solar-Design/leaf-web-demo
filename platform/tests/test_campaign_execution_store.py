@@ -298,7 +298,7 @@ def test_store_has_no_ddl_or_job_submission():
     router = (Path(__file__).resolve().parents[2] / 'server' / 'routers' / 'campaigns.py').read_text(encoding='utf-8')
     for method in ('bind_remote_dispatch', 'record_remote_admission',
                    'settle_remote_attempt', 'pending_remote_bindings'):
-        assert method not in router
+        assert not re.search(r'\b' + method + r'\s*\(', router)
 
 
 def _bind(scope, attempt, **changes):

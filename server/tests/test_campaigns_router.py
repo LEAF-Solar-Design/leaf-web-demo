@@ -1,9 +1,10 @@
 """HTTP proofs for the project campaign authority, using its store seam."""
 import uuid
+import os
 from types import SimpleNamespace
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 import deps
@@ -33,7 +34,53 @@ class FakeStore:
 
     def __init__(self):
         self.campaigns, self.questions, self.answers = {}, {}, {}
+        self.enrollments = {}
         self.calls = []
+
+    def allowed_machines(self):
+        return ['VM-C', 'VM-D']
+
+    def list_enrollments(self, org, project, campaign):
+        self._require(org, project, campaign)
+        return [row for row in self.enrollments.values() if row['campaign_id'] == campaign]
+
+    def request_enrollment(self, org, project, campaign, principal, *, machine_id):
+        self._require(org, project, campaign)
+        self.calls.append(('enroll', org, project, campaign, principal, machine_id))
+        if machine_id not in self.allowed_machines():
+            raise CampaignError('invalid_machine')
+        for row in self.enrollments.values():
+            if row['campaign_id'] == campaign and row['machine_id'] == machine_id:
+                return {**row, 'replayed': True}
+        row = dict(enrollment_id=str(uuid.uuid4()), org_id=org, project_id=project,
+                   campaign_id=campaign, machine_id=machine_id, state='pending',
+                   capability_link={'state': 'pending_link'})
+        self.enrollments[row['enrollment_id']] = row
+        return dict(row)
+
+    def _change_enrollment(self, org, project, campaign, eid, principal, state):
+        self._require(org, project, campaign)
+        row = self.enrollments.get(eid)
+        if not row or (row['org_id'], row['project_id'], row['campaign_id']) != (org, project, campaign):
+            raise CampaignUnavailable('project_unavailable')
+        if row['state'] == 'revoked' and state == 'enabled':
+            raise CampaignConflict('enrollment_revoked')
+        replayed = row['state'] == state
+        row['state'] = state
+        return {**row, 'replayed': replayed}
+
+    def enable_enrollment(self, *args):
+        return self._change_enrollment(*args, 'enabled')
+
+    def revoke_enrollment(self, *args):
+        return self._change_enrollment(*args, 'revoked')
+
+    def resolve_worker_enrollment(self, eid, subject):
+        row = self.enrollments.get(eid)
+        if not row or row['state'] != 'enabled' or subject != os.environ.get('LEAF_CAMPAIGN_WORKER_SUBJECT'):
+            raise CampaignError('worker_forbidden')
+        self.calls.append(('recover', row['org_id'], row['project_id'], row['campaign_id']))
+        return []
 
     def submit_campaign(self, org, project, tenant, principal, **fields):
         self.calls.append(('submit', org, project, tenant, principal))
@@ -91,10 +138,41 @@ class FakeStore:
         return dict(result)
 
 
+class FakeExecution:
+    def __init__(self, store):
+        self.store = store
+        self.calls = []
+
+    def read_execution(self, org, project, campaign, *, limit):
+        self.calls.append((org, project, campaign, limit))
+        self.store._require(org, project, campaign)
+        hidden = dict(spec={'secret': True}, verify_command='private command', fence=9,
+                      idempotency_key='private key', payload_fingerprint='private fingerprint',
+                      active_attempt={'worker_id': 'worker', 'fence': 9,
+                                      'budget_reservation_ref': 'budget', 'outward_operation_key': 'operation'},
+                      result={'private': True}, artifact_ref='artifact', resource_identity='resource',
+                      rollback_identity='rollback', payload={'private': True}, future_secret='secret',
+                      dispatch={'action': 'mount-fleet-adapter'})
+        return {
+            'tasks': [dict(hidden, task_id='task', task_key='build', title='Build recipes', kind='build',
+                           status='reconcile_required', stages=['build'], current_stage='build',
+                           depends_on=['design'], blocked_by_questions=['question'], created_at='now', updated_at='now')],
+            'pending_questions': [dict(hidden, question_id='question', question_key='format', prompt='Which format?',
+                                       options=['PDF'], status='open', blocks_dispatch=True, task_ids=['task'], created_at='now')],
+            'receipts': [dict(hidden, receipt_id='receipt', task_id='task', stage='build', outcome='unknown',
+                              verified=False, created_at='now', reconciles_receipt_id=None)],
+            'events': [dict(hidden, event_id='event', task_id='task', event_type='task_created', created_at='now')],
+            'future_secret': 'secret',
+        }
+
+
 @pytest.fixture
 def setup(monkeypatch):
     store = FakeStore()
     router.set_store(store)
+    router.set_enrollment_store(store)
+    store.execution = FakeExecution(store)
+    router.set_execution_store(store.execution)
     allowed = {PROJECT, OTHER}
 
     def access(tenant, project_id, *, write):
@@ -113,11 +191,104 @@ def setup(monkeypatch):
     with TestClient(app) as client:
         yield client, store, allowed
     router.set_store(None)
+    router.set_execution_store(None)
+    router.set_enrollment_store(None)
 
 
 def _submit(client, **overrides):
     return client.post('/api/campaigns', headers={'Idempotency-Key': 'key'}, json={
         'project_id': PROJECT, 'title': 'ReciPDF', 'prompt': 'Organize recipes', **overrides})
+
+
+def test_enrollment_human_routes_and_server_owned_fields(setup):
+    client, store, allowed = setup
+    campaign = _submit(client).json()['campaign']['campaign_id']
+    url = f'/api/campaigns/{campaign}/enrollments'
+    payload = {'project_id': PROJECT, 'machine_id': 'VM-C', 'service_subject': 'forged',
+               'publication_id': 'forged', 'first_invocation_receipt_id': 'forged'}
+    listed = client.get(url, params={'project_id': PROJECT})
+    assert listed.json()['enrollment']['allowed_machines'] == ['VM-C', 'VM-D']
+    first = client.post(url, json=payload)
+    assert first.status_code == 201
+    row = first.json()['enrollment']
+    assert row['capability_link']['state'] == 'pending_link'
+    assert 'service_subject' not in row and 'publication_id' not in row
+    assert store.calls[-1] == ('enroll', ORG, PROJECT, campaign, PRINCIPAL, 'VM-C')
+    assert client.post(url, json=payload).status_code == 200
+    assert len(store.enrollments) == 1
+    assert client.post(url, json={**payload, 'machine_id': 'other'}).status_code == 400
+    eid = row['enrollment_id']
+    for action in ('enable', 'revoke'):
+        assert client.post(f'{url}/{eid}/{action}', json={'project_id': OTHER}).status_code == 404
+    allowed.remove(PROJECT)
+    for action in ('enable', 'revoke'):
+        assert client.post(f'{url}/{eid}/{action}', json={'project_id': PROJECT}).status_code == 403
+    assert client.post(url, json=payload).status_code == 403
+
+
+def test_worker_recovery_always_verifies_bearer_and_derives_scope(setup, monkeypatch):
+    import auth
+    client, store, _ = setup
+    monkeypatch.setenv('LEAF_CAMPAIGN_WORKER_SUBJECT', 'service-worker')
+    monkeypatch.setenv('LEAF_AUTH_ENABLED', '0')
+    verified = []
+
+    def verify(header):
+        verified.append(header)
+        if header not in ('Bearer signed', 'Bearer wrong'):
+            raise HTTPException(401, 'Invalid bearer')
+        return {'sub': 'service-worker' if header == 'Bearer signed' else 'wrong'}
+
+    monkeypatch.setattr(auth, 'verify_platform_token', verify)
+    campaign = _submit(client).json()['campaign']['campaign_id']
+    url = f'/api/campaigns/{campaign}/enrollments'
+    row = client.post(url, json={'project_id': PROJECT, 'machine_id': 'VM-C'}).json()['enrollment']
+    eid = row['enrollment_id']
+    recover = '/internal/campaign-worker/recover'
+    body = {'enrollment_id': eid}
+    assert client.post(recover, json=body).status_code == 401
+    assert client.post(recover, json=body, headers={'Authorization': 'Bearer unsigned'}).status_code == 401
+    assert client.post(recover, json=body, headers={'Authorization': 'Bearer wrong'}).status_code == 403
+    headers = {'Authorization': 'Bearer signed'}
+    assert client.post(recover, json=body, headers=headers).status_code == 403
+    assert client.post(f'{url}/{eid}/enable', json={'project_id': PROJECT}).status_code == 200
+    assert client.post(recover, json=body, headers=headers).json() == {'ok': True, 'pending_remote_bindings': []}
+    assert store.calls[-1] == ('recover', ORG, PROJECT, campaign)
+    assert client.post(recover, json={**body, 'project_id': OTHER}, headers=headers).status_code == 400
+    assert client.post(recover, json={'enrollment_id': str(uuid.uuid4())}, headers=headers).status_code == 403
+    assert client.post(f'{url}/{eid}/revoke', json={'project_id': PROJECT}).status_code == 200
+    assert client.post(recover, json=body, headers=headers).status_code == 403
+    assert client.post(url, json={'project_id': PROJECT, 'machine_id': 'VM-C'}).json()['enrollment']['state'] == 'revoked'
+    assert None in verified and 'Bearer unsigned' in verified
+
+
+def test_worker_uses_real_signature_verifier_with_tenant_auth_off(setup, monkeypatch):
+    import time
+    import auth
+    import jwt
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    client, _, _ = setup
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    monkeypatch.setattr(auth, '_signing_key', lambda token: key.public_key())
+    monkeypatch.setenv('LEAF_AUTH_LIVE', '0')
+    monkeypatch.setenv('LEAF_CAMPAIGN_WORKER_SUBJECT', 'service-worker')
+    campaign = _submit(client).json()['campaign']['campaign_id']
+    url = f'/api/campaigns/{campaign}/enrollments'
+    row = client.post(url, json={'project_id': PROJECT, 'machine_id': 'VM-C'}).json()['enrollment']
+    eid = row['enrollment_id']
+    client.post(f'{url}/{eid}/enable', json={'project_id': PROJECT})
+    claims = {'sub': 'service-worker', 'iat': int(time.time()), 'exp': int(time.time()) + 300,
+              'iss': auth.issuer(), 'aud': auth.audience()}
+    recover = '/internal/campaign-worker/recover'
+    for token, status in (
+        (jwt.encode(claims, key, algorithm='RS256'), 200),
+        (jwt.encode(claims, '', algorithm='none'), 401),
+        (jwt.encode({**claims, 'sub': 'wrong'}, key, algorithm='RS256'), 403),
+    ):
+        response = client.post(recover, json={'enrollment_id': eid}, headers={'Authorization': 'Bearer ' + token})
+        assert response.status_code == status
+    assert client.post(recover, json={'enrollment_id': eid}).status_code == 401
 
 
 def _question(client):
@@ -127,6 +298,73 @@ def _question(client):
         'options': ['tags', 'collections']})
     assert response.status_code == 201
     return campaign, response.json()['question']['question_id']
+
+
+def test_execution_projection_and_limit_validation(setup):
+    client, store, _ = setup
+    campaign = _submit(client).json()['campaign']['campaign_id']
+    url = f'/api/campaigns/{campaign}/execution'
+    response = client.get(url, params={'project_id': PROJECT})
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {'ok', 'execution'} and body['ok'] is True
+    expected = {
+        'tasks': {'task_id', 'task_key', 'title', 'kind', 'status', 'stages', 'current_stage',
+                  'depends_on', 'blocked_by_questions', 'created_at', 'updated_at'},
+        'questions': {'question_id', 'question_key', 'prompt', 'options', 'status', 'blocks_dispatch', 'task_ids', 'created_at'},
+        'receipts': {'receipt_id', 'task_id', 'stage', 'outcome', 'verified', 'created_at', 'reconciles_receipt_id'},
+        'events': {'event_id', 'task_id', 'event_type', 'created_at'},
+    }
+    assert set(body['execution']) == set(expected)
+    for name, keys in expected.items():
+        assert len(body['execution'][name]) == 1
+        assert set(body['execution'][name][0]) == keys
+    assert '"dispatch":' not in response.text
+    assert store.execution.calls == [(ORG, PROJECT, campaign, 50)]
+    for value, clamped in [('999', 200), ('0', 1), ('-20', 1)]:
+        assert client.get(url, params={'project_id': PROJECT, 'limit': value}).status_code == 200
+        assert store.execution.calls[-1] == (ORG, PROJECT, campaign, clamped)
+    calls = len(store.execution.calls)
+    assert client.get(url, params={'project_id': PROJECT, 'limit': 'bad'}).status_code == 400
+    assert len(store.execution.calls) == calls
+
+
+def test_execution_missing_scope_and_invalid_ids(setup):
+    client, store, _ = setup
+    campaign = _submit(client).json()['campaign']['campaign_id']
+    foreign = client.get(f'/api/campaigns/{campaign}/execution', params={'project_id': OTHER})
+    missing = client.get(f'/api/campaigns/{uuid.uuid4()}/execution', params={'project_id': OTHER})
+    assert foreign.status_code == missing.status_code == 404
+    assert foreign.json() == missing.json() == {'ok': False, 'error': {
+        'error_code': 'project_unavailable', 'message': 'project is unavailable', 'retryable': False}}
+    calls = len(store.execution.calls)
+    for identifier, params in [('bad', {'project_id': PROJECT}), (campaign, {'project_id': 'bad'}), (campaign, {})]:
+        assert client.get(f'/api/campaigns/{identifier}/execution', params=params).status_code == 400
+    assert len(store.execution.calls) == calls
+
+
+def test_execution_forbidden_never_calls_ledger(setup):
+    client, store, allowed = setup
+    campaign = _submit(client).json()['campaign']['campaign_id']
+    allowed.remove(PROJECT)
+    response = client.get(f'/api/campaigns/{campaign}/execution', params={'project_id': PROJECT})
+    assert response.status_code == 403
+    assert response.json()['error']['error_code'] == 'forbidden'
+    assert store.execution.calls == []
+
+
+def test_execution_store_failure_is_retryable_503(setup, monkeypatch):
+    client, _, _ = setup
+    campaign = _submit(client).json()['campaign']['campaign_id']
+
+    def unavailable():
+        raise RuntimeError('private database failure')
+
+    monkeypatch.setattr(router, '_execution_store', unavailable)
+    response = client.get(f'/api/campaigns/{campaign}/execution', params={'project_id': PROJECT})
+    assert response.status_code == 503
+    assert response.json() == {'ok': False, 'error': {'error_code': 'campaigns_unavailable',
+        'message': 'campaign store is unavailable', 'retryable': True}}
 
 
 def test_submission_replay_conflict_verified_identity_and_dispatch(setup):

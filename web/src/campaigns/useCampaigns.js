@@ -2,7 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import * as api from './api.js'
 
 const empty = () => ({ status: 'idle', refreshing: false, error: null, errorAction: null,
-  campaigns: [], selectedId: null, selected: null, questions: [], answers: {}, pending: {} })
+  campaigns: [], selectedId: null, selected: null, questions: [], answers: {}, pending: {},
+  execution: null, executionLoading: false, executionError: null,
+  enrollments: [], allowedMachines: [], enrollmentError: null })
 const newKey = () => globalThis.crypto?.randomUUID?.() || `k-${Date.now()}-${Math.random().toString(16).slice(2)}`
 
 export default function useCampaigns(projectId, { enabled = true } = {}) {
@@ -40,23 +42,40 @@ export default function useCampaigns(projectId, { enabled = true } = {}) {
         ? preferredId : campaigns[0]?.campaign_id || null
       let selected = null
       let questions = []
+      let enrollment = { enrollments: [], allowed_machines: [] }
+      let enrollmentError = null
       if (selectedId) {
-        const [detail, rows] = await Promise.all([
+        const [detail, rows, hosts] = await Promise.all([
           api.getCampaign(projectId, selectedId), api.listQuestions(projectId, selectedId),
+          api.listEnrollments(projectId, selectedId).catch(error => { enrollmentError = error; return null }),
         ])
         if (!live()) return null
         selected = detail.campaign
         questions = rows.questions || []
+        if (hosts) enrollment = hosts.enrollment
       }
       const answers = {}
       for (const question of questions) {
         if (question.answer != null) answers[question.question_id] = question.answer
       }
+      const changedSelection = context.selectedId !== selectedId
       context.selectedId = selectedId
-      update({ campaigns, selectedId, selected, questions, answers, status: 'ready', refreshing: false })
+      update({ campaigns, selectedId, selected, questions, answers, status: 'ready', refreshing: false,
+        enrollments: enrollment.enrollments, allowedMachines: enrollment.allowed_machines, enrollmentError,
+        executionLoading: !!selectedId, ...(changedSelection || !selectedId ? { execution: null, executionError: null } : {}) })
+      if (selectedId) {
+        try {
+          const result = await api.getExecution(projectId, selectedId)
+          if (!live()) return null
+          update({ execution: result.execution, executionLoading: false, executionError: null })
+        } catch (executionError) {
+          if (!live()) return null
+          update({ executionError, executionLoading: false })
+        }
+      }
       return { campaigns, selected, questions }
     } catch (error) {
-      if (live()) update({ error, errorAction: 'load', refreshing: false, ...(!refresh ? { status: 'error' } : {}) })
+      if (live()) update({ error, errorAction: 'load', refreshing: false, executionLoading: false, ...(!refresh ? { status: 'error' } : {}) })
       return null
     }
   }, [context, current, enabled, projectId, update])
@@ -74,7 +93,9 @@ export default function useCampaigns(projectId, { enabled = true } = {}) {
     context.selectedId = id
     context.locks = {}
     questionKeyRef.current = null
-    update({ selectedId: id, selected: null, questions: [], answers: {}, pending: {}, error: null, errorAction: null })
+    update({ selectedId: id, selected: null, questions: [], answers: {}, pending: {}, error: null, errorAction: null,
+      enrollments: [], allowedMachines: [], enrollmentError: null,
+      execution: null, executionLoading: false, executionError: null })
     return load({ preferredId: id })
   }, [context, current, load, update])
 
@@ -125,5 +146,18 @@ export default function useCampaigns(projectId, { enabled = true } = {}) {
     return mutate(`answer:${qid}`, () => api.answerQuestion(projectId, id, qid, text))
   }, [context, mutate, projectId])
   const refetch = useCallback(() => load(), [load])
-  return { ...(snapshot.scope === scope ? snapshot : empty()), select, submit, ask, answer, refetch }
+  const enroll = useCallback(machine => {
+    const id = context.selectedId
+    return id ? mutate('enroll', () => api.requestEnrollment(projectId, id, machine)) : Promise.resolve(null)
+  }, [context, mutate, projectId])
+  const enableEnrollment = useCallback(enrollmentId => {
+    const id = context.selectedId
+    return id ? mutate(`enrollment:${enrollmentId}`, () => api.enableEnrollment(projectId, id, enrollmentId)) : Promise.resolve(null)
+  }, [context, mutate, projectId])
+  const revokeEnrollment = useCallback(enrollmentId => {
+    const id = context.selectedId
+    return id ? mutate(`enrollment:${enrollmentId}`, () => api.revokeEnrollment(projectId, id, enrollmentId)) : Promise.resolve(null)
+  }, [context, mutate, projectId])
+  return { ...(snapshot.scope === scope ? snapshot : empty()), select, submit, ask, answer, refetch,
+    enroll, enableEnrollment, revokeEnrollment }
 }
