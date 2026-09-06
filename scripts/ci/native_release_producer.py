@@ -162,6 +162,10 @@ def run_gate(root: Path, results_dir: Path, *, env: dict[str, str],
     results_dir.mkdir(parents=True, exist_ok=False)
     proof = results_dir / "gate-proof.json"
     deadline = time.monotonic() + timeout_seconds
+    # The canonical pytest commands import from their suite working directory.
+    # Keep safe-path for producer admission, but not these trusted test children.
+    env = dict(env)
+    env.pop("PYTHONSAFEPATH", None)
 
     def run(command, *, check=True, capture_output=False):
         remaining = deadline - time.monotonic()
@@ -185,6 +189,18 @@ def run_gate(root: Path, results_dir: Path, *, env: dict[str, str],
                               "--log-dir", str(results_dir / f"logs-{shard}")], check=False)
         if result.returncode != 0:
             failures.append(shard)
+            report = results_dir / f"shard-{shard}.json"
+            if report.is_file():
+                for entry in json.loads(report.read_text(encoding="utf-8")).get("results", []):
+                    suite_id = entry.get("id", "")
+                    if entry.get("status") != "FAIL" or not re.fullmatch(r"[A-Za-z0-9_-]+", suite_id):
+                        continue
+                    for log in sorted((results_dir / f"logs-{shard}").glob(f"{suite_id}*.log")):
+                        with log.open("rb") as stream:
+                            stream.seek(0, 2)
+                            stream.seek(max(0, stream.tell() - 8192))
+                            tail = stream.read(8192).decode("utf-8", errors="replace")
+                        print(f"FAILED SUITE LOG {log.name}\n{tail}", flush=True)
     # The canonical verifier owns partition/catalog completeness and the proof
     # format. Do not replace it with a summary of subprocess return codes.
     run(runner + ["--verify-shard-results", str(results_dir), "--emit-proof", str(proof)])

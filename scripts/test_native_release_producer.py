@@ -155,6 +155,35 @@ def test_native_gate_cannot_use_missing_proof(tmp_path, monkeypatch):
         producer.run_gate(tmp_path, tmp_path / "results", env={})
 
 
+def test_gate_restores_canonical_import_path_without_mutating_admission_env(tmp_path, monkeypatch):
+    calls = fake_gate(monkeypatch)
+    env = {"PYTHONSAFEPATH": "1", "PATH": "test"}
+    producer.run_gate(tmp_path, tmp_path / "results", env=env)
+    assert env["PYTHONSAFEPATH"] == "1"
+    assert all(kwargs["env"] == {"PATH": "test"} for _, kwargs in calls)
+
+
+def test_failed_gate_prints_bounded_suite_diagnostic(tmp_path, monkeypatch, capsys):
+    fake_gate(monkeypatch, fail_shard="3")
+    original = producer.subprocess.run
+
+    def run(command, **kwargs):
+        if "--shard-index" in command and command[command.index("--shard-index") + 1] == "3":
+            report = Path(command[command.index("--result-json") + 1])
+            report.write_text(json.dumps({"results": [{"id": "broken", "status": "FAIL"}]}))
+            logs = Path(command[command.index("--log-dir") + 1])
+            logs.mkdir()
+            (logs / "broken.log").write_text("x" * 10000 + "ModuleNotFoundError")
+        return original(command, **kwargs)
+
+    monkeypatch.setattr(producer.subprocess, "run", run)
+    with pytest.raises(ValueError, match="shards failed"):
+        producer.run_gate(tmp_path, tmp_path / "results", env={})
+    output = capsys.readouterr().out
+    assert "ModuleNotFoundError" in output
+    assert len(output) < 8300
+
+
 def test_native_gate_preserves_failed_shard_despite_fan_in_exit_zero(tmp_path, monkeypatch):
     calls = fake_gate(monkeypatch, fail_shard="3")
     with pytest.raises(ValueError, match="shards failed"):
