@@ -9,17 +9,10 @@
 import { useEffect, useState } from 'react'
 import { navigate } from './router.js'
 import { loadDemoSolve } from './intakeCache.js'
-import { isSignedIn } from '../auth.js'
 import { submitDemandCapture } from '../api.js'
 
 export function enterWorkspace() {
-  if (isSignedIn()) {
-    navigate('/try')
-    return
-  }
-  // ToolCast and SiteRoot select demo mode at module load. A same-origin
-  // page load initializes both with the guest query, even from a bare root.
-  window.location.assign('/try?demo=1')
+  navigate('/try')
 }
 
 const SHEETS = [
@@ -80,7 +73,7 @@ export default function LandingCast({ onTryTool = enterWorkspace }) {
           Branch is stringing this 3.2 MW rooftop live behind this page — 25 hours of drafting in 3 minutes, zero NEC violations.
         </div>
         <div className="lp-cta-row">
-          <button type="button" className="lp-cta" onClick={onTryTool}>Try Branch, no login required</button>
+          <button type="button" className="lp-cta" onClick={onTryTool}>Try Branch — no install</button>
           <span className="lp-price">PRICING PLACEHOLDER</span>
         </div>
         <form onSubmit={registerInterest} aria-label="Register interest">

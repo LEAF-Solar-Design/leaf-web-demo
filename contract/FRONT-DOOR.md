@@ -10,11 +10,14 @@ previous description of a paid trial funnel.
 - The app-host root renders the landing cover for signed-out visitors,
   including on `leaf-platform-web.vercel.app`, `platform.leafdesign.ai`, and
   `platform-staging.leafdesign.ai`.
-- The cover's workspace buttons, Solve action, and T shortcut open
-  `/try?demo=1` on the same origin. No login or payment is required to try.
-- Guest entry uses a page load because SiteRoot and ToolCast read demo mode
-  at module initialization. A client-side recast from a bare root would not
-  enable the existing local demo.
+- The cover's workspace buttons, Solve action, and T shortcut are an
+  in-shell route change to `/try` (no document reload). No login or payment
+  is required to try.
+- The signed-out `/try` surface is the guest sandbox: upload is enabled, Run
+  is disabled, and no login is required.
+- `/try?demo=1` is the mock walkthrough deep link. `authBoot.js` reads the
+  demo flag at boot; it is reachable directly but the cover's button no
+  longer forces it.
 - The sandbox uses the existing sample drawing and client-side tools. It
   does not promise live cloud execution or change cloud data.
 
