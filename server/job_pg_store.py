@@ -42,7 +42,7 @@ def _json(value: Any) -> Any:
 
 
 def _record(row: Dict[str, Any]) -> Dict[str, Any]:
-    return {
+    rec = {
         "job_id": row["job_id"],
         "tenant_id": row["tenant_id"],
         "tool": row["tool"],
@@ -73,9 +73,26 @@ def _record(row: Dict[str, Any]) -> Dict[str, Any]:
         "idempotency_key": row["idempotency_key"],
         "dwg_version": row["dwg_version"],
     }
+    from campaign_capability_job import record_context
+    capability = record_context(_json(row.get("execution_json")) or {}, rec)
+    if capability is not None:
+        rec["capability_provenance"] = capability
+    return rec
 
 
 class PostgresJobStore:
+    def linked_capability_job(self, canonical_id: str, tenant_id: str):
+        """Resolve mirror linkage from stored rows, never a client spine selector."""
+        with _db().cursor() as cur:
+            cur.execute(
+                "SELECT a.* FROM jobs j JOIN async_jobs a ON a.job_id = j.spine_ref "
+                "WHERE j.job_id::text = %s AND a.tenant_id = %s "
+                "AND a.execution_json ? 'capability_provenance'",
+                (canonical_id, tenant_id),
+            )
+            row = cur.fetchone()
+        return _record(row) if row is not None else None
+
     def ensure_ready(self) -> None:
         db = _db()
         with db.cursor() as cur:
@@ -241,13 +258,15 @@ class PostgresJobStore:
         db = _db()
         with db.cursor() as cur:
             cur.execute(
-                "SELECT attempt, execution_json FROM async_jobs WHERE job_id = %s",
+                "SELECT attempt, execution_json, tenant_id, org_id, project_id, tool "
+                "FROM async_jobs WHERE job_id = %s",
                 (job_id,),
             )
             row = cur.fetchone()
         if not row:
             return None
-        return {"attempt": int(row["attempt"] or 0), "execution": _json(row["execution_json"]) or {}}
+        return {"attempt": int(row["attempt"] or 0), "execution": _json(row["execution_json"]) or {},
+                **{key: row[key] for key in ("tenant_id", "org_id", "project_id", "tool")}}
 
     def event_context(self, job_id: str) -> Optional[Dict[str, Any]]:
         """Identity/attribution fields for the terminal product event (P2

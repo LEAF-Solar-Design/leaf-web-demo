@@ -252,7 +252,39 @@ def _job_for_tenant(job_id: str, tenant_id: str) -> Optional[Dict[str, Any]]:
     legacy = jobs.get_job(job_id)
     if legacy is not None:
         return legacy if legacy.get("tenant_id") == str(tenant_id) else None
+    if jobs.job_store_mode() == "postgres":
+        linked = jobs._pg_store.linked_capability_job(job_id, str(tenant_id))
+        if linked is not None:
+            return linked
     return jobs.platform_link.get_canonical_job(job_id, str(tenant_id))
+
+
+def _capability_access(rec, tenant, *, write=False):
+    """Authorize with the verified caller and stored project on every observation."""
+    if rec is None or "capability_provenance" not in rec:
+        return
+    from campaign_capability_job import validate_context
+    context = validate_context(rec["capability_provenance"])
+    if (not isinstance(tenant, deps.TenantContext) or not tenant.subject
+            or rec.get("tenant_id") != _bound_tenant_id(tenant)
+            or rec.get("org_id") != context["org_id"]
+            or rec.get("project_id") != context["project_id"]):
+        raise LookupError("job unavailable")
+    org = jobs.platform_link.require_project_access(tenant, rec["project_id"], write=write)
+    if str(org) != rec["org_id"]:
+        raise LookupError("job unavailable")
+
+
+def _access_error(rec, tenant, job_id, *, write=False):
+    try:
+        _capability_access(rec, tenant, write=write)
+    except jobs.platform_link.ProjectSessionForbidden:
+        return error_response(ErrorCode.BAD_PARAMS, "project access forbidden",
+                              retryable=False, status_code=403)
+    except (LookupError, ValueError):
+        return error_response(ErrorCode.BAD_PARAMS, f"unknown job_id: {job_id}",
+                              retryable=False, status_code=404)
+    return None
 
 
 def _active_binding_tenant(tenant: Any) -> Optional[str]:
@@ -627,7 +659,8 @@ def get_job(job_id: str, tenant=Depends(deps.require_tenant)):
     if rec is None or rec.get("tenant_id") != tenant_id:
         return error_response(ErrorCode.BAD_PARAMS, f"unknown job_id: {job_id}",
                               retryable=False, status_code=404)
-    return _record_body(rec)
+    denied = _access_error(rec, tenant, job_id)
+    return denied if denied is not None else _record_body(rec)
 
 
 @router.post("/internal/jobs/{job_id}/callback")
@@ -681,13 +714,17 @@ async def stream_job(job_id: str, tenant=Depends(deps.require_tenant)):
     if _rec0 is None or _rec0.get("tenant_id") != tenant_id:
         return error_response(ErrorCode.BAD_PARAMS, f"unknown job_id: {job_id}",
                               retryable=False, status_code=404)
+    denied = await asyncio.to_thread(_access_error, _rec0, tenant, job_id)
+    if denied is not None:
+        return denied
 
     async def event_stream():
         last = None
         deadline = time.time() + jobs.job_max_s() + 60
         while time.time() < deadline:
             rec = await asyncio.to_thread(_job_for_tenant, job_id, tenant_id)
-            if rec is None:
+            denied = await asyncio.to_thread(_access_error, rec, tenant, job_id)
+            if rec is None or denied is not None:
                 yield "data: " + json.dumps({"job_id": job_id, "status": "unknown"}) + "\n\n"
                 return
             key = (rec["status"], rec["progress"])
@@ -713,9 +750,21 @@ def list_jobs(limit: int = 20, tenant=Depends(deps.require_tenant)):
     # Scope strictly to the RESOLVED caller tenant; a client-supplied tenant_id is
     # never trusted (security-audit F1 — this endpoint had no auth + unbound scope).
     canonical = jobs.platform_link.list_canonical_jobs(_bound_tenant_id(tenant), limit=limit)
-    legacy = jobs.list_jobs(str(tenant), limit)
+    legacy = jobs.list_jobs(_bound_tenant_id(tenant), limit)
+    visible = []
+    seen = set()
+    for rec in canonical + legacy:
+        if jobs.job_store_mode() == "postgres" and rec in canonical:
+            rec = jobs._pg_store.linked_capability_job(
+                str(rec["job_id"]), _bound_tenant_id(tenant)) or rec
+        if (rec.get("tenant_id") != _bound_tenant_id(tenant)
+                or _access_error(rec, tenant, rec["job_id"]) is not None
+                or rec["job_id"] in seen):
+            continue
+        visible.append(rec)
+        seen.add(rec["job_id"])
     return with_envelope_fields(
-        {"jobs": [_record_body(r) for r in (canonical + legacy)[:limit]]}
+        {"jobs": [_record_body(r) for r in visible[:limit]]}
     )
 
 
@@ -777,11 +826,17 @@ def close_job(job_id: str, tenant_id: str = Depends(deps.require_tenant)):
     Idempotent. 404s (not 403) on a job owned by another tenant — never leaks
     existence across the tenant boundary."""
     rec = jobs.get_job(job_id)
-    if rec is None or str(tenant_id) != rec["tenant_id"]:
+    if rec is None and jobs.job_store_mode() == "postgres":
+        rec = jobs._pg_store.linked_capability_job(job_id, _bound_tenant_id(tenant_id))
+    if rec is None or _bound_tenant_id(tenant_id) != rec["tenant_id"]:
         return error_response(ErrorCode.BAD_PARAMS, f"unknown job_id: {job_id}",
                               retryable=False, status_code=404)
+    denied = _access_error(rec, tenant_id, job_id, write=True)
+    if denied is not None:
+        return denied
+    job_id = rec["job_id"]
     _rec = jobs.get_job(job_id)
-    if _rec is not None and _rec.get("tenant_id") != str(tenant_id):
+    if _rec is not None and _rec.get("tenant_id") != _bound_tenant_id(tenant_id):
         # Another tenant's job — silently no-op (beacon path, keep it 200/idempotent).
         return JSONResponse(status_code=200,
                             content=with_envelope_fields({"job_id": job_id, "closed": False}))
