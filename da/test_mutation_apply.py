@@ -175,6 +175,7 @@ def test_readiness_resolves_alias_version_and_matches(monkeypatch):
     assert result == {
         "ready": True, "mismatches": [],
         "activity": {"alias": "prod", "version": 7},
+        "contract": 2,
     }
     assert http.calls[1][1].endswith("/activities/LeafApplyMutations/versions/7")
 
@@ -201,6 +202,7 @@ def test_readiness_accepts_aps_omission_of_optional_required_false(monkeypatch):
     assert subject.readiness() == {
         "ready": True, "mismatches": [],
         "activity": {"alias": "prod", "version": 7},
+        "contract": 2,
     }
 
 
@@ -279,7 +281,7 @@ def test_module_has_no_paid_workitem_or_import_time_provisioning_surface():
 
 
 def test_cli_provision_emits_stable_nonsecret_json(monkeypatch, capsys):
-    monkeypatch.setattr(subject, "provision_activity", lambda: {
+    monkeypatch.setattr(subject, "provision_activity", lambda contract=2: {
         "id": "LeafApplyMutations", "alias": "prod", "version": 8,
         "advanced": True,
     })
@@ -287,17 +289,19 @@ def test_cli_provision_emits_stable_nonsecret_json(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out) == {
         "ok": True, "operation": "provision", "id": "LeafApplyMutations",
         "alias": "prod", "version": 8, "advanced": True,
+        "contract": 2,
     }
 
 
 def test_cli_readiness_mismatch_exits_nonzero(monkeypatch, capsys):
-    monkeypatch.setattr(subject, "readiness", lambda: {
+    monkeypatch.setattr(subject, "readiness", lambda contract=2: {
         "ready": False, "mismatches": ["activity engine mismatch"],
     })
     assert subject.main(["readiness", "--json"]) == 1
     assert json.loads(capsys.readouterr().out) == {
         "operation": "readiness", "ready": False,
         "mismatches": ["activity engine mismatch"],
+        "contract": 2,
     }
 
 
@@ -305,7 +309,7 @@ def test_cli_readiness_mismatch_exits_nonzero(monkeypatch, capsys):
 def test_cli_restore_alias_parses_and_receipts(monkeypatch, capsys, raw, expected):
     observed = []
 
-    def restore(version):
+    def restore(version, contract=2):
         observed.append(version)
         return {
             "id": "LeafApplyMutations", "alias": "prod",
@@ -322,9 +326,183 @@ def test_cli_restore_alias_parses_and_receipts(monkeypatch, capsys, raw, expecte
 def test_cli_failure_redacts_exception(monkeypatch, capsys):
     monkeypatch.setattr(
         subject, "provision_activity",
-        lambda: (_ for _ in ()).throw(RuntimeError("secret signed form")),
+        lambda contract=2: (_ for _ in ()).throw(RuntimeError("secret signed form")),
     )
     assert subject.main(["provision", "--json"]) == 1
     output = capsys.readouterr().out
     assert "secret" not in output
     assert json.loads(output)["error"] == "provision failed"
+
+
+def test_v3_activity_extends_only_the_header_and_preserves_v2_settings():
+    from lisp import MUTATION_INSPECT_BLOCKS, build_scr
+
+    v2_settings = {
+        "script": {"value": apply_lisp.build_apply_scr()},
+        "inspectScript": {"value": build_scr(
+            "output-intake.txt", extra_blocks=MUTATION_INSPECT_BLOCKS)},
+    }
+    v2 = subject.activity_spec()
+    v3 = subject.activity_spec(3)
+    assert v2["settings"] == v2_settings
+    assert subject.activity_spec(2) == v2
+    assert subject.ACTIVITY_ID == "LeafApplyMutations" and subject.ALIAS == "prod"
+    assert v3["id"] == "LeafApplyMutationsV3"
+    headers_v2 = '(list "LEAF_MUTATION_PLAN|1" "LEAF_MUTATION_PLAN|2")'
+    headers_v3 = '(list "LEAF_MUTATION_PLAN|1" "LEAF_MUTATION_PLAN|2" "LEAF_MUTATION_PLAN|3")'
+    script_v2 = v2_settings["script"]["value"]
+    script_v3 = v3["settings"]["script"]["value"]
+    assert script_v2.count(headers_v2) == 1
+    assert "LEAF_MUTATION_PLAN|3" not in script_v2
+    assert script_v3.count(headers_v3) == 1
+    assert script_v3 == script_v2.replace(headers_v2, headers_v3)
+    for version in (1, 2, 3):
+        assert script_v3.count(f"LEAF_MUTATION_PLAN|{version}") == 1
+    # No v3 operation is introduced by accepting the new header.
+    assert next(line for line in script_v3.splitlines() if line.startswith("(defun leaf-parse-line")) == next(
+        line for line in script_v2.splitlines() if line.startswith("(defun leaf-parse-line"))
+    v3["id"] = v2["id"]
+    v3["settings"]["script"]["value"] = script_v2
+    assert v3 == v2
+    assert subject.MUTATION_INSPECT_BLOCKS_V3 == MUTATION_INSPECT_BLOCKS
+
+
+def test_v3_readiness_absent_alias_is_a_refusal(monkeypatch):
+    http = Http(get=[Response(404)])
+    monkeypatch.setattr(subject, "requests", http)
+    result = subject.readiness(3)
+    assert result == {
+        "ready": False, "contract": 3,
+        "mismatches": ["activity alias read failed with HTTP 404"],
+    }
+    assert [call[1] for call in http.calls] == [
+        f"{subject.client.DA}/activities/LeafApplyMutationsV3/aliases/prod",
+    ]
+
+
+def test_v3_readiness_compares_its_own_version(monkeypatch):
+    http = Http(get=[Response(200, {"version": 9}), Response(200, subject.activity_spec(3))])
+    monkeypatch.setattr(subject, "requests", http)
+    assert subject.readiness(3) == {
+        "ready": True, "contract": 3, "mismatches": [],
+        "activity": {"alias": "prod", "version": 9},
+    }
+    assert all("/activities/LeafApplyMutationsV3/" in call[1] for call in http.calls)
+
+
+def test_v3_provision_advances_only_the_separate_activity(monkeypatch):
+    http = Http(
+        post=[Response(409), Response(201, {"version": 2}), Response(409)],
+        patch=[Response(200)],
+    )
+    monkeypatch.setattr(subject, "requests", http)
+    assert subject.provision_activity(3) == {
+        "id": "LeafApplyMutationsV3", "alias": "prod", "version": 2, "advanced": True,
+    }
+    assert json.loads(http.calls[0][2]["data"]) == subject.activity_spec(3)
+    assert http.calls[1][1].endswith("/activities/LeafApplyMutationsV3/versions")
+    assert http.calls[2][1].endswith("/activities/LeafApplyMutationsV3/aliases")
+    assert http.calls[3][1].endswith("/activities/LeafApplyMutationsV3/aliases/prod")
+
+
+def test_v3_alias_snapshot_and_restore_stay_on_the_separate_activity(monkeypatch):
+    http = Http(
+        get=[Response(200, {"version": 4}), Response(200, {"version": 3}), Response(404)],
+        patch=[Response(404)], post=[Response(201)], delete=[Response(204)],
+    )
+    monkeypatch.setattr(subject, "requests", http)
+    assert subject.alias_state(3)["version"] == 4
+    assert subject.restore_alias(3, contract=3)["version"] == 3
+    assert subject.restore_alias(None, contract=3)["exists"] is False
+    assert all("/activities/LeafApplyMutationsV3/" in call[1] for call in http.calls)
+    assert [call[0] for call in http.calls] == ["get", "patch", "post", "get", "delete", "get"]
+
+
+def test_cli_v3_readiness_echoes_contract_when_alias_is_absent(monkeypatch, capsys):
+    http = Http(get=[Response(404)])
+    monkeypatch.setattr(subject, "requests", http)
+    assert subject.main(["readiness", "--contract", "3", "--json"]) == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "operation": "readiness", "contract": 3, "ready": False,
+        "mismatches": ["activity alias read failed with HTTP 404"],
+    }
+
+
+@pytest.mark.parametrize("command,function,extra", [
+    ("provision", "provision_activity", []),
+    ("readiness", "readiness", []),
+    ("alias-state", "alias_state", []),
+    ("restore-alias", "restore_alias", ["--version", "absent"]),
+])
+def test_every_cli_command_routes_the_contract(monkeypatch, capsys, command, function, extra):
+    calls = []
+
+    def run(*args, contract=2):
+        calls.append((args, contract))
+        return {"ready": True}
+
+    monkeypatch.setattr(subject, function, run)
+    assert subject.main([command, *extra, "--contract", "3", "--json"]) == 0
+    assert calls == [((None,) if command == "restore-alias" else (), 3)]
+    assert json.loads(capsys.readouterr().out)["contract"] == 3
+
+
+@pytest.mark.parametrize("rgb,expected", [("12,34,56", [12, 34, 56]), ("~", None)])
+def test_entity_properties_are_additive_after_a_line(rgb, expected):
+    import intake_parse
+
+    line = "LN|0|1.000,2.000,0.000|3.000,4.000,0.000|1A\n"
+    legacy = intake_parse.parse_text(line, "test.dwg")
+    parsed = intake_parse.parse_text(line + f"EP|1A|256|{rgb}|ByLayer|-1", "test.dwg")
+    assert parsed.pop("properties") == {
+        "1A": {"aci": 256, "rgb": expected, "linetype": "ByLayer", "lineweight": -1},
+    }
+    assert parsed == legacy
+    assert len(parsed["polylines"]) == 1 and not parsed.get("parseErrors")
+
+
+def test_dimension_record_reads_coordinate_and_angular_precisions():
+    import intake_parse
+
+    parsed = intake_parse.parse_text(
+        "DM|linear|1.23456,2.34567,3.45678|4.56789,5.67891,6.78912|"
+        "7.89123,8.91234,9.12345|30.12345678|Standard|0.0000004,0.0000006,1|12.34567|2A",
+        "test.dwg",
+    )
+    assert parsed["dimensions"] == [{
+        "type": "linear", "p1": [1.235, 2.346, 3.457], "p2": [4.568, 5.679, 6.789],
+        "dimline": [7.891, 8.912, 9.123], "rotation_deg": 30.123457, "style": "Standard",
+        "nrm": [0.0, 0.000001, 1.0], "measurement": 12.346, "handle": "2A",
+    }]
+    assert not parsed["polylines"] and not parsed.get("parseErrors")
+
+
+@pytest.mark.parametrize("record,field", [
+    ("EP|1A|7|~|Continuous|25", "properties"),
+    ("DM|aligned|0,0,0|3,4,0|0,5,0|0|Standard|0,0,1|5|2A", "dimensions"),
+])
+def test_sidecar_records_close_a_complete_polyline_first(record, field):
+    import intake_parse
+
+    legacy = "PL|Panels|1|2|0,0,1|1A\nPV|0,0\nPV|2,0\nPV|2,2\nPX|Leaf\nPXS|kept\n"
+    expected = intake_parse.parse_text(legacy, "test.dwg")
+    parsed = intake_parse.parse_text(legacy + record + "\nPV|99,99\nPXS|ignored", "test.dwg")
+    assert parsed.pop(field)
+    assert parsed == expected
+    assert len(parsed["polylines"]) == 1
+    assert parsed["polylines"][0]["pts"] == [[0.0, 0.0, 2.0], [2.0, 0.0, 2.0], [2.0, 2.0, 2.0]]
+
+
+@pytest.mark.parametrize("record", [
+    "EP|1A|7|~|Continuous",
+    "EP|1A|bad|~|Continuous|25",
+    "EP|1A|7|1,2|Continuous|25",
+    "EP|1A|7|1,2,256|Continuous|25",
+    "EP|1A|7|~|Continuous|bad",
+])
+def test_malformed_properties_are_parse_errors(record):
+    import intake_parse
+
+    parsed = intake_parse.parse_text(record, "test.dwg")
+    assert len(parsed["parseErrors"]) == 1 and parsed["parseErrors"][0].startswith("EP:")
+    assert "properties" not in parsed

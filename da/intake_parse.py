@@ -163,6 +163,28 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                     "layer": layn, "c": [round(v, 3) for v in w], "r": round(float(r), 3),
                     "start_deg": round(float(a1), 6), "end_deg": round(float(a2), 6),
                     "nrm": [round(v, 6) for v in n], "handle": hnd})
+            elif tag == "EP":
+                hnd, aci, rgb, linetype, lineweight = rest.split("|")
+                color = None if rgb == "~" else [int(v) for v in rgb.split(",")]
+                if (not hnd or any(v not in "0123456789abcdefABCDEF" for v in hnd)
+                        or not linetype or (color is not None and (
+                            len(color) != 3 or any(v < 0 or v > 255 for v in color)))):
+                    raise ValueError("malformed entity properties")
+                properties = {"aci": int(aci), "rgb": color,
+                              "linetype": linetype, "lineweight": int(lineweight)}
+                out.setdefault("properties", {})[hnd] = properties
+            elif tag == "DM":
+                kind, p1, p2, dimline, rotation, style, nrm, measurement, hnd = rest.split("|")
+                points = [[round(float(v), 3) for v in p.split(",")]
+                          for p in (p1, p2, dimline)]
+                normal = [round(float(v), 6) for v in nrm.split(",")]
+                if any(len(p) != 3 for p in points) or len(normal) != 3:
+                    raise ValueError("malformed dimension point or normal")
+                dimension = {
+                    "type": kind, "p1": points[0], "p2": points[1], "dimline": points[2],
+                    "rotation_deg": round(float(rotation), 6), "style": style,
+                    "nrm": normal, "measurement": round(float(measurement), 3), "handle": hnd}
+                out.setdefault("dimensions", []).append(dimension)
             elif tag == "TX":
                 # TEXT/MTEXT label (ADDITIVE §1 field `texts`; the value had "|" replaced
                 # by a space in the LISP and is capped at 512 chars there).

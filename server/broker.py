@@ -2818,27 +2818,26 @@ def _start_admitted_execution(
 
 
 PLAN_READINESS_TTL_S = 60
-_plan_readiness_cache: Optional[Tuple[float, Dict[str, Any]]] = None
+_plan_readiness_cache: Dict[int, Tuple[float, Dict[str, Any]]] = {}
 _plan_readiness_lock = threading.Lock()
 
 
-def _plan_activity_ready() -> Tuple[bool, Dict[str, Any]]:
-    """Bound the Activity alias/version read to one call per cache interval."""
-    global _plan_readiness_cache
+def _plan_activity_ready(contract: int = 2) -> Tuple[bool, Dict[str, Any]]:
+    """Bound each contract's Activity read to one call per cache interval."""
     with _plan_readiness_lock:
         now = time.monotonic()
-        if (_plan_readiness_cache is not None
-                and now - _plan_readiness_cache[0] < PLAN_READINESS_TTL_S):
-            result = _plan_readiness_cache[1]
+        cached = _plan_readiness_cache.get(contract)
+        if cached is not None and now - cached[0] < PLAN_READINESS_TTL_S:
+            result = cached[1]
         else:
             try:
                 import mutation_apply
-                result = mutation_apply.readiness()
+                result = mutation_apply.readiness(contract=contract)
                 if not isinstance(result, dict):
                     raise ValueError("invalid mutation Activity readiness result")
             except Exception as exc:  # readiness failure must never enable a run
-                result = {"ready": False, "mismatches": [str(exc)]}
-            _plan_readiness_cache = (time.monotonic(), result)
+                result = {"ready": False, "mismatches": [str(exc)], "contract": contract}
+            _plan_readiness_cache[contract] = (time.monotonic(), result)
         return result.get("ready") is True, result
 
 
@@ -2882,7 +2881,9 @@ def _execute_plan(req: BrokerPlanRunRequest, tool: Dict[str, Any], engine_op: st
         )
 
     _require_supported_live_completion_mode()
-    ready, readiness = _plan_activity_ready()
+    import mutation_plan
+    contract = 3 if mutation_plan.uses_v3(req.plan.mutations) else 2
+    ready, readiness = _plan_activity_ready(contract=contract)
     if not ready:
         mismatches = "; ".join(str(item) for item in readiness.get("mismatches", []))
         return (err_envelope(

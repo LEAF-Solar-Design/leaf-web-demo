@@ -1887,6 +1887,21 @@ def _apply_plan_live(*, tenant_id: str, drawing_id: str, head_v: int,
                      scratch_keys) -> Tuple[Dict[str, Any], int]:
     """Apply one validated plan, verify its WorkItem output, and publish it."""
     import store
+    import mutation_apply
+    contract = int(plan_bytes.splitlines()[0].split(b"|")[1])
+    if contract == 1:
+        contract = 2
+    if contract == 3:
+        try:
+            ready = mutation_apply.readiness(contract=3).get("ready") is True
+        except Exception:
+            ready = False
+        if not ready:
+            return (err_envelope(
+                ErrorCode.APS_UNAVAILABLE,
+                "mutation Activity not ready: contract v3 Activity is not provisioned",
+                retryable=True, tool=name, version=tool_version,
+            ), 503)
     output_inspection_ms = None
     version_write_ms = None
     publish_ms = None
@@ -1951,7 +1966,8 @@ def _apply_plan_live(*, tenant_id: str, drawing_id: str, head_v: int,
         submit_kwargs["on_submitted"] = on_submitted
     submitted_at = time.time()
     status = da.submit_workitem(
-        da.activity_qualified(WRITE_ACTIVITY), arguments, **submit_kwargs)
+        da.activity_qualified(mutation_apply.CONTRACTS[contract].activity_id),
+        arguments, **submit_kwargs)
     if hasattr(da, "_workitem_timing"):
         aps_timing = da._workitem_timing(
             status, submitted_at=submitted_at)

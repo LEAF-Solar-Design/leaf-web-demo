@@ -44,6 +44,8 @@ _ADDED_FIELDS = frozenset({
     "start_deg", "end_deg",
 })
 _ADD_KINDS = ("LWPOLYLINE", "LINE", "CIRCLE", "ARC")
+V3_ADD_KINDS = ("INSERT", "DIMENSION")
+V3_SET_OPS = ("set_color", "set_linetype", "set_lineweight")
 _TRANSFORM_FIELDS = frozenset({"handle", "dx", "dy", "rotation_deg"})
 _SET_LAYER_FIELDS = frozenset({"handle", "layer"})
 _SET_POINTS_FIELDS = frozenset({"handle", "pts", "closed"})
@@ -202,6 +204,8 @@ def validate_mutations(
     """Strictly validate and canonicalize the frozen mutation data contract."""
     if not isinstance(mutations, dict):
         raise ValueError("result.mutations must be an object")
+    if any(field in mutations for field in V3_SET_OPS):
+        raise ValueError("contract v3 is not enabled on this deployment")
     # `removed_kinds` is a canonical-only annotation this function writes (the
     # kind of each non-polyline removal, for the plan header); on input it is
     # never trusted, only recomputed, so a canonical set re-validates cleanly.
@@ -375,6 +379,8 @@ def validate_mutations(
     for position, raw in enumerate(added_raw):
         if not isinstance(raw, dict):
             raise ValueError(f"added entity at index {position} must be an object")
+        if raw.get("kind") in V3_ADD_KINDS:
+            raise ValueError("contract v3 is not enabled on this deployment")
         extra = set(raw) - _ADDED_FIELDS
         if extra:
             raise ValueError(f"added entity at index {position} has unknown fields")
@@ -469,6 +475,14 @@ def validate_mutations(
     if len(canonical_json_bytes(canonical)) > MAX_PLAN_BYTES:
         raise ValueError("canonical mutation data exceeds the byte bound")
     return canonical
+
+
+def uses_v3(canonical: Dict[str, Any]) -> bool:
+    """True when canonical data carries a declared v3 capability."""
+    return any(canonical.get(field) for field in V3_SET_OPS) or any(
+        entity.get("kind") in V3_ADD_KINDS
+        for entity in canonical.get("added", [])
+    )
 
 
 def uses_v2(canonical: Dict[str, Any]) -> bool:
@@ -601,11 +615,15 @@ def _ocs_line(tag: str, head: str, lowered: Dict[str, Any]) -> str:
 def emit_plan(
     canonical: Dict[str, Any], *, base_sha256: str,
     base_intake: Optional[Dict[str, Any]] = None,
+    contract: int | None = None,
 ) -> bytes:
     """Emit the exact data-only Activity input for one canonical mutation set."""
     if not re.fullmatch(r"[0-9a-f]{64}", base_sha256):
         raise ValueError("base_sha256 must be lowercase hex")
-    version = 2 if uses_v2(canonical) else 1
+    if contract is not None and (type(contract) is not int or contract not in (2, 3)):
+        raise ValueError("contract must be 2 or 3")
+    version = contract if contract is not None else (
+        3 if uses_v3(canonical) else 2 if uses_v2(canonical) else 1)
     lines = [f"LEAF_MUTATION_PLAN|{version}", f"BASE_SHA256|{base_sha256}"]
     for handle in canonical.get("removed", []):
         lines.append(f"REMOVE|{handle}")
