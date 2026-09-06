@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
@@ -107,5 +110,25 @@ describe('product navigation state', () => {
   it('shows iOS available only from launchable readiness', () => {
     expect(productSurfaceStates({ sessionActive: true, iosReady: true }).ios.state).toBe('available')
     expect(productSurfaceStates({ sessionActive: true, iosReady: false }).ios.state).toBe('setup')
+  })
+})
+
+// Ruling 1 (guest-first sandbox): a signed-out guest with an uploaded drawing
+// must be able to open version history, while every write behind that tab
+// stays gated on a real session. Structural pins on the raw source, in the
+// style of appSessionWiring.test.js, since mounting ToolCast itself needs a
+// live transport and a dozen controllers.
+const toolCastSource = readFileSync(resolve(process.cwd(), 'src', 'site', 'ToolCast.jsx'), 'utf8')
+
+describe('ToolCast Versions tab gate', () => {
+  it('opens the Versions tab on the drawing-only gate, same as the View tab', () => {
+    const startIndex = toolCastSource.indexOf('id="operations-tab-versions"')
+    const versionsButton = toolCastSource.slice(startIndex, toolCastSource.indexOf('</button>', startIndex))
+    expect(versionsButton).toMatch(/disabled=\{!hasDrawing\}/)
+    expect(versionsButton).not.toMatch(/disabled=\{!(canOperate|sessionReady)\}/)
+  })
+
+  it('keeps restore eligibility on sessionReady so a guest can read but never write', () => {
+    expect(toolCastSource).toMatch(/eligible:\s*\(_row, isHead\) => sessionReady && !isHead/)
   })
 })
