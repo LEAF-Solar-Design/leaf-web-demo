@@ -14,6 +14,8 @@ import uuid
 
 from psycopg.types.json import Jsonb
 
+from .campaign_release import admits_claim
+
 from .campaigns import (
     CampaignError, CampaignConflict, CampaignUnavailable, _scope, _uuid,
     _text, _secret, _fingerprint, _lock, _row, _cursor, _campaign, _missing,
@@ -449,6 +451,8 @@ def claim_task(org_id, project_id, campaign_id, *, worker_id, lease_seconds,
 def _claim_task_cursor(cur, scope, *, worker_id, lease, task_key=None,
                        budget_reservation_ref=None):
     _check(cur, scope)
+    if not admits_claim(cur, scope, worker_id):
+        return None
     scope = dict(scope, task_key=task_key)
     task_filter = ' AND task_key=%(task_key)s' if task_key is not None else ''
     task_filter += " AND NOT (kind='capability' AND capability IN ('campaign.host-enrollment','campaign.native-release'))"
