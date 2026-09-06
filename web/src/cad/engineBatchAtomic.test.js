@@ -17,6 +17,8 @@ import { existsSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { engineIntake } from '../cadedit/engineIntake.js'
+import { diffPlan } from '../cadedit/mutationDiff.js'
 
 function createEditorWorker() {
   return new Worker(
@@ -45,7 +47,8 @@ function captureWorkerPath() {
 }
 const WORKER_PATH = captureWorkerPath()
 const PKG_DIR = path.join(path.dirname(WORKER_PATH), 'pkg-node')
-const GLUE = existsSync(PKG_DIR) ? readdirSync(PKG_DIR).find((name) => name.endsWith('_worker.js')) : null
+const PKG_NAMES = existsSync(PKG_DIR) ? readdirSync(PKG_DIR) : []
+const GLUE = PKG_NAMES.includes('engine.js') ? 'engine.js' : PKG_NAMES.find((name) => name.endsWith('_worker.js'))
 
 // Two crossing lines and a circle, the fixture every batch below starts from.
 const DXF = [
@@ -269,5 +272,106 @@ describe.skipIf(!GLUE)('the worker batch on the real engine', () => {
     expect(out.viewBulge.reason).toBe('bulges_not_a_list')
     expect(out.afterStrict.ok).toBe(true)
     expect(out.afterStrict.entities).toHaveLength(out.afterRefusals.entities.length + 1)
+  })
+})
+
+const BLOCK_DXF = [
+  '0', 'SECTION', '2', 'HEADER', '9', '$ACADVER', '1', 'AC1027', '0', 'ENDSEC',
+  '0', 'SECTION', '2', 'BLOCKS',
+  '0', 'BLOCK', '5', '40', '8', '0', '2', 'B', '70', '0', '10', '1', '20', '2', '30', '0',
+  '0', 'LINE', '5', '100', '8', '0', '10', '1', '20', '2', '30', '0', '11', '4', '21', '2', '31', '0',
+  '0', 'CIRCLE', '5', '101', '8', '0', '10', '1', '20', '2', '30', '0', '40', '1',
+  '0', 'ENDBLK', '5', '41', '8', '0', '0', 'ENDSEC',
+  '0', 'SECTION', '2', 'ENTITIES',
+  '0', 'INSERT', '5', '500', '8', '0', '2', 'B', '10', '10', '20', '20', '30', '0',
+  '41', '2', '42', '3', '43', '1', '50', '90',
+  '0', 'ENDSEC', '0', 'EOF',
+].join('\n') + '\n'
+
+const BLOCK_SCRIPT = [
+  'import { createRequire } from "node:module"',
+  'import { pathToFileURL } from "node:url"',
+  'const [workerPath, gluePath, dxf] = process.argv.slice(1)',
+  'const engine = createRequire(import.meta.url)(gluePath)',
+  'const { handleMessage } = await import(pathToFileURL(workerPath).href)',
+  'const bytes = new TextEncoder().encode(dxf)',
+  'const projection = (entities, blocks = entities?.blocks) => ({ entities: Array.from(entities || []), blocks })',
+  'const reply = (r) => ({ type: r.type, op: r.op, ok: r.ok, reason: r.reason, blockBasePatched: r.blockBasePatched, ...projection(r.entities, r.blocks) })',
+  'const doc = engine.parseDxf(bytes)',
+  'const direct = projection(doc.editableEntities())',
+  'const written = engine.writeDxf(doc)',
+  'const patched = doc.blockBasePatched',
+  'const back = engine.parseDxf(written)',
+  'const roundtrip = projection(back.editableEntities())',
+  'doc.free(); back.free()',
+  'const loaded = await handleMessage({ type: "loadDocument", documentId: "blocks.dxf", bytes }, engine)',
+  'const initial = reply(loaded)',
+  'const out = { direct, patched, roundtrip, initial }',
+  'for (const op of ["move", "copy", "delete"]) {',
+  '  out[op] = reply(await handleMessage({ type: "applyEdit", op, payload: { entityId: "1280", dx: 1, dy: 0 } }, engine))',
+  '}',
+  'out.batch = reply(await handleMessage({ type: "applyEdit", op: "batch", payload: { steps: [',
+  '  { op: "createLine", payload: { x1: 0, y1: 0, x2: 1, y2: 0, layer: "0" } },',
+  '  { op: "move", payload: { entityId: "1280", dx: 1, dy: 0 } },',
+  '] } }, engine))',
+  'const created = await handleMessage({ type: "applyEdit", op: "createLine", payload: { x1: 5, y1: 5, x2: 6, y2: 5, layer: "0" } }, engine)',
+  'out.created = reply(created)',
+  'const batched = await handleMessage({ type: "applyEdit", op: "batch", payload: { steps: [',
+  '  { op: "move", payload: { entityId: created.createdId, dx: 1, dy: 0 } },',
+  '] } }, engine)',
+  'out.batched = reply(batched)',
+  'const batchBack = engine.parseDxf(batched.bytes)',
+  'out.batchRoundtrip = projection(batchBack.editableEntities())',
+  'batchBack.free()',
+  // A raw document change bypasses the editor's refused verb, so the diff must
+  // detect it independently. Re-load the changed insertion through the worker.
+  'const movedBytes = new TextEncoder().encode(dxf.replace("10\\n10\\n20\\n20\\n", "10\\n11\\n20\\n20\\n"))',
+  'const rawMoved = await handleMessage({ type: "loadDocument", documentId: "raw-moved.dxf", bytes: movedBytes }, engine)',
+  'out.rawMoved = reply(rawMoved)',
+  'process.stdout.write(JSON.stringify(out))',
+].join('\n')
+
+describe('W4g-7b-01c blocks through the rebuilt wasm and worker', () => {
+  it('preserves bases, ownership, parent picks, and metadata on load, edits, and batches', { timeout: 90_000 }, () => {
+    expect(GLUE, 'the planner must rebuild pkg-node before this required row').toBeTruthy()
+    const out = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', BLOCK_SCRIPT, WORKER_PATH, path.join(PKG_DIR, GLUE), BLOCK_DXF], {
+      encoding: 'utf8', timeout: 90_000, maxBuffer: 16 * 1024 * 1024,
+    }))
+    expect(out.direct.entities).toHaveLength(1)
+    const reference = { handle: '1280', type: 'INSERT', kind: 'REFERENCE', name: 'B', layer: '0', editable: false, ip: [10, 20, 0], rotationDeg: 90, scale: [2, 3, 1] }
+    expect(out.direct.entities[0]).toMatchObject(reference)
+    expect(out.direct.blocks).toMatchObject([{ name: 'B', base: [1, 2, 0], complete: true }])
+    expect(out.direct.blocks[0].children).toHaveLength(2)
+    expect(out.patched).toBe(true)
+    expect(out.roundtrip.blocks[0].base).toEqual([1, 2, 0])
+    expect(out.initial).toMatchObject({ type: 'documentLoaded', blockBasePatched: false })
+    expect(out.initial.blocks).toEqual(out.direct.blocks)
+    expect(out.initial.entities).toHaveLength(1)
+    expect(out.initial.entities[0]).toMatchObject({ ...reference, id: '1280' })
+    const canvas = engineIntake(out.initial)
+    expect(canvas.polylines).toHaveLength(2)
+    expect(canvas.polylines.map((p) => p.sourceHandle)).toEqual(['500', '500'])
+    expect(canvas.polylines[0].pts[0]).toEqual([10, 20, 0])
+    expect(canvas.polylines[0].pts[1][0]).toBeCloseTo(10, 9)
+    expect(canvas.polylines[0].pts[1][1]).toBeCloseTo(26, 9)
+    for (const op of ['move', 'copy', 'delete']) expect(out[op]).toMatchObject({ ok: false, reason: 'INSERT is not editable in this round', blockBasePatched: false })
+    expect(out.batch).toMatchObject({ ok: false, reason: 'step_1_move:INSERT is not editable in this round', blockBasePatched: false })
+    for (const result of [out.move, out.copy, out.delete, out.batch]) {
+      expect(result.entities).toHaveLength(1)
+      expect(result.entities[0]).toMatchObject({ ...reference, id: '1280' })
+      expect(result.blocks).toEqual(out.direct.blocks)
+    }
+    expect(out.created).toMatchObject({ type: 'editApplied', op: 'createLine', ok: true, blockBasePatched: true })
+    expect(out.created.entities).toHaveLength(2)
+    expect(out.created.entities.find((entity) => entity.type === 'INSERT')).toMatchObject({ ...reference, id: '1280' })
+    expect(out.created.blocks).toEqual(out.direct.blocks)
+    expect(out.batched).toMatchObject({ type: 'editApplied', op: 'batch', ok: true, blockBasePatched: true })
+    expect(out.batched.entities).toHaveLength(2)
+    expect(out.batched.entities.find((entity) => entity.type === 'INSERT')).toMatchObject({ ...reference, id: '1280' })
+    expect(out.batched.entities.find((entity) => entity.type === 'LINE').vertices).toEqual([[6, 5, 0], [7, 5, 0]])
+    expect(out.batched.blocks).toEqual(out.direct.blocks)
+    expect(out.batchRoundtrip.blocks[0].base).toEqual([1, 2, 0])
+    expect(diffPlan(out.initial, out.initial)).toEqual({ mutations: {}, count: 0, reason: null })
+    expect(diffPlan(out.initial, out.rawMoved).reason).toBe('entity 500 is a INSERT the plan cannot carry, and it changed')
   })
 })

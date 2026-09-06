@@ -95,16 +95,16 @@ describe('diffPlan', () => {
 
 describe('W4g-6d: what the contract cannot carry is refused, never dropped', () => {
   const B = Math.tan(Math.PI / 8)
-  it('an editable TEXT that is added, removed or changed refuses the plan; an unchanged one costs nothing; a read-only foreign kind is ignored', () => {
+  it('TEXT and read-only foreign kinds remain opaque to the plan', () => {
     const t = (extra = {}) => ({ id: '12', type: 'TEXT', layer: '0', closed: false, vertices: [[1, 1, 0]], radius: null, startDeg: null, endDeg: null, text: 'hi', height: 2.5, rotationDeg: 0, editable: true, ...extra })
     expect(diffPlan([line(10)], [line(10), t()]).reason).toBe('entity C is a TEXT the plan cannot carry, and it was added')
     expect(diffPlan([line(10), t()], [line(10)]).reason).toBe('entity C is a TEXT the plan cannot carry, and it was removed')
     expect(diffPlan([line(10), t()], [line(10), t({ vertices: [[5, 5, 0]] })]).reason).toBe('entity C is a TEXT the plan cannot carry, and it changed')
     expect(diffPlan([line(10), t()], [line(10), t({ text: 'bye' })]).reason).toBe('entity C is a TEXT the plan cannot carry, and it changed')
     expect(diffPlan([line(10), t()], [line(10, { layer: 'Moved' }), t()])).toEqual({ mutations: { set_layer: [{ handle: 'A', layer: 'Moved' }] }, count: 1, reason: null })
-    // The engine never changes a read-only entity, so its presence or absence is never a plan's business.
+    // Read-only references are still seen if a raw operation changes them.
     const insert = { id: '13', type: 'INSERT', layer: '0', closed: false, vertices: [], radius: null, startDeg: null, endDeg: null, editable: false }
-    expect(diffPlan([line(10), insert], [line(10)])).toEqual({ mutations: {}, count: 0, reason: null })
+    expect(diffPlan([line(10), insert], [line(10)]).reason).toBe('entity D is a INSERT the plan cannot carry, and it was removed')
   })
 
   it('a curved polyline: unchanged or relayered is fine, moved or filleted or added refuses, removed is a plain removal', () => {
@@ -120,5 +120,43 @@ describe('W4g-6d: what the contract cannot carry is refused, never dropped', () 
     expect(diffPlan([curved()], [])).toEqual({ mutations: { removed: ['B'] }, count: 1, reason: null })
     // A bulge list that does not match its points is curved for this purpose too (never read as straight).
     expect(diffPlan([poly(11)], [poly(11, { vertices: [[0, 0, 0], [3, 0, 0], [3, 3, 0], [0, 3, 0]], bulges: [0.1] })]).reason).toBe('polyline B has curved segments the plan cannot carry')
+  })
+})
+
+describe('W4g-7b-01c: references and definitions are opaque', () => {
+  const insert = { id: '1280', handle: '1280', type: 'INSERT', name: 'B', ip: [10, 20, 0], rotationDeg: 90, scale: [2, 3, 1], layer: '0', editable: false }
+  const block = { name: 'B', base: [1, 2, 0], complete: true, children: [line(256, { editable: false })] }
+  const projection = (entity = insert, definition = block) => ({ entities: [entity], blocks: [definition] })
+
+  it('an unchanged document with a block and INSERT produces an empty plan', () => {
+    expect(diffPlan(projection(), structuredClone(projection()))).toEqual({ mutations: {}, count: 0, reason: null })
+    const list = Object.assign([insert], { blocks: [block] })
+    expect(diffPlan(list, structuredClone(list))).toEqual({ mutations: {}, count: 0, reason: null })
+  })
+
+  it.each([
+    { name: 'Other' }, { ip: [11, 20, 0] }, { rotationDeg: 180 },
+    { scale: [-2, 3, 1] }, { layer: 'Elsewhere' },
+  ])('refuses changed INSERT fields: %j', (change) => {
+    expect(diffPlan(projection(), projection({ ...insert, ...change }))).toEqual({
+      mutations: null, count: 0, reason: 'entity 500 is a INSERT the plan cannot carry, and it changed',
+    })
+  })
+
+  it.each([
+    { base: [0, 0, 0] }, { complete: false },
+    { children: [line(256, { editable: false, vertices: [[1, 1, 0], [2, 2, 0]] })] },
+  ])('refuses a changed block definition: %j', (change) => {
+    const result = diffPlan(projection(), projection(insert, { ...block, ...change }))
+    expect(result.mutations).toBeNull()
+    expect(result.reason).toBe('block B is a definition the plan cannot carry, and it was changed')
+  })
+
+  it('refuses added and removed definitions and unknown read-only kinds', () => {
+    expect(diffPlan({ entities: [], blocks: [] }, { entities: [], blocks: [block] }).reason).toMatch(/cannot carry.*added/)
+    expect(diffPlan({ entities: [], blocks: [block] }, { entities: [], blocks: [] }).reason).toMatch(/cannot carry.*removed/)
+    const foreign = { id: '123', type: 'FUTURE', editable: false, vertices: [[0, 0, 0], [1, 1, 0]] }
+    expect(diffPlan([foreign], [{ ...foreign, vertices: [[2, 2, 0], [3, 3, 0]] }]).reason).toMatch(/FUTURE.*cannot carry/)
+    expect(diffPlan([foreign], [foreign])).toEqual({ mutations: {}, count: 0, reason: null })
   })
 })

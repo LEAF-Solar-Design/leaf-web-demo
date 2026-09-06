@@ -76,8 +76,17 @@
 use acadrust::entities::{Arc as ArcEntity, Circle, Entity, EntityType, Line, LwPolyline, Text, Point, Ellipse};
 use acadrust::types::{Handle, Transform, Vector2, Vector3};
 use acadrust::{CadDocument, DxfReader, DxfWriter};
+use acadrust::io::dxf::{DxfStreamWriter, DxfTextWriter};
 use serde::Serialize;
+use std::cell::Cell;
+use std::collections::{HashMap, HashSet};
 use wasm_bindgen::prelude::*;
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = Reflect, js_name = set)]
+    fn set_projection_field(target: &JsValue, key: &JsValue, value: &JsValue) -> bool;
+}
 
 // ---------------------------------------------------------------------------
 // Card F-3 (editing surface engine leg). Everything below is Leaf Automation wrapper
@@ -151,6 +160,7 @@ fn kind_name(entity: &EntityType) -> &'static str {
         // W4g-4b: the reference's Draw column, engine-backed now.
         EntityType::Point(_) => "POINT",
         EntityType::Ellipse(_) => "ELLIPSE",
+        EntityType::Insert(_) => "INSERT",
         _ => "OTHER",
     }
 }
@@ -225,6 +235,7 @@ fn height_of(entity: &EntityType) -> Option<f64> {
 fn rotation_deg_of(entity: &EntityType) -> Option<f64> {
     match entity {
         EntityType::Text(t) => Some(t.rotation.to_degrees()),
+        EntityType::Insert(i) => Some(i.rotation.to_degrees()),
         _ => None,
     }
 }
@@ -258,6 +269,203 @@ fn sweep_deg_of(entity: &EntityType) -> Option<(f64, f64)> {
         EntityType::Arc(a) => Some((a.start_angle.to_degrees(), a.end_angle.to_degrees())),
         _ => None,
     }
+}
+
+// W4g-7b-01c: block definitions share the crate's flat entity storage, but
+// their children are not independent model-space geometry or edit targets.
+const BLOCK_CHILD_CAP: usize = 60;
+const INSERT_NOT_EDITABLE: &str = "INSERT is not editable in this round";
+
+fn block_children(document: &CadDocument) -> HashSet<Handle> {
+    document.block_records.iter()
+        .filter(|b| !b.is_model_space() && b.name != "*Paper_Space")
+        .flat_map(|b| b.entity_handles.iter().copied())
+        .collect()
+}
+
+fn block_base(document: &CadDocument, block: &acadrust::tables::BlockRecord) -> [f64; 3] {
+    let base = match document.get_entity(block.block_entity_handle) {
+        Some(EntityType::Block(marker)) => marker.base_point,
+        // Newly allocated system records may have no marker yet.
+        _ => block.base_point,
+    };
+    [base.x, base.y, base.z]
+}
+
+fn entity_record(index: usize, entity: &EntityType, can_edit: bool) -> serde_json::Value {
+    let mut record = serde_json::json!({
+        "index": index,
+        "handle": handle_id(entity.common().handle.value()),
+        "type": kind_name(entity),
+        "layer": entity.common().layer.clone(),
+        "closed": closed_of(entity),
+        "editable": can_edit && editable(entity),
+        "vertices": vertices_of(entity),
+        "bulges": bulges_of(entity),
+        "radius": radius_of(entity),
+        "text": text_of(entity),
+        "height": height_of(entity),
+        "rotationDeg": rotation_deg_of(entity),
+        "startDeg": sweep_deg_of(entity).map(|(start, _)| start),
+        "endDeg": sweep_deg_of(entity).map(|(_, end)| end),
+        "majorAxis": major_axis_of(entity),
+        "ratio": ratio_of(entity),
+    });
+    if let EntityType::Insert(insert) = entity {
+        record["kind"] = serde_json::json!("REFERENCE");
+        record["name"] = serde_json::json!(insert.block_name);
+        record["ip"] = serde_json::json!([insert.insert_point.x, insert.insert_point.y, insert.insert_point.z]);
+        record["scale"] = serde_json::json!([insert.x_scale(), insert.y_scale(), insert.z_scale()]);
+    }
+    record
+}
+
+fn projected_entities(document: &CadDocument) -> Vec<serde_json::Value> {
+    let children = block_children(document);
+    document.entities().enumerate()
+        .filter(|(_, e)| !children.contains(&e.common().handle))
+        .map(|(index, e)| entity_record(index, e, true))
+        .collect()
+}
+
+fn block_catalogue(document: &CadDocument) -> Vec<serde_json::Value> {
+    document.block_records.iter()
+        .filter(|b| !b.is_model_space() && !b.is_paper_space())
+        .map(|block| {
+            let mut complete = block.entity_handles.len() <= BLOCK_CHILD_CAP && !block.flags.has_attributes;
+            let mut children = Vec::new();
+            for handle in block.entity_handles.iter().take(BLOCK_CHILD_CAP) {
+                match document.get_entity(*handle) {
+                    Some(entity) if matches!(entity, EntityType::Line(_) | EntityType::LwPolyline(_)
+                        | EntityType::Polyline2D(_) | EntityType::Circle(_) | EntityType::Arc(_) | EntityType::Text(_)) => {
+                        let mut child = entity_record(0, entity, false);
+                        child.as_object_mut().unwrap().remove("index");
+                        children.push(child);
+                    }
+                    _ => complete = false,
+                }
+            }
+            serde_json::json!({ "name": block.name, "base": block_base(document, block), "children": children, "complete": complete })
+        })
+        .collect()
+}
+
+// The pinned DXF reader records block handles but discards the BLOCK marker.
+// Retain its base in the wrapper so the post-write pass has the source value.
+fn retain_block_bases(document: &mut CadDocument, bytes: &[u8]) -> Result<(), Refusal> {
+    let text = match std::str::from_utf8(bytes) { Ok(text) => text, Err(_) => return Ok(()) };
+    let lines: Vec<&str> = text.lines().collect();
+    let code = |i: usize| lines.get(i).and_then(|s| s.trim().parse::<i32>().ok());
+    let mut in_blocks = false;
+    let mut i = 0;
+    while i + 1 < lines.len() {
+        if code(i) == Some(0) && lines[i + 1] == "SECTION" {
+            in_blocks = code(i + 2) == Some(2) && lines.get(i + 3) == Some(&"BLOCKS");
+        } else if code(i) == Some(0) && lines[i + 1] == "ENDSEC" {
+            in_blocks = false;
+        } else if in_blocks && code(i) == Some(0) && lines[i + 1] == "BLOCK" {
+            let mut name = None;
+            let mut base = [0.0; 3];
+            let mut end = i + 2;
+            while end + 1 < lines.len() && code(end) != Some(0) {
+                match code(end) {
+                    Some(2) => name = Some(lines[end + 1]),
+                    Some(10 | 20 | 30) => {
+                        let axis = (code(end).unwrap() / 10 - 1) as usize;
+                        base[axis] = lines[end + 1].trim().parse::<f64>()
+                            .map_err(|_| "block_base_not_finite".to_string())?;
+                        if !base[axis].is_finite() { return refuse("block_base_not_finite"); }
+                    }
+                    _ => {}
+                }
+                end += 2;
+            }
+            if let Some(name) = name {
+                if let Some(block) = document.block_records.get(name) {
+                    let handle = block.block_entity_handle;
+                    let owner = block.handle;
+                    let base = Vector3::new(base[0], base[1], base[2]);
+                    if let Some(EntityType::Block(marker)) = document.get_entity_mut(handle) {
+                        marker.base_point = base;
+                    } else if document.get_entity(handle).is_none() {
+                        let mut marker = acadrust::entities::Block::new(name, base);
+                        marker.common.handle = handle;
+                        marker.common.owner_handle = owner;
+                        let marker_handle = document.add_entity(EntityType::Block(marker))
+                            .map_err(|e| format!("block_base_retention_failed:{e}"))?;
+                        document.block_records.get_mut(name).unwrap().block_entity_handle = marker_handle;
+                    } else {
+                        return refuse("block_marker_handle_collision");
+                    }
+                    document.block_records.get_mut(name).unwrap().base_point = base;
+                }
+            }
+            i = end;
+            continue;
+        }
+        i += 2;
+    }
+    Ok(())
+}
+
+fn parse_dxf_core(bytes: &[u8]) -> Result<ParsedDxf, Refusal> {
+    let mut inner = DxfReader::from_reader(std::io::Cursor::new(bytes.to_vec()))
+        .map_err(|e| e.to_string())?.read().map_err(|e| e.to_string())?;
+    retain_block_bases(&mut inner, bytes)?;
+    Ok(ParsedDxf { inner, block_base_patched: Cell::new(false) })
+}
+
+// Validate all BLOCK layouts before emitting any replacement. Keep every byte
+// outside the three coordinate values, including the original line endings.
+// Formatting delegates to the pinned crate's public writer, not a copied formatter.
+fn patch_block_bases(document: &CadDocument, bytes: Vec<u8>) -> (Vec<u8>, bool) {
+    let text = match std::str::from_utf8(&bytes) { Ok(text) => text, Err(_) => return (bytes, false) };
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    if lines.len() % 2 != 0 { return (bytes, false); }
+    let value = |i: usize| lines[i].trim_end_matches(['\r', '\n']);
+    let code = |i: usize| value(i).trim().parse::<i32>().ok();
+    let bases: HashMap<&str, [f64; 3]> = document.block_records.iter()
+        .map(|b| (b.name.as_str(), block_base(document, b))).collect();
+    let mut replacements = HashMap::new();
+    let mut in_blocks = false;
+    let mut i = 0;
+    while i + 1 < lines.len() {
+        if code(i) == Some(0) && value(i + 1) == "SECTION" {
+            in_blocks = i + 3 < lines.len() && code(i + 2) == Some(2) && value(i + 3) == "BLOCKS";
+        } else if code(i) == Some(0) && value(i + 1) == "ENDSEC" {
+            in_blocks = false;
+        } else if in_blocks && code(i) == Some(0) && value(i + 1) == "BLOCK" {
+            let mut end = i + 2;
+            while end + 1 < lines.len() && code(end) != Some(0) { end += 2; }
+            let names: Vec<usize> = (i + 2..end).step_by(2).filter(|&at| code(at) == Some(2)).collect();
+            if names.len() != 1 { return (bytes, false); }
+            let at = names[0];
+            if at + 9 >= end || [70, 10, 20, 30].iter().enumerate().any(|(j, expected)| code(at + 2 + j * 2) != Some(*expected)) {
+                return (bytes, false);
+            }
+            if (i + 2..end).step_by(2).filter(|&pos| matches!(code(pos), Some(10 | 20 | 30))).count() != 3 {
+                return (bytes, false);
+            }
+            let base = match bases.get(value(at + 1)) { Some(base) => base, None => return (bytes, false) };
+            for (axis, coordinate) in base.iter().enumerate() {
+                let mut formatted = Vec::new();
+                if DxfTextWriter::new(&mut formatted).write_double(10, *coordinate).is_err() { return (bytes, false); }
+                let formatted = match String::from_utf8(formatted) { Ok(s) => s, Err(_) => return (bytes, false) };
+                let number = match formatted.lines().nth(1) { Some(s) => s, None => return (bytes, false) };
+                let pos = at + 5 + axis * 2;
+                let ending = &lines[pos][value(pos).len()..];
+                replacements.insert(pos, format!("{number}{ending}"));
+            }
+            i = end;
+            continue;
+        }
+        i += 2;
+    }
+    let mut patched = Vec::with_capacity(bytes.len());
+    for (i, line) in lines.iter().enumerate() {
+        patched.extend_from_slice(replacements.get(&i).map(String::as_str).unwrap_or(line).as_bytes());
+    }
+    (patched, true)
 }
 
 // W4d Draw group. Creation goes through the crate's own `add_entity`, which
@@ -300,11 +508,23 @@ fn created_layer(layer: &str) -> Result<String, Refusal> {
 #[wasm_bindgen]
 pub struct ParsedDxf {
     inner: CadDocument,
+    block_base_patched: Cell<bool>,
 }
 
 // ---- the cores: every operation, natively testable ------------------------
 impl ParsedDxf {
+    fn editable_at(&self, index: usize) -> Result<&EntityType, Refusal> {
+        let entity = self.inner.entities().nth(index)
+            .ok_or_else(|| "entity_index_out_of_range".to_string())?;
+        if block_children(&self.inner).contains(&entity.common().handle) {
+            return refuse("block_child_not_editable");
+        }
+        if matches!(entity, EntityType::Insert(_)) { return refuse(INSERT_NOT_EDITABLE); }
+        Ok(entity)
+    }
+
     fn entity_mut(&mut self, index: usize) -> Result<&mut EntityType, Refusal> {
+        self.editable_at(index)?;
         self.inner
             .entities_mut()
             .nth(index)
@@ -313,11 +533,7 @@ impl ParsedDxf {
 
     fn delete_entity_core(&mut self, index: usize) -> Result<(), Refusal> {
         let (handle, is_editable) = {
-            let entity = self
-                .inner
-                .entities()
-                .nth(index)
-                .ok_or_else(|| "entity_index_out_of_range".to_string())?;
+            let entity = self.editable_at(index)?;
             (entity.common().handle, editable(entity))
         };
         if !is_editable {
@@ -654,11 +870,7 @@ impl ParsedDxf {
     /// `add_entity` allocates a fresh one (a clone that kept its handle would
     /// overwrite the original in the document's map).
     fn cloned_for_create(&self, index: usize) -> Result<(EntityType, String), Refusal> {
-        let entity = self
-            .inner
-            .entities()
-            .nth(index)
-            .ok_or_else(|| "entity_index_out_of_range".to_string())?;
+        let entity = self.editable_at(index)?;
         if !editable(entity) {
             return refuse("entity_kind_not_editable");
         }
@@ -759,11 +971,7 @@ impl ParsedDxf {
     /// document with its source gone.
     fn explode_entity_core(&mut self, index: usize) -> Result<Vec<String>, Refusal> {
         let (handle, layer, parts) = {
-            let entity = self
-                .inner
-                .entities()
-                .nth(index)
-                .ok_or_else(|| "entity_index_out_of_range".to_string())?;
+            let entity = self.editable_at(index)?;
             if !editable(entity) {
                 return refuse("entity_kind_not_editable");
             }
@@ -1074,9 +1282,11 @@ impl ParsedDxf {
     /// `{type, layer, start, end}` object per LINE entity, in document order.
     #[wasm_bindgen(getter)]
     pub fn entities(&self) -> Result<JsValue, JsValue> {
+        let children = block_children(&self.inner);
         let list: Vec<serde_json::Value> = self
             .inner
             .entities()
+            .filter(|e| !children.contains(&e.common().handle))
             .filter_map(|e| match e {
                 EntityType::Line(line) => Some(serde_json::json!({
                     "type": "LINE",
@@ -1094,52 +1304,25 @@ impl ParsedDxf {
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
-    /// F-3 editor projection: EVERY entity in document order, each as
-    /// `{index, handle, type, layer, closed, editable, vertices}`. Non-editable
-    /// kinds appear with `editable: false` and empty vertices — they are
-    /// listed so the count the UI shows is the truth about the document, and
-    /// they round-trip through the writer untouched (whole-document model:
-    /// nothing is dropped by being uneditable).
+    /// Model-space projection with read-only INSERT references. Keep the array
+    /// API (map/find consumers) and attach the additive block catalogue to it.
     #[wasm_bindgen(js_name = editableEntities)]
     pub fn editable_entities(&self) -> Result<JsValue, JsValue> {
-        let list: Vec<serde_json::Value> = self
-            .inner
-            .entities()
-            .enumerate()
-            .map(|(index, e)| {
-                serde_json::json!({
-                    "index": index,
-                    // The handle is the identity that survives a write/re-parse
-                    // (the index does not: a delete renumbers). A create returns
-                    // it; the worker finds the new entity by it afterwards.
-                    "handle": handle_id(e.common().handle.value()),
-                    "type": kind_name(e),
-                    "layer": e.common().layer.clone(),
-                    "closed": closed_of(e),
-                    "editable": editable(e),
-                    "vertices": vertices_of(e),
-                    // W4g-6d: one bulge per vertex for a polyline, null otherwise.
-                    "bulges": bulges_of(e),
-                    // W4f: circles and arcs are drawable from these; null
-                    // for every other kind, so a consumer that ignores them
-                    // sees the exact shape it saw before.
-                    "radius": radius_of(e),
-                    // W4g-5d: a TEXT carries its own value, height and
-                    // rotation (degrees); null for every other kind.
-                    "text": text_of(e),
-                    "height": height_of(e),
-                    "rotationDeg": rotation_deg_of(e),
-                    "startDeg": sweep_deg_of(e).map(|(start, _)| start),
-                    "endDeg": sweep_deg_of(e).map(|(_, end)| end),
-                    // W4g-4b: an ELLIPSE's axis endpoint (relative to the centre)
-                    // and ratio; null for every other kind.
-                    "majorAxis": major_axis_of(e),
-                    "ratio": ratio_of(e),
-                })
-            })
-            .collect();
-        list.serialize(&serde_wasm_bindgen::Serializer::json_compatible())
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+        let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+        let list = projected_entities(&self.inner).serialize(&serializer)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let blocks = block_catalogue(&self.inner).serialize(&serializer)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        if !set_projection_field(&list, &JsValue::from_str("blocks"), &blocks) {
+            return Err(JsValue::from_str("block_catalogue_projection_failed"));
+        }
+        Ok(list)
+    }
+
+    /// Status of the last wrapper write, false until a write has succeeded.
+    #[wasm_bindgen(getter, js_name = blockBasePatched)]
+    pub fn block_base_patched(&self) -> bool {
+        self.block_base_patched.get()
     }
 
     /// Deletes the entity at `index` (current document order) via the
@@ -1386,11 +1569,7 @@ impl ParsedDxf {
 /// does not satisfy `'static` and does not compile.
 #[wasm_bindgen(js_name = parseDxf)]
 pub fn parse_dxf(bytes: &[u8]) -> Result<ParsedDxf, JsValue> {
-    let inner = DxfReader::from_reader(std::io::Cursor::new(bytes.to_vec()))
-        .map_err(|e| JsValue::from_str(&e.to_string()))?
-        .read()
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    Ok(ParsedDxf { inner })
+    parse_dxf_core(bytes).map_err(js_err)
 }
 
 /// Re-serializes a parsed document via `DxfWriter::new(&doc).write_to_vec()`.
@@ -1399,9 +1578,12 @@ pub fn parse_dxf(bytes: &[u8]) -> Result<ParsedDxf, JsValue> {
 /// oracle asks for.
 #[wasm_bindgen(js_name = writeDxf)]
 pub fn write_dxf(doc: &ParsedDxf) -> Result<Vec<u8>, JsValue> {
-    DxfWriter::new(&doc.inner)
+    let bytes = DxfWriter::new(&doc.inner)
         .write_to_vec()
-        .map_err(|e| JsValue::from_str(&e.to_string()))
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let (bytes, patched) = patch_block_bases(&doc.inner, bytes);
+    doc.block_base_patched.set(patched);
+    Ok(bytes)
 }
 
 /// Byte-for-byte comparison, the stand-in's `bytesEqual` twin.
@@ -1432,7 +1614,7 @@ mod created_entity_roundtrip {
     }
 
     fn empty_doc() -> ParsedDxf {
-        ParsedDxf { inner: CadDocument::new() }
+        ParsedDxf { inner: CadDocument::new(), block_base_patched: Cell::new(false) }
     }
 
     fn kinds(doc: &ParsedDxf) -> Vec<&'static str> {
@@ -1453,7 +1635,7 @@ mod created_entity_roundtrip {
     }
 
     fn rewrite(doc: &ParsedDxf) -> ParsedDxf {
-        ParsedDxf { inner: reparse(&doc.inner) }
+        ParsedDxf { inner: reparse(&doc.inner), block_base_patched: Cell::new(false) }
     }
 
     fn code<T>(result: Result<T, Refusal>) -> String {
@@ -2176,5 +2358,108 @@ line two", "")), "text_control_character");
             }
             other => panic!("expected a TEXT, got {}", kind_name(other)),
         };
+    }
+}
+
+#[cfg(test)]
+mod block_definition_rows {
+    use super::*;
+
+    const LINE: &str = "0\nLINE\n5\n100\n8\n0\n10\n1\n20\n2\n30\n0\n11\n4\n21\n2\n31\n0\n";
+    const CIRCLE: &str = "0\nCIRCLE\n5\n101\n8\n0\n10\n1\n20\n2\n30\n0\n40\n2\n";
+
+    fn fixture(children: &str, with_insert: bool) -> Vec<u8> {
+        let insert = if with_insert {
+            "0\nINSERT\n5\n500\n8\nRefs\n2\nB\n10\n10\n20\n20\n30\n3\n41\n-2\n42\n3\n43\n4\n50\n90\n"
+        } else { "" };
+        format!("0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1027\n0\nENDSEC\n\
+            0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n5\n40\n8\n0\n2\nB\n70\n0\n10\n1\n20\n2\n30\n0\n\
+            {children}0\nENDBLK\n5\n41\n8\n0\n0\nENDSEC\n\
+            0\nSECTION\n2\nENTITIES\n{insert}0\nENDSEC\n0\nEOF\n").into_bytes()
+    }
+
+    fn parsed(bytes: Vec<u8>) -> ParsedDxf {
+        parse_dxf_core(&bytes).unwrap()
+    }
+
+    #[test]
+    fn w7b_01c_children_are_owned_and_insert_fields_are_exact() {
+        let mut doc = parsed(fixture(&format!("{LINE}{CIRCLE}"), true));
+        let list = projected_entities(&doc.inner);
+        assert_eq!(list.len(), 1);
+        let reference = &list[0];
+        assert_eq!(reference["handle"], "1280");
+        assert_eq!(reference["type"], "INSERT");
+        assert_eq!(reference["kind"], "REFERENCE");
+        assert_eq!(reference["name"], "B");
+        assert_eq!(reference["ip"], serde_json::json!([10.0, 20.0, 3.0]));
+        assert_eq!(reference["scale"], serde_json::json!([-2.0, 3.0, 4.0]));
+        assert_eq!(reference["rotationDeg"], 90.0);
+        assert_eq!(reference["layer"], "Refs");
+        assert_eq!(reference["editable"], false);
+        let index = reference["index"].as_u64().unwrap() as usize;
+        let before = DxfWriter::new(&doc.inner).write_to_vec().unwrap();
+        assert_eq!(doc.delete_entity_core(index).unwrap_err(), INSERT_NOT_EDITABLE);
+        assert_eq!(doc.translate_entity_core(index, 1.0, 2.0).unwrap_err(), INSERT_NOT_EDITABLE);
+        assert_eq!(doc.copy_entity_core(index, 1.0, 2.0).unwrap_err(), INSERT_NOT_EDITABLE);
+        let child_index = doc.inner.entities().position(|e| e.common().handle == Handle::new(0x100)).unwrap();
+        assert_eq!(doc.delete_entity_core(child_index).unwrap_err(), "block_child_not_editable");
+        assert_eq!(doc.translate_entity_core(child_index, 1.0, 2.0).unwrap_err(), "block_child_not_editable");
+        assert_eq!(doc.copy_entity_core(child_index, 1.0, 2.0).unwrap_err(), "block_child_not_editable");
+        assert_eq!(DxfWriter::new(&doc.inner).write_to_vec().unwrap(), before);
+        let no_insert = parsed(fixture(&format!("{LINE}{CIRCLE}"), false));
+        assert!(projected_entities(&no_insert.inner).is_empty());
+        let blocks = block_catalogue(&doc.inner);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["base"], serde_json::json!([1.0, 2.0, 0.0]));
+        assert_eq!(blocks[0]["complete"], true);
+        let children = blocks[0]["children"].as_array().unwrap();
+        assert_eq!(children.len(), 2);
+        assert!(children.iter().all(|child| child["editable"] == false));
+        assert_eq!(children[0]["vertices"], serde_json::json!([[1.0, 2.0, 0.0], [4.0, 2.0, 0.0]]));
+    }
+
+    #[test]
+    fn w7b_01c_catalogue_caps_children_and_marks_unsupported_definitions() {
+        let children: String = (0..61).map(|i| LINE.replace("100\n", &format!("{:X}\n", 0x100 + i))).collect();
+        let doc = parsed(fixture(&children, true));
+        let blocks = block_catalogue(&doc.inner);
+        assert_eq!(blocks[0]["children"].as_array().unwrap().len(), BLOCK_CHILD_CAP);
+        assert_eq!(blocks[0]["complete"], false);
+        for unsupported in [
+            "0\nINSERT\n5\n100\n8\n0\n2\nB\n10\n1\n20\n2\n30\n0\n",
+            "0\nPOINT\n5\n100\n8\n0\n10\n1\n20\n2\n30\n0\n",
+            "0\nATTDEF\n5\n100\n8\n0\n10\n1\n20\n2\n30\n0\n40\n1\n1\nvalue\n2\nTAG\n3\nprompt\n70\n0\n",
+        ] {
+            let doc = parsed(fixture(unsupported, true));
+            let blocks = block_catalogue(&doc.inner);
+            assert_eq!(blocks[0]["complete"], false);
+            assert!(blocks[0]["children"].as_array().unwrap().is_empty());
+            assert_eq!(projected_entities(&doc.inner).len(), 1);
+        }
+    }
+
+    #[test]
+    fn w7b_01c_base_patch_pins_the_writer_defect_and_preserves_other_bytes() {
+        let doc = parsed(fixture(&format!("{LINE}{CIRCLE}"), true));
+        let original = DxfWriter::new(&doc.inner).write_to_vec().unwrap();
+        let unpatched = parsed(original.clone());
+        assert_eq!(block_base(&unpatched.inner, unpatched.inner.block_records.get("B").unwrap()), [0.0; 3]);
+        let (patched, ok) = patch_block_bases(&doc.inner, original.clone());
+        assert!(ok);
+        let back = parsed(patched.clone());
+        assert_eq!(block_base(&back.inner, back.inner.block_records.get("B").unwrap()), [1.0, 2.0, 0.0]);
+        let raw = String::from_utf8(original).unwrap();
+        let actual = String::from_utf8(patched).unwrap();
+        let prefix = "  2\r\nB\r\n 70\r\n     0\r\n";
+        let old = format!("{prefix} 10\r\n0.0\r\n 20\r\n0.0\r\n 30\r\n0.0\r\n");
+        let new = format!("{prefix} 10\r\n1.0\r\n 20\r\n2.0\r\n 30\r\n0.0\r\n");
+        assert!(raw.contains(&old));
+        assert_eq!(actual, raw.replacen(&old, &new, 1));
+        // A drifted BLOCK layout refuses the entire pass, never a partial patch.
+        let malformed = raw.replacen(&old, &format!("{prefix} 11\r\n0.0\r\n 20\r\n0.0\r\n 30\r\n0.0\r\n"), 1).into_bytes();
+        let (unchanged, ok) = patch_block_bases(&doc.inner, malformed.clone());
+        assert!(!ok);
+        assert_eq!(unchanged, malformed);
     }
 }

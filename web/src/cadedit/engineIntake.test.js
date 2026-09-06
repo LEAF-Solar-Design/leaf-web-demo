@@ -52,6 +52,8 @@ describe('engineIntake (W4f slice A0): engine entities -> viewer intake', () => 
     expect(entityToPolyline({ id: '4', type: 'CIRCLE', vertices: [[0, 0]] })).toBeNull()
     expect(entityToPolyline({ id: '5', type: 'ARC', vertices: [[0, 0]], radius: 1, startDeg: NaN, endDeg: 90 })).toBeNull()
     expect(entityToPolyline({ id: '6', type: 'OTHER', vertices: [] })).toBeNull()
+    expect(entityToPolyline({ id: '6', type: 'OTHER', vertices: [[0, 0], [1, 1]] })).toBeNull()
+    expect(entityToPolyline({ id: '7', type: 'INSERT', vertices: [[0, 0], [1, 1]] })).toBeNull()
   })
 
   it('builds the intake shape the viewer draws, counts points, and truncates honestly past the cap', () => {

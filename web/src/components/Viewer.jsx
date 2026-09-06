@@ -264,6 +264,7 @@ const Viewer = forwardRef(function Viewer(
 
       const fillPos = []
       const linePos = []
+      const lineHandles = []
       const triHandles = [] // triangle index -> polyline handle (fill pick map)
       for (const pl of polys) {
         const pts = pl.pts
@@ -297,6 +298,7 @@ const Viewer = forwardRef(function Viewer(
             fillPos.push(a[0], a[1], bottomZ, b[0], b[1], topZ, a[0], a[1], topZ)
             triHandles.push(pl.handle, pl.handle)
             linePos.push(a[0], a[1], bottomZ, a[0], a[1], topZ)
+            lineHandles.push(pl.sourceHandle ?? null)
           }
         }
         // border segments
@@ -305,6 +307,7 @@ const Viewer = forwardRef(function Viewer(
           const b = pts[(i + 1) % pts.length]
           if (i === pts.length - 1 && !pl.closed) break
           linePos.push(a[0], a[1], topZ + 0.05, b[0], b[1], topZ + 0.05)
+          lineHandles.push(pl.sourceHandle ?? null)
         }
       }
 
@@ -329,6 +332,10 @@ const Viewer = forwardRef(function Viewer(
       const lineMat = new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: 0.9 })
       const lines = new THREE.LineSegments(lineGeom, lineMat)
       group.add(lines)
+      if (lineHandles.some(Boolean)) {
+        lines.userData = { kind: 'blocklines', lineHandles }
+        pickables.push(lines)
+      }
 
       scene.add(group)
       layerGroups.set(layer, group)
@@ -339,8 +346,10 @@ const Viewer = forwardRef(function Viewer(
     const insertGroup = new THREE.Group()
     const hs = dataSpan * 0.02 // base half-size of the glyph
     let nInserts = 0
+    const definitions = new Map((activeIntake.blocks || []).map((block) => [block.name, block]))
     for (const ins of inserts) {
       if (!ins.pt) continue
+      if (definitions.get(ins.name)?.complete === true && ins.incomplete !== true) continue
       const geom = new THREE.PlaneGeometry(hs * 2, hs * 2)
       const mat = new THREE.MeshBasicMaterial({
         color: insertColor, transparent: true, opacity: 0.18, depthWrite: false,
@@ -507,6 +516,8 @@ const Viewer = forwardRef(function Viewer(
         if (grp && grp.visible === false) continue
         if (ud.kind === 'polyfill') {
           handle = ud.triHandles[hit.faceIndex] ?? null
+        } else if (ud.kind === 'blocklines') {
+          handle = ud.lineHandles[Math.floor(hit.index / 2)] ?? null
         } else if (ud.handle) {
           handle = ud.handle
         }
