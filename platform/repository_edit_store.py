@@ -454,7 +454,7 @@ def settle_publish(edit_id: object, *, private_ref_commit: object, main_commit: 
                 "UPDATE project_repository_edits SET state=%(state)s,version=version+1,"
                 "observed_private_ref_commit=%(private)s,observed_main_commit=%(main)s,"
                 "observed_main_tree=%(tree)s,published_at=CASE WHEN %(success)s THEN NOW() ELSE NULL END,"
-                "recovery_reason_code=%(reason)s,recovered_at=CASE WHEN %(reason)s IS NULL THEN NULL ELSE NOW() END,"
+                "recovery_reason_code=%(reason)s::text,recovered_at=CASE WHEN %(reason)s::text IS NULL THEN NULL ELSE NOW() END,"
                 "updated_at=NOW() WHERE edit_id=%(edit)s AND state='publishing' AND version=%(version)s RETURNING *",
                 {"state": next_state, "private": private, "main": main, "tree": tree,
                  "success": success, "reason": reason, "edit": edit, "version": version})

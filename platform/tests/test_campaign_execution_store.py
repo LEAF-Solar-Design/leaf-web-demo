@@ -508,3 +508,202 @@ def test_first_remote_binding_requires_live_lease(make_org):
     _expire(attempt)
     _code('stale_attempt', _bind, scope, attempt)
     assert execution.pending_remote_bindings(*scope) == []
+
+
+def _input_source(scope, attempt, **changes):
+    payload = dict(fence=attempt['fence'], repository_id='leaf/recipdf', commit_sha='b' * 40,
+                   tree_sha='c' * 40, bundle_sha256='d' * 64, bundle_bytes=1024)
+    payload.update(changes)
+    return execution.bind_attempt_input_source(*scope, attempt['attempt_id'], **payload)
+
+
+def _result_source(scope, attempt, **changes):
+    payload = dict(fence=attempt['fence'], repository_id='leaf/recipdf', commit_sha='e' * 40,
+                   tree_sha='f' * 40, publication_receipt={
+                       'repository_id': 'leaf/recipdf', 'ref': 'refs/heads/recipe-candidate',
+                       'expected_commit_sha': 'b' * 40, 'observed_commit_sha': 'e' * 40,
+                       'tree_sha': 'f' * 40, 'cas': {'matched': True}})
+    payload.update(changes)
+    return execution.record_attempt_result_source(*scope, attempt['attempt_id'], **payload)
+
+
+def test_real_postgres_attempt_source_input_replay_conflict_and_immutability(make_org):
+    scope, _, _ = _seed(make_org)
+    _submit(scope)
+    attempt = _claim(scope)
+    barrier = Barrier(2)
+
+    def bind():
+        barrier.wait(timeout=10)
+        return _input_source(scope, attempt)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        rows = list(pool.map(lambda _: bind(), range(2)))
+    assert sorted(row['replayed'] for row in rows) == [False, True]
+    assert rows[0]['source_fingerprint'] == rows[1]['source_fingerprint']
+    db.reset_pool()
+    assert _input_source(scope, attempt)['replayed']
+    for changes in ({'repository_id': 'other'}, {'commit_sha': 'c' * 40},
+                    {'tree_sha': 'd' * 40}, {'bundle_sha256': 'e' * 64},
+                    {'bundle_bytes': 2048}, {'fence': attempt['fence'] + 1}):
+        _code('input_source_conflict', _input_source, scope, attempt, **changes)
+    _expire(attempt)
+    later = _claim(scope)
+    assert later['fence'] > attempt['fence']
+    assert _input_source(scope, attempt)['replayed']
+    with db.connection() as conn:
+        assert conn.execute('SELECT count(*) FROM campaign_attempt_input_sources WHERE attempt_id=%s',
+                            (uuid.UUID(attempt['attempt_id']),)).fetchone()['count'] == 1
+    for sql in ("UPDATE campaign_attempt_input_sources SET bundle_bytes=2 WHERE attempt_id=%s",
+                'DELETE FROM campaign_attempt_input_sources WHERE attempt_id=%s'):
+        with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState):
+            with db.connection() as conn:
+                conn.execute(sql, (uuid.UUID(attempt['attempt_id']),))
+
+
+def test_real_postgres_attempt_source_input_denials(make_org):
+    scope, _, _ = _seed(make_org)
+    _submit(scope)
+    attempt = _claim(scope)
+    for field in ('fence', 'bundle_bytes'):
+        for value in (True, 1.0, '1', -1, 9223372036854775808):
+            _code('invalid_request', _input_source, scope, attempt, **{field: value})
+    for changes in ({'bundle_bytes': 0}, {'commit_sha': 'B' * 40}, {'tree_sha': 'z' * 40},
+                    {'bundle_sha256': 'd' * 63}, {'repository_id': ''},
+                    {'repository_id': 'x' * 201}):
+        _code('invalid_request', _input_source, scope, attempt, **changes)
+    _code('stale_attempt', _input_source, scope, attempt, fence=attempt['fence'] + 1)
+    _code('project_unavailable', _input_source, scope, {**attempt, 'attempt_id': str(uuid.uuid4())})
+    assert execution.read_attempt_sources(*scope, attempt['attempt_id']) == {
+        'input_source': None, 'result_source': None}
+    _expire(attempt)
+    _code('stale_attempt', _input_source, scope, attempt)
+    later = _claim(scope)
+    _bind(scope, later)
+    _code('input_source_conflict', _input_source, scope, later, commit_sha='a' * 40)
+    for target in (attempt, later):
+        assert execution.read_attempt_sources(*scope, target['attempt_id'])['input_source'] is None
+
+
+def test_real_postgres_attempt_source_scope_denials(make_org):
+    scope, _, _ = _seed(make_org)
+    _submit(scope)
+    attempt = _claim(scope)
+    foreign, _, _ = _seed(make_org)
+    project = store.create_project(scope[0], 'Other source project')
+    for denied in ((foreign[0], scope[1], scope[2]), (scope[0], project.project_id, scope[2]),
+                   (scope[0], scope[1], foreign[2])):
+        for function in (_input_source, _result_source):
+            _code('project_unavailable', function, denied, attempt)
+        _code('project_unavailable', execution.read_attempt_sources, *denied, attempt['attempt_id'])
+    assert execution.read_attempt_sources(*scope, attempt['attempt_id']) == {
+        'input_source': None, 'result_source': None}
+    _input_source(scope, attempt)
+    _result_source(scope, attempt)
+    for denied in ((foreign[0], scope[1], scope[2]), (scope[0], project.project_id, scope[2]),
+                   (scope[0], scope[1], foreign[2])):
+        for function in (_input_source, _result_source):
+            _code('project_unavailable', function, denied, attempt)
+        _code('project_unavailable', execution.read_attempt_sources, *denied, attempt['attempt_id'])
+
+
+def test_real_postgres_attempt_source_dispatch_preserves_lineage(make_org):
+    scope, _, _ = _seed(make_org)
+    task = _submit(scope)
+    attempt = _claim(scope)
+    before = execution.read_execution(*scope)
+    _input_source(scope, attempt)
+    assert execution.read_execution(*scope) == before
+    _code('dispatch_identity_mismatch', _bind, scope, attempt)
+    binding = _bind(scope, attempt, source_ref='b' * 40)
+    assert binding['source_ref'] == 'b' * 40
+    assert _bind(scope, attempt, source_ref='b' * 40)['replayed']
+    _code('dispatch_conflict', _bind, scope, attempt)
+    replay = _submit(scope)
+    assert replay['replayed']
+    for key in ('source_sha', 'spec', 'payload_fingerprint'):
+        assert replay[key] == task[key]
+    _admit(scope, binding)
+    _remote_settle(scope, binding)
+    _submit(scope, 'legacy')
+    legacy = _claim(scope)
+    _code('dispatch_identity_mismatch', _bind, scope, legacy, source_ref='b' * 40)
+    assert _bind(scope, legacy)['source_ref'] == 'a' * 40
+
+
+@pytest.mark.parametrize('recover', ['expired', 'settled', 'later_stage'])
+def test_real_postgres_attempt_source_result_recovery(make_org, recover):
+    scope, _, _ = _seed(make_org)
+    _submit(scope, stages=['implementation', 'build_test'])
+    attempt = _claim(scope)
+    _input_source(scope, attempt)
+    binding = _bind(scope, attempt, source_ref='b' * 40)
+    if recover == 'expired':
+        _expire(attempt)
+    else:
+        _admit(scope, binding)
+        _remote_settle(scope, binding)
+        if recover == 'later_stage':
+            assert _claim(scope)['stage'] == 'build_test'
+    before = execution.read_execution(*scope)
+    pending = execution.pending_remote_bindings(*scope)
+    result = _result_source(scope, attempt)
+    receipt = result['publication_receipt']
+    encoded = json.dumps(receipt, sort_keys=True, separators=(',', ':'),
+                         ensure_ascii=False, allow_nan=False).encode()
+    assert result['publication_receipt_sha256'] == hashlib.sha256(encoded).hexdigest()
+    db.reset_pool()
+    assert _result_source(scope, attempt)['replayed']
+    assert execution.read_execution(*scope) == before
+    assert execution.pending_remote_bindings(*scope) == pending
+    for changes in ({'commit_sha': 'a' * 40}, {'tree_sha': 'b' * 40},
+                    {'publication_receipt': {**receipt, 'changed': True}},
+                    {'repository_id': 'other'}, {'fence': attempt['fence'] + 1}):
+        _code('result_source_conflict', _result_source, scope, attempt, **changes)
+    sources = execution.read_attempt_sources(*scope, attempt['attempt_id'])
+    assert sources['result_source'] == result
+    assert sources['input_source']['commit_sha'] == 'b' * 40
+    for sql in ("UPDATE campaign_attempt_result_sources SET commit_sha=repeat('a',40) WHERE attempt_id=%s",
+                'DELETE FROM campaign_attempt_result_sources WHERE attempt_id=%s'):
+        with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState):
+            with db.connection() as conn:
+                conn.execute(sql, (uuid.UUID(attempt['attempt_id']),))
+
+
+def test_real_postgres_attempt_source_result_denials(make_org):
+    scope, _, _ = _seed(make_org)
+    _submit(scope)
+    attempt = _claim(scope)
+    _code('result_source_identity_mismatch', _result_source, scope, attempt)
+    _input_source(scope, attempt)
+    _code('result_source_identity_mismatch', _result_source, scope, attempt, repository_id='other')
+    _code('stale_attempt', _result_source, scope, attempt, fence=attempt['fence'] + 1)
+    for value in (True, 1.0, '1'):
+        _code('invalid_request', _result_source, scope, attempt, fence=value)
+    for receipt in ({}, [], {'number': float('nan')}, {'number': float('inf')},
+                    {'large': 'x' * 65536}, {'unsupported': object()}):
+        _code('invalid_request', _result_source, scope, attempt, publication_receipt=receipt)
+    for changes in ({'commit_sha': 'E' * 40}, {'tree_sha': 'g' * 40}):
+        _code('invalid_request', _result_source, scope, attempt, **changes)
+    assert execution.read_attempt_sources(*scope, attempt['attempt_id'])['result_source'] is None
+
+
+def test_real_postgres_attempt_source_result_feeds_next_task(make_org):
+    scope, _, _ = _seed(make_org)
+    first = _submit(scope, 'first')
+    attempt = _claim(scope)
+    _input_source(scope, attempt)
+    published = _result_source(scope, attempt)
+    _settle(scope, attempt)
+    second = _submit(scope, 'second', depends_on=['first'])
+    next_attempt = _claim(scope)
+    source = _input_source(scope, next_attempt, commit_sha=published['commit_sha'],
+                           tree_sha=published['tree_sha'])
+    assert source['commit_sha'] == published['commit_sha']
+    assert _bind(scope, next_attempt, source_ref=published['commit_sha'])['source_ref'] == 'e' * 40
+    for original, changes in ((first, {}), (second, {'depends_on': ['first']})):
+        replay = _submit(scope, original['task_key'], **changes)
+        assert replay['replayed']
+        for key in ('source_sha', 'spec', 'payload_fingerprint'):
+            assert replay[key] == original[key]
+        assert replay['source_sha'] == 'a' * 40

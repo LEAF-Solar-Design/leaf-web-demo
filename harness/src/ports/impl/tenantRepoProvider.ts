@@ -34,6 +34,8 @@ import { dirname, join, relative, sep } from "node:path";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { ProjectRepositorySourceConflict, ProjectRepositorySourceUnavailable } from "../index.js";
+import { TenantChangeRepo } from "../../vendor/mushy-author/ports/impl/tenantChangeRepo.js";
+import { HARNESS_IDENTITY } from "../../vendor/mushy-author/registry/registerTool.js";
 
 const PROJECT_AUTHORITY_KEYS = [
   "organizationId",
@@ -159,6 +161,7 @@ export class TenantRepoProviderImpl
   private readonly projectLease?: PgTenantRepoLeaseCoordinator;
   private readonly projectAuthoringMode: "disabled" | "singleton" | "fleet";
   private readonly projectBareBase?: string;
+  private readonly projectWorkBase?: string;
 
   constructor(opts: TenantRepoProviderOptions) {
     const projectLease = configuredProjectLease(opts);
@@ -169,6 +172,21 @@ export class TenantRepoProviderImpl
     this.projectLease = projectLease;
     this.projectAuthoringMode = opts.authoringMode ?? resolveAuthoringMode();
     this.projectBareBase = opts.bareBase;
+    this.projectWorkBase = opts.workBase;
+  }
+
+  projectChangeRepo(authorityValue: ProjectRepositoryAuthority): TenantChangeRepo {
+    const authority = requireProjectRepositoryAuthority(authorityValue);
+    const repoDir = this.containedBareRepository(authority.repoKey);
+    checkSourceContents(repoDir);
+    const marker = canonicalJson({ contract: "leaf.project-repository-source-initializer.v1",
+      tenant_id: authority.tenantId, organization_id: authority.organizationId,
+      project_id: authority.projectId, repo_key: authority.repoKey });
+    if (readFileSync(join(repoDir, ".leaf-source-owner.json"), "utf8") !== marker) {
+      throw new ProjectRepositorySourceConflict("project source conflicts");
+    }
+    return new TenantChangeRepo({ repoDir, identity: HARNESS_IDENTITY,
+      ...(this.projectWorkBase ? { workBase: this.projectWorkBase } : {}) });
   }
 
   async withProjectWriterLease<T>(

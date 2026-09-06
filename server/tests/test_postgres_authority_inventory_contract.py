@@ -24,7 +24,7 @@ import re
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INVENTORY_PATH = REPO_ROOT / "platform" / "authority-inventory.json"
 
-EXPECTED_MIGRATIONS = [f"{number:04d}" for number in range(1, 59)]
+EXPECTED_MIGRATIONS = [f"{number:04d}" for number in range(1, 61)]
 EXPECTED_SELECTOR_DEFAULTS = {
     "tenant_authority_modes.authority_mode": "legacy_sqlite",
     "project_authority_modes.authority_mode": "legacy_sqlite",
@@ -101,6 +101,8 @@ REQUIRED_AUTHORITY_FIELDS = {
 REQUIRED_RUNTIME_TABLES_BY_SELECTOR = {
     "project_authority_modes.authority_mode": {
         "arlo_lab_inputs", "campaign_host_enrollments", "campaign_capability_links",
+        "campaign_attempt_input_sources", "campaign_attempt_result_sources",
+        "campaign_capability_invocations", "campaign_host_operations",
     },
     "LEAF_JOBS_STORE": {"async_jobs", "async_job_terminal_conflicts"},
     "LEAF_CALLBACK_REPLAY_STORE": {"callback_consumed_nonces"},

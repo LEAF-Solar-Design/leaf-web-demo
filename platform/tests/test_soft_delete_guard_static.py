@@ -66,6 +66,16 @@ def _writes_to(table: str) -> re.Pattern:
 # Closed-world: an entry whose call site disappears fails this test, so the list
 # cannot quietly rot into a blanket exemption.
 _INTENTIONAL = {
+    ("platform/campaign_capabilities.py", "_load",
+     "SELECT * FROM projects WHERE org_id=%(org)s AND project_id=%(project)s FOR SHARE"):
+        "the locked read observes the row so the live flag rejects deleted or "
+        "inactive projects for normal work; recovery inspects accepted operations "
+        "with live=False",
+    ("platform/campaign_capabilities.py", "_host_scope",
+     "SELECT status, deleted_at FROM projects WHERE org_id=%s AND project_id=%s"):
+        "computes live from both project deletion fields, enrollment and job state; "
+        "non-live rejects new work and permits only final readback settlement after "
+        "apply+activate, as settle_host_operation requires",
     ("platform/db.py", "reconciliation_snapshot", "FROM project_authority_modes"):
         "the RAW table census the backfill comparison reads; the guarded count "
         "sits beside it as project_live, and their difference IS the orphan "

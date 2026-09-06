@@ -1,0 +1,57 @@
+version: 0.2
+
+# Two fixed projects use this source: gate has no image/release write access;
+# release consumes its completed proof and publishes only managed ZIP output.
+# Projects pin mode, role, repository and source versions. No webhook enables
+# arbitrary PR builds on the publishing role. Provider timeout caps both jobs.
+env:
+  shell: bash
+  variables:
+    PYTHONSAFEPATH: "1"
+    PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.12
+      nodejs: 22
+    commands:
+      - |
+        set -euo pipefail
+        python3 -m venv /tmp/leaf-native-venv
+        /tmp/leaf-native-venv/bin/python -m pip install --disable-pip-version-check boto3==1.43.3
+        /tmp/leaf-native-venv/bin/python scripts/ci/native_release_producer.py "$LEAF_NATIVE_MODE" --output "$CODEBUILD_SRC_DIR/native-artifacts" --admit-only
+      - |
+        set -euo pipefail
+        if [ "$LEAF_NATIVE_MODE" = gate ]; then
+          npm install -g npm@10
+          /tmp/leaf-native-venv/bin/python -m pip install \
+            -r server/requirements.txt -r server/requirements-auth.txt \
+            -r da/requirements.txt -r platform/requirements.txt \
+            -r scripts/requirements-ci.txt -r executor/control_plane/requirements.txt \
+            -r executor/runtime/requirements.txt
+          (cd harness && npm ci)
+          (cd web && npm ci && npx playwright install --with-deps chromium)
+          (cd scripts && PYTHONPATH="$CODEBUILD_SRC_DIR/scripts" /tmp/leaf-native-venv/bin/python -m pytest test_native_release_producer.py -q)
+        fi
+  pre_build:
+    commands:
+      - |
+        set -euo pipefail
+        if [ "$LEAF_NATIVE_MODE" = release ]; then
+          aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 807034087062.dkr.ecr.us-east-1.amazonaws.com
+          docker buildx version
+        fi
+  build:
+    commands:
+      - |
+        set -euo pipefail
+        export PATH="/tmp/leaf-native-venv/bin:$PATH"
+        python scripts/ci/native_release_producer.py "$LEAF_NATIVE_MODE" --output "$CODEBUILD_SRC_DIR/native-artifacts"
+
+artifacts:
+  # Project packaging MUST be ZIP, so CodeBuild emits artifacts.sha256sum.
+  # Gate writes only gate-proof.json. Release writes only the manifest and web ZIP.
+  base-directory: native-artifacts
+  files:
+    - '**/*'

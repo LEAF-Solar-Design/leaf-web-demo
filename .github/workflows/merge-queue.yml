@@ -61,7 +61,7 @@ env:
 jobs:
   mq-review:
     name: mq-review
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 20
     outputs:
       head_sha: ${{ steps.queue.outputs.head_sha }}
@@ -182,7 +182,7 @@ jobs:
     name: mq-supply
     if: github.event_name == 'merge_group'
     needs: mq-review
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 25
     outputs:
       supply: ${{ steps.docs.outputs.supply || steps.wait.outputs.supply }}
@@ -310,7 +310,7 @@ jobs:
     name: mq-prewarm
     needs: [mq-review, mq-supply]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 45
     steps:
       - name: Publish the deferred queue-preparation success (pull_request)

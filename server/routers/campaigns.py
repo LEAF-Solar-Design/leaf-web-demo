@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
 import sys
@@ -10,12 +11,15 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 import deps
 import platform_link
 import project_repository_source
 import campaign_worker_service
+import campaign_bridge
+import campaign_capability_api
 
 router = APIRouter()
 _STORE = None
@@ -146,13 +150,12 @@ def _principal(tenant):
 @router.get('/api/campaigns/{campaign_id}/enrollments')
 def enrollments(campaign_id: str, request: Request, tenant: Any = Depends(deps.require_tenant)):
     try:
-        project, campaign_id = _id(request.query_params.get('project_id')), _id(campaign_id)
+        project = _canonical_id(request.query_params.get('project_id'))
+        campaign_id = _canonical_id(campaign_id)
     except ValueError:
         return _failure(400, 'invalid_request', 'Invalid campaign request')
-    return _execute(tenant, project, lambda store, org: {
-        'enrollments': _enrollment_store().list_enrollments(org, project, campaign_id),
-        'allowed_machines': _enrollment_store().allowed_machines(),
-    }, 'enrollment', project=lambda row: row)
+    return _capability_call('enrollment', campaign_capability_api.enrollment_snapshot,
+                            tenant, project, campaign_id)
 
 
 @router.post('/api/campaigns/{campaign_id}/enrollments')
@@ -166,6 +169,82 @@ async def enroll(campaign_id: str, request: Request, tenant: Any = Depends(deps.
     return _execute(tenant, project, lambda store, org: _enrollment_store().request_enrollment(
         org, project, campaign_id, _principal(tenant), machine_id=machine),
         'enrollment', created=True, project=lambda row: row)
+
+
+def _capability_call(key, function, *args):
+    try:
+        return {'ok': True, key: function(*args)}
+    except campaign_capability_api.CapabilityError as exc:
+        return _failure(exc.status, exc.code, 'Campaign capability request failed')
+    except Exception:
+        return _failure(503, 'capability_unavailable', 'Campaign capability request failed')
+
+
+def _canonical_id(value):
+    if not isinstance(value, str) or _id(value) != value:
+        raise ValueError('Invalid id')
+    return value
+
+
+async def _capability_body(request, fields):
+    length = request.headers.get('content-length')
+    if length is not None and (not length.isdecimal() or int(length) > 4096):
+        raise ValueError('Invalid size')
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > 4096:
+            raise ValueError('Invalid size')
+        raw.extend(chunk)
+    body = json.loads(raw, object_pairs_hook=project_repository_source._closed_pairs)
+    if not isinstance(body, dict) or set(body) != set(fields):
+        raise ValueError('Invalid fields')
+    return body
+
+
+@router.get('/api/campaigns/{campaign_id}/capabilities')
+def capabilities(campaign_id: str, request: Request, tenant: Any = Depends(deps.require_tenant)):
+    try:
+        project = _canonical_id(request.query_params.get('project_id'))
+        campaign_id = _canonical_id(campaign_id)
+    except ValueError:
+        return _failure(400, 'invalid_request', 'Invalid campaign request')
+    return _capability_call('capabilities', campaign_capability_api.list_capabilities,
+                            tenant, project, campaign_id)
+
+
+@router.post('/api/campaigns/{campaign_id}/enrollments/{enrollment_id}/publication')
+async def publication(campaign_id: str, enrollment_id: str, request: Request,
+                      tenant: Any = Depends(deps.require_tenant)):
+    try:
+        body = await _capability_body(request, ('project_id', 'change_set_id'))
+        project = _canonical_id(body['project_id'])
+        campaign_id, enrollment_id = _canonical_id(campaign_id), _canonical_id(enrollment_id)
+        change = _text(body['change_set_id'], 'change_set_id', 200)
+        if not change.isprintable():
+            raise ValueError('Invalid change')
+    except (ValueError, UnicodeError):
+        return _failure(400, 'invalid_request', 'Invalid campaign request')
+    return await run_in_threadpool(_capability_call, 'enrollment', campaign_capability_api.bind_publication,
+                                   tenant, project, campaign_id, enrollment_id, change)
+
+
+@router.post('/api/campaigns/{campaign_id}/enrollments/{enrollment_id}/invoke')
+async def invoke(campaign_id: str, enrollment_id: str, request: Request,
+                 tenant: Any = Depends(deps.require_tenant)):
+    try:
+        body = await _capability_body(request, ('project_id', 'effective_catalog_digest'))
+        project = _canonical_id(body['project_id'])
+        campaign_id, enrollment_id = _canonical_id(campaign_id), _canonical_id(enrollment_id)
+        digest = body['effective_catalog_digest']
+        if not isinstance(digest, str) or re.fullmatch('[0-9a-f]{64}', digest) is None:
+            raise ValueError('Invalid digest')
+        key = _text(request.headers.get('Idempotency-Key'), 'Idempotency-Key', 128)
+        if not key.isprintable():
+            raise ValueError('Invalid key')
+    except (ValueError, UnicodeError):
+        return _failure(400, 'invalid_request', 'Invalid campaign request')
+    return await run_in_threadpool(_capability_call, 'invocation', campaign_capability_api.invoke,
+                                   tenant, project, campaign_id, enrollment_id, digest, key)
 
 
 @router.post('/api/campaigns/{campaign_id}/enrollments/{enrollment_id}/{action}')
@@ -183,6 +262,37 @@ async def change_enrollment(campaign_id: str, enrollment_id: str, action: str, r
         _enrollment_store(), action + '_enrollment')(
             org, project, campaign_id, enrollment_id, _principal(tenant)),
         'enrollment', project=lambda row: row)
+
+
+@router.post('/internal/campaigns/bridge/{op}')
+async def campaign_bridge_operation(op: str, request: Request,
+                                    subject: str = Depends(deps.require_campaign_worker)):
+    limit = 6 * 1024 * 1024 if op == 'product' else 512 * 1024 if op == 'plan' else 128 * 1024
+    try:
+        length = request.headers.get('content-length')
+        if length is not None and (not length.isdecimal() or int(length) > limit):
+            return _failure(413, 'request_too_large', 'Campaign bridge request failed')
+        raw = bytearray()
+        async for chunk in request.stream():
+            if len(raw) + len(chunk) > limit:
+                return _failure(413, 'request_too_large', 'Campaign bridge request failed')
+            raw.extend(chunk)
+        body = json.loads(raw, object_pairs_hook=project_repository_source._closed_pairs)
+        if not isinstance(body, dict):
+            raise ValueError('Invalid body')
+    except (ValueError, UnicodeError):
+        return _failure(400, 'invalid_request', 'Invalid campaign bridge request')
+    try:
+        _store()
+        return campaign_bridge.handle(op, body, subject)
+    except campaign_bridge.BridgeError as exc:
+        status = exc.status
+    except Exception:
+        status = 503
+    code = {400: 'invalid_request', 403: 'worker_forbidden', 409: 'bridge_conflict',
+            413: 'request_too_large', 422: 'invalid_plan'}.get(
+        status, 'bridge_unavailable')
+    return _failure(status, code, 'Campaign bridge request failed')
 
 
 @router.post('/internal/campaign-worker/recover')

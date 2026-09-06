@@ -279,6 +279,141 @@ def test_operator_suites_are_registered_with_their_measured_floors():
     assert "server-operator-production-unreachable" in g._MEASURED_EST_S
 
 
+def test_host_capability_ci_producers_cover_unit_and_postgres_modules(tmp_path, monkeypatch):
+    """ReciPDF host capability proofs run in the existing unit and PG producers."""
+    import re
+    import textwrap
+    import xml.etree.ElementTree as ET
+
+    import pytest
+
+    g = _load_runner()
+    suites = g.build_suites()
+    expected = {
+        "server-campaign-capability-job": ("tests/test_campaign_capability_job.py", 24),
+        "server-campaign-capability-job-access": ("tests/test_campaign_capability_job_access.py", 6),
+        "server-campaign-capability-api": ("tests/test_campaign_capability_api.py", 42),
+        "server-build-receipts": ("tests/test_build_receipts.py", 9),
+    }
+    partition = [suite for shard in g.partition_suites(suites, 8) for suite in shard]
+    fingerprint = g.catalog_fingerprint(suites)
+    for sid, (target, floor) in expected.items():
+        matches = [suite for suite in suites if suite.id == sid]
+        assert len(matches) == 1, sid
+        suite = matches[0]
+        assert suite.kind == "pytest" and suite.cwd == g.SERVER
+        assert suite.argv == g._py_pytest(target)
+        assert suite.expected == floor
+        assert suite.allowed_skip_reasons == ()
+        assert suite.allowed_vitest_skips == ()
+        assert not suite.db_gated and not suite.opt_in_env
+        assert sum(target in item.argv for item in suites) == 1
+        assert sum(item.id == sid for item in partition) == 1
+        assert g.catalog_fingerprint([item for item in suites if item.id != sid]) != fingerprint
+    assert all("tests/test_campaign_capability_api_postgres.py" not in s.argv for s in suites)
+
+    workflow = (REPO / ".github/workflows/upload-authority-postgres.yml").read_text(
+        encoding="utf-8"
+    )
+    # Match active YAML lines and step run bodies, not comments or trigger names.
+    paths = workflow.split("  pull_request:\n", 1)[1].split("  workflow_dispatch:", 1)[0]
+    required_paths = {
+        "platform/campaign_capabilities.py",
+        "platform/campaign_enrollment.py",
+        "platform/campaign_execution.py",
+        "platform/campaigns.py",
+        "platform/tests/test_campaign_capabilities.py",
+        "server/campaign_capability_api.py",
+        "server/campaign_capability_job.py",
+        "server/campaign_bridge.py",
+        "server/routers/campaigns.py",
+        "server/routers/jobs.py",
+        "server/build_receipts.py",
+        "server/tool_loader.py",
+        "server/tool_validate.py",
+        "server/deps.py",
+        "server/tests/test_campaign_capability_job.py",
+        "server/tests/test_campaign_capability_job_access.py",
+        "server/tests/test_campaign_capability_api.py",
+        "server/tests/test_campaign_capability_api_postgres.py",
+    }
+    for path in required_paths:
+        assert f"      - '{path}'" in paths.splitlines(), path
+    job = workflow.split("  postgres-authority:\n", 1)[1]
+    service, steps_text = job.split("    steps:\n", 1)
+    assert "        image: postgres:16" in service.splitlines()
+    assert "      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/leaf_test" in service.splitlines()
+    assert "      PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'" in service.splitlines()
+    assert "          python-version: '3.12'" in steps_text.splitlines()
+    install = steps_text.split("      - name: Install test dependencies\n", 1)[1].split("      - name:", 1)[0]
+    for dependency in ("server", "platform", "da"):
+        assert f"          -r {dependency}/requirements.txt" in install.splitlines()
+    steps = re.split(r"^      - (?:name|uses): ", steps_text, flags=re.MULTILINE)[1:]
+    runs = [step.split("        run: |\n", 1)[1] for step in steps if "        run: |\n" in step]
+    active_runs = "\n".join(
+        line for run in runs for line in run.splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    assert len(re.findall(
+        r"python -m pytest[^\n]* tests/test_jobs_callbacks_postgres\.py(?:[);\s]|$)",
+        active_runs,
+    )) == 1
+    callback = next(run for run in runs if "python -m pytest -q -rs tests/test_jobs_callbacks_postgres.py" in run)
+    assert 'if [[ "${out,,}" == *skipped* ]]; then' in callback
+    producers = [
+        ("../platform/tests/test_campaign_capabilities.py", "test_campaign_capabilities", "host-capability-platform", {
+            "test_host_grant_exact_authority_read_preserves_state",
+            "test_completed_link_recovers_missing_settlement_from_exact_replay",
+            "test_link_state_alone_cannot_complete_task",
+        }),
+        ("tests/test_campaign_capability_api_postgres.py", "test_campaign_capability_api_postgres", "host-capability-api", {
+            "test_real_postgres_capability_api_two_uses_and_unknown_outcome",
+        }),
+    ]
+    for target, module, report_prefix, required in producers:
+        command = f'if python -m pytest -q -rs {target} --junitxml="$report" >"$report.log" 2>&1; then'
+        matches = [step for step in steps if "        run: |\n" in step and
+                   any(line.strip() == command for line in
+                       step.split("        run: |\n", 1)[1].splitlines())]
+        assert len(matches) == 1, target
+        step = matches[0]
+        assert "        working-directory: server" in step.splitlines()
+        run = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        assert f'report=$(mktemp "$RUNNER_TEMP/{report_prefix}.XXXXXX.xml")' in run.splitlines()
+        assert '  pytest_exit=$?\n  tail -100 "$report.log"\n  exit "$pytest_exit"' in run
+        assert active_runs.count(command) == 1
+        verifier = run.split('python - "$report" <<\'PY\'\n', 1)[1].split("\nPY", 1)[0]
+        report = tmp_path / f"{module}.xml"
+        monkeypatch.setattr(sys, "argv", ["verify-junit", str(report)])
+
+        def check(names, *, classname=module, bad_node=None):
+            root = ET.Element("testsuites")
+            suite = ET.SubElement(root, "testsuite")
+            for name in names:
+                case = ET.SubElement(suite, "testcase", classname=classname, name=name)
+                if bad_node:
+                    ET.SubElement(case, bad_node)
+            ET.ElementTree(root).write(report, encoding="utf-8")
+            exec(compile(verifier, "<workflow-junit-verifier>", "exec"), {})
+
+        # Run the actual inline verifier against reports with producer identities.
+        check(sorted(required))
+        check([name + "[variant]" for name in sorted(required)])
+        with pytest.raises(SystemExit):
+            check([])
+        for node in ("skipped", "error", "failure"):
+            with pytest.raises(SystemExit):
+                check(sorted(required), bad_node=node)
+        with pytest.raises(SystemExit):
+            check(sorted(required), classname="test_unrelated_module")
+        for missing in required:
+            with pytest.raises(SystemExit):
+                check(sorted(required - {missing}) + ["test_unrelated_case"])
+        report.unlink()
+        with pytest.raises(FileNotFoundError):
+            exec(compile(verifier, "<workflow-junit-verifier>", "exec"), {})
+
+
 def test_test_gate_workflow_shards_and_fans_in():
     """Pins the CI shape the completeness proof depends on: shard jobs run the
     runner with shard flags AND write result JSON; a fan-in job that KEEPS the

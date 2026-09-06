@@ -98,7 +98,7 @@ jobs:
   dispatch-group:
     name: Dispatch the group relay from main
     if: github.event_name == 'merge_group'
-    runs-on: ubuntu-latest
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     permissions:
       actions: write
       contents: read

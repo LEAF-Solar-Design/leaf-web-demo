@@ -98,7 +98,7 @@ def _write_opt_str(value: Any) -> Optional[str]:
 def build_receipt(rec: Dict[str, Any], *, source_sha: Optional[str] = None,
                   now: Optional[float] = None) -> Optional[Dict[str, Any]]:
     """The receipt body for a TERMINAL job record, or None when the record is
-    not terminal or has no usable id. Pure; the caller writes it."""
+    not terminal or has no usable id. Capability proof is read from durable authority."""
     job_id = _safe_id(rec.get("job_id"))
     if job_id is None or rec.get("status") not in ("complete", "failed"):
         return None
@@ -120,6 +120,20 @@ def build_receipt(rec: Dict[str, Any], *, source_sha: Optional[str] = None,
         "source_sha": source_sha if source_sha else os.environ.get("LEAF_SOURCE_SHA", "unknown"),
         "written_at": float(now if now is not None else time.time()),
     }
+    import jobs
+    context = jobs.capability_context(job_id)
+    if context is not None:
+        from campaign_capability_job import stored_readback
+        try:
+            readback = stored_readback(job_id, context)
+        except Exception:
+            if rec["status"] == "complete":
+                raise
+            readback = None
+        if rec["status"] == "complete" and readback is None:
+            raise ValueError("successful capability receipt requires stored readback")
+        body.update(org_id=context["org_id"], project_id=context["project_id"],
+                    capability_provenance=context, host_readback=readback)
     body["digest"] = _digest(body)
     return body
 
@@ -135,10 +149,10 @@ def write_terminal_receipt(rec: Optional[Dict[str, Any]], *, base: Optional[Path
     global _reported_write_failure
     if not isinstance(rec, dict):
         return None
-    body = build_receipt(rec)
-    if body is None:
-        return None
     try:
+        body = build_receipt(rec)
+        if body is None:
+            return None
         root = base if base is not None else receipts_dir()
         target_dir = root / body["job_id"]
         target = target_dir / "receipt.json"
@@ -156,8 +170,8 @@ def write_terminal_receipt(rec: Optional[Dict[str, Any]], *, base: Optional[Path
     except Exception as exc:  # noqa: BLE001 - a receipt must never fail the job
         if not _reported_write_failure:
             _reported_write_failure = True
-            print(f"[leaf-builds] terminal receipt not written for {body['job_id']}: "
-                  f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+            print(f"[leaf-builds] terminal receipt not written: {type(exc).__name__}",
+                  file=sys.stderr, flush=True)
         return None
 
 

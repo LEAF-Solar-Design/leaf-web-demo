@@ -490,6 +490,19 @@ def _row_to_record(row: sqlite3.Row) -> Dict[str, Any]:
         "idempotency_key": row["idempotency_key"] if "idempotency_key" in row.keys() else None,
         "dwg_version": row["dwg_version"] if "dwg_version" in row.keys() else None,
     }
+    from campaign_capability_job import record_context
+    raw_execution = row["execution_json"] if "execution_json" in row.keys() else None
+    try:
+        execution = json.loads(raw_execution)
+    except (ValueError, TypeError):
+        execution = {}
+    # Historical SQLite rows may lack a usable optional execution object.
+    # Present capability data still goes through strict validation below.
+    if not isinstance(execution, dict):
+        execution = {}
+    capability = record_context(execution, rec)
+    if capability is not None:
+        rec["capability_provenance"] = capability
     return rec
 
 
@@ -552,7 +565,8 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
                authority_mode: str = "legacy_sqlite",
                platform_context: Optional[Dict[str, Any]] = None,
                checkout_holder: Optional[str] = None,
-               checkout_fence: Optional[int] = None) -> str:
+               checkout_fence: Optional[int] = None,
+               capability_provenance: Optional[Dict[str, Any]] = None) -> str:
     """Insert the durable job row and hand it to the executor. Returns job_id.
 
     ``org_id`` / ``project_id`` carry the OPTIONAL project context from the
@@ -585,7 +599,7 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
         tenant_id, tool, params, dwg, aps_live, org_id, project_id, dwg_version,
         idempotency_key=idempotency_key, authority_mode=authority_mode,
         platform_context=platform_context, checkout_holder=checkout_holder,
-        checkout_fence=checkout_fence,
+        checkout_fence=checkout_fence, capability_provenance=capability_provenance,
     )
 
 
@@ -608,10 +622,23 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
                 platform_context: Optional[Dict[str, Any]] = None,
                 checkout_holder: Optional[str] = None,
                 checkout_fence: Optional[int] = None,
-                plan: Optional[Dict[str, Any]] = None) -> str:
+                plan: Optional[Dict[str, Any]] = None,
+                capability_provenance: Optional[Dict[str, Any]] = None) -> str:
     """Shared durable insert and executor hand-off for tool and data-plan jobs."""
     if project_id and not idempotency_key:
         raise ValueError("Idempotency-Key is required for project-scoped runs")
+    if capability_provenance is not None:
+        from campaign_capability_job import validate_context
+        capability_provenance = validate_context(capability_provenance)
+        if (job_store_mode() != "postgres" or aps_live is not False or plan is not None
+                or dwg != "" or dwg_version is not None or checkout_holder is not None
+                or checkout_fence is not None or authority_mode != "legacy_sqlite"
+                or platform_context is not None
+                or any(capability_provenance[key] != value for key, value in {
+                    "tenant_id": str(tenant_id), "org_id": org_id,
+                    "project_id": project_id, "tool_name": tool.get("name"),
+                }.items())):
+            raise ValueError("capability submission scope or execution mode mismatch")
     fingerprint_payload = {
         "tenantId": str(tenant_id), "orgId": org_id, "projectId": project_id,
         "tool": tool, "params": params, "dwg": dwg, "apsLive": bool(aps_live),
@@ -623,6 +650,8 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
     }
     if plan is not None:
         fingerprint_payload["plan"] = True
+    if capability_provenance is not None:
+        fingerprint_payload["capability_provenance"] = capability_provenance
     submission_fingerprint = hashlib.sha256(json.dumps(
         fingerprint_payload, sort_keys=True, separators=(",", ":"), default=str,
     ).encode("utf-8")).hexdigest()
@@ -633,6 +662,8 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
                  "checkout_holder": checkout_holder, "checkout_fence": checkout_fence}
     if plan is not None:
         execution["plan"] = plan
+    if capability_provenance is not None:
+        execution["capability_provenance"] = capability_provenance
     created = True
     if job_store_mode() == "postgres":
         job_id, created = _pg_store.submit({
@@ -803,11 +834,39 @@ def _terminal_fingerprint(status: str, result_env: Optional[Dict[str, Any]],
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def capability_context(job_id: str) -> Optional[Dict[str, Any]]:
+    """Read one bounded trusted context from durable execution, never from results."""
+    from campaign_capability_job import record_context
+    if job_store_mode() == "postgres":
+        durable = _pg_store.durable_context(job_id)
+        return record_context(durable["execution"], durable) if durable is not None else None
+    else:
+        rows = _query("SELECT execution_json, tenant_id, org_id, project_id, tool "
+                      "FROM jobs WHERE job_id = ?", (job_id,))
+        if not rows:
+            return None
+        return record_context(json.loads(rows[0]["execution_json"] or "{}"), dict(rows[0]))
+
+
 def _validate_terminal_context(
     status: str, result_env: Optional[Dict[str, Any]],
     provenance: Optional[Dict[str, Any]], durable_attempt: int,
-    execution: Dict[str, Any],
+    execution: Dict[str, Any], *, job_id: Optional[str] = None,
 ) -> None:
+    from campaign_capability_job import execution_context, stored_readback, validate_result
+    capability = execution_context(execution)
+    if capability is not None and status == "complete":
+        from leaf_platform import campaign_capabilities
+        if job_id is None or not isinstance(provenance, dict):
+            raise ValueError("capability terminal context missing")
+        if provenance.get("capability_provenance") != capability:
+            raise ValueError("capability terminal identity mismatch")
+        readback = stored_readback(job_id, capability)
+        if readback is None or provenance.get("host_readback") != readback:
+            raise ValueError("capability terminal readback mismatch")
+        operation = campaign_capabilities.read_operation(job_id, capability)
+        validate_result((result_env or {}).get("result"), operation["operation_id"],
+                        operation["input_sha256"], readback)
     if status != "complete":
         # A FAILURE THAT NAMES AN ATTEMPT IS BOUND TO IT, exactly like a success.
         # This used to return unconditionally, so the attempt comparison below
@@ -872,7 +931,8 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
                       error: Optional[Dict[str, Any]] = None,
                       worker_id: Optional[str] = None,
                       provenance: Optional[Dict[str, Any]] = None,
-                      _allow_closed: bool = False) -> str:
+                      _allow_closed: bool = False,
+                      _capability_owner: bool = False) -> str:
     """Apply one terminal callback exactly once.
 
     Returns ``applied``, ``duplicate``, ``conflict``, or ``not_owner``. A terminal
@@ -907,8 +967,11 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
         if durable is None:
             return "missing"
         durable_attempt = durable["attempt"]
+        if (status == "complete" and "capability_provenance" in durable["execution"]
+                and (not _capability_owner or worker_id is None or _allow_closed)):
+            raise ValueError("capability success requires the owning job adapter")
         _validate_terminal_context(
-            status, result_env, provenance, durable_attempt, durable["execution"])
+            status, result_env, provenance, durable_attempt, durable["execution"], job_id=job_id)
         fingerprint = _terminal_fingerprint(status, result_env, error, provenance)
         outcome = _pg_store.complete(
             job_id, durable_attempt, status, result_env, error, provenance,
@@ -939,6 +1002,7 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
         _validate_terminal_context(
             status, result_env, provenance, durable_attempt,
             json.loads(durable["execution_json"] or "{}"),
+            job_id=job_id,
         )
         fingerprint = _terminal_fingerprint(status, result_env, error, provenance)
         # The PostgreSQL mirror lives in a DIFFERENT database, so it cannot join
@@ -1134,6 +1198,47 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
     started = time.time()
     max_s = job_max_s()
     platform_link.on_running(job_id)  # best-effort; no-op if unlinked
+
+    # Capability waiting stays in this owner, with no detached effect-producing thread.
+    try:
+        capability = capability_context(job_id)
+    except (ValueError, TypeError):
+        _finish(job_id, "failed", started, worker_id=worker_id,
+                error=error_obj(ErrorCode.INTERNAL, "invalid durable capability context", False),
+                provenance={"attempt": attempt, "execution_path": "local"})
+        return
+    if capability is not None:
+        from campaign_capability_job import run, stored_readback
+
+        def cancelled():
+            rec = get_job(job_id)
+            lease = (rec or {}).get("lease") or {}
+            return (rec is None or rec["status"] != "running"
+                    or rec.get("progress") == CLOSED_PROGRESS or rec.get("attempt") != attempt
+                    or lease.get("owner") != worker_id
+                    or float(lease.get("expires_at") or 0) < time.time())
+
+        env = run(job_id, capability, tool, params,
+                  lambda: heartbeat_lease(job_id, worker_id), cancelled,
+                  time.monotonic() + max_s)
+        if cancelled():
+            return
+        provenance = {"attempt": attempt, "execution_path": "local",
+                      "capability_provenance": capability}
+        if env.get("ok") is True:
+            try:
+                provenance["host_readback"] = stored_readback(job_id, capability)
+                env["execution_provenance"] = provenance
+                complete_callback(job_id, "complete", result_env=env, worker_id=worker_id,
+                                  provenance=provenance, _capability_owner=True)
+            except Exception:
+                _retry_or_finish(job_id, worker_id, tenant_id, tool, params, dwg, False,
+                                 error_obj(ErrorCode.INTERNAL, "capability terminal proof rejected", False),
+                                 provenance)
+        else:
+            _retry_or_finish(job_id, worker_id, tenant_id, tool, params, dwg, False,
+                             env["error"], provenance)
+        return
 
     # Richer progress (Contract 5c, §15): mark the real phase this run is ENTERING
     # before the (blocking) broker call, so SSE/poll consumers see more than status flips.
