@@ -1021,34 +1021,43 @@ export default function ToolCast({
     if (!PUBLIC_DEMO) checkout.actions.refresh()
   }, [busy, canOperate, catalog.actions, catalogRunContext, checkout.actions, checkout.lockedByOther, drawing.mutationsBlocked, drawing.previewing, drawing.shown, jobRunning, previewLocked, runTrackedJob, workspace, writeLocked])
 
-  // The recovery EFFECT only (slice 6a). The two-step confirm, the pending
-  // label, the single-flight guard and the error banner all live in
-  // components/VersionList.jsx now, so /app and /try cannot answer this
-  // differently. Preconditions stay here because they are /try's: recovery is
-  // offered only while the head is genuinely unreadable, and never onto head.
+  // Restore and unreadable-head recovery share the existing service and
+  // VersionList confirmation UI. Guard the effect synchronously as well as
+  // the list's pending state so rapid confirmations cannot submit twice.
   // A rejected restore THROWS so the primitive can render the failure on the
   // row the operator pressed.
+  const restorePendingRef = useRef(null)
   const recoverHistoricalVersion = useCallback(async (versionToRecover) => {
+    // Duplicate confirmations must await the same operation so VersionList
+    // cannot clear its pending controls before the request finishes.
+    if (restorePendingRef.current) return restorePendingRef.current
     const drawingId = drawing.drawingState?.drawing_id
     const currentHead = Number(drawing.head)
     const target = Number(versionToRecover)
     if (
-      !sessionReady || drawingId == null || !drawing.unreadableHead ||
-      drawing.unreadableHead.pending ||
+      !sessionReady || drawingId == null ||
+      drawing.unreadableHead?.pending ||
       !Number.isFinite(target) || target === currentHead
     ) return
-    try {
-      const result = await restoreDrawingVersion(
-        PUBLIC_DEMO,
-        drawingId,
-        target,
-        checkout.actions.getCapability() || undefined,
-      )
-      await drawing.actions.recordRestore(result)
-      await drawing.actions.loadHistory()
-    } catch (cause) {
-      throw new Error(cause?.message || `Could not recover from v${target}.`)
-    }
+    restorePendingRef.current = (async () => {
+      try {
+        const result = await restoreDrawingVersion(
+          PUBLIC_DEMO,
+          drawingId,
+          target,
+          checkout.actions.getCapability() || undefined,
+        )
+        await drawing.actions.recordRestore(result)
+        await drawing.actions.loadHistory()
+      } catch (cause) {
+        throw new Error(cause?.message || (drawing.unreadableHead
+          ? `Could not recover from v${target}.`
+          : `Could not restore v${target}.`))
+      } finally {
+        restorePendingRef.current = null
+      }
+    })()
+    return restorePendingRef.current
   }, [checkout.actions, drawing.actions, drawing.drawingState?.drawing_id, drawing.head, drawing.unreadableHead, sessionReady])
 
   const retryCatalogRun = useCallback(() => {
@@ -2225,10 +2234,8 @@ export default function ToolCast({
               onPreview={drawing.actions.previewVersion}
               restore={{
                 run: recoverHistoricalVersion,
-                mode: 'recover',
-                // /try offers recovery ONLY while the head is unreadable, and
-                // never onto the head itself. Unchanged from before the slice.
-                eligible: (_row, isHead) => Boolean(drawing.unreadableHead) && !isHead,
+                mode: drawing.unreadableHead ? 'recover' : 'restore',
+                eligible: (_row, isHead) => sessionReady && !isHead,
                 disabled: Boolean(drawing.unreadableHead?.pending),
               }}
             />
