@@ -107,6 +107,15 @@ def test_mq_sh_accept_path_execs_python3(tmp_path):
     assert argv == ["/tmp/mq_review.py", "--head-sha", head_sha]
 
 
+def test_loader_uses_qualified_refs():
+    script = (ROOT / "scripts/ci/mq-codebuild-project.sh").read_text()
+    buildspec = script.split("<<'BUILDSPEC'\n", 1)[1].split("\nBUILDSPEC", 1)[0]
+    assert "git rev-parse --verify -q refs/remotes/origin/main" in buildspec
+    assert "git rev-parse --verify -q refs/heads/main" in buildspec
+    assert "git rev-parse --verify -q origin/main" not in buildspec
+    assert "git rev-parse --verify -q main" not in buildspec
+
+
 def test_project_dry_run():
     result = subprocess.run([bash(), "scripts/ci/mq-codebuild-project.sh", "--dry-run"],
                             cwd=ROOT, env={**os.environ, "GH_TOKEN": "never-print-this-token"},
@@ -116,10 +125,13 @@ def test_project_dry_run():
 
     role = document["role"]
     assert role["name"] == "leaf-mq-codebuild"
+    assert len(role["trustPolicy"]["Statement"]) == 1
     trust_statement = role["trustPolicy"]["Statement"][0]
     assert trust_statement["Principal"] == {"Service": "codebuild.amazonaws.com"}
     assert trust_statement["Action"] == "sts:AssumeRole"
-    assert trust_statement["Condition"] == {"StringEquals": {"aws:SourceAccount": "807034087062"}}
+    assert trust_statement["Condition"] == {
+        "StringEquals": {"aws:SourceAccount": "807034087062"},
+        "ArnEquals": {"aws:SourceArn": "arn:aws:codebuild:us-east-1:807034087062:project/leaf-mq-leaf-web-demo"}}
     statements = role["policy"]["Statement"]
     assert len(statements) == 3
     for statement in statements:

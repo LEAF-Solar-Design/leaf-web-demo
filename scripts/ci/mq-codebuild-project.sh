@@ -24,7 +24,7 @@ env:
 phases:
   build:
     commands:
-      - REF=$(git rev-parse --verify -q origin/main || git rev-parse --verify -q main)
+      - REF=$(git rev-parse --verify -q refs/remotes/origin/main || git rev-parse --verify -q refs/heads/main)
       - test -n "$REF" || { echo "FATAL: cannot resolve origin/main or main" >&2; exit 1; }
       - git cat-file -e "$REF:.codebuild/mq.sh" || { echo "FATAL: .codebuild/mq.sh missing at $REF" >&2; exit 1; }
       - git cat-file -e "$REF:scripts/ci/mq_review.py" || { echo "FATAL: scripts/ci/mq_review.py missing at $REF" >&2; exit 1; }
@@ -66,7 +66,7 @@ trust_policy = {
         "Effect": "Allow",
         "Principal": {"Service": "codebuild.amazonaws.com"},
         "Action": "sts:AssumeRole",
-        "Condition": {"StringEquals": {"aws:SourceAccount": account}},
+        "Condition": {"StringEquals": {"aws:SourceAccount": account}, "ArnEquals": {"aws:SourceArn": f"arn:aws:codebuild:{region}:{account}:project/{project}"}},
     }],
 }
 
@@ -239,6 +239,7 @@ fi
 
 secret_arn=$(secret_arn_value)
 readarray -t conn_arns < <(connection_arns_value)
+[[ ${#conn_arns[@]} -eq 2 ]] || { echo 'FATAL: connection ARNs unresolved' >&2; exit 1; }
 conn_arn_1=${conn_arns[0]}
 conn_arn_2=${conn_arns[1]}
 
