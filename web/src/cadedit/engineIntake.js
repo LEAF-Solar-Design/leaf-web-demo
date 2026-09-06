@@ -245,9 +245,11 @@ export function expandBlockReference(insert, definition) {
       const column = cell % columns
       const row = Math.floor(cell / columns)
       const pts = pl.pts.map((p) => {
-        const x = (p[0] - base[0] + column * columnSpacing) * scale[0]
-        const y = (p[1] - base[1] + row * rowSpacing) * scale[1]
-        return [ip[0] + x * cos - y * sin, ip[1] + x * sin + y * cos, ip[2] + (p[2] - base[2]) * scale[2]]
+        const x = (p[0] - base[0]) * scale[0]
+        const y = (p[1] - base[1]) * scale[1]
+        // The pinned Insert::array_transforms adds spacing to the insertion
+        // point, outside both the child's scale and rotation.
+        return [ip[0] + column * columnSpacing + x * cos - y * sin, ip[1] + row * rowSpacing + x * sin + y * cos, ip[2] + (p[2] - base[2]) * scale[2]]
       })
       if (pts.some((p) => !p.every(finite))) { complete = false; continue }
       polylines.push({ ...pl, handle, sourceHandle: handle, layer: pl.layer === '0' ? (insert.layer || '0') : pl.layer, pts })

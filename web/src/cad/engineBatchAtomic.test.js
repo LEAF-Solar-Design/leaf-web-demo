@@ -279,7 +279,7 @@ const BLOCK_DXF = [
   '0', 'SECTION', '2', 'HEADER', '9', '$ACADVER', '1', 'AC1027', '0', 'ENDSEC',
   '0', 'SECTION', '2', 'BLOCKS',
   '0', 'BLOCK', '5', '40', '8', '0', '2', 'B', '70', '0', '10', '1', '20', '2', '30', '0',
-  '0', 'LINE', '5', '100', '8', '0', '10', '1', '20', '2', '30', '0', '11', '4', '21', '2', '31', '0',
+  '0', 'LINE', '5', '100', '8', '0', '6', 'ByLayer', '10', '1', '20', '2', '30', '0', '11', '4', '21', '2', '31', '0',
   '0', 'CIRCLE', '5', '101', '8', '0', '10', '1', '20', '2', '30', '0', '40', '1',
   '0', 'ENDBLK', '5', '41', '8', '0', '0', 'ENDSEC',
   '0', 'SECTION', '2', 'ENTITIES',
@@ -350,23 +350,35 @@ const BLOCK_SCRIPT = [
   'out.point = await load(dxf.replace(children, point))',
   'out.pointMoved = await load(dxf.replace(children, point.replace("10\\n1\\n", "10\\n6\\n")))',
   'out.lowercase = await load(dxf.replace("8\\n0\\n2\\nB\\n10\\n10\\n", "8\\n0\\n2\\nb\\n10\\n10\\n"))',
-  'out.array = await load(onlyLine.replace("50\\n90\\n", "50\\n0\\n70\\n2\\n71\\n1\\n44\\n10\\n45\\n4\\n").replace("41\\n2\\n42\\n3\\n", "41\\n1\\n42\\n1\\n"))',
-  'out.arrayOne = await load(onlyLine.replace("50\\n90\\n", "50\\n0\\n70\\n1\\n71\\n1\\n44\\n10\\n45\\n4\\n").replace("41\\n2\\n42\\n3\\n", "41\\n1\\n42\\n1\\n"))',
+  'const arraySource = onlyLine.replace("11\\n4\\n", "11\\n2\\n").replace("41\\n2\\n42\\n3\\n", "41\\n2\\n42\\n1\\n")',
+  'out.array = await load(arraySource.replace("50\\n90\\n", "50\\n0\\n70\\n2\\n71\\n1\\n44\\n10\\n45\\n4\\n"))',
+  'out.arrayOne = await load(arraySource.replace("50\\n90\\n", "50\\n0\\n70\\n1\\n71\\n1\\n44\\n10\\n45\\n4\\n"))',
   'const extraBlock = "0\\nBLOCK\\n5\\n42\\n8\\n0\\n2\\nb\\n70\\n0\\n10\\n1\\n20\\n2\\n30\\n0\\n" + childLine.replace("5\\n100\\n", "5\\n102\\n") + "0\\nENDBLK\\n5\\n43\\n8\\n0\\n"',
   'const colliding = dxf.replace("0\\nENDSEC\\n0\\nSECTION\\n2\\nENTITIES", extraBlock + "0\\nENDSEC\\n0\\nSECTION\\n2\\nENTITIES")',
   'out.collision = await load(colliding)',
-  'const binary = (text) => {',
+  'out.caretCollision = await load(colliding.replaceAll("2\\nB\\n", "2\\nB^ B\\n").replace("2\\nb\\n", "2\\nB^B\\n"))',
+  'out.caret = await load(onlyLine.replaceAll("2\\nB\\n", "2\\nB^ B\\n"))',
+  'const latin1Bytes = Buffer.from(onlyLine.replace("2\\nB\\n70\\n", "2\\nB\\n4\\ncaf\\u00e9\\n70\\n").replace("41\\n2\\n42\\n3\\n", "41\\n1\\n42\\n1\\n").replace("50\\n90\\n", "50\\n0\\n"), "latin1")',
+  'out.latin1 = await load(latin1Bytes)',
+  'const latin1Doc = engine.parseDxf(latin1Bytes)',
+  'out.latin1Back = await load(engine.writeDxf(latin1Doc)); latin1Doc.free()',
+  'const otherInsert = onlyLine.slice(onlyLine.indexOf("0\\nINSERT\\n"), onlyLine.lastIndexOf("0\\nENDSEC\\n")).replace("5\\n500\\n", "5\\n501\\n").replace("2\\nB\\n", "2\\nC\\n")',
+  'const unmatched = onlyLine.replace("0\\nBLOCK\\n5\\n40\\n", "0\\nBLOCK\\n").replace("0\\nENDSEC\\n0\\nSECTION\\n2\\nENTITIES", extraBlock.replace("2\\nb\\n", "2\\nC\\n") + "0\\nENDSEC\\n0\\nSECTION\\n2\\nENTITIES").replace("0\\nENDSEC\\n0\\nEOF", otherInsert + "0\\nENDSEC\\n0\\nEOF")',
+  'out.unmatched = await load(unmatched)',
+  'out.unmatchedEdited = reply(await handleMessage({ type: "applyEdit", op: "createLine", payload: { x1: 0, y1: 0, x2: 1, y2: 0, layer: "0" } }, engine))',
+  'const binary = (text, encoding = "utf8") => {',
   '  const chunks = [Buffer.from("AutoCAD Binary DXF\\r\\n\\x1a\\x00")]',
   '  const pairs = text.trimEnd().split("\\n")',
   '  for (let i = 0; i < pairs.length; i += 2) {',
   '    const code = Number(pairs[i]); const codeBytes = Buffer.alloc(2); codeBytes.writeInt16LE(code); chunks.push(codeBytes)',
   '    if (code >= 10 && code <= 59) { const value = Buffer.alloc(8); value.writeDoubleLE(Number(pairs[i + 1])); chunks.push(value) }',
   '    else if (code >= 60 && code <= 79) { const value = Buffer.alloc(2); value.writeInt16LE(Number(pairs[i + 1])); chunks.push(value) }',
-  '    else chunks.push(Buffer.from(pairs[i + 1] + "\\x00"))',
+  '    else chunks.push(Buffer.from(pairs[i + 1] + "\\x00", encoding))',
   '  }',
   '  return new Uint8Array(Buffer.concat(chunks))',
   '}',
   'out.binaryCollision = await load(binary(colliding))',
+  'out.latin1Collision = await load(binary(colliding.replaceAll("2\\nB\\n", "2\\n\\u00e9\\n").replace("2\\nb\\n", "2\\n\\u00e8\\n"), "latin1"))',
   'out.binary = await load(binary(onlyLine))',
   'out.binaryEdited = reply(await handleMessage({ type: "applyEdit", op: "createLine", payload: { x1: 0, y1: 0, x2: 1, y2: 0, layer: "0" } }, engine))',
   'process.stdout.write(JSON.stringify(out))',
@@ -413,6 +425,11 @@ describe('W4g-7b-01c blocks through the rebuilt wasm and worker', () => {
     expect(out.batched.entities.find((entity) => entity.type === 'LINE').vertices).toEqual([[6, 5, 0], [7, 5, 0]])
     expect(out.batched.blocks).toEqual(out.direct.blocks)
     expect(out.batchRoundtrip.blocks[0].base).toEqual([1, 2, 0])
+    expect(out.batchRoundtrip.blocks[0].digest).toBe(out.initial.blocks[0].digest)
+    expect(diffPlan(out.created, out.batched)).toMatchObject({ count: 1, reason: null })
+    expect(diffPlan(out.batched, out.batchRoundtrip)).toEqual({ mutations: {}, count: 0, reason: null })
+    // Child 100 has an explicit ByLayer linetype in BLOCK_DXF. The writer
+    // omits that default, so equality here must come from its canonical form.
     expect(diffPlan(out.initial, out.roundtrip)).toEqual({ mutations: {}, count: 0, reason: null })
     expect(diffPlan(out.initial, out.rawMoved).reason).toBe('entity 500 is a INSERT the plan cannot carry, and it changed')
 
@@ -431,11 +448,28 @@ describe('W4g-7b-01c blocks through the rebuilt wasm and worker', () => {
     expect(diffPlan(out.many, out.manyBack)).toEqual({ mutations: {}, count: 0, reason: null })
     expect(out.lowercase.entities[0].name).toBe('b')
     expect(engineIntake(out.lowercase).polylines).toHaveLength(2)
-    expect(out.array.entities[0]).toMatchObject({ columns: 2, rows: 1, columnSpacing: 10, rowSpacing: 4 })
-    expect(engineIntake(out.array).polylines.map((p) => p.pts[0])).toEqual([[10, 20, 0], [20, 20, 0]])
+    expect(out.array.entities[0]).toMatchObject({ columns: 2, rows: 1, columnSpacing: 10, rowSpacing: 4, scale: [2, 1, 1] })
+    expect(engineIntake(out.array).polylines.map((p) => p.pts)).toEqual([
+      [[10, 20, 0], [12, 20, 0]], [[20, 20, 0], [22, 20, 0]],
+    ])
     expect(diffPlan(out.arrayOne, out.array).reason).toMatch(/INSERT.*cannot carry/)
-    for (const collision of [out.collision, out.binaryCollision]) {
-      expect(collision).toMatchObject({ type: 'documentLoaded', writable: false, refusal: 'block names collide case-insensitively: B, b', entities: [], blocks: [] })
+    for (const collision of [out.collision, out.binaryCollision, out.caretCollision, out.latin1Collision]) {
+      expect(collision).toMatchObject({ type: 'documentLoaded', writable: false, refusal: 'block definitions collapsed on load: 2 in the file, 1 retained', entities: [], blocks: [] })
+    }
+    expect(out.caret.entities).toHaveLength(1)
+    expect(out.caret.entities[0]).toMatchObject({ type: 'INSERT', name: 'B^B' })
+    expect(out.caret.blocks[0]).toMatchObject({ name: 'B^B', base: [1, 2, 0], baseUnknown: false, complete: true })
+    expect(engineIntake(out.caret).polylines[0].pts[0]).toEqual([10, 20, 0])
+    expect(out.latin1.blocks[0]).toMatchObject({ base: [1, 2, 0], baseUnknown: false, complete: true })
+    expect(engineIntake(out.latin1).polylines[0].pts).toEqual([[10, 20, 0], [13, 20, 0]])
+    expect(diffPlan(out.latin1, out.latin1Back)).toEqual({ mutations: {}, count: 0, reason: null })
+    expect(out.unmatchedEdited).toMatchObject({ ok: true, blockBasePatched: false })
+    for (const result of [out.unmatched, out.unmatchedEdited]) {
+      expect(result.blocks.find((b) => b.name === 'B')).toMatchObject({ baseUnknown: true, complete: false })
+      expect(result.blocks.find((b) => b.name === 'C')).toMatchObject({ base: [1, 2, 0], baseUnknown: false, complete: true })
+      const intake = engineIntake(result)
+      expect(intake.polylines.filter((p) => p.sourceHandle != null)).toMatchObject([{ sourceHandle: '501' }])
+      expect(intake.inserts).toMatchObject([{ handle: '500', incomplete: true }, { handle: '501', incomplete: false }])
     }
     expect(out.binary.blocks[0]).toMatchObject({ baseUnknown: true, complete: false })
     expect(engineIntake(out.binary).polylines).toEqual([])

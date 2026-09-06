@@ -88,19 +88,21 @@ describe('W4g-7b-01c blockExpansion', () => {
     expect(expandBlockReference({ ...insert, ip: null }, block)).toEqual({ polylines: [], complete: false })
   })
 
-  it('expands INSERT array cells in local axes before scale and rotation, with a cell cap', () => {
-    const reference = { ...insert, scale: [1, 1, 1], rotationDeg: 0, columns: 2, rows: 1, columnSpacing: 10, rowSpacing: 4 }
+  it('adds unscaled array spacing to the insertion point as the crate expands cells, with a cell cap', () => {
+    const reference = { ...insert, scale: [2, 1, 1], rotationDeg: 0, columns: 2, rows: 1, columnSpacing: 10, rowSpacing: 4 }
     const intake = engineIntake(projection(reference))
     expect(intake.polylines.map((p) => p.pts)).toEqual([
-      [[10, 20, 0], [13, 20, 0]], [[20, 20, 0], [23, 20, 0]],
+      [[10, 20, 0], [16, 20, 0]], [[20, 20, 0], [26, 20, 0]],
     ])
     expect(intake.polylines.every((p) => p.sourceHandle === '500')).toBe(true)
     expect(intake.inserts[0].incomplete).toBe(false)
     const transformed = expandBlockReference({ ...reference, rows: 2, scale: [-2, 3, 1], rotationDeg: 90 }, block)
     const starts = transformed.polylines.map((p) => p.pts[0])
-    for (const [i, expected] of [[10, 20], [10, 0], [-2, 20], [-2, 0]].entries()) {
+    for (const [i, expected] of [[10, 20], [20, 20], [10, 24], [20, 24]].entries()) {
       expect(starts[i][0]).toBeCloseTo(expected[0], 9)
       expect(starts[i][1]).toBeCloseTo(expected[1], 9)
+      expect(transformed.polylines[i].pts[1][0]).toBeCloseTo(expected[0], 9)
+      expect(transformed.polylines[i].pts[1][1]).toBeCloseTo(expected[1] - 6, 9)
     }
     const capped = engineIntake(projection({ ...reference, columns: MAX_ARRAY_CELLS + 1 }))
     expect(capped.polylines).toHaveLength(MAX_ARRAY_CELLS)

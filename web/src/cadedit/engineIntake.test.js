@@ -5,7 +5,7 @@ import { bulgePoints, ARC_STEP_DEG, CIRCLE_SEGMENTS, MAX_POINTS, MIN_ARC_POINTS,
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps
 
 describe('engineIntake (W4f slice A0): engine entities -> viewer intake', () => {
-  it('W4g-7b-01c keeps unknown binary bases as glyphs and resolves definition names without case', () => {
+  it('W4g-7b-01c keeps an unknown base as a glyph without suppressing known definitions', () => {
     const reference = { handle: '1280', type: 'INSERT', name: 'b', ip: [10, 20, 0], scale: [1, 1, 1], rotationDeg: 0 }
     const definition = { name: 'B', base: [1, 2, 0], complete: true,
       children: [{ type: 'LINE', vertices: [[1, 2, 0], [4, 2, 0]] }] }
@@ -14,6 +14,20 @@ describe('engineIntake (W4f slice A0): engine entities -> viewer intake', () => 
     const unknown = engineIntake({ ...source, blocks: [{ ...definition, baseUnknown: true }] })
     expect(unknown.polylines).toEqual([])
     expect(unknown.inserts).toMatchObject([{ handle: '500', incomplete: true }])
+    const mixed = engineIntake({ entities: [reference, { ...reference, handle: '1281', name: 'C' }],
+      blocks: [{ ...definition, baseUnknown: true, complete: false }, { ...definition, name: 'C' }] })
+    expect(mixed.polylines).toMatchObject([{ sourceHandle: '501', pts: [[10, 20, 0], [13, 20, 0]] }])
+    expect(mixed.inserts).toMatchObject([{ handle: '500', incomplete: true }, { handle: '501', incomplete: false }])
+  })
+
+  it('W4g-7b-01c scales the child but leaves array spacing unscaled', () => {
+    const reference = { handle: '1280', type: 'INSERT', name: 'B', ip: [10, 20, 0], scale: [2, 1, 1], rotationDeg: 0,
+      columns: 2, rows: 1, columnSpacing: 10, rowSpacing: 0 }
+    const definition = { name: 'B', base: [1, 2, 0], complete: true,
+      children: [{ type: 'LINE', vertices: [[1, 2, 0], [2, 2, 0]] }] }
+    expect(engineIntake({ entities: [reference], blocks: [definition] }).polylines.map((p) => p.pts)).toEqual([
+      [[10, 20, 0], [12, 20, 0]], [[20, 20, 0], [22, 20, 0]],
+    ])
   })
 
   it('W4g-1b: the intake handle is the DXF hex form of the worker\'s decimal id, so a canvas pick names the drawing\'s own handle', () => {

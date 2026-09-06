@@ -378,8 +378,9 @@ async function applyEdit(engine, message) {
 
 function reparseDocument(engine, bytes, previous) {
   const doc = engine.parseDxf(bytes)
-  // An ASCII write cannot recover bases lost on binary input.
+  // A write cannot recover a binary base or an unmatched definition marker.
   if (previous.blockBasesUnknown === true) doc.blockBasesUnknown = true
+  if (typeof doc.inheritBlockBaseUnknowns === 'function') doc.inheritBlockBaseUnknowns(previous)
   return doc
 }
 
@@ -428,7 +429,7 @@ export async function handleMessage(raw, engineOverride = null) {
     } catch (error) {
       current = null
       const reason = error instanceof Error ? error.message : String(error)
-      if (reason.startsWith('block names collide case-insensitively: ')) {
+      if (reason.startsWith('block names collide case-insensitively: ') || reason.startsWith('block definitions collapsed on load: ')) {
         return { type: 'documentLoaded', documentId, entityCount: 0, entities: [], blocks: [],
           blockBasePatched: false, writable: false, refusal: reason, unsupported: [] }
       }
