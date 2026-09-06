@@ -98,6 +98,22 @@ def test_enable_revoke_restart_and_worker_subject(seeded):
     assert after['tasks'] == before['tasks']
 
 
+def test_real_postgres_worker_scope_preserves_recovery_list(seeded, monkeypatch):
+    scope, principal = seeded
+    row = connect(seeded)
+    enrollment.enable_enrollment(*scope, row['enrollment_id'], principal)
+    with campaigns._cursor() as cur:
+        resolved = enrollment.resolve_worker_scope(cur, row['enrollment_id'], 'worker-service')
+    assert set(resolved) == {'org', 'project', 'campaign', 'enrollment_id', 'machine_id', 'tenant_id', 'prompt'}
+    assert tuple(str(resolved[key]) for key in ('org', 'project', 'campaign')) == tuple(map(str, scope))
+    assert resolved['prompt'] == 'Organize recipes' and resolved['tenant_id'] == str(scope[0])
+    expected = {'machine_id': 'VM-C', 'attempt_id': 'pending', 'request_body': {'preserved': True}}
+    monkeypatch.setattr(execution, 'pending_remote_bindings',
+                        lambda *args: [expected, {'machine_id': 'VM-D', 'attempt_id': 'foreign'}])
+    recovered = enrollment.resolve_worker_enrollment(row['enrollment_id'], 'worker-service')
+    assert recovered == [expected] and isinstance(recovered, list)
+
+
 def test_scope_and_viewer_authorization_on_postgres(seeded):
     scope, principal = seeded
     row = connect(seeded)

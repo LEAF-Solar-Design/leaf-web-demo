@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 import deps
 import platform_link
 import project_repository_source
+import campaign_worker_service
 
 router = APIRouter()
 _STORE = None
@@ -205,6 +206,43 @@ async def recover_worker(request: Request, subject: str = Depends(deps.require_c
         return _failure(503, 'campaigns_unavailable', 'Campaign recovery is unavailable')
     except Exception:
         return _failure(503, 'campaigns_unavailable', 'Campaign recovery is unavailable')
+
+
+@router.post('/internal/campaign-worker/next')
+async def next_worker(request: Request, subject: str = Depends(deps.require_campaign_worker)):
+    if os.environ.get('LEAF_CAMPAIGN_FIRST_TASK_PRODUCER', '') != 'on':
+        return _failure(503, 'producer_disabled', 'Campaign first-task producer is disabled')
+    try:
+        body = await _body(request)
+        if set(body) != {'enrollment_id'}:
+            raise ValueError('Only enrollment_id is accepted')
+        enrollment_id = _id(body.get('enrollment_id'))
+    except ValueError as exc:
+        return _failure(400, 'invalid_request', str(exc))
+    try:
+        store = _store()
+    except Exception:
+        return _failure(503, 'campaigns_unavailable', 'Campaign planning is unavailable')
+    try:
+        return campaign_worker_service.next_work(enrollment_id, subject)
+    except project_repository_source.SourceConflict:
+        return _failure(409, 'source_conflict', 'Project source conflicts')
+    except project_repository_source.SourceUnavailable:
+        return _failure(503, 'source_unavailable', 'Project source is unavailable')
+    except store.CampaignError as exc:
+        if exc.code in ('worker_forbidden', 'project_unavailable'):
+            return _failure(403, 'worker_forbidden', 'Campaign worker is not authorized')
+        if exc.code in ('plan_source_conflict', 'task_conflict', 'source_conflict'):
+            return _failure(409, 'plan_source_conflict', 'Planning task source conflicts')
+        if exc.code == 'prompt_too_large':
+            return _failure(409, exc.code, 'Shorten the accepted prompt to at most 12000 UTF-8 bytes')
+        if exc.code in ('source_unavailable', 'producer_disabled'):
+            return _failure(503, exc.code, 'Campaign planning is unavailable')
+        if exc.code == 'invalid_request':
+            return _failure(400, exc.code, 'Invalid planning request')
+        return _failure(503, 'campaigns_unavailable', 'Campaign planning is unavailable')
+    except Exception:
+        return _failure(503, 'campaigns_unavailable', 'Campaign planning is unavailable')
 
 
 @router.post('/api/campaigns')

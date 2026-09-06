@@ -269,72 +269,81 @@ def claim_task(org_id, project_id, campaign_id, *, worker_id, lease_seconds,
     if budget_reservation_ref is not None:
         _text(budget_reservation_ref, 'budget_reservation_ref', 256)
     with _cursor() as cur:
-        _check(cur, scope)
-        # Never update attempts before locking their task. Concurrent expiry
-        # cannot overwrite a newly claimed task or deadlock with settlement.
-        cur.execute('SELECT * FROM campaign_tasks WHERE ' + SCOPE +
-                    " AND status='claimed' ORDER BY task_id FOR UPDATE SKIP LOCKED", scope)
-        for task in cur.fetchall():
-            params = {**scope, 'task': task['task_id']}
-            cur.execute("UPDATE campaign_task_attempts SET status='expired' WHERE " + SCOPE +
-                        " AND task_id=%(task)s AND status='active' AND deadline_at<=clock_timestamp() RETURNING *",
-                        params)
-            attempt = cur.fetchone()
-            if attempt is None:
-                continue
-            _event(cur, scope, task, 'attempt_expired', attempt)
-            binding = _dispatch_binding(cur, scope, attempt)
-            if binding or attempt['stage'] in OUTWARD:
-                key = attempt['outward_operation_key']
-                if binding:
-                    key = key or binding['request_id']
-                values = _values('unknown', {'reason': 'lease_expired'}, None,
-                                 key, None, None, False)
-                _receipt(cur, scope, task, attempt, values)
-                _advance(cur, scope, task, 'unknown')
-                _event(cur, scope, task, 'outcome_unknown', attempt,
-                       {'outward_operation_key': key})
-            else:
-                cur.execute("UPDATE campaign_tasks SET status='pending', updated_at=NOW() WHERE " +
-                            SCOPE + ' AND task_id=%(task)s', params)
-        cur.execute(
-            'SELECT t.* FROM campaign_tasks t WHERE t.org_id=%(org)s AND t.project_id=%(project)s '
-            "AND t.campaign_id=%(campaign)s AND t.status='pending' AND NOT EXISTS ("
-            'SELECT 1 FROM campaign_task_dependencies d JOIN campaign_tasks p '
-            'ON p.task_id=d.depends_on_task_id AND p.org_id=d.org_id AND p.project_id=d.project_id '
-            'AND p.campaign_id=d.campaign_id WHERE d.task_id=t.task_id AND d.org_id=t.org_id '
-            "AND d.project_id=t.project_id AND d.campaign_id=t.campaign_id AND p.status<>'succeeded') "
-            'AND NOT EXISTS (SELECT 1 FROM campaign_task_questions l JOIN campaign_questions q '
-            'ON q.question_id=l.question_id AND q.org_id=l.org_id AND q.project_id=l.project_id '
-            'AND q.campaign_id=l.campaign_id WHERE l.task_id=t.task_id AND l.org_id=t.org_id '
-            'AND l.project_id=t.project_id AND l.campaign_id=t.campaign_id '
-            "AND q.status='open' AND q.blocks_dispatch) "
-            'ORDER BY t.created_at, t.task_id LIMIT 1 FOR UPDATE OF t SKIP LOCKED', scope)
-        task = cur.fetchone()
-        if task is None:
-            return None
-        cur.execute("UPDATE campaign_tasks SET fence=fence+1, status='claimed', updated_at=NOW() WHERE " +
-                    SCOPE + ' AND task_id=%(task)s RETURNING *', {**scope, 'task': task['task_id']})
-        task = cur.fetchone()
-        token = secrets.token_hex(32)
-        cur.execute(
-            'INSERT INTO campaign_task_attempts (attempt_id, task_id, org_id, project_id, campaign_id, '
-            'fence, attempt_token_hash, worker_id, stage, deadline_at, status, '
-            'budget_reservation_ref, outward_operation_key) VALUES (%(id)s, %(task)s, %(org)s, '
-            '%(project)s, %(campaign)s, %(fence)s, %(hash)s, %(worker)s, %(stage)s, '
-            "clock_timestamp()+make_interval(secs => %(lease)s), 'active', %(budget)s, %(key)s) RETURNING *",
-            {**scope, 'id': uuid.uuid4(), 'task': task['task_id'], 'fence': task['fence'],
-             'hash': hashlib.sha256(token.encode()).hexdigest(), 'worker': worker_id,
-             'stage': task['current_stage'], 'lease': lease, 'budget': budget_reservation_ref,
-             'key': _operation_key(scope, task)})
+        return _claim_task_cursor(cur, scope, worker_id=worker_id, lease=lease,
+                                  budget_reservation_ref=budget_reservation_ref)
+
+
+def _claim_task_cursor(cur, scope, *, worker_id, lease, task_key=None,
+                       budget_reservation_ref=None):
+    _check(cur, scope)
+    scope = dict(scope, task_key=task_key)
+    task_filter = ' AND task_key=%(task_key)s' if task_key is not None else ''
+    # Never update attempts before locking their task. Concurrent expiry
+    # cannot overwrite a newly claimed task or deadlock with settlement.
+    cur.execute('SELECT * FROM campaign_tasks WHERE ' + SCOPE +
+                " AND status='claimed'" + task_filter + ' ORDER BY task_id FOR UPDATE SKIP LOCKED', scope)
+    for task in cur.fetchall():
+        params = {**scope, 'task': task['task_id']}
+        cur.execute("UPDATE campaign_task_attempts SET status='expired' WHERE " + SCOPE +
+                    " AND task_id=%(task)s AND status='active' AND deadline_at<=clock_timestamp() RETURNING *",
+                    params)
         attempt = cur.fetchone()
-        _event(cur, scope, task, 'attempt_claimed', attempt)
-        result = _public_attempt(attempt)
-        result['attempt_token'] = token
-        result.update({key: _row(task)[key] for key in (
-            'task_key', 'kind', 'parent_task_id', 'spec', 'owned_paths', 'source_sha',
-            'verify_command', 'declared_artifacts')})
-        return result
+        if attempt is None:
+            continue
+        _event(cur, scope, task, 'attempt_expired', attempt)
+        binding = _dispatch_binding(cur, scope, attempt)
+        if binding or attempt['stage'] in OUTWARD:
+            key = attempt['outward_operation_key']
+            if binding:
+                key = key or binding['request_id']
+            values = _values('unknown', {'reason': 'lease_expired'}, None,
+                             key, None, None, False)
+            _receipt(cur, scope, task, attempt, values)
+            _advance(cur, scope, task, 'unknown')
+            _event(cur, scope, task, 'outcome_unknown', attempt,
+                   {'outward_operation_key': key})
+        else:
+            cur.execute("UPDATE campaign_tasks SET status='pending', updated_at=NOW() WHERE " +
+                        SCOPE + ' AND task_id=%(task)s', params)
+    cur.execute(
+        'SELECT t.* FROM campaign_tasks t WHERE t.org_id=%(org)s AND t.project_id=%(project)s '
+        "AND t.campaign_id=%(campaign)s AND t.status='pending' AND NOT EXISTS ("
+        'SELECT 1 FROM campaign_task_dependencies d JOIN campaign_tasks p '
+        'ON p.task_id=d.depends_on_task_id AND p.org_id=d.org_id AND p.project_id=d.project_id '
+        'AND p.campaign_id=d.campaign_id WHERE d.task_id=t.task_id AND d.org_id=t.org_id '
+        "AND d.project_id=t.project_id AND d.campaign_id=t.campaign_id AND p.status<>'succeeded') "
+        'AND NOT EXISTS (SELECT 1 FROM campaign_task_questions l JOIN campaign_questions q '
+        'ON q.question_id=l.question_id AND q.org_id=l.org_id AND q.project_id=l.project_id '
+        'AND q.campaign_id=l.campaign_id WHERE l.task_id=t.task_id AND l.org_id=t.org_id '
+        'AND l.project_id=t.project_id AND l.campaign_id=t.campaign_id '
+        "AND q.status='open' AND q.blocks_dispatch) "
+        + ('AND t.task_key=%(task_key)s ' if task_key is not None else '') +
+        'ORDER BY t.created_at, t.task_id LIMIT 1 FOR UPDATE OF t SKIP LOCKED', scope)
+    task = cur.fetchone()
+    if task is None:
+        return None
+    cur.execute("UPDATE campaign_tasks SET fence=fence+1, status='claimed', updated_at=NOW() WHERE " +
+                SCOPE + ' AND task_id=%(task)s RETURNING *', {**scope, 'task': task['task_id']})
+    task = cur.fetchone()
+    token = secrets.token_hex(32)
+    cur.execute(
+        'INSERT INTO campaign_task_attempts (attempt_id, task_id, org_id, project_id, campaign_id, '
+        'fence, attempt_token_hash, worker_id, stage, deadline_at, status, '
+        'budget_reservation_ref, outward_operation_key) VALUES (%(id)s, %(task)s, %(org)s, '
+        '%(project)s, %(campaign)s, %(fence)s, %(hash)s, %(worker)s, %(stage)s, '
+        "clock_timestamp()+make_interval(secs => %(lease)s), 'active', %(budget)s, %(key)s) RETURNING *",
+        {**scope, 'id': uuid.uuid4(), 'task': task['task_id'], 'fence': task['fence'],
+         'hash': hashlib.sha256(token.encode()).hexdigest(), 'worker': worker_id,
+         'stage': task['current_stage'], 'lease': lease, 'budget': budget_reservation_ref,
+         'key': _operation_key(scope, task)})
+    attempt = cur.fetchone()
+    _event(cur, scope, task, 'attempt_claimed', attempt)
+    result = _public_attempt(attempt)
+    result['attempt_token'] = token
+    result.update({key: _row(task)[key] for key in (
+        'task_key', 'kind', 'parent_task_id', 'spec', 'owned_paths', 'source_sha',
+        'verify_command', 'declared_artifacts')})
+    return result
 
 
 def _public_attempt(attempt):

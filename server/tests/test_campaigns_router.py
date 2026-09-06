@@ -292,6 +292,87 @@ def test_worker_uses_real_signature_verifier_with_tenant_auth_off(setup, monkeyp
     assert client.post(recover, json={'enrollment_id': eid}).status_code == 401
 
 
+def test_next_worker_default_off_closed_body_and_auth(setup, monkeypatch):
+    import auth
+    client, store, _ = setup
+    monkeypatch.delenv('LEAF_CAMPAIGN_FIRST_TASK_PRODUCER', raising=False)
+    monkeypatch.setenv('LEAF_CAMPAIGN_WORKER_SUBJECT', 'service-worker')
+
+    def verify(header):
+        if header not in ('Bearer signed', 'Bearer wrong'):
+            raise HTTPException(401, 'Invalid bearer')
+        return {'sub': 'service-worker' if header == 'Bearer signed' else 'wrong'}
+
+    monkeypatch.setattr(auth, 'verify_platform_token', verify)
+    calls = []
+    eid = str(uuid.uuid4())
+    result = dict(ok=True, kind='claimed', enrollment_id=eid,
+                  scope=dict(org_id=ORG, project_id=PROJECT, campaign_id=str(uuid.uuid4()), machine_id='VM-C'),
+                  attempt=dict(attempt_id=str(uuid.uuid4()), fence=1, stage='implementation',
+                               deadline_at='future', attempt_token='one-use'),
+                  plan_task=dict(task_key='campaign-plan'))
+
+    def next_work(enrollment_id, subject):
+        calls.append((enrollment_id, subject))
+        return result
+
+    monkeypatch.setattr(router.campaign_worker_service, 'next_work', next_work)
+    url, body, headers = '/internal/campaign-worker/next', {'enrollment_id': eid}, {'Authorization': 'Bearer signed'}
+    assert client.post(url, json=body).status_code == 401
+    assert client.post(url, json=body, headers={'Authorization': 'Bearer wrong'}).status_code == 403
+    for value in (None, '', 'off', 'ON', ' on ', 'true'):
+        if value is None:
+            monkeypatch.delenv('LEAF_CAMPAIGN_FIRST_TASK_PRODUCER', raising=False)
+        else:
+            monkeypatch.setenv('LEAF_CAMPAIGN_FIRST_TASK_PRODUCER', value)
+        response = client.post(url, json=body, headers=headers)
+        assert response.status_code == 503 and response.json()['error']['error_code'] == 'producer_disabled'
+    assert calls == [] and store.calls == []
+    monkeypatch.setenv('LEAF_CAMPAIGN_FIRST_TASK_PRODUCER', 'on')
+    for invalid in ({}, {'enrollment_id': ''}, {'enrollment_id': 'bad'},
+                    dict(body, lease_seconds=30), dict(body, project_id=OTHER),
+                    dict(body, attempt_token='forged'), dict(body, owned_paths=['src']),
+                    dict(body, budget=1)):
+        assert client.post(url, json=invalid, headers=headers).status_code == 400
+    assert calls == []
+    assert client.post(url, json=body, headers=headers).json() == result
+    assert calls == [(eid, 'service-worker')]
+
+
+@pytest.mark.parametrize('code,status', [('worker_forbidden', 403), ('project_unavailable', 403),
+    ('plan_source_conflict', 409), ('task_conflict', 409), ('prompt_too_large', 409),
+    ('source_unavailable', 503), ('invalid_request', 400), ('campaigns_unavailable', 503)])
+def test_next_worker_sanitized_campaign_errors(setup, monkeypatch, code, status):
+    client, _, _ = setup
+    monkeypatch.setenv('LEAF_CAMPAIGN_FIRST_TASK_PRODUCER', 'on')
+    client.app.dependency_overrides[deps.require_campaign_worker] = lambda: 'service-worker'
+
+    def fail(*args):
+        raise CampaignError(code, 'private database and provider details')
+
+    monkeypatch.setattr(router.campaign_worker_service, 'next_work', fail)
+    response = client.post('/internal/campaign-worker/next', json={'enrollment_id': str(uuid.uuid4())})
+    assert response.status_code == status and 'private' not in response.text
+
+
+@pytest.mark.parametrize('error,status,code', [
+    (router.project_repository_source.SourceConflict, 409, 'source_conflict'),
+    (router.project_repository_source.SourceUnavailable, 503, 'source_unavailable'),
+    (RuntimeError, 503, 'campaigns_unavailable')])
+def test_next_worker_sanitized_source_errors(setup, monkeypatch, error, status, code):
+    client, _, _ = setup
+    monkeypatch.setenv('LEAF_CAMPAIGN_FIRST_TASK_PRODUCER', 'on')
+    client.app.dependency_overrides[deps.require_campaign_worker] = lambda: 'service-worker'
+
+    def fail(*args):
+        raise error('private source path')
+
+    monkeypatch.setattr(router.campaign_worker_service, 'next_work', fail)
+    response = client.post('/internal/campaign-worker/next', json={'enrollment_id': str(uuid.uuid4())})
+    assert response.status_code == status and response.json()['error']['error_code'] == code
+    assert 'private' not in response.text
+
+
 def _question(client):
     campaign = _submit(client).json()['campaign']['campaign_id']
     response = client.post(f'/api/campaigns/{campaign}/questions', json={

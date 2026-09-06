@@ -167,24 +167,29 @@ def list_enrollments(org_id, project_id, campaign_id):
         return [_public(row, _link(cur, scope, row['enrollment_id'])) for row in rows]
 
 
-def resolve_worker_enrollment(enrollment_id, subject):
-    """Resolve scope from durable authority only; never from worker input."""
+def resolve_worker_scope(cur, enrollment_id, subject):
+    """Resolve persisted authority while retaining the enrollment read lock."""
     configured = os.environ.get('LEAF_CAMPAIGN_WORKER_SUBJECT', '')
     if not configured or subject != configured:
         raise CampaignError('worker_forbidden', 'Campaign worker is not authorized')
+    cur.execute('SELECT e.*, c.tenant_id, c.prompt FROM campaign_host_enrollments e JOIN campaigns c '
+                'ON c.campaign_id=e.campaign_id AND c.org_id=e.org_id AND c.project_id=e.project_id '
+                'JOIN projects p ON p.org_id=e.org_id AND p.project_id=e.project_id '
+                "WHERE e.enrollment_id=%s AND e.service_subject=%s AND e.state='enabled' "
+                "AND p.status='active' AND p.deleted_at IS NULL FOR SHARE OF e",
+                (_uuid(enrollment_id), subject))
+    row = cur.fetchone()
+    if row is None:
+        raise CampaignError('worker_forbidden', 'Campaign worker is not authorized')
+    scope = {**_scope(row['org_id'], row['project_id']), 'campaign': row['campaign_id']}
+    _link(cur, scope, row['enrollment_id'])
+    return dict(scope, enrollment_id=row['enrollment_id'], machine_id=row['machine_id'],
+                tenant_id=row['tenant_id'], prompt=row['prompt'])
+
+
+def resolve_worker_enrollment(enrollment_id, subject):
+    """Preserve the recovery list and read-lock lifetime."""
     with _cursor() as cur:
-        cur.execute('SELECT e.* FROM campaign_host_enrollments e JOIN campaigns c '
-                    'ON c.campaign_id=e.campaign_id AND c.org_id=e.org_id AND c.project_id=e.project_id '
-                    'JOIN projects p ON p.org_id=e.org_id AND p.project_id=e.project_id '
-                    "WHERE e.enrollment_id=%s AND e.service_subject=%s AND e.state='enabled' "
-                    "AND p.status='active' AND p.deleted_at IS NULL FOR SHARE OF e",
-                    (_uuid(enrollment_id), subject))
-        row = cur.fetchone()
-        if row is None:
-            raise CampaignError('worker_forbidden', 'Campaign worker is not authorized')
-        scope = {**_scope(row['org_id'], row['project_id']), 'campaign': row['campaign_id']}
-        _link(cur, scope, row['enrollment_id'])
-        # Keep the enrollment read lock until recovery completes, so revocation
-        # cannot interleave between authorization and the scoped read.
-        bindings = execution.pending_remote_bindings(row['org_id'], row['project_id'], row['campaign_id'])
-        return [binding for binding in bindings if binding['machine_id'] == row['machine_id']]
+        scope = resolve_worker_scope(cur, enrollment_id, subject)
+        bindings = execution.pending_remote_bindings(scope['org'], scope['project'], scope['campaign'])
+        return [binding for binding in bindings if binding['machine_id'] == scope['machine_id']]
