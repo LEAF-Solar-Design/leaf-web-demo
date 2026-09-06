@@ -491,7 +491,15 @@ def _row_to_record(row: sqlite3.Row) -> Dict[str, Any]:
         "dwg_version": row["dwg_version"] if "dwg_version" in row.keys() else None,
     }
     from campaign_capability_job import record_context
-    execution = json.loads(row["execution_json"] or "{}") if "execution_json" in row.keys() else {}
+    raw_execution = row["execution_json"] if "execution_json" in row.keys() else None
+    try:
+        execution = json.loads(raw_execution)
+    except (ValueError, TypeError):
+        execution = {}
+    # Historical SQLite rows may lack a usable optional execution object.
+    # Present capability data still goes through strict validation below.
+    if not isinstance(execution, dict):
+        execution = {}
     capability = record_context(execution, rec)
     if capability is not None:
         rec["capability_provenance"] = capability

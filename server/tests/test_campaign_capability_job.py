@@ -267,9 +267,21 @@ def test_sqlite_and_postgres_public_context_projection_matches():
     assert jobs._row_to_record(row) == _record(columns)
     assert "execution_json" not in _record(columns)
     assert _record(columns)["capability_provenance"] == ctx
-    columns["execution_json"] = '{"capability_provenance": null}'
-    with pytest.raises(ValueError):
-        _record(columns)
+    for invalid in (None, {}, {**ctx, "catalog_commit": "invalid"}):
+        columns["execution_json"] = json.dumps({"capability_provenance": invalid})
+        row = conn.execute("SELECT " + ",".join("? AS " + key for key in columns), list(columns.values())).fetchone()
+        with pytest.raises(ValueError, match="invalid capability"):
+            jobs._row_to_record(row)
+        with pytest.raises(ValueError):
+            _record(columns)
+    for key, foreign in (("tenant_id", "foreign"), ("org_id", str(uuid.uuid4())),
+                         ("project_id", str(uuid.uuid4()))):
+        columns["execution_json"] = json.dumps({"capability_provenance": {**ctx, key: foreign}})
+        row = conn.execute("SELECT " + ",".join("? AS " + key for key in columns), list(columns.values())).fetchone()
+        with pytest.raises(ValueError, match="scope mismatch"):
+            jobs._row_to_record(row)
+        with pytest.raises(ValueError, match="scope mismatch"):
+            _record(columns)
     conn.close()
 
 
