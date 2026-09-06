@@ -9,24 +9,42 @@
 import { useEffect, useState } from 'react'
 import { navigate } from './router.js'
 import { loadDemoSolve } from './intakeCache.js'
+import { isSignedIn } from '../auth.js'
+import { submitDemandCapture } from '../api.js'
 
-function startTrial() {
-  // Single trial entry (front-door contract, contract/FRONT-DOOR.md): billing
-  // and entitlement live on the marketing site; the SPA never mints its own
-  // trial path. Sign-in for existing users is untouched (auth.js stays).
-  window.location.assign('https://www.leafautomation.ai/get-started')
+export function enterWorkspace() {
+  if (isSignedIn()) {
+    navigate('/try')
+    return
+  }
+  // ToolCast and SiteRoot select demo mode at module load. A same-origin
+  // page load initializes both with the guest query, even from a bare root.
+  window.location.assign('/try?demo=1')
 }
 
 const SHEETS = [
   { code: '02', label: '02 The problem' },
   { code: '03', label: '03 How Branch works' },
   { code: '04', label: '04 Proof' },
-  { code: '05', label: '05 Pricing' },
+  { code: '05', label: '05 Pricing placeholder' },
   { code: '06', label: '06 Docs' },
 ]
 
-export default function LandingCast({ onTryTool }) {
+export default function LandingCast({ onTryTool = enterWorkspace }) {
   const [solve, setSolve] = useState(null)
+  const [email, setEmail] = useState('')
+  const [demandStatus, setDemandStatus] = useState('idle')
+  async function registerInterest(event) {
+    event.preventDefault()
+    if (demandStatus === 'pending' || demandStatus === 'saved') return
+    setDemandStatus('pending')
+    try {
+      await submitDemandCapture({ email: email.trim(), interest: 'Bring-your-own-key workspace' })
+      setDemandStatus('saved')
+    } catch {
+      setDemandStatus('error')
+    }
+  }
   useEffect(() => {
     let live = true
     loadDemoSolve()
@@ -47,7 +65,7 @@ export default function LandingCast({ onTryTool }) {
         <div className="lp-top-slot">
           <div className="lp-top-site" data-cast="site" style={{ '--rank': 0 }}>
             <span className="lp-sheetno">Sheet 01 of 07 — Cover</span>
-            <button type="button" className="lp-trial" onClick={startTrial}>Start free trial</button>
+            <button type="button" className="lp-trial" onClick={onTryTool}>Open workspace</button>
           </div>
         </div>
       </div>
@@ -62,9 +80,18 @@ export default function LandingCast({ onTryTool }) {
           Branch is stringing this 3.2 MW rooftop live behind this page — 25 hours of drafting in 3 minutes, zero NEC violations.
         </div>
         <div className="lp-cta-row">
-          <button type="button" className="lp-cta" onClick={onTryTool}>Try Branch — no install</button>
-          <span className="lp-price">$299 / mo per daily active user · 14-day trial</span>
+          <button type="button" className="lp-cta" onClick={onTryTool}>Try Branch, no login required</button>
+          <span className="lp-price">PRICING PLACEHOLDER</span>
         </div>
+        <form onSubmit={registerInterest} aria-label="Register interest">
+          <label htmlFor="front-door-email">Interested in a bring-your-own-key workspace?</label>
+          <input id="front-door-email" type="email" autoComplete="email" required disabled={demandStatus === 'pending' || demandStatus === 'saved'} value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Email address" />
+          <button type="submit" className="chip-act" disabled={demandStatus === 'pending' || demandStatus === 'saved'}>
+            {demandStatus === 'pending' ? 'Saving interest' : 'Register interest'}
+          </button>
+          {demandStatus === 'saved' && <span role="status">Interest saved. No payment required.</span>}
+          {demandStatus === 'error' && <span role="alert">Could not save your interest. Please try again.</span>}
+        </form>
         <div className="lp-stats">
           <div>
             <div className="lp-stat-big">25 hrs <span className="lp-stat-accent">→ 3 min</span></div>
@@ -102,7 +129,7 @@ export default function LandingCast({ onTryTool }) {
             key={s.code}
             type="button"
             className="lp-tab"
-            onClick={() => navigate(`/sheets#${s.code}`)}
+            onClick={() => s.code === '05' ? document.getElementById('front-door-email')?.focus() : navigate(`/sheets#${s.code}`)}
           >
             {s.label}
           </button>

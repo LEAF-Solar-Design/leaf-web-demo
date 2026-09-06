@@ -29,6 +29,7 @@ import { activeCastForScene, sceneAllowsMarketingEject, sceneForPath } from './r
 import { ONE_SHELL_ENABLED } from '../lib/runtimeFlags.js'
 import { StudioGroundContext } from './studioGround.js'
 import StageScene from './StageScene.jsx'
+import { enterWorkspace } from './LandingCast.jsx'
 import ContinuityStore from './ContinuityStore.jsx'
 import { WorkspaceControllerProvider } from '../controllers/WorkspaceControllerProvider.jsx'
 import { consoleWorkspaceMount } from '../controllers/workspaceMount.js'
@@ -52,14 +53,9 @@ const SheetsPage = React.lazy(() => import('./sheets/SheetsPage.jsx'))
 const isEditable = (el) =>
   !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)
 
-// Front-door contract (contract/FRONT-DOOR.md; leaf_website decision D2,
-// docs/decisions/public-web-overhaul-20260819.md): these deployed hosts are
-// APP-ONLY — the one indexable marketing front door is www.leafautomation.ai.
-// Marketing scenes (site/sheets) redirect there. Auth0's bare-origin callback
-// and every ?demo/?fixture deep link boot scene 'app' first (bootWantsApp),
-// so they never reach the redirect. localhost/dev and Vercel preview builds
-// are deliberately NOT listed: the site scenes stay viewable for development
-// and review there (index.html carries noindex everywhere regardless).
+// App hosts expose the guest-first cover locally. Only the sheets hub
+// redirects to the indexable marketing site (contract/FRONT-DOOR.md).
+// Callback and legacy deep-link boot decisions remain in authBoot.js.
 const APP_ONLY_HOSTS = new Set([
   'leaf-platform-web.vercel.app',
   'platform.leafdesign.ai',
@@ -84,15 +80,14 @@ export default function SiteRoot() {
   const [authCallbackPending, setAuthCallbackPending] = useState(shouldDeferForAuthCallback)
   const { path } = useRoute()
   const scene = bootApp ? 'app' : sceneForPath(path)
-  // Marketing scenes leave for the real front door on app-only hosts. The
+  // Sheets leave for the marketing hub on app-only hosts. The
   // sheets codes differ between the two surfaces ('02'.. here, 'l-000'.. on
   // www), so any /sheets path lands on the www sheets hub, not a 404.
   useEffect(() => {
-    if (scene !== 'site' && scene !== 'sheets') return
+    if (scene !== 'sheets') return
     if (!APP_ONLY_HOSTS.has(window.location.hostname)) return
     if (shouldDeferForAuthCallback()) return
-    const target = scene === 'sheets' ? '/sheets' : window.location.pathname
-    window.location.replace(MARKETING_ORIGIN + target)
+    window.location.replace(MARKETING_ORIGIN + '/sheets')
   }, [scene])
   const stageRef = useRef(null)
   // The studio ground node (W3 one-shell). State, not a ref: App's portal
@@ -134,7 +129,7 @@ export default function SiteRoot() {
         const ownedSurface = document.querySelector('.proj-menu, .route, .strip-decision, .resolver, .drawer-layer .drawer, .claude-pop')
         if (!ownedSurface) navigate('/')
       }
-      else if ((e.key === 't' || e.key === 'T') && scene === 'site') navigate('/try')
+      else if ((e.key === 't' || e.key === 'T') && scene === 'site') enterWorkspace()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
