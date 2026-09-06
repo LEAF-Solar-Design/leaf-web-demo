@@ -78,7 +78,8 @@ def test_drift_reports_changed_head():
 
 def test_shell_ref_guard():
     result = subprocess.run([bash(), ".codebuild/mq.sh"], cwd=ROOT,
-                            env={**os.environ, "CODEBUILD_WEBHOOK_HEAD_REF": "refs/heads/main"},
+                            env={**os.environ, "CODEBUILD_WEBHOOK_HEAD_REF": "refs/heads/main",
+                                 "CODEBUILD_WEBHOOK_EVENT": "PUSH"},
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0
     assert "Not a group" in result.stdout
@@ -98,6 +99,7 @@ def test_mq_sh_accept_path_execs_python3(tmp_path):
     stub.chmod(0o755)
     head_sha = "a" * 40
     env = {**os.environ, "PATH": f"{stub_dir}{os.pathsep}{os.environ['PATH']}",
+           "CODEBUILD_WEBHOOK_EVENT": "PUSH",
            "CODEBUILD_WEBHOOK_HEAD_REF": "refs/heads/gh-readonly-queue/main/pr-1-abcdef",
            "CODEBUILD_RESOLVED_SOURCE_VERSION": head_sha,
            "MQ_REVIEW_PY": "/tmp/mq_review.py"}
@@ -106,6 +108,36 @@ def test_mq_sh_accept_path_execs_python3(tmp_path):
     assert result.returncode == 0
     argv = record.read_text().splitlines()
     assert argv == ["/tmp/mq_review.py", "--head-sha", head_sha]
+
+
+@pytest.mark.parametrize("base", ["main", "other"])
+def test_mq_sh_pr_event_routes_only_main(tmp_path, base):
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    record = tmp_path / "argv.txt"
+    stub = stub_dir / "python3"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        f"printf '%s\\n' \"$@\" > \"{record.as_posix()}\"\n"
+        "exit 0\n"
+    )
+    stub.chmod(0o755)
+    head_sha = "b" * 40
+    env = {**os.environ, "PATH": f"{stub_dir}{os.pathsep}{os.environ['PATH']}",
+           "CODEBUILD_WEBHOOK_EVENT": "PULL_REQUEST_UPDATED",
+           "CODEBUILD_WEBHOOK_BASE_REF": f"refs/heads/{base}",
+           "CODEBUILD_WEBHOOK_HEAD_REF": "refs/heads/feature",
+           "CODEBUILD_RESOLVED_SOURCE_VERSION": head_sha,
+           "MQ_REVIEW_PY": "/tmp/mq_review.py"}
+    result = subprocess.run([bash(), ".codebuild/mq.sh"], cwd=ROOT, env=env,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0
+    if base == "main":
+        assert record.read_text().splitlines() == [
+            "/tmp/mq_review.py", "--deferred", "--head-sha", head_sha]
+    else:
+        assert not record.exists()
+        assert "Not main" in result.stdout
 
 
 def test_loader_is_one_parsed_block():
@@ -183,7 +215,9 @@ def test_project_dry_run():
         {"name": "GH_TOKEN", "type": "SECRETS_MANAGER", "value": "leaf-github-runner-pat"}]
     assert document["webhook"]["filterGroups"] == [[
         {"type": "EVENT", "pattern": "PUSH"},
-        {"type": "HEAD_REF", "pattern": "^refs/heads/gh-readonly-queue/main/"}]]
+        {"type": "HEAD_REF", "pattern": "^refs/heads/gh-readonly-queue/main/"}], [
+        {"type": "EVENT", "pattern": "PULL_REQUEST_CREATED,PULL_REQUEST_UPDATED,PULL_REQUEST_REOPENED"},
+        {"type": "BASE_REF", "pattern": "^refs/heads/main$"}]]
     assert project["source"]["reportBuildStatus"] is True
     assert project["source"]["gitCloneDepth"] == 0
     assert project["serviceRole"] == "arn:aws:iam::807034087062:role/leaf-mq-codebuild"
@@ -247,6 +281,64 @@ def test_main_posts_ruleset_context(monkeypatch):
         "context": "mq-review", "state": "success",
         "description": "All queued members have successful kimi-critic-review",
         "target_url": "https://example.test/build"})]
+
+
+@pytest.mark.parametrize("status", [201, 200, 500])
+def test_deferred_posts_exact_payload_without_readers(monkeypatch, status):
+    calls = []
+
+    def no_read(*args, **kwargs):
+        pytest.fail("deferred must not read queue or statuses")
+
+    def fake_run(command, input=None, text=None, capture_output=None):
+        calls.append((command, input))
+        return subprocess.CompletedProcess(command, 0, '{}\n' + str(status), "")
+
+    monkeypatch.setattr(mq, "read_queue", no_read)
+    monkeypatch.setattr(mq, "read_review", no_read)
+    monkeypatch.setattr(mq.subprocess, "run", fake_run)
+    monkeypatch.setenv("GH_TOKEN", "deferred-secret")
+    monkeypatch.setenv("CODEBUILD_BUILD_URL", "https://example.test/build")
+    head = "a" * 40
+    assert mq.main(["--deferred", "--head-sha", head]) == (0 if status == 201 else 1)
+    assert len(calls) == 1
+    command, stdin = calls[0]
+    assert "https://api.github.com/" + f"repos/{mq.REPO}/statuses/{head}" in command
+    assert json.loads(command[command.index("--data-raw") + 1]) == {
+        "context": "mq-review", "state": "success",
+        "description": "deferred: the real mq-review check runs on the merge group",
+        "target_url": "https://example.test/build"}
+    assert command[command.index("--write-out") + 1] == "\n%{http_code}"
+    assert command[command.index("--max-time") + 1] == "60"
+    assert command[command.index("--config") + 1] == "-"
+    assert "deferred-secret" in stdin
+    assert not any("deferred-secret" in arg for arg in command)
+
+
+def test_deferred_omits_unset_build_url(monkeypatch):
+    posts = []
+    monkeypatch.delenv("CODEBUILD_BUILD_URL", raising=False)
+    monkeypatch.setattr(mq, "read_queue", lambda: pytest.fail("must not read queue"))
+    monkeypatch.setattr(mq, "read_review", lambda *a: pytest.fail("must not read statuses"))
+    monkeypatch.setattr(mq, "github", lambda path, payload, expected_status:
+                        posts.append((path, payload, expected_status)))
+    assert mq.main(["--deferred", "--head-sha", "A" * 40]) == 0
+    assert len(posts) == 1
+    assert "target_url" not in posts[0][1]
+    assert posts[0][2] == 201
+
+
+@pytest.mark.parametrize("head", ["a" * 39, "a" * 41, "g" * 40, "a" * 40 + "\n"])
+def test_deferred_rejects_invalid_sha_without_io(monkeypatch, head):
+    def no_io(*args, **kwargs):
+        pytest.fail("invalid SHA must not read or post")
+
+    monkeypatch.setattr(mq, "read_queue", no_io)
+    monkeypatch.setattr(mq, "read_review", no_io)
+    monkeypatch.setattr(mq, "github", no_io)
+    with pytest.raises(SystemExit) as exc:
+        mq.main(["--deferred", "--head-sha", head])
+    assert exc.value.code != 0
 
 
 def test_main_destroyed_group_posts_nothing(monkeypatch):

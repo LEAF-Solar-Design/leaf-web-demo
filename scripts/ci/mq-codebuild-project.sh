@@ -133,6 +133,9 @@ webhook_doc = {
     "filterGroups": [[
         {"type": "EVENT", "pattern": "PUSH"},
         {"type": "HEAD_REF", "pattern": "^refs/heads/gh-readonly-queue/main/"},
+    ], [
+        {"type": "EVENT", "pattern": "PULL_REQUEST_CREATED,PULL_REQUEST_UPDATED,PULL_REQUEST_REOPENED"},
+        {"type": "BASE_REF", "pattern": "^refs/heads/main$"},
     ]],
 }
 
