@@ -10,4 +10,4 @@ ALTER TABLE campaign_host_enrollments
 DO $$ BEGIN
   ALTER TABLE campaign_host_enrollments ADD CONSTRAINT campaign_enrollments_machine_capability_unique
     UNIQUE (campaign_id, machine_id, capability);
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL; END $$;
