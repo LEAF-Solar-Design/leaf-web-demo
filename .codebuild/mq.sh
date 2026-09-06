@@ -6,4 +6,4 @@ if [[ ! ${CODEBUILD_WEBHOOK_HEAD_REF:-} =~ ^refs/heads/gh-readonly-queue/main/ ]
   exit 0
 fi
 
-exec python3 scripts/ci/mq_review.py --head-sha "${CODEBUILD_RESOLVED_SOURCE_VERSION:?missing built commit}"
+exec python3 "${MQ_REVIEW_PY:-scripts/ci/mq_review.py}" --head-sha "${CODEBUILD_RESOLVED_SOURCE_VERSION:?missing built commit}"

@@ -10,6 +10,7 @@ import subprocess
 REPO = "LEAF-Solar-Design/leaf-web-demo"
 CONTEXT = "mq-review"
 REVIEW_CONTEXT = "kimi-critic-review"
+SHA40 = re.compile(r"[0-9a-fA-F]{40}")
 
 
 class NotQueued(Exception):
@@ -113,6 +114,8 @@ def read_queue():
 
 
 def read_review(head):
+    if not SHA40.fullmatch(head):
+        raise ValueError("headRefOid must be a full 40-hex commit sha")
     statuses, page = [], 1
     while True:
         batch = github(f"repos/{REPO}/commits/{head}/statuses?per_page=100&page={page}")
@@ -128,7 +131,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--head-sha", required=True)
     args = parser.parse_args(argv)
-    if not re.fullmatch(r"[0-9a-fA-F]{40}", args.head_sha):
+    if not SHA40.fullmatch(args.head_sha):
         parser.error("--head-sha must be a full commit SHA")
     try:
         before = members_for(read_queue(), args.head_sha)

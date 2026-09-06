@@ -76,13 +76,35 @@ def test_drift_reports_changed_head():
 
 
 def test_shell_ref_guard():
-    script = (ROOT / ".codebuild/mq.sh").read_text()
-    assert "^refs/heads/gh-readonly-queue/main/" in script
     result = subprocess.run([bash(), ".codebuild/mq.sh"], cwd=ROOT,
                             env={**os.environ, "CODEBUILD_WEBHOOK_HEAD_REF": "refs/heads/main"},
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0
     assert "Not a group" in result.stdout
+
+
+def test_mq_sh_accept_path_execs_python3(tmp_path):
+    assert "MQ_REVIEW_PY" in (ROOT / ".codebuild/mq.sh").read_text()
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    record = tmp_path / "argv.txt"
+    stub = stub_dir / "python3"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        f"printf '%s\\n' \"$@\" > \"{record.as_posix()}\"\n"
+        "exit 0\n"
+    )
+    stub.chmod(0o755)
+    head_sha = "a" * 40
+    env = {**os.environ, "PATH": f"{stub_dir}{os.pathsep}{os.environ['PATH']}",
+           "CODEBUILD_WEBHOOK_HEAD_REF": "refs/heads/gh-readonly-queue/main/pr-1-abcdef",
+           "CODEBUILD_RESOLVED_SOURCE_VERSION": head_sha,
+           "MQ_REVIEW_PY": "/tmp/mq_review.py"}
+    result = subprocess.run([bash(), ".codebuild/mq.sh"], cwd=ROOT, env=env,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0
+    argv = record.read_text().splitlines()
+    assert argv == ["/tmp/mq_review.py", "--head-sha", head_sha]
 
 
 def test_project_dry_run():
@@ -91,6 +113,32 @@ def test_project_dry_run():
                             capture_output=True, text=True, timeout=30, check=True)
     document = json.loads(result.stdout)
     assert "never-print-this-token" not in result.stdout + result.stderr
+
+    role = document["role"]
+    assert role["name"] == "leaf-mq-codebuild"
+    trust_statement = role["trustPolicy"]["Statement"][0]
+    assert trust_statement["Principal"] == {"Service": "codebuild.amazonaws.com"}
+    assert trust_statement["Action"] == "sts:AssumeRole"
+    assert trust_statement["Condition"] == {"StringEquals": {"aws:SourceAccount": "807034087062"}}
+    statements = role["policy"]["Statement"]
+    assert len(statements) == 3
+    for statement in statements:
+        actions = statement["Action"] if isinstance(statement["Action"], list) else [statement["Action"]]
+        resources = statement["Resource"] if isinstance(statement["Resource"], list) else [statement["Resource"]]
+        assert all(action != "*" for action in actions)
+        assert all(resource != "*" for resource in resources)
+    logs_statement, secret_statement, conn_statement = statements
+    assert logs_statement["Action"] == ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
+    assert logs_statement["Resource"] == [
+        "arn:aws:logs:us-east-1:807034087062:log-group:/codebuild/leaf-mq-leaf-web-demo",
+        "arn:aws:logs:us-east-1:807034087062:log-group:/codebuild/leaf-mq-leaf-web-demo:*"]
+    assert secret_statement["Action"] == "secretsmanager:GetSecretValue"
+    assert set(conn_statement["Action"]) == {
+        "codeconnections:GetConnection", "codeconnections:GetConnectionToken",
+        "codeconnections:UseConnection", "codestar-connections:GetConnection",
+        "codestar-connections:GetConnectionToken", "codestar-connections:UseConnection"}
+    assert len(conn_statement["Resource"]) == 2
+
     project = document["project"]
     assert project["environment"]["environmentVariables"] == [
         {"name": "GH_TOKEN", "type": "SECRETS_MANAGER", "value": "leaf-github-runner-pat"}]
@@ -98,8 +146,16 @@ def test_project_dry_run():
         {"type": "EVENT", "pattern": "PUSH"},
         {"type": "HEAD_REF", "pattern": "^refs/heads/gh-readonly-queue/main/"}]]
     assert project["source"]["reportBuildStatus"] is True
-    assert "bash .codebuild/mq.sh" in project["source"]["buildspec"]
-    assert "shell: bash" in project["source"]["buildspec"]
+    assert project["source"]["gitCloneDepth"] == 0
+    assert project["serviceRole"] == "arn:aws:iam::807034087062:role/leaf-mq-codebuild"
+    assert project["timeoutInMinutes"] == 40
+    assert project["logsConfig"]["cloudWatchLogs"]["groupName"] == "/codebuild/leaf-mq-leaf-web-demo"
+    buildspec = project["source"]["buildspec"]
+    assert "shell: bash" in buildspec
+    assert "bash .codebuild/mq.sh" not in buildspec
+    assert "origin/main" in buildspec
+    assert 'git show "$REF:.codebuild/mq.sh"' in buildspec
+    assert 'git show "$REF:scripts/ci/mq_review.py"' in buildspec
     for name in (".codebuild/mq.sh", "scripts/ci/mq-codebuild-project.sh", "scripts/ci/mq_review.py",
                  "scripts/test_mq_review_codebuild.py", "scripts/run-all-gates.py"):
         assert b"\r" not in (ROOT / name).read_bytes()
@@ -160,3 +216,38 @@ def test_main_destroyed_group_posts_nothing(monkeypatch):
     monkeypatch.setattr(mq, "read_review", lambda head: "success")
     monkeypatch.setattr(mq, "github", lambda *args: pytest.fail("must not post"))
     assert mq.main(["--head-sha", "2" * 40]) == 2
+
+
+def test_head_sha_arg_rejects_non_hex():
+    with pytest.raises(SystemExit):
+        mq.main(["--head-sha", "not-a-sha"])
+
+
+def test_headrefoid_guard_rejects_bad_sha(monkeypatch):
+    bad_entries = [{"position": 1, "headCommit": {"oid": "1" * 40},
+                    "pullRequest": {"number": 101, "headRefOid": "not-a-sha"}}]
+    monkeypatch.setattr(mq, "read_queue", lambda: bad_entries)
+    monkeypatch.setattr(mq, "github", lambda *a, **k: pytest.fail("must not call GitHub"))
+    assert mq.main(["--head-sha", "1" * 40]) == 1
+
+
+def test_github_token_crosses_on_stdin_only(monkeypatch):
+    calls = []
+
+    class FakeResult:
+        returncode = 0
+        stdout = "{}"
+        stderr = ""
+
+    def fake_run(command, input=None, text=None, capture_output=None):
+        calls.append((command, input))
+        return FakeResult()
+
+    monkeypatch.setattr(mq.subprocess, "run", fake_run)
+    monkeypatch.setenv("GH_TOKEN", "secret-token-value")
+    mq.github("some/path")
+    assert len(calls) == 1
+    command, stdin = calls[0]
+    assert "--max-time" in command
+    assert not any("secret-token-value" in str(arg) for arg in command)
+    assert "secret-token-value" in stdin
