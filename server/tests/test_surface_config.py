@@ -205,7 +205,7 @@ def test_submit_preserves_target_mode_and_defaults_new_file(monkeypatch, tmp_pat
     chmod(path, 0o640)
     existing_mode = path.stat().st_mode
     deps.submit_surface_config("t1", {"cad": {"authoring": True}})
-    assert modes[-1] == existing_mode
+    assert modes[-1] == stat.S_IMODE(existing_mode)
     assert stat.S_IMODE(path.stat().st_mode) == stat.S_IMODE(existing_mode)
 
 
@@ -430,3 +430,23 @@ def test_contained_surface_config_path_is_the_roots_own_file_or_none(tmp_path):
     assert deps._contained_surface_config_path(str(root)) == own
     # the reader is handed the directory the checked file lives in, never the raw root
     assert os.path.dirname(own) == os.path.normpath(os.path.realpath(str(root)))
+
+
+def test_post_handler_awaits_submit_via_threadpool_source():
+    """The POST handler must run the blocking submit_surface_config commit
+    (mkdtemp, writes, fsync, rmtree, os.replace, a threading.Lock) off the
+    event loop thread, or one slow writer stalls every other request in the
+    worker. Pinned at source level: no test can observe loop-thread blocking
+    reliably, so this reads the handler's own body instead."""
+    import re
+    source = (Path(__file__).resolve().parent.parent / "routers" / "capabilities.py").read_text(
+        encoding="utf-8"
+    )
+    assert "from starlette.concurrency import run_in_threadpool" in source
+    handler = re.search(
+        r"async def submit_surface_config\(.*?(?=\n@router\.|\Z)", source, re.DOTALL
+    )
+    assert handler, "POST /api/surface-config handler not found in capabilities.py"
+    assert re.search(
+        r"await run_in_threadpool\(\s*deps\.submit_surface_config\s*,", handler.group(0)
+    ), "POST handler must await run_in_threadpool(deps.submit_surface_config, ...)"

@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 import threading
@@ -389,9 +390,34 @@ def submit_surface_config(tenant_id: str, overlay: dict) -> Dict[str, Any]:
         with _surface_config_lock:
             if _contained_surface_config_path(root) != target:
                 raise HTTPException(status_code=400, detail="surface-config.json target is not contained")
-            os.chmod(temporary, os.stat(target).st_mode if os.path.exists(target) else 0o644)
-            os.replace(temporary, target)
+            os.chmod(
+                temporary,
+                stat.S_IMODE(os.stat(target).st_mode) if os.path.exists(target) else 0o644,
+            )
+            # Windows denies a rename onto a destination a reader briefly has
+            # open (no FILE_SHARE_DELETE); the lock already excludes other
+            # writers, so retry through that transient window before failing
+            # closed.
+            for attempt in range(10):
+                try:
+                    os.replace(temporary, target)
+                    break
+                except PermissionError:
+                    if attempt == 9:
+                        raise
+                    time.sleep(0.05)
             temporary = None
+            if hasattr(os, "O_DIRECTORY"):
+                # POSIX only: fsync the parent directory so the rename itself
+                # is durable, not just the file's contents. Windows has no
+                # O_DIRECTORY, so os.open() on a directory would fail there.
+                dir_fd = os.open(
+                    os.path.dirname(target), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                )
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
             _surface_config_cache.pop(tenant_id, None)
             receipt = surface_config_source(tenant_id)
             if receipt is None:

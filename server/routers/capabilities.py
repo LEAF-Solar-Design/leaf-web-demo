@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 import catalog
 import converse_registry
@@ -200,6 +201,10 @@ async def submit_surface_config(request: Request, tenant=Depends(deps.require_te
     if isinstance(admitted, JSONResponse):
         return admitted
     body = bytearray()
+    # This stream bound (256 KiB) is looser than the vendored fold's file cap
+    # (64 KiB, deps.MAX_SURFACE_CONFIG_BYTES): a body between the two sizes
+    # passes this check, gets parsed as JSON, and is only then refused with
+    # 413 by deps.submit_surface_config against the tighter vendored limit.
     async for chunk in request.stream():
         if len(body) + len(chunk) > 256 * 1024:
             raise HTTPException(status_code=413, detail="Surface config request exceeds 262144 bytes")
@@ -210,7 +215,7 @@ async def submit_surface_config(request: Request, tenant=Depends(deps.require_te
         raise HTTPException(status_code=400, detail="Invalid surface config JSON") from exc
     if not isinstance(payload, dict) or set(payload) != {"overlay"}:
         raise HTTPException(status_code=400, detail="Expected a surface config overlay")
-    return deps.submit_surface_config(admitted[0], payload["overlay"])
+    return await run_in_threadpool(deps.submit_surface_config, admitted[0], payload["overlay"])
 
 
 @router.get("/api/converse/registry")
