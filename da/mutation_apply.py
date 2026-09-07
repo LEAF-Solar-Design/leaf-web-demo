@@ -24,6 +24,7 @@ from apply_lisp import (  # noqa: E402
     OUT_LOCALNAME,
     PLAN_LOCALNAME,
     build_apply_scr,
+    build_apply_scr_v3 as _build_apply_scr_v3,
 )
 
 ACTIVITY_ID = "LeafApplyMutations"
@@ -42,12 +43,8 @@ _TIMEOUT = 60
 
 
 def build_apply_scr_v3() -> str:
-    """Accept the v3 header while retaining the frozen v2 operations."""
-    return build_apply_scr().replace(
-        '(list "LEAF_MUTATION_PLAN|1" "LEAF_MUTATION_PLAN|2")',
-        '(list "LEAF_MUTATION_PLAN|1" "LEAF_MUTATION_PLAN|2" "LEAF_MUTATION_PLAN|3")',
-        1,
-    )
+    """Accept INSERT operations through the separate v3 interpreter."""
+    return _build_apply_scr_v3()
 
 
 MUTATION_INSPECT_BLOCKS_V3 = MUTATION_INSPECT_BLOCKS
@@ -78,6 +75,15 @@ CONTRACTS = {
 def activity_spec(contract: int = 2) -> dict[str, Any]:
     """Return the complete fixed Activity definition."""
     target = CONTRACTS[contract]
+    inspect_script = build_scr(INTAKE_LOCALNAME, extra_blocks=target.inspect_blocks)
+    if contract == 3:
+        # IN retains its legacy radians unit. The v3 verifier needs the
+        # six-decimal reading; leave the provisioned v2 script untouched.
+        inspect_script = inspect_script.replace(
+            '(rtos (cond (rot rot)(T 0.0)) 2 5)',
+            '(rtos (cond (rot rot)(T 0.0)) 2 6)',
+            1,
+        )
     return {
         "id": target.activity_id,
         "engine": ENGINE,
@@ -111,8 +117,7 @@ def activity_spec(contract: int = 2) -> dict[str, Any]:
             # W4g-3: the inspection also reports LINE / CIRCLE / ARC with
             # handles (the kinds the browser engine writes), so a v2 plan's
             # effects verify; the LeafExtract script itself is untouched.
-            "inspectScript": {"value": build_scr(
-                INTAKE_LOCALNAME, extra_blocks=target.inspect_blocks)},
+            "inspectScript": {"value": inspect_script},
         },
         "description": (
             "Leaf fixed closed-format drawing mutation interpreter with "

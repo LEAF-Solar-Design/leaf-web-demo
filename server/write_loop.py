@@ -911,6 +911,13 @@ def apply_mutations(intake: Dict[str, Any], mutations: Dict[str, Any]) -> Dict[s
                 new.setdefault("circles", []).append({
                     "handle": e["handle"], "layer": e["layer"], "c": list(e["c"]),
                     "r": e["r"], "nrm": [0.0, 0.0, 1.0]})
+            elif kind == "INSERT":
+                new.setdefault("inserts", []).append({
+                    "handle": e["handle"], "name": e["name"], "layer": e["layer"],
+                    "x": round(e["pt"][0], 3), "y": round(e["pt"][1], 3),
+                    "z": round(e["pt"][2], 3), "rot": round(math.radians(e["rot"]), 6),
+                    "scale": [round(value, 4) for value in e["scale"]],
+                    "nrm": [0.0, 0.0, 1.0]})
             else:
                 new.setdefault("arcs", []).append({
                     "handle": e["handle"], "layer": e["layer"], "c": list(e["c"]),
@@ -1433,13 +1440,32 @@ def _polyline_effect_matches(
     )
 
 
+def _insert_effect_matches(
+    expected: Dict[str, Any], actual: Dict[str, Any], *, rotation_deg: float,
+) -> bool:
+    if expected.get("name") != actual.get("name") or expected.get("layer") != actual.get("layer"):
+        return False
+    try:
+        return (
+            _point_close([expected[axis] for axis in ("x", "y", "z")],
+                         [actual[axis] for axis in ("x", "y", "z")], tolerance=1e-3)
+            and math.isclose(math.radians(rotation_deg), float(actual["rot"]),
+                             rel_tol=0.0, abs_tol=1e-6)
+            and isinstance(actual.get("scale"), list) and len(actual["scale"]) == 3
+            and _point_close(expected["scale"], actual["scale"], tolerance=1e-4)
+            and _point_close(expected["nrm"], actual.get("nrm"), tolerance=1e-6)
+        )
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+
+
 def verify_live_mutation_effects(
     base: Dict[str, Any], actual: Dict[str, Any], canonical: Dict[str, Any],
 ) -> None:
     """Refuse publication unless extraction proves exactly the proposed effects."""
     expected = apply_mutations(base, canonical)
-    # INSERTs have no new effects in this slice. Compare their complete
-    # records by handle; their positions are not polyline point lists.
+    # Unchanged INSERTs retain their complete records by handle. Added ones
+    # first bind their temporary handles to the actual name and geometry.
     insert_indexes = []
     for intake in (expected, actual):
         rows = intake.get("inserts", [])
@@ -1457,6 +1483,26 @@ def verify_live_mutation_effects(
         if len(index) != len(rows):
             raise ValueError("re-extracted output contains duplicate INSERT handles")
         insert_indexes.append(index)
+    added_inserts = {
+        entity["handle"]: entity for entity in canonical.get("added", [])
+        if entity.get("kind") == "INSERT"
+    }
+    base_insert_handles = {entity["handle"] for entity in base.get("inserts", [])}
+    unmatched_inserts = [entity for entity in actual.get("inserts", [])
+                         if entity["handle"] not in base_insert_handles]
+    for entity in expected.get("inserts", []):
+        if entity["handle"] not in added_inserts:
+            continue
+        match_index = next(
+            (index for index, candidate in enumerate(unmatched_inserts)
+             if _insert_effect_matches(
+                 entity, candidate, rotation_deg=added_inserts[entity["handle"]]["rot"])), None)
+        if match_index is None:
+            raise ValueError(f"added INSERT {entity['name']} not found in output")
+        matched = unmatched_inserts.pop(match_index)
+        insert_indexes[0].pop(entity["handle"])
+        insert_indexes[1].pop(matched["handle"])
+        entity["handle"] = matched["handle"]
     if insert_indexes[0] != insert_indexes[1]:
         raise ValueError("unchanged INSERT has unexpected output geometry")
     # Old intakes may predate the additive catalogue. Once captured, the
