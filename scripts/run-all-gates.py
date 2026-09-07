@@ -708,6 +708,16 @@ def build_suites() -> List[Suite]:
         Suite("server-w4g7b-04s", "server tests/test_w4g7b_04s.py", "pytest", SERVER,
               _py_pytest("tests/test_w4g7b_04s.py"), 57,
               allowed_skip_reasons=(r"local AutoCAD 2026 console is required",)),
+        # W4g-7b-06i: the fixed-engine canary over the whole enabled v3 case
+        # set (INSERT, styled LINE, both dimension types, a property setter
+        # riding a created entity's A: ordinal). Floor 2 is the count WITHOUT
+        # the canary (the mock round trip and the skip-visibility row); the
+        # canary's own skip reason names the exact binary path it looked for
+        # (the "skipped local engine suite is no proof" guard), so its
+        # allowlist pattern differs from the fixed-string siblings above.
+        Suite("server-w4g7b-06i", "server tests/test_w4g7b_06i.py", "pytest", SERVER,
+              _py_pytest("tests/test_w4g7b_06i.py"), 2,
+              allowed_skip_reasons=(r"local AutoCAD 2026 console is required \(.+\)",)),
         # W4g-3a: the contract v2 (the browser engine's saves through the same
         # closed plan), 42 rows over literal parametrize lists, no skip gates.
         Suite("server-mutation-contract-v2",
