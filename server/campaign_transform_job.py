@@ -90,15 +90,15 @@ def input_bytes(context, params):
 
 
 def check_authority(context):
-    import broker
-    if not broker._authored_execution_enabled() or broker.tenant_disabled(context['tenant_id']):
+    import campaign_execution_policy as execution_policy
+    if not execution_policy.authored_execution_enabled() or execution_policy.tenant_disabled(context['tenant_id']):
         raise ValueError('authored execution authority is unavailable')
-    if broker._production_runtime():
+    if execution_policy.production_runtime():
         if os.environ.get('BROKER_URL', '').strip():
             import broker_client
             if not broker_client.broker_headers():
                 raise ValueError('production broker authentication is unavailable')
-        elif not broker._sandbox_configured():
+        elif not execution_policy.sandbox_configured():
             raise ValueError('production authored sandbox is unavailable')
     from leaf_platform import campaigns, campaign_release
 

@@ -682,6 +682,11 @@ def test_runner_does_not_settle_after_losing_ownership(published, monkeypatch, s
 
 
 def test_authority_requires_active_binding_campaign_and_current_release(published, monkeypatch):
+    import broker_pg_store
+    monkeypatch.setenv('LEAF_BROKER_STORE', 'postgres')
+    monkeypatch.setenv('LEAF_RUNTIME_ENV', 'test')
+    monkeypatch.setenv('LEAF_AUTHORED_EXECUTION', '1')
+    monkeypatch.setattr(broker_pg_store, 'get_store', lambda: SimpleNamespace(tenant=lambda tid: None))
     from leaf_platform import campaigns, campaign_release
     import campaign_release_service as runtime
     import campaign_acquisition_service as acquisition
@@ -706,17 +711,19 @@ def test_authority_requires_active_binding_campaign_and_current_release(publishe
     monkeypatch.setattr(acquisition, '_run_authority', lambda actor, tool: policy_calls.append(actor))
     module.check_authority(p.ctx)
     assert policy_calls == ['current-actor']
-    import broker
-    monkeypatch.setattr(broker, '_production_runtime', lambda: True)
-    monkeypatch.setattr(broker, '_sandbox_configured', lambda: False)
-    monkeypatch.setattr(broker, '_authored_execution_enabled', lambda: True)
-    monkeypatch.setattr(broker, 'tenant_disabled', lambda tenant: False)
+    monkeypatch.setenv('LEAF_RUNTIME_ENV', 'production')
+    monkeypatch.delenv('LEAF_TOOL_SANDBOX_PROVIDER', raising=False)
     monkeypatch.setenv('BROKER_URL', 'http://broker.test')
     monkeypatch.setenv('LEAF_BROKER_SECRET', 'test-only-secret')
     module.check_authority(p.ctx)
     monkeypatch.delenv('LEAF_BROKER_SECRET')
     with pytest.raises(ValueError, match='authentication'): module.check_authority(p.ctx)
     monkeypatch.setenv('LEAF_BROKER_SECRET', 'test-only-secret')
+    monkeypatch.delenv('BROKER_URL')
+    with pytest.raises(ValueError, match='sandbox'): module.check_authority(p.ctx)
+    monkeypatch.setenv('LEAF_TOOL_SANDBOX_PROVIDER', 'e2b')
+    module.check_authority(p.ctx)
+    monkeypatch.setenv('BROKER_URL', 'http://broker.test')
     release['contract_version'] = 2
     with pytest.raises(ValueError): module.check_authority(p.ctx)
     release['contract_version'] = 1

@@ -10,6 +10,7 @@ import uuid
 import pytest
 
 import agent_policy
+import broker_pg_store
 import campaign_acquisition_service as service
 import customization_service as customization
 from customization_models import ChangeState
@@ -52,6 +53,10 @@ class Store:
 
 @pytest.fixture
 def setup(monkeypatch):
+    monkeypatch.setenv('LEAF_BROKER_STORE', 'postgres')
+    monkeypatch.setenv('LEAF_RUNTIME_ENV', 'test')
+    monkeypatch.setenv('LEAF_AUTHORED_EXECUTION', '1')
+    monkeypatch.setattr(broker_pg_store, 'get_store', lambda: SimpleNamespace(tenant=lambda tid: None))
     expected = service.recipe.expected_output(SOURCE)
     release = {'release_id': RELEASE, 'contract_version': 1, 'status': 'active',
         'contract': {'transform_recipe': {'recipe_id': 'json-records-to-csv', 'recipe_version': 1,
@@ -281,6 +286,24 @@ def test_run_entitlement_denied(setup, monkeypatch):
     monkeypatch.setattr(entitlements, 'entitlements_for', lambda *a: {'run_read': False})
     assert advance(setup)['state'] == 'awaiting_user'
     assert setup.calls['submit'] == 0
+
+
+@pytest.mark.parametrize('disabled', [True, None, 0, '', 'false'])
+def test_broker_tenant_kill_switch_prevents_submission(setup, monkeypatch, disabled):
+    monkeypatch.setattr(broker_pg_store, 'get_store', lambda: SimpleNamespace(
+        tenant=lambda tid: {'disabled': disabled}))
+    assert advance(setup)['state'] == 'awaiting_user'
+    assert setup.calls['submit'] == 0
+
+
+def test_production_acquisition_requires_sandbox(setup, monkeypatch):
+    monkeypatch.setenv('LEAF_RUNTIME_ENV', 'production')
+    monkeypatch.delenv('LEAF_TOOL_SANDBOX_PROVIDER', raising=False)
+    monkeypatch.setenv('BROKER_URL', 'http://broker.test')
+    assert advance(setup)['state'] == 'awaiting_user'
+    assert setup.calls['submit'] == 0
+    monkeypatch.setenv('LEAF_TOOL_SANDBOX_PROVIDER', 'e2b')
+    assert advance(setup)['state'] == 'complete'
 
 
 def test_existing_policy_confirmation_is_not_bypassed(setup, monkeypatch):
