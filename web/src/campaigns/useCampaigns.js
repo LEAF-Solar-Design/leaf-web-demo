@@ -224,6 +224,15 @@ export default function useCampaigns(projectId, { enabled = true, authorityProvi
       return result
     })
   }, [context, mutate, projectId])
+  const reviseRelease = useCallback(({ workflow, reason }) => {
+    const id = context.selectedId
+    const releaseId = context.completion?.release?.release_id
+    if (!id || !releaseId) return Promise.resolve(null)
+    const signature = JSON.stringify([projectId, id, releaseId, 'revise', workflow, reason])
+    if (!releaseKeysRef.current.has(signature)) releaseKeysRef.current.set(signature, newKey())
+    const idempotencyKey = releaseKeysRef.current.get(signature)
+    return mutate('release', () => api.reviseRelease(projectId, id, releaseId, { workflow, reason, idempotencyKey }))
+  }, [context, mutate, projectId])
   const transitionRelease = useCallback(action => {
     const id = context.selectedId
     const release = context.completion?.release
@@ -231,7 +240,7 @@ export default function useCampaigns(projectId, { enabled = true, authorityProvi
     const version = release?.contract_version
     const view = context.view
     const next = context.completion?.next_action
-    const needsAuthority = action === 'resume' && release?.status === 'waiting' && next?.wait_kind === 'authority'
+    const needsAuthority = ['resume', 'advance'].includes(action) && release?.status === 'waiting' && next?.wait_kind === 'authority'
       && ['Authoring requires an active project conversation', 'Acquisition requires the current account actor'].includes(next.reason)
     return id && releaseId ? mutate('release', async () => {
       if (!needsAuthority) return api.transitionRelease(projectId, id, releaseId, action)
@@ -391,5 +400,5 @@ export default function useCampaigns(projectId, { enabled = true, authorityProvi
   }, [context, current, enabled, load, mutate, projectId, readSubmission])
   return { ...(snapshot.scope === scope ? snapshot : empty()), select, submit, ask, answer, refetch,
     enroll, enableEnrollment, revokeEnrollment, bindPublication, invokeCapability,
-    createRelease, transitionRelease, retryReleaseStage, downloadReleaseArtifact }
+    createRelease, reviseRelease, transitionRelease, retryReleaseStage, downloadReleaseArtifact }
 }

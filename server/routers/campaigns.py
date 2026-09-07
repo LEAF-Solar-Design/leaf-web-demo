@@ -214,13 +214,13 @@ def _canonical_id(value):
     return value
 
 
-async def _capability_body(request, fields):
+async def _capability_body(request, fields, maximum=4096):
     length = request.headers.get('content-length')
-    if length is not None and (not length.isdecimal() or int(length) > 4096):
+    if length is not None and (not length.isdecimal() or int(length) > maximum):
         raise ValueError('Invalid size')
     raw = bytearray()
     async for chunk in request.stream():
-        if len(raw) + len(chunk) > 4096:
+        if len(raw) + len(chunk) > maximum:
             raise ValueError('Invalid size')
         raw.extend(chunk)
     body = json.loads(raw, object_pairs_hook=project_repository_source._closed_pairs)
@@ -488,15 +488,17 @@ async def release_action(campaign_id: str, release_id: str, action: str, request
                          tenant: Any = Depends(deps.require_tenant)):
     import campaign_release_service as releases
     try:
-        if action not in ('pause', 'resume', 'cancel', 'retry', 'advance'):
+        if action not in ('pause', 'resume', 'cancel', 'retry', 'advance', 'revise'):
             raise ValueError('Invalid action')
-        fields = ('project_id', 'stage') if action == 'retry' else ('project_id',)
-        body = await _capability_body(request, fields)
+        fields = ('project_id', 'workflow', 'reason') if action == 'revise' else ('project_id', 'stage') if action == 'retry' else ('project_id',)
+        body = await _capability_body(request, fields, maximum=262144 if action == 'revise' else 4096)
         project, campaign_id, release_id = _id(body['project_id']), _id(campaign_id), _id(release_id)
+        if action == 'revise':
+            key = _text(request.headers.get('Idempotency-Key'), 'Idempotency-Key', 128)
     except (ValueError, UnicodeError):
         return _failure(400, 'invalid_request', 'Invalid release request')
-    function = releases.advance if action == 'advance' else releases.retry if action == 'retry' else releases.transition
-    args = () if action == 'advance' else (body['stage'],) if action == 'retry' else (action,)
+    function = releases.revise if action == 'revise' else releases.advance if action == 'advance' else releases.retry if action == 'retry' else releases.transition
+    args = (body['workflow'], body['reason'], key) if action == 'revise' else () if action == 'advance' else (body['stage'],) if action == 'retry' else (action,)
     return await run_in_threadpool(_release_call, 'completion', function,
                                    tenant, project, campaign_id, release_id, *args,
                                    **(_release_authority(request) if action in ('resume', 'advance') else {}))

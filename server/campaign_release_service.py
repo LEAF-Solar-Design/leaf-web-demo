@@ -284,6 +284,20 @@ def create(tenant, project_id, campaign_id, finish, idempotency_key,
     return advance(tenant, project_id, campaign_id, rid, authority_session_id, authority_turn_id)
 
 
+def revise(tenant, project_id, campaign_id, release_id, workflow, reason, idempotency_key):
+    for value, name, limit in ((workflow, 'workflow', 16384), (reason, 'reason', 4096),
+                               (idempotency_key, 'idempotency key', 128)):
+        if not isinstance(value, str) or not value.strip() or len(value) > limit:
+            raise ValueError('Invalid ' + name)
+    org, project, actor = authority(tenant, project_id)
+    current = _store().get_release(org, project, campaign_id, release_id)
+    contract = dict(current['release']['contract'], workflow=workflow)
+    # The store checks replay before identical-workflow and terminal conflicts.
+    _store().revise_contract(org, project, campaign_id, release_id, actor,
+                             contract=contract, reason=reason, idempotency_key=idempotency_key, pause=True)
+    return snapshot(tenant, project_id, campaign_id, release_id)
+
+
 def transition(tenant, project_id, campaign_id, release_id, action,
                authority_session_id=None, authority_turn_id=None):
     if action not in ('pause', 'resume', 'cancel'):

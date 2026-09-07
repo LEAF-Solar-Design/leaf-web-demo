@@ -42,6 +42,52 @@ function render(ui) {
   return { ...view, rerender(next) { view.rerender(next); expand() } }
 }
 
+describe('stalled release revision', () => {
+  beforeEach(() => {
+    campaign.completion = { release: { release_id: Q, status: 'needs_approach', contract_version: 1,
+      contract: { workflow: 'Old workflow', original_goal: 'Original ambition', required_checks: [], deferred_items: ['Later scope'] } },
+      next_action: { reason: 'Change the approach' }, decisions: [] }
+    campaign.reviseRelease = vi.fn().mockResolvedValue({ ok: true })
+  })
+  it('shows the prefilled form visibly and requires both values before recording', async () => {
+    renderCollapsed(panel())
+    const workflow = screen.getByLabelText('Revised workflow')
+    expect(workflow.value).toBe('Old workflow')
+    expect(workflow.closest('details')).toBeNull()
+    expect(screen.getByText('Saved inputs, required checks and the original goal are retained.')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Record revised approach' }))
+    await screen.findByRole('alert')
+    expect(campaign.reviseRelease).not.toHaveBeenCalled()
+    fireEvent.change(screen.getByLabelText('Reason for changing approach'), { target: { value: 'Reuse publication' } })
+    fireEvent.change(workflow, { target: { value: ' ' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Record revised approach' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/Workflow/))
+    expect(campaign.reviseRelease).not.toHaveBeenCalled()
+    fireEvent.change(workflow, { target: { value: 'Use the published tool' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Record revised approach' }))
+    await screen.findByText('Revised approach recorded. Review it before continuing.')
+    expect(campaign.reviseRelease).toHaveBeenCalledExactlyOnceWith({ workflow: 'Use the published tool', reason: 'Reuse publication' })
+    expect(campaign.transitionRelease).not.toHaveBeenCalled()
+  })
+  it('requires an explicit continuation after showing the saved workflow', async () => {
+    campaign.completion.release = { ...campaign.completion.release, status: 'active', contract_version: 2,
+      contract: { ...campaign.completion.release.contract, workflow: 'Use the published tool' } }
+    renderCollapsed(panel())
+    expect(screen.queryByLabelText('Revised workflow')).toBeNull()
+    expect(screen.getByText('Use the published tool')).toBeTruthy()
+    expect(campaign.transitionRelease).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Continue release' }))
+    await screen.findByText('Release continuation requested.')
+    expect(campaign.transitionRelease).toHaveBeenCalledExactlyOnceWith('advance')
+  })
+  it.each(['waiting', 'paused', 'finished', 'cancelled'])('hides revision for %s', status => {
+    campaign.completion.release.status = status
+    renderCollapsed(panel())
+    expect(screen.queryByLabelText('Revised workflow')).toBeNull()
+    expect(campaign.reviseRelease).not.toHaveBeenCalled()
+  })
+})
+
 describe('results-first hierarchy', () => {
   it('keeps requests and technical history collapsed without hiding an unanswered decision', () => {
     campaign.questions = [{ question_id: Q, prompt: 'Which format?', status: 'open' }]

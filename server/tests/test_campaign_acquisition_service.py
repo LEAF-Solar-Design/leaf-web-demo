@@ -212,6 +212,20 @@ def test_reuse_cumulative_publication_without_authoring(setup):
         'acquisition-v1-intent', 'acquisition-v1-publication', 'acquisition-v1-invocation'}
 
 
+def test_revised_contract_uses_new_job_key_and_existing_publication(setup):
+    assert advance(setup)['state'] == 'complete'
+    old_key = setup.state['job']['idempotency_key']
+    setup.release['contract_version'] = 2
+    setup.release['contract']['workflow'] = 'Reuse published tool with a new approach'
+    setup.state.update(row=None, job=None)
+    result = advance(setup)
+    assert result['state'] == 'complete'
+    assert setup.state['job']['idempotency_key'] != old_key
+    assert setup.calls['submit'] == 2
+    assert setup.calls['stage'] == setup.calls['publish'] == 0
+    assert result['publication']['effective_catalog_digest'] == setup.pin.catalog_digest
+
+
 def test_missing_tool_calls_real_author_route_and_resumes_its_reference(setup):
     setup.state['available'] = False
     first = advance(setup, authority_session_id='active-session', authority_turn_id='active-turn')

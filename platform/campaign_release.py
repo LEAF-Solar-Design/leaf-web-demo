@@ -452,7 +452,9 @@ def runnable_releases(limit=20):
 
 
 def revise_contract(org_id, project_id, campaign_id, release_id, principal_id, *,
-                    contract, reason, idempotency_key):
+                    contract, reason, idempotency_key, pause=False):
+    if type(pause) is not bool:
+        _invalid('invalid revision pause')
     _string(reason, 'reason', 4096)
     _string(idempotency_key, 'idempotency_key', 128)
     scope = _params(org_id, project_id, campaign_id, release_id)
@@ -487,7 +489,8 @@ def revise_contract(org_id, project_id, campaign_id, release_id, principal_id, *
         _decision(cur, scope, 'revision:' + idempotency_key, 'revision',
                   dict(contract_version=version, reason=reason, release_boundary=contract['release_boundary'],
                        deferred_items=contract.get('deferred_items', [])), str(principal_id))
-        status = _slot(cur, scope) if row['status'] == 'needs_approach' else row['status']
+        status = 'paused' if pause else (
+            _slot(cur, scope) if row['status'] == 'needs_approach' else row['status'])
         return _public(_update(cur, scope, status))
 
 

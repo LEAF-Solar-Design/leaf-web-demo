@@ -198,9 +198,9 @@ export async function listReleases(projectId, id) {
 }
 
 export async function transitionRelease(projectId, id, releaseId, action, authority) {
-  if (!['pause', 'resume', 'cancel'].includes(action)) invalid('action', 'Choose pause, resume or cancel.')
+  if (!['pause', 'resume', 'cancel', 'advance'].includes(action)) invalid('action', 'Choose pause, resume, cancel or advance.')
   const headers = {}
-  if (action === 'resume' && authority !== undefined) {
+  if (['resume', 'advance'].includes(action) && authority !== undefined) {
     for (const [field, header] of [['sessionId', 'X-Authority-Session-Id'], ['turnId', 'X-Authority-Turn-Id']]) {
       const value = authority?.[field]
       if (typeof value !== 'string' || !UUID_SHAPE.test(value)) invalid('authority', 'The project conversation did not provide valid continuation authority.')
@@ -208,6 +208,12 @@ export async function transitionRelease(projectId, id, releaseId, action, author
     }
   }
   return request(`${releasePath(id, releaseId)}/${action}`, post({ project_id: uuid(projectId, 'project') }, headers))
+}
+
+export async function reviseRelease(projectId, id, releaseId, { workflow, reason, idempotencyKey }) {
+  return request(`${releasePath(id, releaseId)}/revise`, post({ project_id: uuid(projectId, 'project'),
+    workflow: bounded(workflow, 'workflow', 16384), reason: bounded(reason, 'reason', 4096) },
+  { 'Idempotency-Key': bounded(idempotencyKey, 'submission key', 128) }))
 }
 
 export async function retryReleaseStage(projectId, id, releaseId, stage) {

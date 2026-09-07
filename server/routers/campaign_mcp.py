@@ -24,7 +24,7 @@ def tools_list():
     tools = []
     for name in ('campaign.finish', 'campaign.release.get', 'campaign.release.pause',
                  'campaign.release.resume', 'campaign.release.cancel',
-                 'campaign.release.retry', 'campaign.release.advance'):
+                 'campaign.release.retry', 'campaign.release.advance', 'campaign.release.revise'):
         props = dict(_BASE)
         required = ['project_id', 'campaign_id']
         if name == 'campaign.finish':
@@ -34,6 +34,11 @@ def tools_list():
         else:
             props['release_id'] = {'type': 'string', 'format': 'uuid'}
             required.append('release_id')
+        if name == 'campaign.release.revise':
+            props.update(workflow={'type': 'string', 'minLength': 1, 'maxLength': 16384},
+                         reason={'type': 'string', 'minLength': 1, 'maxLength': 4096},
+                         idempotency_key={'type': 'string', 'minLength': 1, 'maxLength': 128})
+            required.extend(['workflow', 'reason', 'idempotency_key'])
         if name == 'campaign.release.retry':
             props['stage'] = {'type': 'string', 'enum': list(releases.STAGES)}
             required.append('stage')
@@ -67,6 +72,9 @@ def call_tool(tenant, name, args, authority_headers=None):
         return campaigns._release_call('completion', releases.create, tenant, project,
                                        campaign, args['finish'], key, **authority_headers)
     campaign, release = campaigns._id(args['campaign_id']), campaigns._id(args['release_id'])
+    if name == 'campaign.release.revise':
+        return campaigns._release_call('completion', releases.revise, tenant, project, campaign, release,
+                                       args['workflow'], args['reason'], args['idempotency_key'])
     if name == 'campaign.release.get':
         return campaigns._release_call('completion', releases.snapshot, tenant, project, campaign, release)
     if name == 'campaign.release.advance':
@@ -89,7 +97,7 @@ async def mcp(request: Request, tenant=Depends(deps.require_tenant)):
         raw = bytearray()
         async for chunk in request.stream():
             raw.extend(chunk)
-            if len(raw) > 65536:
+            if len(raw) > 262144:
                 return _error(None, -32600, 'Request too large')
         body = json.loads(raw)
     except (ValueError, UnicodeError):

@@ -5,6 +5,7 @@ import { requestEnrollment } from './api.js'
 import { submitCampaign, createRelease, getRelease, listReleases, transitionRelease, retryReleaseStage } from './api.js'
 import { downloadReleaseArtifact } from './api.js'
 import { uploadProjectInput } from './api.js'
+import { reviseRelease } from './api.js'
 
 vi.mock('../api.js', () => ({
   config: { apiBase: 'https://campaign.test', tenant: 'test-tenant' },
@@ -22,6 +23,26 @@ beforeEach(() => {
   vi.stubGlobal('fetch', fetcher)
 })
 afterEach(() => { vi.unstubAllGlobals(); localStorage.clear() })
+
+it('sends only workflow revision fields with the same explicit key on retry', async () => {
+  const draft = { workflow: 'Reuse the published tool', reason: 'Recover', idempotencyKey: 'revision-key', contract: { command: 'forged' } }
+  fetcher.mockRejectedValueOnce(new Error('Lost response'))
+  await expect(reviseRelease(P, C, E, draft)).rejects.toThrow()
+  await reviseRelease(P, C, E, draft)
+  expect(fetcher.mock.calls[0]).toEqual(fetcher.mock.calls[1])
+  expect(fetcher.mock.calls[1][0]).toBe(`https://campaign.test/api/campaigns/${C}/releases/${E}/revise`)
+  expect(JSON.parse(fetcher.mock.calls[1][1].body)).toEqual({ project_id: P, workflow: draft.workflow, reason: draft.reason })
+  expect(fetcher.mock.calls[1][1].headers).toMatchObject({ 'Idempotency-Key': 'revision-key', Authorization: 'Bearer test-token' })
+  await transitionRelease(P, C, E, 'advance', { sessionId: P, turnId: E })
+  expect(fetcher.mock.calls[2][0]).toContain('/advance')
+  expect(fetcher.mock.calls[2][1].headers).toMatchObject({ 'X-Authority-Session-Id': P, 'X-Authority-Turn-Id': E })
+})
+
+it.each([{ workflow: '', reason: 'why' }, { workflow: 'new', reason: ' ' },
+  { workflow: 'x'.repeat(16385), reason: 'why' }, { workflow: 'new', reason: 'x'.repeat(4097) }])('rejects invalid revision before transport', async draft => {
+  await expect(reviseRelease(P, C, E, { ...draft, idempotencyKey: 'key' })).rejects.toThrow()
+  expect(fetcher).not.toHaveBeenCalled()
+})
 
 describe('finish input handoff', () => {
   const text = '[{"name":"Alice","total":42}]'
@@ -145,7 +166,7 @@ describe('completion transport', () => {
       `https://campaign.test/api/campaigns/${C}/releases/${E}/retry`,
     ])
     expect(JSON.parse(fetcher.mock.calls[3][1].body)).toEqual({ project_id: P, stage: 'delivery' })
-    await expect(transitionRelease(P, C, E, 'finish')).rejects.toThrow('pause, resume or cancel')
+    await expect(transitionRelease(P, C, E, 'finish')).rejects.toThrow('pause, resume, cancel or advance')
     await expect(retryReleaseStage(P, C, E, 'execute')).rejects.toThrow('release stage')
     expect(fetcher).toHaveBeenCalledTimes(4)
   })

@@ -49,6 +49,52 @@ async function ready() {
   return hook
 }
 
+describe('release workflow recovery', () => {
+  const stalled = { release: { release_id: Q, status: 'needs_approach', contract_version: 1,
+    contract: { workflow: 'Old workflow' } } }
+  const draft = { workflow: 'Reuse published tool', reason: 'Recover failed job' }
+  beforeEach(() => {
+    api.getCampaign.mockResolvedValue({ campaign: row, completion: stalled })
+  })
+  it('retains its revision key after uncertain errors and locks concurrent changes', async () => {
+    const hook = await ready()
+    await waitFor(() => expect(hook.result.current.completion).toEqual(stalled))
+    const pending = deferred()
+    api.reviseRelease.mockReturnValueOnce(pending.promise).mockRejectedValue(new Error('Response lost'))
+    let first
+    await act(async () => {
+      first = hook.result.current.reviseRelease(draft).catch(error => error)
+      expect(await hook.result.current.reviseRelease(draft)).toBeNull()
+    })
+    expect(api.reviseRelease).toHaveBeenCalledTimes(1)
+    expect(hook.result.current.pending.release).toBe(true)
+    await act(async () => { pending.reject(new Error('Response lost')); await first })
+    await act(async () => { await hook.result.current.reviseRelease(draft).catch(() => {}) })
+    expect(api.reviseRelease.mock.calls[0]).toEqual(api.reviseRelease.mock.calls[1])
+    expect(api.reviseRelease.mock.calls[0]).toEqual([P, C, Q, { ...draft, idempotencyKey: expect.any(String) }])
+    await act(async () => { await hook.result.current.reviseRelease({ ...draft, reason: 'Another reason' }).catch(() => {}) })
+    expect(api.reviseRelease.mock.calls[2][3].idempotencyKey).not.toBe(api.reviseRelease.mock.calls[0][3].idempotencyKey)
+    expect(api.transitionRelease).not.toHaveBeenCalled()
+  })
+  it('discards a late revision response after switching projects', async () => {
+    const pending = deferred()
+    api.reviseRelease.mockReturnValue(pending.promise)
+    const hook = renderHook(({ project }) => useCampaigns(project), { initialProps: { project: P } })
+    await waitFor(() => expect(hook.result.current.completion).toEqual(stalled))
+    let request
+    act(() => { request = hook.result.current.reviseRelease(draft) })
+    api.getCampaign.mockResolvedValue({ campaign: row, completion: null })
+    hook.rerender({ project: B })
+    await waitFor(() => expect(hook.result.current.status).toBe('ready'))
+    await act(async () => {
+      pending.resolve({ completion: { release: { ...stalled.release, status: 'active', contract_version: 2 } } })
+      expect(await request).toBeNull()
+    })
+    expect(hook.result.current.completion).toBeNull()
+    expect(api.transitionRelease).not.toHaveBeenCalled()
+  })
+})
+
 describe('release continuation authority', () => {
   const waiting = { release: { release_id: Q, status: 'waiting', contract_version: 1, scope_summary: 'Export CSV' },
     next_action: { wait_kind: 'authority', reason: 'Authoring requires an active project conversation',

@@ -629,6 +629,44 @@ def test_failed_corrections_persist_stop_without_rolling_back_progress(make_org)
     assert releases.finish_release(*scope, row['release_id'])['status'] == 'finished'
 
 
+def test_paused_workflow_revision_requires_explicit_resume(make_org):
+    scope, principal, _ = _seed(make_org)
+    row = _create(scope, principal)
+    _record(scope, row, 'implementation')
+    publication = _record(scope, row, 'publication')
+    evidence = dict(contract_version=1, source_revision='a' * 40, checks=[])
+    for number in range(3):
+        _record(scope, row, 'deployment', status='unavailable', evidence=evidence,
+                operation_key='deployment-attempt-' + str(number))
+        if number < 2:
+            releases.retry_stage(*scope, row['release_id'], principal, stage='deployment')
+    before = releases.get_release(*scope, row['release_id'])
+    assert before['release']['status'] == 'needs_approach'
+    changed = dict(before['release']['contract'], workflow='Reuse the published recipe tool')
+    args = dict(contract=changed, reason='Recover with the published tool',
+                idempotency_key='paused-revision', pause=True)
+    revised = releases.revise_contract(*scope, row['release_id'], principal, **args)
+    assert revised['status'] == 'paused' and revised['contract_version'] == 2
+    assert revised['contract'] == dict(row['contract'], workflow=changed['workflow'])
+    assert row['release_id'] not in {item['release_id'] for item in releases.runnable_releases(200)}
+    _task(scope, 'after-revision')
+    assert _claim(scope) is None
+    replay = releases.revise_contract(*scope, row['release_id'], principal, **args)
+    assert replay['replayed'] and replay['status'] == 'paused' and replay['contract_version'] == 2
+    snapshot = releases.get_release(*scope, row['release_id'])
+    assert snapshot['stages'] == before['stages']
+    assert publication['stage_id'] in {item['stage_id'] for item in snapshot['stages']}
+    assert len(snapshot['decisions']) == len(before['decisions']) + 1
+    assert releases.transition_release(*scope, row['release_id'], principal,
+                                       action='resume', automatic=True)['status'] == 'paused'
+    assert releases.transition_release(*scope, row['release_id'], principal,
+                                       action='resume')['status'] == 'active'
+    assert row['release_id'] in {item['release_id'] for item in releases.runnable_releases(200)}
+    replay = releases.revise_contract(*scope, row['release_id'], principal, **args)
+    assert replay['replayed'] and replay['status'] == 'active' and replay['contract_version'] == 2
+    assert _claim(scope) is not None
+
+
 def test_revision_decision_replay_and_original_ambition(make_org):
     scope, principal, _ = _seed(make_org)
     row = _create(scope, principal)

@@ -243,6 +243,30 @@ function ReleaseOutputs({ campaign, completion, available, urlApi }) {
   </>
 }
 
+function RevisionForm({ campaign, release }) {
+  const [workflow, setWorkflow] = useState(release.contract?.workflow || '')
+  const [reason, setReason] = useState('')
+  const action = useAction()
+  const busy = action.busy || !!campaign.pending.release
+  return <form noValidate onSubmit={event => {
+    event.preventDefault()
+    action.run(() => {
+      check(workflow, 'workflow', 16384)
+      check(reason, 'reason', 4096)
+      return campaign.reviseRelease({ workflow, reason })
+    }, 'Revised approach recorded. Review it before continuing.')
+  }}>
+    <p>Saved inputs, required checks and the original goal are retained.</p>
+    <label>Revised workflow<textarea maxLength={16384} value={workflow} disabled={busy}
+      onChange={event => setWorkflow(event.target.value)} /></label>
+    <label>Reason for changing approach<textarea maxLength={4096} value={reason} disabled={busy}
+      onChange={event => setReason(event.target.value)} /></label>
+    <button type="submit" className="chip-act" disabled={busy} aria-busy={busy}>Record revised approach</button>
+    <Alert error={action.error} onReload={campaign.refetch} />
+    <span role="status">{action.outcome}</span>
+  </form>
+}
+
 function CompletionPanel({ campaign, artifactUrlApi }) {
   const action = useAction()
   const [profile, setProfile] = useState('web_tool')
@@ -298,6 +322,9 @@ function CompletionPanel({ campaign, artifactUrlApi }) {
       <h4>What requires you</h4>
       <EvidenceList items={itemsOf(completion.next_action).map(nextActionText)} />
     </>}
+    {release.status === 'needs_approach' && <RevisionForm key={`${release.release_id}:${release.contract_version}`}
+      campaign={campaign} release={release} />}
+    {release.contract_version > 1 && <><h4>Current workflow</h4><p>{contract.workflow}</p></>}
     {currentFailure && <p role="alert">{currentFailure.reason || 'Current verification is unavailable. Reload the release.'}</p>}
     {itemsOf(completion.remaining).some(textOf) && <EvidenceList items={completion.remaining} />}
     {campaign.questions.some(question => question.status !== 'answered') && <p>Answer the open questions below to record your decisions.</p>}
@@ -327,6 +354,8 @@ function CompletionPanel({ campaign, artifactUrlApi }) {
       fallback="No scope decisions recorded." />
     </details>
     <div className="campaign-release-controls">
+      {release.status === 'active' && release.contract_version > 1 && <button type="button" className="chip-act" disabled={busy}
+        onClick={() => action.run(() => campaign.transitionRelease('advance'), 'Release continuation requested.')}>Continue release</button>}
       {['active', 'queued', 'waiting'].includes(release.status) && <button type="button" className="chip-act" disabled={busy}
         onClick={() => action.run(() => campaign.transitionRelease('pause'), 'Release paused.')}>Pause release</button>}
       {['paused', 'waiting'].includes(release.status) && <button type="button" className="chip-act" disabled={busy}
