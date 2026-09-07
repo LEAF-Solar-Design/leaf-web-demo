@@ -47,6 +47,69 @@ _ADD_KINDS = ("LWPOLYLINE", "LINE", "CIRCLE", "ARC")
 _INSERT_FIELDS = frozenset({"handle", "kind", "layer", "name", "pt", "rot", "scale"})
 V3_ADD_KINDS = ("INSERT", "DIMENSION")
 V3_SET_OPS = ("set_color", "set_linetype", "set_lineweight")
+LINEWEIGHTS = frozenset({-3, -2, -1, 0, 5, 9, 13, 15, 18, 20, 25, 30, 35,
+                        40, 50, 53, 60, 70, 80, 90, 100, 106, 120, 140, 158, 200, 211})
+STYLE_FIELDS = {"color": "aci", "linetype": "name", "lineweight": "weight"}
+_STANDARD_LINETYPES = ("ByLayer", "ByBlock", "Continuous")
+
+
+def _known_linetype_names(intake: Dict[str, Any]) -> List[str]:
+    """Every linetype spelling this drawing is known to carry (w4g-7b-03s-c
+    R6, reordered by w4g-7b-03s-d D3): the head's OWN spellings first, in
+    encounter order and de-duplicated case-insensitively, then the three
+    standard names appended only when no head spelling already matches one
+    case-insensitively. A head whose entity carries "CONTINUOUS" must
+    canonicalize a "continuous" request to "CONTINUOUS", not to the standard
+    "Continuous" that a standard-names-first order would have matched
+    first. RESIDUAL: the intake carries no LTYPE table, so a linetype that
+    is loaded in the drawing but currently unused by every entity is
+    refused here until a later change adds an LT catalogue (the 04s DS
+    pattern is the model); the interpreter itself still accepts any loaded
+    name via `tblsearch`, so this is strictly narrower, never wider, than
+    what the drawing actually supports."""
+    names: List[str] = []
+    seen_lower: set = set()
+    properties = intake.get("properties")
+    if isinstance(properties, dict):
+        for entry in properties.values():
+            if isinstance(entry, dict):
+                name = entry.get("linetype")
+                if isinstance(name, str) and name and name.lower() not in seen_lower:
+                    seen_lower.add(name.lower())
+                    names.append(name)
+    for standard in _STANDARD_LINETYPES:
+        if standard.lower() not in seen_lower:
+            seen_lower.add(standard.lower())
+            names.append(standard)
+    return names
+
+
+def _canonical_linetype_name(value: str, known: List[str]) -> str:
+    """w4g-7b-03s-c R2: canonicalize to the drawing's own spelling on a
+    case-insensitive match (the same rule as the added-INSERT layer
+    canonicalization below), so the interpreter's case-insensitive
+    `tblsearch` and the verifier's case-insensitive comparison never
+    disagree with what the plan actually names."""
+    for candidate in known:
+        if candidate.lower() == value.lower():
+            return candidate
+    raise ValueError(f"linetype {value} is not loaded in this drawing")
+
+
+def _style_value(field: str, value: Any, known_linetypes: List[str]) -> Any:
+    if field == "color":
+        if type(value) is not int or not 0 <= value <= 256:
+            raise ValueError("color aci must be an integer in 0..256")
+    elif field == "lineweight":
+        if type(value) is not int or value not in LINEWEIGHTS:
+            raise ValueError(f"lineweight {value} is not a valid enumeration value")
+    else:
+        if not isinstance(value, str) or not _LAYER_RE.fullmatch(value):
+            raise ValueError("linetype is not a safe linetype name")
+        value = _canonical_linetype_name(value, known_linetypes)
+    return value
+
+
 _TRANSFORM_FIELDS = frozenset({"handle", "dx", "dy", "rotation_deg"})
 _SET_LAYER_FIELDS = frozenset({"handle", "layer"})
 _SET_POINTS_FIELDS = frozenset({"handle", "pts", "closed"})
@@ -213,16 +276,15 @@ def validate_mutations(
     """Strictly validate and canonicalize the frozen mutation data contract."""
     if not isinstance(mutations, dict):
         raise ValueError("result.mutations must be an object")
-    if any(field in mutations for field in V3_SET_OPS):
-        raise ValueError("contract v3 is not enabled on this deployment")
     # `removed_kinds` is a canonical-only annotation this function writes (the
     # kind of each non-polyline removal, for the plan header); on input it is
     # never trusted, only recomputed, so a canonical set re-validates cleanly.
-    unknown = set(mutations) - _MUTATION_FIELDS - {"removed_kinds"}
+    unknown = set(mutations) - _MUTATION_FIELDS - set(V3_SET_OPS) - {"removed_kinds"}
     if unknown:
         raise ValueError(f"unknown mutation fields: {', '.join(sorted(map(str, unknown)))}")
     _reject_raw_fields(mutations)
     index = _index_intake(intake)
+    known_linetypes = _known_linetype_names(intake)
     removed_raw = _op_list(mutations, "removed")
     added_raw = _op_list(mutations, "added")
     transforms_raw = _op_list(mutations, "transforms")
@@ -230,10 +292,11 @@ def validate_mutations(
     set_points_raw = _op_list(mutations, "set_points")
     set_circle_raw = _op_list(mutations, "set_circle")
     set_arc_raw = _op_list(mutations, "set_arc")
+    style_raw = {op: _op_list(mutations, op) for op in V3_SET_OPS}
     op_count = (
         len(removed_raw) + len(added_raw) + len(transforms_raw)
         + len(set_layer_raw) + len(set_points_raw) + len(set_circle_raw)
-        + len(set_arc_raw)
+        + len(set_arc_raw) + sum(len(style_raw[op]) for op in V3_SET_OPS)
     )
     if op_count == 0 and reject_noop:
         raise ValueError("mutations must contain at least one operation")
@@ -394,7 +457,7 @@ def validate_mutations(
         # execution requires the complete transform, not just a capability tag.
         if raw.get("kind") == "INSERT" and set(raw) <= {"kind", "handle", "name"}:
             raise ValueError("contract v3 is not enabled on this deployment")
-        extra = set(raw) - (_INSERT_FIELDS if raw.get("kind") == "INSERT" else _ADDED_FIELDS)
+        extra = set(raw) - (_INSERT_FIELDS if raw.get("kind") == "INSERT" else _ADDED_FIELDS) - set(STYLE_FIELDS)
         if extra:
             raise ValueError(f"added entity at index {position} has unknown fields")
         handle = _handle(raw.get("handle"), f"added[{position}].handle")
@@ -519,10 +582,60 @@ def validate_mutations(
             "start_deg": start, "end_deg": end,
         })
 
+    # Style does not change canonical geometry or the add ordinal.
+    styles = {raw["handle"]: {field: _style_value(field, raw[field], known_linetypes)
+                              for field in STYLE_FIELDS if field in raw}
+              for raw in added_raw}
+    added.sort(key=canonical_json_bytes)
+    for entity in added:
+        entity.update(styles[entity["handle"]])
+    property_index: Dict[str, Tuple[str, Dict[str, Any]]] = {}
+    if any(style_raw.values()):
+        # Only built (and only able to raise on a duplicate insert handle)
+        # when a style op actually needs it: a v1/v2-only plan never pays
+        # for, or is refused by, a property-targeting concern it never uses.
+        property_index = dict(index)
+        for entity in intake.get("inserts") or []:
+            handle = entity.get("handle")
+            if handle in property_index:
+                raise ValueError(f"ambiguous property handle {handle!r}")
+            property_index[handle] = ("INSERT", entity)
     canonical: Dict[str, Any] = {}
+    for op, field in zip(V3_SET_OPS, STYLE_FIELDS):
+        key = STYLE_FIELDS[field]
+        entries = []
+        seen = set()
+        for raw in style_raw[op]:
+            if not isinstance(raw, dict) or set(raw) != {"handle", key}:
+                raise ValueError(f"{op} has unknown or missing fields")
+            handle = _existing_handle(raw["handle"], op)
+            if handle in seen:
+                raise ValueError(f"duplicate {op} handle {handle!r}")
+            if handle in removed_seen:
+                raise ValueError(f"property target {handle!r} is also removed")
+            if handle not in property_index:
+                raise ValueError(f"unknown {op} handle {handle!r}")
+            value = _style_value(field, raw[key], known_linetypes)
+            prop_key = {"color": "aci", "linetype": "linetype", "lineweight": "lineweight"}[field]
+            properties = (intake.get("properties") or {}).get(handle, {})
+            # w4g-7b-03s-d D3: a linetype no-op compares case-insensitively
+            # (the head's own spelling and the canonicalized request may
+            # differ only in case); the other two properties compare exact.
+            current = properties.get(prop_key)
+            if field == "linetype":
+                is_same = (prop_key in properties and isinstance(current, str)
+                           and current.lower() == value.lower())
+            else:
+                is_same = prop_key in properties and current == value
+            if (reject_noop and is_same
+                    and (field != "color" or properties.get("rgb") is None)):
+                raise ValueError(f"{op} {handle!r} is a no-op")
+            seen.add(handle)
+            entries.append({"handle": handle, key: value})
+        if entries:
+            canonical[op] = sorted(entries, key=lambda item: int(item["handle"], 16))
     if added:
-        canonical["added"] = sorted(
-            added, key=lambda item: canonical_json_bytes(item))
+        canonical["added"] = added
     if removed:
         canonical["removed"] = sorted(removed)
     if removed_kinds:
@@ -553,7 +666,8 @@ def uses_v3(canonical: Any) -> bool:
             return True
     added = canonical.get("added")
     return isinstance(added, list) and any(
-        isinstance(entity, dict) and entity.get("kind") in V3_ADD_KINDS
+        isinstance(entity, dict) and (entity.get("kind") in V3_ADD_KINDS
+                                     or any(field in entity for field in STYLE_FIELDS))
         for entity in added
     )
 
@@ -697,6 +811,8 @@ def emit_plan(
         raise ValueError("contract must be 2 or 3")
     version = contract if contract is not None else (
         3 if uses_v3(canonical) else 2 if uses_v2(canonical) else 1)
+    if uses_v3(canonical) and version != 3:
+        raise ValueError("contract v3 is required for property operations")
     lines = [f"LEAF_MUTATION_PLAN|{version}", f"BASE_SHA256|{base_sha256}"]
     for handle in canonical.get("removed", []):
         lines.append(f"REMOVE|{handle}")
@@ -747,6 +863,13 @@ def emit_plan(
             lines.append(
                 f"ADDARC|{layer}|{_fmt3(entity['c'])}|{_fmt(entity['r'])}|"
                 f"{_fmt(entity['start_deg'])}|{_fmt(entity['end_deg'])}")
+    for op, field, tag in zip(V3_SET_OPS, STYLE_FIELDS,
+                              ("SETCOLOR", "SETLINETYPE", "SETLINEWEIGHT")):
+        for item in sorted(canonical.get(op, []), key=lambda item: int(item["handle"], 16)):
+            lines.append(f"{tag}|H:{item['handle']}|{item[STYLE_FIELDS[field]]}")
+        for ordinal, entity in enumerate(canonical.get("added", [])):
+            if field in entity:
+                lines.append(f"{tag}|A:{ordinal}|{entity[field]}")
     plan = ("\n".join(lines) + "\n").encode("utf-8" if version == 3 else "ascii")
     if len(plan) > MAX_PLAN_BYTES:
         raise ValueError("mutation plan exceeds the byte bound")

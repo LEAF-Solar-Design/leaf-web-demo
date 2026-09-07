@@ -398,8 +398,17 @@ def test_v3_activity_adds_insert_and_preserves_v2_apply_script():
     # script changed and must: the old one hangs the console.
     assert hashlib.sha256(script_v2.encode("utf-8")).hexdigest() == (
         "a7ed0bb7dbd8266404574b523550d8103318981c47a927a6ad4c9daab07f6c35")
-    assert hashlib.sha256(v2_settings["inspectScript"]["value"].encode("utf-8")).hexdigest() == (
-        "56d279f80d5e2898e6b588e6e36e16750a1f53edf5546b8351b9bdb59d3c6588")
+    # W4g-7b-3s added an EP block to the shared inspect script (colour /
+    # linetype / lineweight), so its exact byte pin moved; assert the new
+    # structural invariant directly instead of a hand-computed hash: exactly
+    # one EP progn, positioned after every geometry sequence (LN/CI/AR) and
+    # before the BK catalogue, as the spec requires.
+    inspect_script = v2_settings["inspectScript"]["value"]
+    assert inspect_script.count('"EP|"') == 1
+    ar_index = inspect_script.index('(cons 0 "ARC")')
+    ep_index = inspect_script.index('"EP|"')
+    bk_index = inspect_script.index("leaf-bk-point")
+    assert ar_index < ep_index < bk_index
     assert script_v2.count(headers_v2) == 1
     assert "LEAF_MUTATION_PLAN|3" not in script_v2
     assert script_v3.count(headers_v3) == 1
@@ -409,6 +418,18 @@ def test_v3_activity_adds_insert_and_preserves_v2_apply_script():
         assert script_v3.count(f"LEAF_MUTATION_PLAN|{version}") == 1
     parser_v3 = next(line for line in script_v3.splitlines() if line.startswith("(defun leaf-parse-line"))
     assert '((= (car v) "ADDINSERT") (leaf-addinsert-op v))' in parser_v3
+    # W4g-7b-3s: the three common-property setters (contract v3 only).
+    for fn in ("leaf-apply-setcolor", "leaf-apply-setlinetype", "leaf-apply-setlineweight"):
+        assert fn in script_v3 and fn not in script_v2
+    for tag in ("SETCOLOR", "SETLINETYPE", "SETLINEWEIGHT"):
+        assert tag in script_v3 and tag not in script_v2
+    assert "(setq leaf-created nil)" in script_v3
+    setcolor_line = next(
+        line for line in script_v3.splitlines() if line.startswith("(defun leaf-apply-setcolor"))
+    assert "420" in setcolor_line and "430" in setcolor_line
+    setlinetype_line = next(
+        line for line in script_v3.splitlines() if line.startswith("(defun leaf-apply-setlinetype"))
+    assert 'tblsearch "LTYPE"' in setlinetype_line
     assert v3["settings"]["inspectScript"] == v2_settings["inspectScript"]
     assert '(rtos (cond (rot rot)(T 0.0)) 2 5)' in v3["settings"]["inspectScript"]["value"]
     assert '(rtos (cond (rot rot)(T 0.0)) 2 6)' not in v3["settings"]["inspectScript"]["value"]
@@ -707,7 +728,10 @@ def test_catalogue_lisp_looks_up_the_raw_name_and_encodes_only_record_fields():
     from lisp import MUTATION_INSPECT_BLOCKS
 
     # Helpers now occupy separate lines before the catalogue emission progn.
-    helper = "\n".join(MUTATION_INSPECT_BLOCKS[3:-1])
+    # Index 3 is the W4g-7b-3s EP (colour/linetype/lineweight) block, ahead
+    # of the BK helper defuns tested here; skip it explicitly.
+    assert MUTATION_INSPECT_BLOCKS[3].startswith('(progn (setq f (open "{OUT}" "a")) (setq ss (ssget "_X" (list (cons -4 "<OR")')
+    helper = "\n".join(MUTATION_INSPECT_BLOCKS[4:-1])
     catalogue = MUTATION_INSPECT_BLOCKS[-1]
     assert '(setq name (cdr (assoc 2 bk)))' in catalogue
     assert '(entnext (tblobjname "BLOCK" name))' in catalogue

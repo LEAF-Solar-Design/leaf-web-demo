@@ -133,11 +133,20 @@ def test_v3_adds_are_declared_but_refused(kind):
 
 @pytest.mark.parametrize("operation", mutation_plan.V3_SET_OPS)
 @pytest.mark.parametrize("entries", [[], [{"handle": "A", "value": 7}]])
-def test_v3_property_keys_are_refused_even_when_empty(operation, entries):
+def test_v3_property_keys_admit_empty_and_refuse_malformed(operation, entries):
     mutation = {operation: entries}
     assert mutation_plan.uses_v3(mutation) is bool(entries)
-    with pytest.raises(ValueError, match=f"^{V3_DISABLED}$"):
-        mutation_plan.validate_mutations({"polylines": []}, mutation)
+    added = [{"handle": "new-line", "kind": "LINE", "layer": "0", "pts": [[0, 0], [3, 4]]}]
+    combined = {"added": added, operation: entries}
+    if entries:
+        with pytest.raises(ValueError, match=f"^{operation} has unknown or missing fields$"):
+            mutation_plan.validate_mutations({"polylines": []}, combined)
+    else:
+        canonical = mutation_plan.validate_mutations({"polylines": []}, combined)
+        assert operation not in canonical
+        assert mutation_plan.uses_v3(canonical) is False
+        plan = mutation_plan.emit_plan(canonical, base_sha256=BASE_SHA)
+        assert plan == mutation_plan.emit_plan(_line_plan(), base_sha256=BASE_SHA)
 
 
 @pytest.mark.parametrize("value", [

@@ -62,6 +62,104 @@ def test_synthetic_handles_become_unique_hex_above_the_real_ones():
     assert [p["pts"] for p in back["polylines"]] == [p["pts"] for p in intake["polylines"]]
 
 
+def test_properties_round_trip_62_6_370_and_are_absent_for_an_untouched_entity():
+    # W4g-7b-03s: colour/linetype/lineweight travel through 62/6/370 (rgb,
+    # when present, also travels through 420 as of w4g-7b-03s-d D2; the
+    # write contract itself only ever sets an ACI, never rgb) and only for a
+    # handle `properties` actually names; an untouched entity carries none
+    # of the four groups, so it round-trips with no `properties` entry.
+    intake = {"layers": ["A"], "polylines": [
+        {"layer": "A", "closed": False, "pts": [[0, 0, 0], [1, 0, 0]], "xdata": None, "handle": "10"},
+        {"layer": "A", "closed": False, "pts": [[0, 0, 0], [2, 0, 0]], "xdata": None, "handle": "11"},
+    ], "properties": {"10": {"aci": 1, "rgb": None, "linetype": "Continuous", "lineweight": 25}}}
+    back, data = _roundtrip(intake)
+    assert b"\n62\n1\n" in data and b"\n6\nContinuous\n" in data and b"\n370\n25\n" in data
+    assert b"\n420\n" not in data
+    assert back["properties"] == {"10": {"aci": 1, "rgb": None, "linetype": "Continuous", "lineweight": 25}}
+    assert "11" not in back["properties"]
+
+
+def test_true_colour_rgb_round_trips_through_420():
+    # w4g-7b-03s-d D2: a record carrying a non-null rgb emits 420 (immediately
+    # after 62), and the reader's own 420 -> rgb mapping reads it back.
+    intake = {"layers": ["A"], "polylines": [
+        {"layer": "A", "closed": False, "pts": [[0, 0, 0], [1, 0, 0]], "xdata": None, "handle": "10"},
+    ], "properties": {"10": {"aci": 1, "rgb": [10, 20, 30], "linetype": "ByLayer", "lineweight": -1}}}
+    back, data = _roundtrip(intake)
+    assert b"\n420\n660510\n" in data
+    assert data.index(b"\n420\n") > data.index(b"\n62\n1\n")
+    assert back["properties"]["10"] == {"aci": 1, "rgb": [10, 20, 30], "linetype": "ByLayer", "lineweight": -1}
+
+
+def test_negative_62_is_the_layer_off_flag_and_stores_its_magnitude():
+    # w4g-7b-03s-d D1: a negative colour is AutoCAD's "layer off" flag; the
+    # ACI the entity actually carries is the magnitude.
+    text = "\n".join([
+        "0", "SECTION", "2", "ENTITIES",
+        "0", "LINE", "8", "0",
+        "10", "0.0", "20", "0.0", "30", "0.0",
+        "11", "1.0", "21", "0.0", "31", "0.0",
+        "62", "-7", "5", "3B",
+        "0", "ENDSEC", "0", "EOF", "",
+    ])
+    out = dxf_intake.parse_dxf_bytes(text.encode("utf-8"))
+    assert out["properties"]["3B"]["aci"] == 7
+    assert "propertiesDropped" not in out
+
+
+def test_out_of_range_62_and_370_are_dropped_and_counted():
+    # w4g-7b-03s-d D1: a value the writer would refuse (intake_dxf's 0..256
+    # aci bound, its lineweight enumeration) is never stored; it is dropped
+    # (reads as absent/default) and counted in propertiesDropped so an
+    # uploaded DXF carrying either never becomes unopenable on its own next
+    # intake_to_dxf leg.
+    text = "\n".join([
+        "0", "SECTION", "2", "ENTITIES",
+        "0", "LINE", "8", "0",
+        "10", "0.0", "20", "0.0", "30", "0.0",
+        "11", "1.0", "21", "0.0", "31", "0.0",
+        "62", "300", "370", "26", "5", "3B",
+        "0", "ENDSEC", "0", "EOF", "",
+    ])
+    out = dxf_intake.parse_dxf_bytes(text.encode("utf-8"))
+    assert out["properties"]["3B"]["aci"] == 256
+    assert out["properties"]["3B"]["lineweight"] == -1
+    assert out["propertiesDropped"] == 2
+
+
+def test_every_reader_property_branch_round_trips_through_the_writer_without_raising():
+    # w4g-7b-03s-d D1 pin: intake_to_dxf must accept every intake the reader
+    # emits, including the normalized/dropped branches above, so a DXF that
+    # exercised all of them stays openable on its own next write.
+    long_linetype = "L" * 300
+    text = "\n".join([
+        "0", "SECTION", "2", "ENTITIES",
+        "0", "LINE", "8", "0",  # negative aci -> layer-off magnitude
+        "10", "0.0", "20", "0.0", "30", "0.0",
+        "11", "1.0", "21", "0.0", "31", "0.0",
+        "62", "-7", "5", "10",
+        "0", "LINE", "8", "0",  # out-of-range aci and lineweight -> dropped
+        "10", "0.0", "20", "0.0", "30", "0.0",
+        "11", "2.0", "21", "0.0", "31", "0.0",
+        "62", "300", "370", "26", "5", "11",
+        "0", "LINE", "8", "0",  # oversized linetype -> dropped
+        "10", "0.0", "20", "0.0", "30", "0.0",
+        "11", "3.0", "21", "0.0", "31", "0.0",
+        "6", long_linetype, "5", "12",
+        "0", "LINE", "8", "0",  # valid linetype/lineweight + true colour
+        "10", "0.0", "20", "0.0", "30", "0.0",
+        "11", "4.0", "21", "0.0", "31", "0.0",
+        "6", "DASHED", "370", "25", "62", "1", "420", "660510", "5", "13",
+        "0", "ENDSEC", "0", "EOF", "",
+    ])
+    first = dxf_intake.parse_dxf_bytes(text.encode("utf-8"))
+    assert first["propertiesDropped"] == 3
+    data = intake_dxf.intake_to_dxf(first)
+    second = dxf_intake.parse_dxf_bytes(data, source_name=first["dwg"])
+    assert second["properties"] == first["properties"]
+    assert second["polylines"] == first["polylines"]
+
+
 def test_mixed_z_polyline_takes_the_3d_polyline_path_and_keeps_every_z():
     intake = {"layers": ["Z"], "polylines": [
         {"layer": "Z", "closed": False, "pts": [[0, 0, 1.5], [1, 0, 2.5], [1, 1, -3.25]], "xdata": None, "handle": "2A"},

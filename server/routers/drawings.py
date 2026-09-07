@@ -1077,7 +1077,7 @@ def save_plan_version(drawing_id: str,
     names_an_op = any(
         isinstance(mutations.get(field), list) and mutations.get(field)
         for field in ("added", "removed", "transforms", "set_layer", "set_points",
-                      "set_circle", "set_arc")
+                      "set_circle", "set_arc", *mutation_plan.V3_SET_OPS)
     )
 
     received = _receive_edited_dxf(file, source_digest)
@@ -1205,8 +1205,36 @@ def save_plan_version(drawing_id: str,
                             )
                         if differs:
                             raise ValueError("an unchanged entity differs from the head")
-            write_loop.verify_live_mutation_effects(
+            # W4g-7b-3s: an entity the plan does not name in set_color /
+            # set_linetype / set_lineweight must keep its 62 / 6 / 370 groups
+            # exactly (absent == ByLayer). w4g-7b-03s-c R1: the head's EP
+            # block is dense (every field defaulted) while dxf_intake's
+            # reading of the uploaded DXF is sparse (no entry at all when
+            # none of 62/6/370/420 are present), so both sides go through
+            # the same ByLayer/absent default (case-insensitive linetype,
+            # rgb as a 3-tuple or None) before comparing, or an untouched
+            # entity 422s the instant the EP block ships.
+            styled_handles = {str(entry["handle"]) for op in mutation_plan.V3_SET_OPS
+                              for entry in canonical.get(op, [])}
+            base_properties = quantized_base.get("properties") or {}
+            upload_properties = quantized_upload.get("properties") or {}
+            base_entity_handles = {
+                str(entity["handle"]) for field in ("polylines", "circles", "arcs", "inserts")
+                for entity in (quantized_base.get(field) or [])
+                if isinstance(entity, dict) and entity.get("handle")
+            }
+            for handle in base_entity_handles:
+                if handle in styled_handles or handle in named_handles:
+                    continue
+                if not write_loop.unchanged_property_effect_ok(
+                        base_properties.get(handle), upload_properties.get(handle)):
+                    raise ValueError(f"unchanged entity {handle!r} properties differ from the head")
+            properties_note = write_loop.verify_live_mutation_effects(
                 expected_base, quantized_upload, canonical)
+            if properties_note and (styled_handles or any(
+                    field in entity for entity in canonical.get("added", [])
+                    for field in mutation_plan.STYLE_FIELDS)):
+                raise ValueError(properties_note)
         except ValueError as exc:
             return error_response(ErrorCode.BAD_PARAMS,
                                   f"the uploaded DXF does not carry the plan's result: {exc}",

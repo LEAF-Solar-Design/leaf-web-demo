@@ -897,6 +897,18 @@ def apply_mutations(intake: Dict[str, Any], mutations: Dict[str, Any]) -> Dict[s
         entity["r"] = item["r"]
         entity["start_deg"] = item["start_deg"]
         entity["end_deg"] = item["end_deg"]
+    # W4g-7b-3s: the three common properties, keyed by handle like the EP
+    # inspect record (da/intake_parse.py); an existing record is updated in
+    # place (a fresh set_color drops any stale `rgb`, since the ACI now wins).
+    properties = new.setdefault("properties", {})
+    for item in mutations.get("set_color") or []:
+        entry = properties.setdefault(item["handle"], {})
+        entry["aci"] = item["aci"]
+        entry["rgb"] = None
+    for item in mutations.get("set_linetype") or []:
+        properties.setdefault(item["handle"], {})["linetype"] = item["name"]
+    for item in mutations.get("set_lineweight") or []:
+        properties.setdefault(item["handle"], {})["lineweight"] = item["weight"]
     added = mutations.get("added") or []
     if added:
         polys = new.setdefault("polylines", [])
@@ -925,6 +937,18 @@ def apply_mutations(intake: Dict[str, Any], mutations: Dict[str, Any]) -> Dict[s
                     "r": e["r"], "start_deg": e["start_deg"], "end_deg": e["end_deg"],
                     "nrm": [0.0, 0.0, 1.0]})
             note_layer(e.get("layer"))
+            style = {}
+            if "color" in e:
+                style["aci"] = e["color"]
+                style["rgb"] = None
+            if "linetype" in e:
+                style["linetype"] = e["linetype"]
+            if "lineweight" in e:
+                style["lineweight"] = e["lineweight"]
+            if style:
+                properties.setdefault(e["handle"], {}).update(style)
+    if not properties:
+        new.pop("properties", None)
     return new
 
 
@@ -1514,11 +1538,150 @@ def _max_bipartite_match(adjacency: list[list[int]], right_count: int) -> list[O
     return assignment
 
 
+_PROPERTY_OP_NAMES = {"aci": "set_color", "linetype": "set_linetype", "lineweight": "set_lineweight"}
+_PROPERTY_DEFAULTS: Dict[str, Any] = {"aci": 256, "rgb": None, "linetype": "ByLayer", "lineweight": -1}
+
+
+def _linetype_key(name: Any) -> str:
+    """DXF LTYPE names compare case-insensitively (tblsearch does); this is
+    the one fold both `normalize_property_record` and `_verify_property_effects`
+    use, so the route's default-merge and the verifier's exact-value check
+    never drift onto two different notions of "the same linetype"."""
+    return str(name if name is not None else "ByLayer").lower()
+
+
+def normalize_property_record(record: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Merge a possibly-absent properties entry onto the ByLayer/absent
+    default (w4g-7b-03s-c R1). da/intake_parse.py's EP block is dense: once
+    any of 62/6/370/420 is present it fills every field, defaulting the rest.
+    server/dxf_intake.py's reading of an uploaded DXF is sparse: an entity
+    with none of those groups gets NO entry at all. Comparing a dense head
+    record against a missing upload record raw would 422 every untouched
+    entity the instant the EP block ships; normalizing both sides through
+    this one default first is the fix. rgb compares as a 3-tuple or None;
+    linetype compares case-insensitively via `_linetype_key`."""
+    merged = dict(_PROPERTY_DEFAULTS)
+    if isinstance(record, dict):
+        merged.update(record)
+    rgb = merged.get("rgb")
+    merged["rgb"] = tuple(rgb) if isinstance(rgb, (list, tuple)) else None
+    merged["linetype"] = _linetype_key(merged.get("linetype"))
+    return merged
+
+
+def unchanged_property_effect_ok(
+    base_record: Optional[Dict[str, Any]], upload_record: Optional[Dict[str, Any]],
+) -> bool:
+    """The route's unchanged-property guard (server/routers/drawings.py): an
+    entity the plan does not name in set_color / set_linetype /
+    set_lineweight, or as a styled add, must keep its properties exactly
+    (62 / 6 / 370 at the group level, absent == ByLayer)."""
+    return normalize_property_record(base_record) == normalize_property_record(upload_record)
+
+
+def _styled_add_matches_properties(
+    entity: Dict[str, Any], actual_properties: Any, handle: str,
+) -> bool:
+    """Tie-break only (w4g-7b-03s-c R4): True when the add carries no style
+    at all, or every style field it declares equals the candidate output
+    entity's own EP record. Used purely to order which of several
+    geometrically-identical (coincident) candidates a styled add binds to;
+    it never relaxes the geometry match itself, so a mismatch here still
+    surfaces downstream as `_verify_property_effects`'s exact refusal."""
+    style: Dict[str, Any] = {}
+    if "color" in entity:
+        style["aci"] = entity["color"]
+    if "linetype" in entity:
+        style["linetype"] = entity["linetype"]
+    if "lineweight" in entity:
+        style["lineweight"] = entity["lineweight"]
+    if not style:
+        return True
+    values = actual_properties.get(handle) if isinstance(actual_properties, dict) else None
+    if not isinstance(values, dict):
+        return False
+    for key, expected in style.items():
+        found = values.get(key)
+        if key == "linetype":
+            if _linetype_key(found) != _linetype_key(expected):
+                return False
+        elif found != expected:
+            return False
+    return True
+
+
+def _verify_property_effects(
+    actual: Dict[str, Any], canonical: Dict[str, Any], matched_handles: Dict[str, str],
+) -> Optional[str]:
+    """The colour/linetype/lineweight half: every setter's target, and every
+    styled add's matched output entity (`matched_handles`, filled in by the
+    geometry passes below), must read back the exact value or this refuses.
+    An `actual` with no `properties` at all (a legacy inspect that predates
+    the EP record) is tolerated for geometry but cannot be checked here, so
+    it is reported back to the caller as an UNVERIFIED note, never silently
+    treated as a pass."""
+    wants: Dict[str, Dict[str, Any]] = {}
+    for item in canonical.get("set_color") or []:
+        wants.setdefault(item["handle"], {})["aci"] = item["aci"]
+    for item in canonical.get("set_linetype") or []:
+        wants.setdefault(item["handle"], {})["linetype"] = item["name"]
+    for item in canonical.get("set_lineweight") or []:
+        wants.setdefault(item["handle"], {})["lineweight"] = item["weight"]
+    for entity in canonical.get("added") or []:
+        if not any(field in entity for field in ("color", "linetype", "lineweight")):
+            continue
+        actual_handle = matched_handles.get(entity["handle"])
+        if actual_handle is None:
+            continue
+        style = wants.setdefault(actual_handle, {})
+        if "color" in entity:
+            style["aci"] = entity["color"]
+        if "linetype" in entity:
+            style["linetype"] = entity["linetype"]
+        if "lineweight" in entity:
+            style["lineweight"] = entity["lineweight"]
+    if not wants:
+        return None
+    actual_properties = actual.get("properties")
+    if not isinstance(actual_properties, dict):
+        return ("property effects unverified: the re-extracted output carries "
+                "no properties record")
+    for handle, expected_values in wants.items():
+        actual_values = actual_properties.get(handle)
+        if not isinstance(actual_values, dict):
+            raise ValueError(f"property target {handle!r} is missing from the output properties")
+        for key, value in expected_values.items():
+            found = actual_values.get(key)
+            # w4g-7b-03s-c R2: an admitted linetype whose case differs from
+            # the LTYPE table applies fine (tblsearch is case-insensitive)
+            # but must not then be refused by an exact string comparison.
+            matches = (_linetype_key(found) == _linetype_key(value)
+                       if key == "linetype" else found == value)
+            if not matches:
+                op = _PROPERTY_OP_NAMES[key]
+                raise ValueError(
+                    f"{op} {handle!r} not applied: expected {value!r}, found {found!r}")
+            if key == "aci" and actual_values.get("rgb") is not None:
+                # An explicit ACI wins over a true colour only while both are
+                # readable; a set_color's contract is to REMOVE 420, so a
+                # true colour still present means the interpreter's group-420
+                # strip did not happen (or a DXF-upload client never dropped it).
+                raise ValueError(
+                    f"set_color {handle!r} not applied: a true colour (420) is still present")
+    return None
+
+
 def verify_live_mutation_effects(
     base: Dict[str, Any], actual: Dict[str, Any], canonical: Dict[str, Any],
-) -> None:
-    """Refuse publication unless extraction proves exactly the proposed effects."""
+) -> Optional[str]:
+    """Refuse publication unless extraction proves exactly the proposed effects.
+
+    Returns None on a fully-verified pass, or a note string when geometry
+    verified but the property effects (colour/linetype/lineweight) could not
+    be checked against this `actual` (see `_verify_property_effects`).
+    """
     expected = apply_mutations(base, canonical)
+    matched_handles: Dict[str, str] = {}
     # Unchanged INSERTs retain their complete records by handle. Added ones
     # first bind their temporary handles to the actual name and geometry.
     insert_indexes = []
@@ -1567,6 +1730,7 @@ def verify_live_mutation_effects(
             matched = unmatched_inserts[right_index]
             insert_indexes[0].pop(entity["handle"])
             insert_indexes[1].pop(matched["handle"])
+            matched_handles[entity["handle"]] = matched["handle"]
             entity["handle"] = matched["handle"]
     if insert_indexes[0] != insert_indexes[1]:
         raise ValueError("unchanged INSERT has unexpected output geometry")
@@ -1580,7 +1744,7 @@ def verify_live_mutation_effects(
     # polylines (LINE included, as a 2-point polyline): everything the plan
     # names carries its expected geometry, everything else is untouched,
     # every add is matched by kind and geometry, and no extra entity appears.
-    _verify_round_effects(base, actual, expected, canonical)
+    _verify_round_effects(base, actual, expected, canonical, matched_handles)
     base_polylines = base.get("polylines") or []
     actual_polylines = actual.get("polylines") or []
     if not isinstance(actual_polylines, list):
@@ -1656,6 +1820,16 @@ def verify_live_mutation_effects(
             if item.get("kind", "LWPOLYLINE") in ("LWPOLYLINE", "LINE")
         }
     ]
+    # w4g-7b-03s-c R4: match every styled add before any plain one (stable
+    # sort keeps each group's own canonical order), so a plain add can never
+    # greedily consume, ahead of a styled add's own turn, the one coincident
+    # candidate that actually carries the styled add's properties.
+    _styled_add_handles = {
+        item["handle"] for item in canonical.get("added", [])
+        if any(field in item for field in ("color", "linetype", "lineweight"))
+    }
+    added_polylines.sort(
+        key=lambda entity: str(entity.get("handle")) in _styled_add_handles, reverse=True)
     if len(unmatched) != len(added_polylines):
         raise ValueError("re-extracted output has unexpected new entities")
     for entity in added_polylines:
@@ -1664,14 +1838,21 @@ def verify_live_mutation_effects(
             (index for index, candidate in enumerate(unmatched)
              if isinstance(candidate, dict)
              and _polyline_effect_matches(entity, candidate, extracted=True)),
-            key=lambda index: max(
-                abs(left - right)
-                for point, candidate_point in zip(expected_points, unmatched[index]["pts"])
-                for left, right in zip(point, candidate_point)),
+            key=lambda index: (
+                max(abs(left - right)
+                    for point, candidate_point in zip(expected_points, unmatched[index]["pts"])
+                    for left, right in zip(point, candidate_point)),
+                # w4g-7b-03s-c R4: on an exact geometric tie (coincident
+                # adds), prefer the candidate whose own properties already
+                # match this add's declared style over the next tied one.
+                0 if _styled_add_matches_properties(
+                    entity, actual.get("properties"), unmatched[index]["handle"]) else 1,
+            ),
             default=None,
         )
         if match_index is None:
             raise ValueError(f"added polyline {entity['handle']!r} is missing from output")
+        matched_handles[entity["handle"]] = unmatched[match_index]["handle"]
         unmatched.pop(match_index)
     if unmatched:
         raise ValueError("re-extracted output has unmatched new entities")
@@ -1679,6 +1860,7 @@ def verify_live_mutation_effects(
     # check and to keep mock/live validation on one implementation.
     if len(expected.get("polylines") or []) != expected_count:
         raise ValueError("canonical mutation application produced an invalid count")
+    return _verify_property_effects(actual, canonical, matched_handles)
 
 
 def _round_effect_matches(expected: Dict[str, Any], actual: Dict[str, Any], *, arc: bool) -> bool:
@@ -1704,16 +1886,24 @@ def _round_effect_matches(expected: Dict[str, Any], actual: Dict[str, Any], *, a
 
 def _verify_round_effects(
     base: Dict[str, Any], actual: Dict[str, Any], expected: Dict[str, Any],
-    canonical: Dict[str, Any],
+    canonical: Dict[str, Any], matched_handles: Dict[str, str],
 ) -> None:
     """The circle and arc half of verify_live_mutation_effects."""
     removed = set(canonical.get("removed", []))
     replaced = {item["handle"] for item in canonical.get("set_circle", [])}
     replaced |= {item["handle"] for item in canonical.get("set_arc", [])}
     replaced |= {item["handle"] for item in canonical.get("set_layer", [])}
+    # w4g-7b-03s-c R4: styled adds match before plain ones within each kind
+    # (same reasoning as the polyline/LINE matcher above).
     added_by_kind = {
-        "CIRCLE": [e for e in canonical.get("added", []) if e.get("kind") == "CIRCLE"],
-        "ARC": [e for e in canonical.get("added", []) if e.get("kind") == "ARC"],
+        "CIRCLE": sorted(
+            (e for e in canonical.get("added", []) if e.get("kind") == "CIRCLE"),
+            key=lambda e: any(field in e for field in ("color", "linetype", "lineweight")),
+            reverse=True),
+        "ARC": sorted(
+            (e for e in canonical.get("added", []) if e.get("kind") == "ARC"),
+            key=lambda e: any(field in e for field in ("color", "linetype", "lineweight")),
+            reverse=True),
     }
     for field, kind in (("circles", "CIRCLE"), ("arcs", "ARC")):
         base_rows = base.get(field) or []
@@ -1761,10 +1951,15 @@ def _verify_round_effects(
                             (unmatched[index][key] - entity[key]) % 360.0)
                         for key in ("start_deg", "end_deg")) if kind == "ARC" else 0.0,
                     abs(entity["r"] - unmatched[index]["r"]),
+                    # w4g-7b-03s-c R4: same coincident-add tie-break as the
+                    # polyline/LINE matcher above.
+                    0 if _styled_add_matches_properties(
+                        entity, actual.get("properties"), unmatched[index]["handle"]) else 1,
                 ), default=None,
             )
             if match_index is None:
                 raise ValueError(f"added {kind} {entity['handle']!r} is missing from output")
+            matched_handles[entity["handle"]] = unmatched[match_index]["handle"]
             unmatched.pop(match_index)
         if unmatched:
             raise ValueError("re-extracted output has unmatched new entities")
@@ -2159,9 +2354,15 @@ def _apply_plan_live(*, tenant_id: str, drawing_id: str, head_v: int,
     normalized_base = copy.deepcopy(base_intake)
     normalized_base["dwg"] = drawing_id
     try:
-        verify_live_mutation_effects(normalized_base, output_intake, canonical)
+        properties_note = verify_live_mutation_effects(normalized_base, output_intake, canonical)
     except ValueError as exc:
         raise LiveMutationEffectMismatch(str(exc)) from exc
+    if properties_note:
+        # w4g-7b-03s-c R3: the route's DXF preflight refuses on this same
+        # note (server/routers/drawings.py); the live leg must fail closed
+        # too rather than publish a version whose property effects were
+        # never actually confirmed.
+        raise LiveMutationEffectMismatch(properties_note)
     output_inspection_ms = int(
         (time.perf_counter() - output_inspection_started) * 1000)
 
