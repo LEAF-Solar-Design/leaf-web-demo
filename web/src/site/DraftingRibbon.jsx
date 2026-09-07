@@ -30,7 +30,7 @@
 // run" uses (onRequestRun -> commitCatalogDecision, source 'ribbon'). NEVER
 // dispatchSlash here: that stamps slash provenance into the P2 funnel and
 // silently no-ops on gated writes.
-import { useLayoutEffect, useRef } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
 
 import { accessibleName } from '../lib/actionRegistry.js'
 import { formatElementId } from '../lib/elementIdentity.js'
@@ -100,12 +100,19 @@ export function RibbonWidget({ widget }) {
   // passed. A mouse/pointer pick still applies at once; once an arrow key
   // is seen since focus, `change` only buffers the value, and it applies
   // ONCE, on Enter or on blur, with whatever the last buffered value was.
+  // W4g-7b-03c-h D1: the select is CONTROLLED (`value` below), so the buffer
+  // must live in STATE, not a ref — React restores a controlled select to
+  // its `value` prop after every change event, so a ref-only buffer could
+  // never move the displayed value past the option adjacent to `value`, and
+  // the value that applied on Enter/blur was never the one shown. `walk`
+  // renders in place of `value` while a keyboard walk is in progress; Escape
+  // clears it with no commit, matching the reference's own Esc-abandons.
   const keyboardWalkRef = useRef(false)
-  const pendingValueRef = useRef(null)
-  const commitPending = () => {
-    if (pendingValueRef.current === null) return
-    const next = pendingValueRef.current
-    pendingValueRef.current = null
+  const [walk, setWalk] = useState(null)
+  const commitWalk = () => {
+    if (walk === null) return
+    const next = walk
+    setWalk(null)
     onChange?.(next)
   }
   return (
@@ -113,19 +120,20 @@ export function RibbonWidget({ widget }) {
       <span className="ribbon-note">{label}</span>
       <select
         aria-label={accessibleName(label, unavailable ? reason : '')}
-        value={value}
+        value={walk ?? value}
         disabled={disabled}
-        onFocus={() => { keyboardWalkRef.current = false; pendingValueRef.current = null }}
+        onFocus={() => { keyboardWalkRef.current = false; setWalk(null) }}
         onKeyDown={(event) => {
           if (event.key === 'ArrowUp' || event.key === 'ArrowDown') keyboardWalkRef.current = true
-          else if (event.key === 'Enter' && keyboardWalkRef.current) commitPending()
+          else if (event.key === 'Enter' && keyboardWalkRef.current) commitWalk()
+          else if (event.key === 'Escape') { keyboardWalkRef.current = false; setWalk(null) }
         }}
         onChange={(event) => {
-          if (keyboardWalkRef.current) { pendingValueRef.current = event.target.value; return }
+          if (keyboardWalkRef.current) { setWalk(event.target.value); return }
           onChange?.(event.target.value)
         }}
         onBlur={() => {
-          if (keyboardWalkRef.current) commitPending()
+          if (keyboardWalkRef.current) commitWalk()
           keyboardWalkRef.current = false
         }}
       >

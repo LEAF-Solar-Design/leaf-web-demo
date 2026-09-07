@@ -569,6 +569,20 @@ export function formatAci(aci) {
   return name ? `${name} (${aci})` : `index ${aci}`
 }
 
+// W4g-7b-03c-h D2: the honest reading for a TRUE-COLOURED entity, which the
+// projection carries as trueColor [r, g, b] alongside aci, the nearest
+// standard index (approximate_index) — reading aci alone reported an RGB
+// entity as its nearest name outright, with no sign the colour was ever
+// approximate. A non-finite aci (an entity the engine could not classify)
+// reads as 256, the same ByLayer floor formatAci itself falls back to.
+export function formatColor(entity) {
+  const aci = Number.isFinite(entity?.aci) ? entity.aci : 256
+  const trueColor = entity?.trueColor
+  if (!Array.isArray(trueColor) || trueColor.length !== 3) return formatAci(aci)
+  const [r, g, b] = trueColor
+  return `rgb(${r},${g},${b}) (nearest ${formatAci(aci)})`
+}
+
 function parseAci(raw) {
   const text = String(raw ?? '').trim()
   if (/^bylayer$/i.test(text)) return 256

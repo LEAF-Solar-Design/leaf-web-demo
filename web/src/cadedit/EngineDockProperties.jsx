@@ -21,7 +21,7 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 
 import { useEngineSessionOptional } from './EngineSessionProvider.jsx'
-import { formatAci, formatLineweight } from './engineSession.js'
+import { formatColor, formatLineweight } from './engineSession.js'
 
 export const DOCK_PROPERTIES_SLOT_ID = 'cockpit-dock-properties-slot'
 
@@ -48,7 +48,7 @@ export default function EngineDockProperties() {
   if (!slot || !entity) return null
   return createPortal(
     <dl className="dock-properties" data-testid="dock-properties">
-      <dt>Color</dt><dd>{formatAci(Number.isFinite(entity.aci) ? entity.aci : 256)}</dd>
+      <dt>Color</dt><dd>{formatColor(entity)}</dd>
       <dt>Linetype</dt><dd>{typeof entity.linetype === 'string' && entity.linetype ? entity.linetype : 'ByLayer'}</dd>
       <dt>Lineweight</dt><dd>{formatLineweight(Number.isFinite(entity.lineweight) ? entity.lineweight : -1)}</dd>
     </dl>,

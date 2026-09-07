@@ -72,4 +72,21 @@ describe('EngineDockProperties: the slot consumer inside the provider', () => {
     rerender(<EngineDockProperties />)
     expect(document.querySelector('[data-testid="dock-properties"] dd').textContent).toBe('ByLayer')
   })
+
+  // W4g-7b-03c-h D2: a true-coloured entity reads as its rgb value AND its
+  // nearest standard index, never the index alone (which hid that the colour
+  // was ever approximate); a plain entity (no trueColor) still reads its own name.
+  it('a true-coloured entity reads as rgb plus the nearest index', () => {
+    mountSlot()
+    mockState.engine = { session: { selectedId: 's3', entities: [{ id: 's3', aci: 3, trueColor: [10, 20, 30], linetype: 'ByLayer', lineweight: -1 }] } }
+    render(<EngineDockProperties />)
+    expect(document.querySelector('[data-testid="dock-properties"] dd').textContent).toBe('rgb(10,20,30) (nearest green (3))')
+  })
+
+  it('trueColor: null still reads the plain ACI name', () => {
+    mountSlot()
+    mockState.engine = { session: { selectedId: 's4', entities: [{ id: 's4', aci: 3, trueColor: null, linetype: 'ByLayer', lineweight: -1 }] } }
+    render(<EngineDockProperties />)
+    expect(document.querySelector('[data-testid="dock-properties"] dd').textContent).toBe('green (3)')
+  })
 })

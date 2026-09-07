@@ -269,6 +269,42 @@ describe('W4g-7b-03c-g F5: the combos show the ACTUAL ladder rung', () => {
   })
 })
 
+describe('W4g-7b-03c-h D3: the three word fields bound at MAX_INPUT_CHARS', () => {
+  it('a 200-character LINETYPE prompt field truncates to 64 characters as it is typed', () => {
+    const { workers, getContext } = mountProperties()
+    act(() => { getContext().session.actions.openBytes(new Uint8Array([0]), 'x.dxf') })
+    const entity = {
+      id: '7', handle: '7', type: 'LINE', layer: 'A', closed: false, editable: true,
+      vertices: [[0, 0, 0], [1, 1, 0]], radius: null, startDeg: null, endDeg: null,
+    }
+    workers[0].emit({ type: 'documentLoaded', documentId: 'x.dxf', entities: [entity], entityCount: 1, unsupported: [] })
+    act(() => { getContext().session.actions.select('7') })
+    act(() => { getContext().setArmed({ group: 'modify', op: 'setLinetype' }) })
+    const field = screen.getByLabelText('ribbon linetype')
+    fireEvent.change(field, { target: { value: 'x'.repeat(200) } })
+    expect(field.value).toHaveLength(64)
+  })
+})
+
+describe('W4g-7b-03c-h D2: a true-coloured entity\'s Color combo carries the rgb reading as its own selected option', () => {
+  it('the select value is the rgb string, "green" is still offered, and picking it posts setColor', () => {
+    const { workers, getContext } = mountProperties()
+    act(() => { getContext().session.actions.openBytes(new Uint8Array([0]), 'x.dxf') })
+    const entity = {
+      id: '7', handle: '7', type: 'LINE', layer: 'A', closed: false, editable: true,
+      vertices: [[0, 0, 0], [1, 1, 0]], radius: null, startDeg: null, endDeg: null,
+      aci: 3, trueColor: [10, 20, 30],
+    }
+    workers[0].emit({ type: 'documentLoaded', documentId: 'x.dxf', entities: [entity], entityCount: 1, unsupported: [] })
+    act(() => { getContext().session.actions.select('7') })
+    const colorSelect = screen.getByLabelText(/^Color/)
+    expect(colorSelect.value).toBe('rgb(10,20,30)')
+    expect([...colorSelect.options].map((o) => o.value)).toContain('green')
+    fireEvent.change(colorSelect, { target: { value: 'green' } })
+    expect(workers[0].posted.at(-1)).toEqual({ type: 'applyEdit', op: 'setColor', payload: { entityId: '7', aci: 3 } })
+  })
+})
+
 describe('W4g-7b-03c-g F8/F9: the current value is always its own option', () => {
   it('an ACI of 37 and a lineweight of 26 (both off the standard lists) render as real, selected options', () => {
     const { workers, getContext } = mountProperties()

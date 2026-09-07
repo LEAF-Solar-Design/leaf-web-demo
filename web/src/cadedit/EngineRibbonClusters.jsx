@@ -37,8 +37,8 @@ import { QuickButton, QUICK_FILE_SLOT_ID } from '../site/CockpitTopBand.jsx'
 
 import { DRAW_REASONS, MODIFY_REASONS, clipboardReason, drawReason, forGroup, modifyReason, propertyReason } from '../lib/actionRegistry.js'
 
-import { ACI_NAMES, LINEWEIGHT_VALUES, admissibleBlockName, buildCreatePayload, buildEditPayload, formatAci, formatLineweight, readNumber } from './engineSession.js'
-import { useEngineSessionContext } from './EngineSessionProvider.jsx'
+import { ACI_NAMES, LINEWEIGHT_VALUES, admissibleBlockName, buildCreatePayload, buildEditPayload, formatLineweight, readNumber } from './engineSession.js'
+import { MAX_INPUT_CHARS, useEngineSessionContext } from './EngineSessionProvider.jsx'
 import { isPointExpression } from './pointExpression.js'
 import { resolvePromptInputs } from './promptInputs.js'
 import ScriptPanel from './ScriptPanel.jsx'
@@ -351,11 +351,15 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // so the word path needs no change to that shared contract.
   const [wordInputs, setWordInputs] = useState({ aci: '', linetype: '', lineweight: '' })
   const promptInputs = PROPERTY_OPS.has(armedOp) && prompt ? { ...inputs, ...wordInputs } : inputs
-  const setPromptInput = (key, value) => (
-    Object.prototype.hasOwnProperty.call(wordInputs, key)
-      ? setWordInputs((current) => (current[key] === value ? current : { ...current, [key]: value }))
-      : setInput(key, value)
-  )
+  // W4g-7b-03c-h D3: the provider's own setInput bounds every typed field at
+  // MAX_INPUT_CHARS (a paste-a-whole-file case); the three word fields held
+  // here, outside the provider's record, need the same bound applied here.
+  const setPromptInput = (key, value) => {
+    if (!Object.prototype.hasOwnProperty.call(wordInputs, key)) { setInput(key, value); return }
+    if (typeof value !== 'string') return
+    const bounded = value.length > MAX_INPUT_CHARS ? value.slice(0, MAX_INPUT_CHARS) : value
+    setWordInputs((current) => (current[key] === bounded ? current : { ...current, [key]: bounded }))
+  }
   // W4g-5c: a clipboard arm (PASTE, typed or clicked) reads the clipboard
   // ladder, so the prompt says "nothing on the clipboard yet" with Run held
   // exactly as the ribbon button is held, rather than a live Run that the
@@ -562,10 +566,19 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // fires no change. Every combo's option list gets the current value added
   // when it is not already one of the standard choices.
   const withCurrentOption = (options, current) => (options.includes(current) ? options : [...options, current])
+  // W4g-7b-03c-h D2: a true-coloured entity's current value is its own
+  // `rgb(r,g,b)` string (formatColor's own reading, no space) — no standard
+  // option carries it, so withCurrentOption below adds it as the SELECTED
+  // option and every standard option, the nearest index's own name
+  // included, becomes a real change that posts setColor and clears the 420.
+  const trueColor = selectedEntity && Array.isArray(selectedEntity.trueColor) && selectedEntity.trueColor.length === 3
+    ? selectedEntity.trueColor
+    : null
   const colorValue = !selectedEntity ? 'ByLayer'
-    : selectedEntity.aci === 256 ? 'ByLayer'
-      : selectedEntity.aci === 0 ? 'ByBlock'
-        : ACI_NAMES[selectedEntity.aci] || `index ${selectedEntity.aci}`
+    : trueColor ? `rgb(${trueColor[0]},${trueColor[1]},${trueColor[2]})`
+      : selectedEntity.aci === 256 ? 'ByLayer'
+        : selectedEntity.aci === 0 ? 'ByBlock'
+          : ACI_NAMES[selectedEntity.aci] || `index ${selectedEntity.aci}`
   const linetypeValue = !selectedEntity ? 'ByLayer'
     : linetypeCatalogue.find((name) => name.toLowerCase() === String(selectedEntity.linetype ?? 'ByLayer').toLowerCase())
       || selectedEntity.linetype || 'ByLayer'
