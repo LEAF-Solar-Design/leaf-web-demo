@@ -351,11 +351,12 @@ jobs:
           echo '[]' > dispatched.json
           for SERVICE in $STAGE_SERVICES; do
             # A refused call is recorded per service; mq-prewarm fails closed.
+            # Rail operator handle grammar for LEAF_DEPLOY_APPROVED_BY: ^[A-Za-z0-9-]{1,39}$.
             if ! DISPATCH_OUTPUT=$(timeout 60 aws codebuild start-build \
                 --project-name leaf-deploy-terraform-staging \
                 --environment-variables-override \
                 name=STEP,value=prewarm \
-                "name=LEAF_DEPLOY_APPROVED_BY,value=merge-queue:$SHA12" \
+                "name=LEAF_DEPLOY_APPROVED_BY,value=merge-queue-$SHA12" \
                 "name=LEAF_DEPLOY_SERVICE,value=$SERVICE" \
                 "name=LEAF_DEPLOY_IMAGE_TAG,value=$IMAGE_TAG" \
                 name=LEAF_DEPLOY_EXPECTED_TD,value=auto-live \
