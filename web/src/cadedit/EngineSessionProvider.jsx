@@ -41,6 +41,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { useDrawingIdentityOptional } from '../drawing/DrawingIdentityProvider.jsx'
 
 import useEngineSession, { SESSION_ERROR } from './engineSession.js'
+import { promptKeys } from './promptKeys.js'
 
 const EngineSessionContext = createContext(null)
 
@@ -87,6 +88,8 @@ export const DEFAULT_EDIT_INPUTS = Object.freeze({
   // sx), so they start empty rather than pre-filled with a value that would
   // never actually get typed.
   name: '', sx: '', sy: '',
+  // Every prompt key participates in the shared bounds and arm reset.
+  style: '', aci: '', linetype: '', lineweight: '',
 })
 
 const INPUT_KEYS = new Set(Object.keys(DEFAULT_EDIT_INPUTS))
@@ -95,7 +98,8 @@ const INPUT_KEYS = new Set(Object.keys(DEFAULT_EDIT_INPUTS))
 // list is the one field that legitimately runs long.
 export const MAX_INPUT_CHARS = 64
 export const MAX_POINT_LIST_CHARS = 4096
-const INPUT_LIMITS = Object.freeze({ pts: MAX_POINT_LIST_CHARS })
+// Style keeps the plan contract's DIMSTYLE name bound, mutation_plan.py.
+const INPUT_LIMITS = Object.freeze({ pts: MAX_POINT_LIST_CHARS, style: 255 })
 
 // The two ribbon groups whose tools prompt for operands, and the op token's
 // shape (a JS identifier the clusters own; the engine validates the op
@@ -147,20 +151,23 @@ export default function EngineSessionProvider({
     drawingId: identity?.drawingId ?? null,
   })
 
-  const [inputs, setInputs] = useState(DEFAULT_EDIT_INPUTS)
+  const [{ inputs, armed }, setEditState] = useState({ inputs: DEFAULT_EDIT_INPUTS, armed: null })
   const setInput = useCallback((key, value) => {
     if (!INPUT_KEYS.has(key) || typeof value !== 'string') return
     const limit = INPUT_LIMITS[key] ?? MAX_INPUT_CHARS
     const bounded = value.length > limit ? value.slice(0, limit) : value
-    setInputs((current) => {
-      if (key === 'x' || key === 'y') return current[key] === bounded && current.etol === '' ? current : Object.freeze({ ...current, [key]: bounded, etol: '' })
-      return current[key] === bounded ? current : Object.freeze({ ...current, [key]: bounded })
+    setEditState((current) => {
+      const clearsTolerance = key === 'x' || key === 'y'
+      if (current.inputs[key] === bounded && (!clearsTolerance || current.inputs.etol === '')) return current
+      return { ...current, inputs: Object.freeze({ ...current.inputs, [key]: bounded, ...(clearsTolerance ? { etol: '' } : {}) }) }
     })
   }, [])
 
   // The armed command: null, or { group, op }. Fails closed on any other
   // shape (a consumer bug never leaves the prompt pointing at a non-command).
-  const [armed, setArmedState] = useState(null)
+  const setArmedState = useCallback((next) => {
+    setEditState((current) => current.armed === next ? current : { ...current, armed: next })
+  }, [])
   const setArmed = useCallback((next) => {
     if (next === null) { setArmedState(null); return }
     if (!next || typeof next !== 'object') return
@@ -173,20 +180,29 @@ export default function EngineSessionProvider({
       && next.from.every((v) => typeof v === 'number' && Number.isFinite(v))
       ? Object.freeze([next.from[0], next.from[1]])
       : null
-    setArmedState((current) => (
-      current && current.group === group && current.op === op && sameFrom(current.from, from)
-        ? current
-        : Object.freeze(from ? { group, op, from } : { group, op })
-    ))
-  }, [])
+    setEditState((current) => {
+      const previous = current.armed
+      if (previous && previous.group === group && previous.op === op && sameFrom(previous.from, from)) return current
+      // W4g-7b-04c-8: a prompt speaks only to the keys it shows. Publish
+      // the arm and hidden-key defaults together; a LINE chain's `from`
+      // stays on the armed record, and repeating the same op keeps inputs.
+      let nextInputs = current.inputs
+      if (previous?.op !== op) {
+        const shown = promptKeys(op)
+        nextInputs = Object.freeze(Object.fromEntries(Object.entries(DEFAULT_EDIT_INPUTS)
+          .map(([key, value]) => [key, shown.has(key) ? current.inputs[key] : value])))
+      }
+      return { inputs: nextInputs, armed: Object.freeze(from ? { group, op, from } : { group, op }) }
+    })
+  }, [setArmedState])
   // No parsed document (closed, or the worker died): nothing to prompt for,
   // so a stale prompt never outlives its drawing. A NEW document disarms
   // too (openDocument keeps engineParsed while it loads, so the identity is
   // the signal): opening a file cancels the running command, as in the
   // reference.
   const documentGone = !session.engineParsed || session.errorKind === SESSION_ERROR.CRASHED
-  useEffect(() => { if (documentGone) setArmedState(null) }, [documentGone])
-  useEffect(() => { setArmedState(null) }, [session.documentId])
+  useEffect(() => { if (documentGone) setArmedState(null) }, [documentGone, setArmedState])
+  useEffect(() => { setArmedState(null) }, [session.documentId, setArmedState])
 
   // W4f-4: the drafting mode a pick obeys. ORTHO constrains a picked point
   // (and the rubber band) to the axis of the larger delta from the last

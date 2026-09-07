@@ -27,9 +27,9 @@ import {
 
 import CadEditSurface from './CadEditSurface.jsx'
 import EngineRibbonClusters, {
-  DRAW_REASONS, MODIFY_REASONS, SAVE_REASONS, drawReason, modifyReason, saveReason,
+  DRAW_REASONS, MODIFY_REASONS, SAVE_REASONS, PROMPTS, promptKeys, drawReason, modifyReason, saveReason,
 } from './EngineRibbonClusters.jsx'
-import EngineSessionProvider, { MAX_INPUT_CHARS, useEngineSessionContext } from './EngineSessionProvider.jsx'
+import EngineSessionProvider, { DEFAULT_EDIT_INPUTS, MAX_INPUT_CHARS, useEngineSessionContext } from './EngineSessionProvider.jsx'
 import { SESSION_ERROR } from './engineSession.js'
 
 afterEach(cleanup)
@@ -960,6 +960,108 @@ describe('the reason ladders are pure and total', () => {
     expect(saveReason({ engineParsed: true, savedBytes: new Uint8Array(1) }, false)).toBe(SAVE_REASONS.noTarget)
     expect(saveReason({ engineParsed: true, savedBytes: new Uint8Array(1), busy: true }, true)).toBe(SAVE_REASONS.busy)
     expect(saveReason({ engineParsed: true, savedBytes: new Uint8Array(1) }, true)).toBe('')
+  })
+})
+
+describe('W4g-7b-04c-8: each arm speaks only to its prompt', () => {
+  it.each(Object.keys(PROMPTS))('%s exposes exactly its step keys, all in the shared input record', (op) => {
+    const keys = promptKeys(op)
+    expect(keys).toEqual(new Set(PROMPTS[op].steps.flatMap((step) => [...step.fields.map(([key]) => key), ...(step.pickKeys || [])])))
+    for (const key of keys) expect(Object.hasOwn(DEFAULT_EDIT_INPUTS, key)).toBe(true)
+  })
+
+  it('TEXT rotation resets to the existing default when DIMALIGNED is armed', () => {
+    const studio = mount()
+    act(() => { studio.context.setArmed({ group: 'draw', op: 'createText' }) })
+    act(() => { studio.context.setInput('rot', '15') })
+    act(() => { studio.context.setArmed({ group: 'draw', op: 'dimAligned' }) })
+    expect(studio.context.inputs.rot).toBe(DEFAULT_EDIT_INPUTS.rot)
+    expect(studio.context.inputs.rot).toBe('0')
+  })
+
+  it('INSERT scales reset for LINE while its shown x and y stay typed', () => {
+    const studio = mount()
+    act(() => { studio.context.setArmed({ group: 'draw', op: 'createInsert' }) })
+    act(() => {
+      studio.context.setInput('sx', '2')
+      studio.context.setInput('sy', '3')
+      studio.context.setInput('x', '12')
+      studio.context.setInput('y', '34')
+    })
+    act(() => { studio.context.setArmed({ group: 'draw', op: 'createLine' }) })
+    expect(studio.context.inputs).toMatchObject({ sx: DEFAULT_EDIT_INPUTS.sx, sy: DEFAULT_EDIT_INPUTS.sy, x: '12', y: '34' })
+  })
+
+  it('TRIM edge and click tolerance reset for CIRCLE', () => {
+    const studio = mount()
+    act(() => { studio.context.setArmed({ group: 'modify', op: 'trim' }) })
+    act(() => { studio.context.setInput('edge', 'e2'); studio.context.setInput('etol', '0.25') })
+    act(() => { studio.context.setArmed({ group: 'draw', op: 'createCircle' }) })
+    expect(studio.context.inputs).toMatchObject({ edge: DEFAULT_EDIT_INPUTS.edge, etol: DEFAULT_EDIT_INPUTS.etol })
+  })
+
+  it('repeating an op and disarming preserve all fields, including hidden click tolerance', () => {
+    const studio = mount()
+    act(() => { studio.context.setArmed({ group: 'modify', op: 'trim' }) })
+    act(() => { studio.context.setInput('edge', 'e2'); studio.context.setInput('etol', '0.25') })
+    const before = studio.context.inputs
+    act(() => { studio.context.setArmed({ group: 'modify', op: 'trim' }) })
+    expect(studio.context.inputs).toBe(before)
+    act(() => { studio.context.setArmed(null) })
+    expect(studio.context.armed).toBeNull()
+    expect(studio.context.inputs).toBe(before)
+  })
+
+  it('a LINE chain retains its armed from and the waiting next-point fields', () => {
+    const studio = mount()
+    act(() => { studio.context.setArmed({ group: 'draw', op: 'createLine' }) })
+    act(() => {
+      studio.context.setInput('x', '5')
+      studio.context.setInput('y', '7')
+      studio.context.setInput('x2', '')
+      studio.context.setInput('y2', '')
+      studio.context.setArmed({ group: 'draw', op: 'createLine', from: [5, 7] })
+    })
+    expect(studio.context.armed).toEqual({ group: 'draw', op: 'createLine', from: [5, 7] })
+    expect(studio.context.inputs).toMatchObject({ x: '5', y: '7', x2: '', y2: '' })
+  })
+
+  it('re-arming TRIM after Escape keeps its click tolerance until CIRCLE is armed', () => {
+    const studio = mount()
+    act(() => { studio.context.setArmed({ group: 'modify', op: 'trim' }) })
+    act(() => { studio.context.setInput('etol', '0.25') })
+    act(() => { studio.context.setArmed(null) })
+    act(() => { studio.context.setArmed({ group: 'modify', op: 'trim' }) })
+    expect(studio.context.inputs.etol).toBe('0.25')
+    act(() => { studio.context.setArmed({ group: 'draw', op: 'createCircle' }) })
+    expect(studio.context.inputs.etol).toBe(DEFAULT_EDIT_INPUTS.etol)
+  })
+
+  it.each(['x', 'y'])('typing %s clears the click tolerance even when its value stays the same', (key) => {
+    const studio = mount()
+    act(() => { studio.context.setInput('etol', '0.25') })
+    act(() => { studio.context.setInput(key, studio.context.inputs[key]) })
+    expect(studio.context.inputs.etol).toBe('')
+  })
+
+  it('property word fields and style use the shared reset and bounds', () => {
+    const studio = mount()
+    for (const [op, key] of [['setColor', 'aci'], ['setLinetype', 'linetype'], ['setLineweight', 'lineweight']]) {
+      act(() => { studio.context.setArmed({ group: 'modify', op }) })
+      act(() => { studio.context.setInput(key, 'a'.repeat(MAX_INPUT_CHARS + 1)) })
+      expect(studio.context.inputs[key]).toHaveLength(MAX_INPUT_CHARS)
+      act(() => { studio.context.setArmed({ group: 'draw', op: 'createCircle' }) })
+      expect(studio.context.inputs[key]).toBe(DEFAULT_EDIT_INPUTS[key])
+    }
+    act(() => { studio.context.setArmed({ group: 'draw', op: 'dimLinear' }) })
+    const longStyle = 'A'.repeat(255) + '2'
+    act(() => { studio.context.setInput('style', longStyle) })
+    expect(studio.context.inputs.style).toBe(longStyle.slice(0, 255))
+    const style = 'A'.repeat(64) + '2'
+    act(() => { studio.context.setInput('style', style) })
+    expect(studio.context.inputs.style).toBe(style)
+    act(() => { studio.context.setArmed({ group: 'draw', op: 'createCircle' }) })
+    expect(studio.context.inputs.style).toBe(DEFAULT_EDIT_INPUTS.style)
   })
 })
 

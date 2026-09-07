@@ -1,10 +1,12 @@
 // W4g-7b-04c-1: LINEAR / ALIGNED dimension creation, the store builder and
 // the diff lowering (Change A's crate is covered natively in lib.rs; Change
 // C's mapper/prompts/picks/registry/dock/e2e are record 04c-2).
-import { act, cleanup, render } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import useEngineSession, { buildCreatePayload } from './engineSession.js'
 import { diffPlan } from './mutationDiff.js'
+import EngineSessionProvider, { useEngineSessionContext } from './EngineSessionProvider.jsx'
+import EngineRibbonClusters from './EngineRibbonClusters.jsx'
 
 const STANDARD = Object.freeze(['Standard'])
 
@@ -160,6 +162,72 @@ describe('W4g-7b-04c-3 F3a: a LINEAR whose rotation projects the definition poin
     expect(buildCreatePayload('createDimension', {
       dimtype: 'LINEAR', x: '0', y: '0', x2: '3', y2: '4', dx: '1.5', dy: '6', rot: '90', layer: '',
     }, [], STANDARD).payload).toMatchObject({ rotationDeg: 90 })
+  })
+})
+
+describe('W4g-7b-04c-8: dimension style names obey the plan contract before the engine', () => {
+  const points = { x: '0', y: '0', x2: '3', y2: '4', dx: '1.5', dy: '6' }
+
+  it.each(['Standard', 'ISO-25'])('%s is loaded and admitted by the builder', (style) => {
+    expect(buildCreatePayload('dimLinear', { ...points, style }, [], [style]).payload)
+      .toMatchObject({ dimtype: 'LINEAR', style })
+  })
+
+  it('the provider preserves a 65-character style instead of selecting its loaded 64-character prefix', async () => {
+    const prefix = 'A'.repeat(64)
+    const style = prefix + '2'
+    const dimstyles = [prefix, style]
+    const worker = new ScriptedWorker()
+    const handle = {}
+    function Probe() { handle.context = useEngineSessionContext(); return null }
+    render(<EngineSessionProvider createWorker={() => worker}><Probe /></EngineSessionProvider>)
+    await act(async () => { await handle.context.session.actions.open(fileOf()) })
+    worker.emit({ type: 'documentLoaded', documentId: 'one.dxf', entities: [], entityCount: 0, unsupported: [], dimstyles })
+    act(() => {
+      handle.context.setArmed({ group: 'draw', op: 'dimLinear' })
+      for (const [key, value] of Object.entries(points)) handle.context.setInput(key, value)
+      handle.context.setInput('style', style)
+    })
+    expect(buildCreatePayload('dimLinear', handle.context.inputs, [], dimstyles).payload.style).toBe(style)
+  })
+
+  it('the catalogue offers Стандарт in the select, but both the prompt and store refuse it before applyEdit', async () => {
+    const worker = new ScriptedWorker()
+    const handle = {}
+    function Probe() { handle.context = useEngineSessionContext(); return null }
+    render(
+      <EngineSessionProvider createWorker={() => worker}>
+        <Probe />
+        <EngineRibbonClusters />
+      </EngineSessionProvider>,
+    )
+    await act(async () => { await handle.context.session.actions.open(fileOf()) })
+    worker.emit({ type: 'documentLoaded', documentId: 'one.dxf', entities: [], entityCount: 0, unsupported: [], dimstyles: ['Standard', 'ISO-25', 'Стандарт'] })
+    act(() => {
+      handle.context.setArmed({ group: 'draw', op: 'dimLinear' })
+      for (const [key, value] of Object.entries(points)) handle.context.setInput(key, value)
+    })
+    const select = screen.getByRole('combobox', { name: 'ribbon style' })
+    expect([...select.options].map((option) => option.value)).toContain('Стандарт')
+    fireEvent.change(select, { target: { value: 'Стандарт' } })
+    const refusal = 'Dimension refused: dimension style Стандарт carries characters the plan contract does not admit'
+    expect(buildCreatePayload('dimLinear', { ...points, style: 'Стандарт' }, [], ['Стандарт'])).toEqual({ refusal })
+    expect(screen.getByTestId('cockpit-prompt-note').textContent).toBe(refusal)
+    expect(screen.getByTestId('cockpit-prompt-run').disabled).toBe(true)
+    act(() => { handle.context.session.actions.create('dimLinear', handle.context.inputs) })
+    expect(handle.context.session.status).toBe(refusal)
+    expect(worker.posted.filter((message) => message.type === 'applyEdit')).toHaveLength(0)
+    for (const style of ['Standard', 'ISO-25']) {
+      fireEvent.change(select, { target: { value: style } })
+      expect(screen.getByTestId('cockpit-prompt-run').disabled).toBe(false)
+    }
+  })
+
+  it('the DIMALIGNED seat still ignores rot while the explicit ALIGNED builder refuses it', () => {
+    expect(buildCreatePayload('dimAligned', { ...points, rot: '15' }, [], STANDARD).payload)
+      .toMatchObject({ dimtype: 'ALIGNED', rotationDeg: 0 })
+    expect(buildCreatePayload('createDimension', { ...points, dimtype: 'ALIGNED', rot: '15' }, [], STANDARD).refusal)
+      .toBe('Dimension refused: a rotation applies to a linear dimension only')
   })
 })
 
