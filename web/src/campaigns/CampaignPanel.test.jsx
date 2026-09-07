@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import CampaignPanel from './CampaignPanel.jsx'
 import useCampaigns from './useCampaigns.js'
@@ -296,28 +296,54 @@ describe('release evidence panel', () => {
     expect(screen.getByText('Previously completed release. Current verification unavailable.')).toBeTruthy()
     expect(screen.getByText('Organize all family recipes')).toBeTruthy()
   })
-  it('saves verified file bytes with a safe filename and cleans up its temporary URL', async () => {
+  it.each([false, true])('keeps the verified download URL for 1000ms after click and unmount (throwing: %s)', async throws => {
     readyOutput('records.csv', 'text/csv')
     const urlApi = { createObjectURL: vi.fn().mockReturnValue('blob:file'), revokeObjectURL: vi.fn() }
+    let anchor
     const clicked = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () {
+      anchor = this
+      expect(this.isConnected).toBe(true)
       expect(this.download).toBe('records.csv')
       expect(this.getAttribute('href')).toBe('blob:file')
+      expect(urlApi.revokeObjectURL).not.toHaveBeenCalled()
+      if (throws) throw new Error('Download click failed')
     })
-    render(panel({ artifactUrlApi: urlApi }))
-    fireEvent.click(screen.getByRole('button', { name: 'Download records.csv' }))
-    await waitFor(() => expect(urlApi.revokeObjectURL).toHaveBeenCalledWith('blob:file'))
-    expect(clicked).toHaveBeenCalledOnce()
-    expect(urlApi.createObjectURL.mock.calls[0][0]).toBeInstanceOf(Blob)
-    expect(urlApi.createObjectURL.mock.calls[0][0].size).toBe(4)
-    const saved = await new Promise((resolve, reject) => {
-      const reader = new FileReader()
-      reader.onload = () => resolve(reader.result)
-      reader.onerror = reject
-      reader.readAsArrayBuffer(urlApi.createObjectURL.mock.calls[0][0])
-    })
-    expect([...new Uint8Array(saved)]).toEqual([1, 2, 3, 4])
-    expect(document.querySelector('a[download]')).toBeNull()
-    clicked.mockRestore()
+    vi.useFakeTimers()
+    try {
+      const { unmount } = render(panel({ artifactUrlApi: urlApi }))
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Download records.csv' }))
+      })
+      expect(clicked).toHaveBeenCalledOnce()
+      expect(anchor.isConnected).toBe(false)
+      expect(document.querySelector('a[download]')).toBeNull()
+      expect(urlApi.revokeObjectURL).not.toHaveBeenCalled()
+      if (throws) expect(screen.getByRole('alert').textContent).toContain('Download click failed')
+      else expect(screen.queryByRole('alert')).toBeNull()
+      expect(urlApi.createObjectURL).toHaveBeenCalledOnce()
+      expect(urlApi.createObjectURL.mock.calls[0][0]).toBeInstanceOf(Blob)
+      expect(urlApi.createObjectURL.mock.calls[0][0].size).toBe(4)
+      unmount()
+      expect(urlApi.revokeObjectURL).not.toHaveBeenCalled()
+      vi.advanceTimersByTime(999)
+      expect(urlApi.revokeObjectURL).not.toHaveBeenCalled()
+      vi.advanceTimersByTime(1)
+      expect(urlApi.revokeObjectURL).toHaveBeenCalledExactlyOnceWith('blob:file')
+      vi.runAllTimers()
+      expect(urlApi.revokeObjectURL).toHaveBeenCalledExactlyOnceWith('blob:file')
+      vi.useRealTimers()
+      const saved = await new Promise((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(reader.result)
+        reader.onerror = reject
+        reader.readAsArrayBuffer(urlApi.createObjectURL.mock.calls[0][0])
+      })
+      expect([...new Uint8Array(saved)]).toEqual([1, 2, 3, 4])
+    } finally {
+      vi.clearAllTimers()
+      vi.useRealTimers()
+      clicked.mockRestore()
+    }
   })
   it('drops a completed retrieval after the project changes', async () => {
     readyOutput()

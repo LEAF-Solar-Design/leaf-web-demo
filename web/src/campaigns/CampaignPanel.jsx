@@ -201,7 +201,8 @@ function ReleaseOutputs({ campaign, completion, available, urlApi }) {
           link.click()
         } finally {
           link.remove()
-          urlApi.revokeObjectURL(url)
+          // Let the browser consume the download URL, even if this panel unmounts.
+          setTimeout(() => urlApi.revokeObjectURL(url), 1000)
         }
       }
     } catch (failure) {
