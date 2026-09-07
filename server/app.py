@@ -17,6 +17,7 @@ Env:
 # merge-queue smoke 2026-09-05: first queued merge on main; no behaviour change.
 # merge-queue probe 2026-09-06: mq-review produced by CodeBuild (project leaf-mq-leaf-web-demo); no behaviour change.
 # merge-queue probe 2026-09-06-2: mq-review produced by CodeBuild (project leaf-mq-leaf-web-demo); no behaviour change.
+# merge-queue probe 2026-09-07-3: the full queue path (mq-review on the AWS-hosted runner, mq-prewarm through the CodeBuild prewarm build); no behaviour change.
 from __future__ import annotations
 
 import os
