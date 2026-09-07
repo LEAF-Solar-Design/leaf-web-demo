@@ -8,10 +8,10 @@ from pathlib import Path
 
 import pytest
 
-import mutation_apply
 import tool_loader
 import write_loop
 import store
+import mutation_apply  # after write_loop, which puts da/ on sys.path (the gate runs this file alone)
 from mutation_plan import emit_plan, plan_sha256, validate_mutations, world_to_ocs
 
 

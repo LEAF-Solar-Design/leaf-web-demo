@@ -104,6 +104,40 @@ def test_set_linetype_canonicalizes_to_the_heads_spelling_when_it_differs_only_i
     assert canonical == {"set_linetype": [{"handle": "2A", "name": "DASHED"}]}
 
 
+def test_set_linetype_head_uppercase_continuous_canonicalizes_and_is_a_noop_against_itself():
+    # w4g-7b-03s-d D3: with the standard spellings ordered LAST, a head that
+    # already carries the non-standard capitalization "CONTINUOUS" keeps it
+    # as the canonical spelling (never the standard "Continuous"), and a
+    # request for the same name in any case is a no-op against that handle.
+    base = _base()
+    base["properties"]["2A"]["linetype"] = "CONTINUOUS"
+    with pytest.raises(ValueError, match="set_linetype '2A' is a no-op"):
+        validate_mutations(base, {"set_linetype": [{"handle": "2A", "name": "continuous"}]})
+    canonical = validate_mutations(
+        base, {"set_linetype": [{"handle": "2A", "name": "continuous"}]}, reject_noop=False)
+    assert canonical == {"set_linetype": [{"handle": "2A", "name": "CONTINUOUS"}]}
+
+
+def test_set_linetype_head_mixed_case_continuous_canonicalizes_and_is_a_noop_against_itself():
+    base = _base()
+    base["properties"]["2A"]["linetype"] = "Continuous"
+    with pytest.raises(ValueError, match="set_linetype '2A' is a no-op"):
+        validate_mutations(base, {"set_linetype": [{"handle": "2A", "name": "CONTINUOUS"}]})
+    canonical = validate_mutations(
+        base, {"set_linetype": [{"handle": "2A", "name": "CONTINUOUS"}]}, reject_noop=False)
+    assert canonical == {"set_linetype": [{"handle": "2A", "name": "Continuous"}]}
+
+
+def test_set_linetype_bylayer_admitted_when_no_entity_lists_a_linetype():
+    # No entity in the head lists a linetype at all: the standard names are
+    # the only known spellings, so "bylayer" canonicalizes to "ByLayer" and
+    # is admitted (not a no-op: "linetype" is not in "2A"'s properties).
+    base = _base()
+    del base["properties"]["2A"]["linetype"]
+    canonical = validate_mutations(base, {"set_linetype": [{"handle": "2A", "name": "bylayer"}]})
+    assert canonical == {"set_linetype": [{"handle": "2A", "name": "ByLayer"}]}
+
+
 def test_two_set_color_ops_sort_by_hex_handle_and_read_back():
     base = _base()
     base["properties"]["2A"]["aci"] = 1

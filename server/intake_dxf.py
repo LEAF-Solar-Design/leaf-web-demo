@@ -86,11 +86,15 @@ def _num(f: float) -> str:
 
 
 def _entity_property_groups(properties: Dict[str, Any], handle: Any, where: str) -> List[str]:
-    """62 / 6 / 370 DXF group pairs for one entity, from `intake["properties"]
-    [handle]` (the EP shape); only fields the record actually carries are
-    emitted, so an entity without one is left ByLayer/absent, same as before
-    this record existed. 420 (true colour) is not written back: the write
-    contract only ever sets an ACI (server/mutation_plan.py `set_color`)."""
+    """62 / 6 / 370 / 420 DXF group pairs for one entity, from
+    `intake["properties"][handle]` (the EP shape); only fields the record
+    actually carries are emitted, so an entity without one is left ByLayer/
+    absent, same as before this record existed. w4g-7b-03s-d D2: when the
+    record carries a non-null `rgb` ([r, g, b], each 0..255), 420 (true
+    colour) IS written back, immediately after 62 (AutoCAD writes 62 then
+    420) so the reader's own 420 -> rgb mapping round-trips; the write
+    contract itself only ever sets an ACI (server/mutation_plan.py
+    `set_color`), never rgb."""
     record = properties.get(handle)
     if not isinstance(record, dict):
         return []
@@ -100,6 +104,14 @@ def _entity_property_groups(properties: Dict[str, Any], handle: Any, where: str)
         if isinstance(aci, bool) or not isinstance(aci, int) or not 0 <= aci <= 256:
             _fail(f"{where}: properties.aci must be an integer in 0..256")
         out += ["62", str(aci)]
+    if record.get("rgb") is not None:
+        rgb = record["rgb"]
+        if (not isinstance(rgb, (list, tuple)) or len(rgb) != 3
+                or any(isinstance(c, bool) or not isinstance(c, int) or not 0 <= c <= 255
+                       for c in rgb)):
+            _fail(f"{where}: properties.rgb must be [r, g, b] each an integer in 0..255")
+        packed = (rgb[0] << 16) | (rgb[1] << 8) | rgb[2]
+        out += ["420", str(packed)]
     if "linetype" in record:
         name = record["linetype"]
         if (not isinstance(name, str) or not name or len(name) > 255

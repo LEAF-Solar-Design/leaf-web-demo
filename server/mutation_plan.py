@@ -55,21 +55,32 @@ _STANDARD_LINETYPES = ("ByLayer", "ByBlock", "Continuous")
 
 def _known_linetype_names(intake: Dict[str, Any]) -> List[str]:
     """Every linetype spelling this drawing is known to carry (w4g-7b-03s-c
-    R6): the three standard names plus whatever any entity's EP record
-    already lists. RESIDUAL: the intake carries no LTYPE table, so a
-    linetype that is loaded in the drawing but currently unused by every
-    entity is refused here until a later change adds an LT catalogue (the
-    04s DS pattern is the model); the interpreter itself still accepts any
-    loaded name via `tblsearch`, so this is strictly narrower, never wider,
-    than what the drawing actually supports."""
-    names = list(_STANDARD_LINETYPES)
+    R6, reordered by w4g-7b-03s-d D3): the head's OWN spellings first, in
+    encounter order and de-duplicated case-insensitively, then the three
+    standard names appended only when no head spelling already matches one
+    case-insensitively. A head whose entity carries "CONTINUOUS" must
+    canonicalize a "continuous" request to "CONTINUOUS", not to the standard
+    "Continuous" that a standard-names-first order would have matched
+    first. RESIDUAL: the intake carries no LTYPE table, so a linetype that
+    is loaded in the drawing but currently unused by every entity is
+    refused here until a later change adds an LT catalogue (the 04s DS
+    pattern is the model); the interpreter itself still accepts any loaded
+    name via `tblsearch`, so this is strictly narrower, never wider, than
+    what the drawing actually supports."""
+    names: List[str] = []
+    seen_lower: set = set()
     properties = intake.get("properties")
     if isinstance(properties, dict):
         for entry in properties.values():
             if isinstance(entry, dict):
                 name = entry.get("linetype")
-                if isinstance(name, str) and name:
+                if isinstance(name, str) and name and name.lower() not in seen_lower:
+                    seen_lower.add(name.lower())
                     names.append(name)
+    for standard in _STANDARD_LINETYPES:
+        if standard.lower() not in seen_lower:
+            seen_lower.add(standard.lower())
+            names.append(standard)
     return names
 
 
@@ -607,7 +618,16 @@ def validate_mutations(
             value = _style_value(field, raw[key], known_linetypes)
             prop_key = {"color": "aci", "linetype": "linetype", "lineweight": "lineweight"}[field]
             properties = (intake.get("properties") or {}).get(handle, {})
-            if (reject_noop and prop_key in properties and properties[prop_key] == value
+            # w4g-7b-03s-d D3: a linetype no-op compares case-insensitively
+            # (the head's own spelling and the canonicalized request may
+            # differ only in case); the other two properties compare exact.
+            current = properties.get(prop_key)
+            if field == "linetype":
+                is_same = (prop_key in properties and isinstance(current, str)
+                           and current.lower() == value.lower())
+            else:
+                is_same = prop_key in properties and current == value
+            if (reject_noop and is_same
                     and (field != "color" or properties.get("rgb") is None)):
                 raise ValueError(f"{op} {handle!r} is a no-op")
             seen.add(handle)

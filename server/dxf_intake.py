@@ -25,10 +25,17 @@ extracts through APS.
 from __future__ import annotations
 
 import math
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 BINARY_SENTINEL = b"AutoCAD Binary DXF"
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+# Mirrors server/intake_dxf.py's _LINEWEIGHTS (the DXF group-370 enumeration
+# the writer accepts): duplicated, not imported, because intake_dxf already
+# imports from this module and a reverse import would be circular.
+_LINEWEIGHTS = frozenset({-3, -2, -1, 0, 5, 9, 13, 15, 18, 20, 25, 30, 35,
+                          40, 50, 53, 60, 70, 80, 90, 100, 106, 120, 140, 158, 200, 211})
 
 
 class DxfParseError(ValueError):
@@ -71,6 +78,7 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
     block_count = 0
     has_blocks = False
     handle_seq = 0
+    dropped_count = [0]
     # W4g-7b-3s: colour/linetype/lineweight for every LINE / LWPOLYLINE /
     # CIRCLE / ARC / INSERT, the same EP shape da/intake_parse.py builds from
     # accoreconsole's entget so the plan route's DXF preflight
@@ -112,7 +120,7 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
                     blocks[name] = block
             continue
         if section == "ENTITIES" and code == 0 and value == "INSERT":
-            entity, i = _parse_insert(pairs, i + 1)
+            entity, i = _parse_insert(pairs, i + 1, dropped_count)
             props = entity.pop("_properties", None)
             if entity["layer"] not in seen_layers:
                 seen_layers.add(entity["layer"])
@@ -122,19 +130,19 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
                 insert_properties[entity["handle"]] = props
             continue
         if section == "ENTITIES" and code == 0 and value == "LWPOLYLINE":
-            entity, i = _parse_lwpolyline(pairs, i + 1)
+            entity, i = _parse_lwpolyline(pairs, i + 1, dropped_count)
             handle_seq += 1
             _finish_entity(entity, handle_seq, layers, seen_layers, polylines, properties)
             continue
         if section == "ENTITIES" and code == 0 and value == "POLYLINE":
-            entity, i = _parse_polyline(pairs, i + 1)
+            entity, i = _parse_polyline(pairs, i + 1, dropped_count)
             handle_seq += 1
             _finish_entity(entity, handle_seq, layers, seen_layers, polylines, properties)
             continue
         if section == "ENTITIES" and code == 0 and value == "LINE":
             # A LINE is a 2-point open polyline to the viewer and to every tool: no new
             # intake field, the frozen §1 shape renders it as-is.
-            entity, i = _parse_line(pairs, i + 1)
+            entity, i = _parse_line(pairs, i + 1, dropped_count)
             handle_seq += 1
             _finish_entity(entity, handle_seq, layers, seen_layers, polylines, properties)
             continue
@@ -143,7 +151,7 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             # polylines, as ADDITIVE §1 fields `circles` / `arcs` (a viewer
             # or tool that does not know them ignores them). Centre in WCS,
             # radius, the normal, and for an arc its start/end in degrees.
-            entity, i = _parse_circle_or_arc(pairs, i + 1, value)
+            entity, i = _parse_circle_or_arc(pairs, i + 1, value, dropped_count)
             handle_seq += 1
             if entity is not None:
                 props = entity.pop("_properties", None)
@@ -181,6 +189,8 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
     out: Dict[str, Any] = {"dwg": source_name, "layers": layers, "polylines": polylines}
     if properties:
         out["properties"] = properties
+    if dropped_count[0]:
+        out["propertiesDropped"] = dropped_count[0]
     if texts:
         # ADDITIVE §1 field (frontend ignores unknown keys): drawing labels for tools
         # that classify views by the text inside a frame.
@@ -200,7 +210,8 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
     return out
 
 
-def _entity_properties(aci, linetype, lineweight, truecolor) -> Optional[Dict[str, Any]]:
+def _entity_properties(aci, linetype, lineweight, truecolor,
+                       dropped: Optional[List[int]] = None) -> Optional[Dict[str, Any]]:
     """The EP shape (da/intake_parse.py's `properties[handle]`) built from raw
     DXF group values 62/6/370/420: absent means ByLayer/BYLAYER, exactly as
     entget reports it and exactly what the mutation plan's setters compare
@@ -209,18 +220,49 @@ def _entity_properties(aci, linetype, lineweight, truecolor) -> Optional[Dict[st
     untouched entity round-trips with no `properties` entry at all: a dense
     default here would make every entity, not just a styled one, appear in
     `properties`, and break the byte-for-byte intake round trip that already
-    pins an entity with no style groups to carry no `properties` key."""
+    pins an entity with no style groups to carry no `properties` key.
+
+    w4g-7b-03s-d D1: the writer (server/intake_dxf.py) refuses an aci outside
+    0..256, a lineweight outside its enumeration, or an oversized/control-
+    character linetype name, so a value this reader stored unnormalized would
+    make the version's OWN later `intake_to_dxf` (write_loop.read_dxf's synth
+    leg) fail every time. A negative 62 is AutoCAD's "layer off" flag on that
+    colour, so its magnitude is the ACI (a -7 reads as aci 7); a 62 or 370
+    the writer would still refuse is DROPPED (the field reads as absent/
+    default) and counted in `dropped`, never stored as something the writer
+    cannot round-trip."""
     if aci is None and linetype is None and lineweight is None and truecolor is None:
         return None
     rgb = None
     if truecolor is not None:
         packed = _int(truecolor) & 0xFFFFFF
         rgb = [(packed >> 16) & 0xFF, (packed >> 8) & 0xFF, packed & 0xFF]
+    aci_value = 256
+    if aci is not None:
+        magnitude = abs(_int(aci))
+        if 0 <= magnitude <= 256:
+            aci_value = magnitude
+        elif dropped is not None:
+            dropped[0] += 1
+    linetype_value = "ByLayer"
+    if linetype is not None:
+        if (isinstance(linetype, str) and linetype and len(linetype) <= 255
+                and not _CONTROL_RE.search(linetype)):
+            linetype_value = linetype
+        elif dropped is not None:
+            dropped[0] += 1
+    lineweight_value = -1
+    if lineweight is not None:
+        raw_weight = _int(lineweight)
+        if raw_weight in _LINEWEIGHTS:
+            lineweight_value = raw_weight
+        elif dropped is not None:
+            dropped[0] += 1
     return {
-        "aci": _int(aci) if aci is not None else 256,
+        "aci": aci_value,
         "rgb": rgb,
-        "linetype": linetype if linetype is not None else "ByLayer",
-        "lineweight": _int(lineweight) if lineweight is not None else -1,
+        "linetype": linetype_value,
+        "lineweight": lineweight_value,
     }
 
 
@@ -235,7 +277,7 @@ def _group_point(groups, code=10, default=(0.0, 0.0, 0.0)):
     return [_float(groups.get(code + j * 10, str(v))) for j, v in enumerate(default)]
 
 
-def _parse_insert(pairs, i):
+def _parse_insert(pairs, i, dropped=None):
     groups, i = _entity_groups(pairs, i)
     normal = _group_point(groups, 210, (0.0, 0.0, 1.0))
     point = _ocs_to_wcs(_group_point(groups), normal)
@@ -247,7 +289,7 @@ def _parse_insert(pairs, i):
             "scale": [_float(groups.get(code, "1")) for code in (41, 42, 43)],
             "handle": groups.get(5, ""),
             "_properties": _entity_properties(
-                groups.get(62), groups.get(6), groups.get(370), groups.get(420))}, i
+                groups.get(62), groups.get(6), groups.get(370), groups.get(420), dropped)}, i
 
 
 def _parse_block_child(pairs, i, kind):
@@ -355,7 +397,7 @@ def _ocs_to_wcs(point: List[float], normal: List[float]) -> List[float]:
             x * ax[2] + y * ay[2] + z * nz]
 
 
-def _parse_circle_or_arc(pairs: List[Tuple[int, str]], i: int, kind: str):
+def _parse_circle_or_arc(pairs: List[Tuple[int, str]], i: int, kind: str, dropped=None):
     """CIRCLE / ARC: layer=8, handle=5, centre (10, 20, 30) in OCS, radius=40,
     normal (210, 220, 230, default +z), ARC start=50 / end=51 in DEGREES (the
     DXF file convention; entget's radians never reach a file). A radius that
@@ -408,7 +450,8 @@ def _parse_circle_or_arc(pairs: List[Tuple[int, str]], i: int, kind: str):
     centre = _ocs_to_wcs(c, normal) if normal != [0.0, 0.0, 1.0] else c
     entity: Dict[str, Any] = {"layer": layer, "c": centre, "r": radius,
                               "nrm": normal, "handle": handle,
-                              "_properties": _entity_properties(aci, linetype, lineweight, truecolor)}
+                              "_properties": _entity_properties(
+                                  aci, linetype, lineweight, truecolor, dropped)}
     if kind == "ARC":
         entity["start_deg"] = start
         entity["end_deg"] = end
@@ -451,7 +494,7 @@ def _group_pairs(text: str) -> List[Tuple[int, str]]:
     return pairs
 
 
-def _parse_lwpolyline(pairs: List[Tuple[int, str]], i: int):
+def _parse_lwpolyline(pairs: List[Tuple[int, str]], i: int, dropped=None):
     """LWPOLYLINE: layer=8, handle=5, flags=70 (bit 1 = closed), elevation=38,
     vertices as repeated (10=x, 20=y)."""
     layer = "0"
@@ -488,10 +531,10 @@ def _parse_lwpolyline(pairs: List[Tuple[int, str]], i: int):
     pts = [[x, y, elevation] for x, y in zip(xs, ys)]
     return {"layer": layer, "closed": closed, "pts": pts,
             "xdata": None, "handle": handle,
-            "_properties": _entity_properties(aci, linetype, lineweight, truecolor)}, i
+            "_properties": _entity_properties(aci, linetype, lineweight, truecolor, dropped)}, i
 
 
-def _parse_polyline(pairs: List[Tuple[int, str]], i: int):
+def _parse_polyline(pairs: List[Tuple[int, str]], i: int, dropped=None):
     """Classic POLYLINE ... VERTEX* ... SEQEND: flags=70 on POLYLINE, vertices
     carry (10, 20, 30)."""
     layer = "0"
@@ -541,10 +584,10 @@ def _parse_polyline(pairs: List[Tuple[int, str]], i: int):
         break  # any other entity start ends this POLYLINE (missing SEQEND)
     return {"layer": layer, "closed": closed, "pts": pts,
             "xdata": None, "handle": handle,
-            "_properties": _entity_properties(aci, linetype, lineweight, truecolor)}, i
+            "_properties": _entity_properties(aci, linetype, lineweight, truecolor, dropped)}, i
 
 
-def _parse_line(pairs: List[Tuple[int, str]], i: int):
+def _parse_line(pairs: List[Tuple[int, str]], i: int, dropped=None):
     """LINE: layer=8, handle=5, start (10, 20, 30), end (11, 21, 31). Emitted in the
     polyline shape (closed=False, two pts) so nothing downstream learns a new type."""
     layer = "0"
@@ -581,7 +624,7 @@ def _parse_line(pairs: List[Tuple[int, str]], i: int):
             truecolor = value
         i += 1
     return {"layer": layer, "closed": False, "pts": [a, b], "xdata": None, "handle": handle,
-            "_properties": _entity_properties(aci, linetype, lineweight, truecolor)}, i
+            "_properties": _entity_properties(aci, linetype, lineweight, truecolor, dropped)}, i
 
 
 _MTEXT_FORMAT_CODES = ("\\p", "\\f", "\\F", "\\H", "\\W", "\\C", "\\c", "\\Q", "\\T", "\\A", "\\S")
