@@ -11,7 +11,7 @@ on:
 
 permissions:
   contents: read
-  # Listing this repository's speculative supply-set artifacts.
+  # Cross-checking this repository's producer run records.
   actions: read
   pull-requests: read
 
@@ -47,6 +47,9 @@ jobs:
     timeout-minutes: 25
     # Satisfies OIDC sub repo:LEAF-Solar-Design@90289782/leaf-web-demo@1304548236:environment:ecr-release.
     environment: ecr-release
+    env:
+      MQ_TRANSPORT_BUCKET: "leaf-mq-transport-807034087062-us-east-1"
+      MQ_TRANSPORT_PREFIX: "mq/leaf-web-demo/"
     permissions:
       contents: read
       actions: read
@@ -182,6 +185,13 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Candidate $IMAGE_TAG is stageable."
 
+      - name: Configure AWS credentials for prewarm
+        if: steps.group.outputs.eligible == 'true'
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE }}
+          aws-region: us-east-1
+
       - name: Wait for the speculative supply set to exist
         id: supply
         if: steps.candidate.outputs.stageable == 'true'
@@ -191,19 +201,28 @@ jobs:
         run: |
           set -euo pipefail
           echo "present=false" >> "$GITHUB_OUTPUT"
-          # The build's CONCLUSION is not the evidence: a green run can have
-          # pushed nothing. The artifact is minted only after all five digests
-          # verify and bind to the producer run, so its existence is the proof
-          # that a complete, adoptable image set exists for this exact tree.
+          [[ "$TREE" =~ ^[0-9a-f]{40}$ ]] || exit 1
           NAME="spec-v3-supply-set-$TREE"
+          KEY="${MQ_TRANSPORT_PREFIX}supply-set/$TREE.json"
           ATTEMPT=0
           while [ "$ATTEMPT" -lt "$SUPPLY_SET_POLLS" ]; do
             ATTEMPT=$((ATTEMPT + 1))
-            if gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$NAME&per_page=100" > artifacts.json 2>/dev/null; then
-              if jq -e '[.artifacts[]? | select(.expired == false)] | length > 0' artifacts.json >/dev/null; then
+            # Prefix-conditioned ListBucket cannot authorize HeadObject absence probes.
+            # The producer's duplicate guard preserves the attempt-2 jam: an
+            # attempt-1 supply set cannot attest a rerun. A bogus immutable key
+            # is a permanent squat on this tree until an admin purges it.
+            if timeout 60 aws s3api list-objects-v2 --bucket "$MQ_TRANSPORT_BUCKET" --prefix "$KEY" --max-keys 1 > supply-list.json 2> s3-error.txt; then
+              if jq -e --arg key "$KEY" 'any(.Contents[]?; .Key == $key)' supply-list.json >/dev/null; then
                 echo "present=true" >> "$GITHUB_OUTPUT"
                 echo "Speculative supply set $NAME is present after $ATTEMPT poll(s)."
                 exit 0
+              fi
+            else
+              S3_EXIT=$?
+              if grep -Eq 'AccessDenied|NoSuchBucket|\(403\)' s3-error.txt; then
+                echo "::error::S3 poll failed ($S3_EXIT): bucket $MQ_TRANSPORT_BUCKET; check the mq/leaf-web-demo/ transport policy."
+                cat s3-error.txt
+                exit 1
               fi
             fi
             # Do not pay the interval after the LAST look: the loop has already
@@ -227,110 +246,99 @@ jobs:
         run: |
           set -euo pipefail
           echo "ready=false" >> "$GITHUB_OUTPUT"
-          # The v3 supply set above proves SOME complete image set exists for
-          # this tree; it does not prove it is THIS group's exact prepared
-          # source. An earlier same-tree preview cohort can mint that
-          # artifact first, so this second, source-bound record (minted by
-          # the digests check, not the v3 evidence step) is what the
-          # dispatch below actually waits on. Completion of the producer run
-          # is not required: the artifact exists only after all five digests
-          # verify.
+          [[ "$TREE" =~ ^[0-9a-f]{40}$ && "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
           NAME="spec-tag-readiness-$TREE-$SOURCE_SHA"
+          PREFIX="${MQ_TRANSPORT_PREFIX}readiness/$TREE/$SOURCE_SHA/"
+          transport_error() {
+            if grep -Eq 'AccessDenied|NoSuchBucket|\(403\)' s3-error.txt; then
+              echo "::error::S3 poll failed: bucket $MQ_TRANSPORT_BUCKET; check the mq/leaf-web-demo/ transport policy."
+              cat s3-error.txt
+              exit 1
+            fi
+          }
           ATTEMPT=0
           while [ "$ATTEMPT" -lt "$SUPPLY_SET_POLLS" ]; do
             ATTEMPT=$((ATTEMPT + 1))
-            LISTING=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$NAME&per_page=30" 2>/dev/null || true)
-            if [ -n "$LISTING" ]; then
-              # Exactly one exact same-repository candidate, the same
-              # discipline mq-supply's read-only repeat of this check uses.
-              CANDIDATE=$(jq -r --argjson repo_id "$REPO_ID" '
-                [.artifacts[]?
-                 | select(.expired | not)
-                 | select(.workflow_run.head_repository_id == $repo_id)]
-                | if length == 1 then .[0] | [.id, .workflow_run.id, .digest] | @tsv else empty end
-              ' <<<"$LISTING")
-              if [ -n "$CANDIDATE" ]; then
-                IFS=$'\t' read -r CAND_ID CAND_RUN CAND_DIGEST <<<"$CANDIDATE"
-                if [[ "$CAND_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-                  RUN_RECORD=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CAND_RUN" 2>/dev/null || true)
-                  if [ -n "$RUN_RECORD" ]; then
-                    WORKFLOW_PATH=".github/workflows/build-platform-images.yml"
-                    PATH_OK=$(jq -r --arg path "$WORKFLOW_PATH" '(.path // "" | sub("@.*$"; "")) == $path' <<<"$RUN_RECORD")
-                    EVENT_OK=$(jq -r '.event == "workflow_dispatch"' <<<"$RUN_RECORD")
-                    BRANCH_OK=$(jq -r '.head_branch == "main"' <<<"$RUN_RECORD")
-                    ACTUAL_ATTEMPT=$(jq -r '.run_attempt' <<<"$RUN_RECORD")
-                    if [ "$PATH_OK" = "true" ] && [ "$EVENT_OK" = "true" ] && [ "$BRANCH_OK" = "true" ]; then
-                      if gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$CAND_ID/zip" > tag-readiness.zip 2>/dev/null && [ -s tag-readiness.zip ]; then
-                        # Bound the archive itself before touching it: a
-                        # single-JSON-member readiness artifact is never
-                        # legitimately large.
-                        ARCHIVE_SIZE=$(wc -c < tag-readiness.zip)
-                        if [ "$ARCHIVE_SIZE" -le 65536 ]; then
-                          ACTUAL_DIGEST="sha256:$(sha256sum tag-readiness.zip | awk '{print $1}')"
-                          if [ "$ACTUAL_DIGEST" = "$CAND_DIGEST" ]; then
-                            # List, never extract-all: require the archive
-                            # hold exactly the one named member, no
-                            # directories and no smuggled extras, before
-                            # touching disk with its content.
-                            MEMBERS=$(unzip -Z1 tag-readiness.zip 2>/dev/null || true)
-                            if [ "$MEMBERS" = "spec-tag-readiness.json" ]; then
-                              rm -f tag-readiness.json
-                              unzip -p tag-readiness.zip spec-tag-readiness.json 2>/dev/null \
-                                | head -c 16385 > tag-readiness.json
-                              MEMBER_SIZE=$(wc -c < tag-readiness.json)
-                              if [ "$MEMBER_SIZE" -gt 0 ] && [ "$MEMBER_SIZE" -le 16384 ]; then
-                                # Content, not just presence: the SAME checks
-                                # build-platform-images.yml's own mint made, plus
-                                # the run's ACTUAL attempt from the API record
-                                # rather than the file's self-reported one, and
-                                # the ALREADY-VERIFIED provider workflow path
-                                # rather than a second self-reported claim.
-                                if jq -e --arg schema "leaf.speculative-tag-readiness.v1" \
-                                    --arg tree "$TREE" --arg source_sha "$SOURCE_SHA" \
-                                    --arg image_tag "$IMAGE_TAG" \
-                                    --arg workflow_path "$WORKFLOW_PATH" \
-                                    --argjson run "$CAND_RUN" --argjson attempt "$ACTUAL_ATTEMPT" \
-                                    --argjson repo "$REPO_ID" '
-                                  .schema == $schema
-                                  and .source_tree == $tree
-                                  and .source_sha == $source_sha
-                                  and .image_tag == $image_tag
-                                  and .producer_workflow_path == $workflow_path
-                                  and .producer_run_id == $run
-                                  and .producer_run_attempt == $attempt
-                                  and .repository_id == $repo
-                                  and (.digests.app | test("^sha256:[0-9a-f]{64}$"))
-                                  and (.digests.broker | test("^sha256:[0-9a-f]{64}$"))
-                                  and (.digests.canonical_worker | test("^sha256:[0-9a-f]{64}$"))
-                                  and (.digests.harness | test("^sha256:[0-9a-f]{64}$"))
-                                  and (.digests.web | test("^sha256:[0-9a-f]{64}$"))
-                                ' tag-readiness.json >/dev/null 2>&1; then
-                                  echo "ready=true" >> "$GITHUB_OUTPUT"
-                                  echo "Speculative tag readiness $NAME verified after $ATTEMPT poll(s) (run $CAND_RUN)."
-                                  exit 0
-                                fi
-                              fi
-                            fi
-                          fi
-                        fi
-                      fi
-                    fi
-                  fi
+            if timeout 60 aws s3api list-objects-v2 --bucket "$MQ_TRANSPORT_BUCKET" --prefix "$PREFIX" > readiness-list.json 2> s3-error.txt; then
+              # first-valid-wins: newest first, with Key breaking LastModified ties.
+              jq -r '[.Contents[]?] | sort_by(.LastModified, .Key) | reverse | .[] | .Key' readiness-list.json | tr -d '\r' > readiness-keys.txt
+              while IFS= read -r KEY; do
+                [[ "$KEY" == "$PREFIX"* ]] || continue
+                SUFFIX="${KEY#"$PREFIX"}"
+                [[ "$SUFFIX" =~ ^[0-9]+-[0-9]+\.json$ ]] || continue
+                if timeout 60 aws s3api head-object --bucket "$MQ_TRANSPORT_BUCKET" --key "$KEY" > readiness-head.json 2> s3-error.txt; then
+                  :
+                else
+                  S3_EXIT=$?
+                  transport_error
+                  continue
                 fi
-              fi
+                CAND_RUN=$(jq -j '.Metadata["run-id"] // empty' readiness-head.json)
+                CAND_ATTEMPT=$(jq -j '.Metadata["run-attempt"] // empty' readiness-head.json)
+                [[ "$CAND_RUN" =~ ^[0-9]+$ && "$CAND_ATTEMPT" =~ ^[0-9]+$ ]] || continue
+                [ "$SUFFIX" = "$CAND_RUN-$CAND_ATTEMPT.json" ] || continue
+                WORKFLOW_PATH=".github/workflows/build-platform-images.yml"
+                jq -e --arg repo "$REPO_ID" --arg sha "$SOURCE_SHA" \
+                  --arg ref "$GITHUB_REPOSITORY/$WORKFLOW_PATH@refs/heads/main" '
+                  .Metadata["repository-id"] == $repo and .Metadata["head-sha"] == $sha
+                  and .Metadata["workflow-ref"] == $ref and .Metadata.event == "workflow_dispatch"
+                ' readiness-head.json >/dev/null || continue
+                RUN_RECORD=$(timeout 60 gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CAND_RUN" 2>/dev/null || true)
+                [ -n "$RUN_RECORD" ] || continue
+                PATH_OK=$(jq -j --arg path "$WORKFLOW_PATH" '(.path // "" | sub("@.*$"; "")) == $path' <<<"$RUN_RECORD")
+                EVENT_OK=$(jq -j '.event == "workflow_dispatch"' <<<"$RUN_RECORD")
+                BRANCH_OK=$(jq -j '.head_branch == "main"' <<<"$RUN_RECORD")
+                ACTUAL_ATTEMPT=$(jq -j '.run_attempt' <<<"$RUN_RECORD")
+                REPO_OK=$(jq -j --argjson repo "$REPO_ID" '.repository.id == $repo and .head_repository.id == $repo' <<<"$RUN_RECORD")
+                [ "$PATH_OK" = "true" ] && [ "$EVENT_OK" = "true" ] && [ "$BRANCH_OK" = "true" ] && [ "$REPO_OK" = "true" ] || continue
+                [ "$ACTUAL_ATTEMPT" = "$CAND_ATTEMPT" ] || continue
+                if timeout 60 aws s3api get-object --bucket "$MQ_TRANSPORT_BUCKET" --key "$KEY" --checksum-mode ENABLED tag-readiness.json > readiness-get.json 2> s3-error.txt; then
+                  :
+                else
+                  S3_EXIT=$?
+                  transport_error
+                  continue
+                fi
+                EXPECTED_CHECKSUM=$(jq -j '.ChecksumSHA256 // empty' readiness-get.json)
+                ACTUAL_CHECKSUM=$(openssl dgst -sha256 -binary tag-readiness.json | openssl base64 -A)
+                [ -n "$EXPECTED_CHECKSUM" ] && [ "$ACTUAL_CHECKSUM" = "$EXPECTED_CHECKSUM" ] || continue
+                MEMBER_SIZE=$(wc -c < tag-readiness.json)
+                [ "$MEMBER_SIZE" -gt 0 ] && [ "$MEMBER_SIZE" -le 16384 ] || continue
+                if jq -e --arg schema "leaf.speculative-tag-readiness.v1" \
+                    --arg tree "$TREE" --arg source_sha "$SOURCE_SHA" \
+                    --arg image_tag "$IMAGE_TAG" \
+                    --arg workflow_path "$WORKFLOW_PATH" \
+                    --argjson run "$CAND_RUN" --argjson attempt "$ACTUAL_ATTEMPT" \
+                    --argjson repo "$REPO_ID" '
+                  .schema == $schema
+                  and .source_tree == $tree
+                  and .source_sha == $source_sha
+                  and .image_tag == $image_tag
+                  and .producer_workflow_path == $workflow_path
+                  and .producer_run_id == $run
+                  and .producer_run_attempt == $attempt
+                  and .repository_id == $repo
+                  and (.digests.app | test("^sha256:[0-9a-f]{64}$"))
+                  and (.digests.broker | test("^sha256:[0-9a-f]{64}$"))
+                  and (.digests.canonical_worker | test("^sha256:[0-9a-f]{64}$"))
+                  and (.digests.harness | test("^sha256:[0-9a-f]{64}$"))
+                  and (.digests.web | test("^sha256:[0-9a-f]{64}$"))
+                ' tag-readiness.json >/dev/null 2>&1; then
+                  echo "ready=true" >> "$GITHUB_OUTPUT"
+                  echo "Speculative tag readiness $NAME verified after $ATTEMPT poll(s) (run $CAND_RUN)."
+                  exit 0
+                fi
+              done < readiness-keys.txt
+            else
+              S3_EXIT=$?
+              transport_error
+              echo "::notice::S3 readiness poll returned $S3_EXIT for bucket $MQ_TRANSPORT_BUCKET."
             fi
             if [ "$ATTEMPT" -lt "$SUPPLY_SET_POLLS" ]; then
               sleep "$SUPPLY_SET_INTERVAL"
             fi
           done
           echo "::notice::No exact $NAME after $SUPPLY_SET_POLLS polls; nothing to stage yet. The next push or approval re-triggers this relay."
-
-      - name: Configure AWS credentials for prewarm
-        if: steps.readiness.outputs.ready == 'true'
-        uses: aws-actions/configure-aws-credentials@v6.1.0
-        with:
-          role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE }}
-          aws-region: us-east-1
 
       - name: Dispatch the prewarm for each coloured service
         id: dispatch
@@ -403,6 +411,7 @@ jobs:
             --arg supply_set_present "${SUPPLY_PRESENT:-false}" \
             --arg tag_ready "${TAG_READY:-false}" \
             --arg run_id "$GITHUB_RUN_ID" \
+            --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
             --slurpfile dispatched dispatched.json \
             '{schema: $schema, producer: "codebuild",
               group: {head_sha: $head_sha, base_sha: $base_sha, members: $members},
@@ -411,10 +420,31 @@ jobs:
               migration_refusal: ($migration_refusal == "true"),
               supply_set_present: ($supply_set_present == "true"),
               tag_ready: ($tag_ready == "true"),
-              relay_run_id: $run_id, dispatched: $dispatched[0]}' > prewarm-relay-receipt.json
+              relay_run_id: $run_id, relay_run_attempt: $run_attempt, dispatched: $dispatched[0]}' > prewarm-relay-receipt.json
           jq . prewarm-relay-receipt.json
 
+      - name: Put the relay receipt in S3
+        if: always() && steps.receipt.outcome == 'success' && steps.group.outputs.eligible == 'true'
+        env:
+          HEAD_SHA: ${{ steps.group.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]] || exit 1
+          SHA12="${HEAD_SHA:0:12}"
+          if timeout 60 aws s3api put-object --bucket "$MQ_TRANSPORT_BUCKET" \
+            --key "${MQ_TRANSPORT_PREFIX}relay/$SHA12/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json" \
+            --body prewarm-relay-receipt.json --if-none-match '*' --checksum-algorithm SHA256 \
+            --metadata "run-id=$GITHUB_RUN_ID,run-attempt=$GITHUB_RUN_ATTEMPT,workflow-ref=$GITHUB_WORKFLOW_REF,repository-id=$GITHUB_REPOSITORY_ID,head-sha=$HEAD_SHA,event=$GITHUB_EVENT_NAME" 2> s3-error.txt; then
+            :
+          else
+            S3_EXIT=$?
+            echo "::error::Relay receipt write failed ($S3_EXIT): bucket $MQ_TRANSPORT_BUCKET; check the mq/leaf-web-demo/ transport policy. Per-run keys must be unique."
+            cat s3-error.txt
+            exit 1
+          fi
+
       - name: Upload the relay receipt
+        continue-on-error: true
         if: always() && steps.receipt.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:

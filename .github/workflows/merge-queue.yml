@@ -43,6 +43,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  MQ_TRANSPORT_BUCKET: "leaf-mq-transport-807034087062-us-east-1"
+  MQ_TRANSPORT_PREFIX: "mq/leaf-web-demo/"
   # The provider workflow mq-supply waits on, and the exact checks its
   # producer run must pass — read-only repeats of build-platform-images.yml's
   # own adopt.decide gate (its `adopt` job, ~line 2987): repository id, path,
@@ -180,6 +182,10 @@ jobs:
     name: mq-supply
     if: github.event_name == 'merge_group'
     needs: mq-review
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
     runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 25
     outputs:
@@ -243,6 +249,13 @@ jobs:
             fi
           fi
 
+      - name: Assume the supply transport read role
+        if: steps.docs.outputs.supply != 'none'
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          role-to-assume: ${{ secrets.AWS_MQ_PREWARM_READ_ROLE }}
+          aws-region: us-east-1
+
       - name: Wait for the provider-bound speculative supply set
         id: wait
         if: steps.docs.outputs.supply != 'none'
@@ -252,56 +265,88 @@ jobs:
         run: |
           set -euo pipefail
           echo "supply=none" >> "$GITHUB_OUTPUT"
-          ARTIFACT_NAME="spec-v3-supply-set-$TREE"
+          [[ "$TREE" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          KEY="${MQ_TRANSPORT_PREFIX}supply-set/$TREE.json"
           REPO_ID=$(timeout 60 gh api "repos/$GITHUB_REPOSITORY" --jq .id)
+          transport_error() {
+            if grep -Eq 'AccessDenied|NoSuchBucket|\(403\)' s3-error.txt; then
+              echo "::error::mq-supply: bucket $MQ_TRANSPORT_BUCKET unavailable; check the mq/leaf-web-demo/ transport policy."
+              cat s3-error.txt
+              exit 1
+            fi
+          }
           ATTEMPT=0
           while [ "$ATTEMPT" -lt "$SUPPLY_SET_POLLS" ]; do
             ATTEMPT=$((ATTEMPT + 1))
-            LISTING=$(timeout 60 gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$ARTIFACT_NAME&per_page=30" 2>/dev/null || true)
-            if [ -n "$LISTING" ]; then
-              # Exactly one exact provider-bound candidate is required. The
-              # SAME checks build-platform-images.yml's adopt job makes,
-              # repeated here read-only.
-              CANDIDATE=$(jq -r --argjson repo_id "$REPO_ID" '
-                [.artifacts[]?
-                 | select(.expired | not)
-                 | select(.workflow_run.head_repository_id == $repo_id)]
-                | if length == 1 then .[0] | [.id, .workflow_run.id, .digest] | @tsv else empty end
-              ' <<<"$LISTING")
-              if [ -n "$CANDIDATE" ]; then
-                IFS=$'\t' read -r CAND_ID CAND_RUN CAND_DIGEST <<<"$CANDIDATE"
-                if [[ "$CAND_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-                  RUN_RECORD=$(timeout 60 gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CAND_RUN" 2>/dev/null || true)
-                  if [ -n "$RUN_RECORD" ]; then
-                    PATH_OK=$(jq -r --arg p "$SUPPLY_PROVIDER_WORKFLOW_PATH" '(.path // "" | sub("@.*$"; "")) == $p' <<<"$RUN_RECORD")
-                    EVENT_OK=$(jq -r '.event == "workflow_dispatch"' <<<"$RUN_RECORD")
-                    BRANCH_OK=$(jq -r '.head_branch == "main"' <<<"$RUN_RECORD")
-                    STATUS_OK=$(jq -r '.status == "completed"' <<<"$RUN_RECORD")
-                    CONCLUSION_OK=$(jq -r '.conclusion == "success"' <<<"$RUN_RECORD")
-                    if [ "$PATH_OK" = "true" ] && [ "$EVENT_OK" = "true" ] && [ "$BRANCH_OK" = "true" ] \
-                        && [ "$STATUS_OK" = "true" ] && [ "$CONCLUSION_OK" = "true" ]; then
-                      timeout 60 gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$CAND_ID/zip" > spec-candidate.zip 2>/dev/null || true
-                      if [ -s spec-candidate.zip ]; then
-                        ACTUAL_DIGEST="sha256:$(sha256sum spec-candidate.zip | awk '{print $1}')"
-                        if [ "$ACTUAL_DIGEST" = "$CAND_DIGEST" ]; then
-                          ATTEMPT_NUM=$(jq -r '.run_attempt' <<<"$RUN_RECORD")
-                          echo "supply=present" >> "$GITHUB_OUTPUT"
-                          echo "producer_run_id=$CAND_RUN" >> "$GITHUB_OUTPUT"
-                          echo "producer_run_attempt=$ATTEMPT_NUM" >> "$GITHUB_OUTPUT"
-                          echo "mq-supply: provider-bound supply set verified after $ATTEMPT poll(s) (run $CAND_RUN)."
-                          exit 0
-                        fi
-                      fi
+            # List the exact key first: prefix-scoped ListBucket cannot prove absence via HeadObject.
+            KEY_PRESENT=false
+            if timeout 60 aws s3api list-objects-v2 --bucket "$MQ_TRANSPORT_BUCKET" --prefix "$KEY" --max-keys 1 > supply-list.json 2> s3-error.txt; then
+              if jq -e --arg key "$KEY" 'any(.Contents[]?; .Key == $key)' supply-list.json >/dev/null; then
+                KEY_PRESENT=true
+              fi
+            else
+              S3_EXIT=$?
+              transport_error
+              echo "::notice::mq-supply: S3 listing returned $S3_EXIT."
+            fi
+            if [ "$KEY_PRESENT" = true ]; then
+            if timeout 60 aws s3api head-object --bucket "$MQ_TRANSPORT_BUCKET" --key "$KEY" > supply-head.json 2> s3-error.txt; then
+              CAND_RUN=$(jq -j '.Metadata["run-id"] // empty' supply-head.json)
+              CAND_ATTEMPT=$(jq -j '.Metadata["run-attempt"] // empty' supply-head.json)
+              CAND_SHA=$(jq -j '.Metadata["head-sha"] // empty' supply-head.json)
+              if [[ "$CAND_RUN" =~ ^[0-9]+$ && "$CAND_ATTEMPT" =~ ^[0-9]+$ && "$CAND_SHA" =~ ^[0-9a-f]{40}$ ]] && \
+                  jq -e --arg repo "$REPO_ID" --arg ref "$GITHUB_REPOSITORY/$SUPPLY_PROVIDER_WORKFLOW_PATH@refs/heads/main" '
+                    .Metadata["repository-id"] == $repo and .Metadata["workflow-ref"] == $ref
+                    and .Metadata.event == "workflow_dispatch"
+                  ' supply-head.json >/dev/null; then
+                RUN_RECORD=$(timeout 60 gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CAND_RUN" 2>/dev/null || true)
+                if [ -n "$RUN_RECORD" ]; then
+                  PATH_OK=$(jq -j --arg p "$SUPPLY_PROVIDER_WORKFLOW_PATH" '(.path // "" | sub("@.*$"; "")) == $p' <<<"$RUN_RECORD")
+                  EVENT_OK=$(jq -j '.event == "workflow_dispatch"' <<<"$RUN_RECORD")
+                  BRANCH_OK=$(jq -j '.head_branch == "main"' <<<"$RUN_RECORD")
+                  STATUS_OK=$(jq -j '.status == "completed"' <<<"$RUN_RECORD")
+                  CONCLUSION_OK=$(jq -j '.conclusion == "success"' <<<"$RUN_RECORD")
+                  ATTEMPT_NUM=$(jq -j '.run_attempt' <<<"$RUN_RECORD")
+                  REPO_OK=$(jq -j --argjson repo "$REPO_ID" '.repository.id == $repo and .head_repository.id == $repo' <<<"$RUN_RECORD")
+                  if [ "$PATH_OK" = "true" ] && [ "$EVENT_OK" = "true" ] && [ "$BRANCH_OK" = "true" ] \
+                      && [ "$STATUS_OK" = "true" ] && [ "$CONCLUSION_OK" = "true" ] \
+                      && [ "$REPO_OK" = "true" ] && [ "$ATTEMPT_NUM" = "$CAND_ATTEMPT" ]; then
+                    if timeout 60 aws s3api get-object --bucket "$MQ_TRANSPORT_BUCKET" --key "$KEY" --checksum-mode ENABLED spec-candidate.json > supply-get.json 2> s3-error.txt; then
+                      EXPECTED_CHECKSUM=$(jq -j '.ChecksumSHA256 // empty' supply-get.json)
+                      ACTUAL_CHECKSUM=$(openssl dgst -sha256 -binary spec-candidate.json | openssl base64 -A)
+                      [ -n "$EXPECTED_CHECKSUM" ] && [ "$ACTUAL_CHECKSUM" = "$EXPECTED_CHECKSUM" ] || { echo "::error::mq-supply: S3 checksum mismatch."; exit 1; }
+                      jq -e --arg tree "$TREE" --arg sha "$CAND_SHA" \
+                        --argjson run "$CAND_RUN" --argjson attempt "$CAND_ATTEMPT" '
+                        .release_source_tree == $tree and .release_source_revision == $sha
+                        and .build_run_id == $run and .build_run_attempt == $attempt
+                        and (.services | length == 5)
+                        and all(.services[]; .producer_run_id == $run and .producer_run_attempt == $attempt
+                          and .producer_source_revision == $sha and .producer_source_tree == $tree)
+                      ' spec-candidate.json >/dev/null || { echo "::error::mq-supply: S3 body provenance mismatch."; exit 1; }
+                      echo "supply=present" >> "$GITHUB_OUTPUT"
+                      echo "producer_run_id=$CAND_RUN" >> "$GITHUB_OUTPUT"
+                      echo "producer_run_attempt=$CAND_ATTEMPT" >> "$GITHUB_OUTPUT"
+                      echo "mq-supply: provider-bound supply set verified after $ATTEMPT poll(s) (run $CAND_RUN)."
+                      exit 0
+                    else
+                      S3_EXIT=$?
+                      transport_error
+                      echo "::notice::mq-supply: S3 read returned $S3_EXIT."
                     fi
                   fi
                 fi
               fi
+            else
+              S3_EXIT=$?
+              transport_error
+              echo "::notice::mq-supply: S3 head returned $S3_EXIT."
+            fi
             fi
             if [ "$ATTEMPT" -lt "$SUPPLY_SET_POLLS" ]; then
               sleep "$SUPPLY_SET_INTERVAL"
             fi
           done
-          echo "::error::mq-supply: no exact provider-bound $ARTIFACT_NAME after $SUPPLY_SET_POLLS polls."
+          echo "::error::mq-supply: no exact provider-bound $KEY after $SUPPLY_SET_POLLS polls."
           exit 1
 
   mq-prewarm:
@@ -341,6 +386,13 @@ jobs:
           echo "docs_only=true" >> "$GITHUB_OUTPUT"
           echo "::notice::mq-prewarm: reason=docs-only group: nothing to stage."
 
+      - name: Assume the relay transport read role
+        if: github.event_name == 'merge_group' && needs.mq-supply.outputs.supply == 'present'
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          role-to-assume: ${{ secrets.AWS_MQ_PREWARM_READ_ROLE }}
+          aws-region: us-east-1
+
       - name: Wait for the relay's prewarm receipt for this group
         id: relay
         if: github.event_name == 'merge_group' && needs.mq-supply.outputs.supply == 'present'
@@ -349,22 +401,61 @@ jobs:
           GROUP_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
         run: |
           set -euo pipefail
+          [[ "$GROUP_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
           SHA12="${GROUP_HEAD_SHA:0:12}"
           NAME="prewarm-relay-receipt-mg-$SHA12"
+          PREFIX="${MQ_TRANSPORT_PREFIX}relay/$SHA12/"
           echo "present=false" >> "$GITHUB_OUTPUT"
+          transport_error() {
+            if grep -Eq 'AccessDenied|NoSuchBucket|\(403\)' s3-error.txt; then
+              echo "::error::mq-prewarm: bucket $MQ_TRANSPORT_BUCKET unavailable; check the mq/leaf-web-demo/ transport policy."
+              cat s3-error.txt
+              exit 1
+            fi
+          }
           ATTEMPT=0
           while [ "$ATTEMPT" -lt "$RELAY_RECEIPT_POLLS" ]; do
             ATTEMPT=$((ATTEMPT + 1))
-            LISTING=$(timeout 60 gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$NAME&per_page=30" 2>/dev/null || true)
-            NEWEST_ID=$(jq -r '[.artifacts[]? | select(.expired == false)] | sort_by(.created_at) | last | .id // empty' <<<"${LISTING:-{}}" 2>/dev/null || true)
-            if [ -n "$NEWEST_ID" ]; then
-              if timeout 60 gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$NEWEST_ID/zip" > relay-receipt.zip 2>/dev/null; then
-                rm -rf relay-receipt && mkdir -p relay-receipt
-                if unzip -o -q relay-receipt.zip -d relay-receipt 2>/dev/null \
-                    && [ -f relay-receipt/prewarm-relay-receipt.json ]; then
-                  RECEIPT_HEAD=$(jq -r '.group.head_sha // empty' relay-receipt/prewarm-relay-receipt.json)
+            if LISTING=$(timeout 60 aws s3api list-objects-v2 --bucket "$MQ_TRANSPORT_BUCKET" --prefix "$PREFIX" 2> s3-error.txt); then
+              NEWEST_KEY=$(jq -j '[.Contents[]?] | sort_by(.LastModified, .Key) | last | .Key // empty' <<<"$LISTING")
+            else
+              S3_EXIT=$?
+              transport_error
+              NEWEST_KEY=""
+              echo "::notice::mq-prewarm: S3 listing returned $S3_EXIT."
+            fi
+            if [ -n "$NEWEST_KEY" ]; then
+              [[ "$NEWEST_KEY" == "$PREFIX"* ]] || { echo "::error::mq-prewarm: foreign relay key."; exit 1; }
+              SUFFIX="${NEWEST_KEY#"$PREFIX"}"
+              [[ "$SUFFIX" =~ ^[0-9]+-[0-9]+\.json$ ]] || { echo "::error::mq-prewarm: invalid relay key."; exit 1; }
+              if timeout 60 aws s3api head-object --bucket "$MQ_TRANSPORT_BUCKET" --key "$NEWEST_KEY" > relay-head.json 2> s3-error.txt; then
+                mkdir -p relay-receipt
+                if timeout 60 aws s3api get-object --bucket "$MQ_TRANSPORT_BUCKET" --key "$NEWEST_KEY" --checksum-mode ENABLED relay-receipt/prewarm-relay-receipt.json > relay-get.json 2> s3-error.txt; then
+                  EXPECTED_CHECKSUM=$(jq -j '.ChecksumSHA256 // empty' relay-get.json)
+                  ACTUAL_CHECKSUM=$(openssl dgst -sha256 -binary relay-receipt/prewarm-relay-receipt.json | openssl base64 -A)
+                  [ -n "$EXPECTED_CHECKSUM" ] && [ "$ACTUAL_CHECKSUM" = "$EXPECTED_CHECKSUM" ] || { echo "::error::mq-prewarm: S3 checksum mismatch."; exit 1; }
+                  CAND_RUN=$(jq -j '.Metadata["run-id"] // empty' relay-head.json)
+                  CAND_ATTEMPT=$(jq -j '.Metadata["run-attempt"] // empty' relay-head.json)
+                  [[ "$CAND_RUN" =~ ^[0-9]+$ && "$CAND_ATTEMPT" =~ ^[0-9]+$ ]] || { echo "::error::mq-prewarm: invalid relay metadata ids."; exit 1; }
+                  [ "$SUFFIX" = "$CAND_RUN-$CAND_ATTEMPT.json" ] || { echo "::error::mq-prewarm: relay key metadata mismatch."; exit 1; }
+                  REPO_ID=$(timeout 60 gh api "repos/$GITHUB_REPOSITORY" --jq .id)
+                  jq -e --arg repo "$REPO_ID" --arg sha "$GROUP_HEAD_SHA" \
+                    --arg ref "$GITHUB_REPOSITORY/.github/workflows/prewarm-staging-group.yml@refs/heads/main" '
+                    .Metadata["repository-id"] == $repo and .Metadata["head-sha"] == $sha
+                    and .Metadata["workflow-ref"] == $ref and .Metadata.event == "workflow_dispatch"
+                  ' relay-head.json >/dev/null || { echo "::error::mq-prewarm: foreign relay metadata."; exit 1; }
+                  RUN_RECORD=$(timeout 60 gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CAND_RUN")
+                  jq -e --argjson repo "$REPO_ID" --argjson attempt "$CAND_ATTEMPT" '
+                    (.path | sub("@.*$"; "")) == ".github/workflows/prewarm-staging-group.yml"
+                    and .event == "workflow_dispatch" and .head_branch == "main"
+                    and .run_attempt == $attempt and .repository.id == $repo and .head_repository.id == $repo
+                  ' <<<"$RUN_RECORD" >/dev/null || { echo "::error::mq-prewarm: relay run provenance mismatch."; exit 1; }
+                  jq -e --arg run "$CAND_RUN" --arg attempt "$CAND_ATTEMPT" '
+                    .relay_run_id == $run and .relay_run_attempt == $attempt
+                  ' relay-receipt/prewarm-relay-receipt.json >/dev/null || { echo "::error::mq-prewarm: relay body metadata mismatch."; exit 1; }
+                  RECEIPT_HEAD=$(jq -j '.group.head_sha // empty' relay-receipt/prewarm-relay-receipt.json)
                   if [ "$RECEIPT_HEAD" = "$GROUP_HEAD_SHA" ]; then
-                    MIGRATION_REFUSAL=$(jq -r 'if has("migration_refusal") then (.migration_refusal|tostring) else "false" end' relay-receipt/prewarm-relay-receipt.json)
+                    MIGRATION_REFUSAL=$(jq -j 'if has("migration_refusal") then (.migration_refusal|tostring) else "false" end' relay-receipt/prewarm-relay-receipt.json)
                     echo "present=true" >> "$GITHUB_OUTPUT"
                     echo "migration_refusal=$MIGRATION_REFUSAL" >> "$GITHUB_OUTPUT"
                     if [ "$MIGRATION_REFUSAL" = "true" ]; then
@@ -421,12 +512,20 @@ jobs:
               fail("relay dispatched services differ from configured services")
           Path("dispatched-map.json").write_text(json.dumps(dispatched))
           PY
-                    echo "relay_run_id=$(jq -r .relay_run_id relay-receipt/prewarm-relay-receipt.json)" >> "$GITHUB_OUTPUT"
+                    echo "relay_run_id=$(jq -j .relay_run_id relay-receipt/prewarm-relay-receipt.json)" >> "$GITHUB_OUTPUT"
                     echo "dispatched_json=$(jq -c . dispatched-map.json)" >> "$GITHUB_OUTPUT"
                     echo "mq-prewarm: relay receipt $NAME verified after $ATTEMPT poll(s)."
                     exit 0
                   fi
+                else
+                  S3_EXIT=$?
+                  transport_error
+                  echo "::notice::mq-prewarm: S3 read returned $S3_EXIT."
                 fi
+              else
+                S3_EXIT=$?
+                transport_error
+                echo "::notice::mq-prewarm: S3 head returned $S3_EXIT."
               fi
             fi
             if [ "$ATTEMPT" -lt "$RELAY_RECEIPT_POLLS" ]; then

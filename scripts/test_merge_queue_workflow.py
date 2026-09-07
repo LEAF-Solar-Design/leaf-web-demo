@@ -143,6 +143,8 @@ def run_step(body: str, workdir: Path, env: dict) -> dict:
     output.write_text("", encoding="utf-8")
     exports = {
         "GITHUB_OUTPUT": "step-output.txt",
+        "MQ_TRANSPORT_BUCKET": "leaf-mq-transport-807034087062-us-east-1",
+        "MQ_TRANSPORT_PREFIX": "mq/leaf-web-demo/",
         "GITHUB_REPOSITORY": "LEAF-Solar-Design/leaf-web-demo",
         "SUPPLY_PROVIDER_WORKFLOW_PATH": ".github/workflows/build-platform-images.yml",
         "SUPPLY_SET_POLLS": "1",
@@ -575,18 +577,23 @@ def test_mq_prewarm_always_runs_and_fails_explicitly_on_a_dependency_failure():
 
 
 def test_mq_supply_provider_checks_match_adopt_decides_list():
-    """Read-only repeat of build-platform-images.yml's adopt job: repository
-    id, path, event, branch, status, conclusion, then the immutable archive
-    digest verified against a real download."""
+    """S3 metadata supplies the producer ids; its run record and body must agree."""
     body = step_body("mq-supply", "Wait for the provider-bound speculative supply set")
-    assert ".workflow_run.head_repository_id == $repo_id" in body
+    assert '.Metadata["repository-id"] == $repo' in body
+    assert '.Metadata["run-id"] // empty' in body
+    assert '.Metadata["run-attempt"] // empty' in body
+    assert 'actions/runs/$CAND_RUN' in body
+    assert '"$ATTEMPT_NUM" = "$CAND_ATTEMPT"' in body
+    assert '.repository.id == $repo and .head_repository.id == $repo' in body
+    assert '.build_run_id == $run and .build_run_attempt == $attempt' in body
     assert '.event == "workflow_dispatch"' in body
     assert '.head_branch == "main"' in body
     assert '.status == "completed"' in body
     assert '.conclusion == "success"' in body
-    assert "sha256:$(sha256sum spec-candidate.zip" in body
-    assert 'ACTUAL_DIGEST" = "$CAND_DIGEST"' in body
-    assert "spec-v3-supply-set-$TREE" in body
+    assert "--checksum-mode ENABLED spec-candidate.json" in body
+    assert "openssl dgst -sha256 -binary spec-candidate.json" in body
+    assert 'ACTUAL_CHECKSUM" = "$EXPECTED_CHECKSUM"' in body
+    assert '${MQ_TRANSPORT_PREFIX}supply-set/$TREE.json' in body
 
 
 def test_mq_supply_bounded_poll_matches_spec_40x30s():
@@ -731,6 +738,8 @@ def _prewarm_evidence(tmp_path, entries, relay_source='env:\n  STAGE_SERVICES: "
         set -euo pipefail
         for arg in "$@"; do
           case "$arg" in
+            */actions/runs/77) cat relay-run.json; exit 0 ;;
+            repos/LEAF-Solar-Design/leaf-web-demo) echo 555; exit 0 ;;
             */contents/*)
               echo "$arg" >> contents-calls.txt
               cat relay-source.json; exit 0 ;;
@@ -783,6 +792,20 @@ def _prewarm_evidence(tmp_path, entries, relay_source='env:\n  STAGE_SERVICES: "
             "group": {"head_sha": "a" * 40}, "dispatched": entries,
             "producer": "codebuild", "relay_run_id": "77",
         }))
+    from test_prewarm_staging_cutover_workflow import _s3_object, _s3_transport_fixture
+    relay = {
+        "group": {"head_sha": "a" * 40}, "dispatched": entries,
+        "producer": "codebuild", "relay_run_id": "77", "relay_run_attempt": "1",
+    }
+    _s3_transport_fixture(tmp_path, {
+        "mq/leaf-web-demo/relay/" + "a" * 12 + "/77-1.json":
+            _s3_object(relay, 77, 1, 555, "a" * 40, "prewarm-staging-group.yml"),
+    })
+    (tmp_path / "relay-run.json").write_text(json.dumps({
+        "path": ".github/workflows/prewarm-staging-group.yml", "event": "workflow_dispatch",
+        "head_branch": "main", "run_attempt": 1,
+        "repository": {"id": 555}, "head_repository": {"id": 555},
+    }), encoding="utf-8")
     for service, number in (("web", 101), ("app", 102)):
         build_id = _build_id(number)
         # Filenames use just the UUID: Windows does not allow ':' in a filename.
@@ -968,3 +991,219 @@ def test_codebuild_logs_paginate_and_validate_only_the_last_receipt(tmp_path, lo
         assert "--next-token" not in logs[0]
         assert logs[1][logs[1].index("--next-token") + 1] == "first"
         assert logs[2][logs[2].index("--next-token") + 1] == "last"
+
+
+def test_mq_supply_s3_permissions_role_and_exact_key():
+    document = workflow_document()
+    assert document["env"]["MQ_TRANSPORT_BUCKET"] == "leaf-mq-transport-807034087062-us-east-1"
+    assert document["env"]["MQ_TRANSPORT_PREFIX"] == "mq/leaf-web-demo/"
+    job = document["jobs"]["mq-supply"]
+    assert "environment" not in job
+    assert job["permissions"] == {"id-token": "write", "contents": "read", "actions": "read"}
+    credentials = next(step for step in job["steps"] if step.get("uses", "").startswith("aws-actions/configure"))
+    assert credentials["with"] == {
+        "role-to-assume": "${{ secrets.AWS_MQ_PREWARM_READ_ROLE }}", "aws-region": "us-east-1",
+    }
+    assert job["steps"].index(credentials) < job["steps"].index(step_by_name("mq-supply", "Wait for the provider"))
+    body = step_body("mq-supply", "Wait for the provider")
+    assert '${MQ_TRANSPORT_PREFIX}supply-set/$TREE.json' in body
+    assert 'list-objects-v2 --bucket "$MQ_TRANSPORT_BUCKET" --prefix "$KEY" --max-keys 1' in body
+    assert 'any(.Contents[]?; .Key == $key)' in body
+    assert "actions/artifacts" not in body
+    relay_steps = document["jobs"]["mq-prewarm"]["steps"]
+    relay_credentials = next(step for step in relay_steps if step.get("name") == "Assume the relay transport read role")
+    assert relay_credentials["if"] == step_by_name("mq-prewarm", "Wait for the relay's")["if"]
+    assert relay_steps.index(relay_credentials) < relay_steps.index(step_by_name("mq-prewarm", "Wait for the relay's"))
+
+
+@needs_shell
+def test_mq_supply_absence_requires_exact_equality_without_head_executed(tmp_path):
+    from test_prewarm_staging_cutover_workflow import _s3_transport_fixture
+    for scenario in ("missing", "neighbor"):
+        work = tmp_path / scenario
+        work.mkdir()
+        objects, _, _ = _s3_supply_fixture(work)
+        key, item = next(iter(objects.items()))
+        objects = {} if scenario == "missing" else {key + ".foreign": item}
+        _s3_transport_fixture(work, objects, {"head-object": "AccessDenied"})
+        result = run_step(step_body("mq-supply", "Wait for the provider"), work, {"TREE": "b" * 40})
+        assert result["__returncode__"] == 1
+        assert "no exact provider-bound" in result["__stdout__"]
+        calls = [json.loads(line) for line in (work / "s3-calls.jsonl").read_text().splitlines()]
+        assert [call[1] for call in calls] == ["list-objects-v2"]
+        assert calls[0][calls[0].index("--prefix") + 1] == key
+        assert calls[0][calls[0].index("--max-keys") + 1] == "1"
+
+
+def _s3_supply_fixture(work):
+    from test_prewarm_staging_cutover_workflow import _s3_object, _s3_transport_fixture
+    tree, sha = "b" * 40, "a" * 40
+    body = {
+        "release_source_tree": tree, "release_source_revision": sha,
+        "build_run_id": 99, "build_run_attempt": 2,
+        "services": {name: {
+            "producer_run_id": 99, "producer_run_attempt": 2,
+            "producer_source_revision": sha, "producer_source_tree": tree,
+        } for name in ("app", "broker", "canonical_worker", "harness", "web")},
+    }
+    key = "mq/leaf-web-demo/supply-set/" + tree + ".json"
+    objects = {key: _s3_object(body, 99, 2, 555, sha)}
+    _s3_transport_fixture(work, objects)
+    provider = {
+        "path": ".github/workflows/build-platform-images.yml@refs/heads/main",
+        "event": "workflow_dispatch", "head_branch": "main", "run_attempt": 2,
+        "status": "completed", "conclusion": "success",
+        "repository": {"id": 555}, "head_repository": {"id": 555},
+    }
+    (work / "run.json").write_text(json.dumps(provider))
+    fake = work / "bin" / "gh"
+    fake.write_text('#!/usr/bin/env bash\ncase "$*" in *"/actions/runs/"*) cat run.json ;; *) echo 555 ;; esac\n',
+                    encoding="utf-8", newline="\n")
+    fake.chmod(0o755)
+    return objects, provider, body
+
+
+@needs_shell
+def test_mq_supply_s3_metadata_checksum_and_run_crosscheck_executed(tmp_path):
+    from test_prewarm_staging_cutover_workflow import _s3_object, _s3_transport_fixture
+    for scenario in ("valid", "checksum", "body-run", "body-attempt", "body-source", "metadata-run",
+                     "metadata-repo", "run-attempt", "run-path", "run-event", "run-branch",
+                     "run-status", "run-conclusion", "run-repository"):
+        work = tmp_path / scenario
+        work.mkdir()
+        objects, provider, body = _s3_supply_fixture(work)
+        key, item = next(iter(objects.items()))
+        if scenario == "checksum":
+            item["ChecksumSHA256"] = "wrong"
+        elif scenario.startswith("body-"):
+            field = {"body-run": "build_run_id", "body-attempt": "build_run_attempt",
+                     "body-source": "release_source_revision"}[scenario]
+            body[field] = "c" * 40 if scenario == "body-source" else 123
+            objects[key] = _s3_object(body, 99, 2, 555, "a" * 40)
+        elif scenario == "metadata-run":
+            item["Metadata"]["run-id"] = "123"
+        elif scenario == "metadata-repo":
+            item["Metadata"]["repository-id"] = "123"
+        elif scenario.startswith("run-"):
+            field = {"run-attempt": "run_attempt", "run-path": "path", "run-event": "event",
+                     "run-branch": "head_branch", "run-status": "status",
+                     "run-conclusion": "conclusion", "run-repository": "head_repository"}[scenario]
+            provider[field] = 3 if scenario == "run-attempt" else {"id": 123} if scenario == "run-repository" else "wrong"
+        (work / "run.json").write_text(json.dumps(provider))
+        _s3_transport_fixture(work, objects)
+        result = run_step(step_body("mq-supply", "Wait for the provider"), work, {"TREE": "b" * 40})
+        assert (result["__returncode__"] == 0) == (scenario == "valid"), result
+        if scenario == "valid":
+            assert result["producer_run_id"] == "99" and result["producer_run_attempt"] == "2"
+            calls = [json.loads(line) for line in (work / "s3-calls.jsonl").read_text().splitlines()]
+            assert [call[1] for call in calls] == ["list-objects-v2", "head-object", "get-object"]
+            assert calls[0][calls[0].index("--prefix") + 1] == key
+            assert calls[0][calls[0].index("--max-keys") + 1] == "1"
+            assert all(call[call.index("--key") + 1] == key for call in calls[1:])
+            assert calls[2][calls[2].index("--checksum-mode") + 1] == "ENABLED"
+
+
+@needs_shell
+def test_mq_relay_s3_newest_wins_with_key_tie_break_executed(tmp_path):
+    from test_prewarm_staging_cutover_workflow import _s3_transport_fixture
+    for scenario in ("timestamp", "tie"):
+        work = tmp_path / scenario
+        work.mkdir()
+        _prewarm_evidence(work, [_dispatch("web", 101), _dispatch("app", 102)])
+        objects = json.loads((work / "s3-objects.json").read_text())
+        key, item = next(iter(objects.items()))
+        old = json.loads(json.dumps(item))
+        old["ChecksumSHA256"] = "bad"
+        if scenario == "timestamp":
+            old["LastModified"] = "2026-09-06T00:00:00Z"
+            old_key = key.replace("/77-1.json", "/99-1.json")
+        else:
+            old_key = key.replace("/77-1.json", "/76-1.json")
+        _s3_transport_fixture(work, {key: item, old_key: old})
+        result = run_step(step_body("mq-prewarm", "Wait for the relay's"), work, {"GROUP_HEAD_SHA": "a" * 40})
+        assert result["__returncode__"] == 0, result
+        calls = [json.loads(line) for line in (work / "s3-calls.jsonl").read_text().splitlines()]
+        listings = [call for call in calls if call[1] == "list-objects-v2"]
+        assert len(listings) == 1
+        assert listings[0][listings[0].index("--prefix") + 1] == "mq/leaf-web-demo/relay/" + "a" * 12 + "/"
+        reads = [call for call in calls if call[1] in ("head-object", "get-object")]
+        assert all(call[call.index("--key") + 1] == key for call in reads)
+        assert reads[-1][reads[-1].index("--checksum-mode") + 1] == "ENABLED"
+
+
+@needs_shell
+def test_mq_s3_access_errors_fail_from_own_code(tmp_path):
+    from test_prewarm_staging_cutover_workflow import _s3_transport_fixture
+    for job, operations in (("mq-supply", ("list-objects-v2", "head-object", "get-object")),
+                            ("mq-prewarm", ("list-objects-v2", "head-object", "get-object"))):
+        for operation in operations:
+            for error in ("AccessDenied", "NoSuchBucket"):
+                work = tmp_path / (job + operation + error)
+                work.mkdir()
+                if job == "mq-supply":
+                    objects, _, _ = _s3_supply_fixture(work)
+                    fragment = "Wait for the provider"
+                else:
+                    _prewarm_evidence(work, [_dispatch("web", 101), _dispatch("app", 102)])
+                    objects = json.loads((work / "s3-objects.json").read_text())
+                    fragment = "Wait for the relay's"
+                _s3_transport_fixture(work, objects, {operation: error})
+                result = run_step(step_body(job, fragment), work, {"TREE": "b" * 40, "GROUP_HEAD_SHA": "a" * 40})
+                assert result["__returncode__"] == 1, result
+                assert "::error::" in result["__stdout__"]
+                assert "bucket leaf-mq-transport-807034087062-us-east-1" in result["__stdout__"]
+                assert "transport policy" in result["__stdout__"]
+
+
+@needs_shell
+def test_mq_relay_s3_checksum_and_metadata_refuse_executed(tmp_path):
+    from test_prewarm_staging_cutover_workflow import _s3_transport_fixture
+    for scenario in ("checksum", "metadata", "attempt"):
+        work = tmp_path / scenario
+        work.mkdir()
+        _prewarm_evidence(work, [_dispatch("web", 101), _dispatch("app", 102)])
+        objects = json.loads((work / "s3-objects.json").read_text())
+        item = next(iter(objects.values()))
+        if scenario == "checksum":
+            item["ChecksumSHA256"] = "bad"
+        elif scenario == "metadata":
+            item["Metadata"]["run-id"] = "999"
+        else:
+            provider = json.loads((work / "relay-run.json").read_text())
+            provider["run_attempt"] = 2
+            (work / "relay-run.json").write_text(json.dumps(provider))
+        _s3_transport_fixture(work, objects)
+        result = run_step(step_body("mq-prewarm", "Wait for the relay's"), work, {"GROUP_HEAD_SHA": "a" * 40})
+        assert result["__returncode__"] == 1, result
+        assert "::error::" in result["__stdout__"]
+
+
+@needs_shell
+def test_mq_relay_s3_invalid_newest_never_falls_back_executed(tmp_path):
+    from test_prewarm_staging_cutover_workflow import _s3_transport_fixture
+    _prewarm_evidence(tmp_path, [_dispatch("web", 101), _dispatch("app", 102)])
+    objects = json.loads((tmp_path / "s3-objects.json").read_text())
+    old_key, old = next(iter(objects.items()))
+    newest = json.loads(json.dumps(old))
+    newest["LastModified"] = "2026-09-08T00:00:00Z"
+    newest["ChecksumSHA256"] = "bad"
+    newest_key = old_key.replace("/77-1.json", "/78-1.json")
+    _s3_transport_fixture(tmp_path, {old_key: old, newest_key: newest})
+    result = run_step(step_body("mq-prewarm", "Wait for the relay's"), tmp_path, {"GROUP_HEAD_SHA": "a" * 40})
+    assert result["__returncode__"] == 1, result
+    assert "::error::mq-prewarm: S3 checksum mismatch." in result["__stdout__"]
+    calls = [json.loads(line) for line in (tmp_path / "s3-calls.jsonl").read_text().splitlines()]
+    assert [call[1] for call in calls] == ["list-objects-v2", "head-object", "get-object"]
+    assert all(call[call.index("--key") + 1] == newest_key for call in calls[1:])
+
+
+@needs_shell
+def test_mq_relay_absence_never_heads_an_unlisted_key_executed(tmp_path):
+    from test_prewarm_staging_cutover_workflow import _s3_transport_fixture
+    _s3_transport_fixture(tmp_path, {}, {"head-object": "AccessDenied", "get-object": "AccessDenied"})
+    result = run_step(step_body("mq-prewarm", "Wait for the relay's"), tmp_path, {"GROUP_HEAD_SHA": "a" * 40})
+    assert result["__returncode__"] == 1
+    assert "no matching prewarm-relay-receipt" in result["__stdout__"]
+    calls = [json.loads(line) for line in (tmp_path / "s3-calls.jsonl").read_text().splitlines()]
+    assert [call[1] for call in calls] == ["list-objects-v2"]
+    assert calls[0][calls[0].index("--prefix") + 1] == "mq/leaf-web-demo/relay/" + "a" * 12 + "/"
