@@ -211,6 +211,8 @@ describe('honest triggers', () => {
       'modify:trim', 'modify:extend', 'modify:fillet', 'modify:chamfer',
       // W4g-4b: MATCHPROP, a Modify record seated in the Properties panel.
       'modify:matchprop',
+      // W4g-7b-03c: the Properties panel's three combos, Modify records too.
+      'modify:setColor', 'modify:setLinetype', 'modify:setLineweight',
     ])
   })
 

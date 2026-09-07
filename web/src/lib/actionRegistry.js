@@ -515,10 +515,16 @@ const ACTION_LIST = [
   engineOp('modify', 'extend', 'extend', 'Extend', 'extend', 'Lengthen the selection until it meets a boundary edge', 'small'),
   engineOp('modify', 'fillet', 'fillet', 'Fillet', 'fillet', 'Round the corner between the selection and a second line, arc or circle with an arc', 'small'),
   engineOp('modify', 'chamfer', 'chamfer', 'Chamfer', 'chamfer', 'Bevel the corner between the selection and a second line', 'small'),
-  // W4g-4b: the reference's MATCHPROP, seated in its Properties panel. It
-  // copies the selection's LAYER to the object you pick; colour, linetype
-  // and lineweight wait on the contract (the panel's ByLayer fields say so).
-  engineOp('modify', 'matchprop', 'match', 'Match', 'match', "Copy the selection's layer to the object you click (colour, linetype and lineweight are not carried yet)", 'large', 'properties'),
+  // W4g-4b: the reference's MATCHPROP, seated in its Properties panel.
+  // W4g-7b-03c: it now copies the layer AND colour, linetype and lineweight
+  // to the object you pick, as one batch.
+  engineOp('modify', 'matchprop', 'match', 'Match', 'match', "Copy the selection's layer, colour, linetype and lineweight to the object you click", 'large', 'properties'),
+  // W4g-7b-03c: the Properties panel's three combos. Each runs at once on
+  // change (no prompt: a select is its own prompt); the COLOR/LINETYPE/
+  // LWEIGHT words still arm the same op typed, through PROMPTS.
+  engineOp('modify', 'setColor', 'color', 'Color', 'color', "Set the selection's colour", 'row', 'properties'),
+  engineOp('modify', 'setLinetype', 'linetype', 'Linetype', 'linetype', "Set the selection's linetype", 'row', 'properties'),
+  engineOp('modify', 'setLineweight', 'lineweight', 'Lineweight', 'lineweight', "Set the selection's lineweight", 'row', 'properties'),
   // W4g-5c: the reference's Clipboard panel, in its order and its sizes.
   engineOp('clipboard', 'pasteClip', 'paste', 'Paste', 'paste', 'Paste the clipboard entity at a base point', 'large'),
   engineOp('clipboard', 'cutClip', 'cut', 'Cut', 'cut', 'Put the selection on the clipboard and delete it', 'small'),

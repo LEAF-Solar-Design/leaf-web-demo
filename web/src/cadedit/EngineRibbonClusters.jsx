@@ -32,12 +32,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 
-import { RibbonCluster, RibbonTool } from '../site/DraftingRibbon.jsx'
+import { RibbonCluster, RibbonTool, RibbonWidget } from '../site/DraftingRibbon.jsx'
 import { QuickButton, QUICK_FILE_SLOT_ID } from '../site/CockpitTopBand.jsx'
 
 import { DRAW_REASONS, MODIFY_REASONS, clipboardReason, drawReason, forGroup, modifyReason } from '../lib/actionRegistry.js'
 
-import { admissibleBlockName, buildCreatePayload, buildEditPayload, readNumber } from './engineSession.js'
+import { ACI_NAMES, LINEWEIGHT_VALUES, admissibleBlockName, buildCreatePayload, buildEditPayload, formatAci, formatLineweight, readNumber } from './engineSession.js'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
 import { isPointExpression } from './pointExpression.js'
 import { resolvePromptInputs } from './promptInputs.js'
@@ -260,6 +260,11 @@ export const PROMPTS = Object.freeze({
   ] },
   deleteVertex: { verb: 'DELETE VERTEX', steps: [{ ask: 'Specify vertex:', fields: [['vertexIndex', 'vertex', 'numeric']] }] },
   setLayer: { verb: 'SET LAYER', steps: [{ ask: 'Specify layer:', fields: [['layer', 'set layer', 'text']] }] },
+  // W4g-7b-03c: colour, linetype and lineweight, typed on the command line
+  // (the ribbon's three combos run at once instead, with no prompt).
+  setColor: { verb: 'COLOR', steps: [{ ask: 'Enter new color <ByLayer>:', fields: [['aci', 'color', 'text']] }] },
+  setLinetype: { verb: 'LINETYPE', steps: [{ ask: 'Enter new linetype name <ByLayer>:', fields: [['linetype', 'linetype', 'text']] }] },
+  setLineweight: { verb: 'LWEIGHT', steps: [{ ask: 'Enter new lineweight <ByLayer>:', fields: [['lineweight', 'lineweight', 'text']] }] },
 })
 
 /** Why "save as a version" is unavailable right now, or '' when it is live. */
@@ -504,6 +509,45 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const armedAttrs = (op) => (PROMPTS[op]
     ? { expanded: prompt !== null && armedOp === op, controls: prompt !== null && armedOp === op ? PROMPT_ID : undefined }
     : {})
+
+  // W4g-7b-03c: the Properties panel's three combos. Each RUNS AT ONCE on
+  // change (a select is its own prompt, no arm/Run round trip); "index..."
+  // is the one value that still needs typed input (1..255), so it arms the
+  // COLOR word's own prompt instead of guessing a number. buildEditPayload's
+  // parseAci/parseLinetype/parseLineweight are the same validators the typed
+  // words and MATCHPROP already go through, so a bad pick refuses the same
+  // sentence a bad typed value would.
+  const selectedEntity = (session.entities || []).find((entity) => entity.id === session.selectedId) || null
+  const linetypeCatalogue = Array.isArray(session.entities?.linetypes) && session.entities.linetypes.length
+    ? session.entities.linetypes
+    : ['ByLayer', 'ByBlock', 'Continuous']
+  const colorValue = !selectedEntity ? 'ByLayer'
+    : selectedEntity.aci === 256 ? 'ByLayer'
+      : selectedEntity.aci === 0 ? 'ByBlock'
+        : ACI_NAMES[selectedEntity.aci] || 'index...'
+  const linetypeValue = !selectedEntity ? 'ByLayer'
+    : linetypeCatalogue.find((name) => name.toLowerCase() === String(selectedEntity.linetype ?? 'ByLayer').toLowerCase())
+      || selectedEntity.linetype || 'ByLayer'
+  const lineweightValue = !selectedEntity ? 'ByLayer' : formatLineweight(Number.isFinite(selectedEntity.lineweight) ? selectedEntity.lineweight : -1)
+  const propertyWidgets = [
+    {
+      id: 'prop-color', label: 'Color', value: colorValue,
+      options: ['ByLayer', 'ByBlock', ...Object.values(ACI_NAMES), 'index...'],
+      disabled: !!modify, reason: modify,
+      onChange: (value) => (value === 'index...' ? toggleArmed('modify', 'setColor') : applyEdit('setColor', { aci: value })),
+    },
+    {
+      id: 'prop-linetype', label: 'Linetype', value: linetypeValue, options: linetypeCatalogue,
+      disabled: !!modify, reason: modify,
+      onChange: (value) => applyEdit('setLinetype', { linetype: value }),
+    },
+    {
+      id: 'prop-lineweight', label: 'Lineweight', value: lineweightValue,
+      options: ['ByLayer', 'ByBlock', 'Default', ...LINEWEIGHT_VALUES.map(formatLineweight)],
+      disabled: !!modify, reason: modify,
+      onChange: (value) => applyEdit('setLineweight', { lineweight: value }),
+    },
+  ]
 
   const fileTools = [
     {
@@ -812,27 +856,33 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
         clipboardSlot,
       )}
       {show.has('properties') && propertiesSlot && createPortal(
-        forGroup('modify').filter((action) => action.panel === 'properties').map((action) => {
-          const reason = action.when(engineCtx)
-          return (
-            <RibbonTool
-              key={action.op}
-              tool={{
-                id: action.id,
-                label: action.label,
-                text: action.text,
-                icon: action.icon,
-                size: action.size,
-                title: action.title(engineCtx),
-                write: action.write,
-                disabled: !!reason,
-                reason,
-                ...armedAttrs(action.op),
-                onClick: () => action.run(engineCtx),
-              }}
-            />
-          )
-        }),
+        <>
+          {forGroup('modify').filter((action) => action.panel === 'properties' && action.op === 'matchprop').map((action) => {
+            const reason = action.when(engineCtx)
+            return (
+              <RibbonTool
+                key={action.op}
+                tool={{
+                  id: action.id,
+                  label: action.label,
+                  text: action.text,
+                  icon: action.icon,
+                  size: action.size,
+                  title: action.title(engineCtx),
+                  write: action.write,
+                  disabled: !!reason,
+                  reason,
+                  ...armedAttrs(action.op),
+                  onClick: () => action.run(engineCtx),
+                }}
+              />
+            )
+          })}
+          {/* W4g-7b-03c: the three property combos sit on the SAME tools row
+              (the #1059 lesson: a portaled seat's controls must be on the
+              band, not the separate .ribbon-widgets row under it). */}
+          {propertyWidgets.map((widget) => <RibbonWidget key={widget.id} widget={widget} />)}
+        </>,
         propertiesSlot,
       )}
       {show.has('script') && scriptSlot && createPortal(<ScriptPanel />, scriptSlot)}

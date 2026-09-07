@@ -134,7 +134,9 @@ describe('W4g-4b MATCHPROP', () => {
     expect(planMatchprop(session([H, V], '7'), { edge: '13' }).refusal).toBe('Match refused: the destination object is no longer in the document.')
     expect(planMatchprop(session([H, V], '13'), { edge: '9' }).refusal).toBe('Match refused: the selected entity is no longer in the document.')
     expect(planMatchprop(session([H, RO], '7'), { edge: '11' }).refusal).toBe('Match refused: the destination object is read-only in the browser engine.')
-    expect(planMatchprop(session([H, { ...V, layer: 'Source' }], '7'), { edge: '9' }).refusal).toBe('Match refused: the destination is already on layer Source.')
+    // W4g-7b-03c: MATCHPROP now checks the layer AND the three properties, so
+    // "nothing would change" covers all four rather than naming the layer alone.
+    expect(planMatchprop(session([H, { ...V, layer: 'Source' }], '7'), { edge: '9' }).refusal).toBe('Match refused: nothing to match.')
     expect(planMatchprop(session([{ ...H, layer: '' }, V], '7'), { edge: '9' }).refusal).toBe('Match refused: the selection has no layer to copy.')
     // The step lowers through the same builder a single setLayer op uses.
     expect(lowerSteps([{ op: 'setLayer', entityId: '9', layer: 'Source' }])).toEqual({ steps: [{ op: 'setLayer', payload: { entityId: '9', layer: 'Source' } }] })
@@ -146,7 +148,10 @@ describe('W4g-4b MATCHPROP', () => {
     expect(rec.id).toBe('modify:matchprop')
     expect(rec.panel).toBe('properties')
     expect(rec.icon).toBe('match')
-    for (const a of forGroup('modify')) if (a.op !== 'matchprop') expect(a.panel).toBe('modify')
+    // W4g-7b-03c: setColor/setLinetype/setLineweight join matchprop in the
+    // Properties panel; every other Modify record still sits in its own.
+    const propertiesOps = new Set(['matchprop', 'setColor', 'setLinetype', 'setLineweight'])
+    for (const a of forGroup('modify')) if (!propertiesOps.has(a.op)) expect(a.panel).toBe('modify')
     expect(PROMPTS.matchprop.steps.map((s) => s.ask)).toEqual(['Select destination object:'])
     expect(PROMPTS.createPoint.steps.map((s) => s.ask)).toEqual(['Specify a point:', 'Layer:'])
     expect(PROMPTS.createEllipse.steps.map((s) => s.ask)).toEqual(['Specify center of ellipse:', 'Specify endpoint of axis:', 'Specify ratio (minor to major, 0 to 1):', 'Layer:'])
