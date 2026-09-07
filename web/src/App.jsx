@@ -53,9 +53,13 @@ import { deriveWorkspaceProjectState } from './site/workspaceProjectState.js'
 import IosSurface from './ios/IosSurface.jsx'
 import { ENV_IOS_SURFACE } from './ios/flag.js'
 import CadEditSurface from './cadedit/CadEditSurface.jsx'
-import EngineSessionProvider, { useEngineSessionOptional } from './cadedit/EngineSessionProvider.jsx'
-import { formatAci, formatLineweight } from './cadedit/engineSession.js'
+import EngineSessionProvider from './cadedit/EngineSessionProvider.jsx'
 import EngineRibbonClusters from './cadedit/EngineRibbonClusters.jsx'
+// W4g-7b-03c-d: the dock's Color/Linetype/Lineweight rows portal into the
+// slot below from a consumer INSIDE the provider (App itself sits outside
+// it, so a hook call in App's own body always read null — the PR #1121
+// proof finding this record fixes).
+import EngineDockProperties from './cadedit/EngineDockProperties.jsx'
 import CommandLineArmer from './cadedit/CommandLineArmer.jsx'
 import EngineDocumentView from './cadedit/EngineDocumentView.jsx'
 import EngineHeadOpener from './cadedit/EngineHeadOpener.jsx'
@@ -245,12 +249,6 @@ export default function App() {
   // consumer is the Viewer render site, which portals into it; null renders
   // the old shell byte-for-byte (the rollback contract, studioGround.js).
   const studioGround = useStudioGround()
-  // W4g-7b-03c: the dock's General Color/Linetype/Lineweight rows read the
-  // ENGINE'S OWN selection (session.selectedId), the only place those three
-  // fields live — never the console's server-drawing selection, which has no
-  // such fields. Optional: null on a flag-off build (no provider mounted) or
-  // a standalone embed, which the rows below read as an honest empty state.
-  const engineSessionForDock = useEngineSessionOptional()
   const [mock, setMock] = useState(config.mockDefault)
   const [loadErr, setLoadErr] = useState(null)
   const [intakeRetryKey, setIntakeRetryKey] = useState(0) // X3 Retry — bumping re-runs the intake load effect
@@ -3461,6 +3459,11 @@ export default function App() {
               notice={catalog?.cad_engine?.notice || ''}
             />
           )}
+          {/* W4g-7b-03c-d: mounted unconditionally on studioGround (the dock
+              rows render in both shells), the same way CadEditSurface above
+              is. Portals into the cockpit-dock-properties-slot div rendered
+              further down, wherever propertyRowsEl sits. */}
+          {ENV_CAD_EDIT && <EngineDockProperties />}
           <div className="viewer-wrap">
             {/* X3 whole-pane takeover: red dot + what failed + quiet reason + Retry. */}
             {loadErr && !signedOut && (
@@ -3537,23 +3540,19 @@ export default function App() {
                   onToggle={toggleLayer}
                 />
               ) : null
-              // W4g-7b-03c: the General section's Color/Linetype/Lineweight
-              // rows, read-only, from the ENGINE'S OWN selection (the only
-              // place those three fields live; SelectionReadout.jsx reads the
-              // console's server-drawing selection, which has none of them,
-              // and is out of this record's owned set, so these rows sit
-              // beside it rather than inside it). Absent entirely when the
-              // engine holds no selection, honest-empty like every other row.
-              const engineEntity = engineSessionForDock?.session
-                ? (engineSessionForDock.session.entities || []).find((entity) => entity.id === engineSessionForDock.session.selectedId)
+              // W4g-7b-03c-d: an empty SLOT only (ENV_CAD_EDIT first, the
+              // bundle-fence contract every cadedit call site uses). The real
+              // <dl>, from the ENGINE'S OWN selection, portals in from
+              // EngineDockProperties.jsx, a consumer mounted INSIDE the
+              // provider — App itself mounts EngineSessionProvider and so
+              // sits OUTSIDE it, which is why a hook read here always saw
+              // null (the PR #1121 proof finding). SelectionReadout.jsx reads
+              // the console's server-drawing selection, which has none of
+              // these three fields, so this slot sits beside it rather than
+              // inside it.
+              const propertyRowsEl = ENV_CAD_EDIT
+                ? <div id="cockpit-dock-properties-slot" className="dock-properties-slot" />
                 : null
-              const propertyRowsEl = engineEntity ? (
-                <dl className="dock-properties" data-testid="dock-properties">
-                  <dt>Color</dt><dd>{formatAci(Number.isFinite(engineEntity.aci) ? engineEntity.aci : 256)}</dd>
-                  <dt>Linetype</dt><dd>{typeof engineEntity.linetype === 'string' && engineEntity.linetype ? engineEntity.linetype : 'ByLayer'}</dd>
-                  <dt>Lineweight</dt><dd>{formatLineweight(Number.isFinite(engineEntity.lineweight) ? engineEntity.lineweight : -1)}</dd>
-                </dl>
-              ) : null
               const readoutEl = intake ? (
                 <>
                   <SelectionReadout selection={selection} onDeselect={() => setSelectedHandle(null)} />
