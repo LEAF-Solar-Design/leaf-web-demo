@@ -5,7 +5,7 @@ import importlib.util
 
 import pytest
 
-import broker
+import campaign_execution_policy as policy
 import campaign_acquisition_service as acquisition
 import campaign_release_service as runtime
 import campaign_transform_job as transform
@@ -120,17 +120,17 @@ def test_busy_execution_guard_has_no_effects(release, monkeypatch):
 
 
 def test_authored_switch_and_account_disable_admission(monkeypatch):
-    monkeypatch.setattr(broker, '_authored_execution_enabled', lambda: False)
+    monkeypatch.setattr(policy, 'authored_execution_enabled', lambda: False)
     with pytest.raises(acquisition.AcquisitionError, match='disabled'):
         acquisition._run_authority('tenant', {})
-    monkeypatch.setattr(broker, '_authored_execution_enabled', lambda: True)
-    monkeypatch.setattr(broker, 'tenant_disabled', lambda tenant: True)
+    monkeypatch.setattr(policy, 'authored_execution_enabled', lambda: True)
+    monkeypatch.setattr(policy, 'tenant_disabled', lambda tenant: True)
     with pytest.raises(acquisition.AcquisitionError, match='disabled'):
         acquisition._run_authority('tenant', {})
 
 
 def test_authored_switch_rechecked_before_execution_and_terminal(monkeypatch):
-    monkeypatch.setattr(broker, '_authored_execution_enabled', lambda: False)
+    monkeypatch.setattr(policy, 'authored_execution_enabled', lambda: False)
     # The real authority method fails before any execution or PG mutation.
     with pytest.raises(ValueError, match='authored execution'):
         transform.check_authority({'tenant_id': 'tenant'})

@@ -318,7 +318,7 @@ def build_suites() -> List[Suite]:
           Suite("server-campaign-acquisition", "server tests/test_campaign_acquisition_service.py", "pytest", SERVER,
                 _py_pytest("tests/test_campaign_acquisition_service.py"), 22),
           Suite("server-campaign-transform", "server tests/test_campaign_transform_job.py", "pytest", SERVER,
-                _py_pytest("tests/test_campaign_transform_job.py"), 30),
+                _py_pytest("tests/test_campaign_transform_job.py") + ["tests/test_campaign_execution_policy.py"], 30),
           Suite("server-campaign-transform-admission", "server tests/test_campaign_transform_admission.py", "pytest", SERVER,
                 _py_pytest("tests/test_campaign_transform_admission.py"), 12),
           Suite("server-campaign-web-release", "server tests/test_campaign_web_release.py", "pytest", SERVER,
