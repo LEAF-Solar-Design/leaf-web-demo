@@ -113,7 +113,7 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
         # 13 skipped / 685 executed. W4d Slice B then re-measured exact-head
         # Linux CI at 748 collected / 17 skipped / 731 executed after the
         # lossless-handle correction added one gated and one portable case.
-        "web-vitest": 731,
+        "web-vitest": 746,
     }
     assert {
         suite_id: suites[suite_id].expected

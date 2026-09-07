@@ -4,6 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import elementSourceStamp from './vite-plugins/elementSourceStamp.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
@@ -64,8 +65,8 @@ function buildHash() {
 // Lane C frontend. Dev server on 5175 so it never collides with the
 // Lane D backend (8130). API base + mock mode are controlled via env
 // (see src/api.js): VITE_MOCK=1 (default) demos with no backend.
-export default defineConfig({
-  plugins: [react(), cadEngineDevServer()],
+export default defineConfig(({ mode }) => ({
+  plugins: [react(), cadEngineDevServer(), ...(mode !== 'production' ? [elementSourceStamp({ root: HERE })] : [])],
   define: {
     __BUILD_HASH__: JSON.stringify(buildHash()),
   },
@@ -90,4 +91,4 @@ export default defineConfig({
       },
     },
   },
-})
+}))

@@ -1709,7 +1709,7 @@ def build_suites() -> List[Suite]:
         # batch-atomicity case. An opted-in machine (local wasm build present)
         # executes them instead.
         Suite("web-vitest", "web npm run test:unit (vitest)", "vitest", WEB,
-              [_npm(), "run", "test:unit"], 731,
+              [_npm(), "run", "test:unit"], 746,
               allowed_vitest_skips=(
                   # Day-3 CAD engine real-build round trip: needs a compiled
                   # wasm artifact, which needs a Rust toolchain, so it exists
