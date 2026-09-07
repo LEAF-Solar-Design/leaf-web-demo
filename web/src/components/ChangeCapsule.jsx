@@ -52,7 +52,7 @@ export const CHANGE_CAPSULE_REASONS = Object.freeze({
   staleBase: 'The surface config has changed since this proposal was made. Accept is refused; request a fresh proposal.',
   invalidManifest: 'The live surface config or proposed overlay has an unknown slot or invalid shape. Accept is refused.',
   manifestUnavailable: 'The live surface config could not be checked. Nothing was submitted.',
-  commitFailed: 'The surface config commit could not be confirmed. Refresh before trying again.',
+  commitFailed: 'The commit did not confirm; refresh to see whether it landed',
 })
 
 /**
@@ -139,10 +139,15 @@ function ChangeCapsuleRecord({
   const [submitting, setSubmitting] = useState(false)
   const [refusal, setRefusal] = useState(null)
   const [receipt, setReceipt] = useState(null)
+  const [commitOutcome, setCommitOutcome] = useState(null)
+  const [submittedSha256, setSubmittedSha256] = useState(null)
+  const [liveSha256, setLiveSha256] = useState(null)
   const inFlight = useRef(false)
   const kind = annotation?.kind || 'entity'
   const isSurfaceConfig = kind === 'surface-config'
-  const phase = receipt ? 'accepted' : capsulePhase({ annotation, busy: busy || submitting, error })
+  const phase = commitOutcome === 'committed' ? 'accepted'
+    : commitOutcome === 'unconfirmed' ? 'unconfirmed'
+      : capsulePhase({ annotation, busy: busy || submitting, error })
 
   const intakes = useMemo(() => {
     if (phase !== 'pending' || typeof resolveScopedIntakes !== 'function') return null
@@ -171,15 +176,42 @@ function ChangeCapsuleRecord({
         setRefusal(CHANGE_CAPSULE_REASONS.staleBase)
         return
       }
+      const document = JSON.stringify(annotation.overlay, null, 2) + '\n'
+      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(document))
+      setSubmittedSha256(Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join(''))
       submitted = true
-      const committed = await submitSurfaceConfig(annotation.overlay)
+      setCommitOutcome('unconfirmed')
+      const committed = await submitSurfaceConfig(JSON.parse(document))
       if (typeof committed?.sha256 !== 'string' || typeof committed?.authored_at !== 'string') {
         throw new Error('Missing file receipt')
       }
       setReceipt(committed)
+      setCommitOutcome('committed')
       await refreshSurfaceConfigOverlay()
     } catch {
       setRefusal(submitted ? CHANGE_CAPSULE_REASONS.commitFailed : CHANGE_CAPSULE_REASONS.manifestUnavailable)
+    } finally {
+      inFlight.current = false
+      setSubmitting(false)
+    }
+  }
+
+  async function refreshCommit() {
+    if (inFlight.current) return
+    inFlight.current = true
+    setSubmitting(true)
+    try {
+      await refreshSurfaceConfigOverlay()
+      const live = await getSurfaceConfig(false, { fresh: true })
+      setLiveSha256(live?.source?.sha256 ?? null)
+      if (submittedSha256 && live?.source?.sha256 === submittedSha256
+          && typeof live.source.authored_at === 'string') {
+        setReceipt(live.source)
+        setCommitOutcome('committed')
+        setRefusal(null)
+      }
+    } catch {
+      setRefusal(CHANGE_CAPSULE_REASONS.commitFailed)
     } finally {
       inFlight.current = false
       setSubmitting(false)
@@ -222,9 +254,14 @@ function ChangeCapsuleRecord({
         ? 'Accept replaces the surface config file. Restoring it requires a new proposal.'
         : reversibilityCopy(phase)}</p>
       <LiveRegion as="p" className="dim" data-testid="change-capsule-status">
-        {PHASE_STATUS[phase] || PHASE_STATUS.stale}
+        {phase === 'unconfirmed' ? CHANGE_CAPSULE_REASONS.commitFailed : PHASE_STATUS[phase] || PHASE_STATUS.stale}
       </LiveRegion>
       <div className="overlay-card-actions">
+        {commitOutcome === 'unconfirmed' && (
+          <button type="button" className="chip-act" disabled={submitting} onClick={refreshCommit}>
+            Refresh
+          </button>
+        )}
         <button type="button" className="chip-act" disabled={busy} onClick={onPreview}>
           {busy ? 'Checking…' : 'Preview current'}
         </button>
@@ -261,6 +298,7 @@ function ChangeCapsuleRecord({
         )}
       </div>
       <LiveRegion as="p" className="dim">{confirmedCopy || ''}</LiveRegion>
+      {commitOutcome === 'unconfirmed' && liveSha256 && <p className="dim">Live SHA-256: {liveSha256}</p>}
       {error && <p className="overlay-card-error" role="alert">{error}</p>}
       {refusal && <p className="overlay-card-error" role="alert">{refusal}</p>}
     </section>
