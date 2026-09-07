@@ -32,6 +32,7 @@ phases:
             -r executor/runtime/requirements.txt
           (cd harness && npm ci)
           (cd web && npm ci && npx playwright install --with-deps chromium)
+          /tmp/leaf-native-venv/bin/python -m playwright install --with-deps chromium
           (cd scripts && PYTHONPATH="$CODEBUILD_SRC_DIR/scripts" /tmp/leaf-native-venv/bin/python -m pytest test_native_release_producer.py -q)
         fi
   pre_build:
@@ -47,6 +48,9 @@ phases:
       - |
         set -euo pipefail
         export PATH="/tmp/leaf-native-venv/bin:$PATH"
+        if [ "$LEAF_NATIVE_MODE" = gate ]; then
+          export LEAF_MANAGED_WEB_BROWSER_MODE=trusted-template-container
+        fi
         python scripts/ci/native_release_producer.py "$LEAF_NATIVE_MODE" --output "$CODEBUILD_SRC_DIR/native-artifacts"
 
 artifacts:

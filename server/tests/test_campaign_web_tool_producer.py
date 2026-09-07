@@ -1,6 +1,7 @@
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -106,6 +107,8 @@ class _FakeBrowser:
 
 
 class _FakeContextManager:
+    _leaf_managed_web_browser_mode = 'sandboxed'
+
     def __enter__(self):
         return self
 
@@ -122,7 +125,9 @@ def _fake_start_browser(html_bytes, records_text, preview_text, downloaded_bytes
 
 # --- Injected template is refused before any browser is launched --------------
 
-def test_injected_template_is_rejected_before_any_browser_launch(monkeypatch):
+@pytest.mark.parametrize('mode', ['sandboxed', 'trusted-template-container'])
+def test_injected_template_is_rejected_before_any_browser_launch(monkeypatch, mode):
+    monkeypatch.setenv('LEAF_MANAGED_WEB_BROWSER_MODE', mode)
     source = json.dumps([{'a': 1}]).encode()
     html = static.render(source)
     tampered = html.replace(b'Convert', b'Cxnvert', 1)
@@ -131,6 +136,71 @@ def test_injected_template_is_rejected_before_any_browser_launch(monkeypatch):
     with pytest.raises(producer.WebToolVerificationError):
         producer.verify(tampered, source)
     assert launched == []
+
+
+@pytest.mark.parametrize('mode,sandboxed', [(None, True), ('sandboxed', True),
+                                            ('trusted-template-container', False)])
+def test_browser_launch_uses_only_the_configured_mode(monkeypatch, mode, sandboxed):
+    import playwright.sync_api as sync_api
+
+    if mode is None:
+        monkeypatch.delenv('LEAF_MANAGED_WEB_BROWSER_MODE', raising=False)
+    else:
+        monkeypatch.setenv('LEAF_MANAGED_WEB_BROWSER_MODE', mode)
+    monkeypatch.setenv('LEAF_HARNESS_SECRET', 'must-not-reach-browser')
+    calls = []
+    browser = SimpleNamespace(version='launch-test')
+
+    class Manager(_FakeContextManager):
+        def __enter__(self):
+            def launch(**kwargs):
+                calls.append(kwargs)
+                return browser
+            return SimpleNamespace(chromium=SimpleNamespace(launch=launch))
+
+    manager = Manager()
+    monkeypatch.setattr(sync_api, 'sync_playwright', lambda: manager)
+    assert producer._start_browser() == (manager, browser)
+    assert len(calls) == 1
+    assert calls[0]['chromium_sandbox'] is sandboxed
+    assert calls[0]['timeout'] == 15000
+    assert 'LEAF_HARNESS_SECRET' not in calls[0]['env']
+    assert manager._leaf_managed_web_browser_mode == (mode or 'sandboxed')
+
+
+def test_invalid_mode_is_unavailable_before_launch(monkeypatch):
+    import playwright.sync_api as sync_api
+
+    monkeypatch.setenv('LEAF_MANAGED_WEB_BROWSER_MODE', 'unrestricted')
+    launched = []
+    monkeypatch.setattr(sync_api, 'sync_playwright', lambda: launched.append(True))
+    with pytest.raises(producer.WebToolUnavailable, match='configuration'):
+        producer._start_browser()
+    assert launched == []
+
+
+def test_launch_failure_never_retries_without_sandbox(monkeypatch):
+    import playwright.sync_api as sync_api
+
+    monkeypatch.delenv('LEAF_MANAGED_WEB_BROWSER_MODE', raising=False)
+    calls, exits = [], []
+
+    class Manager(_FakeContextManager):
+        def __enter__(self):
+            def launch(**kwargs):
+                calls.append(kwargs)
+                raise RuntimeError('sandbox could not start')
+            return SimpleNamespace(chromium=SimpleNamespace(launch=launch))
+
+        def __exit__(self, *exc_info):
+            exits.append(True)
+
+    monkeypatch.setattr(sync_api, 'sync_playwright', Manager)
+    with pytest.raises(producer.WebToolUnavailable, match='sandbox could not start'):
+        producer._start_browser()
+    assert len(calls) == 1
+    assert calls[0]['chromium_sandbox'] is True
+    assert exits == [True]
 
 
 # --- Missing Playwright/browser is typed unavailable ---------------------------
@@ -170,6 +240,21 @@ def test_wrong_preview_text_is_a_typed_verification_failure(monkeypatch):
                          _fake_start_browser(html, json.dumps(records), 'Rows: 99 | Columns: 1', expected_csv))
     with pytest.raises(producer.WebToolVerificationError):
         producer.verify(html, source)
+
+
+def test_receipt_records_launch_mode_instead_of_current_environment(monkeypatch):
+    source = b'[{"name":"Example"}]'
+    html = static.render(source)
+    manager, browser = _fake_start_browser(
+        html, source.decode(), 'Rows: 1 | Columns: 1', static.expected_output(source))()
+    manager._leaf_managed_web_browser_mode = 'trusted-template-container'
+    monkeypatch.setenv('LEAF_MANAGED_WEB_BROWSER_MODE', 'sandboxed')
+    monkeypatch.setattr(producer, '_start_browser', lambda: (manager, browser))
+    result = producer.verify(html, source)
+    observation = result['observations'][0]
+    assert 'trusted-template-container mode with chromium_sandbox=False' in observation
+    assert 'OS browser sandboxing was disabled' in observation
+    assert 'template equality' in observation
 
 
 # --- Real Chromium success: cannot be mocked -----------------------------------

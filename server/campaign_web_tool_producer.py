@@ -51,21 +51,34 @@ def _bounded_env():
     return {key: value for key, value in os.environ.items() if key.upper() in _ENV_ALLOWLIST}
 
 
+def _browser_mode():
+    mode = os.environ.get('LEAF_MANAGED_WEB_BROWSER_MODE', 'sandboxed')
+    if mode not in ('sandboxed', 'trusted-template-container'):
+        raise WebToolUnavailable('Invalid LEAF_MANAGED_WEB_BROWSER_MODE configuration')
+    return mode
+
+
 def _start_browser():
     """Import + launch, as one unit: any failure here is UNAVAILABLE, never a
     verification failure. Cleans itself up completely on a launch failure.
     """
+    mode = _browser_mode()
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as error:
         raise WebToolUnavailable(_bounded_message(f'playwright is not installed: {error}')) from error
     context_manager = sync_playwright()
+    context_manager._leaf_managed_web_browser_mode = mode
     try:
         playwright = context_manager.__enter__()
     except Exception as error:
         raise WebToolUnavailable(_bounded_message(error)) from error
     try:
-        browser = playwright.chromium.launch(headless=True, chromium_sandbox=True, env=_bounded_env())
+        # Container mode is only for this byte-exact trusted template, never
+        # arbitrary tenant HTML. A failed sandboxed launch never changes mode.
+        browser = playwright.chromium.launch(
+            headless=True, chromium_sandbox=mode == 'sandboxed',
+            env=_bounded_env(), timeout=15000)
     except Exception as error:
         context_manager.__exit__(None, None, None)
         raise WebToolUnavailable(_bounded_message(error)) from error
@@ -94,10 +107,15 @@ def _verify(html_bytes, source_bytes, *, timeout_s=30):
     source_records = json.loads(source_bytes.decode('utf-8'))
 
     context_manager, browser = _start_browser()
+    mode = context_manager._leaf_managed_web_browser_mode
     workflow = []
     observations = [
-        f'chromium {browser.version} launched headless with chromium_sandbox=True; that flag requests '
-        'the OS-level Chromium sandbox as defense in depth, not a proven kernel isolation boundary',
+        f'chromium {browser.version} launched headless in {mode} mode with '
+        f'chromium_sandbox={mode == "sandboxed"}; '
+        + ('OS browser sandboxing was requested as defense in depth, not proven kernel isolation'
+           if mode == 'sandboxed' else
+           'OS browser sandboxing was disabled for the server-owned exact trusted template; '
+           'template equality is the executable-code admission boundary'),
         'the context routed every request itself: only the one synthetic release URL was fulfilled and '
         'every other destination was aborted, which is application-level test isolation, not a kernel sandbox',
     ]
