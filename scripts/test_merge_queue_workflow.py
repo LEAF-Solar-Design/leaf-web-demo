@@ -12,7 +12,7 @@ git-derived decisions.
 
 The remaining assertions pin properties with no local executable surface:
 GraphQL/REST shapes that only resolve against live GitHub state, the
-cross-repository terraform receipt checks, the concurrency key, the
+concurrency key, the
 permission and secret boundary, and the fail-closed structure of mq-prewarm.
 """
 
@@ -111,7 +111,7 @@ def run_step(body: str, workdir: Path, env: dict) -> dict:
         "RELAY_RECEIPT_INTERVAL": "0",
         "TERRAFORM_RECEIPT_POLLS": "1",
         "TERRAFORM_RECEIPT_INTERVAL": "0",
-        "INFRA_REPO": "LEAF-Solar-Design/leaf-automation-aws-terraform",
+        "RELAY_RUN_ID": "77",
     }
     exports.update(env)
     newline = chr(10)
@@ -447,7 +447,7 @@ def test_local_docs_verdict_requires_dispatcher_skip_evidence(tmp_path, missing,
 @needs_shell
 @pytest.mark.parametrize("receipt,accepted", [({"weights_touched": False}, True), ({}, False)])
 def test_receipt_weights_presence_uses_the_workflow_jq_expression(tmp_path, receipt, accepted):
-    body = step_body("mq-prewarm", "Wait for every dispatched terraform staging receipt")
+    body = step_body("mq-prewarm", "Wait for every dispatched CodeBuild staging receipt")
     expression = re.search(r"REC_WEIGHTS=\$\(jq -[rj] '([^']+)'", body).group(1)
     (tmp_path / "receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
     result = run_step(
@@ -468,7 +468,7 @@ def test_every_network_command_has_a_timeout():
             for line in body.splitlines():
                 if line.lstrip().startswith("#"):
                     continue
-                for command in re.finditer(r"\b(gh|curl)\s+", line):
+                for command in re.finditer(r"\b(gh|curl|aws)\s+", line):
                     prefix = line[:command.start()]
                     wrapped = re.search(r"\btimeout\s+[1-9][0-9]*\s+$", prefix)
                     assert wrapped or (
@@ -588,8 +588,10 @@ def test_docs_only_group_succeeds_with_the_named_reason():
 
 
 def test_per_service_terraform_receipt_checks_include_weights_touched_false():
-    body = step_body("mq-prewarm", "Wait for every dispatched terraform staging receipt")
-    assert 'NAME="staging-prewarm-receipt-$SERVICE-run-$RUN_ID-attempt-$ATTEMPT_NUM"' in body
+    body = step_body("mq-prewarm", "Wait for every dispatched CodeBuild staging receipt")
+    assert "timeout 60 aws codebuild batch-get-builds" in body
+    assert "actions/artifacts" not in body
+    assert "gh api" not in body
     assert 'staged-prewarm-receipt.json' in body
     assert '[ "$REC_SERVICE" = "$SERVICE" ]' in body
     assert 'EXPECTED_TAG="spec-$TREE-$SHA12"' in body
@@ -601,7 +603,7 @@ def test_per_service_terraform_receipt_checks_include_weights_touched_false():
 
 
 def test_terraform_receipt_step_gates_on_supply_present_and_no_migration_refusal():
-    step = step_by_name("mq-prewarm", "Wait for every dispatched terraform staging receipt")
+    step = step_by_name("mq-prewarm", "Wait for every dispatched CodeBuild staging receipt")
     condition = step["if"]
     assert "needs.mq-supply.outputs.supply == 'present'" in condition
     assert "steps.relay.outputs.present == 'true'" in condition
@@ -627,18 +629,22 @@ def test_permissions_are_least():
     }
 
 
-def test_secrets_used_are_exactly_github_token_and_terraform_repo_token():
+def test_secrets_used_are_exactly_github_token_and_oidc_role():
     names = set(re.findall(r"secrets\.([A-Za-z_][A-Za-z0-9_]*)", workflow_text()))
-    assert names == {"TERRAFORM_REPO_TOKEN"}
+    assert names == {"AWS_ECR_PUSH_ROLE"}
     assert "github.token" in workflow_text()
 
 
-def test_terraform_token_is_scoped_to_the_terraform_receipt_step_only():
-    for job in ("mq-review", "mq-supply", "mq-prewarm"):
-        for step in job_steps(job):
-            env = step.get("env", {})
-            if "TERRAFORM_REPO_TOKEN" in str(env.get("GH_TOKEN", "")):
-                assert step["name"] == "Wait for every dispatched terraform staging receipt"
+def test_codebuild_credentials_are_scoped_to_prewarm():
+    job = workflow_document()["jobs"]["mq-prewarm"]
+    assert job["permissions"] == {"contents": "read", "actions": "read", "id-token": "write"}
+    step = step_by_name("mq-prewarm", "Configure AWS credentials")
+    assert step["uses"] == "aws-actions/configure-aws-credentials@v6.1.0"
+    assert step["with"] == {
+        "role-to-assume": "${{ secrets.AWS_ECR_PUSH_ROLE }}", "aws-region": "us-east-1",
+    }
+    assert step["if"] == step_by_name("mq-prewarm", "Wait for every dispatched")["if"]
+    assert "TERRAFORM_REPO_TOKEN" not in workflow_text()
 
 
 def test_every_job_carries_a_timeout():
@@ -674,7 +680,8 @@ def test_no_service_mirror_falsification():
         _assert_no_service_mirror(workflow_text().replace("env:\n", 'env:\n  STAGE_SERVICES: "web"\n', 1))
 
 
-def _prewarm_evidence(tmp_path, entries, relay_source='env:\n  STAGE_SERVICES: "web app"\n', empty_arn=False, receipt_change=None):
+def _prewarm_evidence(tmp_path, entries, relay_source='env:\n  STAGE_SERVICES: "web app"\n',
+                      empty_arn=False, receipt_change=None, status="SUCCEEDED", log_case=None):
     binary = tmp_path / "bin"
     binary.mkdir(exist_ok=True)
     fake = binary / "gh"
@@ -687,52 +694,98 @@ def _prewarm_evidence(tmp_path, entries, relay_source='env:\n  STAGE_SERVICES: "
               echo "$arg" >> contents-calls.txt
               cat relay-source.json; exit 0 ;;
             */actions/artifacts/1/zip) cat relay.zip; exit 0 ;;
-            */actions/artifacts/2/zip) cat web.zip; exit 0 ;;
-            */actions/artifacts/3/zip) cat app.zip; exit 0 ;;
-            */actions/artifacts\?*)
+            */actions/artifacts\\?*)
               echo '{"artifacts":[{"id":1,"expired":false,"created_at":"2026-09-05"}]}'; exit 0 ;;
-            */actions/runs/101/artifacts\?*)
-              echo '{"artifacts":[{"id":2,"expired":false,"name":"staging-prewarm-receipt-web-run-101-attempt-1"}]}'; exit 0 ;;
-            */actions/runs/102/artifacts\?*)
-              echo '{"artifacts":[{"id":3,"expired":false,"name":"staging-prewarm-receipt-app-run-102-attempt-1"}]}'; exit 0 ;;
-            */actions/runs/*)
-              echo "$arg" >> terraform-calls.txt
-              echo '{"status":"completed","conclusion":"success","run_attempt":1}'; exit 0 ;;
           esac
         done
         exit 1
         '''), encoding="utf-8", newline="\n")
     fake.chmod(0o755)
+    aws = binary / "aws"
+    aws.write_text(textwrap.dedent('''\
+        #!/usr/bin/env bash
+        set -euo pipefail
+        printf '%s\\n' "$*" >> aws-calls.txt
+        if [ "$1 $2" = "codebuild batch-get-builds" ]; then
+          ID="$4"
+          cat "build-${ID#*:}.json"
+        elif [ "$1 $2" = "logs get-log-events" ]; then
+          SERVICE="$6"
+          TOKEN=""
+          while [ "$#" -gt 0 ]; do
+            if [ "$1" = --next-token ]; then TOKEN="$2"; fi
+            shift
+          done
+          if [ -f endless ]; then
+            N=$(cat log-count.txt 2>/dev/null || echo 0)
+            N=$((N + 1))
+            echo "$N" > log-count.txt
+            printf '{"events":[],"nextForwardToken":"%s"}' "$N"
+          elif [ -z "$TOKEN" ]; then
+            cat "logs-$SERVICE-first.json"
+          elif [ "$TOKEN" = first ]; then
+            cat "logs-$SERVICE-last.json"
+          elif [ "$TOKEN" = last ]; then
+            echo '{"events":[],"nextForwardToken":"last"}'
+          else
+            exit 1
+          fi
+        else
+          exit 1
+        fi
+        '''), encoding="utf-8", newline="\n")
+    aws.chmod(0o755)
     response = {} if relay_source is None else {"content": base64.b64encode(relay_source.encode()).decode()}
     (tmp_path / "relay-source.json").write_text(json.dumps(response), encoding="utf-8")
     with zipfile.ZipFile(tmp_path / "relay.zip", "w") as archive:
         archive.writestr("prewarm-relay-receipt.json", json.dumps({
             "group": {"head_sha": "a" * 40}, "dispatched": entries,
+            "producer": "codebuild", "relay_run_id": "77",
         }))
-    for service in ("web", "app"):
+    for service, number in (("web", 101), ("app", 102)):
+        build_id = _build_id(number)
+        # Filenames use just the UUID: Windows does not allow ':' in a filename.
+        record_name = "build-" + build_id.split(":")[1] + ".json"
+        (tmp_path / record_name).write_text(json.dumps({"builds": [{
+            "id": build_id, "buildStatus": status,
+            "logs": {"groupName": "/aws/codebuild/leaf-deploy-terraform-staging", "streamName": service},
+        }]}), encoding="utf-8")
         receipt = {
             "schema": "leaf.staging-prewarm-receipt.v1",
             "service": service,
-            "ecs_service": "leaf-platform-" + service + "-alt",
-            "color": "alt",
             "staged_td_arn": "" if empty_arn else _staged_arn(service),
             "image_tag": "spec-" + "b" * 40 + "-" + "a" * 12,
-            "image_digest": "sha256:" + "c" * 64,
-            "witness": "synthetic",
-            "run_id": "101" if service == "web" else "102",
-            "run_attempt": "1",
-            "warm_started_at": "2026-09-05T00:00:00Z",
-            "staged_at": "2026-09-05T00:01:00Z",
-            "migration_legs_skipped": True,
-            "mutations_transaction_skipped": True,
+            "run_id": "a" * 12 + "-77",
             "weights_touched": False,
+            "producer": {"kind": "codebuild", "build_id": build_id},
         }
         if receipt_change == "old-key-only":
             receipt["task_definition_arn"] = receipt.pop("staged_td_arn")
+        elif receipt_change == "missing-weights":
+            receipt.pop("weights_touched")
         elif receipt_change:
             receipt.update(receipt_change)
-        with zipfile.ZipFile(tmp_path / f"{service}.zip", "w") as archive:
-            archive.writestr("staged-prewarm-receipt.json", json.dumps(receipt))
+        first = "LEAF_DEPLOY_RECEIPT " + json.dumps({"refused": True})
+        last = "LEAF_DEPLOY_RECEIPT " + json.dumps(receipt)
+        if log_case == "missing":
+            first = last = "ordinary log line"
+        elif log_case == "malformed":
+            last = "LEAF_DEPLOY_RECEIPT {"
+        elif log_case == "last-refusal":
+            first, last = last, first
+        elif log_case == "multiple-json":
+            last += " {}"
+        for page, message, token in (("first", first, "first"), ("last", last, "last")):
+            (tmp_path / f"logs-{service}-{page}.json").write_text(json.dumps({
+                "events": [{"message": "ordinary log line"}, {"message": message}],
+                "nextForwardToken": token,
+            }), encoding="utf-8")
+    if log_case == "endless":
+        (tmp_path / "endless").write_text("yes", encoding="utf-8")
+
+
+def _build_id(number):
+    return "leaf-deploy-terraform-staging:00000000-0000-0000-0000-" + f"{number:012x}"
 
 
 def _staged_arn(service):
@@ -740,7 +793,8 @@ def _staged_arn(service):
 
 
 def _dispatch(service, run_id, disposition="dispatched"):
-    return {"service": service, "run_id": run_id, "disposition": disposition}
+    return {"service": service, "build_id": _build_id(run_id) if type(run_id) is int else run_id,
+            "disposition": disposition}
 
 
 @needs_shell
@@ -764,22 +818,24 @@ def test_relay_dispatched_set_executed(tmp_path, entries, source, error):
         assert error in result["__stdout__"] + result["__stderr__"]
     else:
         assert result["__returncode__"] == 0, result
-        assert json.loads(result["dispatched_json"]) == {"web": 101, "app": 102}
+        assert json.loads(result["dispatched_json"]) == {"web": _build_id(101), "app": _build_id(102)}
+        assert result["relay_run_id"] == "77"
         assert "configured services: app web" in result["__stdout__"]
         assert "dispatched services: app web" in result["__stdout__"]
         assert (tmp_path / "contents-calls.txt").read_text().strip().endswith(
             "prewarm-staging-group.yml?ref=" + "a" * 40)
         waited = run_step(step_body("mq-prewarm", "Wait for every dispatched"), tmp_path,
                           {"GROUP_HEAD_SHA": "a" * 40, "TREE": "b" * 40,
-                           "DISPATCHED_JSON": result["dispatched_json"]})
+                           "DISPATCHED_JSON": result["dispatched_json"],
+                           "RELAY_RUN_ID": result["relay_run_id"]})
         assert waited["__returncode__"] == 0, waited
         assert _staged_arn("app") + " " + _staged_arn("web") in waited["__stdout__"]
 
 
 @needs_shell
 @pytest.mark.parametrize("dispatched,empty_arn,accepted", [
-    ({"web": 101, "app": 102}, False, True),
-    ({"web": 101, "app": 102}, True, False),
+    ({"web": _build_id(101), "app": _build_id(102)}, False, True),
+    ({"web": _build_id(101), "app": _build_id(102)}, True, False),
     ({}, False, False),
 ])
 def test_terraform_wait_uses_dispatched_set_and_requires_arns(tmp_path, dispatched, empty_arn, accepted):
@@ -789,8 +845,8 @@ def test_terraform_wait_uses_dispatched_set_and_requires_arns(tmp_path, dispatch
                        "DISPATCHED_JSON": json.dumps(dispatched)})
     assert (result["__returncode__"] == 0) == accepted, result
     if accepted:
-        calls = (tmp_path / "terraform-calls.txt").read_text()
-        assert "/runs/101" in calls and "/runs/102" in calls
+        calls = (tmp_path / "aws-calls.txt").read_text()
+        assert _build_id(101) in calls and _build_id(102) in calls
         assert "staged task definitions: " + _staged_arn("app") + " " + _staged_arn("web") in result["__stdout__"]
     else:
         assert "empty" in result["__stdout__"] + result["__stderr__"]
@@ -804,15 +860,70 @@ def test_terraform_wait_uses_dispatched_set_and_requires_arns(tmp_path, dispatch
     ({"run_id": "999"}, "run_id mismatch"),
     ({"staged_td_arn": "arn:wrong:app"}, "empty or invalid staged task definition ARN for app"),
     ({"staged_td_arn": 254}, "empty or invalid staged task definition ARN for app"),
+    ({"service": "web"}, "service mismatch"),
+    ({"image_tag": "wrong"}, "image_tag mismatch"),
+    ({"weights_touched": True}, "weights_touched"),
+    ({"weights_touched": "false"}, "weights_touched"),
+    ("missing-weights", "weights_touched"),
+    ({"producer": {"kind": "actions", "build_id": _build_id(102)}}, "producer mismatch"),
+    ({"producer": {"kind": "codebuild", "build_id": _build_id(101)}}, "producer mismatch"),
 ])
 def test_terraform_wait_reads_real_receipt_schema(tmp_path, receipt_change, error):
     _prewarm_evidence(tmp_path, [], receipt_change=receipt_change)
     result = run_step(step_body("mq-prewarm", "Wait for every dispatched"), tmp_path,
                       {"GROUP_HEAD_SHA": "a" * 40, "TREE": "b" * 40,
-                       "DISPATCHED_JSON": json.dumps({"app": 102})})
+                       "DISPATCHED_JSON": json.dumps({"app": _build_id(102)})})
     if error:
         assert result["__returncode__"] != 0, result
         assert error in result["__stdout__"] + result["__stderr__"]
     else:
         assert result["__returncode__"] == 0, result
         assert "staged task definitions: " + _staged_arn("app") in result["__stdout__"]
+
+
+@needs_shell
+@pytest.mark.parametrize("status", ["FAILED", "FAULT", "STOPPED", "TIMED_OUT", "IN_PROGRESS"])
+def test_codebuild_terminal_failures_name_the_status(tmp_path, status):
+    _prewarm_evidence(tmp_path, [], status=status)
+    result = run_step(step_body("mq-prewarm", "Wait for every dispatched"), tmp_path, {
+        "GROUP_HEAD_SHA": "a" * 40, "TREE": "b" * 40,
+        "DISPATCHED_JSON": json.dumps({"app": _build_id(102)}),
+    })
+    assert result["__returncode__"] != 0, result
+    message = result["__stdout__"] + result["__stderr__"]
+    assert ("never completed" if status == "IN_PROGRESS" else status) in message
+    assert "logs get-log-events" not in (tmp_path / "aws-calls.txt").read_text()
+
+
+@needs_shell
+@pytest.mark.parametrize("log_case,error", [
+    (None, None),
+    ("missing", "no LEAF_DEPLOY_RECEIPT"),
+    ("malformed", "invalid receipt JSON"),
+    ("last-refusal", "schema mismatch"),
+    ("multiple-json", "invalid receipt JSON"),
+    ("endless", "exceeded 200 pages"),
+])
+def test_codebuild_logs_paginate_and_validate_only_the_last_receipt(tmp_path, log_case, error):
+    _prewarm_evidence(tmp_path, [], log_case=log_case)
+    result = run_step(step_body("mq-prewarm", "Wait for every dispatched"), tmp_path, {
+        "GROUP_HEAD_SHA": "a" * 40, "TREE": "b" * 40,
+        "DISPATCHED_JSON": json.dumps({"app": _build_id(102)}),
+    })
+    if error:
+        assert result["__returncode__"] != 0, result
+        assert error in result["__stdout__"] + result["__stderr__"], result
+    else:
+        assert result["__returncode__"] == 0, result
+        assert _staged_arn("app") in result["__stdout__"]
+    calls = (tmp_path / "aws-calls.txt").read_text().splitlines()
+    logs = [shlex.split(call) for call in calls if call.startswith("logs ")]
+    assert len(logs) == (200 if log_case == "endless" else 3)
+    assert all("--start-from-head" in call for call in logs)
+    assert all(call[call.index("--log-group-name") + 1] ==
+               "/aws/codebuild/leaf-deploy-terraform-staging" for call in logs)
+    assert all(call[call.index("--log-stream-name") + 1] == "app" for call in logs)
+    if log_case != "endless":
+        assert "--next-token" not in logs[0]
+        assert logs[1][logs[1].index("--next-token") + 1] == "first"
+        assert logs[2][logs[2].index("--next-token") + 1] == "last"

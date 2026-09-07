@@ -20,8 +20,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  INFRA_REPO: LEAF-Solar-Design/leaf-automation-aws-terraform
-  DEPLOY_WORKFLOW: deploy-leaf-platform-staging.yml
   MIGRATION_SURFACE: "platform/migrations/ platform/db.py"
   STAGE_SERVICES: "web app"
   SUPPLY_SET_POLLS: "20"
@@ -47,6 +45,11 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.group_head_sha != '' && github.ref == 'refs/heads/main'
     runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 25
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      id-token: write
     steps:
       - name: Validate and record the live merge-group head and base
         id: group
@@ -320,89 +323,49 @@ jobs:
           done
           echo "::notice::No exact $NAME after $SUPPLY_SET_POLLS polls; nothing to stage yet. The next push or approval re-triggers this relay."
 
+      - name: Configure AWS credentials for prewarm
+        if: steps.readiness.outputs.ready == 'true'
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE }}
+          aws-region: us-east-1
+
       - name: Dispatch the prewarm for each coloured service
         id: dispatch
         if: steps.readiness.outputs.ready == 'true'
         env:
-          GH_TOKEN: ${{ secrets.TERRAFORM_REPO_TOKEN }}
           IMAGE_TAG: ${{ steps.candidate.outputs.image_tag }}
+          SHA12: ${{ steps.group.outputs.sha12 }}
         run: |
           set -euo pipefail
           echo '[]' > dispatched.json
-
-          latest_run_id() {
-            gh run list --repo "$INFRA_REPO" --workflow "$DEPLOY_WORKFLOW" \
-              --limit 100 --json databaseId \
-              | jq -r '[.[].databaseId] | max // 0'
-          }
-
-          # Ids ABOVE the mark whose run-name is EXACTLY this service and tag.
-          # Exactly one is an identity; two is an ambiguity we refuse to
-          # resolve rather than guess (design §2.3).
-          resolve_run() {
-            gh run list --repo "$INFRA_REPO" --workflow "$DEPLOY_WORKFLOW" \
-              --limit 100 --json databaseId,displayTitle \
-              | jq -r --argjson mark "$1" --arg want "$2" \
-                  '[.[] | select(.databaseId > $mark and .displayTitle == $want)]
-                   | if length == 1 then .[0].databaseId else empty end'
-          }
-
           for SERVICE in $STAGE_SERVICES; do
-            WANT="Deploy leaf-platform staging $SERVICE ($IMAGE_TAG)"
-            MARK=$(latest_run_id)
-            # Soft-fail per service: staging is an optimization, and a refused
-            # or failed dispatch must never redden a PR. The merge deploy takes
-            # the measured fallback warm.
-            if ! DISPATCH_OUTPUT=$(gh workflow run "$DEPLOY_WORKFLOW" \
-                --repo "$INFRA_REPO" \
-                --ref main \
-                -f "service=$SERVICE" \
-                -f "expected_task_definition=auto-live" \
-                -f "image_tag=$IMAGE_TAG" \
-                -f "deploy_strategy=bluegreen" \
-                -f "deploy_mode=prewarm" 2>&1); then
+            # A refused call is recorded per service; mq-prewarm fails closed.
+            if ! DISPATCH_OUTPUT=$(timeout 60 aws codebuild start-build \
+                --project-name leaf-deploy-terraform-staging \
+                --environment-variables-override \
+                name=STEP,value=prewarm \
+                "name=LEAF_DEPLOY_APPROVED_BY,value=merge-queue:$SHA12" \
+                "name=LEAF_DEPLOY_SERVICE,value=$SERVICE" \
+                "name=LEAF_DEPLOY_IMAGE_TAG,value=$IMAGE_TAG" \
+                name=LEAF_DEPLOY_EXPECTED_TD,value=auto-live \
+                "name=LEAF_DEPLOY_REQUEST_ID,value=$SHA12-$GITHUB_RUN_ID" \
+                --output json 2>&1); then
               printf '%s' "$DISPATCH_OUTPUT"
               echo "::warning::Prewarm dispatch for $SERVICE failed; the merge deploy will warm normally."
-              jq --arg service "$SERVICE" '. + [{service: $service, run_id: null, disposition: "dispatch-failed"}]' \
+              jq --arg service "$SERVICE" '. + [{service: $service, build_id: null, disposition: "dispatch-failed"}]' \
                 dispatched.json > dispatched.tmp && mv dispatched.tmp dispatched.json
               continue
             fi
-            printf '%s' "$DISPATCH_OUTPUT"
-            # PREFER THE ID GITHUB GIVES US. gh >= 2.88 prints the created run
-            # URL "if available", and that is the run's own identity rather
-            # than an inference from a listing. It is VERIFIED before it is
-            # trusted -- the id must belong to this workflow path and carry the
-            # run-name we asked for -- so a mangled parse, a redirect, or an
-            # older gh that prints something else can never bind us to a
-            # stranger's run. The mark scan below remains the fallback for
-            # every gh that prints nothing.
-            # `|| true`: under set -euo pipefail a no-match grep would abort the step here, before the mark-scan fallback below and before the next service.
-            RUN_ID=$(printf '%s' "$DISPATCH_OUTPUT" | grep -oE 'actions/runs/[0-9]+' | head -1 | cut -d/ -f3 || true)
-            if [ -n "$RUN_ID" ]; then
-              if gh api "repos/$INFRA_REPO/actions/runs/$RUN_ID" \
-                  --jq 'select(.path == (".github/workflows/" + env.DEPLOY_WORKFLOW)) | .display_title' 2>/dev/null \
-                  | grep -qxF "$WANT"; then
-                echo "Dispatch reported run $RUN_ID and it verified as ours."
-              else
-                echo "::warning::Reported run $RUN_ID did not verify as this dispatch; falling back to the mark scan."
-                RUN_ID=""
-              fi
-            fi
-            if [ -z "$RUN_ID" ]; then
-              for _ in 1 2 3 4 5 6 7 8 9 10; do
-                sleep 6
-                RUN_ID=$(resolve_run "$MARK" "$WANT" || true)
-                [ -n "$RUN_ID" ] && break
-              done
-            fi
-            if [ -n "$RUN_ID" ]; then
-              echo "Prewarm for $SERVICE is run $RUN_ID."
-              jq --arg service "$SERVICE" --argjson run_id "$RUN_ID" \
-                '. + [{service: $service, run_id: $run_id, disposition: "dispatched"}]' \
+            BUILD_ID=$(jq -r '.build.id | select(type == "string")' <<<"$DISPATCH_OUTPUT" 2>/dev/null || true)
+            if [[ "$BUILD_ID" =~ ^leaf-deploy-terraform-staging:[0-9a-f-]{36}$ ]]; then
+              echo "Prewarm for $SERVICE is build $BUILD_ID."
+              jq --arg service "$SERVICE" --arg build_id "$BUILD_ID" \
+                '. + [{service: $service, build_id: $build_id, disposition: "dispatched"}]' \
                 dispatched.json > dispatched.tmp && mv dispatched.tmp dispatched.json
             else
-              echo "::warning::Dispatched $SERVICE but could not bind exactly one run id; not claiming one."
-              jq --arg service "$SERVICE" '. + [{service: $service, run_id: null, disposition: "unresolved"}]' \
+              echo "::warning::Dispatched $SERVICE but received no valid build id; not claiming one."
+              jq --arg service "$SERVICE" '. + [{service: $service, build_id: null, disposition: "unresolved"}]' \
                 dispatched.json > dispatched.tmp && mv dispatched.tmp dispatched.json
             fi
           done
@@ -439,7 +402,7 @@ jobs:
             --arg tag_ready "${TAG_READY:-false}" \
             --arg run_id "$GITHUB_RUN_ID" \
             --slurpfile dispatched dispatched.json \
-            '{schema: $schema,
+            '{schema: $schema, producer: "codebuild",
               group: {head_sha: $head_sha, base_sha: $base_sha, members: $members},
               eligibility: $eligibility,
               image_tag: $image_tag, preview_sha: $preview_sha, tree: $tree,
