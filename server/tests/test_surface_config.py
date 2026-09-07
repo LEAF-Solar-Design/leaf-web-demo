@@ -45,6 +45,96 @@ def _reset_cache(monkeypatch):
     monkeypatch.setattr(deps, "_surface_config_warned_tenants", set())
 
 
+def _post_setup(monkeypatch, tmp_path, overlay=None, *, admit=True):
+    from routers import platform_customize
+    _reset_cache(monkeypatch)
+    base = tmp_path / "tenants"
+    root = _seed(base, "t1", overlay)
+    monkeypatch.setenv("LEAF_TENANTS_DIR", str(base))
+    monkeypatch.delenv("LEAF_TENANT_REPO", raising=False)
+    if admit:
+        monkeypatch.setattr(platform_customize, "_gate", lambda tenant: (str(tenant), "admin"))
+    return root / "surface-config.json"
+
+
+def test_post_invalid_schema_preserves_bytes(monkeypatch, tmp_path):
+    path = _post_setup(monkeypatch, tmp_path, {"cad": {"authoring": False}})
+    before = path.read_bytes()
+    response = _client().post("/api/surface-config", headers=_h("t1"),
+                              json={"overlay": {"cad": {"unknown": True}}})
+    assert response.status_code == 400
+    assert "surface-config.json failed schema validation" in response.text
+    assert path.read_bytes() == before
+
+
+def test_post_commits_exact_bytes_fresh_receipt_and_evicts_cache(monkeypatch, tmp_path):
+    import deps
+    path = _post_setup(monkeypatch, tmp_path, {"cad": {"authoring": False}})
+    assert deps.effective_surface_config("t1") == {"cad": {"authoring": False}}
+    overlay = {"cad": {"authoring": True}, "sheets": {"chrome": {"tab": "My sheets"}}}
+    response = _client().post("/api/surface-config", headers=_h("t1"), json={"overlay": overlay})
+    assert response.status_code == 200, response.text
+    assert path.read_bytes() == (json.dumps(overlay, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    assert response.json() == deps.surface_config_source("t1")
+    assert deps.effective_surface_config("t1") == overlay
+    assert _client().get("/api/surface-config", headers=_h("t1")).json()["surfaces"] == overlay
+
+
+def test_post_oversize_is_refused_before_json_parse(monkeypatch, tmp_path):
+    path = _post_setup(monkeypatch, tmp_path)
+    response = _client().post("/api/surface-config", headers=_h("t1"), content=b"!" * (256 * 1024 + 1))
+    assert response.status_code == 413
+    assert not path.exists()
+
+
+def test_post_respects_vendored_file_size_limit(monkeypatch, tmp_path):
+    path = _post_setup(monkeypatch, tmp_path)
+    response = _client().post("/api/surface-config", headers=_h("t1"),
+                              json={"overlay": {"cad": {"chrome": {"tab": "x" * (64 * 1024)}}}})
+    assert response.status_code == 413
+    assert not path.exists()
+
+
+def test_post_symlink_target_refused(monkeypatch, tmp_path):
+    path = _post_setup(monkeypatch, tmp_path)
+    outside = tmp_path / "outside.json"
+    outside.write_bytes(b"{}\n")
+    _symlink_or_skip(outside, path)
+    response = _client().post("/api/surface-config", headers=_h("t1"), json={"overlay": {}})
+    assert response.status_code == 400
+    assert path.is_symlink()
+    assert outside.read_bytes() == b"{}\n"
+
+
+def test_post_entitlement_gate_refuses_without_write(monkeypatch, tmp_path):
+    import deps
+    from app import app
+    from routers import platform_customize
+    path = _post_setup(monkeypatch, tmp_path, {}, admit=False)
+    before = path.read_bytes()
+    # Run the neighbour's real gate, with only its identity/policy inputs stubbed.
+    monkeypatch.setattr(deps, "auth_live", lambda: True)
+    monkeypatch.setattr(platform_customize.entitlements, "resolve_tier", lambda tenant: "free")
+    monkeypatch.setattr(platform_customize.entitlements, "resolve_roles", lambda tenant: ((), False))
+    monkeypatch.setattr(platform_customize.entitlements, "entitlements_for", lambda *args: {"platform_customize": False})
+    monkeypatch.setitem(app.dependency_overrides, deps.require_tenant, lambda: "t1")
+    response = _client().post("/api/surface-config", headers=_h("t1"), json={"overlay": {}})
+    assert response.status_code == 403, response.text
+    assert response.json()["required"] == "platform_customize"
+    assert path.read_bytes() == before
+
+
+def test_submit_refuses_invalid_tenant_identity(monkeypatch, tmp_path):
+    import deps
+    import pytest
+    from fastapi import HTTPException
+    path = _post_setup(monkeypatch, tmp_path)
+    with pytest.raises(HTTPException) as error:
+        deps.submit_surface_config("../t1", {})
+    assert error.value.status_code == 400
+    assert not path.exists()
+
+
 # =========================================================================== #
 # deps.effective_surface_config — the fold itself
 # =========================================================================== #

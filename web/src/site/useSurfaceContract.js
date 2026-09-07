@@ -24,7 +24,7 @@ import { deepFreeze, surfaceContract } from './productSurfaces.js'
 // server already rejects the WHOLE overlay file on an unknown slot (fails
 // closed to `{}`), so this list is defense-in-depth against a malformed
 // response reaching the client, never the enforcement boundary itself.
-const OVERLAY_SLOT_NAMES = Object.freeze([
+export const OVERLAY_SLOT_NAMES = Object.freeze([
   'chrome', 'toolbar', 'rails', 'commandLine', 'authoring', 'versions',
   'conversations', 'builds', 'contextMenu', 'groundMaterial',
 ])
@@ -34,6 +34,8 @@ function isPlainObject(value) {
 }
 
 let _fetchStarted = false
+let _fetchPromise = null
+let _fetchGeneration = 0
 let _overlay = {}
 let _source = null
 const _listeners = new Set()
@@ -48,15 +50,18 @@ function _notify() {
 }
 
 function _startFetchOnce(mock) {
-  if (_fetchStarted) return
+  if (_fetchStarted) return _fetchPromise
   _fetchStarted = true
-  getSurfaceConfig(mock)
+  const generation = ++_fetchGeneration
+  _fetchPromise = getSurfaceConfig(mock)
     .then((body) => {
+      if (generation !== _fetchGeneration) return
       _overlay = isPlainObject(body?.surfaces) ? body.surfaces : {}
       _source = isPlainObject(body?.source) ? body.source : null
       _notify()
     })
     .catch(() => {
+      if (generation !== _fetchGeneration) return
       // Fails closed to the frozen defaults, exactly like the server's own
       // fold: a broken fetch must not break the surface, only leave it
       // un-overlaid.
@@ -64,11 +69,25 @@ function _startFetchOnce(mock) {
       _source = null
       _notify()
     })
+  return _fetchPromise
+}
+
+export function refreshSurfaceConfigOverlay() {
+  _fetchStarted = false
+  return _startFetchOnce(false)
+}
+
+export function isSurfaceConfigOverlay(value) {
+  return isPlainObject(value) && Object.values(value).every((slots) => (
+    isPlainObject(slots) && Object.keys(slots).every((slot) => OVERLAY_SLOT_NAMES.includes(slot))
+  ))
 }
 
 // Test-only: clears the module singleton so one test file's fetch does not
 // leak into the next. Not imported by any production module.
 export function _resetSurfaceConfigOverlayForTests() {
+  ++_fetchGeneration
+  _fetchPromise = null
   _fetchStarted = false
   _overlay = {}
   _source = null

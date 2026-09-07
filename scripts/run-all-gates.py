@@ -382,7 +382,7 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_mushy_fold_vendor_disposition.py"), 4),
         # standardization slice 7b: the surface-config overlay fold + route.
         Suite("server-surface-config", "server tests/test_surface_config.py", "pytest",
-              SERVER, _py_pytest("tests/test_surface_config.py"), 10),
+              SERVER, _py_pytest("tests/test_surface_config.py"), 17),
         Suite("server-grant-admin-authority", "server tests/test_grant_admin_authority.py",
               "pytest", SERVER, _py_pytest("tests/test_grant_admin_authority.py"), 9),
         Suite("server-microvm", "server tests/test_hardening_2c_microvm.py", "pytest", SERVER,
