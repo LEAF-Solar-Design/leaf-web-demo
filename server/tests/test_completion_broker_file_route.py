@@ -136,7 +136,7 @@ def test_file_branch_marks_admission_before_sandbox(rail, monkeypatch):
     assert calls == ['admitted', 'sandbox']
 
 
-@pytest.mark.parametrize('failure', ['timeout', 'connection', 'http', 'json'])
+@pytest.mark.parametrize('failure', ['timeout', 'connection', 'http', 'json', 'preparation'])
 def test_file_client_failure_has_no_retry(monkeypatch, failure):
     calls = []
 
@@ -146,6 +146,8 @@ def test_file_client_failure_has_no_retry(monkeypatch, failure):
             raise broker_client.requests.Timeout('provider detail')
         if failure == 'connection':
             raise broker_client.requests.ConnectionError('provider detail')
+        if failure == 'preparation':
+            raise ValueError('private request JSON')
         def body():
             if failure == 'json':
                 raise ValueError('invalid JSON')
@@ -158,13 +160,17 @@ def test_file_client_failure_has_no_retry(monkeypatch, failure):
                                      timeout_s=5, file_only=True, test_source=SOURCE)
     assert calls == [True]
     label = ('file-only broker request failed' if failure == 'http' else
-             'file-only broker response invalid' if failure == 'json' else
+             'file-only broker response invalid' if failure in ('json', 'preparation') else
              'file-only broker request unavailable')
     assert str(caught.value) == label
     assert getattr(caught.value, 'status_code', None) == (500 if failure == 'http' else None)
+    assert caught.value.reason == {'timeout': 'timeout', 'connection': 'connect',
+                                   'json': 'nonjson', 'preparation': 'nonjson'}.get(failure)
+    if failure != 'http':
+        assert caught.value.__suppress_context__ is True
 
 
-@pytest.mark.parametrize('status', [None, True, '403', 403.0, 399, 600])
+@pytest.mark.parametrize('status', [None, True, False, '403', 403.0, 99, 600])
 def test_file_client_invalid_status_is_safe(monkeypatch, status):
     monkeypatch.setattr(broker_client.requests, 'post', lambda *a, **k: SimpleNamespace(
         status_code=status, json=lambda: pytest.fail('invalid response parsed')))
@@ -172,6 +178,34 @@ def test_file_client_invalid_status_is_safe(monkeypatch, status):
         broker_client.run_via_broker('tenant', TOOL, {}, '', False, file_only=True)
     assert str(caught.value) == 'file-only broker request failed'
     assert getattr(caught.value, 'status_code', None) is None
+
+
+@pytest.mark.parametrize('status', [100, 199, 302, 399, 400, 500, 599])
+def test_file_client_retains_non_success_http_status(monkeypatch, status):
+    monkeypatch.setattr(broker_client.requests, 'post', lambda *a, **k: SimpleNamespace(
+        status_code=status, json=lambda: pytest.fail('rejected response parsed')))
+    with pytest.raises(broker_client.BrokerHTTPRejected) as caught:
+        broker_client.run_via_broker('tenant', TOOL, {}, '', False, file_only=True)
+    assert caught.value.status_code == status
+    assert str(caught.value) == 'file-only broker request failed'
+
+
+@pytest.mark.parametrize('failure', ['timeout', 'connection', 'json'])
+def test_ordinary_client_failure_message_unchanged(monkeypatch, failure):
+    monkeypatch.setenv('BROKER_URL', 'http://broker.test')
+    error = {'timeout': broker_client.requests.Timeout,
+             'connection': broker_client.requests.ConnectionError, 'json': ValueError}[failure]('legacy detail')
+
+    def post(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(broker_client.requests, 'post', post)
+    with pytest.raises(broker_client.BrokerUnreachable) as caught:
+        broker_client.run_via_broker('tenant', TOOL, {}, '', False)
+    label = 'returned non-JSON' if failure == 'json' else 'unreachable'
+    assert str(caught.value) == 'broker at http://broker.test ' + label + ': legacy detail'
+    assert caught.value.reason is None
+    assert caught.value.__cause__ is error
 
 
 def test_fingerprint_preserves_ordinary_identity_and_hashes_source():

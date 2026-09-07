@@ -41,13 +41,17 @@ def harness_headers() -> Dict[str, str]:
 class BrokerUnreachable(Exception):
     """The broker process could not be reached (connection/timeout)."""
 
+    def __init__(self, *args, reason=None):
+        super().__init__(*args)
+        self.reason = reason
+
 
 class BrokerHTTPRejected(BrokerUnreachable):
     """A file-only rejection carrying only a validated HTTP error status."""
 
     def __init__(self, status_code):
         super().__init__("file-only broker request failed")
-        self.status_code = status_code if type(status_code) is int and 400 <= status_code <= 599 else None
+        self.status_code = status_code if type(status_code) is int and 100 <= status_code <= 599 else None
 
 
 class BrokerReapRejected(Exception):
@@ -135,11 +139,12 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
         return resp.json()
     except (requests.ConnectionError, requests.Timeout) as exc:
         if file_only:
-            raise BrokerUnreachable("file-only broker request unavailable") from None
+            reason = "timeout" if isinstance(exc, requests.Timeout) else "connect"
+            raise BrokerUnreachable("file-only broker request unavailable", reason=reason) from None
         raise BrokerUnreachable(f"broker at {broker_url()} unreachable: {exc}") from exc
     except ValueError as exc:  # non-JSON body
         if file_only:
-            raise BrokerUnreachable("file-only broker response invalid") from None
+            raise BrokerUnreachable("file-only broker response invalid", reason="nonjson") from None
         raise BrokerUnreachable(f"broker at {broker_url()} returned non-JSON: {exc}") from exc
 
 

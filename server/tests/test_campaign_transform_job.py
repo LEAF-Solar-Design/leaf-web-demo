@@ -254,7 +254,7 @@ def test_remote_failures_never_accept_output(published, monkeypatch, caplog, fai
     assert len(calls) == (0 if failure in ('source', 'input') else 1)
 
 
-@pytest.mark.parametrize('status', [401, 403, 422, 500, 503])
+@pytest.mark.parametrize('status', [100, 199, 302, 399, 400, 401, 403, 422, 500, 503, 599])
 def test_http_rejection_exposes_only_status(published, monkeypatch, caplog, status):
     import broker_client
     secret = 'PRIVATE_RESPONSE_SOURCE_URL_HEADER'
@@ -287,7 +287,7 @@ def test_http_rejection_exposes_only_status(published, monkeypatch, caplog, stat
     assert calls == [True]
 
 
-@pytest.mark.parametrize('status', [None, True, False, 399, 600, '403', 403.0, {'status': 403}])
+@pytest.mark.parametrize('status', [None, True, False, 99, 200, 299, 600, '403', 403.0, {'status': 403}])
 def test_malformed_trusted_status_is_not_reported(published, monkeypatch, caplog, status):
     import broker_client
     monkeypatch.setenv('BROKER_URL', 'http://broker.test')
@@ -305,7 +305,7 @@ def test_malformed_trusted_status_is_not_reported(published, monkeypatch, caplog
     assert 'broker HTTP' not in json.dumps(env) + caplog.text
 
 
-@pytest.mark.parametrize('failure', ['json', 'timeout', 'connection'])
+@pytest.mark.parametrize('failure', ['json', 'timeout', 'connection', 'preparation'])
 def test_client_non_http_failure_keeps_safe_job_diagnostic(published, monkeypatch, caplog, failure):
     import broker_client
     secret = 'PRIVATE_TRANSPORT_AND_JSON_DETAIL'
@@ -321,16 +321,58 @@ def test_client_non_http_failure_keeps_safe_job_diagnostic(published, monkeypatc
             raise broker_client.requests.Timeout(secret)
         if failure == 'connection':
             raise broker_client.requests.ConnectionError(secret)
+        if failure == 'preparation':
+            raise ValueError(secret)
         return SimpleNamespace(status_code=200, json=body)
 
     monkeypatch.setattr(broker_client.requests, 'post', post)
     with caplog.at_level(logging.WARNING, logger=adapter.__name__):
         env = invoke(published)
     assert env['ok'] is False and env.get('result') is None
-    assert 'Completion transform could not be verified (execution)' in json.dumps(env)
+    reason = {'json': 'nonjson', 'timeout': 'timeout', 'connection': 'connect', 'preparation': 'nonjson'}[failure]
+    assert 'Completion transform could not be verified (execution; broker %s)' % reason in json.dumps(env)
     assert secret not in json.dumps(env) + caplog.text
     assert 'broker HTTP' not in json.dumps(env) + caplog.text
+    records = [r for r in caplog.records if r.name == adapter.__name__]
+    assert [r.getMessage() for r in records] == ['phase=execution exception_class=Exception broker ' + reason]
+    assert records[0].exc_info is None and records[0].stack_info is None
     assert calls == [True]
+
+
+@pytest.mark.parametrize('reason', [None, True, 42, {}, ['timeout'], 'PRIVATE_REASON', 'timeout\nPRIVATE_REASON'])
+def test_unknown_broker_reason_cannot_escape(published, monkeypatch, caplog, reason):
+    import broker_client
+    monkeypatch.setenv('BROKER_URL', 'http://broker.test')
+    error = broker_client.BrokerUnreachable('PRIVATE_EXCEPTION_TEXT', reason=reason)
+
+    def execute(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(broker_client, 'run_via_broker', execute)
+    with caplog.at_level(logging.WARNING, logger=adapter.__name__):
+        env = invoke(published)
+    assert env['ok'] is False and env.get('result') is None
+    assert 'Completion transform could not be verified (execution)' in json.dumps(env)
+    assert 'PRIVATE_' not in json.dumps(env) + caplog.text
+    assert 'broker ' not in json.dumps(env) + caplog.text
+
+
+def test_custom_exception_cannot_supply_reason_diagnostic(published, monkeypatch, caplog):
+    import broker_client
+    monkeypatch.setenv('BROKER_URL', 'http://broker.test')
+    error = type('PRIVATE_EXCEPTION_NAME', (broker_client.BrokerUnreachable,), {})(
+        'PRIVATE_EXCEPTION_TEXT', reason='timeout')
+
+    def execute(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(broker_client, 'run_via_broker', execute)
+    with caplog.at_level(logging.WARNING, logger=adapter.__name__):
+        env = invoke(published)
+    assert env['ok'] is False and env.get('result') is None
+    assert 'Completion transform could not be verified (execution)' in json.dumps(env)
+    assert 'PRIVATE_' not in json.dumps(env) + caplog.text
+    assert 'broker timeout' not in json.dumps(env) + caplog.text
 
 
 @pytest.mark.parametrize('trusted_parent', [False, True])

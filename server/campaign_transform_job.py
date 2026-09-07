@@ -10,7 +10,7 @@ import time
 import uuid
 
 from envelopes import ErrorCode, err_envelope, ok_envelope
-from broker_client import BrokerHTTPRejected
+from broker_client import BrokerHTTPRejected, BrokerUnreachable
 
 logger = logging.getLogger(__name__)
 
@@ -266,9 +266,13 @@ def run(job_id, completion_provenance, tool, params, heartbeat, cancelled, deadl
         )), "Exception")
         diagnostic = phase
         status = getattr(exc, "status_code", None) if type(exc) is BrokerHTTPRejected else None
-        if type(status) is int and 400 <= status <= 599:
+        reason = getattr(exc, "reason", None) if type(exc) is BrokerUnreachable else None
+        if type(status) is int and (100 <= status <= 199 or 300 <= status <= 599):
             diagnostic += "; broker HTTP" + str(status)
             logger.warning("phase=%s exception_class=%s broker HTTP%d", phase, exception_class, status)
+        elif type(reason) is str and reason in ("timeout", "connect", "nonjson"):
+            diagnostic += "; broker " + reason
+            logger.warning("phase=%s exception_class=%s broker %s", phase, exception_class, reason)
         else:
             logger.warning("phase=%s exception_class=%s", phase, exception_class)
         return err_envelope(ErrorCode.INTERNAL, "Completion transform could not be verified (" + diagnostic + ")", False,
