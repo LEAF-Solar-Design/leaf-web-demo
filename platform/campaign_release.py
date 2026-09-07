@@ -77,17 +77,51 @@ def _strings(value, name, maximum=64):
     return value
 
 
+def _selected_artifact(value):
+    """None, or the exact safe metadata shape produced by delivery.validate_bytes."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {
+        'path', 'name', 'media_type', 'format', 'sha256', 'size_bytes',
+        'content_valid', 'bytes_verified',
+    }:
+        _invalid('invalid selected_artifact fields')
+    path = _string(value['path'], 'path', 512)
+    if (any(ord(c) < 32 for c in path) or any(c in path for c in '\\:%?#')
+            or path.startswith('/') or any(part in ('', '.', '..') for part in path.split('/'))):
+        _invalid('selected_artifact path is unsafe')
+    name = _string(value['name'], 'name', 255)
+    if '/' in name or name != path.rsplit('/', 1)[-1]:
+        _invalid('selected_artifact name must match the path basename')
+    suffix = name.rsplit('.', 1)[-1].lower() if '.' in name else ''
+    if not suffix or _string(value['format'], 'format', 16) != suffix:
+        _invalid('selected_artifact format must match its name suffix')
+    _string(value['media_type'], 'media_type', 128)
+    if not re.fullmatch(r'[0-9a-f]{64}', value.get('sha256') or ''):
+        _invalid('invalid selected_artifact sha256')
+    if type(value['size_bytes']) is not int or not 0 < value['size_bytes'] <= 1048576:
+        _invalid('invalid selected_artifact size')
+    if value['content_valid'] is not True or value['bytes_verified'] is not True:
+        _invalid('selected_artifact proof must be true')
+    return value
+
+
 def _contract(value, profile):
     _json(value)
     if not isinstance(value, dict) or set(value) - {
         'original_goal', 'intended_user', 'workflow', 'release_boundary',
         'deferred_items', 'artifact_refs', 'required_checks',
+        'selected_artifact', 'request_digest', 'request_key_digest',
     }:
         _invalid('invalid contract fields')
     for field in ('original_goal', 'intended_user', 'workflow', 'release_boundary'):
         _string(value.get(field), field, 16384)
     _strings(value.get('deferred_items', []), 'deferred_items')
     _strings(value.get('artifact_refs', []), 'artifact_refs')
+    for field in ('request_digest', 'request_key_digest'):
+        if field in value and not re.fullmatch(r'[0-9a-f]{64}', value[field] or ''):
+            _invalid('invalid ' + field)
+    _selected_artifact(value.get('selected_artifact'))
     checks = value.get('required_checks')
     if not isinstance(checks, list) or not 1 <= len(checks) <= 128:
         _invalid('required_checks must not be empty')

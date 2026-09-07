@@ -140,6 +140,28 @@ def _execute(tenant, project_id, operation, key, *, created=False, project=_disp
         return _failure(503, 'campaigns_unavailable', 'campaign store is unavailable')
 
 
+_COMPLETION_UNAVAILABLE = object()
+
+
+def _completion(org, project, campaign_id):
+    """Best-effort completion projection for a legacy read.
+
+    Uses the already-authorized ``org`` and the raw store's ``release_snapshot``
+    directly, skipping campaign_release_service's own redundant caller-binding
+    resolution. A genuine authorization failure still propagates; any other
+    failure (the completion projection being unavailable) is reported as the
+    sentinel so the caller can omit the field rather than fake an empty state
+    or 503 an otherwise-successful legacy read.
+    """
+    import campaign_release_service as releases
+    try:
+        return releases._store().release_snapshot(org, project, campaign_id)
+    except platform_link.ProjectSessionForbidden:
+        raise
+    except Exception:
+        return _COMPLETION_UNAVAILABLE
+
+
 def _principal(tenant):
     binding = platform_link.resolve_caller_binding(tenant)
     if binding is None:
@@ -503,11 +525,18 @@ def get_campaign(campaign_id: str, request: Request, tenant: Any = Depends(deps.
         campaign_id = _id(campaign_id)
     except ValueError:
         return _failure(400, 'invalid_request', 'Invalid campaign request')
+    availability = []
     def read(store, org):
-        import campaign_release_service as releases
         row = store.get_campaign(org, project, campaign_id)
-        return dict(row, completion=releases.snapshot(tenant, project, campaign_id)) if row else None
-    return _execute(tenant, project, read, 'campaign')
+        if row is None:
+            return None
+        completion = _completion(org, project, campaign_id)
+        availability.append(completion is not _COMPLETION_UNAVAILABLE)
+        return dict(row, completion=completion) if completion is not _COMPLETION_UNAVAILABLE else row
+    response = _execute(tenant, project, read, 'campaign')
+    if availability == [False]:
+        response.headers['X-Completion-Status'] = 'unavailable'
+    return response
 
 
 def _project(snapshot):
@@ -531,12 +560,16 @@ def execution(campaign_id: str, request: Request, tenant: Any = Depends(deps.req
         limit = max(1, min(200, int(request.query_params.get('limit', '50'))))
     except ValueError:
         return _failure(400, 'invalid_request', 'Invalid campaign request')
+    availability = []
     def read(store, org):
-        import campaign_release_service as releases
         result = _project(_execution_store().read_execution(org, project, campaign_id, limit=limit))
-        return dict(result, completion=releases.snapshot(tenant, project, campaign_id))
-    return _execute(tenant, project, read,
-        'execution', project=lambda row: row)
+        completion = _completion(org, project, campaign_id)
+        availability.append(completion is not _COMPLETION_UNAVAILABLE)
+        return dict(result, completion=completion) if completion is not _COMPLETION_UNAVAILABLE else result
+    response = _execute(tenant, project, read, 'execution', project=lambda row: row)
+    if availability == [False]:
+        response.headers['X-Completion-Status'] = 'unavailable'
+    return response
 
 
 @router.post('/api/campaigns/{campaign_id}/questions')

@@ -20,7 +20,8 @@ def test_valid_formats_bind_actual_bytes(path, raw):
 @pytest.mark.parametrize('path,raw', [('drawing.dxf', DXF.replace(b'0\nEOF\n', b'')),
     ('drawing.dxf', DXF.replace(b'11\n10', b'11\nnan')), ('empty.json', b'[]'),
     ('bad.csv', b'a,b\n1\n'), ('empty.txt', b'  '), ('bad.txt', b'\xff'),
-    ('huge.txt', b'x' * (delivery.MAX_BYTES + 1))])
+    ('huge.txt', b'x' * (delivery.MAX_BYTES + 1))],
+    ids=['missing-eof', 'nonfinite-coord', 'empty-json-list', 'ragged-csv', 'blank-txt', 'invalid-utf8', 'oversize-txt'])
 def test_invalid_artifact_never_validates(path, raw):
     with pytest.raises((ValueError, UnicodeError)):
         delivery.validate_bytes(path, raw)

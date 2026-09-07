@@ -1,4 +1,5 @@
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -57,3 +58,17 @@ def test_worker_cannot_supply_evidence():
     with pytest.raises(campaign_bridge.BridgeError):
         campaign_bridge.handle('deliver', {'enrollment_id': str(uuid.uuid4()),
             'release_id': str(uuid.uuid4()), 'status': 'passed'}, 'worker')
+
+
+def test_unavailable_completion_preserves_authorized_campaign(client, monkeypatch):
+    project, campaign = str(uuid.uuid4()), str(uuid.uuid4())
+    row = {'campaign_id': campaign, 'title': 'Existing work', 'dispatch_ref': 'known'}
+    monkeypatch.setattr(campaigns, '_STORE', SimpleNamespace(get_campaign=lambda *args: row))
+    monkeypatch.setattr(campaigns.platform_link, 'require_project_access', lambda *args, **kwargs: 'org')
+    def unavailable(*args):
+        raise RuntimeError('projection down')
+    monkeypatch.setattr(service, '_STORE', SimpleNamespace(release_snapshot=unavailable))
+    response = client.get(f'/api/campaigns/{campaign}', params={'project_id': project})
+    assert response.status_code == 200
+    assert response.json()['campaign'] == row
+    assert response.headers['x-completion-status'] == 'unavailable'

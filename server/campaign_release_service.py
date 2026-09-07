@@ -13,7 +13,7 @@ import campaign_delivery_service as delivery
 import campaign_capability_resolver as capabilities
 
 STAGES = ('implementation', 'publication', 'deployment', 'user_verification', 'delivery')
-PRODUCERS = dict(zip(STAGES, ('task_ledger', 'deployment_adapter', 'deployment_adapter',
+PRODUCERS = dict(zip(STAGES, ('task_ledger', 'task_ledger', 'deployment_adapter',
                              'user_workflow', 'artifact_reader')))
 _STORE = None
 _LIFECYCLE = None
@@ -116,7 +116,9 @@ def compile_finish(tenant, project_id, campaign_id, finish):
     boundary = ('Deliver and verify the existing ' + artifact['format'] + ' artifact ' + artifact['path']
                 if artifact else 'Produce and verify a ' + finish['delivery_profile'] + ' release')
     deferred = ['The original ambition beyond this existing artifact has not been implemented or validated.'] if artifact else []
-    return {**finish, 'original_goal': campaign['prompt'], 'release_boundary': boundary,
+    # The row already owns delivery_profile as its own column; the contract must not duplicate it.
+    public = {key: value for key, value in finish.items() if key != 'delivery_profile'}
+    return {**public, 'original_goal': campaign['prompt'], 'release_boundary': boundary,
             'deferred_items': deferred, 'selected_artifact': artifact,
             'request_digest': _digest(finish),
             'required_checks': [{'check_id': stage + '.verified', 'stage': stage,
@@ -257,6 +259,8 @@ def advance(tenant, project_id, campaign_id, release_id):
             if not source:
                 raise delivery.DeliveryConflict('No executable delivery adapter or validated project artifact')
             artifact = _artifact(release)
+            url = ('/api/campaigns/' + str(campaign_id) + '/releases/' + str(release_id) + '/artifacts/' +
+                   quote(artifact['name'], safe='') + '?project_id=' + str(project))
             if stage == 'implementation':
                 raw = delivery.file_bytes(_lifecycle().project_snapshot(org, project, actor), source['path'])
                 observed = delivery.validate_bytes(source['path'], raw)
@@ -283,16 +287,29 @@ def advance(tenant, project_id, campaign_id, release_id):
                     receipt = result['receipt']
                 raw, observed = delivery.read_verified(_lifecycle().project_snapshot(org, project, actor), artifact)
                 observations = {'artifact': observed, 'receipt': receipt}
+            elif stage == 'deployment':
+                raw, observed = read_artifact(tenant, project_id, campaign_id, release_id, artifact['name'])
+                publication_stage = next((s for s in completion.get('stages', []) if s['stage'] == 'publication'), None)
+                receipt_id = (publication_stage or {}).get('evidence', {}).get('receipt', {}).get('receipt_id')
+                rollback_identity = (
+                    'No prior deployed revision exists; publication receipt ' + receipt_id +
+                    ' is the only recorded state.' if receipt_id else
+                    'No prior deployed revision or publication receipt exists for this release.')
+                observations = {'artifact': observed, 'observed_revision': observed['sha256'],
+                    'resource_identity': artifact['path'] + '@' + revision, 'rollback_identity': rollback_identity}
+            elif stage == 'user_verification':
+                raw, observed = read_artifact(tenant, project_id, campaign_id, release_id, artifact['name'])
+                observations = {'artifact': observed, 'workflow': contract['workflow'],
+                    'observations': ['Project access checked', 'Saved file retrieved through ' + url,
+                                      'Actual file bytes parsed and digest checked']}
             else:
                 raw, observed = read_artifact(tenant, project_id, campaign_id, release_id, artifact['name'])
-                url = '/api/campaigns/' + str(campaign_id) + '/releases/' + str(release_id) + '/artifacts/' + quote(artifact['name'], safe='') + '?project_id=' + str(project)
-                observed['url'] = url
-                observations = {'artifact': observed, 'observed_revision': observed['sha256'],
-                    'retrieved': True, 'bytes_verified': True, 'content_valid': True,
-                    'size_bytes': len(raw), 'workflow': contract['workflow'],
-                    'workflow_verified': True, 'workflow_observations': ['Project access checked', 'Saved file retrieved', 'Actual file bytes parsed and digest checked'],
-                    'replay_recipe': ['Open the authorized project', 'Download ' + url, 'Open the downloaded ' + observed['format'] + ' file'],
-                    'known_limits': contract['deferred_items'], 'deliverables': [observed]}
+                observations = {'artifacts': [{'artifact_ref': source['path'], 'name': observed['name'],
+                        'sha256': observed['sha256'], 'byte_count': len(raw), 'retrieved': True,
+                        'valid': True, 'access_path': url}],
+                    'replay_recipe': ('Open the authorized project, download ' + url +
+                                      ', then open the downloaded ' + observed['format'] + ' file.'),
+                    'known_limits': contract['deferred_items']}
         except (ValueError, UnicodeError) as exc:
             status = 'unavailable'
             observations = {'reason': str(exc), 'recommended_action': 'Restore a valid source artifact or provide the missing delivery adapter'}

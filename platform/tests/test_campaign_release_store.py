@@ -1,13 +1,29 @@
 """PostgreSQL proofs for finish authority within the campaign engine."""
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from threading import Barrier
+from types import SimpleNamespace
+import sys
 import uuid
 
 import psycopg
 import pytest
 
-from leaf_platform import campaigns, campaign_release as releases, campaign_execution as execution, db, store
+from leaf_platform import (campaigns, campaign_release as releases, campaign_execution as execution,
+                           db, store, project_lifecycle)
+
+# Insert server/ AFTER collection-time sys.path setup so `import deps` etc. resolve
+# to server/deps.py rather than any same-named module reachable from platform/.
+_SERVER_DIR = Path(__file__).resolve().parent.parent.parent / 'server'
+sys.path.insert(0, str(_SERVER_DIR))
+
+import deps  # noqa: E402
+import platform_link  # noqa: E402
+import campaign_release_service as runtime  # noqa: E402
+from routers import campaigns as campaigns_router, campaign_mcp  # noqa: E402
+from fastapi import FastAPI  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
 
 
 def _seed(make_org, org=None):
@@ -411,3 +427,128 @@ def test_missing_artifact_and_secret_material_are_not_deliverables(make_org):
                                  payload={'credentials': {'password': 'private-value'}}, decided_by='adapter')
     assert releases.get_release(*scope, row['release_id'])['decisions'] == []
     assert releases.get_release(*scope, row['release_id'])['deliverables'] == []
+
+
+DXF_DRAWING = b'0\nSECTION\n2\nENTITIES\n0\nCIRCLE\n10\n0\n20\n0\n40\n10\n0\nENDSEC\n0\nEOF\n'
+
+
+def _joint_app(scope, principal, monkeypatch):
+    """Wire a real FastAPI app over the real store/lifecycle with a synthetic tenant boundary."""
+    org_id, project_id, campaign_id = scope
+    tenant = SimpleNamespace(tenant_id=str(org_id))
+
+    def access(caller, pid, **kwargs):
+        if caller is not tenant or str(pid) != str(project_id):
+            raise platform_link.ProjectSessionForbidden('wrong workspace or actor')
+        return str(org_id)
+
+    monkeypatch.setattr(platform_link, 'require_project_access', access)
+    monkeypatch.setattr(platform_link, 'resolve_caller_binding',
+                        lambda caller: SimpleNamespace(binding_id=principal) if caller is tenant else None)
+    monkeypatch.setattr(campaigns_router, '_STORE', campaigns)
+    monkeypatch.setattr(runtime, '_STORE', releases)
+    monkeypatch.setattr(runtime, '_LIFECYCLE', project_lifecycle)
+    monkeypatch.setattr(runtime.capabilities, 'resolve', lambda *args, **kwargs: {
+        'selected': 'project-file-delivery', 'candidates': [], 'missing_capability': None,
+        'recommended_action': 'Use existing project file delivery'})
+    app = FastAPI()
+    app.include_router(campaigns_router.router)
+    app.include_router(campaign_mcp.router)
+    app.dependency_overrides[deps.require_tenant] = lambda: tenant
+    return TestClient(app), tenant
+
+
+def test_finish_request_recovers_interrupted_write_and_downloads_dxf_bytes(make_org, monkeypatch):
+    scope, principal, org = _seed(make_org)
+    org_id, project_id, campaign_id = scope
+    project_lifecycle.put_project_file(org_id, project_id, principal, path='drawing.dxf',
+        media_type='image/vnd.dxf', content=DXF_DRAWING.decode(), idempotency_key='seed-dxf')
+    writes = {'n': 0}
+    real_put = project_lifecycle.put_project_file
+
+    def flaky_put(*args, **kwargs):
+        result = real_put(*args, **kwargs)
+        writes['n'] += 1
+        if writes['n'] == 1:
+            raise RuntimeError('lost response after commit')
+        return result
+
+    monkeypatch.setattr(project_lifecycle, 'put_project_file', flaky_put)
+    client, tenant = _joint_app(scope, principal, monkeypatch)
+    body = {'project_id': str(project_id), 'finish': {
+        'delivery_profile': 'cad_file', 'intended_user': 'Project owner',
+        'workflow': 'Open the project and retrieve the valid DXF file',
+        'artifact_refs': ['drawing.dxf']}}
+    with client:
+        first = client.post(f'/api/campaigns/{campaign_id}/releases',
+                            headers={'Idempotency-Key': 'finish-dxf'}, json=body)
+        assert first.status_code == 503, first.text
+        assert writes['n'] == 1
+        second = client.post(f'/api/campaigns/{campaign_id}/releases',
+                             headers={'Idempotency-Key': 'finish-dxf'}, json=body)
+        assert second.status_code in (200, 201), second.text
+        assert writes['n'] == 1
+        completion = second.json()['completion']
+        assert completion['release']['status'] == 'finished'
+        assert {s['stage'] for s in completion['stages'] if s['status'] == 'passed'} == set(releases.STAGES)
+        artifact = completion['deliverables'][0]
+        downloaded = client.get(artifact['access_path'])
+        assert downloaded.status_code == 200, downloaded.text
+        assert downloaded.content == DXF_DRAWING
+        assert artifact['valid'] is True and artifact['retrieved'] is True
+        assert campaigns.get_campaign(*scope)['status'] != 'succeeded'
+        before = project_lifecycle.project_snapshot(org_id, project_id, principal)
+        replay = client.post(f'/api/campaigns/{campaign_id}/releases',
+                             headers={'Idempotency-Key': 'finish-dxf'}, json=body)
+        assert replay.status_code in (200, 201), replay.text
+        after = project_lifecycle.project_snapshot(org_id, project_id, principal)
+        assert before['files'] == after['files']
+        assert writes['n'] == 1
+
+
+def test_wrong_workspace_and_actor_denied_and_saved_drift_reports_unavailable(make_org, monkeypatch):
+    scope, principal, org = _seed(make_org)
+    org_id, project_id, campaign_id = scope
+    project_lifecycle.put_project_file(org_id, project_id, principal, path='result.json',
+        media_type='application/json', content='{"items":["ok"]}\n', idempotency_key='seed-json')
+    client, tenant = _joint_app(scope, principal, monkeypatch)
+    body = {'project_id': str(project_id), 'finish': {
+        'delivery_profile': 'cad_file', 'intended_user': 'Project owner',
+        'workflow': 'Open the project and retrieve the valid JSON file',
+        'artifact_refs': ['result.json']}}
+    with client:
+        foreign_project = store.create_project(org_id, 'Other workspace')
+        denied_workspace = client.post(f'/api/campaigns/{campaign_id}/releases',
+            headers={'Idempotency-Key': 'wrong-workspace'},
+            json={**body, 'project_id': str(foreign_project.project_id)})
+        assert denied_workspace.status_code == 403, denied_workspace.text
+        stranger_app = FastAPI()
+        stranger_app.include_router(campaigns_router.router)
+        stranger_app.dependency_overrides[deps.require_tenant] = lambda: SimpleNamespace(tenant_id=str(org_id))
+        with TestClient(stranger_app) as stranger_client:
+            denied_actor = stranger_client.post(f'/api/campaigns/{campaign_id}/releases',
+                headers={'Idempotency-Key': 'wrong-actor'}, json=body)
+            assert denied_actor.status_code == 403, denied_actor.text
+        finished = client.post(f'/api/campaigns/{campaign_id}/releases',
+                               headers={'Idempotency-Key': 'finish-json'}, json=body)
+        assert finished.status_code in (200, 201), finished.text
+        completion = finished.json()['completion']
+        release_id = completion['release']['release_id']
+        artifact = completion['deliverables'][0]
+        downloaded = client.get(artifact['access_path'])
+        assert downloaded.status_code == 200 and downloaded.content == b'{"items":["ok"]}\n'
+        project_lifecycle.put_project_file(org_id, project_id, principal, path='result.json',
+            media_type='application/json', content='{"items":["drifted"]}\n', idempotency_key='drift-write')
+        preserved = client.get(artifact['access_path'])
+        assert preserved.status_code == 200 and preserved.content == downloaded.content
+        project_lifecycle.put_project_file(org_id, project_id, principal,
+            path=runtime._artifact(completion['release'])['path'], media_type='application/json',
+            content='{"items":["changed release"]}\n', idempotency_key='drift-release-write')
+        drifted = client.get(f'/api/campaigns/{campaign_id}/releases/{release_id}',
+                             params={'project_id': str(project_id)})
+        assert drifted.status_code == 200, drifted.text
+        drifted_completion = drifted.json()['completion']
+        assert drifted_completion['current_verification']['status'] == 'failed'
+        assert drifted_completion['deliverables'] == []
+        redownload = client.get(artifact['access_path'])
+        assert redownload.status_code == 409, redownload.text
