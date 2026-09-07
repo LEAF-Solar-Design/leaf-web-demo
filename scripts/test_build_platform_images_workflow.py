@@ -2991,12 +2991,11 @@ def main() -> None:
     # step is the deliberate exception — its only nonzero exit is the
     # post-write committed path, which must fail the run. The steps AFTER
     # decide are the adopted-path verify half: each runs exactly on
-    # adopted == 'true', and none is absorbed — any failure there is
-    # post-commit by construction (adopted=true means every alias
-    # re-verified), so it must redden the run; a rerun resumes
-    # idempotently through decide's existing-alias arm.
+    # adopted == 'true'. S3d-a replaces the old all-blocking artifact
+    # contract: verification and S3 writes block, while only the three
+    # artifact uploads are best effort after their immutable S3 writes.
     adopt_steps = wf_jobs["adopt"]["steps"]
-    assert len(adopt_steps) == 10
+    assert len(adopt_steps) == 13
     assert adopt_steps[4].get("id") == "decide"
     for step in adopt_steps[:4]:
         assert step.get("continue-on-error") is True, step
@@ -3004,7 +3003,10 @@ def main() -> None:
     assert "if" not in adopt_steps[4]
     for step in adopt_steps[5:]:
         assert step.get("if") == "steps.decide.outputs.adopted == 'true'", step
-        assert "continue-on-error" not in step, step
+        if step.get("uses") == "actions/upload-artifact@v4":
+            assert step.get("continue-on-error") is True, step
+        else:
+            assert "continue-on-error" not in step, step
 
     # The full-build verifier consumes matrix-owned v3 entries and the exact
     # web artifact. The adopted path uses the main-run v3 envelope that the
@@ -7956,6 +7958,98 @@ def test_mq_transport_duplicate_guard_documents_jam_and_squat() -> None:
     assert "attempt-2 jam" in evidence["run"]
     assert "permanent squat" in evidence["run"]
     assert "admin purge" in evidence["run"]
+
+
+def _mq_release_pairs(doc):
+    steps = doc["jobs"]["adopt"]["steps"]
+    names = (
+        ("staging-supply-set.json", "Upload immutable staging supply-set manifest",
+         '"$RUNNER_TEMP/staging-supply-set.json"'),
+        ("web-dist.zip", "Upload deterministic web deployment artifact",
+         "spec-candidate/main-web-dist.zip"),
+        ("web-source-restamp.json", "Upload provider-bound web source-restamp receipt",
+         "spec-candidate/web-source-restamp.json"),
+    )
+    for filename, upload_name, body in names:
+        put = next(s for s in steps if s.get("name") == f"Put release {filename} to S3")
+        upload = next(s for s in steps if s.get("name") == upload_name)
+        yield steps, filename, body, put, upload
+
+
+def test_mq_release_keys_validate_every_component_before_construction() -> None:
+    def check(doc):
+        for _, filename, _, put, _ in _mq_release_pairs(doc):
+            code = _executable_bash(put["run"])
+            key = ('key="${MQ_TRANSPORT_PREFIX}release/$SOURCE_SHA/'
+                   f'$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/{filename}"')
+            assert key in code
+            for variable, pattern in (
+                ("SOURCE_SHA", "^[0-9a-f]{40}$"),
+                ("GITHUB_RUN_ID", "^[1-9][0-9]*$"),
+                ("GITHUB_RUN_ATTEMPT", "^[1-9][0-9]*$"),
+            ):
+                guard = '[[' + f' "${variable}" =~ {pattern} ]] || exit 1'
+                assert guard in code
+                assert code.index(guard) < code.index(key) < code.index("aws s3api put-object")
+    _mq_falsify(check, [
+        ('[[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1', 'echo unchecked'),
+        ('[[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ ]] || exit 1', 'echo unchecked'),
+        ('[[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || exit 1', 'echo unchecked'),
+        ('release/$SOURCE_SHA/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/',
+         'release/$SOURCE_SHA/$FILE_RUN-$GITHUB_RUN_ATTEMPT/'),
+    ])
+
+
+def test_mq_release_puts_are_fail_closed_immutable_and_runner_attested() -> None:
+    def check(doc):
+        for _, _, body, put, _ in _mq_release_pairs(doc):
+            assert set(put) == {"name", "if", "run"}
+            assert put["if"] == "steps.decide.outputs.adopted == 'true'"
+            code = _executable_bash(put["run"])
+            assert code.startswith("set -euo pipefail\n")
+            logical = code.replace("\\\n", "")
+            command = next(l for l in logical.splitlines() if l.startswith("aws s3api put-object"))
+            for flag in (
+                '--bucket "$MQ_TRANSPORT_BUCKET"', '--key "$key"',
+                f"--body {body}", "--if-none-match '*'",
+                "--checksum-algorithm SHA256",
+                '--metadata "run-id=$GITHUB_RUN_ID,run-attempt=$GITHUB_RUN_ATTEMPT,'
+                'workflow-ref=$GITHUB_WORKFLOW_REF,repository-id=$GITHUB_REPOSITORY_ID,'
+                'head-sha=$SOURCE_SHA,event=$GITHUB_EVENT_NAME"',
+            ):
+                assert flag in command
+            assert logical.splitlines()[-1] == command
+            assert "||" not in command and "&&" not in command
+            assert "set +e" not in code and "PreconditionFailed" not in code
+    _mq_falsify(check, [
+        ("--if-none-match '*'", "--if-none-match ignored"),
+        ("--checksum-algorithm SHA256", "--checksum-algorithm CRC32"),
+        ("run-id=$GITHUB_RUN_ID,run-attempt=$GITHUB_RUN_ATTEMPT",
+         "run-id=$FILE_RUN,run-attempt=$FILE_ATTEMPT"),
+        ("--body spec-candidate/main-web-dist.zip", "--body spec-candidate/spec-web-dist.zip"),
+        ("set -euo pipefail", "set +e"),
+    ])
+
+
+def test_mq_release_s3_precedes_each_best_effort_artifact_upload() -> None:
+    def check(doc):
+        for steps, filename, _, put, upload in _mq_release_pairs(doc):
+            assert steps.index(put) + 1 == steps.index(upload)
+            assert upload["uses"] == "actions/upload-artifact@v4"
+            assert upload["continue-on-error"] is True
+            assert upload["if"] == put["if"]
+            assert upload["with"]["if-no-files-found"] == "error"
+        assert sum(s.get("uses") == "actions/upload-artifact@v4"
+                   for s in doc["jobs"]["adopt"]["steps"]) == 3
+    _mq_falsify(check, [
+        ("continue-on-error: true", "continue-on-error: false"),
+        ("- name: Put release web-dist.zip to S3\n        if: steps.decide.outputs.adopted == 'true'",
+         "- name: Put release web-dist.zip to S3\n        if: steps.decide.outputs.adopted == 'false'"),
+    ])
+    text = WORKFLOW.read_text(encoding="utf-8")
+    for _, filename, _, _, _ in _mq_release_pairs(_strict_yaml(text)):
+        assert ("Native staging deploy hand-off: "
+                f"release/<sha40>/<run_id>-<attempt>/{filename}.") in text
 
 
 if __name__ == "__main__":
