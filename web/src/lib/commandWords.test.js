@@ -57,6 +57,13 @@ describe('commandWords (W4f slice B): typed CAD words on the command line', () =
     expect(parseDrawingCommand('lw')).toMatchObject({ op: 'setLineweight' })
   })
 
+  it('W4g-7b-04c: DIMLINEAR/DIMALIGNED and their one-word forms DLI/DAL', () => {
+    expect(parseDrawingCommand('dimlinear')).toMatchObject({ group: 'draw', op: 'dimLinear', verb: 'DIMLINEAR', word: 'dimlinear' })
+    expect(parseDrawingCommand('dli')).toMatchObject({ group: 'draw', op: 'dimLinear', verb: 'DIMLINEAR', word: 'dli' })
+    expect(parseDrawingCommand('dimaligned')).toMatchObject({ group: 'draw', op: 'dimAligned', verb: 'DIMALIGNED', word: 'dimaligned' })
+    expect(parseDrawingCommand('dal')).toMatchObject({ group: 'draw', op: 'dimAligned', verb: 'DIMALIGNED', word: 'dal' })
+  })
+
   it('exposes the word list for the help surface, every entry parseable', () => {
     expect(COMMAND_WORDS.length).toBeGreaterThan(10)
     for (const word of COMMAND_WORDS) expect(parseDrawingCommand(word)).not.toBeNull()

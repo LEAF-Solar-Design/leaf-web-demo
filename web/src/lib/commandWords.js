@@ -81,6 +81,11 @@ const WORDS = Object.freeze({
   // W4g-7b-02c: the reference's INSERT, one letter like the rest of its Draw row.
   insert: { group: 'draw', op: 'createInsert', verb: 'INSERT' },
   i: { group: 'draw', op: 'createInsert', verb: 'INSERT' },
+  // W4g-7b-04c: the reference's DIMLINEAR/DIMALIGNED, DLI/DAL its own aliases.
+  dimlinear: { group: 'draw', op: 'dimLinear', verb: 'DIMLINEAR' },
+  dli: { group: 'draw', op: 'dimLinear', verb: 'DIMLINEAR' },
+  dimaligned: { group: 'draw', op: 'dimAligned', verb: 'DIMALIGNED' },
+  dal: { group: 'draw', op: 'dimAligned', verb: 'DIMALIGNED' },
   rectang: { group: 'draw', op: 'createRectangle', verb: 'RECTANG' },
   rectangle: { group: 'draw', op: 'createRectangle', verb: 'RECTANG' },
   rec: { group: 'draw', op: 'createRectangle', verb: 'RECTANG' },

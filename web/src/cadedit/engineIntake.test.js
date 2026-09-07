@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { bulgePoints, ARC_STEP_DEG, CIRCLE_SEGMENTS, MAX_POINTS, MIN_ARC_POINTS, engineIntake, entityToPolyline, hexHandle } from './engineIntake.js'
+import { bulgePoints, ARC_STEP_DEG, CIRCLE_SEGMENTS, DIM_EXT_PAST, MAX_POINTS, MIN_ARC_POINTS, dimensionSchematic, engineIntake, entityToPolyline, formatMeasurement, hexHandle } from './engineIntake.js'
 
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps
 
@@ -145,5 +145,69 @@ describe('W4g-6d: a polyline bulge draws as its arc', () => {
     expect(closing.pts[2]).toEqual([10, 10, 0])
     // Mismatched list: drawn straight, never thrown on.
     expect(entityToPolyline({ ...base, bulges: [1] }).pts).toHaveLength(5)
+  })
+
+  describe('W4g-7b-04c: dimensionSchematic, the hand-derived rows', () => {
+    it('formats a measurement to 3 decimals, trailing zeros trimmed', () => {
+      expect(formatMeasurement(3)).toBe('3')
+      expect(formatMeasurement(5)).toBe('5')
+      expect(formatMeasurement(4.1)).toBe('4.1')
+      expect(formatMeasurement(4.12345)).toBe('4.123')
+      expect(formatMeasurement(Number.NaN)).toBe('')
+    })
+
+    it('ALIGNED (0,0)-(3,4), dimline (1.5,6): the dimension line is the chord through (1.08,5.44)-(-1.92,1.44), measurement 5', () => {
+      const entity = { id: '500', type: 'DIMENSION', dimtype: 'ALIGNED', layer: '0', def1: [0, 0], def2: [3, 4], dimline: [1.5, 6], rotationDeg: 0, measurement: 5 }
+      const pieces = dimensionSchematic(entity)
+      expect(pieces).toHaveLength(6)
+      const [ext1, ext2, dimLine] = pieces
+      expect(dimLine.pts[0]).toEqual([-1.92, 1.44, 0])
+      expect(dimLine.pts[1]).toEqual([1.08, 5.44, 0])
+      expect(Math.hypot(dimLine.pts[1][0] - dimLine.pts[0][0], dimLine.pts[1][1] - dimLine.pts[0][1])).toBeCloseTo(5, 9)
+      expect(ext1.pts[0]).toEqual([0, 0, 0])
+      expect(ext2.pts[0]).toEqual([3, 4, 0])
+      // Every extension line runs DIM_EXT_PAST past its foot.
+      expect(Math.hypot(ext1.pts[1][0] - (-1.92), ext1.pts[1][1] - 1.44)).toBeCloseTo(DIM_EXT_PAST, 9)
+      expect(Math.hypot(ext2.pts[1][0] - 1.08, ext2.pts[1][1] - 5.44)).toBeCloseTo(DIM_EXT_PAST, 9)
+    })
+
+    it('LINEAR rot 0, dimline (1.5,6): the dimension line is y=6 from x=0 to x=3, measurement 3', () => {
+      const entity = { id: '500', type: 'DIMENSION', dimtype: 'LINEAR', layer: '0', def1: [0, 0], def2: [3, 4], dimline: [1.5, 6], rotationDeg: 0, measurement: 3 }
+      const [ext1, ext2, dimLine] = dimensionSchematic(entity)
+      expect(dimLine.pts).toEqual([[0, 6, 0], [3, 6, 0]])
+      expect(ext1.pts[0]).toEqual([0, 0, 0])
+      expect(ext2.pts[0]).toEqual([3, 4, 0])
+    })
+
+    it('LINEAR rot 90, dimline (1.5,6): the dimension line is x=1.5 from y=0 to y=4, measurement 4', () => {
+      const entity = { id: '500', type: 'DIMENSION', dimtype: 'LINEAR', layer: '0', def1: [0, 0], def2: [3, 4], dimline: [1.5, 6], rotationDeg: 90, measurement: 4 }
+      const [, , dimLine] = dimensionSchematic(entity)
+      expect(dimLine.pts).toEqual([[1.5, 0, 0], [1.5, 4, 0]])
+    })
+
+    it('draws the same line for a raw or a canonical dimline point (the console fact)', () => {
+      const raw = { id: '500', type: 'DIMENSION', dimtype: 'ALIGNED', layer: '0', def1: [0, 0], def2: [3, 4], dimline: [1.5, 6], measurement: 5 }
+      const canonical = { ...raw, dimline: [1.08, 5.44] }
+      const hand = [[-1.92, 1.44, 0], [1.08, 5.44, 0]]
+      expect(dimensionSchematic(raw)[2].pts).toEqual(hand)
+      expect(dimensionSchematic(canonical)[2].pts).toEqual(hand)
+    })
+
+    it('an OTHER dimtype draws nothing through engineIntake, a RADIUS reads as visible-by-handle only', () => {
+      const other = { id: '500', type: 'DIMENSION', dimtype: 'OTHER', layer: '0', editable: false }
+      expect(engineIntake([other]).polylines).toEqual([])
+    })
+
+    it('engineIntake draws a LINEAR dimension\'s schematic pieces, keyed by its own hex handle', () => {
+      const dim = { id: '37986', type: 'DIMENSION', dimtype: 'LINEAR', layer: '0', def1: [0, 0], def2: [3, 4], dimline: [1.5, 6], rotationDeg: 0, measurement: 3 }
+      const intake = engineIntake([dim])
+      expect(intake.polylines).toHaveLength(6)
+      expect(intake.polylines.every((p) => p.handle === '9462')).toBe(true)
+    })
+
+    it('a malformed dimension record draws nothing, never throws', () => {
+      expect(dimensionSchematic({ dimtype: 'ALIGNED', def1: [0, 0], def2: null, dimline: [1, 1] })).toEqual([])
+      expect(dimensionSchematic({ dimtype: 'ALIGNED', def1: [0, 0], def2: [0, 0], dimline: [1, 1] })).toEqual([])
+    })
   })
 })

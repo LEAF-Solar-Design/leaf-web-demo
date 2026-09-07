@@ -62,6 +62,12 @@ export const INTERIM_ICONS = Object.freeze({
   trim: '<path d="M4 6l12 12"/><path d="M4 18L16 6"/><circle cx="6" cy="18" r="2"/><circle cx="6" cy="6" r="2"/><path d="M20 12h-6"/>',
   text: '<path d="M5 5h14"/><path d="M12 5v14"/><path d="M8 19h8"/>',
   dimension: '<path d="M4 15V9M20 15V9"/><path d="M4 12h16"/><path d="M7 10l-3 2 3 2M17 10l3 2-3 2"/><path d="M9 6h6"/>',
+  // W4g-7b-04c: DIMLINEAR, two vertical extension lines and a horizontal
+  // dimension line between them with tick marks (never arrowheads: honest
+  // about the schematic the mapper draws until the viewer draws glyphs).
+  'dim-linear': '<path d="M6 6v12M18 6v12"/><path d="M6 12h12"/><path d="M9 10l-3 2 3 2M15 10l3 2-3 2"/>',
+  // W4g-7b-04c: DIMALIGNED, the same schematic on a diagonal axis.
+  'dim-aligned': '<path d="M5 16l4-8M15 20l4-8"/><path d="M8 12.5l8 3.5"/><path d="M9.6 12.2l-1 2.4 2.6.2M15.4 15.8l1-2.4-2.6-.2"/>',
   match: '<path d="M14 4l6 6-9 9H5v-6z"/><path d="M11 7l6 6"/><path d="M4 20h4"/>',
   bulb: '<path d="M9 18h6"/><path d="M10 21h4"/><path d="M8.5 14a5.5 5.5 0 1 1 7 0c-.8.7-1.5 1.6-1.5 2.5h-4c0-.9-.7-1.8-1.5-2.5z"/>',
 })

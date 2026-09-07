@@ -323,6 +323,12 @@
     },
     "lineweight": {
       "term": "line weight"
+    },
+    "dim-linear": {
+      "term": "linear dimension"
+    },
+    "dim-aligned": {
+      "term": "aligned dimension"
     }
   }
 }
