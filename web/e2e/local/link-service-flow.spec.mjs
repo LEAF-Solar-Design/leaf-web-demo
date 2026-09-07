@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { readFileSync } from 'node:fs'
 import { requireLocalReady } from './requireReady.mjs'
 import { setRail } from './railFlag.mjs'
 
@@ -10,6 +11,11 @@ const local = (value) => ['localhost', '127.0.0.1', '[::1]'].includes(new URL(va
 test.use({ serviceWorkers: 'block' })
 
 test('link service through local OAuth, show connected, then unlink', async ({ page, context, request }) => {
+  if (process.env.LEAF_E2E_PORT_CLEANUP) {
+    const cleanup = JSON.parse(readFileSync(process.env.LEAF_E2E_PORT_CLEANUP, 'utf8'))
+    expect(cleanup.ok && cleanup.remaining.length === 0,
+      'pre-boot port cleanup failed: ' + JSON.stringify(cleanup)).toBe(true)
+  }
   // This row must never quietly skip because its fake AS was not armed.
   expect(local(API_BASE)).toBe(true)
   expect(process.env.LEAF_E2E_MANAGED, 'use the managed local stack').toBe('1')
