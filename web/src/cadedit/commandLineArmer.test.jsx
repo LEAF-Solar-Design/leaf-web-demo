@@ -5,7 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { DEFERRED_REASONS } from '../lib/actionRegistry.js'
-import { COCKPIT_COMMAND_EVENT } from '../lib/commandWords.js'
+import { COCKPIT_COMMAND_EVENT, parseDrawingCommand } from '../lib/commandWords.js'
 
 import CadEditSurface from './CadEditSurface.jsx'
 import CommandLineArmer, { acceptsCommand } from './CommandLineArmer.jsx'
@@ -94,6 +94,19 @@ describe('CommandLineArmer (W4f slice B)', () => {
     command({ group: 'modify', op: 'delete' })
     const posted = workers[0].posted
     expect(posted[posted.length - 1]).toEqual({ type: 'applyEdit', op: 'delete', payload: { entityId: 'e1' } })
+  })
+
+  it('F4: typed m arms MOVE on INSERT and typed erase posts delete', async () => {
+    mount()
+    await openAndLoad([{ id: '11', type: 'INSERT', name: 'Fixture', ip: [0, 0, 0], rotationDeg: 0, scale: [1, 1, 1], layer: '0', editable: false }])
+    fireEvent.click(screen.getByRole('radio'))
+    const before = workers[0].posted.length
+    command(parseDrawingCommand('m'))
+    expect(promptEl().getAttribute('data-op')).toBe('move')
+    expect(screen.getByTestId('cockpit-prompt-note').textContent).toBe('an INSERT is placed, not edited, in this round')
+    expect(workers[0].posted).toHaveLength(before)
+    command(parseDrawingCommand('erase'))
+    expect(workers[0].posted.slice(before)).toEqual([{ type: 'applyEdit', op: 'delete', payload: { entityId: '11' } }])
   })
 
   // W4g-5c: the clipboard words. kimi on #1025 found them registered as words

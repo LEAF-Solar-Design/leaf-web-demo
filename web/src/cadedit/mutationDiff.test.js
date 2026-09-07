@@ -15,6 +15,51 @@ const circle = (id, extra = {}) => ({ id: String(id), type: 'CIRCLE', layer: 'Ro
 const arc = (id, extra = {}) => ({ id: String(id), type: 'ARC', layer: 'Round', closed: false, vertices: [[20, 0, 0]], radius: 2, startDeg: 0, endDeg: 90, ...extra })
 const text = (id) => ({ id: String(id), type: 'TEXT', layer: '0', closed: false, vertices: [], radius: null, startDeg: null, endDeg: null })
 
+describe('W4g-7b-05c-3 F1/F2: hard refusals and INSERT properties', () => {
+  const insert = { id: '1280', type: 'INSERT', name: 'Fixture', ip: [10, 20, 0], rotationDeg: 0, scale: [1, 1, 1], layer: '0', aci: 256 }
+  const label = { ...text(12), text: 'before' }
+  const changedLabel = { ...label, text: 'after' }
+
+  it.each([false, true])('a moved INSERT wins over changed TEXT, INSERT first: %s', (insertFirst) => {
+    const before = [label, insert]
+    const after = [changedLabel, { ...insert, ip: [11, 20, 0] }]
+    if (insertFirst) { before.reverse(); after.reverse() }
+    expect(diffPlan(before, after)).toMatchObject({ mutations: null, kind: 'INSERT', cause: 'moved-reference' })
+  })
+
+  it('TEXT alone keeps its sidecar refusal; a true colour after TEXT wins too', () => {
+    expect(diffPlan([label, insert], [changedLabel, insert]).cause).toBe('opaque-kind')
+    expect(diffPlan([label, insert], [changedLabel, { ...insert, trueColor: [1, 2, 3] }]).cause).toBe('true-colour')
+  })
+
+  it('a definition refusal cannot hide a moved reference', () => {
+    expect(diffPlan({ entities: [insert], blocks: [] }, {
+      entities: [{ ...insert, ip: [11, 20, 0] }], blocks: [{ name: 'New', digest: 'new' }],
+    }).cause).toBe('moved-reference')
+  })
+
+  it('an unmoved INSERT colour change lowers to exactly one set_color', () => {
+    expect(diffPlan([insert], [{ ...insert, aci: 1 }])).toEqual({
+      mutations: { set_color: [{ handle: '500', aci: 1 }] }, count: 1, reason: null,
+    })
+    expect(diffPlan([{ ...insert, aci: 1, trueColor: [10, 20, 30] }], [{ ...insert, aci: 1 }])).toEqual({
+      mutations: { set_color: [{ handle: '500', aci: 1 }] }, count: 1, reason: null,
+    })
+  })
+
+  it('moving and recolouring still refuses; a new true colour refuses by cause', () => {
+    expect(diffPlan([insert], [{ ...insert, ip: [11, 20, 0], aci: 1 }]).cause).toBe('moved-reference')
+    expect(diffPlan([insert], [{ ...insert, trueColor: [1, 2, 3] }]).cause).toBe('true-colour')
+  })
+
+  it('an unmoved INSERT linetype and lineweight lower independently', () => {
+    expect(diffPlan([insert], [{ ...insert, linetype: 'HIDDEN', lineweight: 25 }])).toEqual({
+      mutations: { set_linetype: [{ handle: '500', name: 'HIDDEN' }], set_lineweight: [{ handle: '500', weight: 25 }] },
+      count: 2, reason: null,
+    })
+  })
+})
+
 describe('planGeometry', () => {
   it('reads each kind into the contract terms and leaves the rest out', () => {
     expect(planGeometry(line(10))).toEqual({ kind: 'LINE', layer: '0', pts: [[0, 0, 0], [3, 4, 0]], props: DEFAULT_PROPS })

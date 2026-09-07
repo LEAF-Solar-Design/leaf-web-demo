@@ -27,6 +27,7 @@ import {
   KNOWN_REASON_VALUES,
   LADDER_REASONS,
   MODIFY_REASONS,
+  PLACED_KINDS,
   MAX_ID_CHARS,
   MAX_LABEL_CHARS,
   REASONS,
@@ -593,16 +594,26 @@ describe('the engine reason ladders', () => {
       expect(record.panel).toBe('properties')
       expect(record.when(insertCtx)).toBe('')
     }
-    // Every other Modify record still refuses an INSERT reference: it is
-    // geometry, and the crate's own setters refuse it.
+    // Placed selections reach the builder's verb-specific gate.
     const geometryOps = forGroup('modify').filter((a) => a.panel !== 'properties')
     expect(geometryOps.length).toBeGreaterThan(0)
-    for (const record of geometryOps) expect(record.when(insertCtx)).toBe(MODIFY_REASONS.readOnlyKind)
+    for (const record of geometryOps) expect(record.when(insertCtx)).toBe('')
   })
 })
 
 // W4g-7b-05c: the four deferred controls' frozen reasons, read by both ribbon
 // panels (flag on and off), the typed words and the script runner.
+describe('W4g-7b-05c-3 F4: placed selections reach the verb gate', () => {
+  it.each(['INSERT', 'DIMENSION'])('Modify is live for a read-only %s projection', (type) => {
+    expect(PLACED_KINDS.has(type)).toBe(true)
+    expect(modifyReason({ engineParsed: true, selected: { editable: false, type } })).toBe('')
+  })
+
+  it('other read-only kinds keep the existing rung', () => {
+    expect(modifyReason({ engineParsed: true, selected: { editable: false, type: 'HATCH' } })).toBe(MODIFY_REASONS.readOnlyKind)
+  })
+})
+
 describe('DEFERRED_REASONS', () => {
   it('is frozen, with the four exact sentences', () => {
     expect(Object.isFrozen(DEFERRED_REASONS)).toBe(true)

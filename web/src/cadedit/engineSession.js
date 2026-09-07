@@ -476,6 +476,7 @@ export function planMatchprop(session, inputs = {}) {
   const targetLinetype = String(target.linetype ?? 'ByLayer')
   const targetLineweight = Number.isFinite(target.lineweight) ? target.lineweight : -1
   const layerDiffers = String(target.layer ?? '') !== layer
+  const keepsLayer = target.type === 'INSERT' || target.type === 'DIMENSION'
   // W4g-7b-03c-g F6: the contract carries ACI only, so a source's own true
   // colour copies as its nearest index (sourceAci above, unchanged). A
   // destination that STILL carries a true colour needs its own setColor step
@@ -490,11 +491,14 @@ export function planMatchprop(session, inputs = {}) {
     return { refusal: 'Match refused: nothing to match.' }
   }
   const steps = []
-  if (layerDiffers) steps.push({ op: 'setLayer', entityId: target.id, layer })
+  if (layerDiffers && keepsLayer && !colorDiffers && !linetypeDiffers && !lineweightDiffers) {
+    return { refusal: `Match refused: an ${target.type} keeps its layer in this round.` }
+  }
+  if (layerDiffers && !keepsLayer) steps.push({ op: 'setLayer', entityId: target.id, layer })
   if (colorDiffers) steps.push({ op: 'setColor', entityId: target.id, aci: sourceAci })
   if (linetypeDiffers) steps.push({ op: 'setLinetype', entityId: target.id, linetype: sourceLinetype })
   if (lineweightDiffers) steps.push({ op: 'setLineweight', entityId: target.id, lineweight: sourceLineweight })
-  return { steps }
+  return { steps, ...(layerDiffers && keepsLayer ? { skipped: ['layer'] } : {}) }
 }
 
 /**
@@ -533,7 +537,7 @@ export function planIntersectVerb(op, session, inputs = {}) {
  * buildCreatePayload; a geometry replacement bounded here). `{ steps }` of
  * `{ op, payload }`, or `{ refusal }` naming the first bad step.
  */
-export function lowerSteps(steps) {
+export function lowerSteps(steps, linetypes = [], entities = null) {
   if (!Array.isArray(steps) || steps.length === 0) return { refusal: 'Edit refused: the plan has no steps.' }
   if (steps.length > MAX_BATCH_STEPS) return { refusal: `Edit refused: the plan has more than ${MAX_BATCH_STEPS} steps.` }
   const lowered = []
@@ -547,6 +551,16 @@ export function lowerSteps(steps) {
     }
     const entityId = String(step?.entityId ?? '')
     if (!entityId) return { refusal: `Edit refused: step ${op} names no entity.` }
+    // The posting path supplies the live projection: every edit step goes
+    // through the single-op gate before any part of the batch can post.
+    if (entities !== null) {
+      const stepInputs = { ...step, ...step.inputs }
+      if (op === 'setLineweight' && [-1, -2, -3].includes(stepInputs.lineweight)) {
+        stepInputs.lineweight = { '-1': 'ByLayer', '-2': 'ByBlock', '-3': 'Default' }[stepInputs.lineweight]
+      }
+      const checked = buildEditPayload(op, entityId, stepInputs, linetypes, entities)
+      if (checked.refusal) return { refusal: checked.refusal }
+    }
     if (op === 'delete') {
       lowered.push({ op, payload: { entityId } })
     } else if (op === 'setLayer') {
@@ -921,6 +935,7 @@ export default function useEngineSession({
   // W4g-6: the verb behind an in-flight batch, so its reply and its undo
   // step read under the verb's name rather than `batch`.
   const batchVerbRef = useRef(null)
+  const batchNoteRef = useRef('')
   // W4f slice F: the undo machinery. `current` is the bytes the engine holds
   // right now (the opened file, then each applied edit's written bytes);
   // `undo`/`redo` hold {bytes, op}; `reload` names an undo/redo re-load in
@@ -1039,7 +1054,11 @@ export default function useEngineSession({
         // W4g-6: a batch answers as `batch`; the verb that posted it is the
         // name the drafter sees (and the undo stack keeps).
         const label = message.op === 'batch' ? (batchVerbRef.current || 'batch') : message.op
-        if (message.op === 'batch') batchVerbRef.current = null
+        const batchNote = message.op === 'batch' ? batchNoteRef.current : ''
+        if (message.op === 'batch') {
+          batchVerbRef.current = null
+          batchNoteRef.current = ''
+        }
         if (!message.ok) {
           patch({
             busy: false,
@@ -1088,7 +1107,7 @@ export default function useEngineSession({
             ? `${label} applied, but the new entity was not found after re-parse. ${reparsed}`
             : createdId
               ? `${label} applied: entity ${createdId} drawn. ${reparsed}`
-              : `${label} applied. ${reparsed}`,
+              : `${label} applied${batchNote}. ${reparsed}`,
         }))
         return
       }
@@ -1295,7 +1314,8 @@ export default function useEngineSession({
         patch({ errorKind: SESSION_ERROR.REFUSED, status: planned.refusal })
         return
       }
-      const lowered = lowerSteps(planned.steps)
+      const { entities } = sessionRef.current
+      const lowered = lowerSteps(planned.steps, entities.linetypes, entities)
       if (lowered.refusal) {
         patch({ errorKind: SESSION_ERROR.REFUSED, status: lowered.refusal })
         return
@@ -1306,9 +1326,13 @@ export default function useEngineSession({
         return
       }
       batchVerbRef.current = op
+      const destination = entities.find((entity) => entity.id === String(inputs?.edge ?? '').trim())
+      batchNoteRef.current = planned.skipped?.includes('layer')
+        ? `; layer not copied: an ${destination.type} keeps its layer in this round` : ''
       patch({ busy: true, errorKind: null })
       if (!boundary.post({ type: 'applyEdit', op: 'batch', payload: { verb: op, steps: lowered.steps } })) {
         batchVerbRef.current = null
+        batchNoteRef.current = ''
         patch({
           busy: false,
           errorKind: SESSION_ERROR.TRANSPORT,

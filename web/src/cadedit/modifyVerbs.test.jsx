@@ -211,7 +211,40 @@ describe('W4g-7b-05c-2: a placed INSERT or DIMENSION refuses every geometry verb
     x1: '0', y1: '0', x2: '0', y2: '10', keep: 'true',
     rows: '2', cols: '2', rowGap: '1', colGap: '1', layer: 'New',
   }
-  const GEOMETRY_OPS = ['move', 'copy', 'rotate', 'scale', 'mirror', 'offset', 'arrayRect', 'setLayer']
+  const GEOMETRY_OPS = ['move', 'copy', 'rotate', 'scale', 'mirror', 'offset', 'arrayRect', 'arrayPolar', 'explode', 'setLayer', 'moveVertex', 'addVertex', 'deleteVertex', 'trim', 'extend', 'fillet', 'chamfer']
+
+  it.each([INSERT_ENTITY, DIM_ENTITY].flatMap((entity) => GEOMETRY_OPS.map((op) => [entity.type, op, entity])))(
+    'F5: %s x %s posts zero worker messages', async (kind, op, entity) => {
+      const studio = mount()
+      await openAndLoad([entity, OTHER])
+      act(() => { studio.context.session.actions.select(entity.id) })
+      const before = workers[0].posted.length
+      act(() => { studio.context.session.actions.applyEdit(op, inputs) })
+      expect(studio.context.session.status).toBe(kind === 'INSERT'
+        ? 'an INSERT is placed, not edited, in this round' : 'a dimension is placed, not edited, in this round')
+      expect(workers[0].posted).toHaveLength(before)
+    },
+  )
+
+  it.each([INSERT_ENTITY, DIM_ENTITY])('F5: $type x delete posts exactly one message', async (entity) => {
+    const studio = mount()
+    await openAndLoad([entity, OTHER])
+    act(() => { studio.context.session.actions.select(entity.id) })
+    const before = workers[0].posted.length
+    act(() => { studio.context.session.actions.applyEdit('delete', {}) })
+    expect(workers[0].posted.slice(before)).toEqual([{ type: 'applyEdit', op: 'delete', payload: { entityId: entity.id } }])
+  })
+
+  it('F4: MOVE on INSERT shows the exact by-kind prompt note and holds Run', async () => {
+    const studio = mount()
+    await openAndLoad([INSERT_ENTITY, OTHER])
+    act(() => { studio.context.session.actions.select(INSERT_ENTITY.id) })
+    const before = workers[0].posted.length
+    fireEvent.click(tool('move'))
+    expect(screen.getByTestId('cockpit-prompt-note').textContent).toBe('an INSERT is placed, not edited, in this round')
+    expect(screen.getByTestId('cockpit-prompt').querySelector('.cp-run').disabled).toBe(true)
+    expect(workers[0].posted).toHaveLength(before)
+  })
 
   it('every geometry verb on the INSERT reference refuses with the store sentence', () => {
     for (const op of GEOMETRY_OPS) expect(buildEditPayload(op, 'i1', inputs, undefined, entities).refusal).toBe('an INSERT is placed, not edited, in this round')

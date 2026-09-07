@@ -114,6 +114,8 @@ export const MODIFY_REASONS = Object.freeze({
   readOnlyKind: 'read-only entity kind',
 })
 
+export const PLACED_KINDS = new Set(['INSERT', 'DIMENSION'])
+
 // W4g-5c: the clipboard's ladder. CUT and COPY answer to the Modify ladder
 // (they act on a selection); PASTE does not need a selection at all, it needs
 // a record on the clipboard, so it has its own last rung.
@@ -183,7 +185,7 @@ export function modifyReason(session, reach = null) {
   if (!session.engineParsed) return reachSentence(reach) || MODIFY_REASONS.noDocument
   if (session.busy) return MODIFY_REASONS.busy
   if (!session.selected) return MODIFY_REASONS.noSelection
-  if (session.selected.editable === false) return MODIFY_REASONS.readOnlyKind
+  if (session.selected.editable === false && !PLACED_KINDS.has(session.selected.type)) return MODIFY_REASONS.readOnlyKind
   return ''
 }
 

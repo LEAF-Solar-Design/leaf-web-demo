@@ -729,6 +729,27 @@ describe('save completion', () => {
   // carrying the changed reference, exactly as a future regression would.
   // The save REJECTS before any fetch: no worker call, the committed base
   // and `dirty` both untouched, the sentence names the handle.
+  it('F1: changed TEXT before a moved INSERT rejects without a fetch or either save leg', async () => {
+    const text = { id: '12', type: 'TEXT', layer: '0', text: 'before', height: 2, rotationDeg: 0, vertices: [[0, 0, 0]], editable: true }
+    const insert = { id: '1280', type: 'INSERT', name: 'Fixture', ip: [10, 20, 0], rotationDeg: 0, scale: [1, 1, 1], layer: '0', editable: false }
+    const save = vi.fn()
+    const fetch = vi.spyOn(globalThis, 'fetch')
+    try {
+      const session = mountSession({ saveTarget: { headVersion: 4, save } })
+      act(() => session.current.actions.openBytes(new Uint8Array([9, 9]), 'demo-v4.dxf', { committed: true, version: 4 }))
+      session.workers[0].emit(loadedMessage([text, insert], 'demo-v4.dxf'))
+      session.workers[0].emit(editedMessage('move', [{ ...text, text: 'after' }, { ...insert, ip: [11, 20, 0] }]))
+      const before = session.workers[0].posted.length
+      await act(async () => { await session.current.actions.save() })
+      expect(save).not.toHaveBeenCalled()
+      expect(fetch).not.toHaveBeenCalled()
+      expect(session.workers[0].posted).toHaveLength(before)
+      expect(session.current.status).toBe('Save refused: entity 500 is a INSERT the plan cannot carry, and it changed.')
+      expect(session.current.dirty).toBe(true)
+      expect(session.current.committedEntities).toEqual([text, insert])
+    } finally { fetch.mockRestore() }
+  })
+
   it('a moved INSERT REJECTS the save: no fetch, dirty stays, the sentence names the handle', async () => {
     const INSERTED = { id: 'i1', handle: 'i1', type: 'INSERT', name: 'Fixture', ip: [10, 20, 0], rotationDeg: 90, scale: [2, 3, 1], layer: '0', editable: false }
     const save = vi.fn(async () => planReceipt)
@@ -797,6 +818,44 @@ describe('MATCHPROP admits an INSERT reference as the selection (W4g-7b-03c-f)',
     expect(session.workers[0].posted.at(-1)).toEqual({
       type: 'applyEdit', op: 'batch', payload: { verb: 'matchprop', steps: [{ op: 'setLayer', payload: { entityId: 'e1', layer: 'A' } }] },
     })
+  })
+})
+
+describe('W4g-7b-05c-3 F3: MATCHPROP destination and batch gates', () => {
+  const source = { id: '7', type: 'LINE', layer: 'Source', vertices: [[0, 0], [1, 1]], aci: 256 }
+  const insert = { id: '11', type: 'INSERT', name: 'Fixture', layer: 'Other', editable: false, aci: 256 }
+
+  it('a layer-only match onto INSERT refuses with zero worker messages', async () => {
+    const session = mountSession()
+    await openDocument(session)
+    session.workers[0].emit(loadedMessage([source, insert]))
+    act(() => session.current.actions.select('7'))
+    const before = session.workers[0].posted.length
+    act(() => session.current.actions.applyEdit('matchprop', { edge: '11' }))
+    expect(session.current.status).toBe('Match refused: an INSERT keeps its layer in this round.')
+    expect(session.workers[0].posted).toHaveLength(before)
+  })
+
+  it('a colour difference posts one property-only batch and names the skipped layer on apply', async () => {
+    const session = mountSession()
+    await openDocument(session)
+    const coloured = { ...insert, aci: 1 }
+    session.workers[0].emit(loadedMessage([source, coloured]))
+    act(() => session.current.actions.select('7'))
+    const before = session.workers[0].posted.length
+    act(() => session.current.actions.applyEdit('matchprop', { edge: '11' }))
+    expect(session.workers[0].posted.slice(before)).toEqual([{
+      type: 'applyEdit', op: 'batch', payload: { verb: 'matchprop', steps: [{ op: 'setColor', payload: { entityId: '11', aci: 256 } }] },
+    }])
+    session.workers[0].emit(editedMessage('batch', [source, insert]))
+    expect(session.current.status).toContain('matchprop applied; layer not copied: an INSERT keeps its layer in this round')
+  })
+
+  it.each(['move', 'setLayer', 'setVertices', 'setArc'])('a hand-built batch cannot lower a %s step against INSERT', (op) => {
+    expect(lowerSteps([
+      { op: 'setColor', entityId: '7', aci: 1 },
+      { op, entityId: '11', dx: 1, dy: 1, layer: 'Source' },
+    ], [], [source, insert])).toEqual({ refusal: 'an INSERT is placed, not edited, in this round' })
   })
 })
 
