@@ -1438,6 +1438,33 @@ def verify_live_mutation_effects(
 ) -> None:
     """Refuse publication unless extraction proves exactly the proposed effects."""
     expected = apply_mutations(base, canonical)
+    # INSERTs have no new effects in this slice. Compare their complete
+    # records by handle; their positions are not polyline point lists.
+    insert_indexes = []
+    for intake in (expected, actual):
+        rows = intake.get("inserts", [])
+        if not isinstance(rows, list) or any(
+            not isinstance(row, dict) or not isinstance(row.get("handle"), str)
+            or not row["handle"] for row in rows
+        ):
+            raise ValueError("every re-extracted INSERT must have a nonempty handle")
+        # IN reports radians with RTOS precision 5; DXF intake stores 6.
+        # Compare the same reading without changing either intake record.
+        index = {row["handle"]: {
+            key: _extractor_round(value, 5) if key == "rot" else value
+            for key, value in row.items()
+        } for row in rows}
+        if len(index) != len(rows):
+            raise ValueError("re-extracted output contains duplicate INSERT handles")
+        insert_indexes.append(index)
+    if insert_indexes[0] != insert_indexes[1]:
+        raise ValueError("unchanged INSERT has unexpected output geometry")
+    # Old intakes may predate the additive catalogue. Once captured, the
+    # definitions (keyed by name, not entity handle) must stay unchanged.
+    if "blocks" in expected and expected["blocks"] != actual.get("blocks", {}):
+        raise ValueError("unchanged block definitions differ in output")
+    if "blocksCapped" in expected and expected["blocksCapped"] != actual.get("blocksCapped"):
+        raise ValueError("unchanged block catalogue cap differs in output")
     # W4g-3 (contract v2): circles and arcs verify by the same rule as the
     # polylines (LINE included, as a 2-point polyline): everything the plan
     # names carries its expected geometry, everything else is untouched,
@@ -1887,6 +1914,21 @@ def _apply_plan_live(*, tenant_id: str, drawing_id: str, head_v: int,
                      scratch_keys) -> Tuple[Dict[str, Any], int]:
     """Apply one validated plan, verify its WorkItem output, and publish it."""
     import store
+    import mutation_apply
+    contract = int(plan_bytes.splitlines()[0].split(b"|")[1])
+    if contract == 1:
+        contract = 2
+    if contract == 3:
+        try:
+            ready = mutation_apply.readiness(contract=3).get("ready") is True
+        except Exception:
+            ready = False
+        if not ready:
+            return (err_envelope(
+                ErrorCode.APS_UNAVAILABLE,
+                "mutation Activity not ready: contract v3 Activity is not provisioned",
+                retryable=True, tool=name, version=tool_version,
+            ), 503)
     output_inspection_ms = None
     version_write_ms = None
     publish_ms = None
@@ -1951,7 +1993,8 @@ def _apply_plan_live(*, tenant_id: str, drawing_id: str, head_v: int,
         submit_kwargs["on_submitted"] = on_submitted
     submitted_at = time.time()
     status = da.submit_workitem(
-        da.activity_qualified(WRITE_ACTIVITY), arguments, **submit_kwargs)
+        da.activity_qualified(mutation_apply.CONTRACTS[contract].activity_id),
+        arguments, **submit_kwargs)
     if hasattr(da, "_workitem_timing"):
         aps_timing = da._workitem_timing(
             status, submitted_at=submitted_at)

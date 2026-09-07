@@ -93,17 +93,18 @@ export function planGeometry(entity) {
 /**
  * An editable entity the contract has no kind for (TEXT today): a fingerprint
  * of everything the projection reports, so a change, an add or a removal is
- * SEEN and refused instead of dropped. Null for a read-only entity (the engine
- * never changes those) and for a kind the plan carries.
+ * SEEN and refused instead of dropped. INSERT references remain opaque even
+ * when read-only; a raw operation or a definition edit must never vanish.
  */
 function opaqueOf(entity) {
-  if (!entity || typeof entity !== 'object' || entity.editable === false) return null
+  if (!entity || typeof entity !== 'object') return null
   const type = String(entity.type || '')
   if (!type || ROUND_KINDS.has(type) || LINEAR_KINDS.has(type)) return null
   const print = JSON.stringify([type, entity.layer ?? null, entity.vertices ?? null, entity.radius ?? null, entity.startDeg ?? null,
     entity.endDeg ?? null, entity.text ?? null, entity.height ?? null, entity.rotationDeg ?? null, entity.bulges ?? null, entity.closed === true,
     // W4g-4b: an ELLIPSE's axis and ratio (the row that added them caught their absence here).
-    entity.majorAxis ?? null, entity.ratio ?? null])
+    entity.majorAxis ?? null, entity.ratio ?? null, entity.name ?? null, entity.ip ?? null, entity.scale ?? null,
+    entity.columns ?? 1, entity.rows ?? 1, entity.columnSpacing ?? 0, entity.rowSpacing ?? 0])
   return { kind: 'OPAQUE', type, print }
 }
 
@@ -149,8 +150,8 @@ const byHandle = (a, b) => (a.handle < b.handle ? -1 : a.handle > b.handle ? 1 :
  * contract sees changed.
  */
 export function diffPlan(committed, current) {
-  const before = indexByHandle(committed)
-  const after = indexByHandle(current)
+  const before = indexByHandle(Array.isArray(committed) ? committed : committed?.entities)
+  const after = indexByHandle(Array.isArray(current) ? current : current?.entities)
   const added = []
   const removed = []
   const setLayer = []
@@ -158,6 +159,20 @@ export function diffPlan(committed, current) {
   const setCircle = []
   const setArc = []
   const cannot = (reason) => ({ mutations: null, count: 0, reason })
+  // The engine digest covers EVERY child, including unlisted/unsupported ones.
+  // Keep the legacy full-record fallback for older projections without digests.
+  const canonical = (value) => Array.isArray(value) ? value.map(canonical)
+    : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])) : value
+  const definitions = (projection) => new Map((Array.isArray(projection?.blocks) ? projection.blocks : [])
+    .map((block) => [block.name, typeof block.digest === 'string'
+      ? JSON.stringify([block.name, block.digest]) : JSON.stringify(canonical(block))]))
+  const oldBlocks = definitions(committed)
+  const newBlocks = definitions(current)
+  for (const name of new Set([...oldBlocks.keys(), ...newBlocks.keys()])) {
+    if (oldBlocks.get(name) === newBlocks.get(name)) continue
+    const change = !oldBlocks.has(name) ? 'added' : !newBlocks.has(name) ? 'removed' : 'changed'
+    return cannot(`block ${name} is a definition the plan cannot carry, and it was ${change}`)
+  }
   for (const [handle, was] of before) {
     const now = after.get(handle)
     if (!now) {

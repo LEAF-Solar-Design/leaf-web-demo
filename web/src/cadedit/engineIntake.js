@@ -22,6 +22,8 @@ export const TEXT_ADVANCE = 0.6
 export const POINT_MARK = 0.5
 export const POINT_MARK_FRACTION = 0.005
 export const ELLIPSE_SEGMENTS = 64
+export const BLOCK_CHILD_CAP = 60
+export const MAX_ARRAY_CELLS = 1000
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v)
 const point = (v) => (Array.isArray(v) && finite(v[0]) && finite(v[1]) ? [v[0], v[1], finite(v[2]) ? v[2] : 0] : null)
@@ -181,6 +183,7 @@ export function entityToPolyline(entity, markSize = POINT_MARK) {
     if (!finite(startDeg) || !finite(endDeg)) return null
     return { handle, layer, pts: arcPoints(c[0], c[1], c[2], r, startDeg, endDeg), closed: false }
   }
+  if (!['LINE', 'LWPOLYLINE', 'POLYLINE'].includes(type)) return null
   const pts = []
   for (const v of verts) {
     const p = point(v)
@@ -209,11 +212,60 @@ export function entityToPolyline(entity, markSize = POINT_MARK) {
  * entities were dropped past MAX_POINTS (an honest number for the status
  * line, never a silent cut).
  */
-export function engineIntake(entities, documentId = '') {
+export function expandBlockReference(insert, definition) {
+  if (definition?.baseUnknown === true) return { polylines: [], complete: false }
+  const base = point(definition?.base)
+  const ip = point(insert?.ip)
+  const scale = insert?.scale
+  const rotation = insert?.rotationDeg
+  if (!base || !ip || !Array.isArray(scale) || scale.length !== 3 || !scale.every(finite) || !finite(rotation)) {
+    return { polylines: [], complete: false }
+  }
+  const columns = insert.columns ?? 1
+  const rows = insert.rows ?? 1
+  const columnSpacing = insert.columnSpacing ?? 0
+  const rowSpacing = insert.rowSpacing ?? 0
+  if (!Number.isSafeInteger(columns) || columns < 1 || !Number.isSafeInteger(rows) || rows < 1
+    || !finite(columnSpacing) || !finite(rowSpacing)) return { polylines: [], complete: false }
+  const cells = Math.min(columns * rows, MAX_ARRAY_CELLS)
+  const children = Array.isArray(definition?.children) ? definition.children : []
+  let complete = definition?.complete === true && children.length <= BLOCK_CHILD_CAP && columns * rows <= MAX_ARRAY_CELLS
+  const rad = rotation * Math.PI / 180
+  const cos = Math.cos(rad)
+  const sin = Math.sin(rad)
+  const handle = hexHandle(insert.id ?? insert.handle ?? '')
   const polylines = []
+  for (const child of children.slice(0, BLOCK_CHILD_CAP)) {
+    if (!['LINE', 'LWPOLYLINE', 'POLYLINE', 'CIRCLE', 'ARC', 'TEXT'].includes(child?.type)) { complete = false; continue }
+    // Sample in child coordinates first so non-uniform scale and mirrors
+    // transform circular arcs and text outlines correctly too.
+    const pl = entityToPolyline(child)
+    if (!pl) { complete = false; continue }
+    for (let cell = 0; cell < cells; cell += 1) {
+      const column = cell % columns
+      const row = Math.floor(cell / columns)
+      const pts = pl.pts.map((p) => {
+        const x = (p[0] - base[0]) * scale[0]
+        const y = (p[1] - base[1]) * scale[1]
+        // The pinned Insert::array_transforms adds spacing to the insertion
+        // point, outside both the child's scale and rotation.
+        return [ip[0] + column * columnSpacing + x * cos - y * sin, ip[1] + row * rowSpacing + x * sin + y * cos, ip[2] + (p[2] - base[2]) * scale[2]]
+      })
+      if (pts.some((p) => !p.every(finite))) { complete = false; continue }
+      polylines.push({ ...pl, handle, sourceHandle: handle, layer: pl.layer === '0' ? (insert.layer || '0') : pl.layer, pts })
+    }
+  }
+  return { polylines, complete }
+}
+
+export function engineIntake(entities, documentId = '', catalogue = entities?.blocks) {
+  const polylines = []
+  const inserts = []
   let points = 0
   let truncated = 0
-  const list = Array.isArray(entities) ? entities : []
+  const list = Array.isArray(entities) ? entities : Array.isArray(entities?.entities) ? entities.entities : []
+  const blocks = Array.isArray(catalogue) ? catalogue : []
+  const definitions = new Map(blocks.map((b) => [String(b.name).toUpperCase(), b]))
   // One pass for the drawing's extent (every vertex, plus a circle's or
   // arc's radius), so a POINT marker is sized to what the drawing spans.
   let minX = Infinity; let minY = Infinity; let maxX = -Infinity; let maxY = -Infinity
@@ -231,13 +283,26 @@ export function engineIntake(entities, documentId = '') {
   }
   const markSize = pointMarkSize(minX <= maxX ? { w: maxX - minX, h: maxY - minY } : null)
   for (const entity of list) {
+    if (entity?.type === 'INSERT') {
+      const definition = definitions.get(String(entity.name).toUpperCase())
+      const expanded = definition ? expandBlockReference(entity, definition) : { polylines: [], complete: false }
+      for (const pl of expanded.polylines) {
+        if (points + pl.pts.length > MAX_POINTS) { truncated += 1; expanded.complete = false; continue }
+        points += pl.pts.length
+        polylines.push(pl)
+      }
+      const pt = point(entity.ip)
+      if (pt) inserts.push({ handle: hexHandle(entity.id ?? entity.handle ?? ''), name: entity.name, layer: entity.layer || '0', pt,
+        rot: entity.rotationDeg, scale: entity.scale, incomplete: !expanded.complete })
+      continue
+    }
     const pl = entityToPolyline(entity, markSize)
     if (!pl) continue
     if (points + pl.pts.length > MAX_POINTS) { truncated += 1; continue }
     points += pl.pts.length
     polylines.push(pl)
   }
-  return { source: 'engine', documentId: String(documentId || ''), polylines, inserts: [], faces3d: [], points, truncated }
+  return { source: 'engine', documentId: String(documentId || ''), polylines, inserts, blocks, faces3d: [], points, truncated }
 }
 
 /**

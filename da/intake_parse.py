@@ -8,6 +8,7 @@ emits the same "families text"; this module turns that text into Intake JSON.
 """
 from __future__ import annotations
 
+import math
 import sys
 
 
@@ -105,6 +106,55 @@ def _strip_mtext(s):
     return "".join(out)
 
 
+def _block_point(value, places=3, width=3):
+    point = [round(float(v), places) for v in value.split(",")]
+    if len(point) != width or not all(math.isfinite(v) for v in point):
+        raise ValueError("malformed block point")
+    return point
+
+
+def _block_name(value):
+    # Decode only the catalogue framing escapes, with percent LAST so an
+    # original literal "%7C" (encoded as "%257C") stays a literal "%7C".
+    return value.replace("%7C", "|").replace("%0D", "\r").replace("%0A", "\n").replace("%25", "%")
+
+
+def _block_child(kind, body, layer):
+    child = {"kind": kind, "layer": layer}
+    if kind == "LINE":
+        a, b = body
+        child["pts"] = [_block_point(a), _block_point(b)]
+    elif kind == "LWPOLYLINE":
+        closed, normal, elevation, points = body
+        child.update(closed=bool(int(closed) & 1), nrm=_block_point(normal, 6),
+                     elev=round(float(elevation), 3),
+                     pts=[_block_point(p, width=2) for p in points.split(";") if p])
+        if len(child["pts"]) < 2:
+            raise ValueError("LWPOLYLINE needs at least two points")
+    elif kind in ("CIRCLE", "ARC"):
+        expected = 5 if kind == "ARC" else 3
+        if len(body) != expected:
+            raise ValueError(f"{kind} body must have {expected} fields")
+        child.update(c=_block_point(body[0]), r=round(float(body[1]), 3),
+                     nrm=_block_point(body[-1], 6))
+        if not math.isfinite(child["r"]) or child["r"] <= 0:
+            raise ValueError(f"{kind} radius must be positive")
+        if kind == "ARC":
+            child.update(start_deg=round(float(body[2]), 6),
+                         end_deg=round(float(body[3]), 6))
+    elif kind == "TEXT":
+        point, height, rotation, value = body
+        child.update(pt=_block_point(point), height=round(float(height), 3),
+                     rot=round(float(rotation), 6), text=" ".join(value.split())[:512])
+    elif kind == "OTHER":
+        child["type"], = body
+    else:
+        raise ValueError("unknown block child kind")
+    if "nrm" in child and not any(child["nrm"]):
+        raise ValueError("block child normal must not be the zero vector")
+    return child
+
+
 def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
     # cur_bd / cur_pl are closed over via the enclosing scope trick; re-bind locally
     state = {"bd": cur_bd, "pl": cur_pl}
@@ -163,6 +213,34 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                     "layer": layn, "c": [round(v, 3) for v in w], "r": round(float(r), 3),
                     "start_deg": round(float(a1), 6), "end_deg": round(float(a2), 6),
                     "nrm": [round(v, 6) for v in n], "handle": hnd})
+            elif tag == "EP":
+                hnd, aci, rgb, linetype, lineweight = rest.split("|")
+                color = None if rgb == "~" else [int(v) for v in rgb.split(",")]
+                if (not hnd or any(v not in "0123456789abcdefABCDEF" for v in hnd)
+                        or not linetype or (color is not None and (
+                            len(color) != 3 or any(v < 0 or v > 255 for v in color)))):
+                    raise ValueError("malformed entity properties")
+                properties = {"aci": int(aci), "rgb": color,
+                              "linetype": linetype, "lineweight": int(lineweight)}
+                out.setdefault("properties", {})[hnd] = properties
+            elif tag == "DM":
+                kind, p1, p2, dimline, rotation, style, nrm, measurement, hnd = rest.split("|")
+                points = [[round(float(v), 3) for v in p.split(",")]
+                          for p in (p1, p2, dimline)]
+                n = tuple(float(v) for v in nrm.split(","))
+                if any(len(p) != 3 for p in points) or len(n) != 3:
+                    raise ValueError("malformed dimension point or normal")
+                o2w((0.0, 0.0, 0.0), n)
+                if not hnd or any(v not in "0123456789abcdefABCDEF" for v in hnd):
+                    raise ValueError("malformed dimension handle")
+                normal = [round(v, 6) for v in n]
+                if not any(normal):
+                    raise ValueError("dimension normal rounds to the zero vector")
+                dimension = {
+                    "type": kind, "p1": points[0], "p2": points[1], "dimline": points[2],
+                    "rotation_deg": round(float(rotation), 6), "style": style,
+                    "nrm": normal, "measurement": round(float(measurement), 3), "handle": hnd}
+                out.setdefault("dimensions", []).append(dimension)
             elif tag == "TX":
                 # TEXT/MTEXT label (ADDITIVE §1 field `texts`; the value had "|" replaced
                 # by a space in the LISP and is capped at 512 chars there).
@@ -196,6 +274,35 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                 out["blockdefs"][state["bd"]].append({
                     "type": et,
                     "pts": [[float(v) for v in p.split(",")] for p in pts.split(";") if p]})
+            elif tag == "BK":
+                name, base, count, complete = rest.split("|")
+                name = _block_name(name)
+                count = int(count)
+                if count < 0 or complete not in ("0", "1"):
+                    raise ValueError("malformed block count or completeness")
+                out.setdefault("blocks", {})[name] = {
+                    "base": _block_point(base), "count": count,
+                    "complete": complete == "1" and count <= 60, "children": []}
+            elif tag == "BKE":
+                fields = rest.split("|")
+                name = _block_name(fields[0])
+                block = out.setdefault("blocks", {}).setdefault(name, {
+                    "base": [0.0, 0.0, 0.0], "count": 0,
+                    "complete": False, "children": []})
+                try:
+                    kind, *body, layer = fields[1:]
+                    child = _block_child(kind, body, _block_name(layer))
+                except Exception:
+                    block["complete"] = False
+                    raise
+                if kind == "OTHER":
+                    block["complete"] = False
+                if len(block["children"]) < 60:
+                    block["children"].append(child)
+                else:
+                    block["complete"] = False
+            elif tag == "BKCAP":
+                out["blocksCapped"] = int(rest)
             elif tag == "GEO":
                 out["geodata"].append(rest)
             elif tag == "IMG":

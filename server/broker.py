@@ -2939,27 +2939,26 @@ def _start_admitted_execution(
 
 
 PLAN_READINESS_TTL_S = 60
-_plan_readiness_cache: Optional[Tuple[float, Dict[str, Any]]] = None
+_plan_readiness_cache: Dict[int, Tuple[float, Dict[str, Any]]] = {}
 _plan_readiness_lock = threading.Lock()
 
 
-def _plan_activity_ready() -> Tuple[bool, Dict[str, Any]]:
-    """Bound the Activity alias/version read to one call per cache interval."""
-    global _plan_readiness_cache
+def _plan_activity_ready(contract: int = 2) -> Tuple[bool, Dict[str, Any]]:
+    """Bound each contract's Activity read to one call per cache interval."""
     with _plan_readiness_lock:
         now = time.monotonic()
-        if (_plan_readiness_cache is not None
-                and now - _plan_readiness_cache[0] < PLAN_READINESS_TTL_S):
-            result = _plan_readiness_cache[1]
+        cached = _plan_readiness_cache.get(contract)
+        if cached is not None and now - cached[0] < PLAN_READINESS_TTL_S:
+            result = cached[1]
         else:
             try:
                 import mutation_apply
-                result = mutation_apply.readiness()
+                result = mutation_apply.readiness(contract=contract)
                 if not isinstance(result, dict):
                     raise ValueError("invalid mutation Activity readiness result")
             except Exception as exc:  # readiness failure must never enable a run
-                result = {"ready": False, "mismatches": [str(exc)]}
-            _plan_readiness_cache = (time.monotonic(), result)
+                result = {"ready": False, "mismatches": [str(exc)], "contract": contract}
+            _plan_readiness_cache[contract] = (time.monotonic(), result)
         return result.get("ready") is True, result
 
 
@@ -3003,15 +3002,7 @@ def _execute_plan(req: BrokerPlanRunRequest, tool: Dict[str, Any], engine_op: st
         )
 
     _require_supported_live_completion_mode()
-    ready, readiness = _plan_activity_ready()
-    if not ready:
-        mismatches = "; ".join(str(item) for item in readiness.get("mismatches", []))
-        return (err_envelope(
-            ErrorCode.APS_UNAVAILABLE, f"mutation Activity not ready: {mismatches}",
-            retryable=True, tool=PLAN_TOOL_NAME,
-        ), 503)
-    activity_version = (readiness.get("activity") or {}).get("version")
-    entry["activity_version"] = activity_version
+    import mutation_plan
     da = _get_da()
     if da is None or not hasattr(da, "run_tool"):
         return (err_envelope(
@@ -3020,6 +3011,38 @@ def _execute_plan(req: BrokerPlanRunRequest, tool: Dict[str, Any], engine_op: st
             retryable=True, tool=PLAN_TOOL_NAME,
         ), 503)
     backend = write_loop.default_backend(aps_live=True, da=da)
+    try:
+        base_v, base_intake = write_loop.read_intake(
+            backend, req.tenant_id, req.plan.drawing_id, req.plan.parent_version)
+        if base_v != req.plan.parent_version:
+            raise ValueError("base intake resolved to a different version")
+    except write_loop.ProofStateUnreadable as exc:
+        return (err_envelope(
+            ErrorCode.INTERNAL, str(exc), retryable=True, tool=PLAN_TOOL_NAME,
+        ), 503)
+    except (KeyError, ValueError) as exc:
+        return (err_envelope(
+            ErrorCode.BAD_PARAMS, f"drawing/mutation unavailable: {exc}",
+            retryable=False, tool=PLAN_TOOL_NAME,
+        ), DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
+    try:
+        canonical = mutation_plan.validate_mutations(
+            base_intake, req.plan.mutations, allow_transforms=True, allow_xdata=False)
+    except (ValueError, OverflowError, TypeError) as exc:
+        return (err_envelope(
+            ErrorCode.BAD_PARAMS, f"the edit plan was refused: {exc}",
+            retryable=False, tool=PLAN_TOOL_NAME, version=write_loop.DATA_PLAN_TOOL_VERSION,
+        ), 422)
+    contract = 3 if mutation_plan.uses_v3(canonical) else 2
+    ready, readiness = _plan_activity_ready(contract=contract)
+    if not ready:
+        mismatches = "; ".join(str(item) for item in readiness.get("mismatches", []))
+        return (err_envelope(
+            ErrorCode.APS_UNAVAILABLE, f"mutation Activity not ready: {mismatches}",
+            retryable=True, tool=PLAN_TOOL_NAME,
+        ), 503)
+    activity_version = (readiness.get("activity") or {}).get("version")
+    entry["activity_version"] = activity_version
     _start_admitted_execution(req, admission, aps_submission=True)
     return write_loop.run_data_plan_live(
         req.plan.model_dump(), req.tenant_id, backend=backend, da=da, t0=t0,

@@ -80,7 +80,7 @@ function handleId(value, invalidReason = 'bad_entity_handle') {
   return parsed.toString()
 }
 
-function projectEntities(doc) {
+function projectDocument(doc) {
   // The wrapper's editableEntities() returns plain JSON-compatible objects.
   // The id the surface keys on is the engine HANDLE: the one identity that
   // survives a write/re-parse. It used to be the document-order index, and
@@ -88,7 +88,8 @@ function projectEntities(doc) {
   // the selection "survived" onto a different entity (found by the W4d e2e
   // row on the real stack). Edits still address the wrapper by index, which
   // the worker resolves from the handle at dispatch time (entityIndex).
-  return doc.editableEntities().map((entity) => {
+  const projection = doc.editableEntities()
+  const entities = projection.map((entity) => {
     const handle = handleId(entity.handle)
     return {
       id: handle,
@@ -109,6 +110,15 @@ function projectEntities(doc) {
       text: entity.text ?? null,
       height: entity.height ?? null,
       rotationDeg: entity.rotationDeg ?? null,
+      // W4g-7b-01c: read-only INSERT references retain their own transform.
+      kind: entity.kind,
+      name: entity.name,
+      ip: entity.ip,
+      scale: entity.scale,
+      columns: entity.columns,
+      rows: entity.rows,
+      columnSpacing: entity.columnSpacing,
+      rowSpacing: entity.rowSpacing,
       // W4g-6d: one bulge per vertex for a polyline, null for every other kind.
       bulges: Array.isArray(entity.bulges) ? entity.bulges : null,
       // W4g-4b: an ELLIPSE's axis endpoint (relative to the centre) and ratio.
@@ -118,15 +128,18 @@ function projectEntities(doc) {
       endDeg: entity.endDeg ?? null,
     }
   })
+  return { entities, blocks: projection.blocks ?? [] }
 }
 
 function loadedResponse(documentId, doc) {
-  const entities = projectEntities(doc)
+  const { entities, blocks } = projectDocument(doc)
   return {
     type: 'documentLoaded',
     documentId,
     entityCount: entities.length,
     entities,
+    blocks,
+    blockBasePatched: doc.blockBasePatched ?? false,
     // The whole-document engine reads and rewrites EVERYTHING, so there is
     // no lossy-write refusal class: writable is unconditionally true and
     // per-entity `editable` says which rows the edit ops accept.
@@ -289,7 +302,7 @@ async function applyEdit(engine, message) {
     if (!steps || steps.length === 0) return refused(op, 'batch_empty')
     if (steps.length > MAX_BATCH_STEPS) return refused(op, 'batch_too_many_steps')
     const snapshot = engine.writeDxf(doc)
-    const restore = () => { current = { documentId: current.documentId, doc: engine.parseDxf(snapshot) } }
+    const restore = () => { current = { documentId: current.documentId, doc: reparseDocument(engine, snapshot, doc) } }
     const made = []
     for (let i = 0; i < steps.length; i += 1) {
       const step = steps[i] && typeof steps[i] === 'object' ? steps[i] : {}
@@ -323,14 +336,16 @@ async function applyEdit(engine, message) {
   // Write-back leg: serialize, reparse, report from the REPARSE — the UI
   // renders what the written bytes actually say.
   const written = engine.writeDxf(doc)
-  const reparsed = engine.parseDxf(written)
-  let entities
+  const blockBasePatched = doc.blockBasePatched ?? false
+  const reparsed = reparseDocument(engine, written, doc)
+  let projection
   try {
-    entities = projectEntities(reparsed)
+    projection = projectDocument(reparsed)
   } catch (error) {
     current = null
     return refused(op, error instanceof Error ? error.message : String(error))
   }
+  const { entities, blocks } = projection
   current = { documentId: current.documentId, doc: reparsed }
   const reply = {
     type: 'editApplied',
@@ -338,6 +353,8 @@ async function applyEdit(engine, message) {
     ok: true,
     entityCount: entities.length,
     entities,
+    blocks,
+    blockBasePatched,
     bytes: written,
     byteLength: written.length,
   }
@@ -352,6 +369,14 @@ async function applyEdit(engine, message) {
     if (createdHandles !== null) reply.createdIds = createdHandles.map((h) => byHandle.get(h) ?? null)
   }
   return reply
+}
+
+function reparseDocument(engine, bytes, previous) {
+  const doc = engine.parseDxf(bytes)
+  // A write cannot recover a binary base or an unmatched definition marker.
+  if (previous.blockBasesUnknown === true) doc.blockBasesUnknown = true
+  if (typeof doc.inheritBlockBaseUnknowns === 'function') doc.inheritBlockBaseUnknowns(previous)
+  return doc
 }
 
 /** Handles one boundary message; returns the reply or null. Never throws. */
@@ -395,9 +420,15 @@ export async function handleMessage(raw, engineOverride = null) {
     let doc
     try {
       doc = engine.parseDxf(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes.buffer))
+      if (raw.blockBasesUnknown === true) doc.blockBasesUnknown = true
     } catch (error) {
       current = null
-      return { type: 'error', message: `parse_failed:${error instanceof Error ? error.message : String(error)}` }
+      const reason = error instanceof Error ? error.message : String(error)
+      if (reason.startsWith('block names collide case-insensitively: ') || reason.startsWith('block definitions collapsed on load: ')) {
+        return { type: 'documentLoaded', documentId, entityCount: 0, entities: [], blocks: [],
+          blockBasePatched: false, writable: false, refusal: reason, unsupported: [] }
+      }
+      return { type: 'error', message: `parse_failed:${reason}` }
     }
     current = { documentId, doc }
     try {

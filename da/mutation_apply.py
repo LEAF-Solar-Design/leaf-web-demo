@@ -9,8 +9,9 @@ from __future__ import annotations
 import json
 import argparse
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import requests
 
@@ -40,10 +41,45 @@ INSPECTION_COMMAND_LINE = (
 _TIMEOUT = 60
 
 
-def activity_spec() -> dict[str, Any]:
+def build_apply_scr_v3() -> str:
+    """Accept the v3 header while retaining the frozen v2 operations."""
+    return build_apply_scr().replace(
+        '(list "LEAF_MUTATION_PLAN|1" "LEAF_MUTATION_PLAN|2")',
+        '(list "LEAF_MUTATION_PLAN|1" "LEAF_MUTATION_PLAN|2" "LEAF_MUTATION_PLAN|3")',
+        1,
+    )
+
+
+MUTATION_INSPECT_BLOCKS_V3 = MUTATION_INSPECT_BLOCKS
+
+
+@dataclass(frozen=True)
+class Contract:
+    activity_id: str
+    build_apply: Callable[[], str]
+    inspect_blocks: tuple[str, ...]
+
+    @property
+    def alias(self) -> str:
+        # Read at call time, never cached: this must always name the SAME
+        # alias the client actually submits WorkItems to (client.ALIAS, which
+        # tracks APS_ALIAS), so readiness and submission never drift apart.
+        return client.ALIAS
+
+
+CONTRACTS = {
+    2: Contract(activity_id=ACTIVITY_ID,
+                build_apply=build_apply_scr, inspect_blocks=MUTATION_INSPECT_BLOCKS),
+    3: Contract(activity_id="LeafApplyMutationsV3",
+                build_apply=build_apply_scr_v3, inspect_blocks=MUTATION_INSPECT_BLOCKS_V3),
+}
+
+
+def activity_spec(contract: int = 2) -> dict[str, Any]:
     """Return the complete fixed Activity definition."""
+    target = CONTRACTS[contract]
     return {
-        "id": ACTIVITY_ID,
+        "id": target.activity_id,
         "engine": ENGINE,
         # The second command reopens the exact saved Result bytes before it
         # emits verification intake. This preserves the prior closed-file proof
@@ -71,12 +107,12 @@ def activity_spec() -> dict[str, Any]:
             },
         },
         "settings": {
-            "script": {"value": build_apply_scr()},
+            "script": {"value": target.build_apply()},
             # W4g-3: the inspection also reports LINE / CIRCLE / ARC with
             # handles (the kinds the browser engine writes), so a v2 plan's
             # effects verify; the LeafExtract script itself is untouched.
             "inspectScript": {"value": build_scr(
-                INTAKE_LOCALNAME, extra_blocks=MUTATION_INSPECT_BLOCKS)},
+                INTAKE_LOCALNAME, extra_blocks=target.inspect_blocks)},
         },
         "description": (
             "Leaf fixed closed-format drawing mutation interpreter with "
@@ -131,39 +167,41 @@ def _version(value: dict[str, Any], operation: str) -> int:
         raise RuntimeError(f"{operation} returned no valid version") from exc
 
 
-def provision_activity() -> dict[str, Any]:
+def provision_activity(contract: int = 2) -> dict[str, Any]:
     """Create/advance the Activity and point its prod alias at the new version."""
-    spec = activity_spec()
+    target = CONTRACTS[contract]
+    spec = activity_spec(contract)
     response = _post("/activities", spec)
     advanced = response.status_code == 409
     if advanced:
         response = _post(
-            f"/activities/{ACTIVITY_ID}/versions",
+            f"/activities/{target.activity_id}/versions",
             {key: value for key, value in spec.items() if key != "id"},
         )
     _require_status(response, (200, 201), "activity version create")
     version = _version(response.json(), "activity version create")
 
     alias = _post(
-        f"/activities/{ACTIVITY_ID}/aliases",
-        {"id": ALIAS, "version": version},
+        f"/activities/{target.activity_id}/aliases",
+        {"id": target.alias, "version": version},
     )
     if alias.status_code == 409:
         alias = _patch(
-            f"/activities/{ACTIVITY_ID}/aliases/{ALIAS}", {"version": version},
+            f"/activities/{target.activity_id}/aliases/{target.alias}", {"version": version},
         )
     _require_status(alias, (200, 201), "activity alias update")
     return {
-        "id": ACTIVITY_ID, "alias": ALIAS, "version": version,
+        "id": target.activity_id, "alias": target.alias, "version": version,
         "advanced": advanced,
     }
 
 
-def alias_state() -> dict[str, Any]:
+def alias_state(contract: int = 2) -> dict[str, Any]:
     """Capture the exact rollback target without changing APS state."""
-    response = _get(f"/activities/{ACTIVITY_ID}/aliases/{ALIAS}")
+    target = CONTRACTS[contract]
+    response = _get(f"/activities/{target.activity_id}/aliases/{target.alias}")
     if response.status_code == 404:
-        return {"id": ACTIVITY_ID, "alias": ALIAS, "exists": False, "version": None}
+        return {"id": target.activity_id, "alias": target.alias, "exists": False, "version": None}
     _require_status(response, (200,), "activity alias read")
     try:
         value = response.json()
@@ -172,14 +210,15 @@ def alias_state() -> dict[str, Any]:
     if not isinstance(value, dict):
         raise RuntimeError("activity alias read returned invalid JSON")
     return {
-        "id": ACTIVITY_ID, "alias": ALIAS, "exists": True,
+        "id": target.activity_id, "alias": target.alias, "exists": True,
         "version": _version(value, "activity alias"),
     }
 
 
-def restore_alias(version: int | None) -> dict[str, Any]:
+def restore_alias(version: int | None, contract: int = 2) -> dict[str, Any]:
     """Restore the captured prod alias target, including prior absence."""
-    path = f"/activities/{ACTIVITY_ID}/aliases/{ALIAS}"
+    target = CONTRACTS[contract]
+    path = f"/activities/{target.activity_id}/aliases/{target.alias}"
     if version is None:
         response = _delete(path)
         _require_status(response, (200, 204, 404), "activity alias delete")
@@ -189,11 +228,11 @@ def restore_alias(version: int | None) -> dict[str, Any]:
         response = _patch(path, {"version": version})
         if response.status_code == 404:
             response = _post(
-                f"/activities/{ACTIVITY_ID}/aliases",
-                {"id": ALIAS, "version": version},
+                f"/activities/{target.activity_id}/aliases",
+                {"id": target.alias, "version": version},
             )
         _require_status(response, (200, 201), "activity alias restore")
-    observed = alias_state()
+    observed = alias_state(contract)
     if observed["exists"] is not (version is not None) or observed["version"] != version:
         raise RuntimeError("activity alias restore readback mismatch")
     return observed
@@ -226,21 +265,22 @@ def _canonical_parameters(value: Any) -> Any:
     return canonical
 
 
-def readiness() -> dict[str, Any]:
+def readiness(contract: int = 2) -> dict[str, Any]:
     """Resolve prod and compare its immutable Activity version to the fixed spec."""
+    target = CONTRACTS[contract]
     try:
         alias = _read_json(
-            f"/activities/{ACTIVITY_ID}/aliases/{ALIAS}", "activity alias read",
+            f"/activities/{target.activity_id}/aliases/{target.alias}", "activity alias read",
         )
         version = _version(alias, "activity alias")
         deployed = _read_json(
-            f"/activities/{ACTIVITY_ID}/versions/{version}",
+            f"/activities/{target.activity_id}/versions/{version}",
             "activity version read",
         )
     except RuntimeError as exc:
-        return {"ready": False, "mismatches": [str(exc)]}
+        return {"ready": False, "mismatches": [str(exc)], "contract": contract}
 
-    expected = activity_spec()
+    expected = activity_spec(contract)
     mismatches = []
     for key in ("engine", "commandLine", "settings"):
         if deployed.get(key) != expected[key]:
@@ -254,7 +294,8 @@ def readiness() -> dict[str, Any]:
     return {
         "ready": not mismatches,
         "mismatches": mismatches,
-        "activity": {"alias": ALIAS, "version": version},
+        "activity": {"alias": target.alias, "version": version},
+        "contract": contract,
     }
 
 
@@ -265,19 +306,27 @@ def main(argv: list[str] | None = None) -> int:
     for command in ("provision", "readiness", "alias-state"):
         child = subparsers.add_parser(command)
         child.add_argument("--json", action="store_true", dest="as_json")
+        child.add_argument("--contract", type=int, choices=(2, 3), default=2)
     restore = subparsers.add_parser("restore-alias")
     restore.add_argument("--version", required=True)
     restore.add_argument("--json", action="store_true", dest="as_json")
+    restore.add_argument("--contract", type=int, choices=(2, 3), default=2)
     args = parser.parse_args(argv)
 
     if args.command == "provision":
         try:
-            result = {"ok": True, "operation": "provision", **provision_activity()}
+            result = {
+                "ok": True, "operation": "provision",
+                **provision_activity(contract=args.contract), "contract": args.contract,
+            }
         except Exception:
             # Auth and HTTP exceptions can contain credential paths, request
             # headers, or signed fields. The protected runner gets only this
             # stable fail-closed receipt.
-            result = {"ok": False, "operation": "provision", "error": "provision failed"}
+            result = {
+                "ok": False, "operation": "provision", "error": "provision failed",
+                "contract": args.contract,
+            }
             print(json.dumps(result, sort_keys=True, separators=(",", ":")))
             return 1
         print(json.dumps(result, sort_keys=True, separators=(",", ":")))
@@ -285,11 +334,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "alias-state":
         try:
-            result = {"ok": True, "operation": "alias-state", **alias_state()}
+            result = {
+                "ok": True, "operation": "alias-state",
+                **alias_state(contract=args.contract), "contract": args.contract,
+            }
         except Exception:
             result = {
                 "ok": False, "operation": "alias-state",
                 "error": "alias snapshot failed",
+                "contract": args.contract,
             }
             print(json.dumps(result, sort_keys=True, separators=(",", ":")))
             return 1
@@ -301,12 +354,13 @@ def main(argv: list[str] | None = None) -> int:
             version = None if args.version == "absent" else int(args.version)
             result = {
                 "ok": True, "operation": "restore-alias",
-                **restore_alias(version),
+                **restore_alias(version, contract=args.contract), "contract": args.contract,
             }
         except Exception:
             result = {
                 "ok": False, "operation": "restore-alias",
                 "error": "alias restore failed",
+                "contract": args.contract,
             }
             print(json.dumps(result, sort_keys=True, separators=(",", ":")))
             return 1
@@ -314,11 +368,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        result = {"operation": "readiness", **readiness()}
+        result = {
+            "operation": "readiness", **readiness(contract=args.contract),
+            "contract": args.contract,
+        }
     except Exception:
         result = {
             "operation": "readiness", "ready": False,
             "mismatches": ["readiness failed"],
+            "contract": args.contract,
         }
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0 if result["ready"] else 1
