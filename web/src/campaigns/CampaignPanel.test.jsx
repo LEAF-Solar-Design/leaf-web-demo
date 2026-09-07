@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render as renderCollapsed, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import CampaignPanel from './CampaignPanel.jsx'
 import useCampaigns from './useCampaigns.js'
@@ -33,6 +33,39 @@ beforeEach(() => {
 afterEach(cleanup)
 
 const panel = props => <CampaignPanel projectId={P} projectName="Document studio" signedIn {...props} />
+
+// Existing control/security cases exercise the controls after explicit expansion.
+function render(ui) {
+  const view = renderCollapsed(ui)
+  const expand = () => view.container.querySelectorAll('details:not([open]) > summary').forEach(summary => fireEvent.click(summary))
+  expand()
+  return { ...view, rerender(next) { view.rerender(next); expand() } }
+}
+
+describe('results-first hierarchy', () => {
+  it('keeps requests and technical history collapsed without hiding an unanswered decision', () => {
+    campaign.questions = [{ question_id: Q, prompt: 'Which format?', status: 'open' }]
+    const { container } = renderCollapsed(panel())
+    expect(screen.getByRole('heading', { name: 'Project results' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Record answer' }).closest('details')).toBeNull()
+    expect(screen.getByText('Which format?').closest('details')).toBeNull()
+    for (const name of ['Start a new request', 'Technical execution', 'Enrollment and capability invocation', 'Answered question history']) {
+      const disclosure = screen.getByText(name).closest('details')
+      expect(disclosure.open).toBe(false)
+      fireEvent.click(within(disclosure).getByText(name))
+      expect(disclosure.open).toBe(true)
+    }
+    expect(container.querySelector('.campaign-completion').compareDocumentPosition(screen.getByLabelText('Title').closest('form')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.getByText(/Output unavailable. Define a bounded release/)).toBeTruthy()
+  })
+
+  it('makes an empty project request visible immediately', () => {
+    campaign.campaigns = []
+    campaign.selected = null
+    renderCollapsed(panel())
+    expect(screen.getByRole('button', { name: 'Submit campaign' }).closest('details')).toBeNull()
+  })
+})
 
 describe('finish input controls', () => {
   const path = `inputs/${'a'.repeat(64)}/records.json`
@@ -134,7 +167,7 @@ describe('release evidence panel', () => {
     fireEvent.change(screen.getByLabelText('Release deadline (optional)'), { target: { value: '2026-09-08T09:30' } })
     fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Export' } })
     fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Download CSV' } })
-    fireEvent.click(screen.getAllByRole('button', { name: 'Finish this project' })[0])
+    fireEvent.click(within(screen.getByLabelText('Title').closest('form')).getByRole('button', { name: 'Finish this project' }))
     await waitFor(() => expect(campaign.submit).toHaveBeenCalledWith(expect.objectContaining({ finish: expect.objectContaining({ deadline_at: '2026-09-08T09:30' }) })))
   })
   const stages = ['implementation', 'publication', 'deployment', 'user_verification', 'delivery']
@@ -239,6 +272,46 @@ describe('release evidence panel', () => {
     campaign.downloadReleaseArtifact.mockResolvedValue({ name, mediaType, bytes })
     return artifact
   }
+  it('places verified output controls before scope, release details and the collapsed request', () => {
+    readyOutput()
+    campaign.campaigns = [row, { ...row, campaign_id: 'other', title: 'Another release' }]
+    renderCollapsed(panel())
+    const output = screen.getByRole('button', { name: 'Open tool records-to-csv.html' })
+    expect(output.closest('details')).toBeNull()
+    expect(output.classList.contains('primary')).toBe(true)
+    const picker = screen.getByRole('navigation', { name: 'Project releases and campaigns' })
+    expect(output.compareDocumentPosition(picker) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(picker.compareDocumentPosition(screen.getByText('Start a new request')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.queryByText('Accepted, not running')).toBeNull()
+    expect(screen.queryByText('Release being delivered')).toBeNull()
+    expect(screen.queryByRole('heading', { name: 'Outputs' })).toBeNull()
+    fireEvent.click(within(picker).getByRole('button', { name: 'Another release' }))
+    expect(campaign.select).toHaveBeenCalledExactlyOnceWith('other')
+    for (const label of ['Release details', 'Start a new request']) {
+      const details = screen.getByText(label).closest('details')
+      expect(details.open).toBe(false)
+      expect(output.compareDocumentPosition(details) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    }
+    expect(output.compareDocumentPosition(screen.getByText('Deliver the recipe PDF')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+  it('omits empty action notices while keeping real release decisions and errors visible', () => {
+    readyOutput()
+    campaign.completion.next_action = null
+    const { rerender } = renderCollapsed(panel())
+    expect(screen.queryByText('What requires you')).toBeNull()
+    expect(screen.queryByText('No user action reported.')).toBeNull()
+    expect(screen.queryByText('No other pending action reported.')).toBeNull()
+    campaign.completion.next_action = { message: 'Choose the page size in Questions' }
+    campaign.completion.remaining = ['Confirm the paper size']
+    campaign.questions = [{ question_id: Q, prompt: 'Which format?', status: 'open' }]
+    campaign.executionError = new Error('Readback unavailable')
+    rerender(panel())
+    for (const text of ['Choose the page size in Questions', 'Confirm the paper size', 'Which format?', 'Readback unavailable']) {
+      expect(screen.getByText(text).closest('details')).toBeNull()
+    }
+    expect(screen.getByRole('button', { name: 'Record answer' }).closest('details')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Open tool records-to-csv.html' })).toBeNull()
+  })
   it('renders exact UTF-8 HTML with srcdoc and removes it on close, replacement and unmount', async () => {
     const artifact = readyOutput()
     const urlApi = { createObjectURL: vi.fn(), revokeObjectURL: vi.fn() }
@@ -592,7 +665,7 @@ describe('campaign panel in the project workspace', () => {
     expect(execution.querySelector('time').textContent).toBe(new Date('2026-09-05T12:00:00Z').toLocaleString())
     expect(execution.textContent).not.toMatch(/spec|worker|fence|attempt|mount-fleet-adapter|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|%|complete/i)
     expect(within(execution).queryAllByRole('button')).toHaveLength(0)
-    expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Submit campaign', 'Finish this project', 'Ask'])
+    expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Finish this project', 'Release documents', 'Ask', 'Submit campaign'])
   })
 
   it('shows loading and empty execution, and retains questions during an execution error', () => {
@@ -608,7 +681,7 @@ describe('campaign panel in the project workspace', () => {
     expect(screen.getByText('No tasks recorded yet.')).toBeTruthy()
     expect(screen.getByText('Which format?')).toBeTruthy()
     expect(screen.getByRole('alert').textContent).toContain('Execution is unavailable.')
-    expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Submit campaign', 'Finish this project', 'Try again', 'Record answer', 'Ask'])
+    expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Finish this project', 'Release documents', 'Try again', 'Record answer', 'Ask', 'Submit campaign'])
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
     expect(campaign.refetch).toHaveBeenCalledTimes(1)
   })
@@ -733,9 +806,10 @@ describe('campaign panel in the project workspace', () => {
     campaign.status = 'ready'
     campaign.campaigns = [row, { ...row, campaign_id: 'other', title: 'Another campaign' }]
     rerender(panel())
-    const select = screen.getByRole('combobox', { name: 'Active campaign' })
-    expect(select.value).toBe(C)
-    fireEvent.change(select, { target: { value: 'other' } })
+    expect(screen.getByRole('button', { name: 'Release documents' }).getAttribute('aria-pressed')).toBe('true')
+    const select = screen.getByRole('button', { name: 'Another campaign' })
+    expect(select.getAttribute('aria-pressed')).toBe('false')
+    fireEvent.click(select)
     expect(campaign.select).toHaveBeenCalledWith('other')
   })
 

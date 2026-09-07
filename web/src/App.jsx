@@ -3121,12 +3121,19 @@ export default function App() {
             }}
           />
         )}
+        {!mock && openProjectId ? <h1 className="home-q">{currentProjectName}</h1> : <>
         <div className="kicker">Home · one prompt, two lanes</div>
         <h1 className="home-q">What should Leaf do to <em>{projectName}</em>?</h1>
         <div className="hint">
           Try <b>count panels per layer</b> — one prompt, routed across <b>Run</b> ·{' '}
           <b>Build</b>. You confirm before anything runs — paid actions never auto-execute.
         </div>
+
+        </>}
+
+        {!mock && openProjectId && (
+          <CampaignPanel projectId={openProjectId} projectName={currentProjectName} signedIn={signedIn} authorityProvider={authorAuthorityProvider} />
+        )}
 
         {!mock && openProjectId && (
           <WorkspaceSummary
@@ -3136,10 +3143,6 @@ export default function App() {
             onSelectVersion={selectCanonicalVersion}
             onClose={onCloseProject}
           />
-        )}
-
-        {!mock && openProjectId && (
-          <CampaignPanel key={activeSurface} projectId={openProjectId} projectName={currentProjectName} signedIn={signedIn} authorityProvider={authorAuthorityProvider} />
         )}
 
         <SurfaceFrame.Tabs />

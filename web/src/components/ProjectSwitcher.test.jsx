@@ -5,7 +5,7 @@
  * path could still print "Project rooftop_demo" over a drawing, which is the
  * exact bug this change exists to fix.
  */
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import ProjectSwitcher from './ProjectSwitcher.jsx'
@@ -14,6 +14,30 @@ import { deriveWorkspaceProjectState, WORKSPACE_PROJECT_COPY } from '../site/wor
 afterEach(cleanup)
 
 const chip = () => document.querySelector('.proj-chip')
+
+it('shows a Projects affordance and preserves keyboard selection and project creation', () => {
+  const onOpenProject = vi.fn()
+  const onCreateProject = vi.fn()
+  const state = deriveWorkspaceProjectState({ openProjectId: 'p-1', projectName: 'Maple', drawingName: 'drawing', orgId: 'org-1' })
+  render(<ProjectSwitcher mock={false} orgId="org-1" projectName="drawing" openProjectId="p-1"
+    workspaceProject={state} projects={[{ project_id: 'p-1', name: 'Maple' }, { project_id: 'p-2', name: 'Oak' }]}
+    onOpenProject={onOpenProject} onCreateProject={onCreateProject} onCreateOrg={() => {}} />)
+  const trigger = screen.getByRole('button', { name: 'Projects: change project. Project Maple' })
+  expect(trigger.textContent).toContain('Projects / Change project')
+  expect(trigger.getAttribute('aria-expanded')).toBe('false')
+  fireEvent.click(trigger)
+  expect(trigger.getAttribute('aria-expanded')).toBe('true')
+  fireEvent.keyDown(document, { key: 'ArrowDown' })
+  fireEvent.keyDown(document, { key: 'Enter' })
+  expect(onOpenProject).toHaveBeenCalledExactlyOnceWith('p-2')
+  expect(trigger.getAttribute('aria-expanded')).toBe('false')
+  fireEvent.click(trigger)
+  fireEvent.change(screen.getByLabelText('New project'), { target: { value: ' Birch ' } })
+  fireEvent.submit(screen.getByLabelText('New project').closest('form'))
+  expect(onCreateProject).toHaveBeenCalledExactlyOnceWith('Birch')
+  fireEvent.keyDown(document, { key: 'Escape' })
+  expect(trigger.getAttribute('aria-expanded')).toBe('false')
+})
 
 describe('project-service error copy', () => {
   it('shows the permission error and keeps the drawing name', async () => {

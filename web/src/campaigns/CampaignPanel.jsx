@@ -93,6 +93,7 @@ function SubmitForm({ campaign, projectId }) {
     }, 'Campaign recorded.')
   }}>
     <h3>Submit a campaign</h3>
+    <p>Finish this project requests a new bounded release. It does not close the whole project.</p>
     <label>Campaign goal<select value={mode} disabled={busy} onChange={event => setMode(event.target.value)}>
       <option value="ordinary">Ordinary campaign</option>
       <option value="finish">Finish this project</option>
@@ -213,7 +214,7 @@ function ReleaseOutputs({ campaign, completion, available, urlApi }) {
   }
   return <>
     {!(completion.deliverables || []).length && <p>Validated output evidence unavailable.</p>}
-    <ul>{(completion.deliverables || []).map((artifact, index) => {
+    <ul className="campaign-outputs">{(completion.deliverables || []).map((artifact, index) => {
       const bytes = artifact.byte_count ?? artifact.size_bytes ?? artifact.bytes
       const canonical = 'access_path' in artifact || 'valid' in artifact || 'retrieved' in artifact
       const valid = available && typeof artifact.sha256 === 'string' && /^[a-f0-9]{64}$/.test(artifact.sha256)
@@ -228,7 +229,7 @@ function ReleaseOutputs({ campaign, completion, available, urlApi }) {
         ? safeArtifactUrl(artifact.download_url || artifact.access_url || artifact.url) : null
       const legacyValid = valid && artifact.validated === true && artifact.retrieval_validated === true && artifact.content_validated === true
       return <li key={index}>{canonical && canonicalValid
-        ? <button type="button" className="chip-act" disabled={busy || !!campaign.pending.download} aria-busy={busy}
+        ? <button type="button" className="btn primary" disabled={busy || !!campaign.pending.download} aria-busy={busy}
           onClick={() => retrieve(artifact)}>{/\.html$/i.test(artifact.name) && artifact.media_type === 'text/html' ? 'Open tool' : 'Download'} {name}</button>
         : legacyValid && external ? <a href={external} target="_blank" rel="noopener noreferrer">{name}</a>
           : <span>{name}: access evidence unavailable</span>}
@@ -251,7 +252,7 @@ function CompletionPanel({ campaign, artifactUrlApi }) {
   const busy = action.busy || !!campaign.pending.release
   if (!release) return <section className="panel-sub campaign-completion" aria-label="Project delivery">
     <h3>Finish this project</h3>
-    <p>Define a release for this campaign. Release evidence is unavailable.</p>
+    <p>Output unavailable. Define a bounded release for this campaign using the controls below. This does not close the whole project.</p>
     <DeliveryProfile value={profile} onChange={setProfile} disabled={busy} />
     <button type="button" className="btn primary" disabled={busy} aria-busy={busy}
       onClick={() => action.run(() => campaign.createRelease({ delivery_profile: profile, intended_user: 'Project owner',
@@ -286,30 +287,34 @@ function CompletionPanel({ campaign, artifactUrlApi }) {
   const continueAuthoring = release.status === 'waiting' && completion.next_action?.wait_kind === 'authority'
     && ['Authoring requires an active project conversation', 'Acquisition requires the current account actor'].includes(completion.next_action.reason)
   return <section className="panel-sub campaign-completion" aria-label="Project delivery">
-    <h3>Release being delivered</h3>
-    <p>{textOf(release.scope_summary) || textOf(contract.release_boundary) || 'Release boundary unavailable.'}</p>
     <p role={currentFailure ? 'alert' : 'status'}>{currentFailure && historicalFinish
       ? `Previously completed release. Current verification ${currentFailure.status}.`
       : finished ? 'Completed release' : historicalFinish ? 'Release completion evidence unavailable.' : `Release ${executionWords(release.status)}`}</p>
+    <ReleaseOutputs key={`${release.release_id}:${release.contract_version}:${finished}`} campaign={campaign}
+      completion={completion} available={finished} urlApi={artifactUrlApi} />
+    {!finished && <p>Output unavailable until the release has current, complete verification.</p>}
+    <p>{textOf(release.scope_summary) || textOf(contract.release_boundary) || 'Release boundary unavailable.'}</p>
+    {itemsOf(completion.next_action).length > 0 && <>
+      <h4>What requires you</h4>
+      <EvidenceList items={itemsOf(completion.next_action).map(nextActionText)} />
+    </>}
+    {currentFailure && <p role="alert">{currentFailure.reason || 'Current verification is unavailable. Reload the release.'}</p>}
+    {itemsOf(completion.remaining).some(textOf) && <EvidenceList items={completion.remaining} />}
+    {campaign.questions.some(question => question.status !== 'answered') && <p>Answer the open questions below to record your decisions.</p>}
+    <details className="campaign-disclosure">
+    <summary>Release details</summary>
     <p>A completed release covers this boundary. It does not mean the entire original ambition is done.</p>
     <h4>What works</h4>
     <EvidenceList items={coverage.filter(row => row.status === 'passed')} fallback="Verified checks unavailable." />
     <h4>What remains</h4>
-    <EvidenceList items={[...(currentFailure ? [currentFailure.reason || 'Current verification is unavailable. Reload the release.'] : []),
-    ...itemsOf(completion.remaining), ...coverage.filter(row => row.status !== 'passed')
+    <EvidenceList items={[...coverage.filter(row => row.status !== 'passed')
       .map(row => `${row.description || row.check_id}: ${row.status}`),
     ...stages.filter(item => evidenceStatus(item.row?.status) !== 'passed').map(item => `${stageLabel(item.stage)}: ${evidenceStatus(item.row?.status)}`)]}
     fallback={coverage.length ? 'No remaining required checks reported for this release.' : 'Required check evidence unavailable.'} />
-    <h4>What requires you</h4>
-    <EvidenceList items={itemsOf(completion.next_action).map(nextActionText)} fallback="No user action reported." />
-    {campaign.questions.some(question => question.status !== 'answered') && <p>Answer the open questions below to record your decisions.</p>}
     <h4>Release stages</h4>
     <ul className="campaign-release-stages">{stages.map(({ stage, row }) => <li key={stage}>
       <strong>{stageLabel(stage)}</strong><span>{evidenceStatus(row?.status)}</span>
     </li>)}</ul>
-    <h4>Outputs</h4>
-    <ReleaseOutputs key={`${release.release_id}:${release.contract_version}:${finished}`} campaign={campaign}
-      completion={completion} available={finished} urlApi={artifactUrlApi} />
     <h4>Proven replay recipe</h4>
     <EvidenceList items={replay?.steps ?? replay} fallback="Proven replay recipe unavailable." />
     <h4>Known limits</h4>
@@ -320,6 +325,7 @@ function CompletionPanel({ campaign, artifactUrlApi }) {
     <h4>Scope decisions and history</h4>
     <EvidenceList items={(completion.decisions || []).map(decision => textOf(decision.payload) || textOf(decision))}
       fallback="No scope decisions recorded." />
+    </details>
     <div className="campaign-release-controls">
       {['active', 'queued', 'waiting'].includes(release.status) && <button type="button" className="chip-act" disabled={busy}
         onClick={() => action.run(() => campaign.transitionRelease('pause'), 'Release paused.')}>Pause release</button>}
@@ -435,8 +441,6 @@ function EnrollmentPanel({ campaign }) {
   const busy = action.busy || !!campaign.pending.enroll
   return <section className="panel-sub" aria-label="Enrollment">
     <h3>Enrollment</h3>
-    <Alert error={campaign.enrollmentError} onReload={campaign.refetch} />
-    <Alert error={campaign.capabilityError} onReload={campaign.refetch} />
     {campaign.recoveryUnavailable && <p role="status">Browser storage is unavailable. Retry keeps the same submission in this view, but reconnect recovery is unavailable.</p>}
     {machines.length === 0 ? <p>No campaign machines are configured. Ask your workspace operator to configure a host.</p> : <>
       <label>Registration capability<select value={capability} disabled={busy} onChange={event => setCapability(event.target.value)}>
@@ -472,29 +476,38 @@ function EnrollmentPanel({ campaign }) {
 function SignedInPanel({ projectId, projectName, artifactUrlApi, authorityProvider }) {
   const campaign = useCampaigns(projectId, { enabled: true, authorityProvider })
   const selected = campaign.selected
+  const completion = campaign.completion !== undefined ? campaign.completion
+    : campaign.execution?.completion ?? selected?.completion
+  const hasRelease = !!completion?.release
   return <>
-    <p className="dim">{projectName ? `${projectName} / Campaign` : 'Project / Campaign'}</p>
-    <SubmitForm key={`form:${campaign.selectedId || 'new'}`} campaign={campaign} projectId={projectId} />
+    <h2>Project results</h2>
     {campaign.status === 'loading' && <div role="status" aria-label="Loading campaigns">
       <div className="skeleton-stack" aria-hidden="true"><div className="skeleton-row" /><div className="skeleton-row" /></div>
     </div>}
-    {campaign.campaigns.length > 0 && <label>Active campaign
-      <select aria-label="Active campaign" aria-busy={campaign.refreshing} value={campaign.selectedId || ''} onChange={event => campaign.select(event.target.value)}>
-        {campaign.campaigns.map(row => <option key={row.campaign_id} value={row.campaign_id}>{row.title}</option>)}
-      </select>
-    </label>}
     {selected && <div className="panel-sub campaign-status" data-state={selected.status}>
       <h3>{selected.title}</h3>
-      <p className="campaign-prompt">{selected.prompt}</p>
-      <p role="status">{statusWords[selected.status] || selected.status}</p>
-      {selected.dispatch?.available === false && <p role="status">The build fleet is not connected yet.</p>}
-      {selected.dispatch?.available === true && <p role="status">Build fleet available</p>}
+      {!hasRelease && <>
+        <p role="status">{statusWords[selected.status] || selected.status}</p>
+        {selected.dispatch?.available === false && <p role="status">The build fleet is not connected yet.</p>}
+        {selected.dispatch?.available === true && <p role="status">Build fleet available</p>}
+      </>}
     </div>}
     {selected && <CompletionPanel key={`completion:${campaign.selectedId}`} campaign={campaign} artifactUrlApi={artifactUrlApi} />}
+    {campaign.campaigns.length > 0 && <nav className="campaign-selection" aria-label="Project releases and campaigns" aria-busy={campaign.refreshing}>
+      {campaign.campaigns.map(row => <button type="button" key={row.campaign_id}
+        aria-pressed={campaign.selectedId === row.campaign_id}
+        onClick={() => campaign.select(row.campaign_id)}>{row.title}</button>)}
+    </nav>}
+    {selected && <details className="campaign-disclosure"><summary>Campaign scope</summary>
+      <p className="campaign-prompt">{selected.prompt}</p>
+    </details>}
+    <Alert error={campaign.executionError} onReload={campaign.refetch} retry="Try again" />
+    <Alert error={campaign.enrollmentError} onReload={campaign.refetch} />
+    <Alert error={campaign.capabilityError} onReload={campaign.refetch} />
+    {selected && <details className="campaign-disclosure"><summary>Technical execution</summary>
     {selected && <section className="panel-sub campaign-execution" aria-label="Execution">
       <h3>Execution</h3>
       {campaign.executionLoading && <p role="status">Loading execution…</p>}
-      <Alert error={campaign.executionError} onReload={campaign.refetch} retry="Try again" />
       {campaign.execution && <>
         {campaign.execution.tasks.length === 0 && <p>No tasks recorded yet.</p>}
         <ul>{campaign.execution.tasks.map(task => <li key={task.task_id}>
@@ -515,21 +528,30 @@ function SignedInPanel({ projectId, projectName, artifactUrlApi, authorityProvid
         </li>)}</ul>
       </>}
     </section>}
-    {selected && <EnrollmentPanel key={`enrollment:${campaign.selectedId}`} campaign={campaign} />}
+    </details>}
+    {selected && <details className="campaign-disclosure"><summary>Enrollment and capability invocation</summary>
+      <EnrollmentPanel key={`enrollment:${campaign.selectedId}`} campaign={campaign} />
+    </details>}
     {selected && <div className="panel-sub" key={`questions:${campaign.selectedId}`}>
       <h3>Questions</h3>
       <ul className="campaign-questions">
-        {campaign.questions.map(question => {
+        {campaign.questions.filter(question => question.status !== 'answered').map(question => {
+          return <li key={question.question_id} data-state={question.status}>
+            <p>{question.prompt}</p>
+            <AnswerForm question={question} campaign={campaign} />
+          </li>
+        })}
+      </ul>
+      <details className="campaign-disclosure"><summary>Answered question history</summary>
+        <ul className="campaign-questions">{campaign.questions.filter(question => question.status === 'answered').map(question => {
           const recorded = campaign.answers[question.question_id]
           const text = typeof recorded === 'string' ? recorded : recorded?.answer
           return <li key={question.question_id} data-state={question.status}>
             <p>{question.prompt}</p>
-            {question.status === 'answered'
-              ? <p role="status" className="campaign-answer">{text ?? 'The recorded answer text is unavailable. Reload to retrieve it.'}</p>
-              : <AnswerForm question={question} campaign={campaign} />}
+            <p role="status" className="campaign-answer">{text ?? 'The recorded answer text is unavailable. Reload to retrieve it.'}</p>
           </li>
-        })}
-      </ul>
+        })}</ul>
+      </details>
       <AskForm campaign={campaign} />
     </div>}
     {campaign.refreshing && <p role="status">Updating campaigns…</p>}
@@ -537,6 +559,10 @@ function SignedInPanel({ projectId, projectName, artifactUrlApi, authorityProvid
     {campaign.error && campaign.errorAction === 'load' && <div className="project-lifecycle-stale">
       <Alert error={campaign.error} onReload={campaign.refetch} retry="Try again" />
     </div>}
+    {campaign.campaigns.length > 0 ? <details className="campaign-disclosure">
+      <summary>Start a new request</summary>
+      <SubmitForm key={`form:${campaign.selectedId || 'new'}`} campaign={campaign} projectId={projectId} />
+    </details> : <SubmitForm key="form:new" campaign={campaign} projectId={projectId} />}
   </>
 }
 

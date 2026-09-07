@@ -93,11 +93,14 @@ export default function ProjectSwitcher({
   return (
     <span className="proj-switch" ref={rootRef}>
       <button
+        type="button"
         className="proj-chip"
+        aria-label={`Projects: change project. ${tag} ${label}`}
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
         aria-haspopup="menu"
       >
+        <span>Projects / Change project</span>
         <span className="tag">{tag}</span>
         <span className="name">{label}</span>
         <span className="proj-caret" aria-hidden="true">▾</span>
