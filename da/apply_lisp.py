@@ -85,3 +85,36 @@ _LISP_LINES = (
 def build_apply_scr() -> str:
     """Return the fixed CRLF AutoCAD mutation script."""
     return "\r\n".join(_LISP_LINES) + "\r\n"
+
+
+_INSERT_LISP_LINES = (
+    '(defun leaf-addinsert-op (v / layer name pt rot scale) (if (and (= (length v) 6) (setq layer (nth 1 v) name (nth 2 v)) (<= (strlen layer) 255) (leaf-chars-ok layer "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-$ ") (> (strlen name) 0) (<= (strlen name) 255) (/= (substr name 1 1) "*") (not (vl-string-search (chr 13) name)) (not (vl-string-search (chr 10) name)) (tblsearch "BLOCK" name) (setq pt (leaf-point3 (nth 3 v))) (setq rot (leaf-number (nth 4 v))) (setq scale (leaf-point3 (nth 5 v))) (/= (car scale) 0.0) (/= (cadr scale) 0.0) (/= (caddr scale) 0.0)) (list "ADDINSERT" layer name pt rot scale)))',
+    '(defun leaf-apply-addinsert (op / layer name pt rot sx sy sz) (setq layer (nth 1 op) name (nth 2 op) pt (nth 3 op) rot (nth 4 op) sx (car (nth 5 op)) sy (cadr (nth 5 op)) sz (caddr (nth 5 op))) (if (tblsearch "BLOCK" name) (progn (leaf-ensure-layer layer) (entmakex (list (cons 0 "INSERT") (cons 100 "AcDbEntity") (cons 8 layer) (cons 100 "AcDbBlockReference") (cons 2 name) (cons 10 pt) (cons 41 sx) (cons 42 sy) (cons 43 sz) (cons 50 (/ (* rot pi) 180.0)))))))',
+)
+
+
+def build_apply_scr_v3() -> str:
+    """Extend the frozen interpreter only for the separate v3 Activity."""
+    lines = []
+    for line in _LISP_LINES:
+        if line.startswith("(defun leaf-parse-line "):
+            lines.extend(_INSERT_LISP_LINES)
+            line = line.replace(
+                '((= (car v) "ADDARC")',
+                '((= (car v) "ADDINSERT") (leaf-addinsert-op v)) ((= (car v) "ADDARC")',
+                1,
+            )
+        elif line.startswith("(defun leaf-apply "):
+            line = line.replace(
+                '((= (car op) "ADDARC")',
+                '((= (car op) "ADDINSERT") (leaf-apply-addinsert op)) ((= (car op) "ADDARC")',
+                1,
+            )
+        elif line.startswith("(defun leaf-read-plan "):
+            line = line.replace(
+                '(list "LEAF_MUTATION_PLAN|1" "LEAF_MUTATION_PLAN|2")',
+                '(list "LEAF_MUTATION_PLAN|1" "LEAF_MUTATION_PLAN|2" "LEAF_MUTATION_PLAN|3")',
+                1,
+            )
+        lines.append(line)
+    return "\r\n".join(lines) + "\r\n"

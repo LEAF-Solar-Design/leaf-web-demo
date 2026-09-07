@@ -44,6 +44,7 @@ _ADDED_FIELDS = frozenset({
     "start_deg", "end_deg",
 })
 _ADD_KINDS = ("LWPOLYLINE", "LINE", "CIRCLE", "ARC")
+_INSERT_FIELDS = frozenset({"handle", "kind", "layer", "name", "pt", "rot", "scale"})
 V3_ADD_KINDS = ("INSERT", "DIMENSION")
 V3_SET_OPS = ("set_color", "set_linetype", "set_lineweight")
 _TRANSFORM_FIELDS = frozenset({"handle", "dx", "dy", "rotation_deg"})
@@ -387,18 +388,75 @@ def validate_mutations(
     for position, raw in enumerate(added_raw):
         if not isinstance(raw, dict):
             raise ValueError(f"added entity at index {position} must be an object")
-        if raw.get("kind") in V3_ADD_KINDS:
+        if raw.get("kind") == "DIMENSION":
             raise ValueError("contract v3 is not enabled on this deployment")
-        extra = set(raw) - _ADDED_FIELDS
+        # Keep the routing skeleton's name-only placeholder refusal. INSERT
+        # execution requires the complete transform, not just a capability tag.
+        if raw.get("kind") == "INSERT" and set(raw) <= {"kind", "handle", "name"}:
+            raise ValueError("contract v3 is not enabled on this deployment")
+        extra = set(raw) - (_INSERT_FIELDS if raw.get("kind") == "INSERT" else _ADDED_FIELDS)
         if extra:
             raise ValueError(f"added entity at index {position} has unknown fields")
         handle = _handle(raw.get("handle"), f"added[{position}].handle")
         if handle in index or handle in added_handles:
             raise ValueError(f"duplicate or conflicting added handle {handle!r}")
         kind = raw.get("kind", "LWPOLYLINE")
-        if kind not in _ADD_KINDS:
+        if kind not in _ADD_KINDS and kind != "INSERT":
             raise ValueError(f"added entity {handle!r} has an unsupported kind")
         layer = _layer(raw.get("layer"))
+        if kind == "INSERT":
+            # AutoCAD layer names are case-insensitive: an admitted spelling
+            # that differs only in case from an existing layer creates on
+            # that layer and reads back with the existing spelling, so the
+            # canonical form must already carry it.
+            existing_layers = intake.get("layers")
+            if isinstance(existing_layers, list):
+                for existing_layer in existing_layers:
+                    if (isinstance(existing_layer, str)
+                            and existing_layer.lower() == layer.lower()):
+                        layer = existing_layer
+                        break
+            name = raw.get("name")
+            if (not isinstance(name, str) or not name or len(name) > 255
+                    or any(char in name for char in ("|", "\r", "\n"))):
+                raise ValueError("added INSERT name is not a safe block name")
+            if name.startswith("*"):
+                raise ValueError("added INSERT cannot use a system or anonymous block name")
+            # The plan reader uses the host MBCS code page until a decoder round.
+            if any(not 0x20 <= ord(char) <= 0x7E for char in name):
+                raise ValueError("block names outside printable ASCII are not carried in this round")
+            blocks = intake.get("blocks")
+            if not isinstance(blocks, dict) or name not in blocks:
+                raise ValueError(f"block {name} is not defined in this drawing")
+            block = blocks[name]
+            if (not isinstance(block, dict) or block.get("complete") is not True
+                    or block.get("baseUnknown")
+                    or not isinstance(block.get("children"), list)
+                    or block.get("count") != len(block["children"])):
+                raise ValueError(f"block {name} is incomplete in this drawing")
+            if not isinstance(raw.get("pt"), list) or len(raw["pt"]) != 3:
+                raise ValueError(f"added INSERT {handle!r} pt must have three components")
+            point = [round(value, 3) for value in _point3(raw["pt"], "added INSERT pt")]
+            rotation = _number(raw.get("rot"), "added INSERT rot", limit=float("inf"))
+            rotation = round(rotation % 360.0, 6) % 360.0
+            if not isinstance(raw.get("scale"), list) or len(raw["scale"]) != 3:
+                raise ValueError(f"added INSERT {handle!r} scale must have three components")
+            scale = [round(_number(value, "added INSERT scale"), 4) for value in raw["scale"]]
+            if any(value == 0 for value in scale):
+                raise ValueError("added INSERT scale components must be non-zero")
+            if any(isinstance(entity, dict) and entity.get("handle") == handle
+                   for entity in intake.get("inserts") or []):
+                raise ValueError(f"duplicate or conflicting added handle {handle!r}")
+            total_points += 1
+            if total_points > MAX_POINTS:
+                raise ValueError("mutation point bound exceeded")
+            added_handles.add(handle)
+            added.append({
+                "handle": handle, "kind": "INSERT", "name": name, "layer": layer,
+                "pt": [0.0 if value == 0 else value for value in point],
+                "rot": rotation, "scale": scale,
+            })
+            continue
         xdata = raw.get("xdata")
         if xdata is not None and not allow_xdata:
             # The MVP Activity creates geometry only. Silently discarding xdata
@@ -680,11 +738,16 @@ def emit_plan(
             lines.append(f"ADDLINE|{layer}|{_fmt3(entity['pts'][0])}|{_fmt3(entity['pts'][1])}")
         elif kind == "CIRCLE":
             lines.append(f"ADDCIRCLE|{layer}|{_fmt3(entity['c'])}|{_fmt(entity['r'])}")
+        elif kind == "INSERT":
+            point = ",".join(format(value, ".3f") for value in entity["pt"])
+            scale = ",".join(format(value, ".4f") for value in entity["scale"])
+            lines.append(
+                f"ADDINSERT|{layer}|{entity['name']}|{point}|{entity['rot']:.6f}|{scale}")
         else:
             lines.append(
                 f"ADDARC|{layer}|{_fmt3(entity['c'])}|{_fmt(entity['r'])}|"
                 f"{_fmt(entity['start_deg'])}|{_fmt(entity['end_deg'])}")
-    plan = ("\n".join(lines) + "\n").encode("ascii")
+    plan = ("\n".join(lines) + "\n").encode("utf-8" if version == 3 else "ascii")
     if len(plan) > MAX_PLAN_BYTES:
         raise ValueError("mutation plan exceeds the byte bound")
     return plan
