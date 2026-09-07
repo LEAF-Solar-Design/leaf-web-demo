@@ -1398,7 +1398,8 @@ def build_suites() -> List[Suite]:
               # Native CodeBuild prewarm: five executed dispatch/receipt rows.
               _py_pytest("test_prewarm_staging_cutover_workflow.py"), 58),
         # Merge-queue group controller (slice C: mq-review, mq-supply,
-        # mq-prewarm). 32 = the executed matrix: mq-review's GraphQL
+        # mq-prewarm). 84 cases cover the executed matrix and structural pins.
+        # The executed matrix includes mq-review's GraphQL
         # pagination and post-check re-read run against a fake gh (a queue
         # entry that only exists on page 2 is exactly what a broken
         # pagination loop would miss), the four-case newest-status-wins
@@ -1417,7 +1418,7 @@ def build_suites() -> List[Suite]:
         Suite("merge-queue-workflow",
               "scripts test_merge_queue_workflow.py", "pytest",
               # Native receipts: seven field refusals, five statuses, six log streams.
-              SCRIPTS_DIR, _py_pytest("test_merge_queue_workflow.py"), 81),
+              SCRIPTS_DIR, _py_pytest("test_merge_queue_workflow.py"), 84),
         Suite("platform-release-manifest",
               "scripts test_platform_release_manifest.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_platform_release_manifest.py"), 88),

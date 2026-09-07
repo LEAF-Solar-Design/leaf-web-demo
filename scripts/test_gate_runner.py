@@ -98,7 +98,7 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
         "build-platform-images-workflow": 38,
         # Native CodeBuild prewarm dispatch and CloudWatch receipt contracts.
         "prewarm-staging-cutover-workflow": 58,
-        "merge-queue-workflow": 81,
+        "merge-queue-workflow": 84,
         "platform-release-manifest": 88,
         # 10 -> 17 on 2026-08-18 with the production deploy's second approval
         # mode (administrator self-authorization): 1 acceptance case plus 6

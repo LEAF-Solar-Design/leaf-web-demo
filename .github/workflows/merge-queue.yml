@@ -310,8 +310,8 @@ jobs:
     if: always()
     runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 45
-    # Satisfies OIDC sub repo:LEAF-Solar-Design@90289782/leaf-web-demo@1304548236:environment:ecr-release.
-    environment: ecr-release
+    # Queue refs assume their own read-only role without an environment.
+    # The release role and ecr-release environment are for stage-group on main.
     permissions:
       contents: read
       actions: read
@@ -442,7 +442,7 @@ jobs:
           steps.relay.outputs.present == 'true' && steps.relay.outputs.migration_refusal != 'true'
         uses: aws-actions/configure-aws-credentials@v6.1.0
         with:
-          role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE }}
+          role-to-assume: ${{ secrets.AWS_MQ_PREWARM_READ_ROLE }}
           aws-region: us-east-1
 
       - name: Wait for every dispatched CodeBuild staging receipt
