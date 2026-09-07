@@ -123,7 +123,7 @@ function opaqueOf(entity) {
     // W4g-7b-03c: colour, linetype and lineweight, so a property-only change
     // on an opaque kind (TEXT, POINT, ELLIPSE) is seen, not dropped.
     props.aci, props.trueColor, props.linetype, props.lineweight])
-  return { kind: 'OPAQUE', type, print }
+  return { kind: 'OPAQUE', type, print, props }
 }
 
 // W4g-7b-02c: a created or removed INSERT is a real mutation (contract v3's
@@ -145,13 +145,9 @@ function insertOf(entity) {
   const layer = typeof entity.layer === 'string' && entity.layer ? entity.layer : '0'
   const point = [ip[0], ip[1], 0]
   const props = propsOf(entity)
-  // W4g-7b-03c: an INSERT reference's colour/linetype/lineweight now live on
-  // its own EntityCommon (the crate accepts property ops on a reference); a
-  // change to them is still a raw-operation refusal here, same as any other
-  // in-place INSERT change, so it is never silently dropped from the print.
+  // Placement changes refuse; the reference's own properties lower below.
   const print = JSON.stringify([name, point, rot, scale, layer,
-    entity.columns ?? 1, entity.rows ?? 1, entity.columnSpacing ?? 0, entity.rowSpacing ?? 0,
-    props.aci, props.trueColor, props.linetype, props.lineweight])
+    entity.columns ?? 1, entity.rows ?? 1, entity.columnSpacing ?? 0, entity.rowSpacing ?? 0])
   return { kind: 'INSERT', name, ip: point, rot, scale: scale.slice(), layer, print, props }
 }
 
@@ -276,7 +272,19 @@ export function diffPlan(committed, current) {
   const setColor = []
   const setLinetype = []
   const setLineweight = []
-  const cannot = (reason) => ({ mutations: null, count: 0, reason })
+  // W4g-7b-05c-2: `kind` names the entity type that caused the refusal (null
+  // when the refusal is not about one entity's own kind, e.g. a block
+  // definition or the operation-count cap); `cause` is one of the closed set
+  // the store's save reads to decide REJECT (moved-reference, true-colour)
+  // vs. today's sidecar fallback (every other cause, including null).
+  const cannot = (reason, kind = null, cause = null) => ({ mutations: null, count: 0, reason, kind, cause })
+  let hard = null
+  let soft = null
+  const refuse = (reason, kind = null, cause = null) => {
+    const refusal = cannot(reason, kind, cause)
+    if (cause === 'moved-reference' || cause === 'true-colour') hard ||= refusal
+    else soft ||= refusal
+  }
   // The engine digest covers EVERY child, including unlisted/unsupported ones.
   // Keep the legacy full-record fallback for older projections without digests.
   const canonical = (value) => Array.isArray(value) ? value.map(canonical)
@@ -289,38 +297,46 @@ export function diffPlan(committed, current) {
   for (const name of new Set([...oldBlocks.keys(), ...newBlocks.keys()])) {
     if (oldBlocks.get(name) === newBlocks.get(name)) continue
     const change = !oldBlocks.has(name) ? 'added' : !newBlocks.has(name) ? 'removed' : 'changed'
-    return cannot(`block ${name} is a definition the plan cannot carry, and it was ${change}`)
+    refuse(`block ${name} is a definition the plan cannot carry, and it was ${change}`)
   }
   for (const [handle, was] of before) {
     const now = after.get(handle)
     if (!now) {
       // A kind the contract has no add for still has a remove (by handle);
       // an OPAQUE entity erased is one the plan cannot see go.
-      if (was.kind === 'OPAQUE') return cannot(`entity ${handle} is a ${was.type} the plan cannot carry, and it was removed`)
+      if (was.kind === 'OPAQUE') {
+        refuse(`entity ${handle} is a ${was.type} the plan cannot carry, and it was removed`, was.type, 'opaque-kind')
+        continue
+      }
       removed.push(handle)
       continue
     }
     if (was.kind === 'OPAQUE' || now.kind === 'OPAQUE') {
-      if (was.kind === now.kind && was.print === now.print) continue
       const name = was.kind === 'OPAQUE' ? was.type : now.type
-      return cannot(`entity ${handle} is a ${name} the plan cannot carry, and it changed`)
+      if (now.props?.trueColor && JSON.stringify(was.props?.trueColor ?? null) !== JSON.stringify(now.props.trueColor)) {
+        refuse(`entity ${handle} has a true colour the plan cannot carry`, name, 'true-colour')
+        continue
+      }
+      if (was.kind === now.kind && was.print === now.print) continue
+      refuse(`entity ${handle} is a ${name} the plan cannot carry, and it changed`, name, 'opaque-kind')
+      continue
     }
     if (was.kind !== now.kind && !(isLinear(was) && isLinear(now))) {
-      return cannot(`entity ${handle} changed kind from ${was.kind} to ${now.kind}, which the plan cannot express`)
+      refuse(`entity ${handle} changed kind from ${was.kind} to ${now.kind}, which the plan cannot express`)
+      continue
     }
-    // W4g-7b-02c: an INSERT is a real add/remove but stays opaque for any
-    // in-place change (a move, a rescale, a re-layer): no edit verb touches
-    // one in this round, so a change is a raw operation, never a silent drop.
-    if (was.kind === 'INSERT') {
-      if (was.print === now.print) continue
-      return cannot(`entity ${handle} is a INSERT the plan cannot carry, and it changed`)
+    // An INSERT permits properties, but never a placement change.
+    if (was.kind === 'INSERT' && was.print !== now.print) {
+      refuse(`entity ${handle} is a INSERT the plan cannot carry, and it changed`, 'INSERT', 'moved-reference')
+      continue
     }
     // W4g-7b-04c: a DIMENSION stays opaque for any in-place change, same as
     // INSERT — no verb the store exposes touches one but delete, so this is
     // a defensive refusal (a raw operation), never a silent drop.
     if (was.kind === 'DIMENSION') {
       if (was.print === now.print) continue
-      return cannot(`entity ${handle} is a DIMENSION the plan cannot carry, and it changed`)
+      refuse(`entity ${handle} is a DIMENSION the plan cannot carry, and it changed`, 'DIMENSION', 'moved-reference')
+      continue
     }
     if (was.layer !== now.layer) setLayer.push({ handle, layer: now.layer })
     // W4g-7b-03c: colour, linetype and lineweight lower independently of
@@ -333,7 +349,8 @@ export function diffPlan(committed, current) {
     const nowProps = now.props
     const trueColorChanged = JSON.stringify(wasProps.trueColor) !== JSON.stringify(nowProps.trueColor)
     if (trueColorChanged && nowProps.trueColor) {
-      return cannot(`entity ${handle} has a true colour the plan cannot carry`)
+      refuse(`entity ${handle} has a true colour the plan cannot carry`, now.kind, 'true-colour')
+      continue
     }
     // W4g-7b-03c-g F3: clearing a true colour back to a plain ACI can leave
     // the nearest-index projection (`aci`) unchanged, so the aci compare
@@ -345,6 +362,7 @@ export function diffPlan(committed, current) {
     }
     if (wasProps.linetype.toLowerCase() !== nowProps.linetype.toLowerCase()) setLinetype.push({ handle, name: nowProps.linetype })
     if (wasProps.lineweight !== nowProps.lineweight) setLineweight.push({ handle, weight: nowProps.lineweight })
+    if (now.kind === 'INSERT') continue
     if (now.kind === 'CIRCLE') {
       if (!sameRound(was, now)) setCircle.push({ handle, c: now.c, r: now.r })
     } else if (now.kind === 'ARC') {
@@ -358,22 +376,32 @@ export function diffPlan(committed, current) {
       if (wasClosed !== nowClosed || !samePoints(was.pts, now.pts) || !sameBulges) {
         // A set_points carries points only: a curved polyline (before or
         // after) would be written back as its chords. Refuse, never flatten.
-        if (was.curved || now.curved) return cannot(`polyline ${handle} has curved segments the plan cannot carry`)
+        if (was.curved || now.curved) {
+          refuse(`polyline ${handle} has curved segments the plan cannot carry`, 'LWPOLYLINE', 'curved-geometry')
+          continue
+        }
         setPoints.push({ handle, closed: nowClosed, pts: now.pts })
       }
     }
   }
   for (const [handle, now] of after) {
     if (before.has(handle)) continue
-    if (now.kind === 'OPAQUE') return cannot(`entity ${handle} is a ${now.type} the plan cannot carry, and it was added`)
-    if (now.curved) return cannot(`polyline ${handle} has curved segments the plan cannot carry`)
+    if (now.kind === 'OPAQUE') {
+      refuse(`entity ${handle} is a ${now.type} the plan cannot carry, and it was added`, now.type, 'opaque-kind')
+      continue
+    }
+    if (now.curved) {
+      refuse(`polyline ${handle} has curved segments the plan cannot carry`, 'LWPOLYLINE', 'curved-geometry')
+      continue
+    }
     added.push(addedRecord(handle, now))
   }
   const count = added.length + removed.length + setLayer.length + setPoints.length + setCircle.length + setArc.length
     + setColor.length + setLinetype.length + setLineweight.length
   if (count > MAX_PLAN_OPERATIONS) {
-    return { mutations: null, count, reason: `this edit changes ${count} entities, over the ${MAX_PLAN_OPERATIONS} a plan can carry` }
+    soft ||= { mutations: null, count, reason: `this edit changes ${count} entities, over the ${MAX_PLAN_OPERATIONS} a plan can carry` }
   }
+  if (hard || soft) return hard || soft
   const mutations = {}
   if (added.length) mutations.added = added.sort(byHandle)
   if (removed.length) mutations.removed = removed.sort()

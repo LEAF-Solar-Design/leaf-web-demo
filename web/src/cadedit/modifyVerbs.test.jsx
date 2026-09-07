@@ -195,3 +195,88 @@ describe('W4g-4 ribbon: each verb posts the exact edit, and a creating verb sele
     expect(lastPost()).toEqual({ type: 'applyEdit', op: 'createPolyline', payload: { points: [1, 1, 5, 1, 5, 4, 1, 4], closed: true, layer: '' } })
   })
 })
+
+// W4g-7b-05c-2: buildEditPayload's own by-kind gate (the entity list it now
+// takes) refuses every geometry verb on a placed INSERT or DIMENSION BEFORE
+// any worker message on every surface that calls it; delete stays allowed
+// (the contract carries `removed` for any kind); the three property ops and
+// MATCHPROP's own source ladder are exempt (03c-f, 04c).
+describe('W4g-7b-05c-2: a placed INSERT or DIMENSION refuses every geometry verb by kind, before any worker message', () => {
+  const INSERT_ENTITY = { id: 'i1', type: 'INSERT', name: 'Fixture', ip: [0, 0, 0], rotationDeg: 0, scale: [1, 1, 1], layer: 'A', editable: false }
+  const DIM_ENTITY = { id: 'd1', type: 'DIMENSION', dimtype: 'LINEAR', def1: [0, 0], def2: [1, 1], dimline: [0, 1], rotationDeg: 0, style: 'Standard', layer: 'A', editable: false }
+  const OTHER = { id: 'e9', type: 'LINE', layer: 'B', vertices: [[0, 0], [1, 1]] }
+  const entities = [INSERT_ENTITY, DIM_ENTITY, OTHER]
+  const inputs = {
+    dx: '1', dy: '1', cx: '0', cy: '0', deg: '90', factor: '2',
+    x1: '0', y1: '0', x2: '0', y2: '10', keep: 'true',
+    rows: '2', cols: '2', rowGap: '1', colGap: '1', layer: 'New',
+  }
+  const GEOMETRY_OPS = ['move', 'copy', 'rotate', 'scale', 'mirror', 'offset', 'arrayRect', 'arrayPolar', 'explode', 'setLayer', 'moveVertex', 'addVertex', 'deleteVertex', 'trim', 'extend', 'fillet', 'chamfer']
+
+  it.each([INSERT_ENTITY, DIM_ENTITY].flatMap((entity) => GEOMETRY_OPS.map((op) => [entity.type, op, entity])))(
+    'F5: %s x %s posts zero worker messages', async (kind, op, entity) => {
+      const studio = mount()
+      await openAndLoad([entity, OTHER])
+      act(() => { studio.context.session.actions.select(entity.id) })
+      const before = workers[0].posted.length
+      act(() => { studio.context.session.actions.applyEdit(op, inputs) })
+      expect(studio.context.session.status).toBe(kind === 'INSERT'
+        ? 'an INSERT is placed, not edited, in this round' : 'a dimension is placed, not edited, in this round')
+      expect(workers[0].posted).toHaveLength(before)
+    },
+  )
+
+  it.each([INSERT_ENTITY, DIM_ENTITY])('F5: $type x delete posts exactly one message', async (entity) => {
+    const studio = mount()
+    await openAndLoad([entity, OTHER])
+    act(() => { studio.context.session.actions.select(entity.id) })
+    const before = workers[0].posted.length
+    act(() => { studio.context.session.actions.applyEdit('delete', {}) })
+    expect(workers[0].posted.slice(before)).toEqual([{ type: 'applyEdit', op: 'delete', payload: { entityId: entity.id } }])
+  })
+
+  it('F4: MOVE on INSERT shows the exact by-kind prompt note and holds Run', async () => {
+    const studio = mount()
+    await openAndLoad([INSERT_ENTITY, OTHER])
+    act(() => { studio.context.session.actions.select(INSERT_ENTITY.id) })
+    const before = workers[0].posted.length
+    fireEvent.click(tool('move'))
+    expect(screen.getByTestId('cockpit-prompt-note').textContent).toBe('an INSERT is placed, not edited, in this round')
+    expect(screen.getByTestId('cockpit-prompt').querySelector('.cp-run').disabled).toBe(true)
+    expect(workers[0].posted).toHaveLength(before)
+  })
+
+  it('every geometry verb on the INSERT reference refuses with the store sentence', () => {
+    for (const op of GEOMETRY_OPS) expect(buildEditPayload(op, 'i1', inputs, undefined, entities).refusal).toBe('an INSERT is placed, not edited, in this round')
+  })
+
+  it('every geometry verb on the DIMENSION refuses with the store sentence', () => {
+    for (const op of GEOMETRY_OPS) expect(buildEditPayload(op, 'd1', inputs, undefined, entities).refusal).toBe('a dimension is placed, not edited, in this round')
+  })
+
+  it('delete stays allowed on both kinds (the contract carries `removed` for any kind)', () => {
+    expect(buildEditPayload('delete', 'i1', inputs, undefined, entities)).toEqual({ payload: { entityId: 'i1' } })
+    expect(buildEditPayload('delete', 'd1', inputs, undefined, entities)).toEqual({ payload: { entityId: 'd1' } })
+  })
+
+  it('matchprop with the INSERT or the DIMENSION as the SOURCE is fine: buildEditPayload does not refuse it by kind', () => {
+    expect(buildEditPayload('matchprop', 'i1', { edge: 'e9' }, undefined, entities).refusal).toBeUndefined()
+    expect(buildEditPayload('matchprop', 'd1', { edge: 'e9' }, undefined, entities).refusal).toBeUndefined()
+  })
+
+  // A DIMENSION as the matchprop DESTINATION already refuses (read-only,
+  // unlike an INSERT destination since 03c-f): lastPlaceholders.test.jsx's
+  // RO_DIM row is the oracle for that ladder, unchanged by this record.
+
+  it('on the live store, arming and running MOVE on a selected INSERT posts NOTHING to the worker; DELETE still runs', async () => {
+    const studio = mount()
+    await openAndLoad([{ ...INSERT_ENTITY }, { ...OTHER }])
+    act(() => { studio.context.session.actions.select('i1') })
+    const before = workers[0].posted.length
+    act(() => { studio.context.session.actions.applyEdit('move', { dx: '1', dy: '1' }) })
+    expect(studio.context.session.status).toBe('an INSERT is placed, not edited, in this round')
+    expect(workers[0].posted.length).toBe(before)
+    act(() => { studio.context.session.actions.applyEdit('delete', {}) })
+    expect(lastPost()).toEqual({ type: 'applyEdit', op: 'delete', payload: { entityId: 'i1' } })
+  })
+})

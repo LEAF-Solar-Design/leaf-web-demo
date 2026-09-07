@@ -64,6 +64,12 @@ export default function ScriptPanel() {
     const line = run.lines[index]
     const current = sessionRef.current
     const { actions } = current
+    // W4g-7b-05c: a deferred word (LEADER, BLOCK, GROUP, UNGROUP) stops the
+    // script here, at its own line, with its own frozen reason — never the
+    // engine's ladder (there is no engine op to gate), and every earlier
+    // line stays applied, each its own undo step, exactly as any other
+    // mid-script refusal leaves them.
+    if (line.group === 'deferred') { stop('stopped', `Script stopped at line ${line.line}: ${line.verb} ${line.reason}.`); return }
     // UNDO and REDO are session steps, not group ops: their gate is the depth.
     const gate = line.op === 'undo' || line.op === 'redo'
       ? (current.busy ? drawReason(current, reachRef.current) : (line.op === 'undo' ? current.undoDepth : current.redoDepth) > 0 ? '' : `nothing to ${line.op}`)
@@ -81,7 +87,13 @@ export default function ScriptPanel() {
         actions.copyToClipboard(false)
         run.awaiting.answered = true
       } else if (line.op === 'cutClip') actions.copyToClipboard(true)
-      else actions.applyEdit(line.op, {})
+      else {
+        if (line.op !== 'delete') {
+          const checked = buildEditPayload(line.op, current.selectedId, {}, current.entities.linetypes, current.entities)
+          if (checked.refusal) { stop('stopped', `Script stopped at line ${line.line}: ${checked.refusal}`); return }
+        }
+        actions.applyEdit(line.op, {})
+      }
     } else {
       const prompt = PROMPTS[line.op]
       // W4g-7b-02c-e: every operand the line omits takes the PROMPT'S
@@ -95,7 +107,7 @@ export default function ScriptPanel() {
       if (line.op !== 'pasteClip') {
         const checked = line.group === 'draw'
           ? buildCreatePayload(line.op, effective, current.entities.blocks, current.entities.dimstyles)
-          : buildEditPayload(line.op, current.selectedId, effective, current.entities.linetypes)
+          : buildEditPayload(line.op, current.selectedId, effective, current.entities.linetypes, current.entities)
         if (checked.refusal) { stop('stopped', `Script stopped at line ${line.line}: ${checked.refusal}`); return }
       }
       if (line.group === 'draw') actions.create(line.op, effective)

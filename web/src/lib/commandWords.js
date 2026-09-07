@@ -7,6 +7,8 @@
 // through to the normal dispatch untouched. Pure, bounded, allocation-free on
 // the miss path; the consumer (CommandLineArmer) turns the record into an
 // armed prompt or a direct edit.
+import { DEFERRED_REASONS } from './actionRegistry.js'
+
 export const COCKPIT_COMMAND_EVENT = 'cockpit:command'
 export const MAX_COMMAND_CHARS = 32
 
@@ -102,18 +104,41 @@ const WORDS = Object.freeze({
 
 export const COMMAND_WORDS = Object.freeze(Object.keys(WORDS))
 
+// W4g-7b-05c: the four controls this crate defers (Change A) still take
+// their reference words — a drafter typing LEADER, BLOCK or GROUP must never
+// meet silence. `key` names the DEFERRED_REASONS entry the parse carries.
+const DEFERRED = Object.freeze({
+  leader: { key: 'leader', verb: 'LEADER' },
+  le: { key: 'leader', verb: 'LEADER' },
+  block: { key: 'blockCreate', verb: 'BLOCK' },
+  b: { key: 'blockCreate', verb: 'BLOCK' },
+  group: { key: 'group', verb: 'GROUP' },
+  g: { key: 'group', verb: 'GROUP' },
+  ungroup: { key: 'ungroup', verb: 'UNGROUP' },
+})
+
 /**
  * Parse the Command bar text as a drawing command. Returns a frozen
- * { group, op, verb, word } or null. Exact single-token match only (case-
- * insensitive), with an optional leading ">" and surrounding whitespace;
- * text longer than MAX_COMMAND_CHARS is never a command (a pasted paragraph
- * costs one length check, not a regex over 16 MB).
+ * { group, op, verb, word } (a live word) or { group: 'deferred', op, verb,
+ * word, reason } (one of the four deferred controls, never dropped silently)
+ * or null. Exact single-token match only (case-insensitive), with an
+ * optional leading ">" and surrounding whitespace; text longer than
+ * MAX_COMMAND_CHARS is never a command (a pasted paragraph costs one length
+ * check, not a regex over 16 MB).
  */
 export function parseDrawingCommand(text) {
   if (typeof text !== 'string' || text.length === 0 || text.length > MAX_COMMAND_CHARS) return null
   let s = text.trim()
   if (s.startsWith('>')) s = s.slice(1).trim()
   if (!s || /\s/.test(s)) return null
-  const hit = WORDS[s.toLowerCase()]
-  return hit ? Object.freeze({ ...hit, word: s }) : null
+  const lower = s.toLowerCase()
+  const hit = WORDS[lower]
+  if (hit) return Object.freeze({ ...hit, word: s })
+  const deferred = DEFERRED[lower]
+  if (deferred) {
+    return Object.freeze({
+      group: 'deferred', op: deferred.key, verb: deferred.verb, word: s, reason: DEFERRED_REASONS[deferred.key],
+    })
+  }
+  return null
 }

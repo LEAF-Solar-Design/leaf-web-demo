@@ -361,10 +361,11 @@ fn lineweight_of(entity: &EntityType) -> i64 {
 // W4g-7b-01c: block definitions share the crate's flat entity storage, but
 // their children are not independent model-space geometry or edit targets.
 const BLOCK_CHILD_CAP: usize = 60;
-const INSERT_NOT_EDITABLE: &str = "INSERT is not editable in this round";
-// W4g-7b-04c: the 05c sentence, adopted for DIMENSION. Unlike INSERT, a
-// dimension's DELETE is still allowed (delete_entity_core does not route
-// through entity_mut/cloned_for_create, so this text never gates it).
+// W4g-7b-05c-2: ERASE stays allowed on a placed INSERT or DIMENSION (the
+// contract carries `removed` for any kind); every other geometry verb
+// refuses by kind. Both sentences gate through entity_mut only, never
+// editable_at/delete_entity_core, so delete_entity_core never sees them.
+const INSERT_NOT_EDITABLE: &str = "an INSERT is placed, not edited, in this round";
 const DIMENSION_NOT_EDITABLE: &str = "a dimension is placed, not edited, in this round";
 
 fn block_children(document: &CadDocument) -> HashSet<Handle> {
@@ -842,15 +843,17 @@ impl ParsedDxf {
         if block_children(&self.inner).contains(&entity.common().handle) {
             return refuse("block_child_not_editable");
         }
-        if matches!(entity, EntityType::Insert(_)) { return refuse(INSERT_NOT_EDITABLE); }
         Ok(entity)
     }
 
     fn entity_mut(&mut self, index: usize) -> Result<&mut EntityType, Refusal> {
         let entity = self.editable_at(index)?;
-        // W4g-7b-04c: every geometry verb goes through entity_mut (delete
-        // does not, see delete_entity_core), so gating here refuses a
-        // DIMENSION selection for all of them with the one 05c sentence.
+        // W4g-7b-05c-2: every geometry verb goes through entity_mut (delete
+        // does not, see delete_entity_core), so gating here refuses an
+        // INSERT or a DIMENSION selection for all of them by kind.
+        if matches!(entity, EntityType::Insert(_)) {
+            return refuse(INSERT_NOT_EDITABLE);
+        }
         if matches!(entity, EntityType::Dimension(_)) {
             return refuse(DIMENSION_NOT_EDITABLE);
         }
@@ -864,10 +867,11 @@ impl ParsedDxf {
     fn delete_entity_core(&mut self, index: usize) -> Result<(), Refusal> {
         let (handle, is_editable) = {
             let entity = self.editable_at(index)?;
-            // W4g-7b-04c: a DIMENSION is not geometry-editable (editable()
-            // stays false so the projection's "editable" flag is honest) but
-            // its DELETE is allowed, so this is the one place that admits it.
-            (entity.common().handle, editable(entity) || matches!(entity, EntityType::Dimension(_)))
+            // W4g-7b-04c/05c-2: a DIMENSION or an INSERT is not
+            // geometry-editable (editable() stays false so the projection's
+            // "editable" flag is honest) but its DELETE is allowed, so this
+            // is the one place that admits either.
+            (entity.common().handle, editable(entity) || matches!(entity, EntityType::Dimension(_) | EntityType::Insert(_)))
         };
         if !is_editable {
             return refuse("entity_kind_not_editable");
@@ -1272,9 +1276,11 @@ impl ParsedDxf {
     /// overwrite the original in the document's map).
     fn cloned_for_create(&self, index: usize) -> Result<(EntityType, String), Refusal> {
         let entity = self.editable_at(index)?;
-        // W4g-7b-04c: COPY / MIRROR-with-source / EXPLODE are geometry verbs
-        // too (W4d Draw group note above), so a DIMENSION selection refuses
-        // with the same 05c sentence entity_mut's callers get.
+        // COPY / MIRROR-with-source refuse placed kinds with the same
+        // sentences as entity_mut, before the generic editable-kind check.
+        if matches!(entity, EntityType::Insert(_)) {
+            return refuse(INSERT_NOT_EDITABLE);
+        }
         if matches!(entity, EntityType::Dimension(_)) {
             return refuse(DIMENSION_NOT_EDITABLE);
         }
@@ -1379,6 +1385,12 @@ impl ParsedDxf {
     fn explode_entity_core(&mut self, index: usize) -> Result<Vec<String>, Refusal> {
         let (handle, layer, parts) = {
             let entity = self.editable_at(index)?;
+            if matches!(entity, EntityType::Insert(_)) {
+                return refuse(INSERT_NOT_EDITABLE);
+            }
+            if matches!(entity, EntityType::Dimension(_)) {
+                return refuse(DIMENSION_NOT_EDITABLE);
+            }
             if !editable(entity) {
                 return refuse("entity_kind_not_editable");
             }
@@ -3110,7 +3122,6 @@ mod block_definition_rows {
         assert_eq!(reference["editable"], false);
         let index = reference["index"].as_u64().unwrap() as usize;
         let before = DxfWriter::new(&doc.inner).write_to_vec().unwrap();
-        assert_eq!(doc.delete_entity_core(index).unwrap_err(), INSERT_NOT_EDITABLE);
         assert_eq!(doc.translate_entity_core(index, 1.0, 2.0).unwrap_err(), INSERT_NOT_EDITABLE);
         assert_eq!(doc.copy_entity_core(index, 1.0, 2.0).unwrap_err(), INSERT_NOT_EDITABLE);
         let child_index = doc.inner.entities().position(|e| e.common().handle == Handle::new(0x100)).unwrap();
@@ -3118,6 +3129,10 @@ mod block_definition_rows {
         assert_eq!(doc.translate_entity_core(child_index, 1.0, 2.0).unwrap_err(), "block_child_not_editable");
         assert_eq!(doc.copy_entity_core(child_index, 1.0, 2.0).unwrap_err(), "block_child_not_editable");
         assert_eq!(DxfWriter::new(&doc.inner).write_to_vec().unwrap(), before);
+        // W4g-7b-05c-2: ERASE stays allowed on a placed INSERT, unlike every
+        // other verb above; index is still valid, nothing before mutated it.
+        assert!(doc.delete_entity_core(index).is_ok(), "delete is allowed on an INSERT unlike every other verb");
+        assert!(doc.inner.get_entity(Handle::new(1280)).is_none());
         let no_insert = parsed(fixture(&format!("{LINE}{CIRCLE}"), false));
         assert!(projected_entities(&no_insert.inner).is_empty());
         let blocks = block_catalogue(&doc.inner, doc.block_bases_unknown, &doc.unknown_block_bases);

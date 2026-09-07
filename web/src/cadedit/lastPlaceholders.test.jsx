@@ -8,7 +8,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import DraftingRibbon, { RibbonWidget } from '../site/DraftingRibbon.jsx'
-import { forGroup } from '../lib/actionRegistry.js'
+import { DEFERRED_REASONS, forGroup } from '../lib/actionRegistry.js'
 import { parseDrawingCommand } from '../lib/commandWords.js'
 
 import EngineRibbonClusters, { PROMPTS } from './EngineRibbonClusters.jsx'
@@ -140,7 +140,7 @@ describe('W4g-4b MATCHPROP', () => {
     // W4g-7b-03c-f: an INSERT reference is a matchable destination (its own
     // properties, never its block children); only a non-INSERT read-only
     // kind still refuses by name.
-    expect(planMatchprop(session([H, RO], '7'), { edge: '11' })).toEqual({ steps: [{ op: 'setLayer', entityId: '11', layer: 'Source' }] })
+    expect(planMatchprop(session([H, RO], '7'), { edge: '11' })).toEqual({ refusal: 'Match refused: an INSERT keeps its layer in this round.' })
     expect(planMatchprop(session([H, RO_DIM], '7'), { edge: '12' }).refusal).toBe('Match refused: the destination object is read-only in the browser engine.')
     // W4g-7b-03c: MATCHPROP now checks the layer AND the three properties, so
     // "nothing would change" covers all four rather than naming the layer alone.
@@ -221,6 +221,29 @@ describe('W4g-4b MATCHPROP', () => {
     expect(again).not.toBe(first)
     expect(again.querySelectorAll('[data-tool="modify:matchprop"]')).toHaveLength(1)
     expect(document.querySelectorAll('[data-tool="modify:matchprop"]')).toHaveLength(1)
+  })
+})
+
+// W4g-7b-05c: the flag-ON engine panels' own honest placeholders (Leader,
+// Create Block) carry the same specific reason the flag-off static panels
+// do, not the generic "not in the browser engine yet".
+describe('W4g-7b-05c: the deferred controls carry their own reason with the flag on', () => {
+  it('Leader (Annotation) and Create Block (Block) are disabled with their DEFERRED_REASONS sentence', () => {
+    render(
+      <EngineSessionProvider createWorker={vi.fn(() => new IdleWorker())}>
+        <DraftingRibbon clusters={[]}>
+          <EngineRibbonClusters importOpen={false} onToggleImport={() => {}} panels={['annotation', 'block']} />
+        </DraftingRibbon>
+      </EngineSessionProvider>,
+    )
+    const leader = document.querySelector('[data-tool="annotation:leader"]')
+    expect(leader.disabled).toBe(true)
+    expect(leader.title).toBe(DEFERRED_REASONS.leader)
+    expect(leader.getAttribute('aria-label')).toBe(`Leader (unavailable: ${DEFERRED_REASONS.leader})`)
+    const create = document.querySelector('[data-tool="block:create"]')
+    expect(create.disabled).toBe(true)
+    expect(create.title).toBe(DEFERRED_REASONS.blockCreate)
+    expect(create.getAttribute('aria-label')).toBe(`Create Block (unavailable: ${DEFERRED_REASONS.blockCreate})`)
   })
 })
 

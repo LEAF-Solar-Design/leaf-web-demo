@@ -109,6 +109,16 @@ export function parseScript(text, parseWord, prompts) {
     const [head, ...operands] = tok.tokens
     const command = parseWord(head)
     if (!command) return { refusal: `line ${number}: "${head}" is not a command word`, line: number }
+    // W4g-7b-05c: a deferred word (LEADER, BLOCK, GROUP, UNGROUP) is a real
+    // command word, never "not a command word" — it parses onto the line
+    // list carrying its own reason, and the runner stops there (never here),
+    // so every earlier line still runs before the script honestly refuses.
+    if (command.group === 'deferred') {
+      lines.push(Object.freeze({
+        line: number, word: head, group: command.group, op: command.op, verb: command.verb, inputs: {}, reason: command.reason,
+      }))
+      continue
+    }
     const prompt = prompts[command.op] || null
     const inputs = {}
     if (!prompt) {

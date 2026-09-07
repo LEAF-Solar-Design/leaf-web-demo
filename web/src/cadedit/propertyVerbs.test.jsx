@@ -90,11 +90,11 @@ describe('planMatchprop: one batch of the layer plus only the properties that di
     const insertDest = { id: 'insd', layer: 'B', aci: 256, linetype: 'ByLayer', lineweight: -1, editable: false, type: 'INSERT' }
     expect(planMatchprop({ entities: [source, insertDest], selectedId: 's1' }, { edge: 'insd' })).toEqual({
       steps: [
-        { op: 'setLayer', entityId: 'insd', layer: 'A' },
         { op: 'setColor', entityId: 'insd', aci: 1 },
         { op: 'setLinetype', entityId: 'insd', linetype: 'HIDDEN' },
         { op: 'setLineweight', entityId: 'insd', lineweight: 25 },
       ],
+      skipped: ['layer'],
     })
   })
 
@@ -127,7 +127,7 @@ describe('propertyReason: the Properties panel\'s own ladder (W4g-7b-03c-f)', ()
     expect(propertyReason({ engineParsed: true, selected: { editable: true } })).toBe('')
   })
 
-  it('is live for a selected INSERT reference, where modifyReason still refuses it', () => {
+  it('is live for a selected INSERT reference', () => {
     const session = { engineParsed: true, selected: { editable: false, type: 'INSERT' } }
     expect(propertyReason(session)).toBe('')
   })
@@ -171,7 +171,7 @@ describe('the diff: colour-only changes, styled adds and true colour', () => {
     const before = [line(10)]
     const after = [line(10, { trueColor: [1, 2, 3] })]
     expect(diffPlan(before, after)).toEqual({
-      mutations: null, count: 0, reason: 'entity A has a true colour the plan cannot carry',
+      mutations: null, count: 0, reason: 'entity A has a true colour the plan cannot carry', kind: 'LINE', cause: 'true-colour',
     })
   })
 

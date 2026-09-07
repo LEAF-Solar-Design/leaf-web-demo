@@ -4,7 +4,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { COCKPIT_COMMAND_EVENT } from '../lib/commandWords.js'
+import { DEFERRED_REASONS } from '../lib/actionRegistry.js'
+import { COCKPIT_COMMAND_EVENT, parseDrawingCommand } from '../lib/commandWords.js'
 
 import CadEditSurface from './CadEditSurface.jsx'
 import CommandLineArmer, { acceptsCommand } from './CommandLineArmer.jsx'
@@ -95,6 +96,53 @@ describe('CommandLineArmer (W4f slice B)', () => {
     expect(posted[posted.length - 1]).toEqual({ type: 'applyEdit', op: 'delete', payload: { entityId: 'e1' } })
   })
 
+  it('C2: typed x runs EXPLODE at once on a selected LWPOLYLINE', async () => {
+    mount()
+    await openAndLoad([{ ...LINE, type: 'LWPOLYLINE', vertices: [[0, 0], [1, 0], [1, 1]] }])
+    fireEvent.click(screen.getByRole('radio'))
+    const before = workers[0].posted.length
+    command(parseDrawingCommand('x'))
+    expect(workers[0].posted.slice(before)).toEqual([{ type: 'applyEdit', op: 'explode', payload: { entityId: 'e1' } }])
+    expect(promptEl()).toBeNull()
+  })
+
+  it.each([
+    ['INSERT', 'an INSERT is placed, not edited, in this round'],
+    ['DIMENSION', 'a dimension is placed, not edited, in this round'],
+  ])('C2: typed explode on %s surfaces the placed-kind refusal without posting', async (type, sentence) => {
+    mount()
+    await openAndLoad([{ ...LINE, type, editable: false }])
+    fireEvent.click(screen.getByRole('radio'))
+    const before = workers[0].posted.length
+    command(parseDrawingCommand('explode'))
+    expect(screen.getByRole('status').textContent).toBe(sentence)
+    expect(workers[0].posted).toHaveLength(before)
+    expect(promptEl()).toBeNull()
+  })
+
+  it('C2: typed x without a selection surfaces the ladder sentence and arms nothing', async () => {
+    mount()
+    await openAndLoad()
+    const before = workers[0].posted.length
+    command(parseDrawingCommand('x'))
+    expect(screen.getByRole('status').textContent).toBe('select an entity in the drawing')
+    expect(workers[0].posted).toHaveLength(before)
+    expect(promptEl()).toBeNull()
+  })
+
+  it('F4: typed m arms MOVE on INSERT and typed erase posts delete', async () => {
+    mount()
+    await openAndLoad([{ id: '11', type: 'INSERT', name: 'Fixture', ip: [0, 0, 0], rotationDeg: 0, scale: [1, 1, 1], layer: '0', editable: false }])
+    fireEvent.click(screen.getByRole('radio'))
+    const before = workers[0].posted.length
+    command(parseDrawingCommand('m'))
+    expect(promptEl().getAttribute('data-op')).toBe('move')
+    expect(screen.getByTestId('cockpit-prompt-note').textContent).toBe('an INSERT is placed, not edited, in this round')
+    expect(workers[0].posted).toHaveLength(before)
+    command(parseDrawingCommand('erase'))
+    expect(workers[0].posted.slice(before)).toEqual([{ type: 'applyEdit', op: 'delete', payload: { entityId: '11' } }])
+  })
+
   // W4g-5c: the clipboard words. kimi on #1025 found them registered as words
   // and dropped here, because this gate knew two groups; the ribbon arm had
   // the same defect one layer down. Both layers are pinned now.
@@ -115,6 +163,22 @@ describe('CommandLineArmer (W4f slice B)', () => {
     command({ group: 'clipboard', op: 'cutClip' })
     const posted = workers[0].posted
     expect(posted[posted.length - 1]).toEqual({ type: 'applyEdit', op: 'delete', payload: { entityId: 'e1' } })
+  })
+
+  // W4g-7b-05c: GROUP (typed "g") arms nothing — there is no engine op — but
+  // its frozen reason is surfaced exactly where a real refusal reads, so
+  // typing a deferred word is never silence.
+  it('a deferred word (GROUP) arms nothing and surfaces its own sentence', async () => {
+    mount()
+    await openAndLoad()
+    expect(promptEl()).toBeNull()
+    command({ group: 'deferred', op: 'group', reason: DEFERRED_REASONS.group })
+    expect(promptEl()).toBeNull()
+    expect(screen.getByRole('status').textContent).toBe(DEFERRED_REASONS.group)
+    // A mismatched reason (never emitted by the real parser, but the gate
+    // must fail closed against it anyway) is dropped, same as any malformed detail.
+    command({ group: 'deferred', op: 'leader', reason: 'a made-up sentence' })
+    expect(screen.getByRole('status').textContent).toBe(DEFERRED_REASONS.group)
   })
 
   it('acceptsCommand is the fail-closed gate', () => {

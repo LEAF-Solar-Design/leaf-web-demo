@@ -266,6 +266,8 @@ describe('mutationDiff: the LINEAR/ALIGNED add, undo, and the moved refusal', ()
     const moved = diffPlan([linear(1280)], [linear(1280, { dimline: [9, 9] })])
     expect(moved.mutations).toBeNull()
     expect(moved.reason).toBe('entity 500 is a DIMENSION the plan cannot carry, and it changed')
+    // W4g-7b-05c-2: the save's own REJECT rule reads kind and cause.
+    expect(moved).toMatchObject({ kind: 'DIMENSION', cause: 'moved-reference' })
     const restyled = diffPlan([linear(1280)], [linear(1280, { style: 'Other' })])
     expect(restyled.reason).toBe('entity 500 is a DIMENSION the plan cannot carry, and it changed')
   })

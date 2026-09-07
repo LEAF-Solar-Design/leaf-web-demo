@@ -5,6 +5,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { DEFERRED_REASONS } from '../lib/actionRegistry.js'
 import CadEditSurface from './CadEditSurface.jsx'
 import EngineRibbonClusters from './EngineRibbonClusters.jsx'
 import EngineSessionProvider, { useEngineSessionContext } from './EngineSessionProvider.jsx'
@@ -161,6 +162,22 @@ describe('W4g-7a the script runner', () => {
     expect(posts()).toHaveLength(0)
   })
 
+  // W4g-7b-05c: a deferred word (LEADER, BLOCK, GROUP, UNGROUP) is a real
+  // command word the parser never refuses at; the runner stops AT that line
+  // with its own frozen reason, and the LINE before it stays applied.
+  it('a deferred word (LEADER) stops the script at its own line with its reason; the LINE before it stays', async () => {
+    mount()
+    await openAndLoad([H])
+    setScript('line 0,0 3,4\nleader')
+    fireEvent.click(runButton())
+    expect(posts()).toHaveLength(1)
+    reply('createLine', [H, L2], { createdId: '8' })
+    await waitFor(() => expect(status().textContent).toBe(`Script stopped at line 2: LEADER ${DEFERRED_REASONS.leader}.`), { timeout: 5000 })
+    expect(posts()).toHaveLength(1)
+    expect(status().getAttribute('data-phase')).toBe('stopped')
+    expect(context.session.entityCount).toBe(2)
+  })
+
   it('COPYCLIP is answered the moment it returns, even when its sentence repeats; the same file can be chosen twice', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     mount()
@@ -188,6 +205,28 @@ describe('W4g-7a the script runner', () => {
     setScript('')
     await act(async () => { fireEvent.change(input, { target: { files: [file] } }); await Promise.resolve(); await Promise.resolve() })
     await waitFor(() => expect(screen.getByLabelText('ribbon script').value).toBe('circle 1,1 2\n'), { timeout: 5000 })
+  })
+
+  it.each([
+    ['INSERT', 'an INSERT is placed, not edited, in this round'],
+    ['DIMENSION', 'a dimension is placed, not edited, in this round'],
+  ])('C1: repeated bare EXPLODE on %s stops immediately on both runs', async (type, sentence) => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    mount()
+    await openAndLoad([{ ...H, type, editable: false }])
+    act(() => { context.session.actions.select('7') })
+    const before = workers[0].posted.length
+    const applyEdit = vi.spyOn(context.session.actions, 'applyEdit')
+    setScript('explode')
+    for (let run = 0; run < 2; run += 1) {
+      fireEvent.click(runButton())
+      expect(status().textContent).toBe(`Script stopped at line 1: ${sentence}`)
+      expect(status().getAttribute('data-phase')).toBe('stopped')
+      expect(runButton().disabled).toBe(false)
+      expect(workers[0].posted).toHaveLength(before)
+      expect(applyEdit).not.toHaveBeenCalled()
+    }
+    applyEdit.mockRestore()
   })
 
   it('a bare ERASE runs on the selection, and an engine that never answers is stopped by the line budget', async () => {

@@ -114,11 +114,27 @@ export const MODIFY_REASONS = Object.freeze({
   readOnlyKind: 'read-only entity kind',
 })
 
+export const PLACED_KINDS = new Set(['INSERT', 'DIMENSION'])
+
 // W4g-5c: the clipboard's ladder. CUT and COPY answer to the Modify ladder
 // (they act on a selection); PASTE does not need a selection at all, it needs
 // a record on the clipboard, so it has its own last rung.
 export const CLIPBOARD_REASONS = Object.freeze({
   empty: 'nothing on the clipboard yet',
+})
+
+// W4g-7b-05c: the four reference controls this crate defers, each with its
+// own specific sentence rather than the generic "not in the browser engine
+// yet" every other placeholder carries. Frozen once here so the flag-off
+// ribbon panel, the flag-on engine panel, the typed word (LEADER/LE,
+// BLOCK/B, GROUP/G, UNGROUP) and the script runner all read the exact same
+// four strings — a literal `DEFERRED_REASONS.key` reference the honesty-ladder
+// gate (check_honesty_ladder.mjs) can verify, same as every other `*REASONS` map.
+export const DEFERRED_REASONS = Object.freeze({
+  blockCreate: 'unavailable; insert an existing block',
+  leader: "unavailable; a leader's annotation is an association the contract does not carry yet",
+  group: 'unavailable; groups are dictionary objects the contract does not carry yet',
+  ungroup: 'unavailable; groups are dictionary objects the contract does not carry yet',
 })
 
 // W4g-1b: while the engine holds no document, the reach state (the provider's
@@ -169,7 +185,7 @@ export function modifyReason(session, reach = null) {
   if (!session.engineParsed) return reachSentence(reach) || MODIFY_REASONS.noDocument
   if (session.busy) return MODIFY_REASONS.busy
   if (!session.selected) return MODIFY_REASONS.noSelection
-  if (session.selected.editable === false) return MODIFY_REASONS.readOnlyKind
+  if (session.selected.editable === false && !PLACED_KINDS.has(session.selected.type)) return MODIFY_REASONS.readOnlyKind
   return ''
 }
 

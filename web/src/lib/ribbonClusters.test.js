@@ -5,6 +5,7 @@
 // an unavailable group its note, and no cluster is ever fabricated.
 import { describe, expect, it, vi } from 'vitest'
 
+import { DEFERRED_REASONS } from './actionRegistry.js'
 import {
   CATALOG_TOOL_NOTE_ALL_PLACED,
   MAX_LAYER_TOOLS,
@@ -15,6 +16,7 @@ import {
   catalogTabClusters,
   layersCluster,
   railCluster,
+  referencePanels,
   versionCluster,
   viewCluster,
 } from './ribbonClusters.js'
@@ -445,5 +447,35 @@ describe('authorCluster', () => {
     const cluster = authorCluster({ onOpen: () => {}, authored: readTool, writeLocked: true, writeEntitled: false })
     expect(cluster.tools[1].disabled).toBe(false)
     expect(cluster.tools[1].reason).toBe('')
+  })
+})
+
+// W4g-7b-05c: the flag-off reference panels' census. Dimensions is gone
+// (real since 04c); the four deferred controls carry their own reasons, not
+// the generic REASONS.notInEngine every other placeholder here still does.
+describe('referencePanels (the flag-off placeholders)', () => {
+  it('Annotation drops Dimensions and gives Leader its own reason; Text stays generic', () => {
+    const [annotation] = referencePanels()
+    expect(toolsOf(annotation)).not.toHaveProperty('annotation:dimensions')
+    expect(toolsOf(annotation)['annotation:text'].reason).toBe(REASONS.notInEngine)
+    const leader = toolsOf(annotation)['annotation:leader']
+    expect(leader.disabled).toBe(true)
+    expect(leader.reason).toBe(DEFERRED_REASONS.leader)
+  })
+
+  it('Block gives Create Block its own reason; Insert Block stays generic', () => {
+    const [, block] = referencePanels()
+    const create = toolsOf(block)['block:create']
+    expect(create.disabled).toBe(true)
+    expect(create.reason).toBe(DEFERRED_REASONS.blockCreate)
+    expect(toolsOf(block)['block:insert'].reason).toBe(REASONS.notInEngine)
+  })
+
+  it('Groups gives Group and Ungroup their own reason', () => {
+    const [, , , groups] = referencePanels()
+    const group = toolsOf(groups)['groups:group']
+    const ungroup = toolsOf(groups)['groups:ungroup']
+    expect([group.disabled, group.reason]).toEqual([true, DEFERRED_REASONS.group])
+    expect([ungroup.disabled, ungroup.reason]).toEqual([true, DEFERRED_REASONS.ungroup])
   })
 })
