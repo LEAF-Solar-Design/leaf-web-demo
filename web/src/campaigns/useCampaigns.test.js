@@ -142,6 +142,51 @@ describe('completion state', () => {
   })
 })
 
+describe('current release downloads', () => {
+  const artifact = { name: 'records.csv', byte_count: 4, sha256: 'a'.repeat(64), valid: true, retrieved: true }
+  const completion = { release: { release_id: Q, status: 'finished', contract: { required_checks: [{ check_id: 'workflow' }] } },
+    coverage: [{ check_id: 'workflow', status: 'passed' }], deliverables: [artifact] }
+  beforeEach(() => {
+    api.getCampaign.mockResolvedValue({ campaign: row, completion })
+    api.getRelease.mockResolvedValue({ completion })
+    api.downloadReleaseArtifact.mockResolvedValue({ bytes: new ArrayBuffer(4), mediaType: 'text/csv', name: 'records.csv' })
+  })
+  it('checks current release proof before returning verified bytes and locks duplicate clicks', async () => {
+    const pending = deferred()
+    api.downloadReleaseArtifact.mockReturnValue(pending.promise)
+    const hook = await ready()
+    await waitFor(() => expect(hook.result.current.executionLoading).toBe(false))
+    let download
+    act(() => { download = hook.result.current.downloadReleaseArtifact(artifact) })
+    await waitFor(() => expect(api.downloadReleaseArtifact).toHaveBeenCalledWith(P, C, Q, artifact))
+    expect(api.getRelease).toHaveBeenCalledWith(P, C, Q)
+    await act(async () => { expect(await hook.result.current.downloadReleaseArtifact(artifact)).toBeNull() })
+    const result = { bytes: new ArrayBuffer(4), mediaType: 'text/csv', name: 'records.csv' }
+    await act(async () => { pending.resolve(result); expect(await download).toEqual(result) })
+    expect(api.downloadReleaseArtifact).toHaveBeenCalledTimes(1)
+  })
+  it('replaces historical proof with current failed verification and refuses the file', async () => {
+    api.getRelease.mockResolvedValue({ completion: { ...completion, current_verification: { status: 'failed', reason: 'File changed.' } } })
+    const hook = await ready()
+    await waitFor(() => expect(hook.result.current.executionLoading).toBe(false))
+    await act(async () => { await expect(hook.result.current.downloadReleaseArtifact(artifact)).rejects.toThrow('verification') })
+    expect(hook.result.current.completion.current_verification.status).toBe('failed')
+    expect(api.downloadReleaseArtifact).not.toHaveBeenCalled()
+  })
+  it('discards bytes from the old project after a project change', async () => {
+    const pending = deferred()
+    api.downloadReleaseArtifact.mockReturnValue(pending.promise)
+    const hook = renderHook(({ projectId }) => useCampaigns(projectId), { initialProps: { projectId: P } })
+    await waitFor(() => expect(hook.result.current.executionLoading).toBe(false))
+    await waitFor(() => expect(hook.result.current.status).toBe('ready'))
+    let download
+    act(() => { download = hook.result.current.downloadReleaseArtifact(artifact) })
+    await waitFor(() => expect(api.downloadReleaseArtifact).toHaveBeenCalledOnce())
+    hook.rerender({ projectId: B })
+    await act(async () => { pending.resolve({ bytes: new ArrayBuffer(4) }); expect(await download).toBeNull() })
+  })
+})
+
 it('registers native release in the selected campaign and reloads setup readiness without execution', async () => {
   const native = { enrollment_id: Q, machine_id: 'VM-C', capability: 'campaign.native-release',
     state: 'pending', readiness: 'setup_required', readiness_message: 'The release executor is not connected.',

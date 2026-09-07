@@ -127,7 +127,91 @@ function humanBytes(value) {
   return `${Number((value / unit).toFixed(1))} ${unit === 1024 ? 'KB' : 'MB'}`
 }
 
-function CompletionPanel({ campaign }) {
+function ReleaseOutputs({ campaign, completion, available, urlApi }) {
+  const [preview, setPreview] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+  const live = useRef(false)
+  const sequence = useRef(0)
+  const openedUrl = useRef(null)
+  const close = () => {
+    sequence.current += 1
+    if (openedUrl.current) urlApi.revokeObjectURL(openedUrl.current)
+    openedUrl.current = null
+    setPreview(null)
+    setBusy(false)
+  }
+  useEffect(() => {
+    live.current = true
+    return () => {
+      live.current = false
+      sequence.current += 1
+      if (openedUrl.current) urlApi.revokeObjectURL(openedUrl.current)
+      openedUrl.current = null
+    }
+  }, [urlApi])
+  async function retrieve(artifact) {
+    close()
+    const request = sequence.current
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await campaign.downloadReleaseArtifact(artifact)
+      if (!result || !live.current || request !== sequence.current) return
+      const url = urlApi.createObjectURL(new Blob([result.bytes], { type: result.mediaType }))
+      if (/\.html$/i.test(result.name) && artifact.media_type === 'text/html' && result.mediaType === 'text/html') {
+        openedUrl.current = url
+        setPreview({ url, name: result.name })
+      } else {
+        const link = document.createElement('a')
+        try {
+          link.href = url
+          link.download = result.name
+          document.body.append(link)
+          link.click()
+        } finally {
+          link.remove()
+          urlApi.revokeObjectURL(url)
+        }
+      }
+    } catch (failure) {
+      if (live.current && request === sequence.current) setError(failure)
+    } finally {
+      if (live.current && request === sequence.current) setBusy(false)
+    }
+  }
+  return <>
+    {!(completion.deliverables || []).length && <p>Validated output evidence unavailable.</p>}
+    <ul>{(completion.deliverables || []).map((artifact, index) => {
+      const bytes = artifact.byte_count ?? artifact.size_bytes ?? artifact.bytes
+      const canonical = 'access_path' in artifact || 'valid' in artifact || 'retrieved' in artifact
+      const valid = available && typeof artifact.sha256 === 'string' && /^[a-f0-9]{64}$/.test(artifact.sha256)
+        && Number.isSafeInteger(bytes) && bytes > 0 && bytes <= 1048576
+      const name = artifact.name || artifact.filename || artifact.label || 'Output'
+      const canonicalValid = valid && artifact.valid === true && artifact.retrieved === true
+        && (!artifact.access_path || safeArtifactUrl(artifact.access_path))
+        && typeof artifact.name === 'string' && /^[A-Za-z0-9][A-Za-z0-9._ -]{0,199}$/.test(artifact.name)
+        && !artifact.name.includes('..') && !/[. ]$/.test(artifact.name)
+      // Only clearly external legacy outputs retain an ordinary link.
+      const external = !canonical && /^https?:\/\//i.test(artifact.download_url || artifact.access_url || artifact.url || '')
+        ? safeArtifactUrl(artifact.download_url || artifact.access_url || artifact.url) : null
+      const legacyValid = valid && artifact.validated === true && artifact.retrieval_validated === true && artifact.content_validated === true
+      return <li key={index}>{canonical && canonicalValid
+        ? <button type="button" className="chip-act" disabled={busy || !!campaign.pending.download} aria-busy={busy}
+          onClick={() => retrieve(artifact)}>{/\.html$/i.test(artifact.name) && artifact.media_type === 'text/html' ? 'Open tool' : 'Download'} {name}</button>
+        : legacyValid && external ? <a href={external} target="_blank" rel="noopener noreferrer">{name}</a>
+          : <span>{name}: access evidence unavailable</span>}
+      <span> ({humanBytes(bytes)})</span></li>
+    })}</ul>
+    <Alert error={error} onReload={campaign.refetch} />
+    {preview && <div className="campaign-tool-preview">
+      <button type="button" className="chip-act" onClick={close}>Close tool</button>
+      <iframe src={preview.url} title={`Release tool: ${preview.name}`} sandbox="allow-scripts allow-downloads" />
+    </div>}
+  </>
+}
+
+function CompletionPanel({ campaign, artifactUrlApi }) {
   const action = useAction()
   const [profile, setProfile] = useState('web_tool')
   const completion = campaign.completion !== undefined ? campaign.completion
@@ -158,19 +242,27 @@ function CompletionPanel({ campaign }) {
     return { ...required, status: evidenceStatus(observed?.status) }
   })
   const delivery = stages.find(item => item.stage === 'delivery')?.row
-  const finished = release.status === 'finished'
+  const historicalFinish = release.status === 'finished'
+  const currentFailure = ['failed', 'unavailable'].includes(completion.current_verification?.status)
+    ? completion.current_verification : null
+  const finished = historicalFinish && !currentFailure && coverage.length > 0
+    && Array.isArray(completion.coverage) && completion.coverage.length > 0
+    && coverage.every(row => row.status === 'passed') && stages.every(item => item.row?.status === 'passed')
   const retryable = !['finished', 'cancelled', 'needs_approach', 'paused'].includes(release.status)
   const failed = stages.find(item => item.row && evidenceStatus(item.row.status) !== 'passed')
   const replay = delivery?.status === 'passed' ? delivery.evidence?.replay_recipe ?? completion.replay_recipe : null
   return <section className="panel-sub campaign-completion" aria-label="Project delivery">
     <h3>Release being delivered</h3>
     <p>{textOf(release.scope_summary) || textOf(contract.release_boundary) || 'Release boundary unavailable.'}</p>
-    <p role="status">{finished ? 'Completed release' : `Release ${executionWords(release.status)}`}</p>
+    <p role={currentFailure ? 'alert' : 'status'}>{currentFailure && historicalFinish
+      ? `Previously completed release. Current verification ${currentFailure.status}.`
+      : finished ? 'Completed release' : historicalFinish ? 'Release completion evidence unavailable.' : `Release ${executionWords(release.status)}`}</p>
     <p>A completed release covers this boundary. It does not mean the entire original ambition is done.</p>
     <h4>What works</h4>
     <EvidenceList items={coverage.filter(row => row.status === 'passed')} fallback="Verified checks unavailable." />
     <h4>What remains</h4>
-    <EvidenceList items={[...itemsOf(completion.remaining), ...coverage.filter(row => row.status !== 'passed')
+    <EvidenceList items={[...(currentFailure ? [currentFailure.reason || 'Current verification is unavailable. Reload the release.'] : []),
+    ...itemsOf(completion.remaining), ...coverage.filter(row => row.status !== 'passed')
       .map(row => `${row.description || row.check_id}: ${row.status}`),
     ...stages.filter(item => evidenceStatus(item.row?.status) !== 'passed').map(item => `${stageLabel(item.stage)}: ${evidenceStatus(item.row?.status)}`)]}
     fallback={coverage.length ? 'No remaining required checks reported for this release.' : 'Required check evidence unavailable.'} />
@@ -182,20 +274,8 @@ function CompletionPanel({ campaign }) {
       <strong>{stageLabel(stage)}</strong><span>{evidenceStatus(row?.status)}</span>
     </li>)}</ul>
     <h4>Outputs</h4>
-    {!(completion.deliverables || []).length && <p>Validated output evidence unavailable.</p>}
-    <ul>{(completion.deliverables || []).map((artifact, index) => {
-      const url = safeArtifactUrl(artifact.access_path || artifact.download_url || artifact.access_url || artifact.url)
-      const bytes = artifact.byte_count ?? artifact.size_bytes ?? artifact.bytes
-      const canonical = 'access_path' in artifact || 'valid' in artifact || 'retrieved' in artifact
-      const proof = canonical ? artifact.valid === true && artifact.retrieved === true
-        : artifact.validated === true && artifact.retrieval_validated === true && artifact.content_validated === true
-      const valid = proof && typeof artifact.sha256 === 'string' && /^[a-f0-9]{64}$/i.test(artifact.sha256)
-        && delivery?.status === 'passed' && Number.isSafeInteger(bytes) && bytes > 0
-      return <li key={index}>{valid && url
-        ? <a href={url} target="_blank" rel="noopener noreferrer">{artifact.name || artifact.filename || artifact.label || 'Open output'}</a>
-        : <span>{artifact.name || artifact.filename || artifact.label || 'Output'}: access evidence unavailable</span>}
-      <span> ({humanBytes(bytes)})</span></li>
-    })}</ul>
+    <ReleaseOutputs key={`${release.release_id}:${release.contract_version}:${finished}`} campaign={campaign}
+      completion={completion} available={finished} urlApi={artifactUrlApi} />
     <h4>Proven replay recipe</h4>
     <EvidenceList items={replay?.steps ?? replay} fallback="Proven replay recipe unavailable." />
     <h4>Known limits</h4>
@@ -355,7 +435,7 @@ function EnrollmentPanel({ campaign }) {
   </section>
 }
 
-function SignedInPanel({ projectId, projectName }) {
+function SignedInPanel({ projectId, projectName, artifactUrlApi }) {
   const campaign = useCampaigns(projectId, { enabled: true })
   const selected = campaign.selected
   return <>
@@ -376,7 +456,7 @@ function SignedInPanel({ projectId, projectName }) {
       {selected.dispatch?.available === false && <p role="status">The build fleet is not connected yet.</p>}
       {selected.dispatch?.available === true && <p role="status">Build fleet available</p>}
     </div>}
-    {selected && <CompletionPanel key={`completion:${campaign.selectedId}`} campaign={campaign} />}
+    {selected && <CompletionPanel key={`completion:${campaign.selectedId}`} campaign={campaign} artifactUrlApi={artifactUrlApi} />}
     {selected && <section className="panel-sub campaign-execution" aria-label="Execution">
       <h3>Execution</h3>
       {campaign.executionLoading && <p role="status">Loading execution…</p>}
@@ -426,10 +506,10 @@ function SignedInPanel({ projectId, projectName }) {
   </>
 }
 
-export default function CampaignPanel({ projectId, projectName, signedIn, enabled = true }) {
+export default function CampaignPanel({ projectId, projectName, signedIn, enabled = true, artifactUrlApi = globalThis.URL }) {
   if (!enabled || !projectId) return null
   return <section className="campaign-panel" aria-label="Campaign">
-    {signedIn ? <SignedInPanel key={projectId} projectId={projectId} projectName={projectName} />
+    {signedIn ? <SignedInPanel key={projectId} projectId={projectId} projectName={projectName} artifactUrlApi={artifactUrlApi} />
       : <p role="status">Sign in to submit a campaign.</p>}
   </section>
 }

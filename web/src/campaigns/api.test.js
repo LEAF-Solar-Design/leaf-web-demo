@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { webcrypto } from 'node:crypto'
 import { bindPublication, invokeCapability, listCapabilities } from './api.js'
 import { requestEnrollment } from './api.js'
 import { submitCampaign, createRelease, getRelease, listReleases, transitionRelease, retryReleaseStage } from './api.js'
+import { downloadReleaseArtifact } from './api.js'
 
 vi.mock('../api.js', () => ({
   config: { apiBase: 'https://campaign.test', tenant: 'test-tenant' },
@@ -51,6 +53,51 @@ describe('completion transport', () => {
   it('rejects non-reference objects and malformed profiles before sending', async () => {
     await expect(createRelease(P, C, { finish: { ...finish, artifact_refs: [{ command: 'bad' }] }, idempotencyKey: 'key' })).rejects.toThrow('Artifact reference')
     await expect(createRelease(P, C, { finish: { ...finish, delivery_profile: '../execute' }, idempotencyKey: 'key' })).rejects.toThrow('delivery profile')
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+})
+
+describe('verified authenticated output retrieval', () => {
+  const bytes = new TextEncoder().encode('name,total\nAlice,42\n')
+  let artifact
+  beforeEach(async () => {
+    vi.stubGlobal('crypto', webcrypto)
+    const sha256 = Array.from(new Uint8Array(await webcrypto.subtle.digest('SHA-256', bytes)), n => n.toString(16).padStart(2, '0')).join('')
+    artifact = { name: 'records.csv', byte_count: bytes.length, sha256, valid: true, retrieved: true }
+    fetcher.mockResolvedValue({ ok: true, headers: new Headers({ 'Content-Type': 'text/csv' }), arrayBuffer: async () => bytes.buffer })
+  })
+  it('retrieves exact verified bytes from the constructed endpoint using current account headers', async () => {
+    localStorage.setItem('leaf.org_id', 'workspace')
+    const result = await downloadReleaseArtifact(P, C, E, { ...artifact, access_path: 'https://other.test/steal', download_url: '/foreign' })
+    expect(result).toEqual({ bytes: bytes.buffer, mediaType: 'text/csv', name: 'records.csv' })
+    expect(fetcher).toHaveBeenCalledExactlyOnceWith(`https://campaign.test/api/campaigns/${C}/releases/${E}/artifacts/records.csv?project_id=${P}`,
+      { redirect: 'error', headers: { Authorization: 'Bearer test-token', 'X-Tenant-Id': 'test-tenant', 'X-Org-Id': 'workspace' } })
+  })
+  it.each(['../secret', '/secret', 'https://other.test/a', 'folder/file', 'folder\\file', 'file%2fsecret', '..', 'a.'])('rejects unsafe file name %s before fetching', async name => {
+    await expect(downloadReleaseArtifact(P, C, E, { ...artifact, name })).rejects.toThrow('file name')
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+  it.each([401, 403, 409])('reports server refusal %s without reading output bytes', async status => {
+    const read = vi.fn()
+    fetcher.mockResolvedValue({ ok: false, status, json: async () => ({}), arrayBuffer: read })
+    await expect(downloadReleaseArtifact(P, C, E, artifact)).rejects.toMatchObject({ status })
+    expect(read).not.toHaveBeenCalled()
+  })
+  it.each([{ sha256: '0'.repeat(64) }, { byte_count: bytes.length + 1 }])('refuses wrong digest or byte count', async override => {
+    await expect(downloadReleaseArtifact(P, C, E, { ...artifact, ...override })).rejects.toThrow(/output|release/)
+  })
+  it.each([{ valid: false }, { retrieved: false }, { byte_count: 1048577 }, { byte_count: 0 }, { sha256: 'A'.repeat(64) }])('requires bounded positive metadata: %j', async override => {
+    await expect(downloadReleaseArtifact(P, C, E, { ...artifact, ...override })).rejects.toThrow('output details')
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+  it('cannot skip verification when WebCrypto is unavailable', async () => {
+    vi.stubGlobal('crypto', {})
+    await expect(downloadReleaseArtifact(P, C, E, artifact)).rejects.toThrow('cannot verify')
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+  it('requires current bearer identity to retrieve an output', async () => {
+    localStorage.clear()
+    await expect(downloadReleaseArtifact(P, C, E, artifact)).rejects.toThrow('Sign in')
     expect(fetcher).not.toHaveBeenCalled()
   })
 })
