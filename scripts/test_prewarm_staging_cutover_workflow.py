@@ -1056,7 +1056,7 @@ def test_codebuild_dispatch_and_relay_receipt_executed(tmp_path, response, dispo
         assert shlex.split(call) == [
             "codebuild", "start-build", "--project-name", "leaf-deploy-terraform-staging",
             "--environment-variables-override", "name=STEP,value=prewarm",
-            "name=LEAF_DEPLOY_APPROVED_BY,value=merge-queue:" + "a" * 12,
+            "name=LEAF_DEPLOY_APPROVED_BY,value=merge-queue-" + "a" * 12,
             "name=LEAF_DEPLOY_SERVICE,value=" + service,
             "name=LEAF_DEPLOY_IMAGE_TAG,value=" + image_tag,
             "name=LEAF_DEPLOY_EXPECTED_TD,value=auto-live",
