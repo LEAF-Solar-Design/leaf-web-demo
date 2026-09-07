@@ -111,7 +111,7 @@ def _contract(value, profile):
     if not isinstance(value, dict) or set(value) - {
         'original_goal', 'intended_user', 'workflow', 'release_boundary',
         'deferred_items', 'artifact_refs', 'required_checks',
-        'selected_artifact', 'request_digest', 'request_key_digest',
+        'selected_artifact', 'request_digest', 'request_key_digest', 'web_recipe',
     }:
         _invalid('invalid contract fields')
     for field in ('original_goal', 'intended_user', 'workflow', 'release_boundary'):
@@ -122,6 +122,17 @@ def _contract(value, profile):
         if field in value and not re.fullmatch(r'[0-9a-f]{64}', value[field] or ''):
             _invalid('invalid ' + field)
     _selected_artifact(value.get('selected_artifact'))
+    recipe = value.get('web_recipe')
+    if recipe is not None:
+        if (profile != 'web_tool' or not isinstance(recipe, dict)
+                or set(recipe) != {'recipe_id', 'recipe_version', 'source_artifact'}
+                or recipe['recipe_id'] != 'json-records-to-csv'
+                or type(recipe['recipe_version']) is not int or recipe['recipe_version'] != 1):
+            _invalid('invalid web recipe')
+        _selected_artifact(recipe['source_artifact'])
+        if (not recipe['source_artifact'] or recipe['source_artifact']['format'] != 'json'
+                or not value.get('selected_artifact') or value['selected_artifact']['format'] != 'html'):
+            _invalid('web recipe requires source JSON and generated HTML')
     checks = value.get('required_checks')
     if not isinstance(checks, list) or not 1 <= len(checks) <= 128:
         _invalid('required_checks must not be empty')
@@ -435,7 +446,7 @@ def _evidence(row, stage, status, evidence):
         refs = row['contract'].get('artifact_refs', [])
         if (refs or row['delivery_profile'] == 'cad_file') and not artifacts:
             _conflict('insufficient_evidence')
-        found = set()
+        found, identities = set(), set()
         for artifact in artifacts:
             if not isinstance(artifact, dict):
                 _invalid()
@@ -445,9 +456,11 @@ def _evidence(row, stage, status, evidence):
                     or type(artifact.get('byte_count')) is not int
                     or not 0 < artifact['byte_count'] <= 9223372036854775807
                     or artifact.get('retrieved') is not True or artifact.get('valid') is not True
-                    or artifact['artifact_ref'] in found):
+                    or (artifact['artifact_ref'] in found and not row['contract'].get('web_recipe'))
+                    or artifact['access_path'] in identities):
                 _conflict('insufficient_evidence')
             found.add(artifact['artifact_ref'])
+            identities.add(artifact['access_path'])
         if not set(refs).issubset(found):
             _conflict('insufficient_evidence')
 

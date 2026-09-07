@@ -497,15 +497,12 @@ async def release_action(campaign_id: str, release_id: str, action: str, request
 def release_artifact(campaign_id: str, release_id: str, name: str, request: Request,
                      tenant: Any = Depends(deps.require_tenant)):
     import campaign_release_service as releases
-    from urllib.parse import quote
     result = _release_call('artifact', releases.read_artifact, tenant,
                            request.query_params.get('project_id'), campaign_id, release_id, name)
     if isinstance(result, JSONResponse):
         return result
     raw, metadata = result['artifact']
-    return Response(content=raw, media_type=metadata['media_type'], headers={
-        'Content-Disposition': "attachment; filename*=UTF-8''" + quote(name, safe=''),
-        'ETag': '"' + metadata['sha256'] + '"', 'Cache-Control': 'private, no-store'})
+    return releases.web_release.response(raw, metadata)
 
 
 @router.get('/api/campaigns')

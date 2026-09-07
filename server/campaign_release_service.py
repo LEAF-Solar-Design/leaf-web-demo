@@ -11,6 +11,7 @@ from urllib.parse import quote
 import platform_link
 import campaign_delivery_service as delivery
 import campaign_capability_resolver as capabilities
+import campaign_web_release as web_release
 
 STAGES = ('implementation', 'publication', 'deployment', 'user_verification', 'delivery')
 PRODUCERS = dict(zip(STAGES, ('task_ledger', 'task_ledger', 'deployment_adapter',
@@ -110,16 +111,33 @@ def compile_finish(tenant, project_id, campaign_id, finish):
     if campaign is None:
         raise LookupError('Campaign unavailable')
     artifact = None
+    web_recipe = None
     if finish['delivery_profile'] == 'cad_file':
         artifact = delivery.select_artifact(_lifecycle().project_snapshot(org, project, actor),
                                             finish['artifact_refs'])
+    elif finish['delivery_profile'] == 'web_tool':
+        artifact, web_recipe = web_release.compile_recipe(
+            _lifecycle().project_snapshot(org, project, actor), finish['artifact_refs'])
     boundary = ('Deliver and verify the existing ' + artifact['format'] + ' artifact ' + artifact['path']
                 if artifact else 'Produce and verify a ' + finish['delivery_profile'] + ' release')
     deferred = ['The original ambition beyond this existing artifact has not been implemented or validated.'] if artifact else []
     # The row already owns delivery_profile as its own column; the contract must not duplicate it.
     public = {key: value for key, value in finish.items() if key != 'delivery_profile'}
+    if artifact:
+        public['workflow'] = ('Open the authorized project, retrieve ' + artifact['name'] +
+                              ', and validate the downloaded ' + artifact['format'] + ' file.')
+        public['artifact_refs'] = [artifact['path']]
+    if web_recipe:
+        public['workflow'] = web_release.WORKFLOW
+        public['artifact_refs'] = [web_recipe['source_artifact']['path']]
+        boundary = 'Deliver a working records-to-CSV web tool and its verified CSV output'
+        deferred = ['The original ambition beyond this records-to-CSV workflow remains unproven.']
+    if finish['workflow'] != public['workflow']:
+        deferred.append('Requested workflow beyond this release: ' + finish['workflow'][:900])
+    deferred.extend('Deferred input: ' + path for path in finish['artifact_refs'] if path not in public['artifact_refs'])
     return {**public, 'original_goal': campaign['prompt'], 'release_boundary': boundary,
             'deferred_items': deferred, 'selected_artifact': artifact,
+            **({'web_recipe': web_recipe} if web_recipe else {}),
             'request_digest': _digest(finish),
             'required_checks': [{'check_id': stage + '.verified', 'stage': stage,
                                  'description': description} for stage, description in zip(STAGES, (
@@ -127,7 +145,9 @@ def compile_finish(tenant, project_id, campaign_id, finish):
                 'Persist release copy with matching lifecycle receipt',
                 'Retrieve the saved version through the authorized artifact reader',
                 'Open the project and retrieve and validate the promised file',
-                'Re-read recipient artifact bytes and provide replay and known limits'))]}
+                'Re-read recipient artifact bytes and provide replay and known limits'))] +
+                ([{'check_id': 'browser.download', 'stage': 'user_verification',
+                   'description': 'Run the served converter and validate actual downloaded CSV bytes'}] if web_recipe else [])}
 
 
 def snapshot(tenant, project_id, campaign_id, release_id=None):
@@ -137,8 +157,11 @@ def snapshot(tenant, project_id, campaign_id, release_id=None):
     release = completion.get('release')
     if release and release.get('status') == 'finished' and release['contract'].get('selected_artifact'):
         try:
-            read_artifact(tenant, project_id, campaign_id, release['release_id'],
-                          release['contract']['selected_artifact']['name'])
+            names = [release['contract']['selected_artifact']['name']]
+            if release['contract'].get('web_recipe'):
+                names.append('records.csv')
+            for name in names:
+                read_artifact(tenant, project_id, campaign_id, release['release_id'], name)
             completion = dict(completion, current_verification={'status': 'passed'})
         except (ValueError, UnicodeError):
             completion = dict(completion, deliverables=[], current_verification={
@@ -171,11 +194,18 @@ def create(tenant, project_id, campaign_id, finish, idempotency_key):
     row = _store().create_release(org, project, campaign_id, actor, contract=contract,
                                   delivery_profile=finish['delivery_profile'], idempotency_key=idempotency_key)
     rid = row['release_id']
+    if existing:
+        return advance(tenant, project_id, campaign_id, rid)
     selection = capabilities.resolve(tenant, finish['delivery_profile'],
                                      existing_artifact=bool(contract.get('selected_artifact')))
     authority(tenant, project_id)
     _store().record_decision(org, project, campaign_id, rid, decision_key='capability-selection',
                              kind='capability_selection', payload=selection, decided_by=str(actor))
+    _store().record_decision(org, project, campaign_id, rid, decision_key='initial-release-scope',
+        kind='scope', decided_by=str(actor), payload={'requested_workflow': finish['workflow'],
+        'selected_workflow': contract['workflow'], 'release_boundary': contract['release_boundary'],
+        'deferred_items': contract['deferred_items'],
+        'reason': 'Reuse validated project material or a proven managed recipe for a useful bounded release'})
     if not selection['selected']:
         from routers import campaigns
         campaigns._store().ask_question(org, project, campaign_id, question_key='completion-capability-' + str(rid),
@@ -189,6 +219,8 @@ def transition(tenant, project_id, campaign_id, release_id, action):
         raise ValueError('Unknown release action')
     org, project, actor = authority(tenant, project_id)
     _store().transition_release(org, project, campaign_id, release_id, actor, action=action)
+    if action == 'resume':
+        return advance(tenant, project_id, campaign_id, release_id)
     return snapshot(tenant, project_id, campaign_id, release_id)
 
 
@@ -212,7 +244,7 @@ def _artifact(release):
     source = release['contract'].get('selected_artifact')
     if not source:
         raise delivery.DeliveryConflict('Validated project artifact is unavailable')
-    return dict(source, path='releases/' + str(uuid.UUID(str(release['release_id']))) + '/' + source['name'])
+    return dict(source, path=web_release.prefix(release) + source['name'])
 
 
 def read_artifact(tenant, project_id, campaign_id, release_id, name):
@@ -220,13 +252,18 @@ def read_artifact(tenant, project_id, campaign_id, release_id, name):
     completion = _store().get_release(org, project, campaign_id, release_id)
     release = completion['release']
     artifact = _artifact(release)
-    if name != artifact['name']:
+    if not release['contract'].get('web_recipe') and name != artifact['name']:
         raise LookupError('Artifact unavailable')
     current = [s for s in completion.get('stages', []) if s.get('stage') == 'publication'
                and s.get('status') == 'passed'
                and s.get('contract_version', s.get('evidence', {}).get('contract_version')) == release['contract_version']]
     if not current:
         raise delivery.DeliveryConflict('Publication evidence unavailable')
+    if release['contract'].get('web_recipe'):
+        if name == 'records.csv' and not any(s['stage'] == 'user_verification' and s['status'] == 'passed'
+                and s['contract_version'] == release['contract_version'] for s in completion.get('stages', [])):
+            raise delivery.DeliveryConflict('Download verification evidence unavailable')
+        return web_release.read(_lifecycle().project_snapshot(org, project, actor), release, name)
     return delivery.read_verified(_lifecycle().project_snapshot(org, project, actor), artifact)
 
 
@@ -237,7 +274,7 @@ def advance(tenant, project_id, campaign_id, release_id):
         completion = store.get_release(org, project, campaign_id, release_id)
         release = completion['release']
         if release['status'] != 'active':
-            return completion
+            return snapshot(tenant, project_id, campaign_id, release_id) if release['status'] == 'finished' else completion
         contract = release['contract']
         required = contract.get('required_checks')
         if not required or {c['stage'] for c in required} != set(STAGES):
@@ -261,7 +298,10 @@ def advance(tenant, project_id, campaign_id, release_id):
             artifact = _artifact(release)
             url = ('/api/campaigns/' + str(campaign_id) + '/releases/' + str(release_id) + '/artifacts/' +
                    quote(artifact['name'], safe='') + '?project_id=' + str(project))
-            if stage == 'implementation':
+            if contract.get('web_recipe'):
+                observations = web_release.run_stage(__import__(__name__), tenant, project_id,
+                                                       campaign_id, completion, stage)
+            elif stage == 'implementation':
                 raw = delivery.file_bytes(_lifecycle().project_snapshot(org, project, actor), source['path'])
                 observed = delivery.validate_bytes(source['path'], raw)
                 if observed['sha256'] != revision or observed['size_bytes'] != source['size_bytes']:
@@ -306,11 +346,14 @@ def advance(tenant, project_id, campaign_id, release_id):
                 raw, observed = read_artifact(tenant, project_id, campaign_id, release_id, artifact['name'])
                 observations = {'artifacts': [{'artifact_ref': source['path'], 'name': observed['name'],
                         'sha256': observed['sha256'], 'byte_count': len(raw), 'retrieved': True,
-                        'valid': True, 'access_path': url}],
+                        'valid': True, 'access_path': url, 'media_type': observed['media_type']}],
                     'replay_recipe': ('Open the authorized project, download ' + url +
                                       ', then open the downloaded ' + observed['format'] + ' file.'),
                     'known_limits': contract['deferred_items']}
-        except (ValueError, UnicodeError) as exc:
+        except web_release.producer.WebToolVerificationError as exc:
+            status = 'failed'
+            observations = {'reason': str(exc), 'recommended_action': 'Correct the converter and retry browser verification'}
+        except (ValueError, UnicodeError, web_release.producer.WebToolUnavailable) as exc:
             status = 'unavailable'
             observations = {'reason': str(exc), 'recommended_action': 'Restore a valid source artifact or provide the missing delivery adapter'}
         evidence = {**observations, 'contract_version': release['contract_version'],

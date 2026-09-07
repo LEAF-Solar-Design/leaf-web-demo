@@ -22,12 +22,22 @@ def resolve(tenant, delivery_profile, *, existing_artifact=False):
                            'verification_method': 'Actual invocation and output readback',
                            'missing_capability': 'Verified invocation adapter'})
     candidates.sort(key=lambda row: str(row['name']))
-    available = delivery_profile == 'cad_file' and existing_artifact
-    return {'selected': 'project_file_delivery' if available else None,
+    selected = ({'cad_file': 'project_file_delivery', 'web_tool': 'managed_json_records_to_csv'}
+                .get(delivery_profile) if existing_artifact else None)
+    available = selected is not None
+    native = ({'name': selected, 'operation': 'convert JSON records and download CSV',
+               'inputs': 'One authorized project JSON file with flat records',
+               'outputs': 'Managed HTML tool and verified CSV file', 'readiness': 'available',
+               'permission_requirement': 'Current project write and read authority',
+               'budget_constraint': '1 MiB files, 1000 records, 100 columns, one browser verifier',
+               'verification_method': 'Actual Chromium conversion and downloaded byte comparison',
+               'version': 1} if selected == 'managed_json_records_to_csv' else None)
+    return {'selected': selected,
             'readiness': 'available' if available else 'unavailable',
+            'selected_capability': native,
             'shortlist': candidates[:8], 'connected_mcp_tools': [],
             'missing_capability': None if available else (
-                'Executable website deployment adapter' if delivery_profile == 'web_tool'
+                'One valid JSON records file for the managed converter, or another verified web adapter' if delivery_profile == 'web_tool'
                 else 'Validated project artifact and executable delivery adapter'),
             'connected_mcp_limitation': 'No connected MCP invocation adapter',
             'recommended_action': 'Build the missing output through the existing campaign executor',

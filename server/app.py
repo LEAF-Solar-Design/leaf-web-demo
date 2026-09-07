@@ -51,6 +51,7 @@ from routers import (
     cad_upload,
     campaign_mcp,
     campaigns,
+    campaign_conversation,
     capabilities,
     change_to_live as change_to_live_router,
     checkpoints,
@@ -268,6 +269,7 @@ app.include_router(templates_router.router)  # Wave C solar template beta, fail-
 app.include_router(overlay.router)  # T1 runtime overlay: propose a preview, decide it, read the resolved tokens
 app.include_router(ios_ship.router)  # Wave D one-shot iOS: readiness, one reviewed idempotent launch, status, receipt
 app.include_router(campaigns.router)
+app.include_router(campaign_conversation.router)
 app.include_router(campaign_mcp.router)
 app.include_router(ios_ship_provider_router.router)  # internal provider callbacks, bearer-file auth only
 app.include_router(ios_surface.router)  # Wave D consume-only iOS readiness surface, fail-closed behind LEAF_IOS_SURFACE_ENABLED (GET /api/ios-surface/status refuses 404 while off)
