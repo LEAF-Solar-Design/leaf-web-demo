@@ -37,7 +37,7 @@ import { QuickButton, QUICK_FILE_SLOT_ID } from '../site/CockpitTopBand.jsx'
 
 import { DRAW_REASONS, MODIFY_REASONS, clipboardReason, drawReason, forGroup, modifyReason } from '../lib/actionRegistry.js'
 
-import { buildCreatePayload, buildEditPayload, readNumber } from './engineSession.js'
+import { admissibleBlockName, buildCreatePayload, buildEditPayload, readNumber } from './engineSession.js'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
 import { isPointExpression } from './pointExpression.js'
 import { resolvePromptInputs } from './promptInputs.js'
@@ -610,9 +610,14 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
       <span className="cp-verb">{prompt.verb}</span>
       {prompt.verb === 'INSERT' && (
         <datalist id={BLOCK_CATALOGUE_ID}>
+          {/* W4g-7b-02c-e: offer only names the store would admit (its own
+              rule, admissibleBlockName), trimmed the way it would compare
+              them — never a name a typed selection would then be refused for. */}
           {(session.entities.blocks || [])
             .filter((b) => b?.complete === true && b.baseUnknown !== true)
-            .map((b) => <option key={b.name} value={b.name} />)}
+            .map((b) => admissibleBlockName(b?.name))
+            .filter((name) => name !== null)
+            .map((name) => <option key={name} value={name} />)}
         </datalist>
       )}
       {prompt.steps.map((step) => (

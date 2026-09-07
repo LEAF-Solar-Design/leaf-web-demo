@@ -224,6 +224,23 @@ describe('W4g-7a the script runner', () => {
     await waitFor(() => expect(status().textContent).toBe('Script ran 1 command.'), { timeout: 5000 })
   })
 
+  it('a scripted INSERT never inherits the ribbon\'s own live scale for an omitted operand (record w4g-7b-02c-e F2)', async () => {
+    mount()
+    await openAndLoad([H])
+    workers[0].emit({
+      type: 'documentLoaded', documentId: 'one.dxf', entities: [H], entityCount: 1, unsupported: [],
+      blocks: [{ name: 'Fixture', base: [1, 2, 0], children: [{ type: 'LINE', vertices: [[1, 2, 0], [4, 2, 0]] }], complete: true, baseUnknown: false, digest: 'd1' }],
+    })
+    // Type 2 into the ribbon's own X scale field, then run a script line that
+    // never mentions a scale: the line must still take the prompt's default
+    // (1), never the value sitting in the field.
+    act(() => { context.setInput('sx', '2') })
+    setScript('insert Fixture 10,20')
+    fireEvent.click(runButton())
+    expect(posts()).toHaveLength(1)
+    expect(posts()[0]).toEqual({ type: 'applyEdit', op: 'createInsert', payload: { name: 'Fixture', x: 10, y: 20, rotationDeg: 0, sx: 1, sy: 1, sz: 1, layer: '' } })
+  })
+
   it('a scripted INSERT naming a block absent from the catalogue stops before any post', async () => {
     mount()
     await openAndLoad([H])

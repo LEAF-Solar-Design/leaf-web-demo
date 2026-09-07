@@ -28,6 +28,7 @@ import useEngineSession, {
   MAX_CREATE_POINTS,
   MAX_DOCUMENT_BYTES,
   SESSION_ERROR,
+  admissibleBlockName,
   buildCreatePayload,
   buildEditPayload,
   lowerSteps,
@@ -700,6 +701,26 @@ describe('save completion', () => {
     expect(save).toHaveBeenCalledTimes(1)
     expect(session.current.status).not.toContain('leg')
   })
+
+  // W4g-7b-02c-e F1: a created INSERT is a real mutation (mutationDiff.js),
+  // so save() posts a plan whose `added` carries the INSERT record — never
+  // the opaque refusal a moved or rescaled reference would still hit.
+  it('an INSERT create posts a save plan whose `added` carries the reference', async () => {
+    const FIXTURE = { name: 'Fixture', base: [1, 2, 0], children: [{ type: 'LINE', vertices: [[1, 2, 0], [4, 2, 0]] }], complete: true, baseUnknown: false, digest: 'd1' }
+    const save = vi.fn(async () => planReceipt)
+    const session = mountSession({ saveTarget: { headVersion: 4, save } })
+    act(() => session.current.actions.openBytes(new Uint8Array([9, 9]), 'demo-v4.dxf', { committed: true, version: 4 }))
+    session.workers[0].emit({ ...loadedMessage([LINE], 'demo-v4.dxf'), blocks: [FIXTURE] })
+    act(() => session.current.actions.create('createInsert', { name: 'Fixture', x: '10', y: '20', sx: '2', sy: '3', rot: '90', layer: '0' }))
+    const inserted = { id: 'i1', handle: 'i1', type: 'INSERT', name: 'Fixture', ip: [10, 20, 0], rotationDeg: 90, scale: [2, 3, 1], layer: '0', editable: false }
+    session.workers[0].emit({ ...editedMessage('createInsert', [LINE, inserted]), blocks: [FIXTURE], createdId: 'i1' })
+    await act(async () => { await session.current.actions.save() })
+    expect(save).toHaveBeenCalledWith(
+      new Uint8Array([1, 2, 3]), 4, expect.stringMatching(/^[0-9a-f]{64}$/),
+      expect.objectContaining({ mutations: { added: [{ handle: 'i1', kind: 'INSERT', name: 'Fixture', pt: [10, 20, 0], rot: 90, scale: [2, 3, 1], layer: '0' }] } }),
+      expect.any(Function),
+    )
+  })
 })
 
 describe('worker crash is a RECOVERABLE state', () => {
@@ -947,6 +968,28 @@ describe('W4g-7b-02c: INSERT of an existing block definition', () => {
   it('with no catalogue at all, every name is undefined', () => {
     expect(buildCreatePayload('createInsert', { name: 'Fixture', x: '0', y: '0' }).refusal)
       .toBe('Insert refused: block Fixture is not defined in this drawing')
+  })
+
+  // W4g-7b-02c-e F4: admissibleBlockName is the ONE rule both the store and
+  // the prompt's datalist apply, and the catalogue lookup compares trimmed
+  // to trimmed, so a definition's own incidental whitespace still resolves.
+  it('admissibleBlockName refuses a pipe, a CR/LF, an anonymous or an oversized name, and trims what it admits', () => {
+    expect(admissibleBlockName('Fixture')).toBe('Fixture')
+    expect(admissibleBlockName('Fixture ')).toBe('Fixture')
+    expect(admissibleBlockName(' Fixture')).toBe('Fixture')
+    expect(admissibleBlockName('')).toBeNull()
+    expect(admissibleBlockName('   ')).toBeNull()
+    expect(admissibleBlockName('*U1')).toBeNull()
+    expect(admissibleBlockName('site|Door')).toBeNull()
+    expect(admissibleBlockName('a\r\nb')).toBeNull()
+    expect(admissibleBlockName('x'.repeat(256))).toBeNull()
+    expect(admissibleBlockName('x'.repeat(255))).toBe('x'.repeat(255))
+  })
+
+  it('a catalogue name with trailing whitespace still resolves against the trimmed typed name', () => {
+    const padded = [{ name: 'Fixture ', base: [0, 0, 0], children: [{ type: 'LINE', vertices: [[0, 0, 0], [1, 0, 0]] }], complete: true, baseUnknown: false, digest: 'd3' }]
+    expect(buildCreatePayload('createInsert', { name: 'Fixture', x: '0', y: '0' }, padded).payload)
+      .toMatchObject({ name: 'Fixture ' })
   })
 })
 

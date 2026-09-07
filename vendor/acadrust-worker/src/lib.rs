@@ -1377,11 +1377,22 @@ impl ParsedDxf {
     /// touching the document: a non-finite operand, a zero scale component,
     /// an empty or `*`-prefixed name (anonymous blocks are never insertable
     /// by name), a name with no matching record (case-insensitive, the
-    /// 01c-d lookup rule), or a record that is incomplete or has an unknown
-    /// base (the square-glyph state the catalogue already reports: nothing
-    /// to insert relative to). The Insert's `block_name` takes the
+    /// 01c-d lookup rule), or a record `block_incomplete:<name>` for an
+    /// unknown base, more than BLOCK_CHILD_CAP children, or an attribute
+    /// definition (ATTDEF) among them. The Insert's `block_name` takes the
     /// CATALOGUE'S spelling, never the typed one, so a save that reads the
     /// name back always matches the definition it names.
+    ///
+    /// W4g-7b-02c-e: this check is NOT the whole of "complete". The
+    /// catalogue's own `complete` flag (`block_catalogue`, 01c) is the
+    /// stricter authority: it also marks a definition incomplete for a
+    /// child kind this crate does not support projecting, which this check
+    /// has no way to see (it counts and inspects flags, never child kinds).
+    /// So the store (engineSession.js's buildCreatePayload) refuses on the
+    /// catalogue's `complete`/`baseUnknown` fields before a typed name ever
+    /// reaches this method, and this method's own refusal is the backstop
+    /// for a caller (a script replay, a future direct wasm call) that
+    /// skipped that check, never the primary gate a drafter sees.
     fn create_insert_core(
         &mut self,
         name: &str,

@@ -159,6 +159,19 @@ function fmtDelta(raw) {
   return readNumber(raw)
 }
 
+// W4g-7b-02c-e: the ONE name rule an INSERT's block name must pass, shared by
+// the store's own validation and the prompt's datalist (EngineRibbonClusters.jsx),
+// so the datalist never offers a name a typed selection would then refuse:
+// trimmed, non-empty, not `*`-prefixed (anonymous blocks are never insertable
+// by name), no `|` (the plan's field separator) or CR/LF, at most 255 chars.
+// Returns the trimmed spelling to offer or compare, or null when the name
+// itself (not the definition it might name) is inadmissible.
+export function admissibleBlockName(rawName) {
+  const trimmed = String(rawName ?? '').trim()
+  if (!trimmed || trimmed.startsWith('*') || /[|\r\n]/.test(trimmed) || [...trimmed].length > 255) return null
+  return trimmed
+}
+
 async function sha256Hex(bytes) {
   const digest = await crypto.subtle.digest('SHA-256', bytes)
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
@@ -302,10 +315,8 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
     // 'decimal-default' mode keeps the prompt from holding Run on them).
     const [px, py] = [x, y].map(fmtDelta)
     if (px === null || py === null) return { refusal: 'Insert refused: x and y must both be numbers.' }
-    const rawName = String(name ?? '').trim()
-    if (!rawName || rawName.startsWith('*') || /[|\r\n]/.test(rawName) || [...rawName].length > 255) {
-      return { refusal: 'Insert refused: enter a block name.' }
-    }
+    const rawName = admissibleBlockName(name)
+    if (!rawName) return { refusal: 'Insert refused: enter a block name.' }
     const sxText = String(sx ?? '').trim()
     const scaleX = sxText === '' ? 1 : fmtDelta(sxText)
     if (scaleX === null) return { refusal: 'Insert refused: the x scale factor must be a number.' }
@@ -317,7 +328,10 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
     const rotationDeg = rotText === '' ? 0 : fmtDelta(rotText)
     if (rotationDeg === null) return { refusal: 'Insert refused: the rotation must be a number.' }
     const catalogue = Array.isArray(blocks) ? blocks : []
-    const definition = catalogue.find((b) => String(b?.name ?? '').toLowerCase() === rawName.toLowerCase())
+    // W4g-7b-02c-e: trimmed to trimmed. A catalogue name is compared as
+    // admissibleBlockName would offer it, so a definition whose own DXF name
+    // carries incidental whitespace still matches the typed (also trimmed) name.
+    const definition = catalogue.find((b) => String(b?.name ?? '').trim().toLowerCase() === rawName.toLowerCase())
     if (!definition) return { refusal: `Insert refused: block ${rawName} is not defined in this drawing` }
     if (definition.complete !== true || definition.baseUnknown === true) {
       return { refusal: `Insert refused: block ${definition.name} is incomplete in this drawing` }
@@ -1088,6 +1102,12 @@ export default function useEngineSession({
     // NO plan and names why in the status; the server then takes the DXF
     // sidecar leg and says so in its receipt. A hand import has nothing to
     // diff against and never sends one.
+    // W4g-7b-02c-e: a plan the contract DOES carry (an INSERT add, 02s) still
+    // depends on the SERVER admitting that kind. Against a target where v3 is
+    // not provisioned for it, the server refuses the whole save with its own
+    // sentence ("Save failed: ...") and the document stays dirty: there is no
+    // DXF sidecar fallback for a kind the plan already carries (v63's rule —
+    // the fallback exists only for a diff this module itself cannot express).
     const { committedEntities, entities } = sessionRef.current
     const parent = sessionRef.current.committedVersion ?? target.headVersion
     const onStatus = ({ status, progress }) => {

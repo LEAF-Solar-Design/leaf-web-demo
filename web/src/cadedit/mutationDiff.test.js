@@ -208,4 +208,14 @@ describe('W4g-7b-02c: a created or removed INSERT is a real mutation; a change s
     const overTurn = { ...ref(1280), rotationDeg: 450 }
     expect(diffPlan([], [overTurn]).mutations.added[0].rot).toBe(90)
   })
+
+  it('rounds before wrapping and never emits -0 (record w4g-7b-02c-e F3)', () => {
+    const rot = (rotationDeg) => diffPlan([], [{ ...ref(1280), rotationDeg }]).mutations.added[0].rot
+    // A round-after-wrap reading pushes each of these to 360, outside [0, 360).
+    expect(rot(-1e-7)).toBe(0)
+    expect(rot(359.9999996)).toBe(0)
+    // -0 itself, and a value the rounding step alone lands on -0.
+    expect(rot(-0)).toBe(0)
+    expect(rot(360)).toBe(0)
+  })
 })

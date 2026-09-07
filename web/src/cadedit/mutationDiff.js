@@ -132,10 +132,16 @@ function insertOf(entity) {
 }
 
 // Rotation degrees the way the contract's add carries them: [0, 360), 6 dp.
+// W4g-7b-02c-e: round BEFORE wrapping, never after — wrapping a value that
+// rounds up to exactly 360 (359.9999996) first, then rounding, lands back on
+// 360 itself, outside the promised range. The final `+ 0` turns a surviving
+// -0 (deg exactly 0 or a negative value that rounds to -0) into +0, since a
+// diff and its JSON never carry a sign no reader asked for.
 function normalizedDeg(deg) {
-  let d = deg % 360
+  let d = Math.round(deg * 1e6) / 1e6
+  d %= 360
   if (d < 0) d += 360
-  return Math.round(d * 1e6) / 1e6
+  return d + 0
 }
 
 function indexByHandle(entities) {
