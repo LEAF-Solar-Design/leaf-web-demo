@@ -1792,6 +1792,23 @@ impl ParsedDxf {
         if x1 == x2 && y1 == y2 {
             return refuse("dimension_points_coincide");
         }
+        // W4g-7b-04c-3 F3b: the crate is the boundary (the store already
+        // normalizes before it posts), so a raw rotation reaching this call
+        // directly (-90, 450, 1e9) is normalized here too, before the F3a
+        // projection test below and before the LINEAR constructor, so the
+        // projection's own rotationDeg reads back normalized.
+        let rotation_deg = rotation_deg.rem_euclid(360.0);
+        // W4g-7b-04c-3 F3a: a LINEAR whose rotation is perpendicular to
+        // def1-def2 projects both definition points onto the same foot, a
+        // zero-length dimension line; refused before any write, the same way
+        // a coincident pair already is.
+        if dimtype == "LINEAR" {
+            let rad = rotation_deg.to_radians();
+            let projection = (x2 - x1) * rad.cos() + (y2 - y1) * rad.sin();
+            if projection.abs() < 1e-9 {
+                return refuse("dimension_projection_zero");
+            }
+        }
         if dimtype == "ALIGNED" && rotation_deg != 0.0 {
             return refuse("dimension_rotation_not_allowed");
         }
@@ -3640,6 +3657,39 @@ mod w4g_7b_04c_dimension_rows {
         // Every refusal above left the one prior create's handle the only one present.
         assert_eq!(projected_entities(&doc.inner).len(), 1);
         assert_eq!(projected_entities(&doc.inner)[0]["handle"], handle);
+    }
+
+    // W4g-7b-04c-3 F3a: a LINEAR whose rotation is perpendicular to
+    // def1-def2 projects to a zero-length dimension line; refused before any
+    // write, the same way a coincident pair already is.
+    #[test]
+    fn create_dimension_core_refuses_a_linear_projection_of_zero_before_any_write() {
+        let mut doc = empty_doc();
+        assert_eq!(code(doc.create_dimension_core("LINEAR", 0.0, 0.0, 3.0, 0.0, 1.5, 6.0, 90.0, "Standard", "")), "dimension_projection_zero");
+        assert!(projected_entities(&doc.inner).is_empty(), "the refused create wrote nothing");
+        // The same two def points at a rotation that DOES project: accepted.
+        let handle = doc.create_dimension_core("LINEAR", 0.0, 0.0, 3.0, 4.0, 1.5, 6.0, 90.0, "Standard", "").expect("this one projects (measurement 4)");
+        assert!(near(projected_entities(&doc.inner)[0]["measurement"].as_f64().unwrap(), 4.0));
+        assert_eq!(projected_entities(&doc.inner)[0]["handle"], handle);
+    }
+
+    // W4g-7b-04c-3 F3b: the crate normalizes a raw rotation into [0, 360)
+    // before the F3a projection test and before the LINEAR constructor, so
+    // the projection's own rotationDeg reads back normalized too.
+    #[test]
+    fn create_dimension_core_normalizes_the_rotation_into_0_360_before_the_projection_test_and_the_constructor() {
+        let mut doc = empty_doc();
+        let h90 = doc.create_dimension_core("LINEAR", 0.0, 0.0, 3.0, 4.0, 1.5, 6.0, 90.0, "Standard", "").expect("90");
+        let h450 = doc.create_dimension_core("LINEAR", 0.0, 0.0, 3.0, 4.0, 1.5, 6.0, 450.0, "Standard", "").expect("450 normalizes to 90");
+        let hneg90 = doc.create_dimension_core("LINEAR", 0.0, 0.0, 3.0, 4.0, 1.5, 6.0, -90.0, "Standard", "").expect("-90 normalizes to 270");
+        let list = projected_entities(&doc.inner);
+        let find = |h: &str| list.iter().find(|e| e["handle"] == h).unwrap().clone();
+        let e90 = find(&h90);
+        let e450 = find(&h450);
+        let eneg90 = find(&hneg90);
+        assert_eq!(e450["rotationDeg"], 90.0, "450 normalizes into [0, 360) before the constructor");
+        assert!(near(e450["measurement"].as_f64().unwrap(), e90["measurement"].as_f64().unwrap()), "450 measures the same as 90");
+        assert_eq!(eneg90["rotationDeg"], 270.0, "-90 normalizes into [0, 360) before the constructor");
     }
 
     // The 05c sentence, adopted for DIMENSION: every geometry verb refuses a

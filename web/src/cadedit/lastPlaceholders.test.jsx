@@ -4,7 +4,7 @@
 // a Modify record seated in the reference's Properties panel that copies
 // the selection's layer to a picked object as ONE setLayer step. Pure rows
 // plus the seating, no worker.
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import DraftingRibbon, { RibbonWidget } from '../site/DraftingRibbon.jsx'
@@ -12,7 +12,7 @@ import { forGroup } from '../lib/actionRegistry.js'
 import { parseDrawingCommand } from '../lib/commandWords.js'
 
 import EngineRibbonClusters, { PROMPTS } from './EngineRibbonClusters.jsx'
-import EngineSessionProvider from './EngineSessionProvider.jsx'
+import EngineSessionProvider, { useEngineSessionContext } from './EngineSessionProvider.jsx'
 import { CREATE_OPS, buildCreatePayload, buildEditPayload, lowerSteps, planMatchprop } from './engineSession.js'
 import { ELLIPSE_SEGMENTS, POINT_MARK, POINT_MARK_FRACTION, engineIntake, entityToPolyline, pointMarkSize } from './engineIntake.js'
 import { diffPlan } from './mutationDiff.js'
@@ -295,5 +295,72 @@ describe('W4g-7b-03c-g F7: RibbonWidget applies a keyboard walk ONCE, on Enter o
     expect(select.value).toBe('ByLayer')
     fireEvent.blur(select)
     expect(onChange).not.toHaveBeenCalled()
+  })
+})
+
+// W4g-7b-04c-4 F1: the ribbon's own live validation (armedGroup === 'draw'
+// path) reads `buildCreatePayload` with the session's loaded dimstyles, the
+// same fourth argument the store's own run() already passed; before this fix
+// it called buildCreatePayload with no dimstyles at all, so a dimension held
+// Run disabled forever with "dimension style Standard is not loaded", never
+// mind what the drafter typed.
+describe('W4g-7b-04c-4 F1: the ribbon\'s own live validation sees the loaded dimstyles catalogue', () => {
+  class ScriptedWorker {
+    constructor() { this.posted = []; this.listeners = new Map() }
+    addEventListener(type, fn) { this.listeners.set(type, fn) }
+    removeEventListener(type) { this.listeners.delete(type) }
+    postMessage(message) { this.posted.push(message) }
+    terminate() {}
+    emit(data) { act(() => { this.listeners.get('message')?.({ data }) }) }
+  }
+
+  function fileOf(name = 'one.dxf') {
+    const bytes = new TextEncoder().encode('0\nEOF\n')
+    const file = new File([bytes], name, { type: 'application/dxf' })
+    file.arrayBuffer = async () => bytes.buffer.slice(0)
+    Object.defineProperty(file, 'size', { value: bytes.length })
+    return file
+  }
+
+  it('arming DAL, filling the six points, sees Run live and posts ONE createDimension, dimtype ALIGNED', async () => {
+    const workers = []
+    const createWorker = vi.fn(() => { const w = new ScriptedWorker(); workers.push(w); return w })
+    const handle = {}
+    function Probe() { handle.context = useEngineSessionContext(); return null }
+    render(
+      <EngineSessionProvider createWorker={createWorker}>
+        <Probe />
+        <DraftingRibbon clusters={[]}>
+          <EngineRibbonClusters importOpen={false} onToggleImport={() => {}} panels={['draw', 'modify', 'annotation']} />
+        </DraftingRibbon>
+      </EngineSessionProvider>,
+    )
+    await act(async () => { await handle.context.session.actions.open(fileOf()) })
+    workers[0].emit({
+      type: 'documentLoaded', documentId: 'one.dxf', entities: [], entityCount: 0, unsupported: [], dimstyles: ['Standard'],
+    })
+    // Armed the way W4g-7b-03c-g F1 arms its own typed word: through the
+    // provider's setArmed, never by clicking a portaled Annotation tool by
+    // role (a unit render of EngineRibbonClusters never mounts App's seat
+    // slot, so no such button exists here).
+    act(() => { handle.context.setArmed({ group: 'draw', op: 'dimAligned' }) })
+    fireEvent.change(screen.getByLabelText('ribbon x', { exact: true }), { target: { value: '0' } })
+    fireEvent.change(screen.getByLabelText('ribbon y', { exact: true }), { target: { value: '0' } })
+    fireEvent.change(screen.getByLabelText('ribbon x2', { exact: true }), { target: { value: '3' } })
+    fireEvent.change(screen.getByLabelText('ribbon y2', { exact: true }), { target: { value: '4' } })
+    fireEvent.change(screen.getByLabelText('ribbon dx', { exact: true }), { target: { value: '1.5' } })
+    fireEvent.change(screen.getByLabelText('ribbon dy', { exact: true }), { target: { value: '6' } })
+    // Held Run has aria-label "Run (unavailable: ...)"; this only matches
+    // once liveRefusal is empty, i.e. once the ribbon's own buildCreatePayload
+    // call actually saw the loaded dimstyles catalogue.
+    const runButton = screen.getByRole('button', { name: 'Run' })
+    expect(runButton).not.toBeDisabled()
+    fireEvent.click(runButton)
+    const posted = workers[0].posted.filter((m) => m.type === 'applyEdit')
+    expect(posted).toHaveLength(1)
+    expect(posted[0]).toEqual({
+      type: 'applyEdit', op: 'createDimension',
+      payload: { dimtype: 'ALIGNED', x1: 0, y1: 0, x2: 3, y2: 4, dx: 1.5, dy: 6, rotationDeg: 0, style: 'Standard', layer: '' },
+    })
   })
 })

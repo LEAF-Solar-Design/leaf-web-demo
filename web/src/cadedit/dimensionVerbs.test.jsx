@@ -1,11 +1,62 @@
 // W4g-7b-04c-1: LINEAR / ALIGNED dimension creation, the store builder and
 // the diff lowering (Change A's crate is covered natively in lib.rs; Change
 // C's mapper/prompts/picks/registry/dock/e2e are record 04c-2).
-import { describe, expect, it } from 'vitest'
-import { buildCreatePayload } from './engineSession.js'
+import { act, cleanup, render } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import useEngineSession, { buildCreatePayload } from './engineSession.js'
 import { diffPlan } from './mutationDiff.js'
 
 const STANDARD = Object.freeze(['Standard'])
+
+afterEach(cleanup)
+
+// W4g-7b-04c-3: the same scripted-transport double engineSession.test.jsx
+// uses, kept minimal here — this file only needs one store-level row through
+// create('dimAligned', ...), the way the ribbon's run() calls it.
+class ScriptedWorker {
+  constructor() {
+    this.posted = []
+    this.listeners = { message: [], error: [], messageerror: [] }
+  }
+
+  addEventListener(type, cb) {
+    if (this.listeners[type]) this.listeners[type].push(cb)
+  }
+
+  removeEventListener() {}
+
+  postMessage(data) { this.posted.push(data) }
+
+  terminate() {}
+
+  emit(data) {
+    act(() => { this.listeners.message.forEach((cb) => cb({ data })) })
+  }
+}
+
+function mountSession() {
+  const workers = []
+  const createWorker = vi.fn(() => {
+    const worker = new ScriptedWorker()
+    workers.push(worker)
+    return worker
+  })
+  const handle = { current: null, workers }
+  function Host() {
+    handle.current = useEngineSession({ createWorker })
+    return null
+  }
+  render(<Host />)
+  return handle
+}
+
+function fileOf(name = 'one.dxf', text = '0\nEOF\n') {
+  const bytes = new TextEncoder().encode(text)
+  const file = new File([bytes], name, { type: 'application/dxf' })
+  file.arrayBuffer = async () => bytes.buffer.slice(0)
+  Object.defineProperty(file, 'size', { value: bytes.length })
+  return file
+}
 
 describe('buildCreatePayload(createDimension): the case table', () => {
   it('LINEAR at rot 0: the exact payload, style defaulting to Standard', () => {
@@ -67,6 +118,48 @@ describe('buildCreatePayload(createDimension): the case table', () => {
       .toBe('Dimension refused: the two definition points must both be numbers.')
     expect(buildCreatePayload('createDimension', { dimtype: 'LINEAR', x: '0', y: '0', x2: '3', y2: '4', dx: 'x', dy: '1' }, [], STANDARD).refusal)
       .toBe('Dimension refused: the dimension line point must be a number.')
+  })
+})
+
+describe('W4g-7b-04c-3 F1: the seat ops dimLinear / dimAligned reach the store\'s createDimension', () => {
+  it('buildCreatePayload(dimAligned): the ALIGNED payload, a typed dimtype input ignored for the seat op', () => {
+    expect(buildCreatePayload('dimAligned', {
+      dimtype: 'LINEAR', x: '0', y: '0', x2: '3', y2: '4', dx: '1.5', dy: '6', layer: '',
+    }, [], STANDARD).payload).toEqual({
+      dimtype: 'ALIGNED', x1: 0, y1: 0, x2: 3, y2: 4, dx: 1.5, dy: 6, rotationDeg: 0, style: 'Standard', layer: '',
+    })
+  })
+
+  it('buildCreatePayload(dimLinear) at rot 450 normalizes to 90 before the crate', () => {
+    expect(buildCreatePayload('dimLinear', {
+      x: '0', y: '0', x2: '3', y2: '4', dx: '1.5', dy: '6', rot: '450', layer: '',
+    }, [], STANDARD).payload).toMatchObject({ dimtype: 'LINEAR', rotationDeg: 90 })
+  })
+
+  it('a store-level row: create(\'dimAligned\', inputs) posts ONE applyEdit, op createDimension, dimtype ALIGNED — never the seat id', async () => {
+    const session = mountSession()
+    await act(async () => { await session.current.actions.open(fileOf()) })
+    session.workers[0].emit({
+      type: 'documentLoaded', documentId: 'one.dxf', entities: [], entityCount: 0, unsupported: [], dimstyles: ['Standard'],
+    })
+    act(() => session.current.actions.create('dimAligned', { x: '0', y: '0', x2: '3', y2: '4', dx: '1.5', dy: '6' }))
+    const posted = session.workers[0].posted.filter((m) => m.type === 'applyEdit')
+    expect(posted).toHaveLength(1)
+    expect(posted[0]).toEqual({
+      type: 'applyEdit', op: 'createDimension',
+      payload: { dimtype: 'ALIGNED', x1: 0, y1: 0, x2: 3, y2: 4, dx: 1.5, dy: 6, rotationDeg: 0, style: 'Standard', layer: '' },
+    })
+  })
+})
+
+describe('W4g-7b-04c-3 F3a: a LINEAR whose rotation projects the definition points to nothing refuses', () => {
+  it('(0,0)-(3,0) at rotation 90 projects to nothing; (0,0)-(3,4) at 90 still creates', () => {
+    expect(buildCreatePayload('createDimension', {
+      dimtype: 'LINEAR', x: '0', y: '0', x2: '3', y2: '0', dx: '1.5', dy: '6', rot: '90', layer: '',
+    }, [], STANDARD).refusal).toBe('Dimension refused: the definition points project to nothing along that rotation')
+    expect(buildCreatePayload('createDimension', {
+      dimtype: 'LINEAR', x: '0', y: '0', x2: '3', y2: '4', dx: '1.5', dy: '6', rot: '90', layer: '',
+    }, [], STANDARD).payload).toMatchObject({ rotationDeg: 90 })
   })
 })
 

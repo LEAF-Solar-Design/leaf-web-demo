@@ -171,6 +171,13 @@ export function dimensionSchematic(entity) {
   } else {
     const rad = (finite(entity.rotationDeg) ? entity.rotationDeg : 0) * (Math.PI / 180)
     u = [Math.cos(rad), Math.sin(rad)]
+    // W4g-7b-04c-3 F3a: a rotation perpendicular to def1-def2 projects both
+    // definition points onto the same foot (measurement 0); draw nothing
+    // rather than a zero-length dimension line under a "0" box. The store
+    // and the crate both refuse creating this; a loaded document can still
+    // carry one.
+    const projection = (def2[0] - def1[0]) * u[0] + (def2[1] - def1[1]) * u[1]
+    if (Math.abs(projection) < 1e-9) return []
   }
   const n = [-u[1], u[0]]
   // The foot where an extension line perpendicular to u meets the

@@ -414,7 +414,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const { effective, expressionRefusal, failedExpression, waitingStep, pointSteps } = resolvePromptInputs(prompt, promptInputs, armed && armed.from ? armed.from : null)
   const liveRefusal = prompt && !promptReason && !waitingStep
     ? (expressionRefusal || (armedGroup === 'draw'
-      ? buildCreatePayload(armedOp, effective, session.entities.blocks)
+      ? buildCreatePayload(armedOp, effective, session.entities.blocks, session.entities.dimstyles)
       : buildEditPayload(armedOp, session.selectedId, effective, session.entities.linetypes)).refusal || '')
     : ''
   const runOff = promptOff || !!liveRefusal || !!waitingStep

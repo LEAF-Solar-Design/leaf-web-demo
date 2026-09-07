@@ -203,7 +203,11 @@ export function surviveSelection(previousId, entities) {
 }
 
 /** The W4d Draw group's operations: creation needs no selection. */
-export const CREATE_OPS = Object.freeze(['createLine', 'createCircle', 'createArc', 'createPolyline', 'createRectangle', 'createText', 'createPoint', 'createEllipse', 'createInsert', 'createDimension'])
+// W4g-7b-04c-3: dimLinear / dimAligned are the seat ops the ribbon, the
+// command words and the picks all name; they lower to createDimension below
+// (WORKER_OP, buildCreatePayload) the same way createRectangle lowers to
+// createPolyline.
+export const CREATE_OPS = Object.freeze(['createLine', 'createCircle', 'createArc', 'createPolyline', 'createRectangle', 'createText', 'createPoint', 'createEllipse', 'createInsert', 'createDimension', 'dimLinear', 'dimAligned'])
 // W4g-4: edits that MAKE an entity (a displaced copy, a mirrored copy, the
 // segments of an explode) report what they made by id like the Draw group
 // does; the selection lands on it.
@@ -225,8 +229,16 @@ export const INTERSECT_VERBS = Object.freeze({
   chamfer: { name: 'Chamfer', edge: 'second line', point: 'the point on the first line:' },
 })
 // RECTANG is a closed four-point polyline to the engine: the store lowers it
-// before the post, so the worker's op vocabulary is unchanged.
-const WORKER_OP = Object.freeze({ createRectangle: 'createPolyline' })
+// before the post, so the worker's op vocabulary is unchanged. W4g-7b-04c-3:
+// DIMLINEAR/DIMALIGNED are seat ops the same way — dimLinear/dimAligned lower
+// to createDimension, the worker's only dimension-create op.
+export const WORKER_OP = Object.freeze({ createRectangle: 'createPolyline', dimLinear: 'createDimension', dimAligned: 'createDimension' })
+
+// W4g-7b-04c-3: the fixed dimtype each seat op carries into createDimension's
+// own payload builder. buildCreatePayload never reads a typed `dimtype` input
+// for these two (neither prompt has that field; the internal 'createDimension'
+// op keeps taking dimtype from its own inputs, unchanged, for the store rows).
+const DIMTYPE_OF = Object.freeze({ dimLinear: 'LINEAR', dimAligned: 'ALIGNED' })
 
 // Client-side bound on a typed point list. The engine bounds harder
 // (100,000); past this a "polyline" is a paste, not a drawing gesture.
@@ -262,6 +274,11 @@ export function parsePointList(raw) {
  */
 export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, layer, height, rot, text, ratio, bulges, name, sx, sy, dimtype, dx, dy, style } = {}, blocks = [], dimstyles = []) {
   const layerName = String(layer ?? '').trim()
+  // W4g-7b-04c-3: the seat ops dimLinear / dimAligned lower to createDimension
+  // with a fixed dimtype from DIMTYPE_OF (the typed dimtype input is ignored
+  // for these two).
+  const seatDimtype = DIMTYPE_OF[op]
+  const effectiveOp = seatDimtype ? 'createDimension' : op
   if (op === 'createLine') {
     const [x1, y1, xx2, yy2] = [x, y, x2, y2].map(fmtDelta)
     if ([x1, y1, xx2, yy2].some((v) => v === null)) return { refusal: 'Line refused: x, y, x2 and y2 must all be numbers.' }
@@ -355,14 +372,14 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
     }
     return { payload: { name: admissibleBlockName(definition.name), x: px, y: py, rotationDeg, sx: scaleX, sy: scaleY, sz: 1, layer: layerName } }
   }
-  if (op === 'createDimension') {
+  if (effectiveOp === 'createDimension') {
     // W4g-7b-04c: LINEAR / ALIGNED. def1/def2 are (x, y) / (x2, y2); the
     // dimension line point is (dx, dy); rot applies to LINEAR only (the
     // store normalizes it into [0, 360) before the crate ever sees it, the
     // same wrap the diff's added INSERT rotation already uses); style
     // defaults to 'Standard' and must be loaded (case-insensitively, the
     // catalogue's own spelling rides in the payload).
-    const kind = String(dimtype ?? '').trim().toUpperCase()
+    const kind = seatDimtype ?? String(dimtype ?? '').trim().toUpperCase()
     if (kind !== 'LINEAR' && kind !== 'ALIGNED') return { refusal: 'Dimension refused: choose LINEAR or ALIGNED.' }
     const [px1, py1, px2, py2] = [x, y, x2, y2].map(fmtDelta)
     if ([px1, py1, px2, py2].some((v) => v === null)) return { refusal: 'Dimension refused: the two definition points must both be numbers.' }
@@ -374,6 +391,15 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
     if (rawRot === null) return { refusal: 'Dimension refused: the rotation must be a number (degrees).' }
     if (kind === 'ALIGNED' && rawRot !== 0) return { refusal: 'Dimension refused: a rotation applies to a linear dimension only' }
     const rotationDeg = kind === 'LINEAR' ? ((rawRot % 360) + 360) % 360 : 0
+    // W4g-7b-04c-3 F3a: a LINEAR whose rotation is perpendicular to
+    // def1-def2 projects both definition points onto the same foot, a
+    // zero-length dimension line the schematic would otherwise draw under a
+    // "0" box (engineIntake.js's dimensionSchematic refuses it too).
+    if (kind === 'LINEAR') {
+      const rad = (rotationDeg * Math.PI) / 180
+      const projection = (px2 - px1) * Math.cos(rad) + (py2 - py1) * Math.sin(rad)
+      if (Math.abs(projection) < 1e-9) return { refusal: 'Dimension refused: the definition points project to nothing along that rotation' }
+    }
     const styleText = String(style ?? '').trim() || 'Standard'
     const catalogue = Array.isArray(dimstyles) ? dimstyles : []
     const matchedStyle = catalogue.find((n) => String(n).toLowerCase() === styleText.toLowerCase())

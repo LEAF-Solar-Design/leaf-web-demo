@@ -209,5 +209,11 @@ describe('W4g-6d: a polyline bulge draws as its arc', () => {
       expect(dimensionSchematic({ dimtype: 'ALIGNED', def1: [0, 0], def2: null, dimline: [1, 1] })).toEqual([])
       expect(dimensionSchematic({ dimtype: 'ALIGNED', def1: [0, 0], def2: [0, 0], dimline: [1, 1] })).toEqual([])
     })
+
+    it('W4g-7b-04c-3 F3a: a LINEAR whose rotation projects the definition points to nothing draws nothing, never a zero-length line', () => {
+      expect(dimensionSchematic({ dimtype: 'LINEAR', def1: [0, 0], def2: [3, 0], dimline: [1.5, 6], rotationDeg: 90, measurement: 0 })).toEqual([])
+      // The same two points at a rotation that DOES project still draw.
+      expect(dimensionSchematic({ dimtype: 'LINEAR', def1: [0, 0], def2: [3, 4], dimline: [1.5, 6], rotationDeg: 90, measurement: 4 })).toHaveLength(6)
+    })
   })
 })
