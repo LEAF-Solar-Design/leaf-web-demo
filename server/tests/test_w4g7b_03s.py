@@ -94,6 +94,16 @@ def test_set_linetype_canonical_form_and_plan_line():
         + b"SETLINETYPE|H:2A|Continuous\n")
 
 
+def test_set_linetype_canonicalizes_to_the_heads_spelling_when_it_differs_only_in_case():
+    base = _base()
+    # "5D" (an arc the head already lists) carries the drawing's own
+    # spelling; the request targets "2A" with a different-case spelling of
+    # the SAME name, and must lower to the head's spelling, not the input's.
+    base["properties"]["5D"] = {"aci": 256, "rgb": None, "linetype": "DASHED", "lineweight": -1}
+    canonical = validate_mutations(base, {"set_linetype": [{"handle": "2A", "name": "dashed"}]})
+    assert canonical == {"set_linetype": [{"handle": "2A", "name": "DASHED"}]}
+
+
 def test_two_set_color_ops_sort_by_hex_handle_and_read_back():
     base = _base()
     base["properties"]["2A"]["aci"] = 1
@@ -125,6 +135,8 @@ def test_set_color_accepted_when_property_unavailable_is_not_a_no_op():
     ({"set_linetype": [{"handle": "2A", "name": ""}]}, "linetype is not a safe linetype name"),
     ({"set_linetype": [{"handle": "2A", "name": "bad|name"}]}, "linetype is not a safe linetype name"),
     ({"set_color": [{"handle": "2A", "aci": 256}]}, "set_color '2A' is a no-op"),
+    ({"set_linetype": [{"handle": "2A", "name": "Dashed"}]},
+     "linetype Dashed is not loaded in this drawing"),
 ])
 def test_property_op_refusals(mutations, message):
     with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
@@ -171,6 +183,28 @@ def test_mock_styled_add_sets_properties_keyed_by_the_mapped_handle():
     result = write_loop.apply_mutations(base, canonical)
     assert result["properties"]["p2"] == {"aci": 5, "rgb": None}
     assert "p1" not in result["properties"]
+
+
+def test_verify_prefers_the_property_matching_candidate_on_a_geometric_tie():
+    # R4: two coincident adds, one styled, re-extracted in the OPPOSITE order
+    # from canonical add order ("p1" < "p2" but the output lists "N2" (the
+    # one AutoCAD actually painted color 5) before "N1"). Without preferring
+    # the property match, the plain add (processed first, by handle) would
+    # greedily bind to whichever coincident candidate comes first in the
+    # output and steal the styled add's own match.
+    base = _base()
+    plain = {"handle": "p1", "kind": "LINE", "layer": "0", "pts": [[9, 9], [10, 9]]}
+    styled = {"handle": "p2", "kind": "LINE", "layer": "0", "pts": [[9, 9], [10, 9]], "color": 5}
+    canonical = validate_mutations(base, {"added": [plain, styled]})
+    actual = copy.deepcopy(base)
+    actual["polylines"].extend([
+        {"layer": "0", "closed": False, "pts": [[9.0, 9.0, 0.0], [10.0, 9.0, 0.0]],
+         "xdata": None, "handle": "N2"},
+        {"layer": "0", "closed": False, "pts": [[9.0, 9.0, 0.0], [10.0, 9.0, 0.0]],
+         "xdata": None, "handle": "N1"},
+    ])
+    actual["properties"]["N2"] = {"aci": 5, "rgb": None, "linetype": "ByLayer", "lineweight": -1}
+    assert write_loop.verify_live_mutation_effects(base, actual, canonical) is None
 
 
 # --- header rule -------------------------------------------------------
@@ -264,6 +298,17 @@ def test_verify_reports_unverified_note_for_a_legacy_actual_without_properties()
                      "no properties record")
 
 
+def test_verify_accepts_a_linetype_read_back_in_a_different_case():
+    # R2: tblsearch is case-insensitive, so the LIVE apply can legitimately
+    # read back a different case than the plan named; the verifier must not
+    # refuse that as "not applied".
+    base = _base()
+    canonical = validate_mutations(base, {"set_linetype": [{"handle": "2A", "name": "Continuous"}]})
+    actual = copy.deepcopy(base)
+    actual["properties"]["2A"]["linetype"] = "CONTINUOUS"
+    assert write_loop.verify_live_mutation_effects(base, actual, canonical) is None
+
+
 def test_verify_returns_none_when_the_plan_touches_no_properties():
     base = _base()
     canonical = validate_mutations(base, {"added": [
@@ -342,6 +387,15 @@ def test_intake_parse_reads_an_ep_fixture_line():
     assert parsed["properties"]["2A"] == {
         "aci": 1, "rgb": [10, 20, 30], "linetype": "Continuous", "lineweight": 25,
     }
+
+
+def test_intake_parse_decodes_percent_escapes_in_the_ep_linetype_name():
+    # R5: da/lisp.py's EP block percent-encodes % | CR LF in the linetype
+    # name exactly like a BK block's name; intake_parse must decode it the
+    # same way (percent last, so a literal "%7C" round-trips unchanged).
+    record = "EP|2A|1|~|A%7Cbar%0D%0Aname%25|25"
+    parsed = intake_parse.parse_text(record, "test.dwg")
+    assert parsed["properties"]["2A"]["linetype"] == "A|bar\r\nname%"
 
 
 # --- bounded accoreconsole canary ---------------------------------------

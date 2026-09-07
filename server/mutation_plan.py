@@ -50,9 +50,42 @@ V3_SET_OPS = ("set_color", "set_linetype", "set_lineweight")
 LINEWEIGHTS = frozenset({-3, -2, -1, 0, 5, 9, 13, 15, 18, 20, 25, 30, 35,
                         40, 50, 53, 60, 70, 80, 90, 100, 106, 120, 140, 158, 200, 211})
 STYLE_FIELDS = {"color": "aci", "linetype": "name", "lineweight": "weight"}
+_STANDARD_LINETYPES = ("ByLayer", "ByBlock", "Continuous")
 
 
-def _style_value(field: str, value: Any) -> Any:
+def _known_linetype_names(intake: Dict[str, Any]) -> List[str]:
+    """Every linetype spelling this drawing is known to carry (w4g-7b-03s-c
+    R6): the three standard names plus whatever any entity's EP record
+    already lists. RESIDUAL: the intake carries no LTYPE table, so a
+    linetype that is loaded in the drawing but currently unused by every
+    entity is refused here until a later change adds an LT catalogue (the
+    04s DS pattern is the model); the interpreter itself still accepts any
+    loaded name via `tblsearch`, so this is strictly narrower, never wider,
+    than what the drawing actually supports."""
+    names = list(_STANDARD_LINETYPES)
+    properties = intake.get("properties")
+    if isinstance(properties, dict):
+        for entry in properties.values():
+            if isinstance(entry, dict):
+                name = entry.get("linetype")
+                if isinstance(name, str) and name:
+                    names.append(name)
+    return names
+
+
+def _canonical_linetype_name(value: str, known: List[str]) -> str:
+    """w4g-7b-03s-c R2: canonicalize to the drawing's own spelling on a
+    case-insensitive match (the same rule as the added-INSERT layer
+    canonicalization below), so the interpreter's case-insensitive
+    `tblsearch` and the verifier's case-insensitive comparison never
+    disagree with what the plan actually names."""
+    for candidate in known:
+        if candidate.lower() == value.lower():
+            return candidate
+    raise ValueError(f"linetype {value} is not loaded in this drawing")
+
+
+def _style_value(field: str, value: Any, known_linetypes: List[str]) -> Any:
     if field == "color":
         if type(value) is not int or not 0 <= value <= 256:
             raise ValueError("color aci must be an integer in 0..256")
@@ -62,6 +95,7 @@ def _style_value(field: str, value: Any) -> Any:
     else:
         if not isinstance(value, str) or not _LAYER_RE.fullmatch(value):
             raise ValueError("linetype is not a safe linetype name")
+        value = _canonical_linetype_name(value, known_linetypes)
     return value
 
 
@@ -239,6 +273,7 @@ def validate_mutations(
         raise ValueError(f"unknown mutation fields: {', '.join(sorted(map(str, unknown)))}")
     _reject_raw_fields(mutations)
     index = _index_intake(intake)
+    known_linetypes = _known_linetype_names(intake)
     removed_raw = _op_list(mutations, "removed")
     added_raw = _op_list(mutations, "added")
     transforms_raw = _op_list(mutations, "transforms")
@@ -537,7 +572,7 @@ def validate_mutations(
         })
 
     # Style does not change canonical geometry or the add ordinal.
-    styles = {raw["handle"]: {field: _style_value(field, raw[field])
+    styles = {raw["handle"]: {field: _style_value(field, raw[field], known_linetypes)
                               for field in STYLE_FIELDS if field in raw}
               for raw in added_raw}
     added.sort(key=canonical_json_bytes)
@@ -569,7 +604,7 @@ def validate_mutations(
                 raise ValueError(f"property target {handle!r} is also removed")
             if handle not in property_index:
                 raise ValueError(f"unknown {op} handle {handle!r}")
-            value = _style_value(field, raw[key])
+            value = _style_value(field, raw[key], known_linetypes)
             prop_key = {"color": "aci", "linetype": "linetype", "lineweight": "lineweight"}[field]
             properties = (intake.get("properties") or {}).get(handle, {})
             if (reject_noop and prop_key in properties and properties[prop_key] == value

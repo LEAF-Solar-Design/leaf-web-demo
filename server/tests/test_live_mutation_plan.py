@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import mutation_apply
 import tool_loader
 import write_loop
 import store
@@ -1329,4 +1330,61 @@ def test_data_plan_checkout_denied_is_a_403_envelope(tmp_path):
     assert env["error"]["retryable"] is False
     assert env["tool"] == "cad-edit-plan" and env["version"] == "1.0.0"
     assert da.submissions == [] and da.staged == {}
+    assert store.load_manifest(backend, "tenant", "drawing")["head"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# w4g-7b-03s-c: the route's unchanged-property guard and the live leg's
+# fail-closed behaviour on an unverified property note (this file carried no
+# `properties` scenario before this correction).
+# --------------------------------------------------------------------------- #
+def test_unchanged_property_effect_ok_normalizes_a_dense_head_against_a_sparse_upload():
+    # R1: da/intake_parse.py's EP block is dense (every field defaulted);
+    # server/dxf_intake.py's reading of an uploaded DXF is sparse (no entry
+    # at all when none of 62/6/370/420 are present). The route's preflight
+    # must treat those as the SAME untouched entity, not a property change.
+    dense_default = {"aci": 256, "rgb": None, "linetype": "ByLayer", "lineweight": -1}
+    assert write_loop.unchanged_property_effect_ok(dense_default, None) is True
+    assert write_loop.unchanged_property_effect_ok(None, dense_default) is True
+    assert write_loop.unchanged_property_effect_ok(None, None) is True
+    genuinely_changed = {"aci": 3, "rgb": None, "linetype": "ByLayer", "lineweight": -1}
+    assert write_loop.unchanged_property_effect_ok(dense_default, genuinely_changed) is False
+    # R2: linetype compares case-insensitively; rgb as a 3-tuple or None.
+    assert write_loop.unchanged_property_effect_ok(
+        {"aci": 256, "rgb": [1, 2, 3], "linetype": "CONTINUOUS", "lineweight": -1},
+        {"aci": 256, "rgb": (1, 2, 3), "linetype": "Continuous", "lineweight": -1},
+    ) is True
+
+
+def test_data_plan_refuses_to_publish_on_an_unverified_property_note(monkeypatch, tmp_path):
+    # R3: the route's DXF preflight refuses on this note; the live leg must
+    # fail closed the same way instead of publishing an unverified save.
+    monkeypatch.setattr(
+        mutation_apply, "readiness",
+        lambda contract=2: {"ready": True, "contract": contract},
+    )
+    backend = _store(tmp_path)
+    _, vkey = store.resolve_version(backend, "tenant", "drawing", 1)
+    base_sha = hashlib.sha256(backend.get(vkey)).hexdigest()
+    base = _base()
+    mutations = {"set_color": [{"handle": "A", "aci": 1}]}
+    canonical = validate_mutations(base, mutations)
+    plan_bytes = emit_plan(canonical, base_sha256=base_sha, base_intake=base)
+    plan = {
+        "drawing_id": "drawing", "parent_version": 1, "mutations": mutations,
+        "plan_sha256": plan_sha256(plan_bytes),
+        "source_sha256": hashlib.sha256(b"browser-edited-dxf").hexdigest(),
+    }
+    # FakeDa's `_families_text` never encodes an EP line, so the re-extracted
+    # output geometry matches but carries no `properties` key at all (a
+    # legacy-shaped actual): unverified, and now that must refuse.
+    da = FakeDa({"layers": base["layers"], "polylines": base["polylines"]})
+    env, status = write_loop.run_data_plan_live(
+        plan, "tenant", backend=backend, da=da, t0=time.perf_counter(),
+    )
+    assert status == 502
+    assert env["error"]["error_code"] == "WORKITEM_FAILED"
+    assert env["error"]["retryable"] is False
+    assert "property effects unverified" in env["error"]["message"]
+    assert len(da.submissions) == 1
     assert store.load_manifest(backend, "tenant", "drawing")["head"] == 1

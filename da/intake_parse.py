@@ -220,8 +220,11 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                         or not linetype or (color is not None and (
                             len(color) != 3 or any(v < 0 or v > 255 for v in color)))):
                     raise ValueError("malformed entity properties")
+                # w4g-7b-03s-c R5: the LISP block percent-encodes the
+                # linetype name (%25/%7C/%0D/%0A) exactly like a BK block's
+                # name; decode it the same way, percent last.
                 properties = {"aci": int(aci), "rgb": color,
-                              "linetype": linetype, "lineweight": int(lineweight)}
+                              "linetype": _block_name(linetype), "lineweight": int(lineweight)}
                 out.setdefault("properties", {})[hnd] = properties
             elif tag == "DM":
                 kind, p1, p2, dimline, rotation, style, nrm, measurement, hnd = rest.split("|")

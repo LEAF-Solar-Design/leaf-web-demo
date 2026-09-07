@@ -1207,11 +1207,13 @@ def save_plan_version(drawing_id: str,
                             raise ValueError("an unchanged entity differs from the head")
             # W4g-7b-3s: an entity the plan does not name in set_color /
             # set_linetype / set_lineweight must keep its 62 / 6 / 370 groups
-            # exactly (absent == ByLayer, the same default `properties`
-            # carries): compare the uploaded DXF's own reading against the
-            # head's, for every handle either side carries an explicit group
-            # for (dxf_intake's parser is sparse: no entry at all means every
-            # group was absent, i.e. ByLayer, on that side).
+            # exactly (absent == ByLayer). w4g-7b-03s-c R1: the head's EP
+            # block is dense (every field defaulted) while dxf_intake's
+            # reading of the uploaded DXF is sparse (no entry at all when
+            # none of 62/6/370/420 are present), so both sides go through
+            # the same ByLayer/absent default (case-insensitive linetype,
+            # rgb as a 3-tuple or None) before comparing, or an untouched
+            # entity 422s the instant the EP block ships.
             styled_handles = {str(entry["handle"]) for op in mutation_plan.V3_SET_OPS
                               for entry in canonical.get(op, [])}
             base_properties = quantized_base.get("properties") or {}
@@ -1224,7 +1226,8 @@ def save_plan_version(drawing_id: str,
             for handle in base_entity_handles:
                 if handle in styled_handles or handle in named_handles:
                     continue
-                if base_properties.get(handle) != upload_properties.get(handle):
+                if not write_loop.unchanged_property_effect_ok(
+                        base_properties.get(handle), upload_properties.get(handle)):
                     raise ValueError(f"unchanged entity {handle!r} properties differ from the head")
             properties_note = write_loop.verify_live_mutation_effects(
                 expected_base, quantized_upload, canonical)
