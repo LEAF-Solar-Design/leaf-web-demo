@@ -21,3 +21,12 @@ def test_shortlist_is_bounded_and_local_file_route_explicit(monkeypatch):
     assert len(result['shortlist']) == 8
     assert result['selected'] == 'project_file_delivery'
     assert resolver.acquisition_dependency()['readiness'] == 'unproven'
+
+
+def test_transform_selection_requires_actual_invocation_proof(monkeypatch):
+    monkeypatch.setattr(resolver.deps, 'effective_tools_with_provenance', lambda tenant: [])
+    result = resolver.resolve('tenant', 'cad_file', existing_artifact=True, transform_recipe=True)
+    assert result['selected'] == 'published_json_records_to_csv'
+    assert result['readiness'] == 'unproven'
+    assert result['selected_capability']['outputs']['csv'].startswith('Actual authored CSV')
+    assert result['missing_capability'] and result['shortlist'] == []

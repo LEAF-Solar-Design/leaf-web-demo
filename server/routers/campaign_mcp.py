@@ -16,6 +16,7 @@ _FINISH = {'type': 'object', 'additionalProperties': False,
            'required': ['delivery_profile', 'intended_user', 'workflow', 'artifact_refs'],
            'properties': {'delivery_profile': {'type': 'string'}, 'intended_user': {'type': 'string'},
                           'workflow': {'type': 'string'},
+                          'deadline_at': {'type': 'string', 'format': 'date-time'},
                           'artifact_refs': {'type': 'array', 'maxItems': 32, 'items': {'type': 'string'}}}}
 
 
@@ -42,7 +43,8 @@ def tools_list():
     return tools
 
 
-def call_tool(tenant, name, args):
+def call_tool(tenant, name, args, authority_headers=None):
+    authority_headers = authority_headers or {}
     definition = next((t for t in tools_list() if t['name'] == name), None)
     if definition is None:
         raise LookupError('Unknown tool')
@@ -58,22 +60,23 @@ def call_tool(tenant, name, args):
             title = campaigns._text(args.get('title'), 'title', 200)
             prompt = campaigns._text(args.get('prompt'), 'prompt', 32768)
             return campaigns._release_call('campaign', campaigns._finish_campaign,
-                                           tenant, project, title, prompt, args['finish'], key)
+                                           tenant, project, title, prompt, args['finish'], key, **authority_headers)
         if 'title' in args or 'prompt' in args:
             raise ValueError('Existing campaign finish does not accept admission fields')
         campaign = campaigns._id(args['campaign_id'])
         return campaigns._release_call('completion', releases.create, tenant, project,
-                                       campaign, args['finish'], key)
+                                       campaign, args['finish'], key, **authority_headers)
     campaign, release = campaigns._id(args['campaign_id']), campaigns._id(args['release_id'])
     if name == 'campaign.release.get':
         return campaigns._release_call('completion', releases.snapshot, tenant, project, campaign, release)
     if name == 'campaign.release.advance':
-        return campaigns._release_call('completion', releases.advance, tenant, project, campaign, release)
+        return campaigns._release_call('completion', releases.advance, tenant, project, campaign, release, **authority_headers)
     if name == 'campaign.release.retry':
         return campaigns._release_call('completion', releases.retry, tenant, project, campaign, release, args['stage'])
     actions = {'campaign.release.pause': 'pause', 'campaign.release.resume': 'resume',
                'campaign.release.cancel': 'cancel'}
-    return campaigns._release_call('completion', releases.transition, tenant, project, campaign, release, actions[name])
+    return campaigns._release_call('completion', releases.transition, tenant, project, campaign, release, actions[name],
+                                   **(authority_headers if name == 'campaign.release.resume' else {}))
 
 
 def _error(identifier, code, message):
@@ -112,7 +115,8 @@ async def mcp(request: Request, tenant=Depends(deps.require_tenant)):
         if set(params) != {'name', 'arguments'}:
             return _error(identifier, -32602, 'Invalid params')
         try:
-            output = await run_in_threadpool(call_tool, tenant, params['name'], params['arguments'])
+            output = await run_in_threadpool(call_tool, tenant, params['name'], params['arguments'],
+                                             campaigns._release_authority(request))
         except LookupError:
             return _error(identifier, -32602, 'Unknown tool')
         except (ValueError, TypeError, KeyError):

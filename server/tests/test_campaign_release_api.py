@@ -72,3 +72,20 @@ def test_unavailable_completion_preserves_authorized_campaign(client, monkeypatc
     assert response.status_code == 200
     assert response.json()['campaign'] == row
     assert response.headers['x-completion-status'] == 'unavailable'
+
+
+def test_mcp_deadline_schema_and_authority_header_transport(client, monkeypatch):
+    finish = next(t for t in campaign_mcp.tools_list() if t['name'] == 'campaign.finish')
+    assert finish['inputSchema']['properties']['finish']['properties']['deadline_at']['format'] == 'date-time'
+    calls = []
+    monkeypatch.setattr(service, 'transition', lambda *args, **kwargs:
+                        calls.append((args, kwargs)) or {'release': None})
+    args = {key: str(uuid.uuid4()) for key in ('project_id', 'campaign_id', 'release_id')}
+    body = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+            'params': {'name': 'campaign.release.resume', 'arguments': args}}
+    response = client.post('/api/mcp/campaigns', json=body,
+        headers={'X-Authority-Session-Id': 'session', 'X-Authority-Turn-Id': 'turn'})
+    assert response.json()['result']['isError'] is False
+    assert calls[0][1] == {'authority_session_id': 'session', 'authority_turn_id': 'turn'}
+    body['params']['arguments']['authority_session_id'] = 'forged-model-argument'
+    assert client.post('/api/mcp/campaigns', json=body).json()['error']['code'] == -32602

@@ -255,7 +255,8 @@ def create(tenant, project_id, campaign_id, finish, idempotency_key,
             _store().transition_release(org, project, campaign_id, rid, actor, action='resume')
         return advance(tenant, project_id, campaign_id, rid, authority_session_id, authority_turn_id)
     selection = capabilities.resolve(tenant, finish['delivery_profile'],
-                                     existing_artifact=bool(contract.get('selected_artifact')))
+                                     existing_artifact=bool(contract.get('selected_artifact')),
+                                     **({'transform_recipe': True} if contract.get('transform_recipe') else {}))
     authority(tenant, project_id)
     _store().record_decision(org, project, campaign_id, rid, decision_key='capability-selection',
                              kind='capability_selection', payload=selection, decided_by=str(actor))

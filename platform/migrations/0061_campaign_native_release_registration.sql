@@ -1,4 +1,5 @@
 -- Registration only. Native release has no host operation or published tool.
+-- expand-contract: contract-of=0058
 ALTER TABLE campaign_host_enrollments
   ADD COLUMN IF NOT EXISTS capability TEXT NOT NULL DEFAULT 'campaign.host-enrollment';
 DO $$ BEGIN
