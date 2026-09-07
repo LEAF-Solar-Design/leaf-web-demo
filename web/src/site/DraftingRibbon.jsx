@@ -92,16 +92,42 @@ export function RibbonTool({ tool }) {
 // A panel widget that is not a command: the reference's ByLayer combos.
 // Disabled widgets say why on their title, like disabled tools.
 export function RibbonWidget({ widget }) {
-  const { id, label, value = '', options = [], disabled = false, reason = '', onChange } = widget
+  const { id, label, value = '', options = [], disabled = false, reason = '', title = '', onChange } = widget
   const unavailable = disabled && reason
+  // W4g-7b-03c-g F7: a native closed <select> fires `change` once per
+  // ArrowUp/ArrowDown while it holds keyboard focus, so applying every
+  // change turned one keyboard walk into one engine write per option
+  // passed. A mouse/pointer pick still applies at once; once an arrow key
+  // is seen since focus, `change` only buffers the value, and it applies
+  // ONCE, on Enter or on blur, with whatever the last buffered value was.
+  const keyboardWalkRef = useRef(false)
+  const pendingValueRef = useRef(null)
+  const commitPending = () => {
+    if (pendingValueRef.current === null) return
+    const next = pendingValueRef.current
+    pendingValueRef.current = null
+    onChange?.(next)
+  }
   return (
-    <label className="ribbon-widget" data-widget={id} title={unavailable ? reason : label}>
+    <label className="ribbon-widget" data-widget={id} title={unavailable ? reason : (title || label)}>
       <span className="ribbon-note">{label}</span>
       <select
         aria-label={accessibleName(label, unavailable ? reason : '')}
         value={value}
         disabled={disabled}
-        onChange={(event) => onChange?.(event.target.value)}
+        onFocus={() => { keyboardWalkRef.current = false; pendingValueRef.current = null }}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowUp' || event.key === 'ArrowDown') keyboardWalkRef.current = true
+          else if (event.key === 'Enter' && keyboardWalkRef.current) commitPending()
+        }}
+        onChange={(event) => {
+          if (keyboardWalkRef.current) { pendingValueRef.current = event.target.value; return }
+          onChange?.(event.target.value)
+        }}
+        onBlur={() => {
+          if (keyboardWalkRef.current) commitPending()
+          keyboardWalkRef.current = false
+        }}
       >
         {(options.length ? options : [value]).map((opt) => <option key={opt} value={opt}>{opt}</option>)}
       </select>

@@ -4,10 +4,10 @@
 // a Modify record seated in the reference's Properties panel that copies
 // the selection's layer to a picked object as ONE setLayer step. Pure rows
 // plus the seating, no worker.
-import { cleanup, render } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import DraftingRibbon from '../site/DraftingRibbon.jsx'
+import DraftingRibbon, { RibbonWidget } from '../site/DraftingRibbon.jsx'
 import { forGroup } from '../lib/actionRegistry.js'
 import { parseDrawingCommand } from '../lib/commandWords.js'
 
@@ -221,5 +221,48 @@ describe('W4g-4b MATCHPROP', () => {
     expect(again).not.toBe(first)
     expect(again.querySelectorAll('[data-tool="modify:matchprop"]')).toHaveLength(1)
     expect(document.querySelectorAll('[data-tool="modify:matchprop"]')).toHaveLength(1)
+  })
+})
+
+describe('W4g-7b-03c-g F7: RibbonWidget applies a keyboard walk ONCE, on Enter or blur', () => {
+  it('a mouse/pointer change still applies at once', () => {
+    const onChange = vi.fn()
+    render(<RibbonWidget widget={{ id: 'w', label: 'Color', value: 'ByLayer', options: ['ByLayer', 'red', 'blue'], onChange }} />)
+    fireEvent.change(screen.getByLabelText('Color'), { target: { value: 'red' } })
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith('red')
+  })
+
+  it('three ArrowDown-driven changes then Enter post exactly ONE op, the last value', () => {
+    const onChange = vi.fn()
+    render(<RibbonWidget widget={{ id: 'w', label: 'Color', value: 'ByLayer', options: ['ByLayer', 'red', 'yellow', 'green'], onChange }} />)
+    const select = screen.getByLabelText('Color')
+    fireEvent.keyDown(select, { key: 'ArrowDown' })
+    fireEvent.change(select, { target: { value: 'red' } })
+    fireEvent.keyDown(select, { key: 'ArrowDown' })
+    fireEvent.change(select, { target: { value: 'yellow' } })
+    fireEvent.keyDown(select, { key: 'ArrowDown' })
+    fireEvent.change(select, { target: { value: 'green' } })
+    expect(onChange).not.toHaveBeenCalled()
+    fireEvent.keyDown(select, { key: 'Enter' })
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith('green')
+  })
+
+  it('a keyboard walk with no Enter still applies once, on blur', () => {
+    const onChange = vi.fn()
+    render(<RibbonWidget widget={{ id: 'w', label: 'Color', value: 'ByLayer', options: ['ByLayer', 'red', 'yellow'], onChange }} />)
+    const select = screen.getByLabelText('Color')
+    fireEvent.keyDown(select, { key: 'ArrowDown' })
+    fireEvent.change(select, { target: { value: 'red' } })
+    fireEvent.keyDown(select, { key: 'ArrowDown' })
+    fireEvent.change(select, { target: { value: 'yellow' } })
+    fireEvent.blur(select)
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith('yellow')
+    // A later focus/blur with no new change posts nothing more.
+    fireEvent.focus(select)
+    fireEvent.blur(select)
+    expect(onChange).toHaveBeenCalledTimes(1)
   })
 })

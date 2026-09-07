@@ -343,6 +343,19 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const armedOp = armed ? armed.op : ''
   const armedGroup = armed ? armed.group : ''
   const prompt = armedOp ? PROMPTS[armedOp] : null
+  // W4g-7b-03c-g F1: the typed COLOR / LINETYPE / LWEIGHT words prompt for a
+  // field (aci / linetype / lineweight) the provider's operator record never
+  // learned — those three are the combos' own live-apply keys (W4g-7b-03c),
+  // not typed operands, so `setInput` on them is a silent no-op there. Held
+  // here instead and merged into the record the prompt reads and runs with,
+  // so the word path needs no change to that shared contract.
+  const [wordInputs, setWordInputs] = useState({ aci: '', linetype: '', lineweight: '' })
+  const promptInputs = PROPERTY_OPS.has(armedOp) && prompt ? { ...inputs, ...wordInputs } : inputs
+  const setPromptInput = (key, value) => (
+    Object.prototype.hasOwnProperty.call(wordInputs, key)
+      ? setWordInputs((current) => (current[key] === value ? current : { ...current, [key]: value }))
+      : setInput(key, value)
+  )
   // W4g-5c: a clipboard arm (PASTE, typed or clicked) reads the clipboard
   // ladder, so the prompt says "nothing on the clipboard yet" with Run held
   // exactly as the ribbon button is held, rather than a live Run that the
@@ -375,11 +388,11 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // exactly two decimal operands.
   // W4g-7a: the resolution lives in promptInputs.js, shared with the script
   // runner, so a script line and a typed prompt read the same numbers.
-  const { effective, expressionRefusal, failedExpression, waitingStep, pointSteps } = resolvePromptInputs(prompt, inputs, armed && armed.from ? armed.from : null)
+  const { effective, expressionRefusal, failedExpression, waitingStep, pointSteps } = resolvePromptInputs(prompt, promptInputs, armed && armed.from ? armed.from : null)
   const liveRefusal = prompt && !promptReason && !waitingStep
     ? (expressionRefusal || (armedGroup === 'draw'
       ? buildCreatePayload(armedOp, effective, session.entities.blocks)
-      : buildEditPayload(armedOp, session.selectedId, effective)).refusal || '')
+      : buildEditPayload(armedOp, session.selectedId, effective, session.entities.linetypes)).refusal || '')
     : ''
   const runOff = promptOff || !!liveRefusal || !!waitingStep
   const runReason = promptReason || liveRefusal
@@ -531,40 +544,57 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // words and MATCHPROP already go through, so a bad pick refuses the same
   // sentence a bad typed value would.
   const selectedEntity = (session.entities || []).find((entity) => entity.id === session.selectedId) || null
+  // W4g-7b-03c-g F4 (declared residual, unchanged): this is the browser's
+  // LTYPE table, the drafter's own drawing. The server admits only names an
+  // entity already uses plus the three standard names (mutation_plan.py
+  // ~56-84); a save the server refuses for a name off that list surfaces its
+  // sentence unchanged. The select still offers the full table (honest about
+  // what is IN the drawing); the title says what the server accepts.
   const linetypeCatalogue = Array.isArray(session.entities?.linetypes) && session.entities.linetypes.length
     ? session.entities.linetypes
     : ['ByLayer', 'ByBlock', 'Continuous']
+  const LINETYPE_TITLE = 'Linetype (this drawing\'s table; a save may still be refused for a name the server does not yet admit)'
+  // W4g-7b-03c-g F8/F9: a head value outside the offered options (an ACI in
+  // 8..255, a lineweight off the standard mm grid) must still be its OWN
+  // option, or the select's `value` matches no `<option>` and the browser
+  // shows the first option selected instead — ByLayer becomes unreachable
+  // from there, since picking the option that is already (visually) selected
+  // fires no change. Every combo's option list gets the current value added
+  // when it is not already one of the standard choices.
+  const withCurrentOption = (options, current) => (options.includes(current) ? options : [...options, current])
   const colorValue = !selectedEntity ? 'ByLayer'
     : selectedEntity.aci === 256 ? 'ByLayer'
       : selectedEntity.aci === 0 ? 'ByBlock'
-        : ACI_NAMES[selectedEntity.aci] || 'index...'
+        : ACI_NAMES[selectedEntity.aci] || `index ${selectedEntity.aci}`
   const linetypeValue = !selectedEntity ? 'ByLayer'
     : linetypeCatalogue.find((name) => name.toLowerCase() === String(selectedEntity.linetype ?? 'ByLayer').toLowerCase())
       || selectedEntity.linetype || 'ByLayer'
   const lineweightValue = !selectedEntity ? 'ByLayer' : formatLineweight(Number.isFinite(selectedEntity.lineweight) ? selectedEntity.lineweight : -1)
+  // W4g-7b-03c-g F5: `disabled` already follows the whole ladder (noDocument
+  // / crashed / busy / readOnlyKind / noSelection); the displayed sentence
+  // must be the SAME rung, not a hardcoded noSelection that lies on every
+  // other one. The honesty-ladder gate (check_honesty_ladder.mjs) can only
+  // verify a plain string or a literal REASONS.key; a per-rung sentence is a
+  // computed value, same class as the Draw/Modify/Clipboard/Annotation/
+  // Properties/Block clusters' own `reason = action.when(engineCtx)` above,
+  // and like them counts as one more unverifiable-but-budgeted expression.
   const propertyWidgets = [
     {
       id: 'prop-color', label: 'Color', value: colorValue,
-      options: ['ByLayer', 'ByBlock', ...Object.values(ACI_NAMES), 'index...'],
-      // W4g-7b-03c-c: the honesty ladder can only verify a plain string or a
-      // REASONS.key reference, never a computed identifier; the selection
-      // ladder's own sentence (the same one modify:matchprop uses) covers
-      // every state this select is actually disabled for. W4g-7b-03c-f: the
-      // underlying gate is now the property ladder (`property`), which
-      // admits an INSERT reference; the reason literal is unchanged because
-      // MODIFY_REASONS.noSelection is a key propertyReason still names.
-      disabled: !!property, reason: MODIFY_REASONS.noSelection,
+      options: withCurrentOption(['ByLayer', 'ByBlock', ...Object.values(ACI_NAMES), 'index...'], colorValue),
+      disabled: !!property, reason: property,
       onChange: (value) => (value === 'index...' ? toggleArmed('modify', 'setColor') : applyEdit('setColor', { aci: value })),
     },
     {
-      id: 'prop-linetype', label: 'Linetype', value: linetypeValue, options: linetypeCatalogue,
-      disabled: !!property, reason: MODIFY_REASONS.noSelection,
+      id: 'prop-linetype', label: 'Linetype', value: linetypeValue, title: LINETYPE_TITLE,
+      options: withCurrentOption(linetypeCatalogue, linetypeValue),
+      disabled: !!property, reason: property,
       onChange: (value) => applyEdit('setLinetype', { linetype: value }),
     },
     {
       id: 'prop-lineweight', label: 'Lineweight', value: lineweightValue,
-      options: ['ByLayer', 'ByBlock', 'Default', ...LINEWEIGHT_VALUES.map(formatLineweight)],
-      disabled: !!property, reason: MODIFY_REASONS.noSelection,
+      options: withCurrentOption(['ByLayer', 'ByBlock', 'Default', ...LINEWEIGHT_VALUES.map(formatLineweight)], lineweightValue),
+      disabled: !!property, reason: property,
       onChange: (value) => applyEdit('setLineweight', { lineweight: value }),
     },
   ]
@@ -619,15 +649,17 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const quick = fileTools.map((tool) => ({ ...tool, id: `quick-${tool.id}`, dataTool: `quick-${tool.id}`, label: tool.text }))
 
   // One field of the prompt: the SAME operator record the pane's fields bind
-  // to (provider `inputs`), named `ribbon <label>` for the locator contract.
+  // to (provider `inputs`, merged with `wordInputs` for the three keys the
+  // provider never registered), named `ribbon <label>` for the locator
+  // contract.
   const field = ([key, label, mode = 'decimal', wide = false]) => {
     if (mode === 'checkbox') {
       return (
         <label key={`${key}:${label}`} className="cp-field">
           <input
             type="checkbox"
-            checked={inputs[key] === 'true'}
-            onChange={(event) => setInput(key, event.target.checked ? 'true' : 'false')}
+            checked={promptInputs[key] === 'true'}
+            onChange={(event) => setPromptInput(key, event.target.checked ? 'true' : 'false')}
             aria-label={`ribbon ${label}`}
             disabled={fieldsOff}
           />
@@ -641,7 +673,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     // once something was actually typed: empty is its default, not a mistake.
     const invalid = !!liveRefusal && (mode === 'decimal'
       ? (failedExpression.has(key) || !readsAsNumber(effective[key]))
-      : mode === 'decimal-default' && String(inputs[key] ?? '').trim() !== '' && !readsAsNumber(effective[key]))
+      : mode === 'decimal-default' && String(promptInputs[key] ?? '').trim() !== '' && !readsAsNumber(effective[key]))
     return (
       <input
         key={`${key}:${label}`}
@@ -649,8 +681,8 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
         type="text"
         inputMode={mode === 'edge' || mode === 'decimal-default' ? (mode === 'decimal-default' ? 'decimal' : 'text') : mode}
         list={key === 'name' ? BLOCK_CATALOGUE_ID : undefined}
-        value={inputs[key]}
-        onChange={(event) => setInput(key, event.target.value)}
+        value={promptInputs[key]}
+        onChange={(event) => setPromptInput(key, event.target.value)}
         aria-label={`ribbon ${label}`}
         aria-invalid={invalid ? 'true' : undefined}
         placeholder={label}

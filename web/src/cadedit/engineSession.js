@@ -414,7 +414,14 @@ export function planMatchprop(session, inputs = {}) {
   const targetLinetype = String(target.linetype ?? 'ByLayer')
   const targetLineweight = Number.isFinite(target.lineweight) ? target.lineweight : -1
   const layerDiffers = String(target.layer ?? '') !== layer
-  const colorDiffers = targetAci !== sourceAci
+  // W4g-7b-03c-g F6: the contract carries ACI only, so a source's own true
+  // colour copies as its nearest index (sourceAci above, unchanged). A
+  // destination that STILL carries a true colour needs its own setColor step
+  // even at an unchanged nearest index: the step is what clears its 420, and
+  // an ACI-only compare would otherwise call a true-coloured destination
+  // "already matching" and leave the 420 in place.
+  const targetHasTrueColor = Array.isArray(target.trueColor) && target.trueColor.length === 3
+  const colorDiffers = targetAci !== sourceAci || targetHasTrueColor
   const linetypeDiffers = targetLinetype.toLowerCase() !== sourceLinetype.toLowerCase()
   const lineweightDiffers = targetLineweight !== sourceLineweight
   if (!layerDiffers && !colorDiffers && !linetypeDiffers && !lineweightDiffers) {

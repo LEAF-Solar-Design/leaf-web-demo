@@ -152,7 +152,7 @@ function insertOf(entity) {
   const print = JSON.stringify([name, point, rot, scale, layer,
     entity.columns ?? 1, entity.rows ?? 1, entity.columnSpacing ?? 0, entity.rowSpacing ?? 0,
     props.aci, props.trueColor, props.linetype, props.lineweight])
-  return { kind: 'INSERT', name, ip: point, rot, scale: scale.slice(), layer, print }
+  return { kind: 'INSERT', name, ip: point, rot, scale: scale.slice(), layer, print, props }
 }
 
 // Rotation degrees the way the contract's add carries them: [0, 360), 6 dp.
@@ -216,7 +216,11 @@ function addedRecord(handle, g) {
   if (g.kind === 'CIRCLE') return { handle, kind: 'CIRCLE', layer: g.layer, c: g.c, r: g.r, ...styleOf(g) }
   if (g.kind === 'ARC') return { handle, kind: 'ARC', layer: g.layer, c: g.c, r: g.r, start_deg: g.start_deg, end_deg: g.end_deg, ...styleOf(g) }
   if (g.kind === 'LINE') return { handle, kind: 'LINE', layer: g.layer, pts: g.pts, ...styleOf(g) }
-  if (g.kind === 'INSERT') return { handle, kind: 'INSERT', name: g.name, pt: g.ip, rot: normalizedDeg(g.rot), scale: g.scale, layer: g.layer }
+  // W4g-7b-03c-g: the INSERT styled add. mutation_plan.py's styled-add rule
+  // admits INSERT the same as the geometry kinds, so a created-then-coloured
+  // reference must carry its properties or the route's properties note is
+  // suppressed and the save lands uncoloured.
+  if (g.kind === 'INSERT') return { handle, kind: 'INSERT', name: g.name, pt: g.ip, rot: normalizedDeg(g.rot), scale: g.scale, layer: g.layer, ...styleOf(g) }
   return { handle, layer: g.layer, closed: g.closed, pts: g.pts, ...styleOf(g) }
 }
 
@@ -294,7 +298,14 @@ export function diffPlan(committed, current) {
     if (trueColorChanged && nowProps.trueColor) {
       return cannot(`entity ${handle} has a true colour the plan cannot carry`)
     }
-    if (wasProps.aci !== nowProps.aci) setColor.push({ handle, aci: nowProps.aci })
+    // W4g-7b-03c-g F3: clearing a true colour back to a plain ACI can leave
+    // the nearest-index projection (`aci`) unchanged, so the aci compare
+    // alone misses it; the crate's no-op rule only exempts colour when the
+    // head still carries rgb (mutation_plan.py), so a cleared true colour
+    // always needs its own set_color even at an unchanged index.
+    if (wasProps.aci !== nowProps.aci || (wasProps.trueColor && !nowProps.trueColor)) {
+      setColor.push({ handle, aci: nowProps.aci })
+    }
     if (wasProps.linetype.toLowerCase() !== nowProps.linetype.toLowerCase()) setLinetype.push({ handle, name: nowProps.linetype })
     if (wasProps.lineweight !== nowProps.lineweight) setLineweight.push({ handle, weight: nowProps.lineweight })
     if (now.kind === 'CIRCLE') {
