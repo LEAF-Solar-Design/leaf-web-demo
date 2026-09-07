@@ -69,7 +69,7 @@ describe('release continuation authority', () => {
     const hook = await withProvider(provider)
     expect(provider).not.toHaveBeenCalled()
     await act(async () => { await hook.result.current.transitionRelease('resume') })
-    expect(provider).toHaveBeenCalledExactlyOnceWith(expect.stringContaining('Export CSV'), { forceFresh: true })
+    expect(provider).toHaveBeenCalledExactlyOnceWith(expect.stringContaining('Export CSV'), { projectId: P, forceFresh: true })
     expect(api.transitionRelease).toHaveBeenCalledExactlyOnceWith(P, C, Q, 'resume', { sessionId: B, turnId: D })
     expect(JSON.stringify(hook.result.current)).not.toContain(B)
     expect(localStorage.length).toBe(0)
@@ -81,6 +81,26 @@ describe('release continuation authority', () => {
     expect(api.transitionRelease).not.toHaveBeenCalled()
     expect(hook.result.current.completion.release.status).toBe('waiting')
     expect(hook.result.current.error.message).not.toContain('private details')
+  })
+  it.each([
+    { sessionId: B, status: 'queued' }, { sessionId: B, turnId: null, status: 'queued' },
+    { sessionId: B, turnId: '' }, { turnId: D },
+  ])('does not resume without a usable session and turn: %j', async authority => {
+    const provider = vi.fn().mockResolvedValue(authority)
+    const hook = await withProvider(provider)
+    await act(async () => { await expect(hook.result.current.transitionRelease('resume')).rejects.toThrow('authoring authority') })
+    expect(provider).toHaveBeenCalledExactlyOnceWith(expect.any(String), { projectId: P, forceFresh: true })
+    expect(api.transitionRelease).not.toHaveBeenCalled()
+    expect(hook.result.current.completion.release.status).toBe('waiting')
+  })
+  it('requests authority for the newly selected project', async () => {
+    const provider = vi.fn().mockResolvedValue({ sessionId: B, turnId: D })
+    const hook = await withProvider(provider)
+    hook.rerender({ project: B, enabled: true })
+    await waitFor(() => expect(hook.result.current.completion).toEqual(waiting))
+    await act(async () => { await hook.result.current.transitionRelease('resume') })
+    expect(provider).toHaveBeenCalledExactlyOnceWith(expect.any(String), { projectId: B, forceFresh: true })
+    expect(api.transitionRelease).toHaveBeenCalledExactlyOnceWith(B, C, Q, 'resume', { sessionId: B, turnId: D })
   })
   it.each(['pause', 'cancel'])('does not create a turn for %s', async action => {
     const provider = vi.fn()
@@ -99,9 +119,11 @@ describe('release continuation authority', () => {
   })
   it.each(['project', 'campaign', 'release', 'version', 'disabled'])('refuses late authority after %s changes', async change => {
     const pending = deferred()
-    const hook = await withProvider(() => pending.promise)
+    const provider = vi.fn().mockReturnValue(pending.promise)
+    const hook = await withProvider(provider)
     let resume
     act(() => { resume = hook.result.current.transitionRelease('resume').catch(error => error) })
+    expect(provider).toHaveBeenCalledExactlyOnceWith(expect.any(String), { projectId: P, forceFresh: true })
     if (change === 'project' || change === 'disabled') {
       hook.rerender({ project: change === 'project' ? B : P, enabled: change !== 'disabled' })
     } else if (change === 'campaign') {
