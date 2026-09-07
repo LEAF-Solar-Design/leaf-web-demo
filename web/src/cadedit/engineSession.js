@@ -498,7 +498,7 @@ export function planMatchprop(session, inputs = {}) {
   }
   if (layerDiffers && !keepsLayer) steps.push({ op: 'setLayer', entityId: target.id, layer })
   if (colorDiffers) steps.push({ op: 'setColor', entityId: target.id, aci: sourceAci })
-  if (linetypeDiffers) steps.push({ op: 'setLinetype', entityId: target.id, linetype: sourceLinetype })
+  if (linetypeDiffers) steps.push({ op: 'setLinetype', entityId: target.id, linetype: sourceLinetype, exact: true })
   if (lineweightDiffers) steps.push({ op: 'setLineweight', entityId: target.id, lineweight: sourceLineweight })
   return { steps, ...(layerDiffers && keepsLayer ? { skipped: ['layer'] } : {}) }
 }
@@ -555,6 +555,7 @@ export function lowerSteps(steps, linetypes = [], entities = null) {
     if (!entityId) return { refusal: `Edit refused: step ${op} names no entity.` }
     // The posting path supplies the live projection: every edit step goes
     // through the single-op gate before any part of the batch can post.
+    let validatedPayload
     if (entities !== null) {
       const stepInputs = { ...step, ...step.inputs }
       if (op === 'setLineweight' && [-1, -2, -3].includes(stepInputs.lineweight)) {
@@ -562,6 +563,7 @@ export function lowerSteps(steps, linetypes = [], entities = null) {
       }
       const checked = buildEditPayload(op, entityId, stepInputs, linetypes, entities)
       if (checked.refusal) return { refusal: checked.refusal }
+      validatedPayload = checked.payload
     }
     if (op === 'delete') {
       lowered.push({ op, payload: { entityId } })
@@ -577,9 +579,10 @@ export function lowerSteps(steps, linetypes = [], entities = null) {
       if (!Number.isInteger(aci) || aci < 0 || aci > 256) return { refusal: 'Edit refused: a colour step has an invalid ACI.' }
       lowered.push({ op, payload: { entityId, aci } })
     } else if (op === 'setLinetype') {
-      const linetype = String(step.linetype ?? '').trim()
+      const raw = String(step.linetype ?? '')
+      const linetype = step.exact === true ? raw : raw.trim()
       if (!linetype) return { refusal: 'Edit refused: a linetype step names no linetype.' }
-      lowered.push({ op, payload: { entityId, linetype } })
+      lowered.push({ op, payload: validatedPayload || { entityId, linetype } })
     } else if (op === 'setLineweight') {
       const lineweight = Number(step.lineweight)
       if (!Number.isInteger(lineweight)) return { refusal: 'Edit refused: a lineweight step has an invalid value.' }
@@ -707,7 +710,7 @@ export function formatLineweight(weight) {
 // and applyEdit's backstop, so the two lists cannot drift apart.
 export const EDIT_KIND_EXEMPT_OPS = Object.freeze(new Set(['setColor', 'setLinetype', 'setLineweight', 'matchprop']))
 
-export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer, x1, y1, x2, y2, keep, cx, cy, deg, factor, rows, cols, rowGap, colGap, count, totalDeg, edge, ex, ey, x, y, r, d1, d2, aci, linetype, lineweight } = {}, linetypeCatalogue = [], entities = null) {
+export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer, x1, y1, x2, y2, keep, cx, cy, deg, factor, rows, cols, rowGap, colGap, count, totalDeg, edge, ex, ey, x, y, r, d1, d2, aci, linetype, exact, lineweight } = {}, linetypeCatalogue = [], entities = null) {
   const payload = { entityId }
   // W4g-7b-05c-2: the by-kind refusal, before any operand check below, on
   // every surface that calls this builder (the ribbon's live validation, the
@@ -876,12 +879,16 @@ export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer, x1,
     payload.aci = value
   }
   if (op === 'setLinetype') {
-    const trimmed = String(linetype ?? '').trim()
-    if (!trimmed) return { refusal: 'Property refused: enter a linetype name.' }
+    const raw = String(linetype ?? '')
+    // Reject controls before typed whitespace is trimmed, including C1.
+    // eslint-disable-next-line no-control-regex
+    if (/[\u0000-\u001f\u007f-\u009f]/.test(raw)) return { refusal: 'Property refused: a linetype name cannot contain control characters.' }
+    const value = exact === true ? raw : raw.trim()
+    if (!value) return { refusal: 'Property refused: enter a linetype name.' }
     const catalogue = Array.isArray(linetypeCatalogue) ? linetypeCatalogue : []
-    const match = catalogue.find((name) => String(name).toLowerCase() === trimmed.toLowerCase())
-    if (!match && entities?.linetypesTruncated !== true) return { refusal: `Property refused: linetype ${trimmed} is not loaded in this drawing` }
-    payload.linetype = match || trimmed
+    const match = catalogue.find((name) => exact === true ? name === value : String(name).toLowerCase() === value.toLowerCase())
+    if (!match && entities?.linetypesTruncated !== true) return { refusal: `Property refused: linetype ${value} is not loaded in this drawing` }
+    payload.linetype = exact === true ? value : match || value
   }
   if (op === 'setLineweight') {
     const value = parseLineweight(lineweight)

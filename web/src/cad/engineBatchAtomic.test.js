@@ -68,6 +68,19 @@ const SCRIPT = [
   'const engine = createRequire(import.meta.url)(gluePath)',
   'const bytes = new TextEncoder().encode(dxf)',
   'const out = {}',
+  'const ltypeNames = ["ByLayer", "ByBlock", "Continuous", ...Array.from({ length: 201 }, (_, i) => "L" + String(i + 1).padStart(3, "0"))]',
+  'const ltypeTable = ["0", "SECTION", "2", "TABLES", "0", "TABLE", "2", "LTYPE", "70", String(ltypeNames.length), ...ltypeNames.flatMap((name) => ["0", "LTYPE", "2", name, "70", "0", "3", name, "72", "65", "73", "0", "40", "0"]), "0", "ENDTAB", "0", "ENDSEC"].join("\\n") + "\\n"',
+  'const manyBytes = new TextEncoder().encode(dxf.replace("0\\nSECTION\\n2\\nENTITIES\\n", ltypeTable + "0\\nSECTION\\n2\\nENTITIES\\n"))',
+  'const manyDoc = engine.parseDxf(manyBytes)',
+  'const rawMany = manyDoc.editableEntities()',
+  'out.rawManyCatalogue = { hasFlag: Object.prototype.hasOwnProperty.call(rawMany, "linetypesTruncated"), linetypes: rawMany.linetypes, linetypesTruncated: rawMany.linetypesTruncated }',
+  'manyDoc.free()',
+  'const manyLoaded = await handleMessage({ type: "loadDocument", documentId: "many-linetypes.dxf", bytes: manyBytes }, engine)',
+  'out.manyCatalogue = { linetypes: manyLoaded.linetypes, linetypesTruncated: manyLoaded.linetypesTruncated }',
+  'const ordinaryDoc = engine.parseDxf(bytes)',
+  'const rawOrdinary = ordinaryDoc.editableEntities()',
+  'out.rawOrdinaryCatalogue = { hasFlag: Object.prototype.hasOwnProperty.call(rawOrdinary, "linetypesTruncated"), linetypesTruncated: rawOrdinary.linetypesTruncated }',
+  'ordinaryDoc.free()',
   'const loaded = await handleMessage({ type: "loadDocument", documentId: "x.dxf", bytes }, engine)',
   'out.loadedCatalogue = { linetypes: loaded.linetypes, linetypesTruncated: loaded.linetypesTruncated }',
   'const ids = loaded.entities.map((e) => e.id)',
@@ -318,6 +331,14 @@ describe.skipIf(!GLUE)('the worker batch on the real engine', () => {
     expect(out.setColorRefused).toMatchObject({ ok: false, op: 'setColor', reason: 'color_index_out_of_range' })
     expect(out.setLinetype.ok).toBe(true)
     expect(out.loadedCatalogue.linetypesTruncated).toBe(false)
+    expect(out.rawOrdinaryCatalogue).toEqual({ hasFlag: true, linetypesTruncated: false })
+    expect(out.rawManyCatalogue.hasFlag).toBe(true)
+    expect(out.rawManyCatalogue.linetypesTruncated).toBe(true)
+    expect(out.rawManyCatalogue.linetypes).toHaveLength(200)
+    expect(out.manyCatalogue.linetypesTruncated).toBe(true)
+    expect(out.manyCatalogue.linetypes).toHaveLength(200)
+    expect(out.manyCatalogue.linetypes).toEqual(out.rawManyCatalogue.linetypes)
+    expect(out.manyCatalogue.linetypes).toEqual(expect.arrayContaining(['ByLayer', 'ByBlock', 'Continuous', 'L001']))
     expect(out.loadedCatalogue.linetypes).toEqual(expect.arrayContaining(['ByLayer', 'ByBlock', 'Continuous']))
     expect(out.setLinetype.entities.find((e) => e.id === h).linetype).toBe('ByBlock')
     expect(out.setLinetypeRefused).toMatchObject({ ok: false, op: 'setLinetype', reason: 'linetype_not_loaded:NoSuchLinetype' })

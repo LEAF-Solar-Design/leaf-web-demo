@@ -1233,10 +1233,9 @@ impl ParsedDxf {
     /// The name must be in the LTYPE table (case-insensitively); the table's
     /// own spelling is stored, never the caller's casing.
     fn set_entity_linetype_core(&mut self, index: usize, name: &str) -> Result<(), Refusal> {
-        let trimmed = name.trim();
-        let resolved = self.inner.line_types.get(trimmed)
+        let resolved = self.inner.line_types.get(name)
             .map(|lt| lt.name.clone())
-            .ok_or_else(|| format!("linetype_not_loaded:{trimmed}"))?;
+            .ok_or_else(|| format!("linetype_not_loaded:{name}"))?;
         let entity = self.property_target_mut(index)?;
         entity.common_mut().linetype = resolved;
         Ok(())
@@ -3462,6 +3461,21 @@ mod w4g_7b_03c_property_verbs {
         // The 6 group survives write + re-parse with the table's own case.
         let back = reparse(&doc);
         assert_eq!(back.inner.entities().next().unwrap().common().linetype, "DASHED");
+    }
+
+    #[test]
+    fn w4g_7b_03c_set_linetype_preserves_whitespace_identity() {
+        let mut doc = empty_doc();
+        doc.create_line_core(0.0, 0.0, 10.0, 0.0, "").expect("line");
+        for name in ["ZZZ", "ZZZ "] {
+            doc.inner.line_types.add(acadrust::tables::LineType::new(name)).expect("linetype added");
+        }
+        doc.set_entity_linetype_core(0, "ZZZ ").expect("exact trailing space");
+        assert_eq!(doc.inner.entities().next().unwrap().common().linetype, "ZZZ ");
+        doc.set_entity_linetype_core(0, "ZZZ").expect("exact bare name");
+        assert_eq!(doc.inner.entities().next().unwrap().common().linetype, "ZZZ");
+        assert_eq!(code(doc.set_entity_linetype_core(0, " ZZZ")), "linetype_not_loaded: ZZZ");
+        assert_eq!(doc.inner.entities().next().unwrap().common().linetype, "ZZZ");
     }
 
     #[test]

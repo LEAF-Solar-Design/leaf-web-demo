@@ -55,6 +55,17 @@ describe('W4g-7b linetype catalogue truncation', () => {
       .toEqual({ payload: { entityId: 's1', linetype: 'HIDDEN' } })
     expect(buildEditPayload('setLinetype', 's1', { linetype: 'dashed' }, catalogue, entities))
       .toEqual({ payload: { entityId: 's1', linetype: 'DASHED' } })
+    expect(buildEditPayload('setLinetype', 's1', { linetype: 'ZZZ ' }, catalogue, entities))
+      .toEqual({ payload: { entityId: 's1', linetype: 'ZZZ' } })
+  })
+
+  it('requires exact catalogue spelling for a stored name in a complete catalogue', () => {
+    const entities = projectionEntities({ entities: [], linetypes: ['ZZZ', 'zzz '], linetypesTruncated: false })
+    expect(buildEditPayload('setLinetype', 's1', { linetype: 'ZZZ ', exact: true }, entities.linetypes, entities))
+      .toEqual({ refusal: 'Property refused: linetype ZZZ  is not loaded in this drawing' })
+    entities.linetypes.push('ZZZ ')
+    expect(buildEditPayload('setLinetype', 's1', { linetype: 'ZZZ ', exact: true }, entities.linetypes, entities))
+      .toEqual({ payload: { entityId: 's1', linetype: 'ZZZ ' } })
   })
 
   it('merges the flag from replies or snapshots and defaults a catalogue to complete', () => {
@@ -69,17 +80,17 @@ describe('W4g-7b linetype catalogue truncation', () => {
   it.each([true, false])('MATCHPROP lowering validates against a catalogue with truncated=%s', (truncated) => {
     const entities = projectionEntities({
       entities: [
-        { id: 's1', type: 'LINE', layer: 'A', linetype: 'ZZZ', editable: true },
+        { id: 's1', type: 'LINE', layer: 'A', linetype: 'ZZZ ', editable: true },
         { id: 'd1', type: 'LINE', layer: 'A', linetype: 'ByLayer', editable: true },
       ],
       linetypes: catalogue, linetypesTruncated: truncated,
     })
     const planned = planMatchprop({ entities, selectedId: 's1' }, { edge: 'd1' })
-    expect(planned.steps).toEqual([{ op: 'setLinetype', entityId: 'd1', linetype: 'ZZZ' }])
+    expect(planned.steps).toEqual([{ op: 'setLinetype', entityId: 'd1', linetype: 'ZZZ ', exact: true }])
     const lowered = lowerSteps(planned.steps, entities.linetypes, entities)
     expect(lowered).toEqual(truncated
-      ? { steps: [{ op: 'setLinetype', payload: { entityId: 'd1', linetype: 'ZZZ' } }] }
-      : { refusal: 'Property refused: linetype ZZZ is not loaded in this drawing' })
+      ? { steps: [{ op: 'setLinetype', payload: { entityId: 'd1', linetype: 'ZZZ ' } }] }
+      : { refusal: 'Property refused: linetype ZZZ  is not loaded in this drawing' })
   })
 })
 
@@ -93,7 +104,7 @@ describe('planMatchprop: one batch of the layer plus only the properties that di
       steps: [
         { op: 'setLayer', entityId: 'd1', layer: 'A' },
         { op: 'setColor', entityId: 'd1', aci: 1 },
-        { op: 'setLinetype', entityId: 'd1', linetype: 'HIDDEN' },
+        { op: 'setLinetype', entityId: 'd1', linetype: 'HIDDEN', exact: true },
         { op: 'setLineweight', entityId: 'd1', lineweight: 25 },
       ],
     })
@@ -103,7 +114,7 @@ describe('planMatchprop: one batch of the layer plus only the properties that di
     const dest = { id: 'd2', layer: 'A', aci: 1, linetype: 'ByLayer', lineweight: 25, editable: true }
     const session = { entities: [source, dest], selectedId: 's1' }
     expect(planMatchprop(session, { edge: 'd2' })).toEqual({
-      steps: [{ op: 'setLinetype', entityId: 'd2', linetype: 'HIDDEN' }],
+      steps: [{ op: 'setLinetype', entityId: 'd2', linetype: 'HIDDEN', exact: true }],
     })
   })
 
@@ -123,7 +134,7 @@ describe('planMatchprop: one batch of the layer plus only the properties that di
       steps: [
         { op: 'setLayer', entityId: 'd1', layer: 'A' },
         { op: 'setColor', entityId: 'd1', aci: 1 },
-        { op: 'setLinetype', entityId: 'd1', linetype: 'HIDDEN' },
+        { op: 'setLinetype', entityId: 'd1', linetype: 'HIDDEN', exact: true },
         { op: 'setLineweight', entityId: 'd1', lineweight: 25 },
       ],
     })
@@ -131,7 +142,7 @@ describe('planMatchprop: one batch of the layer plus only the properties that di
     expect(planMatchprop({ entities: [source, insertDest], selectedId: 's1' }, { edge: 'insd' })).toEqual({
       steps: [
         { op: 'setColor', entityId: 'insd', aci: 1 },
-        { op: 'setLinetype', entityId: 'insd', linetype: 'HIDDEN' },
+        { op: 'setLinetype', entityId: 'insd', linetype: 'HIDDEN', exact: true },
         { op: 'setLineweight', entityId: 'insd', lineweight: 25 },
       ],
       skipped: ['layer'],
@@ -314,7 +325,13 @@ describe('W4g-7b-03c-g F5: the combos show the ACTUAL ladder rung', () => {
     expect(getContext().session.entities.linetypesTruncated).toBe(true)
     // RibbonWidget puts the inherited tooltip on the select's label.
     expect(screen.getByLabelText(/^Linetype/).closest('label').title).toBe("first 200 of the drawing's linetypes; type another name with LT")
-    act(() => { getContext().session.actions.applyEdit('setLinetype', { linetype: 'ZZZ' }) })
+    const postedBefore = workers[0].posted.length
+    for (const linetype of ['ZZ\tZ', 'ZZ\u0000Z', 'ZZ\u001fZ', 'ZZ\u007fZ', 'ZZ\u0085Z', 'ZZ\u009fZ']) {
+      act(() => { getContext().session.actions.applyEdit('setLinetype', { linetype }) })
+      expect(getContext().session.status).toBe('Property refused: a linetype name cannot contain control characters.')
+      expect(workers[0].posted).toHaveLength(postedBefore)
+    }
+    act(() => { getContext().session.actions.applyEdit('setLinetype', { linetype: 'ZZZ ' }) })
     expect(workers[0].posted.at(-1)).toMatchObject({ type: 'applyEdit', op: 'setLinetype', payload: { entityId: '7', linetype: 'ZZZ' } })
     workers[0].emit({ type: 'editApplied', op: 'setLinetype', ok: false, reason: 'linetype_not_loaded:ZZZ' })
     expect(getContext().session.status).toBe('Property refused: linetype ZZZ is not loaded in this drawing')
