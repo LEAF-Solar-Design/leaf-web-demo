@@ -352,9 +352,9 @@ function insertGhost(inputs, blocks, cursorX, cursorY) {
 function dimensionGhost(op, def1, def2, x, y, inputs) {
   const rotationDeg = op === 'dimLinear' ? (num(inputs?.rot) ?? 0) : 0
   const pieces = dimensionSchematic({ dimtype: op === 'dimLinear' ? 'LINEAR' : 'ALIGNED', def1, def2, dimline: [x, y], rotationDeg })
-  if (pieces.length < 2) return null
-  const [ext1, ext2] = pieces
-  return { pts: [ext1.pts[0], ext1.pts[1], ext2.pts[1], ext2.pts[0]], closed: false }
+  if (pieces.length < 3) return null
+  const [ext1, ext2, dimensionLine] = pieces
+  return { pts: [ext1.pts[0], ...dimensionLine.pts, ext2.pts[0]], closed: false }
 }
 
 /**

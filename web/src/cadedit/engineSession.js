@@ -239,6 +239,8 @@ export const WORKER_OP = Object.freeze({ createRectangle: 'createPolyline', dimL
 // for these two (neither prompt has that field; the internal 'createDimension'
 // op keeps taking dimtype from its own inputs, unchanged, for the store rows).
 const DIMTYPE_OF = Object.freeze({ dimLinear: 'LINEAR', dimAligned: 'ALIGNED' })
+// mutation_plan.py _LAYER_RE: dimension style names use the same plan charset.
+const PLAN_DIMSTYLE_NAME = /^[A-Za-z0-9][A-Za-z0-9 _.$-]{0,254}$/
 
 // Client-side bound on a typed point list. The engine bounds harder
 // (100,000); past this a "polyline" is a paste, not a drawing gesture.
@@ -388,7 +390,8 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
     if (lx === null || ly === null) return { refusal: 'Dimension refused: the dimension line point must be a number.' }
     // W4g-7b-04c-7: the dimAligned SEAT shows no rotation field, so any `rot` the provider still holds is stale from
     // an earlier prompt (the proof's DIMALIGNED step refused it as a rotation); the seat reads none. The explicit
-    // createDimension + ALIGNED + rot call keeps its refusal.
+    // createDimension + ALIGNED + rot call keeps its refusal. The provider's
+    // promptKeys reset (W4g-7b-04c-8) now prevents this stale input at arming.
     const rotText = seatDimtype === 'ALIGNED' ? '' : String(rot ?? '').trim()
     const rawRot = rotText === '' ? 0 : fmtDelta(rotText)
     if (rawRot === null) return { refusal: 'Dimension refused: the rotation must be a number (degrees).' }
@@ -407,6 +410,7 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
     const catalogue = Array.isArray(dimstyles) ? dimstyles : []
     const matchedStyle = catalogue.find((n) => String(n).toLowerCase() === styleText.toLowerCase())
     if (!matchedStyle) return { refusal: `Dimension refused: dimension style ${styleText} is not loaded in this drawing` }
+    if (!PLAN_DIMSTYLE_NAME.test(matchedStyle)) return { refusal: `Dimension refused: dimension style ${matchedStyle} carries characters the plan contract does not admit` }
     return { payload: { dimtype: kind, x1: px1, y1: py1, x2: px2, y2: py2, dx: lx, dy: ly, rotationDeg, style: matchedStyle, layer: layerName } }
   }
   if (op === 'createPolyline') {

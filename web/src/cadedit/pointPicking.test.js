@@ -227,11 +227,10 @@ describe('W4g-7b-04c: the DIMLINEAR/DIMALIGNED pick sequence and ghost', () => {
     expect(ghostFor(s, 3, 4)).toEqual({ pts: [[0, 0], [3, 4]], closed: false })
     s = applyPick(s, 3, 4, {}).state
     const ghost = ghostFor(s, 1.5, 6, { rot: '0' })
-    // def1 -> its extension line's far point (foot (0,6) plus DIM_EXT_PAST)
-    // -> def2's far point (foot (3,6) plus DIM_EXT_PAST) -> def2: the LINEAR
-    // 0deg dimension line runs y=6 from x=0 to x=3 (dimensionSchematic's own feet).
+    // W4g-7b-04c-8: the crossbar joins the feet on the dimension line,
+    // y=6 from x=0 to x=3, never the extension lines' ends at y=8.
     expect(ghost.closed).toBe(false)
-    expect(ghost.pts).toEqual([[0, 0, 0], [0, 8, 0], [3, 8, 0], [3, 4, 0]])
+    expect(ghost.pts).toEqual([[0, 0, 0], [0, 6, 0], [3, 6, 0], [3, 4, 0]])
     const r = applyPick(s, 1.5, 6, {})
     expect(r.writes).toEqual([['dx', '1.5'], ['dy', '6']])
     expect(wantsPick(r.state)).toBe(false)
