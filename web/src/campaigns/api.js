@@ -33,7 +33,7 @@ function bounded(value, field, max) {
   return value
 }
 
-async function request(path, options = {}) {
+async function request(path, options = {}, binary = false) {
   const identity = authHeaders()
   if (!identity.Authorization) throw Object.assign(new Error('Sign in to submit a campaign.'), { status: 0 })
   const headers = { ...options.headers, ...identity, 'X-Tenant-Id': config.tenant }
@@ -60,7 +60,7 @@ async function request(path, options = {}) {
       status: response.status, body, code, retryable: body?.error?.retryable === true,
     })
   }
-  return response.json()
+  return binary ? response : response.json()
 }
 
 function post(body, headers = {}) {
@@ -94,6 +94,42 @@ export async function createRelease(projectId, id, { finish, idempotencyKey }) {
 
 export async function getRelease(projectId, id, releaseId) {
   return request(`${releasePath(id, releaseId)}?project_id=${encodeURIComponent(uuid(projectId, 'project'))}`)
+}
+
+// Returns verified bytes only: { bytes: ArrayBuffer, mediaType: string, name: string }.
+// Evidence URLs are deliberately never consulted or followed with app credentials.
+export async function downloadReleaseArtifact(projectId, id, releaseId, artifact) {
+  const name = artifact?.name
+  if (typeof name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._ -]{0,199}$/.test(name)
+      || name.includes('..') || /[. ]$/.test(name)) {
+    invalid('output', 'This output has an invalid file name. Reload the release.')
+  }
+  if (artifact.valid !== true || artifact.retrieved !== true
+      || !Number.isSafeInteger(artifact.byte_count) || artifact.byte_count <= 0 || artifact.byte_count > 1048576
+      || typeof artifact.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(artifact.sha256)) {
+    invalid('output', 'Verified output details are unavailable. Reload the release.')
+  }
+  if (!globalThis.crypto?.subtle?.digest) throw new Error('This browser cannot verify downloads. Use a browser with secure download verification.')
+  const path = `${releasePath(id, releaseId)}/artifacts/${encodeURIComponent(name)}?project_id=${encodeURIComponent(uuid(projectId, 'project'))}`
+  const response = await request(path, { redirect: 'error' }, true)
+  const length = response.headers?.get('Content-Length')
+  if (length && (!/^\d+$/.test(length) || Number(length) !== artifact.byte_count)) {
+    throw new Error('The output size changed. Reload the release before downloading.')
+  }
+  let bytes
+  try { bytes = await response.arrayBuffer() }
+  catch { throw new Error('The output download was interrupted. Try downloading again.') }
+  if (bytes.byteLength !== artifact.byte_count || bytes.byteLength > 1048576) {
+    throw new Error('The downloaded output has the wrong size. Reload the release.')
+  }
+  let digest
+  try {
+    digest = Array.from(new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bytes)),
+      value => value.toString(16).padStart(2, '0')).join('')
+  } catch { throw new Error('This browser could not verify the output. Try downloading again.') }
+  if (digest !== artifact.sha256) throw new Error('The downloaded output did not match the verified release. Reload the release.')
+  const mediaType = (response.headers?.get('Content-Type') || 'application/octet-stream').split(';')[0].trim().toLowerCase()
+  return { bytes, mediaType, name }
 }
 
 export async function listReleases(projectId, id) {

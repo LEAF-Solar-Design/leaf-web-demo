@@ -23,6 +23,7 @@ beforeEach(() => {
     createRelease: vi.fn().mockResolvedValue({ ok: true }),
     transitionRelease: vi.fn().mockResolvedValue({ ok: true }),
     retryReleaseStage: vi.fn().mockResolvedValue({ ok: true }),
+    downloadReleaseArtifact: vi.fn(),
   }
   useCampaigns.mockImplementation(() => campaign)
 })
@@ -83,8 +84,9 @@ describe('release evidence panel', () => {
     expect(screen.getByText('Organize all family recipes')).toBeTruthy()
     expect(screen.getByText('Mobile app')).toBeTruthy()
     expect(screen.getByText('PDF first, mobile later')).toBeTruthy()
-    expect(screen.getByRole('link', { name: 'Recipe PDF' }).getAttribute('href')).toBe('/outputs/recipe.pdf')
-    expect(screen.getAllByRole('link')).toHaveLength(1)
+    expect(screen.getByRole('button', { name: 'Download Recipe PDF' })).toBeTruthy()
+    expect(screen.queryByRole('link')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Download Unsafe' })).toBeNull()
     expect(screen.getByText('(2 KB)')).toBeTruthy()
     expect(screen.getByText('Download the recipe PDF')).toBeTruthy()
     expect(screen.getByText('Desktop only')).toBeTruthy()
@@ -105,7 +107,8 @@ describe('release evidence panel', () => {
   })
   it('requires explicit proof for accepted artifact aliases', () => {
     releaseFixture('finished')
-    campaign.completion.stages = [{ stage: 'delivery', status: 'passed' }]
+    campaign.completion.stages = stages.map(stage => ({ stage, status: 'passed' }))
+    campaign.completion.coverage = [{ check_id: 'workflow', status: 'passed' }]
     const artifact = { name: 'Alias output', download_url: 'https://example.test/output.pdf', size_bytes: 2048,
       sha256: 'a'.repeat(64), validated: true, retrieval_validated: true, content_validated: true }
     campaign.completion.deliverables = [artifact]
@@ -118,6 +121,93 @@ describe('release evidence panel', () => {
         expect(screen.queryByRole('link')).toBeNull()
       }
     }
+  })
+  function readyOutput(name = 'records-to-csv.html', mediaType = 'text/html') {
+    releaseFixture('finished')
+    campaign.completion.stages = stages.map(stage => ({ stage, status: 'passed' }))
+    campaign.completion.coverage = [{ check_id: 'workflow', status: 'passed' }]
+    const artifact = { name, media_type: mediaType, byte_count: 4, sha256: 'a'.repeat(64), valid: true, retrieved: true }
+    campaign.completion.deliverables = [artifact]
+    campaign.downloadReleaseArtifact.mockResolvedValue({ name, mediaType, bytes: new Uint8Array([1, 2, 3, 4]).buffer })
+    return artifact
+  }
+  it('opens verified HTML in a sandbox and revokes it on close, replacement and unmount', async () => {
+    const artifact = readyOutput()
+    const urlApi = { createObjectURL: vi.fn().mockReturnValueOnce('blob:first').mockReturnValueOnce('blob:second').mockReturnValueOnce('blob:third'), revokeObjectURL: vi.fn() }
+    const { unmount } = render(panel({ artifactUrlApi: urlApi }))
+    fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
+    const frame = await screen.findByTitle('Release tool: records-to-csv.html')
+    expect(frame.getAttribute('sandbox')).toBe('allow-scripts allow-downloads')
+    expect(campaign.downloadReleaseArtifact).toHaveBeenCalledWith(artifact)
+    fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
+    await waitFor(() => expect(screen.getByTitle('Release tool: records-to-csv.html').getAttribute('src')).toBe('blob:second'))
+    expect(urlApi.revokeObjectURL).toHaveBeenCalledWith('blob:first')
+    fireEvent.click(screen.getByRole('button', { name: 'Close tool' }))
+    expect(screen.queryByTitle('Release tool: records-to-csv.html')).toBeNull()
+    expect(urlApi.revokeObjectURL).toHaveBeenCalledWith('blob:second')
+    fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
+    await screen.findByTitle('Release tool: records-to-csv.html')
+    unmount()
+    expect(urlApi.revokeObjectURL).toHaveBeenCalledWith('blob:third')
+  })
+  it('saves verified file bytes with a safe filename and cleans up its temporary URL', async () => {
+    readyOutput('records.csv', 'text/csv')
+    const urlApi = { createObjectURL: vi.fn().mockReturnValue('blob:file'), revokeObjectURL: vi.fn() }
+    const clicked = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () {
+      expect(this.download).toBe('records.csv')
+      expect(this.getAttribute('href')).toBe('blob:file')
+    })
+    render(panel({ artifactUrlApi: urlApi }))
+    fireEvent.click(screen.getByRole('button', { name: 'Download records.csv' }))
+    await waitFor(() => expect(urlApi.revokeObjectURL).toHaveBeenCalledWith('blob:file'))
+    expect(clicked).toHaveBeenCalledOnce()
+    expect(urlApi.createObjectURL.mock.calls[0][0]).toBeInstanceOf(Blob)
+    expect(urlApi.createObjectURL.mock.calls[0][0].size).toBe(4)
+    const saved = await new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result)
+      reader.onerror = reject
+      reader.readAsArrayBuffer(urlApi.createObjectURL.mock.calls[0][0])
+    })
+    expect([...new Uint8Array(saved)]).toEqual([1, 2, 3, 4])
+    expect(document.querySelector('a[download]')).toBeNull()
+    clicked.mockRestore()
+  })
+  it('drops a completed retrieval after the project changes', async () => {
+    readyOutput()
+    let resolve
+    campaign.downloadReleaseArtifact.mockReturnValue(new Promise(done => { resolve = done }))
+    const urlApi = { createObjectURL: vi.fn(), revokeObjectURL: vi.fn() }
+    const { rerender } = render(panel({ artifactUrlApi: urlApi }))
+    fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
+    rerender(panel({ projectId: Q, artifactUrlApi: urlApi }))
+    resolve({ name: 'records-to-csv.html', mediaType: 'text/html', bytes: new ArrayBuffer(4) })
+    await waitFor(() => expect(screen.queryByTitle('Release tool: records-to-csv.html')).toBeNull())
+    expect(urlApi.createObjectURL).not.toHaveBeenCalled()
+  })
+  it.each(['failed', 'unavailable'])('retains history but withholds outputs after current verification is %s', status => {
+    readyOutput()
+    campaign.completion.current_verification = { status, reason: 'The current file could not be verified.' }
+    render(panel())
+    expect(screen.getByText(`Previously completed release. Current verification ${status}.`)).toBeTruthy()
+    expect(screen.getByText('The current file could not be verified.')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /Open tool|Download records/ })).toBeNull()
+  })
+  it.each(['required_checks', 'coverage'])('never calls contradictory completion usable without %s', missing => {
+    readyOutput()
+    if (missing === 'required_checks') campaign.completion.release.contract.required_checks = []
+    else campaign.completion.coverage = []
+    render(panel())
+    expect(screen.queryByText('Completed release')).toBeNull()
+    expect(screen.queryByRole('button', { name: /Open tool/ })).toBeNull()
+  })
+  it('does not replace empty coverage with a successful stage claim', () => {
+    readyOutput()
+    campaign.completion.coverage = []
+    campaign.completion.stages.find(row => row.stage === 'user_verification').evidence = { checks: [{ check_id: 'workflow', status: 'passed' }] }
+    render(panel())
+    expect(screen.queryByText('Completed release')).toBeNull()
+    expect(screen.queryByRole('button', { name: /Open tool/ })).toBeNull()
   })
   it.each([
     [{ action: 'retry_stage', stage: 'user_verification' }, 'Retry user verification using the release controls.'],

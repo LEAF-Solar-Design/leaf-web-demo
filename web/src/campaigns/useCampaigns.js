@@ -211,6 +211,45 @@ export default function useCampaigns(projectId, { enabled = true } = {}) {
     const releaseId = context.completion?.release?.release_id
     return id && releaseId ? mutate('release', () => api.retryReleaseStage(projectId, id, releaseId, stage)) : Promise.resolve(null)
   }, [context, mutate, projectId])
+  const downloadReleaseArtifact = useCallback(async artifact => {
+    const id = context.selectedId
+    const releaseId = context.completion?.release?.release_id
+    if (!id || !releaseId || !enabled || !current() || context.locks.download) return null
+    const view = context.view
+    const generation = generationRef.current
+    const locks = context.locks
+    const live = () => current(view) && generationRef.current === generation && context.selectedId === id
+      && context.completion?.release?.release_id === releaseId
+    locks.download = true
+    update({ pending: { ...locks } })
+    try {
+      // Recheck current delivery state before accessing previously accepted bytes.
+      const latest = await api.getRelease(projectId, id, releaseId)
+      if (!live()) return null
+      const completion = latest?.completion
+      if (!completion || completion.release?.release_id !== releaseId) throw new Error('Current release verification is unavailable. Reload the release.')
+      context.completion = completion
+      update({ completion })
+      const checks = completion.release.contract?.required_checks || []
+      const coverage = completion.coverage || []
+      if (['failed', 'unavailable'].includes(completion.current_verification?.status)
+          || completion.release.status !== 'finished' || !checks.length
+          || checks.some(check => !coverage.some(row => row.check_id === check.check_id && row.status === 'passed'))) {
+        throw new Error('Current release verification does not permit this download. Reload the release.')
+      }
+      const currentArtifact = completion.deliverables?.find(row => row.name === artifact.name
+        && row.sha256 === artifact.sha256 && row.byte_count === artifact.byte_count)
+      if (!currentArtifact) throw new Error('This output changed. Reload the release before downloading.')
+      const result = await api.downloadReleaseArtifact(projectId, id, releaseId, currentArtifact)
+      return live() ? result : null
+    } catch (error) {
+      if (!live()) return null
+      throw error
+    } finally {
+      delete locks.download
+      if (current(view)) update({ pending: { ...locks } })
+    }
+  }, [context, current, enabled, projectId, update])
   const ask = useCallback(({ prompt }) => {
     const id = context.selectedId
     if (!id) return Promise.resolve(null)
@@ -304,5 +343,5 @@ export default function useCampaigns(projectId, { enabled = true } = {}) {
   }, [context, current, enabled, load, mutate, projectId, readSubmission])
   return { ...(snapshot.scope === scope ? snapshot : empty()), select, submit, ask, answer, refetch,
     enroll, enableEnrollment, revokeEnrollment, bindPublication, invokeCapability,
-    createRelease, transitionRelease, retryReleaseStage }
+    createRelease, transitionRelease, retryReleaseStage, downloadReleaseArtifact }
 }

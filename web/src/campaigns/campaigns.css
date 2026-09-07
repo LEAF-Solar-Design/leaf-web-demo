@@ -50,3 +50,6 @@
 .campaign-completion a { color: inherit; text-decoration: underline; }
 .campaign-release-stages li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.5rem; padding-block: 0.5rem; border-bottom: 1px solid var(--border); }
 .campaign-release-controls { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.campaign-tool-preview { display: grid; gap: 0.75rem; width: 100%; min-width: 0; }
+.campaign-tool-preview iframe { width: 100%; min-width: 0; height: 480px; min-height: 360px; box-sizing: border-box; border: 1px solid var(--border); }
+.campaign-completion button { max-width: 100%; overflow-wrap: anywhere; }
