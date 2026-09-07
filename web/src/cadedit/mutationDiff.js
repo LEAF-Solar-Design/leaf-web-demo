@@ -134,13 +134,20 @@ function insertOf(entity) {
 // Rotation degrees the way the contract's add carries them: [0, 360), 6 dp.
 // W4g-7b-02c-e: round BEFORE wrapping, never after — wrapping a value that
 // rounds up to exactly 360 (359.9999996) first, then rounding, lands back on
-// 360 itself, outside the promised range. The final `+ 0` turns a surviving
-// -0 (deg exactly 0 or a negative value that rounds to -0) into +0, since a
-// diff and its JSON never carry a sign no reader asked for.
+// 360 itself, outside the promised range.
+// W4g-7b-02c-f: the wrap subtraction (d %= 360, d += 360) can reintroduce
+// sub-ulp error above 6 dp (361.000001 must land back on exactly 1.000001,
+// not its nearest double), so round AGAIN after wrapping; that second round
+// can itself land exactly on 360 (a value the wrap wrote as 359.999999...998),
+// which is mapped back to 0. The final `+ 0` turns a surviving -0 (deg
+// exactly 0 or a negative value that rounds to -0) into +0, since a diff and
+// its JSON never carry a sign no reader asked for.
 function normalizedDeg(deg) {
   let d = Math.round(deg * 1e6) / 1e6
   d %= 360
   if (d < 0) d += 360
+  d = Math.round(d * 1e6) / 1e6
+  if (d === 360) d = 0
   return d + 0
 }
 

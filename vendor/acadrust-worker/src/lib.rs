@@ -1415,8 +1415,12 @@ impl ParsedDxf {
             return refuse("insert_name_invalid");
         }
         let upper = trimmed.to_uppercase();
+        // W4g-7b-02c-f: trimmed to trimmed. A record whose own DXF name
+        // carries incidental whitespace still matches a typed name that
+        // strips it, the same rule the store (engineSession.js) and the
+        // ghost (pointPicking.js) apply on their side of this comparison.
         let block = match self.inner.block_records.iter()
-            .find(|b| !b.is_model_space() && !b.is_paper_space() && b.name.to_uppercase() == upper) {
+            .find(|b| !b.is_model_space() && !b.is_paper_space() && b.name.trim().to_uppercase() == upper) {
             Some(block) => block,
             None => return refuse(&format!("block_not_defined:{trimmed}")),
         };
@@ -2706,6 +2710,21 @@ mod block_definition_rows {
         let many_before = DxfWriter::new(&many.inner).write_to_vec().unwrap();
         assert_eq!(many.create_insert_core("B", 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, "").unwrap_err(), "block_incomplete:B");
         assert_eq!(DxfWriter::new(&many.inner).write_to_vec().unwrap(), many_before);
+    }
+
+    #[test]
+    fn w7b_02c_f_insert_matches_a_padded_record_name_trimmed_to_trimmed() {
+        let mut doc = parsed(fixture(LINE, false));
+        // The DXF text path would trim group code 2, so push the record's own
+        // spelling (trailing space) directly, the same way the 02c-f row for
+        // the store and the ghost seed a definition with incidental whitespace.
+        doc.inner.block_records.get_mut("B").unwrap().name = "Fixture ".to_string();
+        let h1 = doc.create_insert_core("Fixture", 10.0, 20.0, 0.0, 1.0, 1.0, 1.0, "").unwrap();
+        let list = projected_entities(&doc.inner);
+        assert_eq!(list[0]["name"], "Fixture ", "the created INSERT carries the record's own spelling");
+        let h2 = doc.create_insert_core(" fixture ", 10.0, 20.0, 0.0, 1.0, 1.0, 1.0, "").unwrap();
+        assert_ne!(h1, h2);
+        assert_eq!(doc.create_insert_core("Nope", 10.0, 20.0, 0.0, 1.0, 1.0, 1.0, "").unwrap_err(), "block_not_defined:Nope");
     }
 
     #[test]

@@ -163,12 +163,15 @@ function fmtDelta(raw) {
 // the store's own validation and the prompt's datalist (EngineRibbonClusters.jsx),
 // so the datalist never offers a name a typed selection would then refuse:
 // trimmed, non-empty, not `*`-prefixed (anonymous blocks are never insertable
-// by name), no `|` (the plan's field separator) or CR/LF, at most 255 chars.
+// by name), no `|` (the plan's field separator) or CR/LF, at most 255 chars,
+// and printable ASCII only (mirrors mutation_plan.py's 0x20..0x7E refusal, so
+// the datalist never offers a name the server would refuse on save).
 // Returns the trimmed spelling to offer or compare, or null when the name
 // itself (not the definition it might name) is inadmissible.
 export function admissibleBlockName(rawName) {
   const trimmed = String(rawName ?? '').trim()
   if (!trimmed || trimmed.startsWith('*') || /[|\r\n]/.test(trimmed) || [...trimmed].length > 255) return null
+  if ([...trimmed].some((ch) => ch.codePointAt(0) < 0x20 || ch.codePointAt(0) > 0x7e)) return null
   return trimmed
 }
 
@@ -315,8 +318,10 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
     // 'decimal-default' mode keeps the prompt from holding Run on them).
     const [px, py] = [x, y].map(fmtDelta)
     if (px === null || py === null) return { refusal: 'Insert refused: x and y must both be numbers.' }
+    const trimmedName = String(name ?? '').trim()
+    if (!trimmedName) return { refusal: 'Insert refused: enter a block name.' }
     const rawName = admissibleBlockName(name)
-    if (!rawName) return { refusal: 'Insert refused: enter a block name.' }
+    if (!rawName) return { refusal: 'Insert refused: a block name must be printable ASCII with no | and no leading *.' }
     const sxText = String(sx ?? '').trim()
     const scaleX = sxText === '' ? 1 : fmtDelta(sxText)
     if (scaleX === null) return { refusal: 'Insert refused: the x scale factor must be a number.' }
@@ -336,7 +341,7 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
     if (definition.complete !== true || definition.baseUnknown === true) {
       return { refusal: `Insert refused: block ${definition.name} is incomplete in this drawing` }
     }
-    return { payload: { name: definition.name, x: px, y: py, rotationDeg, sx: scaleX, sy: scaleY, sz: 1, layer: layerName } }
+    return { payload: { name: admissibleBlockName(definition.name), x: px, y: py, rotationDeg, sx: scaleX, sy: scaleY, sz: 1, layer: layerName } }
   }
   if (op === 'createPolyline') {
     const points = parsePointList(pts)

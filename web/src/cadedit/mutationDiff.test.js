@@ -218,4 +218,17 @@ describe('W4g-7b-02c: a created or removed INSERT is a real mutation; a change s
     expect(rot(-0)).toBe(0)
     expect(rot(360)).toBe(0)
   })
+
+  // W4g-7b-02c-f: the wrap subtraction reintroduces sub-ulp error above 6 dp;
+  // a second round after wrapping recovers the exact 6 dp value.
+  it('rounds again after wrapping so a value above 360 lands on its exact 6 dp remainder', () => {
+    const rot = (rotationDeg) => diffPlan([], [{ ...ref(1280), rotationDeg }]).mutations.added[0].rot
+    expect(rot(361.000001)).toBe(1.000001)
+    expect(rot(720.0000004)).toBe(0)
+    const negZero = rot(-0.0000004)
+    expect(negZero).toBe(0)
+    expect(Object.is(negZero, 0)).toBe(true)
+    expect(rot(359.9999996)).toBe(0)
+    expect(rot(90)).toBe(90)
+  })
 })

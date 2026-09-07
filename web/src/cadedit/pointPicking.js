@@ -294,7 +294,7 @@ function insertGhost(inputs, blocks, cursorX, cursorY) {
   const name = String(inputs?.name ?? '').trim()
   if (!name) return null
   const catalogue = Array.isArray(blocks) ? blocks : []
-  const definition = catalogue.find((b) => String(b?.name ?? '').toLowerCase() === name.toLowerCase())
+  const definition = catalogue.find((b) => String(b?.name ?? '').trim().toLowerCase() === name.toLowerCase())
   if (!definition || definition.complete !== true || definition.baseUnknown === true) return null
   const base = Array.isArray(definition.base) ? definition.base : [0, 0, 0]
   let minX = Infinity

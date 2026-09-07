@@ -201,6 +201,15 @@ describe('W4g-7b-02c: the INSERT ghost', () => {
     expect(ghostFor(s, 10, 20, { name: 'Fixture' }, [{ ...FIXTURE, complete: false }])).toBeNull()
     expect(ghostFor(s, 10, 20, { name: 'Fixture' }, [{ ...FIXTURE, baseUnknown: true }])).toBeNull()
   })
+
+  // W4g-7b-02c-f: the catalogue side is trimmed too, so a definition whose own
+  // spelling carries trailing whitespace still resolves against the typed name.
+  it('a catalogue name with trailing whitespace still resolves against the trimmed typed name', () => {
+    const s = startPicking('createInsert')
+    const inputs = { name: 'Fixture', sx: '2', sy: '3', rot: '90' }
+    const padded = { ...FIXTURE, name: 'Fixture ' }
+    expect(ghostFor(s, 10, 20, inputs, [padded])).toEqual({ pts: [[10, 20], [10, 26]], closed: false })
+  })
 })
 
 describe('OSNAP on curved polyline segments (W4g-6d follow-up)', () => {

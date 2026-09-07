@@ -961,8 +961,9 @@ describe('W4g-7b-02c: INSERT of an existing block definition', () => {
 
   it('refuses a malformed point or name before touching the catalogue', () => {
     expect(buildCreatePayload('createInsert', { name: 'Fixture', x: 'x', y: '0' }, blocks).refusal).toMatch(/x and y must both be numbers/)
-    expect(buildCreatePayload('createInsert', { name: '', x: '0', y: '0' }, blocks).refusal).toMatch(/enter a block name/)
-    expect(buildCreatePayload('createInsert', { name: '*U1', x: '0', y: '0' }, blocks).refusal).toMatch(/enter a block name/)
+    expect(buildCreatePayload('createInsert', { name: '', x: '0', y: '0' }, blocks).refusal).toBe('Insert refused: enter a block name.')
+    expect(buildCreatePayload('createInsert', { name: '*U1', x: '0', y: '0' }, blocks).refusal)
+      .toBe('Insert refused: a block name must be printable ASCII with no | and no leading *.')
   })
 
   it('with no catalogue at all, every name is undefined', () => {
@@ -973,7 +974,7 @@ describe('W4g-7b-02c: INSERT of an existing block definition', () => {
   // W4g-7b-02c-e F4: admissibleBlockName is the ONE rule both the store and
   // the prompt's datalist apply, and the catalogue lookup compares trimmed
   // to trimmed, so a definition's own incidental whitespace still resolves.
-  it('admissibleBlockName refuses a pipe, a CR/LF, an anonymous or an oversized name, and trims what it admits', () => {
+  it('admissibleBlockName refuses a pipe, a CR/LF, an anonymous, an oversized or a non-ASCII name, and trims what it admits', () => {
     expect(admissibleBlockName('Fixture')).toBe('Fixture')
     expect(admissibleBlockName('Fixture ')).toBe('Fixture')
     expect(admissibleBlockName(' Fixture')).toBe('Fixture')
@@ -984,12 +985,20 @@ describe('W4g-7b-02c: INSERT of an existing block definition', () => {
     expect(admissibleBlockName('a\r\nb')).toBeNull()
     expect(admissibleBlockName('x'.repeat(256))).toBeNull()
     expect(admissibleBlockName('x'.repeat(255))).toBe('x'.repeat(255))
+    expect(admissibleBlockName('Ã©')).toBeNull()
+    expect(admissibleBlockName('Café')).toBeNull()
   })
 
-  it('a catalogue name with trailing whitespace still resolves against the trimmed typed name', () => {
+  it('a catalogue name with trailing whitespace resolves against the trimmed typed name and ships the trimmed spelling', () => {
     const padded = [{ name: 'Fixture ', base: [0, 0, 0], children: [{ type: 'LINE', vertices: [[0, 0, 0], [1, 0, 0]] }], complete: true, baseUnknown: false, digest: 'd3' }]
     expect(buildCreatePayload('createInsert', { name: 'Fixture', x: '0', y: '0' }, padded).payload)
-      .toMatchObject({ name: 'Fixture ' })
+      .toMatchObject({ name: 'Fixture' })
+  })
+
+  it('refuses a typed non-ASCII name even when the catalogue carries the same spelling', () => {
+    const accented = [{ name: 'Café', base: [0, 0, 0], children: [{ type: 'LINE', vertices: [[0, 0, 0], [1, 0, 0]] }], complete: true, baseUnknown: false, digest: 'd4' }]
+    expect(buildCreatePayload('createInsert', { name: 'Café', x: '0', y: '0' }, accented).refusal)
+      .toBe('Insert refused: a block name must be printable ASCII with no | and no leading *.')
   })
 })
 
