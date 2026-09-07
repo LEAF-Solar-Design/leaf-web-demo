@@ -36,13 +36,14 @@ import os
 import re
 import secrets
 import time
+import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 import deps
@@ -52,6 +53,118 @@ from envelopes import ErrorCode, err_envelope, with_envelope_fields
 from routers.tenant import _require_grant_owner
 
 router = APIRouter()
+
+_FAKE_PREFIX = "/api/tenant/mcp-servers/_fake-oauth"
+_FAKE_CLIENTS: Dict[str, Dict[str, Any]] = {}
+_FAKE_CODES: Dict[str, Dict[str, Any]] = {}
+_FAKE_LOCK = threading.Lock()
+
+
+def _fake_enabled() -> bool:
+    if os.environ.get("TENANT_MCP_FAKE_OAUTH", "0") != "1":
+        return False
+    # LEAF_RUNTIME_ENV is the deployed platform marker. Unknown nonempty
+    # postures fail closed too; LEAF_ENV is accepted only for local harnesses.
+    for name in ("LEAF_RUNTIME_ENV", "LEAF_ENV"):
+        if os.environ.get(name, "").strip().lower() not in ("", "local", "test", "development", "dev"):
+            raise HTTPException(status_code=403, detail="fake OAuth is local-only")
+    return True
+
+
+def _local_url(value: str) -> bool:
+    parsed = urlsplit(value)
+    return (parsed.scheme in ("http", "https")
+            and parsed.hostname in ("localhost", "127.0.0.1", "::1")
+            and not parsed.username and not parsed.password
+            and not parsed.query and not parsed.fragment)
+
+
+def _fake_resource(value: str) -> bool:
+    return _local_url(value) and urlsplit(value).path == _FAKE_PREFIX
+
+
+def _require_fake(request: Request) -> str:
+    if not _fake_enabled():
+        raise HTTPException(status_code=404, detail="not found")
+    base = str(request.base_url).rstrip("/")
+    if not _local_url(base):
+        raise HTTPException(status_code=403, detail="fake OAuth requires loopback")
+    return base + _FAKE_PREFIX
+
+
+def _prune_fake(entries: Dict[str, Dict[str, Any]]) -> None:
+    for key in list(entries):
+        if entries[key]["expires"] < time.monotonic():
+            del entries[key]
+    if len(entries) >= 200:
+        raise HTTPException(status_code=429, detail="fake OAuth capacity reached")
+
+
+@router.get(_FAKE_PREFIX + "/.well-known/oauth-protected-resource")
+def fake_protected_resource(request: Request):
+    issuer = _require_fake(request)
+    return {"resource": issuer, "authorization_servers": [issuer]}
+
+
+@router.get(_FAKE_PREFIX + "/.well-known/oauth-authorization-server")
+def fake_authorization_metadata(request: Request):
+    issuer = _require_fake(request)
+    return {"issuer": issuer, "registration_endpoint": issuer + "/register",
+            "authorization_endpoint": issuer + "/authorize", "token_endpoint": issuer + "/token"}
+
+
+@router.post(_FAKE_PREFIX + "/register")
+def fake_register(request: Request, body: Dict[str, Any]):
+    issuer = _require_fake(request)
+    redirects = body.get("redirect_uris")
+    callback = issuer.removesuffix(_FAKE_PREFIX) + "/api/tenant/mcp-servers/callback"
+    if redirects != [callback]:
+        raise HTTPException(status_code=400, detail="invalid redirect URI")
+    client_id = secrets.token_urlsafe(24)
+    with _FAKE_LOCK:
+        _prune_fake(_FAKE_CLIENTS)
+        _FAKE_CLIENTS[client_id] = {"redirect_uri": callback, "expires": time.monotonic() + 600}
+    return JSONResponse(status_code=201, content={"client_id": client_id})
+
+
+@router.get(_FAKE_PREFIX + "/authorize")
+def fake_authorize(request: Request):
+    issuer = _require_fake(request)
+    query = dict(request.query_params)
+    with _FAKE_LOCK:
+        _prune_fake(_FAKE_CLIENTS)
+        client = _FAKE_CLIENTS.get(query.get("client_id", ""))
+        if (not client or query.get("redirect_uri") != client["redirect_uri"]
+                or query.get("resource") != issuer or not query.get("state")
+                or query.get("response_type") != "code"
+                or query.get("code_challenge_method") != "S256"
+                or not re.fullmatch(r"[A-Za-z0-9_-]{43}", query.get("code_challenge", ""))):
+            raise HTTPException(status_code=400, detail="invalid authorization request")
+        _prune_fake(_FAKE_CODES)
+        code = secrets.token_urlsafe(32)
+        _FAKE_CODES[code] = {**query, "expires": time.monotonic() + 60}
+    return RedirectResponse(query["redirect_uri"] + "?" + urlencode({"state": query["state"], "code": code}), status_code=302)
+
+
+@router.post(_FAKE_PREFIX + "/token")
+async def fake_token(request: Request):
+    _require_fake(request)
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > 8192:
+            raise HTTPException(status_code=413, detail="token request too large")
+    body = {key: values[0] for key, values in parse_qs(raw.decode("utf-8")).items()}
+    with _FAKE_LOCK:
+        entry = _FAKE_CODES.pop(body.get("code", ""), None)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(body.get("code_verifier", "").encode()).digest()).rstrip(b"=").decode()
+    if (not entry or entry["expires"] < time.monotonic()
+            or body.get("grant_type") != "authorization_code"
+            or challenge != entry["code_challenge"]
+            or any(body.get(key) != entry[key] for key in ("redirect_uri", "client_id", "resource"))):
+        raise HTTPException(status_code=400, detail="invalid authorization code")
+    return {"access_token": "fake-local-" + secrets.token_urlsafe(32),
+            "token_type": "bearer", "expires_in": 3600, "aud": entry["resource"]}
 
 # Bounds (release blockers): every outbound call to a tenant-chosen MCP host
 # or its authorization server is timed out and body-capped — a hostile or
@@ -268,6 +381,10 @@ def _start_connect(tenant_id: str, record: Dict[str, Any], redirect_uri: str) ->
     does so (state stays "registered" until this returns successfully)."""
     parsed = urlsplit(record["url"])
     origin = f"{parsed.scheme}://{parsed.netloc}"
+    if _fake_resource(record["url"]):
+        if not _fake_enabled():
+            raise McpConnectError("metadata_missing", "fake OAuth disabled")
+        origin += _FAKE_PREFIX
     pr_meta = _fetch_metadata(origin + "/.well-known/oauth-protected-resource")
     as_list = pr_meta.get("authorization_servers")
     if not isinstance(as_list, list) or not as_list or not isinstance(as_list[0], str):
@@ -336,7 +453,7 @@ class RegisterRequest(BaseModel):
     @classmethod
     def _validate_url(cls, value: str) -> str:
         parsed = urlsplit(value)
-        if parsed.scheme != "https":
+        if parsed.scheme != "https" and not (_fake_resource(value) and _fake_enabled()):
             raise ValueError("url must use https")
         if not parsed.hostname:
             raise ValueError("url must carry a host")
