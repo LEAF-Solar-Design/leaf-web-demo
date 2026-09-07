@@ -18,6 +18,7 @@ import { surfaceContract } from './productSurfaces.js'
 import {
   _resetSurfaceConfigOverlayForTests,
   mergeSurfaceContract,
+  refreshSurfaceConfigOverlay,
   touchedSurfaceConfigSlots,
   useSurfaceContract,
 } from './useSurfaceContract.js'
@@ -80,6 +81,28 @@ describe('touchedSurfaceConfigSlots', () => {
 })
 
 describe('useSurfaceContract — the session fetch', () => {
+  it('refresh re-fetches and merges the committed overlay for existing subscribers', async () => {
+    getSurfaceConfig.mockResolvedValueOnce({ surfaces: {} })
+      .mockResolvedValueOnce({ surfaces: { cad: { authoring: false } } })
+    const { result } = renderHook(() => useSurfaceContract('cad'))
+    await act(async () => { await Promise.resolve() })
+    expect(result.current).toBe(surfaceContract('cad'))
+    await act(async () => { await refreshSurfaceConfigOverlay() })
+    expect(getSurfaceConfig).toHaveBeenCalledTimes(2)
+    expect(result.current.authoring).toBe(false)
+    expect(result.current.chrome).toBe(surfaceContract('cad').chrome)
+  })
+
+  it('a pre-commit fetch cannot overwrite the refreshed overlay when it settles late', async () => {
+    let finishOld
+    getSurfaceConfig.mockReturnValueOnce(new Promise((resolve) => { finishOld = resolve }))
+      .mockResolvedValueOnce({ surfaces: { cad: { authoring: false } } })
+    const { result } = renderHook(() => useSurfaceContract('cad'))
+    await act(async () => { await refreshSurfaceConfigOverlay() })
+    await act(async () => { finishOld({ surfaces: { cad: { authoring: true } } }) })
+    expect(result.current.authoring).toBe(false)
+  })
+
   it('fetches once per session no matter how many hooks mount, and merges the result', async () => {
     getSurfaceConfig.mockResolvedValue({
       surfaces: { sheets: { chrome: { tab: true } } },

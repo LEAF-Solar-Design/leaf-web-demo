@@ -15,7 +15,10 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -201,6 +204,7 @@ def load_tenant_repo_tools(tenant_id: str = _DEFAULT_TENANT) -> List[Dict[str, A
 # --------------------------------------------------------------------------- #
 # per-tenant surface-config overlay fold (standardization slice 7b)
 # --------------------------------------------------------------------------- #
+from _vendor.mushy_fold.surface_config import load_repo_surface_config, MAX_SURFACE_CONFIG_BYTES
 
 # 30s: long enough that a route-matrix burst against one tenant folds the
 # file once, short enough that an author's just-committed surface-config.json
@@ -208,6 +212,7 @@ def load_tenant_repo_tools(tenant_id: str = _DEFAULT_TENANT) -> List[Dict[str, A
 # to one stat+parse per tenant per window instead of one per request.
 SURFACE_CONFIG_CACHE_TTL_SECONDS = 30.0
 _surface_config_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_surface_config_lock = threading.Lock()
 
 # One stderr warning per tenant per process, not per request: a tenant whose
 # repo carries a permanently broken overlay must not spam the log on every
@@ -279,13 +284,17 @@ def effective_surface_config(tenant_id: str = _DEFAULT_TENANT) -> Dict[str, Any]
 
     Cached per tenant for SURFACE_CONFIG_CACHE_TTL_SECONDS (bounded TTL, see
     the constant above)."""
+    with _surface_config_lock:
+        return _load_effective_surface_config(tenant_id)
+
+
+def _load_effective_surface_config(tenant_id: str) -> Dict[str, Any]:
+    """Load and publish while the caller holds _surface_config_lock."""
     tenant_key = str(tenant_id)
     now = time.monotonic()
     cached = _surface_config_cache.get(tenant_key)
     if cached is not None and now - cached[0] < SURFACE_CONFIG_CACHE_TTL_SECONDS:
         return cached[1]
-
-    from _vendor.mushy_fold.surface_config import load_repo_surface_config
 
     def _bad_surface_config(cfg: Path, exc: Exception) -> None:
         if (tenant_key not in _surface_config_warned_tenants
@@ -338,6 +347,59 @@ def surface_config_source(tenant_id: str = _DEFAULT_TENANT) -> Optional[Dict[str
             cfg.stat().st_mtime, tz=timezone.utc
         ).isoformat(),
     }
+
+
+def submit_surface_config(tenant_id: str, overlay: dict) -> Dict[str, Any]:
+    """Commit a fold-valid overlay and return the fresh file provenance.
+
+    Serialization is UTF-8 JSON, two-space indentation and a final LF. The
+    vendored fold's file limit also applies so every accepted write is readable.
+    """
+    from tenant_id_validator import is_valid_tenant_id
+
+    if (not isinstance(tenant_id, str) or tenant_id != tenant_id.strip()
+            or not is_valid_tenant_id(tenant_id)):
+        raise HTTPException(status_code=400, detail="Invalid tenant identity")
+    try:
+        blob = (json.dumps(overlay, indent=2, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if len(blob) > MAX_SURFACE_CONFIG_BYTES:
+        raise HTTPException(status_code=413, detail=f"surface-config.json exceeds {MAX_SURFACE_CONFIG_BYTES} bytes")
+    scratch = tempfile.mkdtemp()
+    errors = []
+    try:
+        (Path(scratch) / _SURFACE_CONFIG_FILE).write_bytes(blob)
+        load_repo_surface_config(Path(scratch), on_error=lambda cfg, exc: errors.append(exc))
+        if errors:
+            raise HTTPException(status_code=400, detail=str(errors[0]))
+    finally:
+        shutil.rmtree(scratch)
+    root = _contained_tenant_root(tenant_id)
+    target = None if root is None else _contained_surface_config_path(root)
+    if target is None:
+        raise HTTPException(status_code=400, detail="surface-config.json target is unavailable or not contained")
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=os.path.dirname(target), delete=False) as fh:
+            temporary = fh.name
+            fh.write(blob)
+            fh.flush()
+            os.fsync(fh.fileno())
+        with _surface_config_lock:
+            if _contained_surface_config_path(root) != target:
+                raise HTTPException(status_code=400, detail="surface-config.json target is not contained")
+            os.chmod(temporary, os.stat(target).st_mode if os.path.exists(target) else 0o644)
+            os.replace(temporary, target)
+            temporary = None
+            _surface_config_cache.pop(tenant_id, None)
+            receipt = surface_config_source(tenant_id)
+            if receipt is None:
+                raise HTTPException(status_code=503, detail="Surface config was written but its receipt is unavailable")
+            return receipt
+    finally:
+        if temporary is not None:
+            os.unlink(temporary)
 
 
 # in-memory authored registry (seeded from disk at startup).

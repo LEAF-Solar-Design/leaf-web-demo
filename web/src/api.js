@@ -328,14 +328,22 @@ export async function getCapabilities(mock) {
 // GET /api/surface-config -> {surfaces: <tenant overlay>, source?: {sha256,
 // authored_at}}. Mock mode makes NO network call (matches getCapabilities):
 // the demo tenant never authors an overlay file, so there is nothing to read.
-export async function getSurfaceConfig(mock) {
+export async function getSurfaceConfig(mock, { fresh = false } = {}) {
   if (mock) return { surfaces: {} }
-  const data = await http('/api/surface-config', { headers: { 'X-Tenant-Id': TENANT } })
+  const data = await http(fresh ? '/api/surface-config?fresh=true' : '/api/surface-config', { cache: 'no-store', headers: { 'X-Tenant-Id': TENANT } })
   const surfaces = data?.surfaces
   return {
-    surfaces: (surfaces && typeof surfaces === 'object') ? surfaces : {},
+    surfaces,
     source: (data?.source && typeof data.source === 'object') ? data.source : null,
   }
+}
+
+export async function submitSurfaceConfig(overlay) {
+  return http('/api/surface-config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT },
+    body: JSON.stringify({ overlay }),
+  })
 }
 
 // --- Projects / Orgs workspace (platform/api.py; UI wave 2) --------------

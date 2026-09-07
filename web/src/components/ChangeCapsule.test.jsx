@@ -1,10 +1,21 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { webcrypto, createHash } from 'node:crypto'
+import { TextEncoder } from 'node:util'
 
 import ChangeCapsule, { acceptGate, capsulePhase, CHANGE_CAPSULE_REASONS } from './ChangeCapsule.jsx'
+import { getSurfaceConfig, submitSurfaceConfig } from '../api.js'
+import { refreshSurfaceConfigOverlay } from '../site/useSurfaceContract.js'
+
+vi.mock('../api.js', () => ({ getSurfaceConfig: vi.fn(), submitSurfaceConfig: vi.fn() }))
+vi.mock('../site/useSurfaceContract.js', async (importOriginal) => ({
+  ...await importOriginal(),
+  refreshSurfaceConfigOverlay: vi.fn().mockResolvedValue(undefined),
+}))
 
 afterEach(cleanup)
+afterEach(() => { vi.clearAllMocks(); vi.unstubAllGlobals() })
 
 const annotation = (over = {}) => ({
   decisionCopy: 'Move panel AB12 by 2ft.',
@@ -20,6 +31,97 @@ const entityIdentity = { kind: 'entity', id: 'AB12' }
 const base = { polylines: [{ handle: 'AB12', pts: [0, 0] }, { handle: 'CD34', pts: [1, 1] }] }
 const scopedCandidate = { polylines: [{ handle: 'AB12', pts: [9, 9] }, { handle: 'CD34', pts: [1, 1] }] }
 const outOfScopeCandidate = { polylines: [{ handle: 'AB12', pts: [9, 9] }, { handle: 'CD34', pts: [8, 8] }] }
+
+describe('surface-config commit', () => {
+  const overlay = { cad: { authoring: false } }
+  const proposal = () => annotation({ kind: 'surface-config', baseSha256: 'a'.repeat(64), overlay })
+
+  it('refuses a stale base with the literal reason and never submits', async () => {
+    getSurfaceConfig.mockResolvedValue({ surfaces: {}, source: { sha256: 'b'.repeat(64) } })
+    render(<ChangeCapsule annotation={proposal()} />)
+    fireEvent.click(screen.getByTestId('change-capsule-accept'))
+    expect(await screen.findByRole('alert')).toHaveTextContent(CHANGE_CAPSULE_REASONS.staleBase)
+    expect(submitSurfaceConfig).not.toHaveBeenCalled()
+    expect(getSurfaceConfig).toHaveBeenCalledWith(false, { fresh: true })
+    expect(screen.getByTestId('change-capsule-accept')).toBeDisabled()
+  })
+
+  it('submits a matching base once, refreshes, and displays the file receipt', async () => {
+    vi.stubGlobal('crypto', webcrypto)
+    vi.stubGlobal('TextEncoder', TextEncoder)
+    getSurfaceConfig.mockResolvedValue({ surfaces: {}, source: { sha256: 'a'.repeat(64) } })
+    const receipt = { sha256: 'c'.repeat(64), authored_at: '2026-09-06T12:00:00+00:00' }
+    submitSurfaceConfig.mockResolvedValue(receipt)
+    const onAccept = vi.fn()
+    render(<ChangeCapsule annotation={proposal()} onAccept={onAccept} />)
+    const button = screen.getByTestId('change-capsule-accept')
+    fireEvent.click(button)
+    fireEvent.click(button)
+    expect(await screen.findByText(`Surface config committed: cccccccc, authored ${receipt.authored_at}.`)).toBeTruthy()
+    expect(submitSurfaceConfig).toHaveBeenCalledTimes(1)
+    expect(submitSurfaceConfig).toHaveBeenCalledWith(overlay)
+    expect(refreshSurfaceConfigOverlay).toHaveBeenCalledTimes(1)
+    expect(onAccept).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('change-capsule-accept')).toBeNull()
+    expect(screen.queryByTestId('change-capsule-undo')).toBeNull()
+  })
+
+  it.each(['rejects', 'has no receipt'])('stays unconfirmed when submit %s and refresh confirms the submitted digest', async (failure) => {
+    vi.stubGlobal('crypto', webcrypto)
+    vi.stubGlobal('TextEncoder', TextEncoder)
+    getSurfaceConfig.mockResolvedValue({ surfaces: {}, source: { sha256: 'a'.repeat(64) } })
+    if (failure === 'rejects') submitSurfaceConfig.mockRejectedValue(new Error('lost response'))
+    else submitSurfaceConfig.mockResolvedValue(null)
+    render(<ChangeCapsule annotation={proposal()} />)
+    fireEvent.click(screen.getByTestId('change-capsule-accept'))
+    expect(await screen.findByRole('alert')).toHaveTextContent(CHANGE_CAPSULE_REASONS.commitFailed)
+    expect(screen.getByTestId('change-capsule-status')).toHaveTextContent(CHANGE_CAPSULE_REASONS.commitFailed)
+    expect(screen.queryByText(/Nothing has changed yet/)).toBeNull()
+    expect(screen.queryByTestId('change-capsule-accept')).toBeNull()
+    getSurfaceConfig.mockResolvedValue({ surfaces: {}, source: { sha256: 'b'.repeat(64) } })
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    expect(await screen.findByText(`Live SHA-256: ${'b'.repeat(64)}`)).toBeTruthy()
+    expect(screen.queryByText(/Nothing has changed yet/)).toBeNull()
+    const receipt = {
+      sha256: createHash('sha256').update(JSON.stringify(overlay, null, 2) + '\n').digest('hex'),
+      authored_at: '2026-09-06T12:00:00+00:00',
+    }
+    getSurfaceConfig.mockResolvedValue({ surfaces: overlay, source: receipt })
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    expect(await screen.findByText(`Surface config committed: ${receipt.sha256.slice(0, 8)}, authored ${receipt.authored_at}.`)).toBeTruthy()
+    expect(refreshSurfaceConfigOverlay).toHaveBeenCalledTimes(2)
+    expect(getSurfaceConfig).toHaveBeenLastCalledWith(false, { fresh: true })
+    expect(submitSurfaceConfig).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('button', { name: 'Refresh' })).toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('refuses a live unknown slot with no submit', async () => {
+    getSurfaceConfig.mockResolvedValue({ surfaces: { cad: { unknown: {} } }, source: { sha256: 'a'.repeat(64) } })
+    render(<ChangeCapsule annotation={proposal()} />)
+    fireEvent.click(screen.getByTestId('change-capsule-accept'))
+    expect(await screen.findByRole('alert')).toHaveTextContent(CHANGE_CAPSULE_REASONS.invalidManifest)
+    expect(submitSurfaceConfig).not.toHaveBeenCalled()
+  })
+
+  it('refuses an unavailable manifest rather than submitting blind', async () => {
+    getSurfaceConfig.mockRejectedValue(new Error('offline'))
+    render(<ChangeCapsule annotation={proposal()} />)
+    fireEvent.click(screen.getByTestId('change-capsule-accept'))
+    expect(await screen.findByRole('alert')).toHaveTextContent(CHANGE_CAPSULE_REASONS.manifestUnavailable)
+    expect(submitSurfaceConfig).not.toHaveBeenCalled()
+  })
+
+  it('a record without kind retains the entity containment path', async () => {
+    const onAccept = vi.fn()
+    render(<ChangeCapsule annotation={annotation()} identity={entityIdentity} onAccept={onAccept}
+      resolveScopedIntakes={() => ({ baseIntake: base, candidateIntake: scopedCandidate })} />)
+    fireEvent.click(screen.getByTestId('change-capsule-accept'))
+    await waitFor(() => expect(onAccept).toHaveBeenCalledTimes(1))
+    expect(getSurfaceConfig).not.toHaveBeenCalled()
+    expect(submitSurfaceConfig).not.toHaveBeenCalled()
+  })
+})
 
 describe('capsulePhase (pure)', () => {
   it('walks every transition', () => {
