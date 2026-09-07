@@ -7541,17 +7541,23 @@ def test_merge_group_duplicate_supply_set_guard_precedes_mint_and_upload() -> No
         steps = job["steps"]
         mint = next(s for s in steps if s.get("id") == "evidence")
         code = _executable_bash(mint["run"])
+        group, legacy = code.split('if [ "$GROUP_MODE" = "true" ]; then', 1)[1].split("\nelse\n", 1)
+        assert 'aws s3api head-object --bucket "$MQ_TRANSPORT_BUCKET"' in group
+        assert '--key "${MQ_TRANSPORT_PREFIX}supply-set/$SOURCE_TREE.json"' in group
+        assert 'EXISTING="supply-set/$SOURCE_TREE.json"' in group
+        assert "gh api" not in group
         for token in ('gh api --paginate --slurp', 'spec-v3-supply-set-$SOURCE_TREE',
                       '.name == $name', '.expired == false', 'fromdateiso8601) > now',
                       '.workflow_run.repository_id == $repo', '.workflow_run.head_repository_id == $repo',
                       '.workflow_run.id != $run'):
-            assert token in code
+            assert token in legacy
         assert re.search(r'if \[ -n "\$EXISTING" \]; then\s*echo "::notice::[^\n]*\$EXISTING[^\n]*\n\s*exit 0\s*fi', code)
         assert code.index('echo "complete=false"') < code.index('EXISTING=') < code.index('generate-v3') < code.index('echo "complete=true"')
         upload = next(s for s in steps if s.get("uses") == "actions/upload-artifact@v4")
         assert steps.index(mint) < steps.index(upload)
         assert upload["if"] == "steps.evidence.outputs.complete == 'true'"
     _mq_falsify(check, [
+        ('EXISTING="supply-set/$SOURCE_TREE.json"', 'EXISTING=""'),
         ('.workflow_run.id != $run', '.workflow_run.id == $run'),
         ('[ -n "$EXISTING" ]', '[ -z "$EXISTING" ]'),
         ('fromdateiso8601) > now', 'fromdateiso8601) < now'),
@@ -7652,6 +7658,259 @@ def test_merge_group_docs_noop_uses_trusted_parent_and_fails_open() -> None:
         ('git diff --no-renames --name-only HEAD^1 HEAD', 'git diff --name-only HEAD^1 HEAD'),
         ('DISPATCH=false', 'DISPATCH=true'),
     ], dispatcher=True)
+
+
+def _mq_transport_code(doc, job, step_id="evidence"):
+    return _executable_bash(next(
+        s["run"] for s in doc["jobs"][job]["steps"]
+        if s.get("id") == step_id
+    ))
+
+
+def _mq_transport_puts(doc):
+    return [
+        s for job in ("speculate", "speculate-manifest")
+        for s in doc["jobs"][job]["steps"]
+        if "aws s3api put-object" in s.get("run", "")
+    ]
+
+
+def test_mq_transport_literals() -> None:
+    def check(doc):
+        assert doc["env"]["MQ_TRANSPORT_BUCKET"] == "leaf-mq-transport-807034087062-us-east-1"
+        assert doc["env"]["MQ_TRANSPORT_PREFIX"] == "mq/leaf-web-demo/"
+    _mq_falsify(check, [
+        ("MQ_TRANSPORT_BUCKET: leaf-mq-transport-807034087062-us-east-1", "MQ_TRANSPORT_BUCKET: foreign"),
+        ("MQ_TRANSPORT_PREFIX: mq/leaf-web-demo/", "MQ_TRANSPORT_PREFIX: mq/"),
+    ])
+
+
+def test_mq_transport_puts_are_immutable_and_runner_attested() -> None:
+    def check(doc):
+        puts = _mq_transport_puts(doc)
+        assert len(puts) == 4
+        for step in puts:
+            code = _executable_bash(step["run"]).replace("\\\n", "")
+            assert "inputs.speculative_group_head != '' &&" in step["if"]
+            command = next(l for l in code.splitlines() if "aws s3api put-object" in l)
+            for flag in (
+                '--bucket "$MQ_TRANSPORT_BUCKET"', '--key "$key"',
+                "--if-none-match '*'", "--checksum-algorithm SHA256",
+                '--metadata "run-id=$GITHUB_RUN_ID,run-attempt=$GITHUB_RUN_ATTEMPT,'
+                'workflow-ref=$GITHUB_WORKFLOW_REF,repository-id=$GITHUB_REPOSITORY_ID,'
+                'head-sha=$SOURCE_SHA,event=$GITHUB_EVENT_NAME"',
+            ):
+                assert flag in command
+    _mq_falsify(check, [
+        ("--if-none-match '*'", "--if-none-match ignored"),
+        ("--checksum-algorithm SHA256", "--checksum-algorithm CRC32"),
+        ("run-id=$GITHUB_RUN_ID,run-attempt=$GITHUB_RUN_ATTEMPT", "run-id=$FILE_RUN,run-attempt=$FILE_ATTEMPT"),
+    ])
+
+
+def test_mq_transport_writer_keys_are_validated_before_use() -> None:
+    def check(doc):
+        for step in _mq_transport_puts(doc):
+            code = _executable_bash(step["run"])
+            for variable, pattern in (
+                ("SOURCE_TREE", "^[0-9a-f]{40}$"), ("SOURCE_SHA", "^[0-9a-f]{40}$"),
+                ("GITHUB_RUN_ID", "^[1-9][0-9]*$"), ("GITHUB_RUN_ATTEMPT", "^[1-9][0-9]*$"),
+            ):
+                guard = f'[[ "$' + variable + f'" =~ {pattern} ]] || exit 1'
+                assert guard in code
+                assert code.index(guard) < code.index('key="')
+            if "entry" in step["name"]:
+                assert 'case "$IMAGE" in app|broker|canonical-worker|harness|web) ;; *) exit 1 ;; esac' in code
+                assert code.index('case "$IMAGE"') < code.index('key="')
+                assert "entries/$SOURCE_TREE/$SOURCE_SHA/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT/$IMAGE.json" in code
+            if "web dist" in step["name"]:
+                assert "web-dist/$SOURCE_TREE/$SOURCE_SHA/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/spec-web-dist.zip" in code
+            if "readiness" in step["name"]:
+                assert "readiness/$SOURCE_TREE/$SOURCE_SHA/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json" in code
+    _mq_falsify(check, [
+        ('[[ "$SOURCE_TREE" =~ ^[0-9a-f]{40}$ ]] || exit 1', 'echo "invalid tree accepted"'),
+        ('[[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ ]] || exit 1', 'echo "invalid run accepted"'),
+        ("$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT/$IMAGE.json", "$IMAGE.json"),
+    ])
+
+
+def test_mq_transport_manifest_reads_own_run_and_missing_entry_is_benign() -> None:
+    def check(doc):
+        code = _mq_transport_code(doc, "speculate-manifest")
+        for variable, pattern in (
+            ("SOURCE_TREE", "^[0-9a-f]{40}$"), ("SOURCE_SHA", "^[0-9a-f]{40}$"),
+            ("GITHUB_RUN_ID", "^[1-9][0-9]*$"), ("GITHUB_RUN_ATTEMPT", "^[1-9][0-9]*$"),
+        ):
+            guard = '[[ "$' + variable + f'" =~ {pattern} ]] || exit 1'
+            assert guard in code
+            assert code.index(guard) < code.index('key="')
+        assert 'for image in app broker canonical-worker harness web; do' in code
+        assert 'entries/$SOURCE_TREE/$SOURCE_SHA/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT/$image.json' in code
+        assert "list-objects" not in code
+        assert "matches=()" in code
+        assert re.search(
+            r'if \[ "\$\{#matches\[@\]\}" != "1" \]; then\s*'
+            r'echo "::notice::Speculative \$image has [^\n]+\n\s*exit 0\s*fi', code
+        )
+        assert r"'\(NoSuchKey\)|\(404\)|\(NotFound\)'" in code
+        for binding in (".producer_run_id == $run", ".producer_run_attempt == $attempt",
+                        '.Metadata["run-id"] == $run', '.Metadata["run-attempt"] == $attempt'):
+            assert binding in code
+        download = next(s for s in doc["jobs"]["speculate-manifest"]["steps"]
+                        if s.get("uses") == "actions/download-artifact@v4")
+        assert download["if"] == "inputs.speculative_group_head == ''"
+    _mq_falsify(check, [
+        ("$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT/$image.json", "$image.json"),
+        (".producer_run_id == $run", ".producer_run_id != $run"),
+        ('echo "::notice::Speculative $image has', 'echo "::error::Speculative $image has'),
+    ])
+
+
+def test_mq_transport_duplicate_guard_uses_head_and_fails_closed_pre_s0() -> None:
+    def check(doc):
+        code = _mq_transport_code(doc, "speculate-manifest")
+        group = code.split('if [ "$GROUP_MODE" = "true" ]; then', 1)[1].split("\nelse\n", 1)[0]
+        assert 'aws s3api head-object --bucket "$MQ_TRANSPORT_BUCKET"' in group
+        assert 'supply-set/$SOURCE_TREE.json' in group
+        assert 'EXISTING="supply-set/$SOURCE_TREE.json"' in group
+        assert r"'\(404\)|\(NoSuchKey\)|\(NotFound\)'" in group
+        assert re.search(r'cat "\$RUNNER_TEMP/mq-head.err" >&2\s*exit 1', group)
+        assert "NoSuchBucket" not in group and "AccessDenied" not in group
+        assert code.index("aws s3api head-object") < code.index('if [ -n "$EXISTING" ]') < code.index("generate-v3")
+    _mq_falsify(check, [
+        ("aws s3api head-object", "aws s3api list-objects-v2"),
+        ('EXISTING="supply-set/$SOURCE_TREE.json"', 'EXISTING=""'),
+        ('cat "$RUNNER_TEMP/mq-head.err" >&2\n              exit 1',
+         'cat "$RUNNER_TEMP/mq-head.err" >&2\n              exit 0'),
+    ])
+
+
+def test_mq_transport_supply_412_is_benign_and_readiness_independent() -> None:
+    def check(doc):
+        puts = _mq_transport_puts(doc)
+        supply = next(s for s in puts if "supply set" in s["name"])
+        code = _executable_bash(supply["run"])
+        assert re.search(r'set \+e\s*aws s3api put-object', code)
+        assert re.search(r'rc=\$\?\s*set -e\s*if \[ "\$rc" -ne 0 \]; then', code)
+        assert r"'\(PreconditionFailed\)|\(412\)'" in code
+        assert 'echo "::notice::Supply set already exists from another run; no duplicate will be minted."' in code
+        assert re.search(r'else\s*cat "\$RUNNER_TEMP/mq-supply-put.err" >&2\s*exit "\$rc"', code)
+        readiness = next(s for s in puts if "readiness" in s["name"])
+        assert "steps.digests.outputs.complete == 'true'" in readiness["if"]
+        assert "steps.evidence" not in str(readiness)
+        for step in puts:
+            if step is not supply:
+                assert "set -euo pipefail" in step["run"]
+                assert "set +e" not in step["run"]
+                assert "PreconditionFailed" not in step["run"]
+                assert "continue-on-error" not in step
+    _mq_falsify(check, [
+        (r"'\(PreconditionFailed\)|\(412\)'", r"'\(AccessDenied\)|\(412\)'"),
+        ('exit "$rc"', 'exit 0'),
+        ("inputs.speculative_group_head != '' && steps.digests.outputs.complete == 'true'",
+         "inputs.speculative_group_head != '' && steps.evidence.outputs.complete == 'true'"),
+    ])
+
+
+def test_mq_transport_artifact_uploads_are_best_effort_only_in_group_mode() -> None:
+    def check(doc):
+        uploads = [
+            s for job in ("speculate", "speculate-manifest")
+            for s in doc["jobs"][job]["steps"]
+            if s.get("uses") == "actions/upload-artifact@v4"
+        ]
+        assert len(uploads) == 4
+        for step in uploads:
+            assert step["continue-on-error"] == "$" + "{{ inputs.speculative_group_head != '' }}"
+    _mq_falsify(check, [
+        ("continue-on-error: $" + "{{ inputs.speculative_group_head != '' }}", "continue-on-error: true"),
+        ("continue-on-error: $" + "{{ inputs.speculative_group_head != '' }}", "continue-on-error: false"),
+    ])
+
+
+def test_mq_transport_adopt_fallback_is_only_before_a_body() -> None:
+    def check(doc):
+        code = _mq_transport_code(doc, "adopt", "decide")
+        assert code.index("aws s3api head-object") < code.index("aws s3api get-object") < code.index('artifact_name="')
+        assert re.search(
+            r'elif \[ -f spec-candidate/spec-v3-supply-set.json \]; then\s*'
+            r'finish false "S3 supply body obtained but transfer failed"', code
+        )
+        assert 's3_body=true' in code and code.count("s3_body=false") == 1
+        assert re.search(
+            r'else\s*echo "::notice::adopt: S3 unavailable before a body; using artifact transport:'
+            r'[^\n]+\n\s*artifact_name=', code
+        )
+        for reason in ("S3 supply checksum mismatch", "S3 metadata provenance invalid",
+                       "S3 metadata changed during read", "S3 producer fields rebound",
+                       "S3 web download failed after supply body"):
+            assert f'finish false "{reason}"' in code
+        assert re.search(r'if \[ "\$s3_body" != "true" \]; then\s*rm -rf spec-candidate', code)
+        assert re.search(r'else\s*web_artifact_name=', code)
+    _mq_falsify(check, [
+        ('[ -f spec-candidate/spec-v3-supply-set.json ]', '[ -s spec-candidate/spec-v3-supply-set.json ]'),
+        ('finish false "S3 supply checksum mismatch"', 's3_body=false'),
+        ('finish false "S3 web download failed after supply body"', 'echo "fallback"'),
+    ])
+
+
+def test_mq_transport_adopt_provenance_uses_validated_metadata_ids() -> None:
+    def check(doc):
+        code = _mq_transport_code(doc, "adopt", "decide")
+        for token in (
+            'candidate_run="$(jq -er \'.Metadata["run-id"]\' spec-candidate/supply-head.json)"',
+            'metadata_attempt="$(jq -er \'.Metadata["run-attempt"]\' spec-candidate/supply-head.json)"',
+            '[[ "$candidate_run" =~ ^[1-9][0-9]*$ ]]',
+            '[[ "$metadata_attempt" =~ ^[1-9][0-9]*$ ]]',
+            '[[ "$metadata_source" =~ ^[0-9a-f]{40}$ ]]',
+            '"repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run"',
+            '[ "$candidate_run_attempt" = "$metadata_attempt" ]',
+            '.repository.id', '.head_repository.id',
+            '.release_source_revision == $source',
+            '.build_run_id == $run and .build_run_attempt == $attempt',
+            '.producer_source_revision == $source',
+            '.producer_run_id == $run and .producer_run_attempt == $attempt',
+            '.Metadata["repository-id"] == $repo', '.Metadata["workflow-ref"] == $workflow',
+            '.Metadata.event == "workflow_dispatch"',
+            'web-dist/$tree/$candidate_source/$candidate_run-$candidate_run_attempt/spec-web-dist.zip',
+        ):
+            assert token in code
+        assert code.index('[[ "$tree" =~ ^[0-9a-f]{40}$ ]]') < code.index('s3_key=')
+        assert code.index('[[ "$candidate_run" =~ ^[1-9][0-9]*$ ]]') < code.index('actions/runs/$candidate_run')
+        assert '[[ "$candidate_source" =~ ^[0-9a-f]{40}$ ]]' in code
+        assert code.index('[[ "$candidate_source" =~ ^[0-9a-f]{40}$ ]]') < code.index('web_key=')
+        for field, value in (("event", "workflow_dispatch"), ("head_branch", "main"),
+                             ("status", "completed"), ("conclusion", "success")):
+            assert f'\'.{field} // empty\' <<<"$run_record")" == "{value}"' in code
+    _mq_falsify(check, [
+        ('[ "$candidate_run_attempt" = "$metadata_attempt" ]', '[ "$candidate_run_attempt" != "$metadata_attempt" ]'),
+        ('.build_run_id == $run and .build_run_attempt == $attempt', '.build_run_id == $run'),
+        ('[[ "$candidate_source" =~ ^[0-9a-f]{40}$ ]]', '[[ "$candidate_source" =~ . ]]'),
+    ])
+
+
+def test_mq_transport_every_get_checks_sha256_bytes() -> None:
+    def check(doc):
+        manifest = _mq_transport_code(doc, "speculate-manifest")
+        adopt = _mq_transport_code(doc, "adopt", "decide")
+        for code, count in ((manifest, 1), (adopt, 2)):
+            logical = code.replace("\\\n", "")
+            commands = [l for l in logical.splitlines() if "aws s3api get-object" in l]
+            assert len(commands) == count
+            assert all("--checksum-mode ENABLED" in command for command in commands)
+            assert code.count("openssl dgst -sha256 -binary") == count
+            assert code.count("| base64 -w0)") == count
+            assert code.count("jq -er '.ChecksumSHA256'") == count
+            assert code.count('[ "$actual" = "$expected" ] ||') == count
+        assert 'exit 1; }' in manifest
+        assert 'finish false "S3 web checksum mismatch"' in adopt
+        assert "list-objects" not in adopt
+    _mq_falsify(check, [
+        ("--checksum-mode ENABLED", "--checksum-mode DISABLED"),
+        ("openssl dgst -sha256 -binary", "openssl dgst -sha1 -binary"),
+        ('[ "$actual" = "$expected" ] ||', '[ "$actual" != "$expected" ] ||'),
+    ])
+
 
 
 if __name__ == "__main__":

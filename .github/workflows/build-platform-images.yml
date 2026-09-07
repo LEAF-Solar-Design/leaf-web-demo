@@ -143,6 +143,8 @@ permissions:
 env:
   DIGEST_AWARE_CONVERGENCE_ENABLED: "false"
   SURFACE_PREDICATE_TYPE: https://leafdesign.ai/attestations/platform-surface/v1
+  MQ_TRANSPORT_BUCKET: leaf-mq-transport-807034087062-us-east-1
+  MQ_TRANSPORT_PREFIX: mq/leaf-web-demo/
 
 concurrency:
   # Serial main builds make the previous push's cache the normal input. GitHub
@@ -2709,12 +2711,29 @@ jobs:
 
       - name: Upload the provider-bound speculative web deployment artifact
         if: matrix.image == 'web' && steps.exists.outputs.present != 'true'
+        continue-on-error: ${{ inputs.speculative_group_head != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: spec-web-dist-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/spec-web-dist.zip
           if-no-files-found: error
           retention-days: 30
+
+      - name: Put speculative web dist in S3
+        if: ${{ inputs.speculative_group_head != '' && matrix.image == 'web' && steps.exists.outputs.present != 'true' }}
+        env:
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          SOURCE_TREE: ${{ needs.prepare.outputs.source_tree }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_TREE" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || exit 1
+          key="${MQ_TRANSPORT_PREFIX}web-dist/$SOURCE_TREE/$SOURCE_SHA/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/spec-web-dist.zip"
+          aws s3api put-object --bucket "$MQ_TRANSPORT_BUCKET" --key "$key" \
+            --body "$RUNNER_TEMP/spec-web-dist.zip" --if-none-match '*' --checksum-algorithm SHA256 \
+            --metadata "run-id=$GITHUB_RUN_ID,run-attempt=$GITHUB_RUN_ATTEMPT,workflow-ref=$GITHUB_WORKFLOW_REF,repository-id=$GITHUB_REPOSITORY_ID,head-sha=$SOURCE_SHA,event=$GITHUB_EVENT_NAME"
 
       - name: Materialize one producer-owned speculative v3 service entry
         if: steps.exists.outputs.present != 'true'
@@ -2771,12 +2790,32 @@ jobs:
 
       - name: Upload one producer-owned speculative v3 service entry
         if: steps.exists.outputs.present != 'true'
+        continue-on-error: ${{ inputs.speculative_group_head != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: spec-surface-result-${{ matrix.image }}-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/spec-service-entry.json
           if-no-files-found: error
           retention-days: 30
+
+      - name: Put speculative service entry in S3
+        if: ${{ inputs.speculative_group_head != '' && steps.exists.outputs.present != 'true' }}
+        env:
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          SOURCE_TREE: ${{ needs.prepare.outputs.source_tree }}
+          IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_TREE" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || exit 1
+          case "$IMAGE" in app|broker|canonical-worker|harness|web) ;; *) exit 1 ;; esac
+          key="${MQ_TRANSPORT_PREFIX}entries/$SOURCE_TREE/$SOURCE_SHA/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT/$IMAGE.json"
+          aws s3api put-object --bucket "$MQ_TRANSPORT_BUCKET" --key "$key" \
+            --body "$RUNNER_TEMP/spec-service-entry.json" --if-none-match '*' --checksum-algorithm SHA256 \
+            --metadata "run-id=$GITHUB_RUN_ID,run-attempt=$GITHUB_RUN_ATTEMPT,workflow-ref=$GITHUB_WORKFLOW_REF,repository-id=$GITHUB_REPOSITORY_ID,head-sha=$SOURCE_SHA,event=$GITHUB_EVENT_NAME"
+
 
   # The speculative fan-in and the partial-push invariant, redefined over
   # tree identity: a spec-v3-supply-set-<tree> artifact exists ONLY when all
@@ -2827,6 +2866,7 @@ jobs:
           fi
 
       - name: Download exact speculative v3 service entries
+        if: inputs.speculative_group_head == ''
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
@@ -2879,11 +2919,28 @@ jobs:
         id: evidence
         if: steps.digests.outputs.complete == 'true'
         env:
+          GROUP_MODE: ${{ inputs.speculative_group_head != '' }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
           GH_TOKEN: ${{ github.token }}
           REPOSITORY_ID: ${{ github.repository_id }}
         run: |
           set -euo pipefail
           echo "complete=false" >> "$GITHUB_OUTPUT"
+          [[ "$SOURCE_TREE" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || exit 1
+          if [ "$GROUP_MODE" = "true" ]; then
+            EXISTING=""
+            if aws s3api head-object --bucket "$MQ_TRANSPORT_BUCKET" \
+              --key "${MQ_TRANSPORT_PREFIX}supply-set/$SOURCE_TREE.json" \
+              > "$RUNNER_TEMP/mq-existing.json" 2>"$RUNNER_TEMP/mq-head.err"; then
+              EXISTING="supply-set/$SOURCE_TREE.json"
+            elif ! grep -Eq '\(404\)|\(NoSuchKey\)|\(NotFound\)' "$RUNNER_TEMP/mq-head.err"; then
+              cat "$RUNNER_TEMP/mq-head.err" >&2
+              exit 1
+            fi
+          else
           EXISTING=$(gh api --paginate --slurp \
             "repos/$GITHUB_REPOSITORY/actions/artifacts?name=spec-v3-supply-set-$SOURCE_TREE&per_page=100" \
             | jq -r --arg name "spec-v3-supply-set-$SOURCE_TREE" \
@@ -2894,6 +2951,7 @@ jobs:
                   and .workflow_run.head_repository_id == $repo
                   and .workflow_run.id != $run)] | first
                 | if . == null then empty else "\(.name) (artifact \(.id))" end')
+          fi
           if [ -n "$EXISTING" ]; then
             echo "::notice::Supply set already exists from another run: $EXISTING; no duplicate will be minted."
             exit 0
@@ -2905,9 +2963,32 @@ jobs:
           digests[harness]="${{ steps.digests.outputs.harness }}"
           digests[web]="${{ steps.digests.outputs.web }}"
           for image in app broker canonical-worker harness web; do
+            if [ "$GROUP_MODE" = "true" ]; then
+              entry="$RUNNER_TEMP/spec-entry-$image.json"
+              key="${MQ_TRANSPORT_PREFIX}entries/$SOURCE_TREE/$SOURCE_SHA/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT/$image.json"
+              matches=()
+              if aws s3api get-object --bucket "$MQ_TRANSPORT_BUCKET" --key "$key" \
+                --checksum-mode ENABLED "$entry" > "$RUNNER_TEMP/mq-entry-get.json" 2>"$RUNNER_TEMP/mq-entry.err"; then
+                expected="$(jq -er '.ChecksumSHA256' "$RUNNER_TEMP/mq-entry-get.json")"
+                actual="$(openssl dgst -sha256 -binary "$entry" | base64 -w0)"
+                [ "$actual" = "$expected" ] || { echo "::error::Speculative entry checksum mismatch"; exit 1; }
+                jq -e --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" \
+                  --arg source "$SOURCE_SHA" --arg repo "$GITHUB_REPOSITORY_ID" \
+                  --arg workflow "$GITHUB_WORKFLOW_REF" '
+                  .Metadata["run-id"] == $run and .Metadata["run-attempt"] == $attempt
+                  and .Metadata["head-sha"] == $source and .Metadata["repository-id"] == $repo
+                  and .Metadata["workflow-ref"] == $workflow and .Metadata.event == "workflow_dispatch"
+                ' "$RUNNER_TEMP/mq-entry-get.json" >/dev/null || exit 1
+                matches=("$entry")
+              elif ! grep -Eq '\(NoSuchKey\)|\(404\)|\(NotFound\)' "$RUNNER_TEMP/mq-entry.err"; then
+                cat "$RUNNER_TEMP/mq-entry.err" >&2
+                exit 1
+              fi
+            else
             mapfile -t matches < <(find "$RUNNER_TEMP/spec-surface-results" -type f \
               -path "*/spec-surface-result-$image-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}/spec-service-entry.json" \
               -print 2>/dev/null || true)
+            fi
             if [ "${#matches[@]}" != "1" ]; then
               echo "::notice::Speculative $image has ${#matches[@]} current-run v3 entries; no provider-bound supply artifact will be minted."
               exit 0
@@ -2945,12 +3026,40 @@ jobs:
 
       - name: Upload the provider-bound speculative v3 supply set
         if: steps.evidence.outputs.complete == 'true'
+        continue-on-error: ${{ inputs.speculative_group_head != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: spec-v3-supply-set-${{ needs.prepare.outputs.source_tree }}
           path: ${{ runner.temp }}/spec-v3-supply-set.json
           if-no-files-found: error
           retention-days: 30
+
+      - name: Put speculative supply set in S3
+        if: ${{ inputs.speculative_group_head != '' && steps.evidence.outputs.complete == 'true' }}
+        env:
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          SOURCE_TREE: ${{ needs.prepare.outputs.source_tree }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_TREE" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || exit 1
+          key="${MQ_TRANSPORT_PREFIX}supply-set/$SOURCE_TREE.json"
+          set +e
+          aws s3api put-object --bucket "$MQ_TRANSPORT_BUCKET" --key "$key" \
+            --body "$RUNNER_TEMP/spec-v3-supply-set.json" --if-none-match '*' --checksum-algorithm SHA256 \
+            --metadata "run-id=$GITHUB_RUN_ID,run-attempt=$GITHUB_RUN_ATTEMPT,workflow-ref=$GITHUB_WORKFLOW_REF,repository-id=$GITHUB_REPOSITORY_ID,head-sha=$SOURCE_SHA,event=$GITHUB_EVENT_NAME" 2>"$RUNNER_TEMP/mq-supply-put.err"
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            if grep -Eq '\(PreconditionFailed\)|\(412\)' "$RUNNER_TEMP/mq-supply-put.err"; then
+              echo "::notice::Supply set already exists from another run; no duplicate will be minted."
+            else
+              cat "$RUNNER_TEMP/mq-supply-put.err" >&2
+              exit "$rc"
+            fi
+          fi
 
       # Bound to the DIGESTS check, never the v3 evidence step: the v3
       # artifact can be skipped as a duplicate for this exact tree while a
@@ -2989,12 +3098,29 @@ jobs:
 
       - name: Upload the speculative tag-readiness record
         if: steps.digests.outputs.complete == 'true'
+        continue-on-error: ${{ inputs.speculative_group_head != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: spec-tag-readiness-${{ needs.prepare.outputs.source_tree }}-${{ needs.prepare.outputs.source_sha }}
           path: ${{ runner.temp }}/spec-tag-readiness.json
           if-no-files-found: error
           retention-days: 30
+
+      - name: Put speculative readiness in S3
+        if: ${{ inputs.speculative_group_head != '' && steps.digests.outputs.complete == 'true' }}
+        env:
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          SOURCE_TREE: ${{ needs.prepare.outputs.source_tree }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_TREE" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || exit 1
+          key="${MQ_TRANSPORT_PREFIX}readiness/$SOURCE_TREE/$SOURCE_SHA/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          aws s3api put-object --bucket "$MQ_TRANSPORT_BUCKET" --key "$key" \
+            --body "$RUNNER_TEMP/spec-tag-readiness.json" --if-none-match '*' --checksum-algorithm SHA256 \
+            --metadata "run-id=$GITHUB_RUN_ID,run-attempt=$GITHUB_RUN_ATTEMPT,workflow-ref=$GITHUB_WORKFLOW_REF,repository-id=$GITHUB_REPOSITORY_ID,head-sha=$SOURCE_SHA,event=$GITHUB_EVENT_NAME"
 
   # Tree-identity adoption (the merge-run half of the speculative lane).
   # BEFORE the first release-tag write this job has the gate-reuse probe's
@@ -3125,6 +3251,40 @@ jobs:
           [[ "$PROVEN_TREE" == "$tree" ]] || finish false "gate verdict binds tree ${PROVEN_TREE:-<none>}, not $tree"
           [[ "$PROD_TAG" =~ ^prod-[0-9a-f]{7,40}$ ]] || finish false "refusing to alias non-release tag $PROD_TAG"
           repo_id="$(gh api "repos/$GITHUB_REPOSITORY" --jq .id 2>/dev/null || true)"
+          [[ "$repo_id" =~ ^[1-9][0-9]*$ ]] || finish false "repository id unavailable"
+          rm -rf spec-candidate && mkdir -p spec-candidate
+          s3_body=false
+          s3_key="${MQ_TRANSPORT_PREFIX}supply-set/$tree.json"
+          if aws s3api head-object --bucket "$MQ_TRANSPORT_BUCKET" --key "$s3_key" \
+            > spec-candidate/supply-head.json 2>spec-candidate/s3-error; then
+            if aws s3api get-object --bucket "$MQ_TRANSPORT_BUCKET" --key "$s3_key" \
+              --checksum-mode ENABLED spec-candidate/spec-v3-supply-set.json \
+              > spec-candidate/supply-get.json 2>spec-candidate/s3-error; then
+              s3_body=true
+            elif [ -f spec-candidate/spec-v3-supply-set.json ]; then
+              finish false "S3 supply body obtained but transfer failed"
+            fi
+          fi
+          if [ "$s3_body" = "true" ]; then
+            expected="$(jq -er '.ChecksumSHA256' spec-candidate/supply-get.json)" || finish false "S3 checksum absent"
+            actual="$(openssl dgst -sha256 -binary spec-candidate/spec-v3-supply-set.json | base64 -w0)"
+            [ "$actual" = "$expected" ] || finish false "S3 supply checksum mismatch"
+            candidate_run="$(jq -er '.Metadata["run-id"]' spec-candidate/supply-head.json)" || finish false "S3 run metadata absent"
+            metadata_attempt="$(jq -er '.Metadata["run-attempt"]' spec-candidate/supply-head.json)" || finish false "S3 attempt metadata absent"
+            metadata_source="$(jq -er '.Metadata["head-sha"]' spec-candidate/supply-head.json)" || finish false "S3 source metadata absent"
+            [[ "$candidate_run" =~ ^[1-9][0-9]*$ ]] || finish false "S3 run metadata invalid"
+            [[ "$metadata_attempt" =~ ^[1-9][0-9]*$ ]] || finish false "S3 attempt metadata invalid"
+            [[ "$metadata_source" =~ ^[0-9a-f]{40}$ ]] || finish false "S3 source metadata invalid"
+            jq -e --arg repo "$repo_id" \
+              --arg workflow "$GITHUB_REPOSITORY/.github/workflows/build-platform-images.yml@refs/heads/main" '
+              .Metadata["repository-id"] == $repo and .Metadata.event == "workflow_dispatch"
+              and .Metadata["workflow-ref"] == $workflow
+            ' spec-candidate/supply-head.json >/dev/null || finish false "S3 metadata provenance invalid"
+            jq -e --slurpfile head spec-candidate/supply-head.json \
+              '.Metadata == $head[0].Metadata' spec-candidate/supply-get.json >/dev/null \
+              || finish false "S3 metadata changed during read"
+          else
+            echo "::notice::adopt: S3 unavailable before a body; using artifact transport: $(cat spec-candidate/s3-error)"
           artifact_name="spec-v3-supply-set-$tree"
           listing="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$artifact_name&per_page=30" 2>/dev/null || true)"
           if [[ -z "$repo_id" || -z "$listing" ]]; then
@@ -3142,6 +3302,9 @@ jobs:
           IFS=$'\t' read -r candidate_id candidate_run candidate_archive_digest <<<"${candidates[0]}"
           [[ "$candidate_archive_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || finish false "provider artifact has no immutable archive digest"
 
+          fi
+          [[ "$candidate_run" =~ ^[1-9][0-9]*$ ]] || finish false "speculative provider run id is invalid"
+
           # Only one completed main-ref dispatch of this immutable workflow
           # may own the artifact. All facts below come from provider records.
           run_record="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run" 2>/dev/null || true)"
@@ -3155,11 +3318,17 @@ jobs:
           [[ "$(jq -r '.conclusion // empty' <<<"$run_record")" == "success" ]] || finish false "speculative provider run did not succeed"
           candidate_run_attempt="$(jq -r '.run_attempt // empty' <<<"$run_record")"
           [[ "$candidate_run_attempt" =~ ^[1-9][0-9]*$ ]] || finish false "speculative provider attempt is invalid"
+          if [ "$s3_body" = "true" ]; then
+            [ "$candidate_run_attempt" = "$metadata_attempt" ] || finish false "S3 producer attempt changed"
+            [ "$(jq -r '.repository.id' <<<"$run_record")" = "$repo_id" ] || finish false "S3 producer repository changed"
+            [ "$(jq -r '.head_repository.id' <<<"$run_record")" = "$repo_id" ] || finish false "S3 producer head repository changed"
+          fi
           candidate_run_head="$(jq -r '.head_sha // empty' <<<"$run_record")"
           [[ "$candidate_run_head" =~ ^[0-9a-f]{40}$ ]] || finish false "speculative provider source is invalid"
           candidate_workflow_blob="$(gh api "repos/$GITHUB_REPOSITORY/contents/.github/workflows/build-platform-images.yml?ref=$candidate_run_head" --jq .sha 2>/dev/null || true)"
           [[ "$candidate_workflow_blob" =~ ^[0-9a-f]{40}$ ]] || finish false "speculative provider workflow blob is unavailable"
 
+          if [ "$s3_body" != "true" ]; then
           rm -rf spec-candidate && mkdir -p spec-candidate
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$candidate_id/zip" \
             > spec-candidate/spec.zip 2>/dev/null || finish false "speculative artifact download failed"
@@ -3168,9 +3337,31 @@ jobs:
           mapfile -t archive_paths < <(unzip -Z1 spec-candidate/spec.zip 2>/dev/null || true)
           [ "${#archive_paths[@]}" = "1" ] && [ "${archive_paths[0]}" = "spec-v3-supply-set.json" ] || finish false "speculative provider archive is not closed"
           unzip -o -q spec-candidate/spec.zip -d spec-candidate || finish false "speculative provider archive is malformed"
+          fi
           candidate_source="$(jq -er '.release_source_revision' spec-candidate/spec-v3-supply-set.json 2>/dev/null)" \
             || finish false "speculative v3 source is unavailable"
           [[ "$candidate_source" =~ ^[0-9a-f]{40}$ ]] || finish false "speculative v3 source is invalid"
+          if [ "$s3_body" = "true" ]; then
+            [ "$candidate_source" = "$metadata_source" ] || finish false "S3 source rebound"
+            jq -e --arg source "$metadata_source" --argjson run "$candidate_run" \
+              --argjson attempt "$metadata_attempt" '
+              .release_source_revision == $source
+              and .build_run_id == $run and .build_run_attempt == $attempt
+              and ([.services[] | .producer_source_revision == $source
+                and .producer_run_id == $run and .producer_run_attempt == $attempt] | all)
+            ' spec-candidate/spec-v3-supply-set.json >/dev/null || finish false "S3 producer fields rebound"
+            web_key="${MQ_TRANSPORT_PREFIX}web-dist/$tree/$candidate_source/$candidate_run-$candidate_run_attempt/spec-web-dist.zip"
+            aws s3api get-object --bucket "$MQ_TRANSPORT_BUCKET" --key "$web_key" \
+              --checksum-mode ENABLED spec-candidate/spec-web-dist.zip \
+              > spec-candidate/web-get.json 2>spec-candidate/s3-error \
+              || finish false "S3 web download failed after supply body"
+            expected="$(jq -er '.ChecksumSHA256' spec-candidate/web-get.json)" || finish false "S3 web checksum absent"
+            actual="$(openssl dgst -sha256 -binary spec-candidate/spec-web-dist.zip | base64 -w0)"
+            [ "$actual" = "$expected" ] || finish false "S3 web checksum mismatch"
+            jq -e --slurpfile head spec-candidate/supply-head.json \
+              '.Metadata == $head[0].Metadata' spec-candidate/web-get.json >/dev/null \
+              || finish false "S3 web metadata rebound"
+          else
           web_artifact_name="spec-web-dist-$candidate_source-attempt-$candidate_run_attempt"
           web_listing="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run/artifacts?per_page=100" 2>/dev/null || true)"
           [[ -n "$web_listing" ]] || finish false "speculative web artifact listing is unavailable"
@@ -3188,6 +3379,7 @@ jobs:
           mapfile -t web_archive_paths < <(unzip -Z1 spec-candidate/web-provider.zip 2>/dev/null || true)
           [ "${#web_archive_paths[@]}" = "1" ] && [ "${web_archive_paths[0]}" = "spec-web-dist.zip" ] || finish false "speculative web provider archive is not closed"
           unzip -o -q spec-candidate/web-provider.zip -d spec-candidate || finish false "speculative web provider archive is malformed"
+          fi
           claimed_old_web_artifact="$(jq -er '.services.web.artifact_sha256' spec-candidate/spec-v3-supply-set.json 2>/dev/null)" \
             || finish false "speculative v3 web artifact hash is unavailable"
           python scripts/platform_release_manifest.py restamp-web-artifact \
