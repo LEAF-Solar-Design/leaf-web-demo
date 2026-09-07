@@ -159,7 +159,10 @@ RUN pip install --no-cache-dir \
 # stays authoritative; the browser cache lands root-owned and world-readable+
 # executable so the later `USER 10003:10003` drop can still launch Chromium,
 # but never write into or replace it.
-ENV PLAYWRIGHT_BROWSERS_PATH=/opt/leaf-browsers
+# Use an explicit mode for container hosts without nested browser sandboxing.
+# It only permits the producer's exact server-owned template, never arbitrary HTML.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/leaf-browsers \
+    LEAF_MANAGED_WEB_BROWSER_MODE=trusted-template-container
 RUN pip install --no-cache-dir playwright==1.60.0 \
  && python -m playwright install --with-deps chromium \
  && chmod -R o+rX /opt/leaf-browsers
