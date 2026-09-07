@@ -18,6 +18,23 @@ from .campaign_execution import (
 )
 
 
+REGISTRATIONS = {
+    'campaign.host-enrollment': 'host-enrollment-',
+    'campaign.native-release': 'native-release-',
+}
+
+
+def _native_contract(machine_id):
+    return dict(
+        title='Prepare native AWS release',
+        spec=('Register native AWS release preparation for configured machine ' + machine_id +
+              '. The release executor is not connected. Keep this task pending until a distinct '
+              'trusted native release execution and receipt contract is implemented. Host '
+              'publication, connectivity readback and generic execution cannot settle this task.'),
+        stages=['verification'], owned_paths=[],
+        verify_command='campaign.native-release', declared_artifacts=['native-release-receipt'])
+
+
 def allowed_machines():
     return list(dict.fromkeys(value.strip() for value in
         os.environ.get('LEAF_CAMPAIGN_ALLOWED_MACHINES', '').split(',') if value.strip()))
@@ -28,6 +45,7 @@ def _public(row, link, replayed=False):
         'enrollment_id', 'machine_id', 'state', 'created_at', 'enabled_at', 'revoked_at')},
         replayed=replayed)
     result.pop('dispatch', None)
+    result['capability'] = row.get('capability', 'campaign.host-enrollment')
     result['capability_link'] = {key: str(link[key]) for key in
                                ('link_id', 'task_id', 'capability', 'state')}
     for key in ('author_stage_id', 'change_set_id', 'publication_id', 'effective_catalog_id',
@@ -104,14 +122,16 @@ def _host_contract(machine_id, *, legacy=False):
         declared_artifacts=['published-capability-binding', 'two-verified-invocation-receipts'])
 
 
-def _host_task(cur, scope, enrollment_id):
+def _host_task(cur, scope, enrollment_id, *, allow_native=False):
     # Resolve without an enrollment lock, then follow execution's task-first order.
     link = _link(cur, scope, _uuid(enrollment_id))
+    if link['capability'] == 'campaign.native-release' and not allow_native:
+        raise CampaignConflict('capability_not_ready', 'The release executor is not connected')
     return _task(cur, scope, link['task_id'])
 
 
-def _repair_host_task(cur, scope, task, machine_id):
-    contract = _host_contract(machine_id)
+def _repair_host_task(cur, scope, task, machine_id, capability='campaign.host-enrollment'):
+    contract = _native_contract(machine_id) if capability == 'campaign.native-release' else _host_contract(machine_id)
     params = {**scope, 'task': task['task_id']}
     cur.execute('SELECT p.task_key FROM campaign_task_dependencies d JOIN campaign_tasks p '
                 'ON p.task_id=d.depends_on_task_id AND p.org_id=d.org_id '
@@ -124,16 +144,19 @@ def _repair_host_task(cur, scope, task, machine_id):
         'verify_command', 'declared_artifacts', 'kind', 'parent_task_id')}
     fingerprint = execution._fingerprint(
         'leaf.campaign.task.v1', execution._task_payload(**material, depends_on=dependencies))
-    if (task['kind'] != 'capability' or task['capability'] != 'campaign.host-enrollment'
-            or task['task_key'] != 'host-enrollment-' + hashlib.sha256(machine_id.encode()).hexdigest()
+    if (task['kind'] != 'capability' or task['capability'] != capability
+            or task['task_key'] != REGISTRATIONS[capability] + hashlib.sha256(machine_id.encode()).hexdigest()
             or task['idempotency_key'] != task['task_key']
             or task['parent_task_id'] is not None or dependencies
             or fingerprint != task['payload_fingerprint']):
         raise CampaignConflict('reconcile_required', 'Enrollment task contract requires reconciliation')
     if all(task[key] == value for key, value in contract.items()):
-        if task['current_stage'] != 'verification':
+        if (task['current_stage'] != 'verification' or
+                (capability == 'campaign.native-release' and (task['status'] != 'pending' or task['fence'] != 0))):
             raise CampaignConflict('reconcile_required', 'Enrollment task stage requires reconciliation')
         return task
+    if capability == 'campaign.native-release':
+        raise CampaignConflict('reconcile_required', 'Native release task contract requires reconciliation')
     legacy = _host_contract(machine_id, legacy=True)
     if (any(task[key] != value for key, value in legacy.items())
             or task['status'] != 'pending' or task['fence'] != 0
@@ -163,13 +186,16 @@ def _repair_host_task(cur, scope, task, machine_id):
     return task
 
 
-def request_enrollment(org_id, project_id, campaign_id, principal_id, *, machine_id):
+def request_enrollment(org_id, project_id, campaign_id, principal_id, *, machine_id,
+                       capability='campaign.host-enrollment'):
     scope = {**_scope(org_id, project_id), 'campaign': _uuid(campaign_id)}
     principal = _uuid(principal_id)
+    if not isinstance(capability, str) or capability not in REGISTRATIONS:
+        raise CampaignError('invalid_request', 'Choose a supported registration capability')
     _text(machine_id, 'machine_id', 200)
     if machine_id not in allowed_machines():
         raise CampaignError('invalid_machine', 'Choose a configured machine')
-    key = 'host-enrollment-' + hashlib.sha256(machine_id.encode()).hexdigest()
+    key = REGISTRATIONS[capability] + hashlib.sha256(machine_id.encode()).hexdigest()
     with _cursor() as cur:
         _check(cur, scope)
         _principal(cur, scope, principal)
@@ -177,13 +203,14 @@ def request_enrollment(org_id, project_id, campaign_id, principal_id, *, machine
         # A crash after that commit is recovered by the deterministic task key.
         _lock(cur, f"enrollment:{scope['campaign']}:{machine_id}")
         cur.execute('SELECT * FROM campaign_host_enrollments WHERE ' + SCOPE +
-                    ' AND machine_id=%(machine)s', {**scope, 'machine': machine_id})
+                    ' AND machine_id=%(machine)s AND capability=%(capability)s',
+                    {**scope, 'machine': machine_id, 'capability': capability})
         existing = cur.fetchone()
-        if existing:
+        if existing and capability == 'campaign.host-enrollment':
             task = _host_task(cur, scope, existing['enrollment_id'])
             _repair_host_task(cur, scope, task, machine_id)
             return _public(existing, _link(cur, scope, existing['enrollment_id']), True)
-        subject = os.environ.get('LEAF_CAMPAIGN_WORKER_SUBJECT', '')
+        subject = existing['service_subject'] if existing else os.environ.get('LEAF_CAMPAIGN_WORKER_SUBJECT', '')
         if not subject or len(subject) > 200:
             raise CampaignUnavailable('worker_unavailable', 'Campaign worker is not configured')
         cur.execute('SELECT * FROM campaign_tasks WHERE ' + SCOPE +
@@ -195,19 +222,32 @@ def request_enrollment(org_id, project_id, campaign_id, principal_id, *, machine
                 raise CampaignUnavailable('source_unavailable', 'Deployed implementation source is unavailable')
             task = execution.submit_task(
                 org_id, project_id, campaign_id, task_key=key, idempotency_key=key,
-                kind='capability', capability='campaign.host-enrollment', source_sha=source,
-                **_host_contract(machine_id), depends_on=[])
+                kind='capability', capability=capability, source_sha=source,
+                **(_native_contract(machine_id) if capability == 'campaign.native-release'
+                   else _host_contract(machine_id)), depends_on=[])
         task = _task(cur, scope, _uuid(task['task_id']))
-        task = _repair_host_task(cur, scope, task, machine_id)
-        if task['kind'] != 'capability' or task['capability'] != 'campaign.host-enrollment':
+        task = (_repair_host_task(cur, scope, task, machine_id) if capability == 'campaign.host-enrollment'
+                else _repair_host_task(cur, scope, task, machine_id, capability))
+        if task['kind'] != 'capability' or task['capability'] != capability:
             raise CampaignConflict('task_conflict', 'Enrollment task identity conflicts')
-        cur.execute('INSERT INTO campaign_host_enrollments '
-                    '(enrollment_id, org_id, project_id, campaign_id, machine_id, service_subject, '
-                    'enrolled_by_binding_id) VALUES (%(id)s, %(org)s, %(project)s, %(campaign)s, '
-                    '%(machine)s, %(subject)s, %(principal)s) RETURNING *',
-                    {**scope, 'id': uuid.uuid4(), 'machine': machine_id,
-                     'subject': subject, 'principal': principal})
-        row = cur.fetchone()
+        if existing:
+            row = existing
+            cur.execute('SELECT * FROM campaign_capability_links WHERE ' + SCOPE +
+                        ' AND enrollment_id=%(enrollment)s',
+                        {**scope, 'enrollment': row['enrollment_id']})
+            link = cur.fetchone()
+            if link is not None:
+                if link['task_id'] != task['task_id'] or link['capability'] != capability:
+                    raise CampaignConflict('task_conflict', 'Enrollment task identity conflicts')
+                return _public(row, _link(cur, scope, row['enrollment_id']), True)
+        else:
+            cur.execute('INSERT INTO campaign_host_enrollments '
+                        '(enrollment_id, org_id, project_id, campaign_id, machine_id, service_subject, '
+                        'enrolled_by_binding_id, capability) VALUES (%(id)s, %(org)s, %(project)s, %(campaign)s, '
+                        '%(machine)s, %(subject)s, %(principal)s, %(capability)s) RETURNING *',
+                        {**scope, 'id': uuid.uuid4(), 'machine': machine_id, 'capability': capability,
+                         'subject': subject, 'principal': principal})
+            row = cur.fetchone()
         cur.execute('INSERT INTO campaign_capability_links '
                     '(link_id, org_id, project_id, campaign_id, task_id, enrollment_id, capability) '
                     'VALUES (%(id)s, %(org)s, %(project)s, %(campaign)s, %(task)s, %(enrollment)s, '
@@ -215,9 +255,10 @@ def request_enrollment(org_id, project_id, campaign_id, principal_id, *, machine
                     {**scope, 'id': uuid.uuid4(), 'task': task['task_id'],
                      'enrollment': row['enrollment_id'], 'capability': task['capability']})
         link = cur.fetchone()
-        _event(cur, scope, task, 'enrollment_requested')
+        if not existing:
+            _event(cur, scope, task, 'enrollment_requested')
         _event(cur, scope, task, 'capability_link_recorded')
-        return _public(row, link)
+        return _public(row, link, bool(existing))
 
 
 def _transition(org_id, project_id, campaign_id, enrollment_id, principal_id, state):
@@ -226,7 +267,7 @@ def _transition(org_id, project_id, campaign_id, enrollment_id, principal_id, st
     with _cursor() as cur:
         _check(cur, scope)
         _principal(cur, scope, principal)
-        _host_task(cur, scope, enrollment_id)
+        _host_task(cur, scope, enrollment_id, allow_native=state == 'revoked')
         row = _enrollment(cur, scope, enrollment_id)
         link = _link(cur, scope, row['enrollment_id'])
         if row['state'] == state:
@@ -270,6 +311,7 @@ def resolve_worker_scope(cur, enrollment_id, subject):
                 'ON c.campaign_id=e.campaign_id AND c.org_id=e.org_id AND c.project_id=e.project_id '
                 'JOIN projects p ON p.org_id=e.org_id AND p.project_id=e.project_id '
                 "WHERE e.enrollment_id=%s AND e.service_subject=%s AND e.state='enabled' "
+                "AND e.capability='campaign.host-enrollment' "
                 "AND p.status='active' AND p.deleted_at IS NULL FOR SHARE OF e",
                 (_uuid(enrollment_id), subject))
     row = cur.fetchone()

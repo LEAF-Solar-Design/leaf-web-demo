@@ -174,6 +174,40 @@ def _export(enrollment, execution, body, subject):
 
 def handle(op, body, subject):
     """Validate closed requests, resolve persisted authority, and call the ledger."""
+    if op in ('release', 'deliver'):
+        fields = {'enrollment_id'} if op == 'release' else {'enrollment_id', 'release_id'}
+        if not isinstance(body, dict) or set(body) != fields:
+            raise BridgeError(400)
+        try:
+            import uuid
+            for value in body.values():
+                uuid.UUID(value)
+            enrollment, execution, _ = campaign_worker_service._platform()
+            with execution._cursor() as cur:
+                scope = enrollment.resolve_worker_scope(cur, body['enrollment_id'], subject)
+            from leaf_platform import campaign_release
+            if op == 'deliver':
+                completion = campaign_release.get_release(scope['org'], scope['project'],
+                                                          scope['campaign'], body['release_id'])
+                import campaign_release_service as releases
+                actor = releases._WorkerActor(body['enrollment_id'], subject)
+                try:
+                    actor.resolve(scope['project'])
+                except (PermissionError, releases.platform_link.ProjectSessionForbidden):
+                    return {'ok': True, 'completion': completion, 'next_action': {
+                        'available': False, 'action': 'enable-with-current-project-actor',
+                        'reason': 'Current enrollment actor binding is unavailable'}}
+                return {'ok': True, 'completion': releases.advance(actor, scope['project'],
+                    scope['campaign'], body['release_id'])}
+            else:
+                completion = campaign_release.release_snapshot(scope['org'], scope['project'], scope['campaign'])
+            return {'ok': True, 'completion': completion, 'next_action': {
+                'available': True, 'action': 'deliver',
+                'reason': 'Delivery rechecks the enabled enrollment actor and project membership'}}
+        except (ValueError, TypeError):
+            raise BridgeError(400) from None
+        except Exception:
+            raise BridgeError(403) from None
     if op in ('host_op', 'host_settle', 'host_grant'):
         try:
             from leaf_platform import campaign_capabilities as capabilities

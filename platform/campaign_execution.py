@@ -14,6 +14,8 @@ import uuid
 
 from psycopg.types.json import Jsonb
 
+from .campaign_release import admits_claim
+
 from .campaigns import (
     CampaignError, CampaignConflict, CampaignUnavailable, _scope, _uuid,
     _text, _secret, _fingerprint, _lock, _row, _cursor, _campaign, _missing,
@@ -449,9 +451,11 @@ def claim_task(org_id, project_id, campaign_id, *, worker_id, lease_seconds,
 def _claim_task_cursor(cur, scope, *, worker_id, lease, task_key=None,
                        budget_reservation_ref=None):
     _check(cur, scope)
+    if not admits_claim(cur, scope, worker_id):
+        return None
     scope = dict(scope, task_key=task_key)
     task_filter = ' AND task_key=%(task_key)s' if task_key is not None else ''
-    task_filter += " AND NOT (kind='capability' AND capability='campaign.host-enrollment')"
+    task_filter += " AND NOT (kind='capability' AND capability IN ('campaign.host-enrollment','campaign.native-release'))"
     # Never update attempts before locking their task. Concurrent expiry
     # cannot overwrite a newly claimed task or deadlock with settlement.
     cur.execute('SELECT * FROM campaign_tasks WHERE ' + SCOPE +
@@ -482,7 +486,7 @@ def _claim_task_cursor(cur, scope, *, worker_id, lease, task_key=None,
     cur.execute(
         'SELECT t.* FROM campaign_tasks t WHERE t.org_id=%(org)s AND t.project_id=%(project)s '
         "AND t.campaign_id=%(campaign)s AND t.status='pending' "
-        "AND NOT (t.kind='capability' AND t.capability='campaign.host-enrollment') AND NOT EXISTS ("
+        "AND NOT (t.kind='capability' AND t.capability IN ('campaign.host-enrollment','campaign.native-release')) AND NOT EXISTS ("
         'SELECT 1 FROM campaign_task_dependencies d JOIN campaign_tasks p '
         'ON p.task_id=d.depends_on_task_id AND p.org_id=d.org_id AND p.project_id=d.project_id '
         'AND p.campaign_id=d.campaign_id WHERE d.task_id=t.task_id AND d.org_id=t.org_id '

@@ -836,6 +836,8 @@ def _dispatch_backedge_route(method: str, path: str) -> bool:
             # a live staging chat turn, not by tests, because every test
             # called the route directly with a tenant header.
             "/api/overlay/proposals",
+            "/api/campaigns/conversation/finish",
+            "/api/campaigns/conversation/status",
         ):
             return True
         # R7 spine mount: land is per-change (one path segment, no deeper).

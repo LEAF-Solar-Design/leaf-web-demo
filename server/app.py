@@ -50,7 +50,9 @@ from routers import (
     author,
     builds as builds_router,
     cad_upload,
+    campaign_mcp,
     campaigns,
+    campaign_conversation,
     capabilities,
     change_to_live as change_to_live_router,
     checkpoints,
@@ -108,6 +110,9 @@ app = FastAPI(title="Leaf Web Demo — Lane D backend", version="1.0.0")
 
 _customization_worker_stop: threading.Event | None = None
 _customization_worker_thread: threading.Thread | None = None
+_campaign_release_worker_stop: threading.Event | None = None
+_campaign_release_worker_thread: threading.Thread | None = None
+_campaign_release_worker_lock = threading.Lock()
 _ios_callback_tls_server: ios_ship_callback_listener.CallbackTlsServer | None = None
 
 
@@ -201,6 +206,51 @@ def stop_customization_stage_worker() -> None:
     _customization_worker_stop = None
     _customization_worker_thread = None
 
+
+@app.on_event("startup")
+def initialize_campaign_release_worker() -> None:
+    """One recovery loop per live PostgreSQL process; legacy modes stay inert."""
+    import platform_link
+    import campaign_release_worker
+
+    if not deps.auth_live() or os.environ.get("LEAF_CAMPAIGN_RELEASE_WORKER_DISABLED", "0") == "1":
+        return
+    try:
+        if job_store.job_store_mode() != "postgres" or not (
+                platform_link._db_configured() or platform_link.postgres_startup_required()):
+            return
+    except Exception as exc:
+        print(f"[campaign-release-worker] startup unavailable: {type(exc).__name__}", file=sys.stderr)
+        return
+    global _campaign_release_worker_stop, _campaign_release_worker_thread
+    with _campaign_release_worker_lock:
+        if _campaign_release_worker_thread is not None and _campaign_release_worker_thread.is_alive():
+            return
+        _campaign_release_worker_stop = threading.Event()
+        _campaign_release_worker_thread = threading.Thread(
+            target=campaign_release_worker.serve,
+            kwargs={"stop_event": _campaign_release_worker_stop},
+            name="campaign-release-worker", daemon=True,
+        )
+        _campaign_release_worker_thread.start()
+
+
+@app.on_event("shutdown")
+def stop_campaign_release_worker() -> None:
+    global _campaign_release_worker_stop, _campaign_release_worker_thread
+    with _campaign_release_worker_lock:
+        thread = _campaign_release_worker_thread
+        if _campaign_release_worker_stop is not None:
+            _campaign_release_worker_stop.set()
+    if thread is not None:
+        thread.join(timeout=2.0)
+    with _campaign_release_worker_lock:
+        # Keep a still-stopping worker registered so another startup cannot
+        # create a second owner before the first one has left its runtime call.
+        if _campaign_release_worker_thread is thread and (thread is None or not thread.is_alive()):
+            _campaign_release_worker_stop = None
+            _campaign_release_worker_thread = None
+
 # §19: byte-counting wall on the upload route — bounds multipart pre-parse
 # disk use in-process (chunked bodies included); see UploadBodyLimitMiddleware.
 # Registered BEFORE CORSMiddleware so CORS wraps it (last-added = outermost):
@@ -268,6 +318,8 @@ app.include_router(templates_router.router)  # Wave C solar template beta, fail-
 app.include_router(overlay.router)  # T1 runtime overlay: propose a preview, decide it, read the resolved tokens
 app.include_router(ios_ship.router)  # Wave D one-shot iOS: readiness, one reviewed idempotent launch, status, receipt
 app.include_router(campaigns.router)
+app.include_router(campaign_conversation.router)
+app.include_router(campaign_mcp.router)
 app.include_router(ios_ship_provider_router.router)  # internal provider callbacks, bearer-file auth only
 app.include_router(ios_surface.router)  # Wave D consume-only iOS readiness surface, fail-closed behind LEAF_IOS_SURFACE_ENABLED (GET /api/ios-surface/status refuses 404 while off)
 # slice 12a: GET /api/change-class (repo + shape -> delivery ladder, a pure

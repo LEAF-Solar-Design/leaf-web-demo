@@ -479,6 +479,10 @@ jobs:
         working-directory: web
         run: npx playwright install chromium
 
+      - name: Install Python Chromium for managed completion proofs
+        working-directory: server
+        run: python -m playwright install --with-deps chromium
+
       - name: Run gate shard ${{ matrix.shard }}
         env:
           # The autofill-solver is a sibling checkout on an operator box and is
@@ -486,6 +490,9 @@ jobs:
           # to acknowledge a source-less host. The runner allowlists that exact
           # integration reason, and still requires the other 13 tests to execute.
           LEAF_AUTOFILL_SOLVER_ABSENT_OK: "1"
+          # This controlled container runs only the producer's byte-exact
+          # trusted template; arbitrary tenant HTML is refused before launch.
+          LEAF_MANAGED_WEB_BROWSER_MODE: trusted-template-container
         # --retry is pinned rather than inherited so the trade-off is explicit:
         # several suites boot real servers and flake under runner load, so one
         # retry keeps the gate usable. The cost is that a suite passing only on

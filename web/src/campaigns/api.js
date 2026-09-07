@@ -33,7 +33,7 @@ function bounded(value, field, max) {
   return value
 }
 
-async function request(path, options = {}) {
+async function request(path, options = {}, binary = false) {
   const identity = authHeaders()
   if (!identity.Authorization) throw Object.assign(new Error('Sign in to submit a campaign.'), { status: 0 })
   const headers = { ...options.headers, ...identity, 'X-Tenant-Id': config.tenant }
@@ -60,17 +60,104 @@ async function request(path, options = {}) {
       status: response.status, body, code, retryable: body?.error?.retryable === true,
     })
   }
-  return response.json()
+  return binary ? response : response.json()
 }
 
 function post(body, headers = {}) {
   return { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) }
 }
 
-export async function submitCampaign({ projectId, title, prompt, idempotencyKey }) {
+function finishFields(finish) {
+  if (!finish || typeof finish !== 'object' || Array.isArray(finish)) invalid('finish', 'Choose a delivery profile.')
+  const profile = bounded(finish.delivery_profile, 'delivery profile', 64)
+  if (!/^[a-z][a-z0-9_]*$/.test(profile)) invalid('delivery profile', 'Choose a supported delivery profile.')
+  const refs = finish.artifact_refs ?? []
+  if (!Array.isArray(refs) || refs.length > 32) invalid('artifact references', 'Choose at most 32 project artifacts.')
+  let deadline
+  if (finish.deadline_at != null && finish.deadline_at !== '') {
+    if (typeof finish.deadline_at !== 'string' || !Number.isFinite(Date.parse(finish.deadline_at))) invalid('deadline', 'Choose a valid release deadline.')
+    deadline = new Date(finish.deadline_at).toISOString()
+  }
+  return { delivery_profile: profile, intended_user: bounded(finish.intended_user, 'intended user', 2000),
+    workflow: bounded(finish.workflow, 'workflow', 2000), artifact_refs: refs.map(ref => bounded(ref, 'artifact reference', 512)),
+    ...(deadline ? { deadline_at: deadline } : {}) }
+}
+
+export async function submitCampaign({ projectId, title, prompt, idempotencyKey, mode, finish }) {
   const body = { project_id: uuid(projectId, 'project'), title: bounded(title, 'title', 200), prompt: bounded(prompt, 'prompt', 32768) }
+  if (mode !== undefined && mode !== 'finish') invalid('mode', 'Choose a supported campaign mode.')
+  if (mode === 'finish') Object.assign(body, { mode, finish: finishFields(finish) })
   bounded(idempotencyKey, 'submission key', 128)
   return request('/api/campaigns', post(body, { 'Idempotency-Key': idempotencyKey }))
+}
+
+const releasePath = (id, releaseId) => `/api/campaigns/${uuid(id, 'campaign')}/releases${releaseId === undefined ? '' : `/${uuid(releaseId, 'release')}`}`
+
+export async function createRelease(projectId, id, { finish, idempotencyKey }) {
+  return request(releasePath(id), post({ project_id: uuid(projectId, 'project'), finish: finishFields(finish) },
+    { 'Idempotency-Key': bounded(idempotencyKey, 'submission key', 128) }))
+}
+
+export async function getRelease(projectId, id, releaseId) {
+  return request(`${releasePath(id, releaseId)}?project_id=${encodeURIComponent(uuid(projectId, 'project'))}`)
+}
+
+// Returns verified bytes only: { bytes: ArrayBuffer, mediaType: string, name: string }.
+// Evidence URLs are deliberately never consulted or followed with app credentials.
+export async function downloadReleaseArtifact(projectId, id, releaseId, artifact) {
+  const name = artifact?.name
+  if (typeof name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._ -]{0,199}$/.test(name)
+      || name.includes('..') || /[. ]$/.test(name)) {
+    invalid('output', 'This output has an invalid file name. Reload the release.')
+  }
+  if (artifact.valid !== true || artifact.retrieved !== true
+      || !Number.isSafeInteger(artifact.byte_count) || artifact.byte_count <= 0 || artifact.byte_count > 1048576
+      || typeof artifact.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(artifact.sha256)) {
+    invalid('output', 'Verified output details are unavailable. Reload the release.')
+  }
+  if (!globalThis.crypto?.subtle?.digest) throw new Error('This browser cannot verify downloads. Use a browser with secure download verification.')
+  const path = `${releasePath(id, releaseId)}/artifacts/${encodeURIComponent(name)}?project_id=${encodeURIComponent(uuid(projectId, 'project'))}`
+  const response = await request(path, { redirect: 'error' }, true)
+  const length = response.headers?.get('Content-Length')
+  if (length && (!/^\d+$/.test(length) || Number(length) !== artifact.byte_count)) {
+    throw new Error('The output size changed. Reload the release before downloading.')
+  }
+  let bytes
+  try { bytes = await response.arrayBuffer() }
+  catch { throw new Error('The output download was interrupted. Try downloading again.') }
+  if (bytes.byteLength !== artifact.byte_count || bytes.byteLength > 1048576) {
+    throw new Error('The downloaded output has the wrong size. Reload the release.')
+  }
+  let digest
+  try {
+    digest = Array.from(new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bytes)),
+      value => value.toString(16).padStart(2, '0')).join('')
+  } catch { throw new Error('This browser could not verify the output. Try downloading again.') }
+  if (digest !== artifact.sha256) throw new Error('The downloaded output did not match the verified release. Reload the release.')
+  const mediaType = (response.headers?.get('Content-Type') || 'application/octet-stream').split(';')[0].trim().toLowerCase()
+  return { bytes, mediaType, name }
+}
+
+export async function listReleases(projectId, id) {
+  return request(`${releasePath(id)}?project_id=${encodeURIComponent(uuid(projectId, 'project'))}`)
+}
+
+export async function transitionRelease(projectId, id, releaseId, action, authority) {
+  if (!['pause', 'resume', 'cancel'].includes(action)) invalid('action', 'Choose pause, resume or cancel.')
+  const headers = {}
+  if (action === 'resume' && authority !== undefined) {
+    for (const [field, header] of [['sessionId', 'X-Authority-Session-Id'], ['turnId', 'X-Authority-Turn-Id']]) {
+      const value = authority?.[field]
+      if (typeof value !== 'string' || !UUID_SHAPE.test(value)) invalid('authority', 'The project conversation did not provide valid continuation authority.')
+      headers[header] = value
+    }
+  }
+  return request(`${releasePath(id, releaseId)}/${action}`, post({ project_id: uuid(projectId, 'project') }, headers))
+}
+
+export async function retryReleaseStage(projectId, id, releaseId, stage) {
+  if (!['implementation', 'publication', 'deployment', 'user_verification', 'delivery'].includes(stage)) invalid('stage', 'Choose a release stage.')
+  return request(`${releasePath(id, releaseId)}/retry`, post({ project_id: uuid(projectId, 'project'), stage }))
 }
 
 export async function listCampaigns(projectId, limit = 50) {
@@ -121,9 +208,13 @@ export async function invokeCapability(projectId, id, enrollmentId, { effectiveC
   }, { 'Idempotency-Key': bounded(idempotencyKey, 'submission key', 128) }))
 }
 
-export async function requestEnrollment(projectId, id, machineId) {
+export async function requestEnrollment(projectId, id, machineId, capability) {
+  if (capability !== undefined && !['campaign.host-enrollment', 'campaign.native-release'].includes(capability)) {
+    invalid('capability', 'Choose a supported registration capability.')
+  }
   return request(`/api/campaigns/${uuid(id, 'campaign')}/enrollments`, post({
     project_id: uuid(projectId, 'project'), machine_id: bounded(machineId, 'machine', 200),
+    ...(capability === undefined ? {} : { capability }),
   }))
 }
 

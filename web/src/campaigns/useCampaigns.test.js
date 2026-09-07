@@ -41,13 +41,278 @@ beforeEach(() => {
   api.askQuestion.mockResolvedValue({ question: open })
   api.answerQuestion.mockResolvedValue({ answer: receipt })
 })
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); localStorage.clear(); sessionStorage.clear() })
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); localStorage.clear(); sessionStorage.clear() })
 
 async function ready() {
   const hook = renderHook(() => useCampaigns(P, { enabled: true }))
   await waitFor(() => expect(hook.result.current.status).toBe('ready'))
   return hook
 }
+
+describe('release continuation authority', () => {
+  const waiting = { release: { release_id: Q, status: 'waiting', contract_version: 1, scope_summary: 'Export CSV' },
+    next_action: { wait_kind: 'authority', reason: 'Authoring requires an active project conversation',
+      recommended_action: 'Continue this release from the project conversation to author the missing CSV tool' } }
+  beforeEach(() => {
+    api.getCampaign.mockResolvedValue({ campaign: row, completion: waiting })
+    api.transitionRelease.mockResolvedValue({ completion: waiting })
+  })
+  async function withProvider(provider) {
+    const hook = renderHook(({ project, enabled }) => useCampaigns(project, { enabled, authorityProvider: provider }),
+      { initialProps: { project: P, enabled: true } })
+    await waitFor(() => expect(hook.result.current.executionLoading).toBe(false))
+    await waitFor(() => expect(hook.result.current.completion).toEqual(waiting))
+    return hook
+  }
+  it('uses a fresh current tuple once on explicit authoring resume without storing it', async () => {
+    const provider = vi.fn().mockResolvedValue({ sessionId: B, turnId: D })
+    const hook = await withProvider(provider)
+    expect(provider).not.toHaveBeenCalled()
+    await act(async () => { await hook.result.current.transitionRelease('resume') })
+    expect(provider).toHaveBeenCalledExactlyOnceWith(expect.stringContaining('Export CSV'), { forceFresh: true })
+    expect(api.transitionRelease).toHaveBeenCalledExactlyOnceWith(P, C, Q, 'resume', { sessionId: B, turnId: D })
+    expect(JSON.stringify(hook.result.current)).not.toContain(B)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+  it.each([undefined, () => Promise.resolve(null), () => Promise.reject(new Error('private details'))])('does not mutate when the authority provider is unavailable', async provider => {
+    const hook = await withProvider(provider)
+    await act(async () => { await expect(hook.result.current.transitionRelease('resume')).rejects.toThrow(/conversation/) })
+    expect(api.transitionRelease).not.toHaveBeenCalled()
+    expect(hook.result.current.completion.release.status).toBe('waiting')
+    expect(hook.result.current.error.message).not.toContain('private details')
+  })
+  it.each(['pause', 'cancel'])('does not create a turn for %s', async action => {
+    const provider = vi.fn()
+    const hook = await withProvider(provider)
+    await act(async () => { await hook.result.current.transitionRelease(action) })
+    expect(provider).not.toHaveBeenCalled()
+    expect(api.transitionRelease).toHaveBeenCalledExactlyOnceWith(P, C, Q, action)
+  })
+  it('does not create a turn for a policy authority dependency', async () => {
+    const provider = vi.fn()
+    const hook = await withProvider(provider)
+    api.getCampaign.mockResolvedValue({ campaign: row, completion: { ...waiting, next_action: { wait_kind: 'authority', reason: 'Workspace policy disabled execution' } } })
+    await act(async () => { await hook.result.current.refetch(); await hook.result.current.transitionRelease('resume') })
+    expect(provider).not.toHaveBeenCalled()
+    expect(api.transitionRelease).toHaveBeenCalledExactlyOnceWith(P, C, Q, 'resume')
+  })
+  it.each(['project', 'campaign', 'release', 'version', 'disabled'])('refuses late authority after %s changes', async change => {
+    const pending = deferred()
+    const hook = await withProvider(() => pending.promise)
+    let resume
+    act(() => { resume = hook.result.current.transitionRelease('resume').catch(error => error) })
+    if (change === 'project' || change === 'disabled') {
+      hook.rerender({ project: change === 'project' ? B : P, enabled: change !== 'disabled' })
+    } else if (change === 'campaign') {
+      api.listCampaigns.mockResolvedValue({ campaigns: [row, { ...row, campaign_id: D }] })
+      await act(async () => { await hook.result.current.select(D) })
+    } else {
+      api.getCampaign.mockResolvedValue({ campaign: row, completion: { ...waiting, release: { ...waiting.release,
+        ...(change === 'release' ? { release_id: D } : { contract_version: 2 }) } } })
+      await act(async () => { await hook.result.current.refetch() })
+    }
+    await act(async () => { pending.resolve({ sessionId: B, turnId: D }); await resume })
+    expect(api.transitionRelease).not.toHaveBeenCalled()
+  })
+})
+
+describe('bounded release readback', () => {
+  async function polling(completion) {
+    vi.useFakeTimers()
+    api.getCampaign.mockResolvedValue({ campaign: row, completion })
+    const hook = renderHook(({ project, enabled }) => useCampaigns(project, { enabled }), { initialProps: { project: P, enabled: true } })
+    await act(async () => {})
+    expect(hook.result.current.status).toBe('ready')
+    return hook
+  }
+  it.each(['active', 'queued', 'authoring', 'job', 'capacity', 'publication', 'approval'])('polls %s after five seconds without overlapping a read', async state => {
+    const hook = await polling({ release: { release_id: Q, status: ['active', 'queued'].includes(state) ? state : 'waiting' }, next_action: { wait_kind: state } })
+    const pending = deferred()
+    api.listCampaigns.mockReturnValueOnce(pending.promise)
+    await act(async () => { await vi.advanceTimersByTimeAsync(4999) })
+    expect(api.listCampaigns).toHaveBeenCalledTimes(1)
+    await act(async () => { await vi.advanceTimersByTimeAsync(1) })
+    expect(api.listCampaigns).toHaveBeenCalledTimes(2)
+    await act(async () => { hook.result.current.refetch(); await vi.advanceTimersByTimeAsync(20000) })
+    expect(api.listCampaigns).toHaveBeenCalledTimes(2)
+    await act(async () => { pending.resolve({ campaigns: [row] }) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+    expect(api.listCampaigns).toHaveBeenCalledTimes(3)
+    hook.unmount()
+    await act(async () => { await vi.advanceTimersByTimeAsync(10000) })
+    expect(api.listCampaigns).toHaveBeenCalledTimes(3)
+  })
+  it.each(['authority', 'paused', 'finished', 'cancelled', 'needs_approach'])('stops on %s', async state => {
+    await polling({ release: { release_id: Q, status: state === 'authority' ? 'waiting' : state }, next_action: { wait_kind: state } })
+    await act(async () => { await vi.advanceTimersByTimeAsync(20000) })
+    expect(api.listCampaigns).toHaveBeenCalledTimes(1)
+  })
+  it('stops the old project timer on disable and retains evidence with a visible read failure', async () => {
+    const completion = { release: { release_id: Q, status: 'active' } }
+    const hook = await polling(completion)
+    api.listCampaigns.mockRejectedValueOnce(new Error('Readback unavailable'))
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+    expect(hook.result.current.completion).toEqual(completion)
+    expect(hook.result.current.error.message).toBe('Readback unavailable')
+    hook.rerender({ project: P, enabled: false })
+    await act(async () => { await vi.advanceTimersByTimeAsync(10000) })
+    expect(api.listCampaigns).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('completion state', () => {
+  const finish = { delivery_profile: 'web_tool', intended_user: 'Project owner', workflow: 'Use the tool', artifact_refs: [] }
+  const completion = { release: { release_id: Q, status: 'active' }, stages: [{ stage: 'implementation', status: 'passed' }] }
+  it('reads detail and execution snapshots without mandatory release polling', async () => {
+    api.getCampaign.mockResolvedValue({ campaign: row, completion })
+    const hook = await ready()
+    await waitFor(() => expect(hook.result.current.executionLoading).toBe(false))
+    expect(hook.result.current.completion).toEqual(completion)
+    const next = { ...completion, release: { ...completion.release, status: 'paused' } }
+    api.getExecution.mockResolvedValue({ execution: { tasks: [], receipts: [], events: [], completion: next } })
+    await act(async () => { await hook.result.current.refetch() })
+    expect(hook.result.current.completion).toEqual(next)
+    expect(api.getRelease).not.toHaveBeenCalled()
+    expect(api.listReleases).not.toHaveBeenCalled()
+  })
+  it('preserves release progress and submission keys on failures', async () => {
+    api.getCampaign.mockResolvedValue({ campaign: row, completion })
+    api.createRelease.mockRejectedValue(new Error('Unavailable'))
+    api.transitionRelease.mockRejectedValue(new Error('Pause unavailable'))
+    const hook = await ready()
+    for (let i = 0; i < 2; i++) await act(async () => {
+      await expect(hook.result.current.createRelease(finish)).rejects.toThrow('Unavailable')
+    })
+    expect(api.createRelease.mock.calls[0][2]).toEqual(api.createRelease.mock.calls[1][2])
+    await act(async () => { await expect(hook.result.current.transitionRelease('pause')).rejects.toThrow('Pause unavailable') })
+    expect(api.transitionRelease).toHaveBeenCalledWith(P, C, Q, 'pause')
+    expect(hook.result.current.completion).toEqual(completion)
+  })
+  it('includes mode and finish fields in failed draft identity', async () => {
+    api.submitCampaign.mockRejectedValue(new Error('Unavailable'))
+    const hook = await ready()
+    const drafts = [{ title: 'Tool', prompt: 'Build' }, { title: 'Tool', prompt: 'Build', mode: 'finish', finish }]
+    for (const draft of [drafts[0], drafts[1], drafts[1], { ...drafts[1], finish: { ...finish, delivery_profile: 'cad_file' } }]) {
+      await act(async () => { await expect(hook.result.current.submit(draft)).rejects.toThrow('Unavailable') })
+    }
+    const keys = api.submitCampaign.mock.calls.map(([input]) => input.idempotencyKey)
+    expect(keys[0]).not.toBe(keys[1])
+    expect(keys[1]).toBe(keys[2])
+    expect(keys[2]).not.toBe(keys[3])
+  })
+  it('ignores late release mutation responses after campaign selection', async () => {
+    api.listCampaigns.mockResolvedValue({ campaigns: [row, { ...row, campaign_id: D }] })
+    api.getCampaign.mockImplementation(async (_p, id) => ({ campaign: { ...row, campaign_id: id }, completion: id === C ? completion : null }))
+    const pending = deferred()
+    api.transitionRelease.mockReturnValue(pending.promise)
+    const hook = await ready()
+    let mutation
+    act(() => { mutation = hook.result.current.transitionRelease('pause') })
+    await act(async () => { await hook.result.current.select(D) })
+    expect(hook.result.current.completion).toBeNull()
+    await act(async () => { pending.resolve({ completion }); await mutation })
+    expect(hook.result.current.selectedId).toBe(D)
+    expect(hook.result.current.completion).toBeNull()
+  })
+  it('ignores an old project execution snapshot after switching projects', async () => {
+    const pending = deferred()
+    api.getExecution.mockImplementation(project => project === P ? pending.promise : Promise.resolve({ execution: { tasks: [], receipts: [], events: [] } }))
+    api.getCampaign.mockImplementation(async (project, id) => ({ campaign: { ...row, campaign_id: id }, completion: project === P ? completion : null }))
+    const hook = renderHook(({ project }) => useCampaigns(project), { initialProps: { project: P } })
+    await waitFor(() => expect(api.getExecution).toHaveBeenCalledWith(P, C))
+    hook.rerender({ project: B })
+    expect(hook.result.current.completion).toBeNull()
+    await waitFor(() => expect(hook.result.current.status).toBe('ready'))
+    await act(async () => { pending.resolve({ execution: { completion } }) })
+    expect(hook.result.current.completion).toBeNull()
+  })
+  it('clears completion immediately and ignores a late execution response after campaign change', async () => {
+    const pending = deferred()
+    api.listCampaigns.mockResolvedValue({ campaigns: [row, { ...row, campaign_id: D }] })
+    api.getCampaign.mockImplementation(async (_p, id) => ({ campaign: { ...row, campaign_id: id }, completion: id === C ? completion : null }))
+    api.getExecution.mockImplementation((_p, id) => id === C ? pending.promise : Promise.resolve({ execution: { tasks: [], receipts: [], events: [] } }))
+    const hook = await ready()
+    let selection
+    act(() => { selection = hook.result.current.select(D) })
+    expect(hook.result.current.completion).toBeNull()
+    await act(async () => { await selection })
+    await act(async () => { pending.resolve({ execution: { completion } }) })
+    expect(hook.result.current.selectedId).toBe(D)
+    expect(hook.result.current.completion).toBeNull()
+  })
+  it('retains execution completion on failed refresh and clears an explicit empty snapshot', async () => {
+    api.getExecution.mockResolvedValue({ execution: { tasks: [], receipts: [], events: [], completion } })
+    const hook = await ready()
+    await waitFor(() => expect(hook.result.current.completion).toEqual(completion))
+    api.getExecution.mockRejectedValue(new Error('Execution unavailable'))
+    await act(async () => { await hook.result.current.refetch() })
+    expect(hook.result.current.completion).toEqual(completion)
+    api.getExecution.mockResolvedValue({ execution: { tasks: [], receipts: [], events: [], completion: null } })
+    await act(async () => { await hook.result.current.refetch() })
+    expect(hook.result.current.completion).toBeNull()
+  })
+})
+
+describe('current release downloads', () => {
+  const artifact = { name: 'records.csv', byte_count: 4, sha256: 'a'.repeat(64), valid: true, retrieved: true }
+  const completion = { release: { release_id: Q, status: 'finished', contract: { required_checks: [{ check_id: 'workflow' }] } },
+    coverage: [{ check_id: 'workflow', status: 'passed' }], deliverables: [artifact] }
+  beforeEach(() => {
+    api.getCampaign.mockResolvedValue({ campaign: row, completion })
+    api.getRelease.mockResolvedValue({ completion })
+    api.downloadReleaseArtifact.mockResolvedValue({ bytes: new ArrayBuffer(4), mediaType: 'text/csv', name: 'records.csv' })
+  })
+  it('checks current release proof before returning verified bytes and locks duplicate clicks', async () => {
+    const pending = deferred()
+    api.downloadReleaseArtifact.mockReturnValue(pending.promise)
+    const hook = await ready()
+    await waitFor(() => expect(hook.result.current.executionLoading).toBe(false))
+    let download
+    act(() => { download = hook.result.current.downloadReleaseArtifact(artifact) })
+    await waitFor(() => expect(api.downloadReleaseArtifact).toHaveBeenCalledWith(P, C, Q, artifact))
+    expect(api.getRelease).toHaveBeenCalledWith(P, C, Q)
+    await act(async () => { expect(await hook.result.current.downloadReleaseArtifact(artifact)).toBeNull() })
+    const result = { bytes: new ArrayBuffer(4), mediaType: 'text/csv', name: 'records.csv' }
+    await act(async () => { pending.resolve(result); expect(await download).toEqual(result) })
+    expect(api.downloadReleaseArtifact).toHaveBeenCalledTimes(1)
+  })
+  it('replaces historical proof with current failed verification and refuses the file', async () => {
+    api.getRelease.mockResolvedValue({ completion: { ...completion, current_verification: { status: 'failed', reason: 'File changed.' } } })
+    const hook = await ready()
+    await waitFor(() => expect(hook.result.current.executionLoading).toBe(false))
+    await act(async () => { await expect(hook.result.current.downloadReleaseArtifact(artifact)).rejects.toThrow('verification') })
+    expect(hook.result.current.completion.current_verification.status).toBe('failed')
+    expect(api.downloadReleaseArtifact).not.toHaveBeenCalled()
+  })
+  it('discards bytes from the old project after a project change', async () => {
+    const pending = deferred()
+    api.downloadReleaseArtifact.mockReturnValue(pending.promise)
+    const hook = renderHook(({ projectId }) => useCampaigns(projectId), { initialProps: { projectId: P } })
+    await waitFor(() => expect(hook.result.current.executionLoading).toBe(false))
+    await waitFor(() => expect(hook.result.current.status).toBe('ready'))
+    let download
+    act(() => { download = hook.result.current.downloadReleaseArtifact(artifact) })
+    await waitFor(() => expect(api.downloadReleaseArtifact).toHaveBeenCalledOnce())
+    hook.rerender({ projectId: B })
+    await act(async () => { pending.resolve({ bytes: new ArrayBuffer(4) }); expect(await download).toBeNull() })
+  })
+})
+
+it('registers native release in the selected campaign and reloads setup readiness without execution', async () => {
+  const native = { enrollment_id: Q, machine_id: 'VM-C', capability: 'campaign.native-release',
+    state: 'pending', readiness: 'setup_required', readiness_message: 'The release executor is not connected.',
+    capability_link: { capability: 'campaign.native-release', state: 'pending_link' } }
+  const hook = await ready()
+  api.requestEnrollment.mockResolvedValue({ enrollment: native })
+  api.listEnrollments.mockResolvedValue({ enrollment: { enrollments: [native], allowed_machines: ['VM-C'] } })
+  await act(async () => { await hook.result.current.enroll('VM-C', 'campaign.native-release') })
+  expect(api.requestEnrollment).toHaveBeenCalledExactlyOnceWith(P, C, 'VM-C', 'campaign.native-release')
+  expect(hook.result.current.enrollments).toEqual([native])
+  expect(api.enableEnrollment).not.toHaveBeenCalled()
+  expect(api.bindPublication).not.toHaveBeenCalled()
+  expect(api.invokeCapability).not.toHaveBeenCalled()
+})
 
 describe('project campaign hook', () => {
   const digest = 'a'.repeat(64)

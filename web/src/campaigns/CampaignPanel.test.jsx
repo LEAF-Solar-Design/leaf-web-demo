@@ -20,12 +20,305 @@ beforeEach(() => {
     ask: vi.fn().mockResolvedValue({ question: { question_id: Q } }),
     answer: vi.fn().mockResolvedValue({ answer: { answer: 'Use PDF.' } }),
     select: vi.fn(), refetch: vi.fn().mockResolvedValue({ campaigns: [row] }),
+    createRelease: vi.fn().mockResolvedValue({ ok: true }),
+    transitionRelease: vi.fn().mockResolvedValue({ ok: true }),
+    retryReleaseStage: vi.fn().mockResolvedValue({ ok: true }),
+    downloadReleaseArtifact: vi.fn(),
   }
   useCampaigns.mockImplementation(() => campaign)
 })
 afterEach(cleanup)
 
 const panel = props => <CampaignPanel projectId={P} projectName="Document studio" signedIn {...props} />
+
+describe('release evidence panel', () => {
+  it('passes the project authority provider and labels only authoring continuation', async () => {
+    const authorityProvider = vi.fn()
+    releaseFixture('waiting')
+    campaign.completion.next_action = { wait_kind: 'authority', reason: 'Authoring requires an active project conversation', recommended_action: 'Continue from the project conversation to author the missing tool' }
+    const { rerender } = render(panel({ authorityProvider }))
+    expect(useCampaigns).toHaveBeenCalledWith(P, { enabled: true, authorityProvider })
+    fireEvent.click(screen.getByRole('button', { name: 'Continue authoring' }))
+    await waitFor(() => expect(campaign.transitionRelease).toHaveBeenCalledWith('resume'))
+    campaign.completion.next_action = { wait_kind: 'authority', reason: 'Execution disabled', recommended_action: 'Resolve the workspace policy' }
+    rerender(panel({ authorityProvider }))
+    expect(screen.getByRole('button', { name: 'Resume release' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Continue authoring' })).toBeNull()
+    expect(screen.getByText(/Resolve the workspace policy/)).toBeTruthy()
+  })
+  it('offers a deadline only for finish mode and sends it as a declarative field', async () => {
+    render(panel())
+    expect(screen.queryByLabelText('Release deadline (optional)')).toBeNull()
+    fireEvent.change(screen.getByLabelText('Campaign goal'), { target: { value: 'finish' } })
+    fireEvent.change(screen.getByLabelText('Release deadline (optional)'), { target: { value: '2026-09-08T09:30' } })
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Export' } })
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Download CSV' } })
+    fireEvent.click(screen.getAllByRole('button', { name: 'Finish this project' })[0])
+    await waitFor(() => expect(campaign.submit).toHaveBeenCalledWith(expect.objectContaining({ finish: expect.objectContaining({ deadline_at: '2026-09-08T09:30' }) })))
+  })
+  const stages = ['implementation', 'publication', 'deployment', 'user_verification', 'delivery']
+  function releaseFixture(status = 'active') {
+    campaign.completion = {
+      release: { release_id: Q, status, contract_version: 1, scope_summary: 'Deliver the recipe PDF', deferred_items: ['Mobile app'],
+        contract: { original_goal: 'Organize all family recipes', required_checks: [{ check_id: 'workflow', stage: 'user_verification', description: 'Download a readable PDF' }] } },
+      stages: [], coverage: [], decisions: [{ payload: { reason: 'PDF first, mobile later' } }], remaining: [], deliverables: [],
+      next_action: { message: 'Choose the page size in Questions' },
+    }
+  }
+  it('submits finish mode and can start a release for an existing campaign', async () => {
+    render(panel())
+    fireEvent.click(screen.getByRole('button', { name: 'Finish this project' }))
+    await screen.findByText('Release requested.')
+    expect(campaign.createRelease).toHaveBeenCalledWith({ delivery_profile: 'web_tool', intended_user: 'Project owner', workflow: row.prompt, artifact_refs: [] })
+    fireEvent.change(screen.getByLabelText('Campaign goal'), { target: { value: 'finish' } })
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Family recipes' } })
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Deliver the PDF' } })
+    const form = screen.getByLabelText('Title').closest('form')
+    fireEvent.change(within(form).getByLabelText('Delivery profile'), { target: { value: 'cad_file' } })
+    fireEvent.submit(form)
+    await waitFor(() => expect(campaign.submit).toHaveBeenCalledWith({ title: 'Family recipes', prompt: 'Deliver the PDF', mode: 'finish',
+      finish: { delivery_profile: 'cad_file', intended_user: 'Project owner', workflow: 'Deliver the PDF', artifact_refs: [] } }))
+  })
+  it('renders missing stages and missing check status as unavailable', () => {
+    releaseFixture()
+    campaign.completion.coverage = [{ check_id: 'workflow' }]
+    const { container } = render(panel())
+    expect(container.querySelectorAll('.campaign-release-stages li')).toHaveLength(5)
+    expect([...container.querySelectorAll('.campaign-release-stages li')].every(item => item.textContent.includes('unavailable'))).toBe(true)
+    expect(screen.getByText('Download a readable PDF: unavailable')).toBeTruthy()
+    expect(screen.getByText('Verified checks unavailable.')).toBeTruthy()
+    expect(screen.queryByRole('link')).toBeNull()
+    expect(container.textContent).not.toContain('%')
+  })
+  it('shows completed bounded release, safe validated outputs, replay and original ambition', () => {
+    releaseFixture('finished')
+    campaign.completion.stages = stages.map(stage => ({ stage, status: 'passed', contract_version: 1,
+      evidence: stage === 'delivery' ? { replay_recipe: ['Open the project', 'Download the recipe PDF'], known_limits: ['Desktop only'] } : {} }))
+    campaign.completion.coverage = [{ check_id: 'workflow', status: 'passed' }]
+    campaign.completion.deliverables = [
+      { artifact_ref: 'recipe-pdf', name: 'Recipe PDF', access_path: '/outputs/recipe.pdf', byte_count: 2048,
+        sha256: 'a'.repeat(64), valid: true, retrieved: true },
+      { name: 'Unsafe', access_path: 'javascript:alert(1)', byte_count: 100, sha256: 'a'.repeat(64), valid: true, retrieved: true },
+      { name: 'Unverified', access_path: 'https://example.test/file', byte_count: 100, sha256: 'a'.repeat(64), valid: false, retrieved: true },
+      { name: 'Empty', access_path: '/empty', byte_count: 0, sha256: 'a'.repeat(64), valid: true, retrieved: true },
+    ]
+    render(panel())
+    expect(screen.getByText('Completed release')).toBeTruthy()
+    expect(screen.getByText(/does not mean the entire original ambition is done/)).toBeTruthy()
+    expect(screen.getByText('Organize all family recipes')).toBeTruthy()
+    expect(screen.getByText('Mobile app')).toBeTruthy()
+    expect(screen.getByText('PDF first, mobile later')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Download Recipe PDF' })).toBeTruthy()
+    expect(screen.queryByRole('link')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Download Unsafe' })).toBeNull()
+    expect(screen.getByText('(2 KB)')).toBeTruthy()
+    expect(screen.getByText('Download the recipe PDF')).toBeTruthy()
+    expect(screen.getByText('Desktop only')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Cancel release' })).toBeNull()
+  })
+  it.each([
+    { valid: undefined }, { valid: false }, { retrieved: undefined }, { retrieved: false },
+    { valid: undefined, retrieved: undefined }, { sha256: undefined }, { sha256: 'invalid' },
+    { byte_count: undefined }, { byte_count: -1 },
+  ])('withholds canonical output links without positive proof: %j', overrides => {
+    releaseFixture('finished')
+    campaign.completion.stages = [{ stage: 'delivery', status: 'passed' }]
+    campaign.completion.deliverables = [{ artifact_ref: 'cad-file', name: 'CAD drawing', access_path: '/outputs/drawing.dwg',
+      byte_count: 2048, sha256: 'a'.repeat(64), valid: true, retrieved: true, ...overrides }]
+    render(panel())
+    expect(screen.queryByRole('link')).toBeNull()
+    expect(screen.getByText('CAD drawing: access evidence unavailable')).toBeTruthy()
+  })
+  it('requires explicit proof for accepted artifact aliases', () => {
+    releaseFixture('finished')
+    campaign.completion.stages = stages.map(stage => ({ stage, status: 'passed' }))
+    campaign.completion.coverage = [{ check_id: 'workflow', status: 'passed' }]
+    const artifact = { name: 'Alias output', download_url: 'https://example.test/output.pdf', size_bytes: 2048,
+      sha256: 'a'.repeat(64), validated: true, retrieval_validated: true, content_validated: true }
+    campaign.completion.deliverables = [artifact]
+    const { rerender } = render(panel())
+    expect(screen.getByRole('link', { name: 'Alias output' }).getAttribute('href')).toBe(artifact.download_url)
+    for (const flag of ['validated', 'retrieval_validated', 'content_validated']) {
+      for (const value of [undefined, false]) {
+        campaign.completion.deliverables = [{ ...artifact, [flag]: value }]
+        rerender(panel())
+        expect(screen.queryByRole('link')).toBeNull()
+      }
+    }
+  })
+  function readyOutput(name = 'records-to-csv.html', mediaType = 'text/html') {
+    releaseFixture('finished')
+    campaign.completion.stages = stages.map(stage => ({ stage, status: 'passed' }))
+    campaign.completion.coverage = [{ check_id: 'workflow', status: 'passed' }]
+    const artifact = { name, media_type: mediaType, byte_count: 4, sha256: 'a'.repeat(64), valid: true, retrieved: true }
+    campaign.completion.deliverables = [artifact]
+    campaign.downloadReleaseArtifact.mockResolvedValue({ name, mediaType, bytes: new Uint8Array([1, 2, 3, 4]).buffer })
+    return artifact
+  }
+  it('opens verified HTML in a sandbox and revokes it on close, replacement and unmount', async () => {
+    const artifact = readyOutput()
+    const urlApi = { createObjectURL: vi.fn().mockReturnValueOnce('blob:first').mockReturnValueOnce('blob:second').mockReturnValueOnce('blob:third'), revokeObjectURL: vi.fn() }
+    const { unmount } = render(panel({ artifactUrlApi: urlApi }))
+    fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
+    const frame = await screen.findByTitle('Release tool: records-to-csv.html')
+    expect(frame.getAttribute('sandbox')).toBe('allow-scripts allow-downloads')
+    expect(campaign.downloadReleaseArtifact).toHaveBeenCalledWith(artifact)
+    fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
+    await waitFor(() => expect(screen.getByTitle('Release tool: records-to-csv.html').getAttribute('src')).toBe('blob:second'))
+    expect(urlApi.revokeObjectURL).toHaveBeenCalledWith('blob:first')
+    fireEvent.click(screen.getByRole('button', { name: 'Close tool' }))
+    expect(screen.queryByTitle('Release tool: records-to-csv.html')).toBeNull()
+    expect(urlApi.revokeObjectURL).toHaveBeenCalledWith('blob:second')
+    fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
+    await screen.findByTitle('Release tool: records-to-csv.html')
+    unmount()
+    expect(urlApi.revokeObjectURL).toHaveBeenCalledWith('blob:third')
+  })
+  it.each(['load', 'execution'])('revokes the open preview when current %s readback fails while retaining history', async source => {
+    readyOutput()
+    const urlApi = { createObjectURL: vi.fn().mockReturnValue('blob:verified'), revokeObjectURL: vi.fn() }
+    const { rerender } = render(panel({ artifactUrlApi: urlApi }))
+    fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
+    await screen.findByTitle('Release tool: records-to-csv.html')
+    if (source === 'load') Object.assign(campaign, { error: new Error('Readback unavailable'), errorAction: 'load' })
+    else campaign.executionError = new Error('Readback unavailable')
+    rerender(panel({ artifactUrlApi: urlApi }))
+    expect(screen.queryByTitle('Release tool: records-to-csv.html')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Open tool records-to-csv.html' })).toBeNull()
+    expect(urlApi.revokeObjectURL).toHaveBeenCalledWith('blob:verified')
+    expect(screen.getByText('Previously completed release. Current verification unavailable.')).toBeTruthy()
+    expect(screen.getByText('Organize all family recipes')).toBeTruthy()
+  })
+  it('saves verified file bytes with a safe filename and cleans up its temporary URL', async () => {
+    readyOutput('records.csv', 'text/csv')
+    const urlApi = { createObjectURL: vi.fn().mockReturnValue('blob:file'), revokeObjectURL: vi.fn() }
+    const clicked = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () {
+      expect(this.download).toBe('records.csv')
+      expect(this.getAttribute('href')).toBe('blob:file')
+    })
+    render(panel({ artifactUrlApi: urlApi }))
+    fireEvent.click(screen.getByRole('button', { name: 'Download records.csv' }))
+    await waitFor(() => expect(urlApi.revokeObjectURL).toHaveBeenCalledWith('blob:file'))
+    expect(clicked).toHaveBeenCalledOnce()
+    expect(urlApi.createObjectURL.mock.calls[0][0]).toBeInstanceOf(Blob)
+    expect(urlApi.createObjectURL.mock.calls[0][0].size).toBe(4)
+    const saved = await new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result)
+      reader.onerror = reject
+      reader.readAsArrayBuffer(urlApi.createObjectURL.mock.calls[0][0])
+    })
+    expect([...new Uint8Array(saved)]).toEqual([1, 2, 3, 4])
+    expect(document.querySelector('a[download]')).toBeNull()
+    clicked.mockRestore()
+  })
+  it('drops a completed retrieval after the project changes', async () => {
+    readyOutput()
+    let resolve
+    campaign.downloadReleaseArtifact.mockReturnValue(new Promise(done => { resolve = done }))
+    const urlApi = { createObjectURL: vi.fn(), revokeObjectURL: vi.fn() }
+    const { rerender } = render(panel({ artifactUrlApi: urlApi }))
+    fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
+    rerender(panel({ projectId: Q, artifactUrlApi: urlApi }))
+    resolve({ name: 'records-to-csv.html', mediaType: 'text/html', bytes: new ArrayBuffer(4) })
+    await waitFor(() => expect(screen.queryByTitle('Release tool: records-to-csv.html')).toBeNull())
+    expect(urlApi.createObjectURL).not.toHaveBeenCalled()
+  })
+  it.each(['failed', 'unavailable'])('retains history but withholds outputs after current verification is %s', status => {
+    readyOutput()
+    campaign.completion.current_verification = { status, reason: 'The current file could not be verified.' }
+    render(panel())
+    expect(screen.getByText(`Previously completed release. Current verification ${status}.`)).toBeTruthy()
+    expect(screen.getByText('The current file could not be verified.')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /Open tool|Download records/ })).toBeNull()
+  })
+  it.each(['required_checks', 'coverage'])('never calls contradictory completion usable without %s', missing => {
+    readyOutput()
+    if (missing === 'required_checks') campaign.completion.release.contract.required_checks = []
+    else campaign.completion.coverage = []
+    render(panel())
+    expect(screen.queryByText('Completed release')).toBeNull()
+    expect(screen.queryByRole('button', { name: /Open tool/ })).toBeNull()
+  })
+  it('does not replace empty coverage with a successful stage claim', () => {
+    readyOutput()
+    campaign.completion.coverage = []
+    campaign.completion.stages.find(row => row.stage === 'user_verification').evidence = { checks: [{ check_id: 'workflow', status: 'passed' }] }
+    render(panel())
+    expect(screen.queryByText('Completed release')).toBeNull()
+    expect(screen.queryByRole('button', { name: /Open tool/ })).toBeNull()
+  })
+  it.each([
+    [{ action: 'retry_stage', stage: 'user_verification' }, 'Retry user verification using the release controls.'],
+    [{ action: 'change_approach' }, 'Choose a different approach before retrying this release.'],
+    [{ action: 'unknown' }, 'Review the release and resolve the pending action before continuing.'],
+  ])('shows a readable structured next action: %j', (nextAction, message) => {
+    releaseFixture()
+    campaign.completion.next_action = nextAction
+    render(panel())
+    expect(screen.getByText(message)).toBeTruthy()
+    expect(screen.queryByText('No user action reported.')).toBeNull()
+  })
+  it('offers pause, resume, cancel and failed-stage retry, retaining progress on errors', async () => {
+    releaseFixture()
+    campaign.completion.stages = [{ stage: 'implementation', status: 'passed' }, { stage: 'publication', status: 'failed' }]
+    campaign.retryReleaseStage.mockRejectedValue(new Error('Retry unavailable'))
+    const { rerender } = render(panel())
+    fireEvent.click(screen.getByRole('button', { name: 'Retry publication' }))
+    await screen.findByText('Retry unavailable')
+    expect(campaign.retryReleaseStage).toHaveBeenCalledWith('publication')
+    expect(screen.getByText('passed')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Pause release' }))
+    await waitFor(() => expect(campaign.transitionRelease).toHaveBeenCalledWith('pause'))
+    campaign.completion.release.status = 'paused'
+    rerender(panel())
+    fireEvent.click(screen.getByRole('button', { name: 'Resume release' }))
+    await waitFor(() => expect(campaign.transitionRelease).toHaveBeenCalledWith('resume'))
+    await screen.findByText('Release resumed.')
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel release' }))
+    await waitFor(() => expect(campaign.transitionRelease).toHaveBeenCalledWith('cancel'))
+  })
+})
+
+it('lets the user register native AWS release and shows setup required without host execution controls', async () => {
+  campaign.allowedMachines = ['VM-C']
+  campaign.enrollments = []
+  campaign.enroll = vi.fn().mockResolvedValue({ enrollment: { enrollment_id: Q } })
+  campaign.enableEnrollment = vi.fn()
+  campaign.bindPublication = vi.fn()
+  campaign.invokeCapability = vi.fn()
+  campaign.capabilities = [{ change_set_id: 'host-publication', label: 'Host tool' }]
+  const { rerender } = render(panel())
+  expect(screen.getByLabelText('Registration capability').value).toBe('campaign.host-enrollment')
+  fireEvent.change(screen.getByLabelText('Registration capability'), { target: { value: 'campaign.native-release' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Prepare native AWS release' }))
+  await screen.findByText('Native release registration recorded.')
+  expect(campaign.enroll).toHaveBeenCalledExactlyOnceWith('VM-C', 'campaign.native-release')
+  campaign.enrollments = [{ enrollment_id: Q, machine_id: 'VM-C', state: 'pending',
+    capability: 'campaign.native-release', readiness: 'setup_required',
+    readiness_message: 'The release executor is not connected.',
+    capability_link: { capability: 'campaign.native-release', state: 'pending_link' } }]
+  rerender(panel())
+  expect(screen.getByText('Native AWS release: Setup required. The release executor is not connected.')).toBeTruthy()
+  for (const name of ['Enable', 'Run', 'Use capability', 'Use again', 'Bind published tool', 'Recover submission']) {
+    expect(screen.queryByRole('button', { name })).toBeNull()
+  }
+  expect(screen.queryByText(/Verified uses:/)).toBeNull()
+  expect(campaign.enableEnrollment).not.toHaveBeenCalled()
+  expect(campaign.bindPublication).not.toHaveBeenCalled()
+  expect(campaign.invokeCapability).not.toHaveBeenCalled()
+})
+
+it('keeps native release setup required even if a host publication is present on the row', () => {
+  campaign.enrollments = [{ enrollment_id: Q, machine_id: 'VM-C', state: 'enabled', completed_uses: 2,
+    capability: 'campaign.native-release',
+    capability_link: { capability: 'campaign.native-release', state: 'completed', effective_catalog_digest: 'a'.repeat(64) } }]
+  campaign.submissions = { [Q]: { idempotencyKey: 'host-key' } }
+  render(panel())
+  expect(screen.getByText(/Native AWS release: Setup required/)).toBeTruthy()
+  expect(screen.queryByRole('button', { name: 'Recover submission' })).toBeNull()
+  expect(screen.queryByText(/Capability complete/)).toBeNull()
+})
 
 describe('campaign panel in the project workspace', () => {
   const digest = 'a'.repeat(64)
@@ -158,7 +451,7 @@ describe('campaign panel in the project workspace', () => {
     expect(execution.querySelector('time').textContent).toBe(new Date('2026-09-05T12:00:00Z').toLocaleString())
     expect(execution.textContent).not.toMatch(/spec|worker|fence|attempt|mount-fleet-adapter|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|%|complete/i)
     expect(within(execution).queryAllByRole('button')).toHaveLength(0)
-    expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Submit campaign', 'Ask'])
+    expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Submit campaign', 'Finish this project', 'Ask'])
   })
 
   it('shows loading and empty execution, and retains questions during an execution error', () => {
@@ -174,7 +467,7 @@ describe('campaign panel in the project workspace', () => {
     expect(screen.getByText('No tasks recorded yet.')).toBeTruthy()
     expect(screen.getByText('Which format?')).toBeTruthy()
     expect(screen.getByRole('alert').textContent).toContain('Execution is unavailable.')
-    expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Submit campaign', 'Try again', 'Record answer', 'Ask'])
+    expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Submit campaign', 'Finish this project', 'Try again', 'Record answer', 'Ask'])
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
     expect(campaign.refetch).toHaveBeenCalledTimes(1)
   })
