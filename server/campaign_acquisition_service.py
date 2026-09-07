@@ -267,14 +267,7 @@ def _invoke(runtime, tenant, org, project, campaign, release, params, context, t
         separators=(',', ':')).encode())
     with admission._admission_lock(context['tenant_id'], str(org), str(project), key):
         prior = admission._lookup(context['tenant_id'], str(project), key)
-        if prior is None:
-            if not retry_current:
-                if retries:
-                    # Older code could record a retry without admitting its job.
-                    # Skip that gap, but never submit under stale authority.
-                    return _invoke(runtime, tenant, org, project, campaign, release, params,
-                                   context, tool, retries[1:], *retries[0])
-                _refuse('The invocation retry authorization is stale')
+        if prior is None and retry_current:
             _run_authority(tenant, tool)
             with _capacity(org, project, campaign, release['release_id'], release['contract_version']) as available:
                 if not available:
@@ -296,7 +289,15 @@ def _invoke(runtime, tenant, org, project, campaign, release, params, context, t
                     if prior is None or str(prior['job_id']) != str(job_id):
                         raise AcquisitionError('working', 'Transform submission awaits durable readback',
                                                'Retry this release to read the same invocation')
-        job = _read_job(prior, context, params, key)
+        if prior is not None:
+            job = _read_job(prior, context, params, key)
+    if prior is None:
+        if retries:
+            # Older code could record a retry without admitting its job.
+            # Leave its lock before continuing, never submit under stale authority.
+            return _invoke(runtime, tenant, org, project, campaign, release, params,
+                           context, tool, retries[1:], *retries[0])
+        _refuse('The invocation retry authorization is stale')
     phase = 'invocation' if retry_key is None else 'invocation-' + retry_key
     _record(runtime, tenant, project, campaign, release, phase,
             {'job_id': job['job_id'], 'operation_key': key, 'context': context})

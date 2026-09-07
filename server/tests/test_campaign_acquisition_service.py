@@ -513,6 +513,74 @@ def test_later_retry_decision_does_not_replace_live_retry(setup, invocation_hist
     assert setup.calls['submit'] == 2
 
 
+@pytest.mark.parametrize('successor', [False, True])
+def test_missing_stale_retry_releases_wrapping_lock_before_recovery(setup, invocation_history,
+                                                                 monkeypatch, successor):
+    history = invocation_history
+    stale = authorize_invocation_retry(setup)
+    if successor:
+        authorize_invocation_retry(setup)
+        current = advance(setup)
+        assert current['state'] == 'complete'
+        history.records[current['job_id']]['status'] = 'failed'
+    else:
+        setup.store.stages.append(dict(setup.store.stages[-1], stage_id=str(uuid.uuid4()),
+                                       operation_key='new-failure'))
+    original = history.records[history.original]
+    context = original['completion_provenance']
+    identity = [context['release_id'], context['contract_version'], context['input_sha256']]
+    stale_key = 'completion-transform:' + hashlib.sha256(json.dumps(
+        identity + [stale['decision_key']], separators=(',', ':')).encode()).hexdigest()
+    assert stale_key not in history.rows
+    before = deepcopy(history.records)
+    submissions = setup.calls['submit']
+    held, entered, released, reads = [], [], [], []
+
+    @contextmanager
+    def wrapping_lock(tenant, org, project, key):
+        assert not held, 'Nested acquisition while the stale admission lock is held'
+        held.append(key)
+        entered.append(key)
+        try:
+            yield
+        except service.admission.CapabilityError:
+            raise
+        except Exception:
+            # Match production _admission_lock's conversion of unknown errors.
+            raise service.admission.CapabilityError(503, 'invocation_unknown') from None
+        finally:
+            assert held.pop() == key
+            released.append(key)
+
+    read_job = service._read_job
+
+    def read_existing(row, context, params, key):
+        assert row is not None
+        assert held == [key]
+        reads.append(key)
+        return read_job(row, context, params, key)
+
+    monkeypatch.setattr(service.admission, '_admission_lock', wrapping_lock)
+    monkeypatch.setattr(service, '_read_job', read_existing)
+
+    result = advance(setup)
+
+    assert result['state'] == 'failed'
+    assert result['reason'] == ('The published transform job failed' if successor
+                                else 'The invocation retry authorization is stale')
+    assert result['recommended_action'] == (
+        'Inspect the existing job before one bounded correction' if successor else
+        'Review the existing transform and request one bounded correction')
+    assert not held
+    assert entered == released
+    assert entered[1] == stale_key
+    assert len(entered) == (3 if successor else 2)
+    assert reads == [key for key in entered if key != stale_key]
+    assert setup.calls['submit'] == submissions
+    assert history.records == before
+    assert stale_key not in history.rows
+
+
 def test_second_retry_keeps_original_broker_identity_and_release_guard(setup, invocation_history):
     authorize_invocation_retry(setup)
     first = advance(setup)
