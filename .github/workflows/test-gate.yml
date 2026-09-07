@@ -513,7 +513,11 @@ jobs:
             ${{ runner.temp }}/gate-results
             ${{ runner.temp }}/gate-logs
           if-no-files-found: warn
-          retention-days: 14
+          # 3 days, not 14: the fan-in reads this artifact minutes later inside the same run and nothing
+          # reads it after a day; at ~8 shards x 25 pushes a day these logs were most of the org's
+          # 500 MB Actions artifact cap, and a full cap refuses EVERY upload (the merge queue's supply
+          # set, readiness record and relay receipt included; probe #1120, 2026-09-07).
+          retention-days: 3
           overwrite: true
 
       # ---------------------------------------------------------------- #
