@@ -61,7 +61,7 @@ describe("operator wire vocabulary is pinned", () => {
   });
 
   it("tenant spine constants are untouched beside the operator loop", () => {
-    expect(SPINE_TOOL_NAMES).toHaveLength(10);
+    expect(SPINE_TOOL_NAMES).toHaveLength(12);
     for (const name of SPINE_TOOL_NAMES) {
       expect(name.startsWith("operator")).toBe(false);
     }
