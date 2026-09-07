@@ -454,7 +454,7 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
  */
 export function planMatchprop(session, inputs = {}) {
   const { entities, selectedId } = session
-  const checked = buildEditPayload('matchprop', selectedId, inputs)
+  const checked = buildEditPayload('matchprop', selectedId, inputs, undefined, entities)
   if (checked.refusal) return { refusal: checked.refusal }
   const source = (entities || []).find((candidate) => candidate.id === selectedId)
   if (!source) return { refusal: 'Match refused: the selected entity is no longer in the document.' }
@@ -506,7 +506,7 @@ export function planIntersectVerb(op, session, inputs = {}) {
   const verb = INTERSECT_VERBS[op]
   if (!verb) return { refusal: `Edit refused: unknown operation ${op}.` }
   const { entities, selectedId } = session
-  const checked = buildEditPayload(op, selectedId, inputs)
+  const checked = buildEditPayload(op, selectedId, inputs, undefined, entities)
   if (checked.refusal) return { refusal: checked.refusal }
   const target = (entities || []).find((candidate) => candidate.id === selectedId)
   if (!target) return { refusal: `${verb.name} refused: the selected entity is no longer in the document.` }
@@ -684,8 +684,25 @@ export function formatLineweight(weight) {
   return LINEWEIGHT_VALUES.includes(weight) ? `${(weight / 100).toFixed(2)} mm` : String(weight)
 }
 
-export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer, x1, y1, x2, y2, keep, cx, cy, deg, factor, rows, cols, rowGap, colGap, count, totalDeg, edge, ex, ey, x, y, r, d1, d2, aci, linetype, lineweight } = {}, linetypeCatalogue = []) {
+// W4g-7b-05c-2: a property op copies EntityCommon fields, never geometry, so
+// an INSERT or a DIMENSION reference is as matchable/colourable as any other
+// entity (03c-f, 04c); every OTHER op is a geometry verb and refuses by kind
+// before the worker sees it. Shared by buildEditPayload's own by-kind gate
+// and applyEdit's backstop, so the two lists cannot drift apart.
+export const EDIT_KIND_EXEMPT_OPS = Object.freeze(new Set(['setColor', 'setLinetype', 'setLineweight', 'matchprop']))
+
+export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer, x1, y1, x2, y2, keep, cx, cy, deg, factor, rows, cols, rowGap, colGap, count, totalDeg, edge, ex, ey, x, y, r, d1, d2, aci, linetype, lineweight } = {}, linetypeCatalogue = [], entities = null) {
   const payload = { entityId }
+  // W4g-7b-05c-2: the by-kind refusal, before any operand check below, on
+  // every surface that calls this builder (the ribbon's live validation, the
+  // script runner, the store's own run, planMatchprop, the batch planner):
+  // an INSERT or a DIMENSION selection refuses every geometry verb, ERASE
+  // and the three property ops (plus MATCHPROP's own source ladder) excepted.
+  if (Array.isArray(entities) && op !== 'delete' && !EDIT_KIND_EXEMPT_OPS.has(op)) {
+    const target = entities.find((candidate) => candidate.id === entityId)
+    if (target?.type === 'INSERT') return { refusal: 'an INSERT is placed, not edited, in this round' }
+    if (target?.type === 'DIMENSION') return { refusal: 'a dimension is placed, not edited, in this round' }
+  }
   // W4g-6: the intersection verbs validate their OPERANDS here, so the
   // prompt holds Run with the sentence as the drafter types; whether the
   // geometry works out (a crossing, a corner) is intersect.js's answer at
@@ -1223,16 +1240,17 @@ export default function useEngineSession({
     // Nothing selected is not an error, it is a no-op: the affordances that
     // dispatch an edit are disabled until something is.
     if (!sessionRef.current.selectedId) return
-    // W4g-7b-03c: a property is not geometry. The "INSERT is not editable in
-    // this round" refusal is for the geometry verbs; colour, linetype and
-    // lineweight ride on an INSERT reference's own EntityCommon exactly like
-    // any other entity's. W4g-7b-03c-f: MATCHPROP is the same kind of verb
-    // (it copies properties, never geometry) so an INSERT reference as the
-    // SOURCE reaches planMatchprop's own ladder instead of this blanket one.
-    const isPropertyOp = op === 'setColor' || op === 'setLinetype' || op === 'setLineweight' || op === 'matchprop'
+    // W4g-7b-03c: a property is not geometry. The "an INSERT is placed, not
+    // edited, in this round" refusal is for the geometry verbs; colour,
+    // linetype and lineweight ride on an INSERT reference's own EntityCommon
+    // exactly like any other entity's. W4g-7b-03c-f: MATCHPROP is the same
+    // kind of verb (it copies properties, never geometry) so an INSERT
+    // reference as the SOURCE reaches planMatchprop's own ladder instead of
+    // this blanket one. W4g-7b-05c-2: ERASE stays allowed on both kinds (the
+    // contract carries `removed` for any kind), so it is exempt here too.
     const targetType = sessionRef.current.entities.find((entity) => entity.id === sessionRef.current.selectedId)?.type
-    if (!isPropertyOp && targetType === 'INSERT') {
-      patch({ errorKind: SESSION_ERROR.REFUSED, status: 'INSERT is not editable in this round' })
+    if (op !== 'delete' && !EDIT_KIND_EXEMPT_OPS.has(op) && targetType === 'INSERT') {
+      patch({ errorKind: SESSION_ERROR.REFUSED, status: 'an INSERT is placed, not edited, in this round' })
       return
     }
     // W4g-7b-04c: the 05c sentence, adopted for DIMENSION. Unlike INSERT, a
@@ -1299,7 +1317,7 @@ export default function useEngineSession({
       }
       return
     }
-    const { payload, refusal } = buildEditPayload(op, sessionRef.current.selectedId, inputs, sessionRef.current.entities.linetypes)
+    const { payload, refusal } = buildEditPayload(op, sessionRef.current.selectedId, inputs, sessionRef.current.entities.linetypes, sessionRef.current.entities)
     if (refusal) {
       patch({ errorKind: SESSION_ERROR.REFUSED, status: refusal })
       return
@@ -1329,21 +1347,32 @@ export default function useEngineSession({
     // pre-render value. A version write is not an operation to do twice, so
     // the in-flight latch is a ref, set before the first await.
     if (!bytes || !target || sessionRef.current.busy || savingRef.current) return null
-    savingRef.current = true
-    patch({ busy: true, errorKind: null, status: 'Saving to the project as a new version...' })
-    const generation = generationRef.current
+    const { committedEntities, entities } = sessionRef.current
     // W4g-3b: the edit as a plan, when the engine holds the head. A diff the
     // contract cannot carry (a kind change, past the operation bound) sends
     // NO plan and names why in the status; the server then takes the DXF
     // sidecar leg and says so in its receipt. A hand import has nothing to
     // diff against and never sends one.
+    // W4g-7b-05c-2: a moved INSERT/DIMENSION reference or a true colour set
+    // is neither carried by a plan NOR by the sidecar leg: the save REJECTS
+    // here, before any fetch (no digest, no versions/edited, no
+    // versions/plan), commits nothing, and leaves the document dirty. Every
+    // other refusal (an opaque kind, curved geometry, a definition change,
+    // the operation cap) keeps today's sidecar-leg inheritance below.
+    const diff = committedEntities ? diffPlan(committedEntities, entities) : null
+    if (diff && !diff.mutations && (diff.cause === 'moved-reference' || diff.cause === 'true-colour')) {
+      patch({ errorKind: SESSION_ERROR.REFUSED, status: `Save refused: ${diff.reason}.` })
+      return null
+    }
+    savingRef.current = true
+    patch({ busy: true, errorKind: null, status: 'Saving to the project as a new version...' })
+    const generation = generationRef.current
     // W4g-7b-02c-e: a plan the contract DOES carry (an INSERT add, 02s) still
     // depends on the SERVER admitting that kind. Against a target where v3 is
     // not provisioned for it, the server refuses the whole save with its own
     // sentence ("Save failed: ...") and the document stays dirty: there is no
     // DXF sidecar fallback for a kind the plan already carries (v63's rule —
     // the fallback exists only for a diff this module itself cannot express).
-    const { committedEntities, entities } = sessionRef.current
     const parent = sessionRef.current.committedVersion ?? target.headVersion
     const onStatus = ({ status, progress }) => {
       if (generation !== generationRef.current || !savingRef.current) return
@@ -1351,8 +1380,7 @@ export default function useEngineSession({
     }
     let plan = null
     let planNote = ''
-    if (committedEntities) {
-      const diff = diffPlan(committedEntities, entities)
+    if (diff) {
       if (diff.mutations) plan = { mutations: diff.mutations, count: diff.count }
       else planNote = ` No plan sent: ${diff.reason}.`
     }
@@ -1465,7 +1493,7 @@ export default function useEngineSession({
       return
     }
     if (entity.type === 'INSERT') {
-      patch({ errorKind: SESSION_ERROR.REFUSED, status: 'INSERT is not editable in this round' })
+      patch({ errorKind: SESSION_ERROR.REFUSED, status: 'an INSERT is placed, not edited, in this round' })
       return
     }
     // The record is taken BEFORE anything is deleted, so a cut that cannot be

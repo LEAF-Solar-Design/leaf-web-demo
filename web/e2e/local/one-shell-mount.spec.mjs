@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { expect, test } from '@playwright/test'
+import { DEFERRED_REASONS } from '../../src/lib/actionRegistry.js'
 import { requireLocalReady } from './requireReady.mjs'
 import { setRail } from './railFlag.mjs'
 
@@ -1619,6 +1620,27 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByTestId('cockpit-script-status')).toHaveText('Script ran 1 command.', { timeout: 60_000 })
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBefore + 1))
     await expect(page.getByRole('status').filter({ hasText: /createInsert applied/ })).toHaveCount(1)
+
+    // W4g-7b-05c-2: the placed INSERT refuses every geometry verb before the
+    // worker sees it (buildEditPayload's own by-kind gate): arming MOVE holds
+    // Run with the sentence, no worker message; a deferred word typed right
+    // after still carries its OWN frozen reason, unaffected by the selection.
+    // A create SELECTS what it made (engineSession.js's own rule), so the
+    // just-drawn INSERT is already the selection: no radio click needed, and
+    // none would work anyway (the workbench list disables a read-only kind's
+    // own radio, and INSERT is one).
+    const bar = page.getByLabel('Command bar', { exact: true })
+    await bar.fill('m')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'move', { timeout: 20_000 })
+    await expect(page.locator('[data-testid="cockpit-prompt"] .cp-run')).toBeDisabled()
+    await expect(page.getByTestId('cockpit-prompt-note')).toHaveText('an INSERT is placed, not edited, in this round')
+    await page.keyboard.press('Escape')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
+    await bar.fill('leader')
+    await bar.press('Enter')
+    await expect(page.getByRole('status').filter({ hasText: DEFERRED_REASONS.leader })).toHaveCount(1)
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBefore + 1))
 
     // One engine undo takes it back; the redo depth rises.
     await page.getByRole('tab', { name: 'Insert' }).click()

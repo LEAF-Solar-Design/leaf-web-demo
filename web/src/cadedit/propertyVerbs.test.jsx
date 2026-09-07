@@ -171,7 +171,7 @@ describe('the diff: colour-only changes, styled adds and true colour', () => {
     const before = [line(10)]
     const after = [line(10, { trueColor: [1, 2, 3] })]
     expect(diffPlan(before, after)).toEqual({
-      mutations: null, count: 0, reason: 'entity A has a true colour the plan cannot carry',
+      mutations: null, count: 0, reason: 'entity A has a true colour the plan cannot carry', kind: 'LINE', cause: 'true-colour',
     })
   })
 

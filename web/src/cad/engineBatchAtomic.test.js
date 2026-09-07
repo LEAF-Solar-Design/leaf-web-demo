@@ -388,7 +388,7 @@ const BLOCK_SCRIPT = [
   'const loaded = await handleMessage({ type: "loadDocument", documentId: "blocks.dxf", bytes }, engine)',
   'const initial = reply(loaded)',
   'const out = { direct, patched, roundtrip, initial }',
-  'for (const op of ["move", "copy", "delete"]) {',
+  'for (const op of ["move", "copy"]) {',
   '  out[op] = reply(await handleMessage({ type: "applyEdit", op, payload: { entityId: "1280", dx: 1, dy: 0 } }, engine))',
   '}',
   'out.batch = reply(await handleMessage({ type: "applyEdit", op: "batch", payload: { steps: [',
@@ -404,6 +404,9 @@ const BLOCK_SCRIPT = [
   'const batchBack = engine.parseDxf(batched.bytes)',
   'out.batchRoundtrip = projection(batchBack.editableEntities())',
   'batchBack.free()',
+  // W4g-7b-05c-2: ERASE stays allowed on an INSERT, unlike every verb above;
+  // run it LAST, after every other assertion that still needs entity 1280.
+  'out.insertDeleted = reply(await handleMessage({ type: "applyEdit", op: "delete", payload: { entityId: "1280" } }, engine))',
   // A raw document change bypasses the editor's refused verb, so the diff must
   // detect it independently. Re-load the changed insertion through the worker.
   'const movedBytes = new TextEncoder().encode(dxf.replace("10\\n10\\n20\\n20\\n", "10\\n11\\n20\\n20\\n"))',
@@ -498,9 +501,12 @@ describe.skipIf(!GLUE)('W4g-7b-01c blocks through the rebuilt wasm and worker', 
     expect(canvas.polylines[0].pts[0]).toEqual([10, 20, 0])
     expect(canvas.polylines[0].pts[1][0]).toBeCloseTo(10, 9)
     expect(canvas.polylines[0].pts[1][1]).toBeCloseTo(26, 9)
-    for (const op of ['move', 'copy', 'delete']) expect(out[op]).toMatchObject({ ok: false, reason: 'INSERT is not editable in this round' })
-    expect(out.move).toEqual({ type: 'editApplied', op: 'move', ok: false, reason: 'INSERT is not editable in this round' })
-    expect(out.batch).toMatchObject({ ok: false, reason: 'step_1_move:INSERT is not editable in this round' })
+    for (const op of ['move', 'copy']) expect(out[op]).toMatchObject({ ok: false, reason: 'an INSERT is placed, not edited, in this round' })
+    expect(out.move).toEqual({ type: 'editApplied', op: 'move', ok: false, reason: 'an INSERT is placed, not edited, in this round' })
+    expect(out.batch).toMatchObject({ ok: false, reason: 'step_1_move:an INSERT is placed, not edited, in this round' })
+    // W4g-7b-05c-2: ERASE stays allowed on an INSERT, unlike every verb above.
+    expect(out.insertDeleted).toMatchObject({ type: 'editApplied', op: 'delete', ok: true })
+    expect(out.insertDeleted.entities.find((entity) => entity.type === 'INSERT')).toBeUndefined()
     expect(out.created).toMatchObject({ type: 'editApplied', op: 'createLine', ok: true, blockBasePatched: true })
     expect(out.created.entities).toHaveLength(2)
     expect(out.created.entities.find((entity) => entity.type === 'INSERT')).toMatchObject({ ...reference, id: '1280' })

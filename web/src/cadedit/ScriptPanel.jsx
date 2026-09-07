@@ -101,7 +101,7 @@ export default function ScriptPanel() {
       if (line.op !== 'pasteClip') {
         const checked = line.group === 'draw'
           ? buildCreatePayload(line.op, effective, current.entities.blocks, current.entities.dimstyles)
-          : buildEditPayload(line.op, current.selectedId, effective, current.entities.linetypes)
+          : buildEditPayload(line.op, current.selectedId, effective, current.entities.linetypes, current.entities)
         if (checked.refusal) { stop('stopped', `Script stopped at line ${line.line}: ${checked.refusal}`); return }
       }
       if (line.group === 'draw') actions.create(line.op, effective)

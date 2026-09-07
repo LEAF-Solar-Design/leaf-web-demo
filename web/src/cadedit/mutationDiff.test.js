@@ -83,7 +83,7 @@ describe('diffPlan', () => {
 
   it('refuses a handle that changed kind and a plan past the operation bound', () => {
     expect(diffPlan([circle(193)], [line(193)])).toEqual({
-      mutations: null, count: 0, reason: 'entity C1 changed kind from CIRCLE to LINE, which the plan cannot express',
+      mutations: null, count: 0, reason: 'entity C1 changed kind from CIRCLE to LINE, which the plan cannot express', kind: null, cause: null,
     })
     const many = Array.from({ length: MAX_PLAN_OPERATIONS + 1 }, (_, i) => line(1000 + i))
     const over = diffPlan([], many)
@@ -106,6 +106,10 @@ describe('W4g-6d: what the contract cannot carry is refused, never dropped', () 
     expect(diffPlan([line(10)], [line(10), t()]).reason).toBe('entity C is a TEXT the plan cannot carry, and it was added')
     expect(diffPlan([line(10), t()], [line(10)]).reason).toBe('entity C is a TEXT the plan cannot carry, and it was removed')
     expect(diffPlan([line(10), t()], [line(10), t({ vertices: [[5, 5, 0]] })]).reason).toBe('entity C is a TEXT the plan cannot carry, and it changed')
+    // W4g-7b-05c-2: the refusal object's kind and cause, so the store's save
+    // can tell an opaque TEXT edit (the reviewed sidecar fallback, unchanged)
+    // apart from a moved reference or a true colour (the new REJECT rule).
+    expect(diffPlan([line(10), t()], [line(10), t({ vertices: [[5, 5, 0]] })])).toMatchObject({ kind: 'TEXT', cause: 'opaque-kind' })
     expect(diffPlan([line(10), t()], [line(10), t({ text: 'bye' })]).reason).toBe('entity C is a TEXT the plan cannot carry, and it changed')
     expect(diffPlan([line(10), t()], [line(10, { layer: 'Moved' }), t()])).toEqual({ mutations: { set_layer: [{ handle: 'A', layer: 'Moved' }] }, count: 1, reason: null })
     // Read-only references are still seen if a raw operation changes them.
@@ -118,6 +122,7 @@ describe('W4g-6d: what the contract cannot carry is refused, never dropped', () 
     expect(diffPlan([curved()], [curved()])).toEqual({ mutations: {}, count: 0, reason: null })
     expect(diffPlan([curved()], [curved({ layer: 'Elsewhere' })])).toEqual({ mutations: { set_layer: [{ handle: 'B', layer: 'Elsewhere' }] }, count: 1, reason: null })
     expect(diffPlan([curved()], [curved({ vertices: [[1, 0, 0], [3, 0, 0], [3, 2, 0], [1, 2, 0]] })]).reason).toBe('polyline B has curved segments the plan cannot carry')
+    expect(diffPlan([curved()], [curved({ vertices: [[1, 0, 0], [3, 0, 0], [3, 2, 0], [1, 2, 0]] })])).toMatchObject({ kind: 'LWPOLYLINE', cause: 'curved-geometry' })
     // The corner fillet of W4g-6d: a straight square gains a bulge (and a vertex).
     const filleted = poly(11, { vertices: [[0, 0, 0], [2, 0, 0], [2, 1, 0], [1, 2, 0], [0, 2, 0]], bulges: [0, 0, B, 0, 0] })
     expect(diffPlan([poly(11)], [filleted]).reason).toBe('polyline B has curved segments the plan cannot carry')
@@ -146,7 +151,7 @@ describe('W4g-7b-01c: references and definitions are opaque', () => {
     { columns: 2 }, { rows: 2 }, { columnSpacing: 10 }, { rowSpacing: 10 },
   ])('refuses changed INSERT fields: %j', (change) => {
     expect(diffPlan(projection(), projection({ ...insert, ...change }))).toEqual({
-      mutations: null, count: 0, reason: 'entity 500 is a INSERT the plan cannot carry, and it changed',
+      mutations: null, count: 0, reason: 'entity 500 is a INSERT the plan cannot carry, and it changed', kind: 'INSERT', cause: 'moved-reference',
     })
   })
 

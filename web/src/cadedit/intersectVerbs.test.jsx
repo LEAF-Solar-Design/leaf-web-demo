@@ -71,6 +71,20 @@ describe('W4g-6 store: the planner over the session and the lowering to the work
     expect(planIntersectVerb('nope', session([H, V], '7'), {}).refusal).toBe('Edit refused: unknown operation nope.')
   })
 
+  // W4g-7b-05c-2: a placed INSERT or DIMENSION refuses by kind BEFORE the
+  // planner is asked anything (buildEditPayload's own gate, the entity list
+  // it now takes) — never the "no longer in the document" or "read-only"
+  // ladder further down, and never a worker message.
+  it('an INSERT or a DIMENSION selection refuses by kind before the planner runs, under every intersect verb', () => {
+    const INSERT_ENTITY = { id: 'i1', handle: 'i1', type: 'INSERT', name: 'Fixture', ip: [0, 0, 0], rotationDeg: 0, scale: [1, 1, 1], layer: 'A', editable: false }
+    const DIM_ENTITY = { id: 'd1', handle: 'd1', type: 'DIMENSION', dimtype: 'LINEAR', def1: [0, 0], def2: [1, 1], dimline: [0, 1], rotationDeg: 0, style: 'Standard', layer: 'A', editable: false }
+    const inputs = { edge: '9', x: '1', y: '1', r: '1', d1: '1', d2: '1', ex: '5', ey: '3' }
+    for (const op of ['trim', 'extend', 'fillet', 'chamfer']) {
+      expect(planIntersectVerb(op, session([INSERT_ENTITY, V], 'i1'), inputs).refusal).toBe('an INSERT is placed, not edited, in this round')
+      expect(planIntersectVerb(op, session([DIM_ENTITY, V], 'd1'), inputs).refusal).toBe('a dimension is placed, not edited, in this round')
+    }
+  })
+
   it('uses a valid pick aperture for trim and falls back to the default otherwise', () => {
     const inputs = { edge: '9', x: '5.02', y: '0' }
     const expected = { steps: [{ op: 'setVertices', entityId: '7', points: [[0, 0], [5, 0]], closed: false }] }

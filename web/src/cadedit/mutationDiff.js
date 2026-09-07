@@ -276,7 +276,12 @@ export function diffPlan(committed, current) {
   const setColor = []
   const setLinetype = []
   const setLineweight = []
-  const cannot = (reason) => ({ mutations: null, count: 0, reason })
+  // W4g-7b-05c-2: `kind` names the entity type that caused the refusal (null
+  // when the refusal is not about one entity's own kind, e.g. a block
+  // definition or the operation-count cap); `cause` is one of the closed set
+  // the store's save reads to decide REJECT (moved-reference, true-colour)
+  // vs. today's sidecar fallback (every other cause, including null).
+  const cannot = (reason, kind = null, cause = null) => ({ mutations: null, count: 0, reason, kind, cause })
   // The engine digest covers EVERY child, including unlisted/unsupported ones.
   // Keep the legacy full-record fallback for older projections without digests.
   const canonical = (value) => Array.isArray(value) ? value.map(canonical)
@@ -296,14 +301,14 @@ export function diffPlan(committed, current) {
     if (!now) {
       // A kind the contract has no add for still has a remove (by handle);
       // an OPAQUE entity erased is one the plan cannot see go.
-      if (was.kind === 'OPAQUE') return cannot(`entity ${handle} is a ${was.type} the plan cannot carry, and it was removed`)
+      if (was.kind === 'OPAQUE') return cannot(`entity ${handle} is a ${was.type} the plan cannot carry, and it was removed`, was.type, 'opaque-kind')
       removed.push(handle)
       continue
     }
     if (was.kind === 'OPAQUE' || now.kind === 'OPAQUE') {
       if (was.kind === now.kind && was.print === now.print) continue
       const name = was.kind === 'OPAQUE' ? was.type : now.type
-      return cannot(`entity ${handle} is a ${name} the plan cannot carry, and it changed`)
+      return cannot(`entity ${handle} is a ${name} the plan cannot carry, and it changed`, name, 'opaque-kind')
     }
     if (was.kind !== now.kind && !(isLinear(was) && isLinear(now))) {
       return cannot(`entity ${handle} changed kind from ${was.kind} to ${now.kind}, which the plan cannot express`)
@@ -313,14 +318,14 @@ export function diffPlan(committed, current) {
     // one in this round, so a change is a raw operation, never a silent drop.
     if (was.kind === 'INSERT') {
       if (was.print === now.print) continue
-      return cannot(`entity ${handle} is a INSERT the plan cannot carry, and it changed`)
+      return cannot(`entity ${handle} is a INSERT the plan cannot carry, and it changed`, 'INSERT', 'moved-reference')
     }
     // W4g-7b-04c: a DIMENSION stays opaque for any in-place change, same as
     // INSERT — no verb the store exposes touches one but delete, so this is
     // a defensive refusal (a raw operation), never a silent drop.
     if (was.kind === 'DIMENSION') {
       if (was.print === now.print) continue
-      return cannot(`entity ${handle} is a DIMENSION the plan cannot carry, and it changed`)
+      return cannot(`entity ${handle} is a DIMENSION the plan cannot carry, and it changed`, 'DIMENSION', 'moved-reference')
     }
     if (was.layer !== now.layer) setLayer.push({ handle, layer: now.layer })
     // W4g-7b-03c: colour, linetype and lineweight lower independently of
@@ -333,7 +338,7 @@ export function diffPlan(committed, current) {
     const nowProps = now.props
     const trueColorChanged = JSON.stringify(wasProps.trueColor) !== JSON.stringify(nowProps.trueColor)
     if (trueColorChanged && nowProps.trueColor) {
-      return cannot(`entity ${handle} has a true colour the plan cannot carry`)
+      return cannot(`entity ${handle} has a true colour the plan cannot carry`, now.kind, 'true-colour')
     }
     // W4g-7b-03c-g F3: clearing a true colour back to a plain ACI can leave
     // the nearest-index projection (`aci`) unchanged, so the aci compare
@@ -358,15 +363,15 @@ export function diffPlan(committed, current) {
       if (wasClosed !== nowClosed || !samePoints(was.pts, now.pts) || !sameBulges) {
         // A set_points carries points only: a curved polyline (before or
         // after) would be written back as its chords. Refuse, never flatten.
-        if (was.curved || now.curved) return cannot(`polyline ${handle} has curved segments the plan cannot carry`)
+        if (was.curved || now.curved) return cannot(`polyline ${handle} has curved segments the plan cannot carry`, 'LWPOLYLINE', 'curved-geometry')
         setPoints.push({ handle, closed: nowClosed, pts: now.pts })
       }
     }
   }
   for (const [handle, now] of after) {
     if (before.has(handle)) continue
-    if (now.kind === 'OPAQUE') return cannot(`entity ${handle} is a ${now.type} the plan cannot carry, and it was added`)
-    if (now.curved) return cannot(`polyline ${handle} has curved segments the plan cannot carry`)
+    if (now.kind === 'OPAQUE') return cannot(`entity ${handle} is a ${now.type} the plan cannot carry, and it was added`, now.type, 'opaque-kind')
+    if (now.curved) return cannot(`polyline ${handle} has curved segments the plan cannot carry`, 'LWPOLYLINE', 'curved-geometry')
     added.push(addedRecord(handle, now))
   }
   const count = added.length + removed.length + setLayer.length + setPoints.length + setCircle.length + setArc.length
