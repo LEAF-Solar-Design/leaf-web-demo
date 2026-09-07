@@ -1443,7 +1443,11 @@ test.describe('route matrix, rail ON', () => {
     await page.getByLabel('ribbon edge', { exact: true }).press('Enter')
     await expect(workbenchStatus).toContainText('matchprop applied', { timeout: 60_000 })
     // The layer copied too (the batch's first step): find the circle by its
-    // id now, never by the label text MATCHPROP just changed.
+    // id now, never by the label text MATCHPROP just changed. MATCHPROP stays
+    // ARMED for the next pick by design (the reference's loop), and an armed
+    // command makes the workbench click-through, so disarm before the radio.
+    await page.keyboard.press('Escape')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
     await page.locator(`input[type="radio"][value="${circleId}"]`).check()
     await expect(dockColor).toHaveText('red (1)')
     test.info().annotations.push({ type: 'properties-panel', description: `setColor through the panel, then MATCHPROP copied it onto ${circleId}` })
