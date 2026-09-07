@@ -150,12 +150,7 @@ function loadedResponse(documentId, doc) {
 }
 
 function refused(op, reason) {
-  const { entities, blocks } = current ? projectDocument(current.doc) : { entities: [], blocks: [] }
-  return {
-    type: 'editApplied', op, ok: false, reason,
-    entityCount: entities.length, entities, blocks,
-    blockBasePatched: current?.doc.blockBasePatched ?? false,
-  }
+  return { type: 'editApplied', op, ok: false, reason }
 }
 
 // The wrapper addresses entities by CURRENT document-order index; the

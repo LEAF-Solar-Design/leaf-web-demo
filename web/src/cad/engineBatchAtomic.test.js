@@ -296,7 +296,7 @@ const BLOCK_SCRIPT = [
   'const { handleMessage } = await import(pathToFileURL(workerPath).href)',
   'const bytes = new TextEncoder().encode(dxf)',
   'const projection = (entities, blocks = entities?.blocks) => ({ entities: Array.from(entities || []), blocks })',
-  'const reply = (r) => ({ type: r.type, op: r.op, ok: r.ok, reason: r.reason, refusal: r.refusal, writable: r.writable, blockBasePatched: r.blockBasePatched, ...projection(r.entities, r.blocks) })',
+  'const reply = (r) => r.ok === false ? r : ({ type: r.type, op: r.op, ok: r.ok, reason: r.reason, refusal: r.refusal, writable: r.writable, blockBasePatched: r.blockBasePatched, ...projection(r.entities, r.blocks) })',
   'const doc = engine.parseDxf(bytes)',
   'const direct = projection(doc.editableEntities())',
   'const written = engine.writeDxf(doc)',
@@ -408,13 +408,9 @@ describe('W4g-7b-01c blocks through the rebuilt wasm and worker', () => {
     expect(canvas.polylines[0].pts[0]).toEqual([10, 20, 0])
     expect(canvas.polylines[0].pts[1][0]).toBeCloseTo(10, 9)
     expect(canvas.polylines[0].pts[1][1]).toBeCloseTo(26, 9)
-    for (const op of ['move', 'copy', 'delete']) expect(out[op]).toMatchObject({ ok: false, reason: 'INSERT is not editable in this round', blockBasePatched: false })
-    expect(out.batch).toMatchObject({ ok: false, reason: 'step_1_move:INSERT is not editable in this round', blockBasePatched: false })
-    for (const result of [out.move, out.copy, out.delete, out.batch]) {
-      expect(result.entities).toHaveLength(1)
-      expect(result.entities[0]).toMatchObject({ ...reference, id: '1280' })
-      expect(result.blocks).toEqual(out.direct.blocks)
-    }
+    for (const op of ['move', 'copy', 'delete']) expect(out[op]).toMatchObject({ ok: false, reason: 'INSERT is not editable in this round' })
+    expect(out.move).toEqual({ type: 'editApplied', op: 'move', ok: false, reason: 'INSERT is not editable in this round' })
+    expect(out.batch).toMatchObject({ ok: false, reason: 'step_1_move:INSERT is not editable in this round' })
     expect(out.created).toMatchObject({ type: 'editApplied', op: 'createLine', ok: true, blockBasePatched: true })
     expect(out.created.entities).toHaveLength(2)
     expect(out.created.entities.find((entity) => entity.type === 'INSERT')).toMatchObject({ ...reference, id: '1280' })
