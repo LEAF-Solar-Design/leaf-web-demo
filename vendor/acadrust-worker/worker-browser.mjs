@@ -126,19 +126,28 @@ function projectDocument(doc) {
       ratio: entity.ratio ?? null,
       startDeg: entity.startDeg ?? null,
       endDeg: entity.endDeg ?? null,
+      // W4g-7b-03c: colour, linetype and lineweight ride on every entity
+      // (including an INSERT reference); 256/ByLayer/-1 are the crate's own
+      // "unset" defaults, so an older wrapper without these fields still
+      // reads as a plain ByLayer entity.
+      aci: typeof entity.aci === 'number' ? entity.aci : 256,
+      trueColor: Array.isArray(entity.trueColor) ? entity.trueColor : null,
+      linetype: entity.linetype ?? 'ByLayer',
+      lineweight: typeof entity.lineweight === 'number' ? entity.lineweight : -1,
     }
   })
-  return { entities, blocks: projection.blocks ?? [] }
+  return { entities, blocks: projection.blocks ?? [], linetypes: projection.linetypes ?? [] }
 }
 
 function loadedResponse(documentId, doc) {
-  const { entities, blocks } = projectDocument(doc)
+  const { entities, blocks, linetypes } = projectDocument(doc)
   return {
     type: 'documentLoaded',
     documentId,
     entityCount: entities.length,
     entities,
     blocks,
+    linetypes,
     blockBasePatched: doc.blockBasePatched ?? false,
     // The whole-document engine reads and rewrites EVERYTHING, so there is
     // no lossy-write refusal class: writable is unconditionally true and
@@ -237,6 +246,19 @@ function applyOne(doc, op, payload) {
   else if (op === 'addVertex') doc.addVertexAfter(index, Number(p.vertexIndex), Number(p.x), Number(p.y))
   else if (op === 'deleteVertex') doc.deleteVertex(index, Number(p.vertexIndex))
   else if (op === 'setLayer') doc.setEntityLayer(index, String(p.layer ?? ''))
+  // W4g-7b-03c: colour, linetype and lineweight. Each is a single-value
+  // property op on the entity at `index` (an INSERT reference included);
+  // the wrapper resolves/validates and refuses before it writes.
+  else if (op === 'setColor') {
+    need('setEntityColor')
+    doc.setEntityColor(index, Number(p.aci))
+  } else if (op === 'setLinetype') {
+    need('setEntityLinetype')
+    doc.setEntityLinetype(index, String(p.linetype ?? ''))
+  } else if (op === 'setLineweight') {
+    need('setEntityLineweight')
+    doc.setEntityLineweight(index, Number(p.lineweight))
+  }
   // W4g-4: the reference's Modify verbs the crate carries. COPY,
   // MIRROR-with-source and EXPLODE create: their new handle(s) ride the
   // same createdId leg as the Draw group so the selection lands on what
@@ -349,7 +371,7 @@ async function applyEdit(engine, message) {
     current = null
     return refused(op, error instanceof Error ? error.message : String(error))
   }
-  const { entities, blocks } = projection
+  const { entities, blocks, linetypes } = projection
   current = { documentId: current.documentId, doc: reparsed }
   const reply = {
     type: 'editApplied',
@@ -358,6 +380,7 @@ async function applyEdit(engine, message) {
     entityCount: entities.length,
     entities,
     blocks,
+    linetypes,
     blockBasePatched,
     bytes: written,
     byteLength: written.length,
@@ -429,7 +452,7 @@ export async function handleMessage(raw, engineOverride = null) {
       current = null
       const reason = error instanceof Error ? error.message : String(error)
       if (reason.startsWith('block names collide case-insensitively: ') || reason.startsWith('block definitions collapsed on load: ')) {
-        return { type: 'documentLoaded', documentId, entityCount: 0, entities: [], blocks: [],
+        return { type: 'documentLoaded', documentId, entityCount: 0, entities: [], blocks: [], linetypes: [],
           blockBasePatched: false, writable: false, refusal: reason, unsupported: [] }
       }
       return { type: 'error', message: `parse_failed:${reason}` }

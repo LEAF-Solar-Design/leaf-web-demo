@@ -74,7 +74,7 @@
 //! browser. The exported names and semantics are unchanged.
 
 use acadrust::entities::{Arc as ArcEntity, Circle, Entity, EntityType, Line, LwPolyline, Text, Point, Ellipse, Insert};
-use acadrust::types::{Handle, Transform, Vector2, Vector3};
+use acadrust::types::{Color, Handle, LineWeight, Transform, Vector2, Vector3};
 use acadrust::{CadDocument, DxfReader, DxfWriter};
 use acadrust::io::dxf::{DxfStreamWriter, DxfTextWriter};
 use serde::Serialize;
@@ -271,6 +271,29 @@ fn sweep_deg_of(entity: &EntityType) -> Option<(f64, f64)> {
     }
 }
 
+// W4g-7b-03c: colour, linetype and lineweight. ACI is 0..256 (256 ByLayer, 0
+// ByBlock); a true colour (Color::Rgb) still carries a nearest-neighbour ACI
+// here so a consumer that only reads `aci` never sees a hole, but `trueColor`
+// is the field that decides whether the entity is actually true-coloured.
+fn aci_of(color: &Color) -> i64 {
+    (color.approximate_index() as i64).clamp(0, 256)
+}
+
+fn true_color_of(color: &Color) -> Option<[u8; 3]> {
+    color.true_color_rgb().map(|(r, g, b)| [r, g, b])
+}
+
+// EntityCommon.linetype's empty string means ByLayer (see has_linetype());
+// the projection always spells it out.
+fn linetype_of(entity: &EntityType) -> String {
+    let name = &entity.common().linetype;
+    if name.is_empty() { "ByLayer".to_string() } else { name.clone() }
+}
+
+fn lineweight_of(entity: &EntityType) -> i64 {
+    entity.common().line_weight.value() as i64
+}
+
 // W4g-7b-01c: block definitions share the crate's flat entity storage, but
 // their children are not independent model-space geometry or edit targets.
 const BLOCK_CHILD_CAP: usize = 60;
@@ -310,6 +333,10 @@ fn entity_record(index: usize, entity: &EntityType, can_edit: bool) -> serde_jso
         "endDeg": sweep_deg_of(entity).map(|(_, end)| end),
         "majorAxis": major_axis_of(entity),
         "ratio": ratio_of(entity),
+        "aci": aci_of(&entity.common().color),
+        "trueColor": true_color_of(&entity.common().color),
+        "linetype": linetype_of(entity),
+        "lineweight": lineweight_of(entity),
     });
     if let EntityType::Insert(insert) = entity {
         record["kind"] = serde_json::json!("REFERENCE");
@@ -434,6 +461,27 @@ fn block_catalogue(document: &CadDocument, bases_unknown: bool, unknown_bases: &
                 "complete": complete, "baseUnknown": base_unknown, "digest": block_digest(document, block, base_unknown, &written) })
         })
         .collect()
+}
+
+// W4g-7b-03c: the LTYPE table's names for the Properties panel's linetype
+// select, sorted case-insensitively and bounded so a pathological drawing
+// cannot hand the client an unbounded list. ByLayer / ByBlock / Continuous
+// are the crate's own always-created defaults (CadDocument::initialize_defaults),
+// but a hand-built or heavily edited document could in principle omit one, so
+// the catalogue guarantees them defensively.
+const LINETYPE_CATALOGUE_CAP: usize = 200;
+
+fn linetypes_catalogue(document: &CadDocument) -> Vec<String> {
+    let mut names: Vec<String> = document.line_types.iter().map(|lt| lt.name.clone()).collect();
+    for required in ["ByLayer", "ByBlock", "Continuous"] {
+        if !names.iter().any(|n| n.eq_ignore_ascii_case(required)) {
+            names.push(required.to_string());
+        }
+    }
+    names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    names.truncate(LINETYPE_CATALOGUE_CAP);
+    names
 }
 
 // The pinned DXF reader records block handles but discards the BLOCK marker.
@@ -1028,6 +1076,74 @@ impl ParsedDxf {
         Ok(())
     }
 
+    // W4g-7b-03c: a property (colour, linetype, lineweight) is not geometry.
+    // The INSERT-not-editable refusal exists for the geometry verbs; a
+    // reference's own colour/linetype/lineweight lives on its EntityCommon
+    // exactly like any other entity's, so property ops accept it. A block
+    // child is still refused: it is not independent model-space state.
+    fn property_target_at(&self, index: usize) -> Result<&EntityType, Refusal> {
+        let entity = self.inner.entities().nth(index)
+            .ok_or_else(|| "entity_index_out_of_range".to_string())?;
+        if block_children(&self.inner).contains(&entity.common().handle) {
+            return refuse("block_child_not_editable");
+        }
+        if !editable(entity) && !matches!(entity, EntityType::Insert(_)) {
+            return refuse("entity_kind_not_editable");
+        }
+        Ok(entity)
+    }
+
+    fn property_target_mut(&mut self, index: usize) -> Result<&mut EntityType, Refusal> {
+        let handle = self.property_target_at(index)?.common().handle;
+        self.inner
+            .entities_mut()
+            .find(|entity| entity.common().handle == handle)
+            .ok_or_else(|| "entity_handle_not_found".to_string())
+    }
+
+    /// aci: 0..=256 (256 ByLayer, 0 ByBlock, 1..=255 an AutoCAD Color Index).
+    /// Setting an ACI replaces the whole `Color` value, which clears any
+    /// true colour the entity carried, exactly as AutoCAD does.
+    fn set_entity_color_core(&mut self, index: usize, aci: i32) -> Result<(), Refusal> {
+        if !(0..=256).contains(&aci) {
+            return refuse("color_index_out_of_range");
+        }
+        let entity = self.property_target_mut(index)?;
+        entity.common_mut().color = Color::from_index(aci as i16);
+        Ok(())
+    }
+
+    /// The name must be in the LTYPE table (case-insensitively); the table's
+    /// own spelling is stored, never the caller's casing.
+    fn set_entity_linetype_core(&mut self, index: usize, name: &str) -> Result<(), Refusal> {
+        let trimmed = name.trim();
+        let resolved = self.inner.line_types.get(trimmed)
+            .map(|lt| lt.name.clone())
+            .ok_or_else(|| format!("linetype_not_loaded:{trimmed}"))?;
+        let entity = self.property_target_mut(index)?;
+        entity.common_mut().linetype = resolved;
+        Ok(())
+    }
+
+    /// weight must be one of the crate's LineWeight enumeration: -3 Default,
+    /// -2 ByBlock, -1 ByLayer, or one of the 24 standard 1/100mm values.
+    fn set_entity_lineweight_core(&mut self, index: usize, weight: i32) -> Result<(), Refusal> {
+        const VALID: [i32; 24] = [
+            0, 5, 9, 13, 15, 18, 20, 25, 30, 35, 40, 50,
+            53, 60, 70, 80, 90, 100, 106, 120, 140, 158, 200, 211,
+        ];
+        let resolved = match weight {
+            -3 => LineWeight::Default,
+            -2 => LineWeight::ByBlock,
+            -1 => LineWeight::ByLayer,
+            v if VALID.contains(&v) => LineWeight::Value(v as i16),
+            _ => return refuse(&format!("lineweight_not_valid:{weight}")),
+        };
+        let entity = self.property_target_mut(index)?;
+        entity.common_mut().line_weight = resolved;
+        Ok(())
+    }
+
     /// Adds a validated entity through the crate's own add_entity and returns
     /// its handle value (the identity that survives the write/re-parse).
     fn add_created(&mut self, mut entity: EntityType, layer: &str) -> Result<String, Refusal> {
@@ -1571,6 +1687,11 @@ impl ParsedDxf {
         if !set_projection_field(&list, &JsValue::from_str("blocks"), &blocks) {
             return Err(JsValue::from_str("block_catalogue_projection_failed"));
         }
+        let linetypes = linetypes_catalogue(&self.inner).serialize(&serializer)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        if !set_projection_field(&list, &JsValue::from_str("linetypes"), &linetypes) {
+            return Err(JsValue::from_str("linetype_catalogue_projection_failed"));
+        }
         Ok(list)
     }
 
@@ -1653,6 +1774,27 @@ impl ParsedDxf {
     #[wasm_bindgen(js_name = setEntityLayer)]
     pub fn set_entity_layer(&mut self, index: usize, layer: &str) -> Result<(), JsValue> {
         self.set_entity_layer_core(index, layer).map_err(js_err)
+    }
+
+    /// W4g-7b-03c: sets the ACI colour index (0..=256; 256 ByLayer, 0
+    /// ByBlock). Accepts INSERT references, not only geometry-editable kinds.
+    #[wasm_bindgen(js_name = setEntityColor)]
+    pub fn set_entity_color(&mut self, index: usize, aci: i32) -> Result<(), JsValue> {
+        self.set_entity_color_core(index, aci).map_err(js_err)
+    }
+
+    /// W4g-7b-03c: sets the linetype by name (must be loaded in the LTYPE
+    /// table, case-insensitively). Accepts INSERT references.
+    #[wasm_bindgen(js_name = setEntityLinetype)]
+    pub fn set_entity_linetype(&mut self, index: usize, name: &str) -> Result<(), JsValue> {
+        self.set_entity_linetype_core(index, name).map_err(js_err)
+    }
+
+    /// W4g-7b-03c: sets the lineweight (the crate's 1/100mm enumeration, or
+    /// -1 ByLayer / -2 ByBlock / -3 Default). Accepts INSERT references.
+    #[wasm_bindgen(js_name = setEntityLineweight)]
+    pub fn set_entity_lineweight(&mut self, index: usize, weight: i32) -> Result<(), JsValue> {
+        self.set_entity_lineweight_core(index, weight).map_err(js_err)
     }
 
     /// W4g-4 COPY: a displaced clone of the entity at `index`; returns the
@@ -2992,5 +3134,182 @@ mod block_definition_rows {
         let (unchanged, ok) = patch_block_bases(&doc.inner, malformed.clone());
         assert!(!ok);
         assert_eq!(unchanged, malformed);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// W4g-7b-03c: colour, linetype and lineweight on the property setters and
+// the projection. Native, off the cores directly (no JsValue off wasm32).
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod w4g_7b_03c_property_verbs {
+    use super::*;
+
+    fn empty_doc() -> ParsedDxf {
+        ParsedDxf { inner: CadDocument::new(), block_base_patched: Cell::new(false), block_bases_unknown: false, unknown_block_bases: HashSet::new() }
+    }
+
+    fn code<T>(result: Result<T, Refusal>) -> String {
+        match result {
+            Ok(_) => "OK".to_string(),
+            Err(code) => code,
+        }
+    }
+
+    fn reparse(doc: &ParsedDxf) -> ParsedDxf {
+        let bytes = DxfWriter::new(&doc.inner).write_to_vec().expect("writer serializes the document");
+        let inner = DxfReader::from_reader(std::io::Cursor::new(bytes))
+            .expect("reader accepts the written bytes")
+            .read()
+            .expect("written bytes re-parse");
+        ParsedDxf { inner, block_base_patched: Cell::new(false), block_bases_unknown: doc.block_bases_unknown, unknown_block_bases: doc.unknown_block_bases.clone() }
+    }
+
+    #[test]
+    fn w4g_7b_03c_set_color_writes_the_aci_and_the_projection_reflects_it() {
+        let mut doc = empty_doc();
+        doc.create_line_core(0.0, 0.0, 10.0, 0.0, "").expect("line");
+        doc.set_entity_color_core(0, 1).expect("aci 1 is valid");
+        let record = &projected_entities(&doc.inner)[0];
+        assert_eq!(record["aci"], 1);
+        assert_eq!(record["trueColor"], serde_json::Value::Null);
+        let back = reparse(&doc);
+        assert_eq!(back.inner.entities().next().unwrap().common().color, Color::Index(1));
+    }
+
+    #[test]
+    fn w4g_7b_03c_set_color_refuses_out_of_range_before_touching_the_document() {
+        let mut doc = empty_doc();
+        doc.create_line_core(0.0, 0.0, 10.0, 0.0, "").expect("line");
+        assert_eq!(code(doc.set_entity_color_core(0, 300)), "color_index_out_of_range");
+        assert_eq!(doc.inner.entities().next().unwrap().common().color, Color::ByLayer);
+    }
+
+    #[test]
+    fn w4g_7b_03c_set_color_clears_a_true_colour_as_autocad_does() {
+        let mut doc = empty_doc();
+        doc.create_line_core(0.0, 0.0, 10.0, 0.0, "").expect("line");
+        doc.entity_mut(0).unwrap().common_mut().color = Color::from_rgb(10, 20, 30);
+        let record = &projected_entities(&doc.inner)[0];
+        assert_eq!(record["trueColor"], serde_json::json!([10, 20, 30]));
+        doc.set_entity_color_core(0, 1).expect("aci 1 is valid");
+        let record = &projected_entities(&doc.inner)[0];
+        assert_eq!(record["aci"], 1);
+        assert_eq!(record["trueColor"], serde_json::Value::Null);
+        // The 420 group is gone after write + re-parse.
+        let back = reparse(&doc);
+        assert!(!back.inner.entities().next().unwrap().common().color.is_true_color());
+    }
+
+    #[test]
+    fn w4g_7b_03c_set_linetype_stores_the_tables_own_spelling() {
+        let mut doc = empty_doc();
+        doc.create_line_core(0.0, 0.0, 10.0, 0.0, "").expect("line");
+        doc.inner.line_types.add(acadrust::tables::LineType::new("DASHED")).expect("linetype added");
+        doc.set_entity_linetype_core(0, "dashed").expect("case-insensitive match");
+        assert_eq!(doc.inner.entities().next().unwrap().common().linetype, "DASHED");
+        let record = &projected_entities(&doc.inner)[0];
+        assert_eq!(record["linetype"], "DASHED");
+        // The 6 group survives write + re-parse with the table's own case.
+        let back = reparse(&doc);
+        assert_eq!(back.inner.entities().next().unwrap().common().linetype, "DASHED");
+    }
+
+    #[test]
+    fn w4g_7b_03c_set_linetype_refuses_an_unloaded_name() {
+        let mut doc = empty_doc();
+        doc.create_line_core(0.0, 0.0, 10.0, 0.0, "").expect("line");
+        assert_eq!(code(doc.set_entity_linetype_core(0, "Hidden2")), "linetype_not_loaded:Hidden2");
+    }
+
+    #[test]
+    fn w4g_7b_03c_set_lineweight_accepts_the_enumeration_and_refuses_off_grid_values() {
+        let mut doc = empty_doc();
+        doc.create_line_core(0.0, 0.0, 10.0, 0.0, "").expect("line");
+        doc.set_entity_lineweight_core(0, 25).expect("0.25mm is a standard value");
+        let record = &projected_entities(&doc.inner)[0];
+        assert_eq!(record["lineweight"], 25);
+        // The 370 group survives write + re-parse.
+        let back = reparse(&doc);
+        assert_eq!(back.inner.entities().next().unwrap().common().line_weight, LineWeight::Value(25));
+        assert_eq!(code(doc.set_entity_lineweight_core(0, 26)), "lineweight_not_valid:26");
+        doc.set_entity_lineweight_core(0, -1).expect("-1 is ByLayer");
+        assert_eq!(doc.inner.entities().next().unwrap().common().line_weight, LineWeight::ByLayer);
+    }
+
+    #[test]
+    fn w4g_7b_03c_set_lineweight_refusal_leaves_the_document_untouched() {
+        let mut doc = empty_doc();
+        doc.create_line_core(0.0, 0.0, 10.0, 0.0, "").expect("line");
+        doc.set_entity_lineweight_core(0, 25).expect("0.25mm is a standard value");
+        assert_eq!(code(doc.set_entity_lineweight_core(0, 26)), "lineweight_not_valid:26");
+        // The refusal happened before any write: the value from before it stands.
+        assert_eq!(doc.inner.entities().next().unwrap().common().line_weight, LineWeight::Value(25));
+    }
+
+    #[test]
+    fn w4g_7b_03c_linetypes_catalogue_is_sorted_bounded_and_always_carries_the_defaults() {
+        let mut doc = empty_doc();
+        doc.inner.line_types.add(acadrust::tables::LineType::new("ZIGZAG")).expect("linetype added");
+        doc.inner.line_types.add(acadrust::tables::LineType::new("dashed")).expect("linetype added");
+        let names = linetypes_catalogue(&doc.inner);
+        assert!(names.iter().any(|n| n.eq_ignore_ascii_case("ByLayer")));
+        assert!(names.iter().any(|n| n.eq_ignore_ascii_case("ByBlock")));
+        assert!(names.iter().any(|n| n.eq_ignore_ascii_case("Continuous")));
+        assert!(names.iter().any(|n| n == "ZIGZAG"));
+        let lowered: Vec<String> = names.iter().map(|n| n.to_lowercase()).collect();
+        let mut sorted = lowered.clone();
+        sorted.sort();
+        assert_eq!(lowered, sorted, "the catalogue is sorted case-insensitively");
+        assert!(names.len() <= LINETYPE_CATALOGUE_CAP);
+    }
+
+    #[test]
+    fn w4g_7b_03c_property_setters_accept_an_insert_reference_but_not_a_block_child() {
+        let bytes = "0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1027\n0\nENDSEC\n\
+            0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n5\n40\n8\n0\n2\nB\n70\n0\n10\n1\n20\n2\n30\n0\n\
+            0\nLINE\n5\n100\n8\n0\n10\n1\n20\n2\n30\n0\n11\n4\n21\n2\n31\n0\n0\nENDBLK\n5\n41\n8\n0\n0\nENDSEC\n\
+            0\nSECTION\n2\nENTITIES\n0\nINSERT\n5\n500\n8\nRefs\n2\nB\n10\n10\n20\n20\n30\n0\n0\nENDSEC\n0\nEOF\n"
+            .as_bytes().to_vec();
+        let mut doc = parse_dxf_core(&bytes).expect("fixture parses");
+        doc.set_entity_color_core(0, 1).expect("an INSERT reference accepts a colour");
+        let child_index = doc.inner.entities().position(|e| matches!(e, EntityType::Line(_)))
+            .expect("block child present");
+        assert_eq!(code(doc.set_entity_color_core(child_index, 1)), "block_child_not_editable");
+    }
+
+    // Required row (2026-09-07 04:25Z): an entity the browser session never
+    // touches keeps its EXPLICIT 62/6/370/420 groups exactly, through parse
+    // -> one unrelated edit elsewhere -> write -> re-parse. The plan route's
+    // preflight (server/routers/drawings.py) compares the head's dense EP
+    // record against the browser-written DXF for every entity the plan does
+    // not name, so a silent drop here would desync that comparison.
+    #[test]
+    fn w4g_7b_03c_untouched_property_groups_survive_a_write_and_reparse() {
+        let bytes = "0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1027\n0\nENDSEC\n\
+            0\nSECTION\n2\nENTITIES\n\
+            0\nLINE\n5\n64\n8\n0\n6\nContinuous\n62\n3\n370\n25\n10\n20\n20\n0\n30\n0\n11\n25\n21\n0\n31\n0\n\
+            0\nLINE\n5\n65\n8\n0\n420\n660510\n10\n30\n20\n0\n30\n0\n11\n35\n21\n0\n31\n0\n\
+            0\nENDSEC\n0\nEOF\n"
+            .as_bytes().to_vec();
+        let mut doc = parse_dxf_core(&bytes).expect("fixture with explicit property groups parses");
+        let before = projected_entities(&doc.inner);
+        let a = before.iter().find(|e| e["handle"] == "100").expect("entity 100 in the projection");
+        assert_eq!(a["aci"], 3);
+        assert_eq!(a["linetype"], "Continuous");
+        assert_eq!(a["lineweight"], 25);
+        let b = before.iter().find(|e| e["handle"] == "101").expect("entity 101 in the projection");
+        assert_eq!(b["trueColor"], serde_json::json!([10, 20, 30]));
+        // ONE unrelated edit, touching neither entity above.
+        doc.create_line_core(50.0, 50.0, 60.0, 50.0, "0").expect("unrelated line");
+        let back = reparse(&doc);
+        let after = projected_entities(&back.inner);
+        let a2 = after.iter().find(|e| e["handle"] == "100").expect("entity 100 survives the round trip");
+        assert_eq!(a2["aci"], 3);
+        assert_eq!(a2["linetype"], "Continuous");
+        assert_eq!(a2["lineweight"], 25);
+        assert_eq!(a2["trueColor"], serde_json::Value::Null);
+        let b2 = after.iter().find(|e| e["handle"] == "101").expect("entity 101 survives the round trip");
+        assert_eq!(b2["trueColor"], serde_json::json!([10, 20, 30]));
     }
 }

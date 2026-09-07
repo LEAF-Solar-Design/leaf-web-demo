@@ -71,6 +71,13 @@ const WORDS = Object.freeze({
   el: { group: 'draw', op: 'createEllipse', verb: 'ELLIPSE' },
   matchprop: { group: 'modify', op: 'matchprop', verb: 'MATCHPROP' },
   ma: { group: 'modify', op: 'matchprop', verb: 'MATCHPROP' },
+  // W4g-7b-03c: colour, linetype and lineweight, each a one-value prompt like SET LAYER.
+  color: { group: 'modify', op: 'setColor', verb: 'COLOR' },
+  col: { group: 'modify', op: 'setColor', verb: 'COLOR' },
+  linetype: { group: 'modify', op: 'setLinetype', verb: 'LINETYPE' },
+  lt: { group: 'modify', op: 'setLinetype', verb: 'LINETYPE' },
+  lweight: { group: 'modify', op: 'setLineweight', verb: 'LWEIGHT' },
+  lw: { group: 'modify', op: 'setLineweight', verb: 'LWEIGHT' },
   // W4g-7b-02c: the reference's INSERT, one letter like the rest of its Draw row.
   insert: { group: 'draw', op: 'createInsert', verb: 'INSERT' },
   i: { group: 'draw', op: 'createInsert', verb: 'INSERT' },

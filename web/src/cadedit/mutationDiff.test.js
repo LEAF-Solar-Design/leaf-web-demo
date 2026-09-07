@@ -2,6 +2,12 @@
 import { describe, expect, it } from 'vitest'
 import { COORDINATE_EPSILON, MAX_PLAN_OPERATIONS, diffPlan, planGeometry } from './mutationDiff.js'
 
+// W4g-7b-03c: the default ByLayer property set planGeometry stamps on every
+// entity a fixture below leaves aci/linetype/lineweight unset (propsOf's own
+// "missing means ByLayer" reading), shared so the geometry-shape assertions
+// below need not repeat it.
+const DEFAULT_PROPS = { aci: 256, trueColor: null, linetype: 'ByLayer', lineweight: -1 }
+
 // The worker's projection: decimal ids (the intake's hex "A" is 10, "B" 11, "C1" 193).
 const line = (id, extra = {}) => ({ id: String(id), type: 'LINE', layer: '0', closed: false, vertices: [[0, 0, 0], [3, 4, 0]], radius: null, startDeg: null, endDeg: null, ...extra })
 const poly = (id, extra = {}) => ({ id: String(id), type: 'LWPOLYLINE', layer: 'Panels', closed: true, vertices: [[0, 0, 0], [2, 0, 0], [2, 2, 0], [0, 2, 0]], radius: null, startDeg: null, endDeg: null, ...extra })
@@ -11,12 +17,12 @@ const text = (id) => ({ id: String(id), type: 'TEXT', layer: '0', closed: false,
 
 describe('planGeometry', () => {
   it('reads each kind into the contract terms and leaves the rest out', () => {
-    expect(planGeometry(line(10))).toEqual({ kind: 'LINE', layer: '0', pts: [[0, 0, 0], [3, 4, 0]] })
+    expect(planGeometry(line(10))).toEqual({ kind: 'LINE', layer: '0', pts: [[0, 0, 0], [3, 4, 0]], props: DEFAULT_PROPS })
     // W4g-6d: a polyline's geometry also carries its bulges and the curved flag (straight here).
     expect(planGeometry(poly(11))).toMatchObject({ bulges: [0, 0, 0, 0], curved: false })
     expect(planGeometry(poly(11))).toMatchObject({ kind: 'LWPOLYLINE', layer: 'Panels', closed: true, pts: [[0, 0, 0], [2, 0, 0], [2, 2, 0], [0, 2, 0]] })
-    expect(planGeometry(circle(193))).toEqual({ kind: 'CIRCLE', layer: 'Round', c: [10, 10, 0], r: 3 })
-    expect(planGeometry(arc(209))).toEqual({ kind: 'ARC', layer: 'Round', c: [20, 0, 0], r: 2, start_deg: 0, end_deg: 90 })
+    expect(planGeometry(circle(193))).toEqual({ kind: 'CIRCLE', layer: 'Round', c: [10, 10, 0], r: 3, props: DEFAULT_PROPS })
+    expect(planGeometry(arc(209))).toEqual({ kind: 'ARC', layer: 'Round', c: [20, 0, 0], r: 2, start_deg: 0, end_deg: 90, props: DEFAULT_PROPS })
     expect(planGeometry(text(12))).toBeNull()
     expect(planGeometry({ ...poly(11), type: 'POLYLINE', closed: false, vertices: [[0, 0], [1, 1]] })).toMatchObject({ kind: 'LWPOLYLINE', layer: 'Panels', closed: false, pts: [[0, 0, 0], [1, 1, 0]] })
   })

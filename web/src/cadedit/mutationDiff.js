@@ -51,6 +51,19 @@ function samePoints(a, b) {
   return true
 }
 
+// W4g-7b-03c: colour, linetype and lineweight, normalized off the projection
+// so an older engine reply (no such fields) reads as plain ByLayer — the
+// same "missing means default" reading every other optional projection field
+// already gets in this module.
+function propsOf(entity) {
+  const aci = Number.isFinite(entity.aci) ? entity.aci : 256
+  const trueColor = Array.isArray(entity.trueColor) && entity.trueColor.length === 3
+    && entity.trueColor.every(finite) ? entity.trueColor.slice(0, 3) : null
+  const linetype = typeof entity.linetype === 'string' && entity.linetype ? entity.linetype : 'ByLayer'
+  const lineweight = Number.isFinite(entity.lineweight) ? entity.lineweight : -1
+  return { aci, trueColor, linetype, lineweight }
+}
+
 /**
  * One projection entity ({id|handle, type, layer, closed, vertices, radius,
  * startDeg, endDeg}) -> its geometry in the contract's terms, or null when
@@ -64,13 +77,14 @@ export function planGeometry(entity) {
   const type = String(entity.type || '')
   const layer = typeof entity.layer === 'string' && entity.layer ? entity.layer : '0'
   const verts = Array.isArray(entity.vertices) ? entity.vertices : []
+  const props = propsOf(entity)
   if (ROUND_KINDS.has(type)) {
     const c = point3(verts[0])
     const r = entity.radius
     if (!c || !finite(r) || r <= 0) return null
-    if (type === 'CIRCLE') return { kind: 'CIRCLE', layer, c, r }
+    if (type === 'CIRCLE') return { kind: 'CIRCLE', layer, c, r, props }
     if (!finite(entity.startDeg) || !finite(entity.endDeg)) return null
-    return { kind: 'ARC', layer, c, r, start_deg: entity.startDeg, end_deg: entity.endDeg }
+    return { kind: 'ARC', layer, c, r, start_deg: entity.startDeg, end_deg: entity.endDeg, props }
   }
   if (!LINEAR_KINDS.has(type)) return null
   const pts = []
@@ -79,7 +93,7 @@ export function planGeometry(entity) {
     if (!p) return null
     pts.push(p)
   }
-  if (type === 'LINE') return pts.length === 2 ? { kind: 'LINE', layer, pts } : null
+  if (type === 'LINE') return pts.length === 2 ? { kind: 'LINE', layer, pts, props } : null
   if (pts.length < 2) return null
   // W4g-6d: the projection's bulges ride along so a curved polyline is seen;
   // the contract's point list cannot carry them, so a geometry change on
@@ -87,7 +101,7 @@ export function planGeometry(entity) {
   const rawB = Array.isArray(entity.bulges) ? entity.bulges : []
   const bulges = rawB.length === pts.length && rawB.every(finite) ? rawB.slice() : new Array(pts.length).fill(0)
   const curved = rawB.length !== 0 && (rawB.length !== pts.length || !rawB.every(finite) || bulges.some((b) => Math.abs(b) > BULGE_EPS))
-  return { kind: 'LWPOLYLINE', layer, closed: entity.closed === true, pts, bulges, curved }
+  return { kind: 'LWPOLYLINE', layer, closed: entity.closed === true, pts, bulges, curved, props }
 }
 
 /**
@@ -100,11 +114,15 @@ function opaqueOf(entity) {
   if (!entity || typeof entity !== 'object') return null
   const type = String(entity.type || '')
   if (!type || ROUND_KINDS.has(type) || LINEAR_KINDS.has(type)) return null
+  const props = propsOf(entity)
   const print = JSON.stringify([type, entity.layer ?? null, entity.vertices ?? null, entity.radius ?? null, entity.startDeg ?? null,
     entity.endDeg ?? null, entity.text ?? null, entity.height ?? null, entity.rotationDeg ?? null, entity.bulges ?? null, entity.closed === true,
     // W4g-4b: an ELLIPSE's axis and ratio (the row that added them caught their absence here).
     entity.majorAxis ?? null, entity.ratio ?? null, entity.name ?? null, entity.ip ?? null, entity.scale ?? null,
-    entity.columns ?? 1, entity.rows ?? 1, entity.columnSpacing ?? 0, entity.rowSpacing ?? 0])
+    entity.columns ?? 1, entity.rows ?? 1, entity.columnSpacing ?? 0, entity.rowSpacing ?? 0,
+    // W4g-7b-03c: colour, linetype and lineweight, so a property-only change
+    // on an opaque kind (TEXT, POINT, ELLIPSE) is seen, not dropped.
+    props.aci, props.trueColor, props.linetype, props.lineweight])
   return { kind: 'OPAQUE', type, print }
 }
 
@@ -126,8 +144,14 @@ function insertOf(entity) {
   if (!name) return null
   const layer = typeof entity.layer === 'string' && entity.layer ? entity.layer : '0'
   const point = [ip[0], ip[1], 0]
+  const props = propsOf(entity)
+  // W4g-7b-03c: an INSERT reference's colour/linetype/lineweight now live on
+  // its own EntityCommon (the crate accepts property ops on a reference); a
+  // change to them is still a raw-operation refusal here, same as any other
+  // in-place INSERT change, so it is never silently dropped from the print.
   const print = JSON.stringify([name, point, rot, scale, layer,
-    entity.columns ?? 1, entity.rows ?? 1, entity.columnSpacing ?? 0, entity.rowSpacing ?? 0])
+    entity.columns ?? 1, entity.rows ?? 1, entity.columnSpacing ?? 0, entity.rowSpacing ?? 0,
+    props.aci, props.trueColor, props.linetype, props.lineweight])
   return { kind: 'INSERT', name, ip: point, rot, scale: scale.slice(), layer, print }
 }
 
@@ -175,12 +199,25 @@ function sameRound(a, b) {
   return true
 }
 
+// W4g-7b-03c: a created entity whose properties are not plain ByLayer rides
+// as a "styled add" — the three fields present only when they differ from
+// the ByLayer default, so an ordinary add's wire shape is unchanged.
+function styleOf(g) {
+  const props = g.props
+  if (!props) return {}
+  const styled = {}
+  if (props.aci !== 256) styled.color = props.aci
+  if (props.linetype.toLowerCase() !== 'bylayer') styled.linetype = props.linetype
+  if (props.lineweight !== -1) styled.lineweight = props.lineweight
+  return styled
+}
+
 function addedRecord(handle, g) {
-  if (g.kind === 'CIRCLE') return { handle, kind: 'CIRCLE', layer: g.layer, c: g.c, r: g.r }
-  if (g.kind === 'ARC') return { handle, kind: 'ARC', layer: g.layer, c: g.c, r: g.r, start_deg: g.start_deg, end_deg: g.end_deg }
-  if (g.kind === 'LINE') return { handle, kind: 'LINE', layer: g.layer, pts: g.pts }
+  if (g.kind === 'CIRCLE') return { handle, kind: 'CIRCLE', layer: g.layer, c: g.c, r: g.r, ...styleOf(g) }
+  if (g.kind === 'ARC') return { handle, kind: 'ARC', layer: g.layer, c: g.c, r: g.r, start_deg: g.start_deg, end_deg: g.end_deg, ...styleOf(g) }
+  if (g.kind === 'LINE') return { handle, kind: 'LINE', layer: g.layer, pts: g.pts, ...styleOf(g) }
   if (g.kind === 'INSERT') return { handle, kind: 'INSERT', name: g.name, pt: g.ip, rot: normalizedDeg(g.rot), scale: g.scale, layer: g.layer }
-  return { handle, layer: g.layer, closed: g.closed, pts: g.pts }
+  return { handle, layer: g.layer, closed: g.closed, pts: g.pts, ...styleOf(g) }
 }
 
 const byHandle = (a, b) => (a.handle < b.handle ? -1 : a.handle > b.handle ? 1 : 0)
@@ -202,6 +239,9 @@ export function diffPlan(committed, current) {
   const setPoints = []
   const setCircle = []
   const setArc = []
+  const setColor = []
+  const setLinetype = []
+  const setLineweight = []
   const cannot = (reason) => ({ mutations: null, count: 0, reason })
   // The engine digest covers EVERY child, including unlisted/unsupported ones.
   // Keep the legacy full-record fallback for older projections without digests.
@@ -242,6 +282,21 @@ export function diffPlan(committed, current) {
       return cannot(`entity ${handle} is a INSERT the plan cannot carry, and it changed`)
     }
     if (was.layer !== now.layer) setLayer.push({ handle, layer: now.layer })
+    // W4g-7b-03c: colour, linetype and lineweight lower independently of
+    // geometry, so an entity whose geometry ALSO changed carries both. A
+    // true colour that appeared or changed cannot be carried (the contract
+    // is ACI only); a true colour that stayed exactly what it was, or that
+    // was cleared by an ACI set, is not this case (the aci compare below
+    // still catches the clear-and-recolour as an ordinary set_color).
+    const wasProps = was.props
+    const nowProps = now.props
+    const trueColorChanged = JSON.stringify(wasProps.trueColor) !== JSON.stringify(nowProps.trueColor)
+    if (trueColorChanged && nowProps.trueColor) {
+      return cannot(`entity ${handle} has a true colour the plan cannot carry`)
+    }
+    if (wasProps.aci !== nowProps.aci) setColor.push({ handle, aci: nowProps.aci })
+    if (wasProps.linetype.toLowerCase() !== nowProps.linetype.toLowerCase()) setLinetype.push({ handle, name: nowProps.linetype })
+    if (wasProps.lineweight !== nowProps.lineweight) setLineweight.push({ handle, weight: nowProps.lineweight })
     if (now.kind === 'CIRCLE') {
       if (!sameRound(was, now)) setCircle.push({ handle, c: now.c, r: now.r })
     } else if (now.kind === 'ARC') {
@@ -267,6 +322,7 @@ export function diffPlan(committed, current) {
     added.push(addedRecord(handle, now))
   }
   const count = added.length + removed.length + setLayer.length + setPoints.length + setCircle.length + setArc.length
+    + setColor.length + setLinetype.length + setLineweight.length
   if (count > MAX_PLAN_OPERATIONS) {
     return { mutations: null, count, reason: `this edit changes ${count} entities, over the ${MAX_PLAN_OPERATIONS} a plan can carry` }
   }
@@ -277,5 +333,8 @@ export function diffPlan(committed, current) {
   if (setPoints.length) mutations.set_points = setPoints.sort(byHandle)
   if (setCircle.length) mutations.set_circle = setCircle.sort(byHandle)
   if (setArc.length) mutations.set_arc = setArc.sort(byHandle)
+  if (setColor.length) mutations.set_color = setColor.sort(byHandle)
+  if (setLinetype.length) mutations.set_linetype = setLinetype.sort(byHandle)
+  if (setLineweight.length) mutations.set_lineweight = setLineweight.sort(byHandle)
   return { mutations, count, reason: null }
 }

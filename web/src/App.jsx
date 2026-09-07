@@ -53,7 +53,8 @@ import { deriveWorkspaceProjectState } from './site/workspaceProjectState.js'
 import IosSurface from './ios/IosSurface.jsx'
 import { ENV_IOS_SURFACE } from './ios/flag.js'
 import CadEditSurface from './cadedit/CadEditSurface.jsx'
-import EngineSessionProvider from './cadedit/EngineSessionProvider.jsx'
+import EngineSessionProvider, { useEngineSessionOptional } from './cadedit/EngineSessionProvider.jsx'
+import { formatAci, formatLineweight } from './cadedit/engineSession.js'
 import EngineRibbonClusters from './cadedit/EngineRibbonClusters.jsx'
 import CommandLineArmer from './cadedit/CommandLineArmer.jsx'
 import EngineDocumentView from './cadedit/EngineDocumentView.jsx'
@@ -244,6 +245,12 @@ export default function App() {
   // consumer is the Viewer render site, which portals into it; null renders
   // the old shell byte-for-byte (the rollback contract, studioGround.js).
   const studioGround = useStudioGround()
+  // W4g-7b-03c: the dock's General Color/Linetype/Lineweight rows read the
+  // ENGINE'S OWN selection (session.selectedId), the only place those three
+  // fields live — never the console's server-drawing selection, which has no
+  // such fields. Optional: null on a flag-off build (no provider mounted) or
+  // a standalone embed, which the rows below read as an honest empty state.
+  const engineSessionForDock = useEngineSessionOptional()
   const [mock, setMock] = useState(config.mockDefault)
   const [loadErr, setLoadErr] = useState(null)
   const [intakeRetryKey, setIntakeRetryKey] = useState(0) // X3 Retry — bumping re-runs the intake load effect
@@ -2601,10 +2608,14 @@ export default function App() {
       extra: <div id="cockpit-script-slot" className="ribbon-slot ribbon-slot-panel" />,
     }
     // W4g-4b: the Properties panel keeps its reference seat (after Layers and
-    // Block) and its honest ByLayer fields; with the flag on its one tool,
-    // Match, is real and the engine consumer portals it into this slot.
+    // Block); with the flag on, Match and the three combos are real and the
+    // engine consumer portals them into this slot. W4g-7b-03c: `widgets` is
+    // dropped here (not just left at `tools: []`) so the flag-on build shows
+    // ONLY the portaled real combos, never the static disabled ByLayer
+    // placeholders alongside them; referencePanels()'s own widgets stay for
+    // the flag-off build, which never reaches this seat.
     const propertiesSeat = {
-      ...properties, tools: [],
+      ...properties, tools: [], widgets: [],
       extra: <div id="cockpit-properties-slot" className="ribbon-slot" />,
     }
     // The reference's Draw tab: Draw, Modify, Clipboard (engine children,
@@ -3526,8 +3537,28 @@ export default function App() {
                   onToggle={toggleLayer}
                 />
               ) : null
+              // W4g-7b-03c: the General section's Color/Linetype/Lineweight
+              // rows, read-only, from the ENGINE'S OWN selection (the only
+              // place those three fields live; SelectionReadout.jsx reads the
+              // console's server-drawing selection, which has none of them,
+              // and is out of this record's owned set, so these rows sit
+              // beside it rather than inside it). Absent entirely when the
+              // engine holds no selection, honest-empty like every other row.
+              const engineEntity = engineSessionForDock?.session
+                ? (engineSessionForDock.session.entities || []).find((entity) => entity.id === engineSessionForDock.session.selectedId)
+                : null
+              const propertyRowsEl = engineEntity ? (
+                <dl className="dock-properties" data-testid="dock-properties">
+                  <dt>Color</dt><dd>{formatAci(Number.isFinite(engineEntity.aci) ? engineEntity.aci : 256)}</dd>
+                  <dt>Linetype</dt><dd>{typeof engineEntity.linetype === 'string' && engineEntity.linetype ? engineEntity.linetype : 'ByLayer'}</dd>
+                  <dt>Lineweight</dt><dd>{formatLineweight(Number.isFinite(engineEntity.lineweight) ? engineEntity.lineweight : -1)}</dd>
+                </dl>
+              ) : null
               const readoutEl = intake ? (
-                <SelectionReadout selection={selection} onDeselect={() => setSelectedHandle(null)} />
+                <>
+                  <SelectionReadout selection={selection} onDeselect={() => setSelectedHandle(null)} />
+                  {propertyRowsEl}
+                </>
               ) : null
               // wideViewport: <=980px stacks the console; the dock's
               // floating placement has no home there, so the inline arm

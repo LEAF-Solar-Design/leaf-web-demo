@@ -48,6 +48,15 @@ describe('commandWords (W4f slice B): typed CAD words on the command line', () =
     expect(parseDrawingCommand('INSERT')).toMatchObject({ op: 'createInsert' })
   })
 
+  it('W4g-7b-03c: colour, linetype and lineweight, and their one/two-letter forms', () => {
+    expect(parseDrawingCommand('color')).toMatchObject({ group: 'modify', op: 'setColor', verb: 'COLOR', word: 'color' })
+    expect(parseDrawingCommand('col')).toMatchObject({ op: 'setColor' })
+    expect(parseDrawingCommand('linetype')).toMatchObject({ group: 'modify', op: 'setLinetype', verb: 'LINETYPE', word: 'linetype' })
+    expect(parseDrawingCommand('lt')).toMatchObject({ op: 'setLinetype' })
+    expect(parseDrawingCommand('lweight')).toMatchObject({ group: 'modify', op: 'setLineweight', verb: 'LWEIGHT', word: 'lweight' })
+    expect(parseDrawingCommand('lw')).toMatchObject({ op: 'setLineweight' })
+  })
+
   it('exposes the word list for the help surface, every entry parseable', () => {
     expect(COMMAND_WORDS.length).toBeGreaterThan(10)
     for (const word of COMMAND_WORDS) expect(parseDrawingCommand(word)).not.toBeNull()
