@@ -10,7 +10,7 @@ import { parseDrawingCommand } from '../lib/commandWords.js'
 import DraftingRibbon from '../site/DraftingRibbon.jsx'
 import EngineRibbonClusters from './EngineRibbonClusters.jsx'
 import EngineSessionProvider, { useEngineSessionContext } from './EngineSessionProvider.jsx'
-import { buildEditPayload, planMatchprop } from './engineSession.js'
+import { buildEditPayload, lowerSteps, planMatchprop, projectionEntities } from './engineSession.js'
 import { diffPlan } from './mutationDiff.js'
 
 afterEach(() => cleanup())
@@ -40,6 +40,46 @@ describe('the three property builders (buildEditPayload)', () => {
       .toBe('Property refused: lineweight must be a standard value in millimetres, ByLayer, ByBlock or Default')
     expect(buildEditPayload('setLineweight', 's1', { lineweight: 'ByLayer' }).payload.lineweight).toBe(-1)
     expect(buildEditPayload('setLineweight', 's1', { lineweight: 'Default' }).payload.lineweight).toBe(-3)
+  })
+})
+
+describe('W4g-7b linetype catalogue truncation', () => {
+  const catalogue = ['ByLayer', 'ByBlock', 'Continuous', 'DASHED']
+
+  it('defers absent names only for a truncated catalogue and keeps known spelling', () => {
+    const entities = projectionEntities({ entities: [], linetypes: catalogue, linetypesTruncated: false })
+    expect(buildEditPayload('setLinetype', 's1', { linetype: 'HIDDEN' }, catalogue, entities))
+      .toEqual({ refusal: 'Property refused: linetype HIDDEN is not loaded in this drawing' })
+    entities.linetypesTruncated = true
+    expect(buildEditPayload('setLinetype', 's1', { linetype: ' HIDDEN ' }, catalogue, entities))
+      .toEqual({ payload: { entityId: 's1', linetype: 'HIDDEN' } })
+    expect(buildEditPayload('setLinetype', 's1', { linetype: 'dashed' }, catalogue, entities))
+      .toEqual({ payload: { entityId: 's1', linetype: 'DASHED' } })
+  })
+
+  it('merges the flag from replies or snapshots and defaults a catalogue to complete', () => {
+    const entities = projectionEntities({ entities: [], linetypes: catalogue, linetypesTruncated: true })
+    expect(entities.linetypes).toEqual(catalogue)
+    expect(entities.linetypesTruncated).toBe(true)
+    expect(projectionEntities({ entities }).linetypesTruncated).toBe(true)
+    expect(projectionEntities({ entities, linetypesTruncated: false }).linetypesTruncated).toBe(false)
+    expect(projectionEntities({ entities: [], linetypes: catalogue }).linetypesTruncated).toBe(false)
+  })
+
+  it.each([true, false])('MATCHPROP lowering validates against a catalogue with truncated=%s', (truncated) => {
+    const entities = projectionEntities({
+      entities: [
+        { id: 's1', type: 'LINE', layer: 'A', linetype: 'ZZZ', editable: true },
+        { id: 'd1', type: 'LINE', layer: 'A', linetype: 'ByLayer', editable: true },
+      ],
+      linetypes: catalogue, linetypesTruncated: truncated,
+    })
+    const planned = planMatchprop({ entities, selectedId: 's1' }, { edge: 'd1' })
+    expect(planned.steps).toEqual([{ op: 'setLinetype', entityId: 'd1', linetype: 'ZZZ' }])
+    const lowered = lowerSteps(planned.steps, entities.linetypes, entities)
+    expect(lowered).toEqual(truncated
+      ? { steps: [{ op: 'setLinetype', payload: { entityId: 'd1', linetype: 'ZZZ' } }] }
+      : { refusal: 'Property refused: linetype ZZZ is not loaded in this drawing' })
   })
 })
 
@@ -261,6 +301,25 @@ function mountProperties() {
 }
 
 describe('W4g-7b-03c-g F5: the combos show the ACTUAL ladder rung', () => {
+  it('shows the truncated title, posts a typed name beyond the list, and names an engine refusal', () => {
+    const { workers, getContext } = mountProperties()
+    act(() => { getContext().session.actions.openBytes(new Uint8Array([0]), 'x.dxf') })
+    const entity = {
+      id: '7', handle: '7', type: 'LINE', layer: 'A', closed: false, editable: true,
+      vertices: [[0, 0, 0], [1, 1, 0]], radius: null, startDeg: null, endDeg: null,
+    }
+    workers[0].emit({ type: 'documentLoaded', documentId: 'x.dxf', entities: [entity], entityCount: 1, unsupported: [],
+      linetypes: ['ByLayer', 'ByBlock', 'Continuous'], linetypesTruncated: true })
+    act(() => { getContext().session.actions.select('7') })
+    expect(getContext().session.entities.linetypesTruncated).toBe(true)
+    // RibbonWidget puts the inherited tooltip on the select's label.
+    expect(screen.getByLabelText(/^Linetype/).closest('label').title).toBe("first 200 of the drawing's linetypes; type another name with LT")
+    act(() => { getContext().session.actions.applyEdit('setLinetype', { linetype: 'ZZZ' }) })
+    expect(workers[0].posted.at(-1)).toMatchObject({ type: 'applyEdit', op: 'setLinetype', payload: { entityId: '7', linetype: 'ZZZ' } })
+    workers[0].emit({ type: 'editApplied', op: 'setLinetype', ok: false, reason: 'linetype_not_loaded:ZZZ' })
+    expect(getContext().session.status).toBe('Property refused: linetype ZZZ is not loaded in this drawing')
+  })
+
   it('says "no drawing" before any document is open, never the hardcoded "select an entity"', () => {
     mountProperties()
     const select = screen.getByLabelText(/^Color/)

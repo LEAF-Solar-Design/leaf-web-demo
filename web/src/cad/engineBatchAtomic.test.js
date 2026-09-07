@@ -69,9 +69,10 @@ const SCRIPT = [
   'const bytes = new TextEncoder().encode(dxf)',
   'const out = {}',
   'const loaded = await handleMessage({ type: "loadDocument", documentId: "x.dxf", bytes }, engine)',
+  'out.loadedCatalogue = { linetypes: loaded.linetypes, linetypesTruncated: loaded.linetypesTruncated }',
   'const ids = loaded.entities.map((e) => e.id)',
   'const [h, v, c] = ids',
-  'const summary = (r) => ({ ok: r.ok, op: r.op, reason: r.reason ?? null, createdId: r.createdId ?? null, createdIds: r.createdIds ?? null, count: r.entityCount ?? null, entities: (r.entities || []).map((e) => ({ id: e.id, type: e.type, layer: e.layer, editable: e.editable, vertices: e.vertices, bulges: e.bulges, closed: e.closed, radius: e.radius, startDeg: e.startDeg, endDeg: e.endDeg, majorAxis: e.majorAxis, ratio: e.ratio, aci: e.aci, trueColor: e.trueColor ?? null, linetype: e.linetype, lineweight: e.lineweight })), linetypes: r.linetypes ?? null })',
+  'const summary = (r) => ({ ok: r.ok, op: r.op, reason: r.reason ?? null, createdId: r.createdId ?? null, createdIds: r.createdIds ?? null, count: r.entityCount ?? null, entities: (r.entities || []).map((e) => ({ id: e.id, type: e.type, layer: e.layer, editable: e.editable, vertices: e.vertices, bulges: e.bulges, closed: e.closed, radius: e.radius, startDeg: e.startDeg, endDeg: e.endDeg, majorAxis: e.majorAxis, ratio: e.ratio, aci: e.aci, trueColor: e.trueColor ?? null, linetype: e.linetype, lineweight: e.lineweight })), linetypes: r.linetypes ?? null, linetypesTruncated: r.linetypesTruncated })',
   // A fillet: both lines cut to their tangent points, one arc made, in one turn.
   'out.fillet = summary(await handleMessage({ type: "applyEdit", op: "batch", payload: { verb: "fillet", steps: [',
   '  { op: "setVertices", payload: { entityId: h, points: [0, 0, 8, 0], closed: false } },',
@@ -316,6 +317,8 @@ describe.skipIf(!GLUE)('the worker batch on the real engine', () => {
     expect(out.setColor.entities.find((e) => e.id === h).aci).toBe(1)
     expect(out.setColorRefused).toMatchObject({ ok: false, op: 'setColor', reason: 'color_index_out_of_range' })
     expect(out.setLinetype.ok).toBe(true)
+    expect(out.loadedCatalogue.linetypesTruncated).toBe(false)
+    expect(out.loadedCatalogue.linetypes).toEqual(expect.arrayContaining(['ByLayer', 'ByBlock', 'Continuous']))
     expect(out.setLinetype.entities.find((e) => e.id === h).linetype).toBe('ByBlock')
     expect(out.setLinetypeRefused).toMatchObject({ ok: false, op: 'setLinetype', reason: 'linetype_not_loaded:NoSuchLinetype' })
     expect(out.setLineweight.ok).toBe(true)
@@ -325,6 +328,7 @@ describe.skipIf(!GLUE)('the worker batch on the real engine', () => {
     const propsHeld = out.afterProps.entities.find((e) => e.id === h)
     expect(propsHeld).toMatchObject({ aci: 1, linetype: 'ByBlock', lineweight: 25 })
     expect(out.afterProps.linetypes).toEqual(expect.arrayContaining(['ByLayer', 'ByBlock', 'Continuous']))
+    expect(out.afterProps.linetypesTruncated).toBe(false)
 
     // W4g-7b-03c required row: entities the session never touches keep their
     // explicit 62/6/370/420 groups through parse -> one unrelated edit

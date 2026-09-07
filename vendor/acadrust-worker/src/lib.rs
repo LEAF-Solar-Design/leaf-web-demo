@@ -548,7 +548,7 @@ fn block_catalogue(document: &CadDocument, bases_unknown: bool, unknown_bases: &
 // the catalogue guarantees them defensively.
 const LINETYPE_CATALOGUE_CAP: usize = 200;
 
-fn linetypes_catalogue(document: &CadDocument) -> Vec<String> {
+fn linetypes_catalogue(document: &CadDocument) -> (Vec<String>, bool) {
     let mut names: Vec<String> = document.line_types.iter().map(|lt| lt.name.clone()).collect();
     for required in ["ByLayer", "ByBlock", "Continuous"] {
         if !names.iter().any(|n| n.eq_ignore_ascii_case(required)) {
@@ -557,8 +557,18 @@ fn linetypes_catalogue(document: &CadDocument) -> Vec<String> {
     }
     names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
     names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    let truncated = names.len() > LINETYPE_CATALOGUE_CAP;
     names.truncate(LINETYPE_CATALOGUE_CAP);
-    names
+    let defaults = ["ByLayer", "ByBlock", "Continuous"];
+    for required in defaults {
+        if !names.iter().any(|n| n.eq_ignore_ascii_case(required)) {
+            let index = names.iter().rposition(|n| !defaults.iter().any(|d| n.eq_ignore_ascii_case(d)))
+                .expect("bounded catalogue has a non-default name");
+            names[index] = required.to_string();
+        }
+    }
+    names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    (names, truncated)
 }
 
 // W4g-7b-04c: the DIMSTYLE table's names for the create-dimension style
@@ -1891,9 +1901,13 @@ impl ParsedDxf {
         if !set_projection_field(&list, &JsValue::from_str("blocks"), &blocks) {
             return Err(JsValue::from_str("block_catalogue_projection_failed"));
         }
-        let linetypes = linetypes_catalogue(&self.inner).serialize(&serializer)
+        let (names, truncated) = linetypes_catalogue(&self.inner);
+        let linetypes = names.serialize(&serializer)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         if !set_projection_field(&list, &JsValue::from_str("linetypes"), &linetypes) {
+            return Err(JsValue::from_str("linetype_catalogue_projection_failed"));
+        }
+        if !set_projection_field(&list, &JsValue::from_str("linetypesTruncated"), &JsValue::from_bool(truncated)) {
             return Err(JsValue::from_str("linetype_catalogue_projection_failed"));
         }
         // W4g-7b-04c: the DIMSTYLE catalogue, beside blocks/linetypes.
@@ -3487,7 +3501,8 @@ mod w4g_7b_03c_property_verbs {
         let mut doc = empty_doc();
         doc.inner.line_types.add(acadrust::tables::LineType::new("ZIGZAG")).expect("linetype added");
         doc.inner.line_types.add(acadrust::tables::LineType::new("dashed")).expect("linetype added");
-        let names = linetypes_catalogue(&doc.inner);
+        let (names, truncated) = linetypes_catalogue(&doc.inner);
+        assert!(!truncated);
         assert!(names.iter().any(|n| n.eq_ignore_ascii_case("ByLayer")));
         assert!(names.iter().any(|n| n.eq_ignore_ascii_case("ByBlock")));
         assert!(names.iter().any(|n| n.eq_ignore_ascii_case("Continuous")));
@@ -3497,6 +3512,24 @@ mod w4g_7b_03c_property_verbs {
         sorted.sort();
         assert_eq!(lowered, sorted, "the catalogue is sorted case-insensitively");
         assert!(names.len() <= LINETYPE_CATALOGUE_CAP);
+    }
+
+    #[test]
+    fn w4g_7b_linetypes_catalogue_reports_truncation_and_retains_defaults() {
+        let mut doc = empty_doc();
+        let (names, truncated) = linetypes_catalogue(&doc.inner);
+        assert_eq!(names.len(), 3);
+        assert!(!truncated);
+        for index in 0..198 {
+            doc.inner.line_types.add(acadrust::tables::LineType::new(&format!("A{index:03}"))).expect("linetype added");
+        }
+        let (names, truncated) = linetypes_catalogue(&doc.inner);
+        assert_eq!(names.len(), 200);
+        assert!(truncated);
+        for required in ["ByLayer", "ByBlock", "Continuous"] {
+            assert!(names.iter().any(|n| n.eq_ignore_ascii_case(required)));
+        }
+        assert!(names.windows(2).all(|pair| pair[0].to_lowercase() <= pair[1].to_lowercase()));
     }
 
     #[test]

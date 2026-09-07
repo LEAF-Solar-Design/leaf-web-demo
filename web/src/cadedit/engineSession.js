@@ -82,13 +82,15 @@ export function projectionEntities(message) {
   // consumer that reads `session.entities.linetypes` sees it survive an
   // undo/redo re-load exactly like the block catalogue does.
   const linetypes = message?.linetypes ?? entities.linetypes
+  const linetypesTruncated = (message?.linetypesTruncated ?? entities.linetypesTruncated) === true
   // W4g-7b-04c: the DIMSTYLE catalogue rides the same way blocks/linetypes
   // do, so createDimension's style validation sees it survive undo/redo.
   const dimstyles = message?.dimstyles ?? entities.dimstyles
-  if (!Array.isArray(blocks) && !Array.isArray(linetypes) && !Array.isArray(dimstyles)) return entities
+  if (!Array.isArray(blocks) && !Array.isArray(linetypes) && !Array.isArray(dimstyles) && !linetypesTruncated) return entities
   const next = entities.slice()
   if (Array.isArray(blocks)) next.blocks = blocks
   if (Array.isArray(linetypes)) next.linetypes = linetypes
+  next.linetypesTruncated = linetypesTruncated
   if (Array.isArray(dimstyles)) next.dimstyles = dimstyles
   return next
 }
@@ -878,8 +880,8 @@ export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer, x1,
     if (!trimmed) return { refusal: 'Property refused: enter a linetype name.' }
     const catalogue = Array.isArray(linetypeCatalogue) ? linetypeCatalogue : []
     const match = catalogue.find((name) => String(name).toLowerCase() === trimmed.toLowerCase())
-    if (!match) return { refusal: `Property refused: linetype ${trimmed} is not loaded in this drawing` }
-    payload.linetype = match
+    if (!match && entities?.linetypesTruncated !== true) return { refusal: `Property refused: linetype ${trimmed} is not loaded in this drawing` }
+    payload.linetype = match || trimmed
   }
   if (op === 'setLineweight') {
     const value = parseLineweight(lineweight)
@@ -1063,7 +1065,9 @@ export default function useEngineSession({
           patch({
             busy: false,
             errorKind: SESSION_ERROR.REFUSED,
-            status: `Edit refused (${label}): ${message.reason ?? 'unknown reason'}`,
+            status: typeof message.reason === 'string' && message.reason.startsWith('linetype_not_loaded:')
+              ? `Property refused: linetype ${message.reason.slice('linetype_not_loaded:'.length)} is not loaded in this drawing`
+              : `Edit refused (${label}): ${message.reason ?? 'unknown reason'}`,
           })
           return
         }
