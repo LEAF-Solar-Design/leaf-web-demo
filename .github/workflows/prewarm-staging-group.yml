@@ -21,7 +21,14 @@ concurrency:
 
 env:
   MIGRATION_SURFACE: "platform/migrations/ platform/db.py"
-  STAGE_SERVICES: "web app"
+  # The app startup check (server/app.py:340, platform_link.validate_postgres_startup)
+  # refuses to boot on staging without 0058_campaign_host_enrollment
+  # (constraint campaign_host_enrollments_machine_unique). Migrations ride the
+  # merge deploy, dead under 'exclusively AWS' until a native deploy step exists
+  # on leaf-deploy-terraform-staging. Web has no such check and staged natively
+  # twice (builds 1a2cc8c9, fb726619). Restore "web app" in the change that lands
+  # the native deploy's migrate step.
+  STAGE_SERVICES: "web"
   SUPPLY_SET_POLLS: "20"
   SUPPLY_SET_INTERVAL: "30"
 
