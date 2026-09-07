@@ -466,6 +466,55 @@ def test_context_is_closed_and_row_scoped(published):
         adapter.execution_context({'completion_provenance': p.ctx, 'capability_provenance': {}})
 
 
+@pytest.mark.parametrize('value', [None, True, 42, '', 'not-a-uuid', str(uuid.uuid4()).upper(), {}])
+def test_retry_broker_identity_rejects_malformed_uuid(published, value):
+    with pytest.raises(ValueError):
+        adapter.validate_context(dict(published.ctx, broker_job_id=value))
+
+
+def test_retry_context_keeps_closed_shape(published):
+    context = dict(published.ctx, broker_job_id=str(uuid.uuid4()))
+    assert adapter.validate_context(context) == context
+    assert adapter.validate_context(published.ctx) == published.ctx
+    with pytest.raises(ValueError):
+        adapter.validate_context(dict(context, retry=True))
+
+
+def test_retry_uses_original_broker_ledger_and_pinned_source(published, monkeypatch):
+    import broker
+    import broker_client
+    monkeypatch.setenv('BROKER_URL', 'http://broker.test')
+    original = published.jid
+    ledger, executions, calls = {}, [], []
+
+    def execute(*args, **kwargs):
+        calls.append((args, kwargs))
+        key = kwargs['ledger_event_key']
+        if key not in ledger:
+            executions.append(key)
+            ledger[key] = {'ok': True, 'result': {'csv': static.expected_output(
+                published.params['source_json'].encode()).decode()}}
+            raise TimeoutError('external execution completed but response was lost')
+        return ledger[key]
+
+    monkeypatch.setattr(broker_client, 'run_via_broker', execute)
+    assert invoke(published)['ok'] is False
+    published.ctx['broker_job_id'] = original
+    published.jid = str(uuid.uuid4())
+    assert invoke(published)['ok'] is True
+    assert invoke(published)['ok'] is True
+    assert executions == ['completion:' + original]
+    assert all(args == calls[0][0] for args, kwargs in calls)
+    assert all(kwargs['ledger_event_key'] == 'completion:' + original
+               and kwargs['file_only'] is True and kwargs['test_source'] == SOURCE for args, kwargs in calls)
+    assert calls[1][1]['job_id'] == published.jid != original
+    requests = [broker.BrokerRunRequest(
+        tenant_id=args[0], tool=args[1], params=args[2], dwg=args[3], aps_live=args[4],
+        ledger_event_key=kwargs['ledger_event_key'], job_id=kwargs['job_id'],
+        file_only=kwargs['file_only'], test_source=kwargs['test_source']) for args, kwargs in calls]
+    assert broker._broker_request_fingerprint(requests[0]) == broker._broker_request_fingerprint(requests[1])
+
+
 def test_both_record_serializers_validate_present_completion_scope(published):
     p = published
     names = ('job_id tenant_id tool params_json dwg status progress created_at started_at updated_at '

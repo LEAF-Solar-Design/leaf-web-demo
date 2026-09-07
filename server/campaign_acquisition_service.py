@@ -231,17 +231,50 @@ def _read_job(row, context, params, key):
     return job
 
 
-def _invoke(runtime, tenant, org, project, campaign, release, params, context, tool):
+def _invocation_retries(snapshot, version):
+    """Use only immutable retry authorizations backed by this contract's stages."""
+    retries = []
+    stages = [s for s in snapshot.get('stages', []) if s.get('contract_version') == version]
+    for stage in stages:
+        if (stage.get('stage') != 'implementation' or stage.get('status') == 'passed'
+                or stage.get('contract_version') != version):
+            continue
+        stage_id = str(stage['stage_id'])
+        if str(uuid.UUID(stage_id)) != stage_id:
+            continue
+        key = 'retry-stage:' + stage_id
+        expected = {'retry_stage': 'implementation', 'predecessor_stage_id': stage_id,
+                    'predecessor_operation_key': stage['operation_key'], 'contract_version': version}
+        rows = [d for d in snapshot.get('decisions', []) if d.get('decision_key') == key]
+        if len(rows) == 1 and rows[0].get('kind') == 'revision' and rows[0].get('payload') == expected:
+            retries.append((key, stage is stages[-1]))
+    if len(retries) > 2:
+        _refuse('The release retry bound is exhausted')
+    return retries
+
+
+def _invoke(runtime, tenant, org, project, campaign, release, params, context, tool,
+            retries=(), retry_key=None, retry_current=True):
     import jobs
     if jobs.job_store_mode() != 'postgres':
         raise AcquisitionError('awaiting_user', 'Durable transform execution is unavailable',
                                'Connect the existing PostgreSQL job service')
+    identity = [context['release_id'], context['contract_version'], context['input_sha256']]
+    if retry_key is not None:
+        identity.append(retry_key)
     key = 'completion-transform:' + _hash(json.dumps(
-        [context['release_id'], context['contract_version'], context['input_sha256']],
+        identity,
         separators=(',', ':')).encode())
     with admission._admission_lock(context['tenant_id'], str(org), str(project), key):
         prior = admission._lookup(context['tenant_id'], str(project), key)
         if prior is None:
+            if not retry_current:
+                if retries:
+                    # Older code could record a retry without admitting its job.
+                    # Skip that gap, but never submit under stale authority.
+                    return _invoke(runtime, tenant, org, project, campaign, release, params,
+                                   context, tool, retries[1:], *retries[0])
+                _refuse('The invocation retry authorization is stale')
             _run_authority(tenant, tool)
             with _capacity(org, project, campaign, release['release_id'], release['contract_version']) as available:
                 if not available:
@@ -264,12 +297,21 @@ def _invoke(runtime, tenant, org, project, campaign, release, params, context, t
                         raise AcquisitionError('working', 'Transform submission awaits durable readback',
                                                'Retry this release to read the same invocation')
         job = _read_job(prior, context, params, key)
-    _record(runtime, tenant, project, campaign, release, 'invocation',
+    phase = 'invocation' if retry_key is None else 'invocation-' + retry_key
+    _record(runtime, tenant, project, campaign, release, phase,
             {'job_id': job['job_id'], 'operation_key': key, 'context': context})
     if job['status'] in ('submitted', 'running'):
         return {'state': 'working', 'job_id': job['job_id'], 'reason': 'The published transform is running',
                 'recommended_action': 'Wait for its existing job to finish'}
     if job['status'] != 'complete':
+        if job['status'] == 'failed' and retries:
+            # _read_job verified original scope, publication and frozen params
+            # before this internal-only broker identity can enter a new job.
+            import campaign_transform_job as transform
+            retry_context = transform.validate_context(dict(
+                context, broker_job_id=context.get('broker_job_id', str(job['job_id']))))
+            return _invoke(runtime, tenant, org, project, campaign, release, params,
+                           retry_context, tool, retries[1:], *retries[0])
         raise AcquisitionError('failed', 'The published transform job failed',
                                'Inspect the existing job before one bounded correction')
     envelope = job.get('result')
@@ -383,7 +425,8 @@ def advance(runtime, tenant, project_id, campaign_id, release, source_bytes, *,
             'tenant_id': str(tenant), 'org_id': str(org), 'project_id': str(project),
             'campaign_id': str(campaign_id), 'release_id': str(release['release_id']),
             'contract_version': version, 'binding_id': str(actor), 'input_sha256': source_hash, **published})
-        return _invoke(runtime, tenant, org, project, campaign_id, release, params, context, tool)
+        return _invoke(runtime, tenant, org, project, campaign_id, release, params, context, tool,
+                       _invocation_retries(snapshot, version))
     except AcquisitionError as exc:
         return dict(retained, state=exc.state, reason=exc.reason, recommended_action=exc.action)
     except (agent_policy.PolicyError, entitlements.EntitlementsError):

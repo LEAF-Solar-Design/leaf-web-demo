@@ -33,14 +33,14 @@ def _sha(raw):
 
 
 def validate_context(value):
-    if not isinstance(value, dict) or set(value) != KEYS:
+    if not isinstance(value, dict) or set(value) not in (KEYS, KEYS | {"broker_job_id"}):
         raise ValueError("invalid completion context")
     if any(value[k] != v for k, v in CONSTANTS.items()):
         raise ValueError("invalid completion identity")
     for key in ("recipe_version", "contract_version"):
         if type(value[key]) is not int or value[key] < 1:
             raise ValueError("invalid completion version")
-    for key in IDS:
+    for key in IDS | ({"broker_job_id"} if "broker_job_id" in value else set()):
         if not isinstance(value[key], str) or str(uuid.UUID(value[key])) != value[key]:
             raise ValueError("invalid completion UUID")
     for key, cap in (("tenant_id", 32768), ("change_set_id", 200)):
@@ -238,7 +238,7 @@ def run(job_id, completion_provenance, tool, params, heartbeat, cancelled, deadl
             import broker_client
             env = broker_client.run_via_broker(
                 context["tenant_id"], published, params, '', False,
-                timeout_s=timeout, ledger_event_key='completion:' + str(uuid.UUID(job_id)),
+                timeout_s=timeout, ledger_event_key='completion:' + str(uuid.UUID(context.get("broker_job_id", job_id))),
                 job_id=job_id, file_only=True, test_source=source)
         else:
             env = tool_loader.run_tool_dynamic(published, {}, params, False,
