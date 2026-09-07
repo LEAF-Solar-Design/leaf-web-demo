@@ -274,3 +274,29 @@ describe('W4g-7a the script runner', () => {
     expect(context.inputs.etol).toBe('0.2')
   })
 })
+
+describe('W4g-7b-03c-g F1: the typed LT word validates against the LOADED linetype catalogue', () => {
+  it('a typed lt + Continuous is live and posts, once the session\'s own catalogue lists it', async () => {
+    mount()
+    await openAndLoad([H])
+    // A second documentLoaded, exactly the pattern the scripted-INSERT tests
+    // above use to add a block catalogue: this one adds the linetype table.
+    workers[0].emit({
+      type: 'documentLoaded', documentId: 'one.dxf', entities: [H], entityCount: 1, unsupported: [],
+      linetypes: ['ByLayer', 'ByBlock', 'Continuous'],
+    })
+    act(() => { context.session.actions.select('7') })
+    act(() => { context.setArmed({ group: 'modify', op: 'setLinetype' }) })
+    const field = screen.getByLabelText('ribbon linetype')
+    fireEvent.change(field, { target: { value: 'Continuous' } })
+    // Before the fix, the ribbon's live refusal called buildEditPayload with
+    // no catalogue argument (defaulting to []), so even a loaded, spelled-
+    // right name held Run refused forever.
+    expect(screen.queryByTestId('cockpit-prompt-note')).toBeNull()
+    const run = screen.getByTestId('cockpit-prompt-run')
+    expect(run.disabled).toBe(false)
+    fireEvent.click(run)
+    expect(posts()).toHaveLength(1)
+    expect(posts()[0]).toEqual({ type: 'applyEdit', op: 'setLinetype', payload: { entityId: '7', linetype: 'Continuous' } })
+  })
+})

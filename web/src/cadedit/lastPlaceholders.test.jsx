@@ -4,10 +4,10 @@
 // a Modify record seated in the reference's Properties panel that copies
 // the selection's layer to a picked object as ONE setLayer step. Pure rows
 // plus the seating, no worker.
-import { cleanup, render } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import DraftingRibbon from '../site/DraftingRibbon.jsx'
+import DraftingRibbon, { RibbonWidget } from '../site/DraftingRibbon.jsx'
 import { forGroup } from '../lib/actionRegistry.js'
 import { parseDrawingCommand } from '../lib/commandWords.js'
 
@@ -28,7 +28,11 @@ class IdleWorker {
 
 const H = { id: '7', handle: '7', index: 0, type: 'LINE', layer: 'Source', closed: false, editable: true, vertices: [[0, 0, 0], [10, 0, 0]], radius: null, startDeg: null, endDeg: null }
 const V = { id: '9', handle: '9', index: 1, type: 'LINE', layer: 'Other', closed: false, editable: true, vertices: [[5, -5, 0], [5, 5, 0]], radius: null, startDeg: null, endDeg: null }
+// W4g-7b-03c-f: an INSERT reference projects editable: false for GEOMETRY
+// alone; MATCHPROP copies properties, so it is no longer refused as a
+// destination. RO_DIM is a non-INSERT read-only kind, which still refuses.
 const RO = { id: '11', handle: '11', index: 2, type: 'INSERT', layer: 'Other', closed: false, editable: false, vertices: [], radius: null, startDeg: null, endDeg: null }
+const RO_DIM = { id: '12', handle: '12', index: 3, type: 'DIMENSION', layer: 'Other', closed: false, editable: false, vertices: [], radius: null, startDeg: null, endDeg: null }
 const session = (entities, selectedId) => ({ entities, selectedId })
 
 afterEach(() => cleanup())
@@ -133,8 +137,14 @@ describe('W4g-4b MATCHPROP', () => {
     expect(planMatchprop(session([H, V], '7'), { edge: '9' })).toEqual({ steps: [{ op: 'setLayer', entityId: '9', layer: 'Source' }] })
     expect(planMatchprop(session([H, V], '7'), { edge: '13' }).refusal).toBe('Match refused: the destination object is no longer in the document.')
     expect(planMatchprop(session([H, V], '13'), { edge: '9' }).refusal).toBe('Match refused: the selected entity is no longer in the document.')
-    expect(planMatchprop(session([H, RO], '7'), { edge: '11' }).refusal).toBe('Match refused: the destination object is read-only in the browser engine.')
-    expect(planMatchprop(session([H, { ...V, layer: 'Source' }], '7'), { edge: '9' }).refusal).toBe('Match refused: the destination is already on layer Source.')
+    // W4g-7b-03c-f: an INSERT reference is a matchable destination (its own
+    // properties, never its block children); only a non-INSERT read-only
+    // kind still refuses by name.
+    expect(planMatchprop(session([H, RO], '7'), { edge: '11' })).toEqual({ steps: [{ op: 'setLayer', entityId: '11', layer: 'Source' }] })
+    expect(planMatchprop(session([H, RO_DIM], '7'), { edge: '12' }).refusal).toBe('Match refused: the destination object is read-only in the browser engine.')
+    // W4g-7b-03c: MATCHPROP now checks the layer AND the three properties, so
+    // "nothing would change" covers all four rather than naming the layer alone.
+    expect(planMatchprop(session([H, { ...V, layer: 'Source' }], '7'), { edge: '9' }).refusal).toBe('Match refused: nothing to match.')
     expect(planMatchprop(session([{ ...H, layer: '' }, V], '7'), { edge: '9' }).refusal).toBe('Match refused: the selection has no layer to copy.')
     // The step lowers through the same builder a single setLayer op uses.
     expect(lowerSteps([{ op: 'setLayer', entityId: '9', layer: 'Source' }])).toEqual({ steps: [{ op: 'setLayer', payload: { entityId: '9', layer: 'Source' } }] })
@@ -146,7 +156,10 @@ describe('W4g-4b MATCHPROP', () => {
     expect(rec.id).toBe('modify:matchprop')
     expect(rec.panel).toBe('properties')
     expect(rec.icon).toBe('match')
-    for (const a of forGroup('modify')) if (a.op !== 'matchprop') expect(a.panel).toBe('modify')
+    // W4g-7b-03c: setColor/setLinetype/setLineweight join matchprop in the
+    // Properties panel; every other Modify record still sits in its own.
+    const propertiesOps = new Set(['matchprop', 'setColor', 'setLinetype', 'setLineweight'])
+    for (const a of forGroup('modify')) if (!propertiesOps.has(a.op)) expect(a.panel).toBe('modify')
     expect(PROMPTS.matchprop.steps.map((s) => s.ask)).toEqual(['Select destination object:'])
     expect(PROMPTS.createPoint.steps.map((s) => s.ask)).toEqual(['Specify a point:', 'Layer:'])
     expect(PROMPTS.createEllipse.steps.map((s) => s.ask)).toEqual(['Specify center of ellipse:', 'Specify endpoint of axis:', 'Specify ratio (minor to major, 0 to 1):', 'Layer:'])
@@ -208,5 +221,79 @@ describe('W4g-4b MATCHPROP', () => {
     expect(again).not.toBe(first)
     expect(again.querySelectorAll('[data-tool="modify:matchprop"]')).toHaveLength(1)
     expect(document.querySelectorAll('[data-tool="modify:matchprop"]')).toHaveLength(1)
+  })
+})
+
+describe('W4g-7b-03c-g F7: RibbonWidget applies a keyboard walk ONCE, on Enter or blur', () => {
+  it('a mouse/pointer change still applies at once', () => {
+    const onChange = vi.fn()
+    render(<RibbonWidget widget={{ id: 'w', label: 'Color', value: 'ByLayer', options: ['ByLayer', 'red', 'blue'], onChange }} />)
+    fireEvent.change(screen.getByLabelText('Color'), { target: { value: 'red' } })
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith('red')
+  })
+
+  it('three ArrowDown-driven changes then Enter post exactly ONE op, the last value', () => {
+    const onChange = vi.fn()
+    render(<RibbonWidget widget={{ id: 'w', label: 'Color', value: 'ByLayer', options: ['ByLayer', 'red', 'yellow', 'green'], onChange }} />)
+    const select = screen.getByLabelText('Color')
+    fireEvent.keyDown(select, { key: 'ArrowDown' })
+    fireEvent.change(select, { target: { value: 'red' } })
+    fireEvent.keyDown(select, { key: 'ArrowDown' })
+    fireEvent.change(select, { target: { value: 'yellow' } })
+    fireEvent.keyDown(select, { key: 'ArrowDown' })
+    fireEvent.change(select, { target: { value: 'green' } })
+    expect(onChange).not.toHaveBeenCalled()
+    fireEvent.keyDown(select, { key: 'Enter' })
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith('green')
+  })
+
+  it('a keyboard walk with no Enter still applies once, on blur', () => {
+    const onChange = vi.fn()
+    render(<RibbonWidget widget={{ id: 'w', label: 'Color', value: 'ByLayer', options: ['ByLayer', 'red', 'yellow'], onChange }} />)
+    const select = screen.getByLabelText('Color')
+    fireEvent.keyDown(select, { key: 'ArrowDown' })
+    fireEvent.change(select, { target: { value: 'red' } })
+    fireEvent.keyDown(select, { key: 'ArrowDown' })
+    fireEvent.change(select, { target: { value: 'yellow' } })
+    fireEvent.blur(select)
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith('yellow')
+    // A later focus/blur with no new change posts nothing more.
+    fireEvent.focus(select)
+    fireEvent.blur(select)
+    expect(onChange).toHaveBeenCalledTimes(1)
+  })
+
+  it('W4g-7b-03c-h D1: the walk is held in state, so the select shows every buffered step, not just the option adjacent to value', () => {
+    const onChange = vi.fn()
+    const { rerender } = render(<RibbonWidget widget={{ id: 'w', label: 'Color', value: 'ByLayer', options: ['ByLayer', 'red', 'yellow', 'green'], onChange }} />)
+    const select = screen.getByLabelText('Color')
+    fireEvent.keyDown(select, { key: 'ArrowDown' })
+    fireEvent.change(select, { target: { value: 'red' } })
+    expect(select.value).toBe('red')
+    expect(onChange).not.toHaveBeenCalled()
+    fireEvent.keyDown(select, { key: 'ArrowDown' })
+    fireEvent.change(select, { target: { value: 'yellow' } })
+    expect(select.value).toBe('yellow')
+    fireEvent.keyDown(select, { key: 'Enter' })
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith('yellow')
+    rerender(<RibbonWidget widget={{ id: 'w', label: 'Color', value: 'yellow', options: ['ByLayer', 'red', 'yellow', 'green'], onChange }} />)
+    expect(select.value).toBe('yellow')
+  })
+
+  it('W4g-7b-03c-h D1: Escape abandons the walk, no onChange, and a following blur posts nothing', () => {
+    const onChange = vi.fn()
+    render(<RibbonWidget widget={{ id: 'w', label: 'Color', value: 'ByLayer', options: ['ByLayer', 'red', 'yellow'], onChange }} />)
+    const select = screen.getByLabelText('Color')
+    fireEvent.keyDown(select, { key: 'ArrowDown' })
+    fireEvent.change(select, { target: { value: 'red' } })
+    fireEvent.keyDown(select, { key: 'Escape' })
+    expect(onChange).not.toHaveBeenCalled()
+    expect(select.value).toBe('ByLayer')
+    fireEvent.blur(select)
+    expect(onChange).not.toHaveBeenCalled()
   })
 })

@@ -30,7 +30,7 @@
 // run" uses (onRequestRun -> commitCatalogDecision, source 'ribbon'). NEVER
 // dispatchSlash here: that stamps slash provenance into the P2 funnel and
 // silently no-ops on gated writes.
-import { useLayoutEffect, useRef } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
 
 import { accessibleName } from '../lib/actionRegistry.js'
 import { formatElementId } from '../lib/elementIdentity.js'
@@ -92,16 +92,50 @@ export function RibbonTool({ tool }) {
 // A panel widget that is not a command: the reference's ByLayer combos.
 // Disabled widgets say why on their title, like disabled tools.
 export function RibbonWidget({ widget }) {
-  const { id, label, value = '', options = [], disabled = false, reason = '', onChange } = widget
+  const { id, label, value = '', options = [], disabled = false, reason = '', title = '', onChange } = widget
   const unavailable = disabled && reason
+  // W4g-7b-03c-g F7: a native closed <select> fires `change` once per
+  // ArrowUp/ArrowDown while it holds keyboard focus, so applying every
+  // change turned one keyboard walk into one engine write per option
+  // passed. A mouse/pointer pick still applies at once; once an arrow key
+  // is seen since focus, `change` only buffers the value, and it applies
+  // ONCE, on Enter or on blur, with whatever the last buffered value was.
+  // W4g-7b-03c-h D1: the select is CONTROLLED (`value` below), so the buffer
+  // must live in STATE, not a ref — React restores a controlled select to
+  // its `value` prop after every change event, so a ref-only buffer could
+  // never move the displayed value past the option adjacent to `value`, and
+  // the value that applied on Enter/blur was never the one shown. `walk`
+  // renders in place of `value` while a keyboard walk is in progress; Escape
+  // clears it with no commit, matching the reference's own Esc-abandons.
+  const keyboardWalkRef = useRef(false)
+  const [walk, setWalk] = useState(null)
+  const commitWalk = () => {
+    if (walk === null) return
+    const next = walk
+    setWalk(null)
+    onChange?.(next)
+  }
   return (
-    <label className="ribbon-widget" data-widget={id} title={unavailable ? reason : label}>
+    <label className="ribbon-widget" data-widget={id} title={unavailable ? reason : (title || label)}>
       <span className="ribbon-note">{label}</span>
       <select
         aria-label={accessibleName(label, unavailable ? reason : '')}
-        value={value}
+        value={walk ?? value}
         disabled={disabled}
-        onChange={(event) => onChange?.(event.target.value)}
+        onFocus={() => { keyboardWalkRef.current = false; setWalk(null) }}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowUp' || event.key === 'ArrowDown') keyboardWalkRef.current = true
+          else if (event.key === 'Enter' && keyboardWalkRef.current) commitWalk()
+          else if (event.key === 'Escape') { keyboardWalkRef.current = false; setWalk(null) }
+        }}
+        onChange={(event) => {
+          if (keyboardWalkRef.current) { setWalk(event.target.value); return }
+          onChange?.(event.target.value)
+        }}
+        onBlur={() => {
+          if (keyboardWalkRef.current) commitWalk()
+          keyboardWalkRef.current = false
+        }}
       >
         {(options.length ? options : [value]).map((opt) => <option key={opt} value={opt}>{opt}</option>)}
       </select>

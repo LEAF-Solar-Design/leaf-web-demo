@@ -71,7 +71,7 @@ const SCRIPT = [
   'const loaded = await handleMessage({ type: "loadDocument", documentId: "x.dxf", bytes }, engine)',
   'const ids = loaded.entities.map((e) => e.id)',
   'const [h, v, c] = ids',
-  'const summary = (r) => ({ ok: r.ok, op: r.op, reason: r.reason ?? null, createdId: r.createdId ?? null, createdIds: r.createdIds ?? null, count: r.entityCount ?? null, entities: (r.entities || []).map((e) => ({ id: e.id, type: e.type, layer: e.layer, editable: e.editable, vertices: e.vertices, bulges: e.bulges, closed: e.closed, radius: e.radius, startDeg: e.startDeg, endDeg: e.endDeg, majorAxis: e.majorAxis, ratio: e.ratio })) })',
+  'const summary = (r) => ({ ok: r.ok, op: r.op, reason: r.reason ?? null, createdId: r.createdId ?? null, createdIds: r.createdIds ?? null, count: r.entityCount ?? null, entities: (r.entities || []).map((e) => ({ id: e.id, type: e.type, layer: e.layer, editable: e.editable, vertices: e.vertices, bulges: e.bulges, closed: e.closed, radius: e.radius, startDeg: e.startDeg, endDeg: e.endDeg, majorAxis: e.majorAxis, ratio: e.ratio, aci: e.aci, trueColor: e.trueColor ?? null, linetype: e.linetype, lineweight: e.lineweight })), linetypes: r.linetypes ?? null })',
   // A fillet: both lines cut to their tangent points, one arc made, in one turn.
   'out.fillet = summary(await handleMessage({ type: "applyEdit", op: "batch", payload: { verb: "fillet", steps: [',
   '  { op: "setVertices", payload: { entityId: h, points: [0, 0, 8, 0], closed: false } },',
@@ -139,6 +139,42 @@ const SCRIPT = [
   'out.boolBulge = summary(await handleMessage({ type: "applyEdit", op: "createPolyline", payload: { points: [0, 0, 10, 0], closed: false, layer: "A", bulges: [true, null] } }, engine))',
   'out.viewBulge = summary(await handleMessage({ type: "applyEdit", op: "createPolyline", payload: { points: [0, 0, 10, 0], closed: false, layer: "A", bulges: new DataView(new ArrayBuffer(16)) } }, engine))',
   'out.afterStrict = summary(await handleMessage({ type: "applyEdit", op: "createLine", payload: { x1: 90, y1: 90, x2: 95, y2: 90, layer: "A" } }, engine))',
+  // W4g-7b-03c: the three property setters on the real engine. Each reads
+  // back after the write + re-parse; a refused set leaves the entity's
+  // prior value in place (untouched, never a partial write).
+  'out.setColor = summary(await handleMessage({ type: "applyEdit", op: "setColor", payload: { entityId: h, aci: 1 } }, engine))',
+  'out.setColorRefused = summary(await handleMessage({ type: "applyEdit", op: "setColor", payload: { entityId: h, aci: 999 } }, engine))',
+  'out.setLinetype = summary(await handleMessage({ type: "applyEdit", op: "setLinetype", payload: { entityId: h, linetype: "byblock" } }, engine))',
+  'out.setLinetypeRefused = summary(await handleMessage({ type: "applyEdit", op: "setLinetype", payload: { entityId: h, linetype: "NoSuchLinetype" } }, engine))',
+  'out.setLineweight = summary(await handleMessage({ type: "applyEdit", op: "setLineweight", payload: { entityId: h, lineweight: 25 } }, engine))',
+  'out.setLineweightRefused = summary(await handleMessage({ type: "applyEdit", op: "setLineweight", payload: { entityId: h, lineweight: 26 } }, engine))',
+  // A harmless read-back (h is already on layer A): proves every refusal
+  // above left the prior value in place, never a partial write.
+  'out.afterProps = summary(await handleMessage({ type: "applyEdit", op: "setLayer", payload: { entityId: h, layer: "A" } }, engine))',
+  // W4g-7b-03c required row: a DXF with explicit 62/6/370/420 groups on
+  // entities this session never touches round-trips them through parse ->
+  // one unrelated edit elsewhere -> write -> re-parse. $ACADVER AC1027 (the
+  // demo DWG's own converted version) is AC1018+, so the writer emits 420.
+  'const propsDxf = "0\\nSECTION\\n2\\nHEADER\\n9\\n$ACADVER\\n1\\nAC1027\\n0\\nENDSEC\\n0\\nSECTION\\n2\\nENTITIES\\n0\\nLINE\\n5\\n64\\n8\\n0\\n6\\nContinuous\\n62\\n3\\n370\\n25\\n10\\n20.0\\n20\\n0.0\\n30\\n0.0\\n11\\n25.0\\n21\\n0.0\\n31\\n0.0\\n0\\nLINE\\n5\\n65\\n8\\n0\\n420\\n660510\\n10\\n30.0\\n20\\n0.0\\n30\\n0.0\\n11\\n35.0\\n21\\n0.0\\n31\\n0.0\\n0\\nENDSEC\\n0\\nEOF\\n"',
+  'const propsLoaded = await handleMessage({ type: "loadDocument", documentId: "props.dxf", bytes: new TextEncoder().encode(propsDxf) }, engine)',
+  'out.propsBefore = summary(propsLoaded)',
+  'const [untouchedA, untouchedB] = propsLoaded.entities.map((e) => e.id)',
+  // ONE unrelated edit, touching neither line above.
+  'out.propsAfter = summary(await handleMessage({ type: "applyEdit", op: "createLine", payload: { x1: 90, y1: 0, x2: 91, y2: 0, layer: "0" } }, engine))',
+  'out.untouchedA = untouchedA',
+  'out.untouchedB = untouchedB',
+  // Declared residual: the identical fixture under $ACADVER AC1015 (2000,
+  // pre-AC1018). Reading is version-agnostic (the 420 group reads back on
+  // the initial parse), but the WRITER refuses to emit 420 below AC1018, so
+  // the same round-trip (write + re-parse) honestly drops the true colour.
+  'const propsDxfLegacy = "0\\nSECTION\\n2\\nHEADER\\n9\\n$ACADVER\\n1\\nAC1015\\n0\\nENDSEC\\n0\\nSECTION\\n2\\nENTITIES\\n0\\nLINE\\n5\\n64\\n8\\n0\\n6\\nContinuous\\n62\\n3\\n370\\n25\\n10\\n20.0\\n20\\n0.0\\n30\\n0.0\\n11\\n25.0\\n21\\n0.0\\n31\\n0.0\\n0\\nLINE\\n5\\n65\\n8\\n0\\n420\\n660510\\n10\\n30.0\\n20\\n0.0\\n30\\n0.0\\n11\\n35.0\\n21\\n0.0\\n31\\n0.0\\n0\\nENDSEC\\n0\\nEOF\\n"',
+  'const propsLegacyLoaded = await handleMessage({ type: "loadDocument", documentId: "props-legacy.dxf", bytes: new TextEncoder().encode(propsDxfLegacy) }, engine)',
+  'out.propsLegacyBefore = summary(propsLegacyLoaded)',
+  'const [untouchedLegacyA, untouchedLegacyB] = propsLegacyLoaded.entities.map((e) => e.id)',
+  // ONE unrelated edit, touching neither legacy line above.
+  'out.propsLegacyAfter = summary(await handleMessage({ type: "applyEdit", op: "createLine", payload: { x1: 92, y1: 0, x2: 93, y2: 0, layer: "0" } }, engine))',
+  'out.untouchedLegacyA = untouchedLegacyA',
+  'out.untouchedLegacyB = untouchedLegacyB',
   'process.stdout.write(JSON.stringify({ ids, out }))',
 ].join('\n')
 
@@ -272,6 +308,51 @@ describe.skipIf(!GLUE)('the worker batch on the real engine', () => {
     expect(out.viewBulge.reason).toBe('bulges_not_a_list')
     expect(out.afterStrict.ok).toBe(true)
     expect(out.afterStrict.entities).toHaveLength(out.afterRefusals.entities.length + 1)
+
+    // W4g-7b-03c: the three property setters on the real engine, each read
+    // back after the write + re-parse; a refused set leaves the entity's
+    // prior value in place, never a partial write.
+    expect(out.setColor.ok).toBe(true)
+    expect(out.setColor.entities.find((e) => e.id === h).aci).toBe(1)
+    expect(out.setColorRefused).toMatchObject({ ok: false, op: 'setColor', reason: 'color_index_out_of_range' })
+    expect(out.setLinetype.ok).toBe(true)
+    expect(out.setLinetype.entities.find((e) => e.id === h).linetype).toBe('ByBlock')
+    expect(out.setLinetypeRefused).toMatchObject({ ok: false, op: 'setLinetype', reason: 'linetype_not_loaded:NoSuchLinetype' })
+    expect(out.setLineweight.ok).toBe(true)
+    expect(out.setLineweight.entities.find((e) => e.id === h).lineweight).toBe(25)
+    expect(out.setLineweightRefused).toMatchObject({ ok: false, op: 'setLineweight', reason: 'lineweight_not_valid:26' })
+    // Every refusal above left h's colour, linetype and lineweight exactly as they were.
+    const propsHeld = out.afterProps.entities.find((e) => e.id === h)
+    expect(propsHeld).toMatchObject({ aci: 1, linetype: 'ByBlock', lineweight: 25 })
+    expect(out.afterProps.linetypes).toEqual(expect.arrayContaining(['ByLayer', 'ByBlock', 'Continuous']))
+
+    // W4g-7b-03c required row: entities the session never touches keep their
+    // explicit 62/6/370/420 groups through parse -> one unrelated edit
+    // elsewhere -> write -> re-parse; a true colour (420) survives untouched.
+    expect(out.propsBefore.entities).toHaveLength(2)
+    const beforeA = out.propsBefore.entities.find((e) => e.id === out.untouchedA)
+    expect(beforeA).toMatchObject({ aci: 3, linetype: 'Continuous', lineweight: 25, trueColor: null })
+    const beforeB = out.propsBefore.entities.find((e) => e.id === out.untouchedB)
+    expect(beforeB.trueColor).toEqual([10, 20, 30])
+    expect(out.propsAfter.ok).toBe(true)
+    expect(out.propsAfter.entities).toHaveLength(3)
+    const afterA = out.propsAfter.entities.find((e) => e.id === out.untouchedA)
+    expect(afterA).toMatchObject({ aci: 3, linetype: 'Continuous', lineweight: 25, trueColor: null })
+    const afterB = out.propsAfter.entities.find((e) => e.id === out.untouchedB)
+    expect(afterB.trueColor).toEqual([10, 20, 30])
+
+    // W4g-7b-03c-c declared residual: under $ACADVER AC1015 (pre-AC1018),
+    // the initial parse still reads the explicit 420 group (reading is
+    // version-agnostic), but the write + re-parse round trip honestly drops
+    // it, because the vendored crate's DXF writer emits group 420 only for
+    // AC1018+. A pre-2004 head cannot round-trip a true colour through the
+    // browser; the plan route's dense-EP preflight then refuses that save.
+    expect(out.propsLegacyBefore.entities).toHaveLength(2)
+    const legacyBefore = out.propsLegacyBefore.entities.find((e) => e.id === out.untouchedLegacyB)
+    expect(legacyBefore.trueColor).toEqual([10, 20, 30])
+    expect(out.propsLegacyAfter.ok).toBe(true)
+    const legacyAfter = out.propsLegacyAfter.entities.find((e) => e.id === out.untouchedLegacyB)
+    expect(legacyAfter.trueColor).toBeNull()
   })
 })
 

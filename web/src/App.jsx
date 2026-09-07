@@ -55,6 +55,11 @@ import { ENV_IOS_SURFACE } from './ios/flag.js'
 import CadEditSurface from './cadedit/CadEditSurface.jsx'
 import EngineSessionProvider from './cadedit/EngineSessionProvider.jsx'
 import EngineRibbonClusters from './cadedit/EngineRibbonClusters.jsx'
+// W4g-7b-03c-d: the dock's Color/Linetype/Lineweight rows portal into the
+// slot below from a consumer INSIDE the provider (App itself sits outside
+// it, so a hook call in App's own body always read null — the PR #1121
+// proof finding this record fixes).
+import EngineDockProperties from './cadedit/EngineDockProperties.jsx'
 import CommandLineArmer from './cadedit/CommandLineArmer.jsx'
 import EngineDocumentView from './cadedit/EngineDocumentView.jsx'
 import EngineHeadOpener from './cadedit/EngineHeadOpener.jsx'
@@ -2601,10 +2606,14 @@ export default function App() {
       extra: <div id="cockpit-script-slot" className="ribbon-slot ribbon-slot-panel" />,
     }
     // W4g-4b: the Properties panel keeps its reference seat (after Layers and
-    // Block) and its honest ByLayer fields; with the flag on its one tool,
-    // Match, is real and the engine consumer portals it into this slot.
+    // Block); with the flag on, Match and the three combos are real and the
+    // engine consumer portals them into this slot. W4g-7b-03c: `widgets` is
+    // dropped here (not just left at `tools: []`) so the flag-on build shows
+    // ONLY the portaled real combos, never the static disabled ByLayer
+    // placeholders alongside them; referencePanels()'s own widgets stay for
+    // the flag-off build, which never reaches this seat.
     const propertiesSeat = {
-      ...properties, tools: [],
+      ...properties, tools: [], widgets: [],
       extra: <div id="cockpit-properties-slot" className="ribbon-slot" />,
     }
     // The reference's Draw tab: Draw, Modify, Clipboard (engine children,
@@ -3450,6 +3459,11 @@ export default function App() {
               notice={catalog?.cad_engine?.notice || ''}
             />
           )}
+          {/* W4g-7b-03c-d: mounted unconditionally on studioGround (the dock
+              rows render in both shells), the same way CadEditSurface above
+              is. Portals into the cockpit-dock-properties-slot div rendered
+              further down, wherever propertyRowsEl sits. */}
+          {ENV_CAD_EDIT && <EngineDockProperties />}
           <div className="viewer-wrap">
             {/* X3 whole-pane takeover: red dot + what failed + quiet reason + Retry. */}
             {loadErr && !signedOut && (
@@ -3526,8 +3540,24 @@ export default function App() {
                   onToggle={toggleLayer}
                 />
               ) : null
+              // W4g-7b-03c-d: an empty SLOT only (ENV_CAD_EDIT first, the
+              // bundle-fence contract every cadedit call site uses). The real
+              // <dl>, from the ENGINE'S OWN selection, portals in from
+              // EngineDockProperties.jsx, a consumer mounted INSIDE the
+              // provider — App itself mounts EngineSessionProvider and so
+              // sits OUTSIDE it, which is why a hook read here always saw
+              // null (the PR #1121 proof finding). SelectionReadout.jsx reads
+              // the console's server-drawing selection, which has none of
+              // these three fields, so this slot sits beside it rather than
+              // inside it.
+              const propertyRowsEl = ENV_CAD_EDIT
+                ? <div id="cockpit-dock-properties-slot" className="dock-properties-slot" />
+                : null
               const readoutEl = intake ? (
-                <SelectionReadout selection={selection} onDeselect={() => setSelectedHandle(null)} />
+                <>
+                  <SelectionReadout selection={selection} onDeselect={() => setSelectedHandle(null)} />
+                  {propertyRowsEl}
+                </>
               ) : null
               // wideViewport: <=980px stacks the console; the dock's
               // floating placement has no home there, so the inline arm

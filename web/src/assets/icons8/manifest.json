@@ -314,6 +314,15 @@
     },
     "chamfer": {
       "term": "chamfer"
+    },
+    "color": {
+      "term": "color"
+    },
+    "linetype": {
+      "term": "line type"
+    },
+    "lineweight": {
+      "term": "line weight"
     }
   }
 }

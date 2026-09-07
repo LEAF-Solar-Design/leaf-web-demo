@@ -174,6 +174,26 @@ export function modifyReason(session, reach = null) {
 }
 
 /**
+ * Why the Properties ladder (the three colour/linetype/lineweight selects,
+ * and MATCHPROP) is unavailable right now, or '' when it is live. Identical
+ * to `modifyReason` except for the one rung a property is not geometry: a
+ * selected INSERT reference projects `editable: false` (the crate refuses a
+ * GEOMETRY edit on it), but its own EntityCommon still carries a colour, a
+ * linetype and a lineweight the crate's property setters accept exactly like
+ * any other entity's (kimi, #1121 point 6). Every other read-only kind
+ * (a DIMENSION, say) still refuses by name.
+ */
+export function propertyReason(session, reach = null) {
+  if (!session) return reachSentence(reach) || MODIFY_REASONS.noDocument
+  if (session.errorKind === SESSION_ERROR.CRASHED) return MODIFY_REASONS.crashed
+  if (!session.engineParsed) return reachSentence(reach) || MODIFY_REASONS.noDocument
+  if (session.busy) return MODIFY_REASONS.busy
+  if (!session.selected) return MODIFY_REASONS.noSelection
+  if (session.selected.editable === false && session.selected.type !== 'INSERT') return MODIFY_REASONS.readOnlyKind
+  return ''
+}
+
+/**
  * PASTE's ladder: everything the document itself must satisfy (through the
  * draw ladder, since a paste CREATES and needs no selection), then the
  * clipboard's own emptiness.
@@ -425,7 +445,13 @@ const engineOp = (group, op, label, display, icon, title, size, panel = group) =
     ? (ctx) => drawReason(ctx.session, ctx.reach)
     : op === 'pasteClip'
       ? (ctx) => clipboardReason(ctx.session, ctx.reach)
-      : (ctx) => modifyReason(ctx.session, ctx.reach),
+      // W4g-7b-03c-f: the Properties panel (matchprop and the three property
+      // setters) answers to the property ladder, which waives the one rung
+      // that refuses an INSERT reference for geometry alone; every other
+      // Modify op keeps the full ladder.
+      : panel === 'properties'
+        ? (ctx) => propertyReason(ctx.session, ctx.reach)
+        : (ctx) => modifyReason(ctx.session, ctx.reach),
   // Arming vs. running is the consumer's decision (a tool with operands opens
   // the command prompt; one without runs on click), so the record names the
   // one handler and passes the op.
@@ -515,10 +541,16 @@ const ACTION_LIST = [
   engineOp('modify', 'extend', 'extend', 'Extend', 'extend', 'Lengthen the selection until it meets a boundary edge', 'small'),
   engineOp('modify', 'fillet', 'fillet', 'Fillet', 'fillet', 'Round the corner between the selection and a second line, arc or circle with an arc', 'small'),
   engineOp('modify', 'chamfer', 'chamfer', 'Chamfer', 'chamfer', 'Bevel the corner between the selection and a second line', 'small'),
-  // W4g-4b: the reference's MATCHPROP, seated in its Properties panel. It
-  // copies the selection's LAYER to the object you pick; colour, linetype
-  // and lineweight wait on the contract (the panel's ByLayer fields say so).
-  engineOp('modify', 'matchprop', 'match', 'Match', 'match', "Copy the selection's layer to the object you click (colour, linetype and lineweight are not carried yet)", 'large', 'properties'),
+  // W4g-4b: the reference's MATCHPROP, seated in its Properties panel.
+  // W4g-7b-03c: it now copies the layer AND colour, linetype and lineweight
+  // to the object you pick, as one batch.
+  engineOp('modify', 'matchprop', 'match', 'Match', 'match', "Copy the selection's layer, colour, linetype and lineweight to the object you click", 'large', 'properties'),
+  // W4g-7b-03c: the Properties panel's three combos. Each runs at once on
+  // change (no prompt: a select is its own prompt); the COLOR/LINETYPE/
+  // LWEIGHT words still arm the same op typed, through PROMPTS.
+  engineOp('modify', 'setColor', 'color', 'Color', 'color', "Set the selection's colour", 'row', 'properties'),
+  engineOp('modify', 'setLinetype', 'linetype', 'Linetype', 'linetype', "Set the selection's linetype", 'row', 'properties'),
+  engineOp('modify', 'setLineweight', 'lineweight', 'Lineweight', 'lineweight', "Set the selection's lineweight", 'row', 'properties'),
   // W4g-5c: the reference's Clipboard panel, in its order and its sizes.
   engineOp('clipboard', 'pasteClip', 'paste', 'Paste', 'paste', 'Paste the clipboard entity at a base point', 'large'),
   engineOp('clipboard', 'cutClip', 'cut', 'Cut', 'cut', 'Put the selection on the clipboard and delete it', 'small'),

@@ -17,6 +17,12 @@ export const INTERIM_ICONS = Object.freeze({
   fillet: '<path d="M4 20v-8a8 8 0 0 1 8-8h8"/><path d="M4 20v-4M4 6v3M15 4h3"/>',
   // W4g-6: a chamfer, two lines meeting through a bevel.
   chamfer: '<path d="M4 20v-8l8-8h8"/><path d="M4 6v3M15 4h3"/>',
+  // W4g-7b (03c-e): a color swatch, a rounded square with a colour dot.
+  color: '<rect x="4" y="4" width="16" height="16" rx="3"/><circle cx="12" cy="12" r="4"/>',
+  // W4g-7b (03c-e): a linetype, three short dashes on one baseline.
+  linetype: '<path d="M3 12h3M10 12h3M17 12h3"/>',
+  // W4g-7b (03c-e): a lineweight, three lines of increasing stroke width.
+  lineweight: '<path d="M4 6h16" stroke-width="1"/><path d="M4 12h16" stroke-width="2.5"/><path d="M4 18h16" stroke-width="4"/>',
   // W4g-5b: a polar array, copies swept about a centre.
   'array-polar': '<circle cx="12" cy="12" r="1.5"/><rect x="10" y="3" width="4" height="4"/><rect x="17" y="14" width="4" height="4"/><rect x="3" y="14" width="4" height="4"/><path d="M12 9a3 3 0 0 1 3 3"/>',
   'new-file': '<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/><path d="M12 11v6M9 14h6"/>',

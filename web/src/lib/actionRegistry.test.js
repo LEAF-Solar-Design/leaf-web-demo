@@ -42,6 +42,7 @@ import {
   ladderDecision,
   ladderListener,
   modifyReason,
+  propertyReason,
   retryRung,
   ribbonTool,
   slashCommandHandlers,
@@ -211,6 +212,8 @@ describe('honest triggers', () => {
       'modify:trim', 'modify:extend', 'modify:fillet', 'modify:chamfer',
       // W4g-4b: MATCHPROP, a Modify record seated in the Properties panel.
       'modify:matchprop',
+      // W4g-7b-03c: the Properties panel's three combos, Modify records too.
+      'modify:setColor', 'modify:setLinetype', 'modify:setLineweight',
     ])
   })
 
@@ -563,5 +566,34 @@ describe('the engine reason ladders', () => {
     expect(modifyReason({ engineParsed: true, selected: { editable: false } }))
       .toBe(MODIFY_REASONS.readOnlyKind)
     expect(modifyReason({ engineParsed: true, selected: { editable: true } })).toBe('')
+  })
+
+  // W4g-7b-03c-f (kimi, #1121 point 6): the Properties panel's ladder waives
+  // the ONE rung that refuses an INSERT reference (a property is not
+  // geometry), every other rung — including a non-INSERT read-only kind —
+  // unchanged from the Modify ladder above.
+  it('answers the Properties ladder identically to Modify, except an INSERT reference is live', () => {
+    expect(propertyReason(null)).toBe(MODIFY_REASONS.noDocument)
+    expect(propertyReason({ errorKind: 'crashed' })).toBe(MODIFY_REASONS.crashed)
+    expect(propertyReason({ engineParsed: true, busy: true })).toBe(MODIFY_REASONS.busy)
+    expect(propertyReason({ engineParsed: true })).toBe(MODIFY_REASONS.noSelection)
+    expect(propertyReason({ engineParsed: true, selected: { editable: false, type: 'DIMENSION' } }))
+      .toBe(MODIFY_REASONS.readOnlyKind)
+    expect(propertyReason({ engineParsed: true, selected: { editable: false, type: 'INSERT' } })).toBe('')
+    expect(propertyReason({ engineParsed: true, selected: { editable: true } })).toBe('')
+  })
+
+  it('the four Properties-panel records (matchprop, setColor, setLinetype, setLineweight) gate on propertyReason, not modifyReason', () => {
+    const insertCtx = { session: { engineParsed: true, selected: { editable: false, type: 'INSERT' } }, reach: null }
+    for (const op of ['matchprop', 'setColor', 'setLinetype', 'setLineweight']) {
+      const record = byId(`modify:${op}`)
+      expect(record.panel).toBe('properties')
+      expect(record.when(insertCtx)).toBe('')
+    }
+    // Every other Modify record still refuses an INSERT reference: it is
+    // geometry, and the crate's own setters refuse it.
+    const geometryOps = forGroup('modify').filter((a) => a.panel !== 'properties')
+    expect(geometryOps.length).toBeGreaterThan(0)
+    for (const record of geometryOps) expect(record.when(insertCtx)).toBe(MODIFY_REASONS.readOnlyKind)
   })
 })

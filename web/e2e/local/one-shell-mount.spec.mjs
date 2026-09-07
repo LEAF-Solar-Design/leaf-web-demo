@@ -1421,6 +1421,51 @@ test.describe('route matrix, rail ON', () => {
     await bar.press('Enter')
     await expect(destinationRow).not.toContainText('on layer W4G4B', { timeout: 60_000 })
 
+    // W4g-7b-03c: the cockpit row. Colour set through the Properties panel's
+    // select (no prompt: a select is its own prompt), the dock's Color row
+    // reading it back; MATCHPROP copies it onto the circle drawn earlier in
+    // this walk; one engine undo takes the match back, the redo depth rises;
+    // the three combos sit ON the band (the #1059 lesson), never a separate
+    // row under it.
+    await page.locator(`input[type="radio"][value="${sourceId}"]`).check()
+    const colorSelect = page.locator('#cockpit-properties-slot [data-widget="prop-color"] select')
+    await colorSelect.selectOption('red')
+    await expect(workbenchStatus).toContainText('setColor applied', { timeout: 60_000 })
+    const dockColor = page.getByTestId('dock-properties').locator('dd').first()
+    await expect(dockColor).toHaveText('red (1)')
+    const circleRow = page.locator('.cad-edit-workbench label', { hasText: 'CIRCLE on layer 0' })
+    await expect(circleRow).toHaveCount(1)
+    const circleId = await circleRow.locator('input[type="radio"]').getAttribute('value')
+    await bar.fill('ma')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'matchprop', { timeout: 20_000 })
+    await page.getByLabel('ribbon edge', { exact: true }).fill(circleId)
+    await page.getByLabel('ribbon edge', { exact: true }).press('Enter')
+    await expect(workbenchStatus).toContainText('matchprop applied', { timeout: 60_000 })
+    // The layer copied too (the batch's first step): find the circle by its
+    // id now, never by the label text MATCHPROP just changed. MATCHPROP stays
+    // ARMED for the next pick by design (the reference's loop), and an armed
+    // command makes the workbench click-through, so disarm before the radio.
+    await page.keyboard.press('Escape')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
+    await page.locator(`input[type="radio"][value="${circleId}"]`).check()
+    await expect(dockColor).toHaveText('red (1)')
+    test.info().annotations.push({ type: 'properties-panel', description: `setColor through the panel, then MATCHPROP copied it onto ${circleId}` })
+    await page.keyboard.press('Escape')
+    const redoQuick = page.locator('.cockpit-band [data-tool="quick-redo-edit"]')
+    await expect(redoQuick).toBeDisabled()
+    await bar.fill('u')
+    await bar.press('Enter')
+    await expect(dockColor).not.toHaveText('red (1)', { timeout: 60_000 })
+    await expect(redoQuick).toBeEnabled()
+    const propertiesCluster = ribbon.locator('[data-group="properties"]')
+    const clusterBox = await propertiesCluster.boundingBox()
+    for (const id of ['prop-color', 'prop-linetype', 'prop-lineweight']) {
+      const box = await page.locator(`#cockpit-properties-slot [data-widget="${id}"]`).boundingBox()
+      expect(box.y).toBeGreaterThanOrEqual(clusterBox.y - 1)
+      expect(box.y + box.height).toBeLessThanOrEqual(clusterBox.y + clusterBox.height + 1)
+    }
+
     // W4g-2 (one head), confirm-time race. LAST in the walk on purpose: a
     // refused run leaves its failed strip on the page and there is no
     // dismiss for it, and that strip sits BETWEEN the command prompt and

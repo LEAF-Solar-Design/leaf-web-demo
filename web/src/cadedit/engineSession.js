@@ -78,7 +78,15 @@ const NO_ENTITIES = Object.freeze([])
 export function projectionEntities(message) {
   const entities = Array.isArray(message?.entities) ? message.entities : NO_ENTITIES
   const blocks = message?.blocks ?? entities.blocks
-  return Array.isArray(blocks) ? Object.assign(entities.slice(), { blocks }) : entities
+  // W4g-7b-03c: the LTYPE catalogue rides the same way blocks does, so a
+  // consumer that reads `session.entities.linetypes` sees it survive an
+  // undo/redo re-load exactly like the block catalogue does.
+  const linetypes = message?.linetypes ?? entities.linetypes
+  if (!Array.isArray(blocks) && !Array.isArray(linetypes)) return entities
+  const next = entities.slice()
+  if (Array.isArray(blocks)) next.blocks = blocks
+  if (Array.isArray(linetypes)) next.linetypes = linetypes
+  return next
 }
 
 const INITIAL_SESSION = Object.freeze({
@@ -390,11 +398,41 @@ export function planMatchprop(session, inputs = {}) {
   if (!source) return { refusal: 'Match refused: the selected entity is no longer in the document.' }
   const target = (entities || []).find((candidate) => candidate.id === checked.payload.edge)
   if (!target) return { refusal: 'Match refused: the destination object is no longer in the document.' }
-  if (target.editable === false) return { refusal: 'Match refused: the destination object is read-only in the browser engine.' }
+  // W4g-7b-03c-f: an INSERT reference's own properties are as matchable as
+  // any other entity's (kimi, #1121 point 6); only a non-INSERT read-only
+  // kind refuses here.
+  if (target.editable === false && target.type !== 'INSERT') return { refusal: 'Match refused: the destination object is read-only in the browser engine.' }
   const layer = String(source.layer ?? '').trim()
   if (!layer) return { refusal: 'Match refused: the selection has no layer to copy.' }
-  if (String(target.layer ?? '') === layer) return { refusal: `Match refused: the destination is already on layer ${layer}.` }
-  return { steps: [{ op: 'setLayer', entityId: target.id, layer }] }
+  // W4g-7b-03c: MATCHPROP copies the layer AND the three properties, as ONE
+  // batch of only the steps whose value actually differs (a batch of one
+  // step when just the layer differs, matching the pre-03c behaviour).
+  const sourceAci = Number.isFinite(source.aci) ? source.aci : 256
+  const sourceLinetype = String(source.linetype ?? 'ByLayer')
+  const sourceLineweight = Number.isFinite(source.lineweight) ? source.lineweight : -1
+  const targetAci = Number.isFinite(target.aci) ? target.aci : 256
+  const targetLinetype = String(target.linetype ?? 'ByLayer')
+  const targetLineweight = Number.isFinite(target.lineweight) ? target.lineweight : -1
+  const layerDiffers = String(target.layer ?? '') !== layer
+  // W4g-7b-03c-g F6: the contract carries ACI only, so a source's own true
+  // colour copies as its nearest index (sourceAci above, unchanged). A
+  // destination that STILL carries a true colour needs its own setColor step
+  // even at an unchanged nearest index: the step is what clears its 420, and
+  // an ACI-only compare would otherwise call a true-coloured destination
+  // "already matching" and leave the 420 in place.
+  const targetHasTrueColor = Array.isArray(target.trueColor) && target.trueColor.length === 3
+  const colorDiffers = targetAci !== sourceAci || targetHasTrueColor
+  const linetypeDiffers = targetLinetype.toLowerCase() !== sourceLinetype.toLowerCase()
+  const lineweightDiffers = targetLineweight !== sourceLineweight
+  if (!layerDiffers && !colorDiffers && !linetypeDiffers && !lineweightDiffers) {
+    return { refusal: 'Match refused: nothing to match.' }
+  }
+  const steps = []
+  if (layerDiffers) steps.push({ op: 'setLayer', entityId: target.id, layer })
+  if (colorDiffers) steps.push({ op: 'setColor', entityId: target.id, aci: sourceAci })
+  if (linetypeDiffers) steps.push({ op: 'setLinetype', entityId: target.id, linetype: sourceLinetype })
+  if (lineweightDiffers) steps.push({ op: 'setLineweight', entityId: target.id, lineweight: sourceLineweight })
+  return { steps }
 }
 
 /**
@@ -454,6 +492,20 @@ export function lowerSteps(steps) {
       const layer = String(step.layer ?? '').trim()
       if (!layer) return { refusal: 'Edit refused: a layer step names no layer.' }
       lowered.push({ op, payload: { entityId, layer } })
+    } else if (op === 'setColor') {
+      // W4g-7b-03c: MATCHPROP's colour step; aci is already a validated
+      // 0..256 integer computed from the source entity, never re-parsed.
+      const aci = Number(step.aci)
+      if (!Number.isInteger(aci) || aci < 0 || aci > 256) return { refusal: 'Edit refused: a colour step has an invalid ACI.' }
+      lowered.push({ op, payload: { entityId, aci } })
+    } else if (op === 'setLinetype') {
+      const linetype = String(step.linetype ?? '').trim()
+      if (!linetype) return { refusal: 'Edit refused: a linetype step names no linetype.' }
+      lowered.push({ op, payload: { entityId, linetype } })
+    } else if (op === 'setLineweight') {
+      const lineweight = Number(step.lineweight)
+      if (!Number.isInteger(lineweight)) return { refusal: 'Edit refused: a lineweight step has an invalid value.' }
+      lowered.push({ op, payload: { entityId, lineweight } })
     } else if (op === 'setVertices') {
       // A trim keeps at most the entity's own points plus its two cut points,
       // so the bound is the kernel's, plus two, not the create bound.
@@ -490,7 +542,87 @@ export function lowerSteps(steps) {
  * either `{ payload }` or `{ refusal }` with the exact operator-facing
  * sentence — never both, never a throw.
  */
-export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer, x1, y1, x2, y2, keep, cx, cy, deg, factor, rows, cols, rowGap, colGap, count, totalDeg, edge, ex, ey, x, y, r, d1, d2 } = {}) {
+// W4g-7b-03c: the crate's lineweight enumeration (1/100 mm), shared by the
+// payload builder's validation and the panel's <select>.
+export const LINEWEIGHT_VALUES = Object.freeze([
+  0, 5, 9, 13, 15, 18, 20, 25, 30, 35, 40, 50,
+  53, 60, 70, 80, 90, 100, 106, 120, 140, 158, 200, 211,
+])
+
+// W4g-7b-03c: the seven standard ACI names the reference shows in its colour
+// combo, shared by the typed COLOR word's parser and the panel's <select>.
+export const ACI_NAMES = Object.freeze({
+  1: 'red', 2: 'yellow', 3: 'green', 4: 'cyan', 5: 'blue', 6: 'magenta', 7: 'white',
+})
+const ACI_NAME_TO_INDEX = Object.freeze(
+  Object.fromEntries(Object.entries(ACI_NAMES).map(([index, name]) => [name, Number(index)])),
+)
+
+// One reading for every ACI value the store or a panel needs to show a
+// drafter: ByLayer / ByBlock, a standard name with its index, or a bare
+// index for anything else. The dock's Color row and the panel's <select>
+// share this so "red (1)" never drifts between the two.
+export function formatAci(aci) {
+  if (aci === 256) return 'ByLayer'
+  if (aci === 0) return 'ByBlock'
+  const name = ACI_NAMES[aci]
+  return name ? `${name} (${aci})` : `index ${aci}`
+}
+
+// W4g-7b-03c-h D2: the honest reading for a TRUE-COLOURED entity, which the
+// projection carries as trueColor [r, g, b] alongside aci, the nearest
+// standard index (approximate_index) — reading aci alone reported an RGB
+// entity as its nearest name outright, with no sign the colour was ever
+// approximate. A non-finite aci (an entity the engine could not classify)
+// reads as 256, the same ByLayer floor formatAci itself falls back to.
+export function formatColor(entity) {
+  const aci = Number.isFinite(entity?.aci) ? entity.aci : 256
+  const trueColor = entity?.trueColor
+  if (!Array.isArray(trueColor) || trueColor.length !== 3) return formatAci(aci)
+  const [r, g, b] = trueColor
+  return `rgb(${r},${g},${b}) (nearest ${formatAci(aci)})`
+}
+
+function parseAci(raw) {
+  const text = String(raw ?? '').trim()
+  if (/^bylayer$/i.test(text)) return 256
+  if (/^byblock$/i.test(text)) return 0
+  const named = ACI_NAME_TO_INDEX[text.toLowerCase()]
+  if (named) return named
+  if (!/^\d{1,3}$/.test(text)) return null
+  const n = Number(text)
+  return n >= 0 && n <= 256 ? n : null
+}
+
+function parseLineweight(raw) {
+  const text = String(raw ?? '').trim()
+  if (/^bylayer$/i.test(text)) return -1
+  if (/^byblock$/i.test(text)) return -2
+  if (/^default$/i.test(text)) return -3
+  // W4g-7b-03c: the panel's <select> shows the enum in millimetres (the
+  // reference's own display unit, "0.25 mm"); accepted here too so the
+  // typed COLOR-style prompt and a picked option validate identically.
+  const mm = text.match(/^(\d{1,4}(?:\.\d+)?)\s*mm$/i)
+  if (mm) {
+    const n = Math.round(Number(mm[1]) * 100)
+    return LINEWEIGHT_VALUES.includes(n) ? n : null
+  }
+  if (!/^-?\d{1,4}$/.test(text)) return null
+  const n = Number(text)
+  return LINEWEIGHT_VALUES.includes(n) ? n : null
+}
+
+// The enum's millimetre reading, shared by the panel's <select> and the
+// dock's Lineweight row (e.g. "0.25 mm"); ByLayer/ByBlock/Default read as
+// words, matching parseLineweight's own vocabulary.
+export function formatLineweight(weight) {
+  if (weight === -1) return 'ByLayer'
+  if (weight === -2) return 'ByBlock'
+  if (weight === -3) return 'Default'
+  return LINEWEIGHT_VALUES.includes(weight) ? `${(weight / 100).toFixed(2)} mm` : String(weight)
+}
+
+export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer, x1, y1, x2, y2, keep, cx, cy, deg, factor, rows, cols, rowGap, colGap, count, totalDeg, edge, ex, ey, x, y, r, d1, d2, aci, linetype, lineweight } = {}, linetypeCatalogue = []) {
   const payload = { entityId }
   // W4g-6: the intersection verbs validate their OPERANDS here, so the
   // prompt holds Run with the sentence as the drafter types; whether the
@@ -639,6 +771,27 @@ export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer, x1,
     const trimmed = String(layer ?? '').trim()
     if (!trimmed) return { refusal: 'Set layer refused: enter a layer name.' }
     payload.layer = trimmed
+  }
+  // W4g-7b-03c: colour, linetype and lineweight. Each is a single value on
+  // the selection; the sentence always leads with "Property refused:" per
+  // the reference's ladder for these three.
+  if (op === 'setColor') {
+    const value = parseAci(aci)
+    if (value === null) return { refusal: 'Property refused: a colour index is 1 to 255, ByLayer or ByBlock' }
+    payload.aci = value
+  }
+  if (op === 'setLinetype') {
+    const trimmed = String(linetype ?? '').trim()
+    if (!trimmed) return { refusal: 'Property refused: enter a linetype name.' }
+    const catalogue = Array.isArray(linetypeCatalogue) ? linetypeCatalogue : []
+    const match = catalogue.find((name) => String(name).toLowerCase() === trimmed.toLowerCase())
+    if (!match) return { refusal: `Property refused: linetype ${trimmed} is not loaded in this drawing` }
+    payload.linetype = match
+  }
+  if (op === 'setLineweight') {
+    const value = parseLineweight(lineweight)
+    if (value === null) return { refusal: 'Property refused: lineweight must be a standard value in millimetres, ByLayer, ByBlock or Default' }
+    payload.lineweight = value
   }
   return { payload }
 }
@@ -1008,7 +1161,14 @@ export default function useEngineSession({
     // Nothing selected is not an error, it is a no-op: the affordances that
     // dispatch an edit are disabled until something is.
     if (!sessionRef.current.selectedId) return
-    if (sessionRef.current.entities.find((entity) => entity.id === sessionRef.current.selectedId)?.type === 'INSERT') {
+    // W4g-7b-03c: a property is not geometry. The "INSERT is not editable in
+    // this round" refusal is for the geometry verbs; colour, linetype and
+    // lineweight ride on an INSERT reference's own EntityCommon exactly like
+    // any other entity's. W4g-7b-03c-f: MATCHPROP is the same kind of verb
+    // (it copies properties, never geometry) so an INSERT reference as the
+    // SOURCE reaches planMatchprop's own ladder instead of this blanket one.
+    const isPropertyOp = op === 'setColor' || op === 'setLinetype' || op === 'setLineweight' || op === 'matchprop'
+    if (!isPropertyOp && sessionRef.current.entities.find((entity) => entity.id === sessionRef.current.selectedId)?.type === 'INSERT') {
       patch({ errorKind: SESSION_ERROR.REFUSED, status: 'INSERT is not editable in this round' })
       return
     }
@@ -1069,7 +1229,7 @@ export default function useEngineSession({
       }
       return
     }
-    const { payload, refusal } = buildEditPayload(op, sessionRef.current.selectedId, inputs)
+    const { payload, refusal } = buildEditPayload(op, sessionRef.current.selectedId, inputs, sessionRef.current.entities.linetypes)
     if (refusal) {
       patch({ errorKind: SESSION_ERROR.REFUSED, status: refusal })
       return

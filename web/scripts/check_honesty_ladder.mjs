@@ -506,7 +506,10 @@ export function reasonlessDisabled(src, mapsByName = new Map()) {
 // exactly as Draw/Modify/Clipboard/Annotation/Properties already do. createInsert
 // is registered under the 'draw' group, so it shares Draw's verified ladder
 // (drawReason), same runtime throw.
-const UNVERIFIABLE_REASON_BUDGET = 15
+// W4g-7b-03c-g F5 (receipt): 15 -> 18 for the Properties panel's three combos (Color / Linetype /
+// Lineweight in EngineRibbonClusters.jsx), whose `reason` is the property ladder's own sentence, the
+// same computed shape the engine tools already carry inside the budget.
+const UNVERIFIABLE_REASON_BUDGET = 18
 
 /**
  * Whether an "unverifiable reason expressions" count holds against its
