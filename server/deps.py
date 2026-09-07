@@ -16,6 +16,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -338,6 +339,50 @@ def surface_config_source(tenant_id: str = _DEFAULT_TENANT) -> Optional[Dict[str
             cfg.stat().st_mtime, tz=timezone.utc
         ).isoformat(),
     }
+
+
+def submit_surface_config(tenant_id: str, overlay: dict) -> Dict[str, Any]:
+    """Commit a fold-valid overlay and return the fresh file provenance.
+
+    Serialization is UTF-8 JSON, two-space indentation and a final LF. The
+    vendored fold's file limit also applies so every accepted write is readable.
+    """
+    from _vendor.mushy_fold.surface_config import MAX_SURFACE_CONFIG_BYTES, _valid_overlay
+    from tenant_id_validator import is_valid_tenant_id
+
+    if not isinstance(tenant_id, str) or not is_valid_tenant_id(tenant_id):
+        raise HTTPException(status_code=400, detail="Invalid tenant identity")
+    if not _valid_overlay(overlay):
+        raise HTTPException(status_code=400, detail="surface-config.json failed schema validation")
+    try:
+        blob = (json.dumps(overlay, indent=2, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if len(blob) > MAX_SURFACE_CONFIG_BYTES:
+        raise HTTPException(status_code=413, detail=f"surface-config.json exceeds {MAX_SURFACE_CONFIG_BYTES} bytes")
+    root = _contained_tenant_root(tenant_id)
+    target = None if root is None else _contained_surface_config_path(root)
+    if target is None:
+        raise HTTPException(status_code=400, detail="surface-config.json target is unavailable or not contained")
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=os.path.dirname(target), delete=False) as fh:
+            temporary = fh.name
+            fh.write(blob)
+            fh.flush()
+            os.fsync(fh.fileno())
+        if _contained_surface_config_path(root) != target:
+            raise HTTPException(status_code=400, detail="surface-config.json target is not contained")
+        os.replace(temporary, target)
+        temporary = None
+        _surface_config_cache.pop(tenant_id, None)
+        receipt = surface_config_source(tenant_id)
+        if receipt is None:
+            raise HTTPException(status_code=503, detail="Surface config was written but its receipt is unavailable")
+        return receipt
+    finally:
+        if temporary is not None:
+            os.unlink(temporary)
 
 
 # in-memory authored registry (seeded from disk at startup).

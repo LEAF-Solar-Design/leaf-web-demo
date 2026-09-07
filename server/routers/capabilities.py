@@ -6,10 +6,11 @@ requests the projection, but the existing X-Ops-Secret credential authorizes it.
 from __future__ import annotations
 
 import os
+import json
 import sys
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 import catalog
@@ -19,6 +20,7 @@ import deps
 import mcp_tool_projection
 from envelopes import ErrorCode, error_obj, with_envelope_fields
 from routers import ops as ops_router
+from routers import platform_customize as platform_customize_router
 
 router = APIRouter()
 
@@ -168,7 +170,7 @@ def cad_engine_selector() -> Dict[str, Any]:
 
 
 @router.get("/api/surface-config")
-def surface_config(tenant=Depends(deps.require_tenant)) -> Any:
+def surface_config(fresh: bool = False, tenant=Depends(deps.require_tenant)) -> Any:
     """GET /api/surface-config — the tenant's surface-config overlay
     (standardization slice 7b), through the SAME per-tenant fold
     `/api/capabilities` uses.
@@ -182,12 +184,33 @@ def surface_config(tenant=Depends(deps.require_tenant)) -> Any:
     exists, so the web's provenance chip has no digest/timestamp to show
     for a tenant with no overlay at all.
     """
+    if fresh:
+        deps._surface_config_cache.pop(str(tenant), None)
     overlay = deps.effective_surface_config(str(tenant))
     payload: Dict[str, Any] = {"surfaces": overlay}
     source = deps.surface_config_source(str(tenant))
     if source is not None:
         payload["source"] = source
     return with_envelope_fields(payload)
+
+
+@router.post("/api/surface-config")
+async def submit_surface_config(request: Request, tenant=Depends(deps.require_tenant)) -> Any:
+    admitted = platform_customize_router._gate(tenant)
+    if isinstance(admitted, JSONResponse):
+        return admitted
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > 256 * 1024:
+            raise HTTPException(status_code=413, detail="Surface config request exceeds 262144 bytes")
+        body.extend(chunk)
+    try:
+        payload = json.loads(body)
+    except (ValueError, UnicodeError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid surface config JSON") from exc
+    if not isinstance(payload, dict) or set(payload) != {"overlay"}:
+        raise HTTPException(status_code=400, detail="Expected a surface config overlay")
+    return deps.submit_surface_config(admitted[0], payload["overlay"])
 
 
 @router.get("/api/converse/registry")

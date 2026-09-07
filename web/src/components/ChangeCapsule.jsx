@@ -1,9 +1,9 @@
-// WHAT THIS CAPSULE DOES NOT DO YET (the ledger's 9c row is not claimed by
-// the PR that added it): containment checks the scoped delta through an
-// injected resolver, not a live manifest check against the repo, and accept
-// does not commit the transform into the user's repo through the fold. Both
-// are owed; the capsule shows state honestly meanwhile and never reads as
-// settled before a receipt says so.
+// Surface-config proposals check a fresh live manifest and its base digest
+// before accept, commit through the tenant fold, and display its file receipt.
+// Entity proposals retain the injected scoped-delta containment check below.
+// Surface-config records carry kind: 'surface-config', overlay and baseSha256
+// (null for an absent base file). Legacy records default to kind: 'entity'.
+// Producing surface-config proposals in the entity Ask row remains separate.
 // THE CHANGE CAPSULE (standardization slice 9c, second half of the 9b
 // right-click work: web/src/components/ElementContextMenu.jsx mounts one of
 // these once its scoped "Ask Claude to…" prompt has posted).
@@ -36,8 +36,10 @@
 // (those live inside the workspace card's own EngineSessionProvider subtree,
 // narrower than this mount). Missing the adapter refuses accept with a real
 // reason rather than accepting blind — never a fabricated pass.
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 
+import { getSurfaceConfig, submitSurfaceConfig } from '../api.js'
+import { isSurfaceConfigOverlay, refreshSurfaceConfigOverlay } from '../site/useSurfaceContract.js'
 import { computeEntityDelta, scopeDeltaToHandle } from '../lib/entityDelta.js'
 import LiveRegion from './LiveRegion.jsx'
 
@@ -47,6 +49,10 @@ export const CHANGE_CAPSULE_REASONS = Object.freeze({
   noContainmentForKind: 'No scoped containment check exists for this element kind yet, so accept stays refused.',
   noScopedDiff: 'The proposed content is not available to re-parse yet, so a scoped diff cannot be computed.',
   outOfScope: 'The proposed change reaches beyond this element, so accept is refused to stay contained.',
+  staleBase: 'The surface config has changed since this proposal was made. Accept is refused; request a fresh proposal.',
+  invalidManifest: 'The live surface config or proposed overlay has an unknown slot or invalid shape. Accept is refused.',
+  manifestUnavailable: 'The live surface config could not be checked. Nothing was submitted.',
+  commitFailed: 'The surface config commit could not be confirmed. Refresh before trying again.',
 })
 
 /**
@@ -111,7 +117,11 @@ function reversibilityCopy(phase) {
   return 'Reversibility unknown until a decision is confirmed.'
 }
 
-export default function ChangeCapsule({
+export default function ChangeCapsule(props) {
+  return <ChangeCapsuleRecord key={`${props.annotation?.batchId}:${props.annotation?.revision}`} {...props} />
+}
+
+function ChangeCapsuleRecord({
   identity = null,
   annotation = null,
   busy = false,
@@ -126,7 +136,13 @@ export default function ChangeCapsule({
   resolveScopedIntakes,
 }) {
   const [dismissed, setDismissed] = useState(false)
-  const phase = capsulePhase({ annotation, busy, error })
+  const [submitting, setSubmitting] = useState(false)
+  const [refusal, setRefusal] = useState(null)
+  const [receipt, setReceipt] = useState(null)
+  const inFlight = useRef(false)
+  const kind = annotation?.kind || 'entity'
+  const isSurfaceConfig = kind === 'surface-config'
+  const phase = receipt ? 'accepted' : capsulePhase({ annotation, busy: busy || submitting, error })
 
   const intakes = useMemo(() => {
     if (phase !== 'pending' || typeof resolveScopedIntakes !== 'function') return null
@@ -136,11 +152,45 @@ export default function ChangeCapsule({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, identity?.kind, identity?.id, annotation?.batchId, resolveScopedIntakes])
 
-  const gate = useMemo(() => acceptGate({ identity, phase, intakes }), [identity, phase, intakes])
+  const gate = useMemo(() => isSurfaceConfig
+    ? { allowed: phase === 'pending' && !refusal, reason: refusal, outside: [] }
+    : acceptGate({ identity, phase, intakes }), [identity, phase, intakes, isSurfaceConfig, refusal])
+
+  async function acceptSurfaceConfig() {
+    if (inFlight.current || receipt || !gate.allowed) return
+    inFlight.current = true
+    setSubmitting(true)
+    let submitted = false
+    try {
+      const live = await getSurfaceConfig(false, { fresh: true })
+      if (!isSurfaceConfigOverlay(live?.surfaces) || !isSurfaceConfigOverlay(annotation.overlay)) {
+        setRefusal(CHANGE_CAPSULE_REASONS.invalidManifest)
+        return
+      }
+      if (annotation.baseSha256 !== (live?.source?.sha256 ?? null)) {
+        setRefusal(CHANGE_CAPSULE_REASONS.staleBase)
+        return
+      }
+      submitted = true
+      const committed = await submitSurfaceConfig(annotation.overlay)
+      if (typeof committed?.sha256 !== 'string' || typeof committed?.authored_at !== 'string') {
+        throw new Error('Missing file receipt')
+      }
+      setReceipt(committed)
+      await refreshSurfaceConfigOverlay()
+    } catch {
+      setRefusal(submitted ? CHANGE_CAPSULE_REASONS.commitFailed : CHANGE_CAPSULE_REASONS.manifestUnavailable)
+    } finally {
+      inFlight.current = false
+      setSubmitting(false)
+    }
+  }
 
   if (!annotation || dismissed) return null
 
-  const confirmedCopy = confirmation && (
+  const confirmedCopy = receipt
+    ? `Surface config committed: ${receipt.sha256.slice(0, 8)}, authored ${receipt.authored_at}.`
+    : confirmation && (
     confirmation.kind === 'undo'
       ? `Inverse confirmed at revision ${confirmation.revision}, target version ${confirmation.targetVersion}.`
       : `Confirmed at revision ${confirmation.revision}, target version ${confirmation.targetVersion}.`
@@ -161,14 +211,16 @@ export default function ChangeCapsule({
       </div>
       <p className="overlay-card-ask" data-testid="change-capsule-proposal">{annotation.decisionCopy}</p>
       <p className="dim" data-testid="change-capsule-artifact">
-        {identity ? `Affects ${identity.kind} ${identity.id}` : 'No element attached.'}
+        {isSurfaceConfig ? 'Affects the workspace surface config.' : identity ? `Affects ${identity.kind} ${identity.id}` : 'No element attached.'}
       </p>
       {gate.outside.length > 0 && (
         <p className="overlay-card-error" role="alert" data-testid="change-capsule-outside">
           Also touches: {gate.outside.map((t) => t.handle || 'an unidentified entity').join(', ')}
         </p>
       )}
-      <p className="dim" data-testid="change-capsule-reversibility">{reversibilityCopy(phase)}</p>
+      <p className="dim" data-testid="change-capsule-reversibility">{isSurfaceConfig
+        ? 'Accept replaces the surface config file. Restoring it requires a new proposal.'
+        : reversibilityCopy(phase)}</p>
       <LiveRegion as="p" className="dim" data-testid="change-capsule-status">
         {PHASE_STATUS[phase] || PHASE_STATUS.stale}
       </LiveRegion>
@@ -185,7 +237,7 @@ export default function ChangeCapsule({
               title={gate.allowed ? undefined : gate.reason}
               data-reason={gate.allowed ? undefined : gate.reason}
               data-testid="change-capsule-accept"
-              onClick={onAccept}
+              onClick={isSurfaceConfig ? acceptSurfaceConfig : onAccept}
             >
               Accept
             </button>
@@ -202,7 +254,7 @@ export default function ChangeCapsule({
             Retry as a fresh proposal
           </button>
         )}
-        {phase === 'accepted' && (
+        {phase === 'accepted' && !isSurfaceConfig && (
           <button type="button" className="chip-act" disabled={busy} onClick={onUndo} data-testid="change-capsule-undo">
             Prepare undo
           </button>
@@ -210,6 +262,7 @@ export default function ChangeCapsule({
       </div>
       <LiveRegion as="p" className="dim">{confirmedCopy || ''}</LiveRegion>
       {error && <p className="overlay-card-error" role="alert">{error}</p>}
+      {refusal && <p className="overlay-card-error" role="alert">{refusal}</p>}
     </section>
   )
 }
