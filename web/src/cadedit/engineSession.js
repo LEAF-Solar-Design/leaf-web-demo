@@ -73,10 +73,19 @@ export { SESSION_ERROR } from './engineSessionErrors.js'
 
 const NO_ENTITIES = Object.freeze([])
 
+// Keep the catalogue on the entity snapshot: existing viewer consumers take
+// this array, and committed/undo snapshots must carry the same definitions.
+export function projectionEntities(message) {
+  const entities = Array.isArray(message?.entities) ? message.entities : NO_ENTITIES
+  const blocks = message?.blocks ?? entities.blocks
+  return Array.isArray(blocks) ? Object.assign(entities.slice(), { blocks }) : entities
+}
+
 const INITIAL_SESSION = Object.freeze({
   documentId: '',
   entities: NO_ENTITIES,
   entityCount: 0,
+  blockBasePatched: false,
   selectedId: '',
   status: '',
   savedBytes: null,
@@ -687,7 +696,13 @@ export default function useEngineSession({
       if (generation !== generationRef.current) return
       if (message.type === 'ready') return
       if (message.type === 'documentLoaded') {
-        const entities = message.entities ?? NO_ENTITIES
+        if (message.refusal) {
+          clearHistory()
+          setSession((current) => Object.freeze({ ...INITIAL_SESSION, documentId: message.documentId,
+            clipboard: current.clipboard, errorKind: SESSION_ERROR.REFUSED, status: `Load refused: ${message.refusal}` }))
+          return
+        }
+        const entities = projectionEntities(message)
         const others = (message.unsupported ?? []).length
         const history = historyRef.current
         const reload = history.reload
@@ -702,6 +717,7 @@ export default function useEngineSession({
             ...current,
             entities,
             entityCount: message.entityCount ?? 0,
+            blockBasePatched: message.blockBasePatched ?? false,
             selectedId: surviveSelection(current.selectedId, entities),
             savedBytes: edited ? reload.bytes : null,
             busy: false,
@@ -722,6 +738,7 @@ export default function useEngineSession({
         patch({
           entities,
           entityCount: message.entityCount ?? 0,
+          blockBasePatched: message.blockBasePatched ?? false,
           selectedId: '',
           savedBytes: null,
           committedBytes: null,
@@ -751,7 +768,7 @@ export default function useEngineSession({
           })
           return
         }
-        const entities = message.entities ?? NO_ENTITIES
+        const entities = projectionEntities(message)
         // A create reports what it drew BY ID (the worker found it again by
         // handle in the re-parse); the selection lands on it. A create whose
         // entity the writer dropped is a defect and reads as one.
@@ -778,6 +795,7 @@ export default function useEngineSession({
           entities,
           entityCount: message.entityCount ?? 0,
           savedBytes: message.bytes ?? null,
+          blockBasePatched: message.blockBasePatched ?? false,
           selectedId: createdId || surviveSelection(current.selectedId, entities),
           undoDepth: history.undo.length,
           redoDepth: history.redo.length,
@@ -942,6 +960,10 @@ export default function useEngineSession({
     // Nothing selected is not an error, it is a no-op: the affordances that
     // dispatch an edit are disabled until something is.
     if (!sessionRef.current.selectedId) return
+    if (sessionRef.current.entities.find((entity) => entity.id === sessionRef.current.selectedId)?.type === 'INSERT') {
+      patch({ errorKind: SESSION_ERROR.REFUSED, status: 'INSERT is not editable in this round' })
+      return
+    }
     // W4g-5 OFFSET: a parallel copy is a CREATE whose geometry comes from the
     // selection, the distance and the side clicked, computed here (offset.js)
     // and drawn by the engine's own create op. One round trip, and every
@@ -1108,7 +1130,8 @@ export default function useEngineSession({
     trimSnapshots(to)
     history.reload = { kind, op: snap.op, bytes: snap.bytes }
     patch({ busy: true, errorKind: null, undoDepth: history.undo.length, redoDepth: history.redo.length })
-    if (!boundary.post({ type: 'loadDocument', documentId: sessionRef.current.documentId, bytes: snap.bytes })) {
+    if (!boundary.post({ type: 'loadDocument', documentId: sessionRef.current.documentId, bytes: snap.bytes,
+      blockBasesUnknown: sessionRef.current.entities.blocks?.some((block) => block.baseUnknown === true) ?? false })) {
       // Put the snapshot back: nothing moved.
       history.reload = null
       to.pop()
@@ -1155,6 +1178,10 @@ export default function useEngineSession({
     const verb = cut ? 'Cut' : 'Copy'
     if (!entity) {
       patch({ errorKind: SESSION_ERROR.REFUSED, status: `${verb} refused: select an entity first.` })
+      return
+    }
+    if (entity.type === 'INSERT') {
+      patch({ errorKind: SESSION_ERROR.REFUSED, status: 'INSERT is not editable in this round' })
       return
     }
     // The record is taken BEFORE anything is deleted, so a cut that cannot be

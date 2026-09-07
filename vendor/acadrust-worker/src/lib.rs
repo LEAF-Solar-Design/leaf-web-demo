@@ -76,8 +76,17 @@
 use acadrust::entities::{Arc as ArcEntity, Circle, Entity, EntityType, Line, LwPolyline, Text, Point, Ellipse};
 use acadrust::types::{Handle, Transform, Vector2, Vector3};
 use acadrust::{CadDocument, DxfReader, DxfWriter};
+use acadrust::io::dxf::{DxfStreamWriter, DxfTextWriter};
 use serde::Serialize;
+use std::cell::Cell;
+use std::collections::{HashMap, HashSet};
 use wasm_bindgen::prelude::*;
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = Reflect, js_name = set)]
+    fn set_projection_field(target: &JsValue, key: &JsValue, value: &JsValue) -> bool;
+}
 
 // ---------------------------------------------------------------------------
 // Card F-3 (editing surface engine leg). Everything below is Leaf Automation wrapper
@@ -151,6 +160,7 @@ fn kind_name(entity: &EntityType) -> &'static str {
         // W4g-4b: the reference's Draw column, engine-backed now.
         EntityType::Point(_) => "POINT",
         EntityType::Ellipse(_) => "ELLIPSE",
+        EntityType::Insert(_) => "INSERT",
         _ => "OTHER",
     }
 }
@@ -225,6 +235,7 @@ fn height_of(entity: &EntityType) -> Option<f64> {
 fn rotation_deg_of(entity: &EntityType) -> Option<f64> {
     match entity {
         EntityType::Text(t) => Some(t.rotation.to_degrees()),
+        EntityType::Insert(i) => Some(i.rotation.to_degrees()),
         _ => None,
     }
 }
@@ -258,6 +269,383 @@ fn sweep_deg_of(entity: &EntityType) -> Option<(f64, f64)> {
         EntityType::Arc(a) => Some((a.start_angle.to_degrees(), a.end_angle.to_degrees())),
         _ => None,
     }
+}
+
+// W4g-7b-01c: block definitions share the crate's flat entity storage, but
+// their children are not independent model-space geometry or edit targets.
+const BLOCK_CHILD_CAP: usize = 60;
+const INSERT_NOT_EDITABLE: &str = "INSERT is not editable in this round";
+
+fn block_children(document: &CadDocument) -> HashSet<Handle> {
+    document.block_records.iter()
+        .filter(|b| !b.is_model_space() && b.name != "*Paper_Space")
+        .flat_map(|b| b.entity_handles.iter().copied())
+        .collect()
+}
+
+fn block_base(document: &CadDocument, block: &acadrust::tables::BlockRecord) -> [f64; 3] {
+    let base = match document.get_entity(block.block_entity_handle) {
+        Some(EntityType::Block(marker)) => marker.base_point,
+        // Newly allocated system records may have no marker yet.
+        _ => block.base_point,
+    };
+    [base.x, base.y, base.z]
+}
+
+fn entity_record(index: usize, entity: &EntityType, can_edit: bool) -> serde_json::Value {
+    let mut record = serde_json::json!({
+        "index": index,
+        "handle": handle_id(entity.common().handle.value()),
+        "type": kind_name(entity),
+        "layer": entity.common().layer.clone(),
+        "closed": closed_of(entity),
+        "editable": can_edit && editable(entity),
+        "vertices": vertices_of(entity),
+        "bulges": bulges_of(entity),
+        "radius": radius_of(entity),
+        "text": text_of(entity),
+        "height": height_of(entity),
+        "rotationDeg": rotation_deg_of(entity),
+        "startDeg": sweep_deg_of(entity).map(|(start, _)| start),
+        "endDeg": sweep_deg_of(entity).map(|(_, end)| end),
+        "majorAxis": major_axis_of(entity),
+        "ratio": ratio_of(entity),
+    });
+    if let EntityType::Insert(insert) = entity {
+        record["kind"] = serde_json::json!("REFERENCE");
+        record["name"] = serde_json::json!(insert.block_name);
+        record["ip"] = serde_json::json!([insert.insert_point.x, insert.insert_point.y, insert.insert_point.z]);
+        record["scale"] = serde_json::json!([insert.x_scale(), insert.y_scale(), insert.z_scale()]);
+        record["columns"] = serde_json::json!(insert.column_count);
+        record["rows"] = serde_json::json!(insert.row_count);
+        record["columnSpacing"] = serde_json::json!(insert.column_spacing);
+        record["rowSpacing"] = serde_json::json!(insert.row_spacing);
+    }
+    record
+}
+
+fn projected_entities(document: &CadDocument) -> Vec<serde_json::Value> {
+    let children = block_children(document);
+    document.entities().enumerate()
+        .filter(|(_, e)| !children.contains(&e.common().handle))
+        .map(|(index, e)| entity_record(index, e, true))
+        .collect()
+}
+
+// Use the actual writer's group sequence, including inline VERTEX/ATTRIB/
+// SEQEND records. Handles and owners identify records but are not geometry.
+fn written_block_children(document: &CadDocument) -> HashMap<Handle, String> {
+    let mut records = HashMap::<Handle, String>::new();
+    let bytes = match DxfWriter::new(document).write_to_vec() { Ok(bytes) => bytes, Err(_) => return records };
+    let text = match std::str::from_utf8(&bytes) { Ok(text) => text, Err(_) => return records };
+    let lines: Vec<_> = text.lines().collect();
+    let code = |i: usize| lines.get(i).and_then(|line| line.trim().parse::<i32>().ok());
+    let children = block_children(document);
+    let mut in_blocks = false;
+    let mut active = None;
+    let mut i = 0;
+    while i + 1 < lines.len() {
+        if code(i) != Some(0) { i += 2; continue; }
+        let mut end = i + 2;
+        while end + 1 < lines.len() && code(end) != Some(0) { end += 2; }
+        let kind = lines[i + 1];
+        if kind == "SECTION" {
+            in_blocks = code(i + 2) == Some(2) && lines.get(i + 3) == Some(&"BLOCKS");
+            active = None;
+        } else if kind == "ENDSEC" {
+            in_blocks = false;
+            active = None;
+        } else if in_blocks {
+            if matches!(kind, "BLOCK" | "ENDBLK") {
+                active = None;
+            } else {
+                let handle = (i + 2..end).step_by(2).find(|&pos| code(pos) == Some(5))
+                    .and_then(|pos| u64::from_str_radix(lines[pos + 1].trim(), 16).ok()).map(Handle::new);
+                if let Some(handle) = handle.filter(|handle| children.contains(handle)) {
+                    active = Some(handle);
+                    records.entry(handle).or_default();
+                } else if !matches!(kind, "VERTEX" | "ATTRIB" | "SEQEND") {
+                    active = None;
+                }
+                if let Some(handle) = active {
+                    let record = records.entry(handle).or_default();
+                    for pos in (i..end).step_by(2) {
+                        if matches!(code(pos), Some(5 | 330)) { continue; }
+                        record.push_str(lines[pos]);
+                        record.push('\n');
+                        record.push_str(lines[pos + 1]);
+                        record.push('\n');
+                    }
+                }
+            }
+        }
+        i = end;
+    }
+    records
+}
+
+// FNV-1a over length-delimited canonical records in membership order. Only
+// kinds absent from the writer's output fall back to full-field Debug.
+fn block_digest(document: &CadDocument, block: &acadrust::tables::BlockRecord, base_unknown: bool,
+    written: &HashMap<Handle, String>) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    let mut feed = |value: String| {
+        for byte in (value.len() as u64).to_le_bytes().iter().chain(value.as_bytes()) {
+            hash = (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
+        }
+    };
+    let mut base = Vec::new();
+    for (axis, coordinate) in block_base(document, block).iter().enumerate() {
+        let _ = DxfTextWriter::new(&mut base).write_double(10 + axis as i32 * 10, *coordinate);
+    }
+    feed(String::from_utf8(base).unwrap());
+    feed(format!("{base_unknown}:{:?}:{}", block.flags, block.xref_path));
+    for handle in &block.entity_handles {
+        match (written.get(handle), document.get_entity(*handle)) {
+            (Some(record), _) => feed(record.clone()),
+            (_, Some(entity)) => feed(format!("{entity:?}")),
+            _ => feed("missing".to_string()),
+        }
+    }
+    format!("{hash:016x}")
+}
+
+fn block_catalogue(document: &CadDocument, bases_unknown: bool, unknown_bases: &HashSet<String>) -> Vec<serde_json::Value> {
+    if !document.block_records.iter().any(|b| !b.is_model_space() && !b.is_paper_space()) { return Vec::new(); }
+    let written = written_block_children(document);
+    document.block_records.iter()
+        .filter(|b| !b.is_model_space() && !b.is_paper_space())
+        .map(|block| {
+            let base_unknown = bases_unknown || unknown_bases.contains(&block.name);
+            let mut complete = !base_unknown && block.entity_handles.len() <= BLOCK_CHILD_CAP && !block.flags.has_attributes;
+            let mut children = Vec::new();
+            for handle in block.entity_handles.iter().take(BLOCK_CHILD_CAP) {
+                match document.get_entity(*handle) {
+                    Some(entity) if matches!(entity, EntityType::Line(_) | EntityType::LwPolyline(_)
+                        | EntityType::Polyline2D(_) | EntityType::Circle(_) | EntityType::Arc(_) | EntityType::Text(_)) => {
+                        let mut child = entity_record(0, entity, false);
+                        child.as_object_mut().unwrap().remove("index");
+                        children.push(child);
+                    }
+                    _ => complete = false,
+                }
+            }
+            serde_json::json!({ "name": block.name, "base": block_base(document, block), "children": children,
+                "complete": complete, "baseUnknown": base_unknown, "digest": block_digest(document, block, base_unknown, &written) })
+        })
+        .collect()
+}
+
+// The pinned DXF reader records block handles but discards the BLOCK marker.
+// Retain its base in the wrapper so the post-write pass has the source value.
+fn retain_block_bases(document: &mut CadDocument, bytes: &[u8]) -> Result<HashSet<String>, Refusal> {
+    let mut unknown: HashSet<String> = document.block_records.iter()
+        .filter(|b| !b.is_model_space() && !b.is_paper_space()).map(|b| b.name.clone()).collect();
+    if bytes.starts_with(b"AutoCAD Binary DXF") { return Ok(unknown); }
+    // Decode each text line like the crate: UTF-8, then byte-to-char Latin-1.
+    // Coordinates and handles do not depend on the description/name encoding.
+    let lines: Vec<String> = bytes.split(|byte| *byte == b'\n').map(|line| {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        std::str::from_utf8(line).map(str::to_string).unwrap_or_else(|_| line.iter().map(|&byte| char::from(byte)).collect())
+    }).collect();
+    let code = |i: usize| lines.get(i).and_then(|s| s.trim().parse::<i32>().ok());
+    let mut in_blocks = false;
+    let mut i = 0;
+    while i + 1 < lines.len() {
+        if code(i) == Some(0) && lines[i + 1] == "SECTION" {
+            in_blocks = code(i + 2) == Some(2) && lines.get(i + 3).map(String::as_str) == Some("BLOCKS");
+        } else if code(i) == Some(0) && lines[i + 1] == "ENDSEC" {
+            in_blocks = false;
+        } else if in_blocks && code(i) == Some(0) && lines[i + 1] == "BLOCK" {
+            let mut marker_handle = None;
+            let mut base = [0.0; 3];
+            let mut end = i + 2;
+            while end + 1 < lines.len() && code(end) != Some(0) {
+                match code(end) {
+                    Some(5) => marker_handle = u64::from_str_radix(lines[end + 1].trim(), 16).ok().map(Handle::new),
+                    Some(10 | 20 | 30) => {
+                        let axis = (code(end).unwrap() / 10 - 1) as usize;
+                        base[axis] = lines[end + 1].trim().parse::<f64>()
+                            .map_err(|_| "block_base_not_finite".to_string())?;
+                        if !base[axis].is_finite() { return refuse("block_base_not_finite"); }
+                    }
+                    _ => {}
+                }
+                end += 2;
+            }
+            if let Some(handle) = marker_handle.filter(|handle| !handle.is_null()) {
+                let matches: Vec<String> = document.block_records.iter()
+                    .filter(|block| block.block_entity_handle == handle).map(|block| block.name.clone()).collect();
+                if matches.len() == 1 {
+                    let name = &matches[0];
+                    let block = document.block_records.get(name).unwrap();
+                    let handle = block.block_entity_handle;
+                    let owner = block.handle;
+                    let base = Vector3::new(base[0], base[1], base[2]);
+                    if let Some(EntityType::Block(marker)) = document.get_entity_mut(handle) {
+                        marker.base_point = base;
+                    } else if document.get_entity(handle).is_none() {
+                        let mut marker = acadrust::entities::Block::new(name, base);
+                        marker.common.handle = handle;
+                        marker.common.owner_handle = owner;
+                        let marker_handle = document.add_entity(EntityType::Block(marker))
+                            .map_err(|e| format!("block_base_retention_failed:{e}"))?;
+                        document.block_records.get_mut(name).unwrap().block_entity_handle = marker_handle;
+                    } else {
+                        return refuse("block_marker_handle_collision");
+                    }
+                    document.block_records.get_mut(name).unwrap().base_point = base;
+                    unknown.remove(name);
+                }
+            }
+            i = end;
+            continue;
+        }
+        i += 2;
+    }
+    Ok(unknown)
+}
+
+// Count definitions on raw bytes, before any name decoding or table lookup.
+// System and anonymous names start with '*'; all other BLOCKs count once.
+fn raw_block_definition_count(bytes: &[u8]) -> Result<usize, Refusal> {
+    let mut count = 0;
+    let mut in_blocks = false;
+    let mut section_record = false;
+    let mut block_record = false;
+    let mut visit = |code: i32, value: &[u8]| {
+        if code == 0 {
+            if value == b"ENDSEC" { in_blocks = false; }
+            section_record = value == b"SECTION";
+            block_record = in_blocks && value == b"BLOCK";
+        } else if code == 2 {
+            if section_record {
+                in_blocks = value == b"BLOCKS";
+                section_record = false;
+            } else if block_record {
+                if !value.starts_with(b"*") { count += 1; }
+                block_record = false;
+            }
+        }
+    };
+    if !bytes.starts_with(b"AutoCAD Binary DXF") {
+        let mut lines = bytes.split(|byte| *byte == b'\n');
+        while let (Some(code), Some(value)) = (lines.next(), lines.next()) {
+            if let Some(code) = std::str::from_utf8(code).ok().and_then(|code| code.trim().parse().ok()) {
+                visit(code, value.strip_suffix(b"\r").unwrap_or(value));
+            }
+        }
+        return Ok(count);
+    }
+    // Binary names need the same preflight. Use the crate's public group-type
+    // mapping to skip values, including pre-R13 single-byte group codes.
+    use acadrust::io::dxf::GroupCodeValueType as ValueType;
+    let mut at = 22usize;
+    let single_byte = bytes.get(at) == Some(&0) && bytes.get(at + 1).map_or(false, |b| (0x20..0x7f).contains(b));
+    while at < bytes.len() {
+        let code = if single_byte && bytes[at] != 255 {
+            let code = i32::from(bytes[at]);
+            at += 1;
+            code
+        } else {
+            if single_byte { at += 1; }
+            let pair = bytes.get(at..at + 2).ok_or("block_name_scan_truncated")?;
+            at += 2;
+            i32::from(i16::from_le_bytes([pair[0], pair[1]]))
+        };
+        let size = match ValueType::from_raw_code(code) {
+            ValueType::String | ValueType::Handle | ValueType::None => {
+                let length = bytes[at..].iter().position(|b| *b == 0).ok_or("block_name_scan_truncated")?;
+                visit(code, &bytes[at..at + length]);
+                length + 1
+            }
+            ValueType::Double | ValueType::Point3D | ValueType::Int64 => 8,
+            ValueType::Int32 => 4,
+            ValueType::Int16 | ValueType::Byte => 2,
+            ValueType::Bool => 1,
+            ValueType::BinaryData => 1 + usize::from(*bytes.get(at).ok_or("block_name_scan_truncated")?),
+        };
+        at = at.checked_add(size).filter(|end| *end <= bytes.len()).ok_or("block_name_scan_truncated")?;
+    }
+    Ok(count)
+}
+
+fn validate_block_names(document: &CadDocument, definitions: usize) -> Result<(), Refusal> {
+    let retained = document.block_records.iter().filter(|block| !block.name.starts_with('*')).count();
+    if definitions != retained {
+        return Err(format!("block definitions collapsed on load: {definitions} in the file, {retained} retained"));
+    }
+    let mut names = HashMap::<String, String>::new();
+    for block in document.block_records.iter().filter(|block| !block.name.starts_with('*')) {
+        if let Some(previous) = names.insert(block.name.to_uppercase(), block.name.clone()) {
+            return Err(format!("block names collide case-insensitively: {previous}, {}", block.name));
+        }
+    }
+    Ok(())
+}
+
+fn parse_dxf_core(bytes: &[u8]) -> Result<ParsedDxf, Refusal> {
+    let definitions = raw_block_definition_count(bytes)?;
+    let mut inner = DxfReader::from_reader(std::io::Cursor::new(bytes.to_vec()))
+        .map_err(|e| e.to_string())?.read().map_err(|e| e.to_string())?;
+    validate_block_names(&inner, definitions)?;
+    let unknown_block_bases = retain_block_bases(&mut inner, bytes)?;
+    Ok(ParsedDxf { inner, block_base_patched: Cell::new(false), block_bases_unknown: bytes.starts_with(b"AutoCAD Binary DXF"), unknown_block_bases })
+}
+
+// Validate all BLOCK layouts before emitting any replacement. Keep every byte
+// outside the three coordinate values, including the original line endings.
+// Formatting delegates to the pinned crate's public writer, not a copied formatter.
+fn patch_block_bases(document: &CadDocument, bytes: Vec<u8>) -> (Vec<u8>, bool) {
+    let text = match std::str::from_utf8(&bytes) { Ok(text) => text, Err(_) => return (bytes, false) };
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    if lines.len() % 2 != 0 { return (bytes, false); }
+    let value = |i: usize| lines[i].trim_end_matches(['\r', '\n']);
+    let code = |i: usize| value(i).trim().parse::<i32>().ok();
+    let bases: HashMap<Handle, [f64; 3]> = document.block_records.iter()
+        .map(|b| (b.block_entity_handle, block_base(document, b))).collect();
+    let mut replacements = HashMap::new();
+    let mut in_blocks = false;
+    let mut i = 0;
+    while i + 1 < lines.len() {
+        if code(i) == Some(0) && value(i + 1) == "SECTION" {
+            in_blocks = i + 3 < lines.len() && code(i + 2) == Some(2) && value(i + 3) == "BLOCKS";
+        } else if code(i) == Some(0) && value(i + 1) == "ENDSEC" {
+            in_blocks = false;
+        } else if in_blocks && code(i) == Some(0) && value(i + 1) == "BLOCK" {
+            let mut end = i + 2;
+            while end + 1 < lines.len() && code(end) != Some(0) { end += 2; }
+            let names: Vec<usize> = (i + 2..end).step_by(2).filter(|&at| code(at) == Some(2)).collect();
+            if names.len() != 1 { return (bytes, false); }
+            let at = names[0];
+            if at + 9 >= end || [70, 10, 20, 30].iter().enumerate().any(|(j, expected)| code(at + 2 + j * 2) != Some(*expected)) {
+                return (bytes, false);
+            }
+            if (i + 2..end).step_by(2).filter(|&pos| matches!(code(pos), Some(10 | 20 | 30))).count() != 3 {
+                return (bytes, false);
+            }
+            let handle = (i + 2..end).step_by(2).find(|&pos| code(pos) == Some(5))
+                .and_then(|pos| u64::from_str_radix(value(pos + 1).trim(), 16).ok()).map(Handle::new);
+            let base = match handle.and_then(|handle| bases.get(&handle)) { Some(base) => base, None => return (bytes, false) };
+            for (axis, coordinate) in base.iter().enumerate() {
+                let mut formatted = Vec::new();
+                if DxfTextWriter::new(&mut formatted).write_double(10, *coordinate).is_err() { return (bytes, false); }
+                let formatted = match String::from_utf8(formatted) { Ok(s) => s, Err(_) => return (bytes, false) };
+                let number = match formatted.lines().nth(1) { Some(s) => s, None => return (bytes, false) };
+                let pos = at + 5 + axis * 2;
+                let ending = &lines[pos][value(pos).len()..];
+                replacements.insert(pos, format!("{number}{ending}"));
+            }
+            i = end;
+            continue;
+        }
+        i += 2;
+    }
+    let mut patched = Vec::with_capacity(bytes.len());
+    for (i, line) in lines.iter().enumerate() {
+        patched.extend_from_slice(replacements.get(&i).map(String::as_str).unwrap_or(line).as_bytes());
+    }
+    (patched, true)
 }
 
 // W4d Draw group. Creation goes through the crate's own `add_entity`, which
@@ -300,24 +688,34 @@ fn created_layer(layer: &str) -> Result<String, Refusal> {
 #[wasm_bindgen]
 pub struct ParsedDxf {
     inner: CadDocument,
+    block_base_patched: Cell<bool>,
+    block_bases_unknown: bool,
+    unknown_block_bases: HashSet<String>,
 }
 
 // ---- the cores: every operation, natively testable ------------------------
 impl ParsedDxf {
+    fn editable_at(&self, index: usize) -> Result<&EntityType, Refusal> {
+        let entity = self.inner.entities().nth(index)
+            .ok_or_else(|| "entity_index_out_of_range".to_string())?;
+        if block_children(&self.inner).contains(&entity.common().handle) {
+            return refuse("block_child_not_editable");
+        }
+        if matches!(entity, EntityType::Insert(_)) { return refuse(INSERT_NOT_EDITABLE); }
+        Ok(entity)
+    }
+
     fn entity_mut(&mut self, index: usize) -> Result<&mut EntityType, Refusal> {
+        let handle = self.editable_at(index)?.common().handle;
         self.inner
             .entities_mut()
-            .nth(index)
-            .ok_or_else(|| "entity_index_out_of_range".to_string())
+            .find(|entity| entity.common().handle == handle)
+            .ok_or_else(|| "entity_handle_not_found".to_string())
     }
 
     fn delete_entity_core(&mut self, index: usize) -> Result<(), Refusal> {
         let (handle, is_editable) = {
-            let entity = self
-                .inner
-                .entities()
-                .nth(index)
-                .ok_or_else(|| "entity_index_out_of_range".to_string())?;
+            let entity = self.editable_at(index)?;
             (entity.common().handle, editable(entity))
         };
         if !is_editable {
@@ -654,11 +1052,7 @@ impl ParsedDxf {
     /// `add_entity` allocates a fresh one (a clone that kept its handle would
     /// overwrite the original in the document's map).
     fn cloned_for_create(&self, index: usize) -> Result<(EntityType, String), Refusal> {
-        let entity = self
-            .inner
-            .entities()
-            .nth(index)
-            .ok_or_else(|| "entity_index_out_of_range".to_string())?;
+        let entity = self.editable_at(index)?;
         if !editable(entity) {
             return refuse("entity_kind_not_editable");
         }
@@ -759,11 +1153,7 @@ impl ParsedDxf {
     /// document with its source gone.
     fn explode_entity_core(&mut self, index: usize) -> Result<Vec<String>, Refusal> {
         let (handle, layer, parts) = {
-            let entity = self
-                .inner
-                .entities()
-                .nth(index)
-                .ok_or_else(|| "entity_index_out_of_range".to_string())?;
+            let entity = self.editable_at(index)?;
             if !editable(entity) {
                 return refuse("entity_kind_not_editable");
             }
@@ -1074,9 +1464,11 @@ impl ParsedDxf {
     /// `{type, layer, start, end}` object per LINE entity, in document order.
     #[wasm_bindgen(getter)]
     pub fn entities(&self) -> Result<JsValue, JsValue> {
+        let children = block_children(&self.inner);
         let list: Vec<serde_json::Value> = self
             .inner
             .entities()
+            .filter(|e| !children.contains(&e.common().handle))
             .filter_map(|e| match e {
                 EntityType::Line(line) => Some(serde_json::json!({
                     "type": "LINE",
@@ -1094,52 +1486,42 @@ impl ParsedDxf {
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
-    /// F-3 editor projection: EVERY entity in document order, each as
-    /// `{index, handle, type, layer, closed, editable, vertices}`. Non-editable
-    /// kinds appear with `editable: false` and empty vertices — they are
-    /// listed so the count the UI shows is the truth about the document, and
-    /// they round-trip through the writer untouched (whole-document model:
-    /// nothing is dropped by being uneditable).
+    /// Model-space projection with read-only INSERT references. Keep the array
+    /// API (map/find consumers) and attach the additive block catalogue to it.
     #[wasm_bindgen(js_name = editableEntities)]
     pub fn editable_entities(&self) -> Result<JsValue, JsValue> {
-        let list: Vec<serde_json::Value> = self
-            .inner
-            .entities()
-            .enumerate()
-            .map(|(index, e)| {
-                serde_json::json!({
-                    "index": index,
-                    // The handle is the identity that survives a write/re-parse
-                    // (the index does not: a delete renumbers). A create returns
-                    // it; the worker finds the new entity by it afterwards.
-                    "handle": handle_id(e.common().handle.value()),
-                    "type": kind_name(e),
-                    "layer": e.common().layer.clone(),
-                    "closed": closed_of(e),
-                    "editable": editable(e),
-                    "vertices": vertices_of(e),
-                    // W4g-6d: one bulge per vertex for a polyline, null otherwise.
-                    "bulges": bulges_of(e),
-                    // W4f: circles and arcs are drawable from these; null
-                    // for every other kind, so a consumer that ignores them
-                    // sees the exact shape it saw before.
-                    "radius": radius_of(e),
-                    // W4g-5d: a TEXT carries its own value, height and
-                    // rotation (degrees); null for every other kind.
-                    "text": text_of(e),
-                    "height": height_of(e),
-                    "rotationDeg": rotation_deg_of(e),
-                    "startDeg": sweep_deg_of(e).map(|(start, _)| start),
-                    "endDeg": sweep_deg_of(e).map(|(_, end)| end),
-                    // W4g-4b: an ELLIPSE's axis endpoint (relative to the centre)
-                    // and ratio; null for every other kind.
-                    "majorAxis": major_axis_of(e),
-                    "ratio": ratio_of(e),
-                })
-            })
-            .collect();
-        list.serialize(&serde_wasm_bindgen::Serializer::json_compatible())
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+        let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+        let list = projected_entities(&self.inner).serialize(&serializer)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let blocks = block_catalogue(&self.inner, self.block_bases_unknown, &self.unknown_block_bases).serialize(&serializer)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        if !set_projection_field(&list, &JsValue::from_str("blocks"), &blocks) {
+            return Err(JsValue::from_str("block_catalogue_projection_failed"));
+        }
+        Ok(list)
+    }
+
+    /// Status of the last wrapper write, false until a write has succeeded.
+    #[wasm_bindgen(getter, js_name = blockBasePatched)]
+    pub fn block_base_patched(&self) -> bool {
+        self.block_base_patched.get()
+    }
+
+    #[wasm_bindgen(getter, js_name = blockBasesUnknown)]
+    pub fn block_bases_unknown(&self) -> bool {
+        self.block_bases_unknown
+    }
+
+    #[wasm_bindgen(setter, js_name = blockBasesUnknown)]
+    pub fn set_block_bases_unknown(&mut self, unknown: bool) {
+        self.block_bases_unknown = unknown;
+    }
+
+    // Writing cannot recover an unmatched marker or a binary input's base.
+    #[wasm_bindgen(js_name = inheritBlockBaseUnknowns)]
+    pub fn inherit_block_base_unknowns(&mut self, previous: &ParsedDxf) {
+        self.block_bases_unknown |= previous.block_bases_unknown;
+        self.unknown_block_bases.extend(previous.unknown_block_bases.iter().cloned());
     }
 
     /// Deletes the entity at `index` (current document order) via the
@@ -1386,11 +1768,7 @@ impl ParsedDxf {
 /// does not satisfy `'static` and does not compile.
 #[wasm_bindgen(js_name = parseDxf)]
 pub fn parse_dxf(bytes: &[u8]) -> Result<ParsedDxf, JsValue> {
-    let inner = DxfReader::from_reader(std::io::Cursor::new(bytes.to_vec()))
-        .map_err(|e| JsValue::from_str(&e.to_string()))?
-        .read()
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    Ok(ParsedDxf { inner })
+    parse_dxf_core(bytes).map_err(js_err)
 }
 
 /// Re-serializes a parsed document via `DxfWriter::new(&doc).write_to_vec()`.
@@ -1399,9 +1777,12 @@ pub fn parse_dxf(bytes: &[u8]) -> Result<ParsedDxf, JsValue> {
 /// oracle asks for.
 #[wasm_bindgen(js_name = writeDxf)]
 pub fn write_dxf(doc: &ParsedDxf) -> Result<Vec<u8>, JsValue> {
-    DxfWriter::new(&doc.inner)
+    let bytes = DxfWriter::new(&doc.inner)
         .write_to_vec()
-        .map_err(|e| JsValue::from_str(&e.to_string()))
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let (bytes, patched) = if doc.block_bases_unknown { (bytes, false) } else { patch_block_bases(&doc.inner, bytes) };
+    doc.block_base_patched.set(patched && doc.unknown_block_bases.is_empty());
+    Ok(bytes)
 }
 
 /// Byte-for-byte comparison, the stand-in's `bytesEqual` twin.
@@ -1432,7 +1813,7 @@ mod created_entity_roundtrip {
     }
 
     fn empty_doc() -> ParsedDxf {
-        ParsedDxf { inner: CadDocument::new() }
+        ParsedDxf { inner: CadDocument::new(), block_base_patched: Cell::new(false), block_bases_unknown: false, unknown_block_bases: HashSet::new() }
     }
 
     fn kinds(doc: &ParsedDxf) -> Vec<&'static str> {
@@ -1453,7 +1834,7 @@ mod created_entity_roundtrip {
     }
 
     fn rewrite(doc: &ParsedDxf) -> ParsedDxf {
-        ParsedDxf { inner: reparse(&doc.inner) }
+        ParsedDxf { inner: reparse(&doc.inner), block_base_patched: Cell::new(false), block_bases_unknown: doc.block_bases_unknown, unknown_block_bases: doc.unknown_block_bases.clone() }
     }
 
     fn code<T>(result: Result<T, Refusal>) -> String {
@@ -2176,5 +2557,294 @@ line two", "")), "text_control_character");
             }
             other => panic!("expected a TEXT, got {}", kind_name(other)),
         };
+    }
+}
+
+#[cfg(test)]
+mod block_definition_rows {
+    use super::*;
+
+    const LINE: &str = "0\nLINE\n5\n100\n8\n0\n10\n1\n20\n2\n30\n0\n11\n4\n21\n2\n31\n0\n";
+    const CIRCLE: &str = "0\nCIRCLE\n5\n101\n8\n0\n10\n1\n20\n2\n30\n0\n40\n2\n";
+
+    fn fixture(children: &str, with_insert: bool) -> Vec<u8> {
+        let insert = if with_insert {
+            "0\nINSERT\n5\n500\n8\nRefs\n2\nB\n10\n10\n20\n20\n30\n3\n41\n-2\n42\n3\n43\n4\n50\n90\n70\n2\n71\n1\n44\n10\n45\n4\n"
+        } else { "" };
+        format!("0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1027\n0\nENDSEC\n\
+            0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n5\n40\n8\n0\n2\nB\n70\n0\n10\n1\n20\n2\n30\n0\n\
+            {children}0\nENDBLK\n5\n41\n8\n0\n0\nENDSEC\n\
+            0\nSECTION\n2\nENTITIES\n{insert}0\nENDSEC\n0\nEOF\n").into_bytes()
+    }
+
+    fn parsed(bytes: Vec<u8>) -> ParsedDxf {
+        parse_dxf_core(&bytes).unwrap()
+    }
+
+    #[test]
+    fn w7b_01c_children_are_owned_and_insert_fields_are_exact() {
+        let mut doc = parsed(fixture(&format!("{LINE}{CIRCLE}"), true));
+        let list = projected_entities(&doc.inner);
+        assert_eq!(list.len(), 1);
+        let reference = &list[0];
+        assert_eq!(reference["handle"], "1280");
+        assert_eq!(reference["type"], "INSERT");
+        assert_eq!(reference["kind"], "REFERENCE");
+        assert_eq!(reference["name"], "B");
+        assert_eq!(reference["ip"], serde_json::json!([10.0, 20.0, 3.0]));
+        assert_eq!(reference["scale"], serde_json::json!([-2.0, 3.0, 4.0]));
+        assert_eq!(reference["columns"], 2);
+        assert_eq!(reference["rows"], 1);
+        assert_eq!(reference["columnSpacing"], 10.0);
+        assert_eq!(reference["rowSpacing"], 4.0);
+        assert_eq!(reference["rotationDeg"], 90.0);
+        assert_eq!(reference["layer"], "Refs");
+        assert_eq!(reference["editable"], false);
+        let index = reference["index"].as_u64().unwrap() as usize;
+        let before = DxfWriter::new(&doc.inner).write_to_vec().unwrap();
+        assert_eq!(doc.delete_entity_core(index).unwrap_err(), INSERT_NOT_EDITABLE);
+        assert_eq!(doc.translate_entity_core(index, 1.0, 2.0).unwrap_err(), INSERT_NOT_EDITABLE);
+        assert_eq!(doc.copy_entity_core(index, 1.0, 2.0).unwrap_err(), INSERT_NOT_EDITABLE);
+        let child_index = doc.inner.entities().position(|e| e.common().handle == Handle::new(0x100)).unwrap();
+        assert_eq!(doc.delete_entity_core(child_index).unwrap_err(), "block_child_not_editable");
+        assert_eq!(doc.translate_entity_core(child_index, 1.0, 2.0).unwrap_err(), "block_child_not_editable");
+        assert_eq!(doc.copy_entity_core(child_index, 1.0, 2.0).unwrap_err(), "block_child_not_editable");
+        assert_eq!(DxfWriter::new(&doc.inner).write_to_vec().unwrap(), before);
+        let no_insert = parsed(fixture(&format!("{LINE}{CIRCLE}"), false));
+        assert!(projected_entities(&no_insert.inner).is_empty());
+        let blocks = block_catalogue(&doc.inner, doc.block_bases_unknown, &doc.unknown_block_bases);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["base"], serde_json::json!([1.0, 2.0, 0.0]));
+        assert_eq!(blocks[0]["complete"], true);
+        let children = blocks[0]["children"].as_array().unwrap();
+        assert_eq!(children.len(), 2);
+        assert!(children.iter().all(|child| child["editable"] == false));
+        assert_eq!(children[0]["vertices"], serde_json::json!([[1.0, 2.0, 0.0], [4.0, 2.0, 0.0]]));
+    }
+
+    #[test]
+    fn w7b_01c_catalogue_caps_children_and_marks_unsupported_definitions() {
+        let children: String = (0..61).map(|i| LINE.replace("100\n", &format!("{:X}\n", 0x100 + i))).collect();
+        let doc = parsed(fixture(&children, true));
+        let blocks = block_catalogue(&doc.inner, doc.block_bases_unknown, &doc.unknown_block_bases);
+        assert_eq!(blocks[0]["children"].as_array().unwrap().len(), BLOCK_CHILD_CAP);
+        assert_eq!(blocks[0]["complete"], false);
+        for unsupported in [
+            "0\nINSERT\n5\n100\n8\n0\n2\nB\n10\n1\n20\n2\n30\n0\n",
+            "0\nPOINT\n5\n100\n8\n0\n10\n1\n20\n2\n30\n0\n",
+            "0\nATTDEF\n5\n100\n8\n0\n10\n1\n20\n2\n30\n0\n40\n1\n1\nvalue\n2\nTAG\n3\nprompt\n70\n0\n",
+        ] {
+            let doc = parsed(fixture(unsupported, true));
+            let blocks = block_catalogue(&doc.inner, doc.block_bases_unknown, &doc.unknown_block_bases);
+            assert_eq!(blocks[0]["complete"], false);
+            assert!(blocks[0]["children"].as_array().unwrap().is_empty());
+            assert_eq!(projected_entities(&doc.inner).len(), 1);
+        }
+    }
+
+    #[test]
+    fn w7b_01c_delete_then_move_resolves_the_validated_handle() {
+        let model: String = (0..3).map(|i| format!(
+            "0\nLINE\n5\n{:X}\n8\n0\n10\n{}\n20\n0\n30\n0\n11\n{}\n21\n0\n31\n0\n", 0x600 + i, 10 + i * 10, 11 + i * 10)).collect();
+        let source = String::from_utf8(fixture(LINE, false)).unwrap().replace("2\nENTITIES\n", &format!("2\nENTITIES\n{model}"));
+        let mut doc = parsed(source.into_bytes());
+        let index = |doc: &ParsedDxf, handle: u64| doc.inner.entities().position(|e| e.common().handle == Handle::new(handle)).unwrap();
+        let marker = doc.inner.block_records.get("B").unwrap().block_entity_handle;
+        let untouched: Vec<_> = [Handle::new(0x100), Handle::new(0x601), marker].iter()
+            .map(|h| format!("{:?}", doc.inner.get_entity(*h).unwrap())).collect();
+        doc.delete_entity_core(index(&doc, 0x600)).unwrap();
+        doc.translate_entity_core(index(&doc, 0x602), 5.0, 0.0).unwrap();
+        assert!(doc.inner.get_entity(Handle::new(0x600)).is_none());
+        assert_eq!(vertices_of(doc.inner.get_entity(Handle::new(0x602)).unwrap()), vec![[35.0, 0.0, 0.0], [36.0, 0.0, 0.0]]);
+        for (i, handle) in [Handle::new(0x100), Handle::new(0x601), marker].iter().enumerate() {
+            assert_eq!(format!("{:?}", doc.inner.get_entity(*handle).unwrap()), untouched[i]);
+        }
+    }
+
+    #[test]
+    fn w7b_01c_digest_covers_uncapped_and_unsupported_children_and_properties() {
+        let children: String = (0..61).map(|i| LINE.replace("100\n", &format!("{:X}\n", 0x100 + i))).collect();
+        let mut doc = parsed(fixture(&children, true));
+        let before = block_catalogue(&doc.inner, false, &doc.unknown_block_bases);
+        let (written, patched) = patch_block_bases(&doc.inner, DxfWriter::new(&doc.inner).write_to_vec().unwrap());
+        assert!(patched);
+        let back = parsed(written);
+        assert_eq!(before, block_catalogue(&back.inner, false, &back.unknown_block_bases));
+        doc.inner.get_entity_mut(Handle::new(0x100 + 60)).unwrap().translate(Vector3::new(5.0, 0.0, 0.0));
+        let after = block_catalogue(&doc.inner, false, &doc.unknown_block_bases);
+        assert_eq!(before[0]["children"], after[0]["children"]);
+        assert_ne!(before[0]["digest"], after[0]["digest"]);
+        assert_eq!(before[0]["digest"].as_str().unwrap().len(), 16);
+
+        let mut doc = parsed(fixture("0\nPOINT\n5\n100\n8\n0\n10\n1\n20\n2\n30\n0\n", true));
+        let before = block_catalogue(&doc.inner, false, &doc.unknown_block_bases);
+        doc.inner.get_entity_mut(Handle::new(0x100)).unwrap().translate(Vector3::new(5.0, 0.0, 0.0));
+        let after = block_catalogue(&doc.inner, false, &doc.unknown_block_bases);
+        assert_eq!(before[0]["children"], after[0]["children"]);
+        assert_ne!(before[0]["digest"], after[0]["digest"]);
+
+        let mut doc = parsed(fixture(LINE, true));
+        let before = block_catalogue(&doc.inner, false, &doc.unknown_block_bases);
+        if let Some(EntityType::Line(line)) = doc.inner.get_entity_mut(Handle::new(0x100)) { line.thickness = 7.0; }
+        assert_ne!(before[0]["digest"], block_catalogue(&doc.inner, false, &doc.unknown_block_bases)[0]["digest"]);
+    }
+
+    fn binary_fixture(ascii: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut writer = acadrust::io::dxf::DxfBinaryWriter::new(&mut bytes).unwrap();
+        let source = std::str::from_utf8(ascii).unwrap();
+        let lines: Vec<_> = source.lines().collect();
+        for pair in lines.chunks_exact(2) {
+            let code: i32 = pair[0].parse().unwrap();
+            match code {
+                10..=59 => writer.write_double(code, pair[1].parse().unwrap()).unwrap(),
+                60..=79 => writer.write_i16(code, pair[1].parse().unwrap()).unwrap(),
+                _ => writer.write_string(code, pair[1]).unwrap(),
+            }
+        }
+        bytes
+    }
+
+    #[test]
+    fn w7b_01c_case_collisions_refuse_before_membership_can_leak() {
+        let source = String::from_utf8(fixture(LINE, true)).unwrap();
+        let collision = source.replace("0\nENDSEC\n0\nSECTION\n2\nENTITIES", &format!(
+            "0\nBLOCK\n5\n42\n8\n0\n2\nb\n70\n0\n10\n1\n20\n2\n30\n0\n{}0\nENDBLK\n5\n43\n8\n0\n0\nENDSEC\n0\nSECTION\n2\nENTITIES", LINE.replace("100\n", "101\n")));
+        for bytes in [collision.as_bytes().to_vec(), binary_fixture(collision.as_bytes())] {
+            assert_eq!(parse_dxf_core(&bytes).err().unwrap(), "block definitions collapsed on load: 2 in the file, 1 retained");
+        }
+        assert!(parse_dxf_core(source.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn w7b_01c_binary_blocks_have_unknown_bases() {
+        let doc = parsed(binary_fixture(&fixture(LINE, true)));
+        assert!(doc.block_bases_unknown);
+        let blocks = block_catalogue(&doc.inner, doc.block_bases_unknown, &doc.unknown_block_bases);
+        assert_eq!(blocks[0]["baseUnknown"], true);
+        assert_eq!(blocks[0]["complete"], false);
+        assert_eq!(blocks[0]["children"].as_array().unwrap().len(), 1);
+        assert_eq!(projected_entities(&doc.inner)[0]["type"], "INSERT");
+    }
+
+    #[test]
+    fn w7b_01c_decoded_name_collapses_are_counted_on_raw_bytes() {
+        let source = String::from_utf8(fixture(LINE, true)).unwrap();
+        let pair = source.replace("0\nENDSEC\n0\nSECTION\n2\nENTITIES", &format!(
+            "0\nBLOCK\n5\n42\n8\n0\n2\nOTHER\n70\n0\n10\n1\n20\n2\n30\n0\n{}0\nENDBLK\n5\n43\n8\n0\n0\nENDSEC\n0\nSECTION\n2\nENTITIES", LINE.replace("100\n", "101\n")));
+        let caret = pair.replace("2\nB\n", "2\nB^ B\n").replace("2\nOTHER\n", "2\nB^B\n");
+        assert_eq!(raw_block_definition_count(caret.as_bytes()).unwrap(), 2);
+        assert_eq!(parse_dxf_core(caret.as_bytes()).err().unwrap(), "block definitions collapsed on load: 2 in the file, 1 retained");
+
+        // Binary string decoding is lossy UTF-8: distinct Latin-1 bytes become
+        // the same retained name. Counting the raw definitions still sees two.
+        let mut latin1 = binary_fixture(pair.replace("2\nOTHER\n", "2\nC\n").as_bytes());
+        for i in 2..latin1.len() - 1 {
+            if latin1[i - 2..i] == [2, 0] && latin1[i + 1] == 0 {
+                if latin1[i] == b'B' { latin1[i] = 0xe9; }
+                else if latin1[i] == b'C' { latin1[i] = 0xe8; }
+            }
+        }
+        assert_eq!(raw_block_definition_count(&latin1).unwrap(), 2);
+        assert_eq!(parse_dxf_core(&latin1).err().unwrap(), "block definitions collapsed on load: 2 in the file, 1 retained");
+    }
+
+    #[test]
+    fn w7b_01c_text_bases_survive_latin1_descriptions_and_caret_names() {
+        let source = String::from_utf8(fixture(LINE, true)).unwrap();
+        let latin1: Vec<u8> = source.replace("2\nB\n70\n", "2\nB\n4\ncafé\n70\n").chars().map(|c| c as u8).collect();
+        let caret = source.replace("2\nB\n", "2\nB^ B\n").into_bytes();
+        for bytes in [latin1, caret] {
+            let doc = parsed(bytes);
+            assert!(doc.unknown_block_bases.is_empty());
+            let blocks = block_catalogue(&doc.inner, false, &doc.unknown_block_bases);
+            assert_eq!(blocks[0]["base"], serde_json::json!([1.0, 2.0, 0.0]));
+            assert_eq!(blocks[0]["complete"], true);
+            assert_eq!(blocks[0]["baseUnknown"], false);
+            assert_eq!(projected_entities(&doc.inner).len(), 1);
+            assert_eq!(projected_entities(&doc.inner)[0]["type"], "INSERT");
+            let (written, patched) = patch_block_bases(&doc.inner, DxfWriter::new(&doc.inner).write_to_vec().unwrap());
+            assert!(patched);
+            let back = parsed(written);
+            assert_eq!(blocks, block_catalogue(&back.inner, false, &back.unknown_block_bases));
+        }
+    }
+
+    #[test]
+    fn w7b_01c_unmatched_marker_marks_only_its_definition_unknown() {
+        let source = String::from_utf8(fixture(LINE, true)).unwrap().replace("0\nENDSEC\n0\nSECTION\n2\nENTITIES", &format!(
+            "0\nBLOCK\n5\n42\n8\n0\n2\nC\n70\n0\n10\n7\n20\n8\n30\n0\n{}0\nENDBLK\n5\n43\n8\n0\n0\nENDSEC\n0\nSECTION\n2\nENTITIES", LINE.replace("100\n", "101\n")));
+        let mut doc = parsed(source.as_bytes().to_vec());
+        doc.inner.block_records.get_mut("B").unwrap().block_entity_handle = Handle::new(0x99);
+        doc.unknown_block_bases = retain_block_bases(&mut doc.inner, source.as_bytes()).unwrap();
+        assert_eq!(doc.unknown_block_bases, HashSet::from(["B".to_string()]));
+        let blocks = block_catalogue(&doc.inner, false, &doc.unknown_block_bases);
+        let b = blocks.iter().find(|b| b["name"] == "B").unwrap();
+        let c = blocks.iter().find(|b| b["name"] == "C").unwrap();
+        assert_eq!(b["baseUnknown"], true);
+        assert_eq!(b["complete"], false);
+        assert_eq!(c["baseUnknown"], false);
+        assert_eq!(c["complete"], true);
+        assert_eq!(c["base"], serde_json::json!([7.0, 8.0, 0.0]));
+        let (written, _) = patch_block_bases(&doc.inner, DxfWriter::new(&doc.inner).write_to_vec().unwrap());
+        let mut back = parsed(written);
+        back.inherit_block_base_unknowns(&doc);
+        assert_eq!(back.unknown_block_bases, doc.unknown_block_bases);
+    }
+
+    #[test]
+    fn w7b_01c_digest_uses_written_defaults_and_ignores_allocated_handles() {
+        let doc = parsed(fixture(&LINE.replace("8\n0\n", "8\n0\n6\nByLayer\n"), true));
+        assert_eq!(doc.inner.get_entity(Handle::new(0x100)).unwrap().common().linetype, "ByLayer");
+        let before = block_catalogue(&doc.inner, false, &doc.unknown_block_bases);
+        let (written, patched) = patch_block_bases(&doc.inner, DxfWriter::new(&doc.inner).write_to_vec().unwrap());
+        assert!(patched);
+        let mut back = parsed(written);
+        assert_eq!(back.inner.get_entity(Handle::new(0x100)).unwrap().common().linetype, "");
+        assert_eq!(before[0]["digest"], block_catalogue(&back.inner, false, &back.unknown_block_bases)[0]["digest"]);
+        let renumbered = parsed(fixture(&LINE.replace("5\n100\n", "5\n900\n"), true));
+        assert_eq!(before[0]["digest"], block_catalogue(&renumbered.inner, false, &renumbered.unknown_block_bases)[0]["digest"]);
+        back.inner.get_entity_mut(Handle::new(0x100)).unwrap().translate(Vector3::new(5.0, 0.0, 0.0));
+        assert_ne!(before[0]["digest"], block_catalogue(&back.inner, false, &back.unknown_block_bases)[0]["digest"]);
+    }
+
+    #[test]
+    fn w7b_01c_array_spacing_matches_the_pinned_crate_expansion() {
+        let line = EntityType::Line(Line::from_coords(0.0, 0.0, 0.0, 1.0, 0.0, 0.0));
+        let insert = acadrust::entities::Insert::new("B", Vector3::new(10.0, 20.0, 0.0))
+            .with_scale(2.0, 1.0, 1.0).with_array(2, 1, 10.0, 4.0);
+        let expanded = insert.explode(&[line.clone()]);
+        assert_eq!(vertices_of(&expanded[1]), vec![[20.0, 20.0, 0.0], [22.0, 20.0, 0.0]]);
+        let rotated = insert.with_scale(-2.0, 3.0, 1.0).with_rotation(std::f64::consts::FRAC_PI_2).with_array(2, 2, 10.0, 4.0);
+        let expanded = rotated.explode(&[line]);
+        for (entity, [x, y]) in expanded.iter().zip([[10.0, 20.0], [20.0, 20.0], [10.0, 24.0], [20.0, 24.0]]) {
+            let vertices = vertices_of(entity);
+            assert!((vertices[0][0] - x).abs() < 1e-9 && (vertices[0][1] - y).abs() < 1e-9);
+            assert!((vertices[1][0] - x).abs() < 1e-9 && (vertices[1][1] - (y - 2.0)).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn w7b_01c_base_patch_pins_the_writer_defect_and_preserves_other_bytes() {
+        let doc = parsed(fixture(&format!("{LINE}{CIRCLE}"), true));
+        let original = DxfWriter::new(&doc.inner).write_to_vec().unwrap();
+        let unpatched = parsed(original.clone());
+        assert_eq!(block_base(&unpatched.inner, unpatched.inner.block_records.get("B").unwrap()), [0.0; 3]);
+        let (patched, ok) = patch_block_bases(&doc.inner, original.clone());
+        assert!(ok);
+        let back = parsed(patched.clone());
+        assert_eq!(block_base(&back.inner, back.inner.block_records.get("B").unwrap()), [1.0, 2.0, 0.0]);
+        let raw = String::from_utf8(original).unwrap();
+        let actual = String::from_utf8(patched).unwrap();
+        let prefix = "  2\r\nB\r\n 70\r\n     0\r\n";
+        let old = format!("{prefix} 10\r\n0.0\r\n 20\r\n0.0\r\n 30\r\n0.0\r\n");
+        let new = format!("{prefix} 10\r\n1.0\r\n 20\r\n2.0\r\n 30\r\n0.0\r\n");
+        assert!(raw.contains(&old));
+        assert_eq!(actual, raw.replacen(&old, &new, 1));
+        // A drifted BLOCK layout refuses the entire pass, never a partial patch.
+        let malformed = raw.replacen(&old, &format!("{prefix} 11\r\n0.0\r\n 20\r\n0.0\r\n 30\r\n0.0\r\n"), 1).into_bytes();
+        let (unchanged, ok) = patch_block_bases(&doc.inner, malformed.clone());
+        assert!(!ok);
+        assert_eq!(unchanged, malformed);
     }
 }

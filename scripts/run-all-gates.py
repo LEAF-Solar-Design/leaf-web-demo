@@ -1726,9 +1726,10 @@ def build_suites() -> List[Suite]:
                   # W4g-6: the worker's `batch` op on the REAL compiled engine
                   # (a three-step fillet in one reply, an atomic refusal, the
                   # bounds, a refused create keeping the document), gated on the
-                  # same machine-local pkg-node build. One test; it ran green on
-                  # the building machine and its numbers are on PR #1036.
-                  ("src/cad/engineBatchAtomic.test.js", 1),
+                  # same machine-local pkg-node build. Two describes (the W4g-6 batch
+                  # row and the W4g-7b-01c block row) that ran green on the
+                  # building machine; numbers on PRs #1036 and #1107.
+                  ("src/cad/engineBatchAtomic.test.js", 2),
               )),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
