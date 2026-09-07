@@ -37,7 +37,7 @@ def run_once(runtime=None, limit=20):
                 runtime.advance(*args)
                 counts['advanced'] += 1
             else:
-                runtime.transition(*args, 'resume')
+                runtime.resume_pending(*args)
                 counts['resumed'] += 1
         except Exception as exc:
             # Exception messages may contain credentials or provider responses.

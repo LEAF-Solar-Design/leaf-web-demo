@@ -284,6 +284,16 @@ def transition(tenant, project_id, campaign_id, release_id, action,
     return snapshot(tenant, project_id, campaign_id, release_id)
 
 
+def resume_pending(tenant, project_id, campaign_id, release_id):
+    """Worker continuation cannot override a later user pause or authority wait."""
+    org, project, actor = authority(tenant, project_id)
+    row = _store().transition_release(org, project, campaign_id, release_id, actor,
+                                      action='resume', automatic=True)
+    if row['status'] == 'active' and not row.get('replayed'):
+        return advance(tenant, project_id, campaign_id, release_id)
+    return snapshot(tenant, project_id, campaign_id, release_id)
+
+
 def retry(tenant, project_id, campaign_id, release_id, stage):
     if stage not in STAGES:
         raise ValueError('Unknown stage')

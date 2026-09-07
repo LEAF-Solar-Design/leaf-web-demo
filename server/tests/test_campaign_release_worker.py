@@ -18,7 +18,7 @@ def row(name, status='active', wait_kind=None):
 def runtime(rows):
     store = SimpleNamespace(runnable_releases=Mock(return_value=rows))
     return SimpleNamespace(_store=lambda: store, actor_for_release=Mock(return_value='current-actor'),
-                           advance=Mock(), transition=Mock())
+                           advance=Mock(), transition=Mock(), resume_pending=Mock())
 
 
 def test_current_actor_failure_cannot_execute_or_starve_another_release(caplog):
@@ -28,7 +28,8 @@ def test_current_actor_failure_cannot_execute_or_starve_another_release(caplog):
         counts = worker.run_once(service)
     assert counts == dict(considered=3, advanced=1, resumed=1, skipped=0, failed=1)
     service.advance.assert_called_once_with('fresh-member', 'project', 'campaign-ready', 'ready')
-    service.transition.assert_called_once_with('fresh-member', 'project', 'campaign-queued', 'queued', 'resume')
+    service.resume_pending.assert_called_once_with('fresh-member', 'project', 'campaign-queued', 'queued')
+    service.transition.assert_not_called()
     assert 'RuntimeError' in caplog.text and 'secret-provider-response' not in caplog.text
 
 
@@ -39,6 +40,7 @@ def test_restart_reconciles_same_release_through_runtime_and_never_mints_authori
     assert service.actor_for_release.call_count == 2
     assert service.advance.call_args_list[0] == service.advance.call_args_list[1]
     service.transition.assert_not_called()
+    service.resume_pending.assert_not_called()
 
 
 @pytest.mark.parametrize('state,kind', [('paused', None), ('cancelled', None), ('finished', None),
@@ -49,13 +51,15 @@ def test_terminal_paused_and_authority_waits_never_resume(state, kind):
     service.actor_for_release.assert_not_called()
     service.advance.assert_not_called()
     service.transition.assert_not_called()
+    service.resume_pending.assert_not_called()
 
 
 @pytest.mark.parametrize('kind', ['authoring', 'job', 'capacity', 'publication', 'approval'])
 def test_supported_pending_waits_resume_through_existing_runtime(kind):
     service = runtime([row('pending', 'waiting', kind), row('ready')])
     assert worker.run_once(service)['resumed'] == 1
-    service.transition.assert_called_once_with('current-actor', 'project', 'campaign-pending', 'pending', 'resume')
+    service.resume_pending.assert_called_once_with('current-actor', 'project', 'campaign-pending', 'pending')
+    service.transition.assert_not_called()
     service.advance.assert_called_once()
 
 

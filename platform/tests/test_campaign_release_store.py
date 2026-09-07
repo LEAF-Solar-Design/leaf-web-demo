@@ -115,6 +115,56 @@ def test_pending_progress_preserves_predecessors_and_never_consumes_corrections(
           state='active', next_action=dict(wait_kind='job', reason='Still running.'))
 
 
+@pytest.mark.parametrize('later_state', ['paused', 'authority'])
+def test_worker_stale_candidate_cannot_override_human_hold(make_org, monkeypatch, later_state):
+    import campaign_release_worker as worker
+
+    scope, principal, _ = _seed(make_org)
+    row = _create(scope, principal)
+    releases.set_progress(*scope, row['release_id'], principal, state='waiting',
+                          next_action=dict(wait_kind='publication', reason='Publication pending.'))
+    selected = [item for item in releases.runnable_releases(200) if item['release_id'] == row['release_id']]
+    assert len(selected) == 1
+    _, tenant = _joint_app(scope, principal, monkeypatch)
+    advances = []
+    monkeypatch.setattr(runtime, 'advance', lambda *args: advances.append(args))
+
+    def actor_after_user_change(candidate):
+        assert candidate['status'] == 'waiting'
+        if later_state == 'paused':
+            releases.transition_release(*scope, row['release_id'], principal, action='pause')
+        else:
+            releases.transition_release(*scope, row['release_id'], principal, action='resume')
+            releases.set_progress(*scope, row['release_id'], principal, state='waiting',
+                                  next_action=dict(wait_kind='authority', reason='Account action required.'))
+        return tenant
+
+    service = SimpleNamespace(_store=lambda: SimpleNamespace(runnable_releases=lambda limit: selected),
+                              actor_for_release=actor_after_user_change, advance=runtime.advance,
+                              resume_pending=runtime.resume_pending)
+    assert worker.run_once(service)['failed'] == 0
+    current = releases.get_release(*scope, row['release_id'])
+    assert current['release']['status'] == ('paused' if later_state == 'paused' else 'waiting')
+    if later_state == 'authority':
+        assert current['next_action']['wait_kind'] == 'authority'
+    assert not advances and not current['stages']
+    assert releases.transition_release(*scope, row['release_id'], principal, action='resume')['status'] == 'active'
+
+
+@pytest.mark.parametrize('kind', ['authoring', 'job', 'capacity', 'publication', 'approval'])
+def test_automatic_resume_keeps_eligible_pending_work_moving(make_org, monkeypatch, kind):
+    scope, principal, _ = _seed(make_org)
+    row = _create(scope, principal)
+    releases.set_progress(*scope, row['release_id'], principal, state='waiting',
+                          next_action=dict(wait_kind=kind, reason='Producer pending.'))
+    _, tenant = _joint_app(scope, principal, monkeypatch)
+    advances = []
+    monkeypatch.setattr(runtime, 'advance', lambda *args: advances.append(args))
+    runtime.resume_pending(tenant, scope[1], scope[2], row['release_id'])
+    assert advances == [(tenant, scope[1], scope[2], row['release_id'])]
+    assert releases.get_release(*scope, row['release_id'])['release']['status'] == 'active'
+
+
 def _outstanding_job(scope, principal, row):
     from job_pg_store import PostgresJobStore
     job = str(uuid.uuid4())

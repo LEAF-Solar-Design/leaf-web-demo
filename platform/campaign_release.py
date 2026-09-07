@@ -354,14 +354,20 @@ def release_snapshot(org_id, project_id, campaign_id):
         return _snapshot(cur, scope, cur.fetchone())
 
 
-def transition_release(org_id, project_id, campaign_id, release_id, principal_id, *, action):
+def transition_release(org_id, project_id, campaign_id, release_id, principal_id, *, action, automatic=False):
     if action not in ('pause', 'resume', 'cancel', 'wait'):
+        _invalid()
+    if type(automatic) is not bool or (automatic and action != 'resume'):
         _invalid()
     scope = _params(org_id, project_id, campaign_id, release_id)
     with _cursor() as cur:
         _org_lock(cur, scope)
         _check(cur, scope, principal_id)
         row = _get(cur, scope)
+        if automatic and not (row['status'] == 'queued' or (
+                row['status'] == 'waiting' and (row.get('next_action') or {}).get('wait_kind') in
+                ('authoring', 'job', 'capacity', 'publication', 'approval'))):
+            return _public(row, True)
         target = {'pause': 'paused', 'cancel': 'cancelled', 'wait': 'waiting'}.get(action)
         if row['status'] in ('finished', 'cancelled'):
             if target == row['status']:
