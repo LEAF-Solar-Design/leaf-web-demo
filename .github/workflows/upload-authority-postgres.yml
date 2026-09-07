@@ -404,40 +404,6 @@ jobs:
           print(f"Host capability PostgreSQL proof: {len(cases)} cases, no skips")
           PY
 
-      - name: Run host capability API PostgreSQL suite
-        working-directory: server
-        run: |
-          report=$(mktemp "$RUNNER_TEMP/host-capability-api.XXXXXX.xml")
-          if python -m pytest -q -rs tests/test_campaign_capability_api_postgres.py --junitxml="$report" >"$report.log" 2>&1; then
-            tail -5 "$report.log"
-          else
-            pytest_exit=$?
-            tail -100 "$report.log"
-            exit "$pytest_exit"
-          fi
-          python - "$report" <<'PY'
-          import sys
-          import xml.etree.ElementTree as ET
-
-          root = ET.parse(sys.argv[1]).getroot()
-          cases = list(root.iter("testcase"))
-          if not cases:
-              raise SystemExit("FAIL: no host capability testcases")
-          if any(list(root.iter(tag)) for tag in ("skipped", "error", "failure")):
-              raise SystemExit("FAIL: host capability report contains skipped/error/failure nodes")
-          module = "test_campaign_capability_api_postgres"
-          if any(module not in case.get("classname", "").split(".") for case in cases):
-              raise SystemExit("FAIL: unexpected host capability module identity")
-          required = {
-              "test_real_postgres_capability_api_two_uses_and_unknown_outcome",
-          }
-          observed = {case.get("name", "").split("[", 1)[0] for case in cases}
-          missing = required - observed
-          if missing:
-              raise SystemExit(f"FAIL: missing host capability cases: {sorted(missing)}")
-          print(f"Host capability PostgreSQL proof: {len(cases)} cases, no skips")
-          PY
-
       - name: Run customization authority PostgreSQL tests
         working-directory: server
         run: |
@@ -483,6 +449,40 @@ jobs:
             echo "FAIL: only ${ran:-0} customization tests executed, floor is 56 - tests stopped being collected without reporting a skip."
             exit 1
           fi
+
+      - name: Run host capability API PostgreSQL suite
+        working-directory: server
+        run: |
+          report=$(mktemp "$RUNNER_TEMP/host-capability-api.XXXXXX.xml")
+          if python -m pytest -q -rs tests/test_campaign_capability_api_postgres.py --junitxml="$report" >"$report.log" 2>&1; then
+            tail -5 "$report.log"
+          else
+            pytest_exit=$?
+            tail -100 "$report.log"
+            exit "$pytest_exit"
+          fi
+          python - "$report" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          cases = list(root.iter("testcase"))
+          if not cases:
+              raise SystemExit("FAIL: no host capability testcases")
+          if any(list(root.iter(tag)) for tag in ("skipped", "error", "failure")):
+              raise SystemExit("FAIL: host capability report contains skipped/error/failure nodes")
+          module = "test_campaign_capability_api_postgres"
+          if any(module not in case.get("classname", "").split(".") for case in cases):
+              raise SystemExit("FAIL: unexpected host capability module identity")
+          required = {
+              "test_real_postgres_capability_api_two_uses_and_unknown_outcome",
+          }
+          observed = {case.get("name", "").split("[", 1)[0] for case in cases}
+          missing = required - observed
+          if missing:
+              raise SystemExit(f"FAIL: missing host capability cases: {sorted(missing)}")
+          print(f"Host capability PostgreSQL proof: {len(cases)} cases, no skips")
+          PY
 
       - name: Run fused request activation PostgreSQL tests
         working-directory: server
