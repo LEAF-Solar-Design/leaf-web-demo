@@ -87,7 +87,13 @@ export default function ScriptPanel() {
         actions.copyToClipboard(false)
         run.awaiting.answered = true
       } else if (line.op === 'cutClip') actions.copyToClipboard(true)
-      else actions.applyEdit(line.op, {})
+      else {
+        if (line.op !== 'delete') {
+          const checked = buildEditPayload(line.op, current.selectedId, {}, current.entities.linetypes, current.entities)
+          if (checked.refusal) { stop('stopped', `Script stopped at line ${line.line}: ${checked.refusal}`); return }
+        }
+        actions.applyEdit(line.op, {})
+      }
     } else {
       const prompt = PROMPTS[line.op]
       // W4g-7b-02c-e: every operand the line omits takes the PROMPT'S

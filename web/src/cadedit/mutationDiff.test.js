@@ -60,6 +60,20 @@ describe('W4g-7b-05c-3 F1/F2: hard refusals and INSERT properties', () => {
   })
 })
 
+describe('W4g-7b-05c-4 C3: retained opaque true colour', () => {
+  it.each([
+    ['absent to RGB', undefined, [1, 2, 3], 'true-colour'],
+    ['null to RGB', null, [1, 2, 3], 'true-colour'],
+    ['changed RGB', [1, 2, 3], [4, 5, 6], 'true-colour'],
+    ['cleared RGB', [1, 2, 3], null, 'opaque-kind'],
+  ])('%s takes the correct refusal before the opaque fallback', (_label, before, after, cause) => {
+    const label = { ...text(12), text: 'unchanged' }
+    expect(diffPlan([{ ...label, trueColor: before }], [{ ...label, trueColor: after }])).toMatchObject({
+      mutations: null, kind: 'TEXT', cause,
+    })
+  })
+})
+
 describe('planGeometry', () => {
   it('reads each kind into the contract terms and leaves the rest out', () => {
     expect(planGeometry(line(10))).toEqual({ kind: 'LINE', layer: '0', pts: [[0, 0, 0], [3, 4, 0]], props: DEFAULT_PROPS })

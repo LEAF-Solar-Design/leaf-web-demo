@@ -35,7 +35,7 @@ const DEFERRED_OPS = new Set(Object.keys(DEFERRED_REASONS))
 // selection, undo/redo on the engine's own history (W4f slice F).
 // W4g-5c: COPYCLIP and CUTCLIP take no operands either; PASTECLIP has a
 // prompt (where to put it) and arms like a draw word.
-const RUN_ON_ARRIVAL = new Set(['delete', 'undo', 'redo', 'copyClip', 'cutClip'])
+const RUN_ON_ARRIVAL = new Set(['delete', 'explode', 'undo', 'redo', 'copyClip', 'cutClip'])
 
 /** The event detail is a command the engine can take: { group, op } and nothing surprising. */
 export function acceptsCommand(detail) {
@@ -74,9 +74,11 @@ export default function CommandLineArmer() {
         return
       }
       if (RUN_ON_ARRIVAL.has(detail.op)) {
-        // ERASE with a live selection runs, as the ribbon's Delete does; with
-        // nothing to act on it arms nothing (the ribbon's note names why).
-        if (!modifyReason(session)) applyEdit(detail.op, inputs)
+        // ERASE and EXPLODE run on a live selection; otherwise surface the
+        // ladder's sentence without arming a prompt.
+        const reason = modifyReason(session)
+        if (reason) refuse(reason)
+        else applyEdit(detail.op, inputs)
         return
       }
       setArmed({ group: detail.group, op: detail.op })

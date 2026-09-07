@@ -123,7 +123,7 @@ function opaqueOf(entity) {
     // W4g-7b-03c: colour, linetype and lineweight, so a property-only change
     // on an opaque kind (TEXT, POINT, ELLIPSE) is seen, not dropped.
     props.aci, props.trueColor, props.linetype, props.lineweight])
-  return { kind: 'OPAQUE', type, print }
+  return { kind: 'OPAQUE', type, print, props }
 }
 
 // W4g-7b-02c: a created or removed INSERT is a real mutation (contract v3's
@@ -312,8 +312,12 @@ export function diffPlan(committed, current) {
       continue
     }
     if (was.kind === 'OPAQUE' || now.kind === 'OPAQUE') {
-      if (was.kind === now.kind && was.print === now.print) continue
       const name = was.kind === 'OPAQUE' ? was.type : now.type
+      if (now.props?.trueColor && JSON.stringify(was.props?.trueColor ?? null) !== JSON.stringify(now.props.trueColor)) {
+        refuse(`entity ${handle} has a true colour the plan cannot carry`, name, 'true-colour')
+        continue
+      }
+      if (was.kind === now.kind && was.print === now.print) continue
       refuse(`entity ${handle} is a ${name} the plan cannot carry, and it changed`, name, 'opaque-kind')
       continue
     }

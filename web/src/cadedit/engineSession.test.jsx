@@ -750,6 +750,26 @@ describe('save completion', () => {
     } finally { fetch.mockRestore() }
   })
 
+  it('C3: true colour appearing on retained TEXT rejects save without a fetch and stays dirty', async () => {
+    const text = { id: '12', type: 'TEXT', layer: '0', text: 'unchanged', height: 2, rotationDeg: 0, vertices: [[0, 0, 0]], editable: true, trueColor: null }
+    const save = vi.fn()
+    const fetch = vi.spyOn(globalThis, 'fetch')
+    try {
+      const session = mountSession({ saveTarget: { headVersion: 4, save } })
+      act(() => session.current.actions.openBytes(new Uint8Array([9, 9]), 'demo-v4.dxf', { committed: true, version: 4 }))
+      session.workers[0].emit(loadedMessage([text], 'demo-v4.dxf'))
+      session.workers[0].emit(editedMessage('setColor', [{ ...text, trueColor: [1, 2, 3] }]))
+      expect(session.current.dirty).toBe(true)
+      await act(async () => { await session.current.actions.save() })
+      expect(save).not.toHaveBeenCalled()
+      expect(fetch).not.toHaveBeenCalled()
+      expect(session.current.status).toBe('Save refused: entity C has a true colour the plan cannot carry.')
+      expect(session.current.errorKind).toBe(SESSION_ERROR.REFUSED)
+      expect(session.current.dirty).toBe(true)
+      expect(session.current.committedEntities).toEqual([text])
+    } finally { fetch.mockRestore() }
+  })
+
   it('a moved INSERT REJECTS the save: no fetch, dirty stays, the sentence names the handle', async () => {
     const INSERTED = { id: 'i1', handle: 'i1', type: 'INSERT', name: 'Fixture', ip: [10, 20, 0], rotationDeg: 90, scale: [2, 3, 1], layer: '0', editable: false }
     const save = vi.fn(async () => planReceipt)

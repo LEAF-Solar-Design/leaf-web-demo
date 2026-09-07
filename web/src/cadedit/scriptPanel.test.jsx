@@ -207,6 +207,28 @@ describe('W4g-7a the script runner', () => {
     await waitFor(() => expect(screen.getByLabelText('ribbon script').value).toBe('circle 1,1 2\n'), { timeout: 5000 })
   })
 
+  it.each([
+    ['INSERT', 'an INSERT is placed, not edited, in this round'],
+    ['DIMENSION', 'a dimension is placed, not edited, in this round'],
+  ])('C1: repeated bare EXPLODE on %s stops immediately on both runs', async (type, sentence) => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    mount()
+    await openAndLoad([{ ...H, type, editable: false }])
+    act(() => { context.session.actions.select('7') })
+    const before = workers[0].posted.length
+    const applyEdit = vi.spyOn(context.session.actions, 'applyEdit')
+    setScript('explode')
+    for (let run = 0; run < 2; run += 1) {
+      fireEvent.click(runButton())
+      expect(status().textContent).toBe(`Script stopped at line 1: ${sentence}`)
+      expect(status().getAttribute('data-phase')).toBe('stopped')
+      expect(runButton().disabled).toBe(false)
+      expect(workers[0].posted).toHaveLength(before)
+      expect(applyEdit).not.toHaveBeenCalled()
+    }
+    applyEdit.mockRestore()
+  })
+
   it('a bare ERASE runs on the selection, and an engine that never answers is stopped by the line budget', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     mount()

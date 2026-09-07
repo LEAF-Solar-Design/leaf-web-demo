@@ -96,6 +96,40 @@ describe('CommandLineArmer (W4f slice B)', () => {
     expect(posted[posted.length - 1]).toEqual({ type: 'applyEdit', op: 'delete', payload: { entityId: 'e1' } })
   })
 
+  it('C2: typed x runs EXPLODE at once on a selected LWPOLYLINE', async () => {
+    mount()
+    await openAndLoad([{ ...LINE, type: 'LWPOLYLINE', vertices: [[0, 0], [1, 0], [1, 1]] }])
+    fireEvent.click(screen.getByRole('radio'))
+    const before = workers[0].posted.length
+    command(parseDrawingCommand('x'))
+    expect(workers[0].posted.slice(before)).toEqual([{ type: 'applyEdit', op: 'explode', payload: { entityId: 'e1' } }])
+    expect(promptEl()).toBeNull()
+  })
+
+  it.each([
+    ['INSERT', 'an INSERT is placed, not edited, in this round'],
+    ['DIMENSION', 'a dimension is placed, not edited, in this round'],
+  ])('C2: typed explode on %s surfaces the placed-kind refusal without posting', async (type, sentence) => {
+    mount()
+    await openAndLoad([{ ...LINE, type, editable: false }])
+    fireEvent.click(screen.getByRole('radio'))
+    const before = workers[0].posted.length
+    command(parseDrawingCommand('explode'))
+    expect(screen.getByRole('status').textContent).toBe(sentence)
+    expect(workers[0].posted).toHaveLength(before)
+    expect(promptEl()).toBeNull()
+  })
+
+  it('C2: typed x without a selection surfaces the ladder sentence and arms nothing', async () => {
+    mount()
+    await openAndLoad()
+    const before = workers[0].posted.length
+    command(parseDrawingCommand('x'))
+    expect(screen.getByRole('status').textContent).toBe('select an entity in the drawing')
+    expect(workers[0].posted).toHaveLength(before)
+    expect(promptEl()).toBeNull()
+  })
+
   it('F4: typed m arms MOVE on INSERT and typed erase posts delete', async () => {
     mount()
     await openAndLoad([{ id: '11', type: 'INSERT', name: 'Fixture', ip: [0, 0, 0], rotationDeg: 0, scale: [1, 1, 1], layer: '0', editable: false }])
