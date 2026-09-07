@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import os
 import re
 import time
 import uuid
@@ -91,8 +92,13 @@ def check_authority(context):
     import broker
     if not broker._authored_execution_enabled() or broker.tenant_disabled(context['tenant_id']):
         raise ValueError('authored execution authority is unavailable')
-    if broker._production_runtime() and not broker._sandbox_configured():
-        raise ValueError('production authored sandbox is unavailable')
+    if broker._production_runtime():
+        if os.environ.get('BROKER_URL', '').strip():
+            import broker_client
+            if not broker_client.broker_headers():
+                raise ValueError('production broker authentication is unavailable')
+        elif not broker._sandbox_configured():
+            raise ValueError('production authored sandbox is unavailable')
     from leaf_platform import campaigns, campaign_release
 
     scope = campaigns._scope(context["org_id"], context["project_id"])
@@ -227,8 +233,15 @@ def run(job_id, completion_provenance, tool, params, heartbeat, cancelled, deadl
             raise ValueError("sandbox exceeds owning lease budget")
         guard(timeout + 1)
         phase = "execution"
-        env = tool_loader.run_tool_dynamic(published, {}, params, False,
-                                           tenant_id=context["tenant_id"], test_source=source)
+        if os.environ.get('BROKER_URL', '').strip():
+            import broker_client
+            env = broker_client.run_via_broker(
+                context["tenant_id"], published, params, '', False,
+                timeout_s=timeout, ledger_event_key='completion:' + str(uuid.UUID(job_id)),
+                job_id=job_id, file_only=True, test_source=source)
+        else:
+            env = tool_loader.run_tool_dynamic(published, {}, params, False,
+                                               tenant_id=context["tenant_id"], test_source=source)
         guard()
         phase = "execution"
         if not isinstance(env, dict) or env.get("ok") is not True:

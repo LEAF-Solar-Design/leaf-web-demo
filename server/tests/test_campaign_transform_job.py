@@ -49,6 +49,7 @@ def digest(raw):
 
 @pytest.fixture
 def published(monkeypatch, tmp_path):
+    monkeypatch.delenv('BROKER_URL', raising=False)
     job_pg_store._db()  # Package registration only, no connection.
     source_json = json.dumps([{'name': 'a,"b\n', '=header': '=SUM(A1)', 'yes': True,
                               'empty': None, 'number': 2.0}, {'name': '@cmd', 'later': 'x'}])
@@ -194,6 +195,63 @@ def test_actual_captured_source_executes_and_matches_independent_csv(published, 
     assert calls == [SOURCE]
     assert result['result']['csv'].encode() == static.expected_output(published.params['source_json'].encode())
     assert "'=SUM(A1)" in result['result']['csv']
+
+
+def test_remote_broker_without_app_sandbox_uses_pinned_job(published, monkeypatch):
+    import broker_client
+    monkeypatch.setenv('BROKER_URL', 'http://broker.test')
+    monkeypatch.setenv('LEAF_TOOL_SANDBOX_PROVIDER', 'off')
+    monkeypatch.setenv('LEAF_SANDBOX', 'off')
+    monkeypatch.setattr(tool_loader, 'run_tool_dynamic', lambda *a, **k: pytest.fail('local execution'))
+    calls = []
+
+    def execute(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {'ok': True, 'result': {'csv': static.expected_output(
+            published.params['source_json'].encode()).decode()}}
+
+    monkeypatch.setattr(broker_client, 'run_via_broker', execute)
+    assert invoke(published)['ok'] is True
+    assert invoke(published)['ok'] is True
+    assert calls[0] == calls[1]
+    args, kwargs = calls[0]
+    assert args == (published.ctx['tenant_id'], published.tool, published.params, '', False)
+    assert kwargs == {'timeout_s': 5, 'ledger_event_key': 'completion:' + published.jid,
+                      'job_id': published.jid, 'file_only': True, 'test_source': SOURCE}
+
+
+@pytest.mark.parametrize('failure', ['source', 'input', 'csv', 'ownership', 'broker', 'timeout', 'publication'])
+def test_remote_failures_never_accept_output(published, monkeypatch, caplog, failure):
+    import broker_client
+    monkeypatch.setenv('BROKER_URL', 'http://broker.test')
+    calls = []
+    owned = [True]
+    secret = 'provider-message-must-not-escape'
+
+    def execute(*args, **kwargs):
+        calls.append(True)
+        if failure == 'broker':
+            raise broker_client.BrokerUnreachable(secret)
+        if failure == 'timeout':
+            raise TimeoutError(secret)
+        if failure == 'ownership':
+            owned[0] = False
+        if failure == 'publication':
+            published.change.state = ChangeState.SUPERSEDED
+        return {'ok': True, 'result': {'csv': secret if failure == 'csv' else
+            static.expected_output(published.params['source_json'].encode()).decode()}}
+
+    monkeypatch.setattr(broker_client, 'run_via_broker', execute)
+    if failure == 'source':
+        published.path.write_text('changed')
+    if failure == 'input':
+        published.params['source_json'] = '[]'
+        published.ctx['input_sha256'] = digest(b'[]')
+    with caplog.at_level(logging.WARNING, logger=adapter.__name__):
+        env = invoke(published, heartbeat=lambda: owned[0])
+    assert env['ok'] is False and env.get('result') is None
+    assert secret not in json.dumps(env) + caplog.text
+    assert len(calls) == (0 if failure in ('source', 'input') else 1)
 
 
 def test_cumulative_catalog_retains_csv_when_latest_change_added_another_tool(published, monkeypatch):
@@ -433,6 +491,17 @@ def test_authority_requires_active_binding_campaign_and_current_release(publishe
     monkeypatch.setattr(acquisition, '_run_authority', lambda actor, tool: policy_calls.append(actor))
     module.check_authority(p.ctx)
     assert policy_calls == ['current-actor']
+    import broker
+    monkeypatch.setattr(broker, '_production_runtime', lambda: True)
+    monkeypatch.setattr(broker, '_sandbox_configured', lambda: False)
+    monkeypatch.setattr(broker, '_authored_execution_enabled', lambda: True)
+    monkeypatch.setattr(broker, 'tenant_disabled', lambda tenant: False)
+    monkeypatch.setenv('BROKER_URL', 'http://broker.test')
+    monkeypatch.setenv('LEAF_BROKER_SECRET', 'test-only-secret')
+    module.check_authority(p.ctx)
+    monkeypatch.delenv('LEAF_BROKER_SECRET')
+    with pytest.raises(ValueError, match='authentication'): module.check_authority(p.ctx)
+    monkeypatch.setenv('LEAF_BROKER_SECRET', 'test-only-secret')
     release['contract_version'] = 2
     with pytest.raises(ValueError): module.check_authority(p.ctx)
     release['contract_version'] = 1
