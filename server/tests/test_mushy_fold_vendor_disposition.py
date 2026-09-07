@@ -71,10 +71,11 @@ def test_recorded_disposition_is_wired_core_and_deps_matches_it():
     )
     # The wired surface is exactly the registry fold plus the slice-7b
     # surface-config fold; widening what deps consumes from the vendor beyond
-    # these two is a disposition change, not a drive-by.
+    # these two is a disposition change, not a drive-by. Slice 9c adds one
+    # public byte-cap constant so submitted files stay readable by the fold.
     assert imports_vendor == [
         ("registry", "load_repo_registry_tools"),
-        ("surface_config", "load_repo_surface_config"),
+        ("surface_config", "load_repo_surface_config, MAX_SURFACE_CONFIG_BYTES"),
     ], (
         f"deps.py's vendored-import surface changed: {imports_vendor} — "
         "re-record the disposition in VENDOR-PIN.json (card F-7)"
