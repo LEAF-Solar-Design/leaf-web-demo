@@ -1415,17 +1415,18 @@ def build_suites() -> List[Suite]:
               # PR path's step body; the receipt's group object replacing pr;
               # the mg-<sha12> receipt artifact name; and the descale job's
               # explicit pull_request_target-only if: with the reaper comment.
-              # STAGE_SERVICES is back to `web app` (the freshness gap that
-              # paused it is closed by the group head's checked parentage), so
-              # the renamed pin (test_web_and_app_are_staged_again_because_the_
-              # merge_group_makes_the_stage_fresh) replaces the paused one
+              # STAGE_SERVICES is `web` until the native deploy's migrate step
+              # supplies app's missing 0058 migration. The historical pin
+              # (test_web_and_app_are_staged_again_because_the_merge_group_
+              # makes_the_stage_fresh) now requires web alone and the way back,
               # 1-for-1, no count change from that row.
               # 39 -> 43 (slice B v2): replace event-trust pins with live-queue
               # validation (queued and superseded rows), and pin the secret-free
               # dispatcher, main-ref guard, and recorded-base step guards.
               # Queue-mode cutover: 50 base rows plus the notice-only PR pin.
-              # Native CodeBuild prewarm: five executed dispatch/receipt rows.
-              _py_pytest("test_prewarm_staging_cutover_workflow.py"), 69),
+              # Native CodeBuild prewarm: five response cases each execute web
+              # presence and app absence expectations, ten rows (69 -> 74).
+              _py_pytest("test_prewarm_staging_cutover_workflow.py"), 74),
         # Merge-queue group controller (slice C: mq-review, mq-supply,
         # mq-prewarm). 84 cases cover the executed matrix and structural pins.
         # The executed matrix includes mq-review's GraphQL

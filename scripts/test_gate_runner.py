@@ -96,8 +96,9 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
         # checkout, the duplicate-supply-set guard) and the dispatcher's merge_group
         # job carry falsifying rows. Mirrors run-all-gates.py; BOTH must move together.
         "build-platform-images-workflow": 53,
-        # Native CodeBuild prewarm dispatch and CloudWatch receipt contracts.
-        "prewarm-staging-cutover-workflow": 69,
+        # Native CodeBuild prewarm: five response cases for web presence and
+        # app absence, plus the CloudWatch receipt contracts (69 -> 74).
+        "prewarm-staging-cutover-workflow": 74,
         "merge-queue-workflow": 92,
         "platform-release-manifest": 88,
         # 10 -> 17 on 2026-08-18 with the production deploy's second approval
