@@ -1,5 +1,11 @@
 // @vitest-environment node
-/** Ledger 9a: inspect real build bytes for the dev/staging source stamp. */
+/** Ledger 9a: inspect real build bytes for the dev/staging source stamp.
+ * Root measurement at 12c9902d with VITE_CAD_EDIT=1: production contained zero
+ * data-element-source attributes, src/.../*.jsx paths with or without a
+ * component suffix, and src/site/ fragments. Never weaken a marker to get green.
+ * The round-1 reading that production legitimately contains src/site/ was a
+ * NODE_ENV=test artefact: the inherited environment enabled development JSX.
+ */
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -7,16 +13,18 @@ import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 const WEB_ROOT = process.cwd()
-const MARKERS = [/data-element-source/g, /src\/[\w./-]+\.jsx:[A-Z][\w$]*/g]
+const MARKERS = [/data-element-source/g, /src\/[\w./-]+\.jsx(?::[A-Z][\w$]*)?/g, /src\/site\//g]
 
 function buildWithMode(mode, fenceRoot) {
   const outDir = join(fenceRoot, mode)
+  const env = { ...process.env, VITE_CAD_EDIT: '1' }
+  delete env.NODE_ENV
   execFileSync(
     process.execPath,
     [join(WEB_ROOT, 'node_modules', 'vite', 'bin', 'vite.js'), 'build', '--mode', mode, '--outDir', outDir, '--emptyOutDir'],
     {
       cwd: WEB_ROOT,
-      env: { ...process.env, VITE_CAD_EDIT: '1' },
+      env,
       stdio: 'pipe',
       timeout: 240_000,
     },
@@ -80,8 +88,12 @@ describe('element source stamp build fence', () => {
     }
   })
 
-  it('ships zero source attributes or source stamp values in production', () => {
+  it('ships zero source attributes, source paths or site fragments in production', () => {
     for (const marker of MARKERS) expect((allText(productionChunks).match(marker) ?? []).length).toBe(0)
+  })
+
+  it('ships no development JSX runtime markers in production', () => {
+    for (const marker of [/jsxDEV/g, /fileName:/g]) expect((allText(productionChunks).match(marker) ?? []).length).toBe(0)
   })
 
   it('keeps the app positive control in both builds', () => {

@@ -61,6 +61,39 @@ describe('element source stamp transform', () => {
     expect(instance.transform('const X = () => <div data-element-id="x" data-element-source="kept" />', id)).toBeNull()
   })
 
+  it('emits the generated stamp first so spread values win when supplied', () => {
+    const code = 'const Frame = () => <div data-element-id="x" {...props} />'
+    const result = plugin().transform(code, id)
+    expect(result.code.indexOf('data-element-source')).toBeLessThan(result.code.indexOf('{...props}'))
+    const ast = parse(result.code, { sourceType: 'module', plugins: ['jsx'] })
+    const attributes = ast.program.body[0].declarations[0].init.body.openingElement.attributes
+    expect(attributes[0].name.name).toBe('data-element-source')
+    const evaluate = (props) => attributes.reduce((merged, attr) => {
+      if (attr.type === 'JSXSpreadAttribute') {
+        expect(attr.argument.name).toBe('props')
+        return { ...merged, ...props }
+      }
+      return { ...merged, [attr.name.name]: attr.value.value }
+    }, {})
+    expect(evaluate({ 'data-element-source': 'spread:Value' })['data-element-source']).toBe('spread:Value')
+    expect(evaluate({})['data-element-source']).toBe('src/site/SurfaceFrame.jsx:Frame')
+  })
+
+  it('leaves an explicit literal stamp untouched without adding a second stamp', () => {
+    const code = 'const Frame = () => <div data-element-id="x" data-element-source="x:Y" />'
+    const result = plugin().transform(code, id)
+    expect(result).toBeNull()
+    expect(result?.code ?? code).toBe(code)
+    expect(stamps(result?.code ?? code)).toEqual(['x:Y'])
+  })
+
+  it('adds exactly one stamp to an element with a class name', () => {
+    const code = 'const Frame = () => <div data-element-id="x" className="a" />'
+    const result = plugin().transform(code, id)
+    expect(stamps(result.code)).toEqual(['src/site/SurfaceFrame.jsx:Frame'])
+    expect(result.code).toContain('className="a"')
+  })
+
   it('refuses JavaScript, tests, dependencies and files outside src', () => {
     for (const filename of ['src/site/Frame.js', 'src/Frame.test.jsx', 'src/Frame.spec.jsx', 'node_modules/Frame.jsx', 'src/node_modules/Frame.jsx', 'other/Frame.jsx']) {
       expect(plugin().transform(fixture, `${root}/${filename}`)).toBeNull()

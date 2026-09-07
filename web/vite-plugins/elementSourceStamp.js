@@ -59,7 +59,7 @@ export default function elementSourceStamp({ root = process.cwd() } = {}) {
             const name = componentName(parents)
             if (!name) stats.unnamed++
             else {
-              node.attributes.push({
+              node.attributes.unshift({
                 type: 'JSXAttribute',
                 name: { type: 'JSXIdentifier', name: 'data-element-source' },
                 value: { type: 'StringLiteral', value: `${relative}:${name}`.slice(0, 200) },
