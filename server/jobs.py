@@ -503,6 +503,10 @@ def _row_to_record(row: sqlite3.Row) -> Dict[str, Any]:
     capability = record_context(execution, rec)
     if capability is not None:
         rec["capability_provenance"] = capability
+    from campaign_transform_job import record_context as completion_record_context
+    completion = completion_record_context(execution, rec)
+    if completion is not None:
+        rec["completion_provenance"] = completion
     return rec
 
 
@@ -566,7 +570,8 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
                platform_context: Optional[Dict[str, Any]] = None,
                checkout_holder: Optional[str] = None,
                checkout_fence: Optional[int] = None,
-               capability_provenance: Optional[Dict[str, Any]] = None) -> str:
+               capability_provenance: Optional[Dict[str, Any]] = None,
+               completion_provenance: Optional[Dict[str, Any]] = None) -> str:
     """Insert the durable job row and hand it to the executor. Returns job_id.
 
     ``org_id`` / ``project_id`` carry the OPTIONAL project context from the
@@ -600,6 +605,7 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
         idempotency_key=idempotency_key, authority_mode=authority_mode,
         platform_context=platform_context, checkout_holder=checkout_holder,
         checkout_fence=checkout_fence, capability_provenance=capability_provenance,
+        completion_provenance=completion_provenance,
     )
 
 
@@ -623,10 +629,25 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
                 checkout_holder: Optional[str] = None,
                 checkout_fence: Optional[int] = None,
                 plan: Optional[Dict[str, Any]] = None,
-                capability_provenance: Optional[Dict[str, Any]] = None) -> str:
+                capability_provenance: Optional[Dict[str, Any]] = None,
+                completion_provenance: Optional[Dict[str, Any]] = None) -> str:
     """Shared durable insert and executor hand-off for tool and data-plan jobs."""
     if project_id and not idempotency_key:
         raise ValueError("Idempotency-Key is required for project-scoped runs")
+    if completion_provenance is not None:
+        from campaign_transform_job import validate_context as validate_completion, input_bytes
+        completion_provenance = validate_completion(completion_provenance)
+        if (capability_provenance is not None or plan is not None or job_store_mode() != "postgres"
+                or aps_live is not False or dwg != "" or dwg_version is not None
+                or checkout_holder is not None or checkout_fence is not None
+                or authority_mode != "legacy_sqlite" or platform_context is not None
+                or not org_id or not project_id or not idempotency_key
+                or any(completion_provenance[k] != v for k, v in {
+                    "tenant_id": str(tenant_id), "org_id": org_id, "project_id": project_id,
+                    "tool_name": tool.get("name"),
+                }.items())):
+            raise ValueError("completion submission scope or execution mode mismatch")
+        input_bytes(completion_provenance, params)
     if capability_provenance is not None:
         from campaign_capability_job import validate_context
         capability_provenance = validate_context(capability_provenance)
@@ -652,6 +673,8 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
         fingerprint_payload["plan"] = True
     if capability_provenance is not None:
         fingerprint_payload["capability_provenance"] = capability_provenance
+    if completion_provenance is not None:
+        fingerprint_payload["completion_provenance"] = completion_provenance
     submission_fingerprint = hashlib.sha256(json.dumps(
         fingerprint_payload, sort_keys=True, separators=(",", ":"), default=str,
     ).encode("utf-8")).hexdigest()
@@ -664,6 +687,8 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
         execution["plan"] = plan
     if capability_provenance is not None:
         execution["capability_provenance"] = capability_provenance
+    if completion_provenance is not None:
+        execution["completion_provenance"] = completion_provenance
     created = True
     if job_store_mode() == "postgres":
         job_id, created = _pg_store.submit({
@@ -848,11 +873,26 @@ def capability_context(job_id: str) -> Optional[Dict[str, Any]]:
         return record_context(json.loads(rows[0]["execution_json"] or "{}"), dict(rows[0]))
 
 
+def completion_context(job_id: str) -> Optional[Dict[str, Any]]:
+    """Completion execution is admitted only into the PostgreSQL job authority."""
+    from campaign_transform_job import record_context
+    if job_store_mode() != "postgres":
+        return None
+    durable = _pg_store.durable_context(job_id)
+    return record_context(durable["execution"], durable) if durable is not None else None
+
+
 def _validate_terminal_context(
     status: str, result_env: Optional[Dict[str, Any]],
     provenance: Optional[Dict[str, Any]], durable_attempt: int,
     execution: Dict[str, Any], *, job_id: Optional[str] = None,
+    durable_params: Optional[Dict[str, Any]] = None,
 ) -> None:
+    from campaign_transform_job import execution_context as completion_execution_context, validate_terminal
+    completion = completion_execution_context(execution)
+    if completion is not None and status == "complete":
+        validate_terminal(completion, execution.get("tool"), durable_params,
+                          (result_env or {}).get("result"), provenance)
     from campaign_capability_job import execution_context, stored_readback, validate_result
     capability = execution_context(execution)
     if capability is not None and status == "complete":
@@ -932,7 +972,8 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
                       worker_id: Optional[str] = None,
                       provenance: Optional[Dict[str, Any]] = None,
                       _allow_closed: bool = False,
-                      _capability_owner: bool = False) -> str:
+                      _capability_owner: bool = False,
+                      _completion_owner: bool = False) -> str:
     """Apply one terminal callback exactly once.
 
     Returns ``applied``, ``duplicate``, ``conflict``, or ``not_owner``. A terminal
@@ -970,8 +1011,16 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
         if (status == "complete" and "capability_provenance" in durable["execution"]
                 and (not _capability_owner or worker_id is None or _allow_closed)):
             raise ValueError("capability success requires the owning job adapter")
+        if (status == "complete" and "completion_provenance" in durable["execution"]
+                and (not _completion_owner or worker_id is None or _allow_closed)):
+            raise ValueError("completion success requires the owning job adapter")
         _validate_terminal_context(
-            status, result_env, provenance, durable_attempt, durable["execution"], job_id=job_id)
+            status, result_env, provenance, durable_attempt, durable["execution"], job_id=job_id,
+            durable_params=durable.get("params"))
+        if "completion_provenance" in durable["execution"]:
+            # Authority/publication reads above can wait on the database. Do not
+            # validate lease expiry against the timestamp from before those reads.
+            now = time.time()
         fingerprint = _terminal_fingerprint(status, result_env, error, provenance)
         outcome = _pg_store.complete(
             job_id, durable_attempt, status, result_env, error, provenance,
@@ -1198,6 +1247,46 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
     started = time.time()
     max_s = job_max_s()
     platform_link.on_running(job_id)  # best-effort; no-op if unlinked
+
+    try:
+        completion = completion_context(job_id)
+    except (ValueError, TypeError):
+        _finish(job_id, "failed", started, worker_id=worker_id,
+                error=error_obj(ErrorCode.INTERNAL, "invalid durable completion context", False),
+                provenance={"attempt": attempt, "execution_path": "local"})
+        return
+    if completion is not None:
+        from campaign_transform_job import run as run_completion, validate_result
+
+        def completion_cancelled():
+            rec = get_job(job_id)
+            lease = (rec or {}).get("lease") or {}
+            return (rec is None or rec["status"] != "running"
+                    or rec.get("progress") == CLOSED_PROGRESS or rec.get("attempt") != attempt
+                    or lease.get("owner") != worker_id
+                    or float(lease.get("expires_at") or 0) < time.time())
+
+        env = run_completion(job_id, completion, tool, params,
+                             lambda: heartbeat_lease(job_id, worker_id), completion_cancelled,
+                             time.monotonic() + max_s)
+        if completion_cancelled():
+            return
+        provenance = {"attempt": attempt, "execution_path": "local",
+                      "completion_provenance": completion}
+        if env.get("ok") is True:
+            try:
+                provenance.update(validate_result(completion, params, env.get("result")))
+                env["execution_provenance"] = provenance
+                complete_callback(job_id, "complete", result_env=env, worker_id=worker_id,
+                                  provenance=provenance, _completion_owner=True)
+            except Exception:
+                _retry_or_finish(job_id, worker_id, tenant_id, tool, params, dwg, False,
+                                 error_obj(ErrorCode.INTERNAL, "completion terminal proof rejected", False),
+                                 provenance)
+        else:
+            _retry_or_finish(job_id, worker_id, tenant_id, tool, params, dwg, False,
+                             env["error"], provenance)
+        return
 
     # Capability waiting stays in this owner, with no detached effect-producing thread.
     try:
