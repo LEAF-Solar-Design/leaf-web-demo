@@ -194,12 +194,12 @@ def test_dimension_round_trips_exactly_and_dimstyle_table_is_conditional():
     # W4g-7b-04s: one LINEAR and one ALIGNED dimension, plus the loaded
     # dimstyle catalogue; byte-identical output when neither is carried.
     intake = {
-        "layers": ["0"], "polylines": [],
+        "layers": ["0", "DIMS"], "polylines": [],
         "dimensions": [
-            {"type": "LINEAR", "p1": [0.0, 0.0, 0.0], "p2": [3.0, 4.0, 0.0],
+            {"type": "LINEAR", "layer": "DIMS", "p1": [0.0, 0.0, 0.0], "p2": [3.0, 4.0, 0.0],
              "dimline": [1.5, 6.0, 0.0], "rotation_deg": 0.0, "style": "Standard",
              "nrm": [0.0, 0.0, 1.0], "measurement": 3.0, "handle": "A1"},
-            {"type": "ALIGNED", "p1": [0.0, 0.0, 0.0], "p2": [3.0, 4.0, 0.0],
+            {"type": "ALIGNED", "layer": "0", "p1": [0.0, 0.0, 0.0], "p2": [3.0, 4.0, 0.0],
              "dimline": [1.5, 6.0, 0.0], "rotation_deg": 0.0, "style": "Standard",
              "nrm": [0.0, 0.0, 1.0], "measurement": 5.0, "handle": "A2"},
         ],
@@ -247,7 +247,7 @@ def test_dimension_emits_group_11_as_the_canonical_dimline_point():
     intake = {
         "layers": ["0"], "polylines": [],
         "dimensions": [
-            {"type": "LINEAR", "p1": [0.0, 0.0, 0.0], "p2": [3.0, 4.0, 0.0],
+            {"type": "LINEAR", "layer": "0", "p1": [0.0, 0.0, 0.0], "p2": [3.0, 4.0, 0.0],
              "dimline": [3.0, 6.0, 0.0], "rotation_deg": 0.0, "style": "Standard",
              "nrm": [0.0, 0.0, 1.0], "measurement": 3.0, "handle": "A1"},
         ],

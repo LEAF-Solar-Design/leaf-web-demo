@@ -180,6 +180,20 @@ def _layer(value: Any) -> str:
     return value
 
 
+def _canonicalize_layer(layer: str, intake: Dict[str, Any]) -> str:
+    # AutoCAD layer names are case-insensitive: an admitted spelling that
+    # differs only in case from an existing layer creates on that layer and
+    # reads back with the existing spelling, so the canonical form must
+    # already carry it. A layer absent from the intake keeps its given
+    # spelling (the interpreter creates it fresh).
+    existing_layers = intake.get("layers")
+    if isinstance(existing_layers, list):
+        for existing_layer in existing_layers:
+            if isinstance(existing_layer, str) and existing_layer.lower() == layer.lower():
+                return existing_layer
+    return layer
+
+
 def _reject_raw_fields(value: Any, path: str = "mutations") -> None:
     if isinstance(value, dict):
         for key, child in value.items():
@@ -485,17 +499,7 @@ def validate_mutations(
             raise ValueError(f"added entity {handle!r} has an unsupported kind")
         layer = _layer(raw.get("layer"))
         if kind == "INSERT":
-            # AutoCAD layer names are case-insensitive: an admitted spelling
-            # that differs only in case from an existing layer creates on
-            # that layer and reads back with the existing spelling, so the
-            # canonical form must already carry it.
-            existing_layers = intake.get("layers")
-            if isinstance(existing_layers, list):
-                for existing_layer in existing_layers:
-                    if (isinstance(existing_layer, str)
-                            and existing_layer.lower() == layer.lower()):
-                        layer = existing_layer
-                        break
+            layer = _canonicalize_layer(layer, intake)
             name = raw.get("name")
             if (not isinstance(name, str) or not name or len(name) > 255
                     or any(char in name for char in ("|", "\r", "\n"))):
@@ -538,6 +542,7 @@ def validate_mutations(
             })
             continue
         if kind == "DIMENSION":
+            layer = _canonicalize_layer(layer, intake)
             dimtype = raw.get("dimtype")
             if dimtype not in _DIMTYPES:
                 raise ValueError(f"added DIMENSION {handle!r} has an unsupported dimtype")

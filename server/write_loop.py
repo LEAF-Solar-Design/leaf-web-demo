@@ -932,10 +932,9 @@ def apply_mutations(intake: Dict[str, Any], mutations: Dict[str, Any]) -> Dict[s
                     "scale": [round(value, 4) for value in e["scale"]],
                     "nrm": [0.0, 0.0, 1.0]})
             elif kind == "DIMENSION":
-                # The intake's dimension shape (da/intake_parse.py's DM record)
-                # carries no layer: the layer only steers the LISP entmake.
                 new.setdefault("dimensions", []).append({
-                    "type": e["dimtype"], "p1": list(e["def1"]), "p2": list(e["def2"]),
+                    "type": e["dimtype"], "layer": e["layer"],
+                    "p1": list(e["def1"]), "p2": list(e["def2"]),
                     "dimline": list(e["dimline"]),
                     "rotation_deg": e.get("rotation", 0.0), "style": e["style"],
                     "nrm": [0.0, 0.0, 1.0], "measurement": e["measurement"],
@@ -1874,12 +1873,23 @@ def verify_live_mutation_effects(
 
 
 def _dimension_effect_matches(expected: Dict[str, Any], actual: Dict[str, Any]) -> bool:
-    """One dimension against its re-extracted record: same type and style,
-    definition/dimline points within the extractor's 3-decimal quantum, and
-    rotation within a microdegree (LINEAR only; ALIGNED both read 0). The
-    measurement is checked separately, never as part of the match itself, so
-    a geometry match with a wrong measurement is a distinct refusal."""
+    """One dimension against its re-extracted record: same type, style and
+    layer (case-insensitive, like INSERT's), definition/dimline points within
+    the extractor's 3-decimal quantum, and rotation within a microdegree
+    (LINEAR only; ALIGNED both read 0). The measurement is checked
+    separately, never as part of the match itself, so a geometry match with
+    a wrong measurement is a distinct refusal.
+
+    A legacy record on either side predates this field entirely and carries
+    no `layer` at all; when either is missing the comparison is unknown
+    (skipped), never forced to mismatch, so an already-verified pre-migration
+    base or actual stays green."""
     if expected.get("type") != actual.get("type") or expected.get("style") != actual.get("style"):
+        return False
+    expected_layer = expected.get("layer")
+    actual_layer = actual.get("layer")
+    if (expected_layer is not None and actual_layer is not None
+            and str(expected_layer).lower() != str(actual_layer).lower()):
         return False
     for key in ("p1", "p2", "dimline"):
         if not _point_close(list(expected.get(key) or []), list(actual.get(key) or []), 1.5e-3):
@@ -1946,7 +1956,7 @@ def _verify_dimension_effects(
             raise ValueError("re-extracted output has unexpected new entities")
     for entity in adds:
         reference = {
-            "type": entity["dimtype"], "style": entity["style"],
+            "type": entity["dimtype"], "style": entity["style"], "layer": entity["layer"],
             "p1": entity["def1"], "p2": entity["def2"], "dimline": entity["dimline"],
             "rotation_deg": entity.get("rotation", 0.0),
         }

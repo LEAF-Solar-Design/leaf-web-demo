@@ -554,12 +554,12 @@ def test_dimension_record_reads_coordinate_and_angular_precisions():
     import intake_parse
 
     parsed = intake_parse.parse_text(
-        "DM|linear|1.23456,2.34567,3.45678|4.56789,5.67891,6.78912|"
+        "DM|linear|DIMS|1.23456,2.34567,3.45678|4.56789,5.67891,6.78912|"
         "7.89123,8.91234,9.12345|30.12345678|Standard|0.0000004,0.0000006,1|12.34567|2A",
         "test.dwg",
     )
     assert parsed["dimensions"] == [{
-        "type": "linear", "p1": [1.235, 2.346, 3.457], "p2": [4.568, 5.679, 6.789],
+        "type": "linear", "layer": "DIMS", "p1": [1.235, 2.346, 3.457], "p2": [4.568, 5.679, 6.789],
         "dimline": [7.891, 8.912, 9.123], "rotation_deg": 30.123457, "style": "Standard",
         "nrm": [0.0, 0.000001, 1.0], "measurement": 12.346, "handle": "2A",
     }]
@@ -575,7 +575,7 @@ def test_malformed_dimension_normal_or_handle_is_a_parse_error(normal, handle):
     import intake_parse
 
     parsed = intake_parse.parse_text(
-        f"DM|linear|0,0,0|3,4,0|0,5,0|0|Standard|{normal}|5|{handle}",
+        f"DM|linear|0|0,0,0|3,4,0|0,5,0|0|Standard|{normal}|5|{handle}",
         "test.dwg",
     )
     assert len(parsed["parseErrors"]) == 1 and parsed["parseErrors"][0].startswith("DM:")
@@ -584,7 +584,7 @@ def test_malformed_dimension_normal_or_handle_is_a_parse_error(normal, handle):
 
 @pytest.mark.parametrize("record,field", [
     ("EP|1A|7|~|Continuous|25", "properties"),
-    ("DM|aligned|0,0,0|3,4,0|0,5,0|0|Standard|0,0,1|5|2A", "dimensions"),
+    ("DM|aligned|0|0,0,0|3,4,0|0,5,0|0|Standard|0,0,1|5|2A", "dimensions"),
 ])
 def test_sidecar_records_close_a_complete_polyline_first(record, field):
     import intake_parse

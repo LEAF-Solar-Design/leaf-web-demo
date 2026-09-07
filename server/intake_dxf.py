@@ -351,11 +351,13 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         if not any(normal):
             _fail(f"{where}: nrm must not be the zero vector")
         measurement = _number(ent.get("measurement"), f"{where}.measurement")
+        # A legacy record predates the layer field; emit it on "0" like before.
+        layer = _layer_name(ent.get("layer", "0"), where)
         h = _real_handle(ent.get("handle"), where, real)
         if h is not None:
             highest = max(highest, int(h, 16))
-        note_layer("0")  # the intake dimension shape carries no layer; emitted on "0"
-        kinds.append(("dim", dimtype, p1, p2, dimline, rotation, style, normal, measurement, h))
+        note_layer(layer)
+        kinds.append(("dim", dimtype, layer, p1, p2, dimline, rotation, style, normal, measurement, h))
         kind_properties.append([])  # DIMENSION carries no colour/linetype/lineweight round trip
 
     blocks = _validated_blocks(intake["blocks"], note_layer) if "blocks" in intake else None
@@ -471,7 +473,7 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
             if field == "arcs":
                 out += ["100", "AcDbArc", "50", _num(angles[0]), "51", _num(angles[1])]
         elif row[0] == "dim":
-            _, dimtype, p1, p2, dimline, rotation, style, normal, measurement, _ = row
+            _, dimtype, layer, p1, p2, dimline, rotation, style, normal, measurement, _ = row
             tilted = normal != [0.0, 0.0, 1.0]
             # F3: groups 13/14/10 are WCS per the DXF spec (only 11/12/16 are
             # OCS), so p1/p2/dimline are written exactly as given, with no
@@ -483,7 +485,7 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
             # omitted by design: this contract never synthesizes the
             # anonymous block AutoCAD normally attaches to a DIMENSION.
             text_mid = _wcs_to_ocs(dimline, normal) if tilted else tuple(dimline)
-            out += ["0", "DIMENSION", "5", h, "100", "AcDbEntity", "8", "0",
+            out += ["0", "DIMENSION", "5", h, "100", "AcDbEntity", "8", layer,
                     "100", "AcDbDimension", *_point_groups(dimline), *_point_groups(text_mid, 11),
                     "70", str(flags), "3", style, "42", _num(measurement)]
             if tilted:

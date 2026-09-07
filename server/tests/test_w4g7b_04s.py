@@ -276,7 +276,7 @@ def test_mock_dimension_uses_intake_shape_and_dxf_maps_its_temporary_handle():
     before = copy.deepcopy(base)
     result = write_loop.apply_mutations(base, {"added": [_linear()]})
     expected = {
-        "type": "LINEAR", "p1": [0.0, 0.0, 0.0], "p2": [3.0, 4.0, 0.0],
+        "type": "LINEAR", "layer": "0", "p1": [0.0, 0.0, 0.0], "p2": [3.0, 4.0, 0.0],
         "dimline": [3.0, 6.0, 0.0], "rotation_deg": 0.0, "style": "Standard",
         "nrm": [0.0, 0.0, 1.0], "measurement": 3.0, "handle": "new-dim",
     }
@@ -285,6 +285,77 @@ def test_mock_dimension_uses_intake_shape_and_dxf_maps_its_temporary_handle():
     parsed = dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf(result))
     assert parsed["dimensions"] == [{**expected, "handle": "100"}]
     assert parsed["dimstyles"] == ["Standard"]
+
+
+# --- F11: DIMENSION layer canonicalization, like INSERT's -------------------
+
+def test_dimension_layer_is_canonicalized_to_existing_spelling_case_insensitively():
+    base = _base()
+    base["layers"] = ["0", "DIMS"]
+    canonical = validate_mutations(base, {"added": [_linear(layer="dims")]})
+    assert canonical["added"][0]["layer"] == "DIMS"
+
+
+def test_dimension_layer_absent_from_the_intake_keeps_its_given_spelling():
+    base = _base()
+    canonical = validate_mutations(base, {"added": [_linear(layer="dims")]})
+    assert canonical["added"][0]["layer"] == "dims"
+
+
+@pytest.mark.parametrize("actual_layer", ["DIMS", "dims"])
+def test_verifier_accepts_either_layer_case_for_added_dimension(actual_layer):
+    base = _base()
+    base["layers"] = ["0", "DIMS"]
+    canonical = validate_mutations(base, {"added": [_linear(layer="dims")]})
+    assert canonical["added"][0]["layer"] == "DIMS"
+    expected = write_loop.apply_mutations(base, canonical)
+    actual = copy.deepcopy(base)
+    actual["dimensions"] = [dict(expected["dimensions"][0], layer=actual_layer, handle="2A")]
+    write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+def test_verifier_refuses_an_added_dimension_on_the_wrong_layer():
+    base = _base()
+    base["layers"] = ["0", "DIMS"]
+    canonical = validate_mutations(base, {"added": [_linear(layer="DIMS")]})
+    expected = write_loop.apply_mutations(base, canonical)
+    actual = copy.deepcopy(base)
+    actual["dimensions"] = [dict(expected["dimensions"][0], layer="0", handle="2A")]
+    with pytest.raises(ValueError, match="^added DIMENSION 'new-dim' not found in output$"):
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+def test_verifier_treats_a_legacy_actual_dimension_with_no_layer_field_as_unknown():
+    # A legacy actual record (pre-migration) carries no `layer` at all; that
+    # is compared as unknown, never forced to mismatch against a canonical
+    # layer.
+    canonical = validate_mutations(_base(), {"added": [_linear(layer="DIMS")]})
+    expected = write_loop.apply_mutations(_base(), canonical)
+    actual = copy.deepcopy(_base())
+    legacy_actual = dict(expected["dimensions"][0])
+    del legacy_actual["layer"]
+    actual["dimensions"] = [legacy_actual]
+    write_loop.verify_live_mutation_effects(_base(), actual, canonical)
+
+
+def test_verifier_treats_a_legacy_base_dimension_with_no_layer_field_as_unknown():
+    # An unchanged dimension's STORED record predates this field (a cached
+    # intake from before this migration); a fresh re-extraction always
+    # carries one, so the mismatch is unknown, not a drift.
+    base = _with_existing_dimension()
+    assert "layer" not in base["dimensions"][0]
+    actual = copy.deepcopy(base)
+    actual["dimensions"][0]["layer"] = "DIMS"
+    write_loop._verify_dimension_effects(base, actual, {}, {})
+
+
+def test_dimension_added_on_a_new_layer_round_trips_through_the_mock_and_dxf():
+    base = _base()
+    base["layers"] = ["0", "DIMS"]
+    result = write_loop.apply_mutations(base, {"added": [_linear(layer="DIMS")]})
+    assert result["dimensions"][0]["layer"] == "DIMS"
+    parsed = dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf(result))
+    assert parsed["dimensions"][0]["layer"] == "DIMS"
 
 
 def test_mock_removed_dimension_drops_it():
@@ -503,7 +574,7 @@ def test_dm_style_decodes_percent_escapes_the_same_way_as_ds():
     # (percent last) so a style named "A%B" round-trips to the same string.
     parsed = intake_parse.parse_text(
         "DS|A%25B\n"
-        "DM|linear|0,0,0|3,4,0|1.5,6,0|0|A%25B|0,0,1|3|2A",
+        "DM|linear|0|0,0,0|3,4,0|1.5,6,0|0|A%25B|0,0,1|3|2A",
         "test.dwg")
     assert parsed["dimstyles"] == ["A%B"]
     assert parsed["dimensions"][0]["style"] == "A%B"

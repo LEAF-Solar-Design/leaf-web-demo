@@ -79,8 +79,9 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
     has_blocks = False
     handle_seq = 0
     dropped_count = [0]
-    # W4g-7b-04s: LINEAR/ALIGNED dimensions (the DM intake shape, no layer:
-    # see server/write_loop.py's mock add) and the loaded dimstyle catalogue.
+    # W4g-7b-04s: LINEAR/ALIGNED dimensions (the DM intake shape; the layer
+    # comes from group 8, like every other entity here) and the loaded
+    # dimstyle catalogue.
     dimensions: List[Dict[str, Any]] = []
     dimensions_unsupported = 0
     dimstyles: List[str] = []
@@ -188,6 +189,9 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
                 entity.pop("unsupported", None)
                 if not entity["handle"]:
                     entity["handle"] = f"L{handle_seq:X}"
+                if entity["layer"] not in seen_layers:
+                    seen_layers.add(entity["layer"])
+                    layers.append(entity["layer"])
                 dimensions.append(entity)
             continue
         if section == "ENTITIES" and code == 0 and value in ("TEXT", "MTEXT"):
@@ -491,13 +495,12 @@ def _parse_circle_or_arc(pairs: List[Tuple[int, str]], i: int, kind: str, droppe
 
 
 def _parse_dimension(pairs: List[Tuple[int, str]], i: int):
-    """DIMENSION: handle=5, flags=70 (bits 0-3: 0 rotated/linear, 1 aligned;
-    any other subtype is unsupported), def1=(13,23,33), def2=(14,24,34),
-    dimline=(10,20,30), rotation=50 (DXF degrees, LINEAR only), style=3
-    (default Standard), normal=(210,220,230, default +z), measurement=42
-    (group 42 when present, else the same projection rule da/lisp.py's DM
-    inspect block and server/mutation_plan.py compute). No layer: the intake
-    dimension shape never carries one (server/write_loop.py's mock add).
+    """DIMENSION: handle=5, layer=8, flags=70 (bits 0-3: 0 rotated/linear, 1
+    aligned; any other subtype is unsupported), def1=(13,23,33),
+    def2=(14,24,34), dimline=(10,20,30), rotation=50 (DXF degrees, LINEAR
+    only), style=3 (default Standard), normal=(210,220,230, default +z),
+    measurement=42 (group 42 when present, else the same projection rule
+    da/lisp.py's DM inspect block and server/mutation_plan.py compute).
 
     F3 (opus round-one read of PR #1119): per the DXF spec, groups 13/14/10
     on a DIMENSION are WCS points; only 11/12/16 are OCS (this parser has no
@@ -505,6 +508,7 @@ def _parse_dimension(pairs: List[Tuple[int, str]], i: int):
     as given, with no arbitrary-axis (OCS->WCS) transform; 210/220/230 is kept
     only as the informational normal record."""
     handle = ""
+    layer = "0"
     flags = 0
     p13 = [0.0, 0.0, 0.0]
     p14 = [0.0, 0.0, 0.0]
@@ -518,6 +522,8 @@ def _parse_dimension(pairs: List[Tuple[int, str]], i: int):
         code, value = pairs[i]
         if code == 5:
             handle = value
+        elif code == 8:
+            layer = value or "0"
         elif code == 70:
             flags = _int(value)
         elif code == 13:
@@ -566,7 +572,7 @@ def _parse_dimension(pairs: List[Tuple[int, str]], i: int):
         else:
             measurement = math.sqrt(dx * dx + dy * dy + (wp2[2] - wp1[2]) ** 2)
     entity: Dict[str, Any] = {
-        "unsupported": False, "type": kind,
+        "unsupported": False, "type": kind, "layer": layer,
         "p1": [round(v, 3) for v in wp1], "p2": [round(v, 3) for v in wp2],
         "dimline": [round(v, 3) for v in wdl], "rotation_deg": round(rotation, 6),
         "style": style, "nrm": [round(v, 6) for v in normal],
