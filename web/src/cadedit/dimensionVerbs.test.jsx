@@ -173,6 +173,24 @@ describe('W4g-7b-04c-8: dimension style names obey the plan contract before the 
       .toMatchObject({ dimtype: 'LINEAR', style })
   })
 
+  it('the provider preserves a 65-character style instead of selecting its loaded 64-character prefix', async () => {
+    const prefix = 'A'.repeat(64)
+    const style = prefix + '2'
+    const dimstyles = [prefix, style]
+    const worker = new ScriptedWorker()
+    const handle = {}
+    function Probe() { handle.context = useEngineSessionContext(); return null }
+    render(<EngineSessionProvider createWorker={() => worker}><Probe /></EngineSessionProvider>)
+    await act(async () => { await handle.context.session.actions.open(fileOf()) })
+    worker.emit({ type: 'documentLoaded', documentId: 'one.dxf', entities: [], entityCount: 0, unsupported: [], dimstyles })
+    act(() => {
+      handle.context.setArmed({ group: 'draw', op: 'dimLinear' })
+      for (const [key, value] of Object.entries(points)) handle.context.setInput(key, value)
+      handle.context.setInput('style', style)
+    })
+    expect(buildCreatePayload('dimLinear', handle.context.inputs, [], dimstyles).payload.style).toBe(style)
+  })
+
   it('the catalogue offers Стандарт in the select, but both the prompt and store refuse it before applyEdit', async () => {
     const worker = new ScriptedWorker()
     const handle = {}

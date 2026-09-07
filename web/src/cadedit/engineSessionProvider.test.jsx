@@ -1046,13 +1046,22 @@ describe('W4g-7b-04c-8: each arm speaks only to its prompt', () => {
 
   it('property word fields and style use the shared reset and bounds', () => {
     const studio = mount()
-    for (const [op, key] of [['setColor', 'aci'], ['setLinetype', 'linetype'], ['setLineweight', 'lineweight'], ['dimLinear', 'style']]) {
-      act(() => { studio.context.setArmed({ group: op === 'dimLinear' ? 'draw' : 'modify', op }) })
+    for (const [op, key] of [['setColor', 'aci'], ['setLinetype', 'linetype'], ['setLineweight', 'lineweight']]) {
+      act(() => { studio.context.setArmed({ group: 'modify', op }) })
       act(() => { studio.context.setInput(key, 'a'.repeat(MAX_INPUT_CHARS + 1)) })
       expect(studio.context.inputs[key]).toHaveLength(MAX_INPUT_CHARS)
       act(() => { studio.context.setArmed({ group: 'draw', op: 'createCircle' }) })
       expect(studio.context.inputs[key]).toBe(DEFAULT_EDIT_INPUTS[key])
     }
+    act(() => { studio.context.setArmed({ group: 'draw', op: 'dimLinear' }) })
+    const longStyle = 'A'.repeat(255) + '2'
+    act(() => { studio.context.setInput('style', longStyle) })
+    expect(studio.context.inputs.style).toBe(longStyle.slice(0, 255))
+    const style = 'A'.repeat(64) + '2'
+    act(() => { studio.context.setInput('style', style) })
+    expect(studio.context.inputs.style).toBe(style)
+    act(() => { studio.context.setArmed({ group: 'draw', op: 'createCircle' }) })
+    expect(studio.context.inputs.style).toBe(DEFAULT_EDIT_INPUTS.style)
   })
 })
 

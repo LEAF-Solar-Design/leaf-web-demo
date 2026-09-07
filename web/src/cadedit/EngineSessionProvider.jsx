@@ -98,7 +98,8 @@ const INPUT_KEYS = new Set(Object.keys(DEFAULT_EDIT_INPUTS))
 // list is the one field that legitimately runs long.
 export const MAX_INPUT_CHARS = 64
 export const MAX_POINT_LIST_CHARS = 4096
-const INPUT_LIMITS = Object.freeze({ pts: MAX_POINT_LIST_CHARS })
+// Style keeps the plan contract's DIMSTYLE name bound, mutation_plan.py.
+const INPUT_LIMITS = Object.freeze({ pts: MAX_POINT_LIST_CHARS, style: 255 })
 
 // The two ribbon groups whose tools prompt for operands, and the op token's
 // shape (a JS identifier the clusters own; the engine validates the op
