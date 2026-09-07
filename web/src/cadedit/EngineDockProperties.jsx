@@ -22,6 +22,7 @@ import { createPortal } from 'react-dom'
 
 import { useEngineSessionOptional } from './EngineSessionProvider.jsx'
 import { formatColor, formatLineweight } from './engineSession.js'
+import { formatMeasurement } from './engineIntake.js'
 
 export const DOCK_PROPERTIES_SLOT_ID = 'cockpit-dock-properties-slot'
 
@@ -46,11 +47,16 @@ export default function EngineDockProperties() {
     ? (session.entities || []).find((e) => e.id === session.selectedId) || null
     : null
   if (!slot || !entity) return null
+  // W4g-7b-04c: a selected DIMENSION's measurement, read-only, through this
+  // same slot idiom (the dock's Geometry section otherwise has no field for
+  // it: entityGeometry knows nothing of a DIMENSION's projection).
+  const isDimension = entity.type === 'DIMENSION' && Number.isFinite(entity.measurement)
   return createPortal(
     <dl className="dock-properties" data-testid="dock-properties">
       <dt>Color</dt><dd>{formatColor(entity)}</dd>
       <dt>Linetype</dt><dd>{typeof entity.linetype === 'string' && entity.linetype ? entity.linetype : 'ByLayer'}</dd>
       <dt>Lineweight</dt><dd>{formatLineweight(Number.isFinite(entity.lineweight) ? entity.lineweight : -1)}</dd>
+      {isDimension && <><dt>Measurement</dt><dd>{formatMeasurement(entity.measurement)}</dd></>}
     </dl>,
     slot,
   )

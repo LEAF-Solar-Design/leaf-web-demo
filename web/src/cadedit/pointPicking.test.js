@@ -212,6 +212,41 @@ describe('W4g-7b-02c: the INSERT ghost', () => {
   })
 })
 
+describe('W4g-7b-04c: the DIMLINEAR/DIMALIGNED pick sequence and ghost', () => {
+  it('PICK_SEQUENCES: three point steps for both dimtypes', () => {
+    expect(PICK_SEQUENCES.dimLinear).toEqual([
+      { kind: 'point', keys: ['x', 'y'] }, { kind: 'point', keys: ['x2', 'y2'] }, { kind: 'point', keys: ['dx', 'dy'] },
+    ])
+    expect(PICK_SEQUENCES.dimAligned).toEqual(PICK_SEQUENCES.dimLinear)
+  })
+
+  it('the ghost runs point-to-cursor for the second pick, then the schematic once both def points are picked', () => {
+    let s = startPicking('dimLinear')
+    expect(ghostFor(s, 5, 5)).toBeNull()
+    s = applyPick(s, 0, 0, {}).state
+    expect(ghostFor(s, 3, 4)).toEqual({ pts: [[0, 0], [3, 4]], closed: false })
+    s = applyPick(s, 3, 4, {}).state
+    const ghost = ghostFor(s, 1.5, 6, { rot: '0' })
+    // def1 -> its extension line's far point (foot (0,6) plus DIM_EXT_PAST)
+    // -> def2's far point (foot (3,6) plus DIM_EXT_PAST) -> def2: the LINEAR
+    // 0deg dimension line runs y=6 from x=0 to x=3 (dimensionSchematic's own feet).
+    expect(ghost.closed).toBe(false)
+    expect(ghost.pts).toEqual([[0, 0, 0], [0, 8, 0], [3, 8, 0], [3, 4, 0]])
+    const r = applyPick(s, 1.5, 6, {})
+    expect(r.writes).toEqual([['dx', '1.5'], ['dy', '6']])
+    expect(wantsPick(r.state)).toBe(false)
+  })
+
+  it('ALIGNED ignores a typed rotation for its ghost', () => {
+    let s = startPicking('dimAligned')
+    s = applyPick(s, 0, 0, {}).state
+    s = applyPick(s, 3, 4, {}).state
+    const ghost = ghostFor(s, 1.5, 6, { rot: '45' })
+    expect(ghost.pts[0]).toEqual([0, 0, 0])
+    expect(ghost.pts[3]).toEqual([3, 4, 0])
+  })
+})
+
 describe('OSNAP on curved polyline segments (W4g-6d follow-up)', () => {
   it('a bulged segment offers the ARC midpoint and its centre; a straight one the chord midpoint; a bad list reads as straight', () => {
     // Bulge 1 from (0,0) to (10,0) is the LOWER semicircle about (5,0) (the crate's convention): its midpoint is (5,-5).

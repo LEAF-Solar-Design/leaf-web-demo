@@ -134,13 +134,22 @@ function projectDocument(doc) {
       trueColor: Array.isArray(entity.trueColor) ? entity.trueColor : null,
       linetype: entity.linetype ?? 'ByLayer',
       lineweight: typeof entity.lineweight === 'number' ? entity.lineweight : -1,
+      // W4g-7b-04c: null for every kind but DIMENSION. dimtype is 'LINEAR' /
+      // 'ALIGNED' (a reference, the rest present) or 'OTHER' (nothing else
+      // rides): the crate's projection already leaves the unset fields null.
+      dimtype: entity.dimtype ?? null,
+      def1: Array.isArray(entity.def1) ? entity.def1 : null,
+      def2: Array.isArray(entity.def2) ? entity.def2 : null,
+      dimline: Array.isArray(entity.dimline) ? entity.dimline : null,
+      style: entity.style ?? null,
+      measurement: entity.measurement ?? null,
     }
   })
-  return { entities, blocks: projection.blocks ?? [], linetypes: projection.linetypes ?? [] }
+  return { entities, blocks: projection.blocks ?? [], linetypes: projection.linetypes ?? [], dimstyles: projection.dimstyles ?? [] }
 }
 
 function loadedResponse(documentId, doc) {
-  const { entities, blocks, linetypes } = projectDocument(doc)
+  const { entities, blocks, linetypes, dimstyles } = projectDocument(doc)
   return {
     type: 'documentLoaded',
     documentId,
@@ -148,6 +157,7 @@ function loadedResponse(documentId, doc) {
     entities,
     blocks,
     linetypes,
+    dimstyles,
     blockBasePatched: doc.blockBasePatched ?? false,
     // The whole-document engine reads and rewrites EVERYTHING, so there is
     // no lossy-write refusal class: writable is unconditionally true and
@@ -210,6 +220,11 @@ const CREATE_OPS = Object.freeze({
   // already carries references and the catalogue, so nothing else changes.
   createInsert: (doc, p) => doc.createInsert(
     String(p.name ?? ''), Number(p.x), Number(p.y), Number(p.rotationDeg), Number(p.sx), Number(p.sy), Number(p.sz), String(p.layer ?? '')),
+  // W4g-7b-04c: LINEAR / ALIGNED DIMENSION; the wrapper refuses before it
+  // writes (see create_dimension_core), including a rotation on ALIGNED.
+  createDimension: (doc, p) => doc.createDimension(
+    String(p.dimtype ?? ''), Number(p.x1), Number(p.y1), Number(p.x2), Number(p.y2),
+    Number(p.dx), Number(p.dy), Number(p.rotationDeg ?? 0), String(p.style ?? ''), String(p.layer ?? '')),
 })
 // The op string off the boundary is looked up in a Map of the table's OWN
 // entries, never as a computed property: a prototype name such as
@@ -371,7 +386,7 @@ async function applyEdit(engine, message) {
     current = null
     return refused(op, error instanceof Error ? error.message : String(error))
   }
-  const { entities, blocks, linetypes } = projection
+  const { entities, blocks, linetypes, dimstyles } = projection
   current = { documentId: current.documentId, doc: reparsed }
   const reply = {
     type: 'editApplied',
@@ -381,6 +396,7 @@ async function applyEdit(engine, message) {
     entities,
     blocks,
     linetypes,
+    dimstyles,
     blockBasePatched,
     bytes: written,
     byteLength: written.length,
@@ -452,7 +468,7 @@ export async function handleMessage(raw, engineOverride = null) {
       current = null
       const reason = error instanceof Error ? error.message : String(error)
       if (reason.startsWith('block names collide case-insensitively: ') || reason.startsWith('block definitions collapsed on load: ')) {
-        return { type: 'documentLoaded', documentId, entityCount: 0, entities: [], blocks: [], linetypes: [],
+        return { type: 'documentLoaded', documentId, entityCount: 0, entities: [], blocks: [], linetypes: [], dimstyles: [],
           blockBasePatched: false, writable: false, refusal: reason, unsupported: [] }
       }
       return { type: 'error', message: `parse_failed:${reason}` }

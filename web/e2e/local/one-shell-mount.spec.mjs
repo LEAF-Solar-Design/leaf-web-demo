@@ -1466,6 +1466,55 @@ test.describe('route matrix, rail ON', () => {
       expect(box.y + box.height).toBeLessThanOrEqual(clusterBox.y + clusterBox.height + 1)
     }
 
+    // W4g-7b-04c: DIMLINEAR/DIMALIGNED on the real engine. A line by typed
+    // operands sets the scene ((0,0)-(3,4)); DIMALIGNED's three typed picks
+    // measure it as the chord length (the case table's 5), read back off the
+    // dock's own Measurement row (the fresh dimension is the new selection);
+    // one engine undo removes it; DIMLINEAR at rotation 0 over the same two
+    // points measures the axis projection instead (3, never the cached
+    // endpoint distance).
+    const dimCountBefore = Number(await page.getByTestId('cad-edit-entity-count').textContent())
+    await draw.locator('[data-tool="draw:createLine"]').click()
+    await page.getByLabel('ribbon x', { exact: true }).fill('0')
+    await page.getByLabel('ribbon y', { exact: true }).fill('0')
+    await page.getByLabel('ribbon x2', { exact: true }).fill('3')
+    await page.getByLabel('ribbon y2', { exact: true }).fill('4')
+    await page.getByLabel('ribbon y2', { exact: true }).press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(dimCountBefore + 1), { timeout: 60_000 })
+
+    await bar.fill('dal')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'dimAligned', { timeout: 20_000 })
+    await page.getByLabel('ribbon x', { exact: true }).fill('0')
+    await page.getByLabel('ribbon y', { exact: true }).fill('0')
+    await page.getByLabel('ribbon x2', { exact: true }).fill('3')
+    await page.getByLabel('ribbon y2', { exact: true }).fill('4')
+    await page.getByLabel('ribbon dx', { exact: true }).fill('1.5')
+    await page.getByLabel('ribbon dy', { exact: true }).fill('6')
+    await page.getByLabel('ribbon dy', { exact: true }).press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(dimCountBefore + 2), { timeout: 60_000 })
+    await expect(page.getByTestId('dock-properties')).toContainText('Measurement')
+    await expect(page.getByTestId('dock-properties').locator('dd').last()).toHaveText('5')
+
+    await bar.fill('u')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(dimCountBefore + 1), { timeout: 60_000 })
+
+    await bar.fill('dli')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'dimLinear', { timeout: 20_000 })
+    await page.getByLabel('ribbon x', { exact: true }).fill('0')
+    await page.getByLabel('ribbon y', { exact: true }).fill('0')
+    await page.getByLabel('ribbon x2', { exact: true }).fill('3')
+    await page.getByLabel('ribbon y2', { exact: true }).fill('4')
+    await page.getByLabel('ribbon dx', { exact: true }).fill('1.5')
+    await page.getByLabel('ribbon dy', { exact: true }).fill('6')
+    await page.getByLabel('ribbon rotation', { exact: true }).fill('0')
+    await page.getByLabel('ribbon rotation', { exact: true }).press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(dimCountBefore + 2), { timeout: 60_000 })
+    await expect(page.getByTestId('dock-properties').locator('dd').last()).toHaveText('3')
+    await page.keyboard.press('Escape')
+
     // W4g-2 (one head), confirm-time race. LAST in the walk on purpose: a
     // refused run leaves its failed strip on the page and there is no
     // dismiss for it, and that strip sits BETWEEN the command prompt and

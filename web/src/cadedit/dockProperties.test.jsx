@@ -63,6 +63,24 @@ describe('EngineDockProperties: the slot consumer inside the provider', () => {
     expect(document.querySelector('[data-testid="dock-properties"]')).toBeNull()
   })
 
+  it('W4g-7b-04c: a selected DIMENSION shows its measurement, read-only, 3dp trimmed', () => {
+    mountSlot()
+    const dim = { id: 'd1', type: 'DIMENSION', dimtype: 'ALIGNED', aci: 256, linetype: 'ByLayer', lineweight: -1, measurement: 5 }
+    mockState.engine = { session: { selectedId: 'd1', entities: [dim] } }
+    render(<EngineDockProperties />)
+    const dl = document.querySelector('[data-testid="dock-properties"]')
+    expect([...dl.querySelectorAll('dt')].map((d) => d.textContent)).toEqual(['Color', 'Linetype', 'Lineweight', 'Measurement'])
+    expect([...dl.querySelectorAll('dd')].map((d) => d.textContent)).toEqual(['ByLayer', 'ByLayer', 'ByLayer', '5'])
+  })
+
+  it('a non-dimension selection carries no Measurement row', () => {
+    mountSlot()
+    mockState.engine = { session: { selectedId: 's1', entities: [LINE] } }
+    render(<EngineDockProperties />)
+    const dl = document.querySelector('[data-testid="dock-properties"]')
+    expect([...dl.querySelectorAll('dt')].map((d) => d.textContent)).not.toContain('Measurement')
+  })
+
   it('re-renders when the selection changes', () => {
     mountSlot()
     mockState.engine = { session: { selectedId: 's1', entities: [LINE] } }

@@ -106,9 +106,10 @@ const DRAW_OFF = Object.freeze([])
 // and the intersection verbs TRIM, EXTEND, FILLET and CHAMFER (W4g-6).
 // Nothing in the reference's Modify panel is a placeholder any more.
 // W4g-5d: the reference's other Annotation tools stay honest placeholders
-// beside the real TEXT (dimensions and leaders run through APS, W4g-7).
+// beside the real TEXT (leaders run through APS, W4g-7). W4g-7b-04c: the
+// dimensions placeholder leaves now that DIMLINEAR/DIMALIGNED are real
+// registry records (draw:dimLinear, draw:dimAligned).
 const ANNOTATION_OFF = Object.freeze([
-  { id: 'annotation:dimensions', label: 'Dimensions', icon: 'dimension', size: 'large' },
   { id: 'annotation:leader', label: 'Leader', icon: 'leader', size: 'large' },
 ])
 // W4g-7b-02c: the reference's Block panel keeps CREATE BLOCK as an honest
@@ -186,6 +187,24 @@ export const PROMPTS = Object.freeze({
     { ask: 'Enter X scale factor <1>:', fields: [['sx', 'x scale', 'decimal-default']] },
     { ask: 'Enter Y scale factor <use X scale factor>:', fields: [['sy', 'y scale', 'decimal-default']] },
     { ask: 'Specify rotation angle <0>:', fields: [['rot', 'rotation', 'decimal-default']] },
+    { ask: 'Layer:', fields: [['layer', 'layer', 'text']] },
+  ] },
+  // W4g-7b-04c: DIMLINEAR/DIMALIGNED, the reference's own prompts; ALIGNED
+  // has no rotation step (its dimension line always runs parallel to
+  // def1-def2, never a typed axis).
+  dimLinear: { verb: 'DIMLINEAR', steps: [
+    { ask: 'Specify first extension line origin:', fields: [['x', 'x'], ['y', 'y']] },
+    { ask: 'Specify second extension line origin:', fields: [['x2', 'x2'], ['y2', 'y2']] },
+    { ask: 'Specify dimension line location:', fields: [['dx', 'dx'], ['dy', 'dy']] },
+    { ask: 'Specify rotation angle <0>:', fields: [['rot', 'rotation', 'decimal-default']] },
+    { ask: 'Dimension style <Standard>:', fields: [['style', 'style', 'text']] },
+    { ask: 'Layer:', fields: [['layer', 'layer', 'text']] },
+  ] },
+  dimAligned: { verb: 'DIMALIGNED', steps: [
+    { ask: 'Specify first extension line origin:', fields: [['x', 'x'], ['y', 'y']] },
+    { ask: 'Specify second extension line origin:', fields: [['x2', 'x2'], ['y2', 'y2']] },
+    { ask: 'Specify dimension line location:', fields: [['dx', 'dx'], ['dy', 'dy']] },
+    { ask: 'Dimension style <Standard>:', fields: [['style', 'style', 'text']] },
     { ask: 'Layer:', fields: [['layer', 'layer', 'text']] },
   ] },
   createRectangle: { verb: 'RECTANG', steps: [
@@ -395,7 +414,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const { effective, expressionRefusal, failedExpression, waitingStep, pointSteps } = resolvePromptInputs(prompt, promptInputs, armed && armed.from ? armed.from : null)
   const liveRefusal = prompt && !promptReason && !waitingStep
     ? (expressionRefusal || (armedGroup === 'draw'
-      ? buildCreatePayload(armedOp, effective, session.entities.blocks)
+      ? buildCreatePayload(armedOp, effective, session.entities.blocks, session.entities.dimstyles)
       : buildEditPayload(armedOp, session.selectedId, effective, session.entities.linetypes)).refusal || '')
     : ''
   const runOff = promptOff || !!liveRefusal || !!waitingStep

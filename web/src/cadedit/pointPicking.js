@@ -15,7 +15,7 @@ const finite = (v) => typeof v === 'number' && Number.isFinite(v)
 const num = (s) => { const n = Number.parseFloat(s); return Number.isFinite(n) ? n : null }
 
 import { nearestEntity } from './intersect.js'
-import { bulgeArc } from './engineIntake.js'
+import { bulgeArc, dimensionSchematic } from './engineIntake.js'
 /** The pick sequence per op, or null for ops with nothing to pick. */
 export const PICK_SEQUENCES = Object.freeze({
   createLine: [{ kind: 'point', keys: ['x', 'y'] }, { kind: 'point', keys: ['x2', 'y2'] }],
@@ -57,6 +57,10 @@ export const PICK_SEQUENCES = Object.freeze({
   // W4g-7b-02c: INSERT picks its insertion point; the name, scale and
   // rotation are typed, read by the ghost below off the live inputs.
   createInsert: [{ kind: 'point', keys: ['x', 'y'] }],
+  // W4g-7b-04c: DIMLINEAR/DIMALIGNED pick the two definition points, then the
+  // dimension line's location; the style (and LINEAR's rotation) are typed.
+  dimLinear: [{ kind: 'point', keys: ['x', 'y'] }, { kind: 'point', keys: ['x2', 'y2'] }, { kind: 'point', keys: ['dx', 'dy'] }],
+  dimAligned: [{ kind: 'point', keys: ['x', 'y'] }, { kind: 'point', keys: ['x2', 'y2'] }, { kind: 'point', keys: ['dx', 'dy'] }],
 })
 
 /**
@@ -336,6 +340,24 @@ function insertGhost(inputs, blocks, cursorX, cursorY) {
 }
 
 /**
+ * W4g-7b-04c: the DIMLINEAR/DIMALIGNED ghost once both definition points are
+ * picked, one point: the schematic (dimensionSchematic) at the cursor's
+ * dimline, LINEAR at the typed rotation (default 0; ALIGNED ignores it),
+ * collapsed to the ONE path the rubber band can draw (def1 -> its extension
+ * line's far point -> the matching far point off def2 -> def2): the same two
+ * extension lines the finished schematic draws, joined through where its
+ * dimension line runs, so the preview traces the real geometry, not a
+ * fabricated shortcut.
+ */
+function dimensionGhost(op, def1, def2, x, y, inputs) {
+  const rotationDeg = op === 'dimLinear' ? (num(inputs?.rot) ?? 0) : 0
+  const pieces = dimensionSchematic({ dimtype: op === 'dimLinear' ? 'LINEAR' : 'ALIGNED', def1, def2, dimline: [x, y], rotationDeg })
+  if (pieces.length < 2) return null
+  const [ext1, ext2] = pieces
+  return { pts: [ext1.pts[0], ext1.pts[1], ext2.pts[1], ext2.pts[0]], closed: false }
+}
+
+/**
  * The rubber band for the cursor at world (x, y): [[x,y],...] plus closed, or
  * null. `inputs` and `blocks` (the document's block catalogue) are read only
  * by `createInsert`; every other op ignores them.
@@ -364,6 +386,12 @@ export function ghostFor(state, x, y, inputs = null, blocks = null) {
   if (op === 'createLine' || op === 'mirror') {
     if (!last || picked.length >= 2) return null
     return { pts: [last, [x, y]], closed: false }
+  }
+  if (op === 'dimLinear' || op === 'dimAligned') {
+    if (!last) return null
+    if (picked.length === 1) return { pts: [last, [x, y]], closed: false }
+    if (picked.length === 2) return dimensionGhost(op, picked[0], picked[1], x, y, inputs)
+    return null
   }
   // W4g-4b: the ellipse about the centre with the cursor as the axis
   // endpoint, at a fixed preview ratio (the typed ratio is read at run).

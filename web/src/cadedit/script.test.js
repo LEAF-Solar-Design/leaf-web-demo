@@ -30,6 +30,28 @@ describe('promptSlots', () => {
     expect(promptSlots(PROMPTS.createInsert).map((s) => [s.kind, s.keys.join(',')])).toEqual([
       ['text', 'name'], ['point', 'x,y'], ['number', 'sx'], ['number', 'sy'], ['number', 'rot'], ['text', 'layer'],
     ])
+    // W4g-7b-04c: DIMLINEAR's three points, then its own rotation, style, layer;
+    // DIMALIGNED the same without the rotation slot.
+    expect(promptSlots(PROMPTS.dimLinear).map((s) => [s.kind, s.keys.join(',')])).toEqual([
+      ['point', 'x,y'], ['point', 'x2,y2'], ['point', 'dx,dy'], ['number', 'rot'], ['text', 'style'], ['text', 'layer'],
+    ])
+    expect(promptSlots(PROMPTS.dimAligned).map((s) => [s.kind, s.keys.join(',')])).toEqual([
+      ['point', 'x,y'], ['point', 'x2,y2'], ['point', 'dx,dy'], ['text', 'style'], ['text', 'layer'],
+    ])
+  })
+})
+
+describe('W4g-7b-04c: a scripted DIMLINEAR/DIMALIGNED', () => {
+  it('dal takes three points then style/layer; dli additionally takes a rotation', () => {
+    expect(parse('dal 0,0 3,4 1.5,6').lines[0]).toMatchObject({
+      op: 'dimAligned', verb: 'DIMALIGNED', inputs: { x: '0,0', y: '', x2: '3,4', y2: '', dx: '1.5,6', dy: '' },
+    })
+    expect(parse('dli 0,0 3,4 1.5,6 0').lines[0]).toMatchObject({
+      op: 'dimLinear', verb: 'DIMLINEAR', inputs: { x: '0,0', y: '', x2: '3,4', y2: '', dx: '1.5,6', dy: '', rot: '0' },
+    })
+    expect(parse('dimlinear 0,0 3,4 1.5,6 90 Standard L1').lines[0].inputs).toEqual({
+      x: '0,0', y: '', x2: '3,4', y2: '', dx: '1.5,6', dy: '', rot: '90', style: 'Standard', layer: 'L1',
+    })
   })
 })
 

@@ -195,6 +195,8 @@ describe('honest triggers', () => {
       'draw:createEllipse', 'draw:createPoint',
       // W4g-5d: TEXT is a draw create seated in the Annotation panel.
       'draw:createText',
+      // W4g-7b-04c-2: LINEAR / ALIGNED dimensions, seated in the Annotation panel.
+      'draw:dimLinear', 'draw:dimAligned',
       // W4g-7b-02c: INSERT, seated in the Block panel.
       'draw:createInsert',
     ])

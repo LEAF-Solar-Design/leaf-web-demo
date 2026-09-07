@@ -155,6 +155,29 @@ function insertOf(entity) {
   return { kind: 'INSERT', name, ip: point, rot, scale: scale.slice(), layer, print, props }
 }
 
+// W4g-7b-04c: a created or removed LINEAR/ALIGNED DIMENSION is a real
+// mutation (the 04s add carries no measurement: the server computes it); a
+// MOVED one (or any other in-place change — none is reachable through the
+// store's own verbs, which refuse every one but delete) stays opaque, the
+// same shape insertOf gives INSERT. Any other dimtype (OTHER, or a
+// malformed record) returns null and falls through to opaqueOf, same as an
+// unlisted read-only kind.
+function dimensionOf(entity) {
+  if (!entity || entity.type !== 'DIMENSION') return null
+  const dimtype = entity.dimtype
+  if (dimtype !== 'LINEAR' && dimtype !== 'ALIGNED') return null
+  const def1 = point3(entity.def1)
+  const def2 = point3(entity.def2)
+  const dimline = point3(entity.dimline)
+  if (!def1 || !def2 || !dimline) return null
+  const rotation = dimtype === 'LINEAR' ? entity.rotationDeg : 0
+  if (!finite(rotation)) return null
+  const style = typeof entity.style === 'string' && entity.style ? entity.style : 'Standard'
+  const layer = typeof entity.layer === 'string' && entity.layer ? entity.layer : '0'
+  const print = JSON.stringify([dimtype, def1, def2, dimline, rotation, style, layer])
+  return { kind: 'DIMENSION', dimtype, def1, def2, dimline, rotation, style, layer, print }
+}
+
 // Rotation degrees the way the contract's add carries them: [0, 360), 6 dp.
 // W4g-7b-02c-e: round BEFORE wrapping, never after — wrapping a value that
 // rounds up to exactly 360 (359.9999996) first, then rounding, lands back on
@@ -178,7 +201,7 @@ function normalizedDeg(deg) {
 function indexByHandle(entities) {
   const out = new Map()
   for (const entity of Array.isArray(entities) ? entities : []) {
-    const geometry = planGeometry(entity) || insertOf(entity) || opaqueOf(entity)
+    const geometry = planGeometry(entity) || insertOf(entity) || dimensionOf(entity) || opaqueOf(entity)
     if (!geometry) continue
     const handle = hexHandle(entity.id ?? entity.handle ?? '')
     if (!handle) continue
@@ -221,6 +244,13 @@ function addedRecord(handle, g) {
   // reference must carry its properties or the route's properties note is
   // suppressed and the save lands uncoloured.
   if (g.kind === 'INSERT') return { handle, kind: 'INSERT', name: g.name, pt: g.ip, rot: normalizedDeg(g.rot), scale: g.scale, layer: g.layer, ...styleOf(g) }
+  // W4g-7b-04c: no measurement (the server computes it); rotation rides
+  // only for LINEAR (ALIGNED carries none of its own).
+  if (g.kind === 'DIMENSION') {
+    const record = { handle, kind: 'DIMENSION', dimtype: g.dimtype, def1: g.def1, def2: g.def2, dimline: g.dimline, style: g.style, layer: g.layer }
+    if (g.dimtype === 'LINEAR') record.rotation = normalizedDeg(g.rotation)
+    return record
+  }
   return { handle, layer: g.layer, closed: g.closed, pts: g.pts, ...styleOf(g) }
 }
 
@@ -284,6 +314,13 @@ export function diffPlan(committed, current) {
     if (was.kind === 'INSERT') {
       if (was.print === now.print) continue
       return cannot(`entity ${handle} is a INSERT the plan cannot carry, and it changed`)
+    }
+    // W4g-7b-04c: a DIMENSION stays opaque for any in-place change, same as
+    // INSERT — no verb the store exposes touches one but delete, so this is
+    // a defensive refusal (a raw operation), never a silent drop.
+    if (was.kind === 'DIMENSION') {
+      if (was.print === now.print) continue
+      return cannot(`entity ${handle} is a DIMENSION the plan cannot carry, and it changed`)
     }
     if (was.layer !== now.layer) setLayer.push({ handle, layer: now.layer })
     // W4g-7b-03c: colour, linetype and lineweight lower independently of

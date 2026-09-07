@@ -24,9 +24,26 @@ export const POINT_MARK_FRACTION = 0.005
 export const ELLIPSE_SEGMENTS = 64
 export const BLOCK_CHILD_CAP = 60
 export const MAX_ARRAY_CELLS = 1000
+// W4g-7b-04c: a LINEAR/ALIGNED dimension's schematic. DIM_EXT_PAST is the
+// fixed-units choice from the spec's two options (a fixed span reads the
+// same at any drawing scale, unlike a magnitude-order guess); the tick and
+// text sizes are the same order as TEXT_ADVANCE's own convention.
+export const DIM_EXT_PAST = 2
+export const DIM_TICK_HALF = 0.15
+export const DIM_TEXT_HEIGHT = 0.5
+export const DIM_TEXT_GAP = 0.3
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v)
 const point = (v) => (Array.isArray(v) && finite(v[0]) && finite(v[1]) ? [v[0], v[1], finite(v[2]) ? v[2] : 0] : null)
+// The same nanometre-grid clean rule as intersect.js's `clean`: the
+// dimension schematic's trig (unit vectors, projections) leaves 1e-16
+// noise on numbers a hand-derived row expects exact (1.4999999999999996
+// for 1.5), and the engine writes what it is given.
+const cleanCoord = (v) => {
+  const r = Math.round(v * 1e9) / 1e9
+  return Object.is(r, -0) ? 0 : r
+}
+const cleanPoint = (p) => [cleanCoord(p[0]), cleanCoord(p[1]), cleanCoord(p[2])]
 
 const DECIMAL_ID = /^\d{1,20}$/
 
@@ -115,6 +132,97 @@ export function bulgePoints(a, b, bulge, z) {
     out.push([cx + r * Math.cos(t), cy + r * Math.sin(t), z])
   }
   return out
+}
+
+/** A measurement to 3 decimals with trailing zeros trimmed ("3", "4.125", never "3.000"). */
+export function formatMeasurement(n) {
+  if (!finite(n)) return ''
+  return Number(n.toFixed(3)).toString()
+}
+
+/**
+ * W4g-7b-04c: a LINEAR or ALIGNED DIMENSION's SCHEMATIC, drawn from the
+ * projection alone (`def1`, `def2`, `dimline`, `rotationDeg`, `measurement`):
+ * two extension lines from each definition point to the dimension line and
+ * DIM_EXT_PAST past it, the dimension line itself between the two feet, a
+ * 45-degree tick mark at each foot (honest until the viewer draws
+ * arrowhead glyphs, the same idiom as the 5d TEXT outline box), and the
+ * measurement as an axis-aligned TEXT outline box centred (in X) and
+ * DIM_TEXT_GAP above the dimension line's midpoint. LINEAR's dimension
+ * line runs along the rotation axis through the dimline point; ALIGNED's
+ * runs parallel to def1-def2 through it. `dimline` is used only as A point
+ * ON that line (never as an offset itself), so a raw click and the
+ * server's canonical projection of it draw the identical line. Returns []
+ * for a malformed record (never throws): the caller skips it like any
+ * other undrawable entity.
+ */
+export function dimensionSchematic(entity) {
+  const def1 = point(entity?.def1)
+  const def2 = point(entity?.def2)
+  const dimline = point(entity?.dimline)
+  if (!def1 || !def2 || !dimline) return []
+  let u
+  if (entity.dimtype === 'ALIGNED') {
+    const dx = def2[0] - def1[0]
+    const dy = def2[1] - def1[1]
+    const len = Math.hypot(dx, dy)
+    if (len <= 1e-9) return []
+    u = [dx / len, dy / len]
+  } else {
+    const rad = (finite(entity.rotationDeg) ? entity.rotationDeg : 0) * (Math.PI / 180)
+    u = [Math.cos(rad), Math.sin(rad)]
+    // W4g-7b-04c-3 F3a: a rotation perpendicular to def1-def2 projects both
+    // definition points onto the same foot (measurement 0); draw nothing
+    // rather than a zero-length dimension line under a "0" box. The store
+    // and the crate both refuse creating this; a loaded document can still
+    // carry one.
+    const projection = (def2[0] - def1[0]) * u[0] + (def2[1] - def1[1]) * u[1]
+    if (Math.abs(projection) < 1e-9) return []
+  }
+  const n = [-u[1], u[0]]
+  // The foot where an extension line perpendicular to u meets the
+  // dimension-line-through-`dimline`: the projection of `def` onto the
+  // u-direction offset from `dimline`, added back to `dimline`.
+  const foot = (def) => {
+    const t = (def[0] - dimline[0]) * u[0] + (def[1] - dimline[1]) * u[1]
+    return [dimline[0] + t * u[0], dimline[1] + t * u[1], dimline[2]]
+  }
+  const foot1 = foot(def1)
+  const foot2 = foot(def2)
+  const extDir = (def, ft) => {
+    const dx = ft[0] - def[0]
+    const dy = ft[1] - def[1]
+    const len = Math.hypot(dx, dy)
+    return len > 1e-9 ? [dx / len, dy / len] : n
+  }
+  const dir1 = extDir(def1, foot1)
+  const dir2 = extDir(def2, foot2)
+  const past = (ft, dir) => [ft[0] + dir[0] * DIM_EXT_PAST, ft[1] + dir[1] * DIM_EXT_PAST, ft[2]]
+  const handle = hexHandle(entity.id ?? entity.handle ?? '')
+  const layer = typeof entity.layer === 'string' && entity.layer ? entity.layer : '0'
+  const tickDir = [(u[0] + n[0]) / Math.SQRT2, (u[1] + n[1]) / Math.SQRT2]
+  const tick = (ft) => ({ handle, layer, closed: false, pts: [
+    [ft[0] - tickDir[0] * DIM_TICK_HALF, ft[1] - tickDir[1] * DIM_TICK_HALF, ft[2]],
+    [ft[0] + tickDir[0] * DIM_TICK_HALF, ft[1] + tickDir[1] * DIM_TICK_HALF, ft[2]],
+  ] })
+  const mid = [(foot1[0] + foot2[0]) / 2, (foot1[1] + foot2[1]) / 2, foot1[2]]
+  const label = formatMeasurement(entity.measurement)
+  const chars = Math.max(label.length, 1)
+  const w = TEXT_ADVANCE * DIM_TEXT_HEIGHT * chars
+  const bl = [mid[0] - w / 2, mid[1] + DIM_TEXT_GAP, mid[2]]
+  const textBox = { handle, layer, closed: true, pts: [
+    [bl[0], bl[1], bl[2]], [bl[0] + w, bl[1], bl[2]], [bl[0] + w, bl[1] + DIM_TEXT_HEIGHT, bl[2]], [bl[0], bl[1] + DIM_TEXT_HEIGHT, bl[2]],
+  ] }
+  const tick1 = tick(foot1)
+  const tick2 = tick(foot2)
+  return [
+    { handle, layer, closed: false, pts: [def1, past(foot1, dir1)].map(cleanPoint) },
+    { handle, layer, closed: false, pts: [def2, past(foot2, dir2)].map(cleanPoint) },
+    { handle, layer, closed: false, pts: [foot1, foot2].map(cleanPoint) },
+    { ...tick1, pts: tick1.pts.map(cleanPoint) },
+    { ...tick2, pts: tick2.pts.map(cleanPoint) },
+    { ...textBox, pts: textBox.pts.map(cleanPoint) },
+  ]
 }
 
 /**
@@ -294,6 +402,19 @@ export function engineIntake(entities, documentId = '', catalogue = entities?.bl
       const pt = point(entity.ip)
       if (pt) inserts.push({ handle: hexHandle(entity.id ?? entity.handle ?? ''), name: entity.name, layer: entity.layer || '0', pt,
         rot: entity.rotationDeg, scale: entity.scale, incomplete: !expanded.complete })
+      continue
+    }
+    // W4g-7b-04c: only LINEAR/ALIGNED draw (a schematic); OTHER dimtypes
+    // (RADIUS etc.) are visible-by-handle-only projections and draw nothing,
+    // per the case table.
+    if (entity?.type === 'DIMENSION') {
+      if (entity.dimtype === 'LINEAR' || entity.dimtype === 'ALIGNED') {
+        for (const pl of dimensionSchematic(entity)) {
+          if (points + pl.pts.length > MAX_POINTS) { truncated += 1; continue }
+          points += pl.pts.length
+          polylines.push(pl)
+        }
+      }
       continue
     }
     const pl = entityToPolyline(entity, markSize)

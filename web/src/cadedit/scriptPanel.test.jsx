@@ -273,6 +273,24 @@ describe('W4g-7a the script runner', () => {
     expect(status().textContent).toBe('Running line 1: TRIM (1 of 1)...')
     expect(context.inputs.etol).toBe('0.2')
   })
+
+  // W4g-7b-04c-3 F1: the script runner dispatches the seat op the same way
+  // the ribbon's run() does, so DAL's three points post createDimension, the
+  // internal op the worker actually knows, never 'dimAligned' on the wire.
+  it('a scripted DAL dispatches the seat op straight through to createDimension', async () => {
+    mount()
+    await openAndLoad([H])
+    workers[0].emit({
+      type: 'documentLoaded', documentId: 'one.dxf', entities: [H], entityCount: 1, unsupported: [], dimstyles: ['Standard'],
+    })
+    setScript('dal 0,0 3,4 1.5,6')
+    fireEvent.click(runButton())
+    expect(posts()).toHaveLength(1)
+    expect(posts()[0]).toEqual({
+      type: 'applyEdit', op: 'createDimension',
+      payload: { dimtype: 'ALIGNED', x1: 0, y1: 0, x2: 3, y2: 4, dx: 1.5, dy: 6, rotationDeg: 0, style: 'Standard', layer: '' },
+    })
+  })
 })
 
 describe('W4g-7b-03c-g F1: the typed LT word validates against the LOADED linetype catalogue', () => {

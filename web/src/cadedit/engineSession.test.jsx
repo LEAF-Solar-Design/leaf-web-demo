@@ -28,6 +28,7 @@ import useEngineSession, {
   MAX_CREATE_POINTS,
   MAX_DOCUMENT_BYTES,
   SESSION_ERROR,
+  WORKER_OP,
   admissibleBlockName,
   buildCreatePayload,
   buildEditPayload,
@@ -949,7 +950,9 @@ describe('draw dispatch (W4d Draw group): creation needs no selection, and the s
   it('the create op list is the closed set the worker dispatches on', () => {
     // W4g-4: RECTANG is a create the STORE lowers to createPolyline before the post.
     // W4g-5d: TEXT is a create the worker dispatches straight to createText.
-    expect([...CREATE_OPS]).toEqual(['createLine', 'createCircle', 'createArc', 'createPolyline', 'createRectangle', 'createText', 'createPoint', 'createEllipse', 'createInsert'])
+    // W4g-7b-04c-3: dimLinear / dimAligned are the seat ops for DIMLINEAR/DIMALIGNED.
+    expect([...CREATE_OPS]).toEqual(['createLine', 'createCircle', 'createArc', 'createPolyline', 'createRectangle', 'createText', 'createPoint', 'createEllipse', 'createInsert', 'createDimension', 'dimLinear', 'dimAligned'])
+    expect(WORKER_OP).toEqual({ createRectangle: 'createPolyline', dimLinear: 'createDimension', dimAligned: 'createDimension' })
   })
 })
 

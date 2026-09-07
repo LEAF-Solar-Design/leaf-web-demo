@@ -512,6 +512,11 @@ const ACTION_LIST = [
   // W4g-5d: single-line TEXT. A create (group draw) seated in the reference's
   // Annotation panel.
   engineOp('draw', 'createText', 'text', 'Text', 'text', 'Place a line of text at x,y with a height and rotation', 'large', 'annotation'),
+  // W4g-7b-04c: DIMLINEAR and DIMALIGNED, seated beside Text in Annotation
+  // (the reference's own Dimensions dropdown, as two large tools here);
+  // the annotation:dimensions placeholder leaves now these are real.
+  engineOp('draw', 'dimLinear', 'dim-linear', 'Linear Dimension', 'dim-linear', 'Draw a linear dimension between two points, offset to a dimension line', 'large', 'annotation'),
+  engineOp('draw', 'dimAligned', 'dim-aligned', 'Aligned Dimension', 'dim-aligned', 'Draw a dimension aligned to the two points it measures, offset to a dimension line', 'large', 'annotation'),
   // W4g-7b-02c: INSERT of an existing block definition, seated in the
   // reference's Block panel the way TEXT sits in Annotation.
   engineOp('draw', 'createInsert', 'insert block', 'Insert Block', 'block-insert', 'Insert an existing block definition at a point with scale and rotation', 'large', 'block'),
