@@ -71,6 +71,126 @@ def test_replacement_canonicalizes_existing_removal_spelling():
     assert mutation_plan.validate_mutations(head, canonical) == canonical
 
 
+def test_pre_group_validator_unknown_field_guard(monkeypatch):
+    # Main's pre-group field set stops here. The validation rows above
+    # exercise their stated rules only after this capability guard admits v3.
+    monkeypatch.setattr(mutation_plan, "_MUTATION_FIELDS",
+                        mutation_plan._MUTATION_FIELDS - {"added_groups", "removed_groups"})
+    with pytest.raises(ValueError, match="unknown mutation fields: added_groups"):
+        mutation_plan.validate_mutations(base(), {"added_groups": [group()]})
+
+
+@pytest.mark.parametrize("name", ["RACK;A", "A/B", "A" * 256, chr(92), *'<>":?*|,=`'])
+def test_dictionary_name_refused_by_validator_mock_and_dxf(name):
+    head = base()
+    plan = {"added_groups": [group(name)]}
+    with pytest.raises(ValueError, match="group name"):
+        mutation_plan.validate_mutations(head, plan)
+    with pytest.raises(ValueError, match="group name"):
+        write_loop.apply_mutations(head, plan)
+    head["groups"] = [group(name)]
+    with pytest.raises(intake_dxf.IntakeDxfError, match="safe unique names"):
+        intake_dxf.intake_to_dxf(head)
+
+
+def test_dictionary_name_with_space_is_accepted():
+    result = write_loop.apply_mutations(base(), {"added_groups": [group("Rack A")]})
+    parsed = dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf(result))
+    assert parsed["groups"][0]["name"] == "RACK A"
+
+
+def test_dxf_skipped_blank_text_does_not_shift_group_handles():
+    head = base()
+    head["texts"] = [{"handle": "20", "kind": "TEXT", "layer": "0",
+                      "pt": [0, 0], "text": "  "}]
+    head["circles"].append(dict(head["circles"][0], handle="12"))
+    head["groups"] = [group()]
+    parsed = dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf(head))
+    assert parsed["groups"][0]["members"] == ["10", "11"]
+    head["groups"] = [group(members=["10", "20"])]
+    with pytest.raises(intake_dxf.IntakeDxfError, match="20.*emitted entity"):
+        intake_dxf.intake_to_dxf(head)
+
+
+def test_dxf_paper_space_round_trip_refuses_mixed_space_group():
+    data = ("0\nSECTION\n2\nENTITIES\n"
+            "0\nLINE\n5\n10\n8\n0\n67\n1\n410\nLayout1\n"
+            "10\n0\n20\n0\n11\n3\n21\n0\n"
+            "0\nLINE\n5\n11\n8\n0\n10\n4\n20\n0\n11\n7\n21\n0\n"
+            "0\nENDSEC\n0\nEOF\n").encode()
+    parsed = dxf_intake.parse_dxf_bytes(data)
+    assert parsed["polylines"][0]["space"] == "paper"
+    assert parsed["polylines"][0]["layout"] == "Layout1"
+    assert "space" not in parsed["polylines"][1]
+    assert "layout" not in parsed["polylines"][1]
+    emitted = intake_dxf.intake_to_dxf(parsed)
+    assert b"67\n1\n410\nLayout1\n" in emitted
+    reopened = dxf_intake.parse_dxf_bytes(emitted)
+    assert reopened["polylines"] == parsed["polylines"]
+    for head in (parsed, reopened):
+        with pytest.raises(ValueError, match="model-space"):
+            mutation_plan.validate_mutations(head, {"added_groups": [group()]})
+
+
+def test_uncovered_baseline_accepts_unnamed_group_but_checks_named_group():
+    head = base()
+    canonical = mutation_plan.validate_mutations(head, {
+        "set_circle": [{"handle": "11", "c": [4, 2], "r": 2}]})
+    inspection = intake_parse.parse_text("GRC|1\nGR|30|RACK|31|0|1|10;11\n", "test")
+    # Keep the geometry from the mutation; the inspection fixture supplies
+    # group coverage and records only.
+    actual = write_loop.apply_mutations(head, canonical) | {
+        "groups": inspection["groups"], "created": inspection["created"]}
+    write_loop.verify_live_mutation_effects(head, actual, canonical)
+    canonical = mutation_plan.validate_mutations(head, {"added_groups": [group("NEW")]})
+    actual = write_loop.apply_mutations(head, canonical)
+    actual["groups"].append(group())
+    write_loop.verify_live_mutation_effects(head, actual, canonical)
+    actual["groups"][0]["members"] = ["10"]
+    with pytest.raises(ValueError, match="member sets"):
+        write_loop.verify_live_mutation_effects(head, actual, canonical)
+
+
+def test_untouched_groups_require_coverage_on_both_sides():
+    head = base()
+    head["groups"] = [group()]
+    actual = base()
+    write_loop.verify_live_mutation_effects(head, actual, {})
+    actual["groups"] = []
+    with pytest.raises(ValueError, match="member sets"):
+        write_loop.verify_live_mutation_effects(head, actual, {})
+
+
+def test_group_records_without_marker_do_not_claim_coverage():
+    parsed = intake_parse.parse_text("GR|30|RACK|31|0|1|10;11\nCA|0|20\n", "test")
+    assert "groups" not in parsed and "created" not in parsed
+
+
+def test_named_removal_still_checked_without_baseline_coverage():
+    head = base()
+    canonical = {"removed_groups": ["RACK"]}
+    actual = base()
+    actual["groups"] = [group()]
+    with pytest.raises(ValueError, match="member sets"):
+        write_loop._verify_group_effects(head, actual, canonical)
+    actual["groups"] = [group("OTHER")]
+    write_loop._verify_group_effects(head, actual, canonical)
+    actual.pop("groups")
+    with pytest.raises(ValueError, match="coverage"):
+        write_loop._verify_group_effects(head, actual, canonical)
+
+
+def test_dictionary_name_lisp_preflight_mirrors_server_rule():
+    script = mutation_apply.activity_spec(3)["settings"]["script"]["value"]
+    predicate = next(line for line in script.splitlines()
+                     if line.startswith("(defun leaf-group-name-p"))
+    assert "(<= (strlen s) 255)" in predicate
+    assert "(member c (list 60 62 47 92 34 58 59 63 42 124 44 61 96))" in predicate
+    add = next(line for line in script.splitlines()
+               if line.startswith("(defun leaf-addgroup-op"))
+    assert "(leaf-group-name-p name)" in add
+
+
 def test_group_capability_is_additive_and_empty_lists_stay_v2():
     assert mutation_plan.uses_v3({"added_groups": [group()]})
     assert mutation_plan.uses_v3({"removed_groups": ["RACK"]})
@@ -110,8 +230,10 @@ def test_mock_group_move_ungroup_and_membership_repair():
     singleton = write_loop.apply_mutations(grouped, {"removed": ["10"]})
     assert singleton["groups"][0]["members"] == ["11"]
     empty = write_loop.apply_mutations(singleton, {"removed": ["11"]})
-    assert empty["groups"] == []
+    assert empty["groups"][0]["name"] == "RACK"
+    assert empty["groups"][0]["members"] == []
     assert empty["polylines"] == empty["circles"] == []
+    write_loop.verify_live_mutation_effects(singleton, empty, {"removed": ["11"]})
 
 
 def test_mock_resolves_canonical_add_ordinal_to_allocated_handle():
@@ -176,7 +298,7 @@ def test_untouched_group_and_v2_intake_still_verify():
 
 def test_inspection_records_and_malformed_group(tmp_path):
     path = tmp_path / "intake.txt"
-    path.write_text("GR|30|R%25ACK|31|0|1|10;11\nGM|10|30\nCA|1|21\n")
+    path.write_text("GRC|1\nGR|30|R%25ACK|31|0|1|10;11\nGM|10|30\nCA|1|21\n")
     actual = intake_parse.parse(path, "test")
     assert actual["groups"] == [{"handle": "30", "name": "R%ACK", "owner": "31",
                                  "flags": 0, "selectable": 1, "members": ["10", "11"]}]
@@ -186,6 +308,10 @@ def test_inspection_records_and_malformed_group(tmp_path):
     assert intake_parse.parse(path, "test")["parseErrors"][0].startswith("GR:")
     path.write_text("")
     for empty in (intake_parse.parse(path, "test"), intake_parse.parse_text("", "test")):
+        assert "groups" not in empty
+        assert "created" not in empty
+    path.write_text("GRC|1\n")
+    for empty in (intake_parse.parse(path, "test"), intake_parse.parse_text("GRC|1\n", "test")):
         assert empty["groups"] == []
         assert empty["created"] == []
 
@@ -194,6 +320,7 @@ def test_contracts_share_group_inspection_and_v3_writes_receipt():
     v2 = mutation_apply.activity_spec(2)["settings"]
     v3 = mutation_apply.activity_spec(3)["settings"]
     assert v2["inspectScript"] == v3["inspectScript"]
+    assert '(write-line "GRC|1" f)' in v3["inspectScript"]["value"]
     assert '"GR|"' in v3["inspectScript"]["value"]
     assert '"ACAD_GROUP"' in v3["inspectScript"]["value"]
     assert "created-handles.txt" in v3["script"]["value"]

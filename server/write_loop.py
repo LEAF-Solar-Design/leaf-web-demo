@@ -980,8 +980,7 @@ def apply_mutations(intake: Dict[str, Any], mutations: Dict[str, Any]) -> Dict[s
             group["name"] = group["name"].upper()
             group["members"] = [h for h in group["members"]
                                 if h.upper() not in {v.upper() for v in removed}]
-            if group["members"]:
-                groups.append(group)
+            groups.append(group)
         for group in mutations.get("added_groups", []):
             groups.append({"name": group["name"].upper(), "flags": 0, "selectable": 1,
                            "members": [m if isinstance(m, str) else added[m["add"]]["handle"]
@@ -1908,10 +1907,13 @@ def verify_live_mutation_effects(
 
 
 def _verify_group_effects(base, actual, canonical):
-    if not ("groups" in base or canonical.get("added_groups") or canonical.get("removed_groups")):
+    covered = "groups" in base and "groups" in actual
+    if (canonical.get("added_groups") or canonical.get("removed_groups")) and "groups" not in actual:
+        raise ValueError("group names or exact member sets lack inspection coverage")
+    if not (covered or canonical.get("added_groups") or canonical.get("removed_groups")):
         return
     removed = {h.upper() for h in canonical.get("removed", [])}
-    if any(str(error).startswith(("GR:", "GM:", "CA:"))
+    if any(str(error).startswith(("GRC:", "GR:", "GM:", "CA:"))
            for error in actual.get("parseErrors", [])):
         raise ValueError("malformed group inspection or created handoff")
     fields = ("polylines", "circles", "arcs", "texts", "inserts", "dimensions", "points", "ellipses")
@@ -1921,8 +1923,8 @@ def _verify_group_effects(base, actual, canonical):
                     for field in fields for e in base.get(field, [])}
     removed_names = {n.casefold() for n in canonical.get("removed_groups", [])}
     expected = {g["name"].casefold(): {h.upper() for h in g["members"]} - removed
-                for g in base.get("groups", []) if g["name"].casefold() not in removed_names}
-    expected = {n: members for n, members in expected.items() if members}
+                for g in (base.get("groups", []) if covered else [])
+                if g["name"].casefold() not in removed_names}
     expected_names = {g["name"].casefold(): g["name"].upper() for g in base.get("groups", [])
                       if g["name"].casefold() in expected}
     created = {}
@@ -1958,8 +1960,11 @@ def _verify_group_effects(base, actual, canonical):
         observed[name] = {h.upper() for h in group["members"]}
         if name in added_names and not observed[name] <= actual_handles:
             raise ValueError("group contains a dangling member handle")
-        if observed[name] & removed:
+        if (covered or name in added_names) and observed[name] & removed:
             raise ValueError("removed entity remains a group member")
+    if not covered:
+        observed = {n: members for n, members in observed.items()
+                    if n in added_names or n in removed_names}
     if expected != observed:
         raise ValueError("group names or exact member sets differ in output")
 

@@ -35,7 +35,7 @@ def parse(families_txt, dwg):
     """Parse a families text FILE PATH into Intake JSON (§1)."""
     out = {"dwg": dwg, "layers": [], "polylines": [], "inserts": [],
            "faces3d": [], "blockdefs": {}, "geodata": [], "images": [],
-           "imageNames": [], "groups": [], "created": []}
+           "imageNames": []}
     cur_bd = None
     cur_pl = None
 
@@ -58,7 +58,7 @@ def parse_text(families_text, dwg):
     """
     out = {"dwg": dwg, "layers": [], "polylines": [], "inserts": [],
            "faces3d": [], "blockdefs": {}, "geodata": [], "images": [],
-           "imageNames": [], "groups": [], "created": []}
+           "imageNames": []}
     cur_bd = None
     cur_pl = None
 
@@ -213,6 +213,11 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                     "layer": layn, "c": [round(v, 3) for v in w], "r": round(float(r), 3),
                     "start_deg": round(float(a1), 6), "end_deg": round(float(a2), 6),
                     "nrm": [round(v, 6) for v in n], "handle": hnd})
+            elif tag == "GRC":
+                if rest != "1":
+                    raise ValueError("malformed group coverage")
+                out.setdefault("groups", [])
+                out.setdefault("created", [])
             elif tag == "GR":
                 handle, name, owner, flags, selectable, raw_members = rest.split("|")
                 members = raw_members.split(";") if raw_members else []
@@ -349,6 +354,9 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                 out["imageNames"].append(rest)
         except Exception as e:
             out.setdefault("parseErrors", []).append(f"{tag}: {e}")
+    if not any(line.strip() == "GRC|1" for line in lines):
+        out.pop("groups", None)
+        out.pop("created", None)
     close()
     for block in out.get("blocks", {}).values():
         if block["count"] <= 60 and len(block["children"]) < block["count"]:

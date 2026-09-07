@@ -730,7 +730,7 @@ def validate_mutations(
     if added_groups_raw or removed_groups_raw:
         def group_name(value):
             if (not isinstance(value, str) or not 1 <= len(value) <= 255
-                    or value.startswith("*") or "|" in value
+                    or any(c in '<>/\\\\":;?*|,=`' for c in value)
                     or any(not 0x20 <= ord(c) <= 0x7E for c in value)):
                 raise ValueError("group name must be safe printable ASCII, 1..255 characters")
             return value.upper()
