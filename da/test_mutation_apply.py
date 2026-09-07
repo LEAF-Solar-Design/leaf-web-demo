@@ -430,12 +430,13 @@ def test_v3_activity_adds_insert_and_preserves_v2_apply_script():
     setlinetype_line = next(
         line for line in script_v3.splitlines() if line.startswith("(defun leaf-apply-setlinetype"))
     assert 'tblsearch "LTYPE"' in setlinetype_line
+    # Both contracts share GROUP traversal and the CA handoff inspection.
+    assert '"GR|"' in v3["settings"]["inspectScript"]["value"]
     assert v3["settings"]["inspectScript"] == v2_settings["inspectScript"]
     assert '(rtos (cond (rot rot)(T 0.0)) 2 5)' in v3["settings"]["inspectScript"]["value"]
     assert '(rtos (cond (rot rot)(T 0.0)) 2 6)' not in v3["settings"]["inspectScript"]["value"]
     v3["id"] = v2["id"]
     v3["settings"]["script"]["value"] = script_v2
-    v3["settings"]["inspectScript"] = v2_settings["inspectScript"]
     assert v3 == v2
     assert subject.MUTATION_INSPECT_BLOCKS_V3 == MUTATION_INSPECT_BLOCKS
 

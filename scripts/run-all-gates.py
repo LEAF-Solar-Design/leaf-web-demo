@@ -697,6 +697,8 @@ def build_suites() -> List[Suite]:
         # counts that execute WITHOUT it.
         Suite("server-w4g7b-00s", "server tests/test_w4g7b_00s.py", "pytest", SERVER,
               _py_pytest("tests/test_w4g7b_00s.py"), 32),
+        Suite("server-w4g7c-01s", "server tests/test_w4g7c_01s.py", "pytest", SERVER,
+              _py_pytest("tests/test_w4g7c_01s.py"), 19),
         Suite("server-w4g7b-01s", "server tests/test_w4g7b_01s.py", "pytest", SERVER,
               _py_pytest("tests/test_w4g7b_01s.py"), 49),
         Suite("server-w4g7b-02s", "server tests/test_w4g7b_02s.py", "pytest", SERVER,

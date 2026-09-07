@@ -241,6 +241,38 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
     note = write_loop.verify_live_mutation_effects(base, actual, canonical)
     assert note is None
 
+    # GROUP uses an existing LINE and ordinal zero of this new plan.
+    group_plan = validate_mutations(actual, {
+        "added": [{"handle": "group-circle", "kind": "CIRCLE", "layer": "0",
+                   "c": [4, 2, 0], "r": 1}],
+        "added_groups": [{"name": "CanaryRack", "members": [new_lines[0]["handle"], {"add": 0}]}],
+    })
+    group_host = tmp_path / "group-host.dwg"
+    shutil.copyfile(output, group_host)
+    output.unlink()
+    (tmp_path / "mutation-plan.txt").write_bytes(emit_plan(
+        group_plan, base_sha256=hashlib.sha256(group_host.read_bytes()).hexdigest()))
+    _console(tmp_path, group_host, "group.scr", settings["script"]["value"])
+    _console(tmp_path, output, "group-inspect.scr", inspect)
+    grouped = intake_parse.parse(families, "canary")
+    assert not grouped.get("parseErrors"), grouped.get("parseErrors")
+    rack, = [g for g in grouped["groups"] if g["name"] == "CANARYRACK"]
+    circle_handle = next(r["handle"] for r in grouped["created"] if r["ordinal"] == 0)
+    assert set(rack["members"]) == {new_lines[0]["handle"], circle_handle}
+    write_loop.verify_live_mutation_effects(actual, grouped, group_plan)
+
+    ungroup_plan = validate_mutations(grouped, {"removed_groups": ["CanaryRack"]})
+    shutil.copyfile(output, group_host)
+    output.unlink()
+    (tmp_path / "mutation-plan.txt").write_bytes(emit_plan(
+        ungroup_plan, base_sha256=hashlib.sha256(group_host.read_bytes()).hexdigest()))
+    _console(tmp_path, group_host, "ungroup.scr", settings["script"]["value"])
+    _console(tmp_path, output, "ungroup-inspect.scr", inspect)
+    ungrouped = intake_parse.parse(families, "canary")
+    assert not ungrouped.get("parseErrors"), ungrouped.get("parseErrors")
+    assert not any(g["name"] == "CANARYRACK" for g in ungrouped.get("groups", []))
+    write_loop.verify_live_mutation_effects(grouped, ungrouped, ungroup_plan)
+
 
 # --- (3) skip-visibility row: a "skipped local engine suite is no proof" guard
 

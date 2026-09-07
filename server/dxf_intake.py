@@ -93,6 +93,7 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
     # set_lineweight target's actual DXF groups the same way either source.
     properties: Dict[str, Any] = {}
     insert_properties: Dict[str, Any] = {}
+    objects = {}
 
     i = 0
     n = len(pairs)
@@ -108,6 +109,16 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
         if code == 0 and value == "ENDSEC":
             section = None
             i += 1
+            continue
+        if section == "OBJECTS" and code == 0:
+            j = i + 1
+            while j < n and pairs[j][0] != 0:
+                j += 1
+            record = pairs[i + 1:j]
+            handle = next((v.upper() for c, v in record if c == 5), None)
+            if handle:
+                objects[handle] = (value.upper(), record)
+            i = j
             continue
         if section == "TABLES" and code == 0 and value == "LAYER":
             # the next code-2 before the next code-0 names the layer
@@ -217,6 +228,34 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             if entity.get("handle") in insert_properties:
                 properties[entity["handle"]] = insert_properties[entity["handle"]]
     out: Dict[str, Any] = {"dwg": source_name, "layers": layers, "polylines": polylines}
+    def dictionary_entries(record):
+        key = None
+        for code, value in record:
+            if code == 3:
+                key = value
+            elif code in (350, 360) and key is not None:
+                yield key, value.upper()
+                key = None
+
+    for kind, record in objects.values():
+        if kind != "DICTIONARY" or next((v for c, v in record if c == 330), "0") != "0":
+            continue
+        for key, dictionary in dictionary_entries(record):
+            if key.upper() != "ACAD_GROUP":
+                continue
+            group_kind, group_dictionary = objects.get(dictionary, (None, []))
+            if group_kind != "DICTIONARY":
+                raise DxfParseError("ACAD_GROUP must reference a DICTIONARY")
+            out["groups"] = []
+            for name, handle in dictionary_entries(group_dictionary):
+                group_kind, group = objects.get(handle, (None, []))
+                if group_kind != "GROUP":
+                    raise DxfParseError("ACAD_GROUP entry must reference a GROUP")
+                out["groups"].append({
+                    "handle": handle, "name": name, "owner": dictionary,
+                    "flags": int(next((v for c, v in group if c == 70), "0")),
+                    "selectable": int(next((v for c, v in group if c == 71), "1")),
+                    "members": [v.upper() for c, v in group if c == 340]})
     if properties:
         out["properties"] = properties
     if dropped_count[0]:

@@ -1077,7 +1077,7 @@ def save_plan_version(drawing_id: str,
     names_an_op = any(
         isinstance(mutations.get(field), list) and mutations.get(field)
         for field in ("added", "removed", "transforms", "set_layer", "set_points",
-                      "set_circle", "set_arc", *mutation_plan.V3_SET_OPS)
+                      "set_circle", "set_arc", "added_groups", "removed_groups", *mutation_plan.V3_SET_OPS)
     )
 
     received = _receive_edited_dxf(file, source_digest)
@@ -1229,6 +1229,12 @@ def save_plan_version(drawing_id: str,
                 if not write_loop.unchanged_property_effect_ok(
                         base_properties.get(handle), upload_properties.get(handle)):
                     raise ValueError(f"unchanged entity {handle!r} properties differ from the head")
+            if canonical.get("added_groups"):
+                # Uploaded DXF retains the submitted entity handles. Native
+                # output instead supplies CA records from the apply process.
+                quantized_upload["created"] = [
+                    {"ordinal": i, "handle": entity["handle"]}
+                    for i, entity in enumerate(canonical.get("added", []))]
             properties_note = write_loop.verify_live_mutation_effects(
                 expected_base, quantized_upload, canonical)
             if properties_note and (styled_handles or any(

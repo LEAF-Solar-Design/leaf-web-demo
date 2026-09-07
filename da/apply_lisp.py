@@ -116,6 +116,18 @@ _PROPERTY_LISP_LINES = (
 )
 
 
+_GROUP_LISP_LINES = (
+    '(progn (setq leaf-ca (open "created-handles.txt" "w")) (if leaf-ca (close leaf-ca)))',
+    '(defun leaf-group-name-p (s / i ok c) (setq i 1 ok (and (> (strlen s) 0) (<= (strlen s) 255) (/= (substr s 1 1) "*"))) (while (and ok (<= i (strlen s))) (setq c (ascii (substr s i 1))) (if (or (< c 32) (> c 126) (= c 124)) (setq ok nil)) (setq i (1+ i))) ok)',
+    '(defun leaf-group-op (v / members ok m) (if (and (member (car v) (list "ADDGROUP" "REMOVEGROUP")) (leaf-group-name-p (nth 1 v))) (if (= (car v) "REMOVEGROUP") (if (= (length v) 2) v) (if (= (length v) 3) (progn (setq members (leaf-split (nth 2 v) ";") ok (>= (length members) 2)) (foreach m members (if (not (leaf-target-p m)) (setq ok nil))) (if ok (list "ADDGROUP" (nth 1 v) members)))))))',
+    '(defun leaf-group-dictionary (create / found e) (setq found (dictsearch (namedobjdict) "ACAD_GROUP")) (if found (cdr (assoc -1 found)) (if create (progn (setq e (entmakex (list (cons 0 "DICTIONARY") (cons 100 "AcDbDictionary") (cons 281 1)))) (if e (dictadd (namedobjdict) "ACAD_GROUP" e))))))',
+    '(defun leaf-group-member (s / e d) (if (leaf-target-p s) (progn (setq e (if (= (substr s 1 2) "H:") (handent (substr s 3)) (nth (atoi (substr s 3)) leaf-created))) (if e (progn (setq d (entget e)) (if (and (member (cdr (assoc 0 d)) (list "LINE" "LWPOLYLINE" "CIRCLE" "ARC" "TEXT" "INSERT" "DIMENSION" "POINT" "ELLIPSE")) (= (cdr (assoc 410 d)) "Model")) e))))))',
+    '''(defun leaf-addgroup-op (op / members m e ok acad-group group name) (setq ok T name (nth 1 op)) (foreach m (nth 2 op) (setq e (leaf-group-member m)) (if (or (null e) (member e members)) (setq ok nil)) (setq members (append members (list e)))) (if (and ok (>= (length members) 2) (setq acad-group (leaf-group-dictionary T)) (not (dictsearch acad-group name))) (progn (setq group (entmakex (append '((0 . "GROUP") (100 . "AcDbGroup") (300 . "") (70 . 0) (71 . 1)) (mapcar '(lambda (e) (cons 340 e)) members)))) (if group (dictadd acad-group name group)))))''',
+    '(defun leaf-removegroup-op (op / acad-group name) (setq acad-group (leaf-group-dictionary nil) name (nth 1 op)) (if (and acad-group (dictsearch acad-group name)) (dictremove acad-group name)))',
+    '(defun leaf-record-created (e / fh) (setq fh (open "created-handles.txt" "a")) (if fh (progn (write-line (strcat "CA|" (itoa (length leaf-created)) "|" (cdr (assoc 5 (entget e)))) fh) (close fh) T)))',
+)
+
+
 def build_apply_scr_v3() -> str:
     """Extend the frozen interpreter only for the separate v3 Activity."""
     lines = []
@@ -124,6 +136,8 @@ def build_apply_scr_v3() -> str:
             lines.extend(_INSERT_LISP_LINES)
             lines.extend(_DIMENSION_LISP_LINES)
             lines.extend(_PROPERTY_LISP_LINES)
+            lines.extend(_GROUP_LISP_LINES)
+            line = line.replace('(cond ', '(cond ((member (car v) (list "ADDGROUP" "REMOVEGROUP")) (leaf-group-op v)) ', 1)
             line = line.replace('(cond ', '(cond ((member (car v) (list "SETCOLOR" "SETLINETYPE" "SETLINEWEIGHT")) (leaf-property-op v)) ', 1)
             line = line.replace(
                 '((= (car v) "ADDARC")',
@@ -141,6 +155,7 @@ def build_apply_scr_v3() -> str:
             # Capture entmakex results only while applying adds, never while
             # parsing the plan (A: targets do not exist during that pass).
             line = line.replace('(defun leaf-apply (op)', '(defun leaf-apply-one (op)', 1)
+            line = line.replace('(cond ', '(cond ((= (car op) "ADDGROUP") (leaf-addgroup-op op)) ((= (car op) "REMOVEGROUP") (leaf-removegroup-op op)) ', 1)
             line = line.replace('(cond ', '(cond ((= (car op) "SETCOLOR") (leaf-apply-setcolor op)) ((= (car op) "SETLINETYPE") (leaf-apply-setlinetype op)) ((= (car op) "SETLINEWEIGHT") (leaf-apply-setlineweight op)) ', 1)
             line = line.replace(
                 '((= (car op) "ADDARC")',
@@ -148,7 +163,7 @@ def build_apply_scr_v3() -> str:
                 1,
             )
             lines.append(line)
-            line = '(defun leaf-apply (op / result) (setq result (leaf-apply-one op)) (if (and result (member (car op) (list "ADD" "ADDOPEN" "ADDLINE" "ADDCIRCLE" "ADDARC" "ADDINSERT" "ADDDIMLINEAR" "ADDDIMALIGNED"))) (setq leaf-created (append leaf-created (list result)))) result)'
+            line = '(defun leaf-apply (op / result) (setq result (leaf-apply-one op)) (if (and result (member (car op) (list "ADD" "ADDOPEN" "ADDLINE" "ADDCIRCLE" "ADDARC" "ADDINSERT" "ADDDIMLINEAR" "ADDDIMALIGNED"))) (if (leaf-record-created result) (setq leaf-created (append leaf-created (list result))) (setq result nil))) result)'
         elif line.startswith("(defun leaf-read-plan "):
             line = line.replace(
                 '(list "LEAF_MUTATION_PLAN|1" "LEAF_MUTATION_PLAN|2")',

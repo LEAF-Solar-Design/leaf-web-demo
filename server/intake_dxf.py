@@ -504,7 +504,40 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
                         "100", "AcDbMText", "10", _num(x), "20", _num(y), "30", "0.0",
                         "40", TEXT_HEIGHT, "1", value]
         out += props
-    out += ["0", "ENDSEC", "0", "EOF"]
+    out += ["0", "ENDSEC"]
+    if "groups" in intake:
+        groups = intake["groups"]
+        if not isinstance(groups, list):
+            _fail("groups must be a list")
+        sources = [*polylines, *texts, *circles, *arcs, *inserts, *dimensions]
+        handle_map = {str(source.get("handle", "")).upper(): row[-1]
+                      for source, row in zip(sources, kinds)}
+        root, dictionary = fresh_handle(), fresh_handle()
+        group_handles = [fresh_handle() for _ in groups]
+        out += ["0", "SECTION", "2", "OBJECTS", "0", "DICTIONARY", "5", root,
+                "330", "0", "100", "AcDbDictionary", "281", "1",
+                "3", "ACAD_GROUP", "350", dictionary,
+                "0", "DICTIONARY", "5", dictionary, "330", root,
+                "100", "AcDbDictionary", "281", "1"]
+        names = set()
+        for group, handle in zip(groups, group_handles):
+            name = group.get("name")
+            if (not isinstance(name, str) or not 1 <= len(name) <= 255
+                    or _CONTROL_RE.search(name) or name.casefold() in names):
+                _fail("groups require safe unique names")
+            names.add(name.casefold())
+            out += ["3", name, "350", handle]
+        for group, handle in zip(groups, group_handles):
+            out += ["0", "GROUP", "5", handle, "330", dictionary,
+                    "100", "AcDbGroup", "300", "", "70", str(group.get("flags", 0)),
+                    "71", str(group.get("selectable", 1))]
+            for member in group["members"]:
+                target = handle_map.get(str(member).upper())
+                if target is None:
+                    _fail("group member must name an emitted entity")
+                out += ["340", target]
+        out += ["0", "ENDSEC"]
+    out += ["0", "EOF"]
     return ("\n".join(out) + "\n").encode("utf-8")
 
 
