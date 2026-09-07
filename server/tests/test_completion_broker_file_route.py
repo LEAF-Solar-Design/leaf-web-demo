@@ -136,7 +136,7 @@ def test_file_branch_marks_admission_before_sandbox(rail, monkeypatch):
     assert calls == ['admitted', 'sandbox']
 
 
-@pytest.mark.parametrize('failure', ['timeout', 'http', 'json'])
+@pytest.mark.parametrize('failure', ['timeout', 'connection', 'http', 'json'])
 def test_file_client_failure_has_no_retry(monkeypatch, failure):
     calls = []
 
@@ -144,6 +144,8 @@ def test_file_client_failure_has_no_retry(monkeypatch, failure):
         calls.append(True)
         if failure == 'timeout':
             raise broker_client.requests.Timeout('provider detail')
+        if failure == 'connection':
+            raise broker_client.requests.ConnectionError('provider detail')
         def body():
             if failure == 'json':
                 raise ValueError('invalid JSON')
@@ -151,10 +153,25 @@ def test_file_client_failure_has_no_retry(monkeypatch, failure):
         return SimpleNamespace(status_code=500 if failure == 'http' else 200, json=body)
 
     monkeypatch.setattr(broker_client.requests, 'post', post)
-    with pytest.raises(broker_client.BrokerUnreachable):
+    with pytest.raises(broker_client.BrokerUnreachable) as caught:
         broker_client.run_via_broker('tenant', TOOL, {}, '', False,
                                      timeout_s=5, file_only=True, test_source=SOURCE)
     assert calls == [True]
+    label = ('file-only broker request failed' if failure == 'http' else
+             'file-only broker response invalid' if failure == 'json' else
+             'file-only broker request unavailable')
+    assert str(caught.value) == label
+    assert getattr(caught.value, 'status_code', None) == (500 if failure == 'http' else None)
+
+
+@pytest.mark.parametrize('status', [None, True, '403', 403.0, 399, 600])
+def test_file_client_invalid_status_is_safe(monkeypatch, status):
+    monkeypatch.setattr(broker_client.requests, 'post', lambda *a, **k: SimpleNamespace(
+        status_code=status, json=lambda: pytest.fail('invalid response parsed')))
+    with pytest.raises(broker_client.BrokerUnreachable) as caught:
+        broker_client.run_via_broker('tenant', TOOL, {}, '', False, file_only=True)
+    assert str(caught.value) == 'file-only broker request failed'
+    assert getattr(caught.value, 'status_code', None) is None
 
 
 def test_fingerprint_preserves_ordinary_identity_and_hashes_source():

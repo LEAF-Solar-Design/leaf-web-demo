@@ -42,6 +42,14 @@ class BrokerUnreachable(Exception):
     """The broker process could not be reached (connection/timeout)."""
 
 
+class BrokerHTTPRejected(BrokerUnreachable):
+    """A file-only rejection carrying only a validated HTTP error status."""
+
+    def __init__(self, status_code):
+        super().__init__("file-only broker request failed")
+        self.status_code = status_code if type(status_code) is int and 400 <= status_code <= 599 else None
+
+
 class BrokerReapRejected(Exception):
     """The broker was reached but refused the reap (auth, 5xx, malformed body).
 
@@ -120,8 +128,10 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
             headers=broker_headers(),
             timeout=timeout_s or 600,
         )
-        if file_only and not 200 <= resp.status_code < 300:
-            raise BrokerUnreachable("file-only broker request failed")
+        if file_only:
+            status = resp.status_code
+            if type(status) is not int or not 200 <= status < 300:
+                raise BrokerHTTPRejected(status)
         return resp.json()
     except (requests.ConnectionError, requests.Timeout) as exc:
         if file_only:
