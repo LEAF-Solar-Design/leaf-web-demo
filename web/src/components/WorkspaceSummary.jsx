@@ -11,6 +11,7 @@
 // status vocabulary is the platform's own (queued|running|succeeded|failed|
 // cancelled). Close = the Esc cap (never a ✕ glyph).
 import { fmtWhen } from './JobRail.jsx'
+import ArloProjectJob from './ArloProjectJob.jsx'
 
 const JOB_STATE = {
   succeeded: { dot: 'dot', tint: 'ok', label: 'succeeded' },
@@ -82,7 +83,8 @@ export default function WorkspaceSummary({
               const st = JOB_STATE[j.status] || { dot: 'dot hollow', tint: 'mut', label: j.status || 'pending' }
               const w = fmtWhen(j.updated_at || j.created_at)
               return (
-                <div key={j.job_id} className="rail-row">
+                <div key={j.job_id}>
+                <div className="rail-row">
                   <span className={st.dot} />
                   <span className="rail-ev">
                     <b className="rail-tool">{j.tool_name || j.kind}</b>
@@ -91,6 +93,10 @@ export default function WorkspaceSummary({
                   </span>
                   {typeof j.cost_usd === 'number' && <span className="rail-cost">~${j.cost_usd.toFixed(4)}</span>}
                   {w && <span className="rail-when" title={w.abs}>{w.rel}</span>}
+                </div>
+                {j.tool_name === 'arlo-design' && j.status === 'succeeded' && (
+                  <ArloProjectJob key={`${project.org_id}/${project.project_id}/${j.job_id}`} project={project} job={j} />
+                )}
                 </div>
               )
             })}
