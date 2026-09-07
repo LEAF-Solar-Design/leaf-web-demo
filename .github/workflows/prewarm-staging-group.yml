@@ -45,6 +45,8 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.group_head_sha != '' && github.ref == 'refs/heads/main'
     runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 25
+    # Satisfies OIDC sub repo:LEAF-Solar-Design@90289782/leaf-web-demo@1304548236:environment:ecr-release.
+    environment: ecr-release
     permissions:
       contents: read
       actions: read

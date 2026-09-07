@@ -101,6 +101,33 @@ def build_workflow_document() -> dict:
     return yaml.load(BUILD_WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
 
+def _check_ecr_role_environment(document: dict) -> None:
+    for job_name, job in document["jobs"].items():
+        if "secrets.AWS_ECR_PUSH_ROLE" in json.dumps(job.get("steps", [])):
+            assert job.get("environment") == "ecr-release", (
+                "%s: AWS_ECR_PUSH_ROLE requires environment: ecr-release" % job_name
+            )
+
+
+def test_ecr_role_jobs_declare_the_trusted_environment():
+    for document in (workflow_document(), group_workflow_document()):
+        _check_ecr_role_environment(document)
+
+
+def test_ecr_role_environment_pin_rejects_a_missing_job_environment():
+    checked = []
+    for document in (workflow_document(), group_workflow_document()):
+        _check_ecr_role_environment(document)
+        for job_name, job in document["jobs"].items():
+            if "secrets.AWS_ECR_PUSH_ROLE" in json.dumps(job.get("steps", [])):
+                mutated = json.loads(json.dumps(document))
+                mutated["jobs"][job_name].pop("environment")
+                with pytest.raises(AssertionError, match=re.escape(job_name)):
+                    _check_ecr_role_environment(mutated)
+                checked.append(job_name)
+    assert "stage-group" in checked
+
+
 def _step_by_id(job_steps: list, step_id: str) -> dict:
     for step in job_steps:
         if step.get("id") == step_id:

@@ -78,6 +78,32 @@ def workflow_document() -> dict:
     return yaml.load(workflow_text(), Loader=yaml.BaseLoader)
 
 
+def _check_ecr_role_environment(document: dict) -> None:
+    for job_name, job in document["jobs"].items():
+        if "secrets.AWS_ECR_PUSH_ROLE" in json.dumps(job.get("steps", [])):
+            assert job.get("environment") == "ecr-release", (
+                "%s: AWS_ECR_PUSH_ROLE requires environment: ecr-release" % job_name
+            )
+
+
+def test_ecr_role_jobs_declare_the_trusted_environment():
+    _check_ecr_role_environment(workflow_document())
+
+
+def test_ecr_role_environment_pin_rejects_a_missing_job_environment():
+    document = workflow_document()
+    _check_ecr_role_environment(document)
+    checked = []
+    for job_name, job in document["jobs"].items():
+        if "secrets.AWS_ECR_PUSH_ROLE" in json.dumps(job.get("steps", [])):
+            mutated = json.loads(json.dumps(document))
+            mutated["jobs"][job_name].pop("environment")
+            with pytest.raises(AssertionError, match=re.escape(job_name)):
+                _check_ecr_role_environment(mutated)
+            checked.append(job_name)
+    assert "mq-prewarm" in checked
+
+
 def job_steps(job: str) -> list:
     return workflow_document()["jobs"][job]["steps"]
 

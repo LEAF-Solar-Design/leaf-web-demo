@@ -97,8 +97,8 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
         # job carry falsifying rows. Mirrors run-all-gates.py; BOTH must move together.
         "build-platform-images-workflow": 38,
         # Native CodeBuild prewarm dispatch and CloudWatch receipt contracts.
-        "prewarm-staging-cutover-workflow": 56,
-        "merge-queue-workflow": 79,
+        "prewarm-staging-cutover-workflow": 58,
+        "merge-queue-workflow": 81,
         "platform-release-manifest": 88,
         # 10 -> 17 on 2026-08-18 with the production deploy's second approval
         # mode (administrator self-authorization): 1 acceptance case plus 6
