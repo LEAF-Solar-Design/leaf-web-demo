@@ -299,6 +299,7 @@ def test_w4g7b_contract_v3_server_suites_are_registered_with_measured_floors():
         "server-w4g7b-02s": 64,
         "server-w4g7b-03s": 40,
         "server-w4g7b-04s": 57,
+        "server-w4g7b-06i": 2,
     }
     assert {sid: suites[sid].expected for sid in floors} == floors
 
@@ -310,6 +311,11 @@ def test_w4g7b_contract_v3_server_suites_are_registered_with_measured_floors():
         assert suites[sid].allowed_skip_reasons == (), sid
     for sid in ("server-w4g7b-02s", "server-w4g7b-03s", "server-w4g7b-04s"):
         assert suites[sid].allowed_skip_reasons == (canary_reason,), sid
+    # 06i's canary names the exact binary path in its skip reason (the
+    # "skipped local engine suite is no proof" guard), so its allowlist
+    # pattern differs from the fixed-string siblings above.
+    assert suites["server-w4g7b-06i"].allowed_skip_reasons == (
+        canary_reason + r" \(.+\)",), "server-w4g7b-06i"
 
 
 def test_host_capability_ci_producers_cover_unit_and_postgres_modules(tmp_path, monkeypatch):
