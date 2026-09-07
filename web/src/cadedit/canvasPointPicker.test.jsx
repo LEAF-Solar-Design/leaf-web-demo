@@ -56,14 +56,17 @@ function mount() {
   )
 }
 
-async function openAndLoad(entities = [LINE]) {
+async function openAndLoad(entities = [LINE], blocks = undefined) {
   await act(async () => {
     fireEvent.change(screen.getByLabelText('DXF file'), { target: { files: [fileOf()] } })
     await Promise.resolve()
     await Promise.resolve()
   })
   await waitFor(() => expect(workers.length).toBeGreaterThan(0))
-  workers[0].emit({ type: 'documentLoaded', documentId: 'one.dxf', entities, entityCount: entities.length, unsupported: [] })
+  workers[0].emit({
+    type: 'documentLoaded', documentId: 'one.dxf', entities, entityCount: entities.length, unsupported: [],
+    ...(blocks ? { blocks } : {}),
+  })
 }
 
 function click(x, y) {
@@ -222,6 +225,41 @@ describe('CanvasPointPicker (W4f slice A1)', () => {
     click(130, 140)
     expect(screen.getByLabelText('ribbon r').value).toBe('5')
     expect(document.activeElement).toBe(screen.getByTestId('cockpit-prompt-run'))
+  })
+})
+
+// W4g-7b: the INSERT ghost reads the typed name, scale and rotation off the
+// live inputs and the block definition off the document's own catalogue
+// (session.entities.blocks), the wiring CanvasPointPicker adds to the pick
+// gesture (pointPicking.js owns the box math itself).
+describe('W4g-7b the INSERT ghost', () => {
+  const FIXTURE = { name: 'Fixture', base: [1, 2, 0], children: [{ type: 'LINE', vertices: [[1, 2, 0], [4, 2, 0]] }], complete: true, baseUnknown: false, digest: 'd1' }
+
+  it('scales and rotates the named definition about its base to the cursor, reading the typed sx/sy/rot from the live inputs', async () => {
+    mount()
+    await openAndLoad([LINE], [FIXTURE])
+    act(() => { context.setArmed({ group: 'draw', op: 'createInsert' }) })
+    act(() => {
+      context.setInput('name', 'Fixture')
+      context.setInput('sx', '2')
+      context.setInput('sy', '3')
+      context.setInput('rot', '90')
+    })
+    // World = client / 10: cursor at (100, 200) is world (10, 20). The
+    // fixture's one-segment definition (base (1,2), a line to (4,2)) scaled
+    // (2,3) and rotated 90deg about the base, then moved to the cursor, is
+    // the chord (10,20)-(10,26): the hand-derived case in the 02c spec.
+    act(() => { ground.dispatchEvent(new MouseEvent('pointermove', { clientX: 100, clientY: 200, bubbles: true })) })
+    expect(viewer.setRubberBand).toHaveBeenLastCalledWith([[10, 20], [10, 26]], false)
+  })
+
+  it('draws no ghost when the typed name names no definition in the catalogue', async () => {
+    mount()
+    await openAndLoad([LINE], [FIXTURE])
+    act(() => { context.setArmed({ group: 'draw', op: 'createInsert' }) })
+    act(() => { context.setInput('name', 'Nope') })
+    act(() => { ground.dispatchEvent(new MouseEvent('pointermove', { clientX: 100, clientY: 200, bubbles: true })) })
+    expect(viewer.setRubberBand).toHaveBeenLastCalledWith(null, false)
   })
 })
 

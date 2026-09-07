@@ -381,6 +381,15 @@ const BLOCK_SCRIPT = [
   'out.latin1Collision = await load(binary(colliding.replaceAll("2\\nB\\n", "2\\n\\u00e9\\n").replace("2\\nb\\n", "2\\n\\u00e8\\n"), "latin1"))',
   'out.binary = await load(binary(onlyLine))',
   'out.binaryEdited = reply(await handleMessage({ type: "applyEdit", op: "createLine", payload: { x1: 0, y1: 0, x2: 1, y2: 0, layer: "0" } }, engine))',
+  // W4g-7b-02c: createInsert on the real engine, from a fresh load of the
+  // original block document. A lower-cased name still resolves (01c-d);
+  // a second identical insert gets a distinct handle; an undefined block
+  // refuses with the four-key shape and leaves the document untouched.
+  'out.insertBefore = await load(dxf)',
+  'out.insert = reply(await handleMessage({ type: "applyEdit", op: "createInsert", payload: { name: "b", x: 10, y: 20, rotationDeg: 90, sx: 2, sy: 3, sz: 1, layer: "Refs" } }, engine))',
+  'out.insertAgain = reply(await handleMessage({ type: "applyEdit", op: "createInsert", payload: { name: "B", x: 10, y: 20, rotationDeg: 90, sx: 2, sy: 3, sz: 1, layer: "Refs" } }, engine))',
+  'out.insertUndefined = reply(await handleMessage({ type: "applyEdit", op: "createInsert", payload: { name: "Nope", x: 0, y: 0, rotationDeg: 0, sx: 1, sy: 1, sz: 1, layer: "" } }, engine))',
+  'out.insertIncomplete = reply(await handleMessage({ type: "applyEdit", op: "createInsert", payload: { name: "B", x: 0, y: 0, rotationDeg: 0, sx: 0, sy: 1, sz: 1, layer: "" } }, engine))',
   'process.stdout.write(JSON.stringify(out))',
 ].join('\n')
 

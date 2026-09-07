@@ -500,7 +500,13 @@ export function reasonlessDisabled(src, mapsByName = new Map()) {
 // Modify record seated in the reference's Properties panel) renders
 // `action.when(engineCtx)` the same way, the fifth such site. Same verified
 // ladder (modifyReason), same runtime throw.
-const UNVERIFIABLE_REASON_BUDGET = 14
+//
+// Raised 14 -> 15 by W4g-7b-02c: the Block cluster in EngineRibbonClusters.jsx
+// (createInsert's panel), a sixth engine group rendering `action.when(engineCtx)`
+// exactly as Draw/Modify/Clipboard/Annotation/Properties already do. createInsert
+// is registered under the 'draw' group, so it shares Draw's verified ladder
+// (drawReason), same runtime throw.
+const UNVERIFIABLE_REASON_BUDGET = 15
 
 /**
  * Whether an "unverifiable reason expressions" count holds against its

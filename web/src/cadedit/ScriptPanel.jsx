@@ -84,18 +84,17 @@ export default function ScriptPanel() {
       else actions.applyEdit(line.op, {})
     } else {
       const prompt = PROMPTS[line.op]
-      const shown = new Set(prompt.steps.flatMap((step) => step.fields.map((field) => field[0])))
-      const merged = { ...inputsRef.current }
-      for (const key in DEFAULT_EDIT_INPUTS) {
-        if (!shown.has(key)) merged[key] = DEFAULT_EDIT_INPUTS[key]
-      }
-      Object.assign(merged, line.inputs)
+      // W4g-7b-02c-e: every operand the line omits takes the PROMPT'S
+      // DEFAULT, shown by this op or not — the ribbon's live inputs (a value
+      // typed into the prompt before or between script runs) never leak into
+      // a scripted line. Only what the line itself parsed overrides a default.
+      const merged = { ...DEFAULT_EDIT_INPUTS, ...line.inputs }
       const { effective, expressionRefusal, waitingStep } = resolvePromptInputs(prompt, merged, null)
       if (expressionRefusal) { stop('stopped', `Script stopped at line ${line.line}: ${expressionRefusal}`); return }
       if (waitingStep) { stop('stopped', `Script stopped at line ${line.line}: ${line.verb} still needs "${waitingStep.ask}"`); return }
       if (line.op !== 'pasteClip') {
         const checked = line.group === 'draw'
-          ? buildCreatePayload(line.op, effective)
+          ? buildCreatePayload(line.op, effective, current.entities.blocks)
           : buildEditPayload(line.op, current.selectedId, effective)
         if (checked.refusal) { stop('stopped', `Script stopped at line ${line.line}: ${checked.refusal}`); return }
       }

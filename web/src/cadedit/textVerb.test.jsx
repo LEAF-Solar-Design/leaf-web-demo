@@ -74,7 +74,8 @@ describe('W4g-5d surface: word, prompt, pick, seat', () => {
     expect(rec.group).toBe('draw')
     expect(rec.panel).toBe('annotation')
     // Every other draw record sits in its own panel.
-    for (const a of forGroup('draw')) if (a.op !== 'createText') expect(a.panel).toBe('draw')
+    // (W4g-7b-02c seats INSERT BLOCK in the Block panel the same way.)
+    for (const a of forGroup('draw')) if (a.op !== 'createText' && a.op !== 'createInsert') expect(a.panel).toBe('draw')
   })
 })
 

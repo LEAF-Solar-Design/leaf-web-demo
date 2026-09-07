@@ -71,6 +71,9 @@ const WORDS = Object.freeze({
   el: { group: 'draw', op: 'createEllipse', verb: 'ELLIPSE' },
   matchprop: { group: 'modify', op: 'matchprop', verb: 'MATCHPROP' },
   ma: { group: 'modify', op: 'matchprop', verb: 'MATCHPROP' },
+  // W4g-7b-02c: the reference's INSERT, one letter like the rest of its Draw row.
+  insert: { group: 'draw', op: 'createInsert', verb: 'INSERT' },
+  i: { group: 'draw', op: 'createInsert', verb: 'INSERT' },
   rectang: { group: 'draw', op: 'createRectangle', verb: 'RECTANG' },
   rectangle: { group: 'draw', op: 'createRectangle', verb: 'RECTANG' },
   rec: { group: 'draw', op: 'createRectangle', verb: 'RECTANG' },

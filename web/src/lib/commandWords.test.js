@@ -42,6 +42,12 @@ describe('commandWords (W4f slice B): typed CAD words on the command line', () =
     expect(parseDrawingCommand('l'.repeat(MAX_COMMAND_CHARS + 1))).toBeNull()
   })
 
+  it('W4g-7b-02c: insert and its one-letter form arm the INSERT prompt', () => {
+    expect(parseDrawingCommand('insert')).toMatchObject({ group: 'draw', op: 'createInsert', verb: 'INSERT', word: 'insert' })
+    expect(parseDrawingCommand('i')).toMatchObject({ group: 'draw', op: 'createInsert', verb: 'INSERT', word: 'i' })
+    expect(parseDrawingCommand('INSERT')).toMatchObject({ op: 'createInsert' })
+  })
+
   it('exposes the word list for the help surface, every entry parseable', () => {
     expect(COMMAND_WORDS.length).toBeGreaterThan(10)
     for (const word of COMMAND_WORDS) expect(parseDrawingCommand(word)).not.toBeNull()

@@ -486,6 +486,9 @@ const ACTION_LIST = [
   // W4g-5d: single-line TEXT. A create (group draw) seated in the reference's
   // Annotation panel.
   engineOp('draw', 'createText', 'text', 'Text', 'text', 'Place a line of text at x,y with a height and rotation', 'large', 'annotation'),
+  // W4g-7b-02c: INSERT of an existing block definition, seated in the
+  // reference's Block panel the way TEXT sits in Annotation.
+  engineOp('draw', 'createInsert', 'insert block', 'Insert Block', 'block-insert', 'Insert an existing block definition at a point with scale and rotation', 'large', 'block'),
 
   // Modify: the entity operations the compiled engine performs.
   engineOp('modify', 'delete', 'delete', 'Delete', 'delete', 'Delete the selected entity', 'small'),

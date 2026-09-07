@@ -82,6 +82,11 @@ export const DEFAULT_EDIT_INPUTS = Object.freeze({
   etol: '',
   // W4g-4b: ELLIPSE's minor-to-major ratio (a step still waiting until typed).
   ratio: '',
+  // W4g-7b-02c: INSERT's block name and its x/y scale factors (rot reuses
+  // `rot` above). sx and sy default at the store when left empty (1, then
+  // sx), so they start empty rather than pre-filled with a value that would
+  // never actually get typed.
+  name: '', sx: '', sy: '',
 })
 
 const INPUT_KEYS = new Set(Object.keys(DEFAULT_EDIT_INPUTS))

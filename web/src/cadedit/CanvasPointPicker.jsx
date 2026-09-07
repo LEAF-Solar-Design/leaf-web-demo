@@ -144,7 +144,10 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
       const hit = snapAt(v, m, last.x, last.y, p)
       showMarker(v, hit)
       if (hit) { gx = hit.x; gy = hit.y } else if (p && orthoRef.current) { const q = orthoPoint(m, gx, gy); gx = q[0]; gy = q[1] }
-      const ghost = p ? ghostFor(m, gx, gy) : null
+      // W4g-7b: an armed INSERT reads its typed name, scale and rotation, and
+      // the document's block catalogue, so the ghost can be the definition's
+      // own bounding box; every other op ignores the extra arguments.
+      const ghost = p ? ghostFor(m, gx, gy, inputsRef.current, entitiesRef.current.blocks) : null
       v.setRubberBand?.(ghost ? ghost.pts : null, !!ghost?.closed)
     }
     const onMove = (event) => {

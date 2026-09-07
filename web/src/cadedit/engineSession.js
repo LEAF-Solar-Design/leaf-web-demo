@@ -159,6 +159,22 @@ function fmtDelta(raw) {
   return readNumber(raw)
 }
 
+// W4g-7b-02c-e: the ONE name rule an INSERT's block name must pass, shared by
+// the store's own validation and the prompt's datalist (EngineRibbonClusters.jsx),
+// so the datalist never offers a name a typed selection would then refuse:
+// trimmed, non-empty, not `*`-prefixed (anonymous blocks are never insertable
+// by name), no `|` (the plan's field separator) or CR/LF, at most 255 chars,
+// and printable ASCII only (mirrors mutation_plan.py's 0x20..0x7E refusal, so
+// the datalist never offers a name the server would refuse on save).
+// Returns the trimmed spelling to offer or compare, or null when the name
+// itself (not the definition it might name) is inadmissible.
+export function admissibleBlockName(rawName) {
+  const trimmed = String(rawName ?? '').trim()
+  if (!trimmed || trimmed.startsWith('*') || /[|\r\n]/.test(trimmed) || [...trimmed].length > 255) return null
+  if ([...trimmed].some((ch) => ch.codePointAt(0) < 0x20 || ch.codePointAt(0) > 0x7e)) return null
+  return trimmed
+}
+
 async function sha256Hex(bytes) {
   const digest = await crypto.subtle.digest('SHA-256', bytes)
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
@@ -175,7 +191,7 @@ export function surviveSelection(previousId, entities) {
 }
 
 /** The W4d Draw group's operations: creation needs no selection. */
-export const CREATE_OPS = Object.freeze(['createLine', 'createCircle', 'createArc', 'createPolyline', 'createRectangle', 'createText', 'createPoint', 'createEllipse'])
+export const CREATE_OPS = Object.freeze(['createLine', 'createCircle', 'createArc', 'createPolyline', 'createRectangle', 'createText', 'createPoint', 'createEllipse', 'createInsert'])
 // W4g-4: edits that MAKE an entity (a displaced copy, a mirrored copy, the
 // segments of an explode) report what they made by id like the Draw group
 // does; the selection lands on it.
@@ -232,7 +248,7 @@ export function parsePointList(raw) {
  * with a typed reason; this layer exists so a typo costs a sentence, not a
  * round trip.
  */
-export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, layer, height, rot, text, ratio, bulges } = {}) {
+export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, layer, height, rot, text, ratio, bulges, name, sx, sy } = {}, blocks = []) {
   const layerName = String(layer ?? '').trim()
   if (op === 'createLine') {
     const [x1, y1, xx2, yy2] = [x, y, x2, y2].map(fmtDelta)
@@ -294,6 +310,38 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
     if (k === null) return { refusal: 'Ellipse refused: the ratio must be a number.' }
     if (k <= 0 || k > 1) return { refusal: 'Ellipse refused: the ratio (minor to major) must be greater than 0 and at most 1.' }
     return { payload: { cx, cy, ax: ex - cx, ay: ey - cy, ratio: k, layer: layerName } }
+  }
+  if (op === 'createInsert') {
+    // W4g-7b-02c: INSERT of an existing block definition. The name, x and y
+    // are always required; sx defaults to 1, sy to sx, and rot to 0 when
+    // left empty (a DEFAULT, not a waiting step: promptInputs.js's
+    // 'decimal-default' mode keeps the prompt from holding Run on them).
+    const [px, py] = [x, y].map(fmtDelta)
+    if (px === null || py === null) return { refusal: 'Insert refused: x and y must both be numbers.' }
+    const trimmedName = String(name ?? '').trim()
+    if (!trimmedName) return { refusal: 'Insert refused: enter a block name.' }
+    const rawName = admissibleBlockName(name)
+    if (!rawName) return { refusal: 'Insert refused: a block name must be printable ASCII with no | and no leading *.' }
+    const sxText = String(sx ?? '').trim()
+    const scaleX = sxText === '' ? 1 : fmtDelta(sxText)
+    if (scaleX === null) return { refusal: 'Insert refused: the x scale factor must be a number.' }
+    const syText = String(sy ?? '').trim()
+    const scaleY = syText === '' ? scaleX : fmtDelta(syText)
+    if (scaleY === null) return { refusal: 'Insert refused: the y scale factor must be a number.' }
+    if (scaleX === 0 || scaleY === 0) return { refusal: 'Insert refused: a scale factor must not be 0' }
+    const rotText = String(rot ?? '').trim()
+    const rotationDeg = rotText === '' ? 0 : fmtDelta(rotText)
+    if (rotationDeg === null) return { refusal: 'Insert refused: the rotation must be a number.' }
+    const catalogue = Array.isArray(blocks) ? blocks : []
+    // W4g-7b-02c-e: trimmed to trimmed. A catalogue name is compared as
+    // admissibleBlockName would offer it, so a definition whose own DXF name
+    // carries incidental whitespace still matches the typed (also trimmed) name.
+    const definition = catalogue.find((b) => String(b?.name ?? '').trim().toLowerCase() === rawName.toLowerCase())
+    if (!definition) return { refusal: `Insert refused: block ${rawName} is not defined in this drawing` }
+    if (definition.complete !== true || definition.baseUnknown === true) {
+      return { refusal: `Insert refused: block ${definition.name} is incomplete in this drawing` }
+    }
+    return { payload: { name: admissibleBlockName(definition.name), x: px, y: py, rotationDeg, sx: scaleX, sy: scaleY, sz: 1, layer: layerName } }
   }
   if (op === 'createPolyline') {
     const points = parsePointList(pts)
@@ -932,7 +980,7 @@ export default function useEngineSession({
       patch({ errorKind: SESSION_ERROR.REFUSED, status: `Draw refused: unknown operation ${op}.` })
       return
     }
-    const { payload, refusal } = buildCreatePayload(op, inputs)
+    const { payload, refusal } = buildCreatePayload(op, inputs, sessionRef.current.entities.blocks)
     if (refusal) {
       patch({ errorKind: SESSION_ERROR.REFUSED, status: refusal })
       return
@@ -1059,6 +1107,12 @@ export default function useEngineSession({
     // NO plan and names why in the status; the server then takes the DXF
     // sidecar leg and says so in its receipt. A hand import has nothing to
     // diff against and never sends one.
+    // W4g-7b-02c-e: a plan the contract DOES carry (an INSERT add, 02s) still
+    // depends on the SERVER admitting that kind. Against a target where v3 is
+    // not provisioned for it, the server refuses the whole save with its own
+    // sentence ("Save failed: ...") and the document stays dirty: there is no
+    // DXF sidecar fallback for a kind the plan already carries (v63's rule —
+    // the fallback exists only for a diff this module itself cannot express).
     const { committedEntities, entities } = sessionRef.current
     const parent = sessionRef.current.committedVersion ?? target.headVersion
     const onStatus = ({ status, progress }) => {

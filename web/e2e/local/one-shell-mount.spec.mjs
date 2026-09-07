@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { expect, test } from '@playwright/test'
 import { requireLocalReady } from './requireReady.mjs'
 import { setRail } from './railFlag.mjs'
@@ -545,7 +547,13 @@ test.describe('route matrix, rail ON', () => {
     // the engine portals its tools into it, rather than adding a third
     // engine cluster on the left (which moved the prompt seat 148px).
     const referenceTail = ['annotation', 'layers', 'block', 'properties', 'groups', 'clipboard']
-    expect(groups).toEqual(cadEditOn ? ['draw', 'modify', ...referenceTail] : referenceTail)
+    // W4g-7b-02c: the engine's own Block panel (INSERT BLOCK live) renders
+    // the annotation idiom (a child cluster, no portal), so with the flag on
+    // it seats right after Annotation rather than after Layers — the same
+    // deliberate deviation W4g-5c named for Clipboard, here because "no
+    // portal" was the record's own instruction.
+    const cadEditTail = ['annotation', 'block', 'layers', 'properties', 'groups', 'clipboard']
+    expect(groups).toEqual(cadEditOn ? ['draw', 'modify', ...cadEditTail] : referenceTail)
     await page.getByRole('tab', { name: 'View' }).click()
     // W4g-7a: the View tab carries the Script seat with the engine on (the
     // reference's SCRIPT, run from the browser).
@@ -1479,6 +1487,50 @@ test.describe('route matrix, rail ON', () => {
     await bar.fill('draw a line across the roof')
     await bar.press('Enter')
     await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
+  })
+
+  test('W4g-7b-02c: INSERT of an existing block, on the real engine', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    await page.goto('/app')
+    await expect(page.locator(STUDIO)).toHaveCount(1)
+    const ribbon = page.getByTestId('drafting-ribbon')
+    await expect(ribbon).toBeVisible()
+    const engine = await request.get('/engine/engine.js').catch(() => null)
+    const cadEditOn = (await ribbon.locator('[data-group="modify"]').count()) > 0
+    if (!engine || engine.status() !== 200 || !cadEditOn) {
+      test.info().annotations.push({ type: 'engine', description: 'compiled engine not served, or the flag is off; INSERT half not exercised' })
+      return
+    }
+    await page.getByRole('tab', { name: 'Insert' }).click()
+    await ribbon.locator('[data-tool="import-dxf"]').click()
+    const fixture = readFileSync(fileURLToPath(new URL('../fixtures/block-fixture.dxf', import.meta.url)))
+    await page.getByLabel('DXF file').setInputFiles({ name: 'block-fixture.dxf', mimeType: 'application/dxf', buffer: fixture })
+    await expect(page.getByRole('status').filter({ hasText: /Loaded block-fixture\.dxf/ })).toHaveCount(1, { timeout: 60_000 })
+    await page.getByRole('tab', { name: 'Draw' }).click()
+
+    // Census: the Block panel reads 1 real (Insert Block) and 1 placeholder
+    // (Create Block, still honest).
+    const block = ribbon.locator('[data-group="block"]')
+    await expect(block.locator('.ribbon-tool')).toHaveCount(2)
+    await expect(block.locator('[data-tool="draw:createInsert"]')).toBeEnabled()
+    await expect(block.locator('[data-tool="block:create"]')).toBeDisabled()
+
+    const countBefore = Number(await page.getByTestId('cad-edit-entity-count').textContent())
+    const script = page.getByLabel('ribbon script', { exact: true })
+    await page.getByRole('tab', { name: 'View' }).click()
+    await script.fill('i Fixture 10,20')
+    await page.getByTestId('cockpit-script-run').click()
+    await expect(page.getByTestId('cockpit-script-status')).toHaveText('Script ran 1 command.', { timeout: 60_000 })
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBefore + 1))
+    await expect(page.getByRole('status').filter({ hasText: /createInsert applied/ })).toHaveCount(1)
+
+    // One engine undo takes it back; the redo depth rises.
+    await page.getByRole('tab', { name: 'Insert' }).click()
+    await ribbon.locator('[data-tool="undo-edit"]').click()
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBefore), { timeout: 60_000 })
+    await expect(ribbon.locator('[data-tool="redo-edit"]')).toBeEnabled()
   })
 
   test('solar depth: real solved strings on the Solar tab only, honesty-gated (W4c-V3)', async ({ page, request }) => {

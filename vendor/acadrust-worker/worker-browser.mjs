@@ -197,6 +197,10 @@ const CREATE_OPS = Object.freeze({
   createPoint: (doc, p) => doc.createPoint(Number(p.x), Number(p.y), String(p.layer ?? '')),
   createEllipse: (doc, p) => doc.createEllipse(
     Number(p.cx), Number(p.cy), Number(p.ax), Number(p.ay), Number(p.ratio), String(p.layer ?? '')),
+  // W4g-7b-02c: INSERT of an existing block definition; the projection
+  // already carries references and the catalogue, so nothing else changes.
+  createInsert: (doc, p) => doc.createInsert(
+    String(p.name ?? ''), Number(p.x), Number(p.y), Number(p.rotationDeg), Number(p.sx), Number(p.sy), Number(p.sz), String(p.layer ?? '')),
 })
 // The op string off the boundary is looked up in a Map of the table's OWN
 // entries, never as a computed property: a prototype name such as

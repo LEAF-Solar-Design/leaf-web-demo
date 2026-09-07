@@ -43,4 +43,17 @@ describe('resolvePromptInputs', () => {
     expect(isPointStep(PROMPTS.createCircle.steps[1])).toBe(false)
     expect(isPointStep(PROMPTS.fillet.steps[1])).toBe(false)
   })
+
+  // W4g-7b: INSERT's scale and rotation default at the store when left empty
+  // (sx 1, sy = sx, rot 0), so a field marked 'decimal-default' must not hold
+  // Run waiting on it the way a plain 'decimal' field (a radius, here) does.
+  it('a field marked decimal-default is not a waiting step when empty, unlike a plain decimal field', () => {
+    const prompt = { verb: 'INSERT', steps: [
+      { ask: 'Specify insertion point:', fields: [['x', 'x'], ['y', 'y']] },
+      { ask: 'Enter X scale factor <1>:', fields: [['sx', 'x scale', 'decimal-default']] },
+    ] }
+    expect(resolvePromptInputs(prompt, { x: '1', y: '2', sx: '' }).waitingStep).toBeNull()
+    const withRadius = { ...prompt, steps: [...prompt.steps, { ask: 'Specify radius:', fields: [['r', 'r']] }] }
+    expect(resolvePromptInputs(withRadius, { x: '1', y: '2', sx: '', r: '' }).waitingStep.ask).toBe('Specify radius:')
+  })
 })

@@ -11,6 +11,13 @@
 //
 // Pure and bounded: one pass over the prompt's steps, no allocation beyond
 // the effective record and the failed set; every input is a string or absent.
+//
+// W4g-7b: a field's mode 'decimal-default' is a number with its own default
+// at the store (INSERT's typed scale and rotation), so an empty value is a
+// DEFAULT, not a step still waiting, unlike a plain 'decimal' field. Every
+// caller of the waiting-step rule below already treats any mode other than
+// 'decimal' or 'edge' this way; this mode is named so a prompt step can say
+// so on purpose instead of by omission.
 import { isPointExpression, pointExpressionRefusal, resolvePointExpression } from './pointExpression.js'
 
 /** A step is a point step when it asks for exactly two decimal operands. */

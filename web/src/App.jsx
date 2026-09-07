@@ -2622,7 +2622,12 @@ export default function App() {
       // W4g-5d: the engine renders a REAL Annotation panel (TEXT live, the
       // rest honest) third, where the reference seats it; the placeholder is
       // for the flag-off build, as with Clipboard.
-      draw: [...(ENV_CAD_EDIT ? [] : [annotation]), layers, block, ENV_CAD_EDIT ? propertiesSeat : properties, groups,
+      // W4g-7b-02c: the engine renders a REAL Block panel (INSERT BLOCK live,
+      // CREATE BLOCK still honest) where the reference seats it, the same
+      // annotation-panel idiom as W4g-5d's TEXT: the static placeholder is
+      // for the flag-off build only.
+      draw: [...(ENV_CAD_EDIT ? [] : [annotation]), layers, ...(ENV_CAD_EDIT ? [] : [block]),
+        ENV_CAD_EDIT ? propertiesSeat : properties, groups,
         ENV_CAD_EDIT ? clipboardSeat : clipboardOff, ...(tabFamilies.draw || [])],
       insert: [block, ...(tabFamilies.insert || [])],
       annotate: [annotation, ...(tabFamilies.annotate || [])],
@@ -3215,7 +3220,7 @@ export default function App() {
                 <EngineRibbonClusters
                   importOpen={importOpen}
                   onToggleImport={() => setImportOpen((o) => !o)}
-                  panels={ribbonTab === 'insert' ? ['file'] : ribbonTab === 'draw' ? ['draw', 'modify', 'annotation', 'clipboard', 'properties'] : ribbonTab === 'view' ? ['script'] : []}
+                  panels={ribbonTab === 'insert' ? ['file'] : ribbonTab === 'draw' ? ['draw', 'modify', 'annotation', 'block', 'clipboard', 'properties'] : ribbonTab === 'view' ? ['script'] : []}
                 />
               )}
               {/* W4f slice B: the command line's typed words (LINE, C, MOVE ...)

@@ -28,6 +28,7 @@ import useEngineSession, {
   MAX_CREATE_POINTS,
   MAX_DOCUMENT_BYTES,
   SESSION_ERROR,
+  admissibleBlockName,
   buildCreatePayload,
   buildEditPayload,
   lowerSteps,
@@ -700,6 +701,26 @@ describe('save completion', () => {
     expect(save).toHaveBeenCalledTimes(1)
     expect(session.current.status).not.toContain('leg')
   })
+
+  // W4g-7b-02c-e F1: a created INSERT is a real mutation (mutationDiff.js),
+  // so save() posts a plan whose `added` carries the INSERT record — never
+  // the opaque refusal a moved or rescaled reference would still hit.
+  it('an INSERT create posts a save plan whose `added` carries the reference', async () => {
+    const FIXTURE = { name: 'Fixture', base: [1, 2, 0], children: [{ type: 'LINE', vertices: [[1, 2, 0], [4, 2, 0]] }], complete: true, baseUnknown: false, digest: 'd1' }
+    const save = vi.fn(async () => planReceipt)
+    const session = mountSession({ saveTarget: { headVersion: 4, save } })
+    act(() => session.current.actions.openBytes(new Uint8Array([9, 9]), 'demo-v4.dxf', { committed: true, version: 4 }))
+    session.workers[0].emit({ ...loadedMessage([LINE], 'demo-v4.dxf'), blocks: [FIXTURE] })
+    act(() => session.current.actions.create('createInsert', { name: 'Fixture', x: '10', y: '20', sx: '2', sy: '3', rot: '90', layer: '0' }))
+    const inserted = { id: 'i1', handle: 'i1', type: 'INSERT', name: 'Fixture', ip: [10, 20, 0], rotationDeg: 90, scale: [2, 3, 1], layer: '0', editable: false }
+    session.workers[0].emit({ ...editedMessage('createInsert', [LINE, inserted]), blocks: [FIXTURE], createdId: 'i1' })
+    await act(async () => { await session.current.actions.save() })
+    expect(save).toHaveBeenCalledWith(
+      new Uint8Array([1, 2, 3]), 4, expect.stringMatching(/^[0-9a-f]{64}$/),
+      expect.objectContaining({ mutations: { added: [{ handle: 'i1', kind: 'INSERT', name: 'Fixture', pt: [10, 20, 0], rot: 90, scale: [2, 3, 1], layer: '0' }] } }),
+      expect.any(Function),
+    )
+  })
 })
 
 describe('worker crash is a RECOVERABLE state', () => {
@@ -907,7 +928,77 @@ describe('draw dispatch (W4d Draw group): creation needs no selection, and the s
   it('the create op list is the closed set the worker dispatches on', () => {
     // W4g-4: RECTANG is a create the STORE lowers to createPolyline before the post.
     // W4g-5d: TEXT is a create the worker dispatches straight to createText.
-    expect([...CREATE_OPS]).toEqual(['createLine', 'createCircle', 'createArc', 'createPolyline', 'createRectangle', 'createText', 'createPoint', 'createEllipse'])
+    expect([...CREATE_OPS]).toEqual(['createLine', 'createCircle', 'createArc', 'createPolyline', 'createRectangle', 'createText', 'createPoint', 'createEllipse', 'createInsert'])
+  })
+})
+
+describe('W4g-7b-02c: INSERT of an existing block definition', () => {
+  const FIXTURE = { name: 'Fixture', base: [1, 2, 0], children: [{ type: 'LINE', vertices: [[1, 2, 0], [4, 2, 0]] }], complete: true, baseUnknown: false, digest: 'd1' }
+  const many = Array.from({ length: 61 }, () => ({ type: 'LINE', vertices: [[0, 0, 0], [1, 0, 0]] }))
+  const INCOMPLETE = { name: 'Big', base: [0, 0, 0], children: many, complete: false, baseUnknown: false, digest: 'd2' }
+  const blocks = [FIXTURE, INCOMPLETE]
+
+  it('a full operand set becomes the exact payload, the catalogue spelling winning over a typed case', () => {
+    expect(buildCreatePayload('createInsert', { name: 'fixture', x: '10', y: '20', sx: '2', sy: '3', rot: '90', layer: '0' }, blocks).payload)
+      .toEqual({ name: 'Fixture', x: 10, y: 20, rotationDeg: 90, sx: 2, sy: 3, sz: 1, layer: '0' })
+  })
+
+  it('an empty sx defaults to 1, sy defaults to sx, and rot defaults to 0', () => {
+    expect(buildCreatePayload('createInsert', { name: 'Fixture', x: '0', y: '0', sx: '2', sy: '' }, blocks).payload).toMatchObject({ sx: 2, sy: 2, rotationDeg: 0 })
+    expect(buildCreatePayload('createInsert', { name: 'Fixture', x: '0', y: '0', sx: '', sy: '', rot: '' }, blocks).payload).toMatchObject({ sx: 1, sy: 1, rotationDeg: 0 })
+  })
+
+  it('refuses a block absent from the catalogue, an incomplete one, and a zero scale factor', () => {
+    expect(buildCreatePayload('createInsert', { name: 'Nope', x: '0', y: '0' }, blocks).refusal)
+      .toBe('Insert refused: block Nope is not defined in this drawing')
+    expect(buildCreatePayload('createInsert', { name: 'Big', x: '0', y: '0' }, blocks).refusal)
+      .toBe('Insert refused: block Big is incomplete in this drawing')
+    expect(buildCreatePayload('createInsert', { name: 'Fixture', x: '0', y: '0', sx: '0' }, blocks).refusal)
+      .toBe('Insert refused: a scale factor must not be 0')
+    expect(buildCreatePayload('createInsert', { name: 'Fixture', x: '0', y: '0', sx: '2', sy: '0' }, blocks).refusal)
+      .toBe('Insert refused: a scale factor must not be 0')
+  })
+
+  it('refuses a malformed point or name before touching the catalogue', () => {
+    expect(buildCreatePayload('createInsert', { name: 'Fixture', x: 'x', y: '0' }, blocks).refusal).toMatch(/x and y must both be numbers/)
+    expect(buildCreatePayload('createInsert', { name: '', x: '0', y: '0' }, blocks).refusal).toBe('Insert refused: enter a block name.')
+    expect(buildCreatePayload('createInsert', { name: '*U1', x: '0', y: '0' }, blocks).refusal)
+      .toBe('Insert refused: a block name must be printable ASCII with no | and no leading *.')
+  })
+
+  it('with no catalogue at all, every name is undefined', () => {
+    expect(buildCreatePayload('createInsert', { name: 'Fixture', x: '0', y: '0' }).refusal)
+      .toBe('Insert refused: block Fixture is not defined in this drawing')
+  })
+
+  // W4g-7b-02c-e F4: admissibleBlockName is the ONE rule both the store and
+  // the prompt's datalist apply, and the catalogue lookup compares trimmed
+  // to trimmed, so a definition's own incidental whitespace still resolves.
+  it('admissibleBlockName refuses a pipe, a CR/LF, an anonymous, an oversized or a non-ASCII name, and trims what it admits', () => {
+    expect(admissibleBlockName('Fixture')).toBe('Fixture')
+    expect(admissibleBlockName('Fixture ')).toBe('Fixture')
+    expect(admissibleBlockName(' Fixture')).toBe('Fixture')
+    expect(admissibleBlockName('')).toBeNull()
+    expect(admissibleBlockName('   ')).toBeNull()
+    expect(admissibleBlockName('*U1')).toBeNull()
+    expect(admissibleBlockName('site|Door')).toBeNull()
+    expect(admissibleBlockName('a\r\nb')).toBeNull()
+    expect(admissibleBlockName('x'.repeat(256))).toBeNull()
+    expect(admissibleBlockName('x'.repeat(255))).toBe('x'.repeat(255))
+    expect(admissibleBlockName('Ã©')).toBeNull()
+    expect(admissibleBlockName('Café')).toBeNull()
+  })
+
+  it('a catalogue name with trailing whitespace resolves against the trimmed typed name and ships the trimmed spelling', () => {
+    const padded = [{ name: 'Fixture ', base: [0, 0, 0], children: [{ type: 'LINE', vertices: [[0, 0, 0], [1, 0, 0]] }], complete: true, baseUnknown: false, digest: 'd3' }]
+    expect(buildCreatePayload('createInsert', { name: 'Fixture', x: '0', y: '0' }, padded).payload)
+      .toMatchObject({ name: 'Fixture' })
+  })
+
+  it('refuses a typed non-ASCII name even when the catalogue carries the same spelling', () => {
+    const accented = [{ name: 'Café', base: [0, 0, 0], children: [{ type: 'LINE', vertices: [[0, 0, 0], [1, 0, 0]] }], complete: true, baseUnknown: false, digest: 'd4' }]
+    expect(buildCreatePayload('createInsert', { name: 'Café', x: '0', y: '0' }, accented).refusal)
+      .toBe('Insert refused: a block name must be printable ASCII with no | and no leading *.')
   })
 })
 
