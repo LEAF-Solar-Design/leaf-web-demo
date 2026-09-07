@@ -653,7 +653,13 @@ export default function App() {
       if (!drawingCommandOnRef.current) return false
       const command = parseDrawingCommand(text)
       if (!command) return false
-      window.dispatchEvent(new CustomEvent(COCKPIT_COMMAND_EVENT, { detail: { group: command.group, op: command.op } }))
+      // W4g-7b-05c: a deferred word (LEADER, BLOCK, GROUP, UNGROUP) carries
+      // its frozen reason through the same event, so the Armer can surface it
+      // instead of silently dropping the word.
+      const detail = command.reason
+        ? { group: command.group, op: command.op, reason: command.reason }
+        : { group: command.group, op: command.op }
+      window.dispatchEvent(new CustomEvent(COCKPIT_COMMAND_EVENT, { detail }))
       return true
     },
   }), [sessionActions])

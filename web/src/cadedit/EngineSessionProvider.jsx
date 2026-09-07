@@ -218,6 +218,19 @@ export default function EngineSessionProvider({
   const [osnap, setOsnapState] = useState(true)
   const setOsnap = useCallback((next) => { setOsnapState(next === true) }, [])
 
+  // W4g-7b-05c: a typed deferred word (LEADER, BLOCK, GROUP, UNGROUP) arms
+  // nothing, so CommandLineArmer has no prompt or run refusal to carry its
+  // sentence. `refuse` patches the session the consumers read with the
+  // sentence as its status, the same live-region surface a real refusal
+  // (engineSession's own REFUSED patches) already reaches; the next real
+  // status the store reports clears it, so a stale refusal never survives
+  // an actual edit. Bounded the same way `reach`'s sentence is.
+  const [refusal, setRefusalState] = useState('')
+  const refuse = useCallback((sentence) => {
+    setRefusalState(typeof sentence === 'string' ? sentence.slice(0, MAX_REACH_SENTENCE) : '')
+  }, [])
+  useEffect(() => { setRefusalState('') }, [session.status])
+
   // W4g-1b: engine reach. Fails closed on any shape outside the vocabulary
   // (a consumer bug never puts a non-sentence on the ribbon); bounded text.
   const [reach, setReachState] = useState(REACH_IDLE)
@@ -243,9 +256,16 @@ export default function EngineSessionProvider({
   useEffect(() => () => { onDirtyChangeRef.current?.(false) }, [])
 
   const canSave = saveTarget !== null && saveTarget !== undefined
+  // A live refusal overrides only the status a consumer READS; every other
+  // field (engineParsed, busy, errorKind, entities...) stays the real
+  // session's own, so the reason ladders above never see a phantom refusal.
+  const sessionForConsumers = refusal ? { ...session, status: refusal } : session
   const value = useMemo(
-    () => ({ session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap, reach, setReach }),
-    [session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap, reach, setReach],
+    () => ({
+      session: sessionForConsumers, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap,
+      reach, setReach, refuse,
+    }),
+    [sessionForConsumers, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap, reach, setReach, refuse],
   )
   return <EngineSessionContext.Provider value={value}>{children}</EngineSessionContext.Provider>
 }

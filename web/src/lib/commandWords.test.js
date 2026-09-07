@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
+import { DEFERRED_REASONS } from './actionRegistry.js'
 import { COMMAND_WORDS, MAX_COMMAND_CHARS, parseDrawingCommand } from './commandWords.js'
 
 describe('commandWords (W4f slice B): typed CAD words on the command line', () => {
@@ -67,5 +68,21 @@ describe('commandWords (W4f slice B): typed CAD words on the command line', () =
   it('exposes the word list for the help surface, every entry parseable', () => {
     expect(COMMAND_WORDS.length).toBeGreaterThan(10)
     for (const word of COMMAND_WORDS) expect(parseDrawingCommand(word)).not.toBeNull()
+  })
+
+  // W4g-7b-05c: LEADER/LE, BLOCK/B, GROUP/G, UNGROUP are real command words —
+  // never null — but parse to the 'deferred' group with the control's own
+  // frozen reason, never an armable op.
+  it('parses the four deferred controls to group "deferred" with their exact frozen reason', () => {
+    expect(parseDrawingCommand('leader')).toMatchObject({ group: 'deferred', op: 'leader', verb: 'LEADER', word: 'leader', reason: DEFERRED_REASONS.leader })
+    expect(parseDrawingCommand('LE')).toMatchObject({ group: 'deferred', op: 'leader', verb: 'LEADER', word: 'LE', reason: DEFERRED_REASONS.leader })
+    expect(parseDrawingCommand('block')).toMatchObject({ group: 'deferred', op: 'blockCreate', verb: 'BLOCK', word: 'block', reason: DEFERRED_REASONS.blockCreate })
+    expect(parseDrawingCommand('b')).toMatchObject({ group: 'deferred', op: 'blockCreate', verb: 'BLOCK', word: 'b', reason: DEFERRED_REASONS.blockCreate })
+    expect(parseDrawingCommand('group')).toMatchObject({ group: 'deferred', op: 'group', verb: 'GROUP', word: 'group', reason: DEFERRED_REASONS.group })
+    expect(parseDrawingCommand('g')).toMatchObject({ group: 'deferred', op: 'group', verb: 'GROUP', word: 'g', reason: DEFERRED_REASONS.group })
+    expect(parseDrawingCommand('ungroup')).toMatchObject({ group: 'deferred', op: 'ungroup', verb: 'UNGROUP', word: 'ungroup', reason: DEFERRED_REASONS.ungroup })
+    expect(Object.isFrozen(parseDrawingCommand('leader'))).toBe(true)
+    // Every existing word is unchanged: b and g named no prior word.
+    expect(parseDrawingCommand('line')).toMatchObject({ group: 'draw', op: 'createLine' })
   })
 })

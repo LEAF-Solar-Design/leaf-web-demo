@@ -121,6 +121,20 @@ export const CLIPBOARD_REASONS = Object.freeze({
   empty: 'nothing on the clipboard yet',
 })
 
+// W4g-7b-05c: the four reference controls this crate defers, each with its
+// own specific sentence rather than the generic "not in the browser engine
+// yet" every other placeholder carries. Frozen once here so the flag-off
+// ribbon panel, the flag-on engine panel, the typed word (LEADER/LE,
+// BLOCK/B, GROUP/G, UNGROUP) and the script runner all read the exact same
+// four strings — a literal `DEFERRED_REASONS.key` reference the honesty-ladder
+// gate (check_honesty_ladder.mjs) can verify, same as every other `*REASONS` map.
+export const DEFERRED_REASONS = Object.freeze({
+  blockCreate: 'unavailable; insert an existing block',
+  leader: "unavailable; a leader's annotation is an association the contract does not carry yet",
+  group: 'unavailable; groups are dictionary objects the contract does not carry yet',
+  ungroup: 'unavailable; groups are dictionary objects the contract does not carry yet',
+})
+
 // W4g-1b: while the engine holds no document, the reach state (the provider's
 // record of opening the console's own drawing) names what is happening, or
 // why it could not happen, instead of the bare "no drawing" sentence. Only

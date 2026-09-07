@@ -64,6 +64,12 @@ export default function ScriptPanel() {
     const line = run.lines[index]
     const current = sessionRef.current
     const { actions } = current
+    // W4g-7b-05c: a deferred word (LEADER, BLOCK, GROUP, UNGROUP) stops the
+    // script here, at its own line, with its own frozen reason — never the
+    // engine's ladder (there is no engine op to gate), and every earlier
+    // line stays applied, each its own undo step, exactly as any other
+    // mid-script refusal leaves them.
+    if (line.group === 'deferred') { stop('stopped', `Script stopped at line ${line.line}: ${line.verb} ${line.reason}.`); return }
     // UNDO and REDO are session steps, not group ops: their gate is the depth.
     const gate = line.op === 'undo' || line.op === 'redo'
       ? (current.busy ? drawReason(current, reachRef.current) : (line.op === 'undo' ? current.undoDepth : current.redoDepth) > 0 ? '' : `nothing to ${line.op}`)

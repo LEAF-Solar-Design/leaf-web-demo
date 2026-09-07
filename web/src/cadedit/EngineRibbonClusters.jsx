@@ -35,7 +35,7 @@ import { createPortal } from 'react-dom'
 import { RibbonCluster, RibbonTool, RibbonWidget } from '../site/DraftingRibbon.jsx'
 import { QuickButton, QUICK_FILE_SLOT_ID } from '../site/CockpitTopBand.jsx'
 
-import { DRAW_REASONS, MODIFY_REASONS, clipboardReason, drawReason, forGroup, modifyReason, propertyReason } from '../lib/actionRegistry.js'
+import { DEFERRED_REASONS, DRAW_REASONS, MODIFY_REASONS, clipboardReason, drawReason, forGroup, modifyReason, propertyReason } from '../lib/actionRegistry.js'
 
 import { ACI_NAMES, LINEWEIGHT_VALUES, admissibleBlockName, buildCreatePayload, buildEditPayload, formatLineweight, readNumber } from './engineSession.js'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
@@ -109,15 +109,17 @@ const DRAW_OFF = Object.freeze([])
 // W4g-5d: the reference's other Annotation tools stay honest placeholders
 // beside the real TEXT (leaders run through APS, W4g-7). W4g-7b-04c: the
 // dimensions placeholder leaves now that DIMLINEAR/DIMALIGNED are real
-// registry records (draw:dimLinear, draw:dimAligned).
+// registry records (draw:dimLinear, draw:dimAligned). W4g-7b-05c: Leader
+// carries its own DEFERRED_REASONS sentence, not the generic NOT_IN_ENGINE.
 const ANNOTATION_OFF = Object.freeze([
-  { id: 'annotation:leader', label: 'Leader', icon: 'leader', size: 'large' },
+  { id: 'annotation:leader', label: 'Leader', icon: 'leader', size: 'large', reason: DEFERRED_REASONS.leader },
 ])
 // W4g-7b-02c: the reference's Block panel keeps CREATE BLOCK as an honest
 // placeholder beside the now-real INSERT BLOCK (ribbonClusters.js drops its
-// own placeholder for the latter so the two never both render).
+// own placeholder for the latter so the two never both render). W4g-7b-05c:
+// its own DEFERRED_REASONS sentence, not the generic NOT_IN_ENGINE.
 const BLOCK_OFF = Object.freeze([
-  { id: 'block:create', label: 'Create Block', icon: 'block-create', size: 'large' },
+  { id: 'block:create', label: 'Create Block', icon: 'block-create', size: 'large', reason: DEFERRED_REASONS.blockCreate },
 ])
 // The datalist id the INSERT name field's `list` attribute points at.
 const BLOCK_CATALOGUE_ID = 'cockpit-block-catalogue'
@@ -156,8 +158,8 @@ function useSlot(id) {
   return node
 }
 
-const offTool = ({ id, label, icon }, size = 'small') => ({
-  id, label, text: label, icon, size, title: label, disabled: true, reason: NOT_IN_ENGINE, onClick: () => {},
+const offTool = ({ id, label, icon, reason = NOT_IN_ENGINE }, size = 'small') => ({
+  id, label, text: label, icon, size, title: label, disabled: true, reason, onClick: () => {},
 })
 
 export default function EngineRibbonClusters({ importOpen = false, onToggleImport, panels = ['draw', 'modify'] }) {

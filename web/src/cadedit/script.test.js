@@ -2,6 +2,7 @@
 // own prompt grammar (PROMPTS) through the command line's own word table.
 import { describe, expect, it } from 'vitest'
 
+import { DEFERRED_REASONS } from '../lib/actionRegistry.js'
 import { PROMPTS } from './EngineRibbonClusters.jsx'
 import { parseDrawingCommand } from '../lib/commandWords.js'
 import { BARE_OPS, MAX_SCRIPT_CHARS, MAX_SCRIPT_LINES, MAX_TOKEN_CHARS, parseScript, promptSlots, tokenize } from './script.js'
@@ -100,6 +101,24 @@ describe('parseScript', () => {
     expect(parse('circle 0,0 5 A extra').refusal).toBe('line 1: CIRCLE takes at most 3 operands')
     expect(parse('line 0,0 10,10\n\n\n  ; ok\nline "open').refusal).toBe('line 5: an opening quote has no closing quote')
     expect(parse('line 0,0 10,10\nfoo').line).toBe(2)
+  })
+
+  // W4g-7b-05c: a deferred word (LEADER/LE, BLOCK/B, GROUP/G, UNGROUP) is a
+  // real command word — the parse never refuses at that line — carrying its
+  // own reason onto the line record for the runner to stop with.
+  it('a deferred word parses onto the line list carrying its own reason, never as a refusal', () => {
+    const out = parse('line 0,0 3,4\nleader')
+    expect(out.refusal).toBeUndefined()
+    expect(out.lines.map((l) => [l.line, l.group, l.op, l.verb])).toEqual([
+      [1, 'draw', 'createLine', 'LINE'],
+      [2, 'deferred', 'leader', 'LEADER'],
+    ])
+    expect(out.lines[1].reason).toBe(DEFERRED_REASONS.leader)
+    expect(out.lines[1].inputs).toEqual({})
+    expect(Object.isFrozen(out.lines[1])).toBe(true)
+    expect(parse('g').lines[0]).toMatchObject({ group: 'deferred', op: 'group', verb: 'GROUP', reason: DEFERRED_REASONS.group })
+    expect(parse('b').lines[0]).toMatchObject({ group: 'deferred', op: 'blockCreate', verb: 'BLOCK', reason: DEFERRED_REASONS.blockCreate })
+    expect(parse('ungroup').lines[0]).toMatchObject({ group: 'deferred', op: 'ungroup', verb: 'UNGROUP', reason: DEFERRED_REASONS.ungroup })
   })
 
   it('is bounded before any line is read', () => {

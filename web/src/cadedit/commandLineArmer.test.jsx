@@ -4,6 +4,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { DEFERRED_REASONS } from '../lib/actionRegistry.js'
 import { COCKPIT_COMMAND_EVENT } from '../lib/commandWords.js'
 
 import CadEditSurface from './CadEditSurface.jsx'
@@ -115,6 +116,22 @@ describe('CommandLineArmer (W4f slice B)', () => {
     command({ group: 'clipboard', op: 'cutClip' })
     const posted = workers[0].posted
     expect(posted[posted.length - 1]).toEqual({ type: 'applyEdit', op: 'delete', payload: { entityId: 'e1' } })
+  })
+
+  // W4g-7b-05c: GROUP (typed "g") arms nothing — there is no engine op — but
+  // its frozen reason is surfaced exactly where a real refusal reads, so
+  // typing a deferred word is never silence.
+  it('a deferred word (GROUP) arms nothing and surfaces its own sentence', async () => {
+    mount()
+    await openAndLoad()
+    expect(promptEl()).toBeNull()
+    command({ group: 'deferred', op: 'group', reason: DEFERRED_REASONS.group })
+    expect(promptEl()).toBeNull()
+    expect(screen.getByRole('status').textContent).toBe(DEFERRED_REASONS.group)
+    // A mismatched reason (never emitted by the real parser, but the gate
+    // must fail closed against it anyway) is dropped, same as any malformed detail.
+    command({ group: 'deferred', op: 'leader', reason: 'a made-up sentence' })
+    expect(screen.getByRole('status').textContent).toBe(DEFERRED_REASONS.group)
   })
 
   it('acceptsCommand is the fail-closed gate', () => {

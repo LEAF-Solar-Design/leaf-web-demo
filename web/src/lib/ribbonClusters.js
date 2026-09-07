@@ -20,7 +20,7 @@
 // present, disabled, and say so (operator decision, W4e plan: mirror the
 // reference's eight Draw-tab panels).
 import { zoomViewer } from '../site/DrawingCockpit.jsx'
-import { REASONS, forCluster, ribbonTool } from './actionRegistry.js'
+import { DEFERRED_REASONS, REASONS, forCluster, ribbonTool } from './actionRegistry.js'
 import { isWriteTool, toolIcon, toolMcpSource, toolPlacementSize, toolPlacementTab } from './toolRecord.js'
 
 // The reason vocabulary moved to the action registry with slice 10a, because
@@ -364,6 +364,18 @@ function offTool(id, label, icon, size = 'small') {
   return { id, label, text: label, icon, size, title: label, disabled: true, reason: REASONS.notInEngine, onClick: () => {} }
 }
 
+// W4g-7b-05c: the four deferred controls carry their OWN reason instead of
+// offTool's shared REASONS.notInEngine default. Written out as four literal
+// records (never a shared helper taking `reason` as a parameter) so each
+// keeps a literal `DEFERRED_REASONS.key` dot-path in source — the shape the
+// honesty-ladder gate (check_honesty_ladder.mjs) can actually verify; a
+// parameter or a bracketed lookup reads as a computed expression there and
+// counts against its unverifiable-reason budget instead.
+const LEADER_OFF = { id: 'annotation:leader', label: 'Leader', text: 'Leader', icon: 'leader', size: 'large', title: 'Leader', disabled: true, reason: DEFERRED_REASONS.leader, onClick: () => {} }
+const BLOCK_CREATE_OFF = { id: 'block:create', label: 'Create Block', text: 'Create Block', icon: 'block-create', size: 'large', title: 'Create Block', disabled: true, reason: DEFERRED_REASONS.blockCreate, onClick: () => {} }
+const GROUP_OFF = { id: 'groups:group', label: 'Group', text: 'Group', icon: 'group', size: 'large', title: 'Group', disabled: true, reason: DEFERRED_REASONS.group, onClick: () => {} }
+const UNGROUP_OFF = { id: 'groups:ungroup', label: 'Ungroup', text: 'Ungroup', icon: 'ungroup', size: 'large', title: 'Ungroup', disabled: true, reason: DEFERRED_REASONS.ungroup, onClick: () => {} }
+
 /**
  * The reference's Draw-tab panels beyond Draw and Modify (which the engine
  * consumer renders): Annotation, Layers widget (built by layersCluster),
@@ -374,21 +386,23 @@ export function referencePanels() {
   const note = REASONS.notInEngine
   return [
     {
+      // W4g-7b-04c: DIMLINEAR/DIMALIGNED are real now (draw:dimLinear,
+      // draw:dimAligned), so the Dimensions placeholder leaves; Leader stays
+      // honest, and its own reason (W4g-7b-05c) says why, specifically.
       id: 'annotation', label: 'Annotation', kind: 'group', note,
       tools: [
         offTool('annotation:text', 'Text', 'text', 'large'),
-        offTool('annotation:dimensions', 'Dimensions', 'dimension', 'large'),
-        offTool('annotation:leader', 'Leader', 'leader', 'large'),
+        LEADER_OFF,
       ],
     },
     {
       // W4g-7b-02c: INSERT BLOCK is real with the engine flag on (App.jsx
       // drops this static cluster then; EngineRibbonClusters renders the
       // Block panel itself, the annotation seat idiom). CREATE BLOCK stays
-      // the honest placeholder either way.
+      // the honest placeholder either way, with its own reason (W4g-7b-05c).
       id: 'block', label: 'Block', kind: 'group', note,
       tools: [
-        offTool('block:create', 'Create Block', 'block-create', 'large'),
+        BLOCK_CREATE_OFF,
         offTool('block:insert', 'Insert Block', 'block-insert', 'large'),
       ],
     },
@@ -402,10 +416,12 @@ export function referencePanels() {
       ],
     },
     {
+      // W4g-7b-05c: groups are dictionary objects the contract does not
+      // carry yet — the same reason for both, since neither exists without it.
       id: 'groups', label: 'Groups', kind: 'group', note,
       tools: [
-        offTool('groups:group', 'Group', 'group', 'large'),
-        offTool('groups:ungroup', 'Ungroup', 'ungroup', 'large'),
+        GROUP_OFF,
+        UNGROUP_OFF,
       ],
     },
     // W4g-5c: the engine renders a REAL Clipboard panel when the cad_edit

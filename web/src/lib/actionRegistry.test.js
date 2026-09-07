@@ -20,6 +20,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   ACTIONS,
+  DEFERRED_REASONS,
   DRAW_REASONS,
   ESCAPE_RUNGS,
   INTERACTIVE_TARGET_SELECTOR,
@@ -597,5 +598,19 @@ describe('the engine reason ladders', () => {
     const geometryOps = forGroup('modify').filter((a) => a.panel !== 'properties')
     expect(geometryOps.length).toBeGreaterThan(0)
     for (const record of geometryOps) expect(record.when(insertCtx)).toBe(MODIFY_REASONS.readOnlyKind)
+  })
+})
+
+// W4g-7b-05c: the four deferred controls' frozen reasons, read by both ribbon
+// panels (flag on and off), the typed words and the script runner.
+describe('DEFERRED_REASONS', () => {
+  it('is frozen, with the four exact sentences', () => {
+    expect(Object.isFrozen(DEFERRED_REASONS)).toBe(true)
+    expect(DEFERRED_REASONS).toEqual({
+      blockCreate: 'unavailable; insert an existing block',
+      leader: "unavailable; a leader's annotation is an association the contract does not carry yet",
+      group: 'unavailable; groups are dictionary objects the contract does not carry yet',
+      ungroup: 'unavailable; groups are dictionary objects the contract does not carry yet',
+    })
   })
 })
