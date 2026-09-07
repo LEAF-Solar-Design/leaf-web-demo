@@ -381,8 +381,14 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER,
               _py_pytest("tests/test_mushy_fold_vendor_disposition.py"), 4),
         # standardization slice 7b: the surface-config overlay fold + route.
+        # 23 rows total; 3 skip via _symlink_or_skip with reason "symlink
+        # unavailable on this host: ...", so a no-symlink host executes 20 and
+        # a symlink-capable host executes 23. Floor is the no-symlink minimum
+        # (20); the allowlist below lets those 3 skips pass the gate instead
+        # of failing it on a host with no symlink privilege.
         Suite("server-surface-config", "server tests/test_surface_config.py", "pytest",
-              SERVER, _py_pytest("tests/test_surface_config.py"), 10),
+              SERVER, _py_pytest("tests/test_surface_config.py"), 20,
+              allowed_skip_reasons=(r"symlink unavailable on this host: .+",)),
         Suite("server-grant-admin-authority", "server tests/test_grant_admin_authority.py",
               "pytest", SERVER, _py_pytest("tests/test_grant_admin_authority.py"), 9),
         Suite("server-microvm", "server tests/test_hardening_2c_microvm.py", "pytest", SERVER,
