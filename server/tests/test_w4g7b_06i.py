@@ -35,10 +35,11 @@ def _fixture_block():
 
 
 def _full_v3_added():
-    """The whole enabled v3 case set in one plan: an INSERT (with its
+    """The whole enabled v3 add case set in one plan: an INSERT (with its
     property setter riding the created entity's own A: ordinal), a styled
     LINE, and a LINEAR plus an ALIGNED dimension on the same definition
-    points."""
+    points. `_full_v3_mutations` adds the existing-handle setters, including
+    set_color, that round out the whole enabled v3 case set."""
     return [
         {"handle": "insert-1", "kind": "INSERT", "name": "Fixture", "layer": "0",
          "pt": [10, 20, 0], "rot": 90, "scale": [2, 3, 1], "color": 5},
@@ -55,9 +56,10 @@ def _full_v3_added():
 
 def _full_v3_mutations(target_handle):
     """Removals / adds / properties, in that canonical order: an existing
-    LWPOLYLINE's lineweight and linetype alongside the adds above."""
+    LWPOLYLINE's color, lineweight, and linetype alongside the adds above."""
     return {
         "added": _full_v3_added(),
+        "set_color": [{"handle": target_handle, "aci": 4}],
         "set_lineweight": [{"handle": target_handle, "weight": 25}],
         "set_linetype": [{"handle": target_handle, "name": "Continuous"}],
     }
@@ -92,6 +94,7 @@ def test_mock_full_v3_case_set_round_trips_through_dxf():
     plan = emit_plan(canonical, base_sha256=BASE_SHA)
     assert f"SETCOLOR|A:{insert_ordinal}|5\n".encode() in plan
     assert f"SETCOLOR|A:{line_ordinal}|1\n".encode() in plan
+    assert b"SETCOLOR|H:3B|4\n" in plan
     assert b"SETLINEWEIGHT|H:3B|25\n" in plan
     assert b"SETLINETYPE|H:3B|Continuous\n" in plan
 
@@ -105,7 +108,7 @@ def test_mock_full_v3_case_set_round_trips_through_dxf():
     assert added_line["closed"] is False
     assert result["properties"]["added-line"] == {"aci": 1, "rgb": None}
     assert result["properties"]["3B"] == {
-        "aci": 256, "rgb": None, "linetype": "Continuous", "lineweight": 25}
+        "aci": 4, "rgb": None, "linetype": "Continuous", "lineweight": 25}
     assert len(result["dimensions"]) == 2
     result_dims = {d["type"]: d for d in result["dimensions"]}
     assert result_dims["LINEAR"]["measurement"] == 3.0
@@ -121,6 +124,7 @@ def test_mock_full_v3_case_set_round_trips_through_dxf():
     parsed_dims = {d["type"]: d for d in parsed["dimensions"]}
     assert f'{parsed_dims["LINEAR"]["measurement"]:.3f}' == "3.000"
     assert f'{parsed_dims["ALIGNED"]["measurement"]:.3f}' == "5.000"
+    assert parsed["properties"]["3B"]["aci"] == 4
     assert parsed["properties"]["3B"]["lineweight"] == 25
     assert parsed["properties"]["3B"]["linetype"] == "Continuous"
 
@@ -174,6 +178,7 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
         canonical, base_sha256=hashlib.sha256(host.read_bytes()).hexdigest())
     assert f"SETCOLOR|A:{insert_ordinal}|5\n".encode() in plan
     assert f"SETCOLOR|A:{line_ordinal}|1\n".encode() in plan
+    assert f"SETCOLOR|H:{target_handle}|4\n".encode() in plan
     assert f"SETLINEWEIGHT|H:{target_handle}|25\n".encode() in plan
     assert f"SETLINETYPE|H:{target_handle}|Continuous\n".encode() in plan
     (tmp_path / "mutation-plan.txt").write_bytes(plan.replace(b"\n", b"\r\n"))
@@ -219,6 +224,7 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
     assert len(new_lines) == 1
     assert actual["properties"][new_lines[0]["handle"]]["aci"] == 1
 
+    assert actual["properties"][target_handle]["aci"] == 4
     assert actual["properties"][target_handle]["lineweight"] == 25
     assert actual["properties"][target_handle]["linetype"] == "Continuous"
 
