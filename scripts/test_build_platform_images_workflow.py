@@ -3500,9 +3500,17 @@ def check_docs_noop_filter(text: str) -> None:
     assert set(relay_wf["jobs"]) == {"dispatch"}
     dispatch_job = relay_wf["jobs"]["dispatch"]
     assert set(dispatch_job) == {"if", "runs-on", "timeout-minutes", "env", "steps"}
-    # Pinned VALUES, not just keys: on a self-hosted runner the PAT-backed
-    # step would execute on infrastructure outside GitHub's ephemeral VMs.
-    assert dispatch_job["runs-on"] == "ubuntu-latest"
+    # Pinned VALUES, not just keys: on a persistent self-hosted runner the
+    # PAT-backed step would execute on infrastructure outside GitHub's
+    # ephemeral VMs. #1091 moved this job from GitHub-hosted ubuntu-latest to
+    # the CodeBuild-hosted runner, which is fresh per run and attempt; the
+    # rollback is the one-line runs-on change the workflow's own comment names.
+    assert dispatch_job["runs-on"] == (
+        "codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}"
+    )
+    assert dispatch_job["runs-on"] != "self-hosted"
+    assert not dispatch_job["runs-on"].startswith("[")
+    assert not dispatch_job["runs-on"].startswith("self-hosted")
     # 5 -> 105 on 2026-08-07: the relay now watches both deploys to a terminal
     # state instead of dispatching and exiting, and a deploy runs ~8-14 min
     # plus time queued behind the shared staging lock. Must stay above the
