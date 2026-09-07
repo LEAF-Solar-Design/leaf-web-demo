@@ -386,7 +386,10 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
     if (px1 === px2 && py1 === py2) return { refusal: 'Dimension refused: the two definition points coincide' }
     const [lx, ly] = [dx, dy].map(fmtDelta)
     if (lx === null || ly === null) return { refusal: 'Dimension refused: the dimension line point must be a number.' }
-    const rotText = String(rot ?? '').trim()
+    // W4g-7b-04c-7: the dimAligned SEAT shows no rotation field, so any `rot` the provider still holds is stale from
+    // an earlier prompt (the proof's DIMALIGNED step refused it as a rotation); the seat reads none. The explicit
+    // createDimension + ALIGNED + rot call keeps its refusal.
+    const rotText = seatDimtype === 'ALIGNED' ? '' : String(rot ?? '').trim()
     const rawRot = rotText === '' ? 0 : fmtDelta(rotText)
     if (rawRot === null) return { refusal: 'Dimension refused: the rotation must be a number (degrees).' }
     if (kind === 'ALIGNED' && rawRot !== 0) return { refusal: 'Dimension refused: a rotation applies to a linear dimension only' }
