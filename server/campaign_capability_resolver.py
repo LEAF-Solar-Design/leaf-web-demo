@@ -3,7 +3,7 @@ import deps
 import catalog
 
 
-def resolve(tenant, delivery_profile, *, existing_artifact=False, transform_recipe=False):
+def resolve(tenant, delivery_profile, *, existing_artifact=False, transform_recipe=False, cad_recipe=False):
     tenant_id = str(getattr(tenant, 'tenant_id', tenant))
     candidates = []
     for tool, provenance in deps.effective_tools_with_provenance(tenant_id):
@@ -46,6 +46,17 @@ def resolve(tenant, delivery_profile, *, existing_artifact=False, transform_reci
                 'connected_mcp_tools': [], 'missing_capability': 'Verified published CSV invocation',
                 'recommended_action': 'Reuse the published CSV tool or acquire it through existing author authority',
                 'blocks_dispatch': False}
+    if cad_recipe and delivery_profile == 'cad_file' and existing_artifact:
+        selected = 'managed_dxf_layer_inventory'
+        available = True
+        native = {'name': selected, 'recipe_id': 'dxf-layer-summary', 'version': 1,
+                  'operation': 'Summarize direct supported ASCII DXF entities by layer',
+                  'inputs': 'One validated ASCII DXF in the authorized project',
+                  'outputs': 'Deterministic layer summary CSV and a frozen source copy',
+                  'readiness': 'available',
+                  'permission_requirement': 'Current tenant identity and project write/read authority',
+                  'budget_constraint': 'Existing project limits; at most 1 MiB input and output; no external services',
+                  'verification_method': 'Parse frozen DXF, compute layer counts, validate and retrieve receipt-backed CSV bytes'}
     return {'selected': selected,
             'readiness': 'available' if available else 'unavailable',
             'selected_capability': native,

@@ -14,6 +14,7 @@ import platform_link
 import campaign_delivery_service as delivery
 import campaign_capability_resolver as capabilities
 import campaign_web_release as web_release
+import campaign_dxf_inventory as dxf_inventory
 
 STAGES = ('implementation', 'publication', 'deployment', 'user_verification', 'delivery')
 PRODUCERS = dict(zip(STAGES, ('task_ledger', 'task_ledger', 'deployment_adapter',
@@ -148,11 +149,14 @@ def compile_finish(tenant, project_id, campaign_id, finish):
     artifact = None
     web_recipe = None
     transform_recipe = None
+    cad_recipe = None
     if finish['delivery_profile'] == 'cad_file':
         state = _lifecycle().project_snapshot(org, project, actor)
         refs = finish['artifact_refs']
         wants_csv = bool(re.search(r'\bcsv\b', finish['workflow'], re.I))
-        if wants_csv:
+        if dxf_inventory.requested(finish['workflow']):
+            artifact, cad_recipe = dxf_inventory.compile_recipe(state, refs)
+        elif wants_csv:
             csv_refs = [p for p in (refs or [r['path'] for r in state.get('files', [])
                                             if not r['path'].startswith('releases/')]) if p.lower().endswith('.csv')]
             artifact = delivery.select_artifact(state, csv_refs) if csv_refs else None
@@ -185,6 +189,11 @@ def compile_finish(tenant, project_id, campaign_id, finish):
         public['artifact_refs'] = [transform_recipe['source_artifact']['path']]
         boundary = 'Deliver CSV records produced by a verified published tenant tool'
         deferred = ['The original ambition beyond this records-to-CSV file workflow remains unproven.']
+    if cad_recipe:
+        public['workflow'] = dxf_inventory.WORKFLOW
+        public['artifact_refs'] = [cad_recipe['source_artifact']['path']]
+        boundary = 'Deliver a verified CSV summary of direct supported DXF entities by layer'
+        deferred = list(dxf_inventory.LIMITS)
     if finish['workflow'] != public['workflow']:
         deferred.append('Requested workflow beyond this release: ' + finish['workflow'][:900])
     deferred.extend('Deferred input: ' + path for path in finish['artifact_refs'] if path not in public['artifact_refs'])
@@ -192,7 +201,8 @@ def compile_finish(tenant, project_id, campaign_id, finish):
             'deferred_items': deferred, 'selected_artifact': artifact,
             **({'web_recipe': web_recipe} if web_recipe else {}),
             **({'transform_recipe': transform_recipe} if transform_recipe else {}),
-            'priority_score': 90 if artifact and not (web_recipe or transform_recipe) else 60 if web_recipe else 40,
+            **({'cad_recipe': cad_recipe} if cad_recipe else {}),
+            'priority_score': 90 if artifact and not (web_recipe or transform_recipe or cad_recipe) else 60 if web_recipe else 40,
             'request_digest': _digest(finish),
             'required_checks': [{'check_id': stage + '.verified', 'stage': stage,
                                  'description': description} for stage, description in zip(STAGES, (
@@ -256,7 +266,8 @@ def create(tenant, project_id, campaign_id, finish, idempotency_key,
         return advance(tenant, project_id, campaign_id, rid, authority_session_id, authority_turn_id)
     selection = capabilities.resolve(tenant, finish['delivery_profile'],
                                      existing_artifact=bool(contract.get('selected_artifact')),
-                                     **({'transform_recipe': True} if contract.get('transform_recipe') else {}))
+                                     **({'transform_recipe': True} if contract.get('transform_recipe') else {}),
+                                     **({'cad_recipe': True} if contract.get('cad_recipe') else {}))
     authority(tenant, project_id)
     _store().record_decision(org, project, campaign_id, rid, decision_key='capability-selection',
                              kind='capability_selection', payload=selection, decided_by=str(actor))
@@ -322,13 +333,15 @@ def read_artifact(tenant, project_id, campaign_id, release_id, name):
     completion = _store().get_release(org, project, campaign_id, release_id)
     release = completion['release']
     artifact = _artifact(release)
-    if not release['contract'].get('web_recipe') and name != artifact['name']:
+    if not (release['contract'].get('web_recipe') or release['contract'].get('cad_recipe')) and name != artifact['name']:
         raise LookupError('Artifact unavailable')
     current = [s for s in completion.get('stages', []) if s.get('stage') == 'publication'
                and s.get('status') == 'passed'
                and s.get('contract_version', s.get('evidence', {}).get('contract_version')) == release['contract_version']]
     if not current:
         raise delivery.DeliveryConflict('Publication evidence unavailable')
+    if release['contract'].get('cad_recipe'):
+        return dxf_inventory.read(_lifecycle().project_snapshot(org, project, actor), release, name)
     if release['contract'].get('web_recipe'):
         if name == 'records.csv' and not any(s['stage'] == 'user_verification' and s['status'] == 'passed'
                 and s['contract_version'] == release['contract_version'] for s in completion.get('stages', [])):
@@ -440,7 +453,10 @@ def _advance(tenant, project_id, campaign_id, release_id,
             artifact = _artifact(release)
             url = ('/api/campaigns/' + str(campaign_id) + '/releases/' + str(release_id) + '/artifacts/' +
                    quote(artifact['name'], safe='') + '?project_id=' + str(project))
-            if contract.get('web_recipe'):
+            if contract.get('cad_recipe'):
+                observations = dxf_inventory.run_stage(__import__(__name__), tenant, project_id,
+                                                       campaign_id, completion, stage)
+            elif contract.get('web_recipe'):
                 observations = web_release.run_stage(__import__(__name__), tenant, project_id,
                                                        campaign_id, completion, stage)
             elif contract.get('transform_recipe') and stage == 'implementation':

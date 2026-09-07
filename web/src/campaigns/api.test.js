@@ -4,6 +4,7 @@ import { bindPublication, invokeCapability, listCapabilities } from './api.js'
 import { requestEnrollment } from './api.js'
 import { submitCampaign, createRelease, getRelease, listReleases, transitionRelease, retryReleaseStage } from './api.js'
 import { downloadReleaseArtifact } from './api.js'
+import { uploadProjectInput } from './api.js'
 
 vi.mock('../api.js', () => ({
   config: { apiBase: 'https://campaign.test', tenant: 'test-tenant' },
@@ -21,6 +22,79 @@ beforeEach(() => {
   vi.stubGlobal('fetch', fetcher)
 })
 afterEach(() => { vi.unstubAllGlobals(); localStorage.clear() })
+
+describe('finish input handoff', () => {
+  const text = '[{"name":"Alice","total":42}]'
+  const input = (name = 'records.json', bytes = new TextEncoder().encode(text)) => ({
+    name, size: bytes.byteLength, arrayBuffer: async () => bytes.buffer,
+  })
+  const sha = async text => Array.from(new Uint8Array(await webcrypto.subtle.digest('SHA-256', new TextEncoder().encode(text))),
+    byte => byte.toString(16).padStart(2, '0')).join('')
+  beforeEach(() => {
+    vi.stubGlobal('crypto', webcrypto)
+    fetcher.mockImplementation(async (_url, options) => ({ ok: true, json: async () => options.method === 'PUT'
+      ? { file: { ...JSON.parse(options.body), content_sha256: await sha(JSON.parse(options.body).content) } }
+      : { files: [] } }))
+  })
+  it('uses the closed authenticated project route and reuses its path and key after uncertain delivery', async () => {
+    localStorage.setItem('leaf.org_id', 'current-workspace')
+    const normal = fetcher.getMockImplementation()
+    let uncertain = true
+    fetcher.mockImplementation(async (...args) => {
+      if (args[1].method === 'PUT' && uncertain) { uncertain = false; throw new Error('Connection lost') }
+      return normal(...args)
+    })
+    await expect(uploadProjectInput(P, input())).rejects.toThrow('could not be reached')
+    const ready = await uploadProjectInput(P, input())
+    const puts = fetcher.mock.calls.filter(([, options]) => options.method === 'PUT')
+    expect(puts).toHaveLength(2)
+    expect(puts[0]).toEqual(puts[1])
+    expect(puts[1][0]).toBe(`https://campaign.test/api/projects/${P}/files`)
+    expect(puts[1][1]).toMatchObject({ redirect: 'error', headers: {
+      Authorization: 'Bearer test-token', 'X-Tenant-Id': 'test-tenant', 'X-Org-Id': 'current-workspace',
+      'Content-Type': 'application/json', 'Idempotency-Key': expect.stringMatching(/^finish-input-[a-f0-9]{64}$/),
+    } })
+    expect(ready.path).toBe(`inputs/${await sha(text)}/records.json`)
+    expect(JSON.parse(puts[1][1].body)).toEqual({ path: ready.path, media_type: 'application/json', content: text })
+    expect(fetcher.mock.calls[0][0]).toBe(`https://campaign.test/api/projects/${P}/lifecycle`)
+    await uploadProjectInput(C, input())
+    expect(fetcher.mock.calls.at(-1)[1].headers['Idempotency-Key']).not.toBe(puts[1][1].headers['Idempotency-Key'])
+  })
+  it.each([
+    ['drawing.dwg', new Uint8Array([65])], ['file.constructor', new Uint8Array([65])], ['empty.json', new Uint8Array()],
+    ['large.txt', new Uint8Array(1048577)], ['invalid.json', new Uint8Array([0xc3, 0x28])],
+    ['binary.dxf', new Uint8Array([65, 0, 66])], ['unicode.dxf', new TextEncoder().encode('é')],
+  ])('rejects invalid input %s before any request', async (name, bytes) => {
+    await expect(uploadProjectInput(P, input(name, bytes))).rejects.toThrow()
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+  it.each(['json', 'dxf', 'csv', 'txt', 'md'])('accepts supported %s text and retains a safe basename', async extension => {
+    const file = input(`../some unsafe..name.${extension.toUpperCase()}`, new TextEncoder().encode('A'))
+    const ready = await uploadProjectInput(P, file)
+    expect(ready.path).toMatch(new RegExp(`^inputs/[a-f0-9]{64}/some_unsafe_name\\.${extension}$`))
+  })
+  it('preserves UTF-8 bytes including a BOM and accepts the upper byte boundary', async () => {
+    const bytes = new TextEncoder().encode('\ufeff' + 'a'.repeat(1048573))
+    const ready = await uploadProjectInput(P, input('note.txt', bytes))
+    expect(ready.sha256).toBe(await sha('\ufeff' + 'a'.repeat(1048573)))
+    expect(JSON.parse(fetcher.mock.calls.at(-1)[1].body).content.startsWith('\ufeff')).toBe(true)
+  })
+  it('does not overwrite conflicting saved material or accept an unconfirmed acknowledgement', async () => {
+    const ready = await uploadProjectInput(P, input())
+    fetcher.mockClear()
+    fetcher.mockResolvedValue({ ok: true, json: async () => ({ files: [{ path: ready.path, content: 'other', content_sha256: 'b'.repeat(64) }] }) })
+    await expect(uploadProjectInput(P, input())).rejects.toThrow('Different project material')
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    fetcher.mockResolvedValueOnce({ ok: true, json: async () => ({ files: [] }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ file: { path: 'wrong' } }) })
+    await expect(uploadProjectInput(P, input())).rejects.toThrow('did not confirm')
+  })
+  it('requires current account authentication', async () => {
+    localStorage.clear()
+    await expect(uploadProjectInput(P, input())).rejects.toThrow('Sign in')
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+})
 
 describe('completion transport', () => {
   const finish = { delivery_profile: 'cad_file', intended_user: 'Project owner', workflow: 'Download the drawing', artifact_refs: ['project-artifact'] }

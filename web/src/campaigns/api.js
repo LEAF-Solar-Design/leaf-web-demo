@@ -67,6 +67,61 @@ function post(body, headers = {}) {
   return { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) }
 }
 
+const inputMediaTypes = { json: 'application/json', dxf: 'application/dxf', csv: 'text/csv', txt: 'text/plain', md: 'text/markdown' }
+const maxInputBytes = 1048576
+
+// Keep file contents inside the existing authenticated project transport.
+export async function uploadProjectInput(projectId, file) {
+  const project = uuid(projectId, 'project')
+  const name = typeof file?.name === 'string' ? file.name.split(/[\\/]/).pop() : ''
+  const extension = name.match(/\.([^.]+)$/)?.[1].toLowerCase()
+  const mediaType = Object.hasOwn(inputMediaTypes, extension) ? inputMediaTypes[extension] : null
+  if (!mediaType) invalid('input file', 'Choose a JSON, ASCII DXF, CSV, TXT or MD file.')
+  if (!Number.isSafeInteger(file?.size) || file.size < 1 || file.size > maxInputBytes) {
+    invalid('input file', 'Choose a file from 1 byte through 1 MiB.')
+  }
+  let bytes
+  try {
+    bytes = new Uint8Array(typeof file.arrayBuffer === 'function' ? await file.arrayBuffer() : await new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result)
+      reader.onerror = () => reject(new Error('File read failed'))
+      reader.onabort = () => reject(new Error('File read cancelled'))
+      reader.readAsArrayBuffer(file)
+    }))
+  } catch { invalid('input file', 'The file could not be read. Select it again.') }
+  if (bytes.byteLength !== file.size || bytes.byteLength < 1 || bytes.byteLength > maxInputBytes) {
+    invalid('input file', 'Choose a file from 1 byte through 1 MiB.')
+  }
+  let content
+  try { content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes) }
+  catch { invalid('input file', 'The file must contain valid UTF-8 text.') }
+  if (content.includes('\u0000') || (extension === 'dxf' && /[^\x01-\x7f]/.test(content))) {
+    invalid('input file', extension === 'dxf' ? 'Choose an ASCII DXF file, not a binary drawing.' : 'The file must contain text without null bytes.')
+  }
+  if (!globalThis.crypto?.subtle?.digest) invalid('input file', 'This browser cannot prepare the file safely. Try a secure browser session.')
+  const hash = async value => Array.from(new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', value)),
+    byte => byte.toString(16).padStart(2, '0')).join('')
+  const digest = await hash(bytes)
+  const stem = name.slice(0, -(extension.length + 1)).replace(/[^A-Za-z0-9._-]/g, '_')
+    .replace(/\.{2,}/g, '_').replace(/^[._-]+|[._-]+$/g, '').slice(0, 96) || 'input'
+  const path = `inputs/${digest}/${stem}.${extension}`
+  const idempotencyKey = `finish-input-${await hash(new TextEncoder().encode(`${project}\n${path}\n${digest}`))}`
+  const snapshot = await request(`/api/projects/${project}/lifecycle`, { redirect: 'error' })
+  if (!Array.isArray(snapshot?.files)) throw new Error('Project material could not be checked. Try adding the file again.')
+  const existing = snapshot.files.find(item => item.path === path)
+  if (existing && (existing.content_sha256 !== digest || existing.media_type !== mediaType || existing.content !== content)) {
+    throw new Error('Different project material already uses this input path. Keep that material and select a different file name.')
+  }
+  const result = await request(`/api/projects/${project}/files`, {
+    ...post({ path, media_type: mediaType, content }, { 'Idempotency-Key': idempotencyKey }), method: 'PUT', redirect: 'error',
+  })
+  if (result?.file?.path !== path || result.file.content_sha256 !== digest || result.file.media_type !== mediaType) {
+    throw new Error('The server did not confirm this input. Try adding the file again.')
+  }
+  return { path, name, sha256: digest }
+}
+
 function finishFields(finish) {
   if (!finish || typeof finish !== 'object' || Array.isArray(finish)) invalid('finish', 'Choose a delivery profile.')
   const profile = bounded(finish.delivery_profile, 'delivery profile', 64)

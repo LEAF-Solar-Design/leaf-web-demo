@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import useCampaigns from './useCampaigns.js'
+import { uploadProjectInput } from './api.js'
 import './campaigns.css'
 
 const conflictMessage = 'This question already has a different recorded answer. Reload to see it.'
@@ -53,22 +54,40 @@ function check(value, field, max) {
   }
 }
 
-function SubmitForm({ campaign }) {
+function SubmitForm({ campaign, projectId }) {
   const [title, setTitle] = useState('')
   const [prompt, setPrompt] = useState('')
   const [mode, setMode] = useState('ordinary')
   const [profile, setProfile] = useState('web_tool')
   const [deadline, setDeadline] = useState('')
+  const [input, setInput] = useState({ file: null, ready: null, error: null, busy: false })
+  const inputLive = useRef(false)
+  const inputLock = useRef(false)
+  useEffect(() => { inputLive.current = true; return () => { inputLive.current = false } }, [])
   const action = useAction()
-  const busy = action.busy || !!campaign.pending.submit
+  const busy = action.busy || !!campaign.pending.submit || input.busy
   const field = action.error?.invalidField
+  async function addInput() {
+    if (inputLock.current || !input.file || input.ready || busy) return
+    inputLock.current = true
+    setInput(current => ({ ...current, busy: true, error: null, ready: null }))
+    try {
+      const ready = await uploadProjectInput(projectId, input.file)
+      if (inputLive.current) setInput(current => ({ ...current, busy: false, ready }))
+    } catch (error) {
+      if (inputLive.current) setInput(current => ({ ...current, busy: false, error, ready: null }))
+    } finally { inputLock.current = false }
+  }
   return <form className="panel-sub" noValidate onSubmit={event => {
     event.preventDefault()
     action.run(() => {
       check(title, 'title', 200)
       check(prompt, 'prompt', mode === 'finish' ? 2000 : 32768)
+      if (mode === 'finish' && input.file && !input.ready) {
+        throw new Error('Add the selected input to this project before requesting a release.')
+      }
       return campaign.submit({ title, prompt, ...(mode === 'finish' ? { mode: 'finish', finish: {
-        delivery_profile: profile, intended_user: 'Project owner', workflow: prompt, artifact_refs: [],
+        delivery_profile: profile, intended_user: 'Project owner', workflow: prompt, artifact_refs: input.ready ? [input.ready.path] : [],
         ...(deadline ? { deadline_at: deadline } : {}),
       } } : {}) })
     }, 'Campaign recorded.')
@@ -79,6 +98,16 @@ function SubmitForm({ campaign }) {
       <option value="finish">Finish this project</option>
     </select></label>
     {mode === 'finish' && <DeliveryProfile value={profile} onChange={setProfile} disabled={busy} />}
+    {mode === 'finish' && <div>
+      <label>Input file (optional)<input type="file" accept=".json,.dxf,.csv,.txt,.md" disabled={busy}
+        onChange={event => setInput({ file: event.target.files?.[0] || null, ready: null, error: null, busy: false })} /></label>
+      <p className="dim">JSON, ASCII DXF, CSV, TXT or MD. UTF-8 text, from 1 byte through 1 MiB.</p>
+      <button type="button" className="chip-act" disabled={busy || !input.file || !!input.ready}
+        aria-busy={input.busy} onClick={addInput}>Add to project</button>
+      <p role="status">{input.busy ? 'Adding input to project…' : input.ready ? `${input.ready.name} added to this project. Ready for this release.`
+        : input.file ? 'Add the selected input to this project before requesting a release.' : 'Existing project material will be used if no file is selected.'}</p>
+      <Alert error={input.error} />
+    </div>}
     {mode === 'finish' && <label>Release deadline (optional)<input type="datetime-local" value={deadline} disabled={busy}
       onChange={event => setDeadline(event.target.value)} /></label>}
     <label>Title<input value={title} maxLength={200} aria-invalid={field === 'title'} onChange={event => setTitle(event.target.value)} /></label>
@@ -86,7 +115,7 @@ function SubmitForm({ campaign }) {
     <label>Prompt<textarea value={prompt} maxLength={mode === 'finish' ? 2000 : 32768} aria-invalid={field === 'prompt'} onChange={event => setPrompt(event.target.value)} /></label>
     <span className="dim" aria-live="polite">{(mode === 'finish' ? 2000 : 32768) - prompt.length} characters remaining</span>
     {field === 'prompt' && <Alert error={action.error} />}
-    <button type="submit" className="btn primary" disabled={busy} aria-busy={busy}>{mode === 'finish' ? 'Finish this project' : 'Submit campaign'}</button>
+    <button type="submit" className="btn primary" disabled={busy || (mode === 'finish' && !!input.file && !input.ready)} aria-busy={busy}>{mode === 'finish' ? 'Finish this project' : 'Submit campaign'}</button>
     {field !== 'title' && field !== 'prompt' && <Alert error={action.error} onReload={campaign.refetch} />}
     <span role="status">{action.outcome}</span>
   </form>
@@ -447,7 +476,7 @@ function SignedInPanel({ projectId, projectName, artifactUrlApi, authorityProvid
   const selected = campaign.selected
   return <>
     <p className="dim">{projectName ? `${projectName} / Campaign` : 'Project / Campaign'}</p>
-    <SubmitForm key={`form:${campaign.selectedId || 'new'}`} campaign={campaign} />
+    <SubmitForm key={`form:${campaign.selectedId || 'new'}`} campaign={campaign} projectId={projectId} />
     {campaign.status === 'loading' && <div role="status" aria-label="Loading campaigns">
       <div className="skeleton-stack" aria-hidden="true"><div className="skeleton-row" /><div className="skeleton-row" /></div>
     </div>}

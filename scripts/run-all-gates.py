@@ -331,6 +331,8 @@ def build_suites() -> List[Suite]:
                 _py_pytest("tests/test_campaign_conversation.py"), 16),
         Suite("server-campaign-delivery", "server tests/test_campaign_delivery_service.py", "pytest", SERVER,
               _py_pytest("tests/test_campaign_delivery_service.py"), 1),
+        Suite("server-campaign-dxf-inventory", "server tests/test_campaign_dxf_inventory.py", "pytest", SERVER,
+              _py_pytest("tests/test_campaign_dxf_inventory.py"), 29),
         Suite("server-campaign-capability-resolver", "server tests/test_campaign_capability_resolver.py", "pytest", SERVER,
               _py_pytest("tests/test_campaign_capability_resolver.py"), 1),
         Suite("server-campaign-capability-job", "server tests/test_campaign_capability_job.py", "pytest", SERVER,

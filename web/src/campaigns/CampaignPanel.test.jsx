@@ -2,8 +2,10 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import CampaignPanel from './CampaignPanel.jsx'
 import useCampaigns from './useCampaigns.js'
+import { uploadProjectInput } from './api.js'
 
 vi.mock('./useCampaigns.js', () => ({ default: vi.fn() }))
+vi.mock('./api.js', () => ({ uploadProjectInput: vi.fn() }))
 
 const P = '11111111-1111-1111-1111-111111111111'
 const C = '33333333-3333-3333-3333-333333333333'
@@ -12,6 +14,7 @@ const row = { campaign_id: C, title: 'Release documents', prompt: 'Organize reci
 let campaign
 
 beforeEach(() => {
+  uploadProjectInput.mockReset()
   campaign = {
     status: 'ready', refreshing: false, error: null, errorAction: null,
     execution: null, executionLoading: false, executionError: null,
@@ -30,6 +33,84 @@ beforeEach(() => {
 afterEach(cleanup)
 
 const panel = props => <CampaignPanel projectId={P} projectName="Document studio" signedIn {...props} />
+
+describe('finish input controls', () => {
+  const path = `inputs/${'a'.repeat(64)}/records.json`
+  const file = () => new File(['[{"name":"Alice"}]'], 'records.json', { type: 'application/json' })
+  function finishForm() {
+    fireEvent.change(screen.getByLabelText('Campaign goal'), { target: { value: 'finish' } })
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Records export' } })
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Download CSV' } })
+    return screen.getByLabelText('Title').closest('form')
+  }
+  it('requires an explicit upload, prevents duplicate clicks, then sends the acknowledged reference', async () => {
+    let resolve
+    uploadProjectInput.mockReturnValue(new Promise(done => { resolve = done }))
+    render(panel())
+    expect(screen.queryByLabelText('Input file (optional)')).toBeNull()
+    const form = finishForm()
+    const selected = file()
+    fireEvent.change(screen.getByLabelText('Input file (optional)'), { target: { files: [selected] } })
+    expect(uploadProjectInput).not.toHaveBeenCalled()
+    expect(within(form).getByRole('button', { name: 'Finish this project' }).disabled).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Add to project' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add to project' }))
+    expect(uploadProjectInput).toHaveBeenCalledExactlyOnceWith(P, selected)
+    expect(screen.getByText('Adding input to project…')).toBeTruthy()
+    expect(screen.queryByText(/added to this project/)).toBeNull()
+    resolve({ path, name: selected.name })
+    await screen.findByText('records.json added to this project. Ready for this release.')
+    fireEvent.submit(form)
+    await waitFor(() => expect(campaign.submit).toHaveBeenCalledWith({ title: 'Records export', prompt: 'Download CSV', mode: 'finish',
+      finish: { delivery_profile: 'web_tool', intended_user: 'Project owner', workflow: 'Download CSV', artifact_refs: [path] } }))
+  })
+  it('keeps failed input unready, blocks direct submission and permits an explicit retry', async () => {
+    uploadProjectInput.mockRejectedValueOnce(new Error('Upload failed')).mockResolvedValueOnce({ path, name: 'records.json' })
+    render(panel())
+    const form = finishForm()
+    const selected = file()
+    fireEvent.change(screen.getByLabelText('Input file (optional)'), { target: { files: [selected] } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add to project' }))
+    await screen.findByText('Upload failed')
+    expect(screen.queryByText(/added to this project/)).toBeNull()
+    fireEvent.submit(form)
+    await waitFor(() => expect(within(form).getAllByRole('alert')).toHaveLength(2))
+    expect(campaign.submit).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Add to project' }))
+    await screen.findByText('records.json added to this project. Ready for this release.')
+    expect(uploadProjectInput.mock.calls).toEqual([[P, selected], [P, selected]])
+  })
+  it.each(['resolve', 'reject'])('clears project input and ignores an old upload %s after switching projects', async outcome => {
+    let resolve, reject
+    uploadProjectInput.mockReturnValue(new Promise((yes, no) => { resolve = yes; reject = no }))
+    const { rerender } = render(panel())
+    finishForm()
+    fireEvent.change(screen.getByLabelText('Input file (optional)'), { target: { files: [file()] } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add to project' }))
+    rerender(panel({ projectId: Q }))
+    const form = finishForm()
+    if (outcome === 'resolve') resolve({ path, name: 'records.json' })
+    else reject(new Error('Old upload failed'))
+    fireEvent.submit(form)
+    await waitFor(() => expect(campaign.submit).toHaveBeenCalledWith(expect.objectContaining({ finish: expect.objectContaining({ artifact_refs: [] }) })))
+    expect(screen.getByLabelText('Input file (optional)').files).toHaveLength(0)
+    expect(screen.queryByText(/added to this project|Old upload failed/)).toBeNull()
+  })
+  it('clears prior readiness when selecting a replacement and leaves ordinary submission intact', async () => {
+    uploadProjectInput.mockResolvedValue({ path, name: 'records.json' })
+    render(panel())
+    const form = finishForm()
+    fireEvent.change(screen.getByLabelText('Input file (optional)'), { target: { files: [file()] } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add to project' }))
+    await screen.findByText('records.json added to this project. Ready for this release.')
+    fireEvent.change(screen.getByLabelText('Input file (optional)'), { target: { files: [new File(['0'], 'drawing.dxf')] } })
+    expect(screen.queryByText(/added to this project/)).toBeNull()
+    expect(within(form).getByRole('button', { name: 'Finish this project' }).disabled).toBe(true)
+    fireEvent.change(screen.getByLabelText('Campaign goal'), { target: { value: 'ordinary' } })
+    fireEvent.submit(form)
+    await waitFor(() => expect(campaign.submit).toHaveBeenCalledWith({ title: 'Records export', prompt: 'Download CSV' }))
+  })
+})
 
 describe('release evidence panel', () => {
   it('passes the project authority provider and labels only authoring continuation', async () => {

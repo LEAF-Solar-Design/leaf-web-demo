@@ -115,7 +115,7 @@ def _contract(value, profile):
         'original_goal', 'intended_user', 'workflow', 'release_boundary',
         'deferred_items', 'artifact_refs', 'required_checks',
         'selected_artifact', 'request_digest', 'request_key_digest', 'web_recipe',
-        'transform_recipe', 'deadline_at', 'priority_score',
+        'transform_recipe', 'cad_recipe', 'deadline_at', 'priority_score',
     }:
         _invalid('invalid contract fields')
     for field in ('original_goal', 'intended_user', 'workflow', 'release_boundary'):
@@ -139,7 +139,7 @@ def _contract(value, profile):
             _invalid('invalid ' + field)
     _selected_artifact(value.get('selected_artifact'))
     recipe = value.get('web_recipe')
-    if 'web_recipe' in value and 'transform_recipe' in value:
+    if sum(key in value for key in ('web_recipe', 'transform_recipe', 'cad_recipe')) > 1:
         _invalid('release recipes are mutually exclusive')
     if recipe is not None:
         if (profile != 'web_tool' or not isinstance(recipe, dict)
@@ -163,6 +163,19 @@ def _contract(value, profile):
         if (not source or source['format'] != 'json' or source['media_type'] != 'application/json'
                 or not selected or selected['format'] != 'csv' or selected['media_type'] != 'text/csv'):
             _invalid('transform recipe requires source JSON and generated CSV')
+    if 'cad_recipe' in value:
+        recipe = value['cad_recipe']
+        if (profile != 'cad_file' or not isinstance(recipe, dict)
+                or set(recipe) != {'recipe_id', 'recipe_version', 'source_artifact'}
+                or recipe['recipe_id'] != 'dxf-layer-summary'
+                or type(recipe['recipe_version']) is not int or recipe['recipe_version'] != 1):
+            _invalid('invalid CAD recipe')
+        source = _selected_artifact(recipe['source_artifact'])
+        selected = value.get('selected_artifact')
+        if (not source or source['format'] != 'dxf' or source['media_type'] != 'image/vnd.dxf'
+                or not selected or selected['format'] != 'csv' or selected['media_type'] != 'text/csv'
+                or value.get('artifact_refs') != [source['path']]):
+            _invalid('CAD recipe requires one source DXF and generated CSV')
     checks = value.get('required_checks')
     if not isinstance(checks, list) or not 1 <= len(checks) <= 128:
         _invalid('required_checks must not be empty')
