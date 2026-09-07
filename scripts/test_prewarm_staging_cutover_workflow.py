@@ -358,20 +358,18 @@ def test_pr_events_only_report_retirement():
 
 def test_the_dispatch_stages_both_colours_on_the_prewarm_rail():
     body = step_body("stage-group", "Dispatch the prewarm")
-    assert "deploy_mode=prewarm" in body
-    assert "expected_task_definition=auto-live" in body
-    assert "deploy_strategy=bluegreen" in body
+    assert "timeout 60 aws codebuild start-build" in body
+    assert "--project-name leaf-deploy-terraform-staging" in body
     assert "for SERVICE in $STAGE_SERVICES" in body
-    # Staging is an optimisation: a refused or failed dispatch degrades to the
-    # measured fallback warm and must never redden the PR.
     assert "::warning::Prewarm dispatch for $SERVICE failed" in body
-    # Identity, never inference. First choice is the run id GitHub itself
-    # reports, and it is verified against the workflow path and run-name before
-    # it is trusted; the mark scan is the fallback for a gh that reports
-    # nothing, and it too requires exactly one match.
-    assert "actions/runs/[0-9]+" in body
-    assert "did not verify as this dispatch" in body
-    assert "if length == 1 then .[0].databaseId else empty end" in body
+    assert "--source-version" not in body
+    assert set(re.findall(r"name=([A-Z_]+),value=", body)) == {
+        "STEP", "LEAF_DEPLOY_APPROVED_BY", "LEAF_DEPLOY_SERVICE",
+        "LEAF_DEPLOY_IMAGE_TAG", "LEAF_DEPLOY_EXPECTED_TD", "LEAF_DEPLOY_REQUEST_ID",
+    }
+    job = str(group_workflow_document()["jobs"]["stage-group"])
+    assert "gh workflow run" not in job
+    assert "INFRA_REPO" not in job
 
 
 def test_web_and_app_are_staged_again_because_the_merge_group_makes_the_stage_fresh():
@@ -587,10 +585,19 @@ def test_the_group_supply_set_step_retains_tree_identity_and_poll_bounds():
     assert "SUPPLY_SET_INTERVAL" in body
 
 
-def test_the_group_dispatch_keeps_the_cross_repo_token_off_the_pr_path():
-    steps = group_workflow_document()["jobs"]["stage-group"]["steps"]
-    dispatch = next(step for step in steps if step.get("id") == "dispatch")
-    assert dispatch["env"]["GH_TOKEN"] == "${{ secrets.TERRAFORM_REPO_TOKEN }}"
+def test_the_group_dispatch_uses_only_the_oidc_role():
+    job = group_workflow_document()["jobs"]["stage-group"]
+    assert job["permissions"] == {
+        "contents": "read", "actions": "read", "pull-requests": "read", "id-token": "write",
+    }
+    credentials = next(step for step in job["steps"] if
+                       step.get("uses", "").startswith("aws-actions/configure-aws-credentials"))
+    assert credentials["uses"] == "aws-actions/configure-aws-credentials@v6.1.0"
+    assert credentials["with"] == {
+        "role-to-assume": "${{ secrets.AWS_ECR_PUSH_ROLE }}", "aws-region": "us-east-1",
+    }
+    assert credentials["if"] == "steps.readiness.outputs.ready == 'true'"
+    assert set(re.findall(r"secrets\.([A-Z_]+)", str(job))) == {"AWS_ECR_PUSH_ROLE"}
     _check_pr_notice(workflow_document())
 
 
@@ -933,16 +940,75 @@ def test_the_cross_repo_token_is_scoped_to_the_dispatch_steps():
                 )
 
 
-def test_run_url_extraction_cannot_abort_the_service_loop():
-    """Under pipefail, a no-match grep makes the run-URL pipeline fail.
-
-    Errexit then aborts the step before the mark scan and before the next service.
-    Guard the extraction so an empty run URL reaches the fallback.
-    """
-    text = step_body("stage-group", "Dispatch the prewarm")
-    assert "RUN_ID=$(printf '%s' \"$DISPATCH_OUTPUT\" | grep -oE 'actions/runs/[0-9]+' | head -1 | cut -d/ -f3 || true)" in text
-    assert "RUN_ID=$(printf '%s' \"$DISPATCH_OUTPUT\" | grep -oE 'actions/runs/[0-9]+' | head -1 | cut -d/ -f3)" not in text
+def test_build_id_extraction_refuses_unresolved_identity():
+    body = step_body("stage-group", "Dispatch the prewarm")
+    assert '^leaf-deploy-terraform-staging:[0-9a-f-]{36}$' in body
+    assert 'build_id: null, disposition: "unresolved"' in body
+    assert 'build_id: $build_id, disposition: "dispatched"' in body
+    assert 'producer: "codebuild"' in step_body("stage-group", "Emit the relay receipt")
 
 
 def test_pr_stage_is_notice_only():
     _check_pr_notice(workflow_document())
+
+
+@needs_shell
+@pytest.mark.parametrize("response,disposition", [
+    ({"build": {"id": "leaf-deploy-terraform-staging:" + "a" * 36}}, "dispatched"),
+    ({"build": {}}, "unresolved"),
+    ({"build": {"id": "other-project:" + "a" * 36}}, "unresolved"),
+    ("malformed JSON", "unresolved"),
+    ("refused", "dispatch-failed"),
+])
+def test_codebuild_dispatch_and_relay_receipt_executed(tmp_path, response, disposition):
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    (tmp_path / "response.txt").write_text(
+        json.dumps(response) if isinstance(response, dict) else response, encoding="utf-8",
+    )
+    fake = binary / "aws"
+    fake.write_text(textwrap.dedent('''\
+        #!/usr/bin/env bash
+        set -euo pipefail
+        printf '%s\\n' "$*" >> aws-calls.txt
+        if [[ "$*" == *"name=LEAF_DEPLOY_SERVICE,value=web"* ]]; then
+          cat response.txt
+          if [ "$(cat response.txt)" = refused ]; then exit 1; fi
+        else
+          echo '{"build":{"id":"leaf-deploy-terraform-staging:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}'
+        fi
+        '''), encoding="utf-8", newline="\n")
+    fake.chmod(0o755)
+    image_tag = "spec-" + "b" * 40 + "-" + "a" * 12
+    run_step(step_body("stage-group", "Dispatch the prewarm"), tmp_path, {
+        "STAGE_SERVICES": group_workflow_document()["env"]["STAGE_SERVICES"],
+        "IMAGE_TAG": image_tag, "SHA12": "a" * 12, "GITHUB_RUN_ID": "77",
+    })
+    entries = json.loads((tmp_path / "dispatched.json").read_text())
+    assert entries == [
+        {"service": "web", "build_id": response["build"]["id"] if disposition == "dispatched" else None,
+         "disposition": disposition},
+        {"service": "app", "build_id": "leaf-deploy-terraform-staging:" + "b" * 36,
+         "disposition": "dispatched"},
+    ]
+    calls = (tmp_path / "aws-calls.txt").read_text().splitlines()
+    assert len(calls) == 2
+    for service, call in zip(("web", "app"), calls):
+        assert shlex.split(call) == [
+            "codebuild", "start-build", "--project-name", "leaf-deploy-terraform-staging",
+            "--environment-variables-override", "name=STEP,value=prewarm",
+            "name=LEAF_DEPLOY_APPROVED_BY,value=merge-queue:" + "a" * 12,
+            "name=LEAF_DEPLOY_SERVICE,value=" + service,
+            "name=LEAF_DEPLOY_IMAGE_TAG,value=" + image_tag,
+            "name=LEAF_DEPLOY_EXPECTED_TD,value=auto-live",
+            "name=LEAF_DEPLOY_REQUEST_ID,value=" + "a" * 12 + "-77", "--output", "json",
+        ]
+    run_step(step_body("stage-group", "Emit the relay receipt"), tmp_path, {
+        "HEAD_SHA": "a" * 40, "BASE_SHA": "b" * 40, "MEMBERS": "[41]",
+        "ELIGIBILITY": "merge group", "IMAGE_TAG": image_tag, "PREVIEW_SHA": "a" * 40,
+        "TREE": "b" * 40, "GITHUB_RUN_ID": "77", "TAG_READY": "true",
+    })
+    receipt = json.loads((tmp_path / "prewarm-relay-receipt.json").read_text())
+    assert receipt["producer"] == "codebuild"
+    assert receipt["dispatched"] == entries
+    assert receipt["relay_run_id"] == "77"

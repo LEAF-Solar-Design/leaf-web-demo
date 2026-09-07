@@ -1395,7 +1395,8 @@ def build_suites() -> List[Suite]:
               # validation (queued and superseded rows), and pin the secret-free
               # dispatcher, main-ref guard, and recorded-base step guards.
               # Queue-mode cutover: 50 base rows plus the notice-only PR pin.
-              _py_pytest("test_prewarm_staging_cutover_workflow.py"), 51),
+              # Native CodeBuild prewarm: five executed dispatch/receipt rows.
+              _py_pytest("test_prewarm_staging_cutover_workflow.py"), 56),
         # Merge-queue group controller (slice C: mq-review, mq-supply,
         # mq-prewarm). 32 = the executed matrix: mq-review's GraphQL
         # pagination and post-check re-read run against a fake gh (a queue
@@ -1411,11 +1412,12 @@ def build_suites() -> List[Suite]:
         # per-service terraform checks (service, image_tag, weights_touched
         # false), the docs-only and migration-refusal exemptions, mq-prewarm's
         # if:always() plus its explicit dependency-failure branch, the
-        # concurrency key, least permissions, and that TERRAFORM_REPO_TOKEN
-        # never reaches any step but the one that reads the terraform repo.
+        # concurrency key, least permissions, and the OIDC role used to read
+        # CodeBuild status and the rail's CloudWatch receipts.
         Suite("merge-queue-workflow",
               "scripts test_merge_queue_workflow.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_merge_queue_workflow.py"), 61),
+              # Native receipts: seven field refusals, five statuses, six log streams.
+              SCRIPTS_DIR, _py_pytest("test_merge_queue_workflow.py"), 79),
         Suite("platform-release-manifest",
               "scripts test_platform_release_manifest.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_platform_release_manifest.py"), 88),

@@ -8,7 +8,7 @@ name: merge-queue
 # head; mq-supply proves exactly one provider-bound speculative image set
 # exists for the group's tree (or that the group is docs-only, in which case
 # there is nothing to build); mq-prewarm proves the relay (slice B) staged
-# every service the group needs and that terraform's own deploy receipts
+# every service the group needs and that the CodeBuild rail's deploy receipts
 # confirm the staged task never touched weights, then it fails EXPLICITLY if
 # either dependency failed or was cancelled, so a skipped job can never read
 # as green.
@@ -55,8 +55,6 @@ env:
   RELAY_RECEIPT_INTERVAL: "60"
   TERRAFORM_RECEIPT_POLLS: "40"
   TERRAFORM_RECEIPT_INTERVAL: "60"
-  INFRA_REPO: LEAF-Solar-Design/leaf-automation-aws-terraform
-  DEPLOY_WORKFLOW: deploy-leaf-platform-staging.yml
 
 jobs:
   mq-review:
@@ -312,6 +310,10 @@ jobs:
     if: always()
     runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
     steps:
       - name: Publish the deferred queue-preparation success (pull_request)
         if: github.event_name == 'pull_request'
@@ -380,21 +382,27 @@ jobs:
           def fail(message):
               raise SystemExit("::error::mq-prewarm: " + message)
 
-          entries = json.loads(Path("relay-receipt/prewarm-relay-receipt.json").read_text()).get("dispatched")
+          relay = json.loads(Path("relay-receipt/prewarm-relay-receipt.json").read_text())
+          if relay.get("producer") != "codebuild":
+              fail("relay producer is not codebuild")
+          if not isinstance(relay.get("relay_run_id"), str) or not re.fullmatch(r"[0-9]+", relay["relay_run_id"]):
+              fail("invalid relay_run_id")
+          entries = relay.get("dispatched")
           if not isinstance(entries, list) or not entries:
               fail("relay dispatched nothing for this group")
           dispatched = {}
           for entry in entries:
               if not isinstance(entry, dict):
                   fail("invalid dispatched entry for service <unknown>")
-              service, run_id = entry.get("service"), entry.get("run_id")
+              service, build_id = entry.get("service"), entry.get("build_id")
               if (not isinstance(service, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", service)
                       or entry.get("disposition") != "dispatched"
-                      or type(run_id) is not int or run_id <= 0):
-                  fail(f"invalid dispatched run for service {service!r}")
+                      or not isinstance(build_id, str)
+                      or not re.fullmatch(r"leaf-deploy-terraform-staging:[0-9a-f-]{36}", build_id)):
+                  fail(f"invalid dispatched build for service {service!r}")
               if service in dispatched:
                   fail(f"duplicate dispatched service {service}")
-              dispatched[service] = run_id
+              dispatched[service] = build_id
           try:
               response = json.loads(Path("relay-workflow.json").read_text())
               source = base64.b64decode(response["content"]).decode("utf-8")
@@ -411,6 +419,7 @@ jobs:
               fail("relay dispatched services differ from configured services")
           Path("dispatched-map.json").write_text(json.dumps(dispatched))
           PY
+                    echo "relay_run_id=$(jq -r .relay_run_id relay-receipt/prewarm-relay-receipt.json)" >> "$GITHUB_OUTPUT"
                     echo "dispatched_json=$(jq -c . dispatched-map.json)" >> "$GITHUB_OUTPUT"
                     echo "mq-prewarm: relay receipt $NAME verified after $ATTEMPT poll(s)."
                     exit 0
@@ -425,67 +434,91 @@ jobs:
           echo "::error::mq-prewarm: no matching $NAME after $RELAY_RECEIPT_POLLS polls."
           exit 1
 
-      - name: Wait for every dispatched terraform staging receipt
+      - name: Configure AWS credentials for prewarm receipts
+        if: >-
+          github.event_name == 'merge_group' && needs.mq-supply.outputs.supply == 'present' &&
+          steps.relay.outputs.present == 'true' && steps.relay.outputs.migration_refusal != 'true'
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE }}
+          aws-region: us-east-1
+
+      - name: Wait for every dispatched CodeBuild staging receipt
         if: >-
           github.event_name == 'merge_group' && needs.mq-supply.outputs.supply == 'present' &&
           steps.relay.outputs.present == 'true' && steps.relay.outputs.migration_refusal != 'true'
         env:
-          GH_TOKEN: ${{ secrets.TERRAFORM_REPO_TOKEN }}
           TREE: ${{ needs.mq-supply.outputs.tree }}
           GROUP_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
           DISPATCHED_JSON: ${{ steps.relay.outputs.dispatched_json }}
+          RELAY_RUN_ID: ${{ steps.relay.outputs.relay_run_id }}
         run: |
           set -euo pipefail
           SHA12="${GROUP_HEAD_SHA:0:12}"
           EXPECTED_TAG="spec-$TREE-$SHA12"
+          REQUEST_ID="$SHA12-$RELAY_RUN_ID"
           ARNS=""
           SERVICES=$(jq -ej 'keys | if length > 0 then join(" ") else error("empty dispatched set") end' <<<"$DISPATCHED_JSON")
           for SERVICE in $SERVICES; do
-            RUN_ID=$(jq -j --arg s "$SERVICE" '.[$s] // empty' <<<"$DISPATCHED_JSON")
-            [ -n "$RUN_ID" ] || { echo "::error::mq-prewarm: no dispatched run id carried forward for $SERVICE."; exit 1; }
+            BUILD_ID=$(jq -j --arg s "$SERVICE" '.[$s] // empty' <<<"$DISPATCHED_JSON")
+            [[ "$BUILD_ID" =~ ^leaf-deploy-terraform-staging:[0-9a-f-]{36}$ ]] || { echo "::error::mq-prewarm: invalid dispatched build id for $SERVICE."; exit 1; }
             ATTEMPT=0
             FOUND=""
             while [ "$ATTEMPT" -lt "$TERRAFORM_RECEIPT_POLLS" ]; do
               ATTEMPT=$((ATTEMPT + 1))
-              RUN_RECORD=$(timeout 60 gh api "repos/$INFRA_REPO/actions/runs/$RUN_ID" 2>/dev/null || true)
-              STATUS=$(jq -j '.status // empty' <<<"${RUN_RECORD:-{}}" 2>/dev/null || true)
-              CONCLUSION=$(jq -j '.conclusion // empty' <<<"${RUN_RECORD:-{}}" 2>/dev/null || true)
-              if [ "$STATUS" = "completed" ]; then
-                if [ "$CONCLUSION" != "success" ]; then
-                  echo "::error::mq-prewarm: terraform deploy run $RUN_ID for $SERVICE concluded '$CONCLUSION', not success."
-                  exit 1
-                fi
-                ATTEMPT_NUM=$(jq -j '.run_attempt' <<<"$RUN_RECORD")
-                ARTIFACTS=$(timeout 60 gh api "repos/$INFRA_REPO/actions/runs/$RUN_ID/artifacts?per_page=100" 2>/dev/null || true)
-                NAME="staging-prewarm-receipt-$SERVICE-run-$RUN_ID-attempt-$ATTEMPT_NUM"
-                ARTIFACT_ID=$(jq -j --arg n "$NAME" '[.artifacts[]? | select(.name == $n and .expired == false)] | if length == 1 then .[0].id else empty end' <<<"$ARTIFACTS")
-                [ -n "$ARTIFACT_ID" ] || { echo "::error::mq-prewarm: expected exactly one $NAME artifact."; exit 1; }
-                timeout 60 gh api "repos/$INFRA_REPO/actions/artifacts/$ARTIFACT_ID/zip" > "receipt-$SERVICE.zip"
-                rm -rf "receipt-$SERVICE" && mkdir -p "receipt-$SERVICE"
-                unzip -o -q "receipt-$SERVICE.zip" -d "receipt-$SERVICE"
-                RECEIPT="receipt-$SERVICE/staged-prewarm-receipt.json"
-                [ -f "$RECEIPT" ] || { echo "::error::mq-prewarm: $NAME carries no staged-prewarm-receipt.json."; exit 1; }
-                REC_SERVICE=$(jq -j '.service // empty' "$RECEIPT")
-                REC_TAG=$(jq -j '.image_tag // empty' "$RECEIPT")
-                REC_WEIGHTS=$(jq -j 'if has("weights_touched") then (.weights_touched|tostring) else "missing" end' "$RECEIPT")
-                REC_SCHEMA=$(jq -j '.schema // empty' "$RECEIPT")
-                REC_RUN_ID=$(jq -j '.run_id | tostring' "$RECEIPT")
-                [ "$REC_SCHEMA" = "leaf.staging-prewarm-receipt.v1" ] || { echo "::error::mq-prewarm: $NAME schema mismatch ($REC_SCHEMA)."; exit 1; }
-                [ "$REC_RUN_ID" = "$RUN_ID" ] || { echo "::error::mq-prewarm: $NAME run_id mismatch ($REC_RUN_ID != $RUN_ID)."; exit 1; }
-                [ "$REC_SERVICE" = "$SERVICE" ] || { echo "::error::mq-prewarm: $NAME service mismatch ($REC_SERVICE)."; exit 1; }
-                [ "$REC_TAG" = "$EXPECTED_TAG" ] || { echo "::error::mq-prewarm: $NAME image_tag mismatch ($REC_TAG != $EXPECTED_TAG)."; exit 1; }
-                [ "$REC_WEIGHTS" = "false" ] || { echo "::error::mq-prewarm: $NAME weights_touched is '$REC_WEIGHTS', not false."; exit 1; }
-                ARN=$(jq -j '.staged_td_arn | select(type == "string") | select(startswith("arn:aws:ecs:"))' "$RECEIPT")
-                [ -n "$ARN" ] || { echo "::error::mq-prewarm: empty or invalid staged task definition ARN for $SERVICE."; exit 1; }
-                ARNS="${ARNS:+$ARNS }$ARN"
-                FOUND=true
-                break
-              fi
+              BUILD_RECORD=$(timeout 60 aws codebuild batch-get-builds --ids "$BUILD_ID" --output json)
+              STATUS=$(jq -r '.builds[0].buildStatus // empty' <<<"$BUILD_RECORD")
+              case "$STATUS" in
+                SUCCEEDED) FOUND=true; break ;;
+                IN_PROGRESS) ;;
+                FAILED|FAULT|STOPPED|TIMED_OUT|*)
+                  echo "::error::mq-prewarm: CodeBuild build $BUILD_ID for $SERVICE status '$STATUS', not SUCCEEDED."
+                  exit 1 ;;
+              esac
               if [ "$ATTEMPT" -lt "$TERRAFORM_RECEIPT_POLLS" ]; then
                 sleep "$TERRAFORM_RECEIPT_INTERVAL"
               fi
             done
-            [ "$FOUND" = "true" ] || { echo "::error::mq-prewarm: terraform deploy run $RUN_ID for $SERVICE never completed after $TERRAFORM_RECEIPT_POLLS polls."; exit 1; }
+            [ "$FOUND" = "true" ] || { echo "::error::mq-prewarm: CodeBuild build $BUILD_ID for $SERVICE never completed after $TERRAFORM_RECEIPT_POLLS polls."; exit 1; }
+            LOG_GROUP=$(jq -er '.builds[0].logs.groupName | select(type == "string" and length > 0)' <<<"$BUILD_RECORD")
+            LOG_STREAM=$(jq -er '.builds[0].logs.streamName | select(type == "string" and length > 0)' <<<"$BUILD_RECORD")
+            TOKEN=""
+            COMPLETE=false
+            : > receipt-lines.txt
+            for ((PAGE=0; PAGE<200; PAGE++)); do
+              TOKEN_ARGS=()
+              [ -z "$TOKEN" ] || TOKEN_ARGS=(--next-token "$TOKEN")
+              LOG_PAGE=$(timeout 60 aws logs get-log-events --log-group-name "$LOG_GROUP" \
+                --log-stream-name "$LOG_STREAM" --start-from-head "${TOKEN_ARGS[@]}" --output json)
+              jq -r '.events[]? | .message | split("\n")[] | select(startswith("LEAF_DEPLOY_RECEIPT "))' \
+                <<<"$LOG_PAGE" >> receipt-lines.txt
+              NEXT_TOKEN=$(jq -er '.nextForwardToken | select(type == "string" and length > 0)' <<<"$LOG_PAGE")
+              if [ "$NEXT_TOKEN" = "$TOKEN" ]; then
+                COMPLETE=true
+                break
+              fi
+              TOKEN="$NEXT_TOKEN"
+            done
+            [ "$COMPLETE" = "true" ] || { echo "::error::mq-prewarm: log pagination exceeded 200 pages for $SERVICE."; exit 1; }
+            [ -s receipt-lines.txt ] || { echo "::error::mq-prewarm: no LEAF_DEPLOY_RECEIPT line for $SERVICE."; exit 1; }
+            # The last receipt supersedes earlier refusals in this build's log.
+            tail -n 1 receipt-lines.txt | sed 's/^LEAF_DEPLOY_RECEIPT //' > staged-prewarm-receipt.json
+            RECEIPT=staged-prewarm-receipt.json
+            jq -e -s 'length == 1 and (.[0] | type == "object")' "$RECEIPT" >/dev/null || { echo "::error::mq-prewarm: invalid receipt JSON for $SERVICE."; exit 1; }
+            REC_SERVICE=$(jq -j '.service // empty' "$RECEIPT")
+            REC_TAG=$(jq -j '.image_tag // empty' "$RECEIPT")
+            REC_WEIGHTS=$(jq -j 'if has("weights_touched") then (.weights_touched|tostring) else "missing" end' "$RECEIPT")
+            REC_SCHEMA=$(jq -j '.schema // empty' "$RECEIPT")
+            REC_RUN_ID=$(jq -j '.run_id | tostring' "$RECEIPT")
+            [ "$REC_SCHEMA" = "leaf.staging-prewarm-receipt.v1" ] || { echo "::error::mq-prewarm: schema mismatch ($REC_SCHEMA)."; exit 1; }
+            [ "$REC_RUN_ID" = "$REQUEST_ID" ] || { echo "::error::mq-prewarm: run_id mismatch ($REC_RUN_ID != $REQUEST_ID)."; exit 1; }
+            [ "$REC_SERVICE" = "$SERVICE" ] || { echo "::error::mq-prewarm: service mismatch ($REC_SERVICE)."; exit 1; }
+            [ "$REC_TAG" = "$EXPECTED_TAG" ] || { echo "::error::mq-prewarm: image_tag mismatch ($REC_TAG != $EXPECTED_TAG)."; exit 1; }
+            [ "$REC_WEIGHTS" = "false" ] && jq -e '.weights_touched == false' "$RECEIPT" >/dev/null || { echo "::error::mq-prewarm: weights_touched is '$REC_WEIGHTS', not false."; exit 1; }
+            jq -e --arg build_id "$BUILD_ID" '.producer.kind == "codebuild" and .producer.build_id == $build_id' "$RECEIPT" >/dev/null || { echo "::error::mq-prewarm: producer mismatch for $SERVICE."; exit 1; }
+            ARN=$(jq -j '.staged_td_arn | select(type == "string") | select(startswith("arn:aws:ecs:"))' "$RECEIPT")
+            [ -n "$ARN" ] || { echo "::error::mq-prewarm: empty or invalid staged task definition ARN for $SERVICE."; exit 1; }
+            ARNS="${ARNS:+$ARNS }$ARN"
           done
           [ -n "$ARNS" ] || { echo "::error::mq-prewarm: empty staged task definition ARN list."; exit 1; }
           echo "mq-prewarm: staged task definitions: $ARNS"
