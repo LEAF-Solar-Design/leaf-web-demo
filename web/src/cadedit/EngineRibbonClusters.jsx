@@ -398,7 +398,9 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const linetypeCatalogue = Array.isArray(session.entities?.linetypes) && session.entities.linetypes.length
     ? session.entities.linetypes
     : ['ByLayer', 'ByBlock', 'Continuous']
-  const LINETYPE_TITLE = 'Linetype (this drawing\'s table; a save may still be refused for a name the server does not yet admit)'
+  const LINETYPE_TITLE = session.entities?.linetypesTruncated === true
+    ? "first 200 of the drawing's linetypes; type another name with LT"
+    : 'Linetype (this drawing\'s table; a save may still be refused for a name the server does not yet admit)'
   // W4g-7b-03c-g F8/F9: a head value outside the offered options (an ACI in
   // 8..255, a lineweight off the standard mm grid) must still be its OWN
   // option, or the select's `value` matches no `<option>` and the browser

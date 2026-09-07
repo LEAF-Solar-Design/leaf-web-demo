@@ -145,11 +145,11 @@ function projectDocument(doc) {
       measurement: entity.measurement ?? null,
     }
   })
-  return { entities, blocks: projection.blocks ?? [], linetypes: projection.linetypes ?? [], dimstyles: projection.dimstyles ?? [] }
+  return { entities, blocks: projection.blocks ?? [], linetypes: projection.linetypes ?? [], linetypesTruncated: projection.linetypesTruncated === true, dimstyles: projection.dimstyles ?? [] }
 }
 
 function loadedResponse(documentId, doc) {
-  const { entities, blocks, linetypes, dimstyles } = projectDocument(doc)
+  const { entities, blocks, linetypes, linetypesTruncated, dimstyles } = projectDocument(doc)
   return {
     type: 'documentLoaded',
     documentId,
@@ -157,6 +157,7 @@ function loadedResponse(documentId, doc) {
     entities,
     blocks,
     linetypes,
+    linetypesTruncated,
     dimstyles,
     blockBasePatched: doc.blockBasePatched ?? false,
     // The whole-document engine reads and rewrites EVERYTHING, so there is
@@ -386,7 +387,7 @@ async function applyEdit(engine, message) {
     current = null
     return refused(op, error instanceof Error ? error.message : String(error))
   }
-  const { entities, blocks, linetypes, dimstyles } = projection
+  const { entities, blocks, linetypes, linetypesTruncated, dimstyles } = projection
   current = { documentId: current.documentId, doc: reparsed }
   const reply = {
     type: 'editApplied',
@@ -396,6 +397,7 @@ async function applyEdit(engine, message) {
     entities,
     blocks,
     linetypes,
+    linetypesTruncated,
     dimstyles,
     blockBasePatched,
     bytes: written,
@@ -468,7 +470,7 @@ export async function handleMessage(raw, engineOverride = null) {
       current = null
       const reason = error instanceof Error ? error.message : String(error)
       if (reason.startsWith('block names collide case-insensitively: ') || reason.startsWith('block definitions collapsed on load: ')) {
-        return { type: 'documentLoaded', documentId, entityCount: 0, entities: [], blocks: [], linetypes: [], dimstyles: [],
+        return { type: 'documentLoaded', documentId, entityCount: 0, entities: [], blocks: [], linetypes: [], linetypesTruncated: false, dimstyles: [],
           blockBasePatched: false, writable: false, refusal: reason, unsupported: [] }
       }
       return { type: 'error', message: `parse_failed:${reason}` }
