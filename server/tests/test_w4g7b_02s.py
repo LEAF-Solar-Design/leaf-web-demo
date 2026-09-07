@@ -252,6 +252,55 @@ def test_added_insert_accepts_one_rotation_reading_quantum(delta):
     write_loop.verify_live_mutation_effects(_base(), actual, canonical)
 
 
+def test_added_insert_uses_exact_bipartite_matching_not_greedy_nearest(monkeypatch):
+    # Nearest-first (greedy) matching takes add-1's nearest candidate (A0)
+    # and strands add-2 (only within tolerance of A0), though the crossed
+    # assignment add-1<->A1, add-2<->A0 fits both within the 1.5e-5 quantum.
+    base = _base()
+    base_rad = math.radians(90.0)
+    rot2_deg = math.degrees(base_rad - 10e-6)
+    add1 = _add(handle="add-1", rot=90.0)
+    add2 = _add(handle="add-2", rot=rot2_deg)
+    canonical = validate_mutations(base, {"added": [add1, add2]})
+    expected = write_loop.apply_mutations(base, canonical)
+    actual = copy.deepcopy(expected)
+    actual["inserts"][0].update(rot=base_rad + 2e-6, handle="A0")
+    actual["inserts"][1].update(rot=base_rad + 9e-6, handle="A1")
+    monkeypatch.setattr(write_loop, "apply_mutations", lambda *_: expected)
+    write_loop.verify_live_mutation_effects(base, actual, canonical)
+    assert expected["inserts"][0]["handle"] == "A1"
+    assert expected["inserts"][1]["handle"] == "A0"
+
+
+def test_insert_layer_is_canonicalized_to_existing_spelling_case_insensitively():
+    base = _base()
+    base["layers"] = ["0", "FixtureLayer"]
+    canonical = validate_mutations(base, {"added": [_add(layer="fixturelayer")]})
+    assert canonical["added"][0]["layer"] == "FixtureLayer"
+
+
+@pytest.mark.parametrize("actual_layer", ["FixtureLayer", "fixturelayer"])
+def test_verifier_accepts_either_layer_case_for_added_insert(actual_layer):
+    base = _base()
+    base["layers"] = ["0", "FixtureLayer"]
+    canonical = validate_mutations(base, {"added": [_add(layer="fixturelayer")]})
+    assert canonical["added"][0]["layer"] == "FixtureLayer"
+    expected = write_loop.apply_mutations(base, canonical)
+    actual = _actual()
+    actual["layers"] = base["layers"]
+    actual["inserts"] = [dict(expected["inserts"][0], layer=actual_layer, handle="2A")]
+    write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+def test_bke_trailing_empty_field_marks_block_incomplete():
+    parsed = intake_parse.parse_text(
+        "BK|Fixture|0,0,0|1|1\nBKE|Fixture|LINE|0,0,0|1,0,0|", "test.dwg")
+    assert parsed["blocks"]["Fixture"]["complete"] is False
+    assert len(parsed["blocks"]["Fixture"]["children"]) == 0
+    with pytest.raises(ValueError, match="^block Fixture is incomplete in this drawing$"):
+        validate_mutations(parsed, {"added": [_add()]})
+
+
 def test_legacy_and_v3_keep_the_same_unchanged_insert_rotation_reading():
     from lisp import build_scr
 

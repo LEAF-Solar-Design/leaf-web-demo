@@ -405,6 +405,17 @@ def validate_mutations(
             raise ValueError(f"added entity {handle!r} has an unsupported kind")
         layer = _layer(raw.get("layer"))
         if kind == "INSERT":
+            # AutoCAD layer names are case-insensitive: an admitted spelling
+            # that differs only in case from an existing layer creates on
+            # that layer and reads back with the existing spelling, so the
+            # canonical form must already carry it.
+            existing_layers = intake.get("layers")
+            if isinstance(existing_layers, list):
+                for existing_layer in existing_layers:
+                    if (isinstance(existing_layer, str)
+                            and existing_layer.lower() == layer.lower()):
+                        layer = existing_layer
+                        break
             name = raw.get("name")
             if (not isinstance(name, str) or not name or len(name) > 255
                     or any(char in name for char in ("|", "\r", "\n"))):

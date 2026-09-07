@@ -276,6 +276,8 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                     "pts": [[float(v) for v in p.split(",")] for p in pts.split(";") if p]})
             elif tag == "BK":
                 name, base, count, complete = rest.split("|")
+                if not name or not base or not count or not complete:
+                    raise ValueError("empty field in BK record")
                 name = _block_name(name)
                 count = int(count)
                 if count < 0 or complete not in ("0", "1"):
@@ -291,6 +293,11 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                     "complete": False, "children": []})
                 try:
                     kind, *body, layer = fields[1:]
+                    if kind == "OTHER":
+                        if not body or body[0] == "":
+                            raise ValueError("empty field in BKE record")
+                    elif not layer or any(field == "" for field in body):
+                        raise ValueError("empty field in BKE record")
                     child = _block_child(kind, body, _block_name(layer))
                 except Exception:
                     block["complete"] = False

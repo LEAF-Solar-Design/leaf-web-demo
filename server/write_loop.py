@@ -45,6 +45,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from envelopes import DEFAULT_HTTP_STATUS, ErrorCode, err_envelope, ok_envelope
 from mutation_plan import (
+    MAX_OPERATIONS,
     canonical_json_bytes,
     emit_plan,
     plan_sha256,
@@ -1443,7 +1444,13 @@ def _polyline_effect_matches(
 def _insert_effect_matches(
     expected: Dict[str, Any], actual: Dict[str, Any], *, rotation_deg: float,
 ) -> bool:
-    if expected.get("name") != actual.get("name") or expected.get("layer") != actual.get("layer"):
+    # AutoCAD layer names are case-insensitive; the validator already
+    # canonicalizes an added INSERT's layer to the intake's existing spelling
+    # when one exists, but the actual re-extraction may still legitimately
+    # report either spelling, so compare case-insensitively here too.
+    if (expected.get("name") != actual.get("name")
+            or str(expected.get("layer") or "").lower()
+            != str(actual.get("layer") or "").lower()):
         return False
     try:
         return (
@@ -1457,6 +1464,54 @@ def _insert_effect_matches(
         )
     except (KeyError, TypeError, ValueError, OverflowError):
         return False
+
+
+def _max_bipartite_match(adjacency: list[list[int]], right_count: int) -> list[Optional[int]]:
+    """Exact maximum bipartite matching (Kuhn's augmenting-path algorithm).
+
+    `adjacency[i]` lists every right index left index `i` may match.
+    Returns `assignment[i]` = its matched right index, or None when no
+    augmenting path exists for it (left `i` is provably unmatchable in ANY
+    maximum matching, not merely by this search order). Runs with an
+    explicit stack, never Python recursion, so a graph up to MAX_OPERATIONS
+    nodes on a side cannot exceed the interpreter's recursion limit.
+    """
+    left_count = len(adjacency)
+    if left_count > MAX_OPERATIONS or right_count > MAX_OPERATIONS:
+        raise ValueError("added INSERT matching exceeds the supported operation bound")
+    match_right: Dict[int, int] = {}
+    for start in range(left_count):
+        visited = set()
+        frames = [{"node": start, "it": iter(adjacency[start]), "in_edge": None}]
+        matched = False
+        while frames:
+            frame = frames[-1]
+            advanced = False
+            for candidate in frame["it"]:
+                if candidate in visited:
+                    continue
+                visited.add(candidate)
+                if candidate not in match_right:
+                    match_right[candidate] = frame["node"]
+                    for index in range(len(frames) - 1, 0, -1):
+                        match_right[frames[index]["in_edge"]] = frames[index - 1]["node"]
+                    matched = True
+                else:
+                    frames.append({
+                        "node": match_right[candidate],
+                        "it": iter(adjacency[match_right[candidate]]),
+                        "in_edge": candidate,
+                    })
+                advanced = True
+                break
+            if matched:
+                break
+            if not advanced:
+                frames.pop()
+    assignment: list[Optional[int]] = [None] * left_count
+    for right_index, left_index in match_right.items():
+        assignment[left_index] = right_index
+    return assignment
 
 
 def verify_live_mutation_effects(
@@ -1490,27 +1545,29 @@ def verify_live_mutation_effects(
     base_insert_handles = {entity["handle"] for entity in base.get("inserts", [])}
     unmatched_inserts = [entity for entity in actual.get("inserts", [])
                          if entity["handle"] not in base_insert_handles]
-    for entity in expected.get("inserts", []):
-        if entity["handle"] not in added_inserts:
-            continue
-        match_index = min(
-            (index for index, candidate in enumerate(unmatched_inserts)
+    # Nearest-first (greedy) matching can steal a later add's only fitting
+    # candidate even though a different, crossed assignment fits every add
+    # within tolerance; an exact maximum bipartite matching never does.
+    expected_added_inserts = [
+        entity for entity in expected.get("inserts", [])
+        if entity["handle"] in added_inserts
+    ]
+    if expected_added_inserts:
+        adjacency = [
+            [index for index, candidate in enumerate(unmatched_inserts)
              if _insert_effect_matches(
-                 entity, candidate, rotation_deg=added_inserts[entity["handle"]]["rot"])),
-            key=lambda index: (
-                max(abs(entity[axis] - unmatched_inserts[index][axis])
-                    for axis in ("x", "y", "z")),
-                abs(math.radians(added_inserts[entity["handle"]]["rot"])
-                    - float(unmatched_inserts[index]["rot"])),
-                max(abs(left - right) for left, right in
-                    zip(entity["scale"], unmatched_inserts[index]["scale"])),
-            ), default=None)
-        if match_index is None:
-            raise ValueError(f"added INSERT {entity['name']} not found in output")
-        matched = unmatched_inserts.pop(match_index)
-        insert_indexes[0].pop(entity["handle"])
-        insert_indexes[1].pop(matched["handle"])
-        entity["handle"] = matched["handle"]
+                 entity, candidate,
+                 rotation_deg=added_inserts[entity["handle"]]["rot"])]
+            for entity in expected_added_inserts
+        ]
+        assignment = _max_bipartite_match(adjacency, len(unmatched_inserts))
+        for entity, right_index in zip(expected_added_inserts, assignment):
+            if right_index is None:
+                raise ValueError(f"added INSERT {entity['name']} not found in output")
+            matched = unmatched_inserts[right_index]
+            insert_indexes[0].pop(entity["handle"])
+            insert_indexes[1].pop(matched["handle"])
+            entity["handle"] = matched["handle"]
     if insert_indexes[0] != insert_indexes[1]:
         raise ValueError("unchanged INSERT has unexpected output geometry")
     # Old intakes may predate the additive catalogue. Once captured, the
