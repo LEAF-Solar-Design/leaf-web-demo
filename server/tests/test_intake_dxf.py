@@ -216,22 +216,51 @@ def test_dimension_round_trips_exactly_and_dimstyle_table_is_conditional():
     assert empty == plain
 
 
-def test_dimension_with_a_tilted_normal_round_trips_through_ocs():
-    normal = [0.0, 0.707107, 0.707107]
+def test_dimension_with_a_tilted_normal_keeps_def_points_as_wcs_not_ocs():
+    # F3 (opus round-one read of PR #1119): per the DXF spec, DIMENSION
+    # groups 13/14/10 are WCS points; only 11/12/16 are OCS. Re-pinned from
+    # the old (mistaken) OCS-round-trip fixture: a non-default normal must
+    # NOT transform p1/p2/dimline, so def2 (3,4,0) reads back UNCHANGED as
+    # (3,4,0), never rotated into some other OCS-projected point.
+    normal = [0.0, 0.0, -1.0]
     intake = {
         "layers": ["0"], "polylines": [],
         "dimensions": [
-            {"type": "ALIGNED", "p1": [1.0, 2.0, 3.0], "p2": [4.0, 5.0, 6.0],
-             "dimline": [2.0, 3.0, 4.0], "rotation_deg": 0.0, "style": "Standard",
-             "nrm": normal, "measurement": 5.196, "handle": "A3"},
+            {"type": "ALIGNED", "p1": [0.0, 0.0, 0.0], "p2": [3.0, 4.0, 0.0],
+             "dimline": [1.5, 6.0, 0.0], "rotation_deg": 0.0, "style": "Standard",
+             "nrm": normal, "measurement": 5.0, "handle": "A3"},
         ],
         "dimstyles": ["Standard"],
     }
     back, _ = _roundtrip(intake)
     entity = back["dimensions"][0]
     assert entity["nrm"] == normal
-    for key in ("p1", "p2", "dimline"):
-        assert all(abs(a - b) < 1e-3 for a, b in zip(entity[key], intake["dimensions"][0][key]))
+    assert entity["p1"] == [0.0, 0.0, 0.0]
+    assert entity["p2"] == [3.0, 4.0, 0.0]
+    assert entity["dimline"] == [1.5, 6.0, 0.0]
+
+
+def test_dimension_emits_group_11_as_the_canonical_dimline_point():
+    # F4: the text middle point (group 11, OCS like 12/16) was omitted
+    # entirely; the planar contract puts the text on the dimension line, so
+    # it is always the canonical dimline point, written after group 10.
+    intake = {
+        "layers": ["0"], "polylines": [],
+        "dimensions": [
+            {"type": "LINEAR", "p1": [0.0, 0.0, 0.0], "p2": [3.0, 4.0, 0.0],
+             "dimline": [3.0, 6.0, 0.0], "rotation_deg": 0.0, "style": "Standard",
+             "nrm": [0.0, 0.0, 1.0], "measurement": 3.0, "handle": "A1"},
+        ],
+        "dimstyles": ["Standard"],
+    }
+    data = intake_dxf.intake_to_dxf(intake)
+    text = data.decode("ascii")
+    ten_idx = text.index("\n10\n3.0\n20\n6.0\n30\n0.0\n")
+    eleven_idx = text.index("\n11\n3.0\n21\n6.0\n31\n0.0\n")
+    assert ten_idx < eleven_idx
+    # The parser has no field for group 11: it is silently ignored on read.
+    back = dxf_intake.parse_dxf_bytes(data)
+    assert back["dimensions"] == intake["dimensions"]
 
 
 def test_unsupported_dimension_subtype_is_counted_not_refused():

@@ -473,16 +473,22 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         elif row[0] == "dim":
             _, dimtype, p1, p2, dimline, rotation, style, normal, measurement, _ = row
             tilted = normal != [0.0, 0.0, 1.0]
-            op1 = _wcs_to_ocs(p1, normal) if tilted else tuple(p1)
-            op2 = _wcs_to_ocs(p2, normal) if tilted else tuple(p2)
-            odl = _wcs_to_ocs(dimline, normal) if tilted else tuple(dimline)
+            # F3: groups 13/14/10 are WCS per the DXF spec (only 11/12/16 are
+            # OCS), so p1/p2/dimline are written exactly as given, with no
+            # arbitrary-axis transform.
             flags = 33 if dimtype == "ALIGNED" else 32
+            # F4: group 11 (text middle point), OCS like 12/16; this planar
+            # contract puts the text on the dimension line, so it is always
+            # the canonical dimline point. Group 2 (block name) stays
+            # omitted by design: this contract never synthesizes the
+            # anonymous block AutoCAD normally attaches to a DIMENSION.
+            text_mid = _wcs_to_ocs(dimline, normal) if tilted else tuple(dimline)
             out += ["0", "DIMENSION", "5", h, "100", "AcDbEntity", "8", "0",
-                    "100", "AcDbDimension", *_point_groups(odl), "70", str(flags),
-                    "3", style, "42", _num(measurement)]
+                    "100", "AcDbDimension", *_point_groups(dimline), *_point_groups(text_mid, 11),
+                    "70", str(flags), "3", style, "42", _num(measurement)]
             if tilted:
                 out += ["210", _num(normal[0]), "220", _num(normal[1]), "230", _num(normal[2])]
-            out += ["100", "AcDbAlignedDimension", *_point_groups(op1, 13), *_point_groups(op2, 14)]
+            out += ["100", "AcDbAlignedDimension", *_point_groups(p1, 13), *_point_groups(p2, 14)]
             if dimtype == "LINEAR":
                 out += ["50", _num(rotation), "100", "AcDbRotatedDimension"]
         else:

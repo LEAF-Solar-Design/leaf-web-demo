@@ -107,6 +107,70 @@ def test_dimline_is_canonicalized_to_def2_projected_onto_the_dimension_line():
     assert linear_r90["added"][0]["measurement"] == 4.0
 
 
+# --- F7: dimline canonicalization is a fixed point under 3-dp rounding ------
+
+@pytest.mark.parametrize("build", [
+    lambda: _aligned(),
+    lambda: _linear(rotation=0),
+    lambda: _linear(rotation=90),
+    lambda: _linear(dimline=[1.5, 9, 0]),
+])
+def test_dimline_canonicalization_is_a_fixed_point_for_the_hand_derived_cases(build):
+    once = validate_mutations(_base(), {"added": [build()]})
+    twice = validate_mutations(_base(), once)
+    assert twice == once
+
+
+def test_dimline_canonicalization_is_a_fixed_point_off_axis_22_5_degrees():
+    # At 22.5 deg the re-projection of the rounded canonical point moves by
+    # up to 6.04e-4 (more than the 5e-4 half-quantum), so a naive re-round
+    # would move it by 0.001 on a second validate. A supplied dimline that
+    # already lies within tolerance of its own projection is kept unchanged.
+    once = validate_mutations(_base(), {"added": [
+        _linear(rotation=22.5, dimline=[1.3, 2.7, 0])]})
+    twice = validate_mutations(_base(), once)
+    assert twice == once
+
+
+def test_a_far_dimline_point_still_projects():
+    canonical = validate_mutations(_base(), {"added": [_linear(dimline=[100, 200, 0])]})
+    assert canonical["added"][0]["dimline"] == [3.0, 200.0, 0.0]
+
+
+# --- F5: a disagreeing supplied measurement is refused, never fail-open -----
+
+@pytest.mark.parametrize("measurement", [3.0, 3.0004])
+def test_an_agreeing_supplied_measurement_is_accepted_and_stays_the_computed_value(measurement):
+    canonical = validate_mutations(_base(), {"added": [_linear(measurement=measurement)]})
+    assert canonical["added"][0]["measurement"] == 3.0
+
+
+def test_an_absent_measurement_is_accepted():
+    canonical = validate_mutations(_base(), {"added": [_linear()]})
+    assert canonical["added"][0]["measurement"] == 3.0
+
+
+def test_a_disagreeing_supplied_measurement_is_refused():
+    with pytest.raises(
+            ValueError,
+            match=r"^dimension measurement 999\.0 disagrees with the definition points \(3\.0\)$"):
+        validate_mutations(_base(), {"added": [_linear(measurement=999)]})
+
+
+# --- F9: the planar contract, z must be 0 on def1/def2/dimline --------------
+
+def test_def2_with_nonzero_z_is_refused():
+    with pytest.raises(
+            ValueError, match=r"^dimension points must lie in the XY plane \(z = 0\) in this round$"):
+        validate_mutations(_base(), {"added": [_aligned(def2=[3, 4, 5])]})
+
+
+def test_dimline_with_nonzero_z_is_refused():
+    with pytest.raises(
+            ValueError, match=r"^dimension points must lie in the XY plane \(z = 0\) in this round$"):
+        validate_mutations(_base(), {"added": [_aligned(dimline=[1.5, 6, 1])]})
+
+
 # --- refusals ----------------------------------------------------------------
 
 @pytest.mark.parametrize("changes,message", [
@@ -420,6 +484,17 @@ def test_intake_parse_reads_a_ds_and_dmx_fixture_line():
     assert parsed["dimstyles"] == ["Standard"]
     assert parsed["dimensions_unsupported"] == 1
     assert "dimensions" not in parsed
+
+
+def test_dm_block_reports_def_points_as_wcs_never_ocs_transformed():
+    # F3 (opus round-one read of PR #1119): DIMENSION groups 13/14/10 are WCS
+    # per the DXF spec (only 11/12/16 are OCS), so the DM block must report
+    # entget's p1/p2/dl exactly, with no `trans` (arbitrary-axis) call.
+    from lisp import MUTATION_INSPECT_BLOCKS
+
+    dm = MUTATION_INSPECT_BLOCKS[-1]
+    assert "(setq wp1 p1 wp2 p2 wdl dl)" in dm
+    assert "(trans p1" not in dm and "(trans p2" not in dm and "(trans dl" not in dm
 
 
 def test_dm_style_decodes_percent_escapes_the_same_way_as_ds():

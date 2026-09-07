@@ -497,7 +497,13 @@ def _parse_dimension(pairs: List[Tuple[int, str]], i: int):
     (default Standard), normal=(210,220,230, default +z), measurement=42
     (group 42 when present, else the same projection rule da/lisp.py's DM
     inspect block and server/mutation_plan.py compute). No layer: the intake
-    dimension shape never carries one (server/write_loop.py's mock add)."""
+    dimension shape never carries one (server/write_loop.py's mock add).
+
+    F3 (opus round-one read of PR #1119): per the DXF spec, groups 13/14/10
+    on a DIMENSION are WCS points; only 11/12/16 are OCS (this parser has no
+    field for those). Unlike CIRCLE/ARC/INSERT, 13/14/10 are read here EXACTLY
+    as given, with no arbitrary-axis (OCS->WCS) transform; 210/220/230 is kept
+    only as the informational normal record."""
     handle = ""
     flags = 0
     p13 = [0.0, 0.0, 0.0]
@@ -549,10 +555,7 @@ def _parse_dimension(pairs: List[Tuple[int, str]], i: int):
     if subtype not in (0, 1):
         return {"unsupported": True, "handle": handle}, i
     kind = "LINEAR" if subtype == 0 else "ALIGNED"
-    tilted = normal != [0.0, 0.0, 1.0]
-    wp1 = _ocs_to_wcs(p13, normal) if tilted else p13
-    wp2 = _ocs_to_wcs(p14, normal) if tilted else p14
-    wdl = _ocs_to_wcs(p10, normal) if tilted else p10
+    wp1, wp2, wdl = p13, p14, p10  # F3: WCS as given, never OCS-transformed
     if kind != "LINEAR":
         rotation = 0.0
     if measurement is None:

@@ -47,13 +47,15 @@ _ADD_KINDS = ("LWPOLYLINE", "LINE", "CIRCLE", "ARC")
 _INSERT_FIELDS = frozenset({"handle", "kind", "layer", "name", "pt", "rot", "scale"})
 _DIMENSION_FIELDS = frozenset({
     "handle", "kind", "layer", "dimtype", "def1", "def2", "dimline", "rotation", "style",
-    # `measurement` is never read as an input to the computation below (the
-    # canonical value is always recomputed from def1/def2/rotation); it is
-    # allowed here only so that re-validating an already-canonical DIMENSION
-    # (the idempotency contract every add kind holds) does not choke on the
-    # field this same function wrote into the canonical record.
+    # `measurement` is never used to COMPUTE the canonical value (that is
+    # always derived from def1/def2/rotation); when supplied it is instead
+    # checked against that computed value (F5: a disagreeing supplied
+    # measurement is refused) so a caller cannot fail-open a wrong value
+    # through, while an agreeing one, or the field this same function wrote
+    # into an already-canonical record, re-validates cleanly.
     "measurement",
 })
+DIMENSION_MEASUREMENT_TOLERANCE = 1e-3
 _DIMTYPES = ("LINEAR", "ALIGNED")
 V3_ADD_KINDS = ("INSERT", "DIMENSION")
 V3_SET_OPS = ("set_color", "set_linetype", "set_lineweight")
@@ -546,6 +548,14 @@ def validate_mutations(
             if def1 == def2:
                 raise ValueError("dimension definition points coincide")
             dimline_given = _point3(raw.get("dimline"), f"added DIMENSION {handle!r} dimline")
+            # F9: the planar contract. def1, def2 and the supplied dimline
+            # must all lie in z = 0 (after the same 3-dp quantization every
+            # coordinate here carries); a def2 with real depth would silently
+            # yield a 3-D measurement (e.g. 7.071 for def2 [3,4,5]) against a
+            # tool that only ever draws in the XY plane.
+            if (def1[2] != 0.0 or def2[2] != 0.0
+                    or (0.0 if round(dimline_given[2], 3) == 0 else round(dimline_given[2], 3)) != 0.0):
+                raise ValueError("dimension points must lie in the XY plane (z = 0) in this round")
             if dimtype == "LINEAR":
                 if "rotation" not in raw:
                     raise ValueError(f"added DIMENSION {handle!r} LINEAR requires rotation")
@@ -571,9 +581,23 @@ def validate_mutations(
                             + (dimline_given[1] - def1[1]) * normal[1])
             offset_def2 = (def2[0] - def1[0]) * normal[0] + (def2[1] - def1[1]) * normal[1]
             shift = offset_given - offset_def2
-            dimline = [0.0 if round(value, 3) == 0 else round(value, 3) for value in (
-                def2[0] + shift * normal[0], def2[1] + shift * normal[1], def2[2],
-            )]
+            projected = (def2[0] + shift * normal[0], def2[1] + shift * normal[1], def2[2])
+            # F7: off an axis-aligned rotation the 3-dp round is not a fixed
+            # point of this projection (re-projecting the rounded point can
+            # move it back out by up to ~6e-4, more than the 5e-4 half
+            # quantum), so a re-validate of an already-canonical dimline
+            # could drift by 0.001 forever. When the supplied point already
+            # lies within the measurement tolerance of its OWN projection
+            # (it is canonical up to the quantum), it is kept exactly as
+            # given instead of re-derived, making a second validate a no-op.
+            if (abs(dimline_given[0] - projected[0]) <= DIMENSION_MEASUREMENT_TOLERANCE
+                    and abs(dimline_given[1] - projected[1]) <= DIMENSION_MEASUREMENT_TOLERANCE
+                    and abs(dimline_given[2] - projected[2]) <= DIMENSION_MEASUREMENT_TOLERANCE):
+                dimline = [0.0 if round(value, 3) == 0 else round(value, 3)
+                           for value in dimline_given]
+            else:
+                dimline = [0.0 if round(value, 3) == 0 else round(value, 3)
+                           for value in projected]
             style = raw.get("style")
             if not isinstance(style, str) or not _LAYER_RE.fullmatch(style):
                 raise ValueError("added DIMENSION style is not a safe dimstyle name")
@@ -591,6 +615,19 @@ def validate_mutations(
                 measurement = round(abs(dx * math.cos(radians) + dy * math.sin(radians)), 3)
             else:
                 measurement = round(math.sqrt(dx * dx + dy * dy + dz * dz), 3)
+            # F5 (fail-open): a supplied measurement is never silently
+            # replaced by the computed one. Refuse a disagreeing supplied
+            # value outright rather than discarding it; an agreeing one (or
+            # none at all) keeps the computed value, so idempotency on an
+            # already-canonical record still holds.
+            if "measurement" in raw:
+                given_measurement = _number(
+                    raw.get("measurement"), f"added DIMENSION {handle!r} measurement",
+                    limit=float("inf"))
+                if abs(given_measurement - measurement) > DIMENSION_MEASUREMENT_TOLERANCE:
+                    raise ValueError(
+                        f"dimension measurement {given_measurement} disagrees with the "
+                        f"definition points ({measurement})")
             added_handles.add(handle)
             entity = {
                 "handle": handle, "kind": "DIMENSION", "dimtype": dimtype, "layer": layer,
