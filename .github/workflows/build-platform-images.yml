@@ -3679,8 +3679,22 @@ jobs:
             done
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # Native staging deploy hand-off: release/<sha40>/<run_id>-<attempt>/staging-supply-set.json.
+      - name: Put release staging-supply-set.json to S3
+        if: steps.decide.outputs.adopted == 'true'
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || exit 1
+          key="${MQ_TRANSPORT_PREFIX}release/$SOURCE_SHA/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/staging-supply-set.json"
+          aws s3api put-object --bucket "$MQ_TRANSPORT_BUCKET" --key "$key" \
+            --body "$RUNNER_TEMP/staging-supply-set.json" --if-none-match '*' --checksum-algorithm SHA256 \
+            --metadata "run-id=$GITHUB_RUN_ID,run-attempt=$GITHUB_RUN_ATTEMPT,workflow-ref=$GITHUB_WORKFLOW_REF,repository-id=$GITHUB_REPOSITORY_ID,head-sha=$SOURCE_SHA,event=$GITHUB_EVENT_NAME"
+
       - name: Upload immutable staging supply-set manifest
         if: steps.decide.outputs.adopted == 'true'
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: staging-supply-set-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
@@ -3688,8 +3702,22 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      # Native staging deploy hand-off: release/<sha40>/<run_id>-<attempt>/web-dist.zip.
+      - name: Put release web-dist.zip to S3
+        if: steps.decide.outputs.adopted == 'true'
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || exit 1
+          key="${MQ_TRANSPORT_PREFIX}release/$SOURCE_SHA/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/web-dist.zip"
+          aws s3api put-object --bucket "$MQ_TRANSPORT_BUCKET" --key "$key" \
+            --body spec-candidate/main-web-dist.zip --if-none-match '*' --checksum-algorithm SHA256 \
+            --metadata "run-id=$GITHUB_RUN_ID,run-attempt=$GITHUB_RUN_ATTEMPT,workflow-ref=$GITHUB_WORKFLOW_REF,repository-id=$GITHUB_REPOSITORY_ID,head-sha=$SOURCE_SHA,event=$GITHUB_EVENT_NAME"
+
       - name: Upload deterministic web deployment artifact
         if: steps.decide.outputs.adopted == 'true'
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: web-dist-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
@@ -3697,8 +3725,22 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      # Native staging deploy hand-off: release/<sha40>/<run_id>-<attempt>/web-source-restamp.json.
+      - name: Put release web-source-restamp.json to S3
+        if: steps.decide.outputs.adopted == 'true'
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || exit 1
+          key="${MQ_TRANSPORT_PREFIX}release/$SOURCE_SHA/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/web-source-restamp.json"
+          aws s3api put-object --bucket "$MQ_TRANSPORT_BUCKET" --key "$key" \
+            --body spec-candidate/web-source-restamp.json --if-none-match '*' --checksum-algorithm SHA256 \
+            --metadata "run-id=$GITHUB_RUN_ID,run-attempt=$GITHUB_RUN_ATTEMPT,workflow-ref=$GITHUB_WORKFLOW_REF,repository-id=$GITHUB_REPOSITORY_ID,head-sha=$SOURCE_SHA,event=$GITHUB_EVENT_NAME"
+
       - name: Upload provider-bound web source-restamp receipt
         if: steps.decide.outputs.adopted == 'true'
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: web-source-restamp-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
