@@ -103,8 +103,11 @@ def _body(value):
 
 def _pure_tool(tool, params):
     schema = tool.get('params')
+    # Published packages may omit local_only. Completion runs pinned source with
+    # aps_live=False, and the supplied-source path refuses an off/invalid sandbox.
     if (tool.get('name') != TOOL_NAME or tool.get('kind') != 'script'
-            or tool.get('local_only') is not True or tool.get('aps_live') is True
+            or ('local_only' in tool and tool['local_only'] is not True)
+            or tool.get('aps_live') is True
             or tool.get('capabilities') != ['drawing.read']
             or any(tool.get(k) for k in ('grants', 'required_grants', 'network', 'network_access', 'permissions'))
             or not isinstance(schema, dict) or schema.get('type') != 'object'

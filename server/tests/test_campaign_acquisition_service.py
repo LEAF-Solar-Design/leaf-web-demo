@@ -21,7 +21,7 @@ from routers import author
 ORG, PROJECT, CAMPAIGN, RELEASE, BINDING, CHANGE, JOB = [str(uuid.uuid4()) for _ in range(7)]
 SOURCE = b'[{"name":"Example","value":1}]'
 TOOL = {'name': service.TOOL_NAME, 'kind': 'script', 'entry': 'tools/records.py',
-        'local_only': True, 'capabilities': ['drawing.read'], 'version': '1.0.0',
+        'capabilities': ['drawing.read'], 'version': '1.0.0',
         'params': {'type': 'object', 'properties': {'source_json': {'type': 'string',
                    'minLength': 1, 'maxLength': 1048576}}, 'required': ['source_json'],
                    'additionalProperties': False}}
@@ -155,6 +155,50 @@ def setup(monkeypatch):
 
 def advance(setup, **kwargs):
     return service.advance(setup.runtime, setup.tenant, PROJECT, CAMPAIGN, setup.release, SOURCE, **kwargs)
+
+
+def replace_published_tool(setup, monkeypatch, tool):
+    registry = json.dumps({'tools': [tool, {'name': 'unrelated-later-tool'}]}).encode()
+    setup.pin.catalog_digest = hashlib.sha256(registry).hexdigest()
+    setup.change.catalog_digest = setup.pin.catalog_digest
+    monkeypatch.setattr(customization, '_git_blob', lambda *args: registry)
+    monkeypatch.setattr(deps, 'effective_tools_with_provenance', lambda *args:
+        [(deepcopy(tool), deps.TOOL_SOURCE_TENANT_REPO)])
+
+
+def test_omitted_local_only_preserves_published_manifest_and_pins(setup):
+    assert 'local_only' not in TOOL
+    original = deepcopy(TOOL)
+    catalog_digest = setup.pin.catalog_digest
+    manifest_digest = deps.catalog_tool_digest(TOOL)
+    result = advance(setup)
+    assert result['state'] == 'complete'
+    assert result['publication']['effective_catalog_digest'] == catalog_digest
+    assert result['publication']['tool_manifest_sha256'] == manifest_digest
+    assert TOOL == original
+    assert setup.calls['stage'] == setup.calls['publish'] == 0
+    assert setup.calls['submit'] == 1
+
+
+def test_explicit_local_only_true_remains_supported(setup, monkeypatch):
+    tool = dict(deepcopy(TOOL), local_only=True)
+    replace_published_tool(setup, monkeypatch, tool)
+    result = advance(setup)
+    assert result['state'] == 'complete'
+    assert result['output_bytes'] == setup.expected
+    assert result['publication']['tool_manifest_sha256'] == deps.catalog_tool_digest(tool)
+    assert setup.calls['submit'] == 1
+
+
+@pytest.mark.parametrize('value', [False, None, 0, 1, 'true', 'false', '', [], {}])
+def test_explicit_local_only_contradiction_refuses_before_job(setup, monkeypatch, value):
+    tool = dict(deepcopy(TOOL), local_only=value)
+    # Keep publication hashes valid so only the explicit contradiction refuses.
+    replace_published_tool(setup, monkeypatch, tool)
+    result = advance(setup)
+    assert result['state'] == 'failed'
+    assert result['reason'] == 'Published transform does not match its verified contract'
+    assert setup.calls['stage'] == setup.calls['publish'] == setup.calls['submit'] == 0
 
 
 def test_reuse_cumulative_publication_without_authoring(setup):
