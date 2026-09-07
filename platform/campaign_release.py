@@ -389,6 +389,10 @@ def transition_release(org_id, project_id, campaign_id, release_id, principal_id
         if row['status'] == 'needs_approach' and action != 'cancel':
             _conflict('needs_approach')
         if action == 'resume':
+            if not automatic:
+                history = _history(cur, scope, row['contract_version'])
+                if history and history[-1]['status'] != 'passed':
+                    _authorize_retry(cur, scope, history[-1], principal_id)
             target = _slot(cur, scope)
         return _public(_update(cur, scope, target))
 
@@ -429,12 +433,17 @@ def runnable_releases(limit=20):
         cur.execute("SELECT r.* FROM campaign_releases r WHERE (r.status IN ('active','queued') OR "
                     "(r.status='waiting' AND r.next_action->>'wait_kind' IN "
                     "('authoring','job','capacity','publication','approval'))) "
-                    'AND (NOT EXISTS (SELECT 1 FROM campaign_release_stages s WHERE s.org_id=r.org_id '
+                    'AND NOT EXISTS (SELECT 1 FROM campaign_release_stages s WHERE s.org_id=r.org_id '
                     'AND s.project_id=r.project_id AND s.campaign_id=r.campaign_id AND s.release_id=r.release_id '
                     "AND s.contract_version=r.contract_version AND s.status<>'passed' AND NOT EXISTS ("
                     'SELECT 1 FROM campaign_release_stages later WHERE later.release_id=s.release_id '
-                    'AND later.contract_version=s.contract_version AND later.stage=s.stage AND later.seq>s.seq)) '
-                    "OR r.next_action->>'action'='retry_stage') "
+                    'AND later.contract_version=s.contract_version AND later.stage=s.stage AND later.seq>s.seq) '
+                    'AND NOT EXISTS (SELECT 1 FROM campaign_release_decisions d WHERE d.org_id=s.org_id '
+                    'AND d.project_id=s.project_id AND d.campaign_id=s.campaign_id AND d.release_id=s.release_id '
+                    "AND d.kind='revision' AND d.payload->>'retry_stage'=s.stage "
+                    "AND d.payload->>'predecessor_stage_id'=s.stage_id::text "
+                    "AND d.payload->>'contract_version'=s.contract_version::text "
+                    "AND d.payload->>'predecessor_operation_key'=s.operation_key)) "
                     "ORDER BY CASE WHEN r.status='waiting' AND r.next_action->>'wait_kind'='approval' THEN 1 ELSE 0 END, "
                     "(r.contract->>'deadline_at')::timestamptz ASC NULLS LAST, "
                     "COALESCE((r.contract->>'priority_score')::int,0) DESC, r.created_at, r.release_id LIMIT %(limit)s",
@@ -632,6 +641,21 @@ def record_stage(org_id, project_id, campaign_id, release_id, *, stage, status,
         return _public(result)
 
 
+def _authorize_retry(cur, scope, predecessor, principal_id):
+    key = 'retry-stage:' + str(predecessor['stage_id'])
+    # One immutable authorization survives progress updates, but never covers
+    # a new failed receipt or a different contract version.
+    cur.execute('SELECT 1 FROM campaign_release_decisions WHERE ' + RELEASE +
+                ' AND decision_key=%(key)s', {**scope, 'key': key})
+    if cur.fetchone():
+        return
+    _decision(cur, scope, key, 'revision',
+              dict(retry_stage=predecessor['stage'],
+                   predecessor_stage_id=str(predecessor['stage_id']),
+                   predecessor_operation_key=predecessor['operation_key'],
+                   contract_version=predecessor['contract_version']), str(principal_id))
+
+
 def retry_stage(org_id, project_id, campaign_id, release_id, principal_id, *, stage):
     if stage not in STAGES:
         _invalid()
@@ -647,6 +671,7 @@ def retry_stage(org_id, project_id, campaign_id, release_id, principal_id, *, st
         history = _history(cur, scope, row['contract_version'])
         if not history or history[-1]['stage'] != stage or history[-1]['status'] == 'passed':
             _conflict('stage_not_retryable')
+        _authorize_retry(cur, scope, history[-1], principal_id)
         return _public(_update(cur, scope, _slot(cur, scope), dict(action='retry_stage', stage=stage)))
 
 

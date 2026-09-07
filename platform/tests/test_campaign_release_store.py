@@ -225,6 +225,118 @@ def test_runnable_deadlines_priority_and_failed_stage_exclusion(make_org):
     assert row['release_id'] not in {r['release_id'] for r in releases.runnable_releases(200)}
 
 
+def test_explicit_resume_authorizes_only_exact_failed_predecessor(make_org):
+    scope, principal, _ = _seed(make_org)
+    row = _create(scope, principal)
+    passed = _record(scope, row, 'implementation')
+    failed = _record(scope, row, 'publication', status='unavailable',
+                     evidence={'contract_version': 1, 'checks': []}, operation_key='unavailable-one')
+    releases.set_progress(*scope, row['release_id'], principal, state='waiting',
+                          next_action=dict(wait_kind='authority', reason='Restore publication.'))
+    releases.transition_release(*scope, row['release_id'], principal, action='resume', automatic=True)
+    assert releases.get_release(*scope, row['release_id'])['decisions'] == []
+    for _ in range(2):
+        releases.transition_release(*scope, row['release_id'], principal, action='resume')
+    snapshot = releases.get_release(*scope, row['release_id'])
+    assert len(snapshot['decisions']) == 1
+    assert snapshot['decisions'][0]['kind'] == 'revision'
+    assert snapshot['decisions'][0]['payload'] == dict(
+        retry_stage='publication', predecessor_stage_id=failed['stage_id'],
+        predecessor_operation_key=failed['operation_key'], contract_version=1)
+    releases.set_progress(*scope, row['release_id'], principal, state='active',
+                          next_action=dict(wait_kind='job', reason='Still running.'))
+    db.reset_pool()
+    assert row['release_id'] in {r['release_id'] for r in releases.runnable_releases(200)}
+    for hold in ('paused', 'authority'):
+        if hold == 'paused':
+            releases.transition_release(*scope, row['release_id'], principal, action='pause')
+        else:
+            releases.set_progress(*scope, row['release_id'], principal, state='waiting',
+                                  next_action=dict(wait_kind='authority', reason='Sign in.'))
+        assert row['release_id'] not in {r['release_id'] for r in releases.runnable_releases(200)}
+        releases.transition_release(*scope, row['release_id'], principal, action='resume', automatic=True)
+        assert releases.get_release(*scope, row['release_id'])['release']['status'] == (
+            'paused' if hold == 'paused' else 'waiting')
+        releases.transition_release(*scope, row['release_id'], principal, action='resume')
+    _record(scope, row, 'publication', status='unavailable',
+            evidence={'contract_version': 1, 'checks': []}, operation_key='unavailable-two')
+    assert row['release_id'] not in {r['release_id'] for r in releases.runnable_releases(200)}
+    releases.transition_release(*scope, row['release_id'], principal, action='resume')
+    assert row['release_id'] in {r['release_id'] for r in releases.runnable_releases(200)}
+    snapshot = releases.get_release(*scope, row['release_id'])
+    assert len(snapshot['decisions']) == 2
+    assert snapshot['stages'][0] == passed
+    assert snapshot['release']['contract'] == row['contract']
+    assert snapshot['release']['contract_version'] == 1
+
+
+def test_resumed_pending_job_reaches_terminal_observation_with_real_worker(make_org, monkeypatch):
+    import campaign_acquisition_service as acquisition
+    import campaign_release_worker as worker
+
+    scope, principal, _ = _seed(make_org)
+    _, tenant = _joint_app(scope, principal, monkeypatch)
+    raw = b'[{"x":1}]'
+    project_lifecycle.put_project_file(scope[0], scope[1], principal, path='records.json',
+        media_type='application/json', content=raw.decode(), idempotency_key='source')
+    contract = runtime.compile_finish(tenant, scope[1], scope[2], dict(
+        delivery_profile='cad_file', intended_user='Project owner',
+        workflow='Convert JSON to CSV', artifact_refs=['records.json']))
+    assert contract.get('transform_recipe')
+    row = _create(scope, principal, contract=contract)
+    writer, job = _outstanding_job(scope, principal, row)
+    polls = []
+    writes = []
+    real_put = project_lifecycle.put_project_file
+
+    def counted_put(*args, **kwargs):
+        writes.append(kwargs['path'])
+        return real_put(*args, **kwargs)
+
+    monkeypatch.setattr(project_lifecycle, 'put_project_file', counted_put)
+
+    def reconcile(*args, **kwargs):
+        observed = writer.get(job)
+        assert observed is not None
+        polls.append(job)
+        if observed['status'] != 'complete':
+            return dict(state='working', job_id=job, reason='Conversion running.')
+        return dict(state='complete', job_id=job, publication={'change_set_id': 'published-transform'},
+                    output_bytes=runtime.web_release.static.expected_output(raw))
+
+    monkeypatch.setattr(acquisition, 'advance', reconcile)
+    monkeypatch.setattr(runtime, 'actor_for_release',
+                        lambda candidate: tenant if candidate['release_id'] == row['release_id'] else None)
+    failed = _record(scope, row, 'implementation', status='unavailable',
+                     evidence={'contract_version': 1, 'checks': []}, operation_key='prior-unavailable')
+    releases.set_progress(*scope, row['release_id'], principal, state='waiting',
+                          next_action=dict(wait_kind='authority', reason='Restore producer.'))
+    pending = runtime.transition(tenant, scope[1], scope[2], row['release_id'], 'resume')
+    assert pending['next_action']['job_id'] == job
+    revisions = [d for d in pending['decisions'] if d['kind'] == 'revision']
+    assert len(revisions) == 1
+    assert revisions[0]['payload']['predecessor_stage_id'] == failed['stage_id']
+    db.reset_pool()
+    assert worker.run_once(runtime, limit=200)['failed'] == 0
+    assert polls == [job, job]
+    assert writer.complete(job, 0, 'complete', {'ok': True}, None, {}, 'finished', None, time.time()) == 'applied'
+    assert worker.run_once(runtime, limit=200)['failed'] == 0
+    completed = releases.get_release(*scope, row['release_id'])
+    assert completed['release']['status'] == 'finished'
+    assert completed['remaining'] == []
+    assert completed['release']['contract'] == contract
+    assert polls == [job, job, job]
+    assert len(writer.list(str(scope[0]), 100)) == 1
+    before = project_lifecycle.project_snapshot(scope[0], scope[1], principal)
+    assert worker.run_once(runtime, limit=200)['failed'] == 0
+    after = project_lifecycle.project_snapshot(scope[0], scope[1], principal)
+    assert before['files'] == after['files']
+    assert polls == [job, job, job]
+    assert len([d for d in completed['decisions'] if d['kind'] == 'revision']) == 1
+    assert len(writes) == len(set(writes)) == 2
+    assert len(completed['stages']) == 6
+
+
 def _evidence(stage, version=1, source='a' * 40):
     evidence = dict(contract_version=version, source_revision=source,
                     checks=[dict(check_id=stage + '.proof', status='passed', evidence={'observed': 'actual result'})])
