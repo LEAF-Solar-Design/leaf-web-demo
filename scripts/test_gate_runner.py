@@ -95,7 +95,7 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
         # (speculative_group_head, the live-queue GraphQL check, the exact-head
         # checkout, the duplicate-supply-set guard) and the dispatcher's merge_group
         # job carry falsifying rows. Mirrors run-all-gates.py; BOTH must move together.
-        "build-platform-images-workflow": 48,
+        "build-platform-images-workflow": 50,
         # Native CodeBuild prewarm dispatch and CloudWatch receipt contracts.
         "prewarm-staging-cutover-workflow": 58,
         "merge-queue-workflow": 84,

@@ -2931,14 +2931,18 @@ jobs:
           [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
           [[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || exit 1
           if [ "$GROUP_MODE" = "true" ]; then
+            # An attempt-2 jam retains attempt-1 evidence; a bogus immutable key is
+            # a permanent squat on this tree until an admin purge.
             EXISTING=""
-            if aws s3api head-object --bucket "$MQ_TRANSPORT_BUCKET" \
-              --key "${MQ_TRANSPORT_PREFIX}supply-set/$SOURCE_TREE.json" \
-              > "$RUNNER_TEMP/mq-existing.json" 2>"$RUNNER_TEMP/mq-head.err"; then
-              EXISTING="supply-set/$SOURCE_TREE.json"
-            elif ! grep -Eq '\(404\)|\(NoSuchKey\)|\(NotFound\)' "$RUNNER_TEMP/mq-head.err"; then
-              cat "$RUNNER_TEMP/mq-head.err" >&2
+            key="${MQ_TRANSPORT_PREFIX}supply-set/$SOURCE_TREE.json"
+            if ! aws s3api list-objects-v2 --bucket "$MQ_TRANSPORT_BUCKET" \
+              --prefix "$key" --max-keys 1 \
+              > "$RUNNER_TEMP/mq-existing.json" 2>"$RUNNER_TEMP/mq-list.err"; then
+              cat "$RUNNER_TEMP/mq-list.err" >&2
               exit 1
+            fi
+            if jq -e --arg key "$key" 'any(.Contents[]?; .Key == $key)' "$RUNNER_TEMP/mq-existing.json" >/dev/null; then
+              EXISTING="supply-set/$SOURCE_TREE.json"
             fi
           else
           EXISTING=$(gh api --paginate --slurp \
@@ -2967,8 +2971,15 @@ jobs:
               entry="$RUNNER_TEMP/spec-entry-$image.json"
               key="${MQ_TRANSPORT_PREFIX}entries/$SOURCE_TREE/$SOURCE_SHA/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT/$image.json"
               matches=()
-              if aws s3api get-object --bucket "$MQ_TRANSPORT_BUCKET" --key "$key" \
-                --checksum-mode ENABLED "$entry" > "$RUNNER_TEMP/mq-entry-get.json" 2>"$RUNNER_TEMP/mq-entry.err"; then
+              if ! aws s3api list-objects-v2 --bucket "$MQ_TRANSPORT_BUCKET" \
+                --prefix "$key" --max-keys 1 \
+                > "$RUNNER_TEMP/mq-entry-list.json" 2>"$RUNNER_TEMP/mq-entry.err"; then
+                cat "$RUNNER_TEMP/mq-entry.err" >&2
+                exit 1
+              fi
+              if jq -e --arg key "$key" 'any(.Contents[]?; .Key == $key)' "$RUNNER_TEMP/mq-entry-list.json" >/dev/null; then
+                aws s3api get-object --bucket "$MQ_TRANSPORT_BUCKET" --key "$key" \
+                  --checksum-mode ENABLED "$entry" > "$RUNNER_TEMP/mq-entry-get.json"
                 expected="$(jq -er '.ChecksumSHA256' "$RUNNER_TEMP/mq-entry-get.json")"
                 actual="$(openssl dgst -sha256 -binary "$entry" | base64 -w0)"
                 [ "$actual" = "$expected" ] || { echo "::error::Speculative entry checksum mismatch"; exit 1; }
@@ -2980,9 +2991,6 @@ jobs:
                   and .Metadata["workflow-ref"] == $workflow and .Metadata.event == "workflow_dispatch"
                 ' "$RUNNER_TEMP/mq-entry-get.json" >/dev/null || exit 1
                 matches=("$entry")
-              elif ! grep -Eq '\(NoSuchKey\)|\(404\)|\(NotFound\)' "$RUNNER_TEMP/mq-entry.err"; then
-                cat "$RUNNER_TEMP/mq-entry.err" >&2
-                exit 1
               fi
             else
             mapfile -t matches < <(find "$RUNNER_TEMP/spec-surface-results" -type f \
@@ -3130,9 +3138,10 @@ jobs:
   # already points at a speculative digest, a fallback rebuild would only
   # collide with it, so a persistent alias failure fails THIS run with a
   # rerun-to-resume instruction instead (the alias loop is idempotent).
-  # Provenance comes from the artifact listing's workflow_run metadata
-  # (same-repo origin, this workflow's path, a workflow_dispatch run on
-  # main), never from the file's own claims, and the content re-verifies
+  # Provenance comes from S3 object metadata or the fallback artifact
+  # listing's workflow_run metadata, cross-checked against the provider run
+  # (same repo, this workflow, workflow_dispatch on main), never just the
+  # file's own claims, and the content re-verifies
   # against the gate's proven tree plus the live registry digests before a
   # single tag is written.
   #
@@ -3148,10 +3157,10 @@ jobs:
   # deliberately NOT absorbed: any failure there is post-commit by
   # construction (adopted=true means every alias re-verified), so it must
   # redden the run, and a RERUN resumes idempotently — decide re-confirms
-  # the existing aliases and the verify steps run again. This adds no
-  # credential reach: the job already held the release role for aliasing
-  # and actions:read for the artifact listing; the supply-set write uses
-  # only ECR reads the role already had.
+  # the existing aliases and the verify steps run again. The release role
+  # also has S3 Get/List reach on mq/leaf-web-demo/ for this transport;
+  # actions:read remains for the artifact fallback. Supply-set generation
+  # still uses ECR reads to verify the aliased digests.
   adopt:
     needs: [prepare, test]
     if: ${{ !inputs.promote && github.event_name == 'push' && needs.prepare.outputs.build == 'true' }}
@@ -3255,6 +3264,13 @@ jobs:
           rm -rf spec-candidate && mkdir -p spec-candidate
           s3_body=false
           s3_key="${MQ_TRANSPORT_PREFIX}supply-set/$tree.json"
+          if ! aws s3api list-objects-v2 --bucket "$MQ_TRANSPORT_BUCKET" \
+            --prefix "$s3_key" --max-keys 1 \
+            > spec-candidate/supply-list.json 2>spec-candidate/s3-error; then
+            cat spec-candidate/s3-error >&2
+            exit 1
+          fi
+          if jq -e --arg key "$s3_key" 'any(.Contents[]?; .Key == $key)' spec-candidate/supply-list.json >/dev/null; then
           if aws s3api head-object --bucket "$MQ_TRANSPORT_BUCKET" --key "$s3_key" \
             > spec-candidate/supply-head.json 2>spec-candidate/s3-error; then
             if aws s3api get-object --bucket "$MQ_TRANSPORT_BUCKET" --key "$s3_key" \
@@ -3264,6 +3280,9 @@ jobs:
             elif [ -f spec-candidate/spec-v3-supply-set.json ]; then
               finish false "S3 supply body obtained but transfer failed"
             fi
+          fi
+          else
+            echo "Exact S3 supply key absent" > spec-candidate/s3-error
           fi
           if [ "$s3_body" = "true" ]; then
             expected="$(jq -er '.ChecksumSHA256' spec-candidate/supply-get.json)" || finish false "S3 checksum absent"
@@ -3351,6 +3370,14 @@ jobs:
                 and .producer_run_id == $run and .producer_run_attempt == $attempt] | all)
             ' spec-candidate/spec-v3-supply-set.json >/dev/null || finish false "S3 producer fields rebound"
             web_key="${MQ_TRANSPORT_PREFIX}web-dist/$tree/$candidate_source/$candidate_run-$candidate_run_attempt/spec-web-dist.zip"
+            if ! aws s3api list-objects-v2 --bucket "$MQ_TRANSPORT_BUCKET" \
+              --prefix "$web_key" --max-keys 1 \
+              > spec-candidate/web-list.json 2>spec-candidate/s3-error; then
+              cat spec-candidate/s3-error >&2
+              exit 1
+            fi
+            jq -e --arg key "$web_key" 'any(.Contents[]?; .Key == $key)' spec-candidate/web-list.json >/dev/null \
+              || finish false "S3 web key absent after supply body"
             aws s3api get-object --bucket "$MQ_TRANSPORT_BUCKET" --key "$web_key" \
               --checksum-mode ENABLED spec-candidate/spec-web-dist.zip \
               > spec-candidate/web-get.json 2>spec-candidate/s3-error \

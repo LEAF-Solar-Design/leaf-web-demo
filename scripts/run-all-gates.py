@@ -1347,7 +1347,7 @@ def build_suites() -> List[Suite]:
               # because the finalizer reads the receipt with _zip_member and
               # that refuses any archive holding more than one file.
               # Queue-mode cutover: 37 base rows plus the PR retirement battery.
-              _py_pytest("test_build_platform_images_workflow.py"), 48),
+              _py_pytest("test_build_platform_images_workflow.py"), 50),
         # Vendored mushy-code integrity (PR #474 review, P2): the pin verifier
         # must be a CI fact, not a manual command. Registered with its suite the
         # day it shipped — no fix-then-register debt. 2 = verify READY + the

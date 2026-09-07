@@ -7542,8 +7542,10 @@ def test_merge_group_duplicate_supply_set_guard_precedes_mint_and_upload() -> No
         mint = next(s for s in steps if s.get("id") == "evidence")
         code = _executable_bash(mint["run"])
         group, legacy = code.split('if [ "$GROUP_MODE" = "true" ]; then', 1)[1].split("\nelse\n", 1)
-        assert 'aws s3api head-object --bucket "$MQ_TRANSPORT_BUCKET"' in group
-        assert '--key "${MQ_TRANSPORT_PREFIX}supply-set/$SOURCE_TREE.json"' in group
+        assert 'aws s3api list-objects-v2 --bucket "$MQ_TRANSPORT_BUCKET"' in group
+        assert 'key="${MQ_TRANSPORT_PREFIX}supply-set/$SOURCE_TREE.json"' in group
+        assert '--prefix "$key" --max-keys 1' in group
+        assert 'any(.Contents[]?; .Key == $key)' in group
         assert 'EXISTING="supply-set/$SOURCE_TREE.json"' in group
         assert "gh api" not in group
         for token in ('gh api --paginate --slurp', 'spec-v3-supply-set-$SOURCE_TREE',
@@ -7746,13 +7748,15 @@ def test_mq_transport_manifest_reads_own_run_and_missing_entry_is_benign() -> No
             assert code.index(guard) < code.index('key="')
         assert 'for image in app broker canonical-worker harness web; do' in code
         assert 'entries/$SOURCE_TREE/$SOURCE_SHA/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT/$image.json' in code
-        assert "list-objects" not in code
+        assert '--prefix "$key" --max-keys 1' in code
+        assert 'any(.Contents[]?; .Key == $key)' in code
         assert "matches=()" in code
         assert re.search(
             r'if \[ "\$\{#matches\[@\]\}" != "1" \]; then\s*'
             r'echo "::notice::Speculative \$image has [^\n]+\n\s*exit 0\s*fi', code
         )
-        assert r"'\(NoSuchKey\)|\(404\)|\(NotFound\)'" in code
+        assert "grep -Eq" not in code
+        assert re.search(r'cat "\$RUNNER_TEMP/mq-entry.err" >&2\s*exit 1', code)
         for binding in (".producer_run_id == $run", ".producer_run_attempt == $attempt",
                         '.Metadata["run-id"] == $run', '.Metadata["run-attempt"] == $attempt'):
             assert binding in code
@@ -7766,22 +7770,26 @@ def test_mq_transport_manifest_reads_own_run_and_missing_entry_is_benign() -> No
     ])
 
 
-def test_mq_transport_duplicate_guard_uses_head_and_fails_closed_pre_s0() -> None:
+def test_mq_transport_duplicate_guard_uses_exact_listing_and_fails_closed_pre_s0() -> None:
     def check(doc):
         code = _mq_transport_code(doc, "speculate-manifest")
         group = code.split('if [ "$GROUP_MODE" = "true" ]; then', 1)[1].split("\nelse\n", 1)[0]
-        assert 'aws s3api head-object --bucket "$MQ_TRANSPORT_BUCKET"' in group
+        assert 'aws s3api list-objects-v2 --bucket "$MQ_TRANSPORT_BUCKET"' in group
         assert 'supply-set/$SOURCE_TREE.json' in group
         assert 'EXISTING="supply-set/$SOURCE_TREE.json"' in group
-        assert r"'\(404\)|\(NoSuchKey\)|\(NotFound\)'" in group
-        assert re.search(r'cat "\$RUNNER_TEMP/mq-head.err" >&2\s*exit 1', group)
+        assert '--prefix "$key" --max-keys 1' in group
+        assert 'any(.Contents[]?; .Key == $key)' in group
+        assert "head-object" not in group and "get-object" not in group
+        assert "grep" not in group
+        assert re.search(r'cat "\$RUNNER_TEMP/mq-list.err" >&2\s*exit 1', group)
         assert "NoSuchBucket" not in group and "AccessDenied" not in group
-        assert code.index("aws s3api head-object") < code.index('if [ -n "$EXISTING" ]') < code.index("generate-v3")
+        assert code.index("aws s3api list-objects-v2") < code.index('if [ -n "$EXISTING" ]') < code.index("generate-v3")
     _mq_falsify(check, [
-        ("aws s3api head-object", "aws s3api list-objects-v2"),
+        ("aws s3api list-objects-v2", "aws s3api head-object"),
+        (".Key == $key", ".Key != $key"),
         ('EXISTING="supply-set/$SOURCE_TREE.json"', 'EXISTING=""'),
-        ('cat "$RUNNER_TEMP/mq-head.err" >&2\n              exit 1',
-         'cat "$RUNNER_TEMP/mq-head.err" >&2\n              exit 0'),
+        ('cat "$RUNNER_TEMP/mq-list.err" >&2\n              exit 1',
+         'cat "$RUNNER_TEMP/mq-list.err" >&2\n              exit 0'),
     ])
 
 
@@ -7904,13 +7912,50 @@ def test_mq_transport_every_get_checks_sha256_bytes() -> None:
             assert code.count('[ "$actual" = "$expected" ] ||') == count
         assert 'exit 1; }' in manifest
         assert 'finish false "S3 web checksum mismatch"' in adopt
-        assert "list-objects" not in adopt
+        assert adopt.count("aws s3api list-objects-v2") == 2
+        assert '--prefix "$s3_key" --max-keys 1' in adopt
+        assert '--prefix "$web_key" --max-keys 1' in adopt
     _mq_falsify(check, [
         ("--checksum-mode ENABLED", "--checksum-mode DISABLED"),
         ("openssl dgst -sha256 -binary", "openssl dgst -sha1 -binary"),
         ('[ "$actual" = "$expected" ] ||', '[ "$actual" != "$expected" ] ||'),
     ])
 
+
+
+def test_mq_transport_existence_uses_exact_listings_before_metadata_or_bytes() -> None:
+    def check(doc):
+        manifest = _mq_transport_code(doc, "speculate-manifest")
+        adopt = _mq_transport_code(doc, "adopt", "decide")
+        assert "head-object" not in manifest
+        assert manifest.count("aws s3api list-objects-v2") == 2
+        assert manifest.count("any(.Contents[]?; .Key == $key)") == 2
+        assert adopt.count("any(.Contents[]?; .Key == $key)") == 2
+        assert manifest.count('--prefix "$key" --max-keys 1') == 2
+        assert '--prefix "$s3_key" --max-keys 1' in adopt
+        assert '--prefix "$web_key" --max-keys 1' in adopt
+        assert manifest.index("mq-entry-list.json") < manifest.index("aws s3api get-object")
+        assert adopt.index("supply-list.json") < adopt.index("aws s3api head-object")
+        assert adopt.index("web-list.json") < adopt.index('--key "$web_key"')
+        assert "grep" not in manifest
+        assert manifest.count("if ! aws s3api list-objects-v2") == 2
+        assert adopt.count("if ! aws s3api list-objects-v2") == 2
+        assert len(re.findall(r"cat spec-candidate/s3-error >&2\s*exit 1", adopt)) == 2
+    _mq_falsify(check, [
+        (".Key == $key", ".Key != $key"),
+        ("--max-keys 1", "--max-keys 2"),
+        ("aws s3api list-objects-v2", "aws s3api head-object"),
+        ('cat spec-candidate/s3-error >&2\n            exit 1',
+         'cat spec-candidate/s3-error >&2\n            exit 0'),
+    ])
+
+
+def test_mq_transport_duplicate_guard_documents_jam_and_squat() -> None:
+    evidence = next(s for s in _strict_yaml(WORKFLOW.read_text(encoding="utf-8"))["jobs"]["speculate-manifest"]["steps"]
+                    if s.get("id") == "evidence")
+    assert "attempt-2 jam" in evidence["run"]
+    assert "permanent squat" in evidence["run"]
+    assert "admin purge" in evidence["run"]
 
 
 if __name__ == "__main__":
