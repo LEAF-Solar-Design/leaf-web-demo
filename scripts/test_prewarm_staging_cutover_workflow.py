@@ -178,6 +178,9 @@ def run_step(body: str, workdir: Path, env: dict) -> dict:
     exports = {
         "GITHUB_OUTPUT": "step-output.txt",
         "GITHUB_STEP_SUMMARY": "step-summary.md",
+        "GITHUB_RUN_ATTEMPT": "1",
+        "MQ_TRANSPORT_BUCKET": "leaf-mq-transport-807034087062-us-east-1",
+        "MQ_TRANSPORT_PREFIX": "mq/leaf-web-demo/",
         "GITHUB_REPOSITORY": "LEAF-Solar-Design/leaf-web-demo",
     }
     exports.update(env)
@@ -623,7 +626,12 @@ def test_the_group_dispatch_uses_only_the_oidc_role():
     assert credentials["with"] == {
         "role-to-assume": "${{ secrets.AWS_ECR_PUSH_ROLE }}", "aws-region": "us-east-1",
     }
-    assert credentials["if"] == "steps.readiness.outputs.ready == 'true'"
+    assert credentials["if"] == "steps.group.outputs.eligible == 'true'"
+    steps = job["steps"]
+    assert job["needs"] == "guard-ref"
+    assert steps.index(next(step for step in steps if step.get("id") == "group")) < steps.index(credentials)
+    assert steps.index(credentials) < steps.index(next(step for step in steps if step.get("id") == "supply"))
+    assert "refs/heads/main" in group_workflow_document()["jobs"]["guard-ref"]["steps"][0]["run"]
     assert set(re.findall(r"secrets\.([A-Z_]+)", str(job))) == {"AWS_ECR_PUSH_ROLE"}
     _check_pr_notice(workflow_document())
 
@@ -636,7 +644,7 @@ def test_the_group_receipt_carries_a_group_object_not_a_pr_number():
 
 
 def _readiness_gh(workdir: Path, listing: dict, run_record: dict | None, zip_bytes: bytes | None) -> None:
-    """A `gh` that answers the readiness step's three API reads."""
+    """Adapt retained fixtures to S3 metadata and a GitHub producer run record."""
     binary = workdir / "bin"
     binary.mkdir(exist_ok=True)
     (workdir / "listing.json").write_text(json.dumps(listing), encoding="utf-8")
@@ -663,6 +671,30 @@ def _readiness_gh(workdir: Path, listing: dict, run_record: dict | None, zip_byt
         newline="\n",
     )
     script.chmod(0o755)
+
+
+    # Preserve the behavioral fixtures while replacing their wire transport.
+    import io
+    objects = {}
+    if zip_bytes is not None:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as archive:
+            body = archive.read("spec-tag-readiness.json")
+        record = json.loads(body)
+        for entry in listing.get("artifacts", []):
+            run_id = entry["workflow_run"]["id"]
+            attempt = run_record["run_attempt"]
+            key = "mq/leaf-web-demo/readiness/%s/%s/%s-%s.json" % (
+                record["source_tree"], READINESS_SOURCE_SHA if record["source_sha"] == "3" * 40 else record["source_sha"],
+                run_id, attempt,
+            )
+            objects[key] = _s3_object(
+                body, run_id, attempt, entry["workflow_run"]["head_repository_id"],
+                READINESS_SOURCE_SHA if record["source_sha"] == "3" * 40 else record["source_sha"],
+            )
+        provider = {**run_record, "repository": {"id": record["repository_id"]},
+                    "head_repository": {"id": record["repository_id"]}}
+        (workdir / "run.json").write_text(json.dumps(provider), encoding="utf-8")
+    _s3_transport_fixture(workdir, objects)
 
 
 def _readiness_record(tree: str, source_sha: str, *, image_tag: str, run_id: int, run_attempt: int, repository_id: int) -> dict:
@@ -1039,3 +1071,307 @@ def test_codebuild_dispatch_and_relay_receipt_executed(tmp_path, response, dispo
     assert receipt["producer"] == "codebuild"
     assert receipt["dispatched"] == entries
     assert receipt["relay_run_id"] == "77"
+
+
+def _s3_object(body, run_id, attempt, repo_id, sha, workflow="build-platform-images.yml", modified="2026-09-07T00:00:00Z"):
+    import base64
+    if not isinstance(body, bytes):
+        body = json.dumps(body).encode()
+    return {
+        "body": base64.b64encode(body).decode(),
+        "ChecksumSHA256": base64.b64encode(hashlib.sha256(body).digest()).decode(),
+        "LastModified": modified,
+        "Metadata": {
+            "run-id": str(run_id), "run-attempt": str(attempt),
+            "repository-id": str(repo_id), "head-sha": sha, "event": "workflow_dispatch",
+            "workflow-ref": "LEAF-Solar-Design/leaf-web-demo/.github/workflows/" + workflow + "@refs/heads/main",
+        },
+    }
+
+
+def _s3_transport_fixture(workdir, objects, error=None):
+    """A provider-shaped S3 stub; retain any CodeBuild stub for the unchanged rail."""
+    binary = workdir / "bin"
+    binary.mkdir(exist_ok=True)
+    existing = binary / "aws"
+    if existing.exists() and not (binary / "aws-original").exists():
+        existing.rename(binary / "aws-original")
+    (workdir / "s3-objects.json").write_text(json.dumps(objects), encoding="utf-8")
+    (workdir / "s3-error.json").write_text(json.dumps(error), encoding="utf-8")
+    existing.write_text('#!/usr/bin/env bash\nif [ "$1" != s3api ]; then exec ./bin/aws-original "$@"; fi\nexec python3 s3-provider.py "$@"\n',
+                        encoding="utf-8", newline="\n")
+    existing.chmod(0o755)
+    (workdir / "s3-provider.py").write_text(textwrap.dedent('''\
+        import base64
+        import json
+        import sys
+        from pathlib import Path
+
+        args = sys.argv[1:]
+        with Path("s3-calls.jsonl").open("a") as stream:
+            stream.write(json.dumps(args) + "\\n")
+        error = json.loads(Path("s3-error.json").read_text())
+        if isinstance(error, dict):
+            error = error.get(args[1])
+        if error:
+            print(error, file=sys.stderr)
+            sys.exit(254)
+        objects = json.loads(Path("s3-objects.json").read_text())
+        def option(name):
+            return args[args.index(name) + 1]
+        operation = args[1]
+        if operation == "list-objects-v2":
+            prefix = option("--prefix")
+            contents = [{"Key": key, "LastModified": item["LastModified"]}
+                        for key, item in sorted(objects.items()) if key.startswith(prefix)]
+            if "--max-keys" in args:
+                contents = contents[:int(option("--max-keys"))]
+            listed = Path("s3-listed.json")
+            keys = json.loads(listed.read_text()) if listed.exists() else []
+            listed.write_text(json.dumps(keys + [item["Key"] for item in contents]))
+            print(json.dumps({"Contents": contents}))
+        elif operation == "put-object":
+            assert option("--if-none-match") == "*"
+            assert option("--checksum-algorithm") == "SHA256"
+            assert "run-id=" in option("--metadata") and "run-attempt=" in option("--metadata")
+            assert Path(option("--body")).is_file()
+            print("{}")
+        else:
+            key = option("--key")
+            if key not in objects:
+                print("AccessDenied (403)", file=sys.stderr)
+                sys.exit(254)
+            assert key in json.loads(Path("s3-listed.json").read_text()), "read before listing exact key"
+            item = objects[key]
+            if operation == "get-object":
+                assert option("--checksum-mode") == "ENABLED"
+                Path(args[-1]).write_bytes(base64.b64decode(item["body"]))
+            else:
+                assert operation == "head-object"
+            print(json.dumps({name: item[name] for name in ("Metadata", "ChecksumSHA256")}))
+        '''), encoding="utf-8", newline="\n")
+
+
+@needs_shell
+def test_s3_readiness_absence_never_heads_an_unlisted_key_executed(tmp_path):
+    _s3_transport_fixture(tmp_path, {}, {"head-object": "AccessDenied"})
+    result = run_step(step_body("stage-group", "Wait for the exact speculative"), tmp_path, READINESS_ENV)
+    assert result["ready"] == "false"
+    calls = [json.loads(line) for line in (tmp_path / "s3-calls.jsonl").read_text().splitlines()]
+    assert [call[1] for call in calls] == ["list-objects-v2"]
+    assert calls[0][calls[0].index("--prefix") + 1] == (
+        "mq/leaf-web-demo/readiness/" + READINESS_TREE + "/" + READINESS_SOURCE_SHA + "/"
+    )
+
+
+def test_s3_transport_literals_and_credentials_order():
+    document = group_workflow_document()
+    assert document["jobs"]["stage-group"]["env"] == {
+        "MQ_TRANSPORT_BUCKET": "leaf-mq-transport-807034087062-us-east-1",
+        "MQ_TRANSPORT_PREFIX": "mq/leaf-web-demo/",
+    }
+    steps = document["jobs"]["stage-group"]["steps"]
+    credentials = next(step for step in steps if step.get("uses", "").startswith("aws-actions/configure"))
+    assert credentials["if"] == "steps.group.outputs.eligible == 'true'"
+    assert steps.index(next(step for step in steps if step.get("id") == "group")) < steps.index(credentials)
+    assert steps.index(credentials) < steps.index(next(step for step in steps if step.get("id") == "supply"))
+    assert document["jobs"]["stage-group"]["needs"] == "guard-ref"
+    for fragment in ("Wait for the speculative supply", "Wait for the exact speculative"):
+        assert "actions/artifacts" not in step_body("stage-group", fragment)
+
+
+def test_s3_readiness_checksums_are_compared_before_acceptance():
+    body = step_body("stage-group", "Wait for the exact speculative")
+    assert body.count("aws s3api get-object") == 1
+    assert '--key "$KEY" --checksum-mode ENABLED tag-readiness.json' in body
+    assert "openssl dgst -sha256 -binary tag-readiness.json | openssl base64 -A" in body
+    compare = '[ -n "$EXPECTED_CHECKSUM" ] && [ "$ACTUAL_CHECKSUM" = "$EXPECTED_CHECKSUM" ] || continue'
+    assert body.index(compare) < body.index('echo "ready=true"')
+    assert 'sort_by(.LastModified, .Key) | reverse' in body
+
+
+def _s3_ready_fixture(tmp_path):
+    record = _readiness_record(
+        READINESS_TREE, READINESS_SOURCE_SHA, image_tag=READINESS_IMAGE_TAG,
+        run_id=READINESS_RUN_ID, run_attempt=READINESS_RUN_ATTEMPT,
+        repository_id=READINESS_REPO_ID,
+    )
+    zipped, digest = _readiness_zip(tmp_path, record)
+    _readiness_gh(tmp_path, {"artifacts": [{**READINESS_LISTING_TEMPLATE, "digest": digest}]},
+                  READINESS_RUN_RECORD, zipped)
+    return json.loads((tmp_path / "s3-objects.json").read_text())
+
+
+@needs_shell
+def test_s3_readiness_first_valid_wins_and_tie_break_executed(tmp_path):
+    for scenario in ("tie", "invalid-newest", "bad-checksum"):
+        work = tmp_path / scenario
+        work.mkdir()
+        objects = _s3_ready_fixture(work)
+        key, good = next(iter(objects.items()))
+        other_key = key.rsplit("/", 1)[0] + "/98-2.json"
+        other = json.loads(json.dumps(good))
+        other["Metadata"]["run-id"] = "98"
+        import base64
+        record = json.loads(base64.b64decode(other["body"]))
+        record["producer_run_id"] = 98
+        other = _s3_object(record, 98, 2, READINESS_REPO_ID, READINESS_SOURCE_SHA)
+        if scenario == "invalid-newest":
+            other["LastModified"] = "2026-09-08T00:00:00Z"
+            other["Metadata"]["workflow-ref"] = "foreign"
+        if scenario == "bad-checksum":
+            other["LastModified"] = "2026-09-08T00:00:00Z"
+            other["ChecksumSHA256"] = "wrong"
+        # Reverse insertion order makes a listing-order tie breaker fail.
+        _s3_transport_fixture(work, {key: good, other_key: other})
+        result = run_step(step_body("stage-group", "Wait for the exact speculative"), work, READINESS_ENV)
+        assert result["ready"] == "true"
+        calls = [json.loads(line) for line in (work / "s3-calls.jsonl").read_text().splitlines()]
+        listings = [call for call in calls if call[1] == "list-objects-v2"]
+        assert len(listings) == 1
+        assert listings[0][listings[0].index("--prefix") + 1] == key.rsplit("/", 1)[0] + "/"
+        heads = [call[call.index("--key") + 1] for call in calls if call[1] == "head-object"]
+        assert heads == ([key] if scenario == "tie" else [other_key, key])
+        assert "first-valid-wins" in step_body("stage-group", "Wait for the exact speculative")
+
+
+@needs_shell
+def test_s3_readiness_metadata_and_run_attempt_executed(tmp_path):
+    for scenario in ("metadata-run", "metadata-attempt", "run-attempt", "repository", "checksum"):
+        work = tmp_path / scenario
+        work.mkdir()
+        objects = _s3_ready_fixture(work)
+        item = next(iter(objects.values()))
+        if scenario == "metadata-run":
+            item["Metadata"]["run-id"] = "100"
+        elif scenario == "metadata-attempt":
+            item["Metadata"]["run-attempt"] = "1"
+        elif scenario == "repository":
+            item["Metadata"]["repository-id"] = "999"
+        elif scenario == "checksum":
+            item["ChecksumSHA256"] = "wrong"
+        else:
+            provider = json.loads((work / "run.json").read_text())
+            provider["run_attempt"] = 3
+            (work / "run.json").write_text(json.dumps(provider))
+        _s3_transport_fixture(work, objects)
+        result = run_step(step_body("stage-group", "Wait for the exact speculative"), work, READINESS_ENV)
+        assert result["ready"] == "false"
+
+
+@needs_shell
+def test_s3_poll_access_errors_fail_from_own_code(tmp_path):
+    for operation in ("list-objects-v2", "head-object", "get-object"):
+        for error in ("AccessDenied", "NoSuchBucket"):
+            work = tmp_path / (operation + error)
+            work.mkdir()
+            objects = _s3_ready_fixture(work)
+            _s3_transport_fixture(work, objects, {operation: error})
+            with pytest.raises(AssertionError, match="::error::S3 poll failed"):
+                run_step(step_body("stage-group", "Wait for the exact speculative"), work, READINESS_ENV)
+    for error in ("AccessDenied", "NoSuchBucket"):
+        work = tmp_path / ("supply" + error)
+        work.mkdir()
+        _s3_transport_fixture(work, {}, error)
+        with pytest.raises(AssertionError, match="bucket .*transport policy"):
+            run_step(step_body("stage-group", "Wait for the speculative supply"), work, READINESS_ENV)
+
+
+@needs_shell
+def test_s3_receipt_put_metadata_and_best_effort_upload_executed(tmp_path):
+    steps = group_workflow_document()["jobs"]["stage-group"]["steps"]
+    put = next(step for step in steps if step.get("name") == "Put the relay receipt in S3")
+    assert put["if"] == "always() && steps.receipt.outcome == 'success' && steps.group.outputs.eligible == 'true'"
+    upload = next(step for step in steps if step.get("uses", "").startswith("actions/upload-artifact"))
+    assert upload["continue-on-error"] == "true"
+    _s3_transport_fixture(tmp_path, {})
+    run_step(step_body("stage-group", "Emit the relay receipt"), tmp_path, {
+        "HEAD_SHA": READINESS_SOURCE_SHA, "BASE_SHA": READINESS_TREE, "MEMBERS": "[41]",
+        "ELIGIBILITY": "merge group", "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2",
+    })
+    receipt = json.loads((tmp_path / "prewarm-relay-receipt.json").read_text())
+    assert receipt["dispatched"] == []
+    assert receipt["relay_run_id"] == "123" and receipt["relay_run_attempt"] == "2"
+    run_step(put["run"], tmp_path, {
+        "HEAD_SHA": READINESS_SOURCE_SHA, "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2",
+        "GITHUB_REPOSITORY_ID": "555", "GITHUB_EVENT_NAME": "workflow_dispatch",
+        "GITHUB_WORKFLOW_REF": "LEAF-Solar-Design/leaf-web-demo/.github/workflows/prewarm-staging-group.yml@refs/heads/main",
+    })
+    call = json.loads((tmp_path / "s3-calls.jsonl").read_text())
+    assert call[call.index("--key") + 1] == "mq/leaf-web-demo/relay/" + READINESS_SOURCE_SHA[:12] + "/123-2.json"
+    metadata = dict(pair.split("=", 1) for pair in call[call.index("--metadata") + 1].split(","))
+    assert metadata == {
+        "run-id": "123", "run-attempt": "2", "repository-id": "555",
+        "head-sha": READINESS_SOURCE_SHA, "event": "workflow_dispatch",
+        "workflow-ref": "LEAF-Solar-Design/leaf-web-demo/.github/workflows/prewarm-staging-group.yml@refs/heads/main",
+    }
+    assert call[call.index("--if-none-match") + 1] == "*"
+    assert call[call.index("--checksum-algorithm") + 1] == "SHA256"
+
+
+@needs_shell
+def test_s3_supply_exact_listing_executed(tmp_path):
+    key = "mq/leaf-web-demo/supply-set/" + READINESS_TREE + ".json"
+    _s3_transport_fixture(tmp_path, {key: _s3_object({}, 99, 2, 555, READINESS_SOURCE_SHA)})
+    result = run_step(step_body("stage-group", "Wait for the speculative supply"), tmp_path, READINESS_ENV)
+    assert result["present"] == "true"
+    call = json.loads((tmp_path / "s3-calls.jsonl").read_text())
+    assert call[1] == "list-objects-v2"
+    assert call[call.index("--prefix") + 1] == key
+    assert call[call.index("--max-keys") + 1] == "1"
+
+
+@needs_shell
+def test_s3_supply_absence_requires_exact_equality_without_head_executed(tmp_path):
+    key = "mq/leaf-web-demo/supply-set/" + READINESS_TREE + ".json"
+    for suffix in (None, ".foreign"):
+        work = tmp_path / ("missing" if suffix is None else "neighbor")
+        work.mkdir()
+        objects = {} if suffix is None else {key + suffix: _s3_object({}, 99, 2, 555, READINESS_SOURCE_SHA)}
+        _s3_transport_fixture(work, objects, {"head-object": "AccessDenied"})
+        result = run_step(step_body("stage-group", "Wait for the speculative supply"), work, READINESS_ENV)
+        assert result["present"] == "false"
+        calls = [json.loads(line) for line in (work / "s3-calls.jsonl").read_text().splitlines()]
+        assert [call[1] for call in calls] == ["list-objects-v2"]
+        assert calls[0][calls[0].index("--prefix") + 1] == key
+        assert calls[0][calls[0].index("--max-keys") + 1] == "1"
+
+
+@needs_shell
+def test_s3_readiness_retains_every_body_field_check_executed(tmp_path):
+    import base64
+    fields = ("schema", "source_tree", "source_sha", "image_tag", "producer_workflow_path",
+              "producer_run_id", "producer_run_attempt", "repository_id")
+    fields += tuple("digests." + name for name in ("app", "broker", "canonical_worker", "harness", "web"))
+    for field in fields:
+        work = tmp_path / field
+        work.mkdir()
+        objects = _s3_ready_fixture(work)
+        key, item = next(iter(objects.items()))
+        record = json.loads(base64.b64decode(item["body"]))
+        if field.startswith("digests."):
+            record["digests"][field.split(".")[1]] = "sha256:invalid"
+        else:
+            record[field] = 123 if isinstance(record[field], int) else "wrong"
+        objects[key] = _s3_object(record, READINESS_RUN_ID, READINESS_RUN_ATTEMPT,
+                                  READINESS_REPO_ID, READINESS_SOURCE_SHA)
+        _s3_transport_fixture(work, objects)
+        result = run_step(step_body("stage-group", "Wait for the exact speculative"), work, READINESS_ENV)
+        assert result["ready"] == "false", field
+        calls = [json.loads(line) for line in (work / "s3-calls.jsonl").read_text().splitlines()]
+        assert any(call[1] == "get-object" for call in calls), field
+
+
+@needs_shell
+def test_s3_relay_put_refuses_collisions_and_transport_errors_executed(tmp_path):
+    for error in ("PreconditionFailed (412)", "AccessDenied", "NoSuchBucket"):
+        work = tmp_path / error.split()[0]
+        work.mkdir()
+        _s3_transport_fixture(work, {}, {"put-object": error})
+        (work / "prewarm-relay-receipt.json").write_text('{"dispatched": []}')
+        with pytest.raises(AssertionError, match="::error::Relay receipt write failed"):
+            run_step(step_body("stage-group", "Put the relay receipt"), work, {
+                "HEAD_SHA": READINESS_SOURCE_SHA, "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2",
+                "GITHUB_REPOSITORY_ID": "555", "GITHUB_EVENT_NAME": "workflow_dispatch",
+                "GITHUB_WORKFLOW_REF": "LEAF-Solar-Design/leaf-web-demo/.github/workflows/prewarm-staging-group.yml@refs/heads/main",
+            })
