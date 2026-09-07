@@ -45,6 +45,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from envelopes import DEFAULT_HTTP_STATUS, ErrorCode, err_envelope, ok_envelope
 from mutation_plan import (
+    MAX_OPERATIONS,
     canonical_json_bytes,
     emit_plan,
     plan_sha256,
@@ -911,6 +912,13 @@ def apply_mutations(intake: Dict[str, Any], mutations: Dict[str, Any]) -> Dict[s
                 new.setdefault("circles", []).append({
                     "handle": e["handle"], "layer": e["layer"], "c": list(e["c"]),
                     "r": e["r"], "nrm": [0.0, 0.0, 1.0]})
+            elif kind == "INSERT":
+                new.setdefault("inserts", []).append({
+                    "handle": e["handle"], "name": e["name"], "layer": e["layer"],
+                    "x": round(e["pt"][0], 3), "y": round(e["pt"][1], 3),
+                    "z": round(e["pt"][2], 3), "rot": round(math.radians(e["rot"]), 6),
+                    "scale": [round(value, 4) for value in e["scale"]],
+                    "nrm": [0.0, 0.0, 1.0]})
             else:
                 new.setdefault("arcs", []).append({
                     "handle": e["handle"], "layer": e["layer"], "c": list(e["c"]),
@@ -1433,13 +1441,86 @@ def _polyline_effect_matches(
     )
 
 
+def _insert_effect_matches(
+    expected: Dict[str, Any], actual: Dict[str, Any], *, rotation_deg: float,
+) -> bool:
+    # AutoCAD layer names are case-insensitive; the validator already
+    # canonicalizes an added INSERT's layer to the intake's existing spelling
+    # when one exists, but the actual re-extraction may still legitimately
+    # report either spelling, so compare case-insensitively here too.
+    if (expected.get("name") != actual.get("name")
+            or str(expected.get("layer") or "").lower()
+            != str(actual.get("layer") or "").lower()):
+        return False
+    try:
+        return (
+            _point_close([expected[axis] for axis in ("x", "y", "z")],
+                         [actual[axis] for axis in ("x", "y", "z")], tolerance=1.5e-3)
+            and math.isclose(math.radians(rotation_deg), float(actual["rot"]),
+                             rel_tol=0.0, abs_tol=1.5e-5)
+            and isinstance(actual.get("scale"), list) and len(actual["scale"]) == 3
+            and _point_close(expected["scale"], actual["scale"], tolerance=1e-4)
+            and _point_close(expected["nrm"], actual.get("nrm"), tolerance=1e-6)
+        )
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+
+
+def _max_bipartite_match(adjacency: list[list[int]], right_count: int) -> list[Optional[int]]:
+    """Exact maximum bipartite matching (Kuhn's augmenting-path algorithm).
+
+    `adjacency[i]` lists every right index left index `i` may match.
+    Returns `assignment[i]` = its matched right index, or None when no
+    augmenting path exists for it (left `i` is provably unmatchable in ANY
+    maximum matching, not merely by this search order). Runs with an
+    explicit stack, never Python recursion, so a graph up to MAX_OPERATIONS
+    nodes on a side cannot exceed the interpreter's recursion limit.
+    """
+    left_count = len(adjacency)
+    if left_count > MAX_OPERATIONS or right_count > MAX_OPERATIONS:
+        raise ValueError("added INSERT matching exceeds the supported operation bound")
+    match_right: Dict[int, int] = {}
+    for start in range(left_count):
+        visited = set()
+        frames = [{"node": start, "it": iter(adjacency[start]), "in_edge": None}]
+        matched = False
+        while frames:
+            frame = frames[-1]
+            advanced = False
+            for candidate in frame["it"]:
+                if candidate in visited:
+                    continue
+                visited.add(candidate)
+                if candidate not in match_right:
+                    match_right[candidate] = frame["node"]
+                    for index in range(len(frames) - 1, 0, -1):
+                        match_right[frames[index]["in_edge"]] = frames[index - 1]["node"]
+                    matched = True
+                else:
+                    frames.append({
+                        "node": match_right[candidate],
+                        "it": iter(adjacency[match_right[candidate]]),
+                        "in_edge": candidate,
+                    })
+                advanced = True
+                break
+            if matched:
+                break
+            if not advanced:
+                frames.pop()
+    assignment: list[Optional[int]] = [None] * left_count
+    for right_index, left_index in match_right.items():
+        assignment[left_index] = right_index
+    return assignment
+
+
 def verify_live_mutation_effects(
     base: Dict[str, Any], actual: Dict[str, Any], canonical: Dict[str, Any],
 ) -> None:
     """Refuse publication unless extraction proves exactly the proposed effects."""
     expected = apply_mutations(base, canonical)
-    # INSERTs have no new effects in this slice. Compare their complete
-    # records by handle; their positions are not polyline point lists.
+    # Unchanged INSERTs retain their complete records by handle. Added ones
+    # first bind their temporary handles to the actual name and geometry.
     insert_indexes = []
     for intake in (expected, actual):
         rows = intake.get("inserts", [])
@@ -1457,6 +1538,36 @@ def verify_live_mutation_effects(
         if len(index) != len(rows):
             raise ValueError("re-extracted output contains duplicate INSERT handles")
         insert_indexes.append(index)
+    added_inserts = {
+        entity["handle"]: entity for entity in canonical.get("added", [])
+        if entity.get("kind") == "INSERT"
+    }
+    base_insert_handles = {entity["handle"] for entity in base.get("inserts", [])}
+    unmatched_inserts = [entity for entity in actual.get("inserts", [])
+                         if entity["handle"] not in base_insert_handles]
+    # Nearest-first (greedy) matching can steal a later add's only fitting
+    # candidate even though a different, crossed assignment fits every add
+    # within tolerance; an exact maximum bipartite matching never does.
+    expected_added_inserts = [
+        entity for entity in expected.get("inserts", [])
+        if entity["handle"] in added_inserts
+    ]
+    if expected_added_inserts:
+        adjacency = [
+            [index for index, candidate in enumerate(unmatched_inserts)
+             if _insert_effect_matches(
+                 entity, candidate,
+                 rotation_deg=added_inserts[entity["handle"]]["rot"])]
+            for entity in expected_added_inserts
+        ]
+        assignment = _max_bipartite_match(adjacency, len(unmatched_inserts))
+        for entity, right_index in zip(expected_added_inserts, assignment):
+            if right_index is None:
+                raise ValueError(f"added INSERT {entity['name']} not found in output")
+            matched = unmatched_inserts[right_index]
+            insert_indexes[0].pop(entity["handle"])
+            insert_indexes[1].pop(matched["handle"])
+            entity["handle"] = matched["handle"]
     if insert_indexes[0] != insert_indexes[1]:
         raise ValueError("unchanged INSERT has unexpected output geometry")
     # Old intakes may predate the additive catalogue. Once captured, the
@@ -1548,11 +1659,16 @@ def verify_live_mutation_effects(
     if len(unmatched) != len(added_polylines):
         raise ValueError("re-extracted output has unexpected new entities")
     for entity in added_polylines:
-        match_index = next(
+        expected_points = _expected_extracted_points(entity["pts"])
+        match_index = min(
             (index for index, candidate in enumerate(unmatched)
              if isinstance(candidate, dict)
              and _polyline_effect_matches(entity, candidate, extracted=True)),
-            None,
+            key=lambda index: max(
+                abs(left - right)
+                for point, candidate_point in zip(expected_points, unmatched[index]["pts"])
+                for left, right in zip(point, candidate_point)),
+            default=None,
         )
         if match_index is None:
             raise ValueError(f"added polyline {entity['handle']!r} is missing from output")
@@ -1635,10 +1751,17 @@ def _verify_round_effects(
         if len(unmatched) > len(adds):
             raise ValueError("re-extracted output has unexpected new entities")
         for entity in adds:
-            match_index = next(
+            match_index = min(
                 (index for index, candidate in enumerate(unmatched)
                  if _round_effect_matches(entity, candidate, arc=(kind == "ARC"))),
-                None,
+                key=lambda index: (
+                    max(abs(left - right) for left, right in
+                        zip(entity["c"], unmatched[index]["c"])),
+                    max(min((entity[key] - unmatched[index][key]) % 360.0,
+                            (unmatched[index][key] - entity[key]) % 360.0)
+                        for key in ("start_deg", "end_deg")) if kind == "ARC" else 0.0,
+                    abs(entity["r"] - unmatched[index]["r"]),
+                ), default=None,
             )
             if match_index is None:
                 raise ValueError(f"added {kind} {entity['handle']!r} is missing from output")

@@ -1,6 +1,7 @@
 """Offline tests for LeafApplyMutations script and protected provisioning."""
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pytest
@@ -126,6 +127,35 @@ def test_mutation_inspect_script_adds_geometry_and_the_bounded_catalogue():
     assert '"output-intake.txt"' in extended and "{OUT}" not in extended
     spec = subject.activity_spec()
     assert spec["settings"]["inspectScript"]["value"] == extended
+
+
+@pytest.mark.parametrize("contract", [2, 3])
+@pytest.mark.parametrize("setting", ["inspectScript", "script"])
+def test_activity_script_lines_stay_within_console_reader_cap(contract, setting):
+    from lisp import MAX_SCRIPT_LINE_CHARS
+
+    assert MAX_SCRIPT_LINE_CHARS == 1800
+    script = subject.activity_spec(contract)["settings"][setting]["value"]
+    for line in script.splitlines():
+        assert len(line) <= MAX_SCRIPT_LINE_CHARS, line[:40]
+
+
+def test_build_scr_rejects_an_overlong_finished_line():
+    from lisp import build_scr
+
+    block = '(princ "' + "x" * 1990 + '")'
+    assert len(block) == 2000
+    with pytest.raises(ValueError) as error:
+        build_scr(extra_blocks=(block,))
+    assert block[:40] in str(error.value)
+    assert "1800" in str(error.value)
+
+
+def test_build_scr_checks_the_line_after_output_substitution():
+    from lisp import build_scr
+
+    with pytest.raises(ValueError):
+        build_scr("x" * 1800)
 
 
 def test_activity_spec_pins_pure_script_contract():
@@ -346,7 +376,7 @@ def test_cli_failure_redacts_exception(monkeypatch, capsys):
     assert json.loads(output)["error"] == "provision failed"
 
 
-def test_v3_activity_extends_only_the_header_and_preserves_v2_settings():
+def test_v3_activity_adds_insert_and_preserves_v2_apply_script():
     from lisp import MUTATION_INSPECT_BLOCKS, build_scr
 
     v2_settings = {
@@ -364,17 +394,27 @@ def test_v3_activity_extends_only_the_header_and_preserves_v2_settings():
     headers_v3 = '(list "LEAF_MUTATION_PLAN|1" "LEAF_MUTATION_PLAN|2" "LEAF_MUTATION_PLAN|3")'
     script_v2 = v2_settings["script"]["value"]
     script_v3 = v3["settings"]["script"]["value"]
+    # The v2 APPLY script is byte-identical to 81e5d234. The shared inspect
+    # script changed and must: the old one hangs the console.
+    assert hashlib.sha256(script_v2.encode("utf-8")).hexdigest() == (
+        "a7ed0bb7dbd8266404574b523550d8103318981c47a927a6ad4c9daab07f6c35")
+    assert hashlib.sha256(v2_settings["inspectScript"]["value"].encode("utf-8")).hexdigest() == (
+        "56d279f80d5e2898e6b588e6e36e16750a1f53edf5546b8351b9bdb59d3c6588")
     assert script_v2.count(headers_v2) == 1
     assert "LEAF_MUTATION_PLAN|3" not in script_v2
     assert script_v3.count(headers_v3) == 1
-    assert script_v3 == script_v2.replace(headers_v2, headers_v3)
+    assert "leaf-apply-addinsert" in script_v3
+    assert "ADDINSERT" not in script_v2
     for version in (1, 2, 3):
         assert script_v3.count(f"LEAF_MUTATION_PLAN|{version}") == 1
-    # No v3 operation is introduced by accepting the new header.
-    assert next(line for line in script_v3.splitlines() if line.startswith("(defun leaf-parse-line")) == next(
-        line for line in script_v2.splitlines() if line.startswith("(defun leaf-parse-line"))
+    parser_v3 = next(line for line in script_v3.splitlines() if line.startswith("(defun leaf-parse-line"))
+    assert '((= (car v) "ADDINSERT") (leaf-addinsert-op v))' in parser_v3
+    assert v3["settings"]["inspectScript"] == v2_settings["inspectScript"]
+    assert '(rtos (cond (rot rot)(T 0.0)) 2 5)' in v3["settings"]["inspectScript"]["value"]
+    assert '(rtos (cond (rot rot)(T 0.0)) 2 6)' not in v3["settings"]["inspectScript"]["value"]
     v3["id"] = v2["id"]
     v3["settings"]["script"]["value"] = script_v2
+    v3["settings"]["inspectScript"] = v2_settings["inspectScript"]
     assert v3 == v2
     assert subject.MUTATION_INSPECT_BLOCKS_V3 == MUTATION_INSPECT_BLOCKS
 
@@ -666,7 +706,9 @@ def test_catalogue_decodes_names_and_layers_without_collisions_or_double_decodin
 def test_catalogue_lisp_looks_up_the_raw_name_and_encodes_only_record_fields():
     from lisp import MUTATION_INSPECT_BLOCKS
 
-    helper, catalogue = MUTATION_INSPECT_BLOCKS[-2:]
+    # Helpers now occupy separate lines before the catalogue emission progn.
+    helper = "\n".join(MUTATION_INSPECT_BLOCKS[3:-1])
+    catalogue = MUTATION_INSPECT_BLOCKS[-1]
     assert '(setq name (cdr (assoc 2 bk)))' in catalogue
     assert '(entnext (tblobjname "BLOCK" name))' in catalogue
     assert '(leaf-bk-child name bed)' in catalogue
