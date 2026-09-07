@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import re
 import time
 import uuid
 
 from envelopes import ErrorCode, err_envelope, ok_envelope
+
+logger = logging.getLogger(__name__)
 
 CONSTANTS = {
     "schema": "leaf.campaign-transform.v1",
@@ -197,8 +200,11 @@ def run(job_id, completion_provenance, tool, params, heartbeat, cancelled, deadl
     import tool_loader
 
     started = time.monotonic()
+    phase = "context_validation"
 
     def guard(budget=0):
+        nonlocal phase
+        phase = "ownership_deadline"
         if cancelled() or not heartbeat() or cancelled():
             raise ValueError("completion attempt is no longer owned")
         if not math.isfinite(deadline) or time.monotonic() + budget >= deadline:
@@ -207,26 +213,44 @@ def run(job_id, completion_provenance, tool, params, heartbeat, cancelled, deadl
     try:
         context = validate_context(completion_provenance)
         guard()
+        phase = "input_validation"
         input_bytes(context, params)
+        phase = "authority"
         check_authority(context)
+        phase = "publication"
         published = published_tool(context, tool)
+        phase = "source_capture"
         source = capture_source(context, published)
+        phase = "ownership_deadline"
         timeout = tool_loader._sandbox_timeout_s()
         if not math.isfinite(timeout) or timeout <= 0 or timeout + 1 >= min(jobs.lease_duration_s(), jobs.heartbeat_stale_s()):
             raise ValueError("sandbox exceeds owning lease budget")
         guard(timeout + 1)
+        phase = "execution"
         env = tool_loader.run_tool_dynamic(published, {}, params, False,
                                            tenant_id=context["tenant_id"], test_source=source)
         guard()
+        phase = "execution"
         if not isinstance(env, dict) or env.get("ok") is not True:
             raise ValueError("authored tool did not execute successfully")
+        phase = "output_verification"
         actual = env.get("result")
         validate_result(context, params, actual)
+        phase = "authority"
         check_authority(context)
+        phase = "publication"
         published_tool(context, tool)
+        phase = "output_verification"
         return ok_envelope(tool["name"], tool.get("version", ""), actual, None,
                            int((time.monotonic() - started) * 1000))
-    except Exception:
-        return err_envelope(ErrorCode.INTERNAL, "Completion transform could not be verified", False,
+    except Exception as exc:
+        # Only fixed built-in class labels are safe: authored code can name a
+        # custom exception class with sensitive data too. Never attach exc_info.
+        exception_class = next((cls.__name__ for cls in type(exc).__mro__ if cls in (
+            ValueError, TypeError, KeyError, IndexError, RuntimeError, OSError,
+            TimeoutError, PermissionError, UnicodeError, Exception,
+        )), "Exception")
+        logger.warning("phase=%s exception_class=%s", phase, exception_class)
+        return err_envelope(ErrorCode.INTERNAL, "Completion transform could not be verified (" + phase + ")", False,
                             tool=tool.get("name"), version=tool.get("version"),
                             timing_ms=int((time.monotonic() - started) * 1000))

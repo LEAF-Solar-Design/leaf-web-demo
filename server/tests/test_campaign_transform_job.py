@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 import hashlib
 import json
+import logging
 import sqlite3
 import time
 import uuid
@@ -89,6 +90,93 @@ def invoke(p, **kw):
     return adapter.run(p.jid, p.ctx, p.tool, kw.pop('params', p.params),
                        kw.pop('heartbeat', lambda: True), kw.pop('cancelled', lambda: False),
                        kw.pop('deadline', time.monotonic() + 30))
+
+
+@pytest.mark.parametrize('seam,occurrence,phase', [
+    ('validate_context', 1, 'context_validation'),
+    ('input_bytes', 1, 'input_validation'),
+    ('check_authority', 1, 'authority'),
+    ('check_authority', 2, 'authority'),
+    ('published_tool', 1, 'publication'),
+    ('published_tool', 2, 'publication'),
+    ('capture_source', 1, 'source_capture'),
+    ('run_tool_dynamic', 1, 'execution'),
+    ('validate_result', 1, 'output_verification'),
+    ('heartbeat', 1, 'ownership_deadline'),
+    ('heartbeat', 3, 'ownership_deadline'),
+])
+def test_failure_phase_logs_only_safe_labels(published, monkeypatch, caplog, seam, occurrence, phase):
+    secret = 'PLANTED_COMPLETION_SECRET_9371'
+    executions = []
+
+    def execute(*args, **kwargs):
+        executions.append(True)
+        return {'ok': True, 'result': {
+            'csv': static.expected_output(published.params['source_json'].encode()).decode()}}
+
+    monkeypatch.setattr(tool_loader, 'run_tool_dynamic', execute)
+    target = tool_loader if seam == 'run_tool_dynamic' else adapter
+    original = (lambda: True) if seam == 'heartbeat' else getattr(target, seam)
+    calls = []
+
+    def fail(*args, **kwargs):
+        calls.append(True)
+        if len(calls) == occurrence:
+            try:
+                raise ValueError(secret)
+            except ValueError as cause:
+                raise RuntimeError(secret) from cause
+        return original(*args, **kwargs)
+
+    options = {}
+    if seam == 'heartbeat':
+        options['heartbeat'] = fail
+    else:
+        monkeypatch.setattr(target, seam, fail)
+    with caplog.at_level(logging.WARNING, logger=adapter.__name__):
+        env = invoke(published, **options)
+    assert env['ok'] is False and env.get('result') is None
+    assert 'Completion transform could not be verified (' + phase + ')' in json.dumps(env)
+    assert secret not in json.dumps(env) + caplog.text
+    assert len(executions) <= 1
+    records = [record for record in caplog.records if record.name == adapter.__name__]
+    assert len(records) == 1
+    assert records[0].getMessage() == 'phase=' + phase + ' exception_class=RuntimeError'
+    assert records[0].exc_info is None and records[0].stack_info is None
+
+
+@pytest.mark.parametrize('failure', ['deadline', 'lease_budget', 'provider_result', 'wrong_output', 'custom_exception'])
+def test_failure_diagnostics_do_not_expose_payloads(published, monkeypatch, caplog, failure):
+    secret = 'PLANTED_COMPLETION_SECRET_9371'
+    phase = 'execution'
+    options = {}
+
+    def execute(*args, **kwargs):
+        if failure == 'custom_exception':
+            raise type(secret, (RuntimeError,), {})(secret)
+        if failure == 'provider_result':
+            return {'ok': False, 'error': secret, 'result': secret}
+        return {'ok': True, 'result': {'csv': secret}}
+
+    monkeypatch.setattr(tool_loader, 'run_tool_dynamic', execute)
+    if failure == 'deadline':
+        options['deadline'] = time.monotonic() - 1
+        phase = 'ownership_deadline'
+    elif failure == 'lease_budget':
+        monkeypatch.setenv('JOB_LEASE_S', '5')
+        phase = 'ownership_deadline'
+    elif failure == 'wrong_output':
+        phase = 'output_verification'
+    with caplog.at_level(logging.WARNING, logger=adapter.__name__):
+        env = invoke(published, **options)
+    assert env['ok'] is False and env.get('result') is None
+    assert 'Completion transform could not be verified (' + phase + ')' in json.dumps(env)
+    assert secret not in json.dumps(env) + caplog.text
+    records = [record for record in caplog.records if record.name == adapter.__name__]
+    assert len(records) == 1
+    exception_class = 'RuntimeError' if failure == 'custom_exception' else 'ValueError'
+    assert records[0].getMessage() == 'phase=' + phase + ' exception_class=' + exception_class
+    assert records[0].exc_info is None and records[0].stack_info is None
 
 
 def test_actual_captured_source_executes_and_matches_independent_csv(published, monkeypatch):
