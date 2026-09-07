@@ -91,7 +91,7 @@ class PostgresJobStore:
             cur.execute(
                 "SELECT a.* FROM jobs j JOIN async_jobs a ON a.job_id = j.spine_ref "
                 "WHERE j.job_id::text = %s AND a.tenant_id = %s "
-                "AND a.execution_json ? 'capability_provenance'",
+                "AND (a.execution_json ? 'capability_provenance' OR a.execution_json ? 'completion_provenance')",
                 (canonical_id, tenant_id),
             )
             row = cur.fetchone()
