@@ -5,6 +5,8 @@ from pathlib import Path
 from threading import Barrier
 from types import SimpleNamespace
 import sys
+import json
+import time
 import uuid
 
 import psycopg
@@ -52,6 +54,125 @@ def _create(scope, principal, **changes):
     payload = dict(contract=_contract(), delivery_profile='cad_file', idempotency_key='release')
     payload.update(changes)
     return releases.create_release(*scope, principal, **payload)
+
+
+def _metadata(name, media_type):
+    return dict(path=name, name=name, media_type=media_type, format=name.rsplit('.', 1)[-1],
+                sha256='a' * 64, size_bytes=10, content_valid=True, bytes_verified=True)
+
+
+def test_transform_contract_and_normalized_scheduling_intent(make_org):
+    scope, principal, _ = _seed(make_org)
+    contract = _contract()
+    contract.update(transform_recipe=dict(recipe_id='json-records-to-csv', recipe_version=1,
+                                         source_artifact=_metadata('records.json', 'application/json')),
+                    selected_artifact=_metadata('records.csv', 'text/csv'),
+                    deadline_at='2026-09-07T10:00:00-05:00', priority_score=70)
+    row = _create(scope, principal, contract=contract)
+    assert row['contract']['deadline_at'] == '2026-09-07T15:00:00Z'
+    assert row['contract']['transform_recipe']['source_artifact']['format'] == 'json'
+    for change in ({'delivery_profile': 'web_tool'},
+                   {'contract': {**contract, 'web_recipe': None}},
+                   {'contract': {**contract, 'priority_score': True}},
+                   {'contract': {**contract, 'priority_score': 101}},
+                   {'contract': {**contract, 'deadline_at': '2026-09-07'}},
+                   {'contract': {**contract, 'transform_recipe': {**contract['transform_recipe'], 'shell': 'bad'}}},
+                   {'contract': {**contract, 'selected_artifact': _metadata('wrong.html', 'text/html')}}):
+        _code('invalid_request', _create, scope, principal, **{**dict(contract=contract), **change})
+
+
+def test_execution_guard_excludes_other_connection_without_locking_release_rows(make_org):
+    scope, principal, _ = _seed(make_org)
+    row = _create(scope, principal)
+    with releases.execution_guard(*scope, row['release_id']) as acquired:
+        assert acquired
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            def contender():
+                with releases.execution_guard(*scope, row['release_id']) as entered:
+                    return entered
+            assert pool.submit(contender).result(timeout=5) is False
+        # Inner runtime transactions can take the row and org locks independently.
+        progress = releases.set_progress(*scope, row['release_id'], principal, state='active',
+                                        next_action=dict(wait_kind='job', reason='The conversion is running.'))
+        assert progress['status'] == 'active'
+    with releases.execution_guard(*scope, row['release_id']) as acquired:
+        assert acquired
+
+
+def test_pending_progress_preserves_predecessors_and_never_consumes_corrections(make_org):
+    scope, principal, _ = _seed(make_org)
+    row = _create(scope, principal)
+    _record(scope, row, 'implementation')
+    for _ in range(4):
+        releases.set_progress(*scope, row['release_id'], principal, state='active',
+                              next_action=dict(wait_kind='authoring', reason='Preparing the missing tool.', change_set_id='stage-one'))
+    snapshot = releases.get_release(*scope, row['release_id'])
+    assert len(snapshot['stages']) == 1 and snapshot['stages'][0]['status'] == 'passed'
+    releases.set_progress(*scope, row['release_id'], principal, state='waiting',
+                          next_action=dict(wait_kind='authority', reason='Sign in to continue.'))
+    assert row['release_id'] not in {item['release_id'] for item in releases.runnable_releases(200)}
+    _code('release_not_active', releases.set_progress, *scope, row['release_id'], principal,
+          state='active', next_action=dict(wait_kind='job', reason='Still running.'))
+
+
+def _outstanding_job(scope, principal, row):
+    from job_pg_store import PostgresJobStore
+    job = str(uuid.uuid4())
+    context = dict(schema='leaf.campaign-transform.v1', capability='campaign.records-to-csv',
+                   recipe_id='json-records-to-csv', recipe_version=1, tenant_id=str(scope[0]),
+                   org_id=str(scope[0]), project_id=str(scope[1]), campaign_id=str(scope[2]),
+                   release_id=row['release_id'], contract_version=1, binding_id=str(principal),
+                   tool_name='campaign-records-to-csv', change_set_id='published-transform',
+                   catalog_commit='a' * 40, effective_catalog_digest='b' * 64,
+                   tool_manifest_sha256='sha256:' + 'c' * 64, tool_source_sha256='d' * 64, input_sha256='e' * 64)
+    writer = PostgresJobStore()
+    writer.submit(dict(job_id=job, tenant_id=str(scope[0]), org_id=str(scope[0]), project_id=str(scope[1]),
+                       tool=context['tool_name'], params=json.dumps({'source_json': '[{"x":1}]'}), dwg='',
+                       created_at=time.time(), execution=json.dumps({'completion_provenance': context}),
+                       authority_mode='legacy_sqlite', idempotency_key=job, submission_fingerprint='a' * 64, dwg_version=None))
+    return writer, job
+
+
+def test_outstanding_async_work_holds_workspace_slot_and_counts_toward_three(make_org):
+    scope, principal, org = _seed(make_org)
+    other, other_principal, _ = _seed(make_org, org)
+    row = _create(scope, principal)
+    jobs = [_outstanding_job(scope, principal, row) for _ in range(3)]
+    _task(scope, 'after-transform')
+    assert _claim(scope) is None
+    writer, job = jobs[0]
+    assert writer.complete(job, 0, 'complete', {'ok': True}, None, {}, 'finished', None, time.time()) == 'applied'
+    attempt = _claim(scope)
+    assert attempt is not None
+    _settle(scope, attempt)
+    releases.set_progress(*scope, row['release_id'], principal, state='waiting',
+                          next_action=dict(wait_kind='job', reason='The conversion is running.', job_id=jobs[1][1]))
+    queued = _create(other, other_principal)
+    assert queued['status'] == 'queued'
+    for writer, job in jobs[1:]:
+        writer.complete(job, 0, 'complete', {'ok': True}, None, {}, 'finished', None, time.time())
+    assert releases.transition_release(*other, queued['release_id'], other_principal, action='resume')['status'] == 'active'
+
+
+def test_runnable_deadlines_priority_and_failed_stage_exclusion(make_org):
+    entries = []
+    for deadline, priority in ((None, 99), ('2026-09-08T00:00:00Z', 90), ('2026-09-07T00:00:00Z', 1),
+                               ('2026-09-08T00:00:00Z', 100)):
+        scope, principal, _ = _seed(make_org)
+        contract = {**_contract(), 'priority_score': priority}
+        if deadline:
+            contract['deadline_at'] = deadline
+        entries.append((scope, principal, _create(scope, principal, contract=contract)))
+    ids = {row['release_id'] for _, _, row in entries}
+    found = [row['release_id'] for row in releases.runnable_releases(200) if row['release_id'] in ids]
+    assert found == [entries[i][2]['release_id'] for i in (2, 3, 1, 0)]
+    scope, principal, row = entries[2]
+    _record(scope, row, 'implementation', status='unavailable', evidence={'contract_version': 1, 'checks': []})
+    assert row['release_id'] not in {r['release_id'] for r in releases.runnable_releases(200)}
+    releases.retry_stage(*scope, row['release_id'], principal, stage='implementation')
+    assert row['release_id'] in {r['release_id'] for r in releases.runnable_releases(200)}
+    releases.transition_release(*scope, row['release_id'], principal, action='pause')
+    assert row['release_id'] not in {r['release_id'] for r in releases.runnable_releases(200)}
 
 
 def _evidence(stage, version=1, source='a' * 40):
