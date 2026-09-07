@@ -131,8 +131,12 @@ def test_insert_refuses_invalid_fields(changes, message):
         validate_mutations(_base(), {"added": [_add(**changes)]})
 
 
-def test_dimension_remains_disabled():
-    with pytest.raises(ValueError, match="^contract v3 is not enabled on this deployment$"):
+def test_dimension_is_no_longer_the_disabled_placeholder():
+    # W4g-7b-04s moved DIMENSION off this "not enabled" pin (see
+    # test_w4g7b_04s.py and test_w4g7b_00s.py's own-refusal pin): this
+    # INSERT-shaped fixture now refuses on DIMENSION's own field validation
+    # (name/pt/rot/scale are not DIMENSION fields), never the v3-disabled gate.
+    with pytest.raises(ValueError, match="^added entity at index 0 has unknown fields$"):
         validate_mutations(_base(), {"added": [_add(kind="DIMENSION")]})
 
 

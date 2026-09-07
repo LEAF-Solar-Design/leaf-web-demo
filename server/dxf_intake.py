@@ -79,6 +79,12 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
     has_blocks = False
     handle_seq = 0
     dropped_count = [0]
+    # W4g-7b-04s: LINEAR/ALIGNED dimensions (the DM intake shape, no layer:
+    # see server/write_loop.py's mock add) and the loaded dimstyle catalogue.
+    dimensions: List[Dict[str, Any]] = []
+    dimensions_unsupported = 0
+    dimstyles: List[str] = []
+    seen_dimstyles: set[str] = set()
     # W4g-7b-3s: colour/linetype/lineweight for every LINE / LWPOLYLINE /
     # CIRCLE / ARC / INSERT, the same EP shape da/intake_parse.py builds from
     # accoreconsole's entget so the plan route's DXF preflight
@@ -109,6 +115,15 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
                 if pairs[j][0] == 2 and pairs[j][1] not in seen_layers:
                     seen_layers.add(pairs[j][1])
                     layers.append(pairs[j][1])
+                j += 1
+            i = j
+            continue
+        if section == "TABLES" and code == 0 and value == "DIMSTYLE":
+            j = i + 1
+            while j < n and pairs[j][0] != 0:
+                if pairs[j][0] == 2 and pairs[j][1] not in seen_dimstyles:
+                    seen_dimstyles.add(pairs[j][1])
+                    dimstyles.append(pairs[j][1])
                 j += 1
             i = j
             continue
@@ -164,6 +179,17 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
                 if props is not None:
                     properties[entity["handle"]] = props
             continue
+        if section == "ENTITIES" and code == 0 and value == "DIMENSION":
+            entity, i = _parse_dimension(pairs, i + 1)
+            handle_seq += 1
+            if entity.get("unsupported"):
+                dimensions_unsupported += 1
+            else:
+                entity.pop("unsupported", None)
+                if not entity["handle"]:
+                    entity["handle"] = f"L{handle_seq:X}"
+                dimensions.append(entity)
+            continue
         if section == "ENTITIES" and code == 0 and value in ("TEXT", "MTEXT"):
             entity, i = _parse_text(pairs, i + 1, value)
             handle_seq += 1
@@ -201,6 +227,12 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
         out["arcs"] = arcs
     if resolved_inserts:
         out["inserts"] = resolved_inserts
+    if dimensions:
+        out["dimensions"] = dimensions
+    if dimstyles:
+        out["dimstyles"] = dimstyles
+    if dimensions_unsupported:
+        out["dimensions_unsupported"] = dimensions_unsupported
     if has_blocks:
         out["blocks"] = blocks
     if block_count > 200:
@@ -455,6 +487,88 @@ def _parse_circle_or_arc(pairs: List[Tuple[int, str]], i: int, kind: str, droppe
     if kind == "ARC":
         entity["start_deg"] = start
         entity["end_deg"] = end
+    return entity, i
+
+
+def _parse_dimension(pairs: List[Tuple[int, str]], i: int):
+    """DIMENSION: handle=5, flags=70 (bits 0-3: 0 rotated/linear, 1 aligned;
+    any other subtype is unsupported), def1=(13,23,33), def2=(14,24,34),
+    dimline=(10,20,30), rotation=50 (DXF degrees, LINEAR only), style=3
+    (default Standard), normal=(210,220,230, default +z), measurement=42
+    (group 42 when present, else the same projection rule da/lisp.py's DM
+    inspect block and server/mutation_plan.py compute). No layer: the intake
+    dimension shape never carries one (server/write_loop.py's mock add)."""
+    handle = ""
+    flags = 0
+    p13 = [0.0, 0.0, 0.0]
+    p14 = [0.0, 0.0, 0.0]
+    p10 = [0.0, 0.0, 0.0]
+    rotation = 0.0
+    style = "Standard"
+    normal = [0.0, 0.0, 1.0]
+    measurement = None
+    n = len(pairs)
+    while i < n and pairs[i][0] != 0:
+        code, value = pairs[i]
+        if code == 5:
+            handle = value
+        elif code == 70:
+            flags = _int(value)
+        elif code == 13:
+            p13[0] = _float(value)
+        elif code == 23:
+            p13[1] = _float(value)
+        elif code == 33:
+            p13[2] = _float(value)
+        elif code == 14:
+            p14[0] = _float(value)
+        elif code == 24:
+            p14[1] = _float(value)
+        elif code == 34:
+            p14[2] = _float(value)
+        elif code == 10:
+            p10[0] = _float(value)
+        elif code == 20:
+            p10[1] = _float(value)
+        elif code == 30:
+            p10[2] = _float(value)
+        elif code == 50:
+            rotation = _float(value)
+        elif code == 3:
+            style = value or "Standard"
+        elif code == 210:
+            normal[0] = _float(value)
+        elif code == 220:
+            normal[1] = _float(value)
+        elif code == 230:
+            normal[2] = _float(value)
+        elif code == 42:
+            measurement = _float(value)
+        i += 1
+    subtype = flags & 15
+    if subtype not in (0, 1):
+        return {"unsupported": True, "handle": handle}, i
+    kind = "LINEAR" if subtype == 0 else "ALIGNED"
+    tilted = normal != [0.0, 0.0, 1.0]
+    wp1 = _ocs_to_wcs(p13, normal) if tilted else p13
+    wp2 = _ocs_to_wcs(p14, normal) if tilted else p14
+    wdl = _ocs_to_wcs(p10, normal) if tilted else p10
+    if kind != "LINEAR":
+        rotation = 0.0
+    if measurement is None:
+        dx, dy = wp2[0] - wp1[0], wp2[1] - wp1[1]
+        if kind == "LINEAR":
+            radians = math.radians(rotation)
+            measurement = abs(dx * math.cos(radians) + dy * math.sin(radians))
+        else:
+            measurement = math.sqrt(dx * dx + dy * dy + (wp2[2] - wp1[2]) ** 2)
+    entity: Dict[str, Any] = {
+        "unsupported": False, "type": kind,
+        "p1": [round(v, 3) for v in wp1], "p2": [round(v, 3) for v in wp2],
+        "dimline": [round(v, 3) for v in wdl], "rotation_deg": round(rotation, 6),
+        "style": style, "nrm": [round(v, 6) for v in normal],
+        "measurement": round(measurement, 3), "handle": handle,
+    }
     return entity, i
 
 

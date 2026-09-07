@@ -864,7 +864,7 @@ def apply_mutations(intake: Dict[str, Any], mutations: Dict[str, Any]) -> Dict[s
 
     removed = {str(h) for h in (mutations.get("removed") or [])}
     if removed:
-        for field in ("polylines", "circles", "arcs"):
+        for field in ("polylines", "circles", "arcs", "dimensions"):
             if new.get(field):
                 new[field] = [p for p in new[field] if str(p.get("handle")) not in removed]
     # W4g-3 (contract v2): replacements on existing entities, by handle. The
@@ -931,6 +931,15 @@ def apply_mutations(intake: Dict[str, Any], mutations: Dict[str, Any]) -> Dict[s
                     "z": round(e["pt"][2], 3), "rot": round(math.radians(e["rot"]), 6),
                     "scale": [round(value, 4) for value in e["scale"]],
                     "nrm": [0.0, 0.0, 1.0]})
+            elif kind == "DIMENSION":
+                # The intake's dimension shape (da/intake_parse.py's DM record)
+                # carries no layer: the layer only steers the LISP entmake.
+                new.setdefault("dimensions", []).append({
+                    "type": e["dimtype"], "p1": list(e["def1"]), "p2": list(e["def2"]),
+                    "dimline": list(e["dimline"]),
+                    "rotation_deg": e.get("rotation", 0.0), "style": e["style"],
+                    "nrm": [0.0, 0.0, 1.0], "measurement": e["measurement"],
+                    "handle": e["handle"]})
             else:
                 new.setdefault("arcs", []).append({
                     "handle": e["handle"], "layer": e["layer"], "c": list(e["c"]),
@@ -1745,6 +1754,7 @@ def verify_live_mutation_effects(
     # names carries its expected geometry, everything else is untouched,
     # every add is matched by kind and geometry, and no extra entity appears.
     _verify_round_effects(base, actual, expected, canonical, matched_handles)
+    _verify_dimension_effects(base, actual, canonical, matched_handles)
     base_polylines = base.get("polylines") or []
     actual_polylines = actual.get("polylines") or []
     if not isinstance(actual_polylines, list):
@@ -1861,6 +1871,92 @@ def verify_live_mutation_effects(
     if len(expected.get("polylines") or []) != expected_count:
         raise ValueError("canonical mutation application produced an invalid count")
     return _verify_property_effects(actual, canonical, matched_handles)
+
+
+def _dimension_effect_matches(expected: Dict[str, Any], actual: Dict[str, Any]) -> bool:
+    """One dimension against its re-extracted record: same type and style,
+    definition/dimline points within the extractor's 3-decimal quantum, and
+    rotation within a microdegree (LINEAR only; ALIGNED both read 0). The
+    measurement is checked separately, never as part of the match itself, so
+    a geometry match with a wrong measurement is a distinct refusal."""
+    if expected.get("type") != actual.get("type") or expected.get("style") != actual.get("style"):
+        return False
+    for key in ("p1", "p2", "dimline"):
+        if not _point_close(list(expected.get(key) or []), list(actual.get(key) or []), 1.5e-3):
+            return False
+    try:
+        delta = (float(expected.get("rotation_deg", 0.0))
+                 - float(actual.get("rotation_deg", 0.0))) % 360.0
+        if min(delta, 360.0 - delta) > 1e-6:
+            return False
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _verify_dimension_effects(
+    base: Dict[str, Any], actual: Dict[str, Any],
+    canonical: Dict[str, Any], matched_handles: Dict[str, str],
+) -> None:
+    """The dimension half of verify_live_mutation_effects: an unchanged
+    dimension keeps its exact record, an added one is matched by geometry and
+    style with its ACTUAL handle bound, and its measurement is checked
+    against the canonical (computed) record, never the extraction's own
+    cache, within the projection rule's 1e-3 tolerance."""
+    removed = set(canonical.get("removed", []))
+    base_rows = base.get("dimensions") or []
+    actual_rows = actual.get("dimensions") or []
+    if not isinstance(actual_rows, list):
+        raise ValueError("re-extracted output has no dimensions list")
+    if any(not isinstance(e, dict) or not isinstance(e.get("handle"), str) or not e["handle"]
+           for e in actual_rows):
+        raise ValueError("every re-extracted output DIMENSION must have a nonempty handle")
+    actual_by_handle = {str(e["handle"]): e for e in actual_rows}
+    if len(actual_by_handle) != len(actual_rows):
+        raise ValueError("re-extracted output contains duplicate handles")
+    base_handles = set()
+    for entity in base_rows:
+        if not isinstance(entity, dict) or entity.get("handle") is None:
+            continue
+        handle = str(entity["handle"])
+        base_handles.add(handle)
+        if handle in removed:
+            if handle in actual_by_handle:
+                raise ValueError(f"removed handle {handle!r} remains in output")
+            continue
+        if handle not in actual_by_handle:
+            raise ValueError(f"unchanged handle {handle!r} is missing from output")
+        if not _dimension_effect_matches(entity, actual_by_handle[handle]):
+            raise ValueError(f"unchanged handle {handle!r} has unexpected output geometry")
+    unmatched = [e for h, e in actual_by_handle.items() if h not in base_handles]
+    adds = [e for e in canonical.get("added", []) if e.get("kind") == "DIMENSION"]
+    if len(unmatched) > len(adds):
+        raise ValueError("re-extracted output has unexpected new entities")
+    for entity in adds:
+        reference = {
+            "type": entity["dimtype"], "style": entity["style"],
+            "p1": entity["def1"], "p2": entity["def2"], "dimline": entity["dimline"],
+            "rotation_deg": entity.get("rotation", 0.0),
+        }
+        match_index = min(
+            (index for index, candidate in enumerate(unmatched)
+             if _dimension_effect_matches(reference, candidate)),
+            key=lambda index: max(
+                abs(left - right)
+                for point in ("p1", "p2", "dimline")
+                for left, right in zip(reference[point], unmatched[index][point])),
+            default=None,
+        )
+        if match_index is None:
+            raise ValueError(f"added DIMENSION {entity['handle']!r} not found in output")
+        matched = unmatched[match_index]
+        if abs(float(matched.get("measurement", 0.0)) - float(entity["measurement"])) > 1e-3:
+            raise ValueError(
+                f"added DIMENSION {entity['handle']!r} has an unexpected measurement")
+        matched_handles[entity["handle"]] = matched["handle"]
+        unmatched.pop(match_index)
+    if unmatched:
+        raise ValueError("re-extracted output has unmatched new entities")
 
 
 def _round_effect_matches(expected: Dict[str, Any], actual: Dict[str, Any], *, arc: bool) -> bool:

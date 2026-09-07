@@ -123,11 +123,23 @@ def test_explicit_contract_forces_only_the_header():
     assert forced == default.replace(b"LEAF_MUTATION_PLAN|2\n", b"LEAF_MUTATION_PLAN|3\n", 1)
 
 
-@pytest.mark.parametrize("kind", mutation_plan.V3_ADD_KINDS)
-def test_v3_adds_are_declared_but_refused(kind):
-    mutation = {"added": [{"kind": kind, "handle": "new-v3", "name": "ExistingBlock"}]}
+def test_insert_v3_add_is_declared_but_refused():
+    # INSERT keeps the routing-skeleton placeholder refusal: real execution
+    # (test_w4g7b_02s.py) needs the complete transform, not just a capability tag.
+    mutation = {"added": [{"kind": "INSERT", "handle": "new-v3", "name": "ExistingBlock"}]}
     assert mutation_plan.uses_v3(mutation) is True
     with pytest.raises(ValueError, match=f"^{V3_DISABLED}$"):
+        mutation_plan.validate_mutations({"polylines": []}, mutation)
+
+
+def test_dimension_v3_add_is_enabled_with_its_own_refusal():
+    # W4g-7b-04s moved DIMENSION off this "not enabled" pin: a real add is
+    # admitted and executed (server/tests/test_w4g7b_04s.py). This minimal
+    # placeholder is refused by DIMENSION's own field validation, never by
+    # the v3-disabled gate.
+    mutation = {"added": [{"kind": "DIMENSION", "handle": "new-v3", "layer": "0"}]}
+    assert mutation_plan.uses_v3(mutation) is True
+    with pytest.raises(ValueError, match="^added DIMENSION 'new-v3' has an unsupported dimtype$"):
         mutation_plan.validate_mutations({"polylines": []}, mutation)
 
 

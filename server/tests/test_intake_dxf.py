@@ -190,7 +190,71 @@ def test_texts_round_trip_and_empty_texts_are_dropped_like_the_parser_does():
     assert [t["pt"] for t in back["texts"]] == [[1.0, 2.0], [3.0, 4.0]]
 
 
+def test_dimension_round_trips_exactly_and_dimstyle_table_is_conditional():
+    # W4g-7b-04s: one LINEAR and one ALIGNED dimension, plus the loaded
+    # dimstyle catalogue; byte-identical output when neither is carried.
+    intake = {
+        "layers": ["0"], "polylines": [],
+        "dimensions": [
+            {"type": "LINEAR", "p1": [0.0, 0.0, 0.0], "p2": [3.0, 4.0, 0.0],
+             "dimline": [1.5, 6.0, 0.0], "rotation_deg": 0.0, "style": "Standard",
+             "nrm": [0.0, 0.0, 1.0], "measurement": 3.0, "handle": "A1"},
+            {"type": "ALIGNED", "p1": [0.0, 0.0, 0.0], "p2": [3.0, 4.0, 0.0],
+             "dimline": [1.5, 6.0, 0.0], "rotation_deg": 0.0, "style": "Standard",
+             "nrm": [0.0, 0.0, 1.0], "measurement": 5.0, "handle": "A2"},
+        ],
+        "dimstyles": ["Standard"],
+    }
+    back, data = _roundtrip(intake)
+    assert back["dimensions"] == intake["dimensions"]
+    assert back["dimstyles"] == intake["dimstyles"]
+    assert b"\n0\nDIMENSION\n" in data and b"\n0\nDIMSTYLE\n" in data
+    plain = intake_dxf.intake_to_dxf({"layers": ["0"], "polylines": []})
+    assert b"DIMSTYLE" not in plain
+    empty = intake_dxf.intake_to_dxf(
+        {"layers": ["0"], "polylines": [], "dimensions": [], "dimstyles": []})
+    assert empty == plain
+
+
+def test_dimension_with_a_tilted_normal_round_trips_through_ocs():
+    normal = [0.0, 0.707107, 0.707107]
+    intake = {
+        "layers": ["0"], "polylines": [],
+        "dimensions": [
+            {"type": "ALIGNED", "p1": [1.0, 2.0, 3.0], "p2": [4.0, 5.0, 6.0],
+             "dimline": [2.0, 3.0, 4.0], "rotation_deg": 0.0, "style": "Standard",
+             "nrm": normal, "measurement": 5.196, "handle": "A3"},
+        ],
+        "dimstyles": ["Standard"],
+    }
+    back, _ = _roundtrip(intake)
+    entity = back["dimensions"][0]
+    assert entity["nrm"] == normal
+    for key in ("p1", "p2", "dimline"):
+        assert all(abs(a - b) < 1e-3 for a, b in zip(entity[key], intake["dimensions"][0][key]))
+
+
+def test_unsupported_dimension_subtype_is_counted_not_refused():
+    # A real DIMENSION subtype this contract does not carry (2 = angular)
+    # is skipped, counted, and never refuses the parse.
+    raw = (
+        "0\nSECTION\n2\nENTITIES\n"
+        "0\nDIMENSION\n5\n1A\n8\n0\n70\n2\n"
+        "10\n0.0\n20\n0.0\n30\n0.0\n"
+        "13\n0.0\n23\n0.0\n33\n0.0\n"
+        "14\n1.0\n24\n0.0\n34\n0.0\n"
+        "0\nENDSEC\n0\nEOF\n"
+    ).encode("ascii")
+    parsed = dxf_intake.parse_dxf_bytes(raw)
+    assert parsed.get("dimensions_unsupported") == 1
+    assert "dimensions" not in parsed
+
+
 @pytest.mark.parametrize("bad,needle", [
+    ({"layers": ["0"], "polylines": [], "dimensions": [{"type": "ANGULAR", "p1": [0, 0, 0],
+      "p2": [1, 0, 0], "dimline": [0, 1, 0], "style": "Standard", "measurement": 1}]}, "type"),
+    ({"layers": ["0"], "polylines": [], "dimensions": [{"type": "LINEAR", "p1": [0, 0, 0],
+      "p2": [1, 0, 0], "dimline": [0, 1, 0], "style": "", "measurement": 1}]}, "dimstyle name"),
     ({"layers": "A", "polylines": []}, "layers"),
     ({"layers": ["A", "A"], "polylines": []}, "duplicate layer"),
     ({"layers": ["A\nB"], "polylines": []}, "control character"),
