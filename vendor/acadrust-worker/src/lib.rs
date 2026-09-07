@@ -73,7 +73,7 @@
 //! `cargo test` (the tests at the bottom of this file) instead of only in a
 //! browser. The exported names and semantics are unchanged.
 
-use acadrust::entities::{Arc as ArcEntity, Circle, Entity, EntityType, Line, LwPolyline, Text, Point, Ellipse, Insert};
+use acadrust::entities::{Arc as ArcEntity, Circle, Dimension, DimensionAligned, DimensionLinear, Entity, EntityType, Line, LwPolyline, Text, Point, Ellipse, Insert};
 use acadrust::types::{Color, Handle, LineWeight, Transform, Vector2, Vector3};
 use acadrust::{CadDocument, DxfReader, DxfWriter};
 use acadrust::io::dxf::{DxfStreamWriter, DxfTextWriter};
@@ -161,6 +161,9 @@ fn kind_name(entity: &EntityType) -> &'static str {
         EntityType::Point(_) => "POINT",
         EntityType::Ellipse(_) => "ELLIPSE",
         EntityType::Insert(_) => "INSERT",
+        // W4g-7b-04c: a DIMENSION projects under its own type name regardless
+        // of dimtype (LINEAR / ALIGNED / OTHER); see dimension_dimtype_of.
+        EntityType::Dimension(_) => "DIMENSION",
         _ => "OTHER",
     }
 }
@@ -236,6 +239,67 @@ fn rotation_deg_of(entity: &EntityType) -> Option<f64> {
     match entity {
         EntityType::Text(t) => Some(t.rotation.to_degrees()),
         EntityType::Insert(i) => Some(i.rotation.to_degrees()),
+        // W4g-7b-04c: LINEAR's own rotation; ALIGNED has none (0, its
+        // dimension line always runs parallel to def1-def2).
+        EntityType::Dimension(Dimension::Linear(d)) => Some(d.rotation.to_degrees()),
+        EntityType::Dimension(Dimension::Aligned(_)) => Some(0.0),
+        _ => None,
+    }
+}
+
+// W4g-7b-04c: the DIMENSION projection. Linear / Aligned carry their own
+// definition points, the dimension-line point (`base.definition_point` —
+// the field the writer actually emits at group 10, never the per-variant
+// `definition_point` field the crate keeps but never reads on write), the
+// style and the COMPUTED measurement (`measurement()`, never the cached
+// `actual_measurement`). Every other dimension kind (Radius, Diameter,
+// Angular, Ordinate, Arc, LargeRadial) projects as 'OTHER': visible by
+// handle, refused for editing, never dropped (the 05c rule).
+fn dimension_dimtype_of(entity: &EntityType) -> Option<&'static str> {
+    match entity {
+        EntityType::Dimension(Dimension::Linear(_)) => Some("LINEAR"),
+        EntityType::Dimension(Dimension::Aligned(_)) => Some("ALIGNED"),
+        EntityType::Dimension(_) => Some("OTHER"),
+        _ => None,
+    }
+}
+
+fn dimension_def1_of(entity: &EntityType) -> Option<[f64; 2]> {
+    match entity {
+        EntityType::Dimension(Dimension::Linear(d)) => Some([d.first_point.x, d.first_point.y]),
+        EntityType::Dimension(Dimension::Aligned(d)) => Some([d.first_point.x, d.first_point.y]),
+        _ => None,
+    }
+}
+
+fn dimension_def2_of(entity: &EntityType) -> Option<[f64; 2]> {
+    match entity {
+        EntityType::Dimension(Dimension::Linear(d)) => Some([d.second_point.x, d.second_point.y]),
+        EntityType::Dimension(Dimension::Aligned(d)) => Some([d.second_point.x, d.second_point.y]),
+        _ => None,
+    }
+}
+
+fn dimension_dimline_of(entity: &EntityType) -> Option<[f64; 2]> {
+    match entity {
+        EntityType::Dimension(dim @ (Dimension::Linear(_) | Dimension::Aligned(_))) => {
+            let p = dim.base().definition_point;
+            Some([p.x, p.y])
+        }
+        _ => None,
+    }
+}
+
+fn dimension_style_of(entity: &EntityType) -> Option<String> {
+    match entity {
+        EntityType::Dimension(dim @ (Dimension::Linear(_) | Dimension::Aligned(_))) => Some(dim.base().style_name.clone()),
+        _ => None,
+    }
+}
+
+fn dimension_measurement_of(entity: &EntityType) -> Option<f64> {
+    match entity {
+        EntityType::Dimension(dim @ (Dimension::Linear(_) | Dimension::Aligned(_))) => Some(dim.measurement()),
         _ => None,
     }
 }
@@ -298,6 +362,10 @@ fn lineweight_of(entity: &EntityType) -> i64 {
 // their children are not independent model-space geometry or edit targets.
 const BLOCK_CHILD_CAP: usize = 60;
 const INSERT_NOT_EDITABLE: &str = "INSERT is not editable in this round";
+// W4g-7b-04c: the 05c sentence, adopted for DIMENSION. Unlike INSERT, a
+// dimension's DELETE is still allowed (delete_entity_core does not route
+// through entity_mut/cloned_for_create, so this text never gates it).
+const DIMENSION_NOT_EDITABLE: &str = "a dimension is placed, not edited, in this round";
 
 fn block_children(document: &CadDocument) -> HashSet<Handle> {
     document.block_records.iter()
@@ -337,6 +405,14 @@ fn entity_record(index: usize, entity: &EntityType, can_edit: bool) -> serde_jso
         "trueColor": true_color_of(&entity.common().color),
         "linetype": linetype_of(entity),
         "lineweight": lineweight_of(entity),
+        // W4g-7b-04c: null for every kind but DIMENSION; OTHER dimtypes carry
+        // only "dimtype" (the rest stay null, per the projection contract).
+        "dimtype": dimension_dimtype_of(entity),
+        "def1": dimension_def1_of(entity),
+        "def2": dimension_def2_of(entity),
+        "dimline": dimension_dimline_of(entity),
+        "style": dimension_style_of(entity),
+        "measurement": dimension_measurement_of(entity),
     });
     if let EntityType::Insert(insert) = entity {
         record["kind"] = serde_json::json!("REFERENCE");
@@ -481,6 +557,23 @@ fn linetypes_catalogue(document: &CadDocument) -> Vec<String> {
     names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
     names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
     names.truncate(LINETYPE_CATALOGUE_CAP);
+    names
+}
+
+// W4g-7b-04c: the DIMSTYLE table's names for the create-dimension style
+// select, sorted case-insensitively and bounded exactly like linetypes_catalogue.
+// 'Standard' is the crate's own always-created default
+// (CadDocument::initialize_defaults), guaranteed defensively here too.
+const DIMSTYLE_CATALOGUE_CAP: usize = 200;
+
+fn dimstyles_catalogue(document: &CadDocument) -> Vec<String> {
+    let mut names: Vec<String> = document.dim_styles.iter().map(|s| s.name.clone()).collect();
+    if !names.iter().any(|n| n.eq_ignore_ascii_case("Standard")) {
+        names.push("Standard".to_string());
+    }
+    names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    names.truncate(DIMSTYLE_CATALOGUE_CAP);
     names
 }
 
@@ -754,7 +847,14 @@ impl ParsedDxf {
     }
 
     fn entity_mut(&mut self, index: usize) -> Result<&mut EntityType, Refusal> {
-        let handle = self.editable_at(index)?.common().handle;
+        let entity = self.editable_at(index)?;
+        // W4g-7b-04c: every geometry verb goes through entity_mut (delete
+        // does not, see delete_entity_core), so gating here refuses a
+        // DIMENSION selection for all of them with the one 05c sentence.
+        if matches!(entity, EntityType::Dimension(_)) {
+            return refuse(DIMENSION_NOT_EDITABLE);
+        }
+        let handle = entity.common().handle;
         self.inner
             .entities_mut()
             .find(|entity| entity.common().handle == handle)
@@ -764,7 +864,10 @@ impl ParsedDxf {
     fn delete_entity_core(&mut self, index: usize) -> Result<(), Refusal> {
         let (handle, is_editable) = {
             let entity = self.editable_at(index)?;
-            (entity.common().handle, editable(entity))
+            // W4g-7b-04c: a DIMENSION is not geometry-editable (editable()
+            // stays false so the projection's "editable" flag is honest) but
+            // its DELETE is allowed, so this is the one place that admits it.
+            (entity.common().handle, editable(entity) || matches!(entity, EntityType::Dimension(_)))
         };
         if !is_editable {
             return refuse("entity_kind_not_editable");
@@ -1169,6 +1272,12 @@ impl ParsedDxf {
     /// overwrite the original in the document's map).
     fn cloned_for_create(&self, index: usize) -> Result<(EntityType, String), Refusal> {
         let entity = self.editable_at(index)?;
+        // W4g-7b-04c: COPY / MIRROR-with-source / EXPLODE are geometry verbs
+        // too (W4d Draw group note above), so a DIMENSION selection refuses
+        // with the same 05c sentence entity_mut's callers get.
+        if matches!(entity, EntityType::Dimension(_)) {
+            return refuse(DIMENSION_NOT_EDITABLE);
+        }
         if !editable(entity) {
             return refuse("entity_kind_not_editable");
         }
@@ -1644,6 +1753,72 @@ impl ParsedDxf {
         }
         self.add_created(EntityType::LwPolyline(poly), layer)
     }
+
+    /// W4g-7b-04c: LINEAR / ALIGNED dimension creation. Refuses BEFORE the
+    /// document is touched, in this order: a non-finite operand
+    /// (`coordinate_not_finite`), coincident definition points
+    /// (`dimension_points_coincide`), a rotation on ALIGNED
+    /// (`dimension_rotation_not_allowed`), a style absent from the DIMSTYLE
+    /// table by case-insensitive lookup (`dimstyle_not_loaded:<name>`; the
+    /// table's own spelling is stored), an unknown dimtype
+    /// (`dimension_type_not_supported`).
+    ///
+    /// `base.definition_point` is set to the DIMLINE point the caller gave:
+    /// dimension.rs's writer (`write_dimension_base`) emits DXF group 10
+    /// from `base.definition_point`, never from the per-variant
+    /// `definition_point` field the Linear/Aligned structs also carry —
+    /// that field is written nowhere, so setting it would be silently lost.
+    /// `block_name` is left at its default empty string (`DimensionBase::new`);
+    /// the writer emits group 2 unconditionally (`write_string(2,
+    /// &base.block_name)`), so an empty block_name round-trips as an empty
+    /// value rather than a fabricated block name — AutoCAD supplies the
+    /// anonymous block itself.
+    fn create_dimension_core(
+        &mut self,
+        dimtype: &str,
+        x1: f64,
+        y1: f64,
+        x2: f64,
+        y2: f64,
+        dx: f64,
+        dy: f64,
+        rotation_deg: f64,
+        style: &str,
+        layer: &str,
+    ) -> Result<String, Refusal> {
+        if !all_finite(&[x1, y1, x2, y2, dx, dy, rotation_deg]) {
+            return refuse("coordinate_not_finite");
+        }
+        if x1 == x2 && y1 == y2 {
+            return refuse("dimension_points_coincide");
+        }
+        if dimtype == "ALIGNED" && rotation_deg != 0.0 {
+            return refuse("dimension_rotation_not_allowed");
+        }
+        let trimmed_style = style.trim();
+        let resolved_style = self.inner.dim_styles.get(trimmed_style)
+            .map(|s| s.name.clone())
+            .ok_or_else(|| format!("dimstyle_not_loaded:{trimmed_style}"))?;
+        let p1 = Vector3::new(x1, y1, 0.0);
+        let p2 = Vector3::new(x2, y2, 0.0);
+        let dimline = Vector3::new(dx, dy, 0.0);
+        let entity = match dimtype {
+            "LINEAR" => {
+                let mut dim = DimensionLinear::rotated(p1, p2, rotation_deg.to_radians());
+                dim.base.definition_point = dimline;
+                dim.base.style_name = resolved_style;
+                EntityType::Dimension(Dimension::Linear(dim))
+            }
+            "ALIGNED" => {
+                let mut dim = DimensionAligned::new(p1, p2);
+                dim.base.definition_point = dimline;
+                dim.base.style_name = resolved_style;
+                EntityType::Dimension(Dimension::Aligned(dim))
+            }
+            _ => return refuse("dimension_type_not_supported"),
+        };
+        self.add_created(entity, layer)
+    }
 }
 
 // ---- the exported boundary: thin, JsValue only here -------------------------
@@ -1691,6 +1866,12 @@ impl ParsedDxf {
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         if !set_projection_field(&list, &JsValue::from_str("linetypes"), &linetypes) {
             return Err(JsValue::from_str("linetype_catalogue_projection_failed"));
+        }
+        // W4g-7b-04c: the DIMSTYLE catalogue, beside blocks/linetypes.
+        let dimstyles = dimstyles_catalogue(&self.inner).serialize(&serializer)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        if !set_projection_field(&list, &JsValue::from_str("dimstyles"), &dimstyles) {
+            return Err(JsValue::from_str("dimstyle_catalogue_projection_failed"));
         }
         Ok(list)
     }
@@ -1978,6 +2159,28 @@ impl ParsedDxf {
     #[wasm_bindgen(js_name = createPolyline)]
     pub fn create_polyline(&mut self, points: &[f64], closed: bool, layer: &str, bulges: &[f64]) -> Result<String, JsValue> {
         self.create_polyline_core(points, closed, layer, bulges).map_err(js_err)
+    }
+
+    /// Creates a LINEAR or ALIGNED DIMENSION from (x1, y1) to (x2, y2), with
+    /// the dimension line through (dx, dy); `rotation_deg` applies to LINEAR
+    /// only (ALIGNED refuses a non-zero value). See create_dimension_core
+    /// for the exact refusal order.
+    #[wasm_bindgen(js_name = createDimension)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_dimension(
+        &mut self,
+        dimtype: &str,
+        x1: f64,
+        y1: f64,
+        x2: f64,
+        y2: f64,
+        dx: f64,
+        dy: f64,
+        rotation_deg: f64,
+        style: &str,
+        layer: &str,
+    ) -> Result<String, JsValue> {
+        self.create_dimension_core(dimtype, x1, y1, x2, y2, dx, dy, rotation_deg, style, layer).map_err(js_err)
     }
 }
 
@@ -3317,5 +3520,173 @@ mod w4g_7b_03c_property_verbs {
         assert_eq!(a2["trueColor"], serde_json::Value::Null);
         let b2 = after.iter().find(|e| e["handle"] == "101").expect("entity 101 survives the round trip");
         assert_eq!(b2["trueColor"], serde_json::json!([10, 20, 30]));
+    }
+}
+
+#[cfg(test)]
+mod w4g_7b_04c_dimension_rows {
+    use super::*;
+    use acadrust::entities::DimensionRadius;
+
+    fn empty_doc() -> ParsedDxf {
+        ParsedDxf { inner: CadDocument::new(), block_base_patched: Cell::new(false), block_bases_unknown: false, unknown_block_bases: HashSet::new() }
+    }
+
+    fn code<T>(result: Result<T, Refusal>) -> String {
+        match result {
+            Ok(_) => "OK".to_string(),
+            Err(code) => code,
+        }
+    }
+
+    fn reparse(doc: &ParsedDxf) -> ParsedDxf {
+        let bytes = DxfWriter::new(&doc.inner).write_to_vec().expect("writer serializes the document");
+        let inner = DxfReader::from_reader(std::io::Cursor::new(bytes))
+            .expect("reader accepts the written bytes")
+            .read()
+            .expect("written bytes re-parse");
+        ParsedDxf { inner, block_base_patched: Cell::new(false), block_bases_unknown: doc.block_bases_unknown, unknown_block_bases: doc.unknown_block_bases.clone() }
+    }
+
+    fn near(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
+    }
+
+    // (0,0)-(3,4): ALIGNED measures the chord (5); LINEAR at 0deg the x
+    // projection (3); LINEAR at 90deg the y projection (4). Never 5 for
+    // either LINEAR case, which is what reading the cached
+    // `actual_measurement` (always the chord) instead of `measurement()`
+    // would wrongly report.
+    #[test]
+    fn measurement_is_computed_never_the_cached_actual_measurement() {
+        let mut doc = empty_doc();
+        let aligned = doc.create_dimension_core("ALIGNED", 0.0, 0.0, 3.0, 4.0, 1.5, 6.0, 0.0, "Standard", "").expect("aligned");
+        let linear0 = doc.create_dimension_core("LINEAR", 0.0, 0.0, 3.0, 4.0, 1.5, 6.0, 0.0, "Standard", "").expect("linear 0");
+        let linear90 = doc.create_dimension_core("LINEAR", 0.0, 0.0, 3.0, 4.0, 1.5, 6.0, 90.0, "Standard", "").expect("linear 90");
+        let list = projected_entities(&doc.inner);
+        let find = |h: &str| list.iter().find(|e| e["handle"] == h).unwrap().clone();
+        let a = find(&aligned);
+        let l0 = find(&linear0);
+        let l90 = find(&linear90);
+        assert_eq!(a["type"], "DIMENSION");
+        assert_eq!(a["dimtype"], "ALIGNED");
+        assert_eq!(a["editable"], false);
+        assert!(near(a["measurement"].as_f64().unwrap(), 5.0));
+        assert_eq!(l0["dimtype"], "LINEAR");
+        assert!(near(l0["measurement"].as_f64().unwrap(), 3.0), "0deg projects the x component, never the 5.0 chord");
+        assert_eq!(l90["dimtype"], "LINEAR");
+        assert!(near(l90["measurement"].as_f64().unwrap(), 4.0), "90deg projects the y component, never the 5.0 chord");
+        assert_eq!(a["def1"], serde_json::json!([0.0, 0.0]));
+        assert_eq!(a["def2"], serde_json::json!([3.0, 4.0]));
+        assert_eq!(a["dimline"], serde_json::json!([1.5, 6.0]));
+        assert_eq!(a["style"], "Standard");
+        assert_eq!(l0["rotationDeg"], 0.0);
+        assert_eq!(l90["rotationDeg"], 90.0);
+        assert_eq!(a["rotationDeg"], 0.0, "ALIGNED carries no rotation of its own");
+    }
+
+    // Moving the dimline (the definition point the wrapper never exposes for
+    // editing) changes nothing in measurement(): it depends only on the two
+    // definition points and (for LINEAR) the rotation.
+    #[test]
+    fn moving_the_dimline_point_changes_nothing_in_the_measurement() {
+        let mut doc = empty_doc();
+        let handle = doc.create_dimension_core("LINEAR", 0.0, 0.0, 3.0, 4.0, 1.5, 6.0, 0.0, "Standard", "").expect("linear");
+        let before = projected_entities(&doc.inner)[0]["measurement"].as_f64().unwrap();
+        // A raw crate-level mutation (never the wrapper's own edit surface,
+        // which refuses a DIMENSION selection outright).
+        for entity in doc.inner.entities_mut() {
+            if let EntityType::Dimension(dim) = entity {
+                dim.base_mut().definition_point = Vector3::new(99.0, -50.0, 0.0);
+            }
+        }
+        let after = &projected_entities(&doc.inner)[0];
+        assert_eq!(after["handle"], handle);
+        assert_eq!(after["dimline"], serde_json::json!([99.0, -50.0]));
+        assert!(near(after["measurement"].as_f64().unwrap(), before));
+    }
+
+    #[test]
+    fn write_and_reparse_keeps_both_points_the_dimline_the_rotation_the_style_and_the_measurement() {
+        let mut doc = empty_doc();
+        doc.create_dimension_core("LINEAR", 0.0, 0.0, 3.0, 4.0, 1.5, 6.0, 90.0, "Standard", "Dims").expect("linear");
+        let before = &projected_entities(&doc.inner)[0];
+        let back = reparse(&doc);
+        let after = &projected_entities(&back.inner)[0];
+        assert_eq!(after["handle"], before["handle"]);
+        assert_eq!(after["def1"], before["def1"]);
+        assert_eq!(after["def2"], before["def2"]);
+        assert_eq!(after["dimline"], before["dimline"]);
+        assert_eq!(after["rotationDeg"], before["rotationDeg"]);
+        assert_eq!(after["style"], before["style"]);
+        assert!(near(after["measurement"].as_f64().unwrap(), before["measurement"].as_f64().unwrap()));
+        assert!(near(after["measurement"].as_f64().unwrap(), 4.0));
+    }
+
+    #[test]
+    fn create_dimension_core_refuses_before_touching_the_document_in_the_contract_order() {
+        let mut doc = empty_doc();
+        assert_eq!(code(doc.create_dimension_core("LINEAR", f64::NAN, 0.0, 3.0, 4.0, 1.5, 6.0, 0.0, "Standard", "")), "coordinate_not_finite");
+        assert_eq!(code(doc.create_dimension_core("LINEAR", 1.0, 1.0, 1.0, 1.0, 1.5, 6.0, 0.0, "Standard", "")), "dimension_points_coincide");
+        assert_eq!(code(doc.create_dimension_core("ALIGNED", 0.0, 0.0, 3.0, 4.0, 1.5, 6.0, 30.0, "Standard", "")), "dimension_rotation_not_allowed");
+        assert_eq!(code(doc.create_dimension_core("LINEAR", 0.0, 0.0, 3.0, 4.0, 1.5, 6.0, 0.0, "Fancy", "")), "dimstyle_not_loaded:Fancy");
+        assert_eq!(code(doc.create_dimension_core("RADIUS", 0.0, 0.0, 3.0, 4.0, 1.5, 6.0, 0.0, "Standard", "")), "dimension_type_not_supported");
+        // The style lookup is case-insensitive and stores the table's own spelling.
+        let handle = doc.create_dimension_core("LINEAR", 0.0, 0.0, 3.0, 4.0, 1.5, 6.0, 0.0, "standard", "").expect("case-insensitive style");
+        assert_eq!(projected_entities(&doc.inner)[0]["style"], "Standard");
+        // The style check runs BEFORE the dimtype check: an unknown dimtype
+        // with an unloaded style still reports the style refusal.
+        assert_eq!(code(doc.create_dimension_core("RADIUS", 0.0, 0.0, 3.0, 4.0, 1.5, 6.0, 0.0, "Fancy", "")), "dimstyle_not_loaded:Fancy");
+        // Every refusal above left the one prior create's handle the only one present.
+        assert_eq!(projected_entities(&doc.inner).len(), 1);
+        assert_eq!(projected_entities(&doc.inner)[0]["handle"], handle);
+    }
+
+    // The 05c sentence, adopted for DIMENSION: every geometry verb refuses a
+    // DIMENSION selection, but its DELETE is still allowed.
+    #[test]
+    fn every_geometry_verb_refuses_a_dimension_selection_but_delete_is_allowed() {
+        let mut doc = empty_doc();
+        doc.create_dimension_core("LINEAR", 0.0, 0.0, 3.0, 4.0, 1.5, 6.0, 0.0, "Standard", "").expect("linear");
+        assert_eq!(code(doc.translate_entity_core(0, 1.0, 2.0)), DIMENSION_NOT_EDITABLE);
+        assert_eq!(code(doc.move_vertex_core(0, 0, 1.0, 2.0)), DIMENSION_NOT_EDITABLE);
+        assert_eq!(code(doc.copy_entity_core(0, 1.0, 2.0)), DIMENSION_NOT_EDITABLE);
+        assert_eq!(code(doc.mirror_entity_core(0, 0.0, 0.0, 1.0, 0.0, false)), DIMENSION_NOT_EDITABLE);
+        assert_eq!(code(doc.rotate_entity_core(0, 0.0, 0.0, 90.0)), DIMENSION_NOT_EDITABLE);
+        assert_eq!(code(doc.scale_entity_core(0, 0.0, 0.0, 2.0)), DIMENSION_NOT_EDITABLE);
+        assert_eq!(projected_entities(&doc.inner).len(), 1, "every refusal above left the handle untouched");
+        assert!(doc.delete_entity_core(0).is_ok(), "delete is allowed on a DIMENSION unlike every other verb");
+        assert!(projected_entities(&doc.inner).is_empty());
+    }
+
+    // A dimension kind the wrapper does not create (RADIUS here, added
+    // directly through the crate's own add_entity as a loaded document
+    // would carry one) still projects: as OTHER, visible by handle, its
+    // edit refused, its removal allowed — the 05c rule extended to a kind
+    // this record never creates.
+    #[test]
+    fn a_radius_dimension_projects_as_other_and_refuses_its_edit_but_not_its_removal() {
+        let mut doc = empty_doc();
+        let radius = DimensionRadius::new(Vector3::new(0.0, 0.0, 0.0), Vector3::new(5.0, 0.0, 0.0));
+        doc.inner.add_entity(EntityType::Dimension(Dimension::Radius(radius))).expect("radius dimension added");
+        let record = &projected_entities(&doc.inner)[0];
+        assert_eq!(record["type"], "DIMENSION");
+        assert_eq!(record["dimtype"], "OTHER");
+        assert_eq!(record["editable"], false);
+        assert_eq!(record["def1"], serde_json::Value::Null);
+        assert_eq!(record["measurement"], serde_json::Value::Null);
+        assert!(record["handle"].as_str().is_some(), "the handle is never dropped for an unsupported dimtype");
+        assert_eq!(code(doc.translate_entity_core(0, 1.0, 0.0)), DIMENSION_NOT_EDITABLE);
+        assert!(doc.delete_entity_core(0).is_ok());
+        assert!(projected_entities(&doc.inner).is_empty());
+    }
+
+    #[test]
+    fn dimstyles_catalogue_is_sorted_bounded_and_always_carries_standard() {
+        let mut doc = empty_doc();
+        doc.inner.dim_styles.add(acadrust::tables::DimStyle::new("Zeta")).unwrap();
+        doc.inner.dim_styles.add(acadrust::tables::DimStyle::new("alpha")).unwrap();
+        let names = dimstyles_catalogue(&doc.inner);
+        assert_eq!(names, vec!["alpha".to_string(), "Standard".to_string(), "Zeta".to_string()]);
     }
 }
