@@ -376,7 +376,7 @@ def test_cli_failure_redacts_exception(monkeypatch, capsys):
     assert json.loads(output)["error"] == "provision failed"
 
 
-def test_v3_activity_adds_insert_and_preserves_v2_settings():
+def test_v3_activity_adds_insert_and_preserves_v2_apply_script():
     from lisp import MUTATION_INSPECT_BLOCKS, build_scr
 
     v2_settings = {
@@ -394,8 +394,8 @@ def test_v3_activity_adds_insert_and_preserves_v2_settings():
     headers_v3 = '(list "LEAF_MUTATION_PLAN|1" "LEAF_MUTATION_PLAN|2" "LEAF_MUTATION_PLAN|3")'
     script_v2 = v2_settings["script"]["value"]
     script_v3 = v3["settings"]["script"]["value"]
-    # APPLY snapshot at 81e5d234; inspect changes only for the catalogue's
-    # split forms and whitespace compaction outside string literals.
+    # The v2 APPLY script is byte-identical to 81e5d234. The shared inspect
+    # script changed and must: the old one hangs the console.
     assert hashlib.sha256(script_v2.encode("utf-8")).hexdigest() == (
         "a7ed0bb7dbd8266404574b523550d8103318981c47a927a6ad4c9daab07f6c35")
     assert hashlib.sha256(v2_settings["inspectScript"]["value"].encode("utf-8")).hexdigest() == (
@@ -409,9 +409,9 @@ def test_v3_activity_adds_insert_and_preserves_v2_settings():
         assert script_v3.count(f"LEAF_MUTATION_PLAN|{version}") == 1
     parser_v3 = next(line for line in script_v3.splitlines() if line.startswith("(defun leaf-parse-line"))
     assert '((= (car v) "ADDINSERT") (leaf-addinsert-op v))' in parser_v3
-    assert v3["settings"]["inspectScript"]["value"] == v2_settings["inspectScript"]["value"].replace(
-        '(rtos (cond (rot rot)(T 0.0)) 2 5)',
-        '(rtos (cond (rot rot)(T 0.0)) 2 6)', 1)
+    assert v3["settings"]["inspectScript"] == v2_settings["inspectScript"]
+    assert '(rtos (cond (rot rot)(T 0.0)) 2 5)' in v3["settings"]["inspectScript"]["value"]
+    assert '(rtos (cond (rot rot)(T 0.0)) 2 6)' not in v3["settings"]["inspectScript"]["value"]
     v3["id"] = v2["id"]
     v3["settings"]["script"]["value"] = script_v2
     v3["settings"]["inspectScript"] = v2_settings["inspectScript"]

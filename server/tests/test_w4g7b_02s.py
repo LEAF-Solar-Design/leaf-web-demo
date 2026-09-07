@@ -90,6 +90,8 @@ def test_insert_quantizes_all_numbers_and_keeps_mirrored_scales():
     (None, "block Fixture is not defined in this drawing"),
     ({"complete": False}, "block Fixture is incomplete in this drawing"),
     ({"complete": True, "baseUnknown": True}, "block Fixture is incomplete in this drawing"),
+    ({"count": 2}, "block Fixture is incomplete in this drawing"),
+    ({"count": 0}, "block Fixture is incomplete in this drawing"),
 ])
 def test_insert_refuses_unavailable_definition(definition, message):
     base = _base()
@@ -184,7 +186,8 @@ def test_verifier_binds_added_insert_to_actual_handle(monkeypatch):
 
 
 @pytest.mark.parametrize("changes", [
-    {"rot": round(math.radians(91), 6)}, {"rot": math.radians(90) - 1.2e-6},
+    {"rot": round(math.radians(91), 6)},
+    {"rot": math.radians(90) - 2e-5}, {"rot": math.radians(90) + 2e-5},
     {"name": "fixture"}, {"layer": "Other"},
     {"x": 10.01}, {"scale": [2.01, 3.0, 1.0]}, {"nrm": [0.0, 0.0, -1.0]},
 ])
@@ -216,6 +219,84 @@ def test_verifier_accepts_insert_reading_tolerances_and_preserves_unchanged_inse
     actual["inserts"][1]["x"] += 1
     with pytest.raises(ValueError, match="unchanged INSERT"):
         write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+@pytest.mark.parametrize("name", ["Caf\u00e9", "Cafe\t", "Cafe\x7f"])
+def test_insert_refuses_names_outside_printable_ascii(name):
+    base = _base()
+    base["blocks"][name] = base["blocks"].pop("Fixture")
+    with pytest.raises(ValueError, match="^block names outside printable ASCII are not carried in this round$"):
+        validate_mutations(base, {"added": [_add(name=name)]})
+
+
+def test_insert_accepts_printable_ascii_name():
+    base = _base()
+    base["blocks"]["Cafe"] = base["blocks"].pop("Fixture")
+    assert validate_mutations(base, {"added": [_add(name="Cafe")]})["added"][0]["name"] == "Cafe"
+
+
+def test_eof_truncated_catalogue_is_incomplete_and_refused():
+    parsed = intake_parse.parse_text(
+        "BK|Fixture|0,0,0|2|1\nBKE|Fixture|LINE|0,0,0|1,0,0|0", "test.dwg")
+    assert parsed["blocks"]["Fixture"]["complete"] is False
+    assert len(parsed["blocks"]["Fixture"]["children"]) == 1
+    with pytest.raises(ValueError, match="^block Fixture is incomplete in this drawing$"):
+        validate_mutations(parsed, {"added": [_add()]})
+
+
+@pytest.mark.parametrize("delta", [-1e-5, 1e-5])
+def test_added_insert_accepts_one_rotation_reading_quantum(delta):
+    actual = _actual()
+    actual["inserts"][0]["rot"] = math.radians(90) + delta
+    canonical = validate_mutations(_base(), {"added": [_add()]})
+    write_loop.verify_live_mutation_effects(_base(), actual, canonical)
+
+
+def test_legacy_and_v3_keep_the_same_unchanged_insert_rotation_reading():
+    from lisp import build_scr
+
+    legacy = build_scr()
+    v3 = mutation_apply.activity_spec(3)["settings"]["inspectScript"]["value"]
+    reading = '(rtos (cond (rot rot)(T 0.0)) 2 5)'
+    assert reading in legacy and reading in v3
+    assert '(rtos (cond (rot rot)(T 0.0)) 2 6)' not in v3
+    record = "IN|Fixture|0|10,20,0|{rot}|0,0,1|2,3,1|A1"
+    base = _base()
+    base["inserts"] = intake_parse.parse_text(
+        record.format(rot=f"{1.2345646:.5f}"), "test.dwg")["inserts"]
+    actual = _actual()
+    actual["inserts"] += copy.deepcopy(base["inserts"])
+    canonical = validate_mutations(base, {"added": [_add()]})
+    write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+@pytest.mark.parametrize("kind", ["INSERT", "LINE", "CIRCLE", "ARC"])
+def test_added_entities_match_nearest_unconsumed_candidate(kind, monkeypatch):
+    adds = []
+    for index in range(3):
+        x = index * 0.001
+        common = {"handle": f"add-{index}", "kind": kind, "layer": "0"}
+        if kind == "INSERT":
+            entity = _add(**common, pt=[x, 0, 0])
+        elif kind == "LINE":
+            entity = {**common, "pts": [[x, 0, 0], [x, 1, 0]]}
+        else:
+            entity = {**common, "c": [x, 0, 0], "r": 1}
+            if kind == "ARC":
+                entity.update(start_deg=0, end_deg=90)
+        adds.append(entity)
+    base = _base()
+    canonical = validate_mutations(base, {"added": adds})
+    expected = write_loop.apply_mutations(base, canonical)
+    actual = copy.deepcopy(expected)
+    field = {"INSERT": "inserts", "LINE": "polylines", "CIRCLE": "circles", "ARC": "arcs"}[kind]
+    actual[field].reverse()
+    for index, entity in enumerate(actual[field]):
+        entity["handle"] = f"A{index}"
+    monkeypatch.setattr(write_loop, "apply_mutations", lambda *_: expected)
+    write_loop.verify_live_mutation_effects(base, actual, canonical)
+    if kind == "INSERT":
+        assert [entity["handle"] for entity in expected[field]] == ["A2", "A1", "A0"]
 
 
 def test_v3_interpreter_guards_insert_and_keeps_the_v2_script_snapshot():
@@ -290,6 +371,6 @@ def test_accoreconsole_insert_canary_reopens_and_verifies_the_output(tmp_path):
     actual = intake_parse.parse(families, "canary")
     assert not actual.get("parseErrors"), actual.get("parseErrors")
     added, = [entity for entity in actual["inserts"] if entity["name"] == "Fixture"]
-    assert added == _insert(added["handle"])
+    assert added == {**_insert(added["handle"]), "rot": 1.5708}
     assert added["handle"] not in {entity["handle"] for entity in base.get("inserts", [])}
     write_loop.verify_live_mutation_effects(base, actual, canonical)

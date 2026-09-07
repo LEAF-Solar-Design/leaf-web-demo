@@ -411,12 +411,17 @@ def validate_mutations(
                 raise ValueError("added INSERT name is not a safe block name")
             if name.startswith("*"):
                 raise ValueError("added INSERT cannot use a system or anonymous block name")
+            # The plan reader uses the host MBCS code page until a decoder round.
+            if any(not 0x20 <= ord(char) <= 0x7E for char in name):
+                raise ValueError("block names outside printable ASCII are not carried in this round")
             blocks = intake.get("blocks")
             if not isinstance(blocks, dict) or name not in blocks:
                 raise ValueError(f"block {name} is not defined in this drawing")
             block = blocks[name]
             if (not isinstance(block, dict) or block.get("complete") is not True
-                    or block.get("baseUnknown")):
+                    or block.get("baseUnknown")
+                    or not isinstance(block.get("children"), list)
+                    or block.get("count") != len(block["children"])):
                 raise ValueError(f"block {name} is incomplete in this drawing")
             if not isinstance(raw.get("pt"), list) or len(raw["pt"]) != 3:
                 raise ValueError(f"added INSERT {handle!r} pt must have three components")

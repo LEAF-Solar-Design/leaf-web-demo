@@ -1448,9 +1448,9 @@ def _insert_effect_matches(
     try:
         return (
             _point_close([expected[axis] for axis in ("x", "y", "z")],
-                         [actual[axis] for axis in ("x", "y", "z")], tolerance=1e-3)
+                         [actual[axis] for axis in ("x", "y", "z")], tolerance=1.5e-3)
             and math.isclose(math.radians(rotation_deg), float(actual["rot"]),
-                             rel_tol=0.0, abs_tol=1e-6)
+                             rel_tol=0.0, abs_tol=1.5e-5)
             and isinstance(actual.get("scale"), list) and len(actual["scale"]) == 3
             and _point_close(expected["scale"], actual["scale"], tolerance=1e-4)
             and _point_close(expected["nrm"], actual.get("nrm"), tolerance=1e-6)
@@ -1493,10 +1493,18 @@ def verify_live_mutation_effects(
     for entity in expected.get("inserts", []):
         if entity["handle"] not in added_inserts:
             continue
-        match_index = next(
+        match_index = min(
             (index for index, candidate in enumerate(unmatched_inserts)
              if _insert_effect_matches(
-                 entity, candidate, rotation_deg=added_inserts[entity["handle"]]["rot"])), None)
+                 entity, candidate, rotation_deg=added_inserts[entity["handle"]]["rot"])),
+            key=lambda index: (
+                max(abs(entity[axis] - unmatched_inserts[index][axis])
+                    for axis in ("x", "y", "z")),
+                abs(math.radians(added_inserts[entity["handle"]]["rot"])
+                    - float(unmatched_inserts[index]["rot"])),
+                max(abs(left - right) for left, right in
+                    zip(entity["scale"], unmatched_inserts[index]["scale"])),
+            ), default=None)
         if match_index is None:
             raise ValueError(f"added INSERT {entity['name']} not found in output")
         matched = unmatched_inserts.pop(match_index)
@@ -1594,11 +1602,16 @@ def verify_live_mutation_effects(
     if len(unmatched) != len(added_polylines):
         raise ValueError("re-extracted output has unexpected new entities")
     for entity in added_polylines:
-        match_index = next(
+        expected_points = _expected_extracted_points(entity["pts"])
+        match_index = min(
             (index for index, candidate in enumerate(unmatched)
              if isinstance(candidate, dict)
              and _polyline_effect_matches(entity, candidate, extracted=True)),
-            None,
+            key=lambda index: max(
+                abs(left - right)
+                for point, candidate_point in zip(expected_points, unmatched[index]["pts"])
+                for left, right in zip(point, candidate_point)),
+            default=None,
         )
         if match_index is None:
             raise ValueError(f"added polyline {entity['handle']!r} is missing from output")
@@ -1681,10 +1694,17 @@ def _verify_round_effects(
         if len(unmatched) > len(adds):
             raise ValueError("re-extracted output has unexpected new entities")
         for entity in adds:
-            match_index = next(
+            match_index = min(
                 (index for index, candidate in enumerate(unmatched)
                  if _round_effect_matches(entity, candidate, arc=(kind == "ARC"))),
-                None,
+                key=lambda index: (
+                    max(abs(left - right) for left, right in
+                        zip(entity["c"], unmatched[index]["c"])),
+                    max(min((entity[key] - unmatched[index][key]) % 360.0,
+                            (unmatched[index][key] - entity[key]) % 360.0)
+                        for key in ("start_deg", "end_deg")) if kind == "ARC" else 0.0,
+                    abs(entity["r"] - unmatched[index]["r"]),
+                ), default=None,
             )
             if match_index is None:
                 raise ValueError(f"added {kind} {entity['handle']!r} is missing from output")

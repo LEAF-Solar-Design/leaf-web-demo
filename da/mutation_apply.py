@@ -76,14 +76,6 @@ def activity_spec(contract: int = 2) -> dict[str, Any]:
     """Return the complete fixed Activity definition."""
     target = CONTRACTS[contract]
     inspect_script = build_scr(INTAKE_LOCALNAME, extra_blocks=target.inspect_blocks)
-    if contract == 3:
-        # IN retains its legacy radians unit. The v3 verifier needs the
-        # six-decimal reading; leave the provisioned v2 script untouched.
-        inspect_script = inspect_script.replace(
-            '(rtos (cond (rot rot)(T 0.0)) 2 5)',
-            '(rtos (cond (rot rot)(T 0.0)) 2 6)',
-            1,
-        )
     return {
         "id": target.activity_id,
         "engine": ENGINE,

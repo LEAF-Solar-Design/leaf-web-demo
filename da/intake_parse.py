@@ -312,6 +312,9 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
         except Exception as e:
             out.setdefault("parseErrors", []).append(f"{tag}: {e}")
     close()
+    for block in out.get("blocks", {}).values():
+        if block["count"] <= 60 and len(block["children"]) < block["count"]:
+            block["complete"] = False
     # strip parser-internal fields
     for pl in out["polylines"]:
         pl.pop("_el", None)
