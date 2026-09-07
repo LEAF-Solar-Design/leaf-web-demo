@@ -481,7 +481,7 @@ jobs:
 
       - name: Install Python Chromium for managed completion proofs
         working-directory: server
-        run: python -m playwright install --with-deps chromium
+        run: python -m playwright install chromium
 
       - name: Run gate shard ${{ matrix.shard }}
         env:
