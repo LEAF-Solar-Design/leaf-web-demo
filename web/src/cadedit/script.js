@@ -67,6 +67,7 @@ const POINT_Y = new Set(['y', 'y1', 'y2', 'cy', 'dy', 'ey'])
  * 'edge' | 'number'.
  */
 export function promptSlots(prompt) {
+  if (prompt.verb === 'GROUP') return [{ keys: ['groupName'], kind: 'text' }, { keys: ['members'], kind: 'edge', repeat: true }]
   const slots = []
   for (const step of prompt.steps) {
     const fields = step.fields
@@ -121,6 +122,16 @@ export function parseScript(text, parseWord, prompts) {
     }
     const prompt = prompts[command.op] || null
     const inputs = {}
+    if (command.op === 'group') {
+      if (operands.length < 3) return { refusal: `line ${number}: GROUP needs a name and at least two member handles`, line: number }
+      if (operands.slice(1).some((id) => !/^[0-9a-fA-F]{1,16}$/.test(id) || BigInt(`0x${id}`) === 0n)) {
+        return { refusal: `line ${number}: GROUP members must be hexadecimal entity handles`, line: number }
+      }
+      inputs.groupName = operands[0]
+      inputs.members = operands.slice(1).map((id) => BigInt(`0x${id}`).toString()).join(' ')
+      lines.push(Object.freeze({ line: number, word: head, group: command.group, op: command.op, verb: command.verb, inputs }))
+      continue
+    }
     if (!prompt) {
       if (!BARE_OPS.has(command.op)) return { refusal: `line ${number}: ${command.verb} cannot be driven from a script`, line: number }
       if (operands.length) return { refusal: `line ${number}: ${command.verb} takes no operand`, line: number }

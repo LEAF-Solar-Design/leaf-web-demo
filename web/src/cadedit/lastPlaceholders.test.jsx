@@ -228,6 +228,15 @@ describe('W4g-4b MATCHPROP', () => {
 // Create Block) carry the same specific reason the flag-off static panels
 // do, not the generic "not in the browser engine yet".
 describe('W4g-7b-05c: the deferred controls carry their own reason with the flag on', () => {
+  it('the Groups panel has two real tools and no placeholders', () => {
+    render(<EngineSessionProvider createWorker={vi.fn(() => new IdleWorker())}>
+      <DraftingRibbon clusters={[]}><EngineRibbonClusters panels={['groups']} /></DraftingRibbon>
+    </EngineSessionProvider>)
+    const panel = document.querySelector('[data-group="groups"]')
+    expect([...panel.querySelectorAll('[data-tool]')].map((tool) => tool.dataset.tool)).toEqual(['groups:group', 'groups:ungroup'])
+    expect(forGroup('groups').map((action) => action.op)).toEqual(['group', 'ungroup'])
+    expect(panel.textContent).not.toContain('not in the browser engine yet')
+  })
   it('Leader (Annotation) and Create Block (Block) are disabled with their DEFERRED_REASONS sentence', () => {
     render(
       <EngineSessionProvider createWorker={vi.fn(() => new IdleWorker())}>

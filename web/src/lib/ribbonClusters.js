@@ -373,8 +373,6 @@ function offTool(id, label, icon, size = 'small') {
 // counts against its unverifiable-reason budget instead.
 const LEADER_OFF = { id: 'annotation:leader', label: 'Leader', text: 'Leader', icon: 'leader', size: 'large', title: 'Leader', disabled: true, reason: DEFERRED_REASONS.leader, onClick: () => {} }
 const BLOCK_CREATE_OFF = { id: 'block:create', label: 'Create Block', text: 'Create Block', icon: 'block-create', size: 'large', title: 'Create Block', disabled: true, reason: DEFERRED_REASONS.blockCreate, onClick: () => {} }
-const GROUP_OFF = { id: 'groups:group', label: 'Group', text: 'Group', icon: 'group', size: 'large', title: 'Group', disabled: true, reason: DEFERRED_REASONS.group, onClick: () => {} }
-const UNGROUP_OFF = { id: 'groups:ungroup', label: 'Ungroup', text: 'Ungroup', icon: 'ungroup', size: 'large', title: 'Ungroup', disabled: true, reason: DEFERRED_REASONS.ungroup, onClick: () => {} }
 
 /**
  * The reference's Draw-tab panels beyond Draw and Modify (which the engine
@@ -420,8 +418,8 @@ export function referencePanels() {
       // carry yet — the same reason for both, since neither exists without it.
       id: 'groups', label: 'Groups', kind: 'group', note,
       tools: [
-        GROUP_OFF,
-        UNGROUP_OFF,
+        offTool('groups:group', 'Group', 'group', 'large'),
+        offTool('groups:ungroup', 'Ungroup', 'ungroup', 'large'),
       ],
     },
     // W4g-5c: the engine renders a REAL Clipboard panel when the cad_edit

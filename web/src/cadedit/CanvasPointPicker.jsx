@@ -26,7 +26,7 @@ const CLICK_MAX_MS = 500
 // W4f-5: the object-snap reach, in screen pixels (the reference's aperture).
 const SNAP_PX = 10
 // Operand key -> the prompt field's accessible name suffix ("ribbon <label>").
-const FIELD_LABEL = Object.freeze({ x: 'x', y: 'y', x2: 'x2', y2: 'y2', r: 'r', pts: 'points', dx: 'dx', dy: 'dy' })
+const FIELD_LABEL = Object.freeze({ x: 'x', y: 'y', x2: 'x2', y2: 'y2', r: 'r', pts: 'points', dx: 'dx', dy: 'dy', members: 'members' })
 
 function focusField(key) {
   if (typeof document === 'undefined') return
@@ -41,7 +41,11 @@ function focusRun() {
 }
 
 export default function CanvasPointPicker({ viewerRef = null, ground = null, onPicking = null }) {
-  const { session, inputs, setInput, armed, ortho, setOrtho, osnap, setOsnap } = useEngineSessionContext()
+  const { session, inputs, setInput, armed, ortho, setOrtho, osnap, setOsnap, highlightedIds } = useEngineSessionContext()
+  useEffect(() => {
+    viewerRef?.current?.setHighlight?.(Array.from(highlightedIds || []))
+    return () => viewerRef?.current?.setHighlight?.([])
+  }, [viewerRef, highlightedIds])
   // W4f-4: ORTHO (F8) constrains the cursor to the axis of the larger delta
   // from the last point, for the pick and the rubber band alike. W4f-5:
   // OSNAP (F3) lands the cursor on the document's endpoints, midpoints and
@@ -69,6 +73,7 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
   const snapIndex = useRef(null)
   useEffect(() => { snapIndex.current = buildSnapIndex(session.entities) }, [session.entities])
   const armedOp = armed ? armed.op : ''
+  const groupPickDone = armedOp === 'group' && (!!inputs.membersDone || !!inputs.groupName)
   // W4f-3: the chain point a continued command starts from (LINE's next
   // segment), keyed as a string so the sequence restarts only when it moves.
   const armedFrom = armed && armed.from ? armed.from : null
@@ -90,12 +95,12 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
   // armed.
   const entities = session.entities
   useEffect(() => {
-    machine.current = armedOp ? startPicking(armedOp, fromRef.current) : null
+    machine.current = armedOp && !groupPickDone ? startPicking(armedOp, fromRef.current) : null
     const live = !!(machine.current && machine.current.sequence)
     onPickingRef.current?.(live)
     viewerRef?.current?.setRubberBand?.(null)
     return () => { onPickingRef.current?.(false) }
-  }, [armedOp, fromKey, entities, viewerRef])
+  }, [armedOp, fromKey, entities, viewerRef, groupPickDone])
 
   useEffect(() => {
     if (!ground || typeof window === 'undefined') return undefined
@@ -168,6 +173,7 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
       const v = viewer()
       const m = machine.current
       if (!v || !m || !wantsPick(m) || typeof v.unproject !== 'function') return
+      if (m.op === 'group' && inputsRef.current.groupName) return
       const p = v.unproject(event.clientX, event.clientY)
       if (!p) return
       // W4g-6: an edge step names an ENTITY, so the raw click (no snap, no

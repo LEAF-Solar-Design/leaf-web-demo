@@ -99,6 +99,7 @@ function projectDocument(doc) {
       layer: entity.layer,
       closed: entity.closed,
       editable: entity.editable,
+      modelSpace: entity.modelSpace !== false,
       vertices: entity.vertices,
       // W4f: drawable fields for CIRCLE/ARC (null for every other kind), so
       // the viewer can show the engine document; older wrappers without
@@ -145,13 +146,14 @@ function projectDocument(doc) {
       measurement: entity.measurement ?? null,
     }
   })
-  return { entities, blocks: projection.blocks ?? [], linetypes: projection.linetypes ?? [], linetypesTruncated: projection.linetypesTruncated === true, dimstyles: projection.dimstyles ?? [] }
+  return { entities, groups: projection.groups ?? [], blocks: projection.blocks ?? [], linetypes: projection.linetypes ?? [], linetypesTruncated: projection.linetypesTruncated === true, dimstyles: projection.dimstyles ?? [] }
 }
 
 function loadedResponse(documentId, doc) {
-  const { entities, blocks, linetypes, linetypesTruncated, dimstyles } = projectDocument(doc)
+  const { entities, groups, blocks, linetypes, linetypesTruncated, dimstyles } = projectDocument(doc)
   return {
     type: 'documentLoaded',
+    groups,
     documentId,
     entityCount: entities.length,
     entities,
@@ -246,6 +248,18 @@ const MAX_BATCH_STEPS = 4
  */
 function applyOne(doc, op, payload) {
   const p = payload && typeof payload === 'object' ? payload : {}
+  // Group objects are not Draw entities. Report their handle without adding
+  // them to the Draw create table or changing the scalar entity selection.
+  if (op === 'createGroup') {
+    if (typeof doc.createGroup !== 'function') throw new Error('engine_lacks_op:createGroup')
+    const handle = doc.createGroup(String(p.name ?? ''), Array.isArray(p.members) ? p.members.map(String) : [])
+    return { createdHandle: handleId(handle, 'create_returned_no_handle'), createdHandles: null }
+  }
+  if (op === 'ungroup') {
+    if (typeof doc.ungroup !== 'function') throw new Error('engine_lacks_op:ungroup')
+    doc.ungroup(String(p.name ?? ''))
+    return { createdHandle: null, createdHandles: null }
+  }
   const create = CREATE_TABLE.get(op)
   if (typeof create === 'function') {
     if (typeof doc[op] !== 'function') throw new Error(`engine_lacks_create:${op}`)
@@ -387,10 +401,11 @@ async function applyEdit(engine, message) {
     current = null
     return refused(op, error instanceof Error ? error.message : String(error))
   }
-  const { entities, blocks, linetypes, linetypesTruncated, dimstyles } = projection
+  const { entities, groups, blocks, linetypes, linetypesTruncated, dimstyles } = projection
   current = { documentId: current.documentId, doc: reparsed }
   const reply = {
     type: 'editApplied',
+    groups,
     op,
     ok: true,
     entityCount: entities.length,
@@ -410,7 +425,7 @@ async function applyEdit(engine, message) {
     // writer dropped that entity, which the caller treats as a defect, never
     // as success.
     const byHandle = new Map(entities.map((e) => [e.handle, e.id]))
-    if (createdHandle !== null) reply.createdId = byHandle.get(createdHandle) ?? null
+    if (createdHandle !== null) reply.createdId = op === 'createGroup' ? createdHandle : byHandle.get(createdHandle) ?? null
     if (createdHandles !== null) reply.createdIds = createdHandles.map((h) => byHandle.get(h) ?? null)
   }
   return reply

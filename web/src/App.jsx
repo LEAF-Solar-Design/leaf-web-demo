@@ -2604,6 +2604,10 @@ export default function App() {
       id: 'clipboard', label: 'Clipboard', kind: 'group', tools: [],
       extra: <div id="cockpit-clipboard-slot" className="ribbon-slot" />,
     }
+    const groupsSeat = {
+      id: 'groups', label: 'Groups', kind: 'group', tools: [],
+      extra: <div id="cockpit-groups-slot" className="ribbon-slot" />,
+    }
     // W4g-7a: the View tab's Script seat (the reference's SCRIPT): an empty
     // cluster carrying a slot div the engine consumer portals the panel into,
     // present only with the flag on (the panel drives the engine session).
@@ -2642,7 +2646,7 @@ export default function App() {
       // annotation-panel idiom as W4g-5d's TEXT: the static placeholder is
       // for the flag-off build only.
       draw: [...(ENV_CAD_EDIT ? [] : [annotation]), layers, ...(ENV_CAD_EDIT ? [] : [block]),
-        ENV_CAD_EDIT ? propertiesSeat : properties, groups,
+        ENV_CAD_EDIT ? propertiesSeat : properties, ENV_CAD_EDIT ? groupsSeat : groups,
         ENV_CAD_EDIT ? clipboardSeat : clipboardOff, ...(tabFamilies.draw || [])],
       insert: [block, ...(tabFamilies.insert || [])],
       annotate: [annotation, ...(tabFamilies.annotate || [])],
@@ -3235,7 +3239,7 @@ export default function App() {
                 <EngineRibbonClusters
                   importOpen={importOpen}
                   onToggleImport={() => setImportOpen((o) => !o)}
-                  panels={ribbonTab === 'insert' ? ['file'] : ribbonTab === 'draw' ? ['draw', 'modify', 'annotation', 'block', 'clipboard', 'properties'] : ribbonTab === 'view' ? ['script'] : []}
+                  panels={ribbonTab === 'insert' ? ['file'] : ribbonTab === 'draw' ? ['draw', 'modify', 'annotation', 'block', 'clipboard', 'properties', 'groups'] : ribbonTab === 'view' ? ['script'] : []}
                 />
               )}
               {/* W4f slice B: the command line's typed words (LINE, C, MOVE ...)

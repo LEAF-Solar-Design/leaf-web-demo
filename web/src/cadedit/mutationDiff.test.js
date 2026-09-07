@@ -8,6 +8,30 @@ import { COORDINATE_EPSILON, MAX_PLAN_OPERATIONS, diffPlan, planGeometry } from 
 // below need not repeat it.
 const DEFAULT_PROPS = { aci: 256, trueColor: null, linetype: 'ByLayer', lineweight: -1 }
 
+describe('named group mutation plans', () => {
+  const snapshot = (entities, groups = []) => Object.assign(entities, { groups })
+  const rack = (memberIds) => ({ id: '240', name: 'RACK', memberIds })
+  it('binds a same-plan circle to canonical ordinal zero before a lower-handle line', () => {
+    const before = snapshot([line(10)])
+    const now = snapshot([line(10), line(11), circle(32, { vertices: [[4, 2, 0]], radius: 1 })], [rack(['10', '32'])])
+    const result = diffPlan(before, now)
+    expect(result.reason).toBeNull()
+    expect(result.mutations.added.map((entity) => entity.handle)).toEqual(['20', 'B'])
+    expect(result.mutations.added_groups).toEqual([{ name: 'RACK', members: ['A', { add: 0 }] }])
+  })
+  it('removes a group and lowers a changed membership as remove plus add', () => {
+    const entities = [line(10), line(11), circle(12)]
+    const before = snapshot(entities.slice(), [rack(['10', '11'])])
+    expect(diffPlan(before, snapshot(entities.slice())).mutations).toEqual({ removed_groups: ['RACK'] })
+    expect(diffPlan(before, snapshot(entities.slice(), [rack(['10', '12'])])).mutations).toEqual({ removed_groups: ['RACK'], added_groups: [{ name: 'RACK', members: ['A', 'C'] }] })
+  })
+  it('keeps opaque-kind members and lets deletion repair leave a singleton', () => {
+    const opaque = { ...text(12), editable: true, text: 'kept' }
+    expect(diffPlan(snapshot([line(10), opaque]), snapshot([line(10), opaque], [rack(['10', '12'])])).mutations.added_groups).toEqual([{ name: 'RACK', members: ['A', 'C'] }])
+    expect(diffPlan(snapshot([line(10), circle(11)], [rack(['10', '11'])]), snapshot([line(10)], [rack(['10'])])).mutations).toEqual({ removed: ['B'] })
+  })
+})
+
 // The worker's projection: decimal ids (the intake's hex "A" is 10, "B" 11, "C1" 193).
 const line = (id, extra = {}) => ({ id: String(id), type: 'LINE', layer: '0', closed: false, vertices: [[0, 0, 0], [3, 4, 0]], radius: null, startDeg: null, endDeg: null, ...extra })
 const poly = (id, extra = {}) => ({ id: String(id), type: 'LWPOLYLINE', layer: 'Panels', closed: true, vertices: [[0, 0, 0], [2, 0, 0], [2, 2, 0], [0, 2, 0]], radius: null, startDeg: null, endDeg: null, ...extra })

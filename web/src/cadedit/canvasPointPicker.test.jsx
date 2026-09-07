@@ -76,6 +76,17 @@ function click(x, y) {
   })
 }
 
+it('GROUP appends picked edges and ignores the selection and duplicate picks', async () => {
+  mount()
+  const lines = [0, 10, 20].map((y, i) => ({ id: String(10 + i), type: 'LINE', editable: true, vertices: [[0, y, 0], [3, y, 0]] }))
+  await openAndLoad(lines)
+  act(() => { context.session.actions.select('10'); context.setArmed({ group: 'groups', op: 'group' }) })
+  click(15, 0); click(15, 100); click(15, 100); click(15, 200)
+  expect(context.inputs.members).toBe('11 12')
+  expect(context.session.selectedId).toBe('10')
+  expect(workers[0].posted.filter((message) => message.type === 'applyEdit')).toEqual([])
+})
+
 beforeEach(() => {
   globalThis.URL.createObjectURL = vi.fn(() => 'blob:cad-edit-test')
   globalThis.URL.revokeObjectURL = vi.fn()

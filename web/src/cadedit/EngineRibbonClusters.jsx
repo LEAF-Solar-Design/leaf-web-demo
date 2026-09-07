@@ -35,7 +35,7 @@ import { createPortal } from 'react-dom'
 import { RibbonCluster, RibbonTool, RibbonWidget } from '../site/DraftingRibbon.jsx'
 import { QuickButton, QUICK_FILE_SLOT_ID } from '../site/CockpitTopBand.jsx'
 
-import { DEFERRED_REASONS, DRAW_REASONS, MODIFY_REASONS, clipboardReason, drawReason, forGroup, modifyReason, propertyReason } from '../lib/actionRegistry.js'
+import { DEFERRED_REASONS, DRAW_REASONS, MODIFY_REASONS, clipboardReason, drawReason, forGroup, modifyReason, propertyReason, ribbonTool } from '../lib/actionRegistry.js'
 
 import { ACI_NAMES, LINEWEIGHT_VALUES, admissibleBlockName, buildCreatePayload, buildEditPayload, formatLineweight, readNumber } from './engineSession.js'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
@@ -163,7 +163,7 @@ const offTool = ({ id, label, icon, reason = NOT_IN_ENGINE }, size = 'small') =>
 })
 
 export default function EngineRibbonClusters({ importOpen = false, onToggleImport, panels = ['draw', 'modify'] }) {
-  const { session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap, reach } = useEngineSessionContext()
+  const { session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap, reach, selectGroup } = useEngineSessionContext()
   const modify = modifyReason(session, reach)
   // W4g-7b-03c-f: the Properties panel's own ladder, which waives the
   // INSERT-reference rung `modify` still refuses (a property is not
@@ -185,6 +185,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // App renders it there (its ByLayer fields still honest placeholders) with
   // a slot the real Match tool is portaled into, the Clipboard idiom.
   const propertiesSlot = useSlot('cockpit-properties-slot')
+  const groupsSlot = useSlot('cockpit-groups-slot')
   const show = new Set(Array.isArray(panels) ? panels : [])
 
   // The armed command (provider state, so it outlives the ribbon's tab
@@ -205,7 +206,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // ladder, so the prompt says "nothing on the clipboard yet" with Run held
   // exactly as the ribbon button is held, rather than a live Run that the
   // store then refuses.
-  const promptReason = armedGroup === 'draw'
+  const promptReason = armedGroup === 'draw' || armedGroup === 'groups'
     ? draw
     : armedGroup === 'modify'
       ? (PROPERTY_OPS.has(armedOp) ? property : modify)
@@ -234,7 +235,8 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // W4g-7a: the resolution lives in promptInputs.js, shared with the script
   // runner, so a script line and a typed prompt read the same numbers.
   const { effective, expressionRefusal, failedExpression, waitingStep, pointSteps } = resolvePromptInputs(prompt, promptInputs, armed && armed.from ? armed.from : null)
-  const liveRefusal = prompt && !promptReason && !waitingStep
+  const gatheringMembers = armedOp === 'group' && !inputs.membersDone && !inputs.groupName
+  const liveRefusal = prompt && !promptReason && !waitingStep && !gatheringMembers
     ? (expressionRefusal || (armedGroup === 'draw'
       ? buildCreatePayload(armedOp, effective, session.entities.blocks, session.entities.dimstyles)
       : buildEditPayload(armedOp, session.selectedId, effective, session.entities.linetypes, session.entities)).refusal || '')
@@ -267,6 +269,11 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const chainRef = useRef(null)
   const run = () => {
     if (!prompt || runOff) return
+    if (gatheringMembers) {
+      setInput('membersDone', 'true')
+      promptRef.current?.querySelector('[aria-label="ribbon group name"]')?.focus()
+      return
+    }
     // Commit resolved expressions as numbers before the engine sees them:
     // the fields, the record and the chain all carry what was drawn.
     for (const step of pointSteps) {
@@ -293,7 +300,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     // command line takes typing the moment a command starts.
     chainRef.current = null
     if (!armedOp) return undefined
-    promptRef.current?.querySelector('input:not([disabled])')?.focus()
+    promptRef.current?.querySelector(armedOp === 'group' ? '[aria-label="ribbon members"]' : 'input:not([disabled])')?.focus()
     return undefined
   }, [armedOp])
   useEffect(() => {
@@ -310,7 +317,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     // next-point field. A refused edit chains nothing.
     const chain = chainRef.current
     chainRef.current = null
-    let nextField = 'input:not([disabled])'
+    let nextField = armedOp === 'group' ? '[aria-label="ribbon members"]' : 'input:not([disabled])'
     if (chain && armedOp === 'createLine' && session.errorKind === null) {
       const x = Number.parseFloat(chain.x)
       const y = Number.parseFloat(chain.y)
@@ -507,6 +514,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // One field of the prompt: the SAME operator record the pane's fields bind
   // to (provider `inputs`), named `ribbon <label>` for the locator contract.
   const field = ([key, label, mode = 'decimal', wide = false]) => {
+    if (key === 'members') return <span key={key} className="cp-field" tabIndex={0} aria-label="ribbon members">{new Set([session.selectedId, ...String(inputs.members || '').split(/\s+/)].filter(Boolean)).size} objects</span>
     if (key === 'style') {
       return (
         <select
@@ -549,7 +557,8 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
         className={`cp-input${wide ? ' wide' : ''}`}
         type="text"
         inputMode={mode === 'edge' || mode === 'decimal-default' ? (mode === 'decimal-default' ? 'decimal' : 'text') : mode}
-        list={key === 'name' ? BLOCK_CATALOGUE_ID : undefined}
+        list={key === 'name' ? BLOCK_CATALOGUE_ID : key === 'groupName' && armedOp === 'ungroup' ? 'cockpit-group-names' : undefined}
+        maxLength={key === 'groupName' ? 255 : undefined}
         value={promptInputs[key]}
         onChange={(event) => setPromptInput(key, event.target.value)}
         aria-label={`ribbon ${label}`}
@@ -573,6 +582,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
       onKeyDown={onPromptKeyDown}
     >
       <span className="cp-verb">{prompt.verb}</span>
+      {armedOp === 'ungroup' && <datalist id="cockpit-group-names">{(session.entities.groups || []).map((group) => <option key={group.name} value={group.name} />)}</datalist>}
       {prompt.verb === 'INSERT' && (
         <datalist id={BLOCK_CATALOGUE_ID}>
           {/* W4g-7b-02c-e: offer only names the store would admit (its own
@@ -635,8 +645,20 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     </div>
   ) : null
 
+  const groupTools = () => (
+    <>
+        {forGroup('groups').map((action) => (
+          <RibbonTool key={action.id} tool={ribbonTool(action, engineCtx, { write: action.write, ...armedAttrs(action.op) })} />
+        ))}
+        <label>Select group <select aria-label="Select group" title={draw || 'Highlight every member of a named group'} disabled={!!draw} value="" onChange={(event) => selectGroup(event.target.value)}>
+          <option value="">Select group</option>
+          {(session.entities.groups || []).map((group) => <option key={group.name} value={group.name}>{group.name}</option>)}
+        </select></label>
+    </>
+  )
   return (
     <>
+      {show.has('groups') && (groupsSlot ? createPortal(groupTools(), groupsSlot) : <RibbonCluster id="groups" label="Groups" note={draw || null}>{groupTools()}</RibbonCluster>)}
       {quickSlot
         ? createPortal(quick.map((tool) => <QuickButton key={tool.id} tool={tool} />), quickSlot)
         : null}

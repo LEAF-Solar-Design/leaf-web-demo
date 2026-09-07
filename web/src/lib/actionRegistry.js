@@ -133,8 +133,6 @@ export const CLIPBOARD_REASONS = Object.freeze({
 export const DEFERRED_REASONS = Object.freeze({
   blockCreate: 'unavailable; insert an existing block',
   leader: "unavailable; a leader's annotation is an association the contract does not carry yet",
-  group: 'unavailable; groups are dictionary objects the contract does not carry yet',
-  ungroup: 'unavailable; groups are dictionary objects the contract does not carry yet',
 })
 
 // W4g-1b: while the engine holds no document, the reach state (the provider's
@@ -457,7 +455,7 @@ const engineOp = (group, op, label, display, icon, title, size, panel = group) =
   // what the panel note says while the console's drawing is opening.
   // Each engine group answers to its own ladder: draw needs a document,
   // modify needs a selection, and paste needs a clipboard rather than either.
-  when: group === 'draw'
+  when: group === 'draw' || group === 'groups'
     ? (ctx) => drawReason(ctx.session, ctx.reach)
     : op === 'pasteClip'
       ? (ctx) => clipboardReason(ctx.session, ctx.reach)
@@ -477,6 +475,8 @@ const engineOp = (group, op, label, display, icon, title, size, panel = group) =
 })
 
 const ACTION_LIST = [
+  engineOp('groups', 'group', 'group', 'Group', 'group', 'Create a named group of objects', 'large'),
+  engineOp('groups', 'ungroup', 'ungroup', 'Ungroup', 'ungroup', 'Remove a named group, keeping its objects', 'large'),
   // View: fit / zoom / the Properties pane toggle (ribbonClusters.viewCluster).
   ribbon('fit', 'fit', 'Fit', 'fit', 'Fit the drawing to the view',
     (ctx) => (ctx.hasDrawing ? '' : REASONS.noDrawing), (ctx) => ctx.onFit?.(), { cluster: 'view' }),

@@ -78,6 +78,7 @@ const NO_ENTITIES = Object.freeze([])
 export function projectionEntities(message) {
   const entities = Array.isArray(message?.entities) ? message.entities : NO_ENTITIES
   const blocks = message?.blocks ?? entities.blocks
+  const groups = message?.groups ?? entities.groups
   // W4g-7b-03c: the LTYPE catalogue rides the same way blocks does, so a
   // consumer that reads `session.entities.linetypes` sees it survive an
   // undo/redo re-load exactly like the block catalogue does.
@@ -86,8 +87,9 @@ export function projectionEntities(message) {
   // W4g-7b-04c: the DIMSTYLE catalogue rides the same way blocks/linetypes
   // do, so createDimension's style validation sees it survive undo/redo.
   const dimstyles = message?.dimstyles ?? entities.dimstyles
-  if (!Array.isArray(blocks) && !Array.isArray(linetypes) && !Array.isArray(dimstyles) && !linetypesTruncated) return entities
+  if (!Array.isArray(groups) && !Array.isArray(blocks) && !Array.isArray(linetypes) && !Array.isArray(dimstyles) && !linetypesTruncated) return entities
   const next = entities.slice()
+  if (Array.isArray(groups)) next.groups = groups
   if (Array.isArray(blocks)) next.blocks = blocks
   if (Array.isArray(linetypes)) next.linetypes = linetypes
   next.linetypesTruncated = linetypesTruncated
@@ -235,6 +237,8 @@ export const INTERSECT_VERBS = Object.freeze({
 // DIMLINEAR/DIMALIGNED are seat ops the same way — dimLinear/dimAligned lower
 // to createDimension, the worker's only dimension-create op.
 export const WORKER_OP = Object.freeze({ createRectangle: 'createPolyline', dimLinear: 'createDimension', dimAligned: 'createDimension' })
+// Groups create dictionary objects, not Draw entities or scalar selections.
+const GROUP_OPS = Object.freeze({ group: 'createGroup', ungroup: 'ungroup' })
 
 // W4g-7b-04c-3: the fixed dimtype each seat op carries into createDimension's
 // own payload builder. buildCreatePayload never reads a typed `dimtype` input
@@ -710,7 +714,21 @@ export function formatLineweight(weight) {
 // and applyEdit's backstop, so the two lists cannot drift apart.
 export const EDIT_KIND_EXEMPT_OPS = Object.freeze(new Set(['setColor', 'setLinetype', 'setLineweight', 'matchprop']))
 
-export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer, x1, y1, x2, y2, keep, cx, cy, deg, factor, rows, cols, rowGap, colGap, count, totalDeg, edge, ex, ey, x, y, r, d1, d2, aci, linetype, exact, lineweight } = {}, linetypeCatalogue = [], entities = null) {
+export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer, x1, y1, x2, y2, keep, cx, cy, deg, factor, rows, cols, rowGap, colGap, count, totalDeg, edge, ex, ey, x, y, r, d1, d2, aci, linetype, exact, lineweight, members, groupName } = {}, linetypeCatalogue = [], entities = null) {
+  if (op === 'group' || op === 'ungroup') {
+    const name = admissibleBlockName(groupName)
+    if (!name) return { refusal: 'Group name must be 1 to 255 printable ASCII characters, without | or a leading *.' }
+    const existing = (entities?.groups || []).find((g) => g.name.toLowerCase() === name.toLowerCase())
+    if (op === 'ungroup') return existing ? { payload: { name: existing.name } } : { refusal: 'group_not_found: enter an existing group name.' }
+    if (existing) return { refusal: 'group_name_exists: that group name is already used.' }
+    const ids = [...new Set((Array.isArray(members) ? members : [entityId, ...String(members || '').split(/\s+/)]).filter(Boolean).map(String))]
+    if (ids.length < 2) return { refusal: 'group_needs_two_members: select at least two distinct objects.' }
+    if (ids.some((id) => {
+      const e = entities?.find((candidate) => String(candidate.id) === id)
+      return !e || e.modelSpace === false || e.blockChild || e.ownerBlock || (!e.editable && !['INSERT', 'DIMENSION'].includes(e.type))
+    })) return { refusal: 'group_member_not_editable: every member must be an editable model-space object.' }
+    return { payload: { name, members: ids } }
+  }
   const payload = { entityId }
   // W4g-7b-05c-2: the by-kind refusal, before any operand check below, on
   // every surface that calls this builder (the ribbon's live validation, the
@@ -1088,6 +1106,9 @@ export default function useEngineSession({
           ? String(message.createdId)
           : ''
         const createLost = isCreate && !createdId
+        const createdGroupId = message.op === GROUP_OPS.group && message.createdId != null
+          ? String(message.createdId)
+          : ''
         const reparsed = `Re-parsed from the written bytes: ${message.entityCount} entities, ${message.byteLength} bytes.`
         // W4f slice F: the state BEFORE this edit is a snapshot; a new edit
         // ends any redo branch. Done once here (outside the updater, which
@@ -1118,7 +1139,9 @@ export default function useEngineSession({
             ? `${label} applied, but the new entity was not found after re-parse. ${reparsed}`
             : createdId
               ? `${label} applied: entity ${createdId} drawn. ${reparsed}`
-              : `${label} applied${batchNote}. ${reparsed}`,
+              : createdGroupId
+                ? `${label} applied: group ${createdGroupId} created. ${reparsed}`
+                : `${label} applied${batchNote}. ${reparsed}`,
         }))
         return
       }
@@ -1269,7 +1292,18 @@ export default function useEngineSession({
     }
     // Nothing selected is not an error, it is a no-op: the affordances that
     // dispatch an edit are disabled until something is.
-    if (!sessionRef.current.selectedId) return
+    if (!sessionRef.current.selectedId && op !== 'group' && op !== 'ungroup') return
+    if (op === 'group' || op === 'ungroup') {
+      const { payload, refusal } = buildEditPayload(op, sessionRef.current.selectedId, inputs, [], sessionRef.current.entities)
+      if (refusal) { patch({ errorKind: SESSION_ERROR.REFUSED, status: refusal }); return }
+      const boundary = boundaryRef.current
+      if (!boundary || !sessionRef.current.engineParsed) return
+      patch({ busy: true, errorKind: null })
+      if (!boundary.post({ type: 'applyEdit', op: GROUP_OPS[op], payload })) {
+        patch({ busy: false, errorKind: SESSION_ERROR.TRANSPORT, status: 'Group operation refused by the boundary.' })
+      }
+      return
+    }
     // W4g-7b-03c: a property is not geometry. The "an INSERT is placed, not
     // edited, in this round" refusal is for the geometry verbs; colour,
     // linetype and lineweight ride on an INSERT reference's own EntityCommon

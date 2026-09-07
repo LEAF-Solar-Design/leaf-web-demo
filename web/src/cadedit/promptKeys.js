@@ -9,6 +9,13 @@
  * still finds its field once the command is armed.
  */
 export const PROMPTS = Object.freeze({
+  group: { verb: 'GROUP', steps: [
+    { ask: 'Select objects to add:', fields: [['members', 'members', 'edge']], pickKeys: ['membersDone'] },
+    { ask: 'Enter group name:', fields: [['groupName', 'group name', 'text']] },
+  ] },
+  ungroup: { verb: 'UNGROUP', steps: [
+    { ask: 'Enter group name:', fields: [['groupName', 'group name', 'text']] },
+  ] },
   createLine: { verb: 'LINE', steps: [
     { ask: 'Specify first point:', fields: [['x', 'x'], ['y', 'y']] },
     { ask: 'Specify next point:', fields: [['x2', 'x2'], ['y2', 'y2']] },

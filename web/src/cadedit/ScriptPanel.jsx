@@ -17,7 +17,7 @@
 // a reply that never comes cannot hang the script.
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-import { clipboardReason, drawReason, modifyReason } from '../lib/actionRegistry.js'
+import { clipboardReason, drawReason, modifyReason, forGroup } from '../lib/actionRegistry.js'
 import { parseDrawingCommand } from '../lib/commandWords.js'
 import { PROMPTS } from './EngineRibbonClusters.jsx'
 import { DEFAULT_EDIT_INPUTS, useEngineSessionContext } from './EngineSessionProvider.jsx'
@@ -33,6 +33,7 @@ export const LINE_BUDGET_MS = 60_000
 // selection), and every other op, COPY and CUT included, by the Modify
 // ladder (they need a selection; kimi, #1049).
 function gateFor(group, op, session, reach) {
+  if (group === 'groups') return forGroup('groups').find((action) => action.op === op).when({ session, reach })
   if (group === 'draw') return drawReason(session, reach)
   if (op === 'pasteClip') return clipboardReason(session, reach)
   return modifyReason(session, reach)
@@ -102,6 +103,7 @@ export default function ScriptPanel() {
       // a scripted line. Only what the line itself parsed overrides a default.
       const merged = { ...DEFAULT_EDIT_INPUTS, ...line.inputs }
       const { effective, expressionRefusal, waitingStep } = resolvePromptInputs(prompt, merged, null)
+      if (line.op === 'group') effective.members = String(effective.members || '').split(/\s+/).filter(Boolean)
       if (expressionRefusal) { stop('stopped', `Script stopped at line ${line.line}: ${expressionRefusal}`); return }
       if (waitingStep) { stop('stopped', `Script stopped at line ${line.line}: ${line.verb} still needs "${waitingStep.ask}"`); return }
       if (line.op !== 'pasteClip') {

@@ -189,6 +189,12 @@ const SCRIPT = [
   'out.propsLegacyAfter = summary(await handleMessage({ type: "applyEdit", op: "createLine", payload: { x1: 92, y1: 0, x2: 93, y2: 0, layer: "0" } }, engine))',
   'out.untouchedLegacyA = untouchedLegacyA',
   'out.untouchedLegacyB = untouchedLegacyB',
+  'const groupLoaded = await handleMessage({ type: "loadDocument", documentId: "groups.dxf", bytes }, engine)',
+  'const groupMembers = [groupLoaded.entities[0].id, groupLoaded.entities[2].id]',
+  'out.groupBefore = groupLoaded.entities',
+  'out.groupCreated = await handleMessage({ type: "applyEdit", op: "createGroup", payload: { name: "RACK", members: groupMembers } }, engine)',
+  'out.groupMoved = await handleMessage({ type: "applyEdit", op: "move", payload: { entityId: groupMembers[0], dx: 2, dy: -1 } }, engine)',
+  'out.groupRemoved = await handleMessage({ type: "applyEdit", op: "ungroup", payload: { name: "RACK" } }, engine)',
   'process.stdout.write(JSON.stringify({ ids, out }))',
 ].join('\n')
 
@@ -200,6 +206,16 @@ describe.skipIf(!GLUE)('the worker batch on the real engine', () => {
       maxBuffer: 64 * 1024 * 1024,
     })
     const { ids, out } = JSON.parse(raw)
+    expect(out.groupCreated.ok).toBe(true)
+    expect(out.groupCreated.entities).toEqual(out.groupBefore)
+    expect(out.groupCreated.groups).toMatchObject([{ name: 'RACK', memberIds: [out.groupBefore[0].id, out.groupBefore[2].id] }])
+    expect(out.groupCreated.createdId).toBe(out.groupCreated.groups[0].id)
+    expect(out.groupMoved.ok).toBe(true)
+    expect(out.groupMoved.groups).toEqual(out.groupCreated.groups)
+    expect(out.groupMoved.entities[0].vertices).toEqual([[2, -1, 0], [12, -1, 0]])
+    expect(out.groupRemoved.ok).toBe(true)
+    expect(out.groupRemoved.groups).toEqual([])
+    expect(out.groupRemoved.entities).toEqual(out.groupMoved.entities)
     expect(ids).toHaveLength(3)
     const [h, v] = ids
 

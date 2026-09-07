@@ -8,8 +8,21 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 
 import EditSurface from './EditSurface.jsx'
+import { ACTIONS, DEFERRED_REASONS } from '../lib/actionRegistry.js'
 
 afterEach(cleanup)
+
+describe('named groups in the browser editing surface', () => {
+  it('the Groups panel has two real engine commands and no placeholders', () => {
+    const groups = ACTIONS.filter((action) => action.panel === 'groups')
+    expect(groups.map(({ id, surface, op }) => ({ id, surface, op }))).toEqual([
+      { id: 'groups:group', surface: 'engine', op: 'group' },
+      { id: 'groups:ungroup', surface: 'engine', op: 'ungroup' },
+    ])
+    expect(DEFERRED_REASONS).not.toHaveProperty('group')
+    expect(DEFERRED_REASONS).not.toHaveProperty('ungroup')
+  })
+})
 
 describe('acceptance: dormant editing surface mounts only with cad_edit on', () => {
   it('renders nothing when the flag is off', () => {
