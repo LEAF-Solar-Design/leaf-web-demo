@@ -175,7 +175,8 @@ async def conversation_finish(
     key = _idempotency_key(authority_session_id, {"title": title, "prompt": prompt, **finish})
     return await run_in_threadpool(
         campaigns._release_call, "campaign", campaigns._finish_campaign,
-        live_tenant, project_id, title, prompt, finish, key)
+        live_tenant, project_id, title, prompt, finish, key,
+        authority_session_id=authority_session_id, authority_turn_id=authority_turn_id)
 
 
 @router.post("/api/campaigns/conversation/status")

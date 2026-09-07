@@ -146,7 +146,8 @@ def test_finish_rejects_unknown_or_privileged_fields(client, monkeypatch):
 def test_finish_derives_project_from_session_never_from_body(client, monkeypatch):
     calls = []
 
-    def fake_finish(tenant, project, title, prompt, finish, key):
+    def fake_finish(tenant, project, title, prompt, finish, key, **authority):
+        assert authority == {'authority_session_id': SESSION_ID, 'authority_turn_id': TURN_ID}
         calls.append((str(tenant), project, title, prompt, finish, key))
         return {"campaign_id": "cid", "completion": {"release": None}}
 
@@ -169,7 +170,7 @@ def test_finish_derives_project_from_session_never_from_body(client, monkeypatch
 def test_finish_idempotency_key_is_stable_across_retry_turns(client, monkeypatch):
     keys = []
 
-    def fake_finish(tenant, project, title, prompt, finish, key):
+    def fake_finish(tenant, project, title, prompt, finish, key, **authority):
         keys.append(key)
         return {"campaign_id": "cid", "completion": {"release": None}}
 
@@ -184,7 +185,7 @@ def test_finish_idempotency_key_is_stable_across_retry_turns(client, monkeypatch
 def test_finish_idempotency_key_changes_with_intent(client, monkeypatch):
     keys = []
 
-    def fake_finish(tenant, project, title, prompt, finish, key):
+    def fake_finish(tenant, project, title, prompt, finish, key, **authority):
         keys.append(key)
         return {"campaign_id": "cid", "completion": {"release": None}}
 
@@ -196,7 +197,7 @@ def test_finish_idempotency_key_changes_with_intent(client, monkeypatch):
 
 
 def test_finish_propagates_engine_conflict(client, monkeypatch):
-    def conflicting(tenant, project, title, prompt, finish, key):
+    def conflicting(tenant, project, title, prompt, finish, key, **authority):
         raise service.delivery.DeliveryConflict("Finish idempotency collision")
 
     monkeypatch.setattr(campaigns, "_finish_campaign", conflicting)

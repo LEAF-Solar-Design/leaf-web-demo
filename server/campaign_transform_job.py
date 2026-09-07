@@ -85,6 +85,11 @@ def input_bytes(context, params):
 
 
 def check_authority(context):
+    import broker
+    if not broker._authored_execution_enabled() or broker.tenant_disabled(context['tenant_id']):
+        raise ValueError('authored execution authority is unavailable')
+    if broker._production_runtime() and not broker._sandbox_configured():
+        raise ValueError('production authored sandbox is unavailable')
     from leaf_platform import campaigns, campaign_release
 
     scope = campaigns._scope(context["org_id"], context["project_id"])
@@ -100,6 +105,15 @@ def check_authority(context):
             or release.get("contract_version") != context["contract_version"]
             or any(str(release.get(key)) != context[key] for key in ("org_id", "project_id", "campaign_id", "release_id"))):
         raise ValueError("completion release authority changed")
+    import campaign_release_service as runtime
+    import campaign_acquisition_service as acquisition
+    import deps
+    actor = runtime.actor_for_release(release)
+    winners = [tool for tool, source in deps.effective_tools_with_provenance(context['tenant_id'])
+               if tool.get('name') == context['tool_name'] and source == deps.TOOL_SOURCE_TENANT_REPO]
+    if len(winners) != 1 or deps.catalog_tool_digest(winners[0]) != context['tool_manifest_sha256']:
+        raise ValueError('completion execution policy subject changed')
+    acquisition._run_authority(actor, winners[0])
 
 
 def published_tool(context, supplied):

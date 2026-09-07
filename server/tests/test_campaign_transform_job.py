@@ -322,6 +322,8 @@ def test_runner_does_not_settle_after_losing_ownership(published, monkeypatch, s
 
 def test_authority_requires_active_binding_campaign_and_current_release(published, monkeypatch):
     from leaf_platform import campaigns, campaign_release
+    import campaign_release_service as runtime
+    import campaign_acquisition_service as acquisition
     # Fixture replaced the public seam; execute the real function via its saved module source.
     import importlib.util
     spec = importlib.util.spec_from_file_location('transform_authority_check', adapter.__file__)
@@ -336,7 +338,13 @@ def test_authority_requires_active_binding_campaign_and_current_release(publishe
     release = {k: p.ctx[k] for k in ('org_id', 'project_id', 'campaign_id', 'release_id', 'contract_version')}
     release['status'] = 'active'
     monkeypatch.setattr(campaign_release, 'get_release', lambda *a: {'release': release})
+    # This unit isolates release/binding state. Runtime actor/policy producers
+    # have their own integration coverage and are rechecked by this method.
+    monkeypatch.setattr(runtime, 'actor_for_release', lambda row: 'current-actor')
+    policy_calls = []
+    monkeypatch.setattr(acquisition, '_run_authority', lambda actor, tool: policy_calls.append(actor))
     module.check_authority(p.ctx)
+    assert policy_calls == ['current-actor']
     release['contract_version'] = 2
     with pytest.raises(ValueError): module.check_authority(p.ctx)
     release['contract_version'] = 1

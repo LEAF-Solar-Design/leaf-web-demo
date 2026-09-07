@@ -401,7 +401,8 @@ async def submit(request: Request, tenant: Any = Depends(deps.require_tenant)):
         return _failure(400, 'invalid_request', 'Invalid campaign request')
     if body.get('mode') == 'finish':
         return await run_in_threadpool(_release_call, 'campaign', _finish_campaign,
-                                       tenant, project, title, prompt, body['finish'], key)
+                                       tenant, project, title, prompt, body['finish'], key,
+                                       **_release_authority(request))
     def admit(store, org):
         tenant_id = str(getattr(tenant, 'tenant_id', tenant))
         row = store.submit_campaign(org, project, tenant_id, _principal(tenant),
@@ -414,21 +415,27 @@ async def submit(request: Request, tenant: Any = Depends(deps.require_tenant)):
     return _execute(tenant, project, admit, 'campaign', created=True)
 
 
-def _finish_campaign(tenant, project, title, prompt, finish, key):
+def _finish_campaign(tenant, project, title, prompt, finish, key, **authority_headers):
     import campaign_release_service as releases
     org, _, actor = releases.authority(tenant, project)
     row = _store().submit_campaign(org, project, str(getattr(tenant, 'tenant_id', tenant)),
                                    actor, title=title, prompt=prompt, idempotency_key=key)
     if row is None:
         raise LookupError('Campaign unavailable')
-    completion = releases.create(tenant, project, row['campaign_id'], finish, key)
+    completion = releases.create(tenant, project, row['campaign_id'], finish, key, **authority_headers)
     return dict(row, completion=completion)
 
 
-def _release_call(key, function, *args):
+def _release_authority(request):
+    headers = {key: request.headers.get(header) for key, header in (
+        ('authority_session_id', 'X-Authority-Session-Id'), ('authority_turn_id', 'X-Authority-Turn-Id'))}
+    return {key: value for key, value in headers.items() if value}
+
+
+def _release_call(key, function, *args, **kwargs):
     import campaign_delivery_service as delivery
     try:
-        return {'ok': True, key: function(*args)}
+        return {'ok': True, key: function(*args, **kwargs)}
     except (platform_link.ProjectSessionForbidden, PermissionError):
         return _failure(403, 'forbidden', 'Project access denied')
     except LookupError:
@@ -464,7 +471,8 @@ async def release_create(campaign_id: str, request: Request, tenant: Any = Depen
     except (ValueError, UnicodeError):
         return _failure(400, 'invalid_request', 'Invalid release request')
     return await run_in_threadpool(_release_call, 'completion', releases.create,
-                                   tenant, project, campaign_id, body['finish'], key)
+                                   tenant, project, campaign_id, body['finish'], key,
+                                   **_release_authority(request))
 
 
 @router.get('/api/campaigns/{campaign_id}/releases/{release_id}')
@@ -490,7 +498,8 @@ async def release_action(campaign_id: str, release_id: str, action: str, request
     function = releases.advance if action == 'advance' else releases.retry if action == 'retry' else releases.transition
     args = () if action == 'advance' else (body['stage'],) if action == 'retry' else (action,)
     return await run_in_threadpool(_release_call, 'completion', function,
-                                   tenant, project, campaign_id, release_id, *args)
+                                   tenant, project, campaign_id, release_id, *args,
+                                   **(_release_authority(request) if action in ('resume', 'advance') else {}))
 
 
 @router.get('/api/campaigns/{campaign_id}/releases/{release_id}/artifacts/{name}')

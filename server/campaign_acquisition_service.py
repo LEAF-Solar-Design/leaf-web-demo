@@ -160,6 +160,16 @@ def _publication(tenant_id, params):
 
 
 def _run_authority(tenant, tool):
+    import broker
+    if not broker._authored_execution_enabled():
+        raise AcquisitionError('awaiting_user', 'Authored tool execution is disabled',
+                               'Enable the existing authored execution policy for this workspace')
+    if broker.tenant_disabled(str(tenant)):
+        raise AcquisitionError('awaiting_user', 'Workspace execution is disabled',
+                               'Resolve the existing workspace account action')
+    if broker._production_runtime() and not broker._sandbox_configured():
+        raise AcquisitionError('awaiting_user', 'The production tool sandbox is unavailable',
+                               'Restore the existing authorized sandbox provider connection')
     tier = entitlements.resolve_tier(tenant)
     roles, elevated = entitlements.resolve_roles(tenant)
     required = entitlements.tool_required_capability(tool)

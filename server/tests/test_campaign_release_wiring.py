@@ -25,7 +25,8 @@ def boundary(monkeypatch):
         'tenant_id': 'org-one', 'org_id': 'org-one', 'project_id': project})
     monkeypatch.setattr(platform_link, 'require_project_session_access', lambda row, actor, **kwargs: row)
     calls = []
-    monkeypatch.setattr(campaigns, '_finish_campaign', lambda *args: calls.append(args) or {'campaign_id': 'result'})
+    monkeypatch.setattr(campaigns, '_finish_campaign', lambda *args, **kwargs:
+                        calls.append(args) or {'campaign_id': 'result'})
     app = FastAPI()
     app.include_router(campaign_conversation.router)
     app.include_router(campaigns.router)

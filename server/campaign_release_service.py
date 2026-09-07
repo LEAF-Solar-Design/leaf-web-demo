@@ -6,6 +6,8 @@ import importlib
 import json
 import re
 import uuid
+from contextlib import nullcontext
+from datetime import datetime, timezone
 from urllib.parse import quote
 
 import platform_link
@@ -81,9 +83,34 @@ def authority(tenant, project_id):
     return uuid.UUID(str(org)), project, uuid.UUID(str(binding.binding_id))
 
 
+def actor_for_release(row):
+    """Re-resolve a persisted project actor without reconstructing JWT powers."""
+    import deps
+    campaigns = _module('campaigns')
+    scope = campaigns._scope(row['org_id'], row['project_id'])
+    principal = uuid.UUID(str(row['principal_id']))
+    with campaigns._cursor() as cur:
+        campaigns._principal(cur, scope, principal)
+        cur.execute("SELECT external_subject FROM identity_bindings WHERE binding_id=%s "
+                    "AND platform_tenant_id=%s AND external_authority='auth0' AND status='active'",
+                    (principal, scope['org']))
+        identity = cur.fetchone()
+    if not identity:
+        raise platform_link.ProjectSessionForbidden('Current project actor is unavailable')
+    org, tier = deps.resolve_active_platform_tenant_authority(identity['external_subject'])
+    if str(org) != str(scope['org']):
+        raise platform_link.ProjectSessionForbidden('Project actor moved to another workspace')
+    tenant = deps.TenantContext(str(org), org_id=str(org), tier=tier,
+                              subject=identity['external_subject'], authority_resolved=True)
+    resolved = authority(tenant, row['project_id'])
+    if resolved[2] != principal:
+        raise platform_link.ProjectSessionForbidden('Project actor binding changed')
+    return tenant
+
+
 def validate_finish(finish):
-    if not isinstance(finish, dict) or set(finish) != {
-            'delivery_profile', 'intended_user', 'workflow', 'artifact_refs'}:
+    required = {'delivery_profile', 'intended_user', 'workflow', 'artifact_refs'}
+    if not isinstance(finish, dict) or not required <= set(finish) or set(finish) - required - {'deadline_at'}:
         raise ValueError('Invalid finish fields')
     for key in ('intended_user', 'workflow'):
         if not isinstance(finish[key], str) or not 1 <= len(finish[key].strip()) <= 2000:
@@ -95,6 +122,14 @@ def validate_finish(finish):
         raise ValueError('Invalid artifact references')
     for path in refs:
         delivery.safe_path(path)
+    if 'deadline_at' in finish:
+        value = finish['deadline_at']
+        if not isinstance(value, str) or len(value) > 32:
+            raise ValueError('Invalid deadline')
+        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if parsed.tzinfo is None or parsed.utcoffset().total_seconds() != 0:
+            raise ValueError('Deadline must use UTC')
+        finish = dict(finish, deadline_at=parsed.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z'))
     return dict(finish)
 
 
@@ -112,9 +147,22 @@ def compile_finish(tenant, project_id, campaign_id, finish):
         raise LookupError('Campaign unavailable')
     artifact = None
     web_recipe = None
+    transform_recipe = None
     if finish['delivery_profile'] == 'cad_file':
-        artifact = delivery.select_artifact(_lifecycle().project_snapshot(org, project, actor),
-                                            finish['artifact_refs'])
+        state = _lifecycle().project_snapshot(org, project, actor)
+        refs = finish['artifact_refs']
+        wants_csv = bool(re.search(r'\bcsv\b', finish['workflow'], re.I))
+        if wants_csv:
+            csv_refs = [p for p in (refs or [r['path'] for r in state.get('files', [])
+                                            if not r['path'].startswith('releases/')]) if p.lower().endswith('.csv')]
+            artifact = delivery.select_artifact(state, csv_refs) if csv_refs else None
+            if artifact is None:
+                _, transform_recipe = web_release.compile_recipe(state, refs)
+                if transform_recipe:
+                    raw = delivery.file_bytes(state, transform_recipe['source_artifact']['path'])
+                    artifact = delivery.validate_bytes('records.csv', web_release.static.expected_output(raw))
+        else:
+            artifact = delivery.select_artifact(state, refs)
     elif finish['delivery_profile'] == 'web_tool':
         artifact, web_recipe = web_release.compile_recipe(
             _lifecycle().project_snapshot(org, project, actor), finish['artifact_refs'])
@@ -132,12 +180,19 @@ def compile_finish(tenant, project_id, campaign_id, finish):
         public['artifact_refs'] = [web_recipe['source_artifact']['path']]
         boundary = 'Deliver a working records-to-CSV web tool and its verified CSV output'
         deferred = ['The original ambition beyond this records-to-CSV workflow remains unproven.']
+    if transform_recipe:
+        public['workflow'] = 'Transform the selected JSON records with the published project tool, then download and open the verified CSV file.'
+        public['artifact_refs'] = [transform_recipe['source_artifact']['path']]
+        boundary = 'Deliver CSV records produced by a verified published tenant tool'
+        deferred = ['The original ambition beyond this records-to-CSV file workflow remains unproven.']
     if finish['workflow'] != public['workflow']:
         deferred.append('Requested workflow beyond this release: ' + finish['workflow'][:900])
     deferred.extend('Deferred input: ' + path for path in finish['artifact_refs'] if path not in public['artifact_refs'])
     return {**public, 'original_goal': campaign['prompt'], 'release_boundary': boundary,
             'deferred_items': deferred, 'selected_artifact': artifact,
             **({'web_recipe': web_recipe} if web_recipe else {}),
+            **({'transform_recipe': transform_recipe} if transform_recipe else {}),
+            'priority_score': 90 if artifact and not (web_recipe or transform_recipe) else 60 if web_recipe else 40,
             'request_digest': _digest(finish),
             'required_checks': [{'check_id': stage + '.verified', 'stage': stage,
                                  'description': description} for stage, description in zip(STAGES, (
@@ -174,7 +229,8 @@ def list_releases(tenant, project_id, campaign_id):
     return _store().list_releases(org, project, campaign_id)
 
 
-def create(tenant, project_id, campaign_id, finish, idempotency_key):
+def create(tenant, project_id, campaign_id, finish, idempotency_key,
+           authority_session_id=None, authority_turn_id=None):
     finish = validate_finish(finish)
     if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 128:
         raise ValueError('Idempotency key required')
@@ -195,7 +251,9 @@ def create(tenant, project_id, campaign_id, finish, idempotency_key):
                                   delivery_profile=finish['delivery_profile'], idempotency_key=idempotency_key)
     rid = row['release_id']
     if existing:
-        return advance(tenant, project_id, campaign_id, rid)
+        if row['status'] == 'waiting':
+            _store().transition_release(org, project, campaign_id, rid, actor, action='resume')
+        return advance(tenant, project_id, campaign_id, rid, authority_session_id, authority_turn_id)
     selection = capabilities.resolve(tenant, finish['delivery_profile'],
                                      existing_artifact=bool(contract.get('selected_artifact')))
     authority(tenant, project_id)
@@ -211,16 +269,17 @@ def create(tenant, project_id, campaign_id, finish, idempotency_key):
         campaigns._store().ask_question(org, project, campaign_id, question_key='completion-capability-' + str(rid),
             prompt=selection['missing_capability'] + '. ' + selection['recommended_action'],
             options=[], blocks_dispatch=False)
-    return advance(tenant, project_id, campaign_id, rid)
+    return advance(tenant, project_id, campaign_id, rid, authority_session_id, authority_turn_id)
 
 
-def transition(tenant, project_id, campaign_id, release_id, action):
+def transition(tenant, project_id, campaign_id, release_id, action,
+               authority_session_id=None, authority_turn_id=None):
     if action not in ('pause', 'resume', 'cancel'):
         raise ValueError('Unknown release action')
     org, project, actor = authority(tenant, project_id)
     _store().transition_release(org, project, campaign_id, release_id, actor, action=action)
     if action == 'resume':
-        return advance(tenant, project_id, campaign_id, release_id)
+        return advance(tenant, project_id, campaign_id, release_id, authority_session_id, authority_turn_id)
     return snapshot(tenant, project_id, campaign_id, release_id)
 
 
@@ -267,7 +326,79 @@ def read_artifact(tenant, project_id, campaign_id, release_id, name):
     return delivery.read_verified(_lifecycle().project_snapshot(org, project, actor), artifact)
 
 
-def advance(tenant, project_id, campaign_id, release_id):
+def _transform_input(tenant, project_id, campaign_id, release):
+    original = release['contract']['transform_recipe']['source_artifact']
+    frozen = dict(original, path=web_release.prefix(release) + 'source.json', name='source.json')
+    org, project, actor = authority(tenant, project_id)
+    state = _lifecycle().project_snapshot(org, project, actor)
+    if delivery.receipt_for(state, frozen['path'], frozen['media_type'], frozen['sha256']):
+        return delivery.read_verified(state, frozen)[0]
+    raw = delivery.file_bytes(state, original['path'])
+    observed = delivery.validate_bytes(original['path'], raw)
+    if any(observed[k] != original[k] for k in ('sha256', 'size_bytes', 'media_type')):
+        raise delivery.DeliveryConflict('Source records changed before acquisition')
+    web_release._put(__import__(__name__), tenant, project_id, campaign_id, release, frozen, raw)
+    return raw
+
+
+def _pending(tenant, project_id, campaign_id, release, result):
+    org, project, actor = authority(tenant, project_id)
+    reason = str(result.get('reason', 'Existing work is pending'))[:1024]
+    action = str(result.get('recommended_action', 'Wait for the existing work'))[:1024]
+    waiting_user = result['state'] == 'awaiting_user'
+    kind = ('approval' if waiting_user and 'publication' in reason.lower() else 'authority') if waiting_user else (
+        'job' if result.get('job_id') else 'authoring' if result.get('change_set_id') else 'capacity')
+    progress = {'wait_kind': kind, 'reason': reason, 'recommended_action': action}
+    progress.update({k: str(result[k]) for k in ('change_set_id', 'job_id') if result.get(k)})
+    # Running execution retains the slot. External authoring and account actions yield it.
+    _store().set_progress(org, project, campaign_id, release['release_id'], actor,
+                          state='active' if kind == 'job' else 'waiting', next_action=progress)
+    if waiting_user:
+        from routers import campaigns
+        campaigns._store().ask_question(org, project, campaign_id,
+            question_key='completion-action-' + _digest([release['release_id'], release['contract_version'], kind]),
+            prompt=reason + '. Recommended action: ' + action, options=[], blocks_dispatch=False)
+    return _store().get_release(org, project, campaign_id, release['release_id'])
+
+
+def _transform_implementation(tenant, project_id, campaign_id, release,
+                               authority_session_id, authority_turn_id):
+    import campaign_acquisition_service as acquisition
+    source = _transform_input(tenant, project_id, campaign_id, release)
+    if isinstance(tenant, _WorkerActor):
+        tenant.resolve(project_id)
+        tenant = actor_for_release(release)
+    result = acquisition.advance(__import__(__name__), tenant, project_id, campaign_id,
+        release, source, authority_session_id=authority_session_id, authority_turn_id=authority_turn_id)
+    if result['state'] in ('working', 'awaiting_user'):
+        return None, _pending(tenant, project_id, campaign_id, release, result)
+    if result['state'] != 'complete':
+        raise delivery.DeliveryConflict(result.get('reason', 'The authored transform failed'))
+    raw = result['output_bytes']
+    expected = web_release.static.expected_output(source)
+    observed = delivery.validate_bytes('records.csv', raw)
+    artifact = _artifact(release)
+    if raw != expected or any(observed[k] != artifact[k] for k in ('sha256', 'size_bytes', 'media_type')):
+        raise delivery.DeliveryConflict('The authored output does not match the release contract')
+    receipt = web_release._put(__import__(__name__), tenant, project_id, campaign_id, release, artifact, raw)
+    return {'artifact': observed, 'job_id': result['job_id'], 'publication': result['publication'],
+            'input_sha256': hashlib.sha256(source).hexdigest(), 'receipt': receipt}, None
+
+
+def advance(tenant, project_id, campaign_id, release_id,
+            authority_session_id=None, authority_turn_id=None):
+    org, project, _ = authority(tenant, project_id)
+    store = _store()
+    guard = getattr(store, 'execution_guard', None)
+    # The fallback is for injected test stores. The canonical PG store owns the lock.
+    with guard(org, project, campaign_id, release_id) if guard else nullcontext(True) as acquired:
+        if not acquired:
+            return store.get_release(org, project, campaign_id, release_id)
+        return _advance(tenant, project_id, campaign_id, release_id, authority_session_id, authority_turn_id)
+
+
+def _advance(tenant, project_id, campaign_id, release_id,
+             authority_session_id=None, authority_turn_id=None):
     org, project, actor = authority(tenant, project_id)
     store = _store()
     for _ in range(5):
@@ -301,6 +432,16 @@ def advance(tenant, project_id, campaign_id, release_id):
             if contract.get('web_recipe'):
                 observations = web_release.run_stage(__import__(__name__), tenant, project_id,
                                                        campaign_id, completion, stage)
+            elif contract.get('transform_recipe') and stage == 'implementation':
+                observations, pending = _transform_implementation(tenant, project_id, campaign_id, release,
+                                                                   authority_session_id, authority_turn_id)
+                if pending is not None:
+                    return pending
+            elif contract.get('transform_recipe') and stage == 'publication':
+                raw, observed = delivery.read_verified(_lifecycle().project_snapshot(org, project, actor), artifact)
+                receipt = delivery.receipt_for(_lifecycle().project_snapshot(org, project, actor),
+                                               artifact['path'], artifact['media_type'], revision)
+                observations = {'artifact': observed, 'receipt': receipt}
             elif stage == 'implementation':
                 raw = delivery.file_bytes(_lifecycle().project_snapshot(org, project, actor), source['path'])
                 observed = delivery.validate_bytes(source['path'], raw)
@@ -344,12 +485,20 @@ def advance(tenant, project_id, campaign_id, release_id):
                                       'Actual file bytes parsed and digest checked']}
             else:
                 raw, observed = read_artifact(tenant, project_id, campaign_id, release_id, artifact['name'])
-                observations = {'artifacts': [{'artifact_ref': source['path'], 'name': observed['name'],
+                source_ref = contract.get('transform_recipe', {}).get('source_artifact', source)['path']
+                observations = {'artifacts': [{'artifact_ref': source_ref, 'name': observed['name'],
                         'sha256': observed['sha256'], 'byte_count': len(raw), 'retrieved': True,
                         'valid': True, 'access_path': url, 'media_type': observed['media_type']}],
                     'replay_recipe': ('Open the authorized project, download ' + url +
                                       ', then open the downloaded ' + observed['format'] + ' file.'),
                     'known_limits': contract['deferred_items']}
+                if contract.get('transform_recipe'):
+                    original = contract['transform_recipe']['source_artifact']
+                    observations['replay_recipe'] = (
+                        'Open this project and download ' + url + '. To reproduce the transform, '
+                        'use the frozen input ' + web_release.prefix(release) + 'source.json '
+                        'with the published campaign-records-to-csv tool. Its exact publication and job '
+                        'are recorded in implementation evidence. Original input: ' + original['path'] + '.')
         except web_release.producer.WebToolVerificationError as exc:
             status = 'failed'
             observations = {'reason': str(exc), 'recommended_action': 'Correct the converter and retry browser verification'}
@@ -364,6 +513,11 @@ def advance(tenant, project_id, campaign_id, release_id):
         store.record_stage(org, project, campaign_id, release_id, stage=stage, status=status,
                            evidence=evidence, producer=PRODUCERS[stage], operation_key=operation)
         if status != 'passed':
+            current = store.get_release(org, project, campaign_id, release_id)
+            if status == 'unavailable' and current['release']['status'] == 'active' and hasattr(store, 'set_progress'):
+                store.set_progress(org, project, campaign_id, release_id, actor, state='waiting', next_action={
+                    'wait_kind': 'authority', 'reason': observations['reason'],
+                    'recommended_action': observations['recommended_action']})
             return store.get_release(org, project, campaign_id, release_id)
     authority(tenant, project_id)
     store.finish_release(org, project, campaign_id, release_id)
