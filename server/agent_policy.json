@@ -57,7 +57,8 @@
           "GET /api/agent/audit",
           "GET /api/platform/customize",
           "GET /api/platform/source",
-          "GET /api/platform/source/tree"
+          "GET /api/platform/source/tree",
+          "POST /api/campaigns/conversation/status"
         ]
       },
       "args_schema": {
@@ -508,6 +509,59 @@
       "timeout_s": 20,
       "audit_extra": [
         "request_text"
+      ]
+    },
+    "finish_project": {
+      "description": "Record a bounded release goal for THIS conversation's authenticated project through the completion engine, and drive its existing bounded engine operations. Args are declarative only (title, prompt, delivery_profile, intended_user, workflow, artifact_refs); the model can never supply org, project, grants, commands, source revision, authoritative checks, evidence, or completion flags, and the project is derived from the authenticated session, never from the request. Grants no new spending/provider/publication scope beyond the existing bounded release engine.",
+      "rung": 2,
+      "required_capability": "converse",
+      "policy": "auto",
+      "tenant_tightenable": true,
+      "dispatch": {
+        "kind": "app_api",
+        "routes": [
+          "POST /api/campaigns/conversation/finish"
+        ]
+      },
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "delivery_profile": {
+            "type": "string"
+          },
+          "intended_user": {
+            "type": "string"
+          },
+          "workflow": {
+            "type": "string"
+          },
+          "artifact_refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "title",
+          "prompt",
+          "delivery_profile",
+          "intended_user",
+          "workflow",
+          "artifact_refs"
+        ],
+        "additionalProperties": false
+      },
+      "rate_limit_category": "medium",
+      "timeout_s": 30,
+      "audit_extra": [
+        "delivery_profile"
       ]
     }
   },

@@ -534,6 +534,8 @@ export const SPINE_TOOL_NAMES = [
   "request_confirmation",
   "propose_overlay",
   "customize_platform",
+  "finish_project",
+  "project_completion_status",
 ] as const;
 export type SpineToolName = (typeof SPINE_TOOL_NAMES)[number];
 
@@ -843,6 +845,42 @@ export interface AppRunClient {
   /** GET /api/platform/source/tree?dir= — ONE directory level at the review
    * base. Empty dir lists the repo root. */
   customizeListSource(tenantId: string, dir: string): Promise<Record<string, unknown>>;
+  /**
+   * POST /api/campaigns/conversation/finish — record a bounded release goal for
+   * THIS conversation's authenticated project through the completion engine.
+   * The app derives org/project from the authority session/turn; the args here
+   * are the closed, declarative finish intent only (never project_id, org_id,
+   * grants, commands, evidence, or status flags).
+   *
+   * OPTIONAL: a fake/older AppRunClient that predates this tool simply omits
+   * it. The loop must fail EXPLICITLY when it is unconnected, never fabricate
+   * a success (see converseLoop.ts's dispatch guard).
+   */
+  finishProject?(
+    tenantId: string,
+    finish: {
+      title: string;
+      prompt: string;
+      delivery_profile: string;
+      intended_user: string;
+      workflow: string;
+      artifact_refs: string[];
+    },
+    idempotencyKey: string,
+    authority?: { sessionId?: string; turnId?: string },
+  ): Promise<Record<string, unknown>>;
+  /**
+   * POST /api/campaigns/conversation/status — read the current release
+   * completion projection (remaining/evidence/deliverables) for THIS
+   * conversation's authenticated project. Same OPTIONAL contract as
+   * `finishProject` above.
+   */
+  projectCompletionStatus?(
+    tenantId: string,
+    campaignId: string,
+    releaseId?: string,
+    authority?: { sessionId?: string; turnId?: string },
+  ): Promise<Record<string, unknown>>;
 }
 
 // --------------------------------------------------------------------------- //

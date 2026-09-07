@@ -830,6 +830,29 @@ export class ConverseLoop {
             },
           };
         }
+        case "project_completion_status":
+          // Read-only: the campaign engine re-runs its own full project
+          // authority check on every dispatch, so this widens reachability,
+          // never authority — the same reasoning read_platform_state already
+          // carries for catalog_search/drawing_state/job_status above.
+          return { action: "read_platform_state", args: { what: "campaign_completion_status" } };
+        case "finish_project":
+          // Shaped to EXACTLY the finish_project args_schema (closed,
+          // additionalProperties:false): a declarative goal only, never a
+          // project id, org id, grant, command, or evidence/status flag.
+          return {
+            action: "finish_project",
+            args: {
+              title: String(args.title ?? ""),
+              prompt: String(args.prompt ?? ""),
+              delivery_profile: String(args.delivery_profile ?? ""),
+              intended_user: String(args.intended_user ?? ""),
+              workflow: String(args.workflow ?? ""),
+              artifact_refs: Array.isArray(args.artifact_refs)
+                ? args.artifact_refs.map((v) => String(v))
+                : [],
+            },
+          };
       }
     };
 
@@ -1308,6 +1331,67 @@ export class ConverseLoop {
         );
       }
 
+      case "project_completion_status": {
+        const campaignId = String(args.campaign_id ?? "").trim();
+        if (!campaignId) {
+          return err("project_completion_status requires args.campaign_id");
+        }
+        const releaseId =
+          typeof args.release_id === "string" && args.release_id.trim()
+            ? args.release_id.trim()
+            : undefined;
+        if (typeof appRun.projectCompletionStatus !== "function") {
+          // Fail EXPLICITLY when this runtime is not wired for it — never
+          // fabricate a success (an unconnected AppRunClient is a defect to
+          // surface, not paper over).
+          return err("project_completion_status is not connected in this runtime");
+        }
+        const status = await appRun.projectCompletionStatus(tenantId, campaignId, releaseId, {
+          sessionId: ctx.authoritySessionId,
+          turnId: ctx.authorityTurnId,
+        });
+        return ok(JSON.stringify(status));
+      }
+
+      case "finish_project": {
+        const title = String(args.title ?? "").trim();
+        const prompt = String(args.prompt ?? "").trim();
+        const deliveryProfile = String(args.delivery_profile ?? "").trim();
+        const intendedUser = String(args.intended_user ?? "").trim();
+        const workflow = String(args.workflow ?? "").trim();
+        const artifactRefs = Array.isArray(args.artifact_refs)
+          ? args.artifact_refs.map((v) => String(v))
+          : [];
+        if (!title || !prompt || !deliveryProfile || !intendedUser || !workflow) {
+          return err(
+            "finish_project requires title, prompt, delivery_profile, intended_user, and workflow",
+          );
+        }
+        if (typeof appRun.finishProject !== "function") {
+          return err("finish_project is not connected in this runtime");
+        }
+        const finish = {
+          title, prompt, delivery_profile: deliveryProfile,
+          intended_user: intendedUser, workflow, artifact_refs: artifactRefs,
+        };
+        // Stable across a retried turn: the SAME authority session + the SAME
+        // canonical finish intent always yields the SAME key (mirrors
+        // author_tool's own idempotency-key derivation above).
+        const idempotencyKey = `finish:${createHash("sha256")
+          .update(JSON.stringify({
+            action: "finish_project",
+            tenant_id: tenantId,
+            authority_session_id: ctx.authoritySessionId ?? "",
+            finish,
+          }))
+          .digest("hex")}`;
+        const result = await appRun.finishProject(tenantId, finish, idempotencyKey, {
+          sessionId: ctx.authoritySessionId,
+          turnId: ctx.authorityTurnId,
+        });
+        return ok(JSON.stringify(result));
+      }
+
       case "request_confirmation": {
         const kind = String(args.kind ?? "confirm");
         const confirmationId =
@@ -1485,6 +1569,10 @@ function argsSummary(tool: SpineToolName, args: Record<string, unknown>): string
       return `op=${String(args.op ?? "propose")}${args.confirmation_id ? " (confirmed)" : ""}`;
     case "propose_overlay":
       return `tokens=${Object.keys((args.tokens as object) ?? {}).length}`;
+    case "finish_project":
+      return `delivery_profile=${String(args.delivery_profile ?? "?")}`;
+    case "project_completion_status":
+      return `campaign_id=${String(args.campaign_id ?? "?")}`;
   }
 }
 
