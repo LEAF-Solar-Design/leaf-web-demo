@@ -617,8 +617,8 @@ _REQUIRED_CONSTRAINTS = {
         "campaign_host_operations", "PRIMARY KEY (operation_id)"),
     "campaign_host_operations_job_id_key": _catalog_contract(
         "campaign_host_operations", "UNIQUE (job_id)"),
-    "campaign_host_enrollments_machine_unique": _catalog_contract(
-        "campaign_host_enrollments", "UNIQUE (campaign_id, machine_id)"),
+    "campaign_enrollments_machine_capability_unique": _catalog_contract(
+        "campaign_host_enrollments", "UNIQUE (campaign_id, machine_id, capability)"),
     "campaign_capability_links_task_unique": _catalog_contract(
         "campaign_capability_links", "UNIQUE (campaign_id, task_id)"),
     "campaign_dispatch_bindings_request_unique": _catalog_contract(
