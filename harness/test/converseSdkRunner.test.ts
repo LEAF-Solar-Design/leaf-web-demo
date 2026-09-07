@@ -587,6 +587,34 @@ describe("ConverseSdkRunner — bridging to the loop", () => {
     });
   });
 
+  it("finish_project and project_completion_status are mounted and bridge to the ToolExecutor", async () => {
+    const executor = makeExecutor(async (tool) => ({
+      content: JSON.stringify({ tool }),
+    }));
+    const mock = makeMockSdk([resultSuccess()]);
+    await collect(runnerWith(mock), makeInput({ tools: executor }));
+
+    expect(mock.tools.map((t) => t.name)).toContain("finish_project");
+    expect(mock.tools.map((t) => t.name)).toContain("project_completion_status");
+
+    const finish = mock.tools.find((t) => t.name === "finish_project")!;
+    const finishArgs = {
+      title: "Deliver rooftop layout",
+      prompt: "Deliver a downloadable file",
+      delivery_profile: "cad_file",
+      intended_user: "the owner",
+      workflow: "download the file",
+      artifact_refs: ["drawings/rooftop.dwg"],
+    };
+    await finish.handler(finishArgs, undefined);
+    expect(executor.calls).toContainEqual({ tool: "finish_project", args: finishArgs });
+
+    const status = mock.tools.find((t) => t.name === "project_completion_status")!;
+    const statusArgs = { campaign_id: "11111111-1111-4111-8111-111111111111" };
+    await status.handler(statusArgs, undefined);
+    expect(executor.calls).toContainEqual({ tool: "project_completion_status", args: statusArgs });
+  });
+
   it("the SDK canUseTool hook delegates to the loop's CanUseTool (gate chain upstream)", async () => {
     const seen: Array<{ tool: string; input: AnyRec }> = [];
     const canUseTool: ConverseRunInput["canUseTool"] = async (tool, input) => {

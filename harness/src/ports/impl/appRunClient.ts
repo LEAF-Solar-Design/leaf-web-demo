@@ -319,4 +319,60 @@ export class HttpAppRunClient implements AppRunClient {
   async getJob(tenantId: string, jobId: string): Promise<Record<string, unknown>> {
     return this.request(tenantId, "GET", `/api/jobs/${encodeURIComponent(jobId)}`);
   }
+
+  /** POST /api/campaigns/conversation/finish. Same authority-header transport
+   * as `authorTool`: the app resolves org/project from this session/turn's
+   * OWN record, never from a request field. */
+  async finishProject(
+    tenantId: string,
+    finish: {
+      title: string;
+      prompt: string;
+      delivery_profile: string;
+      intended_user: string;
+      workflow: string;
+      artifact_refs: string[];
+    },
+    idempotencyKey: string,
+    authority?: { sessionId?: string; turnId?: string },
+  ): Promise<Record<string, unknown>> {
+    return this.request(
+      tenantId,
+      "POST",
+      "/api/campaigns/conversation/finish",
+      { ...finish },
+      {
+        "idempotency-key": idempotencyKey,
+        ...(authority?.sessionId
+          ? { "x-authority-session-id": authority.sessionId }
+          : {}),
+        ...(authority?.turnId
+          ? { "x-authority-turn-id": authority.turnId }
+          : {}),
+      },
+    );
+  }
+
+  /** POST /api/campaigns/conversation/status. */
+  async projectCompletionStatus(
+    tenantId: string,
+    campaignId: string,
+    releaseId?: string,
+    authority?: { sessionId?: string; turnId?: string },
+  ): Promise<Record<string, unknown>> {
+    return this.request(
+      tenantId,
+      "POST",
+      "/api/campaigns/conversation/status",
+      { campaign_id: campaignId, ...(releaseId ? { release_id: releaseId } : {}) },
+      {
+        ...(authority?.sessionId
+          ? { "x-authority-session-id": authority.sessionId }
+          : {}),
+        ...(authority?.turnId
+          ? { "x-authority-turn-id": authority.turnId }
+          : {}),
+      },
+    );
+  }
 }
