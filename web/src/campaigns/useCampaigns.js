@@ -8,8 +8,11 @@ const empty = () => ({ status: 'idle', refreshing: false, error: null, errorActi
   capabilities: [], capabilityError: null, submissions: {}, invocationResults: {}, recoveryUnavailable: false })
 const newKey = () => globalThis.crypto?.randomUUID?.() || `k-${Date.now()}-${Math.random().toString(16).slice(2)}`
 const submissionScope = (project, campaign, enrollment) => `leaf.campaign.invocation:${project}:${campaign}:${enrollment}`
+const pollRelease = completion => ['active', 'queued'].includes(completion?.release?.status)
+  || (completion?.release?.status === 'waiting'
+    && ['authoring', 'job', 'capacity', 'publication', 'approval'].includes(completion.next_action?.wait_kind))
 
-export default function useCampaigns(projectId, { enabled = true } = {}) {
+export default function useCampaigns(projectId, { enabled = true, authorityProvider } = {}) {
   const scope = `${projectId || ''}:${enabled}`
   const [snapshot, setSnapshot] = useState(() => ({ scope, ...empty() }))
   const contextRef = useRef(null)
@@ -48,7 +51,7 @@ export default function useCampaigns(projectId, { enabled = true } = {}) {
     if (current()) setSnapshot(previous => ({ ...(previous.scope === scope ? previous : empty()), scope, ...patch }))
   }, [current, scope])
 
-  const load = useCallback(async ({ refresh = true, preferredId = context.selectedId, onChoicesError } = {}) => {
+  const loadRequest = useCallback(async ({ refresh = true, preferredId = context.selectedId, onChoicesError } = {}) => {
     if (!enabled || !projectId || !current()) return null
     const generation = ++generationRef.current
     const view = context.view
@@ -126,15 +129,35 @@ export default function useCampaigns(projectId, { enabled = true } = {}) {
     }
   }, [context, current, enabled, projectId, readSubmission, update])
 
+  const load = useCallback(options => {
+    if (!current()) return Promise.resolve(null)
+    const view = context.view
+    if (context.read?.view === view) return options?.afterCurrent
+      ? context.read.promise.then(() => current(view) ? load({ ...options, afterCurrent: false }) : null)
+      : context.read.promise
+    clearTimeout(context.pollTimer)
+    const read = { view, promise: null }
+    read.promise = loadRequest(options).finally(() => {
+      if (context.read !== read) return
+      context.read = null
+      if (current(view) && pollRelease(context.completion)) {
+        context.pollTimer = setTimeout(() => { context.pollTimer = null; load() }, 5000)
+      }
+    })
+    context.read = read
+    return read.promise
+  }, [context, current, loadRequest])
+
   useEffect(() => {
     context.active = true
     update(empty())
     load({ refresh: false })
-    return () => { context.active = false; generationRef.current += 1 }
+    return () => { context.active = false; clearTimeout(context.pollTimer); generationRef.current += 1 }
   }, [context, load, update])
 
   const select = useCallback((id) => {
     if (!current() || context.selectedId === id) return
+    clearTimeout(context.pollTimer)
     context.view += 1
     context.selectedId = id
     context.locks = {}
@@ -170,7 +193,7 @@ export default function useCampaigns(projectId, { enabled = true } = {}) {
         const qid = action.slice(7)
         setSnapshot(previous => ({ ...previous, answers: { ...previous.answers, [qid]: result.answer } }))
       }
-      await load({ preferredId: preferredId?.(result) ?? context.selectedId })
+      await load({ preferredId: preferredId?.(result) ?? context.selectedId, afterCurrent: true })
       return current(view) ? result : null
     } catch (error) {
       if (current(view) && context.selectedId === selectedId) setSnapshot(previous => error?.status === 409 && error?.code === 'catalog_drift'
@@ -203,9 +226,34 @@ export default function useCampaigns(projectId, { enabled = true } = {}) {
   }, [context, mutate, projectId])
   const transitionRelease = useCallback(action => {
     const id = context.selectedId
-    const releaseId = context.completion?.release?.release_id
-    return id && releaseId ? mutate('release', () => api.transitionRelease(projectId, id, releaseId, action)) : Promise.resolve(null)
-  }, [context, mutate, projectId])
+    const release = context.completion?.release
+    const releaseId = release?.release_id
+    const version = release?.contract_version
+    const view = context.view
+    const next = context.completion?.next_action
+    const needsAuthority = action === 'resume' && release?.status === 'waiting' && next?.wait_kind === 'authority'
+      && ['Authoring requires an active project conversation', 'Acquisition requires the current account actor'].includes(next.reason)
+    return id && releaseId ? mutate('release', async () => {
+      if (!needsAuthority) return api.transitionRelease(projectId, id, releaseId, action)
+      if (typeof authorityProvider !== 'function') throw new Error('Continue this release from its project conversation. Authoring authority is unavailable here.')
+      let authority
+      try {
+        authority = await authorityProvider(`Continue this project release: ${release.scope_summary || release.contract?.release_boundary || 'the current release'}. ${next.recommended_action || next.reason || 'Continue the requested authoring step.'}`, { forceFresh: true })
+      } catch {
+        throw new Error('The project conversation could not start this continuation. Try Continue authoring again when it is available.')
+      }
+      if (!current(view) || context.selectedId !== id) return null
+      if (context.completion?.release?.release_id !== releaseId
+          || context.completion?.release?.contract_version !== version
+          || context.completion?.release?.status !== 'waiting'
+          || context.completion?.next_action?.wait_kind !== 'authority'
+          || context.completion?.next_action?.reason !== next.reason) {
+        throw new Error('This release changed while the conversation started. Review its current next action before continuing.')
+      }
+      if (!authority?.sessionId || !authority?.turnId) throw new Error('The project conversation did not provide authoring authority. Continue from that conversation and try again.')
+      return api.transitionRelease(projectId, id, releaseId, action, { sessionId: authority.sessionId, turnId: authority.turnId })
+    }) : Promise.resolve(null)
+  }, [authorityProvider, context, current, mutate, projectId])
   const retryReleaseStage = useCallback(stage => {
     const id = context.selectedId
     const releaseId = context.completion?.release?.release_id

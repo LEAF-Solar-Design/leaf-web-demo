@@ -58,6 +58,7 @@ function SubmitForm({ campaign }) {
   const [prompt, setPrompt] = useState('')
   const [mode, setMode] = useState('ordinary')
   const [profile, setProfile] = useState('web_tool')
+  const [deadline, setDeadline] = useState('')
   const action = useAction()
   const busy = action.busy || !!campaign.pending.submit
   const field = action.error?.invalidField
@@ -65,9 +66,10 @@ function SubmitForm({ campaign }) {
     event.preventDefault()
     action.run(() => {
       check(title, 'title', 200)
-      check(prompt, 'prompt', 32768)
+      check(prompt, 'prompt', mode === 'finish' ? 2000 : 32768)
       return campaign.submit({ title, prompt, ...(mode === 'finish' ? { mode: 'finish', finish: {
         delivery_profile: profile, intended_user: 'Project owner', workflow: prompt, artifact_refs: [],
+        ...(deadline ? { deadline_at: deadline } : {}),
       } } : {}) })
     }, 'Campaign recorded.')
   }}>
@@ -77,10 +79,12 @@ function SubmitForm({ campaign }) {
       <option value="finish">Finish this project</option>
     </select></label>
     {mode === 'finish' && <DeliveryProfile value={profile} onChange={setProfile} disabled={busy} />}
+    {mode === 'finish' && <label>Release deadline (optional)<input type="datetime-local" value={deadline} disabled={busy}
+      onChange={event => setDeadline(event.target.value)} /></label>}
     <label>Title<input value={title} maxLength={200} aria-invalid={field === 'title'} onChange={event => setTitle(event.target.value)} /></label>
     {field === 'title' && <Alert error={action.error} />}
-    <label>Prompt<textarea value={prompt} maxLength={32768} aria-invalid={field === 'prompt'} onChange={event => setPrompt(event.target.value)} /></label>
-    <span className="dim" aria-live="polite">{32768 - prompt.length} characters remaining</span>
+    <label>Prompt<textarea value={prompt} maxLength={mode === 'finish' ? 2000 : 32768} aria-invalid={field === 'prompt'} onChange={event => setPrompt(event.target.value)} /></label>
+    <span className="dim" aria-live="polite">{(mode === 'finish' ? 2000 : 32768) - prompt.length} characters remaining</span>
     {field === 'prompt' && <Alert error={action.error} />}
     <button type="submit" className="btn primary" disabled={busy} aria-busy={busy}>{mode === 'finish' ? 'Finish this project' : 'Submit campaign'}</button>
     {field !== 'title' && field !== 'prompt' && <Alert error={action.error} onReload={campaign.refetch} />}
@@ -101,7 +105,7 @@ const stageLabel = stage => ({ implementation: 'Implementation', publication: 'P
 const evidenceStatus = status => ['passed', 'failed'].includes(status) ? status : 'unavailable'
 const textOf = item => typeof item === 'string' ? item : item?.description || item?.summary || item?.message || item?.reason || item?.label || ''
 const itemsOf = value => Array.isArray(value) ? value : value ? [value] : []
-const nextActionText = item => textOf(item) || (item?.action === 'retry_stage'
+const nextActionText = item => [textOf(item), typeof item?.recommended_action === 'string' ? item.recommended_action : ''].filter(Boolean).join(' ') || (item?.action === 'retry_stage'
   ? `Retry ${stageLabel(item.stage)?.toLowerCase() || 'the failed stage'} using the release controls.`
   : item?.action === 'change_approach' ? 'Choose a different approach before retrying this release.'
     : 'Review the release and resolve the pending action before continuing.')
@@ -244,13 +248,16 @@ function CompletionPanel({ campaign, artifactUrlApi }) {
   const delivery = stages.find(item => item.stage === 'delivery')?.row
   const historicalFinish = release.status === 'finished'
   const currentFailure = ['failed', 'unavailable'].includes(completion.current_verification?.status)
-    ? completion.current_verification : null
+    ? completion.current_verification : campaign.executionError || (campaign.errorAction === 'load' && campaign.error)
+      ? { status: 'unavailable', reason: 'Current release evidence could not be refreshed. Reload the release.' } : null
   const finished = historicalFinish && !currentFailure && coverage.length > 0
     && Array.isArray(completion.coverage) && completion.coverage.length > 0
     && coverage.every(row => row.status === 'passed') && stages.every(item => item.row?.status === 'passed')
   const retryable = !['finished', 'cancelled', 'needs_approach', 'paused'].includes(release.status)
   const failed = stages.find(item => item.row && evidenceStatus(item.row.status) !== 'passed')
   const replay = delivery?.status === 'passed' ? delivery.evidence?.replay_recipe ?? completion.replay_recipe : null
+  const continueAuthoring = release.status === 'waiting' && completion.next_action?.wait_kind === 'authority'
+    && ['Authoring requires an active project conversation', 'Acquisition requires the current account actor'].includes(completion.next_action.reason)
   return <section className="panel-sub campaign-completion" aria-label="Project delivery">
     <h3>Release being delivered</h3>
     <p>{textOf(release.scope_summary) || textOf(contract.release_boundary) || 'Release boundary unavailable.'}</p>
@@ -290,7 +297,7 @@ function CompletionPanel({ campaign, artifactUrlApi }) {
       {['active', 'queued', 'waiting'].includes(release.status) && <button type="button" className="chip-act" disabled={busy}
         onClick={() => action.run(() => campaign.transitionRelease('pause'), 'Release paused.')}>Pause release</button>}
       {['paused', 'waiting'].includes(release.status) && <button type="button" className="chip-act" disabled={busy}
-        onClick={() => action.run(() => campaign.transitionRelease('resume'), 'Release resumed.')}>Resume release</button>}
+        onClick={() => action.run(() => campaign.transitionRelease('resume'), continueAuthoring ? 'Authoring continuation requested.' : 'Release resumed.')}>{continueAuthoring ? 'Continue authoring' : 'Resume release'}</button>}
       {!['finished', 'cancelled'].includes(release.status) && <button type="button" className="chip-act" disabled={busy}
         onClick={() => action.run(() => campaign.transitionRelease('cancel'), 'Release cancellation recorded.')}>Cancel release</button>}
       {retryable && failed && <button type="button" className="chip-act" disabled={busy}
@@ -435,8 +442,8 @@ function EnrollmentPanel({ campaign }) {
   </section>
 }
 
-function SignedInPanel({ projectId, projectName, artifactUrlApi }) {
-  const campaign = useCampaigns(projectId, { enabled: true })
+function SignedInPanel({ projectId, projectName, artifactUrlApi, authorityProvider }) {
+  const campaign = useCampaigns(projectId, { enabled: true, authorityProvider })
   const selected = campaign.selected
   return <>
     <p className="dim">{projectName ? `${projectName} / Campaign` : 'Project / Campaign'}</p>
@@ -506,10 +513,10 @@ function SignedInPanel({ projectId, projectName, artifactUrlApi }) {
   </>
 }
 
-export default function CampaignPanel({ projectId, projectName, signedIn, enabled = true, artifactUrlApi = globalThis.URL }) {
+export default function CampaignPanel({ projectId, projectName, signedIn, enabled = true, artifactUrlApi = globalThis.URL, authorityProvider }) {
   if (!enabled || !projectId) return null
   return <section className="campaign-panel" aria-label="Campaign">
-    {signedIn ? <SignedInPanel key={projectId} projectId={projectId} projectName={projectName} artifactUrlApi={artifactUrlApi} />
+    {signedIn ? <SignedInPanel key={projectId} projectId={projectId} projectName={projectName} artifactUrlApi={artifactUrlApi} authorityProvider={authorityProvider} />
       : <p role="status">Sign in to submit a campaign.</p>}
   </section>
 }

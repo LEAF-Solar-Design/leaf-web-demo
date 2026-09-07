@@ -32,6 +32,30 @@ afterEach(cleanup)
 const panel = props => <CampaignPanel projectId={P} projectName="Document studio" signedIn {...props} />
 
 describe('release evidence panel', () => {
+  it('passes the project authority provider and labels only authoring continuation', async () => {
+    const authorityProvider = vi.fn()
+    releaseFixture('waiting')
+    campaign.completion.next_action = { wait_kind: 'authority', reason: 'Authoring requires an active project conversation', recommended_action: 'Continue from the project conversation to author the missing tool' }
+    const { rerender } = render(panel({ authorityProvider }))
+    expect(useCampaigns).toHaveBeenCalledWith(P, { enabled: true, authorityProvider })
+    fireEvent.click(screen.getByRole('button', { name: 'Continue authoring' }))
+    await waitFor(() => expect(campaign.transitionRelease).toHaveBeenCalledWith('resume'))
+    campaign.completion.next_action = { wait_kind: 'authority', reason: 'Execution disabled', recommended_action: 'Resolve the workspace policy' }
+    rerender(panel({ authorityProvider }))
+    expect(screen.getByRole('button', { name: 'Resume release' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Continue authoring' })).toBeNull()
+    expect(screen.getByText(/Resolve the workspace policy/)).toBeTruthy()
+  })
+  it('offers a deadline only for finish mode and sends it as a declarative field', async () => {
+    render(panel())
+    expect(screen.queryByLabelText('Release deadline (optional)')).toBeNull()
+    fireEvent.change(screen.getByLabelText('Campaign goal'), { target: { value: 'finish' } })
+    fireEvent.change(screen.getByLabelText('Release deadline (optional)'), { target: { value: '2026-09-08T09:30' } })
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Export' } })
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Download CSV' } })
+    fireEvent.click(screen.getAllByRole('button', { name: 'Finish this project' })[0])
+    await waitFor(() => expect(campaign.submit).toHaveBeenCalledWith(expect.objectContaining({ finish: expect.objectContaining({ deadline_at: '2026-09-08T09:30' }) })))
+  })
   const stages = ['implementation', 'publication', 'deployment', 'user_verification', 'delivery']
   function releaseFixture(status = 'active') {
     campaign.completion = {
@@ -149,6 +173,21 @@ describe('release evidence panel', () => {
     await screen.findByTitle('Release tool: records-to-csv.html')
     unmount()
     expect(urlApi.revokeObjectURL).toHaveBeenCalledWith('blob:third')
+  })
+  it.each(['load', 'execution'])('revokes the open preview when current %s readback fails while retaining history', async source => {
+    readyOutput()
+    const urlApi = { createObjectURL: vi.fn().mockReturnValue('blob:verified'), revokeObjectURL: vi.fn() }
+    const { rerender } = render(panel({ artifactUrlApi: urlApi }))
+    fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
+    await screen.findByTitle('Release tool: records-to-csv.html')
+    if (source === 'load') Object.assign(campaign, { error: new Error('Readback unavailable'), errorAction: 'load' })
+    else campaign.executionError = new Error('Readback unavailable')
+    rerender(panel({ artifactUrlApi: urlApi }))
+    expect(screen.queryByTitle('Release tool: records-to-csv.html')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Open tool records-to-csv.html' })).toBeNull()
+    expect(urlApi.revokeObjectURL).toHaveBeenCalledWith('blob:verified')
+    expect(screen.getByText('Previously completed release. Current verification unavailable.')).toBeTruthy()
+    expect(screen.getByText('Organize all family recipes')).toBeTruthy()
   })
   it('saves verified file bytes with a safe filename and cleans up its temporary URL', async () => {
     readyOutput('records.csv', 'text/csv')

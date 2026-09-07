@@ -41,13 +41,125 @@ beforeEach(() => {
   api.askQuestion.mockResolvedValue({ question: open })
   api.answerQuestion.mockResolvedValue({ answer: receipt })
 })
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); localStorage.clear(); sessionStorage.clear() })
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); localStorage.clear(); sessionStorage.clear() })
 
 async function ready() {
   const hook = renderHook(() => useCampaigns(P, { enabled: true }))
   await waitFor(() => expect(hook.result.current.status).toBe('ready'))
   return hook
 }
+
+describe('release continuation authority', () => {
+  const waiting = { release: { release_id: Q, status: 'waiting', contract_version: 1, scope_summary: 'Export CSV' },
+    next_action: { wait_kind: 'authority', reason: 'Authoring requires an active project conversation',
+      recommended_action: 'Continue this release from the project conversation to author the missing CSV tool' } }
+  beforeEach(() => {
+    api.getCampaign.mockResolvedValue({ campaign: row, completion: waiting })
+    api.transitionRelease.mockResolvedValue({ completion: waiting })
+  })
+  async function withProvider(provider) {
+    const hook = renderHook(({ project, enabled }) => useCampaigns(project, { enabled, authorityProvider: provider }),
+      { initialProps: { project: P, enabled: true } })
+    await waitFor(() => expect(hook.result.current.executionLoading).toBe(false))
+    await waitFor(() => expect(hook.result.current.completion).toEqual(waiting))
+    return hook
+  }
+  it('uses a fresh current tuple once on explicit authoring resume without storing it', async () => {
+    const provider = vi.fn().mockResolvedValue({ sessionId: B, turnId: D })
+    const hook = await withProvider(provider)
+    expect(provider).not.toHaveBeenCalled()
+    await act(async () => { await hook.result.current.transitionRelease('resume') })
+    expect(provider).toHaveBeenCalledExactlyOnceWith(expect.stringContaining('Export CSV'), { forceFresh: true })
+    expect(api.transitionRelease).toHaveBeenCalledExactlyOnceWith(P, C, Q, 'resume', { sessionId: B, turnId: D })
+    expect(JSON.stringify(hook.result.current)).not.toContain(B)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+  it.each([undefined, () => Promise.resolve(null), () => Promise.reject(new Error('private details'))])('does not mutate when the authority provider is unavailable', async provider => {
+    const hook = await withProvider(provider)
+    await act(async () => { await expect(hook.result.current.transitionRelease('resume')).rejects.toThrow(/conversation/) })
+    expect(api.transitionRelease).not.toHaveBeenCalled()
+    expect(hook.result.current.completion.release.status).toBe('waiting')
+    expect(hook.result.current.error.message).not.toContain('private details')
+  })
+  it.each(['pause', 'cancel'])('does not create a turn for %s', async action => {
+    const provider = vi.fn()
+    const hook = await withProvider(provider)
+    await act(async () => { await hook.result.current.transitionRelease(action) })
+    expect(provider).not.toHaveBeenCalled()
+    expect(api.transitionRelease).toHaveBeenCalledExactlyOnceWith(P, C, Q, action)
+  })
+  it('does not create a turn for a policy authority dependency', async () => {
+    const provider = vi.fn()
+    const hook = await withProvider(provider)
+    api.getCampaign.mockResolvedValue({ campaign: row, completion: { ...waiting, next_action: { wait_kind: 'authority', reason: 'Workspace policy disabled execution' } } })
+    await act(async () => { await hook.result.current.refetch(); await hook.result.current.transitionRelease('resume') })
+    expect(provider).not.toHaveBeenCalled()
+    expect(api.transitionRelease).toHaveBeenCalledExactlyOnceWith(P, C, Q, 'resume')
+  })
+  it.each(['project', 'campaign', 'release', 'version', 'disabled'])('refuses late authority after %s changes', async change => {
+    const pending = deferred()
+    const hook = await withProvider(() => pending.promise)
+    let resume
+    act(() => { resume = hook.result.current.transitionRelease('resume').catch(error => error) })
+    if (change === 'project' || change === 'disabled') {
+      hook.rerender({ project: change === 'project' ? B : P, enabled: change !== 'disabled' })
+    } else if (change === 'campaign') {
+      api.listCampaigns.mockResolvedValue({ campaigns: [row, { ...row, campaign_id: D }] })
+      await act(async () => { await hook.result.current.select(D) })
+    } else {
+      api.getCampaign.mockResolvedValue({ campaign: row, completion: { ...waiting, release: { ...waiting.release,
+        ...(change === 'release' ? { release_id: D } : { contract_version: 2 }) } } })
+      await act(async () => { await hook.result.current.refetch() })
+    }
+    await act(async () => { pending.resolve({ sessionId: B, turnId: D }); await resume })
+    expect(api.transitionRelease).not.toHaveBeenCalled()
+  })
+})
+
+describe('bounded release readback', () => {
+  async function polling(completion) {
+    vi.useFakeTimers()
+    api.getCampaign.mockResolvedValue({ campaign: row, completion })
+    const hook = renderHook(({ project, enabled }) => useCampaigns(project, { enabled }), { initialProps: { project: P, enabled: true } })
+    await act(async () => {})
+    expect(hook.result.current.status).toBe('ready')
+    return hook
+  }
+  it.each(['active', 'queued', 'authoring', 'job', 'capacity', 'publication', 'approval'])('polls %s after five seconds without overlapping a read', async state => {
+    const hook = await polling({ release: { release_id: Q, status: ['active', 'queued'].includes(state) ? state : 'waiting' }, next_action: { wait_kind: state } })
+    const pending = deferred()
+    api.listCampaigns.mockReturnValueOnce(pending.promise)
+    await act(async () => { await vi.advanceTimersByTimeAsync(4999) })
+    expect(api.listCampaigns).toHaveBeenCalledTimes(1)
+    await act(async () => { await vi.advanceTimersByTimeAsync(1) })
+    expect(api.listCampaigns).toHaveBeenCalledTimes(2)
+    await act(async () => { hook.result.current.refetch(); await vi.advanceTimersByTimeAsync(20000) })
+    expect(api.listCampaigns).toHaveBeenCalledTimes(2)
+    await act(async () => { pending.resolve({ campaigns: [row] }) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+    expect(api.listCampaigns).toHaveBeenCalledTimes(3)
+    hook.unmount()
+    await act(async () => { await vi.advanceTimersByTimeAsync(10000) })
+    expect(api.listCampaigns).toHaveBeenCalledTimes(3)
+  })
+  it.each(['authority', 'paused', 'finished', 'cancelled', 'needs_approach'])('stops on %s', async state => {
+    await polling({ release: { release_id: Q, status: state === 'authority' ? 'waiting' : state }, next_action: { wait_kind: state } })
+    await act(async () => { await vi.advanceTimersByTimeAsync(20000) })
+    expect(api.listCampaigns).toHaveBeenCalledTimes(1)
+  })
+  it('stops the old project timer on disable and retains evidence with a visible read failure', async () => {
+    const completion = { release: { release_id: Q, status: 'active' } }
+    const hook = await polling(completion)
+    api.listCampaigns.mockRejectedValueOnce(new Error('Readback unavailable'))
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+    expect(hook.result.current.completion).toEqual(completion)
+    expect(hook.result.current.error.message).toBe('Readback unavailable')
+    hook.rerender({ project: P, enabled: false })
+    await act(async () => { await vi.advanceTimersByTimeAsync(10000) })
+    expect(api.listCampaigns).toHaveBeenCalledTimes(2)
+  })
+})
 
 describe('completion state', () => {
   const finish = { delivery_profile: 'web_tool', intended_user: 'Project owner', workflow: 'Use the tool', artifact_refs: [] }

@@ -24,6 +24,31 @@ afterEach(() => { vi.unstubAllGlobals(); localStorage.clear() })
 
 describe('completion transport', () => {
   const finish = { delivery_profile: 'cad_file', intended_user: 'Project owner', workflow: 'Download the drawing', artifact_refs: ['project-artifact'] }
+  it('sends exact continuation authority only in resume headers', async () => {
+    const authority = { sessionId: P, turnId: E }
+    await transitionRelease(P, C, E, 'resume', authority)
+    expect(fetcher.mock.calls[0][1].headers).toMatchObject({ 'X-Authority-Session-Id': P, 'X-Authority-Turn-Id': E })
+    expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({ project_id: P })
+    expect(fetcher.mock.calls[0][0]).not.toContain('authority')
+    for (const action of ['pause', 'cancel', 'resume']) await transitionRelease(P, C, E, action, action === 'resume' ? undefined : authority)
+    for (const [, request] of fetcher.mock.calls.slice(1)) {
+      expect(request.headers['X-Authority-Session-Id']).toBeUndefined()
+      expect(request.headers['X-Authority-Turn-Id']).toBeUndefined()
+    }
+    for (const invalid of [{ sessionId: P }, { sessionId: P, turnId: 'bad' }, { sessionId: ` ${P}`, turnId: E }]) {
+      await expect(transitionRelease(P, C, E, 'resume', invalid)).rejects.toThrow('continuation authority')
+    }
+    expect(fetcher).toHaveBeenCalledTimes(4)
+  })
+  it('normalizes deadlines and applies the server finish input bounds', async () => {
+    await createRelease(P, C, { finish: { ...finish, deadline_at: '2026-09-08T09:30:00-05:00' }, idempotencyKey: 'key' })
+    expect(JSON.parse(fetcher.mock.calls[0][1].body).finish.deadline_at).toBe('2026-09-08T14:30:00.000Z')
+    for (const overrides of [{ workflow: 'x'.repeat(2001) }, { intended_user: 'x'.repeat(2001) },
+      { artifact_refs: Array(33).fill('file') }, { artifact_refs: ['x'.repeat(513)] }, { deadline_at: 'bad' }]) {
+      await expect(createRelease(P, C, { finish: { ...finish, ...overrides }, idempotencyKey: 'key' })).rejects.toThrow()
+    }
+    expect(fetcher).toHaveBeenCalledTimes(1)
+  })
   it('sends declarative finish fields and strips executable and authoritative extras', async () => {
     await submitCampaign({ projectId: P, title: 'Drawing', prompt: 'Finish the drawing', mode: 'finish',
       finish: { ...finish, commands: ['bad'], status: 'finished', checks: ['passed'], grants: ['bad'] },
