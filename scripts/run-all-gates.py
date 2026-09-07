@@ -689,6 +689,25 @@ def build_suites() -> List[Suite]:
         Suite("server-live-mutation-plan",
               "server tests/test_live_mutation_plan.py", "pytest", SERVER,
               _py_pytest("tests/test_live_mutation_plan.py"), 34),
+        # W4g-7b: non-associative dimensions through contract v3, server side.
+        # One process per file, same isolation convention as the waves above.
+        # test_w4g7b_02s/03s/04s each carry one accoreconsole canary
+        # (`@pytest.mark.skipif(not ACCORECONSOLE.exists(), ...)`), a visible
+        # skip on a runner with no local AutoCAD 2026 console; floors are the
+        # counts that execute WITHOUT it.
+        Suite("server-w4g7b-00s", "server tests/test_w4g7b_00s.py", "pytest", SERVER,
+              _py_pytest("tests/test_w4g7b_00s.py"), 32),
+        Suite("server-w4g7b-01s", "server tests/test_w4g7b_01s.py", "pytest", SERVER,
+              _py_pytest("tests/test_w4g7b_01s.py"), 49),
+        Suite("server-w4g7b-02s", "server tests/test_w4g7b_02s.py", "pytest", SERVER,
+              _py_pytest("tests/test_w4g7b_02s.py"), 64,
+              allowed_skip_reasons=(r"local AutoCAD 2026 console is required",)),
+        Suite("server-w4g7b-03s", "server tests/test_w4g7b_03s.py", "pytest", SERVER,
+              _py_pytest("tests/test_w4g7b_03s.py"), 40,
+              allowed_skip_reasons=(r"local AutoCAD 2026 console is required",)),
+        Suite("server-w4g7b-04s", "server tests/test_w4g7b_04s.py", "pytest", SERVER,
+              _py_pytest("tests/test_w4g7b_04s.py"), 57,
+              allowed_skip_reasons=(r"local AutoCAD 2026 console is required",)),
         # W4g-3a: the contract v2 (the browser engine's saves through the same
         # closed plan), 42 rows over literal parametrize lists, no skip gates.
         Suite("server-mutation-contract-v2",

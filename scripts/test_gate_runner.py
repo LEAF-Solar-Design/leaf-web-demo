@@ -282,6 +282,36 @@ def test_operator_suites_are_registered_with_their_measured_floors():
     assert "server-operator-production-unreachable" in g._MEASURED_EST_S
 
 
+def test_w4g7b_contract_v3_server_suites_are_registered_with_measured_floors():
+    """W4g-7b: non-associative LINEAR and ALIGNED dimensions through contract
+    v3, server side. Mirrors the floors in run-all-gates.py; BOTH must move
+    together, and only alongside a re-measured run. test_w4g7b_02s/03s/04s
+    each carry one accoreconsole canary
+    (`@pytest.mark.skipif(not ACCORECONSOLE.exists(), ...)`), a visible skip
+    on a runner with no local AutoCAD 2026 console; their floors are the
+    counts that execute WITHOUT it, and only that exact reason may skip."""
+    g = _load_runner()
+    suites = {s.id: s for s in g.build_suites()}
+
+    floors = {
+        "server-w4g7b-00s": 32,
+        "server-w4g7b-01s": 49,
+        "server-w4g7b-02s": 64,
+        "server-w4g7b-03s": 40,
+        "server-w4g7b-04s": 57,
+    }
+    assert {sid: suites[sid].expected for sid in floors} == floors
+
+    for sid in floors:
+        assert suites[sid].cwd == g.SERVER, sid
+
+    canary_reason = r"local AutoCAD 2026 console is required"
+    for sid in ("server-w4g7b-00s", "server-w4g7b-01s"):
+        assert suites[sid].allowed_skip_reasons == (), sid
+    for sid in ("server-w4g7b-02s", "server-w4g7b-03s", "server-w4g7b-04s"):
+        assert suites[sid].allowed_skip_reasons == (canary_reason,), sid
+
+
 def test_host_capability_ci_producers_cover_unit_and_postgres_modules(tmp_path, monkeypatch):
     """ReciPDF host capability proofs run in the existing unit and PG producers."""
     import re
