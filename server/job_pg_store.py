@@ -77,6 +77,10 @@ def _record(row: Dict[str, Any]) -> Dict[str, Any]:
     capability = record_context(_json(row.get("execution_json")) or {}, rec)
     if capability is not None:
         rec["capability_provenance"] = capability
+    from campaign_transform_job import record_context as completion_record_context
+    completion = completion_record_context(_json(row.get("execution_json")) or {}, rec)
+    if completion is not None:
+        rec["completion_provenance"] = completion
     return rec
 
 
@@ -258,7 +262,7 @@ class PostgresJobStore:
         db = _db()
         with db.cursor() as cur:
             cur.execute(
-                "SELECT attempt, execution_json, tenant_id, org_id, project_id, tool "
+                "SELECT attempt, execution_json, params_json, tenant_id, org_id, project_id, tool "
                 "FROM async_jobs WHERE job_id = %s",
                 (job_id,),
             )
@@ -266,6 +270,7 @@ class PostgresJobStore:
         if not row:
             return None
         return {"attempt": int(row["attempt"] or 0), "execution": _json(row["execution_json"]) or {},
+                "params": _json(row.get("params_json")) or {},
                 **{key: row[key] for key in ("tenant_id", "org_id", "project_id", "tool")}}
 
     def event_context(self, job_id: str) -> Optional[Dict[str, Any]]:
