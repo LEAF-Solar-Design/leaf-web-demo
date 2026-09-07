@@ -1709,7 +1709,7 @@ def build_suites() -> List[Suite]:
         # batch-atomicity case. An opted-in machine (local wasm build present)
         # executes them instead.
         Suite("web-vitest", "web npm run test:unit (vitest)", "vitest", WEB,
-              [_npm(), "run", "test:unit"], 731,
+              [_npm(), "run", "test:unit"], 737,
               allowed_vitest_skips=(
                   # Day-3 CAD engine real-build round trip: needs a compiled
                   # wasm artifact, which needs a Rust toolchain, so it exists
@@ -1856,6 +1856,11 @@ def build_suites() -> List[Suite]:
         Suite("web-async-author-stage",
               "web async authoring stage lifecycle + failure visibility", "script", WEB,
               [_npm(), "run", "proof:async-author-stage"], None),
+        Suite("server-tenant-mcp-fake-oauth", "server app-hosted OAuth pins", "pytest", SERVER,
+              _py_pytest("tests/test_tenant_mcp_fake_oauth.py"), 17),
+        Suite("web-link-service-flow", "web managed link service OAuth flow", "script", WEB,
+              [_npx(), "--no-install", "playwright", "test", "--config", "playwright.local.config.mjs",
+               "e2e/local/link-service-flow.spec.mjs", "e2e/local/trust-state.spec.mjs", "--workers=1"], None),
         Suite("web-build", "web production build", "script", WEB,
               [_npm(), "run", "build"], None),
         # --- containerized harness smoke (census #13) — OPT-IN --- #
