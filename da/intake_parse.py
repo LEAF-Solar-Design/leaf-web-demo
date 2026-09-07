@@ -227,7 +227,7 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                               "linetype": _block_name(linetype), "lineweight": int(lineweight)}
                 out.setdefault("properties", {})[hnd] = properties
             elif tag == "DM":
-                kind, p1, p2, dimline, rotation, style, nrm, measurement, hnd = rest.split("|")
+                kind, layer, p1, p2, dimline, rotation, style, nrm, measurement, hnd = rest.split("|")
                 points = [[round(float(v), 3) for v in p.split(",")]
                           for p in (p1, p2, dimline)]
                 n = tuple(float(v) for v in nrm.split(","))
@@ -240,10 +240,15 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                 if not any(normal):
                     raise ValueError("dimension normal rounds to the zero vector")
                 dimension = {
-                    "type": kind, "p1": points[0], "p2": points[1], "dimline": points[2],
-                    "rotation_deg": round(float(rotation), 6), "style": style,
+                    "type": kind, "layer": _block_name(layer),
+                    "p1": points[0], "p2": points[1], "dimline": points[2],
+                    "rotation_deg": round(float(rotation), 6), "style": _block_name(style),
                     "nrm": normal, "measurement": round(float(measurement), 3), "handle": hnd}
                 out.setdefault("dimensions", []).append(dimension)
+            elif tag == "DS":
+                out.setdefault("dimstyles", []).append(_block_name(rest))
+            elif tag == "DMX":
+                out["dimensions_unsupported"] = out.get("dimensions_unsupported", 0) + 1
             elif tag == "TX":
                 # TEXT/MTEXT label (ADDITIVE §1 field `texts`; the value had "|" replaced
                 # by a space in the LISP and is capped at 512 chars there).

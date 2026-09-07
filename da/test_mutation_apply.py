@@ -554,12 +554,12 @@ def test_dimension_record_reads_coordinate_and_angular_precisions():
     import intake_parse
 
     parsed = intake_parse.parse_text(
-        "DM|linear|1.23456,2.34567,3.45678|4.56789,5.67891,6.78912|"
+        "DM|linear|DIMS|1.23456,2.34567,3.45678|4.56789,5.67891,6.78912|"
         "7.89123,8.91234,9.12345|30.12345678|Standard|0.0000004,0.0000006,1|12.34567|2A",
         "test.dwg",
     )
     assert parsed["dimensions"] == [{
-        "type": "linear", "p1": [1.235, 2.346, 3.457], "p2": [4.568, 5.679, 6.789],
+        "type": "linear", "layer": "DIMS", "p1": [1.235, 2.346, 3.457], "p2": [4.568, 5.679, 6.789],
         "dimline": [7.891, 8.912, 9.123], "rotation_deg": 30.123457, "style": "Standard",
         "nrm": [0.0, 0.000001, 1.0], "measurement": 12.346, "handle": "2A",
     }]
@@ -575,7 +575,7 @@ def test_malformed_dimension_normal_or_handle_is_a_parse_error(normal, handle):
     import intake_parse
 
     parsed = intake_parse.parse_text(
-        f"DM|linear|0,0,0|3,4,0|0,5,0|0|Standard|{normal}|5|{handle}",
+        f"DM|linear|0|0,0,0|3,4,0|0,5,0|0|Standard|{normal}|5|{handle}",
         "test.dwg",
     )
     assert len(parsed["parseErrors"]) == 1 and parsed["parseErrors"][0].startswith("DM:")
@@ -584,7 +584,7 @@ def test_malformed_dimension_normal_or_handle_is_a_parse_error(normal, handle):
 
 @pytest.mark.parametrize("record,field", [
     ("EP|1A|7|~|Continuous|25", "properties"),
-    ("DM|aligned|0,0,0|3,4,0|0,5,0|0|Standard|0,0,1|5|2A", "dimensions"),
+    ("DM|aligned|0|0,0,0|3,4,0|0,5,0|0|Standard|0,0,1|5|2A", "dimensions"),
 ])
 def test_sidecar_records_close_a_complete_polyline_first(record, field):
     import intake_parse
@@ -729,10 +729,14 @@ def test_catalogue_lisp_looks_up_the_raw_name_and_encodes_only_record_fields():
 
     # Helpers now occupy separate lines before the catalogue emission progn.
     # Index 3 is the W4g-7b-3s EP (colour/linetype/lineweight) block, ahead
-    # of the BK helper defuns tested here; skip it explicitly.
+    # of the BK helper defuns tested here; skip it explicitly. W4g-7b-04s
+    # appended the DS/DM blocks AFTER the BK catalogue (indices -2/-1), so
+    # the catalogue itself moved off the tuple's tail to a fixed index.
     assert MUTATION_INSPECT_BLOCKS[3].startswith('(progn (setq f (open "{OUT}" "a")) (setq ss (ssget "_X" (list (cons -4 "<OR")')
-    helper = "\n".join(MUTATION_INSPECT_BLOCKS[4:-1])
-    catalogue = MUTATION_INSPECT_BLOCKS[-1]
+    helper = "\n".join(MUTATION_INSPECT_BLOCKS[4:9])
+    catalogue = MUTATION_INSPECT_BLOCKS[9]
+    assert '"DS|"' in MUTATION_INSPECT_BLOCKS[-2]
+    assert '"DM|"' in MUTATION_INSPECT_BLOCKS[-1]
     assert '(setq name (cdr (assoc 2 bk)))' in catalogue
     assert '(entnext (tblobjname "BLOCK" name))' in catalogue
     assert '(leaf-bk-child name bed)' in catalogue
@@ -745,6 +749,38 @@ def test_catalogue_lisp_looks_up_the_raw_name_and_encodes_only_record_fields():
         assert f'((= ch {code}) "{escaped}")' in helper
     assert '(foreach ch (vl-string->list value)' in helper
     assert '(vl-string-translate "|\\r\\n" "   " value)' in helper
+
+
+def test_ep_filter_names_dimension_alongside_the_five_geometry_kinds():
+    # F1: a styled add or a set_color/set_linetype/set_lineweight target of
+    # kind DIMENSION is admitted by the validator and applied by the
+    # interpreter, so the EP inspect block's ssget filter must cover it too
+    # or the verifier never sees the dimension's properties. Still exactly
+    # one EP progn (the OR-list grew, the tag did not duplicate).
+    from lisp import MUTATION_INSPECT_BLOCKS
+
+    ep = MUTATION_INSPECT_BLOCKS[3]
+    assert ep.count('"EP|"') == 1
+    for kind in ("LINE", "LWPOLYLINE", "CIRCLE", "ARC", "INSERT", "DIMENSION"):
+        assert f'(cons 0 "{kind}")' in ep
+    or_list = ep[ep.index('(cons -4 "<OR")'):ep.index('(cons -4 "OR>")')]
+    assert '(cons 0 "DIMENSION")' in or_list
+
+
+def test_dm_inspect_block_computes_the_geometric_measurement_never_group_42():
+    # F8: the measurement is ALWAYS derived from the definition points and
+    # rotation (LINEAR: the projection; ALIGNED: the plain distance), never
+    # DXF group 42 — a dimstyle with DIMLFAC != 1 scales that group for
+    # on-screen display and would otherwise desync from
+    # server/mutation_plan.py's unscaled computation.
+    from lisp import MUTATION_INSPECT_BLOCKS
+
+    dm = MUTATION_INSPECT_BLOCKS[-1]
+    assert "(assoc 42 ed)" not in dm
+    assert dm.count("(setq meas") == 1
+    assert '(setq meas (if (= kind "LINEAR")' in dm
+    assert "(abs (+ (* (- (car wp2) (car wp1)) (cos rot))" in dm
+    assert "(distance wp1 wp2)" in dm
 
 
 def test_leafextract_script_matches_the_pre_catalogue_pinned_text():

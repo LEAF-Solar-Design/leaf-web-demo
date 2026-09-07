@@ -93,10 +93,18 @@ _INSERT_LISP_LINES = (
 )
 
 
+_DIMENSION_LISP_LINES = (
+    '(defun leaf-adddimlinear-op (v / layer style def1 def2 dimline rot) (if (and (= (length v) 7) (setq layer (nth 1 v) style (nth 2 v)) (<= (strlen layer) 255) (leaf-chars-ok layer "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-$ ") (> (strlen style) 0) (<= (strlen style) 255) (leaf-chars-ok style "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-$ ") (tblsearch "DIMSTYLE" style) (setq def1 (leaf-point3 (nth 3 v))) (setq def2 (leaf-point3 (nth 4 v))) (setq dimline (leaf-point3 (nth 5 v))) (setq rot (leaf-number (nth 6 v)))) (list "ADDDIMLINEAR" layer style def1 def2 dimline rot)))',
+    '(defun leaf-adddimaligned-op (v / layer style def1 def2 dimline) (if (and (= (length v) 6) (setq layer (nth 1 v) style (nth 2 v)) (<= (strlen layer) 255) (leaf-chars-ok layer "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-$ ") (> (strlen style) 0) (<= (strlen style) 255) (leaf-chars-ok style "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-$ ") (tblsearch "DIMSTYLE" style) (setq def1 (leaf-point3 (nth 3 v))) (setq def2 (leaf-point3 (nth 4 v))) (setq dimline (leaf-point3 (nth 5 v)))) (list "ADDDIMALIGNED" layer style def1 def2 dimline)))',
+    '(defun leaf-apply-adddimlinear (op / layer style def1 def2 dimline rot) (setq layer (nth 1 op) style (nth 2 op) def1 (nth 3 op) def2 (nth 4 op) dimline (nth 5 op) rot (nth 6 op)) (if (tblsearch "DIMSTYLE" style) (progn (leaf-ensure-layer layer) (entmakex (list (cons 0 "DIMENSION") (cons 100 "AcDbEntity") (cons 8 layer) (cons 100 "AcDbDimension") (cons 10 dimline) (cons 70 32) (cons 3 style) (cons 210 (list 0.0 0.0 1.0)) (cons 100 "AcDbAlignedDimension") (cons 13 def1) (cons 14 def2) (cons 50 (leaf-deg2rad rot)) (cons 100 "AcDbRotatedDimension"))))))',
+    '(defun leaf-apply-adddimaligned (op / layer style def1 def2 dimline) (setq layer (nth 1 op) style (nth 2 op) def1 (nth 3 op) def2 (nth 4 op) dimline (nth 5 op)) (if (tblsearch "DIMSTYLE" style) (progn (leaf-ensure-layer layer) (entmakex (list (cons 0 "DIMENSION") (cons 100 "AcDbEntity") (cons 8 layer) (cons 100 "AcDbDimension") (cons 10 dimline) (cons 70 33) (cons 3 style) (cons 210 (list 0.0 0.0 1.0)) (cons 100 "AcDbAlignedDimension") (cons 13 def1) (cons 14 def2))))))',
+)
+
+
 _PROPERTY_LISP_LINES = (
     '(setq leaf-created nil)',
     '(defun leaf-target-p (s / tail) (setq tail (substr s 3)) (cond ((= (substr s 1 2) "H:") (leaf-handle-p tail)) ((= (substr s 1 2) "A:") (and (<= (strlen tail) 6) (leaf-chars-ok tail "0123456789")))))',
-    '(defun leaf-target (s / n e) (if (leaf-target-p s) (progn (if (= (substr s 1 2) "H:") (setq e (handent (substr s 3))) (progn (setq n (atoi (substr s 3))) (if (< n (length leaf-created)) (setq e (nth n leaf-created))))) (if (and e (member (cdr (assoc 0 (entget e))) (list "LINE" "LWPOLYLINE" "CIRCLE" "ARC" "INSERT"))) e))))',
+    '(defun leaf-target (s / n e) (if (leaf-target-p s) (progn (if (= (substr s 1 2) "H:") (setq e (handent (substr s 3))) (progn (setq n (atoi (substr s 3))) (if (< n (length leaf-created)) (setq e (nth n leaf-created))))) (if (and e (member (cdr (assoc 0 (entget e))) (list "LINE" "LWPOLYLINE" "CIRCLE" "ARC" "INSERT" "DIMENSION"))) e))))',
     '(defun leaf-weight-p (n) (and n (member n (list -3 -2 -1 0 5 9 13 15 18 20 25 30 35 40 50 53 60 70 80 90 100 106 120 140 158 200 211))))',
     '(defun leaf-color-value (s / n) (setq n (leaf-number s)) (if (and n (= n (fix n)) (>= n 0) (<= n 256)) (fix n)))',
     '(defun leaf-weight-value (s / n) (setq n (leaf-number s)) (if (and n (= n (fix n)) (leaf-weight-p (fix n))) (fix n)))',
@@ -114,11 +122,19 @@ def build_apply_scr_v3() -> str:
     for line in _LISP_LINES:
         if line.startswith("(defun leaf-parse-line "):
             lines.extend(_INSERT_LISP_LINES)
+            lines.extend(_DIMENSION_LISP_LINES)
             lines.extend(_PROPERTY_LISP_LINES)
             line = line.replace('(cond ', '(cond ((member (car v) (list "SETCOLOR" "SETLINETYPE" "SETLINEWEIGHT")) (leaf-property-op v)) ', 1)
             line = line.replace(
                 '((= (car v) "ADDARC")',
-                '((= (car v) "ADDINSERT") (leaf-addinsert-op v)) ((= (car v) "ADDARC")',
+                '((= (car v) "ADDINSERT") (leaf-addinsert-op v)) ((= (car v) "ADDDIMLINEAR") (leaf-adddimlinear-op v)) ((= (car v) "ADDDIMALIGNED") (leaf-adddimaligned-op v)) ((= (car v) "ADDARC")',
+                1,
+            )
+        elif line.startswith("(defun leaf-remove-op "):
+            # v3-only: an existing DIMENSION handle may also be removed.
+            line = line.replace(
+                '(list "LWPOLYLINE" "LINE" "CIRCLE" "ARC")',
+                '(list "LWPOLYLINE" "LINE" "CIRCLE" "ARC" "DIMENSION")',
                 1,
             )
         elif line.startswith("(defun leaf-apply "):
@@ -128,11 +144,11 @@ def build_apply_scr_v3() -> str:
             line = line.replace('(cond ', '(cond ((= (car op) "SETCOLOR") (leaf-apply-setcolor op)) ((= (car op) "SETLINETYPE") (leaf-apply-setlinetype op)) ((= (car op) "SETLINEWEIGHT") (leaf-apply-setlineweight op)) ', 1)
             line = line.replace(
                 '((= (car op) "ADDARC")',
-                '((= (car op) "ADDINSERT") (leaf-apply-addinsert op)) ((= (car op) "ADDARC")',
+                '((= (car op) "ADDINSERT") (leaf-apply-addinsert op)) ((= (car op) "ADDDIMLINEAR") (leaf-apply-adddimlinear op)) ((= (car op) "ADDDIMALIGNED") (leaf-apply-adddimaligned op)) ((= (car op) "ADDARC")',
                 1,
             )
             lines.append(line)
-            line = '(defun leaf-apply (op / result) (setq result (leaf-apply-one op)) (if (and result (member (car op) (list "ADD" "ADDOPEN" "ADDLINE" "ADDCIRCLE" "ADDARC" "ADDINSERT"))) (setq leaf-created (append leaf-created (list result)))) result)'
+            line = '(defun leaf-apply (op / result) (setq result (leaf-apply-one op)) (if (and result (member (car op) (list "ADD" "ADDOPEN" "ADDLINE" "ADDCIRCLE" "ADDARC" "ADDINSERT" "ADDDIMLINEAR" "ADDDIMALIGNED"))) (setq leaf-created (append leaf-created (list result)))) result)'
         elif line.startswith("(defun leaf-read-plan "):
             line = line.replace(
                 '(list "LEAF_MUTATION_PLAN|1" "LEAF_MUTATION_PLAN|2")',

@@ -146,6 +146,8 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
     circles = intake.get("circles", [])
     arcs = intake.get("arcs", [])
     inserts = intake.get("inserts", [])
+    dimensions = intake.get("dimensions", [])
+    dimstyles_in = intake.get("dimstyles", [])
     if not isinstance(layers_in, list) or len(layers_in) > MAX_LAYERS:
         _fail(f"layers must be a list of at most {MAX_LAYERS}")
     if not isinstance(polylines, list) or not isinstance(texts, list):
@@ -154,7 +156,10 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         _fail("circles and arcs must be lists")
     if not isinstance(inserts, list):
         _fail("inserts must be a list")
-    if len(polylines) + len(texts) + len(circles) + len(arcs) + len(inserts) > MAX_ENTITIES:
+    if not isinstance(dimensions, list) or not isinstance(dimstyles_in, list):
+        _fail("dimensions and dimstyles must be lists")
+    if (len(polylines) + len(texts) + len(circles) + len(arcs) + len(inserts) + len(dimensions)
+            > MAX_ENTITIES):
         _fail(f"more than {MAX_ENTITIES} entities")
     properties = intake.get("properties", {})
     if not isinstance(properties, dict):
@@ -176,6 +181,22 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         if name not in layer_seen:
             layer_seen.add(name)
             layer_order.append(name)
+
+    # DIMSTYLE table: emitted only when the intake actually names a dimstyle
+    # or carries a dimension (byte-identical output otherwise), and always
+    # carries "Standard" so an added dimension's default style resolves.
+    dimstyle_order: List[str] = []
+    dimstyle_seen: set = set()
+    for k, name in enumerate(dimstyles_in):
+        if (not isinstance(name, str) or not name or len(name) > MAX_LAYER_CHARS
+                or _CONTROL_RE.search(name)):
+            _fail(f"dimstyles[{k}]: not a safe dimstyle name")
+        if name not in dimstyle_seen:
+            dimstyle_seen.add(name)
+            dimstyle_order.append(name)
+    emit_dimstyle_table = bool(dimstyle_order) or bool(dimensions)
+    if emit_dimstyle_table and "Standard" not in dimstyle_seen:
+        dimstyle_order = ["Standard"] + dimstyle_order
 
     # Pass 1: validate every entity and settle handles. Real hex handles are
     # kept (uppercased, the DXF norm) and must be unique; synthetic ones get
@@ -311,6 +332,34 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         note_layer(layer)
         kinds.append(("insert", layer, name, point, normal, scale, rotation, h))
         kind_properties.append(_entity_property_groups(properties, ent.get("handle"), where))
+    for k, ent in enumerate(dimensions):
+        where = f"dimensions[{k}]"
+        if not isinstance(ent, dict):
+            _fail(f"{where}: not an object")
+        dimtype = ent.get("type")
+        if dimtype not in ("LINEAR", "ALIGNED"):
+            _fail(f"{where}: type must be LINEAR or ALIGNED")
+        p1 = _vector(ent.get("p1"), f"{where}.p1")
+        p2 = _vector(ent.get("p2"), f"{where}.p2")
+        dimline = _vector(ent.get("dimline"), f"{where}.dimline")
+        rotation = _number(ent.get("rotation_deg", 0), f"{where}.rotation_deg")
+        style = ent.get("style")
+        if (not isinstance(style, str) or not style or len(style) > MAX_LAYER_CHARS
+                or _CONTROL_RE.search(style)):
+            _fail(f"{where}: style is not a safe dimstyle name")
+        normal = _vector(ent.get("nrm", [0.0, 0.0, 1.0]), f"{where}.nrm")
+        if not any(normal):
+            _fail(f"{where}: nrm must not be the zero vector")
+        measurement = _number(ent.get("measurement"), f"{where}.measurement")
+        # A legacy record predates the layer field; emit it on "0" like before.
+        layer = _layer_name(ent.get("layer", "0"), where)
+        h = _real_handle(ent.get("handle"), where, real)
+        if h is not None:
+            highest = max(highest, int(h, 16))
+        note_layer(layer)
+        kinds.append(("dim", dimtype, layer, p1, p2, dimline, rotation, style, normal, measurement, h))
+        kind_properties.append([])  # DIMENSION carries no colour/linetype/lineweight round trip
+
     blocks = _validated_blocks(intake["blocks"], note_layer) if "blocks" in intake else None
     if blocks is not None:
         total_points += sum(len(child.get("pts", [])) for block in blocks.values()
@@ -339,6 +388,12 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         out += ["0", "LAYER", "100", "AcDbSymbolTableRecord", "100", "AcDbLayerTableRecord",
                 "2", name, "70", "0", "62", "7", "6", "Continuous"]
     out += ["0", "ENDTAB"]
+    if emit_dimstyle_table:
+        out += ["0", "TABLE", "2", "DIMSTYLE", "70", str(len(dimstyle_order))]
+        for name in dimstyle_order:
+            out += ["0", "DIMSTYLE", "105", fresh_handle(), "100", "AcDbSymbolTableRecord",
+                    "100", "AcDbDimStyleTableRecord", "2", name, "70", "0"]
+        out += ["0", "ENDTAB"]
     block_records = {}
     if blocks is not None:
         table_handle = fresh_handle()
@@ -417,6 +472,27 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
                 out += ["210", _num(normal[0]), "220", _num(normal[1]), "230", _num(normal[2])]
             if field == "arcs":
                 out += ["100", "AcDbArc", "50", _num(angles[0]), "51", _num(angles[1])]
+        elif row[0] == "dim":
+            _, dimtype, layer, p1, p2, dimline, rotation, style, normal, measurement, _ = row
+            tilted = normal != [0.0, 0.0, 1.0]
+            # F3: groups 13/14/10 are WCS per the DXF spec (only 11/12/16 are
+            # OCS), so p1/p2/dimline are written exactly as given, with no
+            # arbitrary-axis transform.
+            flags = 33 if dimtype == "ALIGNED" else 32
+            # F4: group 11 (text middle point), OCS like 12/16; this planar
+            # contract puts the text on the dimension line, so it is always
+            # the canonical dimline point. Group 2 (block name) stays
+            # omitted by design: this contract never synthesizes the
+            # anonymous block AutoCAD normally attaches to a DIMENSION.
+            text_mid = _wcs_to_ocs(dimline, normal) if tilted else tuple(dimline)
+            out += ["0", "DIMENSION", "5", h, "100", "AcDbEntity", "8", layer,
+                    "100", "AcDbDimension", *_point_groups(dimline), *_point_groups(text_mid, 11),
+                    "70", str(flags), "3", style, "42", _num(measurement)]
+            if tilted:
+                out += ["210", _num(normal[0]), "220", _num(normal[1]), "230", _num(normal[2])]
+            out += ["100", "AcDbAlignedDimension", *_point_groups(p1, 13), *_point_groups(p2, 14)]
+            if dimtype == "LINEAR":
+                out += ["50", _num(rotation), "100", "AcDbRotatedDimension"]
         else:
             _, layer, kind, (x, y), value, _ = row
             if kind == "TEXT":
