@@ -78,6 +78,47 @@ def workflow_document() -> dict:
     return yaml.load(workflow_text(), Loader=yaml.BaseLoader)
 
 
+def _check_prewarm_read_role(document: dict) -> None:
+    job = document["jobs"]["mq-prewarm"]
+    assert "environment" not in job, "mq-prewarm must not declare an environment"
+    # Scan the whole mapping, including reusable-workflow secrets and inputs.
+    serialized = json.dumps(job)
+    assert "AWS_ECR_PUSH_ROLE" not in serialized, "mq-prewarm must not use the release role"
+    assert "secrets.AWS_MQ_PREWARM_READ_ROLE" in serialized, "mq-prewarm needs its read role"
+    credentials = [step for step in job.get("steps", [])
+                   if step.get("uses", "").startswith("aws-actions/configure-aws-credentials@")]
+    assert credentials, "mq-prewarm needs AWS credentials"
+    assert all(step.get("with", {}).get("role-to-assume") ==
+               "${{ secrets.AWS_MQ_PREWARM_READ_ROLE }}" for step in credentials), (
+        "mq-prewarm credentials must assume the read role"
+    )
+
+
+def test_prewarm_uses_its_read_role_without_an_environment():
+    _check_prewarm_read_role(workflow_document())
+
+
+@pytest.mark.parametrize("mutation", [
+    "release-role", "environment-scalar", "environment-mapping", "reusable-secret",
+])
+def test_prewarm_read_role_pin_rejects_release_authority(mutation):
+    document = workflow_document()
+    _check_prewarm_read_role(document)
+    mutated = json.loads(json.dumps(document))
+    job = mutated["jobs"]["mq-prewarm"]
+    if mutation == "release-role":
+        mutated = json.loads(json.dumps(mutated).replace(
+            "AWS_MQ_PREWARM_READ_ROLE", "AWS_ECR_PUSH_ROLE"))
+    elif mutation == "environment-scalar":
+        job["environment"] = "ecr-release"
+    elif mutation == "environment-mapping":
+        job["environment"] = {"name": "ecr-release"}
+    else:
+        job["secrets"] = {"role": "${{ secrets.AWS_ECR_PUSH_ROLE }}"}
+    with pytest.raises(AssertionError, match="mq-prewarm"):
+        _check_prewarm_read_role(mutated)
+
+
 def job_steps(job: str) -> list:
     return workflow_document()["jobs"][job]["steps"]
 
@@ -631,7 +672,7 @@ def test_permissions_are_least():
 
 def test_secrets_used_are_exactly_github_token_and_oidc_role():
     names = set(re.findall(r"secrets\.([A-Za-z_][A-Za-z0-9_]*)", workflow_text()))
-    assert names == {"AWS_ECR_PUSH_ROLE"}
+    assert names == {"AWS_MQ_PREWARM_READ_ROLE"}
     assert "github.token" in workflow_text()
 
 
@@ -641,7 +682,7 @@ def test_codebuild_credentials_are_scoped_to_prewarm():
     step = step_by_name("mq-prewarm", "Configure AWS credentials")
     assert step["uses"] == "aws-actions/configure-aws-credentials@v6.1.0"
     assert step["with"] == {
-        "role-to-assume": "${{ secrets.AWS_ECR_PUSH_ROLE }}", "aws-region": "us-east-1",
+        "role-to-assume": "${{ secrets.AWS_MQ_PREWARM_READ_ROLE }}", "aws-region": "us-east-1",
     }
     assert step["if"] == step_by_name("mq-prewarm", "Wait for every dispatched")["if"]
     assert "TERRAFORM_REPO_TOKEN" not in workflow_text()
