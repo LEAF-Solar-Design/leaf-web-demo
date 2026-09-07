@@ -26,6 +26,21 @@ describe('promptSlots', () => {
     // FILLET: radius, then the edge id and the point on it, then the point on the first line.
     expect(promptSlots(PROMPTS.fillet).map((s) => [s.kind, s.keys.join(',')])).toEqual([['number', 'r'], ['edge', 'edge'], ['point', 'ex,ey'], ['point', 'x,y']])
     expect(promptSlots(PROMPTS.arrayRect).map((s) => s.kind)).toEqual(['number', 'number', 'number', 'number'])
+    // W4g-7b-02c: INSERT's name, point, then its scale and rotation defaults.
+    expect(promptSlots(PROMPTS.createInsert).map((s) => [s.kind, s.keys.join(',')])).toEqual([
+      ['text', 'name'], ['point', 'x,y'], ['number', 'sx'], ['number', 'sy'], ['number', 'rot'], ['text', 'layer'],
+    ])
+  })
+})
+
+describe('W4g-7b-02c: a scripted INSERT', () => {
+  it('reads the name, point, scale and rotation in the prompt\'s order; an omitted operand keeps its default', () => {
+    expect(parse('insert Fixture 10,20 2 3 90').lines[0].inputs).toEqual({ name: 'Fixture', x: '10,20', y: '', sx: '2', sy: '3', rot: '90' })
+    expect(parse('insert Fixture 10,20 2 3 90').lines[0].verb).toBe('INSERT')
+    // A quoted name may carry spaces; everything after it keeps the prompt's default.
+    expect(parse('insert "My Block" 10,20').lines[0].inputs).toEqual({ name: 'My Block', x: '10,20', y: '' })
+    // The one-letter form.
+    expect(parse('i Fixture 10,20').lines[0].op).toBe('createInsert')
   })
 })
 

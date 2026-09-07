@@ -106,6 +106,14 @@ const ANNOTATION_OFF = Object.freeze([
   { id: 'annotation:dimensions', label: 'Dimensions', icon: 'dimension', size: 'large' },
   { id: 'annotation:leader', label: 'Leader', icon: 'leader', size: 'large' },
 ])
+// W4g-7b-02c: the reference's Block panel keeps CREATE BLOCK as an honest
+// placeholder beside the now-real INSERT BLOCK (ribbonClusters.js drops its
+// own placeholder for the latter so the two never both render).
+const BLOCK_OFF = Object.freeze([
+  { id: 'block:create', label: 'Create Block', icon: 'block-create', size: 'large' },
+])
+// The datalist id the INSERT name field's `list` attribute points at.
+const BLOCK_CATALOGUE_ID = 'cockpit-block-catalogue'
 
 /**
  * W4e slice H: the command line's prompt grammar, in the reference's own
@@ -162,6 +170,18 @@ export const PROMPTS = Object.freeze({
   ] },
   matchprop: { verb: 'MATCHPROP', steps: [
     { ask: 'Select destination object:', fields: [['edge', 'edge', 'edge']] },
+  ] },
+  // W4g-7b-02c: the reference's INSERT: a block name (with a datalist of the
+  // catalogue's complete definitions), the insertion point, the X and Y
+  // scale factors and the rotation (each a DEFAULT when left empty, never a
+  // waiting step: 'decimal-default'), then the layer.
+  createInsert: { verb: 'INSERT', steps: [
+    { ask: 'Enter block name:', fields: [['name', 'block name', 'text']] },
+    { ask: 'Specify insertion point:', fields: [['x', 'x'], ['y', 'y']] },
+    { ask: 'Enter X scale factor <1>:', fields: [['sx', 'x scale', 'decimal-default']] },
+    { ask: 'Enter Y scale factor <use X scale factor>:', fields: [['sy', 'y scale', 'decimal-default']] },
+    { ask: 'Specify rotation angle <0>:', fields: [['rot', 'rotation', 'decimal-default']] },
+    { ask: 'Layer:', fields: [['layer', 'layer', 'text']] },
   ] },
   createRectangle: { verb: 'RECTANG', steps: [
     { ask: 'Specify first corner point:', fields: [['x', 'x'], ['y', 'y']] },
@@ -340,7 +360,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const { effective, expressionRefusal, failedExpression, waitingStep, pointSteps } = resolvePromptInputs(prompt, inputs, armed && armed.from ? armed.from : null)
   const liveRefusal = prompt && !promptReason && !waitingStep
     ? (expressionRefusal || (armedGroup === 'draw'
-      ? buildCreatePayload(armedOp, effective)
+      ? buildCreatePayload(armedOp, effective, session.entities.blocks)
       : buildEditPayload(armedOp, session.selectedId, effective)).refusal || '')
     : ''
   const runOff = promptOff || !!liveRefusal || !!waitingStep
@@ -552,14 +572,19 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
       )
     }
     // A numeric field that does not read as a number while the command is
-    // refused is the one to fix: outlined, and named by the note.
-    const invalid = mode === 'decimal' && !!liveRefusal && (failedExpression.has(key) || !readsAsNumber(effective[key]))
+    // refused is the one to fix: outlined, and named by the note. A
+    // 'decimal-default' field (INSERT's scale and rotation) is blamed only
+    // once something was actually typed: empty is its default, not a mistake.
+    const invalid = !!liveRefusal && (mode === 'decimal'
+      ? (failedExpression.has(key) || !readsAsNumber(effective[key]))
+      : mode === 'decimal-default' && String(inputs[key] ?? '').trim() !== '' && !readsAsNumber(effective[key]))
     return (
       <input
         key={`${key}:${label}`}
         className={`cp-input${wide ? ' wide' : ''}`}
         type="text"
-        inputMode={mode === 'edge' ? 'text' : mode}
+        inputMode={mode === 'edge' || mode === 'decimal-default' ? (mode === 'decimal-default' ? 'decimal' : 'text') : mode}
+        list={key === 'name' ? BLOCK_CATALOGUE_ID : undefined}
         value={inputs[key]}
         onChange={(event) => setInput(key, event.target.value)}
         aria-label={`ribbon ${label}`}
@@ -583,6 +608,13 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
       onKeyDown={onPromptKeyDown}
     >
       <span className="cp-verb">{prompt.verb}</span>
+      {prompt.verb === 'INSERT' && (
+        <datalist id={BLOCK_CATALOGUE_ID}>
+          {(session.entities.blocks || [])
+            .filter((b) => b?.complete === true && b.baseUnknown !== true)
+            .map((b) => <option key={b.name} value={b.name} />)}
+        </datalist>
+      )}
       {prompt.steps.map((step) => (
         <span key={step.ask} className="cp-step">
           <span className="cp-ask">{step.ask}</span>
@@ -722,6 +754,32 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
             )
           })}
           {ANNOTATION_OFF.map((tool) => <RibbonTool key={tool.id} tool={offTool(tool)} />)}
+        </RibbonCluster>
+      )}
+      {show.has('block') && (
+        <RibbonCluster id="block" label="Block" note={draw || null}>
+          {forGroup('draw').filter((action) => action.panel === 'block').map((action) => {
+            const reason = action.when(engineCtx)
+            return (
+              <RibbonTool
+                key={action.op}
+                tool={{
+                  id: action.id,
+                  label: action.label,
+                  text: action.text,
+                  icon: action.icon,
+                  size: action.size,
+                  title: action.title(engineCtx),
+                  write: action.write,
+                  disabled: !!reason,
+                  reason,
+                  ...armedAttrs(action.op),
+                  onClick: () => action.run(engineCtx),
+                }}
+              />
+            )
+          })}
+          {BLOCK_OFF.map((tool) => <RibbonTool key={tool.id} tool={offTool(tool)} />)}
         </RibbonCluster>
       )}
       {show.has('clipboard') && clipboardSlot && createPortal(

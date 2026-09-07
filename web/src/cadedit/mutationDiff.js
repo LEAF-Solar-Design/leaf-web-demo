@@ -108,10 +108,40 @@ function opaqueOf(entity) {
   return { kind: 'OPAQUE', type, print }
 }
 
+// W4g-7b-02c: a created or removed INSERT is a real mutation (contract v3's
+// `added`/`removed`), never an opaque refusal; a MOVED or rescaled one stays
+// opaque (the reference's own edit verbs never touch it in this round, so a
+// change can only be a raw operation nobody should be able to hide). Returns
+// null for anything that is not a well-formed INSERT (falls through to
+// opaqueOf, which keeps today's refusal for a malformed reference).
+function insertOf(entity) {
+  if (!entity || entity.type !== 'INSERT') return null
+  const ip = entity.ip
+  if (!Array.isArray(ip) || !finite(ip[0]) || !finite(ip[1])) return null
+  const rot = entity.rotationDeg
+  if (!finite(rot)) return null
+  const scale = entity.scale
+  if (!Array.isArray(scale) || scale.length !== 3 || !scale.every(finite)) return null
+  const name = String(entity.name ?? '')
+  if (!name) return null
+  const layer = typeof entity.layer === 'string' && entity.layer ? entity.layer : '0'
+  const point = [ip[0], ip[1], 0]
+  const print = JSON.stringify([name, point, rot, scale, layer,
+    entity.columns ?? 1, entity.rows ?? 1, entity.columnSpacing ?? 0, entity.rowSpacing ?? 0])
+  return { kind: 'INSERT', name, ip: point, rot, scale: scale.slice(), layer, print }
+}
+
+// Rotation degrees the way the contract's add carries them: [0, 360), 6 dp.
+function normalizedDeg(deg) {
+  let d = deg % 360
+  if (d < 0) d += 360
+  return Math.round(d * 1e6) / 1e6
+}
+
 function indexByHandle(entities) {
   const out = new Map()
   for (const entity of Array.isArray(entities) ? entities : []) {
-    const geometry = planGeometry(entity) || opaqueOf(entity)
+    const geometry = planGeometry(entity) || insertOf(entity) || opaqueOf(entity)
     if (!geometry) continue
     const handle = hexHandle(entity.id ?? entity.handle ?? '')
     if (!handle) continue
@@ -136,6 +166,7 @@ function addedRecord(handle, g) {
   if (g.kind === 'CIRCLE') return { handle, kind: 'CIRCLE', layer: g.layer, c: g.c, r: g.r }
   if (g.kind === 'ARC') return { handle, kind: 'ARC', layer: g.layer, c: g.c, r: g.r, start_deg: g.start_deg, end_deg: g.end_deg }
   if (g.kind === 'LINE') return { handle, kind: 'LINE', layer: g.layer, pts: g.pts }
+  if (g.kind === 'INSERT') return { handle, kind: 'INSERT', name: g.name, pt: g.ip, rot: normalizedDeg(g.rot), scale: g.scale, layer: g.layer }
   return { handle, layer: g.layer, closed: g.closed, pts: g.pts }
 }
 
@@ -189,6 +220,13 @@ export function diffPlan(committed, current) {
     }
     if (was.kind !== now.kind && !(isLinear(was) && isLinear(now))) {
       return cannot(`entity ${handle} changed kind from ${was.kind} to ${now.kind}, which the plan cannot express`)
+    }
+    // W4g-7b-02c: an INSERT is a real add/remove but stays opaque for any
+    // in-place change (a move, a rescale, a re-layer): no edit verb touches
+    // one in this round, so a change is a raw operation, never a silent drop.
+    if (was.kind === 'INSERT') {
+      if (was.print === now.print) continue
+      return cannot(`entity ${handle} is a INSERT the plan cannot carry, and it changed`)
     }
     if (was.layer !== now.layer) setLayer.push({ handle, layer: now.layer })
     if (now.kind === 'CIRCLE') {

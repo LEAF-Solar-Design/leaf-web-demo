@@ -204,6 +204,35 @@ describe('W4g-7a the script runner', () => {
     expect(posts()).toHaveLength(1)
   })
 
+  // W4g-7b: a scripted INSERT validates against the session's block catalogue
+  // the same way the typed prompt does (engineSession.js buildCreatePayload),
+  // so an undefined block stops the script before any post, exactly like a
+  // refused typed command, and a defined one runs with its typed scale and
+  // rotation, defaulting layer the way every other create op's line does.
+  it('a scripted INSERT posts the typed name, point, scale and rotation, validated against the block catalogue', async () => {
+    mount()
+    await openAndLoad([H])
+    workers[0].emit({
+      type: 'documentLoaded', documentId: 'one.dxf', entities: [H], entityCount: 1, unsupported: [],
+      blocks: [{ name: 'Fixture', base: [1, 2, 0], children: [{ type: 'LINE', vertices: [[1, 2, 0], [4, 2, 0]] }], complete: true, baseUnknown: false, digest: 'd1' }],
+    })
+    setScript('insert Fixture 10,20 2 3 90')
+    fireEvent.click(runButton())
+    expect(posts()).toHaveLength(1)
+    expect(posts()[0]).toEqual({ type: 'applyEdit', op: 'createInsert', payload: { name: 'Fixture', x: 10, y: 20, rotationDeg: 90, sx: 2, sy: 3, sz: 1, layer: '' } })
+    reply('createInsert', [H], { createdId: '20' })
+    await waitFor(() => expect(status().textContent).toBe('Script ran 1 command.'), { timeout: 5000 })
+  })
+
+  it('a scripted INSERT naming a block absent from the catalogue stops before any post', async () => {
+    mount()
+    await openAndLoad([H])
+    setScript('insert Nope 10,20')
+    fireEvent.click(runButton())
+    expect(posts()).toHaveLength(0)
+    expect(status().textContent).toMatch(/^Script stopped at line 1: Insert refused: block Nope is not defined in this drawing/)
+  })
+
   it('a canvas pick\'s aperture never reaches a scripted TRIM', async () => {
     mount()
     const V9 = { ...H, id: '9', handle: '9', index: 1, vertices: [[5, -5, 0], [5, 5, 0]] }

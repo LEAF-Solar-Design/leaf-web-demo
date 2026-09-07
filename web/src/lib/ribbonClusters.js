@@ -382,6 +382,10 @@ export function referencePanels() {
       ],
     },
     {
+      // W4g-7b-02c: INSERT BLOCK is real with the engine flag on (App.jsx
+      // drops this static cluster then; EngineRibbonClusters renders the
+      // Block panel itself, the annotation seat idiom). CREATE BLOCK stays
+      // the honest placeholder either way.
       id: 'block', label: 'Block', kind: 'group', note,
       tools: [
         offTool('block:create', 'Create Block', 'block-create', 'large'),

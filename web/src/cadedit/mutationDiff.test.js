@@ -176,3 +176,36 @@ describe('W4g-7b-01c: references and definitions are opaque', () => {
     expect(diffPlan(before, after)).toEqual({ mutations: {}, count: 0, reason: null })
   })
 })
+
+describe('W4g-7b-02c: a created or removed INSERT is a real mutation; a change stays opaque', () => {
+  const ref = (id) => ({ id: String(id), handle: String(id), type: 'INSERT', name: 'Fixture', ip: [10, 20, 0], rotationDeg: 90, scale: [2, 3, 1], layer: '0', editable: false })
+
+  it('two new identical INSERTs lower to two adds with distinct handles; undo to committed is empty; a removal is a plain removal; a move stays the refusal', () => {
+    const existing = ref(1280)
+    const before = [existing]
+    const after = [existing, ref(1281), ref(1282)]
+    const { mutations, count, reason } = diffPlan(before, after)
+    expect(reason).toBeNull()
+    expect(count).toBe(2)
+    expect(mutations).toEqual({
+      added: [
+        { handle: '501', kind: 'INSERT', name: 'Fixture', pt: [10, 20, 0], rot: 90, scale: [2, 3, 1], layer: '0' },
+        { handle: '502', kind: 'INSERT', name: 'Fixture', pt: [10, 20, 0], rot: 90, scale: [2, 3, 1], layer: '0' },
+      ],
+    })
+    // Undo back to the committed bytes: an empty plan.
+    expect(diffPlan(before, before)).toEqual({ mutations: {}, count: 0, reason: null })
+    // A removed existing INSERT.
+    expect(diffPlan([existing], [])).toEqual({ mutations: { removed: ['500'] }, count: 1, reason: null })
+    // A moved existing INSERT: the opaque refusal sentence, unchanged.
+    expect(diffPlan([existing], [{ ...existing, ip: [11, 20, 0] }]).reason)
+      .toBe('entity 500 is a INSERT the plan cannot carry, and it changed')
+  })
+
+  it('normalizes rotation into [0, 360) for an added INSERT', () => {
+    const negative = { ...ref(1280), rotationDeg: -90 }
+    expect(diffPlan([], [negative]).mutations.added[0].rot).toBe(270)
+    const overTurn = { ...ref(1280), rotationDeg: 450 }
+    expect(diffPlan([], [overTurn]).mutations.added[0].rot).toBe(90)
+  })
+})

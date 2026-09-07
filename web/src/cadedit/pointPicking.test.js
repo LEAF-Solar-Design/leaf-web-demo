@@ -169,6 +169,40 @@ describe('pointPicking (W4f slice A1): clicks on the drawing answer the prompts'
   })
 })
 
+describe('W4g-7b-02c: the INSERT ghost', () => {
+  const FIXTURE = { name: 'Fixture', base: [1, 2, 0], children: [{ type: 'LINE', vertices: [[1, 2, 0], [4, 2, 0]] }], complete: true, baseUnknown: false, digest: 'd1' }
+  const TWO_CHILD = { name: 'Two', base: [1, 2, 0], children: [{ type: 'LINE', vertices: [[1, 2, 0], [4, 2, 0]] }, { type: 'CIRCLE', vertices: [[2, 2, 0]], radius: 1 }], complete: true, baseUnknown: false, digest: 'd2' }
+
+  it('PICK_SEQUENCES.createInsert picks one point', () => {
+    expect(PICK_SEQUENCES.createInsert).toEqual([{ kind: 'point', keys: ['x', 'y'] }])
+  })
+
+  it('a one-segment definition is degenerate: the box collapses to its chord', () => {
+    const s = startPicking('createInsert')
+    const inputs = { name: 'Fixture', sx: '2', sy: '3', rot: '90' }
+    expect(ghostFor(s, 10, 20, inputs, [FIXTURE])).toEqual({ pts: [[10, 20], [10, 26]], closed: false })
+  })
+
+  it('a two-child definition (a line plus a circle) draws the box of both', () => {
+    const s = startPicking('createInsert')
+    const inputs = { name: 'Two', sx: '', sy: '', rot: '' }
+    // Local bbox: the line spans x 1..4, y 2..2; the circle (centre (2,2), r 1)
+    // spans x 1..3, y 1..3. Combined: x 1..4, y 1..3. Defaults sx=sy=1, rot=0:
+    // the box translates straight to the cursor (10,20).
+    expect(ghostFor(s, 10, 20, inputs, [TWO_CHILD])).toEqual({
+      pts: [[10, 19], [13, 19], [13, 21], [10, 21]], closed: true,
+    })
+  })
+
+  it('no definition, an incomplete one, or no typed name draws no ghost', () => {
+    const s = startPicking('createInsert')
+    expect(ghostFor(s, 10, 20, { name: 'Nope' }, [FIXTURE])).toBeNull()
+    expect(ghostFor(s, 10, 20, { name: '' }, [FIXTURE])).toBeNull()
+    expect(ghostFor(s, 10, 20, { name: 'Fixture' }, [{ ...FIXTURE, complete: false }])).toBeNull()
+    expect(ghostFor(s, 10, 20, { name: 'Fixture' }, [{ ...FIXTURE, baseUnknown: true }])).toBeNull()
+  })
+})
+
 describe('OSNAP on curved polyline segments (W4g-6d follow-up)', () => {
   it('a bulged segment offers the ARC midpoint and its centre; a straight one the chord midpoint; a bad list reads as straight', () => {
     // Bulge 1 from (0,0) to (10,0) is the LOWER semicircle about (5,0) (the crate's convention): its midpoint is (5,-5).

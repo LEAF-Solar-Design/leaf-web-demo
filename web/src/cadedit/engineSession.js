@@ -175,7 +175,7 @@ export function surviveSelection(previousId, entities) {
 }
 
 /** The W4d Draw group's operations: creation needs no selection. */
-export const CREATE_OPS = Object.freeze(['createLine', 'createCircle', 'createArc', 'createPolyline', 'createRectangle', 'createText', 'createPoint', 'createEllipse'])
+export const CREATE_OPS = Object.freeze(['createLine', 'createCircle', 'createArc', 'createPolyline', 'createRectangle', 'createText', 'createPoint', 'createEllipse', 'createInsert'])
 // W4g-4: edits that MAKE an entity (a displaced copy, a mirrored copy, the
 // segments of an explode) report what they made by id like the Draw group
 // does; the selection lands on it.
@@ -232,7 +232,7 @@ export function parsePointList(raw) {
  * with a typed reason; this layer exists so a typo costs a sentence, not a
  * round trip.
  */
-export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, layer, height, rot, text, ratio, bulges } = {}) {
+export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, layer, height, rot, text, ratio, bulges, name, sx, sy } = {}, blocks = []) {
   const layerName = String(layer ?? '').trim()
   if (op === 'createLine') {
     const [x1, y1, xx2, yy2] = [x, y, x2, y2].map(fmtDelta)
@@ -294,6 +294,35 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
     if (k === null) return { refusal: 'Ellipse refused: the ratio must be a number.' }
     if (k <= 0 || k > 1) return { refusal: 'Ellipse refused: the ratio (minor to major) must be greater than 0 and at most 1.' }
     return { payload: { cx, cy, ax: ex - cx, ay: ey - cy, ratio: k, layer: layerName } }
+  }
+  if (op === 'createInsert') {
+    // W4g-7b-02c: INSERT of an existing block definition. The name, x and y
+    // are always required; sx defaults to 1, sy to sx, and rot to 0 when
+    // left empty (a DEFAULT, not a waiting step: promptInputs.js's
+    // 'decimal-default' mode keeps the prompt from holding Run on them).
+    const [px, py] = [x, y].map(fmtDelta)
+    if (px === null || py === null) return { refusal: 'Insert refused: x and y must both be numbers.' }
+    const rawName = String(name ?? '').trim()
+    if (!rawName || rawName.startsWith('*') || /[|\r\n]/.test(rawName) || [...rawName].length > 255) {
+      return { refusal: 'Insert refused: enter a block name.' }
+    }
+    const sxText = String(sx ?? '').trim()
+    const scaleX = sxText === '' ? 1 : fmtDelta(sxText)
+    if (scaleX === null) return { refusal: 'Insert refused: the x scale factor must be a number.' }
+    const syText = String(sy ?? '').trim()
+    const scaleY = syText === '' ? scaleX : fmtDelta(syText)
+    if (scaleY === null) return { refusal: 'Insert refused: the y scale factor must be a number.' }
+    if (scaleX === 0 || scaleY === 0) return { refusal: 'Insert refused: a scale factor must not be 0' }
+    const rotText = String(rot ?? '').trim()
+    const rotationDeg = rotText === '' ? 0 : fmtDelta(rotText)
+    if (rotationDeg === null) return { refusal: 'Insert refused: the rotation must be a number.' }
+    const catalogue = Array.isArray(blocks) ? blocks : []
+    const definition = catalogue.find((b) => String(b?.name ?? '').toLowerCase() === rawName.toLowerCase())
+    if (!definition) return { refusal: `Insert refused: block ${rawName} is not defined in this drawing` }
+    if (definition.complete !== true || definition.baseUnknown === true) {
+      return { refusal: `Insert refused: block ${definition.name} is incomplete in this drawing` }
+    }
+    return { payload: { name: definition.name, x: px, y: py, rotationDeg, sx: scaleX, sy: scaleY, sz: 1, layer: layerName } }
   }
   if (op === 'createPolyline') {
     const points = parsePointList(pts)
@@ -932,7 +961,7 @@ export default function useEngineSession({
       patch({ errorKind: SESSION_ERROR.REFUSED, status: `Draw refused: unknown operation ${op}.` })
       return
     }
-    const { payload, refusal } = buildCreatePayload(op, inputs)
+    const { payload, refusal } = buildCreatePayload(op, inputs, sessionRef.current.entities.blocks)
     if (refusal) {
       patch({ errorKind: SESSION_ERROR.REFUSED, status: refusal })
       return

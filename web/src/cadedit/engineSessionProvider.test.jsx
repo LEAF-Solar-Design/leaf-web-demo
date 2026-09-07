@@ -216,6 +216,19 @@ describe('provider construction: one session, one worker, every consumer', () =>
   })
 })
 
+describe('W4g-7b-02c: INSERT operands are part of the one input record', () => {
+  it('DEFAULT_EDIT_INPUTS carries name, sx and sy empty, and setInput accepts all three', () => {
+    const studio = mount()
+    expect(studio.context.inputs.name).toBe('')
+    expect(studio.context.inputs.sx).toBe('')
+    expect(studio.context.inputs.sy).toBe('')
+    act(() => { studio.context.setInput('name', 'Fixture') })
+    act(() => { studio.context.setInput('sx', '2') })
+    act(() => { studio.context.setInput('sy', '3') })
+    expect(studio.context.inputs).toMatchObject({ name: 'Fixture', sx: '2', sy: '3' })
+  })
+})
+
 describe('worker lifetime', () => {
   it('unmounting the provider terminates the worker', async () => {
     const studio = mount()

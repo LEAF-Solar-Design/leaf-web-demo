@@ -907,7 +907,46 @@ describe('draw dispatch (W4d Draw group): creation needs no selection, and the s
   it('the create op list is the closed set the worker dispatches on', () => {
     // W4g-4: RECTANG is a create the STORE lowers to createPolyline before the post.
     // W4g-5d: TEXT is a create the worker dispatches straight to createText.
-    expect([...CREATE_OPS]).toEqual(['createLine', 'createCircle', 'createArc', 'createPolyline', 'createRectangle', 'createText', 'createPoint', 'createEllipse'])
+    expect([...CREATE_OPS]).toEqual(['createLine', 'createCircle', 'createArc', 'createPolyline', 'createRectangle', 'createText', 'createPoint', 'createEllipse', 'createInsert'])
+  })
+})
+
+describe('W4g-7b-02c: INSERT of an existing block definition', () => {
+  const FIXTURE = { name: 'Fixture', base: [1, 2, 0], children: [{ type: 'LINE', vertices: [[1, 2, 0], [4, 2, 0]] }], complete: true, baseUnknown: false, digest: 'd1' }
+  const many = Array.from({ length: 61 }, () => ({ type: 'LINE', vertices: [[0, 0, 0], [1, 0, 0]] }))
+  const INCOMPLETE = { name: 'Big', base: [0, 0, 0], children: many, complete: false, baseUnknown: false, digest: 'd2' }
+  const blocks = [FIXTURE, INCOMPLETE]
+
+  it('a full operand set becomes the exact payload, the catalogue spelling winning over a typed case', () => {
+    expect(buildCreatePayload('createInsert', { name: 'fixture', x: '10', y: '20', sx: '2', sy: '3', rot: '90', layer: '0' }, blocks).payload)
+      .toEqual({ name: 'Fixture', x: 10, y: 20, rotationDeg: 90, sx: 2, sy: 3, sz: 1, layer: '0' })
+  })
+
+  it('an empty sx defaults to 1, sy defaults to sx, and rot defaults to 0', () => {
+    expect(buildCreatePayload('createInsert', { name: 'Fixture', x: '0', y: '0', sx: '2', sy: '' }, blocks).payload).toMatchObject({ sx: 2, sy: 2, rotationDeg: 0 })
+    expect(buildCreatePayload('createInsert', { name: 'Fixture', x: '0', y: '0', sx: '', sy: '', rot: '' }, blocks).payload).toMatchObject({ sx: 1, sy: 1, rotationDeg: 0 })
+  })
+
+  it('refuses a block absent from the catalogue, an incomplete one, and a zero scale factor', () => {
+    expect(buildCreatePayload('createInsert', { name: 'Nope', x: '0', y: '0' }, blocks).refusal)
+      .toBe('Insert refused: block Nope is not defined in this drawing')
+    expect(buildCreatePayload('createInsert', { name: 'Big', x: '0', y: '0' }, blocks).refusal)
+      .toBe('Insert refused: block Big is incomplete in this drawing')
+    expect(buildCreatePayload('createInsert', { name: 'Fixture', x: '0', y: '0', sx: '0' }, blocks).refusal)
+      .toBe('Insert refused: a scale factor must not be 0')
+    expect(buildCreatePayload('createInsert', { name: 'Fixture', x: '0', y: '0', sx: '2', sy: '0' }, blocks).refusal)
+      .toBe('Insert refused: a scale factor must not be 0')
+  })
+
+  it('refuses a malformed point or name before touching the catalogue', () => {
+    expect(buildCreatePayload('createInsert', { name: 'Fixture', x: 'x', y: '0' }, blocks).refusal).toMatch(/x and y must both be numbers/)
+    expect(buildCreatePayload('createInsert', { name: '', x: '0', y: '0' }, blocks).refusal).toMatch(/enter a block name/)
+    expect(buildCreatePayload('createInsert', { name: '*U1', x: '0', y: '0' }, blocks).refusal).toMatch(/enter a block name/)
+  })
+
+  it('with no catalogue at all, every name is undefined', () => {
+    expect(buildCreatePayload('createInsert', { name: 'Fixture', x: '0', y: '0' }).refusal)
+      .toBe('Insert refused: block Fixture is not defined in this drawing')
   })
 })
 

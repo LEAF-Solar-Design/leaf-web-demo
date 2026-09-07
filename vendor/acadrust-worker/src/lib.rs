@@ -73,7 +73,7 @@
 //! `cargo test` (the tests at the bottom of this file) instead of only in a
 //! browser. The exported names and semantics are unchanged.
 
-use acadrust::entities::{Arc as ArcEntity, Circle, Entity, EntityType, Line, LwPolyline, Text, Point, Ellipse};
+use acadrust::entities::{Arc as ArcEntity, Circle, Entity, EntityType, Line, LwPolyline, Text, Point, Ellipse, Insert};
 use acadrust::types::{Handle, Transform, Vector2, Vector3};
 use acadrust::{CadDocument, DxfReader, DxfWriter};
 use acadrust::io::dxf::{DxfStreamWriter, DxfTextWriter};
@@ -1365,6 +1365,64 @@ impl ParsedDxf {
         self.add_created(EntityType::Ellipse(ellipse), layer)
     }
 
+    // ----------------------------------------------------------------------
+    // W4g-7b-02c INSERT: a reference to an existing, complete block
+    // definition. The block itself is never touched here — 01c owns reading
+    // and cataloguing definitions; this is the one new way to ADD a
+    // reference to one.
+    // ----------------------------------------------------------------------
+
+    /// INSERT of the block named `name` at (x, y), scaled (sx, sy, sz) and
+    /// rotated `rotation_deg` counter-clockwise, on `layer`. Refuses BEFORE
+    /// touching the document: a non-finite operand, a zero scale component,
+    /// an empty or `*`-prefixed name (anonymous blocks are never insertable
+    /// by name), a name with no matching record (case-insensitive, the
+    /// 01c-d lookup rule), or a record that is incomplete or has an unknown
+    /// base (the square-glyph state the catalogue already reports: nothing
+    /// to insert relative to). The Insert's `block_name` takes the
+    /// CATALOGUE'S spelling, never the typed one, so a save that reads the
+    /// name back always matches the definition it names.
+    fn create_insert_core(
+        &mut self,
+        name: &str,
+        x: f64,
+        y: f64,
+        rotation_deg: f64,
+        sx: f64,
+        sy: f64,
+        sz: f64,
+        layer: &str,
+    ) -> Result<String, Refusal> {
+        if !all_finite(&[x, y, rotation_deg, sx, sy, sz]) {
+            return refuse("coordinate_not_finite");
+        }
+        if sx == 0.0 || sy == 0.0 || sz == 0.0 {
+            return refuse("insert_scale_zero");
+        }
+        let trimmed = name.trim();
+        if trimmed.is_empty() || trimmed.starts_with('*') {
+            return refuse("insert_name_invalid");
+        }
+        let upper = trimmed.to_uppercase();
+        let block = match self.inner.block_records.iter()
+            .find(|b| !b.is_model_space() && !b.is_paper_space() && b.name.to_uppercase() == upper) {
+            Some(block) => block,
+            None => return refuse(&format!("block_not_defined:{trimmed}")),
+        };
+        let base_unknown = self.block_bases_unknown || self.unknown_block_bases.contains(&block.name);
+        let incomplete = base_unknown
+            || block.entity_handles.len() > BLOCK_CHILD_CAP
+            || block.flags.has_attributes;
+        if incomplete {
+            return refuse(&format!("block_incomplete:{}", block.name));
+        }
+        let block_name = block.name.clone();
+        let insert = Insert::new(block_name, Vector3::new(x, y, 0.0))
+            .with_scale(sx, sy, sz)
+            .with_rotation(rotation_deg.to_radians());
+        self.add_created(EntityType::Insert(insert), layer)
+    }
+
     fn create_line_core(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, layer: &str) -> Result<String, Refusal> {
         if !all_finite(&[x1, y1, x2, y2]) {
             return refuse("coordinate_not_finite");
@@ -1596,6 +1654,15 @@ impl ParsedDxf {
     #[wasm_bindgen(js_name = createEllipse)]
     pub fn create_ellipse(&mut self, cx: f64, cy: f64, ax: f64, ay: f64, ratio: f64, layer: &str) -> Result<String, JsValue> {
         self.create_ellipse_core(cx, cy, ax, ay, ratio, layer).map_err(js_err)
+    }
+
+    /// W4g-7b-02c: INSERT of the block named `name` at (x, y), scaled
+    /// (sx, sy, sz) and rotated `rotation_deg`, on `layer`. Refuses a
+    /// non-finite operand, a zero scale, an invalid or undefined name, or
+    /// an incomplete definition, before it writes.
+    #[wasm_bindgen(js_name = createInsert)]
+    pub fn create_insert(&mut self, name: &str, x: f64, y: f64, rotation_deg: f64, sx: f64, sy: f64, sz: f64, layer: &str) -> Result<String, JsValue> {
+        self.create_insert_core(name, x, y, rotation_deg, sx, sy, sz, layer).map_err(js_err)
     }
 
     /// W4g-6: replaces the geometry of a LINE (two points) or a polyline
@@ -2579,6 +2646,55 @@ mod block_definition_rows {
 
     fn parsed(bytes: Vec<u8>) -> ParsedDxf {
         parse_dxf_core(&bytes).unwrap()
+    }
+
+    #[test]
+    fn w7b_02c_insert_creates_a_reference_that_reads_back_through_the_projection() {
+        let mut doc = parsed(fixture(LINE, false));
+        let h1 = doc.create_insert_core("B", 10.0, 20.0, 90.0, 2.0, 3.0, 1.0, "Refs").unwrap();
+        let (written, block_base_patched) = patch_block_bases(&doc.inner, DxfWriter::new(&doc.inner).write_to_vec().unwrap());
+        assert!(block_base_patched, "blockBasePatched");
+        let back = parsed(written);
+        let list = projected_entities(&back.inner);
+        assert_eq!(list.len(), 1);
+        let reference = &list[0];
+        assert_eq!(reference["handle"], h1);
+        assert_eq!(reference["type"], "INSERT");
+        assert_eq!(reference["kind"], "REFERENCE");
+        assert_eq!(reference["name"], "B");
+        assert_eq!(reference["ip"], serde_json::json!([10.0, 20.0, 0.0]));
+        assert_eq!(reference["rotationDeg"], 90.0);
+        assert_eq!(reference["scale"], serde_json::json!([2.0, 3.0, 1.0]));
+        assert_eq!(reference["layer"], "Refs");
+        let blocks = block_catalogue(&back.inner, back.block_bases_unknown, &back.unknown_block_bases);
+        assert_eq!(blocks[0]["base"], serde_json::json!([1.0, 2.0, 0.0]));
+
+        // A second, identical insert gets a distinct handle.
+        let h2 = doc.create_insert_core("b", 10.0, 20.0, 90.0, 2.0, 3.0, 1.0, "Refs").unwrap();
+        assert_ne!(h1, h2);
+        assert_eq!(projected_entities(&doc.inner).len(), 2);
+    }
+
+    #[test]
+    fn w7b_02c_insert_refuses_before_touching_the_document() {
+        let mut doc = parsed(fixture(LINE, false));
+        let before = DxfWriter::new(&doc.inner).write_to_vec().unwrap();
+        assert_eq!(doc.create_insert_core("B", f64::NAN, 20.0, 0.0, 1.0, 1.0, 1.0, "").unwrap_err(), "coordinate_not_finite");
+        assert_eq!(doc.create_insert_core("B", 10.0, 20.0, 0.0, 0.0, 1.0, 1.0, "").unwrap_err(), "insert_scale_zero");
+        assert_eq!(doc.create_insert_core("B", 10.0, 20.0, 0.0, 1.0, 0.0, 1.0, "").unwrap_err(), "insert_scale_zero");
+        assert_eq!(doc.create_insert_core("", 10.0, 20.0, 0.0, 1.0, 1.0, 1.0, "").unwrap_err(), "insert_name_invalid");
+        assert_eq!(doc.create_insert_core("   ", 10.0, 20.0, 0.0, 1.0, 1.0, 1.0, "").unwrap_err(), "insert_name_invalid");
+        assert_eq!(doc.create_insert_core("*U1", 10.0, 20.0, 0.0, 1.0, 1.0, 1.0, "").unwrap_err(), "insert_name_invalid");
+        assert_eq!(doc.create_insert_core("Nope", 10.0, 20.0, 0.0, 1.0, 1.0, 1.0, "").unwrap_err(), "block_not_defined:Nope");
+        assert_eq!(DxfWriter::new(&doc.inner).write_to_vec().unwrap(), before, "every refusal leaves the document untouched, and the handles too");
+        assert!(projected_entities(&doc.inner).is_empty());
+
+        // An incomplete block (more children than the cap) refuses too, and touches nothing.
+        let children: String = (0..61).map(|i| LINE.replace("100\n", &format!("{:X}\n", 0x100 + i))).collect();
+        let mut many = parsed(fixture(&children, false));
+        let many_before = DxfWriter::new(&many.inner).write_to_vec().unwrap();
+        assert_eq!(many.create_insert_core("B", 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, "").unwrap_err(), "block_incomplete:B");
+        assert_eq!(DxfWriter::new(&many.inner).write_to_vec().unwrap(), many_before);
     }
 
     #[test]

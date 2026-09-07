@@ -54,6 +54,9 @@ export const PICK_SEQUENCES = Object.freeze({
   createPoint: [{ kind: 'point', keys: ['x', 'y'] }],
   createEllipse: [{ kind: 'point', keys: ['x', 'y'] }, { kind: 'point', keys: ['x2', 'y2'] }],
   matchprop: [{ kind: 'edge', keys: ['edge', 'ex', 'ey'] }],
+  // W4g-7b-02c: INSERT picks its insertion point; the name, scale and
+  // rotation are typed, read by the ghost below off the live inputs.
+  createInsert: [{ kind: 'point', keys: ['x', 'y'] }],
 })
 
 /**
@@ -281,10 +284,66 @@ export function snapPoint(index, x, y, tol) {
 // axis, the typed ratio decides the shape.
 export const ELLIPSE_GHOST_RATIO = 0.5
 
-/** The rubber band for the cursor at world (x, y): [[x,y],...] plus closed, or null. */
-export function ghostFor(state, x, y) {
+// W4g-7b-02c: the definition's bounding box (its children's vertices and, for
+// a CIRCLE or ARC child, the extent its radius adds), scaled about the
+// base by the typed sx/sy (default 1, then sx), rotated about the base by
+// the typed rot (default 0), translated to the cursor. A definition
+// degenerate in one axis (a single straight child) draws as its chord
+// instead of a zero-width box; degenerate in both draws nothing.
+function insertGhost(inputs, blocks, cursorX, cursorY) {
+  const name = String(inputs?.name ?? '').trim()
+  if (!name) return null
+  const catalogue = Array.isArray(blocks) ? blocks : []
+  const definition = catalogue.find((b) => String(b?.name ?? '').toLowerCase() === name.toLowerCase())
+  if (!definition || definition.complete !== true || definition.baseUnknown === true) return null
+  const base = Array.isArray(definition.base) ? definition.base : [0, 0, 0]
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  for (const child of Array.isArray(definition.children) ? definition.children : []) {
+    const verts = Array.isArray(child?.vertices) ? child.vertices : []
+    const r = (child?.type === 'CIRCLE' || child?.type === 'ARC') && finite(child.radius) && child.radius > 0 ? child.radius : 0
+    for (const v of verts) {
+      if (!Array.isArray(v) || !finite(v[0]) || !finite(v[1])) continue
+      if (v[0] - r < minX) minX = v[0] - r
+      if (v[0] + r > maxX) maxX = v[0] + r
+      if (v[1] - r < minY) minY = v[1] - r
+      if (v[1] + r > maxY) maxY = v[1] + r
+    }
+  }
+  if (!(minX <= maxX) || !(minY <= maxY)) return null
+  const sxRaw = num(inputs?.sx)
+  const sx = sxRaw !== null && sxRaw !== 0 ? sxRaw : 1
+  const syRaw = num(inputs?.sy)
+  const sy = syRaw !== null && syRaw !== 0 ? syRaw : sx
+  const rotRaw = num(inputs?.rot)
+  const rad = (rotRaw !== null ? rotRaw : 0) * (Math.PI / 180)
+  const cos = Math.cos(rad)
+  const sin = Math.sin(rad)
+  const transform = (cx, cy) => {
+    const dx = (cx - base[0]) * sx
+    const dy = (cy - base[1]) * sy
+    return [cursorX + dx * cos - dy * sin, cursorY + dx * sin + dy * cos]
+  }
+  const corners = [transform(minX, minY), transform(maxX, minY), transform(maxX, maxY), transform(minX, maxY)]
+  const wDegenerate = Math.abs(maxX - minX) < 1e-9
+  const hDegenerate = Math.abs(maxY - minY) < 1e-9
+  if (wDegenerate && hDegenerate) return null
+  if (hDegenerate) return { pts: [corners[0], corners[1]], closed: false }
+  if (wDegenerate) return { pts: [corners[0], corners[3]], closed: false }
+  return { pts: corners, closed: true }
+}
+
+/**
+ * The rubber band for the cursor at world (x, y): [[x,y],...] plus closed, or
+ * null. `inputs` and `blocks` (the document's block catalogue) are read only
+ * by `createInsert`; every other op ignores them.
+ */
+export function ghostFor(state, x, y, inputs = null, blocks = null) {
   if (!state?.sequence || !finite(x) || !finite(y)) return null
   const { op, picked, base } = state
+  if (op === 'createInsert') return insertGhost(inputs, blocks, x, y)
   const last = picked[picked.length - 1]
   if (op === 'createCircle' || op === 'createArc') {
     if (!last) return null

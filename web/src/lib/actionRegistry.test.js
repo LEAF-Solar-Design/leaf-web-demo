@@ -194,6 +194,8 @@ describe('honest triggers', () => {
       'draw:createEllipse', 'draw:createPoint',
       // W4g-5d: TEXT is a draw create seated in the Annotation panel.
       'draw:createText',
+      // W4g-7b-02c: INSERT, seated in the Block panel.
+      'draw:createInsert',
     ])
     expect(forGroup('modify').map((a) => a.id)).toEqual([
       'modify:delete', 'modify:move', 'modify:moveVertex',
