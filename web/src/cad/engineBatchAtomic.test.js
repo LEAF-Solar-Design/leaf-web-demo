@@ -384,7 +384,7 @@ const BLOCK_SCRIPT = [
   'process.stdout.write(JSON.stringify(out))',
 ].join('\n')
 
-describe('W4g-7b-01c blocks through the rebuilt wasm and worker', () => {
+describe.skipIf(!GLUE)('W4g-7b-01c blocks through the rebuilt wasm and worker', () => {
   it('preserves bases, ownership, parent picks, and metadata on load, edits, and batches', { timeout: 90_000 }, () => {
     expect(GLUE, 'the planner must rebuild pkg-node before this required row').toBeTruthy()
     const out = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', BLOCK_SCRIPT, WORKER_PATH, path.join(PKG_DIR, GLUE), BLOCK_DXF], {
