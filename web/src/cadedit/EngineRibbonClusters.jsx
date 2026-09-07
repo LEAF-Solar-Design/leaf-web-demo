@@ -35,7 +35,7 @@ import { createPortal } from 'react-dom'
 import { RibbonCluster, RibbonTool, RibbonWidget } from '../site/DraftingRibbon.jsx'
 import { QuickButton, QUICK_FILE_SLOT_ID } from '../site/CockpitTopBand.jsx'
 
-import { DRAW_REASONS, MODIFY_REASONS, clipboardReason, drawReason, forGroup, modifyReason } from '../lib/actionRegistry.js'
+import { DRAW_REASONS, MODIFY_REASONS, clipboardReason, drawReason, forGroup, modifyReason, propertyReason } from '../lib/actionRegistry.js'
 
 import { ACI_NAMES, LINEWEIGHT_VALUES, admissibleBlockName, buildCreatePayload, buildEditPayload, formatAci, formatLineweight, readNumber } from './engineSession.js'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
@@ -54,6 +54,11 @@ export const PROMPT_SLOT_ID = 'cockpit-prompt-slot'
 export const PROMPT_ID = 'cockpit-prompt'
 
 const ESC_OWNER_SELECTOR = '[data-escape-owner]'
+
+// W4g-7b-03c-f: the four Modify ops seated in the Properties panel (the
+// registry's own `panel === 'properties'` records), the armed prompt's cue
+// to read the property ladder instead of the full Modify one.
+const PROPERTY_OPS = new Set(forGroup('modify').filter((a) => a.panel === 'properties').map((a) => a.op))
 
 // Some layers leave focus on the button that opened them. An explicit marker
 // lets those layers claim Esc without treating every nonmodal dialog as an
@@ -305,6 +310,10 @@ const offTool = ({ id, label, icon }, size = 'small') => ({
 export default function EngineRibbonClusters({ importOpen = false, onToggleImport, panels = ['draw', 'modify'] }) {
   const { session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap, reach } = useEngineSessionContext()
   const modify = modifyReason(session, reach)
+  // W4g-7b-03c-f: the Properties panel's own ladder, which waives the
+  // INSERT-reference rung `modify` still refuses (a property is not
+  // geometry; see actionRegistry.js's propertyReason).
+  const property = propertyReason(session, reach)
   const draw = drawReason(session, reach)
   const save = saveReason(session, canSave)
   const { applyEdit, create, copyToClipboard, pasteFromClipboard } = session.actions
@@ -338,7 +347,11 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // ladder, so the prompt says "nothing on the clipboard yet" with Run held
   // exactly as the ribbon button is held, rather than a live Run that the
   // store then refuses.
-  const promptReason = armedGroup === 'draw' ? draw : armedGroup === 'modify' ? modify : armedGroup === 'clipboard' ? clipboardReason(session, reach) : ''
+  const promptReason = armedGroup === 'draw'
+    ? draw
+    : armedGroup === 'modify'
+      ? (PROPERTY_OPS.has(armedOp) ? property : modify)
+      : armedGroup === 'clipboard' ? clipboardReason(session, reach) : ''
   const promptOff = !!promptReason
   const fieldsOff = promptOff && promptReason !== MODIFY_REASONS.noSelection
   // W4f-6: live validation. The store's own payload builders judge the
@@ -536,19 +549,22 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
       // W4g-7b-03c-c: the honesty ladder can only verify a plain string or a
       // REASONS.key reference, never a computed identifier; the selection
       // ladder's own sentence (the same one modify:matchprop uses) covers
-      // every state this select is actually disabled for.
-      disabled: !!modify, reason: MODIFY_REASONS.noSelection,
+      // every state this select is actually disabled for. W4g-7b-03c-f: the
+      // underlying gate is now the property ladder (`property`), which
+      // admits an INSERT reference; the reason literal is unchanged because
+      // MODIFY_REASONS.noSelection is a key propertyReason still names.
+      disabled: !!property, reason: MODIFY_REASONS.noSelection,
       onChange: (value) => (value === 'index...' ? toggleArmed('modify', 'setColor') : applyEdit('setColor', { aci: value })),
     },
     {
       id: 'prop-linetype', label: 'Linetype', value: linetypeValue, options: linetypeCatalogue,
-      disabled: !!modify, reason: MODIFY_REASONS.noSelection,
+      disabled: !!property, reason: MODIFY_REASONS.noSelection,
       onChange: (value) => applyEdit('setLinetype', { linetype: value }),
     },
     {
       id: 'prop-lineweight', label: 'Lineweight', value: lineweightValue,
       options: ['ByLayer', 'ByBlock', 'Default', ...LINEWEIGHT_VALUES.map(formatLineweight)],
-      disabled: !!modify, reason: MODIFY_REASONS.noSelection,
+      disabled: !!property, reason: MODIFY_REASONS.noSelection,
       onChange: (value) => applyEdit('setLineweight', { lineweight: value }),
     },
   ]

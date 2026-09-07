@@ -398,7 +398,10 @@ export function planMatchprop(session, inputs = {}) {
   if (!source) return { refusal: 'Match refused: the selected entity is no longer in the document.' }
   const target = (entities || []).find((candidate) => candidate.id === checked.payload.edge)
   if (!target) return { refusal: 'Match refused: the destination object is no longer in the document.' }
-  if (target.editable === false) return { refusal: 'Match refused: the destination object is read-only in the browser engine.' }
+  // W4g-7b-03c-f: an INSERT reference's own properties are as matchable as
+  // any other entity's (kimi, #1121 point 6); only a non-INSERT read-only
+  // kind refuses here.
+  if (target.editable === false && target.type !== 'INSERT') return { refusal: 'Match refused: the destination object is read-only in the browser engine.' }
   const layer = String(source.layer ?? '').trim()
   if (!layer) return { refusal: 'Match refused: the selection has no layer to copy.' }
   // W4g-7b-03c: MATCHPROP copies the layer AND the three properties, as ONE
@@ -1140,8 +1143,10 @@ export default function useEngineSession({
     // W4g-7b-03c: a property is not geometry. The "INSERT is not editable in
     // this round" refusal is for the geometry verbs; colour, linetype and
     // lineweight ride on an INSERT reference's own EntityCommon exactly like
-    // any other entity's.
-    const isPropertyOp = op === 'setColor' || op === 'setLinetype' || op === 'setLineweight'
+    // any other entity's. W4g-7b-03c-f: MATCHPROP is the same kind of verb
+    // (it copies properties, never geometry) so an INSERT reference as the
+    // SOURCE reaches planMatchprop's own ladder instead of this blanket one.
+    const isPropertyOp = op === 'setColor' || op === 'setLinetype' || op === 'setLineweight' || op === 'matchprop'
     if (!isPropertyOp && sessionRef.current.entities.find((entity) => entity.id === sessionRef.current.selectedId)?.type === 'INSERT') {
       patch({ errorKind: SESSION_ERROR.REFUSED, status: 'INSERT is not editable in this round' })
       return

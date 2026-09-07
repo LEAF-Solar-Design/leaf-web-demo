@@ -723,6 +723,27 @@ describe('save completion', () => {
   })
 })
 
+// W4g-7b-03c-f: MATCHPROP copies properties, never geometry, so applyEdit's
+// blanket "INSERT is not editable in this round" refusal (aimed at the
+// geometry verbs) must not fire for it — planMatchprop's own ladder judges
+// the destination instead.
+describe('MATCHPROP admits an INSERT reference as the selection (W4g-7b-03c-f)', () => {
+  it('reaches the batch post instead of the blanket INSERT refusal', async () => {
+    const session = mountSession()
+    await openDocument(session)
+    const inserted = { id: 'i1', type: 'INSERT', name: 'Fixture', layer: 'A', editable: false }
+    const other = { id: 'e1', type: 'LINE', layer: 'B', vertices: [[0, 0], [1, 1]] }
+    session.workers[0].emit(loadedMessage([inserted, other]))
+    act(() => session.current.actions.select('i1'))
+    act(() => session.current.actions.applyEdit('matchprop', { edge: 'e1' }))
+    expect(session.current.status).not.toBe('INSERT is not editable in this round')
+    expect(session.current.busy).toBe(true)
+    expect(session.workers[0].posted.at(-1)).toEqual({
+      type: 'applyEdit', op: 'batch', payload: { verb: 'matchprop', steps: [{ op: 'setLayer', payload: { entityId: 'e1', layer: 'A' } }] },
+    })
+  })
+})
+
 describe('worker crash is a RECOVERABLE state', () => {
   it('reports the crash, drops the dead worker, and respawns a fresh one on the next open', async () => {
     const session = mountSession()

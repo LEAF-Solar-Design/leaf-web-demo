@@ -3,7 +3,7 @@
 // lowering and the Properties panel's census. Pure rows, no engine.
 import { describe, expect, it } from 'vitest'
 
-import { forGroup } from '../lib/actionRegistry.js'
+import { MODIFY_REASONS, forGroup, propertyReason } from '../lib/actionRegistry.js'
 import { parseDrawingCommand } from '../lib/commandWords.js'
 import { buildEditPayload, planMatchprop } from './engineSession.js'
 import { diffPlan } from './mutationDiff.js'
@@ -64,6 +64,65 @@ describe('planMatchprop: one batch of the layer plus only the properties that di
     const session = { entities: [source], selectedId: 's1' }
     expect(planMatchprop(session, { edge: 's1' }))
       .toEqual({ refusal: 'Match refused: the destination must be a different entity from the selection.' })
+  })
+
+  // W4g-7b-03c-f (kimi, #1121 point 6): a property is not geometry, so an
+  // INSERT reference is a matchable source AND destination; a non-INSERT
+  // read-only kind still refuses by name.
+  it('accepts an INSERT reference as the source and as the destination', () => {
+    const insertSource = { id: 'ins', layer: 'A', aci: 1, linetype: 'HIDDEN', lineweight: 25, editable: false, type: 'INSERT' }
+    const dest = { id: 'd1', layer: 'B', aci: 256, linetype: 'ByLayer', lineweight: -1, editable: true }
+    expect(planMatchprop({ entities: [insertSource, dest], selectedId: 'ins' }, { edge: 'd1' })).toEqual({
+      steps: [
+        { op: 'setLayer', entityId: 'd1', layer: 'A' },
+        { op: 'setColor', entityId: 'd1', aci: 1 },
+        { op: 'setLinetype', entityId: 'd1', linetype: 'HIDDEN' },
+        { op: 'setLineweight', entityId: 'd1', lineweight: 25 },
+      ],
+    })
+    const insertDest = { id: 'insd', layer: 'B', aci: 256, linetype: 'ByLayer', lineweight: -1, editable: false, type: 'INSERT' }
+    expect(planMatchprop({ entities: [source, insertDest], selectedId: 's1' }, { edge: 'insd' })).toEqual({
+      steps: [
+        { op: 'setLayer', entityId: 'insd', layer: 'A' },
+        { op: 'setColor', entityId: 'insd', aci: 1 },
+        { op: 'setLinetype', entityId: 'insd', linetype: 'HIDDEN' },
+        { op: 'setLineweight', entityId: 'insd', lineweight: 25 },
+      ],
+    })
+  })
+
+  it('still refuses a non-INSERT read-only destination by name', () => {
+    const roDim = { id: 'dim', layer: 'B', aci: 256, linetype: 'ByLayer', lineweight: -1, editable: false, type: 'DIMENSION' }
+    expect(planMatchprop({ entities: [source, roDim], selectedId: 's1' }, { edge: 'dim' }))
+      .toEqual({ refusal: 'Match refused: the destination object is read-only in the browser engine.' })
+  })
+})
+
+describe('propertyReason: the Properties panel\'s own ladder (W4g-7b-03c-f)', () => {
+  it('agrees with modifyReason on every rung except the one an INSERT reference waives', () => {
+    expect(propertyReason(null)).toBe(MODIFY_REASONS.noDocument)
+    expect(propertyReason({ errorKind: 'crashed' })).toBe(MODIFY_REASONS.crashed)
+    expect(propertyReason({ engineParsed: true, busy: true })).toBe(MODIFY_REASONS.busy)
+    expect(propertyReason({ engineParsed: true })).toBe(MODIFY_REASONS.noSelection)
+    expect(propertyReason({ engineParsed: true, selected: { editable: true } })).toBe('')
+  })
+
+  it('is live for a selected INSERT reference, where modifyReason still refuses it', () => {
+    const session = { engineParsed: true, selected: { editable: false, type: 'INSERT' } }
+    expect(propertyReason(session)).toBe('')
+  })
+
+  it('still refuses a non-INSERT read-only kind by name', () => {
+    const session = { engineParsed: true, selected: { editable: false, type: 'DIMENSION' } }
+    expect(propertyReason(session)).toBe(MODIFY_REASONS.readOnlyKind)
+  })
+
+  it('the three property setters and MATCHPROP gate on it: live and enabled on an INSERT reference', () => {
+    const ctx = { session: { engineParsed: true, selected: { editable: false, type: 'INSERT' } }, reach: null }
+    for (const op of ['matchprop', 'setColor', 'setLinetype', 'setLineweight']) {
+      const record = forGroup('modify').find((a) => a.op === op)
+      expect(record.when(ctx)).toBe('')
+    }
   })
 })
 

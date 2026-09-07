@@ -28,7 +28,11 @@ class IdleWorker {
 
 const H = { id: '7', handle: '7', index: 0, type: 'LINE', layer: 'Source', closed: false, editable: true, vertices: [[0, 0, 0], [10, 0, 0]], radius: null, startDeg: null, endDeg: null }
 const V = { id: '9', handle: '9', index: 1, type: 'LINE', layer: 'Other', closed: false, editable: true, vertices: [[5, -5, 0], [5, 5, 0]], radius: null, startDeg: null, endDeg: null }
+// W4g-7b-03c-f: an INSERT reference projects editable: false for GEOMETRY
+// alone; MATCHPROP copies properties, so it is no longer refused as a
+// destination. RO_DIM is a non-INSERT read-only kind, which still refuses.
 const RO = { id: '11', handle: '11', index: 2, type: 'INSERT', layer: 'Other', closed: false, editable: false, vertices: [], radius: null, startDeg: null, endDeg: null }
+const RO_DIM = { id: '12', handle: '12', index: 3, type: 'DIMENSION', layer: 'Other', closed: false, editable: false, vertices: [], radius: null, startDeg: null, endDeg: null }
 const session = (entities, selectedId) => ({ entities, selectedId })
 
 afterEach(() => cleanup())
@@ -133,7 +137,11 @@ describe('W4g-4b MATCHPROP', () => {
     expect(planMatchprop(session([H, V], '7'), { edge: '9' })).toEqual({ steps: [{ op: 'setLayer', entityId: '9', layer: 'Source' }] })
     expect(planMatchprop(session([H, V], '7'), { edge: '13' }).refusal).toBe('Match refused: the destination object is no longer in the document.')
     expect(planMatchprop(session([H, V], '13'), { edge: '9' }).refusal).toBe('Match refused: the selected entity is no longer in the document.')
-    expect(planMatchprop(session([H, RO], '7'), { edge: '11' }).refusal).toBe('Match refused: the destination object is read-only in the browser engine.')
+    // W4g-7b-03c-f: an INSERT reference is a matchable destination (its own
+    // properties, never its block children); only a non-INSERT read-only
+    // kind still refuses by name.
+    expect(planMatchprop(session([H, RO], '7'), { edge: '11' })).toEqual({ steps: [{ op: 'setLayer', entityId: '11', layer: 'Source' }] })
+    expect(planMatchprop(session([H, RO_DIM], '7'), { edge: '12' }).refusal).toBe('Match refused: the destination object is read-only in the browser engine.')
     // W4g-7b-03c: MATCHPROP now checks the layer AND the three properties, so
     // "nothing would change" covers all four rather than naming the layer alone.
     expect(planMatchprop(session([H, { ...V, layer: 'Source' }], '7'), { edge: '9' }).refusal).toBe('Match refused: nothing to match.')

@@ -174,6 +174,26 @@ export function modifyReason(session, reach = null) {
 }
 
 /**
+ * Why the Properties ladder (the three colour/linetype/lineweight selects,
+ * and MATCHPROP) is unavailable right now, or '' when it is live. Identical
+ * to `modifyReason` except for the one rung a property is not geometry: a
+ * selected INSERT reference projects `editable: false` (the crate refuses a
+ * GEOMETRY edit on it), but its own EntityCommon still carries a colour, a
+ * linetype and a lineweight the crate's property setters accept exactly like
+ * any other entity's (kimi, #1121 point 6). Every other read-only kind
+ * (a DIMENSION, say) still refuses by name.
+ */
+export function propertyReason(session, reach = null) {
+  if (!session) return reachSentence(reach) || MODIFY_REASONS.noDocument
+  if (session.errorKind === SESSION_ERROR.CRASHED) return MODIFY_REASONS.crashed
+  if (!session.engineParsed) return reachSentence(reach) || MODIFY_REASONS.noDocument
+  if (session.busy) return MODIFY_REASONS.busy
+  if (!session.selected) return MODIFY_REASONS.noSelection
+  if (session.selected.editable === false && session.selected.type !== 'INSERT') return MODIFY_REASONS.readOnlyKind
+  return ''
+}
+
+/**
  * PASTE's ladder: everything the document itself must satisfy (through the
  * draw ladder, since a paste CREATES and needs no selection), then the
  * clipboard's own emptiness.
@@ -425,7 +445,13 @@ const engineOp = (group, op, label, display, icon, title, size, panel = group) =
     ? (ctx) => drawReason(ctx.session, ctx.reach)
     : op === 'pasteClip'
       ? (ctx) => clipboardReason(ctx.session, ctx.reach)
-      : (ctx) => modifyReason(ctx.session, ctx.reach),
+      // W4g-7b-03c-f: the Properties panel (matchprop and the three property
+      // setters) answers to the property ladder, which waives the one rung
+      // that refuses an INSERT reference for geometry alone; every other
+      // Modify op keeps the full ladder.
+      : panel === 'properties'
+        ? (ctx) => propertyReason(ctx.session, ctx.reach)
+        : (ctx) => modifyReason(ctx.session, ctx.reach),
   // Arming vs. running is the consumer's decision (a tool with operands opens
   // the command prompt; one without runs on click), so the record names the
   // one handler and passes the op.
