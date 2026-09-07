@@ -238,7 +238,7 @@ export default function useCampaigns(projectId, { enabled = true, authorityProvi
       if (typeof authorityProvider !== 'function') throw new Error('Continue this release from its project conversation. Authoring authority is unavailable here.')
       let authority
       try {
-        authority = await authorityProvider(`Continue this project release: ${release.scope_summary || release.contract?.release_boundary || 'the current release'}. ${next.recommended_action || next.reason || 'Continue the requested authoring step.'}`, { forceFresh: true })
+        authority = await authorityProvider(`Continue this project release: ${release.scope_summary || release.contract?.release_boundary || 'the current release'}. ${next.recommended_action || next.reason || 'Continue the requested authoring step.'}`, { projectId, forceFresh: true })
       } catch {
         throw new Error('The project conversation could not start this continuation. Try Continue authoring again when it is available.')
       }
