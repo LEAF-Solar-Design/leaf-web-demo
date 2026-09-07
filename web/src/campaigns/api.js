@@ -72,9 +72,15 @@ function finishFields(finish) {
   const profile = bounded(finish.delivery_profile, 'delivery profile', 64)
   if (!/^[a-z][a-z0-9_]*$/.test(profile)) invalid('delivery profile', 'Choose a supported delivery profile.')
   const refs = finish.artifact_refs ?? []
-  if (!Array.isArray(refs) || refs.length > 100) invalid('artifact references', 'Choose at most 100 project artifacts.')
-  return { delivery_profile: profile, intended_user: bounded(finish.intended_user, 'intended user', 4096),
-    workflow: bounded(finish.workflow, 'workflow', 32768), artifact_refs: refs.map(ref => bounded(ref, 'artifact reference', 2048)) }
+  if (!Array.isArray(refs) || refs.length > 32) invalid('artifact references', 'Choose at most 32 project artifacts.')
+  let deadline
+  if (finish.deadline_at != null && finish.deadline_at !== '') {
+    if (typeof finish.deadline_at !== 'string' || !Number.isFinite(Date.parse(finish.deadline_at))) invalid('deadline', 'Choose a valid release deadline.')
+    deadline = new Date(finish.deadline_at).toISOString()
+  }
+  return { delivery_profile: profile, intended_user: bounded(finish.intended_user, 'intended user', 2000),
+    workflow: bounded(finish.workflow, 'workflow', 2000), artifact_refs: refs.map(ref => bounded(ref, 'artifact reference', 512)),
+    ...(deadline ? { deadline_at: deadline } : {}) }
 }
 
 export async function submitCampaign({ projectId, title, prompt, idempotencyKey, mode, finish }) {
@@ -136,9 +142,17 @@ export async function listReleases(projectId, id) {
   return request(`${releasePath(id)}?project_id=${encodeURIComponent(uuid(projectId, 'project'))}`)
 }
 
-export async function transitionRelease(projectId, id, releaseId, action) {
+export async function transitionRelease(projectId, id, releaseId, action, authority) {
   if (!['pause', 'resume', 'cancel'].includes(action)) invalid('action', 'Choose pause, resume or cancel.')
-  return request(`${releasePath(id, releaseId)}/${action}`, post({ project_id: uuid(projectId, 'project') }))
+  const headers = {}
+  if (action === 'resume' && authority !== undefined) {
+    for (const [field, header] of [['sessionId', 'X-Authority-Session-Id'], ['turnId', 'X-Authority-Turn-Id']]) {
+      const value = authority?.[field]
+      if (typeof value !== 'string' || !UUID_SHAPE.test(value)) invalid('authority', 'The project conversation did not provide valid continuation authority.')
+      headers[header] = value
+    }
+  }
+  return request(`${releasePath(id, releaseId)}/${action}`, post({ project_id: uuid(projectId, 'project') }, headers))
 }
 
 export async function retryReleaseStage(projectId, id, releaseId, stage) {

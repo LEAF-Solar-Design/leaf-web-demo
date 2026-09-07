@@ -1043,13 +1043,13 @@ export default function App() {
   const agentSessionIdRef = useRef(agentSessionId)
   useEffect(() => { agentSessionIdRef.current = agentSessionId }, [agentSessionId])
   const authorAuthorityRef = useRef(null) // { sessionId, turnId, mintedAt }
-  const authorAuthorityProvider = useCallback(async (description, { allowSecretOnce = false } = {}) => {
+  const authorAuthorityProvider = useCallback(async (description, { allowSecretOnce = false, forceFresh = false } = {}) => {
     // No entitlement pre-check here: entitlements load async, and a stage
     // click can beat them (proven by the e2e). A mint against a tenant that
     // truly cannot converse just fails and falls through to null, which the
     // server answers with its own fail-closed refusal.
     const cached = authorAuthorityRef.current
-    if (cached && cached.sessionId === agentSessionIdRef.current
+    if (!forceFresh && cached && cached.sessionId === agentSessionIdRef.current
         && Date.now() - cached.mintedAt < AUTHOR_AUTHORITY_TTL_MS) {
       return { sessionId: cached.sessionId, turnId: cached.turnId }
     }
@@ -3129,7 +3129,7 @@ export default function App() {
         )}
 
         {!mock && openProjectId && (
-          <CampaignPanel projectId={openProjectId} projectName={currentProjectName} signedIn={signedIn} />
+          <CampaignPanel key={activeSurface} projectId={openProjectId} projectName={currentProjectName} signedIn={signedIn} authorityProvider={authorAuthorityProvider} />
         )}
 
         <SurfaceFrame.Tabs />
