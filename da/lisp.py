@@ -125,6 +125,19 @@ MUTATION_INSPECT_BLOCKS += (
 )
 
 
+# W4g-7b-04s: the DIMSTYLE catalogue (DS) and every model-space rotated/
+# aligned DIMENSION (DM), placed after the BK catalogue so both reuse its
+# leaf-bk-point/leaf-bk-encode helpers instead of re-deriving them. An
+# unsupported dimension subtype is counted, never refused (DMX). The
+# measurement is the DXF group 42 when present, else the same projection
+# rule server/mutation_plan.py computes (LINEAR: the projection of def2-def1
+# onto the rotation axis; ALIGNED: the plain distance).
+MUTATION_INSPECT_BLOCKS += (
+    r'''(progn (setq f (open "{OUT}" "a")) (setq ds (tblnext "DIMSTYLE" T)) (while ds (write-line (strcat "DS|" (leaf-bk-encode (cdr (assoc 2 ds)))) f) (setq ds (tblnext "DIMSTYLE"))) (princ "DS-DONE") (close f))''',
+    r'''(progn (setq f (open "{OUT}" "a")) (setq ss (ssget "_X" (list (cons 0 "DIMENSION") (cons 410 "Model")))) (if ss (progn (setq nn (sslength ss) i 0) (while (< i nn) (setq ed (entget (ssname ss i)) sub (logand (cdr (assoc 70 ed)) 15) p1 (cdr (assoc 13 ed)) p2 (cdr (assoc 14 ed)) dl (cdr (assoc 10 ed)) rot (cdr (assoc 50 ed)) style (cdr (assoc 3 ed)) nrm (cdr (assoc 210 ed)) meas (cdr (assoc 42 ed)) hnd (cdr (assoc 5 ed)) kind nil) (if (null nrm) (setq nrm (list 0.0 0.0 1.0))) (if (null style) (setq style "Standard")) (if (null rot) (setq rot 0.0)) (cond ((= sub 0) (setq kind "LINEAR")) ((= sub 1) (setq kind "ALIGNED"))) (if kind (progn (setq wp1 (trans p1 nrm 0) wp2 (trans p2 nrm 0) wdl (trans dl nrm 0)) (if (null meas) (setq meas (if (= kind "LINEAR") (abs (+ (* (- (car wp2) (car wp1)) (cos rot)) (* (- (cadr wp2) (cadr wp1)) (sin rot)))) (distance wp1 wp2)))) (write-line (strcat "DM|" kind "|" (leaf-bk-point wp1 3) "|" (leaf-bk-point wp2 3) "|" (leaf-bk-point wdl 3) "|" (rtos (* 180.0 (/ rot pi)) 2 6) "|" (leaf-bk-encode style) "|" (leaf-bk-point nrm 6) "|" (rtos meas 2 3) "|" hnd) f)) (write-line (strcat "DMX|" hnd "|" (itoa sub)) f)) (setq i (1+ i))))) (princ "DM-DONE") (close f))''',
+)
+
+
 def build_scr(out_localname: str = OUT_LOCALNAME, *, quit_form: str = QUIT_DEFAULT,
               extra_blocks: tuple = ()) -> str:
     """Return the .scr content (CRLF line endings) for the extract Activity.

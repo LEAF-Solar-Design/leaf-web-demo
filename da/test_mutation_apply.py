@@ -729,10 +729,14 @@ def test_catalogue_lisp_looks_up_the_raw_name_and_encodes_only_record_fields():
 
     # Helpers now occupy separate lines before the catalogue emission progn.
     # Index 3 is the W4g-7b-3s EP (colour/linetype/lineweight) block, ahead
-    # of the BK helper defuns tested here; skip it explicitly.
+    # of the BK helper defuns tested here; skip it explicitly. W4g-7b-04s
+    # appended the DS/DM blocks AFTER the BK catalogue (indices -2/-1), so
+    # the catalogue itself moved off the tuple's tail to a fixed index.
     assert MUTATION_INSPECT_BLOCKS[3].startswith('(progn (setq f (open "{OUT}" "a")) (setq ss (ssget "_X" (list (cons -4 "<OR")')
-    helper = "\n".join(MUTATION_INSPECT_BLOCKS[4:-1])
-    catalogue = MUTATION_INSPECT_BLOCKS[-1]
+    helper = "\n".join(MUTATION_INSPECT_BLOCKS[4:9])
+    catalogue = MUTATION_INSPECT_BLOCKS[9]
+    assert '"DS|"' in MUTATION_INSPECT_BLOCKS[-2]
+    assert '"DM|"' in MUTATION_INSPECT_BLOCKS[-1]
     assert '(setq name (cdr (assoc 2 bk)))' in catalogue
     assert '(entnext (tblobjname "BLOCK" name))' in catalogue
     assert '(leaf-bk-child name bed)' in catalogue

@@ -244,6 +244,10 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                     "rotation_deg": round(float(rotation), 6), "style": style,
                     "nrm": normal, "measurement": round(float(measurement), 3), "handle": hnd}
                 out.setdefault("dimensions", []).append(dimension)
+            elif tag == "DS":
+                out.setdefault("dimstyles", []).append(_block_name(rest))
+            elif tag == "DMX":
+                out["dimensions_unsupported"] = out.get("dimensions_unsupported", 0) + 1
             elif tag == "TX":
                 # TEXT/MTEXT label (ADDITIVE §1 field `texts`; the value had "|" replaced
                 # by a space in the LISP and is capped at 512 chars there).

@@ -45,6 +45,16 @@ _ADDED_FIELDS = frozenset({
 })
 _ADD_KINDS = ("LWPOLYLINE", "LINE", "CIRCLE", "ARC")
 _INSERT_FIELDS = frozenset({"handle", "kind", "layer", "name", "pt", "rot", "scale"})
+_DIMENSION_FIELDS = frozenset({
+    "handle", "kind", "layer", "dimtype", "def1", "def2", "dimline", "rotation", "style",
+    # `measurement` is never read as an input to the computation below (the
+    # canonical value is always recomputed from def1/def2/rotation); it is
+    # allowed here only so that re-validating an already-canonical DIMENSION
+    # (the idempotency contract every add kind holds) does not choke on the
+    # field this same function wrote into the canonical record.
+    "measurement",
+})
+_DIMTYPES = ("LINEAR", "ALIGNED")
 V3_ADD_KINDS = ("INSERT", "DIMENSION")
 V3_SET_OPS = ("set_color", "set_linetype", "set_lineweight")
 LINEWEIGHTS = frozenset({-3, -2, -1, 0, 5, 9, 13, 15, 18, 20, 25, 30, 35,
@@ -231,7 +241,8 @@ def _index_intake(intake: Dict[str, Any]) -> Dict[str, Tuple[str, Dict[str, Any]
     result: Dict[str, Tuple[str, Dict[str, Any]]] = {}
     ambiguous = set()
     total = 0
-    for field, kind in (("polylines", "LWPOLYLINE"), ("circles", "CIRCLE"), ("arcs", "ARC")):
+    for field, kind in (("polylines", "LWPOLYLINE"), ("circles", "CIRCLE"), ("arcs", "ARC"),
+                        ("dimensions", "DIMENSION")):
         entities = intake.get(field) or []
         if not isinstance(entities, list):
             raise ValueError(f"intake {field} must be a list")
@@ -451,20 +462,24 @@ def validate_mutations(
     for position, raw in enumerate(added_raw):
         if not isinstance(raw, dict):
             raise ValueError(f"added entity at index {position} must be an object")
-        if raw.get("kind") == "DIMENSION":
-            raise ValueError("contract v3 is not enabled on this deployment")
         # Keep the routing skeleton's name-only placeholder refusal. INSERT
         # execution requires the complete transform, not just a capability tag.
         if raw.get("kind") == "INSERT" and set(raw) <= {"kind", "handle", "name"}:
             raise ValueError("contract v3 is not enabled on this deployment")
-        extra = set(raw) - (_INSERT_FIELDS if raw.get("kind") == "INSERT" else _ADDED_FIELDS) - set(STYLE_FIELDS)
+        if raw.get("kind") == "INSERT":
+            allowed_fields = _INSERT_FIELDS
+        elif raw.get("kind") == "DIMENSION":
+            allowed_fields = _DIMENSION_FIELDS
+        else:
+            allowed_fields = _ADDED_FIELDS
+        extra = set(raw) - allowed_fields - set(STYLE_FIELDS)
         if extra:
             raise ValueError(f"added entity at index {position} has unknown fields")
         handle = _handle(raw.get("handle"), f"added[{position}].handle")
         if handle in index or handle in added_handles:
             raise ValueError(f"duplicate or conflicting added handle {handle!r}")
         kind = raw.get("kind", "LWPOLYLINE")
-        if kind not in _ADD_KINDS and kind != "INSERT":
+        if kind not in _ADD_KINDS and kind not in ("INSERT", "DIMENSION"):
             raise ValueError(f"added entity {handle!r} has an unsupported kind")
         layer = _layer(raw.get("layer"))
         if kind == "INSERT":
@@ -519,6 +534,72 @@ def validate_mutations(
                 "pt": [0.0 if value == 0 else value for value in point],
                 "rot": rotation, "scale": scale,
             })
+            continue
+        if kind == "DIMENSION":
+            dimtype = raw.get("dimtype")
+            if dimtype not in _DIMTYPES:
+                raise ValueError(f"added DIMENSION {handle!r} has an unsupported dimtype")
+            def1 = [0.0 if round(value, 3) == 0 else round(value, 3)
+                    for value in _point3(raw.get("def1"), f"added DIMENSION {handle!r} def1")]
+            def2 = [0.0 if round(value, 3) == 0 else round(value, 3)
+                    for value in _point3(raw.get("def2"), f"added DIMENSION {handle!r} def2")]
+            if def1 == def2:
+                raise ValueError("dimension definition points coincide")
+            dimline_given = _point3(raw.get("dimline"), f"added DIMENSION {handle!r} dimline")
+            if dimtype == "LINEAR":
+                if "rotation" not in raw:
+                    raise ValueError(f"added DIMENSION {handle!r} LINEAR requires rotation")
+                rotation = _number(raw.get("rotation"), "added DIMENSION rotation", limit=float("inf"))
+                rotation = round(rotation % 360.0, 6) % 360.0
+                axis = (math.cos(math.radians(rotation)), math.sin(math.radians(rotation)))
+            else:
+                if "rotation" in raw:
+                    raise ValueError("rotation is only valid for LINEAR")
+                rotation = 0.0
+                axis_dx, axis_dy = def2[0] - def1[0], def2[1] - def1[1]
+                axis_len = math.sqrt(axis_dx * axis_dx + axis_dy * axis_dy)
+                if axis_len <= PLANAR_TOLERANCE:
+                    raise ValueError("dimension definition points coincide")
+                axis = (axis_dx / axis_len, axis_dy / axis_len)
+            # AutoCAD stores group 10 not as the point the caller gave but as
+            # def2 projected onto the dimension line (the line through the
+            # given point, parallel to the dimension axis); canonicalizing
+            # here keeps the plan, the mock writer and the verifier's readback
+            # agreeing on the one point AutoCAD will actually persist.
+            normal = (-axis[1], axis[0])
+            offset_given = ((dimline_given[0] - def1[0]) * normal[0]
+                            + (dimline_given[1] - def1[1]) * normal[1])
+            offset_def2 = (def2[0] - def1[0]) * normal[0] + (def2[1] - def1[1]) * normal[1]
+            shift = offset_given - offset_def2
+            dimline = [0.0 if round(value, 3) == 0 else round(value, 3) for value in (
+                def2[0] + shift * normal[0], def2[1] + shift * normal[1], def2[2],
+            )]
+            style = raw.get("style")
+            if not isinstance(style, str) or not _LAYER_RE.fullmatch(style):
+                raise ValueError("added DIMENSION style is not a safe dimstyle name")
+            dimstyles = intake.get("dimstyles")
+            if isinstance(dimstyles, list):
+                if style not in dimstyles:
+                    raise ValueError(f"dimstyle {style} is not loaded in this drawing")
+            elif style != "Standard":
+                raise ValueError(f"dimstyle {style} is not loaded in this drawing")
+            dx = def2[0] - def1[0]
+            dy = def2[1] - def1[1]
+            dz = def2[2] - def1[2]
+            if dimtype == "LINEAR":
+                radians = math.radians(rotation)
+                measurement = round(abs(dx * math.cos(radians) + dy * math.sin(radians)), 3)
+            else:
+                measurement = round(math.sqrt(dx * dx + dy * dy + dz * dz), 3)
+            added_handles.add(handle)
+            entity = {
+                "handle": handle, "kind": "DIMENSION", "dimtype": dimtype, "layer": layer,
+                "def1": def1, "def2": def2, "dimline": dimline, "style": style,
+                "measurement": measurement,
+            }
+            if dimtype == "LINEAR":
+                entity["rotation"] = rotation
+            added.append(entity)
             continue
         xdata = raw.get("xdata")
         if xdata is not None and not allow_xdata:
@@ -664,6 +745,10 @@ def uses_v3(canonical: Any) -> bool:
         entries = canonical.get(field)
         if isinstance(entries, list) and any(isinstance(entry, dict) for entry in entries):
             return True
+    removed_kinds = canonical.get("removed_kinds")
+    if isinstance(removed_kinds, dict) and any(
+            kind == "DIMENSION" for kind in removed_kinds.values()):
+        return True
     added = canonical.get("added")
     return isinstance(added, list) and any(
         isinstance(entity, dict) and (entity.get("kind") in V3_ADD_KINDS
@@ -859,6 +944,16 @@ def emit_plan(
             scale = ",".join(format(value, ".4f") for value in entity["scale"])
             lines.append(
                 f"ADDINSERT|{layer}|{entity['name']}|{point}|{entity['rot']:.6f}|{scale}")
+        elif kind == "DIMENSION":
+            def1 = ",".join(format(value, ".3f") for value in entity["def1"])
+            def2 = ",".join(format(value, ".3f") for value in entity["def2"])
+            dimline = ",".join(format(value, ".3f") for value in entity["dimline"])
+            if entity["dimtype"] == "LINEAR":
+                lines.append(
+                    f"ADDDIMLINEAR|{layer}|{entity['style']}|{def1}|{def2}|{dimline}|"
+                    f"{entity['rotation']:.6f}")
+            else:
+                lines.append(f"ADDDIMALIGNED|{layer}|{entity['style']}|{def1}|{def2}|{dimline}")
         else:
             lines.append(
                 f"ADDARC|{layer}|{_fmt3(entity['c'])}|{_fmt(entity['r'])}|"
