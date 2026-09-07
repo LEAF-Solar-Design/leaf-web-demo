@@ -194,6 +194,15 @@ def test_existing_dimension_handle_takes_property_setters():
     canonical = validate_mutations(base, {"set_color": [{"handle": "2A", "aci": 1}]})
     assert canonical == {"set_color": [{"handle": "2A", "aci": 1}]}
     assert uses_v3(canonical) is True
+    # F1: a set_color target of kind DIMENSION verifies end to end through the
+    # mock writer and the live verifier, exercising the EP inspect block's
+    # DIMENSION coverage (da/lisp.py) rather than just canonical validation.
+    result = write_loop.apply_mutations(base, canonical)
+    assert result["properties"]["2A"] == {"aci": 1, "rgb": None}
+    actual = copy.deepcopy(base)
+    actual["properties"] = {
+        "2A": {"aci": 1, "rgb": None, "linetype": "ByLayer", "lineweight": -1}}
+    assert write_loop.verify_live_mutation_effects(base, actual, canonical) is None
 
 
 # --- mock writer + DXF round trip --------------------------------------------
@@ -248,6 +257,23 @@ def test_verifier_refuses_a_wrong_measurement_outside_the_tolerance():
         write_loop._verify_dimension_effects(_base(), actual, canonical, {})
 
 
+def test_verifier_refuses_a_dimlfac_scaled_measurement_never_the_geometric_one():
+    # F8: da/lisp.py's DM record is ALWAYS the geometric measurement (never
+    # DXF group 42, which a dimstyle's DIMLFAC scales for on-screen display),
+    # so a scaled display value never reaches this verifier — it refuses an
+    # actual record carrying one exactly like any other wrong measurement.
+    canonical = validate_mutations(_base(), {"added": [_linear()]})  # geometric measurement 3.0
+    actual = copy.deepcopy(_base())
+    actual["dimensions"] = [{
+        "type": "LINEAR", "p1": [0.0, 0.0, 0.0], "p2": [3.0, 4.0, 0.0],
+        "dimline": [3.0, 6.0, 0.0], "rotation_deg": 0.0, "style": "Standard",
+        "nrm": [0.0, 0.0, 1.0], "measurement": 6.0,  # DIMLFAC=2 scaled display value
+        "handle": "2A",
+    }]
+    with pytest.raises(ValueError, match="unexpected measurement"):
+        write_loop._verify_dimension_effects(_base(), actual, canonical, {})
+
+
 def test_verifier_refuses_a_missing_added_dimension():
     canonical = validate_mutations(_base(), {"added": [_linear()]})
     with pytest.raises(ValueError, match="^added DIMENSION 'new-dim' not found in output$"):
@@ -267,6 +293,41 @@ def test_full_verify_live_mutation_effects_covers_dimensions():
     canonical = validate_mutations(_base(), {"added": [_linear()]})
     expected = write_loop.apply_mutations(_base(), canonical)
     write_loop.verify_live_mutation_effects(_base(), expected, canonical)
+
+
+# --- F2: a legacy base (no `dimensions` key) never emitted DM rows ----------
+
+def test_legacy_base_with_no_dimensions_key_verifies_only_the_added_dimension():
+    # base's LeafExtract-shaped intake carries NO `dimensions` key at all (a
+    # live write's stored base, unlike the mutation-inspect `actual`), so an
+    # ALREADY-PRESENT dimension the actual reports must be ignored rather
+    # than read as an unexpected extra entity.
+    base = _base()
+    assert "dimensions" not in base
+    canonical = validate_mutations(base, {"added": [_linear()]})
+    actual = copy.deepcopy(base)
+    actual["dimensions"] = [
+        {"type": "ALIGNED", "p1": [0.0, 0.0, 0.0], "p2": [5.0, 0.0, 0.0],
+         "dimline": [2.5, 3.0, 0.0], "rotation_deg": 0.0, "style": "Standard",
+         "nrm": [0.0, 0.0, 1.0], "measurement": 5.0, "handle": "pre-existing"},
+        {"type": "LINEAR", "p1": [0.0, 0.0, 0.0], "p2": [3.0, 4.0, 0.0],
+         "dimline": [3.0, 6.0, 0.0], "rotation_deg": 0.0, "style": "Standard",
+         "nrm": [0.0, 0.0, 1.0], "measurement": 3.0, "handle": "new-handle"},
+    ]
+    matched_handles = {}
+    write_loop._verify_dimension_effects(base, actual, canonical, matched_handles)
+    assert matched_handles == {"new-dim": "new-handle"}
+
+
+def test_base_carrying_the_dimensions_key_still_refuses_a_missing_handle():
+    # The strict comparison stays once the base DOES carry the key: an
+    # unchanged dimension's handle absent from the actual is refused exactly
+    # as before, legacy tolerance never applies here.
+    base = _with_existing_dimension(handle="2A")
+    actual = copy.deepcopy(base)
+    actual["dimensions"] = []
+    with pytest.raises(ValueError, match="^unchanged handle '2A' is missing from output$"):
+        write_loop._verify_dimension_effects(base, actual, {}, {})
 
 
 # --- da/apply_lisp: the v3 interpreter text ----------------------------------
@@ -359,6 +420,18 @@ def test_intake_parse_reads_a_ds_and_dmx_fixture_line():
     assert parsed["dimstyles"] == ["Standard"]
     assert parsed["dimensions_unsupported"] == 1
     assert "dimensions" not in parsed
+
+
+def test_dm_style_decodes_percent_escapes_the_same_way_as_ds():
+    # F6: da/lisp.py's DM emitter percent-encodes the style with the same
+    # leaf-bk-encode helper DS uses; the parser must decode both identically
+    # (percent last) so a style named "A%B" round-trips to the same string.
+    parsed = intake_parse.parse_text(
+        "DS|A%25B\n"
+        "DM|linear|0,0,0|3,4,0|1.5,6,0|0|A%25B|0,0,1|3|2A",
+        "test.dwg")
+    assert parsed["dimstyles"] == ["A%B"]
+    assert parsed["dimensions"][0]["style"] == "A%B"
 
 
 # --- bounded accoreconsole canary --------------------------------------------

@@ -751,6 +751,38 @@ def test_catalogue_lisp_looks_up_the_raw_name_and_encodes_only_record_fields():
     assert '(vl-string-translate "|\\r\\n" "   " value)' in helper
 
 
+def test_ep_filter_names_dimension_alongside_the_five_geometry_kinds():
+    # F1: a styled add or a set_color/set_linetype/set_lineweight target of
+    # kind DIMENSION is admitted by the validator and applied by the
+    # interpreter, so the EP inspect block's ssget filter must cover it too
+    # or the verifier never sees the dimension's properties. Still exactly
+    # one EP progn (the OR-list grew, the tag did not duplicate).
+    from lisp import MUTATION_INSPECT_BLOCKS
+
+    ep = MUTATION_INSPECT_BLOCKS[3]
+    assert ep.count('"EP|"') == 1
+    for kind in ("LINE", "LWPOLYLINE", "CIRCLE", "ARC", "INSERT", "DIMENSION"):
+        assert f'(cons 0 "{kind}")' in ep
+    or_list = ep[ep.index('(cons -4 "<OR")'):ep.index('(cons -4 "OR>")')]
+    assert '(cons 0 "DIMENSION")' in or_list
+
+
+def test_dm_inspect_block_computes_the_geometric_measurement_never_group_42():
+    # F8: the measurement is ALWAYS derived from the definition points and
+    # rotation (LINEAR: the projection; ALIGNED: the plain distance), never
+    # DXF group 42 — a dimstyle with DIMLFAC != 1 scales that group for
+    # on-screen display and would otherwise desync from
+    # server/mutation_plan.py's unscaled computation.
+    from lisp import MUTATION_INSPECT_BLOCKS
+
+    dm = MUTATION_INSPECT_BLOCKS[-1]
+    assert "(assoc 42 ed)" not in dm
+    assert dm.count("(setq meas") == 1
+    assert '(setq meas (if (= kind "LINEAR")' in dm
+    assert "(abs (+ (* (- (car wp2) (car wp1)) (cos rot))" in dm
+    assert "(distance wp1 wp2)" in dm
+
+
 def test_leafextract_script_matches_the_pre_catalogue_pinned_text():
     from lisp import build_scr
 

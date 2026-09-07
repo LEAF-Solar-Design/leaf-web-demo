@@ -241,7 +241,7 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                     raise ValueError("dimension normal rounds to the zero vector")
                 dimension = {
                     "type": kind, "p1": points[0], "p2": points[1], "dimline": points[2],
-                    "rotation_deg": round(float(rotation), 6), "style": style,
+                    "rotation_deg": round(float(rotation), 6), "style": _block_name(style),
                     "nrm": normal, "measurement": round(float(measurement), 3), "handle": hnd}
                 out.setdefault("dimensions", []).append(dimension)
             elif tag == "DS":

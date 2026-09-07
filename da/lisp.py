@@ -102,14 +102,15 @@ MUTATION_INSPECT_BLOCKS = (
     '(progn (setq f (open "{OUT}" "a")) (setq ss (ssget "_X" (list (cons 0 "ARC") (cons 410 "Model")))) (if ss (progn (setq nn (sslength ss) i 0) (while (< i nn) (setq ed (entget (ssname ss i)) layn (cdr (assoc 8 ed)) c (cdr (assoc 10 ed)) r (cdr (assoc 40 ed)) a1 (cdr (assoc 50 ed)) a2 (cdr (assoc 51 ed)) nrm (cdr (assoc 210 ed)) hnd (cdr (assoc 5 ed))) (if (null nrm) (setq nrm (list 0.0 0.0 1.0))) (write-line (strcat "AR|" layn "|" (rtos (car c) 2 3) "," (rtos (cadr c) 2 3) "," (rtos (caddr c) 2 3) "|" (rtos r 2 3) "|" (rtos (* 180.0 (/ a1 pi)) 2 6) "|" (rtos (* 180.0 (/ a2 pi)) 2 6) "|" (rtos (car nrm) 2 6) "," (rtos (cadr nrm) 2 6) "," (rtos (caddr nrm) 2 6) "|" hnd) f) (setq i (1+ i))))) (princ "AR-DONE") (close f))',
     # W4g-7b-03s: the three common properties (colour, linetype, lineweight)
     # for every entity of a kind the contract can target (LINE, LWPOLYLINE,
-    # CIRCLE, ARC, INSERT), reported AFTER the geometry sequences above and
+    # CIRCLE, ARC, INSERT; W4g-7b-04s-c added DIMENSION so a styled DIMENSION
+    # target is verifiable too), reported AFTER the geometry sequences above and
     # BEFORE the BK catalogue block below (the legacy parser never sees an EP
     # row between a PL and its PV rows, since EP only follows a full pass).
     # ACI defaults to 256 (ByLayer), true colour to "~" (absent), linetype to
     # ByLayer, lineweight to -1 (ByLayer) — the same defaults entget reports
     # for an unset group. A 24-bit true colour (group 420) is decoded to
     # r,g,b inline (no separate helper needed before its first use).
-    '(progn (setq f (open "{OUT}" "a")) (setq ss (ssget "_X" (list (cons -4 "<OR") (cons 0 "LINE") (cons 0 "LWPOLYLINE") (cons 0 "CIRCLE") (cons 0 "ARC") (cons 0 "INSERT") (cons -4 "OR>") (cons 410 "Model")))) (if ss (progn (setq nn (sslength ss) i 0) (while (< i nn) (setq ed (entget (ssname ss i)) hnd (cdr (assoc 5 ed)) aci (cdr (assoc 62 ed)) tc (cdr (assoc 420 ed)) lt (cdr (assoc 6 ed)) lw (cdr (assoc 370 ed)) enc "") (if (null aci) (setq aci 256)) (if (null lt) (setq lt "ByLayer")) (if (null lw) (setq lw -1)) (foreach ch (vl-string->list lt) (setq enc (strcat enc (cond ((= ch 37) "%25") ((= ch 124) "%7C") ((= ch 13) "%0D") ((= ch 10) "%0A") (T (chr ch)))))) (write-line (strcat "EP|" hnd "|" (itoa aci) "|" (cond (tc (strcat (itoa (lsh (logand tc 16711680) -16)) "," (itoa (lsh (logand tc 65280) -8)) "," (itoa (logand tc 255)))) (T "~")) "|" enc "|" (itoa lw)) f) (setq i (1+ i))))) (princ "EP-DONE") (close f))',
+    '(progn (setq f (open "{OUT}" "a")) (setq ss (ssget "_X" (list (cons -4 "<OR") (cons 0 "LINE") (cons 0 "LWPOLYLINE") (cons 0 "CIRCLE") (cons 0 "ARC") (cons 0 "INSERT") (cons 0 "DIMENSION") (cons -4 "OR>") (cons 410 "Model")))) (if ss (progn (setq nn (sslength ss) i 0) (while (< i nn) (setq ed (entget (ssname ss i)) hnd (cdr (assoc 5 ed)) aci (cdr (assoc 62 ed)) tc (cdr (assoc 420 ed)) lt (cdr (assoc 6 ed)) lw (cdr (assoc 370 ed)) enc "") (if (null aci) (setq aci 256)) (if (null lt) (setq lt "ByLayer")) (if (null lw) (setq lw -1)) (foreach ch (vl-string->list lt) (setq enc (strcat enc (cond ((= ch 37) "%25") ((= ch 124) "%7C") ((= ch 13) "%0D") ((= ch 10) "%0A") (T (chr ch)))))) (write-line (strcat "EP|" hnd "|" (itoa aci) "|" (cond (tc (strcat (itoa (lsh (logand tc 16711680) -16)) "," (itoa (lsh (logand tc 65280) -8)) "," (itoa (logand tc 255)))) (T "~")) "|" enc "|" (itoa lw)) f) (setq i (1+ i))))) (princ "EP-DONE") (close f))',
 )
 
 
@@ -129,12 +130,15 @@ MUTATION_INSPECT_BLOCKS += (
 # aligned DIMENSION (DM), placed after the BK catalogue so both reuse its
 # leaf-bk-point/leaf-bk-encode helpers instead of re-deriving them. An
 # unsupported dimension subtype is counted, never refused (DMX). The
-# measurement is the DXF group 42 when present, else the same projection
-# rule server/mutation_plan.py computes (LINEAR: the projection of def2-def1
-# onto the rotation axis; ALIGNED: the plain distance).
+# measurement is ALWAYS the GEOMETRIC value computed from the definition
+# points and the rotation (LINEAR: the projection of def2-def1 onto the
+# rotation axis; ALIGNED: the plain distance) — never DXF group 42, which a
+# dimstyle with DIMLFAC != 1 scales for on-screen display and would refuse
+# every added dimension in such a drawing against server/mutation_plan.py's
+# unscaled computation.
 MUTATION_INSPECT_BLOCKS += (
     r'''(progn (setq f (open "{OUT}" "a")) (setq ds (tblnext "DIMSTYLE" T)) (while ds (write-line (strcat "DS|" (leaf-bk-encode (cdr (assoc 2 ds)))) f) (setq ds (tblnext "DIMSTYLE"))) (princ "DS-DONE") (close f))''',
-    r'''(progn (setq f (open "{OUT}" "a")) (setq ss (ssget "_X" (list (cons 0 "DIMENSION") (cons 410 "Model")))) (if ss (progn (setq nn (sslength ss) i 0) (while (< i nn) (setq ed (entget (ssname ss i)) sub (logand (cdr (assoc 70 ed)) 15) p1 (cdr (assoc 13 ed)) p2 (cdr (assoc 14 ed)) dl (cdr (assoc 10 ed)) rot (cdr (assoc 50 ed)) style (cdr (assoc 3 ed)) nrm (cdr (assoc 210 ed)) meas (cdr (assoc 42 ed)) hnd (cdr (assoc 5 ed)) kind nil) (if (null nrm) (setq nrm (list 0.0 0.0 1.0))) (if (null style) (setq style "Standard")) (if (null rot) (setq rot 0.0)) (cond ((= sub 0) (setq kind "LINEAR")) ((= sub 1) (setq kind "ALIGNED"))) (if kind (progn (setq wp1 (trans p1 nrm 0) wp2 (trans p2 nrm 0) wdl (trans dl nrm 0)) (if (null meas) (setq meas (if (= kind "LINEAR") (abs (+ (* (- (car wp2) (car wp1)) (cos rot)) (* (- (cadr wp2) (cadr wp1)) (sin rot)))) (distance wp1 wp2)))) (write-line (strcat "DM|" kind "|" (leaf-bk-point wp1 3) "|" (leaf-bk-point wp2 3) "|" (leaf-bk-point wdl 3) "|" (rtos (* 180.0 (/ rot pi)) 2 6) "|" (leaf-bk-encode style) "|" (leaf-bk-point nrm 6) "|" (rtos meas 2 3) "|" hnd) f)) (write-line (strcat "DMX|" hnd "|" (itoa sub)) f)) (setq i (1+ i))))) (princ "DM-DONE") (close f))''',
+    r'''(progn (setq f (open "{OUT}" "a")) (setq ss (ssget "_X" (list (cons 0 "DIMENSION") (cons 410 "Model")))) (if ss (progn (setq nn (sslength ss) i 0) (while (< i nn) (setq ed (entget (ssname ss i)) sub (logand (cdr (assoc 70 ed)) 15) p1 (cdr (assoc 13 ed)) p2 (cdr (assoc 14 ed)) dl (cdr (assoc 10 ed)) rot (cdr (assoc 50 ed)) style (cdr (assoc 3 ed)) nrm (cdr (assoc 210 ed)) hnd (cdr (assoc 5 ed)) kind nil) (if (null nrm) (setq nrm (list 0.0 0.0 1.0))) (if (null style) (setq style "Standard")) (if (null rot) (setq rot 0.0)) (cond ((= sub 0) (setq kind "LINEAR")) ((= sub 1) (setq kind "ALIGNED"))) (if kind (progn (setq wp1 (trans p1 nrm 0) wp2 (trans p2 nrm 0) wdl (trans dl nrm 0)) (setq meas (if (= kind "LINEAR") (abs (+ (* (- (car wp2) (car wp1)) (cos rot)) (* (- (cadr wp2) (cadr wp1)) (sin rot)))) (distance wp1 wp2))) (write-line (strcat "DM|" kind "|" (leaf-bk-point wp1 3) "|" (leaf-bk-point wp2 3) "|" (leaf-bk-point wdl 3) "|" (rtos (* 180.0 (/ rot pi)) 2 6) "|" (leaf-bk-encode style) "|" (leaf-bk-point nrm 6) "|" (rtos meas 2 3) "|" hnd) f)) (write-line (strcat "DMX|" hnd "|" (itoa sub)) f)) (setq i (1+ i))))) (princ "DM-DONE") (close f))''',
 )
 
 

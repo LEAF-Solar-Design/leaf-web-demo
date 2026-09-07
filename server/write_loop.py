@@ -1902,7 +1902,16 @@ def _verify_dimension_effects(
     dimension keeps its exact record, an added one is matched by geometry and
     style with its ACTUAL handle bound, and its measurement is checked
     against the canonical (computed) record, never the extraction's own
-    cache, within the projection rule's 1e-3 tolerance."""
+    cache, within the projection rule's 1e-3 tolerance.
+
+    A LEGACY base (no `dimensions` key at all — LeafExtract's plain
+    build_scr, which never emits DM rows, unlike the mutation-inspect
+    variant that produces `actual`) cannot tell its own pre-existing
+    dimensions apart from this plan's adds by handle, so it verifies ONLY
+    the adds against the full actual set and records nothing about anything
+    else the actual carries. A base that DOES carry the key (even an empty
+    list) keeps the strict unchanged-by-handle comparison."""
+    legacy_base = "dimensions" not in base
     removed = set(canonical.get("removed", []))
     base_rows = base.get("dimensions") or []
     actual_rows = actual.get("dimensions") or []
@@ -1914,24 +1923,27 @@ def _verify_dimension_effects(
     actual_by_handle = {str(e["handle"]): e for e in actual_rows}
     if len(actual_by_handle) != len(actual_rows):
         raise ValueError("re-extracted output contains duplicate handles")
-    base_handles = set()
-    for entity in base_rows:
-        if not isinstance(entity, dict) or entity.get("handle") is None:
-            continue
-        handle = str(entity["handle"])
-        base_handles.add(handle)
-        if handle in removed:
-            if handle in actual_by_handle:
-                raise ValueError(f"removed handle {handle!r} remains in output")
-            continue
-        if handle not in actual_by_handle:
-            raise ValueError(f"unchanged handle {handle!r} is missing from output")
-        if not _dimension_effect_matches(entity, actual_by_handle[handle]):
-            raise ValueError(f"unchanged handle {handle!r} has unexpected output geometry")
-    unmatched = [e for h, e in actual_by_handle.items() if h not in base_handles]
     adds = [e for e in canonical.get("added", []) if e.get("kind") == "DIMENSION"]
-    if len(unmatched) > len(adds):
-        raise ValueError("re-extracted output has unexpected new entities")
+    if legacy_base:
+        unmatched = list(actual_rows)
+    else:
+        base_handles = set()
+        for entity in base_rows:
+            if not isinstance(entity, dict) or entity.get("handle") is None:
+                continue
+            handle = str(entity["handle"])
+            base_handles.add(handle)
+            if handle in removed:
+                if handle in actual_by_handle:
+                    raise ValueError(f"removed handle {handle!r} remains in output")
+                continue
+            if handle not in actual_by_handle:
+                raise ValueError(f"unchanged handle {handle!r} is missing from output")
+            if not _dimension_effect_matches(entity, actual_by_handle[handle]):
+                raise ValueError(f"unchanged handle {handle!r} has unexpected output geometry")
+        unmatched = [e for h, e in actual_by_handle.items() if h not in base_handles]
+        if len(unmatched) > len(adds):
+            raise ValueError("re-extracted output has unexpected new entities")
     for entity in adds:
         reference = {
             "type": entity["dimtype"], "style": entity["style"],
@@ -1955,7 +1967,7 @@ def _verify_dimension_effects(
                 f"added DIMENSION {entity['handle']!r} has an unexpected measurement")
         matched_handles[entity["handle"]] = matched["handle"]
         unmatched.pop(match_index)
-    if unmatched:
+    if not legacy_base and unmatched:
         raise ValueError("re-extracted output has unmatched new entities")
 
 
