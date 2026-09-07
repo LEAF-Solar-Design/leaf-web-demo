@@ -166,11 +166,8 @@ function ReleaseOutputs({ campaign, completion, available, urlApi }) {
   const [error, setError] = useState(null)
   const live = useRef(false)
   const sequence = useRef(0)
-  const openedUrl = useRef(null)
   const close = () => {
     sequence.current += 1
-    if (openedUrl.current) urlApi.revokeObjectURL(openedUrl.current)
-    openedUrl.current = null
     setPreview(null)
     setBusy(false)
   }
@@ -179,8 +176,6 @@ function ReleaseOutputs({ campaign, completion, available, urlApi }) {
     return () => {
       live.current = false
       sequence.current += 1
-      if (openedUrl.current) urlApi.revokeObjectURL(openedUrl.current)
-      openedUrl.current = null
     }
   }, [urlApi])
   async function retrieve(artifact) {
@@ -191,11 +186,13 @@ function ReleaseOutputs({ campaign, completion, available, urlApi }) {
     try {
       const result = await campaign.downloadReleaseArtifact(artifact)
       if (!result || !live.current || request !== sequence.current) return
-      const url = urlApi.createObjectURL(new Blob([result.bytes], { type: result.mediaType }))
       if (/\.html$/i.test(result.name) && artifact.media_type === 'text/html' && result.mediaType === 'text/html') {
-        openedUrl.current = url
-        setPreview({ url, name: result.name })
+        let html
+        try { html = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(result.bytes) }
+        catch { throw new Error('The verified tool could not be opened because its HTML is not valid UTF-8.') }
+        setPreview({ html, name: result.name })
       } else {
+        const url = urlApi.createObjectURL(new Blob([result.bytes], { type: result.mediaType }))
         const link = document.createElement('a')
         try {
           link.href = url
@@ -239,7 +236,7 @@ function ReleaseOutputs({ campaign, completion, available, urlApi }) {
     <Alert error={error} onReload={campaign.refetch} />
     {preview && <div className="campaign-tool-preview">
       <button type="button" className="chip-act" onClick={close}>Close tool</button>
-      <iframe src={preview.url} title={`Release tool: ${preview.name}`} sandbox="allow-scripts allow-downloads" />
+      <iframe srcDoc={preview.html} title={`Release tool: ${preview.name}`} sandbox="allow-scripts allow-downloads" />
     </div>}
   </>
 }

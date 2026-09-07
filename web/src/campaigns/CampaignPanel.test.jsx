@@ -227,37 +227,63 @@ describe('release evidence panel', () => {
       }
     }
   })
+  const toolHtml = '\ufeff<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'unsafe-inline\'"></head><body><h1>Café records</h1><button>Convert</button><script>document.title = "Records converter"</script></body></html>'
+  const toolBytes = () => new TextEncoder().encode(toolHtml).buffer
   function readyOutput(name = 'records-to-csv.html', mediaType = 'text/html') {
     releaseFixture('finished')
     campaign.completion.stages = stages.map(stage => ({ stage, status: 'passed' }))
     campaign.completion.coverage = [{ check_id: 'workflow', status: 'passed' }]
-    const artifact = { name, media_type: mediaType, byte_count: 4, sha256: 'a'.repeat(64), valid: true, retrieved: true }
+    const bytes = mediaType === 'text/html' ? toolBytes() : new Uint8Array([1, 2, 3, 4]).buffer
+    const artifact = { name, media_type: mediaType, byte_count: bytes.byteLength, sha256: 'a'.repeat(64), valid: true, retrieved: true }
     campaign.completion.deliverables = [artifact]
-    campaign.downloadReleaseArtifact.mockResolvedValue({ name, mediaType, bytes: new Uint8Array([1, 2, 3, 4]).buffer })
+    campaign.downloadReleaseArtifact.mockResolvedValue({ name, mediaType, bytes })
     return artifact
   }
-  it('opens verified HTML in a sandbox and revokes it on close, replacement and unmount', async () => {
+  it('renders exact UTF-8 HTML with srcdoc and removes it on close, replacement and unmount', async () => {
     const artifact = readyOutput()
-    const urlApi = { createObjectURL: vi.fn().mockReturnValueOnce('blob:first').mockReturnValueOnce('blob:second').mockReturnValueOnce('blob:third'), revokeObjectURL: vi.fn() }
+    const urlApi = { createObjectURL: vi.fn(), revokeObjectURL: vi.fn() }
     const { unmount } = render(panel({ artifactUrlApi: urlApi }))
     fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
     const frame = await screen.findByTitle('Release tool: records-to-csv.html')
     expect(frame.getAttribute('sandbox')).toBe('allow-scripts allow-downloads')
+    expect(frame.getAttribute('srcdoc')).toBe(toolHtml)
+    expect(frame.hasAttribute('src')).toBe(false)
     expect(campaign.downloadReleaseArtifact).toHaveBeenCalledWith(artifact)
+    let resolveReplacement
+    campaign.downloadReleaseArtifact.mockReturnValueOnce(new Promise(done => { resolveReplacement = done }))
     fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
-    await waitFor(() => expect(screen.getByTitle('Release tool: records-to-csv.html').getAttribute('src')).toBe('blob:second'))
-    expect(urlApi.revokeObjectURL).toHaveBeenCalledWith('blob:first')
+    expect(screen.queryByTitle('Release tool: records-to-csv.html')).toBeNull()
+    resolveReplacement({ name: artifact.name, mediaType: 'text/html', bytes: toolBytes() })
+    const replacement = await screen.findByTitle('Release tool: records-to-csv.html')
+    expect(replacement).not.toBe(frame)
+    expect(replacement.getAttribute('srcdoc')).toBe(toolHtml)
+    expect(replacement.hasAttribute('src')).toBe(false)
     fireEvent.click(screen.getByRole('button', { name: 'Close tool' }))
     expect(screen.queryByTitle('Release tool: records-to-csv.html')).toBeNull()
-    expect(urlApi.revokeObjectURL).toHaveBeenCalledWith('blob:second')
     fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
     await screen.findByTitle('Release tool: records-to-csv.html')
     unmount()
-    expect(urlApi.revokeObjectURL).toHaveBeenCalledWith('blob:third')
+    expect(screen.queryByTitle('Release tool: records-to-csv.html')).toBeNull()
+    expect(urlApi.createObjectURL).not.toHaveBeenCalled()
+    expect(urlApi.revokeObjectURL).not.toHaveBeenCalled()
   })
-  it.each(['load', 'execution'])('revokes the open preview when current %s readback fails while retaining history', async source => {
+  it('refuses malformed UTF-8 and clears a previous preview before reporting the decode failure', async () => {
     readyOutput()
-    const urlApi = { createObjectURL: vi.fn().mockReturnValue('blob:verified'), revokeObjectURL: vi.fn() }
+    const urlApi = { createObjectURL: vi.fn(), revokeObjectURL: vi.fn() }
+    render(panel({ artifactUrlApi: urlApi }))
+    fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
+    await screen.findByTitle('Release tool: records-to-csv.html')
+    campaign.downloadReleaseArtifact.mockResolvedValueOnce({ name: 'records-to-csv.html', mediaType: 'text/html',
+      bytes: new Uint8Array([0xc3, 0x28]).buffer })
+    fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
+    await screen.findByText('The verified tool could not be opened because its HTML is not valid UTF-8.')
+    expect(screen.queryByTitle('Release tool: records-to-csv.html')).toBeNull()
+    expect(urlApi.createObjectURL).not.toHaveBeenCalled()
+    expect(urlApi.revokeObjectURL).not.toHaveBeenCalled()
+  })
+  it.each(['load', 'execution'])('removes the open preview when current %s readback fails while retaining history', async source => {
+    readyOutput()
+    const urlApi = { createObjectURL: vi.fn(), revokeObjectURL: vi.fn() }
     const { rerender } = render(panel({ artifactUrlApi: urlApi }))
     fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
     await screen.findByTitle('Release tool: records-to-csv.html')
@@ -266,7 +292,7 @@ describe('release evidence panel', () => {
     rerender(panel({ artifactUrlApi: urlApi }))
     expect(screen.queryByTitle('Release tool: records-to-csv.html')).toBeNull()
     expect(screen.queryByRole('button', { name: 'Open tool records-to-csv.html' })).toBeNull()
-    expect(urlApi.revokeObjectURL).toHaveBeenCalledWith('blob:verified')
+    expect(urlApi.createObjectURL).not.toHaveBeenCalled()
     expect(screen.getByText('Previously completed release. Current verification unavailable.')).toBeTruthy()
     expect(screen.getByText('Organize all family recipes')).toBeTruthy()
   })
@@ -301,9 +327,17 @@ describe('release evidence panel', () => {
     const { rerender } = render(panel({ artifactUrlApi: urlApi }))
     fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
     rerender(panel({ projectId: Q, artifactUrlApi: urlApi }))
-    resolve({ name: 'records-to-csv.html', mediaType: 'text/html', bytes: new ArrayBuffer(4) })
+    resolve({ name: 'records-to-csv.html', mediaType: 'text/html', bytes: toolBytes() })
     await waitFor(() => expect(screen.queryByTitle('Release tool: records-to-csv.html')).toBeNull())
     expect(urlApi.createObjectURL).not.toHaveBeenCalled()
+  })
+  it('removes an open srcdoc preview when the project changes', async () => {
+    readyOutput()
+    const { rerender } = render(panel())
+    fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
+    await screen.findByTitle('Release tool: records-to-csv.html')
+    rerender(panel({ projectId: Q }))
+    expect(screen.queryByTitle('Release tool: records-to-csv.html')).toBeNull()
   })
   it.each(['failed', 'unavailable'])('retains history but withholds outputs after current verification is %s', status => {
     readyOutput()
