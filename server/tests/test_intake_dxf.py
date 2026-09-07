@@ -62,6 +62,21 @@ def test_synthetic_handles_become_unique_hex_above_the_real_ones():
     assert [p["pts"] for p in back["polylines"]] == [p["pts"] for p in intake["polylines"]]
 
 
+def test_properties_round_trip_62_6_370_and_are_absent_for_an_untouched_entity():
+    # W4g-7b-03s: colour/linetype/lineweight travel through 62/6/370 (never
+    # 420, the write contract only ever sets an ACI) and only for a handle
+    # `properties` actually names; an untouched entity carries none of the
+    # three groups, so it round-trips with no `properties` entry at all.
+    intake = {"layers": ["A"], "polylines": [
+        {"layer": "A", "closed": False, "pts": [[0, 0, 0], [1, 0, 0]], "xdata": None, "handle": "10"},
+        {"layer": "A", "closed": False, "pts": [[0, 0, 0], [2, 0, 0]], "xdata": None, "handle": "11"},
+    ], "properties": {"10": {"aci": 1, "rgb": None, "linetype": "Continuous", "lineweight": 25}}}
+    back, data = _roundtrip(intake)
+    assert b"\n62\n1\n" in data and b"\n6\nContinuous\n" in data and b"\n370\n25\n" in data
+    assert back["properties"] == {"10": {"aci": 1, "rgb": None, "linetype": "Continuous", "lineweight": 25}}
+    assert "11" not in back["properties"]
+
+
 def test_mixed_z_polyline_takes_the_3d_polyline_path_and_keeps_every_z():
     intake = {"layers": ["Z"], "polylines": [
         {"layer": "Z", "closed": False, "pts": [[0, 0, 1.5], [1, 0, 2.5], [1, 1, -3.25]], "xdata": None, "handle": "2A"},

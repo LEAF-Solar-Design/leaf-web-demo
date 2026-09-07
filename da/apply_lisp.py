@@ -93,23 +93,46 @@ _INSERT_LISP_LINES = (
 )
 
 
+_PROPERTY_LISP_LINES = (
+    '(setq leaf-created nil)',
+    '(defun leaf-target-p (s / tail) (setq tail (substr s 3)) (cond ((= (substr s 1 2) "H:") (leaf-handle-p tail)) ((= (substr s 1 2) "A:") (and (<= (strlen tail) 6) (leaf-chars-ok tail "0123456789")))))',
+    '(defun leaf-target (s / n e) (if (leaf-target-p s) (progn (if (= (substr s 1 2) "H:") (setq e (handent (substr s 3))) (progn (setq n (atoi (substr s 3))) (if (< n (length leaf-created)) (setq e (nth n leaf-created))))) (if (and e (member (cdr (assoc 0 (entget e))) (list "LINE" "LWPOLYLINE" "CIRCLE" "ARC" "INSERT"))) e))))',
+    '(defun leaf-weight-p (n) (and n (member n (list -3 -2 -1 0 5 9 13 15 18 20 25 30 35 40 50 53 60 70 80 90 100 106 120 140 158 200 211))))',
+    '(defun leaf-color-value (s / n) (setq n (leaf-number s)) (if (and n (= n (fix n)) (>= n 0) (<= n 256)) (fix n)))',
+    '(defun leaf-weight-value (s / n) (setq n (leaf-number s)) (if (and n (= n (fix n)) (leaf-weight-p (fix n))) (fix n)))',
+    '(defun leaf-linetype-value (s) (if (and (> (strlen s) 0) (<= (strlen s) 255) (leaf-chars-ok s "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-$ ") (tblsearch "LTYPE" s)) s))',
+    '(defun leaf-property-op (v / tag value) (setq tag (car v)) (if (and (= (length v) 3) (leaf-target-p (nth 1 v))) (progn (setq value (nth 2 v)) (cond ((= tag "SETLINETYPE") (setq value (leaf-linetype-value value))) ((= tag "SETCOLOR") (setq value (leaf-color-value value))) ((= tag "SETLINEWEIGHT") (setq value (leaf-weight-value value)))) (if value (list tag (nth 1 v) value)))))',
+    '(defun leaf-apply-setcolor (op / e data out item) (if (setq e (leaf-target (nth 1 op))) (progn (setq data (entget e)) (foreach item data (if (not (member (car item) (list 420 430))) (setq out (cons item out)))) (setq out (reverse out)) (if (assoc 62 out) (setq out (subst (cons 62 (nth 2 op)) (assoc 62 out) out)) (setq out (append out (list (cons 62 (nth 2 op)))))) (if (entmod out) (progn (entupd e) T)))))',
+    '(defun leaf-apply-setlinetype (op / e out) (if (and (tblsearch "LTYPE" (nth 2 op)) (setq e (leaf-target (nth 1 op)))) (progn (setq out (entget e)) (if (assoc 6 out) (setq out (subst (cons 6 (nth 2 op)) (assoc 6 out) out)) (setq out (append out (list (cons 6 (nth 2 op)))))) (if (entmod out) (progn (entupd e) T)))))',
+    '(defun leaf-apply-setlineweight (op / e out) (if (and (leaf-weight-p (nth 2 op)) (setq e (leaf-target (nth 1 op)))) (progn (setq out (entget e)) (if (assoc 370 out) (setq out (subst (cons 370 (nth 2 op)) (assoc 370 out) out)) (setq out (append out (list (cons 370 (nth 2 op)))))) (if (entmod out) (progn (entupd e) T)))))',
+)
+
+
 def build_apply_scr_v3() -> str:
     """Extend the frozen interpreter only for the separate v3 Activity."""
     lines = []
     for line in _LISP_LINES:
         if line.startswith("(defun leaf-parse-line "):
             lines.extend(_INSERT_LISP_LINES)
+            lines.extend(_PROPERTY_LISP_LINES)
+            line = line.replace('(cond ', '(cond ((member (car v) (list "SETCOLOR" "SETLINETYPE" "SETLINEWEIGHT")) (leaf-property-op v)) ', 1)
             line = line.replace(
                 '((= (car v) "ADDARC")',
                 '((= (car v) "ADDINSERT") (leaf-addinsert-op v)) ((= (car v) "ADDARC")',
                 1,
             )
         elif line.startswith("(defun leaf-apply "):
+            # Capture entmakex results only while applying adds, never while
+            # parsing the plan (A: targets do not exist during that pass).
+            line = line.replace('(defun leaf-apply (op)', '(defun leaf-apply-one (op)', 1)
+            line = line.replace('(cond ', '(cond ((= (car op) "SETCOLOR") (leaf-apply-setcolor op)) ((= (car op) "SETLINETYPE") (leaf-apply-setlinetype op)) ((= (car op) "SETLINEWEIGHT") (leaf-apply-setlineweight op)) ', 1)
             line = line.replace(
                 '((= (car op) "ADDARC")',
                 '((= (car op) "ADDINSERT") (leaf-apply-addinsert op)) ((= (car op) "ADDARC")',
                 1,
             )
+            lines.append(line)
+            line = '(defun leaf-apply (op / result) (setq result (leaf-apply-one op)) (if (and result (member (car op) (list "ADD" "ADDOPEN" "ADDLINE" "ADDCIRCLE" "ADDARC" "ADDINSERT"))) (setq leaf-created (append leaf-created (list result)))) result)'
         elif line.startswith("(defun leaf-read-plan "):
             line = line.replace(
                 '(list "LEAF_MUTATION_PLAN|1" "LEAF_MUTATION_PLAN|2")',

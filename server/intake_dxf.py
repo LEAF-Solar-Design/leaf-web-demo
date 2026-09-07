@@ -47,6 +47,9 @@ TEXT_HEIGHT = "2.5"
 
 _HANDLE_RE = re.compile(r"^[0-9A-Fa-f]{1,32}$")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+# Mirrors server/mutation_plan.py's LINEWEIGHTS (the DXF group-370 enumeration).
+_LINEWEIGHTS = frozenset({-3, -2, -1, 0, 5, 9, 13, 15, 18, 20, 25, 30, 35,
+                          40, 50, 53, 60, 70, 80, 90, 100, 106, 120, 140, 158, 200, 211})
 
 
 class IntakeDxfError(ValueError):
@@ -82,6 +85,35 @@ def _num(f: float) -> str:
     return repr(f)
 
 
+def _entity_property_groups(properties: Dict[str, Any], handle: Any, where: str) -> List[str]:
+    """62 / 6 / 370 DXF group pairs for one entity, from `intake["properties"]
+    [handle]` (the EP shape); only fields the record actually carries are
+    emitted, so an entity without one is left ByLayer/absent, same as before
+    this record existed. 420 (true colour) is not written back: the write
+    contract only ever sets an ACI (server/mutation_plan.py `set_color`)."""
+    record = properties.get(handle)
+    if not isinstance(record, dict):
+        return []
+    out: List[str] = []
+    if "aci" in record:
+        aci = record["aci"]
+        if isinstance(aci, bool) or not isinstance(aci, int) or not 0 <= aci <= 256:
+            _fail(f"{where}: properties.aci must be an integer in 0..256")
+        out += ["62", str(aci)]
+    if "linetype" in record:
+        name = record["linetype"]
+        if (not isinstance(name, str) or not name or len(name) > 255
+                or _CONTROL_RE.search(name)):
+            _fail(f"{where}: properties.linetype is not a safe linetype name")
+        out += ["6", name]
+    if "lineweight" in record:
+        weight = record["lineweight"]
+        if isinstance(weight, bool) or not isinstance(weight, int) or weight not in _LINEWEIGHTS:
+            _fail(f"{where}: properties.lineweight is not a valid enumeration value")
+        out += ["370", str(weight)]
+    return out
+
+
 def _text_value(value: Any, where: str) -> str:
     if not isinstance(value, str):
         _fail(f"{where}: text is not a string")
@@ -112,6 +144,9 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         _fail("inserts must be a list")
     if len(polylines) + len(texts) + len(circles) + len(arcs) + len(inserts) > MAX_ENTITIES:
         _fail(f"more than {MAX_ENTITIES} entities")
+    properties = intake.get("properties", {})
+    if not isinstance(properties, dict):
+        _fail("properties must be an object")
 
     # Layer order is part of the intake shape (first seen). The table lists
     # the intake's layers in order, then any entity layer it forgot, so the
@@ -136,6 +171,12 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
     real: set = set()
     highest = 0xFF
     kinds: List[tuple] = []
+    # Parallel to `kinds` (one entry per append, "text" rows included as an
+    # empty list): the 62/6/370 group pairs for that entity, looked up here
+    # by the intake's OWN declared handle (before synthesis), never the
+    # settled/uppercased one, matching how `properties` is keyed everywhere
+    # else in this codebase.
+    kind_properties: List[List[str]] = []
     total_points = 0
     for k, poly in enumerate(polylines):
         where = f"polylines[{k}]"
@@ -167,6 +208,7 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
             highest = max(highest, int(h, 16))
         note_layer(layer)
         kinds.append(("poly", layer, closed, coords, h))
+        kind_properties.append(_entity_property_groups(properties, handle, where))
     for k, tx in enumerate(texts):
         where = f"texts[{k}]"
         if not isinstance(tx, dict):
@@ -190,6 +232,7 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
             highest = max(highest, int(h, 16))
         note_layer(layer)
         kinds.append(("text", layer, kind, (x, y), value, h))
+        kind_properties.append([])  # TEXT carries no colour/linetype/lineweight round trip
     # W4g-3: circles and arcs (ADDITIVE fields, the browser engine's kinds).
     # The centre is WCS in the intake; a tilted normal (dxf_intake keeps it)
     # puts the centre back into that OCS for the file.
@@ -224,6 +267,7 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
                 highest = max(highest, int(h, 16))
             note_layer(layer)
             kinds.append(("round", layer, field, (cx, cy, cz), radius, normal, angles, h))
+            kind_properties.append(_entity_property_groups(properties, ent.get("handle"), where))
 
     for k, ent in enumerate(inserts):
         where = f"inserts[{k}]"
@@ -254,6 +298,7 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
             h = ent["handle"]
         note_layer(layer)
         kinds.append(("insert", layer, name, point, normal, scale, rotation, h))
+        kind_properties.append(_entity_property_groups(properties, ent.get("handle"), where))
     blocks = _validated_blocks(intake["blocks"], note_layer) if "blocks" in intake else None
     if blocks is not None:
         total_points += sum(len(child.get("pts", [])) for block in blocks.values()
@@ -307,11 +352,18 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
                     "100", "AcDbEntity", "8", "0", "100", "AcDbBlockEnd"]
         out += ["0", "ENDSEC"]
     out += ["0", "SECTION", "2", "ENTITIES"]
-    for row in kinds:
+    for idx, row in enumerate(kinds):
         h = row[-1]
         if h is None:
             h = format(next_handle, "X")
             next_handle += 1
+        # 62 / 6 / 370 (colour / linetype / lineweight) are emitted at the end
+        # of each entity's own group list — group-code ORDER within an entity
+        # is not significant to a real DXF reader or to dxf_intake.parse_dxf_
+        # bytes, which scans every code up to the next 0-group regardless of
+        # position, so appending here avoids threading the insert point
+        # through every entity kind's group-list construction below.
+        props = kind_properties[idx]
         if row[0] == "poly":
             _, layer, closed, coords, _ = row
             z0 = coords[0][2]
@@ -363,6 +415,7 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
                 out += ["0", "MTEXT", "5", h, "100", "AcDbEntity", "8", layer,
                         "100", "AcDbMText", "10", _num(x), "20", _num(y), "30", "0.0",
                         "40", TEXT_HEIGHT, "1", value]
+        out += props
     out += ["0", "ENDSEC", "0", "EOF"]
     return ("\n".join(out) + "\n").encode("utf-8")
 

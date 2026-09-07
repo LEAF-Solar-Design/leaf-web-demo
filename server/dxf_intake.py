@@ -71,6 +71,13 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
     block_count = 0
     has_blocks = False
     handle_seq = 0
+    # W4g-7b-3s: colour/linetype/lineweight for every LINE / LWPOLYLINE /
+    # CIRCLE / ARC / INSERT, the same EP shape da/intake_parse.py builds from
+    # accoreconsole's entget so the plan route's DXF preflight
+    # (server/routers/drawings.py) can compare a set_color/set_linetype/
+    # set_lineweight target's actual DXF groups the same way either source.
+    properties: Dict[str, Any] = {}
+    insert_properties: Dict[str, Any] = {}
 
     i = 0
     n = len(pairs)
@@ -106,27 +113,30 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             continue
         if section == "ENTITIES" and code == 0 and value == "INSERT":
             entity, i = _parse_insert(pairs, i + 1)
+            props = entity.pop("_properties", None)
             if entity["layer"] not in seen_layers:
                 seen_layers.add(entity["layer"])
                 layers.append(entity["layer"])
             inserts.append(entity)
+            if props is not None and entity.get("handle"):
+                insert_properties[entity["handle"]] = props
             continue
         if section == "ENTITIES" and code == 0 and value == "LWPOLYLINE":
             entity, i = _parse_lwpolyline(pairs, i + 1)
             handle_seq += 1
-            _finish_entity(entity, handle_seq, layers, seen_layers, polylines)
+            _finish_entity(entity, handle_seq, layers, seen_layers, polylines, properties)
             continue
         if section == "ENTITIES" and code == 0 and value == "POLYLINE":
             entity, i = _parse_polyline(pairs, i + 1)
             handle_seq += 1
-            _finish_entity(entity, handle_seq, layers, seen_layers, polylines)
+            _finish_entity(entity, handle_seq, layers, seen_layers, polylines, properties)
             continue
         if section == "ENTITIES" and code == 0 and value == "LINE":
             # A LINE is a 2-point open polyline to the viewer and to every tool: no new
             # intake field, the frozen §1 shape renders it as-is.
             entity, i = _parse_line(pairs, i + 1)
             handle_seq += 1
-            _finish_entity(entity, handle_seq, layers, seen_layers, polylines)
+            _finish_entity(entity, handle_seq, layers, seen_layers, polylines, properties)
             continue
         if section == "ENTITIES" and code == 0 and value in ("CIRCLE", "ARC"):
             # W4g-3: the kinds the browser engine draws besides lines and
@@ -136,12 +146,15 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             entity, i = _parse_circle_or_arc(pairs, i + 1, value)
             handle_seq += 1
             if entity is not None:
+                props = entity.pop("_properties", None)
                 if not entity["handle"]:
                     entity["handle"] = f"L{handle_seq:X}"
                 if entity["layer"] not in seen_layers:
                     seen_layers.add(entity["layer"])
                     layers.append(entity["layer"])
                 (circles if value == "CIRCLE" else arcs).append(entity)
+                if props is not None:
+                    properties[entity["handle"]] = props
             continue
         if section == "ENTITIES" and code == 0 and value in ("TEXT", "MTEXT"):
             entity, i = _parse_text(pairs, i + 1, value)
@@ -163,7 +176,11 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
                 f"INSERT {entity['handle']}: unresolved block reference {entity['name']}")
         else:
             resolved_inserts.append(entity)
+            if entity.get("handle") in insert_properties:
+                properties[entity["handle"]] = insert_properties[entity["handle"]]
     out: Dict[str, Any] = {"dwg": source_name, "layers": layers, "polylines": polylines}
+    if properties:
+        out["properties"] = properties
     if texts:
         # ADDITIVE §1 field (frontend ignores unknown keys): drawing labels for tools
         # that classify views by the text inside a frame.
@@ -181,6 +198,30 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
     if parse_errors:
         out["parseErrors"] = parse_errors
     return out
+
+
+def _entity_properties(aci, linetype, lineweight, truecolor) -> Optional[Dict[str, Any]]:
+    """The EP shape (da/intake_parse.py's `properties[handle]`) built from raw
+    DXF group values 62/6/370/420: absent means ByLayer/BYLAYER, exactly as
+    entget reports it and exactly what the mutation plan's setters compare
+    against (server/routers/drawings.py's uploaded-DXF preflight). None (not
+    a defaulted dict) when the entity carries none of the four groups, so an
+    untouched entity round-trips with no `properties` entry at all: a dense
+    default here would make every entity, not just a styled one, appear in
+    `properties`, and break the byte-for-byte intake round trip that already
+    pins an entity with no style groups to carry no `properties` key."""
+    if aci is None and linetype is None and lineweight is None and truecolor is None:
+        return None
+    rgb = None
+    if truecolor is not None:
+        packed = _int(truecolor) & 0xFFFFFF
+        rgb = [(packed >> 16) & 0xFF, (packed >> 8) & 0xFF, packed & 0xFF]
+    return {
+        "aci": _int(aci) if aci is not None else 256,
+        "rgb": rgb,
+        "linetype": linetype if linetype is not None else "ByLayer",
+        "lineweight": _int(lineweight) if lineweight is not None else -1,
+    }
 
 
 def _entity_groups(pairs, i):
@@ -204,7 +245,9 @@ def _parse_insert(pairs, i):
             "rot": round(math.radians(_float(groups.get(50, "0"))), 6),
             "nrm": [round(v, 6) for v in normal],
             "scale": [_float(groups.get(code, "1")) for code in (41, 42, 43)],
-            "handle": groups.get(5, "")}, i
+            "handle": groups.get(5, ""),
+            "_properties": _entity_properties(
+                groups.get(62), groups.get(6), groups.get(370), groups.get(420))}, i
 
 
 def _parse_block_child(pairs, i, kind):
@@ -325,6 +368,7 @@ def _parse_circle_or_arc(pairs: List[Tuple[int, str]], i: int, kind: str):
     radius = 0.0
     start = 0.0
     end = 360.0 if kind == "ARC" else 0.0
+    aci = linetype = lineweight = truecolor = None
     n = len(pairs)
     while i < n and pairs[i][0] != 0:
         code, value = pairs[i]
@@ -350,12 +394,21 @@ def _parse_circle_or_arc(pairs: List[Tuple[int, str]], i: int, kind: str):
             normal[1] = _float(value)
         elif code == 230:
             normal[2] = _float(value)
+        elif code == 62:
+            aci = value
+        elif code == 6:
+            linetype = value
+        elif code == 370:
+            lineweight = value
+        elif code == 420:
+            truecolor = value
         i += 1
     if not radius > 0.0:
         return None, i
     centre = _ocs_to_wcs(c, normal) if normal != [0.0, 0.0, 1.0] else c
     entity: Dict[str, Any] = {"layer": layer, "c": centre, "r": radius,
-                              "nrm": normal, "handle": handle}
+                              "nrm": normal, "handle": handle,
+                              "_properties": _entity_properties(aci, linetype, lineweight, truecolor)}
     if kind == "ARC":
         entity["start_deg"] = start
         entity["end_deg"] = end
@@ -363,7 +416,9 @@ def _parse_circle_or_arc(pairs: List[Tuple[int, str]], i: int, kind: str):
 
 
 def _finish_entity(entity: Dict[str, Any], seq: int, layers: List[str],
-                   seen_layers: set, polylines: List[Dict[str, Any]]) -> None:
+                   seen_layers: set, polylines: List[Dict[str, Any]],
+                   properties: Dict[str, Any]) -> None:
+    props = entity.pop("_properties", None)
     if len(entity["pts"]) < 2:
         return  # a 0/1-point polyline carries no geometry worth claiming
     if not entity.get("handle"):
@@ -372,6 +427,8 @@ def _finish_entity(entity: Dict[str, Any], seq: int, layers: List[str],
         seen_layers.add(entity["layer"])
         layers.append(entity["layer"])
     polylines.append(entity)
+    if props is not None:
+        properties[entity["handle"]] = props
 
 
 def _group_pairs(text: str) -> List[Tuple[int, str]]:
@@ -403,6 +460,7 @@ def _parse_lwpolyline(pairs: List[Tuple[int, str]], i: int):
     elevation = 0.0
     xs: List[float] = []
     ys: List[float] = []
+    aci = linetype = lineweight = truecolor = None
     n = len(pairs)
     while i < n and pairs[i][0] != 0:
         code, value = pairs[i]
@@ -418,10 +476,19 @@ def _parse_lwpolyline(pairs: List[Tuple[int, str]], i: int):
             xs.append(_float(value))
         elif code == 20:
             ys.append(_float(value))
+        elif code == 62:
+            aci = value
+        elif code == 6:
+            linetype = value
+        elif code == 370:
+            lineweight = value
+        elif code == 420:
+            truecolor = value
         i += 1
     pts = [[x, y, elevation] for x, y in zip(xs, ys)]
     return {"layer": layer, "closed": closed, "pts": pts,
-            "xdata": None, "handle": handle}, i
+            "xdata": None, "handle": handle,
+            "_properties": _entity_properties(aci, linetype, lineweight, truecolor)}, i
 
 
 def _parse_polyline(pairs: List[Tuple[int, str]], i: int):
@@ -431,6 +498,7 @@ def _parse_polyline(pairs: List[Tuple[int, str]], i: int):
     handle = ""
     closed = False
     pts: List[List[float]] = []
+    aci = linetype = lineweight = truecolor = None
     n = len(pairs)
     while i < n and pairs[i][0] != 0:
         code, value = pairs[i]
@@ -440,6 +508,14 @@ def _parse_polyline(pairs: List[Tuple[int, str]], i: int):
             handle = value
         elif code == 70:
             closed = bool(_int(value) & 1)
+        elif code == 62:
+            aci = value
+        elif code == 6:
+            linetype = value
+        elif code == 370:
+            lineweight = value
+        elif code == 420:
+            truecolor = value
         i += 1
     while i < n:
         code, value = pairs[i]
@@ -464,7 +540,8 @@ def _parse_polyline(pairs: List[Tuple[int, str]], i: int):
             break
         break  # any other entity start ends this POLYLINE (missing SEQEND)
     return {"layer": layer, "closed": closed, "pts": pts,
-            "xdata": None, "handle": handle}, i
+            "xdata": None, "handle": handle,
+            "_properties": _entity_properties(aci, linetype, lineweight, truecolor)}, i
 
 
 def _parse_line(pairs: List[Tuple[int, str]], i: int):
@@ -474,6 +551,7 @@ def _parse_line(pairs: List[Tuple[int, str]], i: int):
     handle = ""
     a = [0.0, 0.0, 0.0]
     b = [0.0, 0.0, 0.0]
+    aci = linetype = lineweight = truecolor = None
     n = len(pairs)
     while i < n and pairs[i][0] != 0:
         code, value = pairs[i]
@@ -493,8 +571,17 @@ def _parse_line(pairs: List[Tuple[int, str]], i: int):
             b[1] = _float(value)
         elif code == 31:
             b[2] = _float(value)
+        elif code == 62:
+            aci = value
+        elif code == 6:
+            linetype = value
+        elif code == 370:
+            lineweight = value
+        elif code == 420:
+            truecolor = value
         i += 1
-    return {"layer": layer, "closed": False, "pts": [a, b], "xdata": None, "handle": handle}, i
+    return {"layer": layer, "closed": False, "pts": [a, b], "xdata": None, "handle": handle,
+            "_properties": _entity_properties(aci, linetype, lineweight, truecolor)}, i
 
 
 _MTEXT_FORMAT_CODES = ("\\p", "\\f", "\\F", "\\H", "\\W", "\\C", "\\c", "\\Q", "\\T", "\\A", "\\S")

@@ -897,6 +897,18 @@ def apply_mutations(intake: Dict[str, Any], mutations: Dict[str, Any]) -> Dict[s
         entity["r"] = item["r"]
         entity["start_deg"] = item["start_deg"]
         entity["end_deg"] = item["end_deg"]
+    # W4g-7b-3s: the three common properties, keyed by handle like the EP
+    # inspect record (da/intake_parse.py); an existing record is updated in
+    # place (a fresh set_color drops any stale `rgb`, since the ACI now wins).
+    properties = new.setdefault("properties", {})
+    for item in mutations.get("set_color") or []:
+        entry = properties.setdefault(item["handle"], {})
+        entry["aci"] = item["aci"]
+        entry["rgb"] = None
+    for item in mutations.get("set_linetype") or []:
+        properties.setdefault(item["handle"], {})["linetype"] = item["name"]
+    for item in mutations.get("set_lineweight") or []:
+        properties.setdefault(item["handle"], {})["lineweight"] = item["weight"]
     added = mutations.get("added") or []
     if added:
         polys = new.setdefault("polylines", [])
@@ -925,6 +937,18 @@ def apply_mutations(intake: Dict[str, Any], mutations: Dict[str, Any]) -> Dict[s
                     "r": e["r"], "start_deg": e["start_deg"], "end_deg": e["end_deg"],
                     "nrm": [0.0, 0.0, 1.0]})
             note_layer(e.get("layer"))
+            style = {}
+            if "color" in e:
+                style["aci"] = e["color"]
+                style["rgb"] = None
+            if "linetype" in e:
+                style["linetype"] = e["linetype"]
+            if "lineweight" in e:
+                style["lineweight"] = e["lineweight"]
+            if style:
+                properties.setdefault(e["handle"], {}).update(style)
+    if not properties:
+        new.pop("properties", None)
     return new
 
 
@@ -1514,11 +1538,76 @@ def _max_bipartite_match(adjacency: list[list[int]], right_count: int) -> list[O
     return assignment
 
 
+_PROPERTY_OP_NAMES = {"aci": "set_color", "linetype": "set_linetype", "lineweight": "set_lineweight"}
+
+
+def _verify_property_effects(
+    actual: Dict[str, Any], canonical: Dict[str, Any], matched_handles: Dict[str, str],
+) -> Optional[str]:
+    """The colour/linetype/lineweight half: every setter's target, and every
+    styled add's matched output entity (`matched_handles`, filled in by the
+    geometry passes below), must read back the exact value or this refuses.
+    An `actual` with no `properties` at all (a legacy inspect that predates
+    the EP record) is tolerated for geometry but cannot be checked here, so
+    it is reported back to the caller as an UNVERIFIED note, never silently
+    treated as a pass."""
+    wants: Dict[str, Dict[str, Any]] = {}
+    for item in canonical.get("set_color") or []:
+        wants.setdefault(item["handle"], {})["aci"] = item["aci"]
+    for item in canonical.get("set_linetype") or []:
+        wants.setdefault(item["handle"], {})["linetype"] = item["name"]
+    for item in canonical.get("set_lineweight") or []:
+        wants.setdefault(item["handle"], {})["lineweight"] = item["weight"]
+    for entity in canonical.get("added") or []:
+        if not any(field in entity for field in ("color", "linetype", "lineweight")):
+            continue
+        actual_handle = matched_handles.get(entity["handle"])
+        if actual_handle is None:
+            continue
+        style = wants.setdefault(actual_handle, {})
+        if "color" in entity:
+            style["aci"] = entity["color"]
+        if "linetype" in entity:
+            style["linetype"] = entity["linetype"]
+        if "lineweight" in entity:
+            style["lineweight"] = entity["lineweight"]
+    if not wants:
+        return None
+    actual_properties = actual.get("properties")
+    if not isinstance(actual_properties, dict):
+        return ("property effects unverified: the re-extracted output carries "
+                "no properties record")
+    for handle, expected_values in wants.items():
+        actual_values = actual_properties.get(handle)
+        if not isinstance(actual_values, dict):
+            raise ValueError(f"property target {handle!r} is missing from the output properties")
+        for key, value in expected_values.items():
+            found = actual_values.get(key)
+            if found != value:
+                op = _PROPERTY_OP_NAMES[key]
+                raise ValueError(
+                    f"{op} {handle!r} not applied: expected {value!r}, found {found!r}")
+            if key == "aci" and actual_values.get("rgb") is not None:
+                # An explicit ACI wins over a true colour only while both are
+                # readable; a set_color's contract is to REMOVE 420, so a
+                # true colour still present means the interpreter's group-420
+                # strip did not happen (or a DXF-upload client never dropped it).
+                raise ValueError(
+                    f"set_color {handle!r} not applied: a true colour (420) is still present")
+    return None
+
+
 def verify_live_mutation_effects(
     base: Dict[str, Any], actual: Dict[str, Any], canonical: Dict[str, Any],
-) -> None:
-    """Refuse publication unless extraction proves exactly the proposed effects."""
+) -> Optional[str]:
+    """Refuse publication unless extraction proves exactly the proposed effects.
+
+    Returns None on a fully-verified pass, or a note string when geometry
+    verified but the property effects (colour/linetype/lineweight) could not
+    be checked against this `actual` (see `_verify_property_effects`).
+    """
     expected = apply_mutations(base, canonical)
+    matched_handles: Dict[str, str] = {}
     # Unchanged INSERTs retain their complete records by handle. Added ones
     # first bind their temporary handles to the actual name and geometry.
     insert_indexes = []
@@ -1567,6 +1656,7 @@ def verify_live_mutation_effects(
             matched = unmatched_inserts[right_index]
             insert_indexes[0].pop(entity["handle"])
             insert_indexes[1].pop(matched["handle"])
+            matched_handles[entity["handle"]] = matched["handle"]
             entity["handle"] = matched["handle"]
     if insert_indexes[0] != insert_indexes[1]:
         raise ValueError("unchanged INSERT has unexpected output geometry")
@@ -1580,7 +1670,7 @@ def verify_live_mutation_effects(
     # polylines (LINE included, as a 2-point polyline): everything the plan
     # names carries its expected geometry, everything else is untouched,
     # every add is matched by kind and geometry, and no extra entity appears.
-    _verify_round_effects(base, actual, expected, canonical)
+    _verify_round_effects(base, actual, expected, canonical, matched_handles)
     base_polylines = base.get("polylines") or []
     actual_polylines = actual.get("polylines") or []
     if not isinstance(actual_polylines, list):
@@ -1672,6 +1762,7 @@ def verify_live_mutation_effects(
         )
         if match_index is None:
             raise ValueError(f"added polyline {entity['handle']!r} is missing from output")
+        matched_handles[entity["handle"]] = unmatched[match_index]["handle"]
         unmatched.pop(match_index)
     if unmatched:
         raise ValueError("re-extracted output has unmatched new entities")
@@ -1679,6 +1770,7 @@ def verify_live_mutation_effects(
     # check and to keep mock/live validation on one implementation.
     if len(expected.get("polylines") or []) != expected_count:
         raise ValueError("canonical mutation application produced an invalid count")
+    return _verify_property_effects(actual, canonical, matched_handles)
 
 
 def _round_effect_matches(expected: Dict[str, Any], actual: Dict[str, Any], *, arc: bool) -> bool:
@@ -1704,7 +1796,7 @@ def _round_effect_matches(expected: Dict[str, Any], actual: Dict[str, Any], *, a
 
 def _verify_round_effects(
     base: Dict[str, Any], actual: Dict[str, Any], expected: Dict[str, Any],
-    canonical: Dict[str, Any],
+    canonical: Dict[str, Any], matched_handles: Dict[str, str],
 ) -> None:
     """The circle and arc half of verify_live_mutation_effects."""
     removed = set(canonical.get("removed", []))
@@ -1765,6 +1857,7 @@ def _verify_round_effects(
             )
             if match_index is None:
                 raise ValueError(f"added {kind} {entity['handle']!r} is missing from output")
+            matched_handles[entity["handle"]] = unmatched[match_index]["handle"]
             unmatched.pop(match_index)
         if unmatched:
             raise ValueError("re-extracted output has unmatched new entities")
@@ -2159,7 +2252,7 @@ def _apply_plan_live(*, tenant_id: str, drawing_id: str, head_v: int,
     normalized_base = copy.deepcopy(base_intake)
     normalized_base["dwg"] = drawing_id
     try:
-        verify_live_mutation_effects(normalized_base, output_intake, canonical)
+        properties_note = verify_live_mutation_effects(normalized_base, output_intake, canonical)
     except ValueError as exc:
         raise LiveMutationEffectMismatch(str(exc)) from exc
     output_inspection_ms = int(
@@ -2210,6 +2303,8 @@ def _apply_plan_live(*, tenant_id: str, drawing_id: str, head_v: int,
         "workitem_id": status.get("id"),
         "output_dwg_bytes": len(out_bytes),
     })
+    if properties_note:
+        result["properties_note"] = properties_note
     envelope["result"] = result
     envelope["cost"] = cost
     total_ms = int((time.perf_counter() - t0) * 1000)
