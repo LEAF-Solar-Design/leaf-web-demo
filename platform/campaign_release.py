@@ -7,8 +7,11 @@ original campaign ambition.
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import uuid
+from contextlib import contextmanager
+from datetime import datetime, timezone
 
 from psycopg.types.json import Jsonb
 
@@ -112,17 +115,32 @@ def _contract(value, profile):
         'original_goal', 'intended_user', 'workflow', 'release_boundary',
         'deferred_items', 'artifact_refs', 'required_checks',
         'selected_artifact', 'request_digest', 'request_key_digest', 'web_recipe',
+        'transform_recipe', 'deadline_at', 'priority_score',
     }:
         _invalid('invalid contract fields')
     for field in ('original_goal', 'intended_user', 'workflow', 'release_boundary'):
         _string(value.get(field), field, 16384)
     _strings(value.get('deferred_items', []), 'deferred_items')
     _strings(value.get('artifact_refs', []), 'artifact_refs')
+    if 'deadline_at' in value:
+        deadline = value['deadline_at']
+        if not isinstance(deadline, str) or not re.fullmatch(
+                r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})', deadline):
+            _invalid('invalid release deadline')
+        try:
+            parsed = datetime.fromisoformat(deadline.replace('Z', '+00:00'))
+            value['deadline_at'] = parsed.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+        except (ValueError, OverflowError):
+            _invalid('invalid release deadline')
+    if 'priority_score' in value and (type(value['priority_score']) is not int or not 0 <= value['priority_score'] <= 100):
+        _invalid('invalid release priority')
     for field in ('request_digest', 'request_key_digest'):
         if field in value and not re.fullmatch(r'[0-9a-f]{64}', value[field] or ''):
             _invalid('invalid ' + field)
     _selected_artifact(value.get('selected_artifact'))
     recipe = value.get('web_recipe')
+    if 'web_recipe' in value and 'transform_recipe' in value:
+        _invalid('release recipes are mutually exclusive')
     if recipe is not None:
         if (profile != 'web_tool' or not isinstance(recipe, dict)
                 or set(recipe) != {'recipe_id', 'recipe_version', 'source_artifact'}
@@ -133,6 +151,18 @@ def _contract(value, profile):
         if (not recipe['source_artifact'] or recipe['source_artifact']['format'] != 'json'
                 or not value.get('selected_artifact') or value['selected_artifact']['format'] != 'html'):
             _invalid('web recipe requires source JSON and generated HTML')
+    if 'transform_recipe' in value:
+        recipe = value['transform_recipe']
+        if (profile != 'cad_file' or not isinstance(recipe, dict)
+                or set(recipe) != {'recipe_id', 'recipe_version', 'source_artifact'}
+                or recipe['recipe_id'] != 'json-records-to-csv'
+                or type(recipe['recipe_version']) is not int or recipe['recipe_version'] != 1):
+            _invalid('invalid transform recipe')
+        source = _selected_artifact(recipe['source_artifact'])
+        selected = value.get('selected_artifact')
+        if (not source or source['format'] != 'json' or source['media_type'] != 'application/json'
+                or not selected or selected['format'] != 'csv' or selected['media_type'] != 'text/csv'):
+            _invalid('transform recipe requires source JSON and generated CSV')
     checks = value.get('required_checks')
     if not isinstance(checks, list) or not 1 <= len(checks) <= 128:
         _invalid('required_checks must not be empty')
@@ -179,6 +209,19 @@ def _org_lock(cur, scope):
     _lock(cur, 'campaign-release-org:' + str(scope['org']))
 
 
+@contextmanager
+def execution_guard(org_id, project_id, campaign_id, release_id):
+    """One release executor, on a dedicated transaction with no row locks."""
+    from .db import connection
+
+    scope = _params(org_id, project_id, campaign_id, release_id)
+    name = 'campaign-release-execution:' + ':'.join(str(scope[k]) for k in ('org', 'project', 'campaign', 'release'))
+    key = int.from_bytes(hashlib.sha256(name.encode()).digest()[:8], 'big', signed=True)
+    with connection() as conn, conn.transaction(), conn.cursor() as cur:
+        cur.execute('SELECT pg_try_advisory_xact_lock(%s) AS acquired', (key,))
+        yield bool(cur.fetchone()['acquired'])
+
+
 def _slot(cur, scope):
     # A paused release yields only once outstanding work has settled. Read
     # attempts without locking them: all claimers already hold the org lock.
@@ -186,7 +229,11 @@ def _slot(cur, scope):
                 "AND r.release_id<>%(release)s AND (r.status='active' OR EXISTS ("
                 'SELECT 1 FROM campaign_tasks t WHERE t.org_id=r.org_id '
                 'AND t.project_id=r.project_id AND t.campaign_id=r.campaign_id '
-                "AND t.status IN ('claimed','reconcile_required'))) LIMIT 1", scope)
+                "AND t.status IN ('claimed','reconcile_required')) OR EXISTS ("
+                'SELECT 1 FROM async_jobs j WHERE j.org_id=r.org_id::text AND j.project_id=r.project_id::text '
+                "AND j.status IN ('submitted','running') "
+                "AND j.execution_json->'completion_provenance'->>'campaign_id'=r.campaign_id::text "
+                "AND j.execution_json->'completion_provenance'->>'release_id'=r.release_id::text)) LIMIT 1", scope)
     return 'queued' if cur.fetchone() else 'active'
 
 
@@ -325,6 +372,55 @@ def transition_release(org_id, project_id, campaign_id, release_id, principal_id
         if action == 'resume':
             target = _slot(cur, scope)
         return _public(_update(cur, scope, target))
+
+
+WAIT_KINDS = ('authoring', 'job', 'capacity', 'publication', 'authority', 'approval')
+
+
+def set_progress(org_id, project_id, campaign_id, release_id, principal_id, *, state, next_action):
+    """Pending work changes progress only, never stage evidence or corrections."""
+    if state not in ('active', 'waiting') or not isinstance(next_action, dict) or set(next_action) - {
+            'wait_kind', 'reason', 'recommended_action', 'change_set_id', 'job_id'}:
+        _invalid('invalid pending release progress')
+    _json(next_action)
+    if next_action.get('wait_kind') not in WAIT_KINDS:
+        _invalid('invalid wait kind')
+    _string(next_action.get('reason'), 'reason', 2048)
+    if 'recommended_action' in next_action:
+        _string(next_action['recommended_action'], 'recommended_action', 2048)
+    if 'change_set_id' in next_action:
+        _string(next_action['change_set_id'], 'change_set_id', 200)
+    if 'job_id' in next_action:
+        _uuid(next_action['job_id'])
+    scope = _params(org_id, project_id, campaign_id, release_id)
+    with _cursor() as cur:
+        _org_lock(cur, scope)
+        _check(cur, scope, principal_id)
+        row = _get(cur, scope)
+        if row['status'] != 'active':
+            _conflict('release_not_active')
+        return _public(_update(cur, scope, state, next_action))
+
+
+def runnable_releases(limit=20):
+    """Bounded canonical candidates; failed stages require an explicit retry."""
+    if type(limit) is not int or not 1 <= limit <= 200:
+        _invalid('invalid limit')
+    with _cursor() as cur:
+        cur.execute("SELECT r.* FROM campaign_releases r WHERE (r.status IN ('active','queued') OR "
+                    "(r.status='waiting' AND r.next_action->>'wait_kind' IN "
+                    "('authoring','job','capacity','publication','approval'))) "
+                    'AND (NOT EXISTS (SELECT 1 FROM campaign_release_stages s WHERE s.org_id=r.org_id '
+                    'AND s.project_id=r.project_id AND s.campaign_id=r.campaign_id AND s.release_id=r.release_id '
+                    "AND s.contract_version=r.contract_version AND s.status<>'passed' AND NOT EXISTS ("
+                    'SELECT 1 FROM campaign_release_stages later WHERE later.release_id=s.release_id '
+                    'AND later.contract_version=s.contract_version AND later.stage=s.stage AND later.seq>s.seq)) '
+                    "OR r.next_action->>'action'='retry_stage') "
+                    "ORDER BY CASE WHEN r.status='waiting' AND r.next_action->>'wait_kind'='approval' THEN 1 ELSE 0 END, "
+                    "(r.contract->>'deadline_at')::timestamptz ASC NULLS LAST, "
+                    "COALESCE((r.contract->>'priority_score')::int,0) DESC, r.created_at, r.release_id LIMIT %(limit)s",
+                    {'limit': limit})
+        return [_public(row) for row in cur.fetchall()]
 
 
 def revise_contract(org_id, project_id, campaign_id, release_id, principal_id, *,
@@ -609,4 +705,6 @@ def admits_claim(cur, scope, worker_id):
                 'SELECT 1 FROM campaign_tasks t WHERE t.org_id=a.org_id AND t.project_id=a.project_id '
                 'AND t.campaign_id=a.campaign_id AND t.task_id=a.task_id '
                 "AND t.status='reconcile_required' AND t.fence IN (a.fence,a.fence+1))))", scope)
-    return cur.fetchone()['n'] < 3
+    attempts = cur.fetchone()['n']
+    cur.execute("SELECT count(*) AS n FROM async_jobs WHERE org_id=%(org)s::text AND status IN ('submitted','running')", scope)
+    return attempts + cur.fetchone()['n'] < 3
