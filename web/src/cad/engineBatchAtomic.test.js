@@ -153,8 +153,9 @@ const SCRIPT = [
   'out.afterProps = summary(await handleMessage({ type: "applyEdit", op: "setLayer", payload: { entityId: h, layer: "A" } }, engine))',
   // W4g-7b-03c required row: a DXF with explicit 62/6/370/420 groups on
   // entities this session never touches round-trips them through parse ->
-  // one unrelated edit elsewhere -> write -> re-parse.
-  'const propsDxf = "0\\nSECTION\\n2\\nHEADER\\n9\\n$ACADVER\\n1\\nAC1009\\n0\\nENDSEC\\n0\\nSECTION\\n2\\nENTITIES\\n0\\nLINE\\n5\\n64\\n8\\n0\\n6\\nContinuous\\n62\\n3\\n370\\n25\\n10\\n20.0\\n20\\n0.0\\n30\\n0.0\\n11\\n25.0\\n21\\n0.0\\n31\\n0.0\\n0\\nLINE\\n5\\n65\\n8\\n0\\n420\\n660510\\n10\\n30.0\\n20\\n0.0\\n30\\n0.0\\n11\\n35.0\\n21\\n0.0\\n31\\n0.0\\n0\\nENDSEC\\n0\\nEOF\\n"',
+  // one unrelated edit elsewhere -> write -> re-parse. $ACADVER AC1027 (the
+  // demo DWG's own converted version) is AC1018+, so the writer emits 420.
+  'const propsDxf = "0\\nSECTION\\n2\\nHEADER\\n9\\n$ACADVER\\n1\\nAC1027\\n0\\nENDSEC\\n0\\nSECTION\\n2\\nENTITIES\\n0\\nLINE\\n5\\n64\\n8\\n0\\n6\\nContinuous\\n62\\n3\\n370\\n25\\n10\\n20.0\\n20\\n0.0\\n30\\n0.0\\n11\\n25.0\\n21\\n0.0\\n31\\n0.0\\n0\\nLINE\\n5\\n65\\n8\\n0\\n420\\n660510\\n10\\n30.0\\n20\\n0.0\\n30\\n0.0\\n11\\n35.0\\n21\\n0.0\\n31\\n0.0\\n0\\nENDSEC\\n0\\nEOF\\n"',
   'const propsLoaded = await handleMessage({ type: "loadDocument", documentId: "props.dxf", bytes: new TextEncoder().encode(propsDxf) }, engine)',
   'out.propsBefore = summary(propsLoaded)',
   'const [untouchedA, untouchedB] = propsLoaded.entities.map((e) => e.id)',
@@ -162,6 +163,18 @@ const SCRIPT = [
   'out.propsAfter = summary(await handleMessage({ type: "applyEdit", op: "createLine", payload: { x1: 90, y1: 0, x2: 91, y2: 0, layer: "0" } }, engine))',
   'out.untouchedA = untouchedA',
   'out.untouchedB = untouchedB',
+  // Declared residual: the identical fixture under $ACADVER AC1015 (2000,
+  // pre-AC1018). Reading is version-agnostic (the 420 group reads back on
+  // the initial parse), but the WRITER refuses to emit 420 below AC1018, so
+  // the same round-trip (write + re-parse) honestly drops the true colour.
+  'const propsDxfLegacy = "0\\nSECTION\\n2\\nHEADER\\n9\\n$ACADVER\\n1\\nAC1015\\n0\\nENDSEC\\n0\\nSECTION\\n2\\nENTITIES\\n0\\nLINE\\n5\\n64\\n8\\n0\\n6\\nContinuous\\n62\\n3\\n370\\n25\\n10\\n20.0\\n20\\n0.0\\n30\\n0.0\\n11\\n25.0\\n21\\n0.0\\n31\\n0.0\\n0\\nLINE\\n5\\n65\\n8\\n0\\n420\\n660510\\n10\\n30.0\\n20\\n0.0\\n30\\n0.0\\n11\\n35.0\\n21\\n0.0\\n31\\n0.0\\n0\\nENDSEC\\n0\\nEOF\\n"',
+  'const propsLegacyLoaded = await handleMessage({ type: "loadDocument", documentId: "props-legacy.dxf", bytes: new TextEncoder().encode(propsDxfLegacy) }, engine)',
+  'out.propsLegacyBefore = summary(propsLegacyLoaded)',
+  'const [untouchedLegacyA, untouchedLegacyB] = propsLegacyLoaded.entities.map((e) => e.id)',
+  // ONE unrelated edit, touching neither legacy line above.
+  'out.propsLegacyAfter = summary(await handleMessage({ type: "applyEdit", op: "createLine", payload: { x1: 92, y1: 0, x2: 93, y2: 0, layer: "0" } }, engine))',
+  'out.untouchedLegacyA = untouchedLegacyA',
+  'out.untouchedLegacyB = untouchedLegacyB',
   'process.stdout.write(JSON.stringify({ ids, out }))',
 ].join('\n')
 
@@ -327,6 +340,19 @@ describe.skipIf(!GLUE)('the worker batch on the real engine', () => {
     expect(afterA).toMatchObject({ aci: 3, linetype: 'Continuous', lineweight: 25, trueColor: null })
     const afterB = out.propsAfter.entities.find((e) => e.id === out.untouchedB)
     expect(afterB.trueColor).toEqual([10, 20, 30])
+
+    // W4g-7b-03c-c declared residual: under $ACADVER AC1015 (pre-AC1018),
+    // the initial parse still reads the explicit 420 group (reading is
+    // version-agnostic), but the write + re-parse round trip honestly drops
+    // it, because the vendored crate's DXF writer emits group 420 only for
+    // AC1018+. A pre-2004 head cannot round-trip a true colour through the
+    // browser; the plan route's dense-EP preflight then refuses that save.
+    expect(out.propsLegacyBefore.entities).toHaveLength(2)
+    const legacyBefore = out.propsLegacyBefore.entities.find((e) => e.id === out.untouchedLegacyB)
+    expect(legacyBefore.trueColor).toEqual([10, 20, 30])
+    expect(out.propsLegacyAfter.ok).toBe(true)
+    const legacyAfter = out.propsLegacyAfter.entities.find((e) => e.id === out.untouchedLegacyB)
+    expect(legacyAfter.trueColor).toBeNull()
   })
 })
 

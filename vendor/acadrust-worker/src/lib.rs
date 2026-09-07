@@ -3266,10 +3266,16 @@ mod w4g_7b_03c_property_verbs {
 
     #[test]
     fn w4g_7b_03c_property_setters_accept_an_insert_reference_but_not_a_block_child() {
+        // ENTITIES precedes BLOCKS here (both are ordinary section reads, and
+        // the crate resolves an INSERT's block name lazily, so this parses
+        // fine): the crate pushes a BLOCK's children into the document's flat
+        // entity vec at that block's ENDBLK, so an ENTITIES-first fixture
+        // gives the INSERT index 0 and the LINE the next index, exercising
+        // the gate on both without hardcoding the LINE's index.
         let bytes = "0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1027\n0\nENDSEC\n\
+            0\nSECTION\n2\nENTITIES\n0\nINSERT\n5\n500\n8\nRefs\n2\nB\n10\n10\n20\n20\n30\n0\n0\nENDSEC\n\
             0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n5\n40\n8\n0\n2\nB\n70\n0\n10\n1\n20\n2\n30\n0\n\
-            0\nLINE\n5\n100\n8\n0\n10\n1\n20\n2\n30\n0\n11\n4\n21\n2\n31\n0\n0\nENDBLK\n5\n41\n8\n0\n0\nENDSEC\n\
-            0\nSECTION\n2\nENTITIES\n0\nINSERT\n5\n500\n8\nRefs\n2\nB\n10\n10\n20\n20\n30\n0\n0\nENDSEC\n0\nEOF\n"
+            0\nLINE\n5\n100\n8\n0\n10\n1\n20\n2\n30\n0\n11\n4\n21\n2\n31\n0\n0\nENDBLK\n5\n41\n8\n0\n0\nENDSEC\n0\nEOF\n"
             .as_bytes().to_vec();
         let mut doc = parse_dxf_core(&bytes).expect("fixture parses");
         doc.set_entity_color_core(0, 1).expect("an INSERT reference accepts a colour");

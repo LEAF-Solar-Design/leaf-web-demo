@@ -533,18 +533,22 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     {
       id: 'prop-color', label: 'Color', value: colorValue,
       options: ['ByLayer', 'ByBlock', ...Object.values(ACI_NAMES), 'index...'],
-      disabled: !!modify, reason: modify,
+      // W4g-7b-03c-c: the honesty ladder can only verify a plain string or a
+      // REASONS.key reference, never a computed identifier; the selection
+      // ladder's own sentence (the same one modify:matchprop uses) covers
+      // every state this select is actually disabled for.
+      disabled: !!modify, reason: MODIFY_REASONS.noSelection,
       onChange: (value) => (value === 'index...' ? toggleArmed('modify', 'setColor') : applyEdit('setColor', { aci: value })),
     },
     {
       id: 'prop-linetype', label: 'Linetype', value: linetypeValue, options: linetypeCatalogue,
-      disabled: !!modify, reason: modify,
+      disabled: !!modify, reason: MODIFY_REASONS.noSelection,
       onChange: (value) => applyEdit('setLinetype', { linetype: value }),
     },
     {
       id: 'prop-lineweight', label: 'Lineweight', value: lineweightValue,
       options: ['ByLayer', 'ByBlock', 'Default', ...LINEWEIGHT_VALUES.map(formatLineweight)],
-      disabled: !!modify, reason: modify,
+      disabled: !!modify, reason: MODIFY_REASONS.noSelection,
       onChange: (value) => applyEdit('setLineweight', { lineweight: value }),
     },
   ]
