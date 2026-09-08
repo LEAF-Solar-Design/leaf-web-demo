@@ -1,7 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { expect, test } from '@playwright/test'
-import { DEFERRED_REASONS } from '../../src/lib/actionRegistry.js'
 import { requireLocalReady } from './requireReady.mjs'
 import { setRail } from './railFlag.mjs'
 
@@ -1564,6 +1563,28 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByTestId('dock-properties').locator('dd').last()).toHaveText('3')
     await page.keyboard.press('Escape')
 
+    // MLEADER is typed on the command line and draws its own canvas outline.
+    const mleaderCountBefore = Number(await page.getByTestId('cad-edit-entity-count').textContent())
+    await bar.fill('MLEADER')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'createMleader')
+    await page.getByLabel('ribbon x', { exact: true }).fill('30')
+    await page.getByLabel('ribbon y', { exact: true }).fill('23')
+    await page.getByLabel('ribbon x2', { exact: true }).fill('35')
+    await page.getByLabel('ribbon y2', { exact: true }).fill('26')
+    await page.getByLabel('ribbon text', { exact: true }).fill('Valve')
+    await page.getByLabel('ribbon text', { exact: true }).press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(mleaderCountBefore + 1), { timeout: 60_000 })
+    await expect(page.getByTestId('cad-edit-entity-list')).toContainText('MLEADER on layer 0 · 2 vertices · read-only')
+    await page.keyboard.press('Escape')
+    const mleaderCanvas = page.locator('.studio-ground .viewer-canvas canvas')
+    await expect(mleaderCanvas).toBeVisible()
+    await test.info().attach('MLEADER canvas schematic', { body: await mleaderCanvas.screenshot(), contentType: 'image/png' })
+    await bar.fill('u')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(mleaderCountBefore), { timeout: 60_000 })
+    await expect(page.getByTestId('cad-edit-entity-list')).not.toContainText('MLEADER on layer 0 · 2 vertices · read-only')
+
     // W4g-2 (one head), confirm-time race. LAST in the walk on purpose: a
     // refused run leaves its failed strip on the page and there is no
     // dismiss for it, and that strip sits BETWEEN the command prompt and
@@ -1671,8 +1692,8 @@ test.describe('route matrix, rail ON', () => {
 
     // W4g-7b-05c-2: the placed INSERT refuses every geometry verb before the
     // worker sees it (buildEditPayload's own by-kind gate): arming MOVE holds
-    // Run with the sentence, no worker message; a deferred word typed right
-    // after still carries its OWN frozen reason, unaffected by the selection.
+    // Run with the sentence, no worker message. BLOCK is live since #1140
+    // and arms its own prompt after MOVE is dismissed.
     // A create SELECTS what it made (engineSession.js's own rule), so the
     // just-drawn INSERT is already the selection: no radio click needed, and
     // none would work anyway (the workbench list disables a read-only kind's
@@ -1685,9 +1706,12 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByTestId('cockpit-prompt-note')).toHaveText('an INSERT is placed, not edited, in this round')
     await page.keyboard.press('Escape')
     await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
-    await bar.fill('leader')
+    await bar.fill('block')
     await bar.press('Enter')
-    await expect(page.getByRole('status').filter({ hasText: DEFERRED_REASONS.leader })).toHaveCount(1)
+    // BLOCK is live since #1140; dismiss its prompt before undo.
+    await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'createBlock')
+    await page.keyboard.press('Escape')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBefore + 1))
 
     // One engine undo takes it back; the redo depth rises.

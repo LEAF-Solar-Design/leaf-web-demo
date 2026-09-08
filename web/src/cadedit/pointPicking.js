@@ -21,6 +21,7 @@ export const PICK_SEQUENCES = Object.freeze({
   group: [{ kind: 'edge', key: 'members', repeat: true }],
   createBlock: [{ kind: 'edge', key: 'members', repeat: true }, { kind: 'point', keys: ['x', 'y'] }],
   createLine: [{ kind: 'point', keys: ['x', 'y'] }, { kind: 'point', keys: ['x2', 'y2'] }],
+  createMleader: [{ kind: 'point', keys: ['x', 'y'] }, { kind: 'point', keys: ['x2', 'y2'] }],
   createCircle: [{ kind: 'point', keys: ['x', 'y'] }, { kind: 'radius', key: 'r', from: ['x', 'y'] }],
   createArc: [{ kind: 'point', keys: ['x', 'y'] }, { kind: 'radius', key: 'r', from: ['x', 'y'] }],
   createPolyline: [{ kind: 'append', key: 'pts' }],
@@ -390,7 +391,7 @@ export function ghostFor(state, x, y, inputs = null, blocks = null) {
     if (!picked.length) return null
     return { pts: [...picked, [x, y]], closed: false }
   }
-  if (op === 'createLine' || op === 'mirror') {
+  if (op === 'createLine' || op === 'createMleader' || op === 'mirror') {
     if (!last || picked.length >= 2) return null
     return { pts: [last, [x, y]], closed: false }
   }

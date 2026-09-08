@@ -9,6 +9,19 @@ import { BARE_OPS, MAX_SCRIPT_CHARS, MAX_SCRIPT_LINES, MAX_TOKEN_CHARS, parseScr
 
 const parse = (text) => parseScript(text, parseDrawingCommand, PROMPTS)
 
+it('MLEADER slots are two points, quoted text, then optional style and layer', () => {
+  expect(promptSlots(PROMPTS.createMleader).map((s) => [s.kind, s.keys.join(',')])).toEqual([
+    ['point', 'x,y'], ['point', 'x2,y2'], ['text', 'text'], ['text', 'style'], ['text', 'layer'],
+  ])
+  expect(parse('MLEADER 30,23 35,26 "Valve"').lines[0]).toMatchObject({
+    group: 'draw', op: 'createMleader', verb: 'MLEADER', inputs: { x: '30,23', y: '', x2: '35,26', y2: '', text: 'Valve' },
+  })
+  expect(parse('ML 0,0 3,4 "Valve A" Notes Leaders').lines[0].inputs).toEqual({
+    x: '0,0', y: '', x2: '3,4', y2: '', text: 'Valve A', style: 'Notes', layer: 'Leaders',
+  })
+  expect(parse('MLEADER 0,0 bad "Valve"').refusal).toMatch(/operand 2 must be a point/)
+})
+
 describe('tokenize', () => {
   it('splits on whitespace and keeps a double-quoted run as one token', () => {
     expect(tokenize('text 0,0 2.5 0 "Panel A" Notes').tokens).toEqual(['text', '0,0', '2.5', '0', 'Panel A', 'Notes'])
@@ -109,24 +122,20 @@ describe('parseScript', () => {
     expect(parse('line 0,0 10,10\nfoo').line).toBe(2)
   })
 
-  // W4g-7b-05c: a deferred word (LEADER/LE, BLOCK/B, GROUP/G, UNGROUP) is a
-  // real command word — the parse never refuses at that line — carrying its
-  // own reason onto the line record for the runner to stop with.
-  it('a deferred word parses onto the line list carrying its own reason, never as a refusal', () => {
-    const out = parse('line 0,0 3,4\nleader')
+  // W4g-7c: every former deferred word is live (LEADER / MLEADER in 3c, BLOCK in
+  // 2c), so a script line with one of them parses as a draw command and a
+  // missing operand refuses by operand, never as an unknown word.
+  it('LEADER and BLOCK parse as live commands, refusing by operand and never as unknown words', () => {
+    const out = parse('line 0,0 3,4\nmleader 0,0 5,4 "Valve"')
     expect(out.refusal).toBeUndefined()
     expect(out.lines.map((l) => [l.line, l.group, l.op, l.verb])).toEqual([
       [1, 'draw', 'createLine', 'LINE'],
-      [2, 'deferred', 'leader', 'LEADER'],
+      [2, 'draw', 'createMleader', 'MLEADER'],
     ])
-    expect(out.lines[1].reason).toBe(DEFERRED_REASONS.leader)
-    expect(out.lines[1].inputs).toEqual({})
-    expect(Object.isFrozen(out.lines[1])).toBe(true)
-    expect(parse('g RACK A0 B1').lines[0]).toMatchObject({ group: 'groups', op: 'group', verb: 'GROUP', inputs: { groupName: 'RACK', members: '160 177' } })
-    expect(parse('b NewBlock 10,20 A0 B1').lines[0]).toMatchObject({ group: 'draw', op: 'createBlock', verb: 'BLOCK', inputs: { name: 'NewBlock', x: '10', y: '20', selectedId: '160', members: '177', membersDone: 'true' } })
-    expect(parse('b').refusal).toContain('1 to 60 member handles')
-    expect(parse('b NewBlock 10,20 FFFF').lines[0].inputs.selectedId).toBe('65535')
-    expect(parse('ungroup RACK').lines[0]).toMatchObject({ group: 'groups', op: 'ungroup', verb: 'UNGROUP', inputs: { groupName: 'RACK' } })
+    expect(out.lines[1].reason).toBeUndefined()
+    expect(parse('block').refusal).toMatch(/^line 1: /)
+    expect(parse('block').refusal).not.toMatch(/not a command word/)
+    expect(parse('leader').lines[0]).toMatchObject({ group: 'draw', op: 'createMleader', verb: 'MLEADER' })
   })
 
   it('is bounded before any line is read', () => {

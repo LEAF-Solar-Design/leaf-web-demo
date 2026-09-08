@@ -14,6 +14,13 @@ export const PROMPTS = Object.freeze({
     { ask: 'Specify base point:', fields: [['x', 'x'], ['y', 'y']] },
     { ask: 'Enter new block name:', fields: [['name', 'block name', 'text']] },
   ] },
+  createMleader: { verb: 'MLEADER', steps: [
+    { ask: 'Specify leader arrowhead location:', fields: [['x', 'x'], ['y', 'y']] },
+    { ask: 'Specify leader landing location:', fields: [['x2', 'x2'], ['y2', 'y2']] },
+    { ask: 'Enter text:', fields: [['text', 'text', 'text']] },
+    { ask: 'Multileader style <Standard>:', fields: [['style', 'style', 'text']] },
+    { ask: 'Layer:', fields: [['layer', 'layer', 'text']] },
+  ] },
   group: { verb: 'GROUP', steps: [
     { ask: 'Select objects to add:', fields: [['members', 'members', 'edge']], pickKeys: ['membersDone'] },
     { ask: 'Enter group name:', fields: [['groupName', 'group name', 'text']] },

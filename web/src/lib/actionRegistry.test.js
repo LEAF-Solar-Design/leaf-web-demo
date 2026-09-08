@@ -199,6 +199,7 @@ describe('honest triggers', () => {
       'draw:createText',
       // W4g-7b-04c-2: LINEAR / ALIGNED dimensions, seated in the Annotation panel.
       'draw:dimLinear', 'draw:dimAligned',
+      'draw:createMleader',
       // W4g-7b-02c: INSERT, seated in the Block panel.
       'draw:createInsert',
       'draw:createBlock',
@@ -605,7 +606,7 @@ describe('the engine reason ladders', () => {
 // W4g-7b-05c: the four deferred controls' frozen reasons, read by both ribbon
 // panels (flag on and off), the typed words and the script runner.
 describe('W4g-7b-05c-3 F4: placed selections reach the verb gate', () => {
-  it.each(['INSERT', 'DIMENSION'])('Modify is live for a read-only %s projection', (type) => {
+  it.each(['INSERT', 'DIMENSION', 'MLEADER'])('Modify is live for a read-only %s projection', (type) => {
     expect(PLACED_KINDS.has(type)).toBe(true)
     expect(modifyReason({ engineParsed: true, selected: { editable: false, type } })).toBe('')
   })

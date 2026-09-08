@@ -454,13 +454,11 @@ describe('authorCluster', () => {
 // (real since 04c); the four deferred controls carry their own reasons, not
 // the generic REASONS.notInEngine every other placeholder here still does.
 describe('referencePanels (the flag-off placeholders)', () => {
-  it('Annotation drops Dimensions and gives Leader its own reason; Text stays generic', () => {
+  it('Annotation drops the real Dimensions and Leader placeholders; Text stays generic', () => {
     const [annotation] = referencePanels()
     expect(toolsOf(annotation)).not.toHaveProperty('annotation:dimensions')
     expect(toolsOf(annotation)['annotation:text'].reason).toBe(REASONS.notInEngine)
-    const leader = toolsOf(annotation)['annotation:leader']
-    expect(leader.disabled).toBe(true)
-    expect(leader.reason).toBe(DEFERRED_REASONS.leader)
+    expect(toolsOf(annotation)).not.toHaveProperty('annotation:leader')
   })
 
   it('Block uses the engine-off reason for both real commands', () => {

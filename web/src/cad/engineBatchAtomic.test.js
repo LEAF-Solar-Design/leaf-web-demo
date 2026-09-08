@@ -556,6 +556,134 @@ describe.skipIf(!GLUE)('the worker batch on the real engine', () => {
   })
 })
 
+const MLEADER_SCRIPT = [
+  'import { createRequire } from "node:module"',
+  'import { pathToFileURL } from "node:url"',
+  'const [workerPath, gluePath, dxf] = process.argv.slice(1)',
+  'const { handleMessage } = await import(pathToFileURL(workerPath).href)',
+  'const engine = createRequire(import.meta.url)(gluePath)',
+  'const bytes = new TextEncoder().encode(dxf)',
+  'const loaded = await handleMessage({ type: "loadDocument", documentId: "leader.dxf", bytes }, engine)',
+  'const created = await handleMessage({ type: "applyEdit", op: "batch", payload: { steps: [{ op: "createMleader", payload: { x: 0, y: 0, x2: 3, y2: 4, text: "Valve", style: "Standard", layer: "0" } }] } }, engine)',
+  'const entity = created.entities.find((e) => e.type === "MLEADER")',
+  'const parsed = engine.parseDxf(created.bytes)',
+  'const roundtrip = parsed.editableEntities().find((e) => e.type === "MLEADER")',
+  'parsed.free()',
+  'const refused = []',
+  'for (const [op, payload] of [["move", { dx: 1, dy: 2 }], ["rotate", { cx: 0, cy: 0, deg: 90 }], ["explode", {}], ["setLayer", { layer: "Other" }], ["setColor", { aci: 1 }]]) {',
+  '  refused.push(await handleMessage({ type: "applyEdit", op, payload: { entityId: entity.id, ...payload } }, engine))',
+  '}',
+  'const erased = await handleMessage({ type: "applyEdit", op: "delete", payload: { entityId: entity.id } }, engine)',
+  'process.stdout.write(JSON.stringify({ loaded: { count: loaded.entityCount, mlstyles: loaded.mlstyles }, created: { ok: created.ok, createdId: created.createdId, createdIds: created.createdIds }, entity, roundtrip, refused: refused.map((r) => ({ ok: r.ok, reason: r.reason })), erased: { ok: erased.ok, count: erased.entityCount, entities: erased.entities } }))',
+].join('\n')
+
+// Exact group order from server/intake_dxf.py _emit_mleader/_emit_mlstyle.
+// The arrow is the sole LEADER_LINE vertex; the landing belongs to LEADER.
+const mlPairs = (pairs) => pairs.flatMap(([code, value]) => Array.isArray(value)
+  ? value.flatMap((v, i) => [String(code + i * 10), String(v)]) : [String(code), String(value)])
+const servedStyle = (name, handle, segments) => mlPairs([
+  [0, 'MLEADERSTYLE'], [5, handle], [102, '{ACAD_REACTORS'], [330, '21'],
+  [102, '}'], [330, '21'], [100, 'AcDbMLeaderStyle'], [179, 2], [170, 2],
+  [171, 1], [172, 0], [90, 2], [40, 0], [41, 0], [173, segments],
+  [91, -1056964608], [340, '11'], [92, -2], [290, 1], [42, 0.09],
+  [291, 1], [43, 0.36], [3, name], [341, '0'], [44, 0.18],
+  [300, ''], [342, '10'], [174, 1], [178, 1], [175, 1], [176, 0],
+  [93, -1056964608], [45, 1], [292, 0], [297, 0], [46, 0.18],
+  [343, '0'], [94, -1056964608], [47, 1], [49, 1], [140, 1],
+  [293, 1], [141, 0], [294, 1], [177, 0], [142, 1], [295, 0],
+  [296, 0], [143, 0.125], [271, 0], [272, 9], [273, 9], [298, 0],
+])
+const SERVED_MLEADER_DXF = [
+  ...mlPairs([[0, 'SECTION'], [2, 'HEADER'], [9, '$ACADVER'], [1, 'AC1027'], [0, 'ENDSEC'],
+    [0, 'SECTION'], [2, 'TABLES'], [0, 'TABLE'], [2, 'STYLE'], [70, 1],
+    [0, 'STYLE'], [5, '10'], [2, 'Standard'], [70, 0], [40, 0], [41, 1],
+    [0, 'ENDTAB'], [0, 'ENDSEC'], [0, 'SECTION'], [2, 'ENTITIES']]),
+  ...mlPairs([
+    [0, 'MULTILEADER'], [330, '1F'], [5, '100'], [100, 'AcDbEntity'],
+    [67, 0], [410, 'Model'], [8, '0'], [100, 'AcDbMLeader'], [270, 2],
+    [300, 'CONTEXT_DATA{'], [40, 1], [10, [35.36, 26, 0]], [41, 1],
+    [140, 0.18], [145, 0.09], [174, 1], [175, 1], [176, 0], [177, 0],
+    [290, 1], [304, 'Valve'], [11, [0, 0, 1]], [340, '10'],
+    [12, [35.45, 26.5, 0]], [13, [1, 0, 0]], [42, 0], [43, 0],
+    [44, 0], [45, 1], [170, 1], [90, -1073741824],
+    [171, 1], [172, 5], [91, -1073741824], [141, 0],
+    [92, 0], [291, 0], [292, 0], [173, 0], [293, 0], [142, 0],
+    [143, 0], [294, 0], [295, 0], [296, 0], [110, [0, 0, 0]],
+    [111, [1, 0, 0]], [112, [0, 1, 0]], [297, 0],
+    [302, 'LEADER{'], [290, 1], [291, 1], [10, [35, 26, 0]],
+    [11, [1, 0, 0]], [90, 0], [40, 0.36], [304, 'LEADER_LINE{'],
+    [10, [30, 23, 0]],
+    [91, 0], [170, 1], [92, -1056964608], [340, '0'], [171, -2],
+    [40, 0], [341, '0'], [93, 0], [305, '}'], [271, 0], [303, '}'],
+    [272, 9], [273, 9], [301, '}'], [340, '30'], [90, 279552],
+    [170, 1], [91, -1056964608], [341, '11'], [171, -2], [290, 1],
+    [291, 1], [41, 0.36], [42, 0.18], [172, 2], [343, '10'],
+    [173, 1], [95, 1], [174, 1], [175, 0], [92, -1056964608], [292, 0],
+    [93, -1056964608], [10, [1, 1, 1]], [43, 0], [176, 0],
+    [293, 0], [294, 0], [178, 0], [179, 1], [45, 1], [271, 0],
+    [272, 9], [273, 9], [295, 0],
+    [0, 'ENDSEC'], [0, 'SECTION'], [2, 'OBJECTS'],
+    [0, 'DICTIONARY'], [5, '20'], [330, '0'], [100, 'AcDbDictionary'], [281, 1],
+    [3, 'ACAD_MLEADERSTYLE'], [350, '21'],
+    [0, 'DICTIONARY'], [5, '21'], [102, '{ACAD_REACTORS'], [330, '20'],
+    [102, '}'], [330, '20'], [100, 'AcDbDictionary'], [280, 0], [281, 1],
+    [3, 'ValveStyle'], [350, '30'], [3, 'TwoSegments'], [350, '31'],
+  ]),
+  ...servedStyle('ValveStyle', '30', 1), ...servedStyle('TwoSegments', '31', 2),
+  ...mlPairs([[0, 'ENDSEC'], [0, 'EOF']]),
+].join('\n') + '\n'
+
+describe.skipIf(!GLUE)('MLEADER through the rebuilt engine and worker batch', () => {
+  it('retains source segment counts across consecutive worker write and reparse turns', { timeout: 90_000 }, () => {
+    const source = SERVED_MLEADER_DXF.replace('173\n2\n', '173\n3\n')
+    const script = [
+      'import { createRequire } from "node:module"',
+      'import { pathToFileURL } from "node:url"',
+      'const [workerPath, gluePath, source] = process.argv.slice(1)',
+      'const { handleMessage } = await import(pathToFileURL(workerPath).href)',
+      'const engine = createRequire(import.meta.url)(gluePath)',
+      'const loaded = await handleMessage({ type: "loadDocument", documentId: "segments", bytes: new TextEncoder().encode(source) }, engine)',
+      'const replies = [loaded]',
+      'for (let i = 0; i < 2; i++) replies.push(await handleMessage({ type: "applyEdit", op: "createLine", payload: { x1: i, y1: 0, x2: i + 1, y2: 1, layer: "0" } }, engine))',
+      'process.stdout.write(JSON.stringify(replies.map(r => ({ ok: r.ok, mlstyles: r.mlstyles }))))',
+    ].join('\n')
+    const replies = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', script, WORKER_PATH, path.join(PKG_DIR, GLUE), source], {
+      encoding: 'utf8', timeout: 90_000, maxBuffer: 8 * 1024 * 1024,
+    }))
+    for (const reply of replies) expect(reply.mlstyles).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'TwoSegments', segments: 3 })]))
+    for (const reply of replies.slice(1)) expect(reply.ok).toBe(true)
+  })
+  it('projects a served leader and the source segment counts of two styles', { timeout: 90_000 }, async () => {
+    const worker = realWorkerTransport()
+    const { result } = renderHook(() => useEngineSession({ createWorker: () => worker }))
+    await act(async () => { result.current.actions.openBytes(new TextEncoder().encode(SERVED_MLEADER_DXF), 'served-leader.dxf') })
+    const leader = result.current.entities.find((e) => e.type === 'MLEADER')
+    expect(leader).toMatchObject({ vertices: [[30, 23, 0], [35, 26, 0]], height: 1, text: 'Valve' })
+    expect(result.current.entities.mlstyles).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'ValveStyle', segments: 1 }),
+      expect.objectContaining({ name: 'TwoSegments', segments: 2 }),
+    ]))
+    const intake = engineIntake(result.current.entities)
+    expect(intake.polylines.filter((p) => p.handle === hexHandle(leader.handle))).toHaveLength(4)
+    expect(intake.polylines[0].pts).toEqual([[30, 23, 0], [35, 26, 0]])
+  })
+  it('creates and reparses the bounded leader, refuses edits by kind, and erases it', { timeout: 90_000 }, () => {
+    const out = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', MLEADER_SCRIPT, WORKER_PATH, path.join(PKG_DIR, GLUE), DXF], {
+      encoding: 'utf8', timeout: 90_000, maxBuffer: 8 * 1024 * 1024,
+    }))
+    expect(out.loaded.mlstyles).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'Standard', segments: null })]))
+    expect(out.created.ok).toBe(true)
+    expect(out.created.createdIds).toContain(out.entity.id)
+    expect(out.created.createdId).toBe(out.entity.id)
+    expect(out.entity).toMatchObject({ type: 'MLEADER', editable: false, style: 'Standard', text: 'Valve', vertices: [[0, 0, 0], [3, 4, 0]] })
+    expect(out.roundtrip).toMatchObject({ type: 'MLEADER', style: 'Standard', text: 'Valve', vertices: [[0, 0, 0], [3, 4, 0]] })
+    for (const refusal of out.refused) expect(refusal).toEqual({ ok: false, reason: 'a mleader is placed, not edited, in this round' })
+    expect(out.erased.ok).toBe(true)
+    expect(out.erased.count).toBe(out.loaded.count)
+    expect(out.erased.entities.some((e) => e.type === 'MLEADER')).toBe(false)
+  })
+})
+
 const BLOCK_DXF = [
   '0', 'SECTION', '2', 'HEADER', '9', '$ACADVER', '1', 'AC1027', '0', 'ENDSEC',
   '0', 'SECTION', '2', 'BLOCKS',

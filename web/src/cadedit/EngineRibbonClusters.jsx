@@ -37,7 +37,7 @@ import { QuickButton, QUICK_FILE_SLOT_ID } from '../site/CockpitTopBand.jsx'
 
 import { DEFERRED_REASONS, DRAW_REASONS, MODIFY_REASONS, clipboardReason, drawReason, forGroup, modifyReason, propertyReason, ribbonTool } from '../lib/actionRegistry.js'
 
-import { ACI_NAMES, LINEWEIGHT_VALUES, admissibleBlockName, buildCreatePayload, buildEditPayload, formatLineweight, readNumber } from './engineSession.js'
+import { ACI_NAMES, LINEWEIGHT_VALUES, admissibleBlockName, admissibleServerName, buildCreatePayload, buildEditPayload, formatLineweight, readNumber } from './engineSession.js'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
 import { PROMPTS } from './promptKeys.js'
 import { isPointExpression } from './pointExpression.js'
@@ -106,14 +106,9 @@ const DRAW_OFF = Object.freeze([])
 // SCALE and EXPLODE (W4g-4), OFFSET (W4g-5a), ARRAY's two forms (W4g-5b)
 // and the intersection verbs TRIM, EXTEND, FILLET and CHAMFER (W4g-6).
 // Nothing in the reference's Modify panel is a placeholder any more.
-// W4g-5d: the reference's other Annotation tools stay honest placeholders
-// beside the real TEXT (leaders run through APS, W4g-7). W4g-7b-04c: the
-// dimensions placeholder leaves now that DIMLINEAR/DIMALIGNED are real
-// registry records (draw:dimLinear, draw:dimAligned). W4g-7b-05c: Leader
-// carries its own DEFERRED_REASONS sentence, not the generic NOT_IN_ENGINE.
-const ANNOTATION_OFF = Object.freeze([
-  { id: 'annotation:leader', label: 'Leader', icon: 'leader', size: 'large', reason: DEFERRED_REASONS.leader },
-])
+// Annotation's TEXT, dimensions and MLEADER are real registry records (W4g-7c-3c);
+// Create Block is real too (W4g-7c-2c), so no engine panel keeps a placeholder here.
+const ANNOTATION_OFF = Object.freeze([])
 // The datalist id the INSERT name field's `list` attribute points at.
 const BLOCK_CATALOGUE_ID = 'cockpit-block-catalogue'
 
@@ -231,7 +226,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const gatheringMembers = (armedOp === 'group' && !inputs.groupName || armedOp === 'createBlock') && !inputs.membersDone
   const liveRefusal = prompt && !promptReason && !waitingStep && !gatheringMembers
     ? (expressionRefusal || (armedGroup === 'draw'
-      ? buildCreatePayload(armedOp, effective, session.entities.blocks, session.entities.dimstyles, session)
+      ? buildCreatePayload(armedOp, effective, session.entities.blocks, session.entities.dimstyles, session, session.entities.mlstyles)
       : buildEditPayload(armedOp, session.selectedId, effective, session.entities.linetypes, session.entities)).refusal || '')
     : ''
   const runOff = promptOff || !!liveRefusal || (!!waitingStep && !gatheringMembers)
@@ -524,7 +519,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
           disabled={fieldsOff}
         >
           <option value="">Standard (default)</option>
-          {(session.entities.dimstyles || []).map((name) => <option key={name} value={name}>{name}</option>)}
+          {(armedOp === 'createMleader' ? (session.entities.mlstyles || []).map((style) => style.name).filter(admissibleServerName) : (session.entities.dimstyles || [])).map((name) => <option key={name} value={name}>{name}</option>)}
         </select>
       )
     }

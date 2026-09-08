@@ -115,6 +115,8 @@ describe('cockpit icons (W4e)', () => {
     expect(registryIcons.has('array-polar')).toBe(true)
     expect(registryIcons.has('block-create')).toBe(true)
     expect(built.ids).toContain('block-create')
+    expect(ACTIONS.find((action) => action.id === 'draw:createMleader').icon).toBe('leader')
+    expect(unresolvedIconKeys(['leader'], built.ids || [])).toEqual([])
 
     const withoutArray = (built.ids || []).filter((key) => key !== 'array' && key !== 'array-polar')
     expect(unresolvedIconKeys(declaredIconKeys(), withoutArray))

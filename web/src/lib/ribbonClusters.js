@@ -371,7 +371,6 @@ function offTool(id, label, icon, size = 'small') {
 // honesty-ladder gate (check_honesty_ladder.mjs) can actually verify; a
 // parameter or a bracketed lookup reads as a computed expression there and
 // counts against its unverifiable-reason budget instead.
-const LEADER_OFF = { id: 'annotation:leader', label: 'Leader', text: 'Leader', icon: 'leader', size: 'large', title: 'Leader', disabled: true, reason: DEFERRED_REASONS.leader, onClick: () => {} }
 
 /**
  * The reference's Draw-tab panels beyond Draw and Modify (which the engine
@@ -383,13 +382,10 @@ export function referencePanels() {
   const note = REASONS.notInEngine
   return [
     {
-      // W4g-7b-04c: DIMLINEAR/DIMALIGNED are real now (draw:dimLinear,
-      // draw:dimAligned), so the Dimensions placeholder leaves; Leader stays
-      // honest, and its own reason (W4g-7b-05c) says why, specifically.
+      // Dimensions and Leader have real engine tools, so their placeholders leave.
       id: 'annotation', label: 'Annotation', kind: 'group', note,
       tools: [
         offTool('annotation:text', 'Text', 'text', 'large'),
-        LEADER_OFF,
       ],
     },
     {

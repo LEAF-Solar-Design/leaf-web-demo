@@ -70,12 +70,12 @@ describe('commandWords (W4f slice B): typed CAD words on the command line', () =
     for (const word of COMMAND_WORDS) expect(parseDrawingCommand(word)).not.toBeNull()
   })
 
-  // W4g-7b-05c: LEADER/LE, BLOCK/B, GROUP/G, UNGROUP are real command words —
-  // never null — but parse to the 'deferred' group with the control's own
-  // frozen reason, never an armable op.
-  it('parses the four deferred controls to group "deferred" with their exact frozen reason', () => {
-    expect(parseDrawingCommand('leader')).toMatchObject({ group: 'deferred', op: 'leader', verb: 'LEADER', word: 'leader', reason: DEFERRED_REASONS.leader })
-    expect(parseDrawingCommand('LE')).toMatchObject({ group: 'deferred', op: 'leader', verb: 'LEADER', word: 'LE', reason: DEFERRED_REASONS.leader })
+  // W4g-7c: LEADER (3c) and BLOCK (2c) are live command words; none of the four controls stays deferred.
+  it('parses LEADER and BLOCK as live commands', () => {
+    for (const word of ['ML', 'MLEADER', 'leader', 'LE']) {
+      expect(parseDrawingCommand(word)).toMatchObject({ group: 'draw', op: 'createMleader', verb: 'MLEADER', word })
+      expect(parseDrawingCommand(word).reason).toBeUndefined()
+    }
     expect(parseDrawingCommand('block')).toMatchObject({ group: 'draw', op: 'createBlock', verb: 'BLOCK', word: 'block' })
     expect(parseDrawingCommand('b')).toMatchObject({ group: 'draw', op: 'createBlock', verb: 'BLOCK', word: 'b' })
     expect(parseDrawingCommand('group')).toMatchObject({ group: 'groups', op: 'group', verb: 'GROUP', word: 'group' })

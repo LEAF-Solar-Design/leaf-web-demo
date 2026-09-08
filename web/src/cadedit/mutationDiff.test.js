@@ -134,6 +134,29 @@ describe('named group mutation plans', () => {
   })
 })
 
+describe('MLEADER contract records and opaque existing leaders', () => {
+  const leader = { id: '42', type: 'MLEADER', layer: '0', style: 'Standard', vertices: [[0, 0, 0], [3, 4, 0]], text: 'Valve', textLocation: [3.45, 4.09, 0] }
+  it('carries only the bounded add and allows erase', () => {
+    expect(diffPlan([], [leader]).mutations).toEqual({ added: [{
+      handle: '2A', kind: 'MLEADER', layer: '0', style: 'Standard',
+      pts: [[0, 0, 0], [3, 4, 0]], text: 'Valve',
+    }] })
+    expect(diffPlan([leader], []).mutations).toEqual({ removed: ['2A'] })
+    expect(diffPlan([leader], [{ ...leader }]).count).toBe(0)
+    const existing = { ...leader, vertices: [[0, 0, 0], [3, 4, 0], [5, 4, 0]], style: '' }
+    expect(diffPlan([existing], []).mutations).toEqual({ removed: ['2A'] })
+    expect(diffPlan([], [existing]).mutations).toBeNull()
+  })
+  it.each([
+    { vertices: [[1, 0, 0], [3, 4, 0]] }, { text: 'Other' }, { style: 'Other' },
+    { textLocation: [4, 5, 0] }, { layer: 'Other' }, { height: 1 }, { arrow: 2 }, { dogleg: 3 },
+  ])('uses the sidecar fallback for an existing leader change: %j', (patch) => {
+    expect(diffPlan([leader], [{ ...leader, ...patch }])).toMatchObject({
+      mutations: null, kind: 'MLEADER', cause: 'opaque-kind',
+    })
+  })
+})
+
 // The worker's projection: decimal ids (the intake's hex "A" is 10, "B" 11, "C1" 193).
 const line = (id, extra = {}) => ({ id: String(id), type: 'LINE', layer: '0', closed: false, vertices: [[0, 0, 0], [3, 4, 0]], radius: null, startDeg: null, endDeg: null, ...extra })
 const poly = (id, extra = {}) => ({ id: String(id), type: 'LWPOLYLINE', layer: 'Panels', closed: true, vertices: [[0, 0, 0], [2, 0, 0], [2, 2, 0], [0, 2, 0]], radius: null, startDeg: null, endDeg: null, ...extra })

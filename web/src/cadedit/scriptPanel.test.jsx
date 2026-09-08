@@ -5,7 +5,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { DEFERRED_REASONS } from '../lib/actionRegistry.js'
 import CadEditSurface from './CadEditSurface.jsx'
 import EngineRibbonClusters from './EngineRibbonClusters.jsx'
 import EngineSessionProvider, { useEngineSessionContext } from './EngineSessionProvider.jsx'
@@ -176,20 +175,24 @@ describe('W4g-7a the script runner', () => {
     expect(posts()).toHaveLength(0)
   })
 
-  // W4g-7b-05c: a deferred word (LEADER, BLOCK, GROUP, UNGROUP) is a real
-  // command word the parser never refuses at; the runner stops AT that line
-  // with its own frozen reason, and the LINE before it stays applied.
-  it('a deferred word (LEADER) stops the script at its own line with its reason; the LINE before it stays', async () => {
+  it.each(['LEADER', 'MLEADER'])('%s runs with the default style; the first refused line stops and earlier lines stay', async (word) => {
     mount()
-    await openAndLoad([H])
-    setScript('line 0,0 3,4\nleader')
+    const mlstyles = [{ name: 'Standard', segments: 1 }]
+    await openAndLoad(Object.assign([H], { mlstyles }))
+    setScript(`line 0,0 3,4\n${word} 30,23 35,26 "Valve"\nline 1,1 1,1\nline 0,0 9,9`)
     fireEvent.click(runButton())
     expect(posts()).toHaveLength(1)
-    reply('createLine', [H, L2], { createdId: '8' })
-    await waitFor(() => expect(status().textContent).toBe(`Script stopped at line 2: LEADER ${DEFERRED_REASONS.leader}.`), { timeout: 5000 })
-    expect(posts()).toHaveLength(1)
+    reply('createLine', [H, L2], { createdId: '8', mlstyles })
+    await waitFor(() => expect(posts()).toHaveLength(2))
+    expect(posts()[1]).toEqual({ type: 'applyEdit', op: 'createMleader', payload: {
+      x: 30, y: 23, x2: 35, y2: 26, text: 'Valve', style: 'Standard', layer: '',
+    } })
+    const leader = { id: '9', handle: '9', type: 'MLEADER', layer: '0', editable: false, vertices: [[30, 23, 0], [35, 26, 0]], text: 'Valve', style: 'Standard' }
+    reply('createMleader', [H, L2, leader], { createdId: '9', mlstyles })
+    await waitFor(() => expect(status().textContent).toBe('Script stopped at line 3: Line refused: the two points must differ.'), { timeout: 5000 })
+    expect(posts()).toHaveLength(2)
     expect(status().getAttribute('data-phase')).toBe('stopped')
-    expect(context.session.entityCount).toBe(2)
+    expect(context.session.entityCount).toBe(3)
   })
 
   it('COPYCLIP is answered the moment it returns, even when its sentence repeats; the same file can be chosen twice', async () => {

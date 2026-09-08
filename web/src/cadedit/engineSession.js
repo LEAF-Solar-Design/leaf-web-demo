@@ -87,7 +87,8 @@ export function projectionEntities(message) {
   // W4g-7b-04c: the DIMSTYLE catalogue rides the same way blocks/linetypes
   // do, so createDimension's style validation sees it survive undo/redo.
   const dimstyles = message?.dimstyles ?? entities.dimstyles
-  if (!Array.isArray(groups) && !Array.isArray(blocks) && !Array.isArray(linetypes) && !Array.isArray(dimstyles) && !linetypesTruncated) return entities
+  const mlstyles = message?.mlstyles ?? entities.mlstyles
+  if (!Array.isArray(groups) && !Array.isArray(blocks) && !Array.isArray(linetypes) && !Array.isArray(dimstyles) && !Array.isArray(mlstyles) && !linetypesTruncated) return entities
   const next = entities.slice()
   if (Array.isArray(groups)) next.groups = groups
   if (Array.isArray(blocks)) next.blocks = blocks
@@ -95,6 +96,7 @@ export function projectionEntities(message) {
   if (Array.isArray(linetypes)) next.linetypes = linetypes
   next.linetypesTruncated = linetypesTruncated
   if (Array.isArray(dimstyles)) next.dimstyles = dimstyles
+  if (Array.isArray(mlstyles)) next.mlstyles = mlstyles
   return next
 }
 
@@ -193,6 +195,10 @@ export function admissibleBlockName(rawName) {
   return trimmed
 }
 
+export function admissibleServerName(name) {
+  return typeof name === 'string' && /^[A-Za-z0-9][A-Za-z0-9 _.$-]{0,254}$/.test(name)
+}
+
 async function sha256Hex(bytes) {
   const digest = await crypto.subtle.digest('SHA-256', bytes)
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
@@ -240,6 +246,9 @@ export const INTERSECT_VERBS = Object.freeze({
 // to createDimension, the worker's only dimension-create op.
 export const WORKER_OP = Object.freeze({ createRectangle: 'createPolyline', dimLinear: 'createDimension', dimAligned: 'createDimension' })
 // Groups create dictionary objects, not Draw entities or scalar selections.
+export const MLEADER_OPS = Object.freeze({ createMleader: 'createMleader' })
+const MLEADER_TABLE = new Map(Object.entries(MLEADER_OPS))
+const isCreateOp = (op) => CREATE_OPS.includes(op) || MLEADER_TABLE.has(op) || op === BLOCK_OPS.block
 const GROUP_OPS = Object.freeze({ group: 'createGroup', ungroup: 'ungroup' })
 // Block creation replaces committed members and selects the new INSERT.
 export const BLOCK_OPS = Object.freeze({ block: 'createBlock' })
@@ -284,7 +293,7 @@ export function parsePointList(raw) {
  * with a typed reason; this layer exists so a typo costs a sentence, not a
  * round trip.
  */
-export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, layer, height, rot, text, ratio, bulges, name, sx, sy, dimtype, dx, dy, style, members, selectedId } = {}, blocks = [], dimstyles = [], context = {}) {
+export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, layer, height, rot, text, ratio, bulges, name, sx, sy, dimtype, dx, dy, style, members, selectedId } = {}, blocks = [], dimstyles = [], context = {}, mlstyles) {
   const layerName = String(layer ?? '').trim()
   // W4g-7b-04c-3: the seat ops dimLinear / dimAligned lower to createDimension
   // with a fixed dimtype from DIMTYPE_OF (the typed dimtype input is ignored
@@ -322,6 +331,26 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
       if (!sameBlockMember(original, entity)) return fail('members must have unchanged committed geometry and properties')
     }
     return { payload: { name: blockName, x: bx, y: by, members: ids, layer: '0' } }
+  }
+  if (MLEADER_TABLE.has(op)) {
+    const [px, py, lx, ly] = [x, y, x2, y2].map(fmtDelta)
+    if ([px, py, lx, ly].some((v) => v === null)) return { refusal: 'Mleader refused: x, y, x2 and y2 must all be numbers.' }
+    if (Number(px.toFixed(3)) === Number(lx.toFixed(3)) && Number(py.toFixed(3)) === Number(ly.toFixed(3))) return { refusal: 'the two points coincide at the drawing precision (0.001)' }
+    const value = String(text ?? '')
+    if (value.includes('^')) return { refusal: "mleader text cannot contain ^: the engine's DXF reader rewrites it" }
+    if (!value) return { refusal: 'Mleader refused: enter the text to place.' }
+    if ([...value].length > 256) return { refusal: 'Mleader refused: at most 256 characters.' }
+    if ([...value].some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) > 126 || '|\\%'.includes(c)) || value.trim() !== value) {
+      return { refusal: 'mleader text must be printable ASCII without |, \\ or % and without edge whitespace' }
+    }
+    const requestedStyle = String(style ?? '').trim()
+    const styleName = requestedStyle || 'Standard'
+    if (!admissibleServerName(styleName)) return { refusal: 'Mleader refused: the style name must follow the server name rule (letters, digits, spaces, _, ., $ and -, starting with a letter or digit, at most 255 characters).' }
+    if (!admissibleServerName(layerName || '0')) return { refusal: 'Mleader refused: the layer name must follow the server name rule (letters, digits, spaces, _, ., $ and -, starting with a letter or digit, at most 255 characters).' }
+    const definition = Array.isArray(mlstyles) ? mlstyles.find((s) => String(s?.name ?? '').toLowerCase() === styleName.toLowerCase()) : null
+    if (Array.isArray(mlstyles) && !definition) return { refusal: 'mleader_style_unknown' }
+    if (definition && typeof definition.segments === 'number' && definition.segments !== 1) return { refusal: 'Mleader refused: the style must use one leader segment.' }
+    return { payload: { x: px, y: py, x2: lx, y2: ly, text: value, style: definition?.name ?? styleName, layer: layerName } }
   }
   if (op === 'createLine') {
     const [x1, y1, xx2, yy2] = [x, y, x2, y2].map(fmtDelta)
@@ -585,8 +614,8 @@ export function lowerSteps(steps, linetypes = [], entities = null) {
   const lowered = []
   for (const step of steps) {
     const op = String(step?.op ?? '')
-    if (CREATE_OPS.includes(op)) {
-      const { payload, refusal } = buildCreatePayload(op, step.inputs || {})
+    if (isCreateOp(op)) {
+      const { payload, refusal } = buildCreatePayload(op, step.inputs || {}, entities?.blocks, entities?.dimstyles, undefined, entities?.mlstyles)
       if (refusal) return { refusal }
       lowered.push({ op, payload })
       continue
@@ -772,6 +801,9 @@ export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer, x1,
   // script runner, the store's own run, planMatchprop, the batch planner):
   // an INSERT or a DIMENSION selection refuses every geometry verb, ERASE
   // and the three property ops (plus MATCHPROP's own source ladder) excepted.
+  if (Array.isArray(entities) && op !== 'delete' && entities.find((candidate) => candidate.id === entityId)?.type === 'MLEADER') {
+    return { refusal: 'a mleader is placed, not edited, in this round' }
+  }
   if (Array.isArray(entities) && op !== 'delete' && !EDIT_KIND_EXEMPT_OPS.has(op)) {
     const target = entities.find((candidate) => candidate.id === entityId)
     if (target?.type === 'INSERT') return { refusal: 'an INSERT is placed, not edited, in this round' }
@@ -1140,8 +1172,7 @@ export default function useEngineSession({
         // A create reports what it drew BY ID (the worker found it again by
         // handle in the re-parse); the selection lands on it. A create whose
         // entity the writer dropped is a defect and reads as one.
-        const isCreate = CREATE_OPS.includes(message.op)
-          || message.op === BLOCK_OPS.block
+        const isCreate = isCreateOp(message.op)
           || (CREATING_EDITS.includes(message.op) && Object.prototype.hasOwnProperty.call(message, 'createdId'))
         const createdId = isCreate && message.createdId !== null && message.createdId !== undefined
           ? String(message.createdId)
@@ -1302,11 +1333,11 @@ export default function useEngineSession({
       patch({ status: 'a save is in flight; wait for its receipt' })
       return null
     }
-    if (!CREATE_OPS.includes(op) && op !== BLOCK_OPS.block) {
+    if (!isCreateOp(op)) {
       patch({ errorKind: SESSION_ERROR.REFUSED, status: `Draw refused: unknown operation ${op}.` })
       return
     }
-    const { payload, refusal } = buildCreatePayload(op, inputs, sessionRef.current.entities.blocks, sessionRef.current.entities.dimstyles, sessionRef.current)
+    const { payload, refusal } = buildCreatePayload(op, inputs, sessionRef.current.entities.blocks, sessionRef.current.entities.dimstyles, sessionRef.current, sessionRef.current.entities.mlstyles)
     if (refusal) {
       patch({ errorKind: SESSION_ERROR.REFUSED, status: refusal })
       return
@@ -1361,6 +1392,10 @@ export default function useEngineSession({
     // W4g-7b-04c: the 05c sentence, adopted for DIMENSION. Unlike INSERT, a
     // dimension's DELETE is still allowed (a removal lowers as `removed`);
     // every other verb, including the property ops above, refuses here.
+    if (op !== 'delete' && targetType === 'MLEADER') {
+      patch({ errorKind: SESSION_ERROR.REFUSED, status: 'a mleader is placed, not edited, in this round' })
+      return
+    }
     if (op !== 'delete' && targetType === 'DIMENSION') {
       patch({ errorKind: SESSION_ERROR.REFUSED, status: 'a dimension is placed, not edited, in this round' })
       return

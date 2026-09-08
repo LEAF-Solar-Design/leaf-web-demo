@@ -66,6 +66,10 @@ const WORDS = Object.freeze({
   cha: { group: 'modify', op: 'chamfer', verb: 'CHAMFER' },
   // W4g-5d: the reference's TEXT, one letter like the rest of its Draw row.
   text: { group: 'draw', op: 'createText', verb: 'TEXT' },
+  mleader: { group: 'draw', op: 'createMleader', verb: 'MLEADER' },
+  ml: { group: 'draw', op: 'createMleader', verb: 'MLEADER' },
+  leader: { group: 'draw', op: 'createMleader', verb: 'MLEADER' },
+  le: { group: 'draw', op: 'createMleader', verb: 'MLEADER' },
   t: { group: 'draw', op: 'createText', verb: 'TEXT' },
   // W4g-5c: the reference's clipboard commands, in its own words.
   copyclip: { group: 'clipboard', op: 'copyClip', verb: 'COPYCLIP' },
@@ -109,12 +113,9 @@ const WORDS = Object.freeze({
 
 export const COMMAND_WORDS = Object.freeze(Object.keys(WORDS))
 
-// W4g-7b-05c: the four controls this crate defers (Change A) still take
-// their reference words — a drafter typing LEADER, BLOCK or GROUP must never
-// meet silence. `key` names the DEFERRED_REASONS entry the parse carries.
+// BLOCK still takes its reference words while creation remains deferred.
+// `key` names the DEFERRED_REASONS entry the parse carries.
 const DEFERRED = Object.freeze({
-  leader: { key: 'leader', verb: 'LEADER' },
-  le: { key: 'leader', verb: 'LEADER' },
 })
 
 /**

@@ -149,14 +149,17 @@ function projectDocument(doc) {
       def2: Array.isArray(entity.def2) ? entity.def2 : null,
       dimline: Array.isArray(entity.dimline) ? entity.dimline : null,
       style: entity.style ?? null,
+      textLocation: entity.textLocation ?? null,
+      arrow: entity.arrow ?? null,
+      dogleg: entity.dogleg ?? null,
       measurement: entity.measurement ?? null,
     }
   })
-  return { entities, groups: projection.groups ?? [], blocks: projection.blocks ?? [], linetypes: projection.linetypes ?? [], linetypesTruncated: projection.linetypesTruncated === true, dimstyles: projection.dimstyles ?? [] }
+  return { entities, groups: projection.groups ?? [], blocks: projection.blocks ?? [], linetypes: projection.linetypes ?? [], linetypesTruncated: projection.linetypesTruncated === true, dimstyles: projection.dimstyles ?? [], mlstyles: projection.mlstyles ?? [] }
 }
 
 function loadedResponse(documentId, doc) {
-  const { entities, groups, blocks, linetypes, linetypesTruncated, dimstyles } = projectDocument(doc)
+  const { entities, groups, blocks, linetypes, linetypesTruncated, dimstyles, mlstyles } = projectDocument(doc)
   return {
     type: 'documentLoaded',
     groups,
@@ -167,6 +170,7 @@ function loadedResponse(documentId, doc) {
     linetypes,
     linetypesTruncated,
     dimstyles,
+    mlstyles,
     blockBasePatched: doc.blockBasePatched ?? false,
     // The whole-document engine reads and rewrites EVERYTHING, so there is
     // no lossy-write refusal class: writable is unconditionally true and
@@ -231,6 +235,8 @@ const CREATE_OPS = Object.freeze({
     String(p.name ?? ''), Number(p.x), Number(p.y), Number(p.rotationDeg), Number(p.sx), Number(p.sy), Number(p.sz), String(p.layer ?? '')),
   // W4g-7b-04c: LINEAR / ALIGNED DIMENSION; the wrapper refuses before it
   // writes (see create_dimension_core), including a rotation on ALIGNED.
+  createMleader: (doc, p) => doc.createMleader(
+    Number(p.x), Number(p.y), Number(p.x2), Number(p.y2), String(p.text ?? ''), String(p.style ?? 'Standard'), String(p.layer ?? '')),
   createDimension: (doc, p) => doc.createDimension(
     String(p.dimtype ?? ''), Number(p.x1), Number(p.y1), Number(p.x2), Number(p.y2),
     Number(p.dx), Number(p.dy), Number(p.rotationDeg ?? 0), String(p.style ?? ''), String(p.layer ?? '')),
@@ -413,7 +419,7 @@ async function applyEdit(engine, message) {
     current = null
     return refused(op, error instanceof Error ? error.message : String(error))
   }
-  const { entities, groups, blocks, linetypes, linetypesTruncated, dimstyles } = projection
+  const { entities, groups, blocks, linetypes, linetypesTruncated, dimstyles, mlstyles } = projection
   current = { documentId: current.documentId, doc: reparsed }
   const reply = {
     type: 'editApplied',
@@ -426,6 +432,7 @@ async function applyEdit(engine, message) {
     linetypes,
     linetypesTruncated,
     dimstyles,
+    mlstyles,
     blockBasePatched,
     bytes: written,
     byteLength: written.length,
@@ -448,6 +455,7 @@ function reparseDocument(engine, bytes, previous) {
   // A write cannot recover a binary base or an unmatched definition marker.
   if (previous.blockBasesUnknown === true) doc.blockBasesUnknown = true
   if (typeof doc.inheritBlockBaseUnknowns === 'function') doc.inheritBlockBaseUnknowns(previous)
+  if (typeof doc.inheritMlstyleSegments === 'function') doc.inheritMlstyleSegments(previous)
   return doc
 }
 
@@ -497,7 +505,7 @@ export async function handleMessage(raw, engineOverride = null) {
       current = null
       const reason = error instanceof Error ? error.message : String(error)
       if (reason.startsWith('block names collide case-insensitively: ') || reason.startsWith('block definitions collapsed on load: ')) {
-        return { type: 'documentLoaded', documentId, entityCount: 0, entities: [], blocks: [], linetypes: [], linetypesTruncated: false, dimstyles: [],
+        return { type: 'documentLoaded', documentId, entityCount: 0, entities: [], blocks: [], linetypes: [], linetypesTruncated: false, dimstyles: [], mlstyles: [],
           blockBasePatched: false, writable: false, refusal: reason, unsupported: [] }
       }
       return { type: 'error', message: `parse_failed:${reason}` }
