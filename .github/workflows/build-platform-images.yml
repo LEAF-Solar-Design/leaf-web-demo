@@ -1984,8 +1984,19 @@ jobs:
             digest-web-dist --root dist)"
           echo "sha256=$artifact_sha256" >> "$GITHUB_OUTPUT"
 
+      - name: Publish exact v3 web deployment artifact to S3
+        if: matrix.image == 'web'
+        env:
+          ARTIFACT_PATH: ${{ steps.surface.outputs.reuse == 'true' && format('{0}/reused-web-dist', runner.temp) || 'web/dist' }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          python scripts/release_result_transport.py put --kind surface-web-dist \
+            --source "$SOURCE_SHA" --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --path "$ARTIFACT_PATH"
+
       - name: Preserve the exact v3 web deployment artifact
         if: matrix.image == 'web'
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: surface-web-dist-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
@@ -2074,7 +2085,17 @@ jobs:
             + (if .service == "web" then {artifact_sha256} else {} end)
           ' "$RUNNER_TEMP/surface-predicate.json" > "$RUNNER_TEMP/service-entry.json"
 
+      - name: Publish exact v3 service entry to S3
+        env:
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          IMAGE: ${{ matrix.image }}
+        run: |
+          python scripts/release_result_transport.py put --kind "service-$IMAGE" \
+            --source "$SOURCE_SHA" --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --path "$RUNNER_TEMP/service-entry.json"
+
       - name: Upload exact v3 service entry
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: surface-result-${{ matrix.image }}-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
@@ -2110,24 +2131,31 @@ jobs:
           ref: ${{ needs.prepare.outputs.source_sha }}
           persist-credentials: false
 
-      - name: Download exact v3 service entries
-        uses: actions/download-artifact@v4
-        with:
-          pattern: surface-result-*-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/surface-results
-
-      - name: Download exact v3 web deployment artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: surface-web-dist-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
-          path: web/dist
-
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v6.1.0
         with:
           role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: GHA-VerifyPlatformImages-${{ github.run_id }}
+
+      - name: Download exact v3 service entries
+        env:
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          for image in app broker canonical-worker harness web; do
+            python scripts/release_result_transport.py get --kind "service-$image" \
+              --source "$SOURCE_SHA" --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+              --path "$RUNNER_TEMP/surface-results/surface-result-$image-$SOURCE_SHA-attempt-$GITHUB_RUN_ATTEMPT/service-entry.json"
+          done
+
+      - name: Download exact v3 web deployment artifact
+        env:
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          python scripts/release_result_transport.py get --kind surface-web-dist \
+            --source "$SOURCE_SHA" --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --path web/dist
 
       - name: Login to ECR for immutable digest verification
         uses: aws-actions/amazon-ecr-login@v2
@@ -2186,7 +2214,20 @@ jobs:
             done
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Publish immutable staging supply set and web dist to S3
+        env:
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          python scripts/release_result_transport.py put --kind staging-supply-set \
+            --source "$SOURCE_SHA" --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --path "$RUNNER_TEMP/staging-supply-set.json"
+          python scripts/release_result_transport.py put --kind web-dist \
+            --source "$SOURCE_SHA" --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --path web/dist
+
       - name: Upload immutable staging supply-set manifest
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: staging-supply-set-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
@@ -2195,6 +2236,7 @@ jobs:
           retention-days: 30
 
       - name: Upload deterministic web deployment artifact
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: web-dist-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
