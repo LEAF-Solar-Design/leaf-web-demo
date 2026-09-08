@@ -1456,7 +1456,7 @@ test.describe('route matrix, rail ON', () => {
     await expect(redoQuick).toBeDisabled()
     await bar.fill('u')
     await bar.press('Enter')
-    // Undo reloads the document, the engine drops its selection, and the console mirror follows (#1143).
+    // Escape (pressed above with nothing armed) clears the console selection, and since #1143 the forward mirror carries that into the engine, so the dock is empty until the entity is re-selected; the store keeps a selection across the undo reload.
     await expect(dockColor).toHaveCount(0, { timeout: 60_000 })
     await expect(redoQuick).toBeEnabled()
     await page.locator(`input[type="radio"][value="${circleId}"]`).check()
@@ -1726,7 +1726,10 @@ test.describe('route matrix, rail ON', () => {
     await requireLocalReady(request, test, API_BASE)
     await setRail(page, '1')
     let headDxf = '0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n'
+    // After a reload, live boot can fetch the head before the mock switch is checked.
+    // Route both heads to this row's bytes so that race cannot open the stack's head.
     await page.route('**/sample.dxf', (route) => route.fulfill({ status: 200, contentType: 'application/dxf', body: headDxf }))
+    await page.route('**/api/drawings/*/dxf*', (route) => route.fulfill({ status: 200, contentType: 'application/dxf', body: headDxf }))
     await page.goto('/app?dev=1')
     await page.getByLabel('Use mock data (off = live backend)').check()
     const ribbon = page.getByTestId('drafting-ribbon')
