@@ -209,7 +209,7 @@ def test_mleader_inspection_precedes_frozen_dimension_tail_and_stays_bounded():
     ms = next(i for i, line in enumerate(blocks) if '"MS|"' in line)
     ml = next(i for i, line in enumerate(blocks) if '"ML|"' in line)
     assert ms < ml < len(blocks) - 2
-    assert '"MLX|1"' in blocks[ml]
+    assert '(strcat "MLX|" (cdr (assoc 5 data)))' in blocks[ml]
     assert 'cons 410 "Model"' in blocks[-3]
     for script in (build_scr(extra_blocks=blocks), apply_lisp.build_apply_scr_v3()):
         for line in script.splitlines():
@@ -539,7 +539,7 @@ def test_mleader_uploaded_plan_result_binding(tmp_path, monkeypatch, damage):
     app.include_router(drawings.router)
     client = TestClient(app)
     tenant, drawing = "tenant-mleader-save", "mleader-save"
-    head = {**_base(), "mleaders": []}
+    head = {**_base(), "mleaders": [], "mleaders_unsupported": 0}
     plan = {"added": [_mleader(handle="301")]}
     if damage == "unsupported_remove":
         head = _mleader_dxf_fixture()
@@ -647,7 +647,7 @@ def test_mleader_lisp_contains_ucs_catch_frozen_guard_and_restore_order():
     row = next(line for line in lisp.MUTATION_INSPECT_BLOCKS
                if line.startswith("(defun leaf-ml-row "))
     assert '(if (and style (= branches 1)' in row
-    assert '(write-line "MLX|1" f)' in row
+    assert '(write-line (strcat "MLX|" (cdr (assoc 5 data))) f)' in row
 
 
 @pytest.mark.parametrize("record,index,key", [(MS_RECORD, 3, "mlstyles"), (ML_RECORD, 5, "mleaders")])
@@ -688,3 +688,148 @@ def test_mleader_entity_bad_numbers_raise_dxf_parse_error(needle, replacement):
     assert needle in raw
     with pytest.raises(DxfParseError, match="numeric"):
         parse_dxf_bytes(raw.replace(needle, replacement))
+
+
+# --- record 3s-5: sidecar scope, raw inventory and layer override ----------
+
+def test_mleader_unsupported_handles_survive_both_extractors():
+    import intake_parse
+    import lisp
+    from dxf_intake import parse_dxf_bytes
+    from intake_dxf import intake_to_dxf
+
+    raw = intake_to_dxf(_mleader_dxf_fixture()).replace(
+        b"172\n2\n343\n", b"172\n1\n343\n")
+    assert parse_dxf_bytes(raw)["mleaders_unsupported_handles"] == ["9C76"]
+    parsed = intake_parse.parse_text("MLX|AB\nMLX|9C76\nMLX|1", "probe.dwg")
+    assert parsed["mleaders_unsupported"] == 3
+    assert parsed["mleaders_unsupported_handles"] == ["AB", "9C76"]
+    legacy = intake_parse.parse_text("MLX|1", "probe.dwg")
+    assert legacy["mleaders_unsupported"] == 1
+    assert "mleaders_unsupported_handles" not in legacy
+    assert "mleaders_unsupported_handles" not in intake_parse.parse_text("", "probe.dwg")
+    row = next(line for line in lisp.MUTATION_INSPECT_BLOCKS
+               if line.startswith("(defun leaf-ml-row "))
+    assert '(strcat "MLX|" (cdr (assoc 5 data)))' in row
+
+
+@pytest.mark.parametrize("damage", ["removed_survives", "inventory_swap", "genuine"])
+def test_mleader_raw_inventory_verifies_removal(damage):
+    import copy
+
+    base = {**_mleader_dxf_fixture(), "mleaders_unsupported": 1,
+            "mleaders_unsupported_handles": ["AB"]}
+    # An empty plan is refused by the contract, so the swap case carries an
+    # unrelated LINE add; every case derives its actual through the mock
+    # writer first, then applies the damage to the unsupported inventory.
+    canonical = validate_mutations(
+        base, {"added": [{"handle": "301", "kind": "LINE", "layer": "0",
+                          "pts": [[0, 0, 0], [1, 0, 0]]}]}
+        if damage == "inventory_swap" else {"removed": ["9C76"]})
+    actual = write_loop.apply_mutations(copy.deepcopy(base), canonical)
+    actual.setdefault("mleaders_unsupported", base["mleaders_unsupported"])
+    actual.setdefault("mleaders_unsupported_handles", list(base["mleaders_unsupported_handles"]))
+    if damage != "genuine":
+        actual["mleaders_unsupported_handles"] = [
+            "9C76" if damage == "removed_survives" else "CD"]
+        with pytest.raises(ValueError, match=(
+                "removed MLEADER" if damage == "removed_survives"
+                else "unsupported MULTILEADER inventory changed")):
+            write_loop.verify_live_mutation_effects(base, actual, canonical)
+    else:
+        assert write_loop.verify_live_mutation_effects(base, actual, canonical) is None
+
+
+def test_mleader_legacy_base_accepts_unrelated_line_and_actual_unsupported():
+    base = {"layers": ["0"], "polylines": []}
+    canonical = validate_mutations(base, {"added": [{
+        "handle": "301", "kind": "LINE", "layer": "0",
+        "pts": [[0, 0, 0], [1, 0, 0]]}]})
+    actual = write_loop.apply_mutations(base, canonical)
+    actual.update(mleaders_unsupported=1, mleaders_unsupported_handles=["AB"])
+    assert write_loop.verify_live_mutation_effects(base, actual, canonical) is None
+
+
+def test_mleader_materialised_catalogue_canonicalises_both_spellings():
+    from dxf_intake import parse_dxf_bytes
+    from intake_dxf import intake_to_dxf
+
+    base = _base()
+    del base["mlstyles"]
+    result = write_loop.apply_mutations(base, {"added": [
+        _mleader(handle="301", style="Custom"),
+        _mleader(handle="302", style="custom")]})
+    assert [s["name"] for s in result["mlstyles"]] == ["Custom"]
+    assert [e["style"] for e in result["mleaders"]] == ["Custom", "Custom"]
+    assert parse_dxf_bytes(intake_to_dxf(result))["mleaders"] == result["mleaders"]
+
+
+def test_mleader_lisp_saves_pins_and_restores_mleaderlayer():
+    import apply_lisp
+
+    apply = next(line for line in apply_lisp.build_apply_scr_v3().splitlines()
+                 if line.startswith("(defun leaf-apply-addmleader "))
+    assert (apply.index('oldmleaderlayer (getvar "MLEADERLAYER")')
+            < apply.index('(vl-catch-all-apply')
+            < apply.index('(setvar "MLEADERLAYER" ".")')
+            < apply.index('(command "_.MLEADER"')
+            < apply.index('(setvar "MLEADERLAYER" oldmleaderlayer)')
+            < apply.index('(vl-catch-all-error-p caught)'))
+
+
+@pytest.mark.parametrize("case", ["empty_sidecar", "intake_sidecar",
+                                   "removed_survives", "genuine"])
+def test_mleader_save_scope_and_raw_inventory(tmp_path, monkeypatch, case):
+    import hashlib
+    import io
+    import json
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import deps
+    import store
+    from envelopes import install_error_handlers
+    from intake_dxf import intake_to_dxf
+    from routers import drawings
+
+    monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "drawings"))
+    monkeypatch.delenv("LEAF_AUTH_LIVE", raising=False)
+    monkeypatch.setattr(deps, "APS_LIVE", False)
+    app = FastAPI()
+    install_error_handlers(app)
+    app.include_router(drawings.router)
+    client = TestClient(app)
+    tenant, drawing = "tenant-mleader-save", "mleader-save"
+    head = {**_mleader_dxf_fixture(), "mleaders_unsupported": 1,
+            "mleaders_unsupported_handles": ["AB"]}
+    plan = {"removed": ["9C76"]}
+    upload = _mleader_dxf_fixture()
+    if case == "genuine":
+        upload["mleaders"][0]["handle"] = "AB"
+    data = intake_to_dxf(upload).replace(b"172\n2\n343\n", b"172\n1\n343\n")
+    if case.endswith("sidecar"):
+        head = _base()
+        plan = {} if case == "empty_sidecar" else {"added": [{
+            "handle": "301", "kind": "LINE", "layer": "0",
+            "pts": [[0, 0, 0], [1, 0, 0]]}]}
+        data = intake_to_dxf(write_loop.apply_mutations(head, plan))
+    backend = store.FilesystemBackend(str(tmp_path / "drawings"))
+    source = tmp_path / "base.dwg"
+    source.write_bytes(json.dumps(head).encode() if case == "intake_sidecar"
+                       else b"AC1032" + b"\x00" * 64)
+    store.ingest_drawing(backend, tenant, str(source), drawing_id=drawing)
+    write_loop.publish_intake_cache(backend, tenant, drawing, 1, source.read_bytes(), head)
+    checkout = client.post(f"/api/drawings/{drawing}/checkout",
+        headers={"X-Tenant-Id": tenant}, json={"holder": "editor", "ttl_s": 3600})
+    assert checkout.status_code == 200, checkout.text
+    response = client.post(f"/api/drawings/{drawing}/versions/plan",
+        headers={"X-Tenant-Id": tenant,
+                 "X-Checkout-Capability": checkout.json()["checkout_capability"]},
+        files={"file": ("edited.dxf", io.BytesIO(data), "application/dxf")},
+        data={"parent_version": "1", "source_digest": hashlib.sha256(data).hexdigest(),
+              "plan": json.dumps({"mutations": plan})})
+    assert response.status_code == (422 if case == "removed_survives" else 201), response.text
+    if case.endswith("sidecar"):
+        assert response.json()["commit"] == "dxf-sidecar"
+    elif case == "removed_survives":
+        assert "removed MLEADER" in response.text
+        assert store.resolve_version(backend, tenant, drawing, "head")[0] == 1
