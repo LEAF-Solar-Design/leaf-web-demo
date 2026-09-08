@@ -160,7 +160,10 @@ const WORKSPACE_BOOTSTRAP_DETAILS = new Set([
 ])
 
 export function isWorkspaceBootstrapRequired(error) {
-  return error?.status === 403 && WORKSPACE_BOOTSTRAP_DETAILS.has(error?.body?.detail)
+  return error?.status === 403 && (
+    WORKSPACE_BOOTSTRAP_DETAILS.has(error?.body?.detail) ||
+    WORKSPACE_BOOTSTRAP_DETAILS.has(error?.body?.error?.message)
+  )
 }
 
 // --- Session / intake ---------------------------------------------------
