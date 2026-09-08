@@ -102,7 +102,8 @@ def test_case_table_round_trip_preserves_block_base_and_insert_transform(sx):
     intake = _fixture(sx)
     before = copy.deepcopy(intake)
     data = intake_dxf.intake_to_dxf(intake)
-    assert dxf_intake.parse_dxf_bytes(data) == intake
+    # DXF reads the whole file, so member evidence coverage is unconditional.
+    assert dxf_intake.parse_dxf_bytes(data) == {**intake, "memberEvidenceCovered": True}
     assert intake == before
     block = next(row for kind, row in _records(data) if kind == "BLOCK" and row[2] == "Fixture")
     assert block[10] == "1.0" and block[20] == "2.0" and block[30] == "0.0"
@@ -116,7 +117,8 @@ def test_hand_written_dxf_and_inspection_fixture_pair_match_field_for_field():
     data = intake_dxf.intake_to_dxf(fixture)
     actual = dxf_intake.parse_dxf_bytes(data)
     inspected = intake_parse.parse_text(_inspection_text(fixture), "upload.dxf")
-    assert actual == fixture
+    # DXF coverage is unconditional; inspection needs an MEC|1 record.
+    assert actual == {**fixture, "memberEvidenceCovered": True}
     assert actual["blocks"] == inspected["blocks"]
     assert actual["inserts"] == inspected["inserts"]
     assert len(actual["inserts"]) == 1
@@ -225,7 +227,8 @@ def test_all_supported_block_child_geometries_use_the_inspection_precision():
     )
     blocks = intake_parse.parse_text(text, "upload.dxf")["blocks"]
     intake = {"dwg": "upload.dxf", "layers": ["0"], "polylines": [], "blocks": blocks}
-    assert dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf(intake)) == intake
+    # DXF reads the whole file, so member evidence coverage is unconditional.
+    assert dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf(intake)) == {**intake, "memberEvidenceCovered": True}
     lw, arc, label = blocks["Shapes"]["children"]
     assert lw["pts"] == [[1.123, 2.235], [4.0, 5.0]]
     assert lw["elev"] == 3.123 and lw["nrm"] == [0.0, 1.0, 0.0]
@@ -324,7 +327,10 @@ def test_no_blocks_dxf_has_the_legacy_intake_bytes():
         '"closed": false, "pts": [[1.0, 2.0, 0.0], [4.0, 2.0, 0.0]], '
         '"xdata": null, "handle": "A"}]}'
     ).encode()
-    assert json.dumps(dxf_intake.parse_dxf_bytes(data)).encode() == expected
+    parsed = dxf_intake.parse_dxf_bytes(data)
+    # DXF coverage is unconditional; the remaining legacy bytes stay pinned.
+    assert parsed.pop("memberEvidenceCovered") is True
+    assert json.dumps(parsed).encode() == expected
 
 
 def test_intake_without_blocks_or_inserts_has_the_legacy_dxf_bytes():
@@ -401,4 +407,5 @@ def test_incomplete_catalogue_emits_only_the_supported_children_it_carries():
     block["count"] = 3
     block["children"].append({"kind": "OTHER", "type": "HATCH", "layer": ""})
     parsed = dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf(intake))
-    assert parsed == _fixture()
+    # DXF reads the whole file, so member evidence coverage is unconditional.
+    assert parsed == {**_fixture(), "memberEvidenceCovered": True}

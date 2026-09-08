@@ -300,6 +300,9 @@ def _validate_block_defs(intake, mutations, index):
     definitions = _op_list(mutations, "block_defs")
     if not definitions:
         return []
+    if intake.get("memberEvidenceCovered") is not True or any(
+            str(error).startswith(("BM:", "MEC:")) for error in intake.get("parseErrors", [])):
+        raise ValueError("member evidence unavailable in this inspection")
     blocks = intake.get("blocks", {})
     total = intake.get("blocksCapped", len(blocks))
     if total > len(blocks):
@@ -336,17 +339,25 @@ def _validate_block_defs(intake, mutations, index):
             if h not in index:
                 raise ValueError("block member must be a committed LINE, straight LWPOLYLINE, CIRCLE or ARC; nested INSERT is excluded")
             kind, entity = index[h]
-            entity = {**entity, **intake.get("blockMembers", {}).get(h, {})}
             if entity.get("kind", kind) not in ("LINE", "LWPOLYLINE", "CIRCLE", "ARC"):
                 raise ValueError("block member kind must be LINE, LWPOLYLINE, CIRCLE or ARC")
             if (entity.get("paper_space") or entity.get("paperspace") or entity.get("block")
                     or entity.get("space", "model") not in ("model", "Model", "ModelSpace", 0)):
                 raise ValueError("block members must be model-space entities, never nested")
+            if "normal" in entity:
+                raise ValueError("block members must be planar with normal +Z")
             normal = entity.get("nrm", [0, 0, 1])
             if not isinstance(normal, (list, tuple)) or len(normal) != 3 or not _normal_is_up(entity):
                 raise ValueError("block members must be planar with normal +Z")
-            if any(float(v) != 0 for v in entity.get("bulges", [])) or entity.get("bulge", 0):
+            if "bulges" in entity or entity.get("bulge", 0):
                 raise ValueError("block LWPOLYLINE must have straight segments, every bulge 0")
+            if entity.get("width"):
+                raise ValueError("block LWPOLYLINE must have zero constant and vertex width")
+            if (any(h.upper() in {str(m).upper() for m in g.get("members", [])}
+                    for g in intake.get("groups", [])) or any(
+                    str(m.get("member", "")).upper() == h.upper()
+                    for m in intake.get("group_memberships", []))):
+                raise ValueError("block member belongs to a GROUP; ungroup it first")
             props = (intake.get("properties") or {}).get(h, entity.get("properties", {}))
             if (props.get("aci", 256) == 0 or str(props.get("linetype", "ByLayer")).casefold() == "byblock"
                     or props.get("lineweight", -1) == -2):
@@ -369,7 +380,7 @@ def _validate_block_defs(intake, mutations, index):
                 if any(references(dim.get(field)) for field in (
                         "references", "associated_handles", "definition_association", "association")):
                     dependencies = [dim.get("handle")]
-            if dependencies:
+            if dependencies or "dimensionRef" in entity:
                 raise ValueError("block member is referenced by a DIMENSION association or reactor")
             for op in ("transforms", "set_layer", "set_points", "set_circle", "set_arc", *V3_SET_OPS):
                 if any(isinstance(e, dict) and e.get("handle") == h for e in _op_list(mutations, op)):
@@ -386,8 +397,7 @@ def _validate_block_defs(intake, mutations, index):
         if (len(matches) != 1 or not isinstance(insert, dict) or insert.get("kind") != "INSERT"
                 or insert.get("name") != name or insert.get("layer") != "0"
                 or insert.get("pt") != raw["base"] or insert.get("rot") != 0
-                or insert.get("scale") != [1, 1, 1]
-                or any(k in insert for k in STYLE_FIELDS)):
+                or insert.get("scale") != [1, 1, 1]):
             raise ValueError("block insert must match name and base on layer 0, rotation 0, scale 1,1,1")
         result.append({"name": name, "base": base, "members": list(members), "insert": ordinal})
     return sorted(result, key=lambda b: b["name"])
@@ -814,6 +824,11 @@ def validate_mutations(
                               for field in STYLE_FIELDS if field in raw}
               for raw in added_raw}
     added.sort(key=canonical_json_bytes)
+    canonical_ordinals = {entity["handle"]: i for i, entity in enumerate(added)}
+    submitted_ordinals = {i: canonical_ordinals[entity["handle"]]
+                          for i, entity in enumerate(added_raw)}
+    for definition in block_defs:
+        definition["insert"] = submitted_ordinals[definition["insert"]]
     for entity in added:
         entity.update(styles[entity["handle"]])
     property_index: Dict[str, Tuple[str, Dict[str, Any]]] = {}
@@ -895,7 +910,8 @@ def validate_mutations(
                     token, value = ("H", handle), handle
                 elif (isinstance(member, dict) and set(member) == {"add"}
                       and type(member["add"]) is int and 0 <= member["add"] < len(added)):
-                    token, value = ("A", member["add"]), {"add": member["add"]}
+                    ordinal = submitted_ordinals[member["add"]]
+                    token, value = ("A", ordinal), {"add": ordinal}
                 else:
                     raise ValueError("group member ordinal must resolve inside canonical added")
                 if token in seen:

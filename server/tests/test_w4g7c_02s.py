@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import io
+import json
 import math
 import sys
 from pathlib import Path
@@ -17,7 +20,7 @@ import write_loop
 
 
 def base():
-    return {"layers": ["0", "SITE"], "polylines": [
+    return {"memberEvidenceCovered": True, "layers": ["0", "SITE"], "polylines": [
         {"handle": "10", "layer": "SITE", "closed": False,
          "pts": [[12, 23, 0], [17, 23, 0]], "xdata": None}],
         "circles": [{"handle": "11", "layer": "SITE", "c": [11, 24, 0], "r": 2, "nrm": [0, 0, 1]}],
@@ -165,7 +168,7 @@ def test_reopened_verifier_binds_definition_insert_and_removals(change):
         assert "blockMembers" not in uncovered
         covered = intake_parse.parse_text("BKEPC|1\n" + records, "covered")
         assert covered["blocks"]["B"]["children"][0]["properties"]["aci"] == 3
-        assert covered["blockMembers"]["10"]["kind"] == "LINE"
+        assert "blockMembers" not in covered
     else:
         with pytest.raises(ValueError):
             write_loop.verify_live_mutation_effects(head, actual, canonical)
@@ -184,3 +187,173 @@ def test_dimension_evidence_is_member_specific():
     head = base()
     head["dimensions"] = [{"handle": "20", "references": ["99"]}]
     assert mutation_plan.validate_mutations(head, replace())["block_defs"][0]["name"] == "B"
+
+
+def test_missing_member_coverage_is_refused():
+    head = base()
+    head.pop("memberEvidenceCovered")
+    with pytest.raises(ValueError, match="member evidence unavailable in this inspection"):
+        mutation_plan.validate_mutations(head, replace())
+
+
+@pytest.mark.parametrize("groups", [
+    {"groups": [{"members": ["10"]}]},
+    {"group_memberships": [{"member": "10", "group": "20"}]},
+])
+def test_grouped_member_requires_ungrouping(groups):
+    with pytest.raises(ValueError, match="ungroup it first"):
+        mutation_plan.validate_mutations({**base(), **groups}, replace())
+
+
+@pytest.mark.parametrize("code,value,field,sentence", [
+    (42, "0.5", "bulges", "bulge"),
+    (230, "-1", "normal", "normal"),
+    (43, "2", "width", "zero constant and vertex width"),
+    (40, "2", "width", "zero constant and vertex width"),
+    (41, "2", "width", "zero constant and vertex width"),
+])
+def test_blockless_dxf_member_evidence(code, value, field, sentence):
+    text = ("0\nSECTION\n2\nENTITIES\n0\nLWPOLYLINE\n5\n10\n8\n0\n"
+            "90\n2\n70\n0\n10\n0\n20\n0\n"
+            f"{code}\n{value}\n10\n1\n20\n0\n0\nENDSEC\n0\nEOF\n")
+    head = dxf_intake.parse_dxf_bytes(text.encode())
+    assert head["memberEvidenceCovered"] is True
+    assert field in head["polylines"][0]
+    plan = replace()
+    plan["block_defs"][0]["members"] = ["10"]
+    plan["removed"] = ["10"]
+    with pytest.raises(ValueError, match=sentence):
+        mutation_plan.validate_mutations(head, plan)
+
+
+@pytest.mark.parametrize("normal,bulges,dimension,width,expected", [
+    ("0,0,1", "0;0", "0", "0", {}),
+    ("0,1,0", "0;0", "0", "0", {"normal": [0, 1, 0]}),
+    ("0,0,1", "0;0.5", "0", "0", {"bulges": [0, 0.5]}),
+    ("0,0,1", "0;0", "1", "0", {"dimensionRef": True}),
+    ("0,0,1", "0;0", "0", "1", {"width": True}),
+])
+def test_mec_evidence_is_independent_of_block_properties(normal, bulges, dimension, width, expected):
+    geometry = "LN|0|0,0,0|1,0,0|10\n"
+    records = geometry + f"BM|10|LINE|{normal}|{bulges}|{dimension}|{width}\n"
+    legacy = intake_parse.parse_text(geometry, "head")
+    assert intake_parse.parse_text(records, "head") == legacy
+    covered = intake_parse.parse_text("MEC|1\n" + records, "head")
+    assert covered.pop("memberEvidenceCovered") is True
+    legacy["polylines"][0].update(expected)
+    assert covered == legacy
+
+
+@pytest.mark.parametrize("member", ["10", "99"])
+def test_blockless_dxf_dimension_association_is_member_specific(member):
+    text = ("0\nSECTION\n2\nENTITIES\n0\nLINE\n5\n10\n8\n0\n"
+            "10\n0\n20\n0\n11\n1\n21\n0\n"
+            "0\nDIMENSION\n5\n20\n70\n2\n0\nENDSEC\n"
+            "0\nSECTION\n2\nOBJECTS\n0\nDIMASSOC\n5\n30\n330\n20\n"
+            f"331\n{member}\n0\nENDSEC\n0\nEOF\n")
+    head = dxf_intake.parse_dxf_bytes(text.encode())
+    assert ("dimensionRef" in head["polylines"][0]) == (member == "10")
+    plan = replace()
+    plan["block_defs"][0]["members"] = ["10"]
+    plan["removed"] = ["10"]
+    if member == "10":
+        with pytest.raises(ValueError, match="DIMENSION"):
+            mutation_plan.validate_mutations(head, plan)
+    else:
+        assert mutation_plan.validate_mutations(head, plan)["block_defs"]
+
+
+def test_insert_ordinal_tracks_submitted_addition_after_sort():
+    head, plan = base(), replace()
+    plan["added"].append({"handle": "circle", "kind": "CIRCLE", "layer": "0", "c": [0, 0, 0], "r": 1})
+    plan["added_groups"] = [{"name": "PAIR", "members": [{"add": 0}, {"add": 1}]}]
+    canonical = mutation_plan.validate_mutations(head, plan)
+    assert canonical["added"][0]["kind"] == "CIRCLE"
+    assert canonical["block_defs"][0]["insert"] == 1
+    assert canonical["added_groups"][0]["members"] == [{"add": 1}, {"add": 0}]
+    assert mutation_plan.validate_mutations(head, canonical) == canonical
+    assert write_loop.apply_mutations(head, canonical)["blocks"]["B"]["complete"]
+
+
+def test_two_replacement_insert_ordinals_swap():
+    head, plan = base(), replace()
+    plan["block_defs"][0]["members"] = ["10"]
+    plan["added"][0]["handle"] = "z-insert"
+    plan["block_defs"].append({"name": "A", "base": [10, 20, 0], "members": ["11"], "insert": 1})
+    plan["added"].append({**plan["added"][0], "handle": "a-insert", "name": "A"})
+    canonical = mutation_plan.validate_mutations(head, plan)
+    assert {b["name"]: b["insert"] for b in canonical["block_defs"]} == {"A": 0, "B": 1}
+    assert mutation_plan.validate_mutations(head, canonical) == canonical
+    assert set(write_loop.apply_mutations(head, canonical)["blocks"]) == {"A", "B"}
+
+
+def test_replacement_insert_properties_lower_with_group():
+    head, plan = base(), replace()
+    head["polylines"].append({"handle": "12", "layer": "0", "closed": False,
+                              "pts": [[0, 0, 0], [1, 0, 0]], "xdata": None})
+    plan["added"][0].update(color=3, linetype="Continuous", lineweight=25)
+    plan["added_groups"] = [{"name": "PAIR", "members": [{"add": 0}, "12"]}]
+    canonical = mutation_plan.validate_mutations(head, plan)
+    assert mutation_plan.validate_mutations(head, canonical) == canonical
+    rows = mutation_plan.emit_plan(canonical, base_sha256="1" * 64).decode().splitlines()
+    assert "SETCOLOR|A:0|3" in rows
+    assert "SETLINETYPE|A:0|Continuous" in rows
+    assert "SETLINEWEIGHT|A:0|25" in rows
+
+
+def test_ordinary_plan_preserves_untouched_definition_digest():
+    head = base()
+    head["blocks"]["Old"] = {"base": [0, 0, 0], "count": 0, "complete": True,
+                              "children": [], "digest": "1111111111111111"}
+    canonical = mutation_plan.validate_mutations(head, {"removed": ["10"]})
+    actual = write_loop.apply_mutations(head, canonical)
+    actual["blocks"]["Old"]["digest"] = "2222222222222222"
+    with pytest.raises(ValueError, match="unchanged block definitions"):
+        write_loop.verify_live_mutation_effects(head, actual, canonical)
+
+
+@pytest.mark.parametrize("damage", ["none", "missing-insert", "retained-original"])
+@pytest.mark.parametrize("sidecar", [False, True])
+def test_uploaded_block_result_is_bound_on_mock_and_sidecar(tmp_path, monkeypatch, damage, sidecar):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import deps
+    import store
+    from envelopes import install_error_handlers
+    from routers import drawings
+
+    monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "drawings"))
+    monkeypatch.delenv("LEAF_AUTH_LIVE", raising=False)
+    monkeypatch.setattr(deps, "APS_LIVE", False)
+    app = FastAPI()
+    install_error_handlers(app)
+    app.include_router(drawings.router)
+    client = TestClient(app)
+    tenant, drawing = "tenant-block-save", "block-save"
+    head, plan = base(), replace()
+    # The uploaded DXF and the submitted plan must name the same new handle.
+    plan["added"][0]["handle"] = "301"
+    backend = store.FilesystemBackend(str(tmp_path / "drawings"))
+    source = tmp_path / "base.dwg"
+    source.write_bytes(json.dumps(head).encode() if sidecar else b"AC1032" + b"\x00" * 64)
+    store.ingest_drawing(backend, tenant, str(source), drawing_id=drawing)
+    write_loop.publish_intake_cache(backend, tenant, drawing, 1, source.read_bytes(), head)
+    upload = write_loop.apply_mutations(head, plan)
+    if damage == "missing-insert":
+        upload["inserts"] = []
+    elif damage == "retained-original":
+        upload["polylines"] = copy.deepcopy(head["polylines"])
+    data = intake_dxf.intake_to_dxf(upload)
+    checkout = client.post(f"/api/drawings/{drawing}/checkout", headers={"X-Tenant-Id": tenant},
+                           json={"holder": "block-editor", "ttl_s": 3600})
+    assert checkout.status_code == 200, checkout.text
+    response = client.post(f"/api/drawings/{drawing}/versions/plan",
+        headers={"X-Tenant-Id": tenant,
+                 "X-Checkout-Capability": checkout.json()["checkout_capability"]},
+        files={"file": ("edited.dxf", io.BytesIO(data), "application/dxf")},
+        data={"parent_version": "1", "source_digest": hashlib.sha256(data).hexdigest(),
+              "plan": json.dumps({"mutations": plan})})
+    assert response.status_code == (201 if damage == "none" else 422), response.text
+    if damage != "none":
+        assert "uploaded DXF does not carry the plan's result" in response.text
+        assert store.resolve_version(backend, tenant, drawing, "head")[0] == 1

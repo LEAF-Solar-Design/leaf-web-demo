@@ -135,10 +135,12 @@ _BLOCK_DEPENDENCY_LISP_LINES = (
 _BLOCK_DEFINITION_LISP_LINES = (
     '(setq leaf-pending-definitions nil)',
     '(defun leaf-bd-name-p (name / ok c) (setq ok (and (> (strlen name) 0) (<= (strlen name) 255) (/= (substr name 1 1) "*"))) (foreach c (vl-string->list name) (if (or (< c 32) (> c 126) (= c 124)) (setq ok nil))) ok)',
-    '(defun leaf-bd-member-data (h / e ed kind ok pair) (if (and (leaf-handle-p h) (setq e (handent h)) (setq ed (entget e))) (progn (setq kind (cdr (assoc 0 ed)) ok (and (member kind (list "LINE" "LWPOLYLINE" "CIRCLE" "ARC")) (= (cdr (assoc 410 ed)) "Model") (or (null (assoc 210 ed)) (equal (cdr (assoc 210 ed)) (list 0.0 0.0 1.0) 0.000001)) (not (equal (cdr (assoc 62 ed)) 0)) (/= (strcase (cond ((cdr (assoc 6 ed))) (T "BYLAYER"))) "BYBLOCK") (not (equal (cdr (assoc 370 ed)) -2)) (not (leaf-bd-dimension-p ed)))) (if (= kind "LWPOLYLINE") (foreach pair ed (if (and (= (car pair) 42) (/= (cdr pair) 0.0)) (setq ok nil)))) (if ok ed))))',
+    '(defun leaf-bd-group-p (ed / pair data found) (foreach pair ed (if (and (= (car pair) 330) (= (type (cdr pair)) (quote ENAME))) (progn (setq data (entget (cdr pair))) (if (= (cdr (assoc 0 data)) "GROUP") (setq found T))))) found)',
+    '(defun leaf-bd-member-data (h / e ed kind ok pair) (if (and (leaf-handle-p h) (setq e (handent h)) (setq ed (entget e))) (progn (setq kind (cdr (assoc 0 ed)) ok (and (member kind (list "LINE" "LWPOLYLINE" "CIRCLE" "ARC")) (= (cdr (assoc 410 ed)) "Model") (or (null (assoc 210 ed)) (equal (cdr (assoc 210 ed)) (list 0.0 0.0 1.0) 0.000001)) (not (equal (cdr (assoc 62 ed)) 0)) (/= (strcase (cond ((cdr (assoc 6 ed))) (T "BYLAYER"))) "BYBLOCK") (not (equal (cdr (assoc 370 ed)) -2)) (not (leaf-bd-dimension-p ed)) (not (leaf-bd-group-p ed)))) (if (= kind "LWPOLYLINE") (foreach pair ed (if (and (member (car pair) (list 40 41 42 43)) (/= (cdr pair) 0.0)) (setq ok nil)))) (if ok ed))))',
     '(defun leaf-blockdef-op (v / name base raw members h ok) (if (and (= (length v) 4) (setq name (nth 1 v)) (leaf-bd-name-p name) (not (tblsearch "BLOCK" name)) (not (assoc (strcase name) leaf-pending-definitions)) (setq base (leaf-point3 (nth 2 v)))) (progn (setq raw (leaf-split (nth 3 v) ";") ok (and (>= (length raw) 1) (<= (length raw) 60))) (foreach h raw (if (and (= (substr h 1 2) "H:") (leaf-bd-member-data (substr h 3)) (not (member (strcase (substr h 3)) members))) (setq members (append members (list (strcase (substr h 3))))) (setq ok nil))) (if ok (progn (setq leaf-pending-definitions (cons (list (strcase name) base members) leaf-pending-definitions)) (list "ADDBLOCKDEF" name base members))))))',
     '(defun leaf-bd-clean (ed / out pair depth) (setq depth 0) (foreach pair ed (cond ((= (car pair) 102) (if (= (cdr pair) "}") (setq depth (max 0 (1- depth))) (setq depth (1+ depth)))) ((and (= depth 0) (not (member (car pair) (list -1 5 330 360 350 340 67 410)))) (setq out (cons pair out))))) (reverse out))',
-    '(defun leaf-addblockdef-op (op / name base members children ed h ok) (setq name (nth 1 op) base (nth 2 op) members (nth 3 op) ok (not (tblsearch "BLOCK" name))) (foreach h members (setq ed (leaf-bd-member-data h)) (if ed (setq children (append children (list (leaf-bd-clean ed)))) (setq ok nil))) (if ok (progn (setq ok (entmake (list (cons 0 "BLOCK") (cons 2 name) (cons 70 0) (cons 10 base) (cons 8 "0")))) (foreach ed children (if ok (setq ok (entmake ed)))) (if ok (setq ok (entmake (list (cons 0 "ENDBLK") (cons 8 "0"))))) (if ok (setq leaf-pending-definitions (vl-remove (assoc (strcase name) leaf-pending-definitions) leaf-pending-definitions))))) ok)',
+    '(defun leaf-bd-create-child (ed) (entmake ed))',
+    '(defun leaf-addblockdef-op (op / name base members children ed h ok begun ended) (setq name (nth 1 op) base (nth 2 op) members (nth 3 op) ok (not (tblsearch "BLOCK" name))) (foreach h members (setq ed (leaf-bd-member-data h)) (if ed (setq children (append children (list (leaf-bd-clean ed)))) (setq ok nil))) (if ok (progn (setq begun (entmake (list (cons 0 "BLOCK") (cons 2 name) (cons 70 0) (cons 10 base) (cons 8 "0"))) ok begun) (foreach ed children (if ok (setq ok (leaf-bd-create-child ed)))) (if begun (progn (setq ended (entmake (list (cons 0 "ENDBLK") (cons 8 "0")))) (setq ok (and ok ended)))) (if ok (setq leaf-pending-definitions (vl-remove (assoc (strcase name) leaf-pending-definitions) leaf-pending-definitions))))) ok)',
 )
 
 
@@ -185,6 +187,14 @@ def build_apply_scr_v3() -> str:
             )
             lines.append(line)
             line = '(defun leaf-apply (op / result) (setq result (leaf-apply-one op)) (if (and result (member (car op) (list "ADD" "ADDOPEN" "ADDLINE" "ADDCIRCLE" "ADDARC" "ADDINSERT" "ADDDIMLINEAR" "ADDDIMALIGNED"))) (if (leaf-record-created result) (setq leaf-created (append leaf-created (list result))) (setq result nil))) result)'
+        elif line == '(command "_.UNDO" "_Begin")':
+            line = '(progn (command "_.UNDO" "_Mark") (setq leaf-apply-ok T))'
+        elif line.startswith('(foreach leaf-op leaf-ops '):
+            line = '(foreach leaf-op leaf-ops (if (and leaf-apply-ok (not (leaf-apply leaf-op))) (progn (setq leaf-apply-ok nil) (command "_.UNDO" "_Back") (princ "LEAF-MUTATION-APPLY-FAILED"))))'
+        elif line == '(command "_.UNDO" "_End")':
+            continue
+        elif line == '(command "_.SAVEAS" "" "output.dwg")':
+            line = '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))'
         elif line.startswith("(defun leaf-read-plan "):
             line = line.replace('(setq fh (open path "r")', '(setq leaf-pending-definitions nil) (setq fh (open path "r")', 1)
             line = line.replace(

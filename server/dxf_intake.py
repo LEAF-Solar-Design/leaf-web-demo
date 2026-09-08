@@ -310,9 +310,10 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
         out["blocks"] = blocks
     if block_count > 200:
         out["blocksCapped"] = block_count
-    if model_records and any("properties" in child for block in blocks.values()
-                             for child in block["children"]):
-        evidence = {}
+    out["memberEvidenceCovered"] = True
+    if model_records:
+        entities = {e["handle"]: e for field in ("polylines", "circles", "arcs")
+                    for e in out.get(field, [])}
         graph = {**objects, **{h.upper(): row for h, row in model_records.items()}}
         def dimension_dependency(record):
             pending = [v.upper() for c, v in record if c in (330, 340, 350, 360)]
@@ -332,17 +333,27 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             return False
         associated = set()
         for kind, record in objects.values():
-            if kind == "DIMASSOC":
+            if kind == "DIMASSOC" and dimension_dependency(record):
                 associated.update(v.upper() for c, v in record if c in (331, 332, 340))
         for handle, (kind, record) in model_records.items():
             if kind not in ("LINE", "LWPOLYLINE", "POLYLINE", "CIRCLE", "ARC"):
                 continue
+            entity = entities.get(handle)
+            if entity is None:
+                continue
             groups = dict(record)
-            evidence[handle] = {"kind": kind, "nrm": list(_group_point(groups, 210, (0, 0, 1))),
-                                "bulges": [float(v) for c, v in record if c == 42] if kind == "LWPOLYLINE" else [],
-                                "space": "paper" if groups.get(67) == "1" or groups.get(410, "Model") != "Model" else "model",
-                                "dimension_refs": ["association"] if handle.upper() in associated or dimension_dependency(record) else []}
-        out["blockMembers"] = evidence
+            normal = list(_group_point(groups, 210, (0, 0, 1)))
+            if any(abs(a - b) > 1e-6 for a, b in zip(normal, (0, 0, 1))):
+                entity["normal"] = normal
+            bulges = [float(v) for c, v in record if c == 42] if kind == "LWPOLYLINE" else []
+            if any(bulges):
+                entity["bulges"] = bulges
+            if kind == "LWPOLYLINE" and any(float(v) != 0 for c, v in record if c in (40, 41, 43)):
+                entity["width"] = True
+            if groups.get(67) == "1" or groups.get(410, "Model") != "Model":
+                entity["space"] = "paper"
+            if handle.upper() in associated or dimension_dependency(record):
+                entity["dimensionRef"] = True
     if parse_errors:
         out["parseErrors"] = parse_errors
     return out

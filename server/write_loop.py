@@ -1905,9 +1905,7 @@ def verify_live_mutation_effects(
     # definitions (keyed by name, not entity handle) must stay unchanged.
     if canonical.get("block_defs"):
         _verify_block_effects(base, actual, expected, canonical)
-    elif "blocks" in expected and {
-            n: _block_semantics(b) for n, b in expected["blocks"].items()} != {
-            n: _block_semantics(b) for n, b in actual.get("blocks", {}).items()}:
+    elif "blocks" in expected and expected["blocks"] != actual.get("blocks", {}):
         raise ValueError("unchanged block definitions differ in output")
     if "blocksCapped" in expected and expected["blocksCapped"] != actual.get("blocksCapped"):
         raise ValueError("unchanged block catalogue cap differs in output")
@@ -2040,11 +2038,12 @@ def _verify_block_effects(base, actual, expected, canonical):
         raise ValueError("malformed block inspection or created handoff")
     observed = actual.get("blocks", {})
     for name, block in base.get("blocks", {}).items():
-        if (block.get("digest") is not None and observed.get(name, {}).get("digest") is not None
-                and block["digest"] != observed[name]["digest"]):
-            raise ValueError("untouched block definition digest differs in output")
-    if {n: _block_semantics(b) for n, b in expected.get("blocks", {}).items()} != {
-            n: _block_semantics(b) for n, b in observed.items()}:
+        if block != observed.get(name):
+            raise ValueError("untouched block definition differs in output")
+    created_names = {definition["name"] for definition in canonical["block_defs"]}
+    if (set(expected.get("blocks", {})) != set(observed) or
+            {n: _block_semantics(expected["blocks"][n]) for n in created_names} != {
+                n: _block_semantics(observed[n]) for n in created_names if n in observed}):
         raise ValueError("block definition geometry or child properties differ in output")
     created = {}
     base_handles = {str(e.get("handle", "")).upper() for field in (
