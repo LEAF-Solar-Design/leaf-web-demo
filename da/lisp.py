@@ -126,6 +126,15 @@ MUTATION_INSPECT_BLOCKS += (
 )
 
 
+MUTATION_INSPECT_BLOCKS += (
+    '(defun leaf-gr-backlink (member group / item reactors target data) (setq data (entget member)) (foreach item data (cond ((= (car item) 102) (setq reactors (= (cdr item) "{ACAD_REACTORS"))) ((and reactors (= (car item) 330)) (setq target (cdr (assoc 5 (entget (cdr item))))) (if (= target group) (write-line (strcat "GM|" (cdr (assoc 5 data)) "|" group) f))))))',
+    '(defun leaf-gr-members (data / result item h) (setq result "") (foreach item data (if (= (car item) 340) (progn (setq h (cdr (assoc 5 (entget (cdr item))))) (if h (setq result (strcat result (if (= result "") "" ";") h)))))) result)',
+    '(defun leaf-gr-row (name e owner / data h item) (setq data (entget e) h (cdr (assoc 5 data))) (if (= (cdr (assoc 0 data)) "GROUP") (progn (write-line (strcat "GR|" h "|" (leaf-bk-encode name) "|" owner "|" (itoa (cdr (assoc 70 data))) "|" (itoa (cdr (assoc 71 data))) "|" (leaf-gr-members data)) f) (foreach item data (if (= (car item) 340) (leaf-gr-backlink (cdr item) h))))))',
+    '(progn (setq f (open "{OUT}" "a") gr-dict (dictsearch (namedobjdict) "ACAD_GROUP")) (write-line "GRC|1" f) (if gr-dict (progn (setq gr-e (cdr (assoc -1 gr-dict)) gr-owner (cdr (assoc 5 (entget gr-e))) gr-name nil) (foreach gr-pair (entget gr-e) (cond ((= (car gr-pair) 3) (setq gr-name (cdr gr-pair))) ((and gr-name (member (car gr-pair) (list 350 360))) (leaf-gr-row gr-name (cdr gr-pair) gr-owner) (setq gr-name nil)))))) (close f))',
+    '(progn (setq f (open "{OUT}" "a") gr-ca (open "created-handles.txt" "r")) (if gr-ca (progn (while (setq gr-line (read-line gr-ca)) (write-line gr-line f)) (close gr-ca))) (close f))',
+)
+
+
 # W4g-7b-04s: the DIMSTYLE catalogue (DS) and every model-space rotated/
 # aligned DIMENSION (DM), placed after the BK catalogue so both reuse its
 # leaf-bk-point/leaf-bk-encode helpers instead of re-deriving them. An

@@ -213,6 +213,34 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                     "layer": layn, "c": [round(v, 3) for v in w], "r": round(float(r), 3),
                     "start_deg": round(float(a1), 6), "end_deg": round(float(a2), 6),
                     "nrm": [round(v, 6) for v in n], "handle": hnd})
+            elif tag == "GRC":
+                if rest != "1":
+                    raise ValueError("malformed group coverage")
+                out.setdefault("groups", [])
+                out.setdefault("created", [])
+            elif tag == "GR":
+                handle, name, owner, flags, selectable, raw_members = rest.split("|")
+                members = raw_members.split(";") if raw_members else []
+                if (not name or any(not h or any(c not in "0123456789abcdefABCDEF" for c in h)
+                                    for h in [handle, owner, *members])
+                        or len(set(h.upper() for h in members)) != len(members)
+                        or int(flags) not in (0, 1) or int(selectable) not in (0, 1)):
+                    raise ValueError("malformed group record")
+                out.setdefault("groups", []).append({
+                    "handle": handle, "name": _block_name(name), "owner": owner,
+                    "flags": int(flags), "selectable": int(selectable), "members": members})
+            elif tag == "GM":
+                member, group = rest.split("|")
+                if any(not h or any(c not in "0123456789abcdefABCDEF" for c in h)
+                       for h in (member, group)):
+                    raise ValueError("malformed group membership")
+                out.setdefault("group_memberships", []).append({"member": member, "group": group})
+            elif tag == "CA":
+                ordinal, handle = rest.split("|")
+                if (not ordinal.isascii() or not ordinal.isdecimal()
+                        or not handle or any(c not in "0123456789abcdefABCDEF" for c in handle)):
+                    raise ValueError("malformed created handoff")
+                out.setdefault("created", []).append({"ordinal": int(ordinal), "handle": handle})
             elif tag == "EP":
                 hnd, aci, rgb, linetype, lineweight = rest.split("|")
                 color = None if rgb == "~" else [int(v) for v in rgb.split(",")]
@@ -326,6 +354,9 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                 out["imageNames"].append(rest)
         except Exception as e:
             out.setdefault("parseErrors", []).append(f"{tag}: {e}")
+    if not any(line.strip() == "GRC|1" for line in lines):
+        out.pop("groups", None)
+        out.pop("created", None)
     close()
     for block in out.get("blocks", {}).values():
         if block["count"] <= 60 and len(block["children"]) < block["count"]:

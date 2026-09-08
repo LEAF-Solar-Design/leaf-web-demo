@@ -93,6 +93,7 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
     # set_lineweight target's actual DXF groups the same way either source.
     properties: Dict[str, Any] = {}
     insert_properties: Dict[str, Any] = {}
+    objects = {}
 
     i = 0
     n = len(pairs)
@@ -108,6 +109,16 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
         if code == 0 and value == "ENDSEC":
             section = None
             i += 1
+            continue
+        if section == "OBJECTS" and code == 0:
+            j = i + 1
+            while j < n and pairs[j][0] != 0:
+                j += 1
+            record = pairs[i + 1:j]
+            handle = next((v.upper() for c, v in record if c == 5), None)
+            if handle:
+                objects[handle] = (value.upper(), record)
+            i = j
             continue
         if section == "TABLES" and code == 0 and value == "LAYER":
             # the next code-2 before the next code-0 names the layer
@@ -135,8 +146,21 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
                 if block_count <= 200:
                     blocks[name] = block
             continue
+        if section == "ENTITIES" and code == 0:
+            space_info = {}
+            j = i + 1
+            while j < n and pairs[j][0] != 0:
+                if pairs[j] == (67, "1"):
+                    space_info["space"] = "paper"
+                elif pairs[j][0] == 410:
+                    space_info["layout"] = pairs[j][1]
+                j += 1
+            if space_info.get("space") != "paper":
+                space_info.clear()
         if section == "ENTITIES" and code == 0 and value == "INSERT":
             entity, i = _parse_insert(pairs, i + 1, dropped_count)
+            if entity is not None:
+                entity.update(space_info)
             props = entity.pop("_properties", None)
             if entity["layer"] not in seen_layers:
                 seen_layers.add(entity["layer"])
@@ -147,11 +171,15 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             continue
         if section == "ENTITIES" and code == 0 and value == "LWPOLYLINE":
             entity, i = _parse_lwpolyline(pairs, i + 1, dropped_count)
+            if entity is not None:
+                entity.update(space_info)
             handle_seq += 1
             _finish_entity(entity, handle_seq, layers, seen_layers, polylines, properties)
             continue
         if section == "ENTITIES" and code == 0 and value == "POLYLINE":
             entity, i = _parse_polyline(pairs, i + 1, dropped_count)
+            if entity is not None:
+                entity.update(space_info)
             handle_seq += 1
             _finish_entity(entity, handle_seq, layers, seen_layers, polylines, properties)
             continue
@@ -159,6 +187,8 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             # A LINE is a 2-point open polyline to the viewer and to every tool: no new
             # intake field, the frozen §1 shape renders it as-is.
             entity, i = _parse_line(pairs, i + 1, dropped_count)
+            if entity is not None:
+                entity.update(space_info)
             handle_seq += 1
             _finish_entity(entity, handle_seq, layers, seen_layers, polylines, properties)
             continue
@@ -168,6 +198,8 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             # or tool that does not know them ignores them). Centre in WCS,
             # radius, the normal, and for an arc its start/end in degrees.
             entity, i = _parse_circle_or_arc(pairs, i + 1, value, dropped_count)
+            if entity is not None:
+                entity.update(space_info)
             handle_seq += 1
             if entity is not None:
                 props = entity.pop("_properties", None)
@@ -182,6 +214,8 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             continue
         if section == "ENTITIES" and code == 0 and value == "DIMENSION":
             entity, i = _parse_dimension(pairs, i + 1)
+            if entity is not None:
+                entity.update(space_info)
             handle_seq += 1
             if entity.get("unsupported"):
                 dimensions_unsupported += 1
@@ -196,6 +230,8 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             continue
         if section == "ENTITIES" and code == 0 and value in ("TEXT", "MTEXT"):
             entity, i = _parse_text(pairs, i + 1, value)
+            if entity is not None:
+                entity.update(space_info)
             handle_seq += 1
             if entity["text"]:
                 if not entity["handle"]:
@@ -217,6 +253,34 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             if entity.get("handle") in insert_properties:
                 properties[entity["handle"]] = insert_properties[entity["handle"]]
     out: Dict[str, Any] = {"dwg": source_name, "layers": layers, "polylines": polylines}
+    def dictionary_entries(record):
+        key = None
+        for code, value in record:
+            if code == 3:
+                key = value
+            elif code in (350, 360) and key is not None:
+                yield key, value.upper()
+                key = None
+
+    for kind, record in objects.values():
+        if kind != "DICTIONARY" or next((v for c, v in record if c == 330), "0") != "0":
+            continue
+        for key, dictionary in dictionary_entries(record):
+            if key.upper() != "ACAD_GROUP":
+                continue
+            group_kind, group_dictionary = objects.get(dictionary, (None, []))
+            if group_kind != "DICTIONARY":
+                raise DxfParseError("ACAD_GROUP must reference a DICTIONARY")
+            out["groups"] = []
+            for name, handle in dictionary_entries(group_dictionary):
+                group_kind, group = objects.get(handle, (None, []))
+                if group_kind != "GROUP":
+                    raise DxfParseError("ACAD_GROUP entry must reference a GROUP")
+                out["groups"].append({
+                    "handle": handle, "name": name, "owner": dictionary,
+                    "flags": int(next((v for c, v in group if c == 70), "0")),
+                    "selectable": int(next((v for c, v in group if c == 71), "1")),
+                    "members": [v.upper() for c, v in group if c == 340]})
     if properties:
         out["properties"] = properties
     if dropped_count[0]:

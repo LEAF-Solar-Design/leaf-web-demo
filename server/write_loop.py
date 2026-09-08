@@ -910,6 +910,20 @@ def apply_mutations(intake: Dict[str, Any], mutations: Dict[str, Any]) -> Dict[s
     for item in mutations.get("set_lineweight") or []:
         properties.setdefault(item["handle"], {})["lineweight"] = item["weight"]
     added = mutations.get("added") or []
+    if mutations.get("added_groups"):
+        used = {str(e.get("handle", "")).upper()
+                for field in ("polylines", "circles", "arcs", "texts", "inserts", "dimensions")
+                for e in new.get(field, [])}
+        used.update(e["handle"].upper() for e in added
+                    if re.fullmatch(r"[0-9A-Fa-f]+", e["handle"]))
+        next_handle = max([255, *(int(h, 16) for h in used
+                                  if re.fullmatch(r"[0-9A-Fa-f]+", h))]) + 1
+        for entity in added:
+            if not re.fullmatch(r"[0-9A-Fa-f]+", entity["handle"]):
+                entity["handle"] = format(next_handle, "X")
+                next_handle += 1
+        new["created"] = [{"ordinal": i, "handle": e["handle"]}
+                          for i, e in enumerate(added)]
     if added:
         polys = new.setdefault("polylines", [])
         for e in added:
@@ -957,6 +971,21 @@ def apply_mutations(intake: Dict[str, Any], mutations: Dict[str, Any]) -> Dict[s
                 properties.setdefault(e["handle"], {}).update(style)
     if not properties:
         new.pop("properties", None)
+    if "groups" in intake or mutations.get("added_groups") or mutations.get("removed_groups"):
+        removed_names = {n.casefold() for n in mutations.get("removed_groups", [])}
+        groups = []
+        for group in new.get("groups", []):
+            if group["name"].casefold() in removed_names:
+                continue
+            group["name"] = group["name"].upper()
+            group["members"] = [h for h in group["members"]
+                                if h.upper() not in {v.upper() for v in removed}]
+            groups.append(group)
+        for group in mutations.get("added_groups", []):
+            groups.append({"name": group["name"].upper(), "flags": 0, "selectable": 1,
+                           "members": [m if isinstance(m, str) else added[m["add"]]["handle"]
+                                       for m in group["members"]]})
+        new["groups"] = groups
     return new
 
 
@@ -1457,6 +1486,8 @@ def _polyline_effect_matches(
 ) -> bool:
     if expected.get("layer") != actual.get("layer"):
         return False
+    if expected.get("space", "model") != actual.get("space", "model"):
+        return False
     if expected.get("closed") is not actual.get("closed"):
         return False
     expected_points = expected.get("pts") or []
@@ -1689,6 +1720,11 @@ def verify_live_mutation_effects(
     be checked against this `actual` (see `_verify_property_effects`).
     """
     expected = apply_mutations(base, canonical)
+    _verify_group_effects(base, actual, canonical)
+    if canonical.get("added_groups"):
+        canonical = copy.deepcopy(canonical)
+        for receipt in expected.get("created", []):
+            canonical["added"][receipt["ordinal"]]["handle"] = receipt["handle"]
     matched_handles: Dict[str, str] = {}
     # Unchanged INSERTs retain their complete records by handle. Added ones
     # first bind their temporary handles to the actual name and geometry.
@@ -1870,6 +1906,77 @@ def verify_live_mutation_effects(
     if len(expected.get("polylines") or []) != expected_count:
         raise ValueError("canonical mutation application produced an invalid count")
     return _verify_property_effects(actual, canonical, matched_handles)
+
+
+def _verify_group_effects(base, actual, canonical):
+    covered = "groups" in base and "groups" in actual
+    if (canonical.get("added_groups") or canonical.get("removed_groups")) and "groups" not in actual:
+        raise ValueError("group names or exact member sets lack inspection coverage")
+    if not (covered or canonical.get("added_groups") or canonical.get("removed_groups")):
+        return
+    removed = {h.upper() for h in canonical.get("removed", [])}
+    if any(str(error).startswith(("GRC:", "GR:", "GM:", "CA:"))
+           for error in actual.get("parseErrors", [])):
+        raise ValueError("malformed group inspection or created handoff")
+    fields = ("polylines", "circles", "arcs", "texts", "inserts", "dimensions", "points", "ellipses")
+    actual_handles = {str(e.get("handle", "")).upper()
+                      for field in fields for e in actual.get(field, [])}
+    non_model_handles = {
+        str(e.get("handle", "")).upper()
+        for field in fields for e in actual.get(field, [])
+        if (e.get("space", "model") not in ("model", "Model", "ModelSpace", 0)
+            or e.get("paper_space") or e.get("paperspace"))}
+    base_handles = {str(e.get("handle", "")).upper()
+                    for field in fields for e in base.get(field, [])}
+    removed_names = {n.casefold() for n in canonical.get("removed_groups", [])}
+    expected = {g["name"].casefold(): {h.upper() for h in g["members"]} - removed
+                for g in (base.get("groups", []) if covered else [])
+                if g["name"].casefold() not in removed_names}
+    expected_names = {g["name"].casefold(): g["name"].upper() for g in base.get("groups", [])
+                      if g["name"].casefold() in expected}
+    created = {}
+    needs_created = any(isinstance(m, dict) for g in canonical.get("added_groups", [])
+                        for m in g["members"])
+    for row in (actual.get("created", []) if needs_created else []):
+        ordinal, handle = row.get("ordinal"), row.get("handle")
+        if (type(ordinal) is not int or not 0 <= ordinal < len(canonical.get("added", []))
+                or not isinstance(handle, str) or not re.fullmatch(r"[0-9A-Fa-f]+", handle)
+                or ordinal in created or handle.upper() in created.values()
+                or handle.upper() not in actual_handles or handle.upper() in base_handles):
+            raise ValueError("malformed or duplicate created ordinal handoff")
+        created[ordinal] = handle.upper()
+    for group in canonical.get("added_groups", []):
+        members = set()
+        for member in group["members"]:
+            if isinstance(member, str):
+                handle = member.upper()
+            else:
+                if member["add"] not in created:
+                    raise ValueError("group ordinal is missing its created handoff")
+                handle = created[member["add"]]
+            if handle in non_model_handles:
+                raise ValueError(f"group member {handle!r} must be a model-space entity")
+            members.add(handle)
+        expected[group["name"].casefold()] = members
+        expected_names[group["name"].casefold()] = group["name"].upper()
+    observed = {}
+    added_names = {g["name"].casefold() for g in canonical.get("added_groups", [])}
+    for group in actual.get("groups", []):
+        name = group["name"].casefold()
+        if name in observed:
+            raise ValueError("duplicate group name in output")
+        if name in expected_names and group["name"].upper() != expected_names[name]:
+            raise ValueError("group name spelling differs in output")
+        observed[name] = {h.upper() for h in group["members"]}
+        if name in added_names and not observed[name] <= actual_handles:
+            raise ValueError("group contains a dangling member handle")
+        if (covered or name in added_names) and observed[name] & removed:
+            raise ValueError("removed entity remains a group member")
+    if not covered:
+        observed = {n: members for n, members in observed.items()
+                    if n in added_names or n in removed_names}
+    if expected != observed:
+        raise ValueError("group names or exact member sets differ in output")
 
 
 def _dimension_effect_matches(expected: Dict[str, Any], actual: Dict[str, Any]) -> bool:

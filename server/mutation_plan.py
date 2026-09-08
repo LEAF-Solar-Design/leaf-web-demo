@@ -35,7 +35,7 @@ _HANDLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _EXISTING_HANDLE_RE = re.compile(r"^[0-9A-Fa-f]{1,32}$")
 _LAYER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.$-]{0,254}$")
 _MUTATION_FIELDS = frozenset({
-    "added", "removed", "transforms",
+    "added", "removed", "transforms", "added_groups", "removed_groups",
     "set_layer", "set_points", "set_circle", "set_arc",
 })
 _V2_FIELDS = frozenset({"set_layer", "set_points", "set_circle", "set_arc"})
@@ -320,10 +320,13 @@ def validate_mutations(
     set_circle_raw = _op_list(mutations, "set_circle")
     set_arc_raw = _op_list(mutations, "set_arc")
     style_raw = {op: _op_list(mutations, op) for op in V3_SET_OPS}
+    added_groups_raw = _op_list(mutations, "added_groups")
+    removed_groups_raw = _op_list(mutations, "removed_groups")
     op_count = (
         len(removed_raw) + len(added_raw) + len(transforms_raw)
         + len(set_layer_raw) + len(set_points_raw) + len(set_circle_raw)
         + len(set_arc_raw) + sum(len(style_raw[op]) for op in V3_SET_OPS)
+        + len(added_groups_raw) + len(removed_groups_raw)
     )
     if op_count == 0 and reject_noop:
         raise ValueError("mutations must contain at least one operation")
@@ -724,6 +727,83 @@ def validate_mutations(
                 raise ValueError(f"ambiguous property handle {handle!r}")
             property_index[handle] = ("INSERT", entity)
     canonical: Dict[str, Any] = {}
+    if added_groups_raw or removed_groups_raw:
+        def group_name(value):
+            if isinstance(value, str):
+                value = value.upper()
+                if value != value.strip():
+                    raise ValueError("group name must not have leading or trailing whitespace or be whitespace only")
+            if (not isinstance(value, str) or not 1 <= len(value) <= 255
+                    or any(c in '<>/\\\\":;?*|,=`' for c in value)
+                    or any(not 0x20 <= ord(c) <= 0x7E for c in value)):
+                raise ValueError("group name must be safe printable ASCII, 1..255 characters")
+            return value.upper()
+
+        head_groups = {g["name"].casefold(): g for g in intake.get("groups", [])}
+        removed_names = {}
+        for raw in removed_groups_raw:
+            name = group_name(raw)
+            key = name.casefold()
+            if key in removed_names:
+                raise ValueError("removed group names must be unique case-insensitively")
+            if key not in head_groups:
+                raise ValueError(f"removed group {name!r} must exist")
+            removed_names[key] = name
+        member_handles = set()
+        ambiguous_members = set()
+        supported_kinds = {"LINE", "LWPOLYLINE", "CIRCLE", "ARC", "TEXT", "INSERT",
+                           "DIMENSION", "POINT", "ELLIPSE"}
+        for field in ("polylines", "circles", "arcs", "texts", "inserts",
+                      "dimensions", "points", "ellipses"):
+            for entity in intake.get(field, []):
+                handle = entity.get("handle")
+                if (isinstance(handle, str) and _EXISTING_HANDLE_RE.fullmatch(handle)
+                        and not entity.get("paper_space") and not entity.get("paperspace")
+                        and entity.get("space", "model") in ("model", "Model", "ModelSpace", 0)
+                        and not entity.get("block")
+                        and entity.get("kind", "LINE") in supported_kinds):
+                    if handle.upper() in member_handles:
+                        ambiguous_members.add(handle.upper())
+                    member_handles.add(handle.upper())
+        member_handles.difference_update(ambiguous_members)
+        for block in (intake.get("blocks") or {}).values():
+            for child in block.get("children", []):
+                member_handles.discard(str(child.get("handle", "")).upper())
+        groups = []
+        names = set()
+        for raw in added_groups_raw:
+            if not isinstance(raw, dict) or set(raw) != {"name", "members"}:
+                raise ValueError("added group requires name and members only")
+            name = group_name(raw["name"])
+            key = name.casefold()
+            if key in names or (key in head_groups and key not in removed_names):
+                raise ValueError(f"group name {name!r} collides case-insensitively")
+            names.add(key)
+            if not isinstance(raw["members"], list) or len(raw["members"]) < 2:
+                raise ValueError("added group requires at least two distinct members")
+            members, seen = [], set()
+            for member in raw["members"]:
+                if isinstance(member, str):
+                    handle = _existing_handle(member, "group member").upper()
+                    if handle not in member_handles:
+                        raise ValueError("group member must be an existing supported model-space entity")
+                    if handle in {h.upper() for h in removed_seen}:
+                        raise ValueError("group member is also removed")
+                    token, value = ("H", handle), handle
+                elif (isinstance(member, dict) and set(member) == {"add"}
+                      and type(member["add"]) is int and 0 <= member["add"] < len(added)):
+                    token, value = ("A", member["add"]), {"add": member["add"]}
+                else:
+                    raise ValueError("group member ordinal must resolve inside canonical added")
+                if token in seen:
+                    raise ValueError("added group members must be distinct")
+                seen.add(token)
+                members.append(value)
+            groups.append({"name": name, "members": members})
+        if groups:
+            canonical["added_groups"] = sorted(groups, key=lambda g: g["name"])
+        if removed_names:
+            canonical["removed_groups"] = sorted(removed_names.values())
     for op, field in zip(V3_SET_OPS, STYLE_FIELDS):
         key = STYLE_FIELDS[field]
         entries = []
@@ -783,6 +863,11 @@ def uses_v3(canonical: Any) -> bool:
     """True when canonical data carries a declared v3 capability."""
     if not isinstance(canonical, dict):
         return False
+    if (isinstance(canonical.get("added_groups"), list)
+            and any(isinstance(g, dict) for g in canonical["added_groups"])) or (
+            isinstance(canonical.get("removed_groups"), list)
+            and any(isinstance(n, str) and n for n in canonical["removed_groups"])):
+        return True
     for field in V3_SET_OPS:
         entries = canonical.get(field)
         if isinstance(entries, list) and any(isinstance(entry, dict) for entry in entries):
@@ -941,6 +1026,8 @@ def emit_plan(
     if uses_v3(canonical) and version != 3:
         raise ValueError("contract v3 is required for property operations")
     lines = [f"LEAF_MUTATION_PLAN|{version}", f"BASE_SHA256|{base_sha256}"]
+    for name in canonical.get("removed_groups", []):
+        lines.append(f"REMOVEGROUP|{name.upper()}")
     for handle in canonical.get("removed", []):
         lines.append(f"REMOVE|{handle}")
     if canonical.get("transforms"):
@@ -1007,6 +1094,10 @@ def emit_plan(
         for ordinal, entity in enumerate(canonical.get("added", [])):
             if field in entity:
                 lines.append(f"{tag}|A:{ordinal}|{entity[field]}")
+    for group in canonical.get("added_groups", []):
+        members = ";".join(f"H:{m}" if isinstance(m, str) else f"A:{m['add']}"
+                           for m in group["members"])
+        lines.append(f"ADDGROUP|{group['name'].upper()}|{members}")
     plan = ("\n".join(lines) + "\n").encode("utf-8" if version == 3 else "ascii")
     if len(plan) > MAX_PLAN_BYTES:
         raise ValueError("mutation plan exceeds the byte bound")

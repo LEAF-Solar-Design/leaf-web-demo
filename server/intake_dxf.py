@@ -210,6 +210,7 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
     # settled/uppercased one, matching how `properties` is keyed everywhere
     # else in this codebase.
     kind_properties: List[List[str]] = []
+    kind_sources: List[Dict[str, Any]] = []
     total_points = 0
     for k, poly in enumerate(polylines):
         where = f"polylines[{k}]"
@@ -241,6 +242,7 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
             highest = max(highest, int(h, 16))
         note_layer(layer)
         kinds.append(("poly", layer, closed, coords, h))
+        kind_sources.append(poly)
         kind_properties.append(_entity_property_groups(properties, handle, where))
     for k, tx in enumerate(texts):
         where = f"texts[{k}]"
@@ -265,6 +267,7 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
             highest = max(highest, int(h, 16))
         note_layer(layer)
         kinds.append(("text", layer, kind, (x, y), value, h))
+        kind_sources.append(tx)
         kind_properties.append([])  # TEXT carries no colour/linetype/lineweight round trip
     # W4g-3: circles and arcs (ADDITIVE fields, the browser engine's kinds).
     # The centre is WCS in the intake; a tilted normal (dxf_intake keeps it)
@@ -300,6 +303,7 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
                 highest = max(highest, int(h, 16))
             note_layer(layer)
             kinds.append(("round", layer, field, (cx, cy, cz), radius, normal, angles, h))
+            kind_sources.append(ent)
             kind_properties.append(_entity_property_groups(properties, ent.get("handle"), where))
 
     for k, ent in enumerate(inserts):
@@ -331,6 +335,7 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
             h = ent["handle"]
         note_layer(layer)
         kinds.append(("insert", layer, name, point, normal, scale, rotation, h))
+        kind_sources.append(ent)
         kind_properties.append(_entity_property_groups(properties, ent.get("handle"), where))
     for k, ent in enumerate(dimensions):
         where = f"dimensions[{k}]"
@@ -358,6 +363,7 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
             highest = max(highest, int(h, 16))
         note_layer(layer)
         kinds.append(("dim", dimtype, layer, p1, p2, dimline, rotation, style, normal, measurement, h))
+        kind_sources.append(ent)
         kind_properties.append([])  # DIMENSION carries no colour/linetype/lineweight round trip
 
     blocks = _validated_blocks(intake["blocks"], note_layer) if "blocks" in intake else None
@@ -419,6 +425,7 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
                     "100", "AcDbEntity", "8", "0", "100", "AcDbBlockEnd"]
         out += ["0", "ENDSEC"]
     out += ["0", "SECTION", "2", "ENTITIES"]
+    handle_map = {}
     for idx, row in enumerate(kinds):
         h = row[-1]
         if h is None:
@@ -431,6 +438,7 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         # position, so appending here avoids threading the insert point
         # through every entity kind's group-list construction below.
         props = kind_properties[idx]
+        entity_offset = len(out)
         if row[0] == "poly":
             _, layer, closed, coords, _ = row
             z0 = coords[0][2]
@@ -503,8 +511,51 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
                 out += ["0", "MTEXT", "5", h, "100", "AcDbEntity", "8", layer,
                         "100", "AcDbMText", "10", _num(x), "20", _num(y), "30", "0.0",
                         "40", TEXT_HEIGHT, "1", value]
+        source = kind_sources[idx]
+        if source.get("space") == "paper":
+            space_pairs = ["67", "1"]
+            if "layout" in source:
+                space_pairs += ["410", _layer_name(source["layout"], "entity layout")]
+            # Place common entity metadata before its kind-specific subclass,
+            # including for a POLYLINE whose following records are its vertices.
+            entity_start = out.index("AcDbEntity", entity_offset)
+            out[entity_start + 1:entity_start + 1] = space_pairs
         out += props
-    out += ["0", "ENDSEC", "0", "EOF"]
+        handle_map[str(source.get("handle", "")).upper()] = h
+    out += ["0", "ENDSEC"]
+    if "groups" in intake:
+        groups = intake["groups"]
+        if not isinstance(groups, list):
+            _fail("groups must be a list")
+        root, dictionary = fresh_handle(), fresh_handle()
+        group_handles = [fresh_handle() for _ in groups]
+        out += ["0", "SECTION", "2", "OBJECTS", "0", "DICTIONARY", "5", root,
+                "330", "0", "100", "AcDbDictionary", "281", "1",
+                "3", "ACAD_GROUP", "350", dictionary,
+                "0", "DICTIONARY", "5", dictionary, "330", root,
+                "100", "AcDbDictionary", "281", "1"]
+        names = set()
+        for group, handle in zip(groups, group_handles):
+            name = group.get("name")
+            if (not isinstance(name, str) or not 1 <= len(name) <= 255
+                    or name.upper() != name.upper().strip()
+                    or any(c in '<>/\\\\":;?*|,=`' for c in name)
+                    or any(not 0x20 <= ord(c) <= 0x7E for c in name)
+                    or name.casefold() in names):
+                _fail("groups require safe unique names")
+            names.add(name.casefold())
+            out += ["3", name, "350", handle]
+        for group, handle in zip(groups, group_handles):
+            out += ["0", "GROUP", "5", handle, "330", dictionary,
+                    "100", "AcDbGroup", "300", "", "70", str(group.get("flags", 0)),
+                    "71", str(group.get("selectable", 1))]
+            for member in group["members"]:
+                target = handle_map.get(str(member).upper())
+                if target is None:
+                    _fail(f"group member {member!r} must name an emitted entity")
+                out += ["340", target]
+        out += ["0", "ENDSEC"]
+    out += ["0", "EOF"]
     return ("\n".join(out) + "\n").encode("utf-8")
 
 
