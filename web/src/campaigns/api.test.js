@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { bindPublication, invokeCapability, listCapabilities } from './api.js'
+import { requestEnrollment } from './api.js'
 
 vi.mock('../api.js', () => ({
   config: { apiBase: 'https://campaign.test', tenant: 'test-tenant' },
@@ -17,6 +18,28 @@ beforeEach(() => {
   vi.stubGlobal('fetch', fetcher)
 })
 afterEach(() => { vi.unstubAllGlobals(); localStorage.clear() })
+
+describe('native release registration transport', () => {
+  it('preserves host omission and sends the selected native capability through enrollment', async () => {
+    await requestEnrollment(P, C, 'VM-C')
+    await requestEnrollment(P, C, 'VM-C', 'campaign.native-release')
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+      `https://campaign.test/api/campaigns/${C}/enrollments`,
+      `https://campaign.test/api/campaigns/${C}/enrollments`,
+    ])
+    expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({ project_id: P, machine_id: 'VM-C' })
+    expect(JSON.parse(fetcher.mock.calls[1][1].body)).toEqual({
+      project_id: P, machine_id: 'VM-C', capability: 'campaign.native-release',
+    })
+  })
+
+  it.each(['unknown', null, { capability: 'campaign.native-release', role: 'admin' }])(
+    'rejects unsupported registration input before transport: %s', async capability => {
+      await expect(requestEnrollment(P, C, 'VM-C', capability)).rejects.toThrow('supported registration')
+      expect(fetcher).not.toHaveBeenCalled()
+    },
+  )
+})
 
 describe('published campaign capability transport', () => {
   it('uses the closed candidate, publication and invocation wires', async () => {

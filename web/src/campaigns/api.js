@@ -121,9 +121,13 @@ export async function invokeCapability(projectId, id, enrollmentId, { effectiveC
   }, { 'Idempotency-Key': bounded(idempotencyKey, 'submission key', 128) }))
 }
 
-export async function requestEnrollment(projectId, id, machineId) {
+export async function requestEnrollment(projectId, id, machineId, capability) {
+  if (capability !== undefined && !['campaign.host-enrollment', 'campaign.native-release'].includes(capability)) {
+    invalid('capability', 'Choose a supported registration capability.')
+  }
   return request(`/api/campaigns/${uuid(id, 'campaign')}/enrollments`, post({
     project_id: uuid(projectId, 'project'), machine_id: bounded(machineId, 'machine', 200),
+    ...(capability === undefined ? {} : { capability }),
   }))
 }
 

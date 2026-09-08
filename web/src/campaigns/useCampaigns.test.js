@@ -49,6 +49,21 @@ async function ready() {
   return hook
 }
 
+it('registers native release in the selected campaign and reloads setup readiness without execution', async () => {
+  const native = { enrollment_id: Q, machine_id: 'VM-C', capability: 'campaign.native-release',
+    state: 'pending', readiness: 'setup_required', readiness_message: 'The release executor is not connected.',
+    capability_link: { capability: 'campaign.native-release', state: 'pending_link' } }
+  const hook = await ready()
+  api.requestEnrollment.mockResolvedValue({ enrollment: native })
+  api.listEnrollments.mockResolvedValue({ enrollment: { enrollments: [native], allowed_machines: ['VM-C'] } })
+  await act(async () => { await hook.result.current.enroll('VM-C', 'campaign.native-release') })
+  expect(api.requestEnrollment).toHaveBeenCalledExactlyOnceWith(P, C, 'VM-C', 'campaign.native-release')
+  expect(hook.result.current.enrollments).toEqual([native])
+  expect(api.enableEnrollment).not.toHaveBeenCalled()
+  expect(api.bindPublication).not.toHaveBeenCalled()
+  expect(api.invokeCapability).not.toHaveBeenCalled()
+})
+
 describe('project campaign hook', () => {
   const digest = 'a'.repeat(64)
   const host = { enrollment_id: Q, machine_id: 'Host', state: 'enabled', completed_uses: 0,

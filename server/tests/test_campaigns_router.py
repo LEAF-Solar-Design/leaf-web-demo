@@ -276,6 +276,64 @@ def _submit(client, **overrides):
         'project_id': PROJECT, 'title': 'ReciPDF', 'prompt': 'Organize recipes', **overrides})
 
 
+def test_native_registration_router_preserves_server_scope(setup, monkeypatch):
+    client, store, allowed = setup
+    campaign = _submit(client).json()['campaign']['campaign_id']
+    calls = []
+    eid, task_id = str(uuid.uuid4()), str(uuid.uuid4())
+    def register(org, project, cid, principal, *, machine_id, capability):
+        store._require(org, project, cid)
+        calls.append((org, project, cid, principal, machine_id, capability))
+        return {'enrollment_id': eid, 'capability': capability,
+                'capability_link': {'task_id': task_id, 'capability': capability},
+                'replayed': len(calls) > 1}
+    monkeypatch.setattr(store, 'request_enrollment', register)
+    path = f'/api/campaigns/{campaign}/enrollments'
+    body = {'project_id': PROJECT, 'machine_id': 'VM-C', 'capability': 'campaign.native-release'}
+    first = client.post(path, json=body)
+    replay = client.post(path, json=body)
+    assert first.status_code == 201 and replay.status_code == 200
+    assert first.json()['enrollment']['enrollment_id'] == replay.json()['enrollment']['enrollment_id'] == eid
+    assert calls == [(ORG, PROJECT, campaign, PRINCIPAL, 'VM-C', 'campaign.native-release')] * 2
+    assert client.post(path, json={**body, 'project_id': OTHER}).status_code == 404
+    allowed.remove(PROJECT)
+    assert client.post(path, json=body).status_code == 403
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize('extra', [
+    {'capability': 'unknown'}, {'capability': None}, {'capability': {}},
+    {'role': 'admin'}, {'org_id': ORG}, {'principal_id': PRINCIPAL}, {'source_path': '/tmp'},
+    {'provider': 'aws'}, {'arn': 'arbitrary'}, {'credential': 'arbitrary'}, {'command': 'arbitrary'},
+])
+def test_native_registration_rejects_unknown_and_extra_fields_before_mutation(setup, monkeypatch, extra):
+    client, store, _ = setup
+    campaign = _submit(client).json()['campaign']['campaign_id']
+    monkeypatch.setattr(store, 'request_enrollment', lambda *a, **k: pytest.fail('registration mutated'))
+    response = client.post(f'/api/campaigns/{campaign}/enrollments', json={
+        'project_id': PROJECT, 'machine_id': 'VM-C', 'capability': 'campaign.native-release', **extra})
+    assert response.status_code == 400
+
+
+def test_native_enable_router_returns_scoped_not_ready(setup, monkeypatch):
+    client, store, allowed = setup
+    campaign = _submit(client).json()['campaign']['campaign_id']
+    eid = str(uuid.uuid4())
+    calls = []
+    def enable(org, project, cid, enrollment, principal):
+        store._require(org, project, cid)
+        calls.append((org, project, cid, enrollment, principal))
+        raise CampaignConflict('capability_not_ready')
+    monkeypatch.setattr(store, 'enable_enrollment', enable)
+    path = f'/api/campaigns/{campaign}/enrollments/{eid}/enable'
+    response = client.post(path, json={'project_id': PROJECT})
+    assert response.status_code == 409 and response.json()['error']['error_code'] == 'capability_not_ready'
+    assert calls == [(ORG, PROJECT, campaign, eid, PRINCIPAL)]
+    allowed.remove(PROJECT)
+    assert client.post(path, json={'project_id': PROJECT}).status_code == 403
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize('op', ['next', 'export', 'bind', 'admit', 'settle', 'recover', 'plan', 'product',
                                 'host_op', 'host_settle', 'host_grant'])
 @pytest.mark.parametrize('credential', ['browser', 'admin', 'missing'])
