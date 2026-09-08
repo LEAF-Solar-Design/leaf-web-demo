@@ -96,6 +96,27 @@ beforeEach(() => {
   // the picker's "one frame in flight" latch clears on every draw).
   vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => { cb(); return 0 })
 })
+
+it('BLOCK resolves before exclusion, toggles members, then Enter advances to the base pick', async () => {
+  mount()
+  const lines = [0, 0.2, 10].map((y, i) => ({ id: String(16 + i), type: 'LINE', editable: true, vertices: [[0, y, 0], [3, y, 0]] }))
+  await openAndLoad(lines)
+  act(() => { context.session.actions.select('16'); context.setArmed({ group: 'draw', op: 'createBlock' }) })
+  click(15, 0)
+  expect(context.inputs.members).toBe('')
+  click(15, 100)
+  expect(context.inputs.members).toBe('18')
+  click(15, 100)
+  expect(context.inputs.members).toBe('')
+  click(15, 100)
+  expect([...context.highlightedIds]).toEqual(['16', '18'])
+  fireEvent.keyDown(screen.getByLabelText('ribbon members'), { key: 'Enter' })
+  expect(context.inputs.membersDone).toBe('true')
+  click(100, 200)
+  expect(context.inputs.x).toBe('10')
+  expect(context.inputs.y).toBe('20')
+  expect(screen.getByLabelText('ribbon block name').hasAttribute('list')).toBe(false)
+})
 afterEach(() => { cleanup(); ground?.remove(); vi.restoreAllMocks() })
 
 it('resolves the nearest edge before excluding picked or selected members', async () => {

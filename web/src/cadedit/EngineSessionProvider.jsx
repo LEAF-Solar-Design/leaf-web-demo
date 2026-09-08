@@ -100,7 +100,7 @@ const INPUT_KEYS = new Set(Object.keys(DEFAULT_EDIT_INPUTS))
 export const MAX_INPUT_CHARS = 64
 export const MAX_POINT_LIST_CHARS = 4096
 // Style keeps the plan contract's DIMSTYLE name bound, mutation_plan.py.
-const INPUT_LIMITS = Object.freeze({ pts: MAX_POINT_LIST_CHARS, style: 255, members: MAX_POINT_LIST_CHARS, groupName: 255 })
+const INPUT_LIMITS = Object.freeze({ pts: MAX_POINT_LIST_CHARS, style: 255, members: MAX_POINT_LIST_CHARS, groupName: 255, name: 255 })
 
 // The two ribbon groups whose tools prompt for operands, and the op token's
 // shape (a JS identifier the clusters own; the engine validates the op
@@ -157,7 +157,9 @@ export default function EngineSessionProvider({
   const currentGroup = highlightedGroup?.document === session.documentLoadIdentity && session.engineParsed
     ? (session.entities.groups || []).find((item) => item.name.toUpperCase() === highlightedGroup.name)
     : null
-  const highlightedIds = useMemo(() => new Set(currentGroup?.memberIds || []), [currentGroup])
+  const highlightedIds = useMemo(() => new Set(armed?.op === 'createBlock'
+    ? [session.selectedId, ...String(inputs.members || '').split(/\s+/)].filter(Boolean)
+    : currentGroup?.memberIds || []), [currentGroup, armed, session.selectedId, inputs.members])
   const selectGroup = useCallback((name) => {
     const group = (session.entities.groups || []).find((item) => item.name.toUpperCase() === String(name).trim().toUpperCase())
     const ids = group?.memberIds || []
@@ -206,6 +208,7 @@ export default function EngineSessionProvider({
           .map(([key, value]) => [key, shown.has(key) ? current.inputs[key] : value])))
       }
       if (op === 'group') nextInputs = Object.freeze({ ...nextInputs, members: '', groupName: '', membersDone: '' })
+      if (op === 'createBlock') nextInputs = Object.freeze({ ...nextInputs, members: '', membersDone: '', name: '', x: '', y: '' })
       return { inputs: nextInputs, armed: Object.freeze(from ? { group, op, from } : { group, op }) }
     })
   }, [setArmedState])

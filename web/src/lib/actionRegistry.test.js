@@ -201,6 +201,7 @@ describe('honest triggers', () => {
       'draw:dimLinear', 'draw:dimAligned',
       // W4g-7b-02c: INSERT, seated in the Block panel.
       'draw:createInsert',
+      'draw:createBlock',
     ])
     expect(forGroup('modify').map((a) => a.id)).toEqual([
       'modify:delete', 'modify:move', 'modify:moveVertex',
@@ -623,10 +624,9 @@ describe('DEFERRED_REASONS', () => {
       expect(action.when({ session: { engineParsed: true, selected: null } })).toBe('')
     }
   })
-  it('is frozen, with the two remaining exact sentences', () => {
+  it('is frozen, with the remaining leader sentence', () => {
     expect(Object.isFrozen(DEFERRED_REASONS)).toBe(true)
     expect(DEFERRED_REASONS).toEqual({
-      blockCreate: 'unavailable; insert an existing block',
       leader: "unavailable; a leader's annotation is an association the contract does not carry yet",
     })
   })

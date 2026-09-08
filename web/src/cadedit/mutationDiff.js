@@ -252,6 +252,18 @@ function addedRecord(handle, g) {
 
 const byHandle = (a, b) => (a.handle < b.handle ? -1 : a.handle > b.handle ? 1 : 0)
 
+/** Compare child geometry and properties without its reassigned identity. */
+export function sameBlockMember(a, b) {
+  const left = planGeometry(a)
+  const right = planGeometry(b)
+  if (!left || !right || left.curved || right.curved) return false
+  const equal = (x, y) => typeof x === 'number' && typeof y === 'number' ? sameNumber(x, y)
+    : Array.isArray(x) && Array.isArray(y) ? x.length === y.length && x.every((v, i) => equal(v, y[i]))
+      : x && y && typeof x === 'object' && typeof y === 'object'
+        ? Object.keys(x).length === Object.keys(y).length && Object.keys(x).every((k) => equal(x[k], y[k])) : x === y
+  return equal(left, right) && equal(a.normal ?? [0, 0, 1], b.normal ?? [0, 0, 1])
+}
+
 // The server sorts geometry-only canonical JSON before attaching styles.
 // The unique handle ends every comparison: fields after it cannot affect
 // the ordinal. Refuse prefixes whose Python float spelling or normalized
@@ -298,7 +310,7 @@ export function diffPlan(committed, current) {
   let soft = null
   const refuse = (reason, kind = null, cause = null) => {
     const refusal = cannot(reason, kind, cause)
-    if (cause === 'moved-reference' || cause === 'true-colour' || cause === 'group-singleton') hard ||= refusal
+    if (cause === 'moved-reference' || cause === 'true-colour' || cause === 'group-singleton' || cause === 'block-def-unmatched') hard ||= refusal
     else soft ||= refusal
   }
   // The engine digest covers EVERY child, including unlisted/unsupported ones.
@@ -310,9 +322,11 @@ export function diffPlan(committed, current) {
       ? JSON.stringify([block.name, block.digest]) : JSON.stringify(canonical(block))]))
   const oldBlocks = definitions(committed)
   const newBlocks = definitions(current)
+  const pendingBlocks = []
   for (const name of new Set([...oldBlocks.keys(), ...newBlocks.keys()])) {
     if (oldBlocks.get(name) === newBlocks.get(name)) continue
     const change = !oldBlocks.has(name) ? 'added' : !newBlocks.has(name) ? 'removed' : 'changed'
+    if (change === 'added') { pendingBlocks.push((current.blocks || []).find((block) => block.name === name)); continue }
     refuse(`block ${name} is a definition the plan cannot carry, and it was ${change}`)
   }
   for (const [handle, was] of before) {
@@ -435,15 +449,40 @@ export function diffPlan(committed, current) {
     }
   }
   added.sort(byHandle)
-  if ((addedGroups.length || removedGroups.length) && added.length > 1) {
+  if ((addedGroups.length || removedGroups.length || pendingBlocks.length) && added.length > 1) {
     try {
       const prefixes = new Map(added.map((record) => [record.handle, additionSortPrefix(record)]))
       added.sort((a, b) => prefixes.get(a.handle) < prefixes.get(b.handle) ? -1 : 1)
     } catch {
-      refuse('group members need same-plan ordinals whose canonical addition order cannot be established; save the new entities before grouping them')
+      refuse('same-plan ordinals cannot be established; save the new entities before grouping or creating a block', null, pendingBlocks.length ? 'block-def-unmatched' : null)
     }
   }
   const ordinal = new Map(added.map((record, index) => [record.handle, index]))
+  const blockDefs = []
+  const consumed = new Set()
+  const committedEntities = Array.isArray(committed) ? committed : committed?.entities || []
+  for (const block of pendingBlocks) {
+    const unmatched = () => refuse(`Block ${block?.name || ''} cannot be saved: every child must match a distinct removed committed entity and its replacement INSERT.`, null, 'block-def-unmatched')
+    const children = block?.children
+    const base = Array.isArray(block?.base) && block.base.length === 3 && block.base.every(finite) && block.base[2] === 0 ? block.base.slice() : null
+    if (!base || !Array.isArray(children) || !children.length || children.length > 60 || block.complete === false || block.baseUnknown) { unmatched(); continue }
+    const members = []
+    for (const child of children) {
+      const match = committedEntities.find((entity) => {
+        const handle = hexHandle(entity.id ?? entity.handle ?? '')
+        return removed.includes(handle) && !consumed.has(handle) && sameBlockMember(entity, child)
+      })
+      if (!match) { unmatched(); break }
+      const handle = hexHandle(match.id ?? match.handle)
+      consumed.add(handle)
+      members.push(handle)
+    }
+    const replacements = added.filter((record) => record.kind === 'INSERT' && record.name === block.name)
+    const replacement = replacements[0]
+    if (members.length !== children.length || replacements.length !== 1 || replacement.layer !== '0'
+        || !samePoint(replacement.pt, base) || replacement.rot !== 0 || !samePoint(replacement.scale, [1, 1, 1])) { unmatched(); continue }
+    blockDefs.push({ name: block.name, base, members: members.sort(), insert: ordinal.get(replacement.handle) })
+  }
   for (const group of addedGroups) {
     group.members = group.members.map((handle) => {
       if (before.has(handle)) return handle
@@ -452,13 +491,14 @@ export function diffPlan(committed, current) {
       return handle
     })
   }
-  const count = addedGroups.length + removedGroups.length + added.length + removed.length + setLayer.length + setPoints.length + setCircle.length + setArc.length
+  const count = blockDefs.length + addedGroups.length + removedGroups.length + added.length + removed.length + setLayer.length + setPoints.length + setCircle.length + setArc.length
     + setColor.length + setLinetype.length + setLineweight.length
   if (count > MAX_PLAN_OPERATIONS) {
     soft ||= { mutations: null, count, reason: `this edit changes ${count} entities, over the ${MAX_PLAN_OPERATIONS} a plan can carry` }
   }
   if (hard || soft) return hard || soft
   const mutations = {}
+  if (blockDefs.length) mutations.block_defs = blockDefs.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
   if (added.length) mutations.added = added
   if (addedGroups.length) mutations.added_groups = addedGroups.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
   if (removedGroups.length) mutations.removed_groups = removedGroups.sort()

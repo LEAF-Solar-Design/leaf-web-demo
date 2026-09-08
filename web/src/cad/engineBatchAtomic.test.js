@@ -50,6 +50,46 @@ const PKG_DIR = path.join(path.dirname(WORKER_PATH), 'pkg-node')
 const PKG_NAMES = existsSync(PKG_DIR) ? readdirSync(PKG_DIR) : []
 const GLUE = PKG_NAMES.includes('engine.js') ? 'engine.js' : PKG_NAMES.find((name) => name.endsWith('_worker.js'))
 
+describe.skipIf(!GLUE)('Create Block on the real engine', () => {
+  it('preserves original child coordinates, writes one INSERT, and restores the pre-create snapshot', { timeout: 90_000 }, () => {
+    const source = [
+      'import { createRequire } from "node:module"',
+      'import { pathToFileURL } from "node:url"',
+      'const [workerPath, gluePath] = process.argv.slice(1)',
+      'const { handleMessage } = await import(pathToFileURL(workerPath).href)',
+      'const engine = createRequire(import.meta.url)(gluePath)',
+      'const bytes = new TextEncoder().encode("0\\nSECTION\\n2\\nENTITIES\\n0\\nLINE\\n5\\n10\\n8\\n0\\n10\\n12\\n20\\n23\\n11\\n17\\n21\\n23\\n0\\nCIRCLE\\n5\\n11\\n8\\n0\\n10\\n11\\n20\\n24\\n40\\n2\\n0\\nENDSEC\\n0\\nEOF\\n")',
+      'const before = await handleMessage({ type: "loadDocument", documentId: "block.dxf", bytes }, engine)',
+      'const made = await handleMessage({ type: "applyEdit", op: "createBlock", payload: { name: "B", x: 10, y: 20, members: before.entities.map(e => e.id) } }, engine)',
+      'const collision = await handleMessage({ type: "applyEdit", op: "createBlock", payload: { name: "b", x: 10, y: 20, members: [made.createdId] } }, engine)',
+      'const reinserted = await handleMessage({ type: "applyEdit", op: "createInsert", payload: { name: "B", x: 100, y: 200, rotationDeg: 90, sx: 2, sy: 3, sz: 1, layer: "0" } }, engine)',
+      'const restored = await handleMessage({ type: "loadDocument", documentId: "block.dxf", bytes }, engine)',
+      'process.stdout.write(JSON.stringify({ before, made, collision, reinserted, restored }))',
+    ].join('\n')
+    const out = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', source, WORKER_PATH, path.join(PKG_DIR, GLUE)], { encoding: 'utf8', timeout: 90_000, maxBuffer: 16 * 1024 * 1024 }))
+    expect(out.made.ok).toBe(true)
+    expect(out.made.entities).toHaveLength(1)
+    expect(out.made.entities[0]).toMatchObject({ id: out.made.createdId, type: 'INSERT', name: 'B', ip: [10, 20, 0], layer: '0', scale: [1, 1, 1] })
+    expect(out.made.blocks[0]).toMatchObject({ name: 'B', base: [10, 20, 0], complete: true })
+    expect(out.made.blocks[0].children.find(e => e.type === 'LINE').vertices).toEqual([[12, 23, 0], [17, 23, 0]])
+    expect(out.made.blocks[0].children.find(e => e.type === 'CIRCLE')).toMatchObject({ vertices: [[11, 24, 0]], radius: 2 })
+    expect(out.collision.ok).toBe(false)
+    expect(out.collision.reason).toContain('block_name_exists')
+    expect(out.reinserted.ok).toBe(true)
+    const expanded = engineIntake(out.reinserted).polylines.filter((p) => p.sourceHandle === hexHandle(out.reinserted.createdId))
+    const expandedLine = expanded.find((p) => p.pts.length === 2)
+    expect(expandedLine.pts[0][0]).toBeCloseTo(91, 9)
+    expect(expandedLine.pts[0][1]).toBeCloseTo(204, 9)
+    expect(expandedLine.pts[1][0]).toBeCloseTo(91, 9)
+    expect(expandedLine.pts[1][1]).toBeCloseTo(214, 9)
+    expect(out.restored.entities).toEqual(out.before.entities)
+    expect(out.restored.blocks).toEqual([])
+    const committed = Object.assign(out.before.entities, { blocks: out.before.blocks })
+    const current = Object.assign(out.made.entities, { blocks: out.made.blocks })
+    expect(diffPlan(committed, current).mutations.block_defs).toEqual([{ name: 'B', base: [10, 20, 0], members: ['10', '11'], insert: 0 }])
+  })
+})
+
 // Two crossing lines and a circle, the fixture every batch below starts from.
 const DXF = [
   '0', 'SECTION', '2', 'HEADER', '9', '$ACADVER', '1', 'AC1009', '0', 'ENDSEC',

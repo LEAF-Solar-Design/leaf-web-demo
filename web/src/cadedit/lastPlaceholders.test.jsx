@@ -237,7 +237,7 @@ describe('W4g-7b-05c: the deferred controls carry their own reason with the flag
     expect(forGroup('groups').map((action) => action.op)).toEqual(['group', 'ungroup'])
     expect(panel.textContent).not.toContain('not in the browser engine yet')
   })
-  it('Leader (Annotation) and Create Block (Block) are disabled with their DEFERRED_REASONS sentence', () => {
+  it('Leader stays deferred and Create Block uses the document ladder', () => {
     render(
       <EngineSessionProvider createWorker={vi.fn(() => new IdleWorker())}>
         <DraftingRibbon clusters={[]}>
@@ -249,10 +249,9 @@ describe('W4g-7b-05c: the deferred controls carry their own reason with the flag
     expect(leader.disabled).toBe(true)
     expect(leader.title).toBe(DEFERRED_REASONS.leader)
     expect(leader.getAttribute('aria-label')).toBe(`Leader (unavailable: ${DEFERRED_REASONS.leader})`)
-    const create = document.querySelector('[data-tool="block:create"]')
+    const create = document.querySelector('[data-tool="draw:createBlock"]')
     expect(create.disabled).toBe(true)
-    expect(create.title).toBe(DEFERRED_REASONS.blockCreate)
-    expect(create.getAttribute('aria-label')).toBe(`Create Block (unavailable: ${DEFERRED_REASONS.blockCreate})`)
+    expect(create.getAttribute('aria-label')).toBe('create block (unavailable: no drawing in the browser engine yet)')
   })
 })
 

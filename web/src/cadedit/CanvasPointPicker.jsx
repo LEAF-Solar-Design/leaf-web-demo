@@ -74,6 +74,7 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
   useEffect(() => { snapIndex.current = buildSnapIndex(session.entities) }, [session.entities])
   const armedOp = armed ? armed.op : ''
   const groupPickDone = armedOp === 'group' && (!!inputs.membersDone || !!inputs.groupName)
+  const blockPickDone = armedOp === 'createBlock' && !!inputs.membersDone
   // W4f-3: the chain point a continued command starts from (LINE's next
   // segment), keyed as a string so the sequence restarts only when it moves.
   const armedFrom = armed && armed.from ? armed.from : null
@@ -96,11 +97,12 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
   const entities = session.entities
   useEffect(() => {
     machine.current = armedOp && !groupPickDone ? startPicking(armedOp, fromRef.current) : null
+    if (blockPickDone && machine.current) machine.current.step = 1
     const live = !!(machine.current && machine.current.sequence)
     onPickingRef.current?.(live)
     viewerRef?.current?.setRubberBand?.(null)
     return () => { onPickingRef.current?.(false) }
-  }, [armedOp, fromKey, entities, viewerRef, groupPickDone])
+  }, [armedOp, fromKey, entities, viewerRef, groupPickDone, blockPickDone])
 
   useEffect(() => {
     if (!ground || typeof window === 'undefined') return undefined
@@ -209,6 +211,7 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
       // only takes focus once the render has enabled it.
       window.requestAnimationFrame(() => {
         if (nextStep) focusField(nextStep.keys ? nextStep.keys[0] : nextStep.key)
+        else if (state.op === 'createBlock') document.querySelector('#cockpit-prompt [aria-label="ribbon block name"]')?.focus()
         else focusRun()
       })
       draw()

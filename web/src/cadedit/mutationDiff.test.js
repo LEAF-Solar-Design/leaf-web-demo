@@ -8,6 +8,31 @@ import { COORDINATE_EPSILON, MAX_PLAN_OPERATIONS, diffPlan, planGeometry } from 
 // below need not repeat it.
 const DEFAULT_PROPS = { aci: 256, trueColor: null, linetype: 'ByLayer', lineweight: -1 }
 
+describe('Create Block replacement plan', () => {
+  const members = [
+    { id: '16', type: 'LINE', layer: '0', vertices: [[12, 23, 0], [17, 23, 0]] },
+    { id: '17', type: 'CIRCLE', layer: '0', vertices: [[11, 24, 0]], radius: 2 },
+  ]
+  const insert = { id: '32', type: 'INSERT', layer: '0', name: 'B', ip: [10, 20, 0], rotationDeg: 0, scale: [1, 1, 1] }
+  const block = { name: 'B', base: [10, 20, 0], complete: true, children: members.map((e, i) => ({ ...e, id: undefined, handle: String(48 + i), editable: false })) }
+  it('carries a definition, both removed committed handles and INSERT ordinal zero', () => {
+    const result = diffPlan({ entities: members, blocks: [] }, { entities: [insert], blocks: [block] })
+    expect(result.reason).toBeNull()
+    expect(result.mutations.block_defs).toEqual([{ name: 'B', base: [10, 20, 0], members: ['10', '11'], insert: 0 }])
+    expect(result.mutations.removed).toEqual(['10', '11'])
+    expect(result.mutations.added).toEqual([{ handle: '20', kind: 'INSERT', name: 'B', pt: [10, 20, 0], rot: 0, scale: [1, 1, 1], layer: '0' }])
+  })
+  it('hard-refuses an unmatched child, including a property change', () => {
+    for (const change of [{ radius: 3 }, { aci: 3 }]) {
+      const current = { entities: [insert], blocks: [{ ...block, children: [block.children[0], { ...block.children[1], ...change }] }] }
+      expect(diffPlan({ entities: members, blocks: [] }, current)).toMatchObject({ mutations: null, cause: 'block-def-unmatched' })
+    }
+  })
+  it('does not change a plan without a new definition', () => {
+    expect(JSON.stringify(diffPlan(members, members))).toBe('{"mutations":{},"count":0,"reason":null}')
+  })
+})
+
 describe('named group mutation plans', () => {
   const snapshot = (entities, groups = []) => Object.assign(entities, { groups })
   const rack = (memberIds) => ({ id: '240', name: 'RACK', memberIds })
@@ -265,7 +290,7 @@ describe('W4g-7b-01c: references and definitions are opaque', () => {
   })
 
   it('refuses added and removed definitions and unknown read-only kinds', () => {
-    expect(diffPlan({ entities: [], blocks: [] }, { entities: [], blocks: [block] }).reason).toMatch(/cannot carry.*added/)
+    expect(diffPlan({ entities: [], blocks: [] }, { entities: [], blocks: [block] }).cause).toBe('block-def-unmatched')
     expect(diffPlan({ entities: [], blocks: [block] }, { entities: [], blocks: [] }).reason).toMatch(/cannot carry.*removed/)
     const foreign = { id: '123', type: 'FUTURE', editable: false, vertices: [[0, 0, 0], [1, 1, 0]] }
     expect(diffPlan([foreign], [{ ...foreign, vertices: [[2, 2, 0], [3, 3, 0]] }]).reason).toMatch(/FUTURE.*cannot carry/)

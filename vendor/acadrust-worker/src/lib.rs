@@ -407,6 +407,7 @@ fn entity_record(index: usize, entity: &EntityType, can_edit: bool) -> serde_jso
         "trueColor": true_color_of(&entity.common().color),
         "linetype": linetype_of(entity),
         "lineweight": lineweight_of(entity),
+        "normal": normal_of(entity),
         // W4g-7b-04c: null for every kind but DIMENSION; OTHER dimtypes carry
         // only "dimtype" (the rest stay null, per the projection contract).
         "dimtype": dimension_dimtype_of(entity),
@@ -438,6 +439,12 @@ fn projected_entities(document: &CadDocument) -> Vec<serde_json::Value> {
             let model_space = !document.block_records.iter()
                 .any(|block| block.handle == e.common().owner_handle && !block.is_model_space());
             record["modelSpace"] = serde_json::json!(model_space);
+            if let EntityType::Dimension(dim) = e {
+                let handles: Vec<String> = document.block_records.iter()
+                    .filter(|b| b.name == dim.base().block_name)
+                    .flat_map(|b| b.entity_handles.iter().map(|h| handle_id(h.value()))).collect();
+                record["definingHandles"] = serde_json::json!(handles);
+            }
             record
         })
         .collect()
@@ -884,7 +891,87 @@ fn projected_groups(document: &CadDocument) -> Vec<serde_json::Value> {
 }
 
 // ---- the cores: every operation, natively testable ------------------------
+fn normal_of(entity: &EntityType) -> [f64; 3] {
+    let n = match entity {
+        EntityType::Line(e) => e.normal,
+        EntityType::LwPolyline(e) => e.normal,
+        EntityType::Circle(e) => e.normal,
+        EntityType::Arc(e) => e.normal,
+        _ => Vector3::new(0.0, 0.0, 1.0),
+    };
+    [n.x, n.y, n.z]
+}
+
 impl ParsedDxf {
+    fn create_block_core(&mut self, name: &str, base: [f64; 3], member_handles: &[String], layer_of_insert: &str) -> Result<String, Refusal> {
+        let name = name.trim();
+        if name.is_empty() || name.len() > 255 || name.starts_with('*')
+            || name.bytes().any(|b| !(0x20..=0x7e).contains(&b) || b"<>/\\\":;?*|,=`".contains(&b)) {
+            return refuse("block_name_invalid: use a new printable block name without reserved punctuation");
+        }
+        if self.inner.block_records.iter().any(|b| b.name.trim().eq_ignore_ascii_case(name)) {
+            return refuse("block_name_exists: a block with this name already exists");
+        }
+        if !all_finite(&base) || base[2] != 0.0 { return refuse("block_base_invalid: the base must be a finite XY point"); }
+        if !layer_of_insert.is_empty() && layer_of_insert != "0" { return refuse("block_insert_layer: the replacement INSERT must use layer 0"); }
+        if member_handles.is_empty() || member_handles.len() > 60 { return refuse("block_member_count: select 1 to 60 committed entities"); }
+        let mut handles = HashSet::new();
+        let mut children = Vec::new();
+        for id in member_handles {
+            let entity = self.inner.entities().find(|e| handle_id(e.common().handle.value()) == *id)
+                .ok_or_else(|| "block_member_missing: every member must exist in the drawing".to_string())?;
+            let common = entity.common();
+            if !handles.insert(common.handle) { return refuse("block_member_duplicate: each member must be distinct"); }
+            if !matches!(entity, EntityType::Line(_) | EntityType::LwPolyline(_) | EntityType::Circle(_) | EntityType::Arc(_)) {
+                return refuse("block_member_kind: only LINE, straight LWPOLYLINE, CIRCLE and ARC can become block children");
+            }
+            if self.inner.block_records.iter().any(|b| !b.is_model_space() && (b.handle == common.owner_handle || b.entity_handles.contains(&common.handle)))
+                || common.entity_mode == Some(1) {
+                return refuse("block_member_space: every member must be in model space");
+            }
+            if normal_of(entity) != [0.0, 0.0, 1.0] { return refuse("block_member_normal: every member must have normal +Z"); }
+            if let EntityType::LwPolyline(poly) = entity {
+                if poly.vertices.iter().any(|v| v.bulge != 0.0) { return refuse("block_member_bulge: polyline segments must be straight"); }
+            }
+            if aci_of(&common.color) == 0 || linetype_of(entity).eq_ignore_ascii_case("ByBlock") || lineweight_of(entity) == -2 {
+                return refuse("block_member_byblock: members must not use ByBlock properties");
+            }
+            if self.inner.objects.values().any(|o| matches!(o, ObjectType::Group(g) if g.entities.contains(&common.handle))) {
+                return refuse("block_member_group: ungroup members before creating a block");
+            }
+            if self.inner.entities().any(|e| matches!(e, EntityType::Dimension(dim)
+                if common.reactors.contains(&e.common().handle)
+                    || self.inner.block_records.iter().any(|b| b.name == dim.base().block_name && b.entity_handles.contains(&common.handle)))) {
+                return refuse("block_member_dimension: a dimension defining entity cannot become a block child");
+            }
+            let mut child = entity.clone();
+            child.common_mut().handle = Handle::NULL;
+            child.common_mut().owner_handle = Handle::NULL;
+            child.common_mut().entity_mode = None;
+            child.common_mut().reactors.clear();
+            child.common_mut().xdictionary_handle = None;
+            children.push(child);
+        }
+        // All changes are staged. Even an internal insertion failure leaves self byte-identical.
+        let mut next = self.inner.clone();
+        let mut block = acadrust::tables::BlockRecord::new(name);
+        block.handle = next.allocate_handle();
+        block.block_entity_handle = next.allocate_handle();
+        block.block_end_handle = next.allocate_handle();
+        block.base_point = Vector3::new(base[0], base[1], base[2]);
+        let owner = block.handle;
+        next.block_records.add(block).map_err(|e| format!("block_create_failed:{e}"))?;
+        for mut child in children {
+            child.common_mut().owner_handle = owner;
+            next.add_entity(child).map_err(|e| format!("block_create_failed:{e}"))?;
+        }
+        let insert = Insert::new(name, Vector3::new(base[0], base[1], base[2]));
+        let inserted = next.add_entity(EntityType::Insert(insert)).map_err(|e| format!("block_create_failed:{e}"))?;
+        for handle in handles { next.remove_entity(handle).ok_or_else(|| "block_member_missing".to_string())?; }
+        self.inner = next;
+        Ok(handle_id(inserted.value()))
+    }
+
     fn create_group_core(&mut self, name: &str, member_indices: &[usize]) -> Result<String, Refusal> {
         let name = name.trim();
         if name.is_empty() || name.len() > 255
@@ -2002,6 +2089,13 @@ impl ParsedDxf {
         self.create_group_core(name, &indices).map_err(js_err)
     }
 
+    #[wasm_bindgen(js_name = createBlock)]
+    pub fn create_block(&mut self, name: &str, bx: f64, by: f64, handles_json: &str) -> Result<String, JsValue> {
+        let handles: Vec<String> = serde_json::from_str(handles_json)
+            .map_err(|_| JsValue::from_str("block_members_invalid: members must be entity handles"))?;
+        self.create_block_core(name, [bx, by, 0.0], &handles, "0").map_err(js_err)
+    }
+
     #[wasm_bindgen(js_name = ungroup)]
     pub fn ungroup(&mut self, name: &str) -> Result<(), JsValue> {
         self.ungroup_core(name).map_err(js_err)
@@ -2424,6 +2518,36 @@ pub fn bytes_equal(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod created_entity_roundtrip {
     use super::*;
+
+    #[test]
+    fn create_block_keeps_coordinates_and_refuses_without_changing_bytes() {
+        let mut doc = empty_doc();
+        let line = doc.create_line_core(12.0, 23.0, 17.0, 23.0, "0").unwrap();
+        let circle = doc.create_circle_core(11.0, 24.0, 2.0, "0").unwrap();
+        let members = vec![line, circle];
+        let before = DxfWriter::new(&doc.inner).write_to_vec().unwrap();
+        for name in ["bad<name", "", "*anonymous"] {
+            assert!(doc.create_block_core(name, [10.0, 20.0, 0.0], &members, "0").is_err());
+            assert_eq!(before, DxfWriter::new(&doc.inner).write_to_vec().unwrap());
+        }
+        let inserted = doc.create_block_core("B", [10.0, 20.0, 0.0], &members, "0").unwrap();
+        let projection = projected_entities(&doc.inner);
+        assert_eq!(projection.len(), 1);
+        assert_eq!(projection[0]["handle"], inserted);
+        assert_eq!(projection[0]["type"], "INSERT");
+        let definitions = block_catalogue(&doc.inner, false, &doc.unknown_block_bases);
+        assert_eq!(definitions[0]["base"], serde_json::json!([10.0, 20.0, 0.0]));
+        assert_eq!(definitions[0]["children"][0]["vertices"], serde_json::json!([[12.0, 23.0, 0.0], [17.0, 23.0, 0.0]]));
+        let after = DxfWriter::new(&doc.inner).write_to_vec().unwrap();
+        assert!(doc.create_block_core("b", [10.0, 20.0, 0.0], &members, "0").is_err());
+        assert_eq!(after, DxfWriter::new(&doc.inner).write_to_vec().unwrap());
+        let (written, _) = patch_block_bases(&doc.inner, after);
+        let back = parse_dxf_core(&written).unwrap();
+        let restored = block_catalogue(&back.inner, false, &back.unknown_block_bases);
+        assert_eq!(restored[0]["base"], definitions[0]["base"]);
+        assert_eq!(restored[0]["children"][0]["vertices"], definitions[0]["children"][0]["vertices"]);
+        assert_eq!(projected_entities(&back.inner).len(), 1);
+    }
 
     #[test]
     fn named_group_roundtrip_collision_ungroup_and_deletion_repair() {

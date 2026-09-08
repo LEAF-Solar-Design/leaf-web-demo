@@ -19,6 +19,7 @@ import { bulgeArc, dimensionSchematic } from './engineIntake.js'
 /** The pick sequence per op, or null for ops with nothing to pick. */
 export const PICK_SEQUENCES = Object.freeze({
   group: [{ kind: 'edge', key: 'members', repeat: true }],
+  createBlock: [{ kind: 'edge', key: 'members', repeat: true }, { kind: 'point', keys: ['x', 'y'] }],
   createLine: [{ kind: 'point', keys: ['x', 'y'] }, { kind: 'point', keys: ['x2', 'y2'] }],
   createCircle: [{ kind: 'point', keys: ['x', 'y'] }, { kind: 'radius', key: 'r', from: ['x', 'y'] }],
   createArc: [{ kind: 'point', keys: ['x', 'y'] }, { kind: 'radius', key: 'r', from: ['x', 'y'] }],
@@ -108,7 +109,10 @@ export function applyPick(state, x, y, inputs = {}, context = null) {
     // that lands on nothing writes nothing and the step waits.
     const members = step.repeat ? String(inputs.members || '').split(/\s+/).filter(Boolean) : []
     const hit = context ? nearestEntity(context.entities, x, y, context.tol) : null
-    if (!hit || String(hit.id) === String(context.exceptId) || members.includes(String(hit.id))) return { state, writes: [] }
+    if (!hit || String(hit.id) === String(context.exceptId)) return { state, writes: [] }
+    if (members.includes(String(hit.id))) return state.op === 'createBlock'
+      ? { state, writes: [['members', members.filter((id) => id !== String(hit.id)).join(' ')]] }
+      : { state, writes: [] }
     if (step.repeat) return { state, writes: [['members', [...members, String(hit.id)].join(' ')]] }
     const writes = [[step.keys[0], String(hit.id)], [step.keys[1], round3(x)], [step.keys[2], round3(y)]]
     return { state: next, writes }

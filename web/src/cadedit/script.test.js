@@ -123,7 +123,8 @@ describe('parseScript', () => {
     expect(out.lines[1].inputs).toEqual({})
     expect(Object.isFrozen(out.lines[1])).toBe(true)
     expect(parse('g RACK A0 B1').lines[0]).toMatchObject({ group: 'groups', op: 'group', verb: 'GROUP', inputs: { groupName: 'RACK', members: '160 177' } })
-    expect(parse('b').lines[0]).toMatchObject({ group: 'deferred', op: 'blockCreate', verb: 'BLOCK', reason: DEFERRED_REASONS.blockCreate })
+    expect(parse('b NewBlock 10,20 A0 B1').lines[0]).toMatchObject({ group: 'draw', op: 'createBlock', verb: 'BLOCK', inputs: { name: 'NewBlock', x: '10', y: '20', selectedId: '160', members: '177', membersDone: 'true' } })
+    expect(parse('b').refusal).toContain('1 to 60 member handles')
     expect(parse('ungroup RACK').lines[0]).toMatchObject({ group: 'groups', op: 'ungroup', verb: 'UNGROUP', inputs: { groupName: 'RACK' } })
   })
 

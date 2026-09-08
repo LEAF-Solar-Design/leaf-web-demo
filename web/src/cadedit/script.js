@@ -67,6 +67,7 @@ const POINT_Y = new Set(['y', 'y1', 'y2', 'cy', 'dy', 'ey'])
  * 'edge' | 'number'.
  */
 export function promptSlots(prompt) {
+  if (prompt.verb === 'BLOCK') return [{ keys: ['name'], kind: 'text' }, { keys: ['x', 'y'], kind: 'point' }, { keys: ['members'], kind: 'edge', repeat: true }]
   if (prompt.verb === 'GROUP') return [{ keys: ['groupName'], kind: 'text' }, { keys: ['members'], kind: 'edge', repeat: true }]
   const slots = []
   for (const step of prompt.steps) {
@@ -122,6 +123,19 @@ export function parseScript(text, parseWord, prompts) {
     }
     const prompt = prompts[command.op] || null
     const inputs = {}
+    if (command.op === 'createBlock') {
+      if (operands.length < 3 || operands.length > 62) return { refusal: `line ${number}: BLOCK needs a name, base point and 1 to 60 member handles`, line: number }
+      if (!/^-?[0-9.]+,-?[0-9.]+$/.test(operands[1]) || !operands[1].split(',').every((v) => Number.isFinite(Number(v)))) return { refusal: `line ${number}: BLOCK base must be a finite x,y point`, line: number }
+      if (operands.slice(2).some((id) => !/^[0-9a-fA-F]{1,16}$/.test(id) || BigInt(`0x${id}`) === 0n)) return { refusal: `line ${number}: BLOCK members must be hexadecimal entity handles`, line: number }
+      const ids = operands.slice(2).map((id) => BigInt(`0x${id}`).toString())
+      inputs.name = operands[0]
+      ;[inputs.x, inputs.y] = operands[1].split(',')
+      inputs.selectedId = ids[0]
+      inputs.members = ids.slice(1).join(' ')
+      inputs.membersDone = 'true'
+      lines.push(Object.freeze({ line: number, word: head, group: command.group, op: command.op, verb: command.verb, inputs }))
+      continue
+    }
     if (command.op === 'group') {
       if (operands.length < 3) return { refusal: `line ${number}: GROUP needs a name and at least two member handles`, line: number }
       if (operands.slice(1).some((id) => !/^[0-9a-fA-F]{1,16}$/.test(id) || BigInt(`0x${id}`) === 0n)) {

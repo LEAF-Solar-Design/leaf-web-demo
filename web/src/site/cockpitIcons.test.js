@@ -113,6 +113,8 @@ describe('cockpit icons (W4e)', () => {
     const registryIcons = new Set(ACTIONS.map((action) => action.icon).filter(Boolean))
     expect(registryIcons.has('array')).toBe(true)
     expect(registryIcons.has('array-polar')).toBe(true)
+    expect(registryIcons.has('block-create')).toBe(true)
+    expect(built.ids).toContain('block-create')
 
     const withoutArray = (built.ids || []).filter((key) => key !== 'array' && key !== 'array-polar')
     expect(unresolvedIconKeys(declaredIconKeys(), withoutArray))

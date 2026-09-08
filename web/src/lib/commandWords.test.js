@@ -76,8 +76,8 @@ describe('commandWords (W4f slice B): typed CAD words on the command line', () =
   it('parses the four deferred controls to group "deferred" with their exact frozen reason', () => {
     expect(parseDrawingCommand('leader')).toMatchObject({ group: 'deferred', op: 'leader', verb: 'LEADER', word: 'leader', reason: DEFERRED_REASONS.leader })
     expect(parseDrawingCommand('LE')).toMatchObject({ group: 'deferred', op: 'leader', verb: 'LEADER', word: 'LE', reason: DEFERRED_REASONS.leader })
-    expect(parseDrawingCommand('block')).toMatchObject({ group: 'deferred', op: 'blockCreate', verb: 'BLOCK', word: 'block', reason: DEFERRED_REASONS.blockCreate })
-    expect(parseDrawingCommand('b')).toMatchObject({ group: 'deferred', op: 'blockCreate', verb: 'BLOCK', word: 'b', reason: DEFERRED_REASONS.blockCreate })
+    expect(parseDrawingCommand('block')).toMatchObject({ group: 'draw', op: 'createBlock', verb: 'BLOCK', word: 'block' })
+    expect(parseDrawingCommand('b')).toMatchObject({ group: 'draw', op: 'createBlock', verb: 'BLOCK', word: 'b' })
     expect(parseDrawingCommand('group')).toMatchObject({ group: 'groups', op: 'group', verb: 'GROUP', word: 'group' })
     expect(parseDrawingCommand('g')).toMatchObject({ group: 'groups', op: 'group', verb: 'GROUP', word: 'g' })
     expect(parseDrawingCommand('ungroup')).toMatchObject({ group: 'groups', op: 'ungroup', verb: 'UNGROUP', word: 'ungroup' })
