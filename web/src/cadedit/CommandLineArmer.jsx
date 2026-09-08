@@ -81,7 +81,7 @@ export default function CommandLineArmer() {
         else applyEdit(detail.op, inputs)
         return
       }
-      setArmed({ group: detail.group, op: detail.op })
+      setArmed({ group: detail.group, op: detail.op }, { rearm: true })
     }
     window.addEventListener(COCKPIT_COMMAND_EVENT, onCommand)
     return () => window.removeEventListener(COCKPIT_COMMAND_EVENT, onCommand)

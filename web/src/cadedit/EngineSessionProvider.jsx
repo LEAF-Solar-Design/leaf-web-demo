@@ -183,7 +183,7 @@ export default function EngineSessionProvider({
   const setArmedState = useCallback((next) => {
     setEditState((current) => current.armed === next ? current : { ...current, armed: next })
   }, [])
-  const setArmed = useCallback((next) => {
+  const setArmed = useCallback((next, { rearm = false } = {}) => {
     if (next === null) { setArmedState(null); return }
     if (!next || typeof next !== 'object') return
     const { group, op } = next
@@ -197,18 +197,19 @@ export default function EngineSessionProvider({
       : null
     setEditState((current) => {
       const previous = current.armed
-      if (op !== 'createBlock' && op !== 'group' && previous && previous.group === group && previous.op === op && sameFrom(previous.from, from)) return current
+      if (!rearm && previous && previous.group === group && previous.op === op && sameFrom(previous.from, from)) return current
       // W4g-7b-04c-8: a prompt speaks only to the keys it shows. Publish
       // the arm and hidden-key defaults together; a LINE chain's `from`
-      // stays on the armed record; member gestures start fresh on every arm.
+      // stays on the armed record; only an explicit re-arm resets a gesture.
       let nextInputs = current.inputs
-      if (previous?.op !== op || op === 'group' || op === 'createBlock') {
+      const resetGesture = previous?.op !== op || rearm
+      if (resetGesture) {
         const shown = promptKeys(op)
         nextInputs = Object.freeze(Object.fromEntries(Object.entries(DEFAULT_EDIT_INPUTS)
           .map(([key, value]) => [key, shown.has(key) ? current.inputs[key] : value])))
       }
-      if (op === 'group') nextInputs = Object.freeze({ ...nextInputs, members: '', groupName: '', membersDone: '' })
-      if (op === 'createBlock') nextInputs = Object.freeze({ ...nextInputs, members: '', membersDone: '', name: '', x: '', y: '' })
+      if (resetGesture && op === 'group') nextInputs = Object.freeze({ ...nextInputs, members: '', groupName: '', membersDone: '' })
+      if (resetGesture && op === 'createBlock') nextInputs = Object.freeze({ ...nextInputs, members: '', membersDone: '', name: '', x: '', y: '' })
       return { inputs: nextInputs, armed: Object.freeze(from ? { group, op, from } : { group, op }) }
     })
   }, [setArmedState])

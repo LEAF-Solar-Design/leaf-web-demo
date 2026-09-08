@@ -139,6 +139,30 @@ it('resolves the nearest edge before excluding picked or selected members', asyn
 })
 
 describe('CanvasPointPicker (W4f slice A1)', () => {
+  it('keeps the LINE caret handoff and next pick across a same-op input update', async () => {
+    mount()
+    await openAndLoad()
+    act(() => { context.setArmed({ group: 'draw', op: 'createLine' }, { rearm: true }) })
+    click(120, 30)
+    const nextField = screen.getByLabelText('ribbon x2')
+    expect(document.activeElement).toBe(nextField)
+    act(() => {
+      context.setInput('x', '13')
+      context.setArmed({ group: 'draw', op: 'createLine' })
+    })
+    expect(context.inputs.x).toBe('13')
+    expect(context.inputs.y).toBe('3')
+    expect(document.activeElement).toBe(nextField)
+    click(200, 80)
+    expect(context.inputs.x).toBe('13')
+    expect(context.inputs.x2).toBe('20')
+    expect(document.activeElement).toBe(screen.getByTestId('cockpit-prompt-run'))
+    act(() => { context.setArmed({ group: 'draw', op: 'createLine' }, { rearm: true }) })
+    click(150, 40)
+    expect(context.inputs.x).toBe('15')
+    expect(context.inputs.y).toBe('4')
+    expect(document.activeElement).toBe(nextField)
+  })
   it('nothing is picked, stamped or ghosted without an armed point command', async () => {
     mount()
     await openAndLoad()

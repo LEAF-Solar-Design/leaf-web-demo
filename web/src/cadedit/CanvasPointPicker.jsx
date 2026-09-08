@@ -102,7 +102,7 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
     onPickingRef.current?.(live)
     viewerRef?.current?.setRubberBand?.(null)
     return () => { onPickingRef.current?.(false) }
-  }, [armedOp, fromKey, entities, viewerRef, groupPickDone, blockPickDone])
+  }, [armed, armedOp, fromKey, entities, viewerRef, groupPickDone, blockPickDone])
 
   useEffect(() => {
     if (!ground || typeof window === 'undefined') return undefined

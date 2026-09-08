@@ -95,6 +95,16 @@ describe('named group mutation plans', () => {
     expect(result.reason).toBeNull()
     expect(result.mutations.block_defs[0].members).toEqual(['11'])
   })
+  it.each([{ constantWidth: 1e-12 }, { startWidths: [1e-12, 0] }, { endWidths: [0, 1e-12] }])('matches the zero-width member instead of a deleted tiny-width source: %j', (width) => {
+    const thin = { id: '17', type: 'LWPOLYLINE', layer: '0', vertices: [[12, 23, 0], [17, 23, 0]], closed: false }
+    const wide = { ...thin, id: '16', ...width }
+    const insert = { id: '32', type: 'INSERT', layer: '0', name: 'B', ip: [10, 20, 0], rotationDeg: 0, scale: [1, 1, 1] }
+    const result = diffPlan({ entities: [wide, thin], blocks: [] }, {
+      entities: [insert], blocks: [{ name: 'B', base: [10, 20, 0], complete: true, children: [{ ...thin, id: '48' }] }],
+    })
+    expect(result.reason).toBeNull()
+    expect(result.mutations.block_defs[0].members).toEqual(['11'])
+  })
   it('uppercases added and removed group names and compares names without case', () => {
     const entities = [line(10), line(11)]
     const lower = { ...rack(['10', '11']), name: 'rack' }

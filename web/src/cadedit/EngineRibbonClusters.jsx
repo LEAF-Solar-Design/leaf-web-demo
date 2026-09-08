@@ -237,7 +237,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const runOff = promptOff || !!liveRefusal || (!!waitingStep && !gatheringMembers)
   const runReason = promptReason || liveRefusal
   const runHold = runReason || (waitingStep ? waitingStep.ask : '')
-  const toggleArmed = (group, op) => setArmed(armedOp === op ? null : { group, op })
+  const toggleArmed = (group, op) => setArmed(armedOp === op ? null : { group, op }, { rearm: true })
   // The one context the Draw and Modify records read: the session their reason
   // ladders judge, and the single activation handler they name. Arming vs.
   // running is the CONSUMER's decision (a tool with operands opens the command

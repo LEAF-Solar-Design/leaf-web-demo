@@ -1710,31 +1710,43 @@ test.describe('route matrix, rail ON', () => {
       return
     }
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('0', { timeout: 60_000 })
-    await page.getByRole('tab', { name: 'View' }).click()
-    await page.getByLabel('ribbon script', { exact: true }).fill('LINE 12,23 17,23\nCIRCLE 11,24 2\nLINE 30,23 35,23')
-    await page.getByTestId('cockpit-script-run').click()
-    await expect(page.getByTestId('cockpit-script-status')).toHaveText('Script ran 3 commands.', { timeout: 60_000 })
-    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('3')
-    // SCRIPT leaves its last command (LINE) armed for the next draw.
-    // Disarm it so the workbench no longer takes the click-through rule.
-    await page.locator('body').press('Escape')
-    await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
+    const bar = page.getByLabel('Command bar', { exact: true })
+    for (const [index, command] of [
+      { word: 'LINE', start: '30,23', end: '35,23' },
+      { word: 'LINE', start: '12,23', end: '17,23' },
+      { word: 'CIRCLE', start: '11,24', radius: '2' },
+    ].entries()) {
+      await bar.fill(command.word)
+      await bar.press('Enter')
+      await page.getByLabel('ribbon x', { exact: true }).fill(command.start)
+      const last = page.getByLabel(command.end ? 'ribbon x2' : 'ribbon r', { exact: true })
+      await last.fill(command.end || command.radius)
+      await last.press('Enter')
+      await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(index + 1), { timeout: 60_000 })
+      await page.keyboard.press('Escape')
+    }
     // These members must be committed. Publish the drawn bytes to this test's
     // intercepted mock head, then reopen it; never move the shared demo head.
-    headDxf = await page.locator('.cad-edit-workbench-download').evaluate(async (link) => (await fetch(link.href)).text())
+    headDxf = await page.locator('a[download][href^="blob:"]').evaluate(async (link) => (await fetch(link.href)).text())
     await page.reload()
     await page.getByLabel('Use mock data (off = live backend)').check()
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('3', { timeout: 60_000 })
     await page.getByRole('tab', { name: 'Draw' }).click()
     await page.locator('body').press('Escape')
     await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
-    await page.locator('.cad-edit-workbench label', { hasText: 'LINE' }).locator('input[type="radio"]').first().check()
-    const bar = page.getByLabel('Command bar', { exact: true })
+    const clickWorld = async (x, y) => {
+      const point = await page.evaluate(({ x, y }) => {
+        const pt = document.querySelector('.studio-ground .viewer-canvas').__cadviewer.project(x, y)
+        return { ...pt, onGround: !!document.elementFromPoint(pt.x, pt.y)?.closest('.studio-ground') }
+      }, { x, y })
+      expect(point.onGround, `projected point (${x},${y}) must be on the drawing`).toBe(true)
+      await page.mouse.click(point.x, point.y)
+    }
+    await clickWorld(14.5, 23)
     await bar.fill('B')
     await bar.press('Enter')
     await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'createBlock')
-    const edge = await page.evaluate(() => document.querySelector('.studio-ground .viewer-canvas').__cadviewer.project(9, 24))
-    await page.mouse.click(edge.x, edge.y)
+    await clickWorld(9, 24)
     await expect(page.getByLabel('ribbon members')).toHaveText('2 objects')
     await page.getByLabel('ribbon members').press('Enter')
     await page.getByLabel('ribbon x', { exact: true }).fill('10,20')
@@ -1743,10 +1755,16 @@ test.describe('route matrix, rail ON', () => {
     await page.getByLabel('ribbon block name').press('Enter')
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('2', { timeout: 60_000 })
     await expect(page.locator('dt', { hasText: /^Block$/ }).locator('xpath=following-sibling::dd[1]')).toHaveText('BLK1')
-    // Select the third, surviving member and reissue B without Escape.
-    const survivor = page.locator('.cad-edit-workbench label', { hasText: 'LINE' }).locator('input[type="radio"]')
-    await survivor.focus()
-    await survivor.press('Space')
+    // Select the surviving LINE on the canvas, then reissue B without Escape
+    // from a partially answered BLOCK prompt to prove an explicit fresh arm.
+    await page.keyboard.press('Escape')
+    await clickWorld(32.5, 23)
+    await bar.fill('B')
+    await bar.press('Enter')
+    await page.getByLabel('ribbon members').press('Enter')
+    await page.getByLabel('ribbon x', { exact: true }).fill('10,20')
+    await page.getByLabel('ribbon x', { exact: true }).press('Enter')
+    await page.getByLabel('ribbon block name').fill('STALE')
     await bar.fill('B')
     await bar.press('Enter')
     await expect(page.getByLabel('ribbon members')).toHaveText('1 objects')

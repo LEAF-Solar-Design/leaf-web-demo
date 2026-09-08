@@ -19,7 +19,7 @@
  * (web/src/cad/engineWorker.js): a spec that could only pass through an
  * unvalidated channel would prove nothing about the shipped path.
  */
-import { act, cleanup, render } from '@testing-library/react'
+import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import useEngineSession, {
@@ -141,7 +141,32 @@ async function openDocument(session, file = fileOf()) {
 }
 
 describe('member gestures re-arm from empty operands', () => {
-  it.each(['createBlock', 'group'])('resets a repeated %s without Escape', async (op) => {
+  it.each(['createLine', 'createBlock', 'group'])('keeps inputs and the focus target on a same-op %s update', async (op) => {
+    const worker = new ScriptedWorker()
+    let current
+    function Consumer() {
+      current = useEngineSessionContext()
+      return <input aria-label="handoff target" value={current.inputs.x2} onChange={() => {}} />
+    }
+    render(<EngineSessionProvider createWorker={() => worker}><Consumer /></EngineSessionProvider>)
+    await act(async () => { await current.session.actions.open(fileOf()) })
+    worker.emit(loadedMessage([LINE, POLY]))
+    const armed = { group: op === 'group' ? 'groups' : 'draw', op }
+    act(() => { current.setArmed(armed, { rearm: true }) })
+    const previousArm = current.armed
+    const target = screen.getByLabelText('handoff target')
+    target.focus()
+    const updates = { members: 'e2', membersDone: 'true', name: 'B1', groupName: 'G1', x: '10', y: '20', x2: '30' }
+    act(() => {
+      for (const [key, value] of Object.entries(updates)) current.setInput(key, value)
+      current.setArmed(armed)
+    })
+    expect(current.inputs).toMatchObject(updates)
+    expect(current.armed).toBe(previousArm)
+    expect(document.activeElement).toBe(target)
+    expect(target.value).toBe('30')
+  })
+  it.each(['createBlock', 'group'])('resets an explicitly repeated %s without Escape', async (op) => {
     const worker = new ScriptedWorker()
     let current
     function Consumer() { current = useEngineSessionContext(); return null }
@@ -154,7 +179,7 @@ describe('member gestures re-arm from empty operands', () => {
       for (const [key, value] of Object.entries({ members: 'e2', membersDone: 'true', name: 'B1', groupName: 'G1', x: '10', y: '20' })) current.setInput(key, value)
     })
     expect(current.inputs.members).toBe('e2')
-    act(() => { current.setArmed(armed) })
+    act(() => { current.setArmed(armed, { rearm: true }) })
     expect(current.armed).toMatchObject(armed)
     expect(current.inputs.members).toBe('')
     expect(current.inputs.membersDone).toBe('')

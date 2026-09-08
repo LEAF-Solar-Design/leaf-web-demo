@@ -264,7 +264,10 @@ export function sameBlockMember(a, b) {
   const widths = (entity) => [entity.constantWidth ?? 0,
     entity.startWidths ?? (entity.vertices || []).map(() => 0),
     entity.endWidths ?? (entity.vertices || []).map(() => 0)]
-  return equal(left, right) && equal(a.normal ?? [0, 0, 1], b.normal ?? [0, 0, 1]) && equal(widths(a), widths(b))
+  // Width refusal precedes quantization: even 1e-12 must never match zero.
+  const equalWidths = (x, y) => Array.isArray(x) && Array.isArray(y)
+    ? x.length === y.length && x.every((v, i) => equalWidths(v, y[i])) : x === y
+  return equal(left, right) && equal(a.normal ?? [0, 0, 1], b.normal ?? [0, 0, 1]) && equalWidths(widths(a), widths(b))
 }
 
 // The server sorts geometry-only canonical JSON before attaching styles.
