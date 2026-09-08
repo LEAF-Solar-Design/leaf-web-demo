@@ -45,6 +45,7 @@ _ADDED_FIELDS = frozenset({
 })
 _ADD_KINDS = ("LWPOLYLINE", "LINE", "CIRCLE", "ARC")
 _INSERT_FIELDS = frozenset({"handle", "kind", "layer", "name", "pt", "rot", "scale"})
+_MLEADER_FIELDS = frozenset({"handle", "kind", "layer", "style", "pts", "text"})
 _DIMENSION_FIELDS = frozenset({
     "handle", "kind", "layer", "dimtype", "def1", "def2", "dimline", "rotation", "style",
     # `measurement` is never used to COMPUTE the canonical value (that is
@@ -57,7 +58,7 @@ _DIMENSION_FIELDS = frozenset({
 })
 DIMENSION_MEASUREMENT_TOLERANCE = 1e-3
 _DIMTYPES = ("LINEAR", "ALIGNED")
-V3_ADD_KINDS = ("INSERT", "DIMENSION")
+V3_ADD_KINDS = ("INSERT", "DIMENSION", "MLEADER")
 V3_SET_OPS = ("set_color", "set_linetype", "set_lineweight")
 LINEWEIGHTS = frozenset({-3, -2, -1, 0, 5, 9, 13, 15, 18, 20, 25, 30, 35,
                         40, 50, 53, 60, 70, 80, 90, 100, 106, 120, 140, 158, 200, 211})
@@ -258,7 +259,7 @@ def _index_intake(intake: Dict[str, Any]) -> Dict[str, Tuple[str, Dict[str, Any]
     ambiguous = set()
     total = 0
     for field, kind in (("polylines", "LWPOLYLINE"), ("circles", "CIRCLE"), ("arcs", "ARC"),
-                        ("dimensions", "DIMENSION")):
+                        ("dimensions", "DIMENSION"), ("mleaders", "MULTILEADER")):
         entities = intake.get(field) or []
         if not isinstance(entities, list):
             raise ValueError(f"intake {field} must be a list")
@@ -503,6 +504,8 @@ def validate_mutations(
         if handle in removed_seen:
             raise ValueError(f"handle {handle!r} cannot be removed and replaced")
         kind, entity = index[handle]
+        if kind == "MULTILEADER":
+            raise ValueError("MLEADER is not a property target in this contract")
         if kind not in kinds:
             raise ValueError(f"{field.split('[')[0]} handle {handle!r} is a {kind}")
         return handle, kind, entity
@@ -597,6 +600,10 @@ def validate_mutations(
             allowed_fields = _INSERT_FIELDS
         elif raw.get("kind") == "DIMENSION":
             allowed_fields = _DIMENSION_FIELDS
+        elif raw.get("kind") == "MLEADER":
+            allowed_fields = _MLEADER_FIELDS
+            if set(raw) & set(STYLE_FIELDS):
+                raise ValueError("MLEADER carries no colour, linetype or lineweight in this contract")
         else:
             allowed_fields = _ADDED_FIELDS
         extra = set(raw) - allowed_fields - set(STYLE_FIELDS)
@@ -606,9 +613,52 @@ def validate_mutations(
         if handle in index or handle in added_handles:
             raise ValueError(f"duplicate or conflicting added handle {handle!r}")
         kind = raw.get("kind", "LWPOLYLINE")
-        if kind not in _ADD_KINDS and kind not in ("INSERT", "DIMENSION"):
+        if kind not in _ADD_KINDS and kind not in V3_ADD_KINDS:
             raise ValueError(f"added entity {handle!r} has an unsupported kind")
         layer = _layer(raw.get("layer"))
+        if kind == "MLEADER":
+            layer = _canonicalize_layer(layer, intake)
+            style = raw.get("style")
+            if not isinstance(style, str) or not _LAYER_RE.fullmatch(style):
+                raise ValueError("added MLEADER style is not a safe dimstyle name")
+            if "mlstyles" in intake:
+                catalogue = intake["mlstyles"]
+                if not isinstance(catalogue, list):
+                    raise ValueError("intake mlstyles must be a list")
+                entry = next((item for item in catalogue
+                              if isinstance(item, dict) and isinstance(item.get("name"), str)
+                              and item["name"].lower() == style.lower()), None)
+                if entry is None:
+                    raise ValueError(f"mleader style {style} is not loaded in this drawing")
+                if entry.get("segments") != 1:
+                    raise ValueError("mleader style must take exactly two points in this contract")
+                style = entry["name"]
+            points_raw = raw.get("pts")
+            if not isinstance(points_raw, list) or len(points_raw) != 2:
+                raise ValueError("mleader requires exactly two points")
+            points = [[0.0 if round(value, 3) == 0 else round(value, 3)
+                       for value in _point3(point, "added MLEADER point")]
+                      for point in points_raw]
+            if any(point[2] != 0.0 for point in points):
+                raise ValueError("mleader points must lie in the XY plane (z = 0)")
+            if points[0] == points[1]:
+                raise ValueError("mleader points coincide")
+            text = raw.get("text")
+            if not isinstance(text, str):
+                raise ValueError("mleader text must be a string")
+            if text != text.strip():
+                raise ValueError("mleader text carries edge whitespace")
+            if not 1 <= len(text) <= 256:
+                raise ValueError("mleader text must contain 1..256 characters")
+            if any(not 0x20 <= ord(char) <= 0x7E or char in "|\\%" for char in text):
+                raise ValueError("mleader text must use the closed printable ASCII charset")
+            total_points += 2
+            if total_points > MAX_POINTS:
+                raise ValueError("mutation point bound exceeded")
+            added_handles.add(handle)
+            added.append({"handle": handle, "kind": kind, "layer": layer,
+                          "style": style, "pts": points, "text": text})
+            continue
         if kind == "INSERT":
             layer = _canonicalize_layer(layer, intake)
             name = raw.get("name")
@@ -937,6 +987,8 @@ def validate_mutations(
                 raise ValueError(f"property target {handle!r} is also removed")
             if handle not in property_index:
                 raise ValueError(f"unknown {op} handle {handle!r}")
+            if property_index[handle][0] == "MULTILEADER":
+                raise ValueError("MLEADER is not a property target in this contract")
             value = _style_value(field, raw[key], known_linetypes)
             prop_key = {"color": "aci", "linetype": "linetype", "lineweight": "lineweight"}[field]
             properties = (intake.get("properties") or {}).get(handle, {})
@@ -996,7 +1048,7 @@ def uses_v3(canonical: Any) -> bool:
             return True
     removed_kinds = canonical.get("removed_kinds")
     if isinstance(removed_kinds, dict) and any(
-            kind == "DIMENSION" for kind in removed_kinds.values()):
+            kind in ("DIMENSION", "MULTILEADER") for kind in removed_kinds.values()):
         return True
     added = canonical.get("added")
     return isinstance(added, list) and any(
@@ -1209,6 +1261,10 @@ def emit_plan(
                     f"{entity['rotation']:.6f}")
             else:
                 lines.append(f"ADDDIMALIGNED|{layer}|{entity['style']}|{def1}|{def2}|{dimline}")
+        elif kind == "MLEADER":
+            first, second = [",".join(format(value, ".3f") for value in point)
+                             for point in entity["pts"]]
+            lines.append(f"ADDMLEADER|{layer}|{entity['style']}|{first}|{second}|{entity['text']}")
         else:
             lines.append(
                 f"ADDARC|{layer}|{_fmt3(entity['c'])}|{_fmt(entity['r'])}|"
