@@ -1,0 +1,49 @@
+version: 0.2
+
+# Manual buildspec override only. No webhook, registry push, service dispatch,
+# training, or database access. Uses the existing builder's managed artifacts.
+# Rollback: stop this build; no deployed state is changed.
+env:
+  shell: bash
+phases:
+  build:
+    commands:
+      - |
+        set -euo pipefail
+        python3 - <<'PY'
+        import json, os, pathlib, subprocess
+        from scripts.ci.arlo_consumer_image_request import PINS
+        actual = {}
+        for identifier, (repo, expected) in PINS.items():
+            root = os.environ['CODEBUILD_SRC_DIR_' + identifier]
+            observed = subprocess.check_output(['git', '-C', root, 'rev-parse', 'HEAD'], text=True).strip()
+            if observed != expected:
+                raise SystemExit('Source mismatch: ' + identifier)
+            actual[identifier] = {'repository': repo, 'revision': observed}
+        producer = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+        if producer != os.environ['CODEBUILD_RESOLVED_SOURCE_VERSION']:
+            raise SystemExit('Producer checkout differs from provider revision')
+        out = pathlib.Path('arlo-image-artifacts')
+        out.mkdir()
+        (out / 'sources.json').write_text(json.dumps({
+            'producer_revision': producer, 'build_arn': os.environ['CODEBUILD_BUILD_ARN'],
+            'sources': actual}, sort_keys=True))
+        PY
+        docker buildx build --load \
+          --build-context "arlo_source=$CODEBUILD_SRC_DIR_arlo_source" \
+          --build-context "leaf_platform=$CODEBUILD_SRC_DIR_platform_pinned" \
+          -f "$CODEBUILD_SRC_DIR_arlo_recipe/deploy/canonical-consumer/Dockerfile" \
+          --metadata-file arlo-image-artifacts/build-metadata.json \
+          -t arlo-consumer:offline "$CODEBUILD_SRC_DIR_arlo_recipe"
+        docker run --rm --network none --read-only --cap-drop ALL \
+          --security-opt no-new-privileges --pids-limit 64 --memory 1g --cpus 1 \
+          --mount "type=bind,src=$CODEBUILD_SRC_DIR/scripts/ci/arlo_consumer_image_smoke.py,dst=/smoke.py,readonly" \
+          --entrypoint python arlo-consumer:offline -B /smoke.py \
+          > arlo-image-artifacts/offline-smoke.json
+        docker image inspect arlo-consumer:offline > arlo-image-artifacts/image-inspect.json
+        docker save arlo-consumer:offline -o arlo-image-artifacts/image.tar
+        (cd arlo-image-artifacts && sha256sum image.tar sources.json offline-smoke.json image-inspect.json build-metadata.json > SHA256SUMS)
+artifacts:
+  base-directory: arlo-image-artifacts
+  files:
+    - '**/*'
