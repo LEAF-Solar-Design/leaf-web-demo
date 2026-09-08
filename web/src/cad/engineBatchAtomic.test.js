@@ -1,4 +1,4 @@
-// @vitest-environment node
+// @vitest-environment jsdom
 //
 // W4g-6: the worker's `batch` op on the REAL compiled engine (the wasm-pack
 // pkg-node build), the contract the intersection verbs rest on: several steps
@@ -13,10 +13,14 @@
 // literal `new Worker(new URL(...))` shape below; the on-disk path is derived
 // from it through a throwaway Worker double.
 import { execFileSync } from 'node:child_process'
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
+import { act, cleanup, renderHook } from '@testing-library/react'
+import useEngineSession, { buildCreatePayload } from '../cadedit/engineSession.js'
 import { engineIntake, hexHandle } from '../cadedit/engineIntake.js'
 import { diffPlan } from '../cadedit/mutationDiff.js'
 
@@ -49,9 +53,114 @@ const WORKER_PATH = captureWorkerPath()
 const PKG_DIR = path.join(path.dirname(WORKER_PATH), 'pkg-node')
 const PKG_NAMES = existsSync(PKG_DIR) ? readdirSync(PKG_DIR) : []
 const GLUE = PKG_NAMES.includes('engine.js') ? 'engine.js' : PKG_NAMES.find((name) => name.endsWith('_worker.js'))
+afterEach(cleanup)
+
+// Each transport turn reconstructs the real worker from its last written
+// bytes. Undo's bytes must come from the store's posted loadDocument message.
+function realWorkerTransport() {
+  const listeners = new Set()
+  const worker = { posted: [], writes: [], bytes: null, documentId: null,
+    addEventListener(type, listener) { if (type === 'message') listeners.add(listener) },
+    removeEventListener(type, listener) { if (type === 'message') listeners.delete(listener) },
+    terminate() { listeners.clear() },
+    postMessage(message) {
+      worker.posted.push(message)
+      if (message.type === 'dispose') return
+      queueMicrotask(() => {
+        const source = [
+          'import { createRequire } from "node:module"',
+          'import { pathToFileURL } from "node:url"',
+          'import { readFileSync } from "node:fs"',
+          'const [workerPath, gluePath, inputPath] = process.argv.slice(1)',
+          'const { handleMessage } = await import(pathToFileURL(workerPath).href)',
+          'const native = createRequire(import.meta.url)(gluePath)',
+          'let writes = 0',
+          'const engine = { ...native, writeDxf(doc) { writes++; return native.writeDxf(doc) } }',
+          'const { message, previous, documentId } = JSON.parse(readFileSync(inputPath, "utf8"))',
+          'if (previous && message.type === "applyEdit") await handleMessage({ type: "loadDocument", documentId, bytes: Uint8Array.from(previous) }, engine)',
+          'if (message.bytes) message.bytes = Uint8Array.from(message.bytes)',
+          'writes = 0',
+          'const reply = await handleMessage(message, engine)',
+          'if (reply?.bytes) reply.bytes = Array.from(reply.bytes)',
+          'process.stdout.write(JSON.stringify({ reply, writes }))',
+        ].join('\n')
+        const input = JSON.stringify({ message: { ...message, ...(message.bytes ? { bytes: Array.from(message.bytes) } : {}) }, previous: worker.bytes, documentId: worker.documentId })
+        const inputDir = mkdtempSync(path.join(tmpdir(), 'engine-batch-'))
+        const inputPath = path.join(inputDir, 'input.json')
+        let response
+        try {
+          writeFileSync(inputPath, input, 'utf8')
+          response = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', source, WORKER_PATH, path.join(PKG_DIR, GLUE), inputPath], { encoding: 'utf8', timeout: 90_000, maxBuffer: 16 * 1024 * 1024 }))
+        } finally {
+          rmSync(inputDir, { recursive: true, force: true })
+        }
+        const { reply, writes } = response
+        worker.writes.push({ type: message.type, op: message.op, count: writes })
+        if (message.type === 'loadDocument') { worker.bytes = Array.from(message.bytes); worker.documentId = message.documentId }
+        if (reply?.bytes) { worker.bytes = reply.bytes; reply.bytes = Uint8Array.from(reply.bytes) }
+        if (reply) listeners.forEach((listener) => listener({ data: reply }))
+      })
+    },
+  }
+  return worker
+}
 
 describe.skipIf(!GLUE)('Create Block on the real engine', () => {
-  it('preserves original child coordinates, writes one INSERT, and restores the pre-create snapshot', { timeout: 90_000 }, () => {
+  it('carries native polyline widths to the builder before posting a create', { timeout: 90_000 }, async () => {
+    const worker = realWorkerTransport()
+    const { result } = renderHook(() => useEngineSession({ createWorker: () => worker }))
+    const bytes = new TextEncoder().encode('0\nSECTION\n2\nENTITIES\n0\nLWPOLYLINE\n5\n10\n8\n0\n90\n2\n70\n0\n43\n2\n10\n0\n20\n0\n40\n3\n41\n4\n10\n5\n20\n0\n0\nENDSEC\n0\nEOF\n')
+    await act(async () => { result.current.actions.openBytes(bytes, 'widths.dxf', { committed: true }) })
+    expect(result.current.entities[0]).toMatchObject({ constantWidth: 2, startWidths: [3, 0], endWidths: [4, 0] })
+    act(() => { result.current.actions.select('16') })
+    const posted = worker.posted.length
+    act(() => { result.current.actions.create('createBlock', { name: 'B', x: '0', y: '0' }) })
+    expect(result.current.status).toContain('polyline widths must be zero')
+    expect(worker.posted).toHaveLength(posted)
+  })
+  it('refuses DIMASSOC members using definingHandles from the real worker projection', { timeout: 90_000 }, async () => {
+    const worker = realWorkerTransport()
+    const { result } = renderHook(() => useEngineSession({ createWorker: () => worker }))
+    const bytes = new TextEncoder().encode("0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1027\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nLINE\n5\n10\n102\n{ACAD_REACTORS\n330\n30\n102\n}\n8\n0\n10\n12\n20\n23\n11\n17\n21\n23\n0\nDIMENSION\n5\n20\n8\n0\n70\n0\n10\n0\n20\n5\n13\n0\n23\n0\n14\n5\n24\n0\n0\nENDSEC\n0\nSECTION\n2\nOBJECTS\n0\nDIMASSOC\n5\n30\n100\nAcDbDimAssoc\n330\n20\n90\n1\n70\n0\n71\n0\n1\nAcDbOsnapPointRef\n72\n1\n331\n10\n73\n1\n91\n0\n40\n0\n10\n12\n20\n23\n30\n0\n75\n0\n0\nENDSEC\n0\nEOF\n");
+    await act(async () => { result.current.actions.openBytes(bytes, 'dimassoc.dxf', { committed: true }) })
+    const entities = result.current.entities
+    const dimension = entities.find((e) => e.type === 'DIMENSION')
+    expect(dimension.definingHandles).toContain('16')
+    // Exercise the producer's definingHandles, independently of its member flag.
+    const fromProjection = entities.map(({ dimensionDefined, ...entity }) => entity)
+    const built = buildCreatePayload('createBlock', { name: 'B', x: '10', y: '20', selectedId: '16' }, [], [], { entities: fromProjection, committedEntities: fromProjection })
+    expect(built.refusal).toContain('a dimension defining entity cannot become a block child')
+    act(() => { result.current.actions.select('16') })
+    const posted = worker.posted.length
+    act(() => { result.current.actions.create('createBlock', { name: 'B', x: '10', y: '20' }) })
+    expect(result.current.status).toContain('dimension defining')
+    expect(worker.posted).toHaveLength(posted)
+  })
+  it('undoes a real create through the store action and restores the original handles and bytes', { timeout: 90_000 }, async () => {
+    const worker = realWorkerTransport()
+    const { result } = renderHook(() => useEngineSession({ createWorker: () => worker }))
+    const bytes = new TextEncoder().encode('0\nSECTION\n2\nENTITIES\n0\nLINE\n5\n10\n8\n0\n10\n12\n20\n23\n11\n17\n21\n23\n0\nCIRCLE\n5\n11\n8\n0\n10\n11\n20\n24\n40\n2\n0\nENDSEC\n0\nEOF\n')
+    await act(async () => { result.current.actions.openBytes(bytes, 'block.dxf', { committed: true }) })
+    const before = JSON.parse(JSON.stringify(Array.from(result.current.entities)))
+    const digest = (value) => createHash('sha256').update(Uint8Array.from(value)).digest('hex')
+    const beforeDigest = digest(bytes)
+    expect(before.map((e) => e.id)).toEqual(['16', '17'])
+    act(() => { result.current.actions.select('16') })
+    await act(async () => { result.current.actions.create('createBlock', { name: 'B', x: '10', y: '20', members: '17' }) })
+    expect(result.current.errorKind).toBeNull()
+    expect(result.current.entities).toHaveLength(1)
+    expect(result.current.undoDepth).toBe(1)
+    expect(worker.writes.filter((entry) => entry.op === 'createBlock')).toEqual([{ type: 'applyEdit', op: 'createBlock', count: 1 }])
+    await act(async () => { expect(result.current.actions.undo()).toBe(true) })
+    expect(worker.posted.at(-1).type).toBe('loadDocument')
+    expect(Array.from(worker.posted.at(-1).bytes)).toEqual(Array.from(bytes))
+    expect(Array.from(result.current.entities)).toEqual(before)
+    expect(digest(worker.bytes)).toBe(beforeDigest)
+    expect(result.current.entities.blocks).toEqual([])
+    expect(result.current.undoDepth).toBe(0)
+    expect(result.current.redoDepth).toBe(1)
+  })
+  it('preserves original child coordinates and transforms both children on reinsertion', { timeout: 90_000 }, () => {
     const source = [
       'import { createRequire } from "node:module"',
       'import { pathToFileURL } from "node:url"',
@@ -63,8 +172,7 @@ describe.skipIf(!GLUE)('Create Block on the real engine', () => {
       'const made = await handleMessage({ type: "applyEdit", op: "createBlock", payload: { name: "B", x: 10, y: 20, members: before.entities.map(e => e.id) } }, engine)',
       'const collision = await handleMessage({ type: "applyEdit", op: "createBlock", payload: { name: "b", x: 10, y: 20, members: [made.createdId] } }, engine)',
       'const reinserted = await handleMessage({ type: "applyEdit", op: "createInsert", payload: { name: "B", x: 100, y: 200, rotationDeg: 90, sx: 2, sy: 3, sz: 1, layer: "0" } }, engine)',
-      'const restored = await handleMessage({ type: "loadDocument", documentId: "block.dxf", bytes }, engine)',
-      'process.stdout.write(JSON.stringify({ before, made, collision, reinserted, restored }))',
+      'process.stdout.write(JSON.stringify({ before, made, collision, reinserted }))',
     ].join('\n')
     const out = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', source, WORKER_PATH, path.join(PKG_DIR, GLUE)], { encoding: 'utf8', timeout: 90_000, maxBuffer: 16 * 1024 * 1024 }))
     expect(out.made.ok).toBe(true)
@@ -82,8 +190,13 @@ describe.skipIf(!GLUE)('Create Block on the real engine', () => {
     expect(expandedLine.pts[0][1]).toBeCloseTo(204, 9)
     expect(expandedLine.pts[1][0]).toBeCloseTo(91, 9)
     expect(expandedLine.pts[1][1]).toBeCloseTo(214, 9)
-    expect(out.restored.entities).toEqual(out.before.entities)
-    expect(out.restored.blocks).toEqual([])
+    const expandedCircle = expanded.find((p) => p.pts.length > 2)
+    const xs = expandedCircle.pts.map((p) => p[0])
+    const ys = expandedCircle.pts.map((p) => p[1])
+    expect((Math.min(...xs) + Math.max(...xs)) / 2).toBeCloseTo(88, 6)
+    expect((Math.min(...ys) + Math.max(...ys)) / 2).toBeCloseTo(202, 6)
+    expect(Math.max(...xs) - Math.min(...xs)).toBeCloseTo(12, 6)
+    expect(Math.max(...ys) - Math.min(...ys)).toBeCloseTo(8, 6)
     const committed = Object.assign(out.before.entities, { blocks: out.before.blocks })
     const current = Object.assign(out.made.entities, { blocks: out.made.blocks })
     expect(diffPlan(committed, current).mutations.block_defs).toEqual([{ name: 'B', base: [10, 20, 0], members: ['10', '11'], insert: 0 }])

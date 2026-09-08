@@ -39,6 +39,9 @@ describe('Create Block from committed cockpit entities', () => {
   it.each([
     [{ type: 'INSERT' }, 'only LINE'],
     [{ type: 'LWPOLYLINE', bulges: [1, 0] }, 'straight'],
+    [{ type: 'LWPOLYLINE', constantWidth: 2 }, 'widths must be zero'],
+    [{ type: 'LWPOLYLINE', startWidths: [2, 0] }, 'widths must be zero'],
+    [{ type: 'LWPOLYLINE', endWidths: [0, 2] }, 'widths must be zero'],
     [{ type: 'CIRCLE', radius: 2, normal: [0, 1, 0] }, 'normal +Z'],
     [{ aci: 0 }, 'ByBlock'],
     [{ linetype: 'ByBlock' }, 'ByBlock'],
@@ -47,11 +50,10 @@ describe('Create Block from committed cockpit entities', () => {
   ])('refuses an ineligible member %j', (change, rule) => {
     expect(build(context([{ ...line, ...change }, circle])).refusal).toContain(rule)
   })
-  it('refuses a group member and a dimension defining entity', () => {
+  it('refuses a group member', () => {
     const entities = [line, circle]
     entities.groups = [{ name: 'RACK', memberIds: ['16', '17'] }]
     expect(build(context(entities)).refusal).toContain('ungroup')
-    expect(build(context([line, circle, { type: 'DIMENSION', definingHandles: ['16'] }])).refusal).toContain('dimension defining')
   })
   it('refuses unsaved and modified members', () => {
     expect(build(context([line, circle], [])).refusal).toContain('same-plan')
@@ -82,14 +84,17 @@ describe('Create Block from committed cockpit entities', () => {
     expect(resolved.waitingStep).toBeNull()
     expect(build(context(), resolved.effective).payload.members).toEqual(['16', '17'])
     expect(parseScript('BLOCK B 10,20 nope', parseDrawingCommand, PROMPTS).refusal).toContain('hexadecimal')
+    const unknown = parseScript('BLOCK B 10,20 FFFF', parseDrawingCommand, PROMPTS)
+    expect(unknown.refusal).toBeUndefined()
+    expect(build(context(), unknown.lines[0].inputs).refusal).toContain('only LINE')
   })
   it('stops a refused script line before any later command runs', () => {
     const create = vi.fn()
-    scriptContext.value = { session: { ...context([line, circle], []), engineParsed: true, actions: { create } }, inputs: {}, reach: null }
+    scriptContext.value = { session: { ...context(), engineParsed: true, actions: { create } }, inputs: {}, reach: null }
     render(<ScriptPanel />)
-    fireEvent.change(screen.getByLabelText('ribbon script'), { target: { value: 'BLOCK B 10,20 10 11\nLINE 0,0 1,1' } })
+    fireEvent.change(screen.getByLabelText('ribbon script'), { target: { value: 'BLOCK B 10,20 10 FFFF\nLINE 0,0 1,1' } })
     fireEvent.click(screen.getByTestId('cockpit-script-run'))
-    expect(screen.getByTestId('cockpit-script-status').textContent).toContain('Script stopped at line 1: Create block refused: same-plan')
+    expect(screen.getByTestId('cockpit-script-status').textContent).toContain('Script stopped at line 1: Create block refused: only LINE')
     expect(create).not.toHaveBeenCalled()
   })
 })

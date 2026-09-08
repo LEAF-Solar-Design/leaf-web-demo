@@ -36,6 +36,7 @@ import useEngineSession, {
   parsePointList,
   surviveSelection,
 } from './engineSession.js'
+import EngineSessionProvider, { useEngineSessionContext } from './EngineSessionProvider.jsx'
 
 afterEach(cleanup)
 
@@ -138,6 +139,32 @@ function mountSession(options = {}) {
 async function openDocument(session, file = fileOf()) {
   await act(async () => { await session.current.actions.open(file) })
 }
+
+describe('member gestures re-arm from empty operands', () => {
+  it.each(['createBlock', 'group'])('resets a repeated %s without Escape', async (op) => {
+    const worker = new ScriptedWorker()
+    let current
+    function Consumer() { current = useEngineSessionContext(); return null }
+    render(<EngineSessionProvider createWorker={() => worker}><Consumer /></EngineSessionProvider>)
+    await act(async () => { await current.session.actions.open(fileOf()) })
+    worker.emit(loadedMessage([LINE, POLY]))
+    const armed = { group: op === 'group' ? 'groups' : 'draw', op }
+    act(() => { current.setArmed(armed) })
+    act(() => {
+      for (const [key, value] of Object.entries({ members: 'e2', membersDone: 'true', name: 'B1', groupName: 'G1', x: '10', y: '20' })) current.setInput(key, value)
+    })
+    expect(current.inputs.members).toBe('e2')
+    act(() => { current.setArmed(armed) })
+    expect(current.armed).toMatchObject(armed)
+    expect(current.inputs.members).toBe('')
+    expect(current.inputs.membersDone).toBe('')
+    if (op === 'createBlock') {
+      expect(current.inputs.name).toBe('')
+      expect(current.inputs.x).toBe('')
+      expect(current.inputs.y).toBe('')
+    } else expect(current.inputs.groupName).toBe('')
+  })
+})
 
 describe('worker lifetime is the store\'s', () => {
   it('never spawns the engine worker at mount — only on the first open', async () => {

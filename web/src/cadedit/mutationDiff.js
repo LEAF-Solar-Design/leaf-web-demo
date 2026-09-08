@@ -261,7 +261,10 @@ export function sameBlockMember(a, b) {
     : Array.isArray(x) && Array.isArray(y) ? x.length === y.length && x.every((v, i) => equal(v, y[i]))
       : x && y && typeof x === 'object' && typeof y === 'object'
         ? Object.keys(x).length === Object.keys(y).length && Object.keys(x).every((k) => equal(x[k], y[k])) : x === y
-  return equal(left, right) && equal(a.normal ?? [0, 0, 1], b.normal ?? [0, 0, 1])
+  const widths = (entity) => [entity.constantWidth ?? 0,
+    entity.startWidths ?? (entity.vertices || []).map(() => 0),
+    entity.endWidths ?? (entity.vertices || []).map(() => 0)]
+  return equal(left, right) && equal(a.normal ?? [0, 0, 1], b.normal ?? [0, 0, 1]) && equal(widths(a), widths(b))
 }
 
 // The server sorts geometry-only canonical JSON before attaching styles.

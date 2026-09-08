@@ -312,9 +312,11 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
       const normal = entity.normal ?? [0, 0, 1]
       if (!Array.isArray(normal) || normal.length !== 3 || normal.some((v, i) => v !== [0, 0, 1][i])) return fail('every member must have normal +Z')
       if ((entity.bulges || []).some((b) => b !== 0)) return fail('polyline segments must be straight')
+      if ((entity.constantWidth ?? 0) !== 0 || (entity.startWidths || []).some((w) => w !== 0)
+          || (entity.endWidths || []).some((w) => w !== 0)) return fail('polyline widths must be zero')
       if (entity.aci === 0 || String(entity.linetype).toLowerCase() === 'byblock' || entity.lineweight === -2) return fail('members must not use ByBlock properties')
       if ((entities.groups || []).some((g) => (g.memberIds || []).map(String).includes(id))) return fail('ungroup members before creating a block')
-      if (entities.some((e) => e.type === 'DIMENSION' && (e.definingHandles || []).map(String).includes(id))) return fail('a dimension defining entity cannot become a block child')
+      if (entity.dimensionDefined || entities.some((e) => e.type === 'DIMENSION' && (e.definingHandles || []).map(String).includes(id))) return fail('a dimension defining entity cannot become a block child')
       const original = committed.find((e) => String(e.id ?? e.handle) === id)
       if (!original) return fail('same-plan additions must be saved before creating a block')
       if (!sameBlockMember(original, entity)) return fail('members must have unchanged committed geometry and properties')

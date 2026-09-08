@@ -102,6 +102,10 @@ function projectDocument(doc) {
       modelSpace: entity.modelSpace !== false,
       normal: entity.normal ?? [0, 0, 1],
       definingHandles: entity.definingHandles ?? [],
+      dimensionDefined: entity.dimensionDefined === true,
+      constantWidth: entity.constantWidth ?? null,
+      startWidths: entity.startWidths ?? null,
+      endWidths: entity.endWidths ?? null,
       vertices: entity.vertices,
       // W4f: drawable fields for CIRCLE/ARC (null for every other kind), so
       // the viewer can show the engine document; older wrappers without

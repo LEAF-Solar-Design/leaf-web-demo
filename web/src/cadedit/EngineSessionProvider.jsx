@@ -197,12 +197,12 @@ export default function EngineSessionProvider({
       : null
     setEditState((current) => {
       const previous = current.armed
-      if (previous && previous.group === group && previous.op === op && sameFrom(previous.from, from)) return current
+      if (op !== 'createBlock' && op !== 'group' && previous && previous.group === group && previous.op === op && sameFrom(previous.from, from)) return current
       // W4g-7b-04c-8: a prompt speaks only to the keys it shows. Publish
       // the arm and hidden-key defaults together; a LINE chain's `from`
-      // stays on the armed record, and repeating the same op keeps inputs.
+      // stays on the armed record; member gestures start fresh on every arm.
       let nextInputs = current.inputs
-      if (previous?.op !== op) {
+      if (previous?.op !== op || op === 'group' || op === 'createBlock') {
         const shown = promptKeys(op)
         nextInputs = Object.freeze(Object.fromEntries(Object.entries(DEFAULT_EDIT_INPUTS)
           .map(([key, value]) => [key, shown.has(key) ? current.inputs[key] : value])))

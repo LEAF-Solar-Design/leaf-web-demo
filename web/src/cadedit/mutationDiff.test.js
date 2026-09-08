@@ -45,6 +45,56 @@ describe('named group mutation plans', () => {
     expect(result.reason).toMatch(/group RACK.*two members/)
     expect(result.cause).toBe('group-singleton')
   })
+  it('keeps two definition ordinals aligned with a group and INSERT colour', () => {
+    const members = [
+      { id: '16', type: 'LINE', layer: '0', vertices: [[12, 23, 0], [17, 23, 0]] },
+      { id: '17', type: 'CIRCLE', layer: '0', vertices: [[11, 24, 0]], radius: 2 },
+    ]
+    const insert = { id: '32', type: 'INSERT', layer: '0', name: 'B', ip: [10, 20, 0], rotationDeg: 0, scale: [1, 1, 1] }
+    const block = { name: 'B', base: [10, 20, 0], complete: true, children: members.map((e, i) => ({ ...e, id: String(48 + i) })) }
+    const other = { ...insert, id: '33', name: 'A', aci: 3 }
+    const blocks = [
+      { ...block, children: [block.children[0]] },
+      { ...block, name: 'A', children: [block.children[1]] },
+    ]
+    const result = diffPlan({ entities: members, blocks: [] }, {
+      entities: [other, insert], blocks,
+      groups: [{ name: 'PAIR', memberIds: ['32', '33'] }],
+    })
+    expect(result.reason).toBeNull()
+    expect(result.mutations.added.map((e) => e.handle)).toEqual(['20', '21'])
+    expect(result.mutations.block_defs).toEqual([
+      { name: 'A', base: [10, 20, 0], members: ['11'], insert: 1 },
+      { name: 'B', base: [10, 20, 0], members: ['10'], insert: 0 },
+    ])
+    expect(result.mutations.added_groups).toEqual([{ name: 'PAIR', members: [{ add: 0 }, { add: 1 }] }])
+    expect(result.mutations.added[1].color).toBe(3)
+  })
+  it('matches identical children to distinct removed members', () => {
+    const member = { id: '16', type: 'LINE', layer: '0', vertices: [[12, 23, 0], [17, 23, 0]] }
+    const twins = [member, { ...member, id: '17' }]
+    const insert = { id: '32', type: 'INSERT', layer: '0', name: 'B', ip: [10, 20, 0], rotationDeg: 0, scale: [1, 1, 1] }
+    const block = { name: 'B', base: [10, 20, 0], complete: true }
+    const result = diffPlan({ entities: twins, blocks: [] }, {
+      entities: [insert], blocks: [{ ...block, children: twins.map((e, i) => ({ ...e, id: String(48 + i) })) }],
+    })
+    expect(result.reason).toBeNull()
+    expect(result.mutations.block_defs[0].members).toEqual(['10', '11'])
+    expect(diffPlan({ entities: [twins[0]], blocks: [] }, {
+      entities: [insert], blocks: [{ ...block, children: twins }],
+    }).cause).toBe('block-def-unmatched')
+  })
+  it.each([{ constantWidth: 2 }, { startWidths: [2, 0] }, { endWidths: [0, 2] }])('never matches a wide child to a deleted thin polyline: %j', (width) => {
+    const thin = { id: '16', type: 'LWPOLYLINE', layer: '0', vertices: [[12, 23, 0], [17, 23, 0]], closed: false }
+    const insert = { id: '32', type: 'INSERT', layer: '0', name: 'B', ip: [10, 20, 0], rotationDeg: 0, scale: [1, 1, 1] }
+    const block = { name: 'B', base: [10, 20, 0], complete: true }
+    const wide = { ...thin, id: '17', ...width }
+    const result = diffPlan({ entities: [thin, wide], blocks: [] }, {
+      entities: [insert], blocks: [{ ...block, children: [{ ...wide, id: '48' }] }],
+    })
+    expect(result.reason).toBeNull()
+    expect(result.mutations.block_defs[0].members).toEqual(['11'])
+  })
   it('uppercases added and removed group names and compares names without case', () => {
     const entities = [line(10), line(11)]
     const lower = { ...rack(['10', '11']), name: 'rack' }

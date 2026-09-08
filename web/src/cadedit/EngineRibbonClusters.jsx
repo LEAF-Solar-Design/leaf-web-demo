@@ -295,7 +295,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     if (!armedOp) return undefined
     promptRef.current?.querySelector(armedOp === 'group' || armedOp === 'createBlock' ? '[aria-label="ribbon members"]' : 'input:not([disabled])')?.focus()
     return undefined
-  }, [armedOp])
+  }, [armed, armedOp])
   useEffect(() => {
     // W4f-2: a run makes the engine busy, which disables Run and the fields,
     // and the browser drops focus to the body. When the engine answers, the
