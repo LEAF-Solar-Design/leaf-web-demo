@@ -1773,7 +1773,7 @@ def build_suites() -> List[Suite]:
                   # W4g-7b-01c blocks, W4g-7c-2c Create Block and MLEADER
                   # rows: eight tests) require the rebuilt engine;
                   # numbers on PRs #1036, #1107 and #1140.
-                  ("src/cad/engineBatchAtomic.test.js", 8),
+                  ("src/cad/engineBatchAtomic.test.js", 9),
               )),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
