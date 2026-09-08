@@ -76,7 +76,7 @@ describe('W4g-5d surface: word, prompt, pick, seat', () => {
     // Every other draw record sits in its own panel.
     // (W4g-7b-02c seats INSERT BLOCK in the Block panel the same way;
     // W4g-7b-04c-2 seats the two dimension records in annotation, same idiom.)
-    const annotationOps = ['createText', 'dimLinear', 'dimAligned']
+    const annotationOps = ['createText', 'dimLinear', 'dimAligned', 'createMleader']
     for (const a of forGroup('draw')) {
       if (annotationOps.includes(a.op)) expect(a.panel).toBe('annotation')
       else if (a.op !== 'createInsert' && a.op !== 'createBlock') expect(a.panel).toBe('draw')
@@ -123,7 +123,7 @@ class IdleWorker {
 afterEach(() => cleanup())
 
 describe('W4g-5d the Annotation panel', () => {
-  it('holds the real Text and the two real Dimension tools beside the one honest placeholder; the Draw panel does not carry it', () => {
+  it('holds Text, both Dimensions and Leader as real Annotation tools; the Draw panel does not carry Text', () => {
     render(
       <EngineSessionProvider createWorker={vi.fn(() => new IdleWorker())}>
         <DraftingRibbon clusters={[]}>
@@ -134,7 +134,7 @@ describe('W4g-5d the Annotation panel', () => {
     const annotation = document.querySelector('.ribbon-cluster[data-group="annotation"]')
     expect(annotation).not.toBeNull()
     const ids = [...annotation.querySelectorAll('[data-tool]')].map((el) => el.dataset.tool)
-    expect(ids).toEqual(['draw:createText', 'draw:dimLinear', 'draw:dimAligned', 'annotation:leader'])
+    expect(ids).toEqual(['draw:createText', 'draw:dimLinear', 'draw:dimAligned', 'draw:createMleader'])
     const draw = document.querySelector('.ribbon-cluster[data-group="draw"]')
     expect([...draw.querySelectorAll('[data-tool]')].map((el) => el.dataset.tool)).not.toContain('draw:createText')
     // The panel order on the engine side is the reference's: Draw, Modify,

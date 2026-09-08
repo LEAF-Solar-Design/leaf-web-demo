@@ -223,7 +223,6 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // W4g-7a: the resolution lives in promptInputs.js, shared with the script
   // runner, so a script line and a typed prompt read the same numbers.
   const { effective, expressionRefusal, failedExpression, waitingStep, pointSteps } = resolvePromptInputs(prompt, promptInputs, armed && armed.from ? armed.from : null)
-  if (armedOp === 'createMleader' && !effective.style) effective.style = 'Standard'
   const gatheringMembers = (armedOp === 'group' && !inputs.groupName || armedOp === 'createBlock') && !inputs.membersDone
   const liveRefusal = prompt && !promptReason && !waitingStep && !gatheringMembers
     ? (expressionRefusal || (armedGroup === 'draw'

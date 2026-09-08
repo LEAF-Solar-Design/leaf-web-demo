@@ -194,7 +194,8 @@ fn vertices_of(entity: &EntityType) -> Vec<[f64; 3]> {
         // W4g-4b: a POINT is its location; an ELLIPSE is addressed by its centre
         // (the axis and ratio ride beside it in the projection).
         EntityType::MultiLeader(m) => m.context.leader_roots.iter()
-            .flat_map(|root| root.lines.iter()).flat_map(|line| line.points.iter())
+            .flat_map(|root| root.lines.iter().flat_map(|line| line.points.iter())
+                .chain(std::iter::once(&root.connection_point)))
             .map(|p| [p.x, p.y, p.z]).collect(),
         EntityType::Point(p) => vec![[p.location.x, p.location.y, p.location.z]],
         EntityType::Ellipse(e) => vec![[e.center.x, e.center.y, e.center.z]],
@@ -238,7 +239,7 @@ fn text_of(entity: &EntityType) -> Option<String> {
 fn height_of(entity: &EntityType) -> Option<f64> {
     match entity {
         EntityType::Text(t) => Some(t.height),
-        EntityType::MultiLeader(m) => Some(m.text_height),
+        EntityType::MultiLeader(m) => Some(if m.context.text_height > 0.0 { m.context.text_height } else { m.text_height }),
         _ => None,
     }
 }
@@ -662,7 +663,47 @@ fn linetypes_catalogue(document: &CadDocument) -> (Vec<String>, bool) {
 // (CadDocument::initialize_defaults), guaranteed defensively here too.
 const DIMSTYLE_CATALOGUE_CAP: usize = 200;
 
-fn mlstyles_catalogue(document: &CadDocument) -> Vec<serde_json::Value> {
+// Group 173 is lost by the crate's style reader. Retain only source facts,
+// keyed by object handle; generated and binary documents have no known value.
+fn scan_mlstyle_segments(bytes: &[u8]) -> HashMap<Handle, i32> {
+    let mut segments = HashMap::new();
+    if bytes.len() > 16 * 1024 * 1024 || bytes.starts_with(b"AutoCAD Binary DXF") { return segments; }
+    let mut pairs = bytes.split(|b| *b == b'\n');
+    let mut objects = false;
+    let mut section = false;
+    let mut style = false;
+    let mut handle = None;
+    let mut count = None;
+    while let (Some(code), Some(value)) = (pairs.next(), pairs.next()) {
+        let code = std::str::from_utf8(code).ok().and_then(|s| s.trim().parse::<i32>().ok());
+        let value = std::str::from_utf8(value).unwrap_or("").trim();
+        if code == Some(0) {
+            if style {
+                if let (Some(h), Some(n)) = (handle, count) { segments.insert(h, n); }
+            }
+            style = objects && value == "MLEADERSTYLE";
+            handle = None;
+            count = None;
+            section = value == "SECTION";
+            if section || value == "ENDSEC" { objects = false; }
+        } else if section && code == Some(2) {
+            objects = value == "OBJECTS";
+            section = false;
+        } else if style {
+            match code {
+                Some(5) => handle = u64::from_str_radix(value, 16).ok().map(Handle::new),
+                Some(173) => count = value.parse::<i32>().ok(),
+                _ => {},
+            }
+        }
+    }
+    if style {
+        if let (Some(h), Some(n)) = (handle, count) { segments.insert(h, n); }
+    }
+    segments
+}
+
+fn mlstyles_catalogue(document: &CadDocument, segments: &HashMap<Handle, i32>) -> Vec<serde_json::Value> {
     let mut styles: Vec<_> = document.objects.values().filter_map(|object| {
         let ObjectType::MultiLeaderStyle(style) = object else { return None; };
         let textstyle = document.text_styles.iter()
@@ -671,7 +712,7 @@ fn mlstyles_catalogue(document: &CadDocument) -> Vec<serde_json::Value> {
         Some(serde_json::json!({
             "name": style.name, "textstyle": textstyle, "height": style.text_height,
             "arrow": style.arrowhead_size, "dogleg": style.landing_distance,
-            "gap": style.landing_gap, "segments": style.max_leader_points - 1,
+            "gap": style.landing_gap, "segments": segments.get(&style.handle),
         }))
     }).collect();
     styles.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
@@ -843,7 +884,7 @@ fn parse_dxf_core(bytes: &[u8]) -> Result<ParsedDxf, Refusal> {
         .map_err(|e| e.to_string())?.read().map_err(|e| e.to_string())?;
     validate_block_names(&inner, definitions)?;
     let unknown_block_bases = retain_block_bases(&mut inner, bytes)?;
-    Ok(ParsedDxf { group_names: group_names(&inner), inner, block_base_patched: Cell::new(false), block_bases_unknown: bytes.starts_with(b"AutoCAD Binary DXF"), unknown_block_bases })
+    Ok(ParsedDxf { group_names: group_names(&inner), inner, block_base_patched: Cell::new(false), block_bases_unknown: bytes.starts_with(b"AutoCAD Binary DXF"), unknown_block_bases, mlstyle_segments: scan_mlstyle_segments(bytes) })
 }
 
 // Validate all BLOCK layouts before emitting any replacement. Keep every byte
@@ -945,6 +986,7 @@ pub struct ParsedDxf {
     block_base_patched: Cell<bool>,
     block_bases_unknown: bool,
     unknown_block_bases: HashSet<String>,
+    mlstyle_segments: HashMap<Handle, i32>,
 }
 
 fn group_dictionary(document: &CadDocument) -> Option<Handle> {
@@ -1888,7 +1930,7 @@ impl ParsedDxf {
             x2 + style.landing_distance + style.landing_gap, y2 + style.text_height / 2.0, 0.0);
         if !all_finite(&[text_location.x, text_location.y]) { return refuse("coordinate_not_finite"); }
         let landing = Vector3::new(x2, y2, 0.0);
-        let mut m = MultiLeader::with_text(text, text_location, vec![Vector3::new(x1, y1, 0.0), landing]);
+        let mut m = MultiLeader::with_text(text, text_location, vec![Vector3::new(x1, y1, 0.0)]);
         m.common.handle = Handle::NULL;
         m.style_handle = Some(style.handle);
         m.text_style_handle = style.text_style_handle.or_else(|| self.inner.text_styles.iter()
@@ -2295,7 +2337,7 @@ impl ParsedDxf {
         if !set_projection_field(&list, &JsValue::from_str("linetypesTruncated"), &JsValue::from_bool(truncated)) {
             return Err(JsValue::from_str("linetype_catalogue_projection_failed"));
         }
-        let mlstyles = mlstyles_catalogue(&self.inner).serialize(&serializer)
+        let mlstyles = mlstyles_catalogue(&self.inner, &self.mlstyle_segments).serialize(&serializer)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         if !set_projection_field(&list, &JsValue::from_str("mlstyles"), &mlstyles) {
             return Err(JsValue::from_str("mleader_style_catalogue_projection_failed"));
@@ -2835,7 +2877,7 @@ mod created_entity_roundtrip {
     }
 
     fn empty_doc() -> ParsedDxf {
-        ParsedDxf { inner: CadDocument::new(), group_names: Vec::new(), block_base_patched: Cell::new(false), block_bases_unknown: false, unknown_block_bases: HashSet::new() }
+        ParsedDxf { inner: CadDocument::new(), group_names: Vec::new(), block_base_patched: Cell::new(false), block_bases_unknown: false, unknown_block_bases: HashSet::new(), mlstyle_segments: HashMap::new() }
     }
 
     fn kinds(doc: &ParsedDxf) -> Vec<&'static str> {
@@ -2856,7 +2898,7 @@ mod created_entity_roundtrip {
     }
 
     fn rewrite(doc: &ParsedDxf) -> ParsedDxf {
-        ParsedDxf { inner: reparse(&doc.inner), group_names: group_names(&doc.inner), block_base_patched: Cell::new(false), block_bases_unknown: doc.block_bases_unknown, unknown_block_bases: doc.unknown_block_bases.clone() }
+        ParsedDxf { inner: reparse(&doc.inner), group_names: group_names(&doc.inner), block_base_patched: Cell::new(false), block_bases_unknown: doc.block_bases_unknown, unknown_block_bases: doc.unknown_block_bases.clone(), mlstyle_segments: doc.mlstyle_segments.clone() }
     }
 
     fn code<T>(result: Result<T, Refusal>) -> String {
@@ -3958,7 +4000,7 @@ mod w4g_7b_03c_property_verbs {
     use super::*;
 
     fn empty_doc() -> ParsedDxf {
-        ParsedDxf { inner: CadDocument::new(), group_names: Vec::new(), block_base_patched: Cell::new(false), block_bases_unknown: false, unknown_block_bases: HashSet::new() }
+        ParsedDxf { inner: CadDocument::new(), group_names: Vec::new(), block_base_patched: Cell::new(false), block_bases_unknown: false, unknown_block_bases: HashSet::new(), mlstyle_segments: HashMap::new() }
     }
 
     fn code<T>(result: Result<T, Refusal>) -> String {
@@ -3974,7 +4016,7 @@ mod w4g_7b_03c_property_verbs {
             .expect("reader accepts the written bytes")
             .read()
             .expect("written bytes re-parse");
-        ParsedDxf { group_names: group_names(&inner), inner, block_base_patched: Cell::new(false), block_bases_unknown: doc.block_bases_unknown, unknown_block_bases: doc.unknown_block_bases.clone() }
+        ParsedDxf { group_names: group_names(&inner), inner, block_base_patched: Cell::new(false), block_bases_unknown: doc.block_bases_unknown, unknown_block_bases: doc.unknown_block_bases.clone(), mlstyle_segments: doc.mlstyle_segments.clone() }
     }
 
     #[test]
@@ -4172,7 +4214,7 @@ mod w4g_7b_04c_dimension_rows {
     use acadrust::entities::DimensionRadius;
 
     fn empty_doc() -> ParsedDxf {
-        ParsedDxf { inner: CadDocument::new(), group_names: Vec::new(), block_base_patched: Cell::new(false), block_bases_unknown: false, unknown_block_bases: HashSet::new() }
+        ParsedDxf { inner: CadDocument::new(), group_names: Vec::new(), block_base_patched: Cell::new(false), block_bases_unknown: false, unknown_block_bases: HashSet::new(), mlstyle_segments: HashMap::new() }
     }
 
     fn code<T>(result: Result<T, Refusal>) -> String {
@@ -4188,7 +4230,7 @@ mod w4g_7b_04c_dimension_rows {
             .expect("reader accepts the written bytes")
             .read()
             .expect("written bytes re-parse");
-        ParsedDxf { group_names: group_names(&inner), inner, block_base_patched: Cell::new(false), block_bases_unknown: doc.block_bases_unknown, unknown_block_bases: doc.unknown_block_bases.clone() }
+        ParsedDxf { group_names: group_names(&inner), inner, block_base_patched: Cell::new(false), block_bases_unknown: doc.block_bases_unknown, unknown_block_bases: doc.unknown_block_bases.clone(), mlstyle_segments: doc.mlstyle_segments.clone() }
     }
 
     fn near(a: f64, b: f64) -> bool {
@@ -4360,6 +4402,9 @@ mod w4g_7b_04c_dimension_rows {
     #[test]
     fn mleader_create_roundtrip_refusals_and_erase() {
         let mut doc = empty_doc();
+        for object in doc.inner.objects.values_mut() {
+            if let ObjectType::MultiLeaderStyle(style) = object { style.text_height = 1.0; }
+        }
         assert_eq!(code(doc.create_mleader_core(f64::NAN, 0.0, 3.0, 4.0, "Valve", "Standard", "")), "coordinate_not_finite");
         assert_eq!(code(doc.create_mleader_core(0.0, 0.0, 0.0, 0.0, "Valve", "Standard", "")), "mleader_points_coincide");
         assert_eq!(code(doc.create_mleader_core(0.0, 0.0, 3.0, 4.0, "", "Standard", "")), "text_empty");
@@ -4376,13 +4421,21 @@ mod w4g_7b_04c_dimension_rows {
         assert_eq!(before["text"], "Valve");
         assert_eq!(before["style"], "Standard");
         assert!(near(before["textLocation"][0].as_f64().unwrap(), 3.45));
-        assert!(near(before["textLocation"][1].as_f64().unwrap(), 4.09));
-        assert_eq!(before["height"], serde_json::json!(0.18));
+        assert!(near(before["textLocation"][1].as_f64().unwrap(), 4.5));
+        assert_eq!(before["height"], serde_json::json!(1.0));
         assert_eq!(before["arrow"], serde_json::json!(0.18));
         assert_eq!(before["dogleg"], serde_json::json!(0.36));
         let mut back = reparse(&doc);
         let after = projected_entities(&back.inner)[0].clone();
-        for field in ["handle", "vertices", "text", "style", "layer"] { assert_eq!(after[field], before[field]); }
+        for field in ["handle", "vertices", "text", "style", "layer", "height"] { assert_eq!(after[field], before[field]); }
+        let entity = back.inner.entities().next().unwrap();
+        let EntityType::MultiLeader(m) = entity else { panic!("expected a multileader"); };
+        assert_eq!(m.context.leader_roots.len(), 1);
+        let root = &m.context.leader_roots[0];
+        assert_eq!(root.lines.len(), 1);
+        assert_eq!(root.lines[0].points, vec![Vector3::new(0.0, 0.0, 0.0)]);
+        assert_eq!(root.connection_point, Vector3::new(3.0, 4.0, 0.0));
+        assert_eq!(vertices_of(entity), vec![[0.0, 0.0, 0.0], [3.0, 4.0, 0.0]]);
         assert_eq!(code(back.translate_entity_core(0, 1.0, 2.0)), MLEADER_NOT_EDITABLE);
         assert_eq!(code(back.copy_entity_core(0, 1.0, 2.0)), MLEADER_NOT_EDITABLE);
         assert_eq!(code(back.rotate_entity_core(0, 0.0, 0.0, 90.0)), MLEADER_NOT_EDITABLE);
@@ -4392,8 +4445,19 @@ mod w4g_7b_04c_dimension_rows {
         assert_eq!(code(back.set_entity_color_core(0, 1)), MLEADER_NOT_EDITABLE);
         assert!(back.delete_entity_core(0).is_ok());
         assert!(projected_entities(&back.inner).is_empty());
-        let styles = mlstyles_catalogue(&doc.inner);
-        assert!(styles.iter().any(|s| s["name"] == "Standard" && s["segments"] == 1));
+        let styles = mlstyles_catalogue(&doc.inner, &doc.mlstyle_segments);
+        assert!(styles.iter().any(|s| s["name"] == "Standard" && s["segments"].is_null()));
+    }
+
+    #[test]
+    fn mlstyle_segments_scans_only_objects_and_keeps_unknown_values_unknown() {
+        let bytes = b"0\nSECTION\n2\nENTITIES\n0\nMLEADERSTYLE\n5\nFF\n173\n9\n0\nENDSEC\n0\nSECTION\n2\nOBJECTS\n0\nMLEADERSTYLE\n5\nA\n173\n1\n0\nMLEADERSTYLE\n173\n2\n5\nB\n0\nMLEADERSTYLE\n5\nC\n0\nENDSEC\n0\nEOF\n";
+        let segments = scan_mlstyle_segments(bytes);
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments.get(&Handle::new(0xA)), Some(&1));
+        assert_eq!(segments.get(&Handle::new(0xB)), Some(&2));
+        assert!(scan_mlstyle_segments(b"AutoCAD Binary DXF\r\n").is_empty());
+        assert!(scan_mlstyle_segments(b"").is_empty());
     }
 
     #[test]

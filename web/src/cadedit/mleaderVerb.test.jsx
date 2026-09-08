@@ -11,6 +11,9 @@ describe('MLEADER in the browser engine create lane', () => {
     expect(CREATE_OPS).not.toContain('createMleader')
     expect(build()).toEqual({ payload: { x: 0, y: 0, x2: 3, y2: 4, text: 'Valve', style: 'Standard', layer: '0' } })
     expect(build({ style: 'standard' }).payload.style).toBe('Standard')
+    for (const style of ['', '   ', undefined]) expect(build({ style }).payload.style).toBe('Standard')
+    expect(build({ style: '' }, [{ ...mlstyles[0], name: 'STANDARD' }]).payload.style).toBe('STANDARD')
+    expect(build({ text: 'x'.repeat(200) }).payload.text).toHaveLength(200)
     expect(buildCreatePayload('createMleader', inputs).payload).toBeDefined()
     expect(buildCreatePayload('constructor', inputs).refusal).toBeTruthy()
   })
@@ -26,7 +29,15 @@ describe('MLEADER in the browser engine create lane', () => {
   it('refuses unknown and multi-segment styles when the catalogue is present', () => {
     expect(build({ style: 'Absent' }).refusal).toBe('mleader_style_unknown')
     expect(build({}, []).refusal).toBe('mleader_style_unknown')
+    expect(build({ style: '' }, []).refusal).toBe('mleader_style_unknown')
+    expect(build({ style: ' ' }, [{ ...mlstyles[0], name: 'Other' }]).refusal).toBe('mleader_style_unknown')
+    expect(build({}, [{ ...mlstyles[0], segments: null }]).payload).toBeDefined()
     expect(build({}, [{ ...mlstyles[0], segments: 2 }]).refusal).toMatch(/one leader segment/)
+  })
+  it('passes Standard through for an empty style when no catalogue is available', () => {
+    for (const style of ['', '   ', undefined]) {
+      expect(buildCreatePayload('createMleader', { ...inputs, style }).payload.style).toBe('Standard')
+    }
   })
   it('lowers batch creates through the same builder and catalogue', () => {
     const entities = Object.assign([], { mlstyles })

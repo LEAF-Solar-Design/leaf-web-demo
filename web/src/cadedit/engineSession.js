@@ -338,10 +338,11 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
     if ([...value].some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) > 126 || '|\\%'.includes(c)) || value.trim() !== value) {
       return { refusal: 'mleader text must be printable ASCII without |, \\ or % and without edge whitespace' }
     }
-    const styleName = String(style ?? 'Standard')
+    const requestedStyle = String(style ?? '').trim()
+    const styleName = requestedStyle || 'Standard'
     const definition = Array.isArray(mlstyles) ? mlstyles.find((s) => String(s?.name ?? '').toLowerCase() === styleName.toLowerCase()) : null
     if (Array.isArray(mlstyles) && !definition) return { refusal: 'mleader_style_unknown' }
-    if (definition && definition.segments !== 1) return { refusal: 'Mleader refused: the style must use one leader segment.' }
+    if (definition && typeof definition.segments === 'number' && definition.segments !== 1) return { refusal: 'Mleader refused: the style must use one leader segment.' }
     return { payload: { x: px, y: py, x2: lx, y2: ly, text: value, style: definition?.name ?? styleName, layer: layerName } }
   }
   if (op === 'createLine') {

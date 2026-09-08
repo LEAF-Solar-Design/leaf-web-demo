@@ -4,7 +4,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { byId, DEFERRED_REASONS } from '../lib/actionRegistry.js'
+import { byId } from '../lib/actionRegistry.js'
 import { COCKPIT_COMMAND_EVENT, parseDrawingCommand } from '../lib/commandWords.js'
 
 import CadEditSurface from './CadEditSurface.jsx'
@@ -179,17 +179,16 @@ describe('CommandLineArmer (W4f slice B)', () => {
     expect(workers[0].posted).toHaveLength(before)
   })
 
-  it('a deferred word (LEADER) arms nothing and surfaces its own sentence', async () => {
+  it('LEADER arms the live createMleader prompt', async () => {
     mount()
     await openAndLoad()
     expect(promptEl()).toBeNull()
     command(parseDrawingCommand('LEADER'))
-    expect(promptEl()).toBeNull()
-    expect(screen.getByRole('status').textContent).toBe(DEFERRED_REASONS.leader)
+    expect(promptEl().getAttribute('data-op')).toBe('createMleader')
     // A mismatched reason (never emitted by the real parser, but the gate
     // must fail closed against it anyway) is dropped, same as any malformed detail.
     command({ group: 'deferred', op: 'leader', reason: 'a made-up sentence' })
-    expect(screen.getByRole('status').textContent).toBe(DEFERRED_REASONS.leader)
+    expect(promptEl().getAttribute('data-op')).toBe('createMleader')
   })
 
   it('acceptsCommand is the fail-closed gate', () => {

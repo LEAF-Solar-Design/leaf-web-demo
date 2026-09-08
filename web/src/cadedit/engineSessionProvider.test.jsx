@@ -144,6 +144,12 @@ async function openAndLoad(studio, entities = [LINE], name = 'one.dxf') {
   studio.workers[studio.workers.length - 1].emit(loadedMessage(entities, name))
 }
 
+it('keeps prompt text beyond the scalar input limit', () => {
+  const studio = mount()
+  act(() => { studio.context.setInput('text', 'x'.repeat(100)) })
+  expect(studio.context.inputs.text).toBe('x'.repeat(100))
+})
+
 const ribbonTool = (op) => document.querySelector(`.drafting-ribbon [data-tool="modify:${op}"]`)
 const modifyNote = () => document.querySelector('.drafting-ribbon [data-group="modify"] .ribbon-note')
 const saveTool = () => document.querySelector('.drafting-ribbon [data-tool="save-version"]')
