@@ -183,6 +183,97 @@ def test_catalogue_beyond_display_cap_is_incomplete():
         mutation_plan.validate_mutations(head, replace())
 
 
+@pytest.mark.parametrize("kind", ["LINE", "LWPOLYLINE"])
+def test_two_vertex_member_verifies_with_line_or_lwpolyline_bke(kind):
+    geometry = ("LN|SITE|12,23,0|17,23,0|10\n" if kind == "LINE" else
+                "PL|SITE|0|0|0,0,1|10\nPV|12,23\nPV|17,23\n")
+    records = ("MEC|1\nLAYER|0\nLAYER|SITE\n" + geometry
+               + f"BM|10|{kind}|0,0,1|0|0|0\n"
+               + "CI|SITE|11,24,0|2|0,0,1|11\nBM|11|CIRCLE|0,0,1|0|0|0\n"
+               + "EP|10|3|~|Continuous|25\n")
+    head = intake_parse.parse_text(records, "canary")
+    assert not head.get("parseErrors")
+    assert "kind" not in head["polylines"][0]
+    canonical = mutation_plan.validate_mutations(head, replace())
+    result = write_loop.apply_mutations(head, canonical)
+    assert result["blocks"]["B"]["children"][0]["kind"] == "LINE"
+    actual = reopened()
+    if kind == "LWPOLYLINE":
+        child = intake_parse.parse_text(
+            "BK|B|10,20,0|1|1\n"
+            "BKE|B|LWPOLYLINE|0|0,0,1|0|12,23;17,23;|SITE\n", "canary")
+        actual["blocks"]["B"]["children"][0] = {
+            **child["blocks"]["B"]["children"][0],
+            "properties": actual["blocks"]["B"]["children"][0]["properties"],
+        }
+    assert write_loop.verify_live_mutation_effects(head, actual, canonical) is None
+
+
+@pytest.mark.parametrize("closed,points", [(False, 2), (True, 2), (False, 3)])
+def test_polyline_records_keep_frozen_shape(closed, points):
+    vertices = [[float(i), 0.0, 0.0] for i in range(points)]
+    geometry = (f"PL|0|{int(closed)}|0|0,0,1|10\n"
+                + "".join(f"PV|{i},0\n" for i in range(points)))
+    legacy = intake_parse.parse_text(geometry, "head")
+    covered = intake_parse.parse_text("MEC|1\n" + geometry
+                                      + "BM|10|LWPOLYLINE|0,0,1|0|0|0\n", "head")
+    expected = {"layer": "0", "closed": closed, "pts": vertices, "xdata": None, "handle": "10"}
+    assert legacy["polylines"] == [expected]
+    assert covered["polylines"] == [expected]
+    dxf = ("0\nSECTION\n2\nENTITIES\n0\nLWPOLYLINE\n5\n10\n8\n0\n"
+           + f"90\n{points}\n70\n{int(closed)}\n"
+           + "".join(f"10\n{i}\n20\n0\n" for i in range(points))
+           + "0\nENDSEC\n0\nEOF\n")
+    assert dxf_intake.parse_dxf_bytes(dxf.encode())["polylines"] == [expected]
+
+
+@pytest.mark.parametrize("source", ["dxf", "inspection"])
+@pytest.mark.parametrize("code,evidence,rule", [
+    (42, {"bulges": [0.5]}, "block LWPOLYLINE must have straight segments, every bulge 0"),
+    (40, {"width": True}, "block LWPOLYLINE must have zero constant and vertex width"),
+    (41, {"width": True}, "block LWPOLYLINE must have zero constant and vertex width"),
+])
+def test_classic_polyline_member_refused_without_mutating_document(source, code, evidence, rule):
+    if source == "dxf":
+        text = ("0\nSECTION\n2\nENTITIES\n0\nPOLYLINE\n5\n10\n8\n0\n70\n0\n"
+                f"0\nVERTEX\n10\n0\n20\n0\n{code}\n0.5\n"
+                "0\nVERTEX\n10\n1\n20\n0\n0\nSEQEND\n0\nENDSEC\n0\nEOF\n")
+        head = dxf_intake.parse_dxf_bytes(text.encode())
+    else:
+        head = intake_parse.parse_text(
+            "MEC|1\nPL|0|0|0|0,0,1|10\nPV|0,0\nPV|1,0\n"
+            f"BM|10|POLYLINE|0,0,1|{'0.5' if code == 42 else '0'}|0|{int(code != 42)}\n", "head")
+    assert head["polylines"] == [{"layer": "0", "closed": False,
+        "pts": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], "xdata": None,
+        "handle": "10", **evidence}]
+    before = copy.deepcopy(head)
+    plan = replace()
+    plan["block_defs"][0]["members"] = ["10"]
+    plan["removed"] = ["10"]
+    with pytest.raises(ValueError, match=rule):
+        write_loop.apply_mutations(head, plan)
+    assert head == before
+
+
+@pytest.mark.parametrize("source", ["dxf", "inspection"])
+def test_straight_classic_polyline_keeps_frozen_record(source):
+    if source == "dxf":
+        head = dxf_intake.parse_dxf_bytes(
+            b"0\nSECTION\n2\nENTITIES\n0\nPOLYLINE\n5\n10\n8\n0\n70\n0\n"
+            b"0\nVERTEX\n10\n0\n20\n0\n42\n0\n40\n0\n41\n0\n"
+            b"0\nVERTEX\n10\n1\n20\n0\n0\nSEQEND\n0\nENDSEC\n0\nEOF\n")
+    else:
+        head = intake_parse.parse_text(
+            "MEC|1\nPL|0|0|0|0,0,1|10\nPV|0,0\nPV|1,0\n"
+            "BM|10|POLYLINE|0,0,1|0|0|0\n", "head")
+    assert head["polylines"] == [{"layer": "0", "closed": False,
+        "pts": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], "xdata": None, "handle": "10"}]
+    plan = replace()
+    plan["block_defs"][0]["members"] = ["10"]
+    plan["removed"] = ["10"]
+    assert mutation_plan.validate_mutations(head, plan)["block_defs"][0]["members"] == ["10"]
+
+
 def test_dimension_evidence_is_member_specific():
     head = base()
     head["dimensions"] = [{"handle": "20", "references": ["99"]}]

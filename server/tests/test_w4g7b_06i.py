@@ -172,6 +172,7 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
         '(entmake (list (cons 0 "BLOCK") (cons 2 "Fixture") (cons 70 0) (cons 10 (list 0.0 0.0 0.0))))',
         '(entmake (list (cons 0 "LINE") (cons 8 "0") (cons 10 (list 0.0 0.0 0.0)) (cons 11 (list 1.0 0.0 0.0))))',
         '(entmake (list (cons 0 "ENDBLK")))',
+        '(entmake (list (cons 0 "LWPOLYLINE") (cons 100 "AcDbEntity") (cons 8 "0") (cons 100 "AcDbPolyline") (cons 90 2) (cons 70 0) (cons 10 (list 12.0 23.0)) (cons 10 (list 17.0 23.0))))',
         "",
     ])
     base_stub = {
@@ -285,8 +286,10 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
     assert not any(g["name"] == "CANARYRACK" for g in ungrouped.get("groups", []))
     write_loop.verify_live_mutation_effects(grouped, ungrouped, ungroup_plan)
 
-    # Atomic REPLACE uses the committed LINE and the preceding round's CIRCLE.
-    members = [new_lines[0]["handle"], circle_handle]
+    # Atomic REPLACE copies a LINE, CIRCLE and open two-vertex LWPOLYLINE.
+    polyline, = [p for p in ungrouped["polylines"]
+                 if p["pts"] == [[12.0, 23.0, 0.0], [17.0, 23.0, 0.0]]]
+    members = [new_lines[0]["handle"], circle_handle, polyline["handle"]]
     block_plan = validate_mutations(ungrouped, {
         "block_defs": [{"name": "B", "base": [10, 20, 0], "members": members, "insert": 0}],
         "removed": members,
@@ -336,7 +339,7 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
     _console(tmp_path, output, "block-inspect.scr", inspect)
     blocked = intake_parse.parse(families, "canary")
     assert not blocked.get("parseErrors"), blocked.get("parseErrors")
-    assert [c["kind"] for c in blocked["blocks"]["B"]["children"]] == ["LINE", "CIRCLE"]
+    assert [c["kind"] for c in blocked["blocks"]["B"]["children"]] == ["LINE", "CIRCLE", "LWPOLYLINE"]
     assert len([e for e in blocked["inserts"] if e["name"] == "B"]) == 1
     assert not set(members) & {e["handle"] for field in ("polylines", "circles") for e in blocked.get(field, [])}
     assert all("properties" in c for c in blocked["blocks"]["B"]["children"])

@@ -159,6 +159,14 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             record = pairs[i + 1:j]
             handle = next((v for c, v in record if c == 5), None)
             if handle:
+                if value == "POLYLINE":
+                    vertex_end = j
+                    while vertex_end < n and pairs[vertex_end] == (0, "VERTEX"):
+                        vertex_end += 1
+                        while vertex_end < n and pairs[vertex_end][0] != 0:
+                            if pairs[vertex_end][0] in (40, 41, 42):
+                                record.append(pairs[vertex_end])
+                            vertex_end += 1
                 model_records[handle] = (value, record)
             if space_info.get("space") != "paper":
                 space_info.clear()
@@ -345,10 +353,10 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             normal = list(_group_point(groups, 210, (0, 0, 1)))
             if any(abs(a - b) > 1e-6 for a, b in zip(normal, (0, 0, 1))):
                 entity["normal"] = normal
-            bulges = [float(v) for c, v in record if c == 42] if kind == "LWPOLYLINE" else []
+            bulges = [float(v) for c, v in record if c == 42] if kind in ("LWPOLYLINE", "POLYLINE") else []
             if any(bulges):
                 entity["bulges"] = bulges
-            if kind == "LWPOLYLINE" and any(float(v) != 0 for c, v in record if c in (40, 41, 43)):
+            if kind in ("LWPOLYLINE", "POLYLINE") and any(float(v) != 0 for c, v in record if c in (40, 41, 43)):
                 entity["width"] = True
             if groups.get(67) == "1" or groups.get(410, "Model") != "Model":
                 entity["space"] = "paper"

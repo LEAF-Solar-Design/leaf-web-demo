@@ -386,6 +386,13 @@ def test_v3_activity_adds_insert_and_preserves_v2_apply_script():
                         if line.startswith("(defun leaf-bd-member-data "))
     assert '(member (car pair) (list 40 41 42 43))' in member_check
     assert '(not (leaf-bd-group-p ed))' in member_check
+    preflight = next(line for line in block_script.splitlines()
+                     if line.startswith("(defun leaf-addblockdef-op "))
+    assert '(/= (cdr (assoc 0 ed)) "POLYLINE")' in preflight
+    assert '(member kind (list "LINE" "LWPOLYLINE" "CIRCLE" "ARC"))' in member_check
+    parser = next(line for line in block_script.splitlines()
+                  if line.startswith("(defun leaf-blockdef-op "))
+    assert '(= (cdr (assoc 0 (entget (handent (substr h 3))))) "POLYLINE")' in parser
     assert block_script.index('(command "_.UNDO" "_Mark")') < block_script.index('(foreach leaf-op leaf-ops ')
     assert '(command "_.UNDO" "_Begin")' not in block_script
     assert '(command "_.UNDO" "_End")' not in block_script

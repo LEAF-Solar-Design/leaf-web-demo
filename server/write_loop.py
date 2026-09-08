@@ -831,7 +831,8 @@ def _block_member_child(intake, handle):
                 continue
             metadata = intake.get("blockMembers", {}).get(handle, {})
             kind = metadata.get("kind", entity.get("kind", kind))
-            if kind == "LWPOLYLINE" and len(entity["pts"]) == 2 and not entity.get("closed") and not metadata:
+            if (kind == "LWPOLYLINE" and len(entity["pts"]) == 2 and not entity.get("closed")
+                    and not metadata and "kind" not in entity):
                 kind = "LINE"
             child = {"kind": kind, "layer": entity["layer"],
                      "properties": {**_PROPERTY_DEFAULTS, **copy.deepcopy((intake.get("properties") or {}).get(handle, {}))}}
@@ -922,6 +923,13 @@ def _block_digest(block):
 def _block_semantics(block):
     def child_key(child):
         row = {k: copy.deepcopy(v) for k, v in child.items() if k not in ("handle", "digest", "properties")}
+        # The frozen intake represents LINE and straight two-point open polylines alike.
+        if (row.get("kind") == "LWPOLYLINE" and len(row.get("pts", [])) == 2
+                and not row.get("closed") and row.get("nrm") == [0, 0, 1]):
+            row["kind"] = "LINE"
+            row["pts"] = [p[:2] + [row.get("elev", 0)] for p in row["pts"]]
+            for key in ("closed", "nrm", "elev"):
+                row.pop(key, None)
         row["properties"] = normalize_property_record(child.get("properties"))
         row["properties"]["linetype"] = _linetype_key(row["properties"]["linetype"])
         def quantum(value, key=""):
