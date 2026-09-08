@@ -1715,6 +1715,10 @@ test.describe('route matrix, rail ON', () => {
     await page.getByTestId('cockpit-script-run').click()
     await expect(page.getByTestId('cockpit-script-status')).toHaveText('Script ran 2 commands.', { timeout: 60_000 })
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('2')
+    // SCRIPT leaves its last command (CIRCLE) armed for the next draw.
+    // Disarm it so the workbench no longer takes the click-through rule.
+    await page.locator('body').press('Escape')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
     // These members must be committed. Publish the drawn bytes to this test's
     // intercepted mock head, then reopen it; never move the shared demo head.
     headDxf = await page.locator('.cad-edit-workbench-download').evaluate(async (link) => (await fetch(link.href)).text())
@@ -1722,6 +1726,8 @@ test.describe('route matrix, rail ON', () => {
     await page.getByLabel('Use mock data (off = live backend)').check()
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('2', { timeout: 60_000 })
     await page.getByRole('tab', { name: 'Draw' }).click()
+    await page.locator('body').press('Escape')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
     await page.locator('.cad-edit-workbench label', { hasText: 'LINE' }).locator('input[type="radio"]').check()
     const bar = page.getByLabel('Command bar', { exact: true })
     await bar.fill('B')
