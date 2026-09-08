@@ -39,6 +39,22 @@ describe('MLEADER in the browser engine create lane', () => {
       expect(buildCreatePayload('createMleader', { ...inputs, style }).payload.style).toBe('Standard')
     }
   })
+  it('refuses caret text with the reader-specific sentence', () => {
+    for (const text of ['A^ B', 'A^B']) expect(build({ text }).refusal).toBe("mleader text cannot contain ^: the engine's DXF reader rewrites it")
+  })
+  it('uses the server name grammar for both style and layer', () => {
+    expect(build({ style: 'Notes(1)' }, [{ ...mlstyles[0], name: 'Notes(1)' }]).refusal).toMatch(/style.*server name rule/)
+    expect(build({ layer: 'Notes(1)' }).refusal).toMatch(/layer.*server name rule/)
+    for (const name of ['Notes 1', 'Notes_1.$-']) {
+      expect(build({ style: name, layer: name }, [{ ...mlstyles[0], name }]).payload).toMatchObject({ style: name, layer: name })
+    }
+    expect(build({}, [{ ...mlstyles[0], segments: 0 }]).refusal).toMatch(/one leader segment/)
+  })
+  it('compares points at the server drawing precision', () => {
+    expect(build({ x: 30, y: 23, x2: 30.0004, y2: 23 }).refusal).toBe('the two points coincide at the drawing precision (0.001)')
+    expect(build({ x: 30, y: 23, x2: 30.001, y2: 23 }).payload).toBeDefined()
+    expect(build({ x: -0.0004, y: 0, x2: 0, y2: -0 }).refusal).toMatch(/coincide/)
+  })
   it('lowers batch creates through the same builder and catalogue', () => {
     const entities = Object.assign([], { mlstyles })
     expect(lowerSteps([{ op: 'createMleader', inputs }], [], entities)).toEqual({

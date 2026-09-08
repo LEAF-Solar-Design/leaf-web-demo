@@ -37,6 +37,7 @@ import useEngineSession, {
   surviveSelection,
 } from './engineSession.js'
 import EngineSessionProvider, { useEngineSessionContext } from './EngineSessionProvider.jsx'
+import EngineRibbonClusters from './EngineRibbonClusters.jsx'
 
 afterEach(cleanup)
 
@@ -226,6 +227,21 @@ describe('worker lifetime is the store\'s', () => {
 })
 
 describe('MLEADER store routing and catalogue retention', () => {
+  it('omits style names outside the server grammar from the ribbon select', async () => {
+    const worker = new ScriptedWorker()
+    let current
+    function Consumer() {
+      current = useEngineSessionContext()
+      return <EngineRibbonClusters panels={['annotation']} />
+    }
+    render(<EngineSessionProvider createWorker={() => worker}><Consumer /></EngineSessionProvider>)
+    await act(async () => { await current.session.actions.open(fileOf()) })
+    worker.emit({ ...loadedMessage([LINE]), mlstyles: ['Standard', 'Notes(1)', 'Notes 1', 'Notes_1.$-'].map((name) => ({ name, textstyle: 'Standard', height: 0.18, arrow: 0.18, dogleg: 0.36, gap: 0.09, segments: 1 })) })
+    act(() => { current.setArmed({ group: 'draw', op: 'createMleader' }, { rearm: true }) })
+    expect(screen.queryByRole('option', { name: 'Notes(1)' })).toBeNull()
+    expect(screen.getByRole('option', { name: 'Notes 1' })).toBeTruthy()
+    expect(screen.getByRole('option', { name: 'Notes_1.$-' })).toBeTruthy()
+  })
   it('posts through the separate create table, selects the reply, and retains mlstyles through undo', async () => {
     const session = mountSession()
     await openDocument(session)

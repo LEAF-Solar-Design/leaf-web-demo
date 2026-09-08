@@ -37,7 +37,7 @@ import { QuickButton, QUICK_FILE_SLOT_ID } from '../site/CockpitTopBand.jsx'
 
 import { DEFERRED_REASONS, DRAW_REASONS, MODIFY_REASONS, clipboardReason, drawReason, forGroup, modifyReason, propertyReason, ribbonTool } from '../lib/actionRegistry.js'
 
-import { ACI_NAMES, LINEWEIGHT_VALUES, admissibleBlockName, buildCreatePayload, buildEditPayload, formatLineweight, readNumber } from './engineSession.js'
+import { ACI_NAMES, LINEWEIGHT_VALUES, admissibleBlockName, admissibleServerName, buildCreatePayload, buildEditPayload, formatLineweight, readNumber } from './engineSession.js'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
 import { PROMPTS } from './promptKeys.js'
 import { isPointExpression } from './pointExpression.js'
@@ -519,7 +519,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
           disabled={fieldsOff}
         >
           <option value="">Standard (default)</option>
-          {(armedOp === 'createMleader' ? (session.entities.mlstyles || []).map((style) => style.name) : (session.entities.dimstyles || [])).map((name) => <option key={name} value={name}>{name}</option>)}
+          {(armedOp === 'createMleader' ? (session.entities.mlstyles || []).map((style) => style.name).filter(admissibleServerName) : (session.entities.dimstyles || [])).map((name) => <option key={name} value={name}>{name}</option>)}
         </select>
       )
     }

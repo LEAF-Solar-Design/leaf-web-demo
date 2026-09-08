@@ -195,6 +195,10 @@ export function admissibleBlockName(rawName) {
   return trimmed
 }
 
+export function admissibleServerName(name) {
+  return typeof name === 'string' && /^[A-Za-z0-9][A-Za-z0-9 _.$-]{0,254}$/.test(name)
+}
+
 async function sha256Hex(bytes) {
   const digest = await crypto.subtle.digest('SHA-256', bytes)
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
@@ -331,8 +335,9 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
   if (MLEADER_TABLE.has(op)) {
     const [px, py, lx, ly] = [x, y, x2, y2].map(fmtDelta)
     if ([px, py, lx, ly].some((v) => v === null)) return { refusal: 'Mleader refused: x, y, x2 and y2 must all be numbers.' }
-    if (px === lx && py === ly) return { refusal: 'Mleader refused: the two points must differ.' }
+    if (Number(px.toFixed(3)) === Number(lx.toFixed(3)) && Number(py.toFixed(3)) === Number(ly.toFixed(3))) return { refusal: 'the two points coincide at the drawing precision (0.001)' }
     const value = String(text ?? '')
+    if (value.includes('^')) return { refusal: "mleader text cannot contain ^: the engine's DXF reader rewrites it" }
     if (!value) return { refusal: 'Mleader refused: enter the text to place.' }
     if ([...value].length > 256) return { refusal: 'Mleader refused: at most 256 characters.' }
     if ([...value].some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) > 126 || '|\\%'.includes(c)) || value.trim() !== value) {
@@ -340,6 +345,8 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
     }
     const requestedStyle = String(style ?? '').trim()
     const styleName = requestedStyle || 'Standard'
+    if (!admissibleServerName(styleName)) return { refusal: 'Mleader refused: the style name must follow the server name rule (letters, digits, spaces, _, ., $ and -, starting with a letter or digit, at most 255 characters).' }
+    if (!admissibleServerName(layerName || '0')) return { refusal: 'Mleader refused: the layer name must follow the server name rule (letters, digits, spaces, _, ., $ and -, starting with a letter or digit, at most 255 characters).' }
     const definition = Array.isArray(mlstyles) ? mlstyles.find((s) => String(s?.name ?? '').toLowerCase() === styleName.toLowerCase()) : null
     if (Array.isArray(mlstyles) && !definition) return { refusal: 'mleader_style_unknown' }
     if (definition && typeof definition.segments === 'number' && definition.segments !== 1) return { refusal: 'Mleader refused: the style must use one leader segment.' }

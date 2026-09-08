@@ -634,6 +634,25 @@ const SERVED_MLEADER_DXF = [
 ].join('\n') + '\n'
 
 describe.skipIf(!GLUE)('MLEADER through the rebuilt engine and worker batch', () => {
+  it('retains source segment counts across consecutive worker write and reparse turns', { timeout: 90_000 }, () => {
+    const source = SERVED_MLEADER_DXF.replace('173\n2\n', '173\n3\n')
+    const script = [
+      'import { createRequire } from "node:module"',
+      'import { pathToFileURL } from "node:url"',
+      'const [workerPath, gluePath, source] = process.argv.slice(1)',
+      'const { handleMessage } = await import(pathToFileURL(workerPath).href)',
+      'const engine = createRequire(import.meta.url)(gluePath)',
+      'const loaded = await handleMessage({ type: "loadDocument", documentId: "segments", bytes: new TextEncoder().encode(source) }, engine)',
+      'const replies = [loaded]',
+      'for (let i = 0; i < 2; i++) replies.push(await handleMessage({ type: "applyEdit", op: "createLine", payload: { x1: i, y1: 0, x2: i + 1, y2: 1, layer: "0" } }, engine))',
+      'process.stdout.write(JSON.stringify(replies.map(r => ({ ok: r.ok, mlstyles: r.mlstyles }))))',
+    ].join('\n')
+    const replies = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', script, WORKER_PATH, path.join(PKG_DIR, GLUE), source], {
+      encoding: 'utf8', timeout: 90_000, maxBuffer: 8 * 1024 * 1024,
+    }))
+    for (const reply of replies) expect(reply.mlstyles).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'TwoSegments', segments: 3 })]))
+    for (const reply of replies.slice(1)) expect(reply.ok).toBe(true)
+  })
   it('projects a served leader and the source segment counts of two styles', { timeout: 90_000 }, async () => {
     const worker = realWorkerTransport()
     const { result } = renderHook(() => useEngineSession({ createWorker: () => worker }))

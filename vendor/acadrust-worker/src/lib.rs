@@ -195,7 +195,7 @@ fn vertices_of(entity: &EntityType) -> Vec<[f64; 3]> {
         // (the axis and ratio ride beside it in the projection).
         EntityType::MultiLeader(m) => m.context.leader_roots.iter()
             .flat_map(|root| root.lines.iter().flat_map(|line| line.points.iter())
-                .chain(std::iter::once(&root.connection_point)))
+                .chain(std::iter::once(&root.connection_point).filter(move |p| root.lines.last().and_then(|line| line.points.last()) != Some(*p))))
             .map(|p| [p.x, p.y, p.z]).collect(),
         EntityType::Point(p) => vec![[p.location.x, p.location.y, p.location.z]],
         EntityType::Ellipse(e) => vec![[e.center.x, e.center.y, e.center.z]],
@@ -663,8 +663,8 @@ fn linetypes_catalogue(document: &CadDocument) -> (Vec<String>, bool) {
 // (CadDocument::initialize_defaults), guaranteed defensively here too.
 const DIMSTYLE_CATALOGUE_CAP: usize = 200;
 
-// Group 173 is lost by the crate's style reader. Retain only source facts,
-// keyed by object handle; generated and binary documents have no known value.
+// Group 173 is narrowed by the crate's style reader. Retain source facts by
+// handle, with absent 173 read as 0; unscannable documents have no known value.
 fn scan_mlstyle_segments(bytes: &[u8]) -> HashMap<Handle, i32> {
     let mut segments = HashMap::new();
     if bytes.len() > 16 * 1024 * 1024 || bytes.starts_with(b"AutoCAD Binary DXF") { return segments; }
@@ -679,7 +679,7 @@ fn scan_mlstyle_segments(bytes: &[u8]) -> HashMap<Handle, i32> {
         let value = std::str::from_utf8(value).unwrap_or("").trim();
         if code == Some(0) {
             if style {
-                if let (Some(h), Some(n)) = (handle, count) { segments.insert(h, n); }
+                if let Some(h) = handle { segments.insert(h, count.unwrap_or(0)); }
             }
             style = objects && value == "MLEADERSTYLE";
             handle = None;
@@ -698,7 +698,7 @@ fn scan_mlstyle_segments(bytes: &[u8]) -> HashMap<Handle, i32> {
         }
     }
     if style {
-        if let (Some(h), Some(n)) = (handle, count) { segments.insert(h, n); }
+        if let Some(h) = handle { segments.insert(h, count.unwrap_or(0)); }
     }
     segments
 }
@@ -1918,7 +1918,11 @@ impl ParsedDxf {
         text: &str, style: &str, layer: &str,
     ) -> Result<String, Refusal> {
         if !all_finite(&[x1, y1, x2, y2]) { return refuse("coordinate_not_finite"); }
-        if x1 == x2 && y1 == y2 { return refuse("mleader_points_coincide"); }
+        let quantum = |v: f64| format!("{v:.3}").parse::<f64>().unwrap();
+        if quantum(x1) == quantum(x2) && quantum(y1) == quantum(y2) {
+            return refuse("the two points coincide at the drawing precision (0.001)");
+        }
+        if text.contains('^') { return refuse("text_caret"); }
         if text.is_empty() { return refuse("text_empty"); }
         if text.chars().count() > 256 { return refuse("text_too_long"); }
         if text.chars().any(|c| c.is_control()) { return refuse("text_control_character"); }
@@ -2372,6 +2376,13 @@ impl ParsedDxf {
     pub fn inherit_block_base_unknowns(&mut self, previous: &ParsedDxf) {
         self.block_bases_unknown |= previous.block_bases_unknown;
         self.unknown_block_bases.extend(previous.unknown_block_bases.iter().cloned());
+    }
+
+    // Source counts survive the crate's lossy three-valued enum round trip.
+    // Newly scanned handles remain; an already known source value wins.
+    #[wasm_bindgen(js_name = inheritMlstyleSegments)]
+    pub fn inherit_mlstyle_segments(&mut self, previous: &ParsedDxf) {
+        self.mlstyle_segments.extend(previous.mlstyle_segments.iter().map(|(h, n)| (*h, *n)));
     }
 
     /// Deletes the entity at `index` (current document order) via the
@@ -4406,7 +4417,7 @@ mod w4g_7b_04c_dimension_rows {
             if let ObjectType::MultiLeaderStyle(style) = object { style.text_height = 1.0; }
         }
         assert_eq!(code(doc.create_mleader_core(f64::NAN, 0.0, 3.0, 4.0, "Valve", "Standard", "")), "coordinate_not_finite");
-        assert_eq!(code(doc.create_mleader_core(0.0, 0.0, 0.0, 0.0, "Valve", "Standard", "")), "mleader_points_coincide");
+        assert_eq!(code(doc.create_mleader_core(0.0, 0.0, 0.0, 0.0, "Valve", "Standard", "")), "the two points coincide at the drawing precision (0.001)");
         assert_eq!(code(doc.create_mleader_core(0.0, 0.0, 3.0, 4.0, "", "Standard", "")), "text_empty");
         assert_eq!(code(doc.create_mleader_core(0.0, 0.0, 3.0, 4.0, &"x".repeat(257), "Standard", "")), "text_too_long");
         assert_eq!(code(doc.create_mleader_core(0.0, 0.0, 3.0, 4.0, "Valve\n", "Standard", "")), "text_control_character");
@@ -4453,11 +4464,53 @@ mod w4g_7b_04c_dimension_rows {
     fn mlstyle_segments_scans_only_objects_and_keeps_unknown_values_unknown() {
         let bytes = b"0\nSECTION\n2\nENTITIES\n0\nMLEADERSTYLE\n5\nFF\n173\n9\n0\nENDSEC\n0\nSECTION\n2\nOBJECTS\n0\nMLEADERSTYLE\n5\nA\n173\n1\n0\nMLEADERSTYLE\n173\n2\n5\nB\n0\nMLEADERSTYLE\n5\nC\n0\nENDSEC\n0\nEOF\n";
         let segments = scan_mlstyle_segments(bytes);
-        assert_eq!(segments.len(), 2);
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments.get(&Handle::new(0xC)), Some(&0));
         assert_eq!(segments.get(&Handle::new(0xA)), Some(&1));
         assert_eq!(segments.get(&Handle::new(0xB)), Some(&2));
         assert!(scan_mlstyle_segments(b"AutoCAD Binary DXF\r\n").is_empty());
         assert!(scan_mlstyle_segments(b"").is_empty());
+    }
+
+    #[test]
+    fn mleader_caret_precision_and_foreign_trailing_point() {
+        let mut doc = empty_doc();
+        for text in ["A^ B", "A^B"] {
+            assert_eq!(code(doc.create_mleader_core(30.0, 23.0, 31.0, 23.0, text, "Standard", "")), "text_caret");
+        }
+        assert_eq!(code(doc.create_mleader_core(30.0, 23.0, 30.0004, 23.0, "Valve", "Standard", "")), "the two points coincide at the drawing precision (0.001)");
+        assert!(projected_entities(&doc.inner).is_empty());
+        doc.create_mleader_core(30.0, 23.0, 30.001, 23.0, "Valve", "Standard", "").unwrap();
+        let entity = doc.inner.entities_mut().next().unwrap();
+        let EntityType::MultiLeader(m) = entity else { panic!("leader"); };
+        let root = &mut m.context.leader_roots[0];
+        root.lines[0].points.push(root.connection_point);
+        assert_eq!(vertices_of(entity), vec![[30.0, 23.0, 0.0], [30.001, 23.0, 0.0]]);
+    }
+
+    #[test]
+    fn mlstyle_source_segments_survive_production_write_and_reparse() {
+        let bytes = write_dxf(&empty_doc()).unwrap();
+        let source = String::from_utf8(bytes).unwrap();
+        let mut lines: Vec<_> = source.lines().map(str::to_string).collect();
+        let objects = (0..lines.len().saturating_sub(3)).step_by(2)
+            .find(|&i| lines[i].trim() == "0" && lines[i + 1] == "SECTION"
+                && lines[i + 2].trim() == "2" && lines[i + 3] == "OBJECTS").unwrap();
+        let start = (objects + 4..lines.len().saturating_sub(1)).step_by(2)
+            .find(|&i| lines[i].trim() == "0" && lines[i + 1] == "MLEADERSTYLE").unwrap();
+        let index = (start + 2..lines.len().saturating_sub(1)).step_by(2)
+            .take_while(|&i| lines[i].trim() != "0")
+            .find(|&i| lines[i].trim() == "173").unwrap();
+        lines[index + 1] = "3".to_string();
+        let mut doc = parse_dxf_core((lines.join("\n") + "\n").as_bytes()).unwrap();
+        assert!(mlstyles_catalogue(&doc.inner, &doc.mlstyle_segments).iter().any(|s| s["segments"] == 3));
+        doc.create_line_core(0.0, 0.0, 1.0, 1.0, "").unwrap();
+        let mut back = parse_dxf_core(&write_dxf(&doc).unwrap()).unwrap();
+        back.inherit_mlstyle_segments(&doc);
+        assert!(mlstyles_catalogue(&back.inner, &back.mlstyle_segments).iter().any(|s| s["segments"] == 3));
+        lines.drain(index..index + 2);
+        let missing = parse_dxf_core((lines.join("\n") + "\n").as_bytes()).unwrap();
+        assert!(mlstyles_catalogue(&missing.inner, &missing.mlstyle_segments).iter().any(|s| s["segments"] == 0));
     }
 
     #[test]

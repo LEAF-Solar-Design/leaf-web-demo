@@ -455,6 +455,7 @@ function reparseDocument(engine, bytes, previous) {
   // A write cannot recover a binary base or an unmatched definition marker.
   if (previous.blockBasesUnknown === true) doc.blockBasesUnknown = true
   if (typeof doc.inheritBlockBaseUnknowns === 'function') doc.inheritBlockBaseUnknowns(previous)
+  if (typeof doc.inheritMlstyleSegments === 'function') doc.inheritMlstyleSegments(previous)
   return doc
 }
 
