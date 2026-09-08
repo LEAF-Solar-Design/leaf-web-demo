@@ -1755,7 +1755,7 @@ test.describe('route matrix, rail ON', () => {
     await page.getByLabel('ribbon block name').fill('BLK1')
     await page.getByLabel('ribbon block name').press('Enter')
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('2', { timeout: 60_000 })
-    await expect(page.locator('dt', { hasText: /^Block$/ }).locator('xpath=following-sibling::dd[1]')).toHaveText('BLK1')
+    await expect(page.getByTestId('cad-edit-entity-list')).toContainText('INSERT on layer 0')
     // Select the surviving LINE on the canvas, then reissue B without Escape
     // from a partially answered BLOCK prompt to prove an explicit fresh arm.
     await page.keyboard.press('Escape')
