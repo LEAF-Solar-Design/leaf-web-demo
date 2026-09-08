@@ -899,17 +899,19 @@ def main() -> None:
         assert not raw_key or "\\" not in raw_key.group(1), (
             "escape sequences in a mapping key are banned: %r" % line)
 
-    # SEVEN jobs hold an ECR OIDC credential (see the note above the
+    # EIGHT jobs request OIDC (see the note above the
     # deferred assignment for the roster and for why this is parsed, not
     # text-matched). Six of them can push. The seventh is cve-harvest (D3,
     # 2026-08-26): it reads leaf-platform-* digests out of ECR to scan them
     # and pushes nothing, and since the pull-role repoint it holds a
     # credential that CANNOT push, not merely one it declines to use.
+    # The eighth delegates to the gate's protected-main S3 transport;
+    # test_gate_result_transport.py pins its source and environment boundary.
     oidc_grants = [
         l for l in structural
         if _key_of(l) == "id-token" and _value_of(l) == "write"
     ]
-    assert len(oidc_grants) == 7, oidc_grants
+    assert len(oidc_grants) == 8, oidc_grants
 
     # The two image-building job blocks. Everything the warm/build contract
     # asserts below is bound INSIDE these slices: per sol-critic round 1 on
