@@ -18,6 +18,7 @@ import mutation_apply
 import mutation_plan
 import write_loop
 from lisp import MAX_SCRIPT_LINE_CHARS
+from test_save_plan_version import client as plan_client
 
 
 def base():
@@ -97,6 +98,77 @@ def test_dictionary_name_with_space_is_accepted():
     result = write_loop.apply_mutations(base(), {"added_groups": [group("Rack A")]})
     parsed = dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf(result))
     assert parsed["groups"][0]["name"] == "RACK A"
+
+
+@pytest.mark.parametrize("name", [" RACK", "RACK ", "   ", " " * 255])
+def test_group_edge_whitespace_refused_everywhere(name):
+    head = base()
+    sentence = "group name must not have leading or trailing whitespace or be whitespace only"
+    for operation in ({"added_groups": [group(name)]}, {"removed_groups": [name]}):
+        for apply in (mutation_plan.validate_mutations, write_loop.apply_mutations):
+            with pytest.raises(ValueError) as error:
+                apply(head, operation)
+            assert str(error.value) == sentence
+    head["groups"] = [group(name)]
+    with pytest.raises(intake_dxf.IntakeDxfError, match="safe unique names"):
+        intake_dxf.intake_to_dxf(head)
+
+
+@pytest.mark.parametrize("paper", [True, False])
+def test_uploaded_group_addition_requires_model_space(plan_client, tmp_path, monkeypatch, paper):
+    import deps
+    import jobs
+    from test_save_plan_version import _seed_dwg_backed, _checkout, _post, DWG_DRAWING
+
+    monkeypatch.setattr(deps, "APS_LIVE", True)
+    monkeypatch.setenv("LEAF_PLAN_LIVE_LEG", "1")
+    monkeypatch.setattr(jobs, "job_max_s", lambda: 540)
+    submissions = []
+    monkeypatch.setattr(jobs, "submit_plan_job",
+                        lambda *args, **kwargs: submissions.append(args) or "group-job")
+    head = base()
+    _seed_dwg_backed(tmp_path, intake=head)
+    capability = _checkout(plan_client)
+    plan = {"added": [{"handle": "20", "kind": "LINE", "layer": "0",
+                       "pts": [[5, 0], [8, 0]]}],
+            "added_groups": [group(members=["10", {"add": 0}])]}
+    actual = write_loop.apply_mutations(head, plan)
+    if paper:
+        actual["polylines"][-1].update(space="paper", layout="Layout1")
+    data = intake_dxf.intake_to_dxf(actual)
+    if paper:
+        assert b"67\n1\n410\nLayout1\n" in data
+    response = _post(plan_client, DWG_DRAWING, plan, data=data, capability=capability)
+    if paper:
+        assert response.status_code == 422, response.text
+        assert "group member '20' must be a model-space entity" in response.text
+        assert not submissions
+    else:
+        assert response.status_code == 202, response.text
+        assert len(submissions) == 1
+
+
+@pytest.mark.parametrize("ordinal", [False, True])
+def test_group_verifier_refuses_resolved_non_model_member(ordinal):
+    head = base()
+    plan = {"added_groups": [group()]}
+    handle, field = "11", "circles"
+    if ordinal:
+        plan = {"added": [{"handle": "20", "kind": "LINE", "layer": "0",
+                           "pts": [[5, 0], [8, 0]]}],
+                "added_groups": [group(members=["10", {"add": 0}])]}
+        handle, field = "20", "polylines"
+    canonical = mutation_plan.validate_mutations(head, plan)
+    actual = write_loop.apply_mutations(head, canonical)
+    actual[field][-1]["space"] = "paper"
+    with pytest.raises(ValueError, match=f"group member '{handle}' must be a model-space entity"):
+        write_loop._verify_group_effects(head, actual, canonical)
+
+
+def test_addition_matcher_includes_space_with_model_default():
+    expected = base()["polylines"][0]
+    assert write_loop._polyline_effect_matches(expected, dict(expected, space="model"))
+    assert not write_loop._polyline_effect_matches(expected, dict(expected, space="paper"))
 
 
 def test_dxf_skipped_blank_text_does_not_shift_group_handles():
@@ -185,6 +257,8 @@ def test_dictionary_name_lisp_preflight_mirrors_server_rule():
     predicate = next(line for line in script.splitlines()
                      if line.startswith("(defun leaf-group-name-p"))
     assert "(<= (strlen s) 255)" in predicate
+    assert '(/= (substr s 1 1) " ")' in predicate
+    assert '(/= (substr s (strlen s) 1) " ")' in predicate
     assert "(member c (list 60 62 47 92 34 58 59 63 42 124 44 61 96))" in predicate
     add = next(line for line in script.splitlines()
                if line.startswith("(defun leaf-addgroup-op"))

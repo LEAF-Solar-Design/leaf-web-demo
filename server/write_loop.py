@@ -1486,6 +1486,8 @@ def _polyline_effect_matches(
 ) -> bool:
     if expected.get("layer") != actual.get("layer"):
         return False
+    if expected.get("space", "model") != actual.get("space", "model"):
+        return False
     if expected.get("closed") is not actual.get("closed"):
         return False
     expected_points = expected.get("pts") or []
@@ -1718,6 +1720,7 @@ def verify_live_mutation_effects(
     be checked against this `actual` (see `_verify_property_effects`).
     """
     expected = apply_mutations(base, canonical)
+    _verify_group_effects(base, actual, canonical)
     if canonical.get("added_groups"):
         canonical = copy.deepcopy(canonical)
         for receipt in expected.get("created", []):
@@ -1902,7 +1905,6 @@ def verify_live_mutation_effects(
     # check and to keep mock/live validation on one implementation.
     if len(expected.get("polylines") or []) != expected_count:
         raise ValueError("canonical mutation application produced an invalid count")
-    _verify_group_effects(base, actual, canonical)
     return _verify_property_effects(actual, canonical, matched_handles)
 
 
@@ -1919,6 +1921,11 @@ def _verify_group_effects(base, actual, canonical):
     fields = ("polylines", "circles", "arcs", "texts", "inserts", "dimensions", "points", "ellipses")
     actual_handles = {str(e.get("handle", "")).upper()
                       for field in fields for e in actual.get(field, [])}
+    non_model_handles = {
+        str(e.get("handle", "")).upper()
+        for field in fields for e in actual.get(field, [])
+        if (e.get("space", "model") not in ("model", "Model", "ModelSpace", 0)
+            or e.get("paper_space") or e.get("paperspace"))}
     base_handles = {str(e.get("handle", "")).upper()
                     for field in fields for e in base.get(field, [])}
     removed_names = {n.casefold() for n in canonical.get("removed_groups", [])}
@@ -1942,11 +1949,14 @@ def _verify_group_effects(base, actual, canonical):
         members = set()
         for member in group["members"]:
             if isinstance(member, str):
-                members.add(member.upper())
+                handle = member.upper()
             else:
                 if member["add"] not in created:
                     raise ValueError("group ordinal is missing its created handoff")
-                members.add(created[member["add"]])
+                handle = created[member["add"]]
+            if handle in non_model_handles:
+                raise ValueError(f"group member {handle!r} must be a model-space entity")
+            members.add(handle)
         expected[group["name"].casefold()] = members
         expected_names[group["name"].casefold()] = group["name"].upper()
     observed = {}

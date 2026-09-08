@@ -538,6 +538,7 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         for group, handle in zip(groups, group_handles):
             name = group.get("name")
             if (not isinstance(name, str) or not 1 <= len(name) <= 255
+                    or name.upper() != name.upper().strip()
                     or any(c in '<>/\\\\":;?*|,=`' for c in name)
                     or any(not 0x20 <= ord(c) <= 0x7E for c in name)
                     or name.casefold() in names):

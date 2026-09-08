@@ -729,6 +729,10 @@ def validate_mutations(
     canonical: Dict[str, Any] = {}
     if added_groups_raw or removed_groups_raw:
         def group_name(value):
+            if isinstance(value, str):
+                value = value.upper()
+                if value != value.strip():
+                    raise ValueError("group name must not have leading or trailing whitespace or be whitespace only")
             if (not isinstance(value, str) or not 1 <= len(value) <= 255
                     or any(c in '<>/\\\\":;?*|,=`' for c in value)
                     or any(not 0x20 <= ord(c) <= 0x7E for c in value)):
