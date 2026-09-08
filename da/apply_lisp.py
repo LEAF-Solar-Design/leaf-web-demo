@@ -101,6 +101,14 @@ _DIMENSION_LISP_LINES = (
 )
 
 
+_MLEADER_LISP_LINES = (
+    '(defun leaf-mlstyle (style / d) (if (setq d (dictsearch (namedobjdict) "ACAD_MLEADERSTYLE")) (dictsearch (cdr (assoc -1 d)) style)))',
+    '(defun leaf-mltext-p (text / c ok) (setq ok (and (> (strlen text) 0) (<= (strlen text) 256))) (foreach c (vl-string->list text) (if (or (< c 32) (> c 126) (member c (list 37 92 124))) (setq ok nil))) ok)',
+    '(defun leaf-addmleader-op (v / layer style p1 p2 text) (if (and (= (length v) 6) (setq layer (nth 1 v) style (nth 2 v) text (nth 5 v)) (<= (strlen layer) 255) (leaf-chars-ok layer "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-$ ") (> (strlen style) 0) (<= (strlen style) 255) (leaf-chars-ok style "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-$ ") (leaf-mlstyle style) (setq p1 (leaf-point3 (nth 3 v))) (setq p2 (leaf-point3 (nth 4 v))) (= (caddr p1) 0.0) (= (caddr p2) 0.0) (not (equal p1 p2 0.000000001)) (leaf-mltext-p text)) (list "ADDMLEADER" layer style p1 p2 text)))',
+    '(defun leaf-apply-addmleader (op / layer style p1 p2 text oldlayer oldstyle before result) (setq layer (nth 1 op) style (nth 2 op) p1 (nth 3 op) p2 (nth 4 op) text (nth 5 op)) (if (leaf-mlstyle style) (progn (leaf-ensure-layer layer) (setq oldlayer (getvar "CLAYER") oldstyle (getvar "CMLEADERSTYLE")) (setvar "CLAYER" layer) (setvar "CMLEADERSTYLE" style) (setq before (entlast)) (command "_.MLEADER" p1 p2 text) (setvar "CLAYER" oldlayer) (setvar "CMLEADERSTYLE" oldstyle) (setq result (entlast)) (if (and result (not (equal result before)) (= (cdr (assoc 0 (entget result))) "MULTILEADER")) result))))',
+)
+
+
 _PROPERTY_LISP_LINES = (
     '(setq leaf-created nil)',
     '(defun leaf-target-p (s / tail) (setq tail (substr s 3)) (cond ((= (substr s 1 2) "H:") (leaf-handle-p tail)) ((= (substr s 1 2) "A:") (and (<= (strlen tail) 6) (leaf-chars-ok tail "0123456789")))))',
@@ -157,6 +165,7 @@ def build_apply_scr_v3() -> str:
                          if s.startswith("(defun leaf-addinsert-op ") else s
                          for s in _INSERT_LISP_LINES)
             lines.extend(_DIMENSION_LISP_LINES)
+            lines.extend(_MLEADER_LISP_LINES)
             lines.extend(_PROPERTY_LISP_LINES)
             lines.extend(_GROUP_LISP_LINES)
             line = line.replace('(cond ', '(cond ((= (car v) "ADDBLOCKDEF") (leaf-blockdef-op v)) ', 1)
@@ -164,14 +173,14 @@ def build_apply_scr_v3() -> str:
             line = line.replace('(cond ', '(cond ((member (car v) (list "SETCOLOR" "SETLINETYPE" "SETLINEWEIGHT")) (leaf-property-op v)) ', 1)
             line = line.replace(
                 '((= (car v) "ADDARC")',
-                '((= (car v) "ADDINSERT") (leaf-addinsert-op v)) ((= (car v) "ADDDIMLINEAR") (leaf-adddimlinear-op v)) ((= (car v) "ADDDIMALIGNED") (leaf-adddimaligned-op v)) ((= (car v) "ADDARC")',
+                '((= (car v) "ADDMLEADER") (leaf-addmleader-op v)) ((= (car v) "ADDINSERT") (leaf-addinsert-op v)) ((= (car v) "ADDDIMLINEAR") (leaf-adddimlinear-op v)) ((= (car v) "ADDDIMALIGNED") (leaf-adddimaligned-op v)) ((= (car v) "ADDARC")',
                 1,
             )
         elif line.startswith("(defun leaf-remove-op "):
-            # v3-only: an existing DIMENSION handle may also be removed.
+            # v3-only: existing dimensions and multileaders may be removed.
             line = line.replace(
                 '(list "LWPOLYLINE" "LINE" "CIRCLE" "ARC")',
-                '(list "LWPOLYLINE" "LINE" "CIRCLE" "ARC" "DIMENSION")',
+                '(append (list "LWPOLYLINE" "LINE" "CIRCLE" "ARC" "DIMENSION") (list "MULTILEADER"))',
                 1,
             )
         elif line.startswith("(defun leaf-apply "):
@@ -183,11 +192,11 @@ def build_apply_scr_v3() -> str:
             line = line.replace('(cond ', '(cond ((= (car op) "SETCOLOR") (leaf-apply-setcolor op)) ((= (car op) "SETLINETYPE") (leaf-apply-setlinetype op)) ((= (car op) "SETLINEWEIGHT") (leaf-apply-setlineweight op)) ', 1)
             line = line.replace(
                 '((= (car op) "ADDARC")',
-                '((= (car op) "ADDINSERT") (leaf-apply-addinsert op)) ((= (car op) "ADDDIMLINEAR") (leaf-apply-adddimlinear op)) ((= (car op) "ADDDIMALIGNED") (leaf-apply-adddimaligned op)) ((= (car op) "ADDARC")',
+                '((= (car op) "ADDMLEADER") (leaf-apply-addmleader op)) ((= (car op) "ADDINSERT") (leaf-apply-addinsert op)) ((= (car op) "ADDDIMLINEAR") (leaf-apply-adddimlinear op)) ((= (car op) "ADDDIMALIGNED") (leaf-apply-adddimaligned op)) ((= (car op) "ADDARC")',
                 1,
             )
             lines.append(line)
-            line = '(defun leaf-apply (op / result) (setq result (leaf-apply-one op)) (if (and result (member (car op) (list "ADD" "ADDOPEN" "ADDLINE" "ADDCIRCLE" "ADDARC" "ADDINSERT" "ADDDIMLINEAR" "ADDDIMALIGNED"))) (if (leaf-record-created result) (setq leaf-created (append leaf-created (list result))) (setq result nil))) result)'
+            line = '(defun leaf-apply (op / result) (setq result (leaf-apply-one op)) (if (and result (member (car op) (list "ADD" "ADDOPEN" "ADDLINE" "ADDCIRCLE" "ADDARC" "ADDINSERT" "ADDDIMLINEAR" "ADDDIMALIGNED" "ADDMLEADER"))) (if (leaf-record-created result) (setq leaf-created (append leaf-created (list result))) (setq result nil))) result)'
         elif line == '(command "_.UNDO" "_Begin")':
             line = '(progn (command "_.UNDO" "_Mark") (setq leaf-apply-ok T))'
         elif line.startswith('(foreach leaf-op leaf-ops '):
