@@ -462,12 +462,7 @@ jobs:
                       echo "::notice::mq-prewarm: reason=migration candidate: normal deploy path"
                       exit 0
                     fi
-                    if ! timeout 60 gh api "repos/$GITHUB_REPOSITORY/contents/.github/workflows/prewarm-staging-group.yml?ref=$GROUP_HEAD_SHA" > relay-workflow.json; then
-                      echo "::error::mq-prewarm: cannot read the group head relay configuration."
-                      exit 1
-                    fi
                     python3 - <<'PY'
-          import base64
           import json
           import re
           from pathlib import Path
@@ -496,16 +491,14 @@ jobs:
               if service in dispatched:
                   fail(f"duplicate dispatched service {service}")
               dispatched[service] = build_id
-          try:
-              response = json.loads(Path("relay-workflow.json").read_text())
-              source = base64.b64decode(response["content"]).decode("utf-8")
-              lines = re.findall(r"(?m)^\s*STAGE[_]SERVICES\s*:(.*)$", source)
-              match = re.fullmatch(r'''\s*(["'])([a-z0-9-]+(?: +[a-z0-9-]+)*)\1\s*(?:#.*)?''', lines[0]) if len(lines) == 1 else None
-              if match is None:
-                  fail("relay configured service list absent or unparsable")
-              configured = set(match[2].split())
-          except (KeyError, ValueError, TypeError, UnicodeError):
+          configured_services = relay.get("configured_services")
+          if (not isinstance(configured_services, list) or not configured_services
+                  or any(not isinstance(service, str)
+                         or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", service)
+                         for service in configured_services)
+                  or len(set(configured_services)) != len(configured_services)):
               fail("relay configured service list absent or unparsable")
+          configured = set(configured_services)
           print("mq-prewarm: dispatched services: " + " ".join(sorted(dispatched)))
           print("mq-prewarm: configured services: " + " ".join(sorted(configured)))
           if set(dispatched) != configured:
