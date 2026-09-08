@@ -175,6 +175,9 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
       const v = viewer()
       const m = machine.current
       if (!v || !m || !wantsPick(m) || typeof v.unproject !== 'function') return
+      // BLOCK owns this click before the viewer's target listener can
+      // replace the selection that anchors the member list.
+      if (m.op === 'createBlock') event.stopPropagation()
       if (m.op === 'group' && inputsRef.current.groupName) return
       const p = v.unproject(event.clientX, event.clientY)
       if (!p) return
@@ -217,14 +220,19 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
       draw()
     }
     const onLeave = () => { last = null; const v = viewer(); v?.setRubberBand?.(null); if (v) showMarker(v, null) }
+    const onBlockUp = (event) => {
+      if (machine.current?.op === 'createBlock') onUp(event)
+    }
     ground.addEventListener('pointermove', onMove, { passive: true })
     ground.addEventListener('pointerdown', onDown)
+    ground.addEventListener('pointerup', onBlockUp, true)
     ground.addEventListener('pointerup', onUp)
     ground.addEventListener('pointerleave', onLeave)
     return () => {
       if (frame) window.cancelAnimationFrame(frame)
       ground.removeEventListener('pointermove', onMove)
       ground.removeEventListener('pointerdown', onDown)
+      ground.removeEventListener('pointerup', onBlockUp, true)
       ground.removeEventListener('pointerup', onUp)
       ground.removeEventListener('pointerleave', onLeave)
       viewer()?.setRubberBand?.(null)

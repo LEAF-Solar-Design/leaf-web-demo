@@ -119,6 +119,53 @@ it('BLOCK resolves before exclusion, toggles members, then Enter advances to the
 })
 afterEach(() => { cleanup(); ground?.remove(); vi.restoreAllMocks() })
 
+it('BLOCK consumes a circle rim click before the viewer can replace its selected LINE', async () => {
+  mount()
+  const line = { id: '16', type: 'LINE', editable: true, vertices: [[12, 23, 0], [17, 23, 0]] }
+  const circle = { id: '17', type: 'CIRCLE', editable: true, vertices: [[11, 24, 0]], radius: 2 }
+  await openAndLoad([line, circle])
+  act(() => { context.session.actions.select('16') })
+  act(() => { context.setArmed({ group: 'draw', op: 'createBlock' }) })
+  expect(onPicking).toHaveBeenLastCalledWith(true)
+  expect(screen.getByLabelText('ribbon members').textContent).toBe('1 objects')
+  // The native viewer listener is on a child canvas, before the ground's
+  // bubbling listener. A member click must never reach that selection path.
+  const canvas = document.createElement('canvas')
+  ground.appendChild(canvas)
+  const select = vi.fn(() => context.session.actions.select('17'))
+  canvas.addEventListener('pointerup', select)
+  act(() => {
+    canvas.dispatchEvent(new MouseEvent('pointerdown', { clientX: 90, clientY: 240, button: 0, bubbles: true }))
+    canvas.dispatchEvent(new MouseEvent('pointerup', { clientX: 90, clientY: 240, button: 0, bubbles: true }))
+  })
+  expect(select).not.toHaveBeenCalled()
+  expect(context.inputs.members).toBe('17')
+  expect(screen.getByLabelText('ribbon members').textContent).toBe('2 objects')
+  expect(context.session.selectedId).toBe('16')
+  expect(context.inputs.membersDone).toBe('')
+})
+
+it('a completed LINE run leaves the caret in the empty chained x2 field', async () => {
+  mount()
+  await openAndLoad()
+  act(() => { context.setArmed({ group: 'draw', op: 'createLine' }) })
+  click(120, 30)
+  click(200, 80)
+  const end = { x: context.inputs.x2, y: context.inputs.y2 }
+  fireEvent.keyDown(screen.getByLabelText('ribbon x2'), { key: 'Enter' })
+  expect(context.session.busy).toBe(true)
+  act(() => workers[0].emit({
+    type: 'editApplied', op: 'createLine', ok: true, createdId: 'e2',
+    entities: [LINE, { ...LINE, id: 'e2', vertices: [[12, 3, 0], [20, 8, 0]] }],
+    entityCount: 2, unsupported: [], bytes: new Uint8Array([1, 2, 3]),
+  }))
+  await waitFor(() => expect(context.inputs.x).toBe(end.x))
+  expect(context.inputs.y).toBe(end.y)
+  expect(context.inputs.x2).toBe('')
+  expect(context.inputs.y2).toBe('')
+  expect(document.activeElement).toBe(screen.getByLabelText('ribbon x2'))
+})
+
 it('resolves the nearest edge before excluding picked or selected members', async () => {
   const lines = [0, 0.2].map((y, i) => ({ id: String(10 + i), type: 'LINE', editable: true, vertices: [[0, y, 0], [3, y, 0]] }))
   const state = startPicking('group')

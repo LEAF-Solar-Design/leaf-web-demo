@@ -200,7 +200,7 @@ export default function EngineSessionProvider({
       if (!rearm && previous && previous.group === group && previous.op === op && sameFrom(previous.from, from)) return current
       // W4g-7b-04c-8: a prompt speaks only to the keys it shows. Publish
       // the arm and hidden-key defaults together; a LINE chain's `from`
-      // stays on the armed record; only an explicit re-arm resets a gesture.
+      // stays on the armed record; same-op updates keep inputs.
       let nextInputs = current.inputs
       const resetGesture = previous?.op !== op || rearm
       if (resetGesture) {
