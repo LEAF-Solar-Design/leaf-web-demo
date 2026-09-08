@@ -35,8 +35,9 @@ name: Test gate
 # build-platform-images.yml `needs:` this reusable job as the repo's only
 # enforceable pre-ECR gate (branch protection is unavailable on this plan).
 #
-# Deliberately hermetic -- NO secret, AWS credential, or DATABASE_URL is
-# required or provided:
+# Tests remain hermetic. Only protected main jobs receive the release
+# environment for post-test S3 evidence transport; PRs use GitHub artifacts.
+# No DATABASE_URL is required or provided:
 #   * DATABASE_URL is unset, so the runner's Postgres probe returns NO_DSN and
 #     all three db_gated suites (platform, server-g1a-canonical-e2e,
 #     server-ops-metrics-pg) report SKIP with a reason before any of them
@@ -90,6 +91,10 @@ on:
   pull_request:
   workflow_dispatch:
   workflow_call:
+    secrets:
+      AWS_ECR_PUSH_ROLE:
+        description: "Existing release role, used only for trusted-main gate transport."
+        required: false
     inputs:
       ref:
         description: "Exact commit to test. Empty means the triggering ref."
@@ -129,6 +134,9 @@ jobs:
   # direction of this feature is "run the suites").
   probe:
     name: gate-reuse-probe
+    permissions:
+      contents: read
+      actions: read
     if: ${{ inputs.ref != '' }}
     runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 10
@@ -235,6 +243,12 @@ jobs:
 
   shards:
     name: gate-shard-${{ matrix.shard }}
+    # The environment subject is the role boundary, before any source runs.
+    environment: ${{ github.ref == 'refs/heads/main' && (inputs.ref == '' || inputs.ref == github.sha) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && 'ecr-release' || '' }}
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
     needs: probe
     # `!cancelled()` and not the implicit success(): when the probe is SKIPPED
     # (pull_request and bare-dispatch runs never probe) the shards must still
@@ -505,6 +519,23 @@ jobs:
           --result-json "$RUNNER_TEMP/gate-results/gate-result.json"
           --log-dir "$RUNNER_TEMP/gate-logs"
 
+      - name: Configure AWS for main gate transport
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' && (inputs.ref == '' || inputs.ref == github.sha) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE }}
+          aws-region: us-east-1
+          role-session-name: GHA-GateShard-${{ github.run_id }}-${{ matrix.shard }}
+
+      - name: Store main shard result and bounded logs in S3
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' && (inputs.ref == '' || inputs.ref == github.sha) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+        run: >-
+          python scripts/gate_result_transport.py upload-shard
+          --source "${{ github.sha }}" --run "${{ github.run_id }}"
+          --attempt "${{ github.run_attempt }}" --shard "${{ matrix.shard }}"
+          --file "$RUNNER_TEMP/gate-results/gate-result.json"
+          --logs "$RUNNER_TEMP/gate-logs"
+
       # Always, not just on failure: the fan-in needs every shard's result
       # JSON to prove completeness. `overwrite: true` (no run_attempt in the
       # name) keeps `gh run rerun --failed` working — the rerun shard replaces
@@ -512,7 +543,7 @@ jobs:
       # the new attempt still sees exactly one result per shard. The cost is
       # that a rerun discards the failed attempt's per-suite logs.
       - name: Upload shard result and logs
-        if: always()
+        if: ${{ always() && !(github.ref == 'refs/heads/main' && (inputs.ref == '' || inputs.ref == github.sha) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')) }}
         uses: actions/upload-artifact@v4
         with:
           name: gate-shard-${{ matrix.shard }}-${{ github.run_id }}
@@ -567,6 +598,11 @@ jobs:
 
   gate:
     name: run-all-gates
+    environment: ${{ github.ref == 'refs/heads/main' && (inputs.ref == '' || inputs.ref == github.sha) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && 'ecr-release' || '' }}
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
     needs: [probe, shards]
     # always(): when a shard fails this job must still run and FAIL with the
     # verifier's naming of what broke, not report as skipped.
@@ -647,8 +683,24 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       # ---- full path: verify the shard set, then mint this tree's proof --- #
+      - name: Configure AWS for main gate fan-in
+        if: ${{ !cancelled() && needs.probe.outputs.reuse != 'true' && github.ref == 'refs/heads/main' && (inputs.ref == '' || inputs.ref == github.sha) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE }}
+          aws-region: us-east-1
+          role-session-name: GHA-GateFanin-${{ github.run_id }}
+
+      - name: Retrieve all eight main shard results from S3
+        if: ${{ !cancelled() && needs.probe.outputs.reuse != 'true' && github.ref == 'refs/heads/main' && (inputs.ref == '' || inputs.ref == github.sha) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+        run: >-
+          python scripts/gate_result_transport.py download-shards
+          --source "${{ github.sha }}" --run "${{ github.run_id }}"
+          --attempt "${{ github.run_attempt }}"
+          --output "$RUNNER_TEMP/shard-results"
+
       - name: Download shard results
-        if: ${{ needs.probe.outputs.reuse != 'true' }}
+        if: ${{ needs.probe.outputs.reuse != 'true' && !(github.ref == 'refs/heads/main' && (inputs.ref == '' || inputs.ref == github.sha) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')) }}
         uses: actions/download-artifact@v4
         with:
           pattern: gate-shard-*-${{ github.run_id }}
@@ -741,8 +793,17 @@ jobs:
 
       # Runs only when the step above passed BOTH conditions (implicit
       # success() on the if:), so a proof can never outlive a red verdict.
+      - name: Store this run's tree-bound gate proof in S3
+        if: ${{ needs.probe.outputs.reuse != 'true' && github.ref == 'refs/heads/main' && (inputs.ref == '' || inputs.ref == github.sha) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+        run: >-
+          python scripts/gate_result_transport.py upload-proof
+          --source "${{ github.sha }}" --run "${{ github.run_id }}"
+          --attempt "${{ github.run_attempt }}"
+          --file "$RUNNER_TEMP/gate-proof/gate-proof.json"
+
       - name: Publish the tree-bound gate proof
         if: ${{ needs.probe.outputs.reuse != 'true' }}
+        continue-on-error: ${{ github.ref == 'refs/heads/main' && (inputs.ref == '' || inputs.ref == github.sha) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
         uses: actions/upload-artifact@v4
         with:
           name: gate-proof-${{ steps.tree.outputs.value }}

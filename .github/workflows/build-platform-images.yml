@@ -696,12 +696,16 @@ jobs:
     uses: ./.github/workflows/test-gate.yml
     permissions:
       contents: read
+      id-token: write
       # actions:read flows to the called gate's reuse probe and fan-in so
       # they can read tree-bound gate-proof artifacts minted by earlier runs
       # (a called workflow's permissions are capped by this grant). Read-only.
       actions: read
     with:
       ref: ${{ needs.prepare.outputs.source_sha }}
+
+    secrets:
+      AWS_ECR_PUSH_ROLE: ${{ secrets.AWS_ECR_PUSH_ROLE }}
 
   # Layer-cache warmer. Runs BESIDE the test gate, not after it, and is
   # CONFIGURED to publish no image: push:false, no tags. All it publishes is
