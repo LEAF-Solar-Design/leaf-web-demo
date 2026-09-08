@@ -1087,7 +1087,7 @@ def apply_mutations(intake: Dict[str, Any], mutations: Dict[str, Any]) -> Dict[s
                     new.setdefault("mlstyles", []).append(style)
                 landing = list(e["pts"][-1])
                 new.setdefault("mleaders", []).append({
-                    "handle": e["handle"], "layer": e["layer"], "style": e["style"],
+                    "handle": e["handle"], "layer": e["layer"], "style": style["name"],
                     **{key: style[key] for key in ("textstyle", "height", "arrow", "dogleg")},
                     "attachment": 1, "pts": [list(p) for p in e["pts"]],
                     "landing": landing, "dogleg_dir": [1, 0, 0],
@@ -2190,10 +2190,7 @@ def _mleader_effect_matches(expected: Dict[str, Any], actual: Dict[str, Any]) ->
 
 
 def _verify_mleader_effects(base, actual, canonical, matched_handles):
-    """Keep covered records exact; a legacy base can prove only its adds."""
-    if actual.get("mleaders_unsupported", 0) != base.get("mleaders_unsupported", 0):
-        raise ValueError("re-extracted output carries an unsupported MULTILEADER the base did not, or an unsupported record vanished")
-    legacy_base = "mleaders" not in base
+    """Keep covered records exact; legacy bases prove adds and raw removals."""
     rows = actual.get("mleaders", [])
     if not isinstance(rows, list):
         raise ValueError("re-extracted output has no mleaders list")
@@ -2204,6 +2201,20 @@ def _verify_mleader_effects(base, actual, canonical, matched_handles):
     if len(by_handle) != len(rows):
         raise ValueError("re-extracted output contains duplicate MLEADER handles")
     removed = set(canonical.get("removed", []))
+    unsupported = set(actual.get("mleaders_unsupported_handles", []))
+    raw_handles = unsupported | set(by_handle)
+    for handle in removed & raw_handles:
+        raise ValueError(f"removed MLEADER {handle!r} remains in output")
+    if "mleaders_unsupported" in base or "mleaders_unsupported_handles" in base:
+        base_unsupported = set(base.get("mleaders_unsupported_handles", []))
+        if ("mleaders_unsupported_handles" in base
+                and unsupported != base_unsupported - removed):
+            raise ValueError("unsupported MULTILEADER inventory changed")
+        expected_count = base.get("mleaders_unsupported", len(base_unsupported))
+        expected_count -= len(base_unsupported & removed)
+        if actual.get("mleaders_unsupported", len(unsupported)) != expected_count:
+            raise ValueError("re-extracted output carries an unsupported MULTILEADER the base did not, or an unsupported record vanished")
+    legacy_base = "mleaders" not in base
     base_handles = set()
     for entity in base.get("mleaders", []):
         handle = entity["handle"]

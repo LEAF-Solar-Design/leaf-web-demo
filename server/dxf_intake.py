@@ -304,6 +304,9 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
         entity = _parse_mleader(record, mlstyles, textstyles)
         if entity is None:
             out["mleaders_unsupported"] = out.get("mleaders_unsupported", 0) + 1
+            handle = next((value for code, value in record if code == 5), "")
+            if handle:
+                out.setdefault("mleaders_unsupported_handles", []).append(handle.upper())
         else:
             out.setdefault("mleaders", []).append(entity)
             if entity["layer"] not in seen_layers:

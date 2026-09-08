@@ -359,7 +359,20 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
     assert leader_bytes.splitlines()[-1] == (
         b"ADDMLEADER|0|Standard|0.000,0.000,0.000|5.000,4.000,0.000|Valve")
     (tmp_path / "mutation-plan.txt").write_bytes(leader_bytes)
-    _console(tmp_path, leader_host, "leader.scr", settings["script"]["value"])
+    leader_script = settings["script"]["value"].replace(
+        '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))',
+        '(command "_.-LAYER" "_N" "LEAF-ML-OVERRIDE" "")\r\n'
+        '(setvar "MLEADERLAYER" "LEAF-ML-OVERRIDE")\r\n'
+        '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))',
+    ).replace(
+        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))',
+        '(setq leaf-proof (open "mleaderlayer-after.txt" "w"))\r\n'
+        '(write-line (getvar "MLEADERLAYER") leaf-proof)\r\n'
+        '(close leaf-proof)\r\n'
+        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))',
+    )
+    _console(tmp_path, leader_host, "leader.scr", leader_script)
+    assert (tmp_path / "mleaderlayer-after.txt").read_text().strip() == "LEAF-ML-OVERRIDE"
     _console(tmp_path, output, "leader-inspect.scr", inspect)
     leaders = intake_parse.parse(families, "canary")
     assert not leaders.get("parseErrors"), leaders.get("parseErrors")
@@ -369,6 +382,7 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
     assert leader["dogleg_dir"] == [1, 0, 0]
     assert leader["text"] == "Valve"
     assert leader["style"] == "Standard"
+    assert leader["layer"] == "0"
     assert leader["height"] == 0.18
     assert leader["arrow"] == 0.18
     assert leader["dogleg"] == 0.36
@@ -415,6 +429,7 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
         '(setq leaf-proof (open "frozen-before.txt" "w"))\r\n'
         '(write-line (getvar "CLAYER") leaf-proof)\r\n'
         '(write-line (getvar "CMLEADERSTYLE") leaf-proof)\r\n'
+        '(write-line (getvar "MLEADERLAYER") leaf-proof)\r\n'
         '(close leaf-proof)\r\n'
         '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))',
     ).replace(
@@ -428,6 +443,7 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
         '(setq leaf-proof (open "frozen-after.txt" "w"))\r\n'
         '(write-line (getvar "CLAYER") leaf-proof)\r\n'
         '(write-line (getvar "CMLEADERSTYLE") leaf-proof)\r\n'
+        '(write-line (getvar "MLEADERLAYER") leaf-proof)\r\n'
         '(close leaf-proof)\r\n' + quit_line,
     )
     _console(tmp_path, tmp_path / "frozen-rolled-back.dwg", "frozen-inspect.scr", frozen_inspect)

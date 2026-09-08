@@ -292,6 +292,11 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                 out.setdefault("mleaders", []).append(mleader)
             elif tag == "MLX":
                 out["mleaders_unsupported"] = out.get("mleaders_unsupported", 0) + 1
+                # The old MLX|1 marker carried only a count.
+                if rest and rest != "1":
+                    if any(v not in "0123456789abcdefABCDEF" for v in rest):
+                        raise ValueError("malformed unsupported mleader handle")
+                    out.setdefault("mleaders_unsupported_handles", []).append(rest.upper())
             elif tag == "DM":
                 kind, layer, p1, p2, dimline, rotation, style, nrm, measurement, hnd = rest.split("|")
                 points = [[round(float(v), 3) for v in p.split(",")]
