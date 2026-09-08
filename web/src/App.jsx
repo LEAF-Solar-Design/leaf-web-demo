@@ -390,6 +390,7 @@ export default function App() {
     turns: agentTurns,
     startTurn: startAgentTurn,
     clear: clearAgentSession,
+    setProjectContext,
   } = converse
   // T1 runtime overlay. Reads on load and applies the tenant's colour/copy
   // tokens as CSS custom properties, so an approved change is on screen
@@ -1053,14 +1054,22 @@ export default function App() {
   // this races and loses.
   const agentSessionIdRef = useRef(agentSessionId)
   useEffect(() => { agentSessionIdRef.current = agentSessionId }, [agentSessionId])
-  const authorAuthorityRef = useRef(null) // { sessionId, turnId, mintedAt }
-  const authorAuthorityProvider = useCallback(async (description, { allowSecretOnce = false } = {}) => {
+  const authorAuthorityRef = useRef(null) // { projectId, sessionId, turnId, mintedAt }
+  const authorProjectRef = useRef(openProjectId || null)
+  authorProjectRef.current = openProjectId || null
+  useLayoutEffect(() => {
+    setProjectContext(openProjectId || null)
+    authorAuthorityRef.current = null
+  }, [openProjectId, setProjectContext])
+  const authorAuthorityProvider = useCallback(async (description, { allowSecretOnce = false, forceFresh = false, projectId } = {}) => {
     // No entitlement pre-check here: entitlements load async, and a stage
     // click can beat them (proven by the e2e). A mint against a tenant that
     // truly cannot converse just fails and falls through to null, which the
     // server answers with its own fail-closed refusal.
+    const requestedProjectId = projectId === undefined ? authorProjectRef.current : projectId || null
+    if (requestedProjectId !== authorProjectRef.current) return null
     const cached = authorAuthorityRef.current
-    if (cached && cached.sessionId === agentSessionIdRef.current
+    if (!forceFresh && cached && cached.projectId === requestedProjectId && cached.sessionId === agentSessionIdRef.current
         && Date.now() - cached.mintedAt < AUTHOR_AUTHORITY_TTL_MS) {
       return { sessionId: cached.sessionId, turnId: cached.turnId }
     }
@@ -1071,11 +1080,12 @@ export default function App() {
       // otherwise have its authority mint refused here and silently fall
       // back to null-authority — a refusal the click never saw or overrode.
       const response = await startAgentTurn(description, { source: 'author_panel', purpose: 'stage_authority' }, { allowSecretOnce })
+      if (requestedProjectId !== authorProjectRef.current) return null
       // The response's own session id, never the state-fed ref alone: the
       // first mint resolves before React has re-rendered the fresh sessionId.
-      const sessionId = response?.session_id || agentSessionIdRef.current
+      const sessionId = response?.session_id
       if (!sessionId || !response?.turn_id) return null
-      authorAuthorityRef.current = { sessionId, turnId: response.turn_id, mintedAt: Date.now() }
+      authorAuthorityRef.current = { projectId: requestedProjectId, sessionId, turnId: response.turn_id, mintedAt: Date.now() }
       return { sessionId, turnId: response.turn_id }
     } catch {
       return null
@@ -3135,12 +3145,19 @@ export default function App() {
             }}
           />
         )}
+        {!mock && openProjectId ? <h1 className="home-q">{currentProjectName}</h1> : <>
         <div className="kicker">Home · one prompt, two lanes</div>
         <h1 className="home-q">What should Leaf do to <em>{projectName}</em>?</h1>
         <div className="hint">
           Try <b>count panels per layer</b> — one prompt, routed across <b>Run</b> ·{' '}
           <b>Build</b>. You confirm before anything runs — paid actions never auto-execute.
         </div>
+
+        </>}
+
+        {!mock && openProjectId && (
+          <CampaignPanel projectId={openProjectId} projectName={currentProjectName} signedIn={signedIn} authorityProvider={authorAuthorityProvider} />
+        )}
 
         {!mock && openProjectId && (
           <WorkspaceSummary
@@ -3150,10 +3167,6 @@ export default function App() {
             onSelectVersion={selectCanonicalVersion}
             onClose={onCloseProject}
           />
-        )}
-
-        {!mock && openProjectId && (
-          <CampaignPanel projectId={openProjectId} projectName={currentProjectName} signedIn={signedIn} />
         )}
 
         <SurfaceFrame.Tabs />

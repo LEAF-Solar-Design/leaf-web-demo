@@ -41,6 +41,18 @@ def harness_headers() -> Dict[str, str]:
 class BrokerUnreachable(Exception):
     """The broker process could not be reached (connection/timeout)."""
 
+    def __init__(self, *args, reason=None):
+        super().__init__(*args)
+        self.reason = reason
+
+
+class BrokerHTTPRejected(BrokerUnreachable):
+    """A file-only rejection carrying only a validated HTTP error status."""
+
+    def __init__(self, status_code):
+        super().__init__("file-only broker request failed")
+        self.status_code = status_code if type(status_code) is int and 100 <= status_code <= 599 else None
+
 
 class BrokerReapRejected(Exception):
     """The broker was reached but refused the reap (auth, 5xx, malformed body).
@@ -82,7 +94,9 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
                    ledger_event_key: Optional[str] = None,
                    checkout_holder: Optional[str] = None,
                    checkout_fence: Optional[int] = None,
-                   job_id: Optional[str] = None) -> Dict[str, Any]:
+                   job_id: Optional[str] = None,
+                   file_only: bool = False,
+                   test_source: Optional[str] = None) -> Dict[str, Any]:
     """POST /broker/run -> extended section-3 envelope (ok true OR false).
 
     ``dwg_version`` (None -> head, unchanged behaviour) pins the run to a specific
@@ -98,23 +112,39 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
     ``job_id`` (None -> unchanged behaviour) lets the broker correlate this run's
     live WorkItem with the job row, so ``reap_via_broker`` can cancel it when the
     owning browser tab closes. An older broker ignores the unknown field.
+    ``file_only`` and ``test_source`` are server-owned completion inputs. Omit
+    them for ordinary requests to preserve their existing wire identity.
     """
-    try:
-        resp = requests.post(
-            f"{broker_url()}/broker/run",
-            json={"tenant_id": tenant_id, "tool": tool, "params": params,
+    payload = {"tenant_id": tenant_id, "tool": tool, "params": params,
                   "dwg": dwg, "aps_live": bool(aps_live), "dwg_version": dwg_version,
                   "ledger_event_key": ledger_event_key,
                   "checkout_holder": checkout_holder,
                   "checkout_fence": checkout_fence,
-                  "job_id": job_id},
+                  "job_id": job_id}
+    if file_only:
+        payload["file_only"] = True
+    if test_source is not None:
+        payload["test_source"] = test_source
+    try:
+        resp = requests.post(
+            f"{broker_url()}/broker/run",
+            json=payload,
             headers=broker_headers(),
             timeout=timeout_s or 600,
         )
+        if file_only:
+            status = resp.status_code
+            if type(status) is not int or not 200 <= status < 300:
+                raise BrokerHTTPRejected(status)
         return resp.json()
     except (requests.ConnectionError, requests.Timeout) as exc:
+        if file_only:
+            reason = "timeout" if isinstance(exc, requests.Timeout) else "connect"
+            raise BrokerUnreachable("file-only broker request unavailable", reason=reason) from None
         raise BrokerUnreachable(f"broker at {broker_url()} unreachable: {exc}") from exc
     except ValueError as exc:  # non-JSON body
+        if file_only:
+            raise BrokerUnreachable("file-only broker response invalid", reason="nonjson") from None
         raise BrokerUnreachable(f"broker at {broker_url()} returned non-JSON: {exc}") from exc
 
 

@@ -44,6 +44,33 @@ def _claim(scope):
     return execution.claim_task(*scope, worker_id='recipe-worker', lease_seconds=30)
 
 
+def test_native_registration_is_never_generically_claimed(make_org, monkeypatch):
+    from leaf_platform import campaign_enrollment as enrollment
+    scope, binding, _ = _seed(make_org)
+    monkeypatch.setenv('LEAF_CAMPAIGN_ALLOWED_MACHINES', 'VM-C')
+    monkeypatch.setenv('LEAF_CAMPAIGN_WORKER_SUBJECT', 'worker-service')
+    monkeypatch.setenv('LEAF_SOURCE_SHA', 'a' * 40)
+    native = enrollment.request_enrollment(*scope, binding.binding_id, machine_id='VM-C',
+                                           capability='campaign.native-release')
+    assert _claim(scope) is None
+    enrollment.request_enrollment(*scope, binding.binding_id, machine_id='VM-C')
+    assert _claim(scope) is None
+    params = dict(zip(('org', 'project', 'campaign'), map(uuid.UUID, map(str, scope))))
+    tasks = execution.read_execution(*scope)['tasks']
+    with execution._cursor() as cur:
+        for task in tasks:
+            assert execution._claim_task_cursor(cur, params, worker_id='generic', lease=30,
+                                                task_key=task['task_key']) is None
+    ordinary = _submit(scope, 'ordinary-product')
+    assert _claim(scope)['task_id'] == ordinary['task_id']
+    with db.connection() as conn:
+        assert conn.execute('SELECT count(*) AS n FROM campaign_task_attempts WHERE task_id=%s',
+                            (uuid.UUID(native['capability_link']['task_id']),)).fetchone()['n'] == 0
+        task = conn.execute('SELECT status,fence FROM campaign_tasks WHERE task_id=%s',
+                            (uuid.UUID(native['capability_link']['task_id']),)).fetchone()
+        assert task == {'status': 'pending', 'fence': 0}
+
+
 def _settle(scope, attempt, **changes):
     payload = dict(attempt_token=attempt['attempt_token'], fence=attempt['fence'],
                    outcome='succeeded', result={}, artifact_ref='diff:recipe-change',

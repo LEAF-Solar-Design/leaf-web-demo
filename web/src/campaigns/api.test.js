@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { webcrypto } from 'node:crypto'
 import { bindPublication, invokeCapability, listCapabilities } from './api.js'
+import { requestEnrollment } from './api.js'
+import { submitCampaign, createRelease, getRelease, listReleases, transitionRelease, retryReleaseStage } from './api.js'
+import { downloadReleaseArtifact } from './api.js'
+import { uploadProjectInput } from './api.js'
+import { reviseRelease } from './api.js'
 
 vi.mock('../api.js', () => ({
   config: { apiBase: 'https://campaign.test', tenant: 'test-tenant' },
@@ -17,6 +23,226 @@ beforeEach(() => {
   vi.stubGlobal('fetch', fetcher)
 })
 afterEach(() => { vi.unstubAllGlobals(); localStorage.clear() })
+
+it('sends only workflow revision fields with the same explicit key on retry', async () => {
+  const draft = { workflow: 'Reuse the published tool', reason: 'Recover', idempotencyKey: 'revision-key', contract: { command: 'forged' } }
+  fetcher.mockRejectedValueOnce(new Error('Lost response'))
+  await expect(reviseRelease(P, C, E, draft)).rejects.toThrow()
+  await reviseRelease(P, C, E, draft)
+  expect(fetcher.mock.calls[0]).toEqual(fetcher.mock.calls[1])
+  expect(fetcher.mock.calls[1][0]).toBe(`https://campaign.test/api/campaigns/${C}/releases/${E}/revise`)
+  expect(JSON.parse(fetcher.mock.calls[1][1].body)).toEqual({ project_id: P, workflow: draft.workflow, reason: draft.reason })
+  expect(fetcher.mock.calls[1][1].headers).toMatchObject({ 'Idempotency-Key': 'revision-key', Authorization: 'Bearer test-token' })
+  await transitionRelease(P, C, E, 'advance', { sessionId: P, turnId: E })
+  expect(fetcher.mock.calls[2][0]).toContain('/advance')
+  expect(fetcher.mock.calls[2][1].headers).toMatchObject({ 'X-Authority-Session-Id': P, 'X-Authority-Turn-Id': E })
+})
+
+it.each([{ workflow: '', reason: 'why' }, { workflow: 'new', reason: ' ' },
+  { workflow: 'x'.repeat(16385), reason: 'why' }, { workflow: 'new', reason: 'x'.repeat(4097) }])('rejects invalid revision before transport', async draft => {
+  await expect(reviseRelease(P, C, E, { ...draft, idempotencyKey: 'key' })).rejects.toThrow()
+  expect(fetcher).not.toHaveBeenCalled()
+})
+
+describe('finish input handoff', () => {
+  const text = '[{"name":"Alice","total":42}]'
+  const input = (name = 'records.json', bytes = new TextEncoder().encode(text)) => ({
+    name, size: bytes.byteLength, arrayBuffer: async () => bytes.buffer,
+  })
+  const sha = async text => Array.from(new Uint8Array(await webcrypto.subtle.digest('SHA-256', new TextEncoder().encode(text))),
+    byte => byte.toString(16).padStart(2, '0')).join('')
+  beforeEach(() => {
+    vi.stubGlobal('crypto', webcrypto)
+    fetcher.mockImplementation(async (_url, options) => ({ ok: true, json: async () => options.method === 'PUT'
+      ? { file: { ...JSON.parse(options.body), content_sha256: await sha(JSON.parse(options.body).content) } }
+      : { files: [] } }))
+  })
+  it('uses the closed authenticated project route and reuses its path and key after uncertain delivery', async () => {
+    localStorage.setItem('leaf.org_id', 'current-workspace')
+    const normal = fetcher.getMockImplementation()
+    let uncertain = true
+    fetcher.mockImplementation(async (...args) => {
+      if (args[1].method === 'PUT' && uncertain) { uncertain = false; throw new Error('Connection lost') }
+      return normal(...args)
+    })
+    await expect(uploadProjectInput(P, input())).rejects.toThrow('could not be reached')
+    const ready = await uploadProjectInput(P, input())
+    const puts = fetcher.mock.calls.filter(([, options]) => options.method === 'PUT')
+    expect(puts).toHaveLength(2)
+    expect(puts[0]).toEqual(puts[1])
+    expect(puts[1][0]).toBe(`https://campaign.test/api/projects/${P}/files`)
+    expect(puts[1][1]).toMatchObject({ redirect: 'error', headers: {
+      Authorization: 'Bearer test-token', 'X-Tenant-Id': 'test-tenant', 'X-Org-Id': 'current-workspace',
+      'Content-Type': 'application/json', 'Idempotency-Key': expect.stringMatching(/^finish-input-[a-f0-9]{64}$/),
+    } })
+    expect(ready.path).toBe(`inputs/${await sha(text)}/records.json`)
+    expect(JSON.parse(puts[1][1].body)).toEqual({ path: ready.path, media_type: 'application/json', content: text })
+    expect(fetcher.mock.calls[0][0]).toBe(`https://campaign.test/api/projects/${P}/lifecycle`)
+    await uploadProjectInput(C, input())
+    expect(fetcher.mock.calls.at(-1)[1].headers['Idempotency-Key']).not.toBe(puts[1][1].headers['Idempotency-Key'])
+  })
+  it.each([
+    ['drawing.dwg', new Uint8Array([65])], ['file.constructor', new Uint8Array([65])], ['empty.json', new Uint8Array()],
+    ['large.txt', new Uint8Array(1048577)], ['invalid.json', new Uint8Array([0xc3, 0x28])],
+    ['binary.dxf', new Uint8Array([65, 0, 66])], ['unicode.dxf', new TextEncoder().encode('é')],
+  ])('rejects invalid input %s before any request', async (name, bytes) => {
+    await expect(uploadProjectInput(P, input(name, bytes))).rejects.toThrow()
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+  it.each(['json', 'dxf', 'csv', 'txt', 'md'])('accepts supported %s text and retains a safe basename', async extension => {
+    const file = input(`../some unsafe..name.${extension.toUpperCase()}`, new TextEncoder().encode('A'))
+    const ready = await uploadProjectInput(P, file)
+    expect(ready.path).toMatch(new RegExp(`^inputs/[a-f0-9]{64}/some_unsafe_name\\.${extension}$`))
+  })
+  it('preserves UTF-8 bytes including a BOM and accepts the upper byte boundary', async () => {
+    const bytes = new TextEncoder().encode('\ufeff' + 'a'.repeat(1048573))
+    const ready = await uploadProjectInput(P, input('note.txt', bytes))
+    expect(ready.sha256).toBe(await sha('\ufeff' + 'a'.repeat(1048573)))
+    expect(JSON.parse(fetcher.mock.calls.at(-1)[1].body).content.startsWith('\ufeff')).toBe(true)
+  })
+  it('does not overwrite conflicting saved material or accept an unconfirmed acknowledgement', async () => {
+    const ready = await uploadProjectInput(P, input())
+    fetcher.mockClear()
+    fetcher.mockResolvedValue({ ok: true, json: async () => ({ files: [{ path: ready.path, content: 'other', content_sha256: 'b'.repeat(64) }] }) })
+    await expect(uploadProjectInput(P, input())).rejects.toThrow('Different project material')
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    fetcher.mockResolvedValueOnce({ ok: true, json: async () => ({ files: [] }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ file: { path: 'wrong' } }) })
+    await expect(uploadProjectInput(P, input())).rejects.toThrow('did not confirm')
+  })
+  it('requires current account authentication', async () => {
+    localStorage.clear()
+    await expect(uploadProjectInput(P, input())).rejects.toThrow('Sign in')
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+})
+
+describe('completion transport', () => {
+  const finish = { delivery_profile: 'cad_file', intended_user: 'Project owner', workflow: 'Download the drawing', artifact_refs: ['project-artifact'] }
+  it('sends exact continuation authority only in resume headers', async () => {
+    const authority = { sessionId: P, turnId: E }
+    await transitionRelease(P, C, E, 'resume', authority)
+    expect(fetcher.mock.calls[0][1].headers).toMatchObject({ 'X-Authority-Session-Id': P, 'X-Authority-Turn-Id': E })
+    expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({ project_id: P })
+    expect(fetcher.mock.calls[0][0]).not.toContain('authority')
+    for (const action of ['pause', 'cancel', 'resume']) await transitionRelease(P, C, E, action, action === 'resume' ? undefined : authority)
+    for (const [, request] of fetcher.mock.calls.slice(1)) {
+      expect(request.headers['X-Authority-Session-Id']).toBeUndefined()
+      expect(request.headers['X-Authority-Turn-Id']).toBeUndefined()
+    }
+    for (const invalid of [{ sessionId: P }, { sessionId: P, turnId: 'bad' }, { sessionId: ` ${P}`, turnId: E }]) {
+      await expect(transitionRelease(P, C, E, 'resume', invalid)).rejects.toThrow('continuation authority')
+    }
+    expect(fetcher).toHaveBeenCalledTimes(4)
+  })
+  it('normalizes deadlines and applies the server finish input bounds', async () => {
+    await createRelease(P, C, { finish: { ...finish, deadline_at: '2026-09-08T09:30:00-05:00' }, idempotencyKey: 'key' })
+    expect(JSON.parse(fetcher.mock.calls[0][1].body).finish.deadline_at).toBe('2026-09-08T14:30:00.000Z')
+    for (const overrides of [{ workflow: 'x'.repeat(2001) }, { intended_user: 'x'.repeat(2001) },
+      { artifact_refs: Array(33).fill('file') }, { artifact_refs: ['x'.repeat(513)] }, { deadline_at: 'bad' }]) {
+      await expect(createRelease(P, C, { finish: { ...finish, ...overrides }, idempotencyKey: 'key' })).rejects.toThrow()
+    }
+    expect(fetcher).toHaveBeenCalledTimes(1)
+  })
+  it('sends declarative finish fields and strips executable and authoritative extras', async () => {
+    await submitCampaign({ projectId: P, title: 'Drawing', prompt: 'Finish the drawing', mode: 'finish',
+      finish: { ...finish, commands: ['bad'], status: 'finished', checks: ['passed'], grants: ['bad'] },
+      idempotencyKey: 'finish-key', evidence: 'bad' })
+    expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({ project_id: P, title: 'Drawing',
+      prompt: 'Finish the drawing', mode: 'finish', finish })
+    expect(fetcher.mock.calls[0][1].headers['Idempotency-Key']).toBe('finish-key')
+    await createRelease(P, C, { finish, idempotencyKey: 'release-key' })
+    expect(JSON.parse(fetcher.mock.calls[1][1].body)).toEqual({ project_id: P, finish })
+  })
+  it('uses the scoped release routes and rejects client finalization', async () => {
+    await listReleases(P, C)
+    await getRelease(P, C, E)
+    await transitionRelease(P, C, E, 'pause')
+    await retryReleaseStage(P, C, E, 'delivery')
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+      `https://campaign.test/api/campaigns/${C}/releases?project_id=${P}`,
+      `https://campaign.test/api/campaigns/${C}/releases/${E}?project_id=${P}`,
+      `https://campaign.test/api/campaigns/${C}/releases/${E}/pause`,
+      `https://campaign.test/api/campaigns/${C}/releases/${E}/retry`,
+    ])
+    expect(JSON.parse(fetcher.mock.calls[3][1].body)).toEqual({ project_id: P, stage: 'delivery' })
+    await expect(transitionRelease(P, C, E, 'finish')).rejects.toThrow('pause, resume, cancel or advance')
+    await expect(retryReleaseStage(P, C, E, 'execute')).rejects.toThrow('release stage')
+    expect(fetcher).toHaveBeenCalledTimes(4)
+  })
+  it('rejects non-reference objects and malformed profiles before sending', async () => {
+    await expect(createRelease(P, C, { finish: { ...finish, artifact_refs: [{ command: 'bad' }] }, idempotencyKey: 'key' })).rejects.toThrow('Artifact reference')
+    await expect(createRelease(P, C, { finish: { ...finish, delivery_profile: '../execute' }, idempotencyKey: 'key' })).rejects.toThrow('delivery profile')
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+})
+
+describe('verified authenticated output retrieval', () => {
+  const bytes = new TextEncoder().encode('name,total\nAlice,42\n')
+  let artifact
+  beforeEach(async () => {
+    vi.stubGlobal('crypto', webcrypto)
+    const sha256 = Array.from(new Uint8Array(await webcrypto.subtle.digest('SHA-256', bytes)), n => n.toString(16).padStart(2, '0')).join('')
+    artifact = { name: 'records.csv', byte_count: bytes.length, sha256, valid: true, retrieved: true }
+    fetcher.mockResolvedValue({ ok: true, headers: new Headers({ 'Content-Type': 'text/csv' }), arrayBuffer: async () => bytes.buffer })
+  })
+  it('retrieves exact verified bytes from the constructed endpoint using current account headers', async () => {
+    localStorage.setItem('leaf.org_id', 'workspace')
+    const result = await downloadReleaseArtifact(P, C, E, { ...artifact, access_path: 'https://other.test/steal', download_url: '/foreign' })
+    expect(result).toEqual({ bytes: bytes.buffer, mediaType: 'text/csv', name: 'records.csv' })
+    expect(fetcher).toHaveBeenCalledExactlyOnceWith(`https://campaign.test/api/campaigns/${C}/releases/${E}/artifacts/records.csv?project_id=${P}`,
+      { redirect: 'error', headers: { Authorization: 'Bearer test-token', 'X-Tenant-Id': 'test-tenant', 'X-Org-Id': 'workspace' } })
+  })
+  it.each(['../secret', '/secret', 'https://other.test/a', 'folder/file', 'folder\\file', 'file%2fsecret', '..', 'a.'])('rejects unsafe file name %s before fetching', async name => {
+    await expect(downloadReleaseArtifact(P, C, E, { ...artifact, name })).rejects.toThrow('file name')
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+  it.each([401, 403, 409])('reports server refusal %s without reading output bytes', async status => {
+    const read = vi.fn()
+    fetcher.mockResolvedValue({ ok: false, status, json: async () => ({}), arrayBuffer: read })
+    await expect(downloadReleaseArtifact(P, C, E, artifact)).rejects.toMatchObject({ status })
+    expect(read).not.toHaveBeenCalled()
+  })
+  it.each([{ sha256: '0'.repeat(64) }, { byte_count: bytes.length + 1 }])('refuses wrong digest or byte count', async override => {
+    await expect(downloadReleaseArtifact(P, C, E, { ...artifact, ...override })).rejects.toThrow(/output|release/)
+  })
+  it.each([{ valid: false }, { retrieved: false }, { byte_count: 1048577 }, { byte_count: 0 }, { sha256: 'A'.repeat(64) }])('requires bounded positive metadata: %j', async override => {
+    await expect(downloadReleaseArtifact(P, C, E, { ...artifact, ...override })).rejects.toThrow('output details')
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+  it('cannot skip verification when WebCrypto is unavailable', async () => {
+    vi.stubGlobal('crypto', {})
+    await expect(downloadReleaseArtifact(P, C, E, artifact)).rejects.toThrow('cannot verify')
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+  it('requires current bearer identity to retrieve an output', async () => {
+    localStorage.clear()
+    await expect(downloadReleaseArtifact(P, C, E, artifact)).rejects.toThrow('Sign in')
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+})
+
+describe('native release registration transport', () => {
+  it('preserves host omission and sends the selected native capability through enrollment', async () => {
+    await requestEnrollment(P, C, 'VM-C')
+    await requestEnrollment(P, C, 'VM-C', 'campaign.native-release')
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+      `https://campaign.test/api/campaigns/${C}/enrollments`,
+      `https://campaign.test/api/campaigns/${C}/enrollments`,
+    ])
+    expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({ project_id: P, machine_id: 'VM-C' })
+    expect(JSON.parse(fetcher.mock.calls[1][1].body)).toEqual({
+      project_id: P, machine_id: 'VM-C', capability: 'campaign.native-release',
+    })
+  })
+
+  it.each(['unknown', null, { capability: 'campaign.native-release', role: 'admin' }])(
+    'rejects unsupported registration input before transport: %s', async capability => {
+      await expect(requestEnrollment(P, C, 'VM-C', capability)).rejects.toThrow('supported registration')
+      expect(fetcher).not.toHaveBeenCalled()
+    },
+  )
+})
 
 describe('published campaign capability transport', () => {
   it('uses the closed candidate, publication and invocation wires', async () => {

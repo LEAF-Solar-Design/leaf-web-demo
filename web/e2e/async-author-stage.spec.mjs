@@ -282,12 +282,15 @@ test('a lost acceptance response replays the exact idempotent revision request',
   await expect.poll(() => page.evaluate(() => localStorage.getItem('leaf.inflightAuthor.v1'))).not.toBeNull()
 })
 
-test('a bounded failed poll clears recovery state without staging a tool', async ({ page }) => {
+test('a bounded failed poll preserves its identity across reload without staging or resubmitting', async ({ page }) => {
   const proofState = makeCatProofState()
   let submissions = 0
+  let polls = 0
   await page.addInitScript((pointer) => {
     localStorage.setItem('leaf.org_id', 'cat-proof-org')
-    localStorage.setItem('leaf.inflightAuthor.v1', JSON.stringify(pointer))
+    if (!localStorage.getItem('leaf.inflightAuthor.v1')) {
+      localStorage.setItem('leaf.inflightAuthor.v1', JSON.stringify(pointer))
+    }
   }, {
     idempotency_key: 'failed-author-key-0001',
     description: 'repair the existing tool',
@@ -305,6 +308,7 @@ test('a bounded failed poll clears recovery state without staging a tool', async
     const headers = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*' }
     if (url.pathname === '/api/author/stage' && request.method() === 'POST') submissions += 1
     if (url.pathname === '/api/author/stages/failed-change-0001') {
+      polls += 1
       // Real producer shape (customization_service.stage_status_change):
       // reason_code + retryable always, message when a reason was captured.
       await route.fulfill({
@@ -335,7 +339,18 @@ test('a bounded failed poll clears recovery state without staging a tool', async
   await expect(page.getByText(/Generated source did not pass validation/)).toBeVisible({ timeout: 15_000 })
   await expect(page.locator('.authored')).toHaveCount(0)
   expect(submissions).toBe(0)
-  await expect.poll(() => page.evaluate(() => localStorage.getItem('leaf.inflightAuthor.v1'))).toBeNull()
+  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('leaf.inflightAuthor.v1')))
+  expect(saved).toMatchObject({
+    idempotency_key: 'failed-author-key-0001', change_set_id: 'failed-change-0001', terminal_failed: true,
+    failure: { reason_code: 'customization_author_job_failed' },
+  })
+  const pollsBeforeReload = polls
+  await page.reload()
+  await expect(page.getByRole('button', { name: 'Check status' })).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByText('Authoring failed. Your request is saved for recovery.')).toBeVisible()
+  expect(polls).toBe(pollsBeforeReload)
+  expect(submissions).toBe(0)
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('leaf.inflightAuthor.v1')))).toEqual(saved)
 })
 
 test('a harness job failure surfaces the server reason instead of eternal pending', async ({ page }) => {
@@ -414,7 +429,10 @@ test('a harness job failure surfaces the server reason instead of eternal pendin
   await expect(page.getByText(/Authoring service is temporarily unavailable/)).toHaveCount(0)
   await expect(page.getByText(/Authoring with the agent/)).toHaveCount(0)
   await expect(page.locator('.authored')).toHaveCount(0)
-  await expect.poll(() => page.evaluate(() => localStorage.getItem('leaf.inflightAuthor.v1'))).toBeNull()
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('leaf.inflightAuthor.v1')))).toMatchObject({
+    change_set_id: 'dead-authoring-0001', terminal_failed: true,
+    failure: { reason_code: 'customization_author_job_failed' },
+  })
 })
 
 test('a cross-origin poll URL is rejected without forwarding account authority', async ({ page }) => {

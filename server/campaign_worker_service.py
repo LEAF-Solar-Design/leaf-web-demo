@@ -102,6 +102,11 @@ def next_work(enrollment_id, subject, *, lease_seconds=900):
         'campaign_id': str(scope['campaign']), 'machine_id': scope['machine_id']})
     if bindings:
         return dict(response, kind='recover', pending_remote_bindings=bindings)
+    from leaf_platform import campaign_release
+    completion = campaign_release.release_snapshot(scope['org'], scope['project'], scope['campaign'])
+    release = completion.get('release')
+    if release and release['status'] in ('paused', 'cancelled', 'finished', 'queued', 'needs_approach'):
+        return dict(response, kind='release_wait', completion=completion)
     if waiting:
         return dict(response, **waiting)
     with execution._cursor() as cur:

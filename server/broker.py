@@ -1277,6 +1277,7 @@ class BrokerRunRequest(BaseModel):
     # broker accepts it only when aps_live=false and executes it only inside the
     # configured sandbox. It is never written to the ledger.
     test_source: Optional[str] = None
+    file_only: bool = False
     # None -> head (unchanged); otherwise pin to an immutable drawing version.
     dwg_version: Optional[int] = None
     # Required in PostgreSQL mode. Use one durable key across job redeliveries.
@@ -1559,6 +1560,8 @@ def _broker_request_fingerprint(req: Union[BrokerRunRequest, BrokerPlanRunReques
             "aps_live": bool(req.aps_live),
             "dwg_version": req.dwg_version,
         }
+        if req.file_only:
+            fingerprint_input["file_only"] = True
         if req.test_source is not None:
             fingerprint_input["test_source_sha256"] = hashlib.sha256(
                 req.test_source.encode("utf-8")
@@ -2871,10 +2874,14 @@ def _broker_run_request(req: Union[BrokerRunRequest, BrokerPlanRunRequest]) -> J
         entry["status"] = "INTERNAL"
         # Class name only in the envelope; the message can carry internal
         # paths or state, so it goes to the broker log instead.
-        print(f"[leaf-broker] run failed: {type(exc).__name__}: {exc}",
-              file=sys.stderr)
+        file_only = not is_plan and req.file_only
+        if not file_only:
+            print(f"[leaf-broker] run failed: {type(exc).__name__}: {exc}",
+                  file=sys.stderr)
         terminal_env = err_envelope(
-            ErrorCode.INTERNAL, f"run failed: {type(exc).__name__}", retryable=False,
+            ErrorCode.INTERNAL,
+            "file-only execution failed" if file_only else f"run failed: {type(exc).__name__}",
+            retryable=False,
             tool=tool.get("name"))
         terminal_status = DEFAULT_HTTP_STATUS[ErrorCode.INTERNAL]
         return JSONResponse(status_code=terminal_status, content=terminal_env)
@@ -3081,6 +3088,16 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
         return (err_envelope(ErrorCode.BAD_PARAMS, "tool package missing 'name'", retryable=False),
                 DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
 
+    if req.file_only and (
+        req.aps_live or req.dwg != "" or req.dwg_version is not None
+        or write_loop.is_write_tool(tool)
+        or not isinstance(req.test_source, str) or not req.test_source.strip()
+    ):
+        return _classified_bad_params(
+            "file_only_request_invalid", "invalid file-only execution request",
+            tool=tool.get("name"),
+        )
+
     if req.test_source is not None:
         if req.aps_live:
             return (err_envelope(
@@ -3240,6 +3257,15 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
             "params schema: " + "; ".join(perrs),
             tool=tool.get("name"),
         )
+
+    if req.file_only:
+        _start_admitted_execution(req, admission, aps_submission=False)
+        env = run_dynamic(tool, {}, params, aps_live=False, da=None, t0=t0,
+                          tenant_id=req.tenant_id)
+        if not env.get("ok"):
+            code = (env.get("error") or {}).get("error_code", ErrorCode.INTERNAL)
+            return env, DEFAULT_HTTP_STATUS.get(code, 500)
+        return env, 200
 
     # 1c) WRITE BRANCH (M2): a drawing.write tool produces a NEW immutable store
     #     version (undo/redo-able). Read tools do NOT match here and take the
