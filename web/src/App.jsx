@@ -3253,6 +3253,7 @@ export default function App() {
                 <EngineDocumentView
                   viewerRef={viewerRef}
                   selectedHandle={selectedHandle}
+                  onSelectedHandleChange={setSelectedHandle}
                   onShown={(intake) => {
                     const el = workspaceCardRef.current
                     if (!el) return

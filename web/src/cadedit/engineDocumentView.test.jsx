@@ -33,8 +33,10 @@ let workers
 let viewer
 let viewerRef
 let onShown
+let sessionActions
 function SelectionProbe() {
   const { session } = useEngineSessionContext()
+  sessionActions = session.actions
   return <output data-testid="engine-selection">{session.selectedId ?? 'none'}</output>
 }
 
@@ -70,6 +72,132 @@ beforeEach(() => {
   globalThis.URL.revokeObjectURL = vi.fn()
 })
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
+
+describe.each([true, false])('EngineDocumentView reverse selection (callback enabled: %s)', (withCallback) => {
+  const entities = [{ ...LINE, id: '42' }, { ...CIRCLE, id: '43' }]
+  function setup() {
+    const callback = vi.fn()
+    const props = withCallback ? { onSelectedHandleChange: callback } : {}
+    return { ...mount(props), callback, props }
+  }
+
+  it('mirrors engine selection once and ignores the parent echo without selecting again', async () => {
+    const { rerender, callback, props } = setup()
+    await openAndLoad(entities)
+    act(() => { sessionActions.select('42') })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('42')
+    expect(callback.mock.calls).toEqual(withCallback ? [['2A']] : [])
+    const select = vi.spyOn(sessionActions, 'select')
+    rerender({ ...props, selectedHandle: '2A' })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('42')
+    expect(select).toHaveBeenCalledTimes(withCallback ? 0 : 1)
+    expect(callback.mock.calls).toEqual(withCallback ? [['2A']] : [])
+  })
+
+  it('does not call back for the forward mirror alone', async () => {
+    const { rerender, callback, props } = setup()
+    await openAndLoad(entities)
+    rerender({ ...props, selectedHandle: '2B' })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('43')
+    expect(callback).not.toHaveBeenCalled()
+  })
+
+  it('mirrors an explicit clear once', async () => {
+    const { callback } = setup()
+    await openAndLoad(entities)
+    act(() => { sessionActions.select('42') })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('42')
+    expect(callback.mock.calls).toEqual(withCallback ? [['2A']] : [])
+    act(() => { sessionActions.select(null) })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('none')
+    expect(callback.mock.calls).toEqual(withCallback ? [['2A'], [null]] : [])
+    act(() => { sessionActions.select(null) })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('none')
+    expect(callback.mock.calls).toEqual(withCallback ? [['2A'], [null]] : [])
+  })
+
+  it('does not mirror the initial empty selection on mount or load', async () => {
+    const { callback } = setup()
+    expect(screen.getByTestId('engine-selection').textContent).toBe('')
+    expect(callback).not.toHaveBeenCalled()
+    await openAndLoad(entities)
+    expect(screen.getByTestId('engine-selection').textContent).toBe('')
+    expect(callback).not.toHaveBeenCalled()
+  })
+
+  it('does not mirror a session selection before documentLoaded', () => {
+    const { callback } = setup()
+    act(() => { sessionActions.select('42') })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('42')
+    expect(callback).not.toHaveBeenCalled()
+  })
+
+  it('clears a hidden document selection once after a failed load and mirrors the next document', async () => {
+    const { rerender, callback, props } = setup()
+    await openAndLoad(entities)
+    act(() => { sessionActions.select('42') })
+    expect(callback.mock.calls).toEqual(withCallback ? [['2A']] : [])
+    if (withCallback) rerender({ ...props, selectedHandle: '2A' })
+    act(() => { sessionActions.openBytes(new Uint8Array([48]), 'malformed.dxf') })
+    workers[0].emit({ type: 'error', message: 'DXF parse failed' })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('')
+    expect(callback.mock.calls).toEqual(withCallback ? [['2A'], [null]] : [])
+    if (withCallback) rerender({ ...props, selectedHandle: null })
+    await openAndLoad([entities[1]], 'two.dxf')
+    expect(screen.getByTestId('engine-selection').textContent).toBe('')
+    expect(callback.mock.calls).toEqual(withCallback ? [['2A'], [null]] : [])
+    act(() => { sessionActions.select('43') })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('43')
+    expect(callback.mock.calls).toEqual(withCallback ? [['2A'], [null], ['2B']] : [])
+  })
+
+  it('does not replay a forward selection after a failed load and recovery', async () => {
+    const { rerender, callback, props } = setup()
+    await openAndLoad(entities)
+    rerender({ ...props, selectedHandle: '2A' })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('42')
+    expect(callback).not.toHaveBeenCalled()
+    const select = vi.spyOn(sessionActions, 'select')
+    act(() => { sessionActions.openBytes(new Uint8Array([48]), 'malformed.dxf') })
+    workers[0].emit({ type: 'error', message: 'DXF parse failed' })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('')
+    expect(callback.mock.calls).toEqual(withCallback ? [[null]] : [])
+    if (withCallback) rerender({ ...props, selectedHandle: null })
+    await openAndLoad([{ ...entities[0] }], 'two.dxf')
+    expect(screen.getByTestId('engine-selection').textContent).toBe('')
+    expect(callback.mock.calls).toEqual(withCallback ? [[null]] : [])
+    expect(select).not.toHaveBeenCalled()
+  })
+
+  it('does not call back when a document hides without a held selection', async () => {
+    const { callback } = setup()
+    await openAndLoad(entities)
+    act(() => { sessionActions.openBytes(new Uint8Array([48]), 'malformed.dxf') })
+    workers[0].emit({ type: 'error', message: 'DXF parse failed' })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('')
+    expect(callback).not.toHaveBeenCalled()
+  })
+
+  it('mirrors a selection lost through an edit reply to null exactly once', async () => {
+    const { rerender, callback, props } = setup()
+    await openAndLoad(entities)
+    act(() => { sessionActions.select('42') })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('42')
+    expect(callback.mock.calls).toEqual(withCallback ? [['2A']] : [])
+    // App stores each callback value in selectedHandle before the next edit.
+    if (withCallback) rerender({ ...props, selectedHandle: '2A' })
+    const select = vi.spyOn(sessionActions, 'select')
+    const reply = { type: 'editApplied', op: 'delete', ok: true, entities: [entities[1]], entityCount: 1, bytes: new Uint8Array([48]), byteLength: 1 }
+    workers[0].emit(reply)
+    if (withCallback) rerender({ ...props, selectedHandle: null })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('')
+    expect(callback.mock.calls).toEqual(withCallback ? [['2A'], [null]] : [])
+    workers[0].emit({ ...reply, entities: [entities[1]] })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('')
+    expect(callback.mock.calls).toEqual(withCallback ? [['2A'], [null]] : [])
+    expect(select).not.toHaveBeenCalled()
+  })
+})
 
 describe('EngineDocumentView (W4f slice A0)', () => {
   it('mirrors changed hex handles to decimal engine ids and clears on an empty canvas click', async () => {

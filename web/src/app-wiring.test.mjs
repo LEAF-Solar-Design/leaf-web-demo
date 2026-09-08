@@ -125,6 +125,12 @@ const DECLARED_AND_USED = [
 ]
 
 describe('App.jsx wiring', () => {
+  describe('W4g selection mirror back', () => {
+    it('passes the console selection setter to EngineDocumentView', () => {
+      assert.match(appSource, /<EngineDocumentView\b(?:(?!\/>)[\s\S])*?\bonSelectedHandleChange=\{setSelectedHandle\}/)
+    })
+  })
+
   for (const { name, usedAs } of DECLARED_AND_USED) {
     it(`declares ${name} in executable code, not inside a comment`, () => {
       // Matches a plain binding (`const x =`) and an array destructure

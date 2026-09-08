@@ -1457,8 +1457,11 @@ test.describe('route matrix, rail ON', () => {
     await expect(redoQuick).toBeDisabled()
     await bar.fill('u')
     await bar.press('Enter')
-    await expect(dockColor).not.toHaveText('red (1)', { timeout: 60_000 })
+    // Undo reloads the document, the engine drops its selection, and the console mirror follows (#1143).
+    await expect(dockColor).toHaveCount(0, { timeout: 60_000 })
     await expect(redoQuick).toBeEnabled()
+    await page.locator(`input[type="radio"][value="${circleId}"]`).check()
+    await expect(dockColor).not.toHaveText('red (1)')
     const propertiesCluster = ribbon.locator('[data-group="properties"]')
     const clusterBox = await propertiesCluster.boundingBox()
     for (const id of ['prop-color', 'prop-linetype', 'prop-lineweight']) {

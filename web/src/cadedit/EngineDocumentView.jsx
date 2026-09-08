@@ -19,13 +19,16 @@ import { engineIntake, hexHandle } from './engineIntake.js'
 import { SESSION_ERROR } from './engineSession.js'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
 
-export default function EngineDocumentView({ viewerRef = null, onShown = null, selectedHandle = null }) {
+export default function EngineDocumentView({ viewerRef = null, onShown = null, selectedHandle = null, onSelectedHandleChange = null }) {
   const { session, highlightedIds } = useEngineSessionContext()
   const showing = session.engineParsed && session.errorKind !== SESSION_ERROR.CRASHED
   const entities = showing ? session.entities : null
   const documentId = showing ? session.documentId : ''
   const lastRef = useRef(null)
+  // Both mirrors share this ref so each other's writes cannot echo as changes.
   const lastSelectedHandleRef = useRef(undefined)
+  const lastEngineSelectionRef = useRef(undefined)
+  const wasShownRef = useRef(false)
   /** one-way: console handle -> engine selection, on change */
   useEffect(() => {
     const previous = lastSelectedHandleRef.current
@@ -43,6 +46,31 @@ export default function EngineDocumentView({ viewerRef = null, onShown = null, s
       }
     }
   }, [selectedHandle, entities, session.actions])
+  useEffect(() => {
+    const wasShown = wasShownRef.current
+    wasShownRef.current = entities !== null
+    if (entities === null) {
+      if (wasShown && lastSelectedHandleRef.current != null && typeof onSelectedHandleChange === 'function') {
+        lastSelectedHandleRef.current = null
+        onSelectedHandleChange(null)
+      }
+      return
+    }
+    const selectedId = session.selectedId
+    const previous = lastEngineSelectionRef.current
+    lastEngineSelectionRef.current = selectedId
+    if (typeof onSelectedHandleChange !== 'function' || selectedId === previous) return
+    if (typeof selectedId === 'string' && selectedId !== '') {
+      const hex = hexHandle(selectedId)
+      if (hex === lastSelectedHandleRef.current) return
+      lastSelectedHandleRef.current = hex
+      onSelectedHandleChange(hex)
+    } else if (selectedId === null || (selectedId === '' && typeof previous === 'string' && previous !== '')) {
+      if (lastSelectedHandleRef.current === null) return
+      lastSelectedHandleRef.current = null
+      onSelectedHandleChange(null)
+    }
+  }, [session.selectedId, entities, onSelectedHandleChange])
   // The latest onShown, so the unmount cleanup (a closure from the first
   // render) tells the host the stamp is gone (kimi, #969).
   const onShownRef = useRef(onShown)
