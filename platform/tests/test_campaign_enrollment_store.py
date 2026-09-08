@@ -29,6 +29,124 @@ def connect(seeded, machine='VM-C'):
     return enrollment.request_enrollment(*scope, principal, machine_id=machine)
 
 
+def native_registration(seeded):
+    scope, principal = seeded
+    return enrollment.request_enrollment(*scope, principal, machine_id='VM-C',
+                                         capability='campaign.native-release')
+
+
+def test_native_registration_distinct_identity_replay_and_link_repair(seeded, monkeypatch):
+    host = connect(seeded)
+    native = native_registration(seeded)
+    assert native['capability'] == 'campaign.native-release'
+    assert host['capability'] == 'campaign.host-enrollment'
+    for field in ('link_id', 'task_id'):
+        assert native['capability_link'][field] != host['capability_link'][field]
+    assert native['enrollment_id'] != host['enrollment_id']
+    monkeypatch.delenv('LEAF_SOURCE_SHA')
+    replay = native_registration(seeded)
+    assert replay['replayed'] and replay['enrollment_id'] == native['enrollment_id']
+    assert replay['capability_link'] == native['capability_link']
+    with db.connection() as conn:
+        conn.execute('DELETE FROM campaign_capability_links WHERE link_id=%s',
+                     (uuid.UUID(native['capability_link']['link_id']),))
+    repaired = native_registration(seeded)
+    assert repaired['replayed'] and repaired['enrollment_id'] == native['enrollment_id']
+    assert repaired['capability_link']['task_id'] == native['capability_link']['task_id']
+    assert repaired['capability_link']['state'] == 'pending_link'
+    assert native_registration(seeded)['capability_link'] == repaired['capability_link']
+    snapshot = execution.read_execution(*seeded[0])
+    assert len(snapshot['tasks']) == 2 and snapshot['receipts'] == []
+    task = next(t for t in snapshot['tasks'] if t['task_id'] == repaired['capability_link']['task_id'])
+    assert task['task_key'].startswith('native-release-')
+    assert task['status'] == 'pending' and task['fence'] == 0 and task['source_sha'] == 'a' * 40
+
+
+def test_native_task_commit_recovery(seeded, monkeypatch):
+    original = execution.submit_task
+    def interrupted(*args, **kwargs):
+        original(*args, **kwargs)
+        raise RuntimeError('lost registration response')
+    monkeypatch.setattr(execution, 'submit_task', interrupted)
+    with pytest.raises(campaigns.CampaignUnavailable):
+        native_registration(seeded)
+    monkeypatch.setattr(execution, 'submit_task', original)
+    monkeypatch.delenv('LEAF_SOURCE_SHA')
+    row = native_registration(seeded)
+    assert native_registration(seeded)['enrollment_id'] == row['enrollment_id']
+    assert len(execution.read_execution(*seeded[0])['tasks']) == 1
+
+
+def test_native_scope_and_host_publication_cannot_enable_or_settle(seeded):
+    from leaf_platform import campaign_capabilities as capabilities
+    scope, principal = seeded
+    row = native_registration(seeded)
+    eid = row['enrollment_id']
+    publication = dict(change_set_id='host-publication', catalog_commit='a' * 40,
+        effective_catalog_digest='b' * 64, tool_name='campaign-host-enrollment',
+        tool_manifest_sha256='sha256:' + 'c' * 64, tool_source_sha256='d' * 64)
+    for operation in (
+        lambda: enrollment.enable_enrollment(*scope, eid, principal),
+        lambda: capabilities.bind_publication(*scope, eid, principal, publication=publication),
+        lambda: capabilities.invocation_context(*scope, eid, principal),
+    ):
+        with pytest.raises(campaigns.CampaignConflict) as error:
+            operation()
+        assert error.value.code == 'capability_not_ready'
+    with execution._cursor() as cur:
+        params = dict(zip(('org', 'project', 'campaign'), map(uuid.UUID, map(str, scope))))
+        with pytest.raises(campaigns.CampaignConflict) as error:
+            execution._complete_host_capability(cur, params, eid)
+        assert error.value.code == 'capability_not_ready'
+    other = store.create_project(scope[0], 'Other native project')
+    with pytest.raises(campaigns.CampaignUnavailable):
+        enrollment.enable_enrollment(scope[0], other.project_id, scope[2], eid, principal)
+    with pytest.raises(campaigns.CampaignError):
+        enrollment.resolve_worker_enrollment(eid, 'worker-service')
+    assert native_registration(seeded)['capability_link'] == row['capability_link']
+    assert execution.read_execution(*scope)['receipts'] == []
+    with db.connection() as conn:
+        for table in ('campaign_host_operations', 'campaign_capability_invocations', 'campaign_task_attempts'):
+            assert conn.execute('SELECT count(*) AS n FROM ' + table + ' WHERE campaign_id=%s',
+                                (uuid.UUID(scope[2]),)).fetchone()['n'] == 0
+        assert conn.execute('SELECT count(*) AS n FROM async_jobs WHERE org_id=%s AND project_id=%s',
+                            tuple(map(str, scope[:2]))).fetchone()['n'] == 0
+
+
+@pytest.mark.parametrize('capability', ['unknown', '', None, {}, 'campaign.native-release.extra'])
+def test_native_registration_closed_registry(seeded, capability):
+    scope, principal = seeded
+    with pytest.raises(campaigns.CampaignError):
+        enrollment.request_enrollment(*scope, principal, machine_id='VM-C', capability=capability)
+    assert enrollment.list_enrollments(*scope) == []
+    assert execution.read_execution(*scope)['tasks'] == []
+
+
+def test_native_migration_preserves_historical_rows_and_reapplies(seeded):
+    from pathlib import Path
+    import psycopg
+    migration = (Path(__file__).parents[1] / 'migrations' /
+                 '0061_campaign_native_release_registration.sql').read_text()
+    with db.connection() as conn:
+        conn.execute('CREATE TEMP TABLE campaign_host_enrollments ('
+                     'enrollment_id UUID PRIMARY KEY, campaign_id UUID, machine_id TEXT, '
+                     'CONSTRAINT campaign_host_enrollments_machine_unique UNIQUE (campaign_id,machine_id)) '
+                     'ON COMMIT DROP')
+        eid, cid = uuid.uuid4(), uuid.uuid4()
+        conn.execute('INSERT INTO campaign_host_enrollments VALUES (%s,%s,%s)', (eid, cid, 'VM-C'))
+        conn.execute(migration)
+        conn.execute(migration)
+        historical = conn.execute('SELECT * FROM campaign_host_enrollments').fetchone()
+        assert historical['enrollment_id'] == eid and historical['capability'] == 'campaign.host-enrollment'
+        conn.execute('INSERT INTO campaign_host_enrollments VALUES (%s,%s,%s,%s)',
+                     (uuid.uuid4(), cid, 'VM-C', 'campaign.native-release'))
+        for capability in ('campaign.native-release', 'unknown'):
+            with pytest.raises(psycopg.IntegrityError):
+                with conn.transaction():
+                    conn.execute('INSERT INTO campaign_host_enrollments VALUES (%s,%s,%s,%s)',
+                                 (uuid.uuid4(), cid, 'VM-C', capability))
+
+
 def test_replay_retains_original_task_source_and_pending_link(seeded, monkeypatch):
     scope, _ = seeded
     first = connect(seeded)

@@ -43,7 +43,7 @@ echo "--- 1/6 Upgrade pip"
 python -m pip install --upgrade pip
 cd "$CODEBUILD_SRC_DIR"
 echo "--- 2/6 Install Python dependencies"
-pip install \
+python -m pip install \
   -r server/requirements.txt \
   -r server/requirements-auth.txt \
   -r da/requirements.txt \
@@ -63,9 +63,12 @@ echo "--- 5/6 Install Chromium for browser proofs"
 # The workflow uses `npx playwright install chromium`; --with-deps is added here on purpose
 # because standard:7.0 lacks Chromium's OS libraries and the build runs as root.
 npx playwright install --with-deps chromium
+# Install the Python producer's pinned browser with the gate interpreter too.
+python -m playwright install --with-deps chromium
 cd "$CODEBUILD_SRC_DIR"
 echo "--- 6/6 Run unsharded test gate and print scoreboard"
 export LEAF_AUTOFILL_SOLVER_ABSENT_OK=1
+export LEAF_MANAGED_WEB_BROWSER_MODE=trusted-template-container
 mkdir -p /tmp/gate-results
 gate_status=0
 python scripts/run-all-gates.py --retry 1 --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs || gate_status=$?

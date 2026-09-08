@@ -261,14 +261,24 @@ def _job_for_tenant(job_id: str, tenant_id: str) -> Optional[Dict[str, Any]]:
 
 def _capability_access(rec, tenant, *, write=False):
     """Authorize with the verified caller and stored project on every observation."""
-    if rec is None or "capability_provenance" not in rec:
+    if rec is None:
         return
-    from campaign_capability_job import validate_context
-    context = validate_context(rec["capability_provenance"])
+    kinds = [key for key in ("capability_provenance", "completion_provenance") if key in rec]
+    if not kinds:
+        return
+    if len(kinds) != 1:
+        raise ValueError("conflicting campaign job provenance")
+    if kinds[0] == "completion_provenance":
+        from campaign_transform_job import validate_context
+    else:
+        from campaign_capability_job import validate_context
+    context = validate_context(rec[kinds[0]])
     if (not isinstance(tenant, deps.TenantContext) or not tenant.subject
             or rec.get("tenant_id") != _bound_tenant_id(tenant)
+            or rec.get("tenant_id") != context["tenant_id"]
             or rec.get("org_id") != context["org_id"]
-            or rec.get("project_id") != context["project_id"]):
+            or rec.get("project_id") != context["project_id"]
+            or rec.get("tool") != context["tool_name"]):
         raise LookupError("job unavailable")
     org = jobs.platform_link.require_project_access(tenant, rec["project_id"], write=write)
     if str(org) != rec["org_id"]:

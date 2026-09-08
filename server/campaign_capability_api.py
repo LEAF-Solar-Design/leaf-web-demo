@@ -105,6 +105,7 @@ def list_capabilities(tenant, project_id, campaign_id):
 @_safe
 def bind_publication(tenant, project_id, campaign_id, enrollment_id, change_set_id):
     org, principal, tenant_id = _scope(tenant, project_id, campaign_id)
+    _stored_context(org, project_id, campaign_id, enrollment_id, tenant_id)
     current = _publication(tenant_id)
     if current is None or current[0]['change_set_id'] != change_set_id:
         raise CapabilityError(409, 'publication_conflict')
@@ -112,7 +113,9 @@ def bind_publication(tenant, project_id, campaign_id, enrollment_id, change_set_
     try:
         return capabilities.bind_publication(org, project_id, campaign_id, enrollment_id, principal,
                                              publication=current[0])
-    except capabilities.CampaignConflict:
+    except capabilities.CampaignConflict as exc:
+        if exc.code == 'capability_not_ready':
+            raise CapabilityError(409, 'capability_not_ready') from None
         raise CapabilityError(409, 'publication_conflict') from None
 
 
@@ -123,6 +126,8 @@ def _stored_context(org, project, campaign, enrollment_id, tenant_id):
     if row is None:
         raise CapabilityError(404, 'project_unavailable')
     link = row['capability_link']
+    if row.get('capability') == 'campaign.native-release' or link.get('capability') == 'campaign.native-release':
+        raise CapabilityError(409, 'capability_not_ready')
     context = dict(capabilities.CONSTANTS, tenant_id=tenant_id, org_id=org, project_id=project,
                    campaign_id=campaign, enrollment_id=enrollment_id, link_id=link['link_id'])
     context.update({key: link.get(key) for key in capabilities.PUBLICATION})
@@ -229,9 +234,9 @@ def invoke(tenant, project_id, campaign_id, enrollment_id, expected_digest, idem
     if not isinstance(expected_digest, str) or re.fullmatch('[0-9a-f]{64}', expected_digest) is None:
         raise CapabilityError(400, 'invalid_request')
     org, principal, tenant_id = _scope(tenant, project_id, campaign_id)
+    context = _stored_context(org, project_id, campaign_id, enrollment_id, tenant_id)
     with _admission_lock(tenant_id, org, project_id, key):
         prior = _lookup(tenant_id, project_id, key)
-        context = _stored_context(org, project_id, campaign_id, enrollment_id, tenant_id)
         if prior is not None:
             return _recover(prior, context, expected_digest)
         capabilities = _platform()[1]
@@ -275,6 +280,12 @@ def enrollment_snapshot(tenant, project_id, campaign_id):
     result = []
     for original in rows:
         row = dict(original)
+        if (row.get('capability') == 'campaign.native-release'
+                or row['capability_link'].get('capability') == 'campaign.native-release'):
+            result.append(dict(row, capability='campaign.native-release', readiness='setup_required',
+                               readiness_message='The release executor is not connected.',
+                               invocations=[], completed_uses=0))
+            continue
         eid = row['enrollment_id']
         context = _stored_context(org, project_id, campaign_id, eid, tenant_id)
         with db.cursor() as cur:

@@ -1,9 +1,11 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render as renderCollapsed, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import CampaignPanel from './CampaignPanel.jsx'
 import useCampaigns from './useCampaigns.js'
+import { uploadProjectInput } from './api.js'
 
 vi.mock('./useCampaigns.js', () => ({ default: vi.fn() }))
+vi.mock('./api.js', () => ({ uploadProjectInput: vi.fn() }))
 
 const P = '11111111-1111-1111-1111-111111111111'
 const C = '33333333-3333-3333-3333-333333333333'
@@ -12,6 +14,7 @@ const row = { campaign_id: C, title: 'Release documents', prompt: 'Organize reci
 let campaign
 
 beforeEach(() => {
+  uploadProjectInput.mockReset()
   campaign = {
     status: 'ready', refreshing: false, error: null, errorAction: null,
     execution: null, executionLoading: false, executionError: null,
@@ -20,12 +23,562 @@ beforeEach(() => {
     ask: vi.fn().mockResolvedValue({ question: { question_id: Q } }),
     answer: vi.fn().mockResolvedValue({ answer: { answer: 'Use PDF.' } }),
     select: vi.fn(), refetch: vi.fn().mockResolvedValue({ campaigns: [row] }),
+    createRelease: vi.fn().mockResolvedValue({ ok: true }),
+    transitionRelease: vi.fn().mockResolvedValue({ ok: true }),
+    retryReleaseStage: vi.fn().mockResolvedValue({ ok: true }),
+    downloadReleaseArtifact: vi.fn(),
   }
   useCampaigns.mockImplementation(() => campaign)
 })
 afterEach(cleanup)
 
 const panel = props => <CampaignPanel projectId={P} projectName="Document studio" signedIn {...props} />
+
+// Existing control/security cases exercise the controls after explicit expansion.
+function render(ui) {
+  const view = renderCollapsed(ui)
+  const expand = () => view.container.querySelectorAll('details:not([open]) > summary').forEach(summary => fireEvent.click(summary))
+  expand()
+  return { ...view, rerender(next) { view.rerender(next); expand() } }
+}
+
+describe('stalled release revision', () => {
+  beforeEach(() => {
+    campaign.completion = { release: { release_id: Q, status: 'needs_approach', contract_version: 1,
+      contract: { workflow: 'Old workflow', original_goal: 'Original ambition', required_checks: [], deferred_items: ['Later scope'] } },
+      next_action: { reason: 'Change the approach' }, decisions: [] }
+    campaign.reviseRelease = vi.fn().mockResolvedValue({ ok: true })
+  })
+  it('shows the prefilled form visibly and requires both values before recording', async () => {
+    renderCollapsed(panel())
+    const workflow = screen.getByLabelText('Revised workflow')
+    expect(workflow.value).toBe('Old workflow')
+    expect(workflow.closest('details')).toBeNull()
+    expect(screen.getByText('Saved inputs, required checks and the original goal are retained.')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Record revised approach' }))
+    await screen.findByRole('alert')
+    expect(campaign.reviseRelease).not.toHaveBeenCalled()
+    fireEvent.change(screen.getByLabelText('Reason for changing approach'), { target: { value: 'Reuse publication' } })
+    fireEvent.change(workflow, { target: { value: ' ' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Record revised approach' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/Workflow/))
+    expect(campaign.reviseRelease).not.toHaveBeenCalled()
+    fireEvent.change(workflow, { target: { value: 'Use the published tool' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Record revised approach' }))
+    await screen.findByText('Revised approach recorded. Review it before continuing.')
+    expect(campaign.reviseRelease).toHaveBeenCalledExactlyOnceWith({ workflow: 'Use the published tool', reason: 'Reuse publication' })
+    expect(campaign.transitionRelease).not.toHaveBeenCalled()
+  })
+  it('requires an explicit continuation after showing the saved workflow', async () => {
+    campaign.completion.release = { ...campaign.completion.release, status: 'active', contract_version: 2,
+      contract: { ...campaign.completion.release.contract, workflow: 'Use the published tool' } }
+    renderCollapsed(panel())
+    expect(screen.queryByLabelText('Revised workflow')).toBeNull()
+    expect(screen.getByText('Use the published tool')).toBeTruthy()
+    expect(campaign.transitionRelease).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Continue release' }))
+    await screen.findByText('Release continuation requested.')
+    expect(campaign.transitionRelease).toHaveBeenCalledExactlyOnceWith('advance')
+  })
+  it.each(['waiting', 'paused', 'finished', 'cancelled'])('hides revision for %s', status => {
+    campaign.completion.release.status = status
+    renderCollapsed(panel())
+    expect(screen.queryByLabelText('Revised workflow')).toBeNull()
+    expect(campaign.reviseRelease).not.toHaveBeenCalled()
+  })
+})
+
+describe('results-first hierarchy', () => {
+  it('keeps requests and technical history collapsed without hiding an unanswered decision', () => {
+    campaign.questions = [{ question_id: Q, prompt: 'Which format?', status: 'open' }]
+    const { container } = renderCollapsed(panel())
+    expect(screen.getByRole('heading', { name: 'Project results' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Record answer' }).closest('details')).toBeNull()
+    expect(screen.getByText('Which format?').closest('details')).toBeNull()
+    for (const name of ['Start a new request', 'Technical execution', 'Enrollment and capability invocation', 'Answered question history']) {
+      const disclosure = screen.getByText(name).closest('details')
+      expect(disclosure.open).toBe(false)
+      fireEvent.click(within(disclosure).getByText(name))
+      expect(disclosure.open).toBe(true)
+    }
+    expect(container.querySelector('.campaign-completion').compareDocumentPosition(screen.getByLabelText('Title').closest('form')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.getByText(/Output unavailable. Define a bounded release/)).toBeTruthy()
+  })
+
+  it('makes an empty project request visible immediately', () => {
+    campaign.campaigns = []
+    campaign.selected = null
+    renderCollapsed(panel())
+    expect(screen.getByRole('button', { name: 'Submit campaign' }).closest('details')).toBeNull()
+  })
+})
+
+describe('finish input controls', () => {
+  const path = `inputs/${'a'.repeat(64)}/records.json`
+  const file = () => new File(['[{"name":"Alice"}]'], 'records.json', { type: 'application/json' })
+  function finishForm() {
+    fireEvent.change(screen.getByLabelText('Campaign goal'), { target: { value: 'finish' } })
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Records export' } })
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Download CSV' } })
+    return screen.getByLabelText('Title').closest('form')
+  }
+  it('requires an explicit upload, prevents duplicate clicks, then sends the acknowledged reference', async () => {
+    let resolve
+    uploadProjectInput.mockReturnValue(new Promise(done => { resolve = done }))
+    render(panel())
+    expect(screen.queryByLabelText('Input file (optional)')).toBeNull()
+    const form = finishForm()
+    const selected = file()
+    fireEvent.change(screen.getByLabelText('Input file (optional)'), { target: { files: [selected] } })
+    expect(uploadProjectInput).not.toHaveBeenCalled()
+    expect(within(form).getByRole('button', { name: 'Finish this project' }).disabled).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Add to project' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add to project' }))
+    expect(uploadProjectInput).toHaveBeenCalledExactlyOnceWith(P, selected)
+    expect(screen.getByText('Adding input to project…')).toBeTruthy()
+    expect(screen.queryByText(/added to this project/)).toBeNull()
+    resolve({ path, name: selected.name })
+    await screen.findByText('records.json added to this project. Ready for this release.')
+    fireEvent.submit(form)
+    await waitFor(() => expect(campaign.submit).toHaveBeenCalledWith({ title: 'Records export', prompt: 'Download CSV', mode: 'finish',
+      finish: { delivery_profile: 'web_tool', intended_user: 'Project owner', workflow: 'Download CSV', artifact_refs: [path] } }))
+  })
+  it('keeps failed input unready, blocks direct submission and permits an explicit retry', async () => {
+    uploadProjectInput.mockRejectedValueOnce(new Error('Upload failed')).mockResolvedValueOnce({ path, name: 'records.json' })
+    render(panel())
+    const form = finishForm()
+    const selected = file()
+    fireEvent.change(screen.getByLabelText('Input file (optional)'), { target: { files: [selected] } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add to project' }))
+    await screen.findByText('Upload failed')
+    expect(screen.queryByText(/added to this project/)).toBeNull()
+    fireEvent.submit(form)
+    await waitFor(() => expect(within(form).getAllByRole('alert')).toHaveLength(2))
+    expect(campaign.submit).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Add to project' }))
+    await screen.findByText('records.json added to this project. Ready for this release.')
+    expect(uploadProjectInput.mock.calls).toEqual([[P, selected], [P, selected]])
+  })
+  it.each(['resolve', 'reject'])('clears project input and ignores an old upload %s after switching projects', async outcome => {
+    let resolve, reject
+    uploadProjectInput.mockReturnValue(new Promise((yes, no) => { resolve = yes; reject = no }))
+    const { rerender } = render(panel())
+    finishForm()
+    fireEvent.change(screen.getByLabelText('Input file (optional)'), { target: { files: [file()] } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add to project' }))
+    rerender(panel({ projectId: Q }))
+    const form = finishForm()
+    if (outcome === 'resolve') resolve({ path, name: 'records.json' })
+    else reject(new Error('Old upload failed'))
+    fireEvent.submit(form)
+    await waitFor(() => expect(campaign.submit).toHaveBeenCalledWith(expect.objectContaining({ finish: expect.objectContaining({ artifact_refs: [] }) })))
+    expect(screen.getByLabelText('Input file (optional)').files).toHaveLength(0)
+    expect(screen.queryByText(/added to this project|Old upload failed/)).toBeNull()
+  })
+  it('clears prior readiness when selecting a replacement and leaves ordinary submission intact', async () => {
+    uploadProjectInput.mockResolvedValue({ path, name: 'records.json' })
+    render(panel())
+    const form = finishForm()
+    fireEvent.change(screen.getByLabelText('Input file (optional)'), { target: { files: [file()] } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add to project' }))
+    await screen.findByText('records.json added to this project. Ready for this release.')
+    fireEvent.change(screen.getByLabelText('Input file (optional)'), { target: { files: [new File(['0'], 'drawing.dxf')] } })
+    expect(screen.queryByText(/added to this project/)).toBeNull()
+    expect(within(form).getByRole('button', { name: 'Finish this project' }).disabled).toBe(true)
+    fireEvent.change(screen.getByLabelText('Campaign goal'), { target: { value: 'ordinary' } })
+    fireEvent.submit(form)
+    await waitFor(() => expect(campaign.submit).toHaveBeenCalledWith({ title: 'Records export', prompt: 'Download CSV' }))
+  })
+})
+
+describe('release evidence panel', () => {
+  it('passes the project authority provider and labels only authoring continuation', async () => {
+    const authorityProvider = vi.fn()
+    releaseFixture('waiting')
+    campaign.completion.next_action = { wait_kind: 'authority', reason: 'Authoring requires an active project conversation', recommended_action: 'Continue from the project conversation to author the missing tool' }
+    const { rerender } = render(panel({ authorityProvider }))
+    expect(useCampaigns).toHaveBeenCalledWith(P, { enabled: true, authorityProvider })
+    fireEvent.click(screen.getByRole('button', { name: 'Continue authoring' }))
+    await waitFor(() => expect(campaign.transitionRelease).toHaveBeenCalledWith('resume'))
+    campaign.completion.next_action = { wait_kind: 'authority', reason: 'Execution disabled', recommended_action: 'Resolve the workspace policy' }
+    rerender(panel({ authorityProvider }))
+    expect(screen.getByRole('button', { name: 'Resume release' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Continue authoring' })).toBeNull()
+    expect(screen.getByText(/Resolve the workspace policy/)).toBeTruthy()
+  })
+  it('offers a deadline only for finish mode and sends it as a declarative field', async () => {
+    render(panel())
+    expect(screen.queryByLabelText('Release deadline (optional)')).toBeNull()
+    fireEvent.change(screen.getByLabelText('Campaign goal'), { target: { value: 'finish' } })
+    fireEvent.change(screen.getByLabelText('Release deadline (optional)'), { target: { value: '2026-09-08T09:30' } })
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Export' } })
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Download CSV' } })
+    fireEvent.click(within(screen.getByLabelText('Title').closest('form')).getByRole('button', { name: 'Finish this project' }))
+    await waitFor(() => expect(campaign.submit).toHaveBeenCalledWith(expect.objectContaining({ finish: expect.objectContaining({ deadline_at: '2026-09-08T09:30' }) })))
+  })
+  const stages = ['implementation', 'publication', 'deployment', 'user_verification', 'delivery']
+  function releaseFixture(status = 'active') {
+    campaign.completion = {
+      release: { release_id: Q, status, contract_version: 1, scope_summary: 'Deliver the recipe PDF', deferred_items: ['Mobile app'],
+        contract: { original_goal: 'Organize all family recipes', required_checks: [{ check_id: 'workflow', stage: 'user_verification', description: 'Download a readable PDF' }] } },
+      stages: [], coverage: [], decisions: [{ payload: { reason: 'PDF first, mobile later' } }], remaining: [], deliverables: [],
+      next_action: { message: 'Choose the page size in Questions' },
+    }
+  }
+  it('submits finish mode and can start a release for an existing campaign', async () => {
+    render(panel())
+    fireEvent.click(screen.getByRole('button', { name: 'Finish this project' }))
+    await screen.findByText('Release requested.')
+    expect(campaign.createRelease).toHaveBeenCalledWith({ delivery_profile: 'web_tool', intended_user: 'Project owner', workflow: row.prompt, artifact_refs: [] })
+    fireEvent.change(screen.getByLabelText('Campaign goal'), { target: { value: 'finish' } })
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Family recipes' } })
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Deliver the PDF' } })
+    const form = screen.getByLabelText('Title').closest('form')
+    fireEvent.change(within(form).getByLabelText('Delivery profile'), { target: { value: 'cad_file' } })
+    fireEvent.submit(form)
+    await waitFor(() => expect(campaign.submit).toHaveBeenCalledWith({ title: 'Family recipes', prompt: 'Deliver the PDF', mode: 'finish',
+      finish: { delivery_profile: 'cad_file', intended_user: 'Project owner', workflow: 'Deliver the PDF', artifact_refs: [] } }))
+  })
+  it('renders missing stages and missing check status as unavailable', () => {
+    releaseFixture()
+    campaign.completion.coverage = [{ check_id: 'workflow' }]
+    const { container } = render(panel())
+    expect(container.querySelectorAll('.campaign-release-stages li')).toHaveLength(5)
+    expect([...container.querySelectorAll('.campaign-release-stages li')].every(item => item.textContent.includes('unavailable'))).toBe(true)
+    expect(screen.getByText('Download a readable PDF: unavailable')).toBeTruthy()
+    expect(screen.getByText('Verified checks unavailable.')).toBeTruthy()
+    expect(screen.queryByRole('link')).toBeNull()
+    expect(container.textContent).not.toContain('%')
+  })
+  it('shows completed bounded release, safe validated outputs, replay and original ambition', () => {
+    releaseFixture('finished')
+    campaign.completion.stages = stages.map(stage => ({ stage, status: 'passed', contract_version: 1,
+      evidence: stage === 'delivery' ? { replay_recipe: ['Open the project', 'Download the recipe PDF'], known_limits: ['Desktop only'] } : {} }))
+    campaign.completion.coverage = [{ check_id: 'workflow', status: 'passed' }]
+    campaign.completion.deliverables = [
+      { artifact_ref: 'recipe-pdf', name: 'Recipe PDF', access_path: '/outputs/recipe.pdf', byte_count: 2048,
+        sha256: 'a'.repeat(64), valid: true, retrieved: true },
+      { name: 'Unsafe', access_path: 'javascript:alert(1)', byte_count: 100, sha256: 'a'.repeat(64), valid: true, retrieved: true },
+      { name: 'Unverified', access_path: 'https://example.test/file', byte_count: 100, sha256: 'a'.repeat(64), valid: false, retrieved: true },
+      { name: 'Empty', access_path: '/empty', byte_count: 0, sha256: 'a'.repeat(64), valid: true, retrieved: true },
+    ]
+    render(panel())
+    expect(screen.getByText('Completed release')).toBeTruthy()
+    expect(screen.getByText(/does not mean the entire original ambition is done/)).toBeTruthy()
+    expect(screen.getByText('Organize all family recipes')).toBeTruthy()
+    expect(screen.getByText('Mobile app')).toBeTruthy()
+    expect(screen.getByText('PDF first, mobile later')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Download Recipe PDF' })).toBeTruthy()
+    expect(screen.queryByRole('link')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Download Unsafe' })).toBeNull()
+    expect(screen.getByText('(2 KB)')).toBeTruthy()
+    expect(screen.getByText('Download the recipe PDF')).toBeTruthy()
+    expect(screen.getByText('Desktop only')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Cancel release' })).toBeNull()
+  })
+  it.each([
+    { valid: undefined }, { valid: false }, { retrieved: undefined }, { retrieved: false },
+    { valid: undefined, retrieved: undefined }, { sha256: undefined }, { sha256: 'invalid' },
+    { byte_count: undefined }, { byte_count: -1 },
+  ])('withholds canonical output links without positive proof: %j', overrides => {
+    releaseFixture('finished')
+    campaign.completion.stages = [{ stage: 'delivery', status: 'passed' }]
+    campaign.completion.deliverables = [{ artifact_ref: 'cad-file', name: 'CAD drawing', access_path: '/outputs/drawing.dwg',
+      byte_count: 2048, sha256: 'a'.repeat(64), valid: true, retrieved: true, ...overrides }]
+    render(panel())
+    expect(screen.queryByRole('link')).toBeNull()
+    expect(screen.getByText('CAD drawing: access evidence unavailable')).toBeTruthy()
+  })
+  it('requires explicit proof for accepted artifact aliases', () => {
+    releaseFixture('finished')
+    campaign.completion.stages = stages.map(stage => ({ stage, status: 'passed' }))
+    campaign.completion.coverage = [{ check_id: 'workflow', status: 'passed' }]
+    const artifact = { name: 'Alias output', download_url: 'https://example.test/output.pdf', size_bytes: 2048,
+      sha256: 'a'.repeat(64), validated: true, retrieval_validated: true, content_validated: true }
+    campaign.completion.deliverables = [artifact]
+    const { rerender } = render(panel())
+    expect(screen.getByRole('link', { name: 'Alias output' }).getAttribute('href')).toBe(artifact.download_url)
+    for (const flag of ['validated', 'retrieval_validated', 'content_validated']) {
+      for (const value of [undefined, false]) {
+        campaign.completion.deliverables = [{ ...artifact, [flag]: value }]
+        rerender(panel())
+        expect(screen.queryByRole('link')).toBeNull()
+      }
+    }
+  })
+  const toolHtml = '\ufeff<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'unsafe-inline\'"></head><body><h1>Café records</h1><button>Convert</button><script>document.title = "Records converter"</script></body></html>'
+  const toolBytes = () => new TextEncoder().encode(toolHtml).buffer
+  function readyOutput(name = 'records-to-csv.html', mediaType = 'text/html') {
+    releaseFixture('finished')
+    campaign.completion.stages = stages.map(stage => ({ stage, status: 'passed' }))
+    campaign.completion.coverage = [{ check_id: 'workflow', status: 'passed' }]
+    const bytes = mediaType === 'text/html' ? toolBytes() : new Uint8Array([1, 2, 3, 4]).buffer
+    const artifact = { name, media_type: mediaType, byte_count: bytes.byteLength, sha256: 'a'.repeat(64), valid: true, retrieved: true }
+    campaign.completion.deliverables = [artifact]
+    campaign.downloadReleaseArtifact.mockResolvedValue({ name, mediaType, bytes })
+    return artifact
+  }
+  it('places verified output controls before scope, release details and the collapsed request', () => {
+    readyOutput()
+    campaign.campaigns = [row, { ...row, campaign_id: 'other', title: 'Another release' }]
+    renderCollapsed(panel())
+    const output = screen.getByRole('button', { name: 'Open tool records-to-csv.html' })
+    expect(output.closest('details')).toBeNull()
+    expect(output.classList.contains('primary')).toBe(true)
+    const picker = screen.getByRole('navigation', { name: 'Project releases and campaigns' })
+    expect(output.compareDocumentPosition(picker) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(picker.compareDocumentPosition(screen.getByText('Start a new request')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.queryByText('Accepted, not running')).toBeNull()
+    expect(screen.queryByText('Release being delivered')).toBeNull()
+    expect(screen.queryByRole('heading', { name: 'Outputs' })).toBeNull()
+    fireEvent.click(within(picker).getByRole('button', { name: 'Another release' }))
+    expect(campaign.select).toHaveBeenCalledExactlyOnceWith('other')
+    for (const label of ['Release details', 'Start a new request']) {
+      const details = screen.getByText(label).closest('details')
+      expect(details.open).toBe(false)
+      expect(output.compareDocumentPosition(details) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    }
+    expect(output.compareDocumentPosition(screen.getByText('Deliver the recipe PDF')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+  it('omits empty action notices while keeping real release decisions and errors visible', () => {
+    readyOutput()
+    campaign.completion.next_action = null
+    const { rerender } = renderCollapsed(panel())
+    expect(screen.queryByText('What requires you')).toBeNull()
+    expect(screen.queryByText('No user action reported.')).toBeNull()
+    expect(screen.queryByText('No other pending action reported.')).toBeNull()
+    campaign.completion.next_action = { message: 'Choose the page size in Questions' }
+    campaign.completion.remaining = ['Confirm the paper size']
+    campaign.questions = [{ question_id: Q, prompt: 'Which format?', status: 'open' }]
+    campaign.executionError = new Error('Readback unavailable')
+    rerender(panel())
+    for (const text of ['Choose the page size in Questions', 'Confirm the paper size', 'Which format?', 'Readback unavailable']) {
+      expect(screen.getByText(text).closest('details')).toBeNull()
+    }
+    expect(screen.getByRole('button', { name: 'Record answer' }).closest('details')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Open tool records-to-csv.html' })).toBeNull()
+  })
+  it('renders exact UTF-8 HTML with srcdoc and removes it on close, replacement and unmount', async () => {
+    const artifact = readyOutput()
+    const urlApi = { createObjectURL: vi.fn(), revokeObjectURL: vi.fn() }
+    const { unmount } = render(panel({ artifactUrlApi: urlApi }))
+    fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
+    const frame = await screen.findByTitle('Release tool: records-to-csv.html')
+    expect(frame.getAttribute('sandbox')).toBe('allow-scripts allow-downloads')
+    expect(frame.getAttribute('srcdoc')).toBe(toolHtml)
+    expect(frame.hasAttribute('src')).toBe(false)
+    expect(campaign.downloadReleaseArtifact).toHaveBeenCalledWith(artifact)
+    let resolveReplacement
+    campaign.downloadReleaseArtifact.mockReturnValueOnce(new Promise(done => { resolveReplacement = done }))
+    fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
+    expect(screen.queryByTitle('Release tool: records-to-csv.html')).toBeNull()
+    resolveReplacement({ name: artifact.name, mediaType: 'text/html', bytes: toolBytes() })
+    const replacement = await screen.findByTitle('Release tool: records-to-csv.html')
+    expect(replacement).not.toBe(frame)
+    expect(replacement.getAttribute('srcdoc')).toBe(toolHtml)
+    expect(replacement.hasAttribute('src')).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Close tool' }))
+    expect(screen.queryByTitle('Release tool: records-to-csv.html')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
+    await screen.findByTitle('Release tool: records-to-csv.html')
+    unmount()
+    expect(screen.queryByTitle('Release tool: records-to-csv.html')).toBeNull()
+    expect(urlApi.createObjectURL).not.toHaveBeenCalled()
+    expect(urlApi.revokeObjectURL).not.toHaveBeenCalled()
+  })
+  it('refuses malformed UTF-8 and clears a previous preview before reporting the decode failure', async () => {
+    readyOutput()
+    const urlApi = { createObjectURL: vi.fn(), revokeObjectURL: vi.fn() }
+    render(panel({ artifactUrlApi: urlApi }))
+    fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
+    await screen.findByTitle('Release tool: records-to-csv.html')
+    campaign.downloadReleaseArtifact.mockResolvedValueOnce({ name: 'records-to-csv.html', mediaType: 'text/html',
+      bytes: new Uint8Array([0xc3, 0x28]).buffer })
+    fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
+    await screen.findByText('The verified tool could not be opened because its HTML is not valid UTF-8.')
+    expect(screen.queryByTitle('Release tool: records-to-csv.html')).toBeNull()
+    expect(urlApi.createObjectURL).not.toHaveBeenCalled()
+    expect(urlApi.revokeObjectURL).not.toHaveBeenCalled()
+  })
+  it.each(['load', 'execution'])('removes the open preview when current %s readback fails while retaining history', async source => {
+    readyOutput()
+    const urlApi = { createObjectURL: vi.fn(), revokeObjectURL: vi.fn() }
+    const { rerender } = render(panel({ artifactUrlApi: urlApi }))
+    fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
+    await screen.findByTitle('Release tool: records-to-csv.html')
+    if (source === 'load') Object.assign(campaign, { error: new Error('Readback unavailable'), errorAction: 'load' })
+    else campaign.executionError = new Error('Readback unavailable')
+    rerender(panel({ artifactUrlApi: urlApi }))
+    expect(screen.queryByTitle('Release tool: records-to-csv.html')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Open tool records-to-csv.html' })).toBeNull()
+    expect(urlApi.createObjectURL).not.toHaveBeenCalled()
+    expect(screen.getByText('Previously completed release. Current verification unavailable.')).toBeTruthy()
+    expect(screen.getByText('Organize all family recipes')).toBeTruthy()
+  })
+  it.each([false, true])('keeps the verified download URL for 1000ms after click and unmount (throwing: %s)', async throws => {
+    readyOutput('records.csv', 'text/csv')
+    const urlApi = { createObjectURL: vi.fn().mockReturnValue('blob:file'), revokeObjectURL: vi.fn() }
+    let anchor
+    const clicked = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () {
+      anchor = this
+      expect(this.isConnected).toBe(true)
+      expect(this.download).toBe('records.csv')
+      expect(this.getAttribute('href')).toBe('blob:file')
+      expect(urlApi.revokeObjectURL).not.toHaveBeenCalled()
+      if (throws) throw new Error('Download click failed')
+    })
+    vi.useFakeTimers()
+    try {
+      const { unmount } = render(panel({ artifactUrlApi: urlApi }))
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Download records.csv' }))
+      })
+      expect(clicked).toHaveBeenCalledOnce()
+      expect(anchor.isConnected).toBe(false)
+      expect(document.querySelector('a[download]')).toBeNull()
+      expect(urlApi.revokeObjectURL).not.toHaveBeenCalled()
+      if (throws) expect(screen.getByRole('alert').textContent).toContain('Download click failed')
+      else expect(screen.queryByRole('alert')).toBeNull()
+      expect(urlApi.createObjectURL).toHaveBeenCalledOnce()
+      expect(urlApi.createObjectURL.mock.calls[0][0]).toBeInstanceOf(Blob)
+      expect(urlApi.createObjectURL.mock.calls[0][0].size).toBe(4)
+      unmount()
+      expect(urlApi.revokeObjectURL).not.toHaveBeenCalled()
+      vi.advanceTimersByTime(999)
+      expect(urlApi.revokeObjectURL).not.toHaveBeenCalled()
+      vi.advanceTimersByTime(1)
+      expect(urlApi.revokeObjectURL).toHaveBeenCalledExactlyOnceWith('blob:file')
+      vi.runAllTimers()
+      expect(urlApi.revokeObjectURL).toHaveBeenCalledExactlyOnceWith('blob:file')
+      vi.useRealTimers()
+      const saved = await new Promise((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(reader.result)
+        reader.onerror = reject
+        reader.readAsArrayBuffer(urlApi.createObjectURL.mock.calls[0][0])
+      })
+      expect([...new Uint8Array(saved)]).toEqual([1, 2, 3, 4])
+    } finally {
+      vi.clearAllTimers()
+      vi.useRealTimers()
+      clicked.mockRestore()
+    }
+  })
+  it('drops a completed retrieval after the project changes', async () => {
+    readyOutput()
+    let resolve
+    campaign.downloadReleaseArtifact.mockReturnValue(new Promise(done => { resolve = done }))
+    const urlApi = { createObjectURL: vi.fn(), revokeObjectURL: vi.fn() }
+    const { rerender } = render(panel({ artifactUrlApi: urlApi }))
+    fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
+    rerender(panel({ projectId: Q, artifactUrlApi: urlApi }))
+    resolve({ name: 'records-to-csv.html', mediaType: 'text/html', bytes: toolBytes() })
+    await waitFor(() => expect(screen.queryByTitle('Release tool: records-to-csv.html')).toBeNull())
+    expect(urlApi.createObjectURL).not.toHaveBeenCalled()
+  })
+  it('removes an open srcdoc preview when the project changes', async () => {
+    readyOutput()
+    const { rerender } = render(panel())
+    fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
+    await screen.findByTitle('Release tool: records-to-csv.html')
+    rerender(panel({ projectId: Q }))
+    expect(screen.queryByTitle('Release tool: records-to-csv.html')).toBeNull()
+  })
+  it.each(['failed', 'unavailable'])('retains history but withholds outputs after current verification is %s', status => {
+    readyOutput()
+    campaign.completion.current_verification = { status, reason: 'The current file could not be verified.' }
+    render(panel())
+    expect(screen.getByText(`Previously completed release. Current verification ${status}.`)).toBeTruthy()
+    expect(screen.getByText('The current file could not be verified.')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /Open tool|Download records/ })).toBeNull()
+  })
+  it.each(['required_checks', 'coverage'])('never calls contradictory completion usable without %s', missing => {
+    readyOutput()
+    if (missing === 'required_checks') campaign.completion.release.contract.required_checks = []
+    else campaign.completion.coverage = []
+    render(panel())
+    expect(screen.queryByText('Completed release')).toBeNull()
+    expect(screen.queryByRole('button', { name: /Open tool/ })).toBeNull()
+  })
+  it('does not replace empty coverage with a successful stage claim', () => {
+    readyOutput()
+    campaign.completion.coverage = []
+    campaign.completion.stages.find(row => row.stage === 'user_verification').evidence = { checks: [{ check_id: 'workflow', status: 'passed' }] }
+    render(panel())
+    expect(screen.queryByText('Completed release')).toBeNull()
+    expect(screen.queryByRole('button', { name: /Open tool/ })).toBeNull()
+  })
+  it.each([
+    [{ action: 'retry_stage', stage: 'user_verification' }, 'Retry user verification using the release controls.'],
+    [{ action: 'change_approach' }, 'Choose a different approach before retrying this release.'],
+    [{ action: 'unknown' }, 'Review the release and resolve the pending action before continuing.'],
+  ])('shows a readable structured next action: %j', (nextAction, message) => {
+    releaseFixture()
+    campaign.completion.next_action = nextAction
+    render(panel())
+    expect(screen.getByText(message)).toBeTruthy()
+    expect(screen.queryByText('No user action reported.')).toBeNull()
+  })
+  it('offers pause, resume, cancel and failed-stage retry, retaining progress on errors', async () => {
+    releaseFixture()
+    campaign.completion.stages = [{ stage: 'implementation', status: 'passed' }, { stage: 'publication', status: 'failed' }]
+    campaign.retryReleaseStage.mockRejectedValue(new Error('Retry unavailable'))
+    const { rerender } = render(panel())
+    fireEvent.click(screen.getByRole('button', { name: 'Retry publication' }))
+    await screen.findByText('Retry unavailable')
+    expect(campaign.retryReleaseStage).toHaveBeenCalledWith('publication')
+    expect(screen.getByText('passed')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Pause release' }))
+    await waitFor(() => expect(campaign.transitionRelease).toHaveBeenCalledWith('pause'))
+    campaign.completion.release.status = 'paused'
+    rerender(panel())
+    fireEvent.click(screen.getByRole('button', { name: 'Resume release' }))
+    await waitFor(() => expect(campaign.transitionRelease).toHaveBeenCalledWith('resume'))
+    await screen.findByText('Release resumed.')
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel release' }))
+    await waitFor(() => expect(campaign.transitionRelease).toHaveBeenCalledWith('cancel'))
+  })
+})
+
+it('lets the user register native AWS release and shows setup required without host execution controls', async () => {
+  campaign.allowedMachines = ['VM-C']
+  campaign.enrollments = []
+  campaign.enroll = vi.fn().mockResolvedValue({ enrollment: { enrollment_id: Q } })
+  campaign.enableEnrollment = vi.fn()
+  campaign.bindPublication = vi.fn()
+  campaign.invokeCapability = vi.fn()
+  campaign.capabilities = [{ change_set_id: 'host-publication', label: 'Host tool' }]
+  const { rerender } = render(panel())
+  expect(screen.getByLabelText('Registration capability').value).toBe('campaign.host-enrollment')
+  fireEvent.change(screen.getByLabelText('Registration capability'), { target: { value: 'campaign.native-release' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Prepare native AWS release' }))
+  await screen.findByText('Native release registration recorded.')
+  expect(campaign.enroll).toHaveBeenCalledExactlyOnceWith('VM-C', 'campaign.native-release')
+  campaign.enrollments = [{ enrollment_id: Q, machine_id: 'VM-C', state: 'pending',
+    capability: 'campaign.native-release', readiness: 'setup_required',
+    readiness_message: 'The release executor is not connected.',
+    capability_link: { capability: 'campaign.native-release', state: 'pending_link' } }]
+  rerender(panel())
+  expect(screen.getByText('Native AWS release: Setup required. The release executor is not connected.')).toBeTruthy()
+  for (const name of ['Enable', 'Run', 'Use capability', 'Use again', 'Bind published tool', 'Recover submission']) {
+    expect(screen.queryByRole('button', { name })).toBeNull()
+  }
+  expect(screen.queryByText(/Verified uses:/)).toBeNull()
+  expect(campaign.enableEnrollment).not.toHaveBeenCalled()
+  expect(campaign.bindPublication).not.toHaveBeenCalled()
+  expect(campaign.invokeCapability).not.toHaveBeenCalled()
+})
+
+it('keeps native release setup required even if a host publication is present on the row', () => {
+  campaign.enrollments = [{ enrollment_id: Q, machine_id: 'VM-C', state: 'enabled', completed_uses: 2,
+    capability: 'campaign.native-release',
+    capability_link: { capability: 'campaign.native-release', state: 'completed', effective_catalog_digest: 'a'.repeat(64) } }]
+  campaign.submissions = { [Q]: { idempotencyKey: 'host-key' } }
+  render(panel())
+  expect(screen.getByText(/Native AWS release: Setup required/)).toBeTruthy()
+  expect(screen.queryByRole('button', { name: 'Recover submission' })).toBeNull()
+  expect(screen.queryByText(/Capability complete/)).toBeNull()
+})
 
 describe('campaign panel in the project workspace', () => {
   const digest = 'a'.repeat(64)
@@ -158,7 +711,7 @@ describe('campaign panel in the project workspace', () => {
     expect(execution.querySelector('time').textContent).toBe(new Date('2026-09-05T12:00:00Z').toLocaleString())
     expect(execution.textContent).not.toMatch(/spec|worker|fence|attempt|mount-fleet-adapter|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|%|complete/i)
     expect(within(execution).queryAllByRole('button')).toHaveLength(0)
-    expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Submit campaign', 'Ask'])
+    expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Finish this project', 'Release documents', 'Ask', 'Submit campaign'])
   })
 
   it('shows loading and empty execution, and retains questions during an execution error', () => {
@@ -174,7 +727,7 @@ describe('campaign panel in the project workspace', () => {
     expect(screen.getByText('No tasks recorded yet.')).toBeTruthy()
     expect(screen.getByText('Which format?')).toBeTruthy()
     expect(screen.getByRole('alert').textContent).toContain('Execution is unavailable.')
-    expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Submit campaign', 'Try again', 'Record answer', 'Ask'])
+    expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Finish this project', 'Release documents', 'Try again', 'Record answer', 'Ask', 'Submit campaign'])
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
     expect(campaign.refetch).toHaveBeenCalledTimes(1)
   })
@@ -299,9 +852,10 @@ describe('campaign panel in the project workspace', () => {
     campaign.status = 'ready'
     campaign.campaigns = [row, { ...row, campaign_id: 'other', title: 'Another campaign' }]
     rerender(panel())
-    const select = screen.getByRole('combobox', { name: 'Active campaign' })
-    expect(select.value).toBe(C)
-    fireEvent.change(select, { target: { value: 'other' } })
+    expect(screen.getByRole('button', { name: 'Release documents' }).getAttribute('aria-pressed')).toBe('true')
+    const select = screen.getByRole('button', { name: 'Another campaign' })
+    expect(select.getAttribute('aria-pressed')).toBe('false')
+    fireEvent.click(select)
     expect(campaign.select).toHaveBeenCalledWith('other')
   })
 

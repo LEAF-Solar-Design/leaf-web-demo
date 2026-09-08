@@ -403,15 +403,14 @@ def test_the_dispatch_stages_both_colours_on_the_prewarm_rail():
 
 
 def test_web_and_app_are_staged_again_because_the_merge_group_makes_the_stage_fresh():
-    """Group freshness does not supply app's missing staging migration.
+    """The native release rail supplied app's migration; restore both services.
 
-    Keep web alone until the native deploy runs migrations, then restore app
-    in that same change. The historical row now pins this migration contract.
+    Pin the boot evidence and receipt-led app-only pause if it refuses again.
     """
     services = group_workflow_document()["env"]["STAGE_SERVICES"].split()
-    assert services == ["web"]
+    assert services == ["web", "app"]
     source = GROUP_WORKFLOW.read_text(encoding="utf-8")
-    preceding = source.split('  STAGE_SERVICES: "web"', 1)[0].splitlines()
+    preceding = source.split('  STAGE_SERVICES: "web app"', 1)[0].splitlines()
     comment_lines = []
     for line in reversed(preceding):
         if not line.lstrip().startswith("#"):
@@ -422,8 +421,14 @@ def test_web_and_app_are_staged_again_because_the_merge_group_makes_the_stage_fr
     assert "campaign_host_enrollments_machine_unique" in comment
     assert "platform_link.validate_postgres_startup" in comment
     assert "leaf-deploy-terraform-staging" in comment
-    assert 'Restore "web app" in the change that lands' in comment
-    assert "the native deploy's migrate step" in comment
+    assert "#1136 paused app after its prewarm run refused" in comment
+    assert "native release rail applies migrations to staging" in comment
+    assert "2026-09-08" in comment
+    assert "native-18 image (source 30d46496)" in comment
+    assert "health 200" in comment
+    assert "proving 0058 applied" in comment
+    assert "read the app prewarm build's LEAF_DEPLOY_RECEIPT" in comment
+    assert "refusal reason first and pause only the app leg, naming that reason" in comment
 
 
 def test_merge_group_trigger_fires_only_on_checks_requested():
@@ -533,12 +538,7 @@ def test_the_group_workflow_has_only_the_dispatch_trigger():
     assert set(document["on"]["workflow_dispatch"]["inputs"]) == {"group_head_sha"}
     assert document["permissions"] == workflow_document()["permissions"]
     for key, value in document["env"].items():
-        if key == "STAGE_SERVICES":
-            # Only the group relay excludes app until native migrations land.
-            assert value == "web"
-            assert workflow_document()["env"][key] == "web app"
-        else:
-            assert workflow_document()["env"][key] == value
+        assert workflow_document()["env"][key] == value
     assert "stage-group" not in workflow_document()["jobs"]
     assert "group_head_sha" not in str(workflow_document()["on"]["workflow_dispatch"])
 
@@ -1025,7 +1025,7 @@ def test_pr_stage_is_notice_only():
     ("malformed JSON", "unresolved"),
     ("refused", "dispatch-failed"),
 ])
-@pytest.mark.parametrize("service,expected_present", [("web", True), ("app", False)])
+@pytest.mark.parametrize("service,expected_present", [("web", True), ("app", True)])
 def test_codebuild_dispatch_and_relay_receipt_executed(tmp_path, response, disposition, service, expected_present):
     binary = tmp_path / "bin"
     binary.mkdir()
@@ -1054,14 +1054,16 @@ def test_codebuild_dispatch_and_relay_receipt_executed(tmp_path, response, dispo
     assert entries == [
         {"service": "web", "build_id": response["build"]["id"] if disposition == "dispatched" else None,
          "disposition": disposition},
+        {"service": "app", "build_id": "leaf-deploy-terraform-staging:" + "b" * 36,
+         "disposition": "dispatched"},
     ]
-    # App remains an executed absence expectation until native migrations land.
+    # Both services dispatch, even when the preceding web response refuses.
     assert any(entry["service"] == service for entry in entries) == expected_present
     calls = (tmp_path / "aws-calls.txt").read_text().splitlines()
-    assert len(calls) == 1
+    assert len(calls) == 2
     assert any("name=LEAF_DEPLOY_SERVICE,value=" + service in shlex.split(call)
                for call in calls) == expected_present
-    for service, call in zip(("web",), calls):
+    for service, call in zip(("web", "app"), calls):
         assert shlex.split(call) == [
             "codebuild", "start-build", "--project-name", "leaf-deploy-terraform-staging",
             "--environment-variables-override", "name=STEP,value=prewarm",
@@ -1080,7 +1082,7 @@ def test_codebuild_dispatch_and_relay_receipt_executed(tmp_path, response, dispo
     receipt = json.loads((tmp_path / "prewarm-relay-receipt.json").read_text())
     assert receipt["producer"] == "codebuild"
     assert receipt["dispatched"] == entries
-    assert receipt["configured_services"] == ["web"]
+    assert receipt["configured_services"] == ["app", "web"]
     assert receipt["configured_services"] == sorted(set(group_workflow_document()["env"]["STAGE_SERVICES"].split()))
     assert receipt["relay_run_id"] == "77"
 
@@ -1319,7 +1321,7 @@ def test_s3_receipt_put_metadata_and_best_effort_upload_executed(tmp_path):
     })
     receipt = json.loads((tmp_path / "prewarm-relay-receipt.json").read_text())
     assert receipt["dispatched"] == []
-    assert receipt["configured_services"] == ["web"]
+    assert receipt["configured_services"] == ["app", "web"]
     assert receipt["configured_services"] == sorted(set(group_workflow_document()["env"]["STAGE_SERVICES"].split()))
     assert receipt["relay_run_id"] == "123" and receipt["relay_run_attempt"] == "2"
     run_step(put["run"], tmp_path, {

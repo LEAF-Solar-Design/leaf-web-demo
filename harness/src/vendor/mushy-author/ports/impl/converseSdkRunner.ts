@@ -174,6 +174,10 @@ const TOOL_DESCRIPTIONS: Record<SpineToolName, string> = {
     "Ask the user to explicitly approve something before proceeding. Args {kind, payload?}. After a pending result, summarize and end your turn.",
   customize_platform:
     "Propose a change to the PLATFORM'S OWN code and UI (the product itself, not the drawing) through the audited admin self-edit lane. Args {op: 'propose'|'status'|'land'|'list'|'read_source'|'list_source', ...}. Read-only ops need no approval: list_source {dir?} lists one source directory at the review base, read_source {path} reads one file, list {limit?} recovers this workspace's past changes (change_id, state, commit_sha), status needs {change_id}. Read the files you intend to change BEFORE proposing. propose needs {title, edits:[{path, content?, delete?}]} and returns a change_id + commit_sha after approval; land needs {change_id, commit_sha} and pushes the change as a BRANCH for review — it does NOT change the running product. Admin-only; every propose/land takes a fresh user approval.",
+  finish_project:
+    "Record a bounded release goal for THIS project and let the platform's completion engine drive it (implementation, publication, deployment, user verification, delivery). Args {title, prompt, delivery_profile, intended_user, workflow, artifact_refs}. delivery_profile names the bounded shape of the release (e.g. 'web_tool', 'cad_file'); intended_user and workflow are short plain-language descriptions; artifact_refs names existing project files the release should deliver, if any. This records a GOAL, not a completion claim — starting a bounded release never marks the wider ambition finished, and any remaining or unavailable coverage stays visible in project_completion_status. The project is resolved from this conversation automatically; do not ask the user for a project id.",
+  project_completion_status:
+    "Read the current completion status of a release started with finish_project. Args {campaign_id, release_id?}. Returns what has actually passed, what remains, what could not be verified, and any deferred scope — relay it plainly, including any unavailable coverage; never assert completion the response does not show.",
 };
 
 export interface ConverseSdkRunnerOptions {
@@ -299,6 +303,18 @@ export class ConverseSdkRunner implements SpineConverseRunner {
         path: z.string().optional(),
         dir: z.string().optional(),
         limit: z.number().optional(),
+      },
+      finish_project: {
+        title: z.string(),
+        prompt: z.string(),
+        delivery_profile: z.string(),
+        intended_user: z.string(),
+        workflow: z.string(),
+        artifact_refs: z.array(z.string()),
+      },
+      project_completion_status: {
+        campaign_id: z.string(),
+        release_id: z.string().optional(),
       },
     };
     const tools = SPINE_TOOL_NAMES.map((name) =>

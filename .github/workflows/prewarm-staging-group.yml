@@ -21,14 +21,16 @@ concurrency:
 
 env:
   MIGRATION_SURFACE: "platform/migrations/ platform/db.py"
-  # The app startup check (server/app.py:340, platform_link.validate_postgres_startup)
-  # refuses to boot on staging without 0058_campaign_host_enrollment
-  # (constraint campaign_host_enrollments_machine_unique). Migrations ride the
-  # merge deploy, dead under 'exclusively AWS' until a native deploy step exists
-  # on leaf-deploy-terraform-staging. Web has no such check and staged natively
-  # twice (builds 1a2cc8c9, fb726619). Restore "web app" in the change that lands
-  # the native deploy's migrate step.
-  STAGE_SERVICES: "web"
+  # #1136 paused app after its prewarm run refused: server/app.py:340's
+  # platform_link.validate_postgres_startup required 0058_campaign_host_enrollment
+  # (constraint campaign_host_enrollments_machine_unique). Web staged natively
+  # twice (builds 1a2cc8c9, fb726619) on leaf-deploy-terraform-staging.
+  # App is back because the native release rail applies migrations to staging:
+  # on 2026-09-08, the native-18 image (source 30d46496) booted with health 200,
+  # proving 0058 applied, including the startup-required constraint above.
+  # If app refuses again, read the app prewarm build's LEAF_DEPLOY_RECEIPT
+  # refusal reason first and pause only the app leg, naming that reason.
+  STAGE_SERVICES: "web app"
   SUPPLY_SET_POLLS: "20"
   SUPPLY_SET_INTERVAL: "30"
 

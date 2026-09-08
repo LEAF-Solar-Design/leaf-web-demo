@@ -309,6 +309,32 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_backbone.py"), 15),
         Suite("server-campaigns", "server tests/test_campaigns_router.py", "pytest", SERVER,
               _py_pytest("tests/test_campaigns_router.py"), 8),
+          Suite("server-campaign-release", "server tests/test_campaign_release_api.py", "pytest", SERVER,
+                _py_pytest("tests/test_campaign_release_api.py"), 1),
+          Suite("server-campaign-release-wiring", "server tests/test_campaign_release_wiring.py", "pytest", SERVER,
+                _py_pytest("tests/test_campaign_release_wiring.py"), 8),
+          Suite("server-campaign-release-worker", "server tests/test_campaign_release_worker.py", "pytest", SERVER,
+                _py_pytest("tests/test_campaign_release_worker.py"), 26),
+          Suite("server-campaign-acquisition", "server tests/test_campaign_acquisition_service.py", "pytest", SERVER,
+                _py_pytest("tests/test_campaign_acquisition_service.py"), 22),
+          Suite("server-campaign-transform", "server tests/test_campaign_transform_job.py", "pytest", SERVER,
+                _py_pytest("tests/test_campaign_transform_job.py") + ["tests/test_campaign_execution_policy.py"], 30),
+          Suite("server-campaign-transform-admission", "server tests/test_campaign_transform_admission.py", "pytest", SERVER,
+                _py_pytest("tests/test_campaign_transform_admission.py"), 12),
+          Suite("server-campaign-web-release", "server tests/test_campaign_web_release.py", "pytest", SERVER,
+                _py_pytest("tests/test_campaign_web_release.py"), 7),
+          Suite("server-campaign-web-static", "server tests/test_campaign_web_tool_static.py", "pytest", SERVER,
+                _py_pytest("tests/test_campaign_web_tool_static.py"), 1),
+          Suite("server-campaign-web-producer", "server tests/test_campaign_web_tool_producer.py", "pytest", SERVER,
+                _py_pytest("tests/test_campaign_web_tool_producer.py"), 1),
+          Suite("server-campaign-conversation", "server tests/test_campaign_conversation.py", "pytest", SERVER,
+                _py_pytest("tests/test_campaign_conversation.py"), 16),
+        Suite("server-campaign-delivery", "server tests/test_campaign_delivery_service.py", "pytest", SERVER,
+              _py_pytest("tests/test_campaign_delivery_service.py"), 1),
+        Suite("server-campaign-dxf-inventory", "server tests/test_campaign_dxf_inventory.py", "pytest", SERVER,
+              _py_pytest("tests/test_campaign_dxf_inventory.py"), 29),
+        Suite("server-campaign-capability-resolver", "server tests/test_campaign_capability_resolver.py", "pytest", SERVER,
+              _py_pytest("tests/test_campaign_capability_resolver.py"), 1),
         Suite("server-campaign-capability-job", "server tests/test_campaign_capability_job.py", "pytest", SERVER,
               _py_pytest("tests/test_campaign_capability_job.py"), 24),
         Suite("server-campaign-capability-job-access", "server tests/test_campaign_capability_job_access.py", "pytest", SERVER,
@@ -1421,17 +1447,19 @@ def build_suites() -> List[Suite]:
               # PR path's step body; the receipt's group object replacing pr;
               # the mg-<sha12> receipt artifact name; and the descale job's
               # explicit pull_request_target-only if: with the reaper comment.
-              # STAGE_SERVICES is `web` until the native deploy's migrate step
-              # supplies app's missing 0058 migration. The historical pin
+              # STAGE_SERVICES is back to `web app`: the native release rail
+              # supplied app's missing 0058 migration. The historical pin
               # (test_web_and_app_are_staged_again_because_the_merge_group_
-              # makes_the_stage_fresh) now requires web alone and the way back,
+              # makes_the_stage_fresh) requires both services and the way back,
               # 1-for-1, no count change from that row.
               # 39 -> 43 (slice B v2): replace event-trust pins with live-queue
               # validation (queued and superseded rows), and pin the secret-free
               # dispatcher, main-ref guard, and recorded-base step guards.
               # Queue-mode cutover: 50 base rows plus the notice-only PR pin.
               # Native CodeBuild prewarm: five response cases each execute web
-              # presence and app absence expectations, ten rows (69 -> 74).
+              # and app presence expectations, ten rows (69 -> 74).
+              # App restoration keeps 75: invert five app-absence cases to
+              # presence; rewrite the env/comment/receipt pins one-for-one.
               _py_pytest("test_prewarm_staging_cutover_workflow.py"), 75),
         # Merge-queue group controller (slice C: mq-review, mq-supply,
         # mq-prewarm). 84 cases cover the executed matrix and structural pins.
@@ -1454,6 +1482,8 @@ def build_suites() -> List[Suite]:
         Suite("merge-queue-workflow",
               "scripts test_merge_queue_workflow.py", "pytest",
               # Native receipts: seven field refusals, five statuses, six log streams.
+              # App restoration keeps 96: extend the existing configuration
+              # transition row with the next group's two-service receipt.
               SCRIPTS_DIR, _py_pytest("test_merge_queue_workflow.py"), 96),
         Suite("platform-release-manifest",
               "scripts test_platform_release_manifest.py", "pytest",

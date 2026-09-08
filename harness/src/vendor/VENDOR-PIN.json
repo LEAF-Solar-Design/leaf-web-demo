@@ -11,7 +11,7 @@
     },
     "ports/impl/converseSdkRunner.ts": {
       "reason": "leaf-web-demo downstream patch not present at the pinned upstream commit",
-      "sha256": "df09818381e51ba935dd367c8267b4c05df251e90948d31c8740e463d95ae88a"
+      "sha256": "fc776378a88e913b658e57473a1694007ce5078ccdcfaaf1ceb9779af1b89181"
     },
     "ports/impl/tenantChangeRepo.ts": {
       "reason": "leaf-web-demo downstream patch not present at the pinned upstream commit",
@@ -19,7 +19,7 @@
     },
     "ports/index.ts": {
       "reason": "leaf-web-demo downstream patch not present at the pinned upstream commit",
-      "sha256": "4d123b38f771718872eef955a4bad1002700c5a7c3901058010184eb99433b43"
+      "sha256": "73f5e886f48efaa3300310931cf70af1923c9c4e95018bae7b2276726bd6044a"
     }
   },
   "files": {
@@ -49,7 +49,7 @@
     "ports/impl/agentSdkRunner.ts": "1e36deb407e2dcc1958682b911480aae3ef6e802277a38cc4b72d6680c99d0c6",
     "ports/impl/agentSdkTurnRunner.ts": "2f8bcaec9c5f99d4e7ad7357ef1a100560a618f6f32b08dd4bc5dd22a5c386b0",
     "ports/impl/conversationManager.ts": "423899c87e552aef85fb8b4b14f78a25a8813284adff56fb0b32946b7032ce4e",
-    "ports/impl/converseSdkRunner.ts": "df09818381e51ba935dd367c8267b4c05df251e90948d31c8740e463d95ae88a",
+    "ports/impl/converseSdkRunner.ts": "fc776378a88e913b658e57473a1694007ce5078ccdcfaaf1ceb9779af1b89181",
     "ports/impl/e2bAgentRunner.ts": "d03029ee3598e2d9d64e0f34b43f8bb6610fdcf1560e7c9a2af209df5c8ceb15",
     "ports/impl/envScrub.ts": "d3620e14d92f1aa8b7623236de7993b53b58806f12d641bea89c70d733bf29ad",
     "ports/impl/gitWorker.ts": "efc5cdd3e199857fa6f40673091f6b56d1c398259c39f48270f03955867893e0",
@@ -72,7 +72,7 @@
     "ports/impl/tenantBrokerStandardServiceProvider.ts": "35226b73731b2f31df0d7ff6da133b8bf327ea2896c2975fbd22729e78f08266",
     "ports/impl/tenantChangeRepo.ts": "58b125b5c4c4b7aecab3351031c951cbde849a38f5b263c674e9c41ef6b1d87f",
     "ports/impl/tenantRepoProvider.ts": "081a5b0ac578ae14f1cc11b9363810f734e2f06e91aa07b5b266ae0826ff43bc",
-    "ports/index.ts": "4d123b38f771718872eef955a4bad1002700c5a7c3901058010184eb99433b43",
+    "ports/index.ts": "73f5e886f48efaa3300310931cf70af1923c9c4e95018bae7b2276726bd6044a",
     "ports/modelAllowlist.ts": "1e994732e3750e8e8fef4eb9a66d3b7223cdcc155cc93d5de0b4ef9832118684",
     "ports/surfaceAnnotations.ts": "8fba9c1d4373c2e9600e29a68ee78c801dd75bc56411baf9a33570b65cd52e5b",
     "ports/wireGrant.ts": "ac9619a708b426ff3920c796497727497bc7e707d70a5a5503c759324e379904",

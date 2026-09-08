@@ -272,13 +272,19 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
       if (stageActivity?.active) setErr(null)
       return
     }
-    if (stageActivity?.resumable) setErr(e)
+    if (stageActivity?.failedRequest || stageActivity?.resumable) setErr(e)
     else if (e.entitlementRequired) setBuildGate(true)
     else if (e.grantRequired) setGrantGate(true)
     else if (e.quotaExceeded) setQuotaGate({ limit: e.limit, used: e.used })
     else if (isServiceDown(e)) setSvcGate(true)
     else setErr(e)
-  }, [stageActivity?.error, stageActivity?.resumable])
+  }, [stageActivity?.error, stageActivity?.resumable, stageActivity?.failedRequest])
+
+  useEffect(() => {
+    if (stageActivity?.failedRequest && stageActivity.pointer?.description) {
+      setDesc((current) => current || stageActivity.pointer.description)
+    }
+  }, [stageActivity?.failedRequest?.idempotency_key, stageActivity?.pointer?.description])
 
   // Prefill from a build-lane route (only when the signal changes, so manual
   // edits are never clobbered by a re-render).
@@ -309,12 +315,12 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
   // `allowSecretOnce` is the "Send anyway" click's authorisation, carried as a
   // PARAMETER of this one staging call. Nothing here remembers it, so a click
   // that cannot submit (locked, unentitled, empty) authorises nothing at all.
-  async function submit(override, { allowSecretOnce = false } = {}) {
+  async function submit(override, { allowSecretOnce = false, newAttempt = false } = {}) {
     const d = (typeof override === 'string' ? override : desc).trim()
     if (!d || !buildEntitled) return
     setBusy(true); setErr(null); setPublishErr(null); setGrantGate(false); setBuildGate(false); setSvcGate(false); setQuotaGate(null); setAuthored(null); setSecretNotice(null)
     try {
-      const res = await onAuthor(d, targetToolName, { allowSecretOnce })
+      const res = await onAuthor(d, targetToolName, { allowSecretOnce, ...(newAttempt ? { newAttempt: true } : {}) })
       setAuthored(res)
     } catch (e) {
       // A credential refusal never left the browser. It is not an outage, not
@@ -371,7 +377,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
 
   // X1 mnemonic: R retries a failed Generate (never while typing in a field).
   useEffect(() => {
-    if (!err || busy) return
+    if (!err || busy || stageActivity?.failedRequest) return
     const onKey = (e) => {
       if (e.key !== 'r' && e.key !== 'R') return
       if (e.metaKey || e.ctrlKey || e.altKey) return
@@ -392,7 +398,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
   const publicationPending = publicationStatus === 'awaiting_approval'
   const publicationDenied = publicationStatus === 'denied'
   const busyNow = busy || !!stageActivity?.active
-  const authorLocked = busyNow || publishing || !!stageActivity?.pointer
+  const authorLocked = busyNow || publishing || (!!stageActivity?.pointer && !stageActivity?.failedRequest)
   const shownElapsedMs = stageActivity?.active ? stageActivity.elapsedMs : elapsedMs
   const shownSecs = Math.floor(shownElapsedMs / 1000)
 
@@ -478,9 +484,20 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
           </span>
           {authorError.nextAction && <span className="dim">Next: {authorError.nextAction}</span>}
           {authorError.actor && <span className="key">{errorActorLabel(authorError.actor)}</span>}
-          <button className="chip-act" onClick={stageActivity?.resumable ? onResumeAuthor : submit}>
+          {stageActivity?.failedRequest ? <>
+            <span data-testid="author-failed-request">
+              Request {stageActivity.failedRequest.change_set_id || 'not accepted'} is saved for recovery. No new request was started.
+            </span>
+            {stageActivity.failedRequest.failure?.reason_code && <code>{stageActivity.failedRequest.failure.reason_code}</code>}
+            <button type="button" className="chip-act" data-testid="author-failed-check"
+              disabled={busyNow || !stageActivity.failedRequest.poll_url}
+              onClick={() => stageActivity.checkStatus?.()}>Check status</button>
+            <button type="button" className="chip-act" data-testid="author-failed-new-attempt"
+              disabled={busyNow || publishing || !buildEntitled}
+              onClick={() => submit(undefined, { newAttempt: true })}>Start new attempt</button>
+          </> : <button className="chip-act" onClick={stageActivity?.resumable ? onResumeAuthor : submit}>
             {stageActivity?.resumable ? 'Resume authoring' : <>Retry <span className="key">R</span></>}
-          </button>
+          </button>}
           <span className="err-note">Your description is preserved.</span>
         </div>
       )}

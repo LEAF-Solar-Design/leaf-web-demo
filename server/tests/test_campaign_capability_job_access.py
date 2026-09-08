@@ -1,4 +1,4 @@
-"""Existing job surfaces enforce the ReciPDF job's stored project membership."""
+"""Campaign host and completion job surfaces enforce current project membership."""
 import asyncio
 from copy import deepcopy
 import json
@@ -8,20 +8,35 @@ import pytest
 
 import deps
 import jobs
+import campaign_transform_job as transform
 from routers import jobs as routes
 from test_campaign_capability_job import context
 
 
-@pytest.fixture
-def access(monkeypatch):
-    ctx = context()
+def completion_context():
+    return transform.validate_context({
+        **transform.CONSTANTS, **{key: str(uuid.uuid4()) for key in transform.IDS},
+        "tenant_id": "tenant-transform", "contract_version": 1,
+        "change_set_id": "transform-change", "catalog_commit": "a" * 40,
+        "effective_catalog_digest": "b" * 64, "tool_manifest_sha256": "sha256:" + "c" * 64,
+        "tool_source_sha256": "d" * 64, "input_sha256": "e" * 64,
+    })
+
+
+def provenance_key(rec):
+    return "completion_provenance" if "completion_provenance" in rec else "capability_provenance"
+
+
+@pytest.fixture(params=["capability_provenance", "completion_provenance"])
+def access(monkeypatch, request):
+    ctx = completion_context() if request.param == "completion_provenance" else context()
     ctx["tenant_id"] = ctx["org_id"]
     tenant = deps.TenantContext(ctx["tenant_id"], subject="auth0|reader")
     rec = {"job_id": str(uuid.uuid4()), "tenant_id": ctx["tenant_id"],
            "org_id": ctx["org_id"], "project_id": ctx["project_id"],
-           "capability_provenance": ctx, "status": "running", "progress": "host",
+           request.param: ctx, "tool": ctx["tool_name"], "status": "running", "progress": "host",
            "elapsed_ms": 0, "error": None, "result": None}
-    state = {"read": True, "write": False, "missing": False, "closed": []}
+    state = {"read": True, "write": False, "missing": False, "closed": [], "allowed_project": ctx["project_id"]}
     calls = []
 
     def require(caller, project, *, write):
@@ -30,7 +45,7 @@ def access(monkeypatch):
         calls.append(write)
         if state["missing"]:
             raise LookupError("missing project")
-        if not state["read"] or (write and not state["write"]):
+        if not state["read"] or project != state["allowed_project"] or (write and not state["write"]):
             raise jobs.platform_link.ProjectSessionForbidden("revoked")
         return rec["org_id"]
 
@@ -47,7 +62,8 @@ def access(monkeypatch):
 
 def test_reader_get_list_and_viewer_close_denial(access):
     tenant, rec, state, calls = access
-    assert routes.get_job(rec["job_id"], tenant)["capability_provenance"] == rec["capability_provenance"]
+    key = provenance_key(rec)
+    assert routes.get_job(rec["job_id"], tenant)[key] == rec[key]
     assert len(routes.list_jobs(20, tenant)["jobs"]) == 1
     assert routes.close_job(rec["job_id"], tenant).status_code == 403
     assert not state["closed"]
@@ -97,7 +113,7 @@ def test_stream_rechecks_access_before_each_payload(access):
 
 def test_ordinary_jobs_keep_existing_access_behavior(access):
     tenant, rec, state, calls = access
-    del rec["capability_provenance"]
+    del rec[provenance_key(rec)]
     state["read"] = False
     assert routes.get_job(rec["job_id"], tenant)["job_id"] == rec["job_id"]
     assert routes.close_job(rec["job_id"], tenant)["closed"]
@@ -109,7 +125,7 @@ def test_canonical_mirror_uses_stored_spine_for_access(access, monkeypatch):
     tenant, rec, state, _ = access
     canonical_id = str(uuid.uuid4())
     canonical = {**rec, "job_id": canonical_id}
-    del canonical["capability_provenance"]
+    del canonical[provenance_key(canonical)]
 
     class Store:
         def linked_capability_job(self, jid, tenant_id):
@@ -120,6 +136,61 @@ def test_canonical_mirror_uses_stored_spine_for_access(access, monkeypatch):
     monkeypatch.setattr(jobs.platform_link, "list_canonical_jobs", lambda *a, **k: [canonical])
     assert routes.get_job(canonical_id, tenant)["job_id"] == rec["job_id"]
     assert len(routes.list_jobs(20, tenant)["jobs"]) == 1
+    assert routes.close_job(canonical_id, tenant).status_code == 403
+    state["write"] = True
+    assert routes.close_job(canonical_id, tenant)["closed"] is True
+    assert state["closed"] == [rec["job_id"]]
     state["read"] = False
     assert routes.get_job(canonical_id, tenant).status_code == 403
     assert routes.list_jobs(20, tenant)["jobs"] == []
+    assert asyncio.run(routes.stream_job(canonical_id, tenant)).status_code == 403
+
+
+def test_same_org_other_project_denies_all_routes(access):
+    tenant, rec, state, calls = access
+    other_project = str(uuid.uuid4())
+    rec["project_id"] = other_project
+    rec[provenance_key(rec)]["project_id"] = other_project
+    assert rec["org_id"] == str(tenant)
+    assert routes.get_job(rec["job_id"], tenant).status_code == 403
+    assert routes.list_jobs(20, tenant)["jobs"] == []
+    assert asyncio.run(routes.stream_job(rec["job_id"], tenant)).status_code == 403
+    assert routes.close_job(rec["job_id"], tenant).status_code == 403
+    assert calls == [False, False, False, True]
+    assert not state["closed"]
+
+
+@pytest.mark.parametrize("malformed", [None, {}, "not-a-context", {"schema": "unknown"}])
+def test_malformed_context_does_not_disclose_or_close(access, malformed):
+    tenant, rec, state, calls = access
+    rec[provenance_key(rec)] = malformed
+    assert routes.get_job(rec["job_id"], tenant).status_code == 404
+    assert routes.list_jobs(20, tenant)["jobs"] == []
+    assert asyncio.run(routes.stream_job(rec["job_id"], tenant)).status_code == 404
+    assert routes.close_job(rec["job_id"], tenant).status_code == 404
+    assert not calls and not state["closed"]
+
+
+def test_conflicting_provenance_kinds_are_rejected(access):
+    tenant, rec, state, calls = access
+    rec["capability_provenance"] = context()
+    rec["completion_provenance"] = completion_context()
+    assert routes.get_job(rec["job_id"], tenant).status_code == 404
+    assert routes.list_jobs(20, tenant)["jobs"] == []
+    assert asyncio.run(routes.stream_job(rec["job_id"], tenant)).status_code == 404
+    assert routes.close_job(rec["job_id"], tenant).status_code == 404
+    assert not calls and not state["closed"]
+
+
+@pytest.mark.parametrize("field", ["tenant_id", "org_id", "project_id", "tool_name"])
+def test_context_and_stored_row_scope_must_match(access, field):
+    tenant, rec, state, calls = access
+    if field == "tool_name":
+        rec["tool"] = "different-published-tool"
+    else:
+        rec[provenance_key(rec)][field] = str(uuid.uuid4())
+    assert routes.get_job(rec["job_id"], tenant).status_code == 404
+    assert routes.list_jobs(20, tenant)["jobs"] == []
+    assert asyncio.run(routes.stream_job(rec["job_id"], tenant)).status_code == 404
+    assert routes.close_job(rec["job_id"], tenant).status_code == 404
+    assert not calls and not state["closed"]

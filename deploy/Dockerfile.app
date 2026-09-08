@@ -153,6 +153,20 @@ RUN pip install --no-cache-dir \
       -r /app/platform/requirements.txt \
       -r /app/da/requirements.txt
 
+# --- Browser producer runtime: pinned Playwright + Chromium for the trusted-
+# template JSON-to-CSV web tool (server/campaign_web_tool_producer.py). Root
+# install only, run AFTER the distro security-pin apt gate above so that pin
+# stays authoritative; the browser cache lands root-owned and world-readable+
+# executable so the later `USER 10003:10003` drop can still launch Chromium,
+# but never write into or replace it.
+# Use an explicit mode for container hosts without nested browser sandboxing.
+# It only permits the producer's exact server-owned template, never arbitrary HTML.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/leaf-browsers \
+    LEAF_MANAGED_WEB_BROWSER_MODE=trusted-template-container
+RUN pip install --no-cache-dir playwright==1.60.0 \
+ && python -m playwright install --with-deps chromium \
+ && chmod -R o+rX /opt/leaf-browsers
+
 # --- App source. The app resolves siblings via PROJECT_ROOT = /app -----------
 # (deps.py / broker.py compute SERVER_DIR.parent). Copy the same dirs the native
 # flow sees so engine/registry.json, data/rooftop_demo.intake.json, da/store.py,

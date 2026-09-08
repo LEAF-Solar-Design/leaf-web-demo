@@ -129,6 +129,24 @@ _REQUIRED_COLUMNS = {
         "event_id", "seq", "org_id", "project_id", "campaign_id", "task_id",
         "attempt_id", "fence", "event_type", "payload", "created_at",
     },
+    "campaign_releases": {
+        "release_id", "org_id", "project_id", "campaign_id", "principal_id",
+        "delivery_profile", "status", "contract_version", "contract",
+        "idempotency_key", "payload_fingerprint", "next_action", "created_at", "updated_at",
+    },
+    "campaign_release_contracts": {
+        "org_id", "project_id", "campaign_id", "release_id", "contract_version",
+        "contract", "reason", "principal_id", "idempotency_key", "payload_fingerprint", "created_at",
+    },
+    "campaign_release_decisions": {
+        "decision_id", "org_id", "project_id", "campaign_id", "release_id",
+        "decision_key", "kind", "payload", "decided_by", "payload_fingerprint", "created_at",
+    },
+    "campaign_release_stages": {
+        "stage_id", "seq", "org_id", "project_id", "campaign_id", "release_id",
+        "contract_version", "stage", "status", "evidence", "producer",
+        "operation_key", "payload_fingerprint", "created_at",
+    },
     "arlo_lab_inputs": {"input_version_id", "org_id", "project_id", "example_id",
                         "example_version", "input_sha256", "request_json", "created_at"},
     # Immutable versioned template store (card C2-1R / migration 0049). The
@@ -617,8 +635,8 @@ _REQUIRED_CONSTRAINTS = {
         "campaign_host_operations", "PRIMARY KEY (operation_id)"),
     "campaign_host_operations_job_id_key": _catalog_contract(
         "campaign_host_operations", "UNIQUE (job_id)"),
-    "campaign_host_enrollments_machine_unique": _catalog_contract(
-        "campaign_host_enrollments", "UNIQUE (campaign_id, machine_id)"),
+    "campaign_enrollments_machine_capability_unique": _catalog_contract(
+        "campaign_host_enrollments", "UNIQUE (campaign_id, machine_id, capability)"),
     "campaign_capability_links_task_unique": _catalog_contract(
         "campaign_capability_links", "UNIQUE (campaign_id, task_id)"),
     "campaign_dispatch_bindings_request_unique": _catalog_contract(

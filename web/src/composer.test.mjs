@@ -814,7 +814,7 @@ describe('a dropped refusal is still a leak (round 4)', () => {
     for (const file of ['App.jsx', 'site/ToolCast.jsx']) {
       const source = bare(readStripped(file))
       assert.ok(
-        /authorAuthorityProvider=useCallback\(async\(description,\{allowSecretOnce=false\}=\{\}\)=>/.test(source),
+        /authorAuthorityProvider=useCallback\(async\(description,\{allowSecretOnce=false(?:,forceFresh=false)?(?:,projectId)?\}=\{\}\)=>/.test(source),
         `${file}: authorAuthorityProvider must accept allowSecretOnce`,
       )
       assert.ok(

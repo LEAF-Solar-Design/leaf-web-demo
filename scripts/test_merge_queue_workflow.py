@@ -917,6 +917,21 @@ def test_relay_configuration_change_takes_effect_on_the_next_group(tmp_path):
     assert "configured services: web" in result["__stdout__"]
     assert "contents/" not in (tmp_path / "gh-calls.txt").read_text()
 
+    # After restoration lands, the next relay stages both services from its
+    # own env. Keep the prior web-only receipt above as the transition case.
+    next_group = tmp_path / "next-group"
+    next_group.mkdir()
+    _prewarm_evidence(next_group, [_dispatch("web", 101), _dispatch("app", 102)],
+                      configured_services=["app", "web"])
+    result = run_step(step_body("mq-prewarm", "Wait for the relay's"), next_group,
+                      {"GROUP_HEAD_SHA": "a" * 40})
+    assert result["__returncode__"] == 0, result
+    assert json.loads(result["dispatched_json"]) == {
+        "web": _build_id(101), "app": _build_id(102),
+    }
+    assert "configured services: app web" in result["__stdout__"]
+    assert "contents/" not in (next_group / "gh-calls.txt").read_text()
+
 
 @needs_shell
 @pytest.mark.parametrize("dispatched,empty_arn,accepted", [

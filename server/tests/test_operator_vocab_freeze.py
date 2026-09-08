@@ -297,8 +297,10 @@ def test_roles_file_gained_no_operator_role():
 # #523 (90e94998, 2026-08-07); #810 should have re-pinned it in the same PR per
 # the promotion ritual and did not, because no CI workflow and no
 # run-all-gates.py Suite executes this file.
+# PR #1110 adds the tenant's finish_project action. Its auto admission does
+# not grant deployment authority; existing project and stage grants still apply.
 FROZEN_TENANT_POLICY_SHA256 = (
-    "cdcef02aa205461b65da38b280abb7cabd62f003b83a2ccbe30e3c7710011c92")
+    "3a0083db78a44346583d18f48b805d3913737f44f6ae0335f25fd8f28bbf181a")
 
 FROZEN_TENANT_ACTIONS = {
     "request_confirmation": "always-confirm",
@@ -312,6 +314,7 @@ FROZEN_TENANT_ACTIONS = {
     "register_tool": "always-confirm",
     "customize_platform": "always-confirm",
     "propose_overlay": "auto",
+    "finish_project": "auto",
 }
 
 
