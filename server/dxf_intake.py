@@ -42,6 +42,16 @@ class DxfParseError(ValueError):
     """The file is not something this minimal parser can honestly read."""
 
 
+def _mleader_number(value, integer=False):
+    try:
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError("non-finite value")
+        return int(value) if integer else number
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise DxfParseError("malformed MLEADER numeric value") from exc
+
+
 def parse_dxf_file(path: Path, *, source_name: str = "") -> Dict[str, Any]:
     raw = Path(path).read_bytes()
     return parse_dxf_bytes(raw, source_name=source_name or Path(path).name)
@@ -284,10 +294,10 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             groups = dict(record)
             style = {"name": groups.get(3, ""),
                      "textstyle": textstyles.get(groups.get(342, "").upper(), ""),
-                     **{field: round(float(groups.get(code, "0")), 5)
+                     **{field: round(_mleader_number(groups.get(code, "0")), 5)
                         for field, code in (("height", 45), ("arrow", 44),
                                             ("dogleg", 43), ("gap", 42))},
-                     "segments": int(groups.get(173, "0"))}
+                     "segments": _mleader_number(groups.get(173, "0"), integer=True)}
             mlstyles[handle] = style
             out.setdefault("mlstyles", []).append(style)
     for record in mleader_records:
@@ -430,9 +440,7 @@ def _parse_mleader(record, styles, textstyles):
                     point = record[i:i + 3]
                     if [c for c, _ in point] != [code, code + 10, code + 20]:
                         return None
-                    value = [round(float(v), 3) for _, v in point]
-                    if not all(math.isfinite(v) for v in value):
-                        return None
+                    value = [round(_mleader_number(v), 3) for _, v in point]
                 if state == 1:
                     context[code] = value
                 elif state == 2:
@@ -441,7 +449,8 @@ def _parse_mleader(record, styles, textstyles):
                     vertices.append(value)
             elif closed:
                 top.setdefault(code, value)
-        if branches != 1 or top.get(172) != "2" or 304 not in context or not vertices:
+        if (branches != 1 or _mleader_number(top.get(172, "0"), integer=True) != 2
+                or 304 not in context or not vertices):
             return None
         style = styles.get(top.get(340, "").upper())
         if style is None:
@@ -453,12 +462,14 @@ def _parse_mleader(record, styles, textstyles):
         return {"handle": handle, "layer": groups.get(8, "0") or "0",
                 "style": style["name"],
                 "textstyle": textstyles.get(top.get(343, "").upper(), ""),
-                "height": round(float(context[41]), 5),
-                "arrow": round(float(context[140]), 5),
-                "dogleg": round(float(leader[40]), 5),
-                "attachment": int(context[171]), "pts": vertices + [leader[10]],
+                "height": round(_mleader_number(context[41]), 5),
+                "arrow": round(_mleader_number(context[140]), 5),
+                "dogleg": round(_mleader_number(leader[40]), 5),
+                "attachment": _mleader_number(context[171], integer=True), "pts": vertices + [leader[10]],
                 "landing": leader[10], "dogleg_dir": leader[11],
                 "textpt": context[12], "text": context[304]}
+    except DxfParseError:
+        raise
     except (KeyError, ValueError, TypeError, OverflowError):
         return None
 

@@ -403,6 +403,44 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
         assert restored.get(field, []) == blocked.get(field, [])
 
 
+    # 3s-4: refuse a frozen target after a successful add, then inspect the
+    # UNDO result and the restored sysvars in a fresh console process.
+    frozen_line = leader_bytes.splitlines(keepends=True)[-1].replace(
+        b"ADDMLEADER|0|", b"ADDMLEADER|LEAF-FROZEN|")
+    (tmp_path / "mutation-plan.txt").write_bytes(leader_bytes + frozen_line)
+    frozen_script = settings["script"]["value"].replace(
+        '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))',
+        '(command "_.-LAYER" "_N" "LEAF-FROZEN" "")\r\n'
+        '(command "_.-LAYER" "_F" "LEAF-FROZEN" "")\r\n'
+        '(setq leaf-proof (open "frozen-before.txt" "w"))\r\n'
+        '(write-line (getvar "CLAYER") leaf-proof)\r\n'
+        '(write-line (getvar "CMLEADERSTYLE") leaf-proof)\r\n'
+        '(close leaf-proof)\r\n'
+        '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))',
+    ).replace(
+        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))',
+        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg") '
+        '(command "_.SAVEAS" "" "frozen-rolled-back.dwg"))',
+    )
+    _console(tmp_path, leader_host, "frozen-leader.scr", frozen_script, apply_failed=True)
+    frozen_inspect = inspect.replace(
+        quit_line,
+        '(setq leaf-proof (open "frozen-after.txt" "w"))\r\n'
+        '(write-line (getvar "CLAYER") leaf-proof)\r\n'
+        '(write-line (getvar "CMLEADERSTYLE") leaf-proof)\r\n'
+        '(close leaf-proof)\r\n' + quit_line,
+    )
+    _console(tmp_path, tmp_path / "frozen-rolled-back.dwg", "frozen-inspect.scr", frozen_inspect)
+    assert (tmp_path / "frozen-after.txt").read_text() == (tmp_path / "frozen-before.txt").read_text()
+    frozen = intake_parse.parse(families, "canary")
+    assert not frozen.get("parseErrors"), frozen.get("parseErrors")
+    assert not frozen.get("mleaders")
+    assert not frozen.get("mleaders_unsupported")
+    for field in ("polylines", "circles", "arcs", "inserts", "dimensions",
+                  "blocks", "groups", "properties", "mlstyles"):
+        assert frozen.get(field) == blocked.get(field)
+
+
 # --- (3) skip-visibility row: a "skipped local engine suite is no proof" guard
 
 def test_accoreconsole_canary_skip_reason_names_the_binary_path():

@@ -953,6 +953,9 @@ def validate_mutations(
             for member in raw["members"]:
                 if isinstance(member, str):
                     handle = _existing_handle(member, "group member").upper()
+                    if any(str(e.get("handle", "")).upper() == handle
+                           for e in intake.get("mleaders", [])):
+                        raise ValueError("MLEADER is not a group member in this contract")
                     if handle not in member_handles:
                         raise ValueError("group member must be an existing supported model-space entity")
                     if handle in {h.upper() for h in removed_seen}:
@@ -961,6 +964,8 @@ def validate_mutations(
                 elif (isinstance(member, dict) and set(member) == {"add"}
                       and type(member["add"]) is int and 0 <= member["add"] < len(added)):
                     ordinal = submitted_ordinals[member["add"]]
+                    if added[ordinal].get("kind") == "MLEADER":
+                        raise ValueError("MLEADER is not a group member in this contract")
                     token, value = ("A", ordinal), {"add": ordinal}
                 else:
                     raise ValueError("group member ordinal must resolve inside canonical added")

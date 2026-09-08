@@ -260,6 +260,8 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                 out.setdefault("properties", {})[hnd] = properties
             elif tag == "MS":
                 name, textstyle, height, arrow, dogleg, gap, segments = rest.split("|")
+                if not all(math.isfinite(float(v)) for v in (height, arrow, dogleg, gap)):
+                    raise ValueError("non-finite mleader style scalar")
                 out.setdefault("mlstyles", []).append({
                     "name": _block_name(name), "textstyle": _block_name(textstyle),
                     "height": round(float(height), 5), "arrow": round(float(arrow), 5),
@@ -268,6 +270,8 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
             elif tag == "ML":
                 (hnd, layer, style, textstyle, height, arrow, dogleg, attachment,
                  vertices, landing, dogleg_dir, textpt, text) = rest.split("|")
+                if not all(math.isfinite(float(v)) for v in (height, arrow, dogleg)):
+                    raise ValueError("non-finite mleader scalar")
                 if not hnd or any(v not in "0123456789abcdefABCDEF" for v in hnd):
                     raise ValueError("malformed mleader handle")
                 if not vertices:

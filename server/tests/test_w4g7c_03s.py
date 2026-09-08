@@ -130,14 +130,11 @@ def test_mleader_unknown_fields_refused():
         validate_mutations(_base(), {"added": [_mleader(height=0.18)]})
 
 
-def test_mleader_ordinal_follows_canonical_added_order():
+def test_mleader_group_ordinals_refused():
     plan = {"added": [_mleader(handle="z-leader"), _mleader(handle="a-leader")],
             "added_groups": [{"name": "PAIR", "members": [{"add": 0}, {"add": 1}]}]}
-    canonical = validate_mutations(_base(), plan)
-    assert [entity["handle"] for entity in canonical["added"]] == ["a-leader", "z-leader"]
-    assert canonical["added_groups"][0]["members"] == [{"add": 1}, {"add": 0}]
-    assert emit_plan(canonical, base_sha256=BASE_SHA).endswith(b"ADDGROUP|PAIR|A:1;A:0\n")
-    assert validate_mutations(_base(), canonical) == canonical
+    with pytest.raises(ValueError, match="MLEADER is not a group member in this contract"):
+        validate_mutations(_base(), plan)
 
 
 # --- record 3s-1: command interpreter and only-when inspection ---------------
@@ -521,7 +518,7 @@ def test_mleader_verifier_matches_points_at_three_decimals():
     assert write_loop.verify_live_mutation_effects(base, actual, canonical) is None
 
 
-@pytest.mark.parametrize("damage", [False, True])
+@pytest.mark.parametrize("damage", [False, True, "unsupported_add", "unsupported_remove", "bad_style"])
 def test_mleader_uploaded_plan_result_binding(tmp_path, monkeypatch, damage):
     import hashlib
     import io
@@ -544,16 +541,31 @@ def test_mleader_uploaded_plan_result_binding(tmp_path, monkeypatch, damage):
     tenant, drawing = "tenant-mleader-save", "mleader-save"
     head = {**_base(), "mleaders": []}
     plan = {"added": [_mleader(handle="301")]}
+    if damage == "unsupported_remove":
+        head = _mleader_dxf_fixture()
+        plan = {"removed": ["9C76"]}
     backend = store.FilesystemBackend(str(tmp_path / "drawings"))
     source = tmp_path / "base.dwg"
     source.write_bytes(b"AC1032" + b"\x00" * 64)
     store.ingest_drawing(backend, tenant, str(source), drawing_id=drawing)
     write_loop.publish_intake_cache(backend, tenant, drawing, 1, source.read_bytes(), head)
     upload = write_loop.apply_mutations(head, plan)
+    if damage == "unsupported_remove":
+        upload = _mleader_dxf_fixture()
     upload["mleaders"][0]["textpt"] = [5.45, 4.091, 0]
-    if damage:
+    if damage is True:
         upload["mleaders"][0]["text"] = "Wrong valve"
+    if damage == "unsupported_add":
+        upload["mleaders"].append({**upload["mleaders"][0], "handle": "302"})
     data = intake_to_dxf(upload)
+    if damage == "unsupported_add":
+        # Keep the matching add supported; only the extra entity changes content type.
+        start = data.index(b"5\n302\n")
+        data = data[:start] + data[start:].replace(b"172\n2\n343\n", b"172\n1\n343\n", 1)
+    elif damage == "unsupported_remove":
+        data = data.replace(b"172\n2\n343\n", b"172\n1\n343\n")
+    elif damage == "bad_style":
+        data = data.replace(b"45\n0.18\n", b"45\noops\n")
     checkout = client.post(f"/api/drawings/{drawing}/checkout", headers={"X-Tenant-Id": tenant},
                            json={"holder": "mleader-editor", "ttl_s": 3600})
     assert checkout.status_code == 200, checkout.text
@@ -565,5 +577,114 @@ def test_mleader_uploaded_plan_result_binding(tmp_path, monkeypatch, damage):
               "plan": json.dumps({"mutations": plan})})
     assert response.status_code == (422 if damage else 201), response.text
     if damage:
-        assert "uploaded DXF does not carry the plan's result" in response.text
+        if damage != "bad_style":
+            assert "uploaded DXF does not carry the plan's result" in response.text
         assert store.resolve_version(backend, tenant, drawing, "head")[0] == 1
+
+
+# --- record 3s-4: correction round one ------------------------------------
+
+@pytest.mark.parametrize("base_count,actual_count", [(0, 1), (2, 1), (1, 1)])
+def test_mleader_unsupported_count_is_part_of_effect(base_count, actual_count):
+    base = {**_base(), "mleaders": [], "mleaders_unsupported": base_count}
+    canonical = validate_mutations(base, {"added": [_mleader()]})
+    actual = {**_mleader_dxf_fixture(), "mleaders_unsupported": actual_count}
+    if base_count == actual_count:
+        assert write_loop.verify_live_mutation_effects(base, actual, canonical) is None
+    else:
+        with pytest.raises(ValueError, match="unsupported MULTILEADER"):
+            write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+def test_mleader_mock_materialises_missing_catalogue_and_reopens():
+    from dxf_intake import parse_dxf_bytes
+    from intake_dxf import intake_to_dxf
+
+    base = _base()
+    del base["mlstyles"]
+    result = write_loop.apply_mutations(base, {"added": [_mleader(handle="301", style="Custom")]})
+    assert result["mlstyles"] == [{**_base()["mlstyles"][0], "name": "Custom"}]
+    reopened = parse_dxf_bytes(intake_to_dxf(result))
+    assert reopened["mleaders"] == result["mleaders"]
+    assert "mlstyles" not in base
+
+
+def test_mleader_mock_keeps_existing_catalogue():
+    import copy
+
+    base = _base()
+    base["mlstyles"][0]["height"] = 0.25
+    catalogue = copy.deepcopy(base["mlstyles"])
+    result = write_loop.apply_mutations(base, {"added": [_mleader()]})
+    assert result["mlstyles"] == catalogue
+    assert base["mlstyles"] == catalogue
+
+
+def test_mleader_existing_group_member_refused():
+    base = _mleader_dxf_fixture()
+    with pytest.raises(ValueError, match="MLEADER is not a group member in this contract"):
+        validate_mutations(base, {"added": [_mleader()], "added_groups": [
+            {"name": "PAIR", "members": ["9C76", {"add": 0}]}]})
+
+
+def test_mleader_lisp_contains_ucs_catch_frozen_guard_and_restore_order():
+    import apply_lisp
+    import lisp
+
+    script = apply_lisp.build_apply_scr_v3()
+    assert "(vl-load-com)" in script
+    apply = next(line for line in script.splitlines()
+                 if line.startswith("(defun leaf-apply-addmleader "))
+    assert "(trans p1 0 1)" in apply and "(trans p2 0 1)" in apply
+    assert '(tblsearch "LAYER" layer)' in apply
+    assert '(logand 1 (cdr (assoc 70 layerdata)))' in apply
+    assert apply.index('(assoc 70 layerdata)') < apply.index('(setvar ')
+    assert '(vl-catch-all-apply (function (lambda ()' in apply
+    for variable, saved in (("CLAYER", "oldlayer"), ("CMLEADERSTYLE", "oldstyle")):
+        assert (apply.index('(command "_.MLEADER"')
+                < apply.index(f'(setvar "{variable}" {saved})')
+                < apply.index('(vl-catch-all-error-p caught)'))
+    row = next(line for line in lisp.MUTATION_INSPECT_BLOCKS
+               if line.startswith("(defun leaf-ml-row "))
+    assert '(if (and style (= branches 1)' in row
+    assert '(write-line "MLX|1" f)' in row
+
+
+@pytest.mark.parametrize("record,index,key", [(MS_RECORD, 3, "mlstyles"), (ML_RECORD, 5, "mleaders")])
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+def test_mleader_nonfinite_scalars_are_parse_errors(record, index, key, value):
+    import intake_parse
+
+    fields = record.split("|")
+    fields[index] = value
+    result = intake_parse.parse_text("|".join(fields), "probe.dwg")
+    assert result.get("parseErrors")
+    assert not result.get(key)
+
+
+@pytest.mark.parametrize("code,value", [(45, "oops"), (45, "nan"), (173, "inf")])
+def test_mleader_style_bad_numbers_raise_dxf_parse_error(code, value):
+    from dxf_intake import DxfParseError, parse_dxf_bytes
+    from intake_dxf import intake_to_dxf
+
+    raw = intake_to_dxf(_mleader_dxf_fixture())
+    original = dict(_dxf_records(raw, "MLEADERSTYLE")[0])[code]
+    raw = raw.replace(f"{code}\n{original}\n".encode(), f"{code}\n{value}\n".encode())
+    with pytest.raises(DxfParseError, match="numeric"):
+        parse_dxf_bytes(raw)
+
+
+@pytest.mark.parametrize("needle,replacement", [
+    (b"41\n0.18\n", b"41\nnan\n"),
+    (b"140\n0.18\n", b"140\noops\n"),
+    (b"40\n0.36\n", b"40\ninf\n"),
+    (b"20\n4.0\n", b"20\n-inf\n"),
+])
+def test_mleader_entity_bad_numbers_raise_dxf_parse_error(needle, replacement):
+    from dxf_intake import DxfParseError, parse_dxf_bytes
+    from intake_dxf import intake_to_dxf
+
+    raw = intake_to_dxf(_mleader_dxf_fixture())
+    assert needle in raw
+    with pytest.raises(DxfParseError, match="numeric"):
+        parse_dxf_bytes(raw.replace(needle, replacement))

@@ -1148,7 +1148,8 @@ def save_plan_version(drawing_id: str,
 
     if (leg == "dwg-plan-live" or canonical.get("block_defs")
             or any(e.get("kind") == "MLEADER" for e in canonical.get("added", []))
-            or "MULTILEADER" in canonical.get("removed_kinds", {}).values()):
+            or "MULTILEADER" in canonical.get("removed_kinds", {}).values()
+            or intake.get("mleaders_unsupported", 0) != base_intake.get("mleaders_unsupported", 0)):
         # The client computes the plan from the same entity list it wrote the
         # DXF from, so a mismatch is a client defect. Never commit a plan the
         # bytes beside it contradict.

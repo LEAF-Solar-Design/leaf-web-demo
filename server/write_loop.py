@@ -1077,11 +1077,14 @@ def apply_mutations(intake: Dict[str, Any], mutations: Dict[str, Any]) -> Dict[s
                     "scale": [round(value, 4) for value in e["scale"]],
                     "nrm": [0.0, 0.0, 1.0]})
             elif kind == "MLEADER":
-                catalogue = next((s for s in intake.get("mlstyles", [])
+                catalogue = next((s for s in new.get("mlstyles", [])
                                   if s["name"].casefold() == e["style"].casefold()), None)
                 style = catalogue if catalogue is not None else {
                     "textstyle": "Standard", "height": 0.18, "arrow": 0.18,
-                    "dogleg": 0.36, "gap": 0.09}
+                    "dogleg": 0.36, "gap": 0.09, "segments": 1, "name": e["style"]}
+                if catalogue is None:
+                    # Mock approximation; inspection supplies the console's own values.
+                    new.setdefault("mlstyles", []).append(style)
                 landing = list(e["pts"][-1])
                 new.setdefault("mleaders", []).append({
                     "handle": e["handle"], "layer": e["layer"], "style": e["style"],
@@ -2188,6 +2191,8 @@ def _mleader_effect_matches(expected: Dict[str, Any], actual: Dict[str, Any]) ->
 
 def _verify_mleader_effects(base, actual, canonical, matched_handles):
     """Keep covered records exact; a legacy base can prove only its adds."""
+    if actual.get("mleaders_unsupported", 0) != base.get("mleaders_unsupported", 0):
+        raise ValueError("re-extracted output carries an unsupported MULTILEADER the base did not, or an unsupported record vanished")
     legacy_base = "mleaders" not in base
     rows = actual.get("mleaders", [])
     if not isinstance(rows, list):
