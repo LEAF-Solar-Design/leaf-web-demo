@@ -42,6 +42,123 @@ function render(ui) {
   return { ...view, rerender(next) { view.rerender(next); expand() } }
 }
 
+describe('finish request navigation', () => {
+  function freshProject() {
+    campaign.campaigns = []
+    campaign.selected = null
+    campaign.selectedId = null
+  }
+  function navigate() {
+    fireEvent.click(screen.getByRole('button', { name: 'Finish this project' }))
+  }
+  it.each(['fresh', 'release'])('opens finish fields without starting work for a %s project', kind => {
+    if (kind === 'fresh') freshProject()
+    else campaign.completion = { release: { release_id: Q, status: 'active', contract_version: 1, contract: {} } }
+    const { container } = renderCollapsed(panel())
+    const header = container.querySelector('.campaign-results-header')
+    expect(within(header).getByRole('heading', { name: 'Project results' })).toBeTruthy()
+    expect(within(header).getByRole('button', { name: 'Finish this project' })).toBeTruthy()
+    if (kind === 'release') expect(screen.getByText('Start a new request').closest('details').open).toBe(false)
+    navigate()
+    if (kind === 'release') expect(screen.getByText('Start a new request').closest('details').open).toBe(true)
+    expect(screen.getByLabelText('Campaign goal').value).toBe('finish')
+    expect(document.activeElement).toBe(screen.getByLabelText('Title'))
+    expect(screen.getByLabelText('Delivery profile')).toBeTruthy()
+    expect(screen.getByLabelText('Input file (optional)')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Request release' })).toBeTruthy()
+    expect(campaign.submit).not.toHaveBeenCalled()
+    expect(campaign.createRelease).not.toHaveBeenCalled()
+    expect(campaign.transitionRelease).not.toHaveBeenCalled()
+    expect(uploadProjectInput).not.toHaveBeenCalled()
+  })
+  it('preserves the same draft and selected input through repeated navigation and uses its ready reference', async () => {
+    freshProject()
+    const path = `inputs/${'a'.repeat(64)}/records.json`
+    uploadProjectInput.mockResolvedValue({ path, name: 'records.json' })
+    renderCollapsed(panel())
+    const title = screen.getByLabelText('Title')
+    const prompt = screen.getByLabelText('Prompt')
+    fireEvent.change(title, { target: { value: 'Records export' } })
+    fireEvent.change(prompt, { target: { value: 'Download CSV' } })
+    navigate()
+    const input = screen.getByLabelText('Input file (optional)')
+    const file = new File(['[]'], 'records.json', { type: 'application/json' })
+    fireEvent.change(input, { target: { files: [file] } })
+    navigate()
+    navigate()
+    expect(screen.getByLabelText('Title')).toBe(title)
+    expect(title.value).toBe('Records export')
+    expect(prompt.value).toBe('Download CSV')
+    expect(screen.getByLabelText('Input file (optional)')).toBe(input)
+    expect(input.files[0]).toBe(file)
+    expect(uploadProjectInput).not.toHaveBeenCalled()
+    expect(campaign.submit).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Add to project' }))
+    await screen.findByText('records.json added to this project. Ready for this release.')
+    navigate()
+    expect(screen.getByRole('button', { name: 'Add to project' }).disabled).toBe(true)
+    expect(campaign.submit).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Request release' }))
+    await waitFor(() => expect(campaign.submit).toHaveBeenCalledExactlyOnceWith({ title: 'Records export', prompt: 'Download CSV', mode: 'finish',
+      finish: { delivery_profile: 'web_tool', intended_user: 'Project owner', workflow: 'Download CSV', artifact_refs: [path] } }))
+    expect(uploadProjectInput).toHaveBeenCalledExactlyOnceWith(P, file)
+  })
+  it('keeps ordinary campaign creation available after finish navigation', async () => {
+    freshProject()
+    renderCollapsed(panel())
+    navigate()
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'New campaign' } })
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Build documents' } })
+    fireEvent.change(screen.getByLabelText('Campaign goal'), { target: { value: 'ordinary' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Submit campaign' }))
+    await waitFor(() => expect(campaign.submit).toHaveBeenCalledExactlyOnceWith({ title: 'New campaign', prompt: 'Build documents' }))
+    expect(campaign.createRelease).not.toHaveBeenCalled()
+  })
+  it('isolates finish drafts and ready inputs when the project changes', async () => {
+    freshProject()
+    uploadProjectInput.mockResolvedValue({ path: 'inputs/old/records.json', name: 'records.json' })
+    const { rerender } = renderCollapsed(panel())
+    navigate()
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Old title' } })
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Old prompt' } })
+    fireEvent.change(screen.getByLabelText('Delivery profile'), { target: { value: 'cad_file' } })
+    fireEvent.change(screen.getByLabelText('Input file (optional)'), { target: { files: [new File(['[]'], 'records.json')] } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add to project' }))
+    await screen.findByText('records.json added to this project. Ready for this release.')
+    rerender(panel({ projectId: Q }))
+    expect(screen.getByLabelText('Campaign goal').value).toBe('ordinary')
+    navigate()
+    expect(screen.getByLabelText('Title').value).toBe('')
+    expect(screen.getByLabelText('Prompt').value).toBe('')
+    expect(screen.getByLabelText('Delivery profile').value).toBe('web_tool')
+    expect(screen.getByLabelText('Input file (optional)').files).toHaveLength(0)
+    expect(screen.queryByText(/added to this project/)).toBeNull()
+    expect(campaign.submit).not.toHaveBeenCalled()
+  })
+  it.each(['upload', 'submit'])('disables navigation and duplicate submission during %s', async operation => {
+    freshProject()
+    let resolve
+    const pending = new Promise(done => { resolve = done })
+    if (operation === 'upload') uploadProjectInput.mockReturnValue(pending)
+    else campaign.submit.mockReturnValue(pending)
+    renderCollapsed(panel())
+    navigate()
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Export' } })
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Download CSV' } })
+    const form = screen.getByLabelText('Title').closest('form')
+    if (operation === 'upload') {
+      fireEvent.change(screen.getByLabelText('Input file (optional)'), { target: { files: [new File(['[]'], 'records.json')] } })
+      fireEvent.click(screen.getByRole('button', { name: 'Add to project' }))
+    } else fireEvent.submit(form)
+    expect(screen.getByRole('button', { name: 'Finish this project' }).disabled).toBe(true)
+    navigate()
+    fireEvent.submit(form)
+    expect(campaign.submit).toHaveBeenCalledTimes(operation === 'submit' ? 1 : 0)
+    await act(async () => { resolve(operation === 'upload' ? { path: 'inputs/records.json', name: 'records.json' } : { campaign: row }) })
+    expect(screen.getByRole('button', { name: 'Finish this project' }).disabled).toBe(false)
+  })
+})
+
 describe('stalled release revision', () => {
   beforeEach(() => {
     campaign.completion = { release: { release_id: Q, status: 'needs_approach', contract_version: 1,
@@ -131,7 +248,7 @@ describe('finish input controls', () => {
     const selected = file()
     fireEvent.change(screen.getByLabelText('Input file (optional)'), { target: { files: [selected] } })
     expect(uploadProjectInput).not.toHaveBeenCalled()
-    expect(within(form).getByRole('button', { name: 'Finish this project' }).disabled).toBe(true)
+    expect(within(form).getByRole('button', { name: 'Request release' }).disabled).toBe(true)
     fireEvent.click(screen.getByRole('button', { name: 'Add to project' }))
     fireEvent.click(screen.getByRole('button', { name: 'Add to project' }))
     expect(uploadProjectInput).toHaveBeenCalledExactlyOnceWith(P, selected)
@@ -184,7 +301,7 @@ describe('finish input controls', () => {
     await screen.findByText('records.json added to this project. Ready for this release.')
     fireEvent.change(screen.getByLabelText('Input file (optional)'), { target: { files: [new File(['0'], 'drawing.dxf')] } })
     expect(screen.queryByText(/added to this project/)).toBeNull()
-    expect(within(form).getByRole('button', { name: 'Finish this project' }).disabled).toBe(true)
+    expect(within(form).getByRole('button', { name: 'Request release' }).disabled).toBe(true)
     fireEvent.change(screen.getByLabelText('Campaign goal'), { target: { value: 'ordinary' } })
     fireEvent.submit(form)
     await waitFor(() => expect(campaign.submit).toHaveBeenCalledWith({ title: 'Records export', prompt: 'Download CSV' }))
@@ -213,7 +330,7 @@ describe('release evidence panel', () => {
     fireEvent.change(screen.getByLabelText('Release deadline (optional)'), { target: { value: '2026-09-08T09:30' } })
     fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Export' } })
     fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Download CSV' } })
-    fireEvent.click(within(screen.getByLabelText('Title').closest('form')).getByRole('button', { name: 'Finish this project' }))
+    fireEvent.click(within(screen.getByLabelText('Title').closest('form')).getByRole('button', { name: 'Request release' }))
     await waitFor(() => expect(campaign.submit).toHaveBeenCalledWith(expect.objectContaining({ finish: expect.objectContaining({ deadline_at: '2026-09-08T09:30' }) })))
   })
   const stages = ['implementation', 'publication', 'deployment', 'user_verification', 'delivery']
