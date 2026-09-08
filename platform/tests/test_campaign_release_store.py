@@ -667,6 +667,84 @@ def test_paused_workflow_revision_requires_explicit_resume(make_org):
     assert _claim(scope) is not None
 
 
+def test_stable_revision_preserves_first_contract_and_predecessor_evidence(make_org):
+    scope, principal, _ = _seed(make_org)
+    row = _create(scope, principal)
+    _record(scope, row, 'implementation')
+    _record(scope, row, 'publication')
+    before = releases.get_release(*scope, row['release_id'])
+    changed = dict(row['contract'], workflow='Use a simpler file')
+    args = dict(reason='Recover', idempotency_key='stable-revision', pause=True,
+                request_identity='a' * 64)
+    assert releases.get_contract_by_key(*scope, row['release_id'], principal,
+        **{k: v for k, v in args.items() if k != 'pause'}) is None
+    revised = releases.revise_contract(*scope, row['release_id'], principal, contract=changed, **args)
+    drifted = dict(changed, release_boundary='Different compiled candidate')
+    replay = releases.revise_contract(*scope, row['release_id'], principal, contract=drifted, **args)
+    assert replay['replayed'] and replay['contract'] == changed
+    assert replay['contract_version'] == revised['contract_version'] == 2
+    snapshot = releases.get_release(*scope, row['release_id'])
+    assert snapshot['stages'] == before['stages']
+    assert len(snapshot['remaining']) == len(changed['required_checks'])
+    _code('contract_version_mismatch', _record, scope, revised, 'implementation',
+          evidence=_evidence('implementation', 1))
+    _code('insufficient_evidence', releases.finish_release, *scope, row['release_id'])
+    later = releases.revise_contract(*scope, row['release_id'], principal, contract=drifted,
+        reason='Later approach', idempotency_key='later-revision', request_identity='b' * 64, pause=True)
+    releases.transition_release(*scope, row['release_id'], principal, action='cancel')
+    replay = releases.revise_contract(*scope, row['release_id'], principal, contract=changed, **args)
+    assert replay['replayed'] and replay['status'] == 'cancelled'
+    assert replay['contract'] == later['contract'] and replay['contract_version'] == 3
+    frozen = releases.get_contract_by_key(*scope, row['release_id'], principal,
+        **{k: v for k, v in args.items() if k != 'pause'})
+    assert frozen['contract'] == changed and frozen['contract_version'] == 2
+    for overrides in ({'request_identity': 'c' * 64}, {'reason': 'Changed reason'}):
+        _code('idempotency_conflict', releases.revise_contract, *scope, row['release_id'], principal,
+              contract=changed, **{**args, **overrides})
+        _code('idempotency_conflict', releases.get_contract_by_key, *scope, row['release_id'], principal,
+              **{k: v for k, v in {**args, **overrides}.items() if k != 'pause'})
+    _code('release_terminal', releases.revise_contract, *scope, row['release_id'], principal,
+          contract=changed, **{**args, 'idempotency_key': 'new-key'})
+    assert releases.get_release(*scope, row['release_id'])['stages'] == before['stages']
+    # The original create fingerprint remains valid after all revisions.
+    initial = releases.get_contract_by_key(*scope, row['release_id'], principal, idempotency_key='release')
+    assert _create(scope, principal, contract=initial['contract'])['replayed']
+
+
+def test_concurrent_stable_revisions_freeze_first_compiled_candidate(make_org):
+    scope, principal, _ = _seed(make_org)
+    row = _create(scope, principal)
+    _record(scope, row, 'implementation')
+    before = releases.get_release(*scope, row['release_id'])
+    barrier = Barrier(2)
+
+    def revise(boundary):
+        candidate = dict(row['contract'], release_boundary=boundary)
+        barrier.wait(timeout=10)
+        return releases.revise_contract(*scope, row['release_id'], principal, contract=candidate,
+            reason='Same request', idempotency_key='concurrent-revision', request_identity='d' * 64, pause=True)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(revise, boundary) for boundary in ('First material', 'Drifted material')]
+        results = [future.result(timeout=20) for future in futures]
+    assert sum(bool(result.get('replayed')) for result in results) == 1
+    assert results[0]['contract'] == results[1]['contract']
+    assert all(result['contract_version'] == 2 and result['status'] == 'paused' for result in results)
+    snapshot = releases.get_release(*scope, row['release_id'])
+    assert snapshot['stages'] == before['stages']
+    assert len(snapshot['decisions']) == len(before['decisions']) + 1
+
+
+@pytest.mark.parametrize('identity', ['', 'a' * 63, 'a' * 65, 'A' * 64, 'g' * 64, True, 1, {}, []])
+def test_revision_request_identity_is_strict(make_org, identity):
+    scope, principal, _ = _seed(make_org)
+    row = _create(scope, principal)
+    args = dict(reason='Recover', idempotency_key='identity', request_identity=identity)
+    _code('invalid_request', releases.revise_contract, *scope, row['release_id'], principal,
+          contract=dict(row['contract'], workflow='Different workflow'), **args)
+    _code('invalid_request', releases.get_contract_by_key, *scope, row['release_id'], principal, **args)
+
+
 def test_revision_decision_replay_and_original_ambition(make_org):
     scope, principal, _ = _seed(make_org)
     row = _create(scope, principal)

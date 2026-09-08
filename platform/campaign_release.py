@@ -451,19 +451,45 @@ def runnable_releases(limit=20):
         return [_public(row) for row in cur.fetchall()]
 
 
+def _revision_fingerprint(request_identity, reason):
+    if not isinstance(request_identity, str) or not re.fullmatch(r'[0-9a-f]{64}', request_identity):
+        _invalid('invalid revision request identity')
+    _string(reason, 'reason', 4096)
+    return _fingerprint('revision-request', dict(request_identity=request_identity, reason=reason))
+
+
+def get_contract_by_key(org_id, project_id, campaign_id, release_id, principal_id, *,
+                        idempotency_key, request_identity=None, reason=None):
+    """Read a frozen contract within current project and principal authority."""
+    _string(idempotency_key, 'idempotency_key', 128)
+    fingerprint = _revision_fingerprint(request_identity, reason) if request_identity is not None else None
+    scope = _params(org_id, project_id, campaign_id, release_id)
+    with _cursor() as cur:
+        _check(cur, scope, principal_id)
+        _get(cur, scope)
+        cur.execute('SELECT * FROM campaign_release_contracts WHERE ' + RELEASE +
+                    ' AND idempotency_key=%(key)s', {**scope, 'key': idempotency_key})
+        old = cur.fetchone()
+        if old and fingerprint is not None and old['payload_fingerprint'] != fingerprint:
+            _conflict('idempotency_conflict')
+        return _public(old, True) if old else None
+
+
 def revise_contract(org_id, project_id, campaign_id, release_id, principal_id, *,
-                    contract, reason, idempotency_key, pause=False):
+                    contract, reason, idempotency_key, pause=False, request_identity=None):
     if type(pause) is not bool:
         _invalid('invalid revision pause')
     _string(reason, 'reason', 4096)
     _string(idempotency_key, 'idempotency_key', 128)
+    fingerprint = _revision_fingerprint(request_identity, reason) if request_identity is not None else None
     scope = _params(org_id, project_id, campaign_id, release_id)
     with _cursor() as cur:
         _org_lock(cur, scope)
         _check(cur, scope, principal_id)
         row = _get(cur, scope)
-        _contract(contract, row['delivery_profile'])
-        fingerprint = _fingerprint('revision', dict(contract=contract, reason=reason))
+        if request_identity is None:
+            _contract(contract, row['delivery_profile'])
+            fingerprint = _fingerprint('revision', dict(contract=contract, reason=reason))
         cur.execute('SELECT * FROM campaign_release_contracts WHERE ' + RELEASE +
                     ' AND idempotency_key=%(key)s', {**scope, 'key': idempotency_key})
         old = cur.fetchone()
@@ -473,6 +499,7 @@ def revise_contract(org_id, project_id, campaign_id, release_id, principal_id, *
             return _public(row, True)
         if row['status'] in ('finished', 'cancelled'):
             _conflict('release_terminal')
+        _contract(contract, row['delivery_profile'])
         if contract['original_goal'] != row['contract']['original_goal']:
             _conflict('original_goal_immutable')
         if contract == row['contract']:
