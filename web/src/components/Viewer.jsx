@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react'
-import { applyViewPose, cameraPose, unprojectClientToPlane } from './viewerMath.js'
+import { applyViewPose, cameraPose, pickLineThreshold, unprojectClientToPlane } from './viewerMath.js'
 import { intakeRoundPolylines } from '../cadedit/engineIntake.js'
 import { formatElementId } from '../lib/elementIdentity.js'
 import * as THREE from 'three'
@@ -325,7 +325,7 @@ const Viewer = forwardRef(function Viewer(
           const b = pts[(i + 1) % pts.length]
           if (i === pts.length - 1 && !pl.closed) break
           linePos.push(a[0], a[1], topZ + 0.05, b[0], b[1], topZ + 0.05)
-          lineHandles.push(pl.sourceHandle ?? null)
+          lineHandles.push(pl.sourceHandle ?? pl.handle)
         }
       }
 
@@ -526,6 +526,11 @@ const Viewer = forwardRef(function Viewer(
       ndc.x = ((e.clientX - rect.left) / rect.width) * 2 - 1
       ndc.y = -((e.clientY - rect.top) / rect.height) * 2 + 1
       raycaster.setFromCamera(ndc, camera)
+      const world = unprojectClientToPlane(camera, rect, e.clientX, e.clientY)
+      const adjacent = unprojectClientToPlane(camera, rect, e.clientX + 1, e.clientY)
+      const worldPerPixel = world && adjacent
+        ? Math.hypot(adjacent.x - world.x, adjacent.y - world.y) : undefined
+      raycaster.params.Line.threshold = pickLineThreshold(worldPerPixel)
       const hits = raycaster.intersectObjects(pickables, false)
       const handle = pickHandleFromHits(hits)
       const cb = onSelectRef.current

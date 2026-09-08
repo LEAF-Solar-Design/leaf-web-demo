@@ -114,13 +114,6 @@ const DRAW_OFF = Object.freeze([])
 const ANNOTATION_OFF = Object.freeze([
   { id: 'annotation:leader', label: 'Leader', icon: 'leader', size: 'large', reason: DEFERRED_REASONS.leader },
 ])
-// W4g-7b-02c: the reference's Block panel keeps CREATE BLOCK as an honest
-// placeholder beside the now-real INSERT BLOCK (ribbonClusters.js drops its
-// own placeholder for the latter so the two never both render). W4g-7b-05c:
-// its own DEFERRED_REASONS sentence, not the generic NOT_IN_ENGINE.
-const BLOCK_OFF = Object.freeze([
-  { id: 'block:create', label: 'Create Block', icon: 'block-create', size: 'large', reason: DEFERRED_REASONS.blockCreate },
-])
 // The datalist id the INSERT name field's `list` attribute points at.
 const BLOCK_CATALOGUE_ID = 'cockpit-block-catalogue'
 
@@ -235,16 +228,16 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // W4g-7a: the resolution lives in promptInputs.js, shared with the script
   // runner, so a script line and a typed prompt read the same numbers.
   const { effective, expressionRefusal, failedExpression, waitingStep, pointSteps } = resolvePromptInputs(prompt, promptInputs, armed && armed.from ? armed.from : null)
-  const gatheringMembers = armedOp === 'group' && !inputs.membersDone && !inputs.groupName
+  const gatheringMembers = (armedOp === 'group' && !inputs.groupName || armedOp === 'createBlock') && !inputs.membersDone
   const liveRefusal = prompt && !promptReason && !waitingStep && !gatheringMembers
     ? (expressionRefusal || (armedGroup === 'draw'
-      ? buildCreatePayload(armedOp, effective, session.entities.blocks, session.entities.dimstyles)
+      ? buildCreatePayload(armedOp, effective, session.entities.blocks, session.entities.dimstyles, session)
       : buildEditPayload(armedOp, session.selectedId, effective, session.entities.linetypes, session.entities)).refusal || '')
     : ''
-  const runOff = promptOff || !!liveRefusal || !!waitingStep
+  const runOff = promptOff || !!liveRefusal || (!!waitingStep && !gatheringMembers)
   const runReason = promptReason || liveRefusal
   const runHold = runReason || (waitingStep ? waitingStep.ask : '')
-  const toggleArmed = (group, op) => setArmed(armedOp === op ? null : { group, op })
+  const toggleArmed = (group, op) => setArmed(armedOp === op ? null : { group, op }, { rearm: true })
   // The one context the Draw and Modify records read: the session their reason
   // ladders judge, and the single activation handler they name. Arming vs.
   // running is the CONSUMER's decision (a tool with operands opens the command
@@ -271,7 +264,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     if (!prompt || runOff) return
     if (gatheringMembers) {
       setInput('membersDone', 'true')
-      promptRef.current?.querySelector('[aria-label="ribbon group name"]')?.focus()
+      promptRef.current?.querySelector(armedOp === 'createBlock' ? '[aria-label="ribbon x"]' : '[aria-label="ribbon group name"]')?.focus()
       return
     }
     // Commit resolved expressions as numbers before the engine sees them:
@@ -295,14 +288,15 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     }
   }
   const promptRef = useRef(null)
+  const blockArm = armedOp === 'createBlock' ? armed : null
   useEffect(() => {
     // Arming puts the caret in the first field the way the reference's
     // command line takes typing the moment a command starts.
     chainRef.current = null
     if (!armedOp) return undefined
-    promptRef.current?.querySelector(armedOp === 'group' ? '[aria-label="ribbon members"]' : 'input:not([disabled])')?.focus()
+    promptRef.current?.querySelector(armedOp === 'group' || armedOp === 'createBlock' ? '[aria-label="ribbon members"]' : 'input:not([disabled])')?.focus()
     return undefined
-  }, [armedOp])
+  }, [armedOp, blockArm])
   useEffect(() => {
     // W4f-2: a run makes the engine busy, which disables Run and the fields,
     // and the browser drops focus to the body. When the engine answers, the
@@ -317,7 +311,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     // next-point field. A refused edit chains nothing.
     const chain = chainRef.current
     chainRef.current = null
-    let nextField = armedOp === 'group' ? '[aria-label="ribbon members"]' : 'input:not([disabled])'
+    let nextField = armedOp === 'group' || armedOp === 'createBlock' ? '[aria-label="ribbon members"]' : 'input:not([disabled])'
     if (chain && armedOp === 'createLine' && session.errorKind === null) {
       const x = Number.parseFloat(chain.x)
       const y = Number.parseFloat(chain.y)
@@ -372,6 +366,10 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
       // was cancelling (kimi, #965).
       if (event.target instanceof HTMLButtonElement) return
       event.preventDefault()
+      if (armedOp === 'createBlock' && inputs.membersDone && !waitingStep && !inputs.name) {
+        promptRef.current?.querySelector('[aria-label="ribbon block name"]')?.focus()
+        return
+      }
       run()
     } else if (event.key === 'Escape') {
       // The prompt owns this Esc: it must not ALSO climb to App's
@@ -557,7 +555,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
         className={`cp-input${wide ? ' wide' : ''}`}
         type="text"
         inputMode={mode === 'edge' || mode === 'decimal-default' ? (mode === 'decimal-default' ? 'decimal' : 'text') : mode}
-        list={key === 'name' ? BLOCK_CATALOGUE_ID : key === 'groupName' && armedOp === 'ungroup' ? 'cockpit-group-names' : undefined}
+        list={key === 'name' && armedOp === 'createInsert' ? BLOCK_CATALOGUE_ID : key === 'groupName' && armedOp === 'ungroup' ? 'cockpit-group-names' : undefined}
         maxLength={key === 'groupName' ? 255 : undefined}
         value={promptInputs[key]}
         onChange={(event) => setPromptInput(key, event.target.value)}
@@ -771,7 +769,6 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
               />
             )
           })}
-          {BLOCK_OFF.map((tool) => <RibbonTool key={tool.id} tool={offTool(tool)} />)}
         </RibbonCluster>
       )}
       {show.has('clipboard') && clipboardSlot && createPortal(

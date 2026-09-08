@@ -131,7 +131,6 @@ export const CLIPBOARD_REASONS = Object.freeze({
 // four strings — a literal `DEFERRED_REASONS.key` reference the honesty-ladder
 // gate (check_honesty_ladder.mjs) can verify, same as every other `*REASONS` map.
 export const DEFERRED_REASONS = Object.freeze({
-  blockCreate: 'unavailable; insert an existing block',
   leader: "unavailable; a leader's annotation is an association the contract does not carry yet",
 })
 
@@ -536,6 +535,7 @@ const ACTION_LIST = [
   // W4g-7b-02c: INSERT of an existing block definition, seated in the
   // reference's Block panel the way TEXT sits in Annotation.
   engineOp('draw', 'createInsert', 'insert block', 'Insert Block', 'block-insert', 'Insert an existing block definition at a point with scale and rotation', 'large', 'block'),
+  engineOp('draw', 'createBlock', 'create block', 'Create Block', 'block-create', 'Create a block from committed drawing entities', 'large', 'block'),
 
   // Modify: the entity operations the compiled engine performs.
   engineOp('modify', 'delete', 'delete', 'Delete', 'delete', 'Delete the selected entity', 'small'),

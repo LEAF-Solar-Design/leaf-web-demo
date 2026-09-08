@@ -372,7 +372,6 @@ function offTool(id, label, icon, size = 'small') {
 // parameter or a bracketed lookup reads as a computed expression there and
 // counts against its unverifiable-reason budget instead.
 const LEADER_OFF = { id: 'annotation:leader', label: 'Leader', text: 'Leader', icon: 'leader', size: 'large', title: 'Leader', disabled: true, reason: DEFERRED_REASONS.leader, onClick: () => {} }
-const BLOCK_CREATE_OFF = { id: 'block:create', label: 'Create Block', text: 'Create Block', icon: 'block-create', size: 'large', title: 'Create Block', disabled: true, reason: DEFERRED_REASONS.blockCreate, onClick: () => {} }
 
 /**
  * The reference's Draw-tab panels beyond Draw and Modify (which the engine
@@ -400,7 +399,7 @@ export function referencePanels() {
       // the honest placeholder either way, with its own reason (W4g-7b-05c).
       id: 'block', label: 'Block', kind: 'group', note,
       tools: [
-        BLOCK_CREATE_OFF,
+        offTool('draw:createBlock', 'Create Block', 'block-create', 'large'),
         offTool('block:insert', 'Insert Block', 'block-insert', 'large'),
       ],
     },

@@ -250,6 +250,13 @@
    the three rows. Before this the slots rendered after the row and fell
    under the label, off the band. */
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-slot { display: contents; }
+/* Keep the group picker compact beside the two large tools. */
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) #cockpit-groups-slot > label {
+  display: flex; flex-direction: column; width: 120px; min-width: 0;
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) #cockpit-groups-slot > label > select {
+  width: 120px; min-width: 0; box-sizing: border-box; font-size: 12px;
+}
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-slot-panel {
   display: block; grid-row: 1 / span 3; align-self: start; min-width: 0;
 }

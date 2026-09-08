@@ -100,6 +100,12 @@ function projectDocument(doc) {
       closed: entity.closed,
       editable: entity.editable,
       modelSpace: entity.modelSpace !== false,
+      normal: entity.normal ?? [0, 0, 1],
+      definingHandles: entity.definingHandles ?? [],
+      dimensionDefined: entity.dimensionDefined === true,
+      constantWidth: entity.constantWidth ?? null,
+      startWidths: entity.startWidths ?? null,
+      endWidths: entity.endWidths ?? null,
       vertices: entity.vertices,
       // W4f: drawable fields for CIRCLE/ARC (null for every other kind), so
       // the viewer can show the engine document; older wrappers without
@@ -248,6 +254,12 @@ const MAX_BATCH_STEPS = 4
  */
 function applyOne(doc, op, payload) {
   const p = payload && typeof payload === 'object' ? payload : {}
+  // Replacing committed members is separate from the Draw create census.
+  if (op === 'createBlock') {
+    if (typeof doc.createBlock !== 'function') throw new Error('engine_lacks_op:createBlock')
+    const handle = doc.createBlock(String(p.name ?? ''), Number(p.x), Number(p.y), JSON.stringify(p.members ?? []))
+    return { createdHandle: handleId(handle, 'create_returned_no_handle'), createdHandles: null }
+  }
   // Group objects are not Draw entities. Report their handle without adding
   // them to the Draw create table or changing the scalar entity selection.
   if (op === 'createGroup') {

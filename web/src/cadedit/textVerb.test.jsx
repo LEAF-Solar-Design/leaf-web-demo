@@ -79,7 +79,7 @@ describe('W4g-5d surface: word, prompt, pick, seat', () => {
     const annotationOps = ['createText', 'dimLinear', 'dimAligned']
     for (const a of forGroup('draw')) {
       if (annotationOps.includes(a.op)) expect(a.panel).toBe('annotation')
-      else if (a.op !== 'createInsert') expect(a.panel).toBe('draw')
+      else if (a.op !== 'createInsert' && a.op !== 'createBlock') expect(a.panel).toBe('draw')
     }
   })
 })

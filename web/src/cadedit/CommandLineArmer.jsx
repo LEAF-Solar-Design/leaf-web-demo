@@ -52,7 +52,7 @@ export default function CommandLineArmer() {
     if (typeof window === 'undefined') return undefined
     const onCommand = (event) => {
       const detail = event?.detail
-      // A deferred word arms nothing (Create Block, Leader, Group, Ungroup):
+      // A deferred Leader word arms nothing:
       // its reason is surfaced exactly the way a real refusal is, instead of
       // being dropped the way an out-of-contract group is below. The reason
       // must match the frozen sentence for its op, or it is dropped too —
@@ -81,7 +81,7 @@ export default function CommandLineArmer() {
         else applyEdit(detail.op, inputs)
         return
       }
-      setArmed({ group: detail.group, op: detail.op })
+      setArmed({ group: detail.group, op: detail.op }, { rearm: true })
     }
     window.addEventListener(COCKPIT_COMMAND_EVENT, onCommand)
     return () => window.removeEventListener(COCKPIT_COMMAND_EVENT, onCommand)

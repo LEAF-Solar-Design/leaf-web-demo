@@ -100,7 +100,7 @@ const INPUT_KEYS = new Set(Object.keys(DEFAULT_EDIT_INPUTS))
 export const MAX_INPUT_CHARS = 64
 export const MAX_POINT_LIST_CHARS = 4096
 // Style keeps the plan contract's DIMSTYLE name bound, mutation_plan.py.
-const INPUT_LIMITS = Object.freeze({ pts: MAX_POINT_LIST_CHARS, style: 255, members: MAX_POINT_LIST_CHARS, groupName: 255 })
+const INPUT_LIMITS = Object.freeze({ pts: MAX_POINT_LIST_CHARS, style: 255, members: MAX_POINT_LIST_CHARS, groupName: 255, name: 255 })
 
 // The two ribbon groups whose tools prompt for operands, and the op token's
 // shape (a JS identifier the clusters own; the engine validates the op
@@ -157,7 +157,9 @@ export default function EngineSessionProvider({
   const currentGroup = highlightedGroup?.document === session.documentLoadIdentity && session.engineParsed
     ? (session.entities.groups || []).find((item) => item.name.toUpperCase() === highlightedGroup.name)
     : null
-  const highlightedIds = useMemo(() => new Set(currentGroup?.memberIds || []), [currentGroup])
+  const highlightedIds = useMemo(() => new Set(armed?.op === 'createBlock'
+    ? [session.selectedId, ...String(inputs.members || '').split(/\s+/)].filter(Boolean)
+    : currentGroup?.memberIds || []), [currentGroup, armed, session.selectedId, inputs.members])
   const selectGroup = useCallback((name) => {
     const group = (session.entities.groups || []).find((item) => item.name.toUpperCase() === String(name).trim().toUpperCase())
     const ids = group?.memberIds || []
@@ -181,7 +183,7 @@ export default function EngineSessionProvider({
   const setArmedState = useCallback((next) => {
     setEditState((current) => current.armed === next ? current : { ...current, armed: next })
   }, [])
-  const setArmed = useCallback((next) => {
+  const setArmed = useCallback((next, { rearm = false } = {}) => {
     if (next === null) { setArmedState(null); return }
     if (!next || typeof next !== 'object') return
     const { group, op } = next
@@ -195,17 +197,19 @@ export default function EngineSessionProvider({
       : null
     setEditState((current) => {
       const previous = current.armed
-      if (previous && previous.group === group && previous.op === op && sameFrom(previous.from, from)) return current
+      if (!rearm && previous && previous.group === group && previous.op === op && sameFrom(previous.from, from)) return current
       // W4g-7b-04c-8: a prompt speaks only to the keys it shows. Publish
       // the arm and hidden-key defaults together; a LINE chain's `from`
-      // stays on the armed record, and repeating the same op keeps inputs.
+      // stays on the armed record; same-op updates keep inputs.
       let nextInputs = current.inputs
-      if (previous?.op !== op) {
+      const resetGesture = previous?.op !== op || rearm
+      if (resetGesture) {
         const shown = promptKeys(op)
         nextInputs = Object.freeze(Object.fromEntries(Object.entries(DEFAULT_EDIT_INPUTS)
           .map(([key, value]) => [key, shown.has(key) ? current.inputs[key] : value])))
       }
-      if (op === 'group') nextInputs = Object.freeze({ ...nextInputs, members: '', groupName: '', membersDone: '' })
+      if (resetGesture && op === 'group') nextInputs = Object.freeze({ ...nextInputs, members: '', groupName: '', membersDone: '' })
+      if (resetGesture && op === 'createBlock') nextInputs = Object.freeze({ ...nextInputs, members: '', membersDone: '', name: '', x: '', y: '' })
       return { inputs: nextInputs, armed: Object.freeze(from ? { group, op, from } : { group, op }) }
     })
   }, [setArmedState])

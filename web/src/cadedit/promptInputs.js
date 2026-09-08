@@ -58,7 +58,7 @@ export function resolvePromptInputs(prompt, inputs, from = null) {
     }
   }
   const waitingStep = prompt && !expressionRefusal
-    ? prompt.steps.find((step) => step.fields.some(([key, , mode = 'decimal']) => (mode === 'decimal' || mode === 'edge') && String(effective[key] ?? '').trim() === '')) || null
+    ? prompt.steps.find((step) => step.fields.some(([key, , mode = 'decimal']) => !(prompt.verb === 'BLOCK' && key === 'members' && effective.membersDone) && (mode === 'decimal' || mode === 'edge') && String(effective[key] ?? '').trim() === '')) || null
     : null
   return { effective, expressionRefusal, failedExpression, waitingStep, pointSteps }
 }

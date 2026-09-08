@@ -42,7 +42,7 @@ import { SESSION_ERROR } from './engineSessionErrors.js'
 import { offsetEntity } from './offset.js'
 import { MAX_BATCH_STEPS, MAX_COORD, MAX_INTERSECT_POINTS, chamferLines, extendEntity, filletLines, trimEntity } from './intersect.js'
 import { clipboardRecord, describeRecord, pasteOp } from './clipboard.js'
-import { diffPlan } from './mutationDiff.js'
+import { diffPlan, sameBlockMember } from './mutationDiff.js'
 
 // Mirrors the worker's own bound. Checked against File.size BEFORE any read.
 export const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
@@ -91,6 +91,7 @@ export function projectionEntities(message) {
   const next = entities.slice()
   if (Array.isArray(groups)) next.groups = groups
   if (Array.isArray(blocks)) next.blocks = blocks
+  next.blocksTruncated = (message?.blocksTruncated ?? entities.blocksTruncated) === true
   if (Array.isArray(linetypes)) next.linetypes = linetypes
   next.linetypesTruncated = linetypesTruncated
   if (Array.isArray(dimstyles)) next.dimstyles = dimstyles
@@ -240,6 +241,8 @@ export const INTERSECT_VERBS = Object.freeze({
 export const WORKER_OP = Object.freeze({ createRectangle: 'createPolyline', dimLinear: 'createDimension', dimAligned: 'createDimension' })
 // Groups create dictionary objects, not Draw entities or scalar selections.
 const GROUP_OPS = Object.freeze({ group: 'createGroup', ungroup: 'ungroup' })
+// Block creation replaces committed members and selects the new INSERT.
+export const BLOCK_OPS = Object.freeze({ block: 'createBlock' })
 
 // W4g-7b-04c-3: the fixed dimtype each seat op carries into createDimension's
 // own payload builder. buildCreatePayload never reads a typed `dimtype` input
@@ -281,13 +284,45 @@ export function parsePointList(raw) {
  * with a typed reason; this layer exists so a typo costs a sentence, not a
  * round trip.
  */
-export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, layer, height, rot, text, ratio, bulges, name, sx, sy, dimtype, dx, dy, style } = {}, blocks = [], dimstyles = []) {
+export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, layer, height, rot, text, ratio, bulges, name, sx, sy, dimtype, dx, dy, style, members, selectedId } = {}, blocks = [], dimstyles = [], context = {}) {
   const layerName = String(layer ?? '').trim()
   // W4g-7b-04c-3: the seat ops dimLinear / dimAligned lower to createDimension
   // with a fixed dimtype from DIMTYPE_OF (the typed dimtype input is ignored
   // for these two).
   const seatDimtype = DIMTYPE_OF[op]
   const effectiveOp = seatDimtype ? 'createDimension' : op
+  if (op === 'createBlock') {
+    const fail = (rule) => ({ refusal: `Create block refused: ${rule}.` })
+    const blockName = String(name ?? '').trim()
+    if (!admissibleBlockName(blockName) || /[<>/\\":;?*|,=`]/.test(blockName)) return fail('use a new printable block name without reserved punctuation')
+    if (!context.entities?.blocksTruncated && !context.blocksTruncated
+        && (Array.isArray(blocks) ? blocks : []).some((b) => String(b.name).trim().toLowerCase() === blockName.toLowerCase())) return fail('a block with this name already exists')
+    const [bx, by] = [x, y].map(fmtDelta)
+    if (bx === null || by === null) return fail('the base must be a finite XY point')
+    const rest = Array.isArray(members) ? members.map(String) : String(members ?? '').split(/\s+/).filter(Boolean)
+    const first = selectedId ?? context.selectedId
+    const ids = [...new Set([first, ...rest].filter(Boolean).map(String))]
+    if (!first || ids.length < 1 || ids.length > 60) return fail('select 1 to 60 committed entities')
+    const entities = context.entities || []
+    const committed = context.committedEntities || []
+    for (const id of ids) {
+      const entity = entities.find((e) => String(e.id ?? e.handle) === id)
+      if (!entity || !['LINE', 'LWPOLYLINE', 'CIRCLE', 'ARC'].includes(entity.type)) return fail('only LINE, straight LWPOLYLINE, CIRCLE and ARC can become block children')
+      if (entity.modelSpace === false || entity.blockChild || entity.ownerBlock) return fail('every member must be in model space')
+      const normal = entity.normal ?? [0, 0, 1]
+      if (!Array.isArray(normal) || normal.length !== 3 || normal.some((v, i) => v !== [0, 0, 1][i])) return fail('every member must have normal +Z')
+      if ((entity.bulges || []).some((b) => b !== 0)) return fail('polyline segments must be straight')
+      if ((entity.constantWidth ?? 0) !== 0 || (entity.startWidths || []).some((w) => w !== 0)
+          || (entity.endWidths || []).some((w) => w !== 0)) return fail('polyline widths must be zero')
+      if (entity.aci === 0 || String(entity.linetype).toLowerCase() === 'byblock' || entity.lineweight === -2) return fail('members must not use ByBlock properties')
+      if ((entities.groups || []).some((g) => (g.memberIds || []).map(String).includes(id))) return fail('ungroup members before creating a block')
+      if (entity.dimensionDefined || entities.some((e) => e.type === 'DIMENSION' && (e.definingHandles || []).map(String).includes(id))) return fail('a dimension defining entity cannot become a block child')
+      const original = committed.find((e) => String(e.id ?? e.handle) === id)
+      if (!original) return fail('same-plan additions must be saved before creating a block')
+      if (!sameBlockMember(original, entity)) return fail('members must have unchanged committed geometry and properties')
+    }
+    return { payload: { name: blockName, x: bx, y: by, members: ids, layer: '0' } }
+  }
   if (op === 'createLine') {
     const [x1, y1, xx2, yy2] = [x, y, x2, y2].map(fmtDelta)
     if ([x1, y1, xx2, yy2].some((v) => v === null)) return { refusal: 'Line refused: x, y, x2 and y2 must all be numbers.' }
@@ -1106,6 +1141,7 @@ export default function useEngineSession({
         // handle in the re-parse); the selection lands on it. A create whose
         // entity the writer dropped is a defect and reads as one.
         const isCreate = CREATE_OPS.includes(message.op)
+          || message.op === BLOCK_OPS.block
           || (CREATING_EDITS.includes(message.op) && Object.prototype.hasOwnProperty.call(message, 'createdId'))
         const createdId = isCreate && message.createdId !== null && message.createdId !== undefined
           ? String(message.createdId)
@@ -1266,11 +1302,11 @@ export default function useEngineSession({
       patch({ status: 'a save is in flight; wait for its receipt' })
       return null
     }
-    if (!CREATE_OPS.includes(op)) {
+    if (!CREATE_OPS.includes(op) && op !== BLOCK_OPS.block) {
       patch({ errorKind: SESSION_ERROR.REFUSED, status: `Draw refused: unknown operation ${op}.` })
       return
     }
-    const { payload, refusal } = buildCreatePayload(op, inputs, sessionRef.current.entities.blocks, sessionRef.current.entities.dimstyles)
+    const { payload, refusal } = buildCreatePayload(op, inputs, sessionRef.current.entities.blocks, sessionRef.current.entities.dimstyles, sessionRef.current)
     if (refusal) {
       patch({ errorKind: SESSION_ERROR.REFUSED, status: refusal })
       return
@@ -1435,7 +1471,7 @@ export default function useEngineSession({
     // other refusal (an opaque kind, curved geometry, a definition change,
     // the operation cap) keeps today's sidecar-leg inheritance below.
     const diff = committedEntities ? diffPlan(committedEntities, entities) : null
-    if (diff && !diff.mutations && (diff.cause === 'moved-reference' || diff.cause === 'true-colour' || diff.cause === 'group-singleton')) {
+    if (diff && !diff.mutations && (diff.cause === 'moved-reference' || diff.cause === 'true-colour' || diff.cause === 'group-singleton' || diff.cause === 'block-def-unmatched')) {
       patch({ errorKind: SESSION_ERROR.REFUSED, status: `Save refused: ${diff.reason}.` })
       return null
     }

@@ -76,7 +76,7 @@
 use acadrust::entities::{Arc as ArcEntity, Circle, Dimension, DimensionAligned, DimensionLinear, Entity, EntityType, Line, LwPolyline, Text, Point, Ellipse, Insert};
 use acadrust::types::{Color, Handle, LineWeight, Transform, Vector2, Vector3};
 use acadrust::{CadDocument, DxfReader, DxfWriter};
-use acadrust::objects::{Dictionary, Group, ObjectType};
+use acadrust::objects::{AssociativeData, Dictionary, Group, ObjectType};
 use acadrust::io::dxf::{DxfStreamWriter, DxfTextWriter};
 use serde::Serialize;
 use std::cell::Cell;
@@ -376,6 +376,42 @@ fn block_children(document: &CadDocument) -> HashSet<Handle> {
         .collect()
 }
 
+// One dependency walk shared by the projection and the create boundary.
+fn dimension_defining_handles(document: &CadDocument) -> HashMap<Handle, HashSet<Handle>> {
+    let mut defining = HashMap::<Handle, HashSet<Handle>>::new();
+    let mut reactors = HashMap::<Handle, Handle>::new();
+    for entity in document.entities() {
+        if let EntityType::Dimension(dim) = entity {
+            let handle = entity.common().handle;
+            reactors.insert(handle, handle);
+            defining.entry(handle).or_default().extend(document.block_records.iter()
+                .filter(|b| b.name == dim.base().block_name)
+                .flat_map(|b| b.entity_handles.iter().copied()));
+        }
+    }
+    for object in document.objects.values() {
+        if let ObjectType::Associative(object) = object {
+            if let AssociativeData::DimensionAssociation(assoc) = &object.data {
+                reactors.insert(object.handle, assoc.dimension);
+                let handles = defining.entry(assoc.dimension).or_default();
+                handles.insert(assoc.dimension);
+                for reference in assoc.references.iter().flatten() {
+                    handles.extend(reference.xrefs.iter().copied());
+                    handles.extend(reference.intersection_objects.iter().copied());
+                }
+            }
+        }
+    }
+    for entity in document.entities() {
+        for reactor in &entity.common().reactors {
+            if let Some(dimension) = reactors.get(reactor) {
+                defining.entry(*dimension).or_default().insert(entity.common().handle);
+            }
+        }
+    }
+    defining
+}
+
 fn block_base(document: &CadDocument, block: &acadrust::tables::BlockRecord) -> [f64; 3] {
     let base = match document.get_entity(block.block_entity_handle) {
         Some(EntityType::Block(marker)) => marker.base_point,
@@ -407,6 +443,7 @@ fn entity_record(index: usize, entity: &EntityType, can_edit: bool) -> serde_jso
         "trueColor": true_color_of(&entity.common().color),
         "linetype": linetype_of(entity),
         "lineweight": lineweight_of(entity),
+        "normal": normal_of(entity),
         // W4g-7b-04c: null for every kind but DIMENSION; OTHER dimtypes carry
         // only "dimtype" (the rest stay null, per the projection contract).
         "dimtype": dimension_dimtype_of(entity),
@@ -416,6 +453,17 @@ fn entity_record(index: usize, entity: &EntityType, can_edit: bool) -> serde_jso
         "style": dimension_style_of(entity),
         "measurement": dimension_measurement_of(entity),
     });
+    if let EntityType::LwPolyline(poly) = entity {
+        if poly.constant_width != 0.0 {
+            record["constantWidth"] = serde_json::json!(poly.constant_width);
+        }
+        if poly.vertices.iter().any(|v| v.start_width != 0.0) {
+            record["startWidths"] = serde_json::json!(poly.vertices.iter().map(|v| v.start_width).collect::<Vec<_>>());
+        }
+        if poly.vertices.iter().any(|v| v.end_width != 0.0) {
+            record["endWidths"] = serde_json::json!(poly.vertices.iter().map(|v| v.end_width).collect::<Vec<_>>());
+        }
+    }
     if let EntityType::Insert(insert) = entity {
         record["kind"] = serde_json::json!("REFERENCE");
         record["name"] = serde_json::json!(insert.block_name);
@@ -431,6 +479,8 @@ fn entity_record(index: usize, entity: &EntityType, can_edit: bool) -> serde_jso
 
 fn projected_entities(document: &CadDocument) -> Vec<serde_json::Value> {
     let children = block_children(document);
+    let defining = dimension_defining_handles(document);
+    let defined: HashSet<Handle> = defining.values().flatten().copied().collect();
     document.entities().enumerate()
         .filter(|(_, e)| !children.contains(&e.common().handle))
         .map(|(index, e)| {
@@ -438,6 +488,13 @@ fn projected_entities(document: &CadDocument) -> Vec<serde_json::Value> {
             let model_space = !document.block_records.iter()
                 .any(|block| block.handle == e.common().owner_handle && !block.is_model_space());
             record["modelSpace"] = serde_json::json!(model_space);
+            if defined.contains(&e.common().handle) { record["dimensionDefined"] = serde_json::json!(true); }
+            if let EntityType::Dimension(_) = e {
+                let mut handles: Vec<String> = defining.get(&e.common().handle).into_iter()
+                    .flatten().map(|h| handle_id(h.value())).collect();
+                handles.sort();
+                record["definingHandles"] = serde_json::json!(handles);
+            }
             record
         })
         .collect()
@@ -884,7 +941,92 @@ fn projected_groups(document: &CadDocument) -> Vec<serde_json::Value> {
 }
 
 // ---- the cores: every operation, natively testable ------------------------
+fn normal_of(entity: &EntityType) -> [f64; 3] {
+    let n = match entity {
+        EntityType::Line(e) => e.normal,
+        EntityType::LwPolyline(e) => e.normal,
+        EntityType::Circle(e) => e.normal,
+        EntityType::Arc(e) => e.normal,
+        _ => Vector3::new(0.0, 0.0, 1.0),
+    };
+    [n.x, n.y, n.z]
+}
+
 impl ParsedDxf {
+    fn create_block_core(&mut self, name: &str, base: [f64; 3], member_handles: &[String], layer_of_insert: &str) -> Result<String, Refusal> {
+        if self.block_bases_unknown {
+            return refuse("block_bases_unknown: the drawing's block bases are unknown after a binary load; save as ASCII DXF first");
+        }
+        let name = name.trim();
+        if name.is_empty() || name.len() > 255 || name.starts_with('*')
+            || name.bytes().any(|b| !(0x20..=0x7e).contains(&b) || b"<>/\\\":;?*|,=`".contains(&b)) {
+            return refuse("block_name_invalid: use a new printable block name without reserved punctuation");
+        }
+        if self.inner.block_records.iter().any(|b| b.name.trim().eq_ignore_ascii_case(name)) {
+            return refuse("block_name_exists: a block with this name already exists");
+        }
+        if !all_finite(&base) || base[2] != 0.0 { return refuse("block_base_invalid: the base must be a finite XY point"); }
+        if !layer_of_insert.is_empty() && layer_of_insert != "0" { return refuse("block_insert_layer: the replacement INSERT must use layer 0"); }
+        if member_handles.is_empty() || member_handles.len() > 60 { return refuse("block_member_count: select 1 to 60 committed entities"); }
+        let mut handles = HashSet::new();
+        let mut children = Vec::new();
+        let defining: HashSet<Handle> = dimension_defining_handles(&self.inner).values().flatten().copied().collect();
+        for id in member_handles {
+            let entity = self.inner.entities().find(|e| handle_id(e.common().handle.value()) == *id)
+                .ok_or_else(|| "block_member_missing: every member must exist in the drawing".to_string())?;
+            let common = entity.common();
+            if !handles.insert(common.handle) { return refuse("block_member_duplicate: each member must be distinct"); }
+            if !matches!(entity, EntityType::Line(_) | EntityType::LwPolyline(_) | EntityType::Circle(_) | EntityType::Arc(_)) {
+                return refuse("block_member_kind: only LINE, straight LWPOLYLINE, CIRCLE and ARC can become block children");
+            }
+            if self.inner.block_records.iter().any(|b| !b.is_model_space() && (b.handle == common.owner_handle || b.entity_handles.contains(&common.handle)))
+                || common.entity_mode == Some(1) {
+                return refuse("block_member_space: every member must be in model space");
+            }
+            if normal_of(entity) != [0.0, 0.0, 1.0] { return refuse("block_member_normal: every member must have normal +Z"); }
+            if let EntityType::LwPolyline(poly) = entity {
+                if poly.vertices.iter().any(|v| v.bulge != 0.0) { return refuse("block_member_bulge: polyline segments must be straight"); }
+                if poly.constant_width != 0.0 || poly.vertices.iter().any(|v| v.start_width != 0.0 || v.end_width != 0.0) {
+                    return refuse("block_member_width: polyline widths must be zero");
+                }
+            }
+            if aci_of(&common.color) == 0 || linetype_of(entity).eq_ignore_ascii_case("ByBlock") || lineweight_of(entity) == -2 {
+                return refuse("block_member_byblock: members must not use ByBlock properties");
+            }
+            if self.inner.objects.values().any(|o| matches!(o, ObjectType::Group(g) if g.entities.contains(&common.handle))) {
+                return refuse("block_member_group: ungroup members before creating a block");
+            }
+            if defining.contains(&common.handle) {
+                return refuse("block_member_dimension: a dimension defining entity cannot become a block child");
+            }
+            let mut child = entity.clone();
+            child.common_mut().handle = Handle::NULL;
+            child.common_mut().owner_handle = Handle::NULL;
+            child.common_mut().entity_mode = None;
+            child.common_mut().reactors.clear();
+            child.common_mut().xdictionary_handle = None;
+            children.push(child);
+        }
+        // All changes are staged. Even an internal insertion failure leaves self byte-identical.
+        let mut next = self.inner.clone();
+        let mut block = acadrust::tables::BlockRecord::new(name);
+        block.handle = next.allocate_handle();
+        block.block_entity_handle = next.allocate_handle();
+        block.block_end_handle = next.allocate_handle();
+        block.base_point = Vector3::new(base[0], base[1], base[2]);
+        let owner = block.handle;
+        next.block_records.add(block).map_err(|e| format!("block_create_failed:{e}"))?;
+        for mut child in children {
+            child.common_mut().owner_handle = owner;
+            next.add_entity(child).map_err(|e| format!("block_create_failed:{e}"))?;
+        }
+        let insert = Insert::new(name, Vector3::new(base[0], base[1], base[2]));
+        let inserted = next.add_entity(EntityType::Insert(insert)).map_err(|e| format!("block_create_failed:{e}"))?;
+        for handle in handles { next.remove_entity(handle).ok_or_else(|| "block_member_missing".to_string())?; }
+        self.inner = next;
+        Ok(handle_id(inserted.value()))
+    }
+
     fn create_group_core(&mut self, name: &str, member_indices: &[usize]) -> Result<String, Refusal> {
         let name = name.trim();
         if name.is_empty() || name.len() > 255
@@ -2002,6 +2144,13 @@ impl ParsedDxf {
         self.create_group_core(name, &indices).map_err(js_err)
     }
 
+    #[wasm_bindgen(js_name = createBlock)]
+    pub fn create_block(&mut self, name: &str, bx: f64, by: f64, handles_json: &str) -> Result<String, JsValue> {
+        let handles: Vec<String> = serde_json::from_str(handles_json)
+            .map_err(|_| JsValue::from_str("block_members_invalid: members must be entity handles"))?;
+        self.create_block_core(name, [bx, by, 0.0], &handles, "0").map_err(js_err)
+    }
+
     #[wasm_bindgen(js_name = ungroup)]
     pub fn ungroup(&mut self, name: &str) -> Result<(), JsValue> {
         self.ungroup_core(name).map_err(js_err)
@@ -2424,6 +2573,89 @@ pub fn bytes_equal(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod created_entity_roundtrip {
     use super::*;
+
+    #[test]
+    fn create_block_keeps_coordinates_and_refuses_without_changing_bytes() {
+        let mut doc = empty_doc();
+        let line = doc.create_line_core(12.0, 23.0, 17.0, 23.0, "0").unwrap();
+        let circle = doc.create_circle_core(11.0, 24.0, 2.0, "0").unwrap();
+        let members = vec![line, circle];
+        let before = DxfWriter::new(&doc.inner).write_to_vec().unwrap();
+        let mut late_failure = members.clone();
+        late_failure.push("4294967295".to_string());
+        assert_eq!(code(doc.create_block_core("Late", [10.0, 20.0, 0.0], &late_failure, "0")),
+            "block_member_missing: every member must exist in the drawing");
+        assert_eq!(before, DxfWriter::new(&doc.inner).write_to_vec().unwrap());
+        for name in ["bad<name", "", "*anonymous"] {
+            assert!(doc.create_block_core(name, [10.0, 20.0, 0.0], &members, "0").is_err());
+            assert_eq!(before, DxfWriter::new(&doc.inner).write_to_vec().unwrap());
+        }
+        let inserted = doc.create_block_core("B", [10.0, 20.0, 0.0], &members, "0").unwrap();
+        let projection = projected_entities(&doc.inner);
+        assert_eq!(projection.len(), 1);
+        assert_eq!(projection[0]["handle"], inserted);
+        assert_eq!(projection[0]["type"], "INSERT");
+        let definitions = block_catalogue(&doc.inner, false, &doc.unknown_block_bases);
+        assert_eq!(definitions[0]["base"], serde_json::json!([10.0, 20.0, 0.0]));
+        assert_eq!(definitions[0]["children"][0]["vertices"], serde_json::json!([[12.0, 23.0, 0.0], [17.0, 23.0, 0.0]]));
+        let after = DxfWriter::new(&doc.inner).write_to_vec().unwrap();
+        assert!(doc.create_block_core("b", [10.0, 20.0, 0.0], &members, "0").is_err());
+        assert_eq!(after, DxfWriter::new(&doc.inner).write_to_vec().unwrap());
+        let (written, _) = patch_block_bases(&doc.inner, after);
+        let back = parse_dxf_core(&written).unwrap();
+        let restored = block_catalogue(&back.inner, false, &back.unknown_block_bases);
+        assert_eq!(restored[0]["base"], definitions[0]["base"]);
+        assert_eq!(restored[0]["children"][0]["vertices"], definitions[0]["children"][0]["vertices"]);
+        assert_eq!(projected_entities(&back.inner).len(), 1);
+    }
+
+    #[test]
+    fn create_block_refuses_dimassoc_sources_from_the_real_projection() {
+        let bytes = b"0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1027\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nLINE\n5\n10\n102\n{ACAD_REACTORS\n330\n30\n102\n}\n8\n0\n10\n12\n20\n23\n11\n17\n21\n23\n0\nDIMENSION\n5\n20\n8\n0\n70\n0\n10\n0\n20\n5\n13\n0\n23\n0\n14\n5\n24\n0\n0\nENDSEC\n0\nSECTION\n2\nOBJECTS\n0\nDIMASSOC\n5\n30\n100\nAcDbDimAssoc\n330\n20\n90\n1\n70\n0\n71\n0\n1\nAcDbOsnapPointRef\n72\n1\n331\n10\n73\n1\n91\n0\n40\n0\n10\n12\n20\n23\n30\n0\n75\n0\n0\nENDSEC\n0\nEOF\n";
+        let mut doc = parse_dxf_core(bytes).unwrap();
+        assert!(doc.inner.objects.values().any(|o| matches!(o, ObjectType::Associative(a)
+            if matches!(&a.data, AssociativeData::DimensionAssociation(d) if d.dimension == Handle::new(0x20)
+                && d.references.iter().flatten().any(|r| r.xrefs.contains(&Handle::new(0x10)))))));
+        let projection = projected_entities(&doc.inner);
+        let dim = projection.iter().find(|e| e["handle"] == "32").unwrap();
+        assert!(dim["definingHandles"].as_array().unwrap().contains(&serde_json::json!("16")));
+        for with_reactor in [true, false] {
+            if !with_reactor { doc.inner.get_entity_mut(Handle::new(0x10)).unwrap().common_mut().reactors.clear(); }
+            let before = DxfWriter::new(&doc.inner).write_to_vec().unwrap();
+            assert_eq!(code(doc.create_block_core("B", [10.0, 20.0, 0.0], &["16".to_string()], "0")),
+                "block_member_dimension: a dimension defining entity cannot become a block child");
+            assert_eq!(before, DxfWriter::new(&doc.inner).write_to_vec().unwrap());
+        }
+    }
+
+    #[test]
+    fn create_block_refuses_widths_before_changing_bytes() {
+        for kind in 0..3 {
+            let mut doc = empty_doc();
+            let id = doc.create_polyline_core(&[0.0, 0.0, 5.0, 0.0], false, "0", &[]).unwrap();
+            assert!(projected_entities(&doc.inner)[0]["constantWidth"].is_null());
+            assert!(projected_entities(&doc.inner)[0]["startWidths"].is_null());
+            for entity in doc.inner.entities_mut() {
+                if let EntityType::LwPolyline(poly) = entity {
+                    match kind {
+                        0 => poly.constant_width = 2.0,
+                        1 => poly.vertices[0].start_width = 2.0,
+                        _ => poly.vertices[0].end_width = 2.0,
+                    }
+                }
+            }
+            let projection = projected_entities(&doc.inner);
+            match kind {
+                0 => assert_eq!(projection[0]["constantWidth"], 2.0),
+                1 => assert_eq!(projection[0]["startWidths"][0], 2.0),
+                _ => assert_eq!(projection[0]["endWidths"][0], 2.0),
+            }
+            let before = DxfWriter::new(&doc.inner).write_to_vec().unwrap();
+            assert_eq!(code(doc.create_block_core("B", [0.0, 0.0, 0.0], &[id], "0")),
+                "block_member_width: polyline widths must be zero");
+            assert_eq!(before, DxfWriter::new(&doc.inner).write_to_vec().unwrap());
+        }
+    }
 
     #[test]
     fn named_group_roundtrip_collision_ungroup_and_deletion_repair() {
@@ -3482,6 +3714,17 @@ mod block_definition_rows {
         assert_eq!(blocks[0]["complete"], false);
         assert_eq!(blocks[0]["children"].as_array().unwrap().len(), 1);
         assert_eq!(projected_entities(&doc.inner)[0]["type"], "INSERT");
+    }
+
+    #[test]
+    fn create_block_after_binary_load_refuses_before_mutation() {
+        let source = b"0\nSECTION\n2\nENTITIES\n0\nLINE\n5\n10\n8\n0\n10\n12\n20\n23\n11\n17\n21\n23\n0\nENDSEC\n0\nEOF\n";
+        let mut doc = parsed(binary_fixture(source));
+        assert!(doc.block_bases_unknown);
+        let before = DxfWriter::new(&doc.inner).write_to_vec().unwrap();
+        assert_eq!(doc.create_block_core("B", [10.0, 20.0, 0.0], &["16".to_string()], "0").unwrap_err(),
+            "block_bases_unknown: the drawing's block bases are unknown after a binary load; save as ASCII DXF first");
+        assert_eq!(before, DxfWriter::new(&doc.inner).write_to_vec().unwrap());
     }
 
     #[test]

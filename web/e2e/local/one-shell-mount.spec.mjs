@@ -1655,7 +1655,7 @@ test.describe('route matrix, rail ON', () => {
     const block = ribbon.locator('[data-group="block"]')
     await expect(block.locator('.ribbon-tool')).toHaveCount(2)
     await expect(block.locator('[data-tool="draw:createInsert"]')).toBeEnabled()
-    await expect(block.locator('[data-tool="block:create"]')).toBeDisabled()
+    await expect(block.locator('[data-tool="draw:createBlock"]')).toBeEnabled()
 
     const countBefore = Number(await page.getByTestId('cad-edit-entity-count').textContent())
     const script = page.getByLabel('ribbon script', { exact: true })
@@ -1692,6 +1692,99 @@ test.describe('route matrix, rail ON', () => {
     await ribbon.locator('[data-tool="undo-edit"]').click()
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBefore), { timeout: 60_000 })
     await expect(ribbon.locator('[data-tool="redo-edit"]')).toBeEnabled()
+  })
+
+  test('W4g-7c-2c: create a block from committed LINE and CIRCLE picks', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    let headDxf = '0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n'
+    await page.route('**/sample.dxf', (route) => route.fulfill({ status: 200, contentType: 'application/dxf', body: headDxf }))
+    await page.goto('/app?dev=1')
+    await page.getByLabel('Use mock data (off = live backend)').check()
+    const ribbon = page.getByTestId('drafting-ribbon')
+    const engine = await request.get('/engine/engine.js').catch(() => null)
+    await page.getByRole('tab', { name: 'Draw' }).click()
+    if (!engine || engine.status() !== 200 || !(await ribbon.locator('[data-group="modify"]').count())) {
+      test.info().annotations.push({ type: 'engine', description: 'compiled engine not served, or flag off; Create Block not exercised' })
+      return
+    }
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('0', { timeout: 60_000 })
+    const bar = page.getByLabel('Command bar', { exact: true })
+    for (const [index, command] of [
+      { word: 'LINE', start: '30,23', end: '35,23' },
+      { word: 'LINE', start: '12,23', end: '17,23' },
+      { word: 'CIRCLE', start: '11,24', radius: '2' },
+    ].entries()) {
+      await bar.fill(command.word)
+      await bar.press('Enter')
+      await page.getByLabel('ribbon x', { exact: true }).fill(command.start)
+      const last = page.getByLabel(command.end ? 'ribbon x2' : 'ribbon r', { exact: true })
+      await last.fill(command.end || command.radius)
+      await last.press('Enter')
+      await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(index + 1), { timeout: 60_000 })
+      await page.keyboard.press('Escape')
+    }
+    // These members must be committed. Publish the drawn bytes to this test's
+    // intercepted mock head, then reopen it; never move the shared demo head.
+    headDxf = await page.locator('a[download][href^="blob:"]').evaluate(async (link) => (await fetch(link.href)).text())
+    await page.reload()
+    await page.getByLabel('Use mock data (off = live backend)').check()
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('3', { timeout: 60_000 })
+    await page.getByRole('tab', { name: 'Draw' }).click()
+    await page.locator('body').press('Escape')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
+    const clickWorld = async (x, y) => {
+      const point = await page.evaluate(({ x, y }) => {
+        const pt = document.querySelector('.studio-ground .viewer-canvas').__cadviewer.project(x, y)
+        return { ...pt, onGround: !!document.elementFromPoint(pt.x, pt.y)?.closest('.studio-ground') }
+      }, { x, y })
+      expect(point.onGround, `projected point (${x},${y}) must be on the drawing`).toBe(true)
+      await page.mouse.click(point.x, point.y)
+    }
+    await clickWorld(14.5, 23)
+    await bar.fill('B')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'createBlock')
+    await expect(page.getByLabel('ribbon members')).toHaveText('1 objects')
+    await clickWorld(9, 24)
+    await expect(page.getByLabel('ribbon members')).toHaveText('2 objects')
+    await page.getByLabel('ribbon members').press('Enter')
+    await page.getByLabel('ribbon x', { exact: true }).fill('10,20')
+    await page.getByLabel('ribbon x', { exact: true }).press('Enter')
+    await page.getByLabel('ribbon block name').fill('BLK1')
+    await page.getByLabel('ribbon block name').press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('2', { timeout: 60_000 })
+    await expect(page.getByTestId('cad-edit-entity-list')).toContainText('INSERT on layer 0')
+    // Select the surviving LINE on the canvas, then reissue B without Escape
+    // from a partially answered BLOCK prompt to prove an explicit fresh arm.
+    await page.keyboard.press('Escape')
+    await clickWorld(32.5, 23)
+    await bar.fill('B')
+    await bar.press('Enter')
+    await page.getByLabel('ribbon members').press('Enter')
+    await page.getByLabel('ribbon x', { exact: true }).fill('10,20')
+    await page.getByLabel('ribbon x', { exact: true }).press('Enter')
+    await page.getByLabel('ribbon block name').fill('STALE')
+    await bar.fill('B')
+    await bar.press('Enter')
+    await expect(page.getByLabel('ribbon members')).toHaveText('1 objects')
+    await expect(page.getByLabel('ribbon block name')).toHaveValue('')
+    await expect(page.getByLabel('ribbon x', { exact: true })).toHaveValue('')
+    await page.keyboard.press('Escape')
+    await bar.fill('UNDO')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('3', { timeout: 60_000 })
+    await bar.fill('REDO')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('2', { timeout: 60_000 })
+    await bar.fill('BLOCK')
+    await bar.press('Enter')
+    await page.getByLabel('ribbon members').press('Enter')
+    await page.getByLabel('ribbon x', { exact: true }).fill('10,20')
+    await page.getByLabel('ribbon block name').fill('blk1')
+    await expect(page.getByTestId('cockpit-prompt-note')).toContainText('already exists')
+    await expect(page.getByTestId('cockpit-prompt-run')).toBeDisabled()
   })
 
   test('solar depth: real solved strings on the Solar tab only, honesty-gated (W4c-V3)', async ({ page, request }) => {

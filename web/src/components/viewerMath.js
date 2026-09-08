@@ -9,6 +9,11 @@
 // controls target, and calls controls.update() after a mutation.
 import * as THREE from 'three'
 
+/** Pixel click aperture in world units, or the default line threshold. */
+export function pickLineThreshold(worldPerPixel, px = 6) {
+  return Number.isFinite(worldPerPixel) && worldPerPixel > 0 ? worldPerPixel * px : 1
+}
+
 // A zero-area rect means the canvas is not laid out (hidden pane, mid-mount):
 // every function here answers null rather than NaN. The hidden browser pane
 // lies about geometry (innerWidth 0) and NaN coordinates poison every

@@ -463,11 +463,11 @@ describe('referencePanels (the flag-off placeholders)', () => {
     expect(leader.reason).toBe(DEFERRED_REASONS.leader)
   })
 
-  it('Block gives Create Block its own reason; Insert Block stays generic', () => {
+  it('Block uses the engine-off reason for both real commands', () => {
     const [, block] = referencePanels()
-    const create = toolsOf(block)['block:create']
+    const create = toolsOf(block)['draw:createBlock']
     expect(create.disabled).toBe(true)
-    expect(create.reason).toBe(DEFERRED_REASONS.blockCreate)
+    expect(create.reason).toBe(REASONS.notInEngine)
     expect(toolsOf(block)['block:insert'].reason).toBe(REASONS.notInEngine)
   })
 
