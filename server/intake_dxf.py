@@ -148,6 +148,10 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
     inserts = intake.get("inserts", [])
     dimensions = intake.get("dimensions", [])
     dimstyles_in = intake.get("dimstyles", [])
+    mleaders = intake.get("mleaders", [])
+    mlstyles_in = intake.get("mlstyles", [])
+    if not isinstance(mleaders, list) or not isinstance(mlstyles_in, list):
+        _fail("mleaders and mlstyles must be lists")
     if not isinstance(layers_in, list) or len(layers_in) > MAX_LAYERS:
         _fail(f"layers must be a list of at most {MAX_LAYERS}")
     if not isinstance(polylines, list) or not isinstance(texts, list):
@@ -158,7 +162,7 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         _fail("inserts must be a list")
     if not isinstance(dimensions, list) or not isinstance(dimstyles_in, list):
         _fail("dimensions and dimstyles must be lists")
-    if (len(polylines) + len(texts) + len(circles) + len(arcs) + len(inserts) + len(dimensions)
+    if (len(polylines) + len(texts) + len(circles) + len(arcs) + len(inserts) + len(dimensions) + len(mleaders)
             > MAX_ENTITIES):
         _fail(f"more than {MAX_ENTITIES} entities")
     properties = intake.get("properties", {})
@@ -212,6 +216,21 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
     kind_properties: List[List[str]] = []
     kind_sources: List[Dict[str, Any]] = []
     total_points = 0
+    mlstyles = {}
+    for k, style in enumerate(mlstyles_in):
+        where = f"mlstyles[{k}]"
+        if not isinstance(style, dict):
+            _fail(f"{where}: not an object")
+        name = _layer_name(style.get("name"), where)
+        if name.casefold() in {n.casefold() for n in mlstyles}:
+            _fail(f"{where}: duplicate style")
+        segments = style.get("segments")
+        if isinstance(segments, bool) or not isinstance(segments, int):
+            _fail(f"{where}: segments must be an integer")
+        mlstyles[name] = {"name": name, "textstyle": _layer_name(style.get("textstyle"), where),
+                          "segments": segments,
+                          **{field: _number(style.get(field), where)
+                             for field in ("height", "arrow", "dogleg", "gap")}}
     for k, poly in enumerate(polylines):
         where = f"polylines[{k}]"
         if not isinstance(poly, dict):
@@ -366,6 +385,44 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         kind_sources.append(ent)
         kind_properties.append([])  # DIMENSION carries no colour/linetype/lineweight round trip
 
+    for k, ent in enumerate(mleaders):
+        where = f"mleaders[{k}]"
+        if not isinstance(ent, dict):
+            _fail(f"{where}: not an object")
+        layer = _layer_name(ent.get("layer"), where)
+        style = _layer_name(ent.get("style"), where)
+        if style not in mlstyles:
+            _fail(f"{where}: unresolved mleader style")
+        pts = ent.get("pts")
+        if not isinstance(pts, list) or not 2 <= len(pts) <= MAX_POINTS_PER_ENTITY:
+            _fail(f"{where}: invalid point count")
+        total_points += len(pts)
+        if total_points > MAX_POINTS:
+            _fail(f"more than {MAX_POINTS} points in total")
+        record = {"layer": layer, "style": style,
+                  "textstyle": _layer_name(ent.get("textstyle"), where),
+                  "pts": [_vector(p, where) for p in pts],
+                  **{field: _vector(ent.get(field), where)
+                     for field in ("landing", "dogleg_dir", "textpt")},
+                  **{field: _number(ent.get(field), where)
+                     for field in ("height", "arrow", "dogleg")}}
+        if record["pts"][-1] != record["landing"]:
+            _fail(f"{where}: last point must be the landing")
+        attachment = ent.get("attachment")
+        if isinstance(attachment, bool) or not isinstance(attachment, int):
+            _fail(f"{where}: attachment must be an integer")
+        text = ent.get("text")
+        if not isinstance(text, str) or _CONTROL_RE.search(text):
+            _fail(f"{where}: text must be a string without control characters")
+        record.update(attachment=attachment, text=text)
+        h = _real_handle(ent.get("handle"), where, real)
+        if h is not None:
+            highest = max(highest, int(h, 16))
+        note_layer(layer)
+        kinds.append(("mleader", record, h))
+        kind_sources.append(ent)
+        kind_properties.append([])
+
     blocks = _validated_blocks(intake["blocks"], note_layer) if "blocks" in intake else None
     if blocks is not None:
         total_points += sum(len(child.get("pts", [])) for block in blocks.values()
@@ -384,6 +441,15 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
     # Settle synthetic entity handles before table/definition handles, so
     # BLOCK_RECORD identities are above every model-space entity identity.
     kinds = [row[:-1] + (row[-1] if row[-1] is not None else fresh_handle(),) for row in kinds]
+    textstyle_handles = {}
+    mlstyle_handles = {}
+    ml_linetype = None
+    if mlstyles or mleaders:
+        ml_linetype = fresh_handle()
+        textstyle_handles = {name: fresh_handle() for name in dict.fromkeys(
+            ["Standard"] + [s["textstyle"] for s in mlstyles.values()] +
+            [row[1]["textstyle"] for row in kinds if row[0] == "mleader"])}
+        mlstyle_handles = {name: fresh_handle() for name in mlstyles}
 
     # Pass 2: emit. One flat list of lines, joined once.
     out: List[str] = [
@@ -400,10 +466,22 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
             out += ["0", "DIMSTYLE", "105", fresh_handle(), "100", "AcDbSymbolTableRecord",
                     "100", "AcDbDimStyleTableRecord", "2", name, "70", "0"]
         out += ["0", "ENDTAB"]
+    if textstyle_handles:
+        out += ["0", "TABLE", "2", "LTYPE", "70", "1", "0", "LTYPE", "5", ml_linetype,
+                "100", "AcDbSymbolTableRecord", "100", "AcDbLinetypeTableRecord",
+                "2", "ByLayer", "70", "0", "3", "", "72", "65", "73", "0",
+                "40", "0.0", "0", "ENDTAB"]
+        out += ["0", "TABLE", "2", "STYLE", "70", str(len(textstyle_handles))]
+        for name, handle in textstyle_handles.items():
+            out += ["0", "STYLE", "5", handle, "100", "AcDbSymbolTableRecord",
+                    "100", "AcDbTextStyleTableRecord", "2", name, "70", "0",
+                    "40", "0.0", "41", "1.0", "50", "0.0", "71", "0",
+                    "42", "0.2", "3", "arial.ttf", "4", ""]
+        out += ["0", "ENDTAB"]
     block_records = {}
-    if blocks is not None:
+    if blocks is not None or mleaders:
         table_handle = fresh_handle()
-        block_records = {name: fresh_handle() for name in ("*Model_Space", "*Paper_Space", *blocks)}
+        block_records = {name: fresh_handle() for name in ("*Model_Space", "*Paper_Space", *(blocks or {}))}
         out += ["0", "TABLE", "2", "BLOCK_RECORD", "5", table_handle, "330", "0",
                 "100", "AcDbSymbolTable", "70", str(len(block_records))]
         for name, h in block_records.items():
@@ -480,6 +558,9 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
                 out += ["210", _num(normal[0]), "220", _num(normal[1]), "230", _num(normal[2])]
             if field == "arcs":
                 out += ["100", "AcDbArc", "50", _num(angles[0]), "51", _num(angles[1])]
+        elif row[0] == "mleader":
+            out += _emit_mleader(row[1], h, block_records["*Model_Space"],
+                                 mlstyle_handles, textstyle_handles, mlstyles, ml_linetype)
         elif row[0] == "dim":
             _, dimtype, layer, p1, p2, dimline, rotation, style, normal, measurement, _ = row
             tilted = normal != [0.0, 0.0, 1.0]
@@ -523,17 +604,21 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         out += props
         handle_map[str(source.get("handle", "")).upper()] = h
     out += ["0", "ENDSEC"]
-    if "groups" in intake:
-        groups = intake["groups"]
+    if "groups" in intake or mlstyles:
+        groups = intake.get("groups", [])
         if not isinstance(groups, list):
             _fail("groups must be a list")
         root, dictionary = fresh_handle(), fresh_handle()
         group_handles = [fresh_handle() for _ in groups]
         out += ["0", "SECTION", "2", "OBJECTS", "0", "DICTIONARY", "5", root,
-                "330", "0", "100", "AcDbDictionary", "281", "1",
-                "3", "ACAD_GROUP", "350", dictionary,
-                "0", "DICTIONARY", "5", dictionary, "330", root,
-                "100", "AcDbDictionary", "281", "1"]
+                "330", "0", "100", "AcDbDictionary", "281", "1"]
+        if mlstyles:
+            ml_dictionary = fresh_handle()
+            out += ["3", "ACAD_MLEADERSTYLE", "350", ml_dictionary]
+        if "groups" in intake:
+            out += ["3", "ACAD_GROUP", "350", dictionary,
+                    "0", "DICTIONARY", "5", dictionary, "330", root,
+                    "100", "AcDbDictionary", "281", "1"]
         names = set()
         for group, handle in zip(groups, group_handles):
             name = group.get("name")
@@ -554,9 +639,82 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
                 if target is None:
                     _fail(f"group member {member!r} must name an emitted entity")
                 out += ["340", target]
+        if mlstyles:
+            out += ["0", "DICTIONARY", "5", ml_dictionary, "102", "{ACAD_REACTORS",
+                    "330", root, "102", "}", "330", root,
+                    "100", "AcDbDictionary", "280", "0", "281", "1"]
+            for name, handle in mlstyle_handles.items():
+                out += ["3", name, "350", handle]
+            for name, style in mlstyles.items():
+                out += _emit_mlstyle(style, mlstyle_handles[name], ml_dictionary,
+                                     textstyle_handles[style["textstyle"]], ml_linetype,
+                                     [row[-1] for row in kinds
+                                      if row[0] == "mleader" and row[1]["style"] == name])
         out += ["0", "ENDSEC"]
     out += ["0", "EOF"]
     return ("\n".join(out) + "\n").encode("utf-8")
+
+
+def _ml_pairs(pairs):
+    """Expand entget point groups to file triples without changing group order."""
+    out = []
+    for code, value in pairs:
+        if isinstance(value, (list, tuple)):
+            out += _point_groups(value, code)
+        else:
+            out += [str(code), str(value)]
+    return out
+
+
+def _emit_mleader(e, handle, owner, styles, textstyles, catalogue, linetype):
+    """probe6.txt MULTILEADER sequence, including the null leader-line handles."""
+    gap = catalogue[e["style"]]["gap"]
+    base = [_number(p + d * e["dogleg"], "mleader content base")
+            for p, d in zip(e["landing"], e["dogleg_dir"])]
+    textstyle = textstyles[e["textstyle"]]
+    out = _ml_pairs([
+        (0, "MULTILEADER"), (330, owner), (5, handle), (100, "AcDbEntity"),
+        (67, 0), (410, "Model"), (8, e["layer"]), (100, "AcDbMLeader"), (270, 2),
+        (300, "CONTEXT_DATA{"), (40, 1.0), (10, base), (41, e["height"]),
+        (140, e["arrow"]), (145, gap), (174, 1), (175, 1), (176, 0), (177, 0),
+        (290, 1), (304, e["text"]), (11, [0.0, 0.0, 1.0]), (340, textstyle),
+        (12, e["textpt"]), (13, [1.0, 0.0, 0.0]), (42, 0.0), (43, 0.0),
+        (44, 0.0), (45, 1.0), (170, 1), (90, -1073741824),
+        (171, e["attachment"]), (172, 5), (91, -1073741824), (141, 0.0),
+        (92, 0), (291, 0), (292, 0), (173, 0), (293, 0), (142, 0.0),
+        (143, 0.0), (294, 0), (295, 0), (296, 0), (110, [0.0, 0.0, 0.0]),
+        (111, [1.0, 0.0, 0.0]), (112, [0.0, 1.0, 0.0]), (297, 0),
+        (302, "LEADER{"), (290, 1), (291, 1), (10, e["landing"]),
+        (11, e["dogleg_dir"]), (90, 0), (40, e["dogleg"]), (304, "LEADER_LINE{")])
+    for vertex in e["pts"][:-1]:
+        out += _point_groups(vertex)
+    out += _ml_pairs([
+        (91, 0), (170, 1), (92, -1056964608), (340, "0"), (171, -2),
+        (40, 0.0), (341, "0"), (93, 0), (305, "}"), (271, 0), (303, "}"),
+        (272, 9), (273, 9), (301, "}"), (340, styles[e["style"]]), (90, 279552),
+        (170, 1), (91, -1056964608), (341, linetype), (171, -2), (290, 1),
+        (291, 1), (41, e["dogleg"]), (42, e["arrow"]), (172, 2), (343, textstyle),
+        (173, 1), (95, 1), (174, 1), (175, 0), (92, -1056964608), (292, 0),
+        (93, -1056964608), (10, [1.0, 1.0, 1.0]), (43, 0.0), (176, 0),
+        (293, 0), (294, 0), (178, 0), (179, 1), (45, 1.0), (271, 0),
+        (272, 9), (273, 9), (295, 0)])
+    return out
+
+
+def _emit_mlstyle(s, handle, owner, textstyle, linetype, reactors):
+    """probe6.txt MLEADERSTYLE defaults with the reported catalogue values."""
+    return _ml_pairs([
+        (0, "MLEADERSTYLE"), (5, handle), (102, "{ACAD_REACTORS"), (330, owner),
+        *((330, entity) for entity in reactors),
+        (102, "}"), (330, owner), (100, "AcDbMLeaderStyle"), (179, 2), (170, 2),
+        (171, 1), (172, 0), (90, 2), (40, 0.0), (41, 0.0), (173, s["segments"]),
+        (91, -1056964608), (340, linetype), (92, -2), (290, 1), (42, s["gap"]),
+        (291, 1), (43, s["dogleg"]), (3, s["name"]), (341, "0"), (44, s["arrow"]),
+        (300, ""), (342, textstyle), (174, 1), (178, 1), (175, 1), (176, 0),
+        (93, -1056964608), (45, s["height"]), (292, 0), (297, 0), (46, 0.18),
+        (343, "0"), (94, -1056964608), (47, 1.0), (49, 1.0), (140, 1.0),
+        (293, 1), (141, 0.0), (294, 1), (177, 0), (142, 1.0), (295, 0),
+        (296, 0), (143, 0.125), (271, 0), (272, 9), (273, 9), (298, 0)])
 
 
 def _vector(value, where, width=3):

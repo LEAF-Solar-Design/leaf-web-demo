@@ -286,3 +286,139 @@ def test_mleader_parse_preserves_vertex_order_and_rounds_precision():
     leader = parsed["mleaders"][0]
     assert leader["pts"] == [[0, 0, 0], [2.123, 3, 0], [5, 4, 0]]
     assert leader["height"] == 0.12346
+
+
+# --- record 3s-2: DXF catalogue, nested leader contexts and round trip ------
+
+def _mleader_dxf_fixture():
+    return {"dwg": "probe.dxf", "layers": ["0"], "polylines": [],
+            "memberEvidenceCovered": True, "mlstyles": _base()["mlstyles"],
+            "mleaders": [{
+                "handle": "9C76", "layer": "0", "style": "Standard",
+                "textstyle": "Standard", "height": 0.18, "arrow": 0.18,
+                "dogleg": 0.36, "attachment": 1, "pts": [[0, 0, 0], [5, 4, 0]],
+                "landing": [5, 4, 0], "dogleg_dir": [1, 0, 0],
+                "textpt": [5.45, 4.091, 0], "text": "Valve"}]}
+
+
+def _dxf_records(raw, kind):
+    from dxf_intake import _group_pairs
+
+    pairs = _group_pairs(raw.decode())
+    records = []
+    for i, pair in enumerate(pairs):
+        if pair == (0, kind):
+            end = i + 1
+            while end < len(pairs) and pairs[end][0] != 0:
+                end += 1
+            records.append(pairs[i:end])
+    return records
+
+
+def test_mleader_dxf_round_trip_probe_and_second_style():
+    from dxf_intake import parse_dxf_bytes
+    from intake_dxf import intake_to_dxf
+
+    intake = _mleader_dxf_fixture()
+    assert parse_dxf_bytes(intake_to_dxf(intake), source_name="probe.dxf") == intake
+    intake["mlstyles"].append({"name": "Two segments", "textstyle": "Notes",
+                               "height": 0.12345, "arrow": 0.23456,
+                               "dogleg": 0.34567, "gap": 0.04567, "segments": 2})
+    assert parse_dxf_bytes(intake_to_dxf(intake), source_name="probe.dxf") == intake
+
+
+def test_mleader_dxf_probe_group_sequence_and_references():
+    from intake_dxf import intake_to_dxf
+
+    raw = intake_to_dxf(_mleader_dxf_fixture())
+    ml, = _dxf_records(raw, "MULTILEADER")
+    # probe6 entget sequence, expanded from point groups into DXF triples.
+    expected = [int(c) for c in (
+        "0 330 5 100 67 410 8 100 270 300 40 10 20 30 41 140 145 "
+        "174 175 176 177 290 304 11 21 31 340 12 22 32 13 23 33 "
+        "42 43 44 45 170 90 171 172 91 141 92 291 292 173 293 142 143 "
+        "294 295 296 110 120 130 111 121 131 112 122 132 297 "
+        "302 290 291 10 20 30 11 21 31 90 40 304 10 20 30 "
+        "91 170 92 340 171 40 341 93 305 271 303 272 273 301 "
+        "340 90 170 91 341 171 290 291 41 42 172 343 173 95 174 175 "
+        "92 292 93 10 20 30 43 176 293 294 178 179 45 271 272 273 295"
+    ).split()]
+    assert [code for code, _ in ml] == expected
+    context_end = ml.index((301, "}"))
+    top = dict(ml[context_end + 1:])
+    ms, = _dxf_records(raw, "MLEADERSTYLE")
+    ts, = _dxf_records(raw, "STYLE")
+    assert top[340] == dict(ms)[5]
+    assert top[343] == dict(ts)[5] == dict(ms)[342]
+    assert dict(ts)[2] == "Standard" and dict(ts)[3] == "arial.ttf"
+    assert dict(ts)[40] == "0.0" and dict(ts)[41] == "1.0"
+    assert dict(ms)[173] == "1" and dict(ms)[170] == "2"
+    assert [code for code, _ in ms] == [int(c) for c in (
+        "0 5 102 330 330 102 330 100 179 170 171 172 90 40 41 173 91 "
+        "340 92 290 42 291 43 3 341 44 300 342 174 178 175 176 93 45 "
+        "292 297 46 343 94 47 49 140 293 141 294 177 142 295 296 143 "
+        "271 272 273 298").split()]
+    line_start = ml.index((304, "LEADER_LINE{"))
+    line_end = ml.index((305, "}"))
+    line = dict(ml[line_start:line_end])
+    assert line[340] == line[341] == "0"
+    base_start = ml.index((300, "CONTEXT_DATA{")) + 2
+    assert ml[base_start:base_start + 3] == [(10, "5.36"), (20, "4.0"), (30, "0.0")]
+    dictionaries = _dxf_records(raw, "DICTIONARY")
+    root = next(dict(r) for r in dictionaries if dict(r).get(330) == "0")
+    assert root[3] == "ACAD_MLEADERSTYLE"
+    catalogue = next(dict(r) for r in dictionaries if dict(r)[5] == root[350])
+    assert catalogue[3] == "Standard" and catalogue[350] == dict(ms)[5]
+
+
+@pytest.mark.parametrize("change", ["block", "absent_style", "missing_text", "two_lines"])
+def test_mleader_dxf_unsupported_shapes_counted(change):
+    from dxf_intake import parse_dxf_bytes
+    from intake_dxf import intake_to_dxf
+
+    raw = intake_to_dxf(_mleader_dxf_fixture())
+    if change == "block":
+        raw = raw.replace(b"172\n2\n343\n", b"172\n1\n343\n")
+    elif change == "absent_style":
+        style = dict(_dxf_records(raw, "MLEADERSTYLE")[0])[5].encode()
+        raw = raw.replace(b"301\n}\n340\n" + style + b"\n",
+                          b"301\n}\n340\nDEADBEEF\n")
+    elif change == "missing_text":
+        raw = raw.replace(b"304\nValve\n", b"")
+    else:
+        raw = raw.replace(b"305\n}\n", b"305\n}\n304\nLEADER_LINE{\n305\n}\n")
+    result = parse_dxf_bytes(raw)
+    assert result["mleaders_unsupported"] == 1
+    assert "mleaders" not in result
+    assert result["mlstyles"] == _base()["mlstyles"]
+
+
+def test_mleader_dxf_only_when_and_styles_without_entities():
+    from dxf_intake import parse_dxf_bytes
+    from intake_dxf import intake_to_dxf
+
+    blank = {"dwg": "probe.dxf", "layers": ["0"], "polylines": [],
+             "memberEvidenceCovered": True}
+    assert parse_dxf_bytes(intake_to_dxf(blank), source_name="probe.dxf") == blank
+    styles = {**blank, "mlstyles": _base()["mlstyles"]}
+    assert parse_dxf_bytes(intake_to_dxf(styles), source_name="probe.dxf") == styles
+
+
+def test_mleader_dxf_preserves_vertex_order_and_inspection_precision():
+    from dxf_intake import parse_dxf_bytes
+    from intake_dxf import intake_to_dxf
+
+    intake = _mleader_dxf_fixture()
+    intake["mleaders"][0]["pts"].insert(1, [2.123, 3, 0])
+    intake["mleaders"][0]["height"] = 0.12345
+    assert parse_dxf_bytes(intake_to_dxf(intake), source_name="probe.dxf") == intake
+    raw = intake_to_dxf(intake).replace(b"4.091\n", b"4.09147\n")
+    assert parse_dxf_bytes(raw, source_name="probe.dxf") == intake
+
+
+def test_mleader_dxf_points_share_total_bound(monkeypatch):
+    import intake_dxf
+
+    monkeypatch.setattr(intake_dxf, "MAX_POINTS", 1)
+    with pytest.raises(intake_dxf.IntakeDxfError, match="points in total"):
+        intake_dxf.intake_to_dxf(_mleader_dxf_fixture())
