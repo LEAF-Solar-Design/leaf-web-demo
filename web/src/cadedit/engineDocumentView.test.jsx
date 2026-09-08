@@ -151,6 +151,24 @@ describe.each([true, false])('EngineDocumentView reverse selection (callback ena
     expect(callback.mock.calls).toEqual(withCallback ? [['2A'], [null], ['2B']] : [])
   })
 
+  it('does not replay a forward selection after a failed load and recovery', async () => {
+    const { rerender, callback, props } = setup()
+    await openAndLoad(entities)
+    rerender({ ...props, selectedHandle: '2A' })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('42')
+    expect(callback).not.toHaveBeenCalled()
+    const select = vi.spyOn(sessionActions, 'select')
+    act(() => { sessionActions.openBytes(new Uint8Array([48]), 'malformed.dxf') })
+    workers[0].emit({ type: 'error', message: 'DXF parse failed' })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('')
+    expect(callback.mock.calls).toEqual(withCallback ? [[null]] : [])
+    if (withCallback) rerender({ ...props, selectedHandle: null })
+    await openAndLoad([{ ...entities[0] }], 'two.dxf')
+    expect(screen.getByTestId('engine-selection').textContent).toBe('')
+    expect(callback.mock.calls).toEqual(withCallback ? [[null]] : [])
+    expect(select).not.toHaveBeenCalled()
+  })
+
   it('does not call back when a document hides without a held selection', async () => {
     const { callback } = setup()
     await openAndLoad(entities)

@@ -50,9 +50,9 @@ export default function EngineDocumentView({ viewerRef = null, onShown = null, s
     const wasShown = wasShownRef.current
     wasShownRef.current = entities !== null
     if (entities === null) {
-      if (wasShown && lastSelectedHandleRef.current != null) {
+      if (wasShown && lastSelectedHandleRef.current != null && typeof onSelectedHandleChange === 'function') {
         lastSelectedHandleRef.current = null
-        if (typeof onSelectedHandleChange === 'function') onSelectedHandleChange(null)
+        onSelectedHandleChange(null)
       }
       return
     }
