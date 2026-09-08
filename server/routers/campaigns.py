@@ -293,6 +293,7 @@ async def change_enrollment(campaign_id: str, enrollment_id: str, action: str, r
 
 
 @router.post('/internal/campaigns/bridge/{op}')
+@router.post('/api/internal/campaigns/bridge/{op}')
 async def campaign_bridge_operation(op: str, request: Request,
                                     subject: str = Depends(deps.require_campaign_worker)):
     limit = 6 * 1024 * 1024 if op == 'product' else 512 * 1024 if op == 'plan' else 128 * 1024
