@@ -102,3 +102,9 @@ def test_deps_surface_config_root_literal_is_the_canonical_rule():
     literals = _fullmatch_literals(_source("server/deps.py"))
     assert CANONICAL_CORE in literals, (
         "deps._contained_tenant_root lost its inline literal barrier")
+
+
+def test_tenant_mcp_store_tenant_file_literal_is_the_canonical_rule():
+    literals = _fullmatch_literals(_source("server/tenant_mcp_store.py"))
+    assert CANONICAL_CORE in literals, (
+        "tenant_mcp_store._tenant_file lost its inline literal barrier")

@@ -73,6 +73,16 @@ def _dir() -> Path:
 
 def _tenant_file(tenant_id: str) -> Path:
     validate_tenant_id(tenant_id, kind="tenant id")  # raises ValueError on a malformed id
+    # Inline LITERAL restatement of tenant_id_validator.TENANT_ID_PATTERN
+    # (pinned equal by server/tests/test_codeql_barrier_literals.py, same
+    # belt-and-suspenders shape as tenant_paths.py._safe_component): the
+    # validate_tenant_id call above already decided, but only a literal
+    # fullmatch + rebind directly in this function is a taint barrier static
+    # analysis proves for the path built from it.
+    match = re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", tenant_id)
+    if match is None:
+        raise ValueError(f"invalid tenant id {tenant_id!r}")
+    tenant_id = str(match.group(0))
     return _dir() / f"{tenant_id}.json"
 
 
