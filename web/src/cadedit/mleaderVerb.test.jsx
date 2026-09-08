@@ -4,7 +4,7 @@ import { diffPlan } from './mutationDiff.js'
 
 const inputs = { x: '0', y: '0', x2: '3', y2: '4', text: 'Valve', style: 'Standard', layer: '0' }
 const mlstyles = [{ name: 'Standard', textstyle: 'Standard', height: 0.18, arrow: 0.18, dogleg: 0.36, gap: 0.09, segments: 1 }]
-const build = (patch = {}, styles = mlstyles) => buildCreatePayload('createMleader', { ...inputs, ...patch }, [], [], styles)
+const build = (patch = {}, styles = mlstyles) => buildCreatePayload('createMleader', { ...inputs, ...patch }, [], [], {}, styles)
 
 describe('MLEADER in the browser engine create lane', () => {
   it('uses its own create table and carries only contract operands', () => {

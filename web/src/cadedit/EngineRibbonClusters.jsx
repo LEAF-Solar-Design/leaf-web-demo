@@ -109,7 +109,6 @@ const DRAW_OFF = Object.freeze([])
 // Annotation's TEXT, dimensions and MLEADER are real registry records (W4g-7c-3c);
 // Create Block is real too (W4g-7c-2c), so no engine panel keeps a placeholder here.
 const ANNOTATION_OFF = Object.freeze([])
-])
 // The datalist id the INSERT name field's `list` attribute points at.
 const BLOCK_CATALOGUE_ID = 'cockpit-block-catalogue'
 
