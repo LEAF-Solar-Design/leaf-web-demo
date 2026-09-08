@@ -94,6 +94,7 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
     properties: Dict[str, Any] = {}
     insert_properties: Dict[str, Any] = {}
     objects = {}
+    model_records = {}
 
     i = 0
     n = len(pairs)
@@ -155,6 +156,10 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
                 elif pairs[j][0] == 410:
                     space_info["layout"] = pairs[j][1]
                 j += 1
+            record = pairs[i + 1:j]
+            handle = next((v for c, v in record if c == 5), None)
+            if handle:
+                model_records[handle] = (value, record)
             if space_info.get("space") != "paper":
                 space_info.clear()
         if section == "ENTITIES" and code == 0 and value == "INSERT":
@@ -305,6 +310,39 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
         out["blocks"] = blocks
     if block_count > 200:
         out["blocksCapped"] = block_count
+    if model_records and any("properties" in child for block in blocks.values()
+                             for child in block["children"]):
+        evidence = {}
+        graph = {**objects, **{h.upper(): row for h, row in model_records.items()}}
+        def dimension_dependency(record):
+            pending = [v.upper() for c, v in record if c in (330, 340, 350, 360)]
+            visited = set()
+            while pending:
+                target = pending.pop()
+                if target in visited:
+                    continue
+                visited.add(target)
+                if len(visited) > 256:
+                    return True
+                kind, data = graph.get(target, (None, []))
+                if kind == "DIMENSION":
+                    return True
+                if kind in ("DIMASSOC", "DICTIONARY", "XRECORD"):
+                    pending.extend(v.upper() for c, v in data if c in (330, 331, 340, 350, 360))
+            return False
+        associated = set()
+        for kind, record in objects.values():
+            if kind == "DIMASSOC":
+                associated.update(v.upper() for c, v in record if c in (331, 332, 340))
+        for handle, (kind, record) in model_records.items():
+            if kind not in ("LINE", "LWPOLYLINE", "POLYLINE", "CIRCLE", "ARC"):
+                continue
+            groups = dict(record)
+            evidence[handle] = {"kind": kind, "nrm": list(_group_point(groups, 210, (0, 0, 1))),
+                                "bulges": [float(v) for c, v in record if c == 42] if kind == "LWPOLYLINE" else [],
+                                "space": "paper" if groups.get(67) == "1" or groups.get(410, "Model") != "Model" else "model",
+                                "dimension_refs": ["association"] if handle.upper() in associated or dimension_dependency(record) else []}
+        out["blockMembers"] = evidence
     if parse_errors:
         out["parseErrors"] = parse_errors
     return out
@@ -395,6 +433,9 @@ def _parse_insert(pairs, i, dropped=None):
 def _parse_block_child(pairs, i, kind):
     groups, end = _entity_groups(pairs, i)
     child = {"kind": kind, "layer": groups.get(8, "0") or "0"}
+    properties = _entity_properties(groups.get(62), groups.get(6), groups.get(370), groups.get(420))
+    if properties is not None:
+        child["properties"] = properties
     if kind in ("LINE", "LWPOLYLINE", "CIRCLE", "ARC"):
         # These children must not inherit the legacy top-level parsers'
         # substitution of zero for unreadable coordinates.

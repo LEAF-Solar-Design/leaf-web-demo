@@ -126,6 +126,20 @@ MUTATION_INSPECT_BLOCKS += (
 )
 
 
+try:
+    from .apply_lisp import _BLOCK_DEPENDENCY_LISP_LINES
+except ImportError:
+    from apply_lisp import _BLOCK_DEPENDENCY_LISP_LINES
+
+
+MUTATION_INSPECT_BLOCKS += _BLOCK_DEPENDENCY_LISP_LINES + (
+    '(defun leaf-bkep (name ordinal ed / aci lt lw tc colour) (setq aci (cond ((cdr (assoc 62 ed))) (T 256)) lt (cond ((cdr (assoc 6 ed))) (T "ByLayer")) lw (cond ((cdr (assoc 370 ed))) (T -1)) tc (cdr (assoc 420 ed)) colour "~") (if tc (setq colour (strcat (itoa (lsh (logand tc 16711680) -16)) "," (itoa (lsh (logand tc 65280) -8)) "," (itoa (logand tc 255))))) (write-line (strcat "BKEP|" (leaf-bk-encode name) "|" (itoa ordinal) "|" (itoa aci) "|" (leaf-bk-encode lt) "|" (itoa lw) "|" colour) f))',
+    '(progn (setq f (open "{OUT}" "a") bk (tblnext "BLOCK" T) bn-display 0) (write-line "BKEPC|1" f) (while bk (setq name (cdr (assoc 2 bk))) (if (and (/= (substr name 1 1) "*") (= 0 (logand 1 (cdr (assoc 70 bk))))) (progn (setq bn-display (1+ bn-display)) (if (<= bn-display 200) (progn (setq be (entnext (tblobjname "BLOCK" name)) ordinal 0) (while (and be (< ordinal 60) (/= (cdr (assoc 0 (entget be))) "ENDBLK")) (leaf-bkep name ordinal (entget be)) (setq ordinal (1+ ordinal) be (entnext be))))))) (setq bk (tblnext "BLOCK"))) (close f))',
+    '(progn (setq f (open "{OUT}" "a") ss (ssget "_X" (list (cons 0 "LINE,LWPOLYLINE,CIRCLE,ARC") (cons 410 "Model"))) i 0) (if ss (repeat (sslength ss) (setq ed (entget (ssname ss i)) i (1+ i) bulged 0 normal (cond ((cdr (assoc 210 ed))) (T (list 0.0 0.0 1.0)))) (if (= (cdr (assoc 0 ed)) "LWPOLYLINE") (foreach pair ed (if (and (= (car pair) 42) (/= (cdr pair) 0.0)) (setq bulged 1)))) (write-line (strcat "BM|" (cdr (assoc 5 ed)) "|" (cdr (assoc 0 ed)) "|" (leaf-bk-point normal 6) "|" (itoa bulged) "|" (if (leaf-bd-dimension-p ed) "1" "0")) f))) (close f))',
+)
+
+
+
 MUTATION_INSPECT_BLOCKS += (
     '(defun leaf-gr-backlink (member group / item reactors target data) (setq data (entget member)) (foreach item data (cond ((= (car item) 102) (setq reactors (= (cdr item) "{ACAD_REACTORS"))) ((and reactors (= (car item) 330)) (setq target (cdr (assoc 5 (entget (cdr item))))) (if (= target group) (write-line (strcat "GM|" (cdr (assoc 5 data)) "|" group) f))))))',
     '(defun leaf-gr-members (data / result item h) (setq result "") (foreach item data (if (= (car item) 340) (progn (setq h (cdr (assoc 5 (entget (cdr item))))) (if h (setq result (strcat result (if (= result "") "" ";") h)))))) result)',
@@ -151,6 +165,7 @@ MUTATION_INSPECT_BLOCKS += (
     r'''(progn (setq f (open "{OUT}" "a")) (setq ds (tblnext "DIMSTYLE" T)) (while ds (write-line (strcat "DS|" (leaf-bk-encode (cdr (assoc 2 ds)))) f) (setq ds (tblnext "DIMSTYLE"))) (princ "DS-DONE") (close f))''',
     r'''(progn (setq f (open "{OUT}" "a")) (setq ss (ssget "_X" (list (cons 0 "DIMENSION") (cons 410 "Model")))) (if ss (progn (setq nn (sslength ss) i 0) (while (< i nn) (setq ed (entget (ssname ss i)) sub (logand (cdr (assoc 70 ed)) 15) p1 (cdr (assoc 13 ed)) p2 (cdr (assoc 14 ed)) dl (cdr (assoc 10 ed)) rot (cdr (assoc 50 ed)) style (cdr (assoc 3 ed)) layer (cdr (assoc 8 ed)) nrm (cdr (assoc 210 ed)) hnd (cdr (assoc 5 ed)) kind nil) (if (null nrm) (setq nrm (list 0.0 0.0 1.0))) (if (null style) (setq style "Standard")) (if (null layer) (setq layer "0")) (if (null rot) (setq rot 0.0)) (cond ((= sub 0) (setq kind "LINEAR")) ((= sub 1) (setq kind "ALIGNED"))) (if kind (progn (setq wp1 p1 wp2 p2 wdl dl) (setq meas (if (= kind "LINEAR") (abs (+ (* (- (car wp2) (car wp1)) (cos rot)) (* (- (cadr wp2) (cadr wp1)) (sin rot)))) (distance wp1 wp2))) (write-line (strcat "DM|" kind "|" (leaf-bk-encode layer) "|" (leaf-bk-point wp1 3) "|" (leaf-bk-point wp2 3) "|" (leaf-bk-point wdl 3) "|" (rtos (* 180.0 (/ rot pi)) 2 6) "|" (leaf-bk-encode style) "|" (leaf-bk-point nrm 6) "|" (rtos meas 2 3) "|" hnd) f)) (write-line (strcat "DMX|" hnd "|" (itoa sub)) f)) (setq i (1+ i))))) (princ "DM-DONE") (close f))''',
 )
+
 
 
 def build_scr(out_localname: str = OUT_LOCALNAME, *, quit_form: str = QUIT_DEFAULT,

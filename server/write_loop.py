@@ -824,6 +824,120 @@ def _validated_transforms(intake: Dict[str, Any], mutations: Dict[str, Any]):
     return validated
 
 
+def _block_member_child(intake, handle):
+    for field, kind in (("polylines", "LWPOLYLINE"), ("circles", "CIRCLE"), ("arcs", "ARC")):
+        for entity in intake.get(field, []):
+            if entity.get("handle") != handle:
+                continue
+            metadata = intake.get("blockMembers", {}).get(handle, {})
+            kind = metadata.get("kind", entity.get("kind", kind))
+            if kind == "LWPOLYLINE" and len(entity["pts"]) == 2 and not entity.get("closed") and not metadata:
+                kind = "LINE"
+            child = {"kind": kind, "layer": entity["layer"],
+                     "properties": {**_PROPERTY_DEFAULTS, **copy.deepcopy((intake.get("properties") or {}).get(handle, {}))}}
+            if kind == "LINE":
+                child["pts"] = [[round(v, 3) for v in p] for p in entity["pts"]]
+            elif kind == "LWPOLYLINE":
+                child.update(pts=[[round(v, 3) for v in p[:2]] for p in entity["pts"]],
+                             closed=bool(entity.get("closed")), nrm=[0.0, 0.0, 1.0],
+                             elev=round(entity["pts"][0][2] if len(entity["pts"][0]) > 2 else 0, 3))
+            else:
+                child.update(c=[round(v, 3) for v in entity["c"]], r=round(entity["r"], 3),
+                             nrm=[0.0, 0.0, 1.0])
+                if kind == "ARC":
+                    child.update(start_deg=round(entity["start_deg"], 6), end_deg=round(entity["end_deg"], 6))
+            return child
+    raise ValueError("block member is missing from the committed intake")
+
+
+def _block_digest(block):
+    """01c FNV-1a, length-delimited writer records for the bounded kinds.
+
+    The base uses DxfTextWriter CRLF; written_block_children strips CRLF to
+    LF. Identity/ownership are omitted, membership order remains significant.
+    """
+    from decimal import Decimal
+
+    def pair(code, value, integer=False, newline="\n"):
+        if integer:
+            value = f"{int(value):6d}"
+        elif isinstance(value, (int, float)):
+            value = format(Decimal(str(float(value))), "f")
+            if "." not in value:
+                value += ".0"
+        return f"{code:3d}{newline}{value}{newline}"
+
+    def point(values, code=10, newline="\n"):
+        return "".join(pair(code + 10 * i, v, newline=newline) for i, v in enumerate(values))
+
+    records = [point(block["base"], newline="\r\n"),
+               "false:BlockFlags { anonymous: false, has_attributes: false, is_xref: false, is_xref_overlay: false, is_external: false }:"]
+    def nearest_aci(rgb):
+        colours = [(0, 0, 0), (255, 0, 0), (255, 255, 0), (0, 255, 0),
+                   (0, 255, 255), (0, 0, 255), (255, 0, 255), (255, 255, 255),
+                   (128, 128, 128), (192, 192, 192)]
+        for hue in range(24):
+            sector, offset = divmod(hue, 4)
+            ramp = ((4, offset, 0), (4 - offset, 4, 0), (0, 4, offset),
+                    (0, 4 - offset, 4), (offset, 0, 4), (4, 0, 4 - offset))[sector]
+            for intensity in (255, 165, 127, 76, 38):
+                colours.append(tuple(v * intensity // 4 for v in ramp))
+                colours.append(tuple((4 + v) * intensity // 8 for v in ramp))
+        colours.extend((v, v, v) for v in (51, 91, 132, 173, 214, 255))
+        return min(range(1, 256), key=lambda i: sum((a - b) ** 2 for a, b in zip(rgb, colours[i])))
+
+    for child in block["children"]:
+        kind = child["kind"]
+        props = child["properties"]
+        record = pair(0, kind) + pair(100, "AcDbEntity") + pair(8, child["layer"])
+        if props.get("linetype", "ByLayer").casefold() != "bylayer":
+            record += pair(6, props["linetype"])
+        if props.get("aci", 256) != 256 or props.get("rgb") is not None:
+            record += pair(62, nearest_aci(props["rgb"]) if props.get("rgb") is not None else props["aci"], True)
+        if props.get("rgb") is not None:
+            r, g, b = props["rgb"]
+            record += pair(420, (r << 16) | (g << 8) | b, True)
+        if props.get("lineweight", -1) != -1:
+            record += pair(370, props["lineweight"], True)
+        if kind == "LINE":
+            record += pair(100, "AcDbLine") + point(child["pts"][0]) + point(child["pts"][1], 11)
+        elif kind == "LWPOLYLINE":
+            record += pair(100, "AcDbPolyline") + pair(90, len(child["pts"]), True)
+            record += pair(70, int(child["closed"]), True) + pair(38, child["elev"])
+            for p in child["pts"]:
+                record += point(p) + pair(40, 0.0) + pair(41, 0.0) + pair(42, 0.0)
+        else:
+            record += pair(100, "AcDbCircle") + point(child["c"]) + pair(40, child["r"])
+            if kind == "ARC":
+                record += pair(100, "AcDbArc") + pair(50, child["start_deg"]) + pair(51, child["end_deg"])
+        records.append(record)
+    digest = 0xcbf29ce484222325
+    for record in records:
+        data = record.encode("utf-8")
+        for byte in len(data).to_bytes(8, "little") + data:
+            digest = ((digest ^ byte) * 0x100000001b3) & 0xffffffffffffffff
+    return f"{digest:016x}"
+
+
+def _block_semantics(block):
+    def child_key(child):
+        row = {k: copy.deepcopy(v) for k, v in child.items() if k not in ("handle", "digest", "properties")}
+        row["properties"] = normalize_property_record(child.get("properties"))
+        row["properties"]["linetype"] = _linetype_key(row["properties"]["linetype"])
+        def quantum(value, key=""):
+            if isinstance(value, dict):
+                return {k: quantum(v, k) for k, v in value.items()}
+            if isinstance(value, list):
+                return [quantum(v, key) for v in value]
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return round(float(value), 6 if key in ("nrm", "start_deg", "end_deg", "rot") else 3)
+            return value
+        return json.dumps(quantum(row), sort_keys=True, separators=(",", ":"))
+    return {"base": [round(v, 3) for v in block["base"]], "count": block.get("count"),
+            "complete": block.get("complete"), "baseUnknown": bool(block.get("baseUnknown")),
+            "children": sorted(child_key(c) for c in block["children"])}
+
+
 def apply_mutations(intake: Dict[str, Any], mutations: Dict[str, Any]) -> Dict[str, Any]:
     """Apply additive, remove, and panel-transform/v1 mutations to a copy.
 
@@ -839,6 +953,12 @@ def apply_mutations(intake: Dict[str, Any], mutations: Dict[str, Any]) -> Dict[s
         reject_noop=False)
     transforms = _validated_transforms(intake, mutations)
     new = copy.deepcopy(intake or {})
+    for definition in mutations.get("block_defs", []):
+        children = [_block_member_child(intake, h) for h in definition["members"]]
+        block = {"base": list(definition["base"]), "children": children,
+                 "count": len(children), "complete": True}
+        block["digest"] = _block_digest(block)
+        new.setdefault("blocks", {})[definition["name"]] = block
     if transforms:
         for polyline in new.get("polylines") or []:
             handle = polyline.get("handle")
@@ -864,6 +984,9 @@ def apply_mutations(intake: Dict[str, Any], mutations: Dict[str, Any]) -> Dict[s
 
     removed = {str(h) for h in (mutations.get("removed") or [])}
     if removed:
+        for h in (removed if mutations.get("block_defs") else []):
+            new.get("properties", {}).pop(h, None)
+            new.get("blockMembers", {}).pop(h, None)
         for field in ("polylines", "circles", "arcs", "dimensions"):
             if new.get(field):
                 new[field] = [p for p in new[field] if str(p.get("handle")) not in removed]
@@ -910,7 +1033,7 @@ def apply_mutations(intake: Dict[str, Any], mutations: Dict[str, Any]) -> Dict[s
     for item in mutations.get("set_lineweight") or []:
         properties.setdefault(item["handle"], {})["lineweight"] = item["weight"]
     added = mutations.get("added") or []
-    if mutations.get("added_groups"):
+    if mutations.get("added_groups") or mutations.get("block_defs"):
         used = {str(e.get("handle", "")).upper()
                 for field in ("polylines", "circles", "arcs", "texts", "inserts", "dimensions")
                 for e in new.get(field, [])}
@@ -1721,7 +1844,7 @@ def verify_live_mutation_effects(
     """
     expected = apply_mutations(base, canonical)
     _verify_group_effects(base, actual, canonical)
-    if canonical.get("added_groups"):
+    if canonical.get("added_groups") or canonical.get("block_defs"):
         canonical = copy.deepcopy(canonical)
         for receipt in expected.get("created", []):
             canonical["added"][receipt["ordinal"]]["handle"] = receipt["handle"]
@@ -1780,7 +1903,11 @@ def verify_live_mutation_effects(
         raise ValueError("unchanged INSERT has unexpected output geometry")
     # Old intakes may predate the additive catalogue. Once captured, the
     # definitions (keyed by name, not entity handle) must stay unchanged.
-    if "blocks" in expected and expected["blocks"] != actual.get("blocks", {}):
+    if canonical.get("block_defs"):
+        _verify_block_effects(base, actual, expected, canonical)
+    elif "blocks" in expected and {
+            n: _block_semantics(b) for n, b in expected["blocks"].items()} != {
+            n: _block_semantics(b) for n, b in actual.get("blocks", {}).items()}:
         raise ValueError("unchanged block definitions differ in output")
     if "blocksCapped" in expected and expected["blocksCapped"] != actual.get("blocksCapped"):
         raise ValueError("unchanged block catalogue cap differs in output")
@@ -1906,6 +2033,44 @@ def verify_live_mutation_effects(
     if len(expected.get("polylines") or []) != expected_count:
         raise ValueError("canonical mutation application produced an invalid count")
     return _verify_property_effects(actual, canonical, matched_handles)
+
+
+def _verify_block_effects(base, actual, expected, canonical):
+    if any(str(e).startswith(("BK:", "BKE:", "BKEP:", "CA:")) for e in actual.get("parseErrors", [])):
+        raise ValueError("malformed block inspection or created handoff")
+    observed = actual.get("blocks", {})
+    for name, block in base.get("blocks", {}).items():
+        if (block.get("digest") is not None and observed.get(name, {}).get("digest") is not None
+                and block["digest"] != observed[name]["digest"]):
+            raise ValueError("untouched block definition digest differs in output")
+    if {n: _block_semantics(b) for n, b in expected.get("blocks", {}).items()} != {
+            n: _block_semantics(b) for n, b in observed.items()}:
+        raise ValueError("block definition geometry or child properties differ in output")
+    created = {}
+    base_handles = {str(e.get("handle", "")).upper() for field in (
+        "polylines", "circles", "arcs", "inserts", "dimensions") for e in base.get(field, [])}
+    for row in actual.get("created", []):
+        ordinal, handle = row.get("ordinal"), row.get("handle")
+        if (type(ordinal) is not int or not 0 <= ordinal < len(canonical.get("added", []))
+                or not isinstance(handle, str) or not re.fullmatch(r"[0-9A-Fa-f]+", handle)
+                or ordinal in created or handle.upper() in created.values() or handle.upper() in base_handles):
+            raise ValueError("invalid block INSERT created handoff")
+        created[ordinal] = handle.upper()
+    for definition in canonical["block_defs"]:
+        handle = created.get(definition["insert"])
+        rows = [e for e in actual.get("inserts", []) if str(e.get("handle", "")).upper() == handle]
+        if len(rows) != 1:
+            raise ValueError("block INSERT is missing its CA handoff")
+        source = canonical["added"][definition["insert"]]
+        expected_insert = {"name": definition["name"], "layer": "0", "rot": 0,
+                           "x": source["pt"][0], "y": source["pt"][1], "z": source["pt"][2],
+                           "scale": [1, 1, 1], "nrm": [0, 0, 1]}
+        if not _insert_effect_matches(expected_insert, rows[0], rotation_deg=0):
+            raise ValueError("CA-bound block INSERT placement differs")
+    present = {str(e.get("handle", "")).upper() for field in (
+        "polylines", "circles", "arcs", "inserts", "dimensions") for e in actual.get(field, [])}
+    if present & {h.upper() for h in canonical.get("removed", [])}:
+        raise ValueError("removed block member remains in output")
 
 
 def _verify_group_effects(base, actual, canonical):

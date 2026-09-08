@@ -273,6 +273,28 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
     assert not any(g["name"] == "CANARYRACK" for g in ungrouped.get("groups", []))
     write_loop.verify_live_mutation_effects(grouped, ungrouped, ungroup_plan)
 
+    # Atomic REPLACE uses the committed LINE and the preceding round's CIRCLE.
+    members = [new_lines[0]["handle"], circle_handle]
+    block_plan = validate_mutations(ungrouped, {
+        "block_defs": [{"name": "B", "base": [10, 20, 0], "members": members, "insert": 0}],
+        "removed": members,
+        "added": [{"handle": "block-insert", "kind": "INSERT", "name": "B", "layer": "0",
+                   "pt": [10, 20, 0], "rot": 0, "scale": [1, 1, 1]}],
+    })
+    shutil.copyfile(output, group_host)
+    output.unlink()
+    (tmp_path / "mutation-plan.txt").write_bytes(emit_plan(
+        block_plan, base_sha256=hashlib.sha256(group_host.read_bytes()).hexdigest()))
+    _console(tmp_path, group_host, "block.scr", settings["script"]["value"])
+    _console(tmp_path, output, "block-inspect.scr", inspect)
+    blocked = intake_parse.parse(families, "canary")
+    assert not blocked.get("parseErrors"), blocked.get("parseErrors")
+    assert [c["kind"] for c in blocked["blocks"]["B"]["children"]] == ["LINE", "CIRCLE"]
+    assert len([e for e in blocked["inserts"] if e["name"] == "B"]) == 1
+    assert not set(members) & {e["handle"] for field in ("polylines", "circles") for e in blocked.get(field, [])}
+    assert all("properties" in c for c in blocked["blocks"]["B"]["children"])
+    write_loop.verify_live_mutation_effects(ungrouped, blocked, block_plan)
+
 
 # --- (3) skip-visibility row: a "skipped local engine suite is no proof" guard
 

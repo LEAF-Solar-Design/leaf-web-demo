@@ -377,6 +377,12 @@ def test_cli_failure_redacts_exception(monkeypatch, capsys):
 
 
 def test_v3_activity_adds_insert_and_preserves_v2_apply_script():
+    block_script = subject.activity_spec(3)["settings"]["script"]["value"]
+    assert "ADDBLOCKDEF" not in subject.activity_spec(2)["settings"]["script"]["value"]
+    assert "leaf-pending-definitions" in block_script
+    assert '(cons 0 "BLOCK")' in block_script and '(cons 0 "ENDBLK")' in block_script
+    assert "leaf-bd-clean" in block_script and "leaf-bd-dimension-p" in block_script
+    assert '"BKEP|"' in subject.activity_spec(3)["settings"]["inspectScript"]["value"]
     from lisp import MUTATION_INSPECT_BLOCKS, build_scr
 
     v2_settings = {

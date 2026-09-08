@@ -344,6 +344,26 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                     block["children"].append(child)
                 else:
                     block["complete"] = False
+            elif tag == "BKEPC":
+                if rest != "1":
+                    raise ValueError("malformed block property coverage")
+            elif tag == "BKEP":
+                name, ordinal, aci, linetype, weight, colour = rest.split("|")
+                block = out["blocks"][_block_name(name)]
+                ordinal = int(ordinal)
+                if not 0 <= ordinal < len(block["children"]):
+                    raise ValueError("BKEP ordinal must name an existing child")
+                rgb = None if colour == "~" else [int(v) for v in colour.split(",")]
+                if rgb is not None and (len(rgb) != 3 or any(not 0 <= v <= 255 for v in rgb)):
+                    raise ValueError("BKEP true colour must be RGB")
+                block["children"][ordinal]["properties"] = {
+                    "aci": int(aci), "linetype": _block_name(linetype),
+                    "lineweight": int(weight), "rgb": rgb}
+            elif tag == "BM":
+                handle, kind, normal, bulged, dimension = rest.split("|")
+                out.setdefault("blockMembers", {})[handle] = {
+                    "kind": kind, "nrm": _block_point(normal, 6),
+                    "bulge": int(bulged), "dimension_refs": ["reactor"] if dimension == "1" else []}
             elif tag == "BKCAP":
                 out["blocksCapped"] = int(rest)
             elif tag == "GEO":
@@ -357,6 +377,11 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
     if not any(line.strip() == "GRC|1" for line in lines):
         out.pop("groups", None)
         out.pop("created", None)
+    if not any(line.strip() == "BKEPC|1" for line in lines):
+        out.pop("blockMembers", None)
+        for block in out.get("blocks", {}).values():
+            for child in block["children"]:
+                child.pop("properties", None)
     close()
     for block in out.get("blocks", {}).values():
         if block["count"] <= 60 and len(block["children"]) < block["count"]:

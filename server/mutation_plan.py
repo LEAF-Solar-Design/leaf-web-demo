@@ -35,7 +35,7 @@ _HANDLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _EXISTING_HANDLE_RE = re.compile(r"^[0-9A-Fa-f]{1,32}$")
 _LAYER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.$-]{0,254}$")
 _MUTATION_FIELDS = frozenset({
-    "added", "removed", "transforms", "added_groups", "removed_groups",
+    "added", "removed", "transforms", "added_groups", "removed_groups", "block_defs",
     "set_layer", "set_points", "set_circle", "set_arc",
 })
 _V2_FIELDS = frozenset({"set_layer", "set_points", "set_circle", "set_arc"})
@@ -296,6 +296,103 @@ def _op_list(mutations: Dict[str, Any], field: str) -> List[Any]:
     return raw
 
 
+def _validate_block_defs(intake, mutations, index):
+    definitions = _op_list(mutations, "block_defs")
+    if not definitions:
+        return []
+    blocks = intake.get("blocks", {})
+    total = intake.get("blocksCapped", len(blocks))
+    if total > len(blocks):
+        raise ValueError(
+            f"the block catalogue is incomplete: {total} definitions, {len(blocks)} listed; "
+            "create the block on a drawing whose catalogue fits the display cap")
+    occupied = {n.casefold() for n in blocks}
+    removed = _op_list(mutations, "removed")
+    added = _op_list(mutations, "added")
+    used = set()
+    result = []
+    for raw in definitions:
+        if not isinstance(raw, dict) or set(raw) != {"name", "base", "members", "insert"}:
+            raise ValueError("block definition requires name, base, members and insert only")
+        name = raw["name"]
+        if (not isinstance(name, str) or not 1 <= len(name) <= 255 or name.startswith("*")
+                or any(c in "|\r\n" or not 32 <= ord(c) <= 126 for c in name)):
+            raise ValueError("block definition name must use the INSERT-name charset")
+        if name.casefold() in occupied:
+            raise ValueError("block definition name collides case-insensitively with the catalogue")
+        occupied.add(name.casefold())
+        if not isinstance(raw["base"], list) or len(raw["base"]) != 3:
+            raise ValueError("block definition base must have three components")
+        base = [round(v, 3) for v in _point3(raw["base"], "block base")]
+        members = raw["members"]
+        if not isinstance(members, list) or not 1 <= len(members) <= 60:
+            raise ValueError("block definition requires 1..60 committed members")
+        seen = set()
+        for h in members:
+            _existing_handle(h, "block member")
+            if h.upper() in seen or h.upper() in used:
+                raise ValueError("block members must be distinct across definitions")
+            seen.add(h.upper())
+            if h not in index:
+                raise ValueError("block member must be a committed LINE, straight LWPOLYLINE, CIRCLE or ARC; nested INSERT is excluded")
+            kind, entity = index[h]
+            entity = {**entity, **intake.get("blockMembers", {}).get(h, {})}
+            if entity.get("kind", kind) not in ("LINE", "LWPOLYLINE", "CIRCLE", "ARC"):
+                raise ValueError("block member kind must be LINE, LWPOLYLINE, CIRCLE or ARC")
+            if (entity.get("paper_space") or entity.get("paperspace") or entity.get("block")
+                    or entity.get("space", "model") not in ("model", "Model", "ModelSpace", 0)):
+                raise ValueError("block members must be model-space entities, never nested")
+            normal = entity.get("nrm", [0, 0, 1])
+            if not isinstance(normal, (list, tuple)) or len(normal) != 3 or not _normal_is_up(entity):
+                raise ValueError("block members must be planar with normal +Z")
+            if any(float(v) != 0 for v in entity.get("bulges", [])) or entity.get("bulge", 0):
+                raise ValueError("block LWPOLYLINE must have straight segments, every bulge 0")
+            props = (intake.get("properties") or {}).get(h, entity.get("properties", {}))
+            if (props.get("aci", 256) == 0 or str(props.get("linetype", "ByLayer")).casefold() == "byblock"
+                    or props.get("lineweight", -1) == -2):
+                raise ValueError("block members cannot carry ByBlock colour, linetype or lineweight")
+            dependencies = entity.get("dimension_refs", [])
+            dimension_handles = {str(d.get("handle", "")).upper() for d in intake.get("dimensions", [])}
+            for reactor in entity.get("reactors", []):
+                if ((isinstance(reactor, str) and reactor.upper() in dimension_handles)
+                        or (isinstance(reactor, dict) and reactor.get("kind", reactor.get("type")) == "DIMENSION")):
+                    dependencies = [reactor]
+            def references(value):
+                if isinstance(value, str):
+                    return value.upper() == h.upper()
+                if isinstance(value, list):
+                    return any(references(v) for v in value)
+                if isinstance(value, dict):
+                    return any(references(v) for v in value.values())
+                return False
+            for dim in intake.get("dimensions", []):
+                if any(references(dim.get(field)) for field in (
+                        "references", "associated_handles", "definition_association", "association")):
+                    dependencies = [dim.get("handle")]
+            if dependencies:
+                raise ValueError("block member is referenced by a DIMENSION association or reactor")
+            for op in ("transforms", "set_layer", "set_points", "set_circle", "set_arc", *V3_SET_OPS):
+                if any(isinstance(e, dict) and e.get("handle") == h for e in _op_list(mutations, op)):
+                    raise ValueError("block members must be UNCHANGED committed entities")
+            if h not in removed:
+                raise ValueError("each block member must also be in removed for atomic REPLACE")
+        used.update(seen)
+        ordinal = raw["insert"]
+        if type(ordinal) is not int or not 0 <= ordinal < len(added):
+            raise ValueError("block insert ordinal must point at its matching INSERT")
+        insert = added[ordinal]
+        matches = [e for e in added if isinstance(e, dict) and e.get("kind") == "INSERT"
+                   and str(e.get("name", "")).casefold() == name.casefold()]
+        if (len(matches) != 1 or not isinstance(insert, dict) or insert.get("kind") != "INSERT"
+                or insert.get("name") != name or insert.get("layer") != "0"
+                or insert.get("pt") != raw["base"] or insert.get("rot") != 0
+                or insert.get("scale") != [1, 1, 1]
+                or any(k in insert for k in STYLE_FIELDS)):
+            raise ValueError("block insert must match name and base on layer 0, rotation 0, scale 1,1,1")
+        result.append({"name": name, "base": base, "members": list(members), "insert": ordinal})
+    return sorted(result, key=lambda b: b["name"])
+
+
 def validate_mutations(
     intake: Dict[str, Any], mutations: Any, *, allow_transforms: bool = True,
     allow_xdata: bool = False, reject_noop: bool = True,
@@ -311,6 +408,7 @@ def validate_mutations(
         raise ValueError(f"unknown mutation fields: {', '.join(sorted(map(str, unknown)))}")
     _reject_raw_fields(mutations)
     index = _index_intake(intake)
+    block_defs = _validate_block_defs(intake, mutations, index)
     known_linetypes = _known_linetype_names(intake)
     removed_raw = _op_list(mutations, "removed")
     added_raw = _op_list(mutations, "added")
@@ -326,7 +424,7 @@ def validate_mutations(
         len(removed_raw) + len(added_raw) + len(transforms_raw)
         + len(set_layer_raw) + len(set_points_raw) + len(set_circle_raw)
         + len(set_arc_raw) + sum(len(style_raw[op]) for op in V3_SET_OPS)
-        + len(added_groups_raw) + len(removed_groups_raw)
+        + len(added_groups_raw) + len(removed_groups_raw) + len(block_defs)
     )
     if op_count == 0 and reject_noop:
         raise ValueError("mutations must contain at least one operation")
@@ -513,6 +611,9 @@ def validate_mutations(
             if any(not 0x20 <= ord(char) <= 0x7E for char in name):
                 raise ValueError("block names outside printable ASCII are not carried in this round")
             blocks = intake.get("blocks")
+            if name in {b["name"] for b in block_defs}:
+                blocks = dict(blocks or {})
+                blocks[name] = {"complete": True, "children": [], "count": 0}
             if not isinstance(blocks, dict) or name not in blocks:
                 raise ValueError(f"block {name} is not defined in this drawing")
             block = blocks[name]
@@ -727,6 +828,8 @@ def validate_mutations(
                 raise ValueError(f"ambiguous property handle {handle!r}")
             property_index[handle] = ("INSERT", entity)
     canonical: Dict[str, Any] = {}
+    if block_defs:
+        canonical["block_defs"] = block_defs
     if added_groups_raw or removed_groups_raw:
         def group_name(value):
             if isinstance(value, str):
@@ -863,6 +966,9 @@ def uses_v3(canonical: Any) -> bool:
     """True when canonical data carries a declared v3 capability."""
     if not isinstance(canonical, dict):
         return False
+    if isinstance(canonical.get("block_defs"), list) and any(
+            isinstance(b, dict) for b in canonical["block_defs"]):
+        return True
     if (isinstance(canonical.get("added_groups"), list)
             and any(isinstance(g, dict) for g in canonical["added_groups"])) or (
             isinstance(canonical.get("removed_groups"), list)
@@ -1026,9 +1132,13 @@ def emit_plan(
     if uses_v3(canonical) and version != 3:
         raise ValueError("contract v3 is required for property operations")
     lines = [f"LEAF_MUTATION_PLAN|{version}", f"BASE_SHA256|{base_sha256}"]
+    for definition in canonical.get("block_defs", []):
+        members = ";".join(f"H:{h}" for h in definition["members"])
+        base = ",".join(f"{v:.3f}" for v in definition["base"])
+        lines.append(f"ADDBLOCKDEF|{definition['name']}|{base}|{members}")
     for name in canonical.get("removed_groups", []):
         lines.append(f"REMOVEGROUP|{name.upper()}")
-    for handle in canonical.get("removed", []):
+    for handle in ([] if canonical.get("block_defs") else canonical.get("removed", [])):
         lines.append(f"REMOVE|{handle}")
     if canonical.get("transforms"):
         if base_intake is None:
@@ -1098,6 +1208,8 @@ def emit_plan(
         members = ";".join(f"H:{m}" if isinstance(m, str) else f"A:{m['add']}"
                            for m in group["members"])
         lines.append(f"ADDGROUP|{group['name'].upper()}|{members}")
+    if canonical.get("block_defs"):
+        lines.extend(f"REMOVE|{h}" for h in canonical.get("removed", []))
     plan = ("\n".join(lines) + "\n").encode("utf-8" if version == 3 else "ascii")
     if len(plan) > MAX_PLAN_BYTES:
         raise ValueError("mutation plan exceeds the byte bound")
