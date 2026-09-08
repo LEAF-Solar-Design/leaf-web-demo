@@ -10,6 +10,7 @@ import {
   applyViewPose,
   cameraPose,
   ndcFromClient,
+  pickLineThreshold,
   unprojectClientToPlane,
 } from './viewerMath.js'
 
@@ -24,6 +25,20 @@ function flatCamera({ halfW = 400, halfH = 300, cx = 0, cy = 0, zoom = 1 } = {})
   camera.updateMatrixWorld(true)
   return camera
 }
+
+describe('pickLineThreshold', () => {
+  it.each([
+    [0.0208, undefined, 0.1248],
+    [0, undefined, 1],
+    [NaN, undefined, 1],
+    [-0.0208, undefined, 1],
+    [Infinity, undefined, 1],
+    [undefined, undefined, 1],
+    [0.0208, 10, 0.208],
+  ])('maps %s world units per pixel with aperture %s to %s', (worldPerPixel, px, expected) => {
+    expect(pickLineThreshold(worldPerPixel, px)).toBeCloseTo(expected, 9)
+  })
+})
 
 describe('ndcFromClient', () => {
   it('maps the rect corners and center to NDC space', () => {
