@@ -15,16 +15,34 @@
  */
 import { useEffect, useRef } from 'react'
 
-import { engineIntake } from './engineIntake.js'
+import { engineIntake, hexHandle } from './engineIntake.js'
 import { SESSION_ERROR } from './engineSession.js'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
 
-export default function EngineDocumentView({ viewerRef = null, onShown = null }) {
+export default function EngineDocumentView({ viewerRef = null, onShown = null, selectedHandle = null }) {
   const { session, highlightedIds } = useEngineSessionContext()
   const showing = session.engineParsed && session.errorKind !== SESSION_ERROR.CRASHED
   const entities = showing ? session.entities : null
   const documentId = showing ? session.documentId : ''
   const lastRef = useRef(null)
+  const lastSelectedHandleRef = useRef(undefined)
+  /** one-way: console handle -> engine selection, on change */
+  useEffect(() => {
+    const previous = lastSelectedHandleRef.current
+    if (previous === selectedHandle) return
+    lastSelectedHandleRef.current = selectedHandle
+    if (!entities || (previous === undefined && selectedHandle === null)) return
+    if (selectedHandle === null) {
+      session.actions.select(null)
+      return
+    }
+    for (const entity of entities) {
+      if (hexHandle(entity.id) === selectedHandle) {
+        session.actions.select(entity.id)
+        return
+      }
+    }
+  }, [selectedHandle, entities, session.actions])
   // The latest onShown, so the unmount cleanup (a closure from the first
   // render) tells the host the stamp is gone (kimi, #969).
   const onShownRef = useRef(onShown)

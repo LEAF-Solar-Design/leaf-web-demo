@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import CadEditSurface from './CadEditSurface.jsx'
 import EngineDocumentView from './EngineDocumentView.jsx'
-import EngineSessionProvider from './EngineSessionProvider.jsx'
+import EngineSessionProvider, { useEngineSessionContext } from './EngineSessionProvider.jsx'
 
 class ScriptedWorker {
   constructor() { this.posted = []; this.listeners = new Map(); this.terminated = false }
@@ -33,18 +33,26 @@ let workers
 let viewer
 let viewerRef
 let onShown
-function mount() {
+function SelectionProbe() {
+  const { session } = useEngineSessionContext()
+  return <output data-testid="engine-selection">{session.selectedId ?? 'none'}</output>
+}
+
+function mount(viewProps = {}) {
   workers = []
   viewer = { applyVersion: vi.fn() }
   viewerRef = { current: viewer }
   onShown = vi.fn()
   const createWorker = vi.fn(() => { const w = new ScriptedWorker(); workers.push(w); return w })
-  return render(
+  const tree = (props) => (
     <EngineSessionProvider createWorker={createWorker}>
-      <EngineDocumentView viewerRef={viewerRef} onShown={onShown} />
+      <EngineDocumentView viewerRef={viewerRef} onShown={onShown} {...props} />
       <CadEditSurface enabled />
-    </EngineSessionProvider>,
+      <SelectionProbe />
+    </EngineSessionProvider>
   )
+  const utils = render(tree(viewProps))
+  return { ...utils, rerender: (props) => utils.rerender(tree(props)) }
 }
 
 async function openAndLoad(entities, name = 'one.dxf') {
@@ -64,6 +72,45 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
 describe('EngineDocumentView (W4f slice A0)', () => {
+  it('mirrors changed hex handles to decimal engine ids and clears on an empty canvas click', async () => {
+    const utils = mount()
+    await openAndLoad([{ ...LINE, id: '10' }, { ...CIRCLE, id: '16' }])
+    utils.rerender({ selectedHandle: 'A' })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('10')
+    utils.rerender({ selectedHandle: '10' })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('16')
+    utils.rerender({ selectedHandle: null })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('none')
+  })
+
+  it('preserves a workbench radio selection through initial and unchanged null handles', async () => {
+    const utils = mount({ selectedHandle: null })
+    await openAndLoad([{ ...LINE, id: '10' }, { ...CIRCLE, id: '16' }])
+    fireEvent.click(screen.getByRole('radio', { name: /CIRCLE on layer/ }))
+    expect(screen.getByTestId('engine-selection').textContent).toBe('16')
+    utils.rerender({ selectedHandle: null })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('16')
+    utils.rerender({ selectedHandle: null })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('16')
+  })
+
+  it('leaves the engine selection unchanged for an unknown handle', async () => {
+    const utils = mount()
+    await openAndLoad([{ ...LINE, id: '10' }, { ...CIRCLE, id: '16' }])
+    fireEvent.click(screen.getByRole('radio', { name: /CIRCLE on layer/ }))
+    utils.rerender({ selectedHandle: 'FFFF' })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('16')
+  })
+
+  it('ignores handle changes before documentLoaded and does not replay the pending handle after loading', async () => {
+    const utils = mount()
+    const before = screen.getByTestId('engine-selection').textContent
+    utils.rerender({ selectedHandle: 'A' })
+    expect(screen.getByTestId('engine-selection').textContent).toBe(before)
+    await openAndLoad([{ ...LINE, id: '10' }, { ...CIRCLE, id: '16' }])
+    expect(screen.getByTestId('engine-selection').textContent).toBe(before)
+  })
+
   it('shows the engine document once loaded, re-shows on every edit, and never touches the viewer before that', async () => {
     mount()
     expect(viewer.applyVersion).not.toHaveBeenCalled()

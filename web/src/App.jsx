@@ -3252,6 +3252,7 @@ export default function App() {
               {ENV_CAD_EDIT && (
                 <EngineDocumentView
                   viewerRef={viewerRef}
+                  selectedHandle={selectedHandle}
                   onShown={(intake) => {
                     const el = workspaceCardRef.current
                     if (!el) return

@@ -1746,6 +1746,7 @@ test.describe('route matrix, rail ON', () => {
     await bar.fill('B')
     await bar.press('Enter')
     await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'createBlock')
+    await expect(page.getByLabel('ribbon members')).toHaveText('1 objects')
     await clickWorld(9, 24)
     await expect(page.getByLabel('ribbon members')).toHaveText('2 objects')
     await page.getByLabel('ribbon members').press('Enter')
