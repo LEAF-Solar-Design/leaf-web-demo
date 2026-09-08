@@ -16,6 +16,9 @@ export const MAX_COMMAND_CHARS = 32
 // PROMPTS table (draw/modify) or OPS (delete) knows; `verb` is the reference's
 // command name, shown back to the user.
 const WORDS = Object.freeze({
+  group: { group: 'groups', op: 'group', verb: 'GROUP' },
+  g: { group: 'groups', op: 'group', verb: 'GROUP' },
+  ungroup: { group: 'groups', op: 'ungroup', verb: 'UNGROUP' },
   line: { group: 'draw', op: 'createLine', verb: 'LINE' },
   l: { group: 'draw', op: 'createLine', verb: 'LINE' },
   pline: { group: 'draw', op: 'createPolyline', verb: 'PLINE' },
@@ -112,9 +115,6 @@ const DEFERRED = Object.freeze({
   le: { key: 'leader', verb: 'LEADER' },
   block: { key: 'blockCreate', verb: 'BLOCK' },
   b: { key: 'blockCreate', verb: 'BLOCK' },
-  group: { key: 'group', verb: 'GROUP' },
-  g: { key: 'group', verb: 'GROUP' },
-  ungroup: { key: 'ungroup', verb: 'UNGROUP' },
 })
 
 /**

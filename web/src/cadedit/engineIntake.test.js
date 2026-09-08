@@ -5,6 +5,10 @@ import { bulgePoints, ARC_STEP_DEG, CIRCLE_SEGMENTS, DIM_EXT_PAST, MAX_POINTS, M
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps
 
 describe('engineIntake (W4f slice A0): engine entities -> viewer intake', () => {
+  it('carries dictionary names and converts group and member ids to hex', () => {
+    const entities = Object.assign([], { groups: [{ id: '240', name: 'RACK', memberIds: ['10', '32'], unnamed: false, selectable: true, description: '' }] })
+    expect(engineIntake(entities).groups).toEqual([{ handle: 'F0', name: 'RACK', flags: 0, selectable: true, description: '', members: ['A', '20'] }])
+  })
   it('W4g-7b-01c keeps an unknown base as a glyph without suppressing known definitions', () => {
     const reference = { handle: '1280', type: 'INSERT', name: 'b', ip: [10, 20, 0], scale: [1, 1, 1], rotationDeg: 0 }
     const definition = { name: 'B', base: [1, 2, 0], complete: true,

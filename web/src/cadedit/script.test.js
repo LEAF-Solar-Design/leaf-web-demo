@@ -19,6 +19,12 @@ describe('tokenize', () => {
 })
 
 describe('promptSlots', () => {
+  it('GROUP reads a name before repeated hexadecimal member handles', () => {
+    expect(promptSlots(PROMPTS.group)).toEqual([{ keys: ['groupName'], kind: 'text' }, { keys: ['members'], kind: 'edge', repeat: true }])
+    expect(parse('GROUP "Rack one" A 20').lines[0].inputs).toEqual({ groupName: 'Rack one', members: '10 32' })
+    expect(parse('GROUP RACK A invalid').refusal).toContain('hexadecimal')
+    expect(parse('GROUP RACK A').refusal).toContain('at least two')
+  })
   it('folds a point pair into one slot and keeps every other field its own', () => {
     expect(promptSlots(PROMPTS.createLine).map((s) => s.kind)).toEqual(['point', 'point', 'text'])
     expect(promptSlots(PROMPTS.createCircle).map((s) => [s.kind, s.keys.join(',')])).toEqual([['point', 'x,y'], ['number', 'r'], ['text', 'layer']])
@@ -116,9 +122,9 @@ describe('parseScript', () => {
     expect(out.lines[1].reason).toBe(DEFERRED_REASONS.leader)
     expect(out.lines[1].inputs).toEqual({})
     expect(Object.isFrozen(out.lines[1])).toBe(true)
-    expect(parse('g').lines[0]).toMatchObject({ group: 'deferred', op: 'group', verb: 'GROUP', reason: DEFERRED_REASONS.group })
+    expect(parse('g RACK A0 B1').lines[0]).toMatchObject({ group: 'groups', op: 'group', verb: 'GROUP', inputs: { groupName: 'RACK', members: '160 177' } })
     expect(parse('b').lines[0]).toMatchObject({ group: 'deferred', op: 'blockCreate', verb: 'BLOCK', reason: DEFERRED_REASONS.blockCreate })
-    expect(parse('ungroup').lines[0]).toMatchObject({ group: 'deferred', op: 'ungroup', verb: 'UNGROUP', reason: DEFERRED_REASONS.ungroup })
+    expect(parse('ungroup RACK').lines[0]).toMatchObject({ group: 'groups', op: 'ungroup', verb: 'UNGROUP', inputs: { groupName: 'RACK' } })
   })
 
   it('is bounded before any line is read', () => {

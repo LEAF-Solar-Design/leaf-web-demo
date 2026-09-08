@@ -70,6 +70,20 @@ beforeEach(() => {
 afterEach(() => { cleanup(); context = null; vi.useRealTimers() })
 
 describe('W4g-7a the script runner', () => {
+  it('runs named GROUP and UNGROUP without a scalar selection', async () => {
+    mount()
+    await openAndLoad([H, L2])
+    expect(context.session.selectedId).toBe('')
+    setScript('GROUP RACK 7 8\nUNGROUP RACK')
+    fireEvent.click(runButton())
+    expect(posts()).toEqual([{ type: 'applyEdit', op: 'createGroup', payload: { name: 'RACK', members: ['7', '8'] } }])
+    const groups = [{ id: '20', name: 'RACK', memberIds: ['7', '8'] }]
+    reply('createGroup', [H, L2], { groups, createdId: '20' })
+    await waitFor(() => expect(posts()).toHaveLength(2))
+    expect(posts()[1]).toEqual({ type: 'applyEdit', op: 'ungroup', payload: { name: 'RACK' } })
+    reply('ungroup', [H, L2], { groups: [] })
+    expect(status().textContent).toContain('Script ran 2 commands')
+  })
   it('holds Run without a document or a script, then runs two lines ONE AT A TIME and reports the count', async () => {
     mount()
     expect(runButton().disabled).toBe(true)

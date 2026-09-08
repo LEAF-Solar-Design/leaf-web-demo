@@ -252,6 +252,22 @@ function addedRecord(handle, g) {
 
 const byHandle = (a, b) => (a.handle < b.handle ? -1 : a.handle > b.handle ? 1 : 0)
 
+// The server sorts geometry-only canonical JSON before attaching styles.
+// The unique handle ends every comparison: fields after it cannot affect
+// the ordinal. Refuse prefixes whose Python float spelling or normalized
+// dimension geometry we cannot reproduce, instead of guessing an ordinal.
+function additionSortPrefix(record) {
+  const float = (value) => {
+    if (!Number.isFinite(value) || (value !== 0 && (Math.abs(value) < 0.0001 || Math.abs(value) >= 1e16))) throw new Error('number spelling')
+    return Number.isInteger(value) ? `${value === 0 ? 0 : value}.0` : String(value)
+  }
+  const handle = `"handle":${JSON.stringify(record.handle)}`
+  if (record.kind === 'DIMENSION') throw new Error('normalized dimension geometry')
+  if (record.c) return `{"c":[${record.c.map(float).join(',')}],${record.kind === 'ARC' ? `"end_deg":${float(record.end_deg)},` : ''}${handle}`
+  if (!record.kind) return `{"closed":${record.closed},${handle}`
+  return `{${handle}`
+}
+
 /**
  * The plan from `committed` (the entity list the head document loaded with)
  * to `current` (the list now). Resolves `{ mutations, count, reason }`:
@@ -275,14 +291,14 @@ export function diffPlan(committed, current) {
   // W4g-7b-05c-2: `kind` names the entity type that caused the refusal (null
   // when the refusal is not about one entity's own kind, e.g. a block
   // definition or the operation-count cap); `cause` is one of the closed set
-  // the store's save reads to decide REJECT (moved-reference, true-colour)
+  // the store's save reads to decide REJECT (moved-reference, true-colour, group-singleton)
   // vs. today's sidecar fallback (every other cause, including null).
   const cannot = (reason, kind = null, cause = null) => ({ mutations: null, count: 0, reason, kind, cause })
   let hard = null
   let soft = null
   const refuse = (reason, kind = null, cause = null) => {
     const refusal = cannot(reason, kind, cause)
-    if (cause === 'moved-reference' || cause === 'true-colour') hard ||= refusal
+    if (cause === 'moved-reference' || cause === 'true-colour' || cause === 'group-singleton') hard ||= refusal
     else soft ||= refusal
   }
   // The engine digest covers EVERY child, including unlisted/unsupported ones.
@@ -396,14 +412,56 @@ export function diffPlan(committed, current) {
     }
     added.push(addedRecord(handle, now))
   }
-  const count = added.length + removed.length + setLayer.length + setPoints.length + setCircle.length + setArc.length
+  const groupMap = (projection) => new Map((projection?.groups || projection?.entities?.groups || []).map((group) => [group.name.toUpperCase(), group]))
+  const oldGroups = groupMap(committed)
+  const newGroups = groupMap(current)
+  const addedGroups = []
+  const removedGroups = []
+  const memberHandles = (group) => [...new Set((group.memberIds || []).map(hexHandle))]
+  const livingMembers = (group) => memberHandles(group).filter((id) => !before.has(id) || after.has(id))
+  // Deleting entities repairs membership in the interpreter. Compare the
+  // surviving old members so a natural singleton never becomes an invalid
+  // one-member ADDGROUP replacement.
+  const sameMembers = (a, b) => a.length === b.length && a.every((id) => b.includes(id))
+  for (const [name, group] of oldGroups) {
+    const now = newGroups.get(name)
+    if (!now || !sameMembers(memberHandles(group).filter((id) => after.has(id)), livingMembers(now))) removedGroups.push(name)
+  }
+  for (const [name, group] of newGroups) {
+    if (!oldGroups.has(name) || removedGroups.includes(name)) {
+      const members = livingMembers(group)
+      if (members.length < 2) refuse(`group ${name} needs at least two members to save; ungroup it or add a member`, null, 'group-singleton')
+      else addedGroups.push({ name, members })
+    }
+  }
+  added.sort(byHandle)
+  if ((addedGroups.length || removedGroups.length) && added.length > 1) {
+    try {
+      const prefixes = new Map(added.map((record) => [record.handle, additionSortPrefix(record)]))
+      added.sort((a, b) => prefixes.get(a.handle) < prefixes.get(b.handle) ? -1 : 1)
+    } catch {
+      refuse('group members need same-plan ordinals whose canonical addition order cannot be established; save the new entities before grouping them')
+    }
+  }
+  const ordinal = new Map(added.map((record, index) => [record.handle, index]))
+  for (const group of addedGroups) {
+    group.members = group.members.map((handle) => {
+      if (before.has(handle)) return handle
+      if (ordinal.has(handle)) return { add: ordinal.get(handle) }
+      refuse(`group ${group.name} has a member the plan cannot add`)
+      return handle
+    })
+  }
+  const count = addedGroups.length + removedGroups.length + added.length + removed.length + setLayer.length + setPoints.length + setCircle.length + setArc.length
     + setColor.length + setLinetype.length + setLineweight.length
   if (count > MAX_PLAN_OPERATIONS) {
     soft ||= { mutations: null, count, reason: `this edit changes ${count} entities, over the ${MAX_PLAN_OPERATIONS} a plan can carry` }
   }
   if (hard || soft) return hard || soft
   const mutations = {}
-  if (added.length) mutations.added = added.sort(byHandle)
+  if (added.length) mutations.added = added
+  if (addedGroups.length) mutations.added_groups = addedGroups.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
+  if (removedGroups.length) mutations.removed_groups = removedGroups.sort()
   if (removed.length) mutations.removed = removed.sort()
   if (setLayer.length) mutations.set_layer = setLayer.sort(byHandle)
   if (setPoints.length) mutations.set_points = setPoints.sort(byHandle)

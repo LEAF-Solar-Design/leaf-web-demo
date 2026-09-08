@@ -475,7 +475,7 @@ describe('referencePanels (the flag-off placeholders)', () => {
     const [, , , groups] = referencePanels()
     const group = toolsOf(groups)['groups:group']
     const ungroup = toolsOf(groups)['groups:ungroup']
-    expect([group.disabled, group.reason]).toEqual([true, DEFERRED_REASONS.group])
-    expect([ungroup.disabled, ungroup.reason]).toEqual([true, DEFERRED_REASONS.ungroup])
+    expect([group.disabled, group.reason]).toEqual([true, REASONS.notInEngine])
+    expect([ungroup.disabled, ungroup.reason]).toEqual([true, REASONS.notInEngine])
   })
 })

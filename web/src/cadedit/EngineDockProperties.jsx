@@ -51,9 +51,11 @@ export default function EngineDockProperties() {
   // same slot idiom (the dock's Geometry section otherwise has no field for
   // it: entityGeometry knows nothing of a DIMENSION's projection).
   const isDimension = entity.type === 'DIMENSION' && Number.isFinite(entity.measurement)
+  const groupNames = (session.entities.groups || []).filter((group) => group.memberIds.includes(entity.id)).map((group) => group.name)
   return createPortal(
     <dl className="dock-properties" data-testid="dock-properties">
       <dt>Color</dt><dd>{formatColor(entity)}</dd>
+      {groupNames.length > 0 && <><dt>Groups</dt><dd data-testid="dock-groups">{groupNames.join(', ')}</dd></>}
       <dt>Linetype</dt><dd>{typeof entity.linetype === 'string' && entity.linetype ? entity.linetype : 'ByLayer'}</dd>
       <dt>Lineweight</dt><dd>{formatLineweight(Number.isFinite(entity.lineweight) ? entity.lineweight : -1)}</dd>
       {isDimension && <><dt>Measurement</dt><dd>{formatMeasurement(entity.measurement)}</dd></>}

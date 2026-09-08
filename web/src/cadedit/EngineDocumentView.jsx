@@ -20,7 +20,7 @@ import { SESSION_ERROR } from './engineSession.js'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
 
 export default function EngineDocumentView({ viewerRef = null, onShown = null }) {
-  const { session } = useEngineSessionContext()
+  const { session, highlightedIds } = useEngineSessionContext()
   const showing = session.engineParsed && session.errorKind !== SESSION_ERROR.CRASHED
   const entities = showing ? session.entities : null
   const documentId = showing ? session.documentId : ''
@@ -44,9 +44,10 @@ export default function EngineDocumentView({ viewerRef = null, onShown = null })
     lastRef.current = entities
     const intake = engineIntake(entities, documentId)
     viewer.applyVersion(intake)
+    viewer.setHighlight?.(Array.from(highlightedIds || []))
     onShown?.(intake)
     return undefined
-  }, [viewerRef, entities, documentId, onShown])
+  }, [viewerRef, entities, documentId, onShown, highlightedIds])
   // Unmount (the surface leaves): the console drawing comes back.
   useEffect(() => () => {
     if (lastRef.current === null) return

@@ -615,13 +615,19 @@ describe('W4g-7b-05c-3 F4: placed selections reach the verb gate', () => {
 })
 
 describe('DEFERRED_REASONS', () => {
-  it('is frozen, with the four exact sentences', () => {
+  it('seats both named group operations as real document-gated tools', () => {
+    const actions = forGroup('groups')
+    expect(actions.map((action) => action.id)).toEqual(['groups:group', 'groups:ungroup'])
+    for (const action of actions) {
+      expect(action.panel).toBe('groups')
+      expect(action.when({ session: { engineParsed: true, selected: null } })).toBe('')
+    }
+  })
+  it('is frozen, with the two remaining exact sentences', () => {
     expect(Object.isFrozen(DEFERRED_REASONS)).toBe(true)
     expect(DEFERRED_REASONS).toEqual({
       blockCreate: 'unavailable; insert an existing block',
       leader: "unavailable; a leader's annotation is an association the contract does not carry yet",
-      group: 'unavailable; groups are dictionary objects the contract does not carry yet',
-      ungroup: 'unavailable; groups are dictionary objects the contract does not carry yet',
     })
   })
 })

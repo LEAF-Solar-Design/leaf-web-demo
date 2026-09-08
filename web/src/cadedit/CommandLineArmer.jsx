@@ -26,7 +26,7 @@ import { useEngineSessionContext } from './EngineSessionProvider.jsx'
 // admits. A group missing here is dropped SILENTLY (App has already cleared
 // the bar), which is what kimi found on #1025: COPYCLIP / CUTCLIP /
 // PASTECLIP were registered as words and died here.
-const GROUPS = new Set(['draw', 'modify', 'clipboard'])
+const GROUPS = new Set(['draw', 'modify', 'clipboard', 'groups'])
 // W4g-7b-05c: the four controls this crate defers. Unlike GROUPS above,
 // `deferred` never arms — the word is honest, not a command, so it is
 // handled before acceptsCommand rather than folded into its vocabulary.

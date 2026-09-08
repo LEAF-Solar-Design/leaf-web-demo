@@ -144,6 +144,8 @@ const Viewer = forwardRef(function Viewer(
   // rebuild without the parent having to swap the `intake` prop. Reset whenever
   // a genuinely new `intake` prop arrives (fixture/drawing switch).
   const [internalIntake, setInternalIntake] = useState(null)
+  const [groupHighlight, setGroupHighlight] = useState([])
+  useEffect(() => { setGroupHighlight([]) }, [intake])
   useEffect(() => { setInternalIntake(null) }, [intake])
   const activeIntake = internalIntake || intake
 
@@ -632,7 +634,7 @@ const Viewer = forwardRef(function Viewer(
     // Rebuild scene geometry from a new intake version (e.g. a backend push of
     // the next drawing version). Disposes old geometry and clears the pending
     // ghost as part of the rebuild.
-    applyVersion: (newIntake) => setInternalIntake(newIntake),
+    applyVersion: (newIntake) => { setGroupHighlight([]); setInternalIntake(newIntake) },
     // Project a world point to a client pixel (production twin of the DEV
     // mount.__cadviewer hook — used by the site layer and automated checks).
     project: (wx, wy) => {
@@ -702,6 +704,11 @@ const Viewer = forwardRef(function Viewer(
     // on the snapped point, or nothing. Called when the snap CHANGES (the
     // picker remembers the last one), so it disposes what it replaces and
     // allocates nothing when clearing an empty group.
+    setHighlight: (ids) => {
+      setGroupHighlight(Array.from(ids || [], (id) => {
+        try { return BigInt(id).toString(16).toUpperCase() } catch { return String(id) }
+      }))
+    },
     setSnapMarker: (pt, size = 1) => {
       const s = stateRef.current
       if (!s) return false
@@ -905,11 +912,12 @@ const Viewer = forwardRef(function Viewer(
     if (!s) return
     const g = s.selectionGroup
     g.clear()
-    if (!selectedHandle) return
+    if (!selectedHandle && !groupHighlight.length) return
     const col = s.tokens.select
     const z = 5
 
-    for (const d of s.pickIndex.get(selectedHandle) || []) {
+    for (const handle of new Set([selectedHandle, ...groupHighlight].filter(Boolean))) {
+    for (const d of s.pickIndex.get(handle) || []) {
     if (d.kind === 'poly' || d.kind === 'face') {
       const pts = d.pts
       const fillPos = [], linePos = []
@@ -948,7 +956,8 @@ const Viewer = forwardRef(function Viewer(
       g.add(lMesh)
     }
     }
-  }, [selectedHandle, buildTick])
+    }
+  }, [selectedHandle, groupHighlight, buildTick])
 
   // --- markers (result-driven) ---------------------------------------------
   useEffect(() => {
@@ -1066,6 +1075,7 @@ const Viewer = forwardRef(function Viewer(
       ref={mountRef}
       className="viewer-canvas"
       data-tour="viewer"
+      data-group-highlight={groupHighlight.length ? groupHighlight.join(' ') : undefined}
       // The ONE element identity a WebGL entity gets, since it has no DOM
       // node of its own: the current selection, reflected through the same
       // `selectedHandle` prop the click-to-pick path already drives. No

@@ -57,6 +57,7 @@ function defaultCreateWorker() {
 }
 
 export const DEFAULT_EDIT_INPUTS = Object.freeze({
+  members: '', groupName: '', membersDone: '',
   // Modify operands.
   dx: '10', dy: '0', vertexIndex: '0', layer: '',
   // Draw operands (W4d Slice B): a point, a second point, a radius, an
@@ -99,7 +100,7 @@ const INPUT_KEYS = new Set(Object.keys(DEFAULT_EDIT_INPUTS))
 export const MAX_INPUT_CHARS = 64
 export const MAX_POINT_LIST_CHARS = 4096
 // Style keeps the plan contract's DIMSTYLE name bound, mutation_plan.py.
-const INPUT_LIMITS = Object.freeze({ pts: MAX_POINT_LIST_CHARS, style: 255 })
+const INPUT_LIMITS = Object.freeze({ pts: MAX_POINT_LIST_CHARS, style: 255, members: MAX_POINT_LIST_CHARS, groupName: 255 })
 
 // The two ribbon groups whose tools prompt for operands, and the op token's
 // shape (a JS identifier the clusters own; the engine validates the op
@@ -109,7 +110,7 @@ const INPUT_LIMITS = Object.freeze({ pts: MAX_POINT_LIST_CHARS, style: 255 })
 // setArmed, which is the bound doing its job against an unknown group;
 // the fourth proof of the clipboard slice found Paste clicked and no
 // prompt opened, because this line still knew two groups.
-const ARMED_GROUPS = new Set(['draw', 'modify', 'clipboard'])
+const ARMED_GROUPS = new Set(['draw', 'modify', 'clipboard', 'groups'])
 const ARMED_OP = /^[a-zA-Z]{1,32}$/
 const sameFrom = (a, b) => (!a && !b) || (!!a && !!b && a[0] === b[0] && a[1] === b[1])
 
@@ -152,6 +153,18 @@ export default function EngineSessionProvider({
   })
 
   const [{ inputs, armed }, setEditState] = useState({ inputs: DEFAULT_EDIT_INPUTS, armed: null })
+  const [highlightedGroup, setHighlightedGroup] = useState(null)
+  const currentGroup = highlightedGroup?.document === session.documentLoadIdentity && session.engineParsed
+    ? (session.entities.groups || []).find((item) => item.name.toUpperCase() === highlightedGroup.name)
+    : null
+  const highlightedIds = useMemo(() => new Set(currentGroup?.memberIds || []), [currentGroup])
+  const selectGroup = useCallback((name) => {
+    const group = (session.entities.groups || []).find((item) => item.name.toUpperCase() === String(name).trim().toUpperCase())
+    const ids = group?.memberIds || []
+    setHighlightedGroup(group ? { name: group.name.toUpperCase(), document: session.documentLoadIdentity } : null)
+    if (ids.length) session.actions.select(ids[0])
+  }, [session.entities, session.actions, session.documentLoadIdentity])
+  useEffect(() => { if (!currentGroup) setHighlightedGroup(null) }, [currentGroup])
   const setInput = useCallback((key, value) => {
     if (!INPUT_KEYS.has(key) || typeof value !== 'string') return
     const limit = INPUT_LIMITS[key] ?? MAX_INPUT_CHARS
@@ -192,6 +205,7 @@ export default function EngineSessionProvider({
         nextInputs = Object.freeze(Object.fromEntries(Object.entries(DEFAULT_EDIT_INPUTS)
           .map(([key, value]) => [key, shown.has(key) ? current.inputs[key] : value])))
       }
+      if (op === 'group') nextInputs = Object.freeze({ ...nextInputs, members: '', groupName: '', membersDone: '' })
       return { inputs: nextInputs, armed: Object.freeze(from ? { group, op, from } : { group, op }) }
     })
   }, [setArmedState])
@@ -263,9 +277,9 @@ export default function EngineSessionProvider({
   const value = useMemo(
     () => ({
       session: sessionForConsumers, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap,
-      reach, setReach, refuse,
+      reach, setReach, refuse, highlightedIds, selectGroup,
     }),
-    [sessionForConsumers, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap, reach, setReach, refuse],
+    [sessionForConsumers, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap, reach, setReach, refuse, highlightedIds, selectGroup],
   )
   return <EngineSessionContext.Provider value={value}>{children}</EngineSessionContext.Provider>
 }

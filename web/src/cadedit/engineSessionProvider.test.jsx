@@ -26,6 +26,8 @@ import {
 } from '../drawing/DrawingIdentityProvider.jsx'
 
 import CadEditSurface from './CadEditSurface.jsx'
+import CanvasPointPicker from './CanvasPointPicker.jsx'
+import EngineDocumentView from './EngineDocumentView.jsx'
 import EngineRibbonClusters, {
   DRAW_REASONS, MODIFY_REASONS, SAVE_REASONS, PROMPTS, promptKeys, drawReason, modifyReason, saveReason,
 } from './EngineRibbonClusters.jsx'
@@ -157,6 +159,42 @@ beforeEach(() => {
 })
 
 describe('provider construction: one session, one worker, every consumer', () => {
+  it('derives group highlights from the live projection and clears them on a same-name document load', () => {
+    const worker = new ScriptedWorker()
+    let context
+    function Probe() { context = useEngineSessionContext(); return null }
+    const viewer = { applyVersion: vi.fn(() => viewer.setHighlight([])), setHighlight: vi.fn() }
+    const viewerRef = { current: viewer }
+    render(<EngineSessionProvider createWorker={() => worker}>
+      <Probe /><CanvasPointPicker viewerRef={viewerRef} /><EngineDocumentView viewerRef={viewerRef} />
+    </EngineSessionProvider>)
+    const entities = [{ ...LINE, id: '10' }, { ...POLY, id: '11' }]
+    const groups = [{ id: '240', name: 'RACK', memberIds: ['10', '11'] }]
+    act(() => context.session.actions.openBytes(new Uint8Array([48, 10]), 'drawing.dxf'))
+    worker.emit({ ...loadedMessage(entities, 'drawing.dxf'), groups })
+    act(() => context.selectGroup('rack'))
+    expect(context.session.selectedId).toBe('10')
+    expect([...context.highlightedIds]).toEqual(['10', '11'])
+    expect(viewer.setHighlight).toHaveBeenLastCalledWith(['10', '11'])
+    worker.emit({ ...editApplied('delete', [entities[0]]), groups: [{ ...groups[0], memberIds: ['10'] }] })
+    expect([...context.highlightedIds]).toEqual(['10'])
+    expect(viewer.setHighlight).toHaveBeenLastCalledWith(['10'])
+    const firstIdentity = context.session.documentLoadIdentity
+    // A new file can reuse both the filename and the group/engine handles.
+    act(() => context.session.actions.openBytes(new Uint8Array([49, 10]), 'drawing.dxf'))
+    worker.emit({ ...loadedMessage(entities.map((entity) => ({ ...entity })), 'drawing.dxf'), groups })
+    expect(context.session.documentLoadIdentity).not.toBe(firstIdentity)
+    expect([...context.highlightedIds]).toEqual([])
+    expect(viewer.setHighlight).toHaveBeenLastCalledWith([])
+    act(() => context.selectGroup('rack'))
+    worker.emit({ ...editApplied('ungroup', entities), groups: [] })
+    expect([...context.highlightedIds]).toEqual([])
+    expect(viewer.setHighlight).toHaveBeenLastCalledWith([])
+    // Restoring a removed group must not revive a cleared highlight.
+    worker.emit({ ...editApplied('createGroup', entities), groups })
+    expect([...context.highlightedIds]).toEqual([])
+  })
+
   it('spawns nothing at mount and states the Modify group is unavailable until a DXF is imported', () => {
     const studio = mount()
     expect(studio.createWorker).not.toHaveBeenCalled()

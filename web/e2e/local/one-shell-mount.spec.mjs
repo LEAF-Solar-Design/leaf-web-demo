@@ -1467,6 +1467,51 @@ test.describe('route matrix, rail ON', () => {
       expect(box.y + box.height).toBeLessThanOrEqual(clusterBox.y + clusterBox.height + 1)
     }
 
+    // Named groups keep geometry intact and restore through engine undo.
+    const groupCountBefore = Number(await page.getByTestId('cad-edit-entity-count').textContent())
+    const groupLines = []
+    for (const [index, fraction] of [0.65, 0.75].entries()) {
+      const start = await groundPick(fraction, 0.65)
+      const end = await groundPick(fraction + 0.04, 0.65)
+      groupLines.push({ x: Number(r3((start.wx + end.wx) / 2)), y: Number(r3(start.wy)) })
+      await bar.fill('LINE')
+      await bar.press('Enter')
+      await page.getByLabel('ribbon x', { exact: true }).fill(r3(start.wx))
+      await page.getByLabel('ribbon y', { exact: true }).fill(r3(start.wy))
+      await page.getByLabel('ribbon x2', { exact: true }).fill(r3(end.wx))
+      await page.getByLabel('ribbon y2', { exact: true }).fill(r3(end.wy))
+      await page.getByLabel('ribbon layer', { exact: true }).fill(`GROUP_ROW_${index}`)
+      await page.getByLabel('ribbon layer', { exact: true }).press('Enter')
+      await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(groupCountBefore + index + 1), { timeout: 60_000 })
+      await page.keyboard.press('Escape')
+    }
+    const groupRadios = [0, 1].map((index) => page.locator('.cad-edit-workbench label', { hasText: `on layer GROUP_ROW_${index}` }).locator('input[type="radio"]'))
+    const groupIds = await Promise.all(groupRadios.map((radio) => radio.getAttribute('value')))
+    await groupRadios[0].check()
+    await bar.fill('GROUP')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'group')
+    const groupPick = await page.evaluate(({ x, y }) => document.querySelector('.studio-ground .viewer-canvas').__cadviewer.project(x, y), groupLines[1])
+    await page.mouse.click(groupPick.x, groupPick.y)
+    await expect(page.getByLabel('ribbon members')).toHaveText('2 objects')
+    await page.getByTestId('cockpit-prompt-run').click()
+    await page.getByLabel('ribbon group name').fill('RACK')
+    await page.getByLabel('ribbon group name').press('Enter')
+    await expect(page.getByTestId('dock-groups')).toHaveText('RACK', { timeout: 60_000 })
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(groupCountBefore + 2))
+    await page.getByLabel('Select group', { exact: true }).selectOption('RACK')
+    await expect(page.locator('.studio-ground .viewer-canvas')).toHaveAttribute('data-group-highlight', groupIds.map((id) => BigInt(id).toString(16).toUpperCase()).join(' '))
+    await bar.fill('UNGROUP')
+    await bar.press('Enter')
+    await page.getByLabel('ribbon group name').fill('RACK')
+    await page.getByLabel('ribbon group name').press('Enter')
+    await expect(page.getByTestId('dock-groups')).toHaveCount(0, { timeout: 60_000 })
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(groupCountBefore + 2))
+    await page.keyboard.press('Escape')
+    await bar.fill('UNDO')
+    await bar.press('Enter')
+    await expect(page.getByTestId('dock-groups')).toHaveText('RACK', { timeout: 60_000 })
+
     // W4g-7b-04c: DIMLINEAR/DIMALIGNED on the real engine. A line by typed
     // operands sets the scene ((0,0)-(3,4)); DIMALIGNED's three typed picks
     // measure it as the chord length (the case table's 5), read back off the

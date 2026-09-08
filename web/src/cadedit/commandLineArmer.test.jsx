@@ -4,7 +4,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { DEFERRED_REASONS } from '../lib/actionRegistry.js'
+import { byId, DEFERRED_REASONS } from '../lib/actionRegistry.js'
 import { COCKPIT_COMMAND_EVENT, parseDrawingCommand } from '../lib/commandWords.js'
 
 import CadEditSurface from './CadEditSurface.jsx'
@@ -165,23 +165,37 @@ describe('CommandLineArmer (W4f slice B)', () => {
     expect(posted[posted.length - 1]).toEqual({ type: 'applyEdit', op: 'delete', payload: { entityId: 'e1' } })
   })
 
-  // W4g-7b-05c: GROUP (typed "g") arms nothing — there is no engine op — but
-  // its frozen reason is surfaced exactly where a real refusal reads, so
-  // typing a deferred word is never silence.
-  it('a deferred word (GROUP) arms nothing and surfaces its own sentence', async () => {
+  it.each(['g', 'GROUP', 'UNGROUP'])('%s arms the real Groups prompt without posting an edit', async (word) => {
+    mount()
+    await openAndLoad()
+    const detail = parseDrawingCommand(word)
+    const op = word === 'UNGROUP' ? 'ungroup' : 'group'
+    expect(detail).toMatchObject({ group: 'groups', op })
+    expect(byId(`groups:${op}`)).toMatchObject({ surface: 'engine', group: 'groups', panel: 'groups', op })
+    const before = workers[0].posted.length
+    command(detail)
+    expect(promptEl().getAttribute('data-op')).toBe(op)
+    expect(promptEl().textContent).toContain(op === 'group' ? 'Select objects to add:' : 'Enter group name:')
+    expect(workers[0].posted).toHaveLength(before)
+  })
+
+  it('a deferred word (LEADER) arms nothing and surfaces its own sentence', async () => {
     mount()
     await openAndLoad()
     expect(promptEl()).toBeNull()
-    command({ group: 'deferred', op: 'group', reason: DEFERRED_REASONS.group })
+    command(parseDrawingCommand('LEADER'))
     expect(promptEl()).toBeNull()
-    expect(screen.getByRole('status').textContent).toBe(DEFERRED_REASONS.group)
+    expect(screen.getByRole('status').textContent).toBe(DEFERRED_REASONS.leader)
     // A mismatched reason (never emitted by the real parser, but the gate
     // must fail closed against it anyway) is dropped, same as any malformed detail.
     command({ group: 'deferred', op: 'leader', reason: 'a made-up sentence' })
-    expect(screen.getByRole('status').textContent).toBe(DEFERRED_REASONS.group)
+    expect(screen.getByRole('status').textContent).toBe(DEFERRED_REASONS.leader)
   })
 
   it('acceptsCommand is the fail-closed gate', () => {
+    expect(acceptsCommand({ group: 'groups', op: 'group' })).toBe(true)
+    expect(acceptsCommand({ group: 'groups', op: 'ungroup' })).toBe(true)
+    expect(acceptsCommand({ group: 'deferred', op: 'group' })).toBe(false)
     expect(acceptsCommand({ group: 'clipboard', op: 'pasteClip' })).toBe(true)
     expect(acceptsCommand({ group: 'clipboard', op: 'copyClip' })).toBe(true)
     expect(acceptsCommand({ group: 'clipboard', op: 'cutClip' })).toBe(true)

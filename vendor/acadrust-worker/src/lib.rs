@@ -76,6 +76,7 @@
 use acadrust::entities::{Arc as ArcEntity, Circle, Dimension, DimensionAligned, DimensionLinear, Entity, EntityType, Line, LwPolyline, Text, Point, Ellipse, Insert};
 use acadrust::types::{Color, Handle, LineWeight, Transform, Vector2, Vector3};
 use acadrust::{CadDocument, DxfReader, DxfWriter};
+use acadrust::objects::{Dictionary, Group, ObjectType};
 use acadrust::io::dxf::{DxfStreamWriter, DxfTextWriter};
 use serde::Serialize;
 use std::cell::Cell;
@@ -432,7 +433,13 @@ fn projected_entities(document: &CadDocument) -> Vec<serde_json::Value> {
     let children = block_children(document);
     document.entities().enumerate()
         .filter(|(_, e)| !children.contains(&e.common().handle))
-        .map(|(index, e)| entity_record(index, e, true))
+        .map(|(index, e)| {
+            let mut record = entity_record(index, e, true);
+            let model_space = !document.block_records.iter()
+                .any(|block| block.handle == e.common().owner_handle && !block.is_model_space());
+            record["modelSpace"] = serde_json::json!(model_space);
+            record
+        })
         .collect()
 }
 
@@ -742,7 +749,7 @@ fn parse_dxf_core(bytes: &[u8]) -> Result<ParsedDxf, Refusal> {
         .map_err(|e| e.to_string())?.read().map_err(|e| e.to_string())?;
     validate_block_names(&inner, definitions)?;
     let unknown_block_bases = retain_block_bases(&mut inner, bytes)?;
-    Ok(ParsedDxf { inner, block_base_patched: Cell::new(false), block_bases_unknown: bytes.starts_with(b"AutoCAD Binary DXF"), unknown_block_bases })
+    Ok(ParsedDxf { group_names: group_names(&inner), inner, block_base_patched: Cell::new(false), block_bases_unknown: bytes.starts_with(b"AutoCAD Binary DXF"), unknown_block_bases })
 }
 
 // Validate all BLOCK layouts before emitting any replacement. Keep every byte
@@ -840,13 +847,124 @@ fn created_layer(layer: &str) -> Result<String, Refusal> {
 #[wasm_bindgen]
 pub struct ParsedDxf {
     inner: CadDocument,
+    group_names: Vec<(String, Handle)>,
     block_base_patched: Cell<bool>,
     block_bases_unknown: bool,
     unknown_block_bases: HashSet<String>,
 }
 
+fn group_dictionary(document: &CadDocument) -> Option<Handle> {
+    match document.objects.get(&document.header.named_objects_dict_handle) {
+        Some(ObjectType::Dictionary(root)) => root.get("ACAD_GROUP"),
+        _ => None,
+    }
+}
+
+fn group_names(document: &CadDocument) -> Vec<(String, Handle)> {
+    match group_dictionary(document).and_then(|h| document.objects.get(&h)) {
+        Some(ObjectType::Dictionary(dict)) => dict.entries.clone(),
+        _ => Vec::new(),
+    }
+}
+
+fn projected_groups(document: &CadDocument) -> Vec<serde_json::Value> {
+    let mut names = group_names(document);
+    names.sort_by(|a, b| a.0.cmp(&b.0));
+    names.into_iter().filter_map(|(name, handle)| {
+        match document.objects.get(&handle) {
+            Some(ObjectType::Group(group)) => Some(serde_json::json!({
+                "id": handle_id(handle.value()), "name": name,
+                "memberIds": group.entities.iter().map(|h| handle_id(h.value())).collect::<Vec<_>>(),
+                "unnamed": group.unnamed, "selectable": group.selectable,
+                "description": group.description,
+            })),
+            _ => None,
+        }
+    }).collect()
+}
+
 // ---- the cores: every operation, natively testable ------------------------
 impl ParsedDxf {
+    fn create_group_core(&mut self, name: &str, member_indices: &[usize]) -> Result<String, Refusal> {
+        let name = name.trim();
+        if name.is_empty() || name.len() > 255
+            || name.bytes().any(|b| !(0x20..=0x7e).contains(&b) || b"<>/\\\":;?*|,=`".contains(&b)) {
+            return refuse("group_name_invalid");
+        }
+        let uppercase_name = name.to_ascii_uppercase();
+        let name = uppercase_name.as_str();
+        if self.group_names.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)) {
+            return refuse("group_name_exists");
+        }
+        let mut members = Vec::new();
+        for &index in member_indices {
+            let entity = self.editable_at(index).map_err(|_| "group_member_not_editable".to_string())?;
+            if !editable(entity) && !matches!(entity, EntityType::Insert(_) | EntityType::Dimension(_)) {
+                return refuse("group_member_not_editable");
+            }
+            let handle = entity.common().handle;
+            if !members.contains(&handle) { members.push(handle); }
+            let owner = entity.common().owner_handle;
+            if self.inner.block_records.iter().any(|block| block.handle == owner && !block.is_model_space()) {
+                return refuse("group_member_not_editable");
+            }
+        }
+        if members.len() < 2 { return refuse("group_needs_two_members"); }
+        let root_handle = self.inner.header.named_objects_dict_handle;
+        if !matches!(self.inner.objects.get(&root_handle), Some(ObjectType::Dictionary(_))) {
+            return refuse("group_dictionary_missing");
+        }
+        let dictionary_handle = match group_dictionary(&self.inner) {
+            Some(handle) if matches!(self.inner.objects.get(&handle), Some(ObjectType::Dictionary(_))) => handle,
+            Some(_) => return refuse("group_dictionary_missing"),
+            None => {
+                let handle = self.inner.allocate_handle();
+                let mut dictionary = Dictionary::new();
+                dictionary.handle = handle;
+                dictionary.owner = root_handle;
+                self.inner.objects.insert(handle, ObjectType::Dictionary(dictionary));
+                if let Some(ObjectType::Dictionary(root)) = self.inner.objects.get_mut(&root_handle) {
+                    root.add_entry("ACAD_GROUP", handle);
+                }
+                handle
+            }
+        };
+        let handle = self.inner.allocate_handle();
+        let mut group = Group::new(name);
+        group.handle = handle;
+        group.owner = dictionary_handle;
+        group.entities = members.clone();
+        self.inner.objects.insert(handle, ObjectType::Group(group));
+        self.group_names.push((name.to_string(), handle));
+        if let Some(ObjectType::Dictionary(dictionary)) = self.inner.objects.get_mut(&dictionary_handle) {
+            dictionary.add_entry(name, handle);
+        }
+        for entity in self.inner.entities_mut() {
+            if members.contains(&entity.common().handle) {
+                entity.common_mut().reactors.push(handle);
+            }
+        }
+        Ok(handle_id(handle.value()))
+    }
+
+    fn ungroup_core(&mut self, name: &str) -> Result<(), Refusal> {
+        let handle = group_names(&self.inner).iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name.trim())).map(|(_, h)| *h)
+            .ok_or_else(|| "group_not_found".to_string())?;
+        if let Some(dict_handle) = group_dictionary(&self.inner) {
+            if let Some(ObjectType::Dictionary(dictionary)) = self.inner.objects.get_mut(&dict_handle) {
+                dictionary.entries.retain(|(_, h)| *h != handle);
+                dictionary.hard_owner_entries.retain(|n| !n.eq_ignore_ascii_case(name.trim()));
+            }
+        }
+        self.inner.objects.remove(&handle);
+        self.group_names.retain(|(_, h)| *h != handle);
+        for entity in self.inner.entities_mut() {
+            entity.common_mut().reactors.retain(|h| *h != handle);
+        }
+        Ok(())
+    }
+
     fn editable_at(&self, index: usize) -> Result<&EntityType, Refusal> {
         let entity = self.inner.entities().nth(index)
             .ok_or_else(|| "entity_index_out_of_range".to_string())?;
@@ -886,10 +1004,23 @@ impl ParsedDxf {
         if !is_editable {
             return refuse("entity_kind_not_editable");
         }
+        self.remove_entity_and_repair_groups(handle)
+    }
+
+    fn remove_entity_and_repair_groups(&mut self, handle: Handle) -> Result<(), Refusal> {
         self.inner
             .remove_entity(handle)
             .map(|_| ())
-            .ok_or_else(|| "entity_handle_not_found".to_string())
+            .ok_or_else(|| "entity_handle_not_found".to_string())?;
+        let mut empty = Vec::new();
+        for (name, group_handle) in group_names(&self.inner) {
+            if let Some(ObjectType::Group(group)) = self.inner.objects.get_mut(&group_handle) {
+                group.entities.retain(|h| *h != handle);
+                if group.entities.is_empty() { empty.push(name); }
+            }
+        }
+        for name in empty { self.ungroup_core(&name)?; }
+        Ok(())
     }
 
     fn translate_entity_core(&mut self, index: usize, dx: f64, dy: f64) -> Result<(), Refusal> {
@@ -1299,6 +1430,7 @@ impl ParsedDxf {
         let layer = entity.common().layer.clone();
         let mut copy = entity.clone();
         copy.as_entity_mut().set_handle(Handle::NULL);
+        copy.common_mut().reactors.clear();
         Ok((copy, layer))
     }
 
@@ -1418,11 +1550,10 @@ impl ParsedDxf {
         let mut handles = Vec::with_capacity(parts.len());
         for mut part in parts {
             part.as_entity_mut().set_handle(Handle::NULL);
+            part.common_mut().reactors.clear();
             handles.push(self.add_created(part, &layer)?);
         }
-        self.inner
-            .remove_entity(handle)
-            .ok_or_else(|| "entity_handle_not_found".to_string())?;
+        self.remove_entity_and_repair_groups(handle)?;
         Ok(handles)
     }
 
@@ -1862,6 +1993,20 @@ impl ParsedDxf {
 // ---- the exported boundary: thin, JsValue only here -------------------------
 #[wasm_bindgen]
 impl ParsedDxf {
+    #[wasm_bindgen(js_name = createGroup)]
+    pub fn create_group(&mut self, name: &str, ids: Vec<String>) -> Result<String, JsValue> {
+        let indices = ids.iter().map(|id| {
+            self.inner.entities().position(|e| handle_id(e.common().handle.value()) == *id)
+                .ok_or_else(|| "group_member_not_editable".to_string())
+        }).collect::<Result<Vec<_>, _>>().map_err(js_err)?;
+        self.create_group_core(name, &indices).map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = ungroup)]
+    pub fn ungroup(&mut self, name: &str) -> Result<(), JsValue> {
+        self.ungroup_core(name).map_err(js_err)
+    }
+
     /// Mirrors the stand-in's `parsed.entities` array: one
     /// `{type, layer, start, end}` object per LINE entity, in document order.
     #[wasm_bindgen(getter)]
@@ -1895,6 +2040,11 @@ impl ParsedDxf {
         let serializer = serde_wasm_bindgen::Serializer::json_compatible();
         let list = projected_entities(&self.inner).serialize(&serializer)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let groups = projected_groups(&self.inner).serialize(&serializer)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        if !set_projection_field(&list, &JsValue::from_str("groups"), &groups) {
+            return Err(JsValue::from_str("group_projection_failed"));
+        }
         let blocks = block_catalogue(&self.inner, self.block_bases_unknown, &self.unknown_block_bases).serialize(&serializer)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         if !set_projection_field(&list, &JsValue::from_str("blocks"), &blocks) {
@@ -2275,6 +2425,77 @@ pub fn bytes_equal(a: &[u8], b: &[u8]) -> bool {
 mod created_entity_roundtrip {
     use super::*;
 
+    #[test]
+    fn named_group_roundtrip_collision_ungroup_and_deletion_repair() {
+        let mut doc = empty_doc();
+        let line = doc.create_line_core(0.0, 0.0, 3.0, 0.0, "0").unwrap();
+        let circle = doc.create_circle_core(4.0, 2.0, 1.0, "0").unwrap();
+        let geometry = projected_entities(&doc.inner);
+        let handle = doc.create_group_core(" rack ", &[0, 1, 0]).unwrap();
+        assert_eq!(projected_entities(&doc.inner), geometry);
+        let expected = serde_json::json!({"id": handle, "name": "RACK", "memberIds": [line, circle], "unnamed": false, "selectable": true, "description": ""});
+        assert_eq!(projected_groups(&doc.inner), vec![expected.clone()]);
+        doc = rewrite(&doc);
+        assert_eq!(projected_groups(&doc.inner), vec![expected]);
+        assert_eq!(code(doc.create_group_core("rack", &[0, 1])), "group_name_exists");
+        assert_eq!(code(doc.create_group_core("ONE", &[0, 0])), "group_needs_two_members");
+        doc.ungroup_core("rack").unwrap();
+        assert_eq!(projected_entities(&doc.inner), geometry);
+        assert!(projected_groups(&doc.inner).is_empty());
+        assert!(doc.inner.entities().all(|entity| entity.common().reactors.is_empty()));
+        doc.create_group_core("RACK", &[0, 1]).unwrap();
+        doc.delete_entity_core(1).unwrap();
+        assert_eq!(projected_groups(&doc.inner)[0]["memberIds"], serde_json::json!([line]));
+        doc.delete_entity_core(0).unwrap();
+        assert!(projected_groups(&doc.inner).is_empty());
+        assert!(group_names(&doc.inner).is_empty());
+        assert_eq!(code(doc.ungroup_core("RACK")), "group_not_found");
+    }
+
+    #[test]
+    fn group_dictionary_syntax_refuses_before_mutation() {
+        let mut doc = empty_doc();
+        doc.create_line_core(0.0, 0.0, 3.0, 0.0, "0").unwrap();
+        doc.create_circle_core(4.0, 2.0, 1.0, "0").unwrap();
+        let before = DxfWriter::new(&doc.inner).write_to_vec().unwrap();
+        for name in ["A/B", "RA*CK", "A<B", "A>B", "A\\B", "A\"B", "A:B", "A;B", "A?B", "A|B", "A,B", "A=B", "A`B"] {
+            assert_eq!(code(doc.create_group_core(name, &[0, 1])), "group_name_invalid", "{name}");
+            assert_eq!(DxfWriter::new(&doc.inner).write_to_vec().unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn group_explode_repairs_members_and_parts_have_no_reactors_after_reparse() {
+        let mut doc = empty_doc();
+        let poly = doc.create_polyline_core(&[0.0, 0.0, 4.0, 0.0, 4.0, 3.0], false, "0", &[]).unwrap();
+        let line = doc.create_line_core(10.0, 0.0, 13.0, 0.0, "0").unwrap();
+        doc.create_group_core("rack", &[0, 1]).unwrap();
+        let parts = doc.explode_entity_core(0).unwrap();
+        let back = rewrite(&doc);
+        assert_eq!(projected_groups(&back.inner)[0]["memberIds"], serde_json::json!([line]));
+        assert!(back.inner.entities().all(|entity| handle_id(entity.common().handle.value()) != poly));
+        for part in parts {
+            let entity = back.inner.entities().find(|entity| handle_id(entity.common().handle.value()) == part).unwrap();
+            assert!(entity.common().reactors.is_empty());
+        }
+    }
+
+    #[test]
+    fn group_copy_has_no_reactor_and_does_not_join_members_after_reparse() {
+        let mut doc = empty_doc();
+        doc.create_line_core(0.0, 0.0, 3.0, 0.0, "0").unwrap();
+        doc.create_circle_core(4.0, 2.0, 1.0, "0").unwrap();
+        doc.create_group_core("rack", &[0, 1]).unwrap();
+        let groups = projected_groups(&doc.inner);
+        let copy = doc.copy_entity_core(0, 2.0, 3.0).unwrap();
+        let back = rewrite(&doc);
+        assert_eq!(projected_groups(&back.inner), groups);
+        let copied = back.inner.entities().find(|entity| handle_id(entity.common().handle.value()) == copy).unwrap();
+        assert!(copied.common().reactors.is_empty());
+        assert!(back.inner.entities().filter(|entity| handle_id(entity.common().handle.value()) != copy)
+            .all(|entity| entity.common().reactors.len() == 1));
+    }
+
     const EPS: f64 = 1e-9;
 
     fn near(a: f64, b: f64) -> bool {
@@ -2282,7 +2503,7 @@ mod created_entity_roundtrip {
     }
 
     fn empty_doc() -> ParsedDxf {
-        ParsedDxf { inner: CadDocument::new(), block_base_patched: Cell::new(false), block_bases_unknown: false, unknown_block_bases: HashSet::new() }
+        ParsedDxf { inner: CadDocument::new(), group_names: Vec::new(), block_base_patched: Cell::new(false), block_bases_unknown: false, unknown_block_bases: HashSet::new() }
     }
 
     fn kinds(doc: &ParsedDxf) -> Vec<&'static str> {
@@ -2303,7 +2524,7 @@ mod created_entity_roundtrip {
     }
 
     fn rewrite(doc: &ParsedDxf) -> ParsedDxf {
-        ParsedDxf { inner: reparse(&doc.inner), block_base_patched: Cell::new(false), block_bases_unknown: doc.block_bases_unknown, unknown_block_bases: doc.unknown_block_bases.clone() }
+        ParsedDxf { inner: reparse(&doc.inner), group_names: group_names(&doc.inner), block_base_patched: Cell::new(false), block_bases_unknown: doc.block_bases_unknown, unknown_block_bases: doc.unknown_block_bases.clone() }
     }
 
     fn code<T>(result: Result<T, Refusal>) -> String {
@@ -3394,7 +3615,7 @@ mod w4g_7b_03c_property_verbs {
     use super::*;
 
     fn empty_doc() -> ParsedDxf {
-        ParsedDxf { inner: CadDocument::new(), block_base_patched: Cell::new(false), block_bases_unknown: false, unknown_block_bases: HashSet::new() }
+        ParsedDxf { inner: CadDocument::new(), group_names: Vec::new(), block_base_patched: Cell::new(false), block_bases_unknown: false, unknown_block_bases: HashSet::new() }
     }
 
     fn code<T>(result: Result<T, Refusal>) -> String {
@@ -3410,7 +3631,7 @@ mod w4g_7b_03c_property_verbs {
             .expect("reader accepts the written bytes")
             .read()
             .expect("written bytes re-parse");
-        ParsedDxf { inner, block_base_patched: Cell::new(false), block_bases_unknown: doc.block_bases_unknown, unknown_block_bases: doc.unknown_block_bases.clone() }
+        ParsedDxf { group_names: group_names(&inner), inner, block_base_patched: Cell::new(false), block_bases_unknown: doc.block_bases_unknown, unknown_block_bases: doc.unknown_block_bases.clone() }
     }
 
     #[test]
@@ -3608,7 +3829,7 @@ mod w4g_7b_04c_dimension_rows {
     use acadrust::entities::DimensionRadius;
 
     fn empty_doc() -> ParsedDxf {
-        ParsedDxf { inner: CadDocument::new(), block_base_patched: Cell::new(false), block_bases_unknown: false, unknown_block_bases: HashSet::new() }
+        ParsedDxf { inner: CadDocument::new(), group_names: Vec::new(), block_base_patched: Cell::new(false), block_bases_unknown: false, unknown_block_bases: HashSet::new() }
     }
 
     fn code<T>(result: Result<T, Refusal>) -> String {
@@ -3624,7 +3845,7 @@ mod w4g_7b_04c_dimension_rows {
             .expect("reader accepts the written bytes")
             .read()
             .expect("written bytes re-parse");
-        ParsedDxf { inner, block_base_patched: Cell::new(false), block_bases_unknown: doc.block_bases_unknown, unknown_block_bases: doc.unknown_block_bases.clone() }
+        ParsedDxf { group_names: group_names(&inner), inner, block_base_patched: Cell::new(false), block_bases_unknown: doc.block_bases_unknown, unknown_block_bases: doc.unknown_block_bases.clone() }
     }
 
     fn near(a: f64, b: f64) -> bool {

@@ -18,6 +18,7 @@ import { nearestEntity } from './intersect.js'
 import { bulgeArc, dimensionSchematic } from './engineIntake.js'
 /** The pick sequence per op, or null for ops with nothing to pick. */
 export const PICK_SEQUENCES = Object.freeze({
+  group: [{ kind: 'edge', key: 'members', repeat: true }],
   createLine: [{ kind: 'point', keys: ['x', 'y'] }, { kind: 'point', keys: ['x2', 'y2'] }],
   createCircle: [{ kind: 'point', keys: ['x', 'y'] }, { kind: 'radius', key: 'r', from: ['x', 'y'] }],
   createArc: [{ kind: 'point', keys: ['x', 'y'] }, { kind: 'radius', key: 'r', from: ['x', 'y'] }],
@@ -102,11 +103,13 @@ export function applyPick(state, x, y, inputs = {}, context = null) {
   const next = { ...state, picked, step: state.step + 1 }
   if (step.kind === 'edge') {
     // W4g-6: the click names an ENTITY (the cutting edge, the boundary,
-    // the second object): the nearest one within the aperture other than
-    // the selection, from `context` { entities, tol, exceptId }. A click
+    // the second object): resolve the nearest one within the aperture, then
+    // exclude the selection from `context` { entities, tol, exceptId }. A click
     // that lands on nothing writes nothing and the step waits.
-    const hit = context ? nearestEntity(context.entities, x, y, context.tol, context.exceptId) : null
-    if (!hit) return { state, writes: [] }
+    const members = step.repeat ? String(inputs.members || '').split(/\s+/).filter(Boolean) : []
+    const hit = context ? nearestEntity(context.entities, x, y, context.tol) : null
+    if (!hit || String(hit.id) === String(context.exceptId) || members.includes(String(hit.id))) return { state, writes: [] }
+    if (step.repeat) return { state, writes: [['members', [...members, String(hit.id)].join(' ')]] }
     const writes = [[step.keys[0], String(hit.id)], [step.keys[1], round3(x)], [step.keys[2], round3(y)]]
     return { state: next, writes }
   }

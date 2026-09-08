@@ -423,7 +423,12 @@ export function engineIntake(entities, documentId = '', catalogue = entities?.bl
     points += pl.pts.length
     polylines.push(pl)
   }
-  return { source: 'engine', documentId: String(documentId || ''), polylines, inserts, blocks, faces3d: [], points, truncated }
+  const groups = (entities?.groups || []).map((group) => ({
+    handle: hexHandle(group.id), name: group.name, flags: group.unnamed ? 1 : 0,
+    selectable: group.selectable, description: group.description,
+    members: (group.memberIds || []).map(hexHandle),
+  }))
+  return { source: 'engine', documentId: String(documentId || ''), polylines, inserts, blocks, groups, faces3d: [], points, truncated }
 }
 
 /**

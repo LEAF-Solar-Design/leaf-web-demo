@@ -8,6 +8,7 @@ import DraftingRibbon from '../site/DraftingRibbon.jsx'
 
 import CadEditSurface from './CadEditSurface.jsx'
 import CanvasPointPicker from './CanvasPointPicker.jsx'
+import { applyPick, startPicking } from './pointPicking.js'
 import EngineRibbonClusters from './EngineRibbonClusters.jsx'
 import EngineSessionProvider, { useEngineSessionContext } from './EngineSessionProvider.jsx'
 
@@ -76,6 +77,17 @@ function click(x, y) {
   })
 }
 
+it('GROUP appends picked edges and ignores the selection and duplicate picks', async () => {
+  mount()
+  const lines = [0, 10, 20].map((y, i) => ({ id: String(10 + i), type: 'LINE', editable: true, vertices: [[0, y, 0], [3, y, 0]] }))
+  await openAndLoad(lines)
+  act(() => { context.session.actions.select('10'); context.setArmed({ group: 'groups', op: 'group' }) })
+  click(15, 0); click(15, 100); click(15, 100); click(15, 200)
+  expect(context.inputs.members).toBe('11 12')
+  expect(context.session.selectedId).toBe('10')
+  expect(workers[0].posted.filter((message) => message.type === 'applyEdit')).toEqual([])
+})
+
 beforeEach(() => {
   globalThis.URL.createObjectURL = vi.fn(() => 'blob:cad-edit-test')
   globalThis.URL.revokeObjectURL = vi.fn()
@@ -85,6 +97,25 @@ beforeEach(() => {
   vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => { cb(); return 0 })
 })
 afterEach(() => { cleanup(); ground?.remove(); vi.restoreAllMocks() })
+
+it('resolves the nearest edge before excluding picked or selected members', async () => {
+  const lines = [0, 0.2].map((y, i) => ({ id: String(10 + i), type: 'LINE', editable: true, vertices: [[0, y, 0], [3, y, 0]] }))
+  const state = startPicking('group')
+  const edge = { entities: lines, tol: 1, exceptId: null }
+  expect(applyPick(state, 1.5, 0, {}, edge).writes).toEqual([['members', '10']])
+  expect(applyPick(state, 1.5, 0, { members: '10' }, edge).writes).toEqual([])
+  expect(applyPick(state, 1.5, 0, {}, { ...edge, exceptId: '10' }).writes).toEqual([])
+  mount()
+  await openAndLoad(lines)
+  act(() => context.setArmed({ group: 'groups', op: 'group' }))
+  click(15, 0)
+  expect(context.inputs.members).toBe('10')
+  click(15, 0)
+  expect(context.inputs.members).toBe('10')
+  act(() => { context.setInput('members', ''); context.session.actions.select('10') })
+  click(15, 0)
+  expect(context.inputs.members).toBe('')
+})
 
 describe('CanvasPointPicker (W4f slice A1)', () => {
   it('nothing is picked, stamped or ghosted without an armed point command', async () => {
