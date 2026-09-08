@@ -291,14 +291,14 @@ export function diffPlan(committed, current) {
   // W4g-7b-05c-2: `kind` names the entity type that caused the refusal (null
   // when the refusal is not about one entity's own kind, e.g. a block
   // definition or the operation-count cap); `cause` is one of the closed set
-  // the store's save reads to decide REJECT (moved-reference, true-colour)
+  // the store's save reads to decide REJECT (moved-reference, true-colour, group-singleton)
   // vs. today's sidecar fallback (every other cause, including null).
   const cannot = (reason, kind = null, cause = null) => ({ mutations: null, count: 0, reason, kind, cause })
   let hard = null
   let soft = null
   const refuse = (reason, kind = null, cause = null) => {
     const refusal = cannot(reason, kind, cause)
-    if (cause === 'moved-reference' || cause === 'true-colour') hard ||= refusal
+    if (cause === 'moved-reference' || cause === 'true-colour' || cause === 'group-singleton') hard ||= refusal
     else soft ||= refusal
   }
   // The engine digest covers EVERY child, including unlisted/unsupported ones.
@@ -430,7 +430,7 @@ export function diffPlan(committed, current) {
   for (const [name, group] of newGroups) {
     if (!oldGroups.has(name) || removedGroups.includes(name)) {
       const members = livingMembers(group)
-      if (members.length < 2) refuse(`group ${name} needs at least two members to save; ungroup it or add a member`)
+      if (members.length < 2) refuse(`group ${name} needs at least two members to save; ungroup it or add a member`, null, 'group-singleton')
       else addedGroups.push({ name, members })
     }
   }

@@ -18,6 +18,7 @@ describe('named group mutation plans', () => {
     const result = diffPlan(before, snapshot([line(10)], [rack(['10'])]))
     expect(result.mutations).toBeNull()
     expect(result.reason).toMatch(/group RACK.*two members/)
+    expect(result.cause).toBe('group-singleton')
   })
   it('uppercases added and removed group names and compares names without case', () => {
     const entities = [line(10), line(11)]

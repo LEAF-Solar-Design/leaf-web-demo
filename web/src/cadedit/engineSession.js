@@ -1427,14 +1427,15 @@ export default function useEngineSession({
     // NO plan and names why in the status; the server then takes the DXF
     // sidecar leg and says so in its receipt. A hand import has nothing to
     // diff against and never sends one.
-    // W4g-7b-05c-2: a moved INSERT/DIMENSION reference or a true colour set
+    // W4g-7b-05c-2: a moved INSERT/DIMENSION reference, a true colour set,
+    // or a group requiring a singleton ADDGROUP
     // is neither carried by a plan NOR by the sidecar leg: the save REJECTS
     // here, before any fetch (no digest, no versions/edited, no
     // versions/plan), commits nothing, and leaves the document dirty. Every
     // other refusal (an opaque kind, curved geometry, a definition change,
     // the operation cap) keeps today's sidecar-leg inheritance below.
     const diff = committedEntities ? diffPlan(committedEntities, entities) : null
-    if (diff && !diff.mutations && (diff.cause === 'moved-reference' || diff.cause === 'true-colour')) {
+    if (diff && !diff.mutations && (diff.cause === 'moved-reference' || diff.cause === 'true-colour' || diff.cause === 'group-singleton')) {
       patch({ errorKind: SESSION_ERROR.REFUSED, status: `Save refused: ${diff.reason}.` })
       return null
     }

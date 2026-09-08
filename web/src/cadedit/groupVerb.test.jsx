@@ -24,6 +24,33 @@ class Worker {
 afterEach(() => { cleanup(); context = null })
 
 describe('named GROUP and UNGROUP in the cockpit', () => {
+  it('refuses Save without calling the target when a new group becomes a singleton', async () => {
+    const worker = new Worker()
+    const save = vi.fn()
+    const a = line('10', 0)
+    const b = { id: '11', handle: '11', type: 'CIRCLE', layer: '0', editable: true, vertices: [[10, 10, 0]], radius: 3 }
+    render(<EngineSessionProvider createWorker={() => worker} saveTarget={{ headVersion: 1, save }}><Probe /></EngineSessionProvider>)
+    act(() => context.session.actions.openBytes(new Uint8Array([48, 10]), 'groups.dxf', { committed: true, version: 1 }))
+    worker.emit({ type: 'documentLoaded', documentId: 'groups.dxf', entities: [a], entityCount: 1, groups: [] })
+    act(() => context.session.actions.create('createCircle', { x: '10', y: '10', r: '3', layer: '0' }))
+    worker.emit({ type: 'editApplied', op: 'createCircle', ok: true, createdId: '11', entities: [a, b], groups: [], entityCount: 2, bytes: new Uint8Array([1]), byteLength: 1 })
+    act(() => context.session.actions.select('10'))
+    act(() => context.session.actions.applyEdit('group', { groupName: 'RACK', members: '11' }))
+    const group = { id: '240', name: 'RACK', memberIds: ['10', '11'], selectable: true }
+    worker.emit({ type: 'editApplied', op: 'createGroup', ok: true, createdId: '240', entities: [a, b], groups: [group], entityCount: 2, bytes: new Uint8Array([2]), byteLength: 1 })
+    act(() => context.session.actions.select('11'))
+    act(() => context.session.actions.applyEdit('delete', {}))
+    worker.emit({ type: 'editApplied', op: 'delete', ok: true, entities: [a], groups: [{ ...group, memberIds: ['10'] }], entityCount: 1, bytes: new Uint8Array([3]), byteLength: 1 })
+    expect(worker.posted.filter((message) => message.type === 'applyEdit').map((message) => message.op)).toEqual(['createCircle', 'createGroup', 'delete'])
+    expect(context.session.busy).toBe(false)
+    expect(context.session.dirty).toBe(true)
+    await act(async () => { await context.session.actions.save() })
+    expect(save).not.toHaveBeenCalled()
+    expect(context.session.status).toBe('Save refused: group RACK needs at least two members to save; ungroup it or add a member.')
+    expect(context.session.dirty).toBe(true)
+    expect(context.session.committedVersion).toBe(1)
+  })
+
   it('refuses invalid names, collisions, too few members and noneditable members before dispatch', () => {
     const list = Object.assign(entities.slice(), { groups: [{ name: 'RACK', memberIds: ['10', '11'] }] })
     const payload = (inputs) => buildEditPayload('group', '10', inputs, [], list)
