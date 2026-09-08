@@ -32,11 +32,18 @@ def _sha(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
+def valid_tool_name(value):
+    return (isinstance(value, str) and 1 <= len(value) <= 128
+            and re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', value) is not None)
+
+
 def validate_context(value):
     if not isinstance(value, dict) or set(value) not in (KEYS, KEYS | {"broker_job_id"}):
         raise ValueError("invalid completion context")
-    if any(value[k] != v for k, v in CONSTANTS.items()):
+    if any(value[k] != v for k, v in CONSTANTS.items() if k != "tool_name"):
         raise ValueError("invalid completion identity")
+    if not valid_tool_name(value["tool_name"]):
+        raise ValueError("invalid completion tool name")
     for key in ("recipe_version", "contract_version"):
         if type(value[key]) is not int or value[key] < 1:
             raise ValueError("invalid completion version")

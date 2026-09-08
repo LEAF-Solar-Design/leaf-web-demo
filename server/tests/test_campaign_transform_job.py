@@ -197,6 +197,43 @@ def test_actual_captured_source_executes_and_matches_independent_csv(published, 
     assert "'=SUM(A1)" in result['result']['csv']
 
 
+@pytest.mark.parametrize('wrong_output', [False, True])
+def test_renamed_published_source_executes_with_independent_validation(published, wrong_output):
+    published.tool['name'] = 'existing-records-export'
+    published.ctx['tool_name'] = published.tool['name']
+    published.ctx['tool_manifest_sha256'] = deps.catalog_tool_digest(published.tool)
+    if wrong_output:
+        source = 'def run(intake, params):\n    return {"csv": "wrong"}\n'
+        published.path.write_text(source)
+        published.ctx['tool_source_sha256'] = digest(source.encode())
+    assert adapter.validate_context(published.ctx) == published.ctx
+    row = {key: published.ctx[key] for key in ('tenant_id', 'org_id', 'project_id')}
+    row['tool'] = published.tool['name']
+    assert adapter.record_context({'completion_provenance': published.ctx}, row) == published.ctx
+    result = invoke(published)
+    assert result['ok'] is (not wrong_output), result
+    assert result['tool'] == published.tool['name']
+    if not wrong_output:
+        assert result['result']['csv'].encode() == static.expected_output(published.params['source_json'].encode())
+    else:
+        assert result.get('result') is None
+    row['tool'] = adapter.CONSTANTS['tool_name']
+    with pytest.raises(ValueError, match='scope mismatch'):
+        adapter.record_context({'completion_provenance': published.ctx}, row)
+
+
+@pytest.mark.parametrize('name', ['', 'Upper', '-start', 'end-', 'two--parts', 'a_b',
+                                  'a/b', 'a b', 'a\n', 'a' * 129, None, 1])
+def test_context_refuses_noncanonical_tool_identity(published, name):
+    with pytest.raises(ValueError, match='tool name'):
+        adapter.validate_context(dict(published.ctx, tool_name=name))
+
+
+def test_legacy_default_context_is_unchanged(published):
+    assert published.ctx['tool_name'] == 'campaign-records-to-csv'
+    assert adapter.validate_context(published.ctx) == published.ctx
+
+
 def test_remote_broker_without_app_sandbox_uses_pinned_job(published, monkeypatch):
     import broker_client
     monkeypatch.setenv('BROKER_URL', 'http://broker.test')

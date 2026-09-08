@@ -105,7 +105,9 @@ def _pure_tool(tool, params):
     schema = tool.get('params')
     # Published packages may omit local_only. Completion runs pinned source with
     # aps_live=False, and the supplied-source path refuses an off/invalid sandbox.
-    if (tool.get('name') != TOOL_NAME or tool.get('kind') != 'script'
+    if (not isinstance(tool.get('name'), str) or not 1 <= len(tool['name']) <= 128
+            or re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', tool['name']) is None
+            or tool.get('kind') != 'script'
             or ('local_only' in tool and tool['local_only'] is not True)
             or tool.get('aps_live') is True
             or tool.get('capabilities') != ['drawing.read']
@@ -124,10 +126,28 @@ def _pure_tool(tool, params):
         _refuse()
 
 
-def _publication(tenant_id, params):
+def compatible_tool(tool, params=None):
+    """Schema and pure-tool eligibility only, never output semantics proof."""
+    try:
+        _pure_tool(tool, params if params is not None else {'source_json': '[{"value":1}]'})
+    except (AcquisitionError, ValueError, TypeError, KeyError):
+        return False
+    return True
+
+
+def _publication(tenant_id, params, tool_name=None):
     """Read the cumulative published registry, not the latest change's new tool."""
-    winners = [(tool, source) for tool, source in deps.effective_tools_with_provenance(tenant_id)
-               if tool.get('name') == TOOL_NAME]
+    catalog = list(deps.effective_tools_with_provenance(tenant_id))
+    if tool_name is None:
+        if any(tool.get('name') == TOOL_NAME for tool, _ in catalog):
+            tool_name = TOOL_NAME
+        else:
+            names = sorted(tool['name'] for tool, source in catalog
+                           if source == deps.TOOL_SOURCE_TENANT_REPO and compatible_tool(tool, params))
+            if not names:
+                return None
+            tool_name = names[0]
+    winners = [(tool, source) for tool, source in catalog if tool.get('name') == tool_name]
     if not winners:
         return None
     if len(winners) != 1 or winners[0][1] != deps.TOOL_SOURCE_TENANT_REPO:
@@ -148,7 +168,7 @@ def _publication(tenant_id, params):
     if not isinstance(raw, bytes) or len(raw) > 2 * 1024 * 1024 or _hash(raw) != pin.catalog_digest:
         _refuse()
     registry = json.loads(raw)
-    rows = [item for item in registry.get('tools', []) if isinstance(item, dict) and item.get('name') == TOOL_NAME]
+    rows = [item for item in registry.get('tools', []) if isinstance(item, dict) and item.get('name') == tool_name]
     manifest = deps.catalog_tool_digest(tool)
     if len(rows) != 1 or deps.catalog_tool_digest(rows[0]) != manifest:
         _refuse()
@@ -158,7 +178,7 @@ def _publication(tenant_id, params):
                 'catalog_commit': pin.catalog_commit, 'effective_catalog_digest': pin.catalog_digest}):
         _refuse()
     return ({'change_set_id': pin.change_set_id, 'catalog_commit': pin.catalog_commit,
-             'effective_catalog_digest': pin.catalog_digest, 'tool_name': TOOL_NAME,
+             'effective_catalog_digest': pin.catalog_digest, 'tool_name': tool_name,
              'tool_manifest_sha256': manifest, 'tool_source_sha256': source_hash}, tool)
 
 
@@ -218,14 +238,14 @@ def _read_job(row, context, params, key):
     import campaign_transform_job as transform
     import jobs
     if (not isinstance(row, dict) or any(str(row.get(k)) != context[k] for k in ('tenant_id', 'org_id', 'project_id'))
-            or row.get('tool') != TOOL_NAME or not isinstance(row.get('execution_json'), dict)
+            or row.get('tool') != context['tool_name'] or not isinstance(row.get('execution_json'), dict)
             or row['execution_json'].get('completion_provenance') != context):
         _refuse('An existing invocation belongs to different work')
     transform.validate_context(context)
     job = jobs.get_job(str(row['job_id']))
     if (not isinstance(job, dict) or str(job.get('job_id')) != str(row['job_id'])
             or any(str(job.get(k)) != context[k] for k in ('tenant_id', 'org_id', 'project_id'))
-            or job.get('tool') != TOOL_NAME or job.get('completion_provenance') != context
+            or job.get('tool') != context['tool_name'] or job.get('completion_provenance') != context
             or job.get('params') != params or job.get('idempotency_key') != key):
         _refuse('Invocation readback does not match the frozen input')
     return job
@@ -325,7 +345,7 @@ def _invoke(runtime, tenant, org, project, campaign, release, params, context, t
     envelope = job.get('result')
     result = envelope.get('result') if isinstance(envelope, dict) else None
     if (not isinstance(envelope, dict) or envelope.get('ok') is not True
-            or envelope.get('tool') != TOOL_NAME or not isinstance(result, dict)
+            or envelope.get('tool') != context['tool_name'] or not isinstance(result, dict)
             or set(result) != {'csv'} or not isinstance(result['csv'], str)):
         _refuse('The transform returned an invalid output')
     actual = result['csv'].encode('utf-8')
@@ -334,7 +354,7 @@ def _invoke(runtime, tenant, org, project, campaign, release, params, context, t
     metadata = delivery.validate_bytes('records.csv', actual)
     runtime.authority(tenant, project)
     _run_authority(tenant, tool)
-    publication = _publication(context['tenant_id'], params)
+    publication = _publication(context['tenant_id'], params, context['tool_name'])
     if publication is None or any(publication[0][k] != context[k] for k in publication[0]):
         _refuse('Transform publication changed before output acceptance')
     return {'state': 'complete', 'output_bytes': actual, 'metadata': metadata,
@@ -377,12 +397,23 @@ def advance(runtime, tenant, project_id, campaign_id, release, source_bytes, *,
             raise AcquisitionError('awaiting_user', 'Acquisition requires the current account actor',
                                    'Continue this release from its authenticated project conversation')
         params = {'source_json': source_bytes.decode('utf-8')}
-        _record(runtime, tenant, project, campaign_id, release, 'intent',
-                {'tool_name': TOOL_NAME, 'input_sha256': source_hash, 'recipe_id': recipe.RECIPE_ID,
-                 'recipe_version': recipe.RECIPE_VERSION})
-        publication = _publication(str(tenant), params)
+        prior_publication = _payload(decisions, version, 'publication')
+        if prior_publication is not None and not isinstance(prior_publication.get('tool_name'), str):
+            _refuse('The selected transform publication is invalid')
+        publication = _publication(str(tenant), params,
+                                   prior_publication['tool_name'] if prior_publication is not None else None)
+        intent = _payload(decisions, version, 'intent')
+        if intent is None:
+            intent = {'tool_name': publication[0]['tool_name'] if publication else TOOL_NAME,
+                      'input_sha256': source_hash, 'recipe_id': recipe.RECIPE_ID,
+                      'recipe_version': recipe.RECIPE_VERSION}
+        elif (set(intent) != {'tool_name', 'input_sha256', 'recipe_id', 'recipe_version'}
+              or intent['input_sha256'] != source_hash or intent['recipe_id'] != recipe.RECIPE_ID
+              or intent['recipe_version'] != recipe.RECIPE_VERSION):
+            _refuse('The acquisition intent changed')
+        _record(runtime, tenant, project, campaign_id, release, 'intent', intent)
         if publication is None:
-            if _payload(decisions, version, 'publication'):
+            if prior_publication is not None:
                 _refuse('The previously published transform is no longer available')
             from routers import author
             if change_ref is None:

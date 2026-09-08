@@ -32,6 +32,32 @@ def test_transform_selection_requires_actual_invocation_proof(monkeypatch):
     assert result['missing_capability'] and result['shortlist'] == []
 
 
+def test_compatible_alternative_shortlist_keeps_semantics_unproven(monkeypatch):
+    params = {'type': 'object', 'properties': {'source_json': {
+        'type': 'string', 'minLength': 1, 'maxLength': 1048576}},
+        'required': ['source_json'], 'additionalProperties': False}
+    tool = {'name': 'existing-export', 'kind': 'script', 'capabilities': ['drawing.read'],
+            'params': params}
+    monkeypatch.setattr(resolver.deps, 'effective_tools_with_provenance', lambda tenant: [
+        (tool, resolver.deps.TOOL_SOURCE_TENANT_REPO),
+        (dict(tool, name='builtin-export'), 'builtin'),
+        (dict(tool, name='foreign-export'), 'other-tenant'),
+        (dict(tool, name='write-export', capabilities=['drawing.write']), resolver.deps.TOOL_SOURCE_TENANT_REPO)])
+    result = resolver.resolve('tenant', 'cad_file', transform_recipe=True)
+    assert result['readiness'] == 'unproven'
+    assert [c['name'] for c in result['shortlist']] == ['existing-export']
+    candidate = result['shortlist'][0]
+    assert candidate['operation'] == 'transform JSON records into CSV'
+    assert candidate['inputs'] == params and candidate['inputs'] is not params
+    assert candidate['readiness'] == 'unproven'
+    assert 'execution policy' in candidate['permission_requirement']
+    assert 'independent expected CSV byte comparison' in candidate['verification_method']
+    assert candidate['outputs'].startswith('Unknown:')
+    unsupported = resolver.resolve('tenant', 'unsupported')
+    assert unsupported['readiness'] == 'unavailable'
+    assert unsupported['selected'] is None
+
+
 def test_candidate_contract_copies_canonical_params_without_execution_metadata(monkeypatch):
     params = {'type': 'object',
               'properties': {'records': {'type': 'array', 'items': {'type': 'object',
