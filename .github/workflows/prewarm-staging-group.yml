@@ -403,11 +403,12 @@ jobs:
           MIGRATION_REFUSAL: ${{ steps.candidate.outputs.migration_refusal }}
           SUPPLY_PRESENT: ${{ steps.supply.outputs.present }}
           TAG_READY: ${{ steps.readiness.outputs.ready }}
+          CONFIGURED_SERVICES: ${{ env.STAGE_SERVICES }}
         run: |
           set -euo pipefail
           [ -f dispatched.json ] || echo '[]' > dispatched.json
           jq -n \
-            --arg schema "leaf.staging-prewarm-relay.v1" \
+            --arg schema "leaf.staging-prewarm-relay.v2" \
             --arg head_sha "$HEAD_SHA" \
             --arg base_sha "$BASE_SHA" \
             --argjson members "$MEMBERS" \
@@ -420,6 +421,7 @@ jobs:
             --arg tag_ready "${TAG_READY:-false}" \
             --arg run_id "$GITHUB_RUN_ID" \
             --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg configured_services "$CONFIGURED_SERVICES" \
             --slurpfile dispatched dispatched.json \
             '{schema: $schema, producer: "codebuild",
               group: {head_sha: $head_sha, base_sha: $base_sha, members: $members},
@@ -428,6 +430,7 @@ jobs:
               migration_refusal: ($migration_refusal == "true"),
               supply_set_present: ($supply_set_present == "true"),
               tag_ready: ($tag_ready == "true"),
+              configured_services: ($configured_services | split(" ") | map(select(length > 0)) | unique),
               relay_run_id: $run_id, relay_run_attempt: $run_attempt, dispatched: $dispatched[0]}' > prewarm-relay-receipt.json
           jq . prewarm-relay-receipt.json
 

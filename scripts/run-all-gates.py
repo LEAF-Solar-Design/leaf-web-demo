@@ -1426,7 +1426,7 @@ def build_suites() -> List[Suite]:
               # Queue-mode cutover: 50 base rows plus the notice-only PR pin.
               # Native CodeBuild prewarm: five response cases each execute web
               # presence and app absence expectations, ten rows (69 -> 74).
-              _py_pytest("test_prewarm_staging_cutover_workflow.py"), 74),
+              _py_pytest("test_prewarm_staging_cutover_workflow.py"), 75),
         # Merge-queue group controller (slice C: mq-review, mq-supply,
         # mq-prewarm). 84 cases cover the executed matrix and structural pins.
         # The executed matrix includes mq-review's GraphQL
@@ -1448,7 +1448,7 @@ def build_suites() -> List[Suite]:
         Suite("merge-queue-workflow",
               "scripts test_merge_queue_workflow.py", "pytest",
               # Native receipts: seven field refusals, five statuses, six log streams.
-              SCRIPTS_DIR, _py_pytest("test_merge_queue_workflow.py"), 92),
+              SCRIPTS_DIR, _py_pytest("test_merge_queue_workflow.py"), 96),
         Suite("platform-release-manifest",
               "scripts test_platform_release_manifest.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_platform_release_manifest.py"), 88),

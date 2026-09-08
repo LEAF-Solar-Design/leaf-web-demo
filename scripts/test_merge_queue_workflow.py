@@ -729,13 +729,15 @@ def test_no_service_mirror_falsification():
 
 
 def _prewarm_evidence(tmp_path, entries, relay_source='env:\n  STAGE_SERVICES: "web app"\n',
-                      empty_arn=False, receipt_change=None, status="SUCCEEDED", log_case=None):
+                      empty_arn=False, receipt_change=None, status="SUCCEEDED", log_case=None,
+                      configured_services=("app", "web")):
     binary = tmp_path / "bin"
     binary.mkdir(exist_ok=True)
     fake = binary / "gh"
     fake.write_text(textwrap.dedent('''\
         #!/usr/bin/env bash
         set -euo pipefail
+        printf '%s\\n' "$*" >> gh-calls.txt
         for arg in "$@"; do
           case "$arg" in
             */actions/runs/77) cat relay-run.json; exit 0 ;;
@@ -797,6 +799,9 @@ def _prewarm_evidence(tmp_path, entries, relay_source='env:\n  STAGE_SERVICES: "
         "group": {"head_sha": "a" * 40}, "dispatched": entries,
         "producer": "codebuild", "relay_run_id": "77", "relay_run_attempt": "1",
     }
+    if configured_services != "absent":
+        relay["configured_services"] = (list(configured_services)
+                                        if isinstance(configured_services, tuple) else configured_services)
     _s3_transport_fixture(tmp_path, {
         "mq/leaf-web-demo/relay/" + "a" * 12 + "/77-1.json":
             _s3_object(relay, 77, 1, 555, "a" * 40, "prewarm-staging-group.yml"),
@@ -862,19 +867,22 @@ def _dispatch(service, run_id, disposition="dispatched"):
 
 
 @needs_shell
-@pytest.mark.parametrize("entries,source,error", [
-    ([], 'STAGE_SERVICES: "web app"', "relay dispatched nothing"),
-    ([_dispatch("web", 101, "dispatch-failed")], 'STAGE_SERVICES: "web"', "web"),
-    ([_dispatch("app", 102, "unresolved")], 'STAGE_SERVICES: "app"', "app"),
-    ([_dispatch("app", None)], 'STAGE_SERVICES: "app"', "app"),
-    ([_dispatch("web", 101)], 'STAGE_SERVICES: "web app"', "differ"),
-    ([_dispatch("web", 101), _dispatch("app", 102)], 'STAGE_SERVICES: "web app"', None),
-    ([_dispatch("web", 101)], 'env: {}', "absent or unparsable"),
-    ([_dispatch("web", 101)], 'STAGE_SERVICES: web', "absent or unparsable"),
-    ([_dispatch("web", 101)], None, "absent or unparsable"),
+@pytest.mark.parametrize("entries,configured,error", [
+    ([], ["app", "web"], "relay dispatched nothing"),
+    ([_dispatch("web", 101, "dispatch-failed")], ["web"], "web"),
+    ([_dispatch("app", 102, "unresolved")], ["app"], "app"),
+    ([_dispatch("app", None)], ["app"], "app"),
+    ([_dispatch("web", 101)], ["app", "web"], "relay dispatched services differ from configured services"),
+    ([_dispatch("web", 101), _dispatch("app", 102)], ["app", "web"], None),
+    ([_dispatch("web", 101)], [], "relay configured service list absent or unparsable"),
+    ([_dispatch("web", 101)], "web", "relay configured service list absent or unparsable"),
+    ([_dispatch("web", 101)], "absent", "relay configured service list absent or unparsable"),
+    ([_dispatch("web", 101)], ["web", "web"], "relay configured service list absent or unparsable"),
+    ([_dispatch("web", 101)], [1], "relay configured service list absent or unparsable"),
+    ([_dispatch("web", 101)], ["bad_service"], "relay configured service list absent or unparsable"),
 ])
-def test_relay_dispatched_set_executed(tmp_path, entries, source, error):
-    _prewarm_evidence(tmp_path, entries, source)
+def test_relay_dispatched_set_executed(tmp_path, entries, configured, error):
+    _prewarm_evidence(tmp_path, entries, configured_services=configured)
     result = run_step(step_body("mq-prewarm", "Wait for the relay's"), tmp_path,
                       {"GROUP_HEAD_SHA": "a" * 40})
     if error:
@@ -886,14 +894,28 @@ def test_relay_dispatched_set_executed(tmp_path, entries, source, error):
         assert result["relay_run_id"] == "77"
         assert "configured services: app web" in result["__stdout__"]
         assert "dispatched services: app web" in result["__stdout__"]
-        assert (tmp_path / "contents-calls.txt").read_text().strip().endswith(
-            "prewarm-staging-group.yml?ref=" + "a" * 40)
+        assert "contents/" not in (tmp_path / "gh-calls.txt").read_text()
         waited = run_step(step_body("mq-prewarm", "Wait for every dispatched"), tmp_path,
                           {"GROUP_HEAD_SHA": "a" * 40, "TREE": "b" * 40,
                            "DISPATCHED_JSON": result["dispatched_json"],
                            "RELAY_RUN_ID": result["relay_run_id"]})
         assert waited["__returncode__"] == 0, waited
         assert _staged_arn("app") + " " + _staged_arn("web") in waited["__stdout__"]
+
+
+@needs_shell
+def test_relay_configuration_change_takes_effect_on_the_next_group(tmp_path):
+    # The relay runs main's text. A group changing the list must still merge;
+    # its new configuration takes effect when the next group relay runs.
+    _prewarm_evidence(tmp_path, [_dispatch("web", 101)],
+                      relay_source='env:\n  STAGE_SERVICES: "web app"\n',
+                      configured_services=["web"])
+    result = run_step(step_body("mq-prewarm", "Wait for the relay's"), tmp_path,
+                      {"GROUP_HEAD_SHA": "a" * 40})
+    assert result["__returncode__"] == 0, result
+    assert json.loads(result["dispatched_json"]) == {"web": _build_id(101)}
+    assert "configured services: web" in result["__stdout__"]
+    assert "contents/" not in (tmp_path / "gh-calls.txt").read_text()
 
 
 @needs_shell

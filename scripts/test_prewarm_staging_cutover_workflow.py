@@ -646,7 +646,7 @@ def test_the_group_receipt_carries_a_group_object_not_a_pr_number():
     body = step_body("stage-group", "Emit the relay receipt")
     assert "group: {head_sha: $head_sha, base_sha: $base_sha, members: $members}" in body
     assert "pr: $pr" not in body
-    assert '--arg schema "leaf.staging-prewarm-relay.v1"' in body
+    assert '--arg schema "leaf.staging-prewarm-relay.v2"' in body
 
 
 def _readiness_gh(workdir: Path, listing: dict, run_record: dict | None, zip_bytes: bytes | None) -> None:
@@ -908,7 +908,7 @@ def test_the_receipt_carries_an_honest_tag_ready_boolean():
     body = step_body("stage-group", "Emit the relay receipt")
     assert 'tag_ready: ($tag_ready == "true")' in body
     assert '--arg tag_ready "${TAG_READY:-false}"' in body
-    assert '--arg schema "leaf.staging-prewarm-relay.v1"' in body
+    assert '--arg schema "leaf.staging-prewarm-relay.v2"' in body
 
 
 def test_the_group_receipt_artifact_is_named_by_short_sha():
@@ -1075,11 +1075,29 @@ def test_codebuild_dispatch_and_relay_receipt_executed(tmp_path, response, dispo
         "HEAD_SHA": "a" * 40, "BASE_SHA": "b" * 40, "MEMBERS": "[41]",
         "ELIGIBILITY": "merge group", "IMAGE_TAG": image_tag, "PREVIEW_SHA": "a" * 40,
         "TREE": "b" * 40, "GITHUB_RUN_ID": "77", "TAG_READY": "true",
+        "CONFIGURED_SERVICES": group_workflow_document()["env"]["STAGE_SERVICES"],
     })
     receipt = json.loads((tmp_path / "prewarm-relay-receipt.json").read_text())
     assert receipt["producer"] == "codebuild"
     assert receipt["dispatched"] == entries
+    assert receipt["configured_services"] == ["web"]
+    assert receipt["configured_services"] == sorted(set(group_workflow_document()["env"]["STAGE_SERVICES"].split()))
     assert receipt["relay_run_id"] == "77"
+
+
+@needs_shell
+def test_relay_receipt_configured_services_are_sorted_and_unique(tmp_path):
+    step = next(s for s in group_workflow_document()["jobs"]["stage-group"]["steps"]
+                if s.get("name") == "Emit the relay receipt")
+    assert step["env"]["CONFIGURED_SERVICES"] == "${{ env.STAGE_SERVICES }}"
+    run_step(step["run"], tmp_path, {
+        "HEAD_SHA": "a" * 40, "BASE_SHA": "b" * 40, "MEMBERS": "[41]",
+        "ELIGIBILITY": "merge group", "GITHUB_RUN_ID": "77",
+        "STAGE_SERVICES": "web app web", "CONFIGURED_SERVICES": "web app web",
+    })
+    receipt = json.loads((tmp_path / "prewarm-relay-receipt.json").read_text())
+    assert receipt["configured_services"] == ["app", "web"]
+    assert receipt["configured_services"] == sorted(set("web app web".split()))
 
 
 def _s3_object(body, run_id, attempt, repo_id, sha, workflow="build-platform-images.yml", modified="2026-09-07T00:00:00Z"):
@@ -1297,9 +1315,12 @@ def test_s3_receipt_put_metadata_and_best_effort_upload_executed(tmp_path):
     run_step(step_body("stage-group", "Emit the relay receipt"), tmp_path, {
         "HEAD_SHA": READINESS_SOURCE_SHA, "BASE_SHA": READINESS_TREE, "MEMBERS": "[41]",
         "ELIGIBILITY": "merge group", "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2",
+        "CONFIGURED_SERVICES": group_workflow_document()["env"]["STAGE_SERVICES"],
     })
     receipt = json.loads((tmp_path / "prewarm-relay-receipt.json").read_text())
     assert receipt["dispatched"] == []
+    assert receipt["configured_services"] == ["web"]
+    assert receipt["configured_services"] == sorted(set(group_workflow_document()["env"]["STAGE_SERVICES"].split()))
     assert receipt["relay_run_id"] == "123" and receipt["relay_run_attempt"] == "2"
     run_step(put["run"], tmp_path, {
         "HEAD_SHA": READINESS_SOURCE_SHA, "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2",
