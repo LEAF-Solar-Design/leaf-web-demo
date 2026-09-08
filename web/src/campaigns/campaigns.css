@@ -59,6 +59,12 @@
 .campaign-panel h2,
 .campaign-panel h3 { font-family: var(--font-display); overflow-wrap: anywhere; }
 .campaign-panel h2 { margin: 0; font-size: 1.75rem; }
+.campaign-panel .campaign-results-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem; min-width: 0; }
+.campaign-panel .campaign-results-header .btn.primary {
+  padding: 0.625rem 1rem; font: 600 16px var(--font-sans);
+  background: var(--primary); color: var(--on-accent); border: 1px solid var(--primary); border-radius: 4px;
+}
+.campaign-panel .campaign-results-header .btn.primary:hover:not(:disabled) { background: var(--primary-hover); }
 .campaign-panel button,
 .campaign-panel summary { min-height: 44px; box-sizing: border-box; cursor: pointer; }
 .campaign-panel button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }

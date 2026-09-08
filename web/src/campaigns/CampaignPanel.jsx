@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useImperativeHandle, useRef, useState } from 'react'
 import useCampaigns from './useCampaigns.js'
 import { uploadProjectInput } from './api.js'
 import './campaigns.css'
@@ -54,7 +54,8 @@ function check(value, field, max) {
   }
 }
 
-function SubmitForm({ campaign, projectId }) {
+function SubmitForm({ campaign, projectId, navigationRef, onBusyChange }) {
+  const titleInput = useRef(null)
   const [title, setTitle] = useState('')
   const [prompt, setPrompt] = useState('')
   const [mode, setMode] = useState('ordinary')
@@ -66,6 +67,16 @@ function SubmitForm({ campaign, projectId }) {
   useEffect(() => { inputLive.current = true; return () => { inputLive.current = false } }, [])
   const action = useAction()
   const busy = action.busy || !!campaign.pending.submit || input.busy
+  useEffect(() => { onBusyChange(busy) }, [busy, onBusyChange])
+  useImperativeHandle(navigationRef, () => ({
+    finish() {
+      if (busy || inputLock.current) return
+      const disclosure = titleInput.current?.closest('details')
+      if (disclosure) disclosure.open = true
+      setMode('finish')
+      titleInput.current?.focus()
+    },
+  }))
   const field = action.error?.invalidField
   async function addInput() {
     if (inputLock.current || !input.file || input.ready || busy) return
@@ -80,6 +91,7 @@ function SubmitForm({ campaign, projectId }) {
   }
   return <form className="panel-sub" noValidate onSubmit={event => {
     event.preventDefault()
+    if (busy || inputLock.current) return
     action.run(() => {
       check(title, 'title', 200)
       check(prompt, 'prompt', mode === 'finish' ? 2000 : 32768)
@@ -111,12 +123,12 @@ function SubmitForm({ campaign, projectId }) {
     </div>}
     {mode === 'finish' && <label>Release deadline (optional)<input type="datetime-local" value={deadline} disabled={busy}
       onChange={event => setDeadline(event.target.value)} /></label>}
-    <label>Title<input value={title} maxLength={200} aria-invalid={field === 'title'} onChange={event => setTitle(event.target.value)} /></label>
+    <label>Title<input ref={titleInput} value={title} maxLength={200} aria-invalid={field === 'title'} onChange={event => setTitle(event.target.value)} /></label>
     {field === 'title' && <Alert error={action.error} />}
     <label>Prompt<textarea value={prompt} maxLength={mode === 'finish' ? 2000 : 32768} aria-invalid={field === 'prompt'} onChange={event => setPrompt(event.target.value)} /></label>
     <span className="dim" aria-live="polite">{(mode === 'finish' ? 2000 : 32768) - prompt.length} characters remaining</span>
     {field === 'prompt' && <Alert error={action.error} />}
-    <button type="submit" className="btn primary" disabled={busy || (mode === 'finish' && !!input.file && !input.ready)} aria-busy={busy}>{mode === 'finish' ? 'Finish this project' : 'Submit campaign'}</button>
+    <button type="submit" className="btn primary" disabled={busy || (mode === 'finish' && !!input.file && !input.ready)} aria-busy={busy}>{mode === 'finish' ? 'Request release' : 'Submit campaign'}</button>
     {field !== 'title' && field !== 'prompt' && <Alert error={action.error} onReload={campaign.refetch} />}
     <span role="status">{action.outcome}</span>
   </form>
@@ -504,12 +516,18 @@ function EnrollmentPanel({ campaign }) {
 
 function SignedInPanel({ projectId, projectName, artifactUrlApi, authorityProvider }) {
   const campaign = useCampaigns(projectId, { enabled: true, authorityProvider })
+  const formNavigation = useRef(null)
+  const [formBusy, setFormBusy] = useState(false)
   const selected = campaign.selected
   const completion = campaign.completion !== undefined ? campaign.completion
     : campaign.execution?.completion ?? selected?.completion
   const hasRelease = !!completion?.release
   return <>
-    <h2>Project results</h2>
+    <div className="campaign-results-header">
+      <h2>Project results</h2>
+      {(!selected || hasRelease) && <button type="button" className="btn primary" disabled={formBusy || !!campaign.pending.submit}
+        onClick={() => formNavigation.current?.finish()}>Finish this project</button>}
+    </div>
     {campaign.status === 'loading' && <div role="status" aria-label="Loading campaigns">
       <div className="skeleton-stack" aria-hidden="true"><div className="skeleton-row" /><div className="skeleton-row" /></div>
     </div>}
@@ -590,8 +608,8 @@ function SignedInPanel({ projectId, projectName, artifactUrlApi, authorityProvid
     </div>}
     {campaign.campaigns.length > 0 ? <details className="campaign-disclosure">
       <summary>Start a new request</summary>
-      <SubmitForm key={`form:${campaign.selectedId || 'new'}`} campaign={campaign} projectId={projectId} />
-    </details> : <SubmitForm key="form:new" campaign={campaign} projectId={projectId} />}
+      <SubmitForm key={`form:${campaign.selectedId || 'new'}`} campaign={campaign} projectId={projectId} navigationRef={formNavigation} onBusyChange={setFormBusy} />
+    </details> : <SubmitForm key="form:new" campaign={campaign} projectId={projectId} navigationRef={formNavigation} onBusyChange={setFormBusy} />}
   </>
 }
 
