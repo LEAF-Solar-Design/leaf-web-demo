@@ -1,4 +1,6 @@
 """Bounded capability discovery, distinct from proof of executable delivery."""
+from copy import deepcopy
+
 import deps
 import catalog
 
@@ -14,8 +16,8 @@ def resolve(tenant, delivery_profile, *, existing_artifact=False, transform_reci
                            'catalog_digest': view['catalog_digest'],
                            'source_revision': view.get('source_revision', view.get('catalog_commit')),
                            'operation': view.get('name'),
-                           'inputs': 'Published tool input schema; invocation adapter must validate it',
-                           'outputs': 'Published tool output schema; actual output remains unverified',
+                           'inputs': deepcopy(view['params']) if isinstance(view.get('params'), dict) else None,
+                           'outputs': 'Unknown: no canonical output schema source established',
                            'readiness': 'unproven',
                            'permission_requirement': 'Current tenant and project authority',
                            'budget_constraint': 'Existing entitlement and quota checks required',
