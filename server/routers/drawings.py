@@ -1146,7 +1146,9 @@ def save_plan_version(drawing_id: str,
                                   retryable=False, status_code=422)
         plan_digest = mutation_plan.plan_sha256(plan_bytes)
 
-    if leg == "dwg-plan-live" or canonical.get("block_defs"):
+    if (leg == "dwg-plan-live" or canonical.get("block_defs")
+            or any(e.get("kind") == "MLEADER" for e in canonical.get("added", []))
+            or "MULTILEADER" in canonical.get("removed_kinds", {}).values()):
         # The client computes the plan from the same entity list it wrote the
         # DXF from, so a mismatch is a client defect. Never commit a plan the
         # bytes beside it contradict.

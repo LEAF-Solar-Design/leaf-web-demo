@@ -422,3 +422,148 @@ def test_mleader_dxf_points_share_total_bound(monkeypatch):
     monkeypatch.setattr(intake_dxf, "MAX_POINTS", 1)
     with pytest.raises(intake_dxf.IntakeDxfError, match="points in total"):
         intake_dxf.intake_to_dxf(_mleader_dxf_fixture())
+
+
+# --- record 3s-3: mock writer, actual-handle verification and upload binding --
+
+@pytest.mark.parametrize("catalogue", [False, True])
+def test_mleader_mock_placement_and_catalogue(catalogue):
+    base = _base()
+    if catalogue:
+        base["mlstyles"][0].update(height=0.25, arrow=0.2, textstyle="Notes")
+    else:
+        del base["mlstyles"]
+    result = write_loop.apply_mutations(base, {"added": [_mleader()]})
+    expected = _mleader_dxf_fixture()["mleaders"][0]
+    expected.update(handle="new-leader", textpt=[5.45, 4.125 if catalogue else 4.09, 0])
+    if catalogue:
+        expected.update(height=0.25, arrow=0.2, textstyle="Notes")
+    assert result["mleaders"] == [expected]
+    assert "mleaders" not in base
+
+
+def test_mleader_mock_removal_and_unchanged_records():
+    import copy
+
+    base = _mleader_dxf_fixture()
+    before = copy.deepcopy(base)
+    plan = validate_mutations(base, {"removed": ["9C76"]})
+    result = write_loop.apply_mutations(base, plan)
+    assert result["mleaders"] == []
+    assert base == before
+    assert write_loop.verify_live_mutation_effects(base, result, plan) is None
+    with pytest.raises(ValueError, match="removed MLEADER"):
+        write_loop.verify_live_mutation_effects(base, before, plan)
+
+
+def test_mleader_verifier_accepts_console_placement_and_binds_actual_handle():
+    import intake_parse
+
+    base = {**_base(), "mleaders": []}
+    canonical = validate_mutations(base, {"added": [_mleader()]})
+    actual = {**base, "mleaders": intake_parse.parse_text(ML_RECORD, "probe.dwg")["mleaders"]}
+    assert actual["mleaders"][0]["textpt"] == [5.45, 4.091, 0]
+    assert write_loop.verify_live_mutation_effects(base, actual, canonical) is None
+    matched = {}
+    write_loop._verify_mleader_effects(base, actual, canonical, matched)
+    assert matched == {"new-leader": "9C76"}
+
+
+@pytest.mark.parametrize("damage", ["vertex", "text", "missing", "extra", "style", "layer"])
+def test_mleader_verifier_refuses_wrong_add(damage):
+    import copy
+
+    base = {**_base(), "mleaders": []}
+    canonical = validate_mutations(base, {"added": [_mleader()]})
+    actual = _mleader_dxf_fixture()
+    row = actual["mleaders"][0]
+    if damage == "vertex":
+        row["pts"][0][0] = 0.001
+    elif damage in ("text", "style", "layer"):
+        row[damage] = "Changed"
+    elif damage == "missing":
+        actual["mleaders"] = []
+    else:
+        actual["mleaders"].append({**copy.deepcopy(row), "handle": "AB"})
+    with pytest.raises(ValueError, match="MLEADER"):
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+@pytest.mark.parametrize("field,value", [("textpt", [5.45, 4.09, 0]),
+                                        ("height", 0.2), ("text", "Changed")])
+def test_mleader_verifier_unchanged_record_is_exact(field, value):
+    import copy
+
+    base = _mleader_dxf_fixture()
+    actual = copy.deepcopy(base)
+    assert write_loop.verify_live_mutation_effects(base, actual, {}) is None
+    actual["mleaders"][0][field] = value
+    with pytest.raises(ValueError, match="unchanged MLEADER"):
+        write_loop.verify_live_mutation_effects(base, actual, {})
+
+
+def test_mleader_verifier_legacy_base_proves_only_adds():
+    base = _base()
+    canonical = validate_mutations(base, {"added": [_mleader()]})
+    actual = _mleader_dxf_fixture()
+    actual["mleaders"].append({**actual["mleaders"][0], "handle": "AB", "text": "Existing"})
+    assert write_loop.verify_live_mutation_effects(base, actual, canonical) is None
+    actual["mleaders"] = actual["mleaders"][1:]
+    with pytest.raises(ValueError, match="added MLEADER"):
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+def test_mleader_verifier_matches_points_at_three_decimals():
+    base = {**_base(), "mleaders": []}
+    canonical = validate_mutations(base, {"added": [_mleader()]})
+    actual = _mleader_dxf_fixture()
+    actual["mleaders"][0]["pts"][0][0] = 0.0004
+    assert write_loop.verify_live_mutation_effects(base, actual, canonical) is None
+
+
+@pytest.mark.parametrize("damage", [False, True])
+def test_mleader_uploaded_plan_result_binding(tmp_path, monkeypatch, damage):
+    import hashlib
+    import io
+    import json
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import deps
+    import store
+    from envelopes import install_error_handlers
+    from intake_dxf import intake_to_dxf
+    from routers import drawings
+
+    monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "drawings"))
+    monkeypatch.delenv("LEAF_AUTH_LIVE", raising=False)
+    monkeypatch.setattr(deps, "APS_LIVE", False)
+    app = FastAPI()
+    install_error_handlers(app)
+    app.include_router(drawings.router)
+    client = TestClient(app)
+    tenant, drawing = "tenant-mleader-save", "mleader-save"
+    head = {**_base(), "mleaders": []}
+    plan = {"added": [_mleader(handle="301")]}
+    backend = store.FilesystemBackend(str(tmp_path / "drawings"))
+    source = tmp_path / "base.dwg"
+    source.write_bytes(b"AC1032" + b"\x00" * 64)
+    store.ingest_drawing(backend, tenant, str(source), drawing_id=drawing)
+    write_loop.publish_intake_cache(backend, tenant, drawing, 1, source.read_bytes(), head)
+    upload = write_loop.apply_mutations(head, plan)
+    upload["mleaders"][0]["textpt"] = [5.45, 4.091, 0]
+    if damage:
+        upload["mleaders"][0]["text"] = "Wrong valve"
+    data = intake_to_dxf(upload)
+    checkout = client.post(f"/api/drawings/{drawing}/checkout", headers={"X-Tenant-Id": tenant},
+                           json={"holder": "mleader-editor", "ttl_s": 3600})
+    assert checkout.status_code == 200, checkout.text
+    response = client.post(f"/api/drawings/{drawing}/versions/plan",
+        headers={"X-Tenant-Id": tenant,
+                 "X-Checkout-Capability": checkout.json()["checkout_capability"]},
+        files={"file": ("edited.dxf", io.BytesIO(data), "application/dxf")},
+        data={"parent_version": "1", "source_digest": hashlib.sha256(data).hexdigest(),
+              "plan": json.dumps({"mutations": plan})})
+    assert response.status_code == (422 if damage else 201), response.text
+    if damage:
+        assert "uploaded DXF does not carry the plan's result" in response.text
+        assert store.resolve_version(backend, tenant, drawing, "head")[0] == 1
