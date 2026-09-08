@@ -607,7 +607,7 @@ export function lowerSteps(steps, linetypes = [], entities = null) {
   for (const step of steps) {
     const op = String(step?.op ?? '')
     if (isCreateOp(op)) {
-      const { payload, refusal } = buildCreatePayload(op, step.inputs || {}, entities?.blocks, entities?.dimstyles, entities?.mlstyles)
+      const { payload, refusal } = buildCreatePayload(op, step.inputs || {}, entities?.blocks, entities?.dimstyles, undefined, entities?.mlstyles)
       if (refusal) return { refusal }
       lowered.push({ op, payload })
       continue

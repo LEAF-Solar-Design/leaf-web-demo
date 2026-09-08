@@ -108,7 +108,7 @@ export default function ScriptPanel() {
       if (waitingStep) { stop('stopped', `Script stopped at line ${line.line}: ${line.verb} still needs "${waitingStep.ask}"`); return }
       if (line.op !== 'pasteClip') {
         const checked = line.group === 'draw'
-          ? buildCreatePayload(line.op, effective, current.entities.blocks, current.entities.dimstyles, current)
+          ? buildCreatePayload(line.op, effective, current.entities.blocks, current.entities.dimstyles, current, current.entities.mlstyles)
           : buildEditPayload(line.op, current.selectedId, effective, current.entities.linetypes, current.entities)
         if (checked.refusal) { stop('stopped', `Script stopped at line ${line.line}: ${checked.refusal}`); return }
       }

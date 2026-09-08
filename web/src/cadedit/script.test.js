@@ -9,6 +9,19 @@ import { BARE_OPS, MAX_SCRIPT_CHARS, MAX_SCRIPT_LINES, MAX_TOKEN_CHARS, parseScr
 
 const parse = (text) => parseScript(text, parseDrawingCommand, PROMPTS)
 
+it('MLEADER slots are two points, quoted text, then optional style and layer', () => {
+  expect(promptSlots(PROMPTS.createMleader).map((s) => [s.kind, s.keys.join(',')])).toEqual([
+    ['point', 'x,y'], ['point', 'x2,y2'], ['text', 'text'], ['text', 'style'], ['text', 'layer'],
+  ])
+  expect(parse('MLEADER 30,23 35,26 "Valve"').lines[0]).toMatchObject({
+    group: 'draw', op: 'createMleader', verb: 'MLEADER', inputs: { x: '30,23', y: '', x2: '35,26', y2: '', text: 'Valve' },
+  })
+  expect(parse('ML 0,0 3,4 "Valve A" Notes Leaders').lines[0].inputs).toEqual({
+    x: '0,0', y: '', x2: '3,4', y2: '', text: 'Valve A', style: 'Notes', layer: 'Leaders',
+  })
+  expect(parse('MLEADER 0,0 bad "Valve"').refusal).toMatch(/operand 2 must be a point/)
+})
+
 describe('tokenize', () => {
   it('splits on whitespace and keeps a double-quoted run as one token', () => {
     expect(tokenize('text 0,0 2.5 0 "Panel A" Notes').tokens).toEqual(['text', '0,0', '2.5', '0', 'Panel A', 'Notes'])
@@ -109,17 +122,17 @@ describe('parseScript', () => {
     expect(parse('line 0,0 10,10\nfoo').line).toBe(2)
   })
 
-  // W4g-7b-05c: a deferred word (LEADER/LE, BLOCK/B, GROUP/G, UNGROUP) is a
+  // W4g-7b-05c: a deferred word (BLOCK/B) is a
   // real command word — the parse never refuses at that line — carrying its
   // own reason onto the line record for the runner to stop with.
   it('a deferred word parses onto the line list carrying its own reason, never as a refusal', () => {
-    const out = parse('line 0,0 3,4\nleader')
+    const out = parse('line 0,0 3,4\nblock')
     expect(out.refusal).toBeUndefined()
     expect(out.lines.map((l) => [l.line, l.group, l.op, l.verb])).toEqual([
       [1, 'draw', 'createLine', 'LINE'],
-      [2, 'deferred', 'leader', 'LEADER'],
+      [2, 'deferred', 'blockCreate', 'BLOCK'],
     ])
-    expect(out.lines[1].reason).toBe(DEFERRED_REASONS.leader)
+    expect(out.lines[1].reason).toBe(DEFERRED_REASONS.blockCreate)
     expect(out.lines[1].inputs).toEqual({})
     expect(Object.isFrozen(out.lines[1])).toBe(true)
     expect(parse('g RACK A0 B1').lines[0]).toMatchObject({ group: 'groups', op: 'group', verb: 'GROUP', inputs: { groupName: 'RACK', members: '160 177' } })

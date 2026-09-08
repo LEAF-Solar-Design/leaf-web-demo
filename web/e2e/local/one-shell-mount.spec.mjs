@@ -1561,6 +1561,28 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByTestId('dock-properties').locator('dd').last()).toHaveText('3')
     await page.keyboard.press('Escape')
 
+    // MLEADER is typed on the command line and draws its own canvas outline.
+    const mleaderCountBefore = Number(await page.getByTestId('cad-edit-entity-count').textContent())
+    await bar.fill('MLEADER')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'createMleader')
+    await page.getByLabel('ribbon x', { exact: true }).fill('30')
+    await page.getByLabel('ribbon y', { exact: true }).fill('23')
+    await page.getByLabel('ribbon x2', { exact: true }).fill('35')
+    await page.getByLabel('ribbon y2', { exact: true }).fill('26')
+    await page.getByLabel('ribbon text', { exact: true }).fill('Valve')
+    await page.getByLabel('ribbon text', { exact: true }).press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(mleaderCountBefore + 1), { timeout: 60_000 })
+    await expect(page.getByTestId('cad-edit-entity-list')).toContainText('MLEADER on layer 0 · read-only')
+    await page.keyboard.press('Escape')
+    const mleaderCanvas = page.locator('.studio-ground .viewer-canvas canvas')
+    await expect(mleaderCanvas).toBeVisible()
+    await test.info().attach('MLEADER canvas schematic', { body: await mleaderCanvas.screenshot(), contentType: 'image/png' })
+    await bar.fill('u')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(mleaderCountBefore), { timeout: 60_000 })
+    await expect(page.getByTestId('cad-edit-entity-list')).not.toContainText('MLEADER on layer 0 · read-only')
+
     // W4g-2 (one head), confirm-time race. LAST in the walk on purpose: a
     // refused run leaves its failed strip on the page and there is no
     // dismiss for it, and that strip sits BETWEEN the command prompt and
@@ -1682,9 +1704,9 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByTestId('cockpit-prompt-note')).toHaveText('an INSERT is placed, not edited, in this round')
     await page.keyboard.press('Escape')
     await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
-    await bar.fill('leader')
+    await bar.fill('block')
     await bar.press('Enter')
-    await expect(page.getByRole('status').filter({ hasText: DEFERRED_REASONS.leader })).toHaveCount(1)
+    await expect(page.getByRole('status').filter({ hasText: DEFERRED_REASONS.blockCreate })).toHaveCount(1)
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBefore + 1))
 
     // One engine undo takes it back; the redo depth rises.

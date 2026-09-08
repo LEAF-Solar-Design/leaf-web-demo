@@ -11,7 +11,7 @@ import DraftingRibbon, { RibbonWidget } from '../site/DraftingRibbon.jsx'
 import { DEFERRED_REASONS, forGroup } from '../lib/actionRegistry.js'
 import { parseDrawingCommand } from '../lib/commandWords.js'
 
-import EngineRibbonClusters, { PROMPTS } from './EngineRibbonClusters.jsx'
+import EngineRibbonClusters, { PROMPTS, promptKeys } from './EngineRibbonClusters.jsx'
 import EngineSessionProvider, { useEngineSessionContext } from './EngineSessionProvider.jsx'
 import { CREATE_OPS, buildCreatePayload, buildEditPayload, lowerSteps, planMatchprop } from './engineSession.js'
 import { ELLIPSE_SEGMENTS, POINT_MARK, POINT_MARK_FRACTION, engineIntake, entityToPolyline, pointMarkSize } from './engineIntake.js'
@@ -237,7 +237,7 @@ describe('W4g-7b-05c: the deferred controls carry their own reason with the flag
     expect(forGroup('groups').map((action) => action.op)).toEqual(['group', 'ungroup'])
     expect(panel.textContent).not.toContain('not in the browser engine yet')
   })
-  it('Leader stays deferred and Create Block uses the document ladder', () => {
+  it('Leader and Create Block are both live and document-gated', () => {
     render(
       <EngineSessionProvider createWorker={vi.fn(() => new IdleWorker())}>
         <DraftingRibbon clusters={[]}>
@@ -245,10 +245,11 @@ describe('W4g-7b-05c: the deferred controls carry their own reason with the flag
         </DraftingRibbon>
       </EngineSessionProvider>,
     )
-    const leader = document.querySelector('[data-tool="annotation:leader"]')
+    expect(document.querySelector('[data-tool="annotation:leader"]')).toBeNull()
+    const leader = document.querySelector('[data-tool="draw:createMleader"]')
     expect(leader.disabled).toBe(true)
-    expect(leader.title).toBe(DEFERRED_REASONS.leader)
-    expect(leader.getAttribute('aria-label')).toBe(`Leader (unavailable: ${DEFERRED_REASONS.leader})`)
+    expect(leader.title).toBe('no drawing in the browser engine yet')
+    expect(leader.getAttribute('aria-label')).toBe('Leader (unavailable: no drawing in the browser engine yet)')
     const create = document.querySelector('[data-tool="draw:createBlock"]')
     expect(create.disabled).toBe(true)
     expect(create.getAttribute('aria-label')).toBe('create block (unavailable: no drawing in the browser engine yet)')
@@ -336,6 +337,14 @@ describe('W4g-7b-03c-g F7: RibbonWidget applies a keyboard walk ONCE, on Enter o
 // Run disabled forever with "dimension style Standard is not loaded", never
 // mind what the drafter typed.
 describe('W4g-7b-04c-4 F1: the ribbon\'s own live validation sees the loaded dimstyles catalogue', () => {
+  it('MLEADER uses the reference prompts and carries every input through promptKeys', () => {
+    expect(PROMPTS.createMleader.steps.slice(0, 3).map((step) => step.ask)).toEqual([
+      'Specify leader arrowhead location:', 'Specify leader landing location:', 'Enter text:',
+    ])
+    expect([...promptKeys('createMleader')]).toEqual(['x', 'y', 'x2', 'y2', 'text', 'style', 'layer'])
+    expect(forGroup('draw').find((action) => action.op === 'createMleader')).toMatchObject({ panel: 'annotation', icon: 'leader' })
+  })
+
   class ScriptedWorker {
     constructor() { this.posted = []; this.listeners = new Map() }
     addEventListener(type, fn) { this.listeners.set(type, fn) }
@@ -352,6 +361,36 @@ describe('W4g-7b-04c-4 F1: the ribbon\'s own live validation sees the loaded dim
     Object.defineProperty(file, 'size', { value: bytes.length })
     return file
   }
+
+  it('MLEADER selects loaded multileader styles, validates segments, and defaults to Standard', async () => {
+    const workers = []
+    const handle = {}
+    function Probe() { handle.context = useEngineSessionContext(); return null }
+    render(
+      <EngineSessionProvider createWorker={() => { const w = new ScriptedWorker(); workers.push(w); return w }}>
+        <Probe />
+        <DraftingRibbon clusters={[]}><EngineRibbonClusters panels={['annotation']} /></DraftingRibbon>
+      </EngineSessionProvider>,
+    )
+    await act(async () => { await handle.context.session.actions.open(fileOf()) })
+    workers[0].emit({ type: 'documentLoaded', documentId: 'one.dxf', entities: [], entityCount: 0, unsupported: [],
+      dimstyles: ['DimensionOnly'], mlstyles: [{ name: 'Standard', segments: 1 }, { name: 'Notes', segments: 1 }, { name: 'Multi', segments: 2 }] })
+    fireEvent.click(document.querySelector('[data-tool="draw:createMleader"]'))
+    const style = screen.getByLabelText('ribbon style')
+    expect([...style.options].map((option) => option.text)).toEqual(['Standard (default)', 'Standard', 'Notes', 'Multi'])
+    for (const [key, value] of Object.entries({ x: '30', y: '23', x2: '35', y2: '26', text: 'Valve' })) {
+      fireEvent.change(screen.getByLabelText(`ribbon ${key}`, { exact: true }), { target: { value } })
+    }
+    expect(screen.getByTestId('cockpit-prompt-run')).not.toBeDisabled()
+    fireEvent.change(style, { target: { value: 'Multi' } })
+    expect(screen.getByTestId('cockpit-prompt-run')).toBeDisabled()
+    expect(screen.getByTestId('cockpit-prompt-note')).toHaveTextContent('the style must use one leader segment')
+    fireEvent.change(style, { target: { value: 'Notes' } })
+    fireEvent.click(screen.getByTestId('cockpit-prompt-run'))
+    expect(workers[0].posted.filter((m) => m.type === 'applyEdit')).toEqual([
+      { type: 'applyEdit', op: 'createMleader', payload: { x: 30, y: 23, x2: 35, y2: 26, text: 'Valve', style: 'Notes', layer: '' } },
+    ])
+  })
 
   it('arming DAL, filling the six points, sees Run live and posts ONE createDimension, dimtype ALIGNED', async () => {
     const workers = []

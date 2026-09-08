@@ -1,8 +1,35 @@
 import { describe, expect, it } from 'vitest'
 
-import { bulgePoints, ARC_STEP_DEG, CIRCLE_SEGMENTS, DIM_EXT_PAST, MAX_POINTS, MIN_ARC_POINTS, dimensionSchematic, engineIntake, entityToPolyline, formatMeasurement, hexHandle } from './engineIntake.js'
+import { bulgePoints, ARC_STEP_DEG, CIRCLE_SEGMENTS, DIM_EXT_PAST, MAX_POINTS, MIN_ARC_POINTS, dimensionSchematic, mleaderSchematic, engineIntake, entityToPolyline, formatMeasurement, hexHandle } from './engineIntake.js'
 
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps
+
+describe('MLEADER schematic, v87 hand-derived geometry', () => {
+  const base = { id: '37986', type: 'MLEADER', layer: 'Leaders', text: 'Valve', height: 1, arrow: 0.5, dogleg: 2, textLocation: [5.1, 4.5] }
+  it.each([
+    { landing: [3, 4], dir: [1, 0], end: [5, 4, 0], corners: [[0.1, 0.55, 0], [0.5, 0.25, 0]] },
+    { landing: [-3, 4], dir: [-1, 0], end: [-5, 4, 0], corners: [[-0.5, 0.25, 0], [-0.1, 0.55, 0]] },
+    { landing: [4, 0], dir: [1, 0], end: [6, 0, 0], corners: [[0.5, 0.25, 0], [0.5, -0.25, 0]] },
+  ])('draws the arrow and dogleg for $landing', ({ landing, dir, end, corners }) => {
+    const entity = { ...base, vertices: [[0, 0], landing], dogleg_dir: dir }
+    const pieces = mleaderSchematic(entity)
+    expect(pieces).toHaveLength(4)
+    expect(pieces[0].pts).toEqual([[0, 0, 0], [...landing, 0]])
+    expect(pieces[1].pts).toEqual([[...landing, 0], end])
+    expect(Math.hypot(end[0] - landing[0], end[1] - landing[1])).toBe(2)
+    expect(pieces[2]).toMatchObject({ closed: true, pts: [[0, 0, 0], ...corners] })
+    expect(pieces[3]).toMatchObject({ closed: true, pts: [[5.1, 4.5, 0], [8.1, 4.5, 0], [8.1, 5.5, 0], [5.1, 5.5, 0]] })
+    expect(pieces.every((p) => p.handle === '9462' && p.layer === 'Leaders')).toBe(true)
+    expect(engineIntake([entity]).polylines).toEqual(pieces)
+  })
+  it('uses the projected text side without an explicit dogleg direction and skips malformed records', () => {
+    const entity = { ...base, vertices: [[0, 0], [-3, 4]], textLocation: [-5.1, 4.5] }
+    expect(mleaderSchematic(entity)[1].pts[1]).toEqual([-5, 4, 0])
+    for (const bad of [null, {}, { ...entity, vertices: [[0, 0], [0, 0]] }, { ...entity, height: NaN }, { ...entity, textLocation: null }]) {
+      expect(mleaderSchematic(bad)).toEqual([])
+    }
+  })
+})
 
 describe('engineIntake (W4f slice A0): engine entities -> viewer intake', () => {
   it('carries dictionary names and converts group and member ids to hex', () => {

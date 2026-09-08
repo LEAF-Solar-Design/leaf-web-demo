@@ -114,7 +114,7 @@ export const MODIFY_REASONS = Object.freeze({
   readOnlyKind: 'read-only entity kind',
 })
 
-export const PLACED_KINDS = new Set(['INSERT', 'DIMENSION'])
+export const PLACED_KINDS = new Set(['INSERT', 'DIMENSION', 'MLEADER'])
 
 // W4g-5c: the clipboard's ladder. CUT and COPY answer to the Modify ladder
 // (they act on a selection); PASTE does not need a selection at all, it needs
@@ -532,6 +532,7 @@ const ACTION_LIST = [
   // the annotation:dimensions placeholder leaves now these are real.
   engineOp('draw', 'dimLinear', 'dim-linear', 'Linear Dimension', 'dim-linear', 'Draw a linear dimension between two points, offset to a dimension line', 'large', 'annotation'),
   engineOp('draw', 'dimAligned', 'dim-aligned', 'Aligned Dimension', 'dim-aligned', 'Draw a dimension aligned to the two points it measures, offset to a dimension line', 'large', 'annotation'),
+  engineOp('draw', 'createMleader', 'Leader', 'Leader', 'leader', 'Place a multileader from an arrowhead to a landing with text', 'large', 'annotation'),
   // W4g-7b-02c: INSERT of an existing block definition, seated in the
   // reference's Block panel the way TEXT sits in Annotation.
   engineOp('draw', 'createInsert', 'insert block', 'Insert Block', 'block-insert', 'Insert an existing block definition at a point with scale and rotation', 'large', 'block'),

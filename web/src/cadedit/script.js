@@ -65,6 +65,8 @@ const POINT_Y = new Set(['y', 'y1', 'y2', 'cy', 'dy', 'ey'])
  * written into its first field as a point expression; every other field is
  * one slot. `{ keys, kind }` per slot, kind 'point' | 'checkbox' | 'text' |
  * 'edge' | 'number'.
+ * MLEADER follows the same grammar: arrowhead point, landing point, quoted
+ * text, then optional style and layer. No command-specific slot override.
  */
 export function promptSlots(prompt) {
   if (prompt.verb === 'BLOCK') return [{ keys: ['name'], kind: 'text' }, { keys: ['x', 'y'], kind: 'point' }, { keys: ['members'], kind: 'edge', repeat: true }]
@@ -111,7 +113,7 @@ export function parseScript(text, parseWord, prompts) {
     const [head, ...operands] = tok.tokens
     const command = parseWord(head)
     if (!command) return { refusal: `line ${number}: "${head}" is not a command word`, line: number }
-    // W4g-7b-05c: a deferred word (LEADER, BLOCK, GROUP, UNGROUP) is a real
+    // W4g-7b-05c: a deferred word (BLOCK) is a real
     // command word, never "not a command word" — it parses onto the line
     // list carrying its own reason, and the runner stops there (never here),
     // so every earlier line still runs before the script honestly refuses.

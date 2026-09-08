@@ -236,6 +236,45 @@ export function pointMarkSize(extent) {
   return Math.max(POINT_MARK, POINT_MARK_FRACTION * Math.max(w, h))
 }
 
+/** MLEADER outline: leader, dogleg, arrow triangle and text box, all owned by its handle. */
+export function mleaderSchematic(entity) {
+  const vertices = Array.isArray(entity?.vertices) ? entity.vertices.map(point) : []
+  const textLocation = point(entity?.textLocation)
+  const height = entity?.height
+  const arrow = entity?.arrow
+  const dogleg = entity?.dogleg
+  const chars = typeof entity?.text === 'string' ? [...entity.text].length : 0
+  if (vertices.length < 2 || vertices.some((p) => !p) || !textLocation || !chars
+    || !finite(height) || height <= 0 || !finite(arrow) || arrow < 0 || !finite(dogleg) || dogleg < 0) return []
+  const tip = vertices[0]
+  const next = vertices[1]
+  const landing = vertices[vertices.length - 1]
+  const length = Math.hypot(next[0] - tip[0], next[1] - tip[1])
+  if (length <= 1e-9) return []
+  const ux = (next[0] - tip[0]) / length
+  const uy = (next[1] - tip[1]) / length
+  // The worker's text placement carries the horizontal side when no explicit
+  // direction is projected. Created leaders place text to the right.
+  const dir = point(entity.dogleg_dir) || [textLocation[0] < landing[0] ? -1 : 1, 0, 0]
+  const dirLength = Math.hypot(dir[0], dir[1])
+  if (dirLength <= 1e-9) return []
+  const end = [landing[0] + dogleg * dir[0] / dirLength, landing[1] + dogleg * dir[1] / dirLength, landing[2]]
+  const base = [tip[0] + arrow * ux, tip[1] + arrow * uy, tip[2]]
+  const half = arrow / 2
+  const width = TEXT_ADVANCE * height * chars
+  const [x, y, z] = textLocation
+  const handle = hexHandle(entity.id ?? entity.handle ?? '')
+  const layer = typeof entity.layer === 'string' && entity.layer ? entity.layer : '0'
+  const piece = (pts, closed = false) => ({ handle, layer, pts: pts.map(cleanPoint), closed })
+  const pieces = [
+    piece(vertices),
+    piece([landing, end]),
+    piece([tip, [base[0] - uy * half, base[1] + ux * half, tip[2]], [base[0] + uy * half, base[1] - ux * half, tip[2]]], true),
+    piece([[x, y, z], [x + width, y, z], [x + width, y + height, z], [x, y + height, z]], true),
+  ]
+  return pieces.every((pl) => pl.pts.every((p) => p.every(finite))) ? pieces : []
+}
+
 /** One entity -> one intake polyline, or null when it has nothing drawable. `markSize` is a POINT marker's half-size. */
 export function entityToPolyline(entity, markSize = POINT_MARK) {
   if (!entity || typeof entity !== 'object') return null
@@ -407,6 +446,14 @@ export function engineIntake(entities, documentId = '', catalogue = entities?.bl
     // W4g-7b-04c: only LINEAR/ALIGNED draw (a schematic); OTHER dimtypes
     // (RADIUS etc.) are visible-by-handle-only projections and draw nothing,
     // per the case table.
+    if (entity?.type === 'MLEADER') {
+      for (const pl of mleaderSchematic(entity)) {
+        if (points + pl.pts.length > MAX_POINTS) { truncated += 1; continue }
+        points += pl.pts.length
+        polylines.push(pl)
+      }
+      continue
+    }
     if (entity?.type === 'DIMENSION') {
       if (entity.dimtype === 'LINEAR' || entity.dimtype === 'ALIGNED') {
         for (const pl of dimensionSchematic(entity)) {

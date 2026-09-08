@@ -210,6 +210,27 @@ describe('CanvasPointPicker (W4f slice A1)', () => {
     expect(context.inputs.y).toBe('4')
     expect(document.activeElement).toBe(nextField)
   })
+  it('MLEADER picks arrowhead and landing with a rubber band, then posts the text once', async () => {
+    mount()
+    await openAndLoad()
+    act(() => context.setArmed({ group: 'draw', op: 'createMleader' }))
+    click(300, 230)
+    expect(screen.getByLabelText('ribbon x').value).toBe('30')
+    expect(screen.getByLabelText('ribbon y').value).toBe('23')
+    act(() => { ground.dispatchEvent(new MouseEvent('pointermove', { clientX: 350, clientY: 260, bubbles: true })) })
+    expect(viewer.setRubberBand).toHaveBeenLastCalledWith([[30, 23], [35, 26]], false)
+    click(350, 260)
+    expect(screen.getByLabelText('ribbon x2').value).toBe('35')
+    expect(screen.getByLabelText('ribbon y2').value).toBe('26')
+    click(500, 500)
+    expect(screen.getByLabelText('ribbon x2').value).toBe('35')
+    fireEvent.change(screen.getByLabelText('ribbon text'), { target: { value: 'Valve' } })
+    fireEvent.click(screen.getByTestId('cockpit-prompt-run'))
+    expect(workers[0].posted.filter((m) => m.type === 'applyEdit')).toEqual([
+      { type: 'applyEdit', op: 'createMleader', payload: { x: 30, y: 23, x2: 35, y2: 26, text: 'Valve', style: 'Standard', layer: '' } },
+    ])
+  })
+
   it('nothing is picked, stamped or ghosted without an armed point command', async () => {
     mount()
     await openAndLoad()
