@@ -149,6 +149,19 @@ MUTATION_INSPECT_BLOCKS += (
 )
 
 
+# W4g-7c-3s-1: MLEADER styles and entities precede the frozen DS/DM tail.
+# The walk helpers use the row's dynamically scoped locals for one entget pass.
+MUTATION_INSPECT_BLOCKS += (
+    '(defun leaf-ml-textstyle (h / data) (if (and h (setq data (entget h))) (cond ((cdr (assoc 2 data))) (T "")) ""))',
+    '(defun leaf-ms-row (name e / data) (setq data (entget e)) (write-line (strcat "MS|" (leaf-bk-encode name) "|" (leaf-bk-encode (leaf-ml-textstyle (cdr (assoc 342 data)))) "|" (rtos (cdr (assoc 45 data)) 2 5) "|" (rtos (cdr (assoc 44 data)) 2 5) "|" (rtos (cdr (assoc 43 data)) 2 5) "|" (rtos (cdr (assoc 42 data)) 2 5) "|" (itoa (cdr (assoc 173 data)))) f))',
+    '(progn (setq f (open "{OUT}" "a") ml-dict (dictsearch (namedobjdict) "ACAD_MLEADERSTYLE") ml-names nil ml-name nil) (foreach ml-pair ml-dict (cond ((= (car ml-pair) 3) (setq ml-name (cdr ml-pair))) ((and ml-name (= (car ml-pair) 350)) (setq ml-names (cons (cons (cdr ml-pair) ml-name) ml-names)) (leaf-ms-row ml-name (cdr ml-pair)) (setq ml-name nil)))) (princ "MS-DONE") (close f))',
+    '(defun leaf-ml-context (code value) (cond ((= code 41) (setq height value)) ((= code 140) (setq arrow value)) ((= code 12) (setq textpt value)) ((= code 304) (setq text value)) ((= code 171) (setq attachment value))))',
+    '(defun leaf-ml-walk (data / pair code value) (foreach pair data (setq code (car pair) value (cdr pair)) (cond ((and (= code 300) (= value "CONTEXT_DATA{")) (setq state 1)) ((and (= state 1) (= code 302) (= value "LEADER{")) (setq state 2)) ((and (= state 2) (= code 304) (= value "LEADER_LINE{")) (setq state 3 branches (1+ branches))) ((and (= state 3) (= code 305) (= value "}")) (setq state 2)) ((and (= state 2) (= code 303) (= value "}")) (setq state 1)) ((and (= state 1) (= code 301) (= value "}")) (setq state 0 closed T)) ((= state 1) (leaf-ml-context code value)) ((= state 2) (cond ((= code 10) (setq landing value)) ((= code 11) (setq doglegdir value)) ((= code 40) (setq dogleg value)))) ((and (= state 3) (= code 10)) (setq vertices (strcat vertices (if (= vertices "") "" ";") (leaf-bk-point value 5)))) ((and (= state 0) closed) (cond ((and (= code 340) (null style)) (setq style (cdr (assoc value ml-names)))) ((= code 343) (setq textstyle (leaf-ml-textstyle value))) ((= code 172) (setq content value)))))))',
+    '(defun leaf-ml-row (data / state closed branches vertices height arrow textpt text attachment landing doglegdir dogleg style textstyle content) (setq state 0 branches 0 vertices "") (leaf-ml-walk data) (if (and style (= branches 1) (= content 2) text (/= vertices "") landing) (write-line (strcat "ML|" (cdr (assoc 5 data)) "|" (leaf-bk-encode (cdr (assoc 8 data))) "|" (leaf-bk-encode (cond (style) (T ""))) "|" (leaf-bk-encode (cond (textstyle) (T ""))) "|" (rtos height 2 5) "|" (rtos arrow 2 5) "|" (rtos dogleg 2 5) "|" (itoa attachment) "|" vertices "|" (leaf-bk-point landing 5) "|" (leaf-bk-point doglegdir 5) "|" (leaf-bk-point textpt 5) "|" (leaf-bk-encode text)) f) (write-line (strcat "MLX|" (cdr (assoc 5 data))) f)))',
+    '(progn (setq f (open "{OUT}" "a") ss (ssget "_X" (list (cons 0 "MULTILEADER") (cons 410 "Model"))) i 0) (if ss (repeat (sslength ss) (leaf-ml-row (entget (ssname ss i))) (setq i (1+ i)))) (princ "ML-DONE") (close f))',
+)
+
+
 # W4g-7b-04s: the DIMSTYLE catalogue (DS) and every model-space rotated/
 # aligned DIMENSION (DM), placed after the BK catalogue so both reuse its
 # leaf-bk-point/leaf-bk-encode helpers instead of re-deriving them. An

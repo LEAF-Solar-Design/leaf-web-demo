@@ -42,6 +42,16 @@ class DxfParseError(ValueError):
     """The file is not something this minimal parser can honestly read."""
 
 
+def _mleader_number(value, integer=False):
+    try:
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError("non-finite value")
+        return int(value) if integer else number
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise DxfParseError("malformed MLEADER numeric value") from exc
+
+
 def parse_dxf_file(path: Path, *, source_name: str = "") -> Dict[str, Any]:
     raw = Path(path).read_bytes()
     return parse_dxf_bytes(raw, source_name=source_name or Path(path).name)
@@ -95,6 +105,8 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
     insert_properties: Dict[str, Any] = {}
     objects = {}
     model_records = {}
+    textstyles = {}
+    mleader_records = []
 
     i = 0
     n = len(pairs)
@@ -120,6 +132,11 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             if handle:
                 objects[handle] = (value.upper(), record)
             i = j
+            continue
+        if section == "TABLES" and code == 0 and value == "STYLE":
+            groups, i = _entity_groups(pairs, i + 1)
+            if groups.get(5):
+                textstyles[groups[5].upper()] = groups.get(2, "")
             continue
         if section == "TABLES" and code == 0 and value == "LAYER":
             # the next code-2 before the next code-0 names the layer
@@ -170,6 +187,11 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
                 model_records[handle] = (value, record)
             if space_info.get("space") != "paper":
                 space_info.clear()
+        if section == "ENTITIES" and code == 0 and value == "MULTILEADER":
+            if not space_info and dict(record).get(410, "Model") == "Model":
+                mleader_records.append(record)
+            i = j
+            continue
         if section == "ENTITIES" and code == 0 and value == "INSERT":
             entity, i = _parse_insert(pairs, i + 1, dropped_count)
             if entity is not None:
@@ -266,6 +288,30 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             if entity.get("handle") in insert_properties:
                 properties[entity["handle"]] = insert_properties[entity["handle"]]
     out: Dict[str, Any] = {"dwg": source_name, "layers": layers, "polylines": polylines}
+    mlstyles = {}
+    for handle, (kind, record) in objects.items():
+        if kind == "MLEADERSTYLE":
+            groups = dict(record)
+            style = {"name": groups.get(3, ""),
+                     "textstyle": textstyles.get(groups.get(342, "").upper(), ""),
+                     **{field: round(_mleader_number(groups.get(code, "0")), 5)
+                        for field, code in (("height", 45), ("arrow", 44),
+                                            ("dogleg", 43), ("gap", 42))},
+                     "segments": _mleader_number(groups.get(173, "0"), integer=True)}
+            mlstyles[handle] = style
+            out.setdefault("mlstyles", []).append(style)
+    for record in mleader_records:
+        entity = _parse_mleader(record, mlstyles, textstyles)
+        if entity is None:
+            out["mleaders_unsupported"] = out.get("mleaders_unsupported", 0) + 1
+            handle = next((value for code, value in record if code == 5), "")
+            if handle:
+                out.setdefault("mleaders_unsupported_handles", []).append(handle.upper())
+        else:
+            out.setdefault("mleaders", []).append(entity)
+            if entity["layer"] not in seen_layers:
+                seen_layers.add(entity["layer"])
+                layers.append(entity["layer"])
     def dictionary_entries(record):
         key = None
         for code, value in record:
@@ -365,6 +411,70 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
     if parse_errors:
         out["parseErrors"] = parse_errors
     return out
+
+
+def _parse_mleader(record, styles, textstyles):
+    """Walk the nested contexts before resolving the top-level style handles."""
+    state = 0
+    closed = False
+    branches = 0
+    vertices = []
+    context, leader, top = {}, {}, {}
+    try:
+        for i, (code, value) in enumerate(record):
+            if (code, value) == (300, "CONTEXT_DATA{"):
+                state = 1
+            elif state == 1 and (code, value) == (302, "LEADER{"):
+                state = 2
+            elif state == 2 and (code, value) == (304, "LEADER_LINE{"):
+                state = 3
+                branches += 1
+            elif state == 3 and (code, value) == (305, "}"):
+                state = 2
+            elif state == 2 and (code, value) == (303, "}"):
+                state = 1
+            elif state == 1 and (code, value) == (301, "}"):
+                state, closed = 0, True
+            elif state:
+                point_code = ((state == 1 and code == 12) or
+                              (state == 2 and code in (10, 11)) or
+                              (state == 3 and code == 10))
+                if point_code:
+                    point = record[i:i + 3]
+                    if [c for c, _ in point] != [code, code + 10, code + 20]:
+                        return None
+                    value = [round(_mleader_number(v), 3) for _, v in point]
+                if state == 1:
+                    context[code] = value
+                elif state == 2:
+                    leader[code] = value
+                elif code == 10:
+                    vertices.append(value)
+            elif closed:
+                top.setdefault(code, value)
+        if (branches != 1 or _mleader_number(top.get(172, "0"), integer=True) != 2
+                or 304 not in context or not vertices):
+            return None
+        style = styles.get(top.get(340, "").upper())
+        if style is None:
+            return None
+        groups = dict(record)
+        handle = groups.get(5, "")
+        if not re.fullmatch(r"[0-9A-Fa-f]+", handle):
+            return None
+        return {"handle": handle, "layer": groups.get(8, "0") or "0",
+                "style": style["name"],
+                "textstyle": textstyles.get(top.get(343, "").upper(), ""),
+                "height": round(_mleader_number(context[41]), 5),
+                "arrow": round(_mleader_number(context[140]), 5),
+                "dogleg": round(_mleader_number(leader[40]), 5),
+                "attachment": _mleader_number(context[171], integer=True), "pts": vertices + [leader[10]],
+                "landing": leader[10], "dogleg_dir": leader[11],
+                "textpt": context[12], "text": context[304]}
+    except DxfParseError:
+        raise
+    except (KeyError, ValueError, TypeError, OverflowError):
+        return None
 
 
 def _entity_properties(aci, linetype, lineweight, truecolor,

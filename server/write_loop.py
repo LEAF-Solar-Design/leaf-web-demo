@@ -995,7 +995,7 @@ def apply_mutations(intake: Dict[str, Any], mutations: Dict[str, Any]) -> Dict[s
         for h in (removed if mutations.get("block_defs") else []):
             new.get("properties", {}).pop(h, None)
             new.get("blockMembers", {}).pop(h, None)
-        for field in ("polylines", "circles", "arcs", "dimensions"):
+        for field in ("polylines", "circles", "arcs", "dimensions", "mleaders"):
             if new.get(field):
                 new[field] = [p for p in new[field] if str(p.get("handle")) not in removed]
     # W4g-3 (contract v2): replacements on existing entities, by handle. The
@@ -1043,7 +1043,7 @@ def apply_mutations(intake: Dict[str, Any], mutations: Dict[str, Any]) -> Dict[s
     added = mutations.get("added") or []
     if mutations.get("added_groups") or mutations.get("block_defs"):
         used = {str(e.get("handle", "")).upper()
-                for field in ("polylines", "circles", "arcs", "texts", "inserts", "dimensions")
+                for field in ("polylines", "circles", "arcs", "texts", "inserts", "dimensions", "mleaders")
                 for e in new.get(field, [])}
         used.update(e["handle"].upper() for e in added
                     if re.fullmatch(r"[0-9A-Fa-f]+", e["handle"]))
@@ -1076,6 +1076,25 @@ def apply_mutations(intake: Dict[str, Any], mutations: Dict[str, Any]) -> Dict[s
                     "z": round(e["pt"][2], 3), "rot": round(math.radians(e["rot"]), 6),
                     "scale": [round(value, 4) for value in e["scale"]],
                     "nrm": [0.0, 0.0, 1.0]})
+            elif kind == "MLEADER":
+                catalogue = next((s for s in new.get("mlstyles", [])
+                                  if s["name"].casefold() == e["style"].casefold()), None)
+                style = catalogue if catalogue is not None else {
+                    "textstyle": "Standard", "height": 0.18, "arrow": 0.18,
+                    "dogleg": 0.36, "gap": 0.09, "segments": 1, "name": e["style"]}
+                if catalogue is None:
+                    # Mock approximation; inspection supplies the console's own values.
+                    new.setdefault("mlstyles", []).append(style)
+                landing = list(e["pts"][-1])
+                new.setdefault("mleaders", []).append({
+                    "handle": e["handle"], "layer": e["layer"], "style": style["name"],
+                    **{key: style[key] for key in ("textstyle", "height", "arrow", "dogleg")},
+                    "attachment": 1, "pts": [list(p) for p in e["pts"]],
+                    "landing": landing, "dogleg_dir": [1, 0, 0],
+                    # Mock approximation of the command's reported placement.
+                    "textpt": [round(landing[0] + style["dogleg"] + style["gap"], 3),
+                               round(landing[1] + style["height"] / 2, 3), 0],
+                    "text": e["text"]})
             elif kind == "DIMENSION":
                 new.setdefault("dimensions", []).append({
                     "type": e["dimtype"], "layer": e["layer"],
@@ -1923,6 +1942,7 @@ def verify_live_mutation_effects(
     # every add is matched by kind and geometry, and no extra entity appears.
     _verify_round_effects(base, actual, expected, canonical, matched_handles)
     _verify_dimension_effects(base, actual, canonical, matched_handles)
+    _verify_mleader_effects(base, actual, canonical, matched_handles)
     base_polylines = base.get("polylines") or []
     actual_polylines = actual.get("polylines") or []
     if not isinstance(actual_polylines, list):
@@ -2090,7 +2110,7 @@ def _verify_group_effects(base, actual, canonical):
     if any(str(error).startswith(("GRC:", "GR:", "GM:", "CA:"))
            for error in actual.get("parseErrors", [])):
         raise ValueError("malformed group inspection or created handoff")
-    fields = ("polylines", "circles", "arcs", "texts", "inserts", "dimensions", "points", "ellipses")
+    fields = ("polylines", "circles", "arcs", "texts", "inserts", "dimensions", "mleaders", "points", "ellipses")
     actual_handles = {str(e.get("handle", "")).upper()
                       for field in fields for e in actual.get(field, [])}
     non_model_handles = {
@@ -2149,6 +2169,72 @@ def _verify_group_effects(base, actual, canonical):
                     if n in added_names or n in removed_names}
     if expected != observed:
         raise ValueError("group names or exact member sets differ in output")
+
+
+def _mleader_effect_matches(expected: Dict[str, Any], actual: Dict[str, Any]) -> bool:
+    """Match planned fields at the intake quantum; placement is reported only."""
+    if any(expected.get(key) != actual.get(key) for key in ("layer", "style", "text")):
+        return False
+    try:
+        points = []
+        for entity in (expected, actual):
+            rows = entity["pts"]
+            if not isinstance(rows, list) or len(rows) != 2:
+                return False
+            if any(not isinstance(p, (list, tuple)) or len(p) != 3 for p in rows):
+                return False
+            points.append([[round(_plan_number(v), 3) for v in p] for p in rows])
+        return points[0] == points[1]
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+
+
+def _verify_mleader_effects(base, actual, canonical, matched_handles):
+    """Keep covered records exact; legacy bases prove adds and raw removals."""
+    rows = actual.get("mleaders", [])
+    if not isinstance(rows, list):
+        raise ValueError("re-extracted output has no mleaders list")
+    if any(not isinstance(e, dict) or not isinstance(e.get("handle"), str)
+           or not e["handle"] for e in rows):
+        raise ValueError("every re-extracted MLEADER must have a nonempty handle")
+    by_handle = {e["handle"]: e for e in rows}
+    if len(by_handle) != len(rows):
+        raise ValueError("re-extracted output contains duplicate MLEADER handles")
+    removed = set(canonical.get("removed", []))
+    unsupported = set(actual.get("mleaders_unsupported_handles", []))
+    raw_handles = unsupported | set(by_handle)
+    for handle in removed & raw_handles:
+        raise ValueError(f"removed MLEADER {handle!r} remains in output")
+    if "mleaders_unsupported" in base or "mleaders_unsupported_handles" in base:
+        base_unsupported = set(base.get("mleaders_unsupported_handles", []))
+        if ("mleaders_unsupported_handles" in base
+                and unsupported != base_unsupported - removed):
+            raise ValueError("unsupported MULTILEADER inventory changed")
+        expected_count = base.get("mleaders_unsupported", len(base_unsupported))
+        expected_count -= len(base_unsupported & removed)
+        if actual.get("mleaders_unsupported", len(unsupported)) != expected_count:
+            raise ValueError("re-extracted output carries an unsupported MULTILEADER the base did not, or an unsupported record vanished")
+    legacy_base = "mleaders" not in base
+    base_handles = set()
+    for entity in base.get("mleaders", []):
+        handle = entity["handle"]
+        base_handles.add(handle)
+        if handle in removed:
+            if handle in by_handle:
+                raise ValueError(f"removed MLEADER {handle!r} remains in output")
+        elif entity != by_handle.get(handle):
+            raise ValueError(f"unchanged MLEADER {handle!r} differs in output")
+    unmatched = [e for e in rows if e["handle"] not in base_handles]
+    for entity in canonical.get("added", []):
+        if entity.get("kind") != "MLEADER":
+            continue
+        index = next((i for i, candidate in enumerate(unmatched)
+                      if _mleader_effect_matches(entity, candidate)), None)
+        if index is None:
+            raise ValueError(f"added MLEADER {entity['handle']!r} not found in output")
+        matched_handles[entity["handle"]] = unmatched.pop(index)["handle"]
+    if not legacy_base and unmatched:
+        raise ValueError("re-extracted output has unmatched new MLEADER entities")
 
 
 def _dimension_effect_matches(expected: Dict[str, Any], actual: Dict[str, Any]) -> bool:

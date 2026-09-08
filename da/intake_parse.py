@@ -258,6 +258,45 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                 properties = {"aci": int(aci), "rgb": color,
                               "linetype": _block_name(linetype), "lineweight": int(lineweight)}
                 out.setdefault("properties", {})[hnd] = properties
+            elif tag == "MS":
+                name, textstyle, height, arrow, dogleg, gap, segments = rest.split("|")
+                if not all(math.isfinite(float(v)) for v in (height, arrow, dogleg, gap)):
+                    raise ValueError("non-finite mleader style scalar")
+                out.setdefault("mlstyles", []).append({
+                    "name": _block_name(name), "textstyle": _block_name(textstyle),
+                    "height": round(float(height), 5), "arrow": round(float(arrow), 5),
+                    "dogleg": round(float(dogleg), 5), "gap": round(float(gap), 5),
+                    "segments": int(segments)})
+            elif tag == "ML":
+                (hnd, layer, style, textstyle, height, arrow, dogleg, attachment,
+                 vertices, landing, dogleg_dir, textpt, text) = rest.split("|")
+                if not all(math.isfinite(float(v)) for v in (height, arrow, dogleg)):
+                    raise ValueError("non-finite mleader scalar")
+                if not hnd or any(v not in "0123456789abcdefABCDEF" for v in hnd):
+                    raise ValueError("malformed mleader handle")
+                if not vertices:
+                    raise ValueError("mleader needs vertices")
+                points = [_block_point(p) for p in vertices.split(";")]
+                landing = _block_point(landing)
+                # LEADER_LINE holds segment starts; the LEADER landing is
+                # the final point in the contract's arrow-to-landing path.
+                points.append(landing)
+                mleader = {
+                    "handle": hnd, "layer": _block_name(layer),
+                    "style": _block_name(style), "textstyle": _block_name(textstyle),
+                    "height": round(float(height), 5), "arrow": round(float(arrow), 5),
+                    "dogleg": round(float(dogleg), 5), "attachment": int(attachment),
+                    "pts": points, "landing": landing,
+                    "dogleg_dir": _block_point(dogleg_dir), "textpt": _block_point(textpt),
+                    "text": _block_name(text)}
+                out.setdefault("mleaders", []).append(mleader)
+            elif tag == "MLX":
+                out["mleaders_unsupported"] = out.get("mleaders_unsupported", 0) + 1
+                # The old MLX|1 marker carried only a count.
+                if rest and rest != "1":
+                    if any(v not in "0123456789abcdefABCDEF" for v in rest):
+                        raise ValueError("malformed unsupported mleader handle")
+                    out.setdefault("mleaders_unsupported_handles", []).append(rest.upper())
             elif tag == "DM":
                 kind, layer, p1, p2, dimline, rotation, style, nrm, measurement, hnd = rest.split("|")
                 points = [[round(float(v), 3) for v in p.split(",")]

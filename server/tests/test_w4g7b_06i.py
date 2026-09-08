@@ -345,6 +345,117 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
     assert all("properties" in c for c in blocked["blocks"]["B"]["children"])
     write_loop.verify_live_mutation_effects(ungrouped, blocked, block_plan)
 
+    # W4g-7c-3s-1: the command creates a real MULTILEADER. Derived values
+    # come from inspection, without depending on the later mock/DXF slices.
+    leader_host = tmp_path / "leader-host.dwg"
+    shutil.copyfile(output, leader_host)
+    output.unlink()
+    leader_plan = validate_mutations(blocked, {"added": [{
+        "handle": "leader", "kind": "MLEADER", "layer": "0", "style": "Standard",
+        "pts": [[0, 0, 0], [5, 4, 0]], "text": "Valve",
+    }]})
+    leader_bytes = emit_plan(
+        leader_plan, base_sha256=hashlib.sha256(leader_host.read_bytes()).hexdigest())
+    assert leader_bytes.splitlines()[-1] == (
+        b"ADDMLEADER|0|Standard|0.000,0.000,0.000|5.000,4.000,0.000|Valve")
+    (tmp_path / "mutation-plan.txt").write_bytes(leader_bytes)
+    leader_script = settings["script"]["value"].replace(
+        '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))',
+        '(command "_.-LAYER" "_N" "LEAF-ML-OVERRIDE" "")\r\n'
+        '(setvar "MLEADERLAYER" "LEAF-ML-OVERRIDE")\r\n'
+        '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))',
+    ).replace(
+        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))',
+        '(setq leaf-proof (open "mleaderlayer-after.txt" "w"))\r\n'
+        '(write-line (getvar "MLEADERLAYER") leaf-proof)\r\n'
+        '(close leaf-proof)\r\n'
+        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))',
+    )
+    _console(tmp_path, leader_host, "leader.scr", leader_script)
+    assert (tmp_path / "mleaderlayer-after.txt").read_text().strip() == "LEAF-ML-OVERRIDE"
+    _console(tmp_path, output, "leader-inspect.scr", inspect)
+    leaders = intake_parse.parse(families, "canary")
+    assert not leaders.get("parseErrors"), leaders.get("parseErrors")
+    leader, = leaders["mleaders"]
+    assert leader["pts"] == [[0, 0, 0], [5, 4, 0]]
+    assert leader["landing"] == [5, 4, 0]
+    assert leader["dogleg_dir"] == [1, 0, 0]
+    assert leader["text"] == "Valve"
+    assert leader["style"] == "Standard"
+    assert leader["layer"] == "0"
+    assert leader["height"] == 0.18
+    assert leader["arrow"] == 0.18
+    assert leader["dogleg"] == 0.36
+    standard, = [s for s in leaders["mlstyles"] if s["name"] == "Standard"]
+    assert standard["segments"] == 1
+
+    # Unknown styles are rejected at parse time. Change the second parsed
+    # op to an absent style to reach the production apply refusal after the
+    # first MLEADER exists, then inspect the saved UNDO-Back result.
+    (tmp_path / "mutation-plan.txt").write_bytes(
+        leader_bytes + leader_bytes.splitlines(keepends=True)[-1])
+    failed_leader_script = settings["script"]["value"].replace(
+        '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))',
+        '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))\r\n'
+        '(setq leaf-ops (list (car leaf-ops) '
+        '(subst "NoSuchStyle" "Standard" (cadr leaf-ops))))',
+    ).replace(
+        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))',
+        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg") '
+        '(command "_.SAVEAS" "" "leader-rolled-back.dwg"))',
+    )
+    _console(tmp_path, leader_host, "leader-failure.scr",
+             failed_leader_script, apply_failed=True)
+    leader_rollback = tmp_path / "leader-rolled-back.dwg"
+    assert leader_rollback.exists() and leader_rollback.stat().st_size > 0
+    _console(tmp_path, leader_rollback, "leader-rollback-inspect.scr", inspect)
+    restored = intake_parse.parse(families, "canary")
+    assert not restored.get("parseErrors"), restored.get("parseErrors")
+    assert not restored.get("mleaders")
+    assert not restored.get("mleaders_unsupported")
+    for field in ("polylines", "circles", "arcs", "inserts", "dimensions"):
+        assert restored.get(field, []) == blocked.get(field, [])
+
+
+    # 3s-4: refuse a frozen target after a successful add, then inspect the
+    # UNDO result and the restored sysvars in a fresh console process.
+    frozen_line = leader_bytes.splitlines(keepends=True)[-1].replace(
+        b"ADDMLEADER|0|", b"ADDMLEADER|LEAF-FROZEN|")
+    (tmp_path / "mutation-plan.txt").write_bytes(leader_bytes + frozen_line)
+    frozen_script = settings["script"]["value"].replace(
+        '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))',
+        '(command "_.-LAYER" "_N" "LEAF-FROZEN" "")\r\n'
+        '(command "_.-LAYER" "_F" "LEAF-FROZEN" "")\r\n'
+        '(setq leaf-proof (open "frozen-before.txt" "w"))\r\n'
+        '(write-line (getvar "CLAYER") leaf-proof)\r\n'
+        '(write-line (getvar "CMLEADERSTYLE") leaf-proof)\r\n'
+        '(write-line (getvar "MLEADERLAYER") leaf-proof)\r\n'
+        '(close leaf-proof)\r\n'
+        '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))',
+    ).replace(
+        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))',
+        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg") '
+        '(command "_.SAVEAS" "" "frozen-rolled-back.dwg"))',
+    )
+    _console(tmp_path, leader_host, "frozen-leader.scr", frozen_script, apply_failed=True)
+    frozen_inspect = inspect.replace(
+        quit_line,
+        '(setq leaf-proof (open "frozen-after.txt" "w"))\r\n'
+        '(write-line (getvar "CLAYER") leaf-proof)\r\n'
+        '(write-line (getvar "CMLEADERSTYLE") leaf-proof)\r\n'
+        '(write-line (getvar "MLEADERLAYER") leaf-proof)\r\n'
+        '(close leaf-proof)\r\n' + quit_line,
+    )
+    _console(tmp_path, tmp_path / "frozen-rolled-back.dwg", "frozen-inspect.scr", frozen_inspect)
+    assert (tmp_path / "frozen-after.txt").read_text() == (tmp_path / "frozen-before.txt").read_text()
+    frozen = intake_parse.parse(families, "canary")
+    assert not frozen.get("parseErrors"), frozen.get("parseErrors")
+    assert not frozen.get("mleaders")
+    assert not frozen.get("mleaders_unsupported")
+    for field in ("polylines", "circles", "arcs", "inserts", "dimensions",
+                  "blocks", "groups", "properties", "mlstyles"):
+        assert frozen.get(field) == blocked.get(field)
+
 
 # --- (3) skip-visibility row: a "skipped local engine suite is no proof" guard
 

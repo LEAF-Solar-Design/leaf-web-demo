@@ -1146,106 +1146,110 @@ def save_plan_version(drawing_id: str,
                                   retryable=False, status_code=422)
         plan_digest = mutation_plan.plan_sha256(plan_bytes)
 
-    if leg == "dwg-plan-live" or canonical.get("block_defs"):
-        # The client computes the plan from the same entity list it wrote the
-        # DXF from, so a mismatch is a client defect. Never commit a plan the
-        # bytes beside it contradict.
-        expected_base = copy.deepcopy(base_intake)
-        expected_base["dwg"] = drawing_id
-        uploaded = copy.deepcopy(intake)
-        uploaded["dwg"] = drawing_id
+        if (leg == "dwg-plan-live" or canonical.get("block_defs")
+                or any(e.get("kind") == "MLEADER" for e in canonical.get("added", []))
+                or "MULTILEADER" in canonical.get("removed_kinds", {}).values()
+                or "mleaders_unsupported" in base_intake
+                or "mleaders_unsupported_handles" in base_intake):
+            # The client computes the plan from the same entity list it wrote the
+            # DXF from, so a mismatch is a client defect. Never commit a plan the
+            # bytes beside it contradict.
+            expected_base = copy.deepcopy(base_intake)
+            expected_base["dwg"] = drawing_id
+            uploaded = copy.deepcopy(intake)
+            uploaded["dwg"] = drawing_id
 
-        def text_entities(entities):
-            entries = Counter()
-            for entity in entities:
-                point = entity.get("pt") or []
-                xy = [point[index] if index < len(point) else None for index in range(2)]
-                xy = tuple(
-                    write_loop._extractor_round(value, 3)
-                    if isinstance(value, (int, float)) and not isinstance(value, bool) else value
-                    for value in xy)
-                entries[(entity.get("kind"),
-                         str(entity["handle"]) if entity.get("handle") is not None else None,
-                         str(entity["layer"]) if entity.get("layer") is not None else None,
-                         *xy, entity.get("text"))] += 1
-            return entries
+            def text_entities(entities):
+                entries = Counter()
+                for entity in entities:
+                    point = entity.get("pt") or []
+                    xy = [point[index] if index < len(point) else None for index in range(2)]
+                    xy = tuple(
+                        write_loop._extractor_round(value, 3)
+                        if isinstance(value, (int, float)) and not isinstance(value, bool) else value
+                        for value in xy)
+                    entries[(entity.get("kind"),
+                             str(entity["handle"]) if entity.get("handle") is not None else None,
+                             str(entity["layer"]) if entity.get("layer") is not None else None,
+                             *xy, entity.get("text"))] += 1
+                return entries
 
-        try:
-            if "texts" in base_intake and (
-                text_entities(uploaded.get("texts") or [])
-                != text_entities(base_intake.get("texts") or [])
-            ):
-                raise ValueError("text entities differ from the head")
-            quantized_upload = write_loop.quantize_intake_like_extractor(uploaded)
-            quantized_base = write_loop.quantize_intake_like_extractor(expected_base)
-            named_handles = {str(handle) for handle in canonical.get("removed", [])}
-            for operation in ("set_layer", "set_circle", "set_arc", "set_points", "transforms"):
-                named_handles.update(str(entry["handle"]) for entry in canonical.get(operation, []))
-            for field in ("circles", "arcs"):
-                head_by_handle = {
-                    str(entity["handle"]): entity
-                    for entity in quantized_base.get(field) or []
-                    if isinstance(entity, dict) and entity.get("handle") is not None
+            try:
+                if "texts" in base_intake and (
+                    text_entities(uploaded.get("texts") or [])
+                    != text_entities(base_intake.get("texts") or [])
+                ):
+                    raise ValueError("text entities differ from the head")
+                quantized_upload = write_loop.quantize_intake_like_extractor(uploaded)
+                quantized_base = write_loop.quantize_intake_like_extractor(expected_base)
+                named_handles = {str(handle) for handle in canonical.get("removed", [])}
+                for operation in ("set_layer", "set_circle", "set_arc", "set_points", "transforms"):
+                    named_handles.update(str(entry["handle"]) for entry in canonical.get(operation, []))
+                for field in ("circles", "arcs"):
+                    head_by_handle = {
+                        str(entity["handle"]): entity
+                        for entity in quantized_base.get(field) or []
+                        if isinstance(entity, dict) and entity.get("handle") is not None
+                    }
+                    for entity in quantized_upload.get(field) or []:
+                        normal = entity.get("nrm", [0.0, 0.0, 1.0])
+                        if len(normal) != 3 or any(
+                            not abs(value - expected) <= 1e-9
+                            for value, expected in zip(normal, [0.0, 0.0, 1.0])
+                        ):
+                            raise ValueError("an entity lies outside the drawing plane")
+                        handle = str(entity.get("handle"))
+                        reference = head_by_handle.get(handle)
+                        if handle not in named_handles and reference is not None:
+                            differs = any(entity.get(key) != reference.get(key) for key in ("layer", "c", "r"))
+                            if field == "arcs":
+                                differs = differs or any(
+                                    write_loop._extractor_round(write_loop._plan_number(entity[key]), 3)
+                                    != write_loop._extractor_round(write_loop._plan_number(reference[key]), 3)
+                                    for key in ("start_deg", "end_deg")
+                                )
+                            if differs:
+                                raise ValueError("an unchanged entity differs from the head")
+                # W4g-7b-3s: an entity the plan does not name in set_color /
+                # set_linetype / set_lineweight must keep its 62 / 6 / 370 groups
+                # exactly (absent == ByLayer). w4g-7b-03s-c R1: the head's EP
+                # block is dense (every field defaulted) while dxf_intake's
+                # reading of the uploaded DXF is sparse (no entry at all when
+                # none of 62/6/370/420 are present), so both sides go through
+                # the same ByLayer/absent default (case-insensitive linetype,
+                # rgb as a 3-tuple or None) before comparing, or an untouched
+                # entity 422s the instant the EP block ships.
+                styled_handles = {str(entry["handle"]) for op in mutation_plan.V3_SET_OPS
+                                  for entry in canonical.get(op, [])}
+                base_properties = quantized_base.get("properties") or {}
+                upload_properties = quantized_upload.get("properties") or {}
+                base_entity_handles = {
+                    str(entity["handle"]) for field in ("polylines", "circles", "arcs", "inserts")
+                    for entity in (quantized_base.get(field) or [])
+                    if isinstance(entity, dict) and entity.get("handle")
                 }
-                for entity in quantized_upload.get(field) or []:
-                    normal = entity.get("nrm", [0.0, 0.0, 1.0])
-                    if len(normal) != 3 or any(
-                        not abs(value - expected) <= 1e-9
-                        for value, expected in zip(normal, [0.0, 0.0, 1.0])
-                    ):
-                        raise ValueError("an entity lies outside the drawing plane")
-                    handle = str(entity.get("handle"))
-                    reference = head_by_handle.get(handle)
-                    if handle not in named_handles and reference is not None:
-                        differs = any(entity.get(key) != reference.get(key) for key in ("layer", "c", "r"))
-                        if field == "arcs":
-                            differs = differs or any(
-                                write_loop._extractor_round(write_loop._plan_number(entity[key]), 3)
-                                != write_loop._extractor_round(write_loop._plan_number(reference[key]), 3)
-                                for key in ("start_deg", "end_deg")
-                            )
-                        if differs:
-                            raise ValueError("an unchanged entity differs from the head")
-            # W4g-7b-3s: an entity the plan does not name in set_color /
-            # set_linetype / set_lineweight must keep its 62 / 6 / 370 groups
-            # exactly (absent == ByLayer). w4g-7b-03s-c R1: the head's EP
-            # block is dense (every field defaulted) while dxf_intake's
-            # reading of the uploaded DXF is sparse (no entry at all when
-            # none of 62/6/370/420 are present), so both sides go through
-            # the same ByLayer/absent default (case-insensitive linetype,
-            # rgb as a 3-tuple or None) before comparing, or an untouched
-            # entity 422s the instant the EP block ships.
-            styled_handles = {str(entry["handle"]) for op in mutation_plan.V3_SET_OPS
-                              for entry in canonical.get(op, [])}
-            base_properties = quantized_base.get("properties") or {}
-            upload_properties = quantized_upload.get("properties") or {}
-            base_entity_handles = {
-                str(entity["handle"]) for field in ("polylines", "circles", "arcs", "inserts")
-                for entity in (quantized_base.get(field) or [])
-                if isinstance(entity, dict) and entity.get("handle")
-            }
-            for handle in base_entity_handles:
-                if handle in styled_handles or handle in named_handles:
-                    continue
-                if not write_loop.unchanged_property_effect_ok(
-                        base_properties.get(handle), upload_properties.get(handle)):
-                    raise ValueError(f"unchanged entity {handle!r} properties differ from the head")
-            if canonical.get("added_groups") or canonical.get("block_defs"):
-                # Uploaded DXF retains the submitted entity handles. Native
-                # output instead supplies CA records from the apply process.
-                quantized_upload["created"] = [
-                    {"ordinal": i, "handle": entity["handle"]}
-                    for i, entity in enumerate(canonical.get("added", []))]
-            properties_note = write_loop.verify_live_mutation_effects(
-                expected_base, quantized_upload, canonical)
-            if properties_note and (styled_handles or any(
-                    field in entity for entity in canonical.get("added", [])
-                    for field in mutation_plan.STYLE_FIELDS)):
-                raise ValueError(properties_note)
-        except ValueError as exc:
-            return error_response(ErrorCode.BAD_PARAMS,
-                                  f"the uploaded DXF does not carry the plan's result: {exc}",
-                                  retryable=False, status_code=422)
+                for handle in base_entity_handles:
+                    if handle in styled_handles or handle in named_handles:
+                        continue
+                    if not write_loop.unchanged_property_effect_ok(
+                            base_properties.get(handle), upload_properties.get(handle)):
+                        raise ValueError(f"unchanged entity {handle!r} properties differ from the head")
+                if canonical.get("added_groups") or canonical.get("block_defs"):
+                    # Uploaded DXF retains the submitted entity handles. Native
+                    # output instead supplies CA records from the apply process.
+                    quantized_upload["created"] = [
+                        {"ordinal": i, "handle": entity["handle"]}
+                        for i, entity in enumerate(canonical.get("added", []))]
+                properties_note = write_loop.verify_live_mutation_effects(
+                    expected_base, quantized_upload, canonical)
+                if properties_note and (styled_handles or any(
+                        field in entity for entity in canonical.get("added", [])
+                        for field in mutation_plan.STYLE_FIELDS)):
+                    raise ValueError(properties_note)
+            except ValueError as exc:
+                return error_response(ErrorCode.BAD_PARAMS,
+                                      f"the uploaded DXF does not carry the plan's result: {exc}",
+                                      retryable=False, status_code=422)
 
     if leg == "dwg-plan-live":
         co = store.load_manifest(backend, str(tenant_id), drawing_id).get("checkout")
