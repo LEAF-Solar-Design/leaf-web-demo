@@ -213,6 +213,10 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                     "layer": layn, "c": [round(v, 3) for v in w], "r": round(float(r), 3),
                     "start_deg": round(float(a1), 6), "end_deg": round(float(a2), 6),
                     "nrm": [round(v, 6) for v in n], "handle": hnd})
+            elif tag == "MEC":
+                if rest != "1":
+                    raise ValueError("malformed member evidence coverage")
+                out["memberEvidenceCovered"] = True
             elif tag == "GRC":
                 if rest != "1":
                     raise ValueError("malformed group coverage")
@@ -344,6 +348,36 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                     block["children"].append(child)
                 else:
                     block["complete"] = False
+            elif tag == "BKEPC":
+                if rest != "1":
+                    raise ValueError("malformed block property coverage")
+            elif tag == "BKEP":
+                name, ordinal, aci, linetype, weight, colour = rest.split("|")
+                block = out["blocks"][_block_name(name)]
+                ordinal = int(ordinal)
+                if not 0 <= ordinal < len(block["children"]):
+                    raise ValueError("BKEP ordinal must name an existing child")
+                rgb = None if colour == "~" else [int(v) for v in colour.split(",")]
+                if rgb is not None and (len(rgb) != 3 or any(not 0 <= v <= 255 for v in rgb)):
+                    raise ValueError("BKEP true colour must be RGB")
+                block["children"][ordinal]["properties"] = {
+                    "aci": int(aci), "linetype": _block_name(linetype),
+                    "lineweight": int(weight), "rgb": rgb}
+            elif tag == "BM":
+                fields = rest.split("|")
+                handle, kind, normal, bulged, dimension = fields[:5]
+                evidence = {}
+                normal = _block_point(normal, 6)
+                if any(abs(a - b) > 1e-6 for a, b in zip(normal, (0, 0, 1))):
+                    evidence["normal"] = normal
+                bulges = [float(v) for v in bulged.split(";")]
+                if any(bulges):
+                    evidence["bulges"] = bulges
+                if dimension == "1":
+                    evidence["dimensionRef"] = True
+                if len(fields) == 6 and fields[5] == "1":
+                    evidence["width"] = True
+                state.setdefault("member_evidence", {})[handle] = evidence
             elif tag == "BKCAP":
                 out["blocksCapped"] = int(rest)
             elif tag == "GEO":
@@ -357,7 +391,16 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
     if not any(line.strip() == "GRC|1" for line in lines):
         out.pop("groups", None)
         out.pop("created", None)
+    if not any(line.strip() == "BKEPC|1" for line in lines):
+        for block in out.get("blocks", {}).values():
+            for child in block["children"]:
+                child.pop("properties", None)
     close()
+    if out.get("memberEvidenceCovered"):
+        evidence = state.get("member_evidence", {})
+        for field in ("polylines", "circles", "arcs"):
+            for entity in out.get(field, []):
+                entity.update(evidence.get(entity["handle"], {}))
     for block in out.get("blocks", {}).values():
         if block["count"] <= 60 and len(block["children"]) < block["count"]:
             block["complete"] = False

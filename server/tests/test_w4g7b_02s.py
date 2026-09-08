@@ -177,7 +177,8 @@ def test_mock_insert_uses_intake_shape_and_dxf_maps_its_temporary_handle():
     assert parsed["inserts"] == [_insert("100")]
     assert parsed["blocks"] == base["blocks"]
     result["inserts"][0]["handle"] = "A1"
-    assert dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf(result)) == result
+    # DXF reads the whole file, so member evidence coverage is unconditional.
+    assert dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf(result)) == {**result, "memberEvidenceCovered": True}
 
 
 def test_verifier_binds_added_insert_to_actual_handle(monkeypatch):

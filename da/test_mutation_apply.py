@@ -377,6 +377,30 @@ def test_cli_failure_redacts_exception(monkeypatch, capsys):
 
 
 def test_v3_activity_adds_insert_and_preserves_v2_apply_script():
+    block_script = subject.activity_spec(3)["settings"]["script"]["value"]
+    assert "ADDBLOCKDEF" not in subject.activity_spec(2)["settings"]["script"]["value"]
+    assert "leaf-pending-definitions" in block_script
+    assert '(cons 0 "BLOCK")' in block_script and '(cons 0 "ENDBLK")' in block_script
+    assert "leaf-bd-clean" in block_script and "leaf-bd-dimension-p" in block_script
+    member_check = next(line for line in block_script.splitlines()
+                        if line.startswith("(defun leaf-bd-member-data "))
+    assert '(member (car pair) (list 40 41 42 43))' in member_check
+    assert '(not (leaf-bd-group-p ed))' in member_check
+    preflight = next(line for line in block_script.splitlines()
+                     if line.startswith("(defun leaf-addblockdef-op "))
+    assert '(/= (cdr (assoc 0 ed)) "POLYLINE")' in preflight
+    assert '(member kind (list "LINE" "LWPOLYLINE" "CIRCLE" "ARC"))' in member_check
+    parser = next(line for line in block_script.splitlines()
+                  if line.startswith("(defun leaf-blockdef-op "))
+    assert '(= (cdr (assoc 0 (entget (handent (substr h 3))))) "POLYLINE")' in parser
+    assert block_script.index('(command "_.UNDO" "_Mark")') < block_script.index('(foreach leaf-op leaf-ops ')
+    assert '(command "_.UNDO" "_Begin")' not in block_script
+    assert '(command "_.UNDO" "_End")' not in block_script
+    assert '(command "_.UNDO" "_Back") (princ "LEAF-MUTATION-APPLY-FAILED")' in block_script
+    assert '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))' in block_script
+    assert 'leaf-bd-create-child' in block_script
+    assert '"BKEP|"' in subject.activity_spec(3)["settings"]["inspectScript"]["value"]
+    assert '"MEC|1"' in subject.activity_spec(3)["settings"]["inspectScript"]["value"]
     from lisp import MUTATION_INSPECT_BLOCKS, build_scr
 
     v2_settings = {

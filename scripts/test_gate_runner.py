@@ -297,6 +297,7 @@ def test_w4g7b_contract_v3_server_suites_are_registered_with_measured_floors():
     floors = {
         "server-w4g7b-00s": 32,
         "server-w4g7c-01s": 19,
+        "server-w4g7c-02s": 25,
         "server-w4g7b-01s": 49,
         "server-w4g7b-02s": 64,
         "server-w4g7b-03s": 40,

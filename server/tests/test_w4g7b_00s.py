@@ -121,6 +121,12 @@ def test_explicit_contract_forces_only_the_header():
     assert mutation_plan.emit_plan(canonical, base_sha256=BASE_SHA, contract=2) == default
     forced = mutation_plan.emit_plan(canonical, base_sha256=BASE_SHA, contract=3)
     assert forced == default.replace(b"LEAF_MUTATION_PLAN|2\n", b"LEAF_MUTATION_PLAN|3\n", 1)
+    definition = {"block_defs": [{"name": "B", "base": [0, 0, 0], "members": ["10"], "insert": 0}]}
+    assert mutation_plan.uses_v3(definition)
+    assert not mutation_plan.uses_v3({"block_defs": []})
+    assert not mutation_plan.uses_v3({"block_defs": "B"})
+    with pytest.raises(ValueError, match="contract v3"):
+        mutation_plan.emit_plan(definition, base_sha256=BASE_SHA, contract=2)
 
 
 def test_insert_v3_add_is_declared_but_refused():

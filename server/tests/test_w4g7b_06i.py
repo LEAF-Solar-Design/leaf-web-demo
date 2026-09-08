@@ -131,16 +131,28 @@ def test_mock_full_v3_case_set_round_trips_through_dxf():
 
 # --- (1) bounded accoreconsole canary ----------------------------------------
 
-def _console(work, source, script_name, script):
+def _console(work, source, script_name, script, *, apply_failed=False):
     path = work / script_name
     path.write_text(script, encoding="utf-8", newline="")
     result = subprocess.run(
         [str(ACCORECONSOLE), "/i", str(source), "/s", str(path)],
         cwd=work, capture_output=True, text=True, timeout=120, check=False,
     )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "LEAF-MUTATION-PLAN-INVALID" not in result.stdout, result.stdout
-    assert "LEAF-MUTATION-APPLY-FAILED" not in result.stdout, result.stdout
+    # Redirected accoreconsole output is UTF-16LE read through text mode.
+    text = result.stdout.replace("\x00", "")
+    stderr = result.stderr.replace("\x00", "")
+    assert result.returncode == 0, text + stderr
+    # Keep the QUIT boundary before removing echoes; only printed markers count.
+    before_quit = text.split('(command "_.QUIT"', 1)[0]
+    text = "\n".join(line for line in text.splitlines()
+                     if not line.strip().startswith("Command:"))
+    before_quit = "\n".join(line for line in before_quit.splitlines()
+                            if not line.strip().startswith("Command:"))
+    assert "LEAF-MUTATION-PLAN-INVALID" not in text, text
+    assert ("LEAF-MUTATION-APPLY-FAILED" in text) == apply_failed, text
+    # QUIT can emit a harmless cancellation after SAVEAS; UNDO must not.
+    assert "; error: Function cancelled" not in before_quit + stderr, text + stderr
+    return text
 
 
 @pytest.mark.skipif(not ACCORECONSOLE.exists(), reason=_CANARY_SKIP_REASON)
@@ -160,6 +172,7 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
         '(entmake (list (cons 0 "BLOCK") (cons 2 "Fixture") (cons 70 0) (cons 10 (list 0.0 0.0 0.0))))',
         '(entmake (list (cons 0 "LINE") (cons 8 "0") (cons 10 (list 0.0 0.0 0.0)) (cons 11 (list 1.0 0.0 0.0))))',
         '(entmake (list (cons 0 "ENDBLK")))',
+        '(entmake (list (cons 0 "LWPOLYLINE") (cons 100 "AcDbEntity") (cons 8 "0") (cons 100 "AcDbPolyline") (cons 90 2) (cons 70 0) (cons 10 (list 12.0 23.0)) (cons 10 (list 17.0 23.0))))',
         "",
     ])
     base_stub = {
@@ -272,6 +285,65 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
     assert not ungrouped.get("parseErrors"), ungrouped.get("parseErrors")
     assert not any(g["name"] == "CANARYRACK" for g in ungrouped.get("groups", []))
     write_loop.verify_live_mutation_effects(grouped, ungrouped, ungroup_plan)
+
+    # Atomic REPLACE copies a LINE, CIRCLE and open two-vertex LWPOLYLINE.
+    polyline, = [p for p in ungrouped["polylines"]
+                 if p["pts"] == [[12.0, 23.0, 0.0], [17.0, 23.0, 0.0]]]
+    members = [new_lines[0]["handle"], circle_handle, polyline["handle"]]
+    block_plan = validate_mutations(ungrouped, {
+        "block_defs": [{"name": "B", "base": [10, 20, 0], "members": members, "insert": 0}],
+        "removed": members,
+        "added": [{"handle": "block-insert", "kind": "INSERT", "name": "B", "layer": "0",
+                   "pt": [10, 20, 0], "rot": 0, "scale": [1, 1, 1]}],
+    })
+    shutil.copyfile(output, group_host)
+    output.unlink()
+    (tmp_path / "mutation-plan.txt").write_bytes(emit_plan(
+        block_plan, base_sha256=hashlib.sha256(group_host.read_bytes()).hexdigest()))
+    # Refuse the second child only after BLOCK and the first child exist.
+    # Exercise the production nil handler and its UNDO mark, then save the
+    # rolled-back state so the next console process can inspect the proof.
+    failure_script = settings["script"]["value"].replace(
+        '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))',
+        '(setq leaf-canary-children 0)\r\n'
+        '(defun leaf-bd-create-child (ed) (setq leaf-canary-children (1+ leaf-canary-children)) '
+        '(if (= leaf-canary-children 2) (progn '
+        '(if begun (progn (setq leaf-proof (open "partial-block.txt" "w")) '
+        '(write-line "second child refused after BLOCK began" leaf-proof) (close leaf-proof))) nil) (entmake ed)))\r\n'
+        '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))',
+    ).replace(
+        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))',
+        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg") '
+        '(command "_.SAVEAS" "" "rolled-back.dwg"))',
+    )
+    _console(tmp_path, group_host, "block-failure.scr", failure_script, apply_failed=True)
+    assert (tmp_path / "partial-block.txt").read_text().strip() == "second child refused after BLOCK began"
+    rolled_back = tmp_path / "rolled-back.dwg"
+    assert rolled_back.exists() and rolled_back.stat().st_size > 0
+    rollback_inspect = inspect.replace(
+        quit_line, '(if (not (tblsearch "BLOCK" "B")) (progn '
+        '(setq leaf-proof (open "rollback-table.txt" "w")) '
+        '(write-line "no B table entry" leaf-proof) (close leaf-proof)))\r\n' + quit_line)
+    _console(tmp_path, rolled_back, "rollback-inspect.scr", rollback_inspect)
+    assert (tmp_path / "rollback-table.txt").read_text().strip() == "no B table entry"
+    rollback = intake_parse.parse(families, "canary")
+    assert not rollback.get("parseErrors"), rollback.get("parseErrors")
+    assert "B" not in rollback.get("blocks", {})
+    assert set(members) <= {
+        e["handle"] for field in ("polylines", "circles") for e in rollback.get(field, [])
+    }
+    for field in ("polylines", "circles", "arcs", "inserts", "dimensions"):
+        assert rollback.get(field, []) == ungrouped.get(field, [])
+    assert rollback.get("properties") == ungrouped.get("properties")
+    _console(tmp_path, group_host, "block.scr", settings["script"]["value"])
+    _console(tmp_path, output, "block-inspect.scr", inspect)
+    blocked = intake_parse.parse(families, "canary")
+    assert not blocked.get("parseErrors"), blocked.get("parseErrors")
+    assert [c["kind"] for c in blocked["blocks"]["B"]["children"]] == ["LINE", "CIRCLE", "LWPOLYLINE"]
+    assert len([e for e in blocked["inserts"] if e["name"] == "B"]) == 1
+    assert not set(members) & {e["handle"] for field in ("polylines", "circles") for e in blocked.get(field, [])}
+    assert all("properties" in c for c in blocked["blocks"]["B"]["children"])
+    write_loop.verify_live_mutation_effects(ungrouped, blocked, block_plan)
 
 
 # --- (3) skip-visibility row: a "skipped local engine suite is no proof" guard

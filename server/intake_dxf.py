@@ -590,6 +590,9 @@ def _validated_blocks(blocks, note_layer):
                 continue
             layer = _layer_name(child.get("layer"), where)
             row = {"kind": kind, "layer": layer}
+            if "properties" in child:
+                _entity_property_groups({"child": child["properties"]}, "child", where)
+                row["properties"] = child["properties"]
             if kind in ("LINE", "LWPOLYLINE"):
                 points = child.get("pts")
                 if not isinstance(points, list) or not 2 <= len(points) <= MAX_POINTS_PER_ENTITY:
@@ -634,6 +637,7 @@ def _point_groups(point, code=10):
 def _emit_block_child(child, handle, owner):
     kind = child["kind"]
     out = ["0", kind, "5", handle, "330", owner, "100", "AcDbEntity", "8", child["layer"]]
+    out += _entity_property_groups({handle: child.get("properties", {})}, handle, "block child")
     if kind == "LINE":
         out += ["100", "AcDbLine", *_point_groups(child["pts"][0]), *_point_groups(child["pts"][1], 11)]
     elif kind == "LWPOLYLINE":

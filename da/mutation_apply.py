@@ -43,7 +43,7 @@ _TIMEOUT = 60
 
 
 def build_apply_scr_v3() -> str:
-    """Accept INSERT operations through the separate v3 interpreter."""
+    """Accept INSERT and atomic block-definition REPLACE through contract v3."""
     return _build_apply_scr_v3()
 
 

@@ -1077,7 +1077,7 @@ def save_plan_version(drawing_id: str,
     names_an_op = any(
         isinstance(mutations.get(field), list) and mutations.get(field)
         for field in ("added", "removed", "transforms", "set_layer", "set_points",
-                      "set_circle", "set_arc", "added_groups", "removed_groups", *mutation_plan.V3_SET_OPS)
+                      "set_circle", "set_arc", "added_groups", "removed_groups", "block_defs", *mutation_plan.V3_SET_OPS)
     )
 
     received = _receive_edited_dxf(file, source_digest)
@@ -1119,7 +1119,8 @@ def save_plan_version(drawing_id: str,
         leg, note = "dwg-plan", "mock writer: the plan applied to the head's intake"
 
     plan_digest: Optional[str] = None
-    if leg in ("dwg-plan", "dwg-plan-live"):
+    canonical = {}
+    if leg in ("dwg-plan", "dwg-plan-live") or mutations.get("block_defs"):
         try:
             _base_v, base_intake = write_loop.read_intake(
                 backend, str(tenant_id), drawing_id, int(head_v))
@@ -1145,7 +1146,7 @@ def save_plan_version(drawing_id: str,
                                   retryable=False, status_code=422)
         plan_digest = mutation_plan.plan_sha256(plan_bytes)
 
-    if leg == "dwg-plan-live":
+    if leg == "dwg-plan-live" or canonical.get("block_defs"):
         # The client computes the plan from the same entity list it wrote the
         # DXF from, so a mismatch is a client defect. Never commit a plan the
         # bytes beside it contradict.
@@ -1229,7 +1230,7 @@ def save_plan_version(drawing_id: str,
                 if not write_loop.unchanged_property_effect_ok(
                         base_properties.get(handle), upload_properties.get(handle)):
                     raise ValueError(f"unchanged entity {handle!r} properties differ from the head")
-            if canonical.get("added_groups"):
+            if canonical.get("added_groups") or canonical.get("block_defs"):
                 # Uploaded DXF retains the submitted entity handles. Native
                 # output instead supplies CA records from the apply process.
                 quantized_upload["created"] = [
@@ -1246,6 +1247,7 @@ def save_plan_version(drawing_id: str,
                                   f"the uploaded DXF does not carry the plan's result: {exc}",
                                   retryable=False, status_code=422)
 
+    if leg == "dwg-plan-live":
         co = store.load_manifest(backend, str(tenant_id), drawing_id).get("checkout")
         if store.checkout_active(co):
             remaining = (datetime.fromisoformat(co["expires"])

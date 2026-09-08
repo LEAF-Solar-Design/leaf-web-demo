@@ -128,15 +128,38 @@ _GROUP_LISP_LINES = (
 )
 
 
+_BLOCK_DEPENDENCY_LISP_LINES = (
+    '(defun leaf-bd-dimension-p (ed / todo seen pair e data kind found steps) (setq todo nil seen nil found nil steps 0) (foreach pair ed (if (and (member (car pair) (list 330 340 350 360)) (= (type (cdr pair)) (quote ENAME))) (setq todo (cons (cdr pair) todo)))) (while (and todo (not found) (< steps 256)) (setq e (car todo) todo (cdr todo) steps (1+ steps)) (if (not (member e seen)) (progn (setq seen (cons e seen) data (entget e) kind (cdr (assoc 0 data))) (if (= kind "DIMENSION") (setq found T)) (if (member kind (list "DIMASSOC" "DICTIONARY" "XRECORD")) (foreach pair data (if (and (member (car pair) (list 330 331 340 350 360)) (= (type (cdr pair)) (quote ENAME))) (setq todo (cons (cdr pair) todo)))))))) (or found todo))',
+)
+
+_BLOCK_DEFINITION_LISP_LINES = (
+    '(setq leaf-pending-definitions nil)',
+    '(defun leaf-bd-name-p (name / ok c) (setq ok (and (> (strlen name) 0) (<= (strlen name) 255) (/= (substr name 1 1) "*"))) (foreach c (vl-string->list name) (if (or (< c 32) (> c 126) (= c 124)) (setq ok nil))) ok)',
+    '(defun leaf-bd-group-p (ed / pair data found) (foreach pair ed (if (and (= (car pair) 330) (= (type (cdr pair)) (quote ENAME))) (progn (setq data (entget (cdr pair))) (if (= (cdr (assoc 0 data)) "GROUP") (setq found T))))) found)',
+    '(defun leaf-bd-member-data (h / e ed kind ok pair) (if (and (leaf-handle-p h) (setq e (handent h)) (setq ed (entget e))) (progn (setq kind (cdr (assoc 0 ed)) ok (and (member kind (list "LINE" "LWPOLYLINE" "CIRCLE" "ARC")) (= (cdr (assoc 410 ed)) "Model") (or (null (assoc 210 ed)) (equal (cdr (assoc 210 ed)) (list 0.0 0.0 1.0) 0.000001)) (not (equal (cdr (assoc 62 ed)) 0)) (/= (strcase (cond ((cdr (assoc 6 ed))) (T "BYLAYER"))) "BYBLOCK") (not (equal (cdr (assoc 370 ed)) -2)) (not (leaf-bd-dimension-p ed)) (not (leaf-bd-group-p ed)))) (if (= kind "LWPOLYLINE") (foreach pair ed (if (and (member (car pair) (list 40 41 42 43)) (/= (cdr pair) 0.0)) (setq ok nil)))) (if ok ed))))',
+    '(defun leaf-blockdef-op (v / name base raw members h ok) (if (and (= (length v) 4) (setq name (nth 1 v)) (leaf-bd-name-p name) (not (tblsearch "BLOCK" name)) (not (assoc (strcase name) leaf-pending-definitions)) (setq base (leaf-point3 (nth 2 v)))) (progn (setq raw (leaf-split (nth 3 v) ";") ok (and (>= (length raw) 1) (<= (length raw) 60))) (foreach h raw (if (and (= (substr h 1 2) "H:") (or (leaf-bd-member-data (substr h 3)) (and (leaf-handle-p (substr h 3)) (handent (substr h 3)) (= (cdr (assoc 0 (entget (handent (substr h 3))))) "POLYLINE"))) (not (member (strcase (substr h 3)) members))) (setq members (append members (list (strcase (substr h 3))))) (setq ok nil))) (if ok (progn (setq leaf-pending-definitions (cons (list (strcase name) base members) leaf-pending-definitions)) (list "ADDBLOCKDEF" name base members))))))',
+    '(defun leaf-bd-clean (ed / out pair depth) (setq depth 0) (foreach pair ed (cond ((= (car pair) 102) (if (= (cdr pair) "}") (setq depth (max 0 (1- depth))) (setq depth (1+ depth)))) ((and (= depth 0) (not (member (car pair) (list -1 5 330 360 350 340 67 410)))) (setq out (cons pair out))))) (reverse out))',
+    '(defun leaf-bd-create-child (ed) (entmake ed))',
+    # Residual: straight classic POLYLINE passes frozen intake validation but fails apply preflight, so VERTEX/SEQEND are never copied header-only.
+    '(defun leaf-addblockdef-op (op / name base members children ed h ok begun ended) (setq name (nth 1 op) base (nth 2 op) members (nth 3 op) ok (not (tblsearch "BLOCK" name))) (foreach h members (setq ed (leaf-bd-member-data h)) (if (and ed (/= (cdr (assoc 0 ed)) "POLYLINE")) (setq children (append children (list (leaf-bd-clean ed)))) (setq ok nil))) (if ok (progn (setq begun (entmake (list (cons 0 "BLOCK") (cons 2 name) (cons 70 0) (cons 10 base) (cons 8 "0"))) ok begun) (foreach ed children (if ok (setq ok (leaf-bd-create-child ed)))) (if begun (progn (setq ended (entmake (list (cons 0 "ENDBLK") (cons 8 "0")))) (setq ok (and ok ended)))) (if ok (setq leaf-pending-definitions (vl-remove (assoc (strcase name) leaf-pending-definitions) leaf-pending-definitions))))) ok)',
+)
+
+
 def build_apply_scr_v3() -> str:
     """Extend the frozen interpreter only for the separate v3 Activity."""
     lines = []
     for line in _LISP_LINES:
         if line.startswith("(defun leaf-parse-line "):
-            lines.extend(_INSERT_LISP_LINES)
+            lines.extend(_BLOCK_DEPENDENCY_LISP_LINES)
+            lines.extend(_BLOCK_DEFINITION_LISP_LINES)
+            lines.extend(s.replace('(tblsearch "BLOCK" name)',
+                         '(or (tblsearch "BLOCK" name) (assoc (strcase name) leaf-pending-definitions))')
+                         if s.startswith("(defun leaf-addinsert-op ") else s
+                         for s in _INSERT_LISP_LINES)
             lines.extend(_DIMENSION_LISP_LINES)
             lines.extend(_PROPERTY_LISP_LINES)
             lines.extend(_GROUP_LISP_LINES)
+            line = line.replace('(cond ', '(cond ((= (car v) "ADDBLOCKDEF") (leaf-blockdef-op v)) ', 1)
             line = line.replace('(cond ', '(cond ((member (car v) (list "ADDGROUP" "REMOVEGROUP")) (leaf-group-op v)) ', 1)
             line = line.replace('(cond ', '(cond ((member (car v) (list "SETCOLOR" "SETLINETYPE" "SETLINEWEIGHT")) (leaf-property-op v)) ', 1)
             line = line.replace(
@@ -155,6 +178,7 @@ def build_apply_scr_v3() -> str:
             # Capture entmakex results only while applying adds, never while
             # parsing the plan (A: targets do not exist during that pass).
             line = line.replace('(defun leaf-apply (op)', '(defun leaf-apply-one (op)', 1)
+            line = line.replace('(cond ', '(cond ((= (car op) "ADDBLOCKDEF") (leaf-addblockdef-op op)) ', 1)
             line = line.replace('(cond ', '(cond ((= (car op) "ADDGROUP") (leaf-addgroup-op op)) ((= (car op) "REMOVEGROUP") (leaf-removegroup-op op)) ', 1)
             line = line.replace('(cond ', '(cond ((= (car op) "SETCOLOR") (leaf-apply-setcolor op)) ((= (car op) "SETLINETYPE") (leaf-apply-setlinetype op)) ((= (car op) "SETLINEWEIGHT") (leaf-apply-setlineweight op)) ', 1)
             line = line.replace(
@@ -164,7 +188,16 @@ def build_apply_scr_v3() -> str:
             )
             lines.append(line)
             line = '(defun leaf-apply (op / result) (setq result (leaf-apply-one op)) (if (and result (member (car op) (list "ADD" "ADDOPEN" "ADDLINE" "ADDCIRCLE" "ADDARC" "ADDINSERT" "ADDDIMLINEAR" "ADDDIMALIGNED"))) (if (leaf-record-created result) (setq leaf-created (append leaf-created (list result))) (setq result nil))) result)'
+        elif line == '(command "_.UNDO" "_Begin")':
+            line = '(progn (command "_.UNDO" "_Mark") (setq leaf-apply-ok T))'
+        elif line.startswith('(foreach leaf-op leaf-ops '):
+            line = '(foreach leaf-op leaf-ops (if (and leaf-apply-ok (not (leaf-apply leaf-op))) (progn (setq leaf-apply-ok nil) (command "_.UNDO" "_Back") (princ "LEAF-MUTATION-APPLY-FAILED"))))'
+        elif line == '(command "_.UNDO" "_End")':
+            continue
+        elif line == '(command "_.SAVEAS" "" "output.dwg")':
+            line = '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))'
         elif line.startswith("(defun leaf-read-plan "):
+            line = line.replace('(setq fh (open path "r")', '(setq leaf-pending-definitions nil) (setq fh (open path "r")', 1)
             line = line.replace(
                 '(list "LEAF_MUTATION_PLAN|1" "LEAF_MUTATION_PLAN|2")',
                 '(list "LEAF_MUTATION_PLAN|1" "LEAF_MUTATION_PLAN|2" "LEAF_MUTATION_PLAN|3")',
