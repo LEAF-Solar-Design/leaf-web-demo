@@ -188,7 +188,7 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
         const q = v.unproject(event.clientX + SNAP_PX, event.clientY)
         // W4g-6d: FILLET / CHAMFER on a polyline may name the selection
         // itself (its own corner), so the selection stays pickable then;
-        // every other edge pick still skips it.
+        // every other edge pick ignores that hit after resolving it.
         const selfCorner = (m.op === 'fillet' || m.op === 'chamfer')
           && String((entitiesRef.current || []).find((e) => e && e.id === selectedRef.current)?.type || '').toUpperCase() === 'LWPOLYLINE'
         edgeCtx = { entities: entitiesRef.current, tol: q ? Math.abs(q.x - p.x) : 0, exceptId: selfCorner ? null : selectedRef.current }

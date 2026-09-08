@@ -99,6 +99,7 @@ export function projectionEntities(message) {
 
 const INITIAL_SESSION = Object.freeze({
   documentId: '',
+  documentLoadIdentity: null,
   entities: NO_ENTITIES,
   entityCount: 0,
   blockBasePatched: false,
@@ -716,10 +717,11 @@ export const EDIT_KIND_EXEMPT_OPS = Object.freeze(new Set(['setColor', 'setLinet
 
 export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer, x1, y1, x2, y2, keep, cx, cy, deg, factor, rows, cols, rowGap, colGap, count, totalDeg, edge, ex, ey, x, y, r, d1, d2, aci, linetype, exact, lineweight, members, groupName } = {}, linetypeCatalogue = [], entities = null) {
   if (op === 'group' || op === 'ungroup') {
-    const name = admissibleBlockName(groupName)
-    if (!name) return { refusal: 'Group name must be 1 to 255 printable ASCII characters, without | or a leading *.' }
+    const typedName = String(groupName ?? '').trim()
+    if (!typedName || typedName.length > 255 || /[^\x20-\x7e]|[<>/\\":;?*|,=`]/.test(typedName)) return { refusal: 'group_name_invalid: use 1 to 255 printable ASCII characters without dictionary-key punctuation.' }
+    const name = typedName.toUpperCase()
     const existing = (entities?.groups || []).find((g) => g.name.toLowerCase() === name.toLowerCase())
-    if (op === 'ungroup') return existing ? { payload: { name: existing.name } } : { refusal: 'group_not_found: enter an existing group name.' }
+    if (op === 'ungroup') return existing ? { payload: { name: existing.name.toUpperCase() } } : { refusal: 'group_not_found: enter an existing group name.' }
     if (existing) return { refusal: 'group_name_exists: that group name is already used.' }
     const ids = [...new Set((Array.isArray(members) ? members : [entityId, ...String(members || '').split(/\s+/)]).filter(Boolean).map(String))]
     if (ids.length < 2) return { refusal: 'group_needs_two_members: select at least two distinct objects.' }
@@ -1018,9 +1020,10 @@ export default function useEngineSession({
       if (generation !== generationRef.current) return
       if (message.type === 'ready') return
       if (message.type === 'documentLoaded') {
+        const documentLoadIdentity = {}
         if (message.refusal) {
           clearHistory()
-          setSession((current) => Object.freeze({ ...INITIAL_SESSION, documentId: message.documentId,
+          setSession((current) => Object.freeze({ ...INITIAL_SESSION, documentId: message.documentId, documentLoadIdentity,
             clipboard: current.clipboard, errorKind: SESSION_ERROR.REFUSED, status: `Load refused: ${message.refusal}` }))
           return
         }
@@ -1037,6 +1040,7 @@ export default function useEngineSession({
           const edited = reload.bytes !== history.original
           setSession((current) => Object.freeze({
             ...current,
+            documentLoadIdentity,
             entities,
             entityCount: message.entityCount ?? 0,
             blockBasePatched: message.blockBasePatched ?? false,
@@ -1058,6 +1062,7 @@ export default function useEngineSession({
         history.redo = []
         history.current = history.original
         patch({
+          documentLoadIdentity,
           entities,
           entityCount: message.entityCount ?? 0,
           blockBasePatched: message.blockBasePatched ?? false,

@@ -11,6 +11,22 @@ const DEFAULT_PROPS = { aci: 256, trueColor: null, linetype: 'ByLayer', lineweig
 describe('named group mutation plans', () => {
   const snapshot = (entities, groups = []) => Object.assign(entities, { groups })
   const rack = (memberIds) => ({ id: '240', name: 'RACK', memberIds })
+  it('refuses a new group left with one member after a same-plan circle is deleted', () => {
+    const before = snapshot([line(10)])
+    const created = snapshot([line(10), circle(11)], [rack(['10', '11'])])
+    expect(diffPlan(before, created).mutations.added_groups).toEqual([{ name: 'RACK', members: ['A', { add: 0 }] }])
+    const result = diffPlan(before, snapshot([line(10)], [rack(['10'])]))
+    expect(result.mutations).toBeNull()
+    expect(result.reason).toMatch(/group RACK.*two members/)
+  })
+  it('uppercases added and removed group names and compares names without case', () => {
+    const entities = [line(10), line(11)]
+    const lower = { ...rack(['10', '11']), name: 'rack' }
+    expect(diffPlan(snapshot(entities.slice()), snapshot(entities.slice(), [lower])).mutations.added_groups)
+      .toEqual([{ name: 'RACK', members: ['A', 'B'] }])
+    expect(diffPlan(snapshot(entities.slice(), [lower]), snapshot(entities.slice())).mutations.removed_groups).toEqual(['RACK'])
+    expect(diffPlan(snapshot(entities.slice(), [lower]), snapshot(entities.slice(), [rack(['10', '11'])])).mutations).toEqual({})
+  })
   it('binds a same-plan circle to canonical ordinal zero before a lower-handle line', () => {
     const before = snapshot([line(10)])
     const now = snapshot([line(10), line(11), circle(32, { vertices: [[4, 2, 0]], radius: 1 })], [rack(['10', '32'])])

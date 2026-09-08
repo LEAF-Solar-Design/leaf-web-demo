@@ -887,10 +887,12 @@ fn projected_groups(document: &CadDocument) -> Vec<serde_json::Value> {
 impl ParsedDxf {
     fn create_group_core(&mut self, name: &str, member_indices: &[usize]) -> Result<String, Refusal> {
         let name = name.trim();
-        if name.is_empty() || name.len() > 255 || name.starts_with('*')
-            || name.bytes().any(|b| !(0x20..=0x7e).contains(&b) || b == b'|') {
+        if name.is_empty() || name.len() > 255
+            || name.bytes().any(|b| !(0x20..=0x7e).contains(&b) || b"<>/\\\":;?*|,=`".contains(&b)) {
             return refuse("group_name_invalid");
         }
+        let uppercase_name = name.to_ascii_uppercase();
+        let name = uppercase_name.as_str();
         if self.group_names.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)) {
             return refuse("group_name_exists");
         }
@@ -1002,6 +1004,10 @@ impl ParsedDxf {
         if !is_editable {
             return refuse("entity_kind_not_editable");
         }
+        self.remove_entity_and_repair_groups(handle)
+    }
+
+    fn remove_entity_and_repair_groups(&mut self, handle: Handle) -> Result<(), Refusal> {
         self.inner
             .remove_entity(handle)
             .map(|_| ())
@@ -1424,6 +1430,7 @@ impl ParsedDxf {
         let layer = entity.common().layer.clone();
         let mut copy = entity.clone();
         copy.as_entity_mut().set_handle(Handle::NULL);
+        copy.common_mut().reactors.clear();
         Ok((copy, layer))
     }
 
@@ -1543,11 +1550,10 @@ impl ParsedDxf {
         let mut handles = Vec::with_capacity(parts.len());
         for mut part in parts {
             part.as_entity_mut().set_handle(Handle::NULL);
+            part.common_mut().reactors.clear();
             handles.push(self.add_created(part, &layer)?);
         }
-        self.inner
-            .remove_entity(handle)
-            .ok_or_else(|| "entity_handle_not_found".to_string())?;
+        self.remove_entity_and_repair_groups(handle)?;
         Ok(handles)
     }
 
@@ -2425,7 +2431,7 @@ mod created_entity_roundtrip {
         let line = doc.create_line_core(0.0, 0.0, 3.0, 0.0, "0").unwrap();
         let circle = doc.create_circle_core(4.0, 2.0, 1.0, "0").unwrap();
         let geometry = projected_entities(&doc.inner);
-        let handle = doc.create_group_core(" RACK ", &[0, 1, 0]).unwrap();
+        let handle = doc.create_group_core(" rack ", &[0, 1, 0]).unwrap();
         assert_eq!(projected_entities(&doc.inner), geometry);
         let expected = serde_json::json!({"id": handle, "name": "RACK", "memberIds": [line, circle], "unnamed": false, "selectable": true, "description": ""});
         assert_eq!(projected_groups(&doc.inner), vec![expected.clone()]);
@@ -2444,6 +2450,50 @@ mod created_entity_roundtrip {
         assert!(projected_groups(&doc.inner).is_empty());
         assert!(group_names(&doc.inner).is_empty());
         assert_eq!(code(doc.ungroup_core("RACK")), "group_not_found");
+    }
+
+    #[test]
+    fn group_dictionary_syntax_refuses_before_mutation() {
+        let mut doc = empty_doc();
+        doc.create_line_core(0.0, 0.0, 3.0, 0.0, "0").unwrap();
+        doc.create_circle_core(4.0, 2.0, 1.0, "0").unwrap();
+        let before = DxfWriter::new(&doc.inner).write_to_vec().unwrap();
+        for name in ["A/B", "RA*CK", "A<B", "A>B", "A\\B", "A\"B", "A:B", "A;B", "A?B", "A|B", "A,B", "A=B", "A`B"] {
+            assert_eq!(code(doc.create_group_core(name, &[0, 1])), "group_name_invalid", "{name}");
+            assert_eq!(DxfWriter::new(&doc.inner).write_to_vec().unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn group_explode_repairs_members_and_parts_have_no_reactors_after_reparse() {
+        let mut doc = empty_doc();
+        let poly = doc.create_polyline_core(&[0.0, 0.0, 4.0, 0.0, 4.0, 3.0], false, "0", &[]).unwrap();
+        let line = doc.create_line_core(10.0, 0.0, 13.0, 0.0, "0").unwrap();
+        doc.create_group_core("rack", &[0, 1]).unwrap();
+        let parts = doc.explode_entity_core(0).unwrap();
+        let back = rewrite(&doc);
+        assert_eq!(projected_groups(&back.inner)[0]["memberIds"], serde_json::json!([line]));
+        assert!(back.inner.entities().all(|entity| handle_id(entity.common().handle.value()) != poly));
+        for part in parts {
+            let entity = back.inner.entities().find(|entity| handle_id(entity.common().handle.value()) == part).unwrap();
+            assert!(entity.common().reactors.is_empty());
+        }
+    }
+
+    #[test]
+    fn group_copy_has_no_reactor_and_does_not_join_members_after_reparse() {
+        let mut doc = empty_doc();
+        doc.create_line_core(0.0, 0.0, 3.0, 0.0, "0").unwrap();
+        doc.create_circle_core(4.0, 2.0, 1.0, "0").unwrap();
+        doc.create_group_core("rack", &[0, 1]).unwrap();
+        let groups = projected_groups(&doc.inner);
+        let copy = doc.copy_entity_core(0, 2.0, 3.0).unwrap();
+        let back = rewrite(&doc);
+        assert_eq!(projected_groups(&back.inner), groups);
+        let copied = back.inner.entities().find(|entity| handle_id(entity.common().handle.value()) == copy).unwrap();
+        assert!(copied.common().reactors.is_empty());
+        assert!(back.inner.entities().filter(|entity| handle_id(entity.common().handle.value()) != copy)
+            .all(|entity| entity.common().reactors.len() == 1));
     }
 
     const EPS: f64 = 1e-9;

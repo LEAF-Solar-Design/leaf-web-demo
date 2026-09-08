@@ -103,13 +103,12 @@ export function applyPick(state, x, y, inputs = {}, context = null) {
   const next = { ...state, picked, step: state.step + 1 }
   if (step.kind === 'edge') {
     // W4g-6: the click names an ENTITY (the cutting edge, the boundary,
-    // the second object): the nearest one within the aperture other than
-    // the selection, from `context` { entities, tol, exceptId }. A click
+    // the second object): resolve the nearest one within the aperture, then
+    // exclude the selection from `context` { entities, tol, exceptId }. A click
     // that lands on nothing writes nothing and the step waits.
     const members = step.repeat ? String(inputs.members || '').split(/\s+/).filter(Boolean) : []
-    const candidates = step.repeat ? context?.entities?.filter((entity) => !members.includes(String(entity.id))) : context?.entities
-    const hit = context ? nearestEntity(candidates, x, y, context.tol, context.exceptId) : null
-    if (!hit) return { state, writes: [] }
+    const hit = context ? nearestEntity(context.entities, x, y, context.tol) : null
+    if (!hit || String(hit.id) === String(context.exceptId) || members.includes(String(hit.id))) return { state, writes: [] }
     if (step.repeat) return { state, writes: [['members', [...members, String(hit.id)].join(' ')]] }
     const writes = [[step.keys[0], String(hit.id)], [step.keys[1], round3(x)], [step.keys[2], round3(y)]]
     return { state: next, writes }

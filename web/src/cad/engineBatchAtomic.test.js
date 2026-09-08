@@ -192,9 +192,11 @@ const SCRIPT = [
   'const groupLoaded = await handleMessage({ type: "loadDocument", documentId: "groups.dxf", bytes }, engine)',
   'const groupMembers = [groupLoaded.entities[0].id, groupLoaded.entities[2].id]',
   'out.groupBefore = groupLoaded.entities',
-  'out.groupCreated = await handleMessage({ type: "applyEdit", op: "createGroup", payload: { name: "RACK", members: groupMembers } }, engine)',
+  'out.groupInvalid = []',
+  'for (const name of ["A/B", "RA*CK"]) out.groupInvalid.push(await handleMessage({ type: "applyEdit", op: "createGroup", payload: { name, members: groupMembers } }, engine))',
+  'out.groupCreated = await handleMessage({ type: "applyEdit", op: "createGroup", payload: { name: "rack", members: groupMembers } }, engine)',
   'out.groupMoved = await handleMessage({ type: "applyEdit", op: "move", payload: { entityId: groupMembers[0], dx: 2, dy: -1 } }, engine)',
-  'out.groupRemoved = await handleMessage({ type: "applyEdit", op: "ungroup", payload: { name: "RACK" } }, engine)',
+  'out.groupRemoved = await handleMessage({ type: "applyEdit", op: "ungroup", payload: { name: "rack" } }, engine)',
   'process.stdout.write(JSON.stringify({ ids, out }))',
 ].join('\n')
 
@@ -206,6 +208,10 @@ describe.skipIf(!GLUE)('the worker batch on the real engine', () => {
       maxBuffer: 64 * 1024 * 1024,
     })
     const { ids, out } = JSON.parse(raw)
+    for (const result of out.groupInvalid) {
+      expect(result.ok).toBe(false)
+      expect(result.reason).toContain('group_name_invalid')
+    }
     expect(out.groupCreated.ok).toBe(true)
     expect(out.groupCreated.entities).toEqual(out.groupBefore)
     expect(out.groupCreated.groups).toMatchObject([{ name: 'RACK', memberIds: [out.groupBefore[0].id, out.groupBefore[2].id] }])

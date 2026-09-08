@@ -8,6 +8,7 @@ import DraftingRibbon from '../site/DraftingRibbon.jsx'
 
 import CadEditSurface from './CadEditSurface.jsx'
 import CanvasPointPicker from './CanvasPointPicker.jsx'
+import { applyPick, startPicking } from './pointPicking.js'
 import EngineRibbonClusters from './EngineRibbonClusters.jsx'
 import EngineSessionProvider, { useEngineSessionContext } from './EngineSessionProvider.jsx'
 
@@ -96,6 +97,25 @@ beforeEach(() => {
   vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => { cb(); return 0 })
 })
 afterEach(() => { cleanup(); ground?.remove(); vi.restoreAllMocks() })
+
+it('resolves the nearest edge before excluding picked or selected members', async () => {
+  const lines = [0, 0.2].map((y, i) => ({ id: String(10 + i), type: 'LINE', editable: true, vertices: [[0, y, 0], [3, y, 0]] }))
+  const state = startPicking('group')
+  const edge = { entities: lines, tol: 1, exceptId: null }
+  expect(applyPick(state, 1.5, 0, {}, edge).writes).toEqual([['members', '10']])
+  expect(applyPick(state, 1.5, 0, { members: '10' }, edge).writes).toEqual([])
+  expect(applyPick(state, 1.5, 0, {}, { ...edge, exceptId: '10' }).writes).toEqual([])
+  mount()
+  await openAndLoad(lines)
+  act(() => context.setArmed({ group: 'groups', op: 'group' }))
+  click(15, 0)
+  expect(context.inputs.members).toBe('10')
+  click(15, 0)
+  expect(context.inputs.members).toBe('10')
+  act(() => { context.setInput('members', ''); context.session.actions.select('10') })
+  click(15, 0)
+  expect(context.inputs.members).toBe('')
+})
 
 describe('CanvasPointPicker (W4f slice A1)', () => {
   it('nothing is picked, stamped or ghosted without an armed point command', async () => {

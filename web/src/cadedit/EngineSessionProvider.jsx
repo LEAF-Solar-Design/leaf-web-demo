@@ -153,14 +153,18 @@ export default function EngineSessionProvider({
   })
 
   const [{ inputs, armed }, setEditState] = useState({ inputs: DEFAULT_EDIT_INPUTS, armed: null })
-  const [highlightedIds, setHighlightedIds] = useState(new Set())
+  const [highlightedGroup, setHighlightedGroup] = useState(null)
+  const currentGroup = highlightedGroup?.document === session.documentLoadIdentity && session.engineParsed
+    ? (session.entities.groups || []).find((item) => item.name.toUpperCase() === highlightedGroup.name)
+    : null
+  const highlightedIds = useMemo(() => new Set(currentGroup?.memberIds || []), [currentGroup])
   const selectGroup = useCallback((name) => {
-    const group = (session.entities.groups || []).find((item) => item.name === name)
+    const group = (session.entities.groups || []).find((item) => item.name.toUpperCase() === String(name).trim().toUpperCase())
     const ids = group?.memberIds || []
-    setHighlightedIds(new Set(ids))
+    setHighlightedGroup(group ? { name: group.name.toUpperCase(), document: session.documentLoadIdentity } : null)
     if (ids.length) session.actions.select(ids[0])
-  }, [session.entities, session.actions])
-  useEffect(() => { setHighlightedIds(new Set()) }, [session.documentId, session.engineParsed])
+  }, [session.entities, session.actions, session.documentLoadIdentity])
+  useEffect(() => { if (!currentGroup) setHighlightedGroup(null) }, [currentGroup])
   const setInput = useCallback((key, value) => {
     if (!INPUT_KEYS.has(key) || typeof value !== 'string') return
     const limit = INPUT_LIMITS[key] ?? MAX_INPUT_CHARS

@@ -412,7 +412,7 @@ export function diffPlan(committed, current) {
     }
     added.push(addedRecord(handle, now))
   }
-  const groupMap = (projection) => new Map((projection?.groups || projection?.entities?.groups || []).map((group) => [group.name, group]))
+  const groupMap = (projection) => new Map((projection?.groups || projection?.entities?.groups || []).map((group) => [group.name.toUpperCase(), group]))
   const oldGroups = groupMap(committed)
   const newGroups = groupMap(current)
   const addedGroups = []
@@ -428,7 +428,11 @@ export function diffPlan(committed, current) {
     if (!now || !sameMembers(memberHandles(group).filter((id) => after.has(id)), livingMembers(now))) removedGroups.push(name)
   }
   for (const [name, group] of newGroups) {
-    if (!oldGroups.has(name) || removedGroups.includes(name)) addedGroups.push({ name, members: livingMembers(group) })
+    if (!oldGroups.has(name) || removedGroups.includes(name)) {
+      const members = livingMembers(group)
+      if (members.length < 2) refuse(`group ${name} needs at least two members to save; ungroup it or add a member`)
+      else addedGroups.push({ name, members })
+    }
   }
   added.sort(byHandle)
   if ((addedGroups.length || removedGroups.length) && added.length > 1) {

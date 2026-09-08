@@ -634,7 +634,7 @@ const Viewer = forwardRef(function Viewer(
     // Rebuild scene geometry from a new intake version (e.g. a backend push of
     // the next drawing version). Disposes old geometry and clears the pending
     // ghost as part of the rebuild.
-    applyVersion: (newIntake) => setInternalIntake(newIntake),
+    applyVersion: (newIntake) => { setGroupHighlight([]); setInternalIntake(newIntake) },
     // Project a world point to a client pixel (production twin of the DEV
     // mount.__cadviewer hook — used by the site layer and automated checks).
     project: (wx, wy) => {
