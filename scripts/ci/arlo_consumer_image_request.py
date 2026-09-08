@@ -17,18 +17,21 @@ def request(producer_revision):
     return {
         "projectName": "leaf-studio-native-release",
         "sourceVersion": producer_revision,
+        "gitCloneDepthOverride": 0,
         "buildspecOverride": ".codebuild/arlo-consumer-image.yml",
         "timeoutInMinutesOverride": 20,
         "secondarySourcesOverride": [
             {"sourceIdentifier": identifier, "type": "GITHUB",
              "location": f"https://github.com/LEAF-Solar-Design/{repo}.git",
-             "gitCloneDepth": 1,
+             "gitCloneDepth": 0,
              "auth": {"type": "CODECONNECTIONS", "resource": CONNECTION}}
             for identifier, (repo, _) in PINS.items()
+            if identifier == "arlo_recipe"
         ],
         "secondarySourcesVersionOverride": [
             {"sourceIdentifier": identifier, "sourceVersion": revision}
             for identifier, (_, revision) in PINS.items()
+            if identifier == "arlo_recipe"
         ],
     }
 

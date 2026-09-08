@@ -10,6 +10,10 @@ phases:
     commands:
       - |
         set -euo pipefail
+        export CODEBUILD_SRC_DIR_arlo_source="$(mktemp -d /tmp/arlo-engine.XXXXXX)"
+        export CODEBUILD_SRC_DIR_platform_pinned="$(mktemp -d /tmp/arlo-platform.XXXXXX)"
+        git -C "$CODEBUILD_SRC_DIR_arlo_recipe" worktree add --detach "$CODEBUILD_SRC_DIR_arlo_source" f35a10e864879ac0723fe595fc8dbbe02e09b5f2
+        git -C "$CODEBUILD_SRC_DIR" worktree add --detach "$CODEBUILD_SRC_DIR_platform_pinned" f20fa02b8c2038eb69a6607792b5cbd5287053c4
         python3 - <<'PY'
         import json, os, pathlib, subprocess
         from scripts.ci.arlo_consumer_image_request import PINS
