@@ -313,6 +313,13 @@ def _invoke(runtime, tenant, org, project, campaign, release, params, context, t
                 context, broker_job_id=context.get('broker_job_id', str(job['job_id']))))
             return _invoke(runtime, tenant, org, project, campaign, release, params,
                            retry_context, tool, retries[1:], *retries[0])
+        envelope = job.get('result')
+        error = envelope.get('error') if isinstance(envelope, dict) else None
+        if (job['status'] == 'failed' and isinstance(envelope, dict) and envelope.get('ok') is False
+                and isinstance(error, dict) and error.get('error_code') == 'quota_exceeded'):
+            raise AcquisitionError('failed', 'Workspace execution budget exhausted',
+                                   'Wait for the existing workspace limit reset or ask the workspace administrator '
+                                   'to review the limit, then explicitly resume this release')
         raise AcquisitionError('failed', 'The published transform job failed',
                                'Inspect the existing job before one bounded correction')
     envelope = job.get('result')

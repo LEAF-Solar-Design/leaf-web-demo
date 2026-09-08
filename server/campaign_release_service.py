@@ -23,6 +23,12 @@ _STORE = None
 _LIFECYCLE = None
 
 
+class _AcquisitionFailure(delivery.DeliveryConflict):
+    def __init__(self, reason, recommended_action):
+        super().__init__(reason)
+        self.recommended_action = recommended_action
+
+
 class _WorkerActor:
     """Internal enrollment handle, never constructed from tenant API fields."""
     def __init__(self, enrollment_id, subject):
@@ -411,7 +417,8 @@ def _transform_implementation(tenant, project_id, campaign_id, release,
     if result['state'] in ('working', 'awaiting_user'):
         return None, _pending(tenant, project_id, campaign_id, release, result)
     if result['state'] != 'complete':
-        raise delivery.DeliveryConflict(result.get('reason', 'The authored transform failed'))
+        raise _AcquisitionFailure(result.get('reason', 'The authored transform failed'),
+                                  result.get('recommended_action', 'Inspect the existing job before one bounded correction'))
     raw = result['output_bytes']
     expected = web_release.static.expected_output(source)
     observed = delivery.validate_bytes('records.csv', raw)
@@ -543,6 +550,9 @@ def _advance(tenant, project_id, campaign_id, release_id,
         except web_release.producer.WebToolVerificationError as exc:
             status = 'failed'
             observations = {'reason': str(exc), 'recommended_action': 'Correct the converter and retry browser verification'}
+        except _AcquisitionFailure as exc:
+            status = 'unavailable'
+            observations = {'reason': str(exc), 'recommended_action': exc.recommended_action}
         except (ValueError, UnicodeError, web_release.producer.WebToolUnavailable) as exc:
             status = 'unavailable'
             observations = {'reason': str(exc), 'recommended_action': 'Restore a valid source artifact or provide the missing delivery adapter'}

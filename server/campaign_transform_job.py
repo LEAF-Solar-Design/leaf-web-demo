@@ -208,6 +208,7 @@ def run(job_id, completion_provenance, tool, params, heartbeat, cancelled, deadl
 
     started = time.monotonic()
     phase = "context_validation"
+    broker_execution = False
 
     def guard(budget=0):
         nonlocal phase
@@ -236,10 +237,12 @@ def run(job_id, completion_provenance, tool, params, heartbeat, cancelled, deadl
         phase = "execution"
         if os.environ.get('BROKER_URL', '').strip():
             import broker_client
+            broker_execution = True
             env = broker_client.run_via_broker(
                 context["tenant_id"], published, params, '', False,
                 timeout_s=timeout, ledger_event_key='completion:' + str(uuid.UUID(context.get("broker_job_id", job_id))),
                 job_id=job_id, file_only=True, test_source=source)
+            broker_execution = False
         else:
             env = tool_loader.run_tool_dynamic(published, {}, params, False,
                                                tenant_id=context["tenant_id"], test_source=source)
@@ -275,6 +278,8 @@ def run(job_id, completion_provenance, tool, params, heartbeat, cancelled, deadl
             logger.warning("phase=%s exception_class=%s broker %s", phase, exception_class, reason)
         else:
             logger.warning("phase=%s exception_class=%s", phase, exception_class)
-        return err_envelope(ErrorCode.INTERNAL, "Completion transform could not be verified (" + diagnostic + ")", False,
+        code = (ErrorCode.QUOTA_EXCEEDED if broker_execution and phase == "execution"
+                and type(status) is int and status == 402 else ErrorCode.INTERNAL)
+        return err_envelope(code, "Completion transform could not be verified (" + diagnostic + ")", False,
                             tool=tool.get("name"), version=tool.get("version"),
                             timing_ms=int((time.monotonic() - started) * 1000))

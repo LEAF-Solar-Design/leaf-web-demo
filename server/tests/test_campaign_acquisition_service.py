@@ -406,6 +406,57 @@ def test_failed_base_requires_explicit_retry(setup, invocation_history):
     assert setup.calls['submit'] == 1
 
 
+def test_quota_failure_retains_existing_job_and_fixed_recovery(setup, invocation_history):
+    from envelopes import ErrorCode, err_envelope
+    job = invocation_history.records[invocation_history.original]
+    job['result'] = err_envelope(ErrorCode.QUOTA_EXCEEDED, 'PRIVATE_BROKER_BODY', False)
+    job['result']['error']['next_action'] = 'PRIVATE_UNTRUSTED_ACTION'
+    original = deepcopy(job)
+    decisions = deepcopy(setup.store.decisions)
+    release = deepcopy(setup.release)
+    for _ in range(2):
+        result = advance(setup)
+        assert result['state'] == 'failed'
+        assert result['reason'] == 'Workspace execution budget exhausted'
+        assert result['recommended_action'] == (
+            'Wait for the existing workspace limit reset or ask the workspace administrator '
+            'to review the limit, then explicitly resume this release')
+        assert 'PRIVATE_' not in json.dumps(result)
+    assert setup.calls['submit'] == 1
+    assert setup.calls['stage'] == setup.calls['publish'] == 0
+    assert job == original and setup.release == release
+    assert setup.store.decisions == decisions
+    authorize_invocation_retry(setup)
+    retried = advance(setup)
+    assert retried['state'] == 'complete' and retried['job_id'] != job['job_id']
+    assert setup.calls['submit'] == 2
+    assert job == original
+
+
+@pytest.mark.parametrize('envelope', [None, {'ok': False, 'error': {'error_code': 'INTERNAL'}},
+    {'ok': 0, 'error': {'error_code': 'quota_exceeded'}},
+    {'ok': True, 'error': {'error_code': 'quota_exceeded'}},
+    {'ok': False, 'error': 'quota_exceeded'}])
+def test_other_failed_envelopes_keep_ordinary_action(setup, invocation_history, envelope):
+    invocation_history.records[invocation_history.original]['result'] = envelope
+    result = advance(setup)
+    assert result['state'] == 'failed'
+    assert result['reason'] == 'The published transform job failed'
+    assert result['recommended_action'] == 'Inspect the existing job before one bounded correction'
+    assert setup.calls['submit'] == 1
+
+
+@pytest.mark.parametrize('field', ['completion_provenance', 'params'])
+def test_quota_envelope_cannot_bypass_job_readback(setup, invocation_history, field):
+    job = invocation_history.records[invocation_history.original]
+    job['result'] = {'ok': False, 'error': {'error_code': 'quota_exceeded'}}
+    job[field] = {}
+    result = advance(setup)
+    assert result['state'] == 'failed'
+    assert result['reason'] != 'Workspace execution budget exhausted'
+    assert setup.calls['submit'] == 1
+
+
 @pytest.mark.parametrize('lost_response', [False, True])
 def test_retry_keeps_contract_publication_input_and_original_invocation(setup, invocation_history, lost_response):
     history = invocation_history

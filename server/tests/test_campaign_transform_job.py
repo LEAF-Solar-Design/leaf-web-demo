@@ -254,7 +254,7 @@ def test_remote_failures_never_accept_output(published, monkeypatch, caplog, fai
     assert len(calls) == (0 if failure in ('source', 'input') else 1)
 
 
-@pytest.mark.parametrize('status', [100, 199, 302, 399, 400, 401, 403, 422, 500, 503, 599])
+@pytest.mark.parametrize('status', [100, 199, 302, 399, 400, 401, 402, 403, 422, 500, 503, 599])
 def test_http_rejection_exposes_only_status(published, monkeypatch, caplog, status):
     import broker_client
     secret = 'PRIVATE_RESPONSE_SOURCE_URL_HEADER'
@@ -280,6 +280,8 @@ def test_http_rejection_exposes_only_status(published, monkeypatch, caplog, stat
         env = invoke(published)
     assert env['ok'] is False and env.get('result') is None
     assert 'Completion transform could not be verified (execution; broker HTTP%d)' % status in json.dumps(env)
+    assert env['error']['error_code'] == ('quota_exceeded' if status == 402 else 'INTERNAL')
+    assert env['error']['retryable'] is False
     assert secret not in json.dumps(env) + caplog.text
     records = [r for r in caplog.records if r.name == adapter.__name__]
     assert [r.getMessage() for r in records] == ['phase=execution exception_class=Exception broker HTTP%d' % status]
@@ -287,7 +289,8 @@ def test_http_rejection_exposes_only_status(published, monkeypatch, caplog, stat
     assert calls == [True]
 
 
-@pytest.mark.parametrize('status', [None, True, False, 99, 200, 299, 600, '403', 403.0, {'status': 403}])
+@pytest.mark.parametrize('status', [None, True, False, 99, 200, 299, 600, '403', 403.0, {'status': 403},
+                                   '402', 402.0, {'status': 402}])
 def test_malformed_trusted_status_is_not_reported(published, monkeypatch, caplog, status):
     import broker_client
     monkeypatch.setenv('BROKER_URL', 'http://broker.test')
@@ -303,6 +306,7 @@ def test_malformed_trusted_status_is_not_reported(published, monkeypatch, caplog
     assert env['ok'] is False and env.get('result') is None
     assert 'Completion transform could not be verified (execution)' in json.dumps(env)
     assert 'broker HTTP' not in json.dumps(env) + caplog.text
+    assert env['error']['error_code'] == 'INTERNAL'
 
 
 @pytest.mark.parametrize('failure', ['json', 'timeout', 'connection', 'preparation'])
@@ -376,13 +380,14 @@ def test_custom_exception_cannot_supply_reason_diagnostic(published, monkeypatch
 
 
 @pytest.mark.parametrize('trusted_parent', [False, True])
-def test_custom_exception_cannot_supply_http_diagnostic(published, monkeypatch, caplog, trusted_parent):
+@pytest.mark.parametrize('status', [402, 403])
+def test_custom_exception_cannot_supply_http_diagnostic(published, monkeypatch, caplog, trusted_parent, status):
     import broker_client
     monkeypatch.setenv('BROKER_URL', 'http://broker.test')
     secret = 'PRIVATE_EXCEPTION_NAME_AND_TEXT'
     parent = broker_client.BrokerHTTPRejected if trusted_parent else RuntimeError
-    error = type(secret, (parent,), {'status_code': 403})(secret)
-    error.status_code = 403
+    error = type(secret, (parent,), {'status_code': status})(secret)
+    error.status_code = status
 
     def execute(*args, **kwargs):
         raise error
@@ -395,6 +400,25 @@ def test_custom_exception_cannot_supply_http_diagnostic(published, monkeypatch, 
     assert 'broker HTTP' not in json.dumps(env) + caplog.text
     label = 'Exception' if trusted_parent else 'RuntimeError'
     assert 'phase=execution exception_class=' + label in caplog.text
+    assert env['error']['error_code'] == 'INTERNAL'
+
+
+@pytest.mark.parametrize('seam', ['check_authority', 'run_tool_dynamic', 'validate_result'])
+def test_trusted_quota_rejection_outside_broker_execution_is_internal(published, monkeypatch, seam):
+    import broker_client
+
+    def rejected(*args, **kwargs):
+        raise broker_client.BrokerHTTPRejected(402)
+
+    monkeypatch.setattr(tool_loader, 'run_tool_dynamic', lambda *a, **k: {
+        'ok': True, 'result': {'csv': static.expected_output(published.params['source_json'].encode()).decode()}})
+    if seam == 'validate_result':
+        monkeypatch.setenv('BROKER_URL', 'http://broker.test')
+        monkeypatch.setattr(broker_client, 'run_via_broker', tool_loader.run_tool_dynamic)
+    monkeypatch.setattr(tool_loader if seam == 'run_tool_dynamic' else adapter, seam, rejected)
+    env = invoke(published)
+    assert env['ok'] is False and env.get('result') is None
+    assert env['error']['error_code'] == 'INTERNAL'
 
 
 def test_real_broker_auth_rejection_remains_incomplete(published, monkeypatch, caplog):
