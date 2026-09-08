@@ -556,6 +556,45 @@ describe.skipIf(!GLUE)('the worker batch on the real engine', () => {
   })
 })
 
+const MLEADER_SCRIPT = [
+  'import { createRequire } from "node:module"',
+  'import { pathToFileURL } from "node:url"',
+  'const [workerPath, gluePath, dxf] = process.argv.slice(1)',
+  'const { handleMessage } = await import(pathToFileURL(workerPath).href)',
+  'const engine = createRequire(import.meta.url)(gluePath)',
+  'const bytes = new TextEncoder().encode(dxf)',
+  'const loaded = await handleMessage({ type: "loadDocument", documentId: "leader.dxf", bytes }, engine)',
+  'const created = await handleMessage({ type: "applyEdit", op: "batch", payload: { steps: [{ op: "createMleader", payload: { x: 0, y: 0, x2: 3, y2: 4, text: "Valve", style: "Standard", layer: "0" } }] } }, engine)',
+  'const entity = created.entities.find((e) => e.type === "MLEADER")',
+  'const parsed = engine.parseDxf(created.bytes)',
+  'const roundtrip = parsed.editableEntities().find((e) => e.type === "MLEADER")',
+  'parsed.free()',
+  'const refused = []',
+  'for (const [op, payload] of [["move", { dx: 1, dy: 2 }], ["rotate", { cx: 0, cy: 0, deg: 90 }], ["explode", {}], ["setLayer", { layer: "Other" }], ["setColor", { aci: 1 }]]) {',
+  '  refused.push(await handleMessage({ type: "applyEdit", op, payload: { entityId: entity.id, ...payload } }, engine))',
+  '}',
+  'const erased = await handleMessage({ type: "applyEdit", op: "delete", payload: { entityId: entity.id } }, engine)',
+  'process.stdout.write(JSON.stringify({ loaded: { count: loaded.entityCount, mlstyles: loaded.mlstyles }, created: { ok: created.ok, createdId: created.createdId, createdIds: created.createdIds }, entity, roundtrip, refused: refused.map((r) => ({ ok: r.ok, reason: r.reason })), erased: { ok: erased.ok, count: erased.entityCount, entities: erased.entities } }))',
+].join('\n')
+
+describe.skipIf(!GLUE)('MLEADER through the rebuilt engine and worker batch', () => {
+  it('creates and reparses the bounded leader, refuses edits by kind, and erases it', { timeout: 90_000 }, () => {
+    const out = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', MLEADER_SCRIPT, WORKER_PATH, path.join(PKG_DIR, GLUE), DXF], {
+      encoding: 'utf8', timeout: 90_000, maxBuffer: 8 * 1024 * 1024,
+    }))
+    expect(out.loaded.mlstyles).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'Standard', segments: 1 })]))
+    expect(out.created.ok).toBe(true)
+    expect(out.created.createdIds).toContain(out.entity.id)
+    expect(out.created.createdId).toBe(out.entity.id)
+    expect(out.entity).toMatchObject({ type: 'MLEADER', editable: false, style: 'Standard', text: 'Valve', vertices: [[0, 0, 0], [3, 4, 0]] })
+    expect(out.roundtrip).toMatchObject({ type: 'MLEADER', style: 'Standard', text: 'Valve', vertices: [[0, 0, 0], [3, 4, 0]] })
+    for (const refusal of out.refused) expect(refusal).toEqual({ ok: false, reason: 'a mleader is placed, not edited, in this round' })
+    expect(out.erased.ok).toBe(true)
+    expect(out.erased.count).toBe(out.loaded.count)
+    expect(out.erased.entities.some((e) => e.type === 'MLEADER')).toBe(false)
+  })
+})
+
 const BLOCK_DXF = [
   '0', 'SECTION', '2', 'HEADER', '9', '$ACADVER', '1', 'AC1027', '0', 'ENDSEC',
   '0', 'SECTION', '2', 'BLOCKS',

@@ -116,7 +116,7 @@ function opaqueOf(entity) {
   if (!type || ROUND_KINDS.has(type) || LINEAR_KINDS.has(type)) return null
   const props = propsOf(entity)
   const print = JSON.stringify([type, entity.layer ?? null, entity.vertices ?? null, entity.radius ?? null, entity.startDeg ?? null,
-    entity.endDeg ?? null, entity.text ?? null, entity.height ?? null, entity.rotationDeg ?? null, entity.bulges ?? null, entity.closed === true,
+    entity.endDeg ?? null, entity.style ?? null, entity.textLocation ?? null, entity.arrow ?? null, entity.dogleg ?? null, entity.text ?? null, entity.height ?? null, entity.rotationDeg ?? null, entity.bulges ?? null, entity.closed === true,
     // W4g-4b: an ELLIPSE's axis and ratio (the row that added them caught their absence here).
     entity.majorAxis ?? null, entity.ratio ?? null, entity.name ?? null, entity.ip ?? null, entity.scale ?? null,
     entity.columns ?? 1, entity.rows ?? 1, entity.columnSpacing ?? 0, entity.rowSpacing ?? 0,
@@ -149,6 +149,24 @@ function insertOf(entity) {
   const print = JSON.stringify([name, point, rot, scale, layer,
     entity.columns ?? 1, entity.rows ?? 1, entity.columnSpacing ?? 0, entity.rowSpacing ?? 0])
   return { kind: 'INSERT', name, ip: point, rot, scale: scale.slice(), layer, print, props }
+}
+
+// MLEADER additions carry only contract operands; existing leaders stay opaque.
+function mleaderOf(entity) {
+  if (!entity || entity.type !== 'MLEADER') return null
+  const vertices = entity.vertices
+  const pts = Array.isArray(vertices) && vertices.length === 2 ? vertices.map(point3) : null
+  const text = entity.text
+  const style = entity.style
+  const valid = !(!pts || pts.some((p) => !p) || pts.some((p) => p[2] !== 0)
+    || (pts[0][0] === pts[1][0] && pts[0][1] === pts[1][1])
+    || typeof text !== 'string' || !text || text.length > 256 || text.trim() !== text
+    || [...text].some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) > 126 || '|\\%'.includes(c))
+    || typeof style !== 'string' || !style)
+  const layer = typeof entity.layer === 'string' && entity.layer ? entity.layer : '0'
+  const print = JSON.stringify([vertices, text, style, entity.textLocation ?? null, layer,
+    entity.height ?? null, entity.arrow ?? null, entity.dogleg ?? null, propsOf(entity)])
+  return { kind: 'MLEADER', layer, style, pts, text, print, valid }
 }
 
 // W4g-7b-04c: a created or removed LINEAR/ALIGNED DIMENSION is a real
@@ -197,7 +215,7 @@ function normalizedDeg(deg) {
 function indexByHandle(entities) {
   const out = new Map()
   for (const entity of Array.isArray(entities) ? entities : []) {
-    const geometry = planGeometry(entity) || insertOf(entity) || dimensionOf(entity) || opaqueOf(entity)
+    const geometry = planGeometry(entity) || insertOf(entity) || dimensionOf(entity) || mleaderOf(entity) || opaqueOf(entity)
     if (!geometry) continue
     const handle = hexHandle(entity.id ?? entity.handle ?? '')
     if (!handle) continue
@@ -232,6 +250,7 @@ function styleOf(g) {
 }
 
 function addedRecord(handle, g) {
+  if (g.kind === 'MLEADER') return { handle, kind: 'MLEADER', layer: g.layer, style: g.style, pts: g.pts, text: g.text }
   if (g.kind === 'CIRCLE') return { handle, kind: 'CIRCLE', layer: g.layer, c: g.c, r: g.r, ...styleOf(g) }
   if (g.kind === 'ARC') return { handle, kind: 'ARC', layer: g.layer, c: g.c, r: g.r, start_deg: g.start_deg, end_deg: g.end_deg, ...styleOf(g) }
   if (g.kind === 'LINE') return { handle, kind: 'LINE', layer: g.layer, pts: g.pts, ...styleOf(g) }
@@ -369,6 +388,11 @@ export function diffPlan(committed, current) {
     // W4g-7b-04c: a DIMENSION stays opaque for any in-place change, same as
     // INSERT — no verb the store exposes touches one but delete, so this is
     // a defensive refusal (a raw operation), never a silent drop.
+    if (was.kind === 'MLEADER') {
+      if (was.print === now.print) continue
+      refuse(`entity ${handle} is a MLEADER the plan cannot carry, and it changed`, 'MLEADER', 'opaque-kind')
+      continue
+    }
     if (was.kind === 'DIMENSION') {
       if (was.print === now.print) continue
       refuse(`entity ${handle} is a DIMENSION the plan cannot carry, and it changed`, 'DIMENSION', 'moved-reference')
@@ -424,6 +448,10 @@ export function diffPlan(committed, current) {
     if (before.has(handle)) continue
     if (now.kind === 'OPAQUE') {
       refuse(`entity ${handle} is a ${now.type} the plan cannot carry, and it was added`, now.type, 'opaque-kind')
+      continue
+    }
+    if (now.kind === 'MLEADER' && !now.valid) {
+      refuse(`entity ${handle} is a MLEADER the plan cannot carry, and it was added`, 'MLEADER', 'opaque-kind')
       continue
     }
     if (now.curved) {

@@ -74,6 +74,7 @@
 //! browser. The exported names and semantics are unchanged.
 
 use acadrust::entities::{Arc as ArcEntity, Circle, Dimension, DimensionAligned, DimensionLinear, Entity, EntityType, Line, LwPolyline, Text, Point, Ellipse, Insert};
+use acadrust::entities::MultiLeader;
 use acadrust::types::{Color, Handle, LineWeight, Transform, Vector2, Vector3};
 use acadrust::{CadDocument, DxfReader, DxfWriter};
 use acadrust::objects::{AssociativeData, Dictionary, Group, ObjectType};
@@ -165,6 +166,7 @@ fn kind_name(entity: &EntityType) -> &'static str {
         // W4g-7b-04c: a DIMENSION projects under its own type name regardless
         // of dimtype (LINEAR / ALIGNED / OTHER); see dimension_dimtype_of.
         EntityType::Dimension(_) => "DIMENSION",
+        EntityType::MultiLeader(_) => "MLEADER",
         _ => "OTHER",
     }
 }
@@ -191,6 +193,9 @@ fn vertices_of(entity: &EntityType) -> Vec<[f64; 3]> {
         EntityType::Text(t) => vec![[t.insertion_point.x, t.insertion_point.y, t.insertion_point.z]],
         // W4g-4b: a POINT is its location; an ELLIPSE is addressed by its centre
         // (the axis and ratio ride beside it in the projection).
+        EntityType::MultiLeader(m) => m.context.leader_roots.iter()
+            .flat_map(|root| root.lines.iter()).flat_map(|line| line.points.iter())
+            .map(|p| [p.x, p.y, p.z]).collect(),
         EntityType::Point(p) => vec![[p.location.x, p.location.y, p.location.z]],
         EntityType::Ellipse(e) => vec![[e.center.x, e.center.y, e.center.z]],
         _ => Vec::new(),
@@ -225,6 +230,7 @@ fn closed_of(entity: &EntityType) -> bool {
 fn text_of(entity: &EntityType) -> Option<String> {
     match entity {
         EntityType::Text(t) => Some(t.value.clone()),
+        EntityType::MultiLeader(m) => m.text().map(str::to_string),
         _ => None,
     }
 }
@@ -232,6 +238,7 @@ fn text_of(entity: &EntityType) -> Option<String> {
 fn height_of(entity: &EntityType) -> Option<f64> {
     match entity {
         EntityType::Text(t) => Some(t.height),
+        EntityType::MultiLeader(m) => Some(m.text_height),
         _ => None,
     }
 }
@@ -368,6 +375,7 @@ const BLOCK_CHILD_CAP: usize = 60;
 // editable_at/delete_entity_core, so delete_entity_core never sees them.
 const INSERT_NOT_EDITABLE: &str = "an INSERT is placed, not edited, in this round";
 const DIMENSION_NOT_EDITABLE: &str = "a dimension is placed, not edited, in this round";
+const MLEADER_NOT_EDITABLE: &str = "a mleader is placed, not edited, in this round";
 
 fn block_children(document: &CadDocument) -> HashSet<Handle> {
     document.block_records.iter()
@@ -464,6 +472,12 @@ fn entity_record(index: usize, entity: &EntityType, can_edit: bool) -> serde_jso
             record["endWidths"] = serde_json::json!(poly.vertices.iter().map(|v| v.end_width).collect::<Vec<_>>());
         }
     }
+    if let EntityType::MultiLeader(m) = entity {
+        let p = m.context.text_location;
+        record["textLocation"] = serde_json::json!([p.x, p.y, p.z]);
+        record["arrow"] = serde_json::json!(m.arrowhead_size);
+        record["dogleg"] = serde_json::json!(m.dogleg_length);
+    }
     if let EntityType::Insert(insert) = entity {
         record["kind"] = serde_json::json!("REFERENCE");
         record["name"] = serde_json::json!(insert.block_name);
@@ -487,6 +501,13 @@ fn projected_entities(document: &CadDocument) -> Vec<serde_json::Value> {
             let mut record = entity_record(index, e, true);
             let model_space = !document.block_records.iter()
                 .any(|block| block.handle == e.common().owner_handle && !block.is_model_space());
+            if let EntityType::MultiLeader(m) = e {
+                let style = document.objects.values().find_map(|object| match object {
+                    ObjectType::MultiLeaderStyle(style) if Some(style.handle) == m.style_handle => Some(style.name.as_str()),
+                    _ => None,
+                }).unwrap_or("");
+                record["style"] = serde_json::json!(style);
+            }
             record["modelSpace"] = serde_json::json!(model_space);
             if defined.contains(&e.common().handle) { record["dimensionDefined"] = serde_json::json!(true); }
             if let EntityType::Dimension(_) = e {
@@ -640,6 +661,22 @@ fn linetypes_catalogue(document: &CadDocument) -> (Vec<String>, bool) {
 // 'Standard' is the crate's own always-created default
 // (CadDocument::initialize_defaults), guaranteed defensively here too.
 const DIMSTYLE_CATALOGUE_CAP: usize = 200;
+
+fn mlstyles_catalogue(document: &CadDocument) -> Vec<serde_json::Value> {
+    let mut styles: Vec<_> = document.objects.values().filter_map(|object| {
+        let ObjectType::MultiLeaderStyle(style) = object else { return None; };
+        let textstyle = document.text_styles.iter()
+            .find(|s| Some(s.handle) == style.text_style_handle)
+            .map(|s| s.name.as_str()).unwrap_or("Standard");
+        Some(serde_json::json!({
+            "name": style.name, "textstyle": textstyle, "height": style.text_height,
+            "arrow": style.arrowhead_size, "dogleg": style.landing_distance,
+            "gap": style.landing_gap, "segments": style.max_leader_points - 1,
+        }))
+    }).collect();
+    styles.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    styles
+}
 
 fn dimstyles_catalogue(document: &CadDocument) -> Vec<String> {
     let mut names: Vec<String> = document.dim_styles.iter().map(|s| s.name.clone()).collect();
@@ -1127,6 +1164,9 @@ impl ParsedDxf {
         if matches!(entity, EntityType::Dimension(_)) {
             return refuse(DIMENSION_NOT_EDITABLE);
         }
+        if matches!(entity, EntityType::MultiLeader(_)) {
+            return refuse(MLEADER_NOT_EDITABLE);
+        }
         let handle = entity.common().handle;
         self.inner
             .entities_mut()
@@ -1141,7 +1181,7 @@ impl ParsedDxf {
             // geometry-editable (editable() stays false so the projection's
             // "editable" flag is honest) but its DELETE is allowed, so this
             // is the one place that admits either.
-            (entity.common().handle, editable(entity) || matches!(entity, EntityType::Dimension(_) | EntityType::Insert(_)))
+            (entity.common().handle, editable(entity) || matches!(entity, EntityType::Dimension(_) | EntityType::Insert(_) | EntityType::MultiLeader(_)))
         };
         if !is_editable {
             return refuse("entity_kind_not_editable");
@@ -1477,6 +1517,9 @@ impl ParsedDxf {
         if block_children(&self.inner).contains(&entity.common().handle) {
             return refuse("block_child_not_editable");
         }
+        if matches!(entity, EntityType::MultiLeader(_)) {
+            return refuse(MLEADER_NOT_EDITABLE);
+        }
         if !editable(entity) && !matches!(entity, EntityType::Insert(_)) {
             return refuse("entity_kind_not_editable");
         }
@@ -1565,6 +1608,9 @@ impl ParsedDxf {
         }
         if matches!(entity, EntityType::Dimension(_)) {
             return refuse(DIMENSION_NOT_EDITABLE);
+        }
+        if matches!(entity, EntityType::MultiLeader(_)) {
+            return refuse(MLEADER_NOT_EDITABLE);
         }
         if !editable(entity) {
             return refuse("entity_kind_not_editable");
@@ -1673,6 +1719,9 @@ impl ParsedDxf {
             }
             if matches!(entity, EntityType::Dimension(_)) {
                 return refuse(DIMENSION_NOT_EDITABLE);
+            }
+            if matches!(entity, EntityType::MultiLeader(_)) {
+                return refuse(MLEADER_NOT_EDITABLE);
             }
             if !editable(entity) {
                 return refuse("entity_kind_not_editable");
@@ -1820,6 +1869,43 @@ impl ParsedDxf {
     // 20, not 40/50), so the projection below carries height and rotation
     // itself: what the browser drew is what the browser can read back.
     // ----------------------------------------------------------------------
+
+    /// A bounded text leader using the document's MLEADERSTYLE values.
+    fn create_mleader_core(
+        &mut self, x1: f64, y1: f64, x2: f64, y2: f64,
+        text: &str, style: &str, layer: &str,
+    ) -> Result<String, Refusal> {
+        if !all_finite(&[x1, y1, x2, y2]) { return refuse("coordinate_not_finite"); }
+        if x1 == x2 && y1 == y2 { return refuse("mleader_points_coincide"); }
+        if text.is_empty() { return refuse("text_empty"); }
+        if text.chars().count() > 256 { return refuse("text_too_long"); }
+        if text.chars().any(|c| c.is_control()) { return refuse("text_control_character"); }
+        let style = self.inner.objects.values().find_map(|object| match object {
+            ObjectType::MultiLeaderStyle(s) if s.name.eq_ignore_ascii_case(style) => Some(s.clone()),
+            _ => None,
+        }).ok_or_else(|| "mleader_style_unknown".to_string())?;
+        let text_location = Vector3::new(
+            x2 + style.landing_distance + style.landing_gap, y2 + style.text_height / 2.0, 0.0);
+        if !all_finite(&[text_location.x, text_location.y]) { return refuse("coordinate_not_finite"); }
+        let landing = Vector3::new(x2, y2, 0.0);
+        let mut m = MultiLeader::with_text(text, text_location, vec![Vector3::new(x1, y1, 0.0), landing]);
+        m.common.handle = Handle::NULL;
+        m.style_handle = Some(style.handle);
+        m.text_style_handle = style.text_style_handle.or_else(|| self.inner.text_styles.iter()
+            .find(|s| s.name.eq_ignore_ascii_case("Standard")).map(|s| s.handle));
+        m.context.text_style_handle = m.text_style_handle;
+        m.text_height = style.text_height;
+        m.context.text_height = style.text_height;
+        m.arrowhead_size = style.arrowhead_size;
+        m.context.arrowhead_size = style.arrowhead_size;
+        m.context.landing_gap = style.landing_gap;
+        m.dogleg_length = style.landing_distance;
+        m.context.leader_roots[0].connection_point = landing;
+        m.context.leader_roots[0].landing_distance = style.landing_distance;
+        m.context.leader_roots[0].direction = Vector3::new(1.0, 0.0, 0.0);
+        m.context.leader_roots[0].lines[0].arrowhead_size = style.arrowhead_size;
+        self.add_created(EntityType::MultiLeader(m), layer)
+    }
 
     /// TEXT at (x, y), `height` drawing units tall, rotated `rotation_deg`
     /// counter-clockwise, reading `value`. Refuses before the document is
@@ -2172,6 +2258,7 @@ impl ParsedDxf {
                     "start": [line.start.x, line.start.y, line.start.z],
                     "end": [line.end.x, line.end.y, line.end.z],
                 })),
+                EntityType::MultiLeader(_) => Some(entity_record(0, e, false)),
                 _ => None,
             })
             .collect();
@@ -2207,6 +2294,11 @@ impl ParsedDxf {
         }
         if !set_projection_field(&list, &JsValue::from_str("linetypesTruncated"), &JsValue::from_bool(truncated)) {
             return Err(JsValue::from_str("linetype_catalogue_projection_failed"));
+        }
+        let mlstyles = mlstyles_catalogue(&self.inner).serialize(&serializer)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        if !set_projection_field(&list, &JsValue::from_str("mlstyles"), &mlstyles) {
+            return Err(JsValue::from_str("mleader_style_catalogue_projection_failed"));
         }
         // W4g-7b-04c: the DIMSTYLE catalogue, beside blocks/linetypes.
         let dimstyles = dimstyles_catalogue(&self.inner).serialize(&serializer)
@@ -2506,6 +2598,14 @@ impl ParsedDxf {
     /// the dimension line through (dx, dy); `rotation_deg` applies to LINEAR
     /// only (ALIGNED refuses a non-zero value). See create_dimension_core
     /// for the exact refusal order.
+    #[wasm_bindgen(js_name = createMleader)]
+    pub fn create_mleader(
+        &mut self, x1: f64, y1: f64, x2: f64, y2: f64,
+        text: &str, style: &str, layer: &str,
+    ) -> Result<String, JsValue> {
+        self.create_mleader_core(x1, y1, x2, y2, text, style, layer).map_err(js_err)
+    }
+
     #[wasm_bindgen(js_name = createDimension)]
     #[allow(clippy::too_many_arguments)]
     pub fn create_dimension(
@@ -4255,6 +4355,45 @@ mod w4g_7b_04c_dimension_rows {
         assert_eq!(code(doc.translate_entity_core(0, 1.0, 0.0)), DIMENSION_NOT_EDITABLE);
         assert!(doc.delete_entity_core(0).is_ok());
         assert!(projected_entities(&doc.inner).is_empty());
+    }
+
+    #[test]
+    fn mleader_create_roundtrip_refusals_and_erase() {
+        let mut doc = empty_doc();
+        assert_eq!(code(doc.create_mleader_core(f64::NAN, 0.0, 3.0, 4.0, "Valve", "Standard", "")), "coordinate_not_finite");
+        assert_eq!(code(doc.create_mleader_core(0.0, 0.0, 0.0, 0.0, "Valve", "Standard", "")), "mleader_points_coincide");
+        assert_eq!(code(doc.create_mleader_core(0.0, 0.0, 3.0, 4.0, "", "Standard", "")), "text_empty");
+        assert_eq!(code(doc.create_mleader_core(0.0, 0.0, 3.0, 4.0, &"x".repeat(257), "Standard", "")), "text_too_long");
+        assert_eq!(code(doc.create_mleader_core(0.0, 0.0, 3.0, 4.0, "Valve\n", "Standard", "")), "text_control_character");
+        assert_eq!(code(doc.create_mleader_core(0.0, 0.0, 3.0, 4.0, "Valve", "Absent", "")), "mleader_style_unknown");
+        assert!(projected_entities(&doc.inner).is_empty());
+        let handle = doc.create_mleader_core(0.0, 0.0, 3.0, 4.0, "Valve", "Standard", "Leaders").unwrap();
+        let before = projected_entities(&doc.inner)[0].clone();
+        assert_eq!(before["handle"], handle);
+        assert_eq!(before["type"], "MLEADER");
+        assert_eq!(before["editable"], false);
+        assert_eq!(before["vertices"], serde_json::json!([[0.0, 0.0, 0.0], [3.0, 4.0, 0.0]]));
+        assert_eq!(before["text"], "Valve");
+        assert_eq!(before["style"], "Standard");
+        assert!(near(before["textLocation"][0].as_f64().unwrap(), 3.45));
+        assert!(near(before["textLocation"][1].as_f64().unwrap(), 4.09));
+        assert_eq!(before["height"], serde_json::json!(0.18));
+        assert_eq!(before["arrow"], serde_json::json!(0.18));
+        assert_eq!(before["dogleg"], serde_json::json!(0.36));
+        let mut back = reparse(&doc);
+        let after = projected_entities(&back.inner)[0].clone();
+        for field in ["handle", "vertices", "text", "style", "layer"] { assert_eq!(after[field], before[field]); }
+        assert_eq!(code(back.translate_entity_core(0, 1.0, 2.0)), MLEADER_NOT_EDITABLE);
+        assert_eq!(code(back.copy_entity_core(0, 1.0, 2.0)), MLEADER_NOT_EDITABLE);
+        assert_eq!(code(back.rotate_entity_core(0, 0.0, 0.0, 90.0)), MLEADER_NOT_EDITABLE);
+        assert_eq!(code(back.scale_entity_core(0, 0.0, 0.0, 2.0)), MLEADER_NOT_EDITABLE);
+        assert_eq!(code(back.explode_entity_core(0)), MLEADER_NOT_EDITABLE);
+        assert_eq!(code(back.set_entity_layer_core(0, "Other")), MLEADER_NOT_EDITABLE);
+        assert_eq!(code(back.set_entity_color_core(0, 1)), MLEADER_NOT_EDITABLE);
+        assert!(back.delete_entity_core(0).is_ok());
+        assert!(projected_entities(&back.inner).is_empty());
+        let styles = mlstyles_catalogue(&doc.inner);
+        assert!(styles.iter().any(|s| s["name"] == "Standard" && s["segments"] == 1));
     }
 
     #[test]

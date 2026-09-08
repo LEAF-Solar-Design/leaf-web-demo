@@ -225,6 +225,37 @@ describe('worker lifetime is the store\'s', () => {
   })
 })
 
+describe('MLEADER store routing and catalogue retention', () => {
+  it('posts through the separate create table, selects the reply, and retains mlstyles through undo', async () => {
+    const session = mountSession()
+    await openDocument(session)
+    const worker = session.workers[0]
+    const mlstyles = [{ name: 'Standard', textstyle: 'Standard', height: 0.18, arrow: 0.18, dogleg: 0.36, gap: 0.09, segments: 1 }]
+    worker.emit({ ...loadedMessage([LINE]), mlstyles })
+    expect(session.current.entities.mlstyles).toEqual(mlstyles)
+    act(() => session.current.actions.create('createMleader', { x: '0', y: '0', x2: '3', y2: '4', text: 'Valve', style: 'Standard' }))
+    expect(worker.posted.at(-1)).toEqual({ type: 'applyEdit', op: 'createMleader', payload: {
+      x: 0, y: 0, x2: 3, y2: 4, text: 'Valve', style: 'Standard', layer: '',
+    } })
+    const leader = { id: '42', type: 'MLEADER', editable: false, vertices: [[0, 0, 0], [3, 4, 0]], text: 'Valve', style: 'Standard' }
+    worker.emit({ ...editedMessage('createMleader', [LINE, leader]), createdId: '42', mlstyles })
+    expect(session.current.selectedId).toBe('42')
+    for (const op of ['move', 'setLayer', 'setColor', 'explode']) {
+      const count = worker.posted.length
+      act(() => session.current.actions.applyEdit(op, {}))
+      expect(worker.posted).toHaveLength(count)
+      expect(session.current.status).toBe('a mleader is placed, not edited, in this round')
+    }
+    act(() => session.current.actions.undo())
+    worker.emit({ ...editedMessage('undo', [LINE]), mlstyles })
+    expect(session.current.entities.mlstyles).toEqual(mlstyles)
+    const count = worker.posted.length
+    act(() => session.current.actions.create('createMleader', { x: '0', y: '0', x2: '3', y2: '4', text: 'Valve', style: 'Missing' }))
+    expect(worker.posted).toHaveLength(count)
+    expect(session.current.status).toBe('mleader_style_unknown')
+  })
+})
+
 describe('engine-truth readouts only for engine-parsed documents', () => {
   it('starts NOT engine-parsed, with no geometry source', () => {
     const session = mountSession()
