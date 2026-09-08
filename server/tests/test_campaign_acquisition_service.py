@@ -145,13 +145,14 @@ def setup(monkeypatch):
         assert kwargs['dwg'] == '' and kwargs['aps_live'] is False
         assert 'capability_provenance' not in kwargs
         context = kwargs['completion_provenance']
+        tool_name = kwargs['tool']['name']
         state['row'] = {'job_id': JOB, 'tenant_id': ORG, 'org_id': ORG, 'project_id': PROJECT,
-                        'tool': service.TOOL_NAME, 'execution_json': {'completion_provenance': deepcopy(context)}}
+                        'tool': tool_name, 'execution_json': {'completion_provenance': deepcopy(context)}}
         actual = 'wrong' if state['wrong_csv'] else expected.decode()
         state['job'] = {'job_id': JOB, 'tenant_id': ORG, 'org_id': ORG, 'project_id': PROJECT,
-                        'tool': service.TOOL_NAME, 'completion_provenance': deepcopy(context),
+                        'tool': tool_name, 'completion_provenance': deepcopy(context),
                         'params': deepcopy(kwargs['params']), 'idempotency_key': kwargs['idempotency_key'],
-                        'status': 'complete', 'result': {'ok': True, 'tool': service.TOOL_NAME, 'result': {'csv': actual}}}
+                        'status': 'complete', 'result': {'ok': True, 'tool': tool_name, 'result': {'csv': actual}}}
         if state['lost_response']:
             raise TimeoutError('external response lost')
         return JOB
@@ -195,6 +196,102 @@ def test_explicit_local_only_true_remains_supported(setup, monkeypatch):
     assert result['output_bytes'] == setup.expected
     assert result['publication']['tool_manifest_sha256'] == deps.catalog_tool_digest(tool)
     assert setup.calls['submit'] == 1
+
+
+@pytest.mark.parametrize('wrong_output', [False, True])
+def test_alternative_publication_pins_actual_identity_and_checks_bytes(setup, monkeypatch, wrong_output):
+    tool = dict(deepcopy(TOOL), name='existing-csv-export')
+    replace_published_tool(setup, monkeypatch, tool)
+    setup.state['wrong_csv'] = wrong_output
+    result = advance(setup)
+    assert result['state'] == ('failed' if wrong_output else 'complete')
+    assert setup.calls['stage'] == setup.calls['publish'] == 0
+    assert setup.calls['submit'] == 1
+    assert setup.state['row']['tool'] == tool['name']
+    assert setup.state['job']['tool'] == setup.state['job']['result']['tool'] == tool['name']
+    assert setup.state['job']['completion_provenance']['tool_name'] == tool['name']
+    for phase in ('intent', 'publication'):
+        assert service._payload(setup.store.decisions, 1, phase)['tool_name'] == tool['name']
+    if not wrong_output:
+        assert result['output_bytes'] == setup.expected
+    else:
+        assert 'output_bytes' not in result
+    assert advance(setup)['state'] == result['state']
+    assert setup.calls['submit'] == 1
+
+
+def publish_catalog(setup, monkeypatch, tools):
+    registry = json.dumps({'tools': tools}).encode()
+    setup.pin.catalog_digest = hashlib.sha256(registry).hexdigest()
+    setup.change.catalog_digest = setup.pin.catalog_digest
+    monkeypatch.setattr(customization, '_git_blob', lambda *args: registry)
+    monkeypatch.setattr(deps, 'effective_tools_with_provenance', lambda *args:
+                        [(deepcopy(tool), deps.TOOL_SOURCE_TENANT_REPO) for tool in tools])
+
+
+def test_candidate_order_prefers_default_then_canonical_name(setup, monkeypatch):
+    tools = [dict(deepcopy(TOOL), name=name) for name in ('z-export', 'a-export')]
+    publish_catalog(setup, monkeypatch, tools + [TOOL])
+    assert service._publication(ORG, {'source_json': SOURCE.decode()})[0]['tool_name'] == service.TOOL_NAME
+    publish_catalog(setup, monkeypatch, tools)
+    assert advance(setup)['publication']['tool_name'] == 'a-export'
+
+
+@pytest.mark.parametrize('remove_original', [False, True])
+@pytest.mark.parametrize('wrong_output', [False, True])
+def test_retained_selection_never_switches_candidates(setup, monkeypatch, remove_original, wrong_output):
+    original = dict(deepcopy(TOOL), name='z-export')
+    replace_published_tool(setup, monkeypatch, original)
+    setup.state['wrong_csv'] = wrong_output
+    assert advance(setup)['state'] == ('failed' if wrong_output else 'complete')
+    earlier = dict(deepcopy(TOOL), name='a-export')
+    publish_catalog(setup, monkeypatch, [earlier] + ([] if remove_original else [original]))
+    assert advance(setup)['state'] == 'failed'
+    assert service._payload(setup.store.decisions, 1, 'publication')['tool_name'] == 'z-export'
+    assert setup.calls['stage'] == setup.calls['publish'] == 0
+    assert setup.calls['submit'] == 1
+
+
+@pytest.mark.parametrize('location', ['row', 'job', 'envelope'])
+def test_alternative_readback_requires_exact_name(setup, monkeypatch, location):
+    replace_published_tool(setup, monkeypatch, dict(deepcopy(TOOL), name='existing-export'))
+    assert advance(setup)['state'] == 'complete'
+    target = setup.state['job']['result'] if location == 'envelope' else setup.state[location]
+    target['tool'] = service.TOOL_NAME
+    assert advance(setup)['state'] == 'failed'
+    assert setup.calls['submit'] == 1
+
+
+def test_exact_recovery_ignores_new_discovery_order(setup, monkeypatch):
+    original = dict(deepcopy(TOOL), name='z-export')
+    earlier = dict(deepcopy(TOOL), name='a-export')
+    publish_catalog(setup, monkeypatch, [earlier, original])
+    monkeypatch.setattr(deps, 'effective_tools_with_provenance', lambda *args:
+                        [(original, deps.TOOL_SOURCE_TENANT_REPO)])
+    assert advance(setup)['publication']['tool_name'] == 'z-export'
+    monkeypatch.setattr(deps, 'effective_tools_with_provenance', lambda *args:
+                        [(earlier, deps.TOOL_SOURCE_TENANT_REPO), (original, deps.TOOL_SOURCE_TENANT_REPO)])
+    assert advance(setup)['publication']['tool_name'] == 'z-export'
+    assert setup.calls['submit'] == 1
+
+
+@pytest.mark.parametrize('provenance', ['builtin', 'tenant_override', 'other-tenant'])
+def test_alternative_cross_provenance_is_not_reused(setup, monkeypatch, provenance):
+    tool = dict(deepcopy(TOOL), name='existing-export')
+    replace_published_tool(setup, monkeypatch, tool)
+    monkeypatch.setattr(deps, 'effective_tools_with_provenance', lambda *args: [(tool, provenance)])
+    assert service._publication(ORG, {'source_json': SOURCE.decode()}) is None
+    assert setup.calls['submit'] == 0
+
+
+def test_legacy_intent_preserved_when_alternative_is_reused(setup, monkeypatch):
+    intent = {'tool_name': service.TOOL_NAME, 'input_sha256': hashlib.sha256(SOURCE).hexdigest(),
+              'recipe_id': service.recipe.RECIPE_ID, 'recipe_version': service.recipe.RECIPE_VERSION}
+    setup.store.decisions.append({'decision_key': 'acquisition-v1-intent',
+                                  'kind': 'capability_selection', 'payload': deepcopy(intent)})
+    replace_published_tool(setup, monkeypatch, dict(deepcopy(TOOL), name='existing-export'))
+    assert advance(setup)['state'] == 'complete'
+    assert service._payload(setup.store.decisions, 1, 'intent') == intent
 
 
 @pytest.mark.parametrize('value', [False, None, 0, 1, 'true', 'false', '', [], {}])
