@@ -28,6 +28,7 @@ export default function EngineDocumentView({ viewerRef = null, onShown = null, s
   // Both mirrors share this ref so each other's writes cannot echo as changes.
   const lastSelectedHandleRef = useRef(undefined)
   const lastEngineSelectionRef = useRef(undefined)
+  const wasShownRef = useRef(false)
   /** one-way: console handle -> engine selection, on change */
   useEffect(() => {
     const previous = lastSelectedHandleRef.current
@@ -46,10 +47,19 @@ export default function EngineDocumentView({ viewerRef = null, onShown = null, s
     }
   }, [selectedHandle, entities, session.actions])
   useEffect(() => {
+    const wasShown = wasShownRef.current
+    wasShownRef.current = entities !== null
+    if (entities === null) {
+      if (wasShown && lastSelectedHandleRef.current != null) {
+        lastSelectedHandleRef.current = null
+        if (typeof onSelectedHandleChange === 'function') onSelectedHandleChange(null)
+      }
+      return
+    }
     const selectedId = session.selectedId
     const previous = lastEngineSelectionRef.current
     lastEngineSelectionRef.current = selectedId
-    if (entities === null || typeof onSelectedHandleChange !== 'function' || selectedId === previous) return
+    if (typeof onSelectedHandleChange !== 'function' || selectedId === previous) return
     if (typeof selectedId === 'string' && selectedId !== '') {
       const hex = hexHandle(selectedId)
       if (hex === lastSelectedHandleRef.current) return

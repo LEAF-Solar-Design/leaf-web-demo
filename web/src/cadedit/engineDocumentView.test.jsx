@@ -132,6 +132,34 @@ describe.each([true, false])('EngineDocumentView reverse selection (callback ena
     expect(callback).not.toHaveBeenCalled()
   })
 
+  it('clears a hidden document selection once after a failed load and mirrors the next document', async () => {
+    const { rerender, callback, props } = setup()
+    await openAndLoad(entities)
+    act(() => { sessionActions.select('42') })
+    expect(callback.mock.calls).toEqual(withCallback ? [['2A']] : [])
+    if (withCallback) rerender({ ...props, selectedHandle: '2A' })
+    act(() => { sessionActions.openBytes(new Uint8Array([48]), 'malformed.dxf') })
+    workers[0].emit({ type: 'error', message: 'DXF parse failed' })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('')
+    expect(callback.mock.calls).toEqual(withCallback ? [['2A'], [null]] : [])
+    if (withCallback) rerender({ ...props, selectedHandle: null })
+    await openAndLoad([entities[1]], 'two.dxf')
+    expect(screen.getByTestId('engine-selection').textContent).toBe('')
+    expect(callback.mock.calls).toEqual(withCallback ? [['2A'], [null]] : [])
+    act(() => { sessionActions.select('43') })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('43')
+    expect(callback.mock.calls).toEqual(withCallback ? [['2A'], [null], ['2B']] : [])
+  })
+
+  it('does not call back when a document hides without a held selection', async () => {
+    const { callback } = setup()
+    await openAndLoad(entities)
+    act(() => { sessionActions.openBytes(new Uint8Array([48]), 'malformed.dxf') })
+    workers[0].emit({ type: 'error', message: 'DXF parse failed' })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('')
+    expect(callback).not.toHaveBeenCalled()
+  })
+
   it('mirrors a selection lost through an edit reply to null exactly once', async () => {
     const { rerender, callback, props } = setup()
     await openAndLoad(entities)
