@@ -28,9 +28,28 @@ describe('polyLength', () => {
 })
 
 describe('entityGeometry', () => {
+  it('measures the sampled semicircle while keeping its two original vertices', () => {
+    const g = entityGeometry({ pts: [[0, 0, 0], [10, 0, 0]], closed: false, bulges: [1, 0] }, 'polyline')
+    expect(g.vertices).toBe(2)
+    expect(Math.abs(g.length - 15.696751)).toBeLessThan(1e-5)
+    expect(g.area).toBeNull()
+  })
+  it('adds the sampled semicircle area to the closed square', () => {
+    const g = entityGeometry({ pts: SQUARE, closed: true, bulges: [1, 0, 0, 0] }, 'polyline')
+    expect(g.vertices).toBe(4)
+    expect(g.area).toBeGreaterThan(100)
+    expect(Math.abs(g.area - (100 + 39.27))).toBeLessThan(0.5)
+  })
+  it('measures inspection flags and invalid bulge lists as chords', () => {
+    for (const bulges of [[1], ['1', 0, 0, 0], [NaN, 0, 0, 0], [Infinity, 0, 0, 0]]) {
+      expect(entityGeometry({ pts: SQUARE, closed: false, bulges }, 'polyline'))
+        .toEqual({ vertices: 4, closed: false, length: 30, area: null })
+    }
+  })
   it('closed polyline: vertices, perimeter, area', () => {
     const g = entityGeometry({ pts: SQUARE, closed: true }, 'polyline')
     expect(g).toEqual({ vertices: 4, closed: true, length: 40, area: 100 })
+    expect(JSON.stringify(g)).toBe('{"vertices":4,"closed":true,"length":40,"area":100}')
   })
   it('OPEN polyline gets NO area (an open path encloses nothing)', () => {
     const g = entityGeometry({ pts: SQUARE, closed: false }, 'polyline')

@@ -10,6 +10,8 @@
 // Fail-closed formatting: every formatter answers '—' rather than NaN,
 // Infinity, or "-0.00" — a poisoned vertex must never poison the dock.
 
+import { expandBulgedPolylines } from '../cadedit/engineIntake.js'
+
 /** Shoelace area (absolute), drawing-unit². Verbatim from the mock engine. */
 export function polyArea(pts) {
   let a = 0
@@ -46,9 +48,11 @@ export function polyLength(pts, closed = false) {
 export function entityGeometry(entity, kind) {
   if (!entity) return null
   if (kind === 'polyline') {
-    const pts = Array.isArray(entity.pts) ? entity.pts : []
+    const originalPts = Array.isArray(entity.pts) ? entity.pts : []
+    const expanded = expandBulgedPolylines([entity])[0]
+    const pts = expanded === entity ? originalPts : expanded.pts
     return {
-      vertices: pts.length,
+      vertices: originalPts.length,
       closed: !!entity.closed,
       length: polyLength(pts, !!entity.closed),
       area: entity.closed && pts.length >= 3 ? polyArea(pts) : null,
