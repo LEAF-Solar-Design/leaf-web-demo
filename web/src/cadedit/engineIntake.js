@@ -134,6 +134,38 @@ export function bulgePoints(a, b, bulge, z) {
   return out
 }
 
+/**
+ * Sample server intake bulges for the viewer's fills, strokes and picks.
+ * Returns the same array when no valid record has a nonzero bulge, and keeps
+ * every untouched record by identity. Malformed bulge lists remain chords.
+ */
+export function expandBulgedPolylines(polylines) {
+  const isBulged = (pl) => Array.isArray(pl?.pts) && pl.pts.length >= 2
+    && Array.isArray(pl.bulges) && pl.bulges.length === pl.pts.length
+    && pl.bulges.every(finite) && pl.bulges.some((b) => b !== 0)
+  if (!polylines.some(isBulged)) return polylines
+  return polylines.map((pl) => {
+    if (!isBulged(pl)) return pl
+    const pts = []
+    const append = (p) => {
+      const last = pts[pts.length - 1]
+      if (!last || last[0] !== p[0] || last[1] !== p[1] || (last[2] ?? 0) !== (p[2] ?? 0)) pts.push(p)
+    }
+    const count = pl.pts.length
+    for (let i = 0; i < count; i += 1) {
+      const a = pl.pts[i]
+      append(a)
+      if (i + 1 < count || pl.closed === true) {
+        const b = pl.pts[(i + 1) % count]
+        if (pl.bulges[i] !== 0) {
+          for (const p of bulgePoints(a, b, pl.bulges[i], a[2] ?? 0)) append(p)
+        }
+      }
+    }
+    return { ...pl, pts }
+  })
+}
+
 /** A measurement to 3 decimals with trailing zeros trimmed ("3", "4.125", never "3.000"). */
 export function formatMeasurement(n) {
   if (!finite(n)) return ''

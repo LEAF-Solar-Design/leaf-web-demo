@@ -36,6 +36,69 @@ def _roundtrip(intake):
     return dxf_intake.parse_dxf_bytes(data, source_name=intake.get("dwg", "x")), data
 
 
+def _bulged_square(bulges):
+    return {"layers": ["A"], "polylines": [
+        {"layer": "A", "closed": True, "handle": "10", "xdata": None,
+         "pts": [[0, 0, 0], [10, 0, 0], [10, 10, 0], [0, 10, 0]],
+         "bulges": bulges}]}
+
+
+def test_bulged_polyline_round_trips_with_42_after_its_vertex():
+    intake = _bulged_square([1, 0, 0, 0])
+    back, data = _roundtrip(intake)
+    lines = data.decode().splitlines()
+    pairs = list(zip(lines[::2], lines[1::2]))
+    assert [p for p in pairs if p[0] == "42"] == [("42", "1.0")]
+    first = pairs.index(("10", "0.0"))
+    assert pairs[first:first + 3] == [("10", "0.0"), ("20", "0.0"), ("42", "1.0")]
+    assert back["polylines"][0]["bulges"] == [1.0, 0.0, 0.0, 0.0]
+    assert _subset(back) == _subset(intake)
+
+
+def test_sparse_bulge_after_third_vertex_keeps_its_index():
+    data = (b"0\nSECTION\n2\nENTITIES\n0\nLWPOLYLINE\n5\n10\n8\nA\n"
+            b"90\n4\n70\n1\n10\n0\n20\n0\n10\n10\n20\n0\n"
+            b"10\n10\n20\n10\n42\n0.5\n10\n0\n20\n10\n"
+            b"0\nENDSEC\n0\nEOF\n")
+    back = dxf_intake.parse_dxf_bytes(data)
+    assert back["polylines"][0]["bulges"] == [0.0, 0.0, 0.5, 0.0]
+
+
+def test_sparse_bulge_after_last_vertex_of_closed_polyline_keeps_its_index():
+    data = (b"0\nSECTION\n2\nENTITIES\n0\nLWPOLYLINE\n5\n10\n8\nA\n"
+            b"90\n4\n70\n1\n10\n0\n20\n0\n10\n10\n20\n0\n"
+            b"10\n10\n20\n10\n10\n0\n20\n10\n42\n-0.5\n"
+            b"0\nENDSEC\n0\nEOF\n")
+    back = dxf_intake.parse_dxf_bytes(data)
+    assert back["polylines"][0]["closed"] is True
+    assert back["polylines"][0]["bulges"] == [0.0, 0.0, 0.0, -0.5]
+
+
+def test_zero_bulges_emit_no_groups_and_parse_as_absent():
+    back, data = _roundtrip(_bulged_square([0, 0, 0, 0]))
+    assert b"\n42\n" not in data
+    assert "bulges" not in back["polylines"][0]
+
+
+@pytest.mark.parametrize("bulges", [None, (1, 0, 0, 0), [1],
+    ["1", 0, 0, 0], [float("nan"), 0, 0, 0], [float("inf"), 0, 0, 0]])
+def test_invalid_bulges_are_refused_with_the_field_named(bulges):
+    with pytest.raises(intake_dxf.IntakeDxfError, match=r"polylines\[0\]\.bulges"):
+        intake_dxf.intake_to_dxf(_bulged_square(bulges))
+
+
+def test_mixed_z_bulge_is_inside_the_vertex_entity():
+    intake = _bulged_square([1, 0, 0, 0])
+    intake["polylines"][0]["pts"][1][2] = 2
+    data = intake_dxf.intake_to_dxf(intake)
+    lines = data.decode().splitlines()
+    pairs = list(zip(lines[::2], lines[1::2]))
+    first = pairs.index(("0", "VERTEX"))
+    second = pairs.index(("0", "VERTEX"), first + 1)
+    assert ("42", "1.0") in pairs[first:second]
+    assert [p for p in pairs if p[0] == "42"] == [("42", "1.0")]
+
+
 def test_demo_intake_round_trips_exactly():
     intake = json.loads(DEMO_INTAKE.read_text(encoding="utf-8"))
     back, data = _roundtrip(intake)

@@ -399,7 +399,16 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             normal = list(_group_point(groups, 210, (0, 0, 1)))
             if any(abs(a - b) > 1e-6 for a, b in zip(normal, (0, 0, 1))):
                 entity["normal"] = normal
-            bulges = [float(v) for c, v in record if c == 42] if kind in ("LWPOLYLINE", "POLYLINE") else []
+            bulges = []
+            if kind == "LWPOLYLINE":
+                for code, value in record:
+                    if code == 10:
+                        bulges.append(0.0)
+                    elif code == 42 and bulges:
+                        bulges[-1] = float(value)
+            elif kind == "POLYLINE":
+                # VERTEX coordinates are not copied into record; keep classic bulges unchanged.
+                bulges = [float(v) for c, v in record if c == 42]
             if any(bulges):
                 entity["bulges"] = bulges
             if kind in ("LWPOLYLINE", "POLYLINE") and any(float(v) != 0 for c, v in record if c in (40, 41, 43)):

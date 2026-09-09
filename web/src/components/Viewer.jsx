@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react'
 import { applyViewPose, cameraPose, pickLineThreshold, unprojectClientToPlane } from './viewerMath.js'
-import { intakeRoundPolylines } from '../cadedit/engineIntake.js'
+import { expandBulgedPolylines, intakeRoundPolylines } from '../cadedit/engineIntake.js'
 import { formatElementId } from '../lib/elementIdentity.js'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
@@ -198,9 +198,10 @@ const Viewer = forwardRef(function Viewer(
     // additive lists) draw as sampled polylines; an intake without them
     // draws exactly as before ([] appended).
     const roundPolylines = intakeRoundPolylines(activeIntake)
+    const intakePolylines = expandBulgedPolylines(activeIntake.polylines || [])
     const polylines = roundPolylines.length
-      ? [...(activeIntake.polylines || []), ...roundPolylines]
-      : (activeIntake.polylines || [])
+      ? [...intakePolylines, ...roundPolylines]
+      : intakePolylines
     const inserts = activeIntake.inserts || []
     const faces3d = activeIntake.faces3d || []
     // W4f slice A0: an ENGINE document (the browser engine's imported DXF,
