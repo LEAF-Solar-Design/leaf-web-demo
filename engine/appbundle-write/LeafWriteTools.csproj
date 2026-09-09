@@ -17,11 +17,14 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <Nullable>disable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <AssemblyName>LeafWriteTools</AssemblyName>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="Contents/LeafWriteTools.cs" />
+    <Compile Include="Contents/MutationPlan.cs" />
+    <Compile Include="Contents/MutationCommands.cs" />
   </ItemGroup>
   <ItemGroup>
     <!-- Managed AutoCAD refs are Private=false: the engine supplies them at

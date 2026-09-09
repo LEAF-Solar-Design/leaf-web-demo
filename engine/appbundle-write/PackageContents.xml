@@ -4,10 +4,13 @@
   drawing.write COMPILED productization path (skeleton).
 
   The compiled alternative to the LISP mutate spike (da/write_lisp.py +
-  LeafWriteProbe Activity). One CommandMethod, LEAFWRITEPROBE, loaded into the
+  LeafWriteProbe Activity). The existing LEAFWRITEPROBE is loaded into the
   headless AutoCAD engine as a NETLOAD AppBundle: it deletes one polyline, adds a
   probe polyline on LEAF_WRITE_PROBE, and SaveAs output.dwg (the Activity's Result
   localName), which the Activity uploads.
+
+  LEAFAPPLYMUTATIONS is an additive command for the compiled mutation-plan
+  path. Existing Activities are not switched to it by this registration.
 
   Engines (confirmed available): Autodesk.AutoCAD+24_3 (net48), +25_1, +26_0 (net8).
   Default targets +26_0 (net8), matching client.ENGINE. Skeleton only - see
@@ -34,6 +37,7 @@
         LoadOnCommandInvocation="True">
       <Commands GroupName="LeafWriteTools">
         <Command Global="LEAFWRITEPROBE" Local="LEAFWRITEPROBE" />
+        <Command Global="LEAFAPPLYMUTATIONS" Local="LEAFAPPLYMUTATIONS" />
       </Commands>
     </ComponentEntry>
   </Components>

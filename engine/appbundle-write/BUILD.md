@@ -70,6 +70,27 @@ Compress-Archive -Path "$stage" -DestinationPath LeafWriteTools.zip -Force
    `output.dwg` and re-extract to verify.
 
 ## Status
-Skeleton, deliberately **not built here** (no guarantee the AutoCAD 2026 refs
-resolve on this host). The LISP spike (`da/write_spike.py`) is the demonstrated
-`drawing.write` capability; this bundle is the compiled path to productize it.
+The existing `LEAFWRITEPROBE` command remains unchanged. The additive
+`LEAFAPPLYMUTATIONS` command consumes `mutation-plan.json` in the command's
+working directory, writes `output.dwg`, and then writes `receipt.json` bound to
+the exact input plan digest. It supports closed-polyline additions, removals,
+and polyline translations/rotations through `leaf.mutation-plan.v1`.
+
+The apply command is registered in the bundle, but no existing Activity or
+Python mutation caller is switched to it. Use an isolated working directory:
+the command removes prior output/receipt files before validating its input.
+Native load, mutation behavior, output readback and receipt behavior must be
+verified before publishing this path. The existing LISP mutation path remains
+the demonstrated capability.
+
+Local verification on 2026-09-09: Release compilation against AutoCAD 2026
+references passed with three existing reference-version warnings. The original
+probe source is unchanged. Ten parser checks passed, including strict rejection
+of newline-terminated identifiers. No signed bundle or live native execution is
+claimed by these checks.
+
+Run the dependency-free parser checks from this directory:
+
+```powershell
+dotnet run --project tests/ParserChecks.csproj
+```
