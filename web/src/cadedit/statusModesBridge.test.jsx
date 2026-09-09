@@ -90,6 +90,43 @@ describe('StatusModesBridge', () => {
     }
   }))
 
+  it('m: applies two and three synchronous ORTHO toggles', () => observe((published) => {
+    const studio = mount()
+    for (const [count, ortho] of [[2, false], [3, true]]) {
+      act(() => {
+        for (let i = 0; i < count; i++) {
+          window.dispatchEvent(new CustomEvent('cockpit:mode-toggle', { detail: { id: 'ortho' } }))
+        }
+      })
+      expect(studio.context.ortho).toBe(ortho)
+      expect(last(published)).toEqual({ live: true, ortho, osnap: true })
+    }
+  }))
+
+  it('n: applies two and three synchronous OSNAP toggles', () => observe((published) => {
+    const studio = mount()
+    for (const [count, osnap] of [[2, true], [3, false]]) {
+      act(() => {
+        for (let i = 0; i < count; i++) {
+          window.dispatchEvent(new CustomEvent('cockpit:mode-toggle', { detail: { id: 'osnap' } }))
+        }
+      })
+      expect(studio.context.osnap).toBe(osnap)
+      expect(last(published)).toEqual({ live: true, ortho: false, osnap })
+    }
+  }))
+
+  it('o: applies synchronous ORTHO and OSNAP toggles once each', () => observe((published) => {
+    const studio = mount()
+    act(() => {
+      window.dispatchEvent(new CustomEvent('cockpit:mode-toggle', { detail: { id: 'ortho' } }))
+      window.dispatchEvent(new CustomEvent('cockpit:mode-toggle', { detail: { id: 'osnap' } }))
+    })
+    expect(studio.context.ortho).toBe(true)
+    expect(studio.context.osnap).toBe(false)
+    expect(last(published)).toEqual({ live: true, ortho: true, osnap: false })
+  }))
+
   it('ignores unsupported ids and non-object details', () => observe((published) => {
     const studio = mount()
     published.mockClear()

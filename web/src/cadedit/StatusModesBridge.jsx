@@ -26,8 +26,15 @@ export default function StatusModesBridge() {
     const onToggle = ({ detail }) => {
       if (!detail || typeof detail !== 'object') return
       const modes = current.current
-      if (detail.id === 'ortho') modes.setOrtho(!modes.ortho)
-      else if (detail.id === 'osnap') modes.setOsnap(!modes.osnap)
+      if (detail.id === 'ortho') {
+        const next = !modes.ortho
+        modes.ortho = next
+        modes.setOrtho(next)
+      } else if (detail.id === 'osnap') {
+        const next = !modes.osnap
+        modes.osnap = next
+        modes.setOsnap(next)
+      }
     }
     window.addEventListener('cockpit:modes-request', onRequest)
     window.addEventListener('cockpit:mode-toggle', onToggle)
