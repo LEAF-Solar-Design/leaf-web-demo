@@ -223,10 +223,8 @@ def test_mutation_inspect_reads_per_vertex_bulges(tmp_path):
     assert curved["bulges"] == pytest.approx([1.0, 0.0, 0.0, 0.0], rel=0, abs=1e-9)
 
 
-def _run_plan(tmp_path, tag, host, plan_bytes):
-    """Apply one plan to `host` with the fixed interpreter, then inspect the
-    result with the mutation Activity's inspect variant; returns the parsed
-    intake of the output and the output path."""
+def _apply_plan(tmp_path, tag, host, plan_bytes):
+    """Run the fixed interpreter and return its echo-free transcript."""
     work = tmp_path / tag
     work.mkdir()
     (work / "mutation-plan.txt").write_bytes(plan_bytes.replace(b"\n", b"\r\n"))
@@ -235,11 +233,25 @@ def _run_plan(tmp_path, tag, host, plan_bytes):
         [str(ACCORECONSOLE), "/i", str(host), "/s", str(work / "apply.scr")],
         cwd=work, capture_output=True, text=True, timeout=120, check=False,
     )
+    # Redirected accoreconsole output is UTF-16LE read through text mode.
+    text = applied.stdout.replace("\x00", "")
+    stderr = applied.stderr.replace("\x00", "")
+    assert applied.returncode == 0, text + stderr
+    # Script echoes contain the marker literals; only printed markers count.
+    text = "\n".join(line for line in (text + stderr).splitlines()
+                     if not line.strip().startswith("Command:"))
+    return work, text
+
+
+def _run_plan(tmp_path, tag, host, plan_bytes):
+    """Apply one plan to `host` with the fixed interpreter, then inspect the
+    result with the mutation Activity's inspect variant; returns the parsed
+    intake of the output and the output path."""
+    work, text = _apply_plan(tmp_path, tag, host, plan_bytes)
     output = work / "output.dwg"
-    assert applied.returncode == 0, applied.stdout + applied.stderr
-    assert "LEAF-MUTATION-PLAN-INVALID" not in applied.stdout, applied.stdout
-    assert "LEAF-MUTATION-APPLY-FAILED" not in applied.stdout, applied.stdout
-    assert output.exists() and output.stat().st_size > 0, applied.stdout + applied.stderr
+    assert "LEAF-MUTATION-PLAN-INVALID" not in text, text
+    assert "LEAF-MUTATION-APPLY-FAILED" not in text, text
+    assert output.exists() and output.stat().st_size > 0, text
     (work / "inspect.scr").write_text(
         build_scr("output-intake.txt", extra_blocks=MUTATION_INSPECT_BLOCKS),
         encoding="ascii", newline="")
@@ -253,6 +265,22 @@ def _run_plan(tmp_path, tag, host, plan_bytes):
     intake = parse(families, "canary")
     assert not intake.get("parseErrors"), intake.get("parseErrors")
     return intake, output
+
+
+@pytest.mark.skipif(
+    not ACCORECONSOLE.exists() or not SOURCE_DWG.exists(),
+    reason="local AutoCAD 2026 console and tracked demo DWG are required",
+)
+def test_invalid_plan_marker_is_detected_without_script_echoes(tmp_path):
+    host = tmp_path / "host.dwg"
+    shutil.copyfile(SOURCE_DWG, host)
+    plan = (
+        "LEAF_MUTATION_PLAN|9\n"
+        f"BASE_SHA256|{hashlib.sha256(host.read_bytes()).hexdigest()}\n"
+    ).encode("ascii")
+    work, text = _apply_plan(tmp_path, "invalid", host, plan)
+    assert "LEAF-MUTATION-PLAN-INVALID" in text, text
+    assert not (work / "output.dwg").exists(), text
 
 
 @pytest.mark.skipif(
