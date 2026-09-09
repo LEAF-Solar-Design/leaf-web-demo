@@ -822,6 +822,26 @@ describe('save completion', () => {
     )
   })
 
+  it('rejects a recoloured consumed block member without a save or sidecar fallback', async () => {
+    const member = { id: '17', type: 'CIRCLE', layer: '0', vertices: [[4, 2, 0]], radius: 1 }
+    const insert = { id: '64', type: 'INSERT', layer: '0', name: 'B', ip: [1, 1, 0], rotationDeg: 0, scale: [1, 1, 1] }
+    const save = vi.fn()
+    const session = mountSession({ saveTarget: { headVersion: 4, save } })
+    act(() => session.current.actions.openBytes(new Uint8Array([9, 9]), 'demo-v4.dxf', { committed: true, version: 4 }))
+    session.workers[0].emit(loadedMessage([member], 'demo-v4.dxf'))
+    session.workers[0].emit({
+      ...editedMessage('createBlock', [insert]), createdId: insert.id,
+      blocks: [{ name: 'B', base: [1, 1, 0], complete: true, children: [{ ...member, id: undefined, handle: member.id, aci: 1 }] }],
+    })
+    const before = session.workers[0].posted.length
+    await act(async () => { await session.current.actions.save() })
+    expect(save).not.toHaveBeenCalled()
+    expect(session.workers[0].posted).toHaveLength(before)
+    expect(session.current.status).toBe('Save refused: block members keep their colour, linetype and lineweight; change them after the block exists.')
+    expect(session.current.dirty).toBe(true)
+    expect(session.current.committedEntities).toEqual([member])
+  })
+
   // W4g-7b-05c-2: the save's own REJECT rule. No store verb can ever move an
   // INSERT in place (02c/04c's blanket refusal covers every one), so this
   // drills the rule the only way it is reachable: the worker's own reply

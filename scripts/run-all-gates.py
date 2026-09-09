@@ -1804,8 +1804,9 @@ def build_suites() -> List[Suite]:
                   # same machine-local pkg-node build. Four describes (the W4g-6 batch,
                   # W4g-7b-01c blocks, W4g-7c-2c Create Block and MLEADER
                   # rows: eight tests) require the rebuilt engine;
-                  # numbers on PRs #1036, #1107 and #1140.
-                  ("src/cad/engineBatchAtomic.test.js", 9),
+                  # numbers on PRs #1036, #1107 and #1140; W4g-7c-2d adds the
+                  # handle-retention row (nine tests).
+                  ("src/cad/engineBatchAtomic.test.js", 10),
               )),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
