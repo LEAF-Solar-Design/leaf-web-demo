@@ -1,4 +1,4 @@
-import { useEffect, useImperativeHandle, useRef, useState } from 'react'
+import { useEffect, useId, useImperativeHandle, useRef, useState } from 'react'
 import useCampaigns from './useCampaigns.js'
 import { uploadProjectInput } from './api.js'
 import './campaigns.css'
@@ -255,28 +255,36 @@ function ReleaseOutputs({ campaign, completion, available, urlApi }) {
   </>
 }
 
-function RevisionForm({ campaign, release }) {
+function RevisionForm({ campaign, release, action, busy }) {
   const [workflow, setWorkflow] = useState(release.contract?.workflow || '')
   const [reason, setReason] = useState('')
-  const action = useAction()
-  const busy = action.busy || !!campaign.pending.release
-  return <form noValidate onSubmit={event => {
+  const [expanded, setExpanded] = useState(false)
+  const id = useId()
+  const alwaysVisible = release.status === 'needs_approach'
+  const open = alwaysVisible || expanded
+  return <>
+    {!alwaysVisible && <button type="button" className="chip-act" disabled={busy}
+      aria-expanded={open} aria-controls={id} onClick={() => { if (!busy) setExpanded(value => !value) }}>Revise release</button>}
+    <div id={id} hidden={!open}>
+    {open && <form noValidate aria-labelledby={`${id}-heading`} onSubmit={event => {
     event.preventDefault()
+    if (busy) return
     action.run(() => {
       check(workflow, 'workflow', 16384)
       check(reason, 'reason', 4096)
       return campaign.reviseRelease({ workflow, reason })
     }, 'Revised approach recorded. Review it before continuing.')
   }}>
-    <p>Saved inputs, required checks and the original goal are retained.</p>
+    <h4 id={`${id}-heading`}>Revise release</h4>
+    <p>The original goal and prior evidence are retained. Required checks are updated for the revised workflow.</p>
     <label>Revised workflow<textarea maxLength={16384} value={workflow} disabled={busy}
       onChange={event => setWorkflow(event.target.value)} /></label>
     <label>Reason for changing approach<textarea maxLength={4096} value={reason} disabled={busy}
       onChange={event => setReason(event.target.value)} /></label>
     <button type="submit" className="chip-act" disabled={busy} aria-busy={busy}>Record revised approach</button>
-    <Alert error={action.error} onReload={campaign.refetch} />
-    <span role="status">{action.outcome}</span>
-  </form>
+    </form>}
+    </div>
+  </>
 }
 
 function CompletionPanel({ campaign, artifactUrlApi }) {
@@ -334,8 +342,8 @@ function CompletionPanel({ campaign, artifactUrlApi }) {
       <h4>What requires you</h4>
       <EvidenceList items={itemsOf(completion.next_action).map(nextActionText)} />
     </>}
-    {release.status === 'needs_approach' && <RevisionForm key={`${release.release_id}:${release.contract_version}`}
-      campaign={campaign} release={release} />}
+    {['active', 'queued', 'waiting', 'paused', 'needs_approach'].includes(release.status) && <RevisionForm key={`${release.release_id}:${release.contract_version}`}
+      campaign={campaign} release={release} action={action} busy={busy} />}
     {release.contract_version > 1 && <><h4>Current workflow</h4><p>{contract.workflow}</p></>}
     {currentFailure && <p role="alert">{currentFailure.reason || 'Current verification is unavailable. Reload the release.'}</p>}
     {itemsOf(completion.remaining).some(textOf) && <EvidenceList items={completion.remaining} />}

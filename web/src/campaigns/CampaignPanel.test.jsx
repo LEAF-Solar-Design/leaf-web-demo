@@ -171,7 +171,7 @@ describe('stalled release revision', () => {
     const workflow = screen.getByLabelText('Revised workflow')
     expect(workflow.value).toBe('Old workflow')
     expect(workflow.closest('details')).toBeNull()
-    expect(screen.getByText('Saved inputs, required checks and the original goal are retained.')).toBeTruthy()
+    expect(screen.getByText('The original goal and prior evidence are retained. Required checks are updated for the revised workflow.')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Record revised approach' }))
     await screen.findByRole('alert')
     expect(campaign.reviseRelease).not.toHaveBeenCalled()
@@ -201,6 +201,121 @@ describe('stalled release revision', () => {
     campaign.completion.release.status = status
     renderCollapsed(panel())
     expect(screen.queryByLabelText('Revised workflow')).toBeNull()
+    expect(campaign.reviseRelease).not.toHaveBeenCalled()
+  })
+  it.each(['active', 'queued', 'waiting', 'paused'])('offers deliberate revision for %s without acting on disclosure navigation', status => {
+    campaign.completion.release.status = status
+    renderCollapsed(panel())
+    const toggle = screen.getByRole('button', { name: 'Revise release' })
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    const content = document.getElementById(toggle.getAttribute('aria-controls'))
+    expect(content.hidden).toBe(true)
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(content.hidden).toBe(false)
+    expect(within(content).getByRole('heading', { name: 'Revise release' })).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('Revised workflow'), { target: { value: 'Keep my workflow draft' } })
+    fireEvent.change(screen.getByLabelText('Reason for changing approach'), { target: { value: 'Keep my reason draft' } })
+    fireEvent.click(toggle)
+    expect(screen.queryByLabelText('Revised workflow')).toBeNull()
+    fireEvent.click(toggle)
+    expect(screen.getByLabelText('Revised workflow').value).toBe('Keep my workflow draft')
+    expect(screen.getByLabelText('Reason for changing approach').value).toBe('Keep my reason draft')
+    for (const method of ['reviseRelease', 'retryReleaseStage', 'transitionRelease', 'createRelease', 'submit', 'refetch']) {
+      expect(campaign[method]).not.toHaveBeenCalled()
+    }
+  })
+  it.each(['waiting', 'paused'])('records one revision from %s and uses the paused hook result until explicit resume', async status => {
+    campaign.completion.release.status = status
+    campaign.completion.stages = [{ stage: 'implementation', contract_version: 1, status: 'failed' }]
+    let resolve
+    campaign.reviseRelease.mockImplementation(() => new Promise(done => { resolve = done }))
+    const { rerender } = renderCollapsed(panel())
+    fireEvent.click(screen.getByRole('button', { name: 'Revise release' }))
+    fireEvent.change(screen.getByLabelText('Revised workflow'), { target: { value: 'Use the published tool' } })
+    fireEvent.change(screen.getByLabelText('Reason for changing approach'), { target: { value: 'Reuse publication' } })
+    const submit = screen.getByRole('button', { name: 'Record revised approach' })
+    fireEvent.click(submit)
+    fireEvent.submit(submit.closest('form'))
+    expect(campaign.reviseRelease).toHaveBeenCalledExactlyOnceWith({ workflow: 'Use the published tool', reason: 'Reuse publication' })
+    for (const name of ['Revise release', 'Record revised approach', 'Resume release', 'Cancel release']) {
+      expect(screen.getByRole('button', { name }).disabled).toBe(true)
+    }
+    expect(screen.getByLabelText('Revised workflow').disabled).toBe(true)
+    expect(screen.getByLabelText('Reason for changing approach').disabled).toBe(true)
+    await act(async () => {
+      campaign.completion.release = { ...campaign.completion.release, status: 'paused', contract_version: 2,
+        contract: { ...campaign.completion.release.contract, workflow: 'Use the published tool' } }
+      resolve({ release: campaign.completion.release })
+    })
+    rerender(panel())
+    expect(screen.getByText('Release paused')).toBeTruthy()
+    expect(screen.getByText('Use the published tool')).toBeTruthy()
+    expect(screen.queryByLabelText('Revised workflow')).toBeNull()
+    expect(campaign.retryReleaseStage).not.toHaveBeenCalled()
+    expect(campaign.transitionRelease).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Resume release' }))
+    await screen.findByText('Release resumed.')
+    expect(campaign.transitionRelease).toHaveBeenCalledExactlyOnceWith('resume')
+  })
+  it.each(['finished', 'cancelled'])('has no revision entry for %s releases', status => {
+    campaign.completion.release.status = status
+    renderCollapsed(panel())
+    expect(screen.queryByRole('button', { name: 'Revise release' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Record revised approach' })).toBeNull()
+  })
+  it.each(['waiting', 'needs_approach'])('blocks revision submission while a %s release mutation is pending', status => {
+    campaign.completion.release.status = status
+    const { rerender } = renderCollapsed(panel())
+    if (status === 'waiting') fireEvent.click(screen.getByRole('button', { name: 'Revise release' }))
+    else expect(screen.queryByRole('button', { name: 'Revise release' })).toBeNull()
+    fireEvent.change(screen.getByLabelText('Reason for changing approach'), { target: { value: 'Reuse publication' } })
+    campaign.pending.release = true
+    rerender(panel())
+    const submit = screen.getByRole('button', { name: 'Record revised approach' })
+    expect(submit.disabled).toBe(true)
+    expect(screen.getByLabelText('Revised workflow').disabled).toBe(true)
+    expect(screen.getByLabelText('Reason for changing approach').disabled).toBe(true)
+    fireEvent.submit(submit.closest('form'))
+    if (status === 'waiting') {
+      const toggle = screen.getByRole('button', { name: 'Revise release' })
+      expect(toggle.disabled).toBe(true)
+      fireEvent.click(toggle)
+      expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    }
+    expect(campaign.reviseRelease).not.toHaveBeenCalled()
+  })
+  it('blocks opening and submitting revision while a local release transition is in flight', async () => {
+    campaign.completion.release.status = 'waiting'
+    let resolve
+    campaign.transitionRelease.mockReturnValue(new Promise(done => { resolve = done }))
+    renderCollapsed(panel())
+    fireEvent.click(screen.getByRole('button', { name: 'Revise release' }))
+    fireEvent.change(screen.getByLabelText('Reason for changing approach'), { target: { value: 'Reuse publication' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Pause release' }))
+    expect(screen.getByRole('button', { name: 'Revise release' }).disabled).toBe(true)
+    const submit = screen.getByRole('button', { name: 'Record revised approach' })
+    expect(submit.disabled).toBe(true)
+    fireEvent.submit(submit.closest('form'))
+    expect(campaign.reviseRelease).not.toHaveBeenCalled()
+    await act(async () => { resolve({ ok: true }) })
+    expect(submit.disabled).toBe(false)
+  })
+  it.each(['project', 'release', 'contract'])('resets revision drafts when the %s changes', kind => {
+    campaign.completion.release.status = 'waiting'
+    const { rerender } = renderCollapsed(panel())
+    fireEvent.click(screen.getByRole('button', { name: 'Revise release' }))
+    fireEvent.change(screen.getByLabelText('Revised workflow'), { target: { value: 'Old draft' } })
+    fireEvent.change(screen.getByLabelText('Reason for changing approach'), { target: { value: 'Old reason' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Revise release' }))
+    campaign.completion.release = { ...campaign.completion.release,
+      ...(kind === 'release' ? { release_id: C } : kind === 'contract' ? { contract_version: 2 } : {}),
+      contract: { ...campaign.completion.release.contract, workflow: 'Current saved workflow' } }
+    rerender(panel(kind === 'project' ? { projectId: Q } : {}))
+    expect(screen.getByRole('button', { name: 'Revise release' }).getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(screen.getByRole('button', { name: 'Revise release' }))
+    expect(screen.getByLabelText('Revised workflow').value).toBe('Current saved workflow')
+    expect(screen.getByLabelText('Reason for changing approach').value).toBe('')
     expect(campaign.reviseRelease).not.toHaveBeenCalled()
   })
 })
