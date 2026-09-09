@@ -291,7 +291,7 @@ const Viewer = forwardRef(function Viewer(
         const bottomZ = topZ - panelThickness
         minDisplayZ = Math.min(minDisplayZ, bottomZ)
         maxDisplayZ = Math.max(maxDisplayZ, topZ)
-        addPickDescriptor(pickIndex, pl.sourceHandle ?? pl.handle, { kind: 'poly', layer: pl.layer, pts })
+        addPickDescriptor(pickIndex, pl.sourceHandle ?? pl.handle, { kind: 'poly', layer: pl.layer, pts, strokeOnly: !!pl.strokeOnly })
         // fan-triangulate (panels are convex quads) for a subtle fill; an
         // engine document's OPEN polyline (a line, an arc) is a stroke only.
         const fillThis = !(strokeOnlyOpen && !pl.closed) && !pl.strokeOnly
@@ -891,12 +891,12 @@ const Viewer = forwardRef(function Viewer(
     for (const h of highlightHandles) for (const d of s.pickIndex.get(h) || []) {
       if (!d || d.kind !== 'poly') continue
       const pts = d.pts
-      for (let i = 1; i < pts.length - 1; i++) {
+      for (let i = 1; !d.strokeOnly && i < pts.length - 1; i++) {
         fillPos.push(pts[0][0], pts[0][1], 1)
         fillPos.push(pts[i][0], pts[i][1], 1)
         fillPos.push(pts[i + 1][0], pts[i + 1][1], 1)
       }
-      for (let i = 0; i < pts.length; i++) {
+      for (let i = 0; i < pts.length - (d.strokeOnly ? 1 : 0); i++) {
         const a = pts[i], b = pts[(i + 1) % pts.length]
         linePos.push(a[0], a[1], 1.1, b[0], b[1], 1.1)
       }
@@ -927,12 +927,13 @@ const Viewer = forwardRef(function Viewer(
     if (d.kind === 'poly' || d.kind === 'face') {
       const pts = d.pts
       const fillPos = [], linePos = []
-      for (let i = 1; i < pts.length - 1; i++) {
+      const strokeOnly = d.kind === 'poly' && d.strokeOnly
+      for (let i = 1; !strokeOnly && i < pts.length - 1; i++) {
         fillPos.push(pts[0][0], pts[0][1], z)
         fillPos.push(pts[i][0], pts[i][1], z)
         fillPos.push(pts[i + 1][0], pts[i + 1][1], z)
       }
-      for (let i = 0; i < pts.length; i++) {
+      for (let i = 0; i < pts.length - (strokeOnly ? 1 : 0); i++) {
         const a = pts[i], b = pts[(i + 1) % pts.length]
         linePos.push(a[0], a[1], z + 0.1, b[0], b[1], z + 0.1)
       }

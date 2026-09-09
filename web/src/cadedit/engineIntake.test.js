@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
 import { expandBulgedPolylines } from './engineIntake.js'
 
 import { bulgePoints, ARC_STEP_DEG, CIRCLE_SEGMENTS, DIM_EXT_PAST, MAX_POINTS, MIN_ARC_POINTS, dimensionSchematic, mleaderSchematic, engineIntake, entityToPolyline, formatMeasurement, hexHandle } from './engineIntake.js'
@@ -6,6 +8,11 @@ import { bulgePoints, ARC_STEP_DEG, CIRCLE_SEGMENTS, DIM_EXT_PAST, MAX_POINTS, M
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps
 
 describe('intake bulges for the console viewer', () => {
+  it('carries strokeOnly into the pick descriptor and both highlight loops', () => {
+    const source = readFileSync(path.resolve(process.cwd(), 'src/components/Viewer.jsx'), 'utf8')
+    expect(source).toContain("{ kind: 'poly', layer: pl.layer, pts, strokeOnly: !!pl.strokeOnly }")
+    expect((source.match(/d\.strokeOnly/g) || []).length).toBeGreaterThanOrEqual(2)
+  })
   const open = { layer: 'A', handle: '10', closed: false, pts: [[0, 0, 2], [10, 0, 2]] }
   it('preserves array identity for absent and zero bulges', () => {
     for (const rows of [[], [open], [{ ...open, bulges: [0, 0] }]]) {
