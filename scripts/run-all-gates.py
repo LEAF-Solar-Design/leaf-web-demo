@@ -1681,7 +1681,7 @@ def build_suites() -> List[Suite]:
                   ("test/projectRepositorySourceExport.test.ts", 4),
                   ("test/tenantRepoLease.test.ts", 4),
                   ("test/harnessSchema.pg.test.ts", 1),
-                  ("test/pgSessionStore.contract.test.ts", 5),
+                  ("test/pgSessionStore.contract.test.ts", 6),
                   # B-C6 conversation e2e: Postgres-gated (needs a live
                   # DATABASE_URL / PG_SESSION_STORE_TEST_URL), one test.
                   ("test/conversation.test.ts", 1),
