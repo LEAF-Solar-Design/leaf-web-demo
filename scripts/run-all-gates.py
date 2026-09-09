@@ -1457,6 +1457,7 @@ def build_suites() -> List[Suite]:
               # presence and app absence expectations, ten rows (69 -> 74).
               # 2026-09-09 app pause: 72 executed rows without unzip; three readiness rows still run in CI.
               # 72 to 74: group wait budget invariant and its smaller budget falsifying twin.
+              # Still 74: the timeout failure path extends the existing falsifying twin.
               _py_pytest("test_prewarm_staging_cutover_workflow.py"), 74,
               allowed_skip_reasons=(r"no unzip in this bash \(CI always has one\)",)),
         # Merge-queue group controller (slice C: mq-review, mq-supply,

@@ -636,6 +636,13 @@ def _assert_group_wait_covers_controller(group_text: str, controller_text: str) 
     assert budget(group_text) >= budget(controller_text), (
         "group readiness wait must cover the controller supply wait"
     )
+    group = yaml.load(group_text, Loader=yaml.BaseLoader)
+    timeout_seconds = int(group["jobs"]["stage-group"]["timeout-minutes"]) * 60
+    combined_wait_seconds = 2 * budget(group_text)
+    assert timeout_seconds >= combined_wait_seconds, (
+        f"group job timeout {timeout_seconds} s must cover both waits "
+        f"totaling {combined_wait_seconds} s"
+    )
 
 
 def test_the_group_readiness_wait_covers_the_controller_supply_wait():
@@ -656,6 +663,13 @@ def test_the_group_readiness_wait_rejects_a_smaller_budget():
     assert smaller_group_text != group_text
     with pytest.raises(AssertionError, match="group readiness wait must cover"):
         _assert_group_wait_covers_controller(smaller_group_text, controller_text)
+    # Independently shorten the job timeout while keeping the 40-poll waits.
+    shorter_timeout_group = yaml.load(group_text, Loader=yaml.BaseLoader)
+    assert shorter_timeout_group["env"]["SUPPLY_SET_POLLS"] == "40"
+    assert shorter_timeout_group["jobs"]["stage-group"]["timeout-minutes"] != "25"
+    shorter_timeout_group["jobs"]["stage-group"]["timeout-minutes"] = "25"
+    with pytest.raises(AssertionError, match="group job timeout 1500 s must cover both waits totaling 2400 s"):
+        _assert_group_wait_covers_controller(yaml.safe_dump(shorter_timeout_group), controller_text)
 
 
 def test_the_group_dispatch_uses_only_the_oidc_role():
@@ -1098,12 +1112,12 @@ def test_codebuild_dispatch_and_relay_receipt_executed(tmp_path, response, dispo
     assert len(calls) == 1
     assert any("name=LEAF_DEPLOY_SERVICE,value=" + service in shlex.split(call)
                for call in calls) == expected_present
-    for service, call in zip(("web",), calls):
+    for dispatched_service, call in zip(("web",), calls):
         assert shlex.split(call) == [
             "codebuild", "start-build", "--project-name", "leaf-deploy-terraform-staging",
             "--environment-variables-override", "name=STEP,value=prewarm",
             "name=LEAF_DEPLOY_APPROVED_BY,value=merge-queue-" + "a" * 12,
-            "name=LEAF_DEPLOY_SERVICE,value=" + service,
+            "name=LEAF_DEPLOY_SERVICE,value=" + dispatched_service,
             "name=LEAF_DEPLOY_IMAGE_TAG,value=" + image_tag,
             "name=LEAF_DEPLOY_EXPECTED_TD,value=auto-live",
             "name=LEAF_DEPLOY_REQUEST_ID,value=" + "a" * 12 + "-77", "--output", "json",

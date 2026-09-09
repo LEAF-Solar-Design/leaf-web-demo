@@ -31,7 +31,9 @@ env:
   # 2026-09-09: no consumer adopts a staged candidate. CloudTrail from
   # 2026-09-08T11:35Z to 2026-09-09T01:35Z shows digest intersection zero
   # between staged app-alt:257 to :262 / web-alt:208 to :215 and live
-  # app:824 to :828 / web:371 to :373, with zero listener changes.
+  # app:824 to :828 / web:371 to :373.
+  # The listener sweep from 2026-09-08T08:00Z to 2026-09-09T01:30Z
+  # shows zero listener changes.
   # The native release consumer rolls staging with native-N images of the
   # SAME commits: f20fa02b live 63 min after queue staging, 1c7bcf4f 44 min after.
   # Receipt: C:/tmp/staged-wiggling-fairy/receipts/12d/adoption-finding-native-rail.json;
@@ -46,15 +48,12 @@ env:
   # (the release rail owner's change), or when a native descale returns the
   # idle colour to 0 between groups. Web stays as the queue's exercised
   # prewarm path (about $0.30 per day).
-  # Operator step after merge: one-time `ecs update-service --desired-count 0`
-  # on leaf-platform-app-alt under leaf-admin; the classifier blocks it from
-  # a lane. Let any in-flight app prewarm build finish first: the live queue
-  # group that lands this change still ran with main's `web app`.
   STAGE_SERVICES: "web"
-  # This wait must be at least the merge queue controller's mq supply wait,
-  # 40 x 30 s: both poll the same supply set and readiness objects, and the
-  # controller ejects the group when the dispatched set is empty.
-  # Group d8ba959d on 2026/09/09: an 18 minute build produced readiness at
+  # The controller's mq-supply waits 40 x 30 s for the same supply-set object,
+  # then mq-prewarm waits for the relay receipt. The readiness record lands
+  # with the supply set from the same group build, so this wait must be at least as long.
+  # The 42-minute job timeout holds both waits because supply and readiness run in sequence.
+  # Group d8ba959d on 2026-09-09: an 18 minute build produced readiness at
   # 09:13:39Z, after the empty relay receipt at 09:12:48Z.
   SUPPLY_SET_POLLS: "40"
   SUPPLY_SET_INTERVAL: "30"
@@ -78,7 +77,7 @@ jobs:
     needs: guard-ref
     if: github.event_name == 'workflow_dispatch' && inputs.group_head_sha != '' && github.ref == 'refs/heads/main'
     runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
-    timeout-minutes: 25
+    timeout-minutes: 42
     # Satisfies OIDC sub repo:LEAF-Solar-Design@90289782/leaf-web-demo@1304548236:environment:ecr-release.
     environment: ecr-release
     env:

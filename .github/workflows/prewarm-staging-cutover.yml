@@ -74,8 +74,9 @@ env:
   # merge group closes that gap: its head's first parent is checked equal to
   # its live queue base, so the group's exact tree is fresh at stage time.
   # Later invalidation or replay is still possible.
-  # Keep this environment mirror aligned with the group relay, the sole
-  # producer of new stages after PR-mode retirement.
+  # Keep this env mirror aligned with the group relay except STAGE_SERVICES,
+  # which the group-vs-cutover row pins unequal (the group reads web;
+  # this retired PR-mode relay keeps web app).
   STAGE_SERVICES: "web app"
   # Bounded wait for the speculative supply set: 40 polls x 30s.
   SUPPLY_SET_POLLS: "40"
