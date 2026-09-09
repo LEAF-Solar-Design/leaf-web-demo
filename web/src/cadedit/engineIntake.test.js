@@ -18,6 +18,8 @@ describe('intake bulges for the console viewer', () => {
     const expanded = expandBulgedPolylines(rows)
     expect(expanded).not.toBe(rows)
     expect(expanded[0]).toMatchObject({ layer: 'A', handle: '10', closed: false })
+    expect(expanded[0].strokeOnly).toBe(true)
+    expect(pl).not.toHaveProperty('strokeOnly')
     const pts = expanded[0].pts
     expect(pts).toHaveLength(25)
     expect(pts).toEqual([open.pts[0], ...bulgePoints(...open.pts, 1, 2), open.pts[1]])
@@ -29,7 +31,9 @@ describe('intake bulges for the console viewer', () => {
   })
   it('samples the closing segment without duplicating join vertices', () => {
     const pl = { ...open, closed: true, pts: [[0, 0, 0], [10, 0, 0], [10, 10, 0], [0, 10, 0]], bulges: [0, 0, 0, 1] }
-    const pts = expandBulgedPolylines([pl])[0].pts
+    const expanded = expandBulgedPolylines([pl])[0]
+    expect(expanded).not.toHaveProperty('strokeOnly')
+    const pts = expanded.pts
     expect(pts).toEqual([...pl.pts, ...bulgePoints(pl.pts[3], pl.pts[0], 1, 0)])
     expect(pts).toHaveLength(27)
     expect(near(pts[15][0], -5) && near(pts[15][1], 5)).toBe(true)
@@ -47,6 +51,7 @@ describe('intake bulges for the console viewer', () => {
     const expanded = expandBulgedPolylines(rows)
     expect(expanded[0]).not.toBe(rows[0])
     expect(expanded[1]).toBe(open)
+    expect(expanded[1]).not.toHaveProperty('strokeOnly')
   })
 })
 

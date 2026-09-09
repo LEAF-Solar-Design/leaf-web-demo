@@ -294,14 +294,14 @@ const Viewer = forwardRef(function Viewer(
         addPickDescriptor(pickIndex, pl.sourceHandle ?? pl.handle, { kind: 'poly', layer: pl.layer, pts })
         // fan-triangulate (panels are convex quads) for a subtle fill; an
         // engine document's OPEN polyline (a line, an arc) is a stroke only.
-        const fillThis = !(strokeOnlyOpen && !pl.closed)
+        const fillThis = !(strokeOnlyOpen && !pl.closed) && !pl.strokeOnly
         for (let i = 1; fillThis && i < pts.length - 1; i++) {
           fillPos.push(pts[0][0], pts[0][1], topZ)
           fillPos.push(pts[i][0], pts[i][1], topZ)
           fillPos.push(pts[i + 1][0], pts[i + 1][1], topZ)
           triHandles.push(pl.sourceHandle ?? pl.handle)
         }
-        if (sculpture) {
+        if (sculpture && fillThis) {
           // Bottom and four walls turn each unchanged panel into a thin tile.
           // The depth is a display-space treatment, not drawing geometry.
           for (let i = 1; i < pts.length - 1; i++) {

@@ -80,23 +80,27 @@ def test_zero_bulges_emit_no_groups_and_parse_as_absent():
     assert "bulges" not in back["polylines"][0]
 
 
-@pytest.mark.parametrize("bulges", [None, (1, 0, 0, 0), [1],
+def test_inspection_bulge_flag_emits_no_groups_and_parses_as_absent():
+    back, data = _roundtrip(_bulged_square([1]))
+    assert b"\n42\n" not in data
+    assert "bulges" not in back["polylines"][0]
+
+
+@pytest.mark.parametrize("bulges", [None, (1, 0, 0, 0),
+    ["1"], [float("nan")], [float("inf")],
     ["1", 0, 0, 0], [float("nan"), 0, 0, 0], [float("inf"), 0, 0, 0]])
 def test_invalid_bulges_are_refused_with_the_field_named(bulges):
     with pytest.raises(intake_dxf.IntakeDxfError, match=r"polylines\[0\]\.bulges"):
         intake_dxf.intake_to_dxf(_bulged_square(bulges))
 
 
-def test_mixed_z_bulge_is_inside_the_vertex_entity():
+def test_mixed_z_polyline_cannot_carry_bulges():
     intake = _bulged_square([1, 0, 0, 0])
     intake["polylines"][0]["pts"][1][2] = 2
-    data = intake_dxf.intake_to_dxf(intake)
-    lines = data.decode().splitlines()
-    pairs = list(zip(lines[::2], lines[1::2]))
-    first = pairs.index(("0", "VERTEX"))
-    second = pairs.index(("0", "VERTEX"), first + 1)
-    assert ("42", "1.0") in pairs[first:second]
-    assert [p for p in pairs if p[0] == "42"] == [("42", "1.0")]
+    back, data = _roundtrip(intake)
+    assert b"\nPOLYLINE\n" in data
+    assert b"\n42\n" not in data
+    assert "bulges" not in back["polylines"][0]
 
 
 def test_demo_intake_round_trips_exactly():

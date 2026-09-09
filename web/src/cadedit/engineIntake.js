@@ -162,7 +162,7 @@ export function expandBulgedPolylines(polylines) {
         }
       }
     }
-    return { ...pl, pts }
+    return { ...pl, pts, ...(pl.closed === true ? {} : { strokeOnly: true }) }
   })
 }
 
