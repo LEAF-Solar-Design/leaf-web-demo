@@ -1447,20 +1447,19 @@ def build_suites() -> List[Suite]:
               # PR path's step body; the receipt's group object replacing pr;
               # the mg-<sha12> receipt artifact name; and the descale job's
               # explicit pull_request_target-only if: with the reaper comment.
-              # STAGE_SERVICES is back to `web app`: the native release rail
-              # supplied app's missing 0058 migration. The historical pin
-              # (test_web_and_app_are_staged_again_because_the_merge_group_
-              # makes_the_stage_fresh) requires both services and the way back,
-              # 1-for-1, no count change from that row.
+              # The former both-service freshness pin now requires web only,
+              # measured non-adoption, the plan-live-leg blocker and the way back.
               # 39 -> 43 (slice B v2): replace event-trust pins with live-queue
               # validation (queued and superseded rows), and pin the secret-free
               # dispatcher, main-ref guard, and recorded-base step guards.
               # Queue-mode cutover: 50 base rows plus the notice-only PR pin.
               # Native CodeBuild prewarm: five response cases each execute web
-              # and app presence expectations, ten rows (69 -> 74).
-              # App restoration keeps 75: invert five app-absence cases to
-              # presence; rewrite the env/comment/receipt pins one-for-one.
-              _py_pytest("test_prewarm_staging_cutover_workflow.py"), 75),
+              # presence and app absence expectations, ten rows (69 -> 74).
+              # 2026-09-09 app pause: 72 executed rows without unzip; three readiness rows still run in CI.
+              # 72 to 74: group wait budget invariant and its smaller budget falsifying twin.
+              # Still 74: the timeout failure path extends the existing falsifying twin.
+              _py_pytest("test_prewarm_staging_cutover_workflow.py"), 74,
+              allowed_skip_reasons=(r"no unzip in this bash \(CI always has one\)",)),
         # Merge-queue group controller (slice C: mq-review, mq-supply,
         # mq-prewarm). 84 cases cover the executed matrix and structural pins.
         # The executed matrix includes mq-review's GraphQL
@@ -1482,8 +1481,7 @@ def build_suites() -> List[Suite]:
         Suite("merge-queue-workflow",
               "scripts test_merge_queue_workflow.py", "pytest",
               # Native receipts: seven field refusals, five statuses, six log streams.
-              # App restoration keeps 96: extend the existing configuration
-              # transition row with the next group's two-service receipt.
+              # 2026-09-09 app pause keeps 96 executed rows: next-group receipt becomes web only.
               SCRIPTS_DIR, _py_pytest("test_merge_queue_workflow.py"), 96),
         Suite("platform-release-manifest",
               "scripts test_platform_release_manifest.py", "pytest",
@@ -1660,7 +1658,8 @@ def build_suites() -> List[Suite]:
               # 94s, 140s and 356s, entirely tracking how many other lanes
               # were building at the time. The count is the contract; the
               # clock is not.
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 85),
+              # 2026-09-09 app pause verification reported 87 executed self-test rows, formerly 85.
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 87),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
