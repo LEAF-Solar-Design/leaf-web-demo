@@ -323,16 +323,6 @@ def _validate_block_child(intake, raw):
     child["kind"] = kind
     if "color" in child:
         child["aci"] = child.pop("color")
-    def quantum(value, places=3):
-        rounded = round(value, places)
-        return 0.0 if rounded == 0 else rounded
-    for field in ("pts", "c"):
-        if field in child:
-            child[field] = ([[quantum(v) for v in p] for p in child[field]]
-                            if field == "pts" else [quantum(v) for v in child[field]])
-    for field in ("r", "start_deg", "end_deg"):
-        if field in child:
-            child[field] = quantum(child[field], 3 if field == "r" else 6)
     if kind == "LINE" and child["pts"][0] == child["pts"][1]:
         raise ValueError("block child has zero length")
     if "r" in child and child["r"] <= 0:
@@ -1268,19 +1258,18 @@ def _ocs_line(tag: str, head: str, lowered: Dict[str, Any]) -> str:
 
 def _block_child_line(name, ordinal, child):
     kind = child["kind"]
-    point = lambda values: ",".join(f"{v:.3f}" for v in values)
+    head = f"{name}|{ordinal}|{kind}|{child['layer']}"
     if kind == "LWPOLYLINE":
         lowered = (world_to_ocs if child["closed"] else world_to_ocs_any)(child["pts"])
         # The flag preserves open versus closed with the same four child kinds.
-        geometry = (f"{int(child['closed'])}|{point(lowered['normal'])}|{lowered['elevation']:.3f}|"
-                    + ";".join(point(p) for p in lowered["points"]))
+        row = _ocs_line("BLOCKCHILD", f"{head}|{int(child['closed'])}", lowered)
     elif kind == "LINE":
-        geometry = "|".join(point(p) for p in child["pts"])
+        row = f"BLOCKCHILD|{head}|{_fmt3(child['pts'][0])}|{_fmt3(child['pts'][1])}"
     else:
-        geometry = f"{point(child['c'])}|{child['r']:.3f}"
+        row = f"BLOCKCHILD|{head}|{_fmt3(child['c'])}|{_fmt(child['r'])}"
         if kind == "ARC":
-            geometry += f"|{child['start_deg']:.6f}|{child['end_deg']:.6f}"
-    return (f"BLOCKCHILD|{name}|{ordinal}|{kind}|{child['layer']}|{geometry}|"
+            row += f"|{_fmt(child['start_deg'])}|{_fmt(child['end_deg'])}"
+    return (f"{row}|"
             f"{child.get('aci', 256)}|{child.get('linetype', 'ByLayer')}|{child.get('lineweight', -1)}")
 
 
@@ -1300,21 +1289,27 @@ def emit_plan(
         raise ValueError("contract v3 is required for property operations")
     lines = [f"LEAF_MUTATION_PLAN|{version}", f"BASE_SHA256|{base_sha256}"]
     consumed = {h for definition in canonical.get("block_defs", []) for h in definition["members"]}
-    for item in canonical.get("set_layer", []):
-        if item["handle"] in consumed:
-            lines.append(f"RELAYER|{item['handle']}|{item['layer']}")
-    for item in canonical.get("set_points", []):
-        if item["handle"] in consumed:
-            lines.append(_ocs_line("SETPOINTS", f"{item['handle']}|{1 if item['closed'] else 0}",
-                                   world_to_ocs_any(item["pts"])))
-    for op, tag in (("set_circle", "SETCIRCLE"), ("set_arc", "SETARC")):
+    member_setters, remaining_setters = {}, {}
+    for op in ("set_layer", "set_points", "set_circle", "set_arc"):
+        member_setters[op], remaining_setters[op] = [], []
         for item in canonical.get(op, []):
-            if item["handle"] in consumed:
-                centre = ",".join(f"{v:.3f}" for v in item["c"])
-                row = f"{tag}|{item['handle']}|{centre}|{item['r']:.3f}"
-                if op == "set_arc":
-                    row += f"|{item['start_deg']:.6f}|{item['end_deg']:.6f}"
-                lines.append(row)
+            target = member_setters if item["handle"] in consumed else remaining_setters
+            target[op].append(item)
+
+    def append_setters(setters):
+        for item in setters["set_layer"]:
+            lines.append(f"RELAYER|{item['handle']}|{item['layer']}")
+        for item in setters["set_points"]:
+            lowered = world_to_ocs_any(item["pts"])
+            lines.append(_ocs_line("SETPOINTS", f"{item['handle']}|{1 if item['closed'] else 0}", lowered))
+        for item in setters["set_circle"]:
+            lines.append(f"SETCIRCLE|{item['handle']}|{_fmt3(item['c'])}|{_fmt(item['r'])}")
+        for item in setters["set_arc"]:
+            lines.append(
+                f"SETARC|{item['handle']}|{_fmt3(item['c'])}|{_fmt(item['r'])}|"
+                f"{_fmt(item['start_deg'])}|{_fmt(item['end_deg'])}")
+
+    append_setters(member_setters)
     for definition in canonical.get("block_defs", []):
         for ordinal, child in enumerate(definition.get("children", [])):
             lines.append(_block_child_line(definition["name"], ordinal, child))
@@ -1341,25 +1336,7 @@ def emit_plan(
                     f"transform handle {handle!r} has invalid source geometry")
             target = transformed_points(points, transform)
             lines.append(_ocs_line("TRANSFORM", handle, world_to_ocs(target)))
-    for item in canonical.get("set_layer", []):
-        if item["handle"] in consumed:
-            continue
-        lines.append(f"RELAYER|{item['handle']}|{item['layer']}")
-    for item in canonical.get("set_points", []):
-        if item["handle"] in consumed:
-            continue
-        lowered = world_to_ocs_any(item["pts"])
-        lines.append(_ocs_line("SETPOINTS", f"{item['handle']}|{1 if item['closed'] else 0}", lowered))
-    for item in canonical.get("set_circle", []):
-        if item["handle"] in consumed:
-            continue
-        lines.append(f"SETCIRCLE|{item['handle']}|{_fmt3(item['c'])}|{_fmt(item['r'])}")
-    for item in canonical.get("set_arc", []):
-        if item["handle"] in consumed:
-            continue
-        lines.append(
-            f"SETARC|{item['handle']}|{_fmt3(item['c'])}|{_fmt(item['r'])}|"
-            f"{_fmt(item['start_deg'])}|{_fmt(item['end_deg'])}")
+    append_setters(remaining_setters)
     for entity in canonical.get("added", []):
         layer = entity["layer"]
         kind = entity.get("kind", "LWPOLYLINE")

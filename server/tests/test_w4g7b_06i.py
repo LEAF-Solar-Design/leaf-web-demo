@@ -310,7 +310,7 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
     block_bytes = emit_plan(block_plan, base_sha256=hashlib.sha256(group_host.read_bytes()).hexdigest())
     assert block_bytes.count(b"BLOCKCHILD|") == 1
     assert block_bytes.index(f"RELAYER|{circle_handle}|SITE".encode()) < block_bytes.index(b"BLOCKCHILD|")
-    assert block_bytes.index(f"SETCIRCLE|{circle_handle}|6.000,1.000,0.000|1.000".encode()) < block_bytes.index(b"BLOCKCHILD|")
+    assert block_bytes.index(f"SETCIRCLE|{circle_handle}|6,1,0|1".encode()) < block_bytes.index(b"BLOCKCHILD|")
     (tmp_path / "mutation-plan.txt").write_bytes(block_bytes)
     # Refuse the second child only after BLOCK and the first child exist.
     # Exercise the production nil handler and its UNDO mark, then save the

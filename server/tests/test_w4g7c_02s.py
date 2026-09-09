@@ -491,10 +491,10 @@ def test_inline_mixed_hand_derived_plan_and_mock(moved):
     head, plan = inline_base(), inline_replace(moved=moved)
     canonical = mutation_plan.validate_mutations(head, plan)
     assert mutation_plan.validate_mutations(head, canonical) == canonical
-    setters = (["RELAYER|11|SITE", "SETCIRCLE|11|6.000,1.000,0.000|1.000"] if moved else [])
+    setters = (["RELAYER|11|SITE", "SETCIRCLE|11|6,1,0|1"] if moved else [])
     assert mutation_plan.emit_plan(canonical, base_sha256="1" * 64).decode().splitlines() == [
         "LEAF_MUTATION_PLAN|3", "BASE_SHA256|" + "1" * 64, *setters,
-        "BLOCKCHILD|B|0|LINE|0|0.000,0.000,0.000|3.000,0.000,0.000|256|ByLayer|-1",
+        "BLOCKCHILD|B|0|LINE|0|0,0,0|3,0,0|256|ByLayer|-1",
         "ADDBLOCKDEF|B|1.000,1.000,0.000|C:0;H:11",
         "ADDINSERT|0|B|1.000,1.000,0.000|0.000000|1.0000,1.0000,1.0000", "REMOVE|11"]
     before = copy.deepcopy(head)
@@ -528,8 +528,8 @@ def test_inline_all_new_definition_has_no_removal_or_child_add_ordinals():
     canonical = mutation_plan.validate_mutations(head, plan)
     rows = mutation_plan.emit_plan(canonical, base_sha256="1" * 64).decode().splitlines()
     assert rows[2:5] == [
-        "BLOCKCHILD|B|0|LINE|0|0.000,0.000,0.000|3.000,0.000,0.000|256|ByLayer|-1",
-        "BLOCKCHILD|B|1|CIRCLE|0|4.000,2.000,0.000|1.000|256|ByLayer|-1",
+        "BLOCKCHILD|B|0|LINE|0|0,0,0|3,0,0|256|ByLayer|-1",
+        "BLOCKCHILD|B|1|CIRCLE|0|4,2,0|1|256|ByLayer|-1",
         "ADDBLOCKDEF|B|1.000,1.000,0.000|C:0;C:1"]
     assert not any(row.startswith("REMOVE|") for row in rows)
     result = write_loop.apply_mutations(head, canonical)
@@ -718,22 +718,26 @@ def test_inline_uploaded_dxf_is_bound_to_child_order(tmp_path, monkeypatch, reve
 
 @pytest.mark.parametrize("child,geometry", [
     ({"kind": "LINE", "pts": [[0.12349, -0.0001, 0], [3.12349, 0, 0]]},
-     "LINE|0|0.123,0.000,0.000|3.123,0.000,0.000"),
+     "LINE|0|0.12349,-0.0001,0|3.12349,0,0"),
     ({"kind": "CIRCLE", "c": [4.12349, 2, 0], "r": 1.12349},
-     "CIRCLE|0|4.123,2.000,0.000|1.123"),
+     "CIRCLE|0|4.12349,2,0|1.12349"),
     ({"kind": "ARC", "c": [4, 2, 0], "r": 1, "start_deg": 10.12345649, "end_deg": 80.12345649},
-     "ARC|0|4.000,2.000,0.000|1.000|10.123456|80.123456"),
+     "ARC|0|4,2,0|1|10.12345649|80.12345649"),
     ({"kind": "LWPOLYLINE", "closed": False, "pts": [[0, 0, 2], [3, 0, 2]]},
-     "LWPOLYLINE|0|0|0.000,0.000,1.000|2.000|0.000,0.000;3.000,0.000"),
+     "LWPOLYLINE|0|0|0,0,1|2|0,0;3,0"),
     ({"kind": "LWPOLYLINE", "closed": True, "pts": [[0, 0, 2], [3, 0, 2], [3, 3, 2]]},
-     "LWPOLYLINE|0|1|0.000,0.000,1.000|2.000|0.000,0.000;3.000,0.000;3.000,3.000"),
+     "LWPOLYLINE|0|1|0,0,1|2|0,0;3,0;3,3"),
 ])
-def test_inline_child_kinds_use_add_validation_quantum_and_style(child, geometry):
+def test_inline_child_kinds_use_add_validation_precision_and_style(child, geometry):
     head, plan = inline_base(), inline_replace()
     plan["block_defs"][0]["children"] = [{**child, "layer": "0", "aci": 1,
                                          "linetype": "Continuous", "lineweight": 25}]
     canonical = mutation_plan.validate_mutations(head, plan)
     assert mutation_plan.validate_mutations(head, canonical) == canonical
+    ordinary = mutation_plan.validate_mutations(head, {
+        "added": [{**child, "handle": "ordinary", "layer": "0"}]})["added"][0]
+    for field in child.keys() - {"kind"}:
+        assert canonical["block_defs"][0]["children"][0][field] == ordinary[field]
     row = mutation_plan.emit_plan(canonical, base_sha256="1" * 64).decode().splitlines()[2]
     assert row == f"BLOCKCHILD|B|0|{geometry}|1|Continuous|25"
     result = write_loop.apply_mutations(head, canonical)
@@ -741,7 +745,8 @@ def test_inline_child_kinds_use_add_validation_quantum_and_style(child, geometry
     assert "handle" not in first
     assert first["properties"] == {"aci": 1, "rgb": None, "linetype": "Continuous", "lineweight": 25}
     parsed = dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf(result))
-    assert parsed["blocks"]["B"]["children"] == result["blocks"]["B"]["children"]
+    # DXF intake quantizes geometry for inspection, while adds retain precision.
+    assert write_loop._block_semantics(parsed["blocks"]["B"]) == write_loop._block_semantics(result["blocks"]["B"])
 
 
 @pytest.mark.parametrize("op,member,setter,expected", [
@@ -783,3 +788,76 @@ def test_removed_setter_exception_only_covers_consumed_members():
     assert rows[2].startswith("BLOCKCHILD|")
     assert rows[3].startswith("ADDBLOCKDEF|")
     assert rows[4] == "RELAYER|12|SITE"
+
+
+def test_consumed_setters_use_ordinary_lines_before_block_children():
+    head, plan = inline_base(), inline_replace()
+    head["polylines"] = [{"handle": "10", "layer": "0", "closed": False,
+                          "pts": [[0, 0, 0], [3, 0, 0]], "xdata": None}]
+    head["arcs"] = [{"handle": "12", "layer": "0", "c": [4, 2, 0], "r": 1,
+                     "start_deg": 10, "end_deg": 80, "nrm": [0, 0, 1]}]
+    plan["block_defs"][0].update(members=["10", "11", "12"],
+                                  order=["C:0", "H:10", "H:11", "H:12"])
+    plan["removed"] = ["10", "11", "12"]
+    plan["set_layer"] = [{"handle": "11", "layer": "SITE"}]
+    plan["set_points"] = [{"handle": "10", "closed": False,
+                           "pts": [[0.12349, -0.0001, 0.0004], [3.12349, 0, 0.0004]]}]
+    plan["set_circle"] = [{"handle": "11", "c": [6, 1, 0], "r": 0.0004}]
+    plan["set_arc"] = [{"handle": "12", "c": [6.12349, 1, 0], "r": 0.0004,
+                        "start_deg": 20.12345649, "end_deg": 90.12345649}]
+    ordinary = {op: copy.deepcopy(plan[op])
+                for op in ("set_layer", "set_points", "set_circle", "set_arc")}
+    canonical = mutation_plan.validate_mutations(head, plan)
+    ordinary = mutation_plan.validate_mutations(head, ordinary)
+    rows = mutation_plan.emit_plan(canonical, base_sha256="1" * 64).decode().splitlines()
+    ordinary_rows = mutation_plan.emit_plan(ordinary, base_sha256="1" * 64).decode().splitlines()[2:]
+    assert rows[2:6] == ordinary_rows
+    assert [row.split("|", 1)[0] for row in ordinary_rows] == [
+        "RELAYER", "SETPOINTS", "SETCIRCLE", "SETARC"]
+    assert rows[4] == "SETCIRCLE|11|6,1,0|0.0004"
+    assert rows[6].startswith("BLOCKCHILD|")
+    assert rows[7].startswith("ADDBLOCKDEF|")
+
+
+def test_tilted_inline_polyline_preserves_add_geometry_and_dxf_vertex():
+    head, plan = inline_base(), inline_replace()
+    child = {"kind": "LWPOLYLINE", "layer": "0", "closed": True,
+             "pts": [[0, 0, 0], [10000, 0, 0.009], [0, 10000, 0]]}
+    plan["block_defs"][0]["children"] = [child]
+    canonical = mutation_plan.validate_mutations(head, plan)
+    ordinary = mutation_plan.validate_mutations(head, {
+        "added": [{**child, "handle": "ordinary"}]})
+    assert canonical["block_defs"][0]["children"][0]["pts"] == ordinary["added"][0]["pts"]
+    child_row = mutation_plan.emit_plan(canonical, base_sha256="1" * 64).decode().splitlines()[2]
+    add_row = mutation_plan.emit_plan(ordinary, base_sha256="1" * 64).decode().splitlines()[2]
+    fields = child_row.split("|")
+    assert fields[:6] == ["BLOCKCHILD", "B", "0", "LWPOLYLINE", "0", "1"]
+    assert fields[6:-3] == add_row.split("|")[2:]
+    assert fields[-3:] == ["256", "ByLayer", "-1"]
+    normal = [float(value) for value in fields[6].split(",")]
+    second = [float(value) for value in fields[8].split(";")[1].split(",")]
+    assert dxf_intake._ocs_to_wcs(second + [float(fields[7])], normal)[2] == pytest.approx(0.009)
+    lowered = mutation_plan.world_to_ocs(child["pts"])
+    result = write_loop.apply_mutations(head, canonical)
+    copied = result["blocks"]["B"]["children"][0]
+    assert copied["nrm"] == lowered["normal"]
+    assert copied["elev"] == lowered["elevation"]
+    assert copied["pts"] == lowered["points"]
+    parsed = dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf(result))
+    assert not parsed.get("parseErrors")
+    reopened = parsed["blocks"]["B"]["children"][0]
+    second = dxf_intake._ocs_to_wcs(reopened["pts"][1] + [reopened["elev"]], reopened["nrm"])
+    # The DXF leg rounds normals to six decimals.
+    assert reopened["nrm"] == [round(value, 6) for value in lowered["normal"]]
+    assert second[2] == pytest.approx(0.009, abs=0.011)
+
+    planar_plan = copy.deepcopy(plan)
+    planar_plan["block_defs"][0]["children"][0]["pts"] = [
+        [0, 0, 0.009], [10000, 0, 0.009], [0, 10000, 0.009]]
+    planar_result = write_loop.apply_mutations(head, planar_plan)
+    planar_parsed = dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf(planar_result))
+    assert not planar_parsed.get("parseErrors")
+    planar_reopened = planar_parsed["blocks"]["B"]["children"][0]
+    for point in planar_reopened["pts"]:
+        assert dxf_intake._ocs_to_wcs(
+            point + [planar_reopened["elev"]], planar_reopened["nrm"])[2] == 0.009
