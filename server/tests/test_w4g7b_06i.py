@@ -169,6 +169,7 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
     setup = "\r\n".join([
         '(setvar "CMDECHO" 0)',
         '(setvar "FILEDIA" 0)',
+        '(entmake (list (cons 0 "LWPOLYLINE") (cons 100 "AcDbEntity") (cons 8 "LEAF_BULGE_CANARY") (cons 100 "AcDbPolyline") (cons 90 4) (cons 70 1) (cons 10 (list 0.0 0.0)) (cons 42 1.0) (cons 10 (list 10.0 0.0)) (cons 42 0.0) (cons 10 (list 10.0 10.0)) (cons 42 0.0) (cons 10 (list 0.0 10.0)) (cons 42 0.0)))',
         '(entmake (list (cons 0 "BLOCK") (cons 2 "Fixture") (cons 70 0) (cons 10 (list 0.0 0.0 0.0))))',
         '(entmake (list (cons 0 "LINE") (cons 8 "0") (cons 10 (list 0.0 0.0 0.0)) (cons 11 (list 1.0 0.0 0.0))))',
         '(entmake (list (cons 0 "ENDBLK")))',
@@ -208,6 +209,8 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
     base = intake_parse.parse(tmp_path / "base-intake.txt", "canary")
     assert not base.get("parseErrors"), base.get("parseErrors")
     assert base["blocks"]["Fixture"]["complete"] is True
+    curved, = [p for p in base["polylines"] if p["layer"] == "LEAF_BULGE_CANARY"]
+    assert curved["bulges"] == pytest.approx([1.0, 0.0, 0.0, 0.0], rel=0, abs=1e-9)
     # Rows for the planner's own doubt (v63): the dimstyle catalogue on a
     # real DWG head is readable through the inspect variant before the
     # DIMENSION add (the DS block precedes the plan).
@@ -225,6 +228,8 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
     actual = intake_parse.parse(families, "canary")
     assert not actual.get("parseErrors"), actual.get("parseErrors")
     assert "Standard" in actual.get("dimstyles", [])
+    curved, = [p for p in actual["polylines"] if p["layer"] == "LEAF_BULGE_CANARY"]
+    assert curved["bulges"] == pytest.approx([1.0, 0.0, 0.0, 0.0], rel=0, abs=1e-9)
 
     added_insert, = [e for e in actual["inserts"] if e["name"] == "Fixture"]
     # The IN record at the legacy radians (rtos precision 5), like 02s.
