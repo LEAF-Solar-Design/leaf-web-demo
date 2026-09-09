@@ -4,7 +4,7 @@ import CampaignPanel from './CampaignPanel.jsx'
 import useCampaigns from './useCampaigns.js'
 import { uploadProjectInput } from './api.js'
 
-vi.mock('./useCampaigns.js', () => ({ default: vi.fn() }))
+vi.mock('./useCampaigns.js', async importOriginal => ({ ...await importOriginal(), default: vi.fn() }))
 vi.mock('./api.js', () => ({ uploadProjectInput: vi.fn() }))
 
 const P = '11111111-1111-1111-1111-111111111111'
@@ -27,6 +27,7 @@ beforeEach(() => {
     transitionRelease: vi.fn().mockResolvedValue({ ok: true }),
     retryReleaseStage: vi.fn().mockResolvedValue({ ok: true }),
     downloadReleaseArtifact: vi.fn(),
+    downloadReleaseSource: vi.fn(),
   }
   useCampaigns.mockImplementation(() => campaign)
 })
@@ -550,6 +551,65 @@ describe('release evidence panel', () => {
     campaign.downloadReleaseArtifact.mockResolvedValue({ name, mediaType, bytes })
     return artifact
   }
+  function readySource() {
+    readyOutput('summary.csv', 'text/csv')
+    campaign.completion.stages.forEach(stage => { stage.contract_version = 1 })
+    campaign.completion.release.contract.cad_recipe = { recipe_id: 'dxf-layer-summary', recipe_version: 1,
+      source_artifact: { sha256: 'b'.repeat(64), size_bytes: 4, path: 'https://untrusted.test/source' } }
+  }
+  it('downloads verified source bytes as source.dxf and revokes the URL', async () => {
+    readySource()
+    campaign.downloadReleaseSource.mockResolvedValue({ name: 'source.dxf', mediaType: 'application/dxf', bytes: new Uint8Array([1, 2, 3, 4]).buffer })
+    const urlApi = { createObjectURL: vi.fn().mockReturnValue('blob:source'), revokeObjectURL: vi.fn() }
+    const clicked = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () {
+      expect(this.download).toBe('source.dxf')
+      expect(this.href).toBe('blob:source')
+    })
+    try {
+      render(panel({ artifactUrlApi: urlApi }))
+      fireEvent.click(screen.getByRole('button', { name: 'Download source drawing' }))
+      await waitFor(() => expect(clicked).toHaveBeenCalledOnce())
+      expect(campaign.downloadReleaseSource).toHaveBeenCalledExactlyOnceWith()
+      expect(campaign.downloadReleaseArtifact).not.toHaveBeenCalled()
+      const saved = await new Promise((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(reader.result)
+        reader.onerror = reject
+        reader.readAsArrayBuffer(urlApi.createObjectURL.mock.calls[0][0])
+      })
+      expect([...new Uint8Array(saved)]).toEqual([1, 2, 3, 4])
+      await waitFor(() => expect(urlApi.revokeObjectURL).toHaveBeenCalledWith('blob:source'), { timeout: 2000 })
+      expect(screen.queryByTitle('Release tool: source.dxf')).toBeNull()
+    } finally { clicked.mockRestore() }
+  })
+  it('withholds source without current supported recipe proof', () => {
+    readySource()
+    const original = structuredClone(campaign.completion)
+    const view = render(panel())
+    for (const change of [
+      c => { c.current_verification = { status: 'unavailable' } },
+      c => { c.release.contract.cad_recipe.recipe_id = 'other' },
+      c => { c.release.contract.cad_recipe.recipe_version = 2 },
+      c => { delete c.release.contract.cad_recipe.source_artifact },
+      c => { c.stages[0].contract_version = 2 },
+    ]) {
+      campaign.completion = structuredClone(original)
+      change(campaign.completion)
+      view.rerender(panel())
+      expect(screen.queryByRole('button', { name: 'Download source drawing' })).toBeNull()
+    }
+  })
+  it('disables pending source downloads and shows retrieval failure', async () => {
+    readySource()
+    campaign.pending.download = true
+    const view = render(panel())
+    expect(screen.getByRole('button', { name: 'Download source drawing' }).disabled).toBe(true)
+    campaign.pending = {}
+    campaign.downloadReleaseSource.mockRejectedValue(new Error('Source access revoked.'))
+    view.rerender(panel())
+    fireEvent.click(screen.getByRole('button', { name: 'Download source drawing' }))
+    expect(await screen.findByText('Source access revoked.')).toBeTruthy()
+  })
   it('places verified output controls before scope, release details and the collapsed request', () => {
     readyOutput()
     campaign.campaigns = [row, { ...row, campaign_id: 'other', title: 'Another release' }]
