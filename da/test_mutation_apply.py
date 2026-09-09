@@ -391,8 +391,8 @@ def test_v3_activity_adds_insert_and_preserves_v2_apply_script():
     assert '(/= (cdr (assoc 0 ed)) "POLYLINE")' in preflight
     assert '(member kind (list "LINE" "LWPOLYLINE" "CIRCLE" "ARC"))' in member_check
     parser = next(line for line in block_script.splitlines()
-                  if line.startswith("(defun leaf-blockdef-op "))
-    assert '(= (cdr (assoc 0 (entget (handent (substr h 3))))) "POLYLINE")' in parser
+                  if line.startswith("(defun leaf-bd-ref "))
+    assert '(= (cdr (assoc 0 (entget (handent h)))) "POLYLINE")' in parser
     assert block_script.index('(command "_.UNDO" "_Mark")') < block_script.index('(foreach leaf-op leaf-ops ')
     assert '(command "_.UNDO" "_Begin")' not in block_script
     assert '(command "_.UNDO" "_End")' not in block_script
@@ -418,6 +418,11 @@ def test_v3_activity_adds_insert_and_preserves_v2_apply_script():
     headers_v3 = '(list "LEAF_MUTATION_PLAN|1" "LEAF_MUTATION_PLAN|2" "LEAF_MUTATION_PLAN|3")'
     script_v2 = v2_settings["script"]["value"]
     script_v3 = v3["settings"]["script"]["value"]
+    # Inline children and consumed-member copies move only the v3 APPLY bytes.
+    # Old: ead402b353104e6078e3242bab0940585738f643fc42f9af1445a7761c2bad3e
+    # New: c68f935b6cbb22fb1f55780e78208e833f1b86ce3a44089f064177d6fc0dd90c
+    assert hashlib.sha256(script_v3.encode("utf-8")).hexdigest() == (
+        "c68f935b6cbb22fb1f55780e78208e833f1b86ce3a44089f064177d6fc0dd90c")
     # The v2 APPLY script is byte-identical to 81e5d234. The shared inspect
     # script changed and must: the old one hangs the console.
     assert hashlib.sha256(script_v2.encode("utf-8")).hexdigest() == (
@@ -471,6 +476,33 @@ def test_v3_activity_adds_insert_and_preserves_v2_apply_script():
     v3["settings"]["script"]["value"] = script_v2
     assert v3 == v2
     assert subject.MUTATION_INSPECT_BLOCKS_V3 == MUTATION_INSPECT_BLOCKS
+
+
+def test_v3_inline_declarations_resolve_without_model_space_adds():
+    script = apply_lisp.build_apply_scr_v3()
+    reader = next(line for line in script.splitlines() if line.startswith("(defun leaf-read-plan "))
+    assert '(if (/= (car op) "BLOCKCHILD") (setq ops (cons op ops)))' in reader
+    assert "leaf-bc-complete-p" in reader
+    declaration = next(line for line in script.splitlines() if line.startswith("(defun leaf-blockchild-op "))
+    assert "leaf-bc-index" in declaration and "leaf-bc-geometry" in declaration
+    assert "leaf-color-value" in declaration and "leaf-linetype-value" in declaration
+    assert "leaf-weight-value" in declaration and "leaf-pending-children" in declaration
+    assert "(not (assoc (setq key" in declaration
+    capture = next(line for line in script.splitlines() if line.startswith("(defun leaf-apply (op /"))
+    assert '"BLOCKCHILD"' not in capture and '"ADDBLOCKDEF"' not in capture
+    child = next(line for line in script.splitlines() if line.startswith("(defun leaf-bd-apply-child "))
+    assert "vl-catch-all-apply" in child and "vl-catch-all-error-p" in child
+    assert "leaf-ensure-layer" in child and "leaf-bd-create-child" in child
+    assert '(defun leaf-bd-create-child (ed) (entmake ed))' in script
+    for line in script.splitlines():
+        assert line.count("(") == line.count(")"), line[:80]
+
+
+def test_v3_apply_builder_rejects_overlong_lines(monkeypatch):
+    monkeypatch.setattr(apply_lisp, "_BLOCK_DEFINITION_LISP_LINES",
+                        apply_lisp._BLOCK_DEFINITION_LISP_LINES + ('(princ "' + "x" * 1800 + '")',))
+    with pytest.raises(ValueError, match="MAX_SCRIPT_LINE_CHARS"):
+        apply_lisp.build_apply_scr_v3()
 
 
 def test_v3_readiness_absent_alias_is_a_refusal(monkeypatch):

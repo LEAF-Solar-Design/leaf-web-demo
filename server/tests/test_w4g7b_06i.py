@@ -291,20 +291,27 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
     assert not any(g["name"] == "CANARYRACK" for g in ungrouped.get("groups", []))
     write_loop.verify_live_mutation_effects(grouped, ungrouped, ungroup_plan)
 
-    # Atomic REPLACE copies a LINE, CIRCLE and open two-vertex LWPOLYLINE.
+    # Atomic REPLACE combines an inline LINE with edited committed members.
     polyline, = [p for p in ungrouped["polylines"]
                  if p["pts"] == [[12.0, 23.0, 0.0], [17.0, 23.0, 0.0]]]
     members = [new_lines[0]["handle"], circle_handle, polyline["handle"]]
     block_plan = validate_mutations(ungrouped, {
-        "block_defs": [{"name": "B", "base": [10, 20, 0], "members": members, "insert": 0}],
+        "block_defs": [{"name": "B", "base": [1, 1, 0], "members": members,
+                        "children": [{"kind": "LINE", "layer": "0", "pts": [[0, 0, 0], [3, 0, 0]]}],
+                        "order": ["C:0", *(f"H:{h}" for h in members)], "insert": 0}],
+        "set_circle": [{"handle": circle_handle, "c": [6, 1, 0], "r": 1}],
+        "set_layer": [{"handle": circle_handle, "layer": "SITE"}],
         "removed": members,
         "added": [{"handle": "block-insert", "kind": "INSERT", "name": "B", "layer": "0",
-                   "pt": [10, 20, 0], "rot": 0, "scale": [1, 1, 1]}],
+                   "pt": [1, 1, 0], "rot": 0, "scale": [1, 1, 1]}],
     })
     shutil.copyfile(output, group_host)
     output.unlink()
-    (tmp_path / "mutation-plan.txt").write_bytes(emit_plan(
-        block_plan, base_sha256=hashlib.sha256(group_host.read_bytes()).hexdigest()))
+    block_bytes = emit_plan(block_plan, base_sha256=hashlib.sha256(group_host.read_bytes()).hexdigest())
+    assert block_bytes.count(b"BLOCKCHILD|") == 1
+    assert block_bytes.index(f"RELAYER|{circle_handle}|SITE".encode()) < block_bytes.index(b"BLOCKCHILD|")
+    assert block_bytes.index(f"SETCIRCLE|{circle_handle}|6,1,0|1".encode()) < block_bytes.index(b"BLOCKCHILD|")
+    (tmp_path / "mutation-plan.txt").write_bytes(block_bytes)
     # Refuse the second child only after BLOCK and the first child exist.
     # Exercise the production nil handler and its UNDO mark, then save the
     # rolled-back state so the next console process can inspect the proof.
@@ -322,6 +329,7 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
         '(command "_.SAVEAS" "" "rolled-back.dwg"))',
     )
     _console(tmp_path, group_host, "block-failure.scr", failure_script, apply_failed=True)
+    assert not output.exists()
     assert (tmp_path / "partial-block.txt").read_text().strip() == "second child refused after BLOCK began"
     rolled_back = tmp_path / "rolled-back.dwg"
     assert rolled_back.exists() and rolled_back.stat().st_size > 0
@@ -340,11 +348,47 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
     for field in ("polylines", "circles", "arcs", "inserts", "dimensions"):
         assert rollback.get(field, []) == ungrouped.get(field, [])
     assert rollback.get("properties") == ungrouped.get("properties")
+
+    # Force the inline entmake seam to throw after BLOCK began. A caught
+    # LISP error must use the same UNDO path as the nil in the round above.
+    inline_failure_script = settings["script"]["value"].replace(
+        '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))',
+        '(setq leaf-canary-children 0)\r\n'
+        '(defun leaf-bd-create-child (ed) (setq leaf-canary-children (1+ leaf-canary-children)) '
+        '(if (= leaf-canary-children 1) (progn '
+        '(if begun (progn (setq leaf-proof (open "inline-child-failed.txt" "w")) '
+        '(write-line "inline child threw after BLOCK began" leaf-proof) (close leaf-proof))) '
+        '(car 1)) (entmake ed)))\r\n'
+        '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))',
+    ).replace(
+        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))',
+        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg") '
+        '(command "_.SAVEAS" "" "inline-rolled-back.dwg"))',
+    )
+    _console(tmp_path, group_host, "inline-child-failure.scr", inline_failure_script, apply_failed=True)
+    assert not output.exists()
+    assert (tmp_path / "inline-child-failed.txt").read_text().strip() == "inline child threw after BLOCK began"
+    inline_rollback = tmp_path / "inline-rolled-back.dwg"
+    assert inline_rollback.exists() and inline_rollback.stat().st_size > 0
+    _console(tmp_path, inline_rollback, "inline-rollback-inspect.scr",
+             rollback_inspect.replace("rollback-table.txt", "inline-rollback-table.txt"))
+    assert (tmp_path / "inline-rollback-table.txt").read_text().strip() == "no B table entry"
+    restored_inline = intake_parse.parse(families, "canary")
+    assert not restored_inline.get("parseErrors"), restored_inline.get("parseErrors")
+    assert "B" not in restored_inline.get("blocks", {})
+    for field in ("polylines", "circles", "arcs", "inserts", "dimensions", "properties"):
+        assert restored_inline.get(field) == ungrouped.get(field)
+
     _console(tmp_path, group_host, "block.scr", settings["script"]["value"])
     _console(tmp_path, output, "block-inspect.scr", inspect)
     blocked = intake_parse.parse(families, "canary")
     assert not blocked.get("parseErrors"), blocked.get("parseErrors")
-    assert [c["kind"] for c in blocked["blocks"]["B"]["children"]] == ["LINE", "CIRCLE", "LWPOLYLINE"]
+    assert [c["kind"] for c in blocked["blocks"]["B"]["children"]] == ["LINE", "LINE", "CIRCLE", "LWPOLYLINE"]
+    inline, _, moved_circle, _ = blocked["blocks"]["B"]["children"]
+    assert inline["pts"] == [[0, 0, 0], [3, 0, 0]]
+    assert inline["properties"] == {"aci": 256, "rgb": None, "linetype": "ByLayer", "lineweight": -1}
+    assert moved_circle["c"] == [6, 1, 0] and moved_circle["r"] == 1 and moved_circle["layer"] == "SITE"
+    assert len(blocked["created"]) == 1 and blocked["created"][0]["ordinal"] == 0
     assert len([e for e in blocked["inserts"] if e["name"] == "B"]) == 1
     assert not set(members) & {e["handle"] for field in ("polylines", "circles") for e in blocked.get(field, [])}
     assert all("properties" in c for c in blocked["blocks"]["B"]["children"])
