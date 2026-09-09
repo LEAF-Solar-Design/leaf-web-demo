@@ -42,30 +42,96 @@ def test_revision_rejects_privileged_fields(client, monkeypatch, field):
     assert rpc.json()['error']['code'] == -32602
 
 
-def test_revision_preserves_contract_and_replays_without_dispatch(monkeypatch):
-    contract = {'workflow': 'Old workflow', 'original_goal': 'Whole ambition',
-        'required_checks': [{'check_id': 'delivery.verified'}], 'release_boundary': 'CSV',
-        'transform_recipe': {'source_artifact': {'sha256': 'a' * 64}},
-        'selected_artifact': {'sha256': 'b' * 64}, 'deferred_items': ['Later scope']}
-    original = deepcopy(contract)
-    completion = {'release': {'contract': contract, 'status': 'needs_approach', 'contract_version': 1},
-                  'stages': [{'stage': 'publication', 'status': 'passed'}]}
-    requests = []
+def test_revision_recompiles_and_replays_without_material_or_dispatch(monkeypatch):
+    state = {'files': [{'path': 'records.json', 'content': '[{"name":"Example"}]'}]}
+    monkeypatch.setattr(service, 'authority', lambda *a: ('org', 'project', 'actor'))
+    monkeypatch.setattr(campaigns, '_STORE', SimpleNamespace(
+        get_campaign=lambda *a: {'prompt': 'Whole ambition'}))
+    monkeypatch.setattr(service, '_LIFECYCLE', SimpleNamespace(project_snapshot=lambda *a: deepcopy(state)))
+    finish = dict(delivery_profile='cad_file', intended_user='Owner', workflow='Download JSON',
+                  artifact_refs=['records.json'], deadline_at='2026-09-09T12:00:00Z')
+    original = service.compile_finish('tenant', 'project', 'campaign', finish)
+    original['request_key_digest'] = service._digest('create')
+    original['deferred_items'].append('Later scope')
+    # A predecessor's extra check must not leak into the newly compiled version.
+    original['required_checks'].append(dict(check_id='legacy.proof', stage='delivery', description='Old proof'))
+    completion = {'release': {'contract': deepcopy(original), 'delivery_profile': 'cad_file',
+                             'status': 'needs_approach', 'contract_version': 1},
+                  'stages': [{'stage': 'publication', 'status': 'passed', 'contract_version': 1}]}
+    frozen, requests = {}, []
+
+    def lookup(*args, **kwargs):
+        prior = frozen.get(kwargs['idempotency_key'])
+        if prior and prior['request_identity'] != kwargs['request_identity']:
+            raise service.delivery.DeliveryConflict('idempotency_conflict')
+        return deepcopy(prior) if prior else None
+
     def revise(*args, **kwargs):
         requests.append(deepcopy(kwargs))
-        completion['release'].update(contract=kwargs['contract'], status='paused', contract_version=2)
-    monkeypatch.setattr(service, 'authority', lambda *a: ('org', 'project', 'actor'))
-    monkeypatch.setattr(service, '_STORE', SimpleNamespace(
-        get_release=lambda *a: deepcopy(completion), revise_contract=revise))
-    monkeypatch.setattr(service, 'advance', lambda *a: pytest.fail('revision must not dispatch'))
-    for _ in range(2):
-        result = service.revise('tenant', 'project', 'campaign', 'release', 'Use published tool', 'Recover', 'key')
-        assert result['stages'] == completion['stages']
-        assert result['release']['status'] == 'paused'
-    assert requests[0] == requests[1]
-    assert requests[0] == {'contract': dict(original, workflow='Use published tool'), 'reason': 'Recover', 'idempotency_key': 'key', 'pause': True}
-    assert contract == original
+        frozen[kwargs['idempotency_key']] = deepcopy(kwargs)
+        completion['release'].update(contract=deepcopy(kwargs['contract']), status='paused',
+                                     contract_version=completion['release']['contract_version'] + 1)
 
+    monkeypatch.setattr(service, '_STORE', SimpleNamespace(
+        get_release=lambda *a: deepcopy(completion), get_contract_by_key=lookup, revise_contract=revise))
+    monkeypatch.setattr(service, 'advance', lambda *a: pytest.fail('revision must not dispatch'))
+    revised = service.revise('tenant', 'project', 'campaign', 'release', 'Download CSV', 'Recover', 'key')
+    contract = revised['release']['contract']
+    assert contract['transform_recipe']['recipe_id'] == 'json-records-to-csv'
+    assert contract['selected_artifact']['format'] == 'csv'
+    assert contract['required_checks'] == original['required_checks'][:-1]
+    assert contract['release_boundary'] != original['release_boundary']
+    for key in ('original_goal', 'request_digest', 'request_key_digest', 'deadline_at', 'intended_user'):
+        assert contract[key] == original[key]
+    assert set(original['deferred_items']) <= set(contract['deferred_items'])
+    assert len(contract['deferred_items']) == len(set(contract['deferred_items']))
+    assert revised['release']['status'] == 'paused'
+    assert revised['stages'] == completion['stages']
+    later = service.revise('tenant', 'project', 'campaign', 'release', 'Download JSON', 'Simplify', 'later')
+    assert 'transform_recipe' not in later['release']['contract']
+    assert later['release']['contract']['selected_artifact']['format'] == 'json'
+
+    def unavailable(*args):
+        pytest.fail('replay must not read project material')
+
+    monkeypatch.setattr(service, '_LIFECYCLE', SimpleNamespace(project_snapshot=unavailable))
+    monkeypatch.setattr(service, 'read_artifact', unavailable)
+    for status in ('paused', 'cancelled', 'finished'):
+        completion['release']['status'] = status
+        replay = service.revise('tenant', 'project', 'campaign', 'release', 'Download CSV', 'Recover', 'key')
+        assert replay['release']['contract'] == later['release']['contract']
+        assert replay['release']['contract_version'] == 3
+        assert replay['stages'] == revised['stages']
+    assert len(requests) == 2
+    assert frozen['key']['contract'] == contract
+    for workflow, reason in (('Download JSON', 'Recover'), ('Download CSV', 'Changed reason')):
+        with pytest.raises(service.delivery.DeliveryConflict, match='idempotency_conflict'):
+            service.revise('tenant', 'project', 'campaign', 'release', workflow, reason, 'key')
+    with pytest.raises(service.delivery.DeliveryConflict, match='release_terminal'):
+        service.revise('tenant', 'project', 'campaign', 'release', 'Download CSV', 'Recover', 'new')
+
+
+def test_create_replay_after_revision_uses_initial_frozen_contract(monkeypatch):
+    finish = dict(delivery_profile='cad_file', intended_user='Owner', workflow='Download JSON',
+                  artifact_refs=['records.json'])
+    initial = dict(workflow='Original compiled workflow', request_digest=service._digest(finish),
+                   request_key_digest=service._digest('create'))
+    revised = dict(initial, workflow='Revised compiled workflow')
+    row = dict(release_id='release', contract=revised, contract_version=2, status='paused')
+    calls = []
+
+    def create(*args, **kwargs):
+        calls.append(kwargs)
+        assert kwargs['contract'] == initial
+        return deepcopy(row)
+
+    monkeypatch.setattr(service, 'authority', lambda *a: ('org', 'project', 'actor'))
+    monkeypatch.setattr(service, '_STORE', SimpleNamespace(list_releases=lambda *a: [deepcopy(row)],
+        get_contract_by_key=lambda *a, **k: {'contract': deepcopy(initial)}, create_release=create))
+    monkeypatch.setattr(service, 'compile_finish', lambda *a: pytest.fail('create replay must not compile'))
+    monkeypatch.setattr(service, 'advance', lambda *a: {'release': deepcopy(row)})
+    result = service.create('tenant', 'project', 'campaign', finish, 'create')
+    assert len(calls) == 1 and result['release']['contract'] == revised
 
 @pytest.mark.parametrize('workflow,reason,key', [(' ', 'why', 'key'), ('x' * 16385, 'why', 'key'),
     ('new', '', 'key'), ('new', 'x' * 4097, 'key'), ('new', 'why', ''), ('new', 'why', 'x' * 129)])
@@ -90,7 +156,7 @@ def test_revision_transport_authority_and_conflicts(client, monkeypatch):
     def conflict(*a, **k):
         raise service.delivery.DeliveryConflict('approach_change_required')
     monkeypatch.setattr(service, '_STORE', SimpleNamespace(
-        get_release=lambda *a: {'release': {'contract': {'workflow': 'New workflow'}}}, revise_contract=conflict))
+        get_contract_by_key=conflict))
     assert client.post(path, json=body, headers={'Idempotency-Key': 'key'}).status_code == 409
 
 

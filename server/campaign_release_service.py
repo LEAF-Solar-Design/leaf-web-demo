@@ -120,7 +120,8 @@ def validate_finish(finish):
     if not isinstance(finish, dict) or not required <= set(finish) or set(finish) - required - {'deadline_at'}:
         raise ValueError('Invalid finish fields')
     for key in ('intended_user', 'workflow'):
-        if not isinstance(finish[key], str) or not 1 <= len(finish[key].strip()) <= 2000:
+        limit = 16384 if key == 'workflow' else 2000
+        if not isinstance(finish[key], str) or not 1 <= len(finish[key].strip()) <= limit:
             raise ValueError('Invalid finish description')
     if not isinstance(finish['delivery_profile'], str) or not re.fullmatch('[a-z][a-z0-9_]{0,39}', finish['delivery_profile']):
         raise ValueError('Invalid delivery profile')
@@ -260,6 +261,10 @@ def create(tenant, project_id, campaign_id, finish, idempotency_key,
         contract = existing['contract']
         if contract.get('request_digest') != _digest(finish):
             raise delivery.DeliveryConflict('Finish idempotency collision')
+        if existing.get('contract_version', 1) > 1:
+            contract = _store().get_contract_by_key(
+                org, project, campaign_id, existing['release_id'], actor,
+                idempotency_key=idempotency_key)['contract']
     else:
         contract = compile_finish(tenant, project_id, campaign_id, finish)
         contract['request_key_digest'] = request_key_digest
@@ -296,12 +301,33 @@ def revise(tenant, project_id, campaign_id, release_id, workflow, reason, idempo
         if not isinstance(value, str) or not value.strip() or len(value) > limit:
             raise ValueError('Invalid ' + name)
     org, project, actor = authority(tenant, project_id)
+    request_identity = _digest({'workflow': workflow, 'reason': reason})
+    frozen = _store().get_contract_by_key(
+        org, project, campaign_id, release_id, actor, idempotency_key=idempotency_key,
+        request_identity=request_identity, reason=reason)
+    if frozen is not None:
+        return _store().get_release(org, project, campaign_id, release_id)
     current = _store().get_release(org, project, campaign_id, release_id)
-    contract = dict(current['release']['contract'], workflow=workflow)
-    # The store checks replay before identical-workflow and terminal conflicts.
+    release = current['release']
+    if release['status'] in ('finished', 'cancelled'):
+        raise delivery.DeliveryConflict('release_terminal')
+    previous = release['contract']
+    finish = {key: previous[key] for key in ('intended_user', 'artifact_refs', 'deadline_at')
+              if key in previous}
+    finish.update(delivery_profile=release['delivery_profile'], workflow=workflow)
+    contract = compile_finish(tenant, project_id, campaign_id, finish)
+    for key in ('original_goal', 'request_digest', 'request_key_digest'):
+        if key in previous:
+            contract[key] = previous[key]
+        else:
+            contract.pop(key, None)
+    contract['deferred_items'] = list(dict.fromkeys(
+        contract.get('deferred_items', []) + previous.get('deferred_items', [])))
+    # Recheck the stable request under the store lock: the first compiler wins.
     _store().revise_contract(org, project, campaign_id, release_id, actor,
-                             contract=contract, reason=reason, idempotency_key=idempotency_key, pause=True)
-    return snapshot(tenant, project_id, campaign_id, release_id)
+                             contract=contract, reason=reason, idempotency_key=idempotency_key,
+                             pause=True, request_identity=request_identity)
+    return _store().get_release(org, project, campaign_id, release_id)
 
 
 def transition(tenant, project_id, campaign_id, release_id, action,
