@@ -1,6 +1,71 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Playwright supplies Chromium. The unused Chrome apt index must not prevent
+# Ubuntu from supplying its OS libraries; signature/hash checks stay enabled.
+python - <<'LEAF_CI_APT_SOURCE_FILTER'
+from pathlib import Path
+import re
+
+
+def is_unused_chrome(uri):
+    return uri in {
+        f"{scheme}://dl.google.com/linux/chrome-stable/deb{suffix}"
+        for scheme in ("http", "https") for suffix in ("", "/")
+    }
+
+
+def filter_list(text):
+    result = []
+    for line in text.splitlines(keepends=True):
+        match = re.match(r"^\s*deb(?:-src)?\s+(?:\[[^\]\r\n]*\]\s+)?(\S+)", line)
+        result.append("# leaf-ci unused Chrome source: " + line
+                      if match and is_unused_chrome(match.group(1)) else line)
+    return "".join(result)
+
+
+def filter_deb822(text):
+    # Retain separators and every unrelated stanza byte-for-byte.
+    parts = re.split(r"((?:\r?\n)[ \t]*(?:\r?\n))", text)
+    for index in range(0, len(parts), 2):
+        stanza = parts[index]
+        match = re.search(r"(?im)^URIs:[^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*", stanza)
+        if not match:
+            continue
+        uris = match.group().split(":", 1)[1].split()
+        kept = [uri for uri in uris if not is_unused_chrome(uri)]
+        if kept == uris:
+            continue
+        if kept:
+            stanza = stanza[:match.start()] + "URIs: " + " ".join(kept) + stanza[match.end():]
+        else:
+            # Comment the complete stanza; never leave an enabled URI-less entry.
+            stanza = "".join("# leaf-ci unused Chrome source: " + line
+                             for line in stanza.splitlines(keepends=True))
+        parts[index] = stanza
+    return "".join(parts)
+
+
+def disable_unused_chrome_sources(root):
+    candidates = [root / "sources.list"]
+    directory = root / "sources.list.d"
+    if directory.is_dir():
+        candidates.extend(sorted(directory.glob("*.list")))
+        candidates.extend(sorted(directory.glob("*.sources")))
+    for path in candidates:
+        if not path.exists():
+            continue
+        original = path.read_bytes()
+        text = original.decode("utf-8")
+        updated = filter_deb822(text) if path.suffix == ".sources" else filter_list(text)
+        if updated != text:
+            path.write_bytes(updated.encode("utf-8"))
+
+
+if __name__ == "__main__":
+    disable_unused_chrome_sources(Path("/etc/apt"))
+LEAF_CI_APT_SOURCE_FILTER
+
 # leaf-web-demo native CI: contract, license-fence, and Test gate UNSHARDED.
 # The queue leg lives in .codebuild/mq.sh and is not this script's job.
 # Workflows still dark: speculate-platform-images, prewarm-staging-cutover,
