@@ -189,5 +189,3 @@ def test_surface_receipt_cli_accepts_current_producer(tmp_path):
         "--candidate-digest", DIGESTS["app"], "--terraform-workflow-blob", "f" * 40,
     ], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
-
-
