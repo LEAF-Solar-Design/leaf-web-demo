@@ -1735,7 +1735,7 @@ test.describe('route matrix, rail ON', () => {
     await expect(ribbon.locator('[data-tool="redo-edit"]')).toBeEnabled()
   })
 
-  test('W4g-7c-2c: create a block from committed LINE and CIRCLE picks', async ({ page, request }) => {
+  test('W4g-7c-2d: create a block from committed and unsaved LINE picks', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
     await setRail(page, '1')
@@ -1769,7 +1769,7 @@ test.describe('route matrix, rail ON', () => {
       await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(index + 1), { timeout: 60_000 })
       await page.keyboard.press('Escape')
     }
-    // These members must be committed. Publish the drawn bytes to this test's
+    // Commit the first three entities. Publish the drawn bytes to this test's
     // intercepted mock head, then reopen it; never move the shared demo head.
     headDxf = await page.locator('a[download][href^="blob:"]').evaluate(async (link) => (await fetch(link.href)).text())
     await page.reload()
@@ -1778,6 +1778,14 @@ test.describe('route matrix, rail ON', () => {
     await page.getByRole('tab', { name: 'Draw' }).click()
     await page.locator('body').press('Escape')
     await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
+    // The fourth entity stays unsaved and becomes an inline block child.
+    await bar.fill('LINE')
+    await bar.press('Enter')
+    await page.getByLabel('ribbon x', { exact: true }).fill('20,30')
+    await page.getByLabel('ribbon x2', { exact: true }).fill('25,30')
+    await page.getByLabel('ribbon x2', { exact: true }).press('Enter')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('4', { timeout: 60_000 })
+    await page.keyboard.press('Escape')
     const clickWorld = async (x, y) => {
       const point = await page.evaluate(({ x, y }) => {
         const pt = document.querySelector('.studio-ground .viewer-canvas').__cadviewer.project(x, y)
@@ -1791,14 +1799,14 @@ test.describe('route matrix, rail ON', () => {
     await bar.press('Enter')
     await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'createBlock')
     await expect(page.getByLabel('ribbon members')).toHaveText('1 objects')
-    await clickWorld(9, 24)
+    await clickWorld(22.5, 30)
     await expect(page.getByLabel('ribbon members')).toHaveText('2 objects')
     await page.getByLabel('ribbon members').press('Enter')
     await page.getByLabel('ribbon x', { exact: true }).fill('10,20')
     await page.getByLabel('ribbon x', { exact: true }).press('Enter')
     await page.getByLabel('ribbon block name').fill('BLK1')
     await page.getByLabel('ribbon block name').press('Enter')
-    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('2', { timeout: 60_000 })
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('3', { timeout: 60_000 })
     await expect(page.getByTestId('cad-edit-entity-list')).toContainText('INSERT on layer 0')
     // Select the surviving LINE on the canvas, then reissue B without Escape
     // from a partially answered BLOCK prompt to prove an explicit fresh arm.
@@ -1818,10 +1826,10 @@ test.describe('route matrix, rail ON', () => {
     await page.keyboard.press('Escape')
     await bar.fill('UNDO')
     await bar.press('Enter')
-    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('3', { timeout: 60_000 })
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('4', { timeout: 60_000 })
     await bar.fill('REDO')
     await bar.press('Enter')
-    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('2', { timeout: 60_000 })
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('3', { timeout: 60_000 })
     await bar.fill('BLOCK')
     await bar.press('Enter')
     await page.getByLabel('ribbon members').press('Enter')

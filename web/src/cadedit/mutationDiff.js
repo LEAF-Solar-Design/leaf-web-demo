@@ -483,6 +483,7 @@ export function diffPlan(committed, current) {
     }
   }
   added.sort(byHandle)
+  // Inline block children are not adds and never take same-plan ordinals.
   if ((addedGroups.length || removedGroups.length || pendingBlocks.length) && added.length > 1) {
     try {
       const prefixes = new Map(added.map((record) => [record.handle, additionSortPrefix(record)]))
@@ -494,28 +495,69 @@ export function diffPlan(committed, current) {
   const ordinal = new Map(added.map((record, index) => [record.handle, index]))
   const blockDefs = []
   const consumed = new Set()
-  const committedEntities = Array.isArray(committed) ? committed : committed?.entities || []
   for (const block of pendingBlocks) {
-    const unmatched = () => refuse(`Block ${block?.name || ''} cannot be saved: every child must match a distinct removed committed entity and its replacement INSERT.`, null, 'block-def-unmatched')
+    const unmatched = () => refuse(`Block ${block?.name || ''} cannot be saved: every child must be an eligible inline child or a distinct removed committed entity, with its replacement INSERT.`, null, 'block-def-unmatched')
     const children = block?.children
     const base = Array.isArray(block?.base) && block.base.length === 3 && block.base.every(finite) && block.base[2] === 0 ? block.base.slice() : null
     if (!base || !Array.isArray(children) || !children.length || children.length > 60 || block.complete === false || block.baseUnknown) { unmatched(); continue }
     const members = []
+    const inline = []
+    const order = []
+    const settersBefore = setLayer.length + setPoints.length + setCircle.length + setArc.length
     for (const child of children) {
-      const match = committedEntities.find((entity) => {
-        const handle = hexHandle(entity.id ?? entity.handle ?? '')
-        return removed.includes(handle) && !consumed.has(handle) && sameBlockMember(entity, child)
-      })
-      if (!match) { unmatched(); break }
-      const handle = hexHandle(match.id ?? match.handle)
+      const handle = hexHandle(child?.handle ?? child?.id ?? '')
+      const now = planGeometry(child)
+      if (!handle || consumed.has(handle) || !['LINE', 'LWPOLYLINE', 'CIRCLE', 'ARC'].includes(child?.type)
+          || !now || now.curved) { unmatched(); break }
       consumed.add(handle)
+      const was = before.get(handle)
+      if (!was) {
+        if ((child.constantWidth ?? 0) !== 0 || (child.startWidths || []).some((w) => w !== 0)
+            || (child.endWidths || []).some((w) => w !== 0) || now.props.trueColor) { unmatched(); break }
+        const record = addedRecord(handle, now)
+        delete record.handle
+        if (!record.kind) record.kind = now.kind
+        order.push(`C:${inline.length}`)
+        inline.push(record)
+        continue
+      }
+      if (!removed.includes(handle) || was.curved
+          || (was.kind !== now.kind && !(isLinear(was) && isLinear(now)))) { unmatched(); break }
+      const wasProps = was.props
+      const nowProps = now.props
+      if (wasProps.aci !== nowProps.aci || JSON.stringify(wasProps.trueColor) !== JSON.stringify(nowProps.trueColor)
+          || wasProps.linetype.toLowerCase() !== nowProps.linetype.toLowerCase() || wasProps.lineweight !== nowProps.lineweight) {
+        refuse('block members keep their colour, linetype and lineweight; change them after the block exists', null, 'block-def-unmatched')
+        break
+      }
+      if (was.layer !== now.layer) setLayer.push({ handle, layer: now.layer })
+      if (now.kind === 'CIRCLE') {
+        if (!sameRound(was, now)) setCircle.push({ handle, c: now.c, r: now.r })
+      } else if (now.kind === 'ARC') {
+        if (!sameRound(was, now)) setArc.push({ handle, c: now.c, r: now.r, start_deg: now.start_deg, end_deg: now.end_deg })
+      } else {
+        const wasClosed = was.kind === 'LWPOLYLINE' && was.closed
+        const nowClosed = now.kind === 'LWPOLYLINE' && now.closed
+        const wasB = was.bulges || []
+        const nowB = now.bulges || []
+        const sameBulges = wasB.length === nowB.length && wasB.every((b, i) => sameNumber(b, nowB[i]))
+        if (wasClosed !== nowClosed || !samePoints(was.pts, now.pts) || !sameBulges) {
+          setPoints.push({ handle, closed: nowClosed, pts: now.pts })
+        }
+      }
       members.push(handle)
+      order.push(`H:${handle}`)
     }
     const replacements = added.filter((record) => record.kind === 'INSERT' && record.name === block.name)
     const replacement = replacements[0]
-    if (members.length !== children.length || replacements.length !== 1 || replacement.layer !== '0'
+    if (order.length !== children.length || replacements.length !== 1 || replacement.layer !== '0'
         || !samePoint(replacement.pt, base) || replacement.rot !== 0 || !samePoint(replacement.scale, [1, 1, 1])) { unmatched(); continue }
-    blockDefs.push({ name: block.name, base, members: members.sort(), insert: ordinal.get(replacement.handle) })
+    const definition = { name: block.name, base, members: members.sort(), insert: ordinal.get(replacement.handle) }
+    if (inline.length || setLayer.length + setPoints.length + setCircle.length + setArc.length > settersBefore) {
+      definition.children = inline
+      definition.order = order
+    }
+    blockDefs.push(definition)
   }
   for (const group of addedGroups) {
     group.members = group.members.map((handle) => {

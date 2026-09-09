@@ -614,6 +614,7 @@ fn block_catalogue(document: &CadDocument, bases_unknown: bool, unknown_bases: &
                     Some(entity) if matches!(entity, EntityType::Line(_) | EntityType::LwPolyline(_)
                         | EntityType::Polyline2D(_) | EntityType::Circle(_) | EntityType::Arc(_) | EntityType::Text(_)) => {
                         let mut child = entity_record(0, entity, false);
+                        // Keep entity_record's decimal handle for identity-based plan lowering.
                         child.as_object_mut().unwrap().remove("index");
                         children.push(child);
                     }
@@ -1078,13 +1079,7 @@ impl ParsedDxf {
             if defining.contains(&common.handle) {
                 return refuse("block_member_dimension: a dimension defining entity cannot become a block child");
             }
-            let mut child = entity.clone();
-            child.common_mut().handle = Handle::NULL;
-            child.common_mut().owner_handle = Handle::NULL;
-            child.common_mut().entity_mode = None;
-            child.common_mut().reactors.clear();
-            child.common_mut().xdictionary_handle = None;
-            children.push(child);
+            children.push(common.handle);
         }
         // All changes are staged. Even an internal insertion failure leaves self byte-identical.
         let mut next = self.inner.clone();
@@ -1095,13 +1090,20 @@ impl ParsedDxf {
         block.base_point = Vector3::new(base[0], base[1], base[2]);
         let owner = block.handle;
         next.block_records.add(block).map_err(|e| format!("block_create_failed:{e}"))?;
-        for mut child in children {
+        for handle in children {
+            let mut child = next.remove_entity(handle).ok_or_else(|| "block_member_missing".to_string())?;
+            // remove_entity leaves membership for undo; reparenting must prune it.
+            for old_owner in next.block_records.iter_mut() {
+                old_owner.entity_handles.retain(|member| *member != handle);
+            }
             child.common_mut().owner_handle = owner;
+            child.common_mut().entity_mode = None;
+            child.common_mut().reactors.clear();
+            child.common_mut().xdictionary_handle = None;
             next.add_entity(child).map_err(|e| format!("block_create_failed:{e}"))?;
         }
         let insert = Insert::new(name, Vector3::new(base[0], base[1], base[2]));
         let inserted = next.add_entity(EntityType::Insert(insert)).map_err(|e| format!("block_create_failed:{e}"))?;
-        for handle in handles { next.remove_entity(handle).ok_or_else(|| "block_member_missing".to_string())?; }
         self.inner = next;
         Ok(handle_id(inserted.value()))
     }
@@ -2760,6 +2762,67 @@ mod created_entity_roundtrip {
         assert_eq!(restored[0]["base"], definitions[0]["base"]);
         assert_eq!(restored[0]["children"][0]["vertices"], definitions[0]["children"][0]["vertices"]);
         assert_eq!(projected_entities(&back.inner).len(), 1);
+    }
+
+    #[test]
+    fn create_block_retains_created_and_loaded_handles_and_prunes_old_membership() {
+        let mut doc = parse_dxf_core(b"0\nSECTION\n2\nENTITIES\n0\nCIRCLE\n5\n11\n8\n0\n10\n4\n20\n2\n40\n1\n0\nENDSEC\n0\nEOF\n").unwrap();
+        let circle = "17".to_string();
+        let line = doc.create_line_core(0.0, 0.0, 3.0, 0.0, "0").unwrap();
+        let members = vec![line.clone(), circle.clone()];
+        let original_handles: Vec<Handle> = members.iter().map(|id| Handle::new(id.parse().unwrap())).collect();
+        let old_owner = doc.inner.block_records.iter().find(|b| b.is_model_space()).unwrap().handle;
+        for handle in &original_handles {
+            assert!(doc.inner.block_records.iter().find(|b| b.handle == old_owner).unwrap().entity_handles.contains(handle));
+        }
+        let inserted = doc.create_block_core("B", [1.0, 1.0, 0.0], &members, "0").unwrap();
+        let projection = projected_entities(&doc.inner);
+        assert_eq!(projection.len(), 1);
+        assert_eq!(projection[0]["handle"], inserted);
+        assert_eq!(projection[0]["type"], "INSERT");
+        let block = doc.inner.block_records.get("B").unwrap();
+        assert_eq!(block.entity_handles, original_handles);
+        for handle in &original_handles {
+            assert_eq!(doc.inner.get_entity(*handle).unwrap().common().handle, *handle);
+            assert_eq!(doc.inner.get_entity(*handle).unwrap().common().owner_handle, block.handle);
+            assert!(!doc.inner.block_records.iter().find(|b| b.handle == old_owner).unwrap().entity_handles.contains(handle));
+        }
+        let catalogue = block_catalogue(&doc.inner, false, &doc.unknown_block_bases);
+        assert_eq!(catalogue[0]["children"][0]["handle"], line);
+        assert_eq!(catalogue[0]["children"][1]["handle"], circle);
+        let bytes = DxfWriter::new(&doc.inner).write_to_vec().unwrap();
+        let (bytes, _) = patch_block_bases(&doc.inner, bytes);
+        let back = parse_dxf_core(&bytes).unwrap();
+        let restored = block_catalogue(&back.inner, false, &back.unknown_block_bases);
+        assert_eq!(restored[0]["children"], catalogue[0]["children"]);
+        assert_eq!(projected_entities(&back.inner).len(), 1);
+        let model_space = back.inner.block_records.iter().find(|b| b.is_model_space()).unwrap();
+        assert!(original_handles.iter().all(|handle| !model_space.entity_handles.contains(handle)));
+    }
+
+    #[test]
+    fn create_block_keeps_a_moved_members_handle_and_geometry() {
+        let mut doc = empty_doc();
+        let line = doc.create_line_core(0.0, 0.0, 3.0, 0.0, "0").unwrap();
+        doc.translate_entity_core(0, 2.0, -1.0).unwrap();
+        doc.create_block_core("B", [1.0, 1.0, 0.0], &[line.clone()], "0").unwrap();
+        let catalogue = block_catalogue(&doc.inner, false, &doc.unknown_block_bases);
+        assert_eq!(catalogue[0]["children"][0]["handle"], line);
+        assert_eq!(catalogue[0]["children"][0]["vertices"], serde_json::json!([[2.0, -1.0, 0.0], [5.0, -1.0, 0.0]]));
+    }
+
+    #[test]
+    fn create_block_failure_after_reparenting_one_child_leaves_original_bytes() {
+        let mut doc = empty_doc();
+        let line = doc.create_line_core(0.0, 0.0, 3.0, 0.0, "0").unwrap();
+        let circle = doc.create_circle_core(4.0, 2.0, 1.0, "0").unwrap();
+        // A corrupt identity passes member lookup but cannot be removed by its
+        // flat-storage key. The circle is already reparented on the staged clone.
+        doc.inner.get_entity_mut(Handle::new(line.parse().unwrap())).unwrap().common_mut().handle = Handle::new(0xffff);
+        let before = DxfWriter::new(&doc.inner).write_to_vec().unwrap();
+        assert_eq!(code(doc.create_block_core("B", [1.0, 1.0, 0.0], &[circle, "65535".to_string()], "0")), "block_member_missing");
+        assert_eq!(before, DxfWriter::new(&doc.inner).write_to_vec().unwrap());
+        assert!(doc.inner.block_records.get("B").is_none());
     }
 
     #[test]
