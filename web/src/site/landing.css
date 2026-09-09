@@ -1197,6 +1197,9 @@
 }
 .studio-shell header.top :is(.mark, .who, .who b, .proj .name, .switch) { color: rgba(240, 242, 240, .92); }
 .studio-shell header.top .meta { color: rgba(240, 242, 240, .6); }
+/* Browser results use paper; the sticky shell header keeps its dark material. */
+.studio-shell .app[data-project-workspace="results"] .home-q { color: var(--foreground); }
+.studio-shell .app[data-project-workspace="results"] > header.top { background: rgba(10, 10, 10, .84); }
 .studio-shell header.top .chip-act,
 .studio-shell footer.foot-bar .chip-act,
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .chip-act {
