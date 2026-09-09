@@ -988,6 +988,8 @@ test.describe('route matrix, rail ON', () => {
     // x2 takes the pick's x and y2 holds b's y. F8 again turns it off.
     await page.keyboard.press('F8')
     await expect(page.getByTestId('cockpit-ortho')).toHaveAttribute('aria-pressed', 'true')
+    await expect(page.locator('[data-toggle="ortho"]')).toBeEnabled()
+    await expect(page.locator('[data-toggle="ortho"]')).toHaveAttribute('aria-pressed', 'true')
     const o = await groundPick(0.95, 0.42)
     expect(o.onGround, `ortho pick pixel (${o.x},${o.y}) hit ${o.name}, not the drawing`).toBe(true)
     expect(Math.abs(o.wx - b.wx)).toBeGreaterThan(Math.abs(o.wy - b.wy))
@@ -996,6 +998,8 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByLabel('ribbon y2', { exact: true })).toHaveValue(r3(b.wy))
     await page.keyboard.press('F8')
     await expect(page.getByTestId('cockpit-ortho')).toHaveAttribute('aria-pressed', 'false')
+    await expect(page.locator('[data-toggle="ortho"]')).toBeEnabled()
+    await expect(page.locator('[data-toggle="ortho"]')).toHaveAttribute('aria-pressed', 'false')
     // W4f-5: Enter draws that segment (the chain moves on), then F3 turns
     // OSNAP on and a click a few pixels off the imported polyline's corner
     // (50, 5) lands exactly on it. F3 again turns it off.
@@ -1003,6 +1007,8 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('5', { timeout: 60_000 })
     await page.keyboard.press('F3')
     await expect(page.getByTestId('cockpit-osnap')).toHaveAttribute('aria-pressed', 'true')
+    await expect(page.locator('[data-toggle="osnap"]')).toBeEnabled()
+    await expect(page.locator('[data-toggle="osnap"]')).toHaveAttribute('aria-pressed', 'true')
     const corner = await page.evaluate(() => {
       const canvas = document.querySelector('.studio-ground .viewer-canvas')
       const px = canvas.__cadviewer.project(50, 5)
@@ -1017,6 +1023,14 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByLabel('ribbon y2', { exact: true })).toHaveValue('5')
     await page.keyboard.press('F3')
     await expect(page.getByTestId('cockpit-osnap')).toHaveAttribute('aria-pressed', 'false')
+    await expect(page.locator('[data-toggle="osnap"]')).toBeEnabled()
+    await expect(page.locator('[data-toggle="osnap"]')).toHaveAttribute('aria-pressed', 'false')
+    await page.locator('[data-toggle="ortho"]').click()
+    await expect(page.getByTestId('cockpit-ortho')).toHaveAttribute('aria-pressed', 'true')
+    await page.locator('[data-toggle="ortho"]').click()
+    await expect(page.getByTestId('cockpit-ortho')).toHaveAttribute('aria-pressed', 'false')
+    await expect(page.locator('[data-toggle="snap"]')).toBeDisabled()
+    await expect(page.locator('[data-toggle="snap"]')).toHaveAttribute('title', /not in the browser viewer yet/)
     // W4f-6: the prompt validates as you type with the store's own sentence:
     // a word in x2 outlines the field, names the refusal and holds Run; the
     // number back releases it.

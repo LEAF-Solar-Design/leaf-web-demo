@@ -5,11 +5,112 @@
  * down on unmount.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 
-import { CockpitStatus, FootRegion, ViewCluster, formatCoordinate, formatScale, zoomViewer } from './DrawingCockpit.jsx'
+import { CockpitStatus, FootRegion, StatusToggles, ViewCluster, formatCoordinate, formatScale, zoomViewer } from './DrawingCockpit.jsx'
 
 afterEach(cleanup)
+
+describe('StatusToggles', () => {
+  const modes = (detail) => act(() => { window.dispatchEvent(new CustomEvent('cockpit:modes', { detail })) })
+  const button = (id) => document.querySelector(`[data-toggle="${id}"]`)
+  const reason = 'not in the browser viewer yet'
+  const expectDisabled = () => {
+    expect(screen.getAllByRole('button').map((el) => el.dataset.toggle)).toEqual(['snap', 'grid', 'ortho', 'polar', 'osnap', 'fullscreen'])
+    for (const id of ['snap', 'grid', 'ortho', 'polar', 'osnap']) {
+      expect(button(id).disabled).toBe(true)
+      expect(button(id).title).toContain(reason)
+      expect(button(id).getAttribute('aria-label')).toContain(reason)
+      expect(button(id).hasAttribute('aria-pressed')).toBe(false)
+    }
+  }
+
+  it('starts with the five disabled placeholders in their original order', () => {
+    render(<StatusToggles />)
+    expectDisabled()
+  })
+
+  it('requests the modes exactly once on mount', () => {
+    const listener = vi.fn()
+    window.addEventListener('cockpit:modes-request', listener)
+    try {
+      render(<StatusToggles />)
+      expect(listener).toHaveBeenCalledTimes(1)
+    } finally {
+      window.removeEventListener('cockpit:modes-request', listener)
+    }
+  })
+
+  it('enables only ORTHO and OSNAP with the provider values and titles', () => {
+    render(<StatusToggles />)
+    const placeholders = ['snap', 'grid', 'polar'].map((id) => button(id).outerHTML)
+    modes({ live: true, ortho: false, osnap: true })
+    expect(button('ortho').disabled).toBe(false)
+    expect(button('osnap').disabled).toBe(false)
+    expect(button('ortho').getAttribute('aria-pressed')).toBe('false')
+    expect(button('osnap').getAttribute('aria-pressed')).toBe('true')
+    expect(button('ortho').title).toBe('Ortho mode off (F8)')
+    expect(button('osnap').title).toBe('Object snap on (F3)')
+    expect(button('ortho').getAttribute('aria-label')).toBe('Ortho mode')
+    expect(button('osnap').getAttribute('aria-label')).toBe('Object snap')
+    expect(['snap', 'grid', 'polar'].map((id) => button(id).outerHTML)).toEqual(placeholders)
+    modes({ live: true, ortho: true, osnap: false })
+    expect(button('ortho').title).toBe('Ortho mode on (F8)')
+    expect(button('osnap').title).toBe('Object snap off (F3)')
+  })
+
+  it('dispatches one toggle and waits for the provider to change pressed state', () => {
+    render(<StatusToggles />)
+    modes({ live: true, ortho: false, osnap: true })
+    const listener = vi.fn()
+    window.addEventListener('cockpit:mode-toggle', listener)
+    try {
+      fireEvent.click(button('ortho'))
+      expect(listener).toHaveBeenCalledTimes(1)
+      expect(listener.mock.calls[0][0].detail).toEqual({ id: 'ortho' })
+      expect(button('ortho').getAttribute('aria-pressed')).toBe('false')
+      modes({ live: true, ortho: true, osnap: true })
+      expect(button('ortho').getAttribute('aria-pressed')).toBe('true')
+    } finally {
+      window.removeEventListener('cockpit:mode-toggle', listener)
+    }
+  })
+
+  it('restores the byte-identical disabled DOM when the bridge goes away', () => {
+    const { container } = render(<StatusToggles />)
+    const before = container.innerHTML
+    modes({ live: true, ortho: true, osnap: false })
+    modes({ live: false })
+    expectDisabled()
+    expect(container.innerHTML).toBe(before)
+  })
+
+  it('ignores malformed details without changing the rendered state', () => {
+    const { container } = render(<StatusToggles />)
+    modes({ live: true, ortho: false, osnap: true })
+    const before = container.innerHTML
+    for (const detail of [{ live: true, ortho: 'yes', osnap: true }, { ortho: true }, 'bad', null, { live: 'true' }, { live: true, ortho: false, osnap: 1 }]) {
+      modes(detail)
+      expect(container.innerHTML).toBe(before)
+    }
+  })
+
+  it('removes its modes listener on unmount', () => {
+    const add = vi.spyOn(window, 'addEventListener')
+    const remove = vi.spyOn(window, 'removeEventListener')
+    try {
+      const { container, unmount } = render(<StatusToggles />)
+      const listener = add.mock.calls.find(([type]) => type === 'cockpit:modes')[1]
+      unmount()
+      expect(remove).toHaveBeenCalledWith('cockpit:modes', listener)
+      expect(() => modes({ live: true, ortho: true, osnap: false })).not.toThrow()
+      expect(container.innerHTML).toBe('')
+    } finally {
+      add.mockRestore()
+      remove.mockRestore()
+    }
+  })
+})
 
 const nextFrame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()))
 // jsdom's PointerEvent carries no client coordinates; a MouseEvent with the

@@ -126,6 +126,9 @@ const DECLARED_AND_USED = [
 
 describe('App.jsx wiring', () => {
   describe('W4g selection mirror back', () => {
+    it('mounts StatusModesBridge under the engine flag', () => {
+      assert.match(appSource, /\{ENV_CAD_EDIT && <StatusModesBridge \/>\}/)
+    })
     it('passes the console selection setter to EngineDocumentView', () => {
       assert.match(appSource, /<EngineDocumentView\b(?:(?!\/>)[\s\S])*?\bonSelectedHandleChange=\{setSelectedHandle\}/)
     })
