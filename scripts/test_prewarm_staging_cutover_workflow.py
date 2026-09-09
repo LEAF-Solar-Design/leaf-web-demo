@@ -396,6 +396,7 @@ def test_the_dispatch_stages_configured_services_on_the_prewarm_rail():
     assert set(re.findall(r"name=([A-Z_]+),value=", body)) == {
         "STEP", "LEAF_DEPLOY_APPROVED_BY", "LEAF_DEPLOY_SERVICE",
         "LEAF_DEPLOY_IMAGE_TAG", "LEAF_DEPLOY_EXPECTED_TD", "LEAF_DEPLOY_REQUEST_ID",
+        "LEAF_DEPLOY_PREWARM_PARK",
     }
     job = str(group_workflow_document()["jobs"]["stage-group"])
     assert "gh workflow run" not in job
@@ -1120,6 +1121,7 @@ def test_codebuild_dispatch_and_relay_receipt_executed(tmp_path, response, dispo
             "name=LEAF_DEPLOY_SERVICE,value=" + dispatched_service,
             "name=LEAF_DEPLOY_IMAGE_TAG,value=" + image_tag,
             "name=LEAF_DEPLOY_EXPECTED_TD,value=auto-live",
+            "name=LEAF_DEPLOY_PREWARM_PARK,value=1",
             "name=LEAF_DEPLOY_REQUEST_ID,value=" + "a" * 12 + "-77", "--output", "json",
         ]
     run_step(step_body("stage-group", "Emit the relay receipt"), tmp_path, {
@@ -1134,6 +1136,44 @@ def test_codebuild_dispatch_and_relay_receipt_executed(tmp_path, response, dispo
     assert receipt["configured_services"] == ["web"]
     assert receipt["configured_services"] == sorted(set(group_workflow_document()["env"]["STAGE_SERVICES"].split()))
     assert receipt["relay_run_id"] == "77"
+
+
+@needs_shell
+def test_the_dispatch_asks_the_step_to_park_the_idle_colour(tmp_path):
+    body = step_body("stage-group", "Dispatch the prewarm")
+    assert "parks the idle colour" in body
+    without_park = re.sub(r"name=LEAF_DEPLOY_PREWARM_PARK,value=1\s*\\\n", "", body)
+    for scenario, dispatch_body in (("park", body), ("without-park", without_park)):
+        work = tmp_path / scenario
+        work.mkdir()
+        binary = work / "bin"
+        binary.mkdir()
+        (work / "response.txt").write_text(json.dumps({
+            "build": {"id": "leaf-deploy-terraform-staging:" + "a" * 36},
+        }), encoding="utf-8")
+        fake = binary / "aws"
+        fake.write_text(textwrap.dedent('''\
+            #!/usr/bin/env bash
+            set -euo pipefail
+            printf '%s\\n' "$*" >> aws-calls.txt
+            if [[ "$*" == *"name=LEAF_DEPLOY_SERVICE,value=web"* ]]; then
+              cat response.txt
+              if [ "$(cat response.txt)" = refused ]; then exit 1; fi
+            else
+              echo '{"build":{"id":"leaf-deploy-terraform-staging:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}'
+            fi
+            '''), encoding="utf-8", newline="\n")
+        fake.chmod(0o755)
+        run_step(dispatch_body, work, {
+            "STAGE_SERVICES": group_workflow_document()["env"]["STAGE_SERVICES"],
+            "IMAGE_TAG": "spec-" + "b" * 40 + "-" + "a" * 12,
+            "SHA12": "a" * 12, "GITHUB_RUN_ID": "77",
+        })
+        calls = (work / "aws-calls.txt").read_text().splitlines()
+        assert len(calls) == 1
+        tokens = [token for token in shlex.split(calls[0])
+                  if token.startswith("name=LEAF_DEPLOY_PREWARM_PARK,value=")]
+        assert tokens == (["name=LEAF_DEPLOY_PREWARM_PARK,value=1"] if scenario == "park" else [])
 
 
 @needs_shell

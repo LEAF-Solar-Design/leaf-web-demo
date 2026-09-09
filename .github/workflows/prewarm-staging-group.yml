@@ -385,6 +385,9 @@ jobs:
           for SERVICE in $STAGE_SERVICES; do
             # A refused call is recorded per service; mq-prewarm fails closed.
             # Rail operator handle grammar for LEAF_DEPLOY_APPROVED_BY: ^[A-Za-z0-9-]{1,39}$.
+            # LEAF_DEPLOY_PREWARM_PARK=1: the step parks the idle colour (desired count 0)
+            # after a successful stage; nothing adopts a staged candidate (leaf-plan #74)
+            # and a warm web-alt trips staging's deployment-identity check. Inert until prewarm.sh reads it.
             if ! DISPATCH_OUTPUT=$(timeout 60 aws codebuild start-build \
                 --project-name leaf-deploy-terraform-staging \
                 --environment-variables-override \
@@ -393,6 +396,7 @@ jobs:
                 "name=LEAF_DEPLOY_SERVICE,value=$SERVICE" \
                 "name=LEAF_DEPLOY_IMAGE_TAG,value=$IMAGE_TAG" \
                 name=LEAF_DEPLOY_EXPECTED_TD,value=auto-live \
+                name=LEAF_DEPLOY_PREWARM_PARK,value=1 \
                 "name=LEAF_DEPLOY_REQUEST_ID,value=$SHA12-$GITHUB_RUN_ID" \
                 --output json 2>&1); then
               printf '%s' "$DISPATCH_OUTPUT"
