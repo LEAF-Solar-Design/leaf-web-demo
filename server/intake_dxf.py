@@ -10,6 +10,8 @@ cannot carry (xdata, faces, images) is not invented here; the DWG
 plan leg keeps those by handle on the real drawing.
 Complete bounded block catalogues and INSERTs also round-trip here. For an
 incomplete catalogue, only the supported children actually captured are emitted.
+Polylines may carry finite ``bulges``: per-vertex values emit nonzero groups
+only for planar polylines; other list lengths are inspection flags and emit none.
 
 Hardened and bounded, fail-closed: every field is validated BEFORE a byte is
 emitted; a malformed intake raises ``IntakeDxfError`` and nothing is returned.
@@ -255,12 +257,30 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
             y = _number(pt[1], f"{where}.pts[{j}]")
             z = _number(pt[2], f"{where}.pts[{j}]") if len(pt) == 3 else 0.0
             coords.append((x, y, z))
+        bulges = None
+        if "bulges" in poly:
+            values = poly["bulges"]
+            if not isinstance(values, list):
+                _fail(f"{where}.bulges: must be a list of finite numbers")
+            bulges = []
+            for j, value in enumerate(values):
+                if (isinstance(value, bool) or not isinstance(value, (int, float))):
+                    _fail(f"{where}.bulges[{j}]: must be a finite number")
+                try:
+                    value = float(value)
+                except OverflowError:
+                    _fail(f"{where}.bulges[{j}]: must be a finite number")
+                if not math.isfinite(value):
+                    _fail(f"{where}.bulges[{j}]: must be a finite number")
+                bulges.append(value)
+            if len(bulges) != len(coords):
+                bulges = None
         handle = poly.get("handle")
         h = _real_handle(handle, where, real)
         if h is not None:
             highest = max(highest, int(h, 16))
         note_layer(layer)
-        kinds.append(("poly", layer, closed, coords, h))
+        kinds.append(("poly", layer, closed, coords, bulges, h))
         kind_sources.append(poly)
         kind_properties.append(_entity_property_groups(properties, handle, where))
     for k, tx in enumerate(texts):
@@ -518,21 +538,24 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         props = kind_properties[idx]
         entity_offset = len(out)
         if row[0] == "poly":
-            _, layer, closed, coords, _ = row
+            _, layer, closed, coords, bulges, _ = row
             z0 = coords[0][2]
             planar = all(c[2] == z0 for c in coords)
             if planar:
                 out += ["0", "LWPOLYLINE", "5", h, "100", "AcDbEntity", "8", layer,
                         "100", "AcDbPolyline", "90", str(len(coords)),
                         "70", "1" if closed else "0", "38", _num(z0)]
-                for x, y, _z in coords:
+                for j, (x, y, _z) in enumerate(coords):
                     out += ["10", _num(x), "20", _num(y)]
+                    if bulges is not None and bulges[j] != 0:
+                        out += ["42", _num(bulges[j])]
             else:
                 # A polyline whose vertices differ in z is a classic 3D
                 # POLYLINE (flag 8) with per-vertex z; the parser keeps each z.
                 out += ["0", "POLYLINE", "5", h, "100", "AcDbEntity", "8", layer,
                         "100", "AcDb3dPolyline", "66", "1",
                         "70", str(8 | (1 if closed else 0))]
+                # 3D polylines cannot carry arcs.
                 for x, y, z in coords:
                     out += ["0", "VERTEX", "100", "AcDbEntity", "8", layer,
                             "100", "AcDbVertex", "100", "AcDb3dPolylineVertex",

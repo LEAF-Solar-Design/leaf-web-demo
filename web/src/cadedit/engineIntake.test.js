@@ -1,8 +1,66 @@
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
+import { expandBulgedPolylines } from './engineIntake.js'
 
 import { bulgePoints, ARC_STEP_DEG, CIRCLE_SEGMENTS, DIM_EXT_PAST, MAX_POINTS, MIN_ARC_POINTS, dimensionSchematic, mleaderSchematic, engineIntake, entityToPolyline, formatMeasurement, hexHandle } from './engineIntake.js'
 
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps
+
+describe('intake bulges for the console viewer', () => {
+  it('carries strokeOnly into the pick descriptor and both highlight loops', () => {
+    const source = readFileSync(path.resolve(process.cwd(), 'src/components/Viewer.jsx'), 'utf8')
+    expect(source).toContain("{ kind: 'poly', layer: pl.layer, pts, strokeOnly: !!pl.strokeOnly }")
+    expect((source.match(/d\.strokeOnly/g) || []).length).toBeGreaterThanOrEqual(2)
+  })
+  const open = { layer: 'A', handle: '10', closed: false, pts: [[0, 0, 2], [10, 0, 2]] }
+  it('preserves array identity for absent and zero bulges', () => {
+    for (const rows of [[], [open], [{ ...open, bulges: [0, 0] }]]) {
+      expect(expandBulgedPolylines(rows)).toBe(rows)
+    }
+  })
+  it('samples the lower semicircle with the existing bulgePoints rule', () => {
+    const pl = { ...open, bulges: [1, 0] }
+    const rows = [pl]
+    const expanded = expandBulgedPolylines(rows)
+    expect(expanded).not.toBe(rows)
+    expect(expanded[0]).toMatchObject({ layer: 'A', handle: '10', closed: false })
+    expect(expanded[0].strokeOnly).toBe(true)
+    expect(pl).not.toHaveProperty('strokeOnly')
+    const pts = expanded[0].pts
+    expect(pts).toHaveLength(25)
+    expect(pts).toEqual([open.pts[0], ...bulgePoints(...open.pts, 1, 2), open.pts[1]])
+    expect(pts[0]).toEqual([0, 0, 2])
+    expect(pts[24]).toEqual([10, 0, 2])
+    expect(near(pts[12][0], 5) && near(pts[12][1], -5)).toBe(true)
+    expect(pts.every((p) => p[2] === 2)).toBe(true)
+    expect(pl.pts).toBe(open.pts)
+  })
+  it('samples the closing segment without duplicating join vertices', () => {
+    const pl = { ...open, closed: true, pts: [[0, 0, 0], [10, 0, 0], [10, 10, 0], [0, 10, 0]], bulges: [0, 0, 0, 1] }
+    const expanded = expandBulgedPolylines([pl])[0]
+    expect(expanded).not.toHaveProperty('strokeOnly')
+    const pts = expanded.pts
+    expect(pts).toEqual([...pl.pts, ...bulgePoints(pl.pts[3], pl.pts[0], 1, 0)])
+    expect(pts).toHaveLength(27)
+    expect(near(pts[15][0], -5) && near(pts[15][1], 5)).toBe(true)
+  })
+  it('leaves malformed bulge lists as chords without throwing', () => {
+    for (const bulges of [[1], [NaN, 0], [Infinity, 0], ['1', 0]]) {
+      const pl = { ...open, bulges }
+      const rows = [pl]
+      expect(() => expandBulgedPolylines(rows)).not.toThrow()
+      expect(expandBulgedPolylines(rows)[0].pts).toBe(pl.pts)
+    }
+  })
+  it('keeps an untouched neighboring record by identity', () => {
+    const rows = [{ ...open, bulges: [1, 0] }, open]
+    const expanded = expandBulgedPolylines(rows)
+    expect(expanded[0]).not.toBe(rows[0])
+    expect(expanded[1]).toBe(open)
+    expect(expanded[1]).not.toHaveProperty('strokeOnly')
+  })
+})
 
 describe('MLEADER schematic, v87 hand-derived geometry', () => {
   const base = { id: '37986', type: 'MLEADER', layer: 'Leaders', text: 'Valve', height: 1, arrow: 0.5, dogleg: 2, textLocation: [5.1, 4.5] }

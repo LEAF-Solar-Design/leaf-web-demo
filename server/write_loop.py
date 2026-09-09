@@ -1018,6 +1018,7 @@ def apply_mutations(intake: Dict[str, Any], mutations: Dict[str, Any]) -> Dict[s
         entity = by_handle[item["handle"]]
         entity["pts"] = [list(point) for point in item["pts"]]
         entity["closed"] = bool(item["closed"])
+        entity.pop("bulges", None)
     for item in mutations.get("set_circle") or []:
         entity = by_handle[item["handle"]]
         entity["c"] = list(item["c"])

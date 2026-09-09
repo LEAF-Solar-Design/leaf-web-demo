@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react'
 import { applyViewPose, cameraPose, pickLineThreshold, unprojectClientToPlane } from './viewerMath.js'
-import { intakeRoundPolylines } from '../cadedit/engineIntake.js'
+import { expandBulgedPolylines, intakeRoundPolylines } from '../cadedit/engineIntake.js'
 import { formatElementId } from '../lib/elementIdentity.js'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
@@ -198,9 +198,10 @@ const Viewer = forwardRef(function Viewer(
     // additive lists) draw as sampled polylines; an intake without them
     // draws exactly as before ([] appended).
     const roundPolylines = intakeRoundPolylines(activeIntake)
+    const intakePolylines = expandBulgedPolylines(activeIntake.polylines || [])
     const polylines = roundPolylines.length
-      ? [...(activeIntake.polylines || []), ...roundPolylines]
-      : (activeIntake.polylines || [])
+      ? [...intakePolylines, ...roundPolylines]
+      : intakePolylines
     const inserts = activeIntake.inserts || []
     const faces3d = activeIntake.faces3d || []
     // W4f slice A0: an ENGINE document (the browser engine's imported DXF,
@@ -290,17 +291,17 @@ const Viewer = forwardRef(function Viewer(
         const bottomZ = topZ - panelThickness
         minDisplayZ = Math.min(minDisplayZ, bottomZ)
         maxDisplayZ = Math.max(maxDisplayZ, topZ)
-        addPickDescriptor(pickIndex, pl.sourceHandle ?? pl.handle, { kind: 'poly', layer: pl.layer, pts })
+        addPickDescriptor(pickIndex, pl.sourceHandle ?? pl.handle, { kind: 'poly', layer: pl.layer, pts, strokeOnly: !!pl.strokeOnly })
         // fan-triangulate (panels are convex quads) for a subtle fill; an
         // engine document's OPEN polyline (a line, an arc) is a stroke only.
-        const fillThis = !(strokeOnlyOpen && !pl.closed)
+        const fillThis = !(strokeOnlyOpen && !pl.closed) && !pl.strokeOnly
         for (let i = 1; fillThis && i < pts.length - 1; i++) {
           fillPos.push(pts[0][0], pts[0][1], topZ)
           fillPos.push(pts[i][0], pts[i][1], topZ)
           fillPos.push(pts[i + 1][0], pts[i + 1][1], topZ)
           triHandles.push(pl.sourceHandle ?? pl.handle)
         }
-        if (sculpture) {
+        if (sculpture && fillThis) {
           // Bottom and four walls turn each unchanged panel into a thin tile.
           // The depth is a display-space treatment, not drawing geometry.
           for (let i = 1; i < pts.length - 1; i++) {
@@ -890,12 +891,12 @@ const Viewer = forwardRef(function Viewer(
     for (const h of highlightHandles) for (const d of s.pickIndex.get(h) || []) {
       if (!d || d.kind !== 'poly') continue
       const pts = d.pts
-      for (let i = 1; i < pts.length - 1; i++) {
+      for (let i = 1; !d.strokeOnly && i < pts.length - 1; i++) {
         fillPos.push(pts[0][0], pts[0][1], 1)
         fillPos.push(pts[i][0], pts[i][1], 1)
         fillPos.push(pts[i + 1][0], pts[i + 1][1], 1)
       }
-      for (let i = 0; i < pts.length; i++) {
+      for (let i = 0; i < pts.length - (d.strokeOnly ? 1 : 0); i++) {
         const a = pts[i], b = pts[(i + 1) % pts.length]
         linePos.push(a[0], a[1], 1.1, b[0], b[1], 1.1)
       }
@@ -926,12 +927,13 @@ const Viewer = forwardRef(function Viewer(
     if (d.kind === 'poly' || d.kind === 'face') {
       const pts = d.pts
       const fillPos = [], linePos = []
-      for (let i = 1; i < pts.length - 1; i++) {
+      const strokeOnly = d.kind === 'poly' && d.strokeOnly
+      for (let i = 1; !strokeOnly && i < pts.length - 1; i++) {
         fillPos.push(pts[0][0], pts[0][1], z)
         fillPos.push(pts[i][0], pts[i][1], z)
         fillPos.push(pts[i + 1][0], pts[i + 1][1], z)
       }
-      for (let i = 0; i < pts.length; i++) {
+      for (let i = 0; i < pts.length - (strokeOnly ? 1 : 0); i++) {
         const a = pts[i], b = pts[(i + 1) % pts.length]
         linePos.push(a[0], a[1], z + 0.1, b[0], b[1], z + 0.1)
       }
