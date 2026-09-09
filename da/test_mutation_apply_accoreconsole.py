@@ -18,7 +18,7 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT / "server"))
 
-from apply_lisp import build_apply_scr
+from apply_lisp import build_apply_scr, build_apply_scr_v3
 from intake_parse import o2w, parse
 from lisp import MUTATION_INSPECT_BLOCKS, build_scr
 from mutation_plan import emit_plan, validate_mutations, world_to_ocs
@@ -223,12 +223,12 @@ def test_mutation_inspect_reads_per_vertex_bulges(tmp_path):
     assert curved["bulges"] == pytest.approx([1.0, 0.0, 0.0, 0.0], rel=0, abs=1e-9)
 
 
-def _apply_plan(tmp_path, tag, host, plan_bytes):
+def _apply_plan(tmp_path, tag, host, plan_bytes, script_builder=build_apply_scr):
     """Run the fixed interpreter and return its echo-free transcript."""
     work = tmp_path / tag
     work.mkdir()
     (work / "mutation-plan.txt").write_bytes(plan_bytes.replace(b"\n", b"\r\n"))
-    (work / "apply.scr").write_text(build_apply_scr(), encoding="ascii", newline="")
+    (work / "apply.scr").write_text(script_builder(), encoding="ascii", newline="")
     applied = subprocess.run(
         [str(ACCORECONSOLE), "/i", str(host), "/s", str(work / "apply.scr")],
         cwd=work, capture_output=True, text=True, timeout=120, check=False,
@@ -271,38 +271,20 @@ def _run_plan(tmp_path, tag, host, plan_bytes):
     not ACCORECONSOLE.exists() or not SOURCE_DWG.exists(),
     reason="local AutoCAD 2026 console and tracked demo DWG are required",
 )
-def test_invalid_plan_marker_is_detected_without_script_echoes(tmp_path):
+@pytest.mark.parametrize("script_builder", [build_apply_scr, build_apply_scr_v3], ids=["v2", "v3"])
+def test_invalid_plan_marker_is_detected_without_script_echoes(tmp_path, script_builder):
     host = tmp_path / "host.dwg"
     shutil.copyfile(SOURCE_DWG, host)
     plan = (
         "LEAF_MUTATION_PLAN|9\n"
         f"BASE_SHA256|{hashlib.sha256(host.read_bytes()).hexdigest()}\n"
     ).encode("ascii")
-    work, text = _apply_plan(tmp_path, "invalid", host, plan)
+    work, text = _apply_plan(tmp_path, "invalid", host, plan, script_builder)
     assert "LEAF-MUTATION-PLAN-INVALID" in text, text
     after_marker = text.split("LEAF-MUTATION-PLAN-INVALID", 1)[1]
     assert "error: quit / exit abort" in "\n".join(after_marker.splitlines()[:2]), text
     assert "LEAF-MUTATION-APPLY-FAILED" not in text, text
-    # The script reaches SAVEAS after the abort; the server's effect verifier refuses this output because no effect is present.
-    output = work / "output.dwg"
-    if output.exists():
-        (work / "inspect.scr").write_text(
-            build_scr("output-intake.txt", extra_blocks=MUTATION_INSPECT_BLOCKS),
-            encoding="ascii", newline="")
-        inspected = subprocess.run(
-            [str(ACCORECONSOLE), "/i", str(output), "/s", str(work / "inspect.scr")],
-            cwd=work, capture_output=True, text=True, timeout=120, check=False,
-        )
-        families = work / "output-intake.txt"
-        assert inspected.returncode == 0, inspected.stdout + inspected.stderr
-        assert families.exists() and families.stat().st_size > 0
-        intake = parse(families, "canary")
-        assert not intake.get("parseErrors"), intake.get("parseErrors")
-        source_intake = json.loads(SOURCE_INTAKE.read_text(encoding="utf-8"))
-        for field in ("polylines", "circles", "arcs"):
-            assert {item["handle"] for item in intake.get(field, [])} == {
-                item["handle"] for item in source_intake.get(field, [])
-            }, field
+    assert not (work / "output.dwg").exists(), text
 
 
 @pytest.mark.skipif(
