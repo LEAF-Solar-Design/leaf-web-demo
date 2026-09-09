@@ -102,6 +102,7 @@ _CACHE_TTL_SECONDS = 15.0
 # container in the same task performs the read and publishes it here. The
 # reader fails closed on absence, staleness, malformed content, or an
 # explicit unavailable state; it never falls back to the stored receipt.
+# Optional `routing` uses schema `leaf.live-identity-routing.v1` for ALB evidence.
 _SIDECAR_FILE_DEFAULT = "/run/leaf-identity/current.json"
 _SIDECAR_SCHEMA = "leaf.live-identity-collector.v1"
 # 2 * the collector's 20s poll + 5s slack (C4). One constant, derived.
@@ -116,6 +117,13 @@ _READ_TIMEOUT_SECONDS = 4.0
 _MAX_ATTEMPTS = 2
 # DescribeTasks accepts at most 100 identifiers per call.
 _MAX_TASKS_PER_SERVICE = 100
+_ROUTING_SCHEMA = "leaf.live-identity-routing.v1"
+_ROUTING_VERIFY_HEADER = "X-Leaf-Deploy-Verify"
+_MAX_ROUTING_LISTENERS = 50
+_MAX_ROUTING_RULES = 200
+_MAX_ROUTING_FORWARDS = 20
+_MAX_ROUTING_CONDITIONS = 20
+_MAX_ROUTING_REASON_CHARS = 300
 
 
 class LiveIdentityUnavailable(RuntimeError):
@@ -142,14 +150,19 @@ def _routed_family(
     descriptions: dict[str, dict[str, Any]],
     service: str,
     families_by_service: Mapping[str, tuple[str, ...]],
+    routing: Any = None,
 ) -> str:
     """Return the one family that is actually serving this service.
 
-    Ambiguity is an error, not a coin flip. Two active colors means a flip is
-    in progress and no single answer is true; zero active colors means nothing
-    is serving. Both fail closed rather than pick one.
+    With no routing evidence, or for a single-family service, use the existing
+    desired/running count rule. Pairs with evidence use ordinary HTTPS ALB
+    route classes and require one consistent, running color, without consulting
+    desired counts. Ambiguity is an error, not a coin flip; invalid evidence
+    never falls back to counts.
     """
     families = families_by_service[service]
+    if routing is not None and len(families) != 1:
+        return _alb_routed_family(descriptions, service, families, routing)
     active = [
         family
         for family in families
@@ -163,6 +176,141 @@ def _routed_family(
     raise LiveIdentityUnavailable(
         f"{service} has {len(active)} active colors; the routed image is ambiguous"
     )
+
+
+def _routing_list(value: Any, name: str, limit: int) -> list:
+    if not isinstance(value, list) or len(value) > limit:
+        raise LiveIdentityUnavailable(
+            f"routing evidence malformed: {name} must be a list of at most {limit} entries"
+        )
+    return value
+
+
+def _alb_routed_family(
+    descriptions: dict[str, dict[str, Any]],
+    service: str,
+    families: tuple[str, ...],
+    routing: Any,
+) -> str:
+    """Resolve a pair from the frozen collector evidence contract (no I/O).
+
+    document["routing"] = {
+      "schema": "leaf.live-identity-routing.v1",
+      "state": "ok" | "unavailable",
+      "reason": "<string, present when state is unavailable>",
+      "listeners": [
+        {"arn": "<listener arn>", "protocol": "HTTPS", "port": 443,
+         "rules": [
+           {"arn": "<rule arn>", "priority": "60",
+            "conditions": [{"field": "host-header", "values": ["platform-staging.leafdesign.ai"]},
+                           {"field": "http-header", "name": "X-Leaf-Deploy-Verify", "values": ["*"]}],
+            "forward": [{"target_group": "<target group arn>", "weight": 100}, ...]}
+         ]}
+      ]
+    }
+
+    conditions[].name is present only for http-header conditions. The producer
+    lists every forward target and normalizes a single target to weight 1 and
+    non-forward actions to []. Weights are non-negative ints, excluding bool.
+    Family target groups come from describe_services.services[].loadBalancers[].
+    targetGroupArn. Pinning headers never select the ordinary routed color.
+    """
+    anomaly = None
+    if not isinstance(routing, dict):
+        anomaly = "routing is not an object"
+    elif routing.get("schema") != _ROUTING_SCHEMA:
+        anomaly = "routing schema differs"
+    elif routing.get("state") != "ok":
+        reason = routing.get("reason")
+        anomaly = reason if isinstance(reason, str) and reason else "routing state is not ok"
+    if anomaly is not None:
+        raise LiveIdentityUnavailable(
+            f"ALB routing evidence unavailable: {anomaly[:_MAX_ROUTING_REASON_CHARS]}"
+        )
+
+    group_families: dict[str, str] = {}
+    for family in families:
+        registrations = (descriptions.get(family) or {}).get("loadBalancers", [])
+        if not isinstance(registrations, list) or any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("targetGroupArn"), str)
+            for item in registrations
+        ):
+            raise LiveIdentityUnavailable(
+                f"routing evidence malformed: {family} target group registrations"
+            )
+        groups = {item["targetGroupArn"] for item in registrations}
+        if len(groups) != 1:
+            raise LiveIdentityUnavailable(
+                f"{family} registers {len(groups)} target groups; the routed colour cannot be resolved"
+            )
+        group = next(iter(groups))
+        if group in group_families:
+            raise LiveIdentityUnavailable(f"{service} families share a target group")
+        group_families[group] = family
+
+    selected = None
+    listeners = _routing_list(
+        routing.get("listeners"), "listeners", _MAX_ROUTING_LISTENERS
+    )
+    for listener in listeners:
+        if not isinstance(listener, dict):
+            raise LiveIdentityUnavailable("routing evidence malformed: listener is not an object")
+        rules = _routing_list(listener.get("rules"), "rules", _MAX_ROUTING_RULES)
+        protocol = listener.get("protocol")
+        if not isinstance(protocol, str) or protocol.upper() != "HTTPS" or listener.get("port") != 443:
+            continue
+        for rule in rules:
+            if not isinstance(rule, dict):
+                raise LiveIdentityUnavailable("routing evidence malformed: rule is not an object")
+            forwards = _routing_list(rule.get("forward"), "forward", _MAX_ROUTING_FORWARDS)
+            for entry in forwards:
+                if (
+                    not isinstance(entry, dict)
+                    or not isinstance(entry.get("target_group"), str)
+                    or not isinstance(entry.get("weight"), int)
+                    or isinstance(entry.get("weight"), bool)
+                    or entry["weight"] < 0
+                ):
+                    raise LiveIdentityUnavailable("routing evidence malformed: forward target or weight")
+            conditions = _routing_list(
+                rule.get("conditions"), "conditions", _MAX_ROUTING_CONDITIONS
+            )
+            for condition in conditions:
+                if not isinstance(condition, dict) or not isinstance(condition.get("field"), str):
+                    raise LiveIdentityUnavailable("routing evidence malformed: condition field")
+                if condition["field"] == "http-header" and not isinstance(condition.get("name"), str):
+                    raise LiveIdentityUnavailable("routing evidence malformed: http-header name")
+            if any(
+                condition["field"] == "http-header"
+                and condition["name"].lower() == _ROUTING_VERIFY_HEADER.lower()
+                for condition in conditions
+            ):
+                continue
+            paired = [entry for entry in forwards if entry["target_group"] in group_families]
+            if not paired:
+                continue
+            active = {
+                group_families[entry["target_group"]]
+                for entry in paired
+                if entry["weight"] > 0
+            }
+            if len(active) > 1:
+                raise LiveIdentityUnavailable(
+                    f"{service} is routed to 2 colors; the routed image is ambiguous"
+                )
+            if not active:
+                raise LiveIdentityUnavailable(f"{service} has no routed color")
+            family = active.pop()
+            if selected is not None and selected != family:
+                raise LiveIdentityUnavailable(f"{service} route classes disagree on the routed color")
+            selected = family
+    if selected is None:
+        raise LiveIdentityUnavailable(f"no listener rule routes {service}")
+    running = descriptions[selected].get("runningCount", 0)
+    if not isinstance(running, int) or isinstance(running, bool) or running < 1:
+        raise LiveIdentityUnavailable(f"{selected} is routed but has no running task")
+    return selected
 
 
 def _service_container_digest(
@@ -288,9 +436,13 @@ def _read_live_digests_with_meta(
         families_by_service = _STAGING_SERVICE_FAMILIES
         container_by_service = _STAGING_SERVICE_CONTAINER
 
+    routing = document.get("routing")
+    if "routing" in document and routing is None:
+        # Only an absent key permits the legacy count rule for pairs.
+        routing = {}
     digests: dict[str, str] = {}
     for service in SERVICES:
-        family = _routed_family(described, service, families_by_service)
+        family = _routed_family(described, service, families_by_service, routing=routing)
         family_payload = tasks_by_family.get(family)
         if not isinstance(family_payload, dict):
             raise LiveIdentityUnavailable(f"{family} has no running tasks")
@@ -312,6 +464,7 @@ def _read_live_digests_with_meta(
             )
         digests[service] = observed.pop()
     meta = {"observed_at": document["observed_at"], "age_seconds": round(age, 1)}
+    meta["routing_evidence"] = "alb" if "routing" in document else "counts"
     return digests, meta
 
 
@@ -477,6 +630,7 @@ def live_deployment_identity(
         # one (design review R2).
         result["observed_at"] = meta["observed_at"]
         result["age_seconds"] = meta["age_seconds"]
+        result["routing_evidence"] = meta["routing_evidence"]
     # Only a fully verified fleet gets a single top-level source revision. A
     # partial or contradicted receipt must not present one, because a caller
     # reading only this field is the exact failure this module exists to stop.
