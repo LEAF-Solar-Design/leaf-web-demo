@@ -99,7 +99,7 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
         # 2026-09-09 app pause: 72 executed rows without unzip; three readiness rows still run in CI.
         # 72 to 74: group wait budget invariant and its smaller budget falsifying twin.
         # Still 74: the timeout failure path extends the existing falsifying twin.
-        "prewarm-staging-cutover-workflow": 74,
+        "prewarm-staging-cutover-workflow": 75,
         # 2026-09-09 app pause keeps 96 executed rows: next-group receipt becomes web only.
         "merge-queue-workflow": 96,
         "platform-release-manifest": 88,
