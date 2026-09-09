@@ -11,7 +11,7 @@
 // legend's material, never paper. The cursor readout is a rAF-throttled DOM
 // write, never React state: pointer-rate re-renders were risk R11 in the
 // convergence plan.
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import CockpitIcon from './CockpitIcon.jsx'
 
@@ -158,9 +158,9 @@ export function FootRegion({ on, name, children }) {
 const STATUS_TOGGLES = Object.freeze([
   { id: 'snap', label: 'Snap mode', icon: 'snap' },
   { id: 'grid', label: 'Grid display', icon: 'grid' },
-  { id: 'ortho', label: 'Ortho mode', icon: 'ortho' },
+  { id: 'ortho', label: 'Ortho mode', icon: 'ortho', live: true },
   { id: 'polar', label: 'Polar tracking', icon: 'polar' },
-  { id: 'osnap', label: 'Object snap', icon: 'osnap' },
+  { id: 'osnap', label: 'Object snap', icon: 'osnap', live: true },
 ])
 const TOGGLE_REASON = 'not in the browser viewer yet'
 
@@ -173,12 +173,38 @@ function requestFullscreen() {
 }
 
 // The status bar's right end: the reference's drafting toggles. This viewer
-// has no snap, grid, ortho, polar or object-snap state, so each is present,
-// disabled, and says so; fullscreen is the one that is real.
+// mirrors real ORTHO and OSNAP through StatusModesBridge window events;
+// snap, grid and polar stay disabled. Fullscreen is also real.
 export function StatusToggles() {
+  const [state, setState] = useState({ live: false, ortho: false, osnap: true })
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined
+    const onModes = ({ detail }) => {
+      if (!detail || typeof detail !== 'object' || typeof detail.live !== 'boolean') return
+      if (detail.live && (typeof detail.ortho !== 'boolean' || typeof detail.osnap !== 'boolean')) return
+      setState(detail.live ? { live: true, ortho: detail.ortho, osnap: detail.osnap } : { live: false, ortho: false, osnap: true })
+    }
+    window.addEventListener('cockpit:modes', onModes)
+    window.dispatchEvent(new CustomEvent('cockpit:modes-request'))
+    return () => window.removeEventListener('cockpit:modes', onModes)
+  }, [])
   return (
     <span className="cockpit-status-toggles" role="toolbar" aria-label="Drafting settings" data-testid="cockpit-status-toggles">
-      {STATUS_TOGGLES.map((t) => (
+      {STATUS_TOGGLES.map((t) => t.live && state.live ? (
+        <button
+          key={t.id + '-live'}
+          type="button"
+          data-toggle={t.id}
+          aria-pressed={state[t.id]}
+          title={`${t.label} ${state[t.id] ? 'on' : 'off'} (${t.id === 'ortho' ? 'F8' : 'F3'})`}
+          aria-label={t.label}
+          onClick={() => {
+            if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('cockpit:mode-toggle', { detail: { id: t.id } }))
+          }}
+        >
+          <CockpitIcon id={t.icon} fallback={t.label} size="strip" />
+        </button>
+      ) : (
         <button
           key={t.id}
           type="button"

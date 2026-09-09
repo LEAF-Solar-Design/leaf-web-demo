@@ -61,6 +61,7 @@ import EngineRibbonClusters from './cadedit/EngineRibbonClusters.jsx'
 // proof finding this record fixes).
 import EngineDockProperties from './cadedit/EngineDockProperties.jsx'
 import CommandLineArmer from './cadedit/CommandLineArmer.jsx'
+import StatusModesBridge from './cadedit/StatusModesBridge.jsx'
 import EngineDocumentView from './cadedit/EngineDocumentView.jsx'
 import EngineHeadOpener from './cadedit/EngineHeadOpener.jsx'
 import CanvasPointPicker from './cadedit/CanvasPointPicker.jsx'
@@ -3258,6 +3259,7 @@ export default function App() {
               {/* W4f slice B: the command line's typed words (LINE, C, MOVE ...)
                   reach the engine through this consumer; renders nothing. */}
               {ENV_CAD_EDIT && <CommandLineArmer />}
+              {ENV_CAD_EDIT && <StatusModesBridge />}
               {/* W4f slice A0: while a DXF is open in the engine, the canvas
                   shows the ENGINE document through the viewer's own
                   applyVersion seam (the console drawing returns on close);
@@ -3926,7 +3928,7 @@ export default function App() {
         {studioGround && groundShowsDrawing(activeSurface) && (
           <CockpitStatus ground={studioGround} viewerRef={viewerRef} shown={shown} selectedHandle={selectedHandle} />
         )}
-        {/* W4e: the reference's drafting toggles (honestly off) and fullscreen. */}
+        {/* W4e: ORTHO and OSNAP real through StatusModesBridge; the rest honestly off, plus fullscreen. */}
         <SurfaceFrame.Cockpit />
         </FootRegion>
       </footer>
