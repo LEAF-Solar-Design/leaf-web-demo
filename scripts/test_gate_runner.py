@@ -96,11 +96,9 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
         # checkout, the duplicate-supply-set guard) and the dispatcher's merge_group
         # job carry falsifying rows. Mirrors run-all-gates.py; BOTH must move together.
         "build-platform-images-workflow": 53,
-        # App restoration keeps 75: five response cases retain web presence
-        # and invert app absence to presence; other pins change one-for-one.
-        "prewarm-staging-cutover-workflow": 75,
-        # App restoration keeps 96: the existing configuration transition
-        # row now also checks the next group's two-service receipt.
+        # 2026-09-09 app pause: 72 executed rows without unzip; three readiness rows still run in CI.
+        "prewarm-staging-cutover-workflow": 72,
+        # 2026-09-09 app pause keeps 96 executed rows: next-group receipt becomes web only.
         "merge-queue-workflow": 96,
         "platform-release-manifest": 88,
         # 10 -> 17 on 2026-08-18 with the production deploy's second approval

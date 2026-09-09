@@ -728,9 +728,10 @@ def test_no_service_mirror_falsification():
         _assert_no_service_mirror(workflow_text().replace("env:\n", 'env:\n  STAGE_SERVICES: "web"\n', 1))
 
 
-def _prewarm_evidence(tmp_path, entries, relay_source='env:\n  STAGE_SERVICES: "web app"\n',
+def _prewarm_evidence(tmp_path, entries, relay_source='env:\n  STAGE_SERVICES: "web"\n',
                       empty_arn=False, receipt_change=None, status="SUCCEEDED", log_case=None,
-                      configured_services=("app", "web")):
+                      configured_services=("web",)):
+    # Group-env fixtures previously configured app and web; now they configure web.
     binary = tmp_path / "bin"
     binary.mkdir(exist_ok=True)
     fake = binary / "gh"
@@ -868,12 +869,12 @@ def _dispatch(service, run_id, disposition="dispatched"):
 
 @needs_shell
 @pytest.mark.parametrize("entries,configured,error", [
-    ([], ["app", "web"], "relay dispatched nothing"),
+    ([], ["web"], "relay dispatched nothing"),
     ([_dispatch("web", 101, "dispatch-failed")], ["web"], "web"),
     ([_dispatch("app", 102, "unresolved")], ["app"], "app"),
     ([_dispatch("app", None)], ["app"], "app"),
     ([_dispatch("web", 101)], ["app", "web"], "relay dispatched services differ from configured services"),
-    ([_dispatch("web", 101), _dispatch("app", 102)], ["app", "web"], None),
+    ([_dispatch("web", 101)], ["web"], None),
     ([_dispatch("web", 101)], [], "relay configured service list absent or unparsable"),
     ([_dispatch("web", 101)], "web", "relay configured service list absent or unparsable"),
     ([_dispatch("web", 101)], "absent", "relay configured service list absent or unparsable"),
@@ -890,46 +891,46 @@ def test_relay_dispatched_set_executed(tmp_path, entries, configured, error):
         assert error in result["__stdout__"] + result["__stderr__"]
     else:
         assert result["__returncode__"] == 0, result
-        assert json.loads(result["dispatched_json"]) == {"web": _build_id(101), "app": _build_id(102)}
+        assert json.loads(result["dispatched_json"]) == {"web": _build_id(101)}
         assert result["relay_run_id"] == "77"
-        assert "configured services: app web" in result["__stdout__"]
-        assert "dispatched services: app web" in result["__stdout__"]
+        assert "configured services: web" in result["__stdout__"]
+        assert "dispatched services: web" in result["__stdout__"]
         assert "contents/" not in (tmp_path / "gh-calls.txt").read_text()
         waited = run_step(step_body("mq-prewarm", "Wait for every dispatched"), tmp_path,
                           {"GROUP_HEAD_SHA": "a" * 40, "TREE": "b" * 40,
                            "DISPATCHED_JSON": result["dispatched_json"],
                            "RELAY_RUN_ID": result["relay_run_id"]})
         assert waited["__returncode__"] == 0, waited
-        assert _staged_arn("app") + " " + _staged_arn("web") in waited["__stdout__"]
+        assert "staged task definitions: " + _staged_arn("web") in waited["__stdout__"]
 
 
 @needs_shell
 def test_relay_configuration_change_takes_effect_on_the_next_group(tmp_path):
     # The relay runs main's text. A group changing the list must still merge;
     # its new configuration takes effect when the next group relay runs.
-    _prewarm_evidence(tmp_path, [_dispatch("web", 101)],
-                      relay_source='env:\n  STAGE_SERVICES: "web app"\n',
-                      configured_services=["web"])
+    _prewarm_evidence(tmp_path, [_dispatch("web", 101), _dispatch("app", 102)],
+                      relay_source='env:\n  STAGE_SERVICES: "web"\n',
+                      configured_services=["app", "web"])
     result = run_step(step_body("mq-prewarm", "Wait for the relay's"), tmp_path,
                       {"GROUP_HEAD_SHA": "a" * 40})
     assert result["__returncode__"] == 0, result
-    assert json.loads(result["dispatched_json"]) == {"web": _build_id(101)}
-    assert "configured services: web" in result["__stdout__"]
+    assert json.loads(result["dispatched_json"]) == {"web": _build_id(101), "app": _build_id(102)}
+    assert "configured services: app web" in result["__stdout__"]
     assert "contents/" not in (tmp_path / "gh-calls.txt").read_text()
 
-    # After restoration lands, the next relay stages both services from its
-    # own env. Keep the prior web-only receipt above as the transition case.
+    # Previously restoration added app on the next group; this pause removes it.
+    # The landing group's prior two-service receipt remains the transition case.
     next_group = tmp_path / "next-group"
     next_group.mkdir()
-    _prewarm_evidence(next_group, [_dispatch("web", 101), _dispatch("app", 102)],
-                      configured_services=["app", "web"])
+    _prewarm_evidence(next_group, [_dispatch("web", 101)],
+                      configured_services=["web"])
     result = run_step(step_body("mq-prewarm", "Wait for the relay's"), next_group,
                       {"GROUP_HEAD_SHA": "a" * 40})
     assert result["__returncode__"] == 0, result
     assert json.loads(result["dispatched_json"]) == {
-        "web": _build_id(101), "app": _build_id(102),
+        "web": _build_id(101),
     }
-    assert "configured services: app web" in result["__stdout__"]
+    assert "configured services: web" in result["__stdout__"]
     assert "contents/" not in (next_group / "gh-calls.txt").read_text()
 
 
@@ -1146,7 +1147,7 @@ def test_mq_relay_s3_newest_wins_with_key_tie_break_executed(tmp_path):
     for scenario in ("timestamp", "tie"):
         work = tmp_path / scenario
         work.mkdir()
-        _prewarm_evidence(work, [_dispatch("web", 101), _dispatch("app", 102)])
+        _prewarm_evidence(work, [_dispatch("web", 101)])
         objects = json.loads((work / "s3-objects.json").read_text())
         key, item = next(iter(objects.items()))
         old = json.loads(json.dumps(item))
@@ -1181,7 +1182,7 @@ def test_mq_s3_access_errors_fail_from_own_code(tmp_path):
                     objects, _, _ = _s3_supply_fixture(work)
                     fragment = "Wait for the provider"
                 else:
-                    _prewarm_evidence(work, [_dispatch("web", 101), _dispatch("app", 102)])
+                    _prewarm_evidence(work, [_dispatch("web", 101)])
                     objects = json.loads((work / "s3-objects.json").read_text())
                     fragment = "Wait for the relay's"
                 _s3_transport_fixture(work, objects, {operation: error})
@@ -1198,7 +1199,7 @@ def test_mq_relay_s3_checksum_and_metadata_refuse_executed(tmp_path):
     for scenario in ("checksum", "metadata", "attempt"):
         work = tmp_path / scenario
         work.mkdir()
-        _prewarm_evidence(work, [_dispatch("web", 101), _dispatch("app", 102)])
+        _prewarm_evidence(work, [_dispatch("web", 101)])
         objects = json.loads((work / "s3-objects.json").read_text())
         item = next(iter(objects.values()))
         if scenario == "checksum":
@@ -1218,7 +1219,7 @@ def test_mq_relay_s3_checksum_and_metadata_refuse_executed(tmp_path):
 @needs_shell
 def test_mq_relay_s3_invalid_newest_never_falls_back_executed(tmp_path):
     from test_prewarm_staging_cutover_workflow import _s3_transport_fixture
-    _prewarm_evidence(tmp_path, [_dispatch("web", 101), _dispatch("app", 102)])
+    _prewarm_evidence(tmp_path, [_dispatch("web", 101)])
     objects = json.loads((tmp_path / "s3-objects.json").read_text())
     old_key, old = next(iter(objects.items()))
     newest = json.loads(json.dumps(old))

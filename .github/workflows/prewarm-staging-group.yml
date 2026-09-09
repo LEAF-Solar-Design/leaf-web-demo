@@ -25,12 +25,32 @@ env:
   # platform_link.validate_postgres_startup required 0058_campaign_host_enrollment
   # (constraint campaign_host_enrollments_machine_unique). Web staged natively
   # twice (builds 1a2cc8c9, fb726619) on leaf-deploy-terraform-staging.
-  # App is back because the native release rail applies migrations to staging:
+  # #1146 restored app because the native release rail applies migrations to staging:
   # on 2026-09-08, the native-18 image (source 30d46496) booted with health 200,
   # proving 0058 applied, including the startup-required constraint above.
-  # If app refuses again, read the app prewarm build's LEAF_DEPLOY_RECEIPT
-  # refusal reason first and pause only the app leg, naming that reason.
-  STAGE_SERVICES: "web app"
+  # 2026-09-09: no consumer adopts a staged candidate. CloudTrail from
+  # 2026-09-08T11:35Z to 2026-09-09T01:35Z shows digest intersection zero
+  # between staged app-alt:257 to :262 / web-alt:208 to :215 and live
+  # app:824 to :828 / web:371 to :373, with zero listener changes.
+  # The native release consumer rolls staging with native-N images of the
+  # SAME commits: f20fa02b live 63 min after queue staging, 1c7bcf4f 44 min after.
+  # Receipt: C:/tmp/staged-wiggling-fairy/receipts/12d/adoption-finding-native-rail.json;
+  # leaf-plan #74 (aecd1e38).
+  # Prewarm scales app-alt from 0 to 1. The terraform TTL reaper,
+  # reap-leaf-platform-staging-prewarm-stages.yml (private-repo Actions),
+  # has not run since 2026-09-05T23:56Z. App-alt has run at one task since
+  # 2026-09-08T18:34Z (about $1.19 per day at Fargate list prices), blocking
+  # STEP=plan-live-leg: "the reviewed primary app must be the only live app color".
+  # Way back: restore `web app` when the native release consumer prefers the
+  # queue's staged candidate whose tree equals the admitted release's tree
+  # (the release rail owner's change), or when a native descale returns the
+  # idle colour to 0 between groups. Web stays as the queue's exercised
+  # prewarm path (about $0.30 per day).
+  # Operator step after merge: one-time `ecs update-service --desired-count 0`
+  # on leaf-platform-app-alt under leaf-admin; the classifier blocks it from
+  # a lane. Let any in-flight app prewarm build finish first: the live queue
+  # group that lands this change still ran with main's `web app`.
+  STAGE_SERVICES: "web"
   SUPPLY_SET_POLLS: "20"
   SUPPLY_SET_INTERVAL: "30"
 
