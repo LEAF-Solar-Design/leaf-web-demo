@@ -1071,8 +1071,8 @@ export default function App() {
   const authorAuthorityProvider = useCallback(async (description, { allowSecretOnce = false, forceFresh = false, projectId } = {}) => {
     // No entitlement pre-check here: entitlements load async, and a stage
     // click can beat them (proven by the e2e). A mint against a tenant that
-    // truly cannot converse just fails and falls through to null, which the
-    // server answers with its own fail-closed refusal.
+    // truly cannot converse returns no authority and the controller stops
+    // before submitting an authoring request.
     const requestedProjectId = projectId === undefined ? authorProjectRef.current : projectId || null
     if (requestedProjectId !== authorProjectRef.current) return null
     const cached = authorAuthorityRef.current
@@ -1086,7 +1086,7 @@ export default function App() {
       // AuthorPanel "Send anyway" re-stage with credential-shaped text would
       // otherwise have its authority mint refused here and silently fall
       // back to null-authority — a refusal the click never saw or overrode.
-      const response = await startAgentTurn(description, { source: 'author_panel', purpose: 'stage_authority' }, { allowSecretOnce })
+      const response = await startAgentTurn(description, { source: 'author_panel', purpose: 'stage_authority' }, { allowSecretOnce, requireImmediateTurn: true })
       if (requestedProjectId !== authorProjectRef.current) return null
       // The response's own session id, never the state-fed ref alone: the
       // first mint resolves before React has re-rendered the fresh sessionId.

@@ -2,8 +2,7 @@
 // stage_authority_invalid). This pins the controller's half of the fix: an
 // injected authority provider is consulted once per fresh stage submission
 // and its result rides the stageAuthorTool call — never on a poll/reconnect,
-// and never surfaced as a client-side refusal when the provider comes back
-// empty (the server still fail-closes on its own).
+// and never submitted when the provider has not acquired authority.
 import { describe, expect, it, vi } from 'vitest'
 import { act, renderHook } from '@testing-library/react'
 
@@ -40,7 +39,7 @@ describe('useAuthorStageController turn-authority provider', () => {
     expect(result.current.phase).toBe('succeeded')
   })
 
-  it('proceeds with no authority (never inventing a client-side refusal) when the provider returns null', async () => {
+  it('does not submit when the provider returns null', async () => {
     const authorityProvider = vi.fn(async () => null)
     const stageAuthorTool = vi.fn(async () => staged())
     const { result } = renderHook(() => useAuthorStageController({
@@ -50,12 +49,14 @@ describe('useAuthorStageController turn-authority provider', () => {
     await act(async () => { await result.current.stage('count panels near the ridge line') })
 
     expect(authorityProvider).toHaveBeenCalledTimes(1)
-    const opts = stageAuthorTool.mock.calls[0][3]
-    expect(opts.authority).toBeNull()
-    expect(result.current.phase).toBe('succeeded')
+    expect(stageAuthorTool).not.toHaveBeenCalled()
+    expect(result.current.error.message).toContain('Could not start authoring')
+    expect(result.current.pointer).toBeNull()
+    await act(async () => { await result.current.resume() })
+    expect(authorityProvider).toHaveBeenCalledTimes(1)
   })
 
-  it('proceeds with no authority when the provider throws', async () => {
+  it('preserves the provider error without submitting', async () => {
     const authorityProvider = vi.fn(async () => { throw new Error('mint failed') })
     const stageAuthorTool = vi.fn(async () => staged())
     const { result } = renderHook(() => useAuthorStageController({
@@ -64,8 +65,57 @@ describe('useAuthorStageController turn-authority provider', () => {
 
     await act(async () => { await result.current.stage('count panels near the ridge line') })
 
-    const opts = stageAuthorTool.mock.calls[0][3]
-    expect(opts.authority).toBeNull()
+    expect(stageAuthorTool).not.toHaveBeenCalled()
+    expect(result.current.error.message).toBe('mint failed')
+    expect(result.current.pointer).toBeNull()
+  })
+
+  it('does not submit an incomplete authority tuple', async () => {
+    const stageAuthorTool = vi.fn(async () => staged())
+    const { result } = renderHook(() => useAuthorStageController({
+      storage: memoryStorage(), stageAuthorTool,
+      authorityProvider: async () => ({ sessionId: 'session-1' }),
+    }))
+    await act(async () => { await result.current.stage('organize recipes') })
+    expect(stageAuthorTool).not.toHaveBeenCalled()
+  })
+
+  it('does not submit when authority arrives after unmount', async () => {
+    let resolveAuthority
+    const authorityProvider = vi.fn(() => new Promise((resolve) => { resolveAuthority = resolve }))
+    const stageAuthorTool = vi.fn(async () => staged())
+    const { result, unmount } = renderHook(() => useAuthorStageController({
+      storage: memoryStorage(), stageAuthorTool, authorityProvider,
+    }))
+    let pending
+    act(() => { pending = result.current.stage('organize recipes') })
+    unmount()
+    await act(async () => {
+      resolveAuthority({ sessionId: 'session-1', turnId: 'turn-1' })
+      await pending
+    })
+    expect(stageAuthorTool).not.toHaveBeenCalled()
+  })
+
+  it('reconnects an accepted request without minting another turn', async () => {
+    const authorityProvider = vi.fn(async () => ({ sessionId: 'session-1', turnId: 'turn-1' }))
+    let attempts = 0
+    const stageAuthorTool = vi.fn(async (_mock, _text, _target, options) => {
+      attempts += 1
+      if (attempts === 1) {
+        options.onAccepted({ change_set_id: 'cs-1', poll_url: '/api/author/jobs/cs-1', retry_after_ms: 1 })
+        throw new Error('connection lost')
+      }
+      expect(options.pollUrl).toBe('/api/author/jobs/cs-1')
+      expect(options.authority).toBeNull()
+      return staged()
+    })
+    const { result } = renderHook(() => useAuthorStageController({
+      storage: memoryStorage(), stageAuthorTool, authorityProvider,
+    }))
+    await act(async () => { await result.current.stage('organize recipes') })
+    await act(async () => { await result.current.resume() })
+    expect(authorityProvider).toHaveBeenCalledTimes(1)
     expect(result.current.phase).toBe('succeeded')
   })
 
