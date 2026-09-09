@@ -55,6 +55,7 @@ describeWithPostgres("PgSessionStore contract", () => {
   afterAll(async () => {
     await pool.query(`
       DROP TABLE IF EXISTS
+        "${prefix}_app_sdk_sessions",
         "${prefix}_usage",
         "${prefix}_confirmations",
         "${prefix}_events",
@@ -63,6 +64,21 @@ describeWithPostgres("PgSessionStore contract", () => {
       CASCADE
     `);
     await pool.end();
+  });
+
+  it("persists app SDK isolation across adapters and preserves the legacy session contract", async () => {
+    const legacy = await first.createOrGetSession("tenant-app-a", "drawing");
+    await first.updateSession(legacy.session_id, { sdk_session_id: "legacy-sdk" });
+    expect(await first.getAppSdkSession("tenant-app-a", "app-a")).toBeNull();
+    await first.setAppSdkSession("tenant-app-a", "app-a", "sdk-a");
+    await first.setAppSdkSession("tenant-app-a", "app-b", "sdk-b");
+    await first.setAppSdkSession("tenant-app-b", "app-a", "sdk-c");
+    expect(await second.getAppSdkSession("tenant-app-a", "app-a")).toBe("sdk-a");
+    expect(await second.getAppSdkSession("tenant-app-a", "app-b")).toBe("sdk-b");
+    expect(await second.getAppSdkSession("tenant-app-b", "app-a")).toBe("sdk-c");
+    await second.setAppSdkSession("tenant-app-a", "app-a", null);
+    expect(await first.getAppSdkSession("tenant-app-a", "app-a")).toBeNull();
+    expect((await second.createOrGetSession("tenant-app-a", "drawing")).sdk_session_id).toBe("legacy-sdk");
   });
 
   it("creates one active session per tenant and drawing", async () => {
