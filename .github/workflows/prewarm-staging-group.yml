@@ -51,7 +51,12 @@ env:
   # a lane. Let any in-flight app prewarm build finish first: the live queue
   # group that lands this change still ran with main's `web app`.
   STAGE_SERVICES: "web"
-  SUPPLY_SET_POLLS: "20"
+  # This wait must be at least the merge queue controller's mq supply wait,
+  # 40 x 30 s: both poll the same supply set and readiness objects, and the
+  # controller ejects the group when the dispatched set is empty.
+  # Group d8ba959d on 2026/09/09: an 18 minute build produced readiness at
+  # 09:13:39Z, after the empty relay receipt at 09:12:48Z.
+  SUPPLY_SET_POLLS: "40"
   SUPPLY_SET_INTERVAL: "30"
 
 jobs:

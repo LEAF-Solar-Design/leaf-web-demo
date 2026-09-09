@@ -97,7 +97,8 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
         # job carry falsifying rows. Mirrors run-all-gates.py; BOTH must move together.
         "build-platform-images-workflow": 53,
         # 2026-09-09 app pause: 72 executed rows without unzip; three readiness rows still run in CI.
-        "prewarm-staging-cutover-workflow": 72,
+        # 72 to 74: group wait budget invariant and its smaller budget falsifying twin.
+        "prewarm-staging-cutover-workflow": 74,
         # 2026-09-09 app pause keeps 96 executed rows: next-group receipt becomes web only.
         "merge-queue-workflow": 96,
         "platform-release-manifest": 88,

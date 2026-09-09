@@ -77,8 +77,8 @@ env:
   # Keep this environment mirror aligned with the group relay, the sole
   # producer of new stages after PR-mode retirement.
   STAGE_SERVICES: "web app"
-  # Bounded wait for the speculative supply set: 20 polls x 30s.
-  SUPPLY_SET_POLLS: "20"
+  # Bounded wait for the speculative supply set: 40 polls x 30s.
+  SUPPLY_SET_POLLS: "40"
   SUPPLY_SET_INTERVAL: "30"
 
 jobs:

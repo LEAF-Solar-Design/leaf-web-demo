@@ -628,6 +628,36 @@ def test_the_group_supply_set_step_retains_tree_identity_and_poll_bounds():
     assert "SUPPLY_SET_INTERVAL" in body
 
 
+def _assert_group_wait_covers_controller(group_text: str, controller_text: str) -> None:
+    def budget(text: str) -> int:
+        env = yaml.load(text, Loader=yaml.BaseLoader)["env"]
+        return int(env["SUPPLY_SET_POLLS"]) * int(env["SUPPLY_SET_INTERVAL"])
+
+    assert budget(group_text) >= budget(controller_text), (
+        "group readiness wait must cover the controller supply wait"
+    )
+
+
+def test_the_group_readiness_wait_covers_the_controller_supply_wait():
+    _assert_group_wait_covers_controller(
+        GROUP_WORKFLOW.read_text(encoding="utf-8"),
+        WORKFLOW.with_name("merge-queue.yml").read_text(encoding="utf-8"),
+    )
+
+
+def test_the_group_readiness_wait_rejects_a_smaller_budget():
+    group_text = GROUP_WORKFLOW.read_text(encoding="utf-8")
+    controller_text = WORKFLOW.with_name("merge-queue.yml").read_text(encoding="utf-8")
+    _assert_group_wait_covers_controller(group_text, controller_text)
+    # Reproduce d8ba959d's short wait in memory without changing the workflow.
+    smaller_group_text = re.sub(
+        r'(?m)^(  SUPPLY_SET_POLLS: )"\d+"$', r'\g<1>"20"', group_text,
+    )
+    assert smaller_group_text != group_text
+    with pytest.raises(AssertionError, match="group readiness wait must cover"):
+        _assert_group_wait_covers_controller(smaller_group_text, controller_text)
+
+
 def test_the_group_dispatch_uses_only_the_oidc_role():
     job = group_workflow_document()["jobs"]["stage-group"]
     assert job["permissions"] == {
