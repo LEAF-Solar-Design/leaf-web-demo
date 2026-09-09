@@ -5400,6 +5400,22 @@ def _rehearse_relay_dispatch(*, image_tag="prod-9999999", web_title, app_title,
                 ("web", web_result_zip, digests["web"]),
                 ("app", app_result_zip, digests["app"]),
             ):
+                surface_receipt = {
+                    "schema": "leaf.staging-surface-deploy.v1",
+                    "service": service,
+                    "convergence_id": f"{build_sha}-1-{service}",
+                    "candidate_image_digest": digest,
+                    "terminal_image_digest": digest,
+                    "terminal_task_definition": f"fixture-{service}:1",
+                    "github_run_id": "1000",
+                    "aws_mutation_count": 1,
+                    "identity_stamped": False,
+                    "rollback_invoked": False,
+                }
+                receipt_bytes = subprocess.run(
+                    [jq, "-cS", "."], input=json.dumps(surface_receipt).encode(),
+                    stdout=subprocess.PIPE, check=True,
+                ).stdout.replace(b"\r\n", b"\n")
                 surface_result = {
                     "aws_mutation_count": 1,
                     "candidate_image_digest": digest,
@@ -5408,13 +5424,19 @@ def _rehearse_relay_dispatch(*, image_tag="prod-9999999", web_title, app_title,
                     "release_source_revision": build_sha,
                     "schema": "leaf.staging-surface-result.v1",
                     "service": service,
-                    "surface_receipt_sha256": "c" * 64,
+                    "surface_receipt_sha256": hashlib.sha256(receipt_bytes).hexdigest(),
                     "terminal_image_digest": digest,
                     "terraform_workflow_blob": "b" * 40,
                 }
                 with zipfile.ZipFile(artifact, "w") as archive:
                     archive.writestr(
                         "surface-result.json", json.dumps(surface_result))
+                    archive.writestr(
+                        "surface-deploy-receipt.json", json.dumps(surface_receipt))
+            (tmp / "scripts").mkdir()
+            for helper in ("platform_surface_receipt.py", "platform_release_manifest.py"):
+                shutil.copyfile(WORKFLOW.parents[2] / "scripts" / helper,
+                                tmp / "scripts" / helper)
         script = tmp / "dispatch.sh"
         script.write_text(
             _relay_deploy_step(relay["jobs"]["dispatch"])["run"],
@@ -7089,6 +7111,9 @@ def test_digest_aware_relay_requires_consumer_marker_and_exact_surface_receipts(
     ):
         assert f'-f "{removed_field}' not in code
     assert 'OUTCOME=$(jq -er \'.outcome\'' in code
+    assert 'python scripts/platform_surface_receipt.py' in code
+    assert '--release-source-revision "$RELEASE_SOURCE"' in code
+    assert '--candidate-digest "$SERVICE_DIGEST"' in code
     assert 'if [ "$OUTCOME" = "deployed" ]' in code
     assert "DEPLOYED_ANY=true" in code
     assert 'schema: "leaf.staging-converged.v2"' in code
