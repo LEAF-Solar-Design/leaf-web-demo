@@ -38,7 +38,7 @@ def replace():
     ("insert", "kind"), ("bulged", "bulge"), ("tilted", "normal"),
     ("byblock", "ByBlock"), ("dimension", "DIMENSION"), ("removal", "removed"),
     ("ordinal", "ordinal"), ("placement", "match"), ("collision", "collides"),
-    ("incomplete", "complete"), ("count", "1..60"), ("modified", "UNCHANGED"),
+    ("incomplete", "complete"), ("count", "1..60"), ("modified-property", "colour, linetype and lineweight"),
     ("unsaved", "committed"), ("nested", "model-space"),
 ])
 def test_boundary_refuses_before_mutation(case, rule):
@@ -65,8 +65,8 @@ def test_boundary_refuses_before_mutation(case, rule):
         head["blocksCapped"] = 201
     elif case == "count":
         plan["block_defs"][0]["members"] = ["10"] * 61
-    elif case == "modified":
-        plan["set_layer"] = [{"handle": "10", "layer": "0"}]
+    elif case == "modified-property":
+        plan["set_color"] = [{"handle": "10", "aci": 1}]
     elif case == "unsaved":
         plan["block_defs"][0]["members"] = ["99"]
     elif case == "nested":
@@ -466,3 +466,320 @@ def test_uploaded_block_result_is_bound_on_mock_and_sidecar(tmp_path, monkeypatc
     if damage != "none":
         assert "uploaded DXF does not carry the plan's result" in response.text
         assert store.resolve_version(backend, tenant, drawing, "head")[0] == 1
+
+
+def inline_base():
+    return {"memberEvidenceCovered": True, "layers": ["0"], "polylines": [],
+            "circles": [{"handle": "11", "layer": "0", "c": [4, 2, 0], "r": 1,
+                         "nrm": [0, 0, 1]}], "blocks": {}}
+
+
+def inline_replace(*, moved=False):
+    plan = {"block_defs": [{"name": "B", "base": [1, 1, 0], "members": ["11"],
+             "children": [{"kind": "LINE", "layer": "0", "pts": [[0, 0, 0], [3, 0, 0]]}],
+             "order": ["C:0", "H:11"], "insert": 0}], "removed": ["11"],
+            "added": [{"handle": "new-insert", "kind": "INSERT", "name": "B", "layer": "0",
+                       "pt": [1, 1, 0], "rot": 0, "scale": [1, 1, 1]}]}
+    if moved:
+        plan["set_circle"] = [{"handle": "11", "c": [6, 1, 0], "r": 1}]
+        plan["set_layer"] = [{"handle": "11", "layer": "SITE"}]
+    return plan
+
+
+@pytest.mark.parametrize("moved", [False, True])
+def test_inline_mixed_hand_derived_plan_and_mock(moved):
+    head, plan = inline_base(), inline_replace(moved=moved)
+    canonical = mutation_plan.validate_mutations(head, plan)
+    assert mutation_plan.validate_mutations(head, canonical) == canonical
+    setters = (["RELAYER|11|SITE", "SETCIRCLE|11|6.000,1.000,0.000|1.000"] if moved else [])
+    assert mutation_plan.emit_plan(canonical, base_sha256="1" * 64).decode().splitlines() == [
+        "LEAF_MUTATION_PLAN|3", "BASE_SHA256|" + "1" * 64, *setters,
+        "BLOCKCHILD|B|0|LINE|0|0.000,0.000,0.000|3.000,0.000,0.000|256|ByLayer|-1",
+        "ADDBLOCKDEF|B|1.000,1.000,0.000|C:0;H:11",
+        "ADDINSERT|0|B|1.000,1.000,0.000|0.000000|1.0000,1.0000,1.0000", "REMOVE|11"]
+    before = copy.deepcopy(head)
+    result = write_loop.apply_mutations(head, canonical)
+    assert head == before
+    block = result["blocks"]["B"]
+    assert block["base"] == [1, 1, 0] and block["count"] == 2 and block["complete"] is True
+    assert len(block["digest"]) == 16
+    line, circle = block["children"]
+    defaults = {"aci": 256, "rgb": None, "linetype": "ByLayer", "lineweight": -1}
+    assert line == {"kind": "LINE", "layer": "0", "pts": [[0, 0, 0], [3, 0, 0]],
+                    "properties": defaults}
+    assert circle == {"kind": "CIRCLE", "layer": "SITE" if moved else "0",
+                      "c": [6, 1, 0] if moved else [4, 2, 0], "r": 1,
+                      "nrm": [0, 0, 1], "properties": defaults}
+    assert all("handle" not in child for child in block["children"])
+    assert result["polylines"] == [] and result["circles"] == []
+    insert, = result["inserts"]
+    assert [insert[k] for k in ("name", "x", "y", "z")] == ["B", 1, 1, 0]
+    assert result["created"] == [{"ordinal": 0, "handle": insert["handle"]}]
+
+
+def test_inline_all_new_definition_has_no_removal_or_child_add_ordinals():
+    head, plan = inline_base(), inline_replace()
+    head["circles"] = []
+    definition = plan["block_defs"][0]
+    definition["members"] = []
+    definition["children"].append({"kind": "CIRCLE", "layer": "0", "c": [4, 2, 0], "r": 1})
+    definition["order"] = ["C:0", "C:1"]
+    plan["removed"] = []
+    canonical = mutation_plan.validate_mutations(head, plan)
+    rows = mutation_plan.emit_plan(canonical, base_sha256="1" * 64).decode().splitlines()
+    assert rows[2:5] == [
+        "BLOCKCHILD|B|0|LINE|0|0.000,0.000,0.000|3.000,0.000,0.000|256|ByLayer|-1",
+        "BLOCKCHILD|B|1|CIRCLE|0|4.000,2.000,0.000|1.000|256|ByLayer|-1",
+        "ADDBLOCKDEF|B|1.000,1.000,0.000|C:0;C:1"]
+    assert not any(row.startswith("REMOVE|") for row in rows)
+    result = write_loop.apply_mutations(head, canonical)
+    assert len(result["inserts"]) == len(result["created"]) == 1
+    assert result["blocks"]["B"]["count"] == 2
+    assert not result["circles"] and not result["polylines"]
+
+
+def test_inline_children_do_not_shift_unrelated_add_or_insert_receipts():
+    head, plan = inline_base(), inline_replace()
+    plan["added"].append({"handle": "other-circle", "kind": "CIRCLE", "layer": "0", "c": [9, 9, 0], "r": 2})
+    canonical = mutation_plan.validate_mutations(head, plan)
+    assert [e["kind"] for e in canonical["added"]] == ["CIRCLE", "INSERT"]
+    assert canonical["block_defs"][0]["insert"] == 1
+    result = write_loop.apply_mutations(head, canonical)
+    assert result["created"] == [{"ordinal": 0, "handle": result["circles"][0]["handle"]},
+                                 {"ordinal": 1, "handle": result["inserts"][0]["handle"]}]
+    assert write_loop.verify_live_mutation_effects(head, result, canonical) is None
+    result["created"].append({"ordinal": 2, "handle": "999"})
+    with pytest.raises(ValueError, match="handoff"):
+        write_loop.verify_live_mutation_effects(head, result, canonical)
+
+
+@pytest.mark.parametrize("case,rule", [
+    ("handle", "block children carry no handle"), ("kind", "block child kind must be"),
+    ("bulged", "block LWPOLYLINE must have straight segments, every bulge 0"),
+    ("missing-order", "block order is required with inline children"),
+    ("duplicate-member", "block order must name each member and inline child exactly once"),
+    ("missing-child", "block order must name each member and inline child exactly once"),
+    ("unknown-child", "block order must name each member and inline child exactly once"),
+    ("empty", "1..60"), ("61", "1..60"),
+    ("property", "colour, linetype and lineweight"),
+    ("transform", "block members cannot be transformed; use set_points"),
+    ("two-geometry", "is a CIRCLE"), ("removed-child", "not an AutoCAD handle"),
+    ("removed-add", "not an AutoCAD handle"), ("xdata", "no xdata"),
+    ("ownership", "unknown fields"), ("association", "unknown fields"),
+])
+def test_inline_refusals_leave_the_head_unchanged(case, rule):
+    head, plan = inline_base(), inline_replace()
+    definition = plan["block_defs"][0]
+    if case == "handle":
+        definition["children"][0]["handle"] = "99"
+    elif case == "kind":
+        definition["children"][0]["kind"] = "INSERT"
+    elif case == "bulged":
+        definition["children"][0] = {"kind": "LWPOLYLINE", "layer": "0", "closed": False,
+                                     "pts": [[0, 0], [3, 0]], "bulges": [0.5, 0]}
+    elif case == "missing-order":
+        definition.pop("order")
+    elif case == "duplicate-member":
+        definition["order"] = ["C:0", "H:11", "H:11"]
+    elif case == "missing-child":
+        definition["order"] = ["H:11"]
+    elif case == "unknown-child":
+        definition["order"] = ["C:1", "H:11"]
+    elif case == "empty":
+        definition.update(members=[], children=[], order=[])
+    elif case == "61":
+        definition["children"] *= 60
+    elif case == "property":
+        plan["set_color"] = [{"handle": "11", "aci": 1}]
+    elif case == "transform":
+        plan["transforms"] = [{"handle": "11", "dx": 1, "dy": 0}]
+    elif case == "two-geometry":
+        plan["set_points"] = [{"handle": "11", "pts": [[0, 0], [3, 0]]}]
+        plan["set_circle"] = [{"handle": "11", "c": [6, 1, 0], "r": 1}]
+    elif case in ("removed-child", "removed-add"):
+        plan["removed"].append("C:0" if case == "removed-child" else "A:0")
+    elif case == "xdata":
+        definition["children"][0]["xdata"] = None
+    elif case == "ownership":
+        definition["children"][0]["owner"] = "11"
+    elif case == "association":
+        definition["children"][0]["association"] = ["11"]
+    before = copy.deepcopy(head)
+    with pytest.raises(ValueError, match=rule):
+        write_loop.apply_mutations(head, plan)
+    assert head == before
+
+
+def test_inline_extension_preserves_main_replacement_plan_digest():
+    # main 6ceaf4ab: the exact replace() plan text predates BLOCKCHILD.
+    main_plan_sha256 = "3dde62183a824be6660119c86ec78c3599f6711dc020e100ad95be3c9d7f0b22"
+    canonical = mutation_plan.validate_mutations(base(), replace())
+    assert hashlib.sha256(mutation_plan.emit_plan(canonical, base_sha256="1" * 64)).hexdigest() == main_plan_sha256
+
+
+def inline_reopened(*, aci=256, moved=False, leaked=False, missing=False):
+    circle = "6,1,0" if moved else "4,2,0"
+    layer = "SITE" if moved else "0"
+    records = ("GRC|1\nBKEPC|1\nLAYER|0\nLAYER|SITE\nCA|0|301\n"
+               "IN|B|0|1,1,0|0|0,0,1|1,1,1|301\nEP|301|256|~|ByLayer|-1\n"
+               f"BK|B|1,1,0|{1 if missing else 2}|1\n"
+               "BKE|B|LINE|0,0,0|3,0,0|0\n"
+               f"BKEP|B|0|{aci}|ByLayer|-1|~\n")
+    if not missing:
+        records += f"BKE|B|CIRCLE|{circle}|1|0,0,1|{layer}\nBKEP|B|1|256|ByLayer|-1|~\n"
+    if leaked:
+        records += "LN|0|0,0,0|3,0,0|302\nEP|302|256|~|ByLayer|-1\n"
+    return intake_parse.parse_text(records, "inline-canary")
+
+
+@pytest.mark.parametrize("damage", ["none", "leaked", "missing", "property"])
+@pytest.mark.parametrize("aci", [256, 1])
+def test_inline_reopened_definition_properties_and_model_space_inventory(damage, aci):
+    head, plan = inline_base(), inline_replace()
+    if aci != 256:
+        plan["block_defs"][0]["children"][0]["aci"] = aci
+    canonical = mutation_plan.validate_mutations(head, plan)
+    actual = inline_reopened(aci=(3 if damage == "property" else aci),
+                              leaked=damage == "leaked", missing=damage == "missing")
+    assert not actual.get("parseErrors")
+    if damage == "none":
+        assert write_loop.verify_live_mutation_effects(head, actual, canonical) is None
+        assert actual["blocks"]["B"]["children"][0]["properties"] == {
+            "aci": aci, "rgb": None, "linetype": "ByLayer", "lineweight": -1}
+    else:
+        with pytest.raises(ValueError):
+            write_loop.verify_live_mutation_effects(head, actual, canonical)
+
+
+def test_inline_moved_dxf_legs_preserve_child_sequence():
+    head, plan = inline_base(), inline_replace(moved=True)
+    canonical = mutation_plan.validate_mutations(head, plan)
+    result = write_loop.apply_mutations(head, canonical)
+    parsed = dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf(result))
+    assert parsed["blocks"]["B"]["children"] == result["blocks"]["B"]["children"]
+    assert [c["kind"] for c in parsed["blocks"]["B"]["children"]] == ["LINE", "CIRCLE"]
+    assert parsed["blocks"]["B"]["children"][1]["c"] == [6, 1, 0]
+    assert parsed["blocks"]["B"]["children"][1]["layer"] == "SITE"
+    parsed["created"] = result["created"]
+    assert write_loop.verify_live_mutation_effects(head, parsed, canonical) is None
+    assert write_loop.verify_live_mutation_effects(head, inline_reopened(moved=True), canonical) is None
+
+
+@pytest.mark.parametrize("reverse_children", [False, True])
+@pytest.mark.parametrize("sidecar", [False, True])
+def test_inline_uploaded_dxf_is_bound_to_child_order(tmp_path, monkeypatch, reverse_children, sidecar):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import deps
+    import store
+    from envelopes import install_error_handlers
+    from routers import drawings
+
+    monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "drawings"))
+    monkeypatch.delenv("LEAF_AUTH_LIVE", raising=False)
+    monkeypatch.setattr(deps, "APS_LIVE", False)
+    app = FastAPI()
+    install_error_handlers(app)
+    app.include_router(drawings.router)
+    client = TestClient(app)
+    tenant, drawing = "tenant-inline-save", "inline-save"
+    head, plan = inline_base(), inline_replace(moved=True)
+    plan["added"][0]["handle"] = "301"
+    backend = store.FilesystemBackend(str(tmp_path / "drawings"))
+    source = tmp_path / "base.dwg"
+    source.write_bytes(json.dumps(head).encode() if sidecar else b"AC1032" + b"\x00" * 64)
+    store.ingest_drawing(backend, tenant, str(source), drawing_id=drawing)
+    write_loop.publish_intake_cache(backend, tenant, drawing, 1, source.read_bytes(), head)
+    upload = write_loop.apply_mutations(head, plan)
+    if reverse_children:
+        upload["blocks"]["B"]["children"].reverse()
+        assert write_loop._block_digest(upload["blocks"]["B"]) != upload["blocks"]["B"]["digest"]
+    data = intake_dxf.intake_to_dxf(upload)
+    checkout = client.post(f"/api/drawings/{drawing}/checkout", headers={"X-Tenant-Id": tenant},
+                           json={"holder": "inline-editor", "ttl_s": 3600})
+    assert checkout.status_code == 200, checkout.text
+    response = client.post(f"/api/drawings/{drawing}/versions/plan",
+        headers={"X-Tenant-Id": tenant,
+                 "X-Checkout-Capability": checkout.json()["checkout_capability"]},
+        files={"file": ("edited.dxf", io.BytesIO(data), "application/dxf")},
+        data={"parent_version": "1", "source_digest": hashlib.sha256(data).hexdigest(),
+              "plan": json.dumps({"mutations": plan})})
+    # Binding compares a child multiset while plan order governs the digest and native draw order.
+    assert response.status_code == 201, response.text
+    version, key = store.resolve_version(backend, tenant, drawing, "head")
+    assert version == 2
+    if sidecar:
+        assert response.json()["source_stored"] is True
+        assert backend.get(write_loop.edited_source_key(tenant, drawing, version)) == data
+    else:
+        stored = json.loads(backend.get(key))
+        assert [child["kind"] for child in stored["blocks"]["B"]["children"]] == ["LINE", "CIRCLE"]
+
+
+@pytest.mark.parametrize("child,geometry", [
+    ({"kind": "LINE", "pts": [[0.12349, -0.0001, 0], [3.12349, 0, 0]]},
+     "LINE|0|0.123,0.000,0.000|3.123,0.000,0.000"),
+    ({"kind": "CIRCLE", "c": [4.12349, 2, 0], "r": 1.12349},
+     "CIRCLE|0|4.123,2.000,0.000|1.123"),
+    ({"kind": "ARC", "c": [4, 2, 0], "r": 1, "start_deg": 10.12345649, "end_deg": 80.12345649},
+     "ARC|0|4.000,2.000,0.000|1.000|10.123456|80.123456"),
+    ({"kind": "LWPOLYLINE", "closed": False, "pts": [[0, 0, 2], [3, 0, 2]]},
+     "LWPOLYLINE|0|0|0.000,0.000,1.000|2.000|0.000,0.000;3.000,0.000"),
+    ({"kind": "LWPOLYLINE", "closed": True, "pts": [[0, 0, 2], [3, 0, 2], [3, 3, 2]]},
+     "LWPOLYLINE|0|1|0.000,0.000,1.000|2.000|0.000,0.000;3.000,0.000;3.000,3.000"),
+])
+def test_inline_child_kinds_use_add_validation_quantum_and_style(child, geometry):
+    head, plan = inline_base(), inline_replace()
+    plan["block_defs"][0]["children"] = [{**child, "layer": "0", "aci": 1,
+                                         "linetype": "Continuous", "lineweight": 25}]
+    canonical = mutation_plan.validate_mutations(head, plan)
+    assert mutation_plan.validate_mutations(head, canonical) == canonical
+    row = mutation_plan.emit_plan(canonical, base_sha256="1" * 64).decode().splitlines()[2]
+    assert row == f"BLOCKCHILD|B|0|{geometry}|1|Continuous|25"
+    result = write_loop.apply_mutations(head, canonical)
+    first = result["blocks"]["B"]["children"][0]
+    assert "handle" not in first
+    assert first["properties"] == {"aci": 1, "rgb": None, "linetype": "Continuous", "lineweight": 25}
+    parsed = dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf(result))
+    assert parsed["blocks"]["B"]["children"] == result["blocks"]["B"]["children"]
+
+
+@pytest.mark.parametrize("op,member,setter,expected", [
+    ("set_points", {"polylines": [{"handle": "11", "layer": "0", "closed": False,
+                                  "pts": [[0, 0, 0], [3, 0, 0]], "xdata": None}], "circles": []},
+     {"handle": "11", "pts": [[1, 2, 0], [4, 2, 0]], "closed": False},
+     {"pts": [[1, 2, 0], [4, 2, 0]]}),
+    ("set_arc", {"circles": [], "arcs": [{"handle": "11", "layer": "0", "c": [4, 2, 0],
+                 "r": 1, "start_deg": 10, "end_deg": 80, "nrm": [0, 0, 1]}]},
+     {"handle": "11", "c": [6, 1, 0], "r": 2, "start_deg": 20, "end_deg": 90},
+     {"c": [6, 1, 0], "r": 2, "start_deg": 20, "end_deg": 90}),
+])
+def test_consumed_geometry_setters_copy_final_geometry(op, member, setter, expected):
+    head, plan = {**inline_base(), **member}, inline_replace()
+    plan[op] = [setter]
+    canonical = mutation_plan.validate_mutations(head, plan)
+    rows = mutation_plan.emit_plan(canonical, base_sha256="1" * 64).decode().splitlines()
+    assert rows[2].startswith(op.replace("_", "").upper() + "|11|")
+    assert rows[3].startswith("BLOCKCHILD|")
+    result = write_loop.apply_mutations(head, canonical)
+    copied = result["blocks"]["B"]["children"][1]
+    assert {key: copied[key] for key in expected} == expected
+    assert write_loop.verify_live_mutation_effects(head, result, canonical) is None
+    plan[op].append(copy.deepcopy(setter))
+    with pytest.raises(ValueError, match="more than one geometry operation"):
+        mutation_plan.validate_mutations(head, plan)
+
+
+def test_removed_setter_exception_only_covers_consumed_members():
+    head, plan = inline_base(), inline_replace()
+    head["circles"].append({"handle": "12", "layer": "0", "c": [9, 9, 0], "r": 2, "nrm": [0, 0, 1]})
+    plan["removed"].append("12")
+    plan["set_layer"] = [{"handle": "12", "layer": "SITE"}]
+    with pytest.raises(ValueError, match="cannot be removed and replaced"):
+        mutation_plan.validate_mutations(head, plan)
+    plan["removed"].remove("12")
+    canonical = mutation_plan.validate_mutations(head, plan)
+    rows = mutation_plan.emit_plan(canonical, base_sha256="1" * 64).decode().splitlines()
+    assert rows[2].startswith("BLOCKCHILD|")
+    assert rows[3].startswith("ADDBLOCKDEF|")
+    assert rows[4] == "RELAYER|12|SITE"

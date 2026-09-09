@@ -851,6 +851,23 @@ def _block_member_child(intake, handle):
     raise ValueError("block member is missing from the committed intake")
 
 
+def _block_inline_child(record):
+    child = {"kind": record["kind"], "layer": record["layer"],
+             "properties": {**_PROPERTY_DEFAULTS,
+                            **{k: record[k] for k in ("aci", "linetype", "lineweight") if k in record}}}
+    if record["kind"] == "LINE":
+        child["pts"] = copy.deepcopy(record["pts"])
+    elif record["kind"] == "LWPOLYLINE":
+        lowered = world_to_ocs_any(record["pts"])
+        child.update(pts=lowered["points"], closed=record["closed"],
+                     nrm=lowered["normal"], elev=lowered["elevation"])
+    else:
+        child.update(c=list(record["c"]), r=record["r"], nrm=[0.0, 0.0, 1.0])
+        if record["kind"] == "ARC":
+            child.update(start_deg=record["start_deg"], end_deg=record["end_deg"])
+    return child
+
+
 def _block_digest(block):
     """01c FNV-1a, length-delimited writer records for the bounded kinds.
 
@@ -961,8 +978,30 @@ def apply_mutations(intake: Dict[str, Any], mutations: Dict[str, Any]) -> Dict[s
         reject_noop=False)
     transforms = _validated_transforms(intake, mutations)
     new = copy.deepcopy(intake or {})
+    consumed = {h for definition in mutations.get("block_defs", []) for h in definition["members"]}
+    if consumed:
+        members = {e["handle"]: e for field in ("polylines", "circles", "arcs")
+                   for e in new.get(field, []) if e.get("handle") in consumed}
+        for op in ("set_layer", "set_points", "set_circle", "set_arc"):
+            for item in mutations.get(op, []):
+                if item["handle"] not in consumed:
+                    continue
+                entity = members[item["handle"]]
+                entity.update({k: copy.deepcopy(v) for k, v in item.items() if k != "handle"})
+                if op == "set_points":
+                    entity.pop("bulges", None)
+                if op == "set_layer" and item["layer"] not in new.setdefault("layers", []):
+                    new["layers"].append(item["layer"])
+            if op in mutations:
+                mutations[op] = [item for item in mutations[op] if item["handle"] not in consumed]
     for definition in mutations.get("block_defs", []):
-        children = [_block_member_child(intake, h) for h in definition["members"]]
+        refs = (definition["order"] if definition.get("children")
+                else [f"H:{h}" for h in definition["members"]])
+        children = [(_block_member_child(new, ref[2:]) if ref.startswith("H:") else
+                     _block_inline_child(definition["children"][int(ref[2:])])) for ref in refs]
+        for child in definition.get("children", []):
+            if child["layer"] not in new.setdefault("layers", []):
+                new["layers"].append(child["layer"])
         block = {"base": list(definition["base"]), "children": children,
                  "count": len(children), "complete": True}
         block["digest"] = _block_digest(block)
