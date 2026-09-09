@@ -50,6 +50,7 @@ from mutation_plan import (
     emit_plan,
     plan_sha256,
     validate_mutations,
+    world_to_ocs,
     world_to_ocs_any,
 )
 from tenant_id_validator import validate_tenant_id
@@ -839,9 +840,11 @@ def _block_member_child(intake, handle):
             if kind == "LINE":
                 child["pts"] = [[round(v, 3) for v in p] for p in entity["pts"]]
             elif kind == "LWPOLYLINE":
-                child.update(pts=[[round(v, 3) for v in p[:2]] for p in entity["pts"]],
-                             closed=bool(entity.get("closed")), nrm=[0.0, 0.0, 1.0],
-                             elev=round(entity["pts"][0][2] if len(entity["pts"][0]) > 2 else 0, 3))
+                # Lower the edited 3-D points even when intake carries its own nrm.
+                lowered = (world_to_ocs if entity.get("closed") else world_to_ocs_any)(entity["pts"])
+                child.update(pts=[[round(v, 3) for v in p] for p in lowered["points"]],
+                             closed=bool(entity.get("closed")), nrm=lowered["normal"],
+                             elev=round(lowered["elevation"], 3))
             else:
                 child.update(c=[round(v, 3) for v in entity["c"]], r=round(entity["r"], 3),
                              nrm=[0.0, 0.0, 1.0])

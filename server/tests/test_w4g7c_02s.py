@@ -861,3 +861,52 @@ def test_tilted_inline_polyline_preserves_add_geometry_and_dxf_vertex():
     for point in planar_reopened["pts"]:
         assert dxf_intake._ocs_to_wcs(
             point + [planar_reopened["elev"]], planar_reopened["nrm"])[2] == 0.009
+
+
+def test_tilted_consumed_polyline_uses_edited_ocs_and_inspection_normal():
+    head, plan = inline_base(), inline_replace()
+    head["circles"] = []
+    head["polylines"] = [{"handle": "11", "layer": "0", "closed": True,
+                          "pts": [[0, 0, 0], [10, 0, 0], [0, 10, 0]],
+                          "xdata": None, "nrm": [0, 0, 1]}]
+    points = [[0, 0, 0], [10000, 0, 0.009], [0, 10000, 0]]
+    plan["set_points"] = [{"handle": "11", "closed": True, "pts": points}]
+    canonical = mutation_plan.validate_mutations(head, plan)
+    lowered = mutation_plan.world_to_ocs(points)
+    result = write_loop.apply_mutations(head, canonical)
+    copied = result["blocks"]["B"]["children"][1]
+    assert copied["nrm"] == lowered["normal"]
+    assert copied["nrm"] == pytest.approx([-9e-7, 0, 1])
+    assert copied["elev"] == round(lowered["elevation"], 3)
+    assert copied["pts"] == [[round(value, 3) for value in point] for point in lowered["points"]]
+    actual = intake_parse.parse_text(
+        "GRC|1\nBKEPC|1\nLAYER|0\nCA|0|301\n"
+        "IN|B|0|1,1,0|0|0,0,1|1,1,1|301\n"
+        "EP|301|256|~|ByLayer|-1\n"
+        "BK|B|1,1,0|2|1\n"
+        "BKE|B|LINE|0,0,0|3,0,0|0\n"
+        "BKE|B|LWPOLYLINE|1|-0.000001,0,1|0|0,0;10000,0;0,10000;|0\n"
+        "BKEP|B|0|256|ByLayer|-1|~\n"
+        "BKEP|B|1|256|ByLayer|-1|~\n", "canary")
+    assert not actual.get("parseErrors")
+    observed = actual["blocks"]["B"]["children"][1]
+    assert observed["nrm"] == [round(value, 6) for value in lowered["normal"]]
+    assert write_loop.verify_live_mutation_effects(head, actual, canonical) is None
+    observed["nrm"] = [0, 0, 1]
+    with pytest.raises(ValueError, match="block definition geometry or child properties differ"):
+        write_loop.verify_live_mutation_effects(head, actual, canonical)
+
+
+def test_planar_consumed_polyline_keeps_literal_child():
+    for closed in (True, False):
+        head, plan = inline_base(), inline_replace()
+        head["circles"] = []
+        head["polylines"] = [{"handle": "11", "layer": "0", "closed": closed,
+                              "pts": [[0, 0, 2], [3, 0, 2], [3, 3, 2]], "xdata": None}]
+        result = write_loop.apply_mutations(head, plan)
+        assert result["blocks"]["B"]["children"][1] == {
+            "kind": "LWPOLYLINE", "layer": "0",
+            "properties": {"aci": 256, "rgb": None, "linetype": "ByLayer", "lineweight": -1},
+            "pts": [[0, 0], [3, 0], [3, 3]], "closed": closed,
+            "nrm": [0, 0, 1], "elev": 2,
+        }
