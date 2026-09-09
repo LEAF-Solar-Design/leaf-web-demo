@@ -77,7 +77,7 @@ _LISP_LINES = (
     '(command "_.UNDO" "_Begin")',
     '(foreach leaf-op leaf-ops (if (not (leaf-apply leaf-op)) (progn (command "_.UNDO" "_End") (command "_.UNDO" "_Back") (princ "LEAF-MUTATION-APPLY-FAILED") (quit))))',
     '(command "_.UNDO" "_End")',
-    '(command "_.SAVEAS" "" "output.dwg")',
+    '(if leaf-ops (command "_.SAVEAS" "" "output.dwg"))',
     '(command "_.QUIT" "_Y")',
 )
 
@@ -216,8 +216,8 @@ def build_apply_scr_v3() -> str:
             line = '(foreach leaf-op leaf-ops (if (and leaf-apply-ok (not (leaf-apply leaf-op))) (progn (setq leaf-apply-ok nil) (command "_.UNDO" "_Back") (princ "LEAF-MUTATION-APPLY-FAILED"))))'
         elif line == '(command "_.UNDO" "_End")':
             continue
-        elif line == '(command "_.SAVEAS" "" "output.dwg")':
-            line = '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))'
+        elif line == '(if leaf-ops (command "_.SAVEAS" "" "output.dwg"))':
+            line = '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg"))'
         elif line.startswith("(defun leaf-read-plan "):
             line = line.replace('(setq fh (open path "r")', '(setq leaf-pending-definitions nil leaf-pending-children nil) (setq fh (open path "r")', 1)
             line = line.replace('(setq ops (cons op ops))', '(if (/= (car op) "BLOCKCHILD") (setq ops (cons op ops)))', 1)

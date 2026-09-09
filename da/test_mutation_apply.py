@@ -397,7 +397,7 @@ def test_v3_activity_adds_insert_and_preserves_v2_apply_script():
     assert '(command "_.UNDO" "_Begin")' not in block_script
     assert '(command "_.UNDO" "_End")' not in block_script
     assert '(command "_.UNDO" "_Back") (princ "LEAF-MUTATION-APPLY-FAILED")' in block_script
-    assert '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))' in block_script
+    assert '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg"))' in block_script
     assert 'leaf-bd-create-child' in block_script
     assert '"BKEP|"' in subject.activity_spec(3)["settings"]["inspectScript"]["value"]
     assert '"MEC|1"' in subject.activity_spec(3)["settings"]["inspectScript"]["value"]
@@ -418,15 +418,15 @@ def test_v3_activity_adds_insert_and_preserves_v2_apply_script():
     headers_v3 = '(list "LEAF_MUTATION_PLAN|1" "LEAF_MUTATION_PLAN|2" "LEAF_MUTATION_PLAN|3")'
     script_v2 = v2_settings["script"]["value"]
     script_v3 = v3["settings"]["script"]["value"]
-    # Inline children and consumed-member copies move only the v3 APPLY bytes.
-    # Old: ead402b353104e6078e3242bab0940585738f643fc42f9af1445a7761c2bad3e
-    # New: c68f935b6cbb22fb1f55780e78208e833f1b86ce3a44089f064177d6fc0dd90c
+    # Invalid-plan SAVEAS guards move both APPLY scripts, leaving inspect unchanged.
+    # v3 old: c68f935b6cbb22fb1f55780e78208e833f1b86ce3a44089f064177d6fc0dd90c
+    # v3 new: 36ad4c823a89032592e8ea149aad5b7006c6c3802debac97b5538afb8699b073
     assert hashlib.sha256(script_v3.encode("utf-8")).hexdigest() == (
-        "c68f935b6cbb22fb1f55780e78208e833f1b86ce3a44089f064177d6fc0dd90c")
-    # The v2 APPLY script is byte-identical to 81e5d234. The shared inspect
-    # script changed and must: the old one hangs the console.
+        "36ad4c823a89032592e8ea149aad5b7006c6c3802debac97b5538afb8699b073")
+    # v2 old: a7ed0bb7dbd8266404574b523550d8103318981c47a927a6ad4c9daab07f6c35
+    # v2 new: e233c7f1674744a9efe2b3f4cf5d5e905199cd6756f8b5d57320c0b55678c5ae
     assert hashlib.sha256(script_v2.encode("utf-8")).hexdigest() == (
-        "a7ed0bb7dbd8266404574b523550d8103318981c47a927a6ad4c9daab07f6c35")
+        "e233c7f1674744a9efe2b3f4cf5d5e905199cd6756f8b5d57320c0b55678c5ae")
     # W4g-7b-3s added an EP block to the shared inspect script (colour /
     # linetype / lineweight), so its exact byte pin moved; assert the new
     # structural invariant directly instead of a hand-computed hash: exactly

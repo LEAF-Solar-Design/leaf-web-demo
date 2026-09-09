@@ -324,8 +324,8 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
         '(write-line "second child refused after BLOCK began" leaf-proof) (close leaf-proof))) nil) (entmake ed)))\r\n'
         '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))',
     ).replace(
-        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))',
-        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg") '
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg"))',
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg") '
         '(command "_.SAVEAS" "" "rolled-back.dwg"))',
     )
     _console(tmp_path, group_host, "block-failure.scr", failure_script, apply_failed=True)
@@ -361,8 +361,8 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
         '(car 1)) (entmake ed)))\r\n'
         '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))',
     ).replace(
-        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))',
-        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg") '
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg"))',
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg") '
         '(command "_.SAVEAS" "" "inline-rolled-back.dwg"))',
     )
     _console(tmp_path, group_host, "inline-child-failure.scr", inline_failure_script, apply_failed=True)
@@ -414,11 +414,11 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
         '(setvar "MLEADERLAYER" "LEAF-ML-OVERRIDE")\r\n'
         '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))',
     ).replace(
-        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))',
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg"))',
         '(setq leaf-proof (open "mleaderlayer-after.txt" "w"))\r\n'
         '(write-line (getvar "MLEADERLAYER") leaf-proof)\r\n'
         '(close leaf-proof)\r\n'
-        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))',
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg"))',
     )
     _console(tmp_path, leader_host, "leader.scr", leader_script)
     assert (tmp_path / "mleaderlayer-after.txt").read_text().strip() == "LEAF-ML-OVERRIDE"
@@ -449,8 +449,8 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
         '(setq leaf-ops (list (car leaf-ops) '
         '(subst "NoSuchStyle" "Standard" (cadr leaf-ops))))',
     ).replace(
-        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))',
-        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg") '
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg"))',
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg") '
         '(command "_.SAVEAS" "" "leader-rolled-back.dwg"))',
     )
     _console(tmp_path, leader_host, "leader-failure.scr",
@@ -482,8 +482,8 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
         '(close leaf-proof)\r\n'
         '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))',
     ).replace(
-        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))',
-        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg") '
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg"))',
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg") '
         '(command "_.SAVEAS" "" "frozen-rolled-back.dwg"))',
     )
     _console(tmp_path, leader_host, "frozen-leader.scr", frozen_script, apply_failed=True)
