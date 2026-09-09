@@ -200,6 +200,29 @@ def test_fixed_plan_removes_and_adds_then_reextracts(tmp_path):
     assert len({point[2] for point in tilted[0]["pts"]}) > 1
 
 
+@pytest.mark.skipif(
+    not ACCORECONSOLE.exists() or not SOURCE_DWG.exists(),
+    reason="local AutoCAD 2026 console and tracked demo DWG are required",
+)
+def test_mutation_inspect_reads_per_vertex_bulges(tmp_path):
+    host = tmp_path / "bulges.dwg"
+    shutil.copyfile(SOURCE_DWG, host)
+    setup = '(entmake (list (cons 0 "LWPOLYLINE") (cons 100 "AcDbEntity") (cons 8 "LEAF_BULGE_CANARY") (cons 100 "AcDbPolyline") (cons 90 4) (cons 70 1) (cons 10 (list 0.0 0.0)) (cons 42 1.0) (cons 10 (list 10.0 0.0)) (cons 42 0.0) (cons 10 (list 10.0 10.0)) (cons 42 0.0) (cons 10 (list 0.0 10.0)) (cons 42 0.0)))\r\n'
+    script = tmp_path / "bulges.scr"
+    script.write_text(
+        setup + build_scr("bulges.txt", extra_blocks=MUTATION_INSPECT_BLOCKS),
+        encoding="ascii", newline="")
+    result = subprocess.run(
+        [str(ACCORECONSOLE), "/i", str(host), "/s", str(script)],
+        cwd=tmp_path, capture_output=True, text=True, timeout=120, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    intake = parse(tmp_path / "bulges.txt", "canary")
+    assert not intake.get("parseErrors"), intake.get("parseErrors")
+    curved, = [p for p in intake["polylines"] if p["layer"] == "LEAF_BULGE_CANARY"]
+    assert curved["bulges"] == pytest.approx([1.0, 0.0, 0.0, 0.0], rel=0, abs=1e-9)
+
+
 def _run_plan(tmp_path, tag, host, plan_bytes):
     """Apply one plan to `host` with the fixed interpreter, then inspect the
     result with the mutation Activity's inspect variant; returns the parsed

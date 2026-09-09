@@ -439,7 +439,13 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
         evidence = state.get("member_evidence", {})
         for field in ("polylines", "circles", "arcs"):
             for entity in out.get(field, []):
-                entity.update(evidence.get(entity["handle"], {}))
+                member_evidence = evidence.get(entity["handle"], {})
+                if (field == "polylines" and "bulges" in member_evidence
+                        and entity.get("_nrm", (0, 0, 1))[2] < 0):
+                    # The arbitrary-axis algorithm reflects XY for negative normal Z, reversing bulge sweep.
+                    member_evidence = {**member_evidence,
+                                       "bulges": [-b for b in member_evidence["bulges"]]}
+                entity.update(member_evidence)
     for block in out.get("blocks", {}).values():
         if block["count"] <= 60 and len(block["children"]) < block["count"]:
             block["complete"] = False

@@ -428,6 +428,14 @@ def test_v3_activity_adds_insert_and_preserves_v2_apply_script():
     # one EP progn, positioned after every geometry sequence (LN/CI/AR) and
     # before the BK catalogue, as the spec requires.
     inspect_script = v2_settings["inspectScript"]["value"]
+    # W4g inspect bulges: old fe8b8eef8d59f55679b0a4dc9a6ed2272714d948beb69caee3f49e98dbb58bed
+    # New 73c4bb8a25e3506ba29cf9207abbcaae40e19494685b7d6b3e11d5c1b4fffde1
+    assert hashlib.sha256(inspect_script.encode("utf-8")).hexdigest() == (
+        "73c4bb8a25e3506ba29cf9207abbcaae40e19494685b7d6b3e11d5c1b4fffde1")
+    bm = next(line for line in inspect_script.splitlines() if '"BM|"' in line)
+    assert "(rtos (cdr pair) 2 9)" in bm
+    assert "(itoa bulged)" not in bm
+    assert len(bm) <= 1800
     assert inspect_script.count('"EP|"') == 1
     ar_index = inspect_script.index('(cons 0 "ARC")')
     ep_index = inspect_script.index('"EP|"')

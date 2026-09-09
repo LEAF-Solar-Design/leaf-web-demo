@@ -335,6 +335,24 @@ def test_mec_evidence_is_independent_of_block_properties(normal, bulges, dimensi
     assert covered == legacy
 
 
+@pytest.mark.parametrize("normal,bulges,expected_pts,expected_bulges", [
+    ("0,0,-1", "1;0", [[0, 0, 0], [-10, 0, 0]], [-1.0, 0.0]),
+    ("0,0,1", "1;0", [[0, 0, 0], [10, 0, 0]], [1.0, 0.0]),
+    ("0,0,-1", "0;0", [[0, 0, 0], [-10, 0, 0]], None),
+])
+def test_mec_polyline_bulges_follow_ocs_reflection(normal, bulges, expected_pts, expected_bulges):
+    parsed = intake_parse.parse_text(
+        f"MEC|1\nPL|0|0|0|{normal}|10\nPV|0,0\nPV|10,0\n"
+        f"BM|10|LWPOLYLINE|{normal}|{bulges}|0|0\n", "head")
+    assert not parsed.get("parseErrors")
+    polyline, = parsed["polylines"]
+    assert polyline["pts"] == expected_pts
+    if expected_bulges is None:
+        assert "bulges" not in polyline
+    else:
+        assert polyline["bulges"] == expected_bulges
+
+
 @pytest.mark.parametrize("member", ["10", "99"])
 def test_blockless_dxf_dimension_association_is_member_specific(member):
     text = ("0\nSECTION\n2\nENTITIES\n0\nLINE\n5\n10\n8\n0\n"
