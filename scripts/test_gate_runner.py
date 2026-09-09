@@ -129,7 +129,7 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     assert suites["web-vitest"].allowed_vitest_skips == (
         ("src/cad/engineWasmHarness.realwasm.test.js", 1),
         ("src/cadedit/cadEditSurface.test.jsx", 16),
-        ("src/cad/engineBatchAtomic.test.js", 9),
+        ("src/cad/engineBatchAtomic.test.js", 10),
     )
 
     restore = suites["server-version-restore"]
