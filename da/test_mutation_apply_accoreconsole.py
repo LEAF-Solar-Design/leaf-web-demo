@@ -280,7 +280,29 @@ def test_invalid_plan_marker_is_detected_without_script_echoes(tmp_path):
     ).encode("ascii")
     work, text = _apply_plan(tmp_path, "invalid", host, plan)
     assert "LEAF-MUTATION-PLAN-INVALID" in text, text
-    assert not (work / "output.dwg").exists(), text
+    after_marker = text.split("LEAF-MUTATION-PLAN-INVALID", 1)[1]
+    assert "error: quit / exit abort" in "\n".join(after_marker.splitlines()[:2]), text
+    assert "LEAF-MUTATION-APPLY-FAILED" not in text, text
+    # The script reaches SAVEAS after the abort; the server's effect verifier refuses this output because no effect is present.
+    output = work / "output.dwg"
+    if output.exists():
+        (work / "inspect.scr").write_text(
+            build_scr("output-intake.txt", extra_blocks=MUTATION_INSPECT_BLOCKS),
+            encoding="ascii", newline="")
+        inspected = subprocess.run(
+            [str(ACCORECONSOLE), "/i", str(output), "/s", str(work / "inspect.scr")],
+            cwd=work, capture_output=True, text=True, timeout=120, check=False,
+        )
+        families = work / "output-intake.txt"
+        assert inspected.returncode == 0, inspected.stdout + inspected.stderr
+        assert families.exists() and families.stat().st_size > 0
+        intake = parse(families, "canary")
+        assert not intake.get("parseErrors"), intake.get("parseErrors")
+        source_intake = json.loads(SOURCE_INTAKE.read_text(encoding="utf-8"))
+        for field in ("polylines", "circles", "arcs"):
+            assert {item["handle"] for item in intake.get(field, [])} == {
+                item["handle"] for item in source_intake.get(field, [])
+            }, field
 
 
 @pytest.mark.skipif(
