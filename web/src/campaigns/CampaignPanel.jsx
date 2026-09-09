@@ -1,5 +1,5 @@
 import { useEffect, useId, useImperativeHandle, useRef, useState } from 'react'
-import useCampaigns from './useCampaigns.js'
+import useCampaigns, { releaseSource } from './useCampaigns.js'
 import { uploadProjectInput } from './api.js'
 import './campaigns.css'
 
@@ -173,7 +173,7 @@ function humanBytes(value) {
   return `${Number((value / unit).toFixed(1))} ${unit === 1024 ? 'KB' : 'MB'}`
 }
 
-function ReleaseOutputs({ campaign, completion, available, urlApi }) {
+function ReleaseOutputs({ campaign, completion, available, urlApi, sourceOnly = false }) {
   const [preview, setPreview] = useState(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
@@ -197,9 +197,9 @@ function ReleaseOutputs({ campaign, completion, available, urlApi }) {
     setBusy(true)
     setError(null)
     try {
-      const result = await campaign.downloadReleaseArtifact(artifact)
+      const result = await (sourceOnly ? campaign.downloadReleaseSource() : campaign.downloadReleaseArtifact(artifact))
       if (!result || !live.current || request !== sequence.current) return
-      if (/\.html$/i.test(result.name) && artifact.media_type === 'text/html' && result.mediaType === 'text/html') {
+      if (!sourceOnly && /\.html$/i.test(result.name) && artifact.media_type === 'text/html' && result.mediaType === 'text/html') {
         let html
         try { html = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(result.bytes) }
         catch { throw new Error('The verified tool could not be opened because its HTML is not valid UTF-8.') }
@@ -209,7 +209,7 @@ function ReleaseOutputs({ campaign, completion, available, urlApi }) {
         const link = document.createElement('a')
         try {
           link.href = url
-          link.download = result.name
+          link.download = sourceOnly ? 'source.dxf' : result.name
           document.body.append(link)
           link.click()
         } finally {
@@ -224,7 +224,10 @@ function ReleaseOutputs({ campaign, completion, available, urlApi }) {
       if (live.current && request === sequence.current) setBusy(false)
     }
   }
+  const source = sourceOnly && available ? releaseSource(completion) : null
   return <>
+    {sourceOnly ? source && <button type="button" className="btn primary" disabled={busy || !!campaign.pending.download}
+      aria-busy={busy} onClick={() => retrieve(source)}>Download source drawing</button> : <>
     {!(completion.deliverables || []).length && <p>Validated output evidence unavailable.</p>}
     <ul className="campaign-outputs">{(completion.deliverables || []).map((artifact, index) => {
       const bytes = artifact.byte_count ?? artifact.size_bytes ?? artifact.bytes
@@ -247,6 +250,7 @@ function ReleaseOutputs({ campaign, completion, available, urlApi }) {
           : <span>{name}: access evidence unavailable</span>}
       <span> ({humanBytes(bytes)})</span></li>
     })}</ul>
+    </>}
     <Alert error={error} onReload={campaign.refetch} />
     {preview && <div className="campaign-tool-preview">
       <button type="button" className="chip-act" onClick={close}>Close tool</button>
@@ -364,6 +368,8 @@ function CompletionPanel({ campaign, artifactUrlApi }) {
     </li>)}</ul>
     <h4>Proven replay recipe</h4>
     <EvidenceList items={replay?.steps ?? replay} fallback="Proven replay recipe unavailable." />
+    <ReleaseOutputs key={`source:${release.release_id}:${release.contract_version}:${finished}`} campaign={campaign}
+      completion={completion} available={finished} urlApi={artifactUrlApi} sourceOnly />
     <h4>Known limits</h4>
     <EvidenceList items={completion.known_limits ?? delivery?.evidence?.known_limits} fallback="Known limits unavailable." />
     <h4>Original goal</h4><p>{contract.original_goal || campaign.selected.prompt}</p>
