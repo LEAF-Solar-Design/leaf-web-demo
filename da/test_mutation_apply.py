@@ -53,6 +53,23 @@ def auth(monkeypatch):
     )
 
 
+def test_v2_apply_failure_clears_flag_before_rollback_and_prevents_save():
+    lines = apply_lisp.build_apply_scr().splitlines()
+    begin = '(progn (setq leaf-apply-ok T) (command "_.UNDO" "_Begin"))'
+    failure = next(line for line in lines if line.startswith('(foreach leaf-op leaf-ops '))
+    assert ('(progn (setq leaf-apply-ok nil) (command "_.UNDO" "_End") '
+            '(command "_.UNDO" "_Back") (princ "LEAF-MUTATION-APPLY-FAILED") (quit))') in failure
+    assert lines.index(begin) < lines.index(failure)
+    assert [line for line in lines if '"_.SAVEAS"' in line] == [
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg"))']
+
+
+def test_v3_apply_script_is_byte_identical_to_pre_v2_flag_head():
+    # Frozen emitted-script SHA-256 at ef5a27b4, before the v2 flag change.
+    assert hashlib.sha256(apply_lisp.build_apply_scr_v3().encode("utf-8")).hexdigest() == (
+        "36ad4c823a89032592e8ea149aad5b7006c6c3802debac97b5538afb8699b073")
+
+
 def test_fixed_script_is_crlf_closed_format_and_never_evaluates_plan():
     script = apply_lisp.build_apply_scr()
     assert script.endswith("\r\n")
@@ -423,10 +440,10 @@ def test_v3_activity_adds_insert_and_preserves_v2_apply_script():
     # v3 new: 36ad4c823a89032592e8ea149aad5b7006c6c3802debac97b5538afb8699b073
     assert hashlib.sha256(script_v3.encode("utf-8")).hexdigest() == (
         "36ad4c823a89032592e8ea149aad5b7006c6c3802debac97b5538afb8699b073")
-    # v2 old: a7ed0bb7dbd8266404574b523550d8103318981c47a927a6ad4c9daab07f6c35
-    # v2 new: e233c7f1674744a9efe2b3f4cf5d5e905199cd6756f8b5d57320c0b55678c5ae
+    # v2 apply-failure flag, old: e233c7f1674744a9efe2b3f4cf5d5e905199cd6756f8b5d57320c0b55678c5ae
+    # v2 new: bcb64a969cc2df0dbd90d1100ad83daacdf8439708f35f7cad730231a8990d98
     assert hashlib.sha256(script_v2.encode("utf-8")).hexdigest() == (
-        "e233c7f1674744a9efe2b3f4cf5d5e905199cd6756f8b5d57320c0b55678c5ae")
+        "bcb64a969cc2df0dbd90d1100ad83daacdf8439708f35f7cad730231a8990d98")
     # W4g-7b-3s added an EP block to the shared inspect script (colour /
     # linetype / lineweight), so its exact byte pin moved; assert the new
     # structural invariant directly instead of a hand-computed hash: exactly

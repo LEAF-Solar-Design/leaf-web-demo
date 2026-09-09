@@ -74,10 +74,10 @@ _LISP_LINES = (
     '(defun leaf-apply (op) (cond ((= (car op) "REMOVE") (entdel (handent (nth 1 op)))) ((= (car op) "TRANSFORM") (leaf-apply-transform op)) ((= (car op) "ADD") (leaf-apply-add op)) ((= (car op) "ADDOPEN") (leaf-apply-addopen op)) ((= (car op) "ADDLINE") (leaf-apply-addline op)) ((= (car op) "ADDCIRCLE") (leaf-apply-addcircle op)) ((= (car op) "ADDARC") (leaf-apply-addarc op)) ((= (car op) "RELAYER") (leaf-apply-relayer op)) ((= (car op) "SETPOINTS") (leaf-apply-setpoints op)) ((= (car op) "SETCIRCLE") (leaf-apply-setcircle op)) ((= (car op) "SETARC") (leaf-apply-setarc op))))',
     '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))',
     '(if (not leaf-ops) (progn (princ "LEAF-MUTATION-PLAN-INVALID") (quit)))',
-    '(command "_.UNDO" "_Begin")',
-    '(foreach leaf-op leaf-ops (if (not (leaf-apply leaf-op)) (progn (command "_.UNDO" "_End") (command "_.UNDO" "_Back") (princ "LEAF-MUTATION-APPLY-FAILED") (quit))))',
+    '(progn (setq leaf-apply-ok T) (command "_.UNDO" "_Begin"))',
+    '(foreach leaf-op leaf-ops (if (not (leaf-apply leaf-op)) (progn (setq leaf-apply-ok nil) (command "_.UNDO" "_End") (command "_.UNDO" "_Back") (princ "LEAF-MUTATION-APPLY-FAILED") (quit))))',
     '(command "_.UNDO" "_End")',
-    '(if leaf-ops (command "_.SAVEAS" "" "output.dwg"))',
+    '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg"))',
     '(command "_.QUIT" "_Y")',
 )
 
@@ -210,14 +210,12 @@ def build_apply_scr_v3() -> str:
             )
             lines.append(line)
             line = '(defun leaf-apply (op / result) (setq result (leaf-apply-one op)) (if (and result (member (car op) (list "ADD" "ADDOPEN" "ADDLINE" "ADDCIRCLE" "ADDARC" "ADDINSERT" "ADDDIMLINEAR" "ADDDIMALIGNED" "ADDMLEADER"))) (if (leaf-record-created result) (setq leaf-created (append leaf-created (list result))) (setq result nil))) result)'
-        elif line == '(command "_.UNDO" "_Begin")':
+        elif line == '(progn (setq leaf-apply-ok T) (command "_.UNDO" "_Begin"))':
             line = '(progn (command "_.UNDO" "_Mark") (setq leaf-apply-ok T))'
         elif line.startswith('(foreach leaf-op leaf-ops '):
             line = '(foreach leaf-op leaf-ops (if (and leaf-apply-ok (not (leaf-apply leaf-op))) (progn (setq leaf-apply-ok nil) (command "_.UNDO" "_Back") (princ "LEAF-MUTATION-APPLY-FAILED"))))'
         elif line == '(command "_.UNDO" "_End")':
             continue
-        elif line == '(if leaf-ops (command "_.SAVEAS" "" "output.dwg"))':
-            line = '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg"))'
         elif line.startswith("(defun leaf-read-plan "):
             line = line.replace('(setq fh (open path "r")', '(setq leaf-pending-definitions nil leaf-pending-children nil) (setq fh (open path "r")', 1)
             line = line.replace('(setq ops (cons op ops))', '(if (/= (car op) "BLOCKCHILD") (setq ops (cons op ops)))', 1)
