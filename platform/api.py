@@ -54,6 +54,10 @@ class CreateProjectBody(BaseModel):
     name: str = Field(min_length=1, max_length=200)
 
 
+class EnsureProjectRepositoryAuthorityBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
 class RegisterArloExampleBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     example_version: str = Field(min_length=1, max_length=32)
@@ -372,6 +376,64 @@ def get_project_lifecycle(
     return _lifecycle_response(lambda: project_lifecycle.project_snapshot(
         actor.org_id, project_id, actor.binding_id,
     ))
+
+
+def _project_repository_authority(
+    project_id: uuid.UUID, actor: _LifecycleActor, *, write: bool,
+):
+    try:
+        project_lifecycle.require_project_role(
+            actor.org_id, project_id, actor.binding_id, write=write,
+        )
+        project = store.get_project(actor.org_id, project_id)
+        if project is None or project.status != "active":
+            raise project_lifecycle.LifecycleUnavailable()
+    except project_lifecycle.LifecycleUnavailable:
+        raise HTTPException(status_code=404, detail="project resource not found") from None
+    except project_lifecycle.LifecycleForbidden:
+        raise HTTPException(status_code=403, detail="project access denied") from None
+    except Exception:
+        raise HTTPException(status_code=503, detail="repository authority unavailable") from None
+
+    try:
+        operation = (store.ensure_project_repository_authority if write
+                     else store.resolve_project_repository_authority)
+        authority = operation(actor.org_id, actor.org_id, project_id)
+        if authority is None and not write:
+            return None
+        fields = {"tenant_id", "organization_id", "project_id", "repo_key"}
+        if not isinstance(authority, dict) or set(authority) != fields:
+            raise ValueError()
+        for value in authority.values():
+            if not isinstance(value, str) or str(uuid.UUID(value)) != value:
+                raise ValueError()
+        if (authority["tenant_id"] != str(actor.org_id)
+                or authority["organization_id"] != str(actor.org_id)
+                or authority["project_id"] != str(project_id)):
+            raise ValueError()
+        return {"authority": authority}
+    except Exception:
+        raise HTTPException(status_code=503, detail="repository authority unavailable") from None
+
+
+@router.get("/projects/{project_id}/repository-authority")
+def get_project_repository_authority(
+    project_id: uuid.UUID,
+    actor: _LifecycleActor = Depends(_get_lifecycle_actor),
+):
+    result = _project_repository_authority(project_id, actor, write=False)
+    if result is None:
+        raise HTTPException(status_code=404, detail="project resource not found")
+    return result
+
+
+@router.post("/projects/{project_id}/repository-authority")
+def ensure_project_repository_authority(
+    project_id: uuid.UUID,
+    body: EnsureProjectRepositoryAuthorityBody,
+    actor: _LifecycleActor = Depends(_get_lifecycle_actor),
+):
+    return _project_repository_authority(project_id, actor, write=True)
 
 
 @router.post("/projects/{project_id}/members", status_code=201)
