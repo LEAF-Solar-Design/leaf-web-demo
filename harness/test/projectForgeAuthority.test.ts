@@ -298,12 +298,12 @@ function coordinatedFixture() {
   const tree = f.repo.resolveCommitTree(change.stagedSha!);
   const digest = "a".repeat(64);
   const coordination: ProjectRepositoryEditCoordination = {
-    recordStaged: vi.fn(async () => ({ contract, action: "record_staged", edit_id: change.id, state: "staged", version: 1 })),
+    recordStaged: vi.fn(async () => ({ contract, action: "record_staged", edit_id: change.id, state: "staged", version: 1 } as const)),
     authorizePublish: vi.fn(async () => ({ contract, action: "authorize_publish", edit_id: change.id, state: "publishing", version: 2,
       receipt_digest: digest, expected_main_commit: f.base, staged_head_commit: change.stagedSha!, staged_tree: tree,
-      private_ref: change.ref, publish_lease_id: leaseId, publish_lease_generation: 8 })),
-    settlePublish: vi.fn(async () => ({ contract, action: "settle_publish", edit_id: change.id, state: "published", version: 3 })),
-    recoverPublish: vi.fn(async () => ({ contract, action: "recover_publish", edit_id: change.id, state: "published", version: 3 })),
+      private_ref: change.ref, publish_lease_id: leaseId, publish_lease_generation: 8 } as const)),
+    settlePublish: vi.fn(async () => ({ contract, action: "settle_publish", edit_id: change.id, state: "published", version: 3 } as const)),
+    recoverPublish: vi.fn(async () => ({ contract, action: "recover_publish", edit_id: change.id, state: "published", version: 3 } as const)),
   };
   const service = new ProjectRepositoryEditCoordinator({ leases: provider, coordination, changeRepo: a => {
     const repo = provider.projectChangeRepo(a);
