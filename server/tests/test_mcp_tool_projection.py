@@ -64,6 +64,21 @@ def test_projected_tools_is_empty_with_uncreatable_store(tmp_path, monkeypatch):
     assert blocker.read_text(encoding="utf-8") == "not a directory"
 
 
+def test_projected_tools_is_empty_when_stat_raises_not_a_directory(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEAF_TENANT_MCP_DIR", str(tmp_path))
+    tenant_file = tmp_path / f"{_TENANT}.json"
+    original_stat = Path.stat
+
+    def _stat(path, *args, **kwargs):
+        if path == tenant_file:
+            raise NotADirectoryError(str(path))
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", _stat)
+
+    assert mcp_tool_projection.projected_tools(_TENANT) == []
+
+
 def test_projected_tools_is_empty_with_a_connected_server(tmp_path, monkeypatch):
     monkeypatch.setenv("LEAF_TENANT_MCP_DIR", str(tmp_path))
     _connect_one_server(_TENANT)

@@ -6,9 +6,11 @@ server (a loopback ThreadingHTTPServer) — never a live network call."""
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -458,6 +460,44 @@ def test_uncreatable_store_reads_as_empty(tmp_path, monkeypatch):
 
     assert tenant_mcp_store.list_records(_TENANT) == []
     assert blocker.read_text(encoding="utf-8") == "not a directory"
+
+
+def test_stat_not_a_directory_reads_as_absent(tmp_path, monkeypatch):
+    tenant_file = tmp_path / f"{_TENANT}.json"
+    original_stat = Path.stat
+
+    def _stat(path, *args, **kwargs):
+        if path == tenant_file:
+            raise NotADirectoryError(str(path))
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", _stat)
+
+    assert tenant_mcp_store.list_records(_TENANT) == []
+    assert tenant_mcp_store.get_record(_TENANT, "0" * 24) is None
+
+
+def test_stat_permission_denied_reads_as_absent_and_warns_once(tmp_path, monkeypatch, caplog):
+    tenant_file = tmp_path / f"{_TENANT}.json"
+    original_stat = Path.stat
+    monkeypatch.setattr(tenant_mcp_store, "_warned_stat_permission_paths", set())
+
+    def _stat(path, *args, **kwargs):
+        if path == tenant_file:
+            raise PermissionError(str(path))
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", _stat)
+
+    with caplog.at_level(logging.WARNING, logger=tenant_mcp_store.__name__):
+        assert tenant_mcp_store.list_records(_TENANT) == []
+        assert len(caplog.records) == 1
+        warning = caplog.records[0]
+        assert warning.name == tenant_mcp_store.__name__
+        assert warning.levelno == logging.WARNING
+        assert str(tenant_file) in warning.getMessage()
+        assert tenant_mcp_store.list_records(_TENANT) == []
+        assert len(caplog.records) == 1
 
 
 def test_capabilities_survives_uncreatable_mcp_store(tmp_path, monkeypatch):

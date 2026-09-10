@@ -22,6 +22,7 @@ linked_at} and the token/secrets never leave this module's callers.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import secrets
@@ -32,6 +33,8 @@ from typing import Any, Dict, List, Optional
 from tenant_id_validator import validate_tenant_id
 
 SERVER_DIR = Path(__file__).resolve().parent
+_logger = logging.getLogger(__name__)
+_warned_stat_permission_paths: set[Path] = set()
 
 # Bounds (release blockers, not follow-ups — every number below is load-bearing).
 MAX_SERVERS_PER_TENANT = 25          # one tenant's registry page; matches the list cap
@@ -89,12 +92,18 @@ def _tenant_file(tenant_id: str) -> Path:
 
 
 def _read_bounded(path: Path, cap: int) -> Optional[List[Dict[str, Any]]]:
-    """Read + parse a JSON array, capped at `cap` bytes. None iff the file is
-    absent (the safe, ordinary case). Raises TenantMcpStoreError for anything
+    """Read + parse a JSON array, capped at `cap` bytes. Stat-time
+    FileNotFoundError, NotADirectoryError, and PermissionError mean absent
+    (return None). Raises TenantMcpStoreError for anything
     present but untrustworthy (oversized, unreadable, not a JSON array)."""
     try:
         size = path.stat().st_size
-    except FileNotFoundError:
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except PermissionError:
+        if path not in _warned_stat_permission_paths and len(_warned_stat_permission_paths) < 64:
+            _warned_stat_permission_paths.add(path)
+            _logger.warning("MCP store path %s cannot be accessed; treating as absent", path)
         return None
     if size > cap:
         raise TenantMcpStoreError(f"{path.name} exceeds the {cap}-byte bound ({size} bytes)")
