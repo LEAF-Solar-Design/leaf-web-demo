@@ -169,6 +169,19 @@ def test_default_polyline_normal_emits_identical_bytes_to_absent_normal(normal, 
     assert b"\n230\n" not in with_normal
 
 
+def test_mixed_z_polyline_normal_is_on_header_and_round_trips():
+    pts = [[2, 3, 4], [12, 3, 4], [12, 13, 4], [2, 13, 4]]
+    pts[1][2] = 5
+    intake = _polyline_with_normal([0, 1, 0], pts, closed=True)
+    back, data = _roundtrip(intake)
+    lines = data.decode().splitlines()
+    pairs = list(zip(lines[::2], lines[1::2]))
+    header = pairs[pairs.index(("0", "POLYLINE")):pairs.index(("0", "VERTEX"))]
+    assert header[-3:] == [("210", "0.0"), ("220", "1.0"), ("230", "0.0")]
+    assert [p for p in pairs if p[0] in ("210", "220", "230")] == header[-3:]
+    assert _subset(back) == _subset(intake)
+
+
 @pytest.mark.parametrize("normal", [
     [0, 1], ["a", 0, 1], [0, 0, float("nan")],
     [0, 0, float("inf")], [False, 0, 1], None, (0, 0, -1)])
@@ -176,6 +189,17 @@ def test_malformed_polyline_normal_is_refused_with_handle(normal):
     with pytest.raises(intake_dxf.IntakeDxfError, match=r"handle '2A': normal"):
         intake_dxf.intake_to_dxf(_polyline_with_normal(
             normal, [[0, 0, 0], [1, 0, 0]]))
+
+
+# w4g-lwpolyline-wcs-c finding 3: the reader already refuses a zero normal
+# before building any point; the writer divided by it instead. A zero
+# normal is not within the writer's own 1e-6 tolerance of +Z, so it survives
+# to the OCS projection and must be refused there, with the same message
+# shape as a malformed normal.
+def test_zero_polyline_normal_is_refused_with_handle():
+    with pytest.raises(intake_dxf.IntakeDxfError, match=r"handle '2A': normal must not be the zero vector"):
+        intake_dxf.intake_to_dxf(_polyline_with_normal(
+            [0.0, 0.0, 0.0], [[0, 0, 0], [1, 0, 0]]))
 
 
 def test_demo_intake_round_trips_exactly():

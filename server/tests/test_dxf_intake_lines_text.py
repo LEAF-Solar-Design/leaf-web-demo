@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "da"))
 
 import dxf_intake  # noqa: E402
+import intake_dxf  # noqa: E402
 import intake_parse  # noqa: E402
 
 
@@ -120,6 +121,25 @@ def test_lwpolyline_tilted_normal_lifts_ocs_points_to_wcs():
     assert poly["bulges"] == [1.0, 0.0, 0.0]
 
 
+# w4g-lwpolyline-wcs-c finding 2: a normal within the writer's own 1e-6
+# tolerance of +Z must be the identity on the reader too, or the reader
+# transforms points the writer will never invert back (no `normal` stored),
+# and the resulting per-vertex noise can make an arc's elevation disagree
+# across vertices, dropping its bulge on the next write.
+def test_lwpolyline_near_plus_z_normal_is_identity_and_keeps_bulge():
+    raw = _dxf("0\nLWPOLYLINE\n5\nP9\n8\nRAFTER_45X145\n90\n2\n70\n0\n38\n3\n"
+                "210\n0.000001\n220\n0\n230\n0.9999999999995\n"
+                "10\n0\n20\n0\n42\n1\n10\n2\n20\n0\n")
+    intake = dxf_intake.parse_dxf_bytes(raw, source_name="t.dxf")
+    poly = intake["polylines"][0]
+    assert poly["pts"] == [[0.0, 0.0, 3.0], [2.0, 0.0, 3.0]]
+    assert "normal" not in poly
+    assert poly["bulges"] == [1.0, 0.0]
+    data = intake_dxf.intake_to_dxf(intake)
+    back = dxf_intake.parse_dxf_bytes(data, source_name="t.dxf")
+    assert back["polylines"][0]["bulges"] == [1.0, 0.0]
+
+
 def test_classic_3d_polyline_ignores_extrusion_and_keeps_vertex_z():
     raw = _dxf("0\nPOLYLINE\n5\nP4\n8\nRAFTER_45X145\n70\n8\n66\n1\n"
                 "210\n0\n220\n0\n230\n-1\n"
@@ -133,6 +153,37 @@ def test_classic_3d_polyline_ignores_extrusion_and_keeps_vertex_z():
     # extrusion informationally on every polyline kind; VERTEX coordinates
     # above are untouched, which is the contract this test pins.
     assert poly["normal"] == [0.0, 0.0, -1.0]
+
+
+# w4g-lwpolyline-wcs-c finding 1: Astra's own counterexample. A classic 3D
+# POLYLINE's vertices are genuinely WCS, not OCS relative to its `normal`, so
+# a naive inverse that shares one elevation across every vertex discarded
+# 3 units of the second vertex's z. server/intake_dxf.py now applies the
+# inverse only when every vertex's own recovered OCS z agrees; here they do
+# not (the endpoint-evidence pass still records `normal` informationally),
+# so the round trip must return both vertices unchanged.
+def test_classic_3d_polyline_round_trips_without_losing_z():
+    raw = _dxf("0\nPOLYLINE\n5\nP7\n8\nRAFTER_45X145\n70\n8\n66\n1\n"
+                "210\n0\n220\n0\n230\n-1\n"
+                "0\nVERTEX\n8\nRAFTER_45X145\n10\n1\n20\n2\n30\n3\n"
+                "0\nVERTEX\n8\nRAFTER_45X145\n10\n4\n20\n5\n30\n6\n"
+                "0\nSEQEND\n")
+    intake = dxf_intake.parse_dxf_bytes(raw, source_name="t.dxf")
+    data = intake_dxf.intake_to_dxf(intake)
+    back = dxf_intake.parse_dxf_bytes(data, source_name="t.dxf")
+    assert back["polylines"][0]["pts"] == [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+
+
+# w4g-lwpolyline-wcs-c finding 1: Astra's LINE counterexample. Autodesk
+# explicitly permits a LINE extrusion direction that differs from world Z
+# while its endpoints stay in WCS, so the same disagreement rule applies.
+def test_line_round_trips_without_losing_wcs_endpoints():
+    raw = _dxf("0\nLINE\n5\nP8\n8\nRAFTER_45X145\n10\n0\n20\n0\n30\n0\n"
+                "11\n1\n21\n2\n31\n3\n210\n0\n220\n1\n230\n0\n")
+    intake = dxf_intake.parse_dxf_bytes(raw, source_name="t.dxf")
+    data = intake_dxf.intake_to_dxf(intake)
+    back = dxf_intake.parse_dxf_bytes(data, source_name="t.dxf")
+    assert back["polylines"][0]["pts"] == [[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]]
 
 
 def test_lwpolyline_zero_normal_is_refused():

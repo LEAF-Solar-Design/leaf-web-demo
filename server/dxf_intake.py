@@ -924,7 +924,12 @@ def _parse_lwpolyline(pairs: List[Tuple[int, str]], i: int, dropped=None, wcs=Tr
             raise DxfParseError("LWPOLYLINE normal must be finite")
         if not any(normal):
             raise DxfParseError("LWPOLYLINE normal must not be the zero vector")
-        identity = normal == [0.0, 0.0, 1.0]
+        # Same 1e-6 tolerance server/intake_dxf.py's writer uses to decide a
+        # normal is +Z: an exact-equality check here let a near-+Z normal
+        # (within the writer's own tolerance) still be transformed, while the
+        # member-evidence pass below (also 1e-6) judged it default and stored
+        # no `normal` key, so the writer never inverted the transform back.
+        identity = all(abs(a - b) <= 1e-6 for a, b in zip(normal, (0.0, 0.0, 1.0)))
         pts = [([x, y, elevation] if identity else _ocs_to_wcs([x, y, elevation], normal))
                for x, y in zip(xs, ys)]
     else:
