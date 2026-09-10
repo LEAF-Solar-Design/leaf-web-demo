@@ -7,7 +7,11 @@ import os
 import re
 import sys
 import uuid
+from collections import OrderedDict
+from math import ceil
 from pathlib import Path
+from threading import Lock
+from time import monotonic
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
@@ -25,6 +29,26 @@ router = APIRouter()
 _STORE = None
 _EXECUTION = None
 _ENROLLMENT = None
+_NEXT_WORKER_INTERVAL = 30
+_NEXT_WORKER_MAX_ENTRIES = 64
+_NEXT_WORKER_CALLS = OrderedDict()
+_NEXT_WORKER_LOCK = Lock()
+
+
+def _next_worker_retry_after(subject):
+    # Atomic admission across threads; denied calls refresh LRU, not the window.
+    with _NEXT_WORKER_LOCK:
+        now = monotonic()
+        previous = _NEXT_WORKER_CALLS.get(subject)
+        if previous is not None:
+            _NEXT_WORKER_CALLS.move_to_end(subject)
+            remaining = _NEXT_WORKER_INTERVAL - (now - previous)
+            if remaining > 0:
+                return ceil(remaining)
+        _NEXT_WORKER_CALLS[subject] = now
+        if len(_NEXT_WORKER_CALLS) > _NEXT_WORKER_MAX_ENTRIES:
+            _NEXT_WORKER_CALLS.popitem(last=False)
+    return 0
 
 
 def set_enrollment_store(obj):
@@ -359,6 +383,13 @@ async def next_worker(request: Request, subject: str = Depends(deps.require_camp
         enrollment_id = _id(body.get('enrollment_id'))
     except ValueError:
         return _failure(400, 'invalid_request', 'Invalid campaign request')
+    retry_after = _next_worker_retry_after(subject)
+    if retry_after:
+        return JSONResponse(status_code=429, headers={'Retry-After': str(retry_after)},
+                            content={'ok': False, 'error': {
+                                'error_code': 'rate_limited',
+                                'message': 'Campaign worker must wait before requesting more work',
+                                'retryable': True}})
     try:
         store = _store()
     except Exception:
