@@ -1646,3 +1646,145 @@ def test_data_plan_refuses_to_publish_on_an_unverified_property_note(monkeypatch
     assert "property effects unverified" in env["error"]["message"]
     assert len(da.submissions) == 1
     assert store.load_manifest(backend, "tenant", "drawing")["head"] == 1
+
+
+# w4g-verify-normals: the mutation verifier's CIRCLE/ARC/DIMENSION matchers,
+# and the polyline matcher's added/replaced path, must compare an entity's
+# extrusion normal at the same 2e-6 absolute tolerance already established
+# for an unchanged polyline (_NORMAL_TOLERANCE). CIRCLE/ARC/DIMENSION carry
+# it under the key `nrm`, not `normal`.
+def _circle(handle, layer="Panels", c=(5.0, 5.0, 0.0), r=2.0, nrm=(0.0, 0.0, 1.0)):
+    return {"handle": handle, "layer": layer, "c": list(c), "r": r, "nrm": list(nrm)}
+
+
+def _arc(handle, layer="Panels", c=(5.0, 5.0, 0.0), r=2.0,
+         start_deg=0.0, end_deg=90.0, nrm=(0.0, 0.0, 1.0)):
+    return {"handle": handle, "layer": layer, "c": list(c), "r": r,
+            "start_deg": start_deg, "end_deg": end_deg, "nrm": list(nrm)}
+
+
+def _dimension(handle, layer="Panels", p1=(0.0, 0.0, 0.0), p2=(3.0, 4.0, 0.0),
+               dimline=(1.5, 6.0, 0.0), rotation_deg=0.0, style="Standard",
+               nrm=(0.0, 0.0, 1.0), measurement=5.0):
+    return {"type": "LINEAR", "layer": layer, "p1": list(p1), "p2": list(p2),
+            "dimline": list(dimline), "rotation_deg": rotation_deg, "style": style,
+            "nrm": list(nrm), "measurement": measurement, "handle": handle}
+
+
+def _circle_case(nrm=(0.0, 0.0, 1.0)):
+    base = _base()
+    base["circles"] = [_circle("E", nrm=nrm)]
+    actual = _actual_success()
+    actual["circles"] = [copy.deepcopy(_circle("E", nrm=nrm))]
+    canonical = validate_mutations(base, _mutations(), allow_transforms=False)
+    return base, actual, canonical
+
+
+def test_unchanged_circle_refuses_rewritten_normal():
+    # On main this passes the upload; the CIRCLE matcher never reads `nrm`.
+    base, actual, canonical = _circle_case()
+    actual["circles"][0]["nrm"] = [0, 1, 0]
+
+    with pytest.raises(
+            ValueError, match="^unchanged handle '.*' has unexpected output geometry$"):
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+@pytest.mark.parametrize("nrm,accepted", [
+    ([0, 0, 1], True),
+    ([0, 0, 1.0000019], True),
+    ([0, 0, 1.0000025], False),
+])
+def test_unchanged_circle_effective_normal_uses_absolute_tolerance(nrm, accepted):
+    # Same boundary as the polyline rule: _NORMAL_TOLERANCE is 2e-6.
+    base, actual, canonical = _circle_case()
+    actual["circles"][0]["nrm"] = nrm
+
+    if accepted:
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+    else:
+        with pytest.raises(
+                ValueError, match="^unchanged handle '.*' has unexpected output geometry$"):
+            write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+def test_unchanged_arc_refuses_rewritten_normal():
+    # On main this passes the upload; the ARC matcher never reads `nrm`.
+    base = _base()
+    base["arcs"] = [_arc("F")]
+    actual = _actual_success()
+    actual["arcs"] = [_arc("F")]
+    canonical = validate_mutations(base, _mutations(), allow_transforms=False)
+    actual["arcs"][0]["nrm"] = [0, 1, 0]
+
+    with pytest.raises(
+            ValueError, match="^unchanged handle '.*' has unexpected output geometry$"):
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+def test_unchanged_dimension_refuses_rewritten_normal():
+    # On main this passes the upload; the DIMENSION matcher never reads `nrm`.
+    base = _base()
+    base["dimensions"] = [_dimension("G")]
+    actual = _actual_success()
+    actual["dimensions"] = [_dimension("G")]
+    canonical = validate_mutations(base, _mutations(), allow_transforms=False)
+    actual["dimensions"][0]["nrm"] = [0, 1, 0]
+
+    with pytest.raises(
+            ValueError, match="^unchanged handle '.*' has unexpected output geometry$"):
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+def test_added_circle_refuses_a_tilted_normal():
+    # On main this passes the upload; an added CIRCLE's `nrm` is never
+    # compared against the plan's implicit +Z.
+    base = _base()
+    mutations = {"added": [
+        {"handle": "n1", "kind": "CIRCLE", "layer": "Leaf Output", "c": [10, 10, 0], "r": 2}]}
+    canonical = validate_mutations(base, mutations, allow_transforms=False)
+    actual = {
+        "dwg": "temp-output.dwg", "layers": ["Panels", "Leaf Output"],
+        "polylines": [_entity("A"), _entity("B", z=3.0)],
+        "circles": [{"handle": "APS1", "layer": "Leaf Output", "c": [10.0, 10.0, 0.0],
+                     "r": 2.0, "nrm": [0.0, 1.0, 0.0]}],
+    }
+
+    with pytest.raises(ValueError, match="^added CIRCLE 'n1' is missing from output$"):
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+def test_added_polyline_refuses_a_tilted_normal():
+    # On main this passes the upload; an added LWPOLYLINE's `normal` is never
+    # compared against the plan's implicit +Z (_polyline_effect_matches
+    # never reads it).
+    base = _base()
+    actual = _actual_success()
+    canonical = validate_mutations(base, _mutations(), allow_transforms=False)
+    actual["polylines"][1]["normal"] = [0, 1, 0]
+
+    with pytest.raises(ValueError, match="^added polyline 'C' is missing from output$"):
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+def test_replaced_polyline_via_set_points_refuses_a_tilted_normal():
+    # On main this passes the upload; a set_points replacement's `normal` is
+    # never compared (_polyline_effect_matches never reads it).
+    base = _base()
+    mutations = {"set_points": [
+        {"handle": "B", "pts": [[0.0, 0.0, 3.0], [5.0, 0.0, 3.0], [5.0, 5.0, 3.0]],
+         "closed": False}]}
+    canonical = validate_mutations(base, mutations, allow_transforms=False)
+    actual = {
+        "dwg": "temp-output.dwg", "layers": ["Panels"],
+        "polylines": [
+            _entity("A"),
+            {"handle": "B", "layer": "Panels", "closed": False, "xdata": None,
+             "pts": [[0.0, 0.0, 3.0], [5.0, 0.0, 3.0], [5.0, 5.0, 3.0]],
+             "normal": [0.0, 1.0, 0.0]},
+        ],
+    }
+
+    with pytest.raises(
+            ValueError, match="^replaced handle 'B' has unexpected output geometry$"):
+        write_loop.verify_live_mutation_effects(base, actual, canonical)

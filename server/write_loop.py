@@ -1756,9 +1756,11 @@ def quantize_intake_like_extractor(intake: dict) -> dict:
 _NORMAL_TOLERANCE = 2e-6
 
 
-def _effective_normal(entity: Dict[str, Any]) -> Optional[list]:
-    # dxf_intake.py and da/intake_parse.py omit the normal for +Z.
-    normal = entity.get("normal", [0.0, 0.0, 1.0])
+def _effective_normal(entity: Dict[str, Any], key: str = "normal") -> Optional[list]:
+    # dxf_intake.py and da/intake_parse.py omit the normal for +Z (polylines'
+    # `normal`); CIRCLE/ARC/DIMENSION/INSERT carry the same omission-means-+Z
+    # contract under their own `nrm` key, so a caller names which key applies.
+    normal = entity.get(key, [0.0, 0.0, 1.0])
     if not isinstance(normal, list) or len(normal) != 3:
         return None
     try:
@@ -1782,6 +1784,12 @@ def _polyline_effect_matches(
     # A bulge is a tangent, not a coordinate: the producers either both carry
     # it or both omit it, compared exactly (no extractor quantum applies).
     if (expected.get("bulges") or None) != (actual.get("bulges") or None):
+        return False
+    expected_normal = _effective_normal(expected)
+    actual_normal = _effective_normal(actual)
+    if (expected_normal is None or actual_normal is None
+            or any(abs(left - right) > _NORMAL_TOLERANCE
+                   for left, right in zip(expected_normal, actual_normal))):
         return False
     expected_points = expected.get("pts") or []
     actual_points = actual.get("pts") or []
@@ -2400,23 +2408,31 @@ def _verify_mleader_effects(base, actual, canonical, matched_handles):
 
 
 def _dimension_effect_matches(expected: Dict[str, Any], actual: Dict[str, Any]) -> bool:
-    """One dimension against its re-extracted record: same type, style and
-    layer (case-insensitive, like INSERT's), definition/dimline points within
-    the extractor's 3-decimal quantum, and rotation within a microdegree
-    (LINEAR only; ALIGNED both read 0). The measurement is checked
-    separately, never as part of the match itself, so a geometry match with
-    a wrong measurement is a distinct refusal.
+    """One dimension against its re-extracted record: same type, style,
+    layer (case-insensitive, like INSERT's) and extrusion normal (`nrm`, the
+    same omission-means-+Z contract and 2e-6 tolerance as a polyline's
+    `normal`), definition/dimline points within the extractor's 3-decimal
+    quantum, and rotation within a microdegree (LINEAR only; ALIGNED both
+    read 0). The measurement is checked separately, never as part of the
+    match itself, so a geometry match with a wrong measurement is a distinct
+    refusal.
 
-    A legacy record on either side predates this field entirely and carries
-    no `layer` at all; when either is missing the comparison is unknown
-    (skipped), never forced to mismatch, so an already-verified pre-migration
-    base or actual stays green."""
+    A legacy record on either side predates the `layer` field entirely and
+    carries no `layer` at all; when either is missing that one comparison is
+    unknown (skipped), never forced to mismatch, so an already-verified
+    pre-migration base or actual stays green."""
     if expected.get("type") != actual.get("type") or expected.get("style") != actual.get("style"):
         return False
     expected_layer = expected.get("layer")
     actual_layer = actual.get("layer")
     if (expected_layer is not None and actual_layer is not None
             and str(expected_layer).lower() != str(actual_layer).lower()):
+        return False
+    expected_normal = _effective_normal(expected, key="nrm")
+    actual_normal = _effective_normal(actual, key="nrm")
+    if (expected_normal is None or actual_normal is None
+            or any(abs(left - right) > _NORMAL_TOLERANCE
+                   for left, right in zip(expected_normal, actual_normal))):
         return False
     for key in ("p1", "p2", "dimline"):
         if not _point_close(list(expected.get(key) or []), list(actual.get(key) or []), 1.5e-3):
@@ -2510,9 +2526,17 @@ def _verify_dimension_effects(
 
 def _round_effect_matches(expected: Dict[str, Any], actual: Dict[str, Any], *, arc: bool) -> bool:
     """One circle or arc against its re-extracted record: same layer, the
-    centre and radius within the extractor's 3-decimal quantum, and for an
-    arc its angles within a millidegree (modulo a turn)."""
+    extrusion normal (`nrm`, the same omission-means-+Z contract and 2e-6
+    tolerance as a polyline's `normal`), the centre and radius within the
+    extractor's 3-decimal quantum, and for an arc its angles within a
+    millidegree (modulo a turn)."""
     if expected.get("layer") != actual.get("layer"):
+        return False
+    expected_normal = _effective_normal(expected, key="nrm")
+    actual_normal = _effective_normal(actual, key="nrm")
+    if (expected_normal is None or actual_normal is None
+            or any(abs(left - right) > _NORMAL_TOLERANCE
+                   for left, right in zip(expected_normal, actual_normal))):
         return False
     if not _point_close(list(expected.get("c") or []), list(actual.get("c") or []), 1.5e-3):
         return False
