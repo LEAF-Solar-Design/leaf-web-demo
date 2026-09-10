@@ -169,6 +169,7 @@ class FakeExecution:
 @pytest.fixture
 def setup(monkeypatch):
     monkeypatch.delenv('LEAF_PROJECT_SOURCE_PRODUCER', raising=False)
+    monkeypatch.setattr(router, '_NEXT_WORKER_CALLS', router.OrderedDict())
     store = FakeStore()
     router.set_store(store)
     router.set_enrollment_store(store)
@@ -605,6 +606,69 @@ def test_next_worker_sanitized_source_errors(setup, monkeypatch, error, status, 
     response = client.post('/internal/campaign-worker/next', json={'enrollment_id': str(uuid.uuid4())})
     assert response.status_code == status and response.json()['error']['error_code'] == code
     assert 'private' not in response.text
+
+
+def test_next_worker_rate_limit_window_and_subject(setup, monkeypatch):
+    client, _, _ = setup
+    monkeypatch.setenv('LEAF_CAMPAIGN_FIRST_TASK_PRODUCER', 'on')
+    subject = ['worker-a']
+    client.app.dependency_overrides[deps.require_campaign_worker] = lambda: subject[0]
+    now = [0.0]
+    monkeypatch.setattr(router, 'monotonic', lambda: now[0])
+    calls = []
+
+    def next_work(enrollment_id, worker):
+        calls.append((enrollment_id, worker))
+        return {'ok': True, 'kind': 'idle'}
+
+    monkeypatch.setattr(router.campaign_worker_service, 'next_work', next_work)
+    url = '/internal/campaign-worker/next'
+    body = {'enrollment_id': str(uuid.uuid4())}
+    first = client.post(url, json=body)
+    assert first.status_code == 200 and first.json() == {'ok': True, 'kind': 'idle'}
+    second = client.post(url, json={'enrollment_id': str(uuid.uuid4())})
+    assert second.status_code == 429 and second.headers['Retry-After'] == '30'
+    assert second.json()['ok'] is False
+    assert second.json()['error']['error_code'] == 'rate_limited'
+    assert second.json()['error']['retryable'] is True
+    assert len(calls) == 1
+    subject[0] = 'worker-b'
+    assert client.post(url, json=body).status_code == 200
+    subject[0] = 'worker-a'
+    now[0] = 29.5
+    limited = client.post(url, json=body)
+    assert limited.status_code == 429 and limited.headers['Retry-After'] == '1'
+    now[0] = 30.0
+    assert client.post(url, json=body).status_code == 200
+    assert [worker for _, worker in calls] == ['worker-a', 'worker-b', 'worker-a']
+
+
+def test_next_worker_rate_limit_lru_bounded_eviction(setup, monkeypatch):
+    client, _, _ = setup
+    monkeypatch.setenv('LEAF_CAMPAIGN_FIRST_TASK_PRODUCER', 'on')
+    subject = ['worker-0']
+    client.app.dependency_overrides[deps.require_campaign_worker] = lambda: subject[0]
+    monkeypatch.setattr(router, 'monotonic', lambda: 100.0)
+    monkeypatch.setattr(router.campaign_worker_service, 'next_work',
+                        lambda *args: {'ok': True, 'kind': 'idle'})
+    url = '/internal/campaign-worker/next'
+    body = {'enrollment_id': str(uuid.uuid4())}
+    for index in range(64):
+        subject[0] = f'worker-{index}'
+        assert client.post(url, json=body).status_code == 200
+    subject[0] = 'worker-0'
+    assert client.post(url, json=body).status_code == 429
+    subject[0] = 'worker-64'
+    assert client.post(url, json=body).status_code == 200
+    assert len(router._NEXT_WORKER_CALLS) == 64
+    assert 'worker-0' in router._NEXT_WORKER_CALLS
+    assert 'worker-1' not in router._NEXT_WORKER_CALLS
+    subject[0] = 'worker-1'
+    assert client.post(url, json=body).status_code == 200
+    for index in range(65, 130):
+        subject[0] = f'worker-{index}'
+        assert client.post(url, json=body).status_code == 200
+        assert len(router._NEXT_WORKER_CALLS) == 64
 
 
 def _question(client):
