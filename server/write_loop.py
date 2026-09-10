@@ -1703,6 +1703,10 @@ def _polyline_effect_matches(
         return False
     if expected.get("closed") is not actual.get("closed"):
         return False
+    # A bulge is a tangent, not a coordinate: the producers either both carry
+    # it or both omit it, compared exactly (no extractor quantum applies).
+    if (expected.get("bulges") or None) != (actual.get("bulges") or None):
+        return False
     expected_points = expected.get("pts") or []
     actual_points = actual.get("pts") or []
     if extracted:

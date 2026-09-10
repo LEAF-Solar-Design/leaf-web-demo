@@ -814,6 +814,117 @@ def test_unchanged_polyline_refuses_malformed_normal(normal):
         write_loop.verify_live_mutation_effects(base, actual, canonical)
 
 
+# w4g-polyline-bulge-parity: the mutation verifier's polyline matcher must
+# compare an unchanged polyline's bulges exactly (a bulge is a tangent, not a
+# coordinate) alongside its already-established normal tolerance (2e-6).
+def _curved_polyline(handle="B", bulges=None):
+    return {
+        "handle": handle, "layer": "Panels", "closed": False, "xdata": None,
+        "pts": [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [2.0, 2.0, 0.0]],
+        "bulges": [1.0, 0.0, 0.0] if bulges is None else bulges,
+    }
+
+
+def _reflected_polyline(handle="B"):
+    return {
+        "handle": handle, "layer": "Panels", "closed": False, "xdata": None,
+        "pts": [[0.0, 0.0, -3.0], [-2.0, 0.0, -3.0]],
+        "bulges": [-1.0, 0.0], "normal": [0.0, 0.0, -1.0],
+    }
+
+
+def _curved_polyline_case():
+    base = _base()
+    base["polylines"][1] = _curved_polyline("B")
+    actual = _actual_success()
+    actual["polylines"][0] = copy.deepcopy(_curved_polyline("B"))
+    canonical = validate_mutations(base, _mutations(), allow_transforms=False)
+    return base, actual, canonical
+
+
+def test_unchanged_curved_polyline_matches_bulges_exactly():
+    # (a) A plan that touches other handles leaves the curved B unchanged.
+    base, actual, canonical = _curved_polyline_case()
+    before = copy.deepcopy((base, actual, canonical))
+
+    write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+    assert (base, actual, canonical) == before
+
+
+def test_unchanged_curved_polyline_refuses_flattened_bulges():
+    # (b) The saved side drops the curve's bulges: refuse, naming the handle.
+    base, actual, canonical = _curved_polyline_case()
+    del actual["polylines"][0]["bulges"]
+
+    with pytest.raises(
+            ValueError, match="^unchanged handle '.*' has unexpected output geometry$"):
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+def test_unchanged_curved_polyline_refuses_changed_bulge():
+    # (c) Bulge 1 becomes 0.5 with identical points: refuse.
+    base, actual, canonical = _curved_polyline_case()
+    actual["polylines"][0]["bulges"][0] = 0.5
+
+    with pytest.raises(
+            ValueError, match="^unchanged handle '.*' has unexpected output geometry$"):
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+def _reflected_polyline_case():
+    base = _base()
+    base["polylines"][1] = _reflected_polyline("B")
+    actual = _actual_success()
+    actual["polylines"][0] = copy.deepcopy(_reflected_polyline("B"))
+    canonical = validate_mutations(base, _mutations(), allow_transforms=False)
+    return base, actual, canonical
+
+
+def test_unchanged_reflected_polyline_round_trips():
+    # (d) The reflected B (nrm (0,0,-1), stored bulges [-1,0]) is unchanged.
+    base, actual, canonical = _reflected_polyline_case()
+    before = copy.deepcopy((base, actual, canonical))
+
+    write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+    assert (base, actual, canonical) == before
+
+
+def test_unchanged_reflected_polyline_refuses_flipped_normal():
+    # (d) A saved side whose normal flipped to +Z refuses.
+    base, actual, canonical = _reflected_polyline_case()
+    actual["polylines"][0]["normal"] = [0.0, 0.0, 1.0]
+
+    with pytest.raises(
+            ValueError, match="^unchanged handle '.*' has unexpected output geometry$"):
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+def test_set_points_on_curved_polyline_drops_bulges():
+    # (e) A geometry change on a curved polyline yields a saved row with no
+    # bulges, and the mock (mirrored here) already drops them; assert it.
+    # The unchanged A must also appear in `actual`, or the re-extracted
+    # count check fails before the bulge comparison is ever reached.
+    base = _base()
+    base["polylines"][1] = _curved_polyline("B")
+    mutations = {"set_points": [
+        {"handle": "B", "pts": [[0.0, 0.0, 3.0], [5.0, 0.0, 3.0], [5.0, 5.0, 3.0]]}]}
+    canonical = validate_mutations(base, mutations, allow_transforms=False)
+    actual = {
+        "dwg": "temp-output.dwg", "layers": ["Panels"],
+        "polylines": [
+            copy.deepcopy(base["polylines"][0]),
+            {
+                "handle": "B", "layer": "Panels", "closed": False, "xdata": None,
+                "pts": [[0.0, 0.0, 3.0], [5.0, 0.0, 3.0], [5.0, 5.0, 3.0]],
+            },
+        ],
+    }
+
+    write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
 def test_live_effect_verification_rejects_change_beyond_extractor_precision():
     base = {"dwg": "source.dwg", "layers": [], "polylines": []}
     added = _entity("CENTERED", "Leaf Output")
