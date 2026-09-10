@@ -1482,12 +1482,19 @@ def build_suites() -> List[Suite]:
               "scripts test_merge_queue_workflow.py", "pytest",
               # Native receipts: seven field refusals, five statuses, six log streams.
               # 2026-09-09 app pause keeps 96 executed rows: next-group receipt becomes web only.
-              # 96 -> 106 on 2026-09-10 (mq-admission-gate): mq-review decides
+              # 96 -> 106 on 2026-09-10 (mq-admission-gate v1): mq-review decides
               # pull_request admission itself instead of an unconditional
-              # success, plus a status-triggered re-decision. +4 kimi state
-              # cases, +1 newest-by-created_at proof, +2 unreadable-gate
-              # refusals, +1 status/event-guard structural pin, +1 no-open-PR
-              # no-op, +1 merge_group-path-unchanged pin.
+              # success. +4 kimi state cases, +1 newest-by-created_at proof,
+              # +2 unreadable-gate refusals, +1 status/event-guard structural
+              # pin, +1 no-open-PR no-op, +1 merge_group-path-unchanged pin.
+              # Still 106 on 2026-09-10 (mq-admission-gate v2, critic RED on
+              # v1's status trigger: a status-triggered run's GITHUB_SHA is
+              # always the default branch tip, never the PR head): the status
+              # trigger and its re-decision step are deleted, taking the
+              # status/event-guard structural pin and the no-open-PR no-op
+              # with them (-2), replaced by a no-status-trigger structural pin
+              # covering mq-supply and mq-prewarm's restored conditions (+1)
+              # and a same-second admission tie-break row (+1). Net unchanged.
               SCRIPTS_DIR, _py_pytest("test_merge_queue_workflow.py"), 106),
         Suite("platform-release-manifest",
               "scripts test_platform_release_manifest.py", "pytest",

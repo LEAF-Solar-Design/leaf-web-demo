@@ -19,11 +19,13 @@ name: merge-queue
 # enough to enter the queue. On pull_request events mq-review decides
 # admission from the newest kimi-critic-review status on the PR's own head
 # (the same newest-by-created_at rule the merge_group path proves at
-# ~:113-142, so the two can never disagree), and mq-prewarm publishes a
-# neutral "queue preparation deferred" success and does nothing else. A
-# status event re-runs that same decision when the gate lands after the
-# push, so a PR is never stranded admitting-red on a stale check run; the
-# real staging work only ever runs for merge_group's checks_requested.
+# ~:146-170, so the two can never disagree), and mq-prewarm publishes a
+# neutral "queue preparation deferred" success and does nothing else. There is
+# no status trigger: a status-triggered run's GITHUB_SHA is always the default
+# branch tip, never the PR head, so it cannot correct a PR's own check run. A
+# red mq-review clears the same way any other check does, by a re-run once
+# the kimi-critic-review success is posted; the real staging work only ever
+# runs for merge_group's checks_requested.
 # ---------------------------------------------------------------------------
 
 on:
@@ -32,7 +34,6 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
-  status:
 
 permissions:
   contents: read
@@ -67,12 +68,6 @@ env:
 jobs:
   mq-review:
     name: mq-review
-    # A status event never starts this runner unless it IS the gate landing:
-    # any other status context or a non-success state is not our concern and
-    # must never re-conclude this check.
-    if: >-
-      github.event_name != 'status' ||
-      (github.event.context == 'kimi-critic-review' && github.event.state == 'success')
     runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 20
     outputs:
@@ -99,55 +94,16 @@ jobs:
             exit 1
           }
           # Newest by created_at, never the newest by list order: the
-          # statuses API is not guaranteed sorted.
-          STATE=$(jq -r '[.[] | select(.context == "kimi-critic-review")] | sort_by(.created_at) | last | .state // "absent"' pr-statuses.json)
+          # statuses API is not guaranteed sorted, and a plain sort_by is
+          # stable, so two statuses sharing a created_at second would keep
+          # list order and could pick the older one; reverse first so the
+          # tie resolves to the newest.
+          STATE=$(jq -r '[.[] | select(.context == "kimi-critic-review")] | reverse | sort_by(.created_at) | last | .state // "absent"' pr-statuses.json)
           if [ "$STATE" != "success" ]; then
-            echo "::error::mq-review: this PR has no kimi-critic-review success on $HEAD_SHA; it will not be admitted to the merge queue until one is posted."
+            echo "::error::mq-review: this PR has no kimi-critic-review success on $HEAD_SHA; post a kimi-critic-review success on this head and re-run this check."
             exit 1
           fi
           echo "::notice::mq-review: queue preparation deferred until this PR enters the merge queue."
-
-      - name: Re-decide admission after a status event lands the gate
-        if: github.event_name == 'status'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EVENT_SHA: ${{ github.event.sha }}
-        run: |
-          set -euo pipefail
-          [[ "$EVENT_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::mq-review: status event carries no usable sha."; exit 1; }
-          PULLS=$(timeout 60 gh api "repos/$GITHUB_REPOSITORY/commits/$EVENT_SHA/pulls") || {
-            echo "::error::mq-review: could not resolve open pull requests for $EVENT_SHA; refusing to admit on an unreadable gate."
-            exit 1
-          }
-          echo "$PULLS" | jq -e 'type == "array"' >/dev/null 2>&1 || {
-            echo "::error::mq-review: pull request lookup for $EVENT_SHA returned an unreadable body; refusing to admit on an unreadable gate."
-            exit 1
-          }
-          NUMBERS=$(jq -r --arg sha "$EVENT_SHA" '[.[] | select(.state == "open" and .head.sha == $sha) | .number] | .[]' <<<"$PULLS")
-          if [ -z "$NUMBERS" ]; then
-            echo "::notice::mq-review: status event on $EVENT_SHA heads no open pull request; nothing to re-decide."
-            exit 0
-          fi
-          for NUMBER in $NUMBERS; do
-            RAW=$(timeout 60 gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$EVENT_SHA/statuses?per_page=100") || {
-              echo "::error::mq-review: kimi-critic-review status read failed for $EVENT_SHA (PR #$NUMBER); refusing to admit on an unreadable gate."
-              exit 1
-            }
-            [ -n "$RAW" ] || {
-              echo "::error::mq-review: kimi-critic-review status read for $EVENT_SHA (PR #$NUMBER) returned an empty body; refusing to admit on an unreadable gate."
-              exit 1
-            }
-            echo "$RAW" | jq -s 'add // []' > "status-statuses-$NUMBER.json" 2>/dev/null || {
-              echo "::error::mq-review: kimi-critic-review status read for $EVENT_SHA (PR #$NUMBER) returned unparsable JSON; refusing to admit on an unreadable gate."
-              exit 1
-            }
-            STATE=$(jq -r '[.[] | select(.context == "kimi-critic-review")] | sort_by(.created_at) | last | .state // "absent"' "status-statuses-$NUMBER.json")
-            if [ "$STATE" != "success" ]; then
-              echo "::error::mq-review: PR #$NUMBER ($EVENT_SHA) newest kimi-critic-review state is '$STATE', not success."
-              exit 1
-            fi
-          done
-          echo "mq-review: status event re-decided admission as success for pull request(s) $NUMBERS."
 
       - name: Read the live merge queue and resolve this group's members
         id: queue
@@ -257,7 +213,7 @@ jobs:
 
   mq-supply:
     name: mq-supply
-    if: github.event_name == 'merge_group' && github.event_name != 'status'
+    if: github.event_name == 'merge_group'
     needs: mq-review
     permissions:
       id-token: write
@@ -429,7 +385,7 @@ jobs:
   mq-prewarm:
     name: mq-prewarm
     needs: [mq-review, mq-supply]
-    if: always() && github.event_name != 'status'
+    if: always()
     runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 45
     # Queue refs assume their own read-only role without an environment.

@@ -483,31 +483,29 @@ def test_pull_request_admission_fails_closed_on_an_unreadable_gate(tmp_path, fai
     message = result["__stdout__"] + result["__stderr__"]
     assert result["__returncode__"] != 0, message
     assert "unreadable gate" in message
-    assert "it will not be admitted to the merge queue until one is posted" not in message
-
-
-def test_status_events_only_run_mq_review_and_only_for_the_gate():
-    document = workflow_document()
-    review_if = document["jobs"]["mq-review"]["if"]
-    assert "github.event_name != 'status'" in review_if
-    assert "github.event.context == 'kimi-critic-review'" in review_if
-    assert "github.event.state == 'success'" in review_if
-    for job in ("mq-supply", "mq-prewarm"):
-        assert "github.event_name != 'status'" in document["jobs"][job]["if"]
+    assert "post a kimi-critic-review success on this head and re-run this check" not in message
 
 
 @needs_shell
-def test_a_status_event_on_a_sha_that_heads_no_open_pr_is_a_no_op(tmp_path):
+def test_pull_request_admission_same_second_tie_resolves_to_the_newer_success(tmp_path):
+    """The statuses API returns newest first and jq's sort_by is stable, so a
+    plain sort_by(.created_at) | last would pick the OLDER entry when two
+    statuses share a created_at second. A failure corrected by a success in
+    the same second must still admit."""
     _install_fake_gh(tmp_path)
-    sha = "e" * 40
-    (tmp_path / f"pulls-{sha}.json").write_text("[]", encoding="utf-8")
+    _write_statuses(tmp_path, PR_HEAD_SHA, [
+        status("success", "2026-09-01T00:00:00Z"),
+        status("failure", "2026-09-01T00:00:00Z"),
+    ])
     result = run_step(
-        step_body("mq-review", "Re-decide admission after a status event lands the gate"),
+        step_body("mq-review", "Decide admission from the newest kimi-critic-review status (pull_request)"),
         tmp_path,
-        {"EVENT_SHA": sha},
+        {"HEAD_SHA": PR_HEAD_SHA},
     )
-    assert result["__returncode__"] == 0, result["__stderr__"]
-    assert result.get("__stdout__", "").count("::error::") == 0
+    assert result["__returncode__"] == 0, (
+        "a same-second success listed after a same-second failure must still admit: %s"
+        % (result["__stdout__"] + result["__stderr__"])
+    )
 
 
 def test_the_merge_group_path_is_unchanged():
@@ -647,14 +645,26 @@ def test_every_network_command_has_a_timeout():
 # Structural / falsifying pins with no local executable surface
 # --------------------------------------------------------------------------- #
 
-def test_it_fires_on_merge_group_pull_request_and_status():
+def test_it_fires_on_merge_group_and_pull_request_only():
     triggers = workflow_document()["on"]
     assert triggers["merge_group"]["types"] == ["checks_requested"]
     assert set(triggers["pull_request"]["types"]) == {
         "opened", "synchronize", "reopened", "ready_for_review",
     }
     assert triggers["pull_request"]["branches"] == ["main"]
-    assert "status" in triggers
+    assert "status" not in triggers, "the refuted status trigger must never come back"
+
+
+def test_no_status_trigger_and_supply_prewarm_match_mains_conditions():
+    # Pins the shape a future edit could quietly regress into: reintroducing
+    # `status:` in `on:`, or re-adding `github.event_name != 'status'` to
+    # mq-supply's or mq-prewarm's `if:`.
+    document = workflow_document()
+    assert "status" not in document["on"]
+    assert document["jobs"]["mq-supply"]["if"] == "github.event_name == 'merge_group'"
+    assert document["jobs"]["mq-prewarm"]["if"] == "always()"
+    for job in ("mq-supply", "mq-prewarm"):
+        assert "status" not in document["jobs"][job]["if"]
 
 
 def test_both_required_contexts_are_named_exactly():
@@ -664,9 +674,7 @@ def test_both_required_contexts_are_named_exactly():
 
 
 def test_mq_supply_is_not_a_required_context_and_only_runs_for_the_group():
-    assert workflow_document()["jobs"]["mq-supply"]["if"] == (
-        "github.event_name == 'merge_group' && github.event_name != 'status'"
-    )
+    assert workflow_document()["jobs"]["mq-supply"]["if"] == "github.event_name == 'merge_group'"
 
 
 def test_every_step_in_the_required_jobs_is_conditioned_on_the_event():
@@ -690,7 +698,7 @@ def test_prewarm_pull_request_arm_publishes_a_deferred_success_and_calls_nothing
 
 def test_mq_prewarm_always_runs_and_fails_explicitly_on_a_dependency_failure():
     document = workflow_document()
-    assert document["jobs"]["mq-prewarm"]["if"] == "always() && github.event_name != 'status'"
+    assert document["jobs"]["mq-prewarm"]["if"] == "always()"
     assert document["jobs"]["mq-prewarm"]["needs"] == ["mq-review", "mq-supply"]
     step = step_by_name("mq-prewarm", "Fail explicitly on a failed or cancelled dependency")
     condition = step["if"]
