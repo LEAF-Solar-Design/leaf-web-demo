@@ -1674,6 +1674,12 @@ def quantize_intake_like_extractor(intake: dict) -> dict:
     return quantized
 
 
+# dxf_intake.py and da/intake_parse.py omit +Z within 1e-6; the inspect
+# producer in da/lisp.py rounds to 6 decimals, adding at most 5e-7.
+# 1e-6 + 5e-7 = 1.5e-6, covered by an absolute 2e-6 per component.
+_NORMAL_TOLERANCE = 2e-6
+
+
 def _effective_normal(entity: Dict[str, Any]) -> Optional[list]:
     # dxf_intake.py and da/intake_parse.py omit the normal for +Z.
     normal = entity.get("normal", [0.0, 0.0, 1.0])
@@ -2056,7 +2062,7 @@ def verify_live_mutation_effects(
             base_normal = _effective_normal(entity)
             actual_normal = _effective_normal(actual_by_handle[handle])
             if (base_normal is None or actual_normal is None
-                    or any(abs(left - right) > 1e-6
+                    or any(abs(left - right) > _NORMAL_TOLERANCE
                            for left, right in zip(base_normal, actual_normal))):
                 raise ValueError(
                     f"unchanged handle {handle!r} has unexpected output geometry")

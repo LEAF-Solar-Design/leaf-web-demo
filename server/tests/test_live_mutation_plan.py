@@ -749,13 +749,33 @@ def test_unchanged_polyline_preserves_mirrored_normal():
     assert (base, actual, canonical) == before
 
 
+@pytest.mark.parametrize("base_has_normal", [True, False], ids=["base-normal", "actual-normal"])
+def test_unchanged_polyline_accepts_normal_omission_boundary(base_has_normal):
+    # (a) The exact base-normal case fails at d5768f25; (b) its mirror passes
+    # under the same tolerance. The plan touches handles other than B.
+    base = _base()
+    actual = _actual_success()
+    points = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0],
+              [10.0, 10.0, 0.0], [0.0, 10.0, 0.0]]
+    base["polylines"][1]["pts"] = copy.deepcopy(points)
+    actual["polylines"][0]["pts"] = copy.deepcopy(points)
+    entity = base["polylines"][1] if base_has_normal else actual["polylines"][0]
+    entity["normal"] = [0.0000014, 0, 0.99999999999902]
+    canonical = validate_mutations(base, _mutations(), allow_transforms=False)
+    before = copy.deepcopy((base, actual, canonical))
+
+    write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+    assert (base, actual, canonical) == before
+
+
 @pytest.mark.parametrize("normal,accepted", [
     ([0, 0, 1], True),
-    ([0, 0, 1.0000005], True),
-    ([0, 0, 0.99], False),
+    ([0, 0, 1.0000019], True),
+    ([0, 0, 1.0000025], False),
 ])
 def test_unchanged_polyline_effective_normal_uses_absolute_tolerance(normal, accepted):
-    # (c) Unchanged B's missing normal means +Z, with absolute 1e-6 tolerance.
+    # (c) Unchanged B's missing normal means +Z; _NORMAL_TOLERANCE is 2e-6.
     base = _base()
     actual = _actual_success()
     canonical = validate_mutations(base, _mutations(), allow_transforms=False)
