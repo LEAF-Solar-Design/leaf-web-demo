@@ -170,6 +170,7 @@ class FakeExecution:
 def setup(monkeypatch):
     monkeypatch.delenv('LEAF_PROJECT_SOURCE_PRODUCER', raising=False)
     monkeypatch.setattr(router, '_NEXT_WORKER_CALLS', router.OrderedDict())
+    monkeypatch.setattr(router, '_BRIDGE_BUCKETS', router.OrderedDict())
     store = FakeStore()
     router.set_store(store)
     router.set_enrollment_store(store)
@@ -357,6 +358,8 @@ def test_bridge_every_operation_requires_worker(setup, monkeypatch, op, credenti
                                 'host_op', 'host_settle', 'host_grant'])
 def test_bridge_routes_worker_and_redacts_errors(setup, monkeypatch, op):
     client, _, _ = setup
+    now = [0.0]
+    monkeypatch.setattr(router, 'monotonic', lambda: now[0])
     client.app.dependency_overrides[deps.require_campaign_worker] = lambda: 'worker-service'
     body = {'enrollment_id': str(uuid.uuid4())}
     calls = []
@@ -373,6 +376,7 @@ def test_bridge_routes_worker_and_redacts_errors(setup, monkeypatch, op):
         raise RuntimeError('PRIVATE_BRIDGE_SENTINEL')
 
     monkeypatch.setattr(router.campaign_bridge, 'handle', fail)
+    now[0] = 30.0
     response = client.post('/internal/campaigns/bridge/' + op, json=body)
     assert response.status_code == 503 and 'PRIVATE_BRIDGE_SENTINEL' not in response.text
 
@@ -653,22 +657,156 @@ def test_next_worker_rate_limit_lru_bounded_eviction(setup, monkeypatch):
                         lambda *args: {'ok': True, 'kind': 'idle'})
     url = '/internal/campaign-worker/next'
     body = {'enrollment_id': str(uuid.uuid4())}
-    for index in range(64):
+    for index in range(256):
         subject[0] = f'worker-{index}'
         assert client.post(url, json=body).status_code == 200
     subject[0] = 'worker-0'
     assert client.post(url, json=body).status_code == 429
-    subject[0] = 'worker-64'
+    subject[0] = 'worker-256'
     assert client.post(url, json=body).status_code == 200
-    assert len(router._NEXT_WORKER_CALLS) == 64
-    assert 'worker-0' in router._NEXT_WORKER_CALLS
-    assert 'worker-1' not in router._NEXT_WORKER_CALLS
+    assert len(router._NEXT_WORKER_CALLS) == 256
+    assert ('next', 'worker-0') in router._NEXT_WORKER_CALLS
+    assert ('next', 'worker-1') not in router._NEXT_WORKER_CALLS
     subject[0] = 'worker-1'
     assert client.post(url, json=body).status_code == 200
-    for index in range(65, 130):
+    for index in range(257, 520):
         subject[0] = f'worker-{index}'
         assert client.post(url, json=body).status_code == 200
-        assert len(router._NEXT_WORKER_CALLS) == 64
+        assert len(router._NEXT_WORKER_CALLS) == 256
+
+
+@pytest.fixture
+def bridge_rate_client(setup, monkeypatch):
+    client, _, _ = setup
+    now, subject, calls = [0.0], ['worker-a'], []
+    monkeypatch.setattr(router, 'monotonic', lambda: now[0])
+    client.app.dependency_overrides[deps.require_campaign_worker] = lambda: subject[0]
+    monkeypatch.setattr(router.campaign_bridge, 'handle',
+                        lambda *args: calls.append(args) or {'ok': True})
+    return client, now, subject, calls
+
+
+@pytest.mark.parametrize('op', ['host_op', 'host_grant', 'host_settle', 'settle'])
+def test_bridge_same_op_burst_exhaustion_and_refill(bridge_rate_client, op):
+    client, now, subject, calls = bridge_rate_client
+    url = '/internal/campaigns/bridge/' + op
+    for index in range(120):
+        assert client.post(url, json={'operation_id': str(uuid.uuid4())}).status_code == 200
+    before = router._BRIDGE_BUCKETS[subject[0]]
+    response = client.post(url, json={})
+    assert response.status_code == 429 and response.headers['Retry-After'] == '1'
+    assert response.json() == {'ok': False, 'error': {
+        'error_code': 'rate_limited',
+        'message': 'Campaign worker must wait before requesting more work', 'retryable': True}}
+    assert len(calls) == 120
+    now[0] = 0.25
+    assert client.post(url, json={}).status_code == 429
+    assert router._BRIDGE_BUCKETS[subject[0]] == before
+    subject[0] = 'worker-b'
+    assert client.post(url, json={}).status_code == 200
+    subject[0] = 'worker-a'
+    now[0] = 0.5
+    assert client.post(url, json={}).status_code == 200
+    assert client.post(url, json={}).status_code == 429
+    now[0] = 1000.0
+    assert client.post(url, json={}).status_code == 200
+    assert router._BRIDGE_BUCKETS[subject[0]][0] == 119
+
+
+def test_bridge_bucket_shared_across_ops_and_unknown_paths(bridge_rate_client):
+    client, _, _, calls = bridge_rate_client
+    for index in range(120):
+        assert client.post(f'/internal/campaigns/bridge/unknown-{index}', json={}).status_code == 200
+    for op in ('host_op', 'export', 'next', 'another-unknown'):
+        assert client.post('/api/internal/campaigns/bridge/' + op, json={}).status_code == 429
+    assert len(calls) == 120 and len(router._BRIDGE_BUCKETS) == 1
+    assert not router._NEXT_WORKER_CALLS
+
+
+def test_bridge_next_window_with_refilled_bucket(bridge_rate_client):
+    client, now, _, calls = bridge_rate_client
+    url = '/internal/campaigns/bridge/next'
+    assert client.post(url, json={}).status_code == 200
+    now[0] = 1.0  # The bucket has refilled to capacity, but next must still wait.
+    response = client.post(url, json={})
+    assert response.status_code == 429 and response.headers['Retry-After'] == '29'
+    now[0] = 29.5
+    response = client.post(url, json={})
+    assert response.status_code == 429 and response.headers['Retry-After'] == '1'
+    now[0] = 30.0
+    assert client.post(url, json={}).status_code == 200
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize('bridge_first', [True, False])
+def test_bridge_and_direct_next_share_window(bridge_rate_client, monkeypatch, bridge_first):
+    client, now, _, _ = bridge_rate_client
+    monkeypatch.setenv('LEAF_CAMPAIGN_FIRST_TASK_PRODUCER', 'on')
+    monkeypatch.setattr(router.campaign_worker_service, 'next_work', lambda *args: {'ok': True})
+    urls = ['/internal/campaigns/bridge/next', '/internal/campaign-worker/next']
+    if not bridge_first:
+        urls.reverse()
+    body = {'enrollment_id': str(uuid.uuid4())}
+    assert client.post(urls[0], json=body).status_code == 200
+    response = client.post(urls[1], json=body)
+    assert response.status_code == 429 and response.headers['Retry-After'] == '30'
+    now[0] = 30.0
+    assert client.post(urls[1], json=body).status_code == 200
+    assert client.post(urls[0], json=body).status_code == 429
+
+
+def test_bridge_host_op_live_cadence(bridge_rate_client):
+    client, now, _, calls = bridge_rate_client
+    for index in range(240):
+        now[0] = index * 11.39
+        assert client.post('/internal/campaigns/bridge/host_op', json={}).status_code == 200
+    assert len(calls) == 240 and not router._NEXT_WORKER_CALLS
+
+
+def test_bridge_bucket_lru_bounded_and_denial_refreshes(bridge_rate_client):
+    client, _, subject, _ = bridge_rate_client
+    url = '/internal/campaigns/bridge/host_op'
+    for index in range(256):
+        subject[0] = f'worker-{index}'
+        assert client.post(url, json={}).status_code == 200
+    subject[0] = 'worker-0'
+    for _ in range(119):
+        assert client.post(url, json={}).status_code == 200
+    subject[0] = 'worker-1'
+    assert client.post(url, json={}).status_code == 200
+    subject[0] = 'worker-0'
+    assert client.post(url, json={}).status_code == 429
+    assert next(reversed(router._BRIDGE_BUCKETS)) == 'worker-0'
+    for index in range(256, 510):
+        subject[0] = f'worker-{index}'
+        assert client.post(url, json={}).status_code == 200
+        assert len(router._BRIDGE_BUCKETS) == 256
+    assert 'worker-0' in router._BRIDGE_BUCKETS
+    assert 'worker-2' not in router._BRIDGE_BUCKETS
+
+
+@pytest.mark.parametrize('op', ['host_op', 'next'])
+def test_bridge_rate_denial_precedes_body_read(setup, monkeypatch, op):
+    import asyncio
+
+    monkeypatch.setattr(router, 'monotonic', lambda: 0.0)
+    if op == 'next':
+        assert router._next_worker_retry_after('worker-a') == 0
+    else:
+        for _ in range(120):
+            assert router._bridge_retry_after('worker-a') == 0
+
+    class UnreadableRequest:
+        @property
+        def headers(self):
+            pytest.fail('Denied request read body metadata')
+
+        def stream(self):
+            pytest.fail('Denied request streamed body')
+
+    monkeypatch.setattr(router.campaign_bridge, 'handle', lambda *args: pytest.fail('Bridge entered'))
+    response = asyncio.run(router.campaign_bridge_operation(op, UnreadableRequest(), 'worker-a'))
+    assert response.status_code == 429
 
 
 def _question(client):
