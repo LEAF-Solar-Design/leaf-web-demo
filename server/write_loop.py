@@ -1774,6 +1774,7 @@ def _effective_normal(entity: Dict[str, Any], key: str = "normal") -> Optional[l
 
 def _polyline_effect_matches(
     expected: Dict[str, Any], actual: Dict[str, Any], *, extracted: bool = False,
+    compare_width: bool = False,
 ) -> bool:
     if expected.get("layer") != actual.get("layer"):
         return False
@@ -1786,7 +1787,7 @@ def _polyline_effect_matches(
     if (expected.get("bulges") or None) != (actual.get("bulges") or None):
         return False
     # Width flags a thick or tapered polyline; the engine preserves it.
-    if bool(expected.get("width")) != bool(actual.get("width")):
+    if compare_width and bool(expected.get("width")) != bool(actual.get("width")):
         return False
     expected_normal = _effective_normal(expected)
     actual_normal = _effective_normal(actual)
@@ -2016,6 +2017,7 @@ def _verify_property_effects(
 
 def verify_live_mutation_effects(
     base: Dict[str, Any], actual: Dict[str, Any], canonical: Dict[str, Any],
+    *, compare_width: bool = False,
 ) -> Optional[str]:
     """Refuse publication unless extraction proves exactly the proposed effects.
 
@@ -2169,7 +2171,8 @@ def verify_live_mutation_effects(
                     for point in entity["pts"]
                 ]
         if not _polyline_effect_matches(
-                expected_entity, actual_by_handle[handle], extracted=changed):
+                expected_entity, actual_by_handle[handle], extracted=changed,
+                compare_width=compare_width):
             effect = (
                 "transformed" if handle in transformed
                 else "replaced" if handle in replaced else "unchanged")
@@ -2208,7 +2211,8 @@ def verify_live_mutation_effects(
         match_index = min(
             (index for index, candidate in enumerate(unmatched)
              if isinstance(candidate, dict)
-             and _polyline_effect_matches(entity, candidate, extracted=True)),
+             and _polyline_effect_matches(entity, candidate, extracted=True,
+                                          compare_width=compare_width)),
             key=lambda index: (
                 max(abs(left - right)
                     for point, candidate_point in zip(expected_points, unmatched[index]["pts"])
@@ -3026,6 +3030,7 @@ def _apply_plan_live(*, tenant_id: str, drawing_id: str, head_v: int,
     normalized_base = copy.deepcopy(base_intake)
     normalized_base["dwg"] = drawing_id
     try:
+        # The extractor's five-field PL record cannot carry width on the actual side.
         properties_note = verify_live_mutation_effects(normalized_base, output_intake, canonical)
     except ValueError as exc:
         raise LiveMutationEffectMismatch(str(exc)) from exc

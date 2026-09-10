@@ -1241,7 +1241,7 @@ def save_plan_version(drawing_id: str,
                         {"ordinal": i, "handle": entity["handle"]}
                         for i, entity in enumerate(canonical.get("added", []))]
                 properties_note = write_loop.verify_live_mutation_effects(
-                    expected_base, quantized_upload, canonical)
+                    expected_base, quantized_upload, canonical, compare_width=True)
                 if properties_note and (styled_handles or any(
                         field in entity for entity in canonical.get("added", [])
                         for field in mutation_plan.STYLE_FIELDS)):

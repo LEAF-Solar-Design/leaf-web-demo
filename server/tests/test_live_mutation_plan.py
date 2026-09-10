@@ -742,7 +742,8 @@ def test_unchanged_polyline_preserves_width():
     actual["polylines"][0]["width"] = True
     canonical = validate_mutations(base, _mutations(), allow_transforms=False)
 
-    assert write_loop.verify_live_mutation_effects(base, actual, canonical) is None
+    assert write_loop.verify_live_mutation_effects(
+        base, actual, canonical, compare_width=True) is None
 
 
 def test_unchanged_polyline_refuses_lost_width():
@@ -753,7 +754,19 @@ def test_unchanged_polyline_refuses_lost_width():
 
     with pytest.raises(
             ValueError, match="^unchanged handle 'B' has unexpected output geometry$"):
-        write_loop.verify_live_mutation_effects(base, actual, canonical)
+        write_loop.verify_live_mutation_effects(
+            base, actual, canonical, compare_width=True)
+
+
+def test_live_unchanged_polyline_accepts_width_blind_extraction():
+    base = _base()
+    actual = _actual_success()
+    base["polylines"][1]["width"] = True
+    # The extractor's five-field PL record omits width from the actual side.
+    assert "width" not in actual["polylines"][0]
+    canonical = validate_mutations(base, _mutations(), allow_transforms=False)
+
+    assert write_loop.verify_live_mutation_effects(base, actual, canonical) is None
 
 
 def test_unchanged_polyline_refuses_added_width():
@@ -764,7 +777,8 @@ def test_unchanged_polyline_refuses_added_width():
 
     with pytest.raises(
             ValueError, match="^unchanged handle 'B' has unexpected output geometry$"):
-        write_loop.verify_live_mutation_effects(base, actual, canonical)
+        write_loop.verify_live_mutation_effects(
+            base, actual, canonical, compare_width=True)
 
 
 @pytest.mark.parametrize("false_side", [None, "base", "actual"])
@@ -777,7 +791,8 @@ def test_unchanged_polyline_accepts_no_width(false_side):
         actual["polylines"][0]["width"] = False
     canonical = validate_mutations(base, _mutations(), allow_transforms=False)
 
-    assert write_loop.verify_live_mutation_effects(base, actual, canonical) is None
+    assert write_loop.verify_live_mutation_effects(
+        base, actual, canonical, compare_width=True) is None
 
 
 def test_set_points_on_widthed_polyline_uses_replacement_geometry():
@@ -791,12 +806,14 @@ def test_set_points_on_widthed_polyline_uses_replacement_geometry():
     actual["polylines"][1]["pts"] = copy.deepcopy(points)
     actual["polylines"][1]["closed"] = False
 
-    assert write_loop.verify_live_mutation_effects(base, actual, canonical) is None
+    assert write_loop.verify_live_mutation_effects(
+        base, actual, canonical, compare_width=True) is None
 
     actual["polylines"][1]["pts"] = copy.deepcopy(base["polylines"][1]["pts"])
     with pytest.raises(
             ValueError, match="^replaced handle 'B' has unexpected output geometry$"):
-        write_loop.verify_live_mutation_effects(base, actual, canonical)
+        write_loop.verify_live_mutation_effects(
+            base, actual, canonical, compare_width=True)
 
 
 def test_unchanged_polyline_preserves_mirrored_normal():
