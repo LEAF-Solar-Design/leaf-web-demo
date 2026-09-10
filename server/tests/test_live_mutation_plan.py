@@ -12,6 +12,7 @@ import tool_loader
 import write_loop
 import store
 import mutation_apply  # after write_loop, which puts da/ on sys.path (the gate runs this file alone)
+from intake_parse import parse_text
 from mutation_plan import emit_plan, plan_sha256, validate_mutations, world_to_ocs
 
 
@@ -90,6 +91,12 @@ def _families_text(intake):
             f"PV|{point[0]:.3f},{point[1]:.3f}"
             for point in lowered["points"]
         )
+    if intake.get("polylineWidthCovered") is True:
+        lines.extend(
+            f"PW|{polyline['handle']}|1"
+            for polyline in intake.get("polylines", []) if polyline.get("width")
+        )
+        lines.append("PWC|1")
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
@@ -923,6 +930,127 @@ def test_set_points_on_curved_polyline_drops_bulges():
     }
 
     write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+@pytest.mark.parametrize("evidence,covered,widthed", [
+    ("PW|b|1\nPWC|1\n", True, True),
+    ("PWC|1\n", True, False),
+    ("", False, False),
+    ("PW|B|1\n", False, False),
+    ("MEC|1\n", False, False),
+])
+def test_inspection_polyline_width_merges_by_handle_with_coverage(evidence, covered, widthed):
+    rows = _families_text(_base()).decode("utf-8")
+    intake = parse_text(rows + evidence, "drawing")
+    assert not intake.get("parseErrors"), intake.get("parseErrors")
+    if covered:
+        assert intake["polylineWidthCovered"] is True
+    else:
+        assert "polylineWidthCovered" not in intake
+    by_handle = {p["handle"]: p for p in intake["polylines"]}
+    assert set(by_handle) == {"A", "B"}
+    assert "width" not in by_handle["A"]
+    assert by_handle["B"].get("width", False) is widthed
+    assert by_handle["B"]["pts"] == _base()["polylines"][1]["pts"]
+
+
+@pytest.mark.parametrize("evidence", ["PW|B|0\n", "PW|Z|1\n", "PWC|0\n"])
+def test_inspection_rejects_malformed_polyline_width_evidence(evidence):
+    intake = parse_text(_families_text(_base()).decode("utf-8") + evidence, "drawing")
+    assert intake.get("parseErrors")
+    assert "polylineWidthCovered" not in intake
+
+
+@pytest.mark.parametrize("base_covered,actual_covered", [
+    (True, True), (True, False), (False, True), (False, False),
+])
+@pytest.mark.parametrize("base_widthed,actual_widthed", [
+    (True, False), (False, True), (True, True), (False, False),
+])
+def test_unchanged_polyline_width_comparison_requires_both_producers(
+        base_covered, actual_covered, base_widthed, actual_widthed):
+    base = _base()
+    actual = _actual_success()
+    if base_covered:
+        base["polylineWidthCovered"] = True
+    if actual_covered:
+        actual["polylineWidthCovered"] = True
+    if base_widthed:
+        base["polylines"][1]["width"] = True
+    if actual_widthed:
+        actual["polylines"][0]["width"] = True
+    canonical = validate_mutations(base, _mutations(), allow_transforms=False)
+    before = copy.deepcopy((base, actual, canonical))
+    if base_covered and actual_covered and base_widthed != actual_widthed:
+        with pytest.raises(
+                ValueError, match="^unchanged handle 'B' has unexpected output geometry$"):
+            write_loop.verify_live_mutation_effects(base, actual, canonical)
+    else:
+        assert write_loop.verify_live_mutation_effects(base, actual, canonical) is None
+    assert (base, actual, canonical) == before
+
+
+@pytest.mark.parametrize("actual_covered", [True, False])
+def test_added_polyline_width_uses_output_coverage_even_with_a_legacy_base(actual_covered):
+    base = _base()
+    actual = _actual_success()
+    actual["polylines"][1]["width"] = True
+    if actual_covered:
+        actual["polylineWidthCovered"] = True
+    canonical = validate_mutations(base, _mutations(), allow_transforms=False)
+    if actual_covered:
+        with pytest.raises(ValueError, match="^added polyline 'C' is missing from output$"):
+            write_loop.verify_live_mutation_effects(base, actual, canonical)
+    else:
+        assert write_loop.verify_live_mutation_effects(base, actual, canonical) is None
+
+
+@pytest.mark.parametrize("preserved", [True, False], ids=["preserved", "flattened"])
+def test_live_polyline_width_survives_inspection_and_cache_publication(tmp_path, preserved):
+    backend = store.FilesystemBackend(str(tmp_path / "drawings"))
+    drawing_id = "width-preserved" if preserved else "width-flattened"
+    source = tmp_path / "base.dwg"
+    source.write_bytes(b"AC1032" + b"\x00" * 64)
+    store.ingest_drawing(backend, "tenant", str(source), drawing_id=drawing_id)
+    base = _base()
+    base["polylineWidthCovered"] = True
+    base["polylines"][1]["width"] = True
+    _, vkey = store.resolve_version(backend, "tenant", drawing_id, 1)
+    write_loop.publish_intake_cache(
+        backend, "tenant", drawing_id, 1, backend.get(vkey), base)
+    actual = _actual_success()
+    actual["polylines"][1]["handle"] = "A17"
+    actual["polylineWidthCovered"] = True
+    if preserved:
+        actual["polylines"][0]["width"] = True
+    planner, _ = _planner()
+    da = FakeDa(actual)
+    env, status = write_loop.run_write_live(
+        {"name": "author-tool", "version": "1"},
+        {"drawing_id": drawing_id}, "tenant", backend=backend, da=da,
+        t0=time.perf_counter(), run_tool_dynamic_fn=planner,
+    )
+    assert len(da.submissions) == 1
+    if preserved:
+        assert status == 200, env
+        _, cached = write_loop.read_intake(backend, "tenant", drawing_id, 2)
+        assert cached["polylineWidthCovered"] is True
+        by_handle = {p["handle"]: p for p in cached["polylines"]}
+        assert by_handle["B"]["width"] is True
+        assert "width" not in by_handle["A17"]
+        # The next save must retain coverage when this live output is its base.
+        flattened = copy.deepcopy(cached)
+        next_plan = validate_mutations(cached, {"removed": ["A17"]})
+        flattened["polylines"] = [p for p in flattened["polylines"] if p["handle"] != "A17"]
+        next(p for p in flattened["polylines"] if p["handle"] == "B").pop("width")
+        with pytest.raises(
+                ValueError, match="^unchanged handle 'B' has unexpected output geometry$"):
+            write_loop.verify_live_mutation_effects(cached, flattened, next_plan)
+    else:
+        assert status == 502, env
+        assert env["error"]["error_code"] == "WORKITEM_FAILED"
+        assert "unchanged handle 'B'" in env["error"]["message"]
+        assert store.load_manifest(backend, "tenant", drawing_id)["head"] == 1
 
 
 def test_live_effect_verification_rejects_change_beyond_extractor_precision():

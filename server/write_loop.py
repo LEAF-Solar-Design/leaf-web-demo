@@ -567,6 +567,10 @@ def _sidecar_bound(raw: bytes, payload: Dict[str, Any], payload_bytes: bytes) ->
             raw, source_name=str(payload.get("dwg") or "edited.dxf"))
     except dxf_intake.DxfParseError:
         return False
+    # New edited saves record this parser's width coverage. Older payloads
+    # retain their original bytes and must still bind without the new field.
+    if payload.get("polylineWidthCovered") is True:
+        intake["polylineWidthCovered"] = True
     canonical = json.dumps(intake, separators=(",", ":")).encode("utf-8")
     return hmac.compare_digest(
         hashlib.sha256(canonical).hexdigest(), hashlib.sha256(payload_bytes).hexdigest())
@@ -1824,6 +1828,7 @@ def _effective_normal(entity: Dict[str, Any], key: str = "normal") -> Optional[l
 
 def _polyline_effect_matches(
     expected: Dict[str, Any], actual: Dict[str, Any], *, extracted: bool = False,
+    compare_width: bool = False,
 ) -> bool:
     if expected.get("layer") != actual.get("layer"):
         return False
@@ -1834,6 +1839,9 @@ def _polyline_effect_matches(
     # A bulge is a tangent, not a coordinate: the producers either both carry
     # it or both omit it, compared exactly (no extractor quantum applies).
     if (expected.get("bulges") or None) != (actual.get("bulges") or None):
+        return False
+    # Omission means zero only when the caller has coverage from both producers.
+    if compare_width and bool(expected.get("width")) != bool(actual.get("width")):
         return False
     expected_normal = _effective_normal(expected)
     actual_normal = _effective_normal(actual)
@@ -2146,6 +2154,8 @@ def verify_live_mutation_effects(
     _verify_mleader_effects(base, actual, canonical, matched_handles)
     base_polylines = base.get("polylines") or []
     actual_polylines = actual.get("polylines") or []
+    actual_width_covered = actual.get("polylineWidthCovered") is True
+    compare_width = base.get("polylineWidthCovered") is True and actual_width_covered
     if not isinstance(actual_polylines, list):
         raise ValueError("re-extracted output has no polyline list")
     expected_count = len(expected.get("polylines") or [])
@@ -2216,7 +2226,8 @@ def verify_live_mutation_effects(
                     for point in entity["pts"]
                 ]
         if not _polyline_effect_matches(
-                expected_entity, actual_by_handle[handle], extracted=changed):
+                expected_entity, actual_by_handle[handle], extracted=changed,
+                compare_width=compare_width):
             effect = (
                 "transformed" if handle in transformed
                 else "replaced" if handle in replaced else "unchanged")
@@ -2255,7 +2266,10 @@ def verify_live_mutation_effects(
         match_index = min(
             (index for index, candidate in enumerate(unmatched)
              if isinstance(candidate, dict)
-             and _polyline_effect_matches(entity, candidate, extracted=True)),
+             and _polyline_effect_matches(
+                 entity, candidate, extracted=True,
+                 # The plan produces zero-width adds even if the base is old.
+                 compare_width=actual_width_covered)),
             key=lambda index: (
                 max(abs(left - right)
                     for point, candidate_point in zip(expected_points, unmatched[index]["pts"])

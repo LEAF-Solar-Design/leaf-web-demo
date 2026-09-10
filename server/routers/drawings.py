@@ -877,6 +877,9 @@ def _receive_edited_dxf(file: UploadFile, source_digest: str):
         return error_response(ErrorCode.BAD_PARAMS,
                               f"edited document does not parse: {exc}",
                               retryable=False, status_code=422)
+    # This DXF producer reads all width groups. Persist that fact for the next
+    # save's base, independently of which mutation leg this request will use.
+    intake["polylineWidthCovered"] = True
     return data, actual_digest, intake
 
 
