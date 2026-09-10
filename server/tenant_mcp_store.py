@@ -26,6 +26,7 @@ import logging
 import os
 import re
 import secrets
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -35,6 +36,7 @@ from tenant_id_validator import validate_tenant_id
 SERVER_DIR = Path(__file__).resolve().parent
 _logger = logging.getLogger(__name__)
 _warned_stat_permission_paths: set[Path] = set()
+_warned_stat_paths_lock = threading.Lock()
 
 # Bounds (release blockers, not follow-ups — every number below is load-bearing).
 MAX_SERVERS_PER_TENANT = 25          # one tenant's registry page; matches the list cap
@@ -92,18 +94,25 @@ def _tenant_file(tenant_id: str) -> Path:
 
 
 def _read_bounded(path: Path, cap: int) -> Optional[List[Dict[str, Any]]]:
-    """Read + parse a JSON array, capped at `cap` bytes. Stat-time
-    FileNotFoundError, NotADirectoryError, and PermissionError mean absent
-    (return None). Raises TenantMcpStoreError for anything
-    present but untrustworthy (oversized, unreadable, not a JSON array)."""
+    """Read + parse a JSON array, capped at `cap` bytes. A store whose file
+    cannot even be stat'ed is absent (return None). Only a PRESENT file
+    that is oversized, unreadable at read time, or not a JSON array raises
+    TenantMcpStoreError."""
     try:
         size = path.stat().st_size
     except (FileNotFoundError, NotADirectoryError):
         return None
-    except PermissionError:
-        if path not in _warned_stat_permission_paths and len(_warned_stat_permission_paths) < 64:
-            _warned_stat_permission_paths.add(path)
-            _logger.warning("MCP store path %s cannot be accessed; treating as absent", path)
+    except OSError as exc:
+        warn = False
+        with _warned_stat_paths_lock:
+            if path not in _warned_stat_permission_paths and len(_warned_stat_permission_paths) < 64:
+                _warned_stat_permission_paths.add(path)
+                warn = True
+        if warn:
+            _logger.warning(
+                "MCP store path %s cannot be accessed (%s); treating as absent",
+                path, type(exc).__name__,
+            )
         return None
     if size > cap:
         raise TenantMcpStoreError(f"{path.name} exceeds the {cap}-byte bound ({size} bytes)")

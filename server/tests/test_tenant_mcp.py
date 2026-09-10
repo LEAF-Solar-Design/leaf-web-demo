@@ -5,6 +5,7 @@ states. Every OAuth exchange runs against a FAKE, in-process authorization
 server (a loopback ThreadingHTTPServer) — never a live network call."""
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -498,6 +499,37 @@ def test_stat_permission_denied_reads_as_absent_and_warns_once(tmp_path, monkeyp
         assert str(tenant_file) in warning.getMessage()
         assert tenant_mcp_store.list_records(_TENANT) == []
         assert len(caplog.records) == 1
+
+
+@pytest.mark.parametrize("error_number,message", [
+    (errno.ELOOP, "loop"),
+    (errno.ENAMETOOLONG, "long"),
+])
+def test_stat_oserror_reads_as_absent_and_warns_once_per_path(
+    tmp_path, monkeypatch, caplog, error_number, message,
+):
+    tenant_files = [tmp_path / f"{tenant}.json" for tenant in (_TENANT, "other-tenant")]
+    original_stat = Path.stat
+    monkeypatch.setattr(tenant_mcp_store, "_warned_stat_permission_paths", set())
+
+    def _stat(path, *args, **kwargs):
+        if path in tenant_files:
+            raise OSError(error_number, message)
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", _stat)
+
+    with caplog.at_level(logging.WARNING, logger=tenant_mcp_store.__name__):
+        for index, tenant in enumerate((_TENANT, "other-tenant")):
+            assert tenant_mcp_store.list_records(tenant) == []
+            assert len(caplog.records) == index + 1
+            warning = caplog.records[index]
+            assert warning.name == tenant_mcp_store.__name__
+            assert warning.levelno == logging.WARNING
+            assert str(tenant_files[index]) in warning.getMessage()
+            assert "OSError" in warning.getMessage()
+            assert tenant_mcp_store.list_records(tenant) == []
+            assert len(caplog.records) == index + 1
 
 
 def test_capabilities_survives_uncreatable_mcp_store(tmp_path, monkeypatch):
