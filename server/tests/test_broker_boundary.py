@@ -679,7 +679,7 @@ def test_broker_extract_rechecks_shared_fence_after_paid_work(monkeypatch, tmp_p
 
     drawing = tmp_path / "drawing.dwg"
     drawing.write_bytes(b"DWG")
-    checks = iter((True, False))
+    checks = iter((None, write_loop.MUTATION_REFUSED_FENCE_CLOSED))
     calls = []
 
     class _Da:
@@ -690,18 +690,18 @@ def test_broker_extract_rechecks_shared_fence_after_paid_work(monkeypatch, tmp_p
     monkeypatch.setenv("LEAF_BROKER_STORE", "legacy")
     monkeypatch.setattr(broker, "tenant_disabled", lambda _tenant: False)
     # Extraction is the UPLOAD lane, so it reads the shared fence directly
-    # (fence_open) rather than the authored lane's drawing_mutations_enabled.
+    # (fence_refusal) rather than the authored lane's drawing_mutations_refusal.
     # Patching the authored names here would leave the real fence in charge and
     # the test would never reach its post-work recheck.
     monkeypatch.setattr(
-        broker.write_loop, "fence_open", lambda: next(checks))
+        broker.write_loop, "fence_refusal", lambda: next(checks))
 
     @contextmanager
     def admitted_commit():
-        yield True
+        yield None
 
     monkeypatch.setattr(
-        broker.write_loop, "upload_mutation_commit_guard", admitted_commit)
+        broker.write_loop, "upload_mutation_refusal_guard", admitted_commit)
     monkeypatch.setattr(
         broker, "_resolve_upload_dwg", lambda _dwg, _tenant: drawing)
     monkeypatch.setattr(broker, "_get_da", lambda: _Da())
@@ -712,6 +712,61 @@ def test_broker_extract_rechecks_shared_fence_after_paid_work(monkeypatch, tmp_p
 
     assert response.status_code == 503
     assert calls == [str(drawing)]
+    # The post-work recheck reports the state IT read.
+    assert (json.loads(response.body)["error"]["reason_code"]
+            == write_loop.MUTATION_REFUSED_FENCE_CLOSED)
+
+
+def test_broker_upload_extract_refusal_names_the_fence_never_the_env_flag(
+    monkeypatch, caplog,
+):
+    """/broker/extract's upload lane is gated by the fence FILE only. With the
+    authored drain ON, a shut fence is still reported as the fence."""
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+    monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", raising=False)
+    reason = write_loop.MUTATION_REFUSED_FENCE_UNREADABLE
+    monkeypatch.setattr(broker.write_loop, "fence_refusal", lambda: reason)
+    monkeypatch.setattr(
+        broker, "_broker_extract",
+        lambda _req: pytest.fail("upload extraction ran past a refused fence"))
+
+    with caplog.at_level(logging.WARNING, logger="broker"):
+        response = broker.broker_extract(
+            broker.BrokerExtractRequest(
+                tenant_id="tenant-secret-a", dwg="drawing", upload=True))
+
+    assert response.status_code == 503
+    error = json.loads(response.body)["error"]
+    assert error["error_code"] == "APS_UNAVAILABLE"
+    assert error["retryable"] is True
+    assert error["reason_code"] == reason
+    assert error["message"] == write_loop.mutation_refusal_message(reason)
+    assert "LEAF_DRAWING_MUTATIONS_ENABLED" not in error["message"]
+    lines = [record.getMessage() for record in caplog.records
+             if record.getMessage().startswith("broker_extract_refused")]
+    assert lines == [
+        f"broker_extract_refused reason={reason} tool=None status=503"]
+    assert "tenant-secret-a" not in lines[0]
+
+
+def test_broker_upload_extract_is_not_closed_by_the_authored_env_drain(
+    monkeypatch,
+):
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+    monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", raising=False)
+    admitted = []
+
+    def extract(req):
+        admitted.append(req.upload)
+        return broker.JSONResponse(status_code=200, content={"ok": True})
+
+    monkeypatch.setattr(broker, "_broker_extract", extract)
+
+    response = broker.broker_extract(
+        broker.BrokerExtractRequest(tenant_id="tenant-a", dwg="drawing", upload=True))
+
+    assert response.status_code == 200
+    assert admitted == [True]
 
 
 def test_broker_extract_read_lane_ignores_the_mutation_fence(monkeypatch, tmp_path):
@@ -734,8 +789,12 @@ def test_broker_extract_read_lane_ignores_the_mutation_fence(monkeypatch, tmp_pa
 
     monkeypatch.setenv("LEAF_BROKER_STORE", "legacy")
     monkeypatch.setattr(broker, "tenant_disabled", lambda _tenant: False)
-    # Fence fully drained: a read must still be served.
+    # Fence fully drained: a read must still be served. Both the typed and the
+    # boolean names are shut, so coupling through either is caught.
     monkeypatch.setattr(broker.write_loop, "fence_open", lambda: False)
+    monkeypatch.setattr(
+        broker.write_loop, "fence_refusal",
+        lambda: broker.write_loop.MUTATION_REFUSED_FENCE_CLOSED)
 
     @contextmanager
     def must_not_be_entered():
@@ -745,6 +804,8 @@ def test_broker_extract_read_lane_ignores_the_mutation_fence(monkeypatch, tmp_pa
 
     monkeypatch.setattr(
         broker.write_loop, "upload_mutation_commit_guard", must_not_be_entered)
+    monkeypatch.setattr(
+        broker.write_loop, "upload_mutation_refusal_guard", must_not_be_entered)
     monkeypatch.setattr(broker, "_resolve_live_dwg", lambda _dwg: drawing)
     monkeypatch.setattr(broker, "_get_da", lambda: _Da())
 

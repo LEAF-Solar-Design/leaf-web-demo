@@ -6,6 +6,7 @@ boundary. Prior-context truncation at that boundary is not yet enforced.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends
@@ -23,6 +24,7 @@ import turn_runner
 from envelopes import ErrorCode, error_response, with_envelope_fields
 
 router = APIRouter()
+LOGGER = logging.getLogger(__name__)
 MAX_LABEL_LENGTH = 200
 
 
@@ -205,12 +207,13 @@ def restore_checkpoint(session_id: str, checkpoint_id: str,
             restored = drawings.restore_drawing_version(
                 str(tenant), checkpoint["drawing_id"], checkpoint["drawing_version"],
                 actor="checkpoint_restore")
-        except drawings.RestoreMutationsDisabled:
-            return error_response(
-                ErrorCode.INTERNAL,
-                "drawing mutations are temporarily disabled for a storage cutover",
-                retryable=True,
+        except drawings.RestoreMutationsDisabled as exc:
+            write_loop.log_mutation_refused(
+                LOGGER, exc.reason, surface="checkpoints.restore_checkpoint")
+            return JSONResponse(
                 status_code=503,
+                content=write_loop.mutation_refusal_envelope(
+                    exc.reason, error_code=ErrorCode.INTERNAL),
             )
         except drawings.RestoreCheckoutDenied as exc:
             return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,

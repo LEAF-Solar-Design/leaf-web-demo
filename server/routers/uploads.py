@@ -26,6 +26,7 @@ guards, tests/test_guest_fail_closed.py).
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, Optional, Tuple
 
 from fastapi import APIRouter, Depends, File, Form, Header, Request, UploadFile
@@ -39,6 +40,7 @@ import write_loop
 from envelopes import ErrorCode, error_response, with_envelope_fields
 
 router = APIRouter()
+LOGGER = logging.getLogger(__name__)
 
 _MINT_ATTEMPTS = 4  # UUIDv4 per attempt; collision is cosmic-ray territory
 
@@ -154,7 +156,14 @@ def _emit_upload_event(resp: Any, ident: Dict[str, Any]) -> None:
             reason = "size"
         elif "quota" in message:
             reason = "quota"
-        elif "disabled" in message or "not configured" in message or "cutover" in message:
+        elif (
+            # A typed fence refusal is "disabled" whatever its message says:
+            # "fence file is unreadable" names neither word below.
+            (isinstance(err.get("reason_code"), str)
+             and err["reason_code"] in write_loop.MUTATION_REFUSAL_MESSAGES)
+            or "disabled" in message or "not configured" in message
+            or "cutover" in message
+        ):
             reason = "disabled"
         else:
             reason = "validation"
@@ -224,13 +233,16 @@ def _upload_drawing_gated(
     # The admission checks above are deployment defaults. The shared fence is
     # the LIVE drain and is held across the whole ingest, so a cutover starting
     # mid-request cannot be crossed by an upload already past those checks.
-    with write_loop.upload_mutation_commit_guard() as commit_enabled:
-        if not commit_enabled:
-            return error_response(
-                ErrorCode.INTERNAL,
-                "drawing mutations are temporarily disabled for a storage cutover",
-                retryable=True,
+    # Upload lane: the fence FILE only, so the refusal is never the authored
+    # lane's LEAF_DRAWING_MUTATIONS_ENABLED.
+    with write_loop.upload_mutation_refusal_guard() as refusal:
+        if refusal is not None:
+            write_loop.log_mutation_refused(
+                LOGGER, refusal, surface="uploads.upload_drawing")
+            return JSONResponse(
                 status_code=503,
+                content=write_loop.mutation_refusal_envelope(
+                    refusal, error_code=ErrorCode.INTERNAL),
             )
         return _upload_drawing(
             request,

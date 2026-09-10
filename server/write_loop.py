@@ -196,6 +196,37 @@ def mutation_refusal_message(reason: Optional[str]) -> str:
         reason or "", MUTATION_REFUSAL_MESSAGES[MUTATION_REFUSED_UNATTRIBUTED])
 
 
+def mutation_refusal_envelope(
+    reason: Optional[str], *, error_code: str,
+    tool: Optional[str] = None, version: Optional[str] = None,
+) -> Dict[str, Any]:
+    """The retryable refusal envelope for a closed mutation gate, carrying
+    ``error.reason_code``. The caller keeps its own error code and HTTP status,
+    so this changes what a refusal SAYS, never whether or how it refuses.
+
+    ``None`` is attributed as unattributed rather than guessed."""
+    reason = reason or MUTATION_REFUSED_UNATTRIBUTED
+    env = err_envelope(error_code, mutation_refusal_message(reason),
+                       retryable=True, tool=tool, version=version)
+    env["error"]["reason_code"] = reason
+    return env
+
+
+def log_mutation_refused(logger: logging.Logger, reason: Optional[str], *,
+                         surface: str) -> str:
+    """Write the one refusal log line on the CALLER's logger; return the
+    attributed reason.
+
+    ``surface`` is a fixed literal naming the refusing code path. The line
+    carries configuration state only: no tenant, drawing, ledger key, fence
+    path, or credential. Written on refusals only, so admitted work is silent.
+    """
+    reason = reason or MUTATION_REFUSED_UNATTRIBUTED
+    logger.warning("drawing_mutation_refused reason=%s surface=%s",
+                   reason, surface)
+    return reason
+
+
 def fence_refusal() -> Optional[str]:
     """Typed live cutover state from the shared EFS fence FILE alone.
 
@@ -247,7 +278,7 @@ def drawing_mutations_enabled() -> bool:
 
 
 @contextmanager
-def _fence_held(decide, *, denied=False):
+def _fence_held(decide, *, denied):
     """Hold the shared cutover fence across one durable drawing commit.
 
     Linux tasks take a shared flock.  The protected cutover control takes the
@@ -259,8 +290,9 @@ def _fence_held(decide, *, denied=False):
 
     ``denied`` is what a caller is handed when the LOCK ITSELF is unavailable
     (no fcntl), which is a fail-closed refusal rather than the lane's answer.
-    Boolean callers pass ``False``; a typed caller passes its reason code, so
-    that refusal stops being indistinguishable from a drained fence.
+    Both callers are typed and pass ``MUTATION_REFUSED_LOCK_UNAVAILABLE``, so
+    that refusal is never indistinguishable from a drained fence. The boolean
+    guards are projections of those typed guards, not further callers.
     """
     fence = os.environ.get("LEAF_DRAWING_MUTATIONS_FENCE_FILE", "").strip()
     if not fence:
@@ -283,9 +315,13 @@ def _fence_held(decide, *, denied=False):
 
 @contextmanager
 def drawing_mutation_commit_guard():
-    """Commit guard for the authored / checkout / broker-run lane."""
-    with _fence_held(drawing_mutations_enabled) as commit_enabled:
-        yield commit_enabled
+    """Boolean view of ``drawing_mutation_refusal_guard`` for the authored /
+    checkout / broker-run lane: same lock, same single read.
+
+    Never hand the TYPED guard's value to a caller that reads it as a boolean.
+    A reason code is a truthy string, so that would invert the gate."""
+    with drawing_mutation_refusal_guard() as refusal:
+        yield refusal is None
 
 
 @contextmanager
@@ -303,8 +339,12 @@ def drawing_mutation_refusal_guard():
 
 
 @contextmanager
-def upload_mutation_commit_guard():
+def upload_mutation_refusal_guard():
     """Commit guard for the upload / import lane: ONLY the shared fence.
+
+    Yields ``None`` when the commit is admitted, else the reason code that
+    refused it: fence closed, fence unreadable, or lock unavailable. Never
+    ``MUTATION_REFUSED_ENV_DISABLED``, because this lane never reads that flag.
 
     That lane's env gate is ``upload_import_mutations_enabled``, checked by the
     caller. Folding ``LEAF_DRAWING_MUTATIONS_ENABLED`` in here would let an
@@ -313,8 +353,16 @@ def upload_mutation_commit_guard():
     The fence FILE still applies, because a storage cutover really does drain
     every lane.
     """
-    with _fence_held(fence_open) as commit_enabled:
-        yield commit_enabled
+    with _fence_held(fence_refusal,
+                     denied=MUTATION_REFUSED_LOCK_UNAVAILABLE) as refusal:
+        yield refusal
+
+
+@contextmanager
+def upload_mutation_commit_guard():
+    """Boolean view of ``upload_mutation_refusal_guard`` (see there)."""
+    with upload_mutation_refusal_guard() as refusal:
+        yield refusal is None
 
 
 def upload_import_mutations_enabled() -> bool:
@@ -1353,10 +1401,11 @@ def ensure_demo_drawing(backend, tenant_id: str, drawing_id: str) -> None:
             f"drawing {drawing_id!r} was uploaded but extraction has not "
             f"produced geometry (see /api/drawings/{drawing_id}/upload-status); "
             f"refusing the demo-intake bootstrap")
-    with drawing_mutation_commit_guard() as commit_enabled:
-        if not commit_enabled:
-            raise ValueError(
-                "drawing mutations are temporarily disabled for a storage cutover")
+    with drawing_mutation_refusal_guard() as refusal:
+        if refusal is not None:
+            log_mutation_refused(LOGGER, refusal,
+                                 surface="write_loop.ensure_demo_drawing")
+            raise ValueError(mutation_refusal_message(refusal))
         if backend.exists(store.manifest_key(tenant_id, drawing_id)):
             return
         live = os.environ.get("APS_LIVE", "0").strip() == "1"
@@ -1407,10 +1456,10 @@ def undo_view(tenant_id: str, drawing_id: str, *, backend=None,
     import store
     backend = backend or default_backend()
     ensure_demo_drawing(backend, tenant_id, drawing_id)
-    with drawing_mutation_commit_guard() as commit_enabled:
-        if not commit_enabled:
-            raise ValueError(
-                "drawing mutations are temporarily disabled for a storage cutover")
+    with drawing_mutation_refusal_guard() as refusal:
+        if refusal is not None:
+            log_mutation_refused(LOGGER, refusal, surface="write_loop.undo")
+            raise ValueError(mutation_refusal_message(refusal))
         new_head = store.undo(backend, tenant_id, drawing_id,
                               holder=holder, fence=fence)
     v, intake = read_intake(backend, tenant_id, drawing_id, "head")
@@ -1425,10 +1474,10 @@ def redo_view(tenant_id: str, drawing_id: str, *, backend=None,
     import store
     backend = backend or default_backend()
     ensure_demo_drawing(backend, tenant_id, drawing_id)
-    with drawing_mutation_commit_guard() as commit_enabled:
-        if not commit_enabled:
-            raise ValueError(
-                "drawing mutations are temporarily disabled for a storage cutover")
+    with drawing_mutation_refusal_guard() as refusal:
+        if refusal is not None:
+            log_mutation_refused(LOGGER, refusal, surface="write_loop.redo")
+            raise ValueError(mutation_refusal_message(refusal))
         new_head = store.redo(backend, tenant_id, drawing_id,
                               holder=holder, fence=fence)
     v, intake = read_intake(backend, tenant_id, drawing_id, "head")
@@ -1529,12 +1578,13 @@ def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
         return env, 200
     try:
         new_intake = apply_mutations(cur_intake, mutations)
-        with drawing_mutation_commit_guard() as commit_enabled:
-            if not commit_enabled:
-                return (err_envelope(
-                    ErrorCode.APS_UNAVAILABLE,
-                    "drawing mutations were drained before write commit",
-                    retryable=True, tool=name, version=tool_version,
+        with drawing_mutation_refusal_guard() as refusal:
+            if refusal is not None:
+                log_mutation_refused(LOGGER, refusal,
+                                     surface="write_loop.mock_write_commit")
+                return (mutation_refusal_envelope(
+                    refusal, error_code=ErrorCode.APS_UNAVAILABLE,
+                    tool=name, version=tool_version,
                 ), 503)
             new_v = _put_bytes_version(
                 backend, tenant_id, drawing_id,
@@ -2790,12 +2840,13 @@ def _run_write_live_legacy(tool: Dict[str, Any], params: Dict[str, Any], tenant_
             ledger_entry["engine_seconds"] = cost["engine_seconds"]
             ledger_entry["usd_est"] = cost["usd_est"]
 
-        with drawing_mutation_commit_guard() as commit_enabled:
-            if not commit_enabled:
-                return (err_envelope(
-                    ErrorCode.APS_UNAVAILABLE,
-                    "drawing mutations were drained before write commit",
-                    retryable=True, tool=name, version=tool_version,
+        with drawing_mutation_refusal_guard() as refusal:
+            if refusal is not None:
+                log_mutation_refused(LOGGER, refusal,
+                                     surface="write_loop.live_write_commit")
+                return (mutation_refusal_envelope(
+                    refusal, error_code=ErrorCode.APS_UNAVAILABLE,
+                    tool=name, version=tool_version,
                 ), 503)
             new_v = _put_bytes_version(
                 backend, tenant_id, drawing_id, out_bytes,
@@ -3018,12 +3069,13 @@ def _apply_plan_live(*, tenant_id: str, drawing_id: str, head_v: int,
     }
     if ledger_entry is not None and isinstance(cost, dict):
         ledger_entry.update(cost)
-    with drawing_mutation_commit_guard() as commit_enabled:
-        if not commit_enabled:
-            return (err_envelope(
-                ErrorCode.APS_UNAVAILABLE,
-                "drawing mutations were drained before write commit",
-                retryable=True, tool=name, version=tool_version,
+    with drawing_mutation_refusal_guard() as refusal:
+        if refusal is not None:
+            log_mutation_refused(LOGGER, refusal,
+                                 surface="write_loop.plan_live_commit")
+            return (mutation_refusal_envelope(
+                refusal, error_code=ErrorCode.APS_UNAVAILABLE,
+                tool=name, version=tool_version,
             ), 503)
         version_write_started = time.perf_counter()
         new_v = _put_bytes_version(
@@ -3142,11 +3194,14 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                 ), DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
 
         # Both controls precede tenant execution and every APS-capable call.
-        if not drawing_mutations_enabled():
-            return (err_envelope(
-                ErrorCode.APS_UNAVAILABLE,
-                "drawing mutations are temporarily disabled",
-                retryable=True, tool=name, version=tool_version,
+        # ONE read decides and reports.
+        live_refusal = drawing_mutations_refusal()
+        if live_refusal is not None:
+            log_mutation_refused(LOGGER, live_refusal,
+                                 surface="write_loop.live_write")
+            return (mutation_refusal_envelope(
+                live_refusal, error_code=ErrorCode.APS_UNAVAILABLE,
+                tool=name, version=tool_version,
             ), 503)
         store.authorize_checkout(backend, tenant_id, drawing_id, holder, fence)
 
@@ -3359,11 +3414,14 @@ def run_data_plan_live(plan: Dict[str, Any], tenant_id: str, *, backend, da: Any
                     retryable=False, tool=name, version=tool_version,
                 ), DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
 
-        if not drawing_mutations_enabled():
-            return (err_envelope(
-                ErrorCode.APS_UNAVAILABLE,
-                "drawing mutations are temporarily disabled",
-                retryable=True, tool=name, version=tool_version,
+        # ONE read decides and reports.
+        plan_refusal = drawing_mutations_refusal()
+        if plan_refusal is not None:
+            log_mutation_refused(LOGGER, plan_refusal,
+                                 surface="write_loop.data_plan_live")
+            return (mutation_refusal_envelope(
+                plan_refusal, error_code=ErrorCode.APS_UNAVAILABLE,
+                tool=name, version=tool_version,
             ), 503)
         store.authorize_checkout(backend, tenant_id, drawing_id, holder, fence)
 

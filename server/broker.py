@@ -1704,12 +1704,18 @@ def _classified_bad_params(
     return env, DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS]
 
 
+_RUN_REFUSED = "broker_run_refused"
+# /broker/extract's UPLOAD lane is gated by the same fence (fence file only).
+_EXTRACT_REFUSED = "broker_extract_refused"
+
+
 def _classified_unavailable(
     reason_code: str,
     message: str,
     *,
     tool: Optional[str] = None,
     status: int = 503,
+    event: str = _RUN_REFUSED,
 ) -> tuple[Dict[str, Any], int]:
     """Build one retryable APS_UNAVAILABLE envelope with a stable public reason,
     and LOG that reason.
@@ -1720,8 +1726,8 @@ def _classified_unavailable(
     in both places. Carries a reason code and a tool name only: no tenant,
     drawing, path, or credential ever reaches the log line.
     """
-    LOGGER.warning("broker_run_refused reason=%s tool=%s status=%s",
-                   reason_code, tool, status)
+    LOGGER.warning("%s reason=%s tool=%s status=%s",
+                   event, reason_code, tool, status)
     env = err_envelope(
         ErrorCode.APS_UNAVAILABLE,
         message,
@@ -1734,6 +1740,7 @@ def _classified_unavailable(
 
 def _mutation_refused(
     reason: Optional[str], *, tool: Optional[str] = None,
+    event: str = _RUN_REFUSED,
 ) -> tuple[Dict[str, Any], int]:
     """The ONE refusal for a closed drawing-mutation gate, on every broker lane.
 
@@ -1744,7 +1751,8 @@ def _mutation_refused(
     """
     reason = reason or write_loop.MUTATION_REFUSED_UNATTRIBUTED
     return _classified_unavailable(
-        reason, write_loop.mutation_refusal_message(reason), tool=tool)
+        reason, write_loop.mutation_refusal_message(reason), tool=tool,
+        event=event)
 
 
 def _resolve_live_read_dwg(req: BrokerRunRequest) -> tuple[Path, bool]:
@@ -2394,16 +2402,12 @@ def broker_extract(req: BrokerExtractRequest) -> JSONResponse:
     # delay the exclusive lock the cutover control needs to flip the fence.
     if not req.upload:
         return _broker_extract(req)
-    with write_loop.upload_mutation_commit_guard() as commit_enabled:
-        if not commit_enabled:
-            return JSONResponse(
-                status_code=503,
-                content=err_envelope(
-                    ErrorCode.APS_UNAVAILABLE,
-                    "drawing mutations are temporarily disabled for a storage cutover",
-                    retryable=True,
-                ),
-            )
+    # The upload lane consults the fence FILE only, never
+    # LEAF_DRAWING_MUTATIONS_ENABLED, so it can only report a fence reason.
+    with write_loop.upload_mutation_refusal_guard() as refusal:
+        if refusal is not None:
+            env, status = _mutation_refused(refusal, event=_EXTRACT_REFUSED)
+            return JSONResponse(status_code=status, content=env)
         return _broker_extract(req)
 
 
@@ -2418,16 +2422,12 @@ def _broker_extract(req: BrokerExtractRequest) -> JSONResponse:
                 retryable=False,
             ),
         )
-    # Upload-lane only: a read extraction is not a drawing commit.
-    if req.upload and not write_loop.fence_open():
-        return JSONResponse(
-            status_code=503,
-            content=err_envelope(
-                ErrorCode.APS_UNAVAILABLE,
-                "drawing mutations are temporarily disabled for a storage cutover",
-                retryable=True,
-            ),
-        )
+    # Upload-lane only: a read extraction is not a drawing commit. ONE fence
+    # read decides and reports.
+    upload_refusal = write_loop.fence_refusal() if req.upload else None
+    if upload_refusal is not None:
+        env, status = _mutation_refused(upload_refusal, event=_EXTRACT_REFUSED)
+        return JSONResponse(status_code=status, content=env)
     try:
         local = (_resolve_upload_dwg(req.dwg, req.tenant_id) if req.upload
                  else _resolve_live_dwg(req.dwg))
@@ -2450,15 +2450,11 @@ def _broker_extract(req: BrokerExtractRequest) -> JSONResponse:
     if _broker_store_mode() != "postgres":
         try:
             intake = da.extract(str(local))
-            if req.upload and not write_loop.fence_open():
-                return JSONResponse(
-                    status_code=503,
-                    content=err_envelope(
-                        ErrorCode.APS_UNAVAILABLE,
-                        "drawing mutations were drained before extraction commit",
-                        retryable=True,
-                    ),
-                )
+            commit_refusal = write_loop.fence_refusal() if req.upload else None
+            if commit_refusal is not None:
+                env, status = _mutation_refused(
+                    commit_refusal, event=_EXTRACT_REFUSED)
+                return JSONResponse(status_code=status, content=env)
             return JSONResponse(
                 status_code=200,
                 content=with_envelope_fields({"intake": intake}),
@@ -2605,13 +2601,11 @@ def _broker_extract(req: BrokerExtractRequest) -> JSONResponse:
             else:
                 intake = da.extract(str(local))
                 entry["usd_est"] = estimate
-                if req.upload and not write_loop.fence_open():
-                    terminal_env = err_envelope(
-                        ErrorCode.APS_UNAVAILABLE,
-                        "drawing mutations were drained before extraction commit",
-                        retryable=True,
-                    )
-                    terminal_status = 503
+                commit_refusal = (
+                    write_loop.fence_refusal() if req.upload else None)
+                if commit_refusal is not None:
+                    terminal_env, terminal_status = _mutation_refused(
+                        commit_refusal, event=_EXTRACT_REFUSED)
                     entry["status"] = ErrorCode.APS_UNAVAILABLE
                 else:
                     terminal_env = with_envelope_fields({"intake": intake})

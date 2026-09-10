@@ -27,6 +27,7 @@ import copy
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import threading
@@ -47,6 +48,7 @@ import write_loop
 from envelopes import ErrorCode, error_obj, error_response, with_envelope_fields
 
 router = APIRouter()
+LOGGER = logging.getLogger(__name__)
 SUMMARY_LAYER_CAP = 50
 
 # Serializes restore commits in this process (see restore_version): the legacy
@@ -88,22 +90,40 @@ class RestoreCommitRejected(Exception):
 
 
 class RestoreMutationsDisabled(Exception):
-    """A storage cutover has drained drawing mutations."""
+    """The drawing-mutation gate refused the restore commit.
+
+    ``reason`` is the ``write_loop`` reason code the guard yielded, so a route
+    reporting it names the precondition from the guard's own read."""
+
+    def __init__(self, reason: Optional[str] = None):
+        super().__init__(reason or write_loop.MUTATION_REFUSED_UNATTRIBUTED)
+        self.reason = reason
 
 
 class RestoreCheckoutDenied(Exception):
     """The store refused the restore under its checkout fence."""
 
 
-def _mutation_gate() -> Optional[JSONResponse]:
-    if write_loop.drawing_mutations_enabled():
-        return None
-    return error_response(
-        ErrorCode.INTERNAL,
-        "drawing mutations are temporarily disabled for a storage cutover",
-        retryable=True,
+def _mutation_refused(reason: Optional[str], *, surface: str) -> JSONResponse:
+    """The one 503 for a closed authored-lane mutation gate on this router.
+
+    Names its precondition in ``error.reason_code`` and in this module's log.
+    Status, error code and retryability are what this router always answered.
+    """
+    write_loop.log_mutation_refused(LOGGER, reason, surface=surface)
+    return JSONResponse(
         status_code=503,
+        content=write_loop.mutation_refusal_envelope(
+            reason, error_code=ErrorCode.INTERNAL),
     )
+
+
+def _mutation_gate(surface: str) -> Optional[JSONResponse]:
+    # ONE read decides and reports.
+    refusal = write_loop.drawing_mutations_refusal()
+    if refusal is None:
+        return None
+    return _mutation_refused(refusal, surface=surface)
 
 
 def _store_checkout_denied():
@@ -277,7 +297,7 @@ def undo(drawing_id: str, tenant_id: str = Depends(deps.require_active_tenant),
     is unchanged; with one held, `X-Checkout-Capability` from the acquire response
     is required.
     """
-    blocked = _mutation_gate()
+    blocked = _mutation_gate("drawings.undo")
     if blocked is not None:
         return blocked
     backend = _backend(str(tenant_id))
@@ -320,7 +340,7 @@ def redo(drawing_id: str, tenant_id: str = Depends(deps.require_active_tenant),
          x_checkout_capability: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     """Step head forward one version. Same single-writer gate as `undo` — the two
     are one surface, and a check on only one of them is no check at all."""
-    blocked = _mutation_gate()
+    blocked = _mutation_gate("drawings.redo")
     if blocked is not None:
         return blocked
     backend = _backend(str(tenant_id))
@@ -696,9 +716,9 @@ def restore_drawing_version(tenant_id: str, drawing_id: str, target_version: int
 
     with _RESTORE_LOCK:
         try:
-            with write_loop.drawing_mutation_commit_guard() as commit_enabled:
-                if not commit_enabled:
-                    raise RestoreMutationsDisabled
+            with write_loop.drawing_mutation_refusal_guard() as refusal:
+                if refusal is not None:
+                    raise RestoreMutationsDisabled(refusal)
                 try:
                     manifest = store.load_manifest(backend, tenant_id, drawing_id)
                 except (KeyError, ValueError) as exc:
@@ -754,7 +774,7 @@ def restore_version(drawing_id: str, version: int,
     chain answers 404 — the same shape GET .../intake already gives for an
     unknown version, since the drawing itself is fine and only the version
     argument is bad."""
-    blocked = _mutation_gate()
+    blocked = _mutation_gate("drawings.restore_version")
     if blocked is not None:
         return blocked
     import store  # da/store.py; importable via write_loop's sys.path setup
@@ -788,12 +808,9 @@ def restore_version(drawing_id: str, version: int,
             f"version {version} is not readable as intake ({exc}); "
             "restoring it would produce an unusable head",
             retryable=False, status_code=422)
-    except RestoreMutationsDisabled:
-        return error_response(
-            ErrorCode.INTERNAL,
-            "drawing mutations are temporarily disabled for a storage cutover",
-            retryable=True, status_code=503,
-        )
+    except RestoreMutationsDisabled as exc:
+        return _mutation_refused(
+            exc.reason, surface="drawings.restore_version.commit")
     except RestoreDrawingUnavailable as exc:
         if isinstance(exc.__cause__, KeyError):
             return error_response(ErrorCode.BAD_PARAMS, f"drawing unavailable: {exc}",
@@ -891,7 +908,7 @@ def save_edited_version(drawing_id: str,
       - the receipt names both digests and a truthful cost: the edit ran in
         the tenant's own browser, so engine cost is exactly 0.
     """
-    blocked = _mutation_gate()
+    blocked = _mutation_gate("drawings.save_edited_version")
     if blocked is not None:
         return blocked
     import store  # da/store.py; importable via write_loop's sys.path setup
@@ -934,12 +951,10 @@ def save_edited_version(drawing_id: str,
     intake_payload = json.dumps(intake, separators=(",", ":")).encode("utf-8")
     intake_digest = hashlib.sha256(intake_payload).hexdigest()
     try:
-        with write_loop.drawing_mutation_commit_guard() as commit_enabled:
-            if not commit_enabled:
-                return error_response(
-                    ErrorCode.INTERNAL,
-                    "drawing mutations are temporarily disabled for a storage cutover",
-                    retryable=True, status_code=503)
+        with write_loop.drawing_mutation_refusal_guard() as refusal:
+            if refusal is not None:
+                return _mutation_refused(
+                    refusal, surface="drawings.save_edited_version.commit")
             new_v = write_loop._put_bytes_version(
                 backend, str(tenant_id), drawing_id, intake_payload,
                 parent_version=int(parent_version),
@@ -1048,7 +1063,7 @@ def save_plan_version(drawing_id: str,
     gate, the drain fence, compare-and-set on the parent (checked here before
     any work and again by the store under the commit guard), 403/503/409, and
     a truthful cost."""
-    blocked = _mutation_gate()
+    blocked = _mutation_gate("drawings.save_plan_version")
     if blocked is not None:
         return blocked
     import store  # da/store.py; importable via write_loop's sys.path setup
@@ -1319,12 +1334,10 @@ def save_plan_version(drawing_id: str,
         cost = {"engine_usd": 0.0, "engine": "client-wasm"}
 
     try:
-        with write_loop.drawing_mutation_commit_guard() as commit_enabled:
-            if not commit_enabled:
-                return error_response(
-                    ErrorCode.INTERNAL,
-                    "drawing mutations are temporarily disabled for a storage cutover",
-                    retryable=True, status_code=503)
+        with write_loop.drawing_mutation_refusal_guard() as refusal:
+            if refusal is not None:
+                return _mutation_refused(
+                    refusal, surface="drawings.save_plan_version.commit")
             new_v = write_loop._put_bytes_version(
                 backend, str(tenant_id), drawing_id, payload,
                 parent_version=int(parent_version),
@@ -1443,7 +1456,7 @@ def acquire_checkout_route(drawing_id: str, req: Optional[CheckoutRequest] = Non
     store's rule everywhere else: a forgotten lease must not wedge a drawing).
     Same 404 pattern as the other routes for an unknown drawing (the well-known
     `demo` bootstraps on first use at APS_LIVE=0)."""
-    blocked = _mutation_gate()
+    blocked = _mutation_gate("drawings.acquire_checkout")
     if blocked is not None:
         return blocked
     import store  # da/store.py; importable via write_loop's sys.path setup
@@ -1461,14 +1474,10 @@ def acquire_checkout_route(drawing_id: str, req: Optional[CheckoutRequest] = Non
     # The shared cutover fence is held across the whole acquire. `_mutation_gate`
     # above is the deployment default; this is the LIVE drain, so a cutover that
     # starts after that check still cannot be crossed by this request.
-    with write_loop.drawing_mutation_commit_guard() as commit_enabled:
-        if not commit_enabled:
-            return error_response(
-                ErrorCode.INTERNAL,
-                "drawing mutations are temporarily disabled for a storage cutover",
-                retryable=True,
-                status_code=503,
-            )
+    with write_loop.drawing_mutation_refusal_guard() as refusal:
+        if refusal is not None:
+            return _mutation_refused(
+                refusal, surface="drawings.acquire_checkout.commit")
 
         # A refresh needs the CURRENT generation, and only a valid capability yields
         # one. A caller without it gets expected_fence=None, which `strict_owner`
@@ -1569,7 +1578,7 @@ def release_checkout_route(drawing_id: str,
     when nothing is held (or the lock already expired) is still an idempotent 200
     with the cleared state and needs no capability. §10-enveloped
     `{drawing_id, released, checkout: null}`."""
-    blocked = _mutation_gate()
+    blocked = _mutation_gate("drawings.release_checkout")
     if blocked is not None:
         return blocked
     import store  # da/store.py; importable via write_loop's sys.path setup
@@ -1594,14 +1603,10 @@ def release_checkout_route(drawing_id: str,
 
     # Held across the release for the same reason as the acquire: a drain that
     # starts after `_mutation_gate` must not be crossed by an in-flight clear.
-    with write_loop.drawing_mutation_commit_guard() as commit_enabled:
-        if not commit_enabled:
-            return error_response(
-                ErrorCode.INTERNAL,
-                "drawing mutations are temporarily disabled for a storage cutover",
-                retryable=True,
-                status_code=503,
-            )
+    with write_loop.drawing_mutation_refusal_guard() as refusal:
+        if refusal is not None:
+            return _mutation_refused(
+                refusal, surface="drawings.release_checkout.commit")
         if fence is None:
             # Nothing ACTIVE to release: idempotent. An expired lock is cleared (the
             # store grants those to anyone), an absent one reports released=False.
