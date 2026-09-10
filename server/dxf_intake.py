@@ -396,12 +396,13 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             if entity is None:
                 continue
             groups = dict(record)
-            # w4g-classic-polyline-ocs: a classic 3D POLYLINE (flag 70 bit 8)
-            # never reads 210 at all, whatever it says, so this generic pass
-            # must not attach an informational `normal` or flip its bulges
-            # for one; _parse_polyline already enforces the same rule for the
-            # transform itself.
-            is_3d_polyline = kind == "POLYLINE" and bool(_int(groups.get(70, "0")) & 8)
+            # w4g-classic-polyline-ocs: a classic POLYLINE whose flag 70 sets
+            # any POLYLINE_WCS_VERTEX_FLAGS bit (3D polyline, 3D polygon
+            # mesh, polyface mesh) never reads 210 at all, whatever it says,
+            # so this generic pass must not attach an informational `normal`
+            # or flip its bulges for one; _parse_polyline already enforces
+            # the same rule for the transform itself.
+            is_3d_polyline = kind == "POLYLINE" and bool(_int(groups.get(70, "0")) & POLYLINE_WCS_VERTEX_FLAGS)
             normal = list(_group_point(groups, 210, (0, 0, 1)))
             if not is_3d_polyline and any(abs(a - b) > 1e-6 for a, b in zip(normal, (0, 0, 1))):
                 entity["normal"] = normal
@@ -952,21 +953,29 @@ def _parse_lwpolyline(pairs: List[Tuple[int, str]], i: int, dropped=None, wcs=Tr
     return entity, i
 
 
+# flag 70 bits whose POLYLINE vertices are already WCS, never OCS: 8 = 3D
+# polyline, 16 = 3D polygon mesh, 64 = polyface mesh. Any bit set means 210
+# is read only to pick the branch, never transformed, validated, or emitted.
+POLYLINE_WCS_VERTEX_FLAGS = 8 | 16 | 64
+
+
 def _parse_polyline(pairs: List[Tuple[int, str]], i: int, dropped=None):
     """Classic POLYLINE ... VERTEX* ... SEQEND: flags=70 on POLYLINE (bit 0
-    closed, bit 8 = 3D polyline), vertices carry (10, 20, 30). A 2D polyline
-    (bit 8 clear) is OCS relative to the header's own extrusion normal
-    (210/220/230, default +z): lifted to WCS through the same `_ocs_to_wcs`
-    `_parse_lwpolyline` applies, with `normal` kept on the row (omitted for a
-    +z normal) for server/intake_dxf.py's exact inverse. A 3D polyline (bit 8
-    set) stores its vertices already in WCS: 210 is read only to decide the
-    bit, never transformed, never validated, never emitted as `normal`,
-    whatever it says (treating a 3D polyline's vertices as OCS would corrupt
-    every 3D polyline in every drawing)."""
+    closed, bit 8 = 3D polyline, bit 16 = 3D polygon mesh, bit 64 = polyface
+    mesh). A 2D polyline (all of POLYLINE_WCS_VERTEX_FLAGS clear) is OCS
+    relative to the header's own extrusion normal (210/220/230, default +z):
+    lifted to WCS through the same `_ocs_to_wcs` `_parse_lwpolyline` applies,
+    with `normal` kept on the row (omitted for a +z normal) for
+    server/intake_dxf.py's exact inverse. A 3D polyline, 3D polygon mesh, or
+    polyface mesh (any POLYLINE_WCS_VERTEX_FLAGS bit set) stores its vertices
+    already in WCS: 210 is read only to decide the branch, never transformed,
+    never validated, never emitted as `normal`, whatever it says (treating
+    already-WCS vertices as OCS would corrupt every such polyline in every
+    drawing)."""
     layer = "0"
     handle = ""
     closed = False
-    is_3d = False
+    wcs_vertices = False
     normal = [0.0, 0.0, 1.0]
     raw_pts: List[List[float]] = []
     aci = linetype = lineweight = truecolor = None
@@ -980,7 +989,7 @@ def _parse_polyline(pairs: List[Tuple[int, str]], i: int, dropped=None):
         elif code == 70:
             flags = _int(value)
             closed = bool(flags & 1)
-            is_3d = bool(flags & 8)
+            wcs_vertices = bool(flags & POLYLINE_WCS_VERTEX_FLAGS)
         elif code == 210:
             normal[0] = _float(value)
         elif code == 220:
@@ -1021,7 +1030,7 @@ def _parse_polyline(pairs: List[Tuple[int, str]], i: int, dropped=None):
     entity: Dict[str, Any] = {"layer": layer, "closed": closed, "pts": raw_pts,
             "xdata": None, "handle": handle,
             "_properties": _entity_properties(aci, linetype, lineweight, truecolor, dropped)}
-    if not is_3d:
+    if not wcs_vertices:
         if not all(math.isfinite(v) for v in normal):
             raise DxfParseError(f"POLYLINE {handle} normal must be finite")
         if not any(normal):

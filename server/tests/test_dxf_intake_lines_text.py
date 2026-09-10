@@ -156,6 +156,39 @@ def test_classic_3d_polyline_ignores_extrusion_and_carries_no_normal():
     assert "normal" not in poly
 
 
+# w4g-classic-polyline-ocs-b: flag 70 bit 16 (3D polygon mesh) also means the
+# vertices are already WCS, same as bit 8. AutoCAD writes this entity type
+# and neither sets bit 8, so before this fix the vertices fell into the 2D
+# branch and got corrupted: with 210 = (0,0,-1), (1,2,5) and (3,4,5) came out
+# mirrored on x and negated on z as (-1,2,-5) and (-3,4,-5).
+def test_classic_polygon_mesh_ignores_extrusion_and_carries_no_normal():
+    raw = _dxf("0\nPOLYLINE\n5\nP18\n8\nRAFTER_45X145\n70\n16\n66\n1\n"
+                "210\n0\n220\n0\n230\n-1\n"
+                "0\nVERTEX\n8\nRAFTER_45X145\n10\n1\n20\n2\n30\n5\n"
+                "0\nVERTEX\n8\nRAFTER_45X145\n10\n3\n20\n4\n30\n5\n"
+                "0\nSEQEND\n")
+    intake = dxf_intake.parse_dxf_bytes(raw, source_name="t.dxf")
+    poly = intake["polylines"][0]
+    assert poly["pts"] == [[1.0, 2.0, 5.0], [3.0, 4.0, 5.0]]
+    assert "normal" not in poly
+
+
+# w4g-classic-polyline-ocs-b: flag 70 bit 64 (polyface mesh) also means the
+# vertices are already WCS, same as bit 8. AutoCAD writes this entity type
+# and neither sets bit 8, so before this fix the vertices fell into the 2D
+# branch and got corrupted the same way bit 16 did.
+def test_classic_polyface_mesh_ignores_extrusion_and_carries_no_normal():
+    raw = _dxf("0\nPOLYLINE\n5\nP19\n8\nRAFTER_45X145\n70\n64\n66\n1\n"
+                "210\n0\n220\n0\n230\n-1\n"
+                "0\nVERTEX\n8\nRAFTER_45X145\n10\n1\n20\n2\n30\n5\n"
+                "0\nVERTEX\n8\nRAFTER_45X145\n10\n3\n20\n4\n30\n5\n"
+                "0\nSEQEND\n")
+    intake = dxf_intake.parse_dxf_bytes(raw, source_name="t.dxf")
+    poly = intake["polylines"][0]
+    assert poly["pts"] == [[1.0, 2.0, 5.0], [3.0, 4.0, 5.0]]
+    assert "normal" not in poly
+
+
 # w4g-classic-polyline-ocs row e: a 3D polyline with no 210 group at all
 # behaves exactly as today (default normal is +z, so nothing changes).
 def test_classic_3d_polyline_with_no_extrusion_normal_keeps_vertex_z():
