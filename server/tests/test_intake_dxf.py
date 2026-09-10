@@ -103,6 +103,63 @@ def test_mixed_z_polyline_cannot_carry_bulges():
     assert "bulges" not in back["polylines"][0]
 
 
+def _polyline_with_normal(normal):
+    return {"layers": ["A"], "polylines": [
+        {"layer": "A", "closed": True, "handle": "2A", "xdata": None,
+         "pts": [[2, 3, 4], [12, 3, 4], [12, 13, 4], [2, 13, 4]],
+         "normal": normal}]}
+
+
+@pytest.mark.parametrize("normal", [[0, 0, -1], [0, 1, 0]])
+def test_lwpolyline_normal_follows_elevation_and_keeps_ocs_points(normal):
+    intake = _polyline_with_normal(normal)
+    back, data = _roundtrip(intake)
+    lines = data.decode().splitlines()
+    pairs = list(zip(lines[::2], lines[1::2]))
+    elevation = pairs.index(("38", "4.0"))
+    assert pairs[elevation:elevation + 5] == [
+        ("38", "4.0"), ("210", str(float(normal[0]))),
+        ("220", str(float(normal[1]))), ("230", str(float(normal[2]))),
+        ("10", "2.0")]
+    assert ("0", "LWPOLYLINE") in pairs
+    assert ("0", "POLYLINE") not in pairs
+    assert _subset(back) == _subset(intake)
+
+
+@pytest.mark.parametrize("mixed_z", [False, True])
+@pytest.mark.parametrize("normal", [[0, 0, 1], [1e-6, 0, 1], [0, 0, 1.0000005]])
+def test_default_polyline_normal_emits_identical_bytes_to_absent_normal(normal, mixed_z):
+    intake = _polyline_with_normal(normal)
+    if mixed_z:
+        intake["polylines"][0]["pts"][1][2] = 5
+    with_normal = intake_dxf.intake_to_dxf(intake)
+    del intake["polylines"][0]["normal"]
+    assert intake_dxf.intake_to_dxf(intake) == with_normal
+    assert b"\n210\n" not in with_normal
+    assert b"\n220\n" not in with_normal
+    assert b"\n230\n" not in with_normal
+
+
+def test_mixed_z_polyline_normal_is_on_header_and_round_trips():
+    intake = _polyline_with_normal([0, 1, 0])
+    intake["polylines"][0]["pts"][1][2] = 5
+    back, data = _roundtrip(intake)
+    lines = data.decode().splitlines()
+    pairs = list(zip(lines[::2], lines[1::2]))
+    header = pairs[pairs.index(("0", "POLYLINE")):pairs.index(("0", "VERTEX"))]
+    assert header[-3:] == [("210", "0.0"), ("220", "1.0"), ("230", "0.0")]
+    assert [p for p in pairs if p[0] in ("210", "220", "230")] == header[-3:]
+    assert _subset(back) == _subset(intake)
+
+
+@pytest.mark.parametrize("normal", [
+    [0, 1], ["a", 0, 1], [0, 0, float("nan")],
+    [0, 0, float("inf")], [False, 0, 1], None, (0, 0, -1)])
+def test_malformed_polyline_normal_is_refused_with_handle(normal):
+    with pytest.raises(intake_dxf.IntakeDxfError, match=r"handle '2A': normal"):
+        intake_dxf.intake_to_dxf(_polyline_with_normal(normal))
+
+
 def test_demo_intake_round_trips_exactly():
     intake = json.loads(DEMO_INTAKE.read_text(encoding="utf-8"))
     back, data = _roundtrip(intake)

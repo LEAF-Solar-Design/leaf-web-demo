@@ -276,11 +276,30 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
             if len(bulges) != len(coords):
                 bulges = None
         handle = poly.get("handle")
+        normal = None
+        if "normal" in poly:
+            values = poly["normal"]
+            message = f"{where} handle {handle!r}: normal must be a list of three finite numbers"
+            if not isinstance(values, list) or len(values) != 3:
+                _fail(message)
+            normal = []
+            for value in values:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    _fail(message)
+                try:
+                    value = float(value)
+                except OverflowError:
+                    _fail(message)
+                if not math.isfinite(value):
+                    _fail(message)
+                normal.append(value)
+            if not any(abs(a - b) > 1e-6 for a, b in zip(normal, (0, 0, 1))):
+                normal = None
         h = _real_handle(handle, where, real)
         if h is not None:
             highest = max(highest, int(h, 16))
         note_layer(layer)
-        kinds.append(("poly", layer, closed, coords, bulges, h))
+        kinds.append(("poly", layer, closed, coords, bulges, normal, h))
         kind_sources.append(poly)
         kind_properties.append(_entity_property_groups(properties, handle, where))
     for k, tx in enumerate(texts):
@@ -538,13 +557,15 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         props = kind_properties[idx]
         entity_offset = len(out)
         if row[0] == "poly":
-            _, layer, closed, coords, bulges, _ = row
+            _, layer, closed, coords, bulges, normal, _ = row
             z0 = coords[0][2]
             planar = all(c[2] == z0 for c in coords)
             if planar:
                 out += ["0", "LWPOLYLINE", "5", h, "100", "AcDbEntity", "8", layer,
                         "100", "AcDbPolyline", "90", str(len(coords)),
                         "70", "1" if closed else "0", "38", _num(z0)]
+                if normal is not None:
+                    out += _point_groups(normal, 210)
                 for j, (x, y, _z) in enumerate(coords):
                     out += ["10", _num(x), "20", _num(y)]
                     if bulges is not None and bulges[j] != 0:
@@ -555,6 +576,8 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
                 out += ["0", "POLYLINE", "5", h, "100", "AcDbEntity", "8", layer,
                         "100", "AcDb3dPolyline", "66", "1",
                         "70", str(8 | (1 if closed else 0))]
+                if normal is not None:
+                    out += _point_groups(normal, 210)
                 # 3D polylines cannot carry arcs.
                 for x, y, z in coords:
                     out += ["0", "VERTEX", "100", "AcDbEntity", "8", layer,
