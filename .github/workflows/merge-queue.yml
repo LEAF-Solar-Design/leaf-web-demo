@@ -57,12 +57,16 @@ env:
   RELAY_RECEIPT_INTERVAL: "60"
   TERRAFORM_RECEIPT_POLLS: "40"
   TERRAFORM_RECEIPT_INTERVAL: "60"
+  # The merge queue ejects a group at ruleset 22351452's
+  # check_response_timeout_minutes. Every wait below is bounded by it.
+  MQ_GROUP_BUDGET_MINUTES: "60"
+  MQ_DEADLINE_RESERVE_MINUTES: "6"
 
 jobs:
   mq-review:
     name: mq-review
     runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
-    timeout-minutes: 20
+    timeout-minutes: 10
     outputs:
       head_sha: ${{ steps.queue.outputs.head_sha }}
     steps:
@@ -187,7 +191,7 @@ jobs:
       contents: read
       actions: read
     runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
-    timeout-minutes: 25
+    timeout-minutes: 20
     outputs:
       supply: ${{ steps.docs.outputs.supply || steps.wait.outputs.supply }}
       tree: ${{ steps.tree.outputs.tree }}
@@ -276,7 +280,9 @@ jobs:
             fi
           }
           ATTEMPT=0
-          while [ "$ATTEMPT" -lt "$SUPPLY_SET_POLLS" ]; do
+          source "$GITHUB_WORKSPACE/.github/scripts/mq-deadline.sh"
+          mq_deadline_init
+          while [ "$ATTEMPT" -lt "$SUPPLY_SET_POLLS" ] && ! mq_deadline_expired; do
             ATTEMPT=$((ATTEMPT + 1))
             # List the exact key first: prefix-scoped ListBucket cannot prove absence via HeadObject.
             KEY_PRESENT=false
@@ -343,10 +349,14 @@ jobs:
             fi
             fi
             if [ "$ATTEMPT" -lt "$SUPPLY_SET_POLLS" ]; then
-              sleep "$SUPPLY_SET_INTERVAL"
+              mq_deadline_sleep "$SUPPLY_SET_INTERVAL" || break
             fi
           done
-          echo "::error::mq-supply: no exact provider-bound $KEY after $SUPPLY_SET_POLLS polls."
+          if mq_deadline_expired; then
+            mq_deadline_report mq-supply "the provider-bound $KEY"
+          else
+            echo "::error::mq-supply: no exact provider-bound $KEY after $SUPPLY_SET_POLLS polls."
+          fi
           exit 1
 
   mq-prewarm:
@@ -354,7 +364,7 @@ jobs:
     needs: [mq-review, mq-supply]
     if: always()
     runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
-    timeout-minutes: 45
+    timeout-minutes: 25
     # Queue refs assume their own read-only role without an environment.
     # The release role and ecr-release environment are for stage-group on main.
     permissions:
@@ -386,6 +396,12 @@ jobs:
           echo "docs_only=true" >> "$GITHUB_OUTPUT"
           echo "::notice::mq-prewarm: reason=docs-only group: nothing to stage."
 
+      - uses: actions/checkout@v4
+        if: github.event_name == 'merge_group' && needs.mq-supply.outputs.supply == 'present'
+        with:
+          ref: ${{ github.event.merge_group.head_sha }}
+          persist-credentials: false
+
       - name: Assume the relay transport read role
         if: github.event_name == 'merge_group' && needs.mq-supply.outputs.supply == 'present'
         uses: aws-actions/configure-aws-credentials@v6.1.0
@@ -414,7 +430,9 @@ jobs:
             fi
           }
           ATTEMPT=0
-          while [ "$ATTEMPT" -lt "$RELAY_RECEIPT_POLLS" ]; do
+          source "$GITHUB_WORKSPACE/.github/scripts/mq-deadline.sh"
+          mq_deadline_init
+          while [ "$ATTEMPT" -lt "$RELAY_RECEIPT_POLLS" ] && ! mq_deadline_expired; do
             ATTEMPT=$((ATTEMPT + 1))
             if LISTING=$(timeout 60 aws s3api list-objects-v2 --bucket "$MQ_TRANSPORT_BUCKET" --prefix "$PREFIX" 2> s3-error.txt); then
               NEWEST_KEY=$(jq -j '[.Contents[]?] | sort_by(.LastModified, .Key) | last | .Key // empty' <<<"$LISTING")
@@ -522,10 +540,14 @@ jobs:
               fi
             fi
             if [ "$ATTEMPT" -lt "$RELAY_RECEIPT_POLLS" ]; then
-              sleep "$RELAY_RECEIPT_INTERVAL"
+              mq_deadline_sleep "$RELAY_RECEIPT_INTERVAL" || break
             fi
           done
-          echo "::error::mq-prewarm: no matching $NAME after $RELAY_RECEIPT_POLLS polls."
+          if mq_deadline_expired; then
+            mq_deadline_report mq-prewarm "the relay receipt $NAME"
+          else
+            echo "::error::mq-prewarm: no matching $NAME after $RELAY_RECEIPT_POLLS polls."
+          fi
           exit 1
 
       - name: Configure AWS credentials for prewarm receipts
@@ -546,6 +568,7 @@ jobs:
           GROUP_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
           DISPATCHED_JSON: ${{ steps.relay.outputs.dispatched_json }}
           RELAY_RUN_ID: ${{ steps.relay.outputs.relay_run_id }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           SHA12="${GROUP_HEAD_SHA:0:12}"
@@ -553,12 +576,18 @@ jobs:
           REQUEST_ID="$SHA12-$RELAY_RUN_ID"
           ARNS=""
           SERVICES=$(jq -ej 'keys | if length > 0 then join(" ") else error("empty dispatched set") end' <<<"$DISPATCHED_JSON")
+          source "$GITHUB_WORKSPACE/.github/scripts/mq-deadline.sh"
+          mq_deadline_init
           for SERVICE in $SERVICES; do
             BUILD_ID=$(jq -j --arg s "$SERVICE" '.[$s] // empty' <<<"$DISPATCHED_JSON")
+            if mq_deadline_expired; then
+              mq_deadline_report mq-prewarm "CodeBuild build $BUILD_ID for $SERVICE"
+              exit 1
+            fi
             [[ "$BUILD_ID" =~ ^leaf-deploy-terraform-staging:[0-9a-f-]{36}$ ]] || { echo "::error::mq-prewarm: invalid dispatched build id for $SERVICE."; exit 1; }
             ATTEMPT=0
             FOUND=""
-            while [ "$ATTEMPT" -lt "$TERRAFORM_RECEIPT_POLLS" ]; do
+            while [ "$ATTEMPT" -lt "$TERRAFORM_RECEIPT_POLLS" ] && ! mq_deadline_expired; do
               ATTEMPT=$((ATTEMPT + 1))
               BUILD_RECORD=$(timeout 60 aws codebuild batch-get-builds --ids "$BUILD_ID" --output json)
               STATUS=$(jq -r '.builds[0].buildStatus // empty' <<<"$BUILD_RECORD")
@@ -570,10 +599,17 @@ jobs:
                   exit 1 ;;
               esac
               if [ "$ATTEMPT" -lt "$TERRAFORM_RECEIPT_POLLS" ]; then
-                sleep "$TERRAFORM_RECEIPT_INTERVAL"
+                mq_deadline_sleep "$TERRAFORM_RECEIPT_INTERVAL" || break
               fi
             done
-            [ "$FOUND" = "true" ] || { echo "::error::mq-prewarm: CodeBuild build $BUILD_ID for $SERVICE never completed after $TERRAFORM_RECEIPT_POLLS polls."; exit 1; }
+            if [ "$FOUND" != "true" ]; then
+              if mq_deadline_expired; then
+                mq_deadline_report mq-prewarm "CodeBuild build $BUILD_ID for $SERVICE"
+              else
+                echo "::error::mq-prewarm: CodeBuild build $BUILD_ID for $SERVICE never completed after $TERRAFORM_RECEIPT_POLLS polls."
+              fi
+              exit 1
+            fi
             LOG_GROUP=$(jq -er '.builds[0].logs.groupName | select(type == "string" and length > 0)' <<<"$BUILD_RECORD")
             LOG_STREAM=$(jq -er '.builds[0].logs.streamName | select(type == "string" and length > 0)' <<<"$BUILD_RECORD")
             TOKEN=""
