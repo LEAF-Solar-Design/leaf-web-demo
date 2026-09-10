@@ -19,7 +19,11 @@ CONFIG = {'version', 'client_version', 'enabled', 'endpoint', 'region', 'role_ar
 JOB = {'org_id', 'project_id', 'repository_id', 'job_name', 'environment', 'commit_sha',
        'source_bucket', 'source_prefix', 'acceptance_bucket', 'acceptance_prefix',
        'acceptance_producer', 'runtime_seconds', 'reservation_microusd',
-       'browser_startup_verified', 'profile_id', 'media_bucket', 'media_prefix'}
+       'browser_startup_verified', 'profile_id', 'media_bucket', 'media_prefix', 'runtime_identity'}
+RUNTIME = {'chromium_sha256', 'chromium_version', 'lock_sha256', 'executor_sha256',
+           'playwright_version', 'executor_package_digest'}
+DISCOVERY_JOB_FIELDS = ('job_name', 'environment', 'commit_sha', 'profile_id',
+                        'runtime_identity', 'runtime_seconds', 'browser_startup_verified')
 MANIFEST = {'version', 'profile_id', 'profile_revision', 'profile_digest', 'campaign_id',
             'task_id', 'parent_attempt_id', 'parent_attempt_fence', 'max_cost_microusd',
             'max_runtime_seconds'}
@@ -86,6 +90,36 @@ def _operation(request):
     return _sha([[request[k] for k in ('org_id', 'project_id', 'repository_id')], request['idempotency_key']])
 
 
+def _validate_installation(value):
+    try:
+        _require(isinstance(value, dict) and set(value) == CONFIG
+                 and type(value['version']) is int and value['version'] == 1, 503)
+        _require(value['client_version'] == 1 and type(value['client_version']) is int
+                 and type(value['enabled']) is bool and _hex(value['registry_digest'])
+                 and isinstance(value['profiles'], dict) and isinstance(value['jobs'], list)
+                 and len(value['jobs']) <= 32, 503)
+        # Reuse transport endpoint/region/role validation. Supplying inert
+        # dependencies prevents credential discovery or HTTP client creation.
+        DeveloperJobsTransport(value['endpoint'], region=value['region'], role_arn=value['role_arn'],
+                               boto3_session=object(), http_session=object())
+        for job in value['jobs']:
+            _require(isinstance(job, dict) and set(job) == JOB, 503)
+            _require(all(_text(job[k]) for k in JOB - {'runtime_seconds', 'reservation_microusd', 'browser_startup_verified', 'runtime_identity'})
+                     and _hex(job['commit_sha'], 40) and _integer(job['runtime_seconds'], 1, 3600)
+                     and _integer(job['reservation_microusd']) and type(job['browser_startup_verified']) is bool, 503)
+            for prefix in ('source_prefix', 'acceptance_prefix', 'media_prefix'):
+                _require(safe_prefix(job[prefix]), 503)
+            runtime = job['runtime_identity']
+            _require(isinstance(runtime, dict) and set(runtime) == RUNTIME
+                     and all(_hex(runtime[k]) for k in RUNTIME - {'chromium_version', 'playwright_version'})
+                     and all(isinstance(runtime[k], str) and len(runtime[k]) <= 64
+                             and re.fullmatch(r'[0-9]+(?:\.[0-9]+){1,3}', runtime[k])
+                             for k in ('chromium_version', 'playwright_version')), 503)
+        return value
+    except Exception:
+        raise BridgeError(503) from None
+
+
 def installation():
     path = os.environ.get('LEAF_WALK_INSTALLATION_FILE')
     if not path:
@@ -93,19 +127,7 @@ def installation():
     try:
         with Path(path).open('rb') as handle:
             value = _json(handle.read(LIMIT + 1))
-        _require(set(value) == CONFIG and type(value['version']) is int and value['version'] == 1, 503)
-        _require(value['client_version'] == 1 and type(value['client_version']) is int
-                 and type(value['enabled']) is bool and _hex(value['registry_digest'])
-                 and isinstance(value['profiles'], dict) and isinstance(value['jobs'], list)
-                 and len(value['jobs']) <= 256, 503)
-        for job in value['jobs']:
-            _require(isinstance(job, dict) and set(job) == JOB, 503)
-            _require(all(_text(job[k]) for k in JOB - {'runtime_seconds', 'reservation_microusd', 'browser_startup_verified'})
-                     and _hex(job['commit_sha'], 40) and _integer(job['runtime_seconds'], 1, 3600)
-                     and _integer(job['reservation_microusd']) and type(job['browser_startup_verified']) is bool, 503)
-            for prefix in ('source_prefix', 'acceptance_prefix', 'media_prefix'):
-                _require(safe_prefix(job[prefix]), 503)
-        return value
+        return _validate_installation(value)
     except FileNotFoundError:
         return None
     except Exception:
@@ -229,6 +251,8 @@ class WalkBridge:
 
     def doctor(self, body, subject):
         scope, allocation = self._scope(body, subject)
+        if self.config is not None:
+            _validate_installation(self.config)
         state = 'ready'
         if self.config is None:
             state = 'installation_missing'
@@ -244,7 +268,20 @@ class WalkBridge:
             elif (allocation is None or allocation['limit_microusd'] - allocation['spent_microusd']
                   - allocation['reserved_microusd'] < min(j['reservation_microusd'] for j in jobs)):
                 state = 'insufficient_allocation'
-        return {'state': state}
+        result = {'state': state}
+        if self.config is not None:
+            jobs = []
+            for job in self.config['jobs']:
+                if job['org_id'] != str(scope['org']) or job['project_id'] != str(scope['project']):
+                    continue
+                public = {key: job[key] for key in DISCOVERY_JOB_FIELDS if key != 'runtime_identity'}
+                public['runtime_identity'] = {key: job['runtime_identity'][key] for key in RUNTIME}
+                jobs.append(public)
+            result['installation'] = {'version': 1, 'client_version': 1,
+                'endpoint': self.config['endpoint'], 'registry_digest': self.config['registry_digest'],
+                'capabilities': ['browser.walk'], 'jobs': jobs}
+            _require(len(_raw(result)) <= 64 * 1024, 503)
+        return result
 
     def prepare(self, body, subject):
         _require(self.config is not None and self.config['enabled'], 503)
