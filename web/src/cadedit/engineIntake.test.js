@@ -306,3 +306,81 @@ describe('W4g-6d: a polyline bulge draws as its arc', () => {
     })
   })
 })
+
+describe('W4g-bulge-plane-aware: a bulged segment samples in its own OCS plane', () => {
+  it('a. +Z is byte-identical, with or without a [0,0,1] normal key', () => {
+    const plain = bulgePoints([0, 0, 0], [10, 0, 0], 1, 0)
+    expect(bulgePoints([0, 0, 0], [10, 0, 0], 1, 0, [0, 0, 1])).toEqual(plain)
+    expect(bulgePoints([0, 0, 0], [10, 0, 0], 1, 0, undefined)).toEqual(plain)
+  })
+
+  it('b. Reflected matches main (A\'s own two-vertex case) within floating-point noise', () => {
+    const pl = { layer: 'A', handle: '11', closed: false, pts: [[0, 0, -3], [-2, 0, -3]], bulges: [-1, 0] }
+    const today = expandBulgedPolylines([pl])[0].pts
+    const reflected = expandBulgedPolylines([{ ...pl, normal: [0, 0, -1] }])[0].pts
+    expect(reflected).toHaveLength(today.length)
+    // The mirror and sign flip cancel to the same geometry, but reach it through
+    // an extra matrix multiply: measured max abs diff per component is 5.8e-16.
+    for (let i = 0; i < today.length; i++) {
+      for (let c = 0; c < 3; c++) {
+        expect(Math.abs(reflected[i][c] - today[i][c])).toBeLessThan(1e-12)
+      }
+    }
+  })
+
+  // The frozen basis (A's own): N = (0, 0.6, 0.8) maps OCS (x, y, e) to WCS
+  // (-x, -0.8y + 0.6e, 0.6y + 0.8e). OCS (0,0),(2,0) at elevation 3 is WCS
+  // [0,1.8,2.4],[-2,1.8,2.4]; bulge 1 (Nz > 0, so the stored bulge is the OCS
+  // bulge unchanged) is the lower semicircle whose OCS midpoint (1,-1,3) is
+  // WCS (-1, 2.6, 1.8).
+  const tiltedNormal = [0, 0.6, 0.8]
+  const tiltedPl = { layer: 'A', handle: '12', closed: false, pts: [[0, 1.8, 2.4], [-2, 1.8, 2.4]], bulges: [1, 0], normal: tiltedNormal }
+
+  it('c. A tilted arc lands in the polyline\'s plane, at the hand-derived midpoint', () => {
+    const pts = expandBulgedPolylines([tiltedPl])[0].pts
+    expect(pts.some((p) => near(p[0], -1) && near(p[1], 2.6) && near(p[2], 1.8))).toBe(true)
+    // Both vertices sit at z = 2.4 by construction, so a whole-list z != 2.4
+    // check is false by construction; restrict to the interior arc samples.
+    const [v0, v1] = tiltedPl.pts
+    const interior = pts.filter((p) => !(near(p[0], v0[0]) && near(p[1], v0[1]) && near(p[2], v0[2])) &&
+      !(near(p[0], v1[0]) && near(p[1], v1[1]) && near(p[2], v1[2])))
+    expect(interior.every((p) => !near(p[2], 2.4))).toBe(true)
+  })
+
+  it('d. Every sample lies on the polyline\'s own plane', () => {
+    const v0 = tiltedPl.pts[0]
+    const pts = expandBulgedPolylines([tiltedPl])[0].pts
+    for (const p of pts) {
+      const dot = (p[0] - v0[0]) * tiltedNormal[0] + (p[1] - v0[1]) * tiltedNormal[1] + (p[2] - v0[2]) * tiltedNormal[2]
+      expect(Math.abs(dot)).toBeLessThan(1e-9)
+    }
+  })
+
+  it('e. The endpoints still meet: no sample repeats a vertex, and the tail chord matches the arc\'s own step', () => {
+    const [v0, v1] = tiltedPl.pts
+    const pts = expandBulgedPolylines([tiltedPl])[0].pts
+    expect(pts[0]).toEqual(v0)
+    expect(pts[pts.length - 1]).toEqual(v1)
+    for (const p of pts.slice(1, -1)) {
+      expect(p).not.toEqual(v0)
+      expect(p).not.toEqual(v1)
+    }
+    const chord = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2])
+    const step = chord(pts[1], pts[2])
+    const tail = chord(pts[pts.length - 2], pts[pts.length - 1])
+    expect(tail).toBeCloseTo(step, 6)
+  })
+
+  it('f. Degenerate normals (zero, non-finite, near-+Z, malformed) keep today\'s behaviour and never throw', () => {
+    const a = [0, 0, 0]; const b = [10, 0, 0]; const bulge = 1; const z = 0
+    const today = bulgePoints(a, b, bulge, z)
+    const degenerate = [
+      [0, 0, 0], [NaN, 0, 1], [0, Infinity, 1], [-Infinity, 0, 1],
+      [1e-9, -1e-9, 1 + 1e-9], undefined, null, 'nope', [0, 0], [0, 0, 1, 0],
+    ]
+    for (const normal of degenerate) {
+      expect(() => bulgePoints(a, b, bulge, z, normal)).not.toThrow()
+      expect(bulgePoints(a, b, bulge, z, normal)).toEqual(today)
+    }
+  })
+})
