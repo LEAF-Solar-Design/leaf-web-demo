@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -179,6 +180,116 @@ def test_storage_cutover_gate_blocks_broker_write_before_preflight(monkeypatch):
     )
     assert status == 503
     assert env["error"]["retryable"] is True
+
+
+@pytest.mark.parametrize(
+    "env, fence_contents, reason",
+    [
+        # The measured staging shape (2026-09-10, leaf-platform-broker task def
+        # 528): the env flag, not a cutover, was what refused.
+        ("0", None, write_loop.MUTATION_REFUSED_ENV_DISABLED),
+        ("1", "0\n", write_loop.MUTATION_REFUSED_FENCE_CLOSED),
+        ("1", None, write_loop.MUTATION_REFUSED_FENCE_UNREADABLE),
+    ],
+)
+def test_broker_write_refusal_names_its_precondition(
+    monkeypatch, tmp_path, caplog, env, fence_contents, reason,
+):
+    """A 503 from this gate must say WHICH precondition shut it, in the body and
+    in the log. Before this, all three states returned the same "storage
+    cutover" sentence and wrote nothing but a uvicorn access line."""
+    fence = tmp_path / "drawing-mutations"
+    if fence_contents is None and reason == write_loop.MUTATION_REFUSED_FENCE_UNREADABLE:
+        monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", str(fence))
+    elif fence_contents is None:
+        monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", raising=False)
+    else:
+        fence.write_text(fence_contents, encoding="utf-8")
+        monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", str(fence))
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", env)
+    monkeypatch.setattr(broker, "tenant_disabled", lambda tenant_id: False)
+    monkeypatch.setattr(
+        broker, "_cap_preflight",
+        lambda *args: pytest.fail("mutation gate ran after cost preflight"))
+    tool = {"name": "write", "capabilities": ["drawing.write"]}
+
+    with caplog.at_level(logging.WARNING, logger="broker"):
+        env_body, status = broker._execute(
+            broker.BrokerRunRequest(
+                tenant_id="tenant-a", tool=tool, params={}, aps_live=True,
+            ),
+            tool, "write", 0.0, {},
+        )
+
+    assert status == 503
+    assert env_body["error"]["error_code"] == "APS_UNAVAILABLE"
+    assert env_body["error"]["retryable"] is True
+    assert env_body["error"]["reason_code"] == reason
+    assert env_body["error"]["message"] == write_loop.mutation_refusal_message(reason)
+
+    lines = [record.getMessage() for record in caplog.records
+             if record.getMessage().startswith("broker_run_refused")]
+    assert lines == [f"broker_run_refused reason={reason} tool=write status=503"]
+    # Credential-free and identifier-free: no tenant, no fence path.
+    assert "tenant-a" not in lines[0]
+    assert str(tmp_path) not in lines[0]
+
+
+def test_broker_plan_refusal_names_its_precondition(monkeypatch, caplog):
+    """Same gate, the data-plan lane -- the one POST /broker/run-plan reaches."""
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+    monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", raising=False)
+    monkeypatch.setattr(broker, "tenant_disabled", lambda tenant_id: False)
+    monkeypatch.setattr(
+        broker, "_cap_preflight",
+        lambda *args: pytest.fail("mutation gate ran after cost preflight"))
+
+    with caplog.at_level(logging.WARNING, logger="broker"):
+        env_body, status = broker._execute_plan(
+            broker.BrokerPlanRunRequest(
+                tenant_id="tenant-a", dwg="d", dwg_version=1,
+                plan={"drawing_id": "d", "parent_version": 1,
+                      "mutations": {"delete": ["1A"]},
+                      "plan_sha256": "a" * 64, "source_sha256": "b" * 64},
+            ),
+            broker.PLAN_TOOL, "plan", 0.0, {},
+        )
+
+    assert status == 503
+    assert (env_body["error"]["reason_code"]
+            == write_loop.MUTATION_REFUSED_ENV_DISABLED)
+    assert "LEAF_DRAWING_MUTATIONS_ENABLED" in env_body["error"]["message"]
+    assert "storage cutover" not in env_body["error"]["message"]
+    assert any(write_loop.MUTATION_REFUSED_ENV_DISABLED in record.getMessage()
+               for record in caplog.records)
+
+
+def test_admitted_broker_write_logs_no_refusal(monkeypatch, caplog):
+    """The refusal log is for refusals only: an OPEN gate must stay silent, or
+    the signal drowns in the noise it was added to cut through."""
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", raising=False)
+    monkeypatch.setattr(broker, "tenant_disabled", lambda tenant_id: False)
+    stop = RuntimeError("stop after the mutation gate")
+
+    def past_the_gate(*_a, **_k):
+        raise stop
+
+    monkeypatch.setattr(broker, "_cap_preflight", past_the_gate)
+    tool = {"name": "write", "capabilities": ["drawing.write"]}
+
+    with caplog.at_level(logging.WARNING, logger="broker"):
+        with pytest.raises(RuntimeError) as raised:
+            broker._execute(
+                broker.BrokerRunRequest(
+                    tenant_id="tenant-a", tool=tool, params={}, aps_live=True,
+                ),
+                tool, "write", 0.0, {},
+            )
+
+    assert raised.value is stop
+    assert [record for record in caplog.records
+            if record.getMessage().startswith("broker_run_refused")] == []
 
 
 def test_staged_source_is_hashed_not_recorded_in_request_fingerprint():

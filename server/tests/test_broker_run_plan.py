@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ if str(SERVER_DIR) not in sys.path:
 
 import broker  # noqa: E402
 import mutation_apply  # noqa: E402 - write_loop adds da/ to sys.path
+import mutation_plan  # noqa: E402
 import write_loop  # noqa: E402
 
 
@@ -41,14 +43,18 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setattr(broker, "ACTIVE_WORKITEMS_PATH", tmp_path / "workitems.jsonl")
     monkeypatch.setattr(broker, "_active_workitems", {})
     monkeypatch.setattr(broker, "_sidecar_lines", 0)
-    monkeypatch.setattr(broker, "_plan_readiness_cache", None)
+    # Per-CONTRACT cache: `_plan_activity_ready` calls `.get(contract)` on it, so
+    # `None` here made every test that reaches readiness raise AttributeError.
+    monkeypatch.setattr(broker, "_plan_readiness_cache", {})
     monkeypatch.setattr(broker, "_emit_aps_metric", lambda *_a: None)
     monkeypatch.setattr(broker, "tenant_disabled", lambda _t: False)
     monkeypatch.setattr(broker, "_tenant_tier", lambda _t: "demo")
     monkeypatch.setattr(broker, "_cap_preflight", lambda *_a: None)
     monkeypatch.setattr(broker, "_run_quota_preflight", lambda *_a: None)
     monkeypatch.setattr(broker, "_require_supported_live_completion_mode", lambda: None)
-    monkeypatch.setattr(mutation_apply, "readiness", lambda: {
+    # `readiness(contract=...)`: a zero-arg stub is swallowed by the broker's own
+    # except-clause and silently becomes "not ready", so it must take the kwarg.
+    monkeypatch.setattr(mutation_apply, "readiness", lambda contract=2: {
         "ready": True, "mismatches": [], "activity": {"alias": "prod", "version": 12},
     })
 
@@ -99,6 +105,91 @@ def test_plan_endpoint_rejects_conflicting_request_identity(
     assert response.status_code == 422, response.text
     assert response.json()["error"]["error_code"] == "BAD_PARAMS"
     assert needle in response.json()["error"]["message"]
+
+
+def _refusal_logs(caplog):
+    """Every self-explaining refusal on this path shares one log event name."""
+    return [record for record in caplog.records
+            if record.getMessage().startswith("broker_run_refused")]
+
+
+def test_plan_503_names_the_env_flag_that_refused(monkeypatch, client, body, caplog):
+    """The measured staging failure (2026-09-10, broker task def 528): the only
+    trace of this 503 was the uvicorn access line, so attributing it to
+    LEAF_DRAWING_MUTATIONS_ENABLED=0 took a hunt across four log groups."""
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+
+    with caplog.at_level(logging.WARNING, logger="broker"):
+        response = client.post("/broker/run-plan", json=body)
+
+    assert response.status_code == 503
+    error = response.json()["error"]
+    assert error["error_code"] == "APS_UNAVAILABLE"
+    assert error["retryable"] is True
+    assert error["reason_code"] == write_loop.MUTATION_REFUSED_ENV_DISABLED
+    # The body names the knob, so the caller never has to reach the broker log.
+    assert "LEAF_DRAWING_MUTATIONS_ENABLED" in error["message"]
+
+    records = _refusal_logs(caplog)
+    assert len(records) == 1, "a refusal logs exactly once, not once per gate"
+    line = records[0].getMessage()
+    assert write_loop.MUTATION_REFUSED_ENV_DISABLED in line
+    assert "503" in line
+    # Credential-free and identifier-free, like the rest of this path.
+    assert body["tenant_id"] not in line
+    assert body["plan"]["drawing_id"] not in line
+    assert body["ledger_event_key"] not in line
+
+
+def test_plan_503_does_not_blame_a_cutover_for_an_env_drain(
+    monkeypatch, client, body,
+):
+    """Regression guard for the exact wrong answer the old 503 gave: with the
+    env flag off the message must not claim a storage cutover."""
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+    response = client.post("/broker/run-plan", json=body)
+    assert response.status_code == 503
+    assert "storage cutover" not in response.json()["error"]["message"]
+
+
+def test_plan_503_names_a_missing_aps_client(monkeypatch, client, body, caplog):
+    monkeypatch.setattr(broker, "_get_da", lambda: None)
+
+    with caplog.at_level(logging.WARNING, logger="broker"):
+        response = client.post("/broker/run-plan", json=body)
+
+    assert response.status_code == 503
+    assert response.json()["error"]["reason_code"] == "plan_aps_client_unavailable"
+    records = _refusal_logs(caplog)
+    # Exactly one: this request cleared BOTH mutation-fence gates (the route
+    # guard and _execute_plan's), so an open gate proves it stays silent.
+    assert len(records) == 1
+    assert "plan_aps_client_unavailable" in records[0].getMessage()
+
+
+def test_plan_503_names_an_unready_activity(monkeypatch, client, body, caplog):
+    """`Leaf/Platform/APS JobTerminal status=failed` carried no reason either, so
+    the readiness refusal has to name itself at the source."""
+    monkeypatch.setattr(broker, "_get_da",
+                        lambda: SimpleNamespace(run_tool=lambda *_a, **_k: None))
+    monkeypatch.setattr(write_loop, "default_backend", lambda **_k: object())
+    monkeypatch.setattr(write_loop, "read_intake",
+                        lambda *_a, **_k: (body["plan"]["parent_version"], {}))
+    monkeypatch.setattr(mutation_plan, "validate_mutations",
+                        lambda *_a, **_k: {"delete": ["1A"]})
+    monkeypatch.setattr(mutation_apply, "readiness", lambda contract=2: {
+        "ready": False, "mismatches": ["alias moved"], "contract": contract,
+    })
+
+    with caplog.at_level(logging.WARNING, logger="broker"):
+        response = client.post("/broker/run-plan", json=body)
+
+    assert response.status_code == 503
+    error = response.json()["error"]
+    assert error["reason_code"] == "plan_activity_not_ready"
+    assert "alias moved" in error["message"]
+    assert any("plan_activity_not_ready" in record.getMessage()
+               for record in _refusal_logs(caplog))
 
 
 @pytest.mark.parametrize("failure", ["readiness", "readiness-exception", "no-da", "no-run-tool"])

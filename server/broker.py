@@ -40,6 +40,7 @@ import hashlib
 import hmac
 import inspect
 import json
+import logging
 import math
 import os
 import re
@@ -56,6 +57,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+LOGGER = logging.getLogger(__name__)
 
 SERVER_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SERVER_DIR.parent
@@ -1701,6 +1704,49 @@ def _classified_bad_params(
     return env, DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS]
 
 
+def _classified_unavailable(
+    reason_code: str,
+    message: str,
+    *,
+    tool: Optional[str] = None,
+    status: int = 503,
+) -> tuple[Dict[str, Any], int]:
+    """Build one retryable APS_UNAVAILABLE envelope with a stable public reason,
+    and LOG that reason.
+
+    A 503 whose only trace was the uvicorn access line cost a cross-log-group
+    investigation across app, harness, canonical-worker and broker to attribute
+    a shut mutation fence. Every 503 on this path now names its own precondition
+    in both places. Carries a reason code and a tool name only: no tenant,
+    drawing, path, or credential ever reaches the log line.
+    """
+    LOGGER.warning("broker_run_refused reason=%s tool=%s status=%s",
+                   reason_code, tool, status)
+    env = err_envelope(
+        ErrorCode.APS_UNAVAILABLE,
+        message,
+        retryable=True,
+        tool=tool,
+    )
+    env["error"]["reason_code"] = reason_code
+    return env, status
+
+
+def _mutation_refused(
+    reason: Optional[str], *, tool: Optional[str] = None,
+) -> tuple[Dict[str, Any], int]:
+    """The ONE refusal for a closed drawing-mutation gate, on every broker lane.
+
+    ``reason`` is a ``write_loop`` reason code, or ``None`` for a gate that read
+    closed and then classified open -- attributed as unattributed rather than
+    guessed, because a 503 that names the wrong precondition is worse than one
+    that admits it does not know.
+    """
+    reason = reason or write_loop.MUTATION_REFUSED_UNATTRIBUTED
+    return _classified_unavailable(
+        reason, write_loop.mutation_refusal_message(reason), tool=tool)
+
+
 def _resolve_live_read_dwg(req: BrokerRunRequest) -> tuple[Path, bool]:
     """Resolve one live read to a curated or tenant-store DWG.
 
@@ -2663,17 +2709,11 @@ def broker_run(req: BrokerRunRequest) -> JSONResponse:
         return _broker_run(req)
     if not write_loop.is_write_tool(req.tool or {}):
         return _broker_run(req)
-    with write_loop.drawing_mutation_commit_guard() as commit_enabled:
-        if not commit_enabled:
-            return JSONResponse(
-                status_code=503,
-                content=err_envelope(
-                    ErrorCode.APS_UNAVAILABLE,
-                    "drawing mutations are temporarily disabled for a storage cutover",
-                    retryable=True,
-                    tool=(req.tool or {}).get("name"),
-                ),
-            )
+    with write_loop.drawing_mutation_refusal_guard() as refusal:
+        if refusal is not None:
+            env, status = _mutation_refused(
+                refusal, tool=(req.tool or {}).get("name"))
+            return JSONResponse(status_code=status, content=env)
         return _broker_run(req)
 
 
@@ -2685,17 +2725,10 @@ def broker_run_plan(req: BrokerPlanRunRequest) -> JSONResponse:
     leaves a window in which the WorkItem runs against the moved alias. The
     receipt records the Activity version observed by the readiness check.
     """
-    with write_loop.drawing_mutation_commit_guard() as commit_enabled:
-        if not commit_enabled:
-            return JSONResponse(
-                status_code=503,
-                content=err_envelope(
-                    ErrorCode.APS_UNAVAILABLE,
-                    "drawing mutations are temporarily disabled for a storage cutover",
-                    retryable=True,
-                    tool=PLAN_TOOL_NAME,
-                ),
-            )
+    with write_loop.drawing_mutation_refusal_guard() as refusal:
+        if refusal is not None:
+            env, status = _mutation_refused(refusal, tool=PLAN_TOOL_NAME)
+            return JSONResponse(status_code=status, content=env)
         return _broker_run_plan(req)
 
 
@@ -2854,13 +2887,12 @@ def _broker_run_request(req: Union[BrokerRunRequest, BrokerPlanRunRequest]) -> J
     except ApsCapacityUnavailable:
         if admission is not None:
             admission["capacity_wait"] = True
-        terminal_env = err_envelope(
-            ErrorCode.APS_UNAVAILABLE,
+        terminal_env, terminal_status = _classified_unavailable(
+            "aps_capacity_unavailable",
             "APS fleet concurrency limit is currently full",
-            retryable=True,
             tool=tool.get("name"),
+            status=DEFAULT_HTTP_STATUS[ErrorCode.APS_UNAVAILABLE],
         )
-        terminal_status = DEFAULT_HTTP_STATUS[ErrorCode.APS_UNAVAILABLE]
         return JSONResponse(status_code=terminal_status, content=terminal_env)
     except entitlements.EntitlementsError:
         entry["status"] = "INTERNAL"
@@ -2979,12 +3011,11 @@ def _execute_plan(req: BrokerPlanRunRequest, tool: Dict[str, Any], engine_op: st
             f"tenant {req.tenant_id!r} is disabled by the kill-switch",
             retryable=False, tool=PLAN_TOOL_NAME,
         ), DEFAULT_HTTP_STATUS[ErrorCode.TENANT_DISABLED])
-    if not write_loop.drawing_mutations_enabled():
-        return (err_envelope(
-            ErrorCode.APS_UNAVAILABLE,
-            "drawing mutations are temporarily disabled for a storage cutover",
-            retryable=True, tool=PLAN_TOOL_NAME,
-        ), 503)
+    # ONE read decides and reports: a re-read to classify could race the cutover
+    # control and report a precondition other than the one that refused.
+    plan_refusal = write_loop.drawing_mutations_refusal()
+    if plan_refusal is not None:
+        return _mutation_refused(plan_refusal, tool=PLAN_TOOL_NAME)
     if not quota_reserved:
         capped = _cap_preflight(req.tenant_id, PLAN_TOOL)
         if capped is not None:
@@ -3012,11 +3043,11 @@ def _execute_plan(req: BrokerPlanRunRequest, tool: Dict[str, Any], engine_op: st
     import mutation_plan
     da = _get_da()
     if da is None or not hasattr(da, "run_tool"):
-        return (err_envelope(
-            ErrorCode.APS_UNAVAILABLE,
+        return _classified_unavailable(
+            "plan_aps_client_unavailable",
             "a live browser edit needs the APS client; there is no degraded writer for a data plan",
-            retryable=True, tool=PLAN_TOOL_NAME,
-        ), 503)
+            tool=PLAN_TOOL_NAME,
+        )
     backend = write_loop.default_backend(aps_live=True, da=da)
     try:
         base_v, base_intake = write_loop.read_intake(
@@ -3024,9 +3055,14 @@ def _execute_plan(req: BrokerPlanRunRequest, tool: Dict[str, Any], engine_op: st
         if base_v != req.plan.parent_version:
             raise ValueError("base intake resolved to a different version")
     except write_loop.ProofStateUnreadable as exc:
-        return (err_envelope(
-            ErrorCode.INTERNAL, str(exc), retryable=True, tool=PLAN_TOOL_NAME,
-        ), 503)
+        # INTERNAL, not APS_UNAVAILABLE: the error CODE is the caller's contract
+        # and is not ours to reclassify, so the reason code is added beside it.
+        LOGGER.warning("broker_run_refused reason=%s tool=%s status=503",
+                       "plan_base_intake_unreadable", PLAN_TOOL_NAME)
+        env = err_envelope(
+            ErrorCode.INTERNAL, str(exc), retryable=True, tool=PLAN_TOOL_NAME)
+        env["error"]["reason_code"] = "plan_base_intake_unreadable"
+        return env, 503
     except (KeyError, ValueError) as exc:
         return (err_envelope(
             ErrorCode.BAD_PARAMS, f"drawing/mutation unavailable: {exc}",
@@ -3044,10 +3080,11 @@ def _execute_plan(req: BrokerPlanRunRequest, tool: Dict[str, Any], engine_op: st
     ready, readiness = _plan_activity_ready(contract=contract)
     if not ready:
         mismatches = "; ".join(str(item) for item in readiness.get("mismatches", []))
-        return (err_envelope(
-            ErrorCode.APS_UNAVAILABLE, f"mutation Activity not ready: {mismatches}",
-            retryable=True, tool=PLAN_TOOL_NAME,
-        ), 503)
+        return _classified_unavailable(
+            "plan_activity_not_ready",
+            f"mutation Activity not ready: {mismatches}",
+            tool=PLAN_TOOL_NAME,
+        )
     activity_version = (readiness.get("activity") or {}).get("version")
     entry["activity_version"] = activity_version
     _start_admitted_execution(req, admission, aps_submission=True)
@@ -3069,13 +3106,11 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                            retryable=False, tool=tool.get("name"))
         return env, DEFAULT_HTTP_STATUS[ErrorCode.TENANT_DISABLED]
 
-    if write_loop.is_write_tool(tool) and not write_loop.drawing_mutations_enabled():
-        return (err_envelope(
-            ErrorCode.APS_UNAVAILABLE,
-            "drawing mutations are temporarily disabled for a storage cutover",
-            retryable=True,
-            tool=tool.get("name"),
-        ), 503)
+    if write_loop.is_write_tool(tool):
+        # ONE read decides and reports (see _execute_plan).
+        write_refusal = write_loop.drawing_mutations_refusal()
+        if write_refusal is not None:
+            return _mutation_refused(write_refusal, tool=tool.get("name"))
 
     # 1a) HARD pre-flight cost cap — a tenant over its spend cap is rejected
     #     BEFORE any APS call (off unless a cap is configured for the tenant).
