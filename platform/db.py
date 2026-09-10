@@ -542,6 +542,7 @@ _AUTHORITY_REQUIRED_COLUMNS = {
         },
     },
     "harness_sessions": {
+        "harness_app_sdk_sessions": {"tenant_id", "app_session_id", "sdk_session_id"},
         "harness_sessions": {
             "session_id", "tenant_id", "drawing_id", "sdk_session_id", "status",
             "summary", "created_at", "updated_at",

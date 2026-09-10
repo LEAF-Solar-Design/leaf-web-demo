@@ -10,8 +10,9 @@
  * Identity mapping: the loop keeps its OWN durable store (FileSessionStore keyed
  * by tenant+drawing, its own turn ids and seq) — none of that leaks onto the
  * wire. HarnessTurnEvent is `{type, data}` only; the app assigns its own seq as
- * it relays. The loop-side store exists for sdk_session_id resume, transcript
- * mirroring, and the confirmation mirror rows the split-turn resume validates.
+ * it relays. The loop-side row owns transcript and confirmation mirrors. SDK
+ * resume identities live in a separate durable tenant+app-session mapping so
+ * conversations sharing a drawing cannot inherit one another's model history.
  *
  * Confirm resume: the app's approvals row is AUTHORITATIVE (single-redeem
  * consume happens app-side before /turn is ever called; the gate's args-bound
@@ -30,10 +31,9 @@
  *
  * Context: the frozen wire carries no ContextPacket field (the app-side
  * server/context_packet.py has no live caller yet — recorded chip-2/5 work). The
- * adapter builds a packet-lite from wire fields only: {drawing_id} plus, when the
- * loop has no SDK session to resume, the wire's bounded prior `messages` as data.
- * On resume, it keeps those messages out of the normal prompt and supplies them
- * only to the runner's missing-session recovery prompt.
+ * adapter builds a packet-lite from wire fields. Under its turn lock, the loop
+ * uses the scoped SDK mapping to decide whether the app's bounded `messages`
+ * seed a fresh model conversation or remain available for missing-session recovery.
  *
  * Known debt (recorded in the mount plan): `opts.signal` stops YIELDS immediately
  * on client disconnect, but does not abort the in-flight SDK call — the loop

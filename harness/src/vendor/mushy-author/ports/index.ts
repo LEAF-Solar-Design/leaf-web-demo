@@ -986,6 +986,9 @@ export interface UsageRecord {
  * backend honoring these semantics (SQLite, file-backed JSONL) can swap in.
  */
 export interface SessionStore {
+  /** SDK resume identity owned by one authenticated app conversation. */
+  getAppSdkSession(tenantId: string, appSessionId: string): Promise<string | null>;
+  setAppSdkSession(tenantId: string, appSessionId: string, sdkSessionId: string | null): Promise<void>;
   /** Idempotent per (tenant, drawing): returns the existing session or creates one. */
   createOrGetSession(tenantId: string, drawingId: string): Promise<SessionRecord>;
   getSession(sessionId: string): Promise<SessionRecord | null>;
