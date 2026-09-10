@@ -2,6 +2,7 @@
 import copy
 import hashlib
 import io
+import json
 
 import pytest
 
@@ -129,7 +130,11 @@ def fixture():
         acceptance_prefix='walks/', acceptance_producer='producer-v1', runtime_seconds=90,
         reservation_microusd=100, browser_startup_verified=True, profile_id='synthetic',
         media_bucket='media', media_prefix='walks/media/')
-    config = dict(version=1, client_version=1, enabled=True, endpoint='unused', region='us-east-1',
+    job['runtime_identity'] = dict(chromium_sha256='1' * 64, chromium_version='123.0.0.1',
+        lock_sha256='2' * 64, executor_sha256='3' * 64, playwright_version='1.2.3',
+        executor_package_digest='4' * 64)
+    config = dict(version=1, client_version=1, enabled=True,
+                  endpoint='https://abcdefghij.execute-api.us-east-1.amazonaws.com/v1/developer/jobs', region='us-east-1',
                   role_arn=None, registry_digest='c' * 64, profiles={'synthetic': profile}, jobs=[job])
     ledger, s3 = Ledger(events), S3(events)
     transport = Transport(events, ledger)
@@ -368,6 +373,87 @@ def test_terminal_media_reference_is_not_verified_upload(fixture):
     assert output['evidence']['media_ref'] == media
     assert output['cleanup'] == 'verified' and output['upload'] == 'pending'
     assert output['acceptance'] == 'pending'
+
+
+def test_doctor_returns_scoped_nonsecret_runtime_installation(fixture, monkeypatch):
+    import boto3
+    import requests
+    def forbidden(*args, **kwargs):
+        pytest.fail('discovery attempted provider or HTTP client creation')
+    monkeypatch.setattr(boto3, 'Session', forbidden)
+    monkeypatch.setattr(requests, 'Session', forbidden)
+    service = fixture[0]
+    job = service.config['jobs'][0]
+    foreign_org = copy.deepcopy(job)
+    foreign_org.update(org_id=str(__import__('uuid').UUID(int=90)), job_name='foreign-org-job')
+    foreign_project = copy.deepcopy(job)
+    foreign_project.update(project_id=str(__import__('uuid').UUID(int=91)), job_name='foreign-project-job')
+    service.config['jobs'].extend([foreign_org, foreign_project])
+    service.config['role_arn'] = 'arn:aws:iam::123456789012:role/private-runtime-role'
+    service.config['profiles']['synthetic']['synthetic_messages'] = ['private synthetic material']
+    output = service.handle('walk_doctor', {'enrollment_id': ENROLLMENT, 'campaign_id': CAMPAIGN}, 'service')['result']
+    assert output['state'] == 'ready'
+    install = output['installation']
+    assert set(install) == {'version', 'client_version', 'endpoint', 'registry_digest', 'capabilities', 'jobs'}
+    assert install['version'] == install['client_version'] == 1
+    assert install['capabilities'] == ['browser.walk']
+    assert len(install['jobs']) == 1
+    assert set(install['jobs'][0]) == set(bridge.DISCOVERY_JOB_FIELDS)
+    assert install['jobs'][0]['runtime_identity'] == job['runtime_identity']
+    encoded = json.dumps(output)
+    for private in ('role_arn', 'source_bucket', 'acceptance_bucket', 'media_bucket', 'reservation_microusd',
+                    'source_prefix', 'acceptance_prefix', 'media_prefix', 'profiles', 'synthetic_messages',
+                    'private-runtime-role', 'private synthetic material', 'foreign-org-job', 'foreign-project-job'):
+        assert private not in encoded
+    assert fixture[6] == ['scope']
+
+
+@pytest.mark.parametrize('fault', ['missing', 'extra', 'bad_sha', 'bool_sha', 'bad_version', 'missing_field'])
+def test_installation_rejects_missing_or_wrong_runtime_identity(fixture, tmp_path, monkeypatch, fault):
+    config = copy.deepcopy(fixture[0].config)
+    job = config['jobs'][0]
+    if fault == 'missing':
+        del job['runtime_identity']
+    elif fault == 'extra':
+        job['runtime_identity']['credential_path'] = 'private'
+    elif fault == 'bad_sha':
+        job['runtime_identity']['executor_package_digest'] = 'not-a-sha'
+    elif fault == 'bool_sha':
+        job['runtime_identity']['chromium_sha256'] = True
+    elif fault == 'bad_version':
+        job['runtime_identity']['playwright_version'] = 'latest'
+    else:
+        del job['runtime_identity']['lock_sha256']
+    path = tmp_path / 'installation.json'
+    path.write_text(json.dumps(config))
+    monkeypatch.setenv('LEAF_WALK_INSTALLATION_FILE', str(path))
+    with pytest.raises(bridge.BridgeError) as error:
+        bridge.installation()
+    assert error.value.status == 503
+
+
+def test_installation_validates_and_doctor_rejects_bad_endpoint(fixture, tmp_path, monkeypatch):
+    config = copy.deepcopy(fixture[0].config)
+    path = tmp_path / 'installation.json'
+    path.write_text(json.dumps(config))
+    monkeypatch.setenv('LEAF_WALK_INSTALLATION_FILE', str(path))
+    assert bridge.installation() == config
+    fixture[0].config['endpoint'] = 'https://user:private@example.org/jobs'
+    with pytest.raises(bridge.BridgeError):
+        fixture[0].doctor({'enrollment_id': ENROLLMENT, 'campaign_id': CAMPAIGN}, 'service')
+
+
+def test_discovery_job_count_bound(fixture):
+    fixture[0].config['jobs'] *= 33
+    with pytest.raises(bridge.BridgeError):
+        fixture[0].doctor({'enrollment_id': ENROLLMENT, 'campaign_id': CAMPAIGN}, 'service')
+
+
+def test_disabled_doctor_still_discovers_runtime_pins(fixture):
+    fixture[0].config['enabled'] = False
+    output = fixture[0].doctor({'enrollment_id': ENROLLMENT, 'campaign_id': CAMPAIGN}, 'service')
+    assert output['state'] == 'execution_disabled'
+    assert output['installation']['jobs'][0]['runtime_identity']['executor_package_digest'] == '4' * 64
 
 
 def test_media_failure_preserves_verified_terminal_accounting(fixture, monkeypatch):
