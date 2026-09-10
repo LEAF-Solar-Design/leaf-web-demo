@@ -249,32 +249,6 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         total_points += len(pts)
         if total_points > MAX_POINTS:
             _fail(f"more than {MAX_POINTS} points in total")
-        coords: List[tuple] = []
-        for j, pt in enumerate(pts):
-            if not isinstance(pt, (list, tuple)) or len(pt) not in (2, 3):
-                _fail(f"{where}.pts[{j}]: a point is [x, y] or [x, y, z]")
-            x = _number(pt[0], f"{where}.pts[{j}]")
-            y = _number(pt[1], f"{where}.pts[{j}]")
-            z = _number(pt[2], f"{where}.pts[{j}]") if len(pt) == 3 else 0.0
-            coords.append((x, y, z))
-        bulges = None
-        if "bulges" in poly:
-            values = poly["bulges"]
-            if not isinstance(values, list):
-                _fail(f"{where}.bulges: must be a list of finite numbers")
-            bulges = []
-            for j, value in enumerate(values):
-                if (isinstance(value, bool) or not isinstance(value, (int, float))):
-                    _fail(f"{where}.bulges[{j}]: must be a finite number")
-                try:
-                    value = float(value)
-                except OverflowError:
-                    _fail(f"{where}.bulges[{j}]: must be a finite number")
-                if not math.isfinite(value):
-                    _fail(f"{where}.bulges[{j}]: must be a finite number")
-                bulges.append(value)
-            if len(bulges) != len(coords):
-                bulges = None
         handle = poly.get("handle")
         normal = None
         if "normal" in poly:
@@ -295,6 +269,49 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
                 normal.append(value)
             if not any(abs(a - b) > 1e-6 for a, b in zip(normal, (0, 0, 1))):
                 normal = None
+        # An LWPOLYLINE is planar in its own OCS by construction: when `normal`
+        # is present, every vertex's recovered OCS z is taken from the FIRST
+        # vertex and shared, rather than trusting each vertex's own
+        # (floating-point-noisy) projection to agree exactly — the exact
+        # inverse of dxf_intake._parse_lwpolyline, which stores one shared
+        # elevation for every vertex the same way.
+        coords: List[tuple] = []
+        elevation = None
+        for j, pt in enumerate(pts):
+            if not isinstance(pt, (list, tuple)) or len(pt) not in (2, 3):
+                _fail(f"{where}.pts[{j}]: a point is [x, y] or [x, y, z]")
+            x = _number(pt[0], f"{where}.pts[{j}]")
+            y = _number(pt[1], f"{where}.pts[{j}]")
+            z = _number(pt[2], f"{where}.pts[{j}]") if len(pt) == 3 else 0.0
+            if normal is not None:
+                x, y, oz = _wcs_to_ocs((x, y, z), normal)
+                if elevation is None:
+                    elevation = oz
+                z = elevation
+            coords.append((x, y, z))
+        bulges = None
+        if "bulges" in poly:
+            values = poly["bulges"]
+            if not isinstance(values, list):
+                _fail(f"{where}.bulges: must be a list of finite numbers")
+            bulges = []
+            for j, value in enumerate(values):
+                if (isinstance(value, bool) or not isinstance(value, (int, float))):
+                    _fail(f"{where}.bulges[{j}]: must be a finite number")
+                try:
+                    value = float(value)
+                except OverflowError:
+                    _fail(f"{where}.bulges[{j}]: must be a finite number")
+                if not math.isfinite(value):
+                    _fail(f"{where}.bulges[{j}]: must be a finite number")
+                bulges.append(value)
+            if len(bulges) != len(coords):
+                bulges = None
+            elif normal is not None and normal[2] < 0:
+                # The arbitrary-axis algorithm reflects XY for a negative
+                # normal z; dxf_intake.py flips bulge sign on the way in, so
+                # writing the raw DXF bulge undoes that flip here.
+                bulges = [-b for b in bulges]
         h = _real_handle(handle, where, real)
         if h is not None:
             highest = max(highest, int(h, 16))
