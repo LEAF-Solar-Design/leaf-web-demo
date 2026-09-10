@@ -440,6 +440,84 @@ def test_delete_never_reachable_revocation_endpoint_still_removes(monkeypatch):
 # --------------------------------------------------------------------------- #
 # store-level bounds
 # --------------------------------------------------------------------------- #
+def test_absent_store_reads_do_not_create_directory(tmp_path, monkeypatch):
+    store_dir = tmp_path / "absent" / "tenant_mcp"
+    monkeypatch.setenv("LEAF_TENANT_MCP_DIR", str(store_dir))
+    monkeypatch.delenv("LEAF_AGENT_STATE_DIR", raising=False)
+
+    assert tenant_mcp_store.list_records(_TENANT) == []
+    assert tenant_mcp_store.get_record(_TENANT, "0" * 24) is None
+    assert not store_dir.exists()
+
+
+def test_uncreatable_store_reads_as_empty(tmp_path, monkeypatch):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setenv("LEAF_TENANT_MCP_DIR", str(blocker / "tenant_mcp"))
+    monkeypatch.delenv("LEAF_AGENT_STATE_DIR", raising=False)
+
+    assert tenant_mcp_store.list_records(_TENANT) == []
+    assert blocker.read_text(encoding="utf-8") == "not a directory"
+
+
+def test_capabilities_survives_uncreatable_mcp_store(tmp_path, monkeypatch):
+    from routers import capabilities
+
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setenv("LEAF_TENANT_MCP_DIR", str(blocker / "tenant_mcp"))
+    monkeypatch.delenv("LEAF_AGENT_STATE_DIR", raising=False)
+    test_client = client()
+    test_client.app.include_router(capabilities.router)
+    test_client.app.dependency_overrides[capabilities.deps.require_tenant] = lambda: _TENANT
+
+    resp = test_client.get("/api/capabilities")
+    assert resp.status_code == 200
+    assert blocker.read_text(encoding="utf-8") == "not a directory"
+
+
+def test_register_creates_absent_store_directory(tmp_path, monkeypatch):
+    store_dir = tmp_path / "absent" / "tenant_mcp"
+    monkeypatch.setenv("LEAF_TENANT_MCP_DIR", str(store_dir))
+    monkeypatch.delenv("LEAF_AGENT_STATE_DIR", raising=False)
+    assert not store_dir.exists()
+
+    record = tenant_mcp_store.register(
+        _TENANT, url="https://mcp.example.com/sse", label="svc", host="mcp.example.com")
+
+    assert store_dir.is_dir()
+    assert tenant_mcp_store.list_records(_TENANT) == [record]
+
+
+@pytest.mark.parametrize("store_override,state_override", [
+    ("explicit", "state"),
+    (None, "state"),
+    (None, None),
+    ("", "state"),
+    ("", ""),
+])
+def test_store_directory_precedence_creates_nothing(
+    tmp_path, monkeypatch, store_override, state_override,
+):
+    monkeypatch.delenv("LEAF_TENANT_MCP_DIR", raising=False)
+    monkeypatch.delenv("LEAF_AGENT_STATE_DIR", raising=False)
+    if store_override is not None:
+        monkeypatch.setenv(
+            "LEAF_TENANT_MCP_DIR", str(tmp_path / store_override) if store_override else "")
+    if state_override is not None:
+        monkeypatch.setenv(
+            "LEAF_AGENT_STATE_DIR", str(tmp_path / state_override) if state_override else "")
+    server_dir = tmp_path / "server"
+    monkeypatch.setattr(tenant_mcp_store, "SERVER_DIR", server_dir)
+    expected = (
+        tmp_path / store_override if store_override else
+        (tmp_path / state_override if state_override else server_dir / "data") / "tenant_mcp"
+    )
+
+    assert tenant_mcp_store._dir() == expected
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_store_write_is_atomic_no_tmp_files_left(tmp_path):
     tenant_mcp_store.register(_TENANT, url="https://mcp.example.com/sse",
                                label="svc", host="mcp.example.com")

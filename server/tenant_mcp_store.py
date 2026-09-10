@@ -65,10 +65,12 @@ class TenantMcpStoreError(Exception):
 
 
 def _dir() -> Path:
+    """Resolve without writing into the container's read-only server tree; writes create the directory through _write_atomic."""
     override = os.environ.get("LEAF_TENANT_MCP_DIR")
-    path = Path(override) if override else (SERVER_DIR / "data" / "tenant_mcp")
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    if override:
+        return Path(override)
+    state_dir = os.environ.get("LEAF_AGENT_STATE_DIR")
+    return (Path(state_dir) if state_dir else SERVER_DIR / "data") / "tenant_mcp"
 
 
 def _tenant_file(tenant_id: str) -> Path:
