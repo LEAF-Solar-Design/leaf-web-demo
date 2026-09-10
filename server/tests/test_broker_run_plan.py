@@ -196,12 +196,25 @@ def test_plan_503_names_an_unready_activity(monkeypatch, client, body, caplog):
 def test_plan_endpoint_fails_closed_without_ready_activity_or_da(
     monkeypatch, client, body, failure,
 ):
+    if failure.startswith("readiness"):
+        # The APS client, the base intake and the canonical plan are all read
+        # BEFORE the Activity gate, so a readiness case that leaves them alone
+        # never reaches the refusal it asserts on.
+        monkeypatch.setattr(broker, "_get_da",
+                            lambda: SimpleNamespace(run_tool=lambda *_a, **_k: None))
+        monkeypatch.setattr(write_loop, "default_backend", lambda **_k: object())
+        monkeypatch.setattr(write_loop, "read_intake",
+                            lambda *_a, **_k: (body["plan"]["parent_version"], {}))
+        monkeypatch.setattr(mutation_plan, "validate_mutations",
+                            lambda *_a, **_k: body["plan"]["mutations"])
+    # `readiness(contract=...)`: a stub that refuses the kwarg is swallowed by the
+    # broker's own except-clause, which would pass this test for the wrong reason.
     if failure == "readiness":
-        monkeypatch.setattr(mutation_apply, "readiness", lambda: {
+        monkeypatch.setattr(mutation_apply, "readiness", lambda contract=2: {
             "ready": False, "mismatches": ["x"],
         })
     elif failure == "readiness-exception":
-        def unavailable():
+        def unavailable(contract=2):
             raise RuntimeError("activity lookup failed")
         monkeypatch.setattr(mutation_apply, "readiness", unavailable)
     else:
@@ -213,11 +226,15 @@ def test_plan_endpoint_fails_closed_without_ready_activity_or_da(
     assert envelope["error"]["retryable"] is True
     message = envelope["error"]["message"]
     if failure.startswith("readiness"):
+        assert envelope["error"]["reason_code"] == "plan_activity_not_ready"
         assert "mutation Activity not ready:" in message
         assert ("x" if failure == "readiness" else "activity lookup failed") in message
     else:
+        assert envelope["error"]["reason_code"] == "plan_aps_client_unavailable"
         assert "there is no degraded writer for a data plan" in message
-        assert envelope["result"]["activity_version"] == 12
+        # The client check precedes the Activity read, so this refusal carries no
+        # activity_version: a refusal reporting one would be reporting a guess.
+        assert envelope["result"] is None
 
 
 @pytest.mark.parametrize("store_mode", ["legacy", "postgres"])
@@ -266,6 +283,12 @@ def test_plan_endpoint_passes_identity_and_records_activity_once(
 
     monkeypatch.setattr(broker, "_get_da", lambda: da)
     monkeypatch.setattr(write_loop, "default_backend", get_backend)
+    # The real `read_intake`/`validate_mutations` need a readable store backend,
+    # and `backend` here is an identity token, so the happy path stubs both.
+    monkeypatch.setattr(write_loop, "read_intake",
+                        lambda *_a, **_k: (body["plan"]["parent_version"], {}))
+    monkeypatch.setattr(mutation_plan, "validate_mutations",
+                        lambda *_a, **_k: body["plan"]["mutations"])
     monkeypatch.setattr(write_loop, "run_data_plan_live", run_plan)
     # No caller code loads, so a deployed posture does not close this route.
     monkeypatch.setenv("LEAF_RUNTIME_ENV", "production")
@@ -318,7 +341,9 @@ def test_plan_readiness_cache_bounds_activity_calls(monkeypatch, client, ready):
     result = {"ready": ready, "mismatches": [] if ready else ["x"],
               "activity": {"alias": "prod", "version": 12}}
 
-    def readiness():
+    # Signature must match the broker's `readiness(contract=...)` call: a stub that
+    # refuses the kwarg is swallowed into a "not ready" result by `_plan_activity_ready`.
+    def readiness(contract=2):
         calls.append(now[0])
         return result
 

@@ -712,6 +712,18 @@ def build_suites() -> List[Suite]:
         # in the file, so no environment collects or executes fewer.
         Suite("server-broker-boundary", "server tests/test_broker_boundary.py", "pytest",
               SERVER, _py_pytest("tests/test_broker_boundary.py"), 59),
+        # The /broker/run-plan route, boundary's companion: it owns the live-write
+        # entry point's schema, identity, fail-closed and readiness-cache contracts.
+        # Registered per the #29 fix-then-register rule after it sat UNREGISTERED
+        # and drifted red on main (8 of 18 failing, unseen by CI, 2026-09-10): the
+        # stale bodies predated `_execute_plan` loading the APS client BEFORE the
+        # Activity read, and `readiness()` growing a `contract` kwarg.
+        # Floor 22, measured 2026-09-10 and safe on every runner: 10 test
+        # functions, five carrying a `parametrize` over a literal list (7+2+4+2+2),
+        # so 5 + 17 = 22, with no skipif, pytest.skip, importorskip, xfail, or
+        # platform/env branching anywhere in the file to collect or execute fewer.
+        Suite("server-broker-run-plan", "server tests/test_broker_run_plan.py", "pytest",
+              SERVER, _py_pytest("tests/test_broker_run_plan.py"), 22),
         Suite("server-live-mutation-plan",
               "server tests/test_live_mutation_plan.py", "pytest", SERVER,
               _py_pytest("tests/test_live_mutation_plan.py"), 34),
