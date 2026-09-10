@@ -160,8 +160,48 @@ def _cleanup_scratch_objects(da: Any, scratch_keys) -> None:
             )
 
 
-def fence_open() -> bool:
-    """Live cutover state from the shared EFS fence FILE alone.
+# Stable, public reason codes for a refused drawing mutation. They travel to the
+# caller as the envelope's ``error.reason_code`` and to the broker log as
+# ``reason=``, so a 503 names the precondition that refused it instead of
+# costing a log-spelunking round trip across four log groups. Each names a
+# CONFIGURATION or FENCE state only: never a tenant, drawing, path, or secret.
+MUTATION_REFUSED_ENV_DISABLED = "drawing_mutations_env_disabled"
+MUTATION_REFUSED_FENCE_CLOSED = "drawing_mutations_fence_closed"
+MUTATION_REFUSED_FENCE_UNREADABLE = "drawing_mutations_fence_unreadable"
+MUTATION_REFUSED_LOCK_UNAVAILABLE = "drawing_mutations_fence_lock_unavailable"
+MUTATION_REFUSED_UNATTRIBUTED = "drawing_mutations_refused_unattributed"
+
+MUTATION_REFUSAL_MESSAGES: Dict[str, str] = {
+    MUTATION_REFUSED_ENV_DISABLED:
+        "drawing mutations are disabled by configuration "
+        "(LEAF_DRAWING_MUTATIONS_ENABLED is not \"1\")",
+    MUTATION_REFUSED_FENCE_CLOSED:
+        "drawing mutations are fenced shut for a storage cutover "
+        "(LEAF_DRAWING_MUTATIONS_FENCE_FILE does not hold \"1\")",
+    MUTATION_REFUSED_FENCE_UNREADABLE:
+        "the drawing mutation fence file is unreadable, so mutations fail closed "
+        "(LEAF_DRAWING_MUTATIONS_FENCE_FILE)",
+    MUTATION_REFUSED_LOCK_UNAVAILABLE:
+        "the drawing mutation fence lock is unavailable on this host, "
+        "so mutations fail closed",
+    MUTATION_REFUSED_UNATTRIBUTED:
+        "drawing mutations were refused by the mutation fence",
+}
+
+
+def mutation_refusal_message(reason: Optional[str]) -> str:
+    """Public message for a reason code. Unknown codes fail SAFE, never raise:
+    an observability path must not be able to turn a 503 into a 500."""
+    return MUTATION_REFUSAL_MESSAGES.get(
+        reason or "", MUTATION_REFUSAL_MESSAGES[MUTATION_REFUSED_UNATTRIBUTED])
+
+
+def fence_refusal() -> Optional[str]:
+    """Typed live cutover state from the shared EFS fence FILE alone.
+
+    ``None`` means open; anything else is the stable reason code that refused.
+    ONE read decides and reports, so the reason a caller is told is the reason
+    it was actually refused, with no re-read to race the cutover control.
 
     The fence is the one authority EVERY drawing-authority lane shares, so a
     storage cutover drains already-running app and broker tasks without waiting
@@ -170,27 +210,44 @@ def fence_open() -> bool:
     """
     fence = os.environ.get("LEAF_DRAWING_MUTATIONS_FENCE_FILE", "").strip()
     if not fence:
-        return True
+        return None
     try:
-        return Path(fence).read_text(encoding="utf-8").strip() == "1"
+        state = Path(fence).read_text(encoding="utf-8").strip()
     except (OSError, UnicodeError):
-        return False
+        return MUTATION_REFUSED_FENCE_UNREADABLE
+    return None if state == "1" else MUTATION_REFUSED_FENCE_CLOSED
 
 
-def drawing_mutations_enabled() -> bool:
-    """Authored / checkout / broker-run lane: the env default AND the fence.
+def fence_open() -> bool:
+    """Boolean view of ``fence_refusal``. The typed form is the ONE rule; this
+    is a projection of it, so the two can never disagree."""
+    return fence_refusal() is None
+
+
+def drawing_mutations_refusal() -> Optional[str]:
+    """Typed gate for the authored / checkout / broker-run lane: the env default
+    AND the fence. ``None`` means admitted, else the reason code that refused.
 
     Scoped to THAT lane on purpose. The upload/import lane has its own env gate
     (``upload_import_mutations_enabled``) and must not be closed by this one --
     see ``upload_mutation_commit_guard``.
+
+    The env flag is checked FIRST so a deployment-level drain is reported as
+    itself rather than as a storage cutover, which is exactly the attribution
+    the old boolean gate could not make.
     """
     if os.environ.get("LEAF_DRAWING_MUTATIONS_ENABLED", "1") != "1":
-        return False
-    return fence_open()
+        return MUTATION_REFUSED_ENV_DISABLED
+    return fence_refusal()
+
+
+def drawing_mutations_enabled() -> bool:
+    """Boolean view of ``drawing_mutations_refusal`` (see there for the rule)."""
+    return drawing_mutations_refusal() is None
 
 
 @contextmanager
-def _fence_held(decide):
+def _fence_held(decide, *, denied=False):
     """Hold the shared cutover fence across one durable drawing commit.
 
     Linux tasks take a shared flock.  The protected cutover control takes the
@@ -199,6 +256,11 @@ def _fence_held(decide):
 
     ``decide`` is the lane's own open/closed rule, evaluated INSIDE the lock so
     the answer cannot go stale between the check and the commit.
+
+    ``denied`` is what a caller is handed when the LOCK ITSELF is unavailable
+    (no fcntl), which is a fail-closed refusal rather than the lane's answer.
+    Boolean callers pass ``False``; a typed caller passes its reason code, so
+    that refusal stops being indistinguishable from a drained fence.
     """
     fence = os.environ.get("LEAF_DRAWING_MUTATIONS_FENCE_FILE", "").strip()
     if not fence:
@@ -210,7 +272,7 @@ def _fence_held(decide):
         try:
             import fcntl  # Linux deployment; unavailable on Windows unit hosts.
         except ImportError:
-            yield False
+            yield denied
             return
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH)
         try:
@@ -224,6 +286,20 @@ def drawing_mutation_commit_guard():
     """Commit guard for the authored / checkout / broker-run lane."""
     with _fence_held(drawing_mutations_enabled) as commit_enabled:
         yield commit_enabled
+
+
+@contextmanager
+def drawing_mutation_refusal_guard():
+    """Typed sibling of ``drawing_mutation_commit_guard``.
+
+    Yields ``None`` when the commit is admitted, else the stable reason code
+    that refused it. Same lock, same rule, ONE fence read taken inside the lock,
+    so the reason a route reports is the reason the guard actually refused on
+    and cannot be re-read into a different answer by a concurrent cutover.
+    """
+    with _fence_held(drawing_mutations_refusal,
+                     denied=MUTATION_REFUSED_LOCK_UNAVAILABLE) as refusal:
+        yield refusal
 
 
 @contextmanager

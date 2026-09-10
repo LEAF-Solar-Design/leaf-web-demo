@@ -105,6 +105,85 @@ def test_unconfigured_fence_leaves_the_env_default_in_charge(monkeypatch):
     assert write_loop.drawing_mutations_enabled() is False
 
 
+@pytest.mark.parametrize(
+    "env, contents, expected",
+    [
+        # The staging case that cost a four-log-group investigation: the env
+        # flag was the refusing precondition and the 503 blamed a cutover.
+        ("0", "1\n", write_loop.MUTATION_REFUSED_ENV_DISABLED),
+        ("0", "0\n", write_loop.MUTATION_REFUSED_ENV_DISABLED),
+        ("1", "0\n", write_loop.MUTATION_REFUSED_FENCE_CLOSED),
+        ("1", "banana", write_loop.MUTATION_REFUSED_FENCE_CLOSED),
+        ("1", "", write_loop.MUTATION_REFUSED_FENCE_CLOSED),
+        ("1", "1\n", None),
+    ],
+)
+def test_refusal_names_the_precondition_that_actually_refused(
+    monkeypatch, tmp_path, env, contents, expected,
+):
+    """The env flag and the fence are distinguishable, and the env flag wins the
+    attribution when both are shut -- it is checked first, so a deployment drain
+    is never reported as a storage cutover."""
+    fence = tmp_path / "drawing-mutations"
+    fence.write_text(contents, encoding="utf-8")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", env)
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", str(fence))
+
+    assert write_loop.drawing_mutations_refusal() == expected
+    # The boolean gate is a PROJECTION of the typed one, so the two can never
+    # disagree about admission -- only about how much they can say.
+    assert write_loop.drawing_mutations_enabled() is (expected is None)
+
+
+def test_an_unreadable_fence_is_distinguishable_from_a_drained_one(
+    monkeypatch, tmp_path,
+):
+    """Both fail CLOSED, but "the file says 0" and "I could not read the file"
+    are different operator actions, so they get different reason codes."""
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    monkeypatch.setenv(
+        "LEAF_DRAWING_MUTATIONS_FENCE_FILE", str(tmp_path / "never-written"))
+
+    assert (write_loop.fence_refusal()
+            == write_loop.MUTATION_REFUSED_FENCE_UNREADABLE)
+    assert write_loop.fence_open() is False
+    assert write_loop.drawing_mutations_enabled() is False
+
+
+def test_unconfigured_fence_refuses_nothing_on_its_own(monkeypatch):
+    monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", raising=False)
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    assert write_loop.fence_refusal() is None
+    assert write_loop.drawing_mutations_refusal() is None
+
+
+def test_every_reason_code_has_a_public_message():
+    """A missing message must never turn an observability path into a 500, so
+    the lookup is total and an unknown code degrades to the generic refusal."""
+    for reason, message in write_loop.MUTATION_REFUSAL_MESSAGES.items():
+        assert write_loop.mutation_refusal_message(reason) == message
+        assert message  # no empty refusal ever reaches a caller
+    generic = write_loop.MUTATION_REFUSAL_MESSAGES[
+        write_loop.MUTATION_REFUSED_UNATTRIBUTED]
+    assert write_loop.mutation_refusal_message(None) == generic
+    assert write_loop.mutation_refusal_message("not-a-reason-code") == generic
+
+
+def test_reason_codes_carry_no_identifier_or_path(monkeypatch, tmp_path):
+    """The codes and their messages are the part that reaches a log line, so
+    they name CONFIGURATION only -- never a tenant, drawing, or fence path."""
+    fence = tmp_path / "secret-tenant-path" / "drawing-mutations"
+    fence.parent.mkdir(parents=True)
+    fence.write_text("0\n", encoding="utf-8")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", str(fence))
+
+    reason = write_loop.drawing_mutations_refusal()
+    assert reason == write_loop.MUTATION_REFUSED_FENCE_CLOSED
+    assert "secret-tenant-path" not in reason
+    assert "secret-tenant-path" not in write_loop.mutation_refusal_message(reason)
+
+
 def test_env_drain_beats_an_open_fence(monkeypatch, tmp_path):
     """The two gates are AND, not OR: an open fence cannot re-enable a drained
     deployment flag."""
