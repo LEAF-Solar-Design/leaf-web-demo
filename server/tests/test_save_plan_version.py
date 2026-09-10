@@ -297,6 +297,45 @@ def test_live_leg_submits_a_plan_job_and_writes_nothing(live):
     assert not backend.exists(write_loop.edited_source_key(TENANT, DWG_DRAWING, 2))
 
 
+def _live_full_precision_base_intake():
+    intake = _live_base_intake()
+    intake["polylines"][0]["pts"] = [
+        [17419.35743637016, 3971.032266062823, -25.29583244775665],
+        [17421.35743637016, 3971.032266062823, -25.29583244775665],
+        [17421.35743637016, 3973.032266062823, -25.29583244775665],
+        [17419.35743637016, 3973.032266062823, -25.29583244775665],
+    ]
+    return intake
+
+
+@pytest.mark.parametrize("live", [_live_full_precision_base_intake()], indirect=True)
+def test_live_leg_accepts_full_precision_unchanged_polyline(live):
+    # (d) Live-leg upload binding reaches unchanged A with a raw DWG intake.
+    # On main this returns 422: "does not carry the plan's result".
+    client, _backend, submissions = live
+    capability = _checkout(client)
+    points = _live_full_precision_base_intake()["polylines"][0]["pts"]
+    polyline = (
+        "0\nLWPOLYLINE\n5\nA\n8\nRoof\n90\n4\n70\n1\n"
+        f"38\n{points[0][2]}\n"
+        + "".join(f"10\n{x}\n20\n{y}\n" for x, y, _z in points)
+    ).encode("ascii")
+    data = EDITED_DXF.replace(
+        b"0\nLWPOLYLINE\n5\nA\n8\nRoof\n90\n3\n70\n1\n"
+        b"10\n0\n20\n0\n10\n50\n20\n0\n10\n50\n20\n30\n",
+        polyline,
+    )
+
+    resp = _post(client, DWG_DRAWING, _live_mutations(), data=data, capability=capability)
+
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["commit"] == "dwg-plan"
+    assert resp.json()["job_id"] == "live-plan-job"
+    assert len(submissions) == 1
+    assert submissions[0]["plan"]["mutations"]["set_points"][0]["handle"] == "1F"
+    assert _head(client, DWG_DRAWING) == 1
+
+
 def test_live_leg_accepts_extractor_quantum_without_changing_the_plan(live):
     client, _backend, submissions = live
     capability = _checkout(client)

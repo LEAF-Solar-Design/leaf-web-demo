@@ -2038,6 +2038,18 @@ def verify_live_mutation_effects(
             continue
         changed = handle in transformed or handle in replaced
         expected_entity = expected_by_handle[handle] if changed else entity
+        if not changed:
+            expected_entity = entity.copy()
+            if isinstance(entity.get("pts"), list):
+                expected_entity["pts"] = [
+                    [
+                        _extractor_round(_plan_number(value), 3)
+                        if isinstance(value, (int, float)) and not isinstance(value, bool)
+                        else value
+                        for value in point
+                    ] if isinstance(point, (list, tuple)) else point
+                    for point in entity["pts"]
+                ]
         if not _polyline_effect_matches(
                 expected_entity, actual_by_handle[handle], extracted=changed):
             effect = (

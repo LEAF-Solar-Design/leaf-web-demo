@@ -667,6 +667,61 @@ def test_live_effect_verification_accepts_extractor_coordinate_quantization():
     )
 
 
+def _full_precision_unchanged_polyline_case():
+    base = _base()
+    base["polylines"][1]["pts"] = [
+        [17419.35743637016, 3971.032266062823, -25.29583244775665],
+        [17421.35743637016, 3971.032266062823, -25.29583244775665],
+        [17421.35743637016, 3973.032266062823, -25.29583244775665],
+        [17419.35743637016, 3973.032266062823, -25.29583244775665],
+    ]
+    actual = _actual_success()
+    actual["polylines"][0]["pts"] = [
+        [17419.357, 3971.032, -25.296],
+        [17421.357, 3971.032, -25.296],
+        [17421.357, 3973.032, -25.296],
+        [17419.357, 3973.032, -25.296],
+    ]
+    canonical = validate_mutations(base, _mutations(), allow_transforms=False)
+    return base, actual, canonical
+
+
+def test_unchanged_polyline_matches_full_precision_base_at_extractor_quantum():
+    # (a) Unchanged B branch while A is removed and C added. On main this
+    # fails with "unchanged handle 'B' has unexpected output geometry".
+    base, actual, canonical = _full_precision_unchanged_polyline_case()
+    before = copy.deepcopy(base)
+
+    write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+    assert base == before
+
+
+def test_unchanged_polyline_refuses_drift_beyond_extractor_quantum():
+    # (b) Unchanged B branch must still refuse a 0.002 x drift.
+    base, actual, canonical = _full_precision_unchanged_polyline_case()
+    actual["polylines"][0]["pts"][0][0] += 0.002
+
+    with pytest.raises(
+            ValueError, match="^unchanged handle '.*' has unexpected output geometry$"):
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+@pytest.mark.parametrize("actual_x,accepted", [(10.063, True), (10.062, False)])
+def test_unchanged_polyline_decimal_tie_rounds_half_up(actual_x, accepted):
+    # (c) Unchanged B branch uses ROUND_HALF_UP at a decimal tie.
+    base, actual, canonical = _full_precision_unchanged_polyline_case()
+    base["polylines"][1]["pts"][0][0] = 10.0625
+    actual["polylines"][0]["pts"][0][0] = actual_x
+
+    if accepted:
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+    else:
+        with pytest.raises(
+                ValueError, match="^unchanged handle '.*' has unexpected output geometry$"):
+            write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
 def test_live_effect_verification_rejects_change_beyond_extractor_precision():
     base = {"dwg": "source.dwg", "layers": [], "polylines": []}
     added = _entity("CENTERED", "Leaf Output")
