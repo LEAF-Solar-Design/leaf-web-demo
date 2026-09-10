@@ -39,7 +39,8 @@ _BRIDGE_BUCKET_MAX_ENTRIES = 256
 _BRIDGE_BUCKETS = OrderedDict()
 _BRIDGE_BUCKET_LOCK = Lock()
 _BRIDGE_OPS = frozenset(('next', 'export', 'bind', 'admit', 'settle', 'recover',
-                         'plan', 'product', 'host_op', 'host_settle', 'host_grant'))
+                         'plan', 'product', 'host_op', 'host_settle', 'host_grant',
+                         'walk_doctor', 'walk_prepare', 'walk_read', 'walk_request', 'walk_receipt'))
 
 
 def _bridge_retry_after(subject):
@@ -374,6 +375,8 @@ async def campaign_bridge_operation(op: str, request: Request,
         return _failure(400, 'invalid_request', 'Invalid campaign bridge request')
     try:
         _store()
+        if op in ('walk_doctor', 'walk_prepare', 'walk_read', 'walk_request', 'walk_receipt'):
+            return await run_in_threadpool(campaign_bridge.handle, op, body, subject)
         return campaign_bridge.handle(op, body, subject)
     except campaign_bridge.BridgeError as exc:
         status = exc.status
