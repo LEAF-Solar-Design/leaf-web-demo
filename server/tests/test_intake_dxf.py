@@ -362,6 +362,107 @@ def test_texts_round_trip_and_empty_texts_are_dropped_like_the_parser_does():
     assert [t["pt"] for t in back["texts"]] == [[1.0, 2.0], [3.0, 4.0]]
 
 
+@pytest.mark.parametrize("kind,expected", [
+    ("TEXT", b"0\nTEXT\n5\n30\n100\nAcDbEntity\n8\nT\n"
+     b"100\nAcDbText\n10\n1.0\n20\n2.0\n30\n0.0\n"
+     b"40\n2.5\n1\nnorth\n100\nAcDbText\n"),
+    ("MTEXT", b"0\nMTEXT\n5\n30\n100\nAcDbEntity\n8\nT\n"
+     b"100\nAcDbMText\n10\n1.0\n20\n2.0\n30\n0.0\n"
+     b"40\n2.5\n1\nnorth\n"),
+])
+def test_identity_text_entity_bytes_are_unchanged(kind, expected):
+    intake = {"layers": ["T"], "texts": [
+        {"kind": kind, "layer": "T", "pt": [1.0, 2.0],
+         "text": "north", "handle": "30"}]}
+    data = intake_dxf.intake_to_dxf(intake)
+    entity = data.split(b"0\nSECTION\n2\nENTITIES\n", 1)[1].split(b"0\nENDSEC\n", 1)[0]
+    assert entity == expected
+    assert b"\n210\n" not in data
+
+
+@pytest.mark.parametrize("kind", ["TEXT", "MTEXT"])
+def test_elevated_text_round_trips_exactly(kind):
+    intake = {"layers": ["T"], "texts": [
+        {"kind": kind, "layer": "T", "pt": [1.0, 2.0, 5.0],
+         "text": "north", "handle": "30"}]}
+    back, data = _roundtrip(intake)
+    assert back["texts"] == intake["texts"]
+    assert back["texts"][0]["pt"] == [1.0, 2.0, 5.0]
+    assert b"\n10\n1.0\n20\n2.0\n30\n5.0\n" in data
+    assert b"\n210\n" not in data
+
+
+@pytest.mark.parametrize("kind", ["TEXT", "MTEXT"])
+def test_tilted_text_recovers_frozen_ocs_groups_and_round_trips_exactly(kind):
+    # For N = (0, 0.6, 0.8), OCS (x, y, e) maps to WCS
+    # (-x, -0.8*y + 0.6*e, 0.6*y + 0.8*e): (2, 3, 4) -> (-2, 0, 5).
+    intake = {"dwg": "x", "layers": ["T"], "polylines": [], "texts": [
+        {"kind": kind, "layer": "T", "pt": [-2.0, 0.0, 5.0],
+         "text": "north", "handle": "30", "normal": [0.0, 0.6, 0.8]}]}
+    back, data = _roundtrip(intake)
+    lines = data.decode().splitlines()
+    pairs = list(zip(lines[::2], lines[1::2]))
+    start = pairs.index(("0", kind))
+    end = pairs.index(("0", "ENDSEC"), start)
+    entity = pairs[start:end]
+    for code, expected in [("10", 2.0), ("20", 3.0), ("30", 4.0),
+                           ("210", 0.0), ("220", 0.6), ("230", 0.8)]:
+        values = [float(value) for group, value in entity if group == code]
+        assert values == pytest.approx([expected], rel=0, abs=1e-9)
+    assert [code for code, _ in entity[-3:]] == ["210", "220", "230"]
+    assert back["layers"] == intake["layers"]
+    assert back["polylines"] == intake["polylines"]
+    assert len(back["texts"]) == len(intake["texts"])
+    original = intake["texts"][0]
+    reparsed = back["texts"][0]
+    assert reparsed.keys() == original.keys()
+    for field, expected in original.items():
+        if field in ("pt", "normal"):
+            assert reparsed[field] == pytest.approx(expected, abs=1e-9)
+        else:
+            assert reparsed[field] == expected
+
+
+@pytest.mark.parametrize("kind", ["TEXT", "MTEXT"])
+@pytest.mark.parametrize("normal", [[0, 0, 1], [1e-9, 0, 1]])
+def test_identity_text_normal_emits_identical_bytes_to_absent_normal(kind, normal):
+    intake = {"layers": ["T"], "texts": [
+        {"kind": kind, "layer": "T", "pt": [1.0, 2.0],
+         "text": "north", "handle": "30"}]}
+    plain = intake_dxf.intake_to_dxf(intake)
+    intake["texts"][0]["normal"] = normal
+    data = intake_dxf.intake_to_dxf(intake)
+    assert data == plain
+    assert b"\n210\n" not in data
+
+
+@pytest.mark.parametrize("kind", ["TEXT", "MTEXT"])
+@pytest.mark.parametrize("normal", [
+    [0, 0, 0], [0, 0, "x"], None, (0, 0, 1), [0, 1],
+    [False, 0, 1], [0, 0, float("nan")], [0, 0, float("inf")],
+])
+def test_invalid_text_normal_is_refused_with_row_and_handle(kind, normal):
+    intake = {"layers": ["T"], "texts": [
+        {"kind": kind, "layer": "T", "pt": [1.0, 2.0],
+         "text": "north", "handle": "30", "normal": normal}]}
+    with pytest.raises(intake_dxf.IntakeDxfError, match=r"texts\[0\] handle '30': normal"):
+        intake_dxf.intake_to_dxf(intake)
+
+
+@pytest.mark.parametrize("pt,needle", [
+    ([1.0], "texts[0]: pt must be [x, y]"),
+    ([1.0, 2.0, 3.0, 4.0], "texts[0]: pt must be [x, y] or [x, y, z]"),
+    ([1.0, 2.0, "x"], "texts[0].pt: coordinate is not a number"),
+    ([1.0, 2.0, float("nan")], "texts[0].pt: coordinate is not finite"),
+])
+def test_invalid_text_point_is_refused_with_row(pt, needle):
+    intake = {"layers": ["T"], "texts": [
+        {"kind": "TEXT", "layer": "T", "pt": pt, "text": "north", "handle": "30"}]}
+    with pytest.raises(intake_dxf.IntakeDxfError) as exc:
+        intake_dxf.intake_to_dxf(intake)
+    assert needle in str(exc.value)
+
+
 def test_dimension_round_trips_exactly_and_dimstyle_table_is_conditional():
     # W4g-7b-04s: one LINEAR and one ALIGNED dimension, plus the loaded
     # dimstyle catalogue; byte-identical output when neither is carried.
