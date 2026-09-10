@@ -174,6 +174,9 @@ def _export(enrollment, execution, body, subject):
 
 def handle(op, body, subject):
     """Validate closed requests, resolve persisted authority, and call the ledger."""
+    if op in ('walk_doctor', 'walk_prepare', 'walk_read', 'walk_request', 'walk_receipt'):
+        import campaign_developer_bridge
+        return campaign_developer_bridge.handle(op, body, subject)
     if op in ('release', 'deliver'):
         fields = {'enrollment_id'} if op == 'release' else {'enrollment_id', 'release_id'}
         if not isinstance(body, dict) or set(body) != fields:
