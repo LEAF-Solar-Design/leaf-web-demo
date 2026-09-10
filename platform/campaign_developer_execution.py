@@ -45,7 +45,7 @@ def _live(cur, scope):
     campaign = _campaign(cur, scope)
     if campaign is None:
         _missing()
-    cur.execute('SELECT status,deleted_at FROM projects WHERE org_id=%(org)s AND project_id=%(project)s FOR SHARE', scope)
+    cur.execute("SELECT status,deleted_at FROM projects WHERE org_id=%(org)s AND project_id=%(project)s AND deleted_at IS NULL AND status='active' FOR SHARE", scope)
     project = cur.fetchone()
     cur.execute('SELECT status FROM campaigns WHERE ' + SCOPE + ' FOR SHARE', scope)
     campaign = cur.fetchone()
