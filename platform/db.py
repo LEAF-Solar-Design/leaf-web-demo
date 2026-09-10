@@ -50,6 +50,15 @@ _MIGRATION_LEDGER_COLUMNS = {"name", "sha256", "applied_at"}
 # compatibility contract, not a provider choice. Additions stay additive so an
 # older application can continue to read a database prepared by a newer image.
 _REQUIRED_COLUMNS = {
+    "campaign_developer_allocations": {
+        "org_id", "project_id", "campaign_id", "allocation_id", "limit_microusd", "max_active", "spent_microusd", "reserved_microusd", "evidence_ref", "created_at",
+    },
+    "campaign_developer_operations": {
+        "operation_id", "org_id", "project_id", "campaign_id", "task_id", "parent_attempt_id", "parent_attempt_fence", "idempotency_key", "request", "current_sequence", "created_at",
+    },
+    "campaign_developer_reservations": {
+        "org_id", "project_id", "campaign_id", "operation_id", "sequence", "developer_attempt_id", "expected_attempt_id", "reservation_microusd", "admitted", "cost_microusd", "receipt_ref", "resources_reconciled", "created_at", "settled_at",
+    },
     "campaign_capability_invocations": {
         "job_id", "async_job_id", "org_id", "project_id", "job_org_id", "job_project_id",
         "campaign_id", "link_id", "enrollment_id", "tenant_id", "context", "context_sha256",
@@ -630,6 +639,12 @@ def _catalog_contract(relation: str, *definition_fragments: str) -> Dict[str, An
 # stores, the project lifecycle is part of the canonical platform API whenever
 # this application image is running.
 _REQUIRED_CONSTRAINTS = {
+    "campaign_developer_allocations_pkey": _catalog_contract(
+        "campaign_developer_allocations", "PRIMARY KEY (org_id, project_id, campaign_id)"),
+    "campaign_developer_operations_pkey": _catalog_contract(
+        "campaign_developer_operations", "PRIMARY KEY (operation_id)"),
+    "campaign_developer_reservations_pkey": _catalog_contract(
+        "campaign_developer_reservations", "PRIMARY KEY (operation_id, sequence)"),
     "campaign_capability_invocations_pkey": _catalog_contract(
         "campaign_capability_invocations", "PRIMARY KEY (job_id)"),
     "campaign_host_operations_pkey": _catalog_contract(
