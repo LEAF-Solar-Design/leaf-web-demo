@@ -541,8 +541,14 @@ def build_suites() -> List[Suite]:
         # Windows operator boxes. Linux CI executes it. Keep the Windows run
         # honest with the exact measured floor for every portable test and an
         # allowlist for only that named deployment-contract skip.
+        # Floor 47, re-measured 2026-09-10 at origin/main 5bd6894f: Windows
+        # executes 47 with that one skip, Linux CI (native build 41042fda)
+        # executes 48. 47 is the minimum across both, so neither runner can red
+        # on it; at 36, eleven portable tests could have vanished green. The skip
+        # is a single unparametrized function, and the file's three `parametrize`
+        # decorators are each over a literal list.
         Suite("server-guest-fail-closed", "server tests/test_guest_fail_closed.py", "pytest",
-              SERVER, _py_pytest("tests/test_guest_fail_closed.py"), 36,
+              SERVER, _py_pytest("tests/test_guest_fail_closed.py"), 47,
               allowed_skip_reasons=(r"fcntl is a Linux deployment contract",)),
         Suite("server-guest-purge", "server tests/test_guest_purge.py", "pytest", SERVER,
               _py_pytest("tests/test_guest_purge.py"), 14),
@@ -703,15 +709,18 @@ def build_suites() -> List[Suite]:
         # ignored) — fixed and registered per the #29 fix-then-register rule.
         # The no-da-imports static invariant + §8 ledger-line schema freeze
         # gates ride the same lane.
-        # Floor 59, re-measured 2026-08-06, the third of the stale ones #490
-        # started on. It sat at 46 while the suite executed 59, so 13 could have
-        # vanished behind an "(executed-count drift: ...)" note and still reported
-        # green. 59 is safe on every runner for the same reason 41 is above: 39
-        # test functions plus three `parametrize` decorators over literal lists,
-        # and no skipif, pytest.skip, importorskip, or platform branching anywhere
-        # in the file, so no environment collects or executes fewer.
+        # Floor 86, re-measured 2026-09-10 at origin/main 5bd6894f. It sat at 59
+        # while the suite executed 86 on BOTH a Windows host and Linux CI (native
+        # leaf-ci-leaf-web-demo build 41042fda), so 27 could have vanished behind
+        # an "(executed-count drift: ...)" note and still reported green. 86 is
+        # safe on every runner: 48 test functions plus seven `parametrize`
+        # decorators, each over a literal list, and no skipif, pytest.skip,
+        # importorskip, xfail, or platform branching anywhere in the file. The
+        # one host-sensitive test, the live-dwg symlink guard, falls back to
+        # patching `Path.is_symlink` when the host refuses to create a link, so
+        # it EXECUTES there rather than skipping.
         Suite("server-broker-boundary", "server tests/test_broker_boundary.py", "pytest",
-              SERVER, _py_pytest("tests/test_broker_boundary.py"), 59),
+              SERVER, _py_pytest("tests/test_broker_boundary.py"), 86),
         # The /broker/run-plan route, boundary's companion: it owns the live-write
         # entry point's schema, identity, fail-closed and readiness-cache contracts.
         # Registered per the #29 fix-then-register rule after it sat UNREGISTERED
