@@ -170,11 +170,11 @@ def run_gate(root: Path, results_dir: Path, *, env: dict[str, str],
     env = dict(env)
     env.pop("PYTHONSAFEPATH", None)
 
-    def run(command, *, cwd=root, check=True, capture_output=False):
+    def run(command, *, cwd=root, check=True, capture_output=False, child_env=None):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("native gate exceeded total runtime bound")
-        return subprocess.run(command, cwd=cwd, env=env, check=check,
+        return subprocess.run(command, cwd=cwd, env=env if child_env is None else child_env, check=check,
                               capture_output=capture_output, text=True,
                               timeout=remaining)
 
@@ -207,7 +207,8 @@ def run_gate(root: Path, results_dir: Path, *, env: dict[str, str],
                                           "--shard-index", str(shard), "--result-json",
                                           str(results_dir / f"shard-{shard}.json"),
                                           "--log-dir", str(results_dir / f"logs-{shard}")],
-                                 cwd=roots[worker], check=False)
+                                 cwd=roots[worker], check=False,
+                                 child_env={**env, "LEAF_NATIVE_GATE_WORKER": str(worker)})
                     if result.returncode != 0:
                         failed.append(shard)
                 except Exception as exc:

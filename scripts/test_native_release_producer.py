@@ -4,6 +4,8 @@ from types import SimpleNamespace
 import json
 import hashlib
 import threading
+import os
+import subprocess
 
 import pytest
 
@@ -145,7 +147,9 @@ def test_native_gate_calls_all_shards_then_canonical_verifiers(tmp_path, monkeyp
     assert all("--only" not in command for command in shards)
     assert "--emit-proof" in calls[-2][0]
     assert calls[-1][0][-2:] == ["--expect-tree", "a" * 40]
-    assert all(kwargs["env"] == {"PATH": "test"} for _, kwargs in calls)
+    assert all(kwargs["env"] == ({"PATH": "test", "LEAF_NATIVE_GATE_WORKER":
+        str(int(command[command.index("--shard-index") + 1]) % 4)}
+        if "--shard-index" in command else {"PATH": "test"}) for command, kwargs in calls)
     assert all(0 < kwargs["timeout"] <= 2700 for _, kwargs in calls)
     assert result.name == "gate-proof.json"
 
@@ -161,7 +165,9 @@ def test_gate_restores_canonical_import_path_without_mutating_admission_env(tmp_
     env = {"PYTHONSAFEPATH": "1", "PATH": "test"}
     producer.run_gate(tmp_path, tmp_path / "results", env=env)
     assert env["PYTHONSAFEPATH"] == "1"
-    assert all(kwargs["env"] == {"PATH": "test"} for _, kwargs in calls)
+    assert all(kwargs["env"] == ({"PATH": "test", "LEAF_NATIVE_GATE_WORKER":
+        str(int(command[command.index("--shard-index") + 1]) % 4)}
+        if "--shard-index" in command else {"PATH": "test"}) for command, kwargs in calls)
 
 
 def test_failed_gate_prints_bounded_suite_diagnostic(tmp_path, monkeypatch, capsys):
@@ -195,6 +201,36 @@ def test_native_gate_preserves_failed_shard_despite_fan_in_exit_zero(tmp_path, m
 def test_native_gate_refuses_reused_result_directory(tmp_path):
     with pytest.raises(FileExistsError):
         producer.run_gate(tmp_path, tmp_path, env={})
+
+
+@pytest.mark.parametrize("worker", [None, "0", "1", "3", "7", "8", "-1", "1;echo x", ""])
+def test_browser_config_uses_private_worker_port(tmp_path, worker):
+    # Evaluate the real config. Only Playwright's identity wrapper is stubbed;
+    # no browser, development server or dependency install runs in this test.
+    package = tmp_path / "node_modules/@playwright/test"
+    package.mkdir(parents=True)
+    (package / "package.json").write_text('{"type":"module","exports":"./index.mjs"}')
+    (package / "index.mjs").write_text('export const defineConfig = value => value;')
+    config = tmp_path / "playwright.config.mjs"
+    config.write_bytes((Path(__file__).resolve().parents[1] / "web/playwright.config.mjs").read_bytes())
+    env = dict(os.environ)
+    env.pop("LEAF_NATIVE_GATE_WORKER", None)
+    if worker is not None:
+        env["LEAF_NATIVE_GATE_WORKER"] = worker
+    result = subprocess.run(["node", "--input-type=module", "-e",
+        "import c from './playwright.config.mjs'; console.log(JSON.stringify(c));"],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=10)
+    if worker not in (None, "0", "1", "3", "7"):
+        assert result.returncode != 0
+        assert "Invalid native gate worker" in result.stderr
+        return
+    assert result.returncode == 0, result.stderr
+    value = json.loads(result.stdout)
+    port = 5185 + 100 * int(worker or "0")
+    assert value["use"]["baseURL"] == f"http://127.0.0.1:{port}"
+    assert value["webServer"]["url"] == f"http://127.0.0.1:{port}/app"
+    assert value["webServer"]["command"].endswith(f"--port {port} --strictPort")
+    assert value["webServer"]["reuseExistingServer"] is False
 
 
 @pytest.mark.parametrize("count", [True, False, 0, 3, 5, 16, 4.0, "4", None])
@@ -250,6 +286,7 @@ def test_native_gate_overlaps_four_isolated_serial_workers(tmp_path, monkeypatch
         if "--shard-index" in command:
             shard = int(command[command.index("--shard-index") + 1])
             assert len(copies) == 3
+            assert kwargs["env"]["LEAF_NATIVE_GATE_WORKER"] == str(shard % 4)
             assert Path(command[command.index("--result-json") + 1]).parent == results
             with lock:
                 assert cwd not in active
