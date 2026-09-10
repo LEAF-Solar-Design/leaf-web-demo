@@ -140,7 +140,11 @@ def test_lwpolyline_near_plus_z_normal_is_identity_and_keeps_bulge():
     assert back["polylines"][0]["bulges"] == [1.0, 0.0]
 
 
-def test_classic_3d_polyline_ignores_extrusion_and_keeps_vertex_z():
+# w4g-classic-polyline-ocs row d: flag 70 bit 8 (3D polyline) means the
+# vertices are already WCS. 210 is read only to decide the bit: never
+# transformed, never emitted as `normal`, whatever it says. Getting this
+# wrong would corrupt every 3D polyline in every drawing.
+def test_classic_3d_polyline_ignores_extrusion_and_carries_no_normal():
     raw = _dxf("0\nPOLYLINE\n5\nP4\n8\nRAFTER_45X145\n70\n8\n66\n1\n"
                 "210\n0\n220\n0\n230\n-1\n"
                 "0\nVERTEX\n8\nRAFTER_45X145\n10\n1\n20\n2\n30\n3\n"
@@ -149,19 +153,122 @@ def test_classic_3d_polyline_ignores_extrusion_and_keeps_vertex_z():
     intake = dxf_intake.parse_dxf_bytes(raw, source_name="t.dxf")
     poly = intake["polylines"][0]
     assert poly["pts"] == [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
-    # The pre-existing member-evidence pass (W4g-7c-2s) still records the raw
-    # extrusion informationally on every polyline kind; VERTEX coordinates
-    # above are untouched, which is the contract this test pins.
+    assert "normal" not in poly
+
+
+# w4g-classic-polyline-ocs row e: a 3D polyline with no 210 group at all
+# behaves exactly as today (default normal is +z, so nothing changes).
+def test_classic_3d_polyline_with_no_extrusion_normal_keeps_vertex_z():
+    raw = _dxf("0\nPOLYLINE\n5\nP11\n8\nRAFTER_45X145\n70\n8\n66\n1\n"
+                "0\nVERTEX\n8\nRAFTER_45X145\n10\n1\n20\n2\n30\n3\n"
+                "0\nVERTEX\n8\nRAFTER_45X145\n10\n4\n20\n5\n30\n6\n"
+                "0\nSEQEND\n")
+    intake = dxf_intake.parse_dxf_bytes(raw, source_name="t.dxf")
+    poly = intake["polylines"][0]
+    assert poly["pts"] == [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+    assert "normal" not in poly
+
+
+# w4g-classic-polyline-ocs row a: a 2D classic polyline with no extrusion
+# normal at all is byte-identical to today: no `normal` on the row, vertices
+# unchanged.
+def test_classic_2d_polyline_with_no_extrusion_normal_stores_pts_as_is():
+    raw = _dxf("0\nPOLYLINE\n5\nP12\n8\nRAFTER_45X145\n70\n0\n66\n1\n"
+                "0\nVERTEX\n8\nRAFTER_45X145\n10\n0\n20\n0\n30\n3\n"
+                "0\nVERTEX\n8\nRAFTER_45X145\n10\n2\n20\n0\n30\n3\n"
+                "0\nSEQEND\n")
+    intake = dxf_intake.parse_dxf_bytes(raw, source_name="t.dxf")
+    poly = intake["polylines"][0]
+    assert poly["pts"] == [[0.0, 0.0, 3.0], [2.0, 0.0, 3.0]]
+    assert "normal" not in poly
+
+
+# w4g-classic-polyline-ocs row b: a tilted 2D classic polyline transforms its
+# OCS vertices to WCS through the same `_ocs_to_wcs` LWPOLYLINE uses, and
+# carries the raw normal informationally.
+def test_classic_2d_polyline_tilted_normal_lifts_ocs_points_to_wcs():
+    raw = _dxf("0\nPOLYLINE\n5\nP13\n8\nRAFTER_45X145\n70\n0\n66\n1\n"
+                "210\n0\n220\n0.6\n230\n0.8\n"
+                "0\nVERTEX\n8\nRAFTER_45X145\n10\n0\n20\n0\n30\n3\n"
+                "0\nVERTEX\n8\nRAFTER_45X145\n10\n2\n20\n0\n30\n3\n"
+                "0\nVERTEX\n8\nRAFTER_45X145\n10\n2\n20\n2\n30\n3\n"
+                "0\nSEQEND\n")
+    intake = dxf_intake.parse_dxf_bytes(raw, source_name="t.dxf")
+    poly = intake["polylines"][0]
+    expected = [[0.0, 1.8, 2.4], [-2.0, 1.8, 2.4], [-2.0, 0.2, 3.6]]
+    for got, want in zip(poly["pts"], expected):
+        assert got == pytest.approx(want, abs=1e-9)
+    assert poly["normal"] == [0.0, 0.6, 0.8]
+    data = intake_dxf.intake_to_dxf(intake)
+    back = dxf_intake.parse_dxf_bytes(data, source_name="t.dxf")
+    for got, want in zip(back["polylines"][0]["pts"], expected):
+        assert got == pytest.approx(want, abs=1e-9)
+
+
+# w4g-classic-polyline-ocs row c: a reflected 2D classic polyline mirrors x
+# and negates elevation, and its stored bulges flip sign, matching A's
+# LWPOLYLINE convention.
+def test_classic_2d_polyline_reflected_normal_lifts_ocs_points_to_wcs_and_flips_bulge():
+    raw = _dxf("0\nPOLYLINE\n5\nP14\n8\nRAFTER_45X145\n70\n1\n66\n1\n"
+                "210\n0\n220\n0\n230\n-1\n"
+                "0\nVERTEX\n8\nRAFTER_45X145\n10\n0\n20\n0\n30\n3\n42\n1\n"
+                "0\nVERTEX\n8\nRAFTER_45X145\n10\n2\n20\n0\n30\n3\n42\n0\n"
+                "0\nSEQEND\n")
+    intake = dxf_intake.parse_dxf_bytes(raw, source_name="t.dxf")
+    poly = intake["polylines"][0]
+    assert poly["pts"] == [[0.0, 0.0, -3.0], [-2.0, 0.0, -3.0]]
     assert poly["normal"] == [0.0, 0.0, -1.0]
+    assert poly["bulges"] == [-1.0, 0.0]
+    assert poly["closed"] is True
+    data = intake_dxf.intake_to_dxf(intake)
+    back = dxf_intake.parse_dxf_bytes(data, source_name="t.dxf")
+    assert back["polylines"][0]["pts"] == poly["pts"]
+    assert back["polylines"][0]["bulges"] == poly["bulges"]
+    assert back["polylines"][0]["closed"] is True
+
+
+# w4g-classic-polyline-ocs row f: refusals match A. A zero or non-finite 210
+# on a 2D polyline is refused naming the handle; a 3D polyline is never
+# refused for its 210, because it never reads it.
+def test_classic_2d_polyline_zero_normal_is_refused():
+    raw = _dxf("0\nPOLYLINE\n5\nP15\n8\nRAFTER_45X145\n70\n0\n66\n1\n"
+                "210\n0\n220\n0\n230\n0\n"
+                "0\nVERTEX\n8\nRAFTER_45X145\n10\n0\n20\n0\n30\n3\n"
+                "0\nVERTEX\n8\nRAFTER_45X145\n10\n2\n20\n0\n30\n3\n"
+                "0\nSEQEND\n")
+    with pytest.raises(dxf_intake.DxfParseError, match="zero vector"):
+        dxf_intake.parse_dxf_bytes(raw, source_name="t.dxf")
+
+
+def test_classic_2d_polyline_non_finite_normal_is_refused():
+    raw = _dxf("0\nPOLYLINE\n5\nP16\n8\nRAFTER_45X145\n70\n0\n66\n1\n"
+                "210\n0\n220\n0\n230\nnan\n"
+                "0\nVERTEX\n8\nRAFTER_45X145\n10\n0\n20\n0\n30\n3\n"
+                "0\nVERTEX\n8\nRAFTER_45X145\n10\n2\n20\n0\n30\n3\n"
+                "0\nSEQEND\n")
+    with pytest.raises(dxf_intake.DxfParseError, match="finite"):
+        dxf_intake.parse_dxf_bytes(raw, source_name="t.dxf")
+
+
+def test_classic_3d_polyline_zero_normal_is_never_refused():
+    raw = _dxf("0\nPOLYLINE\n5\nP17\n8\nRAFTER_45X145\n70\n8\n66\n1\n"
+                "210\n0\n220\n0\n230\n0\n"
+                "0\nVERTEX\n8\nRAFTER_45X145\n10\n1\n20\n2\n30\n3\n"
+                "0\nVERTEX\n8\nRAFTER_45X145\n10\n4\n20\n5\n30\n6\n"
+                "0\nSEQEND\n")
+    intake = dxf_intake.parse_dxf_bytes(raw, source_name="t.dxf")
+    poly = intake["polylines"][0]
+    assert poly["pts"] == [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+    assert "normal" not in poly
 
 
 # w4g-lwpolyline-wcs-c finding 1: Astra's own counterexample. A classic 3D
-# POLYLINE's vertices are genuinely WCS, not OCS relative to its `normal`, so
+# POLYLINE's vertices are genuinely WCS, not OCS relative to any normal, so
 # a naive inverse that shares one elevation across every vertex discarded
-# 3 units of the second vertex's z. server/intake_dxf.py now applies the
-# inverse only when every vertex's own recovered OCS z agrees; here they do
-# not (the endpoint-evidence pass still records `normal` informationally),
-# so the round trip must return both vertices unchanged.
+# 3 units of the second vertex's z. w4g-classic-polyline-ocs: a 3D polyline
+# (flag 70 bit 8) never reads 210 at all on parse, so it carries no `normal`
+# to invert in the first place; the round trip must return both vertices
+# unchanged regardless.
 def test_classic_3d_polyline_round_trips_without_losing_z():
     raw = _dxf("0\nPOLYLINE\n5\nP7\n8\nRAFTER_45X145\n70\n8\n66\n1\n"
                 "210\n0\n220\n0\n230\n-1\n"

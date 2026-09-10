@@ -169,7 +169,11 @@ def test_default_polyline_normal_emits_identical_bytes_to_absent_normal(normal, 
     assert b"\n230\n" not in with_normal
 
 
-def test_mixed_z_polyline_normal_is_on_header_and_round_trips():
+# w4g-classic-polyline-ocs: the writer still emits 210 on a mixed-z (3D)
+# POLYLINE header informationally, but a 3D polyline (flag 70 bit 8) never
+# reads 210 back on parse, so the round trip drops `normal` and keeps pts
+# and closed exactly as given.
+def test_mixed_z_polyline_normal_is_on_header_but_never_read_back():
     pts = [[2, 3, 4], [12, 3, 4], [12, 13, 4], [2, 13, 4]]
     pts[1][2] = 5
     intake = _polyline_with_normal([0, 1, 0], pts, closed=True)
@@ -179,7 +183,9 @@ def test_mixed_z_polyline_normal_is_on_header_and_round_trips():
     header = pairs[pairs.index(("0", "POLYLINE")):pairs.index(("0", "VERTEX"))]
     assert header[-3:] == [("210", "0.0"), ("220", "1.0"), ("230", "0.0")]
     assert [p for p in pairs if p[0] in ("210", "220", "230")] == header[-3:]
-    assert _subset(back) == _subset(intake)
+    assert "normal" not in back["polylines"][0]
+    assert back["polylines"][0]["pts"] == pts
+    assert back["polylines"][0]["closed"] is True
 
 
 @pytest.mark.parametrize("normal", [
