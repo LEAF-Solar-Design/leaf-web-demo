@@ -336,6 +336,34 @@ def test_live_leg_accepts_full_precision_unchanged_polyline(live):
     assert _head(client, DWG_DRAWING) == 1
 
 
+@pytest.mark.parametrize("live", [_live_full_precision_base_intake()], indirect=True)
+def test_live_leg_refuses_rewritten_unchanged_polyline_normal(live):
+    # (f) Live-leg unchanged A gets only extrusion groups after group 38.
+    # On main a7c771cd this upload returns 202 instead of refusing it.
+    client, _backend, submissions = live
+    capability = _checkout(client)
+    points = _live_full_precision_base_intake()["polylines"][0]["pts"]
+    polyline = (
+        "0\nLWPOLYLINE\n5\nA\n8\nRoof\n90\n4\n70\n1\n"
+        f"38\n{points[0][2]}\n"
+        + "".join(f"10\n{x}\n20\n{y}\n" for x, y, _z in points)
+    ).encode("ascii")
+    data = EDITED_DXF.replace(
+        b"0\nLWPOLYLINE\n5\nA\n8\nRoof\n90\n3\n70\n1\n"
+        b"10\n0\n20\n0\n10\n50\n20\n0\n10\n50\n20\n30\n",
+        polyline,
+    )
+    elevation = f"38\n{points[0][2]}\n".encode("ascii")
+    data = data.replace(elevation, elevation + b"210\n0\n220\n1\n230\n0\n", 1)
+
+    resp = _post(client, DWG_DRAWING, _live_mutations(), data=data, capability=capability)
+
+    assert resp.status_code == 422, resp.text
+    assert "does not carry the plan's result" in resp.json()["error"]["message"]
+    assert submissions == []
+    assert _head(client, DWG_DRAWING) == 1
+
+
 def test_live_leg_accepts_extractor_quantum_without_changing_the_plan(live):
     client, _backend, submissions = live
     capability = _checkout(client)
