@@ -12,6 +12,7 @@ the caller's org yields HTTP 404, never 403 (a 403 would leak existence).
 from __future__ import annotations
 
 import hmac
+import logging
 import os
 import uuid
 from datetime import datetime
@@ -25,10 +26,11 @@ from . import (arlo_lab, arlo_review, billing, deps as platform_deps, entitlemen
 from .deps import (get_org_id, get_review_binding_id, get_write_binding_id, get_write_org_id,
                    require_auth_when_live)
 from .models import JOB_KINDS, TIERS
-from .mutation_fence import drawing_mutation_commit_guard
+from .mutation_fence import drawing_mutation_refusal_guard, fence_refusal_message
 from .offboard import OrgNotFound, PurgeHook, offboard_org
 
 router = APIRouter(prefix="/api", tags=["platform"])
+LOGGER = logging.getLogger(__name__)
 
 
 def upload_import_mutations_enabled() -> bool:
@@ -554,14 +556,14 @@ def import_drawing_version(
             status_code=503,
             detail="drawing upload/import mutations are temporarily disabled",
         )
-    with drawing_mutation_commit_guard() as commit_enabled:
-        if not commit_enabled:
+    # The typed fence guard yields the reason code from its one read, so the
+    # 503 names that fence state and the log line carries its code.
+    with drawing_mutation_refusal_guard() as refusal:
+        if refusal is not None:
+            LOGGER.warning("drawing_mutation_refused reason=%s surface=%s",
+                           refusal, "platform.import_drawing_version")
             raise HTTPException(
-                status_code=503,
-                detail=(
-                    "drawing mutations are temporarily disabled for a storage cutover"
-                ),
-            )
+                status_code=503, detail=fence_refusal_message(refusal))
         try:
             version, replayed = store.import_ready_account_upload(
                 org_id,
