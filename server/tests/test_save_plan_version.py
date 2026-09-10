@@ -23,6 +23,7 @@ Run:  cd server && python -m pytest tests/test_save_plan_version.py -q
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import io
 import json
@@ -355,6 +356,134 @@ def test_live_leg_refuses_rewritten_unchanged_polyline_normal(live):
     )
     elevation = f"38\n{points[0][2]}\n".encode("ascii")
     data = data.replace(elevation, elevation + b"210\n0\n220\n1\n230\n0\n", 1)
+
+    resp = _post(client, DWG_DRAWING, _live_mutations(), data=data, capability=capability)
+
+    assert resp.status_code == 422, resp.text
+    assert "does not carry the plan's result" in resp.json()["error"]["message"]
+    assert submissions == []
+    assert _head(client, DWG_DRAWING) == 1
+
+
+# w4g-polyline-bulge-parity: the uploaded-DXF binding must catch the same
+# bulge/normal drift as the mutation verifier, on the SAME curved and
+# reflected fixtures (built via intake_dxf.intake_to_dxf so the route rows
+# and the verifier's unit rows are proven against the same bytes).
+def _live_curved_polyline_intake():
+    intake = _live_base_intake()
+    intake["polylines"].append({
+        "handle": "CB", "layer": "Roof", "closed": False, "xdata": None,
+        "pts": [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [2.0, 2.0, 0.0]],
+        "bulges": [1.0, 0.0, 0.0],
+    })
+    return intake
+
+
+def _live_reflected_polyline_intake():
+    intake = _live_base_intake()
+    intake["polylines"].append({
+        "handle": "DF", "layer": "Roof", "closed": False, "xdata": None,
+        "pts": [[0.0, 0.0, -3.0], [-2.0, 0.0, -3.0]],
+        "bulges": [-1.0, 0.0], "normal": [0.0, 0.0, -1.0],
+    })
+    return intake
+
+
+def _live_result_intake(intake):
+    """Apply `_live_mutations()`'s set_points result to handle '1F'.
+
+    The route refuses an upload whose 1F still sits at its pre-mutation
+    geometry ("unexpected output geometry") before it ever reaches the
+    bulge/normal comparison on the OTHER, unchanged polyline, so every
+    uploaded-DXF row below must upload the plan's result, not the head.
+    """
+    result = copy.deepcopy(intake)
+    for polyline in result["polylines"]:
+        if polyline["handle"] == "1F":
+            polyline["pts"] = [[1.0, 2.0, 0.0], [4.0, 6.0, 0.0]]
+    return result
+
+
+@pytest.mark.parametrize("live", [_live_curved_polyline_intake()], indirect=True)
+def test_live_leg_accepts_unchanged_curved_polyline_bulges(live):
+    # (a) The uploaded DXF's unchanged curved polyline round-trips its bulges.
+    import intake_dxf  # noqa: PLC0415
+
+    client, _backend, submissions = live
+    capability = _checkout(client)
+    data = intake_dxf.intake_to_dxf(_live_result_intake(_live_curved_polyline_intake()))
+
+    resp = _post(client, DWG_DRAWING, _live_mutations(), data=data, capability=capability)
+
+    assert resp.status_code == 202, resp.text
+    assert len(submissions) == 1
+    assert _head(client, DWG_DRAWING) == 1
+
+
+@pytest.mark.parametrize("live", [_live_curved_polyline_intake()], indirect=True)
+def test_live_leg_refuses_flattened_unchanged_curved_polyline(live):
+    # (b) An upload that silently drops the curve's bulges is refused.
+    import intake_dxf  # noqa: PLC0415
+
+    client, _backend, submissions = live
+    capability = _checkout(client)
+    flattened = _live_result_intake(_live_curved_polyline_intake())
+    del flattened["polylines"][-1]["bulges"]
+    data = intake_dxf.intake_to_dxf(flattened)
+
+    resp = _post(client, DWG_DRAWING, _live_mutations(), data=data, capability=capability)
+
+    assert resp.status_code == 422, resp.text
+    assert "does not carry the plan's result" in resp.json()["error"]["message"]
+    assert submissions == []
+    assert _head(client, DWG_DRAWING) == 1
+
+
+@pytest.mark.parametrize("live", [_live_curved_polyline_intake()], indirect=True)
+def test_live_leg_refuses_changed_bulge_on_unchanged_polyline(live):
+    # (c) A changed bulge value on an otherwise-identical polyline is refused.
+    import intake_dxf  # noqa: PLC0415
+
+    client, _backend, submissions = live
+    capability = _checkout(client)
+    changed = _live_result_intake(_live_curved_polyline_intake())
+    changed["polylines"][-1]["bulges"][0] = 0.5
+    data = intake_dxf.intake_to_dxf(changed)
+
+    resp = _post(client, DWG_DRAWING, _live_mutations(), data=data, capability=capability)
+
+    assert resp.status_code == 422, resp.text
+    assert "does not carry the plan's result" in resp.json()["error"]["message"]
+    assert submissions == []
+    assert _head(client, DWG_DRAWING) == 1
+
+
+@pytest.mark.parametrize("live", [_live_reflected_polyline_intake()], indirect=True)
+def test_live_leg_accepts_unchanged_reflected_polyline(live):
+    # (d) An unchanged reflected polyline round-trips its bulges and normal.
+    import intake_dxf  # noqa: PLC0415
+
+    client, _backend, submissions = live
+    capability = _checkout(client)
+    data = intake_dxf.intake_to_dxf(_live_result_intake(_live_reflected_polyline_intake()))
+
+    resp = _post(client, DWG_DRAWING, _live_mutations(), data=data, capability=capability)
+
+    assert resp.status_code == 202, resp.text
+    assert len(submissions) == 1
+    assert _head(client, DWG_DRAWING) == 1
+
+
+@pytest.mark.parametrize("live", [_live_reflected_polyline_intake()], indirect=True)
+def test_live_leg_refuses_reflected_polyline_flipped_to_plus_z(live):
+    # (d) A saved side whose reflected polyline's normal flips to +Z is refused.
+    import intake_dxf  # noqa: PLC0415
+
+    client, _backend, submissions = live
+    capability = _checkout(client)
+    flipped = _live_result_intake(_live_reflected_polyline_intake())
+    flipped["polylines"][-1]["normal"] = [0.0, 0.0, 1.0]
+    data = intake_dxf.intake_to_dxf(flipped)
 
     resp = _post(client, DWG_DRAWING, _live_mutations(), data=data, capability=capability)
 
