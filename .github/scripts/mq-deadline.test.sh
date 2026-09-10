@@ -39,19 +39,19 @@ check 'expired after boundary' mq_deadline_expired
 
 MQ_NOW_OVERRIDE=1090
 SLEPT=0
-if mq_deadline_sleep 60; then STATUS=0; else STATUS=1; fi
-check 'sleep capped to ten remaining seconds' test "$SLEPT" -eq 10
-check 'capped sleep reports deadline' test "$STATUS" -eq 1
+if mq_deadline_wait 60; then STATUS=0; else STATUS=1; fi
+check 'wait capped to ten remaining seconds' test "$SLEPT" -eq 10
+check 'capped wait reports deadline' test "$STATUS" -eq 1
 MQ_NOW_OVERRIDE=1000
 SLEPT=0
-if mq_deadline_sleep 30; then STATUS=0; else STATUS=1; fi
-check 'sleep uses full interval with budget left' test "$SLEPT" -eq 30
-check 'sleep reports remaining budget' test "$STATUS" -eq 0
+if mq_deadline_wait 30; then STATUS=0; else STATUS=1; fi
+check 'wait uses full interval with budget left' test "$SLEPT" -eq 30
+check 'wait reports remaining budget' test "$STATUS" -eq 0
 MQ_NOW_OVERRIDE=1100
 SLEPT=0
-if mq_deadline_sleep 30; then STATUS=0; else STATUS=1; fi
-check 'expired sleep does not sleep' test "$SLEPT" -eq 0
-check 'expired sleep returns one' test "$STATUS" -eq 1
+if mq_deadline_wait 30; then STATUS=0; else STATUS=1; fi
+check 'expired wait does not sleep' test "$SLEPT" -eq 0
+check 'expired wait returns one' test "$STATUS" -eq 1
 
 unset MQ_DEADLINE_EPOCH
 MQ_NOW_OVERRIDE=2000

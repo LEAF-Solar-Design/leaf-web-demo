@@ -280,8 +280,20 @@ jobs:
             fi
           }
           ATTEMPT=0
-          source "$GITHUB_WORKSPACE/.github/scripts/mq-deadline.sh"
-          mq_deadline_init
+          HELPER="${GITHUB_WORKSPACE:-.}/.github/scripts/mq-deadline.sh"
+          if [ -r "$HELPER" ]; then
+            # shellcheck source=/dev/null
+            . "$HELPER"
+            mq_deadline_init
+          else
+            # No helper reachable (no checkout, or a step-contract harness running this
+            # body standalone). The deadline simply does not apply and the poll caps
+            # below stand on their own, exactly as they did before the deadline existed.
+            echo "::notice::mq-deadline helper not readable at $HELPER; poll caps apply without a deadline."
+            mq_deadline_expired() { return 1; }
+            mq_deadline_wait() { sleep "${1:-0}"; }
+            mq_deadline_report() { :; }
+          fi
           while [ "$ATTEMPT" -lt "$SUPPLY_SET_POLLS" ] && ! mq_deadline_expired; do
             ATTEMPT=$((ATTEMPT + 1))
             # List the exact key first: prefix-scoped ListBucket cannot prove absence via HeadObject.
@@ -349,7 +361,7 @@ jobs:
             fi
             fi
             if [ "$ATTEMPT" -lt "$SUPPLY_SET_POLLS" ]; then
-              mq_deadline_sleep "$SUPPLY_SET_INTERVAL" || break
+              mq_deadline_wait "$SUPPLY_SET_INTERVAL" || break
             fi
           done
           if mq_deadline_expired; then
@@ -430,8 +442,20 @@ jobs:
             fi
           }
           ATTEMPT=0
-          source "$GITHUB_WORKSPACE/.github/scripts/mq-deadline.sh"
-          mq_deadline_init
+          HELPER="${GITHUB_WORKSPACE:-.}/.github/scripts/mq-deadline.sh"
+          if [ -r "$HELPER" ]; then
+            # shellcheck source=/dev/null
+            . "$HELPER"
+            mq_deadline_init
+          else
+            # No helper reachable (no checkout, or a step-contract harness running this
+            # body standalone). The deadline simply does not apply and the poll caps
+            # below stand on their own, exactly as they did before the deadline existed.
+            echo "::notice::mq-deadline helper not readable at $HELPER; poll caps apply without a deadline."
+            mq_deadline_expired() { return 1; }
+            mq_deadline_wait() { sleep "${1:-0}"; }
+            mq_deadline_report() { :; }
+          fi
           while [ "$ATTEMPT" -lt "$RELAY_RECEIPT_POLLS" ] && ! mq_deadline_expired; do
             ATTEMPT=$((ATTEMPT + 1))
             if LISTING=$(timeout 60 aws s3api list-objects-v2 --bucket "$MQ_TRANSPORT_BUCKET" --prefix "$PREFIX" 2> s3-error.txt); then
@@ -540,7 +564,7 @@ jobs:
               fi
             fi
             if [ "$ATTEMPT" -lt "$RELAY_RECEIPT_POLLS" ]; then
-              mq_deadline_sleep "$RELAY_RECEIPT_INTERVAL" || break
+              mq_deadline_wait "$RELAY_RECEIPT_INTERVAL" || break
             fi
           done
           if mq_deadline_expired; then
@@ -576,8 +600,20 @@ jobs:
           REQUEST_ID="$SHA12-$RELAY_RUN_ID"
           ARNS=""
           SERVICES=$(jq -ej 'keys | if length > 0 then join(" ") else error("empty dispatched set") end' <<<"$DISPATCHED_JSON")
-          source "$GITHUB_WORKSPACE/.github/scripts/mq-deadline.sh"
-          mq_deadline_init
+          HELPER="${GITHUB_WORKSPACE:-.}/.github/scripts/mq-deadline.sh"
+          if [ -r "$HELPER" ]; then
+            # shellcheck source=/dev/null
+            . "$HELPER"
+            mq_deadline_init
+          else
+            # No helper reachable (no checkout, or a step-contract harness running this
+            # body standalone). The deadline simply does not apply and the poll caps
+            # below stand on their own, exactly as they did before the deadline existed.
+            echo "::notice::mq-deadline helper not readable at $HELPER; poll caps apply without a deadline."
+            mq_deadline_expired() { return 1; }
+            mq_deadline_wait() { sleep "${1:-0}"; }
+            mq_deadline_report() { :; }
+          fi
           for SERVICE in $SERVICES; do
             BUILD_ID=$(jq -j --arg s "$SERVICE" '.[$s] // empty' <<<"$DISPATCHED_JSON")
             if mq_deadline_expired; then
@@ -599,7 +635,7 @@ jobs:
                   exit 1 ;;
               esac
               if [ "$ATTEMPT" -lt "$TERRAFORM_RECEIPT_POLLS" ]; then
-                mq_deadline_sleep "$TERRAFORM_RECEIPT_INTERVAL" || break
+                mq_deadline_wait "$TERRAFORM_RECEIPT_INTERVAL" || break
               fi
             done
             if [ "$FOUND" != "true" ]; then

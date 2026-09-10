@@ -52,7 +52,7 @@ mq_deadline_expired() {
   [[ $(mq_deadline_remaining) == 0 ]]
 }
 
-mq_deadline_sleep() {
+mq_deadline_wait() {
   local interval=${1:-0} remaining
   remaining=$(mq_deadline_remaining)
   (( remaining > 0 )) || return 1
