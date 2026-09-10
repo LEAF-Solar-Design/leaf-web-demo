@@ -1088,12 +1088,20 @@ _TEXT_MAX_CHARS = 512
 
 
 def _parse_text(pairs: List[Tuple[int, str]], i: int, kind: str):
-    """TEXT / MTEXT: layer=8, handle=5, insertion (10, 20), value=1 (MTEXT may continue
-    in 3-codes). MTEXT inline formatting codes are stripped to plain words; the value is
-    capped so a hostile file cannot inflate the intake."""
+    """TEXT / MTEXT: layer=8, handle=5, insertion (10, 20, 30), value=1 (MTEXT may continue
+    in 3-codes). The insertion is OCS relative to the entity's own extrusion normal
+    (210/220/230, default +z), lifted to WCS through the same `_ocs_to_wcs` the polyline
+    paths use; the raw normal survives on the row as `normal` (omitted for a +z normal,
+    matching the LWPOLYLINE/POLYLINE convention) for server/intake_dxf.py's exact inverse.
+    `pt` stays the 2-element [x, y] of today when the insertion z is zero and the normal
+    is +Z; either a nonzero z or a non-identity normal makes it 3-element [x, y, z], so a
+    plain drawing's row is byte-identical. A zero or non-finite 210 is refused naming the
+    handle, exactly like the polyline paths. MTEXT inline formatting codes are stripped to
+    plain words; the value is capped so a hostile file cannot inflate the intake."""
     layer = "0"
     handle = ""
-    x = y = 0.0
+    x = y = z = 0.0
+    normal = [0.0, 0.0, 1.0]
     parts: List[str] = []
     n = len(pairs)
     while i < n and pairs[i][0] != 0:
@@ -1106,16 +1114,36 @@ def _parse_text(pairs: List[Tuple[int, str]], i: int, kind: str):
             x = _float(value)
         elif code == 20:
             y = _float(value)
+        elif code == 30:
+            z = _float(value)
+        elif code == 210:
+            normal[0] = _float(value)
+        elif code == 220:
+            normal[1] = _float(value)
+        elif code == 230:
+            normal[2] = _float(value)
         elif code == 3:
             parts.append(value)
         elif code == 1:
             parts.append(value)
         i += 1
+    if not all(math.isfinite(v) for v in normal):
+        raise DxfParseError(f"{kind} {handle} normal must be finite")
+    if not any(normal):
+        raise DxfParseError(f"{kind} {handle} normal must not be the zero vector")
+    identity = all(abs(a - b) <= 1e-6 for a, b in zip(normal, (0.0, 0.0, 1.0)))
+    if identity:
+        pt = [x, y] if z == 0.0 else [x, y, z]
+    else:
+        pt = _ocs_to_wcs([x, y, z], normal)
     text = "".join(parts)
     if kind == "MTEXT":
         text = _strip_mtext(text)
     text = " ".join(text.split())[:_TEXT_MAX_CHARS]
-    return {"kind": kind, "layer": layer, "pt": [x, y], "text": text, "handle": handle}, i
+    entity: Dict[str, Any] = {"kind": kind, "layer": layer, "pt": pt, "text": text, "handle": handle}
+    if not identity:
+        entity["normal"] = [round(v, 6) for v in normal]
+    return entity, i
 
 
 def _strip_mtext(s: str) -> str:

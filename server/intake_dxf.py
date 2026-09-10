@@ -339,8 +339,33 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         pt = tx.get("pt")
         if not isinstance(pt, (list, tuple)) or len(pt) < 2:
             _fail(f"{where}: pt must be [x, y]")
+        if len(pt) > 3:
+            _fail(f"{where}: pt must be [x, y] or [x, y, z]")
         x = _number(pt[0], f"{where}.pt")
         y = _number(pt[1], f"{where}.pt")
+        z = _number(pt[2], f"{where}.pt") if len(pt) == 3 else 0.0
+        handle = tx.get("handle")
+        normal = None
+        if "normal" in tx:
+            values = tx["normal"]
+            message = f"{where} handle {handle!r}: normal must be a list of three finite numbers"
+            if not isinstance(values, list) or len(values) != 3:
+                _fail(message)
+            normal = []
+            for value in values:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    _fail(message)
+                try:
+                    value = float(value)
+                except OverflowError:
+                    _fail(message)
+                if not math.isfinite(value):
+                    _fail(message)
+                normal.append(value)
+            if not any(normal):
+                _fail(f"{where} handle {handle!r}: normal must not be the zero vector")
+            if not any(abs(a - b) > 1e-6 for a, b in zip(normal, (0, 0, 1))):
+                normal = None
         value = _text_value(tx.get("text"), where)
         if not value:
             # The parser drops an empty text on the way in; dropping it on the
@@ -350,7 +375,7 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         if h is not None:
             highest = max(highest, int(h, 16))
         note_layer(layer)
-        kinds.append(("text", layer, kind, (x, y), value, h))
+        kinds.append(("text", layer, kind, (x, y, z), value, normal, h))
         kind_sources.append(tx)
         kind_properties.append([])  # TEXT carries no colour/linetype/lineweight round trip
     # W4g-3: circles and arcs (ADDITIVE fields, the browser engine's kinds).
@@ -655,15 +680,19 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
             if dimtype == "LINEAR":
                 out += ["50", _num(rotation), "100", "AcDbRotatedDimension"]
         else:
-            _, layer, kind, (x, y), value, _ = row
+            _, layer, kind, (x, y, z), value, normal, _ = row
+            if normal is not None:
+                x, y, z = _wcs_to_ocs([x, y, z], normal)
             if kind == "TEXT":
                 out += ["0", "TEXT", "5", h, "100", "AcDbEntity", "8", layer,
-                        "100", "AcDbText", "10", _num(x), "20", _num(y), "30", "0.0",
+                        "100", "AcDbText", "10", _num(x), "20", _num(y), "30", _num(z),
                         "40", TEXT_HEIGHT, "1", value, "100", "AcDbText"]
             else:
                 out += ["0", "MTEXT", "5", h, "100", "AcDbEntity", "8", layer,
-                        "100", "AcDbMText", "10", _num(x), "20", _num(y), "30", "0.0",
+                        "100", "AcDbMText", "10", _num(x), "20", _num(y), "30", _num(z),
                         "40", TEXT_HEIGHT, "1", value]
+            if normal is not None:
+                out += _point_groups(normal, 210)
         source = kind_sources[idx]
         if source.get("space") == "paper":
             space_pairs = ["67", "1"]

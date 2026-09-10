@@ -83,6 +83,94 @@ def test_aps_families_text_parses_ln_and_tx_identically():
     assert intake["texts"][1]["pt"] == [5.0, 6.0]
 
 
+# w4g-text-ocs: a TEXT/MTEXT insertion (10, 20, 30) is OCS relative to the
+# entity's own extrusion normal (210/220/230), same as CIRCLE/LWPOLYLINE/
+# POLYLINE, and must be lifted to WCS through the same `_ocs_to_wcs`. On the
+# unmodified head `_parse_text` reads only codes 8/5/10/20/3/1: it never reads
+# 210/220/230 or 30 at all, so it stores the raw OCS x/y as if they were WCS
+# and always emits a bare 2-element `pt`. Established by reading
+# server/dxf_intake.py's `_parse_text` (pre-fix) directly, not by running it:
+# for this row the pre-fix code returns `pt == [100.0, 200.0]` unconditionally
+# and never sets a `normal` key, so both `poly["pt"] == pytest.approx([-100.0, -160.0, 120.0])`
+# (wrong length and wrong values) and `poly["normal"] == [0.0, 0.6, 0.8]` (KeyError,
+# the key is absent) fail on the unmodified head.
+def test_text_tilted_normal_lifts_insertion_to_wcs():
+    raw = _dxf("0\nTEXT\n5\nT1\n8\n0\n10\n100\n20\n200\n"
+                "210\n0\n220\n0.6\n230\n0.8\n1\nRIDGE\n")
+    intake = dxf_intake.parse_dxf_bytes(raw, source_name="t.dxf")
+    row = intake["texts"][0]
+    assert row["pt"] == pytest.approx([-100.0, -160.0, 120.0], abs=1e-9)
+    assert row["normal"] == [0.0, 0.6, 0.8]
+
+
+# Same class, MTEXT leg of the same `_parse_text` function.
+def test_mtext_tilted_normal_lifts_insertion_to_wcs():
+    raw = _dxf("0\nMTEXT\n5\nT2\n8\n0\n10\n100\n20\n200\n"
+                "210\n0\n220\n0.6\n230\n0.8\n1\nRIDGE\n")
+    intake = dxf_intake.parse_dxf_bytes(raw, source_name="t.dxf")
+    row = intake["texts"][0]
+    assert row["pt"] == pytest.approx([-100.0, -160.0, 120.0], abs=1e-9)
+    assert row["normal"] == [0.0, 0.6, 0.8]
+
+
+# w4g-text-ocs: reflected normal, matching the LWPOLYLINE/POLYLINE reflected
+# rows. On the unmodified head this fails the same way as the tilted row:
+# `pt` comes back as the raw `[5.0, 6.0]` (read directly from `_parse_text`
+# above, which never reads 210/220/230) instead of the WCS-lifted point, and
+# `normal` is never set at all.
+def test_text_reflected_normal_lifts_insertion_to_wcs():
+    raw = _dxf("0\nTEXT\n5\nT3\n8\n0\n10\n5\n20\n6\n"
+                "210\n0\n220\n0\n230\n-1\n1\nEAVE\n")
+    intake = dxf_intake.parse_dxf_bytes(raw, source_name="t.dxf")
+    row = intake["texts"][0]
+    assert row["pt"] == pytest.approx([-5.0, 6.0, 0.0], abs=1e-9)
+    assert row["normal"] == [0.0, 0.0, -1.0]
+
+
+# w4g-text-ocs: an explicit +Z normal is the identity, so the row must stay
+# byte-identical to a TEXT with no 210 group at all (this passes on both the
+# unmodified and the fixed head, unlike the rows above; it is the regression
+# guard, not a defect reproduction).
+def test_text_explicit_plus_z_normal_stays_byte_identical():
+    raw = _dxf("0\nTEXT\n5\nT4\n8\n0\n10\n50\n20\n60\n"
+                "210\n0\n220\n0\n230\n1\n1\nID\n")
+    intake = dxf_intake.parse_dxf_bytes(raw, source_name="t.dxf")
+    row = intake["texts"][0]
+    assert row["pt"] == [50.0, 60.0]
+    assert "normal" not in row
+
+
+# w4g-text-ocs: code 30 (insertion z) is read and carried once the normal is
+# +Z, so a plain drawing's 2D rows are unaffected but a genuine 3D insertion
+# is no longer silently dropped. On the unmodified head `pt` comes back
+# 2-element `[1.0, 2.0]` (code 30 is never read at all), which mismatches the
+# 3-element expectation below both in length and in value.
+def test_text_insertion_z_is_carried_when_present():
+    raw = _dxf("0\nTEXT\n5\nT5\n8\n0\n10\n1\n20\n2\n30\n7.5\n1\nLABEL\n")
+    intake = dxf_intake.parse_dxf_bytes(raw, source_name="t.dxf")
+    row = intake["texts"][0]
+    assert row["pt"] == [1.0, 2.0, 7.5]
+    assert "normal" not in row
+
+
+# w4g-text-ocs: refusals match A/POLYLINE. On the unmodified head neither of
+# these raises at all: `_parse_text` never reads 210/220/230, so a zero or
+# non-finite normal is never even inspected and `pytest.raises` below fails
+# because no exception is raised.
+def test_text_zero_normal_is_refused():
+    raw = _dxf("0\nTEXT\n5\nT6\n8\n0\n10\n0\n20\n0\n"
+                "210\n0\n220\n0\n230\n0\n1\nX\n")
+    with pytest.raises(dxf_intake.DxfParseError, match="zero vector"):
+        dxf_intake.parse_dxf_bytes(raw, source_name="t.dxf")
+
+
+def test_text_non_finite_normal_is_refused():
+    raw = _dxf("0\nTEXT\n5\nT7\n8\n0\n10\n0\n20\n0\n"
+                "210\n0\n220\n0\n230\nnan\n1\nX\n")
+    with pytest.raises(dxf_intake.DxfParseError, match="finite"):
+        dxf_intake.parse_dxf_bytes(raw, source_name="t.dxf")
+
+
 # w4g-lwpolyline-wcs: an LWPOLYLINE's 10/20/38 are OCS relative to its own
 # extrusion normal (210/220/230); a top-level row now stores WCS `pts` with
 # an informational `normal` (server/intake_dxf.py applies the exact inverse).
