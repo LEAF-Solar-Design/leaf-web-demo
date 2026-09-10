@@ -1785,6 +1785,9 @@ def _polyline_effect_matches(
     # it or both omit it, compared exactly (no extractor quantum applies).
     if (expected.get("bulges") or None) != (actual.get("bulges") or None):
         return False
+    # Width flags a thick or tapered polyline; the engine preserves it.
+    if bool(expected.get("width")) != bool(actual.get("width")):
+        return False
     expected_normal = _effective_normal(expected)
     actual_normal = _effective_normal(actual)
     if (expected_normal is None or actual_normal is None
