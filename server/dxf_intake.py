@@ -406,6 +406,11 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
                         bulges.append(0.0)
                     elif code == 42 and bulges:
                         bulges[-1] = float(value)
+                if normal[2] < 0:
+                    # The arbitrary-axis algorithm reflects XY for a negative
+                    # normal z, reversing bulge sweep (the same rule
+                    # da/intake_parse.py's BM sign fix applies).
+                    bulges = [-b for b in bulges]
             elif kind == "POLYLINE":
                 # VERTEX coordinates are not copied into record; keep classic bulges unchanged.
                 bulges = [float(v) for c, v in record if c == 42]
@@ -587,7 +592,7 @@ def _parse_block_child(pairs, i, kind):
         entity, end = _parse_line(pairs, i)
         child["pts"] = [[round(v, 3) for v in p] for p in entity["pts"]]
     elif kind == "LWPOLYLINE":
-        entity, end = _parse_lwpolyline(pairs, i)
+        entity, end = _parse_lwpolyline(pairs, i, wcs=False)
         if (len(entity["pts"]) < 2 or
                 sum(code == 10 for code, _ in pairs[i:end]) !=
                 sum(code == 20 for code, _ in pairs[i:end])):
@@ -860,15 +865,29 @@ def _group_pairs(text: str) -> List[Tuple[int, str]]:
     return pairs
 
 
-def _parse_lwpolyline(pairs: List[Tuple[int, str]], i: int, dropped=None):
+def _parse_lwpolyline(pairs: List[Tuple[int, str]], i: int, dropped=None, wcs=True):
     """LWPOLYLINE: layer=8, handle=5, flags=70 (bit 1 = closed), elevation=38,
-    vertices as repeated (10=x, 20=y)."""
+    vertices as repeated (10=x, 20=y). For a TOP-LEVEL entity (wcs=True, the
+    default), 10/20/38 are OCS relative to the entity's extrusion normal
+    (210/220/230, default +z), so each vertex is lifted into WCS through
+    `_ocs_to_wcs`, the same arbitrary-axis transform CIRCLE/ARC already apply
+    to their centre; the raw normal survives on the row as `normal` (omitted
+    for a +z normal, so a +Z polyline's row stays byte-identical, and
+    matching the key the member-evidence pass below already sets on this
+    same row) for server/intake_dxf.py's exact inverse. `_parse_block_child`
+    calls this with wcs=False: a block child's own 10/20/38 are BLOCK-LOCAL
+    OCS by design (W4g-7c-2s) and must stay raw, so no transform and no
+    normal validation happen there; the caller derives its own `nrm`
+    evidence straight from the raw groups. A classic 2D
+    POLYLINE's own OCS convention is untouched here (separate, later record);
+    a classic 3D POLYLINE (`_parse_polyline`) never reads 210 at all."""
     layer = "0"
     handle = ""
     closed = False
     elevation = 0.0
     xs: List[float] = []
     ys: List[float] = []
+    normal = [0.0, 0.0, 1.0]
     aci = linetype = lineweight = truecolor = None
     n = len(pairs)
     while i < n and pairs[i][0] != 0:
@@ -885,6 +904,12 @@ def _parse_lwpolyline(pairs: List[Tuple[int, str]], i: int, dropped=None):
             xs.append(_float(value))
         elif code == 20:
             ys.append(_float(value))
+        elif code == 210:
+            normal[0] = _float(value)
+        elif code == 220:
+            normal[1] = _float(value)
+        elif code == 230:
+            normal[2] = _float(value)
         elif code == 62:
             aci = value
         elif code == 6:
@@ -894,10 +919,28 @@ def _parse_lwpolyline(pairs: List[Tuple[int, str]], i: int, dropped=None):
         elif code == 420:
             truecolor = value
         i += 1
-    pts = [[x, y, elevation] for x, y in zip(xs, ys)]
-    return {"layer": layer, "closed": closed, "pts": pts,
-            "xdata": None, "handle": handle,
-            "_properties": _entity_properties(aci, linetype, lineweight, truecolor, dropped)}, i
+    if wcs:
+        if not all(math.isfinite(v) for v in normal):
+            raise DxfParseError("LWPOLYLINE normal must be finite")
+        if not any(normal):
+            raise DxfParseError("LWPOLYLINE normal must not be the zero vector")
+        # Same 1e-6 tolerance server/intake_dxf.py's writer uses to decide a
+        # normal is +Z: an exact-equality check here let a near-+Z normal
+        # (within the writer's own tolerance) still be transformed, while the
+        # member-evidence pass below (also 1e-6) judged it default and stored
+        # no `normal` key, so the writer never inverted the transform back.
+        identity = all(abs(a - b) <= 1e-6 for a, b in zip(normal, (0.0, 0.0, 1.0)))
+        pts = [([x, y, elevation] if identity else _ocs_to_wcs([x, y, elevation], normal))
+               for x, y in zip(xs, ys)]
+    else:
+        identity = True
+        pts = [[x, y, elevation] for x, y in zip(xs, ys)]
+    entity = {"layer": layer, "closed": closed, "pts": pts,
+              "xdata": None, "handle": handle,
+              "_properties": _entity_properties(aci, linetype, lineweight, truecolor, dropped)}
+    if wcs and not identity:
+        entity["normal"] = [round(v, 6) for v in normal]
+    return entity, i
 
 
 def _parse_polyline(pairs: List[Tuple[int, str]], i: int, dropped=None):
