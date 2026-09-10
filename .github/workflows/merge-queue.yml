@@ -253,6 +253,16 @@ jobs:
             fi
           fi
 
+      - uses: actions/checkout@v4
+        if: steps.docs.outputs.supply != 'none'
+        with:
+          ref: ${{ github.event.merge_group.base_sha }}
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+          path: .mq-trusted
+          persist-credentials: false
+          fetch-depth: 1
+
       - name: Assume the supply transport read role
         if: steps.docs.outputs.supply != 'none'
         uses: aws-actions/configure-aws-credentials@v6.1.0
@@ -280,7 +290,7 @@ jobs:
             fi
           }
           ATTEMPT=0
-          HELPER="${GITHUB_WORKSPACE:-.}/.github/scripts/mq-deadline.sh"
+          HELPER="${GITHUB_WORKSPACE:-.}/.mq-trusted/.github/scripts/mq-deadline.sh"
           if [ -r "$HELPER" ]; then
             # shellcheck source=/dev/null
             . "$HELPER"
@@ -376,7 +386,7 @@ jobs:
     needs: [mq-review, mq-supply]
     if: always()
     runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
-    timeout-minutes: 25
+    timeout-minutes: 35
     # Queue refs assume their own read-only role without an environment.
     # The release role and ecr-release environment are for stage-group on main.
     permissions:
@@ -411,8 +421,12 @@ jobs:
       - uses: actions/checkout@v4
         if: github.event_name == 'merge_group' && needs.mq-supply.outputs.supply == 'present'
         with:
-          ref: ${{ github.event.merge_group.head_sha }}
+          ref: ${{ github.event.merge_group.base_sha }}
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+          path: .mq-trusted
           persist-credentials: false
+          fetch-depth: 1
 
       - name: Assume the relay transport read role
         if: github.event_name == 'merge_group' && needs.mq-supply.outputs.supply == 'present'
@@ -442,7 +456,7 @@ jobs:
             fi
           }
           ATTEMPT=0
-          HELPER="${GITHUB_WORKSPACE:-.}/.github/scripts/mq-deadline.sh"
+          HELPER="${GITHUB_WORKSPACE:-.}/.mq-trusted/.github/scripts/mq-deadline.sh"
           if [ -r "$HELPER" ]; then
             # shellcheck source=/dev/null
             . "$HELPER"
@@ -600,7 +614,7 @@ jobs:
           REQUEST_ID="$SHA12-$RELAY_RUN_ID"
           ARNS=""
           SERVICES=$(jq -ej 'keys | if length > 0 then join(" ") else error("empty dispatched set") end' <<<"$DISPATCHED_JSON")
-          HELPER="${GITHUB_WORKSPACE:-.}/.github/scripts/mq-deadline.sh"
+          HELPER="${GITHUB_WORKSPACE:-.}/.mq-trusted/.github/scripts/mq-deadline.sh"
           if [ -r "$HELPER" ]; then
             # shellcheck source=/dev/null
             . "$HELPER"
