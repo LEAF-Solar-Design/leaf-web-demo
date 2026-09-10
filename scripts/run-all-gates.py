@@ -69,12 +69,13 @@ USAGE
     python scripts/run-all-gates.py --only server-backbone --only harness-vitest
                                                  # repeatable: runs the UNION of both
     python scripts/run-all-gates.py --log-dir DIR # where per-suite logs land
+    python scripts/run-all-gates.py --jobs 6     # bounded pool; conflicts stay serial
 
 EXIT CODE
 ---------
     0  iff every gate passed and every test-level skip was explicitly allowlisted
     2  nothing ran, so this is never a gate verdict: an --only substring matched
-       no suite, or a suite id was registered more than once
+       no suite, a suite id was registered more than once, or --jobs is outside 1..16
     1  otherwise
 
 Full per-suite output goes to <log-dir>/<suite>.log; only the scoreboard is
@@ -94,7 +95,9 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
@@ -2755,8 +2758,8 @@ def describe_selection(patterns: List[str]) -> str:
 # CI splits the catalog across N isolated runner checkouts (test-gate.yml
 # matrix). Isolation is the point: suites share on-disk state inside one
 # checkout (jobs.db, the versioned drawing store, authored_tools.json, broker
-# ledgers — see the module docstring), so the suites of one shard still run
-# STRICTLY SERIALLY, exactly as a full run does. Nothing about a suite's
+# ledgers — see the module docstring), so suites run serially by default.
+# With --jobs > 1, the shared-state group below still runs serially. Nothing about a suite's
 # environment, retry, floor, or log changes under sharding; only WHICH suites
 # a given invocation runs.
 #
@@ -2882,6 +2885,140 @@ def partition_suites(suites: List[Suite], shard_count: int) -> List[List[Suite]]
         bins[target].append(suite)
         loads[target] += suite_weight(suite)
     return [sorted(b, key=lambda s: index_of[s.id]) for b in bins]
+
+
+# Source inventory for suites whose conflicts are not expressed by Suite flags
+# or an npm/npx executable. Keep ALL conflicts in ONE group, in catalog order.
+# The server integration fixtures bind :0, not a fixed host port, but the older
+# catalog/author paths still read or write the shared authored store and bodies.
+# test_checkout_crossproc.py uses tmp_path stores and no listener: it belongs
+# in the weighted pool, not here. test_sessions_e2e.py also binds :0, but its
+# fixture runs npm build in the shared harness directory before starting Node.
+_SERIAL_SUITE_REASONS = {
+    **dict.fromkeys((
+        "server-backbone", "server-dynamic-loader", "server-write-loop",
+        "server-ui-wave", "server-wave2", "server-wave3", "server-wave4",
+        "server-wave5", "server-e2e-golden", "server-catalog-version-pin",
+        "server-hardening-3b", "server-sessions-routes",
+        "server-authored-tenant-isolation",
+    ), "shared authored catalog or tool bodies"),
+    # These have live DB cases even though the whole suite is not db_gated.
+    # Their fixtures migrate or inspect the same PostgreSQL schema as platform.
+    **dict.fromkeys((
+        "platform", "platform-static", "server-drawing-authority-postgres",
+        "server-agent-gate-postgres", "server-agent-ops-postgres",
+        "server-broker-pg-store", "server-guest-caps-postgres",
+        "server-jobs-callbacks-postgres", "server-session-store-postgres",
+        "server-reconcile-sessions-authority", "server-version-restore",
+        "server-operator-authority", "server-operator-credential-rotate",
+        "server-operator-external-write", "server-operator-overlay-runbook",
+        "server-operator-principals", "server-operator-runbooks",
+        "server-operator-stage-release",
+    ), "shared PostgreSQL schema"),
+    "server-sessions-e2e": "rebuilds shared harness/dist with npm",
+    "web-demo-gate": "nested runner rebuilds web/dist and may unpack node_modules",
+    "harness-container-smoke": "fixed compose project and container ports 8130/8150",
+}
+
+
+def serial_suite_reason(suite: Suite) -> str:
+    """A nonempty reason assigns a suite to the one shared-state worker."""
+    if suite.reset_authored:
+        return "resets shared authored_tools.json"
+    if suite.db_gated:
+        return "shared PostgreSQL through DATABASE_URL"
+    executable = str(suite.argv[0]).replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if executable in ("npm", "npm.cmd", "npm.exe", "npx", "npx.cmd", "npx.exe"):
+        return "npm/npx shares node_modules and build outputs in its cwd"
+    return _SERIAL_SUITE_REASONS.get(suite.id, "")
+
+
+def parallel_suite_groups(suites: List[Suite], jobs: int) -> List[List[Suite]]:
+    """Reserve one worker for conflicts; LPT-partition only the independent rest."""
+    serial = []
+    independent = []
+    for suite in suites:
+        (serial if serial_suite_reason(suite) else independent).append(suite)
+    if serial:
+        return [serial] + partition_suites(independent, jobs - 1)
+    return partition_suites(independent, jobs)
+
+
+def _run_parallel_suite(suite: Suite, log_dir: Path, retry: int) -> tuple[Result, int]:
+    # Mirror the serial retry contract without changing the default code path.
+    def attempt(number: int) -> Result:
+        try:
+            return run_suite_guarded(suite, log_dir, attempt=number)
+        except Exception as exc:
+            return Result(suite, "FAIL", "err", 0.0,
+                          note=f"runner error: {type(exc).__name__}: {str(exc)[:160]}")
+
+    res = attempt(1)
+    attempts = 1
+    while res.status == "FAIL" and attempts <= retry:
+        attempts += 1
+        prev_secs = res.seconds
+        prev_note = res.note
+        res = attempt(attempts)
+        res.seconds += prev_secs
+        if res.status == "PASS":
+            res.note = (f"flaked; passed on attempt {attempts}/{retry + 1}"
+                        + (f" (prev: {prev_note})" if prev_note else "")
+                        + (f" ({res.note})" if res.note else ""))
+    if res.status == "FAIL" and attempts > 1:
+        res.note = (f"FAIL after {attempts} attempts"
+                    + (f" ({res.note})" if res.note else ""))
+    return res, attempts
+
+
+def run_suites_parallel(suites: List[Suite], log_dir: Path, jobs: int,
+                        retry: int, fail_fast: bool) -> tuple[List[Result], dict]:
+    completed = {}
+    dispatch_lock = threading.Lock()
+    stopped_after = None
+
+    def drain(group: List[Suite]) -> None:
+        nonlocal stopped_after
+        for suite in group:
+            # Admission and publication of the first red share a lock. Suites
+            # admitted before it are in flight and finish, including retries.
+            with dispatch_lock:
+                if stopped_after is not None:
+                    break
+            try:
+                res, attempts = _run_parallel_suite(suite, log_dir, retry)
+            except Exception as exc:
+                res = Result(suite, "FAIL", "err", 0.0,
+                             note=f"runner error: {type(exc).__name__}: {str(exc)[:160]}")
+                attempts = 1
+            with dispatch_lock:
+                completed[suite.id] = (res, attempts)
+                if fail_fast and res.status == "FAIL" and stopped_after is None:
+                    stopped_after = suite.id
+
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        futures = [pool.submit(drain, group)
+                   for group in parallel_suite_groups(suites, jobs) if group]
+        for future in futures:
+            future.result()
+
+    # Only this thread prints. Completion order must never reorder the rows or
+    # their FLAKED/skip/audit callouts (or the machine-readable result file).
+    results = []
+    attempts_by_id = {}
+    for suite in suites:
+        if suite.id not in completed:
+            continue
+        res, attempts = completed[suite.id]
+        results.append(res)
+        attempts_by_id[suite.id] = attempts
+        tail = f"{res.got:>4}  {res.seconds:5.1f}s"
+        if res.note:
+            tail += f"  {res.note}"
+        print(f"  ... {suite.id:<22} {res.status:<11} {tail}")
+    if stopped_after is not None:
+        print(f"  --fail-fast: stopping after {stopped_after}; in-flight suites finished")
+    return results, attempts_by_id
 
 
 def _fingerprint_argv(argv: List[str]) -> List[str]:
@@ -3683,10 +3820,26 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
     print("=" * len(line))
 
 
+def _jobs_count(value: str) -> int:
+    try:
+        jobs = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("--jobs must be an integer in 1..16") from None
+    if not 1 <= jobs <= 16:
+        raise argparse.ArgumentTypeError("--jobs must be an integer in 1..16")
+    return jobs
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Leaf web demo full gate runner")
     ap.add_argument("--fail-fast", action="store_true",
-                    help="stop at the first failing gate (default: run all)")
+                    help="stop at the first failing gate (default: run all). With "
+                         "--jobs > 1, stop dispatching new suites and wait for "
+                         "in-flight suites; do not kill running children.")
+    ap.add_argument("--jobs", type=_jobs_count, default=1, metavar="N",
+                    help="run suites with N worker threads (1..16, default 1). "
+                         "Shared-state suites stay in one sequential group; "
+                         "1 uses the original serial path with no threads.")
     ap.add_argument("--continue", dest="cont", action="store_true",
                     help="run every gate even if one fails (this is the default)")
     ap.add_argument("--only", action="append", default=None, metavar="SUBSTR",
@@ -3704,7 +3857,7 @@ def main() -> int:
     ap.add_argument("--shard-count", type=int, default=1, metavar="N",
                     help="partition the catalog into N deterministic shards and run "
                          "only one of them (see --shard-index). Suites inside a shard "
-                         "still run strictly serially; sharding changes WHICH suites "
+                         "run serially unless --jobs > 1; sharding changes WHICH suites "
                          "this invocation runs, never how any suite runs.")
     ap.add_argument("--shard-index", type=int, default=None, metavar="I",
                     help="0-based shard to run; required when --shard-count > 1. "
@@ -3858,7 +4011,10 @@ def main() -> int:
     attempts_by_id: dict = {}
     wall0 = time.perf_counter()
     try:
-      for suite in suites:
+      if args.jobs > 1:
+        results, attempts_by_id = run_suites_parallel(
+            suites, log_dir, args.jobs, args.retry, args.fail_fast)
+      for suite in suites if args.jobs == 1 else ():
         print(f"  ... {suite.id:<22} ", end="", flush=True)
         res = run_suite_guarded(suite, log_dir, attempt=1)
         attempts = 1

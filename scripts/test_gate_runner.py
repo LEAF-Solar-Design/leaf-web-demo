@@ -20,7 +20,12 @@ import importlib.util
 import os
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 SCRIPTS = Path(__file__).resolve().parent
 REPO = SCRIPTS.parent
@@ -2427,3 +2432,307 @@ def test_a_proof_without_a_pass_for_every_audit_suite_is_never_verified(tmp_path
         path.write_text(json.dumps(doc), encoding="utf-8")
         assert g.verify_gate_proof(path, tree) == 1, why
         assert "PASS for every audit suite" in capsys.readouterr().out, why
+
+
+def _jobs_catalog(g, count=4):
+    return [
+        g.Suite(f"pool-{i}", f"pool suite {i}", "pytest", SCRIPTS,
+                [sys.executable, "-c",
+                 f"import time; time.sleep({0.05 * (count - i)!r}); "
+                 "print('2 passed in 0.01s')"], 1)
+        for i in range(count)
+    ]
+
+
+def _jobs_main(g, monkeypatch, capsys, tmp_path, flags):
+    monkeypatch.setattr(sys, "argv", [
+        "run-all-gates.py", "--log-dir", str(tmp_path), *flags,
+    ])
+    rc = g.main()
+    return rc, capsys.readouterr().out
+
+
+def test_jobs_one_is_byte_identical_to_default_without_starting_threads(
+        tmp_path, monkeypatch, capsys):
+    g = _load_runner()
+    suites = _jobs_catalog(g)
+    monkeypatch.setattr(g, "build_suites", lambda: suites)
+    # Freeze only reported durations. The real child subprocesses still run.
+    monkeypatch.setattr(g, "time", SimpleNamespace(
+        perf_counter=lambda: 0.0, strftime=time.strftime))
+
+    def no_pool(*args, **kwargs):
+        raise AssertionError("the serial path must not create a thread pool")
+
+    monkeypatch.setattr(g, "ThreadPoolExecutor", no_pool)
+    default = _jobs_main(g, monkeypatch, capsys, tmp_path, ["--retry", "0"])
+    explicit = _jobs_main(g, monkeypatch, capsys, tmp_path,
+                          ["--retry", "0", "--jobs", "1"])
+    assert default == explicit
+    assert default[0] == 0
+    assert "GATE SCOREBOARD" in default[1]
+    assert "executed-count drift" in default[1]
+
+
+def test_jobs_four_keeps_the_same_scoreboard_and_catalog_order(
+        tmp_path, monkeypatch, capsys):
+    g = _load_runner()
+    suites = _jobs_catalog(g)
+    monkeypatch.setattr(g, "build_suites", lambda: suites)
+    monkeypatch.setattr(g, "time", SimpleNamespace(
+        perf_counter=lambda: 0.0, strftime=time.strftime))
+    serial = _jobs_main(g, monkeypatch, capsys, tmp_path,
+                        ["--retry", "0", "--jobs", "1"])
+    parallel = _jobs_main(g, monkeypatch, capsys, tmp_path,
+                          ["--retry", "0", "--jobs", "4"])
+    assert parallel == serial
+    assert parallel[0] == 0
+    rows = [line for line in parallel[1].splitlines() if line.startswith("pool suite")]
+    assert len(rows) == len(suites)
+    assert [line.split("  ")[0] for line in rows] == [s.label for s in suites]
+
+
+def test_jobs_pool_is_concurrent_with_a_bound_that_serial_sleep_cannot_meet(
+        tmp_path, monkeypatch):
+    g = _load_runner()
+    count, delay = 8, 0.75
+    suites = _jobs_catalog(g, count)
+    rendezvous = threading.Barrier(count)
+    lock = threading.Lock()
+    active = peak = 0
+
+    def sleeping_suite(suite, log_dir, attempt):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        try:
+            rendezvous.wait(timeout=10)
+            time.sleep(delay)
+            return g.Result(suite, "PASS", "2", delay)
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(g, "run_suite_guarded", sleeping_suite)
+    start = time.monotonic()
+    results, attempts = g.run_suites_parallel(suites, tmp_path, count, 0, False)
+    elapsed = time.monotonic() - start
+    assert all(r.status == "PASS" for r in results)
+    assert len(results) == count and peak == count
+    assert set(attempts.values()) == {1}
+    # Serial sleeping alone costs 6s. Threads need 0.75s, leaving 2.25s of
+    # scheduling margin, and the barrier independently proves actual overlap.
+    assert elapsed < 3.0, elapsed
+
+
+def test_jobs_conflicts_are_in_one_group_and_excluded_from_lpt(monkeypatch):
+    g = _load_runner()
+    suites = g.build_suites()
+    partitioned = []
+    real_partition = g.partition_suites
+
+    def recording_partition(items, count):
+        partitioned.append(([s.id for s in items], count))
+        return real_partition(items, count)
+
+    monkeypatch.setattr(g, "partition_suites", recording_partition)
+    groups = g.parallel_suite_groups(suites, 4)
+    serial_ids = {s.id for s in groups[0]}
+    by_id = {s.id: s for s in suites}
+    required = {
+        "server-nl-router": "authored_tools.json",
+        "platform": "PostgreSQL",
+        "harness-vitest": "npm/npx",
+        "harness-tsc-noemit": "npm/npx",
+        "harness-tsc-build": "npm/npx",
+        "harness-audit-high": "npm/npx",
+        "web-vitest": "npm/npx",
+        "web-build": "npm/npx",
+        "web-link-service-flow": "npm/npx",
+        "web-demo-gate": "nested runner",
+        "server-sessions-e2e": "harness/dist",
+        "server-e2e-golden": "authored",
+        "server-dynamic-loader": "authored",
+        "server-drawing-authority-postgres": "PostgreSQL",
+        "harness-container-smoke": "ports 8130/8150",
+    }
+    for sid, reason in required.items():
+        assert sid in serial_ids, sid
+        assert reason in g.serial_suite_reason(by_id[sid]), sid
+    for suite in suites:
+        if suite.reset_authored or suite.db_gated:
+            assert suite.id in serial_ids, suite.id
+        if suite.cwd in (g.HARNESS, g.WEB):
+            assert suite.id in serial_ids, suite.id
+    assert "server-checkout-crossproc" not in serial_ids
+    assert [s.id for s in groups[0]] == [s.id for s in suites if s.id in serial_ids]
+    independent_ids = [s.id for s in suites if s.id not in serial_ids]
+    assert partitioned == [(independent_ids, 3)]
+    assert sorted(s.id for group in groups for s in group) == sorted(by_id)
+    assert len(groups) == 4
+
+
+def test_jobs_serial_group_never_overlaps_itself_and_pool_never_exceeds_jobs(
+        tmp_path, monkeypatch):
+    g = _load_runner()
+    suites = _jobs_catalog(g, 12)
+    suites[0].reset_authored = True
+    suites[4].argv = ["npm", "test"]
+    suites[8].id = "platform"
+    conflict_ids = {suites[i].id for i in (0, 4, 8)}
+    lock = threading.Lock()
+    rendezvous = threading.Barrier(3)
+    first_threads = set()
+    active = peak = serial_active = serial_peak = 0
+    serial_order = []
+
+    def tracked_suite(suite, log_dir, attempt):
+        nonlocal active, peak, serial_active, serial_peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            if suite.id in conflict_ids:
+                serial_active += 1
+                serial_peak = max(serial_peak, serial_active)
+                serial_order.append((suite.id, threading.get_ident()))
+            first = threading.get_ident() not in first_threads
+            first_threads.add(threading.get_ident())
+        try:
+            if first:
+                rendezvous.wait(timeout=10)
+            time.sleep(0.02)
+            return g.Result(suite, "PASS", "2", 0.02)
+        finally:
+            with lock:
+                active -= 1
+                if suite.id in conflict_ids:
+                    serial_active -= 1
+
+    monkeypatch.setattr(g, "run_suite_guarded", tracked_suite)
+    results, _ = g.run_suites_parallel(suites, tmp_path, 3, 0, False)
+    assert len(results) == len(suites)
+    assert all(r.status == "PASS" for r in results)
+    assert peak == 3 and serial_peak == 1
+    assert [sid for sid, _ in serial_order] == [s.id for s in suites if s.id in conflict_ids]
+    assert len({thread for _, thread in serial_order}) == 1
+
+
+def test_jobs_red_and_spawn_retry_keep_the_verdict_rows_and_flaked_callout(
+        tmp_path, monkeypatch, capsys):
+    import json
+    g = _load_runner()
+    suites = _jobs_catalog(g)
+    suites[2].argv = [sys.executable, "-c", "print('1 failed in 0.01s'); exit(1)"]
+    monkeypatch.setattr(g, "build_suites", lambda: suites)
+    monkeypatch.setenv("LEAF_GATE_FAULT_INJECT", f"{suites[1].id}:spawn")
+    monkeypatch.setattr(g, "time", SimpleNamespace(
+        perf_counter=lambda: 0.0, strftime=time.strftime))
+    result_file = tmp_path / "result.json"
+    flags = ["--retry", "1", "--result-json", str(result_file)]
+    serial = _jobs_main(g, monkeypatch, capsys, tmp_path, [*flags, "--jobs", "1"])
+    serial_json = json.loads(result_file.read_text(encoding="utf-8"))
+    parallel = _jobs_main(g, monkeypatch, capsys, tmp_path, [*flags, "--jobs", "4"])
+    assert parallel == serial
+    assert parallel[0] == 1
+    data = json.loads(result_file.read_text(encoding="utf-8"))
+    assert data == serial_json
+    assert [r["id"] for r in data["results"]] == [s.id for s in suites]
+    assert [r["status"] for r in data["results"]] == ["PASS", "PASS", "FAIL", "PASS"]
+    assert [r["attempts"] for r in data["results"]] == [1, 2, 2, 1]
+    assert "FLAKED (passed only on retry" in parallel[1]
+    assert "FAIL after 2 attempts" in parallel[1]
+    assert (tmp_path / f"{suites[1].id}.retry1.log").exists()
+
+
+@pytest.mark.parametrize("value", ["0", "17", "x"])
+def test_jobs_invalid_bound_exits_two_before_any_suite_or_log_directory(
+        tmp_path, monkeypatch, capsys, value):
+    g = _load_runner()
+
+    def never_build():
+        raise AssertionError("invalid --jobs must be refused before catalog construction")
+
+    monkeypatch.setattr(g, "build_suites", never_build)
+    logs = tmp_path / "not-created"
+    monkeypatch.setattr(sys, "argv", [
+        "run-all-gates.py", "--log-dir", str(logs), "--jobs", value,
+    ])
+    with pytest.raises(SystemExit) as error:
+        g.main()
+    output = capsys.readouterr()
+    assert error.value.code == 2
+    assert "--jobs" in output.err and "1..16" in output.err
+    assert "GATE SCOREBOARD" not in output.out
+    assert not logs.exists()
+
+
+@pytest.mark.parametrize("boundary", ["run_suite_guarded", "_run_parallel_suite"])
+def test_jobs_worker_exception_becomes_a_fail_row_without_losing_the_scoreboard(
+        tmp_path, monkeypatch, capsys, boundary):
+    g = _load_runner()
+    suites = _jobs_catalog(g, 8)
+    monkeypatch.setattr(g, "build_suites", lambda: suites)
+    real = getattr(g, boundary)
+
+    def faulty(suite, *args, **kwargs):
+        if suite.id == suites[2].id:
+            raise RuntimeError("worker drill")
+        return real(suite, *args, **kwargs)
+
+    monkeypatch.setattr(g, boundary, faulty)
+    rc, output = _jobs_main(g, monkeypatch, capsys, tmp_path,
+                            ["--jobs", "4", "--retry", "0"])
+    assert rc == 1
+    assert "GATE SCOREBOARD" in output
+    assert "RuntimeError: worker drill" in output
+    assert "suites: 7 PASS  1 FAIL" in output
+    rows = [line for line in output.splitlines() if line.startswith("pool suite")]
+    assert [line.split("  ")[0] for line in rows] == [s.label for s in suites]
+
+
+def test_jobs_fail_fast_stops_new_suites_and_waits_for_in_flight_children(
+        tmp_path, monkeypatch, capsys):
+    g = _load_runner()
+    suites = _jobs_catalog(g, 8)
+    suites[0].reset_authored = suites[1].reset_authored = True
+    monkeypatch.setattr(g, "build_suites", lambda: suites)
+    monkeypatch.setattr(g, "AUTHORED_TOOLS", tmp_path / "authored.json")
+    rendezvous = threading.Barrier(4)
+    red_worker_finished = threading.Event()
+    ran = []
+    finished = []
+    lock = threading.Lock()
+    real_pool = g.ThreadPoolExecutor
+
+    class ObservedPool(real_pool):
+        def submit(self, fn, group):
+            future = super().submit(fn, group)
+            if group[0].id == suites[0].id:
+                future.add_done_callback(lambda _: red_worker_finished.set())
+            return future
+
+    def controlled_suite(suite, log_dir, attempt):
+        with lock:
+            ran.append(suite.id)
+        rendezvous.wait(timeout=10)
+        if suite.id == suites[0].id:
+            return g.Result(suite, "FAIL", "err", 0.0, note="deliberate red")
+        # Release only after the serial worker has published red and stopped.
+        # No scheduler-sensitive sleep between a failure and a new dispatch.
+        assert red_worker_finished.wait(timeout=10)
+        with lock:
+            finished.append(suite.id)
+        return g.Result(suite, "PASS", "2", 0.0)
+
+    monkeypatch.setattr(g, "ThreadPoolExecutor", ObservedPool)
+    monkeypatch.setattr(g, "run_suite_guarded", controlled_suite)
+    rc, output = _jobs_main(g, monkeypatch, capsys, tmp_path,
+                            ["--jobs", "4", "--retry", "0", "--fail-fast"])
+    assert rc == 1
+    assert len(ran) == 4 and len(finished) == 3
+    assert suites[1].id not in ran
+    assert "in-flight suites finished" in output
+    assert "suites: 3 PASS  1 FAIL" in output
+    rows = [line for line in output.splitlines() if line.startswith("pool suite")]
+    assert [line.split("  ")[0] for line in rows] == [s.label for s in suites if s.id in ran]
