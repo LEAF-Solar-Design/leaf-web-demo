@@ -10,6 +10,7 @@ from pathlib import Path
 
 from campaign_bridge import BridgeError
 from developer_jobs_transport import DeveloperJobsTransport, TransportError
+from campaign_walk_media import download as media_download, safe_prefix
 
 OPS = frozenset({'walk_doctor', 'walk_prepare', 'walk_read', 'walk_request', 'walk_receipt'})
 LIMIT = 128 * 1024
@@ -18,7 +19,7 @@ CONFIG = {'version', 'client_version', 'enabled', 'endpoint', 'region', 'role_ar
 JOB = {'org_id', 'project_id', 'repository_id', 'job_name', 'environment', 'commit_sha',
        'source_bucket', 'source_prefix', 'acceptance_bucket', 'acceptance_prefix',
        'acceptance_producer', 'runtime_seconds', 'reservation_microusd',
-       'browser_startup_verified', 'profile_id'}
+       'browser_startup_verified', 'profile_id', 'media_bucket', 'media_prefix'}
 MANIFEST = {'version', 'profile_id', 'profile_revision', 'profile_digest', 'campaign_id',
             'task_id', 'parent_attempt_id', 'parent_attempt_fence', 'max_cost_microusd',
             'max_runtime_seconds'}
@@ -102,9 +103,8 @@ def installation():
             _require(all(_text(job[k]) for k in JOB - {'runtime_seconds', 'reservation_microusd', 'browser_startup_verified'})
                      and _hex(job['commit_sha'], 40) and _integer(job['runtime_seconds'], 1, 3600)
                      and _integer(job['reservation_microusd']) and type(job['browser_startup_verified']) is bool, 503)
-            for prefix in ('source_prefix', 'acceptance_prefix'):
-                _require(job[prefix].endswith('/') and not job[prefix].startswith('/')
-                         and '..' not in job[prefix].split('/') and '\\' not in job[prefix], 503)
+            for prefix in ('source_prefix', 'acceptance_prefix', 'media_prefix'):
+                _require(safe_prefix(job[prefix]), 503)
         return value
     except FileNotFoundError:
         return None
@@ -374,7 +374,10 @@ class WalkBridge:
         media = evidence.get('media_ref')
         safe_evidence = {'terminal_ref': reference}
         if media is not None:
-            safe_evidence['media_ref'] = _ref(media)
+            try:
+                safe_evidence['media_ref'] = _ref(media)
+            except Exception:
+                safe_evidence['media_verification'] = {'status': 'unavailable', 'code': 'media_download_unavailable'}
         if row.get('settled_at') is not None and row['developer_attempt_id'] == attempt['attempt_id']:
             _require(row.get('cost_microusd') == amount and row.get('receipt_ref') == reference)
         else:
@@ -434,6 +437,11 @@ class WalkBridge:
         if attempt['state'] in TERMINAL:
             basis, evidence = self._terminal(scope, row, job, attempt)
             summary.update(accounting=basis, cleanup='verified', evidence=evidence)
+            if 'media_ref' in evidence:
+                try:
+                    evidence['download'] = media_download(self._aws()[0], job, attempt['binding'], evidence['media_ref'])
+                except Exception:
+                    evidence['media_verification'] = {'status': 'unavailable', 'code': 'media_download_unavailable'}
         return summary
 
     def handle(self, op, body, subject):

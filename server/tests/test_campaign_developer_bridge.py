@@ -120,14 +120,15 @@ def fixture():
                 raise bridge.BridgeError(409)
         return scope, {'limit_microusd': 1000, 'spent_microusd': 0, 'reserved_microusd': 0}
     profile = dict(version=1, profile_id='synthetic', profile_revision=1,
-                   max_runtime_seconds=90, max_cost_microusd=100)
+                   max_runtime_seconds=90, max_cost_microusd=100, viewport={'width':1280,'height':720})
     manifest = dict(version=1, profile_id='synthetic', profile_revision=1, profile_digest=bridge._sha(profile),
         campaign_id=CAMPAIGN, task_id=TASK, parent_attempt_id=PARENT, parent_attempt_fence=1,
         max_cost_microusd=100, max_runtime_seconds=90)
     job = dict(org_id=ORG, project_id=PROJECT, repository_id='repo', job_name='browser-v1', environment='staging',
         commit_sha='a' * 40, source_bucket='source', source_prefix='walks/', acceptance_bucket='acceptance',
         acceptance_prefix='walks/', acceptance_producer='producer-v1', runtime_seconds=90,
-        reservation_microusd=100, browser_startup_verified=True, profile_id='synthetic')
+        reservation_microusd=100, browser_startup_verified=True, profile_id='synthetic',
+        media_bucket='media', media_prefix='walks/media/')
     config = dict(version=1, client_version=1, enabled=True, endpoint='unused', region='us-east-1',
                   role_arn=None, registry_digest='c' * 64, profiles={'synthetic': profile}, jobs=[job])
     ledger, s3 = Ledger(events), S3(events)
@@ -367,3 +368,43 @@ def test_terminal_media_reference_is_not_verified_upload(fixture):
     assert output['evidence']['media_ref'] == media
     assert output['cleanup'] == 'verified' and output['upload'] == 'pending'
     assert output['acceptance'] == 'pending'
+
+
+def test_media_failure_preserves_verified_terminal_accounting(fixture, monkeypatch):
+    prepare(fixture)
+    media_ref = dict(bucket='media',key='unavailable/index.json',version_id='v1',sha256='e'*64)
+    terminal(fixture,media_ref=media_ref)
+    def fail(*args):
+        raise RuntimeError('private provider error')
+    monkeypatch.setattr(bridge,'media_download',fail)
+    output=fixture[0].handle('walk_receipt',body(),'service')['result']
+    assert output['accounting']=='actual' and output['cleanup']=='verified'
+    assert fixture[1].row['cost_microusd']==40 and fixture[6].count('settle')==1
+    assert output['evidence']=={'terminal_ref':fixture[1].row['receipt_ref'],'media_ref':media_ref,
+        'media_verification':{'status':'unavailable','code':'media_download_unavailable'}}
+
+
+def test_media_urls_are_transient_not_settlement_evidence(fixture,monkeypatch):
+    prepare(fixture)
+    media_ref=dict(bucket='media',key='media/index.json',version_id='v1',sha256='e'*64)
+    terminal(fixture,media_ref=media_ref)
+    transient={'version':1,'bundle':{'url':'https://example.invalid/transient'}}
+    monkeypatch.setattr(bridge,'media_download',lambda *args:transient)
+    output=fixture[0].handle('walk_receipt',body(),'service')['result']
+    assert output['evidence']['download']==transient
+    assert 'download' not in fixture[1].row and 'example.invalid' not in str(fixture[1].row)
+    assert output['upload']=='pending' and output['acceptance']=='pending' and output['cleanup']=='verified'
+
+
+def test_malformed_optional_media_does_not_block_accounting_or_escape(fixture,monkeypatch):
+    prepare(fixture)
+    terminal(fixture,media_ref={'url':'private-provider-data'})
+    def forbidden(*args):
+        pytest.fail('malformed media must never reach presigning')
+    monkeypatch.setattr(bridge,'media_download',forbidden)
+    output=fixture[0].handle('walk_receipt',body(),'service')['result']
+    assert output['accounting']=='actual' and output['cleanup']=='verified'
+    assert fixture[1].row['cost_microusd']==40 and fixture[6].count('settle')==1
+    assert output['evidence']=={'terminal_ref':fixture[1].row['receipt_ref'],
+        'media_verification':{'status':'unavailable','code':'media_download_unavailable'}}
+    assert 'private-provider-data' not in str(output)
