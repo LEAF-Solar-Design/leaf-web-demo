@@ -101,7 +101,10 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
         # Still 74: the timeout failure path extends the existing falsifying twin.
         "prewarm-staging-cutover-workflow": 75,
         # 2026-09-09 app pause keeps 96 executed rows: next-group receipt becomes web only.
-        "merge-queue-workflow": 96,
+        # 96 -> 106 on 2026-09-10 (mq-admission-gate): mq-review's own
+        # pull_request admission decision plus its status-triggered
+        # re-decision. Mirrors run-all-gates.py; BOTH must move together.
+        "merge-queue-workflow": 106,
         "platform-release-manifest": 88,
         # 10 -> 17 on 2026-08-18 with the production deploy's second approval
         # mode (administrator self-authorization): 1 acceptance case plus 6

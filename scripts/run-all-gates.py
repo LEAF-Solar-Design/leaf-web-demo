@@ -1482,7 +1482,13 @@ def build_suites() -> List[Suite]:
               "scripts test_merge_queue_workflow.py", "pytest",
               # Native receipts: seven field refusals, five statuses, six log streams.
               # 2026-09-09 app pause keeps 96 executed rows: next-group receipt becomes web only.
-              SCRIPTS_DIR, _py_pytest("test_merge_queue_workflow.py"), 96),
+              # 96 -> 106 on 2026-09-10 (mq-admission-gate): mq-review decides
+              # pull_request admission itself instead of an unconditional
+              # success, plus a status-triggered re-decision. +4 kimi state
+              # cases, +1 newest-by-created_at proof, +2 unreadable-gate
+              # refusals, +1 status/event-guard structural pin, +1 no-open-PR
+              # no-op, +1 merge_group-path-unchanged pin.
+              SCRIPTS_DIR, _py_pytest("test_merge_queue_workflow.py"), 106),
         Suite("platform-release-manifest",
               "scripts test_platform_release_manifest.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_platform_release_manifest.py"), 88),
