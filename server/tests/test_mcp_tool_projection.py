@@ -54,6 +54,31 @@ def test_projected_tools_is_empty_with_no_servers_registered_at_all(tmp_path, mo
     assert mcp_tool_projection.projected_tools(_TENANT) == []
 
 
+def test_projected_tools_is_empty_with_uncreatable_store(tmp_path, monkeypatch):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setenv("LEAF_TENANT_MCP_DIR", str(blocker / "tenant_mcp"))
+    monkeypatch.delenv("LEAF_AGENT_STATE_DIR", raising=False)
+
+    assert mcp_tool_projection.projected_tools(_TENANT) == []
+    assert blocker.read_text(encoding="utf-8") == "not a directory"
+
+
+def test_projected_tools_is_empty_when_stat_raises_not_a_directory(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEAF_TENANT_MCP_DIR", str(tmp_path))
+    tenant_file = tmp_path / f"{_TENANT}.json"
+    original_stat = Path.stat
+
+    def _stat(path, *args, **kwargs):
+        if path == tenant_file:
+            raise NotADirectoryError(str(path))
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", _stat)
+
+    assert mcp_tool_projection.projected_tools(_TENANT) == []
+
+
 def test_projected_tools_is_empty_with_a_connected_server(tmp_path, monkeypatch):
     monkeypatch.setenv("LEAF_TENANT_MCP_DIR", str(tmp_path))
     _connect_one_server(_TENANT)
