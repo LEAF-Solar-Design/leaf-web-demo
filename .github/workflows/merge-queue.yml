@@ -66,7 +66,7 @@ jobs:
   mq-review:
     name: mq-review
     runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
-    timeout-minutes: 10
+    timeout-minutes: 5
     outputs:
       head_sha: ${{ steps.queue.outputs.head_sha }}
     steps:
@@ -386,7 +386,7 @@ jobs:
     needs: [mq-review, mq-supply]
     if: always()
     runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
-    timeout-minutes: 35
+    timeout-minutes: 30
     # Queue refs assume their own read-only role without an environment.
     # The release role and ecr-release environment are for stage-group on main.
     permissions:
