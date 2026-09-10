@@ -508,6 +508,37 @@ def test_pull_request_admission_same_second_tie_resolves_to_the_newer_success(tm
     )
 
 
+def test_both_arms_resolve_a_same_second_tie_identically():
+    """R1 from the read of head 58688301: the pull_request arm and the
+    merge_group arm are ONE rule. While only the pull_request arm reversed, a
+    failure corrected by a success inside one second admitted the PR and then
+    ejected the group, which is the exact failure this change exists to end.
+    Both arms must pick the newer of a tie, so the selection expression must
+    be byte-identical in both."""
+    text = workflow_text()
+    marker = 'select(.context == "kimi-critic-review")'
+    selections = []
+    cursor = 0
+    while True:
+        found = text.find(marker, cursor)
+        if found < 0:
+            break
+        tail = text.find(".state", found)
+        assert tail > found, "a kimi-critic-review selection has no .state read"
+        selections.append(" ".join(text[found:tail].split()))
+        cursor = tail
+    assert len(selections) == 2, (
+        "expected exactly two kimi-critic-review selections, found %d" % len(selections)
+    )
+    assert selections[0] == selections[1], (
+        "the two arms must be one rule; they differ: %s vs %s"
+        % (selections[0], selections[1])
+    )
+    assert "reverse" in selections[0], (
+        "both arms must reverse before sort_by so the newer of a tie wins: %s" % selections[0]
+    )
+
+
 def test_the_merge_group_path_is_unchanged():
     # Embeds main's list so a future edit to a merge_group step must update
     # this pin deliberately rather than drift underneath it.
@@ -645,13 +676,18 @@ def test_every_network_command_has_a_timeout():
 # Structural / falsifying pins with no local executable surface
 # --------------------------------------------------------------------------- #
 
-def test_it_fires_on_merge_group_and_pull_request_only():
+def test_it_fires_on_merge_group_and_pull_request_target_only():
+    # pull_request_target, not pull_request (R2 from the read of 58688301):
+    # a pull_request run executes the workflow FILE from the PR's own head,
+    # so a PR could weaken its own admission decision; pull_request_target
+    # always runs the file checked in on main.
     triggers = workflow_document()["on"]
     assert triggers["merge_group"]["types"] == ["checks_requested"]
-    assert set(triggers["pull_request"]["types"]) == {
+    assert "pull_request" not in triggers, "must be pull_request_target, not pull_request"
+    assert set(triggers["pull_request_target"]["types"]) == {
         "opened", "synchronize", "reopened", "ready_for_review",
     }
-    assert triggers["pull_request"]["branches"] == ["main"]
+    assert triggers["pull_request_target"]["branches"] == ["main"]
     assert "status" not in triggers, "the refuted status trigger must never come back"
 
 
@@ -690,7 +726,7 @@ def test_prewarm_pull_request_arm_publishes_a_deferred_success_and_calls_nothing
     # mq-review's pull_request arm now decides admission instead; that
     # behavior is executed in the admission tests below, not pinned here.
     step = step_by_name("mq-prewarm", "Publish the deferred queue-preparation success")
-    assert step["if"] == "github.event_name == 'pull_request'"
+    assert step["if"] == "github.event_name == 'pull_request_target'"
     body = step["run"]
     for forbidden in ("gh ", "curl", "git "):
         assert forbidden not in body, "mq-prewarm: pull_request arm must do nothing but notice"

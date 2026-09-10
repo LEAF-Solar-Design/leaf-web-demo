@@ -1495,7 +1495,13 @@ def build_suites() -> List[Suite]:
               # with them (-2), replaced by a no-status-trigger structural pin
               # covering mq-supply and mq-prewarm's restored conditions (+1)
               # and a same-second admission tie-break row (+1). Net unchanged.
-              SCRIPTS_DIR, _py_pytest("test_merge_queue_workflow.py"), 106),
+              # 106 -> 107 on 2026-09-10 (mq-admission-gate r3, critic RED on
+              # 58688301: the merge_group arm's tie-break didn't reverse
+              # before sort_by while the pull_request arm did, so the two
+              # picked opposite entries on a same-second tie): the
+              # merge_group arm now reverses too, and a row pins both arms'
+              # selection expressions byte-identical (+1).
+              SCRIPTS_DIR, _py_pytest("test_merge_queue_workflow.py"), 107),
         Suite("platform-release-manifest",
               "scripts test_platform_release_manifest.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_platform_release_manifest.py"), 88),
