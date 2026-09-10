@@ -16,33 +16,40 @@ name: merge-queue
 # GitHub couples a PR's required checks with the merge queue's: the SAME two
 # context names (mq-review, mq-prewarm) must exist on both a pull_request run
 # and a merge_group run, or a PR can never satisfy its required checks well
-# enough to enter the queue. On pull_request_target events mq-review decides
+# enough to enter the queue. On pull_request events mq-review decides
 # admission from the newest kimi-critic-review status on the PR's own head,
 # using the same reverse-then-sort_by(.created_at) tie-break the merge_group
 # path proves at ~:146-170 (both arms are pinned byte-identical below, so
 # they can never disagree), and mq-prewarm publishes a neutral "queue
 # preparation deferred" success and does nothing else.
 #
-# This trigger is pull_request_target, not pull_request (critic read on
-# 58688301, R2): a pull_request run executes the workflow FILE from the PR's
-# own head, so a PR could weaken or delete the decision step in its own
-# branch and its mq-review check would pass green with no review anywhere.
-# pull_request_target always runs the workflow file checked in on the base
-# branch (main) while still reading github.event.pull_request for the PR's
-# real data, so the admission decision is no longer something a PR can edit
-# out from under itself. Neither job checks out or executes the PR's code,
-# so this carries none of pull_request_target's usual injection risk. There
-# is no status trigger: a status-triggered run's GITHUB_SHA is always the
-# default branch tip, never the PR head, so it cannot correct a PR's own
-# check run. A red mq-review clears the same way any other check does, by a
-# re-run once the kimi-critic-review success is posted; the real staging
-# work only ever runs for merge_group's checks_requested.
+# R2 from the read of 58688301, ACKNOWLEDGED, NOT FIXED HERE: a pull_request
+# run executes this workflow FILE from the PR's own head, so a PR could
+# weaken or delete the decision step in its own branch and its mq-review
+# check would pass green with no review anywhere. pull_request_target was
+# tried and reverted: GitHub resolves a pull_request_target trigger from the
+# DEFAULT BRANCH's copy of the workflow, so introducing it here (removing
+# `pull_request:` on this PR's own branch while main still only declares
+# `pull_request:`) meant mq-review and mq-prewarm never fired on THIS PR at
+# all, empirically confirmed (zero check-runs of either name on c6732df8
+# under either event). It would have broken every currently-open PR's
+# admission the same way on merge, until each one saw a fresh push after
+# main gained the new trigger. The real fix is the one the repo already uses
+# for this class, the stable loader in scripts/ci/mq-codebuild-project.sh
+# that pulls its script from origin/main: move the decision into the
+# CodeBuild mq-review project, which no PR can edit. That is a separate
+# change with its own spec and review. There is no status trigger: a
+# status-triggered run's GITHUB_SHA is always the default branch tip, never
+# the PR head, so it cannot correct a PR's own check run. A red mq-review
+# clears the same way any other check does, by a re-run once the
+# kimi-critic-review success is posted; the real staging work only ever runs
+# for merge_group's checks_requested.
 # ---------------------------------------------------------------------------
 
 on:
   merge_group:
     types: [checks_requested]
-  pull_request_target:
+  pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
 
@@ -85,7 +92,7 @@ jobs:
       head_sha: ${{ steps.queue.outputs.head_sha }}
     steps:
       - name: Decide admission from the newest kimi-critic-review status (pull_request)
-        if: github.event_name == 'pull_request_target'
+        if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -412,7 +419,7 @@ jobs:
       id-token: write
     steps:
       - name: Publish the deferred queue-preparation success (pull_request)
-        if: github.event_name == 'pull_request_target'
+        if: github.event_name == 'pull_request'
         run: |
           set -euo pipefail
           echo "::notice::mq-prewarm: queue preparation deferred until this PR enters the merge queue."

@@ -676,18 +676,20 @@ def test_every_network_command_has_a_timeout():
 # Structural / falsifying pins with no local executable surface
 # --------------------------------------------------------------------------- #
 
-def test_it_fires_on_merge_group_and_pull_request_target_only():
-    # pull_request_target, not pull_request (R2 from the read of 58688301):
-    # a pull_request run executes the workflow FILE from the PR's own head,
-    # so a PR could weaken its own admission decision; pull_request_target
-    # always runs the file checked in on main.
+def test_it_fires_on_merge_group_and_pull_request_only():
+    # pull_request_target was tried for R2 (a pull_request run executes the
+    # workflow FILE from the PR's own head, so a PR could weaken its own
+    # admission decision) and reverted: GitHub resolves a pull_request_target
+    # trigger from the DEFAULT BRANCH's copy of the workflow, so introducing
+    # it in the same PR that removes `pull_request:` left mq-review and
+    # mq-prewarm never firing on that PR at all. Trigger stays pull_request;
+    # R2 is acknowledged, not fixed, in the header comment.
     triggers = workflow_document()["on"]
     assert triggers["merge_group"]["types"] == ["checks_requested"]
-    assert "pull_request" not in triggers, "must be pull_request_target, not pull_request"
-    assert set(triggers["pull_request_target"]["types"]) == {
+    assert set(triggers["pull_request"]["types"]) == {
         "opened", "synchronize", "reopened", "ready_for_review",
     }
-    assert triggers["pull_request_target"]["branches"] == ["main"]
+    assert triggers["pull_request"]["branches"] == ["main"]
     assert "status" not in triggers, "the refuted status trigger must never come back"
 
 
@@ -726,7 +728,7 @@ def test_prewarm_pull_request_arm_publishes_a_deferred_success_and_calls_nothing
     # mq-review's pull_request arm now decides admission instead; that
     # behavior is executed in the admission tests below, not pinned here.
     step = step_by_name("mq-prewarm", "Publish the deferred queue-preparation success")
-    assert step["if"] == "github.event_name == 'pull_request_target'"
+    assert step["if"] == "github.event_name == 'pull_request'"
     body = step["run"]
     for forbidden in ("gh ", "curl", "git "):
         assert forbidden not in body, "mq-prewarm: pull_request arm must do nothing but notice"
