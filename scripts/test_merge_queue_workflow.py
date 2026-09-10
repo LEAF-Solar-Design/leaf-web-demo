@@ -189,7 +189,9 @@ def _install_fake_gh(workdir: Path) -> Path:
     # counter file persists across separate run_step() invocations sharing
     # this workdir, so a "read" step followed by a "re-read" step can be
     # driven with two different queue snapshots). Statuses calls are served
-    # from statuses-<sha>.json, keyed by the sha embedded in the URL.
+    # from statuses-<sha>.json, keyed by the sha embedded in the URL. Pulls
+    # lookups (a status event resolving its PR) are served from
+    # pulls-<sha>.json, same keying, defaulting to no open pull requests.
     script.write_text(
         textwrap.dedent(
             """\
@@ -221,6 +223,12 @@ def _install_fake_gh(workdir: Path) -> Path:
                 */commits/*/statuses*)
                   SHA=$(printf '%s' "$arg" | sed -E 's#.*/commits/([0-9a-f]+)/statuses.*#\\1#')
                   RESP="$DIR/statuses-$SHA.json"
+                  if [ -f "$RESP" ]; then cat "$RESP"; else echo "[]"; fi
+                  exit 0
+                  ;;
+                */commits/*/pulls*)
+                  SHA=$(printf '%s' "$arg" | sed -E 's#.*/commits/([0-9a-f]+)/pulls.*#\\1#')
+                  RESP="$DIR/pulls-$SHA.json"
                   if [ -f "$RESP" ]; then cat "$RESP"; else echo "[]"; fi
                   exit 0
                   ;;
@@ -404,6 +412,150 @@ def test_post_check_reread_rejects_changed_pr_head_with_same_group_head(tmp_path
 
 
 # --------------------------------------------------------------------------- #
+# mq-review: pull_request admission and its status-triggered re-decision,
+# executed against the real step bodies with a fake `gh`. This is the same
+# newest-by-created_at kimi-critic-review rule the merge_group path proves
+# above, so a PR and its group can never disagree about admission.
+# --------------------------------------------------------------------------- #
+
+PR_HEAD_SHA = "d" * 40
+
+
+def _write_statuses(tmp_path: Path, sha: str, statuses: list) -> None:
+    (tmp_path / f"statuses-{sha}.json").write_text(json.dumps(statuses), encoding="utf-8")
+
+
+@needs_shell
+@pytest.mark.parametrize(
+    "state,expect_pass,because",
+    [
+        ("success", True, "the newest kimi-critic-review status is success"),
+        ("failure", False, "the newest kimi-critic-review status is failure"),
+        ("pending", False, "the newest kimi-critic-review status is pending"),
+        (None, False, "the PR carries no kimi-critic-review status at all"),
+    ],
+)
+def test_pull_request_admission_requires_a_kimi_success(tmp_path, state, expect_pass, because):
+    _install_fake_gh(tmp_path)
+    statuses = [] if state is None else [status(state, "2026-09-01T00:00:00Z")]
+    _write_statuses(tmp_path, PR_HEAD_SHA, statuses)
+    result = run_step(
+        step_body("mq-review", "Decide admission from the newest kimi-critic-review status (pull_request)"),
+        tmp_path,
+        {"HEAD_SHA": PR_HEAD_SHA},
+    )
+    assert (result["__returncode__"] == 0) == expect_pass, "%s: %s" % (because, result["__stderr__"])
+    if not expect_pass:
+        assert PR_HEAD_SHA in (result["__stdout__"] + result["__stderr__"])
+
+
+@needs_shell
+def test_pull_request_admission_uses_the_newest_status_by_created_at(tmp_path):
+    _install_fake_gh(tmp_path)
+    _write_statuses(tmp_path, PR_HEAD_SHA, [
+        status("failure", "2026-09-01T00:05:00Z"),
+        status("success", "2026-09-01T00:00:00Z"),
+    ])
+    result = run_step(
+        step_body("mq-review", "Decide admission from the newest kimi-critic-review status (pull_request)"),
+        tmp_path,
+        {"HEAD_SHA": PR_HEAD_SHA},
+    )
+    assert result["__returncode__"] != 0, "an older success must not beat a newer failure"
+
+
+@needs_shell
+@pytest.mark.parametrize("failure_mode", ["gh-exit-nonzero", "empty-body"])
+def test_pull_request_admission_fails_closed_on_an_unreadable_gate(tmp_path, failure_mode):
+    binary = tmp_path / "bin"
+    binary.mkdir(exist_ok=True)
+    fake = binary / "gh"
+    fake.write_text(
+        "#!/usr/bin/env bash\nexit %s\n" % ("1" if failure_mode == "gh-exit-nonzero" else "0"),
+        encoding="utf-8", newline="\n",
+    )
+    fake.chmod(0o755)
+    result = run_step(
+        step_body("mq-review", "Decide admission from the newest kimi-critic-review status (pull_request)"),
+        tmp_path,
+        {"HEAD_SHA": PR_HEAD_SHA},
+    )
+    message = result["__stdout__"] + result["__stderr__"]
+    assert result["__returncode__"] != 0, message
+    assert "unreadable gate" in message
+    assert "post a kimi-critic-review success on this head and re-run this check" not in message
+
+
+@needs_shell
+def test_pull_request_admission_same_second_tie_resolves_to_the_newer_success(tmp_path):
+    """The statuses API returns newest first and jq's sort_by is stable, so a
+    plain sort_by(.created_at) | last would pick the OLDER entry when two
+    statuses share a created_at second. A failure corrected by a success in
+    the same second must still admit."""
+    _install_fake_gh(tmp_path)
+    _write_statuses(tmp_path, PR_HEAD_SHA, [
+        status("success", "2026-09-01T00:00:00Z"),
+        status("failure", "2026-09-01T00:00:00Z"),
+    ])
+    result = run_step(
+        step_body("mq-review", "Decide admission from the newest kimi-critic-review status (pull_request)"),
+        tmp_path,
+        {"HEAD_SHA": PR_HEAD_SHA},
+    )
+    assert result["__returncode__"] == 0, (
+        "a same-second success listed after a same-second failure must still admit: %s"
+        % (result["__stdout__"] + result["__stderr__"])
+    )
+
+
+def test_both_arms_resolve_a_same_second_tie_identically():
+    """R1 from the read of head 58688301: the pull_request arm and the
+    merge_group arm are ONE rule. While only the pull_request arm reversed, a
+    failure corrected by a success inside one second admitted the PR and then
+    ejected the group, which is the exact failure this change exists to end.
+    Both arms must pick the newer of a tie, so the selection expression must
+    be byte-identical in both."""
+    text = workflow_text()
+    marker = 'select(.context == "kimi-critic-review")'
+    selections = []
+    cursor = 0
+    while True:
+        found = text.find(marker, cursor)
+        if found < 0:
+            break
+        tail = text.find(".state", found)
+        assert tail > found, "a kimi-critic-review selection has no .state read"
+        selections.append(" ".join(text[found:tail].split()))
+        cursor = tail
+    assert len(selections) == 2, (
+        "expected exactly two kimi-critic-review selections, found %d" % len(selections)
+    )
+    assert selections[0] == selections[1], (
+        "the two arms must be one rule; they differ: %s vs %s"
+        % (selections[0], selections[1])
+    )
+    assert "reverse" in selections[0], (
+        "both arms must reverse before sort_by so the newer of a tie wins: %s" % selections[0]
+    )
+
+
+def test_the_merge_group_path_is_unchanged():
+    # Embeds main's list so a future edit to a merge_group step must update
+    # this pin deliberately rather than drift underneath it.
+    expected = [
+        ("Read the live merge queue and resolve this group's members", "github.event_name == 'merge_group'"),
+        ("Require the newest kimi-critic-review status on every member", "github.event_name == 'merge_group'"),
+        ("Re-read the queue and require the same membership", "github.event_name == 'merge_group'"),
+    ]
+    merge_group_steps = [
+        (step["name"], step["if"])
+        for step in job_steps("mq-review")
+        if step["if"] == "github.event_name == 'merge_group'"
+    ]
+    assert merge_group_steps == expected
+
+
+# --------------------------------------------------------------------------- #
 # mq-supply: the docs-only recompute, executed against a real git repo
 # --------------------------------------------------------------------------- #
 
@@ -524,13 +676,33 @@ def test_every_network_command_has_a_timeout():
 # Structural / falsifying pins with no local executable surface
 # --------------------------------------------------------------------------- #
 
-def test_it_fires_on_merge_group_checks_requested_and_pull_request_to_main():
+def test_it_fires_on_merge_group_and_pull_request_only():
+    # pull_request_target was tried for R2 (a pull_request run executes the
+    # workflow FILE from the PR's own head, so a PR could weaken its own
+    # admission decision) and reverted: GitHub resolves a pull_request_target
+    # trigger from the DEFAULT BRANCH's copy of the workflow, so introducing
+    # it in the same PR that removes `pull_request:` left mq-review and
+    # mq-prewarm never firing on that PR at all. Trigger stays pull_request;
+    # R2 is acknowledged, not fixed, in the header comment.
     triggers = workflow_document()["on"]
     assert triggers["merge_group"]["types"] == ["checks_requested"]
     assert set(triggers["pull_request"]["types"]) == {
         "opened", "synchronize", "reopened", "ready_for_review",
     }
     assert triggers["pull_request"]["branches"] == ["main"]
+    assert "status" not in triggers, "the refuted status trigger must never come back"
+
+
+def test_no_status_trigger_and_supply_prewarm_match_mains_conditions():
+    # Pins the shape a future edit could quietly regress into: reintroducing
+    # `status:` in `on:`, or re-adding `github.event_name != 'status'` to
+    # mq-supply's or mq-prewarm's `if:`.
+    document = workflow_document()
+    assert "status" not in document["on"]
+    assert document["jobs"]["mq-supply"]["if"] == "github.event_name == 'merge_group'"
+    assert document["jobs"]["mq-prewarm"]["if"] == "always()"
+    for job in ("mq-supply", "mq-prewarm"):
+        assert "status" not in document["jobs"][job]["if"]
 
 
 def test_both_required_contexts_are_named_exactly():
@@ -551,13 +723,15 @@ def test_every_step_in_the_required_jobs_is_conditioned_on_the_event():
             )
 
 
-def test_pull_request_arm_publishes_a_deferred_success_and_calls_nothing():
-    for job in ("mq-review", "mq-prewarm"):
-        step = step_by_name(job, "Publish the deferred queue-preparation success")
-        assert step["if"] == "github.event_name == 'pull_request'"
-        body = step["run"]
-        for forbidden in ("gh ", "curl", "git "):
-            assert forbidden not in body, "%s: pull_request arm must do nothing but notice" % job
+def test_prewarm_pull_request_arm_publishes_a_deferred_success_and_calls_nothing():
+    # mq-prewarm still defers unconditionally: it gates staging, not review.
+    # mq-review's pull_request arm now decides admission instead; that
+    # behavior is executed in the admission tests below, not pinned here.
+    step = step_by_name("mq-prewarm", "Publish the deferred queue-preparation success")
+    assert step["if"] == "github.event_name == 'pull_request'"
+    body = step["run"]
+    for forbidden in ("gh ", "curl", "git "):
+        assert forbidden not in body, "mq-prewarm: pull_request arm must do nothing but notice"
 
 
 def test_mq_prewarm_always_runs_and_fails_explicitly_on_a_dependency_failure():

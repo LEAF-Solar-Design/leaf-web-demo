@@ -16,9 +16,34 @@ name: merge-queue
 # GitHub couples a PR's required checks with the merge queue's: the SAME two
 # context names (mq-review, mq-prewarm) must exist on both a pull_request run
 # and a merge_group run, or a PR can never satisfy its required checks well
-# enough to enter the queue. On pull_request events both jobs publish a
-# neutral "queue preparation deferred" success and do nothing else; the real
-# work only ever runs for merge_group's checks_requested.
+# enough to enter the queue. On pull_request events mq-review decides
+# admission from the newest kimi-critic-review status on the PR's own head,
+# using the same reverse-then-sort_by(.created_at) tie-break the merge_group
+# path proves at ~:146-170 (both arms are pinned byte-identical below, so
+# they can never disagree), and mq-prewarm publishes a neutral "queue
+# preparation deferred" success and does nothing else.
+#
+# R2 from the read of 58688301, ACKNOWLEDGED, NOT FIXED HERE: a pull_request
+# run executes this workflow FILE from the PR's own head, so a PR could
+# weaken or delete the decision step in its own branch and its mq-review
+# check would pass green with no review anywhere. pull_request_target was
+# tried and reverted: GitHub resolves a pull_request_target trigger from the
+# DEFAULT BRANCH's copy of the workflow, so introducing it here (removing
+# `pull_request:` on this PR's own branch while main still only declares
+# `pull_request:`) meant mq-review and mq-prewarm never fired on THIS PR at
+# all, empirically confirmed (zero check-runs of either name on c6732df8
+# under either event). It would have broken every currently-open PR's
+# admission the same way on merge, until each one saw a fresh push after
+# main gained the new trigger. The real fix is the one the repo already uses
+# for this class, the stable loader in scripts/ci/mq-codebuild-project.sh
+# that pulls its script from origin/main: move the decision into the
+# CodeBuild mq-review project, which no PR can edit. That is a separate
+# change with its own spec and review. There is no status trigger: a
+# status-triggered run's GITHUB_SHA is always the default branch tip, never
+# the PR head, so it cannot correct a PR's own check run. A red mq-review
+# clears the same way any other check does, by a re-run once the
+# kimi-critic-review success is posted; the real staging work only ever runs
+# for merge_group's checks_requested.
 # ---------------------------------------------------------------------------
 
 on:
@@ -70,10 +95,36 @@ jobs:
     outputs:
       head_sha: ${{ steps.queue.outputs.head_sha }}
     steps:
-      - name: Publish the deferred queue-preparation success (pull_request)
+      - name: Decide admission from the newest kimi-critic-review status (pull_request)
         if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::mq-review: pull_request carries no usable head sha."; exit 1; }
+          RAW=$(timeout 60 gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/statuses?per_page=100") || {
+            echo "::error::mq-review: kimi-critic-review status read failed for $HEAD_SHA; refusing to admit on an unreadable gate."
+            exit 1
+          }
+          [ -n "$RAW" ] || {
+            echo "::error::mq-review: kimi-critic-review status read for $HEAD_SHA returned an empty body; refusing to admit on an unreadable gate."
+            exit 1
+          }
+          echo "$RAW" | jq -s 'add // []' > pr-statuses.json 2>/dev/null || {
+            echo "::error::mq-review: kimi-critic-review status read for $HEAD_SHA returned unparsable JSON; refusing to admit on an unreadable gate."
+            exit 1
+          }
+          # Newest by created_at, never the newest by list order: the
+          # statuses API is not guaranteed sorted, and a plain sort_by is
+          # stable, so two statuses sharing a created_at second would keep
+          # list order and could pick the older one; reverse first so the
+          # tie resolves to the newest.
+          STATE=$(jq -r '[.[] | select(.context == "kimi-critic-review")] | reverse | sort_by(.created_at) | last | .state // "absent"' pr-statuses.json)
+          if [ "$STATE" != "success" ]; then
+            echo "::error::mq-review: this PR has no kimi-critic-review success on $HEAD_SHA; post a kimi-critic-review success on this head and re-run this check."
+            exit 1
+          fi
           echo "::notice::mq-review: queue preparation deferred until this PR enters the merge queue."
 
       - name: Read the live merge queue and resolve this group's members
@@ -131,8 +182,13 @@ jobs:
             timeout 60 gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$SHA/statuses?per_page=100" \
               | jq -s 'add // []' > "statuses-$i.json"
             # Newest by created_at, never the newest by list order: the
-            # statuses API is not guaranteed sorted.
-            STATE=$(jq -r '[.[] | select(.context == "kimi-critic-review")] | sort_by(.created_at) | last | .state // "absent"' "statuses-$i.json")
+            # statuses API is not guaranteed sorted, and a plain sort_by is
+            # stable, so two statuses sharing a created_at second would keep
+            # list order and could pick the older one; reverse first so the
+            # newest of a tie wins. This arm and the pull_request arm above
+            # are ONE rule: change them together or a PR admits on a tie the
+            # group then ejects on.
+            STATE=$(jq -r '[.[] | select(.context == "kimi-critic-review")] | reverse | sort_by(.created_at) | last | .state // "absent"' "statuses-$i.json")
             if [ "$STATE" != "success" ]; then
               echo "::error::mq-review: PR #$NUMBER ($SHA) newest kimi-critic-review state is '$STATE', not success."
               exit 1
