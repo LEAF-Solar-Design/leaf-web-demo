@@ -10,6 +10,7 @@ import json
 import hashlib
 import argparse
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import importlib.util
 import os
 from pathlib import Path
@@ -147,7 +148,7 @@ def stage_release(output_dir: Path, **inputs) -> dict:
 
 
 def run_gate(root: Path, results_dir: Path, *, env: dict[str, str],
-             timeout_seconds: int = 2700) -> Path:
+             timeout_seconds: int = 2700, worker_count: int = 4) -> Path:
     """Run all eight canonical shards and require an emitted tree-bound proof.
 
     Run this in the dedicated test project, not the image-publishing project.
@@ -157,6 +158,8 @@ def run_gate(root: Path, results_dir: Path, *, env: dict[str, str],
     """
     if type(timeout_seconds) is not int or timeout_seconds <= 0:
         raise ValueError("gate timeout must be positive")
+    if type(worker_count) is not int or worker_count not in (1, 2, 4, 8):
+        raise ValueError("gate worker count must be one of 1, 2, 4, 8")
     root = root.resolve()
     results_dir = results_dir.resolve()
     results_dir.mkdir(parents=True, exist_ok=False)
@@ -167,11 +170,11 @@ def run_gate(root: Path, results_dir: Path, *, env: dict[str, str],
     env = dict(env)
     env.pop("PYTHONSAFEPATH", None)
 
-    def run(command, *, check=True, capture_output=False):
+    def run(command, *, cwd=root, check=True, capture_output=False):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("native gate exceeded total runtime bound")
-        return subprocess.run(command, cwd=root, env=env, check=check,
+        return subprocess.run(command, cwd=cwd, env=env, check=check,
                               capture_output=capture_output, text=True,
                               timeout=remaining)
 
@@ -180,15 +183,46 @@ def run_gate(root: Path, results_dir: Path, *, env: dict[str, str],
         raise ValueError("gate checkout has no exact tree")
     runner = [sys.executable, "scripts/run-all-gates.py"]
     failures = []
-    # Serial execution preserves suite filesystem isolation on one checkout.
-    # The single deadline caps the complete gate, not each shard independently.
-    for shard in range(8):
-        result = run(runner + ["--retry", "1", "--shard-count", "8",
-                              "--shard-index", str(shard), "--result-json",
-                              str(results_dir / f"shard-{shard}.json"),
-                              "--log-dir", str(results_dir / f"logs-{shard}")], check=False)
-        if result.returncode != 0:
-            failures.append(shard)
+    errors = []
+    # Never place scratch in the source or result tree, even if TMPDIR points
+    # there. Validate the resolved allocation before copying any source bytes.
+    scratch = tempfile.TemporaryDirectory(prefix="leaf-native-gate-workers-")
+    try:
+        scratch_root = Path(scratch.name).resolve()
+        if scratch_root.is_relative_to(root) or scratch_root.is_relative_to(results_dir):
+            raise ValueError("gate worker scratch must be outside source and results")
+        roots = [root]
+        for worker in range(1, worker_count):
+            parent = scratch_root / str(worker)
+            parent.mkdir()
+            checkout = parent / root.name
+            run(["cp", "-a", str(root), str(checkout)])
+            roots.append(checkout)
+
+        def work(worker):
+            failed, raised = [], []
+            for shard in range(worker, 8, worker_count):
+                try:
+                    result = run(runner + ["--retry", "1", "--shard-count", "8",
+                                          "--shard-index", str(shard), "--result-json",
+                                          str(results_dir / f"shard-{shard}.json"),
+                                          "--log-dir", str(results_dir / f"logs-{shard}")],
+                                 cwd=roots[worker], check=False)
+                    if result.returncode != 0:
+                        failed.append(shard)
+                except Exception as exc:
+                    failed.append(shard)
+                    raised.append((shard, exc))
+            return failed, raised
+
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+            futures = [pool.submit(work, worker) for worker in range(worker_count)]
+            for future in futures:
+                failed, raised = future.result()
+                failures.extend(failed)
+                errors.extend(raised)
+        failures.sort()
+        for shard in failures:
             report = results_dir / f"shard-{shard}.json"
             if report.is_file():
                 for entry in json.loads(report.read_text(encoding="utf-8")).get("results", []):
@@ -201,6 +235,10 @@ def run_gate(root: Path, results_dir: Path, *, env: dict[str, str],
                             stream.seek(max(0, stream.tell() - 8192))
                             tail = stream.read(8192).decode("utf-8", errors="replace")
                         print(f"FAILED SUITE LOG {log.name}\n{tail}", flush=True)
+        if errors:
+            raise min(errors, key=lambda item: item[0])[1]
+    finally:
+        scratch.cleanup()
     # The canonical verifier owns partition/catalog completeness and the proof
     # format. Do not replace it with a summary of subprocess return codes.
     run(runner + ["--verify-shard-results", str(results_dir), "--emit-proof", str(proof)])

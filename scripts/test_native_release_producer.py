@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import json
 import hashlib
+import threading
 
 import pytest
 
@@ -140,7 +141,7 @@ def test_native_gate_calls_all_shards_then_canonical_verifiers(tmp_path, monkeyp
     calls = fake_gate(monkeypatch)
     result = producer.run_gate(tmp_path, tmp_path / "results", env={"PATH": "test"})
     shards = [command for command, _ in calls if "--shard-index" in command]
-    assert [command[command.index("--shard-index") + 1] for command in shards] == list(map(str, range(8)))
+    assert sorted(command[command.index("--shard-index") + 1] for command in shards) == list(map(str, range(8)))
     assert all("--only" not in command for command in shards)
     assert "--emit-proof" in calls[-2][0]
     assert calls[-1][0][-2:] == ["--expect-tree", "a" * 40]
@@ -194,6 +195,209 @@ def test_native_gate_preserves_failed_shard_despite_fan_in_exit_zero(tmp_path, m
 def test_native_gate_refuses_reused_result_directory(tmp_path):
     with pytest.raises(FileExistsError):
         producer.run_gate(tmp_path, tmp_path, env={})
+
+
+@pytest.mark.parametrize("count", [True, False, 0, 3, 5, 16, 4.0, "4", None])
+def test_native_gate_rejects_invalid_worker_count(tmp_path, count):
+    with pytest.raises(ValueError, match="worker count"):
+        producer.run_gate(tmp_path, tmp_path / "results", env={}, worker_count=count)
+    assert not (tmp_path / "results").exists()
+
+
+@pytest.mark.parametrize("count", [1, 2, 8])
+def test_native_gate_supports_bounded_worker_counts(tmp_path, monkeypatch, count):
+    calls = fake_gate(monkeypatch)
+    producer.run_gate(tmp_path, tmp_path / "results", env={}, worker_count=count)
+    shards = [(int(cmd[cmd.index("--shard-index") + 1]), kw["cwd"])
+              for cmd, kw in calls if "--shard-index" in cmd]
+    assert sorted(shard for shard, _ in shards) == list(range(8))
+    assert len({cwd for _, cwd in shards}) == count
+    for worker in range(count):
+        assigned = [(shard, cwd) for shard, cwd in shards if shard % count == worker]
+        assert [shard for shard, _ in assigned] == list(range(worker, 8, count))
+        assert len({cwd for _, cwd in assigned}) == 1
+
+
+def test_native_gate_overlaps_four_isolated_serial_workers(tmp_path, monkeypatch):
+    root = tmp_path / "checkout"
+    root.mkdir()
+    results = root / "results"
+    barrier = threading.Barrier(4, timeout=5)
+    lock = threading.Lock()
+    active = set()
+    peak = 0
+    completed = []
+    seen = {}
+    copies = []
+    executor_sizes = []
+    executor = producer.ThreadPoolExecutor
+
+    def pool(*, max_workers):
+        executor_sizes.append(max_workers)
+        return executor(max_workers=max_workers)
+
+    def run(command, **kwargs):
+        nonlocal peak
+        cwd = kwargs["cwd"]
+        assert kwargs["timeout"] > 0
+        if command[0] == "cp":
+            assert command[:3] == ["cp", "-a", str(root)]
+            destination = Path(command[-1])
+            assert destination.name == root.name
+            assert not destination.is_relative_to(root)
+            assert not destination.is_relative_to(results)
+            copies.append(destination)
+        if "--shard-index" in command:
+            shard = int(command[command.index("--shard-index") + 1])
+            assert len(copies) == 3
+            assert Path(command[command.index("--result-json") + 1]).parent == results
+            with lock:
+                assert cwd not in active
+                active.add(cwd)
+                peak = max(peak, len(active))
+                seen.setdefault(cwd, []).append(shard)
+            barrier.wait()
+            with lock:
+                active.remove(cwd)
+                completed.append(shard)
+        if "--emit-proof" in command:
+            assert sorted(completed) == list(range(8))
+            assert not active
+            assert cwd == root
+            Path(command[-1]).write_text("unit proof")
+        if "--verify-gate-proof" in command:
+            assert sorted(completed) == list(range(8))
+            assert cwd == root
+        return SimpleNamespace(stdout="a" * 40, returncode=0)
+
+    monkeypatch.setattr(producer, "ThreadPoolExecutor", pool)
+    monkeypatch.setattr(producer.subprocess, "run", run)
+    producer.run_gate(root, results, env={})
+    assert executor_sizes == [4]
+    assert peak == 4
+    assert len(seen) == 4
+    assert {cwd.name for cwd in seen} == {root.name}
+    assert len({cwd.parent for cwd in seen}) == 4
+    assert seen[root] == [0, 4]
+    assert sorted(seen.values()) == [[0, 4], [1, 5], [2, 6], [3, 7]]
+    assert all(not path.parent.parent.exists() for path in copies)
+
+
+def test_native_gate_joins_workers_and_cleans_scratch_on_exception(tmp_path, monkeypatch):
+    barrier = threading.Barrier(4, timeout=5)
+    completed = []
+    copies = []
+
+    def run(command, **kwargs):
+        if command[0] == "cp":
+            copies.append(Path(command[-1]))
+        if "--shard-index" in command:
+            shard = int(command[command.index("--shard-index") + 1])
+            if shard < 4:
+                barrier.wait()
+            if shard == 0:
+                raise RuntimeError("shard exploded")
+            completed.append(shard)
+        assert "--emit-proof" not in command
+        return SimpleNamespace(stdout="a" * 40, returncode=0)
+
+    monkeypatch.setattr(producer.subprocess, "run", run)
+    with pytest.raises(RuntimeError, match="shard exploded"):
+        producer.run_gate(tmp_path, tmp_path / "results", env={})
+    assert sorted(completed) == list(range(1, 8))
+    assert all(not path.parent.parent.exists() for path in copies)
+
+
+@pytest.mark.parametrize("worker_count", [1, 2])
+def test_native_gate_copy_and_shards_share_deadline(tmp_path, monkeypatch, worker_count):
+    now = [100.0]
+    calls = []
+    copies = []
+
+    def run(command, **kwargs):
+        assert kwargs["timeout"] == 5 - len(calls)
+        calls.append(command)
+        now[0] += 4 if command[0] == "cp" else 1
+        if command[0] == "cp":
+            copies.append(Path(command[-1]))
+        return SimpleNamespace(stdout="a" * 40, returncode=0)
+
+    monkeypatch.setattr(producer.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(producer.subprocess, "run", run)
+    with pytest.raises(TimeoutError, match="total runtime"):
+        producer.run_gate(tmp_path, tmp_path / "results", env={},
+                          timeout_seconds=5, worker_count=worker_count)
+    if worker_count == 2:
+        assert len(calls) == 2
+        assert calls[1][0] == "cp"
+    else:
+        assert len(calls) == 5
+        assert all("--shard-index" in command for command in calls[1:])
+    assert all(not path.parent.parent.exists() for path in copies)
+
+
+def test_native_gate_cleans_scratch_after_copy_failure(tmp_path, monkeypatch):
+    copies = []
+
+    def run(command, **kwargs):
+        if command[0] == "cp":
+            copies.append(Path(command[-1]))
+            raise RuntimeError("copy failed")
+        assert "--shard-index" not in command
+        return SimpleNamespace(stdout="a" * 40, returncode=0)
+
+    monkeypatch.setattr(producer.subprocess, "run", run)
+    with pytest.raises(RuntimeError, match="copy failed"):
+        producer.run_gate(tmp_path, tmp_path / "results", env={})
+    assert copies
+    assert all(not path.parent.parent.exists() for path in copies)
+
+
+@pytest.mark.parametrize("inside_results", [False, True])
+def test_native_gate_rejects_scratch_inside_source_before_copy(tmp_path, monkeypatch, inside_results):
+    original = producer.tempfile.TemporaryDirectory
+    allocated = []
+    root = tmp_path / "checkout"
+    root.mkdir()
+    results = tmp_path / "results"
+
+    def temporary(**kwargs):
+        scratch = original(dir=results if inside_results else root, **kwargs)
+        allocated.append(Path(scratch.name))
+        return scratch
+
+    calls = fake_gate(monkeypatch)
+    monkeypatch.setattr(producer.tempfile, "TemporaryDirectory", temporary)
+    with pytest.raises(ValueError, match="outside source and results"):
+        producer.run_gate(root, results, env={})
+    assert len(calls) == 1
+    assert all(not path.exists() for path in allocated)
+
+
+def test_native_gate_prints_failures_in_shard_order(tmp_path, monkeypatch, capsys):
+    original_calls = fake_gate(monkeypatch)
+    original = producer.subprocess.run
+
+    def run(command, **kwargs):
+        result = original(command, **kwargs)
+        if "--shard-index" in command:
+            shard = int(command[command.index("--shard-index") + 1])
+            if shard in (1, 6):
+                report = Path(command[command.index("--result-json") + 1])
+                report.write_text(json.dumps({"results": [{"id": f"broken{shard}", "status": "FAIL"}]}))
+                logs = Path(command[command.index("--log-dir") + 1])
+                logs.mkdir()
+                (logs / f"broken{shard}.log").write_bytes(b"x" * 10000)
+                result.returncode = 1
+        return result
+
+    monkeypatch.setattr(producer.subprocess, "run", run)
+    with pytest.raises(ValueError, match=r"shards failed: \[1, 6\]"):
+        producer.run_gate(tmp_path, tmp_path / "results", env={})
+    output = capsys.readouterr().out
+    assert output.index("broken1.log") < output.index("broken6.log")
+    assert len(output) < 2 * 8300
+    assert "--emit-proof" in original_calls[-1][0]
 
 
 def test_web_package_reads_exact_image_without_starting_it(tmp_path, monkeypatch):
