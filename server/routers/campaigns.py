@@ -39,7 +39,8 @@ _BRIDGE_BUCKET_MAX_ENTRIES = 256
 _BRIDGE_BUCKETS = OrderedDict()
 _BRIDGE_BUCKET_LOCK = Lock()
 _BRIDGE_OPS = frozenset(('next', 'export', 'bind', 'admit', 'settle', 'recover',
-                         'plan', 'product', 'host_op', 'host_settle', 'host_grant'))
+                         'plan', 'product', 'host_op', 'host_settle', 'host_grant',
+                         'native_claim', 'native_prepare', 'native_read', 'native_request', 'native_receipt'))
 
 
 def _bridge_retry_after(subject):
