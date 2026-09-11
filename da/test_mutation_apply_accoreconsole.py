@@ -1,13 +1,15 @@
 """Local AutoCAD canary for the fixed mutation-plan interpreter.
 
 This test is offline and non-billable. It mutates only a temporary copy of the
-tracked demo DWG, then re-extracts that copy with the same local AutoCAD 2026
-console runtime used to build the proven APS scripts.
+tracked demo DWG, then re-extracts that copy with a resolved local AutoCAD
+console runtime.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -24,11 +26,91 @@ from lisp import MUTATION_INSPECT_BLOCKS, build_scr
 from mutation_plan import emit_plan, validate_mutations, world_to_ocs
 
 
-ACCORECONSOLE = Path(
-    r"C:\Program Files\Autodesk\AutoCAD 2026\accoreconsole.exe"
-)
+def _resolve_accoreconsole(root=Path(r"C:\Program Files\Autodesk")):
+    pattern = str(root / "AutoCAD <year>" / "accoreconsole.exe")
+    override = os.environ.get("LEAF_ACCORECONSOLE")
+    if override is not None:
+        console = Path(override)
+        if not override or not console.is_file():
+            raise ValueError(f"LEAF_ACCORECONSOLE refuses missing executable: {override!r}")
+        return console, f"LEAF_ACCORECONSOLE resolved {console}"
+    years = []
+    candidates = []
+    for directory in root.glob("AutoCAD *"):
+        match = re.fullmatch(r"AutoCAD ([0-9]{4})", directory.name)
+        if match is None or not directory.is_dir():
+            continue
+        year = int(match.group(1))
+        years.append(year)
+        console = directory / "accoreconsole.exe"
+        if console.is_file():
+            candidates.append((year, console))
+    tried = (
+        f"LEAF_ACCORECONSOLE unset; tried {pattern}; "
+        f"years seen: {', '.join(map(str, sorted(years))) or 'none'}"
+    )
+    if candidates:
+        console = max(candidates)[1]
+        return console, f"resolved {console}; {tried}"
+    return None, f"no AutoCAD console found; {tried}"
+
+
+ACCORECONSOLE, CONSOLE_DISCLOSURE = _resolve_accoreconsole()
 SOURCE_DWG = PROJECT_ROOT / "data" / "rooftop_demo.dwg"
 SOURCE_INTAKE = PROJECT_ROOT / "data" / "rooftop_demo.intake.json"
+CONSOLE_SKIP_REASON = f"{CONSOLE_DISCLOSURE}; tracked demo DWG required: {SOURCE_DWG}"
+
+
+def test_console_resolution_is_disclosed(capsys):
+    with capsys.disabled():
+        print(f"\nAutoCAD canary: {CONSOLE_DISCLOSURE}", flush=True)
+    if ACCORECONSOLE is None:
+        assert "no AutoCAD console found" in CONSOLE_DISCLOSURE
+    else:
+        assert str(ACCORECONSOLE) in CONSOLE_DISCLOSURE
+
+
+def test_console_resolver_picks_newest_and_ignores_malformed(tmp_path, monkeypatch):
+    monkeypatch.delenv("LEAF_ACCORECONSOLE", raising=False)
+    for name in ("AutoCAD 2023", "AutoCAD 2025", "AutoCAD 2024",
+                 "AutoCAD latest", "AutoCAD 999", "AutoCAD 20260"):
+        directory = tmp_path / name
+        directory.mkdir()
+        (directory / "accoreconsole.exe").touch()
+    console, _ = _resolve_accoreconsole(tmp_path)
+    assert console == tmp_path / "AutoCAD 2025" / "accoreconsole.exe"
+
+
+def test_console_resolver_override_wins(tmp_path, monkeypatch):
+    installed = tmp_path / "AutoCAD 2027"
+    installed.mkdir()
+    (installed / "accoreconsole.exe").touch()
+    override = tmp_path / "override.exe"
+    override.touch()
+    monkeypatch.setenv("LEAF_ACCORECONSOLE", str(override))
+    console, _ = _resolve_accoreconsole(tmp_path)
+    assert console == override
+
+
+def test_console_resolver_missing_override_refuses(tmp_path, monkeypatch):
+    installed = tmp_path / "AutoCAD 2025"
+    installed.mkdir()
+    (installed / "accoreconsole.exe").touch()
+    override = tmp_path / "missing.exe"
+    monkeypatch.setenv("LEAF_ACCORECONSOLE", str(override))
+    with pytest.raises(ValueError) as error:
+        _resolve_accoreconsole(tmp_path)
+    assert "LEAF_ACCORECONSOLE" in str(error.value)
+    assert repr(str(override)) in str(error.value)
+
+
+def test_console_resolver_empty_scan_explains_skip(tmp_path, monkeypatch):
+    monkeypatch.delenv("LEAF_ACCORECONSOLE", raising=False)
+    console, reason = _resolve_accoreconsole(tmp_path)
+    assert console is None
+    assert "LEAF_ACCORECONSOLE" in reason
+    assert str(tmp_path / "AutoCAD <year>" / "accoreconsole.exe") in reason
+    assert "years seen: none" in reason
 
 
 def test_engine_canary_contract_is_portable_and_wired():
@@ -50,8 +132,8 @@ def test_width_inspection_preserves_leafextract_digest_and_dimension_tail():
 
 
 @pytest.mark.skipif(
-    not ACCORECONSOLE.exists() or not SOURCE_DWG.exists(),
-    reason="local AutoCAD 2026 console and tracked demo DWG are required",
+    ACCORECONSOLE is None or not SOURCE_DWG.exists(),
+    reason=CONSOLE_SKIP_REASON,
 )
 def test_fixed_plan_removes_and_adds_then_reextracts(tmp_path):
     source_intake = json.loads(SOURCE_INTAKE.read_text(encoding="utf-8"))
@@ -213,8 +295,8 @@ def test_fixed_plan_removes_and_adds_then_reextracts(tmp_path):
 
 
 @pytest.mark.skipif(
-    not ACCORECONSOLE.exists() or not SOURCE_DWG.exists(),
-    reason="local AutoCAD 2026 console and tracked demo DWG are required",
+    ACCORECONSOLE is None or not SOURCE_DWG.exists(),
+    reason=CONSOLE_SKIP_REASON,
 )
 def test_mutation_inspect_reads_per_vertex_bulges(tmp_path):
     host = tmp_path / "bulges.dwg"
@@ -236,8 +318,8 @@ def test_mutation_inspect_reads_per_vertex_bulges(tmp_path):
 
 
 @pytest.mark.skipif(
-    not ACCORECONSOLE.exists() or not SOURCE_DWG.exists(),
-    reason="local AutoCAD 2026 console and tracked demo DWG are required",
+    ACCORECONSOLE is None or not SOURCE_DWG.exists(),
+    reason=CONSOLE_SKIP_REASON,
 )
 @pytest.mark.parametrize("widthed", [True, False], ids=["widthed", "clean"])
 def test_mutation_inspect_reports_polyline_width_and_coverage(tmp_path, widthed):
@@ -251,7 +333,8 @@ def test_mutation_inspect_reports_polyline_width_and_coverage(tmp_path, widthed)
     if widthed:
         setup.extend([
             '(entmake (list (cons 0 "LWPOLYLINE") (cons 100 "AcDbEntity") (cons 8 "LEAF_WIDTH_CONSTANT") (cons 410 "Model") (cons 100 "AcDbPolyline") (cons 90 3) (cons 70 0) (cons 43 2.5) (cons 10 (list 20.0 0.0)) (cons 10 (list 30.0 0.0)) (cons 10 (list 30.0 10.0))))',
-            '(entmake (list (cons 0 "LWPOLYLINE") (cons 100 "AcDbEntity") (cons 8 "LEAF_WIDTH_TAPERED") (cons 410 "Model") (cons 100 "AcDbPolyline") (cons 90 3) (cons 70 0) (cons 43 0.0) (cons 10 (list 40.0 0.0)) (cons 40 0.0) (cons 41 0.0) (cons 10 (list 50.0 0.0)) (cons 40 1.25) (cons 41 0.5) (cons 10 (list 50.0 10.0)) (cons 40 0.0) (cons 41 0.0)))',
+            # AutoCAD drops per-vertex 40/41 when group 43 is present, so a tapered fixture must omit 43.
+            '(entmake (list (cons 0 "LWPOLYLINE") (cons 100 "AcDbEntity") (cons 8 "LEAF_WIDTH_TAPERED") (cons 410 "Model") (cons 100 "AcDbPolyline") (cons 90 3) (cons 70 0) (cons 10 (list 40.0 0.0)) (cons 40 0.0) (cons 41 0.0) (cons 10 (list 50.0 0.0)) (cons 40 1.25) (cons 41 0.5) (cons 10 (list 50.0 10.0)) (cons 40 0.0) (cons 41 0.0)))',
         ])
     script = tmp_path / "widths.scr"
     script.write_text(
@@ -330,8 +413,8 @@ def _run_plan(tmp_path, tag, host, plan_bytes):
 
 
 @pytest.mark.skipif(
-    not ACCORECONSOLE.exists() or not SOURCE_DWG.exists(),
-    reason="local AutoCAD 2026 console and tracked demo DWG are required",
+    ACCORECONSOLE is None or not SOURCE_DWG.exists(),
+    reason=CONSOLE_SKIP_REASON,
 )
 @pytest.mark.parametrize("script_builder", [build_apply_scr, build_apply_scr_v3], ids=["v2", "v3"])
 def test_invalid_plan_marker_is_detected_without_script_echoes(tmp_path, script_builder):
@@ -350,8 +433,8 @@ def test_invalid_plan_marker_is_detected_without_script_echoes(tmp_path, script_
 
 
 @pytest.mark.skipif(
-    not ACCORECONSOLE.exists() or not SOURCE_DWG.exists(),
-    reason="local AutoCAD 2026 console and tracked demo DWG are required",
+    ACCORECONSOLE is None or not SOURCE_DWG.exists(),
+    reason=CONSOLE_SKIP_REASON,
 )
 def test_v2_plan_applies_every_new_line_and_the_server_verifies_the_effects(tmp_path):
     """W4g-3a: the contract v2 end to end on a REAL drawing. Round 1 adds a

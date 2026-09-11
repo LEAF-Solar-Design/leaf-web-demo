@@ -1088,8 +1088,17 @@ def build_suites() -> List[Suite]:
         Suite("da-mutation-apply-accoreconsole",
               "da test_mutation_apply_accoreconsole.py", "pytest", DA,
               _py_pytest("test_mutation_apply_accoreconsole.py"), 1,
+              # The canary no longer pins one AutoCAD year: it resolves whichever
+              # console is installed and names what it tried when none is. CI has
+              # none, so the skip is expected there and its reason now carries the
+              # search it performed. The old single-year sentence stays allowed so
+              # a build of an older commit still passes this gate.
               allowed_skip_reasons=(
                   r"local AutoCAD 2026 console and tracked demo DWG are required",
+                  # These are matched with re.fullmatch, so the pattern must
+                  # cover the WHOLE reason, which now names the search it ran.
+                  r"no AutoCAD console found; .+",
+                  r"tracked demo DWG required: .+",
               )),
         # --- executor/ (cwd=REPO ROOT; the instant-execution tree) --- #
         # These ~110 unit tests ran in NO CI workflow: this runner had no
