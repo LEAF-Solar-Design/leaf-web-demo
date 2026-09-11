@@ -313,6 +313,18 @@ export interface TenantRepo {
 export interface TenantBareRepo {
   /** Absolute path to a bare Git directory. Never a live checkout. */
   readonly dir: string;
+  /** Optional remote truth. Caller must hold and recheck the tenant writer fence. */
+  publishAuthoritatively?(request: AuthoritativePublishRequest): Promise<{ commit: string }>;
+  /** Refresh only before staging, never as a substitute for publish authorization. */
+  refreshMain?(): Promise<void>;
+}
+
+export interface AuthoritativePublishRequest {
+  readonly tenantId: string;
+  readonly receipt: StagedCustomizationReceipt;
+  readonly expectedMainSha: string;
+  readonly changeRef: string;
+  readonly stagedCommit: string;
 }
 
 /** Execute one short repository operation only while the current writer lease is valid. */
