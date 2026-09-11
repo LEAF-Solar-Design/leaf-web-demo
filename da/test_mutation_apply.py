@@ -64,10 +64,15 @@ def test_v2_apply_failure_clears_flag_before_rollback_and_prevents_save():
         '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg"))']
 
 
-def test_v3_apply_script_is_byte_identical_to_pre_v2_flag_head():
-    # Frozen emitted-script SHA-256 at ef5a27b4, before the v2 flag change.
+def test_v3_apply_script_digest_includes_setpoints_preservation():
+    # w4g-setpoints-preserve-width: shared SETPOINTS preserves widths and bulges.
     assert hashlib.sha256(apply_lisp.build_apply_scr_v3().encode("utf-8")).hexdigest() == (
-        "36ad4c823a89032592e8ea149aad5b7006c6c3802debac97b5538afb8699b073")
+        "afd87dd5a5796962f5fcbc6e5388152ef3dbc145870227a2f5d9398e7b50cb83")
+
+
+def test_both_apply_scripts_include_setpoints_preserve_defun():
+    for script in (apply_lisp.build_apply_scr(), apply_lisp.build_apply_scr_v3()):
+        assert "(defun leaf-setpoints-preserve " in script
 
 
 def test_fixed_script_is_crlf_closed_format_and_never_evaluates_plan():
@@ -435,15 +440,13 @@ def test_v3_activity_adds_insert_and_preserves_v2_apply_script():
     headers_v3 = '(list "LEAF_MUTATION_PLAN|1" "LEAF_MUTATION_PLAN|2" "LEAF_MUTATION_PLAN|3")'
     script_v2 = v2_settings["script"]["value"]
     script_v3 = v3["settings"]["script"]["value"]
-    # Invalid-plan SAVEAS guards move both APPLY scripts, leaving inspect unchanged.
-    # v3 old: c68f935b6cbb22fb1f55780e78208e833f1b86ce3a44089f064177d6fc0dd90c
-    # v3 new: 36ad4c823a89032592e8ea149aad5b7006c6c3802debac97b5538afb8699b073
+    # w4g-setpoints-preserve-width: v3 now shares positional width/bulge preservation.
     assert hashlib.sha256(script_v3.encode("utf-8")).hexdigest() == (
-        "36ad4c823a89032592e8ea149aad5b7006c6c3802debac97b5538afb8699b073")
-    # v2 apply-failure flag, old: e233c7f1674744a9efe2b3f4cf5d5e905199cd6756f8b5d57320c0b55678c5ae
-    # v2 new: bcb64a969cc2df0dbd90d1100ad83daacdf8439708f35f7cad730231a8990d98
+        "afd87dd5a5796962f5fcbc6e5388152ef3dbc145870227a2f5d9398e7b50cb83")
+    # w4g-setpoints-preserve-width: v2 preserves groups 40/41/42 positionally.
+    # Previous apply-failure flag pin: bcb64a969cc2df0dbd90d1100ad83daacdf8439708f35f7cad730231a8990d98
     assert hashlib.sha256(script_v2.encode("utf-8")).hexdigest() == (
-        "bcb64a969cc2df0dbd90d1100ad83daacdf8439708f35f7cad730231a8990d98")
+        "30c38a48b69b81412ce25466554503bf029892c0065b1c3dc2867e763d6eab33")
     # W4g-7b-3s added an EP block to the shared inspect script (colour /
     # linetype / lineweight), so its exact byte pin moved; assert the new
     # structural invariant directly instead of a hand-computed hash: exactly
