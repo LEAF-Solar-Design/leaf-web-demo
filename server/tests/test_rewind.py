@@ -109,8 +109,10 @@ def drawing(monkeypatch):
                         lambda _backend, _tenant, _drawing, version: (version, {}))
     monkeypatch.setattr(checkpoints_router.write_loop, "publish_intake_cache",
                         lambda *args, **kwargs: None)
-    monkeypatch.setattr(checkpoints_router.write_loop, "drawing_mutation_commit_guard",
-                        lambda: nullcontext(True))
+    # The restore commit holds the TYPED guard: None admits. A truthy stand-in
+    # here would be read as a reason code and refuse every restore.
+    monkeypatch.setattr(checkpoints_router.write_loop, "drawing_mutation_refusal_guard",
+                        lambda: nullcontext(None))
     monkeypatch.setattr(checkpoints_router, "_drawing_version",
                         lambda _tenant, _drawing: state["head"])
 

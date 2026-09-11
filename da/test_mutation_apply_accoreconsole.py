@@ -37,6 +37,18 @@ def test_engine_canary_contract_is_portable_and_wired():
     assert "families.txt" in build_scr("families.txt")
 
 
+def test_width_inspection_preserves_leafextract_digest_and_dimension_tail():
+    # Same pre-change pin as test_extract_dxf_activity.py, in this lane's gate.
+    assert hashlib.sha256(build_scr().encode()).hexdigest() == (
+        "74d54c719d787e7dc1ea42743707657821594ea08100b4d3e0cb211968b29095"
+    )
+    # build_scr also enforces the console's 1800-character line cap.
+    inspection = build_scr(extra_blocks=MUTATION_INSPECT_BLOCKS)
+    assert '"PW|"' in inspection and '"PWC|1"' in inspection
+    assert '"DS|"' in MUTATION_INSPECT_BLOCKS[-2]
+    assert '"DM|"' in MUTATION_INSPECT_BLOCKS[-1]
+
+
 @pytest.mark.skipif(
     not ACCORECONSOLE.exists() or not SOURCE_DWG.exists(),
     reason="local AutoCAD 2026 console and tracked demo DWG are required",
@@ -221,6 +233,56 @@ def test_mutation_inspect_reads_per_vertex_bulges(tmp_path):
     assert not intake.get("parseErrors"), intake.get("parseErrors")
     curved, = [p for p in intake["polylines"] if p["layer"] == "LEAF_BULGE_CANARY"]
     assert curved["bulges"] == pytest.approx([1.0, 0.0, 0.0, 0.0], rel=0, abs=1e-9)
+
+
+@pytest.mark.skipif(
+    not ACCORECONSOLE.exists() or not SOURCE_DWG.exists(),
+    reason="local AutoCAD 2026 console and tracked demo DWG are required",
+)
+@pytest.mark.parametrize("widthed", [True, False], ids=["widthed", "clean"])
+def test_mutation_inspect_reports_polyline_width_and_coverage(tmp_path, widthed):
+    host = tmp_path / "widths.dwg"
+    shutil.copyfile(SOURCE_DWG, host)
+    # Remove source polylines so the clean round does not depend on demo widths.
+    setup = [
+        '(progn (setq ss (ssget "_X" (list (cons 0 "LWPOLYLINE") (cons 410 "Model"))) i 0) (if ss (repeat (sslength ss) (entdel (ssname ss i)) (setq i (1+ i)))))',
+        '(entmake (list (cons 0 "LWPOLYLINE") (cons 100 "AcDbEntity") (cons 8 "LEAF_WIDTH_CLEAN") (cons 410 "Model") (cons 100 "AcDbPolyline") (cons 90 3) (cons 70 0) (cons 43 0.0) (cons 10 (list 0.0 0.0)) (cons 40 0.0) (cons 41 0.0) (cons 10 (list 10.0 0.0)) (cons 40 0.0) (cons 41 0.0) (cons 10 (list 10.0 10.0))))',
+    ]
+    if widthed:
+        setup.extend([
+            '(entmake (list (cons 0 "LWPOLYLINE") (cons 100 "AcDbEntity") (cons 8 "LEAF_WIDTH_CONSTANT") (cons 410 "Model") (cons 100 "AcDbPolyline") (cons 90 3) (cons 70 0) (cons 43 2.5) (cons 10 (list 20.0 0.0)) (cons 10 (list 30.0 0.0)) (cons 10 (list 30.0 10.0))))',
+            '(entmake (list (cons 0 "LWPOLYLINE") (cons 100 "AcDbEntity") (cons 8 "LEAF_WIDTH_TAPERED") (cons 410 "Model") (cons 100 "AcDbPolyline") (cons 90 3) (cons 70 0) (cons 43 0.0) (cons 10 (list 40.0 0.0)) (cons 40 0.0) (cons 41 0.0) (cons 10 (list 50.0 0.0)) (cons 40 1.25) (cons 41 0.5) (cons 10 (list 50.0 10.0)) (cons 40 0.0) (cons 41 0.0)))',
+        ])
+    script = tmp_path / "widths.scr"
+    script.write_text(
+        "\r\n".join(setup) + "\r\n"
+        + build_scr("widths.txt", extra_blocks=MUTATION_INSPECT_BLOCKS),
+        encoding="ascii", newline="",
+    )
+    result = subprocess.run(
+        [str(ACCORECONSOLE), "/i", str(host), "/s", str(script)],
+        cwd=tmp_path, capture_output=True, text=True, timeout=120, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    families = tmp_path / "widths.txt"
+    rows = families.read_text().splitlines()
+    assert rows.count("PWC|1") == 1
+    intake = parse(families, "canary")
+    assert not intake.get("parseErrors"), intake.get("parseErrors")
+    assert intake["polylineWidthCovered"] is True
+    polylines = [p for p in intake["polylines"] if p["layer"].startswith("LEAF_WIDTH_")]
+    by_layer = {p["layer"]: p for p in polylines}
+    expected_layers = {"LEAF_WIDTH_CLEAN"}
+    if widthed:
+        expected_layers.update({"LEAF_WIDTH_CONSTANT", "LEAF_WIDTH_TAPERED"})
+    assert set(by_layer) == expected_layers
+    assert len(polylines) == len(expected_layers)
+    assert not by_layer["LEAF_WIDTH_CLEAN"].get("width", False)
+    expected_rows = []
+    for layer in expected_layers - {"LEAF_WIDTH_CLEAN"}:
+        assert by_layer[layer]["width"] is True
+        expected_rows.append(f"PW|{by_layer[layer]['handle']}|1")
+    assert sorted(row for row in rows if row.startswith("PW|")) == sorted(expected_rows)
 
 
 def _apply_plan(tmp_path, tag, host, plan_bytes, script_builder=build_apply_scr):

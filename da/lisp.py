@@ -149,6 +149,13 @@ MUTATION_INSPECT_BLOCKS += (
 )
 
 
+# Width evidence is mutation-only, with its own marker so an older inspection
+# cannot be mistaken for a drawing with no widthed polylines. Keep DS/DM last.
+MUTATION_INSPECT_BLOCKS += (
+    '(progn (setq f (open "{OUT}" "a") ss (ssget "_X" (list (cons 0 "LWPOLYLINE") (cons 410 "Model"))) i 0) (if ss (repeat (sslength ss) (setq ed (entget (ssname ss i)) i (1+ i) wide nil) (foreach pair ed (if (and (member (car pair) (list 40 41 43)) (/= (cdr pair) 0.0)) (setq wide T))) (if wide (write-line (strcat "PW|" (cdr (assoc 5 ed)) "|1") f)))) (write-line "PWC|1" f) (princ "PW-DONE") (close f))',
+)
+
+
 # W4g-7c-3s-1: MLEADER styles and entities precede the frozen DS/DM tail.
 # The walk helpers use the row's dynamically scoped locals for one entget pass.
 MUTATION_INSPECT_BLOCKS += (

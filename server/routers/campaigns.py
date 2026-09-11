@@ -7,7 +7,11 @@ import os
 import re
 import sys
 import uuid
+from collections import OrderedDict
+from math import ceil
 from pathlib import Path
+from threading import Lock
+from time import monotonic
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
@@ -25,6 +29,53 @@ router = APIRouter()
 _STORE = None
 _EXECUTION = None
 _ENROLLMENT = None
+_NEXT_WORKER_INTERVAL = 30
+_NEXT_WORKER_MAX_ENTRIES = 256
+_NEXT_WORKER_CALLS = OrderedDict()
+_NEXT_WORKER_LOCK = Lock()
+_BRIDGE_BUCKET_CAPACITY = 120
+_BRIDGE_BUCKET_REFILL = 2
+_BRIDGE_BUCKET_MAX_ENTRIES = 256
+_BRIDGE_BUCKETS = OrderedDict()
+_BRIDGE_BUCKET_LOCK = Lock()
+_BRIDGE_OPS = frozenset(('next', 'export', 'bind', 'admit', 'settle', 'recover',
+                         'plan', 'product', 'host_op', 'host_settle', 'host_grant'))
+
+
+def _bridge_retry_after(subject):
+    # Live host_op traffic is 5.3/minute (11.39 s apart). A 120-token burst
+    # gives about 20x headroom; refill caps sustained runaway traffic at 2/s.
+    with _BRIDGE_BUCKET_LOCK:
+        now = monotonic()
+        tokens, previous = _BRIDGE_BUCKETS.get(subject, (_BRIDGE_BUCKET_CAPACITY, now))
+        available = min(_BRIDGE_BUCKET_CAPACITY,
+                        tokens + (now - previous) * _BRIDGE_BUCKET_REFILL)
+        if subject in _BRIDGE_BUCKETS:
+            _BRIDGE_BUCKETS.move_to_end(subject)
+        if available < 1:
+            # Denials refresh recency without consuming tokens or moving refill time.
+            return max(1, ceil((1 - available) / _BRIDGE_BUCKET_REFILL))
+        _BRIDGE_BUCKETS[subject] = (available - 1, now)
+        if len(_BRIDGE_BUCKETS) > _BRIDGE_BUCKET_MAX_ENTRIES:
+            _BRIDGE_BUCKETS.popitem(last=False)
+    return 0
+
+
+def _next_worker_retry_after(subject):
+    # Atomic admission across threads; denied calls refresh LRU, not the window.
+    key = ('next', subject)
+    with _NEXT_WORKER_LOCK:
+        now = monotonic()
+        previous = _NEXT_WORKER_CALLS.get(key)
+        if previous is not None:
+            _NEXT_WORKER_CALLS.move_to_end(key)
+            remaining = _NEXT_WORKER_INTERVAL - (now - previous)
+            if remaining > 0:
+                return ceil(remaining)
+        _NEXT_WORKER_CALLS[key] = now
+        if len(_NEXT_WORKER_CALLS) > _NEXT_WORKER_MAX_ENTRIES:
+            _NEXT_WORKER_CALLS.popitem(last=False)
+    return 0
 
 
 def set_enrollment_store(obj):
@@ -296,6 +347,16 @@ async def change_enrollment(campaign_id: str, enrollment_id: str, action: str, r
 @router.post('/api/internal/campaigns/bridge/{op}')
 async def campaign_bridge_operation(op: str, request: Request,
                                     subject: str = Depends(deps.require_campaign_worker)):
+    rate_op = op if op in _BRIDGE_OPS else '_other'
+    retry_after = _bridge_retry_after(subject)
+    if not retry_after and rate_op == 'next':
+        retry_after = _next_worker_retry_after(subject)
+    if retry_after:
+        return JSONResponse(status_code=429, headers={'Retry-After': str(retry_after)},
+                            content={'ok': False, 'error': {
+                                'error_code': 'rate_limited',
+                                'message': 'Campaign worker must wait before requesting more work',
+                                'retryable': True}})
     limit = 6 * 1024 * 1024 if op == 'product' else 512 * 1024 if op == 'plan' else 128 * 1024
     try:
         length = request.headers.get('content-length')
@@ -359,6 +420,13 @@ async def next_worker(request: Request, subject: str = Depends(deps.require_camp
         enrollment_id = _id(body.get('enrollment_id'))
     except ValueError:
         return _failure(400, 'invalid_request', 'Invalid campaign request')
+    retry_after = _next_worker_retry_after(subject)
+    if retry_after:
+        return JSONResponse(status_code=429, headers={'Retry-After': str(retry_after)},
+                            content={'ok': False, 'error': {
+                                'error_code': 'rate_limited',
+                                'message': 'Campaign worker must wait before requesting more work',
+                                'retryable': True}})
     try:
         store = _store()
     except Exception:

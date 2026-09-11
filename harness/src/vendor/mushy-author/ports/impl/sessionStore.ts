@@ -25,7 +25,7 @@
  *     interleave even under concurrent appendEvent calls.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   appendFileSync,
   existsSync,
@@ -113,6 +113,21 @@ export interface FileSessionStoreOptions {
 }
 
 export class FileSessionStore implements SessionStore {
+  private appSdkPath(tenantId: string, appSessionId: string): string {
+    const key = createHash("sha256").update(JSON.stringify([tenantId, appSessionId])).digest("hex");
+    return join(this.dir, `app-sdk-${key}.json`);
+  }
+
+  async getAppSdkSession(tenantId: string, appSessionId: string): Promise<string | null> {
+    const row = readJsonFile<{ sdk_session_id?: unknown }>(this.appSdkPath(tenantId, appSessionId), {});
+    return typeof row.sdk_session_id === "string" ? row.sdk_session_id : null;
+  }
+
+  async setAppSdkSession(tenantId: string, appSessionId: string, sdkSessionId: string | null): Promise<void> {
+    await this.locked(() => writeFileAtomic(this.appSdkPath(tenantId, appSessionId),
+      JSON.stringify({ sdk_session_id: sdkSessionId }) + "\n"));
+  }
+
   private readonly dir: string;
   private readonly ttlS: number;
   private readonly staleTurnMs: number;

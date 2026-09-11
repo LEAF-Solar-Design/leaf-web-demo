@@ -112,6 +112,59 @@ export function bulgeArc(a, b, bulge) {
   return { cx, cy, r, a0, sweep }
 }
 
+// W4g-bulge-plane-aware: a row's `normal` (WCS, present only when it is not
+// +Z) puts a bulged polyline's own plane at a tilt. The stored bulge is
+// already the WCS-sense bulge (dxf_intake flips it when Nz < 0), so the OCS
+// bulge is recovered by re-applying that same flip. AutoCAD's arbitrary-axis
+// algorithm, the same one server/dxf_intake.py's `_ocs_to_wcs` and
+// server/intake_dxf.py's `_wcs_to_ocs` already run: within 1e-6 of +Z is the
+// identity (null), so a +Z polyline never leaves the untouched path below.
+const OCS_IDENTITY_TOL = 1e-6
+
+function ocsBasis(nx, ny, nz) {
+  let axx; let axy; let axz
+  if (Math.abs(nx) < 1 / 64 && Math.abs(ny) < 1 / 64) {
+    axx = nz; axy = 0; axz = -nx // (0,1,0) x n
+  } else {
+    axx = -ny; axy = nx; axz = 0 // (0,0,1) x n
+  }
+  const axLen = Math.hypot(axx, axy, axz) || 1
+  axx /= axLen; axy /= axLen; axz /= axLen
+  const ayx = ny * axz - nz * axy
+  const ayy = nz * axx - nx * axz
+  const ayz = nx * axy - ny * axx
+  return { ax: [axx, axy, axz], ay: [ayx, ayy, ayz], az: [nx, ny, nz] }
+}
+
+/** null for no normal, a degenerate one, or one within OCS_IDENTITY_TOL of +Z: the untouched path. */
+function ocsBasisForNormal(normal) {
+  if (!Array.isArray(normal) || normal.length < 3) return null
+  const [x, y, z] = normal
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null
+  if (Math.abs(x) <= OCS_IDENTITY_TOL && Math.abs(y) <= OCS_IDENTITY_TOL && Math.abs(z - 1) <= OCS_IDENTITY_TOL) return null
+  const mag = Math.hypot(x, y, z)
+  if (!(mag > 1e-12)) return null
+  return ocsBasis(x / mag, y / mag, z / mag)
+}
+
+function ocsToWcs([x, y, z], { ax, ay, az }) {
+  return [x * ax[0] + y * ay[0] + z * az[0], x * ax[1] + y * ay[1] + z * az[1], x * ax[2] + y * ay[2] + z * az[2]]
+}
+
+function wcsToOcs([x, y, z], { ax, ay, az }) {
+  return [x * ax[0] + y * ax[1] + z * ax[2], x * ay[0] + y * ay[1] + z * ay[2], x * az[0] + y * az[1] + z * az[2]]
+}
+
+function sampleArcPoints({ cx, cy, r, a0, sweep }) {
+  const n = Math.max(MIN_ARC_POINTS, Math.ceil(Math.abs(sweep) / (ARC_STEP_DEG * Math.PI / 180)) + 1)
+  const out = []
+  for (let i = 1; i < n - 1; i += 1) {
+    const t = a0 + (sweep * i) / (n - 1)
+    out.push([cx + r * Math.cos(t), cy + r * Math.sin(t)])
+  }
+  return out
+}
+
 /**
  * W4g-6d: the points BETWEEN a and b along the arc a DXF bulge describes
  * (tan of a quarter of the included angle, positive counter-clockwise): the
@@ -119,19 +172,26 @@ export function bulgeArc(a, b, bulge) {
  * the centre d (1 - b^2) / 4b along the chord's left perpendicular from its
  * midpoint. Endpoints excluded (they are the polyline's own vertices); a
  * straight or degenerate segment yields nothing. Bounded by the arc sampler's
- * own step, so a full semicircle is 24 points.
+ * own step, so a full semicircle is 24 points. `normal` is the row's WCS
+ * normal (absent or +Z-identity keeps this the plain XY path, `z` stamped on
+ * every sample); otherwise the existing `bulgeArc` runs in the polyline's
+ * OWN plane (a and b mapped into OCS, the OCS bulge recovered, the samples
+ * mapped back to WCS) so a tilted polyline's arc never leaves its plane.
  */
-export function bulgePoints(a, b, bulge, z) {
-  const arc = bulgeArc(a, b, bulge)
-  if (!arc) return []
-  const { cx, cy, r, a0, sweep } = arc
-  const n = Math.max(MIN_ARC_POINTS, Math.ceil(Math.abs(sweep) / (ARC_STEP_DEG * Math.PI / 180)) + 1)
-  const out = []
-  for (let i = 1; i < n - 1; i += 1) {
-    const t = a0 + (sweep * i) / (n - 1)
-    out.push([cx + r * Math.cos(t), cy + r * Math.sin(t), z])
+export function bulgePoints(a, b, bulge, z, normal) {
+  const basis = ocsBasisForNormal(normal)
+  if (!basis) {
+    const arc = bulgeArc(a, b, bulge)
+    if (!arc) return []
+    return sampleArcPoints(arc).map(([x, y]) => [x, y, z])
   }
-  return out
+  const ocsBulge = bulge * (normal[2] < 0 ? -1 : 1)
+  const aOcs = wcsToOcs(a, basis)
+  const bOcs = wcsToOcs(b, basis)
+  const arc = bulgeArc(aOcs, bOcs, ocsBulge)
+  if (!arc) return []
+  const elevation = aOcs[2]
+  return sampleArcPoints(arc).map(([x, y]) => ocsToWcs([x, y, elevation], basis))
 }
 
 /**
@@ -158,7 +218,7 @@ export function expandBulgedPolylines(polylines) {
       if (i + 1 < count || pl.closed === true) {
         const b = pl.pts[(i + 1) % count]
         if (pl.bulges[i] !== 0) {
-          for (const p of bulgePoints(a, b, pl.bulges[i], a[2] ?? 0)) append(p)
+          for (const p of bulgePoints(a, b, pl.bulges[i], a[2] ?? 0, pl.normal)) append(p)
         }
       }
     }
@@ -379,7 +439,7 @@ export function entityToPolyline(entity, markSize = POINT_MARK) {
     const last = closed ? pts.length : pts.length - 1
     for (let i = 0; i < pts.length; i += 1) {
       out.push(pts[i])
-      if (i < last) out.push(...bulgePoints(pts[i], pts[(i + 1) % pts.length], bulges[i], pts[i][2]))
+      if (i < last) out.push(...bulgePoints(pts[i], pts[(i + 1) % pts.length], bulges[i], pts[i][2], entity.normal))
     }
     return { handle, layer, pts: out, closed }
   }

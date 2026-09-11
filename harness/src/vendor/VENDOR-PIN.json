@@ -5,6 +5,10 @@
       "reason": "leaf-web-demo downstream patch not present at the pinned upstream commit",
       "sha256": "8a7b076759ad4f7fea0c6ec4de078c32f3cc556252a9328668c41881b7f75f41"
     },
+    "ports/fakes/fakeSessionStore.ts": {
+      "reason": "Isolate SDK transcript bindings by authenticated app conversation in leaf-web-demo",
+      "sha256": "31eaf1f92200b7822ad31fa9f5d6c3d4e07d90767e419482acc6290fd38053c0"
+    },
     "ports/impl/agentSdkRunner.ts": {
       "reason": "leaf-web-demo downstream patch not present at the pinned upstream commit",
       "sha256": "1e36deb407e2dcc1958682b911480aae3ef6e802277a38cc4b72d6680c99d0c6"
@@ -13,13 +17,21 @@
       "reason": "leaf-web-demo downstream patch not present at the pinned upstream commit",
       "sha256": "fc776378a88e913b658e57473a1694007ce5078ccdcfaaf1ceb9779af1b89181"
     },
+    "ports/impl/pgSessionStore.ts": {
+      "reason": "Isolate SDK transcript bindings by authenticated app conversation in leaf-web-demo",
+      "sha256": "bf933056361301fe7f83ef2506ca8b6446b2e7c586898da520f3d063cfffb2a2"
+    },
+    "ports/impl/sessionStore.ts": {
+      "reason": "Isolate SDK transcript bindings by authenticated app conversation in leaf-web-demo",
+      "sha256": "178f761c6dde05e6f60aac87904cd741f5b81c57508efa45e4329c77fc594f5d"
+    },
     "ports/impl/tenantChangeRepo.ts": {
       "reason": "leaf-web-demo downstream patch not present at the pinned upstream commit",
       "sha256": "58b125b5c4c4b7aecab3351031c951cbde849a38f5b263c674e9c41ef6b1d87f"
     },
     "ports/index.ts": {
       "reason": "leaf-web-demo downstream patch not present at the pinned upstream commit",
-      "sha256": "73f5e886f48efaa3300310931cf70af1923c9c4e95018bae7b2276726bd6044a"
+      "sha256": "2d0dc6d5b05e14e9743f8a6bfcc97e226f288eb898065291f4bb73c814bc5a1b"
     }
   },
   "files": {
@@ -41,7 +53,7 @@
     "ports/fakes/fakeIntentSynthesizer.ts": "c7d32cc3b6a677e17688ba768c660afde238778a4eba18eefab82852398a153c",
     "ports/fakes/fakeOAuthGrant.ts": "b0d44aa4ce9dc8e313cc7b8ba9caa372250d99229ce68e2ccfb27286e8616802",
     "ports/fakes/fakeRepoEditor.ts": "bcf03cccc0e003e0b0afd804e57b78486a485506d8133baeb4bc12cfc0e4c38d",
-    "ports/fakes/fakeSessionStore.ts": "5a32cef3cf018e679021e80b46d64fd853945839e929b94f7ffde72a755c4d3c",
+    "ports/fakes/fakeSessionStore.ts": "31eaf1f92200b7822ad31fa9f5d6c3d4e07d90767e419482acc6290fd38053c0",
     "ports/fakes/fakeStandardServiceProvider.ts": "23e90488798f5669baaf4bc67cc0d598aec666ef6f05c88e071cc79a572fa979",
     "ports/fakes/fakeTenantRepo.ts": "d1c545d5fe141870e1ceabbbcc15794b92e8c4e2a22ea8138e7b9da4234a1a0d",
     "ports/fakes/fakeTurnRunner.ts": "2ec3b103d6a866265a756d756d6e28416bcd3390b5759394f1ad2faadae68f50",
@@ -58,12 +70,12 @@
     "ports/impl/mcpNetworkPolicy.ts": "298ac12f2c6a76acaf30aa18459d3aba1a8a3082eb0024f5c8deb48f6b4dc7a2",
     "ports/impl/mcpProxy.ts": "62f34ba8837d0b90ea066b944c2b88f69920e92a9bc2376f95cc3eb9bdb4df1b",
     "ports/impl/oauthGrantProvider.ts": "0e87ba5ebe133432e7a0417cd24da3ee99caefe2c88d5b5d4dc15027f1f6aacd",
-    "ports/impl/pgSessionStore.ts": "fc903254d6a07a671cb15a7e14b7bef19abd7219b4ff7cbfda2503208d9e32dd",
+    "ports/impl/pgSessionStore.ts": "bf933056361301fe7f83ef2506ca8b6446b2e7c586898da520f3d063cfffb2a2",
     "ports/impl/repoEditRunner.ts": "d924a9f2cc131676a7b1aadd966c8176a6186b03d1c4b0caf05f9fbca10595bb",
     "ports/impl/requestJournal.ts": "bed5a89d8b9b1c1ec0b1dfeb87f89b1b5f8cd7c0668eb93d89c9b0a4dd96d7ea",
     "ports/impl/requestScheduler.ts": "9041c1f4e47eec185c30e46e10c16a6151541d378012050d7c5b891f3f6c7175",
     "ports/impl/runnerCapabilities.ts": "fa06d4730aaa442a5d7b2b585024aa00ed8dbda55e37b911547c6a0898ad6478",
-    "ports/impl/sessionStore.ts": "03701fc6b2db5e8523ff6fad54bddccf29ba602925d1c2acdca1ed1b6c29cce9",
+    "ports/impl/sessionStore.ts": "178f761c6dde05e6f60aac87904cd741f5b81c57508efa45e4329c77fc594f5d",
     "ports/impl/sessionStoreFactory.ts": "b896d48b96f39ca6a3afcfbebc752cba155ef8d77762f5add0472ebcd9b39124",
     "ports/impl/skillBundle.ts": "e0a0f9b4e3a7eeaf37bdea16d0b2bd188096b0b30b18507d44beebacfd680e8f",
     "ports/impl/standardServices.ts": "6a7293a33330e464341b09e0ea602ba527c8e9aa13fda7ae10bc819b4ea9a528",
@@ -72,7 +84,7 @@
     "ports/impl/tenantBrokerStandardServiceProvider.ts": "35226b73731b2f31df0d7ff6da133b8bf327ea2896c2975fbd22729e78f08266",
     "ports/impl/tenantChangeRepo.ts": "58b125b5c4c4b7aecab3351031c951cbde849a38f5b263c674e9c41ef6b1d87f",
     "ports/impl/tenantRepoProvider.ts": "081a5b0ac578ae14f1cc11b9363810f734e2f06e91aa07b5b266ae0826ff43bc",
-    "ports/index.ts": "73f5e886f48efaa3300310931cf70af1923c9c4e95018bae7b2276726bd6044a",
+    "ports/index.ts": "2d0dc6d5b05e14e9743f8a6bfcc97e226f288eb898065291f4bb73c814bc5a1b",
     "ports/modelAllowlist.ts": "1e994732e3750e8e8fef4eb9a66d3b7223cdcc155cc93d5de0b4ef9832118684",
     "ports/surfaceAnnotations.ts": "8fba9c1d4373c2e9600e29a68ee78c801dd75bc56411baf9a33570b65cd52e5b",
     "ports/wireGrant.ts": "ac9619a708b426ff3920c796497727497bc7e707d70a5a5503c759324e379904",

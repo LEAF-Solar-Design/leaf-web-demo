@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 
 import guest_uploads
 import telemetry_sink
+import write_loop
 from routers import sessions as sessions_router
 from routers import tenant as tenant_router
 from routers import uploads as uploads_router
@@ -65,6 +66,19 @@ def test_upload_rejection_reason_classification(captured):
     for resp, want in cases:
         uploads_router._emit_upload_event(resp, {"tenant": "t1", "kind": "guest"})
         assert captured[-1]["labels"]["reason"] == want
+
+
+@pytest.mark.parametrize("reason_code", sorted(write_loop.MUTATION_REFUSAL_MESSAGES))
+def test_typed_fence_refusal_is_classified_disabled_whatever_its_message(
+    captured, reason_code,
+):
+    """"the drawing mutation fence file is unreadable" names neither "disabled"
+    nor "cutover", so the typed reason code decides the telemetry class."""
+    body = write_loop.mutation_refusal_envelope(reason_code, error_code="INTERNAL")
+    uploads_router._emit_upload_event(
+        JSONResponse(status_code=503, content=body), {"tenant": "t1", "kind": "account"})
+    assert captured[-1]["name"] == "drawing.upload_rejected"
+    assert captured[-1]["labels"]["reason"] == "disabled"
 
 
 def test_upload_success_minted_flag_comes_from_the_resolver_not_the_token(captured):
@@ -167,10 +181,10 @@ def test_upload_route_threads_resolved_identity_into_rejection(monkeypatch, capt
 
     @contextlib.contextmanager
     def _guard():
-        yield True
+        yield None  # the TYPED upload guard: None admits
 
     monkeypatch.setattr(uploads_router.write_loop,
-                        "upload_mutation_commit_guard", _guard)
+                        "upload_mutation_refusal_guard", _guard)
     monkeypatch.setattr(entitlements, "resolve_tier", lambda t: "pro")
     monkeypatch.setattr(entitlements, "resolve_roles", lambda t: ((), False))
     monkeypatch.setattr(entitlements, "entitlements_for",

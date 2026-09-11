@@ -162,6 +162,7 @@ export class PgSessionStore implements SessionStore {
   private readonly ownsPool: boolean;
   private readonly staleTurnMs: number;
   private readonly tables: {
+    appSdkSessions: string;
     sessions: string;
     turns: string;
     events: string;
@@ -178,6 +179,7 @@ export class PgSessionStore implements SessionStore {
     const prefix = opts.tablePrefix ?? DEFAULT_PREFIX;
     identifier(prefix);
     this.tables = {
+      appSdkSessions: identifier(`${prefix}_app_sdk_sessions`),
       sessions: identifier(`${prefix}_sessions`),
       turns: identifier(`${prefix}_turns`),
       events: identifier(`${prefix}_events`),
@@ -204,6 +206,12 @@ export class PgSessionStore implements SessionStore {
   async initializeSchema(): Promise<void> {
     const t = this.tables;
     await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS ${t.appSdkSessions} (
+        tenant_id text NOT NULL,
+        app_session_id text NOT NULL,
+        sdk_session_id text,
+        PRIMARY KEY (tenant_id, app_session_id)
+      );
       CREATE TABLE IF NOT EXISTS ${t.sessions} (
         session_id uuid PRIMARY KEY,
         tenant_id text NOT NULL,
@@ -291,6 +299,23 @@ export class PgSessionStore implements SessionStore {
           AND status = 'active'
           AND started_at < NOW() - ($2 * INTERVAL '1 millisecond')`,
       [sessionId, this.staleTurnMs],
+    );
+  }
+
+  async getAppSdkSession(tenantId: string, appSessionId: string): Promise<string | null> {
+    const result = await this.pool.query<{ sdk_session_id: string | null }>(
+      `SELECT sdk_session_id FROM ${this.tables.appSdkSessions} WHERE tenant_id = $1 AND app_session_id = $2`,
+      [tenantId, appSessionId],
+    );
+    return result.rows[0]?.sdk_session_id ?? null;
+  }
+
+  async setAppSdkSession(tenantId: string, appSessionId: string, sdkSessionId: string | null): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO ${this.tables.appSdkSessions} (tenant_id, app_session_id, sdk_session_id)
+       VALUES ($1, $2, $3) ON CONFLICT (tenant_id, app_session_id)
+       DO UPDATE SET sdk_session_id = EXCLUDED.sdk_session_id`,
+      [tenantId, appSessionId, sdkSessionId],
     );
   }
 

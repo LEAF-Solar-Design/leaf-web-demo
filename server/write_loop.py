@@ -160,8 +160,79 @@ def _cleanup_scratch_objects(da: Any, scratch_keys) -> None:
             )
 
 
-def fence_open() -> bool:
-    """Live cutover state from the shared EFS fence FILE alone.
+# Stable, public reason codes for a refused drawing mutation. They travel to the
+# caller as the envelope's ``error.reason_code`` and to the broker log as
+# ``reason=``, so a 503 names the precondition that refused it instead of
+# costing a log-spelunking round trip across four log groups. Each names a
+# CONFIGURATION or FENCE state only: never a tenant, drawing, path, or secret.
+MUTATION_REFUSED_ENV_DISABLED = "drawing_mutations_env_disabled"
+MUTATION_REFUSED_FENCE_CLOSED = "drawing_mutations_fence_closed"
+MUTATION_REFUSED_FENCE_UNREADABLE = "drawing_mutations_fence_unreadable"
+MUTATION_REFUSED_LOCK_UNAVAILABLE = "drawing_mutations_fence_lock_unavailable"
+MUTATION_REFUSED_UNATTRIBUTED = "drawing_mutations_refused_unattributed"
+
+MUTATION_REFUSAL_MESSAGES: Dict[str, str] = {
+    MUTATION_REFUSED_ENV_DISABLED:
+        "drawing mutations are disabled by configuration "
+        "(LEAF_DRAWING_MUTATIONS_ENABLED is not \"1\")",
+    MUTATION_REFUSED_FENCE_CLOSED:
+        "drawing mutations are fenced shut for a storage cutover "
+        "(LEAF_DRAWING_MUTATIONS_FENCE_FILE does not hold \"1\")",
+    MUTATION_REFUSED_FENCE_UNREADABLE:
+        "the drawing mutation fence file is unreadable, so mutations fail closed "
+        "(LEAF_DRAWING_MUTATIONS_FENCE_FILE)",
+    MUTATION_REFUSED_LOCK_UNAVAILABLE:
+        "the drawing mutation fence lock is unavailable on this host, "
+        "so mutations fail closed",
+    MUTATION_REFUSED_UNATTRIBUTED:
+        "drawing mutations were refused by the mutation fence",
+}
+
+
+def mutation_refusal_message(reason: Optional[str]) -> str:
+    """Public message for a reason code. Unknown codes fail SAFE, never raise:
+    an observability path must not be able to turn a 503 into a 500."""
+    return MUTATION_REFUSAL_MESSAGES.get(
+        reason or "", MUTATION_REFUSAL_MESSAGES[MUTATION_REFUSED_UNATTRIBUTED])
+
+
+def mutation_refusal_envelope(
+    reason: Optional[str], *, error_code: str,
+    tool: Optional[str] = None, version: Optional[str] = None,
+) -> Dict[str, Any]:
+    """The retryable refusal envelope for a closed mutation gate, carrying
+    ``error.reason_code``. The caller keeps its own error code and HTTP status,
+    so this changes what a refusal SAYS, never whether or how it refuses.
+
+    ``None`` is attributed as unattributed rather than guessed."""
+    reason = reason or MUTATION_REFUSED_UNATTRIBUTED
+    env = err_envelope(error_code, mutation_refusal_message(reason),
+                       retryable=True, tool=tool, version=version)
+    env["error"]["reason_code"] = reason
+    return env
+
+
+def log_mutation_refused(logger: logging.Logger, reason: Optional[str], *,
+                         surface: str) -> str:
+    """Write the one refusal log line on the CALLER's logger; return the
+    attributed reason.
+
+    ``surface`` is a fixed literal naming the refusing code path. The line
+    carries configuration state only: no tenant, drawing, ledger key, fence
+    path, or credential. Written on refusals only, so admitted work is silent.
+    """
+    reason = reason or MUTATION_REFUSED_UNATTRIBUTED
+    logger.warning("drawing_mutation_refused reason=%s surface=%s",
+                   reason, surface)
+    return reason
+
+
+def fence_refusal() -> Optional[str]:
+    """Typed live cutover state from the shared EFS fence FILE alone.
+
+    ``None`` means open; anything else is the stable reason code that refused.
+    ONE read decides and reports, so the reason a caller is told is the reason
+    it was actually refused, with no re-read to race the cutover control.
 
     The fence is the one authority EVERY drawing-authority lane shares, so a
     storage cutover drains already-running app and broker tasks without waiting
@@ -170,27 +241,44 @@ def fence_open() -> bool:
     """
     fence = os.environ.get("LEAF_DRAWING_MUTATIONS_FENCE_FILE", "").strip()
     if not fence:
-        return True
+        return None
     try:
-        return Path(fence).read_text(encoding="utf-8").strip() == "1"
+        state = Path(fence).read_text(encoding="utf-8").strip()
     except (OSError, UnicodeError):
-        return False
+        return MUTATION_REFUSED_FENCE_UNREADABLE
+    return None if state == "1" else MUTATION_REFUSED_FENCE_CLOSED
 
 
-def drawing_mutations_enabled() -> bool:
-    """Authored / checkout / broker-run lane: the env default AND the fence.
+def fence_open() -> bool:
+    """Boolean view of ``fence_refusal``. The typed form is the ONE rule; this
+    is a projection of it, so the two can never disagree."""
+    return fence_refusal() is None
+
+
+def drawing_mutations_refusal() -> Optional[str]:
+    """Typed gate for the authored / checkout / broker-run lane: the env default
+    AND the fence. ``None`` means admitted, else the reason code that refused.
 
     Scoped to THAT lane on purpose. The upload/import lane has its own env gate
     (``upload_import_mutations_enabled``) and must not be closed by this one --
     see ``upload_mutation_commit_guard``.
+
+    The env flag is checked FIRST so a deployment-level drain is reported as
+    itself rather than as a storage cutover, which is exactly the attribution
+    the old boolean gate could not make.
     """
     if os.environ.get("LEAF_DRAWING_MUTATIONS_ENABLED", "1") != "1":
-        return False
-    return fence_open()
+        return MUTATION_REFUSED_ENV_DISABLED
+    return fence_refusal()
+
+
+def drawing_mutations_enabled() -> bool:
+    """Boolean view of ``drawing_mutations_refusal`` (see there for the rule)."""
+    return drawing_mutations_refusal() is None
 
 
 @contextmanager
-def _fence_held(decide):
+def _fence_held(decide, *, denied):
     """Hold the shared cutover fence across one durable drawing commit.
 
     Linux tasks take a shared flock.  The protected cutover control takes the
@@ -199,6 +287,12 @@ def _fence_held(decide):
 
     ``decide`` is the lane's own open/closed rule, evaluated INSIDE the lock so
     the answer cannot go stale between the check and the commit.
+
+    ``denied`` is what a caller is handed when the LOCK ITSELF is unavailable
+    (no fcntl), which is a fail-closed refusal rather than the lane's answer.
+    Both callers are typed and pass ``MUTATION_REFUSED_LOCK_UNAVAILABLE``, so
+    that refusal is never indistinguishable from a drained fence. The boolean
+    guards are projections of those typed guards, not further callers.
     """
     fence = os.environ.get("LEAF_DRAWING_MUTATIONS_FENCE_FILE", "").strip()
     if not fence:
@@ -210,7 +304,7 @@ def _fence_held(decide):
         try:
             import fcntl  # Linux deployment; unavailable on Windows unit hosts.
         except ImportError:
-            yield False
+            yield denied
             return
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH)
         try:
@@ -221,14 +315,36 @@ def _fence_held(decide):
 
 @contextmanager
 def drawing_mutation_commit_guard():
-    """Commit guard for the authored / checkout / broker-run lane."""
-    with _fence_held(drawing_mutations_enabled) as commit_enabled:
-        yield commit_enabled
+    """Boolean view of ``drawing_mutation_refusal_guard`` for the authored /
+    checkout / broker-run lane: same lock, same single read.
+
+    Never hand the TYPED guard's value to a caller that reads it as a boolean.
+    A reason code is a truthy string, so that would invert the gate."""
+    with drawing_mutation_refusal_guard() as refusal:
+        yield refusal is None
 
 
 @contextmanager
-def upload_mutation_commit_guard():
+def drawing_mutation_refusal_guard():
+    """Typed sibling of ``drawing_mutation_commit_guard``.
+
+    Yields ``None`` when the commit is admitted, else the stable reason code
+    that refused it. Same lock, same rule, ONE fence read taken inside the lock,
+    so the reason a route reports is the reason the guard actually refused on
+    and cannot be re-read into a different answer by a concurrent cutover.
+    """
+    with _fence_held(drawing_mutations_refusal,
+                     denied=MUTATION_REFUSED_LOCK_UNAVAILABLE) as refusal:
+        yield refusal
+
+
+@contextmanager
+def upload_mutation_refusal_guard():
     """Commit guard for the upload / import lane: ONLY the shared fence.
+
+    Yields ``None`` when the commit is admitted, else the reason code that
+    refused it: fence closed, fence unreadable, or lock unavailable. Never
+    ``MUTATION_REFUSED_ENV_DISABLED``, because this lane never reads that flag.
 
     That lane's env gate is ``upload_import_mutations_enabled``, checked by the
     caller. Folding ``LEAF_DRAWING_MUTATIONS_ENABLED`` in here would let an
@@ -237,8 +353,16 @@ def upload_mutation_commit_guard():
     The fence FILE still applies, because a storage cutover really does drain
     every lane.
     """
-    with _fence_held(fence_open) as commit_enabled:
-        yield commit_enabled
+    with _fence_held(fence_refusal,
+                     denied=MUTATION_REFUSED_LOCK_UNAVAILABLE) as refusal:
+        yield refusal
+
+
+@contextmanager
+def upload_mutation_commit_guard():
+    """Boolean view of ``upload_mutation_refusal_guard`` (see there)."""
+    with upload_mutation_refusal_guard() as refusal:
+        yield refusal is None
 
 
 def upload_import_mutations_enabled() -> bool:
@@ -331,12 +455,32 @@ def edited_source_key(tenant_id: str, drawing_id: str, version: int) -> str:
     version (card F-3). The version's own payload stays intake JSON (the
     chain's mock-writer idiom, viewer-readable with no cache machinery); this
     sidecar preserves the full-fidelity document — every entity the intake
-    subset cannot represent — for re-edit, digest-bound via the version's
-    meta (source_sha256)."""
+    subset cannot represent — for re-edit, bound by a sibling proof or the
+    legacy re-parse fallback."""
     import store
     v = int(version)
     return (f"tenants/{store.sanitize_id(tenant_id)}/drawings/"
             f"{store.sanitize_id(drawing_id)}/v/{v:08d}.edited.dxf")
+
+
+def edited_source_proof_key(tenant_id: str, drawing_id: str, version: int) -> str:
+    """Binding proof for an edited DXF and its version payload."""
+    return edited_source_key(tenant_id, drawing_id, version) + ".proof.json"
+
+
+def publish_edited_source(backend, tenant_id: str, drawing_id: str, version: int,
+                          raw: bytes, payload_bytes: bytes) -> None:
+    """Publish the sidecar first; an unavailable proof only costs a re-parse."""
+    backend.put(edited_source_key(tenant_id, drawing_id, version), raw)
+    proof = {
+        "sidecar_sha256": hashlib.sha256(raw).hexdigest(),
+        "payload_sha256": hashlib.sha256(payload_bytes).hexdigest(),
+    }
+    try:
+        backend.put(edited_source_proof_key(tenant_id, drawing_id, version),
+                    json.dumps(proof, separators=(",", ":")).encode("utf-8"))
+    except Exception:  # noqa: BLE001 - the sidecar remains readable by re-parse
+        pass
 
 
 def intake_cache_proof_key(tenant_id: str, drawing_id: str, version: int) -> str:
@@ -430,19 +574,35 @@ def _json_object_or_none(raw: bytes) -> Optional[Dict[str, Any]]:
     return value if isinstance(value, dict) else None
 
 
-def _sidecar_bound(raw: bytes, payload: Dict[str, Any], payload_bytes: bytes) -> bool:
-    """The manifest keeps no digest for the sidecar, so the binding is the
-    one thing both artifacts share: the sidecar parsed through the SAME intake
-    path that produced the version payload must reproduce that payload byte
-    for byte (the payload is `json.dumps(intake, separators=(",", ":"))` of
-    the parse, the save route's idiom). A swapped or corrupted sidecar fails
-    this and the payload, the authority, is served instead."""
+def _sidecar_bound(raw: bytes, payload: Dict[str, Any], payload_bytes: bytes,
+                   *, backend=None, proof_key: Optional[str] = None) -> bool:
+    """Bind by saved digests, re-parsing only if the proof cannot be loaded.
+
+    A loaded disagreement refuses the sidecar. This catches corruption and a
+    sidecar swapped without its proof. Store writers can replace both proof
+    and sidecar, but can also replace the authoritative payload; neither this
+    proof nor the legacy re-parse protects against that actor.
+    """
+    if backend is not None and proof_key is not None:
+        try:
+            proof = json.loads(backend.get(proof_key).decode("utf-8"))
+        except Exception:  # noqa: BLE001 - missing/unreadable proof uses legacy binding
+            pass
+        else:
+            return proof == {
+                "sidecar_sha256": hashlib.sha256(raw).hexdigest(),
+                "payload_sha256": hashlib.sha256(payload_bytes).hexdigest(),
+            }
     import dxf_intake
     try:
         intake = dxf_intake.parse_dxf_bytes(
             raw, source_name=str(payload.get("dwg") or "edited.dxf"))
     except dxf_intake.DxfParseError:
         return False
+    # New edited saves record this parser's width coverage. Older payloads
+    # retain their original bytes and must still bind without the new field.
+    if payload.get("polylineWidthCovered") is True:
+        intake["polylineWidthCovered"] = True
     canonical = json.dumps(intake, separators=(",", ":")).encode("utf-8")
     return hmac.compare_digest(
         hashlib.sha256(canonical).hexdigest(), hashlib.sha256(payload_bytes).hexdigest())
@@ -468,7 +628,9 @@ def read_dxf(backend, tenant_id: str, drawing_id: str,
         skey = edited_source_key(tenant_id, drawing_id, v)
         if backend.exists(skey):
             raw = backend.get(skey)
-            if len(raw) <= MAX_DXF_BYTES and _sidecar_bound(raw, payload, source):
+            if len(raw) <= MAX_DXF_BYTES and _sidecar_bound(
+                    raw, payload, source, backend=backend,
+                    proof_key=edited_source_proof_key(tenant_id, drawing_id, v)):
                 return v, raw, "edited-sidecar"
         import intake_dxf
         try:
@@ -1277,10 +1439,11 @@ def ensure_demo_drawing(backend, tenant_id: str, drawing_id: str) -> None:
             f"drawing {drawing_id!r} was uploaded but extraction has not "
             f"produced geometry (see /api/drawings/{drawing_id}/upload-status); "
             f"refusing the demo-intake bootstrap")
-    with drawing_mutation_commit_guard() as commit_enabled:
-        if not commit_enabled:
-            raise ValueError(
-                "drawing mutations are temporarily disabled for a storage cutover")
+    with drawing_mutation_refusal_guard() as refusal:
+        if refusal is not None:
+            log_mutation_refused(LOGGER, refusal,
+                                 surface="write_loop.ensure_demo_drawing")
+            raise ValueError(mutation_refusal_message(refusal))
         if backend.exists(store.manifest_key(tenant_id, drawing_id)):
             return
         live = os.environ.get("APS_LIVE", "0").strip() == "1"
@@ -1331,10 +1494,10 @@ def undo_view(tenant_id: str, drawing_id: str, *, backend=None,
     import store
     backend = backend or default_backend()
     ensure_demo_drawing(backend, tenant_id, drawing_id)
-    with drawing_mutation_commit_guard() as commit_enabled:
-        if not commit_enabled:
-            raise ValueError(
-                "drawing mutations are temporarily disabled for a storage cutover")
+    with drawing_mutation_refusal_guard() as refusal:
+        if refusal is not None:
+            log_mutation_refused(LOGGER, refusal, surface="write_loop.undo")
+            raise ValueError(mutation_refusal_message(refusal))
         new_head = store.undo(backend, tenant_id, drawing_id,
                               holder=holder, fence=fence)
     v, intake = read_intake(backend, tenant_id, drawing_id, "head")
@@ -1349,10 +1512,10 @@ def redo_view(tenant_id: str, drawing_id: str, *, backend=None,
     import store
     backend = backend or default_backend()
     ensure_demo_drawing(backend, tenant_id, drawing_id)
-    with drawing_mutation_commit_guard() as commit_enabled:
-        if not commit_enabled:
-            raise ValueError(
-                "drawing mutations are temporarily disabled for a storage cutover")
+    with drawing_mutation_refusal_guard() as refusal:
+        if refusal is not None:
+            log_mutation_refused(LOGGER, refusal, surface="write_loop.redo")
+            raise ValueError(mutation_refusal_message(refusal))
         new_head = store.redo(backend, tenant_id, drawing_id,
                               holder=holder, fence=fence)
     v, intake = read_intake(backend, tenant_id, drawing_id, "head")
@@ -1453,12 +1616,13 @@ def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
         return env, 200
     try:
         new_intake = apply_mutations(cur_intake, mutations)
-        with drawing_mutation_commit_guard() as commit_enabled:
-            if not commit_enabled:
-                return (err_envelope(
-                    ErrorCode.APS_UNAVAILABLE,
-                    "drawing mutations were drained before write commit",
-                    retryable=True, tool=name, version=tool_version,
+        with drawing_mutation_refusal_guard() as refusal:
+            if refusal is not None:
+                log_mutation_refused(LOGGER, refusal,
+                                     surface="write_loop.mock_write_commit")
+                return (mutation_refusal_envelope(
+                    refusal, error_code=ErrorCode.APS_UNAVAILABLE,
+                    tool=name, version=tool_version,
                 ), 503)
             new_v = _put_bytes_version(
                 backend, tenant_id, drawing_id,
@@ -1674,14 +1838,50 @@ def quantize_intake_like_extractor(intake: dict) -> dict:
     return quantized
 
 
+# dxf_intake.py and da/intake_parse.py omit +Z within 1e-6; the inspect
+# producer in da/lisp.py rounds to 6 decimals, adding at most 5e-7.
+# 1e-6 + 5e-7 = 1.5e-6, covered by an absolute 2e-6 per component.
+_NORMAL_TOLERANCE = 2e-6
+
+
+def _effective_normal(entity: Dict[str, Any], key: str = "normal") -> Optional[list]:
+    # dxf_intake.py and da/intake_parse.py omit the normal for +Z (polylines'
+    # `normal`); CIRCLE/ARC/DIMENSION/INSERT carry the same omission-means-+Z
+    # contract under their own `nrm` key, so a caller names which key applies.
+    normal = entity.get(key, [0.0, 0.0, 1.0])
+    if not isinstance(normal, list) or len(normal) != 3:
+        return None
+    try:
+        if any(not isinstance(value, (int, float)) or isinstance(value, bool)
+               or not math.isfinite(value) for value in normal):
+            return None
+    except OverflowError:
+        return None
+    return normal
+
+
 def _polyline_effect_matches(
     expected: Dict[str, Any], actual: Dict[str, Any], *, extracted: bool = False,
+    compare_width: bool = False,
 ) -> bool:
     if expected.get("layer") != actual.get("layer"):
         return False
     if expected.get("space", "model") != actual.get("space", "model"):
         return False
     if expected.get("closed") is not actual.get("closed"):
+        return False
+    # A bulge is a tangent, not a coordinate: the producers either both carry
+    # it or both omit it, compared exactly (no extractor quantum applies).
+    if (expected.get("bulges") or None) != (actual.get("bulges") or None):
+        return False
+    # Omission means zero only when the caller has coverage from both producers.
+    if compare_width and bool(expected.get("width")) != bool(actual.get("width")):
+        return False
+    expected_normal = _effective_normal(expected)
+    actual_normal = _effective_normal(actual)
+    if (expected_normal is None or actual_normal is None
+            or any(abs(left - right) > _NORMAL_TOLERANCE
+                   for left, right in zip(expected_normal, actual_normal))):
         return False
     expected_points = expected.get("pts") or []
     actual_points = actual.get("pts") or []
@@ -1988,6 +2188,8 @@ def verify_live_mutation_effects(
     _verify_mleader_effects(base, actual, canonical, matched_handles)
     base_polylines = base.get("polylines") or []
     actual_polylines = actual.get("polylines") or []
+    actual_width_covered = actual.get("polylineWidthCovered") is True
+    compare_width = base.get("polylineWidthCovered") is True and actual_width_covered
     if not isinstance(actual_polylines, list):
         raise ValueError("re-extracted output has no polyline list")
     expected_count = len(expected.get("polylines") or [])
@@ -2038,8 +2240,28 @@ def verify_live_mutation_effects(
             continue
         changed = handle in transformed or handle in replaced
         expected_entity = expected_by_handle[handle] if changed else entity
+        if not changed:
+            base_normal = _effective_normal(entity)
+            actual_normal = _effective_normal(actual_by_handle[handle])
+            if (base_normal is None or actual_normal is None
+                    or any(abs(left - right) > _NORMAL_TOLERANCE
+                           for left, right in zip(base_normal, actual_normal))):
+                raise ValueError(
+                    f"unchanged handle {handle!r} has unexpected output geometry")
+            expected_entity = entity.copy()
+            if isinstance(entity.get("pts"), list):
+                expected_entity["pts"] = [
+                    [
+                        _extractor_round(_plan_number(value), 3)
+                        if isinstance(value, (int, float)) and not isinstance(value, bool)
+                        else value
+                        for value in point
+                    ] if isinstance(point, (list, tuple)) else point
+                    for point in entity["pts"]
+                ]
         if not _polyline_effect_matches(
-                expected_entity, actual_by_handle[handle], extracted=changed):
+                expected_entity, actual_by_handle[handle], extracted=changed,
+                compare_width=compare_width):
             effect = (
                 "transformed" if handle in transformed
                 else "replaced" if handle in replaced else "unchanged")
@@ -2078,7 +2300,10 @@ def verify_live_mutation_effects(
         match_index = min(
             (index for index, candidate in enumerate(unmatched)
              if isinstance(candidate, dict)
-             and _polyline_effect_matches(entity, candidate, extracted=True)),
+             and _polyline_effect_matches(
+                 entity, candidate, extracted=True,
+                 # The plan produces zero-width adds even if the base is old.
+                 compare_width=actual_width_covered)),
             key=lambda index: (
                 max(abs(left - right)
                     for point, candidate_point in zip(expected_points, unmatched[index]["pts"])
@@ -2281,23 +2506,31 @@ def _verify_mleader_effects(base, actual, canonical, matched_handles):
 
 
 def _dimension_effect_matches(expected: Dict[str, Any], actual: Dict[str, Any]) -> bool:
-    """One dimension against its re-extracted record: same type, style and
-    layer (case-insensitive, like INSERT's), definition/dimline points within
-    the extractor's 3-decimal quantum, and rotation within a microdegree
-    (LINEAR only; ALIGNED both read 0). The measurement is checked
-    separately, never as part of the match itself, so a geometry match with
-    a wrong measurement is a distinct refusal.
+    """One dimension against its re-extracted record: same type, style,
+    layer (case-insensitive, like INSERT's) and extrusion normal (`nrm`, the
+    same omission-means-+Z contract and 2e-6 tolerance as a polyline's
+    `normal`), definition/dimline points within the extractor's 3-decimal
+    quantum, and rotation within a microdegree (LINEAR only; ALIGNED both
+    read 0). The measurement is checked separately, never as part of the
+    match itself, so a geometry match with a wrong measurement is a distinct
+    refusal.
 
-    A legacy record on either side predates this field entirely and carries
-    no `layer` at all; when either is missing the comparison is unknown
-    (skipped), never forced to mismatch, so an already-verified pre-migration
-    base or actual stays green."""
+    A legacy record on either side predates the `layer` field entirely and
+    carries no `layer` at all; when either is missing that one comparison is
+    unknown (skipped), never forced to mismatch, so an already-verified
+    pre-migration base or actual stays green."""
     if expected.get("type") != actual.get("type") or expected.get("style") != actual.get("style"):
         return False
     expected_layer = expected.get("layer")
     actual_layer = actual.get("layer")
     if (expected_layer is not None and actual_layer is not None
             and str(expected_layer).lower() != str(actual_layer).lower()):
+        return False
+    expected_normal = _effective_normal(expected, key="nrm")
+    actual_normal = _effective_normal(actual, key="nrm")
+    if (expected_normal is None or actual_normal is None
+            or any(abs(left - right) > _NORMAL_TOLERANCE
+                   for left, right in zip(expected_normal, actual_normal))):
         return False
     for key in ("p1", "p2", "dimline"):
         if not _point_close(list(expected.get(key) or []), list(actual.get(key) or []), 1.5e-3):
@@ -2391,9 +2624,17 @@ def _verify_dimension_effects(
 
 def _round_effect_matches(expected: Dict[str, Any], actual: Dict[str, Any], *, arc: bool) -> bool:
     """One circle or arc against its re-extracted record: same layer, the
-    centre and radius within the extractor's 3-decimal quantum, and for an
-    arc its angles within a millidegree (modulo a turn)."""
+    extrusion normal (`nrm`, the same omission-means-+Z contract and 2e-6
+    tolerance as a polyline's `normal`), the centre and radius within the
+    extractor's 3-decimal quantum, and for an arc its angles within a
+    millidegree (modulo a turn)."""
     if expected.get("layer") != actual.get("layer"):
+        return False
+    expected_normal = _effective_normal(expected, key="nrm")
+    actual_normal = _effective_normal(actual, key="nrm")
+    if (expected_normal is None or actual_normal is None
+            or any(abs(left - right) > _NORMAL_TOLERANCE
+                   for left, right in zip(expected_normal, actual_normal))):
         return False
     if not _point_close(list(expected.get("c") or []), list(actual.get("c") or []), 1.5e-3):
         return False
@@ -2671,12 +2912,13 @@ def _run_write_live_legacy(tool: Dict[str, Any], params: Dict[str, Any], tenant_
             ledger_entry["engine_seconds"] = cost["engine_seconds"]
             ledger_entry["usd_est"] = cost["usd_est"]
 
-        with drawing_mutation_commit_guard() as commit_enabled:
-            if not commit_enabled:
-                return (err_envelope(
-                    ErrorCode.APS_UNAVAILABLE,
-                    "drawing mutations were drained before write commit",
-                    retryable=True, tool=name, version=tool_version,
+        with drawing_mutation_refusal_guard() as refusal:
+            if refusal is not None:
+                log_mutation_refused(LOGGER, refusal,
+                                     surface="write_loop.live_write_commit")
+                return (mutation_refusal_envelope(
+                    refusal, error_code=ErrorCode.APS_UNAVAILABLE,
+                    tool=name, version=tool_version,
                 ), 503)
             new_v = _put_bytes_version(
                 backend, tenant_id, drawing_id, out_bytes,
@@ -2899,12 +3141,13 @@ def _apply_plan_live(*, tenant_id: str, drawing_id: str, head_v: int,
     }
     if ledger_entry is not None and isinstance(cost, dict):
         ledger_entry.update(cost)
-    with drawing_mutation_commit_guard() as commit_enabled:
-        if not commit_enabled:
-            return (err_envelope(
-                ErrorCode.APS_UNAVAILABLE,
-                "drawing mutations were drained before write commit",
-                retryable=True, tool=name, version=tool_version,
+    with drawing_mutation_refusal_guard() as refusal:
+        if refusal is not None:
+            log_mutation_refused(LOGGER, refusal,
+                                 surface="write_loop.plan_live_commit")
+            return (mutation_refusal_envelope(
+                refusal, error_code=ErrorCode.APS_UNAVAILABLE,
+                tool=name, version=tool_version,
             ), 503)
         version_write_started = time.perf_counter()
         new_v = _put_bytes_version(
@@ -3023,11 +3266,14 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                 ), DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
 
         # Both controls precede tenant execution and every APS-capable call.
-        if not drawing_mutations_enabled():
-            return (err_envelope(
-                ErrorCode.APS_UNAVAILABLE,
-                "drawing mutations are temporarily disabled",
-                retryable=True, tool=name, version=tool_version,
+        # ONE read decides and reports.
+        live_refusal = drawing_mutations_refusal()
+        if live_refusal is not None:
+            log_mutation_refused(LOGGER, live_refusal,
+                                 surface="write_loop.live_write")
+            return (mutation_refusal_envelope(
+                live_refusal, error_code=ErrorCode.APS_UNAVAILABLE,
+                tool=name, version=tool_version,
             ), 503)
         store.authorize_checkout(backend, tenant_id, drawing_id, holder, fence)
 
@@ -3240,11 +3486,14 @@ def run_data_plan_live(plan: Dict[str, Any], tenant_id: str, *, backend, da: Any
                     retryable=False, tool=name, version=tool_version,
                 ), DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
 
-        if not drawing_mutations_enabled():
-            return (err_envelope(
-                ErrorCode.APS_UNAVAILABLE,
-                "drawing mutations are temporarily disabled",
-                retryable=True, tool=name, version=tool_version,
+        # ONE read decides and reports.
+        plan_refusal = drawing_mutations_refusal()
+        if plan_refusal is not None:
+            log_mutation_refused(LOGGER, plan_refusal,
+                                 surface="write_loop.data_plan_live")
+            return (mutation_refusal_envelope(
+                plan_refusal, error_code=ErrorCode.APS_UNAVAILABLE,
+                tool=name, version=tool_version,
             ), 503)
         store.authorize_checkout(backend, tenant_id, drawing_id, holder, fence)
 
