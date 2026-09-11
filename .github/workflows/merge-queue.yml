@@ -4,7 +4,7 @@ name: merge-queue
 # Slice C of the merge-queue design (verdicts/merge-queue-design-astra.md,
 # points 1, 2, 4, 7, 8). This is the GROUP-level controller: it never builds
 # or deploys anything itself. mq-review proves every PR in the group's
-# ordered prefix already carries a passing kimi-critic-review on its own
+# ordered prefix already carries a passing critic-review on its own
 # head; mq-supply proves exactly one provider-bound speculative image set
 # exists for the group's tree (or that the group is docs-only, in which case
 # there is nothing to build); mq-prewarm proves the relay (slice B) staged
@@ -17,7 +17,7 @@ name: merge-queue
 # context names (mq-review, mq-prewarm) must exist on both a pull_request run
 # and a merge_group run, or a PR can never satisfy its required checks well
 # enough to enter the queue. On pull_request events mq-review decides
-# admission from the newest kimi-critic-review status on the PR's own head,
+# admission from the newest critic-review status on the PR's own head,
 # using the same reverse-then-sort_by(.created_at) tie-break the merge_group
 # path proves at ~:146-170 (both arms are pinned byte-identical below, so
 # they can never disagree), and mq-prewarm publishes a neutral "queue
@@ -42,7 +42,7 @@ name: merge-queue
 # status-triggered run's GITHUB_SHA is always the default branch tip, never
 # the PR head, so it cannot correct a PR's own check run. A red mq-review
 # clears the same way any other check does, by a re-run once the
-# kimi-critic-review success is posted; the real staging work only ever runs
+# critic-review success is posted; the real staging work only ever runs
 # for merge_group's checks_requested.
 # ---------------------------------------------------------------------------
 
@@ -95,7 +95,7 @@ jobs:
     outputs:
       head_sha: ${{ steps.queue.outputs.head_sha }}
     steps:
-      - name: Decide admission from the newest kimi-critic-review status (pull_request)
+      - name: Decide admission from the newest critic-review status (pull_request)
         if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -104,15 +104,15 @@ jobs:
           set -euo pipefail
           [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::mq-review: pull_request carries no usable head sha."; exit 1; }
           RAW=$(timeout 60 gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/statuses?per_page=100") || {
-            echo "::error::mq-review: kimi-critic-review status read failed for $HEAD_SHA; refusing to admit on an unreadable gate."
+            echo "::error::mq-review: critic-review status read failed for $HEAD_SHA; refusing to admit on an unreadable gate."
             exit 1
           }
           [ -n "$RAW" ] || {
-            echo "::error::mq-review: kimi-critic-review status read for $HEAD_SHA returned an empty body; refusing to admit on an unreadable gate."
+            echo "::error::mq-review: critic-review status read for $HEAD_SHA returned an empty body; refusing to admit on an unreadable gate."
             exit 1
           }
           echo "$RAW" | jq -s 'add // []' > pr-statuses.json 2>/dev/null || {
-            echo "::error::mq-review: kimi-critic-review status read for $HEAD_SHA returned unparsable JSON; refusing to admit on an unreadable gate."
+            echo "::error::mq-review: critic-review status read for $HEAD_SHA returned unparsable JSON; refusing to admit on an unreadable gate."
             exit 1
           }
           # Newest by created_at, never the newest by list order: the
@@ -120,9 +120,9 @@ jobs:
           # stable, so two statuses sharing a created_at second would keep
           # list order and could pick the older one; reverse first so the
           # tie resolves to the newest.
-          STATE=$(jq -r '[.[] | select(.context == "kimi-critic-review")] | reverse | sort_by(.created_at) | last | .state // "absent"' pr-statuses.json)
+          STATE=$(jq -r '[.[] | select(.context == "critic-review")] | reverse | sort_by(.created_at) | last | .state // "absent"' pr-statuses.json)
           if [ "$STATE" != "success" ]; then
-            echo "::error::mq-review: this PR has no kimi-critic-review success on $HEAD_SHA; post a kimi-critic-review success on this head and re-run this check."
+            echo "::error::mq-review: this PR has no critic-review success on $HEAD_SHA; post a critic-review success on this head and re-run this check."
             exit 1
           fi
           echo "::notice::mq-review: queue preparation deferred until this PR enters the merge queue."
@@ -165,7 +165,7 @@ jobs:
           echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
           echo "mq-review: group has $((IDX + 1)) member(s)."
 
-      - name: Require the newest kimi-critic-review status on every member
+      - name: Require the newest critic-review status on every member
         if: github.event_name == 'merge_group'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -188,14 +188,14 @@ jobs:
             # newest of a tie wins. This arm and the pull_request arm above
             # are ONE rule: change them together or a PR admits on a tie the
             # group then ejects on.
-            STATE=$(jq -r '[.[] | select(.context == "kimi-critic-review")] | reverse | sort_by(.created_at) | last | .state // "absent"' "statuses-$i.json")
+            STATE=$(jq -r '[.[] | select(.context == "critic-review")] | reverse | sort_by(.created_at) | last | .state // "absent"' "statuses-$i.json")
             if [ "$STATE" != "success" ]; then
-              echo "::error::mq-review: PR #$NUMBER ($SHA) newest kimi-critic-review state is '$STATE', not success."
+              echo "::error::mq-review: PR #$NUMBER ($SHA) newest critic-review state is '$STATE', not success."
               exit 1
             fi
             i=$((i + 1))
           done
-          echo "mq-review: kimi-critic-review is success on all $COUNT member(s)."
+          echo "mq-review: critic-review is success on all $COUNT member(s)."
 
       - name: Re-read the queue and require the same membership
         if: github.event_name == 'merge_group'
