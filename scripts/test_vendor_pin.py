@@ -81,8 +81,11 @@ def test_downstream_overlay_inventory_matches_current_vendor():
 
     assert set(overlays) == {
         "ports/fakes/fakeConverseRunner.ts",
+        "ports/fakes/fakeSessionStore.ts",
         "ports/impl/agentSdkRunner.ts",
         "ports/impl/converseSdkRunner.ts",
+        "ports/impl/pgSessionStore.ts",
+        "ports/impl/sessionStore.ts",
         "ports/impl/tenantChangeRepo.ts",
         "ports/index.ts",
     }

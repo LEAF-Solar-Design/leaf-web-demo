@@ -12,6 +12,7 @@ the caller's org yields HTTP 404, never 403 (a 403 would leak existence).
 from __future__ import annotations
 
 import hmac
+import logging
 import os
 import uuid
 from datetime import datetime
@@ -25,10 +26,11 @@ from . import (arlo_lab, arlo_review, billing, deps as platform_deps, entitlemen
 from .deps import (get_org_id, get_review_binding_id, get_write_binding_id, get_write_org_id,
                    require_auth_when_live)
 from .models import JOB_KINDS, TIERS
-from .mutation_fence import drawing_mutation_commit_guard
+from .mutation_fence import drawing_mutation_refusal_guard, fence_refusal_message
 from .offboard import OrgNotFound, PurgeHook, offboard_org
 
 router = APIRouter(prefix="/api", tags=["platform"])
+LOGGER = logging.getLogger(__name__)
 
 
 def upload_import_mutations_enabled() -> bool:
@@ -52,6 +54,10 @@ class CreateOrgBody(BaseModel):
 
 class CreateProjectBody(BaseModel):
     name: str = Field(min_length=1, max_length=200)
+
+
+class EnsureProjectRepositoryAuthorityBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 
 class RegisterArloExampleBody(BaseModel):
@@ -374,6 +380,64 @@ def get_project_lifecycle(
     ))
 
 
+def _project_repository_authority(
+    project_id: uuid.UUID, actor: _LifecycleActor, *, write: bool,
+):
+    try:
+        project_lifecycle.require_project_role(
+            actor.org_id, project_id, actor.binding_id, write=write,
+        )
+        project = store.get_project(actor.org_id, project_id)
+        if project is None or project.status != "active":
+            raise project_lifecycle.LifecycleUnavailable()
+    except project_lifecycle.LifecycleUnavailable:
+        raise HTTPException(status_code=404, detail="project resource not found") from None
+    except project_lifecycle.LifecycleForbidden:
+        raise HTTPException(status_code=403, detail="project access denied") from None
+    except Exception:
+        raise HTTPException(status_code=503, detail="repository authority unavailable") from None
+
+    try:
+        operation = (store.ensure_project_repository_authority if write
+                     else store.resolve_project_repository_authority)
+        authority = operation(actor.org_id, actor.org_id, project_id)
+        if authority is None and not write:
+            return None
+        fields = {"tenant_id", "organization_id", "project_id", "repo_key"}
+        if not isinstance(authority, dict) or set(authority) != fields:
+            raise ValueError()
+        for value in authority.values():
+            if not isinstance(value, str) or str(uuid.UUID(value)) != value:
+                raise ValueError()
+        if (authority["tenant_id"] != str(actor.org_id)
+                or authority["organization_id"] != str(actor.org_id)
+                or authority["project_id"] != str(project_id)):
+            raise ValueError()
+        return {"authority": authority}
+    except Exception:
+        raise HTTPException(status_code=503, detail="repository authority unavailable") from None
+
+
+@router.get("/projects/{project_id}/repository-authority")
+def get_project_repository_authority(
+    project_id: uuid.UUID,
+    actor: _LifecycleActor = Depends(_get_lifecycle_actor),
+):
+    result = _project_repository_authority(project_id, actor, write=False)
+    if result is None:
+        raise HTTPException(status_code=404, detail="project resource not found")
+    return result
+
+
+@router.post("/projects/{project_id}/repository-authority")
+def ensure_project_repository_authority(
+    project_id: uuid.UUID,
+    body: EnsureProjectRepositoryAuthorityBody,
+    actor: _LifecycleActor = Depends(_get_lifecycle_actor),
+):
+    return _project_repository_authority(project_id, actor, write=True)
+
+
 @router.post("/projects/{project_id}/members", status_code=201)
 def invite_project_member(
     project_id: uuid.UUID,
@@ -492,14 +556,14 @@ def import_drawing_version(
             status_code=503,
             detail="drawing upload/import mutations are temporarily disabled",
         )
-    with drawing_mutation_commit_guard() as commit_enabled:
-        if not commit_enabled:
+    # The typed fence guard yields the reason code from its one read, so the
+    # 503 names that fence state and the log line carries its code.
+    with drawing_mutation_refusal_guard() as refusal:
+        if refusal is not None:
+            LOGGER.warning("drawing_mutation_refused reason=%s surface=%s",
+                           refusal, "platform.import_drawing_version")
             raise HTTPException(
-                status_code=503,
-                detail=(
-                    "drawing mutations are temporarily disabled for a storage cutover"
-                ),
-            )
+                status_code=503, detail=fence_refusal_message(refusal))
         try:
             version, replayed = store.import_ready_account_upload(
                 org_id,

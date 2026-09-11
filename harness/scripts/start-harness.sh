@@ -30,4 +30,11 @@ fi
 # Replace the bootstrap shell so the long-running harness environment contains
 # file paths, never the raw PEM values delivered by ECS.
 cleanup_raw_credentials
+if [ "${LEAF_FORGE_ORIGIN_MAP_JSON+x}" = "x" ] || [ "${LEAF_FORGE_CREDENTIALS_JSON+x}" = "x" ]; then
+  node dist/scripts/forgeMaterialize.js
+  export LEAF_FORGE_ORIGIN_MAP="/app/run/forge/materialized/origins.json"
+  export LEAF_FORGE_CREDENTIAL_DIR="/app/run/forge/materialized/credentials"
+fi
+unset LEAF_FORGE_ORIGIN_MAP_JSON
+unset LEAF_FORGE_CREDENTIALS_JSON
 exec node dist/scripts/serve.js

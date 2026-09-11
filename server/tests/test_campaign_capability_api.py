@@ -52,7 +52,9 @@ def authority(monkeypatch):
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
+    monkeypatch.setattr(campaigns, '_NEXT_WORKER_CALLS', campaigns.OrderedDict())
+    monkeypatch.setattr(campaigns, '_BRIDGE_BUCKETS', campaigns.OrderedDict())
     app = FastAPI()
     app.include_router(campaigns.router)
     app.dependency_overrides[deps.require_tenant] = lambda: ORG

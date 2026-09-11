@@ -35,6 +35,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { ProjectRepositorySourceConflict, ProjectRepositorySourceUnavailable } from "../index.js";
 import { TenantChangeRepo } from "../../vendor/mushy-author/ports/impl/tenantChangeRepo.js";
+import type { ProjectForgeAuthority } from "./projectForgeAuthority.js";
+import type { ProjectRepositoryEditGit } from "../../agent/projectRepositoryEditCoordinator.js";
 import { HARNESS_IDENTITY } from "../../vendor/mushy-author/registry/registerTool.js";
 
 const PROJECT_AUTHORITY_KEYS = [
@@ -121,6 +123,7 @@ export class PgTenantRepoLeaseCoordinator extends VendoredPgTenantRepoLeaseCoord
 
 export interface TenantRepoProviderOptions extends VendoredTenantRepoProviderOptions {
   lease?: PgTenantRepoLeaseCoordinator | false;
+  projectRemoteAuthority?: ProjectForgeAuthority;
 }
 
 function configuredProjectLease(
@@ -162,6 +165,7 @@ export class TenantRepoProviderImpl
   private readonly projectAuthoringMode: "disabled" | "singleton" | "fleet";
   private readonly projectBareBase?: string;
   private readonly projectWorkBase?: string;
+  private readonly projectRemoteAuthority?: ProjectForgeAuthority;
 
   constructor(opts: TenantRepoProviderOptions) {
     const projectLease = configuredProjectLease(opts);
@@ -173,9 +177,10 @@ export class TenantRepoProviderImpl
     this.projectAuthoringMode = opts.authoringMode ?? resolveAuthoringMode();
     this.projectBareBase = opts.bareBase;
     this.projectWorkBase = opts.workBase;
+    this.projectRemoteAuthority = opts.projectRemoteAuthority;
   }
 
-  projectChangeRepo(authorityValue: ProjectRepositoryAuthority): TenantChangeRepo {
+  projectChangeRepo(authorityValue: ProjectRepositoryAuthority): TenantChangeRepo & ProjectRepositoryEditGit {
     const authority = requireProjectRepositoryAuthority(authorityValue);
     const repoDir = this.containedBareRepository(authority.repoKey);
     checkSourceContents(repoDir);
@@ -185,8 +190,9 @@ export class TenantRepoProviderImpl
     if (readFileSync(join(repoDir, ".leaf-source-owner.json"), "utf8") !== marker) {
       throw new ProjectRepositorySourceConflict("project source conflicts");
     }
-    return new TenantChangeRepo({ repoDir, identity: HARNESS_IDENTITY,
+    const repo = new TenantChangeRepo({ repoDir, identity: HARNESS_IDENTITY,
       ...(this.projectWorkBase ? { workBase: this.projectWorkBase } : {}) });
+    return Object.assign(repo, this.projectRemoteAuthority?.bind(authority, repoDir) ?? {});
   }
 
   async withProjectWriterLease<T>(

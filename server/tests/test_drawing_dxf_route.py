@@ -80,12 +80,15 @@ def _get(client, drawing=DRAWING, headers=None, **params):
     return client.get(f"/api/drawings/{drawing}/dxf", headers=headers or H, params=params)
 
 
-def _save_edited(client, data=EDITED_DXF):
+def _save_edited(client, data=EDITED_DXF, route="edited"):
     head = client.get(f"/api/drawings/{DRAWING}/versions", headers=H).json()["head"]
+    form = {"parent_version": str(head), "source_digest": hashlib.sha256(data).hexdigest()}
+    if route == "plan":
+        form["plan"] = json.dumps({"mutations": {}})
     resp = client.post(
-        f"/api/drawings/{DRAWING}/versions/edited", headers=H,
+        f"/api/drawings/{DRAWING}/versions/{route}", headers=H,
         files={"file": ("edited.dxf", io.BytesIO(data), "application/dxf")},
-        data={"parent_version": str(head), "source_digest": hashlib.sha256(data).hexdigest()},
+        data=form,
     )
     assert resp.status_code == 201, resp.text
     return resp.json()["head"]
@@ -121,6 +124,104 @@ def test_edited_version_serves_its_bound_sidecar_byte_for_byte(client):
     assert old.status_code == 200
     assert old.headers["x-leaf-dxf-source"] == "intake-synth"
     assert old.headers["x-leaf-head"] == str(new_v)
+
+
+@pytest.mark.parametrize("route", ["edited", "plan"])
+def test_saved_sidecar_proof_skips_parse(client, tmp_path, monkeypatch, route):
+    import dxf_intake
+    import store
+    import write_loop
+
+    new_v = _save_edited(client, route=route)
+    backend = _backend(tmp_path)
+    _, vkey = store.resolve_version(backend, TENANT, DRAWING, new_v)
+    proof = json.loads(backend.get(write_loop.edited_source_proof_key(TENANT, DRAWING, new_v)))
+    assert proof == {
+        "sidecar_sha256": hashlib.sha256(EDITED_DXF).hexdigest(),
+        "payload_sha256": hashlib.sha256(backend.get(vkey)).hexdigest(),
+    }
+
+    def unexpected_parse(*args, **kwargs):
+        pytest.fail("a saved proof must bind without parsing the sidecar")
+
+    # Frozen baseline: 424,391 bytes / 2,345 entities cost 44.0 ms to parse
+    # and canonicalize, versus 0.20 ms for the raw hash (223x). Pin the saved
+    # work, not a machine-dependent timing threshold: GET performs no parse.
+    monkeypatch.setattr(dxf_intake, "parse_dxf_bytes", unexpected_parse)
+    resp = _get(client)
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["x-leaf-dxf-source"] == "edited-sidecar"
+    assert resp.content == EDITED_DXF
+
+
+@pytest.mark.parametrize("failure", ["missing", "corrupt", "unreadable"])
+def test_unloadable_sidecar_proof_reparses(client, tmp_path, monkeypatch, failure):
+    import dxf_intake
+    import write_loop
+
+    new_v = _save_edited(client)
+    backend = _backend(tmp_path)
+    pkey = write_loop.edited_source_proof_key(TENANT, DRAWING, new_v)
+    original_get = type(backend).get
+
+    def get_with_unloadable_proof(self, key):
+        if key == pkey:
+            if failure == "missing":
+                raise FileNotFoundError(key)
+            if failure == "unreadable":
+                raise OSError("proof transport unavailable")
+            return b"{broken json"
+        return original_get(self, key)
+
+    calls = []
+    original_parse = dxf_intake.parse_dxf_bytes
+
+    def counted_parse(*args, **kwargs):
+        calls.append(args[0])
+        return original_parse(*args, **kwargs)
+
+    monkeypatch.setattr(type(backend), "get", get_with_unloadable_proof)
+    monkeypatch.setattr(dxf_intake, "parse_dxf_bytes", counted_parse)
+    resp = _get(client)
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["x-leaf-dxf-source"] == "edited-sidecar"
+    assert resp.content == EDITED_DXF
+    assert calls == [EDITED_DXF]
+
+
+@pytest.mark.parametrize("field", ["sidecar_sha256", "payload_sha256"])
+def test_loaded_disagreeing_proof_refuses_without_reparse(client, tmp_path, monkeypatch, field):
+    import dxf_intake
+    import write_loop
+
+    new_v = _save_edited(client)
+    backend = _backend(tmp_path)
+    pkey = write_loop.edited_source_proof_key(TENANT, DRAWING, new_v)
+    proof = json.loads(backend.get(pkey))
+    proof[field] = "0" * 64
+    backend.put(pkey, json.dumps(proof).encode("utf-8"))
+
+    def unexpected_parse(*args, **kwargs):
+        pytest.fail("a loaded mismatch must not fall back to re-parsing")
+
+    monkeypatch.setattr(dxf_intake, "parse_dxf_bytes", unexpected_parse)
+    resp = _get(client)
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["x-leaf-dxf-source"] == "intake-synth"
+    assert b"\n20\n30.0\n" in resp.content
+
+
+@pytest.mark.parametrize("width_covered", [False, True])
+def test_legacy_sidecar_binding_preserves_width_compatibility(width_covered):
+    import dxf_intake
+    import write_loop
+
+    payload = dxf_intake.parse_dxf_bytes(EDITED_DXF, source_name="edited.dxf")
+    payload.pop("polylineWidthCovered", None)
+    if width_covered:
+        payload["polylineWidthCovered"] = True
+    payload_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    assert write_loop._sidecar_bound(EDITED_DXF, payload, payload_bytes)
 
 
 def test_swapped_sidecar_is_never_served_the_payload_wins(client, tmp_path):

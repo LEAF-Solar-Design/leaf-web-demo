@@ -284,11 +284,11 @@ describe('App.jsx wiring', () => {
   }
 
   it('fails when a setter declaration is deleted from under its callers', () => {
-    // Falsification: the exact 4a mutation, replayed.
+    // Falsification: remove the state setter used by the author-panel wrapper.
     const mutated = appSource.replace(
-      /const \[authorOpen, setAuthorOpen\] = useState\(false\)/, '')
+      /const \[authorOpen, setAuthorOpenState\] = useState\(false\)/, '')
     assert.notEqual(mutated, appSource, 'the falsification mutation must apply')
-    assert.deepEqual(orphanSetters(mutated), ['setAuthorOpen'])
+    assert.deepEqual(orphanSetters(mutated), ['setAuthorOpenState'])
   })
 
   it('refuses a live legacy write when version bootstrap did not produce a pin', () => {

@@ -44,9 +44,7 @@ export default function useAuthorStageController({
   stageAuthorTool = defaultStageAuthorTool,
   // Optional turn-authority provider: async () => ({ sessionId, turnId } | null).
   // Called once per initial stage submission (never on a poll/reconnect, which
-  // sends no new POST). A null/thrown result proceeds WITHOUT authority headers
-  // -- the server still fail-closes on its own; this never invents a client-side
-  // refusal.
+  // sends no new POST). When supplied, it must resolve a real turn before POST.
   authorityProvider,
 } = {}) {
   const storageRef = useRef(storage)
@@ -100,16 +98,20 @@ export default function useAuthorStageController({
       let authority = null
       if (authorityProvider && !initial.poll_url) {
         try {
-          // `allowSecretOnce` MUST reach the mint too: an AuthorPanel "Send
-          // anyway" re-stages credential-shaped text with the override, and a
-          // provider that guards its own POST (the converse turn start does)
-          // would otherwise refuse the mint itself and swallow it into a
-          // silent no-authority fallback — the override never actually landed.
+          // The one-call credential override also applies to the turn start.
           authority = (await authorityProvider(initial.description, { allowSecretOnce })) || null
-        } catch {
-          authority = null
+          if (!authority?.sessionId || !authority?.turnId) {
+            throw new Error('Could not start authoring in this conversation. Wait for the current turn to finish, then try again.')
+          }
+        } catch (cause) {
+          // No stage POST has happened, so do not retain a pointer that would
+          // silently start another turn on reconnect. A new click may retry.
+          const failure = cause instanceof Error ? cause : new Error(String(cause))
+          failure.authorTerminal = true
+          throw failure
         }
       }
+      if (sequenceRef.current !== sequence || abortController.signal.aborted) return null
       const staged = await stageAuthorTool(
         mock,
         initial.description,

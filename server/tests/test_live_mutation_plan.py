@@ -12,6 +12,7 @@ import tool_loader
 import write_loop
 import store
 import mutation_apply  # after write_loop, which puts da/ on sys.path (the gate runs this file alone)
+from intake_parse import parse_text
 from mutation_plan import emit_plan, plan_sha256, validate_mutations, world_to_ocs
 
 
@@ -90,6 +91,12 @@ def _families_text(intake):
             f"PV|{point[0]:.3f},{point[1]:.3f}"
             for point in lowered["points"]
         )
+    if intake.get("polylineWidthCovered") is True:
+        lines.extend(
+            f"PW|{polyline['handle']}|1"
+            for polyline in intake.get("polylines", []) if polyline.get("width")
+        )
+        lines.append("PWC|1")
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
@@ -665,6 +672,405 @@ def test_live_effect_verification_accepts_extractor_coordinate_quantization():
     write_loop.verify_live_mutation_effects(
         base, actual, {"added": [added]},
     )
+
+
+def _full_precision_unchanged_polyline_case():
+    base = _base()
+    base["polylines"][1]["pts"] = [
+        [17419.35743637016, 3971.032266062823, -25.29583244775665],
+        [17421.35743637016, 3971.032266062823, -25.29583244775665],
+        [17421.35743637016, 3973.032266062823, -25.29583244775665],
+        [17419.35743637016, 3973.032266062823, -25.29583244775665],
+    ]
+    actual = _actual_success()
+    actual["polylines"][0]["pts"] = [
+        [17419.357, 3971.032, -25.296],
+        [17421.357, 3971.032, -25.296],
+        [17421.357, 3973.032, -25.296],
+        [17419.357, 3973.032, -25.296],
+    ]
+    canonical = validate_mutations(base, _mutations(), allow_transforms=False)
+    return base, actual, canonical
+
+
+def test_unchanged_polyline_matches_full_precision_base_at_extractor_quantum():
+    # (a) Unchanged B branch while A is removed and C added. On main this
+    # fails with "unchanged handle 'B' has unexpected output geometry".
+    base, actual, canonical = _full_precision_unchanged_polyline_case()
+    before = copy.deepcopy(base)
+
+    write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+    assert base == before
+
+
+def test_unchanged_polyline_refuses_drift_beyond_extractor_quantum():
+    # (b) Unchanged B branch must still refuse a 0.002 x drift.
+    base, actual, canonical = _full_precision_unchanged_polyline_case()
+    actual["polylines"][0]["pts"][0][0] += 0.002
+
+    with pytest.raises(
+            ValueError, match="^unchanged handle '.*' has unexpected output geometry$"):
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+@pytest.mark.parametrize("actual_x,accepted", [(10.063, True), (10.062, False)])
+def test_unchanged_polyline_decimal_tie_rounds_half_up(actual_x, accepted):
+    # (c) Unchanged B branch uses ROUND_HALF_UP at a decimal tie.
+    base, actual, canonical = _full_precision_unchanged_polyline_case()
+    base["polylines"][1]["pts"][0][0] = 10.0625
+    actual["polylines"][0]["pts"][0][0] = actual_x
+
+    if accepted:
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+    else:
+        with pytest.raises(
+                ValueError, match="^unchanged handle '.*' has unexpected output geometry$"):
+            write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+def test_unchanged_polyline_refuses_rewritten_normal():
+    # (a) Unchanged B while the plan touches other handles. On main a7c771cd
+    # the verifier passes this upload, so this refusal assertion fails.
+    base = _base()
+    actual = _actual_success()
+    canonical = validate_mutations(base, _mutations(), allow_transforms=False)
+    actual["polylines"][0]["normal"] = [0, 1, 0]
+
+    with pytest.raises(
+            ValueError, match="^unchanged handle '.*' has unexpected output geometry$"):
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+def test_unchanged_polyline_preserves_mirrored_normal():
+    # (b) Unchanged mirrored B keeps its -Z normal and identical points.
+    base = _base()
+    actual = _actual_success()
+    base["polylines"][1]["normal"] = [0, 0, -1]
+    actual["polylines"][0]["normal"] = [0, 0, -1]
+    canonical = validate_mutations(base, _mutations(), allow_transforms=False)
+    before = copy.deepcopy((base, actual, canonical))
+
+    write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+    assert (base, actual, canonical) == before
+
+
+@pytest.mark.parametrize("base_has_normal", [True, False], ids=["base-normal", "actual-normal"])
+def test_unchanged_polyline_accepts_normal_omission_boundary(base_has_normal):
+    # (a) The exact base-normal case fails at d5768f25; (b) its mirror passes
+    # under the same tolerance. The plan touches handles other than B.
+    base = _base()
+    actual = _actual_success()
+    points = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0],
+              [10.0, 10.0, 0.0], [0.0, 10.0, 0.0]]
+    base["polylines"][1]["pts"] = copy.deepcopy(points)
+    actual["polylines"][0]["pts"] = copy.deepcopy(points)
+    entity = base["polylines"][1] if base_has_normal else actual["polylines"][0]
+    entity["normal"] = [0.0000014, 0, 0.99999999999902]
+    canonical = validate_mutations(base, _mutations(), allow_transforms=False)
+    before = copy.deepcopy((base, actual, canonical))
+
+    write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+    assert (base, actual, canonical) == before
+
+
+@pytest.mark.parametrize("normal,accepted", [
+    ([0, 0, 1], True),
+    ([0, 0, 1.0000019], True),
+    ([0, 0, 1.0000025], False),
+])
+def test_unchanged_polyline_effective_normal_uses_absolute_tolerance(normal, accepted):
+    # (c) Unchanged B's missing normal means +Z; _NORMAL_TOLERANCE is 2e-6.
+    base = _base()
+    actual = _actual_success()
+    canonical = validate_mutations(base, _mutations(), allow_transforms=False)
+    actual["polylines"][0]["normal"] = normal
+
+    if accepted:
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+    else:
+        with pytest.raises(
+                ValueError, match="^unchanged handle '.*' has unexpected output geometry$"):
+            write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+def test_unchanged_polyline_refuses_missing_mirrored_normal():
+    # (d) Unchanged mirrored B cannot silently become implicit +Z.
+    base = _base()
+    actual = _actual_success()
+    base["polylines"][1]["normal"] = [0, 0, -1]
+    canonical = validate_mutations(base, _mutations(), allow_transforms=False)
+
+    with pytest.raises(
+            ValueError, match="^unchanged handle '.*' has unexpected output geometry$"):
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+@pytest.mark.parametrize("normal", [[0, 1], "0,0,1"])
+def test_unchanged_polyline_refuses_malformed_normal(normal):
+    # (e) Unchanged B's malformed actual normal uses the geometry refusal.
+    base = _base()
+    actual = _actual_success()
+    canonical = validate_mutations(base, _mutations(), allow_transforms=False)
+    actual["polylines"][0]["normal"] = normal
+
+    with pytest.raises(
+            ValueError, match="^unchanged handle '.*' has unexpected output geometry$"):
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+# w4g-polyline-bulge-parity: the mutation verifier's polyline matcher must
+# compare an unchanged polyline's bulges exactly (a bulge is a tangent, not a
+# coordinate) alongside its already-established normal tolerance (2e-6).
+def _curved_polyline(handle="B", bulges=None):
+    return {
+        "handle": handle, "layer": "Panels", "closed": False, "xdata": None,
+        "pts": [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [2.0, 2.0, 0.0]],
+        "bulges": [1.0, 0.0, 0.0] if bulges is None else bulges,
+    }
+
+
+def _reflected_polyline(handle="B"):
+    return {
+        "handle": handle, "layer": "Panels", "closed": False, "xdata": None,
+        "pts": [[0.0, 0.0, -3.0], [-2.0, 0.0, -3.0]],
+        "bulges": [-1.0, 0.0], "normal": [0.0, 0.0, -1.0],
+    }
+
+
+def _curved_polyline_case():
+    base = _base()
+    base["polylines"][1] = _curved_polyline("B")
+    actual = _actual_success()
+    actual["polylines"][0] = copy.deepcopy(_curved_polyline("B"))
+    canonical = validate_mutations(base, _mutations(), allow_transforms=False)
+    return base, actual, canonical
+
+
+def test_unchanged_curved_polyline_matches_bulges_exactly():
+    # (a) A plan that touches other handles leaves the curved B unchanged.
+    base, actual, canonical = _curved_polyline_case()
+    before = copy.deepcopy((base, actual, canonical))
+
+    write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+    assert (base, actual, canonical) == before
+
+
+def test_unchanged_curved_polyline_refuses_flattened_bulges():
+    # (b) The saved side drops the curve's bulges: refuse, naming the handle.
+    base, actual, canonical = _curved_polyline_case()
+    del actual["polylines"][0]["bulges"]
+
+    with pytest.raises(
+            ValueError, match="^unchanged handle '.*' has unexpected output geometry$"):
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+def test_unchanged_curved_polyline_refuses_changed_bulge():
+    # (c) Bulge 1 becomes 0.5 with identical points: refuse.
+    base, actual, canonical = _curved_polyline_case()
+    actual["polylines"][0]["bulges"][0] = 0.5
+
+    with pytest.raises(
+            ValueError, match="^unchanged handle '.*' has unexpected output geometry$"):
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+def _reflected_polyline_case():
+    base = _base()
+    base["polylines"][1] = _reflected_polyline("B")
+    actual = _actual_success()
+    actual["polylines"][0] = copy.deepcopy(_reflected_polyline("B"))
+    canonical = validate_mutations(base, _mutations(), allow_transforms=False)
+    return base, actual, canonical
+
+
+def test_unchanged_reflected_polyline_round_trips():
+    # (d) The reflected B (nrm (0,0,-1), stored bulges [-1,0]) is unchanged.
+    base, actual, canonical = _reflected_polyline_case()
+    before = copy.deepcopy((base, actual, canonical))
+
+    write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+    assert (base, actual, canonical) == before
+
+
+def test_unchanged_reflected_polyline_refuses_flipped_normal():
+    # (d) A saved side whose normal flipped to +Z refuses.
+    base, actual, canonical = _reflected_polyline_case()
+    actual["polylines"][0]["normal"] = [0.0, 0.0, 1.0]
+
+    with pytest.raises(
+            ValueError, match="^unchanged handle '.*' has unexpected output geometry$"):
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+def test_set_points_with_changed_vertex_count_drops_bulges_and_width():
+    # A vertex-count change rebuilds without positional bulges or taper.
+    # The unchanged A must also appear in `actual`, or the re-extracted
+    # count check fails before the bulge comparison is ever reached.
+    base = _base()
+    base["polylines"][1] = _curved_polyline("B")
+    base["polylines"][1]["width"] = True
+    mutations = {"set_points": [
+        {"handle": "B", "pts": [[0.0, 0.0, 3.0], [5.0, 0.0, 3.0]]}]}
+    canonical = validate_mutations(base, mutations, allow_transforms=False)
+    actual = {
+        "dwg": "temp-output.dwg", "layers": ["Panels"],
+        "polylines": [
+            copy.deepcopy(base["polylines"][0]),
+            {
+                "handle": "B", "layer": "Panels", "closed": False, "xdata": None,
+                "pts": [[0.0, 0.0, 3.0], [5.0, 0.0, 3.0]],
+            },
+        ],
+    }
+
+    write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+    output = write_loop.apply_mutations(base, mutations)
+    assert "bulges" not in output["polylines"][1]
+    assert "width" not in output["polylines"][1]
+
+
+def test_set_points_with_same_vertex_count_preserves_positional_bulges():
+    base = _base()
+    base["polylines"][1] = _curved_polyline("B", bulges=[0.5, -1.0, 0.25])
+    base["polylines"][1]["width"] = True
+    before = copy.deepcopy(base)
+    points = [[0.0, 0.0, 3.0], [5.0, 0.0, 3.0], [5.0, 5.0, 3.0]]
+    output = write_loop.apply_mutations(base, {"set_points": [
+        {"handle": "B", "pts": points, "closed": True}]})
+
+    assert output["polylines"][1]["pts"] == points
+    assert output["polylines"][1]["closed"] is True
+    assert output["polylines"][1]["bulges"] == [0.5, -1.0, 0.25]
+    assert output["polylines"][1]["width"] is True
+    assert base == before
+
+
+@pytest.mark.parametrize("evidence,covered,widthed", [
+    ("PW|b|1\nPWC|1\n", True, True),
+    ("PWC|1\n", True, False),
+    ("", False, False),
+    ("PW|B|1\n", False, False),
+    ("MEC|1\n", False, False),
+])
+def test_inspection_polyline_width_merges_by_handle_with_coverage(evidence, covered, widthed):
+    rows = _families_text(_base()).decode("utf-8")
+    intake = parse_text(rows + evidence, "drawing")
+    assert not intake.get("parseErrors"), intake.get("parseErrors")
+    if covered:
+        assert intake["polylineWidthCovered"] is True
+    else:
+        assert "polylineWidthCovered" not in intake
+    by_handle = {p["handle"]: p for p in intake["polylines"]}
+    assert set(by_handle) == {"A", "B"}
+    assert "width" not in by_handle["A"]
+    assert by_handle["B"].get("width", False) is widthed
+    assert by_handle["B"]["pts"] == _base()["polylines"][1]["pts"]
+
+
+@pytest.mark.parametrize("evidence", ["PW|B|0\n", "PW|Z|1\n", "PWC|0\n"])
+def test_inspection_rejects_malformed_polyline_width_evidence(evidence):
+    intake = parse_text(_families_text(_base()).decode("utf-8") + evidence, "drawing")
+    assert intake.get("parseErrors")
+    assert "polylineWidthCovered" not in intake
+
+
+@pytest.mark.parametrize("base_covered,actual_covered", [
+    (True, True), (True, False), (False, True), (False, False),
+])
+@pytest.mark.parametrize("base_widthed,actual_widthed", [
+    (True, False), (False, True), (True, True), (False, False),
+])
+def test_unchanged_polyline_width_comparison_requires_both_producers(
+        base_covered, actual_covered, base_widthed, actual_widthed):
+    base = _base()
+    actual = _actual_success()
+    if base_covered:
+        base["polylineWidthCovered"] = True
+    if actual_covered:
+        actual["polylineWidthCovered"] = True
+    if base_widthed:
+        base["polylines"][1]["width"] = True
+    if actual_widthed:
+        actual["polylines"][0]["width"] = True
+    canonical = validate_mutations(base, _mutations(), allow_transforms=False)
+    before = copy.deepcopy((base, actual, canonical))
+    if base_covered and actual_covered and base_widthed != actual_widthed:
+        with pytest.raises(
+                ValueError, match="^unchanged handle 'B' has unexpected output geometry$"):
+            write_loop.verify_live_mutation_effects(base, actual, canonical)
+    else:
+        assert write_loop.verify_live_mutation_effects(base, actual, canonical) is None
+    assert (base, actual, canonical) == before
+
+
+@pytest.mark.parametrize("actual_covered", [True, False])
+def test_added_polyline_width_uses_output_coverage_even_with_a_legacy_base(actual_covered):
+    base = _base()
+    actual = _actual_success()
+    actual["polylines"][1]["width"] = True
+    if actual_covered:
+        actual["polylineWidthCovered"] = True
+    canonical = validate_mutations(base, _mutations(), allow_transforms=False)
+    if actual_covered:
+        with pytest.raises(ValueError, match="^added polyline 'C' is missing from output$"):
+            write_loop.verify_live_mutation_effects(base, actual, canonical)
+    else:
+        assert write_loop.verify_live_mutation_effects(base, actual, canonical) is None
+
+
+@pytest.mark.parametrize("preserved", [True, False], ids=["preserved", "flattened"])
+def test_live_polyline_width_survives_inspection_and_cache_publication(tmp_path, preserved):
+    backend = store.FilesystemBackend(str(tmp_path / "drawings"))
+    drawing_id = "width-preserved" if preserved else "width-flattened"
+    source = tmp_path / "base.dwg"
+    source.write_bytes(b"AC1032" + b"\x00" * 64)
+    store.ingest_drawing(backend, "tenant", str(source), drawing_id=drawing_id)
+    base = _base()
+    base["polylineWidthCovered"] = True
+    base["polylines"][1]["width"] = True
+    _, vkey = store.resolve_version(backend, "tenant", drawing_id, 1)
+    write_loop.publish_intake_cache(
+        backend, "tenant", drawing_id, 1, backend.get(vkey), base)
+    actual = _actual_success()
+    actual["polylines"][1]["handle"] = "A17"
+    actual["polylineWidthCovered"] = True
+    if preserved:
+        actual["polylines"][0]["width"] = True
+    planner, _ = _planner()
+    da = FakeDa(actual)
+    env, status = write_loop.run_write_live(
+        {"name": "author-tool", "version": "1"},
+        {"drawing_id": drawing_id}, "tenant", backend=backend, da=da,
+        t0=time.perf_counter(), run_tool_dynamic_fn=planner,
+    )
+    assert len(da.submissions) == 1
+    if preserved:
+        assert status == 200, env
+        _, cached = write_loop.read_intake(backend, "tenant", drawing_id, 2)
+        assert cached["polylineWidthCovered"] is True
+        by_handle = {p["handle"]: p for p in cached["polylines"]}
+        assert by_handle["B"]["width"] is True
+        assert "width" not in by_handle["A17"]
+        # The next save must retain coverage when this live output is its base.
+        flattened = copy.deepcopy(cached)
+        next_plan = validate_mutations(cached, {"removed": ["A17"]})
+        flattened["polylines"] = [p for p in flattened["polylines"] if p["handle"] != "A17"]
+        next(p for p in flattened["polylines"] if p["handle"] == "B").pop("width")
+        with pytest.raises(
+                ValueError, match="^unchanged handle 'B' has unexpected output geometry$"):
+            write_loop.verify_live_mutation_effects(cached, flattened, next_plan)
+    else:
+        assert status == 502, env
+        assert env["error"]["error_code"] == "WORKITEM_FAILED"
+        assert "unchanged handle 'B'" in env["error"]["message"]
+        assert store.load_manifest(backend, "tenant", drawing_id)["head"] == 1
 
 
 def test_live_effect_verification_rejects_change_beyond_extractor_precision():
@@ -1388,3 +1794,145 @@ def test_data_plan_refuses_to_publish_on_an_unverified_property_note(monkeypatch
     assert "property effects unverified" in env["error"]["message"]
     assert len(da.submissions) == 1
     assert store.load_manifest(backend, "tenant", "drawing")["head"] == 1
+
+
+# w4g-verify-normals: the mutation verifier's CIRCLE/ARC/DIMENSION matchers,
+# and the polyline matcher's added/replaced path, must compare an entity's
+# extrusion normal at the same 2e-6 absolute tolerance already established
+# for an unchanged polyline (_NORMAL_TOLERANCE). CIRCLE/ARC/DIMENSION carry
+# it under the key `nrm`, not `normal`.
+def _circle(handle, layer="Panels", c=(5.0, 5.0, 0.0), r=2.0, nrm=(0.0, 0.0, 1.0)):
+    return {"handle": handle, "layer": layer, "c": list(c), "r": r, "nrm": list(nrm)}
+
+
+def _arc(handle, layer="Panels", c=(5.0, 5.0, 0.0), r=2.0,
+         start_deg=0.0, end_deg=90.0, nrm=(0.0, 0.0, 1.0)):
+    return {"handle": handle, "layer": layer, "c": list(c), "r": r,
+            "start_deg": start_deg, "end_deg": end_deg, "nrm": list(nrm)}
+
+
+def _dimension(handle, layer="Panels", p1=(0.0, 0.0, 0.0), p2=(3.0, 4.0, 0.0),
+               dimline=(1.5, 6.0, 0.0), rotation_deg=0.0, style="Standard",
+               nrm=(0.0, 0.0, 1.0), measurement=5.0):
+    return {"type": "LINEAR", "layer": layer, "p1": list(p1), "p2": list(p2),
+            "dimline": list(dimline), "rotation_deg": rotation_deg, "style": style,
+            "nrm": list(nrm), "measurement": measurement, "handle": handle}
+
+
+def _circle_case(nrm=(0.0, 0.0, 1.0)):
+    base = _base()
+    base["circles"] = [_circle("E", nrm=nrm)]
+    actual = _actual_success()
+    actual["circles"] = [copy.deepcopy(_circle("E", nrm=nrm))]
+    canonical = validate_mutations(base, _mutations(), allow_transforms=False)
+    return base, actual, canonical
+
+
+def test_unchanged_circle_refuses_rewritten_normal():
+    # On main this passes the upload; the CIRCLE matcher never reads `nrm`.
+    base, actual, canonical = _circle_case()
+    actual["circles"][0]["nrm"] = [0, 1, 0]
+
+    with pytest.raises(
+            ValueError, match="^unchanged handle '.*' has unexpected output geometry$"):
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+@pytest.mark.parametrize("nrm,accepted", [
+    ([0, 0, 1], True),
+    ([0, 0, 1.0000019], True),
+    ([0, 0, 1.0000025], False),
+])
+def test_unchanged_circle_effective_normal_uses_absolute_tolerance(nrm, accepted):
+    # Same boundary as the polyline rule: _NORMAL_TOLERANCE is 2e-6.
+    base, actual, canonical = _circle_case()
+    actual["circles"][0]["nrm"] = nrm
+
+    if accepted:
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+    else:
+        with pytest.raises(
+                ValueError, match="^unchanged handle '.*' has unexpected output geometry$"):
+            write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+def test_unchanged_arc_refuses_rewritten_normal():
+    # On main this passes the upload; the ARC matcher never reads `nrm`.
+    base = _base()
+    base["arcs"] = [_arc("F")]
+    actual = _actual_success()
+    actual["arcs"] = [_arc("F")]
+    canonical = validate_mutations(base, _mutations(), allow_transforms=False)
+    actual["arcs"][0]["nrm"] = [0, 1, 0]
+
+    with pytest.raises(
+            ValueError, match="^unchanged handle '.*' has unexpected output geometry$"):
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+def test_unchanged_dimension_refuses_rewritten_normal():
+    # On main this passes the upload; the DIMENSION matcher never reads `nrm`.
+    base = _base()
+    base["dimensions"] = [_dimension("G")]
+    actual = _actual_success()
+    actual["dimensions"] = [_dimension("G")]
+    canonical = validate_mutations(base, _mutations(), allow_transforms=False)
+    actual["dimensions"][0]["nrm"] = [0, 1, 0]
+
+    with pytest.raises(
+            ValueError, match="^unchanged handle '.*' has unexpected output geometry$"):
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+def test_added_circle_refuses_a_tilted_normal():
+    # On main this passes the upload; an added CIRCLE's `nrm` is never
+    # compared against the plan's implicit +Z.
+    base = _base()
+    mutations = {"added": [
+        {"handle": "n1", "kind": "CIRCLE", "layer": "Leaf Output", "c": [10, 10, 0], "r": 2}]}
+    canonical = validate_mutations(base, mutations, allow_transforms=False)
+    actual = {
+        "dwg": "temp-output.dwg", "layers": ["Panels", "Leaf Output"],
+        "polylines": [_entity("A"), _entity("B", z=3.0)],
+        "circles": [{"handle": "APS1", "layer": "Leaf Output", "c": [10.0, 10.0, 0.0],
+                     "r": 2.0, "nrm": [0.0, 1.0, 0.0]}],
+    }
+
+    with pytest.raises(ValueError, match="^added CIRCLE 'n1' is missing from output$"):
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+def test_added_polyline_refuses_a_tilted_normal():
+    # On main this passes the upload; an added LWPOLYLINE's `normal` is never
+    # compared against the plan's implicit +Z (_polyline_effect_matches
+    # never reads it).
+    base = _base()
+    actual = _actual_success()
+    canonical = validate_mutations(base, _mutations(), allow_transforms=False)
+    actual["polylines"][1]["normal"] = [0, 1, 0]
+
+    with pytest.raises(ValueError, match="^added polyline 'C' is missing from output$"):
+        write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+def test_replaced_polyline_via_set_points_refuses_a_tilted_normal():
+    # On main this passes the upload; a set_points replacement's `normal` is
+    # never compared (_polyline_effect_matches never reads it).
+    base = _base()
+    mutations = {"set_points": [
+        {"handle": "B", "pts": [[0.0, 0.0, 3.0], [5.0, 0.0, 3.0], [5.0, 5.0, 3.0]],
+         "closed": False}]}
+    canonical = validate_mutations(base, mutations, allow_transforms=False)
+    actual = {
+        "dwg": "temp-output.dwg", "layers": ["Panels"],
+        "polylines": [
+            _entity("A"),
+            {"handle": "B", "layer": "Panels", "closed": False, "xdata": None,
+             "pts": [[0.0, 0.0, 3.0], [5.0, 0.0, 3.0], [5.0, 5.0, 3.0]],
+             "normal": [0.0, 1.0, 0.0]},
+        ],
+    }
+
+    with pytest.raises(
+            ValueError, match="^replaced handle 'B' has unexpected output geometry$"):
+        write_loop.verify_live_mutation_effects(base, actual, canonical)

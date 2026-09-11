@@ -11,7 +11,9 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import logging
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -105,6 +107,85 @@ def test_unconfigured_fence_leaves_the_env_default_in_charge(monkeypatch):
     assert write_loop.drawing_mutations_enabled() is False
 
 
+@pytest.mark.parametrize(
+    "env, contents, expected",
+    [
+        # The staging case that cost a four-log-group investigation: the env
+        # flag was the refusing precondition and the 503 blamed a cutover.
+        ("0", "1\n", write_loop.MUTATION_REFUSED_ENV_DISABLED),
+        ("0", "0\n", write_loop.MUTATION_REFUSED_ENV_DISABLED),
+        ("1", "0\n", write_loop.MUTATION_REFUSED_FENCE_CLOSED),
+        ("1", "banana", write_loop.MUTATION_REFUSED_FENCE_CLOSED),
+        ("1", "", write_loop.MUTATION_REFUSED_FENCE_CLOSED),
+        ("1", "1\n", None),
+    ],
+)
+def test_refusal_names_the_precondition_that_actually_refused(
+    monkeypatch, tmp_path, env, contents, expected,
+):
+    """The env flag and the fence are distinguishable, and the env flag wins the
+    attribution when both are shut -- it is checked first, so a deployment drain
+    is never reported as a storage cutover."""
+    fence = tmp_path / "drawing-mutations"
+    fence.write_text(contents, encoding="utf-8")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", env)
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", str(fence))
+
+    assert write_loop.drawing_mutations_refusal() == expected
+    # The boolean gate is a PROJECTION of the typed one, so the two can never
+    # disagree about admission -- only about how much they can say.
+    assert write_loop.drawing_mutations_enabled() is (expected is None)
+
+
+def test_an_unreadable_fence_is_distinguishable_from_a_drained_one(
+    monkeypatch, tmp_path,
+):
+    """Both fail CLOSED, but "the file says 0" and "I could not read the file"
+    are different operator actions, so they get different reason codes."""
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    monkeypatch.setenv(
+        "LEAF_DRAWING_MUTATIONS_FENCE_FILE", str(tmp_path / "never-written"))
+
+    assert (write_loop.fence_refusal()
+            == write_loop.MUTATION_REFUSED_FENCE_UNREADABLE)
+    assert write_loop.fence_open() is False
+    assert write_loop.drawing_mutations_enabled() is False
+
+
+def test_unconfigured_fence_refuses_nothing_on_its_own(monkeypatch):
+    monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", raising=False)
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    assert write_loop.fence_refusal() is None
+    assert write_loop.drawing_mutations_refusal() is None
+
+
+def test_every_reason_code_has_a_public_message():
+    """A missing message must never turn an observability path into a 500, so
+    the lookup is total and an unknown code degrades to the generic refusal."""
+    for reason, message in write_loop.MUTATION_REFUSAL_MESSAGES.items():
+        assert write_loop.mutation_refusal_message(reason) == message
+        assert message  # no empty refusal ever reaches a caller
+    generic = write_loop.MUTATION_REFUSAL_MESSAGES[
+        write_loop.MUTATION_REFUSED_UNATTRIBUTED]
+    assert write_loop.mutation_refusal_message(None) == generic
+    assert write_loop.mutation_refusal_message("not-a-reason-code") == generic
+
+
+def test_reason_codes_carry_no_identifier_or_path(monkeypatch, tmp_path):
+    """The codes and their messages are the part that reaches a log line, so
+    they name CONFIGURATION only -- never a tenant, drawing, or fence path."""
+    fence = tmp_path / "secret-tenant-path" / "drawing-mutations"
+    fence.parent.mkdir(parents=True)
+    fence.write_text("0\n", encoding="utf-8")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", str(fence))
+
+    reason = write_loop.drawing_mutations_refusal()
+    assert reason == write_loop.MUTATION_REFUSED_FENCE_CLOSED
+    assert "secret-tenant-path" not in reason
+    assert "secret-tenant-path" not in write_loop.mutation_refusal_message(reason)
+
+
 def test_env_drain_beats_an_open_fence(monkeypatch, tmp_path):
     """The two gates are AND, not OR: an open fence cannot re-enable a drained
     deployment flag."""
@@ -141,6 +222,268 @@ def test_both_guards_close_on_a_drained_fence(monkeypatch, tmp_path):
 
     assert write_loop.fence_open() is False
     assert write_loop.drawing_mutations_enabled() is False
+
+
+def _refusal_lines(caplog):
+    """Every app-side fence refusal shares one log event name."""
+    return [record.getMessage() for record in caplog.records
+            if record.getMessage().startswith("drawing_mutation_refused")]
+
+
+def _one_version_backend(tenant, drawing):
+    import store
+
+    backend = store.InMemoryBackend()
+    payload = json.dumps({"layers": [], "polylines": []}).encode()
+    backend.put(store.drawing_version_key(tenant, drawing, 1), payload)
+    backend.put(
+        store.manifest_key(tenant, drawing),
+        json.dumps({
+            "schema": 1, "tenant_id": tenant, "drawing_id": drawing,
+            "head": 1, "latest": 1,
+            "versions": [{
+                "v": 1, "parent": None, "created": "now",
+                "bytes": len(payload), "sha256": "source",
+                "workitem_id": None, "tool": None, "note": None,
+            }],
+            "checkout": None,
+        }).encode(),
+    )
+    return backend
+
+
+def test_upload_typed_guard_never_reports_the_authored_env_flag(
+    monkeypatch, tmp_path,
+):
+    """Lane scoping, typed. An authored drain refuses the authored guard BY
+    NAME and leaves the upload guard open; a shut fence refuses the upload
+    lane as the fence, never as LEAF_DRAWING_MUTATIONS_ENABLED."""
+    monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", raising=False)
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+
+    with write_loop.drawing_mutation_refusal_guard() as authored:
+        assert authored == write_loop.MUTATION_REFUSED_ENV_DISABLED
+    with write_loop.upload_mutation_refusal_guard() as upload:
+        assert upload is None
+
+    fence = tmp_path / "drawing-mutations"
+    fence.write_text("0\n", encoding="utf-8")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", str(fence))
+    assert write_loop.fence_refusal() == write_loop.MUTATION_REFUSED_FENCE_CLOSED
+
+
+@pytest.mark.parametrize(
+    "env, fence_reason",
+    [
+        ("1", None),
+        ("0", None),
+        ("1", write_loop.MUTATION_REFUSED_FENCE_CLOSED),
+        ("0", write_loop.MUTATION_REFUSED_FENCE_UNREADABLE),
+    ],
+)
+def test_boolean_guards_are_projections_of_the_typed_guards(
+    monkeypatch, env, fence_reason,
+):
+    """Admission is decided once, by the typed guard, so the boolean guard can
+    never admit what the typed guard refused, or refuse what it admitted."""
+    monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", raising=False)
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", env)
+    monkeypatch.setattr(write_loop, "fence_refusal", lambda: fence_reason)
+
+    for typed, boolean in (
+        (write_loop.drawing_mutation_refusal_guard,
+         write_loop.drawing_mutation_commit_guard),
+        (write_loop.upload_mutation_refusal_guard,
+         write_loop.upload_mutation_commit_guard),
+    ):
+        with typed() as refusal:
+            pass
+        with boolean() as admitted:
+            pass
+        assert admitted is (refusal is None)
+
+
+@pytest.mark.parametrize(
+    "typed_name, boolean_name",
+    [
+        ("drawing_mutation_refusal_guard", "drawing_mutation_commit_guard"),
+        ("upload_mutation_refusal_guard", "upload_mutation_commit_guard"),
+    ],
+)
+def test_a_missing_flock_is_named_and_still_fails_closed(
+    monkeypatch, tmp_path, typed_name, boolean_name,
+):
+    """No fcntl refuses on both lanes' guards, and the typed guard says so
+    instead of looking like a drained fence. Simulated, so it runs anywhere."""
+    fence = tmp_path / "drawing-mutations"
+    fence.write_text("1\n", encoding="utf-8")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", str(fence))
+    monkeypatch.setitem(sys.modules, "fcntl", None)  # `import fcntl` raises
+
+    with getattr(write_loop, typed_name)() as refusal:
+        assert refusal == write_loop.MUTATION_REFUSED_LOCK_UNAVAILABLE
+    with getattr(write_loop, boolean_name)() as admitted:
+        assert admitted is False
+
+
+def test_undo_refusal_raises_the_named_precondition_and_logs_it(
+    monkeypatch, caplog,
+):
+    import store
+
+    tenant, drawing = "tenant-secret-a", "drawing-secret-a"
+    backend = _one_version_backend(tenant, drawing)
+    monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", raising=False)
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+
+    with caplog.at_level(logging.WARNING, logger=write_loop.LOGGER.name):
+        with pytest.raises(ValueError) as refused:
+            write_loop.undo_view(tenant, drawing, backend=backend)
+
+    reason = write_loop.MUTATION_REFUSED_ENV_DISABLED
+    assert str(refused.value) == write_loop.mutation_refusal_message(reason)
+    assert "storage cutover" not in str(refused.value)
+    lines = _refusal_lines(caplog)
+    assert lines == [
+        f"drawing_mutation_refused reason={reason} surface=write_loop.undo"]
+    assert tenant not in lines[0] and drawing not in lines[0]
+    assert store.load_manifest(backend, tenant, drawing)["head"] == 1
+
+
+def test_mock_write_commit_refusal_carries_its_reason(monkeypatch, caplog):
+    tenant, drawing = "tenant-a", "drawing-a"
+    backend = _one_version_backend(tenant, drawing)
+    monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", raising=False)
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    reason = write_loop.MUTATION_REFUSED_FENCE_UNREADABLE
+    monkeypatch.setattr(write_loop, "fence_refusal", lambda: reason)
+
+    with caplog.at_level(logging.WARNING, logger=write_loop.LOGGER.name):
+        env, status = write_loop.run_write_mock(
+            {"name": "writer", "version": "1.0.0"},
+            {"drawing_id": drawing},
+            tenant,
+            backend=backend,
+            t0=0.0,
+            run_tool_dynamic_fn=lambda *_args, **_kwargs: {
+                "ok": True,
+                "result": {"mutations": {"added": [], "removed": []}},
+            },
+        )
+
+    assert status == 503
+    assert env["error"]["error_code"] == "APS_UNAVAILABLE"
+    assert env["error"]["retryable"] is True
+    assert env["error"]["reason_code"] == reason
+    assert env["error"]["message"] == write_loop.mutation_refusal_message(reason)
+    assert _refusal_lines(caplog) == [
+        f"drawing_mutation_refused reason={reason} "
+        "surface=write_loop.mock_write_commit"]
+
+
+def test_extraction_start_refusal_names_the_fence_and_no_identifier(
+    monkeypatch, caplog,
+):
+    # The authored drain is ON and must not be what this lane reports.
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+    reason = write_loop.MUTATION_REFUSED_FENCE_UNREADABLE
+    monkeypatch.setattr(
+        write_loop, "upload_backend_for_tenant", lambda _tenant: object())
+    monkeypatch.setattr(write_loop, "fence_refusal", lambda: reason)
+    monkeypatch.setattr(
+        guest_uploads, "upload_store_mode",
+        lambda: pytest.fail("extraction ran past a refused fence"))
+
+    with caplog.at_level(logging.WARNING, logger=guest_uploads.LOGGER.name):
+        assert guest_uploads._run_extraction(
+            "tenant-secret-a", "drawing-secret-a", ".dxf") is None
+
+    lines = _refusal_lines(caplog)
+    assert lines == [
+        f"drawing_mutation_refused reason={reason} "
+        "surface=guest_uploads.extraction_start"]
+    assert "tenant-secret-a" not in lines[0]
+    assert "drawing-secret-a" not in lines[0]
+
+
+def _platform_fence_module():
+    """platform/mutation_fence.py loaded by path: it has no package-relative
+    imports, so this needs neither the leaf_platform alias nor a database."""
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[2] / "platform" / "mutation_fence.py"
+    spec = importlib.util.spec_from_file_location(
+        "_platform_mutation_fence_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_platform_fence_speaks_the_server_reason_codes():
+    """The platform keeps its own fence copy. Its codes and messages are the
+    server's strings, so one grep finds a refusal in either service."""
+    fence = _platform_fence_module()
+    pairs = {
+        fence.FENCE_REFUSED_CLOSED: write_loop.MUTATION_REFUSED_FENCE_CLOSED,
+        fence.FENCE_REFUSED_UNREADABLE: write_loop.MUTATION_REFUSED_FENCE_UNREADABLE,
+        fence.FENCE_REFUSED_LOCK_UNAVAILABLE:
+            write_loop.MUTATION_REFUSED_LOCK_UNAVAILABLE,
+        fence.FENCE_REFUSED_UNATTRIBUTED: write_loop.MUTATION_REFUSED_UNATTRIBUTED,
+    }
+    for platform_code, server_code in pairs.items():
+        assert platform_code == server_code
+        assert (fence.fence_refusal_message(platform_code)
+                == write_loop.mutation_refusal_message(server_code))
+    assert set(fence.FENCE_REFUSAL_MESSAGES) == set(pairs)
+    assert (fence.fence_refusal_message("not-a-reason-code")
+            == write_loop.mutation_refusal_message(None))
+
+
+@pytest.mark.parametrize(
+    "contents, expected",
+    [
+        ("1\n", None),
+        ("0\n", write_loop.MUTATION_REFUSED_FENCE_CLOSED),
+        ("banana", write_loop.MUTATION_REFUSED_FENCE_CLOSED),
+        (None, write_loop.MUTATION_REFUSED_FENCE_UNREADABLE),
+    ],
+)
+def test_platform_fence_classifies_like_the_server(
+    monkeypatch, tmp_path, contents, expected,
+):
+    fence = _platform_fence_module()
+    path = tmp_path / "drawing-mutations"
+    if contents is not None:
+        path.write_text(contents, encoding="utf-8")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", str(path))
+    # The import lane never reads the authored lane's flag.
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+
+    assert fence._fence_refusal() == expected
+    assert fence._fence_refusal() == write_loop.fence_refusal()
+    assert fence._fence_open() is (expected is None)
+
+
+def test_platform_guard_names_a_missing_flock_and_ignores_the_env_drain(
+    monkeypatch, tmp_path,
+):
+    fence = _platform_fence_module()
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+    monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", raising=False)
+    with fence.drawing_mutation_refusal_guard() as refusal:
+        assert refusal is None
+    with fence.drawing_mutation_commit_guard() as admitted:
+        assert admitted is True
+
+    path = tmp_path / "drawing-mutations"
+    path.write_text("1\n", encoding="utf-8")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", str(path))
+    monkeypatch.setitem(sys.modules, "fcntl", None)
+    with fence.drawing_mutation_refusal_guard() as refusal:
+        assert refusal == fence.FENCE_REFUSED_LOCK_UNAVAILABLE
+    with fence.drawing_mutation_commit_guard() as admitted:
+        assert admitted is False
 
 
 def test_shared_fence_blocks_mock_write_at_commit(monkeypatch, tmp_path):
@@ -216,7 +559,7 @@ def test_shared_fence_blocks_extraction_commit_without_marker_write(
         write_loop, "upload_backend_for_tenant", lambda _tenant: backend
     )
     monkeypatch.setattr(guest_uploads, "upload_store_mode", lambda: "legacy")
-    monkeypatch.setattr(write_loop, "fence_open", lambda: True)
+    monkeypatch.setattr(write_loop, "fence_refusal", lambda: None)
     monkeypatch.setattr(
         dxf_intake,
         "parse_dxf_file",
@@ -225,12 +568,13 @@ def test_shared_fence_blocks_extraction_commit_without_marker_write(
 
     @contextmanager
     def drained_commit():
-        yield False
+        yield write_loop.MUTATION_REFUSED_FENCE_CLOSED
 
-    # Extraction is the UPLOAD lane, so it holds the upload guard. Patching the
-    # authored guard here would leave extraction running and the test vacuous.
+    # Extraction is the UPLOAD lane, so it holds the TYPED upload guard.
+    # Patching the authored guard, or the boolean projection, would leave
+    # extraction running and the test vacuous.
     monkeypatch.setattr(
-        write_loop, "upload_mutation_commit_guard", drained_commit
+        write_loop, "upload_mutation_refusal_guard", drained_commit
     )
 
     guest_uploads.run_extraction(tenant, drawing, ".dxf")
@@ -536,13 +880,168 @@ def test_storage_cutover_gate_blocks_authored_app_drawing_mutations(client, monk
         Path(__file__).resolve().parents[2] / "platform" / "mutation_fence.py"
     ).read_text(encoding="utf-8")
     assert 'os.environ.get("LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED", "0")' in platform_api
-    assert "with drawing_mutation_commit_guard() as commit_enabled" in platform_api
+    # The import lane holds the TYPED fence guard, so its 503 names the fence
+    # state from the guard's own read. The boolean form could only say "no".
+    assert "with drawing_mutation_refusal_guard() as refusal" in platform_api
     assert 'os.environ.get("LEAF_DRAWING_MUTATIONS_FENCE_FILE", "")' in platform_fence
     # The import lane keeps its OWN env flag; folding the authored-lane drain
     # into the platform fence would block canonical import on an unrelated
     # cutover. Pinned so a future edit cannot quietly re-couple the two lanes.
     # Matches the CALL, not the word, so the docstring may still explain why.
     assert 'os.environ.get("LEAF_DRAWING_MUTATIONS_ENABLED"' not in platform_fence
+
+
+@pytest.mark.parametrize(
+    "method, path, surface",
+    [
+        ("post", "/api/drawings/any/undo", "drawings.undo"),
+        ("post", "/api/drawings/any/redo", "drawings.redo"),
+        ("post", "/api/drawings/any/checkout", "drawings.acquire_checkout"),
+        ("delete", "/api/drawings/any/checkout", "drawings.release_checkout"),
+        ("post", "/api/drawings/any/versions/1/restore",
+         "drawings.restore_version"),
+    ],
+)
+def test_authored_app_refusal_names_the_env_drain(
+    client, monkeypatch, caplog, method, path, surface,
+):
+    """The measured staging shape (2026-09-10): LEAF_DRAWING_MUTATIONS_ENABLED=0
+    refused, and each of these routes blamed a storage cutover and logged
+    nothing. Status, error code and retryability are unchanged."""
+    from routers import drawings as drawings_router
+
+    monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", raising=False)
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+    kwargs = {"json": {}} if path.endswith("/checkout") and method == "post" else {}
+
+    with caplog.at_level(logging.WARNING, logger=drawings_router.LOGGER.name):
+        response = getattr(client, method)(
+            path, headers={"X-Tenant-Id": "account-secret-a"}, **kwargs)
+
+    reason = write_loop.MUTATION_REFUSED_ENV_DISABLED
+    assert response.status_code == 503
+    error = response.json()["error"]
+    assert error["error_code"] == "INTERNAL"
+    assert error["retryable"] is True
+    assert error["reason_code"] == reason
+    assert error["message"] == write_loop.mutation_refusal_message(reason)
+    assert "storage cutover" not in error["message"]
+    lines = _refusal_lines(caplog)
+    assert lines == [f"drawing_mutation_refused reason={reason} surface={surface}"]
+    assert "account-secret-a" not in lines[0]
+
+
+def test_checkout_commit_refusal_names_the_state_its_guard_read(
+    client, monkeypatch, caplog,
+):
+    """A drain that starts after the route's gate is refused by the commit
+    guard, which reports what IT read, not a re-read."""
+    from contextlib import contextmanager
+
+    from routers import drawings as drawings_router
+
+    monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", raising=False)
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    headers = {"X-Tenant-Id": "account-commit-a"}
+    # Bootstrap while open, so only the checkout's own commit guard is shut.
+    assert client.get("/api/drawings/demo/intake", headers=headers).status_code == 200
+    reason = write_loop.MUTATION_REFUSED_FENCE_UNREADABLE
+
+    @contextmanager
+    def unreadable_at_commit():
+        yield reason
+
+    monkeypatch.setattr(
+        write_loop, "drawing_mutation_refusal_guard", unreadable_at_commit)
+    with caplog.at_level(logging.WARNING, logger=drawings_router.LOGGER.name):
+        response = client.post(
+            "/api/drawings/demo/checkout", headers=headers, json={})
+
+    assert response.status_code == 503
+    assert response.json()["error"]["reason_code"] == reason
+    assert _refusal_lines(caplog) == [
+        f"drawing_mutation_refused reason={reason} "
+        "surface=drawings.acquire_checkout.commit"]
+
+
+def test_upload_refusal_names_the_fence_never_the_authored_drain(
+    client, monkeypatch, caplog,
+):
+    from routers import uploads as uploads_router
+
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+    monkeypatch.setenv("LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED", "1")
+    monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", raising=False)
+    reason = write_loop.MUTATION_REFUSED_FENCE_CLOSED
+    monkeypatch.setattr(write_loop, "fence_refusal", lambda: reason)
+    dxf = b"0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n"
+
+    with caplog.at_level(logging.WARNING, logger=uploads_router.LOGGER.name):
+        response = client.post(
+            "/api/drawings/upload",
+            headers={"X-Tenant-Id": "account-secret-a"},
+            files={"file": ("f.dxf", io.BytesIO(dxf))},
+        )
+
+    assert response.status_code == 503
+    error = response.json()["error"]
+    assert error["error_code"] == "INTERNAL"
+    assert error["retryable"] is True
+    assert error["reason_code"] == reason
+    assert "LEAF_DRAWING_MUTATIONS_ENABLED" not in error["message"]
+    lines = _refusal_lines(caplog)
+    assert lines == [
+        f"drawing_mutation_refused reason={reason} surface=uploads.upload_drawing"]
+    assert "account-secret-a" not in lines[0]
+
+
+@pytest.mark.parametrize(
+    "reason", [write_loop.MUTATION_REFUSED_FENCE_CLOSED, None])
+def test_checkpoint_restore_refusal_names_its_precondition(
+    monkeypatch, caplog, reason,
+):
+    """A restore refused at its commit guard reports the guard's reason; one
+    that carries none is attributed as unattributed, never guessed."""
+    from routers import checkpoints as checkpoints_router
+
+    monkeypatch.setattr(checkpoints_router, "_require_owned_session",
+                        lambda *_a, **_k: {"drawing_id": "drawing-secret-a"})
+    monkeypatch.setattr(
+        checkpoints_router.checkpoints, "get_checkpoint",
+        lambda *_a: {"checkpoint_id": "cp-1", "drawing_id": "drawing-secret-a",
+                     "drawing_version": 1})
+    monkeypatch.setattr(checkpoints_router, "store_authority_mode", lambda: "legacy")
+    monkeypatch.setattr(
+        checkpoints_router.session_store, "try_begin_turn", lambda *_a: True)
+    monkeypatch.setattr(
+        checkpoints_router.session_store, "end_turn", lambda *_a: None)
+    monkeypatch.setattr(
+        checkpoints_router.turn_runner, "drain_session_followups",
+        lambda *_a: None)
+
+    def refused(*_args, **_kwargs):
+        raise checkpoints_router.drawings.RestoreMutationsDisabled(reason)
+
+    monkeypatch.setattr(
+        checkpoints_router.drawings, "restore_drawing_version", refused)
+
+    with caplog.at_level(logging.WARNING, logger=checkpoints_router.LOGGER.name):
+        response = checkpoints_router.restore_checkpoint(
+            "session-a", "cp-1", tenant="account-secret-a")
+
+    attributed = reason or write_loop.MUTATION_REFUSED_UNATTRIBUTED
+    assert response.status_code == 503
+    error = json.loads(response.body)["error"]
+    assert error["error_code"] == "INTERNAL"
+    assert error["retryable"] is True
+    assert error["reason_code"] == attributed
+    assert error["message"] == write_loop.mutation_refusal_message(attributed)
+    lines = _refusal_lines(caplog)
+    assert lines == [
+        f"drawing_mutation_refused reason={attributed} "
+        "surface=checkpoints.restore_checkpoint"]
+    assert "account-secret-a" not in lines[0]
+    assert "drawing-secret-a" not in lines[0]
 
 
 def test_purge_extraction_race_cannot_resurrect(client, monkeypatch, tmp_path):

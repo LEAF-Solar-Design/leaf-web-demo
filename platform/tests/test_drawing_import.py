@@ -127,12 +127,15 @@ def test_import_commit_fails_closed_when_shared_fence_is_drained(
     org, project = _canonical_project(make_org, "Drained fence import org")
     binding = _binding(org.org_id)
 
+    # The route holds the TYPED guard, which yields the reason code from its
+    # one fence read; the 503 names that fence state instead of one sentence
+    # shared by every shut state.
     @contextmanager
     def drained_commit():
-        yield False
+        yield "drawing_mutations_fence_closed"
 
     monkeypatch.setattr(
-        platform_api, "drawing_mutation_commit_guard", drained_commit
+        platform_api, "drawing_mutation_refusal_guard", drained_commit
     )
     response = client.post(
         f"/api/projects/{project.project_id}/drawing-versions/import",
@@ -142,7 +145,8 @@ def test_import_commit_fails_closed_when_shared_fence_is_drained(
 
     assert response.status_code == 503
     assert response.json()["detail"] == (
-        "drawing mutations are temporarily disabled for a storage cutover"
+        "drawing mutations are fenced shut for a storage cutover "
+        "(LEAF_DRAWING_MUTATIONS_FENCE_FILE does not hold \"1\")"
     )
     assert store.list_drawing_versions(org.org_id, project.project_id) == []
 

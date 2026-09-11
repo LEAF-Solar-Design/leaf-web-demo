@@ -508,11 +508,25 @@ export class ConverseLoop {
         };
       };
 
+      // The app owns conversation identity. The drawing-keyed internal session
+      // still owns turn locks and confirmation mirrors, but cannot select an
+      // app conversation's SDK transcript. Read its mapping under the turn lock.
+      const appSessionId = input.authoritySessionId;
+      const resumeSdkSessionId = appSessionId
+        ? await store.getAppSdkSession(session.tenant_id, appSessionId)
+        : session.sdk_session_id;
+      if (appSessionId) {
+        const { prior_messages: _legacyHistory, ...packet } = input.contextPacket;
+        userMessage = this.buildTurnPrompt(input, confirmation,
+          !resumeSdkSessionId && input.priorMessages?.length
+            ? { ...packet, prior_messages: input.priorMessages }
+            : packet, intent);
+      }
       const run = this.ports.runner.run({
         systemPrompt: SPINE_SYSTEM_PROMPT,
         userMessage,
-        ...(session.sdk_session_id ? { resumeSdkSessionId: session.sdk_session_id } : {}),
-        ...(session.sdk_session_id
+        ...(resumeSdkSessionId ? { resumeSdkSessionId } : {}),
+        ...(resumeSdkSessionId
           ? {
               // Carries `intent` for the same reason the first build does: a
               // stale SDK session must not silently drop the classification
@@ -546,7 +560,11 @@ export class ConverseLoop {
           stopReason = ev.stopReason;
           sdkSessionId = ev.sdkSessionId;
           if (ev.sdkSessionReset && !ev.sdkSessionId) {
-            await store.updateSession(sessionId, { sdk_session_id: null });
+            if (input.authoritySessionId) {
+              await store.setAppSdkSession(session.tenant_id, input.authoritySessionId, null);
+            } else {
+              await store.updateSession(sessionId, { sdk_session_id: null });
+            }
           }
           if (ev.error) {
             await emit("error", {
@@ -590,7 +608,11 @@ export class ConverseLoop {
     // never leave the turns row active (a permanent 409 with no way out).
     if (sdkSessionId) {
       try {
-        await store.updateSession(sessionId, { sdk_session_id: sdkSessionId });
+        if (input.authoritySessionId) {
+          await store.setAppSdkSession(session.tenant_id, input.authoritySessionId, sdkSessionId);
+        } else {
+          await store.updateSession(sessionId, { sdk_session_id: sdkSessionId });
+        }
       } catch {
         // resume id lost; the next turn simply starts a fresh SDK conversation
       }
