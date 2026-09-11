@@ -136,7 +136,7 @@ export LEAF_AUTOFILL_SOLVER_ABSENT_OK=1
 export LEAF_MANAGED_WEB_BROWSER_MODE=trusted-template-container
 mkdir -p /tmp/gate-results
 gate_status=0
-python scripts/run-all-gates.py --retry 1 --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs || gate_status=$?
+python scripts/run-all-gates.py --jobs "${LEAF_GATE_JOBS:-4}" --retry 1 --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs || gate_status=$?
 if [[ -f /tmp/gate-results/gate-result.json ]]; then
   tail -n 200 /tmp/gate-results/gate-result.json || true
 else
