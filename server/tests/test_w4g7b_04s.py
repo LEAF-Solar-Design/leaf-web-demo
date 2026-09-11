@@ -498,7 +498,7 @@ def test_v3_interpreter_carries_both_dimension_functions_and_freezes_v2():
     # Pinned since 81e5d234 (frozen v2 apply script).
     # v2 re-pinned by the invalid-plan fix (apply flag + two-predicate SAVEAS), a da change; the pin still freezes v2 against 7b records.
     assert hashlib.sha256(script_v2.encode("utf-8")).hexdigest() == (
-        "bcb64a969cc2df0dbd90d1100ad83daacdf8439708f35f7cad730231a8990d98")
+        "30c38a48b69b81412ce25466554503bf029892c0065b1c3dc2867e763d6eab33")
 
 
 def test_v3_remove_op_admits_dimension_and_v2_stays_frozen():

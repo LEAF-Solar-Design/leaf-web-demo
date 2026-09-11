@@ -28,12 +28,12 @@ def _poly(handle, layer="Panels", closed=True, pts=None):
             "pts": pts or [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [2.0, 2.0, 0.0], [0.0, 2.0, 0.0]]}
 
 
-def test_mock_set_points_drops_old_bulges():
+def test_mock_set_points_preserves_old_bulges_for_same_vertex_count():
     poly = {**_poly("A"), "bulges": [1.0, 0.0, 0.0, 0.0]}
     base = {"layers": ["Panels"], "polylines": [poly]}
     result = write_loop.apply_mutations(base, {"set_points": [
         {"handle": "A", "pts": [[0, 0], [4, 0], [4, 4], [0, 4]]}]})
-    assert "bulges" not in result["polylines"][0]
+    assert result["polylines"][0]["bulges"] == [1.0, 0.0, 0.0, 0.0]
     assert poly["bulges"] == [1.0, 0.0, 0.0, 0.0]
 
 

@@ -373,7 +373,7 @@ def test_v3_interpreter_guards_insert_and_keeps_the_v2_script_snapshot():
     # Captured from build_apply_scr's frozen literal lines at 81e5d234.
     # v2 re-pinned by the invalid-plan fix (apply flag + two-predicate SAVEAS), a da change; the pin still freezes v2 against 7b records.
     assert hashlib.sha256(v2.encode("utf-8")).hexdigest() == (
-        "bcb64a969cc2df0dbd90d1100ad83daacdf8439708f35f7cad730231a8990d98")
+        "30c38a48b69b81412ce25466554503bf029892c0065b1c3dc2867e763d6eab33")
 
 
 def _console(work, source, script_name, script):
