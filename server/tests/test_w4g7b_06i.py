@@ -13,6 +13,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "da"))
 
+from console import resolve_accoreconsole
+
 import dxf_intake
 import intake_dxf
 import intake_parse
@@ -22,8 +24,8 @@ from mutation_plan import emit_plan, uses_v3, validate_mutations
 
 
 BASE_SHA = "1" * 64
-ACCORECONSOLE = Path(r"C:\Program Files\Autodesk\AutoCAD 2026\accoreconsole.exe")
-_CANARY_SKIP_REASON = f"local AutoCAD 2026 console is required ({ACCORECONSOLE})"
+ACCORECONSOLE, CONSOLE_DISCLOSURE = resolve_accoreconsole()
+_CANARY_SKIP_REASON = CONSOLE_DISCLOSURE
 
 
 def _fixture_block():
@@ -155,7 +157,7 @@ def _console(work, source, script_name, script, *, apply_failed=False):
     return text
 
 
-@pytest.mark.skipif(not ACCORECONSOLE.exists(), reason=_CANARY_SKIP_REASON)
+@pytest.mark.skipif(ACCORECONSOLE is None, reason=_CANARY_SKIP_REASON)
 def test_accoreconsole_full_v3_case_set_canary(tmp_path):
     # Same local binary and tracked seed as da/test_mutation_apply_accoreconsole.py.
     # "9462" (data/rooftop_demo.intake.json polylines[0], layer "Panels") stands
@@ -517,4 +519,8 @@ def test_accoreconsole_canary_skip_reason_names_the_binary_path():
         m for m in test_accoreconsole_full_v3_case_set_canary.pytestmark
         if m.name == "skipif")
     assert marker.kwargs["reason"] == _CANARY_SKIP_REASON
-    assert str(ACCORECONSOLE) in marker.kwargs["reason"]
+    if ACCORECONSOLE is None:
+        assert "LEAF_ACCORECONSOLE unset; tried " in marker.kwargs["reason"]
+        assert "years seen: " in marker.kwargs["reason"]
+    else:
+        assert str(ACCORECONSOLE) in marker.kwargs["reason"]

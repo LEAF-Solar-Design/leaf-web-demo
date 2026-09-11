@@ -14,6 +14,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "da"))
 
+from console import resolve_accoreconsole
+
 import apply_lisp
 import dxf_intake
 import intake_dxf
@@ -24,7 +26,7 @@ from mutation_plan import emit_plan, uses_v3, validate_mutations
 
 
 BASE_SHA = "1" * 64
-ACCORECONSOLE = Path(r"C:\Program Files\Autodesk\AutoCAD 2026\accoreconsole.exe")
+ACCORECONSOLE, CONSOLE_DISCLOSURE = resolve_accoreconsole()
 
 
 def _base():
@@ -447,7 +449,7 @@ def _console(work, source, script_name, script):
     assert "LEAF-MUTATION-APPLY-FAILED" not in result.stdout, result.stdout
 
 
-@pytest.mark.skipif(not ACCORECONSOLE.exists(), reason="local AutoCAD 2026 console is required")
+@pytest.mark.skipif(ACCORECONSOLE is None, reason=CONSOLE_DISCLOSURE)
 def test_accoreconsole_property_canary_sets_and_verifies_the_three_properties(tmp_path):
     # Same local binary and tracked seed as da/test_mutation_apply_accoreconsole.py.
     # A real, stable handle already in the tracked seed (data/rooftop_demo.intake.json
