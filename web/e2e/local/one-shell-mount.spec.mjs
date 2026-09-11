@@ -756,18 +756,90 @@ test.describe('route matrix, rail ON', () => {
     await expect(layerToggle).toHaveAttribute('aria-pressed', 'false')
     await layerToggle.click()
     await expect(layerToggle).toHaveAttribute('aria-pressed', 'true')
-    // Author expands the rail and opens "Author a tool" where authoring is
-    // live; where the stage is off (the local proof stack: R5 off) or the
-    // plan lacks build, it is disabled WITH the reason, never grey and mute.
+    // PARITY-4-AUTHORING: publish from Manage, seat on the declared Draw
+    // tab, then run on this drawing without replacing the page's session.
     await page.getByRole('tab', { name: 'Manage' }).click()
     const authorBtn = ribbon.locator('[data-tool="author-tool"]')
     if (await authorBtn.isEnabled()) {
+      test.setTimeout(600_000)
+      const AUTHORED_TOOL_NAME = `parity4_line_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
+      const authorUrl = page.url()
+      await page.evaluate((name) => { window.__parity4AuthorSession = name }, AUTHORED_TOOL_NAME)
+      // The SCRIPT check above leaves two unsaved primitives. Undo those
+      // through the engine so the catalog write gate permits this run.
+      if (cadEditOn && (await page.getByTestId('cad-edit-entity-count').count())) {
+        const scriptCount = Number(await page.getByTestId('cad-edit-entity-count').textContent())
+        await page.getByRole('tab', { name: 'Insert' }).click()
+        await ribbon.locator('[data-tool="undo-edit"]').click()
+        await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(scriptCount - 1))
+        await ribbon.locator('[data-tool="undo-edit"]').click()
+        await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(scriptCount - 2))
+        await expect(ribbon.locator('[data-tool="save-version"]')).toBeDisabled()
+        await page.getByRole('tab', { name: 'Manage' }).click()
+      }
       await authorBtn.click()
       await expect(page.locator('aside.nav[data-spine]')).toHaveCount(0)
       await expect(page.locator('.author-section .section-head[aria-expanded="true"]')).toHaveCount(1)
+      const author = page.locator('.author-section')
+      await author.getByLabel('What should the tool do?').fill(
+        `Create a CAD tool named exactly ${AUTHORED_TOOL_NAME}. Declare placement {"tab":"draw","size":"large"} in its tool record. ` +
+        'Declare drawing.write capability. On the current open drawing, add exactly one LINE from (600,600) to (620,600), ' +
+        'with no required parameters, and save the changed drawing as a new version. Do not create or switch drawings.',
+      )
+      await author.getByRole('button', { name: 'Generate tool', exact: true }).click()
+      await expect(author.locator('.authored-head .tool-name')).toHaveText(AUTHORED_TOOL_NAME, { timeout: 300_000 })
+      await author.getByRole('button', { name: 'Request publication', exact: true }).click()
+      await expect(author.getByRole('button', { name: 'Run it now', exact: true })).toBeVisible({ timeout: 120_000 })
+      await page.getByRole('button', { name: 'Collapse the tool rail to a spine' }).click()
+      await page.getByRole('tab', { name: 'Draw', exact: true }).click()
+      const authoredTool = ribbon.getByRole('button', { name: AUTHORED_TOOL_NAME, exact: true })
+      await expect(authoredTool).toBeVisible({ timeout: 30_000 })
+      await expect(authoredTool).toBeEnabled()
+      await page.getByRole('button', { name: 'History', exact: true }).click()
+      const history = page.getByRole('dialog', { name: 'Version history' })
+      await expect(history.locator('.vh-mark', { hasText: 'head' })).toHaveCount(1)
+      const oldHead = await history.locator('li').filter({ has: page.locator('.vh-mark') }).getAttribute('data-testid')
+      await page.keyboard.press('Escape')
+      await expect(history).toHaveCount(0)
+      await authoredTool.click()
+      await page.getByRole('button', { name: `Run ${AUTHORED_TOOL_NAME}`, exact: true }).click()
+      await expect(page.locator('.result-tool')).toContainText(AUTHORED_TOOL_NAME, { timeout: 120_000 })
+      await expect(page.locator('.result-block .ok')).toHaveText('Passed', { timeout: 120_000 })
+      // The oracle is the version rail: a NEW head attributed to this unique
+      // tool. A toast, a successful HTTP response, or a catalog card is not it.
+      await page.getByRole('button', { name: 'History', exact: true }).click()
+      const authoredHead = history.locator('li').filter({ has: page.locator('.vh-tool', { hasText: AUTHORED_TOOL_NAME }) })
+      await expect(authoredHead).toHaveCount(1, { timeout: 120_000 })
+      await expect(authoredHead.locator('.vh-tool')).toHaveText(AUTHORED_TOOL_NAME)
+      await expect(authoredHead.locator('.vh-mark')).toHaveText('head')
+      expect(await authoredHead.getAttribute('data-testid')).not.toBe(oldHead)
+      await page.keyboard.press('Escape')
+      expect(page.url()).toBe(authorUrl)
+      expect(await page.evaluate(() => window.__parity4AuthorSession)).toBe(AUTHORED_TOOL_NAME)
     } else {
-      expect(await authorBtn.getAttribute('aria-label')).toMatch(/\(unavailable: /)
-      test.info().annotations.push({ type: 'author', description: `disabled: ${await authorBtn.getAttribute('title')}` })
+      // PARITY-4-UNAVAILABLE: assert the rendered reason, then explicitly
+      // limit this branch to source wiring. It is NOT an end-to-end run.
+      const reason = await authorBtn.getAttribute('title')
+      expect(['your plan does not include authoring tools', 'the authoring stage is off on this deployment']).toContain(reason)
+      await expect(authorBtn).toBeDisabled()
+      await expect(authorBtn).toHaveAttribute('aria-label', `Author tool (unavailable: ${reason})`)
+      // Keep the fallback in this owned spec; app-wiring.test.mjs is outside
+      // this executor's file ownership. These checks inspect real producers,
+      // not a mocked publish response or an injected catalog tool.
+      const appSource = readFileSync(new URL('../../src/App.jsx', import.meta.url), 'utf8')
+      const publishPath = appSource.slice(appSource.indexOf('const onPublishAuthor ='), appSource.indexOf('// "Run it now" from the author card'))
+      expect(publishPath).toMatch(/if \(res\.published\)\s*\{\s*upsertTool\(tool\)/)
+      expect(publishPath.indexOf('loadCatalog()')).toBeGreaterThan(publishPath.indexOf('upsertTool(tool)'))
+      const clusterSource = readFileSync(new URL('../../src/lib/ribbonClusters.js', import.meta.url), 'utf8')
+      const placementPath = clusterSource.slice(clusterSource.indexOf('export function catalogTabClusters('), clusterSource.indexOf('/** One family cluster'))
+      expect(placementPath).toContain('const tab = toolPlacementTab(tool)')
+      expect(placementPath).toContain('else buckets.set(tab, [tool])')
+      expect(placementPath).toContain('familyCluster(fam, tools, gate, onOpenFamily)')
+      expect(placementPath).toContain('else byTab[tab] = [cluster]')
+      const recordSource = readFileSync(new URL('../../src/lib/toolRecord.js', import.meta.url), 'utf8')
+      expect(recordSource).toContain('tool && tool.placement && tool.placement.tab')
+      expect(recordSource).toContain("['draw', 'insert', 'annotate', 'view', 'manage']")
+      test.info().annotations.push({ type: 'PARITY-4-UNAVAILABLE', description: `Wiring-level proof only, NOT end to end: ${reason}` })
     }
 
     // Drawing: import-dxf opens the SAME import pane (aria-controls -> a
