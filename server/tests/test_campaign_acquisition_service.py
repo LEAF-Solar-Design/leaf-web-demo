@@ -503,11 +503,17 @@ def test_failed_base_requires_explicit_retry(setup, invocation_history):
     assert setup.calls['submit'] == 1
 
 
-def test_quota_failure_retains_existing_job_and_fixed_recovery(setup, invocation_history):
+@pytest.mark.parametrize('storage', ['legacy_result', 'durable_error'])
+def test_quota_failure_retains_existing_job_and_fixed_recovery(setup, invocation_history, storage):
     from envelopes import ErrorCode, err_envelope
     job = invocation_history.records[invocation_history.original]
     job['result'] = err_envelope(ErrorCode.QUOTA_EXCEEDED, 'PRIVATE_BROKER_BODY', False)
     job['result']['error']['next_action'] = 'PRIVATE_UNTRUSTED_ACTION'
+    if storage == 'durable_error':
+        # jobs._run_job -> _retry_or_finish -> _finish stores failures in error,
+        # with result=None. This is the shape observed in the live HTTP402 probe.
+        job['error'] = job['result']['error']
+        job['result'] = None
     original = deepcopy(job)
     decisions = deepcopy(setup.store.decisions)
     release = deepcopy(setup.release)
@@ -528,6 +534,10 @@ def test_quota_failure_retains_existing_job_and_fixed_recovery(setup, invocation
     assert retried['state'] == 'complete' and retried['job_id'] != job['job_id']
     assert setup.calls['submit'] == 2
     assert job == original
+    # A rejected admission must not replay the original terminal HTTP402 forever.
+    assert 'broker_job_id' not in invocation_history.records[retried['job_id']]['completion_provenance']
+    assert advance(setup)['job_id'] == retried['job_id']
+    assert setup.calls['submit'] == 2
 
 
 @pytest.mark.parametrize('envelope', [None, {'ok': False, 'error': {'error_code': 'INTERNAL'}},

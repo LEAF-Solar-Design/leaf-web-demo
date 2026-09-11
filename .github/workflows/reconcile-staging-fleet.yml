@@ -105,11 +105,12 @@ jobs:
 
       - name: Upload the plan
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: staging-fleet-reconcile-plan-${{ github.run_id }}
           path: staging-fleet-reconcile-plan.json
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 3
 
       # The arming decision is its own step, holding NO token, so the reason a
       # run did or did not mutate staging is a readable line rather than an

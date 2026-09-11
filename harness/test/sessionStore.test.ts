@@ -35,6 +35,24 @@ const USAGE: ConverseTurnUsage = {
 };
 
 describe("FileSessionStore — sessions", () => {
+  it("keeps app SDK mappings distinct across tenants and reloads without adopting legacy history", async () => {
+    const dir = scratch();
+    const store = new FileSessionStore({ dir });
+    const legacy = await store.createOrGetSession("tenant-a", "drawing");
+    await store.updateSession(legacy.session_id, { sdk_session_id: "unowned-legacy-sdk" });
+    expect(await store.getAppSdkSession("tenant-a", "app-a")).toBeNull();
+    await store.setAppSdkSession("tenant-a", "app-a", "sdk-a");
+    await store.setAppSdkSession("tenant-a", "app-b", "sdk-b");
+    await store.setAppSdkSession("tenant-b", "app-a", "sdk-c");
+    const reloaded = new FileSessionStore({ dir });
+    expect(await reloaded.getAppSdkSession("tenant-a", "app-a")).toBe("sdk-a");
+    expect(await reloaded.getAppSdkSession("tenant-a", "app-b")).toBe("sdk-b");
+    expect(await reloaded.getAppSdkSession("tenant-b", "app-a")).toBe("sdk-c");
+    await reloaded.setAppSdkSession("tenant-a", "app-a", null);
+    expect(await store.getAppSdkSession("tenant-a", "app-a")).toBeNull();
+    expect((await store.getSession(legacy.session_id))?.sdk_session_id).toBe("unowned-legacy-sdk");
+  });
+
   it("createOrGetSession is idempotent per (tenant, drawing) and survives reload", async () => {
     const dir = scratch();
     const store = new FileSessionStore({ dir });

@@ -73,6 +73,7 @@ import { createTenantGrantStore, OAuthGrantProviderImpl } from "../src/ports/imp
 import { upstreamSinkFromEnv } from "../src/ports/impl/httpUpstreamSink.js";
 import { startGitWorker, stopGitWorker } from "../src/ports/impl/gitWorker.js";
 import { TenantRepoProviderImpl } from "../src/ports/impl/tenantRepoProvider.js";
+import { createProjectForgeAuthorityFromEnv, createProjectRepositoryEditsForService } from "../src/ports/impl/projectForgeAuthority.js";
 import {
   AuthorStandardServicesRunner,
   LeafStandardServicesHumanApprovalHost,
@@ -198,7 +199,7 @@ function spineTurnRunner(
 }
 
 /** Compose the real multi-tenant ports. */
-function buildPorts(standardServicesResolver: StandardServicesResolver | undefined): HarnessPorts {
+function buildPorts(standardServicesResolver: StandardServicesResolver | undefined): HarnessPorts & { tenantRepo: TenantRepoProviderImpl } {
   // F18 seam: the backend is selected by $LEAF_GRANT_STORE (default `file` →
   // FileTenantGrantStore under $LEAF_GRANTS_DIR). An explicit `vault` request with no
   // vault wired must fail LOUDLY at boot — never silently persist tokens to disk.
@@ -220,6 +221,7 @@ function buildPorts(standardServicesResolver: StandardServicesResolver | undefin
     new OAuthGrantProviderImpl({ store: grantStore }),
   );
   const tenantRepo = new TenantRepoProviderImpl({
+    projectRemoteAuthority: createProjectForgeAuthorityFromEnv(),
     locator: { async repoRef(tenantId: string) { return tenantRepoDir(tenantId); } },
     inPlace: true,
     bareBase: TENANT_GIT_DIR,
@@ -390,6 +392,7 @@ async function main(): Promise<void> {
       }
     : undefined;
   const ports = buildPorts(standardServicesResolver);
+  const projectRepositoryEdits = createProjectRepositoryEditsForService(ports.tenantRepo);
   const glugMushyAuthor = glugMushyAuthorEnabled()
     ? new PinnedGlugMushyAuthor({
         artifactRoot: requiredEnvironment("LEAF_GLUG_MUSHY_ARTIFACT_ROOT"),
@@ -404,6 +407,7 @@ async function main(): Promise<void> {
       })
     : undefined;
   const serverOptions = {
+    ...(projectRepositoryEdits ? { projectRepositoryEdits } : {}),
     ...(standardServicesApproval ? { standardServicesApproval } : {}),
     ...(glugMushyAuthor ? { glugMushyAuthor } : {}),
   };

@@ -15,6 +15,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "da"))
 
+from console import resolve_accoreconsole
+
 import apply_lisp
 import dxf_intake
 import intake_dxf
@@ -25,7 +27,7 @@ from mutation_plan import emit_plan, uses_v3, validate_mutations
 
 
 BASE_SHA = "1" * 64
-ACCORECONSOLE = Path(r"C:\Program Files\Autodesk\AutoCAD 2026\accoreconsole.exe")
+ACCORECONSOLE, CONSOLE_DISCLOSURE = resolve_accoreconsole()
 ALIGNED_LINE = (
     b"ADDDIMALIGNED|0|Standard|0.000,0.000,0.000|3.000,4.000,0.000|1.080,5.440,0.000\n")
 LINEAR_LINE_R0 = (
@@ -496,8 +498,9 @@ def test_v3_interpreter_carries_both_dimension_functions_and_freezes_v2():
         assert line.count("(") == line.count(")"), line[:80]
     assert '(eval ' not in script_v3 and '(read ' not in script_v3
     # Pinned since 81e5d234 (frozen v2 apply script).
+    # v2 re-pinned by the invalid-plan fix (apply flag + two-predicate SAVEAS), a da change; the pin still freezes v2 against 7b records.
     assert hashlib.sha256(script_v2.encode("utf-8")).hexdigest() == (
-        "a7ed0bb7dbd8266404574b523550d8103318981c47a927a6ad4c9daab07f6c35")
+        "30c38a48b69b81412ce25466554503bf029892c0065b1c3dc2867e763d6eab33")
 
 
 def test_v3_remove_op_admits_dimension_and_v2_stays_frozen():
@@ -594,7 +597,7 @@ def _console(work, source, script_name, script):
     assert "LEAF-MUTATION-APPLY-FAILED" not in result.stdout, result.stdout
 
 
-@pytest.mark.skipif(not ACCORECONSOLE.exists(), reason="local AutoCAD 2026 console is required")
+@pytest.mark.skipif(ACCORECONSOLE is None, reason=CONSOLE_DISCLOSURE)
 def test_accoreconsole_dimension_canary_reopens_and_verifies_the_output(tmp_path):
     # Same local binary and tracked seed as da/test_mutation_apply_accoreconsole.py.
     host = tmp_path / "host.dwg"

@@ -13,6 +13,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "da"))
 
+from console import resolve_accoreconsole
+
 import dxf_intake
 import intake_dxf
 import intake_parse
@@ -22,8 +24,8 @@ from mutation_plan import emit_plan, uses_v3, validate_mutations
 
 
 BASE_SHA = "1" * 64
-ACCORECONSOLE = Path(r"C:\Program Files\Autodesk\AutoCAD 2026\accoreconsole.exe")
-_CANARY_SKIP_REASON = f"local AutoCAD 2026 console is required ({ACCORECONSOLE})"
+ACCORECONSOLE, CONSOLE_DISCLOSURE = resolve_accoreconsole()
+_CANARY_SKIP_REASON = CONSOLE_DISCLOSURE
 
 
 def _fixture_block():
@@ -155,7 +157,7 @@ def _console(work, source, script_name, script, *, apply_failed=False):
     return text
 
 
-@pytest.mark.skipif(not ACCORECONSOLE.exists(), reason=_CANARY_SKIP_REASON)
+@pytest.mark.skipif(ACCORECONSOLE is None, reason=_CANARY_SKIP_REASON)
 def test_accoreconsole_full_v3_case_set_canary(tmp_path):
     # Same local binary and tracked seed as da/test_mutation_apply_accoreconsole.py.
     # "9462" (data/rooftop_demo.intake.json polylines[0], layer "Panels") stands
@@ -324,8 +326,8 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
         '(write-line "second child refused after BLOCK began" leaf-proof) (close leaf-proof))) nil) (entmake ed)))\r\n'
         '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))',
     ).replace(
-        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))',
-        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg") '
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg"))',
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg") '
         '(command "_.SAVEAS" "" "rolled-back.dwg"))',
     )
     _console(tmp_path, group_host, "block-failure.scr", failure_script, apply_failed=True)
@@ -361,8 +363,8 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
         '(car 1)) (entmake ed)))\r\n'
         '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))',
     ).replace(
-        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))',
-        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg") '
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg"))',
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg") '
         '(command "_.SAVEAS" "" "inline-rolled-back.dwg"))',
     )
     _console(tmp_path, group_host, "inline-child-failure.scr", inline_failure_script, apply_failed=True)
@@ -414,11 +416,11 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
         '(setvar "MLEADERLAYER" "LEAF-ML-OVERRIDE")\r\n'
         '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))',
     ).replace(
-        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))',
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg"))',
         '(setq leaf-proof (open "mleaderlayer-after.txt" "w"))\r\n'
         '(write-line (getvar "MLEADERLAYER") leaf-proof)\r\n'
         '(close leaf-proof)\r\n'
-        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))',
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg"))',
     )
     _console(tmp_path, leader_host, "leader.scr", leader_script)
     assert (tmp_path / "mleaderlayer-after.txt").read_text().strip() == "LEAF-ML-OVERRIDE"
@@ -449,8 +451,8 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
         '(setq leaf-ops (list (car leaf-ops) '
         '(subst "NoSuchStyle" "Standard" (cadr leaf-ops))))',
     ).replace(
-        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))',
-        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg") '
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg"))',
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg") '
         '(command "_.SAVEAS" "" "leader-rolled-back.dwg"))',
     )
     _console(tmp_path, leader_host, "leader-failure.scr",
@@ -482,8 +484,8 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
         '(close leaf-proof)\r\n'
         '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))',
     ).replace(
-        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))',
-        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg") '
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg"))',
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg") '
         '(command "_.SAVEAS" "" "frozen-rolled-back.dwg"))',
     )
     _console(tmp_path, leader_host, "frozen-leader.scr", frozen_script, apply_failed=True)
@@ -517,4 +519,8 @@ def test_accoreconsole_canary_skip_reason_names_the_binary_path():
         m for m in test_accoreconsole_full_v3_case_set_canary.pytestmark
         if m.name == "skipif")
     assert marker.kwargs["reason"] == _CANARY_SKIP_REASON
-    assert str(ACCORECONSOLE) in marker.kwargs["reason"]
+    if ACCORECONSOLE is None:
+        assert "LEAF_ACCORECONSOLE unset; tried " in marker.kwargs["reason"]
+        assert "years seen: " in marker.kwargs["reason"]
+    else:
+        assert str(ACCORECONSOLE) in marker.kwargs["reason"]

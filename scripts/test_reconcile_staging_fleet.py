@@ -624,6 +624,23 @@ class LaneShapeTests(unittest.TestCase):
         one-line change, not something that rides along inside another edit."""
         self.assertEqual(self.lane()["env"]["RECONCILE_ARMED"], "false")
 
+    def test_the_diagnostic_upload_is_best_effort_and_short_lived(self) -> None:
+        """The plan artifact has no consumer in the repo: every later step
+        reads the local file. Its upload sits BEFORE the arm decision and the
+        one mutating step, so when the org artifact quota filled on 2026-09-06
+        this one diagnostic upload took the whole lane red on every scheduled
+        run for four days."""
+        steps = self.lane()["jobs"]["plan"]["steps"]
+        uploads = [
+            s
+            for s in steps
+            if s.get("uses", "").startswith("actions/upload-artifact")
+        ]
+        self.assertTrue(uploads)
+        for step in uploads:
+            self.assertIs(step.get("continue-on-error"), True)
+            self.assertLessEqual(int(step["with"]["retention-days"]), 3)
+
     def test_only_one_step_can_mutate_and_it_is_gated(self) -> None:
         steps = self.lane()["jobs"]["plan"]["steps"]
         infra_token = "${{ secrets.TERRAFORM_REPO_TOKEN }}"

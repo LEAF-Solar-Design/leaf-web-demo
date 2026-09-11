@@ -213,6 +213,16 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                     "layer": layn, "c": [round(v, 3) for v in w], "r": round(float(r), 3),
                     "start_deg": round(float(a1), 6), "end_deg": round(float(a2), 6),
                     "nrm": [round(v, 6) for v in n], "handle": hnd})
+            elif tag == "PW":
+                handle, width = rest.split("|")
+                if (width != "1" or not handle
+                        or any(c not in "0123456789abcdefABCDEF" for c in handle)):
+                    raise ValueError("malformed polyline width evidence")
+                state.setdefault("polyline_widths", set()).add(handle.upper())
+            elif tag == "PWC":
+                if rest != "1":
+                    raise ValueError("malformed polyline width coverage")
+                out["polylineWidthCovered"] = True
             elif tag == "MEC":
                 if rest != "1":
                     raise ValueError("malformed member evidence coverage")
@@ -446,6 +456,11 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
                     member_evidence = {**member_evidence,
                                        "bulges": [-b for b in member_evidence["bulges"]]}
                 entity.update(member_evidence)
+    if out.get("polylineWidthCovered"):
+        widths = state.get("polyline_widths", set())
+        for entity in out["polylines"]:
+            if entity["handle"].upper() in widths:
+                entity["width"] = True
     for block in out.get("blocks", {}).values():
         if block["count"] <= 60 and len(block["children"]) < block["count"]:
             block["complete"] = False

@@ -84,21 +84,25 @@ export default function useConverseSessionController({ drawingId, retryNotFound 
   // refusal, handed straight to converse.postMessage, which is where the guard
   // lives. Nothing here stores it, so a retry that never reaches postMessage
   // authorises nothing.
-  const startTurn = useCallback(async (text, classifierHint, { allowSecretOnce = false } = {}) => {
+  const startTurn = useCallback(async (text, classifierHint, { allowSecretOnce = false, requireImmediateTurn = false } = {}) => {
     const requestedProjectId = projectRef.current
+    const requestedDrawingId = drawingRef.current
     const requestId = requestedProjectId ? createRequestId() : null
     const send = async (id) => {
-      if (projectRef.current !== requestedProjectId) {
+      if (projectRef.current !== requestedProjectId || drawingRef.current !== requestedDrawingId) {
         throw new Error('Project changed while starting the conversation')
       }
       const payload = { text, classifier_hint: classifierHint, allowSecretOnce }
       if (requestedProjectId) {
-        payload.queue = true
+        payload.queue = !requireImmediateTurn
         payload.request_id = requestId
       }
       const response = await postMessage(id, payload)
-      if (projectRef.current !== requestedProjectId) {
+      if (projectRef.current !== requestedProjectId || drawingRef.current !== requestedDrawingId) {
         throw new Error('Project changed while starting the conversation')
+      }
+      if (requireImmediateTurn && (!response.turn_id || response.status === 'queued')) {
+        throw new Error('The conversation has not started this request. Wait for the current turn to finish, then try again.')
       }
       if (response.active_requests && typeof response.active_requests === 'object') {
         setActiveRequests(projectActivityProjection(response.active_requests))
@@ -110,26 +114,21 @@ export default function useConverseSessionController({ drawingId, retryNotFound 
         status: response.status || null,
         text,
       }])
-      return response
+      return { ...response, session_id: id }
     }
 
     // The response carries the session id the turn actually ran under, so a
     // caller that needs (session, turn) authority in the same continuation
     // never has to race the sessionId state update through a re-render.
-    const withSession = (response) => (
-      response && typeof response === 'object' && !response.session_id
-        ? { ...response, session_id: sessionRef.current }
-        : response
-    )
     const current = sessionRef.current || (await attach())
     try {
-      return withSession(await send(current))
+      return await send(current)
     } catch (error) {
       if (!retryNotFound || classifyAgentError(error) !== 'not_found') throw error
       resetCached()
       sessionRef.current = null
       setSessionId(null)
-      return withSession(await send(await attach()))
+      return await send(await attach())
     }
   }, [attach, resetCached, retryNotFound])
 

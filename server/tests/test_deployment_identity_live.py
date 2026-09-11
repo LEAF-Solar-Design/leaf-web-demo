@@ -277,6 +277,73 @@ def _task(container, image_digest):
     return {"containers": [{"name": container, "imageDigest": image_digest}]}
 
 
+_TARGET_GROUPS = {
+    family: f"arn:aws:elasticloadbalancing:us-east-1:123456789012:targetgroup/{family}/123"
+    for family in (
+        "leaf-platform-app",
+        "leaf-platform-app-alt",
+        "leaf-platform-web",
+        "leaf-platform-web-alt",
+    )
+}
+
+
+def _attach_target_groups(client):
+    for family, arn in _TARGET_GROUPS.items():
+        client._services[family]["loadBalancers"] = [
+            {"targetGroupArn": arn, "containerName": family.removesuffix("-alt"), "containerPort": 8080}
+        ]
+    return client
+
+
+def _routing(
+    web=(100, 0),
+    app=(100, 0),
+    pinning=True,
+    extra_listeners=(),
+    state="ok",
+    reason=None,
+    app_second=None,
+):
+    def rule(priority, service, weights, conditions):
+        return {
+            "arn": f"arn:aws:elasticloadbalancing:us-east-1:123456789012:listener-rule/staging/{priority}",
+            "priority": priority,
+            "conditions": conditions,
+            "forward": [
+                {"target_group": _TARGET_GROUPS[f"leaf-platform-{service}{suffix}"], "weight": weight}
+                for suffix, weight in zip(("", "-alt"), weights)
+            ],
+        }
+
+    rules = [
+        rule("60", "web", web, [{"field": "host-header", "values": ["platform-staging.leafdesign.ai"]}]),
+        rule("50", "app", app, [{"field": "path-pattern", "values": ["/api/*"]}]),
+        rule("51", "app", app if app_second is None else app_second, [{"field": "path-pattern", "values": ["/ws/*"]}]),
+    ]
+    if pinning:
+        for priority, service in (("58", "app"), ("59", "web")):
+            pinned = rule(priority, service, (0, 1), [
+                {"field": "http-header", "name": "X-Leaf-Deploy-Verify", "values": ["*"]}
+            ])
+            pinned["forward"] = pinned["forward"][1:]
+            rules.append(pinned)
+    evidence = {
+        "schema": "leaf.live-identity-routing.v1",
+        "state": state,
+        "listeners": [
+            {"arn": "listener/https", "protocol": "HTTPS", "port": 443, "rules": rules},
+            {"arn": "listener/http", "protocol": "HTTP", "port": 80, "rules": [
+                {"arn": "rule/redirect", "priority": "default", "conditions": [], "forward": []}
+            ]},
+            *extra_listeners,
+        ],
+    }
+    if reason is not None:
+        evidence["reason"] = reason
+    return evidence
+
+
 def _staging_fixture(app_active="leaf-platform-app", web_active="leaf-platform-web"):
     """Mirror the real staging shape: color pairs, one active per service."""
     services = {}
@@ -367,6 +434,7 @@ def _sidecar_env(
     state="ok",
     reason=None,
     families=_SIDECAR_FAMILIES,
+    routing=None,
 ):
     """Materialize a fake client's world into the sidecar document.
 
@@ -389,6 +457,8 @@ def _sidecar_env(
     }
     if reason is not None:
         document["reason"] = reason
+    if routing is not None:
+        document["routing"] = routing
     for family in families:
         arns = client.list_tasks("c", serviceName=family, desiredStatus="RUNNING")[
             "taskArns"
@@ -623,3 +693,209 @@ def test_the_response_names_the_sidecar_and_its_observation(tmp_path):
     assert isinstance(result["observed_at"], str)
     assert isinstance(result["age_seconds"], float)
     assert result["age_seconds"] < live._SIDECAR_MAX_AGE_SECONDS
+
+
+def _warm_routing_fixture():
+    client = _staging_fixture()
+    for family in ("leaf-platform-app-alt", "leaf-platform-web-alt"):
+        client._services[family] = _service(family)
+    return _attach_target_groups(client)
+
+
+def test_alb_zero_weight_warm_alt_is_not_ambiguous(tmp_path):
+    env = _sidecar_env(tmp_path, _warm_routing_fixture(), routing=_routing())
+
+    assert live.live_digests(env)["web"] == LIVE["web"]
+    digests, meta = live._read_live_digests_with_meta(env)
+    assert digests == LIVE
+    assert meta["routing_evidence"] == "alb"
+
+
+def test_alb_reads_the_routed_alt_with_both_colors_running(tmp_path):
+    env = _sidecar_env(tmp_path, _warm_routing_fixture(), routing=_routing(web=(0, 100)))
+
+    assert live.live_digests(env)["web"] == digest("8")
+
+
+def test_alb_two_positive_colors_fail_closed(tmp_path):
+    env = _sidecar_env(tmp_path, _warm_routing_fixture(), routing=_routing(web=(50, 50)))
+
+    with pytest.raises(LiveIdentityUnavailable, match="ambiguous"):
+        live.live_digests(env)
+
+
+def test_alb_routed_color_without_running_task_never_reads_warm_alt(tmp_path):
+    client = _warm_routing_fixture()
+    client._services["leaf-platform-web"]["runningCount"] = 0
+    env = _sidecar_env(tmp_path, client, routing=_routing())
+
+    with pytest.raises(LiveIdentityUnavailable, match="routed but has no running task"):
+        live.live_digests(env)
+
+
+def test_alb_app_route_classes_must_agree(tmp_path):
+    env = _sidecar_env(
+        tmp_path, _warm_routing_fixture(), routing=_routing(app_second=(0, 100))
+    )
+
+    with pytest.raises(LiveIdentityUnavailable, match="disagree"):
+        live.live_digests(env)
+
+
+def test_alb_pinning_header_is_excluded_regardless_of_priority(tmp_path):
+    evidence = _routing(pinning=True)
+    for rule in evidence["listeners"][0]["rules"]:
+        if rule["priority"] in ("58", "59"):
+            rule["priority"] = "1"
+            rule["conditions"][0]["name"] = "x-leaf-deploy-VERIFY"
+    env = _sidecar_env(tmp_path, _warm_routing_fixture(), routing=evidence)
+
+    assert live.live_digests(env)["web"] == LIVE["web"]
+
+
+def test_alb_pinning_rules_alone_cannot_route_web(tmp_path):
+    evidence = _routing(pinning=True)
+    evidence["listeners"][0]["rules"] = [
+        rule for rule in evidence["listeners"][0]["rules"] if rule["priority"] != "60"
+    ]
+    env = _sidecar_env(tmp_path, _warm_routing_fixture(), routing=evidence)
+
+    with pytest.raises(LiveIdentityUnavailable, match="no listener rule routes web"):
+        live.live_digests(env)
+
+
+@pytest.mark.parametrize("weight", [None, True, -1, "100"])
+def test_alb_invalid_forward_weight_is_malformed(tmp_path, weight):
+    evidence = _routing()
+    entry = evidence["listeners"][0]["rules"][0]["forward"][0]
+    if weight is None:
+        entry.pop("weight")
+    else:
+        entry["weight"] = weight
+    env = _sidecar_env(tmp_path, _warm_routing_fixture(), routing=evidence)
+
+    with pytest.raises(LiveIdentityUnavailable, match="malformed"):
+        live.live_digests(env)
+
+
+def test_alb_unavailable_evidence_surfaces_collector_reason(tmp_path):
+    env = _sidecar_env(
+        tmp_path,
+        _warm_routing_fixture(),
+        routing=_routing(state="unavailable", reason="DescribeRules AccessDenied"),
+    )
+
+    with pytest.raises(LiveIdentityUnavailable, match="AccessDenied"):
+        live.live_digests(env)
+
+
+@pytest.mark.parametrize("registration", ["multiple", "shared"])
+def test_alb_unresolved_target_groups_fail_closed(tmp_path, registration):
+    client = _warm_routing_fixture()
+    if registration == "multiple":
+        client._services["leaf-platform-web"]["loadBalancers"].append(
+            {"targetGroupArn": "arn:extra-target-group"}
+        )
+    else:
+        client._services["leaf-platform-web-alt"]["loadBalancers"][0]["targetGroupArn"] = (
+            _TARGET_GROUPS["leaf-platform-web"]
+        )
+    env = _sidecar_env(tmp_path, client, routing=_routing())
+
+    with pytest.raises(LiveIdentityUnavailable, match="target group"):
+        live.live_digests(env)
+
+
+def test_absent_routing_key_retains_count_metadata_and_digests(tmp_path):
+    env = _sidecar_env(tmp_path, _staging_fixture())
+
+    digests, meta = live._read_live_digests_with_meta(env)
+
+    assert digests == LIVE
+    assert meta["routing_evidence"] == "counts"
+
+
+def test_absent_routing_key_keeps_warm_alt_ambiguous(tmp_path):
+    client = _staging_fixture()
+    client._services["leaf-platform-web-alt"] = _service("leaf-platform-web-alt")
+    env = _sidecar_env(tmp_path, client)
+
+    with pytest.raises(LiveIdentityUnavailable, match="ambiguous"):
+        live.live_digests(env)
+
+
+def test_production_singleton_families_ignore_routing_evidence(tmp_path):
+    evidence = _routing()
+    evidence["listeners"] = []
+    env = _sidecar_env(
+        tmp_path,
+        _production_fixture(),
+        families=_PRODUCTION_SIDECAR_FAMILIES,
+        routing=evidence,
+    )
+    env.update({"LEAF_RUNTIME_ENV": "production", "LEAF_DEPLOYMENT_ENVIRONMENT": "production"})
+
+    assert live.live_digests(env) == LIVE
+
+
+def test_staging_broker_ignores_routing_evidence(tmp_path):
+    client = _warm_routing_fixture()
+    env = _sidecar_env(tmp_path, client, routing=_routing())
+
+    assert live.live_digests(env)["broker"] == LIVE["broker"]
+    assert live._routed_family(
+        client._services, "broker", live._STAGING_SERVICE_FAMILIES,
+        routing=_routing(state="unavailable"),
+    ) == "leaf-platform-broker"
+
+
+@pytest.mark.parametrize("https_present", [False, True])
+def test_http_forward_never_decides_the_routed_color(tmp_path, https_present):
+    evidence = _routing()
+    evidence["listeners"][1]["rules"][0]["forward"] = [
+        {"target_group": _TARGET_GROUPS["leaf-platform-web-alt"], "weight": 100}
+    ]
+    if not https_present:
+        evidence["listeners"][0]["rules"] = [
+            rule for rule in evidence["listeners"][0]["rules"] if rule["priority"] != "60"
+        ]
+    env = _sidecar_env(tmp_path, _warm_routing_fixture(), routing=evidence)
+
+    if https_present:
+        assert live.live_digests(env)["web"] == LIVE["web"]
+    else:
+        with pytest.raises(LiveIdentityUnavailable, match="no listener rule routes web"):
+            live.live_digests(env)
+
+
+@pytest.mark.parametrize("with_evidence", [False, True])
+def test_response_names_routing_evidence_beside_observation(tmp_path, with_evidence):
+    env = _sidecar_env(
+        tmp_path,
+        _attach_target_groups(_staging_fixture()),
+        routing=_routing() if with_evidence else None,
+    )
+
+    result = live_deployment_identity(env)
+
+    assert result["routing_evidence"] == ("alb" if with_evidence else "counts")
+    assert isinstance(result["observed_at"], str)
+    assert isinstance(result["age_seconds"], float)
+
+
+def test_explicit_null_routing_key_does_not_fall_back_to_counts(tmp_path):
+    env = _sidecar_env(tmp_path, _attach_target_groups(_staging_fixture()))
+    path = tmp_path / "current.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["routing"] = None
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(LiveIdentityUnavailable, match="ALB routing evidence unavailable"):
+        live.live_digests(env)
+
+
+def test_alb_zero_weights_never_fall_back_to_running_counts(tmp_path):
+    env = _sidecar_env(tmp_path, _warm_routing_fixture(), routing=_routing(web=(0, 0)))
+
+    with pytest.raises(LiveIdentityUnavailable, match="web has no routed color"):
+        live.live_digests(env)

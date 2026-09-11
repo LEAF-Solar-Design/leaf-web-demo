@@ -22,6 +22,16 @@ function nowIso(): string {
 }
 
 export class FakeSessionStore implements SessionStore {
+  private readonly appSdkSessions = new Map<string, string | null>();
+
+  async getAppSdkSession(tenantId: string, appSessionId: string): Promise<string | null> {
+    return this.appSdkSessions.get(JSON.stringify([tenantId, appSessionId])) ?? null;
+  }
+
+  async setAppSdkSession(tenantId: string, appSessionId: string, sdkSessionId: string | null): Promise<void> {
+    this.appSdkSessions.set(JSON.stringify([tenantId, appSessionId]), sdkSessionId);
+  }
+
   readonly sessions = new Map<string, SessionRecord>();
   readonly turns = new Map<string, TurnRecord[]>();
   readonly events = new Map<string, StoredEvent[]>();

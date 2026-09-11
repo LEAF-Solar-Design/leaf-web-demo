@@ -4,7 +4,7 @@ name: merge-queue
 # Slice C of the merge-queue design (verdicts/merge-queue-design-astra.md,
 # points 1, 2, 4, 7, 8). This is the GROUP-level controller: it never builds
 # or deploys anything itself. mq-review proves every PR in the group's
-# ordered prefix already carries a passing kimi-critic-review on its own
+# ordered prefix already carries a passing critic-review on its own
 # head; mq-supply proves exactly one provider-bound speculative image set
 # exists for the group's tree (or that the group is docs-only, in which case
 # there is nothing to build); mq-prewarm proves the relay (slice B) staged
@@ -16,9 +16,34 @@ name: merge-queue
 # GitHub couples a PR's required checks with the merge queue's: the SAME two
 # context names (mq-review, mq-prewarm) must exist on both a pull_request run
 # and a merge_group run, or a PR can never satisfy its required checks well
-# enough to enter the queue. On pull_request events both jobs publish a
-# neutral "queue preparation deferred" success and do nothing else; the real
-# work only ever runs for merge_group's checks_requested.
+# enough to enter the queue. On pull_request events mq-review decides
+# admission from the newest critic-review status on the PR's own head,
+# using the same reverse-then-sort_by(.created_at) tie-break the merge_group
+# path proves at ~:146-170 (both arms are pinned byte-identical below, so
+# they can never disagree), and mq-prewarm publishes a neutral "queue
+# preparation deferred" success and does nothing else.
+#
+# R2 from the read of 58688301, ACKNOWLEDGED, NOT FIXED HERE: a pull_request
+# run executes this workflow FILE from the PR's own head, so a PR could
+# weaken or delete the decision step in its own branch and its mq-review
+# check would pass green with no review anywhere. pull_request_target was
+# tried and reverted: GitHub resolves a pull_request_target trigger from the
+# DEFAULT BRANCH's copy of the workflow, so introducing it here (removing
+# `pull_request:` on this PR's own branch while main still only declares
+# `pull_request:`) meant mq-review and mq-prewarm never fired on THIS PR at
+# all, empirically confirmed (zero check-runs of either name on c6732df8
+# under either event). It would have broken every currently-open PR's
+# admission the same way on merge, until each one saw a fresh push after
+# main gained the new trigger. The real fix is the one the repo already uses
+# for this class, the stable loader in scripts/ci/mq-codebuild-project.sh
+# that pulls its script from origin/main: move the decision into the
+# CodeBuild mq-review project, which no PR can edit. That is a separate
+# change with its own spec and review. There is no status trigger: a
+# status-triggered run's GITHUB_SHA is always the default branch tip, never
+# the PR head, so it cannot correct a PR's own check run. A red mq-review
+# clears the same way any other check does, by a re-run once the
+# critic-review success is posted; the real staging work only ever runs
+# for merge_group's checks_requested.
 # ---------------------------------------------------------------------------
 
 on:
@@ -57,19 +82,49 @@ env:
   RELAY_RECEIPT_INTERVAL: "60"
   TERRAFORM_RECEIPT_POLLS: "40"
   TERRAFORM_RECEIPT_INTERVAL: "60"
+  # The merge queue ejects a group at ruleset 22351452's
+  # check_response_timeout_minutes. Every wait below is bounded by it.
+  MQ_GROUP_BUDGET_MINUTES: "60"
+  MQ_DEADLINE_RESERVE_MINUTES: "6"
 
 jobs:
   mq-review:
     name: mq-review
     runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
-    timeout-minutes: 20
+    timeout-minutes: 5
     outputs:
       head_sha: ${{ steps.queue.outputs.head_sha }}
     steps:
-      - name: Publish the deferred queue-preparation success (pull_request)
+      - name: Decide admission from the newest critic-review status (pull_request)
         if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::mq-review: pull_request carries no usable head sha."; exit 1; }
+          RAW=$(timeout 60 gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/statuses?per_page=100") || {
+            echo "::error::mq-review: critic-review status read failed for $HEAD_SHA; refusing to admit on an unreadable gate."
+            exit 1
+          }
+          [ -n "$RAW" ] || {
+            echo "::error::mq-review: critic-review status read for $HEAD_SHA returned an empty body; refusing to admit on an unreadable gate."
+            exit 1
+          }
+          echo "$RAW" | jq -s 'add // []' > pr-statuses.json 2>/dev/null || {
+            echo "::error::mq-review: critic-review status read for $HEAD_SHA returned unparsable JSON; refusing to admit on an unreadable gate."
+            exit 1
+          }
+          # Newest by created_at, never the newest by list order: the
+          # statuses API is not guaranteed sorted, and a plain sort_by is
+          # stable, so two statuses sharing a created_at second would keep
+          # list order and could pick the older one; reverse first so the
+          # tie resolves to the newest.
+          STATE=$(jq -r '[.[] | select(.context == "critic-review")] | reverse | sort_by(.created_at) | last | .state // "absent"' pr-statuses.json)
+          if [ "$STATE" != "success" ]; then
+            echo "::error::mq-review: this PR has no critic-review success on $HEAD_SHA; post a critic-review success on this head and re-run this check."
+            exit 1
+          fi
           echo "::notice::mq-review: queue preparation deferred until this PR enters the merge queue."
 
       - name: Read the live merge queue and resolve this group's members
@@ -110,7 +165,7 @@ jobs:
           echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
           echo "mq-review: group has $((IDX + 1)) member(s)."
 
-      - name: Require the newest kimi-critic-review status on every member
+      - name: Require the newest critic-review status on every member
         if: github.event_name == 'merge_group'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -127,15 +182,20 @@ jobs:
             timeout 60 gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$SHA/statuses?per_page=100" \
               | jq -s 'add // []' > "statuses-$i.json"
             # Newest by created_at, never the newest by list order: the
-            # statuses API is not guaranteed sorted.
-            STATE=$(jq -r '[.[] | select(.context == "kimi-critic-review")] | sort_by(.created_at) | last | .state // "absent"' "statuses-$i.json")
+            # statuses API is not guaranteed sorted, and a plain sort_by is
+            # stable, so two statuses sharing a created_at second would keep
+            # list order and could pick the older one; reverse first so the
+            # newest of a tie wins. This arm and the pull_request arm above
+            # are ONE rule: change them together or a PR admits on a tie the
+            # group then ejects on.
+            STATE=$(jq -r '[.[] | select(.context == "critic-review")] | reverse | sort_by(.created_at) | last | .state // "absent"' "statuses-$i.json")
             if [ "$STATE" != "success" ]; then
-              echo "::error::mq-review: PR #$NUMBER ($SHA) newest kimi-critic-review state is '$STATE', not success."
+              echo "::error::mq-review: PR #$NUMBER ($SHA) newest critic-review state is '$STATE', not success."
               exit 1
             fi
             i=$((i + 1))
           done
-          echo "mq-review: kimi-critic-review is success on all $COUNT member(s)."
+          echo "mq-review: critic-review is success on all $COUNT member(s)."
 
       - name: Re-read the queue and require the same membership
         if: github.event_name == 'merge_group'
@@ -187,7 +247,7 @@ jobs:
       contents: read
       actions: read
     runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
-    timeout-minutes: 25
+    timeout-minutes: 20
     outputs:
       supply: ${{ steps.docs.outputs.supply || steps.wait.outputs.supply }}
       tree: ${{ steps.tree.outputs.tree }}
@@ -249,6 +309,16 @@ jobs:
             fi
           fi
 
+      - uses: actions/checkout@v4
+        if: steps.docs.outputs.supply != 'none'
+        with:
+          ref: ${{ github.event.merge_group.base_sha }}
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+          path: .mq-trusted
+          persist-credentials: false
+          fetch-depth: 1
+
       - name: Assume the supply transport read role
         if: steps.docs.outputs.supply != 'none'
         uses: aws-actions/configure-aws-credentials@v6.1.0
@@ -276,7 +346,21 @@ jobs:
             fi
           }
           ATTEMPT=0
-          while [ "$ATTEMPT" -lt "$SUPPLY_SET_POLLS" ]; do
+          HELPER="${GITHUB_WORKSPACE:-.}/.mq-trusted/.github/scripts/mq-deadline.sh"
+          if [ -r "$HELPER" ]; then
+            # shellcheck source=/dev/null
+            . "$HELPER"
+            mq_deadline_init
+          else
+            # No helper reachable (no checkout, or a step-contract harness running this
+            # body standalone). The deadline simply does not apply and the poll caps
+            # below stand on their own, exactly as they did before the deadline existed.
+            echo "::notice::mq-deadline helper not readable at $HELPER; poll caps apply without a deadline."
+            mq_deadline_expired() { return 1; }
+            mq_deadline_wait() { sleep "${1:-0}"; }
+            mq_deadline_report() { :; }
+          fi
+          while [ "$ATTEMPT" -lt "$SUPPLY_SET_POLLS" ] && ! mq_deadline_expired; do
             ATTEMPT=$((ATTEMPT + 1))
             # List the exact key first: prefix-scoped ListBucket cannot prove absence via HeadObject.
             KEY_PRESENT=false
@@ -343,10 +427,14 @@ jobs:
             fi
             fi
             if [ "$ATTEMPT" -lt "$SUPPLY_SET_POLLS" ]; then
-              sleep "$SUPPLY_SET_INTERVAL"
+              mq_deadline_wait "$SUPPLY_SET_INTERVAL" || break
             fi
           done
-          echo "::error::mq-supply: no exact provider-bound $KEY after $SUPPLY_SET_POLLS polls."
+          if mq_deadline_expired; then
+            mq_deadline_report mq-supply "the provider-bound $KEY"
+          else
+            echo "::error::mq-supply: no exact provider-bound $KEY after $SUPPLY_SET_POLLS polls."
+          fi
           exit 1
 
   mq-prewarm:
@@ -354,7 +442,7 @@ jobs:
     needs: [mq-review, mq-supply]
     if: always()
     runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
-    timeout-minutes: 45
+    timeout-minutes: 30
     # Queue refs assume their own read-only role without an environment.
     # The release role and ecr-release environment are for stage-group on main.
     permissions:
@@ -386,6 +474,16 @@ jobs:
           echo "docs_only=true" >> "$GITHUB_OUTPUT"
           echo "::notice::mq-prewarm: reason=docs-only group: nothing to stage."
 
+      - uses: actions/checkout@v4
+        if: github.event_name == 'merge_group' && needs.mq-supply.outputs.supply == 'present'
+        with:
+          ref: ${{ github.event.merge_group.base_sha }}
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+          path: .mq-trusted
+          persist-credentials: false
+          fetch-depth: 1
+
       - name: Assume the relay transport read role
         if: github.event_name == 'merge_group' && needs.mq-supply.outputs.supply == 'present'
         uses: aws-actions/configure-aws-credentials@v6.1.0
@@ -414,7 +512,21 @@ jobs:
             fi
           }
           ATTEMPT=0
-          while [ "$ATTEMPT" -lt "$RELAY_RECEIPT_POLLS" ]; do
+          HELPER="${GITHUB_WORKSPACE:-.}/.mq-trusted/.github/scripts/mq-deadline.sh"
+          if [ -r "$HELPER" ]; then
+            # shellcheck source=/dev/null
+            . "$HELPER"
+            mq_deadline_init
+          else
+            # No helper reachable (no checkout, or a step-contract harness running this
+            # body standalone). The deadline simply does not apply and the poll caps
+            # below stand on their own, exactly as they did before the deadline existed.
+            echo "::notice::mq-deadline helper not readable at $HELPER; poll caps apply without a deadline."
+            mq_deadline_expired() { return 1; }
+            mq_deadline_wait() { sleep "${1:-0}"; }
+            mq_deadline_report() { :; }
+          fi
+          while [ "$ATTEMPT" -lt "$RELAY_RECEIPT_POLLS" ] && ! mq_deadline_expired; do
             ATTEMPT=$((ATTEMPT + 1))
             if LISTING=$(timeout 60 aws s3api list-objects-v2 --bucket "$MQ_TRANSPORT_BUCKET" --prefix "$PREFIX" 2> s3-error.txt); then
               NEWEST_KEY=$(jq -j '[.Contents[]?] | sort_by(.LastModified, .Key) | last | .Key // empty' <<<"$LISTING")
@@ -522,10 +634,14 @@ jobs:
               fi
             fi
             if [ "$ATTEMPT" -lt "$RELAY_RECEIPT_POLLS" ]; then
-              sleep "$RELAY_RECEIPT_INTERVAL"
+              mq_deadline_wait "$RELAY_RECEIPT_INTERVAL" || break
             fi
           done
-          echo "::error::mq-prewarm: no matching $NAME after $RELAY_RECEIPT_POLLS polls."
+          if mq_deadline_expired; then
+            mq_deadline_report mq-prewarm "the relay receipt $NAME"
+          else
+            echo "::error::mq-prewarm: no matching $NAME after $RELAY_RECEIPT_POLLS polls."
+          fi
           exit 1
 
       - name: Configure AWS credentials for prewarm receipts
@@ -546,6 +662,7 @@ jobs:
           GROUP_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
           DISPATCHED_JSON: ${{ steps.relay.outputs.dispatched_json }}
           RELAY_RUN_ID: ${{ steps.relay.outputs.relay_run_id }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           SHA12="${GROUP_HEAD_SHA:0:12}"
@@ -553,12 +670,30 @@ jobs:
           REQUEST_ID="$SHA12-$RELAY_RUN_ID"
           ARNS=""
           SERVICES=$(jq -ej 'keys | if length > 0 then join(" ") else error("empty dispatched set") end' <<<"$DISPATCHED_JSON")
+          HELPER="${GITHUB_WORKSPACE:-.}/.mq-trusted/.github/scripts/mq-deadline.sh"
+          if [ -r "$HELPER" ]; then
+            # shellcheck source=/dev/null
+            . "$HELPER"
+            mq_deadline_init
+          else
+            # No helper reachable (no checkout, or a step-contract harness running this
+            # body standalone). The deadline simply does not apply and the poll caps
+            # below stand on their own, exactly as they did before the deadline existed.
+            echo "::notice::mq-deadline helper not readable at $HELPER; poll caps apply without a deadline."
+            mq_deadline_expired() { return 1; }
+            mq_deadline_wait() { sleep "${1:-0}"; }
+            mq_deadline_report() { :; }
+          fi
           for SERVICE in $SERVICES; do
             BUILD_ID=$(jq -j --arg s "$SERVICE" '.[$s] // empty' <<<"$DISPATCHED_JSON")
+            if mq_deadline_expired; then
+              mq_deadline_report mq-prewarm "CodeBuild build $BUILD_ID for $SERVICE"
+              exit 1
+            fi
             [[ "$BUILD_ID" =~ ^leaf-deploy-terraform-staging:[0-9a-f-]{36}$ ]] || { echo "::error::mq-prewarm: invalid dispatched build id for $SERVICE."; exit 1; }
             ATTEMPT=0
             FOUND=""
-            while [ "$ATTEMPT" -lt "$TERRAFORM_RECEIPT_POLLS" ]; do
+            while [ "$ATTEMPT" -lt "$TERRAFORM_RECEIPT_POLLS" ] && ! mq_deadline_expired; do
               ATTEMPT=$((ATTEMPT + 1))
               BUILD_RECORD=$(timeout 60 aws codebuild batch-get-builds --ids "$BUILD_ID" --output json)
               STATUS=$(jq -r '.builds[0].buildStatus // empty' <<<"$BUILD_RECORD")
@@ -570,10 +705,17 @@ jobs:
                   exit 1 ;;
               esac
               if [ "$ATTEMPT" -lt "$TERRAFORM_RECEIPT_POLLS" ]; then
-                sleep "$TERRAFORM_RECEIPT_INTERVAL"
+                mq_deadline_wait "$TERRAFORM_RECEIPT_INTERVAL" || break
               fi
             done
-            [ "$FOUND" = "true" ] || { echo "::error::mq-prewarm: CodeBuild build $BUILD_ID for $SERVICE never completed after $TERRAFORM_RECEIPT_POLLS polls."; exit 1; }
+            if [ "$FOUND" != "true" ]; then
+              if mq_deadline_expired; then
+                mq_deadline_report mq-prewarm "CodeBuild build $BUILD_ID for $SERVICE"
+              else
+                echo "::error::mq-prewarm: CodeBuild build $BUILD_ID for $SERVICE never completed after $TERRAFORM_RECEIPT_POLLS polls."
+              fi
+              exit 1
+            fi
             LOG_GROUP=$(jq -er '.builds[0].logs.groupName | select(type == "string" and length > 0)' <<<"$BUILD_RECORD")
             LOG_STREAM=$(jq -er '.builds[0].logs.streamName | select(type == "string" and length > 0)' <<<"$BUILD_RECORD")
             TOKEN=""

@@ -14,6 +14,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "da"))
 
+from console import resolve_accoreconsole
+
 import apply_lisp
 import dxf_intake
 import intake_dxf
@@ -24,7 +26,7 @@ from mutation_plan import emit_plan, uses_v3, validate_mutations
 
 
 BASE_SHA = "1" * 64
-ACCORECONSOLE = Path(r"C:\Program Files\Autodesk\AutoCAD 2026\accoreconsole.exe")
+ACCORECONSOLE, CONSOLE_DISCLOSURE = resolve_accoreconsole()
 
 
 def _base():
@@ -381,8 +383,9 @@ def test_v3_interpreter_carries_the_three_setters_and_v2_stays_frozen():
     assert '"H:"' in target_p and '"A:"' in target_p
     assert '(eval ' not in script_v3 and '(read ' not in script_v3
     # Pinned since 81e5d234 (frozen v2 apply script).
+    # v2 re-pinned by the invalid-plan fix (apply flag + two-predicate SAVEAS), a da change; the pin still freezes v2 against 7b records.
     assert hashlib.sha256(script_v2.encode("utf-8")).hexdigest() == (
-        "a7ed0bb7dbd8266404574b523550d8103318981c47a927a6ad4c9daab07f6c35")
+        "30c38a48b69b81412ce25466554503bf029892c0065b1c3dc2867e763d6eab33")
 
 
 def test_v3_interpreter_dispatches_property_ops_before_add_insert():
@@ -446,7 +449,7 @@ def _console(work, source, script_name, script):
     assert "LEAF-MUTATION-APPLY-FAILED" not in result.stdout, result.stdout
 
 
-@pytest.mark.skipif(not ACCORECONSOLE.exists(), reason="local AutoCAD 2026 console is required")
+@pytest.mark.skipif(ACCORECONSOLE is None, reason=CONSOLE_DISCLOSURE)
 def test_accoreconsole_property_canary_sets_and_verifies_the_three_properties(tmp_path):
     # Same local binary and tracked seed as da/test_mutation_apply_accoreconsole.py.
     # A real, stable handle already in the tracked seed (data/rooftop_demo.intake.json

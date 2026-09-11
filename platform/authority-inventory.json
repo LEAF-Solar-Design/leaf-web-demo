@@ -63,7 +63,9 @@
       "0059",
       "0060",
       "0061",
-      "0062"
+      "0062",
+      "0063",
+      "0064"
     ],
     "completeness": "partial",
     "reason": "Historical backfill commands are not present in this repository, and most live staging and production selector values are still unrecorded. A recorded value names the task-definition revision, and where the value is the shipped image default, the image digest it was read from. Status measured_no_override means no deployment-layer override was set and the value is the repository default the image bakes; it is not an operator selection for that environment. Every named revision and digest ages."
@@ -176,7 +178,10 @@
         "campaign_capability_invocations",
         "campaign_host_operations",
         "campaign_attempt_input_sources",
-        "campaign_attempt_result_sources"
+        "campaign_attempt_result_sources",
+        "campaign_developer_allocations",
+        "campaign_developer_operations",
+        "campaign_developer_reservations"
       ],
       "legacy_source": [
         "server JOBS_DB SQLite",
@@ -810,6 +815,7 @@
       ],
       "postgres_tables": [
         "harness_sessions",
+        "harness_app_sdk_sessions",
         "harness_turns",
         "harness_events",
         "harness_confirmations",

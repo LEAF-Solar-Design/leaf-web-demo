@@ -174,6 +174,10 @@ def _export(enrollment, execution, body, subject):
 
 def handle(op, body, subject):
     """Validate closed requests, resolve persisted authority, and call the ledger."""
+    if op in ('native_claim', 'native_prepare', 'native_read', 'native_request', 'native_receipt'):
+        _configured()
+        import campaign_native_developer_bridge
+        return campaign_native_developer_bridge.handle(op, body, subject)
     if op in ('release', 'deliver'):
         fields = {'enrollment_id'} if op == 'release' else {'enrollment_id', 'release_id'}
         if not isinstance(body, dict) or set(body) != fields:
