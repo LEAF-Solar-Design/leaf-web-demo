@@ -3130,11 +3130,15 @@ def main() -> None:
     assert verify_uploads[0]["with"]["if-no-files-found"] == "error"
     downloads = [
         s for s in verify_steps
-        if str(s.get("uses", "")).startswith("actions/download-artifact")
+        if "release_result_transport.py get" in s.get("run", "")
     ]
     assert len(downloads) == 2
-    assert downloads[0]["with"]["pattern"].startswith("surface-result-")
-    assert downloads[1]["with"]["name"].startswith("surface-web-dist-")
+    assert '--kind "service-$image"' in downloads[0]["run"]
+    assert "app broker canonical-worker harness web" in downloads[0]["run"]
+    assert "--kind surface-web-dist" in downloads[1]["run"]
+    for download in downloads:
+        assert not download.get("continue-on-error", False)
+        assert '--source "$SOURCE_SHA" --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"' in download["run"]
     adopt_nodes = [
         s for s in adopt_steps
         if str(s.get("uses", "")).startswith("actions/setup-node")
