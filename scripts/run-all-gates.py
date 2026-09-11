@@ -743,8 +743,8 @@ def build_suites() -> List[Suite]:
         # One process per file, same isolation convention as the waves above.
         # test_w4g7b_02s/03s/04s each carry one accoreconsole canary
         # (`@pytest.mark.skipif(not ACCORECONSOLE.exists(), ...)`), a visible
-        # skip on a runner with no local AutoCAD 2026 console; floors are the
-        # counts that execute WITHOUT it.
+        # skip when no console is found; the resolver picks the newest installed
+        # year. Floors are the counts that execute WITHOUT it.
         Suite("server-w4g7b-00s", "server tests/test_w4g7b_00s.py", "pytest", SERVER,
               _py_pytest("tests/test_w4g7b_00s.py"), 32),
         Suite("server-w4g7c-01s", "server tests/test_w4g7c_01s.py", "pytest", SERVER,
@@ -757,23 +757,22 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_w4g7b_01s.py"), 49),
         Suite("server-w4g7b-02s", "server tests/test_w4g7b_02s.py", "pytest", SERVER,
               _py_pytest("tests/test_w4g7b_02s.py"), 64,
-              allowed_skip_reasons=(r"local AutoCAD 2026 console is required",)),
+              allowed_skip_reasons=(r"no AutoCAD console found; .+",)),
         Suite("server-w4g7b-03s", "server tests/test_w4g7b_03s.py", "pytest", SERVER,
               _py_pytest("tests/test_w4g7b_03s.py"), 40,
-              allowed_skip_reasons=(r"local AutoCAD 2026 console is required",)),
+              allowed_skip_reasons=(r"no AutoCAD console found; .+",)),
         Suite("server-w4g7b-04s", "server tests/test_w4g7b_04s.py", "pytest", SERVER,
               _py_pytest("tests/test_w4g7b_04s.py"), 57,
-              allowed_skip_reasons=(r"local AutoCAD 2026 console is required",)),
+              allowed_skip_reasons=(r"no AutoCAD console found; .+",)),
         # W4g-7b-06i: the fixed-engine canary over the whole enabled v3 case
         # set (INSERT, styled LINE, both dimension types, a property setter
         # riding a created entity's A: ordinal). Floor 2 is the count WITHOUT
         # the canary (the mock round trip and the skip-visibility row); the
-        # canary's own skip reason names the exact binary path it looked for
-        # (the "skipped local engine suite is no proof" guard), so its
-        # allowlist pattern differs from the fixed-string siblings above.
+        # canary's skip reason names the console search it performed, using
+        # the same resolver reason as the siblings above.
         Suite("server-w4g7b-06i", "server tests/test_w4g7b_06i.py", "pytest", SERVER,
               _py_pytest("tests/test_w4g7b_06i.py"), 2,
-              allowed_skip_reasons=(r"local AutoCAD 2026 console is required \(.+\)",)),
+              allowed_skip_reasons=(r"no AutoCAD console found; .+",)),
         # W4g-3a: the contract v2 (the browser engine's saves through the same
         # closed plan), 42 rows over literal parametrize lists, no skip gates.
         Suite("server-mutation-contract-v2",
@@ -1091,14 +1090,12 @@ def build_suites() -> List[Suite]:
               # The canary no longer pins one AutoCAD year: it resolves whichever
               # console is installed and names what it tried when none is. CI has
               # none, so the skip is expected there and its reason now carries the
-              # search it performed. The old single-year sentence stays allowed so
-              # a build of an older commit still passes this gate.
+              # search it performed.
               allowed_skip_reasons=(
-                  r"local AutoCAD 2026 console and tracked demo DWG are required",
                   # These are matched with re.fullmatch, so the pattern must
                   # cover the WHOLE reason, which now names the search it ran.
                   r"no AutoCAD console found; .+",
-                  r"tracked demo DWG required: .+",
+                  r"(?:LEAF_ACCORECONSOLE resolved|resolved) .+; tracked demo DWG required: .+",
               )),
         # --- executor/ (cwd=REPO ROOT; the instant-execution tree) --- #
         # These ~110 unit tests ran in NO CI workflow: this runner had no

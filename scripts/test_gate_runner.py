@@ -303,8 +303,8 @@ def test_w4g7b_contract_v3_server_suites_are_registered_with_measured_floors():
     together, and only alongside a re-measured run. test_w4g7b_02s/03s/04s
     each carry one accoreconsole canary
     (`@pytest.mark.skipif(not ACCORECONSOLE.exists(), ...)`), a visible skip
-    on a runner with no local AutoCAD 2026 console; their floors are the
-    counts that execute WITHOUT it, and only that exact reason may skip."""
+    on a runner with no local AutoCAD console; their floors are the
+    counts that execute WITHOUT it, and only the resolver reason may skip."""
     g = _load_runner()
     suites = {s.id: s for s in g.build_suites()}
 
@@ -324,16 +324,14 @@ def test_w4g7b_contract_v3_server_suites_are_registered_with_measured_floors():
     for sid in floors:
         assert suites[sid].cwd == g.SERVER, sid
 
-    canary_reason = r"local AutoCAD 2026 console is required"
+    canary_reason = r"no AutoCAD console found; .+"
     for sid in ("server-w4g7b-00s", "server-w4g7b-01s"):
         assert suites[sid].allowed_skip_reasons == (), sid
     for sid in ("server-w4g7b-02s", "server-w4g7b-03s", "server-w4g7b-04s"):
         assert suites[sid].allowed_skip_reasons == (canary_reason,), sid
-    # 06i's canary names the exact binary path in its skip reason (the
-    # "skipped local engine suite is no proof" guard), so its allowlist
-    # pattern differs from the fixed-string siblings above.
+    # 06i uses the same console resolver reason as the sibling canaries.
     assert suites["server-w4g7b-06i"].allowed_skip_reasons == (
-        canary_reason + r" \(.+\)",), "server-w4g7b-06i"
+        canary_reason,), "server-w4g7b-06i"
 
 
 def test_host_capability_ci_producers_cover_unit_and_postgres_modules(tmp_path, monkeypatch):
