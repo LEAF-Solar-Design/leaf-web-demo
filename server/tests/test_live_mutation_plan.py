@@ -908,15 +908,15 @@ def test_unchanged_reflected_polyline_refuses_flipped_normal():
         write_loop.verify_live_mutation_effects(base, actual, canonical)
 
 
-def test_set_points_on_curved_polyline_drops_bulges():
-    # (e) A geometry change on a curved polyline yields a saved row with no
-    # bulges, and the mock (mirrored here) already drops them; assert it.
+def test_set_points_with_changed_vertex_count_drops_bulges_and_width():
+    # A vertex-count change rebuilds without positional bulges or taper.
     # The unchanged A must also appear in `actual`, or the re-extracted
     # count check fails before the bulge comparison is ever reached.
     base = _base()
     base["polylines"][1] = _curved_polyline("B")
+    base["polylines"][1]["width"] = True
     mutations = {"set_points": [
-        {"handle": "B", "pts": [[0.0, 0.0, 3.0], [5.0, 0.0, 3.0], [5.0, 5.0, 3.0]]}]}
+        {"handle": "B", "pts": [[0.0, 0.0, 3.0], [5.0, 0.0, 3.0]]}]}
     canonical = validate_mutations(base, mutations, allow_transforms=False)
     actual = {
         "dwg": "temp-output.dwg", "layers": ["Panels"],
@@ -924,12 +924,32 @@ def test_set_points_on_curved_polyline_drops_bulges():
             copy.deepcopy(base["polylines"][0]),
             {
                 "handle": "B", "layer": "Panels", "closed": False, "xdata": None,
-                "pts": [[0.0, 0.0, 3.0], [5.0, 0.0, 3.0], [5.0, 5.0, 3.0]],
+                "pts": [[0.0, 0.0, 3.0], [5.0, 0.0, 3.0]],
             },
         ],
     }
 
     write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+    output = write_loop.apply_mutations(base, mutations)
+    assert "bulges" not in output["polylines"][1]
+    assert "width" not in output["polylines"][1]
+
+
+def test_set_points_with_same_vertex_count_preserves_positional_bulges():
+    base = _base()
+    base["polylines"][1] = _curved_polyline("B", bulges=[0.5, -1.0, 0.25])
+    base["polylines"][1]["width"] = True
+    before = copy.deepcopy(base)
+    points = [[0.0, 0.0, 3.0], [5.0, 0.0, 3.0], [5.0, 5.0, 3.0]]
+    output = write_loop.apply_mutations(base, {"set_points": [
+        {"handle": "B", "pts": points, "closed": True}]})
+
+    assert output["polylines"][1]["pts"] == points
+    assert output["polylines"][1]["closed"] is True
+    assert output["polylines"][1]["bulges"] == [0.5, -1.0, 0.25]
+    assert output["polylines"][1]["width"] is True
+    assert base == before
 
 
 @pytest.mark.parametrize("evidence,covered,widthed", [
