@@ -999,7 +999,8 @@ def save_edited_version(drawing_id: str,
     # response says so rather than pretending.
     source_stored = True
     try:
-        backend.put(write_loop.edited_source_key(str(tenant_id), drawing_id, new_v), data)
+        write_loop.publish_edited_source(
+            backend, str(tenant_id), drawing_id, new_v, data, intake_payload)
     except Exception:  # noqa: BLE001
         source_stored = False
 
@@ -1370,7 +1371,8 @@ def save_plan_version(drawing_id: str,
     if leg == "dxf-sidecar":
         source_stored = True
         try:
-            backend.put(write_loop.edited_source_key(str(tenant_id), drawing_id, new_v), data)
+            write_loop.publish_edited_source(
+                backend, str(tenant_id), drawing_id, new_v, data, payload)
         except Exception:  # noqa: BLE001
             source_stored = False
 

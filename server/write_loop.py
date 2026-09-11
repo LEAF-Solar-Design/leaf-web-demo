@@ -455,12 +455,32 @@ def edited_source_key(tenant_id: str, drawing_id: str, version: int) -> str:
     version (card F-3). The version's own payload stays intake JSON (the
     chain's mock-writer idiom, viewer-readable with no cache machinery); this
     sidecar preserves the full-fidelity document — every entity the intake
-    subset cannot represent — for re-edit, digest-bound via the version's
-    meta (source_sha256)."""
+    subset cannot represent — for re-edit, bound by a sibling proof or the
+    legacy re-parse fallback."""
     import store
     v = int(version)
     return (f"tenants/{store.sanitize_id(tenant_id)}/drawings/"
             f"{store.sanitize_id(drawing_id)}/v/{v:08d}.edited.dxf")
+
+
+def edited_source_proof_key(tenant_id: str, drawing_id: str, version: int) -> str:
+    """Binding proof for an edited DXF and its version payload."""
+    return edited_source_key(tenant_id, drawing_id, version) + ".proof.json"
+
+
+def publish_edited_source(backend, tenant_id: str, drawing_id: str, version: int,
+                          raw: bytes, payload_bytes: bytes) -> None:
+    """Publish the sidecar first; an unavailable proof only costs a re-parse."""
+    backend.put(edited_source_key(tenant_id, drawing_id, version), raw)
+    proof = {
+        "sidecar_sha256": hashlib.sha256(raw).hexdigest(),
+        "payload_sha256": hashlib.sha256(payload_bytes).hexdigest(),
+    }
+    try:
+        backend.put(edited_source_proof_key(tenant_id, drawing_id, version),
+                    json.dumps(proof, separators=(",", ":")).encode("utf-8"))
+    except Exception:  # noqa: BLE001 - the sidecar remains readable by re-parse
+        pass
 
 
 def intake_cache_proof_key(tenant_id: str, drawing_id: str, version: int) -> str:
@@ -554,13 +574,25 @@ def _json_object_or_none(raw: bytes) -> Optional[Dict[str, Any]]:
     return value if isinstance(value, dict) else None
 
 
-def _sidecar_bound(raw: bytes, payload: Dict[str, Any], payload_bytes: bytes) -> bool:
-    """The manifest keeps no digest for the sidecar, so the binding is the
-    one thing both artifacts share: the sidecar parsed through the SAME intake
-    path that produced the version payload must reproduce that payload byte
-    for byte (the payload is `json.dumps(intake, separators=(",", ":"))` of
-    the parse, the save route's idiom). A swapped or corrupted sidecar fails
-    this and the payload, the authority, is served instead."""
+def _sidecar_bound(raw: bytes, payload: Dict[str, Any], payload_bytes: bytes,
+                   *, backend=None, proof_key: Optional[str] = None) -> bool:
+    """Bind by saved digests, re-parsing only if the proof cannot be loaded.
+
+    A loaded disagreement refuses the sidecar. This catches corruption and a
+    sidecar swapped without its proof. Store writers can replace both proof
+    and sidecar, but can also replace the authoritative payload; neither this
+    proof nor the legacy re-parse protects against that actor.
+    """
+    if backend is not None and proof_key is not None:
+        try:
+            proof = json.loads(backend.get(proof_key).decode("utf-8"))
+        except Exception:  # noqa: BLE001 - missing/unreadable proof uses legacy binding
+            pass
+        else:
+            return proof == {
+                "sidecar_sha256": hashlib.sha256(raw).hexdigest(),
+                "payload_sha256": hashlib.sha256(payload_bytes).hexdigest(),
+            }
     import dxf_intake
     try:
         intake = dxf_intake.parse_dxf_bytes(
@@ -596,7 +628,9 @@ def read_dxf(backend, tenant_id: str, drawing_id: str,
         skey = edited_source_key(tenant_id, drawing_id, v)
         if backend.exists(skey):
             raw = backend.get(skey)
-            if len(raw) <= MAX_DXF_BYTES and _sidecar_bound(raw, payload, source):
+            if len(raw) <= MAX_DXF_BYTES and _sidecar_bound(
+                    raw, payload, source, backend=backend,
+                    proof_key=edited_source_proof_key(tenant_id, drawing_id, v)):
                 return v, raw, "edited-sidecar"
         import intake_dxf
         try:
