@@ -325,18 +325,29 @@ def _invoke(runtime, tenant, org, project, campaign, release, params, context, t
         return {'state': 'working', 'job_id': job['job_id'], 'reason': 'The published transform is running',
                 'recommended_action': 'Wait for its existing job to finish'}
     if job['status'] != 'complete':
+        # The durable job producer stores failures separately from result.
+        # Retain older envelope-shaped records, but prefer the canonical error.
+        error = job.get('error')
+        envelope = job.get('result')
+        if error is None and isinstance(envelope, dict) and envelope.get('ok') is False:
+            error = envelope.get('error')
+        budget_rejected = (job['status'] == 'failed' and isinstance(error, dict)
+                           and error.get('error_code') == 'quota_exceeded')
         if job['status'] == 'failed' and retries:
             # _read_job verified original scope, publication and frozen params
             # before this internal-only broker identity can enter a new job.
             import campaign_transform_job as transform
-            retry_context = transform.validate_context(dict(
-                context, broker_job_id=context.get('broker_job_id', str(job['job_id']))))
+            retry_context = dict(context)
+            if budget_rejected:
+                # A quota rejection happened before execution. An explicitly
+                # authorized retry needs its own admission, not a replay of 402.
+                retry_context.pop('broker_job_id', None)
+            else:
+                retry_context['broker_job_id'] = context.get('broker_job_id', str(job['job_id']))
+            retry_context = transform.validate_context(retry_context)
             return _invoke(runtime, tenant, org, project, campaign, release, params,
                            retry_context, tool, retries[1:], *retries[0])
-        envelope = job.get('result')
-        error = envelope.get('error') if isinstance(envelope, dict) else None
-        if (job['status'] == 'failed' and isinstance(envelope, dict) and envelope.get('ok') is False
-                and isinstance(error, dict) and error.get('error_code') == 'quota_exceeded'):
+        if budget_rejected:
             raise AcquisitionError('failed', 'Workspace execution budget exhausted',
                                    'Wait for the existing workspace limit reset or ask the workspace administrator '
                                    'to review the limit, then explicitly resume this release')
