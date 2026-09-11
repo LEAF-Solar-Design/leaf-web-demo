@@ -125,11 +125,42 @@ echo "--- 4/6 Reuse web dependencies"
 # No intervening step changes its dependencies, so reuse that npm ci.
 cd "$CODEBUILD_SRC_DIR/web"
 echo "--- 5/6 Install Chromium for browser proofs"
-# The workflow uses `npx playwright install chromium`; --with-deps is added here on purpose
-# because standard:7.0 lacks Chromium's OS libraries and the build runs as root.
-npx playwright install --with-deps chromium
+# LEAF_CI_BROWSER_INSTALL_BEGIN
+# standard:7.0 needs OS libraries, and --with-deps shells out to apt, so this
+# step used to inherit archive.ubuntu.com's availability. Measured 2026-09-11
+# between 06:37Z and 07:30Z: leaf-ci-leaf-web-demo failed SIX of seven
+# consecutive builds right here, on main and on every merge-queue group, with
+# "Could not connect to archive.ubuntu.com:80 ... connection timed out" against
+# all six mirror IPs, before a single suite ran, and every queued PR ejected
+# behind it. A fallback is honest rather than a papered-over failure because in
+# that same log every library Chromium needs read "is already the newest
+# version" (libasound2, libcairo2, libcups2, libdbus-1-3, libdrm2, libxkbcommon0,
+# libxrandr2, libatk*); the only packages the mirror could not serve were
+# optional FONT packages (fonts-ipafont-gothic, fonts-freefont-ttf,
+# fonts-unifont, fonts-wqy-zenhei, xfonts-*), which change glyph coverage in a
+# rendered page and nothing any suite in this repo asserts. Two attempts, not
+# more: each failed --with-deps costs a full apt timeout against six unreachable
+# IPs, and the fallback is what saves the build. A missing BROWSER BINARY is
+# still a hard failure: the last call is unguarded, so set -e fails the build.
+install_ci_browser() {
+  local attempt
+  for attempt in 1 2; do
+    if "$@" install --with-deps chromium; then
+      return 0
+    fi
+    if [[ "$attempt" == 1 ]]; then
+      echo "WARNING: $* dependency install failed; retrying in 5 seconds (attempt 2/2)." >&2
+      sleep 5
+    fi
+  done
+  echo "WARNING: $* dependency install failed after 2 attempts; falling back to browser-only install. OS libraries may be missing; browser proofs will check runtime usability." >&2
+  "$@" install chromium
+}
+
+install_ci_browser npx playwright
 # Install the Python producer's pinned browser with the gate interpreter too.
-python -m playwright install --with-deps chromium
+install_ci_browser python -m playwright
+# LEAF_CI_BROWSER_INSTALL_END
 cd "$CODEBUILD_SRC_DIR"
 echo "--- 6/6 Run unsharded test gate and print scoreboard"
 export LEAF_AUTOFILL_SOLVER_ABSENT_OK=1
