@@ -2,7 +2,7 @@
 
 mq-review's pagination and per-member status gate are EXECUTED here against
 the real step bodies with a fake `gh`, because a two-member fixture where one
-lacks a passing `kimi-critic-review` status is exactly the case a text
+lacks a passing `critic-review` status is exactly the case a text
 assertion would never catch, and neither is a queue read that only resolves
 correctly once two GraphQL pages are combined. mq-supply's docs-only recompute
 is likewise executed against a real git repository, the same pattern
@@ -268,7 +268,7 @@ def member_node(position: int, number: int, head_sha: str) -> dict:
     }
 
 
-def status(state: str, created_at: str, context: str = "kimi-critic-review") -> dict:
+def status(state: str, created_at: str, context: str = "critic-review") -> dict:
     return {"context": context, "state": state, "created_at": created_at}
 
 
@@ -325,7 +325,7 @@ def test_mq_review_fails_closed_when_group_head_is_not_in_the_queue(tmp_path):
             {"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [status("success", "2026-09-01T00:00:00Z")],
              "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": []},
             False,
-            "one of the two members has no kimi-critic-review status at all",
+            "one of the two members has no critic-review status at all",
         ),
         (
             {"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [status("success", "2026-09-01T00:00:00Z")],
@@ -356,7 +356,7 @@ def test_every_member_of_a_two_member_group_needs_a_success_status(
     for sha, statuses in member_statuses.items():
         (tmp_path / f"statuses-{sha}.json").write_text(json.dumps(statuses), encoding="utf-8")
     result = run_step(
-        step_body("mq-review", "Require the newest kimi-critic-review status"),
+        step_body("mq-review", "Require the newest critic-review status"),
         tmp_path,
         {},
     )
@@ -414,7 +414,7 @@ def test_post_check_reread_rejects_changed_pr_head_with_same_group_head(tmp_path
 # --------------------------------------------------------------------------- #
 # mq-review: pull_request admission and its status-triggered re-decision,
 # executed against the real step bodies with a fake `gh`. This is the same
-# newest-by-created_at kimi-critic-review rule the merge_group path proves
+# newest-by-created_at critic-review rule the merge_group path proves
 # above, so a PR and its group can never disagree about admission.
 # --------------------------------------------------------------------------- #
 
@@ -429,10 +429,10 @@ def _write_statuses(tmp_path: Path, sha: str, statuses: list) -> None:
 @pytest.mark.parametrize(
     "state,expect_pass,because",
     [
-        ("success", True, "the newest kimi-critic-review status is success"),
-        ("failure", False, "the newest kimi-critic-review status is failure"),
-        ("pending", False, "the newest kimi-critic-review status is pending"),
-        (None, False, "the PR carries no kimi-critic-review status at all"),
+        ("success", True, "the newest critic-review status is success"),
+        ("failure", False, "the newest critic-review status is failure"),
+        ("pending", False, "the newest critic-review status is pending"),
+        (None, False, "the PR carries no critic-review status at all"),
     ],
 )
 def test_pull_request_admission_requires_a_kimi_success(tmp_path, state, expect_pass, because):
@@ -440,7 +440,7 @@ def test_pull_request_admission_requires_a_kimi_success(tmp_path, state, expect_
     statuses = [] if state is None else [status(state, "2026-09-01T00:00:00Z")]
     _write_statuses(tmp_path, PR_HEAD_SHA, statuses)
     result = run_step(
-        step_body("mq-review", "Decide admission from the newest kimi-critic-review status (pull_request)"),
+        step_body("mq-review", "Decide admission from the newest critic-review status (pull_request)"),
         tmp_path,
         {"HEAD_SHA": PR_HEAD_SHA},
     )
@@ -457,7 +457,7 @@ def test_pull_request_admission_uses_the_newest_status_by_created_at(tmp_path):
         status("success", "2026-09-01T00:00:00Z"),
     ])
     result = run_step(
-        step_body("mq-review", "Decide admission from the newest kimi-critic-review status (pull_request)"),
+        step_body("mq-review", "Decide admission from the newest critic-review status (pull_request)"),
         tmp_path,
         {"HEAD_SHA": PR_HEAD_SHA},
     )
@@ -476,14 +476,14 @@ def test_pull_request_admission_fails_closed_on_an_unreadable_gate(tmp_path, fai
     )
     fake.chmod(0o755)
     result = run_step(
-        step_body("mq-review", "Decide admission from the newest kimi-critic-review status (pull_request)"),
+        step_body("mq-review", "Decide admission from the newest critic-review status (pull_request)"),
         tmp_path,
         {"HEAD_SHA": PR_HEAD_SHA},
     )
     message = result["__stdout__"] + result["__stderr__"]
     assert result["__returncode__"] != 0, message
     assert "unreadable gate" in message
-    assert "post a kimi-critic-review success on this head and re-run this check" not in message
+    assert "post a critic-review success on this head and re-run this check" not in message
 
 
 @needs_shell
@@ -498,7 +498,7 @@ def test_pull_request_admission_same_second_tie_resolves_to_the_newer_success(tm
         status("failure", "2026-09-01T00:00:00Z"),
     ])
     result = run_step(
-        step_body("mq-review", "Decide admission from the newest kimi-critic-review status (pull_request)"),
+        step_body("mq-review", "Decide admission from the newest critic-review status (pull_request)"),
         tmp_path,
         {"HEAD_SHA": PR_HEAD_SHA},
     )
@@ -516,7 +516,7 @@ def test_both_arms_resolve_a_same_second_tie_identically():
     Both arms must pick the newer of a tie, so the selection expression must
     be byte-identical in both."""
     text = workflow_text()
-    marker = 'select(.context == "kimi-critic-review")'
+    marker = 'select(.context == "critic-review")'
     selections = []
     cursor = 0
     while True:
@@ -524,11 +524,11 @@ def test_both_arms_resolve_a_same_second_tie_identically():
         if found < 0:
             break
         tail = text.find(".state", found)
-        assert tail > found, "a kimi-critic-review selection has no .state read"
+        assert tail > found, "a critic-review selection has no .state read"
         selections.append(" ".join(text[found:tail].split()))
         cursor = tail
     assert len(selections) == 2, (
-        "expected exactly two kimi-critic-review selections, found %d" % len(selections)
+        "expected exactly two critic-review selections, found %d" % len(selections)
     )
     assert selections[0] == selections[1], (
         "the two arms must be one rule; they differ: %s vs %s"
@@ -544,7 +544,7 @@ def test_the_merge_group_path_is_unchanged():
     # this pin deliberately rather than drift underneath it.
     expected = [
         ("Read the live merge queue and resolve this group's members", "github.event_name == 'merge_group'"),
-        ("Require the newest kimi-critic-review status on every member", "github.event_name == 'merge_group'"),
+        ("Require the newest critic-review status on every member", "github.event_name == 'merge_group'"),
         ("Re-read the queue and require the same membership", "github.event_name == 'merge_group'"),
     ]
     merge_group_steps = [
