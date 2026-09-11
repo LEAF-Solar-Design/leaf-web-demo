@@ -12,7 +12,7 @@ phases:
         set -euo pipefail
         export CODEBUILD_SRC_DIR_arlo_source="$(mktemp -d /tmp/arlo-engine.XXXXXX)"
         export CODEBUILD_SRC_DIR_platform_pinned="$(mktemp -d /tmp/arlo-platform.XXXXXX)"
-        git -C "$CODEBUILD_SRC_DIR_arlo_recipe" worktree add --detach "$CODEBUILD_SRC_DIR_arlo_source" f35a10e864879ac0723fe595fc8dbbe02e09b5f2
+        git -C "$CODEBUILD_SRC_DIR_arlo_recipe" worktree add --detach "$CODEBUILD_SRC_DIR_arlo_source" 1a624effbfd0fad277943233cc12e1366a6791eb
         git -C "$CODEBUILD_SRC_DIR" worktree add --detach "$CODEBUILD_SRC_DIR_platform_pinned" f20fa02b8c2038eb69a6607792b5cbd5287053c4
         python3 - <<'PY'
         import json, os, pathlib, subprocess
@@ -34,6 +34,7 @@ phases:
             'sources': actual}, sort_keys=True))
         PY
         docker buildx build --load \
+          --label ai.leaf.arlo.source=1a624effbfd0fad277943233cc12e1366a6791eb \
           --build-context "arlo_source=$CODEBUILD_SRC_DIR_arlo_source" \
           --build-context "leaf_platform=$CODEBUILD_SRC_DIR_platform_pinned" \
           -f "$CODEBUILD_SRC_DIR_arlo_recipe/deploy/canonical-consumer/Dockerfile" \

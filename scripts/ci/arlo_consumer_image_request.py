@@ -6,7 +6,7 @@ import re
 CONNECTION = "arn:aws:codestar-connections:us-east-1:807034087062:connection/f4be860d-5308-4694-9f6a-2d6b9c0ffa99"
 PINS = {
     "arlo_recipe": ("arlo-3dml", "acd89a0a413774147c3aa12607372d0d9e5b209e"),
-    "arlo_source": ("arlo-3dml", "f35a10e864879ac0723fe595fc8dbbe02e09b5f2"),
+    "arlo_source": ("arlo-3dml", "1a624effbfd0fad277943233cc12e1366a6791eb"),
     "platform_pinned": ("leaf-web-demo", "f20fa02b8c2038eb69a6607792b5cbd5287053c4"),
 }
 
