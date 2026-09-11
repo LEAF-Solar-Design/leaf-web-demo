@@ -90,6 +90,22 @@
   --leaf-status: var(--ck-status);
   --leaf-pane: var(--ck-pane);
   --leaf-spine: var(--ck-spine);
+
+  /* Ratified CAD dock host contract, backed by this skin's existing values. */
+  --background: var(--ck-chrome);
+  --card: var(--ck-recess);
+  --border: var(--ck-title);
+  --primary: var(--ck-cmd);
+  --foreground: var(--ck-ink);
+  --muted: var(--ck-label);
+  --font-label: var(--ck-font);
+  --font-sans: var(--ck-font);
+  --cad-selection: var(--ck-sel);
+  --cad-tab-band: var(--ck-top);
+  --cad-icon-ribbon: var(--ck-ribbon);
+  --cad-doc-tabs: var(--ck-doctabs);
+  --cad-properties-pane: var(--ck-pane);
+  --cad-status-bar: var(--ck-status);
 }
 
 /* ---- the ground: the drawing occupies exactly the reference's canvas ---- */
