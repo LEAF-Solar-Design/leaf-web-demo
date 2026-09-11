@@ -42,6 +42,43 @@ function declsFor(css, selector) {
 const cockpit = read('src/site/cockpit.css')
 const text = stripComments(cockpit)
 
+const HOST_TOKENS = {
+  '--background': '--ck-chrome',
+  '--card': '--ck-recess',
+  '--border': '--ck-title',
+  '--primary': '--ck-cmd',
+  '--foreground': '--ck-ink',
+  '--muted': '--ck-label',
+  '--font-label': '--ck-font',
+  '--font-sans': '--ck-font',
+  '--cad-selection': '--ck-sel',
+  '--cad-tab-band': '--ck-top',
+  '--cad-icon-ribbon': '--ck-ribbon',
+  '--cad-doc-tabs': '--ck-doctabs',
+  '--cad-properties-pane': '--ck-pane',
+  '--cad-status-bar': '--ck-status',
+}
+
+describe('the cad-skin scope declares the ratified dock host contract', () => {
+  // Inspect only the original skin block, not later rules with this selector.
+  const start = text.indexOf(`${CAD_SKIN_SELECTOR} {`)
+  const block = text.slice(start, text.indexOf('}', start) + 1)
+  const decls = declsFor(block, CAD_SKIN_SELECTOR)
+
+  it('declares all fourteen host token names in the cad-skin block', () => {
+    for (const name of Object.keys(HOST_TOKENS)) {
+      expect(decls, `cad-skin scope is missing ${name}`).toHaveProperty(name)
+    }
+  })
+
+  it('aliases each host token to its existing --ck-* declaration without literals', () => {
+    for (const [name, source] of Object.entries(HOST_TOKENS)) {
+      expect(decls[name], `${name} must reference ${source}`).toBe(`var(${source})`)
+      expect(decls, `${source} must be declared in the same rule`).toHaveProperty(source)
+    }
+  })
+})
+
 describe('the cad-skin scope maps every --ck-* token cockpit.css consumes (slice 13b)', () => {
   it('has a --leaf-* alias for every var(--ck-*) reference in the file', () => {
     const consumed = new Set()
