@@ -194,6 +194,20 @@ class NativeBridge:
                      and task['capability'] == 'terraform.native'
                      and task['current_stage'] == 'implementation'
                      and task['source_sha'] == job['commit_sha'], 403)
+            if task['status'] == 'claimed':
+                # Replay still-valid custody, without renewing or admitting a claim.
+                # Expired unknown custody requires caller reconciliation, not blind retry.
+                cur.execute('SELECT task_id, attempt_id, fence, stage, deadline_at '
+                            'FROM campaign_task_attempts WHERE ' + execution.SCOPE
+                            + ' AND task_id=%(task)s AND fence=%(fence)s'
+                            " AND worker_id=%(worker)s AND stage='implementation'"
+                            " AND status='active' AND deadline_at>clock_timestamp() FOR UPDATE",
+                            dict(scope, task=task['task_id'], fence=task['fence'],
+                                 worker='enrollment-' + body['enrollment_id']))
+                attempt = cur.fetchone()
+                if attempt is not None:
+                    result = execution._public_attempt(attempt)
+                    return {k: result[k] for k in ('task_id', 'attempt_id', 'fence', 'stage', 'deadline_at')}
             result = execution._claim_task_cursor(cur, scope,
                 worker_id='enrollment-' + body['enrollment_id'], lease=900, task_key=body['task_key'])
             if result is None:
