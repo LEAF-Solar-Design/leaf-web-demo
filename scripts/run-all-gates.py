@@ -2933,15 +2933,22 @@ def serial_suite_reason(suite: Suite) -> str:
     return _SERIAL_SUITE_REASONS.get(suite.id, "")
 
 
-def parallel_suite_groups(suites: List[Suite], jobs: int) -> List[List[Suite]]:
-    """Reserve one worker for conflicts; LPT-partition only the independent rest."""
+def parallel_suite_phases(suites: List[Suite], jobs: int) -> tuple[List[Suite], List[List[Suite]]]:
+    """Run shared state behind a barrier, then give independent suites all jobs.
+
+    Main build leaf-ci-leaf-web-demo:df5b47e4 (5bf9ca61) measured 259 suites
+    at 15.76 min: 69 serial suites / 6.88 min and 190 independent / 8.88 min,
+    with a longest suite of 72.2s. Concurrent scheduling floors at
+    max(6.88, 8.88 / (N - 1)) = 6.88 min for N >= 4; the barrier costs
+    6.88 + 8.88 / N = 8.36 min at N = 6, about 21% slower. Prefer that
+    sound barrier to assuming classification proves all 190 suites cannot
+    conflict with serial state. Re-measure before restoring concurrency.
+    """
     serial = []
     independent = []
     for suite in suites:
         (serial if serial_suite_reason(suite) else independent).append(suite)
-    if serial:
-        return [serial] + partition_suites(independent, jobs - 1)
-    return partition_suites(independent, jobs)
+    return serial, partition_suites(independent, jobs)
 
 
 def _run_parallel_suite(suite: Suite, log_dir: Path, retry: int) -> tuple[Result, int]:
@@ -2996,11 +3003,14 @@ def run_suites_parallel(suites: List[Suite], log_dir: Path, jobs: int,
                 if fail_fast and res.status == "FAIL" and stopped_after is None:
                     stopped_after = suite.id
 
-    with ThreadPoolExecutor(max_workers=jobs) as pool:
-        futures = [pool.submit(drain, group)
-                   for group in parallel_suite_groups(suites, jobs) if group]
-        for future in futures:
-            future.result()
+    serial, pool_groups = parallel_suite_phases(suites, jobs)
+    drain(serial)
+    # A fail-fast red in the serial phase must not start the pool at all.
+    if stopped_after is None:
+        with ThreadPoolExecutor(max_workers=jobs) as pool:
+            futures = [pool.submit(drain, group) for group in pool_groups if group]
+            for future in futures:
+                future.result()
 
     # Only this thread prints. Completion order must never reorder the rows or
     # their FLAKED/skip/audit callouts (or the machine-readable result file).
