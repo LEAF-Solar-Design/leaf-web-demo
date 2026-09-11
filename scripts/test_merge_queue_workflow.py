@@ -426,6 +426,20 @@ def _write_statuses(tmp_path: Path, sha: str, statuses: list) -> None:
 
 
 @needs_shell
+@pytest.mark.parametrize("context", ["kimi-critic-review", "critic-review"])
+@pytest.mark.parametrize("state", ["success", "failure", "pending"])
+@pytest.mark.parametrize("admission", ["Decide admission", "Require the newest"])
+def test_both_admission_sites_accept_either_review_context(tmp_path, context, state, admission):
+    _install_fake_gh(tmp_path)
+    _write_statuses(tmp_path, PR_HEAD_SHA, [status(state, "2026-09-01T00:00:00Z", context)])
+    (tmp_path / "members.json").write_text(
+        json.dumps([member_node(1, 10, PR_HEAD_SHA)]), encoding="utf-8",
+    )
+    result = run_step(step_body("mq-review", admission), tmp_path, {"HEAD_SHA": PR_HEAD_SHA})
+    assert (result["__returncode__"] == 0) == (state == "success"), result
+
+
+@needs_shell
 @pytest.mark.parametrize(
     "state,expect_pass,because",
     [
@@ -516,7 +530,8 @@ def test_both_arms_resolve_a_same_second_tie_identically():
     Both arms must pick the newer of a tie, so the selection expression must
     be byte-identical in both."""
     text = workflow_text()
-    marker = 'select(.context == "kimi-critic-review")'
+    marker = 'select(.context == "kimi-critic-review" or .context == "critic-review")'
+    assert 'select(.context == "kimi-critic-review")' not in text
     selections = []
     cursor = 0
     while True:

@@ -120,7 +120,7 @@ jobs:
           # stable, so two statuses sharing a created_at second would keep
           # list order and could pick the older one; reverse first so the
           # tie resolves to the newest.
-          STATE=$(jq -r '[.[] | select(.context == "kimi-critic-review")] | reverse | sort_by(.created_at) | last | .state // "absent"' pr-statuses.json)
+          STATE=$(jq -r '[.[] | select(.context == "kimi-critic-review" or .context == "critic-review")] | reverse | sort_by(.created_at) | last | .state // "absent"' pr-statuses.json)
           if [ "$STATE" != "success" ]; then
             echo "::error::mq-review: this PR has no kimi-critic-review success on $HEAD_SHA; post a kimi-critic-review success on this head and re-run this check."
             exit 1
@@ -188,7 +188,7 @@ jobs:
             # newest of a tie wins. This arm and the pull_request arm above
             # are ONE rule: change them together or a PR admits on a tie the
             # group then ejects on.
-            STATE=$(jq -r '[.[] | select(.context == "kimi-critic-review")] | reverse | sort_by(.created_at) | last | .state // "absent"' "statuses-$i.json")
+            STATE=$(jq -r '[.[] | select(.context == "kimi-critic-review" or .context == "critic-review")] | reverse | sort_by(.created_at) | last | .state // "absent"' "statuses-$i.json")
             if [ "$STATE" != "success" ]; then
               echo "::error::mq-review: PR #$NUMBER ($SHA) newest kimi-critic-review state is '$STATE', not success."
               exit 1
